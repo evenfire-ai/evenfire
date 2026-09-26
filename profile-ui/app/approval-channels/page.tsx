@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
+import { SingleValueEditDialog } from '@clerum/frontend-components'
 import { AuthGate } from '@components/AuthGate'
 import { Button } from '@components/Button'
 import { useProfileAccess } from '@components/ProfileAccessContext'
@@ -43,6 +44,8 @@ function ApprovalChannelsContent() {
   const [state, setState] = useState<LoadState>('loading')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  const [editingPreferred, setEditingPreferred] = useState(false)
+  const [preferredEditError, setPreferredEditError] = useState('')
 
   const activeAccounts = useMemo(() => {
     const authorizedTargetIds = new Set(targets.map(target => target.id))
@@ -52,6 +55,9 @@ function ApprovalChannelsContent() {
   }, [accounts, targets])
   const selectedPreferredAccountId = preferences?.preferredAccountId ?? ''
   const selectedAccount = activeAccounts.find(account => account.id === selectedPreferredAccountId)
+  const selectedPreferredAccountLabel = selectedAccount
+    ? preferredAccountOptionLabel(selectedAccount)
+    : 'Automatic (most recent channel)'
   const manageMedium = selectedAccount?.medium || activeAccounts[0]?.medium || 'telegram'
 
   async function loadAll(forceAccess = false) {
@@ -86,22 +92,27 @@ function ApprovalChannelsContent() {
       ? (activeAccounts.find(account => account.id === preferredAccountId)?.medium ?? null)
       : null
     setBusy(true)
-    setError('')
+    setPreferredEditError('')
     try {
       const next = await updateNotificationPreferences({
         preferredMedium:
-          preferredMedium === 'telegram' || preferredMedium === 'slack' ? preferredMedium : null,
+          preferredMedium === 'telegram' ||
+          preferredMedium === 'slack' ||
+          preferredMedium === 'teams'
+            ? preferredMedium
+            : null,
         preferredAccountId,
         channelFallbackEnabled: preferences.channelFallbackEnabled,
       })
       setPreferences(next)
+      setEditingPreferred(false)
       showToast(
         preferredAccountId ? 'Preferred channel updated.' : 'Preferred channel set to automatic.',
         { tone: 'success' }
       )
     } catch (err) {
       const message = err instanceof Error ? err.message : ''
-      setError(
+      setPreferredEditError(
         message.includes('preferred_account_not_found')
           ? 'That channel is no longer available. Pick another or leave Automatic.'
           : 'Could not update the preferred channel.'
@@ -166,13 +177,48 @@ function ApprovalChannelsContent() {
                 No external channels are connected. Use Manage to connect one.
               </div>
             ) : (
+              <div className="stack-tight">
+                <span className="small muted">Preferred channel</span>
+                <div className="settings-section-head">
+                  <span>{selectedPreferredAccountLabel}</span>
+                  <Button
+                    variant="secondary"
+                    aria-label="Edit preferred channel"
+                    onClick={() => {
+                      setPreferredEditError('')
+                      setEditingPreferred(true)
+                    }}
+                  >
+                    Edit
+                  </Button>
+                </div>
+              </div>
+            )}
+          </section>
+        ) : null}
+
+        {preferences && activeAccounts.length > 0 ? (
+          <SingleValueEditDialog
+            open={editingPreferred}
+            initialValue={selectedPreferredAccountId}
+            title="Edit preferred approval channel"
+            description="Choose which connected conversation receives approval notifications by default."
+            pending={busy}
+            error={preferredEditError || undefined}
+            discardLabel="Cancel"
+            onDismiss={() => {
+              setPreferredEditError('')
+              setEditingPreferred(false)
+            }}
+            onSave={value => void changePreferredAccount(value)}
+            renderEditor={({ value, onChange, disabled }) => (
               <label className="stack-tight" htmlFor="preferred-notification-account">
                 <span className="small muted">Preferred channel</span>
                 <SelectControl
                   id="preferred-notification-account"
-                  value={selectedPreferredAccountId}
-                  onChange={event => void changePreferredAccount(event.target.value)}
-                  disabled={busy}
+                  value={value}
+                  onChange={event => onChange(event.target.value)}
+                  disabled={disabled}
                 >
                   <option value="">Automatic (most recent channel)</option>
                   {activeAccounts.map(account => (
@@ -183,7 +229,7 @@ function ApprovalChannelsContent() {
                 </SelectControl>
               </label>
             )}
-          </section>
+          />
         ) : null}
       </div>
     </ProfileShell>

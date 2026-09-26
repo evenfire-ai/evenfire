@@ -181,9 +181,10 @@ test.describe('GFS agent file read (issue #775)', () => {
         await expect(page.getByRole('heading', { name: 'Files', exact: true })).toBeVisible({
           timeout: 20_000,
         })
-        await expect(
-          page.getByRole('region', { name: 'Global File System browser' })
-        ).toContainText(fixtures.granted.fileName, { timeout: 20_000 })
+        await expect(page.getByRole('region', { name: 'EvenDrive browser' })).toContainText(
+          fixtures.granted.fileName,
+          { timeout: 20_000 }
+        )
       })
 
       let expandBtn: import('@playwright/test').Locator

@@ -3099,6 +3099,36 @@ async function applyControlAdminSessionVersionDefaultSchema(db: DbClient): Promi
   `)
 }
 
+async function applyMcpSecretRollbackPermitSchema(db: DbClient): Promise<void> {
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS mcp_secret_rollback_permits (
+      session_hash BYTEA NOT NULL CHECK (octet_length(session_hash) = 32),
+      namespace TEXT NOT NULL,
+      name TEXT NOT NULL,
+      uid TEXT NOT NULL,
+      resource_version TEXT NOT NULL,
+      expires_at TIMESTAMPTZ NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp(),
+      claim_token UUID,
+      claim_expires_at TIMESTAMPTZ,
+      PRIMARY KEY (session_hash, namespace, name),
+      CHECK (expires_at > created_at),
+      CHECK (expires_at <= created_at + INTERVAL '120 seconds'),
+      CHECK ((claim_token IS NULL) = (claim_expires_at IS NULL)),
+      CHECK (claim_expires_at IS NULL OR claim_expires_at <= expires_at)
+    );
+
+    CREATE INDEX IF NOT EXISTS mcp_secret_rollback_permits_expires_at_idx
+      ON mcp_secret_rollback_permits (expires_at);
+
+    REVOKE ALL ON TABLE mcp_secret_rollback_permits FROM PUBLIC;
+    GRANT SELECT, INSERT, UPDATE, DELETE
+      ON TABLE mcp_secret_rollback_permits TO control_api_runtime;
+    REVOKE TRUNCATE, REFERENCES, TRIGGER
+      ON TABLE mcp_secret_rollback_permits FROM control_api_runtime;
+  `)
+}
+
 // Exported (read-only) so the migration-order invariant test can assert the
 // array is monotonic by version-string. Applied strictly in array order and
 // tracked by full version-string in `schema_migrations`, so a non-monotonic
@@ -6160,6 +6190,23 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
       // pinned `curated` provenance the sync is required never to overwrite —
       // freezing exactly the rows a test harness needs to be able to refresh.
     },
+  },
+  {
+    version: '0116_mcp_secret_rollback_permits',
+    // Renumbered twice while syncing onto dev: 0101 -> 0109 -> 0116. This branch
+    // introduced the migration as 0101; the first sync brought dev's 0101–0108
+    // (codex multi-connection through the SDK-link FK) and pushed it to 0109;
+    // this sync brought dev's 0109–0115 (grok subscriptions through the
+    // allowed-models image-input column), so 0109 is now taken by
+    // 0109_grok_subscription_connections and the migration moves to the end of
+    // the list rather than claiming a version another migration already uses.
+    // Environments where this feature branch was already deployed recorded it
+    // under one of the earlier names. legacyVersions lets the runner mark 0116
+    // applied from that prior row instead of re-running the DDL and leaving an
+    // orphan schema_migrations entry. Both prior names are unique to this
+    // migration, so there is no false-skip.
+    legacyVersions: ['0101_mcp_secret_rollback_permits', '0109_mcp_secret_rollback_permits'],
+    apply: applyMcpSecretRollbackPermitSchema,
   },
 ]
 

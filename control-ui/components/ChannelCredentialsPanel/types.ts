@@ -1,3 +1,4 @@
+import type { SecretEditState } from '@clerum/frontend-components'
 import type { ChannelType } from '../../lib/channelTypes'
 
 export type { ChannelType }
@@ -33,6 +34,9 @@ export type CredentialDraft = {
   'email-username'?: string
   'email-password'?: string
 }
+
+export type CredentialKey = keyof CredentialDraft
+export type CredentialEditStates = Partial<Record<CredentialKey, SecretEditState>>
 
 export type ChannelCredentialsPanelProps = {
   /** CommunicationChannel resource name. The Secret is keyed by this value
@@ -82,6 +86,13 @@ export type ChannelCredentialsPanelProps = {
   /** Re-runs the stored-key read. Only meaningful alongside
    *  `storedKeysError` — the panel does not own that request. */
   onRetryStoredKeys?: () => void
+  /** Parent-owned edit state for existing channels. When supplied, credential
+   *  changes are staged here and persisted only by the parent form's Save. */
+  editStates?: CredentialEditStates
+  /** Updates one staged credential without performing a network request. */
+  onEditStateChange?: (key: CredentialKey, state: SecretEditState) => void
+  /** Disables staged controls while the parent save coordinator is running. */
+  saving?: boolean
   /** Render masked provider fields without rotation/delete controls. */
   readOnly?: boolean
 }

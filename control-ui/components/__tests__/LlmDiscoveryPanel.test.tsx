@@ -122,10 +122,64 @@ describe('LlmDiscoveryPanel merged lifecycle workflow', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Expand OpenAI review models' }))
     fireEvent.click(screen.getByRole('button', { name: 'Enable' }))
 
+    expect(api.updateLlmModel).not.toHaveBeenCalled()
+    expect(screen.getByRole('alertdialog')).toHaveTextContent('Enable OpenAI/gpt-5?')
+    fireEvent.click(screen.getByRole('button', { name: 'Enable OpenAI/gpt-5' }))
+
     await waitFor(() =>
       expect(api.updateLlmModel).toHaveBeenCalledWith('review-openai', { enabled: true })
     )
     expect(onRefresh).toHaveBeenCalledTimes(1)
+  })
+
+  it('cancels a single-model confirmation without mutation', () => {
+    render(
+      <LlmDiscoveryPanel
+        items={[reviewModel]}
+        loading={false}
+        onRefresh={vi.fn().mockResolvedValue(undefined)}
+      />
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Expand OpenAI review models' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Enable' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(api.updateLlmModel).not.toHaveBeenCalled()
+  })
+
+  it('converges selected actions into the header in the required order', () => {
+    render(
+      <LlmDiscoveryPanel
+        items={[reviewModel]}
+        loading={false}
+        onRefresh={vi.fn().mockResolvedValue(undefined)}
+      />
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Expand OpenAI review models' }))
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select OpenAI/gpt-5' }))
+    const actions = document.querySelector('.cu-table-panel__actions')
+    expect(
+      Array.from(actions?.querySelectorAll('button') ?? []).map(button => button.textContent)
+    ).toEqual(['Unselect all', 'Enable 1 selected', '', 'Sync catalog'])
+    expect(screen.queryByText('1 selected')).not.toBeInTheDocument()
+  })
+
+  it('confirms bulk enable by count and unselects without mutation', () => {
+    render(
+      <LlmDiscoveryPanel
+        items={[reviewModel]}
+        loading={false}
+        onRefresh={vi.fn().mockResolvedValue(undefined)}
+      />
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Expand OpenAI review models' }))
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select OpenAI/gpt-5' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Enable 1 selected' }))
+    expect(screen.getByRole('alertdialog')).toHaveTextContent('Enable 1 selected models?')
+    expect(screen.getByRole('alertdialog')).not.toHaveTextContent('gpt-5')
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Unselect all' }))
+    expect(api.updateLlmModel).not.toHaveBeenCalled()
+    expect(screen.queryByRole('button', { name: 'Enable 1 selected' })).not.toBeInTheDocument()
   })
 
   it('keeps the per-row enable action cell wide enough for its button', () => {

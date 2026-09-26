@@ -8,6 +8,56 @@ import {
 
 export type AnyRecord = Record<string, unknown>
 
+export type SecretIdentity = {
+  uid: string
+  resourceVersion: string
+}
+
+function readSecretIdentity(raw: unknown, operation: string): SecretIdentity | undefined {
+  const value = (raw ?? {}) as {
+    name?: unknown
+    namespace?: unknown
+    uid?: unknown
+    resourceVersion?: unknown
+  }
+  const hasUid = value.uid !== undefined
+  const hasResourceVersion = value.resourceVersion !== undefined
+  if (!hasUid && !hasResourceVersion) return undefined
+  if (
+    typeof value.uid !== 'string' ||
+    !value.uid.trim() ||
+    typeof value.resourceVersion !== 'string' ||
+    !value.resourceVersion.trim()
+  ) {
+    // This error is the operator's only pointer to the object that now needs
+    // manual repair: the Secret WAS created, but without a complete CAS
+    // identity the UI refuses to roll it back. Name it so "repair" is actionable.
+    const subject =
+      typeof value.name === 'string' && value.name
+        ? ` for Secret "${value.name}"${
+            typeof value.namespace === 'string' && value.namespace ? ` in ${value.namespace}` : ''
+          }`
+        : ''
+    throw new Error(
+      `${operation} returned an incomplete Secret identity${subject}; repair is required`
+    )
+  }
+  return { uid: value.uid, resourceVersion: value.resourceVersion }
+}
+
+const SECRET_ERROR_MESSAGES: Record<string, string> = {
+  secret_identity_precondition_required:
+    'A current Secret identity is required before it can be deleted. Refresh the page and review the latest state before taking further action.',
+  secret_identity_unavailable:
+    'The server could not verify the current Secret identity. Refresh the page and review the Secret before taking further action.',
+  secret_identity_changed:
+    'This Secret changed since it was loaded. Refresh the page and review the latest state before taking further action.',
+  mcp_secret_in_use:
+    'This Secret is still in use by one or more connectors. Remove or update its references before deleting it.',
+  mcp_secret_reference_check_unavailable:
+    'The server could not verify whether this Secret is in use. Refresh the page and review its references before taking further action.',
+}
+
 // Global error handler for 401s - managed by AuthContext
 let globalHandleAuthError: (() => void) | null = null
 
@@ -108,8 +158,10 @@ export function formatApiError(res: Response, text: string): Error {
   } catch {
     detail = text
   }
+  const errorCode = typeof parsedBody?.error === 'string' ? parsedBody.error : undefined
   const friendlyDetail =
-    detail === 'duplicate_username'
+    (errorCode ? SECRET_ERROR_MESSAGES[errorCode] : undefined) ??
+    (detail === 'duplicate_username'
       ? 'That username is already taken.'
       : detail === 'duplicate_email'
         ? 'That email is already registered.'
@@ -134,7 +186,7 @@ export function formatApiError(res: Response, text: string): Error {
                       ? "Invitations are unavailable — the member-registration service isn't configured or can't be reached. Check the server logs for details."
                       : detail === 'member_registration_misconfigured'
                         ? 'Invitations are unavailable — member registration is misconfigured. Check the server logs for details.'
-                        : detail
+                        : detail)
   const error = new Error(`${res.status} ${res.statusText} - ${friendlyDetail}`)
   ;(error as Error & { status?: number }).status = res.status
   // Preserve the machine-readable error code and full JSON body so callers can
@@ -480,6 +532,26 @@ export async function getGfsShares(
 
 export async function deleteGfsShare(id: string): Promise<void> {
   await gfsMutate('DELETE', `/api/v1/gfs/shares/${encodeURIComponent(id)}`)
+}
+
+export type GfsResourceByPathView = {
+  resourceId: string
+  rid: string
+  gfsUri: string
+  drive: string
+  name: string
+  kind: string
+  path: string | null
+  updatedAt: string
+}
+
+/** Resolves one drive path to its canonical resource view (GET /api/v1/gfs/by-path). */
+export async function getGfsResourceByPath(
+  drive: string,
+  path: string,
+  signal?: AbortSignal
+): Promise<GfsResourceByPathView> {
+  return (await apiGet('/api/v1/gfs/by-path', { drive, path }, { signal })) as GfsResourceByPathView
 }
 
 export type AdminLoginResponse = {
@@ -1475,21 +1547,51 @@ export async function updateMcpServer(name: string, payload: { spec: Record<stri
   ) as Promise<McpServerResource>
 }
 
-export async function createMcpSecret(name: string, data: Record<string, string>) {
-  return apiSend('POST', '/api/v1/admin/mcp-secrets', { name, data }) as Promise<{
+export type McpSecretCreateResult =
+  | ({
+      name: string
+      namespace: string
+    } & SecretIdentity)
+  | {
+      name: string
+      namespace: string
+      uid?: undefined
+      resourceVersion?: undefined
+    }
+
+export type McpSecretRollbackRepairIdentity = {
+  name: string
+  namespace: string
+} & SecretIdentity
+
+export async function createMcpSecret(
+  name: string,
+  data: Record<string, string>
+): Promise<McpSecretCreateResult> {
+  const response = (await apiSend('POST', '/api/v1/admin/mcp-secrets', { name, data })) as {
     name: string
     namespace: string
-  }>
+  }
+  const identity = readSecretIdentity(response, 'createMcpSecret')
+  return identity ? { ...response, ...identity } : response
 }
 
 /**
  * Deletes a Secret in the MCP-servers namespace (hardcoded server-side to
  * `config.mcpServersNamespace`). Used by the Create MCP Server flow to roll
- * back a just-created Secret when the subsequent McpServer CRD creation fails,
- * so we never leave orphan Secrets behind.
+ * back a just-created Secret when the subsequent McpServer CRD creation fails.
+ *
+ * Current API versions require the server-issued identity. `undefined` is a
+ * narrow compatibility path for that rollback only: older create endpoints
+ * succeeded without returning identity and accepted the original bodyless
+ * DELETE. Primary delete flows must keep their identity precondition.
  */
-export async function deleteMcpSecret(name: string) {
-  return apiSend('DELETE', `/api/v1/admin/mcp-secrets/${encodeURIComponent(name)}`) as Promise<{
+export async function deleteMcpSecret(name: string, identity: SecretIdentity | undefined) {
+  return apiSend(
+    'DELETE',
+    `/api/v1/admin/mcp-secrets/${encodeURIComponent(name)}`,
+    identity
+  ) as Promise<{
     name: string
     namespace: string
   }>
@@ -1528,6 +1630,8 @@ export type RecipeSecretItem = {
   namespace: string
   keys: string[]
   ownership: RecipeSecretOwnership
+  uid?: string
+  resourceVersion?: string
 }
 
 export async function getRecipeSecrets() {
@@ -1545,12 +1649,14 @@ export async function createRecipeSecret(
     data,
     ownership,
     ...(targetNamespace ? { targetNamespace } : {}),
-  }) as Promise<{
-    name: string
-    namespace: string
-    ownership: RecipeSecretOwnership
-    created: boolean
-  }>
+  }) as Promise<
+    {
+      name: string
+      namespace: string
+      ownership: RecipeSecretOwnership
+      created: boolean
+    } & SecretIdentity
+  >
 }
 
 export async function updateRecipeSecret(
@@ -1567,9 +1673,17 @@ export async function updateRecipeSecret(
   })
 }
 
-export async function deleteRecipeSecret(name: string, targetNamespace?: string) {
+export async function deleteRecipeSecret(
+  name: string,
+  targetNamespace: string | undefined,
+  identity: SecretIdentity
+) {
   const qs = targetNamespace ? `?targetNamespace=${encodeURIComponent(targetNamespace)}` : ''
-  return apiSend('DELETE', `/api/v1/admin/recipe-secrets/${encodeURIComponent(name)}${qs}`)
+  return apiSend(
+    'DELETE',
+    `/api/v1/admin/recipe-secrets/${encodeURIComponent(name)}${qs}`,
+    identity
+  )
 }
 
 // ── LLM model prices (token-budgets P0b) ──────────────────────────────────
@@ -1609,6 +1723,54 @@ function apiErrorBody(err: unknown): Record<string, unknown> | null {
   if (!(err instanceof Error)) return null
   const body = (err as Error & { body?: unknown }).body
   return body && typeof body === 'object' ? (body as Record<string, unknown>) : null
+}
+
+function readMcpSecretRollbackRepairIdentity(raw: unknown): McpSecretRollbackRepairIdentity | null {
+  if (!raw || typeof raw !== 'object') return null
+  const created = raw as Record<string, unknown>
+  if (
+    typeof created.name !== 'string' ||
+    !created.name.trim() ||
+    typeof created.namespace !== 'string' ||
+    !created.namespace.trim() ||
+    typeof created.uid !== 'string' ||
+    !created.uid.trim() ||
+    typeof created.resourceVersion !== 'string' ||
+    !created.resourceVersion.trim()
+  ) {
+    return null
+  }
+  return {
+    name: created.name,
+    namespace: created.namespace,
+    uid: created.uid,
+    resourceVersion: created.resourceVersion,
+  }
+}
+
+/**
+ * Returns the CAS identity only from the exact MCP Secret repair response.
+ * A rejected create can still have persisted the Secret when the server could
+ * not record its rollback permit; partial or unrelated errors must not unlock
+ * the legacy bodyless-delete compatibility path.
+ */
+export function getMcpSecretRollbackRepairIdentity(
+  err: unknown,
+  expectedName: string
+): McpSecretRollbackRepairIdentity | null {
+  if (!(err instanceof Error) || (err as Error & { status?: unknown }).status !== 503) {
+    return null
+  }
+  const body = apiErrorBody(err)
+  if (
+    !body ||
+    body.error !== 'mcp_secret_rollback_permit_unavailable' ||
+    body.outcome !== 'repair_required'
+  ) {
+    return null
+  }
+  const identity = readMcpSecretRollbackRepairIdentity(body.created)
+  return identity?.name === expectedName ? identity : null
 }
 
 function coerceUnpricedModels(raw: unknown): UnpricedModel[] {
