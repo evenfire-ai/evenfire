@@ -510,8 +510,7 @@ async function waitForWorkflowRecipeDeleted(token: string, name: string): Promis
 
 function externalEgressReady(server: Record<string, unknown>): boolean {
   const status = server.status as
-    | { conditions?: Array<{ type?: string; status?: string }> }
-    | undefined
+    { conditions?: Array<{ type?: string; status?: string }> } | undefined
   return (
     status?.conditions?.some(
       condition => condition.type === 'ExternalEgressReady' && condition.status === 'True'
@@ -572,8 +571,7 @@ async function submitRegistryInstallForm(
         return false
       }
       const body = response.request().postDataJSON() as
-        | { serverName?: string; registryEntryName?: string }
-        | undefined
+        { serverName?: string; registryEntryName?: string } | undefined
       return body?.serverName === serverName && body?.registryEntryName === registryEntryName
     },
     { timeout: 30_000 }
@@ -1429,8 +1427,7 @@ test.describe('H. Control-UI Smoke Tests', () => {
             return false
           }
           const body = r.request().postDataJSON() as
-            | { serverName?: string; registryEntryName?: string }
-            | undefined
+            { serverName?: string; registryEntryName?: string } | undefined
           return body?.serverName === serverName && body?.registryEntryName === 'mcp-filesystem'
         },
         { timeout: 30_000 }
@@ -2267,8 +2264,9 @@ test.describe('J. Operator Egress Editor Journeys', () => {
     const secretRow = page.locator('tr', { hasText: expectedSecretName })
     await expect(secretRow).toBeVisible({ timeout: 15_000 })
     await secretRow
-      .getByRole('button', { name: `Add connector secret ${expectedSecretName}` })
+      .getByRole('button', { name: `Actions for connector secret ${expectedSecretName}` })
       .click()
+    await page.getByRole('menuitem', { name: 'Add', exact: true }).click()
 
     await expect(page).toHaveURL(/\/secrets\/new\?/)
     await expect(page.getByRole('heading', { name: 'Create connector secret' })).toBeVisible()
