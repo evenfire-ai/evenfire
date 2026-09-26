@@ -49,7 +49,6 @@ vi.mock('@modelcontextprotocol/sdk/client/sse.js', async () => {
 vi.mock('../../core/net/ssrf', () => ({
   SsrfBlockedError: class SsrfBlockedError extends Error {},
   resolvePinnedPublicIp: vi.fn(async () => '203.0.113.10'),
-  pinnedFetch: vi.fn(() => vi.fn(async () => new Response('{}'))),
 }))
 
 function remoteOauthContextServer(name = 'remote-ctx'): McpServerInfo {

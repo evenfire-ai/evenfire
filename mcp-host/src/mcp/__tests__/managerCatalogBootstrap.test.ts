@@ -45,12 +45,11 @@ vi.mock('@modelcontextprotocol/sdk/client/sse.js', async () => {
   return remoteUpstream({ strict: true }, sdk).sseModule
 })
 
-// The real SSRF guard is exercised in clientRemoteTarget.test.ts; here it must
-// never touch DNS (the SDK is mocked, so its returned fetch is never invoked).
+// The real SSRF guard is exercised in clientRemoteTarget.test.ts; here its DNS
+// resolver is stubbed so these tests never touch DNS.
 vi.mock('../../core/net/ssrf', () => ({
   SsrfBlockedError: class SsrfBlockedError extends Error {},
   resolvePinnedPublicIp: vi.fn(async () => '203.0.113.10'),
-  pinnedFetch: vi.fn(() => vi.fn(async () => new Response('{}'))),
 }))
 
 function remoteOauthUserServer(name = 'gh'): McpServerInfo {

@@ -83,12 +83,13 @@ vi.mock('@modelcontextprotocol/sdk/client/sse.js', () => ({
   },
 }))
 
-// Remote (https) admissions pin a public IP via the SSRF guard; neutralize it so
-// these tests never touch DNS (its real behavior lives in clientRemoteTarget.test.ts).
+// Stub the SSRF guard's DNS resolver so these tests never touch DNS; the real
+// guard is exercised in clientRemoteTarget.test.ts. Remote MCP egress goes through
+// the internal HCC http hop, which is NOT pinned (see client.ts) — the guard here
+// only keeps import-time resolution offline.
 vi.mock('../../core/net/ssrf', () => ({
   SsrfBlockedError: class SsrfBlockedError extends Error {},
   resolvePinnedPublicIp: vi.fn(async () => '203.0.113.10'),
-  pinnedFetch: vi.fn(() => vi.fn(async () => new Response('{}'))),
 }))
 
 function httpError(status: number): () => Promise<never> {
