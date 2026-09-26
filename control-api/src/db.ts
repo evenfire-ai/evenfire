@@ -6231,6 +6231,15 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     legacyVersions: ['0117_dynamic_clients_runtime_access'],
     apply: applyDynamicClientsRuntimeAccess,
   },
+  {
+    // Install-identity columns for the DCR/OAuth state (install_id + cr_uid on
+    // dynamic_clients, cr_uid on oauth_grants). This branch is the first to ship
+    // 0119, so no legacyVersions are needed; if a later /sync-dev collides the
+    // number, this migration renumbers and the pre-renumber name moves to
+    // legacyVersions (the convention below).
+    version: '0119_oauth_install_identity',
+    apply: applyOAuthInstallIdentity,
+  },
 ]
 
 async function consolidateWorkflowAllowedUsersToTriggers(db: DbClient): Promise<void> {
@@ -6459,6 +6468,65 @@ async function applyDynamicClientsRuntimeAccess(db: DbClient): Promise<void> {
   await db.query(`
     GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE dynamic_clients TO control_api_runtime;
     GRANT USAGE, SELECT, UPDATE ON SEQUENCE dynamic_clients_id_seq TO control_api_runtime;
+  `)
+}
+
+async function applyOAuthInstallIdentity(db: DbClient): Promise<void> {
+  // Install identity for the DCR/OAuth Postgres state. Rows in dynamic_clients
+  // and oauth_grants were keyed only by (owner_kind, server_namespace,
+  // server_name), so no row knew WHICH installation of the McpServer it belonged
+  // to. Two columns give each row a lifetime owner:
+  //   - install_id: a token the remote-install saga mints before the CR exists,
+  //     so its own compensations only touch its own row.
+  //   - cr_uid: the apiserver's metadata.uid of the owning McpServer (unique per
+  //     object; a same-name reinstall gets a different uid), so post-uninstall
+  //     teardown and orphan reclaim can fence by the exact installation.
+  //
+  // A bound row (cr_uid set) must carry an install_id — the saga always mints one
+  // before binding the CR uid, so a bound-but-install-less row is impossible.
+  //
+  // Greenfield/additive: dynamic_clients ships only on this branch, so no
+  // backfill is possible or needed (legacy rows keep both columns NULL and the
+  // decision logic treats them as name-only). ADD COLUMN is covered by the table
+  // GRANTs from 0117/0118 (legacy_dml), so no new runtime-access grant is needed.
+  // Idempotent: ADD COLUMN IF NOT EXISTS, and each CHECK is guarded on
+  // pg_constraint (Postgres has no ADD CONSTRAINT IF NOT EXISTS).
+  await db.query(`
+    ALTER TABLE dynamic_clients ADD COLUMN IF NOT EXISTS install_id UUID;
+    ALTER TABLE dynamic_clients ADD COLUMN IF NOT EXISTS cr_uid TEXT;
+    ALTER TABLE oauth_grants ADD COLUMN IF NOT EXISTS cr_uid TEXT;
+
+    DO $$ BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+         WHERE conrelid = 'dynamic_clients'::regclass
+           AND conname = 'dynamic_clients_cr_uid_len'
+      ) THEN
+        ALTER TABLE dynamic_clients
+          ADD CONSTRAINT dynamic_clients_cr_uid_len
+          CHECK (cr_uid IS NULL OR char_length(cr_uid) <= 128);
+      END IF;
+
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+         WHERE conrelid = 'dynamic_clients'::regclass
+           AND conname = 'dynamic_clients_bound_needs_install'
+      ) THEN
+        ALTER TABLE dynamic_clients
+          ADD CONSTRAINT dynamic_clients_bound_needs_install
+          CHECK (cr_uid IS NULL OR install_id IS NOT NULL);
+      END IF;
+
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+         WHERE conrelid = 'oauth_grants'::regclass
+           AND conname = 'oauth_grants_cr_uid_len'
+      ) THEN
+        ALTER TABLE oauth_grants
+          ADD CONSTRAINT oauth_grants_cr_uid_len
+          CHECK (cr_uid IS NULL OR char_length(cr_uid) <= 128);
+      END IF;
+    END $$;
   `)
 }
 
