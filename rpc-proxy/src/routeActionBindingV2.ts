@@ -313,6 +313,47 @@ export function bindRouteActionV2(
   return Object.freeze({ operationId: candidate.operationId, target, targetHash })
 }
 
+const UNAVAILABLE_V2_DERIVED_VIEW_OPERATIONS = new Set([
+  'sandbox.open',
+  'sandbox.reconnect',
+  'remote_desktop.open',
+  'remote_desktop.reconnect',
+])
+
+/**
+ * Keeps v2 derived-view work unavailable until a consumer-frequency policy is
+ * approved. Authentication must run first; exact local binding still wins
+ * over this capability gate, and legacy callers pass through unchanged.
+ */
+export function rejectUnadmittedV2DerivedView(
+  req: AuthedRequest,
+  res: Response,
+  next: NextFunction
+): void {
+  const claims = req.userDelegationV2
+  if (!claims) {
+    next()
+    return
+  }
+
+  try {
+    const bound = bindRouteActionV2(req, claims)
+    if (!UNAVAILABLE_V2_DERIVED_VIEW_OPERATIONS.has(bound.operationId)) {
+      res.status(400).json({ error: 'invalid_binding' })
+      return
+    }
+  } catch (error) {
+    if (error instanceof RouteActionBindingError) {
+      res.status(400).json({ error: 'invalid_binding' })
+      return
+    }
+    res.status(503).json({ error: 'authority_unavailable' })
+    return
+  }
+
+  res.status(503).json({ error: 'authority_unavailable' })
+}
+
 function sendCheckpointError(res: Response, error: ActionAuthorityCheckpointError): void {
   if (error.rateLimit) {
     for (const [name, value] of Object.entries(error.rateLimit.headers)) {

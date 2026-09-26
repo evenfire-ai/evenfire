@@ -1,6 +1,7 @@
 import express from "express";
 import fs from "node:fs";
 import { requireRpcAuth, requireScope } from "../middleware/auth";
+import { rejectUnadmittedV2DerivedView } from "../routeActionBindingV2";
 import { tokenDeclaresV2 } from "../userDelegationV2";
 
 
@@ -15,7 +16,11 @@ function v2ViewAuthority(req: any, res: any, next: () => void): void {
     next();
     return;
   }
-  requireRpcAuth(req, res, () => requireScope("sandbox:ui:view")(req, res, next));
+  requireRpcAuth(req, res, () =>
+    rejectUnadmittedV2DerivedView(req, res, () =>
+      requireScope("sandbox:ui:view")(req, res, next),
+    ),
+  );
 }
 
 function requireV2Delegation(req: any, res: any, next: () => void): void {

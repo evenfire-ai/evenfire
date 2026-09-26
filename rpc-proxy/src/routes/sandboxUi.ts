@@ -10,7 +10,10 @@ import {
 } from '../middleware/auth.js'
 import { jsonBody } from '../middleware/jsonBody.js'
 import { emitSessionMint, emitViewRequest } from '../observability/sandboxUiAudit.js'
-import { trustedEdgeActionContextHeader } from '../routeActionBindingV2.js'
+import {
+  rejectUnadmittedV2DerivedView,
+  trustedEdgeActionContextHeader,
+} from '../routeActionBindingV2.js'
 import { startActiveViewLease } from '../services/activeViewLease.js'
 import { normalizeViewPath } from '../services/sandboxUiPath.js'
 import { listSandboxUiApps, lookupSandboxUiRegistry } from '../services/sandboxUiRegistry.js'
@@ -110,7 +113,9 @@ function v2ViewAuthority(req: AuthedRequest, res: Response, next: () => void): v
     next()
     return
   }
-  requireRpcAuth(req, res, () => requireScope('sandbox:ui:view')(req, res, next))
+  requireRpcAuth(req, res, () =>
+    rejectUnadmittedV2DerivedView(req, res, () => requireScope('sandbox:ui:view')(req, res, next))
+  )
 }
 
 function requireSandboxOAuthIdentity(req: AuthedRequest, res: Response, next: NextFunction): void {
@@ -359,6 +364,7 @@ export function createSandboxUiSessionRouter(): Router {
   router.post(
     '/sandbox-ui/:recipeNs/:recipeName/session',
     requireRpcAuth,
+    rejectUnadmittedV2DerivedView,
     requireScope('sandbox:ui:view'),
     async (req: AuthedRequest, res: Response) => {
       if (isV2ViewRequest(req)) {
@@ -424,6 +430,7 @@ export function createSandboxUiSessionRouter(): Router {
   router.post(
     '/sandbox-ui/:recipeNs/:recipeName/reconnect',
     requireRpcAuth,
+    rejectUnadmittedV2DerivedView,
     requireScope('sandbox:ui:view'),
     requireV2Delegation,
     async (req: AuthedRequest, res: Response) => {

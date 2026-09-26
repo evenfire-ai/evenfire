@@ -78,14 +78,15 @@ function delegation(operationId: ActionOperationId): UserDelegationV2Claims {
   }
 }
 
-function viewDelegation(): UserDelegationV2Claims {
+function viewDelegation(
+  operationId: 'sandbox.open' | 'sandbox.reconnect' = 'sandbox.reconnect'
+): UserDelegationV2Claims {
   const resource = canonicalResourceIdentity({
     environmentId: 'test',
     type: 'sandbox_app',
     logicalId: 'sandbox-recipes/r1',
     displayName: 'r1',
   })
-  const operationId = 'sandbox.reconnect' as const
   const target = validateActionOperationTarget({
     operationId,
     resource,
@@ -94,7 +95,7 @@ function viewDelegation(): UserDelegationV2Claims {
   return {
     ...delegation('sandbox.oauth.vend'),
     operationIds: [operationId],
-    scopes: ['action:sandbox.reconnect'],
+    scopes: [`action:${operationId}`],
     resource,
     targets: { [operationId]: target },
     targetHashes: { [operationId]: hashActionTarget(target) },
@@ -200,27 +201,22 @@ describe('Sandbox OAuth v2 authority', () => {
     expect(proxy.web).not.toHaveBeenCalled()
   })
 
-  it.each([
-    ['stale', new ActionAuthorityCheckpointError(409, 'access_path_stale'), 409],
-    ['unavailable', new ActionAuthorityCheckpointError(503, 'authority_unavailable'), 503],
-  ] as const)(
-    'does not fall back to a valid legacy cookie when v2 view authority is %s',
-    async (_label, error, status) => {
-      auth.verifyUserDelegationV2.mockReturnValue(viewDelegation())
-      authority.authorizeActionV2.mockRejectedValue(error)
-      const legacyCookie = createSandboxUiSession('legacy-user', 'sandbox-recipes', 'r1')
-      const fetchSpy = vi.spyOn(globalThis, 'fetch')
+  it('does not checkpoint or fall back to a legacy cookie for a valid v2 view', async () => {
+    auth.verifyUserDelegationV2.mockReturnValue(viewDelegation())
+    const legacyCookie = createSandboxUiSession('legacy-user', 'sandbox-recipes', 'r1')
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
 
-      await request(app())
-        .get('/api/v1/sandbox-ui/sandbox-recipes/r1/view/index.html')
-        .set('Authorization', 'Bearer v2.invalid-authority')
-        .set('Cookie', `${config.sandboxUiCookieName}=${legacyCookie}`)
-        .expect(status)
+    const response = await request(app())
+      .get('/api/v1/sandbox-ui/sandbox-recipes/r1/view/index.html')
+      .set('Authorization', 'Bearer v2.valid-but-unavailable')
+      .set('Cookie', `${config.sandboxUiCookieName}=${legacyCookie}`)
 
-      expect(fetchSpy).not.toHaveBeenCalled()
-      expect(proxy.web).not.toHaveBeenCalled()
-    }
-  )
+    expect(response.status).toBe(503)
+    expect(response.body).toEqual({ error: 'authority_unavailable' })
+    expect(authority.authorizeActionV2).not.toHaveBeenCalled()
+    expect(fetchSpy).not.toHaveBeenCalled()
+    expect(proxy.web).not.toHaveBeenCalled()
+  })
 
   it('does not fall back to a valid legacy cookie after a v2 view target mismatch', async () => {
     const claims = viewDelegation()
@@ -253,14 +249,23 @@ describe('Sandbox OAuth v2 authority', () => {
     expect(proxy.web).not.toHaveBeenCalled()
   })
 
-  it('mounts the active-view lease before a v2 Sandbox view reaches its upstream', async () => {
+  it('rejects v2 Sandbox open before registry lookup', async () => {
+    auth.verifyUserDelegationV2.mockReturnValue(viewDelegation('sandbox.open'))
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+
+    const response = await request(app())
+      .post('/api/v1/sandbox-ui/sandbox-recipes/r1/session')
+      .set('Authorization', 'Bearer v2.open')
+      .send({})
+
+    expect(response.status).toBe(503)
+    expect(response.body).toEqual({ error: 'authority_unavailable' })
+    expect(fetchSpy).not.toHaveBeenCalled()
+    expect(authority.authorizeActionV2).not.toHaveBeenCalled()
+  })
+
+  it('keeps the v2 Sandbox view capability unavailable before checkpoint and registry work', async () => {
     const claims = viewDelegation()
-    const leaseState = { live: true }
-    lease.startActiveViewLease.mockReturnValue({
-      close: () => {
-        leaseState.live = false
-      },
-    })
     auth.verifyUserDelegationV2.mockReturnValue(claims)
     authority.authorizeActionV2.mockImplementation(async (_claims, bound) => ({
       claims,
@@ -281,68 +286,19 @@ describe('Sandbox OAuth v2 authority', () => {
       )
     )
 
-    await request(app())
+    const response = await request(app())
       .get('/api/v1/sandbox-ui/sandbox-recipes/r1/view/index.html')
       .set('Authorization', 'Bearer v2.token')
-      .expect(200)
+      .expect(503)
 
-    expect(authority.authorizeActionV2).toHaveBeenCalledOnce()
-    expect(lease.startActiveViewLease).toHaveBeenCalledOnce()
-    expect(leaseState.live).toBe(false)
-    expect(proxy.web).toHaveBeenCalledOnce()
-    expect(lease.startActiveViewLease.mock.invocationCallOrder[0]).toBeLessThan(
-      proxy.web.mock.invocationCallOrder[0]
-    )
+    expect(response.body).toEqual({ error: 'authority_unavailable' })
+    expect(authority.authorizeActionV2).not.toHaveBeenCalled()
+    expect(lease.startActiveViewLease).not.toHaveBeenCalled()
+    expect(globalThis.fetch).not.toHaveBeenCalled()
+    expect(proxy.web).not.toHaveBeenCalled()
   })
 
-  it('closes the Sandbox HTTP lease when the client aborts before the response finishes', async () => {
-    const claims = viewDelegation()
-    const leaseState = { live: true }
-    lease.startActiveViewLease.mockReturnValue({
-      close: () => {
-        leaseState.live = false
-      },
-    })
-    auth.verifyUserDelegationV2.mockReturnValue(claims)
-    authority.authorizeActionV2.mockResolvedValue({
-      claims,
-      bound: {},
-      checkpoint: { status: 'allowed' },
-      trustedEdgeContext: {},
-      trustedEdgeHeader: 'trusted-v2-context',
-    })
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      new Response(
-        JSON.stringify({
-          appRef: 'sandbox-recipes/r1',
-          service: { name: 'web', namespace: 'sandbox-ui', port: 8080 },
-          ready: true,
-          defaultPath: '/',
-        }),
-        { status: 200, headers: { 'content-type': 'application/json' } }
-      )
-    )
-    let proxiedResponse: express.Response | undefined
-    proxy.web.mockImplementationOnce((_req, res) => {
-      proxiedResponse = res
-      return res
-    })
-
-    const pending = request(app())
-      .get('/api/v1/sandbox-ui/sandbox-recipes/r1/view/index.html')
-      .set('Authorization', 'Bearer v2.token')
-      .then(response => response)
-    await vi.waitFor(() => expect(lease.startActiveViewLease).toHaveBeenCalledOnce())
-    expect(proxiedResponse).toBeDefined()
-
-    proxiedResponse!.emit('close')
-
-    expect(leaseState.live).toBe(false)
-    proxiedResponse!.end()
-    await expect(pending).resolves.toMatchObject({ status: 200 })
-  })
-
-  it('destroys an active v2 Sandbox response when its mounted lease denies', async () => {
+  it('keeps a replayed v2 view delegation out of unbounded Sandbox consumer work', async () => {
     const claims = viewDelegation()
     auth.verifyUserDelegationV2.mockReturnValue(claims)
     authority.authorizeActionV2.mockImplementation(async (_claims, bound) => ({
@@ -363,15 +319,22 @@ describe('Sandbox OAuth v2 authority', () => {
         { status: 200, headers: { 'content-type': 'application/json' } }
       )
     )
-    proxy.web.mockImplementationOnce((_req, res) => res)
 
-    const pending = request(app())
-      .get('/api/v1/sandbox-ui/sandbox-recipes/r1/view/index.html')
-      .set('Authorization', 'Bearer v2.token')
-      .then(response => response)
-    await vi.waitFor(() => expect(lease.startActiveViewLease).toHaveBeenCalledOnce())
-    lease.startActiveViewLease.mock.calls[0]![1].onDenied()
+    const mounted = app()
+    const responses = []
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      responses.push(
+        await request(mounted)
+          .get('/api/v1/sandbox-ui/sandbox-recipes/r1/view/index.html')
+          .set('Authorization', 'Bearer v2.replayed')
+      )
+    }
 
-    await expect(pending).rejects.toThrow(/aborted|socket hang up/i)
+    expect(responses.map(response => response.status)).toEqual([503, 503, 503])
+    expect(responses.map(response => response.body.error)).toEqual(
+      Array(3).fill('authority_unavailable')
+    )
+    expect(authority.authorizeActionV2).not.toHaveBeenCalled()
+    expect(proxy.web).not.toHaveBeenCalled()
   })
 })

@@ -1,11 +1,6 @@
 import { config } from '../config.js'
 
-const HOPS = [
-  'rpc_proxy_trusted_edge',
-  'sandbox_derived_view',
-  'remote_desktop_derived_view',
-  'oauth_exact_target',
-] as const
+const HOPS = ['rpc_proxy_trusted_edge', 'oauth_exact_target'] as const
 
 export function startPr2ReadinessReporter(fetchImpl: typeof fetch = fetch): () => void {
   const sourceRevision = process.env.EVENFIRE_SOURCE_REVISION?.trim() ?? ''

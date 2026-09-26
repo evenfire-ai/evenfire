@@ -1,10 +1,9 @@
 import { Request, Response, Router } from 'express'
 import httpProxy from 'http-proxy'
-import { authorizeActionV2 } from '../actionAuthorityV2.js'
 import { config } from '../config.js'
 import { AuthedRequest, extractAuthToken, requireRpcAuth } from '../middleware/auth.js'
 import { requireScope } from '../middleware/auth.js'
-import { bindRouteActionV2 } from '../routeActionBindingV2.js'
+import { bindRouteActionV2, rejectUnadmittedV2DerivedView } from '../routeActionBindingV2.js'
 import { startActiveViewLease } from '../services/activeViewLease.js'
 import { DesktopSessionService } from '../services/desktopSessionService.js'
 import { tokenDeclaresV2, verifyUserDelegationV2 } from '../userDelegationV2.js'
@@ -46,7 +45,9 @@ function v2ViewAuthority(req: AuthedRequest, res: Response, next: () => void): v
     next()
     return
   }
-  requireRpcAuth(req, res, () => requireScope('desktop:view')(req, res, next))
+  requireRpcAuth(req, res, () =>
+    rejectUnadmittedV2DerivedView(req, res, () => requireScope('desktop:view')(req, res, next))
+  )
 }
 
 function v2OrLegacyHostAllowed(req: AuthedRequest, hostRef: string): boolean {
@@ -179,6 +180,7 @@ function createSessionRoute(): Router {
   router.post(
     '/desktop/:hostRef/session',
     requireRpcAuth,
+    rejectUnadmittedV2DerivedView,
     requireScope('desktop:view'),
     async (req: AuthedRequest, res: Response) => {
       await openOrReconnect(req, res)
@@ -188,6 +190,7 @@ function createSessionRoute(): Router {
   router.post(
     '/desktop/:hostRef/reconnect',
     requireRpcAuth,
+    rejectUnadmittedV2DerivedView,
     requireScope('desktop:view'),
     requireV2Delegation,
     async (req: AuthedRequest, res: Response) => {
@@ -290,9 +293,7 @@ function rejectUpgrade(socket: import('net').Socket, status: number): void {
 async function handleV2DesktopUpgrade(
   req: Request,
   socket: import('net').Socket,
-  head: Buffer,
-  hostRef: string,
-  path: string
+  hostRef: string
 ): Promise<void> {
   const claims = verifyUserDelegationV2(extractAuthToken(req))
   if (!claims) {
@@ -310,14 +311,11 @@ async function handleV2DesktopUpgrade(
       } as unknown as AuthedRequest,
       claims
     )
-    const authorized = await authorizeActionV2(claims, bound)
-    const lease = startActiveViewLease(authorized, { onDenied: () => socket.destroy() })
-    socket.once('close', () => lease.close())
-    socket.once('error', () => lease.close())
-    const target = `ws://${hostRef}.${config.hostNamespace}.svc.cluster.local:${config.desktopPort}`
-    req.url = `/${path}`
-    stripDesktopEdgeCredentials(req.headers)
-    proxy.ws(req, socket, head, { target })
+    if (bound.operationId !== 'remote_desktop.reconnect') {
+      rejectUpgrade(socket, 403)
+      return
+    }
+    rejectUpgrade(socket, 503)
   } catch {
     // A malformed binding, denial, stale authority, or checkpoint outage must
     // all fail before an upstream desktop connection is attempted.
@@ -342,7 +340,7 @@ export function handleDesktopUpgrade(
   const path = match[2] || ''
 
   if (tokenDeclaresV2(extractAuthToken(req))) {
-    void handleV2DesktopUpgrade(req, socket, head, hostRef, path)
+    void handleV2DesktopUpgrade(req, socket, hostRef)
     return true
   }
 
