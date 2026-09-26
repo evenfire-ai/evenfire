@@ -346,6 +346,12 @@ export type WorkflowTriggerAuthorityFence = Readonly<{
   fingerprint: string
 }>
 
+type WorkflowTriggerAuthorityFenceSnapshot = WorkflowTriggerAuthorityFence &
+  Readonly<{
+    idleExpiresAt: Date
+    absoluteExpiresAt: Date
+  }>
+
 function workflowTriggerIdentity(authority: WorkflowAuthorityBinding): {
   recipeNamespace: string
   recipeName: string
@@ -370,7 +376,7 @@ async function readWorkflowTriggerAuthorityFence(input: {
   db: DbClient
   authority: WorkflowAuthorityBinding
   lock: boolean
-}): Promise<WorkflowTriggerAuthorityFence> {
+}): Promise<WorkflowTriggerAuthorityFenceSnapshot> {
   const { binding } = input.authority
   const { recipeNamespace, recipeName } = workflowTriggerIdentity(input.authority)
   const lock = input.lock ? ' FOR SHARE' : ''
@@ -390,13 +396,12 @@ async function readWorkflowTriggerAuthorityFence(input: {
         absolute_expires_at?: unknown
       }
     | undefined
-  if (
-    !sessionRow ||
-    sessionRow.lifecycle_state !== 'active' ||
-    sessionRow.revoked_at !== null ||
-    new Date(String(sessionRow.idle_expires_at)).getTime() <= Date.now() ||
-    new Date(String(sessionRow.absolute_expires_at)).getTime() <= Date.now()
-  ) {
+  if (!sessionRow || sessionRow.lifecycle_state !== 'active' || sessionRow.revoked_at !== null) {
+    throw new WorkflowAuthorityError(401, 'invalid_session')
+  }
+  const idleExpiresAt = new Date(String(sessionRow.idle_expires_at))
+  const absoluteExpiresAt = new Date(String(sessionRow.absolute_expires_at))
+  if (!Number.isFinite(idleExpiresAt.getTime()) || !Number.isFinite(absoluteExpiresAt.getTime())) {
     throw new WorkflowAuthorityError(401, 'invalid_session')
   }
 
@@ -499,15 +504,22 @@ async function readWorkflowTriggerAuthorityFence(input: {
   )
   return Object.freeze({
     fingerprint: createHash('sha256').update(stableStringify(snapshot)).digest('hex'),
+    idleExpiresAt,
+    absoluteExpiresAt,
   })
 }
 
 export function captureWorkflowTriggerAuthorityFence(input: {
   authority: WorkflowAuthorityBinding
 }): Promise<WorkflowTriggerAuthorityFence> {
-  return withTransaction(db =>
-    readWorkflowTriggerAuthorityFence({ db, authority: input.authority, lock: false })
-  )
+  return withTransaction(async db => {
+    const snapshot = await readWorkflowTriggerAuthorityFence({
+      db,
+      authority: input.authority,
+      lock: false,
+    })
+    return Object.freeze({ fingerprint: snapshot.fingerprint })
+  })
 }
 
 export async function requireCurrentWorkflowTriggerAuthority(input: {
@@ -515,20 +527,36 @@ export async function requireCurrentWorkflowTriggerAuthority(input: {
   authority: WorkflowAuthorityBinding
   expectedFence: WorkflowTriggerAuthorityFence
 }): Promise<WorkflowAuthorityBinding> {
-  const currentTime = await input.db.query(
-    `SELECT clock_timestamp() < to_timestamp($1) AS "delegationCurrent"`,
-    [input.authority.sourceExpiresAt]
-  )
-  const currentTimeRow = currentTime.rows[0] as { delegationCurrent?: unknown } | undefined
-  if (currentTimeRow?.delegationCurrent !== true) {
-    throw new WorkflowAuthorityError(409, 'access_path_stale')
-  }
   const current = await readWorkflowTriggerAuthorityFence({
     db: input.db,
     authority: input.authority,
     lock: true,
   })
   if (current.fingerprint !== input.expectedFence.fingerprint) {
+    throw new WorkflowAuthorityError(409, 'access_path_stale')
+  }
+  const currentTime = await input.db.query(
+    `WITH fence_time AS MATERIALIZED (
+       SELECT clock_timestamp() AS observed_at
+     )
+     SELECT observed_at < to_timestamp($1) AS "delegationCurrent",
+            observed_at < $2::timestamptz AS "idleSessionCurrent",
+            observed_at < $3::timestamptz AS "absoluteSessionCurrent"
+       FROM fence_time`,
+    [input.authority.sourceExpiresAt, current.idleExpiresAt, current.absoluteExpiresAt]
+  )
+  const currentTimeRow = currentTime.rows[0] as
+    | {
+        delegationCurrent?: unknown
+        idleSessionCurrent?: unknown
+        absoluteSessionCurrent?: unknown
+      }
+    | undefined
+  if (
+    currentTimeRow?.delegationCurrent !== true ||
+    currentTimeRow.idleSessionCurrent !== true ||
+    currentTimeRow.absoluteSessionCurrent !== true
+  ) {
     throw new WorkflowAuthorityError(409, 'access_path_stale')
   }
   return input.authority
