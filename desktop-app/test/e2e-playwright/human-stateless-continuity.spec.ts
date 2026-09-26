@@ -1,5 +1,5 @@
 import { type ElectronApplication, type Locator, type Page, expect, test } from '@playwright/test'
-import { execFile } from 'node:child_process'
+import { type ChildProcess, execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import {
   EXTERNAL_REST_API_BASE_URL,
@@ -222,9 +222,15 @@ async function openExactSession(page: Page, title: string, hostName: string): Pr
   await page.getByRole('button', { name: `Open ${title}`, exact: true }).click()
   const composer = page.getByRole('textbox', { name: 'Agent message composer' })
   await expect(composer).toBeVisible({ timeout: 30_000 })
-  await expect(page.getByRole('button', { name: /^Switch chat agent$/ })).toContainText(hostName, {
-    timeout: 30_000,
-  })
+  // Existing conversations intentionally replace the new-chat agent selector
+  // with the breadcrumb identity. The composer placeholder keeps exposing the
+  // active binding; it uses the Host id, while catalog display names may vary
+  // in case (chatllm vs chatLLM), so compare case-insensitively.
+  await expect(composer).toHaveAttribute(
+    'placeholder',
+    `Message ${hostName}... (Enter to send, Shift+Enter for newline)`,
+    { timeout: 30_000, ignoreCase: true }
+  )
 }
 
 async function renameSessionByMarker(page: Page, marker: string, title: string): Promise<void> {
@@ -319,8 +325,21 @@ async function resolveColdSend(
   }
 }
 
-async function closeElectron(app: ElectronApplication | undefined): Promise<number | null> {
-  const child = app?.process()
+async function closeElectron(
+  app: ElectronApplication | undefined,
+  capturedChild?: ChildProcess
+): Promise<number | null> {
+  // finalizeRecording closes Electron to flush the video; the Playwright
+  // application handle is disposed after that, so callers capture the child
+  // before finalization and this helper tolerates an already-closed app.
+  let child = capturedChild
+  if (!child) {
+    try {
+      child = app?.process()
+    } catch {
+      child = undefined
+    }
+  }
   const pid = child?.pid ?? null
   await app?.close().catch(() => undefined)
   if (!child) return null
@@ -517,8 +536,9 @@ test('human journey — two Hosts, restart, cache, and two verified stateless wa
 
     await test.step('exit Electron and prove a real replicas-0 suspension', async () => {
       const closeStarted = Date.now()
+      const electronChild = app.process()
       await finalizeRecording(app, page)
-      await closeElectron(app)
+      await closeElectron(app, electronChild)
       metrics.first_close_ms = Date.now() - closeStarted
       app = undefined
       page = undefined
