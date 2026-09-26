@@ -390,6 +390,7 @@ describe('createDbRunProcessor', () => {
   it('mounts the real checkpoint client and retries authority outages before child creation', async () => {
     vi.stubEnv('INTERNAL_CONTROL_JWT_WRC_HMAC_SECRET', 'round-five-workflow-checkpoint-test-secret')
     const run = baseRun({
+      actor_id: '11111111-1111-4111-8111-111111111111',
       authority_binding: {
         version: 2,
         userId: '11111111-1111-4111-8111-111111111111',
@@ -440,6 +441,52 @@ describe('createDbRunProcessor', () => {
     expect(createChildRecipe).not.toHaveBeenCalled()
     expect(client.calls.some(call => /^ROLLBACK$/i.test(call.sql))).toBe(true)
     expect(client.calls.some(call => /SET phase = 'Failed'/.test(call.sql))).toBe(false)
+  })
+
+  it('terminally rejects a persisted binding for another run actor before child creation', async () => {
+    vi.stubEnv('INTERNAL_CONTROL_JWT_WRC_HMAC_SECRET', 'round-five-workflow-checkpoint-test-secret')
+    const run = baseRun({
+      actor_type: 'user',
+      actor_id: '44444444-4444-4444-8444-444444444444',
+      authority_binding: {
+        version: 2,
+        userId: '11111111-1111-4111-8111-111111111111',
+        sid: '22222222-2222-4222-8222-222222222222',
+        sessionVersion: 1,
+        delegationJti: '33333333-3333-4333-8333-333333333333',
+        operationId: 'workflow.trigger',
+        resource: { environmentId: 'local', type: 'workflow_recipe', logicalId: 'demo/echo' },
+        target: { recipeNamespace: 'demo', recipeName: 'echo' },
+        targetHash: `ath2_${'a'.repeat(43)}`,
+        accessPathId: `ap1_${'b'.repeat(43)}`,
+        authorizationRevision: `ar1_${'c'.repeat(43)}`,
+        behaviorBindingHash: `bh2_${'d'.repeat(43)}`,
+        pathKind: 'direct',
+        effectiveTeamId: null,
+      },
+    })
+    const client = makeClient(async sql =>
+      /FROM workflow_runs run[\s\S]*FOR UPDATE OF run/i.test(sql)
+        ? { rows: [run], rowCount: 1 }
+        : { rows: [], rowCount: 0 }
+    )
+    const fetchImpl = vi.fn()
+    const createChildRecipe = vi.fn()
+    const proc = spawn({
+      instanceId: 'wrc-1',
+      pool: { connect: vi.fn(async () => client as unknown as PoolClient) } as unknown as Pool,
+      runPollMs: 30_000,
+      checkpointAuthority: createWorkflowRunAuthorityCheckpointer({
+        fetchImpl: fetchImpl as typeof fetch,
+      }),
+      createChildRecipe,
+      logger: silentLogger(),
+    })
+
+    await expect(proc.processPending(run.run_id)).resolves.toBeUndefined()
+    expect(fetchImpl).not.toHaveBeenCalled()
+    expect(createChildRecipe).not.toHaveBeenCalled()
+    expect(client.calls.some(call => /SET phase = 'Failed'/.test(call.sql))).toBe(true)
   })
 
   it('retries an unavailable checkpoint without duplicating the protected effect', async () => {

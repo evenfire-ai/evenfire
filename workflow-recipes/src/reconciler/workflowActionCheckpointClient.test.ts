@@ -22,6 +22,10 @@ const resource = canonicalResourceIdentity({
 })
 
 const run = {
+  recipe_namespace: 'sandbox-recipes',
+  recipe_name: 'demo',
+  actor_type: 'user',
+  actor_id: userId,
   authority_binding: {
     version: 2,
     userId,
@@ -99,6 +103,7 @@ describe('workflow action checkpoint client', () => {
 
   it('canonicalizes a JSONB target before checkpoint transport', async () => {
     const jsonbOrderedRun = {
+      ...run,
       authority_binding: {
         ...run.authority_binding,
         target: { recipeNamespace: 'sandbox-recipes', recipeName: 'demo' },
@@ -137,26 +142,52 @@ describe('workflow action checkpoint client', () => {
     await expect(malformed(run)).rejects.toThrow('workflow_authority_checkpoint_invalid_response')
   })
 
-  it('rejects an allowed response attributed to a different binding', async () => {
+  it.each([
+    [
+      'a different access path',
+      {
+        attribution: { ...allowedCheckpoint().attribution, accessPathId: `ap1_${'d'.repeat(43)}` },
+      },
+    ],
+    [
+      'a different path kind and team',
+      {
+        attribution: {
+          ...allowedCheckpoint().attribution,
+          pathKind: 'team',
+          effectiveTeamId: '44444444-4444-4444-8444-444444444444',
+        },
+      },
+    ],
+  ])('rejects an allowed response attributed to %s', async (_label, responseOverride) => {
     const checkpoint = createWorkflowRunAuthorityCheckpointer({
       fetchImpl: vi.fn(
         async () =>
-          new Response(
-            JSON.stringify(
-              allowedCheckpoint({
-                attribution: {
-                  ...allowedCheckpoint().attribution,
-                  accessPathId: `ap1_${'d'.repeat(43)}`,
-                },
-              })
-            ),
-            { status: 200 }
-          )
+          new Response(JSON.stringify(allowedCheckpoint(responseOverride)), { status: 200 })
       ) as typeof fetch,
     })
 
     await expect(checkpoint(run)).rejects.toThrow('workflow_authority_denied')
   })
+
+  it.each([
+    ['actor', { actor_id: '44444444-4444-4444-8444-444444444444' }],
+    ['recipe', { recipe_name: 'other-recipe' }],
+  ])(
+    'rejects a persisted trigger binding detached from the run %s before transport',
+    async (_label, mismatch) => {
+      const fetchImpl = vi.fn()
+      const checkpoint = createWorkflowRunAuthorityCheckpointer({
+        fetchImpl: fetchImpl as typeof fetch,
+      })
+
+      await expect(checkpoint({ ...run, ...mismatch } as never)).rejects.toMatchObject({
+        failure: 'invalid_binding',
+        retryable: false,
+      })
+      expect(fetchImpl).not.toHaveBeenCalled()
+    }
+  )
 
   it('rejects expired or status-mismatched checkpoint responses', async () => {
     const expired = createWorkflowRunAuthorityCheckpointer({

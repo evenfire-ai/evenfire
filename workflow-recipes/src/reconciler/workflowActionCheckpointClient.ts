@@ -34,6 +34,24 @@ function checkpointRequest(binding: WorkflowRunAuthorityBinding) {
   }
 }
 
+function persistedBindingMatchesRun(run: DbRunRow, binding: WorkflowRunAuthorityBinding): boolean {
+  if (
+    run.actor_type !== 'user' ||
+    run.actor_id !== binding.userId ||
+    binding.resource.type !== 'workflow_recipe' ||
+    binding.resource.logicalId !== `${run.recipe_namespace}/${run.recipe_name}`
+  ) {
+    return false
+  }
+  try {
+    const target = canonicalActionTarget(binding.target)
+    if (!target) return false
+    return target.recipeNamespace === run.recipe_namespace && target.recipeName === run.recipe_name
+  } catch {
+    return false
+  }
+}
+
 export type WorkflowRunAuthorityCheckpointer = (run: DbRunRow) => Promise<void>
 
 export type WorkflowAuthorityCheckpointFailure =
@@ -78,7 +96,10 @@ export function createWorkflowRunAuthorityCheckpointer(
     const binding = run.authority_binding
     if (!binding) return
     if (binding.operationId !== 'workflow.trigger') {
-      throw new Error('workflow_authority_binding_operation_invalid')
+      throw new WorkflowAuthorityCheckpointError('invalid_binding', false)
+    }
+    if (!persistedBindingMatchesRun(run, binding)) {
+      throw new WorkflowAuthorityCheckpointError('invalid_binding', false)
     }
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
