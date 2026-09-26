@@ -150,6 +150,11 @@ export function createOAuthCallbackRouter(gateway: K8sGateway): Router {
           // RFC 9207 mix-up defence — no issuer echo. 400, consistent with the
           // sibling invalid_state mapping.
           return res.status(400).json({ error: 'issuer_mismatch' })
+        case 'issuer_binding_required':
+          // RFC 9207 mix-up defence, absence case: the remote server pinned no
+          // issuer at install, so the shared remote callback cannot attribute the
+          // code. Fail closed — same 400 class, distinct error for operator triage.
+          return res.status(400).json({ error: 'issuer_binding_required' })
         case 'unknown_oauth_client':
           return res.status(400).json({ error: 'unknown_oauth_client' })
         case 'recipe_not_found':

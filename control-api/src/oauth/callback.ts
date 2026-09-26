@@ -308,6 +308,13 @@ export type CallbackResult =
    * exchanged. No value fields — the issuer strings are NEVER echoed back.
    */
   | { kind: 'issuer_mismatch' }
+  /**
+   * RFC 9207 mix-up defence, absence case: a remote subject reached the SHARED
+   * remote callback but no issuer was pinned at install (`issForCallback` absent),
+   * so the callback cannot attribute the code to an authorization server. Fail
+   * closed BEFORE the single-use code is exchanged. No value fields.
+   */
+  | { kind: 'issuer_binding_required' }
   | { kind: 'unknown_oauth_client' }
   | { kind: 'recipe_not_found' }
   /** mcp subject: the McpServer named in the signed state does not exist / is not OAuth. */
@@ -499,12 +506,24 @@ async function handleMcpOAuthCallback(
   // the honest issuer at discovery (`issForCallback`) and require the callback's
   // `iss` to match it here — BEFORE the single-use code is ever exchanged.
   //
-  // Skip when `issForCallback` is absent/empty: the AS did not advertise `iss`
-  // in its discovery document, so there is nothing to compare against. This is
-  // fail-open by ABSENCE OF PRODUCER DATA, not a lax choice. The baked lane has
-  // no `decl.remote`, so `expectedIss` is always absent there and it never runs.
-  const expectedIss = subject.decl.remote?.issForCallback
-  if (typeof expectedIss === 'string' && expectedIss.length > 0) {
+  // FAIL CLOSED for every remote subject. The stable remote callback
+  // (`/oauth-callback/remote`) is SHARED across all remote subjects (CIMD/DCR/
+  // pre-registered register ONE fixed redirect_uri), so whether the check runs
+  // must NOT be governed by the resolved AS's own advertised metadata: a
+  // malicious installed AS whose discovery omitted `iss` (⇒ `issForCallback`
+  // absent) could relay the user to an honest AS sharing this redirect/state/PKCE
+  // and have the honest code attributed to itself. So a remote subject with no
+  // pinned issuer can never satisfy the defence — reject rather than bind a code
+  // we cannot attribute. The baked/generic lanes have no `decl.remote`; they are
+  // unaffected (this is a remote-lane defence only).
+  if (subject.decl.remote) {
+    const expectedIss = subject.decl.remote.issForCallback
+    if (typeof expectedIss !== 'string' || expectedIss.length === 0) {
+      // No issuer pinned at install → the mix-up defence is unsatisfiable for this
+      // server. (An install-time guard would surface this to the operator earlier
+      // instead of the user at consent — tracked as a follow-up.)
+      return { kind: 'issuer_binding_required' }
+    }
     // Fail closed on any deviation, INCLUDING an absent/empty callback `iss`.
     if (input.iss !== expectedIss) {
       return { kind: 'issuer_mismatch' }

@@ -17,12 +17,15 @@ import { signOAuthState } from '../state.js'
  *
  * The remote AS issuer is discovered and pinned on the McpServer CR
  * (`spec.oauth.issForCallback`), surfaced as `subject.decl.remote.issForCallback`.
- * The callback must read the authorization-response `iss` (`input.iss`) and, when
- * an issuer was advertised, require an exact match BEFORE the single-use auth-code
- * is exchanged — the AS mix-up defence. When no issuer was advertised the check is
- * skipped (fail-open by absence of producer data). These tests pin the observable
- * outcome (T4): a mismatch/absent `iss` short-circuits to `issuer_mismatch` with no
- * exchange and no persist; a match (or a not-advertised issuer) exchanges normally.
+ * The callback must read the authorization-response `iss` (`input.iss`) and require
+ * an exact match BEFORE the single-use auth-code is exchanged — the AS mix-up
+ * defence. The remote callback is SHARED across every remote subject, so it FAILS
+ * CLOSED (R3-H2): a remote subject with no pinned issuer is rejected outright
+ * (`issuer_binding_required`) rather than skipping the check, because a malicious
+ * installed AS that omitted `iss` at discovery could otherwise relay the code from
+ * an honest AS. These tests pin the observable outcome (T4): a mismatched, absent,
+ * or unpinned issuer short-circuits BEFORE exchange with no exchange and no
+ * persist; only a pinned issuer matched by `input.iss` exchanges normally.
  */
 
 const STATE_SECRET = 'test-state-secret-0123456789abcdef' // ≥ 32 chars
@@ -182,9 +185,12 @@ describe('handleOAuthCallback — remote lane RFC 9207 iss validation (H-1)', ()
     expect(String(query.mock.calls[0][0])).toContain('INSERT INTO oauth_grants')
   })
 
-  it('skips the check when no issuer was advertised: exchange proceeds', async () => {
+  // R3-H2: FAIL CLOSED. A remote subject that pinned no issuer at install can never
+  // satisfy the mix-up defence, so the shared remote callback must reject it rather
+  // than skip the check (the pre-fix behaviour was `ok` + exchange + persist).
+  it('rejects a remote subject with no pinned issuer WITHOUT exchange or persist', async () => {
     const pinnedTransport = okPinnedTransport()
-    // Subject WITHOUT issForCallback (AS did not advertise `iss`) + absent input.iss.
+    // Subject WITHOUT issForCallback (AS did not advertise `iss` at discovery).
     const deps = buildDeps({
       subject: remoteSubject(),
       pinnedTransport,
@@ -192,10 +198,26 @@ describe('handleOAuthCallback — remote lane RFC 9207 iss validation (H-1)', ()
 
     const result = await handleOAuthCallback(input({ iss: undefined }), deps)
 
-    expect(result.kind).toBe('ok')
-    expect(pinnedTransport).toHaveBeenCalledTimes(1)
-    const query = deps.db.query as ReturnType<typeof vi.fn>
-    expect(query).toHaveBeenCalledTimes(1)
-    expect(String(query.mock.calls[0][0])).toContain('INSERT INTO oauth_grants')
+    expect(result.kind).toBe('issuer_binding_required')
+    expect(pinnedTransport).not.toHaveBeenCalled()
+    expect(deps.db.query as ReturnType<typeof vi.fn>).not.toHaveBeenCalled()
+  })
+
+  // R3-H2 (relay case): the malicious server omitted `iss` at install, then relays
+  // the user through an HONEST AS that DOES emit `iss`. A present, well-formed
+  // callback `iss` must NOT rescue an unpinned remote subject — the skip was
+  // governed by the malicious server's own (missing) metadata. Fail closed.
+  it('rejects an unpinned remote subject even when a relayed iss is present', async () => {
+    const pinnedTransport = okPinnedTransport()
+    const deps = buildDeps({
+      subject: remoteSubject(),
+      pinnedTransport,
+    })
+
+    const result = await handleOAuthCallback(input({ iss: ADVERTISED_ISS }), deps)
+
+    expect(result.kind).toBe('issuer_binding_required')
+    expect(pinnedTransport).not.toHaveBeenCalled()
+    expect(deps.db.query as ReturnType<typeof vi.fn>).not.toHaveBeenCalled()
   })
 })

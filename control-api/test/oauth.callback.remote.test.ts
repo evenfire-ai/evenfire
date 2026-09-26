@@ -53,6 +53,9 @@ function remoteServerCr() {
         authorizationEndpoint: 'https://mcp.notion.com/authorize',
         tokenEndpoint: TOKEN_ENDPOINT,
         issuer: 'https://mcp.notion.com',
+        // Pinned RFC 9207 issuer: a compliant remote AS advertises `iss`, and the
+        // shared remote callback now fails closed without it (R3-H2).
+        issForCallback: 'https://mcp.notion.com',
         resource: 'https://mcp.notion.com',
         grantScope: 'user',
         scopes: ['read'],
@@ -118,6 +121,9 @@ function remoteInput(): CallbackInput {
     code: 'AUTH_CODE',
     state: remoteState(),
     redirectUri: 'https://control.example.com/api/v1/oauth-callback/remote',
+    // RFC 9207 issuer echoed by the authorization response; matches the pinned
+    // `issForCallback` so the mix-up defence passes and the exchange proceeds.
+    iss: 'https://mcp.notion.com',
   }
 }
 
