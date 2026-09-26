@@ -8,17 +8,14 @@ import {
 import { publicCorrelationId, sanitizeControlApiPublicError } from '../http/publicApiError.js'
 import { type AuthedRequest, extractAuthToken, requireAuth } from '../middleware/auth.js'
 import {
-  WorkflowActionDelegationTransportError,
+  sendWorkflowActionDelegationTransportError,
   workflowActionDelegationHeaders,
 } from '../workflowActionDelegation.js'
 
 const PROPAGATED_STATUSES = new Set([400, 403, 404, 409, 410, 422])
 
 function forwardControlApiError(error: unknown, res: Response, next: NextFunction): void {
-  if (error instanceof WorkflowActionDelegationTransportError) {
-    res.status(400).json({ error: 'invalid_action_delegation' })
-    return
-  }
+  if (sendWorkflowActionDelegationTransportError(error, res)) return
   const sanitized = sanitizeControlApiPublicError(
     error,
     PROPAGATED_STATUSES,
