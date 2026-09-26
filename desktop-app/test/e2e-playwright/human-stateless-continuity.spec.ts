@@ -64,6 +64,8 @@ type JourneyMetrics = {
   second_launch_to_window_ms: number
   second_launch_to_authenticated_ms: number
   second_launch_to_stateless_ready_ms: number
+  second_launch_to_cached_transcript_ms: number | null
+  cache_visible_before_ready_observed: boolean | null
   draft_preserved_while_switching_hosts: boolean
   draft_preserved_across_restart: boolean
   second_suspend_ms: number
@@ -73,10 +75,13 @@ type JourneyMetrics = {
   cold_send_to_user_message_visible_ms: number | null
   cold_send_to_task_acknowledged_ms: number | null
   cold_send_to_ready_observed_ms: number | null
+  cold_send_response_preceded_stepper: boolean
   cold_send_to_response_ms: number
   cold_send_to_composer_idle_ms: number
   cold_send_retries: number
   initial_stateless_send_retries: number
+  stateful_follow_up_to_user_message_visible_ms: number | null
+  stateful_follow_up_to_response_ms: number | null
   stateless_pod_after_cold_send: string[]
   stateful_pod_after: string[]
   markers: {
@@ -254,20 +259,28 @@ async function humanType(locator: Locator, text: string): Promise<void> {
   await locator.pressSequentially(text, { delay: 90 })
 }
 
-async function sendMarker(page: Page, marker: string, prompt: string): Promise<void> {
+async function sendMarker(
+  page: Page,
+  marker: string,
+  prompt: string
+): Promise<{ toUserMessageMs: number; toResponseMs: number }> {
   const composer = page.getByRole('textbox', { name: 'Agent message composer' })
   const response = page.getByTestId('agent-response').filter({ hasText: marker })
   await humanType(composer, prompt)
   await expect(page.getByTestId('send-button')).toBeEnabled()
+  const sendStarted = Date.now()
   await page.getByTestId('send-button').click()
   await expect(page.getByTestId('message-list')).toContainText(marker, { timeout: 30_000 })
+  const toUserMessageMs = Date.now() - sendStarted
   await expect(response).toBeVisible({ timeout: 150_000 })
   await expect(response).toContainText(marker, { timeout: 150_000 })
+  const toResponseMs = Date.now() - sendStarted
   await expect(composer).toHaveValue('', { timeout: 150_000 })
   await expect(page.getByTestId('send-button')).toHaveAttribute('aria-label', 'Send message', {
     timeout: 150_000,
   })
   await expect(page.getByTestId('send-button')).toBeDisabled({ timeout: 150_000 })
+  return { toUserMessageMs, toResponseMs }
 }
 
 async function authenticatedWithoutRelogin(page: Page): Promise<void> {
@@ -281,13 +294,14 @@ async function authenticatedWithoutRelogin(page: Page): Promise<void> {
 async function resolveColdSend(
   page: Page,
   responseMarker: string,
-  contextMarker: string
+  contextMarker: string,
+  startedAt?: number
 ): Promise<{
   wakingVisibleMs: number | null
   retries: number
   firstOutcome: 'response' | 'waking'
 }> {
-  const started = Date.now()
+  const started = startedAt ?? Date.now()
   const response = page.getByTestId('agent-response').filter({ hasText: responseMarker })
   const waking = page.getByTestId('waking-state')
   let firstOutcome: 'response' | 'waking' | null = null
@@ -409,6 +423,8 @@ test('human journey — two Hosts, restart, cache, and two verified stateless wa
     second_launch_to_window_ms: 0,
     second_launch_to_authenticated_ms: 0,
     second_launch_to_stateless_ready_ms: 0,
+    second_launch_to_cached_transcript_ms: null,
+    cache_visible_before_ready_observed: null,
     draft_preserved_while_switching_hosts: false,
     draft_preserved_across_restart: false,
     second_suspend_ms: 0,
@@ -418,10 +434,13 @@ test('human journey — two Hosts, restart, cache, and two verified stateless wa
     cold_send_to_user_message_visible_ms: null,
     cold_send_to_task_acknowledged_ms: null,
     cold_send_to_ready_observed_ms: null,
+    cold_send_response_preceded_stepper: false,
     cold_send_to_response_ms: 0,
     cold_send_to_composer_idle_ms: 0,
     cold_send_retries: 0,
     initial_stateless_send_retries: 0,
+    stateful_follow_up_to_user_message_visible_ms: null,
+    stateful_follow_up_to_response_ms: null,
     stateless_pod_after_cold_send: [],
     stateful_pod_after: [],
     markers: {
@@ -561,17 +580,26 @@ test('human journey — two Hosts, restart, cache, and two verified stateless wa
       await authenticatedWithoutRelogin(page)
       metrics.second_launch_to_authenticated_ms = Date.now() - launchStarted
 
-      const ready = await waitForStatelessReady(270_000)
-      metrics.second_launch_to_stateless_ready_ms = Date.now() - launchStarted
-      metrics.stateless_image_ids_after_reopen = ready.snapshot.imageIds
-      expect(ready.snapshot.readyReplicas).toBeGreaterThan(0)
-      expect(ready.snapshot.podNames.join(',')).not.toBe(metrics.stateless_pod_before.join(','))
-      expect(ready.snapshot.imageIds).toEqual(metrics.stateless_image_ids_before)
-
+      // Observe the catalog-driven prewarm wake from authentication while the
+      // retained conversation opens from local cache before Ready is observed.
+      const readyObservation = waitForStatelessReady(270_000).then(result => {
+        return { result, observedAt: Date.now() }
+      })
       await openExactSession(page, statelessTitle, STATELESS_HOST)
       await expect(page.getByTestId('message-list')).toContainText(statelessMarker, {
         timeout: 30_000,
       })
+      metrics.second_launch_to_cached_transcript_ms = Date.now() - launchStarted
+      metrics.cache_visible_before_ready_observed = !readyObserved
+      const ready = await readyObservation
+      metrics.second_launch_to_stateless_ready_ms = ready.observedAt - launchStarted
+      metrics.stateless_image_ids_after_reopen = ready.result.snapshot.imageIds
+      expect(ready.result.snapshot.readyReplicas).toBeGreaterThan(0)
+      expect(ready.result.snapshot.podNames.join(',')).not.toBe(
+        metrics.stateless_pod_before.join(',')
+      )
+      expect(ready.result.snapshot.imageIds).toEqual(metrics.stateless_image_ids_before)
+
       const composer = page.getByRole('textbox', { name: 'Agent message composer' })
       // Drafts are currently renderer-memory scoped. Record this observation;
       // PR A requires draft continuity during transient errors in a live app.
@@ -610,6 +638,16 @@ test('human journey — two Hosts, restart, cache, and two verified stateless wa
       expect(preClick.readyReplicas).toBe(0)
       expect(preClick.podNames).toHaveLength(0)
 
+      // Arm every observer before the trusted click: Ready polling starts on
+      // the still-suspended Host, and the stepper count baseline excludes
+      // completed steppers from earlier turns that keep the same test id.
+      let readyObserved = false
+      const readyObservation = waitForStatelessReady(270_000).then(result => {
+        readyObserved = true
+        return { result, observedAt: Date.now() }
+      })
+      const taskStepper = page.getByTestId('progress-stepper')
+      const stepperBaseline = await taskStepper.count()
       const sendStarted = Date.now()
       await page.getByTestId('send-button').click()
       await expect(page.getByTestId('message-list')).toContainText(statelessFollowMarker, {
@@ -620,15 +658,19 @@ test('human journey — two Hosts, restart, cache, and two verified stateless wa
       const followResponse = page
         .getByTestId('agent-response')
         .filter({ hasText: statelessFollowMarker })
-      const taskStepper = page.getByTestId('progress-stepper')
       const stepperWatch = expect
         .poll(
           async () => {
             if (
               metrics.cold_send_to_task_acknowledged_ms === null &&
-              (await taskStepper.isVisible().catch(() => false))
+              (await taskStepper.count()) > stepperBaseline
             ) {
               metrics.cold_send_to_task_acknowledged_ms = Date.now() - sendStarted
+            }
+            if (metrics.cold_send_to_task_acknowledged_ms === null) {
+              metrics.cold_send_response_preceded_stepper = await followResponse
+                .isVisible()
+                .catch(() => false)
             }
             return (
               metrics.cold_send_to_task_acknowledged_ms !== null ||
@@ -641,11 +683,12 @@ test('human journey — two Hosts, restart, cache, and two verified stateless wa
           }
         )
         .toBe(true)
-      const readyObservation = waitForStatelessReady(270_000).then(result => ({
-        result,
-        observedAt: Date.now(),
-      }))
-      const outcome = await resolveColdSend(page, statelessFollowMarker, statelessMarker)
+      const outcome = await resolveColdSend(
+        page,
+        statelessFollowMarker,
+        statelessMarker,
+        sendStarted
+      )
       metrics.cold_send_to_waking_visible_ms = outcome.wakingVisibleMs
       metrics.cold_send_first_outcome = outcome.firstOutcome
       metrics.cold_send_to_response_ms = Date.now() - sendStarted
@@ -675,11 +718,13 @@ test('human journey — two Hosts, restart, cache, and two verified stateless wa
       await expect(page.getByTestId('message-list')).toContainText(statefulMarker, {
         timeout: 30_000,
       })
-      await sendMarker(
+      const statefulTimings = await sendMarker(
         page,
         statefulFollowMarker,
         `What was the earlier token in this conversation? Reply with that token followed by ${statefulFollowMarker}.`
       )
+      metrics.stateful_follow_up_to_user_message_visible_ms = statefulTimings.toUserMessageMs
+      metrics.stateful_follow_up_to_response_ms = statefulTimings.toResponseMs
       await expect(
         page.getByTestId('agent-response').filter({ hasText: statefulFollowMarker })
       ).toContainText(statefulMarker)
