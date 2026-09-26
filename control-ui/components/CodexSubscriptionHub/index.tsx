@@ -955,9 +955,8 @@ export function CodexSubscriptionHub() {
                   </p>
                   {connectedGrant ? (
                     <p
-                      className="cu-field__hint"
+                      className="cu-field__hint cu-field__hint--flush"
                       data-testid="codex-signin-connected"
-                      style={{ margin: 0 }}
                     >
                       {`Signed in with ${dialogCopy.brand} — agents authorize through this grant.`}
                     </p>

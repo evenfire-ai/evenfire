@@ -44,6 +44,10 @@
   --cu-auth-bg-edge: rgba(var(--cu-edge-rgb), 0.42);
   --cu-selection-bg: rgba(var(--cu-accent-rgb), 0.45);
   --cu-selection-text: #ffffff;
+  /* Selected/active option background for dropdown option lists. Decoupled
+     from the text-selection highlight (--cu-selection-bg) on purpose so the
+     two can diverge. */
+  --cu-option-selected-bg: rgba(var(--cu-accent-rgb), 0.45);
   --cu-radius: 12px;
   --cu-radius-sm: 8px;
   --cu-radius-pill: 999px;
@@ -167,6 +171,7 @@
   --cu-auth-bg-edge: rgba(var(--cu-edge-rgb), 0.28);
   --cu-selection-bg: rgba(var(--cu-accent-rgb), 0.3);
   --cu-selection-text: var(--cu-brand-dark-blue);
+  --cu-option-selected-bg: rgba(var(--cu-accent-rgb), 0.3);
   --cu-preview-body-bg: var(--cu-bg);
 }
 
@@ -1359,6 +1364,12 @@ body.cu-body {
 
 .cu-field__hint {
   color: var(--cu-text-soft);
+}
+
+/* Flushes the UA paragraph margin when a hint stands alone inside a block
+   that already owns its spacing. */
+.cu-field__hint--flush {
+  margin: 0;
 }
 
 .cu-field__error {
@@ -6771,7 +6782,7 @@ td.cu-registry-description {
 
 .cu-agent-select__option[data-active='true'] {
   color: var(--cu-text);
-  background: var(--cu-selection-bg);
+  background: var(--cu-option-selected-bg);
   box-shadow: inset 0 0 0 1px var(--cu-accent);
   outline: none;
 }
@@ -7010,7 +7021,7 @@ td.cu-registry-description {
 
 .cu-selection-dropdown__option[data-selected='true'] {
   color: var(--cu-text);
-  background: var(--cu-selection-bg);
+  background: var(--cu-option-selected-bg);
   box-shadow: inset 0 0 0 1px var(--cu-accent);
   outline: none;
 }
