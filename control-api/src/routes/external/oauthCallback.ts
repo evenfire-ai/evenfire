@@ -90,7 +90,15 @@ export function createOAuthCallbackRouter(gateway: K8sGateway): Router {
       }
       const resolved = resolveServerOAuthSubject(server)
       if (!resolved) return null
-      return { namespace: config.mcpServersNamespace, ...resolved }
+      // Seal grants written by this consent to the CR's identity (R3-H5): the uid is
+      // the apiserver's, unique per object, so a same-name reinstall's teardown never
+      // purges this installation's grant. Undefined only if the CR carried no uid.
+      const crUid = (server as { metadata?: { uid?: unknown } }).metadata?.uid
+      return {
+        namespace: config.mcpServersNamespace,
+        ...(typeof crUid === 'string' && crUid ? { crUid } : {}),
+        ...resolved,
+      }
     },
   }
 

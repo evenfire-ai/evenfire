@@ -2,11 +2,7 @@ import { describe, expect, it } from 'vitest'
 import fc from 'fast-check'
 import { config } from '../src/config.js'
 import type { DbClient } from '../src/db.js'
-import {
-  deleteDynamicClient,
-  getDynamicClient,
-  upsertDynamicClient,
-} from '../src/oauth/dynamicClientStore.js'
+import { getDynamicClient, upsertDynamicClient } from '../src/oauth/dynamicClientStore.js'
 import { deriveOAuthEncryptionKey } from '../src/oauth/encryption.js'
 import { makeInMemoryDynamicClientsDb } from './fixtures/remoteOAuthDiscovery.js'
 
@@ -80,20 +76,6 @@ describe('dynamicClientStore — upsert SQL + encryption at rest', () => {
     expect(calls[0].values[5]).toBe('public')
     expect(calls[0].values[6]).toBeNull()
     expect(calls[0].values[7]).toBeNull()
-  })
-
-  it('delete is a hard DELETE keyed by owner coordinates, returning rowCount (idempotent)', async () => {
-    const { db, calls } = fakeDb([], 0)
-    const removed = await deleteDynamicClient(db, CONF_KEY)
-    expect(removed).toBe(0)
-    expect(calls[0].text).toContain('DELETE FROM dynamic_clients')
-    expect(calls[0].values).toEqual(['mcpserver', 'mcp-server', 'vercel-remote'])
-  })
-
-  it('defaults ownerKind to mcpserver when omitted', async () => {
-    const { db, calls } = fakeDb([], 1)
-    await deleteDynamicClient(db, { serverNamespace: 'mcp-server', serverName: 'x' })
-    expect(calls[0].values[0]).toBe('mcpserver')
   })
 })
 

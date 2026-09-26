@@ -286,21 +286,6 @@ export async function listExpiringDynamicClients(
 }
 
 /**
- * Hard-delete the dynamic client for a server CR (idempotent). Returns the
- * number of rows removed so a caller can audit whether anything was revoked
- * (0 ⇒ already gone). Mirrors `deleteOAuthGrant`.
- */
-export async function deleteDynamicClient(db: DbClient, key: DynamicClientKey): Promise<number> {
-  const ownerKind = resolveOwnerKind(key)
-  const result = await db.query(
-    `DELETE FROM dynamic_clients
-      WHERE owner_kind = $1 AND server_namespace = $2 AND server_name = $3`,
-    [ownerKind, key.serverNamespace, key.serverName]
-  )
-  return result.rowCount ?? 0
-}
-
-/**
  * RFC 7592 management handle of a dynamic client: the endpoint and the bearer
  * needed to DELETE it at the AS. Present only when both were persisted.
  */

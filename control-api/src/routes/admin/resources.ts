@@ -12,9 +12,8 @@ import { enforceNamespace } from '../../http/namespaceAudit.js'
 import { validateCommunicationChannelSpec } from '../../http/validateCommunicationChannelSpec.js'
 import { validateMcpServerSpecPreflight } from '../../http/validateMcpServerSpec.js'
 import { K8sGateway } from '../../k8s.js'
-import { cleanupDynamicClientForServer } from '../../oauth/dcrCleanup.js'
 import { deriveOAuthEncryptionKey } from '../../oauth/encryption.js'
-import { deleteOAuthGrantsForServer } from '../../oauth/store.js'
+import { teardownMcpServerOAuthState } from '../../oauth/mcpServerOAuthTeardown.js'
 import { rootLogger } from '../../observability/logger.js'
 import { mcpServerUninstallTeardownFailuresTotal } from '../../observability/metrics.js'
 import { stripHookRefFromHosts } from '../../services/hostGuardrailRefs.js'
@@ -1178,7 +1177,30 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
             })
           : null
 
-      const deleted = await gateway.deleteResource(plural, name, ns)
+      // mcpservers only: read the CR before deleting so its metadata.uid fences BOTH
+      // the delete (a same-name reinstall's CR has a different uid → the delete
+      // precondition 409s and we never tear down its state) AND the OAuth teardown
+      // (only this installation's dynamic_clients row + grants are removed, R3-H5). A
+      // 404 means the CR is already gone → no uid, so the teardown is skipped entirely.
+      let mcpServerCrUid: string | undefined
+      if (plural === 'mcpservers') {
+        try {
+          const cr = await gateway.getResource(plural, name, ns)
+          mcpServerCrUid = resourcePreconditionsFromResource(cr)?.uid
+        } catch (err) {
+          // getResource wraps a namespaced 404 as K8sNotFoundError (httpStatus, not
+          // statusCode), so match both shapes — as the update handler does above.
+          if (!(err instanceof K8sNotFoundError) && extractK8sStatusCode(err) !== 404) throw err
+          // CR already gone: leave uid undefined so the teardown below is skipped.
+        }
+      }
+
+      // Only the mcpservers delete is uid-fenced; every other plural keeps the exact
+      // 3-arg call it had (a trailing undefined would change the observed call shape).
+      const deleted =
+        mcpServerCrUid !== undefined
+          ? await gateway.deleteResource(plural, name, ns, { uid: mcpServerCrUid })
+          : await gateway.deleteResource(plural, name, ns)
 
       if (plural === 'communicationchannels' && ccSecretRefName && ccSecretCleanup) {
         if (ccSecretCleanup.status !== 'ready') {
@@ -1297,59 +1319,28 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
           }
         }
 
-        // Remote DCR client teardown (K, DEC-18): revoke the encrypted
-        // `dynamic_clients` row (reliable) + best-effort RFC 7592 delete at the AS
-        // (courtesy). Keyed per-server-CR; idempotent (0 rows ⇒ not a DCR server).
-        // Never blocks or fails the uninstall — the CR is already deleted.
-        try {
-          const teardown = await cleanupDynamicClientForServer(
+        // OAuth teardown fenced by the CR uid (R3-H5): revoke this installation's
+        // encrypted `dynamic_clients` row + best-effort RFC 7592 delete at the AS, and
+        // purge its `oauth_grants` rows — never a same-name reinstall's state. Skipped
+        // when the uid is unknown (the CR read 404'd): a name-only teardown here would
+        // reopen the very race this fences. The module never throws; it counts/logs per
+        // stage and the uninstall keeps its 200 (the response policy is R3-H7).
+        if (mcpServerCrUid !== undefined) {
+          const teardown = await teardownMcpServerOAuthState(
             dcrDb,
             oauthEncryptionKey,
             { logger: log },
+            { namespace: ns, name, crUid: mcpServerCrUid },
+            log
+          )
+          log.info(
             {
-              ownerKind: 'mcpserver',
-              serverNamespace: ns,
               serverName: name,
-            }
-          )
-          if (teardown.localRowsDeleted > 0) {
-            log.info(
-              {
-                serverName: name,
-                namespace: ns,
-                attemptedRemoteDelete: teardown.attemptedRemoteDelete,
-              },
-              'Revoked remote OAuth dynamic client on uninstall'
-            )
-          }
-        } catch (err) {
-          mcpServerUninstallTeardownFailuresTotal.inc({ stage: 'dynamic_client' })
-          log.error(
-            { serverName: name, namespace: ns, err },
-            'Dynamic client cleanup failed on uninstall (CR already deleted)'
-          )
-        }
-
-        // Server teardown (DEC-R2): wipe ALL of this server's oauth_grants rows —
-        // every user / context / client / flavor. Idempotent; never blocks the
-        // uninstall (the CR is already deleted). This is NOT the per-user
-        // revocation path — see deleteOAuthGrantsForServer.
-        try {
-          const purged = await deleteOAuthGrantsForServer(dcrDb, {
-            recipeNamespace: ns,
-            recipeName: name,
-          })
-          if (purged > 0) {
-            log.info(
-              { serverName: name, namespace: ns, count: purged },
-              'Purged OAuth grants on uninstall'
-            )
-          }
-        } catch (err) {
-          mcpServerUninstallTeardownFailuresTotal.inc({ stage: 'oauth_grants' })
-          log.error(
-            { serverName: name, namespace: ns, err },
-            'OAuth grants purge failed on uninstall (CR already deleted)'
+              namespace: ns,
+              dynamicClient: teardown.dynamicClient,
+              grants: teardown.grants,
+            },
+            'MCP server OAuth teardown completed'
           )
         }
 

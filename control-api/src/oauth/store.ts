@@ -104,6 +104,12 @@ export type UpsertOAuthGrantInput = OAuthGrantKey & {
   refreshToken?: string
   /** Seconds until access token expires; null if provider didn't supply expires_in. */
   accessTokenExpiresInSec?: number
+  /**
+   * metadata.uid of the owning McpServer, sealing the grant to this installation
+   * (user path only). Omitted for recipe-domain grants → NULL. The latest consent
+   * re-seals the row so a reinstall's grant carries the new uid.
+   */
+  crUid?: string
 }
 
 /**
@@ -136,14 +142,15 @@ export async function upsertOAuthGrant(
       `INSERT INTO oauth_grants (
          owner_kind, recipe_namespace, recipe_name, user_id, oauth_client_id, grant_kind,
          provider, access_token_encrypted, refresh_token_encrypted,
-         access_token_expires_at, updated_at
-       ) VALUES ($1, $2, $3, $4, $5, 'user', $6, $7, $8, $9, NOW())
+         access_token_expires_at, cr_uid, updated_at
+       ) VALUES ($1, $2, $3, $4, $5, 'user', $6, $7, $8, $9, $10, NOW())
        ON CONFLICT (owner_kind, recipe_namespace, recipe_name, user_id, oauth_client_id)
        DO UPDATE SET
          provider = EXCLUDED.provider,
          access_token_encrypted = EXCLUDED.access_token_encrypted,
          refresh_token_encrypted = EXCLUDED.refresh_token_encrypted,
          access_token_expires_at = EXCLUDED.access_token_expires_at,
+         cr_uid = EXCLUDED.cr_uid,
          updated_at = NOW()`,
       [
         ownerKind,
@@ -155,6 +162,7 @@ export async function upsertOAuthGrant(
         accessTokenEncrypted,
         refreshTokenEncrypted,
         accessTokenExpiresAt,
+        input.crUid ?? null,
       ]
     )
     return
@@ -322,16 +330,23 @@ export async function refreshOAuthGrantTokens(
  * an OAuth mcp-server with `grantScope='context'` lends their provider identity
  * to the whole Context.
  *
- * INSERT … ON CONFLICT DO NOTHING — first-wins tokens AND bootstrapper. If a
- * concurrent second member also completes consent (both minted an authorize URL
- * inside the state TTL), their row is a no-op: they inherit the team's grant,
- * and `bootstrapped_by_user_id` keeps pointing at whoever landed first
- * (mini-spec 05 §3). Distinct from the refresh path (`upsertOAuthGrant` above)
- * on purpose: conflating them would let the last completer silently overwrite
- * the team identity and the audit trail.
+ * INSERT … ON CONFLICT — first-wins tokens AND bootstrapper WITHIN ONE
+ * INSTALLATION. If a concurrent second member of the SAME install also completes
+ * consent (both minted an authorize URL inside the state TTL), their row is a
+ * no-op: they inherit the team's grant, and `bootstrapped_by_user_id` keeps
+ * pointing at whoever landed first (mini-spec 05 §3).
  *
- * Returns `{ inserted }` so the caller can tell "you bootstrapped the team" from
- * "you joined an existing team identity".
+ * Fenced by `cr_uid` (R3-H5): a conflicting row of the SAME uid is left as-is
+ * (first bootstrapper wins), but a row of a DIFFERENT uid — or a legacy row
+ * (cr_uid NULL) left by a previous installation of the same name whose teardown
+ * did not reach it — is NOT this install's first bootstrapper, so it is REPLACED
+ * (the `WHERE cr_uid IS DISTINCT FROM` guard on the DO UPDATE). Distinct from the
+ * refresh path (`upsertOAuthGrant` above): conflating them would let the last
+ * completer of the same install silently overwrite the team identity and audit.
+ *
+ * Returns `{ inserted }` — true when THIS consent established this install's shared
+ * identity (a fresh insert, or a replace of a stale other-install/legacy row);
+ * false when it joined an existing same-install team identity.
  */
 export type BootstrapSharedOAuthGrantInput = {
   ownerKind: 'mcpserver'
@@ -345,6 +360,8 @@ export type BootstrapSharedOAuthGrantInput = {
   accessToken: string
   refreshToken?: string
   accessTokenExpiresInSec?: number
+  /** metadata.uid of the owning McpServer, sealing the grant to this installation. */
+  crUid?: string
 }
 
 export async function bootstrapSharedOAuthGrant(
@@ -366,11 +383,19 @@ export async function bootstrapSharedOAuthGrant(
        owner_kind, recipe_namespace, recipe_name, user_id, context_id,
        oauth_client_id, grant_kind, bootstrapped_by_user_id,
        provider, access_token_encrypted, refresh_token_encrypted,
-       access_token_expires_at, updated_at
-     ) VALUES ($1, $2, $3, NULL, $4, $5, 'shared', $6, $7, $8, $9, $10, NOW())
+       access_token_expires_at, cr_uid, updated_at
+     ) VALUES ($1, $2, $3, NULL, $4, $5, 'shared', $6, $7, $8, $9, $10, $11, NOW())
      ON CONFLICT (owner_kind, recipe_namespace, recipe_name, context_id, oauth_client_id)
        WHERE grant_kind = 'shared'
-     DO NOTHING
+     DO UPDATE SET
+       bootstrapped_by_user_id = EXCLUDED.bootstrapped_by_user_id,
+       provider = EXCLUDED.provider,
+       access_token_encrypted = EXCLUDED.access_token_encrypted,
+       refresh_token_encrypted = EXCLUDED.refresh_token_encrypted,
+       access_token_expires_at = EXCLUDED.access_token_expires_at,
+       cr_uid = EXCLUDED.cr_uid,
+       updated_at = NOW()
+     WHERE oauth_grants.cr_uid IS DISTINCT FROM EXCLUDED.cr_uid
      RETURNING id`,
     [
       input.ownerKind,
@@ -383,6 +408,7 @@ export async function bootstrapSharedOAuthGrant(
       accessTokenEncrypted,
       refreshTokenEncrypted,
       accessTokenExpiresAt,
+      input.crUid ?? null,
     ]
   )
   return { inserted: (result.rowCount ?? 0) > 0 }
@@ -568,15 +594,21 @@ export async function deleteOAuthGrant(db: DbClient, input: GetOAuthGrantInput):
  */
 export async function deleteOAuthGrantsForServer(
   db: DbClient,
-  coords: { recipeNamespace: string; recipeName: string }
+  coords: { recipeNamespace: string; recipeName: string; crUid: string }
 ): Promise<number> {
   // `owner_kind = 'mcpserver'` is load-bearing: it must never touch recipe-domain
   // grants that share a name coordinate. No user_id / context_id / oauth_client_id /
-  // grant_kind filter — the wipe is intentionally all-flavors.
+  // grant_kind filter — the wipe is intentionally all-flavors FOR THIS INSTALLATION.
+  //
+  // Fenced by `cr_uid`: grants sealed with the uninstalled CR's uid are purged, and
+  // legacy grants (cr_uid IS NULL, written before install identity or by a pod mid-
+  // rollout) are purged too. A grant sealed with a DIFFERENT uid — a same-name
+  // reinstall's consent that landed in the teardown window — SURVIVES (R3-H5).
   const result = await db.query(
     `DELETE FROM oauth_grants
-     WHERE owner_kind = 'mcpserver' AND recipe_namespace = $1 AND recipe_name = $2`,
-    [coords.recipeNamespace, coords.recipeName]
+     WHERE owner_kind = 'mcpserver' AND recipe_namespace = $1 AND recipe_name = $2
+       AND (cr_uid = $3 OR cr_uid IS NULL)`,
+    [coords.recipeNamespace, coords.recipeName, coords.crUid]
   )
   return result.rowCount ?? 0
 }

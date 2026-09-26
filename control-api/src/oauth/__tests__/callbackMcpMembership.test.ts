@@ -204,4 +204,56 @@ describe('handleOAuthCallback — mcp context membership guard (R3-L1)', () => {
     expect(String(query.mock.calls[0][0])).toContain('INSERT INTO oauth_grants')
     expect(String(query.mock.calls[0][0])).toContain("'user'")
   })
+
+  // R3-H5 (D-T3): the subject's CR uid seals the grant so a same-name reinstall's
+  // teardown never purges this installation's consent.
+  it('seals a shared bootstrap grant with the subject cr_uid', async () => {
+    const deps = buildDeps({
+      subject: mcpSubject({ grantScope: 'context', contextRef: CONTEXT_REF, crUid: 'uid-live-cr' }),
+      contextIds: [CONTEXT_REF],
+    })
+
+    const result = await handleOAuthCallback(input(), deps)
+    expect(result.kind).toBe('ok')
+
+    const query = deps.db.query as ReturnType<typeof vi.fn>
+    const [sql, values] = query.mock.calls[0]
+    expect(String(sql)).toContain('INSERT INTO oauth_grants')
+    expect(String(sql)).toContain("'shared'")
+    // cr_uid is the last positional param of the shared INSERT.
+    expect((values as unknown[]).at(-1)).toBe('uid-live-cr')
+  })
+
+  it('seals a per-user grant with the subject cr_uid', async () => {
+    const deps = buildDeps({
+      subject: mcpSubject({ grantScope: 'user', contextRef: undefined, crUid: 'uid-live-cr' }),
+      userContextsReader: vi.fn(async () => ({ contextIds: [] })),
+    })
+
+    const result = await handleOAuthCallback(input(), deps)
+    expect(result.kind).toBe('ok')
+
+    const query = deps.db.query as ReturnType<typeof vi.fn>
+    const [sql, values] = query.mock.calls[0]
+    expect(String(sql)).toContain('INSERT INTO oauth_grants')
+    expect(String(sql)).toContain("'user'")
+    // cr_uid is the last positional param of the user INSERT.
+    expect((values as unknown[]).at(-1)).toBe('uid-live-cr')
+  })
+
+  // A grant with NO subject cr_uid (a legacy/authorize-url path that never read a
+  // live CR) persists cr_uid NULL — never crashes, and stays purgeable by any teardown.
+  it('persists cr_uid NULL when the subject carries no uid', async () => {
+    const deps = buildDeps({
+      subject: mcpSubject({ grantScope: 'user', contextRef: undefined, crUid: undefined }),
+      userContextsReader: vi.fn(async () => ({ contextIds: [] })),
+    })
+
+    const result = await handleOAuthCallback(input(), deps)
+    expect(result.kind).toBe('ok')
+
+    const query = deps.db.query as ReturnType<typeof vi.fn>
+    const [, values] = query.mock.calls[0]
+    expect((values as unknown[]).at(-1)).toBeNull()
+  })
 })

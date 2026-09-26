@@ -40,7 +40,7 @@ const SHARED_KEY = {
 }
 
 describe('oauth store — shared (context-identity) grants', () => {
-  it('bootstrapSharedOAuthGrant issues INSERT … ON CONFLICT DO NOTHING with bootstrapped_by, returns inserted', async () => {
+  it('bootstrapSharedOAuthGrant issues INSERT … ON CONFLICT DO UPDATE fenced by cr_uid, returns inserted', async () => {
     const { db, calls } = fakeDb([{ id: 1 }], 1)
     const out = await bootstrapSharedOAuthGrant(db, KEY, {
       ...SHARED_KEY,
@@ -49,14 +49,19 @@ describe('oauth store — shared (context-identity) grants', () => {
       accessToken: 'A',
       refreshToken: 'R',
       accessTokenExpiresInSec: 3600,
+      crUid: 'uid-1',
     })
     expect(out.inserted).toBe(true)
     expect(calls[0].text).toContain('INSERT INTO oauth_grants')
     expect(calls[0].text).toContain('ON CONFLICT')
-    expect(calls[0].text).toContain('DO NOTHING')
+    // R3-H5: same-uid conflict no-ops (first bootstrapper wins), a DIFFERENT uid /
+    // legacy row is replaced — expressed as DO UPDATE guarded on cr_uid DISTINCT.
+    expect(calls[0].text).toContain('DO UPDATE SET')
+    expect(calls[0].text).toContain('oauth_grants.cr_uid IS DISTINCT FROM EXCLUDED.cr_uid')
     expect(calls[0].text).toContain('bootstrapped_by_user_id')
     expect(calls[0].text).toContain("'shared'")
-    // owner, ns, name, contextId, clientId, bootstrappedBy are bound in order.
+    // owner, ns, name, contextId, clientId, bootstrappedBy are bound in order,
+    // and cr_uid is the last bound param.
     expect(calls[0].values.slice(0, 6)).toEqual([
       'mcpserver',
       'mcp-server',
@@ -65,6 +70,7 @@ describe('oauth store — shared (context-identity) grants', () => {
       'google-drive',
       'user-1',
     ])
+    expect((calls[0].values as unknown[]).at(-1)).toBe('uid-1')
   })
 
   it('bootstrapSharedOAuthGrant reports inserted=false when the conflict no-ops', async () => {

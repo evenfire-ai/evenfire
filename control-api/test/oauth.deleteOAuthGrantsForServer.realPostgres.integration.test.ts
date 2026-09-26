@@ -66,8 +66,11 @@ describeRealPostgres('deleteOAuthGrantsForServer — full server-scoped wipe (re
     }
   })
 
-  it('wipes every flavor of the target server and leaves a peer server intact', async () => {
-    // Target server 'gdrive': one user grant + one shared/context grant.
+  const U = 'uid-gdrive-U'
+  const U_PRIME = 'uid-gdrive-Uprime'
+
+  it('purges this uid + legacy grants, spares a different uid and a peer server (fenced)', async () => {
+    // Target server 'gdrive', THIS installation (uid U): a user grant + a shared grant.
     await upsertOAuthGrant(db, KEY, {
       grantKind: 'user',
       ownerKind: 'mcpserver',
@@ -78,6 +81,7 @@ describeRealPostgres('deleteOAuthGrantsForServer — full server-scoped wipe (re
       provider: 'google',
       accessToken: 'at-user-a',
       refreshToken: 'rt-user-a',
+      crUid: U,
     })
     const { inserted } = await bootstrapSharedOAuthGrant(db, KEY, {
       ownerKind: 'mcpserver',
@@ -89,8 +93,36 @@ describeRealPostgres('deleteOAuthGrantsForServer — full server-scoped wipe (re
       provider: 'google',
       accessToken: 'shared-at',
       refreshToken: 'shared-rt',
+      crUid: U,
     })
     expect(inserted).toBe(true)
+
+    // A LEGACY gdrive grant (cr_uid NULL — written before install identity): purged too.
+    await upsertOAuthGrant(db, KEY, {
+      grantKind: 'user',
+      ownerKind: 'mcpserver',
+      recipeNamespace: NS,
+      recipeName: 'gdrive',
+      userId: 'user-legacy',
+      oauthClientId: 'google-drive',
+      provider: 'google',
+      accessToken: 'at-legacy',
+      refreshToken: 'rt-legacy',
+    })
+
+    // A gdrive grant of a DIFFERENT installation (uid U′ — a reinstall's consent): MUST survive.
+    await upsertOAuthGrant(db, KEY, {
+      grantKind: 'user',
+      ownerKind: 'mcpserver',
+      recipeNamespace: NS,
+      recipeName: 'gdrive',
+      userId: 'user-reinstall',
+      oauthClientId: 'google-drive',
+      provider: 'google',
+      accessToken: 'at-reinstall',
+      refreshToken: 'rt-reinstall',
+      crUid: U_PRIME,
+    })
 
     // Peer server 'teamdrive': a grant that MUST survive the gdrive purge.
     await upsertOAuthGrant(db, KEY, {
@@ -103,15 +135,18 @@ describeRealPostgres('deleteOAuthGrantsForServer — full server-scoped wipe (re
       provider: 'google',
       accessToken: 'at-peer',
       refreshToken: 'rt-peer',
+      crUid: U,
     })
 
     const purged = await deleteOAuthGrantsForServer(db, {
       recipeNamespace: NS,
       recipeName: 'gdrive',
+      crUid: U,
     })
-    expect(purged).toBe(2)
+    // U's user + U's shared + the legacy row = 3. U′'s grant is NOT counted.
+    expect(purged).toBe(3)
 
-    // Observable state (T4): both gdrive flavors are gone …
+    // Observable state (T4): both U-sealed gdrive flavors and the legacy row are gone …
     expect(
       await oauthGrantExists(db, {
         grantKind: 'user',
@@ -132,6 +167,27 @@ describeRealPostgres('deleteOAuthGrantsForServer — full server-scoped wipe (re
         oauthClientId: 'google-drive',
       })
     ).toBe(false)
+    expect(
+      await oauthGrantExists(db, {
+        grantKind: 'user',
+        ownerKind: 'mcpserver',
+        recipeNamespace: NS,
+        recipeName: 'gdrive',
+        userId: 'user-legacy',
+        oauthClientId: 'google-drive',
+      })
+    ).toBe(false)
+    // … the DIFFERENT-uid gdrive grant (the reinstall's) SURVIVES (R3-H5 fence) …
+    expect(
+      await oauthGrantExists(db, {
+        grantKind: 'user',
+        ownerKind: 'mcpserver',
+        recipeNamespace: NS,
+        recipeName: 'gdrive',
+        userId: 'user-reinstall',
+        oauthClientId: 'google-drive',
+      })
+    ).toBe(true)
     // … and the peer server's grant is untouched (scoped purge, no blast radius).
     expect(
       await oauthGrantExists(db, {

@@ -47,18 +47,28 @@ describe('DELETE /admin/mcp-servers/:name — deletes the oauth-client Secret on
   function buildApp() {
     const deleteSecretCalls: Array<{ name: string; namespace: string }> = []
     const gateway = {
+      // The uninstall reads the CR before deleting to capture metadata.uid (R3-H5).
+      getResource: vi.fn(async () => ({
+        metadata: { name: SERVER_NAME, uid: `uid-${SERVER_NAME}`, resourceVersion: '1' },
+      })),
       deleteResource: vi.fn(async () => ({ metadata: { name: SERVER_NAME } })),
       deleteSecret: vi.fn(async (name: string, namespace: string) => {
         deleteSecretCalls.push({ name, namespace })
         return {}
       }),
       // The uninstall now fences each Secret cleanup on the identity read back
-      // BEFORE the CR delete (uid/resourceVersion precondition), so a live
-      // read must expose that identity exactly as real K8s getSecret does —
-      // returning a bare `{}` would report `identity-unavailable` and skip the
-      // delete, which is not a state a real existing Secret can be in.
+      // BEFORE the CR delete (uid/resourceVersion precondition), so a live read
+      // must expose that identity exactly as real K8s getSecret does. The
+      // `${name}-oauth-client` cleanup ALSO requires the control-api managed-by
+      // label (R3-H6 ownership guard) — without it the guard classifies the Secret
+      // `not-managed` and skips the delete, so the fixture must carry the label a
+      // real install-saga-created Secret has.
       getSecret: vi.fn(async (name: string) => ({
-        metadata: { uid: `uid-${name}`, resourceVersion: '1' },
+        metadata: {
+          uid: `uid-${name}`,
+          resourceVersion: '1',
+          labels: { 'clerum.io/managed-by': 'control-api' },
+        },
       })),
       listResource: vi.fn(async () => []),
       updateResource: vi.fn(async () => ({})),

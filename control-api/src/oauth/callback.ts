@@ -184,6 +184,12 @@ export interface McpServerOAuthSubject {
   decl: OAuthClientDecl
   grantScope: 'user' | 'context'
   contextRef?: string
+  /**
+   * metadata.uid of the McpServer CR, sealing any grant this consent writes to the
+   * exact installation (R3-H5). Present when the reader read a live CR; absent for
+   * the authorize-url minting paths that never persist a grant.
+   */
+  crUid?: string
 }
 
 export interface McpServerOAuthReader {
@@ -589,6 +595,8 @@ async function handleMcpOAuthCallback(
       accessToken: parsed.accessToken,
       refreshToken: parsed.refreshToken,
       accessTokenExpiresInSec: parsed.expiresIn,
+      // Seal to this installation so a same-name reinstall's teardown never purges it.
+      crUid: subject.crUid,
     })
   } else {
     await upsertOAuthGrant(deps.db, deps.encryptionKey, {
@@ -603,6 +611,8 @@ async function handleMcpOAuthCallback(
       accessToken: parsed.accessToken,
       refreshToken: parsed.refreshToken,
       accessTokenExpiresInSec: parsed.expiresIn,
+      // Seal to this installation so a same-name reinstall's teardown never purges it.
+      crUid: subject.crUid,
     })
   }
 

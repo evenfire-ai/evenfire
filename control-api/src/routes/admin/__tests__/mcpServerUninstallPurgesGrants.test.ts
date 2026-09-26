@@ -44,11 +44,16 @@ vi.mock('../../../db.js', async importActual => {
 const { createAdminResourcesRouter } = await import('../resources.js')
 const { config } = await import('../../../config.js')
 
-describe('DELETE /admin/mcp-servers/:name — purges oauth_grants on uninstall (H-3)', () => {
+describe('DELETE /admin/mcp-servers/:name — purges oauth_grants on uninstall (H-3, R3-H5)', () => {
   const SERVER_NAME = 'gdrive'
+  const CR_UID = 'uid-gdrive-live'
 
   function buildApp() {
     const gateway = {
+      // The uninstall reads the CR before deleting to capture metadata.uid (R3-H5).
+      getResource: vi.fn(async () => ({
+        metadata: { name: SERVER_NAME, uid: CR_UID, resourceVersion: '7' },
+      })),
       deleteResource: vi.fn(async () => ({ metadata: { name: SERVER_NAME } })),
       deleteSecret: vi.fn(async () => ({})),
       getSecret: vi.fn(async () => ({})),
@@ -66,7 +71,7 @@ describe('DELETE /admin/mcp-servers/:name — purges oauth_grants on uninstall (
     dbMock.query.mockClear()
   })
 
-  it('executes a server-scoped DELETE FROM oauth_grants during uninstall', async () => {
+  it('executes a cr_uid-fenced server-scoped DELETE FROM oauth_grants during uninstall', async () => {
     const { app } = buildApp()
 
     const res = await request(app).delete(`/api/v1/admin/mcp-servers/${SERVER_NAME}`)
@@ -76,8 +81,24 @@ describe('DELETE /admin/mcp-servers/:name — purges oauth_grants on uninstall (
       c =>
         /DELETE\s+FROM\s+oauth_grants/i.test(c.text) && c.text.includes("owner_kind = 'mcpserver'")
     )
-    // Before H-3 no such query is issued — this is the regression anchor.
+    // Before H-3 no such query is issued; before R3-H5 it carried no cr_uid fence.
     expect(purge).toBeDefined()
-    expect(purge!.values).toEqual([config.mcpServersNamespace, SERVER_NAME])
+    expect(purge!.text).toContain('cr_uid = $3 OR cr_uid IS NULL')
+    expect(purge!.values).toEqual([config.mcpServersNamespace, SERVER_NAME, CR_UID])
+  })
+
+  it('deletes the CR fenced on the uid read before delete', async () => {
+    const { app, gateway } = buildApp()
+
+    await request(app).delete(`/api/v1/admin/mcp-servers/${SERVER_NAME}`)
+
+    expect(gateway.getResource).toHaveBeenCalledWith(
+      'mcpservers',
+      SERVER_NAME,
+      config.mcpServersNamespace
+    )
+    // deleteResource receives the uid precondition captured from the read CR.
+    const deleteArgs = gateway.deleteResource.mock.calls[0]
+    expect(deleteArgs[3]).toEqual({ uid: CR_UID })
   })
 })

@@ -48,6 +48,10 @@ describe('DELETE /admin/mcp-servers/:name — teardown failure increments the co
 
   function buildApp() {
     const gateway = {
+      // The uninstall reads the CR before deleting to capture metadata.uid (R3-H5).
+      getResource: vi.fn(async () => ({
+        metadata: { name: SERVER_NAME, uid: 'uid-gdrive-live', resourceVersion: '1' },
+      })),
       deleteResource: vi.fn(async () => ({ metadata: { name: SERVER_NAME } })),
       deleteSecret: vi.fn(async () => ({})),
       getSecret: vi.fn(async () => ({})),

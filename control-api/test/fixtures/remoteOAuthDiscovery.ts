@@ -468,7 +468,25 @@ export function makeInMemoryDynamicClientsDb(): {
         const [owner_kind, server_namespace, server_name, fourth] = values
         const key = keyOf(owner_kind, server_namespace, server_name)
         const row = rows.get(key)
-        // By-install DELETE (compensation): remove only when the install_id matches.
+        // Claim-delete (teardown): WHERE (cr_uid = $4 OR legacy) RETURNING the handle.
+        // Deletes the row bound to this uid or a legacy row (both identity cols NULL);
+        // a pending row or a row bound to a different uid does NOT match.
+        if (text.includes('RETURNING')) {
+          if (row && (row.cr_uid === fourth || (row.install_id == null && row.cr_uid == null))) {
+            rows.delete(key)
+            return {
+              rows: [
+                {
+                  registration_client_uri: row.registration_client_uri,
+                  registration_access_token_encrypted: row.registration_access_token_encrypted,
+                },
+              ],
+              rowCount: 1,
+            }
+          }
+          return { rows: [], rowCount: 0 }
+        }
+        // By-install DELETE (saga compensation): remove only when the install_id matches.
         if (values.length === 4) {
           if (row && row.install_id === fourth) {
             rows.delete(key)
@@ -476,7 +494,7 @@ export function makeInMemoryDynamicClientsDb(): {
           }
           return { rows: [], rowCount: 0 }
         }
-        // By-name DELETE (legacy deleteDynamicClient / dcrCleanup).
+        // By-name DELETE (legacy).
         const existed = rows.delete(key)
         return { rows: [], rowCount: existed ? 1 : 0 }
       }

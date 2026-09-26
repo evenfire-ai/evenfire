@@ -1244,6 +1244,10 @@ describe('routes/resources', () => {
     config.mcpServersNamespace = 'mcpservers-ns'
 
     const gateway = {
+      // The uninstall reads the CR before deleting to capture metadata.uid (R3-H5).
+      getResource: vi
+        .fn()
+        .mockResolvedValue({ metadata: { name: 'mcp-a', uid: 'uid-mcp-a', resourceVersion: '1' } }),
       deleteResource: vi.fn().mockResolvedValue({ deleted: true }),
       deleteSecret: vi.fn().mockResolvedValue({ deleted: true }),
       listResource: vi.fn().mockResolvedValue([
@@ -1262,7 +1266,10 @@ describe('routes/resources', () => {
 
       await request(app).delete('/admin/mcp-servers/mcp-a').expect(200)
 
-      expect(gateway.deleteResource).toHaveBeenCalledWith('mcpservers', 'mcp-a', 'mcpservers-ns')
+      // The CR delete is now fenced on the uid read back before deletion (R3-H5).
+      expect(gateway.deleteResource).toHaveBeenCalledWith('mcpservers', 'mcp-a', 'mcpservers-ns', {
+        uid: 'uid-mcp-a',
+      })
       expect(gateway.listResource).toHaveBeenCalledWith('contexts', 'contexts-ns')
       expect(gateway.updateResource).toHaveBeenCalledWith(
         'contexts',
