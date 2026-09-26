@@ -731,6 +731,20 @@ data:
           proxy_set_header Authorization $http_authorization;
         }
 
+        # mcp-host uses its existing runtime access JWT to reauthorize each
+        # protected effect through the canonical Control API checkpoint.
+        location = /api/v1/internal/action-authority/checkpoint {
+          limit_except POST {
+            deny all;
+          }
+          proxy_pass http://control_api_upstream;
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+          proxy_set_header Authorization $http_authorization;
+        }
+
         # ── Plugin Workload SDK runtime endpoints ──
         # Recipe mcp-host pods proxy plugin-workload SDK calls (promptBridge +
         # clientNotifications) to control-api through this gateway. Same RS256

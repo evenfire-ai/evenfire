@@ -875,6 +875,9 @@ jobs:
           kubectl kustomize deploy/overlays/minikube > /tmp/clerum-minikube.yaml
           kubectl kustomize deploy/overlays/minikube-no-uis > /tmp/clerum-minikube-no-uis.yaml
 
+      - name: Verify MCP Host action checkpoint gateway contract
+        run: bash scripts/tests/test-mcp-host-action-checkpoint-gateway.sh
+
       - name: Validate NP-08 caller-bound HCC contract
         run: |
           bash scripts/tests/test-np08-render-contract.sh \
