@@ -6,7 +6,12 @@ import type { AgentChatMessage } from '../../../uiTypes'
 import { ChatThread } from '../ChatThread'
 
 const navigationValue = { selectedAgent: 'agent-x', handleSelectChatAgent: vi.fn() }
-const notificationsValue = { decideApproval: vi.fn() }
+const notificationsValue = { decideApproval: vi.fn(), pushToast: vi.fn() }
+const composerStateValue = {
+  composerImageAttachments: [] as never[],
+  composerReferenceAttachments: [] as never[],
+  requestComposerFocus: vi.fn(),
+}
 const chatListValue = {
   chatList: [],
   chatListLoading: false,
@@ -26,6 +31,9 @@ vi.mock('@contexts/NavigationContext', () => ({
 }))
 vi.mock('@contexts/NotificationsContext', () => ({
   useNotificationsContext: () => notificationsValue,
+}))
+vi.mock('@contexts/ChatComposerStateContext', () => ({
+  useChatComposerStateContext: () => composerStateValue,
 }))
 vi.mock('@contexts/ChatListContext', () => ({
   useChatListContext: () => chatListValue,

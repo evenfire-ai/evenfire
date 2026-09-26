@@ -85,7 +85,10 @@ export function NudgeArea({ agentRef, chatId, onStartNewChat, onRefreshState }: 
   // window too.
   if (state.status === 'suspended' || state.pendingApproval) return null
   if (tier === 'T1' || tier === 'T2') return null
-  const taskIdentity = state.taskId || key
+  // Degenerate-taskId fallback (PR #859 review): keying an id-less task's
+  // dismissal to the CHAT key would suppress every future task in the chat,
+  // contradicting "a new task starts fresh". `startedAt` stays per-task.
+  const taskIdentity = state.taskId || `${key}@${state.startedAt}`
   if (dismissedTaskIds.has(taskIdentity)) return null
 
   const dismissButton = (

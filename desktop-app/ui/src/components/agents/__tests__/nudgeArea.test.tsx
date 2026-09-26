@@ -298,4 +298,27 @@ describe('NudgeArea dismissal (TASK-228)', () => {
     })
     expect(container.firstChild).toBeNull()
   })
+
+  it('does not let a dismissal of a degenerate (empty) task id leak onto the next task in the chat (PR #859 review)', () => {
+    // `taskId` is typed non-optional, but a degenerate '' must not key the
+    // dismissal to the CHAT: the next task (also id-less, later `startedAt`)
+    // starts fresh instead of inheriting the suppression.
+    const first = task(150_000, { taskId: '' })
+    const byKey = new Map<string, TaskState>([['agent-x::c1', first]])
+    const { tracker, emit } = liveKeyedTracker(byKey)
+    const { container } = render(nudgeElement(tracker))
+    expect(screen.getByText(/taking longer than usual/i)).toBeTruthy()
+
+    act(() => {
+      screen
+        .getByRole('button', { name: /dismiss this suggestion/i })
+        .dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    expect(container.firstChild).toBeNull()
+
+    act(() => {
+      emit('agent-x::c1', task(150_000, { taskId: '', startedAt: first.startedAt + 5_000 }))
+    })
+    expect(screen.getByText(/taking longer than usual/i)).toBeTruthy()
+  })
 })

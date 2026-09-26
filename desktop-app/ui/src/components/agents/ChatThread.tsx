@@ -8,6 +8,7 @@ import {
   useState,
 } from 'react'
 import { useAgentChatActionsContext } from '@contexts/AgentChatActionsContext'
+import { useChatComposerStateContext } from '@contexts/ChatComposerStateContext'
 import { useChatListContext } from '@contexts/ChatListContext'
 import { useChatThreadStateContext } from '@contexts/ChatThreadStateContext'
 import { useMcpRuntimeContext } from '@contexts/McpRuntimeContext'
@@ -33,7 +34,7 @@ import {
   getChatMessageAttachmentTypeLabel,
   parseChatMessageDisplay,
 } from '../../lib/chatMessageAttachments'
-import { setComposerDraft } from '../../lib/composerDraftStore'
+import { getComposerDraft, setComposerDraft } from '../../lib/composerDraftStore'
 import { buildComposerResendDraft, findNearestPrecedingUserMessage } from '../../lib/composerResend'
 import {
   extractHtmlVisualization,
@@ -250,7 +251,13 @@ function MessageAttachmentList({ attachments }: { attachments: ChatMessageAttach
       })}
       {previewAttachment ? (
         <GfsImagePreview
-          byteLength={previewAttachment.sizeBytes ?? previewAttachment.dataBase64!.length}
+          byteLength={
+            previewAttachment.sizeBytes ??
+            // Base64 length overstates the decoded size by ~33%; the accurate
+            // 3/4 estimate keeps the 10 MB early-skip from refusing previews
+            // that are actually under the limit (PR #859 review).
+            Math.floor(((previewAttachment.dataBase64 ?? '').length * 3) / 4)
+          }
           fileName={previewAttachment.filename || previewAttachment.label}
           dataBase64={previewAttachment.dataBase64}
           mimeType={previewAttachment.mimeType || 'image/png'}
@@ -263,7 +270,9 @@ function MessageAttachmentList({ attachments }: { attachments: ChatMessageAttach
 
 export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: ChatThreadProps) {
   const { selectedAgent, handleSelectChatAgent: onStartNewChat } = useNavigationContext()
-  const { decideApproval } = useNotificationsContext()
+  const { decideApproval, pushToast } = useNotificationsContext()
+  const { composerImageAttachments, composerReferenceAttachments, requestComposerFocus } =
+    useChatComposerStateContext()
   const {
     activeMessages,
     groupedMessages,
@@ -491,9 +500,24 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
   // plugin/connector/file indicators re-applied as composer references. The
   // source is always a user message: resending a reply re-issues the prompt that
   // produced it (see `findNearestPrecedingUserMessage`).
+  //
+  // Replace-vs-append contract (PR #859 review): like the failed-send recovery
+  // path (`handleRecoverFailedAgentSend`), resend REFUSES to touch a dirty
+  // composer instead of silently merging into a half-written draft — text is
+  // replaced and attachments are appended by the store handlers, so merging
+  // would strand the user's earlier chips under the resent ones. Once the
+  // composer is clean, the resend is a full repopulate.
   const handleResendMessage = useCallback(
     (source: Pick<RenderableChatMessage, 'content' | 'attachments'>) => {
       if (!activeChatId) return
+      if (
+        getComposerDraft(activeChatId) ||
+        composerImageAttachments.length ||
+        composerReferenceAttachments.length
+      ) {
+        pushToast('Keep or clear the current draft before resending this message.', 'error')
+        return
+      }
       const draft = buildComposerResendDraft(source)
       setComposerDraft(activeChatId, draft.content)
       if (draft.imageAttachments.length) {
@@ -502,8 +526,24 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
       if (draft.referenceAttachments.length) {
         onAddComposerReferenceAttachments(draft.referenceAttachments)
       }
+      if (draft.unrestorable.length) {
+        const count = draft.unrestorable.length
+        pushToast(
+          `${count} ${count === 1 ? 'attachment' : 'attachments'} from the original message couldn't be restored.`,
+          'warn'
+        )
+      }
+      requestComposerFocus()
     },
-    [activeChatId, onAddComposerImageAttachments, onAddComposerReferenceAttachments]
+    [
+      activeChatId,
+      composerImageAttachments,
+      composerReferenceAttachments,
+      onAddComposerImageAttachments,
+      onAddComposerReferenceAttachments,
+      pushToast,
+      requestComposerFocus,
+    ]
   )
 
   const renderProgressStepper = useCallback(

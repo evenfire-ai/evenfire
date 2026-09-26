@@ -14,7 +14,12 @@ import type { AgentChatMessage, TaskProgress } from '../../../uiTypes'
 import { ChatThread } from '../ChatThread'
 
 const navValue = { selectedAgent: 'agent-x', handleSelectChatAgent: vi.fn() }
-const notificationsValue = { decideApproval: vi.fn() }
+const notificationsValue = { decideApproval: vi.fn(), pushToast: vi.fn() }
+const composerStateValue = {
+  composerImageAttachments: [] as never[],
+  composerReferenceAttachments: [] as never[],
+  requestComposerFocus: vi.fn(),
+}
 const chatListValue = { chatList: [], chatListLoading: false, sessionStateByChatId: {} }
 const actionsValue = {
   chatEndRef: { current: null },
@@ -28,6 +33,9 @@ let messages: AgentChatMessage[] = []
 vi.mock('@contexts/NavigationContext', () => ({ useNavigationContext: () => navValue }))
 vi.mock('@contexts/NotificationsContext', () => ({
   useNotificationsContext: () => notificationsValue,
+}))
+vi.mock('@contexts/ChatComposerStateContext', () => ({
+  useChatComposerStateContext: () => composerStateValue,
 }))
 vi.mock('@contexts/ChatListContext', () => ({ useChatListContext: () => chatListValue }))
 vi.mock('@contexts/AgentChatActionsContext', () => ({
@@ -177,5 +185,40 @@ describe('ChatThread uploaded-image attachment preview (BUG-176)', () => {
     // No trigger button and no preview modal for byte-less chips.
     expect(container.querySelector('.message-attachment-preview-trigger')).toBeNull()
     expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  it('estimates byteLength from base64 at 3/4, not raw length, when sizeBytes is absent (PR #859 review)', async () => {
+    // base64 length 10,519,760 exceeds the 10,485,760-byte preview limit, so
+    // the old raw-length fallback would early-skip the preview; the accurate
+    // 3/4 estimate (7,889,820 bytes) is under the limit and must render.
+    // Multiple of 4 so atob accepts it; decodes to 7,889,820 null bytes.
+    const base64Length = 10 * 1024 * 1024 + 34_000
+    messages = [
+      {
+        id: 'msg-4',
+        role: 'user',
+        content: 'big one',
+        timestamp: 1,
+        attachments: [
+          {
+            id: 'image-4',
+            type: 'uploaded_file',
+            label: 'big.png',
+            filename: 'big.png',
+            mimeType: 'image/png',
+            encoding: 'base64',
+            dataBase64: 'A'.repeat(base64Length),
+          },
+        ],
+      },
+    ]
+    render(<ChatThread />)
+
+    fireEvent.click(screen.getByRole('button', { name: /big\.png/i }))
+
+    // Under the accurate estimate the preview opens instead of the size error.
+    const dialog = await screen.findByRole('dialog')
+    expect(dialog).toBeTruthy()
+    expect(await screen.findByAltText(/Preview of big\.png/i)).toBeTruthy()
   })
 })

@@ -1,13 +1,18 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
-import { getComposerDraft, resetComposerDraftStore } from '@lib/composerDraftStore'
+import {
+  getComposerDraft,
+  resetComposerDraftStore,
+  setComposerDraft,
+} from '@lib/composerDraftStore'
 import { buildLoadedChatSemanticModels } from '../../../lib/chatMessageSemantics'
-import type { AgentChatMessage } from '../../../uiTypes'
+import type { AgentChatMessage, ComposerImageAttachment } from '../../../uiTypes'
 import { ChatThread } from '../ChatThread'
 
 const navigationValue = { selectedAgent: 'agent-x', handleSelectChatAgent: vi.fn() }
-const notificationsValue = { decideApproval: vi.fn() }
+const pushToast = vi.fn()
+const notificationsValue = { decideApproval: vi.fn(), pushToast }
 const chatListValue = {
   chatList: [],
   chatListLoading: false,
@@ -24,6 +29,11 @@ const actionsValue = {
   handleAddComposerReferenceAttachments: addComposerReferenceAttachments,
 }
 const runtimeValue = { cancelTask: vi.fn() }
+const requestComposerFocus = vi.fn()
+const composerStateValue = {
+  composerImageAttachments: [] as ComposerImageAttachment[],
+  composerReferenceAttachments: [] as never[],
+}
 let messages: AgentChatMessage[] = []
 let groupedMessages: Array<{ role: 'user' | 'assistant' | 'system'; items: AgentChatMessage[] }> =
   []
@@ -33,6 +43,13 @@ vi.mock('@contexts/NavigationContext', () => ({
 }))
 vi.mock('@contexts/NotificationsContext', () => ({
   useNotificationsContext: () => notificationsValue,
+}))
+vi.mock('@contexts/ChatComposerStateContext', () => ({
+  useChatComposerStateContext: () => ({
+    composerImageAttachments: composerStateValue.composerImageAttachments,
+    composerReferenceAttachments: composerStateValue.composerReferenceAttachments,
+    requestComposerFocus,
+  }),
 }))
 vi.mock('@contexts/ChatListContext', () => ({
   useChatListContext: () => chatListValue,
@@ -96,10 +113,18 @@ function userMessageWithAttachments(): AgentChatMessage {
   }
 }
 
+function renderWithUserMessage(user: AgentChatMessage) {
+  messages = [user]
+  groupedMessages = [{ role: 'user', items: [user] }]
+  render(<ChatThread />)
+}
+
 afterEach(() => {
   cleanup()
   messages = []
   groupedMessages = []
+  composerStateValue.composerImageAttachments = []
+  composerStateValue.composerReferenceAttachments = []
   resetComposerDraftStore()
   vi.clearAllMocks()
   vi.restoreAllMocks()
@@ -108,11 +133,7 @@ afterEach(() => {
 
 describe('ChatThread resend action (TASK-42)', () => {
   it('re-populates the composer draft and re-attaches files + plugin indicators from a user message', () => {
-    const user = userMessageWithAttachments()
-    messages = [user]
-    groupedMessages = [{ role: 'user', items: [user] }]
-
-    render(<ChatThread />)
+    renderWithUserMessage(userMessageWithAttachments())
 
     fireEvent.click(screen.getByRole('button', { name: 'Resend message' }))
 
@@ -137,6 +158,8 @@ describe('ChatThread resend action (TASK-42)', () => {
         label: 'revenue',
       },
     ])
+    // A long-thread user must notice the repopulated composer.
+    expect(requestComposerFocus).toHaveBeenCalledTimes(1)
   })
 
   it('resending from an assistant message re-issues the originating user prompt (text + attachments + indicators)', () => {
@@ -178,6 +201,7 @@ describe('ChatThread resend action (TASK-42)', () => {
     expect(addComposerReferenceAttachments.mock.calls[0]![0]).toEqual([
       expect.objectContaining({ type: 'plugin', namespace: 'profits', name: 'revenue' }),
     ])
+    expect(requestComposerFocus).toHaveBeenCalledTimes(1)
   })
 
   it('hides the resend action on an assistant message with no preceding user prompt', () => {
@@ -217,5 +241,74 @@ describe('ChatThread resend action (TASK-42)', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Resend prompt' }))
     expect(getComposerDraft('chat-1')).toBe('Summarize the chart with the plugin')
     expect(addComposerImageAttachments).toHaveBeenCalledTimes(1)
+  })
+
+  describe('dirty-composer contract (PR #859 review: refuse like handleRecoverFailedAgentSend)', () => {
+    it('refuses with an error toast when the composer holds draft text', () => {
+      setComposerDraft('chat-1', 'a half-written draft')
+      renderWithUserMessage(userMessageWithAttachments())
+
+      fireEvent.click(screen.getByRole('button', { name: 'Resend message' }))
+
+      expect(pushToast).toHaveBeenCalledTimes(1)
+      expect(pushToast.mock.calls[0]![0]).toBe(
+        'Keep or clear the current draft before resending this message.'
+      )
+      expect(pushToast.mock.calls[0]![1]).toBe('error')
+      // The dirty draft is untouched and nothing was populated.
+      expect(getComposerDraft('chat-1')).toBe('a half-written draft')
+      expect(addComposerImageAttachments).not.toHaveBeenCalled()
+      expect(addComposerReferenceAttachments).not.toHaveBeenCalled()
+      expect(requestComposerFocus).not.toHaveBeenCalled()
+    })
+
+    it('refuses with an error toast when the composer holds pending attachments', () => {
+      composerStateValue.composerImageAttachments = [
+        {
+          id: 'pending-1',
+          name: 'already-there.png',
+          mimeType: 'image/png',
+          dataBase64: 'cGVuZGluZw==',
+          sizeBytes: 7,
+          previewDataUrl: 'data:image/png;base64,cGVuZGluZw==',
+        },
+      ]
+      renderWithUserMessage(userMessageWithAttachments())
+
+      fireEvent.click(screen.getByRole('button', { name: 'Resend message' }))
+
+      expect(pushToast).toHaveBeenCalledTimes(1)
+      expect(pushToast.mock.calls[0]![1]).toBe('error')
+      expect(addComposerImageAttachments).not.toHaveBeenCalled()
+      expect(addComposerReferenceAttachments).not.toHaveBeenCalled()
+      expect(requestComposerFocus).not.toHaveBeenCalled()
+    })
+  })
+
+  it("surfaces a warn toast when original attachments can't be restored (PR #859 review)", () => {
+    const user: AgentChatMessage = {
+      id: 'user-legacy',
+      role: 'user',
+      content: 'Analyze these',
+      timestamp: 1,
+      attachments: [
+        { id: 'legacy-1', type: 'uploaded_file', label: 'old-shot.png', addedOrder: 0 },
+        { id: 'legacy-2', type: 'uploaded_file', label: 'older-shot.png', addedOrder: 1 },
+      ],
+    }
+    renderWithUserMessage(user)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Resend message' }))
+
+    // The resend itself still happens (text restored, focus nudged)…
+    expect(getComposerDraft('chat-1')).toBe('Analyze these')
+    expect(requestComposerFocus).toHaveBeenCalledTimes(1)
+    expect(addComposerImageAttachments).not.toHaveBeenCalled()
+    // …but the loss is reported, not silent.
+    expect(pushToast).toHaveBeenCalledTimes(1)
+    expect(pushToast.mock.calls[0]![0]).toBe(
+      "2 attachments from the original message couldn't be restored."
+    )
+    expect(pushToast.mock.calls[0]![1]).toBe('warn')
   })
 })
