@@ -189,6 +189,7 @@ WARM_RECOVERY_BUDGET_MS="${WARM_RECOVERY_BUDGET_MS:-5000}"
 R4_WARM_INFRA_BUDGET_MS="${R4_WARM_INFRA_BUDGET_MS:-1500}" # warm-class infra ceiling for the R4 prewarm claim (warm ~100-250ms, in-band cold ~17000ms)
 COLD_RECOVERY_BUDGET_MS="${COLD_RECOVERY_BUDGET_MS:-120000}"
 RECOVERY_ARTIFACT="${RECOVERY_ARTIFACT:-/tmp/stateless-wake-recovery-$(date +%s).json}"
+mkdir -p -- "$(dirname -- "$RECOVERY_ARTIFACT")"
 TURN_TIMING_WAIT="${TURN_TIMING_WAIT:-15}"       # bounded wait for the serving pod's [TurnTiming] line after a 200
 LLM_EMPTY_MAX_RETRIES="${LLM_EMPTY_MAX_RETRIES:-3}" # bounded re-sends of a turn that 200s with an empty-LLM body (glm-4.7 provider flake, orthogonal to wake)
 
