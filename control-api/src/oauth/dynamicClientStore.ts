@@ -115,10 +115,15 @@ function encodeCredentialColumns(
 
 /**
  * Insert (or replace) the dynamic client for a server CR. Re-registration
- * overwrites in place (INSERT … ON CONFLICT DO UPDATE), which is also the only
- * rotation path in C2 — there is no dedicated rotate fn (no caller; avoids dead
- * code, DEC-18). `client_secret` and `registration_access_token` are encrypted
- * at rest; a public client stores NULL for the secret.
+ * overwrites in place (INSERT … ON CONFLICT DO UPDATE). `client_secret` and
+ * `registration_access_token` are encrypted at rest; a public client stores NULL
+ * for the secret.
+ *
+ * NO production caller: the remote-install saga now claims the name with
+ * `insertDynamicClientPending` (ON CONFLICT DO NOTHING) so an install can never
+ * clobber a live server's row. This clobbering upsert is retained ONLY as a store
+ * primitive exercised by its own unit tests and as a row-seeder for other suites;
+ * it must NOT be reintroduced into any install/reclaim path.
  */
 export async function upsertDynamicClient(
   db: DbClient,

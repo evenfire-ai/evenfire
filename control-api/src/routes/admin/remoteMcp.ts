@@ -1,7 +1,8 @@
 import { Router } from 'express'
+import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { config } from '../../config.js'
-import { type DbClient, pool } from '../../db.js'
+import { type DbClient, type DbTransactionClient, pool, withTransaction } from '../../db.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import { extractK8sError } from '../../http/k8sError.js'
 import { enforceNamespace } from '../../http/namespaceAudit.js'
@@ -21,8 +22,14 @@ import { type DiscoveryResult, discoverRemoteOAuth } from '../../oauth/discovery
 import { discoveryHttpStatus } from '../../oauth/discoveryHttpStatus.js'
 import {
   type DynamicClientKey,
-  deleteDynamicClient,
-  upsertDynamicClient,
+  PENDING_TTL_MS,
+  type UpsertDynamicClientInput,
+  bindDynamicClientToResource,
+  classifyExistingDynamicClient,
+  deleteDynamicClientOwnedByInstall,
+  getDynamicClient,
+  insertDynamicClientPending,
+  reclaimOrphanDynamicClient,
 } from '../../oauth/dynamicClientStore.js'
 import { deriveOAuthEncryptionKey } from '../../oauth/encryption.js'
 import { probeMcpTransport } from '../../oauth/mcpTransportProbe.js'
@@ -108,6 +115,31 @@ function resourcePreconditionsFrom(resource: unknown): ResourcePreconditions | u
     return undefined
   }
   return { uid, resourceVersion }
+}
+
+/** The server-assigned `metadata.uid`, or undefined when the response carried none. */
+function resourceUidFrom(resource: unknown): string | undefined {
+  const uid = (resource as { metadata?: { uid?: unknown } } | null)?.metadata?.uid
+  return typeof uid === 'string' && uid ? uid : undefined
+}
+
+/**
+ * The uid of a live McpServer with this name, or undefined when none exists. A live
+ * CR owns the name: the reclaim/classify path treats a conflict against a live uid as
+ * `in-use` regardless of the persisted row's state. A 404 is "no live CR" (undefined);
+ * any other read error propagates (fail closed, not "assume free").
+ */
+async function readLiveMcpServerUid(
+  gateway: K8sGateway,
+  name: string,
+  namespace: string
+): Promise<string | undefined> {
+  try {
+    return resourceUidFrom(await gateway.getResource('mcpservers', name, namespace))
+  } catch (err) {
+    if (err instanceof K8sNotFoundError || extractK8sError(err)?.status === 404) return undefined
+    throw err
+  }
 }
 
 /**
@@ -221,6 +253,15 @@ const REMOTE_MCP_PROXY_PORT = 3000
 const DELETE_SETTLE_TIMEOUT_MS = 10_000
 const DELETE_SETTLE_POLL_MS = 250
 
+/**
+ * Production default for the DCR orphan-reclaim transaction. Wraps `withTransaction`
+ * so the binding is only accessed when a reclaim actually runs — not at router
+ * creation, which suites that partial-mock db.js would break.
+ */
+function defaultRunInTransaction<T>(work: (tx: DbTransactionClient) => Promise<T>): Promise<T> {
+  return withTransaction(work)
+}
+
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 
 /** Poll until a best-effort delete settles to a 404, so a re-install cannot 409. */
@@ -260,6 +301,13 @@ export interface AdminRemoteMcpDeps {
    * inject one derived from the real producer to drive a specific probe outcome offline.
    */
   probe?: typeof probeMcpTransport
+  /**
+   * Injectable transaction runner (test seam only). Production leaves it undefined and
+   * `withTransaction` (module pool) is used. The DCR orphan reclaim opens a transaction
+   * for its `SELECT … FOR UPDATE` + CAS; a test injects a runner bound to its in-memory
+   * db so the reclaim runs against the same store as the rest of the saga.
+   */
+  runInTransaction?: <T>(work: (tx: DbTransactionClient) => Promise<T>) => Promise<T>
 }
 
 export function createAdminRemoteMcpRouter(
@@ -272,6 +320,10 @@ export function createAdminRemoteMcpRouter(
   const dcrDeps: DcrDeps = deps.dcr ?? { logger: log }
   const discover = deps.discover ?? discoverRemoteOAuth
   const probe = deps.probe ?? probeMcpTransport
+  // Defer the `withTransaction` binding to CALL time (only the DCR reclaim uses it).
+  // Referencing it here at router-creation would break the many suites that
+  // partial-mock db.js without a `withTransaction` export.
+  const runInTransaction = deps.runInTransaction ?? defaultRunInTransaction
 
   // ── POST /admin/mcp-servers/remote/discover — dry-run, no writes ──────────
   router.post(
@@ -383,6 +435,24 @@ export function createAdminRemoteMcpRouter(
       const kernelErrors = await validateOAuthEndpointUrl(body.baseUrl, 'baseUrl')
       if (kernelErrors.length > 0) {
         res.status(400).json({ error: kernelErrors[0].message, errors: kernelErrors })
+        return
+      }
+
+      // Pre-check: a name already taken by a LIVE McpServer is rejected before any
+      // discovery or AS mint, so we never register a throwaway client at the AS for a
+      // name we cannot use. This is NOT the fence — a CR could still appear between here
+      // and the persist (TOCTOU); the pending INSERT's ON CONFLICT below is the fence.
+      const nameInUseUid = await readLiveMcpServerUid(
+        gateway,
+        body.serverName,
+        config.mcpServersNamespace
+      )
+      if (nameInUseUid !== undefined) {
+        log.warn(
+          { event: 'remote_install_server_name_in_use', serverName: body.serverName },
+          'remote install rejected: an McpServer with this name already exists'
+        )
+        res.status(409).json({ error: 'server_name_in_use' })
         return
       }
 
@@ -545,6 +615,10 @@ export function createAdminRemoteMcpRouter(
         serverNamespace: targetNs,
         serverName,
       }
+      // Install-ownership token minted at the start of DCR step 0. Every compensation
+      // deletes ONLY the row carrying this install_id, so a concurrent install/reinstall
+      // of the same name that reclaimed the row is never destroyed (R3-H1).
+      const installId = randomUUID()
       let dcrRegistered = false
       let dcrClientId: string | undefined
       let dcrRegistrationClientUri: string | undefined
@@ -552,7 +626,7 @@ export function createAdminRemoteMcpRouter(
       const rollbackDynamicClient = async (): Promise<void> => {
         if (!dcrRegistered) return
         try {
-          await deleteDynamicClient(db, dynamicClientKey)
+          await deleteDynamicClientOwnedByInstall(db, dynamicClientKey, installId)
         } catch {
           // Best-effort local revocation; preserve the original saga error.
         }
@@ -664,30 +738,9 @@ export function createAdminRemoteMcpRouter(
         // AS. Compensate here explicitly (DEC-18).
         const mintedRegistrationClientUri = registration.registration_client_uri
         const mintedRegistrationAccessToken = registration.registration_access_token
-        try {
-          await upsertDynamicClient(db, encryptionKey, {
-            ...dynamicClientKey,
-            issuer: discovery.issuer,
-            clientId: registration.client_id,
-            clientMode: effectiveClientMode,
-            // A public client carries no secret; never persist one the AS may have
-            // echoed alongside a `none` downgrade.
-            clientSecret:
-              effectiveClientMode === 'confidential' ? registration.client_secret : undefined,
-            registrationAccessToken: registration.registration_access_token,
-            registrationClientUri: registration.registration_client_uri,
-            clientIdIssuedAtSec: registration.client_id_issued_at,
-            clientSecretExpiresAtSec: registration.client_secret_expires_at,
-          })
-        } catch (err) {
-          // Local delete is idempotent (the row may never have landed); the pinned
-          // RFC 7592 DELETE is the courtesy revocation at the AS. Both best-effort —
-          // neither must mask the persist failure we report.
-          try {
-            await deleteDynamicClient(db, dynamicClientKey)
-          } catch {
-            // Best-effort local revocation; the row may not exist.
-          }
+        // Best-effort RFC 7592 revocation of the client WE just minted (handle in
+        // memory). Used on every path that abandons this install after the mint.
+        const revokeMintedClient = async (): Promise<void> => {
           if (mintedRegistrationClientUri && mintedRegistrationAccessToken) {
             await bestEffortRfc7592Delete(
               dcrDeps,
@@ -695,6 +748,32 @@ export function createAdminRemoteMcpRouter(
               mintedRegistrationAccessToken
             )
           }
+        }
+        // A public client carries no secret; never persist one the AS may have echoed
+        // alongside a `none` downgrade.
+        const dcrCredentials: UpsertDynamicClientInput = {
+          ...dynamicClientKey,
+          issuer: discovery.issuer,
+          clientId: registration.client_id,
+          clientMode: effectiveClientMode,
+          clientSecret:
+            effectiveClientMode === 'confidential' ? registration.client_secret : undefined,
+          registrationAccessToken: registration.registration_access_token,
+          registrationClientUri: registration.registration_client_uri,
+          clientIdIssuedAtSec: registration.client_id_issued_at,
+          clientSecretExpiresAtSec: registration.client_secret_expires_at,
+        }
+
+        const persistFailed503 = async (err: unknown): Promise<void> => {
+          // Local delete removes ONLY our row (idempotent; it may never have landed);
+          // the pinned RFC 7592 DELETE is the courtesy revocation at the AS. Both
+          // best-effort — neither must mask the persist failure we report.
+          try {
+            await deleteDynamicClientOwnedByInstall(db, dynamicClientKey, installId)
+          } catch {
+            // Best-effort local revocation; the row may not exist.
+          }
+          await revokeMintedClient()
           // Names-only: never echo the persist error body (may carry secret material).
           log.error(
             {
@@ -707,7 +786,107 @@ export function createAdminRemoteMcpRouter(
           )
           // 503: transient/server-side (DB), not a client error.
           res.status(503).json({ error: 'dcr_persist_failed' })
+        }
+
+        // Claim the name with a PENDING row. ON CONFLICT DO NOTHING NEVER clobbers a
+        // live server's credentials (the R3-H1 fix, replacing the old upsert) — a
+        // conflict means the name is already owned, and we classify who owns it.
+        let owned: boolean
+        try {
+          owned = (
+            await insertDynamicClientPending(db, encryptionKey, { ...dcrCredentials, installId })
+          ).inserted
+        } catch (err) {
+          await persistFailed503(err)
           return
+        }
+
+        if (!owned) {
+          // Any throw inside this conflict-resolution block (a transient k8s error from
+          // the live-uid re-read, a DB error on the row re-read, or a failure of the
+          // reclaim tx) must still revoke the client we just minted — otherwise a
+          // confidential client is orphaned at the AS. Mirrors the revoke-on-abort
+          // discipline of persistFailed503 and every explicit return below.
+          try {
+            // Someone already holds the name. A live CR owns it unconditionally; else the
+            // persisted row's lifetime decides (in-progress = another saga; reclaimable =
+            // orphan/legacy). Re-read the live uid HERE (a CR may have appeared since the
+            // pre-check — the TOCTOU the fence closes).
+            const liveCrUid = await readLiveMcpServerUid(gateway, serverName, targetNs)
+            let existing = await getDynamicClient(db, encryptionKey, dynamicClientKey)
+            if (!existing) {
+              // The row was deleted between our INSERT-conflict and this read (a teardown
+              // in the gap). Retry the claim once.
+              try {
+                owned = (
+                  await insertDynamicClientPending(db, encryptionKey, {
+                    ...dcrCredentials,
+                    installId,
+                  })
+                ).inserted
+              } catch (err) {
+                await persistFailed503(err)
+                return
+              }
+              if (!owned) existing = await getDynamicClient(db, encryptionKey, dynamicClientKey)
+            }
+
+            if (!owned) {
+              if (!existing) {
+                // Still conflicting yet unreadable — cannot classify; fail safe as taken.
+                await revokeMintedClient()
+                res.status(409).json({ error: 'server_name_in_use' })
+                return
+              }
+              const klass = classifyExistingDynamicClient(
+                {
+                  installId: existing.installId ?? null,
+                  crUid: existing.crUid ?? null,
+                  updatedAt: existing.updatedAt,
+                },
+                { now: new Date(), pendingTtlMs: PENDING_TTL_MS, liveCrUid }
+              )
+              if (klass === 'in-use' || klass === 'in-progress') {
+                await revokeMintedClient()
+                log.warn(
+                  { event: 'remote_install_dcr_name_conflict', serverName, conflict: klass },
+                  'remote dcr install rejected: name already owned'
+                )
+                res.status(409).json({
+                  error: klass === 'in-use' ? 'server_name_in_use' : 'install_in_progress',
+                })
+                return
+              }
+              // reclaimable: take over the orphan/legacy row atomically (CAS in a tx).
+              const reclaim = await reclaimOrphanDynamicClient(
+                encryptionKey,
+                {
+                  key: dynamicClientKey,
+                  newCredentials: dcrCredentials,
+                  newInstallId: installId,
+                  ctx: { now: new Date(), pendingTtlMs: PENDING_TTL_MS, liveCrUid },
+                },
+                runInTransaction
+              )
+              if (!reclaim.reclaimed) {
+                // Raced: another saga won the reclaim (or re-claimed the freed name).
+                await revokeMintedClient()
+                res.status(409).json({ error: 'install_in_progress' })
+                return
+              }
+              // We own the row now. Best-effort revoke the OLD client we superseded.
+              if (reclaim.oldHandle) {
+                await bestEffortRfc7592Delete(
+                  dcrDeps,
+                  reclaim.oldHandle.registrationClientUri,
+                  reclaim.oldHandle.registrationAccessToken
+                )
+              }
+            }
+          } catch (err) {
+            await revokeMintedClient()
+            throw err
+          }
         }
         dcrRegistered = true
         dcrClientId = registration.client_id
@@ -798,6 +977,7 @@ export function createAdminRemoteMcpRouter(
       // the same serverName recreated between the create and the rollback.
       let createdClientSecretSnapshot: SecretSnapshot | null = null
       let createdServerPreconditions: ResourcePreconditions | undefined
+      let createdServerUid: string | undefined
       if (effectiveClientMode === 'confidential' && clientSecretName) {
         try {
           createdClientSecretSnapshot = await gateway.createSecret({
@@ -837,6 +1017,7 @@ export function createAdminRemoteMcpRouter(
           targetNs
         )
         createdServerPreconditions = resourcePreconditionsFrom(createdServer)
+        createdServerUid = resourceUidFrom(createdServer)
       } catch (err) {
         if (createdClientSecretSnapshot && clientSecretName) {
           try {
@@ -856,6 +1037,71 @@ export function createAdminRemoteMcpRouter(
           return
         }
         throw err
+      }
+
+      // ── Saga step 2b (DCR only): bind the pending row to the created CR's uid ──
+      // Only DCR wrote a dynamic_clients row; other modes skip this. Binding seals the
+      // row to the McpServer's metadata.uid so a later teardown/reclaim can fence by the
+      // exact installation. A missing uid or a lost bind means the row is no longer ours
+      // — compensate the CR (fenced) and this install rather than leave a dangling row.
+      if (body.mode === 'dcr' && dcrRegistered) {
+        const rollbackCreatedServer = async (): Promise<void> => {
+          try {
+            await gateway.deleteResource(
+              'mcpservers',
+              serverName,
+              targetNs,
+              createdServerPreconditions
+            )
+            await waitForDeletion(
+              () => gateway.getResource('mcpservers', serverName, targetNs),
+              `McpServer/${serverName}`
+            )
+          } catch {
+            // Best-effort rollback; preserve the reported failure.
+          }
+        }
+        if (createdServerUid === undefined) {
+          // Without a uid the row can never be bound (it would strand as pending and be
+          // reclaimed by the TTL). Compensate now instead of leaving that residue.
+          await rollbackCreatedServer()
+          await rollbackDynamicClient()
+          log.error(
+            { event: 'remote_oauth_dcr_bind_no_uid', serverName, namespace: targetNs },
+            'dcr bind aborted: created McpServer carried no metadata.uid'
+          )
+          res.status(503).json({ error: 'dcr_bind_failed' })
+          return
+        }
+        let bound: boolean
+        try {
+          ;({ bound } = await bindDynamicClientToResource(
+            db,
+            dynamicClientKey,
+            installId,
+            createdServerUid
+          ))
+        } catch (err) {
+          // A thrown bind (DB error) would otherwise strand the created CR, the pending
+          // row and the minted AS client at once. Compensate all three, like steps 2/3.
+          await rollbackCreatedServer()
+          await rollbackDynamicClient()
+          throw err
+        }
+        if (!bound) {
+          // The pending row was reclaimed out from under us (TTL expired mid-saga): the
+          // reclaimer now owns the name. Roll back OUR CR; `rollbackDynamicClient` deletes
+          // only rows with OUR install_id (0 now — the reclaim rewrote it) and revokes our
+          // minted client, so the reclaimer's row is untouched.
+          await rollbackCreatedServer()
+          await rollbackDynamicClient()
+          log.warn(
+            { event: 'remote_oauth_dcr_install_superseded', serverName, namespace: targetNs },
+            'dcr install superseded: the pending row was reclaimed before bind'
+          )
+          res.status(503).json({ error: 'install_superseded' })
+          return
+        }
       }
 
       // ── Saga step 3: attach to the Context allowlist (rollback CR+Secret) ──

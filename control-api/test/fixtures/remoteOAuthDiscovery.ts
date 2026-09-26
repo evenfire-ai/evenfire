@@ -377,10 +377,18 @@ export function makeDcrTransport(opts: {
 /**
  * A minimal in-memory `dynamic_clients` DbClient for the store + saga tests. It is
  * a TEST HARNESS (not a cross-layer fixture, T1): it mirrors the exact parameter
- * order of `dynamicClientStore.ts`'s own INSERT/SELECT/DELETE, so a store round-trip
- * (upsert → get) and the saga's rollback (delete) run end-to-end with zero real
- * Postgres. The encrypted envelope it stores is produced by the real
+ * order of `dynamicClientStore.ts`'s own statements so the saga runs end-to-end with
+ * zero real Postgres. The encrypted envelope it stores is produced by the real
  * `encryptOAuthSecret` inside the store, never hand-written.
+ *
+ * It models the install-identity statements the route now drives: the pending INSERT
+ * (`ON CONFLICT DO NOTHING RETURNING id`), the legacy upsert (`ON CONFLICT DO UPDATE`),
+ * the bind UPDATE, the reclaim CAS UPDATE, and both DELETE shapes (by-install and
+ * by-name). The AUTHORITATIVE SQL semantics — real ON CONFLICT, the FOR UPDATE + CAS
+ * race — are certified by the real-Postgres suite
+ * (`oauth.dynamicClientStore.installIdentity.realPostgres.integration.test.ts`); this
+ * harness only lets the route-level wiring (classify → HTTP code, which 7592 DELETE
+ * fires) be asserted offline.
  */
 export function makeInMemoryDynamicClientsDb(): {
   db: DbClient
@@ -388,6 +396,7 @@ export function makeInMemoryDynamicClientsDb(): {
 } {
   const rows = new Map<string, Record<string, unknown>>()
   const keyOf = (owner: unknown, ns: unknown, name: unknown) => `${owner}/${ns}/${name}`
+  let idSequence = 0
   const db = {
     query: async (text: string, values: unknown[] = []) => {
       if (text.includes('INSERT INTO dynamic_clients')) {
@@ -403,8 +412,40 @@ export function makeInMemoryDynamicClientsDb(): {
           registration_client_uri,
           client_id_issued_at,
           client_secret_expires_at,
+          // Present only on the pending INSERT (12th param); undefined for the upsert.
+          install_id,
         ] = values
-        rows.set(keyOf(owner_kind, server_namespace, server_name), {
+        const key = keyOf(owner_kind, server_namespace, server_name)
+        const existing = rows.get(key)
+        // Pending INSERT: ON CONFLICT DO NOTHING — never clobber, signal via rowCount.
+        if (text.includes('DO NOTHING')) {
+          if (existing) return { rows: [], rowCount: 0 }
+          const id = ++idSequence
+          rows.set(key, {
+            id,
+            owner_kind,
+            server_namespace,
+            server_name,
+            issuer,
+            client_id,
+            client_mode,
+            client_secret_encrypted,
+            registration_access_token_encrypted,
+            registration_client_uri,
+            client_id_issued_at,
+            client_secret_expires_at,
+            install_id: install_id ?? null,
+            cr_uid: null,
+            created_at: new Date(),
+            updated_at: new Date(),
+          })
+          return { rows: [{ id }], rowCount: 1 }
+        }
+        // Legacy upsert: ON CONFLICT DO UPDATE overwrites the creds in place; it does
+        // NOT touch install_id/cr_uid, so those survive a conflict (default NULL on a
+        // fresh insert).
+        rows.set(key, {
+          id: existing?.id ?? ++idSequence,
           owner_kind,
           server_namespace,
           server_name,
@@ -416,20 +457,85 @@ export function makeInMemoryDynamicClientsDb(): {
           registration_client_uri,
           client_id_issued_at,
           client_secret_expires_at,
-          created_at: new Date(),
+          install_id: existing?.install_id ?? null,
+          cr_uid: existing?.cr_uid ?? null,
+          created_at: existing?.created_at ?? new Date(),
           updated_at: new Date(),
         })
         return { rows: [], rowCount: 1 }
       }
       if (text.includes('DELETE FROM dynamic_clients')) {
-        const [owner_kind, server_namespace, server_name] = values
-        const existed = rows.delete(keyOf(owner_kind, server_namespace, server_name))
+        const [owner_kind, server_namespace, server_name, fourth] = values
+        const key = keyOf(owner_kind, server_namespace, server_name)
+        const row = rows.get(key)
+        // By-install DELETE (compensation): remove only when the install_id matches.
+        if (values.length === 4) {
+          if (row && row.install_id === fourth) {
+            rows.delete(key)
+            return { rows: [], rowCount: 1 }
+          }
+          return { rows: [], rowCount: 0 }
+        }
+        // By-name DELETE (legacy deleteDynamicClient / dcrCleanup).
+        const existed = rows.delete(key)
         return { rows: [], rowCount: existed ? 1 : 0 }
+      }
+      if (text.includes('UPDATE dynamic_clients')) {
+        const key = keyOf(values[0], values[1], values[2])
+        const row = rows.get(key)
+        if (!row) return { rows: [], rowCount: 0 }
+        // Reclaim CAS: WHERE id = $13 AND install_id IS NOT DISTINCT FROM $14.
+        if (text.includes('IS NOT DISTINCT FROM')) {
+          const [
+            ,
+            ,
+            ,
+            issuer,
+            client_id,
+            client_mode,
+            client_secret_encrypted,
+            registration_access_token_encrypted,
+            registration_client_uri,
+            client_id_issued_at,
+            client_secret_expires_at,
+            newInstallId,
+            lockedId,
+            lockedInstallId,
+          ] = values
+          if (row.id !== lockedId || row.install_id !== lockedInstallId) {
+            return { rows: [], rowCount: 0 }
+          }
+          Object.assign(row, {
+            issuer,
+            client_id,
+            client_mode,
+            client_secret_encrypted,
+            registration_access_token_encrypted,
+            registration_client_uri,
+            client_id_issued_at,
+            client_secret_expires_at,
+            install_id: newInstallId,
+            cr_uid: null,
+            updated_at: new Date(),
+          })
+          return { rows: [], rowCount: 1 }
+        }
+        // Bind: WHERE install_id = $4 AND cr_uid IS NULL, SET cr_uid = $5.
+        const [, , , installId, crUid] = values
+        if (row.install_id === installId && row.cr_uid == null) {
+          row.cr_uid = crUid
+          row.updated_at = new Date()
+          return { rows: [], rowCount: 1 }
+        }
+        return { rows: [], rowCount: 0 }
       }
       if (text.includes('FROM dynamic_clients')) {
         const [owner_kind, server_namespace, server_name] = values
         const row = rows.get(keyOf(owner_kind, server_namespace, server_name))
-        return { rows: row ? [row] : [], rowCount: row ? 1 : 0 }
+        // Return a SNAPSHOT (shallow copy), as a real SELECT does: a later UPDATE must
+        // not retroactively mutate a row already read (e.g. the reclaim reads the OLD
+        // handle from its FOR UPDATE snapshot AFTER issuing the overwriting UPDATE).
+        return { rows: row ? [{ ...row }] : [], rowCount: row ? 1 : 0 }
       }
       return { rows: [], rowCount: 0 }
     },

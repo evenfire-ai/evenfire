@@ -1,7 +1,9 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
+import { randomUUID } from 'node:crypto'
 import request from 'supertest'
 import { config } from '../src/config.js'
+import type { DbTransactionClient } from '../src/db.js'
 import type { PinnedTransport } from '../src/http/pinnedFetch.js'
 import type { K8sGateway } from '../src/k8s.js'
 import {
@@ -9,12 +11,18 @@ import {
   type DiscoveryResult,
   discoverRemoteOAuth,
 } from '../src/oauth/discovery.js'
+import {
+  bindDynamicClientToResource,
+  getDynamicClient,
+  insertDynamicClientPending,
+} from '../src/oauth/dynamicClientStore.js'
 import { decryptOAuthSecret, deriveOAuthEncryptionKey } from '../src/oauth/encryption.js'
 import { probeMcpTransport } from '../src/oauth/mcpTransportProbe.js'
 import {
   type AdminRemoteMcpDeps,
   createAdminRemoteMcpRouter,
 } from '../src/routes/admin/remoteMcp.js'
+import { K8sNotFoundError } from '../src/services/resourceService.js'
 import {
   DCR_BASIC_REGISTRATION_RESPONSE,
   DCR_CONFIDENTIAL_REGISTRATION_RESPONSE,
@@ -1142,5 +1150,294 @@ describe('POST /admin/mcp-servers/remote — DCR install saga (C2)', () => {
     // No registration POST fired; no row persisted.
     expect(calls).toHaveLength(0)
     expect(rows.size).toBe(0)
+  })
+
+  // ── R3-H1: install identity fences the DCR row writes ──────────────────────
+  // The install saga must NEVER clobber or delete a live server's dynamic_clients
+  // row. Rows are seeded via the REAL producers (insertDynamicClientPending + bind),
+  // read through the REAL getDynamicClient (T1).
+
+  const LIVE_ROW = {
+    ownerKind: 'mcpserver' as const,
+    serverNamespace: NS,
+    issuer: 'https://as.example.com',
+    clientId: 'live-client-id',
+    clientMode: 'confidential' as const,
+    clientSecret: 'live-secret',
+    registrationAccessToken: 'live-reg-token',
+    registrationClientUri: 'https://as.example.com/register/live',
+  }
+
+  // T4/invariant-1 (R3-H1): installing a name already held by a LIVE McpServer must
+  // leave that install's row byte-identical and mint NOTHING at the AS. Fails at
+  // parent 6938afbd3: with no pre-check and the old clobbering upsert, the CR-create
+  // 409 rolls back and DELETEs the (now overwritten) row → the row is gone and the
+  // error is the create 409, not `server_name_in_use`.
+  it('install over a live McpServer of the same name → 409 server_name_in_use, live row untouched, nothing minted', async () => {
+    vi.mocked(discoverRemoteOAuth).mockResolvedValue({ ok: true, result: dcrConfidentialResult })
+    const { db, rows } = makeInMemoryDynamicClientsDb()
+    const seededInstall = randomUUID()
+    await insertDynamicClientPending(db, ENC_KEY, {
+      ...LIVE_ROW,
+      serverName: 'live-dcr',
+      installId: seededInstall,
+    })
+    await bindDynamicClientToResource(
+      db,
+      { serverNamespace: NS, serverName: 'live-dcr' },
+      seededInstall,
+      'uid-live-cr'
+    )
+    const before = await getDynamicClient(db, ENC_KEY, {
+      serverNamespace: NS,
+      serverName: 'live-dcr',
+    })
+
+    const gw = gatewayWithContext('ctx-a')
+    await gw.createResource('mcpservers', { metadata: { name: 'live-dcr' }, spec: {} }, NS)
+
+    const { transport, calls } = makeDcrTransport({
+      responseJson: JSON.stringify(DCR_CONFIDENTIAL_REGISTRATION_RESPONSE),
+    })
+    const res = await request(
+      makeAppWithDeps(gw, { db, dcr: { transport, resolveDns: PUBLIC_IP } })
+    )
+      .post('/admin/mcp-servers/remote')
+      .send({
+        serverName: 'live-dcr',
+        contextRef: 'ctx-a',
+        baseUrl: 'https://mcp.notion.com/mcp',
+        mode: 'dcr',
+      })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error).toBe('server_name_in_use')
+    // Pre-check short-circuits BEFORE discovery/mint: no AS interaction at all.
+    expect(calls).toHaveLength(0)
+    // The live row is byte-identical — never clobbered, never deleted (R3-H1).
+    const after = await getDynamicClient(db, ENC_KEY, {
+      serverNamespace: NS,
+      serverName: 'live-dcr',
+    })
+    expect(after).toEqual(before)
+    expect(rows.size).toBe(1)
+  })
+
+  // The INSERT fence itself (not the pre-check): a live CR that appears AFTER the
+  // pre-check but before the persist (TOCTOU) is caught by the ON CONFLICT + classify
+  // `in-use`. The row stays byte-identical; the throwaway client we minted is revoked.
+  it('TOCTOU: a live CR appears after the pre-check → 409 server_name_in_use via the INSERT fence, row untouched', async () => {
+    vi.mocked(discoverRemoteOAuth).mockResolvedValue({ ok: true, result: dcrConfidentialResult })
+    const { db, rows } = makeInMemoryDynamicClientsDb()
+    const seededInstall = randomUUID()
+    await insertDynamicClientPending(db, ENC_KEY, {
+      ...LIVE_ROW,
+      serverName: 'toctou-dcr',
+      installId: seededInstall,
+    })
+    await bindDynamicClientToResource(
+      db,
+      { serverNamespace: NS, serverName: 'toctou-dcr' },
+      seededInstall,
+      'uid-toctou-cr'
+    )
+    const before = await getDynamicClient(db, ENC_KEY, {
+      serverNamespace: NS,
+      serverName: 'toctou-dcr',
+    })
+
+    const gw = gatewayWithContext('ctx-a')
+    const realGet = gw.getResource.bind(gw)
+    let mcpReads = 0
+    vi.spyOn(gw, 'getResource').mockImplementation(async (plural, name, ns) => {
+      if (plural === 'mcpservers' && name === 'toctou-dcr') {
+        mcpReads += 1
+        // First read is the pre-check (name still free); the CR appears by the time
+        // the INSERT conflicts and we re-read the live uid for classification.
+        if (mcpReads === 1) throw new K8sNotFoundError('mcpservers/toctou-dcr not found')
+        return { metadata: { uid: 'uid-toctou-cr' } }
+      }
+      return realGet(plural, name, ns)
+    })
+
+    const { transport, calls } = makeDcrTransport({
+      responseJson: JSON.stringify(DCR_CONFIDENTIAL_REGISTRATION_RESPONSE),
+    })
+    const res = await request(
+      makeAppWithDeps(gw, { db, dcr: { transport, resolveDns: PUBLIC_IP } })
+    )
+      .post('/admin/mcp-servers/remote')
+      .send({
+        serverName: 'toctou-dcr',
+        contextRef: 'ctx-a',
+        baseUrl: 'https://mcp.notion.com/mcp',
+        mode: 'dcr',
+      })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error).toBe('server_name_in_use')
+    // The row we seeded is untouched (the INSERT never clobbered it).
+    const after = await getDynamicClient(db, ENC_KEY, {
+      serverNamespace: NS,
+      serverName: 'toctou-dcr',
+    })
+    expect(after).toEqual(before)
+    // The throwaway client minted before the conflict was revoked at the AS, and the
+    // seeded live client's handle was NOT touched.
+    const deleteCalls = calls.filter(c => c.method === 'DELETE')
+    expect(deleteCalls.map(c => c.url)).toContain(
+      DCR_CONFIDENTIAL_REGISTRATION_RESPONSE.registration_client_uri
+    )
+    expect(deleteCalls.map(c => c.url)).not.toContain(LIVE_ROW.registrationClientUri)
+  })
+
+  // Regression guard for the class fix: a transient throw in the conflict-resolution
+  // block (here the live-uid re-read) must STILL revoke the client we just minted —
+  // otherwise a confidential client is orphaned at the AS. Before the fix this path
+  // propagated to a 500 with zero 7592 DELETEs (reproduced by review).
+  it('a transient error while classifying a name conflict still revokes the minted client', async () => {
+    vi.mocked(discoverRemoteOAuth).mockResolvedValue({ ok: true, result: dcrConfidentialResult })
+    const { db } = makeInMemoryDynamicClientsDb()
+    // Seed a fresh pending row so the install's INSERT conflicts and we enter the
+    // classify path (which re-reads the live uid).
+    await insertDynamicClientPending(db, ENC_KEY, {
+      ...LIVE_ROW,
+      serverName: 'throwrevoke-dcr',
+      installId: randomUUID(),
+    })
+
+    const gw = gatewayWithContext('ctx-a')
+    const realGet = gw.getResource.bind(gw)
+    let mcpReads = 0
+    vi.spyOn(gw, 'getResource').mockImplementation(async (plural, name, ns) => {
+      if (plural === 'mcpservers' && name === 'throwrevoke-dcr') {
+        mcpReads += 1
+        // 1st read = pre-check (name free → proceed to mint + INSERT conflict);
+        // 2nd read = the conflict re-read of the live uid → transient non-404 error.
+        if (mcpReads === 1) throw new K8sNotFoundError('mcpservers/throwrevoke-dcr not found')
+        throw Object.assign(new Error('apiserver unavailable'), { code: 500 })
+      }
+      return realGet(plural, name, ns)
+    })
+
+    const { transport, calls } = makeDcrTransport({
+      responseJson: JSON.stringify(DCR_CONFIDENTIAL_REGISTRATION_RESPONSE),
+    })
+    const res = await request(
+      makeAppWithDeps(gw, { db, dcr: { transport, resolveDns: PUBLIC_IP } })
+    )
+      .post('/admin/mcp-servers/remote')
+      .send({
+        serverName: 'throwrevoke-dcr',
+        contextRef: 'ctx-a',
+        baseUrl: 'https://mcp.notion.com/mcp',
+        mode: 'dcr',
+      })
+
+    // The transient error surfaces (not swallowed), but the minted client is revoked.
+    expect(res.status).toBe(500)
+    const deleteCalls = calls.filter(c => c.method === 'DELETE')
+    expect(deleteCalls.map(c => c.url)).toContain(
+      DCR_CONFIDENTIAL_REGISTRATION_RESPONSE.registration_client_uri
+    )
+  })
+
+  // A fresh pending row (another saga of the same name in flight) → 409
+  // install_in_progress; the in-flight row is untouched and our throwaway client is
+  // revoked.
+  it('install over a fresh pending row → 409 install_in_progress, in-flight row untouched', async () => {
+    vi.mocked(discoverRemoteOAuth).mockResolvedValue({ ok: true, result: dcrConfidentialResult })
+    const { db, rows } = makeInMemoryDynamicClientsDb()
+    const inflightInstall = randomUUID()
+    await insertDynamicClientPending(db, ENC_KEY, {
+      ...LIVE_ROW,
+      serverName: 'inprogress-dcr',
+      clientId: 'inflight-client-id',
+      installId: inflightInstall,
+    })
+    const before = await getDynamicClient(db, ENC_KEY, {
+      serverNamespace: NS,
+      serverName: 'inprogress-dcr',
+    })
+
+    const gw = gatewayWithContext('ctx-a') // no McpServer seeded → pre-check passes
+    const { transport, calls } = makeDcrTransport({
+      responseJson: JSON.stringify(DCR_CONFIDENTIAL_REGISTRATION_RESPONSE),
+    })
+    const res = await request(
+      makeAppWithDeps(gw, { db, dcr: { transport, resolveDns: PUBLIC_IP } })
+    )
+      .post('/admin/mcp-servers/remote')
+      .send({
+        serverName: 'inprogress-dcr',
+        contextRef: 'ctx-a',
+        baseUrl: 'https://mcp.notion.com/mcp',
+        mode: 'dcr',
+      })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error).toBe('install_in_progress')
+    // The in-flight row is untouched (its install still owns it).
+    const after = await getDynamicClient(db, ENC_KEY, {
+      serverNamespace: NS,
+      serverName: 'inprogress-dcr',
+    })
+    expect(after).toEqual(before)
+    expect(rows.size).toBe(1)
+    // Our throwaway minted client was revoked at the AS.
+    expect(calls.some(c => c.method === 'DELETE')).toBe(true)
+  })
+
+  // An orphan row (bound to a uid with no live CR) does NOT block a reinstall: it is
+  // reclaimed (CAS in a tx), the OLD client is revoked, and the install proceeds to 201.
+  it('install over a reclaimable orphan → reclaims the row, revokes the old client, 201', async () => {
+    vi.mocked(discoverRemoteOAuth).mockResolvedValue({ ok: true, result: dcrConfidentialResult })
+    const { db, rows } = makeInMemoryDynamicClientsDb()
+    const orphanInstall = randomUUID()
+    await insertDynamicClientPending(db, ENC_KEY, {
+      ...LIVE_ROW,
+      serverName: 'reclaim-dcr',
+      clientId: 'orphan-client-id',
+      installId: orphanInstall,
+    })
+    // Bound to a uid whose CR no longer exists → orphan (reclaimable, no live CR).
+    await bindDynamicClientToResource(
+      db,
+      { serverNamespace: NS, serverName: 'reclaim-dcr' },
+      orphanInstall,
+      'uid-orphan-gone'
+    )
+
+    const gw = gatewayWithContext('ctx-a') // no live McpServer → orphan is reclaimable
+    const { transport, calls } = makeDcrTransport({
+      responseJson: JSON.stringify(DCR_CONFIDENTIAL_REGISTRATION_RESPONSE),
+    })
+    const res = await request(
+      makeAppWithDeps(gw, {
+        db,
+        dcr: { transport, resolveDns: PUBLIC_IP },
+        // The reclaim opens a tx; bind it to the same in-memory db.
+        runInTransaction: work => work(db as unknown as DbTransactionClient),
+      })
+    )
+      .post('/admin/mcp-servers/remote')
+      .send({
+        serverName: 'reclaim-dcr',
+        contextRef: 'ctx-a',
+        baseUrl: 'https://mcp.notion.com/mcp',
+        mode: 'dcr',
+      })
+
+    expect(res.status).toBe(201)
+    // Still exactly one row, now owned by the new install (minted client_id).
+    expect(rows.size).toBe(1)
+    const owned = await getDynamicClient(db, ENC_KEY, {
+      serverNamespace: NS,
+      serverName: 'reclaim-dcr',
+    })
+    expect(owned?.clientId).toBe(DCR_CONFIDENTIAL_REGISTRATION_RESPONSE.client_id)
+    // The OLD (orphan) client was revoked at the AS via its handle read under the lock.
+    const deleteCalls = calls.filter(c => c.method === 'DELETE')
+    expect(deleteCalls.map(c => c.url)).toContain(LIVE_ROW.registrationClientUri)
   })
 })
