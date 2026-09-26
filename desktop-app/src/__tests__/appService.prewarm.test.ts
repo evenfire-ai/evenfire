@@ -338,12 +338,16 @@ describe('AppService.prewarmHost — bounded wake re-emission', () => {
     ).mockReturnValue(pendingSwitch)
     mockPrewarmHost.mockResolvedValue({ status: 'active' })
 
+    await expect(svc.prewarmHost('first-host')).resolves.toEqual({
+      requested: true,
+      status: 'active',
+    })
     const switching = svc.switchTeam('team-2')
     await expect(svc.prewarmHost('chatllm')).resolves.toEqual({
       requested: false,
       skipped: 'auth-changed',
     })
-    expect(mockPrewarmHost).not.toHaveBeenCalled()
+    expect(mockPrewarmHost).toHaveBeenCalledTimes(1)
 
     rejectSwitch(new Error('switch canceled'))
     await expect(switching).rejects.toThrow('switch canceled')
@@ -351,6 +355,7 @@ describe('AppService.prewarmHost — bounded wake re-emission', () => {
       requested: true,
       status: 'active',
     })
+    expect(mockPrewarmHost).toHaveBeenCalledTimes(2)
   })
 
   it('a transient session revision does not cancel the bounded wake loop', async () => {
@@ -365,6 +370,94 @@ describe('AppService.prewarmHost — bounded wake re-emission', () => {
 
     expect(mockPrewarmHost).toHaveBeenCalledTimes(2)
     expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('an internal team hop preserves the bounded wake loop and cooldown', async () => {
+    mockPrewarmHost
+      .mockResolvedValueOnce({ status: 'wake-requested' })
+      .mockResolvedValueOnce({ status: 'active' })
+    const svc = makeService()
+    const switchSessionToTeam = vi
+      .spyOn(
+        svc as unknown as { switchSessionToTeam: () => Promise<string> },
+        'switchSessionToTeam'
+      )
+      .mockImplementation(async () => (svc as unknown as { sessionToken: string }).sessionToken)
+    let finishOperation!: () => void
+    const operation = new Promise<void>(resolve => {
+      finishOperation = resolve
+    })
+    let markOperationStarted!: () => void
+    const operationStarted = new Promise<void>(resolve => {
+      markOperationStarted = resolve
+    })
+
+    await svc.prewarmHost('chatllm')
+    const hop = (
+      svc as unknown as {
+        runWithTeamContext: (teamId: string, operation: () => Promise<void>) => Promise<void>
+      }
+    ).runWithTeamContext('team-2', () => {
+      markOperationStarted()
+      return operation
+    })
+    await operationStarted
+    expect(switchSessionToTeam).toHaveBeenCalledWith('team-2', expect.any(String))
+    expect(
+      (
+        svc as unknown as { prewarmAttemptAtByHostRef: Map<string, number> }
+      ).prewarmAttemptAtByHostRef.has('chatllm')
+    ).toBe(true)
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(mockPrewarmHost).toHaveBeenCalledTimes(2)
+    expect(vi.getTimerCount()).toBe(0)
+
+    finishOperation()
+    await hop
+    expect(switchSessionToTeam).toHaveBeenCalledWith('team-1', expect.any(String))
+    await expect(svc.prewarmHost('chatllm')).resolves.toEqual({
+      requested: false,
+      skipped: 'cooldown',
+    })
+  })
+
+  it('nested explicit transitions keep prewarm fenced until both rejected switches settle', async () => {
+    const rejectSwitches: Array<(error: Error) => void> = []
+    const svc = makeService()
+    vi.spyOn(
+      svc as unknown as { switchSessionToTeam: () => Promise<string> },
+      'switchSessionToTeam'
+    ).mockImplementation(
+      () =>
+        new Promise<string>((_resolve, reject) => {
+          rejectSwitches.push(reject)
+        })
+    )
+    mockPrewarmHost.mockResolvedValue({ status: 'active' })
+
+    const firstSwitch = svc.switchTeam('team-2')
+    const secondSwitch = svc.switchTeam('team-3')
+    expect(rejectSwitches).toHaveLength(2)
+    await expect(svc.prewarmHost('chatllm')).resolves.toEqual({
+      requested: false,
+      skipped: 'auth-changed',
+    })
+
+    rejectSwitches[0](new Error('first switch rejected'))
+    await expect(firstSwitch).rejects.toThrow('first switch rejected')
+    await expect(svc.prewarmHost('chatllm')).resolves.toEqual({
+      requested: false,
+      skipped: 'auth-changed',
+    })
+    expect(mockPrewarmHost).not.toHaveBeenCalled()
+
+    rejectSwitches[1](new Error('second switch rejected'))
+    await expect(secondSwitch).rejects.toThrow('second switch rejected')
+    await expect(svc.prewarmHost('chatllm')).resolves.toEqual({
+      requested: true,
+      status: 'active',
+    })
+    expect(mockPrewarmHost).toHaveBeenCalledTimes(1)
   })
 
   it('a late prior response cannot clear the new session wake loop', async () => {
@@ -397,6 +490,10 @@ describe('AppService.prewarmHost — bounded wake re-emission', () => {
     const loops = (svc as unknown as { prewarmReemitLoopHostRefs: Set<string> })
       .prewarmReemitLoopHostRefs
     expect(loops.has('chatllm')).toBe(true)
+    await expect(svc.prewarmHost('chatllm')).resolves.toEqual({
+      requested: false,
+      skipped: 'cooldown',
+    })
     ;(
       svc as unknown as { prewarmAttemptAtByHostRef: Map<string, number> }
     ).prewarmAttemptAtByHostRef.delete('chatllm')

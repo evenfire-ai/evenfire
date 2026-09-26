@@ -191,6 +191,11 @@ function AgentChatHarness() {
       <div data-testid="active-chat-id">{vm.activeChatId || ''}</div>
       <div data-testid="agent-sending">{String(vm.agentSending)}</div>
       <div data-testid="chat-message-count">{vm.chatMessages.length}</div>
+      {vm.chatMessages.map(message => (
+        <div key={message.id} data-testid="chat-message-row">
+          {message.content}
+        </div>
+      ))}
       <div data-testid="chat-list-ids">{vm.chatList.map(chat => chat.id).join(',')}</div>
       <div data-testid="latest-list-ids">
         {vm.latestChatSessions.map(chat => chat.id).join(',')}
@@ -312,6 +317,55 @@ describe('useAgentChatController (cross-chat, migrated)', () => {
     } as TaskProgressStreamEvent)
     // Terminal → tracker unsubscribes both streams (the mock unsub deletes its
     // handler), proving the tasks were retired.
+    await waitFor(() => expect(progressHandlers.size).toBe(0))
+  })
+
+  it('persists the outgoing row before invoking the host and leaves it visible while the acknowledgement is pending', async () => {
+    const { invokeHostMessage, upsertMessages, progressHandlers } = installClerumHarness()
+    let acknowledge!: (result: { taskId: string; status: string }) => void
+    invokeHostMessage.mockImplementationOnce(
+      () =>
+        new Promise(resolve => {
+          acknowledge = resolve
+        })
+    )
+
+    render(
+      <AgentTaskTrackerProvider>
+        <AgentChatHarness />
+      </AgentTaskTrackerProvider>
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Create chat' }))
+    await waitFor(() => expect(screen.getByTestId('active-chat-id').textContent).not.toBe(''))
+
+    fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
+    await waitFor(() => expect(invokeHostMessage).toHaveBeenCalledTimes(1))
+
+    expect(upsertMessages.mock.invocationCallOrder[0]).toBeLessThan(
+      invokeHostMessage.mock.invocationCallOrder[0]!
+    )
+    expect(upsertMessages.mock.calls[0]?.[2]?.[0]).toMatchObject({
+      role: 'user',
+      content: 'hello',
+    })
+    expect(upsertMessages.mock.calls[0]?.[2]?.[0]).not.toHaveProperty('task_id')
+    expect(screen.getByTestId('chat-message-row').textContent).toBe('hello')
+    expect(screen.getByTestId('send-state').textContent).toBe('pending')
+    expect(progressHandlers.size).toBe(0)
+
+    acknowledge({ taskId: 'acknowledged-task', status: 'pending' })
+    await waitFor(() => expect(screen.getByTestId('send-state').textContent).toBe('settled'))
+    await waitFor(() => expect(progressHandlers.has('acknowledged-task')).toBe(true))
+    expect(upsertMessages.mock.calls[1]?.[2]?.[0]).toMatchObject({
+      id: (upsertMessages.mock.calls[0]?.[2]?.[0] as { id: string }).id,
+      task_id: 'acknowledged-task',
+    })
+    expect(screen.getByTestId('chat-message-row').textContent).toBe('hello')
+
+    await progressHandlers.get('acknowledged-task')?.({
+      type: 'terminal',
+      data: { status: 'completed' },
+    } as TaskProgressStreamEvent)
     await waitFor(() => expect(progressHandlers.size).toBe(0))
   })
 
