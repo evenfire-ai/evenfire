@@ -3,7 +3,11 @@ import httpProxy from 'http-proxy'
 import { config } from '../config.js'
 import { AuthedRequest, extractAuthToken, requireRpcAuth } from '../middleware/auth.js'
 import { requireScope } from '../middleware/auth.js'
-import { bindRouteActionV2, rejectUnadmittedV2DerivedView } from '../routeActionBindingV2.js'
+import {
+  RouteActionBindingError,
+  bindRouteActionV2,
+  rejectUnadmittedV2DerivedView,
+} from '../routeActionBindingV2.js'
 import { startActiveViewLease } from '../services/activeViewLease.js'
 import { DesktopSessionService } from '../services/desktopSessionService.js'
 import { tokenDeclaresV2, verifyUserDelegationV2 } from '../userDelegationV2.js'
@@ -283,10 +287,14 @@ export function parseCookies(header: string): Record<string, string> {
   return result
 }
 
-function rejectUpgrade(socket: import('net').Socket, status: number): void {
-  socket.write(
-    `HTTP/1.1 ${status} ${status === 503 ? 'Service Unavailable' : 'Unauthorized'}\r\n\r\n`
-  )
+function rejectUpgrade(socket: import('net').Socket, status: 400 | 401 | 403 | 503): void {
+  const reason = {
+    400: 'Bad Request',
+    401: 'Unauthorized',
+    403: 'Forbidden',
+    503: 'Service Unavailable',
+  }[status]
+  socket.write(`HTTP/1.1 ${status} ${reason}\r\n\r\n`)
   socket.destroy()
 }
 
@@ -316,10 +324,15 @@ async function handleV2DesktopUpgrade(
       return
     }
     rejectUpgrade(socket, 503)
-  } catch {
-    // A malformed binding, denial, stale authority, or checkpoint outage must
-    // all fail before an upstream desktop connection is attempted.
-    rejectUpgrade(socket, 403)
+  } catch (error) {
+    if (error instanceof RouteActionBindingError) {
+      rejectUpgrade(socket, error.code === 'invalid_binding' ? 400 : 403)
+      return
+    }
+    // The v2 view capability remains disabled until rollout; unexpected
+    // authority failures must not be mislabeled as a client authorization
+    // denial or reach the Desktop upstream.
+    rejectUpgrade(socket, 503)
   }
 }
 
