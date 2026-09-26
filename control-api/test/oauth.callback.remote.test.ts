@@ -36,13 +36,18 @@ const ENCRYPTION_KEY = deriveOAuthEncryptionKey(
 )
 const MCP_NS = 'mcp-server'
 const VALIDATED_IP = '93.184.216.34'
-const TOKEN_ENDPOINT = 'https://mcp.notion.com/token'
+const TOKEN_ENDPOINT = 'https://mcp.sentry.dev/oauth/token'
 
 // Shape `buildRemoteOAuthSpec` emits for a CIMD-public remote server (kept inline
-// so this file runs against the parent SHA — see file docstring).
+// so this file runs against the parent SHA — see file docstring). Modeled on SENTRY
+// (test/fixtures/remoteOAuthDiscovery.ts): its REAL AS metadata advertises
+// `authorization_response_iss_parameter_supported`, so `issForCallback` is a shape
+// the discovery producer actually emits. Notion does NOT advertise RFC 9207 (see
+// oauth.discovery.test.ts) — a Notion CR with issForCallback is impossible, and the
+// remote install now rejects such servers (R3F-H1), so this fixture uses Sentry.
 function remoteServerCr() {
   return {
-    metadata: { name: 'notion-remote', namespace: MCP_NS },
+    metadata: { name: 'sentry-remote', namespace: MCP_NS },
     spec: {
       contextRef: 'ctx-A',
       auth: { type: 'oauth' },
@@ -50,13 +55,13 @@ function remoteServerCr() {
         source: 'remote',
         id: 'https://control.example.com/api/v1/.well-known/evenfire-mcp-client',
         clientMode: 'public',
-        authorizationEndpoint: 'https://mcp.notion.com/authorize',
+        authorizationEndpoint: 'https://mcp.sentry.dev/oauth/authorize',
         tokenEndpoint: TOKEN_ENDPOINT,
-        issuer: 'https://mcp.notion.com',
-        // Pinned RFC 9207 issuer: a compliant remote AS advertises `iss`, and the
-        // shared remote callback now fails closed without it (R3-H2).
-        issForCallback: 'https://mcp.notion.com',
-        resource: 'https://mcp.notion.com',
+        issuer: 'https://mcp.sentry.dev',
+        // Pinned RFC 9207 issuer: Sentry's real AS advertises it, and the shared
+        // remote callback fails closed without it (R3-H2).
+        issForCallback: 'https://mcp.sentry.dev',
+        resource: 'https://mcp.sentry.dev/mcp',
         grantScope: 'user',
         scopes: ['read'],
         bearerInBody: false,
@@ -90,7 +95,7 @@ function recordingTransport(responseJson: string, status = 200) {
   const transport = async (input: PinnedTransportInput): Promise<PinnedRawResponse> => {
     let connectedIP: string | undefined
     input.lookup(
-      'mcp.notion.com',
+      'mcp.sentry.dev',
       { all: true } as never,
       ((err, addrs) => {
         if (!err && Array.isArray(addrs)) connectedIP = addrs[0]?.address
@@ -107,7 +112,7 @@ function remoteState() {
   // stable `remote` (CIMD/DCR register one fixed redirect_uri).
   return signOAuthState(STATE_SECRET, {
     subjectKind: 'mcp',
-    mcpServerName: 'notion-remote',
+    mcpServerName: 'sentry-remote',
     userId: 'user-9',
     oauthClientId: REMOTE_CLIENT_ID,
     grantKind: 'user',
@@ -123,7 +128,7 @@ function remoteInput(): CallbackInput {
     redirectUri: 'https://control.example.com/api/v1/oauth-callback/remote',
     // RFC 9207 issuer echoed by the authorization response; matches the pinned
     // `issForCallback` so the mix-up defence passes and the exchange proceeds.
-    iss: 'https://mcp.notion.com',
+    iss: 'https://mcp.sentry.dev',
   }
 }
 

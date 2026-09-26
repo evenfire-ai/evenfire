@@ -104,12 +104,33 @@ function gatewayWithContext(contextName = 'ctx-a'): MockGateway {
   return gw
 }
 
-// Real DiscoveryResult, derived from the real Notion probe fixtures (T1).
+// Real DiscoveryResult, derived from the real Notion probe fixtures (T1). Notion's
+// real AS metadata does NOT advertise RFC 9207 (see oauth.discovery.test.ts), so this
+// carries NO `issForCallback` — the fixture the install must now REJECT (R3F-H1).
 let notionResult: DiscoveryResult
+// A DiscoveryResult that DOES advertise RFC 9207, derived from the real producer (T1)
+// by documented substitution (like `bodyBearerResult`): the real Notion pilot with
+// `authorization_response_iss_parameter_supported:true` added to the AS metadata, then
+// run through the real discovery client so `issForCallback` is producer-derived, not
+// hand-authored. Every remote install SUCCESS path needs an RFC-9207 AS now that the
+// install guard is fail-closed; all other endpoints stay Notion's, so success-path
+// assertions are unchanged except for the added `issForCallback`.
+let rfc9207Result: DiscoveryResult
 // A DiscoveryResult whose resource requires the token in the BODY, derived from the
 // real producer (T1) by documented substitution of the Notion PRM's
 // `bearer_methods_supported` to `["body"]` — the only field changed.
 let bodyBearerResult: DiscoveryResult
+
+/**
+ * Documented T1 substitution: add `authorization_response_iss_parameter_supported`
+ * to a pilot's AS metadata (parsed-object level, key-order agnostic) so the real
+ * discovery producer derives `issForCallback`. Never hand-authors the DiscoveryResult.
+ */
+function withRfc9207<T extends { as: { json: string } }>(pilot: T): T {
+  const as = JSON.parse(pilot.as.json)
+  as.authorization_response_iss_parameter_supported = true
+  return { ...pilot, as: { ...pilot.as, json: JSON.stringify(as) } }
+}
 
 beforeAll(async () => {
   const actual = await vi.importActual<typeof import('../src/oauth/discovery.js')>(
@@ -121,6 +142,14 @@ beforeAll(async () => {
   })
   if (!outcome.ok) throw new Error(`fixture discovery failed: ${outcome.error.kind}`)
   notionResult = outcome.result
+
+  const rfc9207Outcome = await actual.discoverRemoteOAuth(PILOTS.notion.mcpUrl, {
+    transport: makeDiscoveryTransport(withRfc9207(PILOTS.notion)),
+    resolveDns: async () => ['93.184.216.34'],
+  })
+  if (!rfc9207Outcome.ok)
+    throw new Error(`rfc9207 fixture discovery failed: ${rfc9207Outcome.error.kind}`)
+  rfc9207Result = rfc9207Outcome.result
 
   const vercelOutcome = await actual.discoverRemoteOAuth(VERCEL_PILOT.mcpUrl, {
     transport: makeDiscoveryTransport(VERCEL_PILOT),
@@ -257,7 +286,7 @@ describe('POST /admin/mcp-servers/remote (install saga)', () => {
   const CIMD_SELF_CLIENT_ID = 'https://control.example.com/api/v1/.well-known/evenfire-mcp-client'
 
   it('CIMD (public): creates the CR with the pinned spec.oauth shape + attaches to Context', async () => {
-    mockDiscovery(notionResult)
+    mockDiscovery(rfc9207Result)
     const gw = gatewayWithContext('ctx-a')
     const res = await request(makeApp(gw)).post('/admin/mcp-servers/remote').send({
       serverName: 'notion-remote',
@@ -289,6 +318,8 @@ describe('POST /admin/mcp-servers/remote (install saga)', () => {
       tokenEndpoint: 'https://mcp.notion.com/token',
       registrationEndpoint: 'https://mcp.notion.com/register',
       issuer: 'https://mcp.notion.com',
+      // RFC 9207 advertised (rfc9207Result) ⇒ pinned for the shared remote callback.
+      issForCallback: 'https://mcp.notion.com',
       resource: 'https://mcp.notion.com',
       grantScope: 'user',
       scopes: ['default'],
@@ -301,6 +332,41 @@ describe('POST /admin/mcp-servers/remote (install saga)', () => {
       spec: { mcpServers?: string[] }
     }
     expect(ctx.spec.mcpServers).toContain('notion-remote')
+  })
+
+  // R3F-H1 (regression of R3-H2): the shared remote callback fails closed without a
+  // pinned issuer, so an install against an AS that does NOT advertise RFC 9207 would
+  // create a server that can never complete OAuth (user hits 400 at consent). The
+  // install must reject up front. `notionResult` is the REAL Notion discovery (no
+  // `authorization_response_iss_parameter_supported`), derived from the real producer —
+  // NOT hand-authored. Fails at parent a835d7130 (install proceeds, 201 + CR).
+  it('rejects a remote install against an AS without RFC 9207 → 422, no CR, no Secret', async () => {
+    // Self-check the T1 fixture: real Notion genuinely lacks the issuer pin.
+    expect(notionResult.issForCallback).toBeUndefined()
+    mockDiscovery(notionResult)
+    const gw = gatewayWithContext('ctx-a')
+    const createResourceSpy = vi.spyOn(gw, 'createResource')
+    const createSecretSpy = vi.spyOn(gw, 'createSecret')
+
+    const res = await request(makeApp(gw)).post('/admin/mcp-servers/remote').send({
+      serverName: 'no-rfc9207-remote',
+      contextRef: 'ctx-a',
+      baseUrl: 'https://mcp.notion.com/mcp',
+      mode: 'pre-registered',
+      clientId: 'client-abc',
+      clientSecret: 'shhh-secret',
+    })
+
+    // Observable outcome (T4): rejected before any write.
+    expect(res.status).toBe(422)
+    expect(res.body.error).toBe('issuer_binding_required')
+    expect(createResourceSpy).not.toHaveBeenCalled()
+    expect(createSecretSpy).not.toHaveBeenCalled()
+    await expect(gw.getResource('mcpservers', 'no-rfc9207-remote', NS)).rejects.toThrow()
+    const ctx = (await gw.getResource('contexts', 'ctx-a', NS)) as {
+      spec: { mcpServers?: string[] }
+    }
+    expect(ctx.spec.mcpServers ?? []).not.toContain('no-rfc9207-remote')
   })
 
   it('body-bearer resource: rejects at admission and creates no CR (the runtime cannot honor bearerInBody)', async () => {
@@ -327,7 +393,7 @@ describe('POST /admin/mcp-servers/remote (install saga)', () => {
   })
 
   it('pre-registered confidential: creates the client Secret + references it in spec.oauth', async () => {
-    mockDiscovery(notionResult)
+    mockDiscovery(rfc9207Result)
     const gw = gatewayWithContext('ctx-a')
     const res = await request(makeApp(gw)).post('/admin/mcp-servers/remote').send({
       serverName: 'slack-remote',
@@ -411,7 +477,7 @@ describe('POST /admin/mcp-servers/remote (install saga)', () => {
   })
 
   it('rolls back the Secret when the CR create fails', async () => {
-    mockDiscovery(notionResult)
+    mockDiscovery(rfc9207Result)
     const gw = gatewayWithContext('ctx-a')
     const k8sErr = Object.assign(new Error('already exists'), { code: 409 })
     vi.spyOn(gw, 'createResource').mockRejectedValueOnce(k8sErr)
@@ -429,7 +495,7 @@ describe('POST /admin/mcp-servers/remote (install saga)', () => {
   })
 
   it('rolls back the CR AND Secret when the Context attach fails', async () => {
-    mockDiscovery(notionResult)
+    mockDiscovery(rfc9207Result)
     // Context does NOT exist → getResource('contexts', …) throws K8sNotFoundError.
     const gw = new MockGateway(NS)
     const res = await request(makeApp(gw)).post('/admin/mcp-servers/remote').send({
@@ -447,7 +513,7 @@ describe('POST /admin/mcp-servers/remote (install saga)', () => {
   })
 
   it('fenced Secret rollback: a homonym recreated with a NEW uid survives the CR-create rollback (P1)', async () => {
-    mockDiscovery(notionResult)
+    mockDiscovery(rfc9207Result)
     const gw = gatewayWithContext('ctx-a')
     const secretName = 'race-remote-oauth-client'
 
@@ -487,7 +553,7 @@ describe('POST /admin/mcp-servers/remote (install saga)', () => {
   })
 
   it('fenced CR rollback: a homonym recreated with a NEW uid survives the Context-attach rollback (P1)', async () => {
-    mockDiscovery(notionResult)
+    mockDiscovery(rfc9207Result)
     const gw = gatewayWithContext('ctx-a')
     const serverName = 'race2-remote'
 
@@ -526,7 +592,7 @@ describe('POST /admin/mcp-servers/remote (install saga)', () => {
   })
 
   it('forces the namespace server-side (caller-supplied namespace is ignored)', async () => {
-    mockDiscovery(notionResult)
+    mockDiscovery(rfc9207Result)
     const gw = gatewayWithContext('ctx-a')
     const res = await request(makeApp(gw)).post('/admin/mcp-servers/remote').send({
       serverName: 'ns-remote',
@@ -603,7 +669,7 @@ describe('POST /admin/mcp-servers/remote (install saga)', () => {
 
   // An inconclusive probe (5xx) must NOT block: the install proceeds to 201.
   it('install proceeds to 201 when the transport probe is inconclusive (5xx)', async () => {
-    mockDiscovery(notionResult)
+    mockDiscovery(rfc9207Result)
     const gw = gatewayWithContext('ctx-a')
     const res = await request(makeApp(gw, inconclusiveProbe))
       .post('/admin/mcp-servers/remote')
@@ -631,22 +697,39 @@ describe('POST /admin/mcp-servers/remote — DCR install saga (C2)', () => {
   // probe with CIMD support removed (→ DCR) and, for confidential, `none` dropped.
   let dcrPublicResult: DiscoveryResult
   let dcrConfidentialResult: DiscoveryResult
+  // Real DCR DiscoveryResult WITHOUT RFC 9207 (pristine `dcrPilot`, no substitution):
+  // the fixture the install must reject before any AS registration (R3F-H1).
+  let dcrNoIssResult: DiscoveryResult
 
   beforeAll(async () => {
     const actual = await vi.importActual<typeof import('../src/oauth/discovery.js')>(
       '../src/oauth/discovery.js'
     )
+    const noIssPilot = dcrPilot('public')
+    const noIssOutcome = await actual.discoverRemoteOAuth(noIssPilot.mcpUrl, {
+      transport: makeDiscoveryTransport(noIssPilot),
+      resolveDns: PUBLIC_IP,
+    })
+    if (!noIssOutcome.ok)
+      throw new Error(`dcr no-iss fixture discovery failed: ${noIssOutcome.error.kind}`)
+    expect(noIssOutcome.result.issForCallback).toBeUndefined()
+    dcrNoIssResult = noIssOutcome.result
+
     for (const [mode, assign] of [
       ['public', (r: DiscoveryResult) => (dcrPublicResult = r)],
       ['confidential', (r: DiscoveryResult) => (dcrConfidentialResult = r)],
     ] as const) {
-      const pilot = dcrPilot(mode)
+      // RFC 9207 is mandatory for a remote install (R3F-H1); a DCR AS that omits it
+      // is rejected before registration. Add the advertisement via the same
+      // producer-derived substitution so the DCR success paths exercise the saga.
+      const pilot = withRfc9207(dcrPilot(mode))
       const outcome = await actual.discoverRemoteOAuth(pilot.mcpUrl, {
         transport: makeDiscoveryTransport(pilot),
         resolveDns: PUBLIC_IP,
       })
       if (!outcome.ok) throw new Error(`dcr fixture discovery failed: ${outcome.error.kind}`)
       expect(outcome.result.registrationMode).toBe('dcr')
+      expect(outcome.result.issForCallback).toBeTruthy()
       assign(outcome.result)
     }
   })
@@ -676,6 +759,37 @@ describe('POST /admin/mcp-servers/remote — DCR install saga (C2)', () => {
     )
     return app
   }
+
+  // R3F-H1: a DCR AS without RFC 9207 must be rejected BEFORE the DCR registration
+  // POST (saga step 0), so no throwaway client is minted at the AS, no dynamic_clients
+  // row is written, and no CR is created. Fails at parent a835d7130 (install registers
+  // + persists + creates the CR). `dcrNoIssResult` is producer-derived (no iss), T1.
+  it('rejects a DCR install against an AS without RFC 9207 → 422, no DCR registration, no row, no CR', async () => {
+    vi.mocked(discoverRemoteOAuth).mockResolvedValue({ ok: true, result: dcrNoIssResult })
+    const { db, rows } = makeInMemoryDynamicClientsDb()
+    const { transport, calls } = makeDcrTransport({
+      responseJson: JSON.stringify(DCR_PUBLIC_REGISTRATION_RESPONSE),
+    })
+    const gw = gatewayWithContext('ctx-a')
+    const res = await request(
+      makeAppWithDeps(gw, { db, dcr: { transport, resolveDns: PUBLIC_IP } })
+    )
+      .post('/admin/mcp-servers/remote')
+      .send({
+        serverName: 'no-rfc9207-dcr',
+        contextRef: 'ctx-a',
+        baseUrl: 'https://mcp.notion.com/mcp',
+        mode: 'dcr',
+      })
+
+    // Observable outcome (T4): rejected before any AS registration or write.
+    expect(res.status).toBe(422)
+    expect(res.body.error).toBe('issuer_binding_required')
+    // No DCR POST to the AS, no persisted dynamic_clients row, no CR.
+    expect(calls).toHaveLength(0)
+    expect(rows.size).toBe(0)
+    await expect(gw.getResource('mcpservers', 'no-rfc9207-dcr', NS)).rejects.toThrow()
+  })
 
   // T3(a) — fails at parent 9e4677652: DCR install returns 400 dcr_not_available there.
   it('public DCR → 201, persists a dynamic_clients row, sets spec.oauth.id, no Secret refs', async () => {

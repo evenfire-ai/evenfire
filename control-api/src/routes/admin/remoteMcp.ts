@@ -487,6 +487,29 @@ export function createAdminRemoteMcpRouter(
         )
       }
 
+      // RFC 9207 issuer binding is MANDATORY on the remote lane. Every remote mode
+      // (dcr/cimd/pre-registered) lands on the SHARED remote callback
+      // (`/oauth-callback/remote`), whose mix-up defence fails closed when no issuer is
+      // pinned (`issuer_binding_required`, R3-H2). `discovery.issForCallback` is set iff
+      // the AS advertised `authorization_response_iss_parameter_supported`. Reject at
+      // install — BEFORE any AS registration (DCR saga step 0) or K8s/store write — so
+      // the operator learns now instead of the user hitting a 400 at consent against a
+      // server that can never complete OAuth (the regression this closes, R3F-H1).
+      // Ordered AFTER the bearerInBody/mode-match/transport admission checks so their
+      // more specific rejections keep precedence; still before any write.
+      if (!discovery.issForCallback) {
+        log.warn(
+          { event: 'remote_oauth_issuer_binding_unsupported', serverName: body.serverName },
+          'remote install rejected: authorization server does not advertise RFC 9207 (authorization_response_iss_parameter_supported)'
+        )
+        res.status(422).json({
+          error: 'issuer_binding_required',
+          message:
+            'the authorization server does not advertise RFC 9207 (authorization_response_iss_parameter_supported); a remote OAuth install requires it',
+        })
+        return
+      }
+
       // Client mode: pre-registered/CIMD are fixed by the mode; DCR derives it from
       // the AS auth methods (public iff `none`, else confidential) — NOT the body.
       const clientMode: 'public' | 'confidential' =
