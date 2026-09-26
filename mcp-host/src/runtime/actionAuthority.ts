@@ -9,6 +9,7 @@ import type {
   LlmPort,
   ReasoningPort,
 } from '../core/interfaces'
+import type { Tool, ToolRegistry } from '../core/interfaces'
 import type { TokenCounter } from '../core/tokenizer/tokenCounter'
 import type {
   ChatMessage,
@@ -19,6 +20,7 @@ import type {
   RespondResult,
   ToolCompletionRequest,
   ToolCompletionResponse,
+  ToolOutput,
   ToolResult,
 } from '../core/types'
 
@@ -125,6 +127,54 @@ export function withRuntimeActionAuthority(
       context: ReasoningContext,
       results: ToolResult[]
     ): Promise<RespondResult> => execute(() => reasoning.continueWithToolResults(context, results)),
+  }
+}
+
+/** Rechecks the message authority immediately before every registered tool effect. */
+export function withRuntimeActionAuthorityForToolRegistry(
+  registry: ToolRegistry,
+  binding: AuthorityBindingV2,
+  checkpoint: RuntimeActionCheckpoint
+): ToolRegistry {
+  const wrappedTools = new WeakMap<Tool, Tool>()
+  return {
+    get(name) {
+      const tool = registry.get(name)
+      if (!tool) return null
+      const cached = wrappedTools.get(tool)
+      if (cached) return cached
+      const wrapped: Tool = {
+        name: () => tool.name(),
+        description: () => tool.description(),
+        parametersSchema: () => tool.parametersSchema(),
+        execute: (params, context) =>
+          executeAuthorityBoundEffect({
+            binding,
+            operationId: 'chat.message.invoke',
+            checkpoint,
+            effect: () => tool.execute(params, context),
+          }),
+        requiresSanitization: () => tool.requiresSanitization(),
+        requiresApproval: () => tool.requiresApproval(),
+        ...(tool.validateParams
+          ? { validateParams: (params: Record<string, unknown>) => tool.validateParams!(params) }
+          : {}),
+        ...(tool.traceDescriptor
+          ? {
+              traceDescriptor: (params: Record<string, unknown>, output?: ToolOutput) =>
+                tool.traceDescriptor!(params, output),
+            }
+          : {}),
+        ...(tool.supportsProgressOutput
+          ? { supportsProgressOutput: () => tool.supportsProgressOutput!() }
+          : {}),
+        ...(tool.timeoutCleanupMs ? { timeoutCleanupMs: () => tool.timeoutCleanupMs!() } : {}),
+      }
+      wrappedTools.set(tool, wrapped)
+      return wrapped
+    },
+    listDefinitions: () => registry.listDefinitions(),
+    register: tool => registry.register(tool),
   }
 }
 

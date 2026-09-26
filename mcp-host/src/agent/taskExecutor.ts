@@ -115,6 +115,7 @@ import {
   withRuntimeActionAuthority,
   withRuntimeActionAuthorityForContextManager,
   withRuntimeActionAuthorityForLlmPort,
+  withRuntimeActionAuthorityForToolRegistry,
 } from '../runtime/actionAuthority'
 import { resolveCronTaskSessionKey, serializeSessionKey } from '../session'
 import { GovernedRunReporter, UsageReporter } from '../usage/usageReporter.js'
@@ -1496,6 +1497,11 @@ export class TaskExecutor {
     }
 
     const { registry, loopController, bridge } = await this.buildToolRegistry()
+    const authorityBinding = this.task.sourceMessage?.authorityV2
+    const checkpoint = this.deps.actionAuthorityCheckpoint ?? (async () => 'unavailable' as const)
+    const actionRegistry = authorityBinding
+      ? withRuntimeActionAuthorityForToolRegistry(registry, authorityBinding, checkpoint)
+      : registry
 
     // T2.2 — when the prompt-cache flag is ON and we have the dependencies
     // wired (PromptCache + WorkspaceService), build the tiered
@@ -1513,13 +1519,11 @@ export class TaskExecutor {
       raw => this.deps.conversationManager.recordContextBreakdown(conversation, raw),
       this.contextMaxTokens()
     )
-    const parts = await this.maybeGetOrBuildParts(registry.listDefinitions())
+    const parts = await this.maybeGetOrBuildParts(actionRegistry.listDefinitions())
     const identity = parts ? undefined : await this.buildSystemIdentity(llmPort)
     const unguardedReasoning = parts
       ? reasoningFactory.createWithParts(parts)
       : reasoningFactory.create(identity)
-    const authorityBinding = this.task.sourceMessage?.authorityV2
-    const checkpoint = this.deps.actionAuthorityCheckpoint ?? (async () => 'unavailable' as const)
     const reasoning = authorityBinding
       ? withRuntimeActionAuthority(unguardedReasoning, authorityBinding, checkpoint)
       : unguardedReasoning
@@ -1588,7 +1592,7 @@ export class TaskExecutor {
 
     const loopConfig = buildLoopConfig({
       reasoning,
-      toolRegistry: registry,
+      toolRegistry: actionRegistry,
       safety: new BasicSafety(this.deps.secretEntriesProvider),
       events: this.buildTrackingEventEmitter(),
       // P.5: conversation is always set by the time buildLoopConfig runs —
