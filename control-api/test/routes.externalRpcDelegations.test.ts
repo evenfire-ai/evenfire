@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
+import { config } from '../src/config.js'
 import { knownBehavior } from '../src/services/access/accessPath.js'
 import { prepareActionOperationTarget } from '../src/services/access/actionMessageId.js'
 import { canonicalEnvironmentId } from '../src/services/access/operationalAccessProjection.js'
@@ -69,10 +70,10 @@ const accessPathId = `ap1_${'a'.repeat(43)}`
 const authorizationRevision = `ar1_${'b'.repeat(43)}`
 const behaviorBindingHash = `bh2_${'c'.repeat(43)}`
 
-function app() {
+function app(gateway: Parameters<typeof createExternalRpcDelegationsRouter>[0] = {} as never) {
   const value = express()
   value.use(express.json())
-  value.use(createExternalRpcDelegationsRouter({} as never))
+  value.use(createExternalRpcDelegationsRouter(gateway))
   return value
 }
 
@@ -206,6 +207,241 @@ describe('POST /external/rpc/delegations', () => {
     expect(mocks.authorize.mock.invocationCallOrder[0]).toBeLessThan(
       tokenIssuer.issueUserDelegationV2.mock.invocationCallOrder[0]!
     )
+  })
+
+  it('excludes OAuth MCP destinations before v2 delegation signing', async () => {
+    const mcpResource = canonicalResourceIdentity({
+      environmentId: canonicalEnvironmentId(),
+      type: 'mcp_server',
+      logicalId: `${config.mcpServersNamespace}/oauth-weather`,
+    })
+    const mcpTarget = {
+      serverNamespace: config.mcpServersNamespace,
+      serverName: 'oauth-weather',
+      toolName: 'forecast',
+    }
+    const mcpPrepared = prepareActionOperationTarget({
+      operationId: 'mcp.invoke',
+      resource: mcpResource,
+      operationTarget: mcpTarget,
+      allocateMessageId: () => {
+        throw new Error('MCP invocation must not allocate a chat message ID')
+      },
+    })
+    const behavior = {
+      capabilities: ['mcp_server.use'],
+      budget: knownBehavior(null),
+      credentialPolicy: knownBehavior(null),
+      approvalPolicy: knownBehavior(null),
+      filesystemScope: knownBehavior(null),
+      runtime: knownBehavior('ctx/weather'),
+      providerModelPolicy: knownBehavior(null),
+      audit: knownBehavior(null),
+    }
+    mocks.authorize.mockResolvedValueOnce({
+      status: 'allowed',
+      context: {
+        version: 2,
+        principal: { userId, sid, sessionVersion: 1 },
+        operationId: 'mcp.invoke',
+        resource: mcpResource,
+        target: mcpPrepared.target,
+        targetHash: mcpPrepared.targetHash,
+        accessPathId,
+        authorizationRevision,
+        behaviorBindingHash,
+        pathKind: 'direct',
+        effectiveTeamId: null,
+        selectedPathCapabilities: ['mcp_server.use'],
+        behavior,
+        validUntil: null,
+      },
+      behaviorBindingHash,
+      preparedTarget: mcpPrepared,
+      operation: {},
+    })
+    const getResourceExact = vi.fn(async () => ({
+      metadata: { name: 'oauth-weather', namespace: config.mcpServersNamespace },
+      spec: {
+        enabled: true,
+        auth: { type: 'oauth' },
+        transport: { type: 'streamableHttp', url: 'http://oauth-weather/mcp' },
+      },
+    }))
+
+    const response = await request(app({ getResourceExact } as never))
+      .post('/external/rpc/delegations')
+      .set('x-user-session-token', 'session-v2')
+      .set('x-evenfire-access-path-id', accessPathId)
+      .set('x-evenfire-authorization-revision', authorizationRevision)
+      .send({
+        version: 2,
+        operationId: 'mcp.invoke',
+        resource: { type: 'mcp_server', logicalId: mcpResource.logicalId },
+        target: mcpTarget,
+      })
+
+    expect(response.status).toBe(403)
+    expect(response.body).toMatchObject({ error: { code: 'forbidden' } })
+    expect(getResourceExact).toHaveBeenCalledWith(
+      'mcpservers',
+      'oauth-weather',
+      config.mcpServersNamespace,
+      expect.any(Object)
+    )
+    expect(tokenIssuer.issueUserDelegationV2).not.toHaveBeenCalled()
+  })
+
+  it('keeps supported non-OAuth MCP invocation on the real v2 token producer', async () => {
+    const mcpResource = canonicalResourceIdentity({
+      environmentId: canonicalEnvironmentId(),
+      type: 'mcp_server',
+      logicalId: `${config.mcpServersNamespace}/plain-weather`,
+    })
+    const mcpTarget = {
+      serverNamespace: config.mcpServersNamespace,
+      serverName: 'plain-weather',
+      toolName: 'forecast',
+    }
+    const mcpPrepared = prepareActionOperationTarget({
+      operationId: 'mcp.invoke',
+      resource: mcpResource,
+      operationTarget: mcpTarget,
+      allocateMessageId: () => {
+        throw new Error('MCP invocation must not allocate a chat message ID')
+      },
+    })
+    mocks.authorize.mockResolvedValueOnce({
+      status: 'allowed',
+      context: {
+        version: 2,
+        principal: { userId, sid, sessionVersion: 1 },
+        operationId: 'mcp.invoke',
+        resource: mcpResource,
+        target: mcpPrepared.target,
+        targetHash: mcpPrepared.targetHash,
+        accessPathId,
+        authorizationRevision,
+        behaviorBindingHash,
+        pathKind: 'direct',
+        effectiveTeamId: null,
+        selectedPathCapabilities: ['mcp_server.use'],
+        behavior: {
+          capabilities: ['mcp_server.use'],
+          budget: knownBehavior(null),
+          credentialPolicy: knownBehavior(null),
+          approvalPolicy: knownBehavior(null),
+          filesystemScope: knownBehavior(null),
+          runtime: knownBehavior('ctx/weather'),
+          providerModelPolicy: knownBehavior(null),
+          audit: knownBehavior(null),
+        },
+        validUntil: null,
+      },
+      behaviorBindingHash,
+      preparedTarget: mcpPrepared,
+      operation: {},
+    })
+    const getResourceExact = vi.fn(async () => ({
+      metadata: { name: 'plain-weather', namespace: config.mcpServersNamespace },
+      spec: {
+        enabled: true,
+        auth: { type: 'none' },
+        transport: { type: 'streamableHttp', url: 'http://plain-weather/mcp' },
+      },
+    }))
+
+    const response = await request(app({ getResourceExact } as never))
+      .post('/external/rpc/delegations')
+      .set('x-user-session-token', 'session-v2')
+      .set('x-evenfire-access-path-id', accessPathId)
+      .set('x-evenfire-authorization-revision', authorizationRevision)
+      .send({
+        version: 2,
+        operationId: 'mcp.invoke',
+        resource: { type: 'mcp_server', logicalId: mcpResource.logicalId },
+        target: mcpTarget,
+      })
+
+    expect(response.status).toBe(200)
+    expect(verifyUserDelegationV2(response.body.delegationToken)).toMatchObject({
+      operationIds: ['mcp.invoke'],
+      resource: mcpResource,
+      targets: { 'mcp.invoke': mcpTarget },
+    })
+    expect(getResourceExact).toHaveBeenCalledOnce()
+    expect(tokenIssuer.issueUserDelegationV2).toHaveBeenCalledOnce()
+  })
+
+  it('fails closed when exact MCP destination lookup is unavailable', async () => {
+    const mcpResource = canonicalResourceIdentity({
+      environmentId: canonicalEnvironmentId(),
+      type: 'mcp_server',
+      logicalId: `${config.mcpServersNamespace}/plain-weather`,
+    })
+    const mcpTarget = {
+      serverNamespace: config.mcpServersNamespace,
+      serverName: 'plain-weather',
+      toolName: 'forecast',
+    }
+    const mcpPrepared = prepareActionOperationTarget({
+      operationId: 'mcp.invoke',
+      resource: mcpResource,
+      operationTarget: mcpTarget,
+      allocateMessageId: () => {
+        throw new Error('MCP invocation must not allocate a chat message ID')
+      },
+    })
+    mocks.authorize.mockResolvedValueOnce({
+      status: 'allowed',
+      context: {
+        version: 2,
+        principal: { userId, sid, sessionVersion: 1 },
+        operationId: 'mcp.invoke',
+        resource: mcpResource,
+        target: mcpPrepared.target,
+        targetHash: mcpPrepared.targetHash,
+        accessPathId,
+        authorizationRevision,
+        behaviorBindingHash,
+        pathKind: 'direct',
+        effectiveTeamId: null,
+        selectedPathCapabilities: ['mcp_server.use'],
+        behavior: {
+          capabilities: ['mcp_server.use'],
+          budget: knownBehavior(null),
+          credentialPolicy: knownBehavior(null),
+          approvalPolicy: knownBehavior(null),
+          filesystemScope: knownBehavior(null),
+          runtime: knownBehavior('ctx/weather'),
+          providerModelPolicy: knownBehavior(null),
+          audit: knownBehavior(null),
+        },
+        validUntil: null,
+      },
+      behaviorBindingHash,
+      preparedTarget: mcpPrepared,
+      operation: {},
+    })
+    const getResourceExact = vi.fn(async () => {
+      throw new Error('Kubernetes API unavailable')
+    })
+
+    const response = await request(app({ getResourceExact } as never))
+      .post('/external/rpc/delegations')
+      .set('x-user-session-token', 'session-v2')
+      .set('x-evenfire-access-path-id', accessPathId)
+      .set('x-evenfire-authorization-revision', authorizationRevision)
+      .send({
+        version: 2,
+        operationId: 'mcp.invoke',
+        resource: { type: 'mcp_server', logicalId: mcpResource.logicalId },
+        target: mcpTarget,
+      })
+
+    expect(response.status).toBe(503)
+    expect(response.body).toMatchObject({ error: { code: 'authority_unavailable' } })
+    expect(tokenIssuer.issueUserDelegationV2).not.toHaveBeenCalled()
   })
 
   it.each([
