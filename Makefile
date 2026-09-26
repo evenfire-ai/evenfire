@@ -137,6 +137,10 @@ test-unit-all: test-service-matrix ## Run unit tests across all services
 test-service-matrix: ## Check local test coverage against the CI service matrix
 	@node scripts/dev/check-test-services.cjs $(TEST_SERVICES)
 
+.PHONY: autoresearch-checks
+autoresearch-checks: ## Run the local checks used by AutoResearch hard gates
+	@bash scripts/dev/autoresearch-checks.sh
+
 .PHONY: test-codex-subscription-t0
 test-codex-subscription-t0: ## Run the Codex subscription T0 aggregator (counts, no skips)
 	@bash scripts/tests/test-codex-subscription-t0.sh
