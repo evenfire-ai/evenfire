@@ -806,10 +806,12 @@ function remoteGrantKeyFromRow(row: RemoteGrantWindowDbRow): OAuthGrantKey {
  * via `refreshGenericGrant`), so an unattended one has the same silent-expiry risk
  * and belongs in the sweep (R1-L1). The DCR secret-expiry sweep stays remote-only
  * — dynamic clients are a remote-lane concept — so this function keeps its name.
- * A snapshot SELECT with NO lock — the cron re-claims each row under
- * `FOR UPDATE SKIP LOCKED` in its own short transaction
- * ({@link claimRemoteGrantForRefresh}) so no pool connection is pinned across the
- * refresh POSTs.
+ * A snapshot SELECT with NO lock — this enumeration does not hold a connection
+ * across the whole sweep; the cron re-claims each row under `FOR UPDATE SKIP
+ * LOCKED` in its OWN short transaction ({@link claimRemoteGrantForRefresh}), and
+ * that per-row transaction DOES pin its connection across ITS refresh POST,
+ * bounded by the carrier idle-in-transaction timeout
+ * (`boundOAuthRefreshLockIdleTimeout`).
  *
  * Filter (§4 eligibility + window): `provider IN ('remote','generic')`, non-null
  * expiry in `(now+Br, now+Bp]`, and `grant_kind='shared' OR (grant_kind='user' AND

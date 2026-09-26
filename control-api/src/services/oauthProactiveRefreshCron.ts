@@ -22,8 +22,8 @@
  * (`OAUTH_PROACTIVE_REFRESH_CRON_ENABLED`).
  */
 import { config } from '../config.js'
-import type { DbClient } from '../db.js'
-import { pool, withTransaction } from '../db.js'
+import type { DbClient, DbTransactionClient } from '../db.js'
+import { boundOAuthRefreshLockIdleTimeout, pool, withTransaction } from '../db.js'
 import type { K8sGateway } from '../k8s.js'
 import {
   RecipeNotFoundError,
@@ -78,8 +78,13 @@ export interface ProactiveRefreshSweepOptions {
 export interface ProactiveRefreshSweepDeps {
   /** Snapshot reads (candidate enumeration + DCR list) — no lock, no txn. */
   db: DbClient
-  /** Runs `work` inside one short transaction (BEGIN…COMMIT/ROLLBACK). */
-  runInTransaction: <T>(work: (txDb: DbClient) => Promise<T>) => Promise<T>
+  /**
+   * Runs `work` inside one short transaction (BEGIN…COMMIT/ROLLBACK). The client
+   * is transaction-scoped (branded {@link DbTransactionClient}) so the sweep can
+   * bound the carrier's idle timeout across the in-transaction refresh POST, same
+   * as the reactive path.
+   */
+  runInTransaction: <T>(work: (txDb: DbTransactionClient) => Promise<T>) => Promise<T>
   encryptionKey: Buffer
   fetchFn: typeof fetch
 }
@@ -203,6 +208,12 @@ export async function runProactiveRefreshSweep(
         // reactive path already renewed it out of the window since the snapshot.
         const claimed = await claimRemoteGrantForRefresh(txDb, key, window)
         if (!claimed) return 'skipped' as const
+        // The refresh POST runs INSIDE this transaction while it holds the row
+        // lock, so bound the idle-in-transaction tenancy just like the reactive
+        // path: `withTransaction` sets no such timeout, and if the AS hangs mid
+        // POST neither statement_timeout (no statement is running) nor the
+        // transport abort guarantees the lock + pool connection is released.
+        await boundOAuthRefreshLockIdleTimeout(txDb)
         // requireBackground is PER-grantKind, not fixed. SEC-5 governs `user`
         // grants only (unattended reuse needs explicit background consent), so
         // those keep `true` — redundant with the enumeration filter, kept as

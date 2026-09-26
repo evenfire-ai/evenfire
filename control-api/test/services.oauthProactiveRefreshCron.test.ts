@@ -9,7 +9,8 @@
  * by the real-Postgres suite and the reactive `tokenHelper` tests.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { DbClient } from '../src/db.js'
+import type { DbClient, DbTransactionClient } from '../src/db.js'
+import { OAUTH_REFRESH_LOCK_CARRIER_IDLE_TIMEOUT_MS } from '../src/db.js'
 import type { K8sGateway } from '../src/k8s.js'
 import type { ExpiringDynamicClient } from '../src/oauth/dynamicClientStore.js'
 import { listExpiringDynamicClients } from '../src/oauth/dynamicClientStore.js'
@@ -52,9 +53,13 @@ vi.mock('../src/oauth/tokenHelper.js', async () => {
 const OPTS = { proactiveBufferMs: 300_000, reactiveBufferMs: 60_000, dcrWarnMs: 604_800_000 }
 const gateway = {} as K8sGateway
 
-const fakeTx: DbClient = { query: vi.fn(async () => ({ rows: [], rowCount: 0 })) }
+// Transaction-scoped spy client: its `.query` records every statement the sweep
+// issues inside the refresh transaction (e.g. the SET LOCAL idle timeout). The
+// brand is nominal-only, so the cast is the test's blessed mint point.
+const fakeTxQuery = vi.fn(async () => ({ rows: [], rowCount: 0 }))
+const fakeTx = { query: fakeTxQuery } as unknown as DbTransactionClient
 const deps: ProactiveRefreshSweepDeps = {
-  db: { query: vi.fn(async () => ({ rows: [], rowCount: 0 })) },
+  db: { query: vi.fn(async () => ({ rows: [], rowCount: 0 })) } as DbClient,
   runInTransaction: work => work(fakeTx),
   encryptionKey: Buffer.alloc(32),
   fetchFn: vi.fn() as unknown as typeof fetch,
@@ -119,6 +124,34 @@ describe('runProactiveRefreshSweep — token candidates', () => {
     expect(mockedGetToken).toHaveBeenCalledWith(
       expect.objectContaining({ grantKind: 'user' }),
       expect.objectContaining({ db: fakeTx, refreshBufferMs: OPTS.proactiveBufferMs })
+    )
+  })
+
+  it('bounds the carrier idle timeout inside the refresh tx, BEFORE the refresh POST', async () => {
+    // Defense-in-depth symmetry with the reactive path (reactiveTokenHelper.ts):
+    // the refresh POST runs inside the transaction that holds the row lock, so
+    // the sweep MUST emit `SET LOCAL idle_in_transaction_session_timeout` on the
+    // tx client before handing off to getAccessToken (the POST). Assert the
+    // observable statement on the tx client + its ordering, not an internal spy.
+    // Fails against the pre-fix head, which never emitted this statement.
+    mockedEnumerate.mockResolvedValue([sharedKey('srv-a', 'ctx-1')])
+    await runProactiveRefreshSweep(gateway, OPTS, deps)
+
+    const idleCallIdx = fakeTxQuery.mock.calls.findIndex(
+      ([text]) =>
+        typeof text === 'string' &&
+        text.includes("set_config('idle_in_transaction_session_timeout'")
+    )
+    expect(idleCallIdx).toBeGreaterThanOrEqual(0)
+    // SET LOCAL (third positional arg true) so it reverts on COMMIT/ROLLBACK.
+    expect(fakeTxQuery.mock.calls[idleCallIdx][0]).toContain('$1, true)')
+    expect(fakeTxQuery.mock.calls[idleCallIdx][1]).toEqual([
+      String(OAUTH_REFRESH_LOCK_CARRIER_IDLE_TIMEOUT_MS),
+    ])
+    // Emitted BEFORE the refresh POST (getAccessToken) — else the lock+connection
+    // is unbounded across a hung AS, the exact gap this fix closes.
+    expect(fakeTxQuery.mock.invocationCallOrder[idleCallIdx]).toBeLessThan(
+      mockedGetToken.mock.invocationCallOrder[0]
     )
   })
 
