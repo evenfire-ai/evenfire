@@ -5,6 +5,48 @@ export type RpcDelegationV2Response = Readonly<{
   messageId?: string
 }>
 
+const MESSAGE_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+const COMPACT_JWT_SEGMENT_PATTERN = /^[A-Za-z0-9_-]+$/
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+function parseRpcDelegationResponse(value: unknown, requestBody: unknown): RpcDelegationV2Response {
+  if (
+    !isRecord(value) ||
+    Object.keys(value).some(key => !['delegationToken', 'messageId'].includes(key))
+  ) {
+    throw new Error('invalid_rpc_delegation_response')
+  }
+  const token = value.delegationToken
+  const segments = typeof token === 'string' ? token.split('.') : []
+  if (
+    typeof token !== 'string' ||
+    !token.trim() ||
+    segments.length !== 3 ||
+    segments.some(segment => !COMPACT_JWT_SEGMENT_PATTERN.test(segment))
+  ) {
+    throw new Error('invalid_rpc_delegation_response')
+  }
+
+  const operationId = isRecord(requestBody) ? requestBody.operationId : undefined
+  const messageId = value.messageId
+  if (
+    (operationId === 'chat.message.invoke' &&
+      (typeof messageId !== 'string' || !MESSAGE_ID_PATTERN.test(messageId))) ||
+    (operationId !== 'chat.message.invoke' && messageId !== undefined)
+  ) {
+    throw new Error('invalid_rpc_delegation_response')
+  }
+
+  return Object.freeze({
+    delegationToken: token,
+    ...(typeof messageId === 'string' ? { messageId } : {}),
+  })
+}
+
 export async function issueRpcDelegationV2(input: {
   sessionToken: string
   requestBody: unknown
@@ -13,7 +55,7 @@ export async function issueRpcDelegationV2(input: {
   accessPathId?: string
   authorizationRevision?: string
 }): Promise<RpcDelegationV2Response> {
-  return controlApiRequest<RpcDelegationV2Response>('POST', '/external/rpc/delegations', {
+  const response = await controlApiRequest<unknown>('POST', '/external/rpc/delegations', {
     userSessionToken: input.sessionToken,
     body: input.requestBody,
     extraHeaders: {
@@ -25,4 +67,5 @@ export async function issueRpcDelegationV2(input: {
         : {}),
     },
   })
+  return parseRpcDelegationResponse(response, input.requestBody)
 }
