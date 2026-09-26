@@ -1,5 +1,5 @@
 import type { NextFunction, Request, Response } from 'express'
-import { createHash } from 'node:crypto'
+import { createHash, timingSafeEqual } from 'node:crypto'
 import {
   type ActionOperationId,
   type TrustedEdgeActionContextV2,
@@ -19,6 +19,7 @@ const EDGE_REQUEST_ID_HEADER = 'x-clerum-edge-request-id'
 const EDGE_CHANNEL_TYPE_HEADER = 'x-clerum-edge-channel-type'
 const EDGE_CHANNEL_ID_HEADER = 'x-clerum-edge-channel-id'
 const EDGE_SENDER_HEADER = 'x-clerum-edge-sender'
+const EDGE_SERVICE_HEADER = 'x-service-token'
 export const EDGE_ACTION_CONTEXT_HEADER = 'x-clerum-edge-action-context'
 const MAX_ACTION_CONTEXT_HEADER_BYTES = 32 * 1024
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
@@ -46,6 +47,23 @@ function firstHeaderValue(req: Request, name: string): string | undefined {
 function cleanHeader(req: Request, name: string): string | undefined {
   const value = firstHeaderValue(req, name)?.trim()
   return value ? value : undefined
+}
+
+function rpcProxyServiceAuthenticated(req: Request): boolean {
+  const expected = config.rpcProxyEdgeToken
+  const service = cleanHeader(req, EDGE_SERVICE_HEADER)
+  const authorization = cleanHeader(req, 'authorization') ?? ''
+  const match = /^Bearer\s+(.+)$/i.exec(authorization)
+  const token = match?.[1]?.trim() ?? ''
+
+  // Local non-production fixtures may omit deployment credentials. Production
+  // startup requires the configured token, so a deployed guard never takes this
+  // compatibility branch.
+  if (!expected) return process.env.NODE_ENV !== 'production' && !authorization && !service
+  if (service !== 'rpc-proxy' || token.length < 16 || token.length > 4096) return false
+  const actualBytes = Buffer.from(token)
+  const expectedBytes = Buffer.from(expected)
+  return actualBytes.length === expectedBytes.length && timingSafeEqual(actualBytes, expectedBytes)
 }
 
 function hasExactKeys(value: unknown, keys: readonly string[]): value is Record<string, unknown> {
@@ -245,7 +263,12 @@ export function runtimeEdgeGuard(
 ) {
   const allowed = new Set<RuntimeCallerKind>(allowedCallers)
   return (req: Request, res: Response, next: NextFunction): void => {
-    if (req.headers.authorization) {
+    const assertedCaller = cleanHeader(req, EDGE_CALLER_HEADER)
+    if (assertedCaller === 'rpc-proxy' && !rpcProxyServiceAuthenticated(req)) {
+      res.status(401).json({ error: 'Missing authenticated rpc-proxy service context' })
+      return
+    }
+    if (req.headers.authorization && assertedCaller !== 'rpc-proxy') {
       res
         .status(401)
         .json({ error: 'Authorization is not accepted on this direct mcp-host runtime route' })

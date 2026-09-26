@@ -965,6 +965,13 @@ describe('HostReconciler.buildDeployment — SharedFileSystem mounts', () => {
     expect(envNames).not.toContain('CLERUM_CONTEXT_FILES_MOUNTS')
     expect(envNames).toContain('MCP_HOST_WORKFLOW_CONTROL_TOKEN_FILE')
     expect(envNames).toContain('MCP_HOST_RUNTIME_AUTH_STATE_DIR')
+    const rpcProxyEdgeToken = container.env?.find(
+      entry => entry.name === 'MCP_HOST_RPC_PROXY_EDGE_TOKEN'
+    )
+    expect(rpcProxyEdgeToken?.valueFrom?.secretKeyRef).toEqual({
+      name: 'rpc-proxy-edge-credentials',
+      key: 'RPC_PROXY_MCP_HOST_EDGE_TOKEN',
+    })
     // Only the built-in runtime volumes — no context-files volumes.
     const volNames = (podSpec.volumes ?? []).map(v => v.name).sort()
     expect(volNames).toEqual(['mcp-host-runtime-tokens', 'tmp', 'workflow-auth-state', 'workspace'])

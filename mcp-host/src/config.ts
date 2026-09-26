@@ -18,6 +18,14 @@ import { HostSpec, McpServerInfo, MemoryConfig, ModelConfig, PersonalizationConf
 export const PLUGIN_WORKLOAD_SDK_CAPABILITIES = ['promptBridge', 'clientNotifications'] as const
 export type PluginWorkloadSdkCapability = (typeof PLUGIN_WORKLOAD_SDK_CAPABILITIES)[number]
 
+export function parseRpcProxyEdgeToken(raw: string | undefined, production: boolean): string {
+  const token = raw?.trim() ?? ''
+  if ((token && (token.length < 16 || token.length > 4096)) || (production && !token)) {
+    throw new Error('MCP_HOST_RPC_PROXY_EDGE_TOKEN is missing or invalid')
+  }
+  return token
+}
+
 /**
  * Parse the WRC capability projection without silently accepting typos. An
  * empty/missing value is intentionally an empty set so the SDK activation gate
@@ -53,6 +61,9 @@ export interface Config {
 
   // Kubernetes namespace
   namespace: string
+
+  /** Dedicated service credential for RPC Proxy → MCP Host trusted runtime routes. */
+  rpcProxyEdgeToken: string
 
   // Namespace where installed LlmHook workloads/Services live (spec §8.2). The
   // guardrail hook resolver derives in-cluster endpoints against this namespace.
@@ -723,6 +734,11 @@ const hccAuthorityMaxStalenessMs = Math.min(
 // local fixture runs. Every cluster-mode process must satisfy it at startup.
 if (!devMode) validateHccAuthorityTiming(contextMapperPollInterval, hccAuthorityMaxStalenessMs)
 
+const rpcProxyEdgeToken = parseRpcProxyEdgeToken(
+  process.env.MCP_HOST_RPC_PROXY_EDGE_TOKEN,
+  process.env.NODE_ENV === 'production'
+)
+
 export const config: Config = {
   devMode,
   devHostConfig: getDevHostConfig(),
@@ -738,6 +754,7 @@ export const config: Config = {
 
   // Kubernetes namespace
   namespace: getEnv('CLERUM_NAMESPACE', 'default')!,
+  rpcProxyEdgeToken,
 
   // Namespace where installed LlmHook workloads/Services live (spec §8.2).
   llmHooksNamespace: getEnv('CLERUM_LLM_HOOKS_NAMESPACE', 'llm-hooks')!,
