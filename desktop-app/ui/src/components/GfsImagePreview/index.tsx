@@ -16,6 +16,7 @@ export function GfsImagePreview({
   byteLength,
   fileName,
   gfsUri,
+  dataBase64,
   mimeType,
   onClose,
   onDownloadError,
@@ -52,6 +53,7 @@ export function GfsImagePreview({
           byteLength={byteLength}
           fileName={fileName}
           gfsUri={gfsUri}
+          dataBase64={dataBase64}
           mimeType={mimeType}
           onDownloadError={onDownloadError}
           titleId={titleId}
@@ -76,4 +78,4 @@ export function GfsImagePreview({
 }
 
 export { GfsImagePreviewBody } from './Body'
-export type { GfsImagePreviewProps } from './types'
+export type { GfsImagePreviewProps, GfsImagePreviewSource } from './types'

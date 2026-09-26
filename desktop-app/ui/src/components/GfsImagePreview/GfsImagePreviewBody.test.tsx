@@ -52,6 +52,29 @@ describe('GfsImagePreviewBody', () => {
     expect(screen.queryByRole('presentation')).toBeNull()
   })
 
+  it('renders an inline base64 source without a GFS download (chat attachments)', async () => {
+    // BUG-176: chat image attachments already carry their bytes — the body must
+    // decode them locally instead of reaching for `gfs.downloadPreview`.
+    const downloadPreview = vi.fn(async () => ({ bytes: new Uint8Array([9]).buffer }))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { downloadPreview } },
+    })
+
+    render(
+      <GfsImagePreviewBody
+        byteLength={3}
+        fileName="Screenshot 2026-09-21 at 13.32.30.png"
+        dataBase64="AQID"
+        mimeType="image/png"
+      />
+    )
+
+    const img = await screen.findByAltText('Preview of Screenshot 2026-09-21 at 13.32.30.png')
+    expect(img.getAttribute('src')).toBe('blob:gfs-image-preview')
+    expect(downloadPreview).not.toHaveBeenCalled()
+  })
+
   it('renders the heading at the requested level (a page uses h2)', async () => {
     stubDownload(new Uint8Array([1, 2, 3]).buffer)
     render(

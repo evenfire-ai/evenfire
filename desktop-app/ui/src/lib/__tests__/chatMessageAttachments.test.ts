@@ -95,6 +95,29 @@ describe('chat message attachments', () => {
     ).toEqual(['first', 'logo.png', 'second'])
   })
 
+  it('keeps the image bytes on uploaded_file display attachments (BUG-176 chip preview)', () => {
+    const images: ComposerImageAttachment[] = [
+      {
+        id: 'image:shot',
+        name: 'shot.png',
+        mimeType: 'image/png',
+        dataBase64: 'AQID',
+        sizeBytes: 3,
+        previewDataUrl: 'blob:shot',
+      },
+    ]
+
+    expect(buildChatMessageAttachments(images, [])[0]).toMatchObject({
+      type: 'uploaded_file',
+      label: 'shot.png',
+      filename: 'shot.png',
+      mimeType: 'image/png',
+      encoding: 'base64',
+      dataBase64: 'AQID',
+      sizeBytes: 3,
+    })
+  })
+
   it('builds downloadable generated-file attachments from task responses', () => {
     const attachments = buildResponseFileAttachments({
       attachments: [
