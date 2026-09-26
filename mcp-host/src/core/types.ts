@@ -62,6 +62,13 @@ export interface ChatMessage {
   name?: string
   tool_calls?: ToolCall[] | null
   /**
+   * Provider reasoning that must accompany the assistant tool call on the next
+   * OpenAI-compatible request. ZAI GLM reasoning models require this field to
+   * remain on the same tool-call message; it is absent for providers that do
+   * not return reasoning.
+   */
+  reasoning_content?: string | null
+  /**
    * IronClaw invariant #2 (P.3, Opción D): lateral field that points at a
    * spillover blob written by T1.5. `content` always stays a string (a rich
    * summary if the blob exists, the literal output otherwise) so the wire
@@ -226,6 +233,7 @@ export interface ToolCompletionRequest {
 export interface ToolCompletionResponse {
   content: string | null
   tool_calls: ToolCall[] | null
+  reasoning_content?: string | null
   usage: TokenUsage
   /** True only when the provider response carried authoritative token counters. */
   usage_reported?: boolean
@@ -245,7 +253,13 @@ export interface ReasoningContext {
 
 export type RespondResult =
   | { type: 'text'; content: string }
-  | { type: 'tool_calls'; calls: ToolCall[]; content?: string; usage?: TokenUsage }
+  | {
+      type: 'tool_calls'
+      calls: ToolCall[]
+      content?: string
+      reasoning_content?: string | null
+      usage?: TokenUsage
+    }
   | { type: 'need_approval'; approval: PendingApproval }
   | { type: 'error'; error: Error }
 

@@ -8,8 +8,11 @@ import { VisualInputBudget } from '../../../visualInput/policy'
 import { makeFakeConversation } from '../../conversation/__testing__/makeFakeConversation'
 import { LlmError, LlmErrorCode } from '../../errors'
 import type { ReasoningPort, Tool, ToolRegistry } from '../../interfaces'
+import { DefaultReasoningPort } from '../../reasoning/port'
+import { DefaultPromptBuilder } from '../../reasoning/promptBuilder'
 import { BasicSafety } from '../../safety/safety'
-import type { Attachment, RespondResult, ToolOutput } from '../../types'
+import type { Attachment, ChatMessage, RespondResult, ToolOutput } from '../../types'
+import { FinishReason } from '../../types'
 import { SimpleEventEmitter } from '../eventEmitter'
 import { buildLoopConfig } from '../loopConfig'
 import {
@@ -151,6 +154,47 @@ describe('runToolUseLoop — loop control', () => {
     if (result.type === 'response') {
       expect(result.content).toBe('Hello world')
     }
+  })
+
+  it('preserves provider reasoning_content from ReasoningPort through the next tool continuation', async () => {
+    const completeWithTools = vi
+      .fn()
+      .mockResolvedValueOnce({
+        content: null,
+        tool_calls: [{ id: 'tc_reason', name: 'noop', arguments: {} }],
+        reasoning_content: 'GLM reasoning must survive the tool boundary',
+        usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
+        finish_reason: FinishReason.ToolUse,
+      })
+      .mockResolvedValueOnce({
+        content: 'done after reasoning',
+        tool_calls: null,
+        usage: { input_tokens: 11, output_tokens: 2, total_tokens: 13 },
+        finish_reason: FinishReason.Stop,
+      })
+    const reasoning = new DefaultReasoningPort(
+      { complete: vi.fn(), completeWithTools, modelName: () => 'glm-5.3' },
+      new DefaultPromptBuilder()
+    )
+
+    const config = buildLoopConfig({
+      reasoning,
+      toolRegistry: createMockRegistry([createMockTool('noop')]),
+      safety: new BasicSafety(),
+      events: new SimpleEventEmitter(),
+      conversation: makeFakeConversation(),
+    })
+
+    const result = await runToolUseLoop(config, [{ role: 'user', content: 'Use the tool' }])
+
+    expect(result.type).toBe('response')
+    expect(completeWithTools).toHaveBeenCalledTimes(2)
+    const continuation = completeWithTools.mock.calls[1]?.[0]
+    const assistant = continuation?.messages.find(
+      (message: ChatMessage) =>
+        message.role === 'assistant' && (message.tool_calls?.length ?? 0) > 0
+    )
+    expect(assistant?.reasoning_content).toBe('GLM reasoning must survive the tool boundary')
   })
 
   it('should stop at maxIterations when reasoning always returns tool_calls (Risk 4.5a)', async () => {
