@@ -55,7 +55,14 @@ export type ControlAdminInvitationRecord = {
   expiresAt: Date
   createdAt: Date
   acceptedAt: Date | null
+  /** Accepting this invitation retires the inviter (completeControlAdminInvitation). */
+  replaceInviter: boolean
+  /** NULL when the inviting admin row was deleted (FK ON DELETE SET NULL). */
+  invitedByAdminId: string | null
 }
+
+const INVITATION_COLUMNS =
+  'id, email, status, expires_at, created_at, accepted_at, invited_by_admin_id, replace_inviter'
 
 export type ControlAdminEmailChangeRequestRecord = {
   id: string
@@ -104,10 +111,12 @@ function mapAdminRow(row: {
 function mapInvitationRow(row: {
   id: string
   email: string
-  status: 'pending' | 'accepted' | 'revoked'
+  status: 'pending' | 'opened' | 'accepted' | 'revoked'
   expires_at: Date
   created_at: Date
   accepted_at: Date | null
+  invited_by_admin_id: string | null
+  replace_inviter: boolean | null
 }): ControlAdminInvitationRecord {
   return {
     id: row.id,
@@ -116,6 +125,8 @@ function mapInvitationRow(row: {
     expiresAt: new Date(row.expires_at),
     createdAt: new Date(row.created_at),
     acceptedAt: row.accepted_at ? new Date(row.accepted_at) : null,
+    replaceInviter: row.replace_inviter === true,
+    invitedByAdminId: row.invited_by_admin_id ?? null,
   }
 }
 
@@ -716,7 +727,7 @@ export async function listControlAdmins(): Promise<{
         ORDER BY accepted_at DESC, created_at DESC`
     ),
     pool.query(
-      `SELECT id, email, status, expires_at, created_at, accepted_at
+      `SELECT ${INVITATION_COLUMNS}
          FROM control_admin_invitations
         WHERE status = 'pending'
         ORDER BY created_at DESC`
@@ -821,9 +832,11 @@ export async function listControlAdmins(): Promise<{
 
 export async function createControlAdminInvitation(
   email: string,
-  invitedByAdminId: string
+  invitedByAdminId: string,
+  options: { replaceInviter?: boolean } = {}
 ): Promise<ControlAdminInvitationRecord | { error: 'duplicate_email' }> {
   const normalizedEmail = normalizeEmail(email)
+  const replaceInviter = options.replaceInviter === true
   // Revoke expired active invitations first so the INSERT guard can treat any remaining
   // pending/opened invitation as a real blocker for the partial unique index.
   await pool.query(
@@ -838,8 +851,8 @@ export async function createControlAdminInvitation(
   let result
   try {
     result = await pool.query(
-      `INSERT INTO control_admin_invitations(email, invited_by_admin_id)
-       SELECT $1, $2
+      `INSERT INTO control_admin_invitations(email, invited_by_admin_id, replace_inviter)
+       SELECT $1, $2, $3::boolean
         WHERE NOT EXISTS (
           SELECT 1 FROM control_admin_users WHERE lower(email) = lower($1)
         )
@@ -848,8 +861,8 @@ export async function createControlAdminInvitation(
              WHERE lower(email) = lower($1)
                AND status IN ('pending', 'opened')
           )
-       RETURNING id, email, status, expires_at, created_at, accepted_at`,
-      [normalizedEmail, invitedByAdminId]
+       RETURNING ${INVITATION_COLUMNS}`,
+      [normalizedEmail, invitedByAdminId, replaceInviter]
     )
   } catch (error) {
     if (
@@ -888,7 +901,7 @@ export async function getPendingControlAdminInvitation(
   email: string
 ): Promise<ControlAdminInvitationRecord | null> {
   const result = await db.query(
-    `SELECT id, email, status, expires_at, created_at, accepted_at
+    `SELECT ${INVITATION_COLUMNS}
        FROM control_admin_invitations
       WHERE id = $1
         AND lower(email) = lower($2)
