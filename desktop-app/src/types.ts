@@ -755,15 +755,16 @@ export type HostRuntimeHealth = {
  * 409 `not-stateless`). `skipped: 'cooldown'` means a recent attempt for the
  * same hostRef suppressed the HTTP call entirely; `skipped: 'in-flight'`
  * means that attempt's bounded re-emission loop is still running (structural
- * single-loop-per-host guarantee). `error` carries the failure
- * message for any other outcome — the caller treats prewarm as
+ * single-loop-per-host guarantee). `skipped: 'auth-changed'` means the
+ * authenticated owner changed or is changing before a wake can be issued.
+ * `error` carries the failure message for any other outcome — the caller treats prewarm as
  * fire-and-forget, so failures surface here (and in main-process logs), never
  * as a thrown error.
  */
 export type PrewarmHostResult = {
   requested: boolean
   status?: string
-  skipped?: 'cooldown' | 'in-flight'
+  skipped?: 'cooldown' | 'in-flight' | 'auth-changed'
   error?: string
 }
 

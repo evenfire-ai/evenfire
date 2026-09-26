@@ -7,6 +7,8 @@ import { ApiError } from '../httpClient.js'
 // ── mock dependencies before AppService is imported ──────────────────────────
 
 vi.mock('../config.js', () => ({
+  getActiveEnvKey: () => 'test-env',
+  getActiveLegacyEnvKeys: () => [],
   config: {
     rpcProxyBaseUrl: 'http://proxy',
     externalRestApiBaseUrl: 'http://rest',
@@ -256,6 +258,155 @@ describe('AppService.prewarmHost — bounded wake re-emission', () => {
     await vi.advanceTimersByTimeAsync(30_000)
     expect(mockPrewarmHost).toHaveBeenCalledTimes(2)
     infoSpy.mockRestore()
+  })
+
+  it('logout cancels pending re-emissions and does not leak cooldown to the next session', async () => {
+    mockPrewarmHost
+      .mockResolvedValueOnce({ status: 'wake-requested' })
+      .mockResolvedValueOnce({ status: 'active' })
+    const svc = makeService()
+    vi.spyOn(
+      svc as unknown as { suspendDesktopGfsUploadsForAuthBoundary: () => Promise<void> },
+      'suspendDesktopGfsUploadsForAuthBoundary'
+    ).mockResolvedValue()
+
+    await expect(svc.prewarmHost('chatllm')).resolves.toEqual({
+      requested: true,
+      status: 'wake-requested',
+    })
+    expect(vi.getTimerCount()).toBe(1)
+
+    await svc.logout()
+
+    expect(vi.getTimerCount()).toBe(0)
+    await vi.advanceTimersByTimeAsync(30_000)
+    expect(mockPrewarmHost).toHaveBeenCalledTimes(1)
+    ;(svc as unknown as { sessionToken: string }).sessionToken = 'next-session'
+    ;(svc as unknown as { me: unknown }).me = { id: 2, teamId: 'team-2' }
+    await expect(svc.prewarmHost('chatllm')).resolves.toEqual({
+      requested: true,
+      status: 'active',
+    })
+    expect(mockPrewarmHost).toHaveBeenCalledTimes(2)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('a late prewarm result cannot erase the next session cooldown', async () => {
+    const grant = await mockGetOrIssue()
+    mockGetOrIssue.mockClear()
+    let complete!: (value: typeof grant) => void
+    const pending = new Promise<typeof grant>(resolve => {
+      complete = resolve
+    })
+    mockGetOrIssue.mockReturnValueOnce(pending)
+    mockPrewarmHost.mockResolvedValue({ status: 'active' })
+    const svc = makeService()
+    vi.spyOn(
+      svc as unknown as { suspendDesktopGfsUploadsForAuthBoundary: () => Promise<void> },
+      'suspendDesktopGfsUploadsForAuthBoundary'
+    ).mockResolvedValue()
+
+    const oldAttempt = svc.prewarmHost('chatllm')
+    for (let i = 0; i < 10 && mockGetOrIssue.mock.calls.length === 0; i++) await Promise.resolve()
+    expect(mockGetOrIssue).toHaveBeenCalledTimes(1)
+    await svc.logout()
+    ;(svc as unknown as { sessionToken: string }).sessionToken = 'next-session'
+    ;(svc as unknown as { me: unknown }).me = { id: 2, teamId: 'team-2' }
+
+    await expect(svc.prewarmHost('chatllm')).resolves.toEqual({
+      requested: true,
+      status: 'active',
+    })
+    complete(grant)
+    await expect(oldAttempt).resolves.toEqual({ requested: false, skipped: 'auth-changed' })
+    await expect(svc.prewarmHost('chatllm')).resolves.toEqual({
+      requested: false,
+      skipped: 'cooldown',
+    })
+    expect(mockPrewarmHost).toHaveBeenCalledTimes(1)
+  })
+
+  it('a pending explicit team switch blocks prewarm and a failed switch releases the guard', async () => {
+    let rejectSwitch!: (error: Error) => void
+    const pendingSwitch = new Promise<string>((_resolve, reject) => {
+      rejectSwitch = reject
+    })
+    const svc = makeService()
+    vi.spyOn(
+      svc as unknown as { switchSessionToTeam: () => Promise<string> },
+      'switchSessionToTeam'
+    ).mockReturnValue(pendingSwitch)
+    mockPrewarmHost.mockResolvedValue({ status: 'active' })
+
+    const switching = svc.switchTeam('team-2')
+    await expect(svc.prewarmHost('chatllm')).resolves.toEqual({
+      requested: false,
+      skipped: 'auth-changed',
+    })
+    expect(mockPrewarmHost).not.toHaveBeenCalled()
+
+    rejectSwitch(new Error('switch canceled'))
+    await expect(switching).rejects.toThrow('switch canceled')
+    await expect(svc.prewarmHost('chatllm')).resolves.toEqual({
+      requested: true,
+      status: 'active',
+    })
+  })
+
+  it('a transient session revision does not cancel the bounded wake loop', async () => {
+    mockPrewarmHost
+      .mockResolvedValueOnce({ status: 'wake-requested' })
+      .mockResolvedValueOnce({ status: 'active' })
+    const svc = makeService()
+
+    await svc.prewarmHost('chatllm')
+    ;(svc as unknown as { sessionGeneration: number }).sessionGeneration += 1
+    await vi.advanceTimersByTimeAsync(10_000)
+
+    expect(mockPrewarmHost).toHaveBeenCalledTimes(2)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('a late prior response cannot clear the new session wake loop', async () => {
+    let completeOld!: (value: { status: string }) => void
+    const pendingOld = new Promise<{ status: string }>(resolve => {
+      completeOld = resolve
+    })
+    mockPrewarmHost
+      .mockResolvedValueOnce({ status: 'wake-requested' })
+      .mockReturnValueOnce(pendingOld)
+      .mockResolvedValueOnce({ status: 'wake-requested' })
+      .mockResolvedValueOnce({ status: 'active' })
+    const svc = makeService()
+    vi.spyOn(
+      svc as unknown as { suspendDesktopGfsUploadsForAuthBoundary: () => Promise<void> },
+      'suspendDesktopGfsUploadsForAuthBoundary'
+    ).mockResolvedValue()
+
+    await svc.prewarmHost('chatllm')
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(mockPrewarmHost).toHaveBeenCalledTimes(2)
+    await svc.logout()
+    ;(svc as unknown as { sessionToken: string }).sessionToken = 'next-session'
+    ;(svc as unknown as { me: unknown }).me = { id: 2, teamId: 'team-2' }
+    await svc.prewarmHost('chatllm')
+
+    completeOld({ status: 'active' })
+    await Promise.resolve()
+    await Promise.resolve()
+    const loops = (svc as unknown as { prewarmReemitLoopHostRefs: Set<string> })
+      .prewarmReemitLoopHostRefs
+    expect(loops.has('chatllm')).toBe(true)
+    ;(
+      svc as unknown as { prewarmAttemptAtByHostRef: Map<string, number> }
+    ).prewarmAttemptAtByHostRef.delete('chatllm')
+    await expect(svc.prewarmHost('chatllm')).resolves.toEqual({
+      requested: false,
+      skipped: 'in-flight',
+    })
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(mockPrewarmHost).toHaveBeenCalledTimes(4)
+    expect(loops.has('chatllm')).toBe(false)
   })
 
   it('immediate 200 or 409 schedules no re-emission at all', async () => {
