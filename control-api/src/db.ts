@@ -3129,6 +3129,17 @@ async function applyMcpSecretRollbackPermitSchema(db: DbClient): Promise<void> {
   `)
 }
 
+// A control-admin invitation that, when accepted, hands the inviter's access to
+// the invitee and retires the inviter (completeControlAdminInvitation). Additive
+// and defaulted false, so N-1 pods that never read the column keep today's
+// behavior.
+async function applyControlAdminInvitationReplaceInviterSchema(db: DbClient): Promise<void> {
+  await db.query(`
+    ALTER TABLE control_admin_invitations
+      ADD COLUMN IF NOT EXISTS replace_inviter BOOLEAN NOT NULL DEFAULT false;
+  `)
+}
+
 // Exported (read-only) so the migration-order invariant test can assert the
 // array is monotonic by version-string. Applied strictly in array order and
 // tracked by full version-string in `schema_migrations`, so a non-monotonic
@@ -6207,6 +6218,10 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     // migration, so there is no false-skip.
     legacyVersions: ['0101_mcp_secret_rollback_permits', '0109_mcp_secret_rollback_permits'],
     apply: applyMcpSecretRollbackPermitSchema,
+  },
+  {
+    version: '0117_control_admin_invitation_replace_inviter',
+    apply: applyControlAdminInvitationReplaceInviterSchema,
   },
 ]
 
