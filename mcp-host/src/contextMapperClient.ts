@@ -131,6 +131,21 @@ function decodeMcpServer(value: unknown): McpServerInfo {
   ) {
     throw new Error('HCC inventory response contains an invalid authKind')
   }
+  // `remote` is non-secret policy (mini-spec 19 §D-6), the sibling of authKind:
+  // absent degrades to local (fail-safe default); a present-but-non-boolean value
+  // is rejected, consistent with the decoder's strictness. HCC emits it
+  // omit-when-false, so a real inventory carries it only for remote servers. Like
+  // authKind it is NOT on the forbidden-metadata denylist, so accepting it leaves
+  // that guard intact.
+  if (value.remote !== undefined && typeof value.remote !== 'boolean') {
+    throw new Error('HCC inventory response contains an invalid remote flag')
+  }
+  // `bearerInBody` is non-secret transport policy (mini-spec 19 §D-8), the sibling
+  // of `remote`: absent → header (fail-safe default); present-but-non-boolean is
+  // rejected; NOT on the forbidden-metadata denylist, so the guard stays intact.
+  if (value.bearerInBody !== undefined && typeof value.bearerInBody !== 'boolean') {
+    throw new Error('HCC inventory response contains an invalid bearerInBody flag')
+  }
 
   return {
     name: value.name,
@@ -148,6 +163,8 @@ function decodeMcpServer(value: unknown): McpServerInfo {
     ...(typeof value.authKind === 'string'
       ? { authKind: value.authKind as McpServerInfo['authKind'] }
       : {}),
+    ...(typeof value.remote === 'boolean' ? { remote: value.remote } : {}),
+    ...(typeof value.bearerInBody === 'boolean' ? { bearerInBody: value.bearerInBody } : {}),
     status: {
       deployed: value.status.deployed,
       ready: value.status.ready,

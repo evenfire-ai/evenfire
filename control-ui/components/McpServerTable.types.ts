@@ -83,6 +83,7 @@ export type McpServerTableProps = {
   deletingKey?: string | null
   onRefresh?: () => void
   onCreate?: () => void
+  onAddRemote?: () => void
   onInstallFromRegistry?: () => void
   detailContent?: ReactNode
   refreshing?: boolean

@@ -35,6 +35,17 @@ describe('0101 oauth_grants owner generalization migration', () => {
     expect(versions.indexOf('0108_llm_provider_attempts_sdk_link_on_delete_set_null')).toBeLessThan(
       versions.indexOf('0116_mcp_secret_rollback_permits')
     )
+    // oauth-19 dynamic-clients pair, renumbered past dev's 0116 during the sync
+    // (0116->0117 table, 0117->0118 runtime-access). Same liveness+ordering
+    // guard so a future re-number or drop fails here first.
+    expect(versions).toContain('0117_dynamic_clients_table')
+    expect(versions).toContain('0118_dynamic_clients_runtime_access')
+    expect(versions.indexOf('0116_mcp_secret_rollback_permits')).toBeLessThan(
+      versions.indexOf('0117_dynamic_clients_table')
+    )
+    expect(versions.indexOf('0117_dynamic_clients_table')).toBeLessThan(
+      versions.indexOf('0118_dynamic_clients_runtime_access')
+    )
     expect(versions.indexOf('0100_seed_minimax_allowed_model')).toBeLessThan(
       versions.indexOf('0106_oauth_grants_owner_generalization')
     )

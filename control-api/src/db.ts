@@ -6208,6 +6208,29 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     legacyVersions: ['0101_mcp_secret_rollback_permits', '0109_mcp_secret_rollback_permits'],
     apply: applyMcpSecretRollbackPermitSchema,
   },
+  {
+    // Renumbered from 0116 while syncing onto dev: dev shipped
+    // 0116_mcp_secret_rollback_permits, so the oauth-19 dynamic-clients pair
+    // moves past it rather than claiming a version another migration already
+    // uses. Environments where this feature branch was already deployed (the
+    // oauth-19 dev cluster) recorded it under the pre-renumber 0116 name (see
+    // legacyVersions below); that entry lets the runner mark 0117 applied from
+    // the prior row instead of re-running the DDL and leaving an orphan
+    // schema_migrations entry. The legacy name is unique to this migration, so
+    // there is no false-skip.
+    version: '0117_dynamic_clients_table',
+    legacyVersions: ['0116_dynamic_clients_table'],
+    apply: applyDynamicClientsTable,
+  },
+  {
+    // Renumbered from 0117 while syncing onto dev (dev's 0116 pushed the whole
+    // dynamic-clients pair down by one; see the table migration above). Same
+    // legacyVersions rationale: the prior deploy recorded it under the
+    // pre-renumber 0117 name (see legacyVersions below), unique to this migration.
+    version: '0118_dynamic_clients_runtime_access',
+    legacyVersions: ['0117_dynamic_clients_runtime_access'],
+    apply: applyDynamicClientsRuntimeAccess,
+  },
 ]
 
 async function consolidateWorkflowAllowedUsersToTriggers(db: DbClient): Promise<void> {
@@ -6384,6 +6407,61 @@ async function applyOAuthGrantsOwnerGeneralization(db: DbClient): Promise<void> 
   `)
 }
 
+async function applyDynamicClientsTable(db: DbClient): Promise<void> {
+  // DCR (RFC 7591) dynamic clients — sibling of `oauth_grants` (spec 02 C2,
+  // D-5, DEC-18). When an AS supports neither a pre-registered client nor CIMD,
+  // control-api registers a client dynamically and persists its credentials
+  // here, with the same at-rest guarantees as oauth_grants: client_secret and
+  // the RFC 7592 registration_access_token are AES-256-GCM encrypted via
+  // `encryptOAuthSecret` (never stored in the clear); client_id is the AS's
+  // public assignment and is mirrored into `spec.oauth.id` on the CR.
+  //
+  // Keyed per-server-CR: (owner_kind, server_namespace, server_name) mirror the
+  // exact coordinates of the pre-registered `${serverName}-oauth-client` Secret
+  // and of oauth_grants — the AS (untrusted) never names the primary key. The
+  // `issuer` column is indexed for audit and a possible additive per-issuer
+  // dedup later; it is deliberately NOT part of the uniqueness key.
+  //
+  // Additive + idempotent (CREATE TABLE IF NOT EXISTS): control-api-only, no CRD.
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS dynamic_clients (
+      id BIGSERIAL PRIMARY KEY,
+      owner_kind TEXT NOT NULL DEFAULT 'mcpserver',
+      server_namespace TEXT NOT NULL,
+      server_name TEXT NOT NULL,
+      issuer TEXT NOT NULL,
+      client_id TEXT NOT NULL,
+      client_mode TEXT NOT NULL,
+      client_secret_encrypted TEXT,
+      registration_access_token_encrypted TEXT,
+      registration_client_uri TEXT,
+      client_id_issued_at TIMESTAMPTZ,
+      client_secret_expires_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CONSTRAINT dynamic_clients_owner_unique UNIQUE (owner_kind, server_namespace, server_name)
+    );
+    CREATE INDEX IF NOT EXISTS dynamic_clients_issuer_idx ON dynamic_clients (issuer);
+  `)
+}
+
+async function applyDynamicClientsRuntimeAccess(db: DbClient): Promise<void> {
+  // `dynamic_clients` was created (0117) after the base migration's
+  // `GRANT ... ON ALL TABLES IN SCHEMA public`, which only reaches tables that
+  // existed when it ran. Without this the runtime role has f/f/f/f on the table
+  // and no USAGE/SELECT/UPDATE on its identity sequence, so dynamicClientStore's
+  // upsert/select/delete fail and the deploy access-contract verifier aborts on
+  // a coverage violation. dynamicClientStore runs INSERT ... ON CONFLICT DO
+  // UPDATE, SELECT and DELETE → the legacy_dml (S/I/U/D) relation profile and
+  // the legacy_rw (USAGE/SELECT/UPDATE) sequence profile, matching oauth_grants.
+  // Plain GRANTs are idempotent; the table is freshly created with no PUBLIC
+  // grant, so no REVOKE is needed to keep the least-privilege envelope exact.
+  await db.query(`
+    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE dynamic_clients TO control_api_runtime;
+    GRANT USAGE, SELECT, UPDATE ON SEQUENCE dynamic_clients_id_seq TO control_api_runtime;
+  `)
+}
+
 async function ensureSchemaMigrationsTable(db: DbClient): Promise<void> {
   await db.query(`
     CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -6532,6 +6610,18 @@ export const HOST_MODEL_WRITE_CARRIER_IDLE_TIMEOUT_MS = boundedEnvInteger(
   MAX_CARRIER_IDLE_TIMEOUT_MS
 )
 
+// Idle-in-transaction bound for the REACTIVE OAuth-refresh carrier transaction —
+// the one that holds a per-grant `FOR UPDATE` row lock across the refresh POST.
+// Default 20s > the 15s HTTP AbortSignal so the client aborts a hung AS first;
+// the GUC is only the backstop for a wedged abort. Same [1s, 60s] bounds as the
+// host↔model carrier.
+export const OAUTH_REFRESH_LOCK_CARRIER_IDLE_TIMEOUT_MS = boundedEnvInteger(
+  'CONTROL_API_OAUTH_REFRESH_LOCK_IDLE_TIMEOUT_MS',
+  20_000,
+  MIN_CARRIER_IDLE_TIMEOUT_MS,
+  MAX_CARRIER_IDLE_TIMEOUT_MS
+)
+
 /**
  * Take the transaction-scoped advisory lock for one model NAME. Auto-released on
  * COMMIT/ROLLBACK and on backend death, so it never orphans. Must be a statement
@@ -6574,4 +6664,17 @@ export async function boundCarrierTransactionIdleTimeout(
   ms: number = HOST_MODEL_WRITE_CARRIER_IDLE_TIMEOUT_MS
 ): Promise<void> {
   await db.query(`SELECT set_config('idle_in_transaction_session_timeout', $1, true)`, [String(ms)])
+}
+
+/**
+ * Bound the idle-in-transaction tenancy of the reactive OAuth-refresh carrier
+ * transaction — the one that HOLDS the per-grant `FOR UPDATE` row lock across the
+ * refresh POST (mini-spec 16, R2-M1). While that POST is awaited no statement
+ * runs, so this GUC is the only timeout that can release the row lock + pool
+ * connection if the AS hangs. Thin wrapper over
+ * {@link boundCarrierTransactionIdleTimeout} pinned to the OAuth carrier's own
+ * env-bounded value.
+ */
+export async function boundOAuthRefreshLockIdleTimeout(db: DbTransactionClient): Promise<void> {
+  await boundCarrierTransactionIdleTimeout(db, OAUTH_REFRESH_LOCK_CARRIER_IDLE_TIMEOUT_MS)
 }

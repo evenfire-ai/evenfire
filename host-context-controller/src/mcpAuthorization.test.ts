@@ -649,3 +649,81 @@ describe('listServers authKind emission (mini-spec 10 §3.2, T1)', () => {
     expect(inventory[0]).not.toHaveProperty('authKind')
   })
 })
+
+describe('listServers remote projection (C3, orthogonal transport axis)', () => {
+  it('emits remote:true for a remote oauth server while authKind stays oauth-user (no remote rama)', async () => {
+    const store = new FakeStore()
+    store.serverObject = {
+      ...server,
+      auth: { type: 'oauth' },
+      oauth: fullOAuth('user'),
+      remote: true,
+    }
+    const service = new McpAuthorizationService(store)
+    const inventory = await service.listServers(principal)
+    expect(inventory[0].remote).toBe(true)
+    expect(inventory[0].authKind).toBe('oauth-user')
+    // No authority leaks onto the wire item regardless of the transport axis.
+    expect(inventory[0]).not.toHaveProperty('contextRef')
+    expect(inventory[0]).not.toHaveProperty('auth')
+    expect(inventory[0]).not.toHaveProperty('oauth')
+  })
+
+  it('omits remote for a local oauth server (absent → local, fail-safe)', async () => {
+    const store = new FakeStore()
+    store.serverObject = {
+      ...server,
+      auth: { type: 'oauth' },
+      oauth: fullOAuth('context'),
+    }
+    const service = new McpAuthorizationService(store)
+    const inventory = await service.listServers(principal)
+    expect(inventory[0]).not.toHaveProperty('remote')
+    expect(inventory[0].authKind).toBe('oauth-context')
+  })
+
+  it('emits remote:true with authKind static for a static remote server', async () => {
+    const store = new FakeStore()
+    store.serverObject = {
+      ...server,
+      auth: { type: 'bearer', secretRef: 'server-a-auth', secretKey: 'token' },
+      remote: true,
+    }
+    const service = new McpAuthorizationService(store)
+    const inventory = await service.listServers(principal)
+    expect(inventory[0].remote).toBe(true)
+    expect(inventory[0].authKind).toBe('static')
+  })
+})
+
+describe('listServers bearerInBody projection (mini-spec 19 §D-8, DEC-24)', () => {
+  it('emits bearerInBody:true for a remote oauth server that carries the quirk', async () => {
+    const store = new FakeStore()
+    store.serverObject = {
+      ...server,
+      auth: { type: 'oauth' },
+      oauth: fullOAuth('user'),
+      remote: true,
+      bearerInBody: true,
+    }
+    const service = new McpAuthorizationService(store)
+    const inventory = await service.listServers(principal)
+    expect(inventory[0].bearerInBody).toBe(true)
+    // Orthogonal to authKind, and no authority leaks alongside the quirk.
+    expect(inventory[0].authKind).toBe('oauth-user')
+    expect(inventory[0]).not.toHaveProperty('oauth')
+  })
+
+  it('omits bearerInBody when the server does not carry the quirk (absent → header, fail-safe)', async () => {
+    const store = new FakeStore()
+    store.serverObject = {
+      ...server,
+      auth: { type: 'oauth' },
+      oauth: fullOAuth('user'),
+      remote: true,
+    }
+    const service = new McpAuthorizationService(store)
+    const inventory = await service.listServers(principal)
+    expect(inventory[0]).not.toHaveProperty('bearerInBody')
+  })
+})

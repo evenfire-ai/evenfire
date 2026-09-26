@@ -25,9 +25,34 @@ import { McpManager } from '../manager'
 
 const state: { callToolQueue: Array<() => Promise<unknown>> } = { callToolQueue: [] }
 
+interface MockTransport {
+  url: string
+  requestHeaders: Record<string, string>
+}
+
+/** Structured 401 at `initialize`, mirroring managerRemoteOauthCatalog's mock:
+ *  the MCP SDK puts the HTTP status in `.code` for StreamableHTTP errors, so
+ *  `extractStructuredHttpStatus` reads 401 and `isAuthError` classifies it. */
+class RemoteAuthRequired extends Error {
+  readonly code = 401
+  constructor() {
+    super('initialize returned 401')
+    this.name = 'RemoteAuthRequired'
+  }
+}
+
 vi.mock('@modelcontextprotocol/sdk/client/index.js', () => ({
   Client: class MockClient {
-    connect = vi.fn().mockResolvedValue(undefined)
+    private transport: MockTransport | null = null
+    connect = vi.fn(async (t: MockTransport) => {
+      // Spec-compliant remote: a token-less request to an https target 401s at
+      // `initialize`. Local (http) targets serve initialize unauthenticated, so
+      // the pre-existing http fixtures below still connect.
+      if (t.url?.startsWith('https:') && !t.requestHeaders?.['Authorization']) {
+        throw new RemoteAuthRequired()
+      }
+      this.transport = t
+    })
     close = vi.fn().mockResolvedValue(undefined)
     listTools = vi.fn().mockResolvedValue({
       tools: [{ name: 'do', description: 'demo', inputSchema: { type: 'object' } }],
@@ -42,8 +67,13 @@ vi.mock('@modelcontextprotocol/sdk/client/index.js', () => ({
 
 vi.mock('@modelcontextprotocol/sdk/client/streamableHttp.js', () => ({
   StreamableHTTPClientTransport: class {
+    url: string
+    requestHeaders: Record<string, string>
     close = vi.fn().mockResolvedValue(undefined)
-    constructor(_url: URL, _opts?: unknown) {}
+    constructor(url: URL, opts?: { requestInit?: { headers?: Record<string, string> } }) {
+      this.url = url.toString()
+      this.requestHeaders = opts?.requestInit?.headers ?? {}
+    }
   },
 }))
 
@@ -51,6 +81,15 @@ vi.mock('@modelcontextprotocol/sdk/client/sse.js', () => ({
   SSEClientTransport: class {
     close = vi.fn().mockResolvedValue(undefined)
   },
+}))
+
+// Stub the SSRF guard's DNS resolver so these tests never touch DNS; the real
+// guard is exercised in clientRemoteTarget.test.ts. Remote MCP egress goes through
+// the internal HCC http hop, which is NOT pinned (see client.ts) — the guard here
+// only keeps import-time resolution offline.
+vi.mock('../../core/net/ssrf', () => ({
+  SsrfBlockedError: class SsrfBlockedError extends Error {},
+  resolvePinnedPublicIp: vi.fn(async () => '203.0.113.10'),
 }))
 
 function httpError(status: number): () => Promise<never> {
@@ -99,6 +138,25 @@ function tokenFactory(): McpTokenProviderFactory {
   })
 }
 
+/** A remote oauth-user server whose per-user `initialize` 401s when the user has
+ *  no grant (the token provider resolves undefined → no Authorization header). */
+function remoteOauthUserServer(name = 'remote-bob'): McpServerInfo {
+  return {
+    name,
+    transport: { type: 'streamableHttp', url: `https://${name}.example.com/mcp` },
+    authKind: 'oauth-user',
+    remote: true,
+    enabled: true,
+    status: { deployed: true, ready: true },
+  }
+}
+
+/** Simulates "no grant": the broker 404s → the provider resolves no token, so the
+ *  per-user connection reaches the upstream token-less and 401s at `initialize`. */
+function noGrantFactory(): McpTokenProviderFactory {
+  return () => ({ resolve: async () => undefined, refresh: async () => undefined })
+}
+
 beforeEach(() => {
   state.callToolQueue = []
 })
@@ -139,5 +197,23 @@ describe('manager.callTool — U5 reactive consent classification', () => {
 
     expect(result.isError).toBe(true)
     expect(result.connectRequired).toBeUndefined()
+  })
+
+  // Inv. 16 (§9): with another user's partition alive, a second user without a
+  // grant sees the tool, the LLM calls it, and the per-user admission 401s at
+  // `initialize` (a RAW 401, not the McpAuthError of a live tools/call). The
+  // callTool catch must still surface `connectRequired` so the desktop offers the
+  // consent flow. This is the second user's NORMAL path once eager bootstrap makes
+  // the tool visible for everyone via the representative catalog.
+  it('401 at the per-user admission initialize → connect_required marker', async () => {
+    const manager = new McpManager(undefined, undefined, noGrantFactory())
+    // Remote oauth-user: addServer registers it (markConnected, 0 tools) without
+    // connecting — the per-user admission happens lazily in callTool below.
+    await manager.addServer(remoteOauthUserServer('remote-bob'))
+
+    const result = await manager.callTool('remote-bob__do', {}, { userId: 'bob' })
+
+    expect(result.isError).toBe(true)
+    expect(result.connectRequired).toEqual({ mcpServerName: 'remote-bob' })
   })
 })

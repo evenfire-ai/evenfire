@@ -11,6 +11,7 @@ import { CreateStepFlow } from '@components/CreateStepFlow'
 import { DashboardLayout } from '@components/DashboardLayout'
 import { EgressEditor } from '@components/EgressEditor'
 import { HookInstallForm } from '@components/HookInstallForm'
+import { OAuthInstallForm } from '@components/OAuthInstallForm'
 import { RegistryInstallForm } from '@components/RegistryInstallForm'
 import { IconStore } from '@components/Sidebar/icons'
 import { useToast } from '@components/Toast'
@@ -23,6 +24,7 @@ import type { LlmAllowedModel, RegistryEntry } from '@lib/api'
 import { analyzeWorkflowRecipeEgress } from '@lib/egressModel'
 import type { EgressBinding, EgressEditorStatus } from '@lib/egressModel'
 import { useLlmAllowedModels } from '@lib/hooks/useLlmAllowedModels'
+import { getCatalogOAuthBlock } from '@lib/oauthInstall'
 import { validateRecipe } from '@lib/recipeValidator'
 
 type TransportWorkloadEditorTarget = {
@@ -611,6 +613,9 @@ function RegistryInstallPageContent() {
     void loadEntry()
   }, [entryName, entryVersion])
 
+  // An mcp-server entry that declares OAuth routes to the OAuth install wizard
+  // instead of the ordinary connector form (S1-U4).
+  const catalogOAuth = useMemo(() => getCatalogOAuthBlock(entry), [entry])
   const isPrivate = entry?.visibility === 'private'
   const kindLabel =
     entry?.entry_type === 'recipe'
@@ -664,6 +669,14 @@ function RegistryInstallPageContent() {
                 entry={entry}
                 onCancel={() => router.push(CONTROL_ROUTES.marketplace.root)}
                 onInstalled={() => router.push(CONTROL_ROUTES.guardrails.root)}
+              />
+            ) : entry && catalogOAuth ? (
+              <OAuthInstallForm
+                entry={entry}
+                catalogOAuth={catalogOAuth}
+                onCancel={() => router.push(CONTROL_ROUTES.marketplace.root)}
+                onInstalled={() => undefined}
+                onViewConnectors={() => router.push(CONTROL_ROUTES.connectors.root)}
               />
             ) : entry ? (
               <RegistryInstallForm

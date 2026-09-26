@@ -8,6 +8,7 @@ import { buildAuthorizeUrl } from '../../oauth/authorizeUrlHelper.js'
 import {
   type McpServerOAuthReader,
   type McpServerOAuthSubject,
+  REMOTE_CALLBACK_CLIENT_SEGMENT,
   RecipeNotFoundError,
   type RecipeReader,
   type RecipeWithOAuthClients,
@@ -22,8 +23,8 @@ import {
   resolveServerOAuth,
   resolveServerOAuthSubject,
 } from '../../oauth/mcpServerOAuthSpec.js'
+import { getAccessTokenReactive } from '../../oauth/reactiveTokenHelper.js'
 import { deleteOAuthGrant } from '../../oauth/store.js'
-import { getAccessToken } from '../../oauth/tokenHelper.js'
 import { getUserContexts } from '../../services/directory/index.js'
 import { K8sNotFoundError } from '../../services/resourceService.js'
 import { buildPublicCallbackUrl } from '../external/oauthCallback.js'
@@ -230,7 +231,18 @@ export function createInternalOAuthRouter(gateway: K8sGateway): Router {
         }
 
         const oauthClientId = resolved.decl.id
-        const redirectUri = buildPublicCallbackUrl(req, oauthClientId, config.oauthCallbackBaseUrl)
+        // Remote lane registers ONE stable redirect_uri (`/oauth-callback/remote`),
+        // so the callback URL segment is the reserved constant, NOT the client id —
+        // the real binding rides the signed state. Baked keeps the per-client
+        // segment. The exchange re-derives the same redirect_uri from this segment.
+        const callbackSegment = resolved.decl.remote
+          ? REMOTE_CALLBACK_CLIENT_SEGMENT
+          : oauthClientId
+        const redirectUri = buildPublicCallbackUrl(
+          req,
+          callbackSegment,
+          config.oauthCallbackBaseUrl
+        )
 
         const result = await buildAuthorizeUrl(
           {
@@ -517,7 +529,7 @@ export function createInternalOAuthRouter(gateway: K8sGateway): Router {
           return res.status(400).json({ error: 'invalid_recipe_namespace' })
         }
 
-        const result = await getAccessToken(
+        const result = await getAccessTokenReactive(
           {
             grantKind: 'user',
             recipeNamespace: recipeNs,

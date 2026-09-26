@@ -189,6 +189,17 @@ export const mcpHostJwtReissueTotal = getOrCreateCounter({
   labelNames: ['result'] as const as Array<'result'>,
 })
 
+// MCP server uninstall teardown: a best-effort cleanup step failed AFTER the CR was
+// already deleted (orphan oauth-client Secret, dynamic client row, or oauth_grants).
+// Nothing retries once the CR is gone, so the structured error log is the only trace
+// today — this counter makes the residual reconcilable/alertable. Rate > 0 ⇒ orphaned
+// state to sweep. Stages: oauth_client_secret | dynamic_client | oauth_grants.
+export const mcpServerUninstallTeardownFailuresTotal = getOrCreateCounter({
+  name: 'mcp_server_uninstall_teardown_failures_total',
+  help: 'Count of best-effort MCP server uninstall teardown steps that failed after CR deletion, by stage.',
+  labelNames: ['stage'] as const as Array<'stage'>,
+})
+
 // ─── HTTP counters / histograms (scoped to workflow-approvals endpoints) ──
 export const mcpHostHttpTotal = getOrCreateCounter({
   name: 'mcp_host_http_total',
@@ -384,6 +395,33 @@ export const pluginWorkloadSdkMaintenanceRunsTotal = getOrCreateCounter({
   name: 'clerum_plugin_workload_sdk_maintenance_runs_total',
   help: 'Plugin Workload SDK maintenance sweeps (stale-invocations + idempotency pruning).',
   labelNames: ['result'] as const as Array<'result'>, // ok | error
+})
+
+// ─── OAuth proactive-refresh cron metrics (mini-spec L) ──────────────────
+export const oauthProactiveRefreshRunsTotal = getOrCreateCounter({
+  name: 'oauth_proactive_refresh_runs_total',
+  help: 'Count of OAuth proactive-refresh cron sweeps.',
+  labelNames: ['result'] as const as Array<'result'>, // ok | error
+})
+
+export const oauthProactiveRefreshGrantsTotal = getOrCreateCounter({
+  name: 'oauth_proactive_refresh_grants_total',
+  help: 'Count of remote grants processed by the proactive-refresh cron, labelled by outcome.',
+  // ok | transient | client_invalid | no_grant | skipped | error
+  labelNames: ['outcome'] as const as Array<'outcome'>,
+})
+
+export const oauthDcrSecretStatusTotal = getOrCreateCounter({
+  name: 'oauth_dcr_secret_status_total',
+  help: 'Count of DCR confidential clients observed near/at client_secret expiry.',
+  labelNames: ['state'] as const as Array<'state'>, // expiring | expired
+})
+
+export const oauthProactiveRefreshDurationSeconds = getOrCreateHistogram({
+  name: 'oauth_proactive_refresh_duration_seconds',
+  help: 'Duration of each OAuth proactive-refresh cron sweep.',
+  labelNames: [] as string[],
+  buckets: [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60],
 })
 
 // ─── Governed tracing foundation ──────────────────────────────────────────

@@ -1,5 +1,11 @@
 'use client'
 
+import type { GenericDiscoveryPrefill } from './oauthGeneric.types'
+import type {
+  McpSecretSummary,
+  OAuthCredentialManifest,
+  OAuthInstallSubmit,
+} from './oauthInstall.types'
 import {
   DEFAULT_MCP_SERVER_SECRET_NAMESPACE,
   DEFAULT_SANDBOX_SECRET_NAMESPACE,
@@ -3345,6 +3351,40 @@ export async function getRegistryCredentialSchema(
   ) as Promise<CredentialSchema>
 }
 
+/**
+ * The credential-form manifest for a baked OAuth provider (S1-U4, D-B1). control-ui
+ * renders the install form from `fields`; `secret: true` fields are masked and never
+ * echoed back. control-api 404s for a non-baked provider id.
+ */
+export async function getOAuthCredentialManifest(
+  provider: string
+): Promise<OAuthCredentialManifest> {
+  return apiGet(
+    `/api/v1/admin/oauth/providers/${encodeURIComponent(provider)}/credential-manifest`
+  ) as Promise<OAuthCredentialManifest>
+}
+
+/**
+ * Dry-run generic AS discovery (E-19.5, D-A6). Posts the operator-typed issuer/URL and
+ * resolves to the prefill SUGGESTION the wizard offers on Apply. No writes. On failure
+ * the thrown Error carries `.code`/`.body` (the `discovery_failed` detail kind or a
+ * kernel §4 400 message), mapped to UI copy by `mapRemoteDiscoverError`.
+ */
+export async function discoverGenericOAuth(url: string): Promise<GenericDiscoveryPrefill> {
+  return apiSend('POST', '/api/v1/admin/oauth/discover', {
+    url,
+  }) as Promise<GenericDiscoveryPrefill>
+}
+
+/**
+ * Lists MCP Server Secrets as names + keys only — never values (E-16.1). The OAuth
+ * install wizard's reference mode uses this to verify that a chosen Secret and its
+ * id/secret keys exist before the operator submits (D-B3 / Fam. B(1)).
+ */
+export async function listMcpSecrets(): Promise<{ items: McpSecretSummary[] }> {
+  return apiGet('/api/v1/admin/mcp-secrets') as Promise<{ items: McpSecretSummary[] }>
+}
+
 export type InstallFromRegistryRequest = {
   serverName?: string
   namespace?: string
@@ -3353,6 +3393,10 @@ export type InstallFromRegistryRequest = {
   registryEntryVersion: string
   credentials?: Record<string, string>
   egressBindings?: EgressBinding[]
+  // Present only when the catalog entry declares OAuth (S1-U4). `oauth.id` is
+  // never sent — control-api derives and validates it (D-B5). The client_secret
+  // in `oauth.secret` (managed mode) lives only in this request body.
+  oauth?: OAuthInstallSubmit
 }
 
 export type InstallFromRegistryResponse = {

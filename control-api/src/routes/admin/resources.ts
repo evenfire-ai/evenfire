@@ -4,6 +4,7 @@ import {
   type DbClient,
   advisoryLockModelNames,
   boundCarrierTransactionIdleTimeout,
+  pool,
   withTransaction,
 } from '../../db.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
@@ -11,7 +12,11 @@ import { enforceNamespace } from '../../http/namespaceAudit.js'
 import { validateCommunicationChannelSpec } from '../../http/validateCommunicationChannelSpec.js'
 import { validateMcpServerSpecPreflight } from '../../http/validateMcpServerSpec.js'
 import { K8sGateway } from '../../k8s.js'
+import { cleanupDynamicClientForServer } from '../../oauth/dcrCleanup.js'
+import { deriveOAuthEncryptionKey } from '../../oauth/encryption.js'
+import { deleteOAuthGrantsForServer } from '../../oauth/store.js'
 import { rootLogger } from '../../observability/logger.js'
+import { mcpServerUninstallTeardownFailuresTotal } from '../../observability/metrics.js'
 import { stripHookRefFromHosts } from '../../services/hostGuardrailRefs.js'
 import {
   K8sConflictError,
@@ -512,6 +517,13 @@ function hostValidationDeps(db: DbClient) {
 
 export function createAdminResourcesRouter(gateway: K8sGateway): Router {
   const router = Router()
+  // Uses the module-level `log` (= exported `adminResourcesLogger`). A local
+  // child here would shadow it with a different instance, so handler logs would
+  // bypass any spy/redaction attached to the exported logger.
+  // Reliable local revocation of a remote server's DCR client on uninstall; the
+  // AS-side RFC 7592 delete is courtesy (real pinned transport in production).
+  const oauthEncryptionKey = deriveOAuthEncryptionKey(config.oauthEncryptionKey)
+  const dcrDb: DbClient = { query: (text, values) => pool.query(text, values) }
 
   // Middleware: enforce namespace per resource type and audit any injection attempt.
   // Uses enforceNamespace() consistently with all other admin routers.
@@ -1135,6 +1147,16 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
       const mcpCredentialsSecretName = `${name}-credentials`
       const mcpSecretCleanup =
         plural === 'mcpservers' ? await captureSecretForCleanup(mcpCredentialsSecretName) : null
+      // Pre-registered confidential remote installs create a `${name}-oauth-client`
+      // Secret in the install saga with NO ownerReferences (it predates the CR), so
+      // K8s GC never reaps it — control-api must delete it here. Fence it on the
+      // identity captured BEFORE the CR delete, exactly like the credentials Secret:
+      // a name-addressed delete could otherwise clobber a fresh same-name Secret
+      // written by a concurrent reinstall in the gap (the bug this capture shape
+      // exists to prevent). 'absent' (404) is the norm for non-pre-registered servers.
+      const mcpOAuthClientSecretName = `${name}-oauth-client`
+      const mcpOAuthClientSecretCleanup =
+        plural === 'mcpservers' ? await captureSecretForCleanup(mcpOAuthClientSecretName) : null
 
       const deleted = await gateway.deleteResource(plural, name, ns)
 
@@ -1205,6 +1227,110 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
               )
             }
           }
+        }
+
+        // Pre-registered confidential remote installs leave a `${name}-oauth-client`
+        // Secret with no ownerReferences (see the capture above). Delete it fenced on
+        // the identity captured before the CR delete; 'absent' (404) is expected for
+        // every non-pre-registered server and never fails the uninstall.
+        if (mcpOAuthClientSecretCleanup) {
+          if (mcpOAuthClientSecretCleanup.status === 'ready') {
+            try {
+              await gateway.deleteSecret(
+                mcpOAuthClientSecretName,
+                ns,
+                mcpOAuthClientSecretCleanup.precondition
+              )
+              log.info(
+                { secretName: mcpOAuthClientSecretName, namespace: ns },
+                'Deleted MCP OAuth client Secret'
+              )
+            } catch (err) {
+              if (extractK8sStatusCode(err) === 404) {
+                log.info(
+                  { secretName: mcpOAuthClientSecretName, namespace: ns },
+                  'MCP OAuth client Secret already gone'
+                )
+              } else {
+                mcpServerUninstallTeardownFailuresTotal.inc({ stage: 'oauth_client_secret' })
+                log.error(
+                  { secretName: mcpOAuthClientSecretName, namespace: ns, err },
+                  'McpServer delete succeeded but OAuth client Secret cleanup failed'
+                )
+              }
+            }
+          } else if (mcpOAuthClientSecretCleanup.status === 'absent') {
+            // Expected for every non-pre-registered server: no OAuth client Secret exists.
+            log.info(
+              { secretName: mcpOAuthClientSecretName, namespace: ns },
+              'No MCP OAuth client Secret to delete'
+            )
+          } else {
+            log.warn(
+              {
+                secretName: mcpOAuthClientSecretName,
+                namespace: ns,
+                reason: mcpOAuthClientSecretCleanup.status,
+              },
+              'Skipped MCP OAuth client Secret cleanup'
+            )
+          }
+        }
+
+        // Remote DCR client teardown (K, DEC-18): revoke the encrypted
+        // `dynamic_clients` row (reliable) + best-effort RFC 7592 delete at the AS
+        // (courtesy). Keyed per-server-CR; idempotent (0 rows ⇒ not a DCR server).
+        // Never blocks or fails the uninstall — the CR is already deleted.
+        try {
+          const teardown = await cleanupDynamicClientForServer(
+            dcrDb,
+            oauthEncryptionKey,
+            { logger: log },
+            {
+              ownerKind: 'mcpserver',
+              serverNamespace: ns,
+              serverName: name,
+            }
+          )
+          if (teardown.localRowsDeleted > 0) {
+            log.info(
+              {
+                serverName: name,
+                namespace: ns,
+                attemptedRemoteDelete: teardown.attemptedRemoteDelete,
+              },
+              'Revoked remote OAuth dynamic client on uninstall'
+            )
+          }
+        } catch (err) {
+          mcpServerUninstallTeardownFailuresTotal.inc({ stage: 'dynamic_client' })
+          log.error(
+            { serverName: name, namespace: ns, err },
+            'Dynamic client cleanup failed on uninstall (CR already deleted)'
+          )
+        }
+
+        // Server teardown (DEC-R2): wipe ALL of this server's oauth_grants rows —
+        // every user / context / client / flavor. Idempotent; never blocks the
+        // uninstall (the CR is already deleted). This is NOT the per-user
+        // revocation path — see deleteOAuthGrantsForServer.
+        try {
+          const purged = await deleteOAuthGrantsForServer(dcrDb, {
+            recipeNamespace: ns,
+            recipeName: name,
+          })
+          if (purged > 0) {
+            log.info(
+              { serverName: name, namespace: ns, count: purged },
+              'Purged OAuth grants on uninstall'
+            )
+          }
+        } catch (err) {
+          mcpServerUninstallTeardownFailuresTotal.inc({ stage: 'oauth_grants' })
+          log.error(
+            { serverName: name, namespace: ns, err },
+            'OAuth grants purge failed on uninstall (CR already deleted)'
+          )
         }
 
         try {

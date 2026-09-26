@@ -1,0 +1,37 @@
+// Display metadata for the 8 baked OAuth providers (Slice 1) plus the `generic`
+// sentinel (Slice 3, S3-B4). The baked provider ids are the frozen enum control-api
+// serves via isKnownOAuthProvider; `generic` is NOT a baked provider — it is the
+// self-hosted `source:'generic'` carril and carries only a label (no provider docs
+// URL, since there is no single provider). These are the labels and the provider's own
+// "where to register the redirect URI" docs shown beside the redirect URI (D-B4).
+
+export const OAUTH_PROVIDER_LABELS: Record<string, string> = {
+  google: 'Google',
+  'microsoft-graph': 'Microsoft 365',
+  slack: 'Slack',
+  salesforce: 'Salesforce',
+  notion: 'Notion',
+  monday: 'monday.com',
+  clickup: 'ClickUp',
+  vercel: 'Vercel',
+  generic: 'Custom OAuth 2.0 provider',
+}
+
+// Where the operator registers the OAuth app + redirect URI for each provider.
+// A missing entry simply renders no docs link (the redirect URI + copy button
+// remain the primary affordance).
+export const OAUTH_PROVIDER_DOC_URLS: Record<string, string> = {
+  google: 'https://console.cloud.google.com/apis/credentials',
+  'microsoft-graph':
+    'https://learn.microsoft.com/en-us/entra/identity-platform/quickstart-register-app',
+  slack: 'https://api.slack.com/apps',
+  salesforce: 'https://help.salesforce.com/s/articleView?id=sf.connected_app_create.htm',
+  notion: 'https://www.notion.so/my-integrations',
+  monday: 'https://developer.monday.com/apps/docs/oauth',
+  clickup: 'https://developer.clickup.com/docs/authentication',
+  vercel: 'https://vercel.com/docs/rest-api/reference/integrations',
+}
+
+export function oauthProviderLabel(provider: string): string {
+  return OAUTH_PROVIDER_LABELS[provider] ?? provider
+}

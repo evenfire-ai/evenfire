@@ -10,6 +10,9 @@ import { useToast } from '@components/Toast'
 import { isSilentApiError } from '@lib/api'
 import {
   type ConnectedAccount,
+  connectedAccountKey,
+  connectedAccountName,
+  describeGrantSource,
   listConnectedAccounts,
   revokeConnectedAccount,
 } from '@lib/connectedAccounts'
@@ -37,7 +40,7 @@ function ConnectedAccountsContent() {
   }, [])
 
   async function revoke(a: ConnectedAccount) {
-    const key = `${a.recipeName}/${a.oauthClientId}`
+    const key = connectedAccountKey(a)
     setBusy(key)
     try {
       await revokeConnectedAccount(a)
@@ -84,21 +87,24 @@ function ConnectedAccountsContent() {
             ) : (
               <RecordList className="stack">
                 {accounts.map(a => {
-                  const key = `${a.recipeName}/${a.oauthClientId}`
+                  const key = connectedAccountKey(a)
+                  const name = connectedAccountName(a)
+                  const { typeLabel, detail } = describeGrantSource(a)
                   return (
                     <RecordListRow key={key} className="member-row">
                       <div className="member-summary">
                         <div>
                           <div>
-                            <strong>{a.recipeName}</strong>
+                            <strong>{name}</strong>
                           </div>
                           <div className="small muted">
-                            {a.provider}
+                            {typeLabel}
+                            {detail ? ` · ${detail}` : ''}
                             {a.background ? ' · background access' : ''}
                           </div>
                         </div>
                         <RowActionMenu
-                          ariaLabel={`Actions for ${a.recipeName}`}
+                          ariaLabel={`Actions for ${name}`}
                           actions={[
                             {
                               key: 'revoke',

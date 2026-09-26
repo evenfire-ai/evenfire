@@ -500,8 +500,9 @@ function classifyConnector(server: McpServerCR, grantPresent: ReadonlySet<string
   }
   // Provider is the non-secret panel label. Derive it directly from
   // `spec.oauth.provider`, consistent with the oauth-ness gate above — NOT via
-  // `resolveServerOAuthSubject`, which additionally requires clientIdRef/
-  // clientSecretRef and would drop the label for an oauth server missing them.
+  // `resolveServerOAuthSubject`, whose baked lane still requires clientIdRef/
+  // clientSecretRef (and whose remote lane sets `provider:'remote'`, not the panel
+  // label). This gate only needs the grant coordinate (`resolveServerOAuth`).
   const providerRaw = server.spec?.oauth?.provider
   const provider =
     typeof providerRaw === 'string' && providerRaw.length > 0 ? providerRaw : undefined

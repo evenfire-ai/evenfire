@@ -8,6 +8,7 @@ import { CreateFlowPanel } from '@components/CreateFlowPanel'
 import { CreatePageHeader } from '@components/CreatePageHeader'
 import { DashboardLayout } from '@components/DashboardLayout'
 import { EgressEditor } from '@components/EgressEditor'
+import { OAuthImmutableFields } from '@components/OAuthImmutableFields'
 import { IconCable } from '@components/Sidebar/icons'
 import { TabBar } from '@components/TabBar'
 import { useToast } from '@components/Toast'
@@ -46,6 +47,7 @@ import {
   sortAccessPrincipals,
 } from '@lib/connectorAccess'
 import type { EgressEditorStatus } from '@lib/egressModel'
+import { extractOAuthImmutables, oauthClientSecretRefName } from '@lib/oauthInstall'
 
 /**
  * Narrows `server.spec.envSecret` (typed as `unknown` on the generic
@@ -300,6 +302,9 @@ export default function EditMcpServerPage() {
   const envSecret = server?.spec
     ? resolveEnvSecret(server.spec as Record<string, unknown>)
     : undefined
+  const oauthImmutables = server?.spec
+    ? extractOAuthImmutables(server.spec as Record<string, unknown>)
+    : null
   const registryCredentialSource = useMemo(
     () => resolveRegistryCredentialSource(server?.metadata),
     [server?.metadata]
@@ -365,17 +370,30 @@ export default function EditMcpServerPage() {
           ) : server ? (
             activeTab === 'credentials' ? (
               <div className="cu-connector-edit-form">
-                <UpdateConnectorCredentials
-                  serverName={name}
-                  envSecret={envSecret}
-                  registryCredentialSource={registryCredentialSource}
-                  surface={resolveCredentialSurface(
-                    server.status?.conditions,
-                    server.spec as { managed?: boolean } | undefined
-                  )}
-                  // Ownership is a spec fact, independent of observed status.
-                  recipeOwned={isRecipeOwned(server.spec as { managed?: boolean } | undefined)}
-                />
+                {oauthImmutables ? (
+                  // An OAuth connector's credential lives in its clientSecretRef
+                  // Secret, not spec.envSecret — so UpdateConnectorCredentials would
+                  // fall to its "nothing to rotate here" branch and mislead. Show the
+                  // accurate OAuth panel instead (D-B7; rotation is a follow-up).
+                  <OAuthImmutableFields
+                    oauth={oauthImmutables}
+                    credentialSecretName={oauthClientSecretRefName(
+                      server.spec as Record<string, unknown>
+                    )}
+                  />
+                ) : (
+                  <UpdateConnectorCredentials
+                    serverName={name}
+                    envSecret={envSecret}
+                    registryCredentialSource={registryCredentialSource}
+                    surface={resolveCredentialSurface(
+                      server.status?.conditions,
+                      server.spec as { managed?: boolean } | undefined
+                    )}
+                    // Ownership is a spec fact, independent of observed status.
+                    recipeOwned={isRecipeOwned(server.spec as { managed?: boolean } | undefined)}
+                  />
+                )}
               </div>
             ) : activeTab === 'access' ? (
               <div className="cu-connector-edit-form cu-connector-edit-content">

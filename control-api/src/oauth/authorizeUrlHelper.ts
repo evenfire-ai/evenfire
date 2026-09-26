@@ -9,7 +9,12 @@ import {
   type SecretReader,
 } from './callback.js'
 import { computeCodeChallengeS256, deriveCodeVerifier } from './pkce.js'
-import { getOAuthProviderAdapter, isKnownOAuthProvider } from './providers.js'
+import {
+  buildAdapterFromConfig,
+  buildRemoteAuthorizeUrl,
+  getOAuthProviderAdapter,
+  isKnownOAuthProvider,
+} from './providers.js'
 import { type SignStateInput, signOAuthState } from './state.js'
 
 /**
@@ -164,23 +169,68 @@ async function mintAuthorizeUrl(
     return { kind: 'background_access_not_enabled' }
   }
 
+  // Remote lane (`source:'remote'`): the authorize URL is built from the pinned
+  // discovery-derived `authorizationEndpoint` with a PUBLIC client_id (`decl.id`,
+  // backfilled for every mode — DEC-23), mandatory PKCE S256, and RFC 8707
+  // `resource`. No secret material rides the URL and no K8s Secret is read.
+  if (decl.remote) {
+    const state = signOAuthState(deps.stateSecret, stateInput)
+    const codeChallenge = computeCodeChallengeS256(deriveCodeVerifier(deps.stateSecret, state))
+    const authorizeUrl = buildRemoteAuthorizeUrl(decl.remote.authorizationEndpoint, {
+      clientId: decl.id,
+      redirectUri: input.redirectUri,
+      state,
+      scopes: decl.scopes ?? [],
+      codeChallenge,
+      resource: decl.remote.resource,
+    })
+    return { kind: 'ok', authorizeUrl }
+  }
+
+  // Generic self-hosted lane (`source:'generic'`, DEC-28): the authorize URL is
+  // composed from the pinned `authorizationEndpoint` + wire knobs
+  // (`buildAdapterFromConfig`) with the PUBLIC client_id (`decl.id`). PKCE S256 is
+  // gated on `usePkce`; when off, no challenge is computed or emitted. No K8s
+  // Secret is read (the client_id rides `oauth.id`, not a Secret).
+  if (decl.generic) {
+    const state = signOAuthState(deps.stateSecret, stateInput)
+    const codeChallenge = decl.generic.usePkce
+      ? computeCodeChallengeS256(deriveCodeVerifier(deps.stateSecret, state))
+      : undefined
+    const authorizeUrl = buildAdapterFromConfig(decl.generic).buildAuthorizeUrl({
+      clientId: decl.id,
+      redirectUri: input.redirectUri,
+      state,
+      scopes: decl.scopes ?? [],
+      codeChallenge,
+    })
+    return { kind: 'ok', authorizeUrl }
+  }
+
   if (!isKnownOAuthProvider(decl.provider)) {
     return { kind: 'unsupported_provider', provider: decl.provider }
   }
   const adapter = getOAuthProviderAdapter(decl.provider)
 
+  // Baked/recipe lane: clientIdRef is always present (only the remote lane, handled
+  // above, omits it). Guard fail-closed rather than dereference undefined.
+  if (!decl.clientIdRef) {
+    return { kind: 'secret_missing', secret: `${decl.id}/client_id` }
+  }
+  const clientIdRef = decl.clientIdRef
+
   let clientIdSecret: Record<string, string>
   try {
-    clientIdSecret = await deps.secretReader.read(decl.clientIdRef.name, secretNamespace)
+    clientIdSecret = await deps.secretReader.read(clientIdRef.name, secretNamespace)
   } catch (err) {
     if (err instanceof SecretNotFoundError) {
-      return { kind: 'secret_missing', secret: decl.clientIdRef.name }
+      return { kind: 'secret_missing', secret: clientIdRef.name }
     }
     throw err
   }
-  const clientId = clientIdSecret[decl.clientIdRef.key]
+  const clientId = clientIdSecret[clientIdRef.key]
   if (!clientId) {
-    return { kind: 'secret_missing', secret: `${decl.clientIdRef.name}/${decl.clientIdRef.key}` }
+    return { kind: 'secret_missing', secret: `${clientIdRef.name}/${clientIdRef.key}` }
   }
 
   const state = signOAuthState(deps.stateSecret, stateInput)

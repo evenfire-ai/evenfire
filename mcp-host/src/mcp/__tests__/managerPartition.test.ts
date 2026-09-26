@@ -15,6 +15,8 @@ import fc from 'fast-check'
 import type { McpServerInfo } from '../../types'
 import { createBrokerTokenProvider } from '../brokerTokenProvider'
 import type { McpTokenProvider } from '../client'
+import { checkGrantExistence } from '../grantExistenceClient'
+import type { GrantExistenceChecker, McpCatalogBootstrapConfig } from '../grantProbe'
 import {
   McpManager,
   type McpPrincipal,
@@ -24,6 +26,7 @@ import {
   serverNameFromClientKey,
   userPrincipal,
 } from '../manager'
+import { brokerWiring } from './helpers/brokerWiring'
 
 // ─── SDK mocks (constructable; capture per-transport headers) ────────────────
 
@@ -686,5 +689,60 @@ describe('R4-M5 — a terminal McpAuthError evicts the per-user partition', () =
     const second = await manager.callTool('gh__do', {}, { userId: 'alice' })
     expect(second.isError).toBe(false)
     expect(built.filter(b => b.principal === 'alice')).toHaveLength(2)
+  })
+})
+
+// ── invariant 14: a bootstrapped partition is idle-evictable and re-bootstraps ──
+
+function remoteOauthUserServer(name = 'gh'): McpServerInfo {
+  return {
+    name,
+    transport: { type: 'streamableHttp', url: `https://${name}.example.com/mcp` },
+    authKind: 'oauth-user',
+    remote: true,
+    enabled: true,
+    status: { deployed: true, ready: true },
+  }
+}
+
+function bootstrapConfig(): McpCatalogBootstrapConfig {
+  return {
+    enabled: true,
+    waitBudgetMs: 4000,
+    probeTimeoutMs: 2000,
+    connectTimeoutMs: 8000,
+    negativeTtlMs: 15000,
+    failureTtlMs: 60000,
+    probesPerMin: 20,
+    backoffMs: 30000,
+  }
+}
+
+describe('bootstrapped partition interacts with the idle sweep (inv 14)', () => {
+  it('is idle-evictable (in partitionLastUsed) and re-bootstraps on the next turn', async () => {
+    const grantStore = new Set(['gh:alice'])
+    const { deps, factory, existsCalls } = brokerWiring(grantStore)
+    const grantExistence: GrantExistenceChecker = (queries, { timeoutMs }) =>
+      checkGrantExistence({ ...deps, timeoutMs }, queries)
+    const manager = new McpManager(undefined, undefined, factory, {
+      grantExistence,
+      catalogBootstrap: bootstrapConfig(),
+    })
+    await manager.addServer(remoteOauthUserServer('gh'))
+
+    // Bootstrap opens the partition without any callTool.
+    await manager.bootstrapUserCatalog('alice')
+    expect(manager.getAllTools().map(t => t.name)).toEqual(['gh__do'])
+    expect(existsCalls).toHaveLength(1)
+
+    // Never called ⇒ its lastUsed is the bootstrap stamp ⇒ idle-evictable.
+    expect(manager.evictIdleUserPartitions(0)).toBe(1)
+    expect(manager.getAllTools()).toEqual([])
+
+    // The next turn re-probes (it was present, not absent-cached) and re-admits.
+    const again = await manager.bootstrapUserCatalog('alice')
+    expect(again.admitted).toBe(1)
+    expect(existsCalls).toHaveLength(2)
+    expect(manager.getAllTools().map(t => t.name)).toEqual(['gh__do'])
   })
 })

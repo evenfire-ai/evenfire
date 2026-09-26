@@ -3,6 +3,7 @@ import type { NextFunction, Request, Response } from 'express'
 import { createHash } from 'node:crypto'
 import { isIP } from 'node:net'
 import { parse as parseYaml } from 'yaml'
+import { z } from 'zod'
 import { config } from '../../config.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import { extractK8sError } from '../../http/k8sError.js'
@@ -10,6 +11,8 @@ import { validateMcpServerSpecPreflight } from '../../http/validateMcpServerSpec
 import { K8sGateway } from '../../k8s.js'
 import type { UiAuthedRequest } from '../../middleware/controlUIAuth.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
+import { GenericConfigSuggestionSchema } from '../../oauth/genericKnobs.js'
+import { getOAuthProviderAdapter, isKnownOAuthProvider } from '../../oauth/providers.js'
 import { rootLogger } from '../../observability/logger.js'
 import { type AdminUserRecord, findAdminById } from '../../services/adminAuthService.js'
 import {
@@ -67,6 +70,13 @@ import {
   validateWorkflowRecipeLimits,
 } from '../../services/workflowRecipeLimits.js'
 import type { SecretPreconditions, SecretUpsertRequest } from '../../types.js'
+import {
+  type GenericOAuthSpecRefs,
+  InstallGenericOAuthInputSchema,
+  InstallOAuthSecretSchema,
+  buildGenericOAuthSpec,
+  validateGenericEndpoints,
+} from './registryGenericOauth.js'
 import {
   EVENFIRE_REGISTRY_PULL_SECRET_NAME,
   shouldAttachEvenfirePullSecret,
@@ -664,11 +674,18 @@ async function loadRegistryCredentialSchema(entry: {
   }
 }
 
+const log = rootLogger.child({ module: 'admin-registry' })
+
 /** Audit log for security-sensitive operations (finding #10). */
 function auditLog(action: string, details: Record<string, unknown>): void {
-  const safe: Record<string, unknown> = { timestamp: new Date().toISOString(), action, ...details }
+  const safe: Record<string, unknown> = { ...details }
+  // Drop value-bearing fields defensively; only key NAMES are ever passed in.
+  // pino's redact layer strips token/secret keys on top of this.
   for (const k of ['credentials', 'clientSecret', 'stringData', 'password']) delete safe[k]
-  log.info(safe, 'registry-audit')
+  // Keep `action` as a structured field (dev's `registry-audit` message dropped
+  // it, which erases which operation the audit line describes); merge the safe
+  // details on top. pino's redact layer strips token/secret keys on top of this.
+  log.info({ action, ...safe }, 'registry-audit')
 }
 
 /**
@@ -770,6 +787,146 @@ function validateRemoteUrl(url: string): void {
   ) {
     throw new Error('Cluster-internal URLs not allowed')
   }
+}
+
+// ─── OAuth install-from-UI (Slice 1, S1-U2/S1-U3) ───────────────────────────
+
+// Canonical Secret keys control-api writes for the managed-Secret mode (D-B3).
+// They match the credential-manifest field names in oauth/providers.ts, so the
+// form field, the stored key, and the clientIdRef/clientSecretRef never drift.
+const OAUTH_CLIENT_ID_KEY = 'client_id'
+const OAUTH_CLIENT_SECRET_KEY = 'client_secret'
+
+// Frozen catalog contract (S1-U1 deferred): the entry MAY carry an `oauth` block
+// under mcp_server_meta. `genericConfig` (E-19.6) is a typed generic SUGGESTION that
+// is NEVER read to build spec.oauth (S-4: the catalog suggests, it never
+// auto-configures; only the wizard-confirmed body.oauth.generic reaches the CR).
+// Because it is never read, a malformed one must NEVER block an install — `.catch`
+// drops a non-conforming suggestion to `undefined` instead of failing the whole
+// catalog-oauth parse. This also keeps the baked path byte-identical: a baked entry
+// that happens to carry a non-conforming genericConfig installs exactly as before.
+const CatalogOAuthBlockSchema = z.object({
+  provider: z.string(),
+  grantScope: z.enum(['user', 'context']).optional(),
+  scopes: z.array(z.string()).optional(),
+  genericConfig: GenericConfigSuggestionSchema.optional().catch(undefined),
+})
+
+// `InstallOAuthSecretSchema` (managed | reference) lives in `registryGenericOauth.ts`
+// so the generic input schema can reuse it without an import cycle; the baked input
+// schema below imports it back.
+const InstallOAuthInputSchema = z.object({
+  // Editable scopes (D-B6/E-19.3): the wizard prefills from the catalog and the
+  // admin may override them per server (the Google family shares one provider
+  // with different scopes per server).
+  scopes: z.array(z.string()).optional(),
+  // grantScope is immutable once set (D-B7); the selector is offered only at
+  // create, which is where this saga runs.
+  grantScope: z.enum(['user', 'context']).optional(),
+  secret: InstallOAuthSecretSchema,
+})
+
+type InstallOAuthInput = z.infer<typeof InstallOAuthInputSchema>
+
+/**
+ * Derive the immutable `spec.oauth.id` from the server name (D-B5). The operator
+ * never types it: the id is the OAuth callback path segment, so control-api owns
+ * it and pre-checks uniqueness. The mcpserver CRD constrains it to
+ * `^[a-z0-9-]{1,63}$`; the server name is already a valid K8s name, so this only
+ * normalises separators and truncates.
+ */
+export function deriveOAuthClientId(serverName: string): string {
+  return serverName
+    .toLowerCase()
+    .replace(/[^a-z0-9-]/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+/, '')
+    .slice(0, 63)
+    .replace(/-+$/, '')
+}
+
+/**
+ * Resolve the effective OAuth scopes for an install (D-B6/GAP-6). Precedence:
+ * operator-edited scopes → catalog prefill → the baked adapter's defaultScopes.
+ * Returns `[]` only when every source is empty (the google/salesforce/slack/…
+ * family with no scopes supplied), which the caller rejects: a baked OAuth server
+ * must never be created with `scopes: []` when its provider demands explicit ones.
+ */
+export function computeInstallOAuthScopes(args: {
+  operatorScopes?: string[]
+  catalogScopes?: string[]
+  defaultScopes: ReadonlyArray<string>
+}): string[] {
+  // An empty list at any level (operator cleared it, or the catalog carries [])
+  // falls THROUGH to the next source, ending at defaultScopes, then rejection.
+  const clean = (list: string[] | undefined): string[] | undefined => {
+    if (!Array.isArray(list)) return undefined
+    const filtered = list.map(s => s.trim()).filter(s => s.length > 0)
+    return filtered.length > 0 ? filtered : undefined
+  }
+  const prefill = clean(args.operatorScopes) ?? clean(args.catalogScopes)
+  if (prefill) return prefill
+  return [...args.defaultScopes]
+}
+
+/**
+ * Pre-check that `spec.oauth.id` is unique among installed servers in the
+ * namespace (D-B5). The id is the callback path segment, so a collision would
+ * route two servers' callbacks to the same coordinate. The CRD validates the id
+ * FORMAT but not uniqueness, so control-api owns this gate. A read failure
+ * propagates (asyncHandler → 500): a green install on an unverified id could
+ * hijack another server's callback route.
+ */
+async function oauthClientIdInUse(
+  gateway: K8sGateway,
+  namespace: string,
+  oauthId: string
+): Promise<boolean> {
+  const servers = (await gateway.listResource('mcpservers', namespace)) as Array<{
+    spec?: { oauth?: { id?: unknown } }
+  }>
+  return servers.some(server => server.spec?.oauth?.id === oauthId)
+}
+
+/**
+ * Verify a referenced client Secret and its named keys EXIST before the CR is
+ * written (D-B3 reference mode / Fam. B(1) invariant). A dangling
+ * clientIdRef/clientSecretRef would leave the broker unable to exchange tokens,
+ * discovered only at first connect; fail closed at admission instead. A 404
+ * Secret and a missing key are both operator-fixable 400s; any other read error
+ * propagates.
+ */
+async function verifyReferencedOAuthSecret(
+  gateway: K8sGateway,
+  namespace: string,
+  ref: { secretName: string; clientIdKey: string; clientSecretKey: string }
+): Promise<{ ok: true } | { ok: false; status: number; error: string }> {
+  let secret: { data?: Record<string, string>; stringData?: Record<string, string> }
+  try {
+    secret = (await gateway.getSecret(ref.secretName, namespace)) as typeof secret
+  } catch (err) {
+    if (extractK8sError(err)?.status === 404) {
+      return {
+        ok: false,
+        status: 400,
+        error: `oauth.secret.reference: Secret "${ref.secretName}" not found in ${namespace}`,
+      }
+    }
+    throw err
+  }
+  const presentKeys = new Set<string>([
+    ...Object.keys(secret.data ?? {}),
+    ...Object.keys(secret.stringData ?? {}),
+  ])
+  const missing = [ref.clientIdKey, ref.clientSecretKey].filter(key => !presentKeys.has(key))
+  if (missing.length > 0) {
+    return {
+      ok: false,
+      status: 400,
+      error: `oauth.secret.reference: Secret "${ref.secretName}" is missing key(s): ${missing.join(', ')}`,
+    }
+  }
+  return { ok: true }
 }
 
 type RegistryEgressSummary = {
@@ -1456,6 +1613,12 @@ export interface RegistryInstallRequest {
   registryEntryVersion: string
   credentials?: Record<string, string>
   egressBindings?: RegistryEgressBinding[]
+  /**
+   * OAuth wiring for an entry whose catalog carries an `oauth` block (S1-U2/U3).
+   * Absent for non-OAuth installs. Required when the catalog declares OAuth: the
+   * operator must supply the client Secret (managed values or a reference).
+   */
+  oauth?: InstallOAuthInput
 }
 
 export async function getInstalledRegistryState(gateway?: K8sGateway): Promise<{
@@ -1533,8 +1696,6 @@ export async function getInstalledRegistryState(gateway?: K8sGateway): Promise<{
     hookKeys: [...hookKeys].sort((a, b) => a.localeCompare(b)),
   }
 }
-
-const log = rootLogger.child({ module: 'admin-registry' })
 
 type RegistryFenceFailure = 'identity-mismatch' | 'identity-unavailable' | 'rejected' | 'unresolved'
 
@@ -2024,6 +2185,286 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
           return
         }
 
+        // ── OAuth wiring (S1-U2/U3 baked · S3-B4 generic): generate spec.oauth from
+        // the catalog block + operator input. Only runs when the entry declares OAuth.
+        // The catalog `genericConfig` SUGGESTION is validated but NEVER read here to
+        // build the spec (S-4): only the wizard-confirmed body.oauth reaches the CR.
+        let managedOAuthSecret: { name: string; data: Record<string, string> } | undefined
+        // Snapshot of the managed OAuth client Secret created in Step 3b, captured
+        // for the same UID/RV-fenced rollback dev applies to the envSecret
+        // (createdSecretSnapshot). Null until Step 3b creates it.
+        let createdOAuthClientSecretSnapshot: SecretSnapshot | null = null
+        const catalogOAuthRaw = (meta as { oauth?: unknown } | null)?.oauth
+        if (catalogOAuthRaw !== undefined && catalogOAuthRaw !== null) {
+          const parsedCatalog = CatalogOAuthBlockSchema.safeParse(catalogOAuthRaw)
+          if (!parsedCatalog.success) {
+            res.status(400).json({ error: 'Invalid catalog oauth block', pendingAllowed: false })
+            return
+          }
+          const catalogOAuth = parsedCatalog.data
+
+          if (catalogOAuth.provider === 'generic') {
+            // ── Generic self-hosted lane (S3-B4 / DEC-28) ────────────────────────
+            // Opened BEFORE the isKnownOAuthProvider gate so 'generic' never enters
+            // ADAPTERS/KNOWN_OAUTH_PROVIDERS; the baked path stays byte-identical.
+            if (!config.oauthCallbackBaseUrl || config.oauthCallbackBaseUrl.trim().length === 0) {
+              res.status(400).json({
+                error:
+                  'oauth: CONTROL_API_OAUTH_CALLBACK_BASE_URL is not configured; cannot install an OAuth server',
+              })
+              return
+            }
+            if (body.oauth === undefined || body.oauth === null) {
+              res.status(400).json({
+                error: 'oauth: generic client configuration is required (endpoints + wire knobs)',
+              })
+              return
+            }
+            const parsedGeneric = InstallGenericOAuthInputSchema.safeParse(body.oauth)
+            if (!parsedGeneric.success) {
+              // Zod issue paths/messages are field names + type descriptions, never
+              // submitted values — cannot leak a client secret or endpoint.
+              const detail = parsedGeneric.error.issues
+                .map(issue => {
+                  const path = issue.path.join('.')
+                  return path ? `${path}: ${issue.message}` : issue.message
+                })
+                .join('; ')
+              res.status(400).json({ error: `oauth: invalid generic oauth input: ${detail}` })
+              return
+            }
+            const genericInput = parsedGeneric.data
+            const knobs = genericInput.generic
+
+            // grantScope: operator → catalog → 'user' (same order as baked).
+            const grantScope = genericInput.grantScope ?? catalogOAuth.grantScope ?? 'user'
+
+            // Scopes: operator → catalog → [] (generic has no baked adapter). GAP-6
+            // (DA-4): with sendScope:true an empty scope set is rejected, exactly as
+            // baked; with sendScope:false an authorize without `scope` is legal.
+            const scopes = computeInstallOAuthScopes({
+              operatorScopes: genericInput.scopes,
+              catalogScopes: catalogOAuth.scopes,
+              defaultScopes: [],
+            })
+            if (scopes.length === 0 && knobs.sendScope) {
+              res.status(400).json({
+                error: 'oauth_scopes_required',
+                message:
+                  'oauth: generic client with sendScope:true requires explicit scopes; none supplied',
+              })
+              return
+            }
+
+            // Coherence (fail-closed, not a decision): Basic client auth needs a
+            // secret. The composer throws at runtime without one (providers.ts); reject
+            // at admission instead of creating an unusable public+basic client.
+            if (knobs.tokenAuthMethod === 'basic' && genericInput.secret === undefined) {
+              res.status(400).json({
+                error:
+                  'oauth: generic tokenAuthMethod=basic requires a client secret (confidential)',
+              })
+              return
+            }
+
+            // D-B5: control-api derives the immutable id and pre-checks uniqueness. The
+            // slug narrow (CEL) applies to generic too — client_id IS oauth.id (public).
+            const oauthId = deriveOAuthClientId(serverName)
+            if (!oauthId) {
+              res
+                .status(400)
+                .json({ error: 'oauth: could not derive a valid oauth.id from serverName' })
+              return
+            }
+            if (await oauthClientIdInUse(gateway, targetNs, oauthId)) {
+              res.status(409).json({
+                error: `oauth.id "${oauthId}" is already in use by another server; choose a different serverName`,
+              })
+              return
+            }
+
+            // Kernel §4 (spec 19 §4) over every operator-typed endpoint, BEFORE any
+            // Secret or CR is written (0 Secrets, 0 CR on rejection). These endpoints
+            // are immutable by CEL and authorize is never re-validated at runtime.
+            const endpointErrors = await validateGenericEndpoints(knobs)
+            if (endpointErrors.length > 0) {
+              res.status(422).json({ error: 'oauth_endpoint_rejected', errors: endpointErrors })
+              return
+            }
+
+            // Secret refs by mode (D-B3) — confidential only. A public client (no
+            // secret) carries NO refs; its client_id IS oauth.id (DA-1).
+            let refs: GenericOAuthSpecRefs | undefined
+            if (genericInput.secret) {
+              if (genericInput.secret.mode === 'reference') {
+                const verify = await verifyReferencedOAuthSecret(
+                  gateway,
+                  targetNs,
+                  genericInput.secret
+                )
+                if (!verify.ok) {
+                  res.status(verify.status).json({ error: verify.error })
+                  return
+                }
+                refs = {
+                  clientIdRef: {
+                    name: genericInput.secret.secretName,
+                    key: genericInput.secret.clientIdKey,
+                  },
+                  clientSecretRef: {
+                    name: genericInput.secret.secretName,
+                    key: genericInput.secret.clientSecretKey,
+                  },
+                }
+              } else {
+                const oauthSecretName = `${serverName}-oauth-client`
+                refs = {
+                  clientIdRef: { name: oauthSecretName, key: OAUTH_CLIENT_ID_KEY },
+                  clientSecretRef: { name: oauthSecretName, key: OAUTH_CLIENT_SECRET_KEY },
+                }
+                managedOAuthSecret = {
+                  name: oauthSecretName,
+                  data: {
+                    [OAUTH_CLIENT_ID_KEY]: genericInput.secret.clientId,
+                    [OAUTH_CLIENT_SECRET_KEY]: genericInput.secret.clientSecret,
+                  },
+                }
+              }
+            }
+
+            mcpServerSpec.auth = { type: 'oauth' }
+            mcpServerSpec.oauth = buildGenericOAuthSpec({
+              id: oauthId,
+              knobs,
+              scopes,
+              grantScope,
+              refs,
+            })
+          } else {
+            // Baked lane (S1) — byte-identical to before, now guarded by the generic
+            // branch above so 'generic' never reaches the isKnownOAuthProvider gate.
+            if (!isKnownOAuthProvider(catalogOAuth.provider)) {
+              res.status(400).json({
+                error: `oauth.provider "${catalogOAuth.provider}" is not a supported baked provider`,
+              })
+              return
+            }
+            const provider = catalogOAuth.provider
+
+            // D-B4: the public callback base URL MUST be configured. Without it the
+            // callback would derive from the internal Host behind the funnel and the
+            // operator would register a broken redirect URI at the provider.
+            if (!config.oauthCallbackBaseUrl || config.oauthCallbackBaseUrl.trim().length === 0) {
+              res.status(400).json({
+                error:
+                  'oauth: CONTROL_API_OAUTH_CALLBACK_BASE_URL is not configured; cannot install an OAuth server',
+              })
+              return
+            }
+
+            if (body.oauth === undefined || body.oauth === null) {
+              res.status(400).json({
+                error:
+                  'oauth: client credentials are required (managed values or a Secret reference)',
+              })
+              return
+            }
+            const parsedInput = InstallOAuthInputSchema.safeParse(body.oauth)
+            if (!parsedInput.success) {
+              // Describe the real validation failure. Zod issue paths/messages are
+              // field names and type descriptions — never the submitted values — so
+              // this cannot leak a client secret.
+              const detail = parsedInput.error.issues
+                .map(issue => {
+                  const path = issue.path.join('.')
+                  return path ? `${path}: ${issue.message}` : issue.message
+                })
+                .join('; ')
+              res.status(400).json({ error: `oauth: invalid oauth input: ${detail}` })
+              return
+            }
+            const oauthInput = parsedInput.data
+
+            // grantScope: operator selector wins, else catalog, else 'user'. Immutable
+            // once set (D-B7) — this saga only ever creates.
+            const grantScope = oauthInput.grantScope ?? catalogOAuth.grantScope ?? 'user'
+
+            // Scopes: operator edit → catalog prefill → baked defaultScopes (D-B6).
+            const adapter = getOAuthProviderAdapter(provider)
+            const scopes = computeInstallOAuthScopes({
+              operatorScopes: oauthInput.scopes,
+              catalogScopes: catalogOAuth.scopes,
+              defaultScopes: adapter.defaultScopes,
+            })
+            if (scopes.length === 0) {
+              // GAP-6: google/salesforce/slack/notion/monday/clickup have empty
+              // defaultScopes, so a server with no scopes supplied is rejected rather
+              // than created inert with scopes: [].
+              res.status(400).json({
+                error: `oauth: provider "${provider}" requires explicit scopes; none supplied`,
+              })
+              return
+            }
+
+            // D-B5: control-api derives the immutable id and pre-checks uniqueness.
+            const oauthId = deriveOAuthClientId(serverName)
+            if (!oauthId) {
+              res
+                .status(400)
+                .json({ error: 'oauth: could not derive a valid oauth.id from serverName' })
+              return
+            }
+            if (await oauthClientIdInUse(gateway, targetNs, oauthId)) {
+              res.status(409).json({
+                error: `oauth.id "${oauthId}" is already in use by another server; choose a different serverName`,
+              })
+              return
+            }
+
+            // Secret refs by mode (D-B3).
+            let clientIdRef: { name: string; key: string }
+            let clientSecretRef: { name: string; key: string }
+            if (oauthInput.secret.mode === 'reference') {
+              const verify = await verifyReferencedOAuthSecret(gateway, targetNs, oauthInput.secret)
+              if (!verify.ok) {
+                res.status(verify.status).json({ error: verify.error })
+                return
+              }
+              clientIdRef = {
+                name: oauthInput.secret.secretName,
+                key: oauthInput.secret.clientIdKey,
+              }
+              clientSecretRef = {
+                name: oauthInput.secret.secretName,
+                key: oauthInput.secret.clientSecretKey,
+              }
+            } else {
+              const oauthSecretName = `${serverName}-oauth-client`
+              clientIdRef = { name: oauthSecretName, key: OAUTH_CLIENT_ID_KEY }
+              clientSecretRef = { name: oauthSecretName, key: OAUTH_CLIENT_SECRET_KEY }
+              managedOAuthSecret = {
+                name: oauthSecretName,
+                data: {
+                  [OAUTH_CLIENT_ID_KEY]: oauthInput.secret.clientId,
+                  [OAUTH_CLIENT_SECRET_KEY]: oauthInput.secret.clientSecret,
+                },
+              }
+            }
+
+            // The CRD couples auth.type=='oauth' iff spec.oauth is present and
+            // forbids a static auth.secretRef alongside oauth.
+            mcpServerSpec.auth = { type: 'oauth' }
+            mcpServerSpec.oauth = {
+              id: oauthId,
+              provider,
+              clientIdRef,
+              clientSecretRef,
+              scopes,
+              grantScope,
+            }
+          }
+        }
+
         const preflightErrors = await validateMcpServerSpecPreflight(mcpServerSpec, {
           allowedImagePrefixes: config.allowedPluginImagePrefixes,
           enforceImageAllowlist: config.enforcePluginImageAllowlist,
@@ -2117,6 +2558,79 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
           }
         }
 
+        // ── Step 3b: Create the managed OAuth client Secret (D-B3) ────────
+        // Only for managed mode; reference mode was verified above and creates
+        // nothing. Written before the CR that references it, and rolled back with
+        // the CR/context on any later failure via its snapshot (same UID/RV-fenced
+        // mechanism dev uses for the envSecret) so a failed install leaves no
+        // orphaned Secret (H-2/H-3).
+        if (managedOAuthSecret) {
+          const oauthSecretReq: SecretUpsertRequest = {
+            name: managedOAuthSecret.name,
+            namespace: targetNs,
+            type: 'Opaque',
+            labels: registryLabels,
+            // Same write-capability contract as the env Secret above: dev's
+            // assertValidSecretConstraints rejects `clerum.io/*` annotation keys
+            // unless the write declares the matching capability, so this must use
+            // `credentialAnnotations` (the grant-scoped subset) + the capability,
+            // not the broader `registryAnnotations` which carries keys outside
+            // the `registryCredential` grant.
+            annotations: credentialAnnotations,
+            stringData: managedOAuthSecret.data,
+          }
+          try {
+            createdOAuthClientSecretSnapshot = await gateway.createSecret(oauthSecretReq, {
+              capability: 'registryCredential',
+            })
+          } catch (err) {
+            // The OAuth client Secret write failed. Roll back the envSecret created
+            // in Step 3 (if any) with the same identity-fenced helper dev uses for
+            // credential rollback; a failed compensation escalates to
+            // compensation_failed so the operator knows a Secret may be orphaned.
+            let rollbackFailed = false
+            if (createdSecretSnapshot) {
+              try {
+                await rollbackCreatedSecret(gateway, createdSecretSnapshot)
+              } catch {
+                rollbackFailed = true
+              }
+            }
+            if (rollbackFailed) {
+              res.status(500).json({
+                error: 'registry_install_rollback_incomplete',
+                outcome: 'compensation_failed',
+              })
+              return
+            }
+            const k8sErr = extractK8sError(err)
+            if (k8sErr && k8sErr.status < 500) {
+              res
+                .status(k8sErr.status)
+                .json({ error: `OAuth client Secret creation failed: ${k8sErr.message}` })
+              return
+            }
+            // A create has no pre-write UID/RV to fence; its response cannot be
+            // recovered into a compensable success, even if the named Secret later
+            // looks like the requested intent.
+            res.status(503).json({
+              error: 'registry_secret_outcome_ambiguous',
+              outcome: 'repair_required',
+              resourceName: managedOAuthSecret.name,
+              resourceType: 'secret',
+              namespace: targetNs,
+            })
+            return
+          }
+          // Key NAMES only; the client_id/client_secret VALUES are never logged.
+          auditLog('oauth_client_secret_created', {
+            secretName: managedOAuthSecret.name,
+            namespace: targetNs,
+            registryEntry: body.registryEntryName,
+            credentialKeys: Object.keys(managedOAuthSecret.data),
+          })
+        }
+
         // ── Step 4: Create McpServer CRD (rollback by UID on failure) ────
         let createdMcpServerSnapshot: RegistryResourceSnapshot | null = null
         try {
@@ -2160,11 +2674,21 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
           }
 
           // A deterministic create rejection proves there is no CR to
-          // compensate; only the earlier credential object needs rollback.
+          // compensate; only the earlier credential objects need rollback
+          // (the envSecret and the managed OAuth client Secret). Both are
+          // fenced on their captured UID/RV, and a failed compensation
+          // escalates to compensation_failed.
           let rollbackFailed = false
           if (createdSecretSnapshot) {
             try {
               await rollbackCreatedSecret(gateway, createdSecretSnapshot)
+            } catch {
+              rollbackFailed = true
+            }
+          }
+          if (createdOAuthClientSecretSnapshot) {
+            try {
+              await rollbackCreatedSecret(gateway, createdOAuthClientSecretSnapshot)
             } catch {
               rollbackFailed = true
             }
@@ -2279,12 +2803,15 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
               })
               return
             }
-            if (createdSecretSnapshot) {
+            if (createdSecretSnapshot || createdOAuthClientSecretSnapshot) {
               // The CR was live during this saga. There is no Kubernetes
               // transaction that atomically proves its absence and deletes a
-              // separately named Secret. Preserve the dependency for repair;
-              // deleting it after the CR rollback would permit a replacement
-              // CR to race into the same name and reference.
+              // separately named Secret (the envSecret or the managed OAuth
+              // client Secret). Preserve the dependency for repair; deleting it
+              // after the CR rollback would permit a replacement CR to race into
+              // the same name and reference. The compensation_failed 500 flags
+              // the leftover Secret for the operator, so a failed install never
+              // silently orphans one (H-2/H-3).
               res.status(500).json({
                 error: 'registry_install_rollback_incomplete',
                 outcome: 'compensation_failed',
@@ -3487,6 +4014,8 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
           // Uninstall MCP Server
           let credentialSecretSnapshot: SecretSnapshot | null = null
           const credentialSecretName = `${resourceName}-credentials`
+          let oauthClientSecretSnapshot: SecretSnapshot | null = null
+          const oauthClientSecretName = `${resourceName}-oauth-client`
 
           // Capture the credential identity before deleting the parent CR. A
           // same-name Secret replacement can be created after the CR delete;
@@ -3511,6 +4040,36 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
                 warnings: [
                   ...warnings,
                   `Secret/${credentialSecretName}: ${err instanceof Error ? err.message : 'unable to verify identity'}`,
+                ],
+              })
+              return
+            }
+          }
+
+          // Same fence for the managed OAuth client Secret. It is created in the
+          // install saga WITHOUT ownerReferences (it predates the CR), so K8s GC
+          // never collects it and control-api must delete it here — but by-name
+          // after the CR delete is exposed to the same delete/recreate race a
+          // concurrent reinstall opens. Bind the later delete to this snapshot.
+          // Absent (404) is the norm for non-OAuth / reference-mode servers.
+          try {
+            oauthClientSecretSnapshot = normalizeSecretSnapshot(
+              await gateway.getSecret(oauthClientSecretName, namespace),
+              oauthClientSecretName,
+              namespace
+            )
+          } catch (err) {
+            if (extractK8sError(err)?.status !== 404) {
+              res.status(503).json({
+                error: 'registry_uninstall_outcome_ambiguous',
+                outcome: 'repair_required',
+                resourceName,
+                resourceType,
+                namespace,
+                deleted,
+                warnings: [
+                  ...warnings,
+                  `Secret/${oauthClientSecretName}: ${err instanceof Error ? err.message : 'unable to verify identity'}`,
                 ],
               })
               return
@@ -3588,6 +4147,50 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
               return
             }
             // Secret may not exist (no credentials)
+          }
+
+          // Delete the managed OAuth client Secret (S1-U3, Step 3b). The name is
+          // DERIVED (`${serverName}-oauth-client`), so it can only exist if this
+          // server was installed in OAuth managed mode; reference mode points the
+          // clientIdRef/clientSecretRef at an operator-named Secret and never
+          // creates this name. Fenced to the pre-CR-delete snapshot, same as
+          // `-credentials` above: a no-op when the server had no OAuth block or
+          // used reference mode, and a delete bound to the exact UID/RV so a
+          // concurrent reinstall's same-name Secret is never razed.
+          try {
+            if (oauthClientSecretSnapshot) {
+              await gateway.deleteSecret(
+                oauthClientSecretSnapshot.name,
+                oauthClientSecretSnapshot.namespace,
+                secretPreconditions(oauthClientSecretSnapshot)
+              )
+              await waitForDeletion(
+                () =>
+                  gateway.getSecret(
+                    oauthClientSecretSnapshot!.name,
+                    oauthClientSecretSnapshot!.namespace
+                  ),
+                `Secret/${oauthClientSecretSnapshot.name}`
+              )
+              deleted.push(`Secret/${oauthClientSecretSnapshot.name}`)
+            }
+          } catch (err) {
+            if (extractK8sError(err)?.status !== 404) {
+              res.status(503).json({
+                error: 'registry_uninstall_outcome_ambiguous',
+                outcome: 'repair_required',
+                resourceName,
+                resourceType,
+                namespace,
+                deleted,
+                warnings: [
+                  ...warnings,
+                  `Secret/${oauthClientSecretName}: ${err instanceof Error ? err.message : 'unable to verify deletion'}`,
+                ],
+              })
+              return
+            }
+            // Secret may not exist (no OAuth block, or reference mode)
           }
 
           // Remove from Context allowlists

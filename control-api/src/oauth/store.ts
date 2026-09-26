@@ -556,6 +556,32 @@ export async function deleteOAuthGrant(db: DbClient, input: GetOAuthGrantInput):
 }
 
 /**
+ * Purge EVERY oauth_grants row owned by one McpServer — server teardown only
+ * (called from the CR uninstall). Deletes across all flavors (user/service/shared),
+ * all users, all contexts, all client ids for the server coordinate. Returns the
+ * row count deleted (0 ⇒ the server had none; idempotent).
+ *
+ * NOT the per-user revocation path (deleteOAuthGrant): that removes ONE user's grant
+ * by full key and must never cascade to other users or to dynamic_clients. This one
+ * is the opposite — a full wipe scoped to the server, run only when the server CR is
+ * being deleted.
+ */
+export async function deleteOAuthGrantsForServer(
+  db: DbClient,
+  coords: { recipeNamespace: string; recipeName: string }
+): Promise<number> {
+  // `owner_kind = 'mcpserver'` is load-bearing: it must never touch recipe-domain
+  // grants that share a name coordinate. No user_id / context_id / oauth_client_id /
+  // grant_kind filter — the wipe is intentionally all-flavors.
+  const result = await db.query(
+    `DELETE FROM oauth_grants
+     WHERE owner_kind = 'mcpserver' AND recipe_namespace = $1 AND recipe_name = $2`,
+    [coords.recipeNamespace, coords.recipeName]
+  )
+  return result.rowCount ?? 0
+}
+
+/**
  * Set (or clear) the background-consent flag on a user grant. Separate from
  * upsertOAuthGrant so the refresh-on-demand re-upsert never disturbs consent.
  */
@@ -576,28 +602,48 @@ export async function setUserGrantBackground(
 }
 
 export interface UserGrantSummary {
+  /** Owner domain of the grant; lets the client route the DELETE by owner (D-1). */
+  ownerKind: OAuthOwnerKind
   recipeNamespace: string
   recipeName: string
   oauthClientId: string
   provider: string
   background: boolean
   updatedAt: Date
+  /** Present only when `ownerKind==='mcpserver'`: the McpServer name (= recipe_name). */
+  mcpServerName?: string
 }
 
-/** All of a user's grants across recipes (for the Profile UI "Connected accounts" list). */
+/**
+ * All of a user's grants (for the Profile UI "Connected accounts" list).
+ *
+ * `ownerKind` selects the owner domain: the default `'recipe'` preserves the
+ * historical recipe-only behavior byte-for-byte (invariant 3); `'all'` returns
+ * both recipe and mcpserver grants (spec 04 D-1) so Profile UI can see and
+ * revoke mcp-server identities; a specific kind filters to that one domain. The
+ * query is not duplicated — the owner filter is parameterised in place (D4).
+ */
 export async function listUserOAuthGrants(
   db: DbClient,
-  userId: string
+  userId: string,
+  ownerKind: OAuthOwnerKind | 'all' = 'recipe'
 ): Promise<UserGrantSummary[]> {
+  const params: unknown[] = [userId]
+  let ownerFilter = ''
+  if (ownerKind !== 'all') {
+    params.push(ownerKind)
+    ownerFilter = ` AND owner_kind = $${params.length}`
+  }
   const result = await db.query(
-    `SELECT recipe_namespace, recipe_name, oauth_client_id, provider, background, updated_at
+    `SELECT owner_kind, recipe_namespace, recipe_name, oauth_client_id, provider, background, updated_at
      FROM oauth_grants
-     WHERE owner_kind = 'recipe' AND user_id = $1 AND grant_kind = 'user'
+     WHERE user_id = $1 AND grant_kind = 'user'${ownerFilter}
      ORDER BY recipe_name, oauth_client_id`,
-    [userId]
+    params
   )
   return result.rows.map(r => {
     const row = r as {
+      owner_kind: OAuthOwnerKind
       recipe_namespace: string
       recipe_name: string
       oauth_client_id: string
@@ -605,7 +651,8 @@ export async function listUserOAuthGrants(
       background: boolean
       updated_at: Date
     }
-    return {
+    const summary: UserGrantSummary = {
+      ownerKind: row.owner_kind,
       recipeNamespace: row.recipe_namespace,
       recipeName: row.recipe_name,
       oauthClientId: row.oauth_client_id,
@@ -613,6 +660,12 @@ export async function listUserOAuthGrants(
       background: row.background,
       updatedAt: row.updated_at,
     }
+    // For mcp-server owners the McpServer name lives in recipe_name; surface it
+    // under a purpose-named field so the UI never parses the recipe field.
+    if (row.owner_kind === 'mcpserver') {
+      summary.mcpServerName = row.recipe_name
+    }
+    return summary
   })
 }
 
@@ -636,6 +689,43 @@ export async function listUserGrantsForClient(
 }
 
 /**
+ * All user grants for one mcp-server — admin oversight (read-only, spec 04 U3).
+ *
+ * Mirror of {@link listUserGrantsForClient} but keyed by the server coordinate
+ * `(namespace, name)` WITHOUT an oauthClientId: it lists EVERY user grant of the
+ * server across clients, returning each row's `oauthClientId` so the admin can
+ * force-revoke a specific one. Scoped to `owner_kind='mcpserver'`,
+ * `grant_kind='user'`.
+ */
+export async function listUserGrantsForServer(
+  db: DbClient,
+  key: { namespace: string; name: string }
+): Promise<{ userId: string; oauthClientId: string; background: boolean; updatedAt: Date }[]> {
+  const result = await db.query(
+    `SELECT user_id, oauth_client_id, background, updated_at
+     FROM oauth_grants
+     WHERE owner_kind = 'mcpserver' AND recipe_namespace = $1 AND recipe_name = $2
+       AND grant_kind = 'user'
+     ORDER BY user_id, oauth_client_id`,
+    [key.namespace, key.name]
+  )
+  return result.rows.map(r => {
+    const row = r as {
+      user_id: string
+      oauth_client_id: string
+      background: boolean
+      updated_at: Date
+    }
+    return {
+      userId: row.user_id,
+      oauthClientId: row.oauth_client_id,
+      background: row.background,
+      updatedAt: row.updated_at,
+    }
+  })
+}
+
+/**
  * List the userIds with a background-consented user grant for (recipe, client).
  * SEC-6: scoped to one recipe + client; returns opaque platform user ids only.
  */
@@ -651,4 +741,240 @@ export async function listBackgroundUserGrants(
     [key.recipeNamespace, key.recipeName, key.oauthClientId]
   )
   return result.rows.map(r => (r as { user_id: string }).user_id)
+}
+
+/**
+ * Buffers (milliseconds) that define the proactive window on the token's life:
+ * a grant is a proactive-refresh candidate while
+ * `now + reactiveBufferMs < access_token_expires_at ≤ now + proactiveBufferMs`.
+ * `proactiveBufferMs` = Bp, `reactiveBufferMs` = Br (Bp > Br, config invariant).
+ */
+export interface ProactiveWindow {
+  proactiveBufferMs: number
+  reactiveBufferMs: number
+}
+
+interface RemoteGrantWindowDbRow {
+  owner_kind: OAuthOwnerKind
+  recipe_namespace: string
+  recipe_name: string
+  user_id: string | null
+  context_id: string | null
+  oauth_client_id: string
+  grant_kind: 'user' | 'service' | 'shared'
+}
+
+/**
+ * Reconstruct the flavored {@link OAuthGrantKey} for an mcpserver-owned grant
+ * enumerated by {@link listRemoteGrantsInProactiveWindow} (remote OR generic lane;
+ * the key is derived from `grant_kind`, independent of provider). The enumeration
+ * filter admits only `shared` and background `user` grants, so those are the only
+ * two flavors handled; a `service`/unexpected row throws (fail loud, never mint a
+ * malformed key).
+ */
+function remoteGrantKeyFromRow(row: RemoteGrantWindowDbRow): OAuthGrantKey {
+  if (row.grant_kind === 'user') {
+    if (!row.user_id) throw new Error('remote user grant row missing user_id')
+    return {
+      grantKind: 'user',
+      ownerKind: 'mcpserver',
+      recipeNamespace: row.recipe_namespace,
+      recipeName: row.recipe_name,
+      userId: row.user_id,
+      oauthClientId: row.oauth_client_id,
+    }
+  }
+  if (row.grant_kind === 'shared') {
+    if (!row.context_id) throw new Error('remote shared grant row missing context_id')
+    return {
+      grantKind: 'shared',
+      ownerKind: 'mcpserver',
+      recipeNamespace: row.recipe_namespace,
+      recipeName: row.recipe_name,
+      contextId: row.context_id,
+      oauthClientId: row.oauth_client_id,
+    }
+  }
+  throw new Error(`unexpected grant_kind for remote proactive candidate: ${row.grant_kind}`)
+}
+
+/**
+ * Enumerate the mcpserver-owned grants whose access token sits inside the
+ * proactive window (mini-spec L §6.3). Covers BOTH the remote and generic
+ * (mcpserver-owned) lanes: a `generic` grant admits background/context use and a
+ * rotating refresh token exactly like remote (its reactive refresh already runs
+ * via `refreshGenericGrant`), so an unattended one has the same silent-expiry risk
+ * and belongs in the sweep (R1-L1). The DCR secret-expiry sweep stays remote-only
+ * — dynamic clients are a remote-lane concept — so this function keeps its name.
+ * A snapshot SELECT with NO lock — this enumeration does not hold a connection
+ * across the whole sweep; the cron re-claims each row under `FOR UPDATE SKIP
+ * LOCKED` in its OWN short transaction ({@link claimRemoteGrantForRefresh}), and
+ * that per-row transaction DOES pin its connection across ITS refresh POST,
+ * bounded by the carrier idle-in-transaction timeout
+ * (`boundOAuthRefreshLockIdleTimeout`).
+ *
+ * Filter (§4 eligibility + window): `provider IN ('remote','generic')`, non-null
+ * expiry in `(now+Br, now+Bp]`, and `grant_kind='shared' OR (grant_kind='user' AND
+ * background=true)` (SEC-5: unattended use only — non-background user grants are
+ * excluded here as a first line of defense, `requireBackground:true` being the
+ * second). Returns the flavored keys; tokens are never read.
+ */
+export async function listRemoteGrantsInProactiveWindow(
+  db: DbClient,
+  window: ProactiveWindow
+): Promise<OAuthGrantKey[]> {
+  const result = await db.query(
+    `SELECT owner_kind, recipe_namespace, recipe_name, user_id, context_id,
+            oauth_client_id, grant_kind
+       FROM oauth_grants
+      WHERE owner_kind = 'mcpserver'
+        AND provider IN ('remote', 'generic')
+        AND access_token_expires_at IS NOT NULL
+        AND access_token_expires_at > NOW() + ($1::bigint * INTERVAL '1 millisecond')
+        AND access_token_expires_at <= NOW() + ($2::bigint * INTERVAL '1 millisecond')
+        AND (grant_kind = 'shared' OR (grant_kind = 'user' AND background = true))
+      ORDER BY recipe_namespace, recipe_name, oauth_client_id, grant_kind,
+               user_id NULLS FIRST, context_id NULLS FIRST`,
+    [window.reactiveBufferMs, window.proactiveBufferMs]
+  )
+  return result.rows.map(r => remoteGrantKeyFromRow(r as RemoteGrantWindowDbRow))
+}
+
+/**
+ * Claim one enumerated grant for proactive refresh inside an open transaction
+ * (mini-spec L §6.3). Runs `SELECT 1 … FOR UPDATE SKIP LOCKED` keyed by the exact
+ * grant coordinate AND re-checks the proactive window, so a row another replica
+ * already holds, or one the reactive path renewed out of the window since the
+ * snapshot, is skipped (returns `false`). On `true` the caller holds the row lock
+ * for the rest of the transaction and MUST run the refresh UPDATE on the SAME
+ * `txClient` so it lands under this lock.
+ *
+ * `txClient` MUST be a client inside an open transaction (BEGIN issued); the lock
+ * only survives until COMMIT/ROLLBACK.
+ */
+export async function claimRemoteGrantForRefresh(
+  txClient: DbClient,
+  key: OAuthGrantKey,
+  window: ProactiveWindow
+): Promise<boolean> {
+  const ownerKind = resolveOwnerKind(key)
+  // The window buffers are the FIRST two params ($1 = reactive, $2 = proactive)
+  // of every branch so the window predicate is byte-identical across flavors and
+  // needs no string surgery. The flavor's key params follow from $3.
+  const windowPredicate = `access_token_expires_at IS NOT NULL
+        AND access_token_expires_at > NOW() + ($1::bigint * INTERVAL '1 millisecond')
+        AND access_token_expires_at <= NOW() + ($2::bigint * INTERVAL '1 millisecond')`
+  const windowParams = [window.reactiveBufferMs, window.proactiveBufferMs]
+
+  if (key.grantKind === 'user') {
+    const result = await txClient.query(
+      `SELECT 1 FROM oauth_grants
+        WHERE ${windowPredicate}
+          AND owner_kind = $3 AND recipe_namespace = $4 AND recipe_name = $5
+          AND user_id = $6 AND oauth_client_id = $7 AND grant_kind = 'user'
+        FOR UPDATE SKIP LOCKED`,
+      [
+        ...windowParams,
+        ownerKind,
+        key.recipeNamespace,
+        key.recipeName,
+        key.userId,
+        key.oauthClientId,
+      ]
+    )
+    return (result.rowCount ?? 0) > 0
+  }
+
+  if (key.grantKind === 'shared') {
+    const result = await txClient.query(
+      `SELECT 1 FROM oauth_grants
+        WHERE ${windowPredicate}
+          AND owner_kind = $3 AND recipe_namespace = $4 AND recipe_name = $5
+          AND user_id IS NULL AND context_id = $6 AND oauth_client_id = $7
+          AND grant_kind = 'shared'
+        FOR UPDATE SKIP LOCKED`,
+      [
+        ...windowParams,
+        ownerKind,
+        key.recipeNamespace,
+        key.recipeName,
+        key.contextId,
+        key.oauthClientId,
+      ]
+    )
+    return (result.rowCount ?? 0) > 0
+  }
+
+  const result = await txClient.query(
+    `SELECT 1 FROM oauth_grants
+      WHERE ${windowPredicate}
+        AND owner_kind = $3 AND recipe_namespace = $4 AND recipe_name = $5
+        AND user_id IS NULL AND oauth_client_id = $6 AND grant_kind = 'service'
+      FOR UPDATE SKIP LOCKED`,
+    [...windowParams, ownerKind, key.recipeNamespace, key.recipeName, key.oauthClientId]
+  )
+  return (result.rowCount ?? 0) > 0
+}
+
+/**
+ * Take the per-grant row lock for the REACTIVE refresh path (mini-spec 16,
+ * R2-M1). `SELECT 1 … FOR UPDATE` keyed by the exact grant coordinate — BLOCKING
+ * (no `SKIP LOCKED`) and with NO window predicate, unlike the proactive claim
+ * ({@link claimRemoteGrantForRefresh}): a reactive caller must WAIT for whoever
+ * holds the row (proactive or another reactive) and then re-read the fresh token,
+ * rather than skip and double-spend the rotating refresh token. Sharing the same
+ * row is what makes the reactive lock mutually exclusive with the proactive
+ * `FOR UPDATE SKIP LOCKED`.
+ *
+ * Returns `rowCount > 0`: `false` means the row is absent (deleted, or never
+ * existed). The engine's re-read under the lock already surfaces that as
+ * `no_grant`, so the boolean is an informational signal, not a required branch.
+ *
+ * `txClient` MUST be inside an open transaction (BEGIN issued); the lock only
+ * survives until COMMIT/ROLLBACK.
+ *
+ * F2 Class-check: the per-flavor WHERE (owner_kind + coordinate + grant_kind) is
+ * repeated verbatim across `getOAuthGrant`, `oauthGrantExists`, `deleteOAuthGrant`,
+ * `refreshOAuthGrantTokens`, `claimRemoteGrantForRefresh` — this is the 6th site.
+ * Deliberately NOT extracted to a shared helper: that would touch the proactive
+ * claim (hot path, green). If the key semantics change, grep `grant_kind = 'user'`
+ * / `'shared'` / `'service'` and change all six together.
+ */
+export async function lockOAuthGrantForRefresh(
+  txClient: DbClient,
+  key: OAuthGrantKey
+): Promise<boolean> {
+  const ownerKind = resolveOwnerKind(key)
+
+  if (key.grantKind === 'user') {
+    const result = await txClient.query(
+      `SELECT 1 FROM oauth_grants
+        WHERE owner_kind = $1 AND recipe_namespace = $2 AND recipe_name = $3
+          AND user_id = $4 AND oauth_client_id = $5 AND grant_kind = 'user'
+        FOR UPDATE`,
+      [ownerKind, key.recipeNamespace, key.recipeName, key.userId, key.oauthClientId]
+    )
+    return (result.rowCount ?? 0) > 0
+  }
+
+  if (key.grantKind === 'shared') {
+    const result = await txClient.query(
+      `SELECT 1 FROM oauth_grants
+        WHERE owner_kind = $1 AND recipe_namespace = $2 AND recipe_name = $3
+          AND user_id IS NULL AND context_id = $4 AND oauth_client_id = $5
+          AND grant_kind = 'shared'
+        FOR UPDATE`,
+      [ownerKind, key.recipeNamespace, key.recipeName, key.contextId, key.oauthClientId]
+    )
+    return (result.rowCount ?? 0) > 0
+  }
+
+  const result = await txClient.query(
+    `SELECT 1 FROM oauth_grants
+      WHERE owner_kind = $1 AND recipe_namespace = $2 AND recipe_name = $3
+        AND user_id IS NULL AND oauth_client_id = $4 AND grant_kind = 'service'
+      FOR UPDATE`,
+    [ownerKind, key.recipeNamespace, key.recipeName, key.oauthClientId]
+  )
+  return (result.rowCount ?? 0) > 0
 }
