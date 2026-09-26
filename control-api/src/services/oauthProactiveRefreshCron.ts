@@ -11,10 +11,13 @@
  * `requireBackground` set per grantKind (`true` for `user` grants — SEC-5;
  * `false` for `shared` context identity, which is unattended by design), and the
  * returned access token is DISCARDED — only the side effect (persisted renewed
- * token) and the outcome label matter (mini-spec §6.2). The decision layer is
- * the pure `proactiveRefreshPolicy`
- * module; this file is the thin orchestrator: enumerate → claim → refresh →
- * classify, plus the time-based DCR sweep.
+ * token) and the outcome label matter (mini-spec §6.2). Which grants are
+ * candidates is decided by the SQL `WHERE` of `listRemoteGrantsInProactiveWindow`
+ * plus `getAccessToken`'s own staleness check — NOT by a separate decision table.
+ * The pure `proactiveRefreshPolicy` module only maps each result to a metric
+ * outcome (`resultToOutcome`) and classifies DCR secret expiry
+ * (`classifyDcrSecretDecision`). This file is the thin orchestrator: enumerate →
+ * claim → refresh → label, plus the time-based DCR sweep.
  *
  * Best-effort, never worsens a grant: any per-row failure is logged + counted and
  * the sweep continues; a transient refresh failure leaves the row untouched and
