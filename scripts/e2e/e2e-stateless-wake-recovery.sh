@@ -151,6 +151,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/e2e/e2e-lib.sh
 source "${SCRIPT_DIR}/e2e-lib.sh"
+# Resolve the canonical seeded credential in-process before any cluster
+# mutation. An explicit E2E_USER_PASSWORD remains the journey override.
+# shellcheck source=scripts/e2e/load-dotenv.sh
+source "${SCRIPT_DIR}/load-dotenv.sh"
+dotenv_load_canonical_root "${SCRIPT_DIR}/.."
+# shellcheck source=scripts/e2e/admin-credentials.sh
+source "${SCRIPT_DIR}/admin-credentials.sh"
 require_safe_kube_context
 
 HOST_REF="${E2E_STATELESS_HOST_REF:-chatllm-stateless}"
@@ -159,7 +166,15 @@ RPC_BASE="${RPC_PROXY_BASE_URL:-http://127.0.0.1:8094}"
 CONTROL_BASE="${CONTROL_API_BASE_URL:-http://127.0.0.1:8090}"
 WAKE_BASE="${RPC_GATEWAY_BASE_URL:-${CONTROL_BASE}}"
 DEV_EMAIL="${E2E_DEV_LOGIN_EMAIL:-test@clerum.io}"
-DEV_PASSWORD="${E2E_USER_PASSWORD:-${ADMIN_PASSWORD:-changeme123!}}"
+if [[ -z "${E2E_USER_PASSWORD:-}" ]]; then
+  DEV_PASSWORD="$(e2e_resolve_admin_password "${SCRIPT_DIR}/.." "" || true)"
+  if [[ -z "${DEV_PASSWORD}" ]]; then
+    echo "FAIL: canonical E2E credential is unavailable; set E2E_USER_PASSWORD explicitly" >&2
+    exit 2
+  fi
+else
+  DEV_PASSWORD="${E2E_USER_PASSWORD}"
+fi
 
 E2E_TURN_TIMEOUT="${E2E_TURN_TIMEOUT:-120}"
 POD_READY_TIMEOUT="${POD_READY_TIMEOUT:-180}"
