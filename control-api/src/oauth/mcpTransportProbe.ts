@@ -232,7 +232,7 @@ export async function probeMcpTransport(
       const httpStatus = fetched.response.status as 404 | 405
       let suggestedBaseUrl: string | undefined
       if (opts.suggest !== false) {
-        let pathname = '/'
+        let pathname: string
         try {
           pathname = new URL(baseUrl).pathname
         } catch {
