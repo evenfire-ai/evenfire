@@ -883,14 +883,23 @@ export async function createControlAdminInvitation(
 }
 
 export async function revokeControlAdminInvitation(invitationId: string): Promise<void> {
+  // One statement: the admin invitation and the silent desktop invitation the
+  // POST route paired with it (same email, purpose admin_desktop_access) are
+  // revoked together, so a caller never strands a desktop invitation that would
+  // still grant team membership on its own.
   await pool.query(
-    `UPDATE control_admin_invitations
+    `WITH revoked AS (
+       UPDATE control_admin_invitations
+          SET status = 'revoked'
+        WHERE id = $1
+          AND status IN ('pending', 'opened')
+        RETURNING email
+     )
+     UPDATE invitations
         SET status = 'revoked'
-      WHERE id = $1
-        AND (
-          status = 'pending'
-          OR status = 'opened'
-        )`,
+      WHERE purpose = 'admin_desktop_access'
+        AND status = 'pending'
+        AND lower(email) IN (SELECT lower(email) FROM revoked)`,
     [invitationId]
   )
 }

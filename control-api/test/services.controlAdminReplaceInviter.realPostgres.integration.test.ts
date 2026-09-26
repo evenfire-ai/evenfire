@@ -184,4 +184,32 @@ describeRealPostgres('control admin replace-inviter invitations on real PostgreS
       getPendingControlAdminInvitation(testPool, replacing.id, replacing.email)
     ).resolves.toMatchObject({ replaceInviter: true, invitedByAdminId: inviter.id })
   })
+
+  it('revokes the same-email desktop invitation with the admin invitation and leaves the inviter untouched', async () => {
+    const inviter = await seedAdmin('revoker')
+    const inviterDesktopId = await seedDesktopUser(inviter.email)
+    const clientEmail = uniqueEmail('revoked-client')
+    const invitation = await createControlAdminInvitation(clientEmail, inviter.id, {
+      replaceInviter: true,
+    })
+    if ('error' in invitation) throw new Error(invitation.error)
+    const desktopInvitationId = await inviteDesktopAccess(clientEmail)
+    const unrelatedDesktopInvitationId = await inviteDesktopAccess(uniqueEmail('unrelated'))
+
+    await revokeControlAdminInvitation(invitation.id)
+
+    expect(await adminInvitationStatus(invitation.id)).toBe('revoked')
+    expect(await desktopInvitationStatus(desktopInvitationId)).toBe('revoked')
+    expect(await desktopInvitationStatus(unrelatedDesktopInvitationId)).toBe('pending')
+    expect(await adminStatus(inviter.id)).toBe('active')
+    expect(await desktopLifecycle(inviterDesktopId)).toBe('active')
+    await expect(
+      completeControlAdminInvitation({
+        email: clientEmail,
+        invitationId: invitation.id,
+        username: `client-${randomUUID().slice(0, 8)}`,
+        passwordHash: 'real-pg-replace-client',
+      })
+    ).resolves.toEqual({ error: 'not_found' })
+  })
 })
