@@ -78,6 +78,7 @@ import {
   HostWorkflowControlSpec,
 } from './types'
 import {
+  type ResourceApplyResult,
   applyNetworkPolicy,
   canonicalStringify,
   canonicalizeValue,
@@ -382,6 +383,7 @@ const GFS_TOKEN_REFRESH_BEFORE_ANNOTATION = 'clerum.io/gfs-token-refresh-before'
 const GFS_TOKEN_EXPECTED_SUBJECT_ANNOTATION = 'clerum.io/gfs-token-expected-subject'
 const GFS_TOKEN_CAPABILITY_SET_HASH_ANNOTATION = 'clerum.io/gfs-token-capability-set-hash'
 const GFS_TOKEN_HOST_UID_ANNOTATION = 'clerum.io/gfs-token-host-uid'
+const HOST_UID_ANNOTATION = 'clerum.io/host-uid'
 const GFS_TOKEN_HOST_GENERATION_ANNOTATION = 'clerum.io/gfs-token-host-generation'
 const RUNTIME_TOKEN_HOST_BINDING_HASH_ANNOTATION = 'clerum.io/runtime-token-host-binding-hash'
 const RUNTIME_TOKEN_SCOPE_HASH_ANNOTATION = 'clerum.io/runtime-token-scope-hash'
@@ -3182,6 +3184,7 @@ export class HostReconciler {
         name: host.name,
         namespace: host.namespace,
         labels,
+        ...(host.uid ? { annotations: { [HOST_UID_ANNOTATION]: host.uid } } : {}),
       },
       spec: {
         // A suspended stateless Host scales to 0 on EVERY reconcile path
@@ -3502,16 +3505,17 @@ export class HostReconciler {
     this.readinessTimers.set(name, timer)
   }
 
-  private async ensurePvc(host: HostCRD, revalidate?: () => void): Promise<void> {
+  private async ensurePvc(host: HostCRD, revalidate?: () => void): Promise<boolean> {
     const pvc = this.buildPvc(host)
     const name = this.pvcName(host)
+    let createFailed = false
     const mutationAllowed = () => {
       revalidate?.()
       return true
     }
     // Initial GET errors must propagate; retain only the established
     // non-throwing POST and convergence failures of this PVC writer.
-    await ensureResource({
+    const result = await ensureResource({
       mutationAllowed,
       read: () =>
         observeExistenceRead('PersistentVolumeClaim', () =>
@@ -3527,6 +3531,7 @@ export class HostReconciler {
           )
         } catch (error) {
           if (error != null && getErrorCode(error) === 409) throw error
+          createFailed = true
           log.error('Failed to create Host PVC', { host: host.name, err: error })
         }
       },
@@ -3549,17 +3554,19 @@ export class HostReconciler {
       },
       onSkipped: () => createsTotal.inc({ kind: 'PersistentVolumeClaim', outcome: 'skipped' }),
     })
+    return !createFailed && this.resourceApplySucceeded(result)
   }
 
-  private async ensureService(host: HostCRD, revalidate?: () => void): Promise<void> {
+  private async ensureService(host: HostCRD, revalidate?: () => void): Promise<boolean> {
     const service = this.buildService(host)
+    let createFailed = false
     const mutationAllowed = () => {
       revalidate?.()
       return true
     }
     // Initial read errors propagate. Only the existing POST/convergence paths
     // retain their historical non-throwing failures.
-    await ensureResource({
+    const result = await ensureResource({
       mutationAllowed,
       read: () =>
         observeExistenceRead('Service', () =>
@@ -3572,6 +3579,7 @@ export class HostReconciler {
           )
         } catch (error) {
           if (error != null && getErrorCode(error) === 409) throw error
+          createFailed = true
           log.error('Failed to create Host Service', { host: host.name, err: error })
         }
       },
@@ -3600,23 +3608,60 @@ export class HostReconciler {
         }
       },
     })
+    return !createFailed && this.resourceApplySucceeded(result)
+  }
+
+  private resourceApplySucceeded(result: ResourceApplyResult): boolean {
+    return result === 'created' || result === 'replaced' || result === 'up_to_date'
   }
 
   private async ensureDeployment(
     host: HostCRD,
     mounts: ResolvedSfsMount[],
-    runtimeTokenRevision: string,
+    runtimeTokenRevision: string | undefined,
     lifecycle?: EffectiveHostLifecycle,
     resolveStateBeforeMutation?: () => Promise<DeploymentMutationState>,
     revalidate?: () => void
-  ): Promise<void> {
-    const buildDesiredDeployment = async (): Promise<k8s.V1Deployment> => {
+  ): Promise<boolean> {
+    let observedDeployment: k8s.V1Deployment | undefined
+    let holdingTemplate = false
+    let applied = true
+    const buildDesiredDeployment = async (): Promise<k8s.V1Deployment | null> => {
       const state = resolveStateBeforeMutation ? await resolveStateBeforeMutation() : null
+      const effective = state?.lifecycle ?? lifecycle
+      holdingTemplate = effective?.suspensionBlocked === true
+      if (holdingTemplate) {
+        if (!observedDeployment) return null
+        const existing = observedDeployment
+        if (
+          !this.isHccOwnedHostResource(existing, host.name) ||
+          existing.metadata?.name !== host.name ||
+          existing.metadata?.namespace !== host.namespace ||
+          !existing.metadata?.uid ||
+          !existing.metadata?.resourceVersion ||
+          existing.metadata.deletionTimestamp ||
+          !existing.spec?.template?.spec
+        ) {
+          throw new Error(`Cannot preserve an unverified Deployment for Host "${host.name}"`)
+        }
+        const annotatedHostUid = existing.metadata.annotations?.[HOST_UID_ANNOTATION]
+        const hostUidVerified = !!host.uid && annotatedHostUid === host.uid
+        if (!hostUidVerified) {
+          throw new Error(`Cannot preserve an unverified Deployment for Host "${host.name}"`)
+        }
+        // Preserve UID/resourceVersion and every applied field. Conflicts
+        // re-read this object before retrying; replicas is the only field that
+        // may change. An unverified legacy object must never be scaled.
+        return {
+          ...existing,
+          spec: { ...existing.spec, replicas: 1 },
+        }
+      }
       return this.buildDeployment(
         host,
         mounts,
         state?.runtimeTokenRevision ?? runtimeTokenRevision,
-        state?.lifecycle ?? lifecycle,
+        effective,
         state?.grokExecutionEnabled ?? this.hostDerivesGrokExecution(host)
       )
     }
@@ -3624,16 +3669,22 @@ export class HostReconciler {
       revalidate?.()
       return true
     }
-    await ensureResource({
+    const result = await ensureResource({
       mutationAllowed,
-      read: () =>
-        observeExistenceRead('Deployment', () =>
+      read: async () => {
+        observedDeployment = await observeExistenceRead('Deployment', () =>
           this.appsApi.readNamespacedDeployment({ namespace: host.namespace, name: host.name })
-        ),
+        )
+        return observedDeployment
+      },
       create: async () => {
         // The initial GET may outlive the lifecycle or token-scope observation.
         const deployment = await buildDesiredDeployment()
         revalidate?.()
+        if (!deployment) {
+          applied = false
+          return
+        }
         return observeCreate('Deployment', () =>
           this.appsApi.createNamespacedDeployment({ namespace: host.namespace, body: deployment })
         )
@@ -3643,8 +3694,13 @@ export class HostReconciler {
         replaceWithConflictRetry({
           description: `Deployment "${host.name}"`,
           logPrefix: '[HostReconciler]',
-          resolveBody: buildDesiredDeployment,
-          mergeExisting: preserveHostDeploymentAnnotations,
+          resolveBody: async () => {
+            const desired = await buildDesiredDeployment()
+            if (!desired) throw new Error('Deployment disappeared during preservation')
+            return desired
+          },
+          mergeExisting: (desired, existing) =>
+            holdingTemplate ? desired : preserveHostDeploymentAnnotations(desired, existing),
           isUpToDate: deploymentMatchesDesired,
           mutationAllowed,
           read,
@@ -3656,6 +3712,7 @@ export class HostReconciler {
             }),
         }),
     })
+    return applied && this.resourceApplySucceeded(result)
   }
 
   private async deleteRuntimeResources(name: string, namespace: string): Promise<void> {
@@ -3822,9 +3879,11 @@ export class HostReconciler {
     }
   }
 
-  private async ensureDesktopNetworkPolicy(host: HostCRD): Promise<void> {
+  private async ensureDesktopNetworkPolicy(
+    host: HostCRD
+  ): Promise<'not-required' | ResourceApplyResult> {
     const isDesktop = !!(host.spec.desktop?.browser || host.spec.desktop?.x11)
-    if (!isDesktop) return
+    if (!isDesktop) return 'not-required'
 
     const policyName = `allow-rpc-proxy-desktop-${host.name}`
     const policy: k8s.V1NetworkPolicy = {
@@ -3858,17 +3917,13 @@ export class HostReconciler {
       },
     }
 
-    try {
-      await applyNetworkPolicy(
-        this.networkingApi,
-        policyName,
-        host.namespace,
-        policy,
-        '[HostReconciler]'
-      )
-    } catch (error) {
-      log.error('Failed to ensure desktop NetworkPolicy', { policy: policyName, err: error })
-    }
+    return applyNetworkPolicy(
+      this.networkingApi,
+      policyName,
+      host.namespace,
+      policy,
+      '[HostReconciler]'
+    )
   }
 
   /**
@@ -3877,7 +3932,7 @@ export class HostReconciler {
    * egress. Desktop hosts also expose the desktop service port through the
    * same host-scoped egress boundary.
    */
-  private async ensureRpcProxyHostEgressNetworkPolicy(host: HostCRD): Promise<void> {
+  private async ensureRpcProxyHostEgressNetworkPolicy(host: HostCRD): Promise<ResourceApplyResult> {
     const isDesktop = !!(host.spec.desktop?.browser || host.spec.desktop?.x11)
     const policyName = `rpc-proxy-${host.name}-egress-mcp-host`
     const ports: k8s.V1NetworkPolicyPort[] = [{ port: config.hostPort, protocol: 'TCP' }]
@@ -3920,7 +3975,7 @@ export class HostReconciler {
       },
     }
 
-    await applyNetworkPolicy(
+    return applyNetworkPolicy(
       this.networkingApi,
       policyName,
       config.rpcProxyNamespace,
@@ -3934,7 +3989,9 @@ export class HostReconciler {
    * its bound mcp-host on :8080. Provider approvals and verification continue
    * through mcp-host; channel-reader must not reach control-api gateways.
    */
-  private async ensureChannelReaderEgressNetworkPolicy(host: HostCRD): Promise<void> {
+  private async ensureChannelReaderEgressNetworkPolicy(
+    host: HostCRD
+  ): Promise<ResourceApplyResult> {
     const policyName = `channel-reader-${host.name}-egress`
     const policy: k8s.V1NetworkPolicy = {
       apiVersion: 'networking.k8s.io/v1',
@@ -3979,7 +4036,7 @@ export class HostReconciler {
     // channel-reader security boundary. Route-level JWT auth is the other
     // half, so an NP apply error still MUST surface in HostRuntimeStatus
     // rather than be silently swallowed.
-    await applyNetworkPolicy(
+    return applyNetworkPolicy(
       this.networkingApi,
       policyName,
       config.channelsNamespace,
@@ -3993,7 +4050,9 @@ export class HostReconciler {
    * are verified by control-api against a CommunicationChannel, then forwarded
    * to that channel's bound Host for the authoritative provider-decision path.
    */
-  private async ensureWorkflowApprovalReaderHostEgressNetworkPolicy(host: HostCRD): Promise<void> {
+  private async ensureWorkflowApprovalReaderHostEgressNetworkPolicy(
+    host: HostCRD
+  ): Promise<ResourceApplyResult> {
     const policyName = `workflow-approval-reader-${host.name}-egress-mcp-host`
     const policy: k8s.V1NetworkPolicy = {
       apiVersion: 'networking.k8s.io/v1',
@@ -4033,7 +4092,7 @@ export class HostReconciler {
       },
     }
 
-    await applyNetworkPolicy(
+    return applyNetworkPolicy(
       this.networkingApi,
       policyName,
       config.channelsNamespace,
@@ -4047,7 +4106,7 @@ export class HostReconciler {
    * pod ingress on :8080 to ONLY accept connections from channel-reader-<host>
    * pods (label match).
    */
-  private async ensureMcpHostIngressNetworkPolicy(host: HostCRD): Promise<void> {
+  private async ensureMcpHostIngressNetworkPolicy(host: HostCRD): Promise<ResourceApplyResult> {
     const policyName = `mcp-host-${host.name}-ingress-channel-reader`
     const policy: k8s.V1NetworkPolicy = {
       apiVersion: 'networking.k8s.io/v1',
@@ -4095,7 +4154,7 @@ export class HostReconciler {
     // channel-reader↔mcp-host security boundary. Route-level JWT auth is
     // the other half, so an apply error MUST surface in HostRuntimeStatus
     // rather than be silently swallowed.
-    await applyNetworkPolicy(
+    return applyNetworkPolicy(
       this.networkingApi,
       policyName,
       host.namespace,
@@ -4111,7 +4170,7 @@ export class HostReconciler {
    */
   private async ensureWorkflowApprovalReaderMcpHostIngressNetworkPolicy(
     host: HostCRD
-  ): Promise<void> {
+  ): Promise<ResourceApplyResult> {
     const policyName = `mcp-host-${host.name}-ingress-workflow-approval-reader`
     const policy: k8s.V1NetworkPolicy = {
       apiVersion: 'networking.k8s.io/v1',
@@ -4153,7 +4212,7 @@ export class HostReconciler {
       },
     }
 
-    await applyNetworkPolicy(
+    return applyNetworkPolicy(
       this.networkingApi,
       policyName,
       host.namespace,
@@ -4167,7 +4226,9 @@ export class HostReconciler {
    * namespace-wide mcp-host ingress rule for rpc-proxy. Desktop hosts include
    * the desktop port, but only for the selected Host pod.
    */
-  private async ensureRpcProxyMcpHostIngressNetworkPolicy(host: HostCRD): Promise<void> {
+  private async ensureRpcProxyMcpHostIngressNetworkPolicy(
+    host: HostCRD
+  ): Promise<ResourceApplyResult> {
     const isDesktop = !!(host.spec.desktop?.browser || host.spec.desktop?.x11)
     const policyName = `mcp-host-${host.name}-ingress-rpc-proxy`
     const ports: k8s.V1NetworkPolicyPort[] = [{ port: config.hostPort, protocol: 'TCP' }]
@@ -4210,7 +4271,7 @@ export class HostReconciler {
       },
     }
 
-    await applyNetworkPolicy(
+    return applyNetworkPolicy(
       this.networkingApi,
       policyName,
       host.namespace,
@@ -4224,7 +4285,7 @@ export class HostReconciler {
    * NetworkPolicy only opens the required transport lane from the selected Host
    * pod to the governed GFS controller service.
    */
-  private async ensureMcpHostGfsEgressNetworkPolicy(host: HostCRD): Promise<void> {
+  private async ensureMcpHostGfsEgressNetworkPolicy(host: HostCRD): Promise<ResourceApplyResult> {
     const target = { namespace: config.gfsNamespace, port: config.gfscPort }
     const policyName = `mcp-host-${host.name}-egress-gfs`
     const policy: k8s.V1NetworkPolicy = {
@@ -4265,7 +4326,7 @@ export class HostReconciler {
       },
     }
 
-    await applyNetworkPolicy(
+    return applyNetworkPolicy(
       this.networkingApi,
       policyName,
       host.namespace,
@@ -4278,7 +4339,9 @@ export class HostReconciler {
    * Per-Host mcp-host egress to the static Codex LLM proxy runtime listener.
    * Derived from the same Codex projection that mints `llm:codex:execute`.
    */
-  private async ensureMcpHostCodexProxyEgressNetworkPolicy(host: HostCRD): Promise<void> {
+  private async ensureMcpHostCodexProxyEgressNetworkPolicy(
+    host: HostCRD
+  ): Promise<ResourceApplyResult> {
     const policyName = `mcp-host-${host.name}-egress-codex-proxy`
     const policy: k8s.V1NetworkPolicy = {
       apiVersion: 'networking.k8s.io/v1',
@@ -4318,7 +4381,7 @@ export class HostReconciler {
       },
     }
 
-    await applyNetworkPolicy(
+    return applyNetworkPolicy(
       this.networkingApi,
       policyName,
       host.namespace,
@@ -4347,17 +4410,21 @@ export class HostReconciler {
     )
   }
 
-  private async reconcileMcpHostCodexProxyEgressNetworkPolicy(host: HostCRD): Promise<void> {
+  private async reconcileMcpHostCodexProxyEgressNetworkPolicy(
+    host: HostCRD
+  ): Promise<'not-required' | ResourceApplyResult> {
     const projection = this.projectCodexForHost(host)
-    if (projection.eligibility === 'uncertain') return
+    if (projection.eligibility === 'uncertain') return 'not-required'
     if (projection.requiresCodexProxyEgress) {
-      await this.ensureMcpHostCodexProxyEgressNetworkPolicy(host)
-      return
+      return this.ensureMcpHostCodexProxyEgressNetworkPolicy(host)
     }
     await this.deleteMcpHostCodexProxyEgressNetworkPolicy(host)
+    return 'not-required'
   }
 
-  private async ensureMcpHostGrokProxyEgressNetworkPolicy(host: HostCRD): Promise<void> {
+  private async ensureMcpHostGrokProxyEgressNetworkPolicy(
+    host: HostCRD
+  ): Promise<ResourceApplyResult> {
     const policyName = `mcp-host-${host.name}-egress-grok-proxy`
     const policy: k8s.V1NetworkPolicy = {
       apiVersion: 'networking.k8s.io/v1',
@@ -4396,7 +4463,7 @@ export class HostReconciler {
         ],
       },
     }
-    await applyNetworkPolicy(
+    return applyNetworkPolicy(
       this.networkingApi,
       policyName,
       host.namespace,
@@ -4425,14 +4492,16 @@ export class HostReconciler {
     )
   }
 
-  private async reconcileMcpHostGrokProxyEgressNetworkPolicy(host: HostCRD): Promise<void> {
+  private async reconcileMcpHostGrokProxyEgressNetworkPolicy(
+    host: HostCRD
+  ): Promise<'not-required' | ResourceApplyResult> {
     const projection = this.projectGrokForHost(host)
-    if (projection.eligibility === 'uncertain') return
+    if (projection.eligibility === 'uncertain') return 'not-required'
     if (projection.requiresGrokProxyEgress) {
-      await this.ensureMcpHostGrokProxyEgressNetworkPolicy(host)
-      return
+      return this.ensureMcpHostGrokProxyEgressNetworkPolicy(host)
     }
     await this.deleteMcpHostGrokProxyEgressNetworkPolicy(host)
+    return 'not-required'
   }
 
   /**
@@ -4686,10 +4755,75 @@ export class HostReconciler {
       })
     }
 
+    let pvcApplied = true
+    let serviceApplied = true
+    const resourceErrors: unknown[] = []
+    const resourceFailureMessages = new Map<'Host PVC' | 'Host Service', string>()
+    const npFailures: string[] = []
+    const ensureIndependentResource = async (
+      kind: 'Host PVC' | 'Host Service',
+      reconcile: () => Promise<boolean>
+    ): Promise<boolean> => {
+      try {
+        return await reconcile()
+      } catch (error) {
+        if (isBenignSupersessionError(error)) throw error
+        resourceErrors.push(error)
+        const message = error instanceof Error ? error.message : String(error)
+        resourceFailureMessages.set(kind, `${kind}: ${message}`)
+        log.error('Failed to reconcile Host resource', {
+          host: host.name,
+          resource: kind,
+          err: error,
+        })
+        return false
+      }
+    }
+    const holdAppliedRuntime = async (): Promise<void> => {
+      const applied = await this.ensureDeployment(
+        host,
+        mounts,
+        undefined,
+        lifecycle.effective,
+        undefined,
+        revalidateHostMutationBoundary
+      )
+      revalidateHostMutationBoundary()
+      this.lifecycle.markHostNotSuspended(host.name)
+      const deploymentReady =
+        applied && (await this.checkDeploymentReady(host.name, host.namespace))
+      revalidateHostMutationBoundary()
+      const ready = deploymentReady && pvcApplied && serviceApplied && npFailures.length === 0
+      const failures = [
+        ...(!pvcApplied
+          ? [resourceFailureMessages.get('Host PVC') ?? 'Host PVC did not converge']
+          : []),
+        ...(!serviceApplied
+          ? [resourceFailureMessages.get('Host Service') ?? 'Host Service did not converge']
+          : []),
+        ...npFailures,
+      ]
+      this.setStatus(host.name, {
+        deployed: applied,
+        ready,
+        message: !applied
+          ? 'Waiting for CommunicationChannel inventory before creating runtime'
+          : failures.length > 0
+            ? `degraded — Host runtime boundary incomplete while preserving applied runtime (${failures.join('; ')})`
+            : deploymentReady
+              ? 'CommunicationChannel inventory unavailable; preserving applied runtime with one replica'
+              : 'CommunicationChannel inventory unavailable; preserved applied runtime is not Ready',
+      })
+    }
+
     revalidateHostMutationBoundary()
-    await this.ensurePvc(host, revalidateHostMutationBoundary)
+    pvcApplied = await ensureIndependentResource('Host PVC', () =>
+      this.ensurePvc(host, revalidateHostMutationBoundary)
+    )
     revalidateHostMutationBoundary()
-    await this.ensureService(host, revalidateHostMutationBoundary)
+    serviceApplied = await ensureIndependentResource('Host Service', () =>
+      this.ensureService(host, revalidateHostMutationBoundary)
+    )
 
     // NetworkPolicies before Deployments. Calico/Cilium evaluate egress and
     // ingress against the policies that exist when the connection is opened,
@@ -4702,45 +4836,54 @@ export class HostReconciler {
     // Route-level edge context and ownership checks remain the application
     // boundary. An NP apply failure means the network boundary is missing, so
     // surface it via HostRuntimeStatus instead of swallowing it.
-    const npFailures: string[] = []
-    try {
-      revalidateHostMutationBoundary()
-      await this.ensureMcpHostIngressNetworkPolicy(host)
-      revalidateHostMutationBoundary()
-      await this.ensureMcpHostGfsEgressNetworkPolicy(host)
-      revalidateHostMutationBoundary()
-      await this.reconcileMcpHostCodexProxyEgressNetworkPolicy(host)
-      revalidateHostMutationBoundary()
-      await this.reconcileMcpHostGrokProxyEgressNetworkPolicy(host)
-      // The mcp-host→llm-hooks egress policy is now owned by LlmHookReconciler
-      // (per-host, scoped to referenced hook pods — N1/N7); host-delete cleanup
-      // of `mcp-host-<host>-egress-llm-hooks` stays in deleteHostNetworkPolicies.
-      revalidateHostMutationBoundary()
-      await this.ensureWorkflowApprovalReaderMcpHostIngressNetworkPolicy(host)
-    } catch (err) {
-      log.error('Failed to ensure mcp-host NP', { host: host.name, err })
-      npFailures.push(`mcp-host NP: ${(err as Error).message}`)
+    const ensureNetworkPolicy = async (
+      name: string,
+      reconcile: () => Promise<'not-required' | ResourceApplyResult>
+    ): Promise<void> => {
+      try {
+        revalidateHostMutationBoundary()
+        const result = await reconcile()
+        revalidateHostMutationBoundary()
+        if (result !== 'not-required' && !this.resourceApplySucceeded(result)) {
+          throw new Error(`apply did not converge (${result})`)
+        }
+      } catch (err) {
+        log.error('Failed to ensure Host NetworkPolicy', { host: host.name, policy: name, err })
+        npFailures.push(`${name}: ${err instanceof Error ? err.message : String(err)}`)
+      }
     }
-    try {
-      revalidateHostMutationBoundary()
-      await this.ensureRpcProxyMcpHostIngressNetworkPolicy(host)
-      revalidateHostMutationBoundary()
-      await this.ensureRpcProxyHostEgressNetworkPolicy(host)
-    } catch (err) {
-      log.error('Failed to ensure rpc-proxy host NP', { host: host.name, err })
-      npFailures.push(`rpc-proxy NP: ${(err as Error).message}`)
-    }
+    await ensureNetworkPolicy('mcp-host ingress', () =>
+      this.ensureMcpHostIngressNetworkPolicy(host)
+    )
+    await ensureNetworkPolicy('mcp-host GFS egress', () =>
+      this.ensureMcpHostGfsEgressNetworkPolicy(host)
+    )
+    await ensureNetworkPolicy('mcp-host Codex proxy egress', () =>
+      this.reconcileMcpHostCodexProxyEgressNetworkPolicy(host)
+    )
+    await ensureNetworkPolicy('mcp-host Grok proxy egress', () =>
+      this.reconcileMcpHostGrokProxyEgressNetworkPolicy(host)
+    )
+    // The mcp-host→llm-hooks egress policy is now owned by LlmHookReconciler
+    // (per-host, scoped to referenced hook pods — N1/N7); host-delete cleanup
+    // of `mcp-host-<host>-egress-llm-hooks` stays in deleteHostNetworkPolicies.
+    await ensureNetworkPolicy('workflow approval reader ingress', () =>
+      this.ensureWorkflowApprovalReaderMcpHostIngressNetworkPolicy(host)
+    )
+    await ensureNetworkPolicy('rpc-proxy mcp-host ingress', () =>
+      this.ensureRpcProxyMcpHostIngressNetworkPolicy(host)
+    )
+    await ensureNetworkPolicy('rpc-proxy Host egress', () =>
+      this.ensureRpcProxyHostEgressNetworkPolicy(host)
+    )
+    await ensureNetworkPolicy('desktop ingress', () => this.ensureDesktopNetworkPolicy(host))
+    await ensureNetworkPolicy('channel-reader egress', () =>
+      this.ensureChannelReaderEgressNetworkPolicy(host)
+    )
+    await ensureNetworkPolicy('workflow approval reader egress', () =>
+      this.ensureWorkflowApprovalReaderHostEgressNetworkPolicy(host)
+    )
     revalidateHostMutationBoundary()
-    await this.ensureDesktopNetworkPolicy(host)
-    try {
-      revalidateHostMutationBoundary()
-      await this.ensureChannelReaderEgressNetworkPolicy(host)
-      revalidateHostMutationBoundary()
-      await this.ensureWorkflowApprovalReaderHostEgressNetworkPolicy(host)
-    } catch (err) {
-      log.error('Failed to ensure channels egress NP', { host: host.name, err })
-      npFailures.push(`egress NP: ${(err as Error).message}`)
-    }
 
     // Resolve policy once before bootstrap so token scopes and wake/suspend
     // decisions use the latest channel state already observed.
@@ -4754,6 +4897,19 @@ export class HostReconciler {
       await this.lifecycle.writeLifecycleStatusToCluster(host, lifecycle)
     }
     revalidateHostMutationBoundary()
+
+    if (lifecycle.effective.suspensionBlocked) {
+      await holdAppliedRuntime()
+      return
+    }
+
+    if (resourceErrors.length === 1) throw resourceErrors[0]
+    if (resourceErrors.length > 1) {
+      throw new AggregateError(
+        resourceErrors,
+        `Failed to reconcile Host resources for "${host.name}"`
+      )
+    }
 
     // Bootstrap captures the scope contract used for issuance. The Deployment
     // guard below compares that contract with the live channel cache after this
@@ -4813,10 +4969,25 @@ export class HostReconciler {
     const resolveDeploymentState = async (): Promise<DeploymentMutationState> => {
       for (let attempt = 1; attempt <= 3; attempt++) {
         revalidateHostMutationBoundary()
-        await resolveDeploymentLifecycle()
+        const beforeScope = await resolveDeploymentLifecycle()
+        if (beforeScope.suspensionBlocked) {
+          return {
+            lifecycle: beforeScope,
+            runtimeTokenRevision: runtimeTokenProvision.revision,
+            grokExecutionEnabled: this.hostDerivesGrokExecution(host),
+          }
+        }
         await ensureCurrentRuntimeTokenScope()
         const effective = await resolveDeploymentLifecycle()
         const currentScopeHash = this.runtimeScopeHashFor(host, await this.frontsOAuthServer(host))
+        // The OAuth lookup can await I/O after the last lifecycle observation.
+        // Retry assessment rather than committing a now-obsolete mode.
+        if (
+          this.lifecycle.enforceCommunicationChannelPolicyBeforeDeployment(host.name, lifecycle) !==
+          lifecycle
+        ) {
+          continue
+        }
         if (runtimeTokenProvision.scopeHash === currentScopeHash) {
           revalidateHostMutationBoundary()
           return {
@@ -4837,7 +5008,7 @@ export class HostReconciler {
     }
 
     revalidateHostMutationBoundary()
-    await this.ensureDeployment(
+    const deploymentApplied = await this.ensureDeployment(
       host,
       mounts,
       runtimeTokenProvision.revision,
@@ -4846,6 +5017,15 @@ export class HostReconciler {
       revalidateHostMutationBoundary
     )
     revalidateHostMutationBoundary()
+
+    if (!deploymentApplied) {
+      this.setStatus(host.name, {
+        deployed: false,
+        ready: false,
+        message: 'Waiting for CommunicationChannel inventory before creating runtime',
+      })
+      return
+    }
 
     const suspended = lifecycle.effective.stateless && lifecycle.effective.state === 'suspended'
     if (suspended) {

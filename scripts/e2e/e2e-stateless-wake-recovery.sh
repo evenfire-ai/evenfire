@@ -81,6 +81,11 @@
 #               measured_total_ms, infra_overhead_ms}]}}
 # R4 additionally emits prewarm_to_ready_ms:[ms] -- the per-cycle overlap
 # series (informational, no budget).
+# R2 additionally emits cold_resume_baseline:[{cycle, first_post_status,
+# admission_attempts, first_200_ms, status_flipped_to_replicas_patched_ms}]
+# -- characterization-only admission/scale data for later before/after
+# comparison. It is informational, has no budget, and never replaces the
+# existing ms gate metric.
 # Each measured turn (baseline, R1, R2, R4) is attributed with the serving
 # pod's [TurnTiming] phase line (queue_wait/session_load/prompt_assembly/
 # llm_wall/llm_calls/tool_loop/tools_called/input_chars_approx) and
@@ -119,6 +124,9 @@
 #     CONTEXT_MAPPER_STATELESS_IDLE_MINUTES       = 1
 #     CONTEXT_MAPPER_STATELESS_DRAIN_GRACE_MS     = 20000
 #     CONTEXT_MAPPER_HEARTBEAT_POLL_MS            = 5000
+#   Acceleration is opt-in with E2E_ALLOW_STATELESS_CADENCE_ACCELERATION=1.
+#   Cleanup fails loud if kubectl set env, rollout, or exact readback fails;
+#   a nominal test result can never hide a leaked one-minute profile policy.
 #   Reaching state=draining after a served turn therefore needs idle
 #   floor (60s) + one emitter tick (30s) + one HCC poll (5s) + slack =>
 #   DRAINING_WAIT default 150s. Full suspend adds drain grace (20s) =>
@@ -134,7 +142,8 @@
 #   - state.db row observable resolvable (exactly-once assertion in R3)
 #
 # Usage:
-#   KUBECONTEXT=clerum-test bash scripts/e2e/e2e-stateless-wake-recovery.sh
+#   E2E_ALLOW_STATELESS_CADENCE_ACCELERATION=1 \
+#     KUBECONTEXT=clerum-test bash scripts/e2e/e2e-stateless-wake-recovery.sh
 #   RECOVERY_CYCLES=5 WARM_RECOVERY_BUDGET_MS=3000 ...
 # ======================================================================
 set -euo pipefail
@@ -185,24 +194,38 @@ HCC_ENV_SAVED=""
 
 restore_hcc_env() {
   [ -n "$HCC_ENV_SAVED" ] || return 0
-  local args=() key val
+  local args=() key val actual
   while IFS='=' read -r key val; do
     [ -n "$key" ] || continue
     if [ -n "$val" ]; then args+=("${key}=${val}"); else args+=("${key}-"); fi
   done <<< "$HCC_ENV_SAVED"
   [ ${#args[@]} -gt 0 ] || return 0
   log "Restoring HCC cadence env on deployment/${HCC_DEPLOY}"
-  kctl set env "deployment/${HCC_DEPLOY}" -n "$HCC_NS" "${args[@]}" >/dev/null 2>&1 || \
-    warn "failed to restore HCC env (manual check advised)"
-  kctl rollout status "deployment/${HCC_DEPLOY}" -n "$HCC_NS" --timeout=180s >/dev/null 2>&1 || \
+  if ! kctl set env "deployment/${HCC_DEPLOY}" -n "$HCC_NS" "${args[@]}" >/dev/null 2>&1; then
+    warn "failed to restore HCC env (manual check required)"
+    return 1
+  fi
+  if ! kctl rollout status "deployment/${HCC_DEPLOY}" -n "$HCC_NS" --timeout=180s >/dev/null 2>&1; then
     warn "HCC rollout did not settle after env restore"
+    return 1
+  fi
+  while IFS='=' read -r key val; do
+    [ -n "$key" ] || continue
+    actual="$(kctl get "deployment/${HCC_DEPLOY}" -n "$HCC_NS" \
+      -o jsonpath="{.spec.template.spec.containers[0].env[?(@.name=='${key}')].value}" 2>/dev/null || true)"
+    if [ "$actual" != "$val" ]; then
+      warn "HCC restore readback mismatch for ${key}: expected '${val}', got '${actual}'"
+      return 1
+    fi
+  done <<< "$HCC_ENV_SAVED"
+  HCC_ENV_SAVED=""
 }
 
 cleanup_on_exit() {
   local status=$?
   set +e
   rm -f "$CYCLES_FILE" >/dev/null 2>&1
-  restore_hcc_env
+  restore_hcc_env || status=1
   exit "$status"
 }
 trap cleanup_on_exit EXIT
@@ -319,9 +342,13 @@ send_turn_raw() {
 # hard failure at the caller — an unreachable assertion never passes.
 RECOVERY_MS=""
 TURN_T0_RFC3339=""
+ADMISSION_FIRST_STATUS=""
+ADMISSION_ATTEMPTS=""
 measure_recovery_turn() {
   local content=$1 t0 t1 deadline attempt=0
   RECOVERY_MS=""
+  ADMISSION_FIRST_STATUS=""
+  ADMISSION_ATTEMPTS=""
   mint_rpc_token || { echo "could not mint RPC token before t0" >&2; return 1; }
   TURN_T0_RFC3339="$(now_rfc3339)"
   t0="$(now_ms)"
@@ -329,9 +356,11 @@ measure_recovery_turn() {
   while [ "$SECONDS" -lt "$deadline" ]; do
     attempt=$((attempt + 1))
     send_turn_raw "$content" || return 1
+    if [ "$attempt" -eq 1 ]; then ADMISSION_FIRST_STATUS="$TURN_STATUS"; fi
     if [ "$TURN_STATUS" = "200" ]; then
       t1="$(now_ms)"
       RECOVERY_MS=$((t1 - t0))
+      ADMISSION_ATTEMPTS="$attempt"
       return 0
     fi
     if [ "$TURN_STATUS" = "503" ] && echo "$TURN_BODY" | grep -qE 'host_waking|host_draining'; then
@@ -490,6 +519,10 @@ force_idle_and_suspend() {
 }
 
 save_and_set_hcc_cadences() {
+  if [ "${E2E_ALLOW_STATELESS_CADENCE_ACCELERATION:-0}" != 1 ]; then
+    fail "refusing to accelerate stateless lifecycle cadences; set E2E_ALLOW_STATELESS_CADENCE_ACCELERATION=1 on an owned profile"
+    return 1
+  fi
   header "PRECONDITION (labeled setup) -- HCC test cadences (idle=1min, drain=${TEST_DRAIN_GRACE_MS}ms, poll=${TEST_POLL_MS}ms)"
   local keys=(CONTEXT_MAPPER_STATELESS_IDLE_MINUTES CONTEXT_MAPPER_STATELESS_IDLE_FLOOR_MINUTES \
     CONTEXT_MAPPER_STATELESS_DRAIN_GRACE_MS CONTEXT_MAPPER_HEARTBEAT_POLL_MS)
@@ -535,11 +568,11 @@ drain_window_signal() {
 }
 
 record_cycle() {
-  local scenario=$1 cycle=$2 ms=$3 resolution=$4 wake_lines=$5 timing_json=${6:-null} prewarm_ms=${7:-null}
+  local scenario=$1 cycle=$2 ms=$3 resolution=$4 wake_lines=$5 timing_json=${6:-null} prewarm_ms=${7:-null} baseline_json=${8:-null}
   jq -cn --arg s "$scenario" --argjson c "$cycle" --argjson ms "$ms" \
     --arg r "$resolution" --arg wl "$wake_lines" --argjson tt "$timing_json" \
-    --argjson pw "$prewarm_ms" \
-    '{scenario:$s, cycle:$c, ms:$ms, resolution:$r, wake_phases:($wl | split("\n") | map(select(length>0))), turn_timing:$tt, prewarm_to_ready_ms:$pw}' \
+    --argjson pw "$prewarm_ms" --argjson ab "$baseline_json" \
+    '{scenario:$s, cycle:$c, ms:$ms, resolution:$r, wake_phases:($wl | split("\n") | map(select(length>0))), turn_timing:$tt, prewarm_to_ready_ms:$pw, admission_baseline:$ab}' \
     >> "$CYCLES_FILE"
 }
 
@@ -851,6 +884,16 @@ while [ "$cycle" -le "$RECOVERY_CYCLES" ]; do
     fail "R2 cycle ${cycle}: turn to suspended host did not reach a definitive 200"
     pod_diagnostics; print_results; exit 1
   fi
+  # Characterization baseline for a later, separately approved proxy
+  # admission change: first POST HTTP status, POST count through the first
+  # 200, and the first-200 send->200 latency. first_200_ms is deliberately
+  # the same first-200 measurement as RECOVERY_MS (LLM-empty re-sends never
+  # touch it); it is repeated here so the baseline record is self-contained.
+  r2_baseline_json="$(jq -cn \
+    --arg first_status "$ADMISSION_FIRST_STATUS" \
+    --argjson attempts "$ADMISSION_ATTEMPTS" \
+    --argjson first_200_ms "$RECOVERY_MS" \
+    '{first_post_status:$first_status, admission_attempts:$attempts, first_200_ms:$first_200_ms}')"
   assert_success_response "R2 cycle ${cycle} turn" "Reply with exactly: ${r2_marker}" || { print_results; exit 1; }
   if wait_for_state "active" "$ACTIVE_WAIT"; then
     ok "R2 cycle ${cycle}: state=active after wake"
@@ -888,7 +931,7 @@ while [ "$cycle" -le "$RECOVERY_CYCLES" ]; do
     fail "R2 cycle ${cycle}: no [StatelessWake] phase=wake_observed line since ${r2_since} -- the wake path is unproven for this cycle"
     pod_diagnostics; print_results; exit 1
   fi
-  record_cycle "R2_cold_resume_from_suspended" "$cycle" "$RECOVERY_MS" "cold" "$r2_wake_lines" "$r2_attr"
+  record_cycle "R2_cold_resume_from_suspended" "$cycle" "$RECOVERY_MS" "cold" "$r2_wake_lines" "$r2_attr" null "$r2_baseline_json"
   cycle=$((cycle + 1))
 done
 
@@ -1181,12 +1224,56 @@ for name, budget in budgets.items():
             continue
         attribution.append({"cycle": r["cycle"], **tt})
     breakdown = []
+    baseline = []
     for r in recs:
         parsed = []
         for line in r.get("wake_phases", []):
             m = wake_re.search(line)
             if m:
                 parsed.append({"generation": m.group(1), "phase": m.group(2), "ts_ms": int(m.group(3))})
+        if name == "R2_cold_resume_from_suspended":
+            raw = r.get("admission_baseline") or {}
+            for key in ("first_post_status", "admission_attempts", "first_200_ms"):
+                if key not in raw:
+                    print(
+                        f"scenario {name} cycle {r['cycle']}: admission baseline field '{key}' is missing -- refusing to emit partial baseline data",
+                        file=sys.stderr,
+                    )
+                    raise SystemExit(1)
+            # Pair the two HCC phases by wake generation. A missing phase or
+            # multiple candidate generations stays null with a reason: the
+            # baseline must characterize the observed signal, never invent it.
+            generations = {}
+            for phase in parsed:
+                generations.setdefault(phase["generation"], {})[phase["phase"]] = phase["ts_ms"]
+            paired = [
+                phases["replicas_patched"] - phases["status_flipped"]
+                for phases in generations.values()
+                if "status_flipped" in phases and "replicas_patched" in phases
+            ]
+            baseline_entry = {
+                "cycle": r["cycle"],
+                "first_post_status": raw["first_post_status"],
+                "admission_attempts": raw["admission_attempts"],
+                "first_200_ms": raw["first_200_ms"],
+                "status_flipped_to_replicas_patched_ms": None,
+            }
+            if len(paired) == 1:
+                if paired[0] >= 0:
+                    baseline_entry["status_flipped_to_replicas_patched_ms"] = paired[0]
+                else:
+                    baseline_entry["status_flipped_to_replicas_patched_unavailable_reason"] = (
+                        f"negative timestamp delta ({paired[0]}ms) in [StatelessWake] lines"
+                    )
+            elif len(paired) == 0:
+                baseline_entry["status_flipped_to_replicas_patched_unavailable_reason"] = (
+                    "no [StatelessWake] generation in this cycle has both phase=status_flipped and phase=replicas_patched"
+                )
+            else:
+                baseline_entry["status_flipped_to_replicas_patched_unavailable_reason"] = (
+                    f"{len(paired)} [StatelessWake] generations have both phases -- attribution is ambiguous"
+                )
+            baseline.append(baseline_entry)
         if parsed:
             breakdown.append({"cycle": r["cycle"], "wake_phases": parsed})
     # R4 overlap series (prewarm POST -> pod Ready). Informational, no
@@ -1235,6 +1322,10 @@ for name, budget in budgets.items():
         entry["turn_attribution"] = attribution
     if prewarm:
         entry["prewarm_to_ready_ms"] = prewarm
+    if baseline:
+        # Informational characterization only: no budget and no effect on
+        # the existing R2 recovery verdict.
+        entry["cold_resume_baseline"] = baseline
     scenarios[name] = entry
 
 artifact = {

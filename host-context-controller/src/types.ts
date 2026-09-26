@@ -544,7 +544,7 @@ export interface HostLifecycleStatus {
    * Written by the mcp-host runtime; HCC only preserves it across writes.
    */
   wakeHandledGeneration: number
-  /** Human-readable explanation when the stateless request was rejected. */
+  /** Human-readable rejection or temporary suspension-block reason. */
   reason?: string
 }
 

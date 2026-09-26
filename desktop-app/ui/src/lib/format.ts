@@ -158,23 +158,48 @@ function errorText(err: unknown): string {
   return (err instanceof Error ? err.message : String(err)).toLowerCase()
 }
 
-/**
- * True when an error reflects an HTTP 404 (the server doesn't know a chat the
- * local cache references). Used by the D.4 reconcile to evict a stale local
- * chat — which is destructive, so we require the 404 status token specifically
- * rather than a generic "not found" substring (a "host/agent not found"
- * transport error must NOT evict the user's cache).
- */
+/** IPC preserves error messages but not always custom status fields. */
+function httpErrorStatus(err: unknown): number | undefined {
+  if (err && typeof err === 'object') {
+    const status = (err as { status?: unknown; cause?: { status?: unknown } }).status
+    if (typeof status === 'number') return status
+    const causeStatus = (err as { cause?: { status?: unknown } }).cause?.status
+    if (typeof causeStatus === 'number') return causeStatus
+  }
+  // ApiError puts the response status before the body. Using the first token
+  // keeps a 503 body that mentions 403 from becoming a revocation signal.
+  const match = /\b([1-5]\d{2})\b/.exec(errorText(err))
+  return match ? Number(match[1]) : undefined
+}
+
+/** A transcript 404 is ambiguous: absence, authority and wake failure share it. */
 export function isHttp404(err: unknown): boolean {
-  const value = errorText(err)
+  return httpErrorStatus(err) === 404
+}
+
+/** Only an explicit authorization status can revoke the visible chat scope. */
+export function isAuthorizationError(err: unknown): boolean {
+  const status = httpErrorStatus(err)
+  return status === 401 || status === 403
+}
+
+export function isHttp403(err: unknown): boolean {
+  return httpErrorStatus(err) === 403
+}
+
+/** Exact Host-wide denial projected by the trusted Desktop RPC client. */
+export function isConfirmedHostAccessRevoked(err: unknown): boolean {
   return (
-    /\b404\b/.test(value) || value.includes('chat not found') || value.includes('session not found')
+    httpErrorStatus(err) === 403 &&
+    /(?:^|error: )(?:403 forbidden: host_access_revoked|rename session failed \(403\): host_access_revoked)$/.test(
+      errorText(err)
+    )
   )
 }
 
 /**
- * True when an error reflects a transport/connectivity failure rather than a
- * server-side rejection. The D.4 reconcile stays in offline mode on these.
+ * True when a transcript read failed without an authority decision. The
+ * reconcile keeps the cached conversation while these errors recover.
  */
 export function isNetworkError(err: unknown): boolean {
   const value = errorText(err)
@@ -184,7 +209,8 @@ export function isNetworkError(err: unknown): boolean {
     value.includes('network') ||
     value.includes('fetch failed') ||
     value.includes('econnrefused') ||
-    value.includes('failed to fetch')
+    value.includes('failed to fetch') ||
+    [502, 503, 504].includes(httpErrorStatus(err) ?? 0)
   )
 }
 

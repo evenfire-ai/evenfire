@@ -14,7 +14,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, waitFor } from '@testing-library/react'
 import { parseSessionsListResult } from '../../../../../src/rpcProxyClient'
 import type { ChatIndex } from '../../../../../src/types'
-import { MAX_RENAME_SYNC_ATTEMPTS } from '../useChatListController'
+import { MAX_RENAME_SYNC_ATTEMPTS, deletedChatIdsForScope } from '../useChatListController'
 import { renderController } from './__fixtures__/controllerHarness'
 import { type MockClerum, installMockClerum, uninstallMockClerum } from './__fixtures__/mockClerum'
 
@@ -52,6 +52,47 @@ function localIndex(chats: Array<{ id: string; title: string }>): ChatIndex {
     })),
   }
 }
+
+describe('scoped deletion visibility', () => {
+  it('filters tombstones by environment, user, and team while keeping legacy reads conservative', () => {
+    const index: ChatIndex = {
+      ...localIndex([]),
+      deletedChatIds: ['legacy-delete'],
+      deletedChatTombstones: [
+        {
+          chatId: 'team-a-delete',
+          authorityScope: { environmentKey: 'env-1', userId: 'user-1', teamId: 'team-a' },
+        },
+        {
+          chatId: 'other-environment-delete',
+          authorityScope: { environmentKey: 'env-2', userId: 'user-1', teamId: 'team-a' },
+        },
+      ],
+    }
+
+    expect(
+      deletedChatIdsForScope(index, {
+        environmentKey: 'env-1',
+        userId: 'user-1',
+        teamId: 'team-a',
+      })
+    ).toEqual(['team-a-delete'])
+    expect(
+      deletedChatIdsForScope(index, {
+        environmentKey: 'env-1',
+        userId: 'user-1',
+        teamId: 'team-b',
+      })
+    ).toEqual([])
+    expect(
+      deletedChatIdsForScope(index, {
+        environmentKey: 'env-1',
+        userId: 'user-1',
+        teamId: null,
+      })
+    ).toEqual(['legacy-delete'])
+  })
+})
 
 function titleInList(current: { chatList: Array<{ id: string; title: string }> }, id: string) {
   return current.chatList.find(c => c.id === id)?.title
@@ -118,6 +159,66 @@ function reportedSessions(chats: Array<{ chatId: string; title?: string }>) {
 }
 
 describe('rename pending queue (spec 15 §2.5)', () => {
+  it.each([
+    {
+      label: 'exact Host denial',
+      renameError: 'Rename session failed (403): host_access_revoked',
+      readStatus: null,
+      shouldRevoke: true,
+      shouldBeUncertain: false,
+    },
+    {
+      label: 'operation-scope denial',
+      renameError: 'Rename session failed (403)',
+      readStatus: null,
+      shouldRevoke: false,
+      shouldBeUncertain: true,
+    },
+    {
+      label: 'read also denied',
+      renameError: 'Rename session failed (403)',
+      readStatus: 403,
+      shouldRevoke: false,
+      shouldBeUncertain: true,
+    },
+    {
+      label: 'read unavailable',
+      renameError: 'Rename session failed (403)',
+      readStatus: 503,
+      shouldRevoke: false,
+      shouldBeUncertain: true,
+    },
+  ])(
+    '$label applies the transcript authority decision',
+    async ({ renameError, readStatus, shouldRevoke, shouldBeUncertain }) => {
+      const revoked = new Set<string>()
+      const uncertain = new Set<string>()
+      clerum.chat.getIndex.mockResolvedValue(localIndex([{ id: 'c1', title: 'old' }]))
+      clerum.rpc.renameSession.mockRejectedValue(new Error(renameError))
+      clerum.rpc.listSessions.mockImplementation(
+        async (_hostRef: string, _teamId: string | undefined, query?: { limit?: number }) => {
+          if (query?.limit === 1 && readStatus !== null) throw new Error(`${readStatus} response`)
+          return reportedSessions([{ chatId: 'c1', title: 'old' }])
+        }
+      )
+      const { result } = renderController({
+        selectedAgent: 'agent-x',
+        agentNames: ['agent-x'],
+        onHostAccessRevoked: agentRef => revoked.add(agentRef),
+        onHostAuthorityUncertain: agentRef => uncertain.add(agentRef),
+        isHostAccessBlocked: agentRef => revoked.has(agentRef),
+      })
+      await waitFor(() => expect(titleInList(result.current, 'c1')).toBe('old'))
+      await act(async () => {
+        await result.current.handleRenameChatForAgent('agent-x', 'c1', 'new')
+      })
+      expect(revoked.has('agent-x')).toBe(shouldRevoke)
+      expect(uncertain.has('agent-x')).toBe(shouldBeUncertain)
+      if (shouldRevoke) expect(result.current.chatList).toEqual([])
+      else expect(titleInList(result.current, 'c1')).toBe('new')
+    }
+  )
+
   it('200: optimistic local title + RPC sync (hostRef===agent===agentRef), no toast', async () => {
     clerum.chat.getIndex.mockResolvedValue(localIndex([{ id: 'c1', title: 'old' }]))
     clerum.rpc.renameSession.mockResolvedValue({ title: 'renamed' })
@@ -222,7 +323,7 @@ describe('rename pending queue (spec 15 §2.5)', () => {
 
     // Next poll reports c1 → the queue retries the 404'd rename.
     await act(async () => {
-      rerender({ agentNames: ['agent-x'] })
+      rerender({ agentNames: ['agent-x', 'agent-y'] })
     })
     await waitFor(() => expect(clerum.rpc.renameSession).toHaveBeenCalledTimes(2))
     // Still shows the rename (never clobbered by the server title).
@@ -290,11 +391,11 @@ describe('rename pending queue — concurrency (spec 15 §2.5)', () => {
     // trick drives a retry in the 404 case — see the T5 test — so it does invoke
     // flushPendingRenames; here the in-flight guard must make it a no-op.)
     await act(async () => {
-      rerender({ agentNames: ['agent-x'] })
+      rerender({ agentNames: ['agent-x', 'agent-y'] })
       await flushMicrotasks()
     })
     await act(async () => {
-      rerender({ agentNames: ['agent-x'] })
+      rerender({ agentNames: ['agent-x', 'agent-y'] })
       await flushMicrotasks()
     })
 
@@ -651,7 +752,7 @@ describe('rename pending queue — bounded retry (spec 15 §2.5 / R1-M1)', () =>
       reportedSessions([{ chatId: 'c1', title: 'server' }])
     )
     await act(async () => {
-      rerender({ agentNames: ['agent-x'] })
+      rerender({ agentNames: ['agent-x', 'agent-y'] })
       await flushMicrotasks()
     })
     await waitFor(() => expect(clerum.rpc.renameSession).toHaveBeenCalledTimes(2))

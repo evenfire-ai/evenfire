@@ -218,7 +218,8 @@ describe('sendAgentMessage — auto-title on send (B10)', () => {
       expect(clerum.chat.rename).toHaveBeenCalledWith(
         'agent-x',
         createdChatId,
-        'summarize the quarterly report'
+        'summarize the quarterly report',
+        1
       )
     )
   })

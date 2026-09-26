@@ -456,6 +456,33 @@ function errorCodeFromBody(body: string): string | null {
   }
 }
 
+function exactHostAccessRevokedError(status: number, body: string): ApiError | null {
+  const denied =
+    status === 403 && errorCodeFromBody(body) === 'Forbidden: user cannot access this host'
+  return denied ? new ApiError('403 Forbidden: host_access_revoked', 403, body) : null
+}
+
+function projectHostAccessRevoked(error: unknown): unknown {
+  if (!(error instanceof ApiError)) return error
+  return exactHostAccessRevokedError(error.status, error.bodyText) ?? error
+}
+
+async function projectHostAccessRevokedInPromise<T>(promise: Promise<T>): Promise<T> {
+  try {
+    return await promise
+  } catch (error) {
+    throw projectHostAccessRevoked(error)
+  }
+}
+
+function requestJsonProjected<T>(
+  method: Parameters<typeof requestJson>[0],
+  url: Parameters<typeof requestJson>[1],
+  options: Parameters<typeof requestJson>[2]
+): Promise<T> {
+  return projectHostAccessRevokedInPromise(requestJson<T>(method, url, options))
+}
+
 export class RpcProxyClient {
   async health(): Promise<{ status: string }> {
     return requestJson<{ status: string }>('GET', url('/health'))
@@ -513,7 +540,7 @@ export class RpcProxyClient {
     options?: { async?: boolean }
   ): Promise<HostMessageResponse> {
     const query = options?.async ? '?async=true' : ''
-    return requestJson<HostMessageResponse>(
+    return requestJsonProjected<HostMessageResponse>(
       'POST',
       url(`/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/messages${query}`),
       {
@@ -528,7 +555,7 @@ export class RpcProxyClient {
     hostRef: string,
     taskId: string
   ): Promise<HostMessageResponse> {
-    return requestJson<HostMessageResponse>(
+    return requestJsonProjected<HostMessageResponse>(
       'GET',
       url(
         `/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/tasks/${encodeURIComponent(taskId)}/result`
@@ -996,6 +1023,8 @@ export class RpcProxyClient {
     })
     if (!response.ok) {
       const body = await response.text()
+      const hostAccessRevoked = exactHostAccessRevokedError(response.status, body)
+      if (hostAccessRevoked) throw hostAccessRevoked
       throw new ApiError(
         `List sessions failed (${response.status}): ${body}`,
         response.status,
@@ -1032,12 +1061,14 @@ export class RpcProxyClient {
       signal: withTimeout(),
     })
     if (response.status === 404) {
-      // Keep the '404' token in the message: the renderer's `isHttp404` matches on
-      // it to evict a stale local chat.
+      // Preserve the status for the renderer. A transcript 404 is ambiguous
+      // during Host wake and never confirms that local data may be deleted.
       throw new ApiError(`Session not found (404)`, 404, '')
     }
     if (!response.ok) {
       const body = await response.text()
+      const hostAccessRevoked = exactHostAccessRevokedError(response.status, body)
+      if (hostAccessRevoked) throw hostAccessRevoked
       throw new ApiError(
         `Load session messages failed (${response.status}): ${body}`,
         response.status,
@@ -1229,7 +1260,20 @@ export class RpcProxyClient {
       // Body may echo the invalid title; read it for the ApiError payload but
       // keep the raw title out of the human-facing message.
       const body = await readErrorBody(response)
-      throw new ApiError(`Rename session failed (${response.status})`, response.status, body)
+      let hostAccessRevoked = false
+      if (response.status === 403) {
+        try {
+          const parsed = JSON.parse(body) as { error?: unknown }
+          hostAccessRevoked = parsed?.error === 'Forbidden: user cannot access this host'
+        } catch {
+          // A non-JSON or interposed 403 is not an authoritative Host denial.
+        }
+      }
+      throw new ApiError(
+        `Rename session failed (${response.status})${hostAccessRevoked ? ': host_access_revoked' : ''}`,
+        response.status,
+        body
+      )
     }
     const parsed = (await response.json().catch(() => ({}))) as { title?: unknown }
     // Re-sanitize the server's echoed title on read (defense in depth, A14 rule).

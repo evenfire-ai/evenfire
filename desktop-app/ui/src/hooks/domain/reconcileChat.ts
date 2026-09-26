@@ -8,14 +8,14 @@ import type { SessionFsmStore } from './sessionFsm'
  * second invocation while one runs coalesces onto the same promise) and routes
  * the server truth through the four precedence branches, dispatching
  * `SERVER_SNAPSHOT`/`RECONCILE_*` to the FSM. The side-effectful branch bodies
- * (attach a live stream, materialize/persist idle turns + durable result, evict a
- * 404 chat) are injected so the module stays pure and exhaustively unit-testable.
+ * (attach a live stream, materialize/persist idle turns + durable result, hide
+ * protected data after an authorization rejection) are injected.
  *
  * Telemetry (§4.8): one `stream_recovery` emission per `RECONCILE_FINISHED`,
  * carrying `{reason, outcome}` and preserving the existing outcome names
  * (`reconcile_rejoined`, `rejoin_capped_offline`, `reconcile_replaced`,
- * `recovered_from_task_result`, `fell_through_to_resend`, `404`) plus new ones
- * (`stale_drop`, `offline`, `error`).
+ * `recovered_from_task_result`, `fell_through_to_resend`) plus `revoked`,
+ * `stale_drop`, `offline`, and `error`.
  */
 
 /** Precedence-branch outcomes (stable telemetry names + Fase-3 additions). */
@@ -30,7 +30,8 @@ export type ReconcileOutcome =
   | 'recovered_error'
   | 'fell_through_to_resend'
   | 'stale_drop'
-  | '404'
+  | 'revoked'
+  | 'authority_unverified'
   | 'offline'
   | 'error'
   | 'noop'
@@ -77,10 +78,13 @@ export interface ReconcileChatDeps {
     /** Same post-await teardown guard as `attachLiveTask` (see there). */
     stillRelevant: () => boolean
   ) => Promise<ReconcileOutcome>
-  /** Local eviction for a chat the server 404s (cache + sidebar + deselect). */
-  evictChat: (chatKey: string) => Promise<void>
+  /** Hide protected data after an explicit authorization rejection. */
+  revokeAccess: (chatKey: string) => void
+  holdAccess: (chatKey: string) => void
   isNetworkError: (err: unknown) => boolean
   isHttp404: (err: unknown) => boolean
+  isAuthorizationError: (err: unknown) => boolean
+  isConfirmedHostAccessRevoked: (err: unknown) => boolean
   telemetry: (event: string, data: Record<string, unknown>) => void
   /** Guard: `false` aborts the reconcile mid-flight (chat switched away). */
   isStillRelevant?: (chatKey: string) => boolean
@@ -165,9 +169,13 @@ export function createReconcileChat(deps: ReconcileChatDeps): ReconcileChat {
       try {
         return await deps.loadSessionMessages(agentRef, chatId, query, stillRelevant)
       } catch (err) {
+        // Chat selection may change while this request is pending, but an
+        // explicit Host authorization denial still applies to the active scope.
+        // The outer catch checks the principal/team generation before revoking.
+        if (deps.isAuthorizationError(err)) throw err
         if (!stillRelevant()) return undefined
-        // Non-network (404, etc.) rethrows to the branch handler; a network blip
-        // is retried with backoff up to the cap (mirrors switchToChat P2-A).
+        // Transport failures retry with backoff. An ambiguous 404 and an
+        // authorization rejection reach the classification branch immediately.
         if (!deps.isNetworkError(err) || attempt === attempts - 1) throw err
       }
       if (!stillRelevant()) return undefined
@@ -216,15 +224,22 @@ export function createReconcileChat(deps: ReconcileChatDeps): ReconcileChat {
           )
       return outcome
     } catch (err) {
-      if (!stillRelevant()) {
+      // An authority rejection applies to the Host, even if the user switched
+      // from chat A to B while A's request was pending. The reset generation is
+      // the principal/team boundary; an old scope cannot revoke a new one.
+      if (deps.isAuthorizationError(err) && generation === startGeneration) {
+        const confirmed = deps.isConfirmedHostAccessRevoked(err)
+        if (confirmed) deps.revokeAccess(chatKey)
+        else deps.holdAccess(chatKey)
+        deps.fsm.dispatch(chatKey, { type: 'RESET' })
+        outcome = confirmed ? 'revoked' : 'authority_unverified'
+      } else if (!stillRelevant()) {
         outcome = 'stale_drop'
         return outcome
-      }
-      if (deps.isHttp404(err)) {
-        await deps.evictChat(chatKey)
-        deps.fsm.dispatch(chatKey, { type: 'RESET' })
-        outcome = '404'
-      } else if (deps.isNetworkError(err)) {
+      } else if (deps.isHttp404(err) || deps.isNetworkError(err)) {
+        // A transcript 404 is anti-enumeration and can also occur while a Host
+        // wakes. It does not prove the session was deleted. Keep the local chat,
+        // selection and draft for a later successful reconcile.
         deps.fsm.dispatch(chatKey, { type: 'WENT_OFFLINE' })
         outcome = 'offline'
       } else {
@@ -239,10 +254,11 @@ export function createReconcileChat(deps: ReconcileChatDeps): ReconcileChat {
       }
       return outcome
     } finally {
-      // RESET already tore the entry down on 404; re-dispatching FINISHED would
+      // RESET already tore the entry down on revocation; re-dispatching FINISHED would
       // resurrect an empty entry, so skip the finalizer in that case.
       if (
-        outcome !== '404' &&
+        outcome !== 'revoked' &&
+        outcome !== 'authority_unverified' &&
         generation === startGeneration &&
         (chatGenerations.get(chatKey) ?? 0) === startChatGeneration
       ) {

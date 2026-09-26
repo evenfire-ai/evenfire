@@ -578,14 +578,19 @@ const clerum = Object.freeze({
     list: (agentRef: string) => ipcRenderer.invoke('chat:list', { agentRef }),
     create: (agentRef: string, chatId: string) =>
       ipcRenderer.invoke('chat:create', { agentRef, chatId }),
-    rename: (agentRef: string, chatId: string, title: string) =>
-      ipcRenderer.invoke('chat:rename', { agentRef, chatId, title }),
-    delete: (agentRef: string, chatId: string) =>
-      ipcRenderer.invoke('chat:delete', { agentRef, chatId }),
+    rename: (agentRef: string, chatId: string, title: string, bindingGeneration: number) =>
+      ipcRenderer.invoke('chat:rename', { agentRef, chatId, title, bindingGeneration }),
+    getBindingGeneration: () => ipcRenderer.invoke('chat:bindingGeneration'),
+    captureDeleteFence: (expectedAuthorityScope: import('./types.js').ChatAuthorityScope) =>
+      ipcRenderer.invoke('chat:captureDeleteFence', { expectedAuthorityScope }),
+    delete: (agentRef: string, chatId: string, fence: import('./types.js').ChatDeleteFence) =>
+      ipcRenderer.invoke('chat:delete', { version: 3, agentRef, chatId, fence }),
     loadMessages: (agentRef: string, chatId: string, limit?: number, offset?: number) =>
       ipcRenderer.invoke('chat:loadMessages', { agentRef, chatId, limit, offset }),
     appendMessages: (agentRef: string, chatId: string, messages: unknown[]) =>
       ipcRenderer.invoke('chat:appendMessages', { agentRef, chatId, messages }),
+    upsertMessages: (agentRef: string, chatId: string, messages: unknown[]) =>
+      ipcRenderer.invoke('chat:upsertMessages', { agentRef, chatId, messages }),
     replaceMessages: (
       agentRef: string,
       chatId: string,

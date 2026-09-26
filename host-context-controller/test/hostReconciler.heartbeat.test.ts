@@ -1076,7 +1076,7 @@ describe('HostReconciler.suspendHostFromHeartbeat', () => {
       expect(appsApi.replaceNamespacedDeployment).not.toHaveBeenCalled()
       expect(host.status?.lifecycle?.state).toBe('draining')
       const staleLines = logSpy.mock.calls
-        .map(args => String(args[0]))
+        .map(args => JSON.parse(String(args[0])).msg as string)
         .filter(line => line.includes('phase=drained_report_stale'))
       expect(staleLines).toEqual([
         expect.stringMatching(
@@ -1117,7 +1117,7 @@ describe('HostReconciler.suspendHostFromHeartbeat', () => {
       expect(appsApi.createNamespacedDeployment).not.toHaveBeenCalled()
       expect(appsApi.replaceNamespacedDeployment).not.toHaveBeenCalled()
       const staleLines = logSpy.mock.calls
-        .map(args => String(args[0]))
+        .map(args => JSON.parse(String(args[0])).msg as string)
         .filter(line => line.includes('phase=drained_report_stale'))
       expect(staleLines).toEqual([
         expect.stringMatching(
@@ -1876,7 +1876,7 @@ describe('HostReconciler.markHostDrainingFromHeartbeat — AP-1 entry-epoch guar
       expect(customApi.patchNamespacedCustomObjectStatus).not.toHaveBeenCalled()
       expect(host.status?.lifecycle?.state).toBe('active')
       const staleLines = logSpy.mock.calls
-        .map(args => String(args[0]))
+        .map(args => JSON.parse(String(args[0])).msg as string)
         .filter(line => line.includes('phase=draining_write_stale'))
       expect(staleLines).toEqual([
         expect.stringMatching(
@@ -1914,7 +1914,7 @@ describe('HostReconciler.markHostDrainingFromHeartbeat — AP-1 entry-epoch guar
 
       expect(customApi.patchNamespacedCustomObjectStatus).not.toHaveBeenCalled()
       const staleLines = logSpy.mock.calls
-        .map(args => String(args[0]))
+        .map(args => JSON.parse(String(args[0])).msg as string)
         .filter(line => line.includes('phase=draining_write_stale'))
       expect(staleLines).toEqual([
         expect.stringMatching(
@@ -2018,7 +2018,7 @@ describe('HostReconciler reconcile — stateless replicas derive from FRESH stat
       // pod is never scaled to 0.
       expect(hostDeploymentBody(appsApi, 'stateless-host').spec?.replicas).toBe(1)
       const guardLines = logSpy.mock.calls
-        .map(args => String(args[0]))
+        .map(args => JSON.parse(String(args[0])).msg as string)
         .filter(line => line.includes('disagrees with fresh'))
       expect(guardLines).toEqual([
         '[HostReconciler] Stateless replicas guard for "stateless-host": cached lifecycle state "suspended" disagrees with fresh "active" — deriving replicas from FRESH state',

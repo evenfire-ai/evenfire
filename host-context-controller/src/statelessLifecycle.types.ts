@@ -8,13 +8,15 @@ import { HostCondition, HostLifecycleState, HostLifecycleStatus } from './types'
 
 /**
  * Effective lifecycle of a Host after the reconcile-time rejection checks.
- * `stateless` is false when spec.lifecycle.stateless is off OR a rejection
- * applies (legacy force-always-on CommunicationChannel policy, spec.desktop
- * present, unsatisfiable SharedFileSystem co-location).
+ * `stateless` is false when spec.lifecycle.stateless is off OR a confirmed
+ * incompatibility applies. Cache uncertainty blocks suspension and template
+ * selection; `stateless` then describes the request, not the applied mode.
  */
 export interface EffectiveHostLifecycle {
   stateless: boolean
   state: HostLifecycleState
+  /** Unknown channel authority: preserve the entire applied Deployment template. */
+  suspensionBlocked?: boolean
 }
 
 /** Reconcile-time lifecycle assessment: effective mode + durable status + condition. */

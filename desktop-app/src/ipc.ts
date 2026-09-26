@@ -11,7 +11,11 @@ import { randomUUID } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { AppService } from './appService.js'
-import { requireChatStore } from './chatStoreBinding.js'
+import {
+  getChatStoreBindingGeneration,
+  requireChatStore,
+  requireChatStoreForBindingGeneration,
+} from './chatStoreBinding.js'
 import { GFS_PREVIEW_MAX_BYTES } from './gfs/previewLimits.js'
 import { assertSafeRouteSegment } from './pathSafety.js'
 import {
@@ -22,6 +26,8 @@ import {
   PLUGIN_SDK_REQUEST_CHANNEL,
 } from './pluginSdkProtocol.js'
 import {
+  type ChatAuthorityScope,
+  type ChatDeleteFence,
   DesktopRuntimeConfig,
   HostActivityStreamEvent,
   HostMessageRequest,
@@ -32,6 +38,54 @@ import {
 
 function sanitizeString(input: unknown): string {
   return String(input || '').trim()
+}
+
+function sanitizeChatAuthorityScope(input: unknown): ChatAuthorityScope {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw new Error('Invalid chat deletion authority scope')
+  }
+  const value = input as Record<string, unknown>
+  const environmentKey = sanitizeString(value.environmentKey)
+  const userId = sanitizeString(value.userId)
+  const teamId = value.teamId === null ? null : sanitizeString(value.teamId)
+  if (!environmentKey || !userId || (value.teamId !== null && !teamId)) {
+    throw new Error('Invalid chat deletion authority scope')
+  }
+  return { environmentKey, userId, teamId }
+}
+
+function sameChatAuthorityScope(left: ChatAuthorityScope, right: ChatAuthorityScope): boolean {
+  return (
+    left.environmentKey === right.environmentKey &&
+    left.userId === right.userId &&
+    left.teamId === right.teamId
+  )
+}
+
+function sanitizeChatDeleteFence(input: unknown): ChatDeleteFence {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw new Error('Scoped chat deletion is required')
+  }
+  const value = input as Record<string, unknown>
+  const bindingGeneration = value.bindingGeneration
+  const sessionGeneration = value.sessionGeneration
+  if (
+    value.version !== 1 ||
+    typeof bindingGeneration !== 'number' ||
+    !Number.isSafeInteger(bindingGeneration) ||
+    bindingGeneration < 1 ||
+    typeof sessionGeneration !== 'number' ||
+    !Number.isSafeInteger(sessionGeneration) ||
+    sessionGeneration < 0
+  ) {
+    throw new Error('Invalid chat deletion fence')
+  }
+  return {
+    version: 1,
+    authorityScope: sanitizeChatAuthorityScope(value.authorityScope),
+    bindingGeneration,
+    sessionGeneration,
+  }
 }
 
 /**
@@ -1409,24 +1463,84 @@ export function registerIpcHandlers(service: AppService): void {
 
   ipcMain.handle(
     'chat:rename',
-    async (event, payload: { agentRef: string; chatId: string; title: string }) => {
+    async (
+      event,
+      payload: {
+        agentRef: string
+        chatId: string
+        title: string
+        bindingGeneration: number
+      }
+    ) => {
       assertTrustedSender(event)
       const agentRef = sanitizeString(payload?.agentRef)
       const chatId = sanitizeString(payload?.chatId)
       const title = sanitizeString(payload?.title)
       if (!agentRef || !chatId || !title)
         throw new Error('agentRef, chatId, and title are required')
-      await requireChatStore().renameChat(agentRef, chatId, title)
+      const bindingGeneration = payload?.bindingGeneration
+      if (typeof bindingGeneration !== 'number' || !Number.isSafeInteger(bindingGeneration)) {
+        throw new Error('A valid chat store binding generation is required')
+      }
+      await requireChatStoreForBindingGeneration(bindingGeneration).renameChat(
+        agentRef,
+        chatId,
+        title
+      )
     }
   )
 
-  ipcMain.handle('chat:delete', async (event, payload: { agentRef: string; chatId: string }) => {
+  ipcMain.handle('chat:bindingGeneration', event => {
     assertTrustedSender(event)
-    const agentRef = sanitizeString(payload?.agentRef)
-    const chatId = sanitizeString(payload?.chatId)
-    if (!agentRef || !chatId) throw new Error('agentRef and chatId are required')
-    await requireChatStore().deleteChat(agentRef, chatId)
+    return getChatStoreBindingGeneration()
   })
+
+  ipcMain.handle(
+    'chat:captureDeleteFence',
+    (event, payload: { expectedAuthorityScope?: unknown }) => {
+      assertTrustedSender(event)
+      const expectedAuthorityScope = sanitizeChatAuthorityScope(payload?.expectedAuthorityScope)
+      const authority = service.getChatDeletionFenceAuthority()
+      if (!sameChatAuthorityScope(expectedAuthorityScope, authority.authorityScope)) {
+        throw new Error('Chat deletion authority scope changed before confirmation')
+      }
+      return {
+        version: 1,
+        authorityScope: authority.authorityScope,
+        bindingGeneration: getChatStoreBindingGeneration(),
+        sessionGeneration: authority.sessionGeneration,
+      } satisfies ChatDeleteFence
+    }
+  )
+
+  ipcMain.handle(
+    'chat:delete',
+    async (
+      event,
+      payload: {
+        version?: number
+        fence?: unknown
+        agentRef: string
+        chatId: string
+      }
+    ) => {
+      assertTrustedSender(event)
+      const agentRef = sanitizeString(payload?.agentRef)
+      const chatId = sanitizeString(payload?.chatId)
+      if (!agentRef || !chatId) throw new Error('agentRef and chatId are required')
+      if (payload?.version !== 3) throw new Error('Scoped chat deletion is required')
+      const fence = sanitizeChatDeleteFence(payload.fence)
+      const authority = service.getChatDeletionFenceAuthority()
+      if (
+        !sameChatAuthorityScope(fence.authorityScope, authority.authorityScope) ||
+        fence.sessionGeneration !== authority.sessionGeneration
+      ) {
+        throw new Error('Chat deletion authority changed before confirmation')
+      }
+      const store = requireChatStoreForBindingGeneration(fence.bindingGeneration)
+      return await store.deleteChat(agentRef, chatId, fence.authorityScope)
+    }
+  )
 
   ipcMain.handle(
     'chat:loadMessages',
@@ -1452,6 +1566,22 @@ export function registerIpcHandlers(service: AppService): void {
       if (!agentRef || !chatId) throw new Error('agentRef and chatId are required')
       const messages = Array.isArray(payload?.messages) ? payload.messages : []
       await requireChatStore().appendMessages(
+        agentRef,
+        chatId,
+        messages as import('./types.js').ChatMessage[]
+      )
+    }
+  )
+
+  ipcMain.handle(
+    'chat:upsertMessages',
+    async (event, payload: { agentRef: string; chatId: string; messages: unknown[] }) => {
+      assertTrustedSender(event)
+      const agentRef = sanitizeString(payload?.agentRef)
+      const chatId = sanitizeString(payload?.chatId)
+      if (!agentRef || !chatId) throw new Error('agentRef and chatId are required')
+      const messages = Array.isArray(payload?.messages) ? payload.messages : []
+      await requireChatStore().upsertMessages(
         agentRef,
         chatId,
         messages as import('./types.js').ChatMessage[]
@@ -1576,7 +1706,10 @@ export function registerIpcHandlers(service: AppService): void {
     assertTrustedSender(event)
     const agentRef = sanitizeString(payload?.agentRef)
     if (!agentRef) throw new Error('agentRef is required')
-    return requireChatStore().getIndex(agentRef)
+    const store = requireChatStore()
+    const authority = service.getChatDeletionFenceAuthority()
+    await store.retryPendingDeleteCleanups(authority.authorityScope)
+    return store.getIndex(agentRef)
   })
 
   ipcMain.handle('chat:dismissOnboarding', async (event, payload: { agentRef: string }) => {

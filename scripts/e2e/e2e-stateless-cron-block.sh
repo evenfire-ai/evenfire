@@ -5,6 +5,8 @@
 # because tool selection is model-driven in the live chat path. This T2 gate
 # proves the runtime lifecycle contract with deterministic heartbeat evidence:
 # activeCronSchedules blocks suspension, and clearing it releases suspension.
+# It accelerates HCC cadences only with E2E_ALLOW_STATELESS_CADENCE_ACCELERATION=1
+# and fails cleanup if the saved values are not restored and read back exactly.
 #
 # Registered gate: e2e-stateless-cron-block (run directly; not wired to Make).
 set -euo pipefail
@@ -184,6 +186,10 @@ probe_pod_cron_policy_artifacts() {
 }
 
 save_and_set_hcc_cadences() {
+  if [ "${E2E_ALLOW_STATELESS_CADENCE_ACCELERATION:-0}" != 1 ]; then
+    fail "refusing to accelerate stateless lifecycle cadences; set E2E_ALLOW_STATELESS_CADENCE_ACCELERATION=1 on an owned profile"
+    return 1
+  fi
   header "PRECONDITION (labeled setup) -- HCC test cadences (idle=${TEST_IDLE_MINUTES}min, drain=${TEST_DRAIN_GRACE_MS}ms)"
   local keys=(CONTEXT_MAPPER_STATELESS_IDLE_MINUTES CONTEXT_MAPPER_STATELESS_IDLE_FLOOR_MINUTES \
     CONTEXT_MAPPER_STATELESS_DRAIN_GRACE_MS CONTEXT_MAPPER_HEARTBEAT_POLL_MS)
@@ -208,14 +214,32 @@ save_and_set_hcc_cadences() {
 restore_hcc_cadences() {
   [ -n "$HCC_ENV_SAVED" ] || return 0
   log "restoring HCC cadence env"
-  local args=() line k v
+  local args=() line k v actual
   while IFS= read -r line; do
     [ -z "$line" ] && continue
     k="${line%%=*}"; v="${line#*=}"
     if [ -n "$v" ]; then args+=("${k}=${v}"); else args+=("${k}-"); fi
   done <<< "$HCC_ENV_SAVED"
-  [ ${#args[@]} -gt 0 ] && kctl set env "deployment/${HCC_DEPLOY}" -n "$HCC_NS" "${args[@]}" >/dev/null 2>&1 || true
-  kctl rollout status "deployment/${HCC_DEPLOY}" -n "$HCC_NS" --timeout=120s >/dev/null 2>&1 || true
+  if [ ${#args[@]} -eq 0 ]; then return 0; fi
+  if ! kctl set env "deployment/${HCC_DEPLOY}" -n "$HCC_NS" "${args[@]}" >/dev/null 2>&1; then
+    fail "failed to restore HCC cadence env"
+    return 1
+  fi
+  if ! kctl rollout status "deployment/${HCC_DEPLOY}" -n "$HCC_NS" --timeout=120s >/dev/null 2>&1; then
+    fail "HCC rollout did not settle after cadence restore"
+    return 1
+  fi
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    k="${line%%=*}"; v="${line#*=}"
+    actual="$(kctl get "deployment/${HCC_DEPLOY}" -n "$HCC_NS" \
+      -o jsonpath="{.spec.template.spec.containers[0].env[?(@.name=='${k}')].value}" 2>/dev/null || true)"
+    if [ "$actual" != "$v" ]; then
+      fail "HCC cadence restore readback mismatch for ${k}: expected '${v}', got '${actual}'"
+      return 1
+    fi
+  done <<< "$HCC_ENV_SAVED"
+  HCC_ENV_SAVED=""
 }
 
 restore_cron_allow_env() {
@@ -255,7 +279,7 @@ cleanup() {
   local rc=$?
   stop_active_cron_pin "$CRON_POD_UID" >/dev/null 2>&1 || true
   restore_cron_allow_env
-  restore_hcc_cadences
+  restore_hcc_cadences || rc=1
   print_results
   exit "$rc"
 }

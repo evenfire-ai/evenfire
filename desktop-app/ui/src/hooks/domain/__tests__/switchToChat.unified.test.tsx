@@ -10,6 +10,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { makeTaskKey } from '@contexts/AgentTaskTrackerContext/types'
 import { act, waitFor } from '@testing-library/react'
+import {
+  getComposerDraft,
+  resetComposerDraftStore,
+  setComposerDraft,
+} from '@lib/composerDraftStore'
 import { renderController } from './__fixtures__/controllerHarness'
 import { type MockClerum, installMockClerum, uninstallMockClerum } from './__fixtures__/mockClerum'
 
@@ -29,6 +34,7 @@ beforeEach(() => {
 afterEach(() => {
   vi.restoreAllMocks()
   vi.useRealTimers()
+  resetComposerDraftStore()
   uninstallMockClerum()
 })
 
@@ -51,6 +57,8 @@ function deferred<T>() {
   })
   return { promise, resolve }
 }
+
+type SessionResult = Awaited<ReturnType<typeof clerum.rpc.loadSessionMessages>>
 
 describe('switchToChat (unified, D.4)', () => {
   it('Phase 1 renders the cache, Phase 2 reconciles, and preserves the cache when there is no diff', async () => {
@@ -78,7 +86,7 @@ describe('switchToChat (unified, D.4)', () => {
       'agent-x',
       'c1',
       undefined,
-      { limit: 40, afterTurn: 1 }
+      { limit: 40, afterTurn: 0 }
     )
     expect(clerum.chat.replaceMessages).not.toHaveBeenCalled()
     expect(result.current.chatMessages).toHaveLength(2)
@@ -374,7 +382,7 @@ describe('switchToChat (unified, D.4)', () => {
       'agent-x',
       'delta-pages',
       undefined,
-      { limit: 40, afterTurn: 1 }
+      { limit: 40, afterTurn: 0 }
     )
     expect(clerum.rpc.loadSessionMessages).toHaveBeenNthCalledWith(
       2,
@@ -457,6 +465,46 @@ describe('switchToChat (unified, D.4)', () => {
     ])
   })
 
+  it('preserves turnless legacy history outside a partial authoritative window', async () => {
+    const legacyMessages = Array.from({ length: 100 }, (_, index) => ({
+      id: `legacy-${index + 1}`,
+      role: index % 2 === 0 ? ('user' as const) : ('assistant' as const),
+      content: `legacy-${index + 1}`,
+      timestamp: index + 1,
+    }))
+    clerum.chat.loadMessages.mockResolvedValue(legacyMessages)
+    clerum.rpc.loadSessionMessages.mockResolvedValue({
+      agent: 'agent-x',
+      chatId: 'legacy-partial-window',
+      state: 'idle',
+      totalTurns: 50,
+      oldestTurnNumber: 11,
+      latestTurnNumber: 50,
+      hasMoreBefore: true,
+      hasMoreAfter: false,
+      turns: Array.from({ length: 40 }, (_, index) =>
+        turn(index + 11, `server-q${index + 11}`, `server-a${index + 11}`)
+      ),
+    })
+    const { result } = renderController()
+    await settleMount()
+
+    await act(async () => {
+      await result.current.switchToChat('agent-x', 'legacy-partial-window')
+    })
+
+    expect(result.current.chatMessages.map(message => message.id)).toContain('legacy-1')
+    expect(result.current.chatMessages.map(message => message.id)).toContain('turn-50-assistant')
+    expect(clerum.chat.replaceMessages).toHaveBeenCalledWith(
+      'agent-x',
+      'legacy-partial-window',
+      expect.arrayContaining([
+        expect.objectContaining({ id: 'legacy-1' }),
+        expect.objectContaining({ id: 'turn-11-user' }),
+      ])
+    )
+  })
+
   it('caps server delta pagination so reconcile cannot walk an unbounded cursor chain', async () => {
     clerum.chat.loadMessages.mockResolvedValue([
       { id: 'turn-1-user', role: 'user' as const, content: 'q1', timestamp: 1 },
@@ -512,8 +560,6 @@ describe('switchToChat (unified, D.4)', () => {
       'turn-4-assistant',
       'turn-5-user',
       'turn-5-assistant',
-      'turn-6-user',
-      'turn-6-assistant',
       'turn-999-user',
       'turn-999-assistant',
     ])
@@ -883,7 +929,7 @@ describe('switchToChat (unified, D.4)', () => {
       'agent-x',
       'synced-chat',
       undefined,
-      { limit: 40, afterTurn: 1 }
+      { limit: 40, afterTurn: 0 }
     )
     expect(result.current.chatMessages.map(message => message.id)).toEqual([
       'turn-1-user',
@@ -988,6 +1034,325 @@ describe('switchToChat (unified, D.4)', () => {
     })
     expect(result.current.olderMessagesLoading).toBe(false)
   })
+
+  it.each([401, 403, 404])(
+    'older-message HTTP %i applies the correct Host authority decision',
+    async status => {
+      const revoked = new Set<string>()
+      const uncertain = new Set<string>()
+      clerum.chat.loadMessages.mockImplementation(async (_agentRef, _chatId, _limit, offset) =>
+        offset === undefined
+          ? [
+              {
+                id: 'turn-10-user',
+                role: 'user',
+                content: 'cached',
+                timestamp: 10,
+                serverTurnNumber: 10,
+              },
+            ]
+          : []
+      )
+      clerum.rpc.loadSessionMessages.mockImplementation(
+        async (_hostRef, _agent, chatId, _teamId, query?: { beforeTurn?: number }) => {
+          if (query?.beforeTurn !== undefined) throw new Error(`${status} response`)
+          return {
+            agent: 'agent-x',
+            chatId,
+            state: 'idle',
+            turns: [],
+            hasMoreBefore: true,
+            hasMoreAfter: false,
+          }
+        }
+      )
+      const { result } = renderController({
+        onHostAccessRevoked: agentRef => revoked.add(agentRef),
+        onHostAuthorityUncertain: agentRef => uncertain.add(agentRef),
+        isHostAccessBlocked: agentRef => revoked.has(agentRef) || uncertain.has(agentRef),
+      })
+      await settleMount()
+      await act(async () => {
+        await result.current.switchToChat('agent-x', 'older-authority')
+      })
+      expect(result.current.hasOlderMessages).toBe(true)
+
+      await act(async () => {
+        await result.current.handleLoadOlderMessages()
+      })
+      if (status === 404) {
+        expect(revoked.has('agent-x')).toBe(false)
+        expect(uncertain.has('agent-x')).toBe(false)
+        expect(result.current.activeChatId).toBe('older-authority')
+        expect(result.current.chatMessages.map(message => message.content)).toEqual(['cached'])
+      } else {
+        expect(revoked.has('agent-x')).toBe(false)
+        expect(uncertain.has('agent-x')).toBe(true)
+        expect(result.current.activeChatId).toBe('older-authority')
+        expect(result.current.chatMessages.map(message => message.content)).toEqual(['cached'])
+      }
+    }
+  )
+
+  it('re-fetches the newest cached turn so a response completed after caching is recovered', async () => {
+    clerum.chat.loadMessages.mockResolvedValue([
+      { id: 'turn-1-user', role: 'user' as const, content: 'q', timestamp: 1, serverTurnNumber: 1 },
+    ])
+    clerum.rpc.loadSessionMessages.mockResolvedValue({
+      agent: 'agent-x',
+      chatId: 'partial-turn',
+      state: 'idle',
+      totalTurns: 1,
+      turns: [turn(1, 'q', 'completed answer')],
+    })
+    const { result } = renderController()
+    await settleMount()
+
+    await act(async () => {
+      await result.current.switchToChat('agent-x', 'partial-turn')
+    })
+
+    expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledWith(
+      'agent-x',
+      'agent-x',
+      'partial-turn',
+      undefined,
+      { limit: 40, afterTurn: 0 }
+    )
+    expect(result.current.chatMessages.map(message => message.content)).toEqual([
+      'q',
+      'completed answer',
+    ])
+  })
+
+  it('reuses the in-flight selection when the same chat is reopened', async () => {
+    const response = deferred<SessionResult>()
+    clerum.chat.loadMessages.mockResolvedValue([])
+    clerum.rpc.loadSessionMessages.mockImplementationOnce(() => response.promise)
+    const { result } = renderController()
+    await settleMount()
+
+    let firstSwitch!: Promise<void>
+    await act(async () => {
+      firstSwitch = result.current.switchToChat('agent-x', 'same-chat')
+      await waitFor(() => expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledTimes(1))
+    })
+    let secondSwitch!: Promise<void>
+    await act(async () => {
+      secondSwitch = result.current.switchToChat('agent-x', 'same-chat')
+      await Promise.resolve()
+    })
+
+    response.resolve({
+      agent: 'agent-x',
+      chatId: 'same-chat',
+      state: 'idle',
+      totalTurns: 1,
+      turns: [turn(1, 'question', 'fresh answer')],
+    })
+    await act(async () => {
+      await Promise.all([firstSwitch, secondSwitch])
+    })
+
+    expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledTimes(1)
+    expect(result.current.chatMessages.map(message => message.content)).toEqual([
+      'question',
+      'fresh answer',
+    ])
+  })
+
+  it('ignores a send 403 from the prior team scope', async () => {
+    const revoked = new Set<string>()
+    let rejectSend!: (reason: unknown) => void
+    clerum.rpc.invokeHostMessage.mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectSend = reject
+        })
+    )
+    const controller = renderController({
+      currentTeamId: 'team-before',
+      onHostAccessRevoked: agentRef => revoked.add(agentRef),
+      onHostAuthorityUncertain: agentRef => revoked.add(agentRef),
+      isHostAccessBlocked: agentRef => revoked.has(agentRef),
+    })
+    await settleMount()
+    await act(async () => {
+      await controller.result.current.switchToChat('agent-x', 'old-team-chat')
+    })
+
+    const pendingSend = controller.result.current.handleSendAgentMessage('hello')
+    await waitFor(() => expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1))
+    controller.rerender({ currentTeamId: 'team-after' })
+    await act(async () => {
+      rejectSend(new Error('403 forbidden'))
+      await pendingSend
+    })
+    expect(revoked.has('agent-x')).toBe(false)
+  })
+
+  it('ignores an older-message 403 from the prior team scope', async () => {
+    const revoked = new Set<string>()
+    let rejectOlder!: (reason: unknown) => void
+    clerum.chat.loadMessages.mockImplementation(async (_agentRef, _chatId, _limit, offset) =>
+      offset === undefined
+        ? [
+            {
+              id: 'turn-10-user',
+              role: 'user',
+              content: 'cached',
+              timestamp: 10,
+              serverTurnNumber: 10,
+            },
+          ]
+        : []
+    )
+    clerum.rpc.loadSessionMessages.mockImplementation(
+      async (_hostRef, _agent, chatId, _teamId, query?: { beforeTurn?: number }) => {
+        if (query?.beforeTurn !== undefined) {
+          return new Promise((_resolve, reject) => {
+            rejectOlder = reject
+          })
+        }
+        return { agent: 'agent-x', chatId, state: 'idle', turns: [], hasMoreBefore: true }
+      }
+    )
+    const controller = renderController({
+      currentTeamId: 'team-before',
+      onHostAccessRevoked: agentRef => revoked.add(agentRef),
+      onHostAuthorityUncertain: agentRef => revoked.add(agentRef),
+      isHostAccessBlocked: agentRef => revoked.has(agentRef),
+    })
+    await settleMount()
+    await act(async () => {
+      await controller.result.current.switchToChat('agent-x', 'old-team-chat')
+    })
+    const pendingOlder = controller.result.current.handleLoadOlderMessages()
+    await waitFor(() => expect(rejectOlder).toEqual(expect.any(Function)))
+    controller.rerender({ currentTeamId: 'team-after' })
+    await act(async () => {
+      rejectOlder(new Error('403 forbidden'))
+      await pendingOlder
+    })
+    expect(revoked.has('agent-x')).toBe(false)
+  })
+
+  it.each([401, 403, 404])(
+    'durable task-result HTTP %i applies the correct Host authority decision',
+    async status => {
+      const revoked = new Set<string>()
+      const uncertain = new Set<string>()
+      clerum.chat.loadMessages.mockResolvedValue([])
+      clerum.rpc.loadSessionMessages.mockResolvedValue({
+        agent: 'agent-x',
+        chatId: 'result-authority',
+        state: 'idle',
+        turns: [],
+      })
+      clerum.rpc.getTaskResult.mockRejectedValue(new Error(`${status} response`))
+      const { result } = renderController({
+        onHostAccessRevoked: agentRef => revoked.add(agentRef),
+        onHostAuthorityUncertain: agentRef => uncertain.add(agentRef),
+        isHostAccessBlocked: agentRef => revoked.has(agentRef) || uncertain.has(agentRef),
+      })
+      await settleMount()
+      await act(async () => {
+        await result.current.switchToChat('agent-x', 'result-authority')
+      })
+
+      await act(async () => {
+        await result.current.reconcileChat(makeTaskKey('agent-x', 'result-authority'), {
+          reason: 'task_result_recovery',
+          taskIdHint: 'task-missing-turn',
+        })
+      })
+      expect(clerum.rpc.getTaskResult).toHaveBeenCalled()
+      if (status === 404) {
+        expect(revoked.has('agent-x')).toBe(false)
+        expect(uncertain.has('agent-x')).toBe(false)
+        expect(result.current.activeChatId).toBe('result-authority')
+      } else {
+        expect(revoked.has('agent-x')).toBe(false)
+        expect(uncertain.has('agent-x')).toBe(true)
+        expect(result.current.activeChatId).toBe('result-authority')
+      }
+    }
+  )
+
+  it.each(['revocation', 'confirmed deletion', 'team switch'])(
+    'does not publish a late durable task reply after %s',
+    async action => {
+      const revoked = new Set<string>()
+      const lateResult = deferred<{ response: string }>()
+      clerum.chat.loadMessages.mockResolvedValue([])
+      clerum.rpc.loadSessionMessages.mockResolvedValueOnce({
+        agent: 'agent-x',
+        chatId: 'late-result',
+        state: 'processing',
+        activeTaskId: 'task-late-result',
+        turns: [turn(1, 'question')],
+      })
+      const controller = renderController({
+        currentTeamId: 'team-before',
+        onHostAccessRevoked: agentRef => revoked.add(agentRef),
+        onHostAuthorityUncertain: agentRef => revoked.add(agentRef),
+        isHostAccessBlocked: agentRef => revoked.has(agentRef),
+      })
+      await settleMount()
+      await act(async () => {
+        await controller.result.current.switchToChat('agent-x', 'late-result')
+      })
+      await waitFor(() => expect(clerum.hasProgressHandler('task-late-result')).toBe(true))
+
+      // The initial processing snapshot may fetch attachments. Hold only the
+      // terminal fallback read whose late completion is under test.
+      clerum.rpc.getTaskResult.mockClear()
+      clerum.rpc.getTaskResult.mockImplementation(() => lateResult.promise)
+      clerum.rpc.loadSessionMessages.mockRejectedValue(new Error('unexpected transcript failure'))
+      clerum.emitTaskProgress('task-late-result', { type: 'error', message: 'stream dropped' })
+      await waitFor(() => expect(clerum.rpc.getTaskResult).toHaveBeenCalledTimes(1))
+
+      if (action === 'revocation') {
+        clerum.rpc.loadSessionMessages.mockRejectedValue(new Error('403 forbidden'))
+        await act(async () => {
+          await controller.result.current.reconcileChat(makeTaskKey('agent-x', 'late-result'), {
+            reason: 'authority_refresh',
+          })
+        })
+        expect(revoked.has('agent-x')).toBe(true)
+      } else if (action === 'confirmed deletion') {
+        await act(async () => {
+          const deletion = await controller.result.current.captureChatDeleteFence('agent-x')
+          await controller.result.current.handleDeleteChatForAgent(
+            'agent-x',
+            'late-result',
+            deletion
+          )
+        })
+        expect(clerum.chat.delete).toHaveBeenCalledWith(
+          'agent-x',
+          'late-result',
+          expect.objectContaining({ version: 1, bindingGeneration: 1 })
+        )
+      } else {
+        controller.rerender({ currentTeamId: 'team-after' })
+      }
+
+      const writesBefore = clerum.chat.appendMessages.mock.calls.length
+      const notificationsBefore = controller.spies.pushNotification.mock.calls.length
+      const toastsBefore = controller.spies.pushToast.mock.calls.length
+      await act(async () => {
+        lateResult.resolve({ response: 'late protected reply' })
+        await lateResult.promise
+      })
+      expect(clerum.chat.appendMessages.mock.calls.length).toBe(writesBefore)
+      expect(controller.spies.pushNotification.mock.calls.length).toBe(notificationsBefore)
+      expect(controller.spies.pushToast.mock.calls.length).toBe(toastsBefore)
+      expect(controller.result.current.chatMessages.map(message => message.content)).not.toContain(
+        'late protected reply'
+      )
+    }
+  )
 
   it('ignores an older-page response when switching away and back before it resolves', async () => {
     let resolveOlder!: (messages: unknown[]) => void
@@ -1665,10 +2030,12 @@ describe('switchToChat (unified, D.4)', () => {
     expect(clerum.hasProgressHandler('task-NEW')).toBe(true)
   })
 
-  it('404 evicts the stale local chat and resets the active selection', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
-    clerum.chat.loadMessages.mockResolvedValue([])
+  it('ambiguous 404 preserves the selected chat, cached messages and unsent draft', async () => {
+    clerum.chat.loadMessages.mockResolvedValue([
+      { id: 'cached-turn', role: 'user' as const, content: 'known conversation', timestamp: 1 },
+    ])
     clerum.rpc.loadSessionMessages.mockRejectedValue(new Error('404 Not Found'))
+    setComposerDraft('gone', 'unsent message')
     const { result } = renderController()
     await settleMount()
 
@@ -1676,10 +2043,16 @@ describe('switchToChat (unified, D.4)', () => {
       await result.current.switchToChat('agent-x', 'gone')
     })
 
-    expect(clerum.chat.delete).toHaveBeenCalledWith('agent-x', 'gone')
-    expect(result.current.activeChatId).toBeNull()
-    expect(result.current.sessionStateByChatKey['agent-x::gone']).toBeUndefined()
-    expect(warn).toHaveBeenCalled()
+    expect(clerum.chat.delete).not.toHaveBeenCalled()
+    expect(result.current.activeChatId).toBe('gone')
+    expect(result.current.chatMessages.map(message => message.content)).toEqual([
+      'known conversation',
+    ])
+    expect(getComposerDraft('gone')).toBe('unsent message')
+    expect(result.current.sessionStateByChatKey['agent-x::gone']).toMatchObject({
+      syncing: false,
+      offlineMode: true,
+    })
   })
 
   it('network error keeps the Phase-1 cache and flags offline mode', async () => {

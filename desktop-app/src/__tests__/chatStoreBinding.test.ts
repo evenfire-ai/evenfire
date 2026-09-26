@@ -5,7 +5,9 @@ import path from 'node:path'
 import {
   __setChatStoreBaseDirForTests,
   bindChatStoreForUser,
+  getChatStoreBindingGeneration,
   requireChatStore,
+  requireChatStoreForBindingGeneration,
   unbindChatStore,
 } from '../chatStoreBinding'
 
@@ -37,6 +39,27 @@ describe('chatStoreBinding', () => {
 
   it('requireChatStore throws Not authenticated before any bind', () => {
     expect(() => requireChatStore()).toThrow(/Not authenticated/)
+  })
+
+  it('fences destructive work to the binding that issued it', async () => {
+    await bindChatStoreForUser('user-a', ENV_A)
+    const firstBinding = getChatStoreBindingGeneration()
+    expect(requireChatStoreForBindingGeneration(firstBinding)).toBe(requireChatStore())
+
+    // Refreshing the same user's binding does not invalidate their work.
+    await bindChatStoreForUser('user-a', ENV_A)
+    expect(getChatStoreBindingGeneration()).toBe(firstBinding)
+
+    await bindChatStoreForUser('user-b', ENV_A)
+    const nextBinding = getChatStoreBindingGeneration()
+    expect(nextBinding).not.toBe(firstBinding)
+    expect(() => requireChatStoreForBindingGeneration(firstBinding)).toThrow(
+      /Chat store binding changed/
+    )
+    expect(requireChatStoreForBindingGeneration(nextBinding)).toBe(requireChatStore())
+
+    unbindChatStore()
+    expect(() => requireChatStoreForBindingGeneration(nextBinding)).toThrow()
   })
 
   it('does not follow symlinked quarantine roots during retention cleanup', async () => {

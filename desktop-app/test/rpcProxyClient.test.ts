@@ -207,6 +207,36 @@ describe('RpcProxyClient — openTaskProgressStream()', () => {
 })
 
 describe('RpcProxyClient — renameSession() (spec 15 Fase B)', () => {
+  it.each([
+    {
+      status: 403,
+      body: JSON.stringify({ error: 'Forbidden: user cannot access this host' }),
+      marked: true,
+    },
+    {
+      status: 403,
+      body: JSON.stringify({ error: 'Forbidden: missing rename scope' }),
+      marked: false,
+    },
+    { status: 403, body: 'Forbidden: user cannot access this host', marked: false },
+    {
+      status: 503,
+      body: JSON.stringify({ error: 'Forbidden: user cannot access this host' }),
+      marked: false,
+    },
+  ])(
+    'marks exact Host-wide denial only for authoritative 403 body ($status, $marked)',
+    async ({ status, body, marked }) => {
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(body, { status })))
+      const client = new RpcProxyClient()
+      const error = await client
+        .renameSession('rpc-token', 'chatllm', 'chatllm', 'chat-1', 'name')
+        .catch((caught: Error) => caught)
+      expect(error).toBeInstanceOf(Error)
+      expect((error as Error).message.includes('host_access_revoked')).toBe(marked)
+    }
+  )
+
   it('PATCHes the name route with the title and returns the (re-sanitized) server title', async () => {
     const fetchMock = vi
       .fn()

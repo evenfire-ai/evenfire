@@ -580,6 +580,36 @@ describe('post-resolution re-forward hardening (respondWithWakeAndHold)', () => 
     expect(coordinator.trackedCoordinationCount()).toBe(0)
   })
 
+  it('active wake response currently returns host_waking when upstream admission becomes possible after the bounded retry schedule', async () => {
+    const { coordinator, requestWake, probeReady } = makeCoordinator()
+    requestWake.mockResolvedValue({ kind: 'active', wakeGeneration: null })
+
+    const res = makeRes()
+    let upstreamAdmits = false
+    const attemptUpstream = vi.fn(async () => {
+      if (!upstreamAdmits) throw upstreamDrainingError()
+      res.status(200).json({ success: true, taskId: 't-late-admission' })
+    })
+    const pending = respondWithWakeAndHold(respondOptions(coordinator, res, attemptUpstream))
+
+    await vi.advanceTimersByTimeAsync(1_250) // exhaust 0ms + 250ms + 1000ms attempts
+    await pending
+    expect(attemptUpstream).toHaveBeenCalledTimes(3)
+    expect(res.statusCode).toBe(503)
+    expect(res.body).toMatchObject({
+      code: 'host_waking',
+      hostRef: 'chatllm',
+      lastKnownState: 'active',
+    })
+    expect(probeReady).not.toHaveBeenCalled()
+    expect(coordinator.trackedCoordinationCount()).toBe(0)
+
+    upstreamAdmits = true
+    await vi.advanceTimersByTimeAsync(MAX_HOLD_MS * 3)
+    expect(attemptUpstream).toHaveBeenCalledTimes(3) // admission later does not trigger a retry
+    expect(res.statusCode).toBe(503)
+  })
+
   it('(d) two concurrent holds for different hosts do not cross-cancel each other', async () => {
     const { coordinator, requestWake, probeReady } = makeCoordinator()
     requestWake.mockResolvedValue({ kind: 'wake-requested', wakeGeneration: 1 })

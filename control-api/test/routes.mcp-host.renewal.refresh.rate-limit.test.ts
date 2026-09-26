@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import jwt from 'jsonwebtoken'
 import request from 'supertest'
 import { createApp } from '../src/app.js'
@@ -63,6 +63,8 @@ vi.mock('../src/db.js', () => ({
 describe('Workflow approval refresh rate limit', () => {
   let app: ReturnType<typeof createApp>
 
+  afterEach(() => vi.restoreAllMocks())
+
   beforeEach(() => {
     vi.clearAllMocks()
     rateLimitCounts.clear()
@@ -72,6 +74,9 @@ describe('Workflow approval refresh rate limit', () => {
 
   it('does not consume a refresh token when the request is rate limited', async () => {
     const limit = config.approvalRlRefreshPerMin
+    // Pin the fixed-window clock before warm-up, including near a minute boundary.
+    const baseNow = Math.floor(Date.now() / 60_000) * 60_000 + 10_000
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(baseNow)
     // Warm up exactly `limit` calls with unique refresh tokens — all should 200.
     for (let i = 0; i < limit; i++) {
       const { token } = issueMcpHostRefreshJwt('ns', 'recipe')
@@ -94,8 +99,6 @@ describe('Workflow approval refresh rate limit', () => {
     // Rollover the 60s window so the limiter grants a fresh slot. The
     // rateLimiterService uses `Date.now()` internally — spy on it so we don't
     // actually wait a minute in the test.
-    const baseNow = Date.now()
-    const nowSpy = vi.spyOn(Date, 'now')
     nowSpy.mockReturnValue(baseNow + 60_001)
 
     try {

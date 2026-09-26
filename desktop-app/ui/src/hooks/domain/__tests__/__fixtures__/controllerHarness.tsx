@@ -4,6 +4,11 @@ import { AgentTaskTrackerProvider } from '@contexts/AgentTaskTrackerContext'
 import { renderHook } from '@testing-library/react'
 import { useAgentChatController } from '../../useAgentChatController'
 
+const onHostAccessRevoked = () => {}
+const onHostAuthorityUncertain = () => {}
+const isHostAccessBlocked = () => false
+const getHostAuthorityEpoch = () => 0
+
 type ControllerParams = Parameters<typeof useAgentChatController>[0]
 
 export interface RenderControllerResult {
@@ -47,10 +52,15 @@ export function renderController(
     selectedAgent: 'agent-x',
     agentNames: ['agent-x'],
     currentTeamId: 'team-1',
+    currentEnvironmentKey: 'env-test',
     currentTeamName: 'Team 1',
     isAuthenticated: true,
     loadMenuData: true,
     navItem: 'agents',
+    onHostAccessRevoked,
+    onHostAuthorityUncertain,
+    isHostAccessBlocked,
+    getHostAuthorityEpoch,
     pushToast: spies.pushToast,
     pushNotification: spies.pushNotification,
     // Identity resolver by default (no catalog display layer in the harness).

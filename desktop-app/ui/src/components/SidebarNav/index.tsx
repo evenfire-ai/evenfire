@@ -1,5 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { useAgentChatActionsContext } from '@contexts/AgentChatActionsContext'
+import {
+  type QueuedChatDelete,
+  useAgentChatActionsContext,
+} from '@contexts/AgentChatActionsContext'
 import { makeTaskKey } from '@contexts/AgentTaskTrackerContext/types'
 import { useAuthContext } from '@contexts/AuthContext'
 import { useChatListContext } from '@contexts/ChatListContext'
@@ -53,6 +56,7 @@ export function SidebarNav({
   const { activeChatId, latestChatSessions, latestChatSessionsLoading, sessionStateByChatKey } =
     useChatListContext()
   const {
+    captureChatDeleteFence,
     handleRenameChatForAgent: onRenameChatForAgent,
     handleDeleteChatForAgent: onDeleteChatForAgent,
   } = useAgentChatActionsContext()
@@ -71,6 +75,7 @@ export function SidebarNav({
     agentRef: string
     chatId: string
     title: string
+    deletion: QueuedChatDelete
   } | null>(null)
   const lastToggleRequestIdRef = useRef(0)
   const desktopAppInfo = useDesktopAppInfo()
@@ -86,6 +91,24 @@ export function SidebarNav({
       onSettingsMenuOpenChange?.(open)
     },
     [onSettingsMenuOpenChange]
+  )
+
+  const requestDeleteSession = React.useCallback(
+    async (session: { agentRef: string; id: string; title: string }) => {
+      setSessionMenuId(null)
+      try {
+        const deletion = await captureChatDeleteFence(session.agentRef)
+        setPendingDeleteSession({
+          agentRef: session.agentRef,
+          chatId: session.id,
+          title: session.title,
+          deletion,
+        })
+      } catch {
+        // captureChatDeleteFence reports the failure through the shared chat toast.
+      }
+    },
+    [captureChatDeleteFence, pushToast]
   )
 
   useClickOutside(settingsMenuRef, settingsMenuOpen, () => {
@@ -503,14 +526,7 @@ export function SidebarNav({
                                       role="menuitem"
                                       color="danger"
                                       className="danger"
-                                      onClick={() => {
-                                        setSessionMenuId(null)
-                                        setPendingDeleteSession({
-                                          agentRef: session.agentRef,
-                                          chatId: session.id,
-                                          title: session.title,
-                                        })
-                                      }}
+                                      onClick={() => void requestDeleteSession(session)}
                                     >
                                       Delete
                                     </MenuItem>
@@ -749,7 +765,11 @@ export function SidebarNav({
           tone="danger"
           onCancel={() => setPendingDeleteSession(null)}
           onConfirm={() => {
-            void onDeleteChatForAgent(pendingDeleteSession.agentRef, pendingDeleteSession.chatId)
+            void onDeleteChatForAgent(
+              pendingDeleteSession.agentRef,
+              pendingDeleteSession.chatId,
+              pendingDeleteSession.deletion
+            )
             setPendingDeleteSession(null)
           }}
         />

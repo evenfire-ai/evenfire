@@ -174,6 +174,42 @@ describe('StatelessLifecycleTracker — D8 idle rule', () => {
     })
   })
 
+  it('does not drain or suspend a stateless Host while channel authority is unavailable', async () => {
+    const port = makePort()
+    port.getEffectiveLifecycle.mockReturnValue({
+      stateless: true,
+      state: 'active',
+      suspensionBlocked: true,
+    })
+    const tracker = makeTracker({ port })
+    for (let cycle = 0; cycle < 2; cycle++) {
+      expect(await tracker.handleHeartbeat(payload({ lastActivityTs: NOW - 10 * HOUR }))).toEqual({
+        drain: false,
+      })
+    }
+    expect(port.suspendHostFromHeartbeat).not.toHaveBeenCalled()
+  })
+
+  it('reverts a durable draining Host through a fresh read when a cached Host is stale', async () => {
+    const port = makePort()
+    const cachedHost = makeHost({ lifecycle: { state: 'active', wakeHandledGeneration: 3 } })
+    port.getEffectiveLifecycle.mockReturnValue({
+      stateless: true,
+      state: 'active',
+      suspensionBlocked: true,
+    })
+    port.readFreshHost.mockResolvedValue(
+      makeHost({ lifecycle: { state: 'draining', wakeHandledGeneration: 3 } })
+    )
+    const tracker = makeTracker({ port, host: cachedHost })
+
+    await expect(tracker.handleHeartbeat(payload({ state: 'draining' }))).resolves.toEqual({
+      drain: false,
+    })
+    expect(port.markHostActiveFromHeartbeat).toHaveBeenCalledWith(cachedHost)
+    expect(port.suspendHostFromHeartbeat).not.toHaveBeenCalled()
+  })
+
   it('answers drain:false for an unknown host', async () => {
     const port = makePort()
     const tracker = new StatelessLifecycleTracker({

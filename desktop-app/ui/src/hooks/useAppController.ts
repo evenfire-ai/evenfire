@@ -306,11 +306,82 @@ export function useAppController() {
     (agentName: string) => agentsData.agentDisplayByName[agentName] ?? agentName,
     [agentsData.agentDisplayByName]
   )
+  const authorityScope = `${auth.runtimeConfigState?.envKey ?? ''}:${auth.isAuthenticated}:${authenticatedPrincipalIdentity ?? ''}:${currentTeamId}`
+  const authorityScopeRef = useRef(authorityScope)
+  authorityScopeRef.current = authorityScope
+  const hostAuthorityEpochRef = useRef(0)
+  const hostAuthorityEpochByAgentRef = useRef(new Map<string, number>())
+  const navigationIntentEpochRef = useRef(0)
+  const blockedHostsRef = useRef(
+    new Map<string, { kind: 'revoked' | 'uncertain'; epoch: number }>()
+  )
+  const [hostAuthorityRevision, setHostAuthorityRevision] = useState(0)
+  const selectedAgentRef = useRef(nav.selectedAgent)
+  selectedAgentRef.current = nav.selectedAgent
+  const isHostAccessBlocked = useCallback(
+    (agentRef: string) => blockedHostsRef.current.has(agentRef),
+    []
+  )
+  const getHostAuthorityEpoch = useCallback(
+    (agentRef: string) =>
+      hostAuthorityEpochByAgentRef.current.get(agentRef) ?? hostAuthorityEpochRef.current,
+    []
+  )
+  useEffect(() => {
+    blockedHostsRef.current.clear()
+    hostAuthorityEpochRef.current += 1
+    hostAuthorityEpochByAgentRef.current.clear()
+    setHostAuthorityRevision(revision => revision + 1)
+  }, [authorityScope])
+  const blockHostAccess = useCallback(
+    (agentRef: string, kind: 'revoked' | 'uncertain') => {
+      const existing = blockedHostsRef.current.get(agentRef)
+      if (existing?.kind === 'revoked' && kind === 'uncertain') return
+      blockedHostsRef.current.set(agentRef, {
+        kind,
+        epoch: ++hostAuthorityEpochRef.current,
+      })
+      hostAuthorityEpochByAgentRef.current.set(agentRef, hostAuthorityEpochRef.current)
+      setHostAuthorityRevision(revision => revision + 1)
+      if (selectedAgentRef.current === agentRef) nav.setSelectedAgent(null)
+      void agentsData.refresh()
+    },
+    [agentsData.refresh, nav.setSelectedAgent]
+  )
+  const onHostAccessRevoked = useCallback(
+    (agentRef: string) => blockHostAccess(agentRef, 'revoked'),
+    [blockHostAccess]
+  )
+  const onHostAuthorityUncertain = useCallback(
+    (agentRef: string) => blockHostAccess(agentRef, 'uncertain'),
+    [blockHostAccess]
+  )
+  const verifyHostAccess = useCallback(async (agentRef: string): Promise<boolean> => {
+    const blocked = blockedHostsRef.current.get(agentRef)
+    if (!blocked) return true
+    const scope = authorityScopeRef.current
+    const epoch = blocked.epoch
+    try {
+      await window.clerum.rpc.listSessions(agentRef, undefined, { agent: agentRef, limit: 1 })
+    } catch {
+      return false
+    }
+    if (
+      authorityScopeRef.current !== scope ||
+      blockedHostsRef.current.get(agentRef)?.epoch !== epoch
+    )
+      return false
+    blockedHostsRef.current.delete(agentRef)
+    hostAuthorityEpochByAgentRef.current.set(agentRef, ++hostAuthorityEpochRef.current)
+    setHostAuthorityRevision(revision => revision + 1)
+    return true
+  }, [])
   const chat = useAgentChatController({
     selectedAgent: nav.selectedAgent,
     agentNames: agentsData.agentNames,
     currentUserId: auth.me?.id,
     currentTeamId,
+    currentEnvironmentKey: auth.runtimeConfigState?.envKey ?? '',
     currentTeamName,
     isAuthenticated: auth.isAuthenticated,
     loadMenuData: postPaintDataReady,
@@ -322,6 +393,10 @@ export function useAppController() {
     showDesktopNotification: notificationSettings.showDesktopNotification,
     openAgentConversationFromNotification,
     decideApprovalFromNotification,
+    onHostAccessRevoked,
+    onHostAuthorityUncertain,
+    isHostAccessBlocked,
+    getHostAuthorityEpoch,
   })
 
   // §4.7.4: the ONE central approval-decision function, bound to the chat
@@ -597,7 +672,10 @@ export function useAppController() {
   useEffect(() => {
     if (!auth.isAuthenticated) return
     if (agentsData.accessCatalog && nav.selectedAgent) {
-      if (!agentsData.agentNames.includes(nav.selectedAgent)) {
+      if (
+        !agentsData.agentNames.includes(nav.selectedAgent) ||
+        isHostAccessBlocked(nav.selectedAgent)
+      ) {
         nav.setSelectedAgent(null)
       }
     }
@@ -607,6 +685,7 @@ export function useAppController() {
     auth.isAuthenticated,
     nav.selectedAgent,
     nav.setSelectedAgent,
+    isHostAccessBlocked,
   ])
 
   const switchTeamForWorkspace = useCallback(
@@ -859,7 +938,7 @@ export function useAppController() {
   ])
 
   // ─── Cross-domain: handleOpenAgentWorkspace ───
-  const handleOpenAgentWorkspace = useCallback(
+  const openAgentWorkspace = useCallback(
     (agentName: string, route: AgentWorkspaceRoute = AGENT_WORKSPACE_ROUTES.connectors) => {
       if (!agentName) return
       chat.setPendingChatSelection(agentName, null)
@@ -878,9 +957,30 @@ export function useAppController() {
       nav.setSelectedAgentRoute,
     ]
   )
+  const handleOpenAgentWorkspace = useCallback(
+    (agentName: string, route: AgentWorkspaceRoute = AGENT_WORKSPACE_ROUTES.connectors) => {
+      if (!agentName) return
+      const navigationIntentEpoch = ++navigationIntentEpochRef.current
+      if (!isHostAccessBlocked(agentName)) {
+        openAgentWorkspace(agentName, route)
+        return
+      }
+      const scope = authorityScopeRef.current
+      void verifyHostAccess(agentName).then(verified => {
+        if (
+          verified &&
+          authorityScopeRef.current === scope &&
+          navigationIntentEpochRef.current === navigationIntentEpoch
+        ) {
+          openAgentWorkspace(agentName, route)
+        }
+      })
+    },
+    [isHostAccessBlocked, openAgentWorkspace, verifyHostAccess]
+  )
 
   // ─── Cross-domain: handleSelectChatAgent (Chat page agent picker) ───
-  const handleSelectChatAgent = useCallback(
+  const selectChatAgent = useCallback(
     (
       agentName: string,
       options: {
@@ -981,6 +1081,27 @@ export function useAppController() {
       nav.setSelectedAgentRoute,
     ]
   )
+  const handleSelectChatAgent = useCallback(
+    (agentName: string, options: Parameters<typeof selectChatAgent>[1] = {}) => {
+      if (!agentName) return
+      const navigationIntentEpoch = ++navigationIntentEpochRef.current
+      if (!isHostAccessBlocked(agentName)) {
+        selectChatAgent(agentName, options)
+        return
+      }
+      const scope = authorityScopeRef.current
+      void verifyHostAccess(agentName).then(verified => {
+        if (
+          verified &&
+          authorityScopeRef.current === scope &&
+          navigationIntentEpochRef.current === navigationIntentEpoch
+        ) {
+          selectChatAgent(agentName, options)
+        }
+      })
+    },
+    [isHostAccessBlocked, selectChatAgent, verifyHostAccess]
+  )
 
   // ─── Cross-domain: handleNavSelect (extended) ───
   const handleNavSelect = useCallback(
@@ -1037,6 +1158,7 @@ export function useAppController() {
         if (requiresTeamSwitch) {
           await ensureTeamContext({ teamId: targetTeamId })
         }
+        if (isHostAccessBlocked(targetAgent) && !(await verifyHostAccess(targetAgent))) return
 
         if (stayInDrawer) {
           // handleSelectChatAgent(keepNavItem) sets the active chat without
@@ -1090,6 +1212,8 @@ export function useAppController() {
       ensureTeamContext,
       fullSetStatus,
       handleSelectChatAgent,
+      isHostAccessBlocked,
+      verifyHostAccess,
       nav.activateChatTab,
       nav.navItem,
       nav.selectedAgent,
@@ -1336,6 +1460,8 @@ export function useAppController() {
     // Navigation
     navItem: nav.navItem,
     selectedAgent: nav.selectedAgent,
+    isHostAccessBlocked,
+    hostAuthorityRevision,
     selectedAgentRoute: nav.selectedAgentRoute,
     setSelectedAgent: nav.setSelectedAgent,
     handleNavSelect,
@@ -1419,6 +1545,7 @@ export function useAppController() {
     handleCreateChat: chat.handleCreateChat,
     handleRenameChat: chat.handleRenameChat,
     handleRenameChatForAgent: chat.handleRenameChatForAgent,
+    captureChatDeleteFence: chat.captureChatDeleteFence,
     handleDeleteChat: chat.handleDeleteChat,
     handleDeleteChatForAgent: chat.handleDeleteChatForAgent,
     handleSelectChat: chat.handleSelectChat,

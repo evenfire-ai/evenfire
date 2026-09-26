@@ -318,6 +318,15 @@ export function App() {
   // The universal tab store lives in the controller (single writer; `vm.navItem`
   // is its projection). App composes the strip/reveal/reconcile over it.
   const workspaceTabs = vm.workspaceTabs
+  const visibleWorkspaceTabs = React.useMemo(
+    () =>
+      workspaceTabs.tabs.map(tab =>
+        tab.kind === 'chat' && tab.chat?.agentRef && vm.isHostAccessBlocked(tab.chat.agentRef)
+          ? { ...tab, title: 'Conversation unavailable' }
+          : tab
+      ),
+    [workspaceTabs.tabs, vm.hostAuthorityRevision, vm.isHostAccessBlocked]
+  )
   const setWorkspaceTabs = vm.setWorkspaceTabs
   const nextChatTabId = vm.nextWorkspaceTabId
   const workspaceTabsRef = React.useRef(workspaceTabs)
@@ -2204,8 +2213,12 @@ export function App() {
 
   const notifValue = React.useMemo(
     () => ({
-      notifications: vm.notifications,
-      unreadNotificationCount: vm.unreadNotificationCount,
+      notifications: vm.notifications.filter(
+        notification => !vm.isHostAccessBlocked(notification.agentName)
+      ),
+      unreadNotificationCount: vm.notifications.filter(
+        notification => !vm.isHostAccessBlocked(notification.agentName) && !notification.read
+      ).length,
       notificationActionById: vm.notificationActionById,
       pendingApprovals: vm.pendingApprovals,
       pendingApprovalsLoading: vm.pendingApprovalsLoading,
@@ -2233,13 +2246,13 @@ export function App() {
       vm.markNotificationsRead,
       vm.notificationActionById,
       vm.notifications,
+      vm.isHostAccessBlocked,
       vm.pendingApprovalActionId,
       vm.pendingApprovals,
       vm.pendingApprovalsLoading,
       vm.removeNotification,
       vm.resolveApprovalNotification,
       vm.toasts,
-      vm.unreadNotificationCount,
     ]
   )
 
@@ -2437,8 +2450,8 @@ export function App() {
   // Its "current" chat is the controller's (selectedAgent, activeChatId) — NOT
   // the store's active tab, which is the app tab while the drawer is open.
   const chatWorkspaceTabs = React.useMemo(
-    () => workspaceTabs.tabs.filter((tab): tab is WorkspaceTab => tab.kind === 'chat'),
-    [workspaceTabs.tabs]
+    () => visibleWorkspaceTabs.filter((tab): tab is WorkspaceTab => tab.kind === 'chat'),
+    [visibleWorkspaceTabs]
   )
   const drawerActiveChatTabId =
     chatWorkspaceTabs.find(
@@ -2540,7 +2553,7 @@ export function App() {
                                     tab. Hidden only when the workspace is empty. */}
                                 {workspaceTabs.tabs.length > 0 && (
                                   <WorkspaceTabStrip
-                                    tabs={workspaceTabs.tabs}
+                                    tabs={visibleWorkspaceTabs}
                                     activeTabId={
                                       vm.appsPickerActive ? null : workspaceTabs.activeTabId
                                     }

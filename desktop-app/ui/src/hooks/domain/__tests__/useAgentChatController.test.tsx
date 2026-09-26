@@ -431,6 +431,50 @@ describe('useAgentChatController — characterization (D.0)', () => {
       expect(appended?.[0]?.errorCode).toBe('provider_error')
     })
 
+    it('does not toast or repaint a terminal error after its append crosses a team switch', async () => {
+      const pendingAppend = deferred<void>()
+      clerum.rpc.invokeHostMessage.mockResolvedValue({ taskId: 'task-old-team' })
+      clerum.chat.appendMessages.mockImplementation(
+        async (_agentRef: string, _chatId: string, messages: Array<{ role?: string }>) => {
+          if (messages[0]?.role === 'assistant') await pendingAppend.promise
+        }
+      )
+      const controller = renderController({ currentTeamId: 'team-before' })
+      await settleMount()
+      await act(async () => {
+        await controller.result.current.handleSendAgentMessage('question')
+      })
+      await waitFor(() => expect(clerum.hasProgressHandler('task-old-team')).toBe(true))
+
+      clerum.emitTaskProgress('task-old-team', {
+        type: 'terminal',
+        data: {
+          taskId: 'task-old-team',
+          status: 'failed',
+          error: { message: 'protected old-team failure', code: 'provider_error' },
+        },
+      })
+      await waitFor(() =>
+        expect(
+          clerum.chat.appendMessages.mock.calls.some(
+            call => (call[2] as Array<{ role?: string }>)[0]?.role === 'assistant'
+          )
+        ).toBe(true)
+      )
+      controller.rerender({ currentTeamId: 'team-after' })
+      const toastCount = controller.spies.pushToast.mock.calls.length
+      const notificationCount = controller.spies.pushNotification.mock.calls.length
+      const progressAfterSwitch = controller.result.current.progressByMessageId
+
+      await act(async () => {
+        pendingAppend.resolve()
+        await pendingAppend.promise
+      })
+      expect(controller.spies.pushToast.mock.calls.length).toBe(toastCount)
+      expect(controller.spies.pushNotification.mock.calls.length).toBe(notificationCount)
+      expect(controller.result.current.progressByMessageId).toEqual(progressAfterSwitch)
+    })
+
     it('4.6 marks the task cancelled without fetching a result', async () => {
       clerum.rpc.invokeHostMessage.mockResolvedValue({ taskId: 'task-abc' })
       const { result } = renderController()

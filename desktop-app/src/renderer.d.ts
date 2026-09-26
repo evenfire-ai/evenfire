@@ -8,6 +8,9 @@ import {
   AccessCatalog,
   AgentWithMcpServers,
   ApprovalDecisionResult,
+  ChatAuthorityScope,
+  ChatDeleteFence,
+  ChatDeleteResult,
   ChatIndex,
   ChatMessage,
   ChatMetadata,
@@ -695,8 +698,19 @@ declare global {
       chat: {
         list: (agentRef: string) => Promise<ChatMetadata[]>
         create: (agentRef: string, chatId: string) => Promise<ChatMetadata>
-        rename: (agentRef: string, chatId: string, title: string) => Promise<void>
-        delete: (agentRef: string, chatId: string) => Promise<void>
+        rename: (
+          agentRef: string,
+          chatId: string,
+          title: string,
+          bindingGeneration: number
+        ) => Promise<void>
+        getBindingGeneration: () => Promise<number>
+        captureDeleteFence: (expectedAuthorityScope: ChatAuthorityScope) => Promise<ChatDeleteFence>
+        delete: (
+          agentRef: string,
+          chatId: string,
+          fence: ChatDeleteFence
+        ) => Promise<ChatDeleteResult>
         loadMessages: (
           agentRef: string,
           chatId: string,
@@ -704,6 +718,7 @@ declare global {
           offset?: number
         ) => Promise<ChatMessage[]>
         appendMessages: (agentRef: string, chatId: string, messages: ChatMessage[]) => Promise<void>
+        upsertMessages: (agentRef: string, chatId: string, messages: ChatMessage[]) => Promise<void>
         replaceMessages: (
           agentRef: string,
           chatId: string,

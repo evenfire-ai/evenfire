@@ -30,9 +30,107 @@ const allowedPath = '/api/v1/namespaces/mcp-server/services/runtime-witness'
 const mcpPath = '/apis/clerum.io/v1alpha1/namespaces/mcp-server/mcpservers?watch=true'
 const contextPath = '/apis/clerum.io/v1alpha1/namespaces/mcp-server/contexts?watch=true'
 const otherPath = '/api/v1/namespaces/mcp-server/pods?watch=true'
+const channelPath = '/apis/clerum.io/v1alpha1/namespaces/channels/communicationchannels'
 let front
 let upstreamTls
 let publicConfig
+
+test('channel hold accepts only a bounded duration', () => {
+  assert.throws(() => validateCommand({ id: 'hold', action: 'hold-channel', durationMs: 0 }, []))
+  assert.throws(() => validateCommand({ id: 'hold', action: 'hold-channel', durationMs: 60001 }, []))
+  assert.deepEqual(validateCommand({ id: 'hold', action: 'hold-channel', durationMs: 60000 }, []),
+    { id: 'hold', action: 'hold-channel', durationMs: 60000 })
+})
+
+test('channel hold cuts only its watch and keeps Host API requests available', { timeout: 10000 }, async () => {
+  const controlDir = mkdtempSync(join(tmpdir(), 'hcc-channel-hold-'))
+  const seen = []
+  const upstream = https.createServer(upstreamTls, (request, response) => {
+    seen.push(request.url)
+    if (request.url.includes('watch=true')) {
+      response.writeHead(200)
+      response.flushHeaders()
+    } else {
+      response.writeHead(200, { 'content-type': 'application/json' })
+      response.end('{}')
+    }
+  })
+  let proxy
+  let watchRequest
+  const get = path => new Promise((resolveResponse, rejectResponse) => {
+    https.get({ hostname: '127.0.0.1', port: proxy.server.address().port, path,
+      servername: 'proxy-fixture.test-fixture.svc', ca: front.cert }, response => {
+      response.resume()
+      response.once('end', () => resolveResponse(response.statusCode))
+    }).once('error', rejectResponse)
+  })
+  const ack = async (id, state) => {
+    for (let attempt = 0; attempt < 50; attempt++) {
+      if (existsSync(join(controlDir, 'ack.json'))) {
+        const value = JSON.parse(readFileSync(join(controlDir, 'ack.json'), 'utf8'))
+        if (value.id === id && value.state === state) return value
+      }
+      await new Promise(resolveWait => setTimeout(resolveWait, 20))
+    }
+    throw new Error(`missing ${state} acknowledgement`)
+  }
+  try {
+    await new Promise(resolveListen => upstream.listen(0, '127.0.0.1', resolveListen))
+    proxy = createProxy({ ...front, upstreamCa: upstreamTls.cert,
+      upstreamHost: '127.0.0.1', upstreamPort: upstream.address().port,
+      allowedPaths: [], controlDir, periodMs: 60000, minAgeMs: 60000, channelPath })
+    await new Promise(resolveListen => proxy.server.listen(0, '127.0.0.1', resolveListen))
+    await new Promise((resolveHeaders, rejectHeaders) => {
+      watchRequest = https.get({ hostname: '127.0.0.1', port: proxy.server.address().port,
+        path: `${channelPath}?watch=true`, servername: 'proxy-fixture.test-fixture.svc',
+        ca: front.cert }, resolveHeaders)
+      watchRequest.once('error', rejectHeaders)
+    })
+    writeFileSync(join(controlDir, 'command.json'), JSON.stringify({
+      id: 'hold-1', action: 'hold-channel', durationMs: 5000,
+    }))
+    const held = await ack('hold-1', 'held')
+    assert.equal(held.count, 1, 'live CommunicationChannel watch was cut')
+    const initialHold = JSON.parse(readFileSync(join(controlDir, 'channel-hold.json'), 'utf8'))
+    assert.equal(await get(channelPath), 503, 'channel LIST remains unavailable')
+    assert.equal(await get('/apis/clerum.io/v1alpha1/namespaces/mcp-host/hosts/test'), 200)
+    assert.equal(await get('/api/v1/namespaces/mcp-host/pods'), 200)
+    assert.equal(seen.filter(path => path.startsWith(channelPath)).length, 1,
+      'blocked channel retries never reached upstream')
+    writeFileSync(join(controlDir, 'command.json'), JSON.stringify({
+      id: 'hold-2', action: 'hold-channel', durationMs: 5000,
+    }))
+    const renewed = await ack('hold-2', 'held')
+    assert.equal(renewed.count, 1, 'renewal retains the original watch-cut witness')
+    assert.equal(renewed.renewed, true)
+    assert.equal(renewed.renewals, 1)
+    assert.ok(renewed.deadlineAtMs > initialHold.deadlineAtMs,
+      'renewal extends the live hold deadline without a timing sleep')
+    const renewedHold = JSON.parse(readFileSync(join(controlDir, 'channel-hold.json'), 'utf8'))
+    assert.deepEqual(renewedHold, {
+      id: 'hold-2',
+      state: 'held',
+      cut: 1,
+      rejected: 1,
+      renewals: 1,
+      deadlineAtMs: renewed.deadlineAtMs,
+    })
+    assert.equal(await get(channelPath), 503, 'channel LIST remains unavailable after renewal')
+    assert.equal(seen.filter(path => path.startsWith(channelPath)).length, 1,
+      'renewed channel hold still blocks upstream channel requests')
+    writeFileSync(join(controlDir, 'command.json'), JSON.stringify({
+      id: 'release-1', action: 'release-channel',
+    }))
+    await ack('release-1', 'released')
+    assert.equal(await get(channelPath), 200, 'authoritative LIST works after release')
+  } finally {
+    watchRequest?.destroy()
+    proxy?.close()
+    upstream.closeAllConnections()
+    await new Promise(resolveClose => upstream.close(resolveClose))
+    rmSync(controlDir, { recursive: true, force: true })
+  }
+})
 
 test(
   'quiet upstream WATCH headers reach the client before its first body event',

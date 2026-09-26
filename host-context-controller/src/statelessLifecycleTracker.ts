@@ -438,6 +438,11 @@ export class StatelessLifecycleTracker implements HeartbeatLifecycleTracker {
       this.clearDrainGrace(hostRef)
       return { drain: false }
     }
+    if (effective.suspensionBlocked) {
+      this.clearDrainGrace(hostRef)
+      await this.cancelDrainOnEvidence(hostRef, host, true)
+      return { drain: false }
+    }
     this.noteWakeHandledGeneration(hostRef, host)
 
     let wakePending =
@@ -610,9 +615,18 @@ export class StatelessLifecycleTracker implements HeartbeatLifecycleTracker {
    * a suspended Host is exclusively the wake fast-path's job). Loud, not
    * fatal on failure — the emitter keeps beating while fenced, so the
    * revert retries on the next polled heartbeat.
+   *
+   * When CommunicationChannel authority is unknown, the cached Host may still
+   * say `active` while the durable CR already says `draining`. The caller then
+   * bypasses the cache precheck so this fresh-read writer can safely revert the
+   * durable `draining` state (and no-op for active/suspended).
    */
-  private async cancelDrainOnEvidence(hostRef: string, host: HostCRD): Promise<void> {
-    if ((host.status?.lifecycle?.state ?? 'active') !== 'draining') {
+  private async cancelDrainOnEvidence(
+    hostRef: string,
+    host: HostCRD,
+    bypassCachedState = false
+  ): Promise<void> {
+    if (!bypassCachedState && (host.status?.lifecycle?.state ?? 'active') !== 'draining') {
       return
     }
     try {
@@ -793,7 +807,8 @@ export class StatelessLifecycleTracker implements HeartbeatLifecycleTracker {
       )
       return
     }
-    if (!this.reconciler.getEffectiveLifecycle(host).stateless) {
+    const effective = this.reconciler.getEffectiveLifecycle(host)
+    if (!effective.stateless || effective.suspensionBlocked) {
       return
     }
     // KZ-R1: the informer-cached Host can be STALE here exactly as it is on the

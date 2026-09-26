@@ -8,10 +8,17 @@ import type { ChatMessage } from '../types.js'
 
 let tempDir: string
 let store: ChatStore
+const TEAM_A_SCOPE = {
+  environmentKey: 'env-a',
+  userId: 'user-a',
+  teamId: 'team-a',
+} as const
+const TEAM_B_SCOPE = { ...TEAM_A_SCOPE, teamId: 'team-b' } as const
 
 beforeEach(async () => {
   tempDir = await fs.mkdtemp(join(tmpdir(), 'chatstore-test-'))
   store = new ChatStore(tempDir)
+  store.setAuthorityScope(TEAM_A_SCOPE)
 })
 
 afterEach(async () => {
@@ -178,12 +185,63 @@ describe('renameChat', () => {
 // ── deleteChat ───────────────────────────────────────────────────────────────
 
 describe('deleteChat', () => {
+  it('persists a confirmed deletion across a new store instance', async () => {
+    await store.createChat('agent-1', 'deleted-session')
+    await store.createChat('agent-1', 'kept-session')
+    await store.deleteChat('agent-1', 'deleted-session', TEAM_A_SCOPE)
+
+    const restartedStore = new ChatStore(tempDir)
+    expect((await restartedStore.listChats('agent-1')).map(chat => chat.id)).toEqual([
+      'kept-session',
+    ])
+    expect((await restartedStore.getIndex('agent-1')).deletedChatTombstones).toContainEqual({
+      chatId: 'deleted-session',
+      authorityScope: TEAM_A_SCOPE,
+    })
+  })
+
+  it('does not recreate a deleted transcript from queued or restarted writes', async () => {
+    const agentRef = 'agent-1'
+    const chatId = 'deleted-while-sending'
+    const message: ChatMessage = {
+      id: 'late-message',
+      role: 'user',
+      content: 'arrived after delete',
+      timestamp: 1,
+    }
+    await store.createChat(agentRef, chatId)
+    await store.saveMessages(agentRef, chatId, [
+      { id: 'original', role: 'user', content: 'original', timestamp: 0 },
+    ])
+
+    // Invocation order is the per-chat serialization order: both writes must
+    // observe the tombstone published by the preceding confirmed delete.
+    const deletion = store.deleteChat(agentRef, chatId, TEAM_A_SCOPE)
+    const queuedAppend = store.appendMessages(agentRef, chatId, [message])
+    const queuedReplace = store.replaceMessages(agentRef, chatId, [message])
+    await Promise.all([deletion, queuedAppend, queuedReplace])
+
+    const restartedStore = new ChatStore(tempDir)
+    await restartedStore.appendMessages(agentRef, chatId, [message])
+    await restartedStore.replaceMessages(agentRef, chatId, [message])
+    await expect(restartedStore.createChat(agentRef, chatId)).rejects.toThrow(
+      'Chat was deleted locally'
+    )
+    expect(await restartedStore.loadMessages(agentRef, chatId)).toEqual([])
+    expect(await restartedStore.listChats(agentRef)).toEqual([])
+    expect((await restartedStore.getIndex(agentRef)).deletedChatTombstones).toContainEqual({
+      chatId,
+      authorityScope: TEAM_A_SCOPE,
+    })
+    await expect(fs.access(chatCacheDir(chatId))).rejects.toThrow()
+  })
+
   it('removes from index and deletes message cache', async () => {
     await store.createChat('agent-1', 'del-1')
     await store.saveMessages('agent-1', 'del-1', [
       { id: 'm1', role: 'user', content: 'hello', timestamp: Date.now() },
     ])
-    await store.deleteChat('agent-1', 'del-1')
+    await store.deleteChat('agent-1', 'del-1', TEAM_A_SCOPE)
     const chats = await store.listChats('agent-1')
     expect(chats).toHaveLength(0)
 
@@ -194,9 +252,78 @@ describe('deleteChat', () => {
   it('clears lastActiveChatId when deleting active chat', async () => {
     await store.createChat('agent-1', 'active-1')
     await store.setLastActiveChatId('agent-1', 'active-1')
-    await store.deleteChat('agent-1', 'active-1')
+    await store.deleteChat('agent-1', 'active-1', TEAM_A_SCOPE)
     const lastActive = await store.getLastActiveChatId('agent-1')
     expect(lastActive).toBeNull()
+  })
+
+  it('keeps new tombstones scoped to the full authority identity', async () => {
+    await store.createChat('agent-1', 'team-owned-chat')
+    await store.deleteChat('agent-1', 'team-owned-chat', TEAM_A_SCOPE)
+
+    const teamBStore = new ChatStore(tempDir)
+    teamBStore.setAuthorityScope(TEAM_B_SCOPE)
+    await expect(teamBStore.createChat('agent-1', 'team-owned-chat')).resolves.toMatchObject({
+      id: 'team-owned-chat',
+    })
+    await expect(store.createChat('agent-1', 'team-owned-chat')).rejects.toThrow(
+      'Chat was deleted locally'
+    )
+  })
+
+  it('retains legacy tombstone reads without carrying them into a new team', async () => {
+    await fs.mkdir(agentPath(), { recursive: true })
+    await fs.writeFile(
+      agentPath('index.json'),
+      JSON.stringify({
+        version: 2,
+        lastActiveChatId: null,
+        onboardingDismissed: false,
+        chats: [],
+        deletedChatIds: ['legacy-chat', 'legacy-unscoped-only'],
+      })
+    )
+    const teamBStore = new ChatStore(tempDir)
+    teamBStore.setAuthorityScope(TEAM_B_SCOPE)
+    expect((await teamBStore.getIndex('agent-1')).deletedChatIds).toContain('legacy-chat')
+    await expect(teamBStore.createChat('agent-1', 'legacy-chat')).resolves.toMatchObject({
+      id: 'legacy-chat',
+    })
+
+    const unscopedStore = new ChatStore(tempDir)
+    unscopedStore.setAuthorityScope({ ...TEAM_A_SCOPE, teamId: null })
+    await expect(unscopedStore.createChat('agent-1', 'legacy-unscoped-only')).rejects.toThrow(
+      'Chat was deleted locally'
+    )
+  })
+
+  it('keeps cleanup queued after a failure and retries it only in the owning scope', async () => {
+    await store.createChat('agent-1', 'retry-cleanup')
+    await store.saveMessages('agent-1', 'retry-cleanup', [
+      { id: 'message', role: 'user', content: 'private', timestamp: 1 },
+    ])
+    const cleanupReadError = Object.assign(new Error('permission denied'), { code: 'EACCES' })
+    vi.spyOn(fs, 'readdir').mockRejectedValueOnce(cleanupReadError)
+
+    await expect(store.deleteChat('agent-1', 'retry-cleanup', TEAM_A_SCOPE)).resolves.toEqual({
+      cleanupPending: true,
+    })
+    expect((await store.getIndex('agent-1')).pendingChatCleanup).toContainEqual({
+      chatId: 'retry-cleanup',
+      authorityScope: TEAM_A_SCOPE,
+    })
+    await expect(fs.access(chatCacheDir('retry-cleanup'))).resolves.toBeUndefined()
+
+    store.setAuthorityScope(TEAM_B_SCOPE)
+    await expect(store.retryPendingDeleteCleanups(TEAM_A_SCOPE)).rejects.toThrow(
+      'Chat deletion authority scope changed'
+    )
+    await expect(fs.access(chatCacheDir('retry-cleanup'))).resolves.toBeUndefined()
+
+    store.setAuthorityScope(TEAM_A_SCOPE)
+    await store.retryPendingDeleteCleanups(TEAM_A_SCOPE)
+    expect((await store.getIndex('agent-1')).pendingChatCleanup).toEqual([])
+    await expect(fs.access(chatCacheDir('retry-cleanup'))).rejects.toThrow()
   })
 })
 
@@ -213,6 +340,19 @@ describe('messages', () => {
     expect(messages).toHaveLength(2)
     expect(messages[0]!.content).toBe('hi')
     expect(messages[1]!.content).toBe('hello')
+  })
+
+  it('upserts an optimistic outgoing message and later updates it by the same id', async () => {
+    await store.createChat('agent-1', 'upsert-send')
+    const optimistic = { id: 'outgoing-1', role: 'user' as const, content: 'hello', timestamp: 1 }
+    await store.upsertMessages('agent-1', 'upsert-send', [optimistic])
+    await store.upsertMessages('agent-1', 'upsert-send', [
+      { ...optimistic, task_id: 'task-1', timestamp: 2 },
+    ])
+
+    await expect(store.loadMessages('agent-1', 'upsert-send')).resolves.toEqual([
+      expect.objectContaining({ id: 'outgoing-1', task_id: 'task-1' }),
+    ])
   })
 
   it('pagination with limit and offset', async () => {
@@ -243,6 +383,7 @@ describe('messages', () => {
       pageSize: 3,
       maxLocalSyncedMessages: Number.POSITIVE_INFINITY,
     })
+    pagedStore.setAuthorityScope(TEAM_A_SCOPE)
     await pagedStore.createChat('agent-1', 'paged-1')
     const msgs = Array.from({ length: 10 }, (_, i) => ({
       id: `m${i}`,
@@ -273,6 +414,7 @@ describe('messages', () => {
       pageSize: 2,
       maxLocalSyncedMessages: Number.POSITIVE_INFINITY,
     })
+    pagedStore.setAuthorityScope(TEAM_A_SCOPE)
     await pagedStore.createChat('agent-1', 'append-pages')
     await pagedStore.saveMessages('agent-1', 'append-pages', [
       { id: 'm0', role: 'user', content: 'msg-0', timestamp: 0 },
@@ -663,6 +805,7 @@ describe('messages', () => {
       pageSize: 2,
       maxLocalSyncedMessages: Number.POSITIVE_INFINITY,
     })
+    pagedStore.setAuthorityScope(TEAM_A_SCOPE)
     await pagedStore.createChat('agent-1', 'delete-siblings')
     await pagedStore.saveMessages('agent-1', 'delete-siblings', [
       { id: 'm0', role: 'user', content: 'msg-0', timestamp: 0 },
@@ -673,7 +816,7 @@ describe('messages', () => {
       [{ id: 'backup-0', role: 'user', content: 'backup-0', timestamp: 1 }]
     )
 
-    await pagedStore.deleteChat('agent-1', 'delete-siblings')
+    await pagedStore.deleteChat('agent-1', 'delete-siblings', TEAM_A_SCOPE)
 
     expect(await pagedStore.loadMessages('agent-1', 'delete-siblings')).toEqual([])
     await expect(
@@ -1665,12 +1808,14 @@ describe('corrupt/missing files', () => {
       lastActiveChatId: null,
       onboardingDismissed: false,
       chats: [],
+      deletedChatIds: [],
     })
     await expect(store.getIndex('agent-1')).resolves.toEqual({
       version: 2,
       lastActiveChatId: null,
       onboardingDismissed: false,
       chats: [],
+      deletedChatIds: [],
     })
     const quarantinedIndexes = (await fs.readdir(agentPath('.corrupt'))).filter(name =>
       name.startsWith('index-')
@@ -1847,7 +1992,7 @@ describe('corrupt/missing files', () => {
     await fs.writeFile(join(corruptDir, `${encodedChatId}-${legacyUuid}.json`), '{}')
     await fs.writeFile(join(corruptDir, `${otherEncodedChatId}-${legacyUuid}.json`), '{}')
 
-    await store.deleteChat('agent-1', chatId)
+    await store.deleteChat('agent-1', chatId, TEAM_A_SCOPE)
 
     await expect(fs.access(join(corruptDir, encodedChatId))).rejects.toMatchObject({
       code: 'ENOENT',

@@ -331,6 +331,7 @@ describe('#654 visual send and recovery', () => {
     })
     expect(result.current.failedAgentSend).toBeNull()
     expect(result.current.agentError).toBeNull()
-    expect(bridge.chat.appendMessages).not.toHaveBeenCalled()
+    expect(bridge.chat.upsertMessages).toHaveBeenCalledTimes(1)
+    expect(bridge.chat.appendMessages).toHaveBeenCalledTimes(1)
   })
 })

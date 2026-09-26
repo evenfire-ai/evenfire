@@ -1,6 +1,10 @@
 import { classifyTier } from '@hooks/useTaskTier'
 import { buildResponseFileAttachments } from '@lib/chatMessageAttachments'
-import { extractAssistantReply } from '@lib/format'
+import {
+  extractAssistantReply,
+  isAuthorizationError,
+  isConfirmedHostAccessRevoked,
+} from '@lib/format'
 import type { ProgressStep } from '@/uiTypes'
 import type {
   ChatMessageAttachment,
@@ -629,7 +633,21 @@ export class TaskTracker implements AgentTaskTracker {
             const { agentRef } = parseTaskKey(key)
             const result = await window.clerum.rpc.getTaskResult(agentRef, failedTaskId, [agentRef])
             attachments = buildResponseFileAttachments(result)
-          } catch {
+          } catch (error) {
+            if (isAuthorizationError(error)) {
+              if (this.states.get(key)?.taskId !== failedTaskId) return
+              this.mutate(key, s => {
+                s.status = 'failed'
+                s.terminalResult = {
+                  kind: 'error',
+                  source: 'authority',
+                  message: 'Host authorization rejected',
+                  authority: isConfirmedHostAccessRevoked(error) ? 'revoked' : 'uncertain',
+                }
+              })
+              await this.fireTerminal(key)
+              return
+            }
             // Preserve the authoritative terminal error if artifact retrieval fails.
           }
           if (this.states.get(key)?.taskId !== failedTaskId) return
@@ -694,7 +712,7 @@ export class TaskTracker implements AgentTaskTracker {
               ...(attachments.length ? { attachments } : {}),
             }
           })
-        } catch {
+        } catch (error) {
           // Same post-await identity guard on the failure branch — a replacement
           // during the await must not have its state overwritten with this error.
           if (this.states.get(key)?.taskId !== completedTaskId) return
@@ -702,8 +720,17 @@ export class TaskTracker implements AgentTaskTracker {
             s.status = 'failed'
             s.terminalResult = {
               kind: 'error',
-              source: 'result_fetch',
-              message: 'Failed to retrieve task result after completion',
+              source: isAuthorizationError(error) ? 'authority' : 'result_fetch',
+              message: isAuthorizationError(error)
+                ? 'Host authorization rejected'
+                : 'Failed to retrieve task result after completion',
+              ...(isAuthorizationError(error)
+                ? {
+                    authority: isConfirmedHostAccessRevoked(error)
+                      ? ('revoked' as const)
+                      : ('uncertain' as const),
+                  }
+                : {}),
             }
           })
         }

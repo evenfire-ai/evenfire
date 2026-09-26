@@ -152,6 +152,10 @@ export class OpenAICompatibleProvider extends OpenAIProvider {
     return false
   }
 
+  protected override supportsReasoningContent(): boolean {
+    return this.cfg.id === 'zai'
+  }
+
   override completeSingleTurn(
     messages: CoreChatMessage[],
     options?: { max_tokens?: number; temperature?: number; signal?: AbortSignal }

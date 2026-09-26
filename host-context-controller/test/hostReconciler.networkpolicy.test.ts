@@ -215,10 +215,10 @@ describe('HostReconciler.reconcile — NP wiring', () => {
       revision: 'runtime-revision',
       scopeHash: (HostReconciler as any).runtimeTokenScopeHash(HOST, false),
     })
-    vi.spyOn(reconciler as any, 'ensurePvc').mockResolvedValue(undefined)
-    vi.spyOn(reconciler as any, 'ensureService').mockResolvedValue(undefined)
-    vi.spyOn(reconciler as any, 'ensureDeployment').mockResolvedValue(undefined)
-    vi.spyOn(reconciler as any, 'ensureDesktopNetworkPolicy').mockResolvedValue(undefined)
+    vi.spyOn(reconciler as any, 'ensurePvc').mockResolvedValue(true)
+    vi.spyOn(reconciler as any, 'ensureService').mockResolvedValue(true)
+    vi.spyOn(reconciler as any, 'ensureDeployment').mockResolvedValue(true)
+    vi.spyOn(reconciler as any, 'ensureDesktopNetworkPolicy').mockResolvedValue('up_to_date')
     vi.spyOn(reconciler as any, 'reconcileChannelReaderDeployment').mockResolvedValue(undefined)
     vi.spyOn(reconciler as any, 'checkDeploymentReady').mockResolvedValue(true)
   })
@@ -229,8 +229,8 @@ describe('HostReconciler.reconcile — NP wiring', () => {
     // than racing the deny-all default.
     const ingressSpy = vi
       .spyOn(reconciler as any, 'ensureMcpHostIngressNetworkPolicy')
-      .mockResolvedValue(undefined)
-    const deploySpy = vi.spyOn(reconciler as any, 'ensureDeployment').mockResolvedValue(undefined)
+      .mockResolvedValue('up_to_date')
+    const deploySpy = vi.spyOn(reconciler as any, 'ensureDeployment').mockResolvedValue(true)
     const readySpy = vi.spyOn(reconciler as any, 'checkDeploymentReady').mockResolvedValue(true)
 
     await reconciler.reconcile(HOST)
@@ -246,7 +246,7 @@ describe('HostReconciler.reconcile — NP wiring', () => {
   it('calls ensureChannelReaderEgressNetworkPolicy before reconcileChannelReaderDeployment', async () => {
     const egressSpy = vi
       .spyOn(reconciler as any, 'ensureChannelReaderEgressNetworkPolicy')
-      .mockResolvedValue(undefined)
+      .mockResolvedValue('up_to_date')
     const cReaderSpy = vi
       .spyOn(reconciler as any, 'reconcileChannelReaderDeployment')
       .mockResolvedValue(undefined)
@@ -266,7 +266,7 @@ describe('HostReconciler.reconcile — NP wiring', () => {
       new Error('rbac: networkpolicies.networking.k8s.io is forbidden')
     )
     vi.spyOn(reconciler as any, 'ensureChannelReaderEgressNetworkPolicy').mockResolvedValue(
-      undefined
+      'up_to_date'
     )
 
     await reconciler.reconcile(HOST)
@@ -278,11 +278,13 @@ describe('HostReconciler.reconcile — NP wiring', () => {
     expect(status!.deployed).toBe(true)
     expect(status!.ready).toBe(false)
     expect(status!.message).toMatch(/degraded/i)
-    expect(status!.message).toMatch(/mcp-host NP/)
+    expect(status!.message).toMatch(
+      /mcp-host ingress: rbac: networkpolicies\.networking\.k8s\.io is forbidden/
+    )
   })
 
   it('surfaces egress NP apply failure in Host status as degraded', async () => {
-    vi.spyOn(reconciler as any, 'ensureMcpHostIngressNetworkPolicy').mockResolvedValue(undefined)
+    vi.spyOn(reconciler as any, 'ensureMcpHostIngressNetworkPolicy').mockResolvedValue('up_to_date')
     vi.spyOn(reconciler as any, 'ensureChannelReaderEgressNetworkPolicy').mockRejectedValue(
       new Error('cluster connectivity failure')
     )
@@ -296,7 +298,25 @@ describe('HostReconciler.reconcile — NP wiring', () => {
     expect(status!.deployed).toBe(true)
     expect(status!.ready).toBe(false)
     expect(status!.message).toMatch(/degraded/i)
-    expect(status!.message).toMatch(/egress NP/)
+    expect(status!.message).toMatch(/channel-reader egress: cluster connectivity failure/)
+  })
+
+  it('surfaces a NetworkPolicy apply result of missing as degraded', async () => {
+    vi.spyOn(reconciler as any, 'ensureMcpHostIngressNetworkPolicy').mockResolvedValue('missing')
+    vi.spyOn(reconciler as any, 'ensureChannelReaderEgressNetworkPolicy').mockResolvedValue(
+      'up_to_date'
+    )
+
+    await reconciler.reconcile(HOST)
+
+    const status = (reconciler as any).statusMap.get('chatllm') as
+      | { deployed?: boolean; ready?: boolean; message?: string }
+      | undefined
+    expect(status).toMatchObject({
+      deployed: true,
+      ready: false,
+      message: expect.stringContaining('mcp-host ingress: apply did not converge (missing)'),
+    })
   })
 })
 

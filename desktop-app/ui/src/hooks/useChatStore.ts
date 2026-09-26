@@ -1,5 +1,7 @@
 import { useCallback } from 'react'
 import type {
+  ChatAuthorityScope,
+  ChatDeleteFence,
   ChatMessage,
   ReplaceChatMessagesOptions,
   SessionMessagesQuery,
@@ -64,12 +66,19 @@ export function useChatStore() {
     []
   )
   const renameChat = useCallback(
-    (agentRef: string, chatId: string, title: string) =>
-      window.clerum.chat.rename(agentRef, chatId, title),
+    (agentRef: string, chatId: string, title: string, bindingGeneration: number) =>
+      window.clerum.chat.rename(agentRef, chatId, title, bindingGeneration),
+    []
+  )
+  const getBindingGeneration = useCallback(() => window.clerum.chat.getBindingGeneration(), [])
+  const captureDeleteFence = useCallback(
+    (expectedAuthorityScope: ChatAuthorityScope) =>
+      window.clerum.chat.captureDeleteFence(expectedAuthorityScope),
     []
   )
   const deleteChat = useCallback(
-    (agentRef: string, chatId: string) => window.clerum.chat.delete(agentRef, chatId),
+    (agentRef: string, chatId: string, fence: ChatDeleteFence) =>
+      window.clerum.chat.delete(agentRef, chatId, fence),
     []
   )
   const loadMessages = useCallback(
@@ -80,6 +89,11 @@ export function useChatStore() {
   const appendMessages = useCallback(
     (agentRef: string, chatId: string, messages: ChatMessage[]) =>
       window.clerum.chat.appendMessages(agentRef, chatId, messages),
+    []
+  )
+  const upsertMessages = useCallback(
+    (agentRef: string, chatId: string, messages: ChatMessage[]) =>
+      window.clerum.chat.upsertMessages(agentRef, chatId, messages),
     []
   )
   const backfillCounters = useCallback(
@@ -244,9 +258,12 @@ export function useChatStore() {
     listChats,
     createChat,
     renameChat,
+    getBindingGeneration,
+    captureDeleteFence,
     deleteChat,
     loadMessages,
     appendMessages,
+    upsertMessages,
     replaceMessages,
     backfillCounters,
     markUnreadTerminal,

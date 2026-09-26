@@ -755,15 +755,16 @@ export type HostRuntimeHealth = {
  * 409 `not-stateless`). `skipped: 'cooldown'` means a recent attempt for the
  * same hostRef suppressed the HTTP call entirely; `skipped: 'in-flight'`
  * means that attempt's bounded re-emission loop is still running (structural
- * single-loop-per-host guarantee). `error` carries the failure
- * message for any other outcome — the caller treats prewarm as
+ * single-loop-per-host guarantee). `skipped: 'auth-changed'` means the
+ * authenticated owner changed or is changing before a wake can be issued.
+ * `error` carries the failure message for any other outcome — the caller treats prewarm as
  * fire-and-forget, so failures surface here (and in main-process logs), never
  * as a thrown error.
  */
 export type PrewarmHostResult = {
   requested: boolean
   status?: string
-  skipped?: 'cooldown' | 'in-flight'
+  skipped?: 'cooldown' | 'in-flight' | 'auth-changed'
   error?: string
 }
 
@@ -908,12 +909,45 @@ export interface ChatMetadata {
   lastTerminalAt?: string
 }
 
+/** The authority identity that owns a local chat deletion. */
+export interface ChatAuthorityScope {
+  environmentKey: string
+  userId: string
+  teamId: string | null
+}
+
+/** Main-issued fence captured when a delete is queued and rechecked on confirm. */
+export interface ChatDeleteFence {
+  version: 1
+  authorityScope: ChatAuthorityScope
+  bindingGeneration: number
+  sessionGeneration: number
+}
+
+/** Durable tombstone and cleanup identity for one scoped local deletion. */
+export interface ChatDeleteTombstone {
+  chatId: string
+  authorityScope: ChatAuthorityScope
+}
+
 export interface ChatIndex {
   /** v2 remains readable by pre-paging builds; v3 is accepted and normalized for compatibility. */
   version: 1 | 2 | 3
   lastActiveChatId: string | null
   onboardingDismissed: boolean
   chats: ChatMetadata[]
+  /** Legacy tombstones from pre-scoped versions; retained for read compatibility. */
+  deletedChatIds?: string[]
+  /** New deletions are isolated to their complete authority identity. */
+  deletedChatTombstones?: ChatDeleteTombstone[]
+  /** Durable artifact-cleanup work, retried only in the owning authority scope. */
+  pendingChatCleanup?: ChatDeleteTombstone[]
+  /** Legacy pending cleanup field, read for compatibility with intermediate builds. */
+  pendingCleanupChatIds?: string[]
+}
+
+export interface ChatDeleteResult {
+  cleanupPending: boolean
 }
 
 /** Server-reported session lifecycle (D.1). `idle` once no task is in flight. */
