@@ -29,6 +29,11 @@ const REQUIRE_IDENTITY_FILES = process.env.E2E_REQUIRE_IDENTITY_FILES === '1'
 const KUBE_CONTEXT =
   process.env.E2E_K8S_CONTEXT || process.env.KUBECONTEXT || process.env.K8S_CONTEXT || ''
 const HCC_DEPLOYMENT = 'host-context-controller'
+const RUNTIME_TOKEN_REVISION_ANNOTATION = 'clerum.io/runtime-token-revision'
+const RUNTIME_TOKEN_SECRET_REVISION_ANNOTATION = 'clerum.io/runtime-token-secret-revision'
+const RUNTIME_TOKEN_BOOTSTRAP_STATE_ANNOTATION = 'clerum.io/runtime-token-bootstrap-state'
+const RUNTIME_TOKEN_ROLLOUT_REQUIRED_ANNOTATION = 'clerum.io/runtime-token-rollout-required'
+const RUNTIME_TOKEN_ISSUED_AT_ANNOTATION = 'clerum.io/runtime-token-issued-at'
 const BASELINE_HCC_ENV = {
   CONTEXT_MAPPER_STATELESS_IDLE_MINUTES: '30',
   CONTEXT_MAPPER_STATELESS_IDLE_FLOOR_MINUTES: '15',
@@ -44,6 +49,7 @@ const ACCELERATED_HCC_ENV = {
 const IDENTITY_FILES = ['IDENTITY.md', 'SOUL.md', 'AGENTS.md', 'USER.md'] as const
 const EMPTY_FILE_SHA256 = createHash('sha256').update('').digest('hex')
 type IdentityFileName = (typeof IDENTITY_FILES)[number]
+const HCC_RUNTIME_PROBE_ANNOTATION = 'clerum.io/pr849-hcc-runtime-probe'
 
 type Json = Record<string, any>
 type HostSnapshot = {
@@ -55,6 +61,8 @@ type HostSnapshot = {
   podUids: string[]
   imageIds: string[]
   templateHash: string
+  rawTemplateHash: string
+  runtimeTokenRevision: string
   parameterHash: string
   claimName: string
   pvcUid: string
@@ -99,6 +107,15 @@ async function jsonAsync(args: readonly string[]): Promise<Json> {
 
 function hash(value: unknown): string {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex')
+}
+
+function functionalWorkloadTemplate(template: Json | undefined): Json | undefined {
+  if (!template?.metadata?.annotations) return template
+  const functional = structuredClone(template)
+  const annotations = { ...(functional.metadata?.annotations ?? {}) }
+  delete annotations[RUNTIME_TOKEN_REVISION_ANNOTATION]
+  functional.metadata.annotations = annotations
+  return functional
 }
 
 async function hostSnapshot(
@@ -158,7 +175,11 @@ async function hostSnapshot(
       )
       .filter(Boolean)
       .sort(),
-    templateHash: hash(deployment.spec?.template ?? {}),
+    templateHash: hash(functionalWorkloadTemplate(deployment.spec?.template)),
+    rawTemplateHash: hash(deployment.spec?.template ?? {}),
+    runtimeTokenRevision: String(
+      deployment.spec?.template?.metadata?.annotations?.[RUNTIME_TOKEN_REVISION_ANNOTATION] ?? ''
+    ),
     parameterHash: hash({
       personalization: host.spec?.personalization,
       model: host.spec?.model,
@@ -352,6 +373,148 @@ async function closeElectron(app: ElectronApplication | undefined): Promise<void
   expect(child.exitCode !== null || child.signalCode !== null).toBe(true)
 }
 
+async function waitForSingleCurrentPod(deploymentName: string): Promise<void> {
+  const deadline = Date.now() + 180_000
+  for (;;) {
+    const [deployment, podList] = await Promise.all([
+      jsonAsync(['-n', 'mcp-host', 'get', `deployment/${deploymentName}`, '-o', 'json']),
+      jsonAsync(['-n', 'mcp-host', 'get', 'pods', '-l', `app=${deploymentName}`, '-o', 'json']),
+    ])
+    const generation = Number(deployment.metadata?.generation ?? 0)
+    const observedGeneration = Number(deployment.status?.observedGeneration ?? 0)
+    const desired = Number(deployment.spec?.replicas ?? -1)
+    const updated = Number(deployment.status?.updatedReplicas ?? 0)
+    const ready = Number(deployment.status?.readyReplicas ?? 0)
+    const available = Number(deployment.status?.availableReplicas ?? 0)
+    const livePods = (podList.items ?? []).filter((item: Json) => !item.metadata?.deletionTimestamp)
+    const pod = livePods[0]
+    const containerStatus = (pod?.status?.containerStatuses ?? []).find(
+      (status: Json) => status.name === 'mcp-host'
+    )
+    const podReadyCondition = (pod?.status?.conditions ?? []).find(
+      (condition: Json) => condition.type === 'Ready'
+    )
+    const currentPodReady =
+      livePods.length === 1 &&
+      pod?.status?.phase === 'Running' &&
+      containerStatus?.ready === true &&
+      podReadyCondition?.status === 'True'
+    if (
+      observedGeneration >= generation &&
+      desired === 1 &&
+      updated === 1 &&
+      ready === 1 &&
+      available === 1 &&
+      currentPodReady
+    ) {
+      return
+    }
+    if (Date.now() >= deadline) {
+      throw new Error(`Timed out waiting for one current Ready pod for ${deploymentName}`)
+    }
+    await new Promise(resolve => setTimeout(resolve, 2_000))
+  }
+}
+
+function readCredentialAnnotation(hostName: string, annotation: string): string {
+  const value = kubectl([
+    '-n',
+    'mcp-host',
+    'get',
+    'secret',
+    `host-${hostName}-mcp-host-runtime-tokens`,
+    '-o',
+    `go-template={{index .metadata.annotations "${annotation}"}}`,
+  ]).trim()
+  return value === '<no value>' || value === '<nil>' ? '' : value
+}
+
+function credentialMetadata(hostName: string): {
+  revision: string
+  bootstrapState: string
+  rolloutRequired: string
+  issuedAt: string
+} {
+  const metadata = {
+    revision: readCredentialAnnotation(hostName, RUNTIME_TOKEN_SECRET_REVISION_ANNOTATION),
+    bootstrapState: readCredentialAnnotation(hostName, RUNTIME_TOKEN_BOOTSTRAP_STATE_ANNOTATION),
+    rolloutRequired: readCredentialAnnotation(hostName, RUNTIME_TOKEN_ROLLOUT_REQUIRED_ANNOTATION),
+    issuedAt: readCredentialAnnotation(hostName, RUNTIME_TOKEN_ISSUED_AT_ANNOTATION),
+  }
+  if (Object.values(metadata).some(value => value === '')) {
+    throw new Error(`Incomplete runtime credential metadata for ${hostName}`)
+  }
+  return metadata
+}
+
+function deploymentRevisionMetadata(deployment: Json): {
+  revision: string
+  restartedAt: string
+} {
+  const annotations = deployment.spec?.template?.metadata?.annotations ?? {}
+  return {
+    revision: String(annotations[RUNTIME_TOKEN_REVISION_ANNOTATION] ?? ''),
+    restartedAt: String(annotations['kubectl.kubernetes.io/restartedAt'] ?? ''),
+  }
+}
+
+function runtimeStateAllowsPaidTurn(
+  runtime: ReturnType<typeof credentialMetadata>,
+  deployment: ReturnType<typeof deploymentRevisionMetadata>
+): boolean {
+  if (runtime.revision === '' || deployment.revision === '') return false
+  if (runtime.rolloutRequired !== 'false') return false
+
+  const issuedAt = Date.parse(runtime.issuedAt)
+  if (!Number.isFinite(issuedAt)) return false
+  if (deployment.restartedAt !== '') {
+    const restartedAt = Date.parse(deployment.restartedAt)
+    if (!Number.isFinite(restartedAt) || restartedAt > issuedAt) return false
+  }
+
+  if (runtime.bootstrapState === 'consumed') {
+    return deployment.revision === runtime.revision
+  }
+  if (runtime.bootstrapState !== 'fresh') return false
+  return true
+}
+
+async function settleHccRuntimeIdentity(hostName: string): Promise<void> {
+  const sinceTime = new Date().toISOString()
+  kubectl([
+    '-n',
+    'mcp-host',
+    'annotate',
+    `host/${hostName}`,
+    `${HCC_RUNTIME_PROBE_ANNOTATION}=${sinceTime}`,
+    '--overwrite',
+  ])
+  const deadline = Date.now() + 180_000
+  for (;;) {
+    const [deployment, runtime] = await Promise.all([
+      jsonAsync(['-n', 'mcp-host', 'get', `deployment/${hostName}`, '-o', 'json']),
+      (async () => credentialMetadata(hostName))(),
+    ])
+    const deploymentRuntime = deploymentRevisionMetadata(deployment)
+    if (runtimeStateAllowsPaidTurn(runtime, deploymentRuntime)) {
+      break
+    }
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `Timed out waiting for settled HCC runtime state for ${hostName}: ` +
+          `revision=${runtime.revision || 'missing'}, ` +
+          `deploymentRevision=${deploymentRuntime.revision || 'missing'}, ` +
+          `bootstrap=${runtime.bootstrapState || 'missing'}, ` +
+          `rolloutRequired=${runtime.rolloutRequired || 'missing'}, ` +
+          `issuedAt=${runtime.issuedAt || 'missing'}, ` +
+          `restartedAt=${deploymentRuntime.restartedAt || 'missing'}`
+      )
+    }
+    await new Promise(resolve => setTimeout(resolve, 2_000))
+  }
+  await waitForSingleCurrentPod(hostName)
+}
+
 async function newChat(page: Page, hostName: string): Promise<void> {
   await openAgentsPage(page)
   await page.getByRole('button', { name: `More actions for ${hostName}`, exact: true }).click()
@@ -409,6 +572,24 @@ async function assertEffectiveStatelessModel(page: Page): Promise<void> {
   )
 }
 
+async function probeHostModels(
+  page: Page,
+  hostRef: string
+): Promise<{ error: string | null; modelCount: number | null }> {
+  return page.evaluate(async targetHostRef => {
+    try {
+      const result = await window.clerum.rpc.getHostModels(targetHostRef, '')
+      const models = (result as unknown as { models?: unknown[] } | null)?.models
+      return { error: null, modelCount: Array.isArray(models) ? models.length : null }
+    } catch (error) {
+      return {
+        error: error instanceof Error ? error.message : String(error),
+        modelCount: null,
+      }
+    }
+  }, hostRef)
+}
+
 async function terminateRunOwnedShellTask(
   page: Page,
   marker: string
@@ -422,7 +603,7 @@ async function terminateRunOwnedShellTask(
         if (await cancel.isVisible().catch(() => false)) return 'cancel'
         return 'waiting'
       },
-      { timeout: 10_000, intervals: [250, 500, 1_000] }
+      { timeout: 60_000, intervals: [250, 500, 1_000, 2_000, 5_000] }
     )
     .toMatch(/^(?:response|cancel)$/)
 
@@ -515,7 +696,9 @@ test('PR849 controlled parity across pending work, GFS, host switching, and cold
   let shellTaskPage: Page | undefined
   let shellTaskTitle = ''
   let shellTaskMarker = ''
+  const runtimeProbeHosts = new Set<string>()
   const cleanupErrors: string[] = []
+  let primaryError: unknown
   const metrics: Json = {
     runId,
     githubMcpConfigured: false,
@@ -533,15 +716,24 @@ test('PR849 controlled parity across pending work, GFS, host switching, and cold
     initialRuntimeModelProof: null,
     postWakeRuntimeModelProof: null,
     effectiveStatelessModelAsserted: false,
+    statelessModelRpcAsserted: false,
+    statefulModelRpcAsserted: false,
+    postWakeStatelessModelRpcAsserted: false,
     runOwnedShellCleanup: 'not-required',
     statelessSessionId: '',
     statefulSessionId: '',
     reopenedSessionId: '',
+    statelessRawTemplateHashBefore: '',
+    statelessRawTemplateHashAfter: '',
+    statelessRuntimeTokenRevisionBefore: '',
+    statelessRuntimeTokenRevisionAfter: '',
   }
 
   try {
     await test.step('verify policy, seed GFS, and wake through Desktop catalog', async () => {
       expect(hccEnv()).toEqual(BASELINE_HCC_ENV)
+      runtimeProbeHosts.add(STATEFUL_HOST)
+      await settleHccRuntimeIdentity(STATEFUL_HOST)
       beforeStateful = await hostSnapshot(STATEFUL_HOST, STATEFUL_HOST, false)
       expect(beforeStateful.readyReplicas).toBe(1)
       assertGfsInfraHealthy()
@@ -561,6 +753,8 @@ test('PR849 controlled parity across pending work, GFS, host switching, and cold
           exact: true,
         })
       ).toBeVisible({ timeout: 30_000 })
+      runtimeProbeHosts.add(STATELESS_HOST)
+      await settleHccRuntimeIdentity(STATELESS_HOST)
       beforeStateless = (await waitForStateless('ready', 270_000)).snapshot
       expect(beforeStateless.readyReplicas).toBe(1)
       beforeIdentityFileSnapshot = identityFileSnapshot(beforeStateless.pods[0]!)
@@ -577,6 +771,13 @@ test('PR849 controlled parity across pending work, GFS, host switching, and cold
       await newChat(page, STATELESS_HOST)
       await assertEffectiveStatelessModel(page)
       metrics.effectiveStatelessModelAsserted = true
+      const statelessModels = await probeHostModels(page, STATELESS_HOST)
+      expect(
+        statelessModels.error,
+        `stateless model RPC failed before the first paid turn: ${statelessModels.error}`
+      ).toBeNull()
+      expect(statelessModels.modelCount ?? 0).toBeGreaterThan(0)
+      metrics.statelessModelRpcAsserted = true
       const initialModelLogSince = new Date().toISOString()
       await sendAndExpect(
         page,
@@ -677,6 +878,20 @@ test('PR849 controlled parity across pending work, GFS, host switching, and cold
       await expect(approvalStepper).toContainText(/Shell.*requires approval/i)
 
       await newChat(page, STATEFUL_HOST_DISPLAY)
+      const statefulSelector = page.getByTestId('model-selector-up')
+      await expect(statefulSelector).toHaveAttribute('data-provider', 'openai', {
+        timeout: 30_000,
+      })
+      await expect(statefulSelector).toHaveAttribute('data-model', 'gpt-5.4-mini', {
+        timeout: 30_000,
+      })
+      const statefulModels = await probeHostModels(page, STATEFUL_HOST)
+      expect(
+        statefulModels.error,
+        `stateful model RPC failed before the control turn: ${statefulModels.error}`
+      ).toBeNull()
+      expect(statefulModels.modelCount ?? 0).toBeGreaterThan(0)
+      metrics.statefulModelRpcAsserted = true
       await expect(page.getByTestId('message-list')).not.toContainText(gfsPath)
       await expect(page.getByTestId('message-list')).not.toContainText(shellCommand)
       await sendAndExpect(
@@ -839,6 +1054,13 @@ test('PR849 controlled parity across pending work, GFS, host switching, and cold
         readyObservedAt !== null && cachedVisibleAt < readyObservedAt
       await assertEffectiveStatelessModel(page)
       metrics.effectiveStatelessModelAsserted = true
+      const postWakeModels = await probeHostModels(page, STATELESS_HOST)
+      expect(
+        postWakeModels.error,
+        `stateless model RPC failed after wake: ${postWakeModels.error}`
+      ).toBeNull()
+      expect(postWakeModels.modelCount ?? 0).toBeGreaterThan(0)
+      metrics.postWakeStatelessModelRpcAsserted = true
       metrics.reopenedSessionId = await page.evaluate(
         hostRef => window.clerum.chat.getLastActive(hostRef),
         STATELESS_HOST
@@ -876,6 +1098,9 @@ test('PR849 controlled parity across pending work, GFS, host switching, and cold
     const checks = {
       hostUidStable: afterStateless!.hostUid === beforeStateless!.hostUid,
       templateStable: afterStateless!.templateHash === beforeStateless!.templateHash,
+      rawTemplateChanged: afterStateless!.rawTemplateHash !== beforeStateless!.rawTemplateHash,
+      runtimeTokenRevisionChanged:
+        afterStateless!.runtimeTokenRevision !== beforeStateless!.runtimeTokenRevision,
       declaredParametersStable: afterStateless!.parameterHash === beforeStateless!.parameterHash,
       pvcStable: afterStateless!.pvcUid === beforeStateless!.pvcUid,
       sqliteStable:
@@ -909,6 +1134,8 @@ test('PR849 controlled parity across pending work, GFS, host switching, and cold
     expect(checks).toEqual({
       hostUidStable: true,
       templateStable: true,
+      rawTemplateChanged: true,
+      runtimeTokenRevisionChanged: true,
       declaredParametersStable: true,
       pvcStable: true,
       sqliteStable: true,
@@ -916,9 +1143,33 @@ test('PR849 controlled parity across pending work, GFS, host switching, and cold
       statelessPodChanged: true,
       statefulPodStable: true,
     })
+    metrics.statelessRawTemplateHashBefore = beforeStateless!.rawTemplateHash
+    metrics.statelessRawTemplateHashAfter = afterStateless!.rawTemplateHash
+    metrics.statelessRuntimeTokenRevisionBefore = beforeStateless!.runtimeTokenRevision
+    metrics.statelessRuntimeTokenRevisionAfter = afterStateless!.runtimeTokenRevision
+  } catch (error) {
+    primaryError = error
+    throw error
   } finally {
     cancelReadinessObserver = true
     await readinessObserver
+    for (const hostName of runtimeProbeHosts) {
+      try {
+        kubectl([
+          '-n',
+          'mcp-host',
+          'annotate',
+          `host/${hostName}`,
+          `${HCC_RUNTIME_PROBE_ANNOTATION}-`,
+        ])
+      } catch (error) {
+        cleanupErrors.push(
+          `HCC runtime probe cleanup ${hostName}: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        )
+      }
+    }
     if (shellTaskActive && shellTaskPage && app) {
       try {
         await openSession(shellTaskPage, shellTaskTitle, STATELESS_HOST)
@@ -965,6 +1216,12 @@ test('PR849 controlled parity across pending work, GFS, host switching, and cold
       contentType: 'application/json',
     })
     console.log(`[PR849ControlledParity] ${JSON.stringify(metrics)}`)
-    if (cleanupErrors.length > 0) throw new Error(cleanupErrors.join('; '))
+    if (cleanupErrors.length > 0) {
+      await testInfo.attach('pr849-controlled-parity-cleanup-errors', {
+        body: cleanupErrors.join('\n'),
+        contentType: 'text/plain',
+      })
+      if (!primaryError) throw new Error(cleanupErrors.join('; '))
+    }
   }
 })
