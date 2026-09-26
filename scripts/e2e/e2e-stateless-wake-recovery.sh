@@ -272,7 +272,7 @@ wait_for_ready_pod() {
 # --- Row observable (exactly-once marker): mirrors the durability exemplar
 DB_PATH=""
 ROW_TOOL=""
-NODE_COUNT_SNIPPET='const D=require("/app/node_modules/better-sqlite3");const db=new D(process.env.DB,{readonly:true});db.pragma("busy_timeout=5000");const row=db.prepare(process.env.SQL).get();console.log(row?Object.values(row)[0]:0);'
+NODE_COUNT_SNIPPET='const D=require("better-sqlite3");const db=new D(process.env.DB,{readonly:true});db.pragma("busy_timeout=5000");const row=db.prepare(process.env.SQL).get();console.log(row?Object.values(row)[0]:0);'
 
 resolve_row_tool() {
   local pod dbdir
@@ -282,7 +282,7 @@ resolve_row_tool() {
   DB_PATH="${dbdir%/}/state.db"
   if kctl exec "$pod" -n "$MCP_HOST_NS" -- sh -c 'command -v sqlite3' >/dev/null 2>&1; then
     ROW_TOOL="sqlite3-cli"
-  elif kctl exec "$pod" -n "$MCP_HOST_NS" -- sh -c 'test -d /app/node_modules/better-sqlite3' >/dev/null 2>&1; then
+  elif kctl exec "$pod" -n "$MCP_HOST_NS" -- node -e 'require("better-sqlite3")' >/dev/null 2>&1; then
     ROW_TOOL="node-better-sqlite3"
   else
     echo "no row-count reader in pod (${pod}): neither sqlite3 CLI nor better-sqlite3" >&2; return 1
