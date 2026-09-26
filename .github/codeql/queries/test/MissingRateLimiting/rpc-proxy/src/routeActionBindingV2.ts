@@ -7,6 +7,14 @@ export function authorizeBoundRequestV2(
   next();
 }
 
+export function rejectUnadmittedV2DerivedView(
+  _req: any,
+  res: any,
+  _next: () => void,
+): void {
+  res.status(503).json({ error: "authority_unavailable" });
+}
+
 function routePath(req: any): string {
   return req.route.path;
 }

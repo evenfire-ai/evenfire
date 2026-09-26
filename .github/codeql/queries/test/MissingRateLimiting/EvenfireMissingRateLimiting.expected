@@ -45,5 +45,5 @@
 | rpc-proxy/src/routes/artifacts.ts:82:3:82:32 | require ... :read") | This route handler performs $@, but is not rate-limited. | rpc-proxy/src/middleware/auth.ts:29:5:29:65 | fs.writ ... ecked") | a file system access |
 | rpc-proxy/src/routes/artifacts.ts:82:3:82:32 | require ... :read") | This route handler performs $@, but is not rate-limited. | rpc-proxy/src/middleware/auth.ts:31:12:31:50 | authori ... , next) | authorization |
 | rpc-proxy/src/routes/artifacts.ts:84:3:87:3 | (_req,  ... 4);\\n  } | This route handler performs $@, but is not rate-limited. | rpc-proxy/src/routes/artifacts.ts:85:5:85:71 | fs.writ ... ected") | a file system access |
-| rpc-proxy/src/routes/pr2.ts:39:46:39:60 | v2ViewAuthority | This route handler performs $@, but is not rate-limited. | rpc-proxy/src/routes/pr2.ts:18:3:18:81 | require ...  next)) | authorization |
-| rpc-proxy/src/routes/pr2.ts:39:63:42:1 | (_req,  ... 204);\\n} | This route handler performs $@, but is not rate-limited. | rpc-proxy/src/routes/pr2.ts:40:3:40:71 | fs.writ ... ected") | a file system access |
+| rpc-proxy/src/routes/pr2.ts:44:46:44:60 | v2ViewAuthority | This route handler performs $@, but is not rate-limited. | rpc-proxy/src/routes/pr2.ts:19:3:23:3 | require ...  ),\\n  ) | authorization |
+| rpc-proxy/src/routes/pr2.ts:44:63:47:1 | (_req,  ... 204);\\n} | This route handler performs $@, but is not rate-limited. | rpc-proxy/src/routes/pr2.ts:45:3:45:71 | fs.writ ... ected") | a file system access |

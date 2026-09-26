@@ -107,71 +107,6 @@ private predicate isImportedCall(CallExpr call, string path, string importedName
   isImportedValue(call.getCallee(), path, importedName)
 }
 
-private predicate isCanonicalExternalRpcLimiterStage(CallExpr middleware, string stage) {
-  exists(CallExpr options |
-    isImportedCall(middleware, "control-api/src/middleware/rateLimitMiddleware.ts",
-      "rateLimitMiddleware") and
-    middleware.getArgument(0) = options and
-    isImportedCall(options, "control-api/src/middleware/externalUserRateLimitPolicy.ts",
-      "externalUserRateLimitOptions") and
-    isImportedValue(options.getArgument(0),
-      "control-api/src/services/access/actionOperationRegistry.ts", "EXTERNAL_RPC_ADMISSION_CLASS") and
-    options.getArgument(1).getStringValue() = stage
-  )
-}
-
-private predicate hasCanonicalExternalRpcPolicy() {
-  exists(
-    VariableDeclarator policiesDeclaration, VarDecl policiesBinding, ObjectExpr policies,
-    Property rpcPolicyProperty, ObjectExpr rpcPolicy, Property bucketType, Property maxPerMinute,
-    VariableDeclarator admissionDeclaration, VarDecl admissionBinding
-  |
-    policiesDeclaration.getFile().getRelativePath() =
-      "control-api/src/middleware/externalUserRateLimitPolicy.ts" and
-    policiesDeclaration.getBindingPattern() = policiesBinding and
-    policiesBinding.getVariable().getName() = "POLICIES" and
-    policiesDeclaration.getInit() = policies and
-    rpcPolicyProperty = policies.getPropertyByName("rpc_token") and
-    rpcPolicyProperty.getInit() = rpcPolicy and
-    bucketType = rpcPolicy.getPropertyByName("bucketType") and
-    bucketType.getInit().getStringValue() = "external_rpc_token" and
-    maxPerMinute = rpcPolicy.getPropertyByName("maxPerMinute") and
-    maxPerMinute.getInit().getIntValue() = 10 and
-    admissionDeclaration.getFile().getRelativePath() =
-      "control-api/src/services/access/actionOperationRegistry.ts" and
-    admissionDeclaration.getBindingPattern() = admissionBinding and
-    admissionBinding.getVariable().getName() = "EXTERNAL_RPC_ADMISSION_CLASS" and
-    admissionDeclaration.getInit().getStringValue() = "rpc_token"
-  )
-}
-
-/**
- * The PR2 distributed admission model is valid only while the canonical
- * external delegation issuer has both exact `external_rpc_token` stages and
- * is the producer that signs the downstream delegation.
- */
-private predicate hasCanonicalExternalRpcDelegationIssuer() {
-  exists(
-    MethodCallExpr registration, CallExpr preAuth, CallExpr authenticated, Function handler,
-    CallExpr issuer, int preAuthIndex, int authenticatedIndex, int handlerIndex
-  |
-    registration.getMethodName() = "post" and
-    registration.getArgument(0).getStringValue() = "/external/rpc/delegations" and
-    preAuth = registration.getArgument(preAuthIndex) and
-    authenticated = registration.getArgument(authenticatedIndex) and
-    handler = registration.getArgument(handlerIndex) and
-    0 < preAuthIndex and
-    preAuthIndex < authenticatedIndex and
-    authenticatedIndex < handlerIndex and
-    isCanonicalExternalRpcLimiterStage(preAuth, "pre_auth") and
-    isCanonicalExternalRpcLimiterStage(authenticated, "authenticated") and
-    isImportedCall(issuer, "control-api/src/utils/auth/userDelegationV2Token.ts",
-      "issueUserDelegationV2") and
-    issuer.getEnclosingFunction() = handler
-  ) and
-  hasCanonicalExternalRpcPolicy()
-}
-
 private predicate registeredRouteContainsNodeAtIndex(
   MethodCallExpr registration, Routing::Node node, int index
 ) {
@@ -322,12 +257,15 @@ private predicate isV2OnlyGuard(Function guard) {
   )
 }
 
-/** The existing v2-view branch is retained separately during the Spec 60 partition. */
+/**
+ * The v2-view branch is exempt only when its consumer capability is rejected
+ * before the remote checkpoint. Issuer throttling is not consumer admission.
+ */
 private predicate hasRetainedRpcProxyV2ViewConsumer(Routing::Node useSite) {
   exists(
     MethodCallExpr registration, VarAccess middleware, Function authority, VarAccess v2Only,
-    Function v2OnlyGuard, Function handler, int authorityIndex, int v2OnlyIndex, int handlerIndex,
-    int useIndex
+    Function v2OnlyGuard, Function handler, CallExpr capabilityGate, int authorityIndex,
+    int v2OnlyIndex, int handlerIndex, int useIndex
   |
     registeredRouteContainsNodeAtIndex(registration, useSite, useIndex) and
     middleware = registration.getArgument(authorityIndex) and
@@ -340,6 +278,9 @@ private predicate hasRetainedRpcProxyV2ViewConsumer(Routing::Node useSite) {
     middleware.getName() = "v2ViewAuthority" and
     authority.getName() = middleware.getName() and
     authority.getFile() = registration.getFile() and
+    functionOccursWithin(capabilityGate.getEnclosingFunction(), authority) and
+    isImportedCall(capabilityGate, "rpc-proxy/src/routeActionBindingV2.ts",
+      "rejectUnadmittedV2DerivedView") and
     v2OnlyGuard.getVariable() = v2Only.getVariable() and
     v2OnlyGuard.getFile() = registration.getFile() and
     isV2OnlyGuard(v2OnlyGuard) and
@@ -351,6 +292,7 @@ private predicate hasRetainedRpcProxyV2ViewConsumer(Routing::Node useSite) {
       isImportedCall(declaredV2, "rpc-proxy/src/userDelegationV2.ts", "tokenDeclaresV2") and
       isImportedCall(rpcAuth, "rpc-proxy/src/middleware/auth.ts", "requireRpcAuth") and
       isImportedCall(scope, "rpc-proxy/src/middleware/auth.ts", "requireScope") and
+      capabilityGate.getLocation().getStartLine() < scope.getLocation().getStartLine() and
       (scope.getArgument(0).getStringValue() = "sandbox:ui:view" or
         scope.getArgument(0).getStringValue() = "desktop:view") and
       hasCanonicalRpcProxyDelegationVerifier()
@@ -417,10 +359,6 @@ private predicate hasCanonicalRpcProxyDelegationVerifier() {
   hasCanonicalRpcProxyAuthentication() and hasCanonicalRpcProxyScopeAuthorization()
 }
 
-private predicate hasRetainedPr2V2ViewAdmissionGuard(Routing::Node useSite) {
-  hasCanonicalExternalRpcDelegationIssuer() and hasRetainedRpcProxyV2ViewConsumer(useSite)
-}
-
 /**
  * R30 admission is distributed across the rpc-proxy artifact resolver and the
  * authoritative Control API. This predicate intentionally uses exact module
@@ -442,7 +380,7 @@ where
   useSite = Routing::getNode(r).getRouteInstallation() and
   r.explain(explanation, reference, referenceLabel) and
   not (
-    hasLocalRateLimitingGuard(useSite) or hasRetainedPr2V2ViewAdmissionGuard(useSite)
+    hasLocalRateLimitingGuard(useSite) or hasRetainedRpcProxyV2ViewConsumer(useSite)
   )
 select useSite, "This route handler " + explanation + ", but is not rate-limited.", reference,
   referenceLabel
