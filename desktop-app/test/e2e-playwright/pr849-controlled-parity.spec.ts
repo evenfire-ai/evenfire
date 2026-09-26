@@ -2,7 +2,7 @@
 // E2E_GUARDIAN_IPC_FLOW: Desktop sends RPC and GFS calls through Electron's
 // main-process IPC, so renderer page.waitForRequest cannot observe this journey.
 import { type ElectronApplication, type Page, expect, test } from '@playwright/test'
-import { execFileSync } from 'node:child_process'
+import { execFile, execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import path from 'node:path'
 import {
@@ -23,6 +23,9 @@ import {
 const STATELESS_HOST = process.env.E2E_STATELESS_HOST_REF || 'chatllm-stateless'
 const STATEFUL_HOST = process.env.E2E_STATEFUL_HOST_REF || 'chatllm'
 const STATEFUL_HOST_DISPLAY = process.env.E2E_STATEFUL_HOST_DISPLAY || 'chatLLM'
+const EXPECTED_STATELESS_MODEL_PROVIDER = process.env.E2E_EXPECTED_STATELESS_MODEL_PROVIDER || ''
+const EXPECTED_STATELESS_MODEL_NAME = process.env.E2E_EXPECTED_STATELESS_MODEL_NAME || ''
+const REQUIRE_IDENTITY_FILES = process.env.E2E_REQUIRE_IDENTITY_FILES === '1'
 const KUBE_CONTEXT =
   process.env.E2E_K8S_CONTEXT || process.env.KUBECONTEXT || process.env.K8S_CONTEXT || ''
 const HCC_DEPLOYMENT = 'host-context-controller'
@@ -38,6 +41,9 @@ const ACCELERATED_HCC_ENV = {
   CONTEXT_MAPPER_STATELESS_DRAIN_GRACE_MS: '20000',
   CONTEXT_MAPPER_HEARTBEAT_POLL_MS: '5000',
 }
+const IDENTITY_FILES = ['IDENTITY.md', 'SOUL.md', 'AGENTS.md', 'USER.md'] as const
+const EMPTY_FILE_SHA256 = createHash('sha256').update('').digest('hex')
+type IdentityFileName = (typeof IDENTITY_FILES)[number]
 
 type Json = Record<string, any>
 type HostSnapshot = {
@@ -54,6 +60,7 @@ type HostSnapshot = {
   pvcUid: string
   mountPath: string
   sqliteDir: string | null
+  declaredIdentityFiles: string[]
 }
 
 function kubectl(args: readonly string[], timeout = 20_000): string {
@@ -69,18 +76,41 @@ function json(args: readonly string[]): Json {
   return JSON.parse(kubectl(args)) as Json
 }
 
+function kubectlAsync(args: readonly string[], timeout = 20_000): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile(
+      'kubectl',
+      ['--context', KUBE_CONTEXT, ...args],
+      { encoding: 'utf8', timeout, maxBuffer: 12 * 1024 * 1024 },
+      (error, stdout, stderr) => {
+        if (error) {
+          reject(new Error(`${error.message}: ${stderr}`))
+          return
+        }
+        resolve(stdout)
+      }
+    )
+  })
+}
+
+async function jsonAsync(args: readonly string[]): Promise<Json> {
+  return JSON.parse(await kubectlAsync(args)) as Json
+}
+
 function hash(value: unknown): string {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex')
 }
 
-function hostSnapshot(
+async function hostSnapshot(
   deploymentName: string,
   hostName: string,
   requireStatelessSqlite: boolean
-): HostSnapshot {
-  const deployment = json(['-n', 'mcp-host', 'get', `deployment/${deploymentName}`, '-o', 'json'])
-  const host = json(['-n', 'mcp-host', 'get', `host/${hostName}`, '-o', 'json'])
-  const podList = json(['-n', 'mcp-host', 'get', 'pods', '-l', `app=${hostName}`, '-o', 'json'])
+): Promise<HostSnapshot> {
+  const [deployment, host, podList] = await Promise.all([
+    jsonAsync(['-n', 'mcp-host', 'get', `deployment/${deploymentName}`, '-o', 'json']),
+    jsonAsync(['-n', 'mcp-host', 'get', `host/${hostName}`, '-o', 'json']),
+    jsonAsync(['-n', 'mcp-host', 'get', 'pods', '-l', `app=${hostName}`, '-o', 'json']),
+  ])
   const container = deployment.spec?.template?.spec?.containers?.find(
     (item: Json) => item.name === 'mcp-host'
   )
@@ -103,7 +133,7 @@ function hostSnapshot(
       throw new Error(`${hostName} lost its dedicated SQLite subPath mount`)
     }
   }
-  const claim = json(['-n', 'mcp-host', 'get', `pvc/${claimName}`, '-o', 'json'])
+  const claim = await jsonAsync(['-n', 'mcp-host', 'get', `pvc/${claimName}`, '-o', 'json'])
   const livePods = (podList.items ?? []).filter((item: Json) => !item.metadata?.deletionTimestamp)
 
   return {
@@ -140,6 +170,7 @@ function hostSnapshot(
     pvcUid: String(claim.metadata?.uid ?? ''),
     mountPath: workspace.mountPath,
     sqliteDir: sqliteDir ?? null,
+    declaredIdentityFiles: host.spec?.personalization == null ? [] : [...IDENTITY_FILES],
   }
 }
 
@@ -193,6 +224,95 @@ function setHccEnv(values: Record<string, string>): void {
   expect(hccEnv()).toEqual(values)
 }
 
+function identityFileSnapshot(
+  podName: string
+): Record<IdentityFileName, { exists: boolean; sha256: string | null }> {
+  const script = [
+    'set -eu',
+    ...IDENTITY_FILES.map(file => {
+      const path = `/workspace/${file}`
+      return `if test -f "${path}"; then sha256sum "${path}"; else printf 'ABSENT ${file}\\n'; fi`
+    }),
+  ].join('\n')
+  const output = kubectl(['-n', 'mcp-host', 'exec', podName, '--', 'sh', '-c', script])
+  const snapshot: Record<IdentityFileName, { exists: boolean; sha256: string | null }> = {
+    'IDENTITY.md': { exists: false, sha256: null },
+    'SOUL.md': { exists: false, sha256: null },
+    'AGENTS.md': { exists: false, sha256: null },
+    'USER.md': { exists: false, sha256: null },
+  }
+  const observedFiles = new Set<IdentityFileName>()
+  for (const line of output.trim().split('\n')) {
+    const absentMatch = /^ABSENT (IDENTITY\.md|SOUL\.md|AGENTS\.md|USER\.md)$/.exec(line.trim())
+    const absentFile = absentMatch?.[1] as IdentityFileName | undefined
+    if (absentFile) {
+      if (observedFiles.has(absentFile)) {
+        throw new Error(`Duplicate identity output for ${absentFile} on ${podName}`)
+      }
+      observedFiles.add(absentFile)
+      snapshot[absentFile] = { exists: false, sha256: null }
+      continue
+    }
+    const presentMatch =
+      /^([0-9a-f]{64})\s+\/workspace\/(IDENTITY\.md|SOUL\.md|AGENTS\.md|USER\.md)$/.exec(
+        line.trim()
+      )
+    const digest = presentMatch?.[1]
+    const fileName = presentMatch?.[2] as IdentityFileName | undefined
+    if (!digest || !fileName) {
+      throw new Error(`Unexpected identity hash output for ${podName}`)
+    }
+    if (observedFiles.has(fileName)) {
+      throw new Error(`Duplicate identity output for ${fileName} on ${podName}`)
+    }
+    observedFiles.add(fileName)
+    snapshot[fileName] = { exists: true, sha256: digest }
+  }
+  expect([...observedFiles].sort()).toEqual([...IDENTITY_FILES].sort())
+  return snapshot
+}
+
+type IdentityFileSnapshot = ReturnType<typeof identityFileSnapshot>
+
+function proveStatelessRuntimeModel(
+  podName: string,
+  sinceTime: string
+): { toolStartEvents: number; matchingEvents: number; otherModelEvents: number } {
+  const logs = kubectl(['-n', 'mcp-host', 'logs', podName, '--since-time', sinceTime])
+  let toolStartEvents = 0
+  let matchingEvents = 0
+  let otherModelEvents = 0
+
+  for (const line of logs.trim().split('\n')) {
+    if (!line.trim()) continue
+    let event: Json
+    try {
+      event = JSON.parse(line) as Json
+    } catch {
+      continue
+    }
+    if (event.msg !== 'LLM tool completion started') continue
+    toolStartEvents += 1
+    if (
+      event.provider === EXPECTED_STATELESS_MODEL_PROVIDER &&
+      event.model === EXPECTED_STATELESS_MODEL_NAME
+    ) {
+      matchingEvents += 1
+    } else {
+      otherModelEvents += 1
+    }
+  }
+
+  if (matchingEvents === 0 || otherModelEvents > 0) {
+    throw new Error(
+      `Expected ${EXPECTED_STATELESS_MODEL_PROVIDER}/${EXPECTED_STATELESS_MODEL_NAME} ` +
+        `to serve every tool-capable LLM call; events=${toolStartEvents}, ` +
+        `matching=${matchingEvents}, other=${otherModelEvents}`
+    )
+  }
+  return { toolStartEvents, matchingEvents, otherModelEvents }
+}
+
 async function waitForStateless(
   desired: 'suspended' | 'ready',
   timeoutMs: number,
@@ -201,7 +321,7 @@ async function waitForStateless(
   const started = Date.now()
   for (;;) {
     if (shouldStop?.()) throw new Error(`Stopped waiting for ${STATELESS_HOST}=${desired}`)
-    const snapshot = hostSnapshot(STATELESS_HOST, STATELESS_HOST, true)
+    const snapshot = await hostSnapshot(STATELESS_HOST, STATELESS_HOST, true)
     if (shouldStop?.()) throw new Error(`Stopped waiting for ${STATELESS_HOST}=${desired}`)
     const matched =
       desired === 'suspended'
@@ -273,6 +393,47 @@ async function openSession(page: Page, title: string, hostName: string): Promise
   })
 }
 
+async function assertEffectiveStatelessModel(page: Page): Promise<void> {
+  const selector = page.getByTestId('model-selector-up')
+  await expect(selector).toHaveAttribute('data-host-ref', STATELESS_HOST, { timeout: 30_000 })
+  await expect(selector).toHaveAttribute('data-provider', EXPECTED_STATELESS_MODEL_PROVIDER, {
+    timeout: 30_000,
+  })
+  await expect(selector).toHaveAttribute('data-model', EXPECTED_STATELESS_MODEL_NAME, {
+    timeout: 30_000,
+  })
+  await expect(page.getByTestId('selected-chat-model')).toHaveAttribute(
+    'data-model-id',
+    EXPECTED_STATELESS_MODEL_NAME,
+    { timeout: 30_000 }
+  )
+}
+
+async function terminateRunOwnedShellTask(
+  page: Page,
+  marker: string
+): Promise<'cancelled' | 'response'> {
+  const response = page.getByTestId('agent-response').filter({ hasText: marker })
+  const cancel = page.getByTestId('progress-cancel-btn')
+  await expect
+    .poll(
+      async () => {
+        if (await response.isVisible().catch(() => false)) return 'response'
+        if (await cancel.isVisible().catch(() => false)) return 'cancel'
+        return 'waiting'
+      },
+      { timeout: 10_000, intervals: [250, 500, 1_000] }
+    )
+    .toMatch(/^(?:response|cancel)$/)
+
+  if (await response.isVisible().catch(() => false)) return 'response'
+
+  await expect(cancel).toBeVisible({ timeout: 10_000 })
+  await cancel.click()
+  await expect(page.locator('.stepper-cancelled-badge')).toBeVisible({ timeout: 30_000 })
+  return 'cancelled'
+}
+
 async function sendAndExpect(
   page: Page,
   prompt: string,
@@ -311,6 +472,11 @@ test('PR849 controlled parity across pending work, GFS, host switching, and cold
   if (!KUBE_CONTEXT || !/^clerum-[a-z0-9][a-z0-9-]*-[0-9a-f]{8}$/.test(KUBE_CONTEXT)) {
     throw new Error(`Refusing non-branch-owned context: ${KUBE_CONTEXT || '<empty>'}`)
   }
+  if (!EXPECTED_STATELESS_MODEL_PROVIDER || !EXPECTED_STATELESS_MODEL_NAME) {
+    throw new Error(
+      'Set E2E_EXPECTED_STATELESS_MODEL_PROVIDER and E2E_EXPECTED_STATELESS_MODEL_NAME so the effective session model cannot drift silently'
+    )
+  }
   if (
     process.env.E2E_ALLOW_STATELESS_CADENCE_ACCELERATION !== '1' ||
     process.env.E2E_GFS_AGENT_A !== STATELESS_HOST
@@ -343,6 +509,12 @@ test('PR849 controlled parity across pending work, GFS, host switching, and cold
   let cancelReadinessObserver = false
   let readinessObserver: Promise<unknown> | undefined
   let firstPage: Page | undefined
+  let beforeIdentityFileSnapshot: IdentityFileSnapshot | undefined
+  let afterIdentityFileSnapshot: IdentityFileSnapshot | undefined
+  let shellTaskActive = false
+  let shellTaskPage: Page | undefined
+  let shellTaskTitle = ''
+  let shellTaskMarker = ''
   const cleanupErrors: string[] = []
   const metrics: Json = {
     runId,
@@ -356,6 +528,12 @@ test('PR849 controlled parity across pending work, GFS, host switching, and cold
     secondLaunchToCachedTranscriptMs: 0,
     followUpToResponseMs: 0,
     effectiveIdentityFileHashesAsserted: false,
+    identityFileCoverage: 'unknown',
+    statelessRuntimeModelLogAsserted: false,
+    initialRuntimeModelProof: null,
+    postWakeRuntimeModelProof: null,
+    effectiveStatelessModelAsserted: false,
+    runOwnedShellCleanup: 'not-required',
     statelessSessionId: '',
     statefulSessionId: '',
     reopenedSessionId: '',
@@ -364,7 +542,7 @@ test('PR849 controlled parity across pending work, GFS, host switching, and cold
   try {
     await test.step('verify policy, seed GFS, and wake through Desktop catalog', async () => {
       expect(hccEnv()).toEqual(BASELINE_HCC_ENV)
-      beforeStateful = hostSnapshot(STATEFUL_HOST, STATEFUL_HOST, false)
+      beforeStateful = await hostSnapshot(STATEFUL_HOST, STATEFUL_HOST, false)
       expect(beforeStateful.readyReplicas).toBe(1)
       assertGfsInfraHealthy()
       fixtures = seedAgentGfsFixtures(desktopCredentials().email)
@@ -385,6 +563,7 @@ test('PR849 controlled parity across pending work, GFS, host switching, and cold
       ).toBeVisible({ timeout: 30_000 })
       beforeStateless = (await waitForStateless('ready', 270_000)).snapshot
       expect(beforeStateless.readyReplicas).toBe(1)
+      beforeIdentityFileSnapshot = identityFileSnapshot(beforeStateless.pods[0]!)
 
       const mcpServers = json(['-n', 'mcp-server', 'get', 'mcpservers', '-o', 'json'])
       metrics.githubMcpConfigured = (mcpServers.items ?? []).some((item: Json) =>
@@ -396,6 +575,9 @@ test('PR849 controlled parity across pending work, GFS, host switching, and cold
       const page = firstPage!
 
       await newChat(page, STATELESS_HOST)
+      await assertEffectiveStatelessModel(page)
+      metrics.effectiveStatelessModelAsserted = true
+      const initialModelLogSince = new Date().toISOString()
       await sendAndExpect(
         page,
         `Prepare the continuity case. Remember exactly code=${statelessCode}, owner=Lucia, limit=27. Reply exactly ${statelessMarker}. Do not use a tool yet.`,
@@ -452,9 +634,11 @@ test('PR849 controlled parity across pending work, GFS, host switching, and cold
                     !sibling.classList.contains('stepper-step') &&
                     !sibling.classList.contains('stepper-iteration-divider')
                   ) {
-                    const output = sibling.querySelector(
-                      '[data-testid="step-output-panel"] .stepper-step-output-code'
-                    )
+                    const output = sibling.matches('[data-testid="step-output-panel"]')
+                      ? sibling.querySelector('.stepper-step-output-code')
+                      : sibling.querySelector(
+                          '[data-testid="step-output-panel"] .stepper-step-output-code'
+                        )
                     if (output?.textContent?.includes(expected) === true) return true
                     sibling = sibling.nextElementSibling
                   }
@@ -465,6 +649,11 @@ test('PR849 controlled parity across pending work, GFS, host switching, and cold
           { timeout: 30_000 }
         )
         .toBe(true)
+      metrics.initialRuntimeModelProof = proveStatelessRuntimeModel(
+        beforeStateless!.pods[0]!,
+        initialModelLogSince
+      )
+      metrics.statelessRuntimeModelLogAsserted = true
 
       const shellMarker = `PR849_SHELL_${runId}`
       const shellCommand = `printf '${shellMarker}'`
@@ -473,6 +662,10 @@ test('PR849 controlled parity across pending work, GFS, host switching, and cold
         `Then reply with exactly ${shellMarker}.`
       await composer.fill(shellPrompt)
       await page.getByTestId('send-button').click()
+      shellTaskActive = true
+      shellTaskPage = page
+      shellTaskTitle = statelessTitle
+      shellTaskMarker = shellMarker
       await expect(page.getByTestId('message-list')).toContainText(shellCommand, {
         timeout: 30_000,
       })
@@ -547,9 +740,11 @@ test('PR849 controlled parity across pending work, GFS, host switching, and cold
                     const input = sibling.matches('[data-testid="step-input-preview"]')
                       ? sibling
                       : sibling.querySelector('[data-testid="step-input-preview"]')
-                    const output = sibling.querySelector(
-                      '[data-testid="step-output-panel"] .stepper-step-output-code'
-                    )
+                    const output = sibling.matches('[data-testid="step-output-panel"]')
+                      ? sibling.querySelector('.stepper-step-output-code')
+                      : sibling.querySelector(
+                          '[data-testid="step-output-panel"] .stepper-step-output-code'
+                        )
                     if (input?.textContent?.includes(expected.command) === true) {
                       inputMatches = true
                     }
@@ -565,6 +760,8 @@ test('PR849 controlled parity across pending work, GFS, host switching, and cold
           { timeout: 30_000 }
         )
         .toBe(true)
+      shellTaskActive = false
+      shellTaskPage = undefined
 
       await composer.fill(statelessDraft)
       await openSession(page, statefulTitle, STATEFUL_HOST_DISPLAY)
@@ -593,7 +790,7 @@ test('PR849 controlled parity across pending work, GFS, host switching, and cold
     })
 
     await test.step('reopen the same isolated profile and continue after wake', async () => {
-      const relaunchBefore = hostSnapshot(STATELESS_HOST, STATELESS_HOST, true)
+      const relaunchBefore = await hostSnapshot(STATELESS_HOST, STATELESS_HOST, true)
       expect(relaunchBefore.lifecycle.state).toBe('suspended')
       expect(relaunchBefore.pods).toHaveLength(0)
       let readyObservedAt: number | null = null
@@ -636,10 +833,12 @@ test('PR849 controlled parity across pending work, GFS, host switching, and cold
       if (!readyObservedAt || !afterStateless) {
         throw new Error(`${STATELESS_HOST} readiness observer completed without a Ready snapshot`)
       }
-      afterStateful = hostSnapshot(STATEFUL_HOST, STATEFUL_HOST, false)
+      afterStateful = await hostSnapshot(STATEFUL_HOST, STATEFUL_HOST, false)
       metrics.secondLaunchToReadyMs = readyObservedAt - launchStarted
       metrics.cacheVisibleBeforeReadyObserved =
         readyObservedAt !== null && cachedVisibleAt < readyObservedAt
+      await assertEffectiveStatelessModel(page)
+      metrics.effectiveStatelessModelAsserted = true
       metrics.reopenedSessionId = await page.evaluate(
         hostRef => window.clerum.chat.getLastActive(hostRef),
         STATELESS_HOST
@@ -647,6 +846,7 @@ test('PR849 controlled parity across pending work, GFS, host switching, and cold
       expect(metrics.reopenedSessionId).toBe(metrics.statelessSessionId)
 
       const followStarted = Date.now()
+      const postWakeModelLogSince = new Date().toISOString()
       await sendAndExpect(
         page,
         'Continue the earlier continuity case. From the first turn only, return exactly three labeled fields in order: code=..., owner=..., limit=... Do not repeat control-case values.',
@@ -660,6 +860,11 @@ test('PR849 controlled parity across pending work, GFS, host switching, and cold
       await expect(follow).toContainText(/limit\s*[:=]\s*27/i)
       await expect(follow).not.toContainText(statefulCode)
       await expect(follow).not.toContainText('Mateo')
+      metrics.postWakeRuntimeModelProof = proveStatelessRuntimeModel(
+        afterStateless!.pods[0]!,
+        postWakeModelLogSince
+      )
+      metrics.statelessRuntimeModelLogAsserted = true
 
       await openSession(page, statefulTitle, STATEFUL_HOST_DISPLAY)
       await expect(
@@ -681,6 +886,25 @@ test('PR849 controlled parity across pending work, GFS, host switching, and cold
       statelessPodChanged: afterStateless!.podUids.join(',') !== beforeStateless!.podUids.join(','),
       statefulPodStable: afterStateful!.podUids.join(',') === beforeStateful!.podUids.join(','),
     }
+    afterIdentityFileSnapshot = identityFileSnapshot(afterStateless!.pods[0]!)
+    expect(afterIdentityFileSnapshot).toEqual(beforeIdentityFileSnapshot)
+    const identityAndSoulNonEmpty = (['IDENTITY.md', 'SOUL.md'] as const).every(
+      (file: IdentityFileName) =>
+        beforeIdentityFileSnapshot?.[file].exists === true &&
+        beforeIdentityFileSnapshot[file].sha256 !== EMPTY_FILE_SHA256
+    )
+    const anyIdentityFilePresent = Object.values(beforeIdentityFileSnapshot ?? {}).some(
+      state => state.exists
+    )
+    metrics.identityFileCoverage = !anyIdentityFilePresent
+      ? 'empty-config-only'
+      : identityAndSoulNonEmpty
+        ? 'nonempty-config'
+        : 'empty-or-partial-config'
+    if (REQUIRE_IDENTITY_FILES) {
+      expect(metrics.identityFileCoverage).toBe('nonempty-config')
+    }
+    metrics.effectiveIdentityFileHashesAsserted = true
     Object.assign(metrics, checks)
     expect(checks).toEqual({
       hostUidStable: true,
@@ -695,6 +919,22 @@ test('PR849 controlled parity across pending work, GFS, host switching, and cold
   } finally {
     cancelReadinessObserver = true
     await readinessObserver
+    if (shellTaskActive && shellTaskPage && app) {
+      try {
+        await openSession(shellTaskPage, shellTaskTitle, STATELESS_HOST)
+        metrics.runOwnedShellCleanup = await terminateRunOwnedShellTask(
+          shellTaskPage,
+          shellTaskMarker
+        )
+        shellTaskActive = false
+      } catch (error) {
+        cleanupErrors.push(
+          `Run-owned Shell task termination: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        )
+      }
+    }
     try {
       await closeElectron(app)
     } catch (error) {
