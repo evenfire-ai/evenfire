@@ -159,9 +159,10 @@ export default function GuardrailDetailPage() {
     return CONTROL_ROUTES.guardrails.tab(name, tab)
   }
 
+  // Tab navigation goes through the Link rendered by TabBar (see the href on
+  // each tab option); DetailPageShell requires a handler to render tabs.
   function selectTab(tab: GuardrailTab) {
-    setActiveTab(tab)
-    router.replace(guardrailTabHref(tab))
+    void tab
   }
 
   async function handleUninstall() {
@@ -321,7 +322,7 @@ export default function GuardrailDetailPage() {
                     <tr
                       key={a.name}
                       className="cu-table__row cu-table__row--clickable"
-                      role="button"
+                      role="link"
                       tabIndex={0}
                       onClick={() => router.push(CONTROL_ROUTES.agents.tab(a.name, 'guardrails'))}
                       onKeyDown={e => {
