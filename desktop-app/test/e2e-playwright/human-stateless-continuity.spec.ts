@@ -582,7 +582,9 @@ test('human journey — two Hosts, restart, cache, and two verified stateless wa
 
       // Observe the catalog-driven prewarm wake from authentication while the
       // retained conversation opens from local cache before Ready is observed.
+      let readyObserved = false
       const readyObservation = waitForStatelessReady(270_000).then(result => {
+        readyObserved = true
         return { result, observedAt: Date.now() }
       })
       await openExactSession(page, statelessTitle, STATELESS_HOST)
