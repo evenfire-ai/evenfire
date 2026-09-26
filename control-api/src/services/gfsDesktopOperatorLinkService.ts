@@ -825,13 +825,14 @@ export class GfsDesktopOperatorLinkService {
         input.kind === 'desktop_user'
           ? { kind: 'user' as const, id: parentId }
           : {
-              // The 'operator' principal kind is redacted to the literal
-              // 'operator:' ref everywhere it is disclosed
-              // (traceSafeFieldProjection.ts; append.ts's canonical-prefix
-              // check requires an exact 'operator:' match). The retired
-              // control admin's id is still fully recorded in detailRef below.
+              // The 'operator' principal kind carries no id: the canonical ref
+              // is the literal 'operator:' everywhere one is disclosed
+              // (traceSafeFieldProjection.ts, the db.ts CHECK, append.ts's
+              // canonical-prefix check, subjectKey() in routes/gfs/grants.ts,
+              // routes/external/gfs.ts:231). The retired control admin's id is
+              // still fully recorded in detailRef below.
               kind: 'service' as const,
-              id: null,
+              id: 'operator:',
               principalKind: 'operator' as const,
             },
       sourceAuditRef: `gfs_desktop_operator_link_source:${link.source}`,
