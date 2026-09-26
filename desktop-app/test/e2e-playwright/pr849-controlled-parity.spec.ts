@@ -388,9 +388,9 @@ async function openSession(page: Page, title: string, hostName: string): Promise
   await expect(page.getByRole('textbox', { name: 'Agent message composer' })).toBeVisible({
     timeout: 30_000,
   })
-  await expect(page.getByRole('button', { name: /^Switch chat agent$/ })).toContainText(hostName, {
-    timeout: 30_000,
-  })
+  await expect(
+    page.getByRole('navigation', { name: 'Chat breadcrumb' }).getByText(hostName, { exact: true })
+  ).toBeVisible({ timeout: 30_000 })
 }
 
 async function assertEffectiveStatelessModel(page: Page): Promise<void> {

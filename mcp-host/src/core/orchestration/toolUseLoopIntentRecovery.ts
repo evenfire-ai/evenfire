@@ -91,7 +91,9 @@ export function shouldRecoverWorkflowTriggerTextResponse(
   const normalizedUser = userText.toLowerCase()
   const asksToTrigger = /\b(run|start|trigger|execute|launch)\b/.test(normalizedUser)
   const includesRecipeLikeName = /\b[a-z0-9]+(?:-[a-z0-9]+)+\b/.test(normalizedUser)
-  const namesWorkflow = /\bworkflow\s+recipe\b/.test(normalizedUser) || includesRecipeLikeName
+  const namesWorkflow =
+    /\bworkflow\s+recipe\b/.test(normalizedUser) ||
+    (includesRecipeLikeName && /\b(?:workflow|recipe)\b/.test(normalizedUser))
   if (!asksToTrigger || !namesWorkflow) return false
 
   const normalizedResponse = responseText.toLowerCase()
