@@ -265,4 +265,90 @@ describe('extractOAuthImmutables', () => {
     })
     expect(result?.generic?.clientMode).toBe('confidential')
   })
+
+  // The `spec.oauth` fixtures below are a PROJECTION of control-api's remote producer
+  // `buildRemoteOAuthSpec` (control-api/src/routes/admin/remoteMcp.ts) — control-ui cannot
+  // import that module across services, so field names/types are derived from that producer,
+  // not from a re-imagined contract. This is a projection test, not a cross-service
+  // contract test (same limitation recorded when the discovery tests were renamed, R1-M4).
+  it('surfaces a remote connector (source:remote, no provider) as non-null with remote fields', () => {
+    // T3: before this fix extractOAuthImmutables returned null for a remote CR (it required
+    // a `provider`, which the remote producer omits by REMOTE-FORBID-PROVIDER), so the edit
+    // view rendered a remote connector in the non-OAuth credentials panel. It now returns a
+    // synthetic `provider:'remote'` plus the read-only remote fields (D-B7).
+    const result = extractOAuthImmutables({
+      oauth: {
+        source: 'remote',
+        id: 'client-abc',
+        clientMode: 'public',
+        grantScope: 'user',
+        authorizationEndpoint: 'https://as.example.com/authorize',
+        tokenEndpoint: 'https://as.example.com/token',
+        issuer: 'https://as.example.com',
+        resource: 'https://mcp.example.com',
+        scopes: ['mcp.read'],
+        bearerInBody: false,
+        supportsRefresh: true,
+      },
+    })
+    expect(result).not.toBeNull()
+    expect(result?.provider).toBe('remote')
+    expect(result?.id).toBe('client-abc')
+    expect(result?.grantScope).toBe('user')
+    expect(result?.remote).toEqual({
+      clientMode: 'public',
+      authorizationEndpoint: 'https://as.example.com/authorize',
+      tokenEndpoint: 'https://as.example.com/token',
+      registrationEndpoint: '',
+      issuer: 'https://as.example.com',
+      resource: 'https://mcp.example.com',
+      issForCallback: '',
+      bearerInBody: false,
+      supportsRefresh: true,
+      secretPosture: 'public',
+    })
+  })
+
+  it('reads the remote pre-registered confidential posture and optional endpoints', () => {
+    // Pre-registered confidential: paired client refs present ⇒ 'referenced'. Optional
+    // registrationEndpoint/issForCallback are surfaced when the producer wrote them.
+    const result = extractOAuthImmutables({
+      oauth: {
+        source: 'remote',
+        id: 'client-conf',
+        clientMode: 'confidential',
+        authorizationEndpoint: 'https://as.example.com/authorize',
+        tokenEndpoint: 'https://as.example.com/token',
+        registrationEndpoint: 'https://as.example.com/register',
+        issuer: 'https://as.example.com',
+        resource: 'https://mcp.example.com',
+        issForCallback: 'https://as.example.com',
+        bearerInBody: true,
+        supportsRefresh: false,
+        clientIdRef: { name: 'client-conf-oauth-client', key: 'client_id' },
+        clientSecretRef: { name: 'client-conf-oauth-client', key: 'client_secret' },
+      },
+    })
+    expect(result?.remote?.secretPosture).toBe('referenced')
+    expect(result?.remote?.registrationEndpoint).toBe('https://as.example.com/register')
+    expect(result?.remote?.issForCallback).toBe('https://as.example.com')
+    expect(result?.remote?.bearerInBody).toBe(true)
+  })
+
+  it('reads the remote DCR posture (confidential, no refs) as dynamic', () => {
+    const result = extractOAuthImmutables({
+      oauth: {
+        source: 'remote',
+        id: 'client-dcr',
+        clientMode: 'confidential',
+        authorizationEndpoint: 'https://as.example.com/authorize',
+        tokenEndpoint: 'https://as.example.com/token',
+        issuer: 'https://as.example.com',
+        resource: 'https://mcp.example.com',
+        bearerInBody: false,
+        supportsRefresh: true,
+      },
+    })
+    expect(result?.remote?.secretPosture).toBe('dynamic')
+  })
 })

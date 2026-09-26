@@ -15,6 +15,7 @@ export const OAUTH_PROVIDER_LABELS: Record<string, string> = {
   clickup: 'ClickUp',
   vercel: 'Vercel',
   generic: 'Custom OAuth 2.0 provider',
+  remote: 'Remote MCP server (auto-discovered)',
 }
 
 // Where the operator registers the OAuth app + redirect URI for each provider.

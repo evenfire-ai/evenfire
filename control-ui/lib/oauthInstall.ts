@@ -8,6 +8,8 @@ import type {
   OAuthInstallSubmit,
   OAuthReferenceSecretInput,
 } from './oauthInstall.types'
+import { readRemoteImmutables } from './oauthRemote'
+import type { RemoteImmutableView } from './oauthRemote.types'
 
 // Public callback base URL for the exact redirect URI (D-B4). It is a control-api
 // server env (CONTROL_API_OAUTH_CALLBACK_BASE_URL) and is NOT reachable from the
@@ -171,13 +173,15 @@ export function scopesAreSatisfied(scopes: readonly string[]): boolean {
 // The OAuth fields that are CEL-immutable on the mcpserver CRD (D-B7): a change
 // means delete + recreate, so the edit form shows them read-only. `scopes` is
 // deliberately absent — it is editable (D-B6). `generic` is present only for the
-// `source:'generic'` carril: its endpoints and wire knobs are all create-only
-// (GENERIC-IMM / GENERIC-SECRET-IMM) and shown read-only alongside the base fields.
+// `source:'generic'` carril and `remote` only for `source:'remote'`: each carril's
+// endpoints and wire knobs are create-only (GENERIC-IMM / IMM-6) and shown read-only
+// alongside the base fields.
 export type OAuthImmutableFields = {
   id: string
   provider: string
   grantScope: OAuthGrantScope | ''
   generic?: GenericImmutableView
+  remote?: RemoteImmutableView
 }
 
 /**
@@ -185,7 +189,9 @@ export type OAuthImmutableFields = {
  * read-only display in the edit form (D-B7). Returns null when the server carries
  * no OAuth block. A generic connector has no `provider` (it is discriminated by
  * `source:'generic'`, DEC-28); it is surfaced with a synthetic `provider:'generic'`
- * label plus its read-only endpoints/knobs.
+ * label plus its read-only endpoints/knobs. A remote connector likewise carries no
+ * `provider` (REMOTE-FORBID-PROVIDER) and is discriminated by `source:'remote'`; it is
+ * surfaced with a synthetic `provider:'remote'` label plus its read-only remote fields.
  */
 export function extractOAuthImmutables(
   spec: Record<string, unknown> | null | undefined
@@ -203,6 +209,15 @@ export function extractOAuthImmutables(
       provider: 'generic',
       grantScope,
       generic: readGenericImmutables(oauth),
+    }
+  }
+
+  if (oauth.source === 'remote') {
+    return {
+      id,
+      provider: 'remote',
+      grantScope,
+      remote: readRemoteImmutables(oauth),
     }
   }
 

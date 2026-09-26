@@ -91,4 +91,81 @@ describe('OAuthImmutableFields — immutables read-only in edit (D-B7)', () => {
     expect(screen.queryByLabelText('Refresh endpoint')).toBeNull()
     expect(screen.queryByLabelText('Resource')).toBeNull()
   })
+
+  it('renders the remote carril fields read-only with the confidential-referenced posture (IMM-6)', () => {
+    render(
+      <OAuthImmutableFields
+        oauth={{
+          id: 'client-conf',
+          provider: 'remote',
+          grantScope: 'user',
+          remote: {
+            clientMode: 'confidential',
+            authorizationEndpoint: 'https://as.example.com/authorize',
+            tokenEndpoint: 'https://as.example.com/token',
+            registrationEndpoint: 'https://as.example.com/register',
+            issuer: 'https://as.example.com',
+            resource: 'https://mcp.example.com',
+            issForCallback: 'https://as.example.com',
+            bearerInBody: true,
+            supportsRefresh: false,
+            secretPosture: 'referenced',
+          },
+        }}
+      />
+    )
+    // The synthetic remote provider label plus the discovered endpoints/knobs are shown…
+    expect((screen.getByLabelText('Provider') as HTMLInputElement).value).toBe(
+      'Remote MCP server (auto-discovered)'
+    )
+    const issuer = screen.getByLabelText('Issuer') as HTMLInputElement
+    const authEndpoint = screen.getByLabelText('Authorization endpoint') as HTMLInputElement
+    const registration = screen.getByLabelText('Registration endpoint') as HTMLInputElement
+    const clientType = screen.getByLabelText('Client type') as HTMLInputElement
+    const bearer = screen.getByLabelText('Bearer token in body') as HTMLInputElement
+    expect(issuer.value).toBe('https://as.example.com')
+    expect(authEndpoint.value).toBe('https://as.example.com/authorize')
+    expect(registration.value).toBe('https://as.example.com/register')
+    expect(clientType.value).toBe('Confidential (referenced Secret)')
+    expect(bearer.value).toBe('Yes')
+
+    // …and every one is read-only + disabled (a change means delete + recreate).
+    for (const input of [issuer, authEndpoint, registration, clientType, bearer]) {
+      expect(input).toHaveAttribute('readonly')
+      expect(input).toBeDisabled()
+    }
+
+    // scopes stays editable (D-B6), so no scopes control appears here.
+    expect(screen.queryByLabelText('Scopes')).toBeNull()
+  })
+
+  it('labels a public remote client and omits absent optional endpoints', () => {
+    render(
+      <OAuthImmutableFields
+        oauth={{
+          id: 'client-pub',
+          provider: 'remote',
+          grantScope: 'user',
+          remote: {
+            clientMode: 'public',
+            authorizationEndpoint: 'https://as.example.com/authorize',
+            tokenEndpoint: 'https://as.example.com/token',
+            registrationEndpoint: '',
+            issuer: 'https://as.example.com',
+            resource: 'https://mcp.example.com',
+            issForCallback: '',
+            bearerInBody: false,
+            supportsRefresh: true,
+            secretPosture: 'public',
+          },
+        }}
+      />
+    )
+    expect((screen.getByLabelText('Client type') as HTMLInputElement).value).toBe(
+      'Public (no client secret)'
+    )
+    // Optional endpoints that the connector did not carry are not rendered as fields.
+    expect(screen.queryByLabelText('Registration endpoint')).toBeNull()
+    expect(screen.queryByLabelText('Callback issuer (iss)')).toBeNull()
+  })
 })

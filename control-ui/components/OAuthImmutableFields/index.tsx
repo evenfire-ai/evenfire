@@ -4,11 +4,18 @@ import React from 'react'
 import { Field, TextInput } from '@components/ui'
 import { oauthProviderLabel } from '@constants/oauthProviders'
 import type { GenericImmutableView } from '@lib/oauthGeneric.types'
+import type { RemoteImmutableView, RemoteSecretPosture } from '@lib/oauthRemote.types'
 import type { OAuthImmutableFieldsProps } from './types'
 
 const GRANT_SCOPE_LABELS: Record<string, string> = {
   user: 'Per user',
   context: 'Shared (context)',
+}
+
+const REMOTE_SECRET_POSTURE_LABELS: Record<RemoteSecretPosture, string> = {
+  referenced: 'Confidential (referenced Secret)',
+  dynamic: 'Confidential (dynamic registration)',
+  public: 'Public (no client secret)',
 }
 
 /**
@@ -65,6 +72,7 @@ export function OAuthImmutableFields({ oauth, credentialSecretName }: OAuthImmut
       </Field>
 
       {oauth.generic ? <GenericImmutableFields generic={oauth.generic} /> : null}
+      {oauth.remote ? <RemoteImmutableFields remote={oauth.remote} /> : null}
     </section>
   )
 }
@@ -184,6 +192,108 @@ function GenericImmutableFields({ generic }: { generic: GenericImmutableView }) 
         <TextInput
           id="oauth-immutable-supports-refresh"
           value={YES_NO(generic.supportsRefresh)}
+          readOnly
+          disabled
+        />
+      </Field>
+    </>
+  )
+}
+
+/**
+ * The remote carril's discovered endpoints and wire knobs, read-only. Every field is
+ * create-only (IMM-6): changing one means delete + recreate. `scopes` is editable (D-B6)
+ * and lives elsewhere, so it is absent here.
+ */
+function RemoteImmutableFields({ remote }: { remote: RemoteImmutableView }) {
+  return (
+    <>
+      <Field htmlFor="oauth-immutable-remote-client-mode" label="Client type">
+        <TextInput
+          id="oauth-immutable-remote-client-mode"
+          value={REMOTE_SECRET_POSTURE_LABELS[remote.secretPosture]}
+          readOnly
+          disabled
+        />
+      </Field>
+
+      <Field htmlFor="oauth-immutable-remote-issuer" label="Issuer">
+        <TextInput
+          id="oauth-immutable-remote-issuer"
+          value={remote.issuer || '-'}
+          readOnly
+          disabled
+          monospace
+        />
+      </Field>
+
+      <Field htmlFor="oauth-immutable-remote-auth-endpoint" label="Authorization endpoint">
+        <TextInput
+          id="oauth-immutable-remote-auth-endpoint"
+          value={remote.authorizationEndpoint || '-'}
+          readOnly
+          disabled
+          monospace
+        />
+      </Field>
+
+      <Field htmlFor="oauth-immutable-remote-token-endpoint" label="Token endpoint">
+        <TextInput
+          id="oauth-immutable-remote-token-endpoint"
+          value={remote.tokenEndpoint || '-'}
+          readOnly
+          disabled
+          monospace
+        />
+      </Field>
+
+      {remote.registrationEndpoint ? (
+        <Field htmlFor="oauth-immutable-remote-registration-endpoint" label="Registration endpoint">
+          <TextInput
+            id="oauth-immutable-remote-registration-endpoint"
+            value={remote.registrationEndpoint}
+            readOnly
+            disabled
+            monospace
+          />
+        </Field>
+      ) : null}
+
+      <Field htmlFor="oauth-immutable-remote-resource" label="Resource">
+        <TextInput
+          id="oauth-immutable-remote-resource"
+          value={remote.resource || '-'}
+          readOnly
+          disabled
+          monospace
+        />
+      </Field>
+
+      {remote.issForCallback ? (
+        <Field htmlFor="oauth-immutable-remote-iss-callback" label="Callback issuer (iss)">
+          <TextInput
+            id="oauth-immutable-remote-iss-callback"
+            value={remote.issForCallback}
+            readOnly
+            disabled
+            monospace
+          />
+        </Field>
+      ) : null}
+
+      <Field htmlFor="oauth-immutable-remote-bearer-in-body" label="Bearer token in body">
+        <TextInput
+          id="oauth-immutable-remote-bearer-in-body"
+          value={YES_NO(remote.bearerInBody)}
+          readOnly
+          disabled
+        />
+      </Field>
+
+      <Field htmlFor="oauth-immutable-remote-supports-refresh" label="Issues refresh tokens">
+        <TextInput
+          id="oauth-immutable-remote-supports-refresh"
+          value={YES_NO(remote.supportsRefresh)}
           readOnly
           disabled
         />
