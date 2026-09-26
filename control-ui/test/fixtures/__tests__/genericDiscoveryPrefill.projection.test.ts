@@ -3,10 +3,12 @@ import type { GenericDiscoveryPrefill } from '../../../lib/oauthGeneric.types'
 import { GENERIC_PREFILL_CASES } from '../genericDiscoveryPrefill'
 
 /**
- * Reproduces the producer's projection (control-api discovery.ts
- * `buildGenericDiscoveryPrefill`, spec 19 §5.2) from the verbatim raw probe bytes and
- * asserts each hand-derived `GenericDiscoveryPrefill` fixture equals it. A fixture value
- * that drifts from the real server bytes fails here, so the fixtures cannot silently
+ * This is NOT a cross-service contract test — control-api is not importable from
+ * control-ui, so nothing here fails when the real producer
+ * (`buildGenericDiscoveryPrefill` in control-api/src/oauth/discovery.ts) drifts.
+ * That producer contract is pinned by control-api's own tests. What this file
+ * guarantees is narrower: each hand-derived `GenericDiscoveryPrefill` fixture equals
+ * a LOCAL re-projection of the verbatim raw probe bytes, so a fixture cannot silently
  * encode an invented shape (T1).
  *
  * DRIFT LIMIT: projectPrefill is a HAND MIRROR of buildGenericDiscoveryPrefill

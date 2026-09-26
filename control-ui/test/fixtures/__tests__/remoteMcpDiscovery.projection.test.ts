@@ -27,10 +27,12 @@ import {
 } from '../remoteMcpDiscovery'
 
 /**
- * Reproduces the producer's projection (control-api discovery.ts + remoteMcp.ts
- * route) from the verbatim raw probe bytes and asserts each hand-derived
- * `detected` fixture equals it. A fixture value that drifts from the real server
- * bytes fails here, so the fixtures cannot silently encode an invented shape.
+ * This is NOT a cross-service contract test — control-api is not importable from
+ * control-ui, so nothing here fails when the real producer drifts. The producer
+ * contract for the discover response (`res.body.detected`) is pinned by control-api
+ * `test/routes.adminRemoteMcp.test.ts`. What this file guarantees is narrower: each
+ * hand-derived `detected` fixture equals a LOCAL re-projection of the verbatim raw
+ * probe bytes, so a fixture cannot silently encode an invented shape.
  *
  * DRIFT LIMIT: projectDetected is a HAND MIRROR of the producer logic
  * (`discoverRemoteOAuth` + `selectRegistrationMode`/`deriveQuirks` in
