@@ -10,6 +10,7 @@ import { makeFakeConversation } from '../../core/conversation/__testing__/makeFa
 import { ConversationManager } from '../../core/conversation/conversation'
 import { LlmError, LlmErrorCode } from '../../core/errors'
 import { PressureContextManager } from '../../core/extensions/contextManager'
+import type { Tool } from '../../core/interfaces'
 import { SimpleEventEmitter } from '../../core/orchestration/eventEmitter'
 import { parseCodexToolPresentation } from '../../core/orchestration/toolPresentationPolicy'
 import { executeSingleTool, runToolUseLoop } from '../../core/orchestration/toolUseLoop'
@@ -370,6 +371,48 @@ describe('TaskExecutor', () => {
         provider: 'unknown',
       })
     )
+  })
+
+  it('rechecks live v2 authority before each protected tool effect', async () => {
+    const effect = vi
+      .fn()
+      .mockResolvedValue({ content: 'effect completed', duration_ms: 1, is_error: false })
+    const protectedTool: Tool = {
+      name: () => 'protected-effect',
+      description: () => 'A test effect',
+      parametersSchema: () => ({}),
+      execute: effect,
+      requiresSanitization: () => false,
+      requiresApproval: () => false,
+    }
+    vi.mocked(registerDesktopTools).mockImplementationOnce(async registry => {
+      registry.register(protectedTool)
+    })
+    vi.mocked(runToolUseLoop).mockImplementationOnce(async config => {
+      const tool = config.toolRegistry.get('protected-effect')
+      if (!tool) throw new Error('test_tool_not_registered')
+      await tool.execute({})
+      await tool.execute({})
+      return {
+        type: 'response',
+        content: 'done',
+        usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
+      }
+    })
+    const checkpoint = vi
+      .fn()
+      .mockResolvedValueOnce('allowed' as const)
+      .mockResolvedValueOnce('denied' as const)
+    const task = createTask('Hello', runtimeAuthority().userId)
+    task.sourceMessage!.channelType = 'rpc'
+    task.sourceMessage!.authorityV2 = runtimeAuthority()
+
+    await new TaskExecutor(task, createDeps({ actionAuthorityCheckpoint: checkpoint })).run()
+
+    expect(checkpoint).toHaveBeenCalledTimes(2)
+    expect(checkpoint).toHaveBeenNthCalledWith(1, runtimeAuthority())
+    expect(checkpoint).toHaveBeenNthCalledWith(2, runtimeAuthority())
+    expect(effect).toHaveBeenCalledTimes(1)
   })
 
   it('rechecks v2 authority before continuing after suspended tool results', async () => {
