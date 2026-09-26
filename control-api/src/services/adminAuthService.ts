@@ -565,58 +565,77 @@ export async function deleteControlAdmin(
   actorAdminId: string,
   adminId: string
 ): Promise<{ deleted: true } | { error: 'not_found' }> {
-  return withTransaction(async db => {
-    const actorResult = await db.query(
-      `SELECT id, username, email
+  return withTransaction(db =>
+    retireControlAdminInTransaction(db, {
+      actorAdminId,
+      adminId,
+      reason: 'control_admin_retired',
+    })
+  )
+}
+
+/**
+ * Retire an active control admin inside the caller's transaction: operator
+ * link retired, status disabled, sessions invalidated (session_version + 1),
+ * deletion audit and governed administrative event appended. A target that is
+ * missing or not active is a stable not_found.
+ */
+export async function retireControlAdminInTransaction(
+  db: DbClient,
+  input: { actorAdminId: string; adminId: string; reason: string }
+): Promise<{ deleted: true } | { error: 'not_found' }> {
+  const { actorAdminId, adminId } = input
+  const actorResult = await db.query(
+    `SELECT id, username, email
          FROM control_admin_users
         WHERE id = $1
         LIMIT 1`,
-      [actorAdminId]
-    )
+    [actorAdminId]
+  )
 
-    // Serialize retirement against a concurrent delete/disable. The lifecycle
-    // transition is active -> disabled; a replay must be a stable not-found
-    // result and must not revoke another generation or append duplicate audit.
-    const targetResult = await db.query(
-      `SELECT id, username, email, status
+  // Serialize retirement against a concurrent delete/disable. The lifecycle
+  // transition is active -> disabled; a replay must be a stable not-found
+  // result and must not revoke another generation or append duplicate audit.
+  const targetResult = await db.query(
+    `SELECT id, username, email, status
          FROM control_admin_users
         WHERE id = $1
         FOR UPDATE`,
-      [adminId]
-    )
-    const target = targetResult.rows[0] as
-      | { id: string; username: string; email: string | null; status: 'active' | 'disabled' }
-      | undefined
-    if (!target || target.status !== 'active') return { error: 'not_found' as const }
+    [adminId]
+  )
+  const target = targetResult.rows[0] as
+    | { id: string; username: string; email: string | null; status: 'active' | 'disabled' }
+    | undefined
+  if (!target || target.status !== 'active') return { error: 'not_found' as const }
 
-    await gfsDesktopOperatorLinkService.retireParentInTransaction(db, {
-      kind: 'control_admin',
-      parentId: adminId,
-      actor: { kind: 'control_admin', controlAdminId: actorAdminId },
-      reason: 'control_admin_retired',
-    })
-    const deletedResult = await db.query(
-      `UPDATE control_admin_users
+  await gfsDesktopOperatorLinkService.retireParentInTransaction(db, {
+    kind: 'control_admin',
+    parentId: adminId,
+    actor: { kind: 'control_admin', controlAdminId: actorAdminId },
+    reason: input.reason,
+  })
+  const deletedResult = await db.query(
+    `UPDATE control_admin_users
           SET status = 'disabled', session_version = session_version + 1, updated_at = NOW()
         WHERE id = $1
           AND status = 'active'
         RETURNING id, username, email`,
-      [adminId]
-    )
+    [adminId]
+  )
 
-    if ((deletedResult.rowCount ?? 0) === 0) return { error: 'not_found' as const }
+  if ((deletedResult.rowCount ?? 0) === 0) return { error: 'not_found' as const }
 
-    const actor = actorResult.rows[0] as
-      | { id: string; username: string; email: string | null }
-      | undefined
-    const deleted = deletedResult.rows[0] as {
-      id: string
-      username: string
-      email: string | null
-    }
+  const actor = actorResult.rows[0] as
+    | { id: string; username: string; email: string | null }
+    | undefined
+  const deleted = deletedResult.rows[0] as {
+    id: string
+    username: string
+    email: string | null
+  }
 
-    const auditResult = await db.query(
-      `INSERT INTO control_admin_deletion_audit (
+  const auditResult = await db.query(
+    `INSERT INTO control_admin_deletion_audit (
          actor_admin_id,
          actor_username,
          actor_email,
@@ -626,64 +645,63 @@ export async function deleteControlAdmin(
        )
        VALUES ($1, $2, $3, $4, $5, $6)
        RETURNING id::text AS id`,
-      [
-        actor?.id ?? actorAdminId,
-        actor?.username ?? null,
-        actor?.email ?? null,
-        deleted.id,
-        deleted.username,
-        deleted.email,
-      ]
-    )
+    [
+      actor?.id ?? actorAdminId,
+      actor?.username ?? null,
+      actor?.email ?? null,
+      deleted.id,
+      deleted.username,
+      deleted.email,
+    ]
+  )
 
-    const audit = auditResult.rows[0] as { id: string } | undefined
-    if (!audit?.id) throw new Error('control admin deletion audit insert did not return an id')
-    const requestContext = currentAdministrativeRequestContext()
-    await administrativeEvents.appendInTransaction(
-      db,
-      CONTROL_API_LOCAL_ADMINISTRATIVE_PRINCIPAL_V1,
-      {
-        action: 'control_admin_deleted',
-        outcome: 'committed',
-        operatorSub: actor?.id ?? actorAdminId,
-        operatorUserId: actor?.id ?? actorAdminId,
-        operationId: audit.id,
-        relatedRunId: null,
-        requestId:
-          requestContext?.operatorSub === (actor?.id ?? actorAdminId)
-            ? requestContext.requestId
-            : null,
-        targetType: 'control_admin',
-        targetRef: `control_admin:${deleted.id}`,
-        environment: canonicalTracingEnvironment(),
-        tenantId: null,
-        teamId: null,
-        namespace: null,
-        sourceAuditRef: `control_admin_deletion_audit:${audit.id}`,
-        identityIssuer: config.adminJwtIssuer,
-        resourceAud: config.adminJwtAudience,
-        effectiveScopes: [],
-        authorizationDecision: 'allow',
-        decisionActorSub: actor?.id ?? actorAdminId,
-        targetIdentityIssuer: config.adminJwtIssuer,
-        targetHumanSub: deleted.id,
-        targetUserId: null,
+  const audit = auditResult.rows[0] as { id: string } | undefined
+  if (!audit?.id) throw new Error('control admin deletion audit insert did not return an id')
+  const requestContext = currentAdministrativeRequestContext()
+  await administrativeEvents.appendInTransaction(
+    db,
+    CONTROL_API_LOCAL_ADMINISTRATIVE_PRINCIPAL_V1,
+    {
+      action: 'control_admin_deleted',
+      outcome: 'committed',
+      operatorSub: actor?.id ?? actorAdminId,
+      operatorUserId: actor?.id ?? actorAdminId,
+      operationId: audit.id,
+      relatedRunId: null,
+      requestId:
+        requestContext?.operatorSub === (actor?.id ?? actorAdminId)
+          ? requestContext.requestId
+          : null,
+      targetType: 'control_admin',
+      targetRef: `control_admin:${deleted.id}`,
+      environment: canonicalTracingEnvironment(),
+      tenantId: null,
+      teamId: null,
+      namespace: null,
+      sourceAuditRef: `control_admin_deletion_audit:${audit.id}`,
+      identityIssuer: config.adminJwtIssuer,
+      resourceAud: config.adminJwtAudience,
+      effectiveScopes: [],
+      authorizationDecision: 'allow',
+      decisionActorSub: actor?.id ?? actorAdminId,
+      targetIdentityIssuer: config.adminJwtIssuer,
+      targetHumanSub: deleted.id,
+      targetUserId: null,
+    },
+    {
+      kind: 'service_action',
+      sourceEventId: `control_admin_deletion_audit:${audit.id}`,
+      occurredAt: new Date().toISOString(),
+      reasonCode: 'control_admin_access_revoked',
+      payload: {
+        resource_class: 'control_admin_access',
+        status: 'revoked',
+        target_label: deleted.username,
       },
-      {
-        kind: 'service_action',
-        sourceEventId: `control_admin_deletion_audit:${audit.id}`,
-        occurredAt: new Date().toISOString(),
-        reasonCode: 'control_admin_access_revoked',
-        payload: {
-          resource_class: 'control_admin_access',
-          status: 'revoked',
-          target_label: deleted.username,
-        },
-      }
-    )
+    }
+  )
 
-    return { deleted: true as const }
-  })
+  return { deleted: true as const }
 }
 
 export async function listControlAdmins(): Promise<{

@@ -353,4 +353,40 @@ describe('retireDesktopUser', () => {
     ).rejects.toMatchObject({ code: 'invalid_input' })
     expect(mocks.withTransaction).not.toHaveBeenCalled()
   })
+
+  it('retains an unlinked user as retired inside the caller transaction when asked to', async () => {
+    const { retireDesktopUserInTransaction } = await import('../src/services/directory/users.js')
+    mocks.retireParentInTransaction.mockResolvedValueOnce(false)
+    mocks.txQuery
+      .mockResolvedValueOnce({ rows: [{ id: OPERATION_ID }], rowCount: 1 })
+      .mockResolvedValueOnce(activeUser())
+      .mockResolvedValueOnce({ rows: [{ has_link_history: false }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [{ lifecycle_version: 2 }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+
+    await expect(
+      retireDesktopUserInTransaction(
+        { query: mocks.txQuery },
+        {
+          actor: { kind: 'control_admin', controlAdminId: ADMIN_ID },
+          userId: USER_ID,
+          reason: 'control_admin_replaced',
+          idempotencyKey: 'control_admin_replaced:invitation-1',
+          requestId: null,
+          retainWithoutLinkHistory: true,
+        }
+      )
+    ).resolves.toEqual({
+      id: USER_ID,
+      outcome: 'retired',
+      operationId: OPERATION_ID,
+      lifecycleVersion: 2,
+      replayed: false,
+    })
+    expect(mocks.withTransaction).not.toHaveBeenCalled()
+    const sqls = mocks.txQuery.mock.calls.map(([sql]) => String(sql))
+    expect(sqls.some(sql => sql.includes('DELETE FROM users'))).toBe(false)
+    expect(sqls[3]).toContain("SET lifecycle_state = 'retired'")
+    expect(sqls[4]).toContain("outcome = 'retired'")
+  })
 })
