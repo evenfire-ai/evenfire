@@ -39,8 +39,9 @@ const ENTRY_TTL_MARGIN_MS = 5_000
  */
 const MAX_TRACKED_WAKE_COORDINATIONS = 1_000
 const WAKE_SCOPE = 'host:wake:write' as const
-/** Short upstream retry schedule after a wake reports the host is up. */
-const PROCEED_RETRY_DELAYS_MS = [0, 250, 1_000]
+const ADMISSION_RETRY_DELAYS_MS = [250, 500, 1_000]
+/** Leaves room for one final upstream timeout before Desktop's 60s deadline. */
+export const MAX_REQUEST_HOLD_MS = 48_000
 
 export type WakeHoldOutcome =
   /** Host is (or just became) reachable — re-issue the upstream request now. */
@@ -110,6 +111,8 @@ export type WakeHoldParams = {
   claims: RpcAccessClaims
   /** Raw bearer forwarded to the wake plane when this caller is wake-capable. */
   rpcAccessToken: string
+  /** Optional request deadline, shared with upstream admission retries. */
+  deadlineMs?: number
 }
 
 /**
@@ -132,7 +135,7 @@ export function wakeCoordinationKey(claims: RpcAccessClaims, hostRef: string): s
  * hold budget so a token that cannot survive the wake call is not treated as
  * usable for it.
  */
-function isWakeCapable(claims: RpcAccessClaims, hostRef: string, now: number): boolean {
+export function isWakeCapable(claims: RpcAccessClaims, hostRef: string, now: number): boolean {
   const tokenExpMs = claims.exp * 1000
   if (tokenExpMs - TOKEN_EXP_SAFETY_MARGIN_MS <= now) return false
   if (!claims.scopes.includes(WAKE_SCOPE)) return false
@@ -181,9 +184,23 @@ export class WakeAndHoldCoordinator {
         lastKnownState: 'unknown',
       }
     }
-    const holdBudgetMs = Math.min(this.deps.maxHoldMs, tokenBudgetMs)
+    const holdBudgetMs = Math.min(
+      this.deps.maxHoldMs,
+      tokenBudgetMs,
+      params.deadlineMs === undefined ? Infinity : Math.max(0, params.deadlineMs - now)
+    )
     const deadlineReason =
-      holdBudgetMs < this.deps.maxHoldMs ? 'token-expiring' : 'max-hold-exceeded'
+      tokenBudgetMs <= Math.min(this.deps.maxHoldMs, (params.deadlineMs ?? Infinity) - now)
+        ? 'token-expiring'
+        : 'max-hold-exceeded'
+    if (holdBudgetMs <= 0) {
+      return {
+        kind: 'waking',
+        retryAfterMs: this.deps.pollMs,
+        reason: deadlineReason,
+        lastKnownState: 'unknown',
+      }
+    }
 
     const key = wakeCoordinationKey(params.claims, params.hostRef)
     const wakeCapable = isWakeCapable(params.claims, params.hostRef, now)
@@ -587,12 +604,14 @@ export type RespondWithWakeAndHoldOptions = {
   /** Writes today's error response (502/504) — the pre-wake behavior. */
   respondLegacy: (error: unknown) => void
   coordinator?: WakeAndHoldCoordinator
+  /** Absolute deadline captured before a route's initial availability probe. */
+  deadlineMs?: number
 }
 
 /**
  * Drives one held request through the wake flow and always writes a response:
- * - proceed  → short upstream retry schedule (draining bounces clear in ~1-2s),
- *              then structured host_waking if the pod is still not answering.
+ * - proceed  → retry availability failures until upstream accepts or the
+ *              single request deadline expires.
  * - legacy   → today's 502 path (409 not-stateless, wake plane failure, or a
  *              non-wake-capable caller with no wake authorization to ride).
  * - not-found→ 404.
@@ -602,6 +621,8 @@ export async function respondWithWakeAndHold(
   options: RespondWithWakeAndHoldOptions
 ): Promise<void> {
   const coordinator = options.coordinator ?? hostWakeCoordinator
+  const deadlineMs =
+    options.deadlineMs ?? Date.now() + Math.min(config.wakeMaxHoldMs, MAX_REQUEST_HOLD_MS)
   if (options.res.headersSent) {
     // A response is already committed for this request: parking it could only
     // ever produce a duplicate upstream delivery. Refuse loudly.
@@ -615,12 +636,20 @@ export async function respondWithWakeAndHold(
     host: options.host,
     claims: options.claims,
     rpcAccessToken: options.rpcAccessToken,
+    deadlineMs,
   })
+
+  if (options.res.headersSent) {
+    console.debug(
+      `[RPC_PROXY] late wake-hold artifact ignored (already resolved) host=${options.hostRef} artifact=hold-outcome`
+    )
+    return
+  }
 
   switch (outcome.kind) {
     case 'proceed': {
-      for (const delayMs of PROCEED_RETRY_DELAYS_MS) {
-        if (delayMs > 0) await sleep(delayMs)
+      let availabilityFailures = 0
+      while (Date.now() < deadlineMs) {
         if (options.res.headersSent) {
           // Resolution latch: the response was committed while this retry
           // schedule was pending. Re-forwarding now would duplicate a message
@@ -645,7 +674,15 @@ export async function respondWithWakeAndHold(
             )
             return
           }
-          if (isWakeEligibleHostError(error)) continue
+          if (isWakeEligibleHostError(error)) {
+            const remainingMs = deadlineMs - Date.now()
+            const delayMs =
+              ADMISSION_RETRY_DELAYS_MS[
+                Math.min(availabilityFailures++, ADMISSION_RETRY_DELAYS_MS.length - 1)
+              ]
+            if (remainingMs > 0) await sleep(Math.min(delayMs, remainingMs))
+            continue
+          }
           // The host answered with a non-availability failure — exactly
           // today's behavior for an up-but-erroring host.
           console.warn(
@@ -664,7 +701,7 @@ export async function respondWithWakeAndHold(
         return
       }
       console.warn(
-        `[RPC_PROXY] wake-hold host still unreachable after wake host=${options.hostRef} lastKnownState=${outcome.lastKnownState}`
+        `[RPC_PROXY] wake-hold admission deadline exceeded host=${options.hostRef} lastKnownState=${outcome.lastKnownState}`
       )
       respondHostWaking(options.res, {
         hostRef: options.hostRef,

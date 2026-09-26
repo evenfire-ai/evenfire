@@ -1,5 +1,36 @@
-import { describe, expect, it } from 'vitest'
-import { __test__normalizeHostStatusPayload as normalize } from '../mcpHostRestService.js'
+import { describe, expect, it, vi } from 'vitest'
+import {
+  forwardHostMessageToHost,
+  __test__normalizeHostStatusPayload as normalize,
+} from '../mcpHostRestService.js'
+
+describe('host message availability probe', () => {
+  it('aborts at the requested short timeout with a distinct wake-eligible reason', async () => {
+    vi.useFakeTimers()
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(
+      (_input, init) =>
+        new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => reject(init.signal?.reason))
+        })
+    )
+    try {
+      const pending = forwardHostMessageToHost(
+        { name: 'chatllm', url: 'http://chatllm:8080', headers: {} },
+        { content: 'hello', hostRef: 'chatllm' },
+        { timeoutMs: 750 }
+      )
+      const rejection = expect(pending).rejects.toMatchObject({
+        name: 'HostAvailabilityProbeTimeoutError',
+      })
+      await vi.advanceTimersByTimeAsync(750)
+      await rejection
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+    } finally {
+      fetchMock.mockRestore()
+      vi.useRealTimers()
+    }
+  })
+})
 
 const baseUpstream = {
   agent: {

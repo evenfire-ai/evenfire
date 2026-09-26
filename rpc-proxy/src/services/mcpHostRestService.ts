@@ -131,7 +131,7 @@ export type HostRuntimeMessageRequest = {
 export async function forwardHostMessageToHost(
   host: ResolvedServerConnection,
   message: HostRuntimeMessageRequest,
-  options?: { async?: boolean }
+  options?: { async?: boolean; timeoutMs?: number }
 ): Promise<Record<string, unknown>> {
   const payload = {
     ...message,
@@ -140,7 +140,15 @@ export async function forwardHostMessageToHost(
   const baseUrl = host.url.replace(/\/+$/, '')
   const query = options?.async ? '?async=true' : ''
   const abortController = new AbortController()
-  const timeout = setTimeout(() => abortController.abort(), config.upstreamTimeoutMs)
+  const timeout = setTimeout(() => {
+    if (options?.timeoutMs !== undefined) {
+      const error = new Error('Initial host availability probe timed out')
+      error.name = 'HostAvailabilityProbeTimeoutError'
+      abortController.abort(error)
+    } else {
+      abortController.abort()
+    }
+  }, options?.timeoutMs ?? config.upstreamTimeoutMs)
   try {
     const response = await fetch(`${baseUrl}/v1/runtime/messages${query}`, {
       method: 'POST',

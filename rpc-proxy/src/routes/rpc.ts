@@ -32,7 +32,9 @@ import {
   validateRpcRequest,
 } from '../services/mcpProxyService.js'
 import {
+  MAX_REQUEST_HOLD_MS,
   isUpstreamTimeoutError,
+  isWakeCapable,
   isWakeEligibleHostError,
   respondWithWakeAndHold,
 } from '../services/wakeAndHold.js'
@@ -45,6 +47,8 @@ const RFC1123_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/
 // own copy (the two services share no package, so each names its own).
 const SESSIONS_LIMIT_CAP = 100
 const MESSAGES_LIMIT_CAP = 200
+/** A suspended pod may spend seconds failing DNS/connect before the wake starts. */
+const MESSAGE_AVAILABILITY_PROBE_MS = 750
 
 function isSafeUpstreamPathSegment(value: string): boolean {
   return (
@@ -403,6 +407,7 @@ export function createRpcRouter(): Router {
             : {}),
         }
 
+        const wakeDeadlineMs = Date.now() + Math.min(config.wakeMaxHoldMs, MAX_REQUEST_HOLD_MS)
         const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
           teamId: auth.teamId,
           ...(traceContext.sessionId
@@ -437,9 +442,11 @@ export function createRpcRouter(): Router {
           `[RPC_PROXY] user=${auth.sub} host=${hostRef} method=host-message-rest${isAsync ? ' (async)' : ''} attachments=${attachmentCount}`
         )
         let upstreamResponse: Record<string, unknown> | null = null
+        const wakeCapable = isWakeCapable(auth, hostRef, Date.now())
         try {
           upstreamResponse = await forwardHostMessageToHost(host, forwardedBody, {
             async: isAsync,
+            ...(wakeCapable ? { timeoutMs: MESSAGE_AVAILABILITY_PROBE_MS } : {}),
           })
         } catch (error) {
           console.warn(
@@ -447,7 +454,12 @@ export function createRpcRouter(): Router {
               error instanceof Error ? error.message : String(error)
             }`
           )
-          if (isWakeEligibleHostError(error)) {
+          if (
+            isWakeEligibleHostError(error) ||
+            (wakeCapable &&
+              error instanceof Error &&
+              error.name === 'HostAvailabilityProbeTimeoutError')
+          ) {
             // Stateless wake-and-hold: a down or draining host triggers a
             // control-api wake (and possibly a bounded hold) instead of the
             // generic 502. Non-stateless hosts fall back to the legacy path.
@@ -457,6 +469,7 @@ export function createRpcRouter(): Router {
               host,
               claims: auth,
               rpcAccessToken,
+              deadlineMs: wakeDeadlineMs,
               attemptUpstream: async () => {
                 const retried = await forwardHostMessageToHost(host, forwardedBody, {
                   async: isAsync,
