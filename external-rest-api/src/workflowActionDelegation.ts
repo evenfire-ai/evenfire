@@ -1,4 +1,4 @@
-import type { Request } from 'express'
+import type { Request, Response } from 'express'
 
 export const WORKFLOW_ACTION_DELEGATION_HEADER = 'x-evenfire-action-delegation'
 export const WORKFLOW_ACTION_DELEGATION_MAX_LENGTH = 4096
@@ -8,6 +8,13 @@ export class WorkflowActionDelegationTransportError extends Error {
     super('invalid_action_delegation_transport')
     this.name = 'WorkflowActionDelegationTransportError'
   }
+}
+
+/** Map malformed local delegation transport to the canonical public client error. */
+export function sendWorkflowActionDelegationTransportError(error: unknown, res: Response): boolean {
+  if (!(error instanceof WorkflowActionDelegationTransportError)) return false
+  res.status(400).json({ error: 'invalid_action_delegation' })
+  return true
 }
 
 function rawHeaderValues(req: Request): string[] {

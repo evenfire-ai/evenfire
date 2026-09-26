@@ -13,7 +13,10 @@ import {
   sendSanitizedControlApiPublicError,
 } from '../http/publicApiError.js'
 import { type AuthedRequest, extractAuthToken, requireAuth } from '../middleware/auth.js'
-import { workflowActionDelegationHeaders } from '../workflowActionDelegation.js'
+import {
+  sendWorkflowActionDelegationTransportError,
+  workflowActionDelegationHeaders,
+} from '../workflowActionDelegation.js'
 
 type GfsRouterOptions = {
   edgeRequestLimit?: number
@@ -136,6 +139,7 @@ function gfsControlApiRequest<T>(
 }
 
 function forwardControlApiError(error: unknown, res: Response, next: NextFunction): void {
+  if (sendWorkflowActionDelegationTransportError(error, res)) return
   const statuses =
     error instanceof Error &&
     'status' in error &&

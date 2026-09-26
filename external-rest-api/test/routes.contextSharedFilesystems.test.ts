@@ -217,4 +217,17 @@ describe('Method gating', () => {
       { userSessionToken: 'good-token', extraHeaders: {}, throwOnHttpError: false }
     )
   })
+
+  it('returns the canonical client error for malformed v2 delegation transport', async () => {
+    authTokenMock.verifyToken.mockReturnValue({ ...claims, sessionContract: 'v2' })
+
+    const response = await request(buildApp())
+      .get('/me/contexts/ctx-a/shared-filesystems/team-mission/proxy/files')
+      .set('authorization', 'Bearer good-token')
+      .set('x-evenfire-action-delegation', 'first,second')
+      .expect(400)
+
+    expect(response.body).toEqual({ error: 'invalid_action_delegation' })
+    expect(controlApiClientMock.controlApiStreamRequest).not.toHaveBeenCalled()
+  })
 })

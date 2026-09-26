@@ -337,6 +337,27 @@ describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', 
     })
   })
 
+  it('returns the canonical client error for malformed v2 delegation transport', async () => {
+    authTokenMock.verifyToken.mockReturnValue({
+      userId: 'u1',
+      email: 'u@example.com',
+      teamId: null,
+      role: 'member',
+      exp: 9_999_999_999,
+      sessionContract: 'v2',
+    })
+
+    const response = await request(buildApp())
+      .post('/me/gfs/token')
+      .set('authorization', 'Bearer sess-xyz')
+      .set('x-evenfire-action-delegation', 'first,second')
+      .send({})
+      .expect(400)
+
+    expect(response.body).toEqual({ error: 'invalid_action_delegation' })
+    expect(clientMock.controlApiRequest).not.toHaveBeenCalled()
+  })
+
   it('forwards a user delegation grant to /external/gfs/grants', async () => {
     clientMock.controlApiRequest.mockResolvedValue({ ok: true })
     const body = {
