@@ -2925,7 +2925,7 @@ h3 {
   overflow: hidden;
   min-height: 0;
   height: calc(100vh - var(--window-titlebar-height));
-  padding: var(--space-4) var(--space-4) 0;
+  padding: var(--space-1) var(--space-2) var(--space-2) var(--space-2);
   gap: var(--space-2-5);
 }
 
@@ -4993,12 +4993,16 @@ h3 {
   stroke-linejoin: round;
 }
 
+/* Portaled to document.body and positioned by useFlyoutPosition with a fixed
+   rect clamped to the chat drawer (or the viewport in full screen). It sits above
+   the persistent sidebar flyout layer (dropdown + 1000), matching the
+   GfsResourceMenu portal. */
 .agent-title-selector-menu {
-  position: absolute;
-  top: calc(100% + var(--space-1));
-  left: 0;
-  z-index: calc(var(--layer-dropdown) + 60);
+  position: fixed;
+  z-index: calc(var(--layer-dropdown) + 1100);
   min-width: 240px;
+  max-height: calc(100vh - (var(--space-4) * 2));
+  overflow-y: auto;
   border: 1px solid rgba(var(--edge-rgb), 0.32);
   border-radius: var(--radius-md);
   background: var(--panel);
@@ -5101,13 +5105,18 @@ h3 {
   fill: currentColor;
 }
 
-/* Sections sub-menu opens to the right of its row, vertically aligned. */
+/* Sections sub-menu: portaled to document.body and positioned by
+   useFlyoutPosition (right-of its row's dots button, flipping/clamping inside the
+   drawer or viewport). It must be portaled rather than nested because the menu is
+   a scroll container (max-height + overflow) and an overflow box can't host a
+   sub-menu that escapes it. Sits above the sidebar flyout layer, like the Gfs
+   resource-menu submenu. */
 .agent-title-selector-submenu {
-  position: absolute;
-  left: calc(100% + var(--space-1));
-  top: 0;
-  z-index: calc(var(--layer-dropdown) + 61);
-  min-width: 200px;
+  position: fixed;
+  z-index: calc(var(--layer-dropdown) + 1101);
+  width: min(200px, calc(100vw - (var(--space-4) * 2)));
+  max-height: calc(100vh - (var(--space-4) * 2));
+  overflow-y: auto;
   border: 1px solid rgba(var(--edge-rgb), 0.32);
   border-radius: var(--radius-md);
   background: var(--panel);
@@ -13315,6 +13324,17 @@ pre {
   height: 100%;
 }
 
+/* Propagate the 0 width-floor down the chat body chain so no descendant's
+   min-content (the greeting heading, the composer action row) inflates the slim
+   column and reintroduces the horizontal scrollbar the surface just clipped.
+   Full-screen gets this from `.chat-view-surface__content > .agent-page`, which
+   the drawer's <ChatPage> renders outside of; this mirrors it, scoped here. */
+.chat-drawer .agent-page,
+.chat-drawer .agent-workspace-shell,
+.chat-drawer .agent-workspace-body-slot {
+  min-width: 0;
+}
+
 .chat-drawer .agent-workspace-shell .chat-thread {
   padding: var(--space-2);
 }
@@ -13351,11 +13371,44 @@ pre {
    use; keep the base rule's hero top offset and bottom padding intact. */
 .chat-drawer .agent-workspace-shell .agent-workspace-greeting-row {
   padding-inline: var(--space-2);
+  /* The slim column can't fit the greeting + agent selector on one line at the
+     full-screen 2xl size, so let them wrap and step the type down to lg. */
+  flex-wrap: wrap;
+}
+
+.chat-drawer .agent-workspace-greeting-row .agent-workspace-greeting,
+.chat-drawer .agent-workspace-greeting-row .agent-title-selector-trigger.ui-button,
+.chat-drawer .agent-workspace-greeting-row .agent-title-selector-trigger.ui-button--sm {
+  font-size: var(--font-size-lg);
+}
+
+/* Let the agent selector shrink and its label ellipsize instead of forcing the
+   row wider than the column (full-screen pins it at `flex: 0 0 auto`). */
+.chat-drawer .agent-workspace-greeting-row .agent-title-selector {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.chat-drawer .agent-workspace-greeting-row .agent-title-selector-trigger {
+  min-width: 0;
 }
 
 .chat-drawer .composer {
   margin-top: var(--space-1);
   padding: var(--space-2);
+}
+
+/* The composer action row packs the agent selector, reference toolbar, model
+   chip and send button; at full-screen widths they sit on one line, but their
+   combined min-content exceeds the slim column. Let the row wrap and the
+   right-hand cluster shrink so it reflows instead of forcing the column wider. */
+.chat-drawer .composer-input-actions {
+  flex-wrap: wrap;
+}
+
+.chat-drawer .composer-actions-right {
+  min-width: 0;
+  flex: 0 1 auto;
 }
 
 /* Tighter table cells so the data table breathes in the slim column; the
@@ -13406,6 +13459,14 @@ pre {
 .chat-drawer__surface {
   flex: 1 1 auto;
   min-height: 0;
+  /* min-width:0 establishes a 0 width-floor so the embedded chat's min-content
+     can't inflate this fixed rail wider than the drawer; overflow-x:hidden clips
+     any residual. Per CSS spec `overflow-y:auto` with a `visible` overflow-x
+     would compute overflow-x to `auto` and surface a horizontal scrollbar — this
+     pins it to `hidden`. The full-screen route gets the same floor/clip from
+     `.chat-view-surface`, which the drawer's <ChatPage> renders outside of. */
+  min-width: 0;
+  overflow-x: hidden;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
@@ -13482,20 +13543,14 @@ pre {
   padding-top: var(--space-1);
 }
 
-/* Overlay confinement (spec §6). The native app view paints above ALL DOM, so
-   any chat overlay that crosses the embed's rect is hidden behind it. The drawer
-   is RIGHT-docked, so the embed sits to its LEFT. The composer reference menu is
-   anchored at the composer's left edge and its submenu flies RIGHT
-   (`left: calc(100% + …)`) — i.e. INTO the drawer, away from the embed — so it is
-   already off the app rect. Pin that rightward direction inside the drawer so a
-   future global LEFT flip can't leak the submenu over the embed and be occluded.
-   (The spec's suggested LEFT flip is inverted for a right-docked drawer: leftward
-   pushes the submenu over the embed, not off it. See report.) */
-.chat-drawer .composer-reference-submenu {
-  left: calc(100% + var(--space-1));
-  right: auto;
-}
-
+/* Overlay confinement. The native app view paints above ALL DOM, so any chat
+   overlay that crosses the embed's rect is hidden behind it. The drawer is
+   RIGHT-docked, so the embed sits to its LEFT. The composer reference SUBMENU
+   used to be in-flow here and had to pin a rightward direction to stay off the
+   embed; it is now portaled to document.body and confined to the drawer's rect
+   in JS (useFlyoutPosition), so no in-flow override is needed — a submenu clamped
+   inside the drawer is by construction off the embed. The primary panel is still
+   in flow and left-anchored at the composer's left edge. */
 .chat-drawer .composer-reference-menu-panel {
   left: 0;
   right: auto;
@@ -13592,7 +13647,13 @@ pre {
    absorb the row's free space and shove the search pill to the far left, on top
    of the app's leading actions. */
 .window-titlebar__actions .chat-drawer-toggle {
-  width: 30px;
+  /* 36px wide to match the bell's footprint: the real toggle is an IconButton,
+     whose `.ui-icon-button` base pins `min-width: 36px`, so its used width is 36
+     regardless of this `width`. Pin `min-width` here too so the placeholder span
+     (which lacks `.ui-icon-button`) reserves the identical 36px — otherwise it
+     collapses to 30px and the search pill still shifts ~6px on toggle. */
+  width: 36px;
+  min-width: 36px;
   height: 30px;
   min-height: 30px;
   border-color: transparent;
@@ -13615,6 +13676,15 @@ pre {
 .window-titlebar__actions .chat-drawer-toggle[aria-pressed='true'] {
   border-color: rgba(var(--accent-rgb), 0.42);
   background: var(--surface-hover);
+}
+
+/* Slot-reserving twin of the chat-drawer toggle. On chat tabs the real button
+   is unmounted, but this inert placeholder shares `.chat-drawer-toggle`'s box
+   (same 36px footprint + top-bar gap) so the toggle appears/disappears in place
+   without sliding the search pill and bell sideways. */
+.window-titlebar__actions .chat-drawer-toggle--placeholder {
+  visibility: hidden;
+  pointer-events: none;
 }
 
 :root[data-theme='dark'] .window-titlebar__actions .search-input {
@@ -13859,8 +13929,6 @@ pre {
 
 .composer-reference-menu-panel,
 .composer-reference-submenu {
-  position: absolute;
-  bottom: calc(100% + var(--space-1));
   z-index: calc(var(--layer-dropdown) + 60);
   min-width: 210px;
   border: 1px solid rgba(var(--edge-rgb), 0.32);
@@ -13872,14 +13940,23 @@ pre {
   gap: var(--space-0-5);
 }
 
+/* The primary panel stays in flow (210px fits the 340px drawer). Only the
+   submenu is portaled. */
 .composer-reference-menu-panel {
+  position: absolute;
+  bottom: calc(100% + var(--space-1));
   left: 0;
 }
 
+/* Portaled to document.body and positioned by useFlyoutPosition with a fixed
+   rect clamped to the chat drawer (or the viewport in full screen), so it carries
+   no in-flow anchor offsets. It sits above the persistent sidebar flyout layer
+   (dropdown + 1000), matching the GfsResourceMenu portal. */
 .composer-reference-submenu {
-  left: calc(100% + var(--space-1));
-  bottom: calc(var(--space-1) + 34px);
-  top: auto;
+  position: fixed;
+  z-index: calc(var(--layer-dropdown) + 1101);
+  width: min(210px, calc(100vw - (var(--space-4) * 2)));
+  min-width: min(210px, calc(100vw - (var(--space-4) * 2)));
   max-height: min(420px, 65vh);
   overflow-y: auto;
   scrollbar-width: thin;
@@ -13896,38 +13973,6 @@ pre {
 
 .composer-reference-submenu::-webkit-scrollbar-thumb:hover {
   background: rgba(var(--edge-rgb), 0.6);
-}
-
-.composer-reference-submenu--plugins {
-  bottom: calc(var(--space-1) + 68px);
-}
-
-.composer-reference-submenu--connectors {
-  bottom: calc(var(--space-1) + 34px);
-}
-
-.composer-reference-submenu--agent-files {
-  bottom: var(--space-1);
-}
-
-.composer-inline .composer-reference-submenu {
-  bottom: auto;
-  top: var(--space-1);
-}
-
-.composer-inline .composer-reference-submenu--plugins {
-  top: var(--space-1);
-  bottom: auto;
-}
-
-.composer-inline .composer-reference-submenu--connectors {
-  top: calc(var(--space-1) + 34px);
-  bottom: auto;
-}
-
-.composer-inline .composer-reference-submenu--agent-files {
-  top: calc(var(--space-1) + 68px);
-  bottom: auto;
 }
 
 .composer-inline .composer-reference-menu-panel {
@@ -14413,6 +14458,10 @@ pre {
   height: 8px;
   min-width: 8px;
   max-width: 8px;
+  /* Lock height too: the base .badge sets height/min-height: 22px, which would
+     stretch this dot into an ellipse without a matching min/max-height. */
+  min-height: 8px;
+  max-height: 8px;
   border: 1.5px solid rgba(var(--info-rgb), 0.28);
   border-top-color: var(--info);
   background: transparent;
@@ -14425,6 +14474,8 @@ pre {
   height: 12px;
   min-width: 12px;
   max-width: 12px;
+  min-height: 12px;
+  max-height: 12px;
 }
 
 .badge--awaiting_approval {
@@ -16551,6 +16602,116 @@ pre {
   color: var(--text-muted);
   font-size: var(--font-size-sm);
   font-weight: var(--font-weight-medium);
+}
+
+/* Parent-folder confirmation for inherited access rows (Share dialog). */
+.da-gfs-parent-update-dialog {
+  width: min(460px, 94vw);
+  display: grid;
+  gap: var(--space-4);
+  padding: var(--space-5);
+  border: 1px solid rgba(var(--edge-rgb), 0.42);
+  border-radius: var(--radius-xl);
+  background: var(--bg-elev);
+  box-shadow: var(--shadow-hard);
+}
+
+.da-gfs-parent-update-dialog__header h3 {
+  margin: 0;
+  color: var(--text);
+  font-size: var(--font-size-xl);
+  font-weight: var(--font-weight-semibold);
+  line-height: var(--line-height-tight);
+}
+
+.da-gfs-parent-update-dialog__body {
+  min-width: 0;
+  display: grid;
+  gap: var(--space-3);
+}
+
+.da-gfs-parent-update-dialog__lead {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+  line-height: var(--line-height-normal);
+}
+
+.da-gfs-parent-update-dialog__learn-more {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+  cursor: pointer;
+}
+
+.da-gfs-parent-update-dialog__learn-more:focus-visible {
+  outline: 2px solid rgba(var(--focus-rgb), 0.8);
+  outline-offset: 2px;
+}
+
+/* R1-H1: every affected ancestor folder plus the file, stacked. */
+.da-gfs-parent-update-dialog__folders {
+  display: grid;
+  gap: var(--space-1);
+}
+
+.da-gfs-parent-update-dialog__folder {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid rgba(var(--edge-rgb), 0.32);
+  border-radius: var(--radius-lg);
+  background: var(--bg);
+}
+
+.da-gfs-parent-update-dialog__name {
+  overflow: hidden;
+  color: var(--text);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.da-gfs-parent-update-dialog__change {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.da-gfs-parent-update-dialog__role {
+  color: var(--text-muted);
+  font-weight: var(--font-weight-medium);
+}
+
+.da-gfs-parent-update-dialog__role--next {
+  color: var(--text);
+}
+
+.da-gfs-parent-update-dialog__help {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+  padding-inline-start: 1.25rem;
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+  line-height: var(--line-height-normal);
+}
+
+.da-gfs-parent-update-dialog__actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
 }
 
 .da-gfs-grant-list__chips {

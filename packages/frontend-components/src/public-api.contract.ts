@@ -1,10 +1,16 @@
 import {
+  ConfirmationDialog,
   DataTable,
   DataViewHeader,
+  DialogShell,
   GroupedTableBody,
+  MultiSelectActionDialog,
   RecordList,
   RecordListRow,
   RowActionMenu,
+  SecretEditField,
+  SimpleEditDialog,
+  SingleValueEditDialog,
   TableCell,
   TableHeaderCell,
   TableRow,
@@ -18,10 +24,16 @@ import {
 } from './index'
 import type {
   CellKind,
+  ConfirmationDialogProps,
   DataViewHeaderProps,
+  DialogShellProps,
   GroupedTableBodyProps,
   GroupedTableSummaryCell,
+  MultiSelectActionDialogProps,
   RowAction,
+  SecretEditFieldProps,
+  SimpleEditDialogProps,
+  SingleValueEditDialogProps,
   SortDirection,
   SortValue,
   TableHeaderCellProps,
@@ -46,6 +58,12 @@ export const publicRuntimeApi = {
   compareSortValues,
   stableSortRows,
   useTableSort,
+  ConfirmationDialog,
+  DialogShell,
+  MultiSelectActionDialog,
+  SecretEditField,
+  SimpleEditDialog,
+  SingleValueEditDialog,
 }
 
 export type PublicTypeApi = {
@@ -59,4 +77,10 @@ export type PublicTypeApi = {
   tableHeaderCell: TableHeaderCellProps
   tableStateRow: TableStateRowProps
   tableVariant: TableVariant
+  confirmationDialog: ConfirmationDialogProps
+  dialogShell: DialogShellProps
+  multiSelectActionDialog: MultiSelectActionDialogProps
+  secretEditField: SecretEditFieldProps
+  simpleEditDialog: SimpleEditDialogProps
+  singleValueEditDialog: SingleValueEditDialogProps<string>
 }

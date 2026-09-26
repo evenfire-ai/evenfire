@@ -45,7 +45,7 @@ test.describe('GFS operator journey', () => {
       await test.step('operator remains on the GFS page with the seeded folder visible', async () => {
         await expect(page).toHaveURL(/\/global-file-system(?:$|\?)/, { timeout: 15_000 })
         await expect(page).not.toHaveURL(/\?next=%2Fgfs/)
-        await expect(page.getByRole('region', { name: 'Global File System browser' })).toBeVisible()
+        await expect(page.getByRole('region', { name: 'EvenDrive browser' })).toBeVisible()
         await expect(
           page
             .getByRole('list', { name: 'Current folder resources' })

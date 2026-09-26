@@ -20,6 +20,7 @@ import { logger } from '../logger'
 import { CodexLlmProxyClient, CodexProxyError } from './codexLlmProxyClient'
 import { classifyUnknown } from './errorClassification'
 import { CodexAuthorizeError, ProviderAttemptAuthorizer } from './providerAttemptAuthorizer'
+import { rateLimitRetryDelayMs, waitBeforeRetry } from './rateLimitRetry'
 import { type LlmProvider, descriptorFor } from './registryCore'
 import type { ClassifiedError, SingleTurnProvider } from './types'
 
@@ -460,6 +461,31 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
         ...(providerDispatched !== undefined ? { providerDispatched } : {}),
       }
     }
+    // A control-plane hop no live process answered (#720): retryable, with the
+    // failover class of the overload arm below; only the label differs.
+    if (code === 'control_plane_unavailable') {
+      return {
+        code: LlmErrorCode.ControlPlaneUnavailable,
+        retryable: true,
+        message: err instanceof Error ? err.message : String(err),
+        providerCode: code,
+        ...(providerDispatched !== undefined ? { providerDispatched } : {}),
+      }
+    }
+    // An upstream 4xx the proxy could not map (#720): the same request gets
+    // the same answer, so it is terminal and has its own label.
+    // httpStatus is the upstream's own status, when the proxy sent it (R1-H2).
+    if (code === 'upstream_rejected') {
+      const upstreamStatus = err instanceof CodexProxyError ? err.upstreamStatus : undefined
+      return {
+        code: LlmErrorCode.UpstreamRejected,
+        retryable: false,
+        message: err instanceof Error ? err.message : String(err),
+        providerCode: code,
+        ...(upstreamStatus !== undefined ? { httpStatus: upstreamStatus } : {}),
+        ...(providerDispatched !== undefined ? { providerDispatched } : {}),
+      }
+    }
     if (code === 'provider_unavailable' || code === 'connection_unavailable') {
       return {
         code: LlmErrorCode.ModelOverloaded,
@@ -538,7 +564,7 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
     }
   ) {
     if (options?.signal?.aborted) {
-      throw new CodexProxyError('canceled', 'aborted before authorize', false)
+      throw new CodexProxyError('canceled', 'aborted before authorize', { dispatched: false })
     }
     // An over-long history is reported as a context-length failure instead of
     // a generic invalid request; it is thrown before authorize and dispatch.
@@ -594,43 +620,64 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
     ) {
       throw new CodexAuthorizeError('no_grant', 'Codex catalog policy binding is missing')
     }
-    const providerAttemptIndex = context.providerAttemptIndex ?? this.nextProviderAttemptIndex++
-    const authorized = await this.deps.authorizer.authorize(
-      {
+    const attempt = async (providerAttemptIndex: number) => {
+      const authorized = await this.deps.authorizer.authorize(
+        {
+          request: wireRequest,
+          requestHash,
+          invocationId: context.invocationId ?? wireRequest.requestId,
+          attemptGeneration: context.attemptGeneration ?? 1,
+          providerAttemptIndex,
+          policyRevision: context.policyRevision,
+          policyHash: context.policyHash,
+          hostRef: context.hostRef,
+          recipeNamespace: context.recipeNamespace,
+          recipeName: context.recipeName,
+          userId: context.userId,
+          ...(context.pluginWorkloadSdkProviderAttemptId
+            ? { pluginWorkloadSdkProviderAttemptId: context.pluginWorkloadSdkProviderAttemptId }
+            : {}),
+          ...(context.targetRef ? { targetRef: context.targetRef } : {}),
+        },
+        // Authorize shares the caller's deadline. Without this the attempt could
+        // keep a cancelled request alive on the control-api hop while the bridge
+        // has already given up on it.
+        { ...(options?.signal ? { signal: options.signal } : {}) }
+      )
+      if (!('accessToken' in authorized)) {
+        // Bound: authorize returns ticket material only.
+      }
+      const streamed = await this.deps.proxy.stream({
+        executionTicket: authorized.executionTicket,
+        requestHash: authorized.requestHash,
         request: wireRequest,
-        requestHash,
-        invocationId: context.invocationId ?? wireRequest.requestId,
-        attemptGeneration: context.attemptGeneration ?? 1,
+        signal: options?.signal,
+      })
+      return {
+        ...streamed,
+        providerAttemptId: authorized.providerAttemptId,
         providerAttemptIndex,
-        policyRevision: context.policyRevision,
-        policyHash: context.policyHash,
-        hostRef: context.hostRef,
-        recipeNamespace: context.recipeNamespace,
-        recipeName: context.recipeName,
-        userId: context.userId,
-        ...(context.pluginWorkloadSdkProviderAttemptId
-          ? { pluginWorkloadSdkProviderAttemptId: context.pluginWorkloadSdkProviderAttemptId }
-          : {}),
-        ...(context.targetRef ? { targetRef: context.targetRef } : {}),
-      },
-      // Authorize shares the caller's deadline. Without this the attempt could
-      // keep a cancelled request alive on the control-api hop while the bridge
-      // has already given up on it.
-      { ...(options?.signal ? { signal: options.signal } : {}) }
-    )
-    if (!('accessToken' in authorized)) {
-      // Bound: authorize returns ticket material only.
+      }
     }
-    const streamed = await this.deps.proxy.stream({
-      executionTicket: authorized.executionTicket,
-      requestHash: authorized.requestHash,
-      request: wireRequest,
-      signal: options?.signal,
-    })
-    return {
-      ...streamed,
-      providerAttemptId: authorized.providerAttemptId,
-      providerAttemptIndex,
+    try {
+      return await attempt(context.providerAttemptIndex ?? this.nextProviderAttemptIndex++)
+    } catch (err) {
+      // G1-9 (#720): a 429 that advised a short Retry-After is retried once,
+      // after that delay, under a new authorize: a redeemed ticket cannot be
+      // reused. The 429 may come from the proxy or from control-api's
+      // authorize limiter (G1-11). A caller that pins the attempt index owns
+      // its own retries.
+      const waitMs =
+        context.providerAttemptIndex === undefined &&
+        (err instanceof CodexProxyError || err instanceof CodexAuthorizeError)
+          ? rateLimitRetryDelayMs(err.code, err.retryAfterMs)
+          : undefined
+      if (waitMs === undefined) throw err
+      await waitBeforeRetry(waitMs, options?.signal)
+      // The wait stops watching the signal once its timer fires: an abort in
+      // that gap must not reach a second authorize (G1-12).
+      options?.signal?.throwIfAborted()
+      return attempt(this.nextProviderAttemptIndex++)
     }
   }
 

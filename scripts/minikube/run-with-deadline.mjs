@@ -116,16 +116,27 @@ function spawnErrorExitCode(error) {
   return 1;
 }
 
+// Returns the EPERM error when the kernel refused the signal, otherwise null.
+// macOS answers kill(-pgid) with EPERM when every process left in the group is
+// already exiting, so a refusal alone does not mean the group is alive; the
+// caller decides by checking the group afterwards (reapProcessGroup).
 function killProcessGroup(signal) {
-  if (!child.pid) return;
+  if (!child.pid) return null;
   try {
     if (process.platform === "win32") child.kill(signal);
     else process.kill(-child.pid, signal);
   } catch (error) {
-    if (error?.code !== "ESRCH") throw error;
+    if (error?.code === "ESRCH") return null;
+    if (error?.code === "EPERM") return error;
+    throw error;
   }
+  return null;
 }
 
+// EPERM counts as alive. macOS answers signal 0 for a group that holds only
+// zombies with EPERM too, the same as SIGKILL, so an exiting group reads as
+// alive until its last zombie is reaped and the probe turns ESRCH; the reap
+// window in reapProcessGroup must span that reap.
 function processGroupExists() {
   if (!child.pid) return false;
   if (process.platform === "win32") {
@@ -141,12 +152,28 @@ function processGroupExists() {
   }
 }
 
+// The window is measured on the monotonic clock: a wall-clock step (NTP) must
+// not shorten or stretch it.
 async function waitForProcessGroupExit(milliseconds) {
-  const deadline = Date.now() + milliseconds;
-  while (processGroupExists() && Date.now() < deadline) {
-    await wait(Math.min(25, Math.max(1, deadline - Date.now())));
+  const deadline = performance.now() + milliseconds;
+  while (processGroupExists() && performance.now() < deadline) {
+    await wait(Math.min(25, Math.max(1, deadline - performance.now())));
   }
   return !processGroupExists();
+}
+
+// The last action on the group. A refused SIGKILL is accepted only when the
+// group is gone afterwards; a refused SIGKILL on a live group is rethrown.
+async function reapProcessGroup() {
+  const refusal = killProcessGroup("SIGKILL");
+  const groupGone = await waitForProcessGroupExit(1_000);
+  if (refusal === null) return;
+  if (groupGone) {
+    report("reap-permission-denied", `groupGone=${groupGone}`);
+    return;
+  }
+  report("reap-failed", `reason=EPERM groupGone=${groupGone}`);
+  throw refusal;
 }
 
 const heartbeat = setInterval(() => {
@@ -180,6 +207,7 @@ for (const signal of HANDLED_SIGNALS) {
       signalEscalated = true;
     }
     teardownStarted = true;
+    // A refusal here is settled by the reapProcessGroup that ends teardown.
     killProcessGroup("SIGKILL");
   };
   signalHandlers.set(signal, handler);
@@ -208,8 +236,7 @@ if (first.kind === "exit") {
   // A bounded operation may not daemonize work behind the runner. If the
   // direct child exited while a helper remained in its process group, reap the
   // helper before returning the child's exact status.
-  killProcessGroup("SIGKILL");
-  await waitForProcessGroupExit(1_000);
+  await reapProcessGroup();
 } else if (first.kind === "spawn-error") {
   finalExitCode = spawnErrorExitCode(first.error);
   report("spawn-failed", `durationMs=${elapsedMilliseconds()} exitCode=${finalExitCode}`);
@@ -222,7 +249,14 @@ if (first.kind === "exit") {
     `durationMs=${elapsedMilliseconds()} signal=${terminatingSignal} exitCode=${finalExitCode}`,
   );
 
-  if (!signalEscalated) killProcessGroup(terminatingSignal);
+  // A refused graceful signal is reported, because the whole grace below may
+  // then pass with the group alive; the reap after it settles the group.
+  if (!signalEscalated) {
+    const refusal = killProcessGroup(terminatingSignal);
+    if (refusal !== null) {
+      report("signal-refused", `signal=${terminatingSignal} reason=${refusal.code}`);
+    }
+  }
   await waitForProcessGroupExit(killGraceSeconds * 1_000);
 
   // Always address the original process group after graceful teardown. The
@@ -230,8 +264,7 @@ if (first.kind === "exit") {
   // the first signal; killing by negative PGID closes that otherwise invisible
   // orphan path. A repeated parent signal reaches this same action immediately
   // through the handlers above.
-  killProcessGroup("SIGKILL");
-  await waitForProcessGroupExit(1_000);
+  await reapProcessGroup();
   report("terminated", `durationMs=${elapsedMilliseconds()} exitCode=${finalExitCode}`);
 }
 
