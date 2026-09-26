@@ -1228,7 +1228,7 @@ describe('POST /admin/mcp-servers/remote — DCR install saga (C2)', () => {
   // `in-use`. The row stays byte-identical; the throwaway client we minted is revoked.
   it('TOCTOU: a live CR appears after the pre-check → 409 server_name_in_use via the INSERT fence, row untouched', async () => {
     vi.mocked(discoverRemoteOAuth).mockResolvedValue({ ok: true, result: dcrConfidentialResult })
-    const { db, rows } = makeInMemoryDynamicClientsDb()
+    const { db } = makeInMemoryDynamicClientsDb()
     const seededInstall = randomUUID()
     await insertDynamicClientPending(db, ENC_KEY, {
       ...LIVE_ROW,
