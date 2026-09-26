@@ -825,8 +825,13 @@ export class GfsDesktopOperatorLinkService {
         input.kind === 'desktop_user'
           ? { kind: 'user' as const, id: parentId }
           : {
+              // The 'operator' principal kind is redacted to the literal
+              // 'operator:' ref everywhere it is disclosed
+              // (traceSafeFieldProjection.ts; append.ts's canonical-prefix
+              // check requires an exact 'operator:' match). The retired
+              // control admin's id is still fully recorded in detailRef below.
               kind: 'service' as const,
-              id: `control_admin:${parentId}`,
+              id: null,
               principalKind: 'operator' as const,
             },
       sourceAuditRef: `gfs_desktop_operator_link_source:${link.source}`,

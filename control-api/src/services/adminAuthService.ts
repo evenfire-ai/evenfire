@@ -1,6 +1,7 @@
 import { config } from '../config.js'
 import { type DbClient, pool, withTransaction } from '../db.js'
 import { rootLogger } from '../observability/logger.js'
+import { retireDesktopUserInTransaction } from './directory/users.js'
 import { gfsDesktopOperatorLinkService } from './gfsDesktopOperatorLinkService.js'
 import { currentAdministrativeRequestContext } from './tracing/adminOperationContext.js'
 import { AdministrativeEventService } from './tracing/administrativeEvents.js'
@@ -987,6 +988,21 @@ export async function completeControlAdminInvitation(input: {
     const invitation = await getPendingControlAdminInvitation(db, input.invitationId, email)
     if (!invitation) return { error: 'not_found' as const }
 
+    // Lock and re-check before creating anything: getPendingControlAdminInvitation
+    // does not lock, and the accept UPDATE below has no status guard, so a revoke
+    // that commits meanwhile (DELETE route, MCC resend/cancel, or a replace-inviter
+    // acceptance revoking this inviter's other invitations) must win here.
+    const lockedInvitation = await db.query(
+      `SELECT id
+         FROM control_admin_invitations
+        WHERE id = $1
+          AND status IN ('pending', 'opened')
+          AND expires_at > NOW()
+        FOR UPDATE`,
+      [invitation.id]
+    )
+    if ((lockedInvitation.rowCount ?? 0) === 0) return { error: 'not_found' as const }
+
     const conflict = await db.query(
       `SELECT
          EXISTS(SELECT 1 FROM control_admin_users WHERE lower(email) = lower($1)) AS email_exists,
@@ -1014,8 +1030,177 @@ export async function completeControlAdminInvitation(input: {
       [invitation.id, admin.id]
     )
 
+    if (invitation.replaceInviter && invitation.invitedByAdminId) {
+      await replaceInviterInTransaction(db, {
+        invitationId: invitation.id,
+        inviterAdminId: invitation.invitedByAdminId,
+        newAdmin: admin,
+      })
+    }
+
     return admin
   })
+}
+
+export const CONTROL_ADMIN_REPLACED_REASON = 'control_admin_replaced'
+
+// admin > inviter > member; used so a copied role never downgrades a target.
+const TEAM_ROLE_RANK = (column: string) =>
+  `(CASE ${column} WHEN 'admin' THEN 3 WHEN 'inviter' THEN 2 ELSE 1 END)`
+
+/**
+ * Hand the inviter's access to the invitee and retire the inviter, inside the
+ * transaction that created the invitee's control admin. An inviter that is
+ * gone or no longer active has nothing to hand over; the caller still commits.
+ */
+async function replaceInviterInTransaction(
+  db: DbClient,
+  input: { invitationId: string; inviterAdminId: string; newAdmin: AdminUserRecord }
+): Promise<void> {
+  const inviterResult = await db.query(
+    `SELECT id::text AS id, email, status
+       FROM control_admin_users
+      WHERE id = $1
+      FOR UPDATE`,
+    [input.inviterAdminId]
+  )
+  const inviter = inviterResult.rows[0] as
+    | { id: string; email: string | null; status: 'active' | 'disabled' }
+    | undefined
+  if (!inviter || inviter.status !== 'active') return
+
+  const inviterDesktop = inviter.email
+    ? await db.query(
+        `SELECT id::text AS id
+           FROM users
+          WHERE lower(email) = lower($1)
+            AND lifecycle_state = 'active'
+          LIMIT 1
+          FOR UPDATE`,
+        [inviter.email]
+      )
+    : { rows: [], rowCount: 0 }
+  const inviterDesktopUserId = (inviterDesktop.rows[0] as { id: string } | undefined)?.id ?? null
+  // completeControlAdminInvitation always inserts the normalized invitation email.
+  const newAdminEmail = input.newAdmin.email ?? ''
+
+  if (inviterDesktopUserId) {
+    // (1a) The invitee already has a desktop user: raise its memberships.
+    await db.query(
+      `INSERT INTO team_members(team_id, user_id, role, status)
+       SELECT source.team_id, target.id, source.role, 'active'
+         FROM team_members source
+         JOIN users target
+           ON lower(target.email) = lower($2)
+          AND target.lifecycle_state = 'active'
+        WHERE source.user_id = $1::uuid
+          AND source.status = 'active'
+       ON CONFLICT (team_id, user_id) DO UPDATE
+          SET role = CASE
+                       WHEN team_members.status <> 'active' THEN EXCLUDED.role
+                       WHEN ${TEAM_ROLE_RANK('EXCLUDED.role')} > ${TEAM_ROLE_RANK('team_members.role')}
+                         THEN EXCLUDED.role
+                       ELSE team_members.role
+                     END,
+              status = 'active',
+              updated_at = NOW()`,
+      [inviterDesktopUserId, newAdminEmail]
+    )
+    // (1b) The desktop invitation is accepted after this transaction commits
+    // (auth.ts:504-507) and upserts role = EXCLUDED.role (membership.ts:319-326),
+    // so the roles must also live on the invitation or 1a would be downgraded.
+    // Materialize a legacy single-team invitation first so adding rows cannot
+    // hide its fallback team (loadInvitationTeams, membership.ts:242-267).
+    await db.query(
+      `INSERT INTO invitation_teams(invitation_id, team_id, role)
+       SELECT i.id, i.team_id, i.role
+         FROM invitations i
+        WHERE lower(i.email) = lower($1)
+          AND i.purpose = 'admin_desktop_access'
+          AND i.status = 'pending'
+          AND i.team_id IS NOT NULL
+       ON CONFLICT (invitation_id, team_id) DO NOTHING`,
+      [newAdminEmail]
+    )
+    await db.query(
+      `INSERT INTO invitation_teams(invitation_id, team_id, role)
+       SELECT i.id, source.team_id, source.role
+         FROM invitations i
+         JOIN team_members source
+           ON source.user_id = $1::uuid
+          AND source.status = 'active'
+        WHERE lower(i.email) = lower($2)
+          AND i.purpose = 'admin_desktop_access'
+          AND i.status = 'pending'
+       ON CONFLICT (invitation_id, team_id) DO UPDATE
+          SET role = CASE
+                       WHEN ${TEAM_ROLE_RANK('EXCLUDED.role')} > ${TEAM_ROLE_RANK('invitation_teams.role')}
+                         THEN EXCLUDED.role
+                       ELSE invitation_teams.role
+                     END`,
+      [inviterDesktopUserId, newAdminEmail]
+    )
+
+    // (2) Retire, never hard-delete, the inviter's desktop identity. Its approval
+    // medium accounts go first: the approval reader grants canApprove on an
+    // enabled account alone (workflowApprovalReader.ts:763-773) and never reads
+    // users.lifecycle_state; the retained tombstone path skips the disable that
+    // retireDesktopUser's hard-delete branch does (users.ts:483-499).
+    await db.query(
+      `UPDATE workflow_approval_medium_accounts
+          SET disabled_at = COALESCE(disabled_at, NOW()),
+              updated_at = NOW()
+        WHERE user_id = $1::uuid
+          AND disabled_at IS NULL`,
+      [inviterDesktopUserId]
+    )
+    await db.query(
+      `UPDATE workflow_approval_medium_challenges
+          SET consumed_at = COALESCE(consumed_at, NOW()),
+              expires_at = LEAST(expires_at, NOW())
+        WHERE user_id = $1::uuid
+          AND consumed_at IS NULL`,
+      [inviterDesktopUserId]
+    )
+    await retireDesktopUserInTransaction(db, {
+      actor: { kind: 'control_admin', controlAdminId: input.newAdmin.id },
+      userId: inviterDesktopUserId,
+      reason: CONTROL_ADMIN_REPLACED_REASON,
+      idempotencyKey: `${CONTROL_ADMIN_REPLACED_REASON}:${input.invitationId}`,
+      requestId: null,
+      retainWithoutLinkHistory: true,
+    })
+  }
+
+  // (3) Retire the inviter exactly as deleteControlAdmin does.
+  const retired = await retireControlAdminInTransaction(db, {
+    actorAdminId: input.newAdmin.id,
+    adminId: inviter.id,
+    reason: CONTROL_ADMIN_REPLACED_REASON,
+  })
+  if ('error' in retired) {
+    throw new Error('inviting control admin changed during replace-inviter acceptance')
+  }
+
+  // (4) Nothing the inviter started may outlive them. `invitations` has no
+  // inviter column (dropped by applyInvitationAndUserPasswordMigration), so the
+  // paired desktop invitations are found by the revoked admin invitations' emails.
+  await db.query(
+    `WITH revoked AS (
+       UPDATE control_admin_invitations
+          SET status = 'revoked'
+        WHERE invited_by_admin_id = $1::uuid
+          AND id <> $2::uuid
+          AND status IN ('pending', 'opened')
+        RETURNING email
+     )
+     UPDATE invitations
+        SET status = 'revoked'
+      WHERE purpose = 'admin_desktop_access'
+        AND status = 'pending'
+        AND lower(email) IN (SELECT lower(email) FROM revoked)`,
+    [inviter.id, input.invitationId]
+  )
 }
 
 export async function completeControlAdminEmailChangeRequest(input: {
