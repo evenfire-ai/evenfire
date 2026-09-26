@@ -510,7 +510,8 @@ async function waitForWorkflowRecipeDeleted(token: string, name: string): Promis
 
 function externalEgressReady(server: Record<string, unknown>): boolean {
   const status = server.status as
-    { conditions?: Array<{ type?: string; status?: string }> } | undefined
+    | { conditions?: Array<{ type?: string; status?: string }> }
+    | undefined
   return (
     status?.conditions?.some(
       condition => condition.type === 'ExternalEgressReady' && condition.status === 'True'
@@ -571,7 +572,8 @@ async function submitRegistryInstallForm(
         return false
       }
       const body = response.request().postDataJSON() as
-        { serverName?: string; registryEntryName?: string } | undefined
+        | { serverName?: string; registryEntryName?: string }
+        | undefined
       return body?.serverName === serverName && body?.registryEntryName === registryEntryName
     },
     { timeout: 30_000 }
@@ -1427,7 +1429,8 @@ test.describe('H. Control-UI Smoke Tests', () => {
             return false
           }
           const body = r.request().postDataJSON() as
-            { serverName?: string; registryEntryName?: string } | undefined
+            | { serverName?: string; registryEntryName?: string }
+            | undefined
           return body?.serverName === serverName && body?.registryEntryName === 'mcp-filesystem'
         },
         { timeout: 30_000 }

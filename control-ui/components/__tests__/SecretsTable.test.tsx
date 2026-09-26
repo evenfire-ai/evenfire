@@ -664,7 +664,7 @@ describe('SecretsTable — connector row actions', () => {
     expect(apiSendMock).not.toHaveBeenCalled()
   })
 
-  it('navigates Update to the connector secret edit page with its registry source', async () => {
+  it('navigates Update to the connector secret edit page for its attached connector', async () => {
     mockConnectorRow()
     renderTable()
     await openRowMenu()
@@ -672,8 +672,31 @@ describe('SecretsTable — connector row actions', () => {
     fireEvent.click(screen.getByRole('menuitem', { name: 'Update' }))
 
     expect(mockPush).toHaveBeenCalledWith(
-      '/secrets/connector/linear-credentials/edit?registryEntry=mcp-linear&registryVersion=1.4.0'
+      '/secrets/connector/linear-credentials/edit?server=linear-conn'
     )
+  })
+
+  it('navigates Update without a server filter when several connectors share the secret', async () => {
+    getMcpServersMock.mockResolvedValue({
+      items: [
+        {
+          metadata: { name: 'conn-a' },
+          spec: { envSecret: { name: 'shared-credentials' } },
+        },
+        {
+          metadata: { name: 'conn-b' },
+          spec: { envSecret: { name: 'shared-credentials' } },
+        },
+      ],
+    })
+    renderTable()
+
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'Actions for connector secret shared-credentials' })
+    )
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Update' }))
+
+    expect(mockPush).toHaveBeenCalledWith('/secrets/connector/shared-credentials/edit')
   })
 
   it('still prefills the create flow from the row Add action', async () => {

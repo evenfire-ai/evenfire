@@ -49,7 +49,10 @@ type McpSecretRow = {
 }
 type RecipeSecretStatus = 'provisioned' | 'missing'
 type RecipeSecretRowOwnership =
-  { kind: 'shared' } | { kind: 'owner-recipe'; recipeName: string } | { kind: 'unlabeled' } | null // missing rows: not yet provisioned, ownership chosen at create time.
+  | { kind: 'shared' }
+  | { kind: 'owner-recipe'; recipeName: string }
+  | { kind: 'unlabeled' }
+  | null // missing rows: not yet provisioned, ownership chosen at create time.
 type RecipeSecretRow = {
   name: string
   namespace: string
@@ -681,62 +684,58 @@ export function SecretsTable({
                           : 'Created manually or source unknown.'}
                       </td>
                       <td className="cu-table__cell-actions">
-                        <div style={{ display: 'inline-flex', gap: '0.35rem' }}>
-                          <RowActionsMenu
-                            ariaLabel={`Actions for connector secret ${row.name}`}
-                            horizontalTrigger
-                            actions={[
-                              {
-                                key: 'add',
-                                label: 'Add',
-                                onClick: () => {
-                                  const source =
-                                    row.registrySources.length === 1
-                                      ? row.registrySources[0]
+                        <RowActionsMenu
+                          ariaLabel={`Actions for connector secret ${row.name}`}
+                          horizontalTrigger
+                          actions={[
+                            {
+                              key: 'add',
+                              label: 'Add',
+                              onClick: () => {
+                                const source =
+                                  row.registrySources.length === 1
+                                    ? row.registrySources[0]
+                                    : undefined
+                                router.push(
+                                  CONTROL_ROUTES.secrets.new({
+                                    scope: 'mcp',
+                                    name: row.name,
+                                    registryEntry: source?.name,
+                                    registryVersion: source?.version,
+                                  })
+                                )
+                              },
+                            },
+                            {
+                              key: 'update',
+                              label: 'Update',
+                              onClick: () => {
+                                router.push(
+                                  CONTROL_ROUTES.secrets.editConnector(
+                                    row.name,
+                                    row.servers.length === 1
+                                      ? { server: row.servers[0] }
                                       : undefined
-                                  router.push(
-                                    CONTROL_ROUTES.secrets.new({
-                                      scope: 'mcp',
-                                      name: row.name,
-                                      registryEntry: source?.name,
-                                      registryVersion: source?.version,
-                                    })
                                   )
-                                },
+                                )
                               },
-                              {
-                                key: 'update',
-                                label: 'Update',
-                                onClick: () => {
-                                  const source =
-                                    row.registrySources.length === 1
-                                      ? row.registrySources[0]
-                                      : undefined
-                                  router.push(
-                                    CONTROL_ROUTES.secrets.editConnector(row.name, {
-                                      registryEntry: source?.name,
-                                      registryVersion: source?.version,
-                                    })
-                                  )
-                                },
-                              },
-                              {
-                                key: 'delete',
-                                label: 'Delete',
-                                danger: true,
-                                // deleteMcpSecret requires the Secret's live
-                                // uid/resourceVersion as its CAS precondition.
-                                // Connector rows are derived from McpServer
-                                // references and no list API returns that
-                                // identity, so delete stays inert rather than
-                                // issuing an unfenced delete.
-                                disabled: true,
-                                disabledReason: 'Delete is not available for this secret.',
-                                onClick: () => {},
-                              },
-                            ]}
-                          />
-                        </div>
+                            },
+                            {
+                              key: 'delete',
+                              label: 'Delete',
+                              danger: true,
+                              // deleteMcpSecret requires the Secret's live
+                              // uid/resourceVersion as its CAS precondition.
+                              // Connector rows are derived from McpServer
+                              // references and no list API returns that
+                              // identity, so delete stays inert rather than
+                              // issuing an unfenced delete.
+                              disabled: true,
+                              disabledReason: 'Delete is not available for this secret.',
+                              onClick: () => {},
+                            },
+                          ]}
+                        />
                       </td>
                     </tr>
                   ))
