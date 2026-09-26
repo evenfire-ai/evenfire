@@ -56,6 +56,18 @@ Before running anything, verify ALL of these:
       `pre-gate-sync` can restart every deployment; T2 then renews the hold
       once, before Health/Playwright, and records `PortForwards=` evidence.
       Without it an in-run sync leaves the hold on terminated pods.
+- [ ] When the same owned profile is reused after a HEAD change, the
+      orchestrator runs `pre-gate-sync` for a targeted change and refreshes
+      forwards after any restarted services. For `targeted-sync`, also supply
+      a bounded `T2_HEALTHCHECK_COMMAND` that exercises the affected
+      user-facing path.
+- [ ] Before a login-based health journey patches HCC or creates fault
+      fixtures, resolve its seeded test credential in-process. Source
+      `scripts/e2e/load-dotenv.sh` and `scripts/e2e/admin-credentials.sh`;
+      use `dotenv_load_canonical_root` and `e2e_resolve_admin_password`.
+      An explicit `E2E_USER_PASSWORD` may override the journey credential.
+      Never inspect, print, log, or persist `.env` contents, even for a
+      key-presence check. Fail before cluster mutation if resolution fails.
 
 Shell contract-test rule: fixtures that exercise Git/lease state must use a
 temporary repository via `scripts/tests/lib/minikube-fixture-repo.sh`. Keep the
@@ -113,6 +125,12 @@ Rules that override any shortcut idea:
 - Never set `T2_RUN_T0=false` / `T2_RUN_T1=false` by hand to skip a lane that
   was not certified on this HEAD; the harness refuses it unless the plan is
   `already-synced`, and evidence must show the earlier green runs.
+- Before repeating a completed full T0/T1/T2 certification, propose the
+  repeat with its reason and expected cost and ask the user to decide. A
+  recommendation is not consent. If the user declines after HEAD changes,
+  preserve the prior evidence but report the new HEAD as uncertified. A
+  same-HEAD `minikube-t2-runtime` retry finishes an authorized run without
+  repeating T0/T1.
 
 ## Step 3 — T1 specifics (Real PostgreSQL)
 
