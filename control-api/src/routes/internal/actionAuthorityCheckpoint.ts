@@ -31,9 +31,10 @@ export function createInternalActionAuthorityCheckpointRouter(gateway: K8sGatewa
     '/internal/action-authority/checkpoint',
     requireActionCheckpointCaller,
     async (req, res) => {
+      const caller = req.actionCheckpointCaller!
       let parsed
       try {
-        parsed = parseActionAuthorityCheckpointRequest(req.body, req.actionCheckpointCaller!)
+        parsed = parseActionAuthorityCheckpointRequest(req.body, caller)
       } catch {
         res.status(400).json({
           version: ACTION_CONTEXT_VERSION,
@@ -42,7 +43,9 @@ export function createInternalActionAuthorityCheckpointRouter(gateway: K8sGatewa
         })
         return
       }
-      if (parsed.operationId === 'chat.message.invoke' && !parsed.hostMessageAdmission) {
+      const chargesHostMessageAdmission =
+        parsed.operationId === 'chat.message.invoke' && caller.service === 'rpc-proxy'
+      if (chargesHostMessageAdmission && !parsed.hostMessageAdmission) {
         res.status(400).json({
           version: ACTION_CONTEXT_VERSION,
           status: 'invalid_binding',
@@ -51,9 +54,8 @@ export function createInternalActionAuthorityCheckpointRouter(gateway: K8sGatewa
         return
       }
       let admissionReceipt: string | undefined
-      if (parsed.operationId === 'chat.message.invoke') {
+      if (chargesHostMessageAdmission) {
         const admissionContext = parsed.hostMessageAdmission!
-        const caller = req.actionCheckpointCaller!
         if (admissionContext.receipt !== undefined) {
           if (
             !verifyHostMessageAdmissionReceipt(
@@ -87,11 +89,11 @@ export function createInternalActionAuthorityCheckpointRouter(gateway: K8sGatewa
           budget,
           correlationId: req.correlationId,
         })
-        if (result.status === 'allowed' && parsed.operationId === 'chat.message.invoke') {
+        if (result.status === 'allowed' && chargesHostMessageAdmission) {
           try {
             admissionReceipt ??= issueHostMessageAdmissionReceipt(
               parsed,
-              req.actionCheckpointCaller!,
+              caller,
               parsed.hostMessageAdmission!
             )
           } catch {

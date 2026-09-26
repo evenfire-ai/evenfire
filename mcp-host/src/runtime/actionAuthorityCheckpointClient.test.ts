@@ -101,6 +101,7 @@ describe('mcp-host action-authority checkpoint client', () => {
       'content-type': 'application/json',
     })
     expect(JSON.parse(init.body)).toEqual(mcpHostActionAuthorityCheckpointRequest(binding))
+    expect(JSON.parse(init.body)).not.toHaveProperty('hostMessageAdmission')
   })
 
   it('refreshes the existing runtime credential once after 401 and retries with its new token', async () => {
