@@ -354,7 +354,7 @@ export function rejectUnadmittedV2DerivedView(
   res.status(503).json({ error: 'authority_unavailable' })
 }
 
-function sendCheckpointError(res: Response, error: ActionAuthorityCheckpointError): void {
+export function sendCheckpointError(res: Response, error: ActionAuthorityCheckpointError): void {
   if (error.rateLimit) {
     for (const [name, value] of Object.entries(error.rateLimit.headers)) {
       if (value) res.setHeader(name, value)
