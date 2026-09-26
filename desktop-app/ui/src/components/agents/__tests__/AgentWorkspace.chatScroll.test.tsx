@@ -60,6 +60,13 @@ vi.mock('@hooks/domain/useConnectorsController', async importActual => ({
   }),
 }))
 vi.mock('../ComposerPanel', () => ({ ComposerPanel: () => null }))
+vi.mock('@contexts/ChatComposerStateContext', () => ({
+  useChatComposerStateContext: () => ({
+    composerImageAttachments: [],
+    composerReferenceAttachments: [],
+    requestComposerFocus: vi.fn(),
+  }),
+}))
 vi.mock('../ContextWindowIndicator', () => ({ ContextWindowIndicator: () => null }))
 vi.mock('../InFlightAssistantPlaceholder', () => ({ InFlightAssistantPlaceholder: () => null }))
 vi.mock('../NudgeArea', () => ({ NudgeArea: () => null }))
@@ -178,6 +185,7 @@ function WorkspaceHarness({
               pendingApprovalsLoading: false,
               pendingApprovalActionId: null,
               toasts: [],
+              pushToast: vi.fn(),
               markNotificationsRead: vi.fn(),
               clearNotifications: vi.fn(),
               removeNotification: vi.fn(),

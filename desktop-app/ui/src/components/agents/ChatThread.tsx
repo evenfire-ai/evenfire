@@ -8,6 +8,7 @@ import {
   useState,
 } from 'react'
 import { useAgentChatActionsContext } from '@contexts/AgentChatActionsContext'
+import { useChatComposerStateContext } from '@contexts/ChatComposerStateContext'
 import { useChatListContext } from '@contexts/ChatListContext'
 import { useChatThreadStateContext } from '@contexts/ChatThreadStateContext'
 import { useMcpRuntimeContext } from '@contexts/McpRuntimeContext'
@@ -16,6 +17,7 @@ import { useNotificationsContext } from '@contexts/NotificationsContext'
 import { Button, IconButton, MenuItem } from '@components/Common'
 import { ConfirmDialog } from '@components/ConfirmDialog'
 import { GfsFileIcon } from '@components/GfsFileIcon'
+import { GfsImagePreview } from '@components/GfsImagePreview'
 import { MessageArtifactActions } from '@components/MessageArtifactActions'
 import { SecureHtmlPreview } from '@components/SecureHtmlPreview'
 import { IconConnectors, IconContexts, IconWorkflows } from '@components/SidebarNav/icons'
@@ -32,6 +34,8 @@ import {
   getChatMessageAttachmentTypeLabel,
   parseChatMessageDisplay,
 } from '../../lib/chatMessageAttachments'
+import { getComposerDraft, setComposerDraft } from '../../lib/composerDraftStore'
+import { buildComposerResendDraft, findNearestPrecedingUserMessage } from '../../lib/composerResend'
 import {
   extractHtmlVisualization,
   formatChatTimestamp,
@@ -146,6 +150,22 @@ function canDownloadResponseFileAttachment(attachment: ChatMessageAttachment): b
   )
 }
 
+/**
+ * BUG-176: a user-attached image whose bytes ride on the attachment
+ * (inline base64, same contract as response_file) can reopen the shared
+ * `GfsImagePreview` modal from the sent-message chip. Parsed legacy
+ * `[Attached images]` chips carry labels only and stay inert.
+ */
+function canPreviewUploadedFileAttachment(attachment: ChatMessageAttachment): boolean {
+  return (
+    attachment.type === 'uploaded_file' &&
+    attachment.encoding === 'base64' &&
+    typeof attachment.dataBase64 === 'string' &&
+    attachment.dataBase64.length > 0 &&
+    (attachment.mimeType ?? '').startsWith('image/')
+  )
+}
+
 function downloadResponseFileAttachment(attachment: ChatMessageAttachment): void {
   if (!canDownloadResponseFileAttachment(attachment)) return
   const binary = window.atob(attachment.dataBase64 ?? '')
@@ -167,7 +187,13 @@ function downloadResponseFileAttachment(attachment: ChatMessageAttachment): void
 }
 
 function MessageAttachmentList({ attachments }: { attachments: ChatMessageAttachment[] }) {
+  const [previewAttachmentId, setPreviewAttachmentId] = useState<string | null>(null)
   if (!attachments.length) return null
+  const previewAttachment =
+    attachments.find(
+      attachment =>
+        attachment.id === previewAttachmentId && canPreviewUploadedFileAttachment(attachment)
+    ) ?? null
   return (
     <span className="message-attachments-list" aria-label="Message attachments">
       {attachments.map(attachment => {
@@ -176,12 +202,9 @@ function MessageAttachmentList({ attachments }: { attachments: ChatMessageAttach
           attachment.type === 'uploaded_file' ? 'uploaded-image' : attachment.type
         const downloadable = canDownloadResponseFileAttachment(attachment)
         const isResponseFile = attachment.type === 'response_file'
-        return (
-          <span
-            key={attachment.id}
-            className={`message-attachment-chip${isResponseFile ? ' message-attachment-chip--response-file' : ''}`}
-            title={typeLabel}
-          >
+        const previewable = canPreviewUploadedFileAttachment(attachment)
+        const chipBody = (
+          <>
             <span
               className={`composer-reference-icon message-attachment-icon composer-reference-icon--${iconTypeClass}`}
               aria-hidden="true"
@@ -192,6 +215,26 @@ function MessageAttachmentList({ attachments }: { attachments: ChatMessageAttach
               <span className="message-attachment-type-label">Generated file</span>
             ) : null}
             <span className="message-attachment-label">{attachment.label}</span>
+          </>
+        )
+        return (
+          <span
+            key={attachment.id}
+            className={`message-attachment-chip${isResponseFile ? ' message-attachment-chip--response-file' : ''}`}
+            title={typeLabel}
+          >
+            {previewable ? (
+              <button
+                type="button"
+                className="message-attachment-preview-trigger"
+                onClick={() => setPreviewAttachmentId(attachment.id)}
+                title={typeLabel}
+              >
+                {chipBody}
+              </button>
+            ) : (
+              chipBody
+            )}
             {downloadable ? (
               <Button
                 className="message-attachment-download-button"
@@ -206,13 +249,30 @@ function MessageAttachmentList({ attachments }: { attachments: ChatMessageAttach
           </span>
         )
       })}
+      {previewAttachment ? (
+        <GfsImagePreview
+          byteLength={
+            previewAttachment.sizeBytes ??
+            // Base64 length overstates the decoded size by ~33%; the accurate
+            // 3/4 estimate keeps the 10 MB early-skip from refusing previews
+            // that are actually under the limit (PR #859 review).
+            Math.floor(((previewAttachment.dataBase64 ?? '').length * 3) / 4)
+          }
+          fileName={previewAttachment.filename || previewAttachment.label}
+          dataBase64={previewAttachment.dataBase64}
+          mimeType={previewAttachment.mimeType || 'image/png'}
+          onClose={() => setPreviewAttachmentId(null)}
+        />
+      ) : null}
     </span>
   )
 }
 
 export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: ChatThreadProps) {
   const { selectedAgent, handleSelectChatAgent: onStartNewChat } = useNavigationContext()
-  const { decideApproval } = useNotificationsContext()
+  const { decideApproval, pushToast } = useNotificationsContext()
+  const { composerImageAttachments, composerReferenceAttachments, requestComposerFocus } =
+    useChatComposerStateContext()
   const {
     activeMessages,
     groupedMessages,
@@ -240,6 +300,8 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
     handleSelectChat: onSelectChat,
     handleRenameChat: onRenameChat,
     handleDeleteChat: onDeleteChat,
+    handleAddComposerImageAttachments: onAddComposerImageAttachments,
+    handleAddComposerReferenceAttachments: onAddComposerReferenceAttachments,
   } = useAgentChatActionsContext()
   const { cancelTask: onCancelTask } = useMcpRuntimeContext()
 
@@ -433,6 +495,57 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
     }
   }, [])
 
+  // TASK-42: resend repopulates the composer from the ORIGINAL prompt — text in
+  // the per-chat draft store, uploaded files re-attached (bytes ride the chip),
+  // plugin/connector/file indicators re-applied as composer references. The
+  // source is always a user message: resending a reply re-issues the prompt that
+  // produced it (see `findNearestPrecedingUserMessage`).
+  //
+  // Replace-vs-append contract (PR #859 review): like the failed-send recovery
+  // path (`handleRecoverFailedAgentSend`), resend REFUSES to touch a dirty
+  // composer instead of silently merging into a half-written draft — text is
+  // replaced and attachments are appended by the store handlers, so merging
+  // would strand the user's earlier chips under the resent ones. Once the
+  // composer is clean, the resend is a full repopulate.
+  const handleResendMessage = useCallback(
+    (source: Pick<RenderableChatMessage, 'content' | 'attachments'>) => {
+      if (!activeChatId) return
+      if (
+        getComposerDraft(activeChatId) ||
+        composerImageAttachments.length ||
+        composerReferenceAttachments.length
+      ) {
+        pushToast('Keep or clear the current draft before resending this message.', 'error')
+        return
+      }
+      const draft = buildComposerResendDraft(source)
+      setComposerDraft(activeChatId, draft.content)
+      if (draft.imageAttachments.length) {
+        onAddComposerImageAttachments(draft.imageAttachments)
+      }
+      if (draft.referenceAttachments.length) {
+        onAddComposerReferenceAttachments(draft.referenceAttachments)
+      }
+      if (draft.unrestorable.length) {
+        const count = draft.unrestorable.length
+        pushToast(
+          `${count} ${count === 1 ? 'attachment' : 'attachments'} from the original message couldn't be restored.`,
+          'warn'
+        )
+      }
+      requestComposerFocus()
+    },
+    [
+      activeChatId,
+      composerImageAttachments,
+      composerReferenceAttachments,
+      onAddComposerImageAttachments,
+      onAddComposerReferenceAttachments,
+      pushToast,
+      requestComposerFocus,
+    ]
+  )
+
   const renderProgressStepper = useCallback(
     (message: RenderableChatMessage, filterStatus?: 'completed' | 'non-completed') => {
       if (progressByMessageId[message.id] == null) return null
@@ -615,6 +728,13 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
                         /\b[a-zA-Z0-9][a-zA-Z0-9._-]*\.html?\b/i.test(displayContent)
                       const showMetaRow = message.role === 'assistant' || message.role === 'user'
                       const copyContent = message.role === 'user' ? displayContent : message.content
+                      // TASK-42: a user message resends itself; an assistant
+                      // message (including error bubbles) resends the user
+                      // prompt that produced it.
+                      const resendSource =
+                        message.role === 'user'
+                          ? message
+                          : findNearestPrecedingUserMessage(groupedWithKeys, groupIndex)
                       const metaRowRoleClass =
                         message.role === 'user'
                           ? 'chat-message-meta-row--user'
@@ -744,6 +864,25 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
                                   <MessageTokens tokens={message.tokens} />
                                 )}
                               </div>
+                              {resendSource ? (
+                                <IconButton
+                                  className="message-resend-button message-copy-button message-copy-button--inline"
+                                  onClick={() => handleResendMessage(resendSource)}
+                                  aria-label={
+                                    message.role === 'user' ? 'Resend message' : 'Resend prompt'
+                                  }
+                                  label={
+                                    message.role === 'user' ? 'Resend message' : 'Resend prompt'
+                                  }
+                                  size="xs"
+                                  variant="ghost"
+                                >
+                                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                                    <path fill="none" d="M0 0h24v24H0V0z" />
+                                    <path d="M2.01 21 23 12 2.01 3 2 10l15 2-15 2z" />
+                                  </svg>
+                                </IconButton>
+                              ) : null}
                               <IconButton
                                 className={`message-copy-button message-copy-button--inline${
                                   copiedMessageKey === message.messageKey ? ' copied' : ''

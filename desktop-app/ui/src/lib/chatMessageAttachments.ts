@@ -100,6 +100,14 @@ export function buildChatMessageAttachments(
       label: attachment.name,
       tooltip: formatUploadedFileTooltip(attachment),
       addedOrder: attachmentOrder(attachment, fallbackIndex),
+      // BUG-176: keep the image bytes on the display attachment so the
+      // sent-message chip can reopen the shared image preview. Persisted with
+      // the user message (same inline-base64 contract as response_file).
+      filename: attachment.name,
+      mimeType: attachment.mimeType,
+      encoding: 'base64',
+      dataBase64: attachment.dataBase64,
+      sizeBytes: attachment.sizeBytes,
     }
   })
   return [...referenceItems, ...imageItems].sort(

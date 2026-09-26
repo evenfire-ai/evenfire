@@ -20,7 +20,12 @@ import { ChatThread } from '../ChatThread'
 
 // ── context stubs (ChatThread reads everything from 6 contexts) ──
 const navValue = { selectedAgent: 'agent-x', handleSelectChatAgent: vi.fn() }
-const notificationsValue = { resolveApprovalNotification: vi.fn() }
+const notificationsValue = { resolveApprovalNotification: vi.fn(), pushToast: vi.fn() }
+const composerStateValue = {
+  composerImageAttachments: [] as never[],
+  composerReferenceAttachments: [] as never[],
+  requestComposerFocus: vi.fn(),
+}
 const chatListValue = { chatList: [], chatListLoading: false, sessionStateByChatId: {} }
 const actionsValue = {
   chatEndRef: { current: null },
@@ -50,6 +55,9 @@ let threadStateValue: {
 vi.mock('@contexts/NavigationContext', () => ({ useNavigationContext: () => navValue }))
 vi.mock('@contexts/NotificationsContext', () => ({
   useNotificationsContext: () => notificationsValue,
+}))
+vi.mock('@contexts/ChatComposerStateContext', () => ({
+  useChatComposerStateContext: () => composerStateValue,
 }))
 vi.mock('@contexts/ChatListContext', () => ({ useChatListContext: () => chatListValue }))
 vi.mock('@contexts/AgentChatActionsContext', () => ({

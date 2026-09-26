@@ -183,3 +183,142 @@ describe('NudgeArea (D.5b)', () => {
     expect(container.firstChild).toBeNull()
   })
 })
+
+describe('NudgeArea dismissal (TASK-228)', () => {
+  /** Live, key-aware fake: emits flow through `emit` so later tiers of a task
+   * (and new tasks) reach an already-mounted NudgeArea. */
+  function liveKeyedTracker(byKey: Map<string, TaskState>) {
+    const listeners = new Map<string, (s: TaskState) => void>()
+    const tracker = {
+      get: (key: string) => byKey.get(key),
+      subscribe: (key: string, fn: (s: TaskState) => void) => {
+        listeners.set(key, fn)
+        const s = byKey.get(key)
+        if (s) fn(s)
+        return () => {
+          listeners.delete(key)
+        }
+      },
+      start: vi.fn(),
+      rejoinIfRunning: vi.fn(),
+      ack: vi.fn(),
+      cancel: vi.fn(async () => undefined),
+      setCallbacks: vi.fn(),
+    } as unknown as TaskTracker
+    const emit = (key: string, next: TaskState) => {
+      byKey.set(key, next)
+      listeners.get(key)?.(next)
+    }
+    return { tracker, emit }
+  }
+
+  function nudgeElement(tracker: TaskTracker, chatId = 'c1') {
+    return (
+      <AgentTaskTrackerContext.Provider value={tracker}>
+        <NudgeArea
+          agentRef="agent-x"
+          chatId={chatId}
+          onStartNewChat={vi.fn()}
+          onRefreshState={vi.fn()}
+        />
+      </AgentTaskTrackerContext.Provider>
+    )
+  }
+
+  it('renders a dismiss control on every tier', () => {
+    for (const ageMs of [150_000, 400_000, 1_000_000]) {
+      const { unmount } = renderNudge(task(ageMs))
+      expect(screen.getByRole('button', { name: /dismiss this suggestion/i })).toBeTruthy()
+      unmount()
+    }
+  })
+
+  it('removes the card on dismiss and keeps it hidden for later tiers of the same task', () => {
+    const byKey = new Map<string, TaskState>([['agent-x::c1', task(150_000)]])
+    const { tracker, emit } = liveKeyedTracker(byKey)
+    const { container } = render(nudgeElement(tracker))
+    expect(screen.getByText(/taking longer than usual/i)).toBeTruthy()
+
+    act(() => {
+      screen
+        .getByRole('button', { name: /dismiss this suggestion/i })
+        .dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    expect(container.firstChild).toBeNull()
+
+    // Same task ages into T4 → the tracker keeps emitting, but the dismissal
+    // is keyed to the task, so no later tier may re-show the card.
+    act(() => {
+      emit('agent-x::c1', task(400_000))
+    })
+    expect(container.firstChild).toBeNull()
+  })
+
+  it('shows the nudge again for a NEW task in the same chat', () => {
+    const first = task(150_000)
+    const byKey = new Map<string, TaskState>([['agent-x::c1', first]])
+    const { tracker, emit } = liveKeyedTracker(byKey)
+    const { container } = render(nudgeElement(tracker))
+
+    act(() => {
+      screen
+        .getByRole('button', { name: /dismiss this suggestion/i })
+        .dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    expect(container.firstChild).toBeNull()
+
+    // A different task id → fresh nudges.
+    act(() => {
+      emit('agent-x::c1', task(150_000, { taskId: 't2', userMessageId: 'm2' }))
+    })
+    expect(screen.getByText(/taking longer than usual/i)).toBeTruthy()
+  })
+
+  it('keeps a dismissal across a chat switch away and back (same task)', () => {
+    const byKey = new Map<string, TaskState>([['agent-x::c1', task(150_000)]])
+    const { tracker } = liveKeyedTracker(byKey)
+    const { container, rerender } = render(nudgeElement(tracker, 'c1'))
+    expect(screen.getByText(/taking longer than usual/i)).toBeTruthy()
+
+    act(() => {
+      screen
+        .getByRole('button', { name: /dismiss this suggestion/i })
+        .dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    expect(container.firstChild).toBeNull()
+
+    // Switch to c2 (no task) and back to c1 — the same task is still running
+    // and must stay dismissed.
+    act(() => {
+      rerender(nudgeElement(tracker, 'c2'))
+    })
+    expect(container.firstChild).toBeNull()
+    act(() => {
+      rerender(nudgeElement(tracker, 'c1'))
+    })
+    expect(container.firstChild).toBeNull()
+  })
+
+  it('does not let a dismissal of a degenerate (empty) task id leak onto the next task in the chat (PR #859 review)', () => {
+    // `taskId` is typed non-optional, but a degenerate '' must not key the
+    // dismissal to the CHAT: the next task (also id-less, later `startedAt`)
+    // starts fresh instead of inheriting the suppression.
+    const first = task(150_000, { taskId: '' })
+    const byKey = new Map<string, TaskState>([['agent-x::c1', first]])
+    const { tracker, emit } = liveKeyedTracker(byKey)
+    const { container } = render(nudgeElement(tracker))
+    expect(screen.getByText(/taking longer than usual/i)).toBeTruthy()
+
+    act(() => {
+      screen
+        .getByRole('button', { name: /dismiss this suggestion/i })
+        .dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    expect(container.firstChild).toBeNull()
+
+    act(() => {
+      emit('agent-x::c1', task(150_000, { taskId: '', startedAt: first.startedAt + 5_000 }))
+    })
+    expect(screen.getByText(/taking longer than usual/i)).toBeTruthy()
+  })
+})
