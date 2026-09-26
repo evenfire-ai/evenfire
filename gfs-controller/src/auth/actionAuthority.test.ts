@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { execFileSync } from 'node:child_process'
+import { resolve } from 'node:path'
 import { hashActionTarget } from '../../../packages/action-context-contracts/index.cjs'
 import {
   createGfsAuthorityCheckpointer,
@@ -45,22 +47,39 @@ function authority() {
 
 function allowedResponse(overrides: Record<string, unknown> = {}) {
   const binding = authority().binding
-  return {
-    version: 2,
-    status: 'allowed',
-    authorizationRevision: binding.authorizationRevision,
-    behaviorBindingHash: binding.behaviorBindingHash,
-    validUntil: null,
-    attribution: {
-      userId: USER,
-      sid: SID,
-      sessionVersion: 3,
-      accessPathId: binding.accessPathId,
-      pathKind: 'direct',
-      effectiveTeamId: null,
-    },
-    ...overrides,
-  }
+  const repositoryRoot = resolve(process.cwd(), '..')
+  const output = execFileSync(
+    resolve(repositoryRoot, 'rpc-proxy/node_modules/.bin/tsx'),
+    [
+      resolve(
+        repositoryRoot,
+        'control-api/test/fixtures/emitActionAuthorityCheckpointV2Fixture.ts'
+      ),
+      JSON.stringify({
+        request: {
+          version: 2,
+          principal: { sub: USER, sid: SID, sessionVersion: 3 },
+          delegationJti: JTI,
+          resource: binding.resource,
+          operationId: binding.operationId,
+          target: binding.target,
+          targetHash: binding.targetHash,
+          accessPathId: binding.accessPathId,
+          authorizationRevision: binding.authorizationRevision,
+          behaviorBindingHash: binding.behaviorBindingHash,
+          domain: {
+            service: 'gfs-controller',
+            resource: binding.resource,
+            targetHash: binding.targetHash,
+          },
+        },
+        destination: null,
+        checkedAt: new Date().toISOString(),
+      }),
+    ],
+    { cwd: repositoryRoot, encoding: 'utf8' }
+  )
+  return { ...JSON.parse(output), ...overrides }
 }
 
 afterEach(() => vi.unstubAllGlobals())
@@ -81,24 +100,7 @@ describe('gfs v2 live authority', () => {
         authorizationRevision: binding.binding.authorizationRevision,
         domain: { service: 'gfs-controller' },
       })
-      return new Response(
-        JSON.stringify({
-          version: 2,
-          status: 'allowed',
-          authorizationRevision: binding.binding.authorizationRevision,
-          behaviorBindingHash: binding.binding.behaviorBindingHash,
-          validUntil: null,
-          attribution: {
-            userId: USER,
-            sid: SID,
-            sessionVersion: 3,
-            accessPathId: binding.binding.accessPathId,
-            pathKind: 'direct',
-            effectiveTeamId: null,
-          },
-        }),
-        { status: 200 }
-      )
+      return new Response(JSON.stringify(allowedResponse()), { status: 200 })
     })
     vi.stubGlobal('fetch', fetchMock)
     const checkpoint = createGfsAuthorityCheckpointer({
@@ -108,6 +110,27 @@ describe('gfs v2 live authority', () => {
     })
     await checkpoint(binding)
     expect(fetchMock).toHaveBeenCalledOnce()
+  })
+
+  it.each([
+    ['unknown keys', { ...allowedResponse(), internal: true }, 200],
+    [
+      'an invalid denied union arm',
+      { ...allowedResponse(), status: 'denied', code: 'forbidden', destination: null },
+      403,
+    ],
+  ])('fails closed on a producer response with %s', async (_label, body, status) => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify(body), { status }))
+    )
+    await expect(
+      createGfsAuthorityCheckpointer({
+        baseUrl: 'http://control-api:8090',
+        serviceToken: 'gfsc-service-token',
+        timeoutMs: 1000,
+      })(authority())
+    ).rejects.toMatchObject({ code: 'not_mounted' })
   })
 
   it('rejects operation substitution before protected work', () => {
@@ -122,29 +145,11 @@ describe('gfs v2 live authority', () => {
 
   it('rejects malformed or stale checkpoint validity', async () => {
     const binding = authority()
-    for (const validUntil of ['not-a-date', '1970-01-01T00:00:00.000Z', 123]) {
+    for (const validUntil of ['not-a-date', 123]) {
       vi.stubGlobal(
         'fetch',
         vi.fn(
-          async () =>
-            new Response(
-              JSON.stringify({
-                version: 2,
-                status: 'allowed',
-                authorizationRevision: binding.binding.authorizationRevision,
-                behaviorBindingHash: binding.binding.behaviorBindingHash,
-                validUntil,
-                attribution: {
-                  userId: USER,
-                  sid: SID,
-                  sessionVersion: 3,
-                  accessPathId: binding.binding.accessPathId,
-                  pathKind: 'direct',
-                  effectiveTeamId: null,
-                },
-              }),
-              { status: 200 }
-            )
+          async () => new Response(JSON.stringify(allowedResponse({ validUntil })), { status: 200 })
         )
       )
       await expect(
@@ -153,8 +158,27 @@ describe('gfs v2 live authority', () => {
           serviceToken: 'gfsc-service-token',
           timeoutMs: 1000,
         })(binding)
-      ).rejects.toMatchObject({ code: 'forbidden' })
+      ).rejects.toMatchObject({ code: 'not_mounted' })
     }
+
+    const checkedAt = new Date(Date.now() - 2000).toISOString()
+    const expiredAt = new Date(Date.now() - 1000).toISOString()
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify(allowedResponse({ checkedAt, validUntil: expiredAt })), {
+            status: 200,
+          })
+      )
+    )
+    await expect(
+      createGfsAuthorityCheckpointer({
+        baseUrl: 'http://control-api:8090',
+        serviceToken: 'gfsc-service-token',
+        timeoutMs: 1000,
+      })(binding)
+    ).rejects.toMatchObject({ code: 'forbidden' })
   })
 
   it.each([
@@ -167,9 +191,26 @@ describe('gfs v2 live authority', () => {
       'access path',
       { attribution: { ...allowedResponse().attribution, accessPathId: `ap1_${'b'.repeat(43)}` } },
     ],
-    ['path kind', { attribution: { ...allowedResponse().attribution, pathKind: 'team' } }],
-    ['effective team', { attribution: { ...allowedResponse().attribution, effectiveTeamId: JTI } }],
-    ['validity', { validUntil: '1970-01-01T00:00:00.000Z' }],
+    [
+      'path kind',
+      {
+        attribution: {
+          ...allowedResponse().attribution,
+          pathKind: 'team',
+          effectiveTeamId: SID,
+        },
+      },
+    ],
+    [
+      'effective team',
+      {
+        attribution: {
+          ...allowedResponse().attribution,
+          pathKind: 'team',
+          effectiveTeamId: JTI,
+        },
+      },
+    ],
   ] as const)(
     'rejects an independent %s mismatch before filesystem I/O',
     async (_name, mutation) => {

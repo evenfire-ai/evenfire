@@ -1,3 +1,4 @@
+import { validateActionAuthorityCheckpointResponse } from '../../../packages/action-context-contracts'
 import { GfsError } from '../api/errors'
 
 export type CanonicalTarget = Readonly<Record<string, string>>
@@ -245,7 +246,7 @@ export function createGfsAuthorityCheckpointer(config: GfsCheckpointConfig) {
     const timer = setTimeout(() => controller.abort(), config.timeoutMs)
     timer.unref()
     let response: Response
-    let result: Record<string, unknown>
+    let result: ReturnType<typeof validateActionAuthorityCheckpointResponse>
     try {
       response = await fetch(
         `${config.baseUrl.replace(/\/+$/, '')}/api/v1/internal/action-authority/checkpoint`,
@@ -281,7 +282,7 @@ export function createGfsAuthorityCheckpointer(config: GfsCheckpointConfig) {
         }
       )
       try {
-        result = record(await response.json(), 'checkpoint response')
+        result = validateActionAuthorityCheckpointResponse(await response.json())
       } catch {
         if (controller.signal.aborted) {
           throw new GfsError('not_mounted', 'live filesystem authority is unavailable')
@@ -294,13 +295,18 @@ export function createGfsAuthorityCheckpointer(config: GfsCheckpointConfig) {
     } finally {
       clearTimeout(timer)
     }
-    const attribution =
-      result.attribution && typeof result.attribution === 'object'
-        ? (result.attribution as Record<string, unknown>)
-        : {}
+    if (!response.ok || result.status !== 'allowed') {
+      throw new GfsError(
+        (!response.ok && response.status >= 500) || result.status === 'authority_unavailable'
+          ? 'not_mounted'
+          : 'forbidden',
+        (!response.ok && response.status >= 500) || result.status === 'authority_unavailable'
+          ? 'live filesystem authority is unavailable'
+          : 'live filesystem authority denied'
+      )
+    }
+    const attribution = result.attribution
     if (
-      !response.ok ||
-      result.status !== 'allowed' ||
       result.authorizationRevision !== binding.authorizationRevision ||
       result.behaviorBindingHash !== binding.behaviorBindingHash ||
       attribution.userId !== binding.userId ||

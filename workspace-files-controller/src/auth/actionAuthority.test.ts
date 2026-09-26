@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { execFileSync } from 'node:child_process'
+import { resolve } from 'node:path'
 import { hashActionTarget } from '../../../packages/action-context-contracts'
 import { createWfcAuthorityCheckpointer, parseWfcActionAuthority } from './actionAuthority'
 
@@ -47,22 +49,39 @@ function authority() {
 
 function allowedResponse(overrides: Record<string, unknown> = {}) {
   const binding = authority().binding
-  return {
-    version: 2,
-    status: 'allowed',
-    authorizationRevision: binding.authorizationRevision,
-    behaviorBindingHash: binding.behaviorBindingHash,
-    validUntil: null,
-    attribution: {
-      userId: USER,
-      sid: SID,
-      sessionVersion: 4,
-      accessPathId: binding.accessPathId,
-      pathKind: 'direct',
-      effectiveTeamId: null,
-    },
-    ...overrides,
-  }
+  const repositoryRoot = resolve(process.cwd(), '..')
+  const output = execFileSync(
+    resolve(repositoryRoot, 'rpc-proxy/node_modules/.bin/tsx'),
+    [
+      resolve(
+        repositoryRoot,
+        'control-api/test/fixtures/emitActionAuthorityCheckpointV2Fixture.ts'
+      ),
+      JSON.stringify({
+        request: {
+          version: 2,
+          principal: { sub: USER, sid: SID, sessionVersion: 4 },
+          delegationJti: JTI,
+          resource: binding.resource,
+          operationId: binding.operationId,
+          target: binding.target,
+          targetHash: binding.targetHash,
+          accessPathId: binding.accessPathId,
+          authorizationRevision: binding.authorizationRevision,
+          behaviorBindingHash: binding.behaviorBindingHash,
+          domain: {
+            service: 'workspace-files-controller',
+            resource: binding.resource,
+            targetHash: binding.targetHash,
+          },
+        },
+        destination: null,
+        checkedAt: new Date().toISOString(),
+      }),
+    ],
+    { cwd: repositoryRoot, encoding: 'utf8' }
+  )
+  return { ...JSON.parse(output), ...overrides }
 }
 
 afterEach(() => vi.unstubAllGlobals())
@@ -80,24 +99,7 @@ describe('workspace filesystem v2 live authority', () => {
         operationId: 'shared_filesystem.read',
         domain: { service: 'workspace-files-controller' },
       })
-      return new Response(
-        JSON.stringify({
-          version: 2,
-          status: 'allowed',
-          authorizationRevision: value.binding.authorizationRevision,
-          behaviorBindingHash: value.binding.behaviorBindingHash,
-          validUntil: null,
-          attribution: {
-            userId: USER,
-            sid: SID,
-            sessionVersion: 4,
-            accessPathId: value.binding.accessPathId,
-            pathKind: 'direct',
-            effectiveTeamId: null,
-          },
-        }),
-        { status: 200 }
-      )
+      return new Response(JSON.stringify(allowedResponse()), { status: 200 })
     })
     vi.stubGlobal('fetch', fetchMock)
     await createWfcAuthorityCheckpointer({
@@ -106,6 +108,28 @@ describe('workspace filesystem v2 live authority', () => {
       timeoutMs: 1000,
     })(value, { operationId: value.binding.operationId, target: value.binding.target })
     expect(fetchMock).toHaveBeenCalledOnce()
+  })
+
+  it.each([
+    ['unknown keys', { ...allowedResponse(), internal: true }, 200],
+    [
+      'an invalid denied union arm',
+      { ...allowedResponse(), status: 'denied', code: 'forbidden', destination: null },
+      403,
+    ],
+  ])('fails closed on a producer response with %s', async (_label, body, status) => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify(body), { status }))
+    )
+    const value = authority()
+    await expect(
+      createWfcAuthorityCheckpointer({
+        baseUrl: 'http://control-api:8090',
+        serviceToken: 'wfc-service-token',
+        timeoutMs: 1000,
+      })(value, { operationId: value.binding.operationId, target: value.binding.target })
+    ).rejects.toMatchObject({ status: 503, code: 'not_mounted' })
   })
 
   it('rejects target substitution without contacting Control API', async () => {
@@ -129,27 +153,7 @@ describe('workspace filesystem v2 live authority', () => {
     const value = authority()
     vi.stubGlobal(
       'fetch',
-      vi.fn(
-        async () =>
-          new Response(
-            JSON.stringify({
-              version: 2,
-              status: 'allowed',
-              authorizationRevision: value.binding.authorizationRevision,
-              behaviorBindingHash: value.binding.behaviorBindingHash,
-              validUntil: null,
-              attribution: {
-                userId: USER,
-                sid: SID,
-                sessionVersion: 4,
-                accessPathId: value.binding.accessPathId,
-                pathKind: 'direct',
-                effectiveTeamId: null,
-              },
-            }),
-            { status: 200 }
-          )
-      )
+      vi.fn(async () => new Response(JSON.stringify(allowedResponse()), { status: 200 }))
     )
     const reversed = Object.fromEntries(Object.entries(value.binding.target).reverse())
     await expect(
@@ -163,29 +167,11 @@ describe('workspace filesystem v2 live authority', () => {
 
   it('rejects malformed or stale checkpoint validity', async () => {
     const value = authority()
-    for (const validUntil of ['not-a-date', '1970-01-01T00:00:00.000Z', 123]) {
+    for (const validUntil of ['not-a-date', 123]) {
       vi.stubGlobal(
         'fetch',
         vi.fn(
-          async () =>
-            new Response(
-              JSON.stringify({
-                version: 2,
-                status: 'allowed',
-                authorizationRevision: value.binding.authorizationRevision,
-                behaviorBindingHash: value.binding.behaviorBindingHash,
-                validUntil,
-                attribution: {
-                  userId: USER,
-                  sid: SID,
-                  sessionVersion: 4,
-                  accessPathId: value.binding.accessPathId,
-                  pathKind: 'direct',
-                  effectiveTeamId: null,
-                },
-              }),
-              { status: 200 }
-            )
+          async () => new Response(JSON.stringify(allowedResponse({ validUntil })), { status: 200 })
         )
       )
       await expect(
@@ -194,8 +180,27 @@ describe('workspace filesystem v2 live authority', () => {
           serviceToken: 'wfc-service-token',
           timeoutMs: 1000,
         })(value, { operationId: value.binding.operationId, target: value.binding.target })
-      ).rejects.toMatchObject({ code: 'forbidden' })
+      ).rejects.toMatchObject({ status: 503, code: 'not_mounted' })
     }
+
+    const checkedAt = new Date(Date.now() - 2000).toISOString()
+    const expiredAt = new Date(Date.now() - 1000).toISOString()
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify(allowedResponse({ checkedAt, validUntil: expiredAt })), {
+            status: 200,
+          })
+      )
+    )
+    await expect(
+      createWfcAuthorityCheckpointer({
+        baseUrl: 'http://control-api:8090',
+        serviceToken: 'wfc-service-token',
+        timeoutMs: 1000,
+      })(value, { operationId: value.binding.operationId, target: value.binding.target })
+    ).rejects.toMatchObject({ code: 'forbidden' })
   })
 
   it.each([
@@ -208,9 +213,26 @@ describe('workspace filesystem v2 live authority', () => {
       'access path',
       { attribution: { ...allowedResponse().attribution, accessPathId: `ap1_${'b'.repeat(43)}` } },
     ],
-    ['path kind', { attribution: { ...allowedResponse().attribution, pathKind: 'team' } }],
-    ['effective team', { attribution: { ...allowedResponse().attribution, effectiveTeamId: JTI } }],
-    ['validity', { validUntil: '1970-01-01T00:00:00.000Z' }],
+    [
+      'path kind',
+      {
+        attribution: {
+          ...allowedResponse().attribution,
+          pathKind: 'team',
+          effectiveTeamId: SID,
+        },
+      },
+    ],
+    [
+      'effective team',
+      {
+        attribution: {
+          ...allowedResponse().attribution,
+          pathKind: 'team',
+          effectiveTeamId: JTI,
+        },
+      },
+    ],
   ] as const)(
     'rejects an independent %s mismatch before filesystem I/O',
     async (_name, mutation) => {

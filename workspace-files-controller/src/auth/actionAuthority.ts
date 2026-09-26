@@ -1,3 +1,4 @@
+import { validateActionAuthorityCheckpointResponse } from '../../../packages/action-context-contracts'
 import { HttpError, err } from '../errors'
 
 export type WfcOperation = 'shared_filesystem.read' | 'shared_filesystem.write'
@@ -199,18 +200,18 @@ export function createWfcAuthorityCheckpointer(config: {
           signal: controller.signal,
         }
       )
-      const payload = object(await response.json(), 'checkpoint response')
-      if (!response.ok) {
+      const payload = validateActionAuthorityCheckpointResponse(await response.json())
+      if (!response.ok || payload.status !== 'allowed') {
+        const unavailable = response.status >= 500 || payload.status === 'authority_unavailable'
         throw err(
-          response.status >= 500 ? 'not_mounted' : 'forbidden',
-          response.status >= 500
+          unavailable ? 'not_mounted' : 'forbidden',
+          unavailable
             ? 'live filesystem authority is unavailable'
             : 'live filesystem authority denied'
         )
       }
-      const attribution = object(payload.attribution, 'checkpoint response attribution')
+      const attribution = payload.attribution
       if (
-        payload.status !== 'allowed' ||
         payload.authorizationRevision !== binding.authorizationRevision ||
         payload.behaviorBindingHash !== binding.behaviorBindingHash ||
         attribution.userId !== binding.userId ||
