@@ -558,6 +558,49 @@ describeRealPostgres('workflow authority bindings on real PostgreSQL', () => {
     }
   })
 
+  it('rejects a session that expires during the final trigger authority fence', async () => {
+    const recipeName = 'trigger-session-expiry-fence'
+    const triggerAuthority = await currentTriggerAuthority(recipeName)
+    await databasePool.query(
+      `UPDATE external_user_sessions
+          SET idle_expires_at = clock_timestamp() + interval '500 milliseconds'
+        WHERE sid = $1`,
+      [triggerAuthority.binding.sid]
+    )
+    const idempotencyKey = `session-expiry-${randomUUID()}`
+    const budget = AccessExecutionBudget.create('action')
+    const processTime = Date.now()
+    const dateNowSpy = vi.spyOn(Date, 'now').mockReturnValue(processTime)
+    try {
+      await expect(
+        createRun({
+          recipe_namespace: 'sandbox-recipes',
+          recipe_name: recipeName,
+          actor_type: 'user',
+          actor_id: userId,
+          idempotency_key: idempotencyKey,
+          trigger_source: 'onDemand',
+          ttl_seconds_after_finished: defaultTtlSecondsAfterFinished,
+          authority: triggerAuthority,
+          ...triggerReauthorizer(triggerAuthority, budget, async () => {
+            await new Promise(resolve => setTimeout(resolve, 1_000))
+          }),
+        })
+      ).rejects.toMatchObject({ status: 409, code: 'access_path_stale' })
+    } finally {
+      dateNowSpy.mockRestore()
+      budget.close()
+    }
+
+    const persisted = await databasePool.query(
+      `SELECT run_id FROM workflow_runs
+        WHERE recipe_namespace = 'sandbox-recipes' AND recipe_name = $1
+          AND idempotency_key = $2`,
+      [recipeName, idempotencyKey]
+    )
+    expect(persisted.rowCount).toBe(0)
+  })
+
   it('rejects an operational recipe snapshot race before creating a trigger run', async () => {
     const recipeName = 'trigger-resource-race'
     const staleAuthority = await currentTriggerAuthority(recipeName)
