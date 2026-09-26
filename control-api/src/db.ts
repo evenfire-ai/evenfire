@@ -6554,12 +6554,32 @@ export async function assertDbReady(db: DbClient = pool): Promise<void> {
 }
 
 export async function withTransaction<T>(
-  work: (db: DbTransactionClient) => Promise<T>
+  work: (db: DbTransactionClient) => Promise<T>,
+  // Injectable only so the carrier's client lifecycle can be unit-tested against
+  // a fake Pool; production always uses the module-level core pool.
+  txPool: Pool = pool
 ): Promise<T> {
-  const client = (await pool.connect()) as PoolClient
+  const client = (await txPool.connect()) as PoolClient
   let transactionStarted = false
   let commitSent = false
   let releaseError: Error | boolean | undefined
+
+  // pg-pool detaches its own idle 'error' listener from a client while it is
+  // checked out, so an out-of-band backend error on the borrowed client (e.g.
+  // Postgres terminating the backend on idle_in_transaction_session_timeout,
+  // 25P03, while the transaction awaits an external POST with no query running)
+  // arrives with NO 'error' listener. Node's EventEmitter then THROWS in that
+  // tick — an async event outside any await stack, so no try/catch here or in a
+  // caller can catch it — and with no process-level handler it exits the process.
+  // The carrier owns the client for the whole checkout, so it holds the listener:
+  // capture the async error and fold it into releaseError so pg-pool DESTROYS the
+  // poisoned connection instead of returning it to the pool.
+  let asyncClientError: Error | undefined
+  const onClientError = (err: unknown): void => {
+    asyncClientError ??= err instanceof Error ? err : new Error(String(err))
+  }
+  client.on('error', onClientError)
+
   try {
     await client.query('BEGIN')
     transactionStarted = true
@@ -6582,6 +6602,14 @@ export async function withTransaction<T>(
     }
     throw error
   } finally {
+    client.removeListener('error', onClientError)
+    // A client that emitted 'error' mid-checkout is poisoned; destroy it. Keep an
+    // existing releaseError (the primary failure from work/commit/rollback) and
+    // adopt the async one only when the sync path saw none, so a truthy value
+    // always reaches release() and pg-pool never recycles the bad connection.
+    if (asyncClientError && !releaseError) {
+      releaseError = asyncClientError
+    }
     client.release(releaseError)
   }
 }
