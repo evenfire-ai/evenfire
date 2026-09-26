@@ -925,6 +925,24 @@ while [ "$cycle" -le "$RECOVERY_CYCLES" ]; do
     fail "R2 cycle ${cycle}: expected a NEW pod after suspend, got uid '${r2_uid_after:-<empty>}' (before ${r2_uid_before})"
     pod_diagnostics; print_results; exit 1
   fi
+  # Kubernetes-clock timeline for the NEW pod: creation, scheduling,
+  # initialization, container start, and Ready publication. Deltas are
+  # computed server-side only below; send-aligned cross-clock subtraction is
+  # deliberately avoided because client and apiserver clocks are not proven
+  # synchronized.
+  r2_pod_timeline="$(kctl get pod "$r2_pod_after" -n "$MCP_HOST_NS" -o json | jq -c '{
+    pod_uid: .metadata.uid,
+    created_at: .metadata.creationTimestamp,
+    scheduled_at: (.status.conditions[]? | select(.type == "PodScheduled") | .lastTransitionTime),
+    initialized_at: (.status.conditions[]? | select(.type == "Initialized") | .lastTransitionTime),
+    ready_at: (.status.conditions[]? | select(.type == "Ready") | .lastTransitionTime),
+    container_started_at: (.status.containerStatuses[]? | select(.name == "mcp-host") | .state.running.startedAt)
+  }' 2>/dev/null || true)"
+  if [ -n "$r2_pod_timeline" ]; then
+    r2_baseline_json="$(jq -cn --argjson b "$r2_baseline_json" --argjson t "$r2_pod_timeline" '$b + {pod_timeline:$t}')"
+  else
+    r2_baseline_json="$(jq -cn --argjson b "$r2_baseline_json" '$b + {pod_timeline_unavailable_reason:"pod timeline read failed"}')"
+  fi
   # ATTRIBUTION -- the NEW pod served the resume; its log stream carries the
   # [TurnTiming] line for the measured turn.
   if capture_turn_attribution "R2 cycle ${cycle}" "$r2_pod_after"; then
@@ -1302,6 +1320,56 @@ for name, budget in budgets.items():
                 "first_200_ms": raw["first_200_ms"],
                 "status_flipped_to_replicas_patched_ms": None,
             }
+            timeline = raw.get("pod_timeline") or {}
+            if timeline:
+                baseline_entry["pod_timeline"] = timeline
+
+                def _rfc3339_ms(value):
+                    from datetime import datetime
+
+                    return int(
+                        datetime.fromisoformat(
+                            value.replace("Z", "+00:00")
+                        ).timestamp()
+                        * 1000
+                    )
+
+                marks = {
+                    key: _rfc3339_ms(timeline[key])
+                    for key in (
+                        "created_at",
+                        "scheduled_at",
+                        "initialized_at",
+                        "container_started_at",
+                        "ready_at",
+                    )
+                    if timeline.get(key)
+                }
+                ordered = [
+                    ("created_to_scheduled_ms", "created_at", "scheduled_at"),
+                    ("scheduled_to_initialized_ms", "scheduled_at", "initialized_at"),
+                    (
+                        "initialized_to_container_started_ms",
+                        "initialized_at",
+                        "container_started_at",
+                    ),
+                    ("container_started_to_ready_ms", "container_started_at", "ready_at"),
+                ]
+                deltas = {}
+                for label, start_key, end_key in ordered:
+                    if start_key in marks and end_key in marks:
+                        deltas[label] = marks[end_key] - marks[start_key]
+                if deltas:
+                    baseline_entry["pod_timeline_deltas_ms"] = deltas
+                else:
+                    baseline_entry["pod_timeline_deltas_unavailable_reason"] = (
+                        "pod timeline lacked a complete server-side phase pair"
+                    )
+            else:
+                baseline_entry["pod_timeline_deltas_unavailable_reason"] = raw.get(
+                    "pod_timeline_unavailable_reason",
+                    "pod timeline was not captured",
+                )
             if len(paired) == 1:
                 if paired[0] >= 0:
                     baseline_entry["status_flipped_to_replicas_patched_ms"] = paired[0]
