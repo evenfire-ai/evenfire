@@ -29,9 +29,13 @@ vi.mock('../src/middleware/actionCheckpointCaller.js', () => ({
     _res: express.Response,
     next: express.NextFunction
   ) => {
+    const service = req.header('x-test-checkpoint-caller') === 'mcp-host' ? 'mcp-host' : 'rpc-proxy'
     req.actionCheckpointCaller = {
-      service: req.header('x-test-checkpoint-caller') === 'mcp-host' ? 'mcp-host' : 'rpc-proxy',
-      trustPlane: 'internal_service_token',
+      service,
+      trustPlane: service === 'mcp-host' ? 'mcp_host_runtime_jwt' : 'internal_service_token',
+      ...(service === 'mcp-host'
+        ? { permittedResource: { type: 'host', logicalId: 'default/chatllm' } }
+        : {}),
     }
     next()
   },
@@ -51,7 +55,8 @@ function checkpointRequest(
   operationId: 'chat.message.invoke' | 'host.status.read',
   index: number,
   receipt?: string,
-  nonceIndex = index
+  nonceIndex = index,
+  callerService = 'rpc-proxy'
 ) {
   const target = canonicalActionTarget(
     operationId === 'chat.message.invoke'
@@ -79,7 +84,7 @@ function checkpointRequest(
     accessPathId: `ap1_${'a'.repeat(43)}`,
     authorizationRevision: `ar1_${'b'.repeat(43)}`,
     behaviorBindingHash: `bh2_${'c'.repeat(43)}`,
-    ...(operationId === 'chat.message.invoke'
+    ...(operationId === 'chat.message.invoke' && callerService === 'rpc-proxy'
       ? {
           hostMessageAdmission: {
             sendNonce: String(nonceIndex).padStart(43, '0'),
@@ -88,7 +93,7 @@ function checkpointRequest(
           },
         }
       : {}),
-    domain: { service: 'rpc-proxy', resource, targetHash },
+    domain: { service: callerService, resource, targetHash },
   }
 }
 
@@ -178,6 +183,49 @@ describe('Spec 62 v2 Host-message admission and retry receipt', () => {
       .send(checkpointRequest('chat.message.invoke', 9, undefined, 10))
       .expect(200)
     expect(admission.checkAndIncrement).toHaveBeenCalledTimes(2)
+  })
+
+  it('charges ingress once and keeps MCP Host effect checkpoints admission-free', async () => {
+    const server = app()
+    const ingress = checkpointRequest('chat.message.invoke', 37)
+    const admitted = await request(server)
+      .post('/internal/action-authority/checkpoint')
+      .send(ingress)
+      .expect(200)
+    const receipt = admitted.body.hostMessageAdmissionReceipt as string
+    expect(receipt).toMatch(/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/)
+    expect(admission.checkAndIncrement).toHaveBeenCalledOnce()
+
+    const downstreamRequest = checkpointRequest(
+      'chat.message.invoke',
+      37,
+      undefined,
+      37,
+      'mcp-host'
+    )
+    const downstream = await request(server)
+      .post('/internal/action-authority/checkpoint')
+      .set('x-test-checkpoint-caller', 'mcp-host')
+      .send(downstreamRequest)
+      .expect(200)
+
+    expect(downstream.body).not.toHaveProperty('hostMessageAdmissionReceipt')
+    expect(admission.checkAndIncrement).toHaveBeenCalledOnce()
+    expect(checkpoint.checkpointActionAuthority).toHaveBeenCalledTimes(2)
+    expect(
+      checkpoint.checkpointActionAuthority.mock.calls.map(([input]) => input.request.domain.service)
+    ).toEqual(['rpc-proxy', 'mcp-host'])
+
+    await request(server)
+      .post('/internal/action-authority/checkpoint')
+      .set('x-test-checkpoint-caller', 'mcp-host')
+      .send({
+        ...downstreamRequest,
+        hostMessageAdmission: { ...ingress.hostMessageAdmission, receipt },
+      })
+      .expect(400)
+    expect(admission.checkAndIncrement).toHaveBeenCalledOnce()
+    expect(checkpoint.checkpointActionAuthority).toHaveBeenCalledTimes(2)
   })
 
   it('rejects forged or rebound receipts before admission and live authority', async () => {
@@ -367,14 +415,22 @@ describe('Spec 62 v2 Host-message admission and retry receipt', () => {
     expect(receipt).not.toContain('sendNonce')
   })
 
-  it('rejects a non-authoritative checkpoint caller before admission', async () => {
-    await request(app())
+  it('rejects an MCP Host admission-receipt exemption before live authority', async () => {
+    const server = app()
+    const ingress = checkpointRequest('chat.message.invoke', 15)
+    const admitted = await request(server)
+      .post('/internal/action-authority/checkpoint')
+      .send(ingress)
+      .expect(200)
+    const receipt = admitted.body.hostMessageAdmissionReceipt as string
+    const downstream = checkpointRequest('chat.message.invoke', 15, undefined, 15, 'mcp-host')
+    await request(server)
       .post('/internal/action-authority/checkpoint')
       .set('x-test-checkpoint-caller', 'mcp-host')
-      .send(checkpointRequest('chat.message.invoke', 15))
+      .send({ ...downstream, hostMessageAdmission: { ...ingress.hostMessageAdmission, receipt } })
       .expect(400)
-    expect(admission.checkAndIncrement).not.toHaveBeenCalled()
-    expect(checkpoint.checkpointActionAuthority).not.toHaveBeenCalled()
+    expect(admission.checkAndIncrement).toHaveBeenCalledOnce()
+    expect(checkpoint.checkpointActionAuthority).toHaveBeenCalledOnce()
   })
 
   it('rejects exact v2 binding substitution before charging admission', async () => {
