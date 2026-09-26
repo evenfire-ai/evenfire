@@ -68,6 +68,11 @@ type JourneyMetrics = {
   draft_preserved_across_restart: boolean
   second_suspend_ms: number
   cold_send_to_waking_visible_ms: number | null
+  cold_send_pre_click_ready_replicas: number
+  cold_send_first_outcome: 'response' | 'waking' | null
+  cold_send_to_user_message_visible_ms: number | null
+  cold_send_to_task_acknowledged_ms: number | null
+  cold_send_to_ready_observed_ms: number | null
   cold_send_to_response_ms: number
   cold_send_to_composer_idle_ms: number
   cold_send_retries: number
@@ -274,6 +279,7 @@ async function resolveColdSend(
 ): Promise<{
   wakingVisibleMs: number | null
   retries: number
+  firstOutcome: 'response' | 'waking'
 }> {
   const started = Date.now()
   const response = page.getByTestId('agent-response').filter({ hasText: responseMarker })
@@ -291,6 +297,9 @@ async function resolveColdSend(
     .not.toBeNull()
   let wakingVisibleMs: number | null = null
   let retries = 0
+  if (firstOutcome === null) {
+    throw new Error('Cold send ended without an observable first outcome')
+  }
   if (firstOutcome === 'waking') {
     wakingVisibleMs = Date.now() - started
     // The retry is a user action. Wait for the observed Host to become Ready
@@ -306,6 +315,7 @@ async function resolveColdSend(
   return {
     wakingVisibleMs,
     retries,
+    firstOutcome,
   }
 }
 
@@ -384,6 +394,11 @@ test('human journey — two Hosts, restart, cache, and two verified stateless wa
     draft_preserved_across_restart: false,
     second_suspend_ms: 0,
     cold_send_to_waking_visible_ms: null,
+    cold_send_pre_click_ready_replicas: 0,
+    cold_send_first_outcome: null,
+    cold_send_to_user_message_visible_ms: null,
+    cold_send_to_task_acknowledged_ms: null,
+    cold_send_to_ready_observed_ms: null,
     cold_send_to_response_ms: 0,
     cold_send_to_composer_idle_ms: 0,
     cold_send_retries: 0,
@@ -564,10 +579,55 @@ test('human journey — two Hosts, restart, cache, and two verified stateless wa
       const followPrompt = `Earlier I gave you a token. Reply with exactly that token followed by ${statelessFollowMarker}.`
       await humanType(composer, followPrompt)
       await expect(page.getByTestId('send-button')).toBeEnabled()
+      // The catalog prewarm after reopen is measured separately by
+      // second_launch_to_stateless_ready_ms. This fresh snapshot proves that
+      // the second send is itself a cold wake intent, not a continuation of
+      // that earlier prewarm window.
+      const preClick = await readHostSnapshot(STATELESS_DEPLOYMENT, STATELESS_HOST_RESOURCE)
+      metrics.cold_send_pre_click_ready_replicas = preClick.readyReplicas
+      expect(preClick.lifecycleState).toBe('suspended')
+      expect(preClick.replicas).toBe(0)
+      expect(preClick.readyReplicas).toBe(0)
+      expect(preClick.podNames).toHaveLength(0)
+
       const sendStarted = Date.now()
       await page.getByTestId('send-button').click()
+      await expect(page.getByTestId('message-list')).toContainText(statelessFollowMarker, {
+        timeout: 30_000,
+      })
+      metrics.cold_send_to_user_message_visible_ms = Date.now() - sendStarted
+
+      const followResponse = page
+        .getByTestId('agent-response')
+        .filter({ hasText: statelessFollowMarker })
+      const taskStepper = page.getByTestId('progress-stepper')
+      const stepperWatch = expect
+        .poll(
+          async () => {
+            if (
+              metrics.cold_send_to_task_acknowledged_ms === null &&
+              (await taskStepper.isVisible().catch(() => false))
+            ) {
+              metrics.cold_send_to_task_acknowledged_ms = Date.now() - sendStarted
+            }
+            return (
+              metrics.cold_send_to_task_acknowledged_ms !== null ||
+              (await followResponse.isVisible().catch(() => false))
+            )
+          },
+          {
+            timeout: 270_000,
+            message: 'Cold send must expose either a task acknowledgement or a final response',
+          }
+        )
+        .toBe(true)
+      const readyObservation = waitForStatelessReady(270_000).then(result => ({
+        result,
+        observedAt: Date.now(),
+      }))
       const outcome = await resolveColdSend(page, statelessFollowMarker, statelessMarker)
       metrics.cold_send_to_waking_visible_ms = outcome.wakingVisibleMs
+      metrics.cold_send_first_outcome = outcome.firstOutcome
       metrics.cold_send_to_response_ms = Date.now() - sendStarted
       metrics.cold_send_retries = outcome.retries
       await expect(composer).toHaveValue('', { timeout: 150_000 })
@@ -576,12 +636,14 @@ test('human journey — two Hosts, restart, cache, and two verified stateless wa
       })
       await expect(page.getByTestId('send-button')).toBeDisabled({ timeout: 150_000 })
       metrics.cold_send_to_composer_idle_ms = Date.now() - sendStarted
+      await stepperWatch
 
-      const ready = await waitForStatelessReady(270_000)
-      metrics.stateless_pod_after_cold_send = ready.snapshot.podNames
-      metrics.stateless_image_ids_after_cold_send = ready.snapshot.imageIds
-      expect(ready.snapshot.readyReplicas).toBeGreaterThan(0)
-      expect(ready.snapshot.imageIds).toEqual(metrics.stateless_image_ids_before)
+      const readyAfterSend = await readyObservation
+      metrics.cold_send_to_ready_observed_ms = readyAfterSend.observedAt - sendStarted
+      metrics.stateless_pod_after_cold_send = readyAfterSend.result.snapshot.podNames
+      metrics.stateless_image_ids_after_cold_send = readyAfterSend.result.snapshot.imageIds
+      expect(readyAfterSend.result.snapshot.readyReplicas).toBeGreaterThan(0)
+      expect(readyAfterSend.result.snapshot.imageIds).toEqual(metrics.stateless_image_ids_before)
       await expect(
         page.getByTestId('agent-response').filter({ hasText: statelessFollowMarker })
       ).toContainText(statelessFollowMarker, { timeout: 30_000 })
