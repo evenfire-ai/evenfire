@@ -403,6 +403,25 @@ export function createAdminRemoteMcpRouter(
       }
       const discovery = outcome.result
 
+      // Reject `bearerInBody` at admission instead of persisting a CR the runtime
+      // cannot honor. mcp-host always sends the token in the Authorization header
+      // (body injection is deferred, see `mcp/client.ts`), so a resource that only
+      // accepts the token in the body (`bearer_methods_supported:["body"]` without
+      // `"header"`, e.g. SEMrush) would install "green" and then fail every tool
+      // call with no signal. Fail closed here until body injection exists.
+      if (discovery.quirks.bearerInBody) {
+        log.warn(
+          { event: 'remote_oauth_bearer_in_body_unsupported', serverName: body.serverName },
+          'remote install rejected: resource requires bearer token in body, unsupported by the runtime'
+        )
+        res.status(400).json({
+          error: 'bearer_in_body_unsupported',
+          message:
+            'this resource requires the bearer token in the request body, which is not yet supported',
+        })
+        return
+      }
+
       // The requested mode must match what server-side discovery actually resolved
       // (D-4: discovery is authoritative). CIMD ⇒ AS must offer CIMD; DCR ⇒ AS must
       // offer a registration endpoint (registrationMode 'dcr').

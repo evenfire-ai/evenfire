@@ -23,6 +23,7 @@ import {
   DCR_PUBLIC_WITH_ECHOED_SECRET_REGISTRATION_RESPONSE,
   DCR_VERCEL_DOWNGRADE_REGISTRATION_JSON,
   DCR_VERCEL_DOWNGRADE_REGISTRATION_RESPONSE,
+  NOTION_PRM_JSON,
   PILOTS,
   VERCEL_PILOT,
   dcrPilot,
@@ -105,6 +106,10 @@ function gatewayWithContext(contextName = 'ctx-a'): MockGateway {
 
 // Real DiscoveryResult, derived from the real Notion probe fixtures (T1).
 let notionResult: DiscoveryResult
+// A DiscoveryResult whose resource requires the token in the BODY, derived from the
+// real producer (T1) by documented substitution of the Notion PRM's
+// `bearer_methods_supported` to `["body"]` — the only field changed.
+let bodyBearerResult: DiscoveryResult
 
 beforeAll(async () => {
   const actual = await vi.importActual<typeof import('../src/oauth/discovery.js')>(
@@ -124,6 +129,27 @@ beforeAll(async () => {
   if (!vercelOutcome.ok)
     throw new Error(`vercel fixture discovery failed: ${vercelOutcome.error.kind}`)
   vercelResult = vercelOutcome.result
+
+  // Documented substitution (like the DCR fixtures): the real Notion pilot with the
+  // PRM's `bearer_methods_supported` set to body-only. The real producer then derives
+  // `quirks.bearerInBody === true` — no hand-authored DiscoveryResult (T1).
+  const bodyBearerPilot = {
+    ...PILOTS.notion,
+    prm: {
+      ...PILOTS.notion.prm,
+      json: NOTION_PRM_JSON.replace(
+        '"bearer_methods_supported":["header"]',
+        '"bearer_methods_supported":["body"]'
+      ),
+    },
+  }
+  const bodyBearerOutcome = await actual.discoverRemoteOAuth(bodyBearerPilot.mcpUrl, {
+    transport: makeDiscoveryTransport(bodyBearerPilot),
+    resolveDns: async () => ['93.184.216.34'],
+  })
+  if (!bodyBearerOutcome.ok)
+    throw new Error(`body-bearer fixture discovery failed: ${bodyBearerOutcome.error.kind}`)
+  bodyBearerResult = bodyBearerOutcome.result
 })
 
 beforeEach(() => {
@@ -275,6 +301,29 @@ describe('POST /admin/mcp-servers/remote (install saga)', () => {
       spec: { mcpServers?: string[] }
     }
     expect(ctx.spec.mcpServers).toContain('notion-remote')
+  })
+
+  it('body-bearer resource: rejects at admission and creates no CR (the runtime cannot honor bearerInBody)', async () => {
+    // Self-check the T1 fixture: the real producer must have derived the body-bearer
+    // quirk, or this test would pass vacuously against any server.
+    expect(bodyBearerResult.quirks.bearerInBody).toBe(true)
+    mockDiscovery(bodyBearerResult)
+    const gw = gatewayWithContext('ctx-a')
+    const res = await request(makeApp(gw)).post('/admin/mcp-servers/remote').send({
+      serverName: 'notion-remote',
+      contextRef: 'ctx-a',
+      baseUrl: 'https://mcp.notion.com/mcp',
+      mode: 'cimd',
+    })
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe('bearer_in_body_unsupported')
+
+    // No CR persisted, and the Context is not mutated: the install failed closed.
+    await expect(gw.getResource('mcpservers', 'notion-remote', NS)).rejects.toBeDefined()
+    const ctx = (await gw.getResource('contexts', 'ctx-a', NS)) as {
+      spec: { mcpServers?: string[] }
+    }
+    expect(ctx.spec.mcpServers ?? []).not.toContain('notion-remote')
   })
 
   it('pre-registered confidential: creates the client Secret + references it in spec.oauth', async () => {
