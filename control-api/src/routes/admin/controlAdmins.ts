@@ -263,7 +263,14 @@ export function createAdminControlAdminsRouter(): Router {
         return
       }
 
-      const invitation = await createControlAdminInvitation(email, invitedByAdminId)
+      const replaceInviterInput: unknown = req.body?.replaceInviter
+      if (replaceInviterInput !== undefined && typeof replaceInviterInput !== 'boolean') {
+        res.status(400).json({ error: 'replaceInviter must be a boolean' })
+        return
+      }
+      const invitation = await createControlAdminInvitation(email, invitedByAdminId, {
+        replaceInviter: replaceInviterInput === true,
+      })
       if ('error' in invitation) {
         res.status(409).json({ error: invitation.error })
         return
@@ -319,6 +326,7 @@ export function createAdminControlAdminsRouter(): Router {
           status: invitation.status,
           expiresAt: invitation.expiresAt.toISOString(),
           createdAt: invitation.createdAt.toISOString(),
+          replaceInviter: invitation.replaceInviter,
         },
       })
     } catch (error) {
