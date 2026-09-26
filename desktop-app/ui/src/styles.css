@@ -15773,6 +15773,36 @@ pre {
   width: min(100%, 52rem);
   margin: 0 auto;
   color: var(--text);
+  font-family: var(--font-family-base);
+  overflow-wrap: anywhere;
+}
+
+.da-gfs-markdown-preview__content img {
+  max-width: 100%;
+  height: auto;
+}
+
+.da-gfs-markdown-preview__content .gfs-markdown-table-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+  margin: 0 0 var(--space-3);
+  overscroll-behavior-x: contain;
+}
+
+.da-gfs-markdown-preview__content .gfs-markdown-table-scroll:focus-visible {
+  outline: 2px solid rgba(var(--focus-rgb), 0.85);
+  outline-offset: 2px;
+}
+
+.da-gfs-markdown-preview__content .gfs-markdown-table-scroll table {
+  width: max-content;
+  min-width: 100%;
+  margin: 0;
+}
+
+.da-gfs-markdown-preview__content .gfs-markdown-table-scroll th,
+.da-gfs-markdown-preview__content .gfs-markdown-table-scroll td {
+  max-width: 24rem;
   overflow-wrap: anywhere;
 }
 

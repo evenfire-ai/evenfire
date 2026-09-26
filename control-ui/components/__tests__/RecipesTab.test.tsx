@@ -140,9 +140,12 @@ describe('RecipesTab — render', () => {
     expect(screen.getByText(/Install Plugin/)).toBeInTheDocument()
   })
 
-  it('shows Plugins SDK button', () => {
+  it('shows Plugin SDK in the plugin actions menu', () => {
     render(<RecipesTab {...DEFAULT_PROPS} />)
-    expect(screen.getByRole('button', { name: 'Plugins SDK' })).toBeInTheDocument()
+    const actionsButton = screen.getByRole('button', { name: 'Plugin actions' })
+    expect(actionsButton).toBeInTheDocument()
+    fireEvent.click(actionsButton)
+    expect(screen.getByRole('menuitem', { name: 'Plugin SDK' })).toBeInTheDocument()
   })
 
   it('shows Refresh button', () => {
@@ -198,9 +201,10 @@ describe('RecipesTab — actions', () => {
     expect(onRefresh).toHaveBeenCalledOnce()
   })
 
-  it("navigates to the Plugin SDK when 'Plugins SDK' clicked", () => {
+  it("navigates to the Plugin SDK when 'Plugin SDK' is selected", () => {
     render(<RecipesTab {...DEFAULT_PROPS} />)
-    fireEvent.click(screen.getByRole('button', { name: 'Plugins SDK' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Plugin actions' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Plugin SDK' }))
     expect(pushSpy).toHaveBeenCalledWith('/plugins/sdk')
   })
 
