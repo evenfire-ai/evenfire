@@ -3449,6 +3449,15 @@ export class HostReconciler {
         },
       },
       {
+        name: 'MCP_HOST_RPC_PROXY_EDGE_TOKEN',
+        valueFrom: {
+          secretKeyRef: {
+            name: 'rpc-proxy-edge-credentials',
+            key: 'RPC_PROXY_MCP_HOST_EDGE_TOKEN',
+          },
+        },
+      },
+      {
         name: 'MCP_HOST_WORKFLOW_CONTROL_TOKEN_FILE',
         value: MCP_HOST_WORKFLOW_CONTROL_TOKEN_FILE_PATH,
       },

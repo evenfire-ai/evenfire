@@ -120,8 +120,10 @@ export async function resolveHostConnectionForUser(
 
   const headers: Record<string, string> = {
     ...host.headers,
+    authorization: `Bearer ${config.mcpHostEdgeToken}`,
     'x-clerum-edge-caller': 'rpc-proxy',
     'x-clerum-edge-host-ref': hostRef,
+    'x-service-token': 'rpc-proxy',
   }
   if (edgeContext?.actionContextV2) {
     headers['x-clerum-edge-action-context'] = edgeContext.actionContextV2
@@ -155,9 +157,11 @@ export async function resolveArtifactReadHostConnectionForUser(
 
   const headers: Record<string, string> = {
     ...host.headers,
+    authorization: `Bearer ${config.mcpHostEdgeToken}`,
     'x-clerum-edge-caller': 'rpc-proxy',
     'x-clerum-edge-host-ref': hostRef,
     'x-clerum-edge-user-id': userId,
+    'x-service-token': 'rpc-proxy',
   }
   if (edgeContext?.teamId) headers['x-clerum-edge-team-id'] = edgeContext.teamId
   headers['x-clerum-edge-access-scope'] =

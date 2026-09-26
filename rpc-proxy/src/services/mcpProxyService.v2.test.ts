@@ -17,7 +17,11 @@ describe('v2 checkpoint destination routing', () => {
     expect(connection).toMatchObject({
       name: 'chatllm',
       url: 'http://chatllm.mcp-host.svc.cluster.local:8080',
-      headers: { 'x-clerum-edge-action-context': 'trusted-edge' },
+      headers: {
+        'x-clerum-edge-action-context': 'trusted-edge',
+        authorization: expect.stringMatching(/^Bearer .{16,}$/),
+        'x-service-token': 'rpc-proxy',
+      },
     })
     expect(fetchSpy).not.toHaveBeenCalled()
   })

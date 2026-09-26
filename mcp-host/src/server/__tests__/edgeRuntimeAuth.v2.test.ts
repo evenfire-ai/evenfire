@@ -16,6 +16,7 @@ import {
 const userId = '11111111-1111-4111-8111-111111111111'
 const sid = '22222222-2222-4222-8222-222222222222'
 const delegationJti = '33333333-3333-4333-8333-333333333333'
+const rpcProxyEdgeToken = 'dev-rpc-proxy-mcp-host-edge-token'
 
 async function rpcProxyHeaderFor(input: {
   operationId: ActionOperationId
@@ -137,14 +138,14 @@ describe('runtimeEdgeGuard v2', () => {
   beforeEach(() => {
     vi.resetModules()
     vi.doMock('../../config', () => ({
-      config: { hostName: 'chatllm', namespace: 'mcp-host' },
+      config: { hostName: 'chatllm', namespace: 'mcp-host', rpcProxyEdgeToken },
     }))
   })
 
   async function appFor(operations: readonly ['chat.message.invoke'] | readonly ['task.read']) {
     const { runtimeEdgeGuard, getRuntimeCallerContext } = await import('../edgeRuntimeAuth')
     const app = express()
-    app.post('/test', runtimeEdgeGuard(['rpc-proxy'], operations), (req, res) => {
+    app.post('/test', runtimeEdgeGuard(['rpc-proxy', 'channel-reader'], operations), (req, res) => {
       res.json(getRuntimeCallerContext(req))
     })
     return app
@@ -152,11 +153,35 @@ describe('runtimeEdgeGuard v2', () => {
 
   it('consumes the real rpc-proxy producer and exposes only trusted v2 identity', async () => {
     const header = await realRpcProxyHeader()
+    const { resolveHostConnectionForUser } = (await import(
+      `${process.cwd()}/../rpc-proxy/src/services/mcpProxyService.ts`
+    )) as {
+      resolveHostConnectionForUser: (
+        userId: string,
+        hostRef: string,
+        rpcAccessToken: string,
+        edgeContext: {
+          actionContextV2: string
+          destination: { kind: 'host'; ref: string; url: string }
+        }
+      ) => Promise<{ headers: Record<string, string> } | null>
+    }
+    const connection = await resolveHostConnectionForUser(userId, 'chatllm', 'unused-user-token', {
+      actionContextV2: header,
+      destination: {
+        kind: 'host',
+        ref: 'mcp-host/chatllm',
+        url: 'http://chatllm.mcp-host.svc.cluster.local:8080',
+      },
+    })
+    expect(connection?.headers).toMatchObject({
+      authorization: `Bearer ${rpcProxyEdgeToken}`,
+      'x-service-token': 'rpc-proxy',
+      'x-clerum-edge-caller': 'rpc-proxy',
+    })
     const response = await request(await appFor(['chat.message.invoke']))
       .post('/test')
-      .set('x-clerum-edge-caller', 'rpc-proxy')
-      .set('x-clerum-edge-host-ref', 'chatllm')
-      .set('x-clerum-edge-action-context', header)
+      .set(connection!.headers)
     expect(response.status).toBe(200)
     expect(response.body).toMatchObject({
       caller: 'rpc-proxy',
@@ -197,6 +222,8 @@ describe('runtimeEdgeGuard v2', () => {
     const response = await request(app)
       .get('/search?q=budget')
       .set('x-clerum-edge-caller', 'rpc-proxy')
+      .set('authorization', `Bearer ${rpcProxyEdgeToken}`)
+      .set('x-service-token', 'rpc-proxy')
       .set('x-clerum-edge-host-ref', 'chatllm')
       .set('x-clerum-edge-action-context', header)
 
@@ -211,6 +238,8 @@ describe('runtimeEdgeGuard v2', () => {
     const mismatch = await request(await appFor(['task.read']))
       .post('/test')
       .set('x-clerum-edge-caller', 'rpc-proxy')
+      .set('authorization', `Bearer ${rpcProxyEdgeToken}`)
+      .set('x-service-token', 'rpc-proxy')
       .set('x-clerum-edge-host-ref', 'chatllm')
       .set('x-clerum-edge-action-context', header)
     expect(mismatch.status).toBe(403)
@@ -218,6 +247,8 @@ describe('runtimeEdgeGuard v2', () => {
     const mixed = await request(await appFor(['chat.message.invoke']))
       .post('/test')
       .set('x-clerum-edge-caller', 'rpc-proxy')
+      .set('authorization', `Bearer ${rpcProxyEdgeToken}`)
+      .set('x-service-token', 'rpc-proxy')
       .set('x-clerum-edge-host-ref', 'chatllm')
       .set('x-clerum-edge-user-id', 'attacker')
       .set('x-clerum-edge-action-context', header)
@@ -236,6 +267,8 @@ describe('runtimeEdgeGuard v2', () => {
     const response = await request(await appFor(['chat.message.invoke']))
       .post('/test')
       .set('x-clerum-edge-caller', 'rpc-proxy')
+      .set('authorization', `Bearer ${rpcProxyEdgeToken}`)
+      .set('x-service-token', 'rpc-proxy')
       .set('x-clerum-edge-host-ref', 'chatllm')
       .set('x-clerum-edge-action-context', substituted)
     expect(response.status).toBe(401)
@@ -254,8 +287,46 @@ describe('runtimeEdgeGuard v2', () => {
     const response = await request(await appFor(['chat.message.invoke']))
       .post('/test')
       .set('x-clerum-edge-caller', 'rpc-proxy')
+      .set('authorization', `Bearer ${rpcProxyEdgeToken}`)
+      .set('x-service-token', 'rpc-proxy')
       .set('x-clerum-edge-host-ref', 'chatllm')
       .set('x-clerum-edge-action-context', extended)
     expect(response.status).toBe(401)
+  })
+
+  it('rejects a permitted peer forging rpc-proxy and user headers without the token', async () => {
+    const response = await request(await appFor(['chat.message.invoke']))
+      .post('/test')
+      .set('x-clerum-edge-caller', 'rpc-proxy')
+      .set('x-clerum-edge-user-id', userId)
+      .set('x-clerum-edge-host-ref', 'chatllm')
+
+    expect(response.status).toBe(401)
+    expect(response.body).toEqual({ error: 'Missing authenticated rpc-proxy service context' })
+  })
+
+  it('rejects the rpc-proxy marker with a wrong service token', async () => {
+    const response = await request(await appFor(['chat.message.invoke']))
+      .post('/test')
+      .set('x-clerum-edge-caller', 'rpc-proxy')
+      .set('x-clerum-edge-user-id', userId)
+      .set('x-clerum-edge-host-ref', 'chatllm')
+      .set('authorization', 'Bearer wrong-rpc-proxy-edge-credential')
+      .set('x-service-token', 'rpc-proxy')
+
+    expect(response.status).toBe(401)
+  })
+
+  it('keeps the independent channel-reader caller path working without RPC Proxy auth', async () => {
+    const response = await request(await appFor(['chat.message.invoke']))
+      .post('/test')
+      .set('x-clerum-edge-caller', 'channel-reader')
+      .set('x-clerum-edge-host-ref', 'chatllm')
+      .set('x-clerum-edge-channel-type', 'telegram')
+      .set('x-clerum-edge-channel-id', 'chatllm')
+      .set('x-clerum-edge-sender', 'sender-1')
+
+    expect(response.status).toBe(200)
+    expect(response.body.caller).toBe('channel-reader')
   })
 })

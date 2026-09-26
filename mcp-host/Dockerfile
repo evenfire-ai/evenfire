@@ -38,6 +38,7 @@ RUN npm run build && npm prune --omit=dev
 FROM node:24.16.0-alpine@sha256:21f403ab171f2dc89bad4dd69d7721bfd15f084ccb46cdd225f31f2bc59b5c9a
 ARG EVENFIRE_SOURCE_REVISION
 ARG EVENFIRE_SERVICE_VERSION
+ENV NODE_ENV=production
 
 WORKDIR /app
 
