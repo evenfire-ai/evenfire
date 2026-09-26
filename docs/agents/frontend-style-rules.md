@@ -64,6 +64,19 @@ application guidance that must be combined with this shared document.
   context, and cover that behavior with tests. Do not extend an exception to
   ordinary document preview or editing surfaces.
 
+Recorded exception — GFS file previews. `GfsMarkdownPreview` in Control UI
+(`control-ui/components/GfsMarkdownPreview`) and the Desktop renderer
+(`desktop-app/ui/src/components/GfsMarkdownPreview/Body.tsx`) renders read-only
+GFS Markdown/text file previews with ReactMarkdown + remark-gfm instead of
+`@uiw/react-md-editor`. The concrete limitation: the previews must render GFM
+tables inside a labelled, keyboard-focusable scrollable table region, which
+`MDEditor.Markdown` cannot preserve without regressing that behavior.
+Guarantees: no rehype-raw, so raw HTML stays inert; `urlTransform` restricts
+image `src` to `https:`/inline `data:image` URIs and link hrefs to
+`http(s):`/`mailto:`/`#` fragments; code blocks render as plain `pre` > `code`.
+The behavior is covered by the GfsMarkdownPreview test suites in both
+applications. This exception is scoped to these preview components only.
+
 ## Types, constants, and imports
 
 - Do not declare exported or reusable `type` or `interface` definitions inside
