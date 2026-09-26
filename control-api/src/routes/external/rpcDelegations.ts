@@ -17,6 +17,7 @@ import {
   type RequestedActionContextV2,
   requestedActionContextV2,
 } from '../../services/access/actionContextV2.js'
+import { resolveActionDestination } from '../../services/access/actionDestination.js'
 import { delegationV2IssuanceResponse } from '../../services/access/actionMessageId.js'
 import {
   EXTERNAL_RPC_ADMISSION_CLASS,
@@ -192,6 +193,39 @@ export function createExternalRpcDelegationsRouter(gateway: K8sGateway): Router 
         if (result.status !== 'allowed') {
           sendAuthorizationOutcome(req, res, result)
           return
+        }
+        if (parsed.operationId === 'mcp.invoke') {
+          const destination = await resolveActionDestination({
+            resource: result.context.resource,
+            target: result.context.target,
+            gateway,
+            budget: req.accessExecutionBudget!,
+          })
+          if (destination.status === 'unavailable') {
+            sendPublicApiError(
+              req,
+              res,
+              503,
+              'authority_unavailable',
+              'Authorization is temporarily unavailable.',
+              true
+            )
+            return
+          }
+          if (
+            destination.status !== 'resolved' ||
+            destination.destination?.kind !== 'mcp_server' ||
+            destination.destination.ref !== result.context.resource.logicalId
+          ) {
+            sendPublicApiError(
+              req,
+              res,
+              403,
+              'forbidden',
+              'The requested operation is not allowed.'
+            )
+            return
+          }
         }
         const delegationToken = issueUserDelegationV2({
           principal: result.context.principal,
