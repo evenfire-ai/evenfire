@@ -89,10 +89,15 @@ export function shouldRecoverWorkflowTriggerTextResponse(
   if (isWorkflowListIntent(userText)) return false
 
   const normalizedUser = userText.toLowerCase()
+  const directTrigger = userText.match(/^\s*(run|execute|trigger|start)\s+(.+?)\s*$/i)
+  const directCandidate = directTrigger?.[2].replace(/[\u0060'"“”‘’]/g, '').trim()
+  const namesDirectRecipe =
+    directCandidate !== undefined && /^[a-z0-9]+(?:-[a-z0-9]+)+$/i.test(directCandidate)
   const asksToTrigger = /\b(run|start|trigger|execute|launch)\b/.test(normalizedUser)
   const includesRecipeLikeName = /\b[a-z0-9]+(?:-[a-z0-9]+)+\b/.test(normalizedUser)
   const namesWorkflow =
     /\bworkflow\s+recipe\b/.test(normalizedUser) ||
+    namesDirectRecipe ||
     (includesRecipeLikeName && /\b(?:workflow|recipe)\b/.test(normalizedUser))
   if (!asksToTrigger || !namesWorkflow) return false
 

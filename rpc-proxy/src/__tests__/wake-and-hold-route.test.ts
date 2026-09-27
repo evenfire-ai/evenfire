@@ -113,7 +113,7 @@ describe('POST /rpc/hosts/:hostRef/messages wake-and-hold triggers', () => {
     const response = await postMessage(makeApp()).expect(200)
 
     expect(response.body).toEqual({ success: true, taskId: 't-1' })
-    expect(controlApiMock.requestHostWakeFromControlApi).toHaveBeenCalledTimes(1)
+    expect(controlApiMock.requestHostWakeFromControlApi).toHaveBeenCalledTimes(2)
     expect(controlApiMock.requestHostWakeFromControlApi).toHaveBeenCalledWith('chatllm', 'token')
     expect(serviceMock.forwardHostMessageToHost).toHaveBeenCalledTimes(2)
   })
@@ -149,9 +149,9 @@ describe('POST /rpc/hosts/:hostRef/messages wake-and-hold triggers', () => {
       .expect(200)
       .then(response => response)
     await firstForward
-    expect(controlApiMock.requestHostWakeFromControlApi).not.toHaveBeenCalled()
-    await vi.advanceTimersByTimeAsync(750)
     expect(controlApiMock.requestHostWakeFromControlApi).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(750)
+    expect(controlApiMock.requestHostWakeFromControlApi).toHaveBeenCalledTimes(2)
     expect(serviceMock.forwardHostMessageToHost).toHaveBeenCalledTimes(2)
     await vi.advanceTimersByTimeAsync(1_500)
     upstreamAdmits = true
@@ -268,7 +268,7 @@ describe('POST /rpc/hosts/:hostRef/messages wake-and-hold triggers', () => {
     const response = await postMessage(makeApp()).expect(200)
 
     expect(response.body).toEqual({ success: true, taskId: 't-2' })
-    expect(controlApiMock.requestHostWakeFromControlApi).toHaveBeenCalledTimes(1)
+    expect(controlApiMock.requestHostWakeFromControlApi).toHaveBeenCalledTimes(2)
   })
 
   it('drain-cancel bounce resolves within the short retry schedule (250ms then 1s)', async () => {
@@ -287,13 +287,15 @@ describe('POST /rpc/hosts/:hostRef/messages wake-and-hold triggers', () => {
     expect(serviceMock.forwardHostMessageToHost).toHaveBeenCalledTimes(3)
   })
 
-  it('409 not-stateless keeps today behavior exactly: 502 Upstream host unavailable', async () => {
+  it('409 not-stateless keeps the full upstream timeout and legacy 502 behavior', async () => {
     serviceMock.forwardHostMessageToHost.mockRejectedValue(hostDownError())
     controlApiMock.requestHostWakeFromControlApi.mockResolvedValue({ kind: 'not-stateless' })
 
     const response = await postMessage(makeApp()).expect(502)
 
     expect(response.body).toEqual({ error: 'Upstream host unavailable' })
+    expect(serviceMock.forwardHostMessageToHost.mock.calls[0][2]).toEqual({ async: false })
+    expect(controlApiMock.requestHostWakeFromControlApi).toHaveBeenCalledTimes(2)
   })
 
   it('404 unknown host maps to a 404 for the caller', async () => {
@@ -348,7 +350,7 @@ describe('POST /rpc/hosts/:hostRef/messages wake-and-hold triggers', () => {
     expect(serviceMock.forwardHostMessageToHost.mock.calls.length).toBeGreaterThan(4)
   })
 
-  it('a non-availability upstream failure (mcp-host 500) never triggers a wake', async () => {
+  it('a non-availability upstream failure (mcp-host 500) never enters the wake hold', async () => {
     serviceMock.forwardHostMessageToHost.mockRejectedValue(
       new serviceMock.UpstreamHostError(500, '{"error":"boom"}')
     )
@@ -356,10 +358,10 @@ describe('POST /rpc/hosts/:hostRef/messages wake-and-hold triggers', () => {
     const response = await postMessage(makeApp()).expect(502)
 
     expect(response.body).toEqual({ error: 'Upstream host unavailable' })
-    expect(controlApiMock.requestHostWakeFromControlApi).not.toHaveBeenCalled()
+    expect(controlApiMock.requestHostWakeFromControlApi).toHaveBeenCalledTimes(1) // statelessness check only
   })
 
-  it('an upstream AbortError keeps the 504 path and never triggers a wake', async () => {
+  it('an upstream AbortError keeps the 504 path without entering the wake hold', async () => {
     const abort = new Error('aborted')
     abort.name = 'AbortError'
     serviceMock.forwardHostMessageToHost.mockRejectedValue(abort)
@@ -367,7 +369,7 @@ describe('POST /rpc/hosts/:hostRef/messages wake-and-hold triggers', () => {
     const response = await postMessage(makeApp()).expect(504)
 
     expect(response.body).toEqual({ error: 'Gateway Timeout' })
-    expect(controlApiMock.requestHostWakeFromControlApi).not.toHaveBeenCalled()
+    expect(controlApiMock.requestHostWakeFromControlApi).toHaveBeenCalledTimes(1) // statelessness check only
   })
 
   it('a token without wake scope keeps the original full upstream timeout', async () => {
@@ -384,6 +386,17 @@ describe('POST /rpc/hosts/:hostRef/messages wake-and-hold triggers', () => {
     expect(serviceMock.forwardHostMessageToHost).toHaveBeenCalledTimes(1)
     expect(serviceMock.forwardHostMessageToHost.mock.calls[0][2]).toEqual({ async: false })
     expect(controlApiMock.requestHostWakeFromControlApi).not.toHaveBeenCalled()
+  })
+
+  it('uses the full upstream timeout when statelessness cannot be confirmed', async () => {
+    controlApiMock.requestHostWakeFromControlApi.mockRejectedValue(
+      new Error('wake API unavailable')
+    )
+    serviceMock.forwardHostMessageToHost.mockResolvedValue({ success: true, taskId: 't-stateful' })
+
+    await postMessage(makeApp()).expect(200)
+
+    expect(serviceMock.forwardHostMessageToHost.mock.calls[0][2]).toEqual({ async: false })
   })
 })
 

@@ -604,8 +604,8 @@ export type RespondWithWakeAndHoldOptions = {
   claims: RpcAccessClaims
   /** Raw bearer forwarded to the wake plane when the caller is wake-capable. */
   rpcAccessToken: string
-  /** Re-issues the original upstream request and writes the success response. */
-  attemptUpstream: () => Promise<void>
+  /** Re-issues the original upstream request with a deadline-bounded timeout. */
+  attemptUpstream: (timeoutMs: number) => Promise<void>
   /** Writes today's error response (502/504) — the pre-wake behavior. */
   respondLegacy: (error: unknown) => void
   coordinator?: WakeAndHoldCoordinator
@@ -664,7 +664,9 @@ export async function respondWithWakeAndHold(
           return
         }
         try {
-          await options.attemptUpstream()
+          const remainingMs = deadlineMs - Date.now()
+          if (remainingMs <= 0) break
+          await options.attemptUpstream(Math.min(config.upstreamTimeoutMs, remainingMs))
           return
         } catch (error) {
           if (options.res.headersSent) {

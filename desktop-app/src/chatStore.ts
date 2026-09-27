@@ -1802,6 +1802,8 @@ export class ChatStore {
   ): Promise<ChatMessage[]> {
     try {
       return await this.serializeChat(agentRef, chatId, async () => {
+        const index = await this.getIndex(agentRef)
+        if (this.isDeletedInScope(index, chatId)) return []
         const meta = await this.readOrMigratePagedChatUnlocked(agentRef, chatId)
         if (!meta) return []
         return this.readMessagesFromPagedMeta(agentRef, chatId, meta, limit, offset)

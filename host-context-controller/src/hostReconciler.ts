@@ -534,6 +534,8 @@ export class HostReconciler {
   private codexSnapshot: CodexCatalogSnapshot = { flagEnabled: false }
   private lastCodexConfigMap: k8s.V1ConfigMap | undefined
   private readonly readinessTimers: Map<string, ReturnType<typeof setTimeout>> = new Map()
+  private readonly reconcileGenerations = new Map<string, number>()
+  private readonly statusGenerations = new Map<string, number>()
   /**
    * host.name → image whose pull-policy refusal was already error-logged.
    * The periodic resync rebuilds the Deployment forever; the operator needs
@@ -2183,10 +2185,19 @@ export class HostReconciler {
 
   private setStatus(name: string, status: HostRuntimeStatus): void {
     this.statusMap.set(name, status)
+    this.statusGenerations.set(name, this.reconcileGenerations.get(name) ?? 0)
+  }
+
+  private advanceReconcileGeneration(name: string): number {
+    const generation = (this.reconcileGenerations.get(name) ?? 0) + 1
+    this.reconcileGenerations.set(name, generation)
+    return generation
   }
 
   private clearStatus(name: string): void {
     this.statusMap.delete(name)
+    this.reconcileGenerations.delete(name)
+    this.statusGenerations.delete(name)
     this.lifecycle.clearHost(name)
     const timer = this.readinessTimers.get(name)
     if (timer) {
@@ -3477,6 +3488,7 @@ export class HostReconciler {
     intervalMs = 5000,
     maxAttempts = 12
   ): void {
+    const pollGeneration = this.reconcileGenerations.get(name) ?? 0
     const existing = this.readinessTimers.get(name)
     if (existing) {
       clearTimeout(existing)
@@ -3489,6 +3501,13 @@ export class HostReconciler {
       attempts++
       const ready = await this.checkDeploymentReady(name, namespace)
       if (ready) {
+        if (
+          (this.reconcileGenerations.get(name) ?? 0) !== pollGeneration ||
+          (this.statusGenerations.get(name) ?? 0) > pollGeneration
+        ) {
+          this.readinessTimers.delete(name)
+          return
+        }
         this.setStatus(name, { deployed: true, ready: true, message: 'Running' })
         this.readinessTimers.delete(name)
         return
@@ -4579,6 +4598,7 @@ export class HostReconciler {
     const capturedAuthority = this.captureHostMutationAuthority()
     const capturedDependencies = this.resolveHostMutationDependencies?.(host)
     return this.lifecycle.serializeByHost(host.name, async () => {
+      this.advanceReconcileGeneration(host.name)
       this.requireHostMutationAuthority(`Host "${host.name}" reconcile`, capturedAuthority)
       const admittedHost = this.resolveCurrentHost ? this.resolveCurrentHost(host.name) : host
       if (!admittedHost) return
@@ -4803,6 +4823,12 @@ export class HostReconciler {
           : []),
         ...npFailures,
       ]
+      this.advanceReconcileGeneration(host.name)
+      const timer = this.readinessTimers.get(host.name)
+      if (timer) {
+        clearTimeout(timer)
+        this.readinessTimers.delete(host.name)
+      }
       this.setStatus(host.name, {
         deployed: applied,
         ready,

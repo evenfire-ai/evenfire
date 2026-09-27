@@ -1567,11 +1567,13 @@ export function useChatListController({
 
   return {
     // State (public contract, re-exported unchanged by the parent).
-    chatList,
+    chatList: selectedAgent && isHostAccessBlocked(selectedAgent) ? [] : chatList,
     chatListLoading,
     chatListMoreLoading,
     chatListHasMoreRemoteSessions,
-    latestChatSessions,
+    latestChatSessions: latestChatSessions.filter(
+      session => !isHostAccessBlocked(session.agentRef)
+    ),
     latestChatSessionsLoading,
     hideAgent,
     // CRUD (public contract).

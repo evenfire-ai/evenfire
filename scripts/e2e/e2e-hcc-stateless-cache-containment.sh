@@ -129,6 +129,14 @@ K8S_API_SERVICE_HOST="$(kctl exec deployment/"$HCC_DEPLOY" -n "$HCC_NS" -c host-
 node -e 'process.exit(require("node:net").isIP(process.argv[1])===4?0:1)' "$K8S_API_SERVICE_HOST" ||
   die 'Kubernetes API service address is not IPv4'
 K8S_API_CIDR="${K8S_API_SERVICE_HOST}/32"
+EXT_BASE="${EXTERNAL_REST_API_BASE_URL%/}"
+RPC_BASE="${RPC_PROXY_BASE_URL%/}"
+DEV_EMAIL="${E2E_DEV_LOGIN_EMAIL:-test@clerum.io}"
+DEV_PASSWORD="${E2E_USER_PASSWORD:-}"
+if [ -z "$DEV_PASSWORD" ]; then
+  DEV_PASSWORD="$(e2e_resolve_admin_password "$REPO_ROOT" || true)"
+fi
+[ -n "$DEV_PASSWORD" ] || die 'known-session proof requires E2E_USER_PASSWORD or a canonical admin password'
 hcc_pr_a_preflight
 create_hcc_api_proxy
 HCC_PR_A_SELECTIVE_CHANNEL=1 hcc_pr_a_enable_proxy
@@ -140,14 +148,6 @@ kctl rollout status deployment "$HCC_DEPLOY" -n "$HCC_NS" --timeout=180s >/dev/n
 read -r HCC_UID HCC_RESTARTS <<<"$(wait_for_hcc_identity 30)"
 start_hcc_recovery_log_stream
 
-EXT_BASE="${EXTERNAL_REST_API_BASE_URL%/}"
-RPC_BASE="${RPC_PROXY_BASE_URL%/}"
-DEV_EMAIL="${E2E_DEV_LOGIN_EMAIL:-test@clerum.io}"
-DEV_PASSWORD="${E2E_USER_PASSWORD:-}"
-if [ -z "$DEV_PASSWORD" ]; then
-  DEV_PASSWORD="$(e2e_resolve_admin_password "$REPO_ROOT" || true)"
-fi
-[ -n "$DEV_PASSWORD" ] || die 'known-session proof requires E2E_USER_PASSWORD or a canonical admin password'
 curl -fsS -m 10 "${EXT_BASE}/health" >/dev/null || die 'external-rest-api unavailable'
 curl -fsS -m 10 "${RPC_BASE}/health" >/dev/null || die 'rpc-proxy unavailable'
 login="$(curl -fsS -m 20 -X POST "${EXT_BASE}/api/v1/auth/password-login" \

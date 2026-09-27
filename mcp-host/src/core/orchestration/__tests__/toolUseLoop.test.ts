@@ -634,6 +634,35 @@ describe('runToolUseLoop — loop control', () => {
     expect(workflowTriggerTool.execute).toHaveBeenCalledTimes(1)
   })
 
+  it('recovers a bare hyphenated workflow slug when the LLM omits workflow_trigger', async () => {
+    const reasoning = createMockReasoning([
+      { type: 'text', content: 'I can help with that.' },
+      {
+        type: 'tool_calls',
+        calls: [{ id: 'tc_1', name: 'workflow_trigger', arguments: { name: 'risk-review' } }],
+      },
+      { type: 'text', content: 'The workflow request is now being handled.' },
+    ])
+    const workflowTriggerTool = createMockTool('workflow_trigger', {
+      sanitize: false,
+      output: JSON.stringify({ workflowName: 'risk-review', phase: 'Pending' }),
+    })
+    const config = buildLoopConfig({
+      reasoning,
+      toolRegistry: createMockRegistry([workflowTriggerTool]),
+      safety: new BasicSafety(),
+      events: new SimpleEventEmitter(),
+      conversation: makeFakeConversation(),
+      maxIterations: 4,
+    })
+
+    const result = await runToolUseLoop(config, [{ role: 'user', content: 'Run risk-review' }])
+
+    expect(result.type).toBe('response')
+    expect(reasoning.respondWithTools).toHaveBeenCalledTimes(2)
+    expect(workflowTriggerTool.execute).toHaveBeenCalledTimes(1)
+  })
+
   it('synthesizes a workflow_list answer when the LLM omits returned recipe names', async () => {
     const reasoning = createMockReasoning([
       {

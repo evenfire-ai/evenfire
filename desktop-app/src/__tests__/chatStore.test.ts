@@ -342,6 +342,24 @@ describe('messages', () => {
     expect(messages[1]!.content).toBe('hello')
   })
 
+  it('does not load transcript messages while deleted-chat cleanup is pending', async () => {
+    await store.createChat('agent-1', 'pending-delete')
+    await store.saveMessages('agent-1', 'pending-delete', [
+      { id: 'private-message', role: 'user', content: 'still on disk', timestamp: 1000 },
+    ])
+    vi.spyOn(fs, 'rm').mockRejectedValue(transientFileReadError('EACCES'))
+
+    await expect(store.deleteChat('agent-1', 'pending-delete', TEAM_A_SCOPE)).resolves.toEqual({
+      cleanupPending: true,
+    })
+    expect((await store.getIndex('agent-1')).pendingChatCleanup).toContainEqual({
+      chatId: 'pending-delete',
+      authorityScope: TEAM_A_SCOPE,
+    })
+    await expect(store.loadMessages('agent-1', 'pending-delete')).resolves.toEqual([])
+    await expect(fs.access(chatMetaPath('pending-delete'))).resolves.toBeUndefined()
+  })
+
   it('upserts an optimistic outgoing message and later updates it by the same id', async () => {
     await store.createChat('agent-1', 'upsert-send')
     const optimistic = { id: 'outgoing-1', role: 'user' as const, content: 'hello', timestamp: 1 }

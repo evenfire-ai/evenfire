@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Response as ExpressResponse } from 'express'
+import { config } from '../../config.js'
 import type { ResolvedServerConnection, RpcAccessClaims, RpcScope } from '../../types.js'
 import type { HostWakeApiResponse } from '../controlApiRestService.js'
 import {
@@ -474,7 +475,7 @@ describe('post-resolution re-forward hardening (respondWithWakeAndHold)', () => 
   function respondOptions(
     coordinator: WakeAndHoldCoordinator,
     res: FakeRes,
-    attemptUpstream: () => Promise<void>,
+    attemptUpstream: (timeoutMs: number) => Promise<void>,
     overrides?: {
       hostRef?: string
       host?: ResolvedServerConnection
@@ -624,6 +625,43 @@ describe('post-resolution re-forward hardening (respondWithWakeAndHold)', () => 
     expect(res.body).toMatchObject({ code: 'host_waking', hostRef: 'chatllm' })
     await vi.advanceTimersByTimeAsync(MAX_HOLD_MS)
     expect(attemptUpstream).toHaveBeenCalledTimes(3)
+  })
+
+  it('passes each admission retry only the remaining hold budget', async () => {
+    const { coordinator, requestWake } = makeCoordinator()
+    requestWake.mockResolvedValue({ kind: 'active', wakeGeneration: null })
+    const res = makeRes()
+    const attemptUpstream = vi.fn(async (_timeoutMs: number) => {
+      throw upstreamDrainingError()
+    })
+    const pending = respondWithWakeAndHold({
+      ...respondOptions(coordinator, res, attemptUpstream),
+      deadlineMs: Date.now() + 500,
+    })
+
+    await vi.advanceTimersByTimeAsync(500)
+    await pending
+
+    expect(attemptUpstream.mock.calls.map(([timeoutMs]) => timeoutMs)).toEqual([500, 250])
+    expect(res.statusCode).toBe(503)
+  })
+
+  it('caps an admission retry timeout at the configured upstream timeout', async () => {
+    const { coordinator, requestWake } = makeCoordinator()
+    requestWake.mockResolvedValue({ kind: 'active', wakeGeneration: null })
+    const res = makeRes()
+    const attemptUpstream = vi.fn(async (_timeoutMs: number) => {
+      res.status(200).json({ success: true, taskId: 't-capped' })
+    })
+    const pending = respondWithWakeAndHold({
+      ...respondOptions(coordinator, res, attemptUpstream),
+      deadlineMs: Date.now() + config.upstreamTimeoutMs + 5_000,
+    })
+
+    await pending
+
+    expect(attemptUpstream).toHaveBeenCalledWith(config.upstreamTimeoutMs)
+    expect(res.statusCode).toBe(200)
   })
 
   it('(d) two concurrent holds for different hosts do not cross-cancel each other', async () => {

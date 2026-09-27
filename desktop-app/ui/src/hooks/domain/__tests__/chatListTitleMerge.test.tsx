@@ -210,6 +210,35 @@ describe('confirmed deletion catalog protection', () => {
 })
 
 describe('revoked host catalog protection', () => {
+  it('filters held-host sessions from the sidebar while retaining them for recovery', async () => {
+    const blocked = new Set<string>()
+    clerum.chat.getIndex.mockResolvedValue(localIndex([]))
+    clerum.rpc.listSessions.mockResolvedValue(
+      serverSessions([{ agent: 'agent-a', chatId: 'cached-session', title: 'Private title' }])
+    )
+    const controller = renderController({
+      selectedAgent: null,
+      agentNames: ['agent-a'],
+      isHostAccessBlocked: agentRef => blocked.has(agentRef),
+    })
+
+    await waitFor(() =>
+      expect(controller.result.current.latestChatSessions.map(session => session.id)).toEqual([
+        'cached-session',
+      ])
+    )
+
+    blocked.add('agent-a')
+    controller.rerender()
+    expect(controller.result.current.latestChatSessions).toEqual([])
+
+    blocked.delete('agent-a')
+    controller.rerender()
+    expect(controller.result.current.latestChatSessions.map(session => session.id)).toEqual([
+      'cached-session',
+    ])
+  })
+
   it('hides a nonselected host after 403 and blocks direct reselection', async () => {
     const blocked = new Set<string>()
     clerum.chat.getIndex.mockResolvedValue(localIndex([]))

@@ -47,7 +47,7 @@ const RFC1123_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/
 // own copy (the two services share no package, so each names its own).
 const SESSIONS_LIMIT_CAP = 100
 const MESSAGES_LIMIT_CAP = 200
-/** A suspended pod may spend seconds failing DNS/connect before the wake starts. */
+/** A confirmed stateless host may be suspended and spend seconds failing DNS/connect. */
 const MESSAGE_AVAILABILITY_PROBE_MS = 750
 
 function isSafeUpstreamPathSegment(value: string): boolean {
@@ -443,10 +443,28 @@ export function createRpcRouter(): Router {
         )
         let upstreamResponse: Record<string, unknown> | null = null
         const wakeCapable = isWakeCapable(auth, hostRef, Date.now())
+        let statelessHostConfirmed = false
+        if (wakeCapable) {
+          try {
+            const wakeStatus = await requestHostWakeFromControlApi(hostRef, rpcAccessToken)
+            // The wake API checks lifecycle.spec.stateless before returning either
+            // status. Unknown, rate-limited, unauthorized, and failed checks do not
+            // authorize a short timeout for a mutating message request.
+            statelessHostConfirmed =
+              wakeStatus.kind === 'active' || wakeStatus.kind === 'wake-requested'
+          } catch {
+            // A failed statelessness check must not turn a healthy stateful send
+            // into a short, aborting POST. The normal timeout still allows the
+            // existing wake path to handle a genuine upstream availability error.
+          }
+        }
         try {
+          // This is a mutating POST. Its short availability probe is safe only
+          // after the wake API confirms a stateless Host, where deliveryMessageId
+          // lets mcp-host deduplicate an interrupted send and its retry.
           upstreamResponse = await forwardHostMessageToHost(host, forwardedBody, {
             async: isAsync,
-            ...(wakeCapable ? { timeoutMs: MESSAGE_AVAILABILITY_PROBE_MS } : {}),
+            ...(statelessHostConfirmed ? { timeoutMs: MESSAGE_AVAILABILITY_PROBE_MS } : {}),
           })
         } catch (error) {
           console.warn(
@@ -470,9 +488,10 @@ export function createRpcRouter(): Router {
               claims: auth,
               rpcAccessToken,
               deadlineMs: wakeDeadlineMs,
-              attemptUpstream: async () => {
+              attemptUpstream: async timeoutMs => {
                 const retried = await forwardHostMessageToHost(host, forwardedBody, {
                   async: isAsync,
+                  timeoutMs,
                 })
                 res.status(200).json(retried)
               },
