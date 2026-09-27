@@ -36,7 +36,7 @@ function uniqueEmail(label: string): string {
 describeRealPostgres('control admin replace-inviter invitations on real PostgreSQL', () => {
   const database = `control_admin_replace_${randomBytes(6).toString('hex')}`
   const connectionString = databaseUrl(
-    adminUrl ?? 'postgresql://postgres@127.0.0.1/postgres',
+    adminUrl ?? 'postgresql://postgres@db.example.com/postgres',
     database
   )
   let adminPool: Pool
@@ -268,7 +268,7 @@ describeRealPostgres('control admin replace-inviter invitations on real PostgreS
       sessionVersion: 2,
     })
     await expect(
-      passwordLoginData({ email: inviter.email, password: 'irrelevant' })
+      passwordLoginData({ email: inviter.email, password: 'example-password' })
     ).resolves.toEqual({ error: 'user_retired' })
 
     const desktop = await testPool.query(
