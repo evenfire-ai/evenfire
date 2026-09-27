@@ -419,7 +419,6 @@ export async function loadOperationalResourceGraphs(input: {
   const logicalIds = [...new Set(input.logicalIds)]
   if (logicalIds.length === 0) return new Map()
 
-  const roots = logicalIds.map(logicalId => [input.resourceType, logicalId])
   const states = await budgetedQuery(
     input.db,
     input.budget,
