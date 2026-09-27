@@ -264,6 +264,7 @@ private predicate isV2OnlyGuard(Function guard) {
     missingV2.getOperand() = classifier and
     classifier.getCalleeName() = "isV2ViewRequest" and
     classifier.getEnclosingFunction() = guard and
+    hasCanonicalV2ViewRequestClassifier(guard, classifier) and
     isFixed4xxBranch(denied.getThen()) and
     next.getCalleeName() = "next" and
     next.getEnclosingFunction() = guard and
@@ -271,9 +272,42 @@ private predicate isV2OnlyGuard(Function guard) {
   )
 }
 
+private predicate hasCanonicalV2ViewRequestClassifier(Function guard, CallExpr classifierCall) {
+  exists(
+    Function classifier, ReturnStmt classifierReturn, CallExpr booleanCall,
+    LogAndExpr exactAuthorityState, PropAccess delegation, PropAccess authorizedAction,
+    VarAccess delegationBase, VarAccess actionBase, Parameter classifierParameter,
+    Parameter guardRequest
+  |
+    classifier.getName() = "isV2ViewRequest" and
+    classifier.getFile() = guard.getFile() and
+    classifierCall.getCallee().(VarAccess).getVariable() = classifier.getVariable() and
+    classifierCall.getArgument(0).(VarAccess).getVariable() = guardRequest.getVariable() and
+    guardRequest = guard.getParameter(0) and
+    classifierReturn.nestedIn(classifier.getBody()) and
+    classifierReturn.getExpr() = booleanCall and
+    booleanCall.getCalleeName() = "Boolean" and
+    booleanCall.getArgument(0) = exactAuthorityState and
+    exactAuthorityState.getLeftOperand() = delegation and
+    exactAuthorityState.getRightOperand() = authorizedAction and
+    classifierParameter = classifier.getParameter(0) and
+    delegation.getPropertyName() = "userDelegationV2" and
+    delegation.getBase() = delegationBase and
+    delegationBase.getVariable() = classifierParameter.getVariable() and
+    authorizedAction.getPropertyName() = "authorizedActionV2" and
+    authorizedAction.getBase() = actionBase and
+    actionBase.getVariable() = classifierParameter.getVariable() and
+    not exists(ReturnStmt otherReturn |
+      otherReturn.nestedIn(classifier.getBody()) and otherReturn != classifierReturn
+    )
+  )
+}
+
 /**
  * The v2-view branch is exempt only when its consumer capability is rejected
  * before the remote checkpoint. Issuer throttling is not consumer admission.
+ * The direct session/reconnect composition is matched by exact imported gate,
+ * scope, route binding, and middleware order; same-named wrappers do not match.
  */
 private predicate hasRetainedRpcProxyV2ViewConsumer(Routing::Node useSite) {
   exists(
@@ -313,6 +347,39 @@ private predicate hasRetainedRpcProxyV2ViewConsumer(Routing::Node useSite) {
       ) and
       hasCanonicalRpcProxyDelegationVerifier()
     )
+  )
+  or
+  exists(
+    MethodCallExpr registration, StringLiteral installedPath, Expr rpcAuth, CallExpr scope,
+    VarAccess v2Only, Function v2OnlyGuard, int useIndex
+  |
+    registration.getMethodName() = "post" and
+    installedPath = registration.getArgument(0) and
+    installedPath.getStringValue() in [
+        "/desktop/:hostRef/reconnect",
+        "/sandbox-ui/:recipeNs/:recipeName/reconnect"
+      ] and
+    rpcAuth = registration.getArgument(1) and
+    isImportedValue(rpcAuth, "rpc-proxy/src/middleware/auth.ts", "requireRpcAuth") and
+    isImportedValue(registration.getArgument(2), "rpc-proxy/src/routeActionBindingV2.ts",
+      "rejectUnadmittedV2DerivedView") and
+    scope = registration.getArgument(3) and
+    isImportedCall(scope, "rpc-proxy/src/middleware/auth.ts", "requireScope") and
+    (
+      installedPath.getStringValue().matches("/desktop/%") and
+      scope.getArgument(0).getStringValue() = "desktop:view"
+      or
+      installedPath.getStringValue().matches("/sandbox-ui/%") and
+      scope.getArgument(0).getStringValue() = "sandbox:ui:view"
+    ) and
+    v2Only = registration.getArgument(4) and
+    v2OnlyGuard.getVariable() = v2Only.getVariable() and
+    v2OnlyGuard.getFile() = registration.getFile() and
+    isV2OnlyGuard(v2OnlyGuard) and
+    registration.getArgument(5) instanceof Function and
+    useIndex in [1, 2, 3, 4, 5] and
+    canonicalBinderAcceptsRoute(registration) and
+    registeredRouteContainsNodeAtIndex(registration, useSite, useIndex)
   )
 }
 
