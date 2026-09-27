@@ -116,6 +116,20 @@ private predicate registeredRouteContainsNodeAtIndex(
   )
 }
 
+/** Test-only route fixtures are not deployed application handlers. */
+private predicate isRepositoryTestRoute(Routing::Node useSite) {
+  exists(string path, int startLine, int startColumn, int endLine, int endColumn |
+    useSite.hasLocationInfo(path, startLine, startColumn, endLine, endColumn) and
+    (
+      path.matches("%/__tests__/%") or
+      path.matches("%.test.ts") or
+      path.matches("%.test.tsx") or
+      path.matches("%.spec.ts") or
+      path.matches("%.spec.tsx")
+    )
+  )
+}
+
 /**
  * A consumer is part of the closed v2 authority surface only when its literal
  * Express path is also handled by the canonical route-action binder.
@@ -293,8 +307,10 @@ private predicate hasRetainedRpcProxyV2ViewConsumer(Routing::Node useSite) {
       isImportedCall(rpcAuth, "rpc-proxy/src/middleware/auth.ts", "requireRpcAuth") and
       isImportedCall(scope, "rpc-proxy/src/middleware/auth.ts", "requireScope") and
       capabilityGate.getLocation().getStartLine() < scope.getLocation().getStartLine() and
-      (scope.getArgument(0).getStringValue() = "sandbox:ui:view" or
-        scope.getArgument(0).getStringValue() = "desktop:view") and
+      (
+        scope.getArgument(0).getStringValue() = "sandbox:ui:view" or
+        scope.getArgument(0).getStringValue() = "desktop:view"
+      ) and
       hasCanonicalRpcProxyDelegationVerifier()
     )
   )
@@ -379,8 +395,7 @@ from
 where
   useSite = Routing::getNode(r).getRouteInstallation() and
   r.explain(explanation, reference, referenceLabel) and
-  not (
-    hasLocalRateLimitingGuard(useSite) or hasRetainedRpcProxyV2ViewConsumer(useSite)
-  )
+  not isRepositoryTestRoute(useSite) and
+  not (hasLocalRateLimitingGuard(useSite) or hasRetainedRpcProxyV2ViewConsumer(useSite))
 select useSite, "This route handler " + explanation + ", but is not rate-limited.", reference,
   referenceLabel
