@@ -9,9 +9,13 @@ import {
   AccessBudgetExceededError,
   AccessExecutionBudget,
 } from '../src/services/access/accessExecutionBudget.js'
+import { authorizeActionV2 } from '../src/services/access/actionAuthorizer.js'
 import type { AccessCapability } from '../src/services/access/capabilityRegistry.js'
 import { CATALOG_FAMILIES, type CatalogFamily } from '../src/services/access/catalogContracts.js'
-import { resolveLiveAuthorization } from '../src/services/access/liveAuthorizationResolver.js'
+import {
+  resolveLiveActionAuthorization,
+  resolveLiveAuthorization,
+} from '../src/services/access/liveAuthorizationResolver.js'
 import { OperationalAccessIndex } from '../src/services/access/operationalAccessIndex.js'
 import {
   OperationalAccessIndexer,
@@ -24,6 +28,8 @@ import {
   loadConfiguredUserAccessIntent,
 } from '../src/services/access/userAccessPolicy.js'
 import type { ExternalSessionAuthorityContext } from '../src/services/auth/externalSessionAuthentication.js'
+import { createUserSession } from '../src/services/auth/userSessionService.js'
+import { __resetBudgetCheckCache, evaluateBudgetCheck } from '../src/services/budgets/check.js'
 import { TemporaryKubernetesApi } from './helpers/temporaryKubernetesApi.js'
 
 vi.mock('../src/services/access/operationTarget.js', async importOriginal => {
@@ -171,6 +177,7 @@ describeRealPostgres('all aggregate catalog families on real producers', () => {
       namespace: config.mcpServersNamespace,
       name: 'catalog-mcp',
       uid: 'catalog-mcp-uid',
+      spec: { auth: { type: 'none' } },
     }),
     fixture({
       plural: 'workflowrecipes',
@@ -200,6 +207,7 @@ describeRealPostgres('all aggregate catalog families on real producers', () => {
   let databasePool: Pool
   let gateway: K8sGateway
   let indexer: OperationalAccessIndexer
+  let initialListRequests: string[]
 
   beforeAll(async () => {
     adminPool = new Pool({ connectionString: adminUrl })
@@ -207,6 +215,10 @@ describeRealPostgres('all aggregate catalog families on real producers', () => {
     await adminPool.query(`CREATE DATABASE ${quoteIdentifier(database)}`)
     databasePool = new Pool({ connectionString })
     await initDb({ connect: () => databasePool.connect() })
+    await databasePool.query(
+      `INSERT INTO llm_allowed_models(provider, model, vendor, enabled)
+       VALUES ('openai', 'test-model', 'test', TRUE)`
+    )
     await kubernetesApi.start()
     for (const value of operationalFixtures) {
       kubernetesApi.put(value.plural, value.namespace, value.object)
@@ -324,6 +336,9 @@ describeRealPostgres('all aggregate catalog families on real producers', () => {
     for (const source of operationalSourceSpecs) {
       await indexer.reconcileSource(source)
     }
+    initialListRequests = kubernetesApi.requests
+      .filter(request => !request.watch && !request.name)
+      .map(request => `${request.namespace}/${request.plural}`)
   })
 
   afterAll(async () => {
@@ -399,6 +414,13 @@ describeRealPostgres('all aggregate catalog families on real producers', () => {
       expect(catalog.partialErrors).toEqual([])
       expect(catalog.nextCursor).toBeNull()
       expect(catalog.items).toHaveLength(expectedItemCounts[family])
+      if (family === 'workflow_run') {
+        expect(
+          catalog.items
+            .flatMap(item => item.accessPaths)
+            .some(path => path.capabilities.includes('workflow.run.manage'))
+        ).toBe(false)
+      }
       expect(
         [...new Set(catalog.items.flatMap(item => item.accessPaths.map(path => path.kind)))].sort()
       ).toEqual([...expectedKinds[family]].sort())
@@ -407,6 +429,12 @@ describeRealPostgres('all aggregate catalog families on real producers', () => {
         expect(item.resource.type).toBe(family)
         expect(item.accessPaths.length).toBeGreaterThan(0)
         for (const path of item.accessPaths) {
+          if (family === 'context' || family === 'mcp_server') {
+            expect(path.behaviorDescriptors.providerModelPolicy).toEqual({
+              state: 'known',
+              value: null,
+            })
+          }
           const resolved = await resolveLiveAuthorization(
             {
               session,
@@ -437,6 +465,579 @@ describeRealPostgres('all aggregate catalog families on real producers', () => {
       }
     })
   }
+
+  it('binds producer-backed runtime actions to complete source-derived behavior', async () => {
+    const issued = await createUserSession(
+      {
+        userId,
+        email: `${userId}@example.test`,
+        authenticationMethods: ['password'],
+      },
+      { db: databasePool as never }
+    )
+    const actionSession: ExternalSessionAuthorityContext = {
+      contract: 'v2',
+      userId,
+      sid: issued.identity.sid,
+      jti: issued.identity.jti,
+      sessionVersion: issued.identity.sessionVersion,
+    }
+    const operations = [
+      {
+        operationId: 'chat.message.invoke' as const,
+        resource: canonicalResourceIdentity({
+          environmentId,
+          type: 'host',
+          logicalId: `${config.hostsNamespace}/catalog-host`,
+        }),
+        resolutionTarget: {
+          hostRef: `${config.hostsNamespace}/catalog-host`,
+          channelType: 'rpc',
+          channelId: 'catalog-host',
+          messageId: randomUUID(),
+        },
+        actionTarget: {
+          hostRef: `${config.hostsNamespace}/catalog-host`,
+          channelType: 'rpc',
+          channelId: 'catalog-host',
+        },
+        allocateChatMessageId: true,
+      },
+      {
+        operationId: 'mcp.invoke' as const,
+        resource: canonicalResourceIdentity({
+          environmentId,
+          type: 'mcp_server',
+          logicalId: `${config.mcpServersNamespace}/catalog-mcp`,
+        }),
+        resolutionTarget: {
+          serverNamespace: config.mcpServersNamespace,
+          serverName: 'catalog-mcp',
+          toolName: 'lookup',
+        },
+        actionTarget: {
+          serverNamespace: config.mcpServersNamespace,
+          serverName: 'catalog-mcp',
+          toolName: 'lookup',
+        },
+        allocateChatMessageId: false,
+      },
+      {
+        operationId: 'workflow.trigger' as const,
+        resource: canonicalResourceIdentity({
+          environmentId,
+          type: 'workflow_recipe',
+          logicalId: `${config.sandboxNamespace}/catalog-recipe`,
+        }),
+        resolutionTarget: {
+          recipeNamespace: config.sandboxNamespace,
+          recipeName: 'catalog-recipe',
+        },
+        actionTarget: {
+          recipeNamespace: config.sandboxNamespace,
+          recipeName: 'catalog-recipe',
+        },
+        allocateChatMessageId: false,
+      },
+      {
+        operationId: 'context.use' as const,
+        resource: canonicalResourceIdentity({
+          environmentId,
+          type: 'context',
+          logicalId: `${config.contextsNamespace}/catalog-context`,
+        }),
+        resolutionTarget: {
+          contextNamespace: config.contextsNamespace,
+          contextName: 'catalog-context',
+          action: 'use',
+        },
+        actionTarget: {
+          contextNamespace: config.contextsNamespace,
+          contextName: 'catalog-context',
+          action: 'use',
+        },
+        allocateChatMessageId: false,
+      },
+    ]
+    const outcomes: Array<{ operationId: string; accessPathId: string; status: string }> = []
+
+    for (const operation of operations) {
+      const produced = await resolveLiveActionAuthorization(
+        {
+          session: actionSession,
+          operationId: operation.operationId,
+          resource: operation.resource,
+          operationTarget: operation.resolutionTarget,
+        },
+        { transaction: transaction(databasePool), gateway }
+      )
+      const accessPathIds =
+        produced.status === 'allowed'
+          ? [produced.selectedPath.id]
+          : produced.status === 'access_path_required'
+            ? produced.safePathDescriptors.map(path => path.id)
+            : []
+      expect(
+        accessPathIds,
+        `${operation.operationId}: ${JSON.stringify(produced)}`
+      ).not.toHaveLength(0)
+
+      for (const requestedAccessPathId of accessPathIds) {
+        const authorized = await authorizeActionV2(
+          {
+            session: actionSession,
+            requested: { version: 2, requestedAccessPathId },
+            operationId: operation.operationId,
+            resource: operation.resource,
+            operationTarget: operation.actionTarget,
+            allocateChatMessageId: operation.allocateChatMessageId,
+            gateway,
+          },
+          {
+            messageId: () => '00000000-0000-4000-8000-000000000001',
+            authorizationOptions: { transaction: transaction(databasePool) },
+          }
+        )
+        outcomes.push({
+          operationId: operation.operationId,
+          accessPathId: requestedAccessPathId,
+          status: authorized.status,
+        })
+      }
+    }
+    expect(outcomes).toEqual(outcomes.map(outcome => ({ ...outcome, status: 'allowed' })))
+
+    const manageDenied = await authorizeActionV2(
+      {
+        session: actionSession,
+        requested: { version: 2 },
+        operationId: 'context.manage',
+        resource: canonicalResourceIdentity({
+          environmentId,
+          type: 'context',
+          logicalId: `${config.contextsNamespace}/catalog-context`,
+        }),
+        operationTarget: {
+          contextNamespace: config.contextsNamespace,
+          contextName: 'catalog-context',
+          action: 'manage',
+        },
+        allocateChatMessageId: false,
+        gateway,
+      },
+      { authorizationOptions: { transaction: transaction(databasePool) } }
+    )
+    expect(manageDenied).toEqual({ status: 'denied', code: 'forbidden' })
+  })
+
+  it('binds applicable budget policy but not mutable reservation consumption', async () => {
+    const resource = canonicalResourceIdentity({
+      environmentId,
+      type: 'host',
+      logicalId: `${config.hostsNamespace}/catalog-host`,
+    })
+    const readPathIds = async () => {
+      const catalog = await buildAccessCatalog(
+        { session, families: ['host'], limit: 20 },
+        { transaction: transaction(databasePool) }
+      )
+      const item = catalog.items.find(value => value.resource.logicalId === resource.logicalId)
+      expect(item).toBeDefined()
+      return {
+        direct: item!.accessPaths
+          .filter(path => path.kind === 'direct')
+          .map(path => ({ id: path.accessPathId, behavior: path.behaviorDescriptors })),
+        team: item!.accessPaths
+          .filter(path => path.kind === 'team')
+          .map(path => ({ id: path.accessPathId, behavior: path.behaviorDescriptors })),
+      }
+    }
+    const before = await readPathIds()
+    expect(before.direct).toHaveLength(1)
+    expect(before.team).toHaveLength(1)
+    const budget = await databasePool.query<{ id: string }>(
+      `INSERT INTO token_budgets
+         (name, scope, unit, limit_amount, period, timezone,
+          min_start_amount, enforcement)
+       VALUES ($1, $2::jsonb, 'tokens', 1000, 'monthly', 'UTC', 0, 'block')
+       RETURNING id`,
+      [
+        `r31-policy-${randomUUID()}`,
+        JSON.stringify({ team_id: [teamId], host_ref: ['catalog-host'] }),
+      ]
+    )
+    const budgetId = budget.rows[0]!.id
+    try {
+      __resetBudgetCheckCache()
+      const canonicalCheck = await evaluateBudgetCheck(
+        {
+          host_ref: 'catalog-host',
+          context_ref: 'catalog-context',
+          team_id: null,
+          user_id: userId,
+          provider: 'openai',
+          model: 'gpt-4o',
+          llm_secret_name: null,
+          source_kind: 'channel',
+          recipe_name: null,
+          cron_job_id: null,
+          task_ref: null,
+        },
+        databasePool
+      )
+      expect(canonicalCheck.matched?.map(value => value.id)).toContain(budgetId)
+
+      const withPolicy = await readPathIds()
+      expect(withPolicy.direct.map(path => path.behavior.budget)).not.toEqual(
+        before.direct.map(path => path.behavior.budget)
+      )
+      expect(withPolicy.team.map(path => path.behavior.budget)).not.toEqual(
+        before.team.map(path => path.behavior.budget)
+      )
+      expect(withPolicy.team.map(path => path.id)).not.toEqual(before.team.map(path => path.id))
+
+      await databasePool.query(
+        `INSERT INTO budget_pending_reservations(budget_id, est_amount, host_ref, expires_at)
+         VALUES ($1, 5, 'catalog-host', NOW() + INTERVAL '1 hour')`,
+        [budgetId]
+      )
+      expect(await readPathIds()).toEqual(withPolicy)
+
+      await databasePool.query(
+        `DELETE FROM team_contexts WHERE team_id = $1 AND context_id = 'catalog-context'`,
+        [teamId]
+      )
+      const afterContextTeamRemoval = await readPathIds()
+      expect(afterContextTeamRemoval.direct.map(path => path.behavior.budget)).toEqual(
+        before.direct.map(path => path.behavior.budget)
+      )
+      await databasePool.query(
+        `INSERT INTO team_contexts(team_id, context_id) VALUES ($1, 'catalog-context')`,
+        [teamId]
+      )
+      const afterContextTeamRestore = await readPathIds()
+      expect(afterContextTeamRestore.direct.map(path => path.behavior.budget)).toEqual(
+        withPolicy.direct.map(path => path.behavior.budget)
+      )
+
+      await databasePool.query(`UPDATE token_budgets SET scope = $2::jsonb WHERE id = $1`, [
+        budgetId,
+        JSON.stringify({ team_id: [randomUUID()], host_ref: ['catalog-host'] }),
+      ])
+      const afterPolicyMutation = await readPathIds()
+      expect(afterPolicyMutation.direct.map(path => path.behavior.budget)).toEqual(
+        before.direct.map(path => path.behavior.budget)
+      )
+      expect(afterPolicyMutation.team.map(path => path.behavior.budget)).toEqual(
+        before.team.map(path => path.behavior.budget)
+      )
+    } finally {
+      await databasePool.query(`DELETE FROM token_budgets WHERE id = $1`, [budgetId])
+    }
+  })
+
+  it('binds legacy malformed provider/model scopes using the canonical budget matcher', async () => {
+    const resource = canonicalResourceIdentity({
+      environmentId,
+      type: 'host',
+      logicalId: `${config.hostsNamespace}/catalog-host`,
+    })
+    const readBudgetDescriptors = async () => {
+      const catalog = await buildAccessCatalog(
+        { session, families: ['host'], limit: 20 },
+        { transaction: transaction(databasePool) }
+      )
+      const item = catalog.items.find(value => value.resource.logicalId === resource.logicalId)
+      expect(item).toBeDefined()
+      return item!.accessPaths.map(path => path.behaviorDescriptors.budget)
+    }
+
+    const legacyScopes: ReadonlyArray<Readonly<{ label: string; scope: Record<string, unknown> }>> =
+      [
+        { label: 'empty-provider', scope: { host_ref: ['catalog-host'], provider: [] } },
+        { label: 'empty-model', scope: { host_ref: ['catalog-host'], model: [] } },
+        { label: 'non-array-provider', scope: { host_ref: ['catalog-host'], provider: 'openai' } },
+        { label: 'non-array-model', scope: { host_ref: ['catalog-host'], model: 'test-model' } },
+      ]
+    for (const legacyScope of legacyScopes) {
+      const before = await readBudgetDescriptors()
+      const budget = await databasePool.query<{ id: string }>(
+        `INSERT INTO token_budgets
+           (name, scope, unit, limit_amount, period, timezone,
+            min_start_amount, enforcement)
+         VALUES ($1, $2::jsonb, 'tokens', 1000, 'monthly', 'UTC', 0, 'block')
+         RETURNING id`,
+        [`r31-${legacyScope.label}-${randomUUID()}`, JSON.stringify(legacyScope.scope)]
+      )
+      const budgetId = budget.rows[0]!.id
+      try {
+        __resetBudgetCheckCache()
+        const canonicalCheck = await evaluateBudgetCheck(
+          {
+            host_ref: 'catalog-host',
+            context_ref: 'catalog-context',
+            team_id: null,
+            user_id: userId,
+            provider: 'openai',
+            model: 'test-model',
+            llm_secret_name: null,
+            source_kind: 'channel',
+            recipe_name: null,
+            cron_job_id: null,
+            task_ref: null,
+          },
+          databasePool
+        )
+        expect(canonicalCheck.matched?.map(value => value.id)).toContain(budgetId)
+        expect(await readBudgetDescriptors()).not.toEqual(before)
+      } finally {
+        await databasePool.query(`DELETE FROM token_budgets WHERE id = $1`, [budgetId])
+        __resetBudgetCheckCache()
+      }
+    }
+  })
+
+  it('binds workflow budget policy using the exact workflow evaluator dimensions', async () => {
+    const readRecipeBudgets = async () => {
+      const catalog = await buildAccessCatalog(
+        { session, families: ['workflow_recipe'], limit: 20 },
+        { transaction: transaction(databasePool) }
+      )
+      const item = catalog.items.find(value => value.resource.logicalId.endsWith('/catalog-recipe'))
+      expect(item).toBeDefined()
+      return item!.accessPaths.map(path => ({
+        kind: path.kind,
+        budget: path.behaviorDescriptors.budget,
+      }))
+    }
+    const evaluateWorkflowBudget = () => {
+      __resetBudgetCheckCache()
+      return evaluateBudgetCheck(
+        {
+          host_ref: `${config.sandboxNamespace}/catalog-recipe`,
+          context_ref: null,
+          team_id: teamId,
+          user_id: userId,
+          provider: 'openai',
+          model: 'test-model',
+          llm_secret_name: null,
+          source_kind: 'workflow',
+          recipe_name: 'catalog-recipe',
+          cron_job_id: null,
+          task_ref: null,
+        },
+        databasePool
+      )
+    }
+    const insertBudget = async (name: string, scope: Record<string, string[]>) => {
+      const result = await databasePool.query<{ id: string }>(
+        `INSERT INTO token_budgets
+           (name, scope, unit, limit_amount, period, timezone,
+            min_start_amount, enforcement)
+         VALUES ($1, $2::jsonb, 'tokens', 1000, 'monthly', 'UTC', 0, 'block')
+         RETURNING id`,
+        [name, JSON.stringify(scope)]
+      )
+      return result.rows[0]!.id
+    }
+
+    const before = await readRecipeBudgets()
+    const contextScoped = await insertBudget(`r31-context-${randomUUID()}`, {
+      context_ref: ['catalog-context'],
+      recipe_name: ['catalog-recipe'],
+      source_kind: ['workflow'],
+    })
+    const cronScoped = await insertBudget(`r31-cron-${randomUUID()}`, {
+      recipe_name: ['catalog-recipe'],
+      source_kind: ['cron'],
+    })
+    const workflowScoped = await insertBudget(`r31-workflow-${randomUUID()}`, {
+      host_ref: [`${config.sandboxNamespace}/catalog-recipe`],
+      recipe_name: ['catalog-recipe'],
+      source_kind: ['workflow'],
+    })
+    try {
+      const workflowCheck = await evaluateWorkflowBudget()
+      const beforeMatchedIds = workflowCheck.matched?.map(value => value.id) ?? []
+      expect(beforeMatchedIds).not.toContain(contextScoped)
+      expect(beforeMatchedIds).not.toContain(cronScoped)
+      expect(beforeMatchedIds, JSON.stringify(workflowCheck)).toContain(workflowScoped)
+      expect(await readRecipeBudgets()).not.toEqual(before)
+    } finally {
+      await databasePool.query(`DELETE FROM token_budgets WHERE id = ANY($1::uuid[])`, [
+        [contextScoped, cronScoped, workflowScoped],
+      ])
+    }
+  })
+
+  it('invalidates a Host path when its credential, approval, or model policy changes', async () => {
+    const originalHost = operationalFixtures.find(value => value.plural === 'hosts')!
+    const source = operationalSourceSpecs.find(value => value.family === 'host')!
+    const resource = canonicalResourceIdentity({
+      environmentId,
+      type: 'host',
+      logicalId: `${config.hostsNamespace}/catalog-host`,
+    })
+    const readPaths = async () => {
+      const catalog = await buildAccessCatalog(
+        { session, families: ['host'], limit: 20 },
+        { transaction: transaction(databasePool) }
+      )
+      return catalog.items
+        .find(value => value.resource.logicalId === resource.logicalId)!
+        .accessPaths.map(path => ({
+          id: path.accessPathId,
+          behavior: path.behaviorDescriptors,
+        }))
+        .sort((left, right) => left.id.localeCompare(right.id))
+    }
+    const baseline = await readPaths()
+    const behaviorSet = (paths: Awaited<ReturnType<typeof readPaths>>) =>
+      paths.map(path => JSON.stringify(path.behavior)).sort()
+    const originalMetadata = originalHost.object.metadata as Record<string, unknown>
+    const originalSpec = originalHost.object.spec as Record<string, unknown>
+    const changes = [
+      { secretRef: 'changed-host-secret' },
+      {
+        approval: {
+          defaultPolicy: 'designated_approvers',
+          channels: { telegram: { enabled: true } },
+        },
+      },
+      { model: { provider: 'openai', name: 'different-model' } },
+    ]
+
+    try {
+      for (const [index, change] of changes.entries()) {
+        const updated = {
+          ...originalHost.object,
+          metadata: { ...originalMetadata, resourceVersion: String(index + 2) },
+          spec: { ...originalSpec, ...change },
+        }
+        kubernetesApi.put(originalHost.plural, originalHost.namespace, updated)
+        await indexer.reconcileSource(source)
+        const changed = await readPaths()
+        expect(changed.map(path => path.id)).not.toEqual(baseline.map(path => path.id))
+
+        kubernetesApi.put(originalHost.plural, originalHost.namespace, originalHost.object)
+        await indexer.reconcileSource(source)
+        expect(behaviorSet(await readPaths())).toEqual(behaviorSet(baseline))
+      }
+    } finally {
+      kubernetesApi.put(originalHost.plural, originalHost.namespace, originalHost.object)
+      await indexer.reconcileSource(source)
+    }
+  })
+
+  it('binds a complete empty Host provider allow policy instead of treating it as absent', async () => {
+    const originalHost = operationalFixtures.find(value => value.plural === 'hosts')!
+    const source = operationalSourceSpecs.find(value => value.family === 'host')!
+    const originalMetadata = originalHost.object.metadata as Record<string, unknown>
+    const originalSpec = originalHost.object.spec as Record<string, unknown>
+    const withoutModel = { ...originalSpec }
+    delete withoutModel.model
+
+    try {
+      kubernetesApi.put(originalHost.plural, originalHost.namespace, {
+        ...originalHost.object,
+        metadata: { ...originalMetadata, resourceVersion: 'empty-model-policy' },
+        spec: withoutModel,
+      })
+      await indexer.reconcileSource(source)
+      await databasePool.query(
+        `UPDATE llm_allowed_models SET enabled = FALSE
+          WHERE provider = 'openai' AND model = 'test-model'`
+      )
+
+      const catalog = await buildAccessCatalog(
+        { session, families: ['host'], limit: 20 },
+        { transaction: transaction(databasePool) }
+      )
+      const host = catalog.items.find(value => value.resource.logicalId.endsWith('/catalog-host'))
+      expect(host).toBeDefined()
+      expect(host!.accessPaths.length).toBeGreaterThan(0)
+      for (const path of host!.accessPaths) {
+        expect(path.behaviorDescriptors.providerModelPolicy).toMatchObject({
+          state: 'known',
+          value: expect.stringMatching(/^[A-Za-z0-9_-]+$/),
+        })
+      }
+    } finally {
+      await databasePool.query(
+        `UPDATE llm_allowed_models SET enabled = TRUE
+          WHERE provider = 'openai' AND model = 'test-model'`
+      )
+      kubernetesApi.put(originalHost.plural, originalHost.namespace, originalHost.object)
+      await indexer.reconcileSource(source)
+    }
+  })
+
+  it('binds derived MCP paths to their selected Context and ignores sibling Contexts', async () => {
+    const catalogMcp = canonicalResourceIdentity({
+      environmentId,
+      type: 'mcp_server',
+      logicalId: `${config.mcpServersNamespace}/catalog-mcp`,
+    })
+    const readPaths = async () => {
+      const catalog = await buildAccessCatalog(
+        { session, families: ['mcp_server'], limit: 100 },
+        { transaction: transaction(databasePool) }
+      )
+      const item = catalog.items.find(value => value.resource.logicalId === catalogMcp.logicalId)
+      expect(item).toBeDefined()
+      return item!.accessPaths
+        .map(path => ({ id: path.accessPathId, behavior: path.behaviorDescriptors }))
+        .sort((left, right) => left.id.localeCompare(right.id))
+    }
+    const before = await readPaths()
+    const behaviorSet = (paths: Awaited<ReturnType<typeof readPaths>>) =>
+      paths.map(path => JSON.stringify(path.behavior)).sort()
+    const unrelated = fixture({
+      plural: 'contexts',
+      namespace: config.contextsNamespace,
+      name: 'unrelated-context',
+      uid: 'unrelated-context-uid',
+      spec: { mcpServers: ['catalog-mcp'], sharedFileSystems: [] },
+    })
+    const contextSource = operationalSourceSpecs.find(value => value.family === 'context')!
+    const originalContext = operationalFixtures.find(
+      value =>
+        value.plural === 'contexts' &&
+        value.object.metadata &&
+        (value.object.metadata as Record<string, unknown>).name === 'catalog-context'
+    )!
+    const changedContext = {
+      ...originalContext.object,
+      metadata: {
+        ...(originalContext.object.metadata as Record<string, unknown>),
+        resourceVersion: '2',
+      },
+      spec: {
+        ...(originalContext.object.spec as Record<string, unknown>),
+        sharedFileSystems: [{ name: 'catalog-files', mountPath: '/workspace/changed' }],
+      },
+    }
+
+    try {
+      kubernetesApi.put(unrelated.plural, unrelated.namespace, unrelated.object)
+      await indexer.reconcileSource(contextSource)
+      const withSibling = await readPaths()
+      expect(behaviorSet(withSibling)).toEqual(behaviorSet(before))
+
+      kubernetesApi.put(originalContext.plural, originalContext.namespace, changedContext)
+      await indexer.reconcileSource(contextSource)
+      const selectedMutation = await readPaths()
+      expect(behaviorSet(selectedMutation)).not.toEqual(behaviorSet(before))
+
+      kubernetesApi.put(originalContext.plural, originalContext.namespace, originalContext.object)
+      await indexer.reconcileSource(contextSource)
+      await expect(readPaths().then(behaviorSet)).resolves.toEqual(behaviorSet(before))
+    } finally {
+      kubernetesApi.delete(unrelated.plural, unrelated.namespace, 'unrelated-context')
+      kubernetesApi.put(originalContext.plural, originalContext.namespace, originalContext.object)
+      await indexer.reconcileSource(contextSource)
+    }
+  })
 
   it('round-trips a catalog write path when capability selection excludes a read-only sibling', async () => {
     const catalog = await buildAccessCatalog(
@@ -670,12 +1271,16 @@ describeRealPostgres('all aggregate catalog families on real producers', () => {
   })
 
   it('uses real Kubernetes list and exact-read wire boundaries', async () => {
-    const listRequests = kubernetesApi.requests.filter(request => !request.watch && !request.name)
-    expect(listRequests).toHaveLength(operationalSourceSpecs.length)
-    expect(listRequests.map(request => `${request.namespace}/${request.plural}`).sort()).toEqual(
+    expect(initialListRequests).toHaveLength(operationalSourceSpecs.length)
+    expect(initialListRequests.sort()).toEqual(
       operationalSourceSpecs.map(source => `${source.namespace}/${source.plural}`).sort()
     )
-    expect(listRequests.every(request => request.limit !== null)).toBe(true)
+    expect(
+      kubernetesApi.requests
+        .filter(request => !request.watch && !request.name)
+        .slice(0, initialListRequests.length)
+        .every(request => request.limit !== null)
+    ).toBe(true)
     const exactRequests = kubernetesApi.requests.filter(request => request.name)
     expect(exactRequests.length).toBeGreaterThan(0)
     expect(
@@ -787,6 +1392,24 @@ describeRealPostgres('all aggregate catalog families on real producers', () => {
         resourceVersion: '1',
       })
     )
+  })
+
+  it('binds the current source-family generation into operational path identity', async () => {
+    const readPathIds = async () => {
+      const catalog = await buildAccessCatalog(
+        { session, families: ['host'], limit: 20 },
+        { transaction: transaction(databasePool) }
+      )
+      const item = catalog.items.find(value => value.resource.logicalId.endsWith('/catalog-host'))
+      expect(item).toBeDefined()
+      return item!.accessPaths.map(path => path.accessPathId).sort()
+    }
+    const before = await readPathIds()
+    const hostSource = operationalSourceSpecs.find(value => value.family === 'host')!
+
+    await indexer.reconcileSource(hostSource)
+
+    expect(await readPathIds()).not.toEqual(before)
   })
 
   it('cancels a real indexer relist without staging or promoting late results', async () => {

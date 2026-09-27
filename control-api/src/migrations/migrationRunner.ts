@@ -33,6 +33,7 @@ export const PR2_MIGRATION_VERSIONS = Object.freeze([
   '0118_pr2_runtime_privileges',
   '0119_workflow_recipe_authority_entity',
   '011a_workflow_run_failure_reason',
+  '0120_r31_runtime_behavior_sources',
 ])
 
 const NON_PR1_POST_0106_MIGRATION_VERSIONS = new Set<string>(DEV_POST_0106_MIGRATION_VERSIONS)

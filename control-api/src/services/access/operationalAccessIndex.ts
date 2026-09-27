@@ -78,6 +78,7 @@ function resourcePayload(value: OperationalResourceRecord, generation: number) {
     deleted_at: value.deletedAt,
     observed_generation: value.observedGeneration,
     content_bytes: value.contentBytes,
+    behavior_sources: value.behaviorSources,
   }
 }
 
@@ -215,7 +216,7 @@ export class OperationalAccessIndex {
            INSERT INTO operational_resource_index_staging(
              environment_id, resource_type, logical_id, source_family, source_generation,
              provider_uid, provider_resource_version, display_name, enabled, deleted_at,
-             observed_generation, content_bytes, observed_at
+             observed_generation, content_bytes, behavior_sources, observed_at
            )
            SELECT value->>'environment_id', value->>'resource_type', value->>'logical_id',
                   value->>'source_family', (value->>'source_generation')::bigint,
@@ -223,7 +224,8 @@ export class OperationalAccessIndex {
                   value->>'display_name', (value->>'enabled')::boolean,
                   (value->>'deleted_at')::timestamptz,
                   (value->>'observed_generation')::bigint,
-                  (value->>'content_bytes')::bigint, NOW()
+                  (value->>'content_bytes')::bigint,
+                  COALESCE(value->'behavior_sources', '{}'::jsonb), NOW()
              FROM resource_rows
            ON CONFLICT (
              environment_id, source_family, source_generation, resource_type, logical_id
@@ -237,6 +239,7 @@ export class OperationalAccessIndex {
                  deleted_at = EXCLUDED.deleted_at,
                  observed_generation = EXCLUDED.observed_generation,
                  content_bytes = EXCLUDED.content_bytes,
+                 behavior_sources = EXCLUDED.behavior_sources,
                  observed_at = NOW()
            RETURNING 1
          ), relationship_rows AS (
@@ -333,11 +336,11 @@ export class OperationalAccessIndex {
         `INSERT INTO operational_resource_index(
            environment_id, resource_type, logical_id, source_family, source_generation,
            provider_uid, provider_resource_version, display_name, enabled, deleted_at,
-           observed_generation, content_bytes, observed_at
+           observed_generation, content_bytes, behavior_sources, observed_at
          )
          SELECT environment_id, resource_type, logical_id, source_family, source_generation,
                 provider_uid, provider_resource_version, display_name, enabled, deleted_at,
-                observed_generation, content_bytes, observed_at
+                observed_generation, content_bytes, behavior_sources, observed_at
            FROM operational_resource_index_staging
           WHERE environment_id = $1 AND source_family = $2
             AND source_generation = $3`,
@@ -488,7 +491,7 @@ export class OperationalAccessIndex {
          INSERT INTO operational_resource_index(
            environment_id, resource_type, logical_id, source_family, source_generation,
            provider_uid, provider_resource_version, display_name, enabled, deleted_at,
-           observed_generation, content_bytes, observed_at
+           observed_generation, content_bytes, behavior_sources, observed_at
          )
          SELECT value->>'environment_id', value->>'resource_type', value->>'logical_id',
                 value->>'source_family', (value->>'source_generation')::bigint,
@@ -496,7 +499,8 @@ export class OperationalAccessIndex {
                 value->>'display_name', (value->>'enabled')::boolean,
                 (value->>'deleted_at')::timestamptz,
                 (value->>'observed_generation')::bigint,
-                (value->>'content_bytes')::bigint, NOW()
+                (value->>'content_bytes')::bigint,
+                COALESCE(value->'behavior_sources', '{}'::jsonb), NOW()
            FROM resource_rows
          RETURNING 1
        ), relationship_rows AS (

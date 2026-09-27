@@ -32,6 +32,7 @@ import {
   authorizationRevision,
   canonicalAccessPathSeeds,
   databaseRelationshipsRevision,
+  revisionOfValues,
 } from './authorizationRevision.js'
 import { type AccessCapability, isAccessCapability } from './capabilityRegistry.js'
 import { validateExactOperationalBindings } from './exactOperationalAuthorization.js'
@@ -266,7 +267,10 @@ async function resolveInTransaction(input: {
     userRevision: snapshot.userRevision,
     memberships: snapshot.memberships,
     resource: input.request.resource,
-    resourceRevision: snapshot.resourceRevision,
+    resourceRevision:
+      graph?.status === 'current'
+        ? revisionOfValues([graph.resource.providerUid, graph.resource.providerResourceVersion])
+        : snapshot.resourceRevision,
     sourceStateRevision:
       graph?.status === 'current' ? graph.sourceStateRevision : 'database-resource',
     relationshipsRevision:
