@@ -1032,7 +1032,6 @@ test('PR849 controlled parity across pending work, GFS, host switching, and cold
         page.getByRole('button', { name: `More actions for ${STATELESS_HOST}`, exact: true })
       ).toBeVisible({ timeout: 30_000 })
 
-      const openStarted = Date.now()
       await openSession(page, statelessTitle, STATELESS_HOST)
       await expect(page.getByTestId('message-list')).toContainText(statelessCode)
       const retainedMarker = page.getByTestId('agent-response').filter({ hasText: statelessMarker })

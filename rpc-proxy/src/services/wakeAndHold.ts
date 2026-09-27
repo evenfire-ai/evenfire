@@ -4,6 +4,11 @@ import type { ResolvedServerConnection, RpcAccessClaims } from '../types.js'
 import { type HostWakeApiResponse, requestHostWakeFromControlApi } from './controlApiRestService.js'
 import { forwardHostHealth } from './mcpHostRestService.js'
 
+/** Strip control characters and newlines from user-derived hostRef before log interpolation. */
+function sanitizeHostRefForLog(hostRef: string): string {
+  return hostRef.replace(/[\r\n\t\x00-\x1f\x7f]/g, '')
+}
+
 /**
  * Stateless wake-and-hold (Stage 5, Issue #791 §11).
  *
@@ -621,14 +626,13 @@ export async function respondWithWakeAndHold(
   options: RespondWithWakeAndHoldOptions
 ): Promise<void> {
   const coordinator = options.coordinator ?? hostWakeCoordinator
+  const safeHostRef = sanitizeHostRefForLog(options.hostRef)
   const deadlineMs =
     options.deadlineMs ?? Date.now() + Math.min(config.wakeMaxHoldMs, MAX_REQUEST_HOLD_MS)
   if (options.res.headersSent) {
     // A response is already committed for this request: parking it could only
     // ever produce a duplicate upstream delivery. Refuse loudly.
-    console.warn(
-      `[RPC_PROXY] wake-hold refused: response already committed host=${options.hostRef}`
-    )
+    console.warn(`[RPC_PROXY] wake-hold refused: response already committed host=${safeHostRef}`)
     return
   }
   const outcome = await coordinator.hold({
@@ -641,7 +645,7 @@ export async function respondWithWakeAndHold(
 
   if (options.res.headersSent) {
     console.debug(
-      `[RPC_PROXY] late wake-hold artifact ignored (already resolved) host=${options.hostRef} artifact=hold-outcome`
+      `[RPC_PROXY] late wake-hold artifact ignored (already resolved) host=${safeHostRef} artifact=hold-outcome`
     )
     return
   }
@@ -655,7 +659,7 @@ export async function respondWithWakeAndHold(
           // schedule was pending. Re-forwarding now would duplicate a message
           // the upstream already accepted.
           console.debug(
-            `[RPC_PROXY] late wake-hold artifact ignored (already resolved) host=${options.hostRef} artifact=proceed-retry`
+            `[RPC_PROXY] late wake-hold artifact ignored (already resolved) host=${safeHostRef} artifact=proceed-retry`
           )
           return
         }
@@ -668,7 +672,7 @@ export async function respondWithWakeAndHold(
             // success write threw): the request is resolved. A retry here is
             // the duplicate-delivery bug — never re-forward, fail loudly.
             console.warn(
-              `[RPC_PROXY] wake-hold post-response failure suppressed (already resolved) host=${options.hostRef} error=${
+              `[RPC_PROXY] wake-hold post-response failure suppressed (already resolved) host=${safeHostRef} error=${
                 error instanceof Error ? error.message : String(error)
               }`
             )
@@ -686,7 +690,7 @@ export async function respondWithWakeAndHold(
           // The host answered with a non-availability failure — exactly
           // today's behavior for an up-but-erroring host.
           console.warn(
-            `[RPC_PROXY] wake-hold upstream retry failed host=${options.hostRef} error=${
+            `[RPC_PROXY] wake-hold upstream retry failed host=${safeHostRef} error=${
               error instanceof Error ? error.message : String(error)
             }`
           )
@@ -696,12 +700,12 @@ export async function respondWithWakeAndHold(
       }
       if (options.res.headersSent) {
         console.debug(
-          `[RPC_PROXY] late wake-hold artifact ignored (already resolved) host=${options.hostRef} artifact=host-waking-response`
+          `[RPC_PROXY] late wake-hold artifact ignored (already resolved) host=${safeHostRef} artifact=host-waking-response`
         )
         return
       }
       console.warn(
-        `[RPC_PROXY] wake-hold admission deadline exceeded host=${options.hostRef} lastKnownState=${outcome.lastKnownState}`
+        `[RPC_PROXY] wake-hold admission deadline exceeded host=${safeHostRef} lastKnownState=${outcome.lastKnownState}`
       )
       respondHostWaking(options.res, {
         hostRef: options.hostRef,
@@ -712,7 +716,7 @@ export async function respondWithWakeAndHold(
     }
     case 'legacy':
       console.warn(
-        `[RPC_PROXY] wake-hold falling back to legacy error path host=${options.hostRef} reason=${outcome.reason}`
+        `[RPC_PROXY] wake-hold falling back to legacy error path host=${safeHostRef} reason=${outcome.reason}`
       )
       options.respondLegacy(new Error(`Upstream host unavailable (${outcome.reason})`))
       return
@@ -721,7 +725,7 @@ export async function respondWithWakeAndHold(
       return
     case 'waking':
       console.info(
-        `[RPC_PROXY] wake-hold responding host_waking host=${options.hostRef} reason=${outcome.reason} lastKnownState=${outcome.lastKnownState}`
+        `[RPC_PROXY] wake-hold responding host_waking host=${safeHostRef} reason=${outcome.reason} lastKnownState=${outcome.lastKnownState}`
       )
       respondHostWaking(options.res, {
         hostRef: options.hostRef,
