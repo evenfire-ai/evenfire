@@ -113,51 +113,29 @@ describe('POST /rpc/hosts/:hostRef/messages wake-and-hold triggers', () => {
     const response = await postMessage(makeApp()).expect(200)
 
     expect(response.body).toEqual({ success: true, taskId: 't-1' })
-    expect(controlApiMock.requestHostWakeFromControlApi).toHaveBeenCalledTimes(2)
+    expect(controlApiMock.requestHostWakeFromControlApi).toHaveBeenCalledTimes(1)
     expect(controlApiMock.requestHostWakeFromControlApi).toHaveBeenCalledWith('chatllm', 'token')
     expect(serviceMock.forwardHostMessageToHost).toHaveBeenCalledTimes(2)
+    expect(serviceMock.forwardHostMessageToHost.mock.calls[0][2]).toEqual({ async: false })
   })
 
-  it('starts wake after a short availability probe and admits after the Host becomes ready', async () => {
-    let firstForwardStarted!: () => void
-    const firstForward = new Promise<void>(resolve => {
-      firstForwardStarted = resolve
-    })
-    let upstreamAdmits = false
-    const availabilityTimeout = new Error('Initial host availability probe timed out')
-    availabilityTimeout.name = 'HostAvailabilityProbeTimeoutError'
+  it('uses the normal POST timeout before wake-hold retries until the suspended Host admits', async () => {
     serviceMock.forwardHostMessageToHost
-      .mockImplementationOnce(
-        (_host: unknown, _body: unknown, options: { timeoutMs?: number }) =>
-          new Promise((_resolve, reject) => {
-            vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
-            expect(options.timeoutMs).toBe(750)
-            firstForwardStarted()
-            setTimeout(() => reject(availabilityTimeout), options.timeoutMs)
-          })
-      )
-      .mockImplementation(async () => {
-        if (!upstreamAdmits) throw hostDownError()
-        return { success: true, taskId: 't-delayed' }
-      })
+      .mockRejectedValueOnce(hostDownError()) // Initial POST fails quickly on the suspended Host.
+      .mockRejectedValueOnce(hostDownError()) // Wake was accepted, but admission is not ready yet.
+      .mockResolvedValueOnce({ success: true, taskId: 't-delayed' })
     controlApiMock.requestHostWakeFromControlApi.mockResolvedValue({
       kind: 'active',
       wakeGeneration: null,
     })
 
-    const responsePromise = postMessage(makeApp())
-      .expect(200)
-      .then(response => response)
-    await firstForward
-    expect(controlApiMock.requestHostWakeFromControlApi).toHaveBeenCalledTimes(1)
-    await vi.advanceTimersByTimeAsync(750)
-    expect(controlApiMock.requestHostWakeFromControlApi).toHaveBeenCalledTimes(2)
-    expect(serviceMock.forwardHostMessageToHost).toHaveBeenCalledTimes(2)
-    await vi.advanceTimersByTimeAsync(1_500)
-    upstreamAdmits = true
-    await vi.advanceTimersByTimeAsync(250)
-    const response = await responsePromise
+    const response = await postMessage(makeApp()).expect(200)
+
     expect(response.body).toEqual({ success: true, taskId: 't-delayed' })
+    expect(serviceMock.forwardHostMessageToHost).toHaveBeenCalledTimes(3)
+    // The first POST omits timeoutMs so the service applies its normal full upstream timeout.
+    expect(serviceMock.forwardHostMessageToHost.mock.calls[0][2]).toEqual({ async: false })
+    expect(controlApiMock.requestHostWakeFromControlApi).toHaveBeenCalledTimes(1)
     expect(serviceMock.forwardHostMessageToHost.mock.calls[0][1]).toBe(
       serviceMock.forwardHostMessageToHost.mock.calls.at(-1)![1]
     )
@@ -268,7 +246,8 @@ describe('POST /rpc/hosts/:hostRef/messages wake-and-hold triggers', () => {
     const response = await postMessage(makeApp()).expect(200)
 
     expect(response.body).toEqual({ success: true, taskId: 't-2' })
-    expect(controlApiMock.requestHostWakeFromControlApi).toHaveBeenCalledTimes(2)
+    expect(controlApiMock.requestHostWakeFromControlApi).toHaveBeenCalledTimes(1)
+    expect(serviceMock.forwardHostMessageToHost.mock.calls[0][2]).toEqual({ async: false })
   })
 
   it('drain-cancel bounce resolves within the short retry schedule (250ms then 1s)', async () => {
@@ -295,7 +274,7 @@ describe('POST /rpc/hosts/:hostRef/messages wake-and-hold triggers', () => {
 
     expect(response.body).toEqual({ error: 'Upstream host unavailable' })
     expect(serviceMock.forwardHostMessageToHost.mock.calls[0][2]).toEqual({ async: false })
-    expect(controlApiMock.requestHostWakeFromControlApi).toHaveBeenCalledTimes(2)
+    expect(controlApiMock.requestHostWakeFromControlApi).toHaveBeenCalledTimes(1)
   })
 
   it('404 unknown host maps to a 404 for the caller', async () => {
@@ -358,7 +337,7 @@ describe('POST /rpc/hosts/:hostRef/messages wake-and-hold triggers', () => {
     const response = await postMessage(makeApp()).expect(502)
 
     expect(response.body).toEqual({ error: 'Upstream host unavailable' })
-    expect(controlApiMock.requestHostWakeFromControlApi).toHaveBeenCalledTimes(1) // statelessness check only
+    expect(controlApiMock.requestHostWakeFromControlApi).not.toHaveBeenCalled()
   })
 
   it('an upstream AbortError keeps the 504 path without entering the wake hold', async () => {
@@ -369,7 +348,7 @@ describe('POST /rpc/hosts/:hostRef/messages wake-and-hold triggers', () => {
     const response = await postMessage(makeApp()).expect(504)
 
     expect(response.body).toEqual({ error: 'Gateway Timeout' })
-    expect(controlApiMock.requestHostWakeFromControlApi).toHaveBeenCalledTimes(1) // statelessness check only
+    expect(controlApiMock.requestHostWakeFromControlApi).not.toHaveBeenCalled()
   })
 
   it('a token without wake scope keeps the original full upstream timeout', async () => {
@@ -388,15 +367,13 @@ describe('POST /rpc/hosts/:hostRef/messages wake-and-hold triggers', () => {
     expect(controlApiMock.requestHostWakeFromControlApi).not.toHaveBeenCalled()
   })
 
-  it('uses the full upstream timeout when statelessness cannot be confirmed', async () => {
-    controlApiMock.requestHostWakeFromControlApi.mockRejectedValue(
-      new Error('wake API unavailable')
-    )
+  it('uses the normal upstream timeout for a healthy POST without requesting a wake', async () => {
     serviceMock.forwardHostMessageToHost.mockResolvedValue({ success: true, taskId: 't-stateful' })
 
     await postMessage(makeApp()).expect(200)
 
     expect(serviceMock.forwardHostMessageToHost.mock.calls[0][2]).toEqual({ async: false })
+    expect(controlApiMock.requestHostWakeFromControlApi).not.toHaveBeenCalled()
   })
 })
 

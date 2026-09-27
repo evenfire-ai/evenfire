@@ -352,6 +352,14 @@ export class WakeAndHoldCoordinator {
       // bounded by the per-waiter deadlines and the entry TTL.
       return
     }
+    await this.processWakeResponse(entry, response, options)
+  }
+
+  private async processWakeResponse(
+    entry: HostWakeEntry,
+    response: HostWakeApiResponse,
+    options: { initial: boolean }
+  ): Promise<void> {
     if (entry.settled) {
       console.debug(
         `[RPC_PROXY] late wake-hold artifact ignored (already resolved) host=${entry.hostRef} artifact=wake-response kind=${response.kind}`

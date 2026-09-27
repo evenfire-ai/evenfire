@@ -5078,7 +5078,10 @@ export class HostReconciler {
       ready: ready && npFailures.length === 0,
       message,
     })
-    if (!ready && !suspended) {
+    // Do not schedule a readiness poll when NetworkPolicy has degraded the
+    // runtime: the same-generation poll would overwrite the degraded verdict
+    // with "Running" once the Deployment alone becomes Ready.
+    if (!ready && !suspended && npFailures.length === 0) {
       this.pollReadiness(host.name, host.namespace)
     }
 

@@ -48,7 +48,6 @@ const RFC1123_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/
 const SESSIONS_LIMIT_CAP = 100
 const MESSAGES_LIMIT_CAP = 200
 /** A confirmed stateless host may be suspended and spend seconds failing DNS/connect. */
-const MESSAGE_AVAILABILITY_PROBE_MS = 750
 
 function isSafeUpstreamPathSegment(value: string): boolean {
   return (
@@ -443,28 +442,14 @@ export function createRpcRouter(): Router {
         )
         let upstreamResponse: Record<string, unknown> | null = null
         const wakeCapable = isWakeCapable(auth, hostRef, Date.now())
-        let statelessHostConfirmed = false
-        if (wakeCapable) {
-          try {
-            const wakeStatus = await requestHostWakeFromControlApi(hostRef, rpcAccessToken)
-            // The wake API checks lifecycle.spec.stateless before returning either
-            // status. Unknown, rate-limited, unauthorized, and failed checks do not
-            // authorize a short timeout for a mutating message request.
-            statelessHostConfirmed =
-              wakeStatus.kind === 'active' || wakeStatus.kind === 'wake-requested'
-          } catch {
-            // A failed statelessness check must not turn a healthy stateful send
-            // into a short, aborting POST. The normal timeout still allows the
-            // existing wake path to handle a genuine upstream availability error.
-          }
-        }
         try {
-          // This is a mutating POST. Its short availability probe is safe only
-          // after the wake API confirms a stateless Host, where deliveryMessageId
-          // lets mcp-host deduplicate an interrupted send and its retry.
+          // Always use the configured upstream timeout for the first POST.
+          // A separate statelessness pre-check would double-charge the
+          // rate-limited wake endpoint and risk aborting a healthy send.
+          // The wake path below already checks statelessness when a
+          // connection-level failure triggers it.
           upstreamResponse = await forwardHostMessageToHost(host, forwardedBody, {
             async: isAsync,
-            ...(statelessHostConfirmed ? { timeoutMs: MESSAGE_AVAILABILITY_PROBE_MS } : {}),
           })
         } catch (error) {
           console.warn(
@@ -472,12 +457,7 @@ export function createRpcRouter(): Router {
               error instanceof Error ? error.message : String(error)
             }`
           )
-          if (
-            isWakeEligibleHostError(error) ||
-            (wakeCapable &&
-              error instanceof Error &&
-              error.name === 'HostAvailabilityProbeTimeoutError')
-          ) {
+          if (isWakeEligibleHostError(error)) {
             // Stateless wake-and-hold: a down or draining host triggers a
             // control-api wake (and possibly a bounded hold) instead of the
             // generic 502. Non-stateless hosts fall back to the legacy path.
