@@ -101,6 +101,7 @@ function resourceRow(resource: (typeof hostProjection.resources)[number]) {
     deleted_at: resource.deletedAt,
     observed_generation: resource.observedGeneration,
     content_bytes: resource.contentBytes,
+    behavior_sources: resource.behaviorSources,
   }
 }
 
@@ -122,7 +123,7 @@ function relationshipRow(relationship: (typeof contextProjection.relationships)[
   }
 }
 
-function fakeTransaction(kind: 'host' | 'mcp_server') {
+function fakeTransaction(kind: 'host' | 'mcp_server', options: { behaviorSources?: boolean } = {}) {
   const query = vi.fn(async (text: string) => {
     if (text.startsWith('SET TRANSACTION') || text.includes("set_config('statement_timeout'")) {
       return { rows: [], rowCount: 0 }
@@ -143,7 +144,10 @@ function fakeTransaction(kind: 'host' | 'mcp_server') {
       }
     }
     if (text.includes('FROM operational_catalog_source_state')) {
-      const families = kind === 'host' ? ['host'] : ['mcp_server', 'context', 'host']
+      const families =
+        kind === 'host'
+          ? ['host', 'context', 'mcp_server', 'shared_filesystem']
+          : ['mcp_server', 'context', 'host', 'shared_filesystem']
       return {
         rows: families.map(source_family => ({
           source_family,
@@ -156,11 +160,17 @@ function fakeTransaction(kind: 'host' | 'mcp_server') {
       }
     }
     if (text.includes('FROM operational_resource_index')) {
-      const row =
+      const resources =
         kind === 'host'
-          ? resourceRow(hostProjection.resources[0]!)
-          : resourceRow(mcpProjection.resources[0]!)
-      return { rows: [row], rowCount: 1 }
+          ? [hostProjection.resources[0]!]
+          : text.includes('(resource_type, logical_id) IN')
+            ? [mcpProjection.resources[0]!, contextProjection.resources[0]!]
+            : [mcpProjection.resources[0]!]
+      const rows = resources.map(resourceRow)
+      if (options.behaviorSources === false) {
+        for (const row of rows) delete row.behavior_sources
+      }
+      return { rows, rowCount: rows.length }
     }
     if (text.includes('FROM operational_resource_relationships')) {
       const rows =
@@ -170,6 +180,11 @@ function fakeTransaction(kind: 'host' | 'mcp_server') {
               .map(relationshipRow)
           : []
       return { rows, rowCount: rows.length }
+    }
+    if (text.includes('FROM token_budgets')) return { rows: [], rowCount: 0 }
+    if (text.includes('FROM llm_allowed_models')) return { rows: [], rowCount: 0 }
+    if (text.includes('SELECT DISTINCT ON (context_id)')) {
+      return { rows: [], rowCount: 0 }
     }
     if (text.includes('WITH context_names AS')) {
       return {
@@ -257,7 +272,7 @@ describe('canonical action live authorization', () => {
     },
   ])('resolves $operationId through the real selected-path resolver', async input => {
     const result = await resolve(input)
-    expect(result.status).toBe('allowed')
+    expect(result.status, JSON.stringify(result)).toBe('allowed')
     if (result.status !== 'allowed') return
     expect(result.selectedPath.behavior.capabilities).toContain(input.capability)
   })
@@ -272,7 +287,7 @@ describe('canonical action live authorization', () => {
         toolName: 'forecast',
       },
     })
-    expect(result.status).toBe('allowed')
+    expect(result.status, JSON.stringify(result)).toBe('allowed')
     if (result.status !== 'allowed') return
     expect(result.selectedPath.behavior.capabilities).toContain('mcp_server.use')
   })
@@ -291,7 +306,7 @@ describe('canonical action live authorization', () => {
       },
       { authorizationOptions: { transaction: firstDb.transaction } }
     )
-    expect(issued.status).toBe('allowed')
+    expect(issued.status, JSON.stringify(issued)).toBe('allowed')
     if (issued.status !== 'allowed') return
 
     const budget = AccessExecutionBudget.create('action')
@@ -342,7 +357,7 @@ describe('canonical action live authorization', () => {
   })
 
   it('fails closed when the selected chat path lacks required behavior facts', async () => {
-    const db = fakeTransaction('host')
+    const db = fakeTransaction('host', { behaviorSources: false })
     await expect(
       authorizeActionV2(
         {

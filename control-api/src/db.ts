@@ -3268,6 +3268,23 @@ async function applyWorkflowRunFailureReasonSchema(db: DbClient): Promise<void> 
   `)
 }
 
+async function applyR31RuntimeBehaviorSourcesSchema(db: DbClient): Promise<void> {
+  for (const table of ['operational_resource_index', 'operational_resource_index_staging']) {
+    await db.query(
+      `ALTER TABLE ${table}
+         ADD COLUMN IF NOT EXISTS behavior_sources JSONB NOT NULL DEFAULT '{}'::JSONB`
+    )
+    await db.query(`
+      DO $$ BEGIN
+        ALTER TABLE ${table}
+          ADD CONSTRAINT ${table}_behavior_sources_object
+          CHECK (jsonb_typeof(behavior_sources) = 'object');
+      EXCEPTION WHEN duplicate_object THEN NULL;
+      END $$;
+    `)
+  }
+}
+
 // Exported (read-only) as the canonical migration registry. The baseline
 // runner consumes its early entries in array order; post-0106 migrations are
 // selected from this registry and executed in the classified phase order in
@@ -6496,6 +6513,10 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     version: '0125_workflow_run_failure_reason',
     legacyVersions: ['0114_workflow_run_failure_reason', '011a_workflow_run_failure_reason'],
     apply: applyWorkflowRunFailureReasonSchema,
+  },
+  {
+    version: '0120_r31_runtime_behavior_sources',
+    apply: applyR31RuntimeBehaviorSourcesSchema,
   },
 ]
 
