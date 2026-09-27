@@ -34,7 +34,6 @@ import {
 import {
   MAX_REQUEST_HOLD_MS,
   isUpstreamTimeoutError,
-  isWakeCapable,
   isWakeEligibleHostError,
   respondWithWakeAndHold,
 } from '../services/wakeAndHold.js'
