@@ -441,7 +441,6 @@ export function createRpcRouter(): Router {
           `[RPC_PROXY] user=${auth.sub} host=${hostRef} method=host-message-rest${isAsync ? ' (async)' : ''} attachments=${attachmentCount}`
         )
         let upstreamResponse: Record<string, unknown> | null = null
-        const wakeCapable = isWakeCapable(auth, hostRef, Date.now())
         try {
           // Always use the configured upstream timeout for the first POST.
           // A separate statelessness pre-check would double-charge the
