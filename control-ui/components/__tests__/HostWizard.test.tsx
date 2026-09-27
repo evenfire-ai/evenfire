@@ -840,14 +840,14 @@ describe('HostWizard — baseline render', () => {
 })
 
 describe('HostWizard — Agent type (stateless lifecycle)', () => {
-  it('hides the Agent type selector from the create flow', async () => {
+  it('shows the Agent type selector in the create flow', async () => {
     await renderWizard()
 
-    expect(screen.queryByText('Agent type')).not.toBeInTheDocument()
-    expect(screen.queryByRole('radio', { name: /Stateful \(always on\)/i })).not.toBeInTheDocument()
+    expect(screen.getByText('Agent type')).toBeInTheDocument()
+    expect(screen.getByRole('radio', { name: /Stateful \(always on\)/i })).toBeInTheDocument()
     expect(
-      screen.queryByRole('radio', { name: /Stateless \(suspends when idle\)/i })
-    ).not.toBeInTheDocument()
+      screen.getByRole('radio', { name: /Stateless \(suspends when idle\)/i })
+    ).toBeInTheDocument()
   })
 
   it('omits spec.lifecycle from the created Host when Stateful is kept (absent = disabled)', async () => {

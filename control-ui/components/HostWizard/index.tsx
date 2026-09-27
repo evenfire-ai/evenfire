@@ -67,9 +67,10 @@ import {
 } from './constants'
 import type { CreatedResource, HostWizardProps, HostWizardValidationState } from './types'
 
-// Stateless lifecycle support remains intact in the API and existing-agent UI;
-// only creation through this wizard is temporarily unavailable.
-const SHOW_STATELESS_AGENT_SELECTOR = false
+// Stateless agents can now be created from the wizard. The API and HCC
+// lifecycle support were already in place; this flag gates the operator-facing
+// type selector during the incremental rollout.
+const SHOW_STATELESS_AGENT_SELECTOR = true
 
 // Asymmetric save gate (spec Topic 1b): the PRIMARY provider must be usable —
 // its required credential slot(s) filled — before create is allowed. Fallbacks
