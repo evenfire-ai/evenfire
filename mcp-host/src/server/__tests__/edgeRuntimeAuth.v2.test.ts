@@ -311,7 +311,7 @@ describe('runtimeEdgeGuard v2', () => {
       .set('x-clerum-edge-caller', 'rpc-proxy')
       .set('x-clerum-edge-user-id', userId)
       .set('x-clerum-edge-host-ref', 'chatllm')
-      .set('authorization', 'Bearer wrong-rpc-proxy-edge-credential')
+      .set('authorization', 'Bearer wrong-edge-token')
       .set('x-service-token', 'rpc-proxy')
 
     expect(response.status).toBe(401)

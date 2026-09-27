@@ -208,7 +208,7 @@ describe('Sandbox OAuth v2 authority', () => {
 
     const response = await request(app())
       .get('/api/v1/sandbox-ui/sandbox-recipes/r1/view/index.html')
-      .set('Authorization', 'Bearer v2.valid-but-unavailable')
+      .set('Authorization', 'Bearer v2.unavailable')
       .set('Cookie', `${config.sandboxUiCookieName}=${legacyCookie}`)
 
     expect(response.status).toBe(503)
