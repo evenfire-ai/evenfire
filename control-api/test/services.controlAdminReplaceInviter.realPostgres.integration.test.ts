@@ -1,7 +1,11 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { Pool } from 'pg'
+import { config } from '../src/config.js'
 import { initDb, pool } from '../src/db.js'
+import type { K8sGateway } from '../src/k8s.js'
+import type { RpcAccessClaims } from '../src/profileTypes.js'
+import { authorizeRpcHostAccess } from '../src/services/access/rpcHostAccessAuthorizer.js'
 import {
   completeControlAdminInvitation,
   createControlAdminInvitation,
@@ -10,6 +14,7 @@ import {
   listControlAdmins,
   revokeControlAdminInvitation,
 } from '../src/services/adminAuthService.js'
+import { getCurrentTeam } from '../src/services/directory/index.js'
 import { passwordLoginData } from '../src/services/directory/login.js'
 import {
   acceptInvitationById,
@@ -307,6 +312,66 @@ describeRealPostgres('control admin replace-inviter invitations on real PostgreS
     expect(await desktopInvitationStatus(clientDesktopInvitationId)).toBe('accepted')
     expect(await adminInvitationStatus(stray.id)).toBe('revoked')
     expect(await desktopInvitationStatus(strayDesktopInvitationId)).toBe('revoked')
+  })
+
+  it('denies the retired inviter team-granted host access although its team rows stay active', async () => {
+    const inviter = await seedAdmin('rpc-ops')
+    const inviterDesktopId = await seedDesktopUser(inviter.email)
+    const team = await seedTeam('Rpc')
+    await addTeamMember(team, inviterDesktopId, 'admin')
+    const hostRef = `host-${randomUUID().slice(0, 8)}`
+    await testPool.query(`INSERT INTO team_agents (team_id, agent_name) VALUES ($1::uuid, $2)`, [
+      team,
+      hostRef,
+    ])
+    const gateway = {
+      listResource: async (plural: string, namespace: string) => {
+        expect(plural).toBe('hosts')
+        expect(namespace).toBe(config.hostsNamespace)
+        return [{ metadata: { name: hostRef }, spec: { enabled: true } }]
+      },
+    } as unknown as K8sGateway
+    // A token minted before the handover stays valid until it expires.
+    const claims: RpcAccessClaims = {
+      sub: inviterDesktopId,
+      typ: 'user',
+      accessScope: 'team',
+      teamId: team,
+      role: 'admin',
+      scopes: ['host:message:invoke'],
+      hostRefs: [hostRef],
+      jti: randomUUID(),
+      iat: Math.floor(Date.now() / 1000),
+      exp: Math.floor(Date.now() / 1000) + 300,
+    }
+    await expect(
+      authorizeRpcHostAccess(gateway, claims, inviterDesktopId, hostRef)
+    ).resolves.toMatchObject({ authorized: true })
+
+    const clientEmail = uniqueEmail('rpc-client')
+    const handover = await createControlAdminInvitation(clientEmail, inviter.id, {
+      replaceInviter: true,
+    })
+    if ('error' in handover) throw new Error(handover.error)
+    const completed = await completeControlAdminInvitation({
+      email: clientEmail,
+      invitationId: handover.id,
+      username: `rpc-${randomUUID().slice(0, 8)}`,
+      passwordHash: 'real-pg-replace-client',
+    })
+    if ('error' in completed) throw new Error(completed.error)
+
+    // Retirement, like every other retirement path, keeps team_members; the
+    // users.lifecycle_state join in getCurrentTeam is what closes team access.
+    const rows = await testPool.query(
+      `SELECT status FROM team_members WHERE team_id = $1::uuid AND user_id = $2::uuid`,
+      [team, inviterDesktopId]
+    )
+    expect(rows.rows).toEqual([{ status: 'active' }])
+    await expect(getCurrentTeam(inviterDesktopId, team)).resolves.toBeNull()
+    await expect(
+      authorizeRpcHostAccess(gateway, claims, inviterDesktopId, hostRef)
+    ).resolves.toEqual({ authorized: false, reason: 'team_membership_missing' })
   })
 
   it('raises an existing desktop user of the new admin to the inviter roles', async () => {
