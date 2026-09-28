@@ -194,19 +194,25 @@ export async function requestHostRpcAdmission(
       'x-ratelimit-reset',
     ] as const
     const headers = Object.fromEntries(names.map(name => [name, response.headers.get(name)]))
-    const retryAfter = Number(headers['retry-after'])
-    const limit = Number(headers['x-ratelimit-limit'])
-    const remaining = Number(headers['x-ratelimit-remaining'])
-    const reset = Number(headers['x-ratelimit-reset'])
+    const parseCanonicalInteger = (value: string | null): number | null => {
+      if (value === null || !/^(0|[1-9]\d*)$/.test(value)) return null
+      const parsed = Number(value)
+      return Number.isSafeInteger(parsed) ? parsed : null
+    }
+    const retryAfter = parseCanonicalInteger(headers['retry-after'])
+    const limit = parseCanonicalInteger(headers['x-ratelimit-limit'])
+    const remaining = parseCanonicalInteger(headers['x-ratelimit-remaining'])
+    const reset = parseCanonicalInteger(headers['x-ratelimit-reset'])
     if (
       body?.error === 'Too Many Requests' &&
       Number.isSafeInteger(body.retryAfterSeconds) &&
       Number(body.retryAfterSeconds) > 0 &&
+      retryAfter !== null &&
       retryAfter === Number(body.retryAfterSeconds) &&
-      Number.isSafeInteger(limit) &&
+      limit !== null &&
       limit > 0 &&
       remaining === 0 &&
-      Number.isSafeInteger(reset) &&
+      reset !== null &&
       reset > 0
     ) {
       throw new ControlApiHostRpcAdmissionError(
