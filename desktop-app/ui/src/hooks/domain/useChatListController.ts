@@ -149,8 +149,14 @@ const byLastActivityDesc = (a: { lastActivityAt: string }, b: { lastActivityAt: 
   sortableTimestamp(b.lastActivityAt) - sortableTimestamp(a.lastActivityAt)
 
 function isRecoverableCatalogCursorError(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error)
-  return /\b4\d\d\b/.test(message) || message.toLowerCase().includes('invalid')
+  const message = (error instanceof Error ? error.message : String(error)).toLowerCase()
+  const status = httpErrorStatus(error)
+  const invalidCursor = /invalid (?:sessions )?cursor/.test(message)
+  if (status === 429) return false
+  if (status !== undefined) {
+    return status === 400 && invalidCursor
+  }
+  return invalidCursor
 }
 
 function isCatalogOutageError(error: unknown): boolean {

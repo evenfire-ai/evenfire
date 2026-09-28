@@ -362,7 +362,7 @@ describe('revoked host catalog protection', () => {
   it('clears a rejected load-more cursor after a client-side cursor error', async () => {
     clerum.rpc.listSessions.mockImplementation(
       async (_agentRef: string, _teamId: string | undefined, query?: { cursor?: string }) => {
-        if (query?.cursor) throw new Error('400 Bad Request: invalid cursor')
+        if (query?.cursor) throw new Error('400 Bad Request: Invalid sessions cursor')
         return {
           ...serverSessions([{ agent: 'agent-x', chatId: 'remote-page-1' }]),
           nextCursor: 'cursor-invalid',
@@ -382,6 +382,35 @@ describe('revoked host catalog protection', () => {
         call => (call[2] as { cursor?: string } | undefined)?.cursor === 'cursor-invalid'
       )
     ).toHaveLength(1)
+  })
+
+  it('preserves the load-more cursor during a transient rate limit', async () => {
+    clerum.rpc.listSessions.mockImplementation(
+      async (_agentRef: string, _teamId: string | undefined, query?: { cursor?: string }) => {
+        if (query?.cursor) throw new Error('429 Too Many Requests')
+        return {
+          ...serverSessions([{ agent: 'agent-x', chatId: 'remote-page-1' }]),
+          nextCursor: 'cursor-rate-limited',
+        }
+      }
+    )
+    const controller = renderController()
+
+    await waitFor(() => expect(controller.result.current.chatListHasMoreRemoteSessions).toBe(true))
+    await act(async () => {
+      await controller.result.current.loadMoreChatSessions()
+    })
+    expect(controller.result.current.chatListHasMoreRemoteSessions).toBe(true)
+
+    await act(async () => {
+      await controller.result.current.loadMoreChatSessions()
+    })
+
+    expect(
+      clerum.rpc.listSessions.mock.calls.filter(
+        call => (call[2] as { cursor?: string } | undefined)?.cursor === 'cursor-rate-limited'
+      )
+    ).toHaveLength(2)
   })
 })
 
