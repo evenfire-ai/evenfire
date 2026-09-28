@@ -499,6 +499,18 @@ export function createAdminAuthRouter(): Router {
           ? await acceptInvitationById(validation.email, desktopAccess.id)
           : null
         if (acceptedDesktopAccess && 'error' in acceptedDesktopAccess) {
+          // The control-admin invitation is already committed. A failed desktop
+          // acceptance leaves that admin in place and, for a hand-over, the
+          // inviter already retired. Record the code without the invitee email.
+          rootLogger.error(
+            {
+              event: 'control_admin_desktop_acceptance_failed',
+              invitationId: validation.invitationUuid,
+              adminId: result.id,
+              errorCode: acceptedDesktopAccess.error,
+            },
+            'desktop invitation acceptance failed after the control admin invitation committed'
+          )
           res.status(409).json({ error: acceptedDesktopAccess.error })
           return
         }
