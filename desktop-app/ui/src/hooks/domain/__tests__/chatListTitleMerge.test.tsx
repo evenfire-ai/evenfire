@@ -14,6 +14,7 @@ import { makeTaskKey } from '@contexts/AgentTaskTrackerContext'
 import { act, waitFor } from '@testing-library/react'
 import { parseSessionsListResult } from '../../../../../src/rpcProxyClient'
 import type { ChatIndex, SessionsListResult } from '../../../../../src/types'
+import { httpErrorStatus } from '../../../lib/format'
 import { renderController } from './__fixtures__/controllerHarness'
 import { type MockClerum, installMockClerum, uninstallMockClerum } from './__fixtures__/mockClerum'
 
@@ -31,6 +32,18 @@ afterEach(() => {
 })
 
 const NOW = '2026-09-12T00:00:00.000Z'
+
+describe('HTTP status parsing through Electron IPC', () => {
+  it.each([
+    ['Error invoking remote method: Error: 403 Forbidden: host_access_revoked', 403],
+    ['Error invoking remote method: Error: 401 Unauthorized', 401],
+    ['Error invoking remote method: Error: 503 Service Unavailable: upstream mentioned 403', 503],
+    ["Error invoking remote method 'rpc:invoke': Error: 403 Forbidden", 403],
+    ['request to support-401 failed', undefined],
+  ])('parses %s as %s', (message, expected) => {
+    expect(httpErrorStatus(message)).toBe(expected)
+  })
+})
 
 /** Parse a raw wire payload through the real producer parser (T1). */
 function serverSessions(
@@ -309,7 +322,7 @@ describe('revoked host catalog protection', () => {
     const blocked = new Set<string>()
     clerum.chat.getIndex.mockResolvedValue(localIndex([{ id: 'cached-a', title: 'Cached chat' }]))
     clerum.rpc.listSessions.mockRejectedValue(new Error('503 Service Unavailable'))
-    const { result } = renderController({
+    const controller = renderController({
       selectedAgent: 'agent-a',
       agentNames: ['agent-a'],
       onHostAccessRevoked: agentRef => blocked.add(agentRef),
@@ -318,9 +331,57 @@ describe('revoked host catalog protection', () => {
     })
     await waitFor(() => expect(clerum.rpc.listSessions).toHaveBeenCalled())
     await waitFor(() =>
-      expect(result.current.chatList.some(chat => chat.id === 'cached-a')).toBe(true)
+      expect(controller.result.current.chatList.some(chat => chat.id === 'cached-a')).toBe(true)
     )
     expect(blocked.has('agent-a')).toBe(false)
+    await waitFor(() => expect(controller.spies.pushToast).toHaveBeenCalledTimes(1))
+    expect(controller.spies.pushToast).toHaveBeenCalledWith(
+      'Chat list for agent-a is offline. Showing saved chats.',
+      'info'
+    )
+  })
+
+  it('does not show the offline toast for a client-side catalog error', async () => {
+    clerum.chat.getIndex.mockResolvedValue(localIndex([{ id: 'cached-a', title: 'Cached chat' }]))
+    clerum.rpc.listSessions.mockRejectedValue(new Error('400 Bad Request: invalid cursor'))
+    const controller = renderController({
+      selectedAgent: 'agent-a',
+      agentNames: ['agent-a'],
+    })
+
+    await waitFor(() => expect(clerum.rpc.listSessions).toHaveBeenCalled())
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(controller.spies.pushToast).not.toHaveBeenCalledWith(
+      expect.stringContaining('Chat list'),
+      'info'
+    )
+  })
+
+  it('clears a rejected load-more cursor after a client-side cursor error', async () => {
+    clerum.rpc.listSessions.mockImplementation(
+      async (_agentRef: string, _teamId: string | undefined, query?: { cursor?: string }) => {
+        if (query?.cursor) throw new Error('400 Bad Request: invalid cursor')
+        return {
+          ...serverSessions([{ agent: 'agent-x', chatId: 'remote-page-1' }]),
+          nextCursor: 'cursor-invalid',
+        }
+      }
+    )
+    const controller = renderController()
+
+    await waitFor(() => expect(controller.result.current.chatListHasMoreRemoteSessions).toBe(true))
+    await act(async () => {
+      await controller.result.current.loadMoreChatSessions()
+    })
+
+    expect(controller.result.current.chatListHasMoreRemoteSessions).toBe(false)
+    expect(
+      clerum.rpc.listSessions.mock.calls.filter(
+        call => (call[2] as { cursor?: string } | undefined)?.cursor === 'cursor-invalid'
+      )
+    ).toHaveLength(1)
   })
 })
 

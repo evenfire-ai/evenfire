@@ -9,7 +9,13 @@ import type {
   ChatMetadata,
   SessionsListResult,
 } from '../../../../src/types'
-import { isAuthorizationError, isConfirmedHostAccessRevoked } from '../../lib/format'
+import {
+  httpErrorStatus,
+  isAuthorizationError,
+  isConfirmedHostAccessRevoked,
+  isHttpServerError,
+  isNetworkError,
+} from '../../lib/format'
 import { scheduleAfterFirstPaint } from '../scheduleAfterFirstPaint'
 import type { useChatStore } from '../useChatStore'
 import { type SessionFsmEvent, type SessionFsmStore, seedSessionSnapshots } from './sessionFsm'
@@ -147,6 +153,12 @@ function isRecoverableCatalogCursorError(error: unknown): boolean {
   return /\b4\d\d\b/.test(message) || message.toLowerCase().includes('invalid')
 }
 
+function isCatalogOutageError(error: unknown): boolean {
+  const status = httpErrorStatus(error)
+  if (status !== undefined) return isHttpServerError(error)
+  return isNetworkError(error)
+}
+
 /**
  * Classify a failed rename RPC for the pending-rename queue (spec 15 §2.5). The
  * HTTP status rides the error message as `(NNN)` (see rpcProxyClient.renameSession
@@ -226,6 +238,9 @@ export function useChatListController({
   const [latestChatSessions, setLatestChatSessions] = useState<LatestSidebarChatEntry[]>([])
   const [latestChatSessionsLoading, setLatestChatSessionsLoading] = useState(false)
   const catalogOfflineByAgentRef = useRef(new Set<string>())
+  const catalogOfflineToastShownRef = useRef(false)
+  const catalogOfflineToastQueuedRef = useRef(false)
+  const catalogOfflineToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [latestCatalogMutationRevision, setLatestCatalogMutationRevision] = useState(0)
   // Selection requested for an agent before its chats have loaded, consumed by
   // the parent's agent-selection effect. Ref (not state): imperative, per-agent.
@@ -300,6 +315,12 @@ export function useChatListController({
     authorityScopeGenerationRef.current += 1
     deletedChatIdsByAgentRef.current.clear()
     catalogOfflineByAgentRef.current.clear()
+    catalogOfflineToastShownRef.current = false
+    if (catalogOfflineToastTimerRef.current !== null) {
+      clearTimeout(catalogOfflineToastTimerRef.current)
+      catalogOfflineToastTimerRef.current = null
+    }
+    catalogOfflineToastQueuedRef.current = false
   }, [isAuthenticated, scopeKey])
 
   // R1-H1 — the pending-rename queue is per-USER identity. mcp-host keys a chat
@@ -318,6 +339,33 @@ export function useChatListController({
   useEffect(() => {
     pendingRenamesRef.current.clear()
   }, [authUserKey])
+
+  const reportCatalogOffline = (agentRef: string) => {
+    if (!catalogOfflineByAgentRef.current.has(agentRef)) {
+      catalogOfflineByAgentRef.current.add(agentRef)
+    }
+    if (catalogOfflineToastShownRef.current || catalogOfflineToastQueuedRef.current) return
+    catalogOfflineToastQueuedRef.current = true
+    catalogOfflineToastTimerRef.current = setTimeout(() => {
+      catalogOfflineToastTimerRef.current = null
+      catalogOfflineToastQueuedRef.current = false
+      const affectedAgents = [...catalogOfflineByAgentRef.current]
+      if (!affectedAgents.length || catalogOfflineToastShownRef.current) return
+      catalogOfflineToastShownRef.current = true
+      const scope =
+        affectedAgents.length === 1
+          ? `for ${affectedAgents[0]}`
+          : `for ${affectedAgents.join(', ')}`
+      host.current?.pushToast(`Chat list ${scope} is offline. Showing saved chats.`, 'info')
+    }, 0)
+  }
+
+  const reportCatalogOnline = (agentRef: string) => {
+    catalogOfflineByAgentRef.current.delete(agentRef)
+    if (catalogOfflineByAgentRef.current.size === 0) {
+      catalogOfflineToastShownRef.current = false
+    }
+  }
 
   // Live `selectedAgent` for the stable callbacks below (they gate a chatList
   // write on "is this the selected agent"). A ref keeps the callbacks stable
@@ -433,15 +481,13 @@ export function useChatListController({
             if (
               !isConfirmedHostAccessRevoked(error) &&
               !isAuthorizationError(error) &&
-              !catalogOfflineByAgentRef.current.has(agentRef)
-            ) {
-              catalogOfflineByAgentRef.current.add(agentRef)
-              host.current?.pushToast('Chat list is offline. Showing saved chats.', 'info')
-            }
+              isCatalogOutageError(error)
+            )
+              reportCatalogOffline(agentRef)
           }
           return
         }
-        catalogOfflineByAgentRef.current.delete(agentRef)
+        reportCatalogOnline(agentRef)
         if (
           selectedAgentRef.current !== agentRef ||
           requestGenerationRef.current !== requestGeneration ||
@@ -623,13 +669,15 @@ export function useChatListController({
         ) {
           if (isConfirmedHostAccessRevoked(error)) onHostAccessRevoked(agentRef)
           else if (isAuthorizationError(error)) onHostAuthorityUncertain(agentRef)
-          if (
+          else if (isRecoverableCatalogCursorError(error)) {
+            chatListNextCursorByAgentRef.current[agentRef] = null
+            setChatListHasMoreRemoteSessions(false)
+          } else if (
             !isConfirmedHostAccessRevoked(error) &&
             !isAuthorizationError(error) &&
-            !catalogOfflineByAgentRef.current.has(agentRef)
+            isCatalogOutageError(error)
           ) {
-            catalogOfflineByAgentRef.current.add(agentRef)
-            host.current?.pushToast('Chat list is offline. Showing saved chats.', 'info')
+            reportCatalogOffline(agentRef)
           }
           return
         }
@@ -648,7 +696,7 @@ export function useChatListController({
         }
         return
       }
-      catalogOfflineByAgentRef.current.delete(agentRef)
+      reportCatalogOnline(agentRef)
       if (
         requestGenerationRef.current !== requestGeneration ||
         getHostAuthorityEpoch(agentRef) !== hostAuthorityEpoch ||
@@ -1479,15 +1527,14 @@ export function useChatListController({
                 if (
                   !isConfirmedHostAccessRevoked(error) &&
                   !isAuthorizationError(error) &&
-                  !catalogOfflineByAgentRef.current.has(agentRef)
+                  isCatalogOutageError(error)
                 ) {
-                  catalogOfflineByAgentRef.current.add(agentRef)
-                  host.current?.pushToast('Chat list is offline. Showing saved chats.', 'info')
+                  reportCatalogOffline(agentRef)
                 }
               }
               return { agentRef, sessions: [] as SessionsListResult['items'] }
             }
-            catalogOfflineByAgentRef.current.delete(agentRef)
+            reportCatalogOnline(agentRef)
             if (
               currentAuthorityScopeRef.current !== authorityScopeAtRequest ||
               getHostAuthorityEpoch(agentRef) !== hostAuthorityEpochByAgent.get(agentRef) ||

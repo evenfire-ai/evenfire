@@ -1,5 +1,6 @@
 import type { HostMessageResponse, SessionTokensLite } from '../../../src/types'
 import type { AppErrorKind } from '../uiTypes'
+import { stripIpcWrapper } from './gfsGrantErrors'
 
 export function toPrettyJson(value: unknown): string {
   return JSON.stringify(value, null, 2)
@@ -159,7 +160,7 @@ function errorText(err: unknown): string {
 }
 
 /** IPC preserves error messages but not always custom status fields. */
-function httpErrorStatus(err: unknown): number | undefined {
+export function httpErrorStatus(err: unknown): number | undefined {
   if (err && typeof err === 'object') {
     const status = (err as { status?: unknown; cause?: { status?: unknown } }).status
     if (typeof status === 'number') return status
@@ -170,10 +171,16 @@ function httpErrorStatus(err: unknown): number | undefined {
   // mistaken for the response status.
   const match =
     /^(?:http\s+)?(?<leading>[1-5]\d{2})\b|\b(?:http(?:\s+status)?|status(?:\s+code)?)\s*[:=]?\s*(?<labeled>[1-5]\d{2})\b|\((?<parenthesized>[1-5]\d{2})\)/i.exec(
-      errorText(err)
+      stripIpcWrapper(errorText(err))
     )
   const status = match?.groups?.leading ?? match?.groups?.labeled ?? match?.groups?.parenthesized
   return status ? Number(status) : undefined
+}
+
+/** True when the parsed response status is in the server-error range. */
+export function isHttpServerError(err: unknown): boolean {
+  const status = httpErrorStatus(err)
+  return status !== undefined && status >= 500 && status < 600
 }
 
 /** A transcript 404 is ambiguous: absence, authority and wake failure share it. */

@@ -37,7 +37,7 @@ const GFS_GRANT_ERROR_MESSAGES: Record<string, string> = {
  * verdict that follows it is the part a user can act on. This strips exactly
  * the wrapper and leaves the verdict intact.
  */
-const IPC_WRAPPER_PREFIX = /^Error invoking remote method '[^']*':\s*(?:[A-Za-z]*Error:\s*)?/
+const IPC_WRAPPER_PREFIX = /^Error invoking remote method(?: '[^']*')?:\s*(?:[A-Za-z]*Error:\s*)?/i
 
 export function stripIpcWrapper(message: string): string {
   return message.replace(IPC_WRAPPER_PREFIX, '')
