@@ -120,8 +120,7 @@ export async function checkAndIncrementStrict(
   nowMs = Date.now(),
   cost = 1
 ): Promise<RateLimitCheck> {
-  assertPositiveCost(cost)
-  return incrementFixedWindowWithQuery(
+  return checkAndIncrementStrictWithQuery(
     (text, values) => rateLimitPool.query(text, values),
     bucketKey,
     maxPerMinute,
@@ -139,7 +138,33 @@ export async function checkAndIncrementStrictWithQuery(
   cost = 1
 ): Promise<RateLimitCheck> {
   assertPositiveCost(cost)
-  return incrementFixedWindowWithQuery(query, bucketKey, maxPerMinute, nowMs, cost)
+  try {
+    return await incrementFixedWindowWithQuery(query, bucketKey, maxPerMinute, nowMs, cost)
+  } catch (err) {
+    reportStrictRateLimitBackendError(bucketKey, err)
+    throw err
+  }
+}
+
+function reportStrictRateLimitBackendError(bucketKey: string, err: unknown): void {
+  rateLimitBackendErrorsTotal.inc()
+  const hashedKey = createHash('sha256').update(boundedBucketKey(bucketKey)).digest('hex')
+  const suppressed = dbErrorLogThrottle.admit(hashedKey)
+  if (suppressed === undefined) return
+
+  const errorName = err instanceof Error ? 'Error' : 'UnknownError'
+  const errorCode =
+    err &&
+    typeof err === 'object' &&
+    'code' in err &&
+    typeof err.code === 'string' &&
+    /^[0-9A-Z]{5}$/.test(err.code)
+      ? err.code
+      : undefined
+  rootLogger.warn(
+    { event: 'rate_limit_db_error', hashedKey, errorName, errorCode, suppressed },
+    'strict rate limiter DB error, backend unavailable'
+  )
 }
 
 async function incrementFixedWindowWithQuery(
