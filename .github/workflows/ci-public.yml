@@ -318,6 +318,8 @@ jobs:
             pluginWorkloadSdkGrokDualLedger.realPostgres.integration.test.ts \
             services.grokSubscriptionConnection.realPostgres.integration.test.ts \
             services.grokProviderAttemptRedemption.realPostgres.integration.test.ts \
+            services.controlAdminReplaceInviter.realPostgres.integration.test.ts \
+            services.adminAuthDelete.realPostgres.integration.test.ts \
             services.grokProviderAttemptRedemption.refresh.realPostgres.integration.test.ts \
             services.codexSubscriptionLifecycle.realPostgres.integration.test.ts \
             db.llmProviderAttemptConnectionIntegrity.realPostgres.integration.test.ts \

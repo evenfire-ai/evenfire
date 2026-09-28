@@ -677,9 +677,9 @@ export function CodexSubscriptionHub() {
   // The sign-in action and the status badge above it share this one status
   // source, so they can never disagree: a connected grant shows the signed-in
   // indicator instead of the sign-in button, and only a grant that expired
-  // (reauth-required) surfaces the explicit reconnect action. The
-  // create/setup flow keeps the plain sign-in button throughout.
-  const connectedGrant = editing !== null && !setupNew && uiStatus === 'connected'
+  // (reauth-required) surfaces the explicit reconnect action. This includes
+  // first-time setup once its device sign-in completes.
+  const connectedGrant = editing !== null && uiStatus === 'connected'
   const needsReconnect = editing !== null && !setupNew && uiStatus === 'reauth-required'
   const dialogBroker: HubBroker = editing?.broker ?? createBroker
   const dialogCopy = HUB_PROVIDER_COPY[dialogBroker]

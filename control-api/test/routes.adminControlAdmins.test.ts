@@ -61,6 +61,28 @@ vi.mock(
 )
 vi.mock('../src/middleware/controlUIAuth.js', () => uiAuth)
 
+const directorySvc = vi.hoisted(() => ({
+  createSilentInvitationForTeams: vi.fn(),
+  revokePendingInvitation: vi.fn(),
+}))
+vi.mock('../src/services/directory/index.js', async importOriginal => ({
+  ...(await importOriginal<typeof import('../src/services/directory/index.js')>()),
+  ...directorySvc,
+}))
+
+function storedInvitation(replaceInviter: boolean) {
+  return {
+    id: '11111111-1111-4111-8111-111111111111',
+    email: 'client@example.com',
+    status: 'pending' as const,
+    expiresAt: new Date('2026-09-28T10:00:00.000Z'),
+    createdAt: new Date('2026-09-26T10:00:00.000Z'),
+    acceptedAt: null,
+    replaceInviter,
+    invitedByAdminId: 'current-admin-id',
+  }
+}
+
 function createTestApp() {
   const app = express()
   app.use(express.json())
@@ -84,6 +106,7 @@ describe('routes/adminControlAdmins', () => {
     Object.values(controlAdminInvitationRegistrationSvc).forEach(fn => fn.mockReset())
     Object.values(operatorLinkSvc).forEach(fn => fn.mockReset())
     Object.values(uiAuth).forEach(fn => fn.mockClear())
+    Object.values(directorySvc).forEach(fn => fn.mockReset())
   })
 
   it('deletes another admin', async () => {
@@ -254,5 +277,81 @@ describe('routes/adminControlAdmins', () => {
       .expect(409)
 
     expect(res.body).toEqual({ error: 'desktop_user_retired' })
+  })
+
+  it('stores replaceInviter and echoes the stored flag on the 201 body', async () => {
+    adminSvc.createControlAdminInvitation.mockResolvedValue(storedInvitation(true))
+    directorySvc.createSilentInvitationForTeams.mockResolvedValue({
+      id: 'desktop-invitation-id',
+      team_id: null,
+      teams: [],
+    })
+    controlAdminInvitationRegistrationSvc.registerAndSendControlAdminInvitation.mockResolvedValue(
+      undefined
+    )
+
+    const res = await request(createTestApp())
+      .post('/admin/control-admin-invitations')
+      .send({ email: 'Client@Example.com', createDesktopAccess: true, replaceInviter: true })
+      .expect(201)
+
+    expect(adminSvc.createControlAdminInvitation).toHaveBeenCalledWith(
+      'client@example.com',
+      'current-admin-id',
+      { replaceInviter: true }
+    )
+    expect(res.body).toEqual({
+      invitation: {
+        id: '11111111-1111-4111-8111-111111111111',
+        email: 'client@example.com',
+        status: 'pending',
+        expiresAt: '2026-09-28T10:00:00.000Z',
+        createdAt: '2026-09-26T10:00:00.000Z',
+        replaceInviter: true,
+      },
+    })
+  })
+
+  it('defaults replaceInviter to false when the body omits it', async () => {
+    adminSvc.createControlAdminInvitation.mockResolvedValue(storedInvitation(false))
+    controlAdminInvitationRegistrationSvc.registerAndSendControlAdminInvitation.mockResolvedValue(
+      undefined
+    )
+
+    const res = await request(createTestApp())
+      .post('/admin/control-admin-invitations')
+      .send({ email: 'client@example.com' })
+      .expect(201)
+
+    expect(adminSvc.createControlAdminInvitation).toHaveBeenCalledWith(
+      'client@example.com',
+      'current-admin-id',
+      { replaceInviter: false }
+    )
+    expect(res.body.invitation.replaceInviter).toBe(false)
+  })
+
+  it('echoes what was stored, not what was requested', async () => {
+    adminSvc.createControlAdminInvitation.mockResolvedValue(storedInvitation(false))
+    controlAdminInvitationRegistrationSvc.registerAndSendControlAdminInvitation.mockResolvedValue(
+      undefined
+    )
+
+    const res = await request(createTestApp())
+      .post('/admin/control-admin-invitations')
+      .send({ email: 'client@example.com', replaceInviter: true })
+      .expect(201)
+
+    expect(res.body.invitation.replaceInviter).toBe(false)
+  })
+
+  it('rejects a non-boolean replaceInviter before creating anything', async () => {
+    const res = await request(createTestApp())
+      .post('/admin/control-admin-invitations')
+      .send({ email: 'client@example.com', replaceInviter: 'true' })
+      .expect(400)
+
+    expect(res.body).toEqual({ error: 'replaceInviter must be a boolean' })
+    expect(adminSvc.createControlAdminInvitation).not.toHaveBeenCalled()
   })
 })

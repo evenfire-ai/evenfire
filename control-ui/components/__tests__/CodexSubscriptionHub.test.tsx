@@ -563,7 +563,7 @@ describe('CodexSubscriptionHub', () => {
     expect(within(dialog).queryByTestId('codex-signin-connected')).not.toBeInTheDocument()
   })
 
-  it('keeps the sign-in button through the new-subscription setup flow even after it connects', async () => {
+  it('replaces sign-in with the connected indicator after new-subscription setup connects', async () => {
     vi.stubGlobal(
       'open',
       vi.fn(() => ({}))
@@ -601,16 +601,22 @@ describe('CodexSubscriptionHub', () => {
       target: { value: 'New team' },
     })
     fireEvent.click(screen.getByRole('button', { name: 'Sign in with ChatGPT' }))
-    // Wait for the handshake to land: the grant flips to connected while the
-    // setup dialog is still open, and the setup flow keeps the sign-in entry.
+    // The setup dialog remains open after the handshake, but the sign-in
+    // action must follow the same connected state as the badge.
     await waitFor(() => {
       expect(listCodexConnectionModels).toHaveBeenCalledWith('codex-bbb')
     })
     await waitFor(() => {
       expect(screen.getByRole('button', { name: 'Finish setup' })).toBeInTheDocument()
     })
-    expect(screen.getByRole('button', { name: 'Sign in with ChatGPT' })).toBeInTheDocument()
-    expect(screen.queryByTestId('codex-signin-connected')).not.toBeInTheDocument()
+    const dialog = screen.getByRole('dialog', { name: 'New ChatGPT subscription' })
+    expect(within(dialog).getByText('Connected')).toBeInTheDocument()
+    expect(within(dialog).getByTestId('codex-signin-connected')).toHaveTextContent(
+      'Signed in with ChatGPT'
+    )
+    expect(
+      within(dialog).queryByRole('button', { name: 'Sign in with ChatGPT' })
+    ).not.toBeInTheDocument()
   })
 })
 

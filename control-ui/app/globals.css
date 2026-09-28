@@ -6787,6 +6787,11 @@ td.cu-registry-description {
   outline: none;
 }
 
+.cu-agent-select__option:focus-visible {
+  outline: 2px solid var(--cu-focus);
+  outline-offset: 2px;
+}
+
 .cu-agent-select__empty {
   display: block;
   padding: 0.6rem 0.65rem;
@@ -7024,6 +7029,11 @@ td.cu-registry-description {
   background: var(--cu-option-selected-bg);
   box-shadow: inset 0 0 0 1px var(--cu-accent);
   outline: none;
+}
+
+.cu-selection-dropdown__option:focus-visible {
+  outline: 2px solid var(--cu-focus);
+  outline-offset: 2px;
 }
 
 .cu-selection-dropdown__option-leading {
