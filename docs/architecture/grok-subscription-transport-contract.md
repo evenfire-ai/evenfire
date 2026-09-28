@@ -363,8 +363,9 @@ the proxy both surface a size refusal (`kind: 'size'`) as HTTP 413
 before it), while the Host raises `request_limit_exceeded` before it
 authorizes at all — for the five size refusals listed under that code below —
 `attachment_too_large` for the image budget refusals (classified as
-`InvalidAttachment`), `payload_too_large` for the container, member and
-element bounds (classified as `ContextLengthExceeded`), and
+`InvalidAttachment`), `request_limit_exceeded` for the element bound and
+`payload_too_large` for the container and member bounds (all three
+classified as `ContextLengthExceeded`), and
 `invalid_request` for the rest, which no amount of compaction would fix.
 
 That symmetry holds for a request and not for a response, which is why the

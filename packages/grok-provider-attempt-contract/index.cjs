@@ -201,8 +201,10 @@ const USAGE_KEYS = new Set(['inputTokens', 'outputTokens'])
 
 // `kind` classifies a `limit` failure. The proxy and control-api answer
 // `kind: 'size'` with payload_too_large and every other failure with
-// invalid_request, so `size` is set only where a byte budget refused. The V2
-// image count sets `count`; the other count and range bounds carry no kind.
+// invalid_request. `size` covers the byte budget and the aggregate structural
+// counts (containers, members, elements) that a shorter conversation can fix.
+// The V2 image count sets `count`; depth and other range bounds carry no kind
+// because compaction cannot fix them.
 function fail(code, message, kind) {
   return kind ? { ok: false, code, message, kind } : { ok: false, code, message }
 }

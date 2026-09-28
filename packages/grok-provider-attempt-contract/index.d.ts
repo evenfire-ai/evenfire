@@ -109,7 +109,8 @@ export declare const GROK_VISUAL_LIMITS: {
 }
 
 /**
- * `size`: a byte budget refused (payload_too_large). `count`: the V2 image
+ * `size`: a byte budget or aggregate structural count refused
+ * (payload_too_large). `count`: the V2 image
  * count refused. Every other failure carries no kind.
  */
 export type ContractLimitKind = 'size' | 'count'
