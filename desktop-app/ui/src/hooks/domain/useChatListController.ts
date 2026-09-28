@@ -432,6 +432,7 @@ export function useChatListController({
             else if (isAuthorizationError(error)) onHostAuthorityUncertain(agentRef)
             if (
               !isConfirmedHostAccessRevoked(error) &&
+              !isAuthorizationError(error) &&
               !catalogOfflineByAgentRef.current.has(agentRef)
             ) {
               catalogOfflineByAgentRef.current.add(agentRef)
@@ -624,6 +625,7 @@ export function useChatListController({
           else if (isAuthorizationError(error)) onHostAuthorityUncertain(agentRef)
           if (
             !isConfirmedHostAccessRevoked(error) &&
+            !isAuthorizationError(error) &&
             !catalogOfflineByAgentRef.current.has(agentRef)
           ) {
             catalogOfflineByAgentRef.current.add(agentRef)
@@ -1476,6 +1478,7 @@ export function useChatListController({
                 else if (isAuthorizationError(error)) onHostAuthorityUncertain(agentRef)
                 if (
                   !isConfirmedHostAccessRevoked(error) &&
+                  !isAuthorizationError(error) &&
                   !catalogOfflineByAgentRef.current.has(agentRef)
                 ) {
                   catalogOfflineByAgentRef.current.add(agentRef)
