@@ -391,8 +391,9 @@ export function createAdminSecretsRouter(
           res.status(400).json({ error: 'name is required' })
           return
         }
-        // Only a 404 means "no such Secret"; any other read failure throws a
-        // SecretReadError instead of a false "Secret not found".
+        // Only a 404 means "no such Secret". A 401/403 throws a SecretReadError
+        // 502, any other HTTP status or a failed connection a 503, and any
+        // other error is rethrown (500); none of them is a false "not found".
         const existing = (await readSecretOrNull(
           gateway,
           name.trim(),
@@ -822,10 +823,11 @@ export function createAdminSecretsRouter(
       // Rotation targets a Secret that already exists — creating one is POST's
       // job. Read it first so a missing Secret is a 404 instead of a silent
       // upsert, and so the ownership guard below sees the stored labels.
-      // A 401/403 (control-api's Role lacks the verb), any other non-404 HTTP
-      // status, and a failed connection throw a SecretReadError. Answering 404
-      // for them would tell the operator the credential does not exist when the
-      // API server refused or failed the read.
+      // A 401/403 (control-api's Role lacks the verb) throws a SecretReadError
+      // 502; any other non-404 HTTP status or a failed connection a 503; any
+      // other error is rethrown (500). Answering 404 for them would tell the
+      // operator the credential does not exist when the API server refused or
+      // failed the read.
       const existing = (await readSecretOrNull(gateway, name, targetNs)) as {
         metadata?: {
           labels?: Record<string, string>
@@ -1041,9 +1043,11 @@ export function createAdminSecretsRouter(
           return
         }
       }
-      // A 404 is the only "absent": anything else throws a SecretReadError
-      // (502 for 401/403, 503 otherwise) after the claim is released, so the
-      // permit stays usable for the caller's retry.
+      // A 404 is the only "absent": the claim is finalized, since there is
+      // nothing left to delete, and the route answers 404. Any read failure
+      // releases the claim first, so the permit stays usable for the caller's
+      // retry, and then propagates: a SecretReadError 502 for 401/403, 503 for
+      // any other HTTP status or a failed connection, any other error as is.
       let existing: {
         metadata?: { labels?: Record<string, string>; uid?: string; resourceVersion?: string }
       } | null
@@ -1257,8 +1261,9 @@ export function createAdminSecretsRouter(
   }
 
   // Only a 404 means "no recipe Secret". The recipe-secret PUT/DELETE fence
-  // compares the live UID/RV against the caller's, so any other read failure
-  // throws a SecretReadError instead of reporting the Secret as gone.
+  // compares the live UID/RV against the caller's, so a read failure must not
+  // report the Secret as gone: a 401/403 throws a SecretReadError 502, any
+  // other HTTP status or a failed connection a 503, anything else is rethrown.
   async function getRecipeSecret(
     name: string,
     namespace = config.sandboxNamespace

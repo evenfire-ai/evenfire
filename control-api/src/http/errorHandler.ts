@@ -226,7 +226,8 @@ export function clerumErrorHandler(
     FORWARDABLE_INTEGRATION_CODES.has(integrationCode)
   ) {
     // The apiserver read errors carry the upstream status and a log-safe reason
-    // (metav1.Status message or errno code, never headers); log them with the
+    // (the metav1.Status message, the errno code of a FetchError of type
+    // 'system', or the AbortError name; never headers); log them with the
     // correlation id so one line explains the forwarded 502/503.
     const upstream = err as { upstreamStatus?: unknown; upstreamReason?: unknown }
     log.warn(

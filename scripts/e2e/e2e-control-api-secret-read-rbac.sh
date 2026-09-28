@@ -236,9 +236,12 @@ wait_for_can_i() {
   return 1
 }
 
-# Idempotent: the cleanup trap calls it again after a failed first attempt, so
-# it patches only while the rule still holds the revoked verbs, only verifies
-# when the original verbs are already back, and refuses any other state.
+# Idempotent: the cleanup trap calls it again after a failed first attempt. It
+# patches the verbs back only while the rule still holds the revoked verbs,
+# skips the patch when the original verbs are already back, and refuses any
+# other state or a replaced Role (uid changed). In both accepted cases it then
+# waits for can-i get secrets to answer yes and compares the rules with the
+# pre-E2E snapshot.
 restore_role() {
   local current_json current_uid current_verbs restore_patch current_rules
   current_json="$(kctl -n "${SECRETS_NS}" get role "${ROLE}" -o json)" || return 1

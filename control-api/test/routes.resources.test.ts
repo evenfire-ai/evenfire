@@ -1529,6 +1529,12 @@ describe('routes/resources — Host secretRef anti-spoofing', () => {
 
   it('returns 502 on a 403 secretRef read on Host UPDATE and updates nothing', async () => {
     const gateway = new MockGateway('mcp-host')
+    // The Host exists, so the PUT is a real UPDATE rather than a missing-Host
+    // path. Created without secretRef, so this does not read a Secret.
+    await request(makeApp(gateway))
+      .post('/admin/hosts')
+      .send({ metadata: { name: 'host-a' }, spec: { contextRef: 'ctx-a' } })
+      .expect(201)
     const updateResource = vi.spyOn(gateway, 'updateResource')
     vi.spyOn(rootLogger, 'warn').mockImplementation(() => {})
     try {

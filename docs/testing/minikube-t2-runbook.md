@@ -403,8 +403,11 @@ password and session cookie on stdin only.
 The phase runs under `scripts/minikube/run-with-deadline.mjs` (300 s timeout,
 120 s kill grace). On timeout or failure the journey's exit trap restores the
 Role and deletes the fixture Secret and Host. The restore is idempotent: it
-patches only while the rule holds the revoked verbs, only verifies when the
-original verbs are back, and refuses any other state. When the restore fails,
+patches the verbs back only while the rule holds the revoked verbs, skips the
+patch when the original verbs are already back, and refuses any other state or
+a replaced Role (uid changed). In both accepted cases it then waits for
+`kubectl auth can-i get secrets` to answer `yes` and compares the rules with
+the snapshot. When the restore fails,
 the log prints `CONTROL_API_SECRET_READ_RBAC_ROLE_RESTORE_FAILED` and the T2
 next command says to re-apply `deploy/base/mcp-host/rbac.yaml` on the profile
 context and then run `make minikube-t2-runtime`. That file is the only

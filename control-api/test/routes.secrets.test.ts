@@ -725,7 +725,7 @@ describe('routes/secrets', () => {
       },
       {
         label: 'status-less non-transport error',
-        error: new Error('socket hang up'),
+        error: new Error('unexpected gateway failure'),
         expectedStatus: 500,
       },
     ])('DELETE fails loud when the live read fails with a $label', async testCase => {
@@ -756,6 +756,11 @@ describe('routes/secrets', () => {
         label: 'apiserver outage',
         error: Object.assign(new Error('boom'), { code: 500 }),
         expectedStatus: 503,
+      },
+      {
+        label: 'status-less non-transport error',
+        error: new Error('unexpected gateway failure'),
+        expectedStatus: 500,
       },
     ])('PUT fails loud when the live read fails with a $label', async testCase => {
       const gateway = createRecipeGateway()
@@ -815,6 +820,46 @@ describe('routes/secrets', () => {
         expect(gateway.getSecret).toHaveBeenCalledWith('r1', 'sandbox-recipes')
         expectRejectedSecretRead(res, 'r1', 'sandbox-recipes')
         expect(gateway.updateSecret).not.toHaveBeenCalled()
+      } finally {
+        vi.restoreAllMocks()
+      }
+    })
+
+    // A refused connection has no HTTP status. The route must answer 503
+    // "could not be reached" through the production handler, and the
+    // node-fetch message (which carries the apiserver URL) stays out of it.
+    it('DELETE with a refused connection on the Secret read returns 503', async () => {
+      const gateway = createRecipeGateway()
+      gateway.getSecret.mockRejectedValueOnce(
+        Object.assign(new Error('request to https://10.96.0.1/api failed, reason: connect'), {
+          name: 'FetchError',
+          type: 'system',
+          code: 'ECONNREFUSED',
+          errno: 'ECONNREFUSED',
+        })
+      )
+      const app = express()
+      app.use(express.json())
+      app.use(createAdminSecretsRouter(gateway as never))
+      app.use(clerumErrorHandler)
+      vi.spyOn(rootLogger, 'warn').mockImplementation(() => {})
+
+      try {
+        const res = await request(app)
+          .delete('/admin/recipe-secrets/r1')
+          .send({ uid: 'uid-r1', resourceVersion: '1' })
+
+        expect(gateway.getSecret).toHaveBeenCalledWith('r1', 'sandbox-recipes')
+        expect(res.status).toBe(503)
+        expect(Object.keys(res.body).sort()).toEqual(['correlationId', 'error', 'message'])
+        expect(res.body).toMatchObject({
+          error: 'secret_read_failed',
+          message:
+            'control-api could not read Secret "r1" in namespace "sandbox-recipes": ' +
+            'the Kubernetes API server could not be reached.',
+        })
+        expect(JSON.stringify(res.body)).not.toContain('10.96.0.1')
+        expect(gateway.deleteSecret).not.toHaveBeenCalled()
       } finally {
         vi.restoreAllMocks()
       }

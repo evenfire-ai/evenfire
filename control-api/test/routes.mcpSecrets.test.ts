@@ -215,7 +215,12 @@ function createAuthenticatedAgent(app: express.Express) {
   return agent
 }
 
-/** Same router behind the production error handler, for status/body contracts. */
+/**
+ * The router behind the production `clerumErrorHandler`, for status/body
+ * contracts (makeApp's handler turns every error into a 500). The admin
+ * session is stamped on the request, and `rollbackPermits` defaults to a fresh
+ * in-memory store; pass one to assert its issue/claim/release/finalize calls.
+ */
 function makeAppWithRealHandler(
   gateway: ReturnType<typeof createGateway>,
   rollbackPermits = createRollbackPermitStore()

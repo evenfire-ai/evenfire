@@ -167,57 +167,63 @@ describe('POST /admin/recipe-secrets — ownership', () => {
 
   it('answers 502 when control-api may not list WorkflowRecipes (no Secret created)', async () => {
     vi.spyOn(rootLogger, 'warn').mockImplementation(() => {})
-    const gateway = createGateway({ recipes: ['recipe-a'] })
-    gateway.listResource.mockRejectedValue(
-      new ApiException(
-        403,
-        'Forbidden',
-        JSON.stringify({
-          kind: 'Status',
-          message:
-            'workflowrecipes.clerum.io is forbidden: User "system:serviceaccount:control-plane:control-api" cannot list resource "workflowrecipes"',
-          code: 403,
-        }),
-        { 'audit-id': 'recipe-list-audit' }
+    try {
+      const gateway = createGateway({ recipes: ['recipe-a'] })
+      gateway.listResource.mockRejectedValue(
+        new ApiException(
+          403,
+          'Forbidden',
+          JSON.stringify({
+            kind: 'Status',
+            message:
+              'workflowrecipes.clerum.io is forbidden: User "system:serviceaccount:control-plane:control-api" cannot list resource "workflowrecipes"',
+            code: 403,
+          }),
+          { 'audit-id': 'recipe-list-audit' }
+        )
       )
-    )
-    const res = await request(makeAppWithGlobalHandler(gateway))
-      .post('/admin/recipe-secrets')
-      .send({
-        name: 'k',
-        data: { a: 'b' },
-        ownership: { kind: 'owner-recipe', recipeName: 'recipe-a' },
-      })
-    expect(gateway.listResource).toHaveBeenCalledWith('workflowrecipes', 'sandbox-recipes')
-    expect(res.status).toBe(502)
-    expect(res.body.error).toBe('workflow_recipe_list_failed')
-    expect(res.body.message).toBe(
-      `control-api could not list WorkflowRecipes in namespace "sandbox-recipes": ` +
-        `the Kubernetes API server rejected control-api's own access (HTTP 403). ` +
-        `Your session is not the cause; check the control-api RBAC for that namespace.`
-    )
-    expect(JSON.stringify(res.body)).not.toContain('system:serviceaccount')
-    expect(JSON.stringify(res.body)).not.toContain('recipe-list-audit')
-    expect(gateway.createSecret).not.toHaveBeenCalled()
-    vi.restoreAllMocks()
+      const res = await request(makeAppWithGlobalHandler(gateway))
+        .post('/admin/recipe-secrets')
+        .send({
+          name: 'k',
+          data: { a: 'b' },
+          ownership: { kind: 'owner-recipe', recipeName: 'recipe-a' },
+        })
+      expect(gateway.listResource).toHaveBeenCalledWith('workflowrecipes', 'sandbox-recipes')
+      expect(res.status).toBe(502)
+      expect(res.body.error).toBe('workflow_recipe_list_failed')
+      expect(res.body.message).toBe(
+        `control-api could not list WorkflowRecipes in namespace "sandbox-recipes": ` +
+          `the Kubernetes API server rejected control-api's own access (HTTP 403). ` +
+          `Your session is not the cause; check the control-api RBAC for that namespace.`
+      )
+      expect(JSON.stringify(res.body)).not.toContain('system:serviceaccount')
+      expect(JSON.stringify(res.body)).not.toContain('recipe-list-audit')
+      expect(gateway.createSecret).not.toHaveBeenCalled()
+    } finally {
+      vi.restoreAllMocks()
+    }
   })
 
   it('answers 503 when the WorkflowRecipe list fails upstream (no Secret created)', async () => {
     vi.spyOn(rootLogger, 'warn').mockImplementation(() => {})
-    const gateway = createGateway({ recipes: ['recipe-a'] })
-    gateway.listResource.mockRejectedValue(new ApiException(503, 'Unavailable', '{}', {}))
-    const res = await request(makeAppWithGlobalHandler(gateway))
-      .post('/admin/recipe-secrets')
-      .send({
-        name: 'k',
-        data: { a: 'b' },
-        ownership: { kind: 'owner-recipe', recipeName: 'recipe-a' },
-      })
-    expect(gateway.listResource).toHaveBeenCalledWith('workflowrecipes', 'sandbox-recipes')
-    expect(res.status).toBe(503)
-    expect(res.body.error).toBe('workflow_recipe_list_failed')
-    expect(gateway.createSecret).not.toHaveBeenCalled()
-    vi.restoreAllMocks()
+    try {
+      const gateway = createGateway({ recipes: ['recipe-a'] })
+      gateway.listResource.mockRejectedValue(new ApiException(503, 'Unavailable', '{}', {}))
+      const res = await request(makeAppWithGlobalHandler(gateway))
+        .post('/admin/recipe-secrets')
+        .send({
+          name: 'k',
+          data: { a: 'b' },
+          ownership: { kind: 'owner-recipe', recipeName: 'recipe-a' },
+        })
+      expect(gateway.listResource).toHaveBeenCalledWith('workflowrecipes', 'sandbox-recipes')
+      expect(res.status).toBe(503)
+      expect(res.body.error).toBe('workflow_recipe_list_failed')
+      expect(gateway.createSecret).not.toHaveBeenCalled()
+    } finally {
+      vi.restoreAllMocks()
+    }
   })
 
   it('stores shared=true label when kind=shared', async () => {
