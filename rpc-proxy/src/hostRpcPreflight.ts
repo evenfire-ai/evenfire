@@ -140,6 +140,8 @@ function parseRoute(req: AuthedRequest): ParseResult {
   if (route === 'GET /rpc/hosts/:hostRef/sessions/:agent/:chatId/messages') {
     const agent = String(req.params.agent || '').trim()
     const chatId = String(req.params.chatId || '').trim()
+    if (!safePathSegment(hostRef) || !safeAgentSegment(agent) || !safePathSegment(chatId))
+      return fail('Invalid hostRef, agent, or chatId')
     const limit = integerQuery(req.query.limit)
     const beforeTurn = integerQuery(req.query.beforeTurn)
     const afterTurn = integerQuery(req.query.afterTurn)
@@ -147,9 +149,6 @@ function parseRoute(req: AuthedRequest): ParseResult {
       key => req.query[key] !== undefined && typeof req.query[key] !== 'string'
     )
     if (
-      !safePathSegment(hostRef) ||
-      !safeAgentSegment(agent) ||
-      !safePathSegment(chatId) ||
       invalidShape ||
       limit === null ||
       (limit !== undefined && limit < 1) ||
@@ -159,18 +158,7 @@ function parseRoute(req: AuthedRequest): ParseResult {
       (afterTurn !== undefined && afterTurn < 0) ||
       (beforeTurn !== undefined && afterTurn !== undefined)
     )
-      return fail(
-        invalidShape ||
-          limit === null ||
-          beforeTurn === null ||
-          afterTurn === null ||
-          (limit !== undefined && limit < 1) ||
-          (beforeTurn !== undefined && beforeTurn < 1) ||
-          (afterTurn !== undefined && afterTurn < 0) ||
-          (beforeTurn !== undefined && afterTurn !== undefined)
-          ? 'Invalid session messages pagination query'
-          : 'Invalid hostRef, agent, or chatId'
-      )
+      return fail('Invalid session messages pagination query')
     return {
       value: {
         ...base,
