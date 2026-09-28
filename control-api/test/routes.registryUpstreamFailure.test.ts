@@ -166,7 +166,9 @@ describe('POST /admin/registry/install — apiserver failures', () => {
       contextRef: 'default-context',
       registryEntryName: 'airtable-mcp',
       registryEntryVersion: '1.0.0',
-      ...(withCredentials ? { [CREDENTIALS_FIELD]: { AIRTABLE_API_KEY: 'value-for-test' } } : {}),
+      ...(withCredentials
+        ? { [CREDENTIALS_FIELD]: { AIRTABLE_API_KEY: 'fixture-api-key-value' } }
+        : {}),
     }
   }
 
@@ -701,7 +703,7 @@ describe('POST /admin/registry/upgrade — apiserver failures', () => {
       serverName: 'my-srv',
       registryEntryName: 'test-mcp',
       registryEntryVersion: '2.0.0',
-      ...(withCredentials ? { [CREDENTIALS_FIELD]: { API_KEY: 'value-for-test' } } : {}),
+      ...(withCredentials ? { [CREDENTIALS_FIELD]: { API_KEY: 'fixture-api-key-value' } } : {}),
     }
   }
 
