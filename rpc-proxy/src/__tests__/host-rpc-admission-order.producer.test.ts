@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import { execFileSync } from 'node:child_process'
+import { createServer, request as rawHttpRequest } from 'node:http'
 import { resolve } from 'node:path'
 import request from 'supertest'
 import { encodeSessionsCursor, sessionsCursorScope } from '@clerum/action-context-contracts'
@@ -147,6 +148,57 @@ function app() {
   server.use(createRpcHostActivityStreamRouter())
   server.use(createRpcHostProgressStreamRouter())
   return server
+}
+
+async function rawChunkedGet(path: string): Promise<{
+  status: number
+  body: unknown
+  contentLength: string | number | undefined
+  transferEncoding: string | number | undefined
+}> {
+  const server = createServer(app())
+  await new Promise<void>(resolveListen => server.listen(0, '127.0.0.1', resolveListen))
+  const address = server.address()
+  if (!address || typeof address === 'string') throw new Error('test server did not bind TCP')
+
+  try {
+    return await new Promise((resolveResponse, rejectResponse) => {
+      const client = rawHttpRequest(
+        {
+          host: '127.0.0.1',
+          port: address.port,
+          path,
+          method: 'GET',
+          headers: {
+            authorization: `Bearer ${signedAccessToken}`,
+            'content-type': 'application/json',
+            'transfer-encoding': 'chunked',
+            connection: 'close',
+          },
+        },
+        response => {
+          let text = ''
+          response.setEncoding('utf8')
+          response.on('data', chunk => (text += chunk))
+          response.on('end', () => {
+            resolveResponse({
+              status: response.statusCode ?? 0,
+              body: JSON.parse(text),
+              contentLength: client.getHeader('content-length'),
+              transferEncoding: client.getHeader('transfer-encoding'),
+            })
+          })
+        }
+      )
+      client.on('error', rejectResponse)
+      client.write('{"unexpected":')
+      client.end('true}')
+    })
+  } finally {
+    await new Promise<void>((resolveClose, rejectClose) =>
+      server.close(error => (error ? rejectClose(error) : resolveClose()))
+    )
+  }
 }
 
 beforeEach(() => {
@@ -318,6 +370,20 @@ describe('Spec 65 legacy Host-RPC admission ordering (real Control API token pro
     expect(events.values).toEqual([])
     expect(controlApi.requestHostRpcAdmission).not.toHaveBeenCalled()
     expect(service.resolveHostConnectionForUser).not.toHaveBeenCalled()
+  })
+
+  it('rejects a chunked read-only stream body before admission or Host resolution', async () => {
+    const response = await rawChunkedGet('/rpc/hosts/chatllm/status/stream')
+
+    expect(response.contentLength).toBeUndefined()
+    expect(response.transferEncoding).toBe('chunked')
+    expect(events.values).toEqual([])
+    expect(controlApi.requestHostRpcAdmission).not.toHaveBeenCalled()
+    expect(service.resolveHostConnectionForUser).not.toHaveBeenCalled()
+    expect(response.status).toBe(400)
+    expect(response.body).toEqual({
+      error: 'Status stream is read-only and does not accept request bodies',
+    })
   })
 
   it.each([
