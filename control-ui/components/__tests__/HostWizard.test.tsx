@@ -868,6 +868,24 @@ describe('HostWizard — Agent type (stateless lifecycle)', () => {
     expect('lifecycle' in payload.spec).toBe(false)
     expect('workflowControl' in payload.spec).toBe(false)
   })
+
+  it('sends spec.lifecycle.stateless when Stateless is selected', async () => {
+    await renderWizard()
+    fireEvent.click(screen.getByRole('radio', { name: /Stateless \(suspends when idle\)/i }))
+    await walkToAccessStep({ agentName: 'stateless-agent' })
+    continueToConnectorsStep()
+    submitFromConnectorsStep()
+
+    await waitFor(() => {
+      expect(api.apiSend).toHaveBeenCalledWith('POST', '/api/v1/admin/hosts', expect.any(Object))
+    })
+    const hostCall = vi
+      .mocked(api.apiSend)
+      .mock.calls.find(call => call[0] === 'POST' && call[1] === '/api/v1/admin/hosts')
+    expect(hostCall).toBeDefined()
+    const payload = hostCall![2] as { spec: { lifecycle?: { stateless?: boolean } } }
+    expect(payload.spec.lifecycle).toEqual({ stateless: true })
+  })
 })
 
 describe('HostWizard — create-only seam + compensation (R5-C1/R5-B1, V-1, V-7)', () => {
