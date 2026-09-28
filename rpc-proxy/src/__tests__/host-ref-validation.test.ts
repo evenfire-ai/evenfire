@@ -83,14 +83,31 @@ function mountedApp() {
 }
 
 type Route = { method: 'get' | 'post' | 'patch'; suffix: string; body?: object }
+const w1PayloadRoutes: Route[] = [
+  {
+    method: 'post',
+    suffix: '/approvals/approve',
+    body: { taskId: 'task-1', toolCallId: 'approval-1' },
+  },
+  {
+    method: 'post',
+    suffix: '/approvals/deny',
+    body: { taskId: 'task-1', toolCallId: 'approval-1' },
+  },
+  {
+    method: 'post',
+    suffix: '/model',
+    body: { agent: 'agent', chatId: 'chat', provider: 'openai', model: 'model' },
+  },
+  { method: 'patch', suffix: '/sessions/agent/chat/name', body: { title: 'Valid title' } },
+]
 const legacyRoutes: Route[] = [
   { method: 'post', suffix: '/messages', body: { content: 'hello' } },
   { method: 'post', suffix: '/wake', body: {} },
-  { method: 'post', suffix: '/approvals/approve', body: {} },
-  { method: 'post', suffix: '/approvals/deny', body: {} },
-  { method: 'post', suffix: '/model', body: {} },
+  ...w1PayloadRoutes.slice(0, 2),
+  w1PayloadRoutes[2]!,
   { method: 'post', suffix: '/tasks/task-1/cancel', body: {} },
-  { method: 'patch', suffix: '/sessions/agent/chat/name', body: {} },
+  w1PayloadRoutes[3]!,
   { method: 'get', suffix: '/sessions' },
   { method: 'get', suffix: '/sessions/agent/chat/messages' },
   { method: 'get', suffix: '/sessions/agent/chat/context-breakdown' },
@@ -176,6 +193,131 @@ describe('public Host-ref validation', () => {
       }
     }
   )
+
+  it.each(w1PayloadRoutes)(
+    'rejects invalid Host at W1 for valid $method $suffix input before admission or effects',
+    async route => {
+      const downstreamEffect = vi.fn()
+      vi.stubGlobal('fetch', downstreamEffect)
+      const response = await callRoute(mountedApp(), route, 'invalid_host')
+
+      expect(response.status).toBe(400)
+      expect(response.body).toEqual({ error: 'Invalid hostRef' })
+      expect(admissionMock.requestHostRpcAdmission).not.toHaveBeenCalled()
+      expect(hostMock.resolveHostConnectionForUser).not.toHaveBeenCalled()
+      expect(hostMock.resolveArtifactReadHostConnectionForUser).not.toHaveBeenCalled()
+      expect(hostMock.requestHostWakeFromControlApi).not.toHaveBeenCalled()
+      expect(downstreamEffect).not.toHaveBeenCalled()
+    }
+  )
+
+  it.each(w1PayloadRoutes)(
+    'valid Host control reaches live authority after preflight for $method $suffix',
+    async route => {
+      authMock.verifyRpcToken.mockReturnValue({ ...legacyClaims, hostRefs: ['valid-host'] })
+      const downstreamEffect = vi.fn()
+      vi.stubGlobal('fetch', downstreamEffect)
+      const response = await callRoute(mountedApp(), route, 'valid-host')
+
+      expect(response.status).toBe(403)
+      expect(response.body).toEqual({ error: 'Forbidden: user cannot access this host' })
+      expect(admissionMock.requestHostRpcAdmission).toHaveBeenCalledTimes(1)
+      expect(hostMock.resolveHostConnectionForUser).toHaveBeenCalledWith(
+        'user-1',
+        'valid-host',
+        'legacy-token',
+        expect.anything()
+      )
+      expect(downstreamEffect).not.toHaveBeenCalled()
+    }
+  )
+
+  it.each([
+    {
+      name: 'approval approve',
+      operationId: 'task.manage',
+      resourceType: 'runtime_session',
+      resourceId: 'session-a',
+      target: {
+        hostRef: 'mcp-host/chatllm',
+        taskId: '60000000-0000-4000-8000-000000000006',
+        action: 'approve',
+        approvalRequestId: '70000000-0000-4000-8000-000000000007',
+      },
+      suffix: '/approvals/approve',
+      body: {
+        taskId: '60000000-0000-4000-8000-000000000006',
+        toolCallId: '70000000-0000-4000-8000-000000000007',
+      },
+    },
+    {
+      name: 'approval deny',
+      operationId: 'task.manage',
+      resourceType: 'runtime_session',
+      resourceId: 'session-a',
+      target: {
+        hostRef: 'mcp-host/chatllm',
+        taskId: '60000000-0000-4000-8000-000000000006',
+        action: 'deny',
+        approvalRequestId: '70000000-0000-4000-8000-000000000007',
+      },
+      suffix: '/approvals/deny',
+      body: {
+        taskId: '60000000-0000-4000-8000-000000000006',
+        toolCallId: '70000000-0000-4000-8000-000000000007',
+      },
+    },
+    {
+      name: 'model write',
+      operationId: 'model.select',
+      resourceType: 'runtime_session',
+      resourceId: 'session-a',
+      target: {
+        hostRef: 'mcp-host/chatllm',
+        agent: 'agent',
+        chatId: 'chat',
+        provider: 'openai',
+        model: 'model',
+      },
+      suffix: '/model',
+      body: { agent: 'agent', chatId: 'chat', provider: 'openai', model: 'model' },
+    },
+  ])('rejects producer-bound v2 $name at W1 before checkpoint or effects', async route => {
+    const producerOutput = execFileSync(
+      tsx,
+      [
+        bodyBoundDelegationProducer,
+        JSON.stringify({
+          operationId: route.operationId,
+          resourceType: route.resourceType,
+          resourceId: route.resourceId,
+          target: route.target,
+        }),
+      ],
+      { cwd: repositoryRoot, encoding: 'utf8', env: process.env }
+    )
+    const { token } = JSON.parse(producerOutput) as { token: string }
+    const checkpoint = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ error: 'checkpoint_should_not_run' }), {
+          status: 503,
+          headers: { 'content-type': 'application/json' },
+        })
+    )
+    vi.stubGlobal('fetch', checkpoint)
+
+    const response = await request(mountedApp())
+      .post(`/rpc/hosts/%20chatllm%20${route.suffix}`)
+      .set('authorization', `Bearer ${token}`)
+      .send(route.body)
+
+    expect(response.status).toBe(400)
+    expect(response.body).toEqual({ error: 'Invalid hostRef' })
+    expect(checkpoint).not.toHaveBeenCalled()
+    expect(admissionMock.requestHostRpcAdmission).not.toHaveBeenCalled()
+    expect(hostMock.resolveHostConnectionForUser).not.toHaveBeenCalled()
+    expect(hostMock.requestHostWakeFromControlApi).not.toHaveBeenCalled()
+  })
 
   it.each(['a', 'a'.repeat(63), 'valid-host-1'])(
     'allows valid boundary %s to reach the existing live authority path',
