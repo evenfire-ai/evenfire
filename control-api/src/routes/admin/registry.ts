@@ -443,10 +443,23 @@ type SafeRegistryErrorLogFields = {
   name: string
   status?: number
   code?: string
+  cause?: SafeRegistryErrorLogFields
 }
 
-/** Return only bounded error identity fields; never place upstream messages in logs. */
+/**
+ * Return only bounded error identity fields; never place upstream messages in
+ * logs. A @kubernetes/client-node ApiException carries its HTTP status in a
+ * numeric `code`, so that is read as the status. One level of `cause` is
+ * included, so a wrapper such as RegistryInstallRollbackError still logs the
+ * upstream status that made the rollback give up.
+ */
 export function registryErrorLogFields(err: unknown): SafeRegistryErrorLogFields {
+  const fields = registryErrorIdentityFields(err)
+  const cause = err instanceof Error ? err.cause : undefined
+  return cause === undefined ? fields : { ...fields, cause: registryErrorIdentityFields(cause) }
+}
+
+function registryErrorIdentityFields(err: unknown): SafeRegistryErrorLogFields {
   const candidate =
     err && typeof err === 'object'
       ? (err as {
@@ -461,7 +474,10 @@ export function registryErrorLogFields(err: unknown): SafeRegistryErrorLogFields
     typeof rawName === 'string' && /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(rawName)
       ? rawName
       : 'UnknownError'
-  const rawStatus = candidate?.status ?? candidate?.statusCode
+  const rawStatus =
+    candidate?.status ??
+    candidate?.statusCode ??
+    (typeof candidate?.code === 'number' ? candidate.code : undefined)
   const status =
     typeof rawStatus === 'number' &&
     Number.isInteger(rawStatus) &&
@@ -1087,13 +1103,42 @@ class RegistryInstallRollbackError extends Error {
    * and without the subject the 500 says only that something could not be
    * cleaned up. Kind and name only — never credential data.
    */
-  constructor(subject?: string) {
+  constructor(subject?: string, options?: { cause?: unknown }) {
     super(
       'registry install rollback could not be completed without risking another writer' +
-        (subject ? `: ${subject}` : '')
+        (subject ? `: ${subject}` : ''),
+      options
     )
     this.name = 'RegistryInstallRollbackError'
   }
+}
+
+/**
+ * An error whose message control-api composed from kinds, names and fixed
+ * text only, so an uninstall response may carry it verbatim. Upstream errors
+ * never take this type.
+ */
+class RegistryOperatorMessageError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'RegistryOperatorMessageError'
+  }
+}
+
+/**
+ * The warning text an uninstall 503 carries for a failed step. A
+ * @kubernetes/client-node ApiException message embeds the apiserver's
+ * response headers, and `extractK8sError` falls back to that message when the
+ * Status body is empty, so an upstream error contributes its HTTP status only.
+ * The raw error goes to the server log through `registryErrorLogFields`.
+ */
+function uninstallWarningDetail(err: unknown): string {
+  if (err instanceof RegistryOperatorMessageError || err instanceof RegistryInstallRollbackError) {
+    return err.message
+  }
+  const status = extractK8sError(err)?.status
+  if (status !== undefined) return `Kubernetes API returned HTTP ${status}`
+  return `unable to verify (${registryErrorLogFields(err).name})`
 }
 
 async function readSecretForRollback(
@@ -1104,7 +1149,7 @@ async function readSecretForRollback(
     return await gateway.getSecret(snapshot.name, snapshot.namespace)
   } catch (err) {
     if (extractK8sError(err)?.status === 404) return null
-    throw new RegistryInstallRollbackError()
+    throw new RegistryInstallRollbackError(`Secret/${snapshot.name}`, { cause: err })
   }
 }
 
@@ -1445,7 +1490,7 @@ async function waitForDeletion(
     }
     await sleep(pollMs)
   }
-  throw new Error(`Timed out waiting for ${label} deletion`)
+  throw new RegistryOperatorMessageError(`Timed out waiting for ${label} deletion`)
 }
 
 export interface RegistryInstallRequest {
@@ -1535,6 +1580,15 @@ export async function getInstalledRegistryState(gateway?: K8sGateway): Promise<{
 }
 
 const log = rootLogger.child({ module: 'admin-registry' })
+
+/**
+ * The install rollback answers a bare `compensation_failed`, so this log line
+ * is the only record of why: the subject left behind and, through `cause`, the
+ * upstream status that stopped the compensation.
+ */
+function logInstallRollbackFailure(subject: string, err: unknown): void {
+  log.error({ subject, error: registryErrorLogFields(err) }, 'Registry install rollback failed')
+}
 
 type RegistryFenceFailure = 'identity-mismatch' | 'identity-unavailable' | 'rejected' | 'unresolved'
 
@@ -2165,7 +2219,8 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
           if (createdSecretSnapshot) {
             try {
               await rollbackCreatedSecret(gateway, createdSecretSnapshot)
-            } catch {
+            } catch (rollbackErr) {
+              logInstallRollbackFailure(`Secret/${createdSecretSnapshot.name}`, rollbackErr)
               rollbackFailed = true
             }
           }
@@ -2269,7 +2324,8 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
                 createdMcpServerSnapshot!,
                 `McpServer/${serverName}`
               )
-            } catch {
+            } catch (rollbackErr) {
+              logInstallRollbackFailure(`McpServer/${serverName}`, rollbackErr)
               resourceRollbackFailed = true
             }
             if (resourceRollbackFailed) {
@@ -2788,7 +2844,8 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
             if (secretCreated && createdSecretSnapshot) {
               try {
                 await rollbackCreatedSecret(gateway, createdSecretSnapshot)
-              } catch {
+              } catch (rollbackErr) {
+                logInstallRollbackFailure(`Secret/${createdSecretSnapshot.name}`, rollbackErr)
                 res.status(500).json({
                   error: 'registry_install_rollback_incomplete',
                   outcome: 'compensation_failed',
@@ -2866,7 +2923,8 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
           if (secretCreated && createdSecretSnapshot) {
             try {
               await rollbackCreatedSecret(gateway, createdSecretSnapshot)
-            } catch {
+            } catch (rollbackErr) {
+              logInstallRollbackFailure(`Secret/${createdSecretSnapshot.name}`, rollbackErr)
               rollbackFailed = true
             }
           }
@@ -2954,7 +3012,8 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
                 createdHookSnapshot!,
                 `LlmHook/${crName}`
               )
-            } catch {
+            } catch (rollbackErr) {
+              logInstallRollbackFailure(`LlmHook/${crName}`, rollbackErr)
               resourceRollbackFailed = true
             }
             if (resourceRollbackFailed) {
@@ -3439,6 +3498,12 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
 
         const deleted: string[] = []
         const warnings: string[] = []
+        const logUninstallStepFailure = (subject: string, err: unknown): void => {
+          log.error(
+            { resourceName, resourceType, namespace, subject, error: registryErrorLogFields(err) },
+            'Registry uninstall step failed'
+          )
+        }
 
         if (resourceType === 'recipe') {
           if (namespace !== config.sandboxNamespace) {
@@ -3469,6 +3534,7 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
               deleted.push(`WorkflowRecipe/${resourceName}`)
             }
           } catch (err) {
+            logUninstallStepFailure(`WorkflowRecipe/${resourceName}`, err)
             res.status(503).json({
               error: 'registry_uninstall_outcome_ambiguous',
               outcome: 'repair_required',
@@ -3478,7 +3544,7 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
               deleted,
               warnings: [
                 ...warnings,
-                `WorkflowRecipe/${resourceName}: ${err instanceof Error ? err.message : 'unable to verify deletion'}`,
+                `WorkflowRecipe/${resourceName}: ${uninstallWarningDetail(err)}`,
               ],
             })
             return
@@ -3501,6 +3567,7 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
             )
           } catch (err) {
             if (extractK8sError(err)?.status !== 404) {
+              logUninstallStepFailure(`Secret/${credentialSecretName}`, err)
               res.status(503).json({
                 error: 'registry_uninstall_outcome_ambiguous',
                 outcome: 'repair_required',
@@ -3510,7 +3577,7 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
                 deleted,
                 warnings: [
                   ...warnings,
-                  `Secret/${credentialSecretName}: ${err instanceof Error ? err.message : 'unable to verify identity'}`,
+                  `Secret/${credentialSecretName}: ${uninstallWarningDetail(err)}`,
                 ],
               })
               return
@@ -3538,6 +3605,7 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
               deleted.push(`McpServer/${resourceName}`)
             }
           } catch (err) {
+            logUninstallStepFailure(`McpServer/${resourceName}`, err)
             res.status(503).json({
               error: 'registry_uninstall_outcome_ambiguous',
               outcome: 'repair_required',
@@ -3545,10 +3613,7 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
               resourceType,
               namespace,
               deleted,
-              warnings: [
-                ...warnings,
-                `McpServer/${resourceName}: ${err instanceof Error ? err.message : 'unable to verify deletion'}`,
-              ],
+              warnings: [...warnings, `McpServer/${resourceName}: ${uninstallWarningDetail(err)}`],
             })
             return
           }
@@ -3573,6 +3638,7 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
             }
           } catch (err) {
             if (extractK8sError(err)?.status !== 404) {
+              logUninstallStepFailure(`Secret/${credentialSecretName}`, err)
               res.status(503).json({
                 error: 'registry_uninstall_outcome_ambiguous',
                 outcome: 'repair_required',
@@ -3582,7 +3648,7 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
                 deleted,
                 warnings: [
                   ...warnings,
-                  `Secret/${credentialSecretName}: ${err instanceof Error ? err.message : 'unable to verify deletion'}`,
+                  `Secret/${credentialSecretName}: ${uninstallWarningDetail(err)}`,
                 ],
               })
               return
@@ -3607,7 +3673,9 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
                 const uid = ctx.metadata?.uid
                 const resourceVersion = ctx.metadata?.resourceVersion
                 if (!uid || !resourceVersion) {
-                  throw new Error(`Context/${name} identity unavailable; refusing stale update`)
+                  throw new RegistryOperatorMessageError(
+                    `Context/${name} identity unavailable; refusing stale update`
+                  )
                 }
                 await gateway.updateResource(
                   'contexts',
@@ -3626,6 +3694,7 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
               }
             }
           } catch (err) {
+            logUninstallStepFailure('Context allowlists', err)
             res.status(503).json({
               error: 'registry_uninstall_partial',
               outcome: 'repair_required',
@@ -3633,10 +3702,7 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
               resourceType,
               namespace,
               deleted,
-              warnings: [
-                ...warnings,
-                `Context allowlists: ${err instanceof Error ? err.message : 'unable to update safely'}`,
-              ],
+              warnings: [...warnings, `Context allowlists: ${uninstallWarningDetail(err)}`],
             })
             return
           }

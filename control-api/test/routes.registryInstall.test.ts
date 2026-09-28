@@ -29,11 +29,31 @@ import {
   searchEntries,
 } from '../src/services/registryClient.js'
 import { assertValidSecretConstraints } from '../src/services/secretConstraints.js'
+import { controlApiForbiddenRead } from './helpers/secretReadFailure.js'
 import { MockGateway } from './mockGateway.js'
 
 vi.mock('node:dns/promises', () => ({
   lookup: vi.fn(async () => [{ address: '93.184.216.34', family: 4 }]),
 }))
+
+// A real Pino instance writing to memory, so tests can read the error records
+// the registry routes actually emit (the route responses carry no cause).
+const logCapture = vi.hoisted(() => ({ lines: [] as string[] }))
+vi.mock('../src/observability/logger.js', async () => {
+  const { default: pino } = await import('pino')
+  const stream = {
+    write: (chunk: string) => {
+      logCapture.lines.push(chunk)
+    },
+  }
+  return { rootLogger: pino({ level: 'error' }, stream) }
+})
+
+function capturedErrorRecords(msg: string): Array<Record<string, unknown>> {
+  return logCapture.lines
+    .map(line => JSON.parse(line) as Record<string, unknown>)
+    .filter(record => record.msg === msg)
+}
 
 // ── Mock the registry client ─────────────────────────────────────────────────
 vi.mock('../src/services/registryClient.js', () => ({
@@ -75,6 +95,17 @@ describe('registryErrorLogFields', () => {
       code: 'registry_unavailable',
     })
     expect(JSON.stringify(fields)).not.toContain('sensitive marker')
+  })
+
+  it('reads the numeric code of an ApiException as its status and includes one level of cause', () => {
+    const upstream = controlApiForbiddenRead('srv-credentials', 'mcp-server')
+    const wrapper = Object.assign(new Error('rollback gave up'), { cause: upstream })
+
+    const fields = registryErrorLogFields(wrapper)
+
+    expect(fields).toEqual({ name: 'Error', cause: { name: 'Error', status: 403 } })
+    expect(JSON.stringify(fields)).not.toContain('system:serviceaccount')
+    expect(JSON.stringify(fields)).not.toContain('5f0c7a4e-secret-read')
   })
 
   it('drops untrusted status and code values', () => {
@@ -1243,6 +1274,69 @@ describe('POST /admin/registry/install', () => {
     await expect(gw.getSecret('my-airtable-credentials', 'mcp-server')).resolves.toMatchObject({
       metadata: { uid: expect.any(String), resourceVersion: expect.any(String) },
     })
+  })
+
+  it('logs the upstream status when the Secret rollback read is rejected', async () => {
+    vi.mocked(getEntryVersion).mockResolvedValueOnce(MOCK_ENTRY)
+    vi.mocked(getCredentialSchema).mockResolvedValueOnce(MOCK_SCHEMA_REQUIRED)
+    logCapture.lines.length = 0
+
+    const gw = new MockGateway('mcp-server')
+    await gw.createResource('contexts', {
+      metadata: { name: 'default-context' },
+      spec: { contextId: 'default-context', mcpServers: [] },
+    })
+    vi.spyOn(gw, 'createResource').mockImplementation(async (plural, body, ns) => {
+      if (plural === 'mcpservers' && body.metadata.name === 'my-airtable') {
+        throw Object.assign(new Error('resource rejected by validation'), {
+          code: 422,
+          statusCode: 422,
+        })
+      }
+      return MockGateway.prototype.createResource.call(gw, plural, body, ns)
+    })
+    // The rollback deletes the created Secret, then re-reads it to confirm the
+    // delete settled. That confirming read is the one control-api is refused.
+    let secretDeleted = false
+    const deleteSecretSpy = vi.spyOn(gw, 'deleteSecret').mockImplementation(async (...args) => {
+      secretDeleted = true
+      return MockGateway.prototype.deleteSecret.apply(gw, args)
+    })
+    const getSecretSpy = vi.spyOn(gw, 'getSecret').mockImplementation(async (...args) => {
+      if (secretDeleted) throw controlApiForbiddenRead(args[0], args[1] ?? 'mcp-server')
+      return MockGateway.prototype.getSecret.apply(gw, args)
+    })
+
+    const app = makeApp(gw as unknown as import('../src/k8s.js').K8sGateway)
+    const res = await request(app)
+      .post('/admin/registry/install')
+      .send({
+        serverName: 'my-airtable',
+        contextRef: 'default-context',
+        registryEntryName: 'airtable-mcp',
+        registryEntryVersion: '1.0.0',
+        credentials: { AIRTABLE_API_KEY: 'api-key-test-token' },
+      })
+      .expect(500)
+
+    expect(res.body).toEqual({
+      error: 'registry_install_rollback_incomplete',
+      outcome: 'compensation_failed',
+    })
+    expect(deleteSecretSpy).toHaveBeenCalledTimes(1)
+    expect(getSecretSpy).toHaveBeenCalledWith('my-airtable-credentials', 'mcp-server')
+    const records = capturedErrorRecords('Registry install rollback failed')
+    expect(records).toHaveLength(1)
+    expect(records[0]).toMatchObject({
+      subject: 'Secret/my-airtable-credentials',
+      error: {
+        name: 'RegistryInstallRollbackError',
+        code: 'registry_install_rollback_incomplete',
+        cause: { name: 'Error', status: 403 },
+      },
+    })
+    expect(logCapture.lines.join('')).not.toContain('5f0c7a4e-secret-read')
+    expect(logCapture.lines.join('')).not.toContain('system:serviceaccount')
   })
 
   it('preserves the Secret when Context rollback cannot atomically prove dependency safety', async () => {
@@ -3449,6 +3543,78 @@ describe('DELETE /admin/registry/uninstall/:serverName', () => {
     await expect(gw.getSecret(secretName, 'mcp-server')).resolves.toMatchObject({
       metadata: { uid: 'uid-secret-replacement', resourceVersion: '1' },
     })
+  })
+
+  function expectNoApiserverText(body: unknown): void {
+    const serialized = JSON.stringify(body)
+    expect(serialized).not.toContain('system:serviceaccount')
+    expect(serialized).not.toContain('audit-id')
+    expect(serialized).not.toContain('5f0c7a4e-secret-read')
+  }
+
+  it('answers 503 with the HTTP status only when the credential Secret snapshot read is rejected', async () => {
+    logCapture.lines.length = 0
+    const gw = new MockGateway('mcp-server')
+    await gw.createResource(
+      'mcpservers',
+      { metadata: { name: 'rbac-srv' }, spec: { image: 'test:1.0' } },
+      'mcp-server'
+    )
+    ;(gw as unknown as { _seeded?: boolean })._seeded = true
+    const getSecretSpy = vi
+      .spyOn(gw, 'getSecret')
+      .mockRejectedValue(controlApiForbiddenRead('rbac-srv-credentials', 'mcp-server'))
+    const deleteResourceSpy = vi.spyOn(gw, 'deleteResource')
+
+    const { app } = makeApp(gw)
+    const res = await request(app).delete('/admin/registry/uninstall/rbac-srv').expect(503)
+
+    expect(getSecretSpy).toHaveBeenCalledWith('rbac-srv-credentials', 'mcp-server')
+    expect(res.body).toMatchObject({
+      error: 'registry_uninstall_outcome_ambiguous',
+      outcome: 'repair_required',
+      deleted: [],
+    })
+    expect(res.body.warnings).toEqual([
+      'Secret/rbac-srv-credentials: Kubernetes API returned HTTP 403',
+    ])
+    expectNoApiserverText(res.body)
+    expect(deleteResourceSpy).not.toHaveBeenCalled()
+    expect(capturedErrorRecords('Registry uninstall step failed')).toEqual([
+      expect.objectContaining({
+        subject: 'Secret/rbac-srv-credentials',
+        error: { name: 'Error', status: 403 },
+      }),
+    ])
+  })
+
+  it('answers 503 with the HTTP status only when the credential Secret delete is rejected', async () => {
+    logCapture.lines.length = 0
+    const gw = new MockGateway('mcp-server')
+    await gw.createResource(
+      'mcpservers',
+      { metadata: { name: 'rbac-srv' }, spec: { image: 'test:1.0' } },
+      'mcp-server'
+    )
+    gw.seedSecret('rbac-srv-credentials', 'mcp-server')
+    ;(gw as unknown as { _seeded?: boolean })._seeded = true
+    const deleteSecretSpy = vi
+      .spyOn(gw, 'deleteSecret')
+      .mockRejectedValue(controlApiForbiddenRead('rbac-srv-credentials', 'mcp-server'))
+
+    const { app } = makeApp(gw)
+    const res = await request(app).delete('/admin/registry/uninstall/rbac-srv').expect(503)
+
+    expect(deleteSecretSpy).toHaveBeenCalledTimes(1)
+    expect(res.body).toMatchObject({
+      error: 'registry_uninstall_outcome_ambiguous',
+      outcome: 'repair_required',
+      deleted: ['McpServer/rbac-srv'],
+    })
+    expect(res.body.warnings).toEqual([
+      'Secret/rbac-srv-credentials: Kubernetes API returned HTTP 403',
+    ])
+    expectNoApiserverText(res.body)
   })
 
   it('does not delete a same-name replacement that wins the uninstall race', async () => {
