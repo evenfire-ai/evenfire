@@ -3213,13 +3213,13 @@ export class WorkflowReconciler {
   private async pruneLegacyMcpServersInternetEgressPolicy(
     recipeName: string,
     recipeUid?: string
-  ): Promise<void> {
+  ): Promise<{ retryPending: boolean }> {
     const key = this.legacyMcpServersInternetEgressKey(recipeName, recipeUid)
     if (this.prunedLegacyMcpServersInternetEgress.has(key)) {
       this.log.debug('Skipping legacy mcp-servers internet NP delete; already observed gone', {
         recipe: recipeName,
       })
-      return
+      return { retryPending: false }
     }
     const outcome = await observeNamespacedDelete(() =>
       this.deps.networkingApi.deleteNamespacedNetworkPolicy({
@@ -3233,7 +3233,7 @@ export class WorkflowReconciler {
         ...deleteOutcomeFields(outcome),
         error: outcome.error instanceof Error ? outcome.error.message : String(outcome.error),
       })
-      return
+      return { retryPending: true }
     }
     this.log.info('Legacy mcp-servers internet NP delete', {
       recipe: recipeName,
@@ -3242,6 +3242,7 @@ export class WorkflowReconciler {
     if (shouldRecordDelete(outcome)) {
       this.prunedLegacyMcpServersInternetEgress.add(key)
     }
+    return { retryPending: false }
   }
 
   private needsRuntimeHttpEgressRefresh(spec: WorkflowRecipeSpec): boolean {
@@ -3430,7 +3431,8 @@ export class WorkflowReconciler {
       }
     )
     if (prune.retryPending) summary.retryPending = true
-    await this.pruneLegacyMcpServersInternetEgressPolicy(recipeName, recipeUid)
+    const legacy = await this.pruneLegacyMcpServersInternetEgressPolicy(recipeName, recipeUid)
+    if (legacy.retryPending) summary.retryPending = true
     return summary
   }
 

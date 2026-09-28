@@ -3478,6 +3478,23 @@ describe('WorkflowReconciler — reconcile loop', () => {
       expect(apiserver.live.has(apiserver.key(SANDBOX, GROK_PROXY))).toBe(true)
     })
 
+    it('marks retryPending when the legacy internet NP DELETE fails', async () => {
+      const apiserver = makeApiserverNetworkingApi()
+      apiserver.api.deleteNamespacedNetworkPolicy.mockImplementation(
+        async ({ name, namespace }: { name: string; namespace: string }) => {
+          if (name === `${RECIPE}-mcp-servers-egress-internet`) {
+            throw { code: 403, message: 'forbidden' }
+          }
+          if (!apiserver.live.delete(apiserver.key(namespace, name))) throw { code: 404 }
+          return {}
+        }
+      )
+      const reconciler = new WorkflowReconciler(makeDeps({ networkingApi: apiserver.api as never }))
+
+      const summary = await applyPolicies(reconciler)
+      expect(summary.retryPending).toBe(true)
+    })
+
     it('keeps the apply outcome when the prune LIST fails', async () => {
       const apiserver = makeApiserverNetworkingApi()
       seedLivePolicy(apiserver, GROK_PROXY, WRC_LABELS)
