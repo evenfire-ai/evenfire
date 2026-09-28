@@ -37,6 +37,8 @@ function resolveOwnerKind(input: { ownerKind?: 'mcpserver' }): 'mcpserver' {
 
 /** One decrypted row of `dynamic_clients`. */
 export interface DynamicClientRow {
+  /** Surrogate row id; part of the identity a reclaim must still find unchanged. */
+  id: string
   ownerKind: 'mcpserver'
   serverNamespace: string
   serverName: string
@@ -59,6 +61,12 @@ export interface DynamicClientRow {
   crUid?: string
   createdAt: Date
   updatedAt: Date
+  /**
+   * Age of the row (`NOW() - updated_at`) as measured by the database at read
+   * time, so the pending-TTL decision never mixes the pod clock with the DB clock
+   * that stamped `updated_at`.
+   */
+  ageMs: number
 }
 
 export type UpsertDynamicClientInput = DynamicClientKey & {
@@ -173,6 +181,7 @@ export async function upsertDynamicClient(
 }
 
 interface DynamicClientDbRow {
+  id: string | number
   owner_kind: 'mcpserver'
   server_namespace: string
   server_name: string
@@ -188,12 +197,14 @@ interface DynamicClientDbRow {
   cr_uid: string | null
   created_at: Date
   updated_at: Date
+  age_ms: number
 }
 
-const SELECT_COLUMNS = `owner_kind, server_namespace, server_name, issuer, client_id, client_mode,
+const SELECT_COLUMNS = `id, owner_kind, server_namespace, server_name, issuer, client_id, client_mode,
             client_secret_encrypted, registration_access_token_encrypted,
             registration_client_uri, client_id_issued_at, client_secret_expires_at,
-            install_id, cr_uid, created_at, updated_at`
+            install_id, cr_uid, created_at, updated_at,
+            (EXTRACT(EPOCH FROM (NOW() - updated_at)) * 1000)::float8 AS age_ms`
 
 /** Read one dynamic client, decrypting its secret and registration token. */
 export async function getDynamicClient(
@@ -211,6 +222,7 @@ export async function getDynamicClient(
   if (result.rows.length === 0) return null
   const row = result.rows[0] as DynamicClientDbRow
   return {
+    id: String(row.id),
     ownerKind: row.owner_kind,
     serverNamespace: row.server_namespace,
     serverName: row.server_name,
@@ -230,6 +242,7 @@ export async function getDynamicClient(
     crUid: row.cr_uid ?? undefined,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    ageMs: Number(row.age_ms),
   }
 }
 
@@ -311,9 +324,13 @@ export type ExistingDynamicClientClass = 'in-use' | 'in-progress' | 'reclaimable
 
 /**
  * Decide who owns a conflicting `dynamic_clients` row — the one rule for "whose
- * row is this?" (D4). Pure and total; the caller supplies wall-clock `now`, the
- * pending TTL, and `liveCrUid` (the uid of a live McpServer with this name, when
- * one exists at conflict time).
+ * row is this?" (D4). Pure and total; the caller supplies the row's DB-measured
+ * age, the pending TTL, and `liveCrUid` (the uid of a live McpServer with this
+ * name, when one exists).
+ *
+ * `liveCrUid` is only meaningful if it was read AFTER the row it is classified
+ * with: a CR created and bound between an earlier K8s read and the row read would
+ * otherwise make a live install's row look orphaned.
  *
  * A live CR owns the name unconditionally: it covers a bound-live row AND the
  * pre-check→INSERT TOCTOU race where the CR appeared after the pending INSERT.
@@ -323,16 +340,15 @@ export type ExistingDynamicClientClass = 'in-use' | 'in-progress' | 'reclaimable
  * today — all reclaimable except the fresh pending one.
  */
 export function classifyExistingDynamicClient(
-  row: { installId: string | null; crUid: string | null; updatedAt: Date },
-  ctx: { now: Date; pendingTtlMs: number; liveCrUid?: string }
+  row: { installId: string | null; crUid: string | null; ageMs: number },
+  ctx: { pendingTtlMs: number; liveCrUid?: string }
 ): ExistingDynamicClientClass {
   if (ctx.liveCrUid !== undefined) return 'in-use'
   if (row.crUid != null) return 'reclaimable'
   if (row.installId != null) {
-    // In-progress iff `updated_at > now − TTL` (i.e. age strictly under the TTL);
-    // at exactly the TTL the row is expired and reclaimable.
-    const ageMs = ctx.now.getTime() - row.updatedAt.getTime()
-    return ageMs < ctx.pendingTtlMs ? 'in-progress' : 'reclaimable'
+    // In-progress iff age is strictly under the TTL; at exactly the TTL the row is
+    // expired and reclaimable.
+    return row.ageMs < ctx.pendingTtlMs ? 'in-progress' : 'reclaimable'
   }
   return 'reclaimable'
 }
@@ -380,25 +396,42 @@ export async function insertDynamicClientPending(
 }
 
 /**
- * Take over a `reclaimable` row (orphan or legacy) for a new install, atomically.
- * Opens a transaction, `SELECT … FOR UPDATE`s the row, re-runs
- * {@link classifyExistingDynamicClient} on the LOCKED row (its state may have
- * changed since the losing INSERT), and only if still `reclaimable` overwrites the
- * credentials with the new install's `install_id` and `cr_uid = NULL`.
+ * The identity of a `dynamic_clients` row as the caller read and classified it.
+ * A reclaim only applies to the row in exactly this state.
+ */
+export type ObservedDynamicClient = Pick<DynamicClientRow, 'id' | 'installId' | 'crUid'>
+
+/**
+ * Take over a row the caller classified `reclaimable` (orphan or legacy) for a
+ * new install, atomically. Does NOT classify: the caller did, from `observed` and
+ * a live-CR read taken after it. This applies the takeover only if the row still
+ * has the observed `id`, `install_id` AND `cr_uid` — one guard, evaluated on the
+ * row-locked latest version, so:
+ * - a concurrent reclaim that won first changed `install_id` → we lose;
+ * - the owner binding its pending row (`cr_uid` NULL → uid) after our read →
+ *   we lose, and a live install's client is never overwritten or revoked;
+ * - the row deleted (teardown) → 0 rows → we lose (conservative; the operator's
+ *   retry goes through the INSERT).
+ * Re-classifying under the lock is deliberately absent: it would re-decide with a
+ * K8s read that predates the locked version, which is exactly the stale-uid bug.
  *
- * The UPDATE is a CAS on `id` + `install_id` read under the lock, so two
- * concurrent reclaims cannot both win: the second serializes behind the first,
- * re-reads a now-fresh pending row, and classifies it `in-progress` →
- * `{ reclaimed: false }`. Returns the OLD row's RFC 7592 handle (decrypted, when
- * present) so the caller can best-effort revoke the superseded client at the AS.
+ * The guard does not compare `updated_at`: every production writer that moves it
+ * also changes `id` (INSERT), `install_id` (reclaim) or `cr_uid` (bind), so the
+ * observed age can only have grown and an expired pending row stays expired.
+ * `upsertDynamicClient` refreshes `updated_at` with identity intact and would break
+ * that premise; it has no production caller and must not gain one on this table.
  *
- * No leading `db` param: all work runs inside the transaction this function owns.
+ * Returns the OLD row's RFC 7592 handle (decrypted, when present) so the caller
+ * can best-effort revoke the superseded client at the AS.
+ *
+ * The reclaim is a single statement, so the transaction adds no atomicity; the
+ * runner is kept only as the injection point.
+ *
  * `runInTransaction` is a REQUIRED injected runner (pass `withTransaction` from
  * db.ts) rather than a default import — this module sits on the config init path
  * (config → tokenHelper → callback → here), so importing db.ts's `withTransaction`
  * value at module top-level would close an init cycle back to `config` and leave
- * it undefined. The injection also lets tests bind the runner to a disposable pool,
- * matching the `runInTransaction` idiom in reactiveTokenHelper.
+ * it undefined. The injection also lets tests bind the runner to a disposable pool.
  */
 export async function reclaimOrphanDynamicClient(
   encryptionKey: Buffer,
@@ -406,7 +439,7 @@ export async function reclaimOrphanDynamicClient(
     key: DynamicClientKey
     newCredentials: UpsertDynamicClientInput
     newInstallId: string
-    ctx: { now: Date; pendingTtlMs: number; liveCrUid?: string }
+    observed: ObservedDynamicClient
   },
   runInTransaction: <T>(work: (tx: DbTransactionClient) => Promise<T>) => Promise<T>
 ): Promise<{ reclaimed: boolean; oldHandle?: DynamicClientRegistrationHandle }> {
@@ -414,32 +447,17 @@ export async function reclaimOrphanDynamicClient(
   const creds = encodeCredentialColumns(encryptionKey, input.newCredentials)
 
   return runInTransaction(async tx => {
-    const locked = await tx.query(
-      `SELECT id, install_id, cr_uid, updated_at,
-              registration_client_uri, registration_access_token_encrypted
-         FROM dynamic_clients
-        WHERE owner_kind = $1 AND server_namespace = $2 AND server_name = $3
-        FOR UPDATE`,
-      [ownerKind, input.key.serverNamespace, input.key.serverName]
-    )
-    if (locked.rows.length === 0) return { reclaimed: false }
-    const row = locked.rows[0] as {
-      id: string
-      install_id: string | null
-      cr_uid: string | null
-      updated_at: Date
-      registration_client_uri: string | null
-      registration_access_token_encrypted: string | null
-    }
-
-    const klass = classifyExistingDynamicClient(
-      { installId: row.install_id, crUid: row.cr_uid, updatedAt: row.updated_at },
-      input.ctx
-    )
-    if (klass !== 'reclaimable') return { reclaimed: false }
-
     const updated = await tx.query(
-      `UPDATE dynamic_clients
+      `WITH prev AS (
+         SELECT id, registration_client_uri, registration_access_token_encrypted
+           FROM dynamic_clients
+          WHERE owner_kind = $1 AND server_namespace = $2 AND server_name = $3
+            AND id = $13
+            AND install_id IS NOT DISTINCT FROM $14
+            AND cr_uid IS NOT DISTINCT FROM $15
+          FOR UPDATE
+       )
+       UPDATE dynamic_clients d
           SET issuer = $4,
               client_id = $5,
               client_mode = $6,
@@ -451,8 +469,9 @@ export async function reclaimOrphanDynamicClient(
               install_id = $12,
               cr_uid = NULL,
               updated_at = NOW()
-        WHERE owner_kind = $1 AND server_namespace = $2 AND server_name = $3
-          AND id = $13 AND install_id IS NOT DISTINCT FROM $14`,
+         FROM prev
+        WHERE d.id = prev.id
+       RETURNING prev.registration_client_uri, prev.registration_access_token_encrypted`,
       [
         ownerKind,
         input.key.serverNamespace,
@@ -466,19 +485,24 @@ export async function reclaimOrphanDynamicClient(
         creds.clientIdIssuedAt,
         creds.clientSecretExpiresAt,
         input.newInstallId,
-        row.id,
-        row.install_id,
+        input.observed.id,
+        input.observed.installId ?? null,
+        input.observed.crUid ?? null,
       ]
     )
     if ((updated.rowCount ?? 0) !== 1) return { reclaimed: false }
+    const prev = updated.rows[0] as {
+      registration_client_uri: string | null
+      registration_access_token_encrypted: string | null
+    }
 
     const oldHandle =
-      row.registration_client_uri && row.registration_access_token_encrypted
+      prev.registration_client_uri && prev.registration_access_token_encrypted
         ? {
-            registrationClientUri: row.registration_client_uri,
+            registrationClientUri: prev.registration_client_uri,
             registrationAccessToken: decryptOAuthSecret(
               encryptionKey,
-              row.registration_access_token_encrypted
+              prev.registration_access_token_encrypted
             ),
           }
         : undefined

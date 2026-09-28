@@ -383,8 +383,8 @@ export function makeDcrTransport(opts: {
  *
  * It models the install-identity statements the route now drives: the pending INSERT
  * (`ON CONFLICT DO NOTHING RETURNING id`), the legacy upsert (`ON CONFLICT DO UPDATE`),
- * the bind UPDATE, the reclaim CAS UPDATE, and both DELETE shapes (by-install and
- * by-name). The AUTHORITATIVE SQL semantics — real ON CONFLICT, the FOR UPDATE + CAS
+ * the bind UPDATE, the reclaim guarded UPDATE, and both DELETE shapes (by-install and
+ * by-name). The AUTHORITATIVE SQL semantics — real ON CONFLICT, the reclaim guard
  * race — are certified by the real-Postgres suite
  * (`oauth.dynamicClientStore.installIdentity.realPostgres.integration.test.ts`); this
  * harness only lets the route-level wiring (classify → HTTP code, which 7592 DELETE
@@ -502,7 +502,9 @@ export function makeInMemoryDynamicClientsDb(): {
         const key = keyOf(values[0], values[1], values[2])
         const row = rows.get(key)
         if (!row) return { rows: [], rowCount: 0 }
-        // Reclaim CAS: WHERE id = $13 AND install_id IS NOT DISTINCT FROM $14.
+        // Reclaim: one guard on the observed identity — id = $13 AND install_id IS
+        // NOT DISTINCT FROM $14 AND cr_uid IS NOT DISTINCT FROM $15 — RETURNING the
+        // OLD row's RFC 7592 handle.
         if (text.includes('IS NOT DISTINCT FROM')) {
           const [
             ,
@@ -517,11 +519,20 @@ export function makeInMemoryDynamicClientsDb(): {
             client_id_issued_at,
             client_secret_expires_at,
             newInstallId,
-            lockedId,
-            lockedInstallId,
+            observedId,
+            observedInstallId,
+            observedCrUid,
           ] = values
-          if (row.id !== lockedId || row.install_id !== lockedInstallId) {
+          if (
+            String(row.id) !== String(observedId) ||
+            (row.install_id ?? null) !== (observedInstallId ?? null) ||
+            (row.cr_uid ?? null) !== (observedCrUid ?? null)
+          ) {
             return { rows: [], rowCount: 0 }
+          }
+          const oldHandle = {
+            registration_client_uri: row.registration_client_uri,
+            registration_access_token_encrypted: row.registration_access_token_encrypted,
           }
           Object.assign(row, {
             issuer,
@@ -536,7 +547,7 @@ export function makeInMemoryDynamicClientsDb(): {
             cr_uid: null,
             updated_at: new Date(),
           })
-          return { rows: [], rowCount: 1 }
+          return { rows: [oldHandle], rowCount: 1 }
         }
         // Bind: WHERE install_id = $4 AND cr_uid IS NULL, SET cr_uid = $5.
         const [, , , installId, crUid] = values
@@ -551,9 +562,11 @@ export function makeInMemoryDynamicClientsDb(): {
         const [owner_kind, server_namespace, server_name] = values
         const row = rows.get(keyOf(owner_kind, server_namespace, server_name))
         // Return a SNAPSHOT (shallow copy), as a real SELECT does: a later UPDATE must
-        // not retroactively mutate a row already read (e.g. the reclaim reads the OLD
-        // handle from its FOR UPDATE snapshot AFTER issuing the overwriting UPDATE).
-        return { rows: row ? [{ ...row }] : [], rowCount: row ? 1 : 0 }
+        // not retroactively mutate a row already read. `age_ms` mirrors the store's
+        // `NOW() - updated_at` column, measured at read time.
+        if (!row) return { rows: [], rowCount: 0 }
+        const ageMs = Date.now() - (row.updated_at as Date).getTime()
+        return { rows: [{ ...row, age_ms: ageMs }], rowCount: 1 }
       }
       return { rows: [], rowCount: 0 }
     },

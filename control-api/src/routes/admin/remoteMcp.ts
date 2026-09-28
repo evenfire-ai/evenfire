@@ -808,11 +808,11 @@ export function createAdminRemoteMcpRouter(
           // confidential client is orphaned at the AS. Mirrors the revoke-on-abort
           // discipline of persistFailed503 and every explicit return below.
           try {
-            // Someone already holds the name. A live CR owns it unconditionally; else the
-            // persisted row's lifetime decides (in-progress = another saga; reclaimable =
-            // orphan/legacy). Re-read the live uid HERE (a CR may have appeared since the
-            // pre-check — the TOCTOU the fence closes).
-            const liveCrUid = await readLiveMcpServerUid(gateway, serverName, targetNs)
+            // Someone already holds the name. `existing` is always the LAST row read,
+            // and the live-uid read happens only after it: an owner that creates its CR
+            // and binds between the two is then seen as `in-use`, and one that binds
+            // after the K8s read breaks the reclaim's cr_uid guard. Reading K8s first
+            // would classify a just-bound live row as an orphan and revoke its client.
             let existing = await getDynamicClient(db, encryptionKey, dynamicClientKey)
             if (!existing) {
               // The row was deleted between our INSERT-conflict and this read (a teardown
@@ -838,13 +838,16 @@ export function createAdminRemoteMcpRouter(
                 res.status(409).json({ error: 'server_name_in_use' })
                 return
               }
+              // A live CR owns the name unconditionally (also covers a CR that appeared
+              // since the pre-check).
+              const liveCrUid = await readLiveMcpServerUid(gateway, serverName, targetNs)
               const klass = classifyExistingDynamicClient(
                 {
                   installId: existing.installId ?? null,
                   crUid: existing.crUid ?? null,
-                  updatedAt: existing.updatedAt,
+                  ageMs: existing.ageMs,
                 },
-                { now: new Date(), pendingTtlMs: PENDING_TTL_MS, liveCrUid }
+                { pendingTtlMs: PENDING_TTL_MS, liveCrUid }
               )
               if (klass === 'in-use' || klass === 'in-progress') {
                 await revokeMintedClient()
@@ -857,19 +860,21 @@ export function createAdminRemoteMcpRouter(
                 })
                 return
               }
-              // reclaimable: take over the orphan/legacy row atomically (CAS in a tx).
+              // reclaimable: take over the orphan/legacy row only if it is still exactly
+              // the one we observed (id + install_id + cr_uid).
               const reclaim = await reclaimOrphanDynamicClient(
                 encryptionKey,
                 {
                   key: dynamicClientKey,
                   newCredentials: dcrCredentials,
                   newInstallId: installId,
-                  ctx: { now: new Date(), pendingTtlMs: PENDING_TTL_MS, liveCrUid },
+                  observed: existing,
                 },
                 runInTransaction
               )
               if (!reclaim.reclaimed) {
-                // Raced: another saga won the reclaim (or re-claimed the freed name).
+                // The row changed since we read it: another saga reclaimed it, its owner
+                // bound it, or it was deleted.
                 await revokeMintedClient()
                 res.status(409).json({ error: 'install_in_progress' })
                 return

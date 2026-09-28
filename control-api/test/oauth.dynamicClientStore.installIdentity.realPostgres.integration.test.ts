@@ -44,38 +44,36 @@ const NS = config.mcpServersNamespace
 
 // classifyExistingDynamicClient is pure — cover its exhaustive table with no DB.
 describe('classifyExistingDynamicClient — ownership decision table', () => {
-  const now = new Date('2026-01-01T00:00:00.000Z')
-  const fresh = new Date(now.getTime() - 1000)
-  const expired = new Date(now.getTime() - PENDING_TTL_MS - 1000)
+  const fresh = 1000
+  const expired = PENDING_TTL_MS + 1000
 
   it('a live CR owns the name regardless of the row state → in-use', () => {
     expect(
       classifyExistingDynamicClient(
-        { installId: null, crUid: null, updatedAt: fresh },
-        { now, pendingTtlMs: PENDING_TTL_MS, liveCrUid: 'uid-live' }
+        { installId: null, crUid: null, ageMs: fresh },
+        { pendingTtlMs: PENDING_TTL_MS, liveCrUid: 'uid-live' }
       )
     ).toBe('in-use')
     expect(
       classifyExistingDynamicClient(
-        { installId: 'i1', crUid: 'uid-old', updatedAt: expired },
-        { now, pendingTtlMs: PENDING_TTL_MS, liveCrUid: 'uid-live' }
+        { installId: 'i1', crUid: 'uid-old', ageMs: expired },
+        { pendingTtlMs: PENDING_TTL_MS, liveCrUid: 'uid-live' }
       )
     ).toBe('in-use')
     // A live CR beats even a fresh pending row (the pre-check→INSERT TOCTOU race).
     expect(
       classifyExistingDynamicClient(
-        { installId: 'i1', crUid: null, updatedAt: fresh },
-        { now, pendingTtlMs: PENDING_TTL_MS, liveCrUid: 'uid-live' }
+        { installId: 'i1', crUid: null, ageMs: fresh },
+        { pendingTtlMs: PENDING_TTL_MS, liveCrUid: 'uid-live' }
       )
     ).toBe('in-use')
   })
 
   it('at exactly the TTL boundary a pending row is reclaimable (in-progress is strictly under)', () => {
-    const atBoundary = new Date(now.getTime() - PENDING_TTL_MS)
     expect(
       classifyExistingDynamicClient(
-        { installId: 'i1', crUid: null, updatedAt: atBoundary },
-        { now, pendingTtlMs: PENDING_TTL_MS }
+        { installId: 'i1', crUid: null, ageMs: PENDING_TTL_MS },
+        { pendingTtlMs: PENDING_TTL_MS }
       )
     ).toBe('reclaimable')
   })
@@ -83,8 +81,8 @@ describe('classifyExistingDynamicClient — ownership decision table', () => {
   it('a fresh pending row with no live CR → in-progress', () => {
     expect(
       classifyExistingDynamicClient(
-        { installId: 'i1', crUid: null, updatedAt: fresh },
-        { now, pendingTtlMs: PENDING_TTL_MS }
+        { installId: 'i1', crUid: null, ageMs: fresh },
+        { pendingTtlMs: PENDING_TTL_MS }
       )
     ).toBe('in-progress')
   })
@@ -92,8 +90,8 @@ describe('classifyExistingDynamicClient — ownership decision table', () => {
   it('a bound orphan (cr_uid set, no live CR) → reclaimable', () => {
     expect(
       classifyExistingDynamicClient(
-        { installId: 'i1', crUid: 'uid-gone', updatedAt: fresh },
-        { now, pendingTtlMs: PENDING_TTL_MS }
+        { installId: 'i1', crUid: 'uid-gone', ageMs: fresh },
+        { pendingTtlMs: PENDING_TTL_MS }
       )
     ).toBe('reclaimable')
   })
@@ -101,8 +99,8 @@ describe('classifyExistingDynamicClient — ownership decision table', () => {
   it('an expired pending row → reclaimable', () => {
     expect(
       classifyExistingDynamicClient(
-        { installId: 'i1', crUid: null, updatedAt: expired },
-        { now, pendingTtlMs: PENDING_TTL_MS }
+        { installId: 'i1', crUid: null, ageMs: expired },
+        { pendingTtlMs: PENDING_TTL_MS }
       )
     ).toBe('reclaimable')
   })
@@ -110,8 +108,8 @@ describe('classifyExistingDynamicClient — ownership decision table', () => {
   it('a legacy row (both null, no live CR) → reclaimable', () => {
     expect(
       classifyExistingDynamicClient(
-        { installId: null, crUid: null, updatedAt: fresh },
-        { now, pendingTtlMs: PENDING_TTL_MS }
+        { installId: null, crUid: null, ageMs: fresh },
+        { pendingTtlMs: PENDING_TTL_MS }
       )
     ).toBe('reclaimable')
   })
@@ -198,38 +196,80 @@ describeRealPostgres('dynamicClientStore install identity (real Postgres)', () =
     expect(after?.registrationClientUri).toBe(`https://as.example.com/reg/${name}`)
   })
 
-  it('reclaimOrphanDynamicClient CAS: takes over a reclaimable row, returns the old handle, second reclaim loses', async () => {
+  const keyOf = (serverName: string) => ({ serverNamespace: NS, serverName })
+
+  /**
+   * Age a real row past the pending TTL. Only `updated_at` moves (the DB clock the
+   * store measures age against); every other column stays as the producer wrote it.
+   */
+  async function expirePending(serverName: string): Promise<void> {
+    await db.query(
+      `UPDATE dynamic_clients
+          SET updated_at = NOW() - ($1::bigint * INTERVAL '1 millisecond')
+        WHERE server_namespace = $2 AND server_name = $3`,
+      [PENDING_TTL_MS + 60_000, NS, serverName]
+    )
+  }
+
+  /** Every persisted column; `ageMs` is a read-time measurement, not row state. */
+  const rowState = (row: Awaited<ReturnType<typeof getDynamicClient>>) => {
+    if (!row) return row
+    const { ageMs: _ageMs, ...state } = row
+    return state
+  }
+
+  it('the row age is measured by the database: fresh pending → in-progress, aged → reclaimable', async () => {
+    const name = `srv-age-${randomUUID().slice(0, 8)}`
+    await insertDynamicClientPending(db, KEY, { ...baseCreds(name), installId: randomUUID() })
+
+    const fresh = await getDynamicClient(db, KEY, keyOf(name))
+    expect(fresh?.id).toMatch(/^\d+$/)
+    expect(fresh?.ageMs).toBeGreaterThanOrEqual(0)
+    expect(fresh?.ageMs).toBeLessThan(PENDING_TTL_MS)
+    expect(
+      classifyExistingDynamicClient(
+        { installId: fresh?.installId ?? null, crUid: null, ageMs: fresh?.ageMs ?? 0 },
+        { pendingTtlMs: PENDING_TTL_MS }
+      )
+    ).toBe('in-progress')
+
+    await expirePending(name)
+    const aged = await getDynamicClient(db, KEY, keyOf(name))
+    expect(aged?.ageMs).toBeGreaterThanOrEqual(PENDING_TTL_MS)
+    expect(
+      classifyExistingDynamicClient(
+        { installId: aged?.installId ?? null, crUid: null, ageMs: aged?.ageMs ?? 0 },
+        { pendingTtlMs: PENDING_TTL_MS }
+      )
+    ).toBe('reclaimable')
+  })
+
+  it('reclaimOrphanDynamicClient takes over the observed orphan and returns the old handle', async () => {
     const name = `srv-reclaim-${randomUUID().slice(0, 8)}`
     const install1 = randomUUID()
-    const uidGone = randomUUID()
 
     // Seed a BOUND ORPHAN via the real producers: pending insert, then bind to a
-    // uid whose CR no longer exists (liveCrUid undefined at reclaim time).
+    // uid whose CR no longer exists.
     await insertDynamicClientPending(db, KEY, {
       ...baseCreds(name, { clientId: 'cid-old', clientSecret: 'secret-old' }),
       registrationAccessToken: 'rat-old',
       registrationClientUri: 'https://as.example.com/reg/old',
       installId: install1,
     })
-    expect(
-      (
-        await bindDynamicClientToResource(
-          db,
-          { serverNamespace: NS, serverName: name },
-          install1,
-          uidGone
-        )
-      ).bound
-    ).toBe(true)
+    expect((await bindDynamicClientToResource(db, keyOf(name), install1, randomUUID())).bound).toBe(
+      true
+    )
+    const observed = await getDynamicClient(db, KEY, keyOf(name))
+    if (!observed) throw new Error('seeded row missing')
 
     const install2 = randomUUID()
     const reclaim = await reclaimOrphanDynamicClient(
       KEY,
       {
-        key: { serverNamespace: NS, serverName: name },
+        key: keyOf(name),
         newCredentials: baseCreds(name, { clientId: 'cid-new', clientSecret: 'secret-new' }),
         newInstallId: install2,
-        ctx: { now: new Date(), pendingTtlMs: PENDING_TTL_MS, liveCrUid: undefined },
+        observed,
       },
       runInTransaction
     )
@@ -240,54 +280,131 @@ describeRealPostgres('dynamicClientStore install identity (real Postgres)', () =
       registrationAccessToken: 'rat-old',
     })
 
-    const owned = await getDynamicClient(db, KEY, { serverNamespace: NS, serverName: name })
+    const owned = await getDynamicClient(db, KEY, keyOf(name))
+    expect(owned?.id).toBe(observed.id)
     expect(owned?.installId).toBe(install2)
     expect(owned?.crUid).toBeUndefined()
     expect(owned?.clientId).toBe('cid-new')
     expect(owned?.clientSecret).toBe('secret-new')
+    expect(owned?.registrationClientUri).toBe(`https://as.example.com/reg/${name}`)
+  })
 
-    // Row is now fresh-pending (install2). A second reclaim classifies it
-    // in-progress → loses. Models the concurrent second reclaim with a stale
-    // old-install expectation.
-    const install3 = randomUUID()
+  // A pending row observed past its TTL (a crashed-looking saga) whose owner then
+  // BINDS it to its freshly created CR before the reclaim lands. Only `cr_uid`
+  // changes on bind, so the reclaim must refuse on the cr_uid guard — otherwise a
+  // live install's credentials are overwritten and its client revoked at the AS.
+  it('a row bound by its owner after it was observed is never reclaimed', async () => {
+    const name = `srv-bindrace-${randomUUID().slice(0, 8)}`
+    const ownerInstall = randomUUID()
+    await insertDynamicClientPending(db, KEY, {
+      ...baseCreds(name, { clientId: 'cid-owner', clientSecret: 'secret-owner' }),
+      installId: ownerInstall,
+    })
+    await expirePending(name)
+
+    const observed = await getDynamicClient(db, KEY, keyOf(name))
+    if (!observed) throw new Error('seeded row missing')
+    // No live CR yet at this point → the caller classifies it reclaimable.
+    expect(
+      classifyExistingDynamicClient(
+        {
+          installId: observed.installId ?? null,
+          crUid: observed.crUid ?? null,
+          ageMs: observed.ageMs,
+        },
+        { pendingTtlMs: PENDING_TTL_MS }
+      )
+    ).toBe('reclaimable')
+
+    // The owner's CR now exists and it binds its row.
+    const ownerUid = randomUUID()
+    expect((await bindDynamicClientToResource(db, keyOf(name), ownerInstall, ownerUid)).bound).toBe(
+      true
+    )
+    const bound = await getDynamicClient(db, KEY, keyOf(name))
+
+    const reclaim = await reclaimOrphanDynamicClient(
+      KEY,
+      {
+        key: keyOf(name),
+        newCredentials: baseCreds(name, { clientId: 'cid-thief', clientSecret: 'secret-thief' }),
+        newInstallId: randomUUID(),
+        observed,
+      },
+      runInTransaction
+    )
+    expect(reclaim.reclaimed).toBe(false)
+    expect(reclaim.oldHandle).toBeUndefined()
+    const after = await getDynamicClient(db, KEY, keyOf(name))
+    expect(after?.crUid).toBe(ownerUid)
+    expect(after?.clientSecret).toBe('secret-owner')
+    expect(rowState(after)).toEqual(rowState(bound))
+  })
+
+  // Two sagas observe the same reclaimable row; B′ reclaims first. B′'s reclaim
+  // leaves cr_uid NULL (as observed) and keeps the id, so only install_id tells B
+  // that the row is no longer the one it classified.
+  it('the second of two reclaims of the same observed row loses on install_id', async () => {
+    const name = `srv-tworeclaims-${randomUUID().slice(0, 8)}`
+    await insertDynamicClientPending(db, KEY, {
+      ...baseCreds(name, { clientId: 'cid-crashed' }),
+      installId: randomUUID(),
+    })
+    await expirePending(name)
+    const observed = await getDynamicClient(db, KEY, keyOf(name))
+    if (!observed) throw new Error('seeded row missing')
+
+    const winnerInstall = randomUUID()
+    const first = await reclaimOrphanDynamicClient(
+      KEY,
+      {
+        key: keyOf(name),
+        newCredentials: baseCreds(name, { clientId: 'cid-winner', clientSecret: 'secret-winner' }),
+        newInstallId: winnerInstall,
+        observed,
+      },
+      runInTransaction
+    )
+    expect(first.reclaimed).toBe(true)
+    const won = await getDynamicClient(db, KEY, keyOf(name))
+
     const second = await reclaimOrphanDynamicClient(
       KEY,
       {
-        key: { serverNamespace: NS, serverName: name },
-        newCredentials: baseCreds(name, { clientId: 'cid-loser' }),
-        newInstallId: install3,
-        ctx: { now: new Date(), pendingTtlMs: PENDING_TTL_MS, liveCrUid: undefined },
+        key: keyOf(name),
+        newCredentials: baseCreds(name, { clientId: 'cid-loser', clientSecret: 'secret-loser' }),
+        newInstallId: randomUUID(),
+        observed,
       },
       runInTransaction
     )
     expect(second.reclaimed).toBe(false)
-    const afterLoser = await getDynamicClient(db, KEY, { serverNamespace: NS, serverName: name })
-    expect(afterLoser?.installId).toBe(install2)
-    expect(afterLoser?.clientId).toBe('cid-new')
+    const after = await getDynamicClient(db, KEY, keyOf(name))
+    expect(after?.installId).toBe(winnerInstall)
+    expect(after?.clientId).toBe('cid-winner')
+    expect(rowState(after)).toEqual(rowState(won))
   })
 
-  it('reclaimOrphanDynamicClient leaves an in-progress (fresh pending) row alone', async () => {
-    const name = `srv-noreclaim-${randomUUID().slice(0, 8)}`
+  it('reclaimOrphanDynamicClient loses when the observed row was deleted', async () => {
+    const name = `srv-reclaimgone-${randomUUID().slice(0, 8)}`
     const install1 = randomUUID()
-    await insertDynamicClientPending(db, KEY, {
-      ...baseCreds(name, { clientId: 'cid-inflight' }),
-      installId: install1,
-    })
+    await insertDynamicClientPending(db, KEY, { ...baseCreds(name), installId: install1 })
+    const observed = await getDynamicClient(db, KEY, keyOf(name))
+    if (!observed) throw new Error('seeded row missing')
+    await deleteDynamicClientOwnedByInstall(db, keyOf(name), install1)
 
-    const result = await reclaimOrphanDynamicClient(
+    const reclaim = await reclaimOrphanDynamicClient(
       KEY,
       {
-        key: { serverNamespace: NS, serverName: name },
-        newCredentials: baseCreds(name, { clientId: 'cid-would-steal' }),
+        key: keyOf(name),
+        newCredentials: baseCreds(name, { clientId: 'cid-late' }),
         newInstallId: randomUUID(),
-        ctx: { now: new Date(), pendingTtlMs: PENDING_TTL_MS, liveCrUid: undefined },
+        observed,
       },
       runInTransaction
     )
-    expect(result.reclaimed).toBe(false)
-    const row = await getDynamicClient(db, KEY, { serverNamespace: NS, serverName: name })
-    expect(row?.installId).toBe(install1)
-    expect(row?.clientId).toBe('cid-inflight')
+    expect(reclaim.reclaimed).toBe(false)
+    expect(await getDynamicClient(db, KEY, keyOf(name))).toBeNull()
   })
 
   it('bindDynamicClientToResource binds our pending row and refuses a non-matching install', async () => {

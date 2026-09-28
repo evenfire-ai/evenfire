@@ -3,7 +3,7 @@ import express from 'express'
 import { randomUUID } from 'node:crypto'
 import request from 'supertest'
 import { config } from '../src/config.js'
-import type { DbTransactionClient } from '../src/db.js'
+import type { DbClient, DbTransactionClient } from '../src/db.js'
 import type { PinnedTransport } from '../src/http/pinnedFetch.js'
 import type { K8sGateway } from '../src/k8s.js'
 import {
@@ -12,7 +12,9 @@ import {
   discoverRemoteOAuth,
 } from '../src/oauth/discovery.js'
 import {
+  PENDING_TTL_MS,
   bindDynamicClientToResource,
+  claimDeleteDynamicClientForResource,
   getDynamicClient,
   insertDynamicClientPending,
 } from '../src/oauth/dynamicClientStore.js'
@@ -1157,6 +1159,13 @@ describe('POST /admin/mcp-servers/remote — DCR install saga (C2)', () => {
   // row. Rows are seeded via the REAL producers (insertDynamicClientPending + bind),
   // read through the REAL getDynamicClient (T1).
 
+  /** Every persisted column; `ageMs` is a read-time measurement, not row state. */
+  const rowState = (row: Awaited<ReturnType<typeof getDynamicClient>>) => {
+    if (!row) return row
+    const { ageMs: _ageMs, ...state } = row
+    return state
+  }
+
   const LIVE_ROW = {
     ownerKind: 'mcpserver' as const,
     serverNamespace: NS,
@@ -1219,7 +1228,7 @@ describe('POST /admin/mcp-servers/remote — DCR install saga (C2)', () => {
       serverNamespace: NS,
       serverName: 'live-dcr',
     })
-    expect(after).toEqual(before)
+    expect(rowState(after)).toEqual(rowState(before))
     expect(rows.size).toBe(1)
   })
 
@@ -1281,7 +1290,7 @@ describe('POST /admin/mcp-servers/remote — DCR install saga (C2)', () => {
       serverNamespace: NS,
       serverName: 'toctou-dcr',
     })
-    expect(after).toEqual(before)
+    expect(rowState(after)).toEqual(rowState(before))
     // The throwaway client minted before the conflict was revoked at the AS, and the
     // seeded live client's handle was NOT touched.
     const deleteCalls = calls.filter(c => c.method === 'DELETE')
@@ -1382,7 +1391,7 @@ describe('POST /admin/mcp-servers/remote — DCR install saga (C2)', () => {
       serverNamespace: NS,
       serverName: 'inprogress-dcr',
     })
-    expect(after).toEqual(before)
+    expect(rowState(after)).toEqual(rowState(before))
     expect(rows.size).toBe(1)
     // Our throwaway minted client was revoked at the AS.
     expect(calls.some(c => c.method === 'DELETE')).toBe(true)
@@ -1439,5 +1448,242 @@ describe('POST /admin/mcp-servers/remote — DCR install saga (C2)', () => {
     // The OLD (orphan) client was revoked at the AS via its handle read under the lock.
     const deleteCalls = calls.filter(c => c.method === 'DELETE')
     expect(deleteCalls.map(c => c.url)).toContain(LIVE_ROW.registrationClientUri)
+  })
+
+  // ── The live-uid read must follow the LAST row read ─────────────────────────
+  // Install A of the same name finishes (CR created, row bound) while B is resolving
+  // its INSERT conflict. The hook below plays A's steps with the REAL producers
+  // (gateway createResource + bindDynamicClientToResource) at the exact point in B's
+  // flow under test. Asserted on what is observable: A's client is never revoked at
+  // the AS and A's row is byte-identical. The status is 409 either way, so it does
+  // not discriminate.
+
+  const RACE_A_ROW = {
+    ...LIVE_ROW,
+    clientId: 'owner-a-client-id',
+    clientSecret: 'owner-a-secret',
+    registrationAccessToken: 'owner-a-reg-token',
+    registrationClientUri: 'https://as.example.com/register/owner-a',
+  }
+
+  /**
+   * Wrap the in-memory db so hooks run around B's Nth plain row read
+   * (`getDynamicClient`), counted only once armed: `before` effects are visible to
+   * that read, `after` effects land once its snapshot is taken.
+   */
+  function withRowReadHook(
+    inner: DbClient,
+    plan: Record<number, { before?: () => Promise<void>; after?: () => Promise<void> }>
+  ): { db: DbClient; arm: () => void } {
+    let armed = false
+    let reads = 0
+    const db = {
+      query: async (text: string, values?: unknown[]) => {
+        const isRowRead =
+          armed &&
+          text.includes('FROM dynamic_clients') &&
+          !text.includes('UPDATE') &&
+          !text.includes('DELETE') &&
+          !text.includes('FOR UPDATE')
+        if (!isRowRead) return inner.query(text, values)
+        reads += 1
+        const step = plan[reads]
+        await step?.before?.()
+        const result = await inner.query(text, values)
+        await step?.after?.()
+        return result
+      },
+    } as unknown as DbClient
+    return { db, arm: () => (armed = true) }
+  }
+
+  const rowKey = (serverName: string) => `mcpserver/${NS}/${serverName}`
+
+  /**
+   * Age a real row past the pending TTL. Only `updated_at` moves (what the store's
+   * age column measures); every other column stays as the producer wrote it.
+   */
+  function expirePending(rows: Map<string, Record<string, unknown>>, serverName: string): void {
+    const row = rows.get(rowKey(serverName))
+    if (!row) throw new Error(`no row for ${serverName}`)
+    row.updated_at = new Date(Date.now() - PENDING_TTL_MS - 60_000)
+  }
+
+  /**
+   * A's CR appears (real gateway create) and A binds its row to that CR's uid.
+   * Returns A's row as persisted right after the bind — the state that must survive.
+   */
+  async function ownerAFinishes(
+    gw: MockGateway,
+    inner: DbClient,
+    serverName: string,
+    installA: string
+  ) {
+    const cr = (await gw.createResource(
+      'mcpservers',
+      { metadata: { name: serverName }, spec: {} },
+      NS
+    )) as { metadata: { uid: string } }
+    const bound = await bindDynamicClientToResource(
+      inner,
+      { serverNamespace: NS, serverName },
+      installA,
+      cr.metadata.uid
+    )
+    if (!bound.bound) throw new Error('owner A failed to bind its row')
+    return rowState(await getDynamicClient(inner, ENC_KEY, { serverNamespace: NS, serverName }))
+  }
+
+  async function installB(gw: MockGateway, db: DbClient, serverName: string) {
+    const { transport, calls } = makeDcrTransport({
+      responseJson: JSON.stringify(DCR_CONFIDENTIAL_REGISTRATION_RESPONSE),
+    })
+    const res = await request(
+      makeAppWithDeps(gw, {
+        db,
+        dcr: { transport, resolveDns: PUBLIC_IP },
+        runInTransaction: work => work(db as unknown as DbTransactionClient),
+      })
+    )
+      .post('/admin/mcp-servers/remote')
+      .send({
+        serverName,
+        contextRef: 'ctx-a',
+        baseUrl: 'https://mcp.notion.com/mcp',
+        mode: 'dcr',
+      })
+    return { res, deleteUrls: calls.filter(c => c.method === 'DELETE').map(c => c.url) }
+  }
+
+  it("A binds its row between B's row read and B's live-CR read → A's client is never revoked, A's row untouched", async () => {
+    vi.mocked(discoverRemoteOAuth).mockResolvedValue({ ok: true, result: dcrConfidentialResult })
+    const { db: inner, rows } = makeInMemoryDynamicClientsDb()
+    const serverName = 'race-bind-dcr'
+    const installA = randomUUID()
+    await insertDynamicClientPending(inner, ENC_KEY, {
+      ...RACE_A_ROW,
+      serverName,
+      installId: installA,
+    })
+    // A's saga has been slow: B reads a pending row already past the TTL.
+    expirePending(rows, serverName)
+
+    const gw = gatewayWithContext('ctx-a')
+    let aState: Awaited<ReturnType<typeof ownerAFinishes>> | undefined
+    const { db, arm } = withRowReadHook(inner, {
+      1: {
+        after: async () => {
+          aState = await ownerAFinishes(gw, inner, serverName, installA)
+        },
+      },
+    })
+    arm()
+    const { res, deleteUrls } = await installB(gw, db, serverName)
+
+    expect(res.status).toBe(409)
+    expect(aState).toBeDefined()
+    expect(deleteUrls).not.toContain(RACE_A_ROW.registrationClientUri)
+    // B still revokes the throwaway client it minted.
+    expect(deleteUrls).toContain(DCR_CONFIDENTIAL_REGISTRATION_RESPONSE.registration_client_uri)
+    const afterA = await getDynamicClient(inner, ENC_KEY, { serverNamespace: NS, serverName })
+    expect(rowState(afterA)).toEqual(aState)
+  })
+
+  // A finishes (CR created, row bound) before B even reads the row. The row B reads
+  // is already bound, so only a live-CR read taken AFTER that row read can tell it
+  // is in use; with the K8s read first, B sees no CR, classifies the bound row as an
+  // orphan, and its reclaim guard matches the row it just read.
+  it("A binds its row before B's row read → B's live-CR read follows it, A's client is never revoked", async () => {
+    vi.mocked(discoverRemoteOAuth).mockResolvedValue({ ok: true, result: dcrConfidentialResult })
+    const { db: inner, rows } = makeInMemoryDynamicClientsDb()
+    const serverName = 'race-prebind-dcr'
+    const installA = randomUUID()
+    await insertDynamicClientPending(inner, ENC_KEY, {
+      ...RACE_A_ROW,
+      serverName,
+      installId: installA,
+    })
+    expirePending(rows, serverName)
+
+    const gw = gatewayWithContext('ctx-a')
+    let aState: Awaited<ReturnType<typeof ownerAFinishes>> | undefined
+    const { db, arm } = withRowReadHook(inner, {
+      1: {
+        before: async () => {
+          aState = await ownerAFinishes(gw, inner, serverName, installA)
+        },
+      },
+    })
+    arm()
+    const { res, deleteUrls } = await installB(gw, db, serverName)
+
+    expect(res.status).toBe(409)
+    expect(aState).toBeDefined()
+    expect(deleteUrls).not.toContain(RACE_A_ROW.registrationClientUri)
+    expect(deleteUrls).toContain(DCR_CONFIDENTIAL_REGISTRATION_RESPONSE.registration_client_uri)
+    const afterA = await getDynamicClient(inner, ENC_KEY, { serverNamespace: NS, serverName })
+    expect(rowState(afterA)).toEqual(aState)
+  })
+
+  // Same race through the retry branch: B's first row read finds the row gone (a
+  // teardown), A reinstalls the name before B's retried INSERT, and A creates its CR
+  // and binds before B's second row read.
+  it("retry branch: A reinserts and binds before B's re-read → A's client is never revoked, A's row untouched", async () => {
+    vi.mocked(discoverRemoteOAuth).mockResolvedValue({ ok: true, result: dcrConfidentialResult })
+    const { db: inner } = makeInMemoryDynamicClientsDb()
+    const serverName = 'race-retry-dcr'
+    // The row B's INSERT first conflicts with: an orphan of an earlier install.
+    const orphanInstall = randomUUID()
+    await insertDynamicClientPending(inner, ENC_KEY, {
+      ...LIVE_ROW,
+      serverName,
+      installId: orphanInstall,
+    })
+    await bindDynamicClientToResource(
+      inner,
+      { serverNamespace: NS, serverName },
+      orphanInstall,
+      'uid-orphan-gone'
+    )
+
+    const gw = gatewayWithContext('ctx-a')
+    const installA = randomUUID()
+    let aState: Awaited<ReturnType<typeof ownerAFinishes>> | undefined
+    const { db, arm } = withRowReadHook(inner, {
+      // B's first read finds the orphan torn down; A then claims the name again,
+      // ahead of B's retried INSERT.
+      1: {
+        before: async () => {
+          await claimDeleteDynamicClientForResource(
+            inner,
+            ENC_KEY,
+            { serverNamespace: NS, serverName },
+            'uid-orphan-gone'
+          )
+        },
+        after: async () => {
+          await insertDynamicClientPending(inner, ENC_KEY, {
+            ...RACE_A_ROW,
+            serverName,
+            installId: installA,
+          })
+        },
+      },
+      // A creates its CR and binds before B re-reads the row.
+      2: {
+        before: async () => {
+          aState = await ownerAFinishes(gw, inner, serverName, installA)
+        },
+      },
+    })
+    arm()
+    const { res, deleteUrls } = await installB(gw, db, serverName)
+
+    expect(res.status).toBe(409)
+    expect(aState).toBeDefined()
+    expect(deleteUrls).not.toContain(RACE_A_ROW.registrationClientUri)
+    expect(deleteUrls).toContain(DCR_CONFIDENTIAL_REGISTRATION_RESPONSE.registration_client_uri)
+    const afterA = await getDynamicClient(inner, ENC_KEY, { serverNamespace: NS, serverName })
+    expect(rowState(afterA)).toEqual(aState)
   })
 })
