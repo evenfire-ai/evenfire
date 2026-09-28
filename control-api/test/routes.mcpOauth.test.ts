@@ -61,6 +61,15 @@ function seedOauthServer(
   )
 }
 
+// The uid the gateway assigned to the seeded CR — the installation identity the
+// grant readers are fenced by. Read back from the producer, never invented.
+async function liveUid(gateway: MockGateway, name: string): Promise<string> {
+  const cr = (await gateway.getResource('mcpservers', name, MCP_NS)) as {
+    metadata: { uid: string }
+  }
+  return cr.metadata.uid
+}
+
 // Control JWT derived from the REAL minter (T1) — no hand-forged token.
 function controlToken(scopes: Array<'oauth:user-token'> = ['oauth:user-token']): string {
   return issueMcpHostControlJwt('mcp-host', 'standalone', ['mcp-host/standalone'], { scopes }).token
@@ -178,7 +187,14 @@ describe('routes/mcp-oauth — POST /mcp-oauth/user-token (U1)', () => {
         sql.includes('FROM oauth_grants') &&
         sql.includes("grant_kind = 'user'")
     )
-    expect(grantQuery?.[1]).toEqual(['mcpserver', MCP_NS, 'gdrive', 'user-1', 'google-drive'])
+    expect(grantQuery?.[1]).toEqual([
+      'mcpserver',
+      MCP_NS,
+      'gdrive',
+      'user-1',
+      'google-drive',
+      await liveUid(gateway, 'gdrive'),
+    ])
   })
 
   it('404 no_grant when no row exists', async () => {
@@ -244,7 +260,14 @@ describe('routes/mcp-oauth — POST /mcp-oauth/user-token (U1)', () => {
         sql.includes("grant_kind = 'shared'")
     )
     // owner, ns, name, contextId(=contextRef), clientId — userId NOT a coordinate.
-    expect(grantQuery?.[1]).toEqual(['mcpserver', MCP_NS, 'gdrive', 'ctx-A', 'google-drive'])
+    expect(grantQuery?.[1]).toEqual([
+      'mcpserver',
+      MCP_NS,
+      'gdrive',
+      'ctx-A',
+      'google-drive',
+      await liveUid(gateway, 'gdrive'),
+    ])
   })
 
   // Guardian (T5): a caller with the scope must NOT be able to fetch another
@@ -291,7 +314,14 @@ describe('routes/mcp-oauth — POST /mcp-oauth/user-token (U1)', () => {
         sql.includes('FROM oauth_grants') &&
         sql.includes("grant_kind = 'shared'")
     )
-    expect(grantQuery?.[1]).toEqual(['mcpserver', MCP_NS, 'gdrive', 'ctx-A', 'google-drive'])
+    expect(grantQuery?.[1]).toEqual([
+      'mcpserver',
+      MCP_NS,
+      'gdrive',
+      'ctx-A',
+      'google-drive',
+      await liveUid(gateway, 'gdrive'),
+    ])
   })
 
   // Fail-closed: a context-flavor server that is missing its CRD-required
@@ -519,7 +549,14 @@ describe('routes/mcp-oauth — POST /mcp-oauth/grants/exists (mini-spec 13)', ()
         sql.includes('FROM oauth_grants') &&
         sql.includes("grant_kind = 'user'")
     )
-    expect(grantQuery?.[1]).toEqual(['mcpserver', MCP_NS, 'gdrive', 'nobody', 'google-drive'])
+    expect(grantQuery?.[1]).toEqual([
+      'mcpserver',
+      MCP_NS,
+      'gdrive',
+      'nobody',
+      'google-drive',
+      await liveUid(gateway, 'gdrive'),
+    ])
   })
 
   it('200: reports exists:true when the SELECT 1 finds a row', async () => {
@@ -610,7 +647,14 @@ describe('routes/mcp-oauth — POST /mcp-oauth/grants/exists (mini-spec 13)', ()
         sql.includes("grant_kind = 'shared'")
     )
     // contextId coordinate is the authoritative ctx-real, NOT the body ctx-foreign.
-    expect(grantQuery?.[1]).toEqual(['mcpserver', MCP_NS, 'team', 'ctx-real', 'google-drive'])
+    expect(grantQuery?.[1]).toEqual([
+      'mcpserver',
+      MCP_NS,
+      'team',
+      'ctx-real',
+      'google-drive',
+      await liveUid(gateway, 'team'),
+    ])
   })
 
   // FIX A: a malformed entry must NOT be dropped (that breaks positional/tuple

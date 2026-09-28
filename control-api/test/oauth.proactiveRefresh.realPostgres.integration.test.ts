@@ -22,7 +22,6 @@ import type {
 import type { RecipeWithOAuthClients } from '../src/oauth/callback.js'
 import { listExpiringDynamicClients, upsertDynamicClient } from '../src/oauth/dynamicClientStore.js'
 import { deriveOAuthEncryptionKey } from '../src/oauth/encryption.js'
-import { resolveServerOAuthSubject } from '../src/oauth/mcpServerOAuthSpec.js'
 import {
   type OAuthGrantKey,
   bootstrapSharedOAuthGrant,
@@ -32,6 +31,8 @@ import {
   upsertOAuthGrant,
 } from '../src/oauth/store.js'
 import { getAccessToken } from '../src/oauth/tokenHelper.js'
+import { type McpServerResource, normalizeMcpServerOwnerDecl } from '../src/routes/mcpOauth.js'
+import { MockGateway } from './mockGateway.js'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
@@ -89,6 +90,7 @@ describeRealPostgres('oauth proactive refresh — enumeration + claim (real Post
     recipeName: server,
     contextId: ctx,
     oauthClientId: REMOTE_OAUTH_ID,
+    crUid: uidOf(server),
   })
 
   async function seedShared(
@@ -97,6 +99,7 @@ describeRealPostgres('oauth proactive refresh — enumeration + claim (real Post
     provider: string,
     expiresInSec: number | undefined
   ): Promise<void> {
+    await install(server)
     await bootstrapSharedOAuthGrant(db, KEY, {
       ...sharedKey(server, ctx),
       bootstrappedByUserId: 'user-1',
@@ -113,6 +116,7 @@ describeRealPostgres('oauth proactive refresh — enumeration + claim (real Post
     background: boolean,
     expiresInSec: number
   ): Promise<void> {
+    await install(server)
     await upsertOAuthGrant(db, KEY, {
       grantKind: 'user',
       ownerKind: 'mcpserver',
@@ -124,6 +128,7 @@ describeRealPostgres('oauth proactive refresh — enumeration + claim (real Post
       accessToken: 'AT',
       refreshToken: 'RT',
       accessTokenExpiresInSec: expiresInSec,
+      crUid: uidOf(server),
     })
     // The background column is set elsewhere at consent time; drive it directly
     // here (real schema column) to build the background-vs-not distinction.
@@ -137,31 +142,54 @@ describeRealPostgres('oauth proactive refresh — enumeration + claim (real Post
     }
   }
 
-  // Remote owner decl produced by the REAL resolver (T1), so the refresh path
-  // reads the same public/remote routing the mint + callback do.
-  const REMOTE_TOKEN_ENDPOINT = 'https://as.example.com/token'
   const REMOTE_VALIDATED_IP = '93.184.216.34'
-  function remoteOwnerDecl(): RecipeWithOAuthClients {
-    const resolved = resolveServerOAuthSubject({
-      spec: {
-        contextRef: 'ctx-1',
-        oauth: {
-          source: 'remote',
-          id: REMOTE_OAUTH_ID,
-          clientMode: 'public',
-          authorizationEndpoint: 'https://as.example.com/authorize',
-          tokenEndpoint: REMOTE_TOKEN_ENDPOINT,
-          issuer: 'https://as.example.com',
-          resource: 'https://as.example.com',
-          grantScope: 'user',
-          scopes: ['read'],
-          bearerInBody: false,
-          supportsRefresh: true,
+  // The owner CR lives in a gateway (which assigns its `metadata.uid`, as the
+  // apiserver does) and is read back through the REAL owner normalizer the
+  // refresh engine consumes (T1). Grants are sealed with that uid, as the consent
+  // callback does, and keys carry it, as the readers derive them.
+  const gateway = new MockGateway(NS)
+  const uids = new Map<string, string>()
+  async function install(server: string): Promise<void> {
+    if (uids.has(server)) return
+    await gateway.createResource(
+      'mcpservers',
+      {
+        metadata: { name: server },
+        spec: {
+          contextRef: 'ctx-1',
+          auth: { type: 'oauth' },
+          oauth: {
+            source: 'remote',
+            id: REMOTE_OAUTH_ID,
+            clientMode: 'public',
+            authorizationEndpoint: 'https://as.example.com/authorize',
+            tokenEndpoint: 'https://as.example.com/token',
+            issuer: 'https://as.example.com',
+            resource: 'https://as.example.com',
+            grantScope: 'user',
+            scopes: ['read'],
+            bearerInBody: false,
+            supportsRefresh: true,
+          },
         },
       },
-    })
-    if (!resolved) throw new Error('fixture: remote resolve returned null')
-    return { spec: { oauthClients: [resolved.decl] } }
+      NS
+    )
+    const cr = (await gateway.getResource('mcpservers', server, NS)) as {
+      metadata: { uid: string }
+    }
+    uids.set(server, cr.metadata.uid)
+  }
+  function uidOf(server: string): string {
+    const uid = uids.get(server)
+    if (!uid) throw new Error(`fixture: ${server} not installed`)
+    return uid
+  }
+  const ownerReader = {
+    read: async (name: string): Promise<RecipeWithOAuthClients | null> =>
+      normalizeMcpServerOwnerDecl(
+        (await gateway.getResource('mcpservers', name, NS)) as McpServerResource
+      ),
   }
   const constTransport =
     (responseJson: string): PinnedTransport =>
@@ -172,7 +200,7 @@ describeRealPostgres('oauth proactive refresh — enumeration + claim (real Post
     })
   const refreshDeps = (transport: PinnedTransport) => ({
     db,
-    recipeReader: { read: async () => remoteOwnerDecl() },
+    recipeReader: ownerReader,
     secretReader: { read: async () => ({}) },
     fetchFn: (async () => {
       throw new Error('remote refresh must not use fetchFn')

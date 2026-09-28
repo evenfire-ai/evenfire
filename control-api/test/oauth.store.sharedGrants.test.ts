@@ -39,6 +39,9 @@ const SHARED_KEY = {
   oauthClientId: 'google-drive',
 }
 
+// A reader key as `buildMcpServerGrantKey` produces it: it carries the live CR uid.
+const SHARED_READ_KEY = { ...SHARED_KEY, crUid: 'uid-1' }
+
 describe('oauth store — shared (context-identity) grants', () => {
   it('bootstrapSharedOAuthGrant issues INSERT … ON CONFLICT DO UPDATE fenced by cr_uid, returns inserted', async () => {
     const { db, calls } = fakeDb([{ id: 1 }], 1)
@@ -148,25 +151,50 @@ describe('oauth store — shared (context-identity) grants', () => {
         access_token_expires_at: null,
         updated_at: new Date(),
         background: false,
+        cr_uid: 'uid-1',
       },
     ])
-    const row = await getOAuthGrant(db, KEY, SHARED_KEY)
+    const row = await getOAuthGrant(db, KEY, SHARED_READ_KEY)
     expect(row?.grantKind).toBe('shared')
     expect(row?.ownerKind).toBe('mcpserver')
     expect(row?.contextId).toBe('ctx-9')
     expect(row?.bootstrappedByUserId).toBe('user-1')
     expect(row?.accessToken).toBe('A')
+    expect(row?.crUid).toBe('uid-1')
     expect(calls[0].text).toContain("grant_kind = 'shared'")
     expect(calls[0].text).toContain('context_id = $4')
-    expect(calls[0].values).toEqual(['mcpserver', 'mcp-server', 'gdrive', 'ctx-9', 'google-drive'])
+    expect(calls[0].text).toContain('AND (cr_uid = $6 OR cr_uid IS NULL)')
+    expect(calls[0].values).toEqual([
+      'mcpserver',
+      'mcp-server',
+      'gdrive',
+      'ctx-9',
+      'google-drive',
+      'uid-1',
+    ])
   })
 
-  it('oauthGrantExists(shared) is scoped to the context key', async () => {
+  it('oauthGrantExists(shared) is scoped to the context key and the installation', async () => {
     const { db, calls } = fakeDb([{ '?column?': 1 }])
-    const exists = await oauthGrantExists(db, SHARED_KEY)
+    const exists = await oauthGrantExists(db, SHARED_READ_KEY)
     expect(exists).toBe(true)
     expect(calls[0].text).toContain("grant_kind = 'shared'")
-    expect(calls[0].values).toEqual(['mcpserver', 'mcp-server', 'gdrive', 'ctx-9', 'google-drive'])
+    expect(calls[0].text).toContain('AND (cr_uid = $6 OR cr_uid IS NULL)')
+    expect(calls[0].values).toEqual([
+      'mcpserver',
+      'mcp-server',
+      'gdrive',
+      'ctx-9',
+      'google-drive',
+      'uid-1',
+    ])
+  })
+
+  it('an mcp-server reader key without a uid matches nothing and issues no query', async () => {
+    const { db, calls } = fakeDb([{ '?column?': 1 }])
+    expect(await oauthGrantExists(db, SHARED_KEY)).toBe(false)
+    expect(await getOAuthGrant(db, KEY, SHARED_KEY)).toBeNull()
+    expect(calls).toHaveLength(0)
   })
 
   it('deleteOAuthGrant(shared) deletes the single shared row by context key', async () => {
@@ -206,8 +234,36 @@ describe('oauth store — owner_kind on user/service ops (recipe domain unchange
       recipeName: 'gdrive',
       userId: 'user-1',
       oauthClientId: 'google-drive',
+      crUid: 'uid-1',
     })
     expect(calls[0].text).toContain('owner_kind = $1')
-    expect(calls[0].values).toEqual(['mcpserver', 'mcp-server', 'gdrive', 'user-1', 'google-drive'])
+    expect(calls[0].text).toContain('AND (cr_uid = $6 OR cr_uid IS NULL)')
+    expect(calls[0].values).toEqual([
+      'mcpserver',
+      'mcp-server',
+      'gdrive',
+      'user-1',
+      'google-drive',
+      'uid-1',
+    ])
+  })
+
+  it('getOAuthGrant(user) in the recipe domain carries no installation fence', async () => {
+    const { db, calls } = fakeDb()
+    await getOAuthGrant(db, KEY, {
+      grantKind: 'user',
+      recipeNamespace: 'sandbox-recipes',
+      recipeName: 'leadforge',
+      userId: 'user-1',
+      oauthClientId: 'google-gmail',
+    })
+    expect(calls[0].text).not.toContain('cr_uid =')
+    expect(calls[0].values).toEqual([
+      'recipe',
+      'sandbox-recipes',
+      'leadforge',
+      'user-1',
+      'google-gmail',
+    ])
   })
 })

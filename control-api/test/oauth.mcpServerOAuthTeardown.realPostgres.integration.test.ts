@@ -215,7 +215,9 @@ describeRealPostgres('teardownMcpServerOAuthState — fenced by cr_uid (real Pos
     )
     expect(result.grants).toBe('done')
 
-    const exists = (userId: string) =>
+    // Each row is read by the installation that could see it, so a `false` means
+    // the row is gone rather than merely invisible to a foreign uid.
+    const exists = (userId: string, crUid: string) =>
       oauthGrantExists(db, {
         grantKind: 'user',
         ownerKind: 'mcpserver',
@@ -223,11 +225,12 @@ describeRealPostgres('teardownMcpServerOAuthState — fenced by cr_uid (real Pos
         recipeName: name,
         userId,
         oauthClientId: 'client',
+        crUid,
       })
-    expect(await exists('user-u')).toBe(false)
-    expect(await exists('user-legacy')).toBe(false)
+    expect(await exists('user-u', U)).toBe(false)
+    expect(await exists('user-legacy', U)).toBe(false)
     // The reinstall's grant (uid U′) survives (R3-H5).
-    expect(await exists('user-reinstall')).toBe(true)
+    expect(await exists('user-reinstall', Uprime)).toBe(true)
   })
 
   it('a server with no OAuth state is a clean no-op (none/none, no revoke)', async () => {

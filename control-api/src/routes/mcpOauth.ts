@@ -16,6 +16,7 @@ import { integrationNotConfigured, isSecretNotFound } from '../oauth/integration
 import {
   type McpServerOAuthDecl,
   buildMcpServerGrantKey,
+  readCrUid,
   resolveServerOAuth,
   resolveServerOAuthSubject,
 } from '../oauth/mcpServerOAuthSpec.js'
@@ -61,7 +62,7 @@ import { extractBearerToken } from '../utils/extractBearerToken.js'
  */
 
 export interface McpServerResource {
-  metadata?: { name?: string; namespace?: string }
+  metadata?: { name?: string; namespace?: string; uid?: string }
   spec?: {
     auth?: { type?: unknown }
     oauth?: McpServerOAuthDecl
@@ -70,6 +71,18 @@ export interface McpServerResource {
     // context-identity server — the shared grant coordinate — never the body.
     contextRef?: unknown
   }
+}
+
+/**
+ * The owner metadata the refresh engine reads. `uid` is the installation identity
+ * a grant was sealed with; it is kept only when it is a non-empty string, so a
+ * malformed value can never equal a sealed grant's uid.
+ */
+function ownerMetadata(server: McpServerResource): RecipeWithOAuthClients['metadata'] {
+  const md = server.metadata
+  if (!md) return undefined
+  const uid = readCrUid(server)
+  return { name: md.name, namespace: md.namespace, ...(uid ? { uid } : {}) }
 }
 
 /**
@@ -90,7 +103,7 @@ export function normalizeMcpServerOwnerDecl(
   if (oauth.source === 'remote') {
     const resolved = resolveServerOAuthSubject(server)
     if (!resolved) return null
-    return { metadata: server.metadata, spec: { oauthClients: [resolved.decl] } }
+    return { metadata: ownerMetadata(server), spec: { oauthClients: [resolved.decl] } }
   }
   // Generic self-hosted lane (`source:'generic'`, DEC-28): delegate to the SAME
   // subject resolver (D4 — no drift with mint + callback) so the refresh reader
@@ -99,7 +112,7 @@ export function normalizeMcpServerOwnerDecl(
   if (oauth.source === 'generic') {
     const resolved = resolveServerOAuthSubject(server)
     if (!resolved) return null
-    return { metadata: server.metadata, spec: { oauthClients: [resolved.decl] } }
+    return { metadata: ownerMetadata(server), spec: { oauthClients: [resolved.decl] } }
   }
   // Baked lane (unchanged; a public baked client is tolerated per E-19.2).
   if (typeof oauth.id !== 'string' || typeof oauth.provider !== 'string') return null
@@ -121,7 +134,7 @@ export function normalizeMcpServerOwnerDecl(
     normalizedSecretRef = { name: clientSecretRef.name, key: clientSecretRef.key }
   }
   return {
-    metadata: server.metadata,
+    metadata: ownerMetadata(server),
     spec: {
       oauthClients: [
         {

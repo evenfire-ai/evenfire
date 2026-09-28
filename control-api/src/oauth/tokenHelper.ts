@@ -128,6 +128,15 @@ export async function getAccessToken(
   }
   if (!recipe) return { kind: 'recipe_not_found' }
 
+  // A grant sealed with another installation's uid is inert: the owner was
+  // uninstalled and a same-name server now exists. Refreshing it would spend the
+  // old refresh token against the new installation's client (and, for DCR, a
+  // rejected POST would be misread as the new client being invalid). The fenced
+  // reader above cannot catch this when the key came from the row itself (the
+  // proactive sweep) or when the CR was replaced after the caller read it.
+  const ownerCrUid = recipe.metadata?.uid
+  if (grant.crUid !== undefined && grant.crUid !== ownerCrUid) return { kind: 'no_grant' }
+
   const decl = recipe.spec?.oauthClients?.find(c => c.id === input.oauthClientId)
   if (!decl) return { kind: 'unknown_oauth_client' }
 
@@ -140,7 +149,7 @@ export async function getAccessToken(
     // refresh — surfaces `connect_required` in mcp-host. Derived from the flag,
     // NOT heuristically from token presence.
     if (!decl.remote.supportsRefresh) return { kind: 'no_grant' }
-    return refreshRemoteGrant(grant.refreshToken, decl, input, deps)
+    return refreshRemoteGrant(grant.refreshToken, decl, ownerCrUid, input, deps)
   }
 
   // Generic self-hosted lane (`source:'generic'`, DEC-28): same fail-closed
@@ -148,7 +157,7 @@ export async function getAccessToken(
   // but the request is composed from the CR knobs (`buildAdapterFromConfig`).
   if (decl.generic) {
     if (!decl.generic.supportsRefresh) return { kind: 'no_grant' }
-    return refreshGenericGrant(grant.refreshToken, decl, input, deps)
+    return refreshGenericGrant(grant.refreshToken, decl, ownerCrUid, input, deps)
   }
 
   if (!isKnownOAuthProvider(decl.provider)) {
@@ -266,6 +275,7 @@ export async function getAccessToken(
 async function refreshRemoteGrant(
   refreshToken: string,
   decl: OAuthClientDecl,
+  ownerCrUid: string | undefined,
   input: GetAccessTokenInput,
   deps: GetAccessTokenDeps
 ): Promise<GetAccessTokenResult> {
@@ -274,7 +284,7 @@ async function refreshRemoteGrant(
   const credResult = await resolveRemoteClientCredential(
     decl,
     input.recipeNamespace,
-    input.recipeName,
+    { name: input.recipeName, crUid: ownerCrUid },
     {
       db: deps.db,
       encryptionKey: deps.encryptionKey,
@@ -339,6 +349,7 @@ async function refreshRemoteGrant(
 async function refreshGenericGrant(
   refreshToken: string,
   decl: OAuthClientDecl,
+  ownerCrUid: string | undefined,
   input: GetAccessTokenInput,
   deps: GetAccessTokenDeps
 ): Promise<GetAccessTokenResult> {
@@ -347,7 +358,7 @@ async function refreshGenericGrant(
   const credResult = await resolveRemoteClientCredential(
     decl,
     input.recipeNamespace,
-    input.recipeName,
+    { name: input.recipeName, crUid: ownerCrUid },
     {
       db: deps.db,
       encryptionKey: deps.encryptionKey,

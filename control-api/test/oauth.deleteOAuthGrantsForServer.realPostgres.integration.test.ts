@@ -155,6 +155,7 @@ describeRealPostgres('deleteOAuthGrantsForServer — full server-scoped wipe (re
         recipeName: 'gdrive',
         userId: 'user-a',
         oauthClientId: 'google-drive',
+        crUid: U,
       })
     ).toBe(false)
     expect(
@@ -165,6 +166,7 @@ describeRealPostgres('deleteOAuthGrantsForServer — full server-scoped wipe (re
         recipeName: 'gdrive',
         contextId: 'ctx-A',
         oauthClientId: 'google-drive',
+        crUid: U,
       })
     ).toBe(false)
     expect(
@@ -175,6 +177,7 @@ describeRealPostgres('deleteOAuthGrantsForServer — full server-scoped wipe (re
         recipeName: 'gdrive',
         userId: 'user-legacy',
         oauthClientId: 'google-drive',
+        crUid: U,
       })
     ).toBe(false)
     // … the DIFFERENT-uid gdrive grant (the reinstall's) SURVIVES (R3-H5 fence) …
@@ -186,6 +189,7 @@ describeRealPostgres('deleteOAuthGrantsForServer — full server-scoped wipe (re
         recipeName: 'gdrive',
         userId: 'user-reinstall',
         oauthClientId: 'google-drive',
+        crUid: U_PRIME,
       })
     ).toBe(true)
     // … and the peer server's grant is untouched (scoped purge, no blast radius).
@@ -197,6 +201,7 @@ describeRealPostgres('deleteOAuthGrantsForServer — full server-scoped wipe (re
         recipeName: 'teamdrive',
         userId: 'user-a',
         oauthClientId: 'google-drive',
+        crUid: U,
       })
     ).toBe(true)
   })

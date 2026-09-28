@@ -135,7 +135,8 @@ export interface OAuthClientDecl {
 }
 
 export interface RecipeWithOAuthClients {
-  metadata?: { name?: string; namespace?: string }
+  /** `uid` is set for an McpServer owner: the installation its grants are sealed with. */
+  metadata?: { name?: string; namespace?: string; uid?: string }
   spec?: { oauthClients?: OAuthClientDecl[] }
 }
 
@@ -185,9 +186,10 @@ export interface McpServerOAuthSubject {
   grantScope: 'user' | 'context'
   contextRef?: string
   /**
-   * metadata.uid of the McpServer CR, sealing any grant this consent writes to the
-   * exact installation (R3-H5). Present when the reader read a live CR; absent for
-   * the authorize-url minting paths that never persist a grant.
+   * metadata.uid of the McpServer CR the subject was read from. The callback seals
+   * the grant it writes with it and fences the DCR credential read by it; the
+   * authorize-url mint carries it too but never persists a grant. Absent only when
+   * the CR carried no uid.
    */
   crUid?: string
 }
@@ -570,7 +572,7 @@ async function handleMcpOAuthCallback(
   const exchanged = await exchangeAuthCode(
     subject.decl,
     subject.namespace,
-    claims.mcpServerName,
+    { name: claims.mcpServerName, crUid: subject.crUid },
     input,
     deps
   )
@@ -649,8 +651,8 @@ type ExchangeAuthCodeResult =
 async function exchangeAuthCode(
   decl: OAuthClientDecl,
   secretNamespace: string,
-  /** mcp-server name (grant/dynamic-client coordinate); undefined for the recipe lane. */
-  serverName: string | undefined,
+  /** mcp-server owner (dynamic-client coordinate + installation); undefined for the recipe lane. */
+  owner: RemoteCredentialOwner | undefined,
   input: CallbackInput,
   deps: CallbackDeps
 ): Promise<ExchangeAuthCodeResult> {
@@ -658,14 +660,14 @@ async function exchangeAuthCode(
   // (DEC-17), public token client, credentials per `secretSource`. Byte-identical
   // baked path is below (unchanged).
   if (decl.remote) {
-    return exchangeRemoteAuthCode(decl, secretNamespace, serverName, input, deps)
+    return exchangeRemoteAuthCode(decl, secretNamespace, owner, input, deps)
   }
 
   // Generic self-hosted lane (`source:'generic'`): knob-configured request over
   // the same IP-pinned POST (DEC-17). Credentials per `secretSource` (public or
   // k8s-secret). Baked path is below (unchanged).
   if (decl.generic) {
-    return exchangeGenericAuthCode(decl, secretNamespace, serverName, input, deps)
+    return exchangeGenericAuthCode(decl, secretNamespace, owner, input, deps)
   }
 
   // Baked/recipe lane. clientIdRef is always present here (remote is the only
@@ -760,13 +762,13 @@ async function exchangeAuthCode(
 async function exchangeRemoteAuthCode(
   decl: OAuthClientDecl,
   secretNamespace: string,
-  serverName: string | undefined,
+  owner: RemoteCredentialOwner | undefined,
   input: CallbackInput,
   deps: CallbackDeps
 ): Promise<ExchangeAuthCodeResult> {
   // `decl.remote` presence is the branch guard in the caller.
   const remote = decl.remote as RemoteClientRouting
-  const credResult = await resolveRemoteClientCredential(decl, secretNamespace, serverName, deps)
+  const credResult = await resolveRemoteClientCredential(decl, secretNamespace, owner, deps)
   if (!credResult.ok) return { kind: 'secret_missing', secret: credResult.secret }
 
   // PKCE (DEC-1 / §6 #3): the remote lane is ALWAYS S256 — re-derive the verifier
@@ -820,13 +822,13 @@ async function exchangeRemoteAuthCode(
 async function exchangeGenericAuthCode(
   decl: OAuthClientDecl,
   secretNamespace: string,
-  serverName: string | undefined,
+  owner: RemoteCredentialOwner | undefined,
   input: CallbackInput,
   deps: CallbackDeps
 ): Promise<ExchangeAuthCodeResult> {
   // `decl.generic` presence is the branch guard in the caller.
   const generic = decl.generic as GenericClientRouting
-  const credResult = await resolveRemoteClientCredential(decl, secretNamespace, serverName, deps)
+  const credResult = await resolveRemoteClientCredential(decl, secretNamespace, owner, deps)
   if (!credResult.ok) return { kind: 'secret_missing', secret: credResult.secret }
 
   const adapter = buildAdapterFromConfig(generic)
@@ -889,17 +891,31 @@ export type RemoteCredentialResult =
   | { ok: true; cred: RemoteClientCredential }
   | { ok: false; secret: string }
 
+/** The McpServer whose `dynamic_clients` row holds a DCR client's credentials. */
+export interface RemoteCredentialOwner {
+  /** McpServer name — the `dynamic_clients` coordinate. */
+  name: string
+  /** metadata.uid of the live CR; undefined when the reader saw none. */
+  crUid: string | undefined
+}
+
 /**
  * Resolve the remote client's `(clientId, clientSecret)` from the `secretSource`
  * discriminator (DEC-18) — the SINGLE place the three remote secret sources are
  * read, shared by the exchange (here) and the refresh (`tokenHelper.ts`) so the
  * two never drift (D4). Never logs or returns secret material on the error path
- * (names only). `serverName` is the `dynamic_clients` coordinate (DCR only).
+ * (names only). `owner` locates the `dynamic_clients` row (DCR only).
+ *
+ * A DCR row is used only when it is not yet bound (`cr_uid` NULL — pending
+ * between the CR create and the bind, or legacy) or bound to `owner.crUid`. A row
+ * bound to another uid belongs to a gone installation of the same name and is
+ * treated as absent. The check lives here rather than in `getDynamicClient`
+ * because the install saga must still see every row to classify and reclaim it.
  */
 export async function resolveRemoteClientCredential(
   decl: OAuthClientDecl,
   secretNamespace: string,
-  serverName: string | undefined,
+  owner: RemoteCredentialOwner | undefined,
   deps: { db: DbClient; encryptionKey: Buffer; secretReader: SecretReader }
 ): Promise<RemoteCredentialResult> {
   const source = decl.secretSource
@@ -910,14 +926,16 @@ export async function resolveRemoteClientCredential(
     return { ok: true, cred: { clientId: decl.id } }
   }
   if (source.kind === 'dcr-store') {
-    if (!serverName) return { ok: false, secret: `dynamic_clients/${decl.id}` }
+    if (!owner) return { ok: false, secret: `dynamic_clients/${decl.id}` }
     const row = await getDynamicClient(deps.db, deps.encryptionKey, {
       serverNamespace: secretNamespace,
-      serverName,
+      serverName: owner.name,
     })
-    if (!row) return { ok: false, secret: `dynamic_clients/${serverName}` }
+    if (!row || (row.crUid !== undefined && row.crUid !== owner.crUid)) {
+      return { ok: false, secret: `dynamic_clients/${owner.name}` }
+    }
     if (!row.clientSecret) {
-      return { ok: false, secret: `dynamic_clients/${serverName}/client_secret` }
+      return { ok: false, secret: `dynamic_clients/${owner.name}/client_secret` }
     }
     return { ok: true, cred: { clientId: row.clientId, clientSecret: row.clientSecret } }
   }

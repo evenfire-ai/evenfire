@@ -52,6 +52,7 @@ export interface McpServerOAuthDecl {
 
 /** Minimal structural shape needed to resolve a server's OAuth grant coordinate. */
 export interface McpServerOAuthSpecInput {
+  metadata?: { uid?: unknown }
   spec?: {
     oauth?: McpServerOAuthDecl
     // `spec.contextRef` is REQUIRED + singular on the CRD ("the context this
@@ -68,10 +69,25 @@ export interface ResolvedServerOAuth {
   grantScope: GrantScope
   /** Authoritative Context of the server (spec.contextRef); undefined if absent. */
   contextRef?: string
+  /**
+   * metadata.uid of the CR this resolution was read from — the installation
+   * identity grant reads are fenced by. Undefined when the object carried none.
+   */
+  crUid?: string
 }
 
 /**
- * Derive `{ oauthClientId, grantScope, contextRef }` from a McpServer's
+ * The apiserver's `metadata.uid` of a McpServer, or undefined when absent or not
+ * a non-empty string. Never defaulted: an unknown identity must not match a
+ * sealed grant.
+ */
+export function readCrUid(server: McpServerOAuthSpecInput): string | undefined {
+  const uid = server.metadata?.uid
+  return typeof uid === 'string' && uid.length > 0 ? uid : undefined
+}
+
+/**
+ * Derive `{ oauthClientId, grantScope, contextRef, crUid }` from a McpServer's
  * `spec.oauth`. Returns null when the server carries no usable OAuth id, so
  * callers fail closed. `grantScope` defaults to `'user'` for anything other
  * than the explicit `'context'` sentinel (U1: immutable per server, CEL-guarded).
@@ -84,7 +100,7 @@ export function resolveServerOAuth(server: McpServerOAuthSpecInput): ResolvedSer
     typeof server.spec?.contextRef === 'string' && server.spec.contextRef.length > 0
       ? server.spec.contextRef
       : undefined
-  return { oauthClientId: oauth.id, grantScope, contextRef }
+  return { oauthClientId: oauth.id, grantScope, contextRef, crUid: readCrUid(server) }
 }
 
 /** The coordinates the caller supplies to derive an mcp-server grant key. */
@@ -114,6 +130,11 @@ export interface McpServerGrantKeyCoords {
  *
  * It intentionally does NOT read the token or touch the DB — it only maps a
  * resolved OAuth declaration + coordinates to a key.
+ *
+ * A missing `crUid` never yields null: the key is still built and the store
+ * treats an mcp-server key without a uid as matching no row. Returning null here
+ * would push the grant-existence sweep into its fail-open branch (`exists:true`),
+ * so a revoked token cached in mcp-host would never be evicted.
  */
 export function buildMcpServerGrantKey(
   resolved: ResolvedServerOAuth,
@@ -130,6 +151,7 @@ export function buildMcpServerGrantKey(
       recipeName: coords.mcpServerName,
       contextId: resolved.contextRef,
       oauthClientId: resolved.oauthClientId,
+      crUid: resolved.crUid,
     }
   }
   if (typeof coords.userId !== 'string' || coords.userId.length === 0) return null
@@ -140,6 +162,7 @@ export function buildMcpServerGrantKey(
     recipeName: coords.mcpServerName,
     userId: coords.userId,
     oauthClientId: resolved.oauthClientId,
+    crUid: resolved.crUid,
   }
 }
 
@@ -161,6 +184,8 @@ export interface ResolvedServerOAuthSubject {
   grantScope: GrantScope
   /** Authoritative Context (spec.contextRef); undefined if absent. */
   contextRef?: string
+  /** metadata.uid of the CR this subject was read from; undefined if absent. */
+  crUid?: string
 }
 
 /** Extract + type-validate the remote routing block from an untrusted `spec.oauth`. */
@@ -320,6 +345,7 @@ export function resolveServerOAuthSubject(
     typeof server.spec?.contextRef === 'string' && server.spec.contextRef.length > 0
       ? server.spec.contextRef
       : undefined
+  const crUid = readCrUid(server)
 
   // ─── Remote lane (`source:'remote'`) ─────────────────────────────────────
   if (oauth.source === 'remote') {
@@ -341,7 +367,7 @@ export function resolveServerOAuthSubject(
       decl.clientIdRef = secretSource.clientIdRef
       decl.clientSecretRef = secretSource.clientSecretRef
     }
-    return { decl, grantScope, contextRef }
+    return { decl, grantScope, contextRef, crUid }
   }
 
   // ─── Generic self-hosted lane (`source:'generic'`, DEC-28) ────────────────
@@ -365,7 +391,7 @@ export function resolveServerOAuthSubject(
       decl.clientIdRef = secretSource.clientIdRef
       decl.clientSecretRef = secretSource.clientSecretRef
     }
-    return { decl, grantScope, contextRef }
+    return { decl, grantScope, contextRef, crUid }
   }
 
   // ─── Baked lane (byte-identical to before) ───────────────────────────────
@@ -384,5 +410,6 @@ export function resolveServerOAuthSubject(
     },
     grantScope,
     contextRef,
+    crUid,
   }
 }
