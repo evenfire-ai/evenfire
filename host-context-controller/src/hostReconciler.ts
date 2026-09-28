@@ -392,6 +392,10 @@ const RUNTIME_TOKEN_AUDIENCE_ANNOTATION = 'clerum.io/runtime-token-audience'
 const RUNTIME_TOKEN_SCHEMA_VERSION_ANNOTATION = 'clerum.io/runtime-token-schema-version'
 const RUNTIME_TOKEN_BOOTSTRAP_STATE_ANNOTATION = 'clerum.io/runtime-token-bootstrap-state'
 const RUNTIME_TOKEN_ROLLOUT_REQUIRED_ANNOTATION = 'clerum.io/runtime-token-rollout-required'
+const RUNTIME_TOKEN_BOOTSTRAP_DEPLOYMENT_UID_ANNOTATION =
+  'clerum.io/runtime-token-bootstrap-deployment-uid'
+const RUNTIME_TOKEN_BOOTSTRAP_APPLIED_REVISION_ANNOTATION =
+  'clerum.io/runtime-token-bootstrap-applied-revision'
 const RUNTIME_TOKEN_HAS_CHANNEL_INGRESS_ANNOTATION = 'clerum.io/runtime-token-has-channel-ingress'
 const RUNTIME_TOKEN_FRONTS_OAUTH_ANNOTATION = 'clerum.io/runtime-token-fronts-oauth-server'
 const RUNTIME_TOKEN_ISSUER = 'control-api'
@@ -501,6 +505,7 @@ type BootstrapOptions = {
   forceFreshForWake?: boolean
   targetSuspended?: boolean
   refreshGfsOnly?: boolean
+  preserveDeploymentTemplateOnWake?: boolean
 }
 
 type RuntimeTokenProvision = {
@@ -1561,6 +1566,24 @@ export class HostReconciler {
     return (deployment?.status?.readyReplicas ?? 0) > 0
   }
 
+  private static bootstrapBindingMatchesDeployment(
+    record: Pick<k8s.V1Secret, 'metadata'>,
+    deployment: k8s.V1Deployment | null
+  ): boolean {
+    const deploymentIdentity = deployment?.metadata?.uid
+    const boundDeploymentIdentity =
+      record.metadata?.annotations?.[RUNTIME_TOKEN_BOOTSTRAP_DEPLOYMENT_UID_ANNOTATION]
+    const appliedRevision = HostReconciler.deploymentRuntimeTokenRevision(deployment)
+    const boundAppliedRevision =
+      record.metadata?.annotations?.[RUNTIME_TOKEN_BOOTSTRAP_APPLIED_REVISION_ANNOTATION]
+    return (
+      !!deploymentIdentity &&
+      boundDeploymentIdentity === deploymentIdentity &&
+      appliedRevision !== '' &&
+      boundAppliedRevision === appliedRevision
+    )
+  }
+
   private static credentialRecordBelongsToHost(
     record: { metadata?: { labels?: Record<string, string> } },
     host: HostCRD
@@ -1622,11 +1645,16 @@ export class HostReconciler {
    * readiness 503s forever, and the pod never becomes Ready. Reuse is only
    * safe for a pod that stays up and never re-reads the Secret (it uses its
    * in-memory rotated tokens), which is exactly deploymentReady && replicas>=1.
+   *
+   * A wake bootstrap already bound to this exact Deployment UID and applied
+   * runtime revision is the one startup exception: its replica-only wake starts
+   * that Deployment with the newly mounted material. Any identity or revision
+   * change must mint again.
    */
   private static deploymentNeedsFreshBootstrap(
     deployment: k8s.V1Deployment | null,
     currentRevision: string,
-    bootstrapIsFresh: boolean,
+    credentialRecord: k8s.V1Secret | null,
     options: BootstrapOptions
   ): boolean {
     if (options.forceFreshForWake || !deployment) return true
@@ -1635,8 +1663,16 @@ export class HostReconciler {
     if (options.targetSuspended === true) return false
     if ((deployment.spec?.replicas ?? 1) === 0) return true
     if (HostReconciler.deploymentReady(deployment)) return false
+    if (
+      credentialRecord?.metadata?.annotations?.[RUNTIME_TOKEN_BOOTSTRAP_STATE_ANNOTATION] ===
+        RUNTIME_TOKEN_BOOTSTRAP_STATE_FRESH &&
+      HostReconciler.bootstrapBindingMatchesDeployment(credentialRecord, deployment)
+    ) {
+      return false
+    }
     return (
-      !bootstrapIsFresh ||
+      credentialRecord?.metadata?.annotations?.[RUNTIME_TOKEN_BOOTSTRAP_STATE_ANNOTATION] !==
+        RUNTIME_TOKEN_BOOTSTRAP_STATE_FRESH ||
       HostReconciler.deploymentRuntimeTokenRevision(deployment) !== currentRevision
     )
   }
@@ -1829,11 +1865,16 @@ export class HostReconciler {
           ? HostReconciler.runtimeTokenSecretRevisionFromSecret(existing)
           : null
         const nowMs = Date.now()
+        const preserveWakeTemplate =
+          options.preserveDeploymentTemplateOnWake === true &&
+          !!deployment &&
+          HostReconciler.deploymentBelongsToHost(deployment, host) &&
+          (deployment.spec?.replicas ?? 1) === 0 &&
+          HostReconciler.deploymentRuntimeTokenRevision(deployment) !== ''
         if (options.refreshGfsOnly) {
           const trustedDeployment =
             HostReconciler.deploymentBelongsToHost(deployment, host) &&
-            (deployment?.spec?.replicas ?? 0) > 0 &&
-            HostReconciler.deploymentReady(deployment)
+            (deployment?.spec?.replicas ?? 0) > 0
           if (
             !existing ||
             !HostReconciler.credentialRecordBelongsToHost(existing, host) ||
@@ -1851,6 +1892,37 @@ export class HostReconciler {
             )
             return null
           }
+          if (
+            existing.metadata?.annotations?.[RUNTIME_TOKEN_BOOTSTRAP_STATE_ANNOTATION] ===
+              RUNTIME_TOKEN_BOOTSTRAP_STATE_FRESH &&
+            HostReconciler.bootstrapBindingMatchesDeployment(existing, deployment)
+          ) {
+            const appliedRevision = HostReconciler.deploymentRuntimeTokenRevision(deployment)
+            if (HostReconciler.deploymentReady(deployment)) {
+              await this.coreApi.replaceNamespacedSecret({
+                name,
+                namespace: host.namespace,
+                body: {
+                  ...existing,
+                  metadata: {
+                    ...existing.metadata,
+                    annotations: {
+                      ...(existing.metadata?.annotations ?? {}),
+                      [RUNTIME_TOKEN_BOOTSTRAP_STATE_ANNOTATION]:
+                        RUNTIME_TOKEN_BOOTSTRAP_STATE_CONSUMED,
+                      [RUNTIME_TOKEN_ROLLOUT_REQUIRED_ANNOTATION]: 'false',
+                    },
+                  },
+                },
+              })
+            }
+            return {
+              revision: appliedRevision || existingRevision || '',
+              scopeHash:
+                existing.metadata?.annotations?.[RUNTIME_TOKEN_SCOPE_HASH_ANNOTATION] ?? '',
+            }
+          }
+          if (!HostReconciler.deploymentReady(deployment)) return null
           if (
             !HostReconciler.credentialRenewalWindowReached(
               existing,
@@ -2012,7 +2084,7 @@ export class HostReconciler {
           HostReconciler.deploymentNeedsFreshBootstrap(
             deployment,
             existingRevision,
-            bootstrapIsFresh,
+            existing,
             options
           )
         ) {
@@ -2030,6 +2102,13 @@ export class HostReconciler {
           const deploymentRevision = HostReconciler.deploymentRuntimeTokenRevision(deployment)
           const rolloutMarker =
             existing.metadata?.annotations?.[RUNTIME_TOKEN_ROLLOUT_REQUIRED_ANNOTATION]
+          const bootstrapBoundToAppliedDeployment =
+            HostReconciler.bootstrapBindingMatchesDeployment(existing, deployment)
+          const bootstrapPendingForAppliedDeployment =
+            bootstrapIsFresh && bootstrapBoundToAppliedDeployment
+          const bootstrapConsumedForAppliedDeployment =
+            existing.metadata?.annotations?.[RUNTIME_TOKEN_BOOTSTRAP_STATE_ANNOTATION] ===
+              RUNTIME_TOKEN_BOOTSTRAP_STATE_CONSUMED && bootstrapBoundToAppliedDeployment
           const rolloutPending =
             rolloutMarker === 'true' ||
             (rolloutMarker === undefined &&
@@ -2056,6 +2135,11 @@ export class HostReconciler {
               String(host.generation)
           ) {
             annotationUpdates[GFS_TOKEN_HOST_GENERATION_ANNOTATION] = String(host.generation)
+          }
+          if (bootstrapPendingForAppliedDeployment && HostReconciler.deploymentReady(deployment)) {
+            annotationUpdates[RUNTIME_TOKEN_BOOTSTRAP_STATE_ANNOTATION] =
+              RUNTIME_TOKEN_BOOTSTRAP_STATE_CONSUMED
+            annotationUpdates[RUNTIME_TOKEN_ROLLOUT_REQUIRED_ANNOTATION] = 'false'
           }
           if (
             bootstrapIsFresh &&
@@ -2094,7 +2178,10 @@ export class HostReconciler {
           })
           this.recordGfsLifecycleEvidence(host, 'reused')
           const selectedRevision =
-            rolloutPending || HostReconciler.shouldRollForRuntimeSecret(deployment, false)
+            rolloutPending ||
+            (!bootstrapPendingForAppliedDeployment &&
+              !bootstrapConsumedForAppliedDeployment &&
+              HostReconciler.shouldRollForRuntimeSecret(deployment, false))
               ? existingRevision
               : deploymentRevision || existingRevision
           return {
@@ -2145,8 +2232,9 @@ export class HostReconciler {
           throw new Error('mcp-host-runtime-token Secret body missing required credential keys')
         }
         const rolloutRequired =
-          !existing ||
-          HostReconciler.shouldRollForRuntimeSecret(deployment, decision.rolloutRequired)
+          !preserveWakeTemplate &&
+          (!existing ||
+            HostReconciler.shouldRollForRuntimeSecret(deployment, decision.rolloutRequired))
         body.metadata = {
           ...body.metadata,
           annotations: {
@@ -2165,6 +2253,14 @@ export class HostReconciler {
             ),
             [RUNTIME_TOKEN_BOOTSTRAP_STATE_ANNOTATION]: RUNTIME_TOKEN_BOOTSTRAP_STATE_FRESH,
             [RUNTIME_TOKEN_ROLLOUT_REQUIRED_ANNOTATION]: rolloutRequired ? 'true' : 'false',
+            ...(preserveWakeTemplate && deployment
+              ? {
+                  [RUNTIME_TOKEN_BOOTSTRAP_DEPLOYMENT_UID_ANNOTATION]:
+                    deployment.metadata?.uid ?? '',
+                  [RUNTIME_TOKEN_BOOTSTRAP_APPLIED_REVISION_ANNOTATION]:
+                    HostReconciler.deploymentRuntimeTokenRevision(deployment),
+                }
+              : {}),
             [RUNTIME_TOKEN_HAS_CHANNEL_INGRESS_ANNOTATION]: String(hasChannelIngress),
             [RUNTIME_TOKEN_FRONTS_OAUTH_ANNOTATION]: String(observedFrontsOAuth),
           },
@@ -2181,7 +2277,12 @@ export class HostReconciler {
             resourceName: name,
             reason: decision.reason,
           })
-          return { revision, scopeHash }
+          return {
+            revision: preserveWakeTemplate
+              ? HostReconciler.deploymentRuntimeTokenRevision(deployment) || revision
+              : revision,
+            scopeHash,
+          }
         }
 
         const replaceBody = {
@@ -2205,9 +2306,11 @@ export class HostReconciler {
           rolloutRequired,
         })
         return {
-          revision: rolloutRequired
-            ? revision
-            : HostReconciler.deploymentRuntimeTokenRevision(deployment) || revision,
+          revision: preserveWakeTemplate
+            ? HostReconciler.deploymentRuntimeTokenRevision(deployment) || revision
+            : rolloutRequired
+              ? revision
+              : HostReconciler.deploymentRuntimeTokenRevision(deployment) || revision,
           scopeHash,
         }
       } catch (err) {
@@ -4984,16 +5087,25 @@ export class HostReconciler {
     }
     const holdAppliedRuntime = async (wakeRequested: boolean): Promise<void> => {
       const liveDeployment = await this.readHostDeploymentOrNull(host)
-      const deploymentIdentityIsTrusted =
-        !liveDeployment || HostReconciler.deploymentBelongsToHost(liveDeployment, host)
+      const preservedWakeTarget =
+        HostReconciler.deploymentBelongsToHost(liveDeployment, host) &&
+        (liveDeployment?.spec?.replicas ?? 1) === 0 &&
+        HostReconciler.deploymentRuntimeTokenRevision(liveDeployment) !== ''
       const runtimeIsReady =
         !!liveDeployment &&
         HostReconciler.deploymentBelongsToHost(liveDeployment, host) &&
         HostReconciler.deploymentReady(liveDeployment)
-      const scaleUpForRecovery =
-        lifecycle.effective.state === 'active' &&
-        (!liveDeployment || (liveDeployment.spec?.replicas ?? 1) === 0)
-      const allowScaleUp = deploymentIdentityIsTrusted && (wakeRequested || scaleUpForRecovery)
+      const scaleUpForRecovery = lifecycle.effective.state === 'active' && preservedWakeTarget
+      const allowScaleUp = preservedWakeTarget && (wakeRequested || scaleUpForRecovery)
+      if (!liveDeployment || ((wakeRequested || scaleUpForRecovery) && !preservedWakeTarget)) {
+        this.setStatus(host.name, {
+          deployed: !!liveDeployment,
+          ready: false,
+          message:
+            'Waiting for a verified applied runtime before waking during CommunicationChannel inventory loss',
+        })
+        return
+      }
       let provisioningRequired = false
       if (allowScaleUp) {
         // A pod starting from zero will consume bootstrap credentials. Mint and
@@ -5018,6 +5130,8 @@ export class HostReconciler {
         const provision = await this.provisionRuntimeTokenRevision(host, {
           forceFreshForWake: true,
           targetSuspended: lifecycle.effective.state === 'suspended',
+          preserveDeploymentTemplateOnWake:
+            !!liveDeployment && (liveDeployment.spec?.replicas ?? 1) === 0,
         })
         if (!provision) {
           this.setStatus(host.name, {

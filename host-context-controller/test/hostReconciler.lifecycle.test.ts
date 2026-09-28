@@ -296,6 +296,33 @@ function markPersistedRuntimeTrusted(
   return deployment
 }
 
+function encodedRuntimeRefreshMaterial(expiresAtMs: number): string {
+  const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url')
+  return [
+    encode({ alg: 'none', typ: 'JWT' }),
+    encode({ exp: Math.floor(expiresAtMs / 1000) }),
+    'test-signature',
+  ].join('.')
+}
+
+function withReadableRuntimeRefreshMaterial(record: k8s.V1Secret): k8s.V1Secret {
+  const material =
+    (
+      HostReconciler as unknown as {
+        runtimeTokenSecretData(record: k8s.V1Secret): Record<string, string> | null
+      }
+    ).runtimeTokenSecretData(record) ?? {}
+  return {
+    ...record,
+    data: {
+      ...material,
+      [MCP_HOST_RUNTIME_TOKEN_SECRET_REFRESH_KEY]: Buffer.from(
+        encodedRuntimeRefreshMaterial(Date.now() + 3_600_000)
+      ).toString('base64'),
+    },
+  }
+}
+
 /** Model persisted API state so a loss-of-authority test cannot invent a template. */
 function persistHostDeployment(appsApi: MockAppsApi, host: HostCRD, initial: k8s.V1Deployment) {
   let live = structuredClone(initial)
@@ -938,12 +965,14 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     appsApi.readNamespacedDeployment.mockImplementation(request =>
       request.name === host.name ? Promise.reject({ code: 404 }) : read(request)
     )
+    vi.mocked(issueMcpHostRuntimeTokens).mockClear()
     await reconciler.reconcile(host)
     expect(
       appsApi.createNamespacedDeployment.mock.calls.filter(
         ([r]) => r.body.metadata.name === host.name
       )
     ).toHaveLength(0)
+    expect(vi.mocked(issueMcpHostRuntimeTokens)).not.toHaveBeenCalled()
     expect(reconciler.getStatus(host.name)).toMatchObject({ deployed: false, ready: false })
     synced = true
     await reconciler.reconcile(host)
@@ -1137,6 +1166,12 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     })
     customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(host))
     const applied = createReconciler().reconciler.buildDeployment(host)
+    applied.spec!.replicas = 0
+    applied.spec!.template!.metadata!.annotations = {
+      ...applied.spec!.template!.metadata!.annotations,
+      'clerum.io/runtime-token-revision': 'applied-runtime-revision',
+    }
+    markPersistedRuntimeTrusted(applied, host, 0)
     const live = persistHostDeployment(appsApi, host, applied)
     const provision = vi
       .spyOn(reconciler as any, 'provisionRuntimeTokenRevision')
@@ -1146,6 +1181,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     expect(provision).toHaveBeenCalledWith(host, {
       forceFreshForWake: true,
       targetSuspended: false,
+      preserveDeploymentTemplateOnWake: true,
     })
     expect(provision.mock.invocationCallOrder[0]).toBeLessThan(
       appsApi.replaceNamespacedDeployment.mock.invocationCallOrder.at(-1)!
@@ -1448,6 +1484,11 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     const applied = reconciler.buildDeployment(host)
     applied.spec!.replicas = 0
     applied.spec!.template.metadata!.annotations = { 'example.org/applied': 'keep-exactly' }
+    applied.spec!.template!.metadata!.annotations = {
+      ...applied.spec!.template!.metadata!.annotations,
+      'clerum.io/runtime-token-revision': 'applied-runtime-revision',
+    }
+    markPersistedRuntimeTrusted(applied, host, 0)
     const live = persistHostDeployment(appsApi, host, applied)
     const provision = vi
       .spyOn(reconciler as any, 'provisionRuntimeTokenRevision')
@@ -1459,12 +1500,142 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     expect(provision).toHaveBeenCalledWith(host, {
       forceFreshForWake: true,
       targetSuspended: false,
+      preserveDeploymentTemplateOnWake: true,
     })
     expect(provision.mock.invocationCallOrder[0]).toBeLessThan(
       appsApi.replaceNamespacedDeployment.mock.invocationCallOrder.at(-1)!
     )
     expect(live().spec!.replicas).toBe(1)
     expect(live().spec!.template).toEqual(applied.spec!.template)
+  })
+
+  it('does not roll a held wake bootstrap when the watch recovers before Ready', async () => {
+    let cacheSynced = false
+    const host = makeStatelessHost({
+      status: { lifecycle: { state: 'active', wakeHandledGeneration: 1 } },
+    })
+    const { reconciler, appsApi, coreApi, customApi } = createReconciler({
+      isCommunicationChannelCacheSynced: () => cacheSynced,
+    })
+    customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(host))
+    let runtimeRecord = runtimeCredentialRecord(host)
+    coreApi.readNamespacedSecret.mockImplementation(({ name }) =>
+      name?.includes('runtime-tokens')
+        ? Promise.resolve(runtimeRecord)
+        : Promise.resolve({ metadata: { resourceVersion: '1' }, data: {} } as any)
+    )
+    const applied = reconciler.buildDeployment(host)
+    applied.spec!.replicas = 0
+    applied.spec!.template!.metadata!.annotations = {
+      ...applied.spec!.template!.metadata!.annotations,
+      'clerum.io/runtime-token-revision': 'applied-runtime-revision',
+    }
+    markPersistedRuntimeTrusted(applied, host, 0)
+    const live = persistHostDeployment(appsApi, host, applied)
+    const issueRuntimeMaterial = vi.mocked(issueMcpHostRuntimeTokens)
+    issueRuntimeMaterial.mockClear()
+
+    await reconciler.reconcile(host)
+
+    expect(issueRuntimeMaterial).toHaveBeenCalledOnce()
+    expect(live().spec!.replicas).toBe(1)
+    expect(live().spec!.template!.metadata!.annotations?.['clerum.io/runtime-token-revision']).toBe(
+      'applied-runtime-revision'
+    )
+    const wakeWrite = coreApi.replaceNamespacedSecret.mock.calls.find(([request]) =>
+      request.name?.includes('runtime-tokens')
+    )?.[0].body as k8s.V1Secret
+    expect(wakeWrite.metadata?.annotations).toMatchObject({
+      'clerum.io/runtime-token-bootstrap-state': 'fresh',
+      'clerum.io/runtime-token-rollout-required': 'false',
+      'clerum.io/runtime-token-bootstrap-deployment-uid': 'deployment-uid',
+      'clerum.io/runtime-token-bootstrap-applied-revision': 'applied-runtime-revision',
+    })
+    runtimeRecord = withReadableRuntimeRefreshMaterial(wakeWrite)
+    issueRuntimeMaterial.mockClear()
+    appsApi.createNamespacedDeployment.mockClear()
+    appsApi.replaceNamespacedDeployment.mockClear()
+    cacheSynced = true
+    await reconciler.reconcile(host)
+
+    expect(issueRuntimeMaterial).not.toHaveBeenCalled()
+    expect(
+      appsApi.replaceNamespacedDeployment.mock.calls.filter(
+        ([request]) => request.body?.metadata?.name === host.name
+      )
+    ).toHaveLength(0)
+
+    live().status = { readyReplicas: 1 }
+    coreApi.replaceNamespacedSecret.mockClear()
+    await reconciler.reconcile(host)
+
+    expect(issueRuntimeMaterial).not.toHaveBeenCalled()
+    expect(
+      appsApi.replaceNamespacedDeployment.mock.calls.filter(
+        ([request]) => request.body?.metadata?.name === host.name
+      )
+    ).toHaveLength(0)
+    const consumedWrite = coreApi.replaceNamespacedSecret.mock.calls.find(([request]) =>
+      request.name?.includes('runtime-tokens')
+    )?.[0].body as k8s.V1Secret
+    expect(consumedWrite.metadata?.annotations?.['clerum.io/runtime-token-bootstrap-state']).toBe(
+      'consumed'
+    )
+    runtimeRecord = consumedWrite
+
+    live().spec!.replicas = 0
+    live().status = { readyReplicas: 0 }
+    issueRuntimeMaterial.mockClear()
+    await reconciler.reconcile(host)
+
+    expect(issueRuntimeMaterial).toHaveBeenCalledOnce()
+    expect(live().spec!.replicas).toBe(1)
+  })
+
+  it('marks a newly created preserved wake bootstrap for scale-only delivery', async () => {
+    const host = makeStatelessHost()
+    const { reconciler, appsApi, coreApi } = createReconciler()
+    const deployment = trustedRuntimeDeployment(reconciler, host, {
+      replicas: 0,
+      readyReplicas: 0,
+    })
+    deployment.spec!.template!.metadata!.annotations = {
+      ...deployment.spec!.template!.metadata!.annotations,
+      'clerum.io/runtime-token-revision': 'applied-runtime-revision',
+    }
+    appsApi.readNamespacedDeployment.mockResolvedValue(deployment)
+    coreApi.readNamespacedSecret.mockRejectedValue({ code: 404 })
+    const issueRuntimeMaterial = vi.mocked(issueMcpHostRuntimeTokens)
+    issueRuntimeMaterial.mockClear()
+
+    const first = await (reconciler as any).ensureMcpHostRuntimeTokenSecret(host, {
+      forceFreshForWake: true,
+      targetSuspended: false,
+      preserveDeploymentTemplateOnWake: true,
+    })
+
+    expect(first.revision).toBe('applied-runtime-revision')
+    const created = coreApi.createNamespacedSecret.mock.calls.find(([request]) =>
+      request.body?.metadata?.name?.includes('runtime-tokens')
+    )?.[0].body as k8s.V1Secret
+    expect(created.metadata?.annotations).toMatchObject({
+      'clerum.io/runtime-token-bootstrap-state': 'fresh',
+      'clerum.io/runtime-token-rollout-required': 'false',
+      'clerum.io/runtime-token-bootstrap-applied-revision': 'applied-runtime-revision',
+    })
+
+    const readableCreated = withReadableRuntimeRefreshMaterial(created)
+    coreApi.readNamespacedSecret.mockResolvedValue(readableCreated)
+    deployment.spec!.replicas = 1
+    issueRuntimeMaterial.mockClear()
+
+    const second = await (reconciler as any).ensureMcpHostRuntimeTokenSecret(host, {
+      targetSuspended: false,
+      preserveDeploymentTemplateOnWake: true,
+    })
+
+    expect(issueRuntimeMaterial).not.toHaveBeenCalled()
+    expect(second.revision).toBe('applied-runtime-revision')
   })
 
   it('keeps an active held Deployment at zero when credential minting is unavailable', async () => {
@@ -1477,6 +1648,10 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(host))
     const applied = reconciler.buildDeployment(host)
     applied.spec!.replicas = 0
+    applied.spec!.template!.metadata!.annotations = {
+      ...applied.spec!.template!.metadata!.annotations,
+      'clerum.io/runtime-token-revision': 'applied-runtime-revision',
+    }
     markPersistedRuntimeTrusted(applied, host, 0)
     const live = persistHostDeployment(appsApi, host, applied)
     appsApi.replaceNamespacedDeployment.mockClear()
@@ -1490,6 +1665,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     expect(provision).toHaveBeenCalledWith(host, {
       forceFreshForWake: true,
       targetSuspended: false,
+      preserveDeploymentTemplateOnWake: true,
     })
     expect(appsApi.replaceNamespacedDeployment).not.toHaveBeenCalled()
     expect(live().spec!.replicas).toBe(0)
