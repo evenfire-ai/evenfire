@@ -143,7 +143,7 @@ describeRealPostgres('teardownMcpServerOAuthState — fenced by cr_uid (real Pos
     const name = `srv-tp-legacy-${randomUUID().slice(0, 8)}`
     const install = randomUUID()
     await insertDynamicClientPending(db, KEY, { ...dcrCreds(name, 'legacy'), installId: install })
-    // Emulate a pre-0119 legacy row: null the identity columns the migration added
+    // Emulate a pre-0121 legacy row: null the identity columns the migration added
     // (the encrypted creds still came from the real producer above).
     await db.query(
       `UPDATE dynamic_clients SET install_id = NULL, cr_uid = NULL

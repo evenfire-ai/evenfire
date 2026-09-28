@@ -9,7 +9,7 @@ const mockPoolCtor = vi.fn(function MockPool() {
 
 vi.mock('pg', () => ({ Pool: mockPoolCtor }))
 
-describe('0117_dynamic_clients_table migration', () => {
+describe('0119_dynamic_clients_table migration', () => {
   beforeEach(() => {
     vi.resetModules()
     vi.clearAllMocks()
@@ -22,13 +22,13 @@ describe('0117_dynamic_clients_table migration', () => {
     const versions = CONTROL_API_MIGRATIONS.map(m => m.version)
     // Renumbered 0116->0117 during the dev sync: dev's 0116_mcp_secret_rollback_permits
     // now sits between 0115 and this migration, so this guards ordering, not adjacency.
-    expect(versions).toContain('0117_dynamic_clients_table')
+    expect(versions).toContain('0119_dynamic_clients_table')
     expect(versions.indexOf('0115_llm_allowed_models_image_input')).toBeLessThan(
-      versions.indexOf('0117_dynamic_clients_table')
+      versions.indexOf('0119_dynamic_clients_table')
     )
     // The runtime-access grant for the table must run after the table exists.
-    expect(versions.indexOf('0117_dynamic_clients_table')).toBeLessThan(
-      versions.indexOf('0118_dynamic_clients_runtime_access')
+    expect(versions.indexOf('0119_dynamic_clients_table')).toBeLessThan(
+      versions.indexOf('0120_dynamic_clients_runtime_access')
     )
   })
 

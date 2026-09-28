@@ -9,7 +9,7 @@ const mockPoolCtor = vi.fn(function MockPool() {
 
 vi.mock('pg', () => ({ Pool: mockPoolCtor }))
 
-describe('0119_oauth_install_identity migration', () => {
+describe('0121_oauth_install_identity migration', () => {
   beforeEach(() => {
     vi.resetModules()
     vi.clearAllMocks()
@@ -20,14 +20,14 @@ describe('0119_oauth_install_identity migration', () => {
   it('is registered after the dynamic-clients table and its runtime-access grant', async () => {
     const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
     const versions = CONTROL_API_MIGRATIONS.map(m => m.version)
-    expect(versions).toContain('0119_oauth_install_identity')
-    // The columns extend dynamic_clients, so the table (0117) and its runtime
-    // grant (0118) must already exist when 0119 runs.
-    expect(versions.indexOf('0117_dynamic_clients_table')).toBeLessThan(
-      versions.indexOf('0119_oauth_install_identity')
+    expect(versions).toContain('0121_oauth_install_identity')
+    // The columns extend dynamic_clients, so the table (0119) and its runtime
+    // grant (0120) must already exist when 0121 runs.
+    expect(versions.indexOf('0119_dynamic_clients_table')).toBeLessThan(
+      versions.indexOf('0121_oauth_install_identity')
     )
-    expect(versions.indexOf('0118_dynamic_clients_runtime_access')).toBeLessThan(
-      versions.indexOf('0119_oauth_install_identity')
+    expect(versions.indexOf('0120_dynamic_clients_runtime_access')).toBeLessThan(
+      versions.indexOf('0121_oauth_install_identity')
     )
   })
 
@@ -40,7 +40,7 @@ describe('0119_oauth_install_identity migration', () => {
         sql.includes('ALTER TABLE dynamic_clients ADD COLUMN IF NOT EXISTS install_id UUID') &&
         sql.includes('cr_uid')
     )
-    expect(ddl, 'the 0119 DDL was applied').toBeDefined()
+    expect(ddl, 'the 0121 DDL was applied').toBeDefined()
     const sql = ddl as string
 
     // Additive + idempotent columns.
@@ -67,15 +67,15 @@ describe('0119_oauth_install_identity migration', () => {
     const recordedVersions = clientQuery.mock.calls
       .filter(([q]) => String(q).includes('INSERT INTO schema_migrations'))
       .map(([, params]) => (Array.isArray(params) ? params[0] : undefined))
-    expect(recordedVersions).toContain('0119_oauth_install_identity')
+    expect(recordedVersions).toContain('0121_oauth_install_identity')
   })
 
   it('needs no new runtime-access grant — ADD COLUMN is covered by the table GRANTs', async () => {
     const { initDb } = await import('../src/db.js')
     await initDb()
     const sqls = clientQuery.mock.calls.map(([sql]) => String(sql))
-    // No GRANT is emitted for the 0119 columns: they inherit the 0117/0118
-    // table-level GRANTs. Any GRANT on dynamic_clients belongs to 0118, not here.
+    // No GRANT is emitted for the 0121 columns: they inherit the 0119/0120
+    // table-level GRANTs. Any GRANT on dynamic_clients belongs to 0120, not here.
     const grantsInInstallIdentity = sqls.filter(
       sql => sql.includes('install_id') && sql.includes('cr_uid') && sql.includes('GRANT')
     )

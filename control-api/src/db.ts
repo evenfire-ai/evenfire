@@ -6508,7 +6508,7 @@ async function applyDynamicClientsTable(db: DbClient): Promise<void> {
 }
 
 async function applyDynamicClientsRuntimeAccess(db: DbClient): Promise<void> {
-  // `dynamic_clients` was created (0117) after the base migration's
+  // `dynamic_clients` was created (0119) after the base migration's
   // `GRANT ... ON ALL TABLES IN SCHEMA public`, which only reaches tables that
   // existed when it ran. Without this the runtime role has f/f/f/f on the table
   // and no USAGE/SELECT/UPDATE on its identity sequence, so dynamicClientStore's
@@ -6541,7 +6541,7 @@ async function applyOAuthInstallIdentity(db: DbClient): Promise<void> {
   // Greenfield/additive: dynamic_clients ships only on this branch, so no
   // backfill is possible or needed (legacy rows keep both columns NULL and the
   // decision logic treats them as name-only). ADD COLUMN is covered by the table
-  // GRANTs from 0117/0118 (legacy_dml), so no new runtime-access grant is needed.
+  // GRANTs from 0119/0120 (legacy_dml), so no new runtime-access grant is needed.
   // Idempotent: ADD COLUMN IF NOT EXISTS, and each CHECK is guarded on
   // pg_constraint (Postgres has no ADD CONSTRAINT IF NOT EXISTS).
   await db.query(`

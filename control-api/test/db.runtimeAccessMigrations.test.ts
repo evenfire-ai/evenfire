@@ -55,7 +55,7 @@ describe('runtime access migrations', () => {
     expect(recordedVersions).toContain('0070_member_registration_runtime_delete_revoke')
   })
 
-  it('0117 grants the control-api runtime S/I/U/D on dynamic_clients and USAGE/SELECT/UPDATE on its sequence', async () => {
+  it('0120 grants the control-api runtime S/I/U/D on dynamic_clients and USAGE/SELECT/UPDATE on its sequence', async () => {
     const { initDb } = await import('../src/db.js')
     await initDb()
 
@@ -76,6 +76,6 @@ describe('runtime access migrations', () => {
     const recordedVersions = clientQuery.mock.calls
       .filter(([sql]) => String(sql).includes('INSERT INTO schema_migrations'))
       .map(([, params]) => (Array.isArray(params) ? params[0] : undefined))
-    expect(recordedVersions).toContain('0118_dynamic_clients_runtime_access')
+    expect(recordedVersions).toContain('0120_dynamic_clients_runtime_access')
   })
 })

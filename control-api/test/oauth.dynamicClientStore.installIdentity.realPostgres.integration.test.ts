@@ -579,13 +579,13 @@ describeRealPostgres('dynamicClientStore install identity (real Postgres)', () =
     ).not.toBeNull()
   })
 
-  it('migration 0119 is idempotent — re-running the guarded DDL over an already-migrated DB does not error', async () => {
+  it('migration 0121 is idempotent — re-running the guarded DDL over an already-migrated DB does not error', async () => {
     // Force applyPendingMigrations to re-run applyOAuthInstallIdentity against a DB
     // that ALREADY has the columns and CHECK constraints. This exercises the real
     // guards (ADD COLUMN IF NOT EXISTS + pg_constraint DO-blocks) end to end — a
     // mocked pg that never executes DDL cannot. A dropped guard would raise a
     // duplicate-object error here instead of resolving.
-    await db.query(`DELETE FROM schema_migrations WHERE version = '0119_oauth_install_identity'`)
+    await db.query(`DELETE FROM schema_migrations WHERE version = '0121_oauth_install_identity'`)
     await expect(initDb({ connect: () => dbPool.connect() })).resolves.not.toThrow()
 
     // Still exactly one copy of each object — no duplicate column or constraint.
