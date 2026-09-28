@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { config } from '../src/config.js'
 import type { DbClient } from '../src/db.js'
 import { deriveOAuthEncryptionKey } from '../src/oauth/encryption.js'
+import { buildMcpServerGrantKey, resolveServerOAuth } from '../src/oauth/mcpServerOAuthSpec.js'
 import {
   bootstrapSharedOAuthGrant,
   deleteOAuthGrant,
@@ -39,8 +40,27 @@ const SHARED_KEY = {
   oauthClientId: 'google-drive',
 }
 
-// A reader key as `buildMcpServerGrantKey` produces it: it carries the live CR uid.
+// A reader key of a non-baked lane: it carries the live CR uid but no legacyProvider.
 const SHARED_READ_KEY = { ...SHARED_KEY, crUid: 'uid-1' }
+
+/** Reader key derived from a baked CR, exactly as the broker/gate/sweep build it. */
+function bakedReaderKey(grantScope: 'user' | 'context', userId?: string) {
+  const resolved = resolveServerOAuth({
+    metadata: { uid: 'uid-1', name: 'gdrive' },
+    spec: {
+      contextRef: 'ctx-9',
+      oauth: { id: 'google-drive', provider: 'google', grantScope },
+    },
+  })
+  if (!resolved) throw new Error('fixture: server did not resolve as OAuth')
+  const key = buildMcpServerGrantKey(resolved, {
+    mcpServerName: 'gdrive',
+    mcpServersNamespace: 'mcp-server',
+    userId,
+  })
+  if (!key) throw new Error('fixture: no grant key')
+  return key
+}
 
 describe('oauth store — shared (context-identity) grants', () => {
   it('bootstrapSharedOAuthGrant issues INSERT … ON CONFLICT DO UPDATE fenced by cr_uid, returns inserted', async () => {
@@ -163,7 +183,8 @@ describe('oauth store — shared (context-identity) grants', () => {
     expect(row?.crUid).toBe('uid-1')
     expect(calls[0].text).toContain("grant_kind = 'shared'")
     expect(calls[0].text).toContain('context_id = $4')
-    expect(calls[0].text).toContain('AND (cr_uid = $6 OR cr_uid IS NULL)')
+    expect(calls[0].text).toContain('AND cr_uid = $6')
+    expect(calls[0].text).not.toContain('cr_uid IS NULL')
     expect(calls[0].values).toEqual([
       'mcpserver',
       'mcp-server',
@@ -179,7 +200,8 @@ describe('oauth store — shared (context-identity) grants', () => {
     const exists = await oauthGrantExists(db, SHARED_READ_KEY)
     expect(exists).toBe(true)
     expect(calls[0].text).toContain("grant_kind = 'shared'")
-    expect(calls[0].text).toContain('AND (cr_uid = $6 OR cr_uid IS NULL)')
+    expect(calls[0].text).toContain('AND cr_uid = $6')
+    expect(calls[0].text).not.toContain('cr_uid IS NULL')
     expect(calls[0].values).toEqual([
       'mcpserver',
       'mcp-server',
@@ -188,6 +210,27 @@ describe('oauth store — shared (context-identity) grants', () => {
       'google-drive',
       'uid-1',
     ])
+  })
+
+  it('a baked reader key also admits unsealed rows of its own provider only (shared)', async () => {
+    const key = bakedReaderKey('context')
+    for (const read of [
+      (db: DbClient) => getOAuthGrant(db, KEY, key),
+      (db: DbClient) => oauthGrantExists(db, key),
+    ]) {
+      const { db, calls } = fakeDb()
+      await read(db)
+      expect(calls[0].text).toContain('AND (cr_uid = $6 OR (cr_uid IS NULL AND provider = $7))')
+      expect(calls[0].values).toEqual([
+        'mcpserver',
+        'mcp-server',
+        'gdrive',
+        'ctx-9',
+        'google-drive',
+        'uid-1',
+        'google',
+      ])
+    }
   })
 
   it('an mcp-server reader key without a uid matches nothing and issues no query', async () => {
@@ -237,7 +280,8 @@ describe('oauth store — owner_kind on user/service ops (recipe domain unchange
       crUid: 'uid-1',
     })
     expect(calls[0].text).toContain('owner_kind = $1')
-    expect(calls[0].text).toContain('AND (cr_uid = $6 OR cr_uid IS NULL)')
+    expect(calls[0].text).toContain('AND cr_uid = $6')
+    expect(calls[0].text).not.toContain('cr_uid IS NULL')
     expect(calls[0].values).toEqual([
       'mcpserver',
       'mcp-server',
@@ -245,6 +289,21 @@ describe('oauth store — owner_kind on user/service ops (recipe domain unchange
       'user-1',
       'google-drive',
       'uid-1',
+    ])
+  })
+
+  it('getOAuthGrant(user) with a baked reader key admits unsealed rows of its provider', async () => {
+    const { db, calls } = fakeDb()
+    await getOAuthGrant(db, KEY, bakedReaderKey('user', 'user-1'))
+    expect(calls[0].text).toContain('AND (cr_uid = $6 OR (cr_uid IS NULL AND provider = $7))')
+    expect(calls[0].values).toEqual([
+      'mcpserver',
+      'mcp-server',
+      'gdrive',
+      'user-1',
+      'google-drive',
+      'uid-1',
+      'google',
     ])
   })
 

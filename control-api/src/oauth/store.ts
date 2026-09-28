@@ -38,11 +38,22 @@ export type OAuthOwnerKind = 'recipe' | 'mcpserver'
  *
  * `crUid` is the installation identity of an mcp-server owner (the live CR's
  * `metadata.uid`). The row readers ({@link getOAuthGrant}, {@link oauthGrantExists})
- * only return an mcp-server row sealed with that uid or unsealed (legacy), and an
- * mcp-server key WITHOUT a uid matches nothing: a same-name reinstall gets a new
- * uid, so a grant consented against the previous installation stays inert even if
- * its teardown never ran. Ignored for the recipe domain. Locks, deletes and
- * listings do not apply it (see {@link lockOAuthGrantForRefresh}).
+ * apply an installation fence to mcp-server keys:
+ *   - a key WITHOUT a uid matches nothing;
+ *   - a row sealed with another uid is invisible: a same-name reinstall gets a new
+ *     uid, so a SEALED grant consented against the previous installation stays
+ *     inert even if its teardown never ran;
+ *   - an unsealed (legacy, `cr_uid IS NULL`) row is visible only when the key
+ *     carries `legacyProvider` and the row's `provider` equals it. Only pods that
+ *     predate install identity wrote such rows, and they only spoke the baked
+ *     lane, so a remote/generic key, a key for another baked provider, or a key
+ *     built by hand without `legacyProvider` never sees one.
+ * Ignored for the recipe domain. Locks, deletes and listings do not apply it (see
+ * {@link lockOAuthGrantForRefresh}).
+ *
+ * `legacyProvider` is the baked `spec.oauth.provider` of the CR the key was built
+ * from; absent for every other lane. It is a separate name from the `provider`
+ * that refresh inputs carry (the value to WRITE) so a spread never conflates them.
  */
 export type OAuthGrantKey =
   | {
@@ -54,6 +65,7 @@ export type OAuthGrantKey =
       userId: string
       oauthClientId: string
       crUid?: string
+      legacyProvider?: string
     }
   | {
       grantKind: 'service'
@@ -63,6 +75,7 @@ export type OAuthGrantKey =
       recipeName: string
       oauthClientId: string
       crUid?: string
+      legacyProvider?: string
     }
   | {
       grantKind: 'shared'
@@ -73,6 +86,7 @@ export type OAuthGrantKey =
       contextId: string
       oauthClientId: string
       crUid?: string
+      legacyProvider?: string
     }
 
 /** Resolve the owner domain of a key, defaulting to the recipe domain. */
@@ -457,9 +471,13 @@ interface OAuthGrantDbRow {
 
 /**
  * Installation-identity predicate for the row readers, appended to each flavor's
- * WHERE with `nextParam` as its placeholder index. Returns null when the key can
- * match no row (an mcp-server key without a uid). Unsealed rows (`cr_uid IS NULL`)
- * stay visible: a pod that predates install identity writes them during a rollout.
+ * WHERE with `nextParam` (and `nextParam + 1`) as its placeholder indexes. Returns
+ * null when the key can match no row (an mcp-server key without a uid). A row
+ * sealed with the key's uid is always visible. An unsealed (`cr_uid IS NULL`) row
+ * is visible only to a key carrying `legacyProvider`, and only when its `provider`
+ * matches: pods that predate install identity wrote it, always on the baked lane,
+ * so serving it to another lane or provider would hand its tokens to an endpoint
+ * that was never consented to.
  */
 function installIdentityFence(
   input: OAuthGrantKey,
@@ -467,7 +485,13 @@ function installIdentityFence(
 ): { sql: string; params: string[] } | null {
   if (resolveOwnerKind(input) !== 'mcpserver') return { sql: '', params: [] }
   if (typeof input.crUid !== 'string' || input.crUid.length === 0) return null
-  return { sql: ` AND (cr_uid = $${nextParam} OR cr_uid IS NULL)`, params: [input.crUid] }
+  if (typeof input.legacyProvider === 'string' && input.legacyProvider.length > 0) {
+    return {
+      sql: ` AND (cr_uid = $${nextParam} OR (cr_uid IS NULL AND provider = $${nextParam + 1}))`,
+      params: [input.crUid, input.legacyProvider],
+    }
+  }
+  return { sql: ` AND cr_uid = $${nextParam}`, params: [input.crUid] }
 }
 
 /**
@@ -941,7 +965,9 @@ export async function listRemoteGrantsInProactiveWindow(
         AND (grant_kind = 'shared' OR (grant_kind = 'user' AND background = true))
         -- An unsealed (legacy) row has no installation the sweep could check it
         -- against: the key built from it would match nothing in the fenced reader.
-        -- It is refreshed only on the reactive path, whose key carries the live uid.
+        -- The fenced reader serves an unsealed row only to a baked key of the same
+        -- provider, so an unsealed remote/generic row is never refreshed on any
+        -- path; reconnecting replaces and seals it.
         AND cr_uid IS NOT NULL
       ORDER BY recipe_namespace, recipe_name, oauth_client_id, grant_kind,
                user_id NULLS FIRST, context_id NULLS FIRST`,

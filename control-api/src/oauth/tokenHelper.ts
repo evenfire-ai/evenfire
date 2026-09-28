@@ -19,7 +19,12 @@ import {
   isKnownOAuthProvider,
   parseRemoteTokenResponse,
 } from './providers.js'
-import { type OAuthGrantKey, getOAuthGrant, refreshOAuthGrantTokens } from './store.js'
+import {
+  type OAuthGrantKey,
+  getOAuthGrant,
+  refreshOAuthGrantTokens,
+  resolveOwnerKind,
+} from './store.js'
 
 /**
  * Fetch the current access token for a grant (user or service), refreshing on
@@ -139,6 +144,17 @@ export async function getAccessToken(
 
   const decl = recipe.spec?.oauthClients?.find(c => c.id === input.oauthClientId)
   if (!decl) return { kind: 'unknown_oauth_client' }
+
+  // Only pods without install identity wrote unsealed rows, and those only spoke
+  // the baked lane. The owner CR is re-read here, after the caller built the key,
+  // so it may now be another lane or provider; refreshing would send the legacy
+  // refresh token to an endpoint nobody consented to. Same rule as the store's
+  // reader fence, applied to the CR as it is now.
+  if (resolveOwnerKind(input) === 'mcpserver' && grant.crUid === undefined) {
+    if (decl.remote || decl.generic || decl.provider !== grant.provider) {
+      return { kind: 'no_grant' }
+    }
+  }
 
   // Remote lane (`source:'remote'`): discovery-derived refresh over the IP-pinned
   // transport (DEC-17), public token client, credentials per `secretSource`. The

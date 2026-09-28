@@ -19,6 +19,7 @@ import {
   assertRemoteOAuthSpecCoherent,
   buildMcpServerGrantKey,
   readCrUid,
+  readOAuthLane,
   resolveServerOAuth,
   resolveServerOAuthSubject,
 } from '../oauth/mcpServerOAuthSpec.js'
@@ -98,11 +99,12 @@ export function normalizeMcpServerOwnerDecl(
 ): RecipeWithOAuthClients | null {
   const oauth = server.spec?.oauth
   if (!oauth) return null
+  const lane = readOAuthLane(oauth)
   // Remote lane (`source:'remote'`): delegate to the SHARED subject resolver so the
   // refresh reader reads the remote client (public / DCR / pre-registered)
   // IDENTICALLY to the mint + callback (D4 — no drift). The remote decl carries the
   // pinned routing + secretSource that `getAccessToken` branches on.
-  if (oauth.source === 'remote') {
+  if (lane === 'remote') {
     const resolved = resolveServerOAuthSubject(server)
     if (!resolved) return null
     return { metadata: ownerMetadata(server), spec: { oauthClients: [resolved.decl] } }
@@ -111,7 +113,7 @@ export function normalizeMcpServerOwnerDecl(
   // subject resolver (D4 — no drift with mint + callback) so the refresh reader
   // gets the pinned `generic` routing + secretSource that `getAccessToken`
   // branches on.
-  if (oauth.source === 'generic') {
+  if (lane === 'generic') {
     const resolved = resolveServerOAuthSubject(server)
     if (!resolved) return null
     return { metadata: ownerMetadata(server), spec: { oauthClients: [resolved.decl] } }

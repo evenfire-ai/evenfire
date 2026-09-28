@@ -194,6 +194,8 @@ describe('routes/mcp-oauth — POST /mcp-oauth/user-token (U1)', () => {
       'user-1',
       'google-drive',
       await liveUid(gateway, 'gdrive'),
+      // Baked CR: the reader key carries its provider for unsealed legacy rows.
+      'google',
     ])
   })
 
@@ -267,6 +269,8 @@ describe('routes/mcp-oauth — POST /mcp-oauth/user-token (U1)', () => {
       'ctx-A',
       'google-drive',
       await liveUid(gateway, 'gdrive'),
+      // Baked CR: the reader key carries its provider for unsealed legacy rows.
+      'google',
     ])
   })
 
@@ -321,6 +325,8 @@ describe('routes/mcp-oauth — POST /mcp-oauth/user-token (U1)', () => {
       'ctx-A',
       'google-drive',
       await liveUid(gateway, 'gdrive'),
+      // Baked CR: the reader key carries its provider for unsealed legacy rows.
+      'google',
     ])
   })
 
@@ -556,6 +562,8 @@ describe('routes/mcp-oauth — POST /mcp-oauth/grants/exists (mini-spec 13)', ()
       'nobody',
       'google-drive',
       await liveUid(gateway, 'gdrive'),
+      // Baked CR: the reader key carries its provider for unsealed legacy rows.
+      'google',
     ])
   })
 
@@ -654,6 +662,8 @@ describe('routes/mcp-oauth — POST /mcp-oauth/grants/exists (mini-spec 13)', ()
       'ctx-real',
       'google-drive',
       await liveUid(gateway, 'team'),
+      // Baked CR: the reader key carries its provider for unsealed legacy rows.
+      'google',
     ])
   })
 

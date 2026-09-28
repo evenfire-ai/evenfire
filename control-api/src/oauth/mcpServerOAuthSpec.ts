@@ -77,6 +77,31 @@ export interface ResolvedServerOAuth {
    * identity grant reads are fenced by. Undefined when the object carried none.
    */
   crUid?: string
+  /**
+   * The CR's `spec.oauth.provider`, present only on the baked lane. It lets the
+   * store serve an unsealed (legacy) grant written by a pod without install
+   * identity, and only one of this same provider.
+   */
+  legacyProvider?: string
+}
+
+/**
+ * OAuth lane of a McpServer. `unknown` is a `source` value no reader recognises;
+ * callers that need a decl keep treating it as baked, but it never qualifies for
+ * legacy (unsealed) grants.
+ */
+export type McpServerOAuthLane = 'baked' | 'remote' | 'generic' | 'unknown'
+
+/**
+ * The single lane classifier for `spec.oauth.source`: absent (undefined/null) ⇒
+ * baked; the literals `'remote'`/`'generic'`; any other value (including `''`) ⇒
+ * unknown.
+ */
+export function readOAuthLane(oauth: McpServerOAuthDecl): McpServerOAuthLane {
+  const source = oauth.source
+  if (source === undefined || source === null) return 'baked'
+  if (source === 'remote' || source === 'generic') return source
+  return 'unknown'
 }
 
 /**
@@ -103,7 +128,19 @@ export function resolveServerOAuth(server: McpServerOAuthSpecInput): ResolvedSer
     typeof server.spec?.contextRef === 'string' && server.spec.contextRef.length > 0
       ? server.spec.contextRef
       : undefined
-  return { oauthClientId: oauth.id, grantScope, contextRef, crUid: readCrUid(server) }
+  const legacyProvider =
+    readOAuthLane(oauth) === 'baked' &&
+    typeof oauth.provider === 'string' &&
+    oauth.provider.length > 0
+      ? oauth.provider
+      : undefined
+  return {
+    oauthClientId: oauth.id,
+    grantScope,
+    contextRef,
+    crUid: readCrUid(server),
+    ...(legacyProvider ? { legacyProvider } : {}),
+  }
 }
 
 /** The coordinates the caller supplies to derive an mcp-server grant key. */
@@ -155,6 +192,7 @@ export function buildMcpServerGrantKey(
       contextId: resolved.contextRef,
       oauthClientId: resolved.oauthClientId,
       crUid: resolved.crUid,
+      ...(resolved.legacyProvider ? { legacyProvider: resolved.legacyProvider } : {}),
     }
   }
   if (typeof coords.userId !== 'string' || coords.userId.length === 0) return null
@@ -166,6 +204,7 @@ export function buildMcpServerGrantKey(
     userId: coords.userId,
     oauthClientId: resolved.oauthClientId,
     crUid: resolved.crUid,
+    ...(resolved.legacyProvider ? { legacyProvider: resolved.legacyProvider } : {}),
   }
 }
 
@@ -230,7 +269,7 @@ function remoteOAuthSpecIncoherence(oauth: McpServerOAuthDecl): RemoteOAuthSpecI
  */
 export function assertRemoteOAuthSpecCoherent(server: McpServerOAuthSpecInput): void {
   const oauth = server.spec?.oauth
-  if (!oauth || oauth.source !== 'remote') return
+  if (!oauth || readOAuthLane(oauth) !== 'remote') return
   const reason = remoteOAuthSpecIncoherence(oauth)
   if (!reason) return
   const name = server.metadata?.name
@@ -406,9 +445,10 @@ export function resolveServerOAuthSubject(
       ? server.spec.contextRef
       : undefined
   const crUid = readCrUid(server)
+  const lane = readOAuthLane(oauth)
 
   // ─── Remote lane (`source:'remote'`) ─────────────────────────────────────
-  if (oauth.source === 'remote') {
+  if (lane === 'remote') {
     assertRemoteOAuthSpecCoherent(server)
     const remote = extractRemoteRouting(oauth)
     if (!remote) return null
@@ -432,7 +472,7 @@ export function resolveServerOAuthSubject(
   }
 
   // ─── Generic self-hosted lane (`source:'generic'`, DEC-28) ────────────────
-  if (oauth.source === 'generic') {
+  if (lane === 'generic') {
     const generic = extractGenericRouting(oauth)
     if (!generic) return null
     const secretSource = resolveGenericSecretSource(oauth)

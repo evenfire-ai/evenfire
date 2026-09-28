@@ -151,6 +151,8 @@ describe('resolveServerOAuthSubject — generic lane (DEC-28)', () => {
       grantScope: 'context',
       contextRef: 'ctx-a',
     })
+    // Only a baked CR may see unsealed legacy grants.
+    expect(r).not.toHaveProperty('legacyProvider')
   })
 })
 

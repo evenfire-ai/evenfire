@@ -228,7 +228,16 @@ describeRealPostgres('teardownMcpServerOAuthState — fenced by cr_uid (real Pos
         crUid,
       })
     expect(await exists('user-u', U)).toBe(false)
-    expect(await exists('user-legacy', U)).toBe(false)
+    // No reader key sees an unsealed row unless it names the row's provider, so the
+    // legacy row is checked on the table itself: a fenced read would be `false`
+    // whether or not the purge ran.
+    const legacyRows = await db.query(
+      `SELECT 1 FROM oauth_grants
+        WHERE owner_kind = 'mcpserver' AND recipe_namespace = $1 AND recipe_name = $2
+          AND user_id = 'user-legacy'`,
+      [NS, name]
+    )
+    expect(legacyRows.rows).toHaveLength(0)
     // The reinstall's grant (uid U′) survives (R3-H5).
     expect(await exists('user-reinstall', Uprime)).toBe(true)
   })

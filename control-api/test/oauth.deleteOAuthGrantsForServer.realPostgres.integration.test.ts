@@ -169,17 +169,15 @@ describeRealPostgres('deleteOAuthGrantsForServer — full server-scoped wipe (re
         crUid: U,
       })
     ).toBe(false)
-    expect(
-      await oauthGrantExists(db, {
-        grantKind: 'user',
-        ownerKind: 'mcpserver',
-        recipeNamespace: NS,
-        recipeName: 'gdrive',
-        userId: 'user-legacy',
-        oauthClientId: 'google-drive',
-        crUid: U,
-      })
-    ).toBe(false)
+    // The unsealed row is checked on the table itself: a fenced read without the
+    // row's provider would be `false` whether or not the purge ran.
+    const legacyRows = await db.query(
+      `SELECT 1 FROM oauth_grants
+        WHERE owner_kind = 'mcpserver' AND recipe_namespace = $1 AND recipe_name = 'gdrive'
+          AND user_id = 'user-legacy'`,
+      [NS]
+    )
+    expect(legacyRows.rows).toHaveLength(0)
     // … the DIFFERENT-uid gdrive grant (the reinstall's) SURVIVES (R3-H5 fence) …
     expect(
       await oauthGrantExists(db, {

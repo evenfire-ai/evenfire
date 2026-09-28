@@ -135,6 +135,8 @@ describe('resolveServerOAuthSubject — remote lane (real-producer fixtures, T1)
     })
     const r = resolveServerOAuth(serverFrom(oauth as unknown as Record<string, unknown>))
     expect(r).toEqual({ oauthClientId: CIMD_SELF, grantScope: 'context', contextRef: 'ctx-a' })
+    // Only a baked CR may see unsealed legacy grants.
+    expect(r).not.toHaveProperty('legacyProvider')
   })
 })
 

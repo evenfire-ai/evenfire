@@ -145,6 +145,8 @@ describe('resolveInvocableMcpServersForContexts — rpc-proxy grant-presence gat
       // The installation identity comes from the listed CR (gateway-assigned uid).
       crUid: ((await g.getResource('mcpservers', 'gdrive', NS)) as { metadata: { uid: string } })
         .metadata.uid,
+      // Baked CR: its provider lets the store serve that provider's unsealed rows.
+      legacyProvider: 'google',
     })
   })
 
@@ -185,6 +187,7 @@ describe('resolveInvocableMcpServersForContexts — context (shared) flavor', ()
       crUid: (
         (await g.getResource('mcpservers', 'gdrive-shared', NS)) as { metadata: { uid: string } }
       ).metadata.uid,
+      legacyProvider: 'google',
     })
     // Shared key must not carry a userId — invocability is team-wide.
     expect(key).not.toHaveProperty('userId')
