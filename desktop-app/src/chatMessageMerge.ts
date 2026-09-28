@@ -1,4 +1,4 @@
-import type { ChatMessage } from './types.js'
+import type { ChatMessage, ChatMessageAttachment } from './types.js'
 
 export function messageServerTurnNumber(message: Pick<ChatMessage, 'id' | 'serverTurnNumber'>) {
   if (message.serverTurnNumber !== undefined) return message.serverTurnNumber
@@ -14,6 +14,59 @@ function serverSlotKey(message: Pick<ChatMessage, 'id' | 'role' | 'serverTurnNum
   return `${messageServerTurnNumber(message)}\u0000${message.role}`
 }
 
+function attachmentName(attachment: ChatMessageAttachment): string {
+  return (attachment.filename || attachment.label).trim()
+}
+
+/** Preserve server chips while recovering bytes that only the optimistic message has. */
+function mergeByteBearingAttachments(
+  server: ChatMessageAttachment[] | undefined,
+  local: ChatMessageAttachment[] | undefined
+): ChatMessageAttachment[] | undefined {
+  if (!server?.length) return local
+  if (!local?.length) return server
+
+  const byteBearing = local.filter(attachment => Boolean(attachment.dataBase64))
+  if (!byteBearing.length) return server
+  const consumed = new Set<ChatMessageAttachment>()
+  const merged = server.map(serverAttachment => {
+    const sameId = byteBearing.find(
+      localAttachment =>
+        !consumed.has(localAttachment) &&
+        localAttachment.type === serverAttachment.type &&
+        localAttachment.id === serverAttachment.id
+    )
+    const name = attachmentName(serverAttachment)
+    const nameCandidates = name
+      ? byteBearing.filter(
+          localAttachment =>
+            !consumed.has(localAttachment) &&
+            localAttachment.type === serverAttachment.type &&
+            attachmentName(localAttachment) === name
+        )
+      : []
+    const serverNameIsUnique =
+      name &&
+      server.filter(
+        attachment =>
+          attachment.type === serverAttachment.type && attachmentName(attachment) === name
+      ).length === 1
+    const match =
+      sameId ?? (serverNameIsUnique && nameCandidates.length === 1 ? nameCandidates[0] : undefined)
+    if (!match) return serverAttachment
+    consumed.add(match)
+    return {
+      ...serverAttachment,
+      filename: serverAttachment.filename ?? match.filename,
+      mimeType: serverAttachment.mimeType ?? match.mimeType,
+      encoding: serverAttachment.encoding ?? match.encoding,
+      dataBase64: serverAttachment.dataBase64 ?? match.dataBase64,
+      sizeBytes: serverAttachment.sizeBytes ?? match.sizeBytes,
+    }
+  })
+  return [...merged, ...byteBearing.filter(attachment => !consumed.has(attachment))]
+}
+
 function preferredServerMessage(
   server: ChatMessage,
   local: ChatMessage | undefined,
@@ -23,7 +76,7 @@ function preferredServerMessage(
   return {
     ...server,
     task_id: local.task_id ?? server.task_id,
-    attachments: server.attachments?.length ? server.attachments : local.attachments,
+    attachments: mergeByteBearingAttachments(server.attachments, local.attachments),
     toolSteps: server.toolSteps?.length ? server.toolSteps : local.toolSteps,
   }
 }
@@ -363,9 +416,7 @@ export function mergeAuthoritativeServerMessages(
     if (collapsedEcho) {
       hydrated = {
         ...hydrated,
-        attachments: hydrated.attachments?.length
-          ? hydrated.attachments
-          : collapsedEcho.attachments,
+        attachments: mergeByteBearingAttachments(hydrated.attachments, collapsedEcho.attachments),
         toolSteps: hydrated.toolSteps?.length ? hydrated.toolSteps : collapsedEcho.toolSteps,
       }
     }
