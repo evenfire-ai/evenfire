@@ -24,6 +24,7 @@ vi.mock('../src/db.js', async importActual => {
 
 const { config } = await import('../src/config.js')
 const { createAdminResourcesRouter } = await import('../src/routes/admin/resources.js')
+const { clerumErrorHandler } = await import('../src/http/errorHandler.js')
 
 const NS = config.mcpServersNamespace
 const SERVER = 'srv'
@@ -167,5 +168,58 @@ describe('DELETE /admin/mcp-servers/:name — cleanup before delete, 503 repair_
     ])
     await expect(gw.getResource('mcpservers', SERVER, NS)).resolves.toBeTruthy()
     await expect(gw.getSecret(CREDENTIALS, NS)).rejects.toThrow()
+  })
+})
+
+describe('DELETE /admin/mcp-servers/:name — a missing CR touches nothing (R3-H5a)', () => {
+  // A reinstall recreates the CR (and its Secrets, which a pre-registered install writes
+  // before the CR) right after the uninstall's read found nothing. A name-addressed
+  // cleanup at that point would tear down the NEW installation.
+  it('answers 404 and leaves a CR, Secrets and allowlist recreated after the read intact', async () => {
+    const gw = new MockGateway(NS)
+    await gw.createResource(
+      'contexts',
+      { metadata: { name: 'ctx-a' }, spec: { contextId: 'ctx-a', mcpServers: [SERVER] } },
+      'contexts-ns'
+    )
+    const app = express()
+    app.use(express.json())
+    app.use(createAdminResourcesRouter(gw as unknown as K8sGateway))
+    app.use(clerumErrorHandler)
+
+    let recreatedUid: string | undefined
+    const realGet = MockGateway.prototype.getResource
+    vi.spyOn(gw, 'getResource').mockImplementation(async (plural, name, ns) => {
+      try {
+        return await realGet.call(gw, plural, name, ns)
+      } catch (err) {
+        if (plural === 'mcpservers' && name === SERVER && recreatedUid === undefined) {
+          gw.seedSecret(CREDENTIALS, NS, { stringData: { TOKEN: 'new' } })
+          gw.seedSecret(`${SERVER}-oauth-client`, NS, {
+            labels: { 'clerum.io/managed-by': 'control-api' },
+            stringData: { client_id: 'id', client_secret: 'sec' },
+          })
+          const cr = (await gw.createResource(
+            'mcpservers',
+            { metadata: { name: SERVER }, spec: { image: 'reinstall' } },
+            NS
+          )) as { metadata: { uid: string } }
+          recreatedUid = cr.metadata.uid
+        }
+        throw err
+      }
+    })
+
+    const res = await request(app).delete(`/admin/mcp-servers/${SERVER}`)
+
+    expect(res.status).toBe(404)
+    expect(res.body).toMatchObject({ error: `mcpservers/${SERVER} not found` })
+    await expect(realGet.call(gw, 'mcpservers', SERVER, NS)).resolves.toMatchObject({
+      metadata: { uid: recreatedUid },
+    })
+    await expect(gw.getSecret(CREDENTIALS, NS)).resolves.toBeTruthy()
+    await expect(gw.getSecret(`${SERVER}-oauth-client`, NS)).resolves.toBeTruthy()
+    expect(await allowlist(gw)).toEqual([SERVER])
+    expect(grantsPurges()).toBe(0)
   })
 })

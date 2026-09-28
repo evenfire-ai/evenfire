@@ -1,9 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
-import { config } from '../src/config.js'
-import { createAdminResourcesRouter } from '../src/routes/admin/resources.js'
 import { MockGateway } from './mockGateway.js'
+
+// The uninstall tears OAuth state down before deleting the CR and answers 503 when
+// that fails, so it needs a DB that answers (empty: nothing to tear down).
+vi.mock('../src/db.js', async importActual => {
+  const actual = await importActual<typeof import('../src/db.js')>()
+  return { ...actual, pool: { query: vi.fn(async () => ({ rows: [], rowCount: 0 })) } }
+})
+
+const { config } = await import('../src/config.js')
+const { createAdminResourcesRouter } = await import('../src/routes/admin/resources.js')
 
 // R3-H6: the McpServer uninstall path (`DELETE /admin/mcp-servers/:name`) cleans up
 // the derived-name `${name}-oauth-client` Secret. That name is not exclusive to
@@ -16,6 +24,18 @@ describe('DELETE /admin/mcp-servers/:name — oauth-client Secret ownership guar
 
   let prevMcpServersNs: string
   let prevContextsNs: string
+
+  // The Secret cleanup only runs for a live CR: a missing one answers 404 and touches
+  // nothing, so every case installs the server first.
+  async function gatewayWithServer(): Promise<MockGateway> {
+    const gw = new MockGateway('mcpservers-ns')
+    await gw.createResource(
+      'mcpservers',
+      { metadata: { name: 'my-gmail' }, spec: {} },
+      'mcpservers-ns'
+    )
+    return gw
+  }
 
   function makeApp(gateway: MockGateway) {
     const app = express()
@@ -38,7 +58,7 @@ describe('DELETE /admin/mcp-servers/:name — oauth-client Secret ownership guar
   })
 
   it('does NOT delete a foreign, unlabeled oauth-client Secret (operator-owned collision)', async () => {
-    const gw = new MockGateway('mcpservers-ns')
+    const gw = await gatewayWithServer()
     // Fixture from the real producer (MockGateway.getSecret): an operator Secret
     // that happens to carry the derived name and NO managed-by label.
     gw.seedSecret(OAUTH_SECRET, 'mcpservers-ns', {
@@ -58,7 +78,7 @@ describe('DELETE /admin/mcp-servers/:name — oauth-client Secret ownership guar
   })
 
   it('does NOT delete an oauth-client Secret managed by another controller', async () => {
-    const gw = new MockGateway('mcpservers-ns')
+    const gw = await gatewayWithServer()
     gw.seedSecret(OAUTH_SECRET, 'mcpservers-ns', {
       labels: { 'clerum.io/managed-by': 'Helm' },
       stringData: { client_id: 'id', client_secret: 'sec' },
@@ -76,7 +96,7 @@ describe('DELETE /admin/mcp-servers/:name — oauth-client Secret ownership guar
   })
 
   it('DOES delete a control-api-managed oauth-client Secret', async () => {
-    const gw = new MockGateway('mcpservers-ns')
+    const gw = await gatewayWithServer()
     gw.seedSecret(OAUTH_SECRET, 'mcpservers-ns', {
       labels: { 'clerum.io/managed-by': 'control-api' },
       stringData: { client_id: 'id', client_secret: 'sec' },

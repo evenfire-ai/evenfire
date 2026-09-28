@@ -13,13 +13,8 @@ import { validateCommunicationChannelSpec } from '../../http/validateCommunicati
 import { validateMcpServerSpecPreflight } from '../../http/validateMcpServerSpec.js'
 import { K8sGateway } from '../../k8s.js'
 import { deriveOAuthEncryptionKey } from '../../oauth/encryption.js'
-import {
-  captureMcpServerSecrets,
-  deleteCapturedSecrets,
-  uninstallMcpServer,
-} from '../../oauth/mcpServerUninstall.js'
+import { uninstallMcpServer } from '../../oauth/mcpServerUninstall.js'
 import { rootLogger } from '../../observability/logger.js'
-import { stripServerFromContexts } from '../../services/contextAllowlist.js'
 import { stripHookRefFromHosts } from '../../services/hostGuardrailRefs.js'
 import {
   K8sConflictError,
@@ -1104,20 +1099,15 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
           })
           return
         }
-        // The CR read found nothing, so there is no uid to fence an OAuth teardown by:
-        // only the name-addressed K8s cleanup runs, and OAuth state is left alone.
-        const secretCaptures = await captureMcpServerSecrets(gateway, name, ns, log)
-        const deleted = await gateway.deleteResource(plural, name, ns)
-        await deleteCapturedSecrets(gateway, secretCaptures, ns, log)
-        try {
-          await stripServerFromContexts(gateway, resourceNamespace('contexts'), name, contextName =>
-            log.info({ serverName: name, contextName }, 'Removed MCP server from Context allowlist')
-          )
-        } catch (err) {
-          log.error({ serverName: name, err }, 'Failed to clean up Context allowlists')
+        if (outcome.status === 'not_found') {
+          // Every cleanup runs before the CR delete, so a missing CR means "already clean"
+          // or "deleted out of band". Cleaning by name here would have no uid to fence
+          // by: it could delete a CR a reinstall recreated after this read, or the Secret
+          // a pre-registered reinstall creates before its CR.
+          throw new K8sNotFoundError(`mcpservers/${name} not found`)
         }
-        res.status(200).json(deleted)
-        return
+        const unhandled: never = outcome
+        throw new Error(`unhandled mcp-server uninstall outcome: ${JSON.stringify(unhandled)}`)
       }
 
       // CommunicationChannel: read the credentialsSecretRef name FIRST (we
