@@ -394,3 +394,20 @@ export declare function validateHostApprovalRequestId(
 ):
   | Readonly<{ ok: true; requestId: unknown }>
   | Readonly<{ ok: false; error: 'Missing userId or requestId' }>
+
+export type SessionsCursorWire = Readonly<{
+  version: 1
+  scope: string
+  updatedAt: string
+  key: string
+}>
+export declare function sessionsCursorScope(userSub: string, agent?: string): string
+export declare function decodeSessionsCursor(
+  cursor: string | undefined,
+  expectedScope?: string
+): SessionsCursorWire | null
+export declare function encodeSessionsCursor(
+  updatedAt: string,
+  key: string,
+  scope?: string
+): string
