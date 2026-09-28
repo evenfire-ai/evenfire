@@ -1,5 +1,5 @@
 import type { DbClient } from '../db.js'
-import { extractK8sError } from '../http/k8sError.js'
+import { extractK8sError, k8sSafeFailureMessage } from '../http/k8sError.js'
 import type { K8sGateway } from '../k8s.js'
 import type { Logger } from '../observability/logger.js'
 import { mcpServerUninstallTeardownFailuresTotal } from '../observability/metrics.js'
@@ -43,7 +43,19 @@ export type McpServerUninstallStage =
 export type McpServerUninstallResult =
   | { status: 'not_found' }
   | { status: 'completed'; crUid: string; deleted: string[]; crDeleteResponse: unknown }
-  | { status: 'incomplete'; pending: McpServerUninstallStage[]; deleted: string[] }
+  | {
+      status: 'incomplete'
+      pending: McpServerUninstallStage[]
+      deleted: string[]
+      /** Per-resource reason, for callers that report it (registry `warnings`). */
+      failures: UninstallFailure[]
+    }
+
+export interface UninstallFailure {
+  /** `Kind/name`, same vocabulary as `deleted`. */
+  resource: string
+  message: string
+}
 
 export type UninstallGateway = Pick<
   K8sGateway,
@@ -102,9 +114,9 @@ export async function deleteCapturedSecrets(
   namespace: string,
   logger: Logger,
   awaitDeletion?: McpServerUninstallDeps['awaitDeletion']
-): Promise<{ deleted: string[]; failed: boolean }> {
+): Promise<{ deleted: string[]; failures: UninstallFailure[] }> {
   const deleted: string[] = []
-  let failed = false
+  const failures: UninstallFailure[] = []
   for (const capture of captures) {
     if (capture.status !== 'ready') {
       if (capture.status !== 'absent') {
@@ -125,7 +137,10 @@ export async function deleteCapturedSecrets(
         logger.info({ secretName: capture.name, namespace }, 'McpServer Secret already gone')
         continue
       }
-      failed = true
+      failures.push({
+        resource: `Secret/${capture.name}`,
+        message: k8sSafeFailureMessage(err, 'unable to verify deletion'),
+      })
       mcpServerUninstallTeardownFailuresTotal.inc({
         stage: capture.name.endsWith('-oauth-client') ? 'oauth_client_secret' : 'secrets',
       })
@@ -135,7 +150,7 @@ export async function deleteCapturedSecrets(
       )
     }
   }
-  return { deleted, failed }
+  return { deleted, failures }
 }
 
 function readCrUid(cr: unknown): string | undefined {
@@ -150,11 +165,10 @@ export async function uninstallMcpServer(
   const { gateway, logger } = deps
   const { name, namespace } = target
   const deleted: string[] = []
-  const incomplete = (stage: McpServerUninstallStage[]): McpServerUninstallResult => ({
-    status: 'incomplete',
-    pending: stage,
-    deleted,
-  })
+  const incomplete = (
+    stage: McpServerUninstallStage[],
+    failures: UninstallFailure[]
+  ): McpServerUninstallResult => ({ status: 'incomplete', pending: stage, deleted, failures })
 
   // 1 · CR identity + Secret snapshots.
   let cr: unknown
@@ -173,14 +187,27 @@ export async function uninstallMcpServer(
       'McpServer read returned no metadata.uid; a real apiserver always sets it, so this ' +
         'points at a non-apiserver gateway or a broken proxy — retrying will not resolve it'
     )
-    return incomplete(['mcp_server'])
+    return incomplete(
+      ['mcp_server'],
+      [{ resource: `McpServer/${name}`, message: 'identity unavailable' }]
+    )
   }
   const secretCaptures = await captureMcpServerSecrets(gateway, name, namespace, logger)
-  // An unreadable Secret now would be orphaned once the CR is gone; stop before any
+  // A Secret that cannot be read, or read without the uid/resourceVersion its delete
+  // must be fenced on, would be orphaned once the CR is gone. Stop before any
   // mutation so the retry re-captures it.
-  if (secretCaptures.some(c => c.status === 'read-failed')) {
+  const unfenceable = secretCaptures.filter(
+    c => c.status === 'read-failed' || c.status === 'identity-unavailable'
+  )
+  if (unfenceable.length > 0) {
     mcpServerUninstallTeardownFailuresTotal.inc({ stage: 'secrets' })
-    return incomplete(['secrets'])
+    return incomplete(
+      ['secrets'],
+      unfenceable.map(c => ({
+        resource: `Secret/${c.name}`,
+        message: c.status === 'read-failed' ? 'unable to verify identity' : 'identity unavailable',
+      }))
+    )
   }
 
   // 2 · Context allowlists.
@@ -192,7 +219,15 @@ export async function uninstallMcpServer(
   } catch (err) {
     mcpServerUninstallTeardownFailuresTotal.inc({ stage: 'contexts' })
     logger.error({ serverName: name, err }, 'Context allowlist cleanup failed on uninstall')
-    return incomplete(['contexts'])
+    return incomplete(
+      ['contexts'],
+      [
+        {
+          resource: 'Context allowlists',
+          message: k8sSafeFailureMessage(err, 'unable to update safely'),
+        },
+      ]
+    )
   }
 
   // 3 · OAuth state of THIS installation.
@@ -206,9 +241,16 @@ export async function uninstallMcpServer(
   if (teardown.dynamicClient === 'done') deleted.push(`DynamicClient/${name}`)
   if (teardown.grants === 'done') deleted.push(`OAuthGrants/${name}`)
   const oauthPending: McpServerUninstallStage[] = []
-  if (teardown.dynamicClient === 'failed') oauthPending.push('dynamic_client')
-  if (teardown.grants === 'failed') oauthPending.push('oauth_grants')
-  if (oauthPending.length > 0) return incomplete(oauthPending)
+  const oauthFailures: UninstallFailure[] = []
+  if (teardown.dynamicClient === 'failed') {
+    oauthPending.push('dynamic_client')
+    oauthFailures.push({ resource: `DynamicClient/${name}`, message: 'revocation failed' })
+  }
+  if (teardown.grants === 'failed') {
+    oauthPending.push('oauth_grants')
+    oauthFailures.push({ resource: `OAuthGrants/${name}`, message: 'purge failed' })
+  }
+  if (oauthPending.length > 0) return incomplete(oauthPending, oauthFailures)
 
   // 4 · Secrets, fenced on the step-1 snapshots.
   const secrets = await deleteCapturedSecrets(
@@ -219,7 +261,7 @@ export async function uninstallMcpServer(
     deps.awaitDeletion
   )
   deleted.push(...secrets.deleted)
-  if (secrets.failed) return incomplete(['secrets'])
+  if (secrets.failures.length > 0) return incomplete(['secrets'], secrets.failures)
 
   // 5 · The CR itself, fenced on the uid every cleanup above was bound to.
   let crDeleteResponse: unknown
@@ -229,7 +271,15 @@ export async function uninstallMcpServer(
   } catch (err) {
     mcpServerUninstallTeardownFailuresTotal.inc({ stage: 'mcp_server' })
     logger.error({ serverName: name, namespace, err }, 'McpServer delete failed on uninstall')
-    return incomplete(['mcp_server'])
+    return incomplete(
+      ['mcp_server'],
+      [
+        {
+          resource: `McpServer/${name}`,
+          message: k8sSafeFailureMessage(err, 'unable to verify deletion'),
+        },
+      ]
+    )
   }
   deleted.push(`McpServer/${name}`)
 

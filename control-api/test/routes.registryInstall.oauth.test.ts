@@ -52,10 +52,19 @@ afterEach(() => {
   config.oauthCallbackBaseUrl = savedCallbackBaseUrl
 })
 
+// The McpServer uninstall tears OAuth state down before the CR delete; these cases
+// hold no OAuth rows, and the real-Postgres path lives in
+// routes.registryUninstall.realPostgres.
+const emptyUninstallDb = { query: async () => ({ rows: [], rowCount: 0 }) }
+
 function makeApp(gateway: MockGateway) {
   const app = express()
   app.use(express.json())
-  app.use(createAdminRegistryRouter(gateway as unknown as import('../src/k8s.js').K8sGateway))
+  app.use(
+    createAdminRegistryRouter(gateway as unknown as import('../src/k8s.js').K8sGateway, {
+      uninstallDb: emptyUninstallDb,
+    })
+  )
   app.use(
     (err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
       res.status(500).json({ error: err instanceof Error ? err.message : 'unknown' })

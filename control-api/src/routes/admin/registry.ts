@@ -5,13 +5,19 @@ import { isIP } from 'node:net'
 import { parse as parseYaml } from 'yaml'
 import { z } from 'zod'
 import { config } from '../../config.js'
+import { type DbClient, pool } from '../../db.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
-import { extractK8sError } from '../../http/k8sError.js'
+import { extractK8sError, k8sSafeFailureMessage } from '../../http/k8sError.js'
 import { validateMcpServerSpecPreflight } from '../../http/validateMcpServerSpec.js'
 import { K8sGateway } from '../../k8s.js'
 import type { UiAuthedRequest } from '../../middleware/controlUIAuth.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
+import { deriveOAuthEncryptionKey } from '../../oauth/encryption.js'
 import { GenericConfigSuggestionSchema } from '../../oauth/genericKnobs.js'
+import {
+  type McpServerUninstallResult,
+  uninstallMcpServer,
+} from '../../oauth/mcpServerUninstall.js'
 import { getOAuthProviderAdapter, isKnownOAuthProvider } from '../../oauth/providers.js'
 import { rootLogger } from '../../observability/logger.js'
 import { type AdminUserRecord, findAdminById } from '../../services/adminAuthService.js'
@@ -65,11 +71,7 @@ import {
   invalidSecretTypeReason,
 } from '../../services/secretConstraints.js'
 import { findSecretReferenceState } from '../../services/secretReferenceService.js'
-import {
-  SecretSnapshot,
-  isControlApiManagedSecret,
-  toSecretSnapshot,
-} from '../../services/secretRepository.js'
+import { SecretSnapshot, toSecretSnapshot } from '../../services/secretRepository.js'
 import {
   validateWorkflowRecipeEgressPreflight,
   validateWorkflowRecipeLimits,
@@ -1730,7 +1732,21 @@ function logRegistryFenceFailure(input: {
   )
 }
 
-export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
+export function createAdminRegistryRouter(
+  gateway?: K8sGateway,
+  deps: {
+    /** DB for the McpServer uninstall's OAuth teardown; defaults to the shared pool. */
+    uninstallDb?: DbClient
+  } = {}
+): Router {
+  const uninstallDb: DbClient = deps.uninstallDb ?? {
+    query: (text, values) => pool.query(text, values),
+  }
+  // Derived on first use: only the McpServer uninstall needs it, and deriving it here
+  // would make every registry route depend on the OAuth key being configured.
+  let oauthEncryptionKey: Buffer | undefined
+  const uninstallEncryptionKey = () =>
+    (oauthEncryptionKey ??= deriveOAuthEncryptionKey(config.oauthEncryptionKey))
   const router = Router()
 
   // GET /admin/registry/catalog — Catalog plus installed state for Control UI
@@ -3992,92 +4008,42 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
             return
           }
         } else {
-          // Uninstall MCP Server
-          let credentialSecretSnapshot: SecretSnapshot | null = null
-          const credentialSecretName = `${resourceName}-credentials`
-          let oauthClientSecretSnapshot: SecretSnapshot | null = null
-          const oauthClientSecretName = `${resourceName}-oauth-client`
-
-          // Capture the credential identity before deleting the parent CR. A
-          // same-name Secret replacement can be created after the CR delete;
-          // reading by name afterwards would make the cleanup delete a
-          // different owner's object. The later delete is bound to this exact
-          // UID/RV snapshot.
-          try {
-            credentialSecretSnapshot = normalizeSecretSnapshot(
-              await gateway.getSecret(credentialSecretName, namespace),
-              credentialSecretName,
-              namespace
-            )
-          } catch (err) {
-            if (extractK8sError(err)?.status !== 404) {
-              res.status(503).json({
-                error: 'registry_uninstall_outcome_ambiguous',
-                outcome: 'repair_required',
-                resourceName,
-                resourceType,
-                namespace,
-                deleted,
-                warnings: [
-                  ...warnings,
-                  `Secret/${credentialSecretName}: ${err instanceof Error ? err.message : 'unable to verify identity'}`,
-                ],
-              })
-              return
-            }
-          }
-
-          // Same fence for the managed OAuth client Secret. It is created in the
-          // install saga WITHOUT ownerReferences (it predates the CR), so K8s GC
-          // never collects it and control-api must delete it here — but by-name
-          // after the CR delete is exposed to the same delete/recreate race a
-          // concurrent reinstall opens. Bind the later delete to this snapshot.
-          // Absent (404) is the norm for non-OAuth / reference-mode servers.
-          try {
-            oauthClientSecretSnapshot = normalizeSecretSnapshot(
-              await gateway.getSecret(oauthClientSecretName, namespace),
-              oauthClientSecretName,
-              namespace
-            )
-          } catch (err) {
-            if (extractK8sError(err)?.status !== 404) {
-              res.status(503).json({
-                error: 'registry_uninstall_outcome_ambiguous',
-                outcome: 'repair_required',
-                resourceName,
-                resourceType,
-                namespace,
-                deleted,
-                warnings: [
-                  ...warnings,
-                  `Secret/${oauthClientSecretName}: ${err instanceof Error ? err.message : 'unable to verify identity'}`,
-                ],
-              })
-              return
-            }
-          }
-
-          try {
-            const current = await readResourceForRollback(gateway, 'mcpservers', {
-              metadata: { name: resourceName, namespace },
-              spec: {},
+          // Context allowlists hold bare server names and are stripped in the canonical
+          // contexts namespace, so uninstalling a same-name McpServer from any other
+          // namespace would unlist the canonical server from every Context.
+          if (namespace !== config.mcpServersNamespace) {
+            res.status(422).json({
+              error: `McpServer resources always live in namespace "${config.mcpServersNamespace}"`,
             })
-            if (!current) {
-              warnings.push(`McpServer/${resourceName}: not found`)
-            } else {
-              await gateway.deleteResource(
-                'mcpservers',
-                resourceName,
-                namespace,
-                resourcePreconditions(current)
-              )
-              await waitForDeletion(
-                () => gateway.getResource('mcpservers', resourceName, namespace),
-                `McpServer/${resourceName}`
-              )
-              deleted.push(`McpServer/${resourceName}`)
-            }
+            return
+          }
+          const encryptionKey = uninstallEncryptionKey()
+          let outcome: McpServerUninstallResult
+          try {
+            outcome = await uninstallMcpServer(
+              {
+                gateway,
+                db: uninstallDb,
+                encryptionKey,
+                dcrDeps: { logger: log },
+                contextsNamespace: config.contextsNamespace,
+                logger: log,
+                awaitDeletion: ({ kind, name, namespace: ns }) =>
+                  kind === 'McpServer'
+                    ? waitForDeletion(
+                        () => gateway.getResource('mcpservers', name, ns),
+                        `McpServer/${name}`
+                      )
+                    : waitForDeletion(() => gateway.getSecret(name, ns), `Secret/${name}`),
+              },
+              { name: resourceName, namespace }
+            )
           } catch (err) {
+            // Only the CR read throws; nothing has been touched yet.
+            log.error(
+              { err, resourceName, namespace },
+              'McpServer read failed on registry uninstall'
+            )
             res.status(503).json({
               error: 'registry_uninstall_outcome_ambiguous',
               outcome: 'repair_required',
@@ -4087,153 +4053,40 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
               deleted,
               warnings: [
                 ...warnings,
-                `McpServer/${resourceName}: ${err instanceof Error ? err.message : 'unable to verify deletion'}`,
+                `McpServer/${resourceName}: ${k8sSafeFailureMessage(err, 'unable to read')}`,
               ],
             })
             return
           }
-
-          // Delete credential Secret
-          try {
-            if (credentialSecretSnapshot) {
-              await gateway.deleteSecret(
-                credentialSecretSnapshot.name,
-                credentialSecretSnapshot.namespace,
-                secretPreconditions(credentialSecretSnapshot)
-              )
-              await waitForDeletion(
-                () =>
-                  gateway.getSecret(
-                    credentialSecretSnapshot!.name,
-                    credentialSecretSnapshot!.namespace
-                  ),
-                `Secret/${credentialSecretSnapshot.name}`
-              )
-              deleted.push(`Secret/${credentialSecretSnapshot.name}`)
-            }
-          } catch (err) {
-            if (extractK8sError(err)?.status !== 404) {
-              res.status(503).json({
-                error: 'registry_uninstall_outcome_ambiguous',
-                outcome: 'repair_required',
-                resourceName,
-                resourceType,
-                namespace,
-                deleted,
-                warnings: [
-                  ...warnings,
-                  `Secret/${credentialSecretName}: ${err instanceof Error ? err.message : 'unable to verify deletion'}`,
-                ],
-              })
-              return
-            }
-            // Secret may not exist (no credentials)
-          }
-
-          // Delete the managed OAuth client Secret (S1-U3, Step 3b). The name is
-          // DERIVED (`${serverName}-oauth-client`), but reference mode accepts
-          // arbitrary clientIdRef/clientSecretRef names, so an operator-owned
-          // Secret can carry this exact name by coincidence. UID/RV fencing proves
-          // same-object, not same-owner, so confirm control-api's install saga
-          // created it via the managed-by label before razing it; otherwise skip
-          // and warn. Fenced to the pre-CR-delete snapshot, a no-op when the
-          // server had no OAuth block or used reference mode with a different name.
-          try {
-            if (
-              oauthClientSecretSnapshot &&
-              !isControlApiManagedSecret(oauthClientSecretSnapshot)
-            ) {
-              log.warn(
-                {
-                  secretName: oauthClientSecretSnapshot.name,
-                  namespace: oauthClientSecretSnapshot.namespace,
-                },
-                'Skipped OAuth client Secret cleanup: not managed by control-api'
-              )
-            } else if (oauthClientSecretSnapshot) {
-              await gateway.deleteSecret(
-                oauthClientSecretSnapshot.name,
-                oauthClientSecretSnapshot.namespace,
-                secretPreconditions(oauthClientSecretSnapshot)
-              )
-              await waitForDeletion(
-                () =>
-                  gateway.getSecret(
-                    oauthClientSecretSnapshot!.name,
-                    oauthClientSecretSnapshot!.namespace
-                  ),
-                `Secret/${oauthClientSecretSnapshot.name}`
-              )
-              deleted.push(`Secret/${oauthClientSecretSnapshot.name}`)
-            }
-          } catch (err) {
-            if (extractK8sError(err)?.status !== 404) {
-              res.status(503).json({
-                error: 'registry_uninstall_outcome_ambiguous',
-                outcome: 'repair_required',
-                resourceName,
-                resourceType,
-                namespace,
-                deleted,
-                warnings: [
-                  ...warnings,
-                  `Secret/${oauthClientSecretName}: ${err instanceof Error ? err.message : 'unable to verify deletion'}`,
-                ],
-              })
-              return
-            }
-            // Secret may not exist (no OAuth block, or reference mode)
-          }
-
-          // Remove from Context allowlists
-          try {
-            const ctxList = (await gateway.listResource('contexts', namespace)) as Array<{
-              metadata?: { name?: string; uid?: string; resourceVersion?: string }
-              spec?: Record<string, unknown> & {
-                contextId?: string
-                description?: string
-                mcpServers?: string[]
-              }
-            }>
-            for (const ctx of ctxList) {
-              const name = ctx.metadata?.name
-              const servers = ctx.spec?.mcpServers ?? []
-              if (name && servers.includes(resourceName)) {
-                const uid = ctx.metadata?.uid
-                const resourceVersion = ctx.metadata?.resourceVersion
-                if (!uid || !resourceVersion) {
-                  throw new Error(`Context/${name} identity unavailable; refusing stale update`)
-                }
-                await gateway.updateResource(
-                  'contexts',
-                  name,
-                  {
-                    metadata: { uid, resourceVersion },
-                    spec: {
-                      ...ctx.spec,
-                      contextId: ctx.spec?.contextId ?? name,
-                      mcpServers: servers.filter(s => s !== resourceName),
-                    } as Record<string, unknown>,
-                  },
-                  namespace
-                )
-                deleted.push(`Context/${name} (removed from allowlist)`)
-              }
-            }
-          } catch (err) {
+          if (outcome.status === 'not_found') {
+            // Every cleanup runs before the CR delete, so a missing CR is already
+            // clean or was deleted out of band; cleaning by name would have no uid to
+            // fence a same-name reinstall's state against.
+            warnings.push(`McpServer/${resourceName}: not found`)
+          } else if (outcome.status === 'incomplete') {
             res.status(503).json({
-              error: 'registry_uninstall_partial',
+              // `ambiguous`: the CR delete (or its settle) could not be verified.
+              // `partial`: a cleanup step failed and the CR was deliberately kept.
+              // A CR read without a uid also reports `mcp_server`: that one is
+              // deterministic (nothing was touched) but unreachable with a real
+              // apiserver, so it shares the conservative code.
+              error: outcome.pending.includes('mcp_server')
+                ? 'registry_uninstall_outcome_ambiguous'
+                : 'registry_uninstall_partial',
               outcome: 'repair_required',
               resourceName,
               resourceType,
               namespace,
-              deleted,
-              warnings: [
-                ...warnings,
-                `Context allowlists: ${err instanceof Error ? err.message : 'unable to update safely'}`,
-              ],
+              pending: outcome.pending,
+              deleted: [...deleted, ...outcome.deleted],
+              warnings: [...warnings, ...outcome.failures.map(f => `${f.resource}: ${f.message}`)],
             })
             return
+          } else if (outcome.status === 'completed') {
+            deleted.push(...outcome.deleted)
+          } else {
+            const unhandled: never = outcome
+            throw new Error(`unhandled uninstall outcome: ${JSON.stringify(unhandled)}`)
           }
         }
 
