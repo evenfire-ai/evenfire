@@ -473,6 +473,41 @@ PY
   if [ "$success" -ne 1 ] || [ "$total_suites" -le 0 ] || \
      [ "$passed_suites" -ne "$total_suites" ] || [ "$failed_suites" -ne 0 ] || \
      [ "$failed_tests" -ne 0 ]; then
+    cat "$log_file" >&2 || true
+    python3 - "$json_file" <<'PY' >&2 || true
+import json
+import sys
+from pathlib import Path
+
+result = json.loads(Path(sys.argv[1]).read_text())
+print(
+    "T1 reporter counters:",
+    {
+        key: result.get(key)
+        for key in (
+            "success",
+            "numTotalTestSuites",
+            "numPassedTestSuites",
+            "numFailedTestSuites",
+            "numPendingTestSuites",
+            "numTotalTests",
+            "numPassedTests",
+            "numFailedTests",
+            "numPendingTests",
+        )
+    },
+)
+for test_result in result.get("testResults", []):
+    if test_result.get("status") == "passed":
+        continue
+    print(f"FAILED FILE: {test_result.get('name')}")
+    for assertion in test_result.get("assertionResults", []):
+        if assertion.get("status") == "passed":
+            continue
+        print(f"FAILED TEST: {assertion.get('fullName') or assertion.get('title')}")
+        for message in assertion.get("failureMessages", []):
+            print(message)
+PY
     T1_NEXT_COMMAND='repair the failed or incomplete Real PostgreSQL lane, then re-run T1'
     die_t1 REAL_PG_SUITE_FAILED "Real PostgreSQL reporter did not pass every suite in $package ($lane)"
   fi
