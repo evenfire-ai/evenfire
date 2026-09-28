@@ -34,6 +34,29 @@ test('Host route deterministic validators preserve approval, model, and title ru
   })
 })
 
+test('overlong normalized titles skip unbounded code-point array materialization', () => {
+  const originalFrom = Array.from
+  let calls = 0
+  let longResult
+  Array.from = function (...args) {
+    calls += 1
+    return originalFrom.apply(this, args)
+  }
+  try {
+    longResult = contracts.validateSessionRenameTitle('😀'.repeat(121))
+  } finally {
+    Array.from = originalFrom
+  }
+
+  assert.deepEqual(longResult, { ok: false, error: 'invalid title' })
+  assert.equal(calls, 0)
+
+  assert.deepEqual(contracts.validateSessionRenameTitle('😀'.repeat(120)), {
+    ok: true,
+    title: '😀'.repeat(120),
+  })
+})
+
 test('session cursor encoding and validation share the runtime wire contract', () => {
   const scope = contracts.sessionsCursorScope('user-a', 'chatllm')
   const cursor = contracts.encodeSessionsCursor('2026-04-22T00:00:00.000Z', 'session-a', scope)
