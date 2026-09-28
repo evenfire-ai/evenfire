@@ -12,6 +12,7 @@ import { validateMcpServerSpecPreflight } from '../../http/validateMcpServerSpec
 import { K8sGateway } from '../../k8s.js'
 import type { UiAuthedRequest } from '../../middleware/controlUIAuth.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
+import { REMOTE_CALLBACK_CLIENT_SEGMENT } from '../../oauth/callback.js'
 import { deriveOAuthEncryptionKey } from '../../oauth/encryption.js'
 import { GenericConfigSuggestionSchema } from '../../oauth/genericKnobs.js'
 import {
@@ -850,6 +851,23 @@ export function deriveOAuthClientId(serverName: string): string {
     .replace(/^-+/, '')
     .slice(0, 63)
     .replace(/-+$/, '')
+}
+
+/**
+ * The oauth.id equal to the shared remote callback segment is reserved for the
+ * remote lane: the callback waives the segment==id check on that segment and only
+ * a remote subject (with its issuer pin) may use it, so a baked/generic server
+ * owning this id could never complete consent.
+ */
+function isReservedOAuthClientId(oauthId: string): boolean {
+  return oauthId === REMOTE_CALLBACK_CLIENT_SEGMENT
+}
+
+function reservedOAuthClientIdError(oauthId: string): { error: string; message: string } {
+  return {
+    error: 'oauth_id_reserved',
+    message: `oauth: serverName derives the reserved oauth.id "${oauthId}" (the shared remote OAuth callback segment); choose a different serverName`,
+  }
 }
 
 /**
@@ -2297,6 +2315,10 @@ export function createAdminRegistryRouter(
                 .json({ error: 'oauth: could not derive a valid oauth.id from serverName' })
               return
             }
+            if (isReservedOAuthClientId(oauthId)) {
+              res.status(400).json(reservedOAuthClientIdError(oauthId))
+              return
+            }
             if (await oauthClientIdInUse(gateway, targetNs, oauthId)) {
               res.status(409).json({
                 error: `oauth.id "${oauthId}" is already in use by another server; choose a different serverName`,
@@ -2433,6 +2455,10 @@ export function createAdminRegistryRouter(
               res
                 .status(400)
                 .json({ error: 'oauth: could not derive a valid oauth.id from serverName' })
+              return
+            }
+            if (isReservedOAuthClientId(oauthId)) {
+              res.status(400).json(reservedOAuthClientIdError(oauthId))
               return
             }
             if (await oauthClientIdInUse(gateway, targetNs, oauthId)) {

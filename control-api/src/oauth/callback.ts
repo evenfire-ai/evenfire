@@ -380,7 +380,7 @@ export async function handleOAuthCallback(
   // Dispatch by the signed subject. mcp subjects go to their own handler; the
   // recipe path below is unchanged (byte-identical grant persistence).
   if (claims.subjectKind === 'mcp') {
-    return handleMcpOAuthCallback(claims, input, deps)
+    return handleMcpOAuthCallback(claims, input, deps, isRemoteStableSegment)
   }
 
   const recipeNamespace = claims.recipeNamespace
@@ -482,7 +482,8 @@ export async function handleOAuthCallback(
 async function handleMcpOAuthCallback(
   claims: OAuthMcpStateClaims,
   input: CallbackInput,
-  deps: CallbackDeps
+  deps: CallbackDeps,
+  isRemoteStableSegment: boolean
 ): Promise<CallbackResult> {
   // Fail closed: an mcp state cannot be processed without an mcp reader wired.
   if (!deps.mcpServerReader) return { kind: 'server_not_found' }
@@ -503,6 +504,15 @@ async function handleMcpOAuthCallback(
   // one. For the baked mcp lane `claims.oauthClientId === input.oauthClientId`
   // (enforced above), so this stays equivalent.
   if (subject.decl.id !== claims.oauthClientId) {
+    return { kind: 'invalid_state', reason: 'binding_mismatch' }
+  }
+  // The segment==id waiver above is only sound for remote subjects, whose issuer
+  // check below replaces it. A baked/generic state delivered here would bypass
+  // both, leaving the AS's own redirect_uri comparison as the only binding — and
+  // the generic lane exists precisely for ASes that may not enforce it. A
+  // non-remote server that nonetheless owns the reserved id (e.g. written straight
+  // to the apiserver) fails closed here instead of completing consent.
+  if (isRemoteStableSegment && !subject.decl.remote) {
     return { kind: 'invalid_state', reason: 'binding_mismatch' }
   }
 
