@@ -13,15 +13,19 @@ vi.mock('pg', () => ({
   }),
 }))
 
-const LEGACY_IDENTITIES = new Map<string, string>([
+const LEGACY_IDENTITIES: Array<readonly [string, string]> = [
   ['0115_workflow_authority_bindings', '010f_workflow_authority_bindings'],
   ['0116_gfs_upload_authority_bindings', '0110_gfs_upload_authority_bindings'],
-  ['0117_pr2_readiness_evidence', '0111_pr2_readiness_evidence'],
-  ['0118_pr2_runtime_privileges', '0112_pr2_runtime_privileges'],
-  ['0119_workflow_recipe_authority_entity', '0113_workflow_recipe_authority_entity'],
-  ['011a_workflow_run_failure_reason', '0114_workflow_run_failure_reason'],
+  ['0119_pr2_readiness_evidence', '0117_pr2_readiness_evidence'],
+  ['0119_pr2_readiness_evidence', '0111_pr2_readiness_evidence'],
+  ['011a_pr2_runtime_privileges', '0118_pr2_runtime_privileges'],
+  ['011a_pr2_runtime_privileges', '0112_pr2_runtime_privileges'],
+  ['011b_workflow_recipe_authority_entity', '0119_workflow_recipe_authority_entity'],
+  ['011b_workflow_recipe_authority_entity', '0113_workflow_recipe_authority_entity'],
+  ['011c_workflow_run_failure_reason', '011a_workflow_run_failure_reason'],
+  ['011c_workflow_run_failure_reason', '0114_workflow_run_failure_reason'],
   ['0115_llm_allowed_models_image_input', '011b_llm_allowed_models_image_input'],
-])
+]
 
 const CLASSIFIED_VERSIONS = [
   ...DEV_POST_0106_MIGRATION_VERSIONS,

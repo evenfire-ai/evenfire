@@ -181,22 +181,22 @@ describeRealPostgres('control-api real Postgres migrations', () => {
         ));
       DELETE FROM schema_migrations
        WHERE version IN (
-         '0123_pr2_runtime_privileges',
-         '0124_workflow_recipe_authority_entity'
+         '011a_pr2_runtime_privileges',
+         '011b_workflow_recipe_authority_entity'
        );
     `)
     await initDb(connector)
     const upgradedPr2Corrections = await dbPool.query<{ version: string }>(
       `SELECT version FROM schema_migrations
         WHERE version IN (
-          '0123_pr2_runtime_privileges',
-          '0124_workflow_recipe_authority_entity'
+          '011a_pr2_runtime_privileges',
+          '011b_workflow_recipe_authority_entity'
         )
         ORDER BY version`
     )
     expect(upgradedPr2Corrections.rows.map(row => row.version)).toEqual([
-      '0123_pr2_runtime_privileges',
-      '0124_workflow_recipe_authority_entity',
+      '011a_pr2_runtime_privileges',
+      '011b_workflow_recipe_authority_entity',
     ])
     expect(secondVersions.rows.map(row => row.version)).toContain(
       '0063_workflow_approval_trace_binding'

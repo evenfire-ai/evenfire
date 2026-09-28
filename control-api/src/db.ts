@@ -6495,23 +6495,26 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   {
     // Reassigned after FINAL_DEV added parent migrations through 0121. Preserve
     // every previously published PR2 identity so deployed schemas are not rerun.
-    version: '0122_pr2_readiness_evidence',
-    legacyVersions: ['0111_pr2_readiness_evidence', '0117_pr2_readiness_evidence'],
+    version: '0119_pr2_readiness_evidence',
+    legacyVersions: ['0117_pr2_readiness_evidence', '0111_pr2_readiness_evidence'],
     apply: applyPr2ReadinessEvidenceSchema,
   },
   {
-    version: '0123_pr2_runtime_privileges',
-    legacyVersions: ['0112_pr2_runtime_privileges', '0118_pr2_runtime_privileges'],
+    version: '011a_pr2_runtime_privileges',
+    legacyVersions: ['0118_pr2_runtime_privileges', '0112_pr2_runtime_privileges'],
     apply: applyPr2RuntimePrivilegesSchema,
   },
   {
-    version: '0124_workflow_recipe_authority_entity',
-    legacyVersions: ['0113_workflow_recipe_authority_entity', '0119_workflow_recipe_authority_entity'],
+    version: '011b_workflow_recipe_authority_entity',
+    legacyVersions: [
+      '0119_workflow_recipe_authority_entity',
+      '0113_workflow_recipe_authority_entity',
+    ],
     apply: applyWorkflowRecipeAuthorityEntitySchema,
   },
   {
-    version: '0125_workflow_run_failure_reason',
-    legacyVersions: ['0114_workflow_run_failure_reason', '011a_workflow_run_failure_reason'],
+    version: '011c_workflow_run_failure_reason',
+    legacyVersions: ['011a_workflow_run_failure_reason', '0114_workflow_run_failure_reason'],
     apply: applyWorkflowRunFailureReasonSchema,
   },
   {
