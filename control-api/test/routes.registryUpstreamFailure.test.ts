@@ -19,6 +19,7 @@ import {
   connectionRefused,
   expectNoApiserverText,
 } from './helpers/apiserverErrors.js'
+import { controlApiForbiddenRead, expectRejectedSecretRead } from './helpers/secretReadFailure.js'
 import { MockGateway } from './mockGateway.js'
 
 vi.mock('node:dns/promises', () => ({
@@ -651,6 +652,542 @@ describe('POST /admin/registry/install-hook — apiserver failures', () => {
     expect(deleteResource.mock.calls.filter(call => call[0] === 'llmhooks')).toHaveLength(1)
     expectOneUpstreamFailureLog(
       { verb: 'update', kind: 'Host', name: 'host', namespace: config.hostsNamespace },
+      502,
+      403
+    )
+  })
+})
+
+// ── POST /admin/registry/upgrade (sites O, I, J, K, Q) ───────────────────────
+describe('POST /admin/registry/upgrade — apiserver failures', () => {
+  const SERVER_NS = 'mcp-server'
+  const SECRET_NAME = 'my-srv-credentials'
+  const MCP_ENTRY_V2 = {
+    id: '1',
+    name: 'test-mcp',
+    version: '2.0.0',
+    entry_type: 'mcp-server',
+    description: 'Test v2',
+    author: 'test',
+    server_mode: 'local',
+    transport: 'streamableHttp',
+    mcp_server_meta: { imageRef: 'test:2.0', port: 3000 },
+  }
+  const SCHEMA_REQUIRED = { required: true, authType: 'api-key', keys: [{ name: 'API_KEY' }] }
+
+  function makeUpgradeApp(seedServer = true) {
+    const gw = new MockGateway(SERVER_NS)
+    if (seedServer) {
+      gw.createResource('mcpservers', {
+        metadata: { name: 'my-srv' },
+        spec: {
+          image: 'test:1.0',
+          contextRef: 'ctx1',
+          transport: {
+            type: 'streamableHttp',
+            port: 3000,
+            url: 'http://my-srv.mcp-server.svc:3000/mcp',
+          },
+        },
+      })
+    }
+    vi.mocked(getEntryVersion).mockResolvedValueOnce(MCP_ENTRY_V2 as never)
+    vi.mocked(reportInstall).mockResolvedValue({ acknowledged: true, stored: true })
+    return { app: makeApp(gw), gw }
+  }
+
+  function upgradeBody(withCredentials: boolean): Record<string, unknown> {
+    return {
+      serverName: 'my-srv',
+      registryEntryName: 'test-mcp',
+      registryEntryVersion: '2.0.0',
+      ...(withCredentials ? { [CREDENTIALS_FIELD]: { API_KEY: 'value-for-test' } } : {}),
+    }
+  }
+
+  function mcpServerUpdates(spy: { mock: { calls: unknown[][] } }): unknown[][] {
+    return spy.mock.calls.filter(call => call[0] === 'mcpservers')
+  }
+
+  // Site O
+  it('answers 502 when the McpServer read is rejected with 403', async () => {
+    const { app, gw } = makeUpgradeApp()
+    const original = gw.getResource.bind(gw)
+    const getResource = vi
+      .spyOn(gw, 'getResource')
+      .mockImplementation(async (plural, name, namespace) => {
+        if (plural === 'mcpservers') throw apiserverError(403)
+        return original(plural, name, namespace)
+      })
+    const updateResource = vi.spyOn(gw, 'updateResource')
+
+    const res = await request(app).post('/admin/registry/upgrade').send(upgradeBody(false))
+
+    expect(res.status).toBe(502)
+    expect(res.body).toEqual({
+      error: 'registry_upstream_failed',
+      message: accessMessage(`read McpServer "my-srv" in namespace "${SERVER_NS}"`, 403),
+      resourceType: 'mcp-server',
+      resourceName: 'my-srv',
+      namespace: SERVER_NS,
+    })
+    expectNoApiserverText(res.body)
+    expect(getResource.mock.calls.filter(call => call[0] === 'mcpservers')).toHaveLength(1)
+    expect(updateResource).not.toHaveBeenCalled()
+    expectOneUpstreamFailureLog(
+      { verb: 'read', kind: 'McpServer', name: 'my-srv', namespace: SERVER_NS },
+      502,
+      403
+    )
+  })
+
+  it('keeps the existing 404 body when the McpServer does not exist', async () => {
+    const { app, gw } = makeUpgradeApp(false)
+    const getResource = vi.spyOn(gw, 'getResource')
+
+    const res = await request(app).post('/admin/registry/upgrade').send(upgradeBody(false))
+
+    expect(res.status).toBe(404)
+    expect(res.body).toEqual({ error: 'McpServer "my-srv" not found' })
+    expect(getResource.mock.calls.filter(call => call[0] === 'mcpservers')).toHaveLength(1)
+    expect(upstreamFailureRecords()).toHaveLength(0)
+  })
+
+  // Site I
+  it('answers secret_read_failed and writes nothing when the credentials read is rejected', async () => {
+    vi.mocked(getCredentialSchema).mockResolvedValueOnce(SCHEMA_REQUIRED as never)
+    const { app, gw } = makeUpgradeApp()
+    const getSecret = vi
+      .spyOn(gw, 'getSecret')
+      .mockRejectedValueOnce(controlApiForbiddenRead(SECRET_NAME, SERVER_NS))
+    const createSecret = vi.spyOn(gw, 'createSecret')
+    const updateSecret = vi.spyOn(gw, 'updateSecret')
+    const updateResource = vi.spyOn(gw, 'updateResource')
+
+    const res = await request(app).post('/admin/registry/upgrade').send(upgradeBody(true))
+
+    expectRejectedSecretRead(res, SECRET_NAME, SERVER_NS)
+    expect(getSecret).toHaveBeenCalledTimes(1)
+    expect(getSecret.mock.calls[0]).toEqual([SECRET_NAME, SERVER_NS])
+    expect(createSecret).not.toHaveBeenCalled()
+    expect(updateSecret).not.toHaveBeenCalled()
+    expect(updateResource).not.toHaveBeenCalled()
+  })
+
+  // Site J (create: no Secret existed)
+  it('answers 502 when the credential Secret create is rejected with 403', async () => {
+    vi.mocked(getCredentialSchema).mockResolvedValueOnce(SCHEMA_REQUIRED as never)
+    const { app, gw } = makeUpgradeApp()
+    const createSecret = vi.spyOn(gw, 'createSecret').mockRejectedValueOnce(apiserverError(403))
+    const updateResource = vi.spyOn(gw, 'updateResource')
+
+    const res = await request(app).post('/admin/registry/upgrade').send(upgradeBody(true))
+
+    expect(res.status).toBe(502)
+    expect(res.body).toEqual({
+      error: 'registry_upstream_failed',
+      message: accessMessage(`create Secret "${SECRET_NAME}" in namespace "${SERVER_NS}"`, 403),
+      resourceType: 'secret',
+      resourceName: SECRET_NAME,
+      namespace: SERVER_NS,
+    })
+    expectNoApiserverText(res.body)
+    expect(createSecret).toHaveBeenCalledTimes(1)
+    expect(updateResource).not.toHaveBeenCalled()
+    expectOneUpstreamFailureLog(
+      { verb: 'create', kind: 'Secret', name: SECRET_NAME, namespace: SERVER_NS },
+      502,
+      403
+    )
+  })
+
+  // Site J (update: the Secret existed)
+  it('answers 422 naming the rejected field when the credential Secret update is invalid', async () => {
+    vi.mocked(getCredentialSchema).mockResolvedValueOnce(SCHEMA_REQUIRED as never)
+    const { app, gw } = makeUpgradeApp()
+    gw.seedSecret(SECRET_NAME, SERVER_NS, {
+      type: 'Opaque',
+      uid: 'uid-upgrade-credentials',
+      resourceVersion: '1',
+      data: { API_KEY: Buffer.from('old-value').toString('base64') },
+    })
+    const updateSecret = vi
+      .spyOn(gw, 'updateSecret')
+      .mockRejectedValueOnce(apiserverError(422, { causes: [{ field: 'data[API_KEY]' }] }))
+    const updateResource = vi.spyOn(gw, 'updateResource')
+
+    const res = await request(app).post('/admin/registry/upgrade').send(upgradeBody(true))
+
+    expect(res.status).toBe(422)
+    expect(res.body).toEqual({
+      error: 'registry_upstream_rejected',
+      message:
+        `the Kubernetes API server rejected Secret "${SECRET_NAME}" in namespace ` +
+        `"${SERVER_NS}" as invalid (HTTP 422; fields: data[API_KEY]).`,
+      resourceType: 'secret',
+      resourceName: SECRET_NAME,
+      namespace: SERVER_NS,
+    })
+    expectNoApiserverText(res.body)
+    expect(updateSecret).toHaveBeenCalledTimes(1)
+    expect(updateResource).not.toHaveBeenCalled()
+    const record = expectOneUpstreamFailureLog(
+      { verb: 'update', kind: 'Secret', name: SECRET_NAME, namespace: SERVER_NS },
+      422,
+      422
+    )
+    expect(record.invalidFields).toEqual(['data[API_KEY]'])
+  })
+
+  // Site K
+  it('answers 502 when the McpServer update is rejected with 403', async () => {
+    const { app, gw } = makeUpgradeApp()
+    const original = gw.updateResource.bind(gw)
+    const updateResource = vi
+      .spyOn(gw, 'updateResource')
+      .mockImplementation(async (plural, name, body, namespace) => {
+        if (plural === 'mcpservers') throw apiserverError(403)
+        return original(plural, name, body, namespace)
+      })
+
+    const res = await request(app).post('/admin/registry/upgrade').send(upgradeBody(false))
+
+    expect(res.status).toBe(502)
+    expect(res.body).toEqual({
+      error: 'registry_upstream_failed',
+      message: accessMessage(`update McpServer "my-srv" in namespace "${SERVER_NS}"`, 403),
+      resourceType: 'mcp-server',
+      resourceName: 'my-srv',
+      namespace: SERVER_NS,
+    })
+    expectNoApiserverText(res.body)
+    expect(mcpServerUpdates(updateResource)).toHaveLength(1)
+    expectOneUpstreamFailureLog(
+      { verb: 'update', kind: 'McpServer', name: 'my-srv', namespace: SERVER_NS },
+      502,
+      403
+    )
+  })
+
+  it('answers 422 naming the registry entry when the McpServer spec is rejected', async () => {
+    const { app, gw } = makeUpgradeApp()
+    const original = gw.updateResource.bind(gw)
+    const updateResource = vi
+      .spyOn(gw, 'updateResource')
+      .mockImplementation(async (plural, name, body, namespace) => {
+        if (plural === 'mcpservers') {
+          throw apiserverError(422, { causes: [{ field: 'spec.image' }] })
+        }
+        return original(plural, name, body, namespace)
+      })
+
+    const res = await request(app).post('/admin/registry/upgrade').send(upgradeBody(false))
+
+    expect(res.status).toBe(422)
+    expect(res.body.message).toBe(
+      'the Kubernetes API server rejected the McpServer "my-srv" spec that control-api built ' +
+        'from registry entry test-mcp@2.0.0 (HTTP 422; fields: spec.image). Your request is ' +
+        "not the cause: the catalog entry and this cluster's McpServer definition or " +
+        'admission policy disagree.'
+    )
+    expectNoApiserverText(res.body)
+    expect(mcpServerUpdates(updateResource)).toHaveLength(1)
+    const record = expectOneUpstreamFailureLog(
+      { verb: 'update', kind: 'McpServer', name: 'my-srv', namespace: SERVER_NS },
+      422,
+      422
+    )
+    expect(record.level).toBe(50)
+  })
+
+  // Site Q: the pending-credentials read runs after the McpServer update committed.
+  it('answers secret_read_failed when the pending-credentials read is rejected', async () => {
+    vi.mocked(getCredentialSchema).mockResolvedValueOnce(SCHEMA_REQUIRED as never)
+    const { app, gw } = makeUpgradeApp()
+    const updateResource = vi.spyOn(gw, 'updateResource')
+    const getSecret = vi
+      .spyOn(gw, 'getSecret')
+      .mockRejectedValueOnce(controlApiForbiddenRead(SECRET_NAME, SERVER_NS))
+
+    const res = await request(app).post('/admin/registry/upgrade').send(upgradeBody(false))
+
+    expectRejectedSecretRead(res, SECRET_NAME, SERVER_NS)
+    expect(mcpServerUpdates(updateResource)).toHaveLength(1)
+    expect(getSecret).toHaveBeenCalledTimes(1)
+    expect(getSecret.mock.calls[0]).toEqual([SECRET_NAME, SERVER_NS])
+    expect(upstreamFailureRecords()).toHaveLength(0)
+  })
+})
+
+// ── POST /admin/registry/upgrade-hook (sites N, H) ───────────────────────────
+describe('POST /admin/registry/upgrade-hook — apiserver failures', () => {
+  const IMG_A = `reg.example/hook@sha256:${'a'.repeat(64)}`
+  const IMG_B = `reg.example/hook@sha256:${'b'.repeat(64)}`
+  const clusterScope: PublishScope = { curator: false, orgName: 'acme', scope: '@acme' }
+  const HOOK_ENTRY_V2 = {
+    id: 'h1',
+    name: '@acme/hook',
+    version: '2.0.0',
+    entry_type: 'llm-hook',
+    owner_type: 'org',
+    description: 'a hook',
+    author: 'acme',
+    origin: 'org',
+    category: 'guardrail',
+    tags: [],
+    trust_level: 'low',
+    quality_tier: 'production',
+    status: 'published',
+    server_mode: null,
+    transport: null,
+    recipe_type: null,
+    mcp_server_meta: null,
+    recipe_meta: null,
+    artifact_refs: null,
+    downloads: 0,
+    installs: 0,
+    created_at: '2026-03-20T00:00:00Z',
+    hook_meta: { target: { image: { ref: IMG_B, port: 8080 } }, lifecyclePoints: ['preCall'] },
+  }
+  const HOOK_BODY = {
+    hookName: 'my-hook',
+    registryEntryName: '@acme/hook',
+    registryEntryVersion: '2.0.0',
+  }
+
+  async function makeHookUpgradeApp(seedHook = true) {
+    const gw = new MockGateway()
+    if (seedHook) {
+      await gw.createResource(
+        'llmhooks',
+        {
+          metadata: {
+            name: 'my-hook',
+            annotations: {
+              'clerum.io/catalog-id': '@acme/hook',
+              'clerum.io/catalog-version': '1.0.0',
+              'clerum.io/trust-level': 'low',
+            },
+          },
+          spec: { target: { image: { ref: IMG_A, port: 8080 } }, lifecyclePoints: ['preCall'] },
+        },
+        config.llmHooksNamespace
+      )
+    }
+    vi.mocked(resolvePublishScope).mockResolvedValue(clusterScope)
+    vi.mocked(getEntryVersion).mockResolvedValueOnce(HOOK_ENTRY_V2 as never)
+    vi.mocked(reportInstall).mockResolvedValue({ acknowledged: true, stored: true })
+    return { app: makeApp(gw), gw }
+  }
+
+  // Site N
+  it('answers 502 when the LlmHook read is rejected with 403', async () => {
+    const { app, gw } = await makeHookUpgradeApp()
+    const original = gw.getResource.bind(gw)
+    const getResource = vi
+      .spyOn(gw, 'getResource')
+      .mockImplementation(async (plural, name, namespace) => {
+        if (plural === 'llmhooks') throw apiserverError(403)
+        return original(plural, name, namespace)
+      })
+    const updateResource = vi.spyOn(gw, 'updateResource')
+
+    const res = await request(app).post('/admin/registry/upgrade-hook').send(HOOK_BODY)
+
+    expect(res.status).toBe(502)
+    expect(res.body).toEqual({
+      error: 'registry_upstream_failed',
+      message: accessMessage(
+        `read LlmHook "my-hook" in namespace "${config.llmHooksNamespace}"`,
+        403
+      ),
+      resourceType: 'llm-hook',
+      resourceName: 'my-hook',
+      namespace: config.llmHooksNamespace,
+    })
+    expectNoApiserverText(res.body)
+    expect(getResource.mock.calls.filter(call => call[0] === 'llmhooks')).toHaveLength(1)
+    expect(updateResource).not.toHaveBeenCalled()
+    expectOneUpstreamFailureLog(
+      { verb: 'read', kind: 'LlmHook', name: 'my-hook', namespace: config.llmHooksNamespace },
+      502,
+      403
+    )
+  })
+
+  it('answers 404 without apiserver text when the LlmHook does not exist', async () => {
+    const { app, gw } = await makeHookUpgradeApp(false)
+    const getResource = vi.spyOn(gw, 'getResource')
+
+    const res = await request(app).post('/admin/registry/upgrade-hook').send(HOOK_BODY)
+
+    expect(res.status).toBe(404)
+    expect(res.body).toEqual({ error: 'LlmHook "my-hook" not found' })
+    expect(getResource.mock.calls.filter(call => call[0] === 'llmhooks')).toHaveLength(1)
+    expect(upstreamFailureRecords()).toHaveLength(0)
+  })
+
+  // Site H
+  it('answers 502 when the LlmHook update is rejected with 403', async () => {
+    const { app, gw } = await makeHookUpgradeApp()
+    const original = gw.updateResource.bind(gw)
+    const updateResource = vi
+      .spyOn(gw, 'updateResource')
+      .mockImplementation(async (plural, name, body, namespace) => {
+        if (plural === 'llmhooks') throw apiserverError(403)
+        return original(plural, name, body, namespace)
+      })
+
+    const res = await request(app).post('/admin/registry/upgrade-hook').send(HOOK_BODY)
+
+    expect(res.status).toBe(502)
+    expect(res.body).toEqual({
+      error: 'registry_upstream_failed',
+      message: accessMessage(
+        `update LlmHook "my-hook" in namespace "${config.llmHooksNamespace}"`,
+        403
+      ),
+      resourceType: 'llm-hook',
+      resourceName: 'my-hook',
+      namespace: config.llmHooksNamespace,
+    })
+    expectNoApiserverText(res.body)
+    expect(updateResource.mock.calls.filter(call => call[0] === 'llmhooks')).toHaveLength(1)
+    expectOneUpstreamFailureLog(
+      { verb: 'update', kind: 'LlmHook', name: 'my-hook', namespace: config.llmHooksNamespace },
+      502,
+      403
+    )
+  })
+})
+
+// ── POST /admin/registry/upgrade-recipe (sites P, L) ─────────────────────────
+describe('POST /admin/registry/upgrade-recipe — apiserver failures', () => {
+  const RECIPE_ENTRY_V2 = {
+    id: 'r2',
+    name: 'workflow-template',
+    version: '2.0.0',
+    entry_type: 'recipe',
+    description: 'Workflow template',
+    author: 'clerum',
+    recipe_meta: {
+      recipeYaml: JSON.stringify({
+        spec: { description: 'Workflow template', steps: [{ id: 's1', instruction: 'Run step' }] },
+      }),
+    },
+  }
+  const RECIPE_BODY = {
+    recipeName: 'existing-recipe',
+    registryEntryName: 'workflow-template',
+    registryEntryVersion: '2.0.0',
+  }
+
+  function makeRecipeUpgradeApp(seedRecipe = true) {
+    const gw = new MockGateway('mcp-server')
+    if (seedRecipe) {
+      gw.createResource(
+        'workflowrecipes',
+        {
+          metadata: { name: 'existing-recipe', resourceVersion: '23' },
+          spec: { steps: [{ id: 's1', instruction: 'Run step' }] },
+        },
+        config.sandboxNamespace
+      )
+    }
+    vi.mocked(getEntryVersion).mockResolvedValueOnce(RECIPE_ENTRY_V2 as never)
+    vi.mocked(reportInstall).mockResolvedValue({ acknowledged: true, stored: true })
+    return { app: makeApp(gw), gw }
+  }
+
+  // Site P
+  it('stops the lookup and answers 502 when the WorkflowRecipe read is rejected with 403', async () => {
+    const { app, gw } = makeRecipeUpgradeApp()
+    const original = gw.getResource.bind(gw)
+    const getResource = vi
+      .spyOn(gw, 'getResource')
+      .mockImplementation(async (plural, name, namespace) => {
+        if (plural === 'workflowrecipes') throw apiserverError(403)
+        return original(plural, name, namespace)
+      })
+    const updateResource = vi.spyOn(gw, 'updateResource')
+
+    const res = await request(app).post('/admin/registry/upgrade-recipe').send(RECIPE_BODY)
+
+    expect(res.status).toBe(502)
+    expect(res.body).toEqual({
+      error: 'registry_upstream_failed',
+      message: accessMessage(
+        `read WorkflowRecipe "existing-recipe" in namespace "${config.sandboxNamespace}"`,
+        403
+      ),
+      resourceType: 'recipe',
+      resourceName: 'existing-recipe',
+      namespace: config.sandboxNamespace,
+    })
+    expectNoApiserverText(res.body)
+    expect(getResource.mock.calls.filter(call => call[0] === 'workflowrecipes')).toHaveLength(1)
+    expect(updateResource).not.toHaveBeenCalled()
+    expectOneUpstreamFailureLog(
+      {
+        verb: 'read',
+        kind: 'WorkflowRecipe',
+        name: 'existing-recipe',
+        namespace: config.sandboxNamespace,
+      },
+      502,
+      403
+    )
+  })
+
+  it('keeps the existing 404 body when the WorkflowRecipe does not exist', async () => {
+    const { app, gw } = makeRecipeUpgradeApp(false)
+    const getResource = vi.spyOn(gw, 'getResource')
+
+    const res = await request(app).post('/admin/registry/upgrade-recipe').send(RECIPE_BODY)
+
+    expect(res.status).toBe(404)
+    expect(res.body).toEqual({
+      error:
+        'WorkflowRecipe "existing-recipe" not found in any known recipe namespace ' +
+        `(${config.sandboxNamespace})`,
+    })
+    expect(getResource.mock.calls.filter(call => call[0] === 'workflowrecipes')).toHaveLength(1)
+    expect(upstreamFailureRecords()).toHaveLength(0)
+  })
+
+  // Site L
+  it('answers 502 when the WorkflowRecipe update is rejected with 403', async () => {
+    const { app, gw } = makeRecipeUpgradeApp()
+    const original = gw.updateResource.bind(gw)
+    const updateResource = vi
+      .spyOn(gw, 'updateResource')
+      .mockImplementation(async (plural, name, body, namespace) => {
+        if (plural === 'workflowrecipes') throw apiserverError(403)
+        return original(plural, name, body, namespace)
+      })
+
+    const res = await request(app).post('/admin/registry/upgrade-recipe').send(RECIPE_BODY)
+
+    expect(res.status).toBe(502)
+    expect(res.body).toEqual({
+      error: 'registry_upstream_failed',
+      message: accessMessage(
+        `update WorkflowRecipe "existing-recipe" in namespace "${config.sandboxNamespace}"`,
+        403
+      ),
+      resourceType: 'recipe',
+      resourceName: 'existing-recipe',
+      namespace: config.sandboxNamespace,
+    })
+    expectNoApiserverText(res.body)
+    expect(updateResource.mock.calls.filter(call => call[0] === 'workflowrecipes')).toHaveLength(1)
+    expectOneUpstreamFailureLog(
+      {
+        verb: 'update',
+        kind: 'WorkflowRecipe',
+        name: 'existing-recipe',
+        namespace: config.sandboxNamespace,
+      },
       502,
       403
     )

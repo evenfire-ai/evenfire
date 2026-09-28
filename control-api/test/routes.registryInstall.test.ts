@@ -3712,6 +3712,18 @@ describe('DELETE /admin/registry/uninstall/:serverName', () => {
 
 // ── Upgrade flow (§9.4) ─────────────────────────────────────────────────────
 describe('POST /admin/registry/upgrade', () => {
+  // The McpServer update rejected with a 422 answers the composed body, never
+  // the apiserver's own text ('upgrade conflict' in these fixtures).
+  const MCP_UPGRADE_REJECTED = {
+    error: 'registry_upstream_rejected',
+    message:
+      'the Kubernetes API server rejected the McpServer "my-srv" spec that control-api ' +
+      'built from registry entry test-mcp@2.0.0 (HTTP 422). Your request is not the cause: ' +
+      "the catalog entry and this cluster's McpServer definition or admission policy disagree.",
+    resourceType: 'mcp-server',
+    resourceName: 'my-srv',
+    namespace: 'mcp-server',
+  }
   const MOCK_ENTRY_V2 = {
     id: '1',
     name: 'test-mcp',
@@ -3825,7 +3837,13 @@ describe('POST /admin/registry/upgrade', () => {
       .expect(409)
 
     expect(raced).toBe(true)
-    expect(res.body.error).toContain('modified')
+    expect(res.body).toEqual({
+      error: 'registry_upstream_rejected',
+      message: `Secret "${secretName}" in namespace "mcp-server" changed while this request was running. Retry.`,
+      resourceType: 'secret',
+      resourceName: secretName,
+      namespace: 'mcp-server',
+    })
     expect(res.body.upgraded).toBeUndefined()
     await expect(gw.getSecret(secretName, 'mcp-server')).resolves.toMatchObject({
       metadata: {
@@ -4752,7 +4770,7 @@ describe('POST /admin/registry/upgrade', () => {
       })
       .expect(422)
 
-    expect(res.body.error).toContain('upgrade conflict')
+    expect(res.body).toEqual(MCP_UPGRADE_REJECTED)
     expect(updateSpy).toHaveBeenCalled()
     expect(deleteSecretSpy).toHaveBeenCalledWith(
       'my-srv-credentials',
@@ -4881,7 +4899,7 @@ describe('POST /admin/registry/upgrade', () => {
       })
       .expect(422)
 
-    expect(res.body.error).toContain('upgrade conflict')
+    expect(res.body).toEqual(MCP_UPGRADE_REJECTED)
     expect(updateSecretSpy).toHaveBeenCalledTimes(2)
     expect(updateSecretSpy.mock.calls[1][0]).toMatchObject({
       name: 'my-srv-credentials',
@@ -4992,11 +5010,9 @@ describe('POST /admin/registry/upgrade', () => {
       })
       .expect(422)
 
-    expect(res.body).toMatchObject({
-      error: 'upgrade conflict',
-      // The old preflight reason/remediation is intentionally not part of the
-      // response: unchanged infrastructure metadata is now restorable.
-    })
+    // The old preflight reason/remediation is intentionally not part of the
+    // response: unchanged infrastructure metadata is now restorable.
+    expect(res.body).toEqual(MCP_UPGRADE_REJECTED)
     expect(updateSecretSpy).toHaveBeenCalledTimes(2)
     expect(updateResourceSpy).toHaveBeenCalled()
     const legacyApplyKey = [
@@ -5054,7 +5070,7 @@ describe('POST /admin/registry/upgrade', () => {
       })
       .expect(422)
 
-    expect(res.body.error).toBe('upgrade conflict')
+    expect(res.body).toEqual(MCP_UPGRADE_REJECTED)
     expect(updateSecretSpy).toHaveBeenCalledTimes(2)
     expect(updateSecretSpy.mock.calls[0][0].annotations).not.toHaveProperty(futureKey)
     expect(updateSecretSpy.mock.calls[1][0].annotations).toMatchObject({

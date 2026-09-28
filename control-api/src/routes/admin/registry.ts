@@ -64,6 +64,7 @@ import {
   REGISTRY_SECRET_OPERATION_ID_ANNOTATION,
   invalidSecretTypeReason,
 } from '../../services/secretConstraints.js'
+import { readSecretOrNull } from '../../services/secretRead.js'
 import { findSecretReferenceState } from '../../services/secretReferenceService.js'
 import { SecretSnapshot, toSecretSnapshot } from '../../services/secretRepository.js'
 import {
@@ -625,20 +626,17 @@ async function collectMissingMcpEnvSecretPendingCredentials(
   const keys = credentialSchema.keys.map(key => key.name)
   if (keys.length === 0) return []
 
-  try {
-    const existing = await gateway.getSecret(secretName, namespace)
-    const missingKeys = keys.filter(key => !hasMcpCredentialKey(existing, key))
-    if (missingKeys.length === 0) return []
-    return [
-      { kind: 'mcpEnvSecret', secretName, namespace, keys: missingKeys, field: 'spec.envSecret' },
-    ]
-  } catch (err) {
-    const k8sErr = extractK8sError(err)
-    if (k8sErr?.status === 404) {
-      return [{ kind: 'mcpEnvSecret', secretName, namespace, keys, field: 'spec.envSecret' }]
-    }
-    throw err
+  // A read failure other than 404 throws SecretReadError (502/503) through
+  // clerumErrorHandler instead of forwarding the apiserver's text.
+  const existing = await readSecretOrNull(gateway, secretName, namespace)
+  if (existing === null) {
+    return [{ kind: 'mcpEnvSecret', secretName, namespace, keys, field: 'spec.envSecret' }]
   }
+  const missingKeys = keys.filter(key => !hasMcpCredentialKey(existing, key))
+  if (missingKeys.length === 0) return []
+  return [
+    { kind: 'mcpEnvSecret', secretName, namespace, keys: missingKeys, field: 'spec.envSecret' },
+  ]
 }
 
 /** Validate credential schema structure from registry (finding #9). */
@@ -3228,8 +3226,15 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
             }
           }
         } catch (err) {
-          res.status(404).json({
-            error: `LlmHook "${body.hookName}" not found: ${err instanceof Error ? err.message : 'not found'}`,
+          if (extractK8sError(err)?.status === 404) {
+            res.status(404).json({ error: `LlmHook "${body.hookName}" not found` })
+            return
+          }
+          sendRegistryUpstreamFailure(req, res, err, {
+            verb: 'read',
+            kind: 'LlmHook',
+            name: body.hookName,
+            namespace: llmHooksNs,
           })
           return
         }
@@ -3480,12 +3485,18 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
           operationId
         )
         if (mutation.outcome === 'rejected') {
-          const k8sErr = extractK8sError(mutation.error)
-          if (k8sErr) {
-            res.status(k8sErr.status).json({ error: k8sErr.message })
-            return
-          }
-          throw mutation.error
+          sendRegistryUpstreamFailure(req, res, mutation.error, {
+            verb: 'update',
+            kind: 'LlmHook',
+            name: body.hookName,
+            namespace: llmHooksNs,
+            content: {
+              source: 'registry',
+              entry: body.registryEntryName,
+              version: body.registryEntryVersion,
+            },
+          })
+          return
         }
         if (mutation.outcome === 'not-committed') {
           res.status(503).json({
@@ -3842,8 +3853,17 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
             body.serverName,
             namespace
           )) as typeof existingServer
-        } catch {
-          res.status(404).json({ error: `McpServer "${body.serverName}" not found` })
+        } catch (err) {
+          if (extractK8sError(err)?.status === 404) {
+            res.status(404).json({ error: `McpServer "${body.serverName}" not found` })
+            return
+          }
+          sendRegistryUpstreamFailure(req, res, err, {
+            verb: 'read',
+            kind: 'McpServer',
+            name: body.serverName,
+            namespace,
+          })
           return
         }
 
@@ -4021,20 +4041,11 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
         let mutatedSecretSnapshot: SecretSnapshot | null = null
         const hasCredentialUpdates = Object.keys(credentialPayload.secretData).length > 0
         if (hasCredentialUpdates) {
-          try {
-            previousSecretSnapshot = normalizeSecretSnapshot(
-              await gateway.getSecret(secretName, namespace),
-              secretName,
-              namespace
-            )
-          } catch (err) {
-            const k8sErr = extractK8sError(err)
-            if (k8sErr?.status !== 404) {
-              res.status(k8sErr?.status ?? 500).json({
-                error: `Failed to read existing credentials: ${k8sErr?.message || (err instanceof Error ? err.message : 'unknown error')}`,
-              })
-              return
-            }
+          // A read failure other than 404 throws SecretReadError (502/503)
+          // through clerumErrorHandler before any write.
+          const existingSecret = await readSecretOrNull(gateway, secretName, namespace)
+          if (existingSecret !== null) {
+            previousSecretSnapshot = normalizeSecretSnapshot(existingSecret, secretName, namespace)
           }
 
           if (previousSecretSnapshot) {
@@ -4118,7 +4129,13 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
           } catch (err) {
             const k8sErr = extractK8sError(err)
             if (k8sErr && k8sErr.status < 500) {
-              res.status(k8sErr.status).json({ error: k8sErr.message })
+              sendRegistryUpstreamFailure(req, res, err, {
+                verb: previousSecretSnapshot ? 'update' : 'create',
+                kind: 'Secret',
+                name: secretName,
+                namespace,
+                content: { source: 'operator' },
+              })
               return
             }
 
@@ -4273,12 +4290,18 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
             return
           }
 
-          const k8sErr = extractK8sError(err)
-          if (k8sErr) {
-            res.status(k8sErr.status).json({ error: k8sErr.message })
-            return
-          }
-          throw err
+          sendRegistryUpstreamFailure(req, res, err, {
+            verb: 'update',
+            kind: 'McpServer',
+            name: body.serverName,
+            namespace,
+            content: {
+              source: 'registry',
+              entry: body.registryEntryName,
+              version: body.registryEntryVersion,
+            },
+          })
+          return
         }
         auditLog('upgrade', {
           serverName: body.serverName,
@@ -4367,8 +4390,17 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
             }
             namespace = candidate
             break
-          } catch {
-            // try next namespace
+          } catch (err) {
+            // Only "not in this namespace" moves on; any other failure means
+            // the lookup is unknown, not that the recipe is absent.
+            if (extractK8sError(err)?.status === 404) continue
+            sendRegistryUpstreamFailure(req, res, err, {
+              verb: 'read',
+              kind: 'WorkflowRecipe',
+              name: body.recipeName,
+              namespace: candidate,
+            })
+            return
           }
         }
         if (!namespace || !existingRecipe) {
@@ -4546,12 +4578,18 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
           operationId
         )
         if (mutation.outcome === 'rejected') {
-          const k8sErr = extractK8sError(mutation.error)
-          if (k8sErr) {
-            res.status(k8sErr.status).json({ error: k8sErr.message })
-            return
-          }
-          throw mutation.error
+          sendRegistryUpstreamFailure(req, res, mutation.error, {
+            verb: 'update',
+            kind: 'WorkflowRecipe',
+            name: body.recipeName,
+            namespace,
+            content: {
+              source: 'registry',
+              entry: body.registryEntryName,
+              version: body.registryEntryVersion,
+            },
+          })
+          return
         }
         if (mutation.outcome === 'not-committed') {
           res.status(503).json({
