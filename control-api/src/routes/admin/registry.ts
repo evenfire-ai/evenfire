@@ -57,6 +57,10 @@ import {
   platformWorkloadNamespaces,
 } from '../../services/registryPullSecretService.js'
 import {
+  type RegistryUpstreamStep,
+  classifyRegistryUpstreamFailure,
+} from '../../services/registryUpstreamFailure.js'
+import {
   REGISTRY_SECRET_OPERATION_ID_ANNOTATION,
   invalidSecretTypeReason,
 } from '../../services/secretConstraints.js'
@@ -1141,6 +1145,36 @@ function uninstallWarningDetail(err: unknown): string {
   return `unable to verify (${registryErrorLogFields(err).name})`
 }
 
+/**
+ * Answer a failed Kubernetes call of an install/upgrade step with the
+ * classified status and a control-api message (services/registryUpstreamFailure).
+ * The apiserver's Status message, the filtered 422 field paths and the bounded
+ * error identity go to one `registry_upstream_failure` log line with the
+ * request's correlation id; the response never carries apiserver text. Errors
+ * that are not apiserver or transport failures are rethrown unchanged.
+ */
+function sendRegistryUpstreamFailure(
+  req: Request,
+  res: Response,
+  err: unknown,
+  step: RegistryUpstreamStep
+): void {
+  const failure = classifyRegistryUpstreamFailure(err, step)
+  log[failure.severity](
+    {
+      correlationId: req.correlationId,
+      step,
+      status: failure.status,
+      upstreamStatus: failure.upstreamStatus,
+      upstreamReason: failure.upstreamReason,
+      invalidFields: failure.invalidFields,
+      error: registryErrorLogFields(err),
+    },
+    'registry_upstream_failure'
+  )
+  res.status(failure.status).json(failure.body)
+}
+
 async function readSecretForRollback(
   gateway: K8sGateway,
   snapshot: SecretSnapshot
@@ -2145,9 +2179,13 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
             } catch (err) {
               const k8sErr = extractK8sError(err)
               if (k8sErr && k8sErr.status < 500) {
-                res
-                  .status(k8sErr.status)
-                  .json({ error: `Secret creation failed: ${k8sErr.message}` })
+                sendRegistryUpstreamFailure(req, res, err, {
+                  verb: 'create',
+                  kind: 'Secret',
+                  name: secretName,
+                  namespace: targetNs,
+                  content: { source: 'operator' },
+                })
                 return
               }
               // A create has no pre-write UID/RV to fence. Its response cannot
@@ -2198,7 +2236,6 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
             throw new RegistryInstallRollbackError()
           }
         } catch (err) {
-          const k8sErr = extractK8sError(err)
           if (
             err instanceof RegistryInstallRollbackError ||
             !isDeterministicRegistryNoCommit(err)
@@ -2231,11 +2268,18 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
             })
             return
           }
-          if (k8sErr) {
-            res.status(k8sErr.status).json({ error: k8sErr.message })
-            return
-          }
-          throw err
+          sendRegistryUpstreamFailure(req, res, err, {
+            verb: 'create',
+            kind: 'McpServer',
+            name: serverName,
+            namespace: targetNs,
+            content: {
+              source: 'registry',
+              entry: body.registryEntryName,
+              version: body.registryEntryVersion,
+            },
+          })
+          return
         }
 
         // ── Step 5: Update Context allowlist ──────────────────────────────
@@ -2347,13 +2391,26 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
               })
               return
             }
-            const k8sErr = extractK8sError(err)
-            const message =
-              k8sErr?.message ||
-              (err instanceof Error ? err.message : 'Failed to update Context allowlist')
-            res
-              .status(k8sErr?.status ?? 500)
-              .json({ error: `Context allowlist update failed: ${message}` })
+            if ((err as { code?: unknown }).code === 'context_identity_unavailable') {
+              res.status(503).json({
+                error: 'context_identity_unavailable',
+                resourceName: contextRef,
+                resourceType: 'context',
+                namespace: contextsNs,
+              })
+              return
+            }
+            sendRegistryUpstreamFailure(req, res, err, {
+              verb: 'update',
+              kind: 'Context',
+              name: contextRef,
+              namespace: contextsNs,
+              content: {
+                source: 'registry',
+                entry: body.registryEntryName,
+                version: body.registryEntryVersion,
+              },
+            })
             return
           }
         }
@@ -2570,12 +2627,20 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
             spec: recipeSpec,
           })
         } catch (err) {
-          const k8sErr = extractK8sError(err)
-          if (k8sErr) {
-            res.status(k8sErr.status).json({ error: k8sErr.message })
-            return
-          }
-          throw err
+          // The gateway creates WorkflowRecipes in config.sandboxNamespace
+          // (K8sGateway defaultNamespaces.workflowrecipes).
+          sendRegistryUpstreamFailure(req, res, err, {
+            verb: 'create',
+            kind: 'WorkflowRecipe',
+            name: recipeName,
+            namespace: config.sandboxNamespace,
+            content: {
+              source: 'registry',
+              entry: body.registryEntryName,
+              version: body.registryEntryVersion,
+            },
+          })
+          return
         }
 
         // Step 5: Report install (fire-and-forget)
@@ -2679,8 +2744,16 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
             return
           }
         } catch (err) {
-          const k8sErr = extractK8sError(err)
-          res.status(k8sErr?.status ?? 404).json({ error: `Host "${body.hostRef}" not found` })
+          if (extractK8sError(err)?.status === 404) {
+            res.status(404).json({ error: `Host "${body.hostRef}" not found` })
+            return
+          }
+          sendRegistryUpstreamFailure(req, res, err, {
+            verb: 'read',
+            kind: 'Host',
+            name: body.hostRef,
+            namespace: config.hostsNamespace,
+          })
           return
         }
         const guardrails = host.spec?.guardrails ?? {}
@@ -2813,7 +2886,13 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
           } catch (err) {
             const k8sErr = extractK8sError(err)
             if (k8sErr && k8sErr.status < 500) {
-              res.status(k8sErr.status).json({ error: `Secret creation failed: ${k8sErr.message}` })
+              sendRegistryUpstreamFailure(req, res, err, {
+                verb: 'create',
+                kind: 'Secret',
+                name: secretName,
+                namespace: targetNs,
+                content: { source: 'operator' },
+              })
               return
             }
             // A create has no pre-write UID/RV to fence. Its response cannot
@@ -2904,7 +2983,6 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
             throw new RegistryInstallRollbackError()
           }
         } catch (err) {
-          const k8sErr = extractK8sError(err)
           if (
             err instanceof RegistryInstallRollbackError ||
             !isDeterministicRegistryNoCommit(err)
@@ -2935,11 +3013,18 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
             })
             return
           }
-          if (k8sErr) {
-            res.status(k8sErr.status).json({ error: k8sErr.message })
-            return
-          }
-          throw err
+          sendRegistryUpstreamFailure(req, res, err, {
+            verb: 'create',
+            kind: 'LlmHook',
+            name: crName,
+            namespace: targetNs,
+            content: {
+              source: 'registry',
+              entry: body.registryEntryName,
+              version: body.registryEntryVersion,
+            },
+          })
+          return
         }
 
         // Step 10 — reference the hook from Host.spec.guardrails.hooks[phase] as
@@ -3033,13 +3118,17 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
               })
               return
             }
-            const k8sErr = extractK8sError(err)
-            const message =
-              k8sErr?.message ||
-              (err instanceof Error ? err.message : 'Failed to update Host guardrails')
-            res
-              .status(k8sErr?.status ?? 500)
-              .json({ error: `Host guardrails update failed: ${message}` })
+            sendRegistryUpstreamFailure(req, res, err, {
+              verb: 'update',
+              kind: 'Host',
+              name: body.hostRef,
+              namespace: config.hostsNamespace,
+              content: {
+                source: 'registry',
+                entry: body.registryEntryName,
+                version: body.registryEntryVersion,
+              },
+            })
             return
           }
         }
