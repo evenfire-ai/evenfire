@@ -441,7 +441,16 @@ export function createProxyApps(
       }, bodyReadDeadlineMs)
       res.once('close', () => {
         clearTimeout(readDeadline)
-        releaseVisual()
+        // Backstop only while the slot is still held here. Once the handler
+        // takes ownership it clears `req.codexStreamRelease` (hand-off) or the
+        // demotion path releases it through `releaseAdmission`; in both cases
+        // the handler's own `finally` frees the slot when it finishes
+        // unwinding. Releasing here after hand-off would free the visual slot
+        // and the principal share while the handler still holds the parsed
+        // body during its (up to ~30 s) unwind, admitting another large body
+        // over the gate width. Guarding on the field preserves the
+        // `d5826f385` demotion fix (that path never runs this hook).
+        if (req.codexStreamRelease) releaseVisual()
       })
       visualJson(req, res, err => {
         clearTimeout(readDeadline)

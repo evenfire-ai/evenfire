@@ -890,5 +890,68 @@ describe('visual stream-gate handoff', () => {
       hang.release()
       await holder
     })
+
+    // M1 regression: after the handler takes a visual slot for the stream
+    // (hand-off), a client disconnect must not free the slot or the principal
+    // share early. The `res.close` backstop only runs while the slot is still
+    // held in selectTransportBudget; once the handler owns it the slot is freed
+    // by the handler's own `finally` when it finishes unwinding. Freeing it on
+    // close after hand-off would admit another large body over the gate width
+    // while the disconnected request's parsed body is still resident.
+    it('keeps the visual slot held when the streaming client disconnects after hand-off', async () => {
+      expect(VISUAL_STREAM_LIMITS.maxConcurrentStreams).toBe(2)
+      const maxBodyBytes = smallCaps()
+      const acquire = vi.spyOn(visualStreamGate, 'acquire')
+      const hang = hangStream()
+      hangs.push(hang)
+      const port = listen(
+        createProxyApps(config({ maxBodyBytes, maxVisualBodyBytes: 1024 * 1024 }), {
+          streamCompletion: hang.impl,
+        })
+      )
+      // Fill both visual slots: A hands off under an abortable client, B under
+      // a normal one. Both use the default host so they clear host-binding and
+      // reach the stream. Two admissions for one principal stay under the
+      // per-host share of four.
+      const payloadA = largeValid(maxBodyBytes)
+      const abort = new AbortController()
+      const holderA = fetch(`http://127.0.0.1:${port}${COMPLETIONS_PATH}`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${payloadA.token}`,
+          'content-type': 'application/json',
+        },
+        body: payloadA.body,
+        signal: abort.signal,
+      }).catch((err: unknown) => err)
+      const holderB = postCompletion(port, 'codex-completion-request.v2', 'x'.repeat(maxBodyBytes))
+      await waitFor(
+        () => visualStreamGate.snapshot().running === 2,
+        'the two large V2 bodies did not hold both visual slots'
+      )
+      // A third large V2 queues behind the two slots, so the queue depth is a
+      // live witness of whether a slot stays held. It is the third admission for
+      // the principal, still under the per-host share of four.
+      const waiter = postCompletion(port, 'codex-completion-request.v2', 'x'.repeat(maxBodyBytes))
+      await waitFor(
+        () => visualStreamGate.snapshot().queued === 1,
+        'the third large V2 did not queue behind the held slots'
+      )
+
+      // Holder A's client disconnects while its handler is still unwinding (the
+      // hang holds it). Its slot and the queue place must both persist.
+      abort.abort()
+      expect(await holderA).toBeInstanceOf(Error)
+      // Give the close backstop time to (wrongly) fire before the assertion.
+      await new Promise(resolve => setTimeout(resolve, 300))
+      expect(visualStreamGate.snapshot()).toEqual({ running: 2, queued: 1 })
+      expect(acquire).toHaveBeenCalledTimes(3)
+
+      // Releasing the handlers frees the slots; only then is the waiter admitted.
+      hang.release()
+      await Promise.all([holderB, waiter])
+      await expectGateEmpty()
+      await expectNextVisualAdmitted(port, maxBodyBytes)
+    })
   })
 })

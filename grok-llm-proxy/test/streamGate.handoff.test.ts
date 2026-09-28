@@ -862,5 +862,66 @@ describe('grok visual stream-gate handoff', () => {
       hang.release()
       await holder
     })
+
+    // M1 regression: after the handler takes the visual slot for the stream
+    // (hand-off), a client disconnect must not free the slot or the principal
+    // share early. The `res.close` backstop only runs while the slot is still
+    // held in selectTransportBudget; once the handler owns it the slot is freed
+    // by the handler's own `finally` when it finishes unwinding. Freeing it on
+    // close after hand-off would admit another large body over the gate width
+    // while the disconnected request's parsed body is still resident.
+    it('keeps the visual slot held when the streaming client disconnects after hand-off', async () => {
+      const maxBodyBytes = smallCaps()
+      const acquire = vi.spyOn(visualStreamGate, 'acquire')
+      const hang = hangStream()
+      hangs.push(hang)
+      const port = listen(
+        createProxyApps(config({ maxBodyBytes, maxVisualBodyBytes: 1024 * 1024 }), {
+          streamCompletion: hang.impl,
+        })
+      )
+      // The first large V2 hands off to the stream and holds the single slot.
+      const abort = new AbortController()
+      const holder = fetch(`http://127.0.0.1:${port}${COMPLETIONS_PATH}`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${platformToken()}`,
+          'content-type': 'application/json',
+        },
+        body: largeValid(maxBodyBytes).body,
+        signal: abort.signal,
+      }).catch((err: unknown) => err)
+      await waitFor(
+        () => visualStreamGate.snapshot().running === 1,
+        'the large V2 did not hold the visual gate'
+      )
+      // A second large V2 from a distinct principal queues behind the one slot,
+      // so the queue depth is a live witness of whether the slot stays held.
+      const waiter = postCompletion(
+        port,
+        'grok-completion-request.v2',
+        'x'.repeat(maxBodyBytes),
+        ['visual-queue-m1']
+      )
+      await waitFor(
+        () => visualStreamGate.snapshot().queued === 1,
+        'the second large V2 did not queue behind the held slot'
+      )
+
+      // The streaming client disconnects while the handler is still unwinding
+      // (the hang holds it). The slot and the queue place must both persist.
+      abort.abort()
+      expect(await holder).toBeInstanceOf(Error)
+      // Give the close backstop time to (wrongly) fire before the assertion.
+      await new Promise(resolve => setTimeout(resolve, 300))
+      expect(visualStreamGate.snapshot()).toEqual({ running: 1, queued: 1 })
+      expect(acquire).toHaveBeenCalledTimes(2)
+
+      // Releasing the handler frees the slot; only then is the waiter admitted.
+      hang.release()
+      await waiter
+      await expectGateEmpty()
+      await expectNextVisualAdmitted(port, maxBodyBytes)
+    })
   })
 })
