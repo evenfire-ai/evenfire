@@ -123,9 +123,29 @@ interface Crumb {
 interface GfsResolvedLocation {
   resourceId: string
   rid: string
+  gfsUri: string
   name: string
   kind: string
   path: string | null
+  version: number
+}
+
+/** Project every response-backed folder source through one version-preserving
+ * breadcrumb adapter. An incomplete runtime payload remains browseable but
+ * never gains a fabricated mutation precondition. */
+function folderResourceToCrumb(
+  resource: Pick<GfsChild, 'resourceId' | 'rid' | 'gfsUri' | 'name' | 'kind'> & {
+    version?: number
+  }
+): Crumb {
+  return {
+    id: resource.resourceId,
+    rid: resource.rid,
+    name: resource.name,
+    kind: 'directory',
+    gfsUri: resource.gfsUri,
+    ...(Number.isSafeInteger(resource.version) ? { version: resource.version } : {}),
+  }
 }
 
 /** Verdict of a breadcrumb ancestry reconstruction attempt (R7-M1 race).
@@ -705,7 +725,7 @@ export function GfsBrowser(): React.JSX.Element {
             if (ancestor.kind !== 'directory') {
               throw new Error('GFS folder hierarchy changed during refresh')
             }
-            refreshed.push({ id: ancestor.resourceId, rid: ancestor.rid, name: ancestor.name })
+            refreshed.push(folderResourceToCrumb(ancestor))
           }
           if (refreshed[refreshed.length - 1]?.id !== resolved.resourceId) {
             throw new Error('GFS folder hierarchy changed during refresh')
@@ -822,17 +842,7 @@ export function GfsBrowser(): React.JSX.Element {
   function openDirectory(child: GfsChild): void {
     if (child.kind !== 'directory') return
     setRenameTarget(null)
-    setCrumbs(prev => [
-      ...prev,
-      {
-        id: child.resourceId,
-        rid: child.rid,
-        name: child.name,
-        kind: 'directory',
-        gfsUri: child.gfsUri,
-        version: child.version,
-      },
-    ])
+    setCrumbs(prev => [...prev, folderResourceToCrumb(child)])
     const cached = childCacheRef.current.get(child.resourceId)
     if (cached) {
       // Render the cached listing instantly; the effect-driven background
@@ -1128,13 +1138,7 @@ export function GfsBrowser(): React.JSX.Element {
       } catch {
         return verdict('failed')
       }
-      ancestors.push({
-        id: ancestor.resourceId,
-        rid: ancestor.rid,
-        name: ancestor.name,
-        kind: 'directory',
-        gfsUri: ancestor.gfsUri,
-      })
+      ancestors.push(folderResourceToCrumb(ancestor))
     }
     if (epoch !== trailReconstructionEpochRef.current) return 'superseded'
     setCrumbs(prev => {
@@ -1533,31 +1537,12 @@ export function GfsBrowser(): React.JSX.Element {
   }
 
   /** "Open EvenDrive link": resolve a pasted gfs:// URI through control-api
-   *  and navigate the breadcrumb straight to that folder, mirroring the
-   *  Desktop Files flow.
-   *
-   *  DEFERRAL (R1-M5 / R2-M2): the real resolve producer (control-api
-   *  `toResolveView`) returns resourceId, rid, gfsUri, drive, name, kind,
-   *  path, and updatedAt — and NO mutation version. Until that contract
-   *  supplies a version (backend issue #774), a link-opened active crumb
-   *  carries no version, so `crumbToChild` returns null and the crumb gets
-   *  NO mutating ⋯ menu — breadcrumb mutations on link-opened folders stay
-   *  deferred rather than running against an invented ifMatch. */
+   * and navigate the breadcrumb straight to that folder, mirroring Desktop. */
   async function openEvenDriveLink(uri: string): Promise<void> {
     setOpenLinkError(null)
     setOpenLinkResolving(true)
     try {
-      const view = (await apiGet('/api/v1/gfs/resolve', { uri })) as {
-        resourceId: string
-        rid: string
-        gfsUri: string
-        name: string
-        kind: string
-        /** Absent from the real resolve contract; kept so a future producer
-         *  that supplies it lights the mutating menu up without another UI
-         *  change (see the deferral note above). */
-        version?: number
-      }
+      const view = (await apiGet('/api/v1/gfs/resolve', { uri })) as GfsResolvedLocation
       if (view.kind !== 'directory') {
         setOpenLinkError('Only folder links can be opened here.')
         return
@@ -1569,17 +1554,7 @@ export function GfsBrowser(): React.JSX.Element {
       // reconstruction (R7-M1): its late response must not re-anchor the
       // trail this link-open just replaced.
       trailReconstructionEpochRef.current += 1
-      setCrumbs([
-        { id: null, rid: null, name: '/' },
-        {
-          id: view.resourceId,
-          rid: view.rid,
-          name: view.name,
-          kind: 'directory',
-          gfsUri: view.gfsUri,
-          ...(view.version === undefined ? {} : { version: view.version }),
-        },
-      ])
+      setCrumbs([{ id: null, rid: null, name: '/' }, folderResourceToCrumb(view)])
       setLoading(true)
       setOpenLinkOpen(false)
     } catch (err) {

@@ -25,10 +25,12 @@ import {
   normalizeUploadProductMaxBytes,
   uploadGfsFile,
 } from '@lib/gfsFileUpload'
+import { toChildView } from '../../../control-api/src/gfs/tree.js'
 import {
   closeActiveEntityChangeStreams,
   streamEntityChanges,
 } from '../../../control-api/src/routes/entityChangeStream.js'
+import { toResolveView } from '../../../control-api/src/routes/gfs/resolve.js'
 import { GfsBrowser } from '../GfsBrowser'
 import { ToastProvider } from '../Toast'
 
@@ -87,6 +89,10 @@ const controlApiProducerMetrics = vi.hoisted(() => ({
 }))
 
 vi.mock('../../../control-api/src/config.js', () => ({ config: controlApiProducerConfig }))
+vi.mock('../../../control-api/src/db.js', () => ({ pool: {} }))
+vi.mock('../../../control-api/src/middleware/controlUIAuth.js', () => ({
+  requireAuthForControlUI: vi.fn(),
+}))
 vi.mock('../../../control-api/src/services/entityChangeService.js', () => controlApiProducer)
 vi.mock('../../../control-api/src/observability/logger.js', () => ({
   rootLogger: { child: () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn() }) },
@@ -221,6 +227,31 @@ function child(name: string, kind: string, n: number, version = 0) {
     bytes: 0,
     version,
   }
+}
+
+function resolvedFolderView(resourceId: string, name: string, path: string, version: number) {
+  return toResolveView({
+    resourceId,
+    drive: 'main',
+    name,
+    kind: 'directory',
+    pathCache: path,
+    bytes: 0,
+    version,
+    updatedAt: '2026-09-28T00:00:00.000Z',
+  })
+}
+
+function listedFolder(resourceId: string, name: string, path: string, version: number) {
+  return toChildView('main', {
+    resourceId,
+    name,
+    kind: 'directory',
+    pathCache: path,
+    bytes: 0,
+    version,
+    updatedAt: '2026-09-28T00:00:00.000Z',
+  })
 }
 
 describe('GfsBrowser', () => {
@@ -669,49 +700,61 @@ describe('GfsBrowser', () => {
   })
 
   it('rebuilds the open directory breadcrumbs after a remote move', async () => {
-    const rootId = 'root-id'
+    const rootId = '11111111-1111-1111-1111-111111111111'
+    const oldParent = listedFolder(
+      '22222222-2222-2222-2222-222222222222',
+      'old-parent',
+      '/old-parent',
+      1
+    )
+    const oldFolder = listedFolder(
+      '33333333-3333-3333-3333-333333333333',
+      'old-folder',
+      '/old-parent/old-folder',
+      2
+    )
+    const newParent = resolvedFolderView(
+      '44444444-4444-4444-4444-444444444444',
+      'new-parent',
+      '/new-parent',
+      11
+    )
+    const resolvedLocation = resolvedFolderView(
+      oldFolder.resourceId,
+      'renamed-folder',
+      '/new-parent/renamed-folder',
+      10
+    )
+    const refreshedFolder = resolvedFolderView(
+      oldFolder.resourceId,
+      'renamed-folder',
+      '/new-parent/renamed-folder',
+      12
+    )
     const streamControllers: ReadableStreamDefaultController<Uint8Array>[] = []
     mockApiGet.mockImplementation(async (path: string, query?: Record<string, string>) => {
       if (path === '/api/v1/gfs/tree') {
         return {
           rootResourceId: rootId,
-          items: [child('old-parent', 'directory', 1)],
+          items: [oldParent],
           nextCursor: null,
         }
       }
       if (path === '/api/v1/gfs/resolve') {
-        return {
-          resourceId: 'id-2',
-          rid: 'r2',
-          name: 'renamed-folder',
-          kind: 'directory',
-          path: '/new-parent/renamed-folder',
-        }
+        return resolvedLocation
       }
       if (path === '/api/v1/gfs/by-path' && query?.path === '/new-parent') {
-        return {
-          resourceId: 'id-3',
-          rid: 'r3',
-          name: 'new-parent',
-          kind: 'directory',
-          path: '/new-parent',
-        }
+        return newParent
       }
       if (path === '/api/v1/gfs/by-path' && query?.path === '/new-parent/renamed-folder') {
-        return {
-          resourceId: 'id-2',
-          rid: 'r2',
-          name: 'renamed-folder',
-          kind: 'directory',
-          path: '/new-parent/renamed-folder',
-        }
+        return refreshedFolder
       }
       if (path.endsWith('/children')) {
-        if (path.endsWith('/root-id/children')) {
-          return { items: [child('old-parent', 'directory', 1)], nextCursor: null }
+        if (path === `/api/v1/gfs/resources/${rootId}/children`) {
+          return { items: [oldParent], nextCursor: null }
         }
-        if (path.endsWith('/id-1/children')) {
-          return { items: [child('old-folder', 'directory', 2)], nextCursor: null }
+        if (path.endsWith(`/${oldParent.resourceId}/children`)) {
+          return { items: [oldFolder], nextCursor: null }
         }
         return { items: [], nextCursor: null }
       }
@@ -752,6 +795,33 @@ describe('GfsBrowser', () => {
       drive: 'main',
       path: '/new-parent/renamed-folder',
     })
+
+    mockApiSend.mockResolvedValueOnce({
+      ok: true,
+      data: { resourceId: oldFolder.resourceId, version: 13 },
+    })
+    fireEvent.click(within(breadcrumb).getByRole('button', { name: 'Actions for renamed-folder' }))
+    expect(screen.getAllByRole('menuitem').map(item => item.textContent)).toEqual([
+      'Share',
+      'Open EvenDrive link',
+      'Rename',
+      'Move to…',
+      'Delete',
+    ])
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Rename' }))
+    const renameDialog = await screen.findByRole('dialog', { name: 'Rename folder' })
+    fireEvent.change(within(renameDialog).getByLabelText('New name'), {
+      target: { value: 'renamed-again' },
+    })
+    fireEvent.click(within(renameDialog).getByRole('button', { name: 'Rename' }))
+    await waitFor(() =>
+      expect(mockApiSend).toHaveBeenCalledWith(
+        'PATCH',
+        `/api/v1/gfs/resources/${oldFolder.resourceId}`,
+        { drive: 'main', newName: 'renamed-again', ifMatch: 12 },
+        { drive: 'main' }
+      )
+    )
   })
 
   it('keeps a newer remote hierarchy when an older local move reconstruction completes late', async () => {
@@ -2014,6 +2084,12 @@ describe('GfsBrowser', () => {
   it('shows the ⋯ menu only on the active breadcrumb folder and opens pasted EvenDrive links', async () => {
     const orgFolder = child('org', 'directory', 1)
     const nestedFolder = child('nested', 'directory', 3)
+    const linkedView = resolvedFolderView(
+      '99999999-9999-9999-9999-999999999999',
+      'nested',
+      '/nested',
+      4
+    )
     mockApiGet.mockImplementation(async (path: string) => {
       if (path === '/api/v1/gfs/tree') {
         return { items: [orgFolder], nextCursor: null }
@@ -2022,17 +2098,7 @@ describe('GfsBrowser', () => {
         return { items: [nestedFolder], nextCursor: null }
       }
       if (path === '/api/v1/gfs/resolve') {
-        // Real control-api resolve contract (toResolveView): no version.
-        return {
-          resourceId: 'id-3',
-          rid: 'r3',
-          gfsUri: 'gfs://main/r3',
-          drive: 'main',
-          name: 'nested',
-          kind: 'directory',
-          path: '/nested',
-          updatedAt: '2026-09-24T00:00:00.000Z',
-        }
+        return linkedView
       }
       return { items: [], nextCursor: null }
     })
@@ -2064,24 +2130,40 @@ describe('GfsBrowser', () => {
     expect(screen.getAllByRole('menuitem').map(item => item.textContent)).toEqual(rowOptions)
     expect(rowOptions).toEqual(['Share', 'Open EvenDrive link', 'Rename', 'Move to…', 'Delete'])
 
-    // "Open EvenDrive link" resolves the pasted URI and navigates to it. The
-    // current resolve contract does not return a mutation version, so the
-    // active breadcrumb deliberately has no mutating menu until the backend
-    // version contract is delivered.
+    // "Open EvenDrive link" resolves the pasted URI through the real producer
+    // contract and preserves its authoritative mutation version.
     fireEvent.click(screen.getByRole('menuitem', { name: 'Open EvenDrive link' }))
     const dialog = await screen.findByRole('dialog', { name: 'Open EvenDrive link' })
     fireEvent.change(within(dialog).getByLabelText('EvenDrive link'), {
-      target: { value: 'gfs://main/r3' },
+      target: { value: linkedView.gfsUri },
     })
     fireEvent.click(within(dialog).getByRole('button', { name: 'Open' }))
 
     await waitFor(() =>
-      expect(mockApiGet).toHaveBeenCalledWith('/api/v1/gfs/resolve', { uri: 'gfs://main/r3' })
+      expect(mockApiGet).toHaveBeenCalledWith('/api/v1/gfs/resolve', { uri: linkedView.gfsUri })
     )
     await waitFor(() =>
       expect(within(breadcrumb).getByRole('button', { name: 'nested' })).toBeTruthy()
     )
-    expect(within(breadcrumb).queryByRole('button', { name: 'Actions for nested' })).toBeNull()
+    fireEvent.click(within(breadcrumb).getByRole('button', { name: 'Actions for nested' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Rename' }))
+    const renameDialog = await screen.findByRole('dialog', { name: 'Rename folder' })
+    fireEvent.change(within(renameDialog).getByLabelText('New name'), {
+      target: { value: 'linked-renamed' },
+    })
+    mockApiSend.mockResolvedValueOnce({
+      ok: true,
+      data: { resourceId: linkedView.resourceId, version: 5 },
+    })
+    fireEvent.click(within(renameDialog).getByRole('button', { name: 'Rename' }))
+    await waitFor(() =>
+      expect(mockApiSend).toHaveBeenCalledWith(
+        'PATCH',
+        `/api/v1/gfs/resources/${linkedView.resourceId}`,
+        { drive: 'main', newName: 'linked-renamed', ifMatch: 4 },
+        { drive: 'main' }
+      )
+    )
     expect(within(breadcrumb).queryByRole('button', { name: 'Actions for org' })).toBeNull()
     expect(screen.queryByRole('dialog', { name: 'Open EvenDrive link' })).toBeNull()
   })
@@ -2091,35 +2173,25 @@ describe('GfsBrowser', () => {
   // old location. The trail must be rebuilt from the folder's new location.
   it('rebuilds the breadcrumb trail after moving the open folder to another parent', async () => {
     const rootId = '11111111-1111-1111-1111-111111111111'
-    const folder = child('org', 'directory', 1, 7)
-    const archive = child('archive', 'directory', 2, 5)
-    // The resolve and by-path fixtures carry exactly the real control-api
-    // contract shape (toResolveView): no version field anywhere.
-    const resolveView = (resourceId: string, rid: string, name: string, path: string) => ({
-      resourceId,
-      rid,
-      gfsUri: `gfs://main/${rid}`,
-      drive: 'main',
-      name,
-      kind: 'directory',
-      path,
-      updatedAt: '2026-09-24T00:00:00.000Z',
-    })
+    const folder = listedFolder('55555555-5555-5555-5555-555555555555', 'org', '/org', 7)
+    const archive = listedFolder('66666666-6666-6666-6666-666666666666', 'archive', '/archive', 5)
+    const resolveView = (resourceId: string, name: string, path: string, version: number) =>
+      resolvedFolderView(resourceId, name, path, version)
     mockApiGet.mockImplementation(async (path: string) => {
       if (path === '/api/v1/gfs/tree' || path === `/api/v1/gfs/resources/${rootId}/children`) {
         return { rootResourceId: rootId, items: [folder, archive], nextCursor: null }
       }
       if (path === '/api/v1/gfs/resolve') {
-        return resolveView(folder.resourceId, folder.rid, folder.name, '/archive/org')
+        return resolveView(folder.resourceId, folder.name, '/archive/org', 8)
       }
       if (path === '/api/v1/gfs/by-path') {
-        return resolveView(archive.resourceId, archive.rid, archive.name, '/archive')
+        return resolveView(archive.resourceId, archive.name, '/archive', 10)
       }
       return { items: [], nextCursor: null }
     })
     mockGetGfsResourceByPath.mockReset()
     mockGetGfsResourceByPath.mockImplementation(async (_drive: string, path: string) =>
-      resolveView(archive.resourceId, archive.rid, archive.name, path)
+      resolveView(archive.resourceId, archive.name, path, 10)
     )
     mockApiSend
       .mockResolvedValueOnce({
@@ -2129,6 +2201,10 @@ describe('GfsBrowser', () => {
       .mockResolvedValueOnce({
         ok: true,
         data: { resourceId: folder.resourceId, version: 9 },
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        data: { resourceId: archive.resourceId, version: 11 },
       })
     renderBrowser()
 
@@ -2191,16 +2267,34 @@ describe('GfsBrowser', () => {
     await waitFor(() =>
       expect(within(breadcrumb).getByRole('button', { name: 'org-renamed' })).toBeTruthy()
     )
+
+    // The by-path ancestor also retained its producer version and remains
+    // actionable when navigated into after move reconstruction.
+    fireEvent.click(within(breadcrumb).getByRole('button', { name: 'archive' }))
+    await screen.findByText('No resources are visible in this folder.')
+    fireEvent.click(within(breadcrumb).getByRole('button', { name: 'Actions for archive' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Rename' }))
+    const archiveRenameDialog = await screen.findByRole('dialog', { name: 'Rename folder' })
+    fireEvent.change(within(archiveRenameDialog).getByLabelText('New name'), {
+      target: { value: 'archive-renamed' },
+    })
+    fireEvent.click(within(archiveRenameDialog).getByRole('button', { name: 'Rename' }))
+    await waitFor(() =>
+      expect(mockApiSend).toHaveBeenNthCalledWith(
+        3,
+        'PATCH',
+        `/api/v1/gfs/resources/${archive.resourceId}`,
+        { drive: 'main', newName: 'archive-renamed', ifMatch: 10 },
+        { drive: 'main' }
+      )
+    )
   })
 
-  // R1-M5 / R2-M2: the real resolve producer (control-api toResolveView)
-  // returns NO mutation version, so link-opened breadcrumb mutations stay
-  // explicitly deferred — no synthetic version fixture may imply otherwise.
-  // Production resolve version support remains owned by backend issue #774.
-  it('keeps breadcrumb mutations deferred for a link-opened folder while resolve provides no version', async () => {
+  // Defensive fallback: an incomplete runtime response remains browseable but
+  // cannot enable mutation actions with a fabricated version.
+  it('keeps breadcrumb mutations disabled when a link resolve omits its version', async () => {
     const orgFolder = child('org', 'directory', 1)
-    // Fixture derived field-for-field from the real resolve contract
-    // (control-api/src/routes/gfs/resolve.ts toResolveView): no version.
+    // Deliberately incomplete response to preserve the fail-closed boundary.
     const linkedView = {
       resourceId: 'id-9',
       rid: 'r9',
@@ -2243,9 +2337,8 @@ describe('GfsBrowser', () => {
         drive: 'main',
       })
     )
-    // …but with no real version from resolve, the active crumb carries no
-    // mutating ⋯ menu and no mutation request is issued against an
-    // invented ifMatch.
+    // …but without a response version, the active crumb has no mutating menu
+    // and no request is issued against an invented ifMatch.
     expect(within(breadcrumb).queryByRole('button', { name: 'Actions for nested' })).toBeNull()
     expect(within(breadcrumb).queryByRole('button', { name: 'Actions for org' })).toBeNull()
     expect(mockApiSend).not.toHaveBeenCalled()

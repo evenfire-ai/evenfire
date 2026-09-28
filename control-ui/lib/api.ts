@@ -542,6 +542,8 @@ export type GfsResourceByPathView = {
   name: string
   kind: string
   path: string | null
+  /** Authoritative GFS version used as the mutation `ifMatch` precondition. */
+  version: number
   updatedAt: string
 }
 
