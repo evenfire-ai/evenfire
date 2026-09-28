@@ -17,6 +17,7 @@ import {
   claimDeleteDynamicClientForResource,
   getDynamicClient,
   insertDynamicClientPending,
+  reclaimOrphanDynamicClient,
 } from '../src/oauth/dynamicClientStore.js'
 import { decryptOAuthSecret, deriveOAuthEncryptionKey } from '../src/oauth/encryption.js'
 import { probeMcpTransport } from '../src/oauth/mcpTransportProbe.js'
@@ -1688,5 +1689,121 @@ describe('POST /admin/mcp-servers/remote — DCR install saga (C2)', () => {
     expect(deleteUrls).toContain(DCR_CONFIDENTIAL_REGISTRATION_RESPONSE.registration_client_uri)
     const afterA = await getDynamicClient(inner, ENC_KEY, { serverNamespace: NS, serverName })
     expect(rowState(afterA)).toEqual(aState)
+  })
+
+  // ── Saga step 2b: compensations of the bind phase ───────────────────────────
+  // Each failure after the CR create must undo the CR, OUR pending row and OUR minted
+  // AS client — and nothing else. Asserted on observable state: the gateway store, the
+  // dynamic_clients rows, and the RFC 7592 DELETEs the AS received.
+
+  const MINTED_URI = DCR_CONFIDENTIAL_REGISTRATION_RESPONSE.registration_client_uri
+
+  async function installDcr(gw: MockGateway, db: DbClient, serverName: string) {
+    const { transport, calls } = makeDcrTransport({
+      responseJson: JSON.stringify(DCR_CONFIDENTIAL_REGISTRATION_RESPONSE),
+    })
+    const res = await request(
+      makeAppWithDeps(gw, {
+        db,
+        dcr: { transport, resolveDns: PUBLIC_IP },
+        runInTransaction: work => work(db as unknown as DbTransactionClient),
+      })
+    )
+      .post('/admin/mcp-servers/remote')
+      .send({ serverName, contextRef: 'ctx-a', baseUrl: 'https://mcp.notion.com/mcp', mode: 'dcr' })
+    return { res, deleteUrls: calls.filter(c => c.method === 'DELETE').map(c => c.url) }
+  }
+
+  // Unreachable in production (the apiserver always assigns a uid); tested as the
+  // defensive branch it is. The REAL gateway create runs and stores the CR, so "CR
+  // absent" proves the rollback deleted it — only the returned value loses its uid.
+  it('bind phase, created CR without uid → 503 dcr_bind_failed; CR, own row and minted client undone', async () => {
+    vi.mocked(discoverRemoteOAuth).mockResolvedValue({ ok: true, result: dcrConfidentialResult })
+    const { db, rows } = makeInMemoryDynamicClientsDb()
+    const serverName = 'bind-nouid-dcr'
+    const gw = gatewayWithContext('ctx-a')
+    const realCreate = gw.createResource.bind(gw)
+    vi.spyOn(gw, 'createResource').mockImplementation(async (plural, body, namespace) => {
+      const created = (await realCreate(plural, body, namespace)) as {
+        metadata: Record<string, unknown>
+      }
+      if (plural !== 'mcpservers') return created
+      const { uid: _uid, ...metadata } = created.metadata
+      return { ...created, metadata }
+    })
+
+    const { res, deleteUrls } = await installDcr(gw, db, serverName)
+
+    expect(res.status).toBe(503)
+    expect(res.body.error).toBe('dcr_bind_failed')
+    await expect(gw.getResource('mcpservers', serverName, NS)).rejects.toThrow()
+    expect(rows.has(rowKey(serverName))).toBe(false)
+    expect(deleteUrls).toEqual([MINTED_URI])
+  })
+
+  it('bind phase, bind UPDATE throws → error propagates; CR, own row and minted client undone', async () => {
+    vi.mocked(discoverRemoteOAuth).mockResolvedValue({ ok: true, result: dcrConfidentialResult })
+    const { db: inner, rows } = makeInMemoryDynamicClientsDb()
+    const serverName = 'bind-throws-dcr'
+    // Only the bind statement (`SET cr_uid = $5`) rejects; every other statement —
+    // including the compensation DELETE — reaches the in-memory store.
+    const db = {
+      query: async (text: string, values?: unknown[]) => {
+        if (text.includes('UPDATE dynamic_clients') && text.includes('SET cr_uid = $5')) {
+          throw new Error('bind boom')
+        }
+        return inner.query(text, values)
+      },
+    } as unknown as DbClient
+    const gw = gatewayWithContext('ctx-a')
+
+    const { res, deleteUrls } = await installDcr(gw, db, serverName)
+
+    // The route rethrows; the app's error handler maps it to a 500 with the message.
+    expect(res.status).toBe(500)
+    expect(res.body.error).toBe('bind boom')
+    await expect(gw.getResource('mcpservers', serverName, NS)).rejects.toThrow()
+    expect(rows.has(rowKey(serverName))).toBe(false)
+    expect(deleteUrls).toEqual([MINTED_URI])
+  })
+
+  // The pending row expires and another install reclaims it between our CR create and
+  // our bind. The reclaim is played by the REAL producer (`reclaimOrphanDynamicClient`
+  // with the `observed` identity read through the real `getDynamicClient`) from the
+  // gateway's create hook — i.e. after the CR exists, before the bind runs.
+  it('bind phase, row reclaimed before bind → 503 install_superseded; CR undone, reclaimer row byte-identical', async () => {
+    vi.mocked(discoverRemoteOAuth).mockResolvedValue({ ok: true, result: dcrConfidentialResult })
+    const { db, rows } = makeInMemoryDynamicClientsDb()
+    const serverName = 'bind-lost-dcr'
+    const key = { serverNamespace: NS, serverName }
+    const gw = gatewayWithContext('ctx-a')
+    let reclaimerState: ReturnType<typeof rowState> | undefined
+    gw.setResourceCreateFault(async ({ plural }) => {
+      if (plural !== 'mcpservers') return
+      expirePending(rows, serverName)
+      const observed = await getDynamicClient(db, ENC_KEY, key)
+      if (!observed) throw new Error('no pending row to reclaim')
+      const { reclaimed } = await reclaimOrphanDynamicClient(
+        ENC_KEY,
+        {
+          key,
+          newCredentials: { ...RACE_A_ROW, serverName },
+          newInstallId: randomUUID(),
+          observed,
+        },
+        work => work(db as unknown as DbTransactionClient)
+      )
+      if (!reclaimed) throw new Error('reclaim did not apply')
+      reclaimerState = rowState(await getDynamicClient(db, ENC_KEY, key))
+    })
+
+    const { res, deleteUrls } = await installDcr(gw, db, serverName)
+
+    expect(res.status).toBe(503)
+    expect(res.body.error).toBe('install_superseded')
+    expect(reclaimerState).toBeDefined()
+    await expect(gw.getResource('mcpservers', serverName, NS)).rejects.toThrow()
+    expect(rowState(await getDynamicClient(db, ENC_KEY, key))).toEqual(reclaimerState)
+    expect(deleteUrls).toEqual([MINTED_URI])
   })
 })
