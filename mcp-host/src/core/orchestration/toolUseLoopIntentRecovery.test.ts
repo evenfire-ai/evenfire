@@ -28,4 +28,25 @@ describe('shouldRecoverWorkflowTriggerTextResponse', () => {
       )
     ).toBe(true)
   })
+
+  it.each([
+    'Run "quarterly-report"',
+    "Run 'quarterly-report'",
+    'Run “quarterly-report”',
+    'Run ‘quarterly-report’',
+    'Please run quarterly-report',
+    'Launch quarterly-report',
+    'Run quarterly-report.',
+    'Please launch “quarterly-report”.',
+  ])('recovers a direct named recipe request: %s', userText => {
+    expect(shouldRecoverWorkflowTriggerTextResponse(userText, 'I can help with that.')).toBe(true)
+  })
+
+  it.each([
+    'Run a shell command',
+    'Run quarterly-report and delete it',
+    `Run ${'a'.repeat(129)}-report`,
+  ])('does not infer a recipe from unrelated or oversized text: %s', userText => {
+    expect(shouldRecoverWorkflowTriggerTextResponse(userText, 'I can help with that.')).toBe(false)
+  })
 })
