@@ -60,7 +60,11 @@ function fail(error: string): ParseResult {
 }
 
 export function hostStreamBodyError(req: AuthedRequest): string | undefined {
-  if (Number(req.headers['content-length'] || 0) <= 0) return undefined
+  if (
+    Number(req.headers['content-length'] || 0) <= 0 &&
+    req.headers['transfer-encoding'] === undefined
+  )
+    return undefined
   const route = String(req.route?.path || '')
   if (route.endsWith('/status/stream'))
     return 'Status stream is read-only and does not accept request bodies'
