@@ -20,8 +20,8 @@ describe('0119_dynamic_clients_table migration', () => {
   it('is registered after 0115, immediately before its runtime-access grant', async () => {
     const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
     const versions = CONTROL_API_MIGRATIONS.map(m => m.version)
-    // Renumbered 0116->0117 during the dev sync: dev's 0116_mcp_secret_rollback_permits
-    // now sits between 0115 and this migration, so this guards ordering, not adjacency.
+    // Renumbered 0116->0117->0119 across dev syncs: dev's 0116-0118 now sit between
+    // 0115 and this migration, so this guards ordering, not adjacency.
     expect(versions).toContain('0119_dynamic_clients_table')
     expect(versions.indexOf('0115_llm_allowed_models_image_input')).toBeLessThan(
       versions.indexOf('0119_dynamic_clients_table')
@@ -30,6 +30,21 @@ describe('0119_dynamic_clients_table migration', () => {
     expect(versions.indexOf('0119_dynamic_clients_table')).toBeLessThan(
       versions.indexOf('0120_dynamic_clients_runtime_access')
     )
+  })
+
+  it('carries the pre-renumber names as legacyVersions so a deploy that already ran them is not re-executed', async () => {
+    // Environments that recorded an earlier name (the oauth-19 dev cluster) must
+    // mark the current version applied from that row instead of re-running the DDL.
+    const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
+    const byVersion = (v: string) => CONTROL_API_MIGRATIONS.find(m => m.version === v)
+    expect(byVersion('0119_dynamic_clients_table')?.legacyVersions).toEqual([
+      '0116_dynamic_clients_table',
+      '0117_dynamic_clients_table',
+    ])
+    expect(byVersion('0120_dynamic_clients_runtime_access')?.legacyVersions).toEqual([
+      '0117_dynamic_clients_runtime_access',
+      '0118_dynamic_clients_runtime_access',
+    ])
   })
 
   it('creates the dynamic_clients table with the encrypted columns, owner-unique constraint and issuer index', async () => {

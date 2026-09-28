@@ -31,6 +31,12 @@ describe('0121_oauth_install_identity migration', () => {
     )
   })
 
+  it('carries its pre-renumber name as legacyVersions so a deploy that already ran it is not re-executed', async () => {
+    const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
+    const migration = CONTROL_API_MIGRATIONS.find(m => m.version === '0121_oauth_install_identity')
+    expect(migration?.legacyVersions).toEqual(['0119_oauth_install_identity'])
+  })
+
   it('adds install_id + cr_uid to dynamic_clients and cr_uid to oauth_grants, with the bound/length CHECKs', async () => {
     const { initDb } = await import('../src/db.js')
     await initDb()
