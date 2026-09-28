@@ -32,10 +32,10 @@ export const DEV_POST_0106_MIGRATION_VERSIONS = Object.freeze([
 export const PR2_MIGRATION_VERSIONS = Object.freeze([
   '0115_workflow_authority_bindings',
   '0116_gfs_upload_authority_bindings',
-  '0117_pr2_readiness_evidence',
-  '0118_pr2_runtime_privileges',
-  '0119_workflow_recipe_authority_entity',
-  '011a_workflow_run_failure_reason',
+  '0119_pr2_readiness_evidence',
+  '011a_pr2_runtime_privileges',
+  '011b_workflow_recipe_authority_entity',
+  '011c_workflow_run_failure_reason',
   '0120_r31_runtime_behavior_sources',
 ])
 
