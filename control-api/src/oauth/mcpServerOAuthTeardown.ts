@@ -20,9 +20,10 @@ import { deleteOAuthGrantsForServer } from './store.js'
  *   - C: the old read→await(7592)→delete gap let a reinstall slip a new row in between.
  *     Here there is no gap: the claim is one statement.
  *
- * Runs AFTER the CR delete; never throws. Each stage is best-effort — a throw is
- * caught, counted (metric, existing stage labels) and logged (names-only), and the
- * uninstall keeps its 200. Changing that response policy is R3-H7, out of scope.
+ * Runs while the CR still exists (see mcpServerUninstall.ts) and never throws: a
+ * throw is caught, counted (metric, per stage) and logged (names-only), and reported
+ * as `'failed'` so the caller can keep the CR and answer "repair required" — the
+ * retry reuses the same uid.
  */
 export type TeardownStageResult = 'done' | 'none' | 'failed'
 
@@ -70,10 +71,7 @@ export async function teardownMcpServerOAuthState(
   } catch (err) {
     result.dynamicClient = 'failed'
     mcpServerUninstallTeardownFailuresTotal.inc({ stage: 'dynamic_client' })
-    logger.error(
-      { serverName: name, namespace, err },
-      'Dynamic client cleanup failed on uninstall (CR already deleted)'
-    )
+    logger.error({ serverName: name, namespace, err }, 'Dynamic client cleanup failed on uninstall')
   }
 
   // Grants: purge this installation's rows (fenced by cr_uid + legacy). A reinstall's
@@ -94,10 +92,7 @@ export async function teardownMcpServerOAuthState(
   } catch (err) {
     result.grants = 'failed'
     mcpServerUninstallTeardownFailuresTotal.inc({ stage: 'oauth_grants' })
-    logger.error(
-      { serverName: name, namespace, err },
-      'OAuth grants purge failed on uninstall (CR already deleted)'
-    )
+    logger.error({ serverName: name, namespace, err }, 'OAuth grants purge failed on uninstall')
   }
 
   return result

@@ -35,6 +35,9 @@ vi.mock('../src/db.js', async () => {
     advisoryLockModelName: async () => {},
     advisoryLockModelNames: async () => {},
     boundCarrierTransactionIdleTimeout: async () => {},
+    // The McpServer uninstall runs its OAuth teardown before the CR delete and answers
+    // 503 when it fails, so it needs a DB that answers (empty: nothing to tear down).
+    pool: { query: async () => ({ rows: [], rowCount: 0 }) },
   }
 })
 
@@ -1243,21 +1246,24 @@ describe('routes/resources', () => {
     config.contextsNamespace = 'contexts-ns'
     config.mcpServersNamespace = 'mcpservers-ns'
 
-    const gateway = {
-      // The uninstall reads the CR before deleting to capture metadata.uid (R3-H5).
-      getResource: vi
-        .fn()
-        .mockResolvedValue({ metadata: { name: 'mcp-a', uid: 'uid-mcp-a', resourceVersion: '1' } }),
-      deleteResource: vi.fn().mockResolvedValue({ deleted: true }),
-      deleteSecret: vi.fn().mockResolvedValue({ deleted: true }),
-      listResource: vi.fn().mockResolvedValue([
-        {
-          metadata: { name: 'ctx-a' },
-          spec: { contextId: 'ctx-a', description: 'desc', mcpServers: ['mcp-a', 'mcp-b'] },
-        },
-      ]),
-      updateResource: vi.fn().mockResolvedValue({}),
-    }
+    // Stateful gateway: the Context and the CR carry the uid/resourceVersion the
+    // apiserver always returns, which the fenced strip and delete depend on.
+    const gateway = new MockGateway('mcpservers-ns')
+    const cr = (await gateway.createResource(
+      'mcpservers',
+      { metadata: { name: 'mcp-a' }, spec: {} },
+      'mcpservers-ns'
+    )) as { metadata: { uid: string } }
+    await gateway.createResource(
+      'contexts',
+      {
+        metadata: { name: 'ctx-a' },
+        spec: { contextId: 'ctx-a', description: 'desc', mcpServers: ['mcp-a', 'mcp-b'] },
+      },
+      'contexts-ns'
+    )
+    const deleteSpy = vi.spyOn(gateway, 'deleteResource')
+    const updateSpy = vi.spyOn(gateway, 'updateResource')
 
     try {
       const app = express()
@@ -1266,21 +1272,20 @@ describe('routes/resources', () => {
 
       await request(app).delete('/admin/mcp-servers/mcp-a').expect(200)
 
-      // The CR delete is now fenced on the uid read back before deletion (R3-H5).
-      expect(gateway.deleteResource).toHaveBeenCalledWith('mcpservers', 'mcp-a', 'mcpservers-ns', {
-        uid: 'uid-mcp-a',
+      expect(deleteSpy).toHaveBeenCalledWith('mcpservers', 'mcp-a', 'mcpservers-ns', {
+        uid: cr.metadata.uid,
       })
-      expect(gateway.listResource).toHaveBeenCalledWith('contexts', 'contexts-ns')
-      expect(gateway.updateResource).toHaveBeenCalledWith(
+      await expect(gateway.getResource('mcpservers', 'mcp-a', 'mcpservers-ns')).rejects.toThrow()
+      await expect(gateway.getResource('contexts', 'ctx-a', 'contexts-ns')).resolves.toMatchObject({
+        spec: { contextId: 'ctx-a', description: 'desc', mcpServers: ['mcp-b'] },
+      })
+      // The strip is fenced on the Context identity it read.
+      expect(updateSpy).toHaveBeenCalledWith(
         'contexts',
         'ctx-a',
-        {
-          spec: {
-            contextId: 'ctx-a',
-            description: 'desc',
-            mcpServers: ['mcp-b'],
-          },
-        },
+        expect.objectContaining({
+          metadata: { uid: expect.any(String), resourceVersion: '1' },
+        }),
         'contexts-ns'
       )
     } finally {

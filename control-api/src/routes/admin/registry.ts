@@ -15,6 +15,7 @@ import { GenericConfigSuggestionSchema } from '../../oauth/genericKnobs.js'
 import { getOAuthProviderAdapter, isKnownOAuthProvider } from '../../oauth/providers.js'
 import { rootLogger } from '../../observability/logger.js'
 import { type AdminUserRecord, findAdminById } from '../../services/adminAuthService.js'
+import { attachServerToContext } from '../../services/contextAllowlist.js'
 import {
   addHookRefToHost,
   listHostsReferencingHook,
@@ -2726,42 +2727,18 @@ export function createAdminRegistryRouter(gateway?: K8sGateway): Router {
         const contextsNs = config.contextsNamespace
         let contextBefore: RegistryResourceSnapshot | null = null
         try {
-          const ctx = (await gateway.getResource('contexts', contextRef, contextsNs)) as {
-            metadata?: { uid?: string; resourceVersion?: string }
-            spec?: Record<string, unknown> & {
-              contextId?: string
-              description?: string
-              mcpServers?: string[]
-            }
-          }
-          contextBefore = normalizeRegistryResourceSnapshot(ctx, contextRef, contextsNs)
-          if (!contextBefore.metadata?.uid || !contextBefore.metadata.resourceVersion) {
-            throw Object.assign(new Error('Context identity is unavailable'), {
-              statusCode: 503,
-              code: 'context_identity_unavailable',
-            })
-          }
-          const existing: string[] = ctx.spec?.mcpServers ?? []
-          if (!existing.includes(serverName)) {
-            await gateway.updateResource(
-              'contexts',
-              contextRef,
-              {
-                metadata: {
-                  uid: contextBefore.metadata.uid,
-                  ...(ctx.metadata?.resourceVersion
-                    ? { resourceVersion: ctx.metadata.resourceVersion }
-                    : {}),
-                },
-                spec: {
-                  ...ctx.spec,
-                  contextId: ctx.spec?.contextId ?? contextRef,
-                  mcpServers: [...existing, serverName],
-                } as Record<string, unknown>,
+          // The before-image for the ambiguous-outcome readback below is the snapshot
+          // the LAST attempt edited: an earlier one is stale after a 409 retry.
+          await attachServerToContext(
+            gateway,
+            { name: contextRef, namespace: contextsNs },
+            serverName,
+            {
+              onRead: ctx => {
+                contextBefore = normalizeRegistryResourceSnapshot(ctx, contextRef, contextsNs)
               },
-              contextsNs
-            )
-          }
+            }
+          )
         } catch (err) {
           let associationOutcome: RegistryMutationOutcome = isDeterministicRegistryNoCommit(err)
             ? 'not-committed'

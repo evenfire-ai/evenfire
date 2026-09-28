@@ -1450,9 +1450,14 @@ describe('POST /admin/registry/install', () => {
     })
   })
 
-  it('preserves dependencies after an ambiguous concurrent Context change', async () => {
+  // A concurrent Context writer moves the resourceVersion between the attach's read
+  // and its write. The attach re-reads and re-applies its edit to the fresh list
+  // instead of replaying the stale one (which would drop the other writer's change)
+  // or failing the install.
+  it('merges into a concurrently changed Context allowlist instead of replaying a stale one', async () => {
     vi.mocked(getEntryVersion).mockResolvedValueOnce(MOCK_ENTRY)
     vi.mocked(getCredentialSchema).mockResolvedValueOnce(MOCK_SCHEMA_REQUIRED)
+    vi.mocked(reportInstall).mockResolvedValueOnce({ acknowledged: true, stored: true })
 
     const gw = new MockGateway('mcp-server')
     await gw.createResource('contexts', {
@@ -1491,14 +1496,79 @@ describe('POST /admin/registry/install', () => {
         registryEntryVersion: '1.0.0',
         credentials: { AIRTABLE_API_KEY: ['context', 'race'].join('-') },
       })
+      .expect(201)
+
+    expect(res.body.contextUpdated).toBe(true)
+    await expect(gw.getResource('contexts', 'default-context')).resolves.toMatchObject({
+      spec: { mcpServers: ['concurrent-writer', 'my-airtable'] },
+    })
+    await expect(gw.getResource('mcpservers', 'my-airtable', 'mcp-server')).resolves.toMatchObject({
+      metadata: { uid: expect.any(String), resourceVersion: expect.any(String) },
+    })
+    await expect(gw.getSecret('my-airtable-credentials', 'mcp-server')).resolves.toMatchObject({
+      metadata: { uid: expect.any(String), resourceVersion: expect.any(String) },
+    })
+  })
+
+  // Sibling of the merge above: the Context is rewritten before EVERY attach write, so
+  // the bounded retry runs out. The install must not guess — the CR and its Secret stay
+  // for repair and the other writers' entries are not clobbered.
+  it('gives up after the bounded attach retries when the Context keeps changing', async () => {
+    vi.mocked(getEntryVersion).mockResolvedValueOnce(MOCK_ENTRY)
+    vi.mocked(getCredentialSchema).mockResolvedValueOnce(MOCK_SCHEMA_REQUIRED)
+
+    const gw = new MockGateway('mcp-server')
+    await gw.createResource('contexts', {
+      metadata: { name: 'default-context' },
+      spec: { contextId: 'default-context', mcpServers: [] },
+    })
+    const originalUpdate = gw.updateResource.bind(gw)
+    let attachWrites = 0
+    vi.spyOn(gw, 'updateResource').mockImplementation(async (plural, name, body, ns) => {
+      // Only the attach writes carry the new server; the ambiguous-outcome fence
+      // rewrites the pre-attach snapshot and must reach the gateway untouched.
+      const servers = (body.spec as { mcpServers?: string[] }).mcpServers ?? []
+      if (plural === 'contexts' && servers.includes('my-airtable')) {
+        attachWrites += 1
+        const current = (await gw.getResource('contexts', name, ns)) as {
+          metadata: { resourceVersion: string }
+          spec: { mcpServers?: string[] }
+        }
+        await originalUpdate(
+          'contexts',
+          name,
+          {
+            metadata: { resourceVersion: current.metadata.resourceVersion },
+            spec: {
+              ...current.spec,
+              mcpServers: [...(current.spec.mcpServers ?? []), `writer-${attachWrites}`],
+            },
+          },
+          ns
+        )
+      }
+      return originalUpdate(plural, name, body, ns)
+    })
+
+    const app = makeApp(gw as unknown as import('../src/k8s.js').K8sGateway)
+    const res = await request(app)
+      .post('/admin/registry/install')
+      .send({
+        serverName: 'my-airtable',
+        contextRef: 'default-context',
+        registryEntryName: 'airtable-mcp',
+        registryEntryVersion: '1.0.0',
+        credentials: { AIRTABLE_API_KEY: ['context', 'storm'].join('-') },
+      })
       .expect(503)
 
     expect(res.body).toMatchObject({
       error: 'registry_install_outcome_ambiguous',
       outcome: 'repair_required',
     })
+    expect(attachWrites).toBe(3)
     await expect(gw.getResource('contexts', 'default-context')).resolves.toMatchObject({
-      spec: { mcpServers: ['concurrent-writer'] },
+      spec: { mcpServers: ['writer-1', 'writer-2', 'writer-3'] },
     })
     await expect(gw.getResource('mcpservers', 'my-airtable', 'mcp-server')).resolves.toMatchObject({
       metadata: { uid: expect.any(String), resourceVersion: expect.any(String) },

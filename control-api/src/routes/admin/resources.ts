@@ -13,21 +13,21 @@ import { validateCommunicationChannelSpec } from '../../http/validateCommunicati
 import { validateMcpServerSpecPreflight } from '../../http/validateMcpServerSpec.js'
 import { K8sGateway } from '../../k8s.js'
 import { deriveOAuthEncryptionKey } from '../../oauth/encryption.js'
-import { teardownMcpServerOAuthState } from '../../oauth/mcpServerOAuthTeardown.js'
+import {
+  captureMcpServerSecrets,
+  deleteCapturedSecrets,
+  uninstallMcpServer,
+} from '../../oauth/mcpServerUninstall.js'
 import { rootLogger } from '../../observability/logger.js'
-import { mcpServerUninstallTeardownFailuresTotal } from '../../observability/metrics.js'
+import { stripServerFromContexts } from '../../services/contextAllowlist.js'
 import { stripHookRefFromHosts } from '../../services/hostGuardrailRefs.js'
 import {
   K8sConflictError,
   K8sNotFoundError,
   type MutableResourceSnapshot,
 } from '../../services/resourceService.js'
+import { captureSecretForCleanup } from '../../services/secretCleanup.js'
 import { secretKeyNames } from '../../services/secretKeyNames.js'
-import {
-  isControlApiManagedSecret,
-  isRecipeOwnedSecret,
-  secretIdentityPreconditions,
-} from '../../services/secretRepository.js'
 import {
   ClerumResourceType,
   type ResourcePreconditions,
@@ -1079,6 +1079,47 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
       const { plural, ns } = resolveResource(req.params.resource)!
       const name = req.params.name
 
+      if (plural === 'mcpservers') {
+        const outcome = await uninstallMcpServer(
+          {
+            gateway,
+            db: dcrDb,
+            encryptionKey: oauthEncryptionKey,
+            dcrDeps: { logger: log },
+            contextsNamespace: resourceNamespace('contexts'),
+            logger: log,
+          },
+          { name, namespace: ns }
+        )
+        if (outcome.status === 'completed') {
+          res.status(200).json(outcome.crDeleteResponse)
+          return
+        }
+        if (outcome.status === 'incomplete') {
+          res.status(503).json({
+            error: 'mcp_server_uninstall_incomplete',
+            outcome: 'repair_required',
+            pending: outcome.pending,
+            deleted: outcome.deleted,
+          })
+          return
+        }
+        // The CR read found nothing, so there is no uid to fence an OAuth teardown by:
+        // only the name-addressed K8s cleanup runs, and OAuth state is left alone.
+        const secretCaptures = await captureMcpServerSecrets(gateway, name, ns, log)
+        const deleted = await gateway.deleteResource(plural, name, ns)
+        await deleteCapturedSecrets(gateway, secretCaptures, ns, log)
+        try {
+          await stripServerFromContexts(gateway, resourceNamespace('contexts'), name, contextName =>
+            log.info({ serverName: name, contextName }, 'Removed MCP server from Context allowlist')
+          )
+        } catch (err) {
+          log.error({ serverName: name, err }, 'Failed to clean up Context allowlists')
+        }
+        res.status(200).json(deleted)
+        return
+      }
+
       // CommunicationChannel: read the credentialsSecretRef name FIRST (we
       // can't read the CC after it's deleted), then delete the CC, then
       // delete the Secret. The CC-first order means HCC's SecretInformer
@@ -1102,105 +1143,15 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
         }
       }
 
-      // Capture the credential Secret identity BEFORE deleting the parent CR.
-      // A same-name Secret can be created in the gap, and a name-addressed
-      // delete afterwards would remove that replacement — a different owner's
-      // object — on the strength of a decision made about something that no
-      // longer exists. Every cleanup below is bound to the snapshot taken here.
-      // Same reasoning, and same shape, as the registry uninstall path.
-      const captureSecretForCleanup = async (
-        secretName: string,
-        { requireManagedOwnership = false }: { requireManagedOwnership?: boolean } = {}
-      ): Promise<
-        | { status: 'ready'; precondition: SecretPreconditions }
-        | {
-            status:
-              | 'absent'
-              | 'recipe-owned'
-              | 'not-managed'
-              | 'identity-unavailable'
-              | 'read-failed'
-          }
-      > => {
-        let raw: unknown
-        try {
-          raw = await gateway.getSecret(secretName, ns)
-        } catch (err) {
-          if (extractK8sStatusCode(err) === 404) return { status: 'absent' }
-          // Deleting the CR is the request's actual intent; the Secret is a
-          // cascade. A failed read means we cannot fence the cascade delete, so
-          // it is skipped and logged — the same policy this PR already applies
-          // to the rollback paths ("rollback skipped: identity unavailable").
-          // Failing the whole request here would leave the CR undeleted because
-          // its dependent Secret could not be read.
-          log.error(
-            { secretName, namespace: ns, err },
-            'Secret cleanup capture failed; cascade delete will be skipped'
-          )
-          return { status: 'read-failed' }
-        }
-        // Recipe-owned Secrets belong to /admin/recipe-secrets. The mcp-secret
-        // route refuses them with 409; deleting one here would route around
-        // that guard.
-        if (isRecipeOwnedSecret(raw)) return { status: 'recipe-owned' }
-        // Derived-name Secrets (`${name}-oauth-client`) share a name with any
-        // operator-owned Secret referenced in OAuth reference mode. Only delete
-        // when the managed-by label proves control-api's install saga created it;
-        // UID/RV fencing guarantees same-object, not same-owner.
-        if (requireManagedOwnership && !isControlApiManagedSecret(raw)) {
-          return { status: 'not-managed' }
-        }
-        const precondition = secretIdentityPreconditions(raw)
-        if (!precondition) return { status: 'identity-unavailable' }
-        return { status: 'ready', precondition }
-      }
-
+      // Capture the credential Secret identity BEFORE deleting the parent CR: a
+      // same-name Secret created in the gap belongs to a different owner, and a
+      // name-addressed delete afterwards would remove it.
       const ccSecretCleanup =
         plural === 'communicationchannels' && ccSecretRefName
-          ? await captureSecretForCleanup(ccSecretRefName)
-          : null
-      const mcpCredentialsSecretName = `${name}-credentials`
-      const mcpSecretCleanup =
-        plural === 'mcpservers' ? await captureSecretForCleanup(mcpCredentialsSecretName) : null
-      // Pre-registered confidential remote installs create a `${name}-oauth-client`
-      // Secret in the install saga with NO ownerReferences (it predates the CR), so
-      // K8s GC never reaps it — control-api must delete it here. Fence it on the
-      // identity captured BEFORE the CR delete, exactly like the credentials Secret:
-      // a name-addressed delete could otherwise clobber a fresh same-name Secret
-      // written by a concurrent reinstall in the gap (the bug this capture shape
-      // exists to prevent). 'absent' (404) is the norm for non-pre-registered servers.
-      const mcpOAuthClientSecretName = `${name}-oauth-client`
-      const mcpOAuthClientSecretCleanup =
-        plural === 'mcpservers'
-          ? await captureSecretForCleanup(mcpOAuthClientSecretName, {
-              requireManagedOwnership: true,
-            })
+          ? await captureSecretForCleanup(gateway, ccSecretRefName, ns, log)
           : null
 
-      // mcpservers only: read the CR before deleting so its metadata.uid fences BOTH
-      // the delete (a same-name reinstall's CR has a different uid → the delete
-      // precondition 409s and we never tear down its state) AND the OAuth teardown
-      // (only this installation's dynamic_clients row + grants are removed, R3-H5). A
-      // 404 means the CR is already gone → no uid, so the teardown is skipped entirely.
-      let mcpServerCrUid: string | undefined
-      if (plural === 'mcpservers') {
-        try {
-          const cr = await gateway.getResource(plural, name, ns)
-          mcpServerCrUid = resourcePreconditionsFromResource(cr)?.uid
-        } catch (err) {
-          // getResource wraps a namespaced 404 as K8sNotFoundError (httpStatus, not
-          // statusCode), so match both shapes — as the update handler does above.
-          if (!(err instanceof K8sNotFoundError) && extractK8sStatusCode(err) !== 404) throw err
-          // CR already gone: leave uid undefined so the teardown below is skipped.
-        }
-      }
-
-      // Only the mcpservers delete is uid-fenced; every other plural keeps the exact
-      // 3-arg call it had (a trailing undefined would change the observed call shape).
-      const deleted =
-        mcpServerCrUid !== undefined
-          ? await gateway.deleteResource(plural, name, ns, { uid: mcpServerCrUid })
-          : await gateway.deleteResource(plural, name, ns)
+      const deleted = await gateway.deleteResource(plural, name, ns)
 
       if (plural === 'communicationchannels' && ccSecretRefName && ccSecretCleanup) {
         if (ccSecretCleanup.status !== 'ready') {
@@ -1230,153 +1181,6 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
               )
             }
           }
-        }
-      }
-
-      if (plural === 'mcpservers') {
-        const contextsNs = resourceNamespace('contexts')
-        if (mcpSecretCleanup && mcpSecretCleanup.status !== 'ready') {
-          log.warn(
-            {
-              secretName: mcpCredentialsSecretName,
-              namespace: ns,
-              reason: mcpSecretCleanup.status,
-            },
-            'Skipped MCP credentials Secret cleanup'
-          )
-        } else if (mcpSecretCleanup) {
-          try {
-            await gateway.deleteSecret(mcpCredentialsSecretName, ns, mcpSecretCleanup.precondition)
-            log.info(
-              { secretName: mcpCredentialsSecretName, namespace: ns },
-              'Deleted MCP credentials Secret'
-            )
-          } catch (err) {
-            if (extractK8sStatusCode(err) === 404) {
-              log.info(
-                { secretName: mcpCredentialsSecretName, namespace: ns },
-                'MCP credentials Secret already gone'
-              )
-            } else {
-              // The McpServer is already gone, so a 200 is still the honest
-              // outcome — but this is a cleanup FAILURE, not an absence. The
-              // previous catch reported every error class, 403 included, as
-              // "no Secret to delete", telling the operator a credential had
-              // been removed while it was still live.
-              log.error(
-                { secretName: mcpCredentialsSecretName, namespace: ns, err },
-                'McpServer delete succeeded but credentials cleanup failed'
-              )
-            }
-          }
-        }
-
-        // Pre-registered confidential remote installs leave a `${name}-oauth-client`
-        // Secret with no ownerReferences (see the capture above). Delete it fenced on
-        // the identity captured before the CR delete; 'absent' (404) is expected for
-        // every non-pre-registered server and never fails the uninstall.
-        if (mcpOAuthClientSecretCleanup) {
-          if (mcpOAuthClientSecretCleanup.status === 'ready') {
-            try {
-              await gateway.deleteSecret(
-                mcpOAuthClientSecretName,
-                ns,
-                mcpOAuthClientSecretCleanup.precondition
-              )
-              log.info(
-                { secretName: mcpOAuthClientSecretName, namespace: ns },
-                'Deleted MCP OAuth client Secret'
-              )
-            } catch (err) {
-              if (extractK8sStatusCode(err) === 404) {
-                log.info(
-                  { secretName: mcpOAuthClientSecretName, namespace: ns },
-                  'MCP OAuth client Secret already gone'
-                )
-              } else {
-                mcpServerUninstallTeardownFailuresTotal.inc({ stage: 'oauth_client_secret' })
-                log.error(
-                  { secretName: mcpOAuthClientSecretName, namespace: ns, err },
-                  'McpServer delete succeeded but OAuth client Secret cleanup failed'
-                )
-              }
-            }
-          } else if (mcpOAuthClientSecretCleanup.status === 'absent') {
-            // Expected for every non-pre-registered server: no OAuth client Secret exists.
-            log.info(
-              { secretName: mcpOAuthClientSecretName, namespace: ns },
-              'No MCP OAuth client Secret to delete'
-            )
-          } else {
-            log.warn(
-              {
-                secretName: mcpOAuthClientSecretName,
-                namespace: ns,
-                reason: mcpOAuthClientSecretCleanup.status,
-              },
-              'Skipped MCP OAuth client Secret cleanup'
-            )
-          }
-        }
-
-        // OAuth teardown fenced by the CR uid (R3-H5): revoke this installation's
-        // encrypted `dynamic_clients` row + best-effort RFC 7592 delete at the AS, and
-        // purge its `oauth_grants` rows — never a same-name reinstall's state. Skipped
-        // when the uid is unknown (the CR read 404'd): a name-only teardown here would
-        // reopen the very race this fences. The module never throws; it counts/logs per
-        // stage and the uninstall keeps its 200 (the response policy is R3-H7).
-        if (mcpServerCrUid !== undefined) {
-          const teardown = await teardownMcpServerOAuthState(
-            dcrDb,
-            oauthEncryptionKey,
-            { logger: log },
-            { namespace: ns, name, crUid: mcpServerCrUid },
-            log
-          )
-          log.info(
-            {
-              serverName: name,
-              namespace: ns,
-              dynamicClient: teardown.dynamicClient,
-              grants: teardown.grants,
-            },
-            'MCP server OAuth teardown completed'
-          )
-        }
-
-        try {
-          const ctxList = (await gateway.listResource('contexts', contextsNs)) as Array<{
-            metadata?: { name?: string }
-            spec?: Record<string, unknown> & {
-              contextId?: string
-              description?: string
-              mcpServers?: string[]
-            }
-          }>
-          for (const ctx of ctxList) {
-            const ctxName = ctx.metadata?.name
-            const servers = ctx.spec?.mcpServers ?? []
-            if (ctxName && servers.includes(name)) {
-              await gateway.updateResource(
-                'contexts',
-                ctxName,
-                {
-                  spec: {
-                    ...ctx.spec,
-                    contextId: ctx.spec?.contextId ?? ctxName,
-                    mcpServers: servers.filter(s => s !== name),
-                  } as Record<string, unknown>,
-                },
-                contextsNs
-              )
-              log.info(
-                { serverName: name, contextName: ctxName },
-                'Removed MCP server from Context allowlist'
-              )
-            }
-          }
-        } catch (err) {
-          log.error({ serverName: name, err }, 'Failed to clean up Context allowlists')
         }
       }
 

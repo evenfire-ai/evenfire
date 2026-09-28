@@ -580,7 +580,10 @@ describe('POST /admin/mcp-servers/remote (install saga)', () => {
         NS
       )) as { metadata: { uid: string } }
       recreatedCrUid = recreated.metadata.uid
-      throw Object.assign(new Error('conflict'), { code: 409 })
+      // Not a 409: the attach re-reads and retries on a conflict (the Context status
+      // subresource moves its resourceVersion), so only a non-retryable failure
+      // reaches the compensation this test is about.
+      throw Object.assign(new Error('context write failed'), { code: 500 })
     })
 
     const res = await request(makeApp(gw)).post('/admin/mcp-servers/remote').send({

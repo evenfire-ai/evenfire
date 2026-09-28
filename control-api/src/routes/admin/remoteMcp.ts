@@ -34,6 +34,7 @@ import {
 import { deriveOAuthEncryptionKey } from '../../oauth/encryption.js'
 import { probeMcpTransport } from '../../oauth/mcpTransportProbe.js'
 import { rootLogger } from '../../observability/logger.js'
+import { attachServerToContext } from '../../services/contextAllowlist.js'
 import { K8sNotFoundError } from '../../services/resourceService.js'
 import type { SecretSnapshot } from '../../services/secretRepository.js'
 import type { ResourcePreconditions } from '../../types.js'
@@ -1111,19 +1112,7 @@ export function createAdminRemoteMcpRouter(
 
       // ── Saga step 3: attach to the Context allowlist (rollback CR+Secret) ──
       try {
-        const ctx = (await gateway.getResource('contexts', contextRef)) as {
-          spec?: Record<string, unknown> & { contextId?: string; mcpServers?: string[] }
-        }
-        const existing: string[] = ctx.spec?.mcpServers ?? []
-        if (!existing.includes(serverName)) {
-          await gateway.updateResource('contexts', contextRef, {
-            spec: {
-              ...ctx.spec,
-              contextId: ctx.spec?.contextId ?? contextRef,
-              mcpServers: [...existing, serverName],
-            } as Record<string, unknown>,
-          })
-        }
+        await attachServerToContext(gateway, { name: contextRef }, serverName)
       } catch (err) {
         try {
           await gateway.deleteResource(
