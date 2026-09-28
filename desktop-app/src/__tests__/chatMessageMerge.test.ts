@@ -16,6 +16,66 @@ const imageWithBytes: ChatMessageAttachment = {
 }
 
 describe('mergeAuthoritativeServerMessages image byte gap-fill', () => {
+  it('never duplicates same-name logical images across reconciliation or a repeated merge', () => {
+    fc.assert(
+      fc.property(
+        fc.array(fc.constantFrom('chart.png', 'photo.png'), { minLength: 1, maxLength: 8 }),
+        names => {
+          const localImages: ChatMessageAttachment[] = names.map((label, index) => ({
+            id: `local-${index}`,
+            type: 'uploaded_file',
+            label,
+            filename: label,
+            mimeType: 'image/png',
+            encoding: 'base64',
+            dataBase64: Buffer.from([index]).toString('base64'),
+            sizeBytes: 1,
+          }))
+          const serverImages: ChatMessageAttachment[] = names.map((label, index) => ({
+            id: `parsed:uploaded_file:${index}:${label}`,
+            type: 'uploaded_file',
+            label,
+          }))
+          const server: ChatMessage = {
+            id: 'turn-1-user',
+            role: 'user',
+            content: 'Analyze',
+            timestamp: 2,
+            serverTurnNumber: 1,
+            task_id: 'task-1',
+            attachments: [
+              { id: 'server-plugin', type: 'plugin', label: 'profits/revenue' },
+              ...serverImages,
+            ],
+          }
+          const local: ChatMessage = {
+            id: 'optimistic-user',
+            role: 'user',
+            content: 'Analyze',
+            timestamp: 1,
+            task_id: 'task-1',
+            attachments: localImages,
+          }
+          const [merged] = mergeAuthoritativeServerMessages([local], [server], {
+            activeTaskIds: new Set(['task-1']),
+          })
+          const uploaded = merged?.attachments?.filter(
+            attachment => attachment.type === 'uploaded_file'
+          )
+          expect(uploaded).toHaveLength(names.length)
+          expect(uploaded?.map(attachment => attachment.dataBase64)).toEqual(
+            localImages.map(attachment => attachment.dataBase64)
+          )
+          expect(merged?.attachments?.[0]).toEqual(server.attachments?.[0])
+          expect(mergeAuthoritativeServerMessages([merged!], [server])[0]?.attachments).toEqual(
+            merged?.attachments
+          )
+        }
+      ),
+      { numRuns: 250 }
+    )
+  })
+
   it('keeps server reference chips and enriches a matching image during live-task replacement', () => {
     const serverPlugin: ChatMessageAttachment = {
       id: 'server-plugin',

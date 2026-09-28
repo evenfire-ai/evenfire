@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import { mergeAuthoritativeServerMessages } from '../../../../src/chatMessageMerge'
 import type { ChatMessage } from '../../../../src/types'
+import {
+  buildComposerReferencesPromptSection,
+  buildComposerRequestContent,
+} from '../../lib/composerReferencesPrompt'
+import { buildComposerResendDraft } from '../../lib/composerResend'
+import type { ComposerReferenceAttachment } from '../../uiTypes'
 import { turnsToChatMessages } from '../sessionAdapter'
 
 describe('turnsToChatMessages', () => {
@@ -87,6 +93,114 @@ describe('turnsToChatMessages', () => {
 
     expect(merged.map(message => message.id)).toEqual(['turn-7-user', 'turn-7-assistant'])
     expect(merged[0]?.attachments).toMatchObject([{ type: 'uploaded_file', label: 'photo.png' }])
+  })
+
+  it('reconciles two same-name server image chips without duplicates or resend warnings', () => {
+    const incoming = turnsToChatMessages([
+      {
+        number: 8,
+        user_input: [
+          'Analyze charts',
+          '[Attached images]',
+          '- chart.png',
+          '- chart.png',
+          'USER-ATTACHED CONTEXT: The user selected these capabilities/files for this message.',
+          'Plugins: profits/revenue. Use workflow tools.',
+        ].join('\n'),
+        started_at: new Date(120_003).toISOString(),
+      },
+    ])
+    const existing: ChatMessage[] = [
+      {
+        id: 'optimistic-user',
+        role: 'user',
+        content: 'Analyze charts',
+        timestamp: 1,
+        attachments: [
+          {
+            id: 'first',
+            type: 'uploaded_file',
+            label: 'chart.png',
+            filename: 'chart.png',
+            mimeType: 'image/png',
+            encoding: 'base64',
+            dataBase64: 'AQ==',
+            sizeBytes: 1,
+          },
+          {
+            id: 'second',
+            type: 'uploaded_file',
+            label: 'chart.png',
+            filename: 'chart.png',
+            mimeType: 'image/png',
+            encoding: 'base64',
+            dataBase64: 'Ag==',
+            sizeBytes: 1,
+          },
+        ],
+      },
+    ]
+    const merged = mergeAuthoritativeServerMessages(existing, incoming)
+    const user = merged.find(message => message.id === 'turn-8-user')!
+    expect(user.attachments?.map(attachment => attachment.type)).toEqual([
+      'uploaded_file',
+      'uploaded_file',
+      'plugin',
+    ])
+    expect(
+      user.attachments?.filter(attachment => attachment.type === 'uploaded_file')
+    ).toMatchObject([
+      { label: 'chart.png', dataBase64: 'AQ==' },
+      { label: 'chart.png', dataBase64: 'Ag==' },
+    ])
+    const draft = buildComposerResendDraft(user)
+    expect(draft.imageAttachments.map(image => image.dataBase64)).toEqual(['AQ==', 'Ag=='])
+    expect(draft.unrestorable).toEqual([])
+  })
+
+  it('retains agent and global file identity from a real server input through Resend', () => {
+    const references: ComposerReferenceAttachment[] = [
+      {
+        id: 'agent-file',
+        type: 'agent_file',
+        contextId: 'ctx-1',
+        filesystemName: 'shared-fs',
+        path: 'notes/todo.md',
+        kind: 'file',
+        label: 'todo.md',
+      },
+      {
+        id: 'global-file',
+        type: 'global_file',
+        drive: 'drive-7',
+        resourceId: 'res-9',
+        gfsUri: 'gfs://drive-7/res-9',
+        label: 'Report',
+      },
+    ]
+    const [serverUser] = turnsToChatMessages([
+      {
+        number: 9,
+        user_input: buildComposerRequestContent('Read these files', references),
+        started_at: new Date(120_004).toISOString(),
+      },
+    ])
+    expect(serverUser?.content).toBe('Read these files')
+    expect(serverUser?.attachments).toMatchObject([
+      { type: 'agent_file', label: 'todo.md', filesystemName: 'shared-fs', path: 'notes/todo.md' },
+      {
+        type: 'global_file',
+        label: 'Report',
+        drive: 'drive-7',
+        resourceId: 'res-9',
+        gfsUri: 'gfs://drive-7/res-9',
+      },
+    ])
+    const draft = buildComposerResendDraft(serverUser!)
+    expect(draft.unrestorable).toEqual([])
+    expect(buildComposerReferencesPromptSection(draft.referenceAttachments)).toBe(
+      buildComposerReferencesPromptSection(references)
+    )
   })
 
   it('preserves turn order for multi-turn transcripts', () => {

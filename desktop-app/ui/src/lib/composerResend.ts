@@ -7,14 +7,13 @@
  * references.
  *
  * Fidelity ladder (a message can carry its inputs in two places):
- *  1. The raw content's `USER-ATTACHED CONTEXT:` block (server-authoritative
- *     messages) — carries full identity (plugin `ns/name`, agent-file
- *     `filesystem/path`, global-file `label (gfs://drive/resourceId)`).
- *  2. The persisted `attachments` chips (locally optimistic messages) —
- *     uploaded files carry their base64 bytes, references carry labels only.
- *     Labels that still encode the identity (`ns/name`) are split back into
- *     structured fields; bare labels without enough identity are reported as
- *     unrestorable so the composer never shows a chip that send will omit.
+ *  1. Persisted attachment chips carry uploaded image bytes and, for current
+ *     messages, structured agent/global file identity from the composer or
+ *     server-turn parser.
+ *  2. A legacy raw `USER-ATTACHED CONTEXT:` block can supply missing identity
+ *     (plugin `ns/name`, agent-file `filesystem/path`, global-file URI).
+ *     Bare labels without enough identity are reported as unrestorable so the
+ *     composer never shows a chip that send will omit.
  *
  * `response_file` attachments are never re-applied: they are artifacts the
  * previous reply generated, not inputs of the resent prompt.
@@ -91,8 +90,8 @@ function pathBasename(path: string): string {
 /**
  * Extracts full-identity references from the `USER-ATTACHED CONTEXT:` block a
  * sent message embeds (the same block `parseChatMessageDisplay` strips for
- * display). Only this source carries plugin namespaces, agent-file filesystem
- * paths, and global-file URIs.
+ * display). Older chips may need this fallback when their structured identity
+ * was not persisted.
  */
 export function parseStructuredResendReferences(content: string): StructuredReferences {
   const result: StructuredReferences = { plugin: [], connector: [], agentFile: [], globalFile: [] }
@@ -194,13 +193,19 @@ function buildConnectorReference(
 }
 
 function buildAgentFileReference(
-  label: string,
+  chip: ChatMessageAttachment,
   structured: StructuredAgentFile[]
 ): Extract<ComposerReferenceAttachment, { type: 'agent_file' }> | null {
+  const label = chip.label
+  const embedded =
+    chip.filesystemName && chip.path
+      ? { filesystemName: chip.filesystemName, path: chip.path }
+      : null
   const basenameMatches = structured.filter(
     entry => entry.filesystemName && pathBasename(entry.path) === label
   )
   const match =
+    embedded ??
     structured.find(
       entry =>
         entry.filesystemName &&
@@ -224,10 +229,13 @@ function buildAgentFileReference(
 }
 
 function buildGlobalFileReference(
-  label: string,
+  chip: ChatMessageAttachment,
   structured: StructuredGlobalFile[]
 ): Extract<ComposerReferenceAttachment, { type: 'global_file' }> | null {
+  const label = chip.label
+  const embedded = chip.gfsUri ? parseGlobalFileFromUri(label, chip.gfsUri) : null
   const match =
+    (embedded?.drive && embedded.resourceId ? embedded : null) ??
     structured.find(entry => entry.gfsUri && entry.label === label) ??
     structured.find(entry => entry.gfsUri && pathBasename(entry.gfsUri) === label) ??
     null
@@ -282,13 +290,13 @@ export function buildComposerResendDraft(
       continue
     }
     if (chip.type === 'agent_file') {
-      const reference = buildAgentFileReference(chip.label, structured.agentFile)
+      const reference = buildAgentFileReference(chip, structured.agentFile)
       if (reference) referenceAttachments.push(reference)
       else unrestorable.push({ type: chip.type, label: chip.label })
       continue
     }
     if (chip.type === 'global_file') {
-      const reference = buildGlobalFileReference(chip.label, structured.globalFile)
+      const reference = buildGlobalFileReference(chip, structured.globalFile)
       if (reference) referenceAttachments.push(reference)
       else unrestorable.push({ type: chip.type, label: chip.label })
     }

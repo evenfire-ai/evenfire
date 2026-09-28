@@ -1221,6 +1221,12 @@ export interface ChatMessageAttachment {
   encoding?: 'base64'
   dataBase64?: string
   sizeBytes?: number
+  /** Reference identity survives server-turn display parsing for Resend. */
+  filesystemName?: string
+  path?: string
+  drive?: string
+  resourceId?: string
+  gfsUri?: string
 }
 
 export interface ChatFile {

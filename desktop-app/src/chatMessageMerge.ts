@@ -18,53 +18,66 @@ function attachmentName(attachment: ChatMessageAttachment): string {
   return (attachment.filename || attachment.label).trim()
 }
 
-/** Preserve server chips while recovering bytes that only the optimistic message has. */
-function mergeByteBearingAttachments(
+/** Keep server chips in order while pairing repeated image names by occurrence. */
+function mergeAttachmentChips(
   server: ChatMessageAttachment[] | undefined,
   local: ChatMessageAttachment[] | undefined
 ): ChatMessageAttachment[] | undefined {
   if (!server?.length) return local
   if (!local?.length) return server
 
-  const byteBearing = local.filter(attachment => Boolean(attachment.dataBase64))
-  if (!byteBearing.length) return server
-  const consumed = new Set<ChatMessageAttachment>()
-  const merged = server.map(serverAttachment => {
-    const sameId = byteBearing.find(
-      localAttachment =>
-        !consumed.has(localAttachment) &&
-        localAttachment.type === serverAttachment.type &&
-        localAttachment.id === serverAttachment.id
+  const matchedLocalIndexes = new Set<number>()
+  const localIndexByServerIndex = new Map<number, number>()
+  const pair = (serverIndex: number, predicate: (attachment: ChatMessageAttachment) => boolean) => {
+    const localIndex = local.findIndex(
+      (attachment, index) =>
+        !matchedLocalIndexes.has(index) &&
+        (attachment.type === 'uploaded_file' || Boolean(attachment.dataBase64)) &&
+        predicate(attachment)
     )
-    const name = attachmentName(serverAttachment)
-    const nameCandidates = name
-      ? byteBearing.filter(
-          localAttachment =>
-            !consumed.has(localAttachment) &&
-            localAttachment.type === serverAttachment.type &&
-            attachmentName(localAttachment) === name
-        )
-      : []
-    const serverNameIsUnique =
-      name &&
-      server.filter(
-        attachment =>
-          attachment.type === serverAttachment.type && attachmentName(attachment) === name
-      ).length === 1
-    const match =
-      sameId ?? (serverNameIsUnique && nameCandidates.length === 1 ? nameCandidates[0] : undefined)
-    if (!match) return serverAttachment
-    consumed.add(match)
-    return {
-      ...serverAttachment,
-      filename: serverAttachment.filename ?? match.filename,
-      mimeType: serverAttachment.mimeType ?? match.mimeType,
-      encoding: serverAttachment.encoding ?? match.encoding,
-      dataBase64: serverAttachment.dataBase64 ?? match.dataBase64,
-      sizeBytes: serverAttachment.sizeBytes ?? match.sizeBytes,
+    if (localIndex < 0) return
+    matchedLocalIndexes.add(localIndex)
+    localIndexByServerIndex.set(serverIndex, localIndex)
+  }
+
+  // Stable IDs win even when the server changes a display label.
+  server.forEach((attachment, index) => {
+    pair(index, candidate => candidate.type === attachment.type && candidate.id === attachment.id)
+  })
+  // Parsed server IDs differ from optimistic IDs. Pair the remaining chips by
+  // type + name in order, including collisions such as two "photo.png" images.
+  server.forEach((attachment, index) => {
+    if (localIndexByServerIndex.has(index)) return
+    const name = attachmentName(attachment)
+    if (name) {
+      pair(
+        index,
+        candidate => candidate.type === attachment.type && attachmentName(candidate) === name
+      )
     }
   })
-  return [...merged, ...byteBearing.filter(attachment => !consumed.has(attachment))]
+
+  const merged = server.map((attachment, index) => {
+    const localIndex = localIndexByServerIndex.get(index)
+    const match = localIndex === undefined ? undefined : local[localIndex]
+    if (!match?.dataBase64) return attachment
+    return {
+      ...attachment,
+      filename: attachment.filename ?? match.filename,
+      mimeType: attachment.mimeType ?? match.mimeType,
+      encoding: attachment.encoding ?? match.encoding,
+      dataBase64: attachment.dataBase64 ?? match.dataBase64,
+      sizeBytes: attachment.sizeBytes ?? match.sizeBytes,
+    }
+  })
+  return [
+    ...merged,
+    ...local.filter(
+      (attachment, index) =>
+        !matchedLocalIndexes.has(index) &&
+        (attachment.type === 'uploaded_file' || Boolean(attachment.dataBase64))
+    ),
+  ]
 }
 
 function preferredServerMessage(
@@ -76,7 +89,7 @@ function preferredServerMessage(
   return {
     ...server,
     task_id: local.task_id ?? server.task_id,
-    attachments: mergeByteBearingAttachments(server.attachments, local.attachments),
+    attachments: mergeAttachmentChips(server.attachments, local.attachments),
     toolSteps: server.toolSteps?.length ? server.toolSteps : local.toolSteps,
   }
 }
@@ -416,7 +429,7 @@ export function mergeAuthoritativeServerMessages(
     if (collapsedEcho) {
       hydrated = {
         ...hydrated,
-        attachments: mergeByteBearingAttachments(hydrated.attachments, collapsedEcho.attachments),
+        attachments: mergeAttachmentChips(hydrated.attachments, collapsedEcho.attachments),
         toolSteps: hydrated.toolSteps?.length ? hydrated.toolSteps : collapsedEcho.toolSteps,
       }
     }

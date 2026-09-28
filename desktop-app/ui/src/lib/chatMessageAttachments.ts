@@ -49,7 +49,28 @@ function createParsedAttachment(
     type,
     label: normalizedLabel,
     addedOrder: index,
+    ...(type === 'agent_file' ? parseAgentFileIdentity(label) : {}),
+    ...(type === 'global_file' ? parseGlobalFileIdentity(label) : {}),
   }
+}
+
+function parseAgentFileIdentity(
+  value: string
+): Pick<ChatMessageAttachment, 'filesystemName' | 'path'> {
+  const slash = value.indexOf('/')
+  return slash > 0 && slash < value.length - 1
+    ? { filesystemName: value.slice(0, slash), path: value.slice(slash + 1) }
+    : {}
+}
+
+function parseGlobalFileIdentity(
+  value: string
+): Pick<ChatMessageAttachment, 'drive' | 'resourceId' | 'gfsUri'> {
+  const gfsUri = value.match(/(?:^|\()(gfs:\/\/[^)\s]+)\)?$/i)?.[1]
+  const uriParts = gfsUri?.match(/^gfs:\/\/([^/]+)\/(.+)$/i)
+  return gfsUri && uriParts?.[1] && uriParts[2]
+    ? { gfsUri, drive: uriParts[1], resourceId: uriParts[2] }
+    : {}
 }
 
 function inferLegacyContextAttachmentType(label: string): ChatMessageAttachment['type'] {
@@ -90,6 +111,16 @@ export function buildChatMessageAttachments(
               ? 'Global File'
               : 'Agent File',
       addedOrder: attachmentOrder(attachment, index),
+      ...(attachment.type === 'agent_file'
+        ? { filesystemName: attachment.filesystemName, path: attachment.path }
+        : {}),
+      ...(attachment.type === 'global_file'
+        ? {
+            gfsUri: attachment.gfsUri,
+            drive: attachment.drive,
+            resourceId: attachment.resourceId,
+          }
+        : {}),
     }
   })
   const imageItems = imageAttachments.map((attachment, index): ChatMessageAttachment => {

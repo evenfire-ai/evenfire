@@ -6,6 +6,8 @@ import {
   resetComposerDraftStore,
   setComposerDraft,
 } from '@lib/composerDraftStore'
+import { mergeAuthoritativeServerMessages } from '../../../../../src/chatMessageMerge'
+import { turnsToChatMessages } from '../../../hooks/sessionAdapter'
 import { buildLoadedChatSemanticModels } from '../../../lib/chatMessageSemantics'
 import type { AgentChatMessage, ComposerImageAttachment } from '../../../uiTypes'
 import { ChatThread } from '../ChatThread'
@@ -310,5 +312,37 @@ describe('ChatThread resend action (TASK-42)', () => {
       "2 attachments from the original message couldn't be restored."
     )
     expect(pushToast.mock.calls[0]![1]).toBe('warn')
+  })
+
+  it('warns when a legacy label-only image survives reconciliation beside server references', () => {
+    const local: AgentChatMessage = {
+      id: 'optimistic-user',
+      role: 'user',
+      content: 'Analyze this',
+      timestamp: 1,
+      attachments: [{ id: 'legacy-image', type: 'uploaded_file', label: 'old-chart.png' }],
+    }
+    const incoming = turnsToChatMessages([
+      {
+        number: 10,
+        user_input: [
+          'Analyze this',
+          'USER-ATTACHED CONTEXT: The user selected these capabilities/files for this message.',
+          'Plugins: profits/revenue. Use workflow tools.',
+        ].join('\n'),
+        started_at: new Date(2).toISOString(),
+      },
+    ])
+    const user = mergeAuthoritativeServerMessages([local], incoming)[0]!
+    expect(user.attachments?.map(attachment => attachment.type)).toEqual([
+      'plugin',
+      'uploaded_file',
+    ])
+    renderWithUserMessage(user)
+    fireEvent.click(screen.getByRole('button', { name: 'Resend message' }))
+    expect(pushToast).toHaveBeenCalledWith(
+      "1 attachment from the original message couldn't be restored.",
+      'warn'
+    )
   })
 })
