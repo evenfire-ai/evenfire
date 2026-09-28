@@ -14,7 +14,8 @@ Companion to `SKILL.md`. Source of truth: `scripts/minikube/t2.sh`,
 - **Do not re-run full `make minikube-t2` to "close T2"** when T0 and T1 are
   already green on the same HEAD — use `make minikube-t2-runtime`.
 - **Do not derive a new profile from the current HEAD.** Resolve the profile
-  through the primary checkout helper. Worktree + branch own profile identity;
+  through this worktree's `scripts/minikube-profiles/branch.mk`. Worktree +
+  branch own profile identity;
   the exact-head marker owns deployed freshness and `ports.env` is persistent.
 - **Do not `ls`/`cat` `~/.cache/clerum/minikube-profiles/`.** Private profile
   state (ports, pids, markers). The harness is the only reader.
@@ -128,9 +129,9 @@ Forbidden: new profile, PVC reset, `docker desktop restart`, `docker run`
 probes, treating Error 127 as GFS/`PROFILE_UNHEALTHY`.
 
 `PROFILE_METADATA_MISSING` (unreadable `profile.env` / ports) is raised as
-`PROFILE_OWNERSHIP_MISMATCH`. Resolve or generate metadata via the primary
-checkout `branch.mk` (`branch-profile-start`). Never invent ports or
-`ls`/`cat` `~/.cache/clerum/minikube-profiles/`.
+`PROFILE_OWNERSHIP_MISMATCH`. Resolve or generate metadata via this
+worktree's `scripts/minikube-profiles/branch.mk` (`branch-profile-start`).
+Never invent ports or `ls`/`cat` `~/.cache/clerum/minikube-profiles/`.
 
 ## Stable failure codes
 

@@ -1131,7 +1131,7 @@ export class WorkflowReconciler {
     snapshot: CodexCatalogSnapshot
   } = { snapshot: { flagEnabled: false } }
   private readonly codexContexts = new Map<string, CodexReconcileContext>()
-  /** B3(c): one process-lifetime DELETE of the leftover mcp-servers internet NP. */
+  /** B3(c): one process-lifetime DELETE of the leftover mcp-servers internet NP. Keyed by recipe uid. */
   private readonly prunedLegacyMcpServersInternetEgress = new Set<string>()
 
   constructor(private readonly deps: WorkflowReconcilerDeps) {
@@ -1886,7 +1886,7 @@ export class WorkflowReconciler {
           // pod with an empty status.phase is present and must still be deleted.
           const presence = samePassPresence[component]
           if (presence?.kind === 'absent') {
-            log.info('Skipping runtime component DELETE; same-pass GET was absent', {
+            log.debug('Skipping runtime component DELETE; same-pass GET was absent', {
               recipe: recipeName,
               component,
               presence: presence.kind,
@@ -2929,8 +2929,9 @@ export class WorkflowReconciler {
    * so dropping mcp-host/coordinator/snippet-runner here frees CPU/RAM without
    * losing any artifacts.
    *
-   * Skip DELETE when the same-pass GET is already 404. A live pod with an empty
-   * status.phase is present and is still deleted. Deliberately EXCLUDES
+   * DELETE-first and 404-safe (`deletePodIfExists`). This path is outside B3
+   * (E.4(e), §7.16): do not add a GET just to skip the DELETE. The archive
+   * TTL still owns leftover objects. Deliberately EXCLUDES
    * `workflow-artifact-reader`.
    *
    * The component list is an explicit literal (not derived from
@@ -2946,24 +2947,7 @@ export class WorkflowReconciler {
       'workflow-mcp-host',
       'workflow-snippet-runner',
     ]
-    const namespace = this.deps.config.sandboxNamespace
-    const podSuffixByComponent: Record<WorkflowRuntimeComponent, string> = {
-      'workflow-coordinator': 'coordinator',
-      'workflow-mcp-host': 'mcp-host',
-      'workflow-artifact-reader': 'artifact-reader',
-      'workflow-snippet-runner': 'snippet-runner',
-    }
     for (const component of computeComponents) {
-      const podName = `${recipeName}-${podSuffixByComponent[component]}`
-      const presence = await getPodPresence(this.deps.coreApi, podName, namespace)
-      if (presence.kind === 'absent') {
-        this.log.info('Skipping terminal compute-pod DELETE; same-pass GET was absent', {
-          recipe: recipeName,
-          component,
-          presence: presence.kind,
-        })
-        continue
-      }
       await this.deleteRuntimeComponentIfExists(recipeName, component)
     }
   }
@@ -3222,9 +3206,17 @@ export class WorkflowReconciler {
     }
   }
 
-  private async pruneLegacyMcpServersInternetEgressPolicy(recipeName: string): Promise<void> {
-    if (this.prunedLegacyMcpServersInternetEgress.has(recipeName)) {
-      this.log.info('Skipping legacy mcp-servers internet NP delete; already observed gone', {
+  private legacyMcpServersInternetEgressKey(recipeName: string, recipeUid?: string): string {
+    return recipeUid && recipeUid.length > 0 ? recipeUid : recipeName
+  }
+
+  private async pruneLegacyMcpServersInternetEgressPolicy(
+    recipeName: string,
+    recipeUid?: string
+  ): Promise<void> {
+    const key = this.legacyMcpServersInternetEgressKey(recipeName, recipeUid)
+    if (this.prunedLegacyMcpServersInternetEgress.has(key)) {
+      this.log.debug('Skipping legacy mcp-servers internet NP delete; already observed gone', {
         recipe: recipeName,
       })
       return
@@ -3235,12 +3227,20 @@ export class WorkflowReconciler {
         namespace: this.deps.config.mcpServerNamespace,
       })
     )
+    if (outcome.kind === 'failed') {
+      this.log.error('Legacy mcp-servers internet NP delete failed', {
+        recipe: recipeName,
+        ...deleteOutcomeFields(outcome),
+        error: outcome.error instanceof Error ? outcome.error.message : String(outcome.error),
+      })
+      return
+    }
     this.log.info('Legacy mcp-servers internet NP delete', {
       recipe: recipeName,
       ...deleteOutcomeFields(outcome),
     })
     if (shouldRecordDelete(outcome)) {
-      this.prunedLegacyMcpServersInternetEgress.add(recipeName)
+      this.prunedLegacyMcpServersInternetEgress.add(key)
     }
   }
 
@@ -3420,11 +3420,17 @@ export class WorkflowReconciler {
     )
     const summary = await this.applyNetworkPolicyList(policies)
     const policyNames = new Set(policies.map(policy => policy.metadata?.name))
-    await this.pruneUndesiredRunLaneNetworkPolicies(recipeName, policyNames, catalog, {
-      skipCodexProxy: codexProjection.eligibility === 'uncertain',
-      skipGrokProxy: grokProjection?.eligibility === 'uncertain',
-    })
-    await this.pruneLegacyMcpServersInternetEgressPolicy(recipeName)
+    const prune = await this.pruneUndesiredRunLaneNetworkPolicies(
+      recipeName,
+      policyNames,
+      catalog,
+      {
+        skipCodexProxy: codexProjection.eligibility === 'uncertain',
+        skipGrokProxy: grokProjection?.eligibility === 'uncertain',
+      }
+    )
+    if (prune.retryPending) summary.retryPending = true
+    await this.pruneLegacyMcpServersInternetEgressPolicy(recipeName, recipeUid)
     return summary
   }
 
@@ -3441,20 +3447,30 @@ export class WorkflowReconciler {
     desiredNames: Set<string | undefined>,
     catalog: Set<string>,
     uncertain: { skipCodexProxy: boolean; skipGrokProxy: boolean }
-  ): Promise<void> {
+  ): Promise<{ retryPending: boolean }> {
     const namespace = this.deps.config.sandboxNamespace
     const labelSelector = `clerum.io/recipe=${recipeName},clerum.io/managed-by=wrc`
-    const list = await this.deps.networkingApi.listNamespacedNetworkPolicy({
-      namespace,
-      labelSelector,
-    })
+    let list: { items?: Array<{ metadata?: { name?: string } }> }
+    try {
+      list = await this.deps.networkingApi.listNamespacedNetworkPolicy({
+        namespace,
+        labelSelector,
+      })
+    } catch (error: unknown) {
+      this.log.error('Run-lane NP prune LIST failed; apply outcome is kept', {
+        recipe: recipeName,
+        error: error instanceof Error ? error.message : String(error),
+      })
+      return { retryPending: true }
+    }
     const codexProxyPolicyName = `${recipeName}-mcp-host-to-codex-proxy`
     const grokProxyPolicyName = `${recipeName}-mcp-host-to-grok-proxy`
+    let retryPending = false
     for (const policy of list.items ?? []) {
       const name = policy.metadata?.name
       if (!name || desiredNames.has(name)) continue
       if (name === codexProxyPolicyName && uncertain.skipCodexProxy) {
-        this.log.info('Skipping run-lane NP prune', {
+        this.log.debug('Skipping run-lane NP prune', {
           recipe: recipeName,
           policy: name,
           reason: 'uncertain',
@@ -3462,7 +3478,7 @@ export class WorkflowReconciler {
         continue
       }
       if (name === grokProxyPolicyName && uncertain.skipGrokProxy) {
-        this.log.info('Skipping run-lane NP prune', {
+        this.log.debug('Skipping run-lane NP prune', {
           recipe: recipeName,
           policy: name,
           reason: 'uncertain',
@@ -3470,17 +3486,27 @@ export class WorkflowReconciler {
         continue
       }
       if (!catalog.has(name)) {
-        this.log.info('Skipping run-lane NP prune', {
+        this.log.debug('Skipping run-lane NP prune', {
           recipe: recipeName,
           policy: name,
           reason: 'not-in-catalog',
         })
         continue
       }
-      await this.safeDelete(() =>
+      const outcome = await observeNamespacedDelete(() =>
         this.deps.networkingApi.deleteNamespacedNetworkPolicy({ name, namespace })
       )
+      if (outcome.kind === 'failed') {
+        this.log.error('Run-lane NP prune delete failed', {
+          recipe: recipeName,
+          policy: name,
+          ...deleteOutcomeFields(outcome),
+          error: outcome.error instanceof Error ? outcome.error.message : String(outcome.error),
+        })
+        retryPending = true
+      }
     }
+    return { retryPending }
   }
 
   /**
@@ -3744,12 +3770,15 @@ export class WorkflowReconciler {
   async reconcileDelete(
     recipeName: string,
     recipeNamespace?: string,
-    spec?: WorkflowRecipeSpec
+    spec?: WorkflowRecipeSpec,
+    recipeUid?: string
   ): Promise<void> {
     const ns = this.deps.config.sandboxNamespace
     const log = createLogger('wrc', recipeName)
     log.info(`Deleting workflow resources`)
     this.pluginWorkloadSdkProvisioner.clearRecipeState(recipeName)
+    this.prunedLegacyMcpServersInternetEgress.delete(recipeName)
+    if (recipeUid) this.prunedLegacyMcpServersInternetEgress.delete(recipeUid)
 
     // Best-effort cleanup of the recipe's subdirectory on the workflow output PVC.
     // Must run BEFORE pod deletion while mcp-host is still reachable; failures

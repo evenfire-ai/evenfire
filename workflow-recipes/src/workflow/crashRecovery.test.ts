@@ -135,7 +135,7 @@ describe('getPodPresence', () => {
 })
 
 describe('waitForPodDeletion', () => {
-  it('returns true once getPodPhase reports the pod is gone', async () => {
+  it('returns true once getPodPresence reports the pod is gone', async () => {
     const readNamespacedPod = vi
       .fn()
       .mockResolvedValueOnce({ status: { phase: 'Running' } })
@@ -151,5 +151,21 @@ describe('waitForPodDeletion', () => {
       })
     ).resolves.toBe(true)
     expect(readNamespacedPod).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not treat a GET 200 with empty status.phase as deleted', async () => {
+    const readNamespacedPod = vi
+      .fn()
+      .mockResolvedValue({ metadata: { name: 'recipe-mcp-host' }, status: {} })
+    const coreApi = {
+      readNamespacedPod,
+    } as unknown as Parameters<typeof waitForPodDeletion>[0]
+
+    await expect(
+      waitForPodDeletion(coreApi, 'recipe-mcp-host', 'sandbox-recipes', {
+        timeoutMs: 20,
+        pollIntervalMs: 5,
+      })
+    ).resolves.toBe(false)
   })
 })

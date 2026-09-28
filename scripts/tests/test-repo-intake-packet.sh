@@ -122,7 +122,7 @@ git -C "${MAIN_REPO}" config user.name "Clerum Test"
 
 printf '{"scripts":{"test":"true"}}\n' >"${MAIN_REPO}/package.json"
 mkdir -p "${MAIN_REPO}/scripts/minikube-profiles"
-printf '# test helper\n' >"${MAIN_REPO}/scripts/minikube-profiles/branch.mk"
+printf '# worktree-local helper (scripts/minikube-profiles)\n' >"${MAIN_REPO}/scripts/minikube-profiles/branch.mk"
 git -C "${MAIN_REPO}" add package.json
 git -C "${MAIN_REPO}" commit -q -m "initial"
 git -C "${MAIN_REPO}" update-ref refs/remotes/origin/dev HEAD

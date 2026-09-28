@@ -1276,28 +1276,7 @@ describe('WorkflowReconciler.reconcileDelete — orphaned Service cleanup', () =
   })
 
   describe('teardownComputePodsForTerminalRun', () => {
-    afterEach(() => {
-      crashRecoveryMocks.getPodPresence.mockImplementation(
-        async (api: unknown, name: string, namespace: string) => {
-          const phase = await crashRecoveryMocks.getPodPhase(api, name, namespace)
-          return phase === undefined
-            ? { kind: 'absent' as const }
-            : { kind: 'present' as const, phase }
-        }
-      )
-    })
-
     it('deletes coordinator, mcp-host, and snippet-runner but PRESERVES artifact-reader', async () => {
-      crashRecoveryMocks.getPodPhase.mockImplementation(async (_api, name: string) => {
-        if (
-          name === 'wf-run-7-coordinator' ||
-          name === 'wf-run-7-mcp-host' ||
-          name === 'wf-run-7-snippet-runner'
-        ) {
-          return 'Succeeded'
-        }
-        return undefined
-      })
       const reconciler = new WorkflowReconciler(deps)
 
       await reconciler.teardownComputePodsForTerminalRun('wf-run-7')
@@ -1314,41 +1293,27 @@ describe('WorkflowReconciler.reconcileDelete — orphaned Service cleanup', () =
       for (const call of crashRecoveryMocks.deletePodIfExists.mock.calls) {
         expect(call[2]).toBe(sandboxNamespace)
       }
+      expect(crashRecoveryMocks.getPodPresence).not.toHaveBeenCalled()
     })
 
-    it('skips DELETE when the same-pass GET is already 404', async () => {
-      crashRecoveryMocks.getPodPhase.mockResolvedValue(undefined)
+    it('is DELETE-first and 404-safe even when pods are already gone', async () => {
+      crashRecoveryMocks.deletePodIfExists.mockResolvedValue(undefined)
       const reconciler = new WorkflowReconciler(deps)
 
       await reconciler.teardownComputePodsForTerminalRun('wf-run-7')
 
-      expect(crashRecoveryMocks.deletePodIfExists).not.toHaveBeenCalled()
+      expect(crashRecoveryMocks.deletePodIfExists).toHaveBeenCalledTimes(3)
+      expect(crashRecoveryMocks.getPodPresence).not.toHaveBeenCalled()
     })
 
-    it('still deletes a live pod whose status.phase is empty', async () => {
-      crashRecoveryMocks.getPodPresence.mockResolvedValue({ kind: 'present' })
-      const reconciler = new WorkflowReconciler(deps)
-
-      await reconciler.teardownComputePodsForTerminalRun('wf-run-7')
-
-      const deletedPods = crashRecoveryMocks.deletePodIfExists.mock.calls.map(
-        call => call[1] as string
-      )
-      expect(deletedPods).toEqual([
-        'wf-run-7-coordinator',
-        'wf-run-7-mcp-host',
-        'wf-run-7-snippet-runner',
-      ])
-    })
-
-    it('is idempotent: re-running after pods are gone is a no-op (404-safe)', async () => {
-      crashRecoveryMocks.getPodPhase.mockResolvedValue(undefined)
+    it('is idempotent: a second pass still DELETE-first (404-safe)', async () => {
       const reconciler = new WorkflowReconciler(deps)
       await reconciler.teardownComputePodsForTerminalRun('wf-run-7')
-      expect(crashRecoveryMocks.deletePodIfExists).not.toHaveBeenCalled()
+      crashRecoveryMocks.deletePodIfExists.mockClear()
       await expect(
         reconciler.teardownComputePodsForTerminalRun('wf-run-7')
       ).resolves.toBeUndefined()
+      expect(crashRecoveryMocks.deletePodIfExists).toHaveBeenCalledTimes(3)
     })
   })
 })

@@ -911,8 +911,8 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
         this.secretReverseIndex,
         name => this.triggerSecretDrivenReconcile(name),
         10_000,
-        // Invalidate only. SecretWatcher debounces the recipe enqueue so a
-        // reconnect ADDED replay cannot force an immediate undebounced storm.
+        // Invalidate only. SecretWatcher must not enqueue on oauth ADDED:
+        // a watch reconnect replays ADDED for every broker token.
         recipeName => {
           this.reconciler.invalidateOAuthBrokerDeleteLedger(recipeName)
         }

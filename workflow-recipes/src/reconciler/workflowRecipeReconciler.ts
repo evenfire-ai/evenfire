@@ -3940,7 +3940,12 @@ export class WorkflowRecipeReconciler {
       if (recipe.spec.pluginWorkloadSdk || recipe.status?.pluginWorkloadSdk) {
         await this.cleanupPluginWorkloadSdkOrThrow(name, { preserveWorkflowRuntime: true })
       }
-      await this.workflowReconciler.reconcileDelete(name, recipe.metadata.namespace, recipe.spec)
+      await this.workflowReconciler.reconcileDelete(
+        name,
+        recipe.metadata.namespace,
+        recipe.spec,
+        recipe.metadata.uid
+      )
       await this.cleanupDelegationIfNeeded(recipe)
       await this.cleanupDeclaredRuntimeResources(recipe)
       return

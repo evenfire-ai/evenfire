@@ -592,7 +592,8 @@ load_port_forward_owner() {
     pf_owner_process_command \
     pf_owner_command_matches \
     pf_owner_abort_child \
-    pf_owner_pause; do
+    pf_owner_pause \
+    pf_owner_remove_dead_record; do
     declare -F "${function_name}" >/dev/null ||
       die "PORT_FORWARD_OWNER_API_INVALID: missing ${function_name} in ${PORT_FORWARD_OWNER_SCRIPT}"
   done
@@ -793,21 +794,32 @@ cmd_prepare_shims() {
   require_command git shasum perl
   persist_state
   mkdir -p "${CACHE_DIR}/scripts"
+  if [[ -L "${SHIMS_DIR}" || -L "${DEPLOY_SHIM_DIR}" ]]; then
+    die "BRANCH_PROFILE_SHIM_SYMLINK: refusing to replace symlink shim dirs"
+  fi
+  umask 077
   rm -rf "${SHIMS_DIR}" "${DEPLOY_SHIM_DIR}"
   cp -R "${REPO_DIR}/scripts/minikube" "${SHIMS_DIR}"
   cp -R "${REPO_DIR}/deploy" "${DEPLOY_SHIM_DIR}"
 
   local file
   while IFS= read -r file; do
-    perl -0pi -e 's#PROJECT_DIR="\$\(cd "\$SCRIPT_DIR/\.\./\.\." && pwd\)"#PROJECT_DIR="\${CLERUM_PROJECT_DIR:-\$(cd \"\$SCRIPT_DIR/../..\" && pwd)}"#g; s#PROJECT_DIR="\$\(cd "\$\{SCRIPT_DIR\}/\.\./\.\." && pwd\)"#PROJECT_DIR="\${CLERUM_PROJECT_DIR:-\$(cd \"\${SCRIPT_DIR}/../..\" && pwd)}"#g; s#PROFILE="clerum-test"#PROFILE="\${MINIKUBE_PROFILE:-clerum-test}"#g; s#--context=clerum-test#--context=\${PROFILE}#g' "${file}"
+    perl -0pi -e 's#PROJECT_DIR="\$\(cd "\$SCRIPT_DIR/\.\./\.\." && pwd\)"#PROJECT_DIR="\${CLERUM_PROJECT_DIR:-\$(cd \"\$SCRIPT_DIR/../..\" && pwd)}"#g; s#PROJECT_DIR="\$\(cd "\$\{SCRIPT_DIR\}/\.\./\.\." && pwd\)"#PROJECT_DIR="\${CLERUM_PROJECT_DIR:-\$(cd \"\${SCRIPT_DIR}/../..\" && pwd)}"#g; s#PROFILE="clerum-test"#PROFILE="\${MINIKUBE_PROFILE:-clerum-test}"#g; s#--context=clerum-test#--context=\${PROFILE}#g' "${file}" ||
+      die "BRANCH_PROFILE_SHIM_REWRITE_FAILED: ${file}"
   done < <(find "${SHIMS_DIR}" -type f -name '*.sh' | sort)
 
-  perl -0pi -e 's#OUTPUT="\$\{PROJECT_DIR\}/deploy/minikube/secrets/jwt-signing-keys.yaml"#OUTPUT="\${BRANCH_PROFILE_DEPLOY_DIR:-\${PROJECT_DIR}/deploy}/minikube/secrets/jwt-signing-keys.yaml"#g' "${SHIMS_DIR}/generate-keys.sh"
-  perl -0pi -e 's#REPO_ROOT="\$\(cd "\$\{SCRIPT_DIR\}/\.\./\.\." && pwd\)"#REPO_ROOT="\${CLERUM_PROJECT_DIR:-\$(cd \"\${SCRIPT_DIR}/../..\" && pwd)}"#g' "${SHIMS_DIR}/seed-test-data.sh"
-  perl -0pi -e 's#: "\$\{CONTEXT:=\$\(kubectl config current-context\)\}"#: "\${CONTEXT:=\${MINIKUBE_PROFILE:-\$(kubectl config current-context)}}"#g; s#export ADMIN_PASSWORD E2E_TEST_EMAIL E2E_TEST_PASSWORD CONTEXT#: "\${ALLOWED_CONTEXTS:=\${CONTEXT}}"\nexport ADMIN_PASSWORD E2E_TEST_EMAIL E2E_TEST_PASSWORD CONTEXT ALLOWED_CONTEXTS#g; s#export ADMIN_PASSWORD E2E_DEV_LOGIN_EMAIL CONTEXT#: "\${ALLOWED_CONTEXTS:=\${CONTEXT}}"\nexport ADMIN_PASSWORD E2E_DEV_LOGIN_EMAIL CONTEXT ALLOWED_CONTEXTS#g' "${SHIMS_DIR}/seed-test-data.sh"
-  perl -0pi -e 's#MANIFEST_FILE="\$\{PROJECT_DIR\}/deploy/minikube/\.image-manifest.json"#MANIFEST_FILE="\${BRANCH_PROFILE_DEPLOY_DIR:-\${PROJECT_DIR}/deploy}/minikube/.image-manifest.json"#g' "${SHIMS_DIR}/build-images.sh"
-  perl -0pi -e 's#BASE_MINIKUBE_KUSTOMIZE_DIR="\$\{PROJECT_DIR\}/deploy/overlays/minikube"#BASE_MINIKUBE_KUSTOMIZE_DIR="\${BRANCH_PROFILE_DEPLOY_DIR:-\${PROJECT_DIR}/deploy}/overlays/minikube"#g; s#LOCAL_MEMBER_REGISTRATION_KUSTOMIZE_DIR="\$\{PROJECT_DIR\}/deploy/overlays/minikube-local-member-registration"#LOCAL_MEMBER_REGISTRATION_KUSTOMIZE_DIR="\${BRANCH_PROFILE_DEPLOY_DIR:-\${PROJECT_DIR}/deploy}/overlays/minikube-local-member-registration"#g' "${SHIMS_DIR}/full-setup.sh"
-  perl -0pi -e 's#CONTEXT="\$\{PROFILE\}" "\$\{PROJECT_DIR\}/deploy/scripts/minikube-detect-k8s-api-ip.sh"#CONTEXT="\${PROFILE}" OVERLAY_DIR="\${BRANCH_PROFILE_DEPLOY_DIR:-\${PROJECT_DIR}/deploy}/overlays/minikube" "\${PROJECT_DIR}/deploy/scripts/minikube-detect-k8s-api-ip.sh"#g; s#kubectl kustomize "\$\{PROJECT_DIR\}/deploy/overlays/minikube"#kubectl kustomize "\${BRANCH_PROFILE_DEPLOY_DIR:-\${PROJECT_DIR}/deploy}/overlays/minikube"#g' "${SHIMS_DIR}/full-setup.sh"
+  perl -0pi -e 's#OUTPUT="\$\{PROJECT_DIR\}/deploy/minikube/secrets/jwt-signing-keys.yaml"#OUTPUT="\${BRANCH_PROFILE_DEPLOY_DIR:-\${PROJECT_DIR}/deploy}/minikube/secrets/jwt-signing-keys.yaml"#g' "${SHIMS_DIR}/generate-keys.sh" ||
+    die "BRANCH_PROFILE_SHIM_REWRITE_FAILED: generate-keys.sh"
+  perl -0pi -e 's#REPO_ROOT="\$\(cd "\$\{SCRIPT_DIR\}/\.\./\.\." && pwd\)"#REPO_ROOT="\${CLERUM_PROJECT_DIR:-\$(cd \"\${SCRIPT_DIR}/../..\" && pwd)}"#g' "${SHIMS_DIR}/seed-test-data.sh" ||
+    die "BRANCH_PROFILE_SHIM_REWRITE_FAILED: seed-test-data.sh REPO_ROOT"
+  perl -0pi -e 's#: "\$\{CONTEXT:=\$\(kubectl config current-context\)\}"#: "\${CONTEXT:=\${MINIKUBE_PROFILE:-\$(kubectl config current-context)}}"#g; s#export ADMIN_PASSWORD E2E_TEST_EMAIL E2E_TEST_PASSWORD CONTEXT#: "\${ALLOWED_CONTEXTS:=\${CONTEXT}}"\nexport ADMIN_PASSWORD E2E_TEST_EMAIL E2E_TEST_PASSWORD CONTEXT ALLOWED_CONTEXTS#g; s#export ADMIN_PASSWORD E2E_DEV_LOGIN_EMAIL CONTEXT#: "\${ALLOWED_CONTEXTS:=\${CONTEXT}}"\nexport ADMIN_PASSWORD E2E_DEV_LOGIN_EMAIL CONTEXT ALLOWED_CONTEXTS#g' "${SHIMS_DIR}/seed-test-data.sh" ||
+    die "BRANCH_PROFILE_SHIM_REWRITE_FAILED: seed-test-data.sh CONTEXT"
+  perl -0pi -e 's#MANIFEST_FILE="\$\{PROJECT_DIR\}/deploy/minikube/\.image-manifest.json"#MANIFEST_FILE="\${BRANCH_PROFILE_DEPLOY_DIR:-\${PROJECT_DIR}/deploy}/minikube/.image-manifest.json"#g' "${SHIMS_DIR}/build-images.sh" ||
+    die "BRANCH_PROFILE_SHIM_REWRITE_FAILED: build-images.sh"
+  perl -0pi -e 's#BASE_MINIKUBE_KUSTOMIZE_DIR="\$\{PROJECT_DIR\}/deploy/overlays/minikube"#BASE_MINIKUBE_KUSTOMIZE_DIR="\${BRANCH_PROFILE_DEPLOY_DIR:-\${PROJECT_DIR}/deploy}/overlays/minikube"#g; s#LOCAL_MEMBER_REGISTRATION_KUSTOMIZE_DIR="\$\{PROJECT_DIR\}/deploy/overlays/minikube-local-member-registration"#LOCAL_MEMBER_REGISTRATION_KUSTOMIZE_DIR="\${BRANCH_PROFILE_DEPLOY_DIR:-\${PROJECT_DIR}/deploy}/overlays/minikube-local-member-registration"#g' "${SHIMS_DIR}/full-setup.sh" ||
+    die "BRANCH_PROFILE_SHIM_REWRITE_FAILED: full-setup.sh overlays"
+  perl -0pi -e 's#CONTEXT="\$\{PROFILE\}" "\$\{PROJECT_DIR\}/deploy/scripts/minikube-detect-k8s-api-ip.sh"#CONTEXT="\${PROFILE}" OVERLAY_DIR="\${BRANCH_PROFILE_DEPLOY_DIR:-\${PROJECT_DIR}/deploy}/overlays/minikube" "\${PROJECT_DIR}/deploy/scripts/minikube-detect-k8s-api-ip.sh"#g; s#kubectl kustomize "\$\{PROJECT_DIR\}/deploy/overlays/minikube"#kubectl kustomize "\${BRANCH_PROFILE_DEPLOY_DIR:-\${PROJECT_DIR}/deploy}/overlays/minikube"#g' "${SHIMS_DIR}/full-setup.sh" ||
+    die "BRANCH_PROFILE_SHIM_REWRITE_FAILED: full-setup.sh detect"
 
   chmod +x "${SHIMS_DIR}"/*.sh
   cat >"${SHIM_ENV}" <<EOF_SHIMS

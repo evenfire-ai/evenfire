@@ -46,7 +46,7 @@ matches HEAD and the current source fingerprint. `make minikube-pre-gate-sync`
 reconciles the profile; it does not emit a T2 verdict.
 
 The profile helper that generated the profile remains the source of truth for
-the profile metadata and random localhost port mapping. Resolve it from the
+the profile metadata and random localhost port mapping. Resolve it from
 this worktree's `scripts/minikube-profiles/branch.mk`. A legacy creation
 SHA is historical metadata; it does not override stable worktree+branch
 ownership. Persisted `ports.env` is allocated once. Missing, corrupt, or

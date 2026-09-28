@@ -246,7 +246,8 @@ describe('SecretWatcher', () => {
     expect(invalidated).toEqual(['test-recipe', 'test-recipe'])
     expect(enqueued).toEqual([])
     vi.advanceTimersByTime(DEBOUNCE_MS)
-    expect(enqueued).toEqual(['test-recipe'])
+    // E.4(a): invalidate only. A watch replay must not enqueue every recipe.
+    expect(enqueued).toEqual([])
     watcher.stop()
   })
 

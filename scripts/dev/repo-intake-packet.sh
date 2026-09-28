@@ -266,13 +266,13 @@ PROFILE_OWNER_SCRIPT="${SCRIPT_ROOT}/scripts/minikube/profile-owner.sh"
 PROFILE_OWNER_AVAILABLE="no"
 
 [[ -f "${LOCAL_PROFILE_HELPER}" ]] && LOCAL_HELPER_EXISTS="yes"
-if [[ -f "${PRIMARY_PROFILE_HELPER}" ]]; then
-  PRIMARY_HELPER_EXISTS="yes"
-  PROFILE_HELPER_EXISTS="yes"
-  PROFILE_HELPER_COMMAND="make -f ${PRIMARY_PROFILE_HELPER} branch-profile-info"
-elif [[ "${LOCAL_HELPER_EXISTS}" == "yes" ]]; then
+[[ -f "${PRIMARY_PROFILE_HELPER}" ]] && PRIMARY_HELPER_EXISTS="yes"
+if [[ "${LOCAL_HELPER_EXISTS}" == "yes" ]]; then
   PROFILE_HELPER_EXISTS="yes"
   PROFILE_HELPER_COMMAND="make -f ${LOCAL_PROFILE_HELPER} branch-profile-info"
+elif [[ "${PRIMARY_HELPER_EXISTS}" == "yes" ]]; then
+  PROFILE_HELPER_EXISTS="yes"
+  PROFILE_HELPER_COMMAND="make -f ${PRIMARY_PROFILE_HELPER} branch-profile-info"
 else
   BLOCKERS+=("missing_branch_profile_helper")
 fi

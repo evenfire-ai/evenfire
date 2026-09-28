@@ -3062,6 +3062,34 @@ describe('WorkflowReconciler — reconcile loop', () => {
     expect(legacyDeletes).toHaveLength(2)
   })
 
+  it('clears the legacy internet NP process set on recipe delete so a recreate can delete again', async () => {
+    const networkingApi = makeNetworkingApi() as ReturnType<typeof makeNetworkingApi>
+    const reconciler = new WorkflowReconciler(
+      makeDeps({
+        networkingApi: networkingApi as never,
+      })
+    )
+
+    await reconciler.reconcile(
+      'test-wf',
+      'uid-123',
+      'sandbox-recipes',
+      makeSpec({ mcpServers: ['redis-mcp'] })
+    )
+    networkingApi.deleteNamespacedNetworkPolicy.mockClear()
+    await reconciler.reconcileDelete('test-wf', 'sandbox-recipes', makeSpec(), 'uid-123')
+    await reconciler.reconcile(
+      'test-wf',
+      'uid-123',
+      'sandbox-recipes',
+      makeSpec({ mcpServers: ['redis-mcp'] })
+    )
+    expect(networkingApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith({
+      name: 'test-wf-mcp-servers-egress-internet',
+      namespace: 'mcp-server',
+    })
+  })
+
   describe('B2 desired-set NetworkPolicy prune', () => {
     const RECIPE = 'test-wf'
     const SANDBOX = 'sandbox-recipes'
@@ -3069,6 +3097,7 @@ describe('WorkflowReconciler — reconcile loop', () => {
     const CODEX_PROXY = `${RECIPE}-mcp-host-to-codex-proxy`
     const GROK_PROXY = `${RECIPE}-mcp-host-to-grok-proxy`
     const COORD_TO_WRC = `${RECIPE}-coord-to-wrc`
+    const COORD_TO_MCP_HOST = `${RECIPE}-coord-to-mcp-host`
     const WRC_LABELS = {
       'clerum.io/recipe': RECIPE,
       'clerum.io/managed-by': 'wrc',
@@ -3126,8 +3155,9 @@ describe('WorkflowReconciler — reconcile loop', () => {
         codex?: Partial<CodexExecutionProjection>
         grok?: Partial<CodexExecutionProjection> & { requiresGrokProxyEgress?: boolean }
         awaitsTriggeredRun?: boolean
+        eagerSdkMcpHost?: boolean
       } = {}
-    ): Promise<void> {
+    ): Promise<{ retryPending: boolean }> {
       const spec = makeSpec()
       const runtime = deriveWorkflowRuntimePlan(spec, {
         recipeName: RECIPE,
@@ -3144,7 +3174,7 @@ describe('WorkflowReconciler — reconcile loop', () => {
         requiresGrokProxyEgress: false,
         ...opts.grok,
       }
-      await (
+      return (await (
         reconciler as unknown as {
           applyWorkflowNetworkPolicies: (
             recipeName: string,
@@ -3155,7 +3185,7 @@ describe('WorkflowReconciler — reconcile loop', () => {
             codexProjection: CodexExecutionProjection,
             eagerSdkMcpHost: boolean,
             grokProjection: typeof grok
-          ) => Promise<unknown>
+          ) => Promise<{ retryPending: boolean }>
         }
       ).applyWorkflowNetworkPolicies(
         RECIPE,
@@ -3164,9 +3194,9 @@ describe('WorkflowReconciler — reconcile loop', () => {
         runtime,
         opts.awaitsTriggeredRun === true,
         codex,
-        false,
+        opts.eagerSdkMcpHost === true,
         grok
-      )
+      )) as { retryPending: boolean }
     }
 
     function expectListWitness(
@@ -3367,6 +3397,98 @@ describe('WorkflowReconciler — reconcile loop', () => {
       expectListWitness(apiserver.api)
       expect(sandboxDeletes(apiserver.api)).toEqual([])
     })
+
+    it('keeps an unlisted-as-desired Grok proxy while eligibility is uncertain, and deletes the twin', async () => {
+      const uncertain = makeApiserverNetworkingApi()
+      seedLivePolicy(uncertain, GROK_PROXY, WRC_LABELS)
+      const uncertainReconciler = new WorkflowReconciler(
+        makeDeps({ networkingApi: uncertain.api as never })
+      )
+      await applyPolicies(uncertainReconciler, {
+        grok: { eligibility: 'uncertain', requiresGrokProxyEgress: false, reason: 'forbidden' },
+      })
+      expectListWitness(uncertain.api)
+      expect(sandboxDeletes(uncertain.api).map(d => d.name)).not.toContain(GROK_PROXY)
+      expect(uncertain.live.has(uncertain.key(SANDBOX, GROK_PROXY))).toBe(true)
+
+      const decided = makeApiserverNetworkingApi()
+      seedLivePolicy(decided, GROK_PROXY, WRC_LABELS)
+      const decidedReconciler = new WorkflowReconciler(
+        makeDeps({ networkingApi: decided.api as never })
+      )
+      await applyPolicies(decidedReconciler, {
+        grok: { eligibility: 'ineligible', requiresGrokProxyEgress: false },
+      })
+      expectListWitness(decided.api)
+      expect(sandboxDeletes(decided.api).map(d => d.name)).toContain(GROK_PROXY)
+    })
+
+    it('does not prune a catalog-named recipes-lane policy (two-term selector)', async () => {
+      const apiserver = makeApiserverNetworkingApi()
+      seedLivePolicy(apiserver, COORD_TO_MCP_HOST, {
+        'clerum.io/recipe': RECIPE,
+        'clerum.io/managed-by': 'workflow-recipes',
+      })
+      const reconciler = new WorkflowReconciler(makeDeps({ networkingApi: apiserver.api as never }))
+
+      await applyPolicies(reconciler, { awaitsTriggeredRun: true })
+
+      expectListWitness(apiserver.api)
+      expect(sandboxDeletes(apiserver.api).map(d => d.name)).not.toContain(COORD_TO_MCP_HOST)
+      expect(apiserver.live.has(apiserver.key(SANDBOX, COORD_TO_MCP_HOST))).toBe(true)
+    })
+
+    it('deletes a leftover coord-to-mcp-host when awaiting trigger', async () => {
+      const apiserver = makeApiserverNetworkingApi()
+      seedLivePolicy(apiserver, COORD_TO_MCP_HOST, WRC_LABELS)
+      const reconciler = new WorkflowReconciler(makeDeps({ networkingApi: apiserver.api as never }))
+
+      await applyPolicies(reconciler, { awaitsTriggeredRun: true })
+
+      expectListWitness(apiserver.api)
+      expect(sandboxDeletes(apiserver.api).map(d => d.name)).toContain(COORD_TO_MCP_HOST)
+      expect(apiserver.live.has(apiserver.key(SANDBOX, COORD_TO_MCP_HOST))).toBe(false)
+    })
+
+    it('eager SDK path still prunes a leftover Grok proxy', async () => {
+      const apiserver = makeApiserverNetworkingApi()
+      seedLivePolicy(apiserver, GROK_PROXY, WRC_LABELS)
+      const reconciler = new WorkflowReconciler(makeDeps({ networkingApi: apiserver.api as never }))
+
+      await applyPolicies(reconciler, { awaitsTriggeredRun: true, eagerSdkMcpHost: true })
+
+      expectListWitness(apiserver.api)
+      expect(sandboxDeletes(apiserver.api).map(d => d.name)).toContain(GROK_PROXY)
+    })
+
+    it('marks retryPending when a leftover prune DELETE fails', async () => {
+      const apiserver = makeApiserverNetworkingApi()
+      seedLivePolicy(apiserver, GROK_PROXY, WRC_LABELS)
+      apiserver.api.deleteNamespacedNetworkPolicy.mockImplementation(
+        async ({ name, namespace }: { name: string; namespace: string }) => {
+          if (name === GROK_PROXY) throw { code: 403, message: 'forbidden' }
+          if (!apiserver.live.delete(apiserver.key(namespace, name))) throw { code: 404 }
+          return {}
+        }
+      )
+      const reconciler = new WorkflowReconciler(makeDeps({ networkingApi: apiserver.api as never }))
+
+      const summary = await applyPolicies(reconciler)
+      expect(summary.retryPending).toBe(true)
+      expect(apiserver.live.has(apiserver.key(SANDBOX, GROK_PROXY))).toBe(true)
+    })
+
+    it('keeps the apply outcome when the prune LIST fails', async () => {
+      const apiserver = makeApiserverNetworkingApi()
+      seedLivePolicy(apiserver, GROK_PROXY, WRC_LABELS)
+      apiserver.api.listNamespacedNetworkPolicy.mockRejectedValue({ code: 500, message: 'boom' })
+      const reconciler = new WorkflowReconciler(makeDeps({ networkingApi: apiserver.api as never }))
+
+      const summary = await applyPolicies(reconciler)
+      expect(summary.retryPending).toBe(true)
+      expect(sandboxDeletes(apiserver.api)).toEqual([])
+      expect(apiserver.live.has(apiserver.key(SANDBOX, GROK_PROXY))).toBe(true)
+    })
   })
 
   describe('B3(d) skip coordinator DELETE after same-pass 404', () => {
@@ -3389,7 +3511,7 @@ describe('WorkflowReconciler — reconcile loop', () => {
       const result = await reconciler.reconcile('test-wf', 'uid-123', SANDBOX, makeSpec())
 
       expect(result.workflowPhase).not.toBe('failed')
-      expect(podReads(coreApi, COORDINATOR)).toBeGreaterThan(0)
+      expect(podReads(coreApi, COORDINATOR)).toBe(2)
       expect(podDeletes(coreApi, COORDINATOR)).toBe(0)
     })
 
@@ -3403,7 +3525,7 @@ describe('WorkflowReconciler — reconcile loop', () => {
 
       await reconciler.reconcile('test-wf', 'uid-123', SANDBOX, makeSpec())
 
-      expect(podReads(coreApi, COORDINATOR)).toBeGreaterThan(0)
+      expect(podReads(coreApi, COORDINATOR)).toBe(2)
       expect(podDeletes(coreApi, COORDINATOR)).toBe(1)
     })
 
@@ -3436,7 +3558,7 @@ describe('WorkflowReconciler — reconcile loop', () => {
         'run-1'
       )
 
-      expect(podReads(coreApi, COORDINATOR)).toBeGreaterThan(0)
+      expect(podReads(coreApi, COORDINATOR)).toBe(3)
       expect(podDeletes(coreApi, COORDINATOR)).toBe(0)
     })
 
@@ -3446,7 +3568,7 @@ describe('WorkflowReconciler — reconcile loop', () => {
 
       await reconciler.reconcile('test-wf', 'uid-123', SANDBOX, makeSpec())
 
-      expect(podReads(coreApi, COORDINATOR)).toBeGreaterThan(0)
+      expect(podReads(coreApi, COORDINATOR)).toBe(3)
       expect(podDeletes(coreApi, COORDINATOR)).toBe(1)
       expect(coreApi.deleteNamespacedPod).toHaveBeenCalledWith({
         name: COORDINATOR,
@@ -3478,6 +3600,21 @@ describe('WorkflowReconciler — reconcile loop', () => {
       )
 
       expect(podReads(coreApi, MCP_HOST)).toBe(0)
+      expect(podDeletes(coreApi, MCP_HOST)).toBe(0)
+      // Snippet-only has needsMcpHost=false, so awaitsTriggeredRun is false and
+      // B3(d) does not run. The coordinator is still read for crash recovery.
+      expect(podReads(coreApi, COORDINATOR)).toBe(2)
+      expect(podDeletes(coreApi, COORDINATOR)).toBe(0)
+    })
+
+    it('does not delete mcp-host when same-pass GET is 404', async () => {
+      const coreApi = makeCoreApi(false)
+      const reconciler = new WorkflowReconciler(makeDeps({ coreApi: coreApi as never }))
+
+      const result = await reconciler.reconcile('test-wf', 'uid-123', SANDBOX, makeSpec())
+
+      expect(result.workflowPhase).not.toBe('failed')
+      expect(podReads(coreApi, MCP_HOST)).toBe(2)
       expect(podDeletes(coreApi, MCP_HOST)).toBe(0)
     })
   })
