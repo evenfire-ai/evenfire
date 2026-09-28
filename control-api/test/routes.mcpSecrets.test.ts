@@ -934,6 +934,58 @@ describe('DELETE /admin/mcp-secrets/:name', () => {
     }
   })
 
+  it('finalizes the rollback permit when the Secret is already gone', async () => {
+    const gateway = createGateway()
+    const rollbackPermits = createRollbackPermitStore()
+    const agent = createAuthenticatedAgent(makeAppWithRealHandler(gateway, rollbackPermits))
+
+    await agent
+      .post('/admin/mcp-secrets')
+      .send({ name: 'linear-credentials', data: { LINEAR_API_KEY: 'create-value' } })
+      .expect(201)
+    gateway.getSecret.mockRejectedValueOnce(k8sError(404, 'secrets "linear-credentials" not found'))
+
+    await agent.delete('/admin/mcp-secrets/linear-credentials').expect(404)
+
+    expect(gateway.getSecret).toHaveBeenCalledWith('linear-credentials', 'mcp-server')
+    expect(rollbackPermits.finalize).toHaveBeenCalledOnce()
+    expect(rollbackPermits.release).not.toHaveBeenCalled()
+    expect(gateway.deleteSecret).not.toHaveBeenCalled()
+
+    // A finalized permit is consumed: a second bodyless DELETE has no
+    // server-side identity left and must ask for the precondition.
+    const retry = await agent.delete('/admin/mcp-secrets/linear-credentials').expect(428)
+    expect(retry.body.error).toBe('secret_identity_precondition_required')
+    expect(rollbackPermits.claim).toHaveBeenCalledTimes(2)
+  })
+
+  it('still answers 502 for a rejected read when releasing the permit fails', async () => {
+    const gateway = createGateway()
+    const rollbackPermits = createRollbackPermitStore()
+    const agent = createAuthenticatedAgent(makeAppWithRealHandler(gateway, rollbackPermits))
+    vi.spyOn(rootLogger, 'warn').mockImplementation(() => {})
+
+    try {
+      await agent
+        .post('/admin/mcp-secrets')
+        .send({ name: 'linear-credentials', data: { LINEAR_API_KEY: 'create-value' } })
+        .expect(201)
+      gateway.getSecret.mockRejectedValueOnce(
+        controlApiForbiddenRead('linear-credentials', 'mcp-server')
+      )
+      rollbackPermits.release.mockRejectedValueOnce(new Error('permit store unavailable'))
+
+      const failed = await agent.delete('/admin/mcp-secrets/linear-credentials')
+
+      expect(rollbackPermits.release).toHaveBeenCalledOnce()
+      expectRejectedSecretRead(failed, 'linear-credentials', 'mcp-server')
+      expect(JSON.stringify(failed.body)).not.toContain('permit store unavailable')
+      expect(gateway.deleteSecret).not.toHaveBeenCalled()
+    } finally {
+      vi.restoreAllMocks()
+    }
+  })
+
   it('returns 500 when gateway.deleteSecret throws', async () => {
     const gateway = createGateway()
     gateway.deleteSecret.mockRejectedValueOnce(new Error('K8s API timeout'))

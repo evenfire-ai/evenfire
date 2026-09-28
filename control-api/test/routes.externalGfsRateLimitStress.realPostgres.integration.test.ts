@@ -13,9 +13,10 @@ import { Pool } from 'pg'
 // and, in E3 only, the fetch to gfsc (the service boundary).
 //
 // The pools run at their production bounds: every CORE_POOL_* and
-// RATE_LIMIT_POOL_* variable is deleted before db.js is imported, so a 503
-// from either pool fails the exact tallies below. Each scenario serves its app
-// from one listening server and sends through one keep-alive agent.
+// RATE_LIMIT_POOL_* variable db.js reads (envKeys) is deleted before db.js is
+// imported, so a 503 from either pool fails the exact tallies below. Each
+// scenario serves its app from one listening server and sends through one
+// keep-alive agent, capped at 64 sockets on macOS only (see serve()).
 //
 // Denial source, for status 429 only, and only on the
 // resource read and resource mutation routes. Those routes have no
@@ -57,6 +58,8 @@ const INGRESS_L = 1_800
 const IP_L_DEFAULT = 1_200
 const MINUTE_MS = 60_000
 const DAY_MS = 24 * 60 * MINUTE_MS
+/** Core pool (10) plus limiter pool (6): a higher in-flight peak contends on both. */
+const CONTENDED_IN_FLIGHT = 16
 
 /** The shipped defaults (config.ts); beforeAll asserts config still has them. */
 const PRODUCTION_BUDGETS: Budgets = {
@@ -126,6 +129,7 @@ describeRealPostgres('external GFS rate limits under concurrent load (real Postg
   const envKeys = [
     'CONTROL_API_PG_CONNECTION_STRING',
     'CORE_POOL_MAX',
+    'CORE_POOL_IDLE_TIMEOUT_MS',
     'CORE_POOL_CONNECTION_TIMEOUT_MS',
     'CORE_POOL_STATEMENT_TIMEOUT_MS',
     'RATE_LIMIT_POOL_MAX',
@@ -165,11 +169,15 @@ describeRealPostgres('external GFS rate limits under concurrent load (real Postg
 
     const dbMod = await import('../src/db.js')
     corePool = dbMod.pool as unknown as Pool
-    // Witness that nothing raised the bounds: core 10 / 2000 ms, limiter 6 / 5000 ms.
-    type PoolOptions = { options: { max: number; connectionTimeoutMillis: number } }
+    // Witness that nothing raised the bounds: core 10 / 2000 ms (idle 30 s),
+    // limiter 6 / 5000 ms.
+    type PoolOptions = {
+      options: { max: number; connectionTimeoutMillis: number; idleTimeoutMillis: number }
+    }
     expect((corePool as unknown as PoolOptions).options).toMatchObject({
       max: 10,
       connectionTimeoutMillis: 2_000,
+      idleTimeoutMillis: 30_000,
     })
     expect((dbMod.rateLimitPool as unknown as PoolOptions).options).toMatchObject({
       max: 6,
@@ -263,23 +271,39 @@ describeRealPostgres('external GFS rate limits under concurrent load (real Postg
     const minuteMs = Math.ceil(nextScenarioMinuteMs / alignMs) * alignMs
     nextScenarioMinuteMs = minuteMs + spanMs
     vi.setSystemTime(minuteMs + 10_000)
-    const send = await serve(mod.createApp(new mod.MockGateway()))
-    return { send, minuteMs }
+    const { send, peakInFlight } = await serve(mod.createApp(new mod.MockGateway()))
+    return { send, minuteMs, peakInFlight }
   }
 
-  /** Serves `app` on one listening server; `send` reuses one keep-alive agent. */
+  /**
+   * Serves `app` on one listening server; `send` reuses one keep-alive agent.
+   * `peakInFlight()` is the most requests the server held open at once.
+   */
   async function serve(app: import('express').Express) {
     const internalToken = mod.config.internalServiceTokens['external-rest-api']
     if (!internalToken) throw new Error('config has no external-rest-api internal service token')
-    const server = http.createServer(app)
+    let inFlight = 0
+    let peak = 0
+    const server = http.createServer((req, res) => {
+      inFlight += 1
+      peak = Math.max(peak, inFlight)
+      res.on('close', () => {
+        inFlight -= 1
+      })
+      app(req, res)
+    })
     await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
     const { port } = server.address() as AddressInfo
-    // Bound the client sockets below the kernel accept queue. macOS caps the
-    // listen backlog at kern.ipc.somaxconn (128), so an unbounded agent opening
-    // 481 connections at once gets ECONNRESET before the app sees a request.
-    // 64 in flight still exceeds both production pools (core 10, limiter 6),
-    // so the limiter keeps contending on Postgres.
-    const agent = new http.Agent({ keepAlive: true, maxSockets: 64 })
+    // macOS only: bound the client sockets below the kernel accept queue.
+    // macOS caps the listen backlog at kern.ipc.somaxconn (128), so an
+    // unbounded agent opening 481 connections at once gets ECONNRESET before
+    // the app sees a request. Linux keeps the unbounded burst. The scenarios
+    // that load the pools assert peakInFlight() > CONTENDED_IN_FLIGHT, so the
+    // limiter still contends on Postgres on either platform.
+    const agent = new http.Agent({
+      keepAlive: true,
+      maxSockets: process.platform === 'darwin' ? 64 : Infinity,
+    })
     if (openServer) throw new Error('a scenario server is already open')
     openServer = {
       close: () => {
@@ -292,7 +316,7 @@ describeRealPostgres('external GFS rate limits under concurrent load (real Postg
     }
 
     /** GET, or POST with `post.body` as JSON. */
-    return function send(
+    function send(
       path: string,
       token: string,
       ip: string,
@@ -340,6 +364,7 @@ describeRealPostgres('external GFS rate limits under concurrent load (real Postg
         req.end(payload)
       })
     }
+    return { send, peakInFlight: () => peak }
   }
 
   function singleHeader(res: http.IncomingMessage, name: string): string | undefined {
@@ -498,7 +523,7 @@ describeRealPostgres('external GFS rate limits under concurrent load (real Postg
 
   it('S1: 20 users with distinct sessions and IPs each get exactly the read budget', async () => {
     const budgets = uniformBudgets(6, 6, IP_L_DEFAULT)
-    const { send } = await startScenario(budgets)
+    const { send, peakInFlight } = await startScenario(budgets)
     const users = await Promise.all(Array.from({ length: 20 }, () => seedUser()))
     const resourceId = randomUUID()
 
@@ -514,6 +539,7 @@ describeRealPostgres('external GFS rate limits under concurrent load (real Postg
     const labels = run.result.map(response => classify(response, 'resource-read', budgets))
 
     expect(run.result).toHaveLength(200)
+    expect(peakInFlight()).toBeGreaterThan(CONTENDED_IN_FLIGHT)
     for (let user = 0; user < 20; user += 1) {
       expect(tally(labels.slice(user * 10, user * 10 + 10))).toEqual({
         'allowed:200': 6,
@@ -761,9 +787,9 @@ describeRealPostgres('external GFS rate limits under concurrent load (real Postg
     })
   }, 120_000)
 
-  it('E1: 481 concurrent reads by one actor at the production budget: 480 allowed, one Postgres 429, no 503', async () => {
+  it('E1: a burst of 481 reads by one actor at the production budget: 480 allowed, one Postgres 429, no 503', async () => {
     const budgets = PRODUCTION_BUDGETS
-    const { send } = await startScenario(budgets)
+    const { send, peakInFlight } = await startScenario(budgets)
     const userId = await seedUser()
     const resourceId = randomUUID()
 
@@ -779,6 +805,7 @@ describeRealPostgres('external GFS rate limits under concurrent load (real Postg
     expect(tally(run.result.map(response => classify(response, 'resource-read', budgets)))).toEqual(
       { 'allowed:200': 480, 'postgres:480': 1 }
     )
+    expect(peakInFlight()).toBeGreaterThan(CONTENDED_IN_FLIGHT)
     const ledger = await readLedger()
     expect(counts(ledger, 'gfs-ext:pre:resource:session:')).toEqual([481])
     expect(counts(ledger, 'gfs-ext:pre:resource:ip:')).toEqual([480])
@@ -796,7 +823,7 @@ describeRealPostgres('external GFS rate limits under concurrent load (real Postg
 
   it('E2: a burst straddling a minute boundary passes 2L-1 = 959 reads in 60 s; the next is a Postgres 429', async () => {
     const budgets = PRODUCTION_BUDGETS
-    const { send, minuteMs } = await startScenario(budgets)
+    const { send, minuteMs, peakInFlight } = await startScenario(budgets)
     const userId = await seedUser()
     const resourceId = randomUUID()
     const boundary = minuteMs + 2 * MINUTE_MS
@@ -825,6 +852,7 @@ describeRealPostgres('external GFS rate limits under concurrent load (real Postg
       'allowed:200': 960,
       'postgres:480': 1,
     })
+    expect(peakInFlight()).toBeGreaterThan(CONTENDED_IN_FLIGHT)
     // The sliding bound: in the 60 s ending at M+1:00.0, 959 reads passed.
     expect(
       run.result.filter(
