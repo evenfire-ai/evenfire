@@ -142,7 +142,10 @@ export function validateBaseUrls({
   }
 }
 
-function kubectlCurrentContext(expectedContext: string): string {
+function readGlobalKubectlCurrentContext(expectedContext: string): string {
+  // Deliberately strict: `config current-context` reads the global kubeconfig
+  // context even when --context selects another context for object commands.
+  // E2E must refuse to start unless that global context already matches.
   return execFileSync('kubectl', ['--context', expectedContext, 'config', 'current-context'], {
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -185,7 +188,7 @@ async function globalSetup(): Promise<void> {
 
   let current: string
   try {
-    current = kubectlCurrentContext(expected)
+    current = readGlobalKubectlCurrentContext(expected)
   } catch (err) {
     throw new Error(`[E2E-GUARD] Failed to read kubectl current-context: ${(err as Error).message}`)
   }

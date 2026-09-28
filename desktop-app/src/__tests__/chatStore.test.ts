@@ -1705,6 +1705,18 @@ describe('lastActiveChatId', () => {
     const id = await store.getLastActiveChatId('agent-1')
     expect(id).toBe('last-1')
   })
+
+  it('does not reactivate a deleted chat when a late selection write arrives', async () => {
+    await store.createChat('agent-1', 'retained-1')
+    await store.setLastActiveChatId('agent-1', 'retained-1')
+    await store.createChat('agent-1', 'deleted-1')
+    await store.deleteChat('agent-1', 'deleted-1', TEAM_A_SCOPE)
+
+    await store.setLastActiveChatId('agent-1', 'deleted-1')
+
+    expect(await store.getLastActiveChatId('agent-1')).toBe('retained-1')
+    expect((await store.listChats('agent-1')).map(chat => chat.id)).toEqual(['retained-1'])
+  })
 })
 
 // ── onboarding ───────────────────────────────────────────────────────────────

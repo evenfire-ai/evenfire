@@ -50,8 +50,6 @@ type JourneyMetrics = {
   hcc_idle_floor_minutes: number
   hcc_drain_grace_ms: number
   hcc_heartbeat_poll_ms: number
-  first_profile_path: string
-  second_profile_path: string
   stateful_pod_before: string[]
   stateless_pod_before: string[]
   stateless_initial_lifecycle_state: string
@@ -369,6 +367,11 @@ async function closeElectron(
   return pid
 }
 
+test.skip(
+  process.env.HUMAN_E2E_STATELESS_CONTINUITY !== '1',
+  'Set HUMAN_E2E_STATELESS_CONTINUITY=1 for this recorded, cluster-mutating journey'
+)
+
 test('human journey — two Hosts, restart, cache, and two verified stateless wake episodes', async ({}, testInfo) => {
   test.setTimeout(1_800_000)
 
@@ -403,14 +406,13 @@ test('human journey — two Hosts, restart, cache, and two verified stateless wa
 
   let app: ElectronApplication | undefined
   let page: Page | undefined
+  let firstProfilePath = ''
 
   const metrics: JourneyMetrics = {
     hcc_idle_minutes: 0,
     hcc_idle_floor_minutes: 0,
     hcc_drain_grace_ms: 0,
     hcc_heartbeat_poll_ms: 0,
-    first_profile_path: '',
-    second_profile_path: '',
     stateful_pod_before: [],
     stateless_pod_before: [],
     stateless_initial_lifecycle_state: '',
@@ -497,7 +499,7 @@ test('human journey — two Hosts, restart, cache, and two verified stateless wa
       const launched = await launchDesktopApp(testInfo)
       app = launched.app
       page = launched.page
-      metrics.first_profile_path = await desktopProfilePath(app)
+      firstProfilePath = await desktopProfilePath(app)
       await login(page, desktopCredentials())
       await openAgentsPage(page)
       await expect(
@@ -576,8 +578,7 @@ test('human journey — two Hosts, restart, cache, and two verified stateless wa
       metrics.second_launch_to_window_ms = Date.now() - launchStarted
       app = launched.app
       page = launched.page
-      metrics.second_profile_path = await desktopProfilePath(app)
-      expect(metrics.second_profile_path).toBe(metrics.first_profile_path)
+      expect(await desktopProfilePath(app)).toBe(firstProfilePath)
       await authenticatedWithoutRelogin(page)
       metrics.second_launch_to_authenticated_ms = Date.now() - launchStarted
 
