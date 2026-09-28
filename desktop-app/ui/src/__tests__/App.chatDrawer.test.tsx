@@ -485,7 +485,7 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
     expect(screen.getByRole('button', { name: 'Open chats' }).textContent).toContain('Second chat')
   })
 
-  it('hides already-delivered notifications for a revoked Host', () => {
+  it('hides already-delivered notifications after a Host is revoked', () => {
     const notification = {
       id: 'approval-1',
       kind: 'approval_required',
@@ -494,12 +494,26 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
       timestamp: 1,
       read: false,
     } as AppNotification
+    let hostBlocked = false
+    let hostAuthorityRevision = 0
+    const isHostAccessBlocked = vi.fn(() => hostBlocked)
     currentController = makeController({
       notifications: [notification],
-      isHostAccessBlocked: vi.fn(() => true),
+      isHostAccessBlocked,
+      hostAuthorityRevision,
     } as Partial<AppController>)
 
-    render(<App />)
+    const { rerender } = render(<App />)
+
+    expect(appHeaderHarness.notifications).toEqual([notification])
+    expect(appHeaderHarness.unreadNotificationCount).toBe(1)
+
+    act(() => {
+      hostBlocked = true
+      hostAuthorityRevision += 1
+      currentController.hostAuthorityRevision = hostAuthorityRevision
+      rerender(<App />)
+    })
 
     expect(appHeaderHarness.notifications).toEqual([])
     expect(appHeaderHarness.unreadNotificationCount).toBe(0)

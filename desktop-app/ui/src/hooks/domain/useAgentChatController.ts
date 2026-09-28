@@ -2734,7 +2734,10 @@ export function useAgentChatController({
       const sendScopeIdentity = currentAuthScopeRef.current
       const originalDraftChat = activeChatVisibilityRef.current.activeChatId
       const originalDraftAgent = selectedAgent
-      const originalDraftRevision = getComposerDraftRevision(originalDraftChat, originalDraftAgent)
+      const originalDraftRevision = getComposerDraftRevision(
+        originalDraftChat,
+        originalDraftAgent ?? undefined
+      )
       const originalAttachmentRevision = composerAttachmentRevisionRef.current
       const trimmedContent = content.trim()
       const effectiveAttachments = [...attachments]
@@ -2977,7 +2980,8 @@ export function useAgentChatController({
         activeChatVisibilityRef.current.selectedAgent === sendAgent &&
         activeChatVisibilityRef.current.activeChatId === sendChatId &&
         composerAttachmentRevisionRef.current === originalAttachmentRevision &&
-        getComposerDraftRevision(originalDraftChat, originalDraftAgent) === originalDraftRevision
+        getComposerDraftRevision(originalDraftChat, originalDraftAgent ?? undefined) ===
+          originalDraftRevision
       ) {
         clearComposerAfterSend(sendChatId)
         clearComposerDraft(null, sendAgent)

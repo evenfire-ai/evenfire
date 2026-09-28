@@ -271,32 +271,6 @@ describe('deleteChat', () => {
     )
   })
 
-  it('retains legacy tombstone reads without carrying them into a new team', async () => {
-    await fs.mkdir(agentPath(), { recursive: true })
-    await fs.writeFile(
-      agentPath('index.json'),
-      JSON.stringify({
-        version: 2,
-        lastActiveChatId: null,
-        onboardingDismissed: false,
-        chats: [],
-        deletedChatIds: ['legacy-chat', 'legacy-unscoped-only'],
-      })
-    )
-    const teamBStore = new ChatStore(tempDir)
-    teamBStore.setAuthorityScope(TEAM_B_SCOPE)
-    expect((await teamBStore.getIndex('agent-1')).deletedChatIds).toContain('legacy-chat')
-    await expect(teamBStore.createChat('agent-1', 'legacy-chat')).resolves.toMatchObject({
-      id: 'legacy-chat',
-    })
-
-    const unscopedStore = new ChatStore(tempDir)
-    unscopedStore.setAuthorityScope({ ...TEAM_A_SCOPE, teamId: null })
-    await expect(unscopedStore.createChat('agent-1', 'legacy-unscoped-only')).rejects.toThrow(
-      'Chat was deleted locally'
-    )
-  })
-
   it('keeps cleanup queued after a failure and retries it only in the owning scope', async () => {
     await store.createChat('agent-1', 'retry-cleanup')
     await store.saveMessages('agent-1', 'retry-cleanup', [
@@ -1826,14 +1800,12 @@ describe('corrupt/missing files', () => {
       lastActiveChatId: null,
       onboardingDismissed: false,
       chats: [],
-      deletedChatIds: [],
     })
     await expect(store.getIndex('agent-1')).resolves.toEqual({
       version: 2,
       lastActiveChatId: null,
       onboardingDismissed: false,
       chats: [],
-      deletedChatIds: [],
     })
     const quarantinedIndexes = (await fs.readdir(agentPath('.corrupt'))).filter(name =>
       name.startsWith('index-')

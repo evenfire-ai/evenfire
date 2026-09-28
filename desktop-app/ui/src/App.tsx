@@ -2247,6 +2247,7 @@ export function App() {
       vm.notificationActionById,
       vm.notifications,
       vm.isHostAccessBlocked,
+      vm.hostAuthorityRevision,
       vm.pendingApprovalActionId,
       vm.pendingApprovals,
       vm.pendingApprovalsLoading,

@@ -17,6 +17,8 @@ export interface EffectiveHostLifecycle {
   state: HostLifecycleState
   /** Unknown channel authority: preserve the entire applied Deployment template. */
   suspensionBlocked?: boolean
+  /** A fresh-read-verified wake may scale the held Deployment without a template change. */
+  allowScaleUpDuringHold?: boolean
 }
 
 /** Reconcile-time lifecycle assessment: effective mode + durable status + condition. */

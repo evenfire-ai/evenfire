@@ -71,6 +71,13 @@ const DENY_REASON_BY_SOURCE: Record<ApprovalDecisionTarget['source'], string> = 
   connect_completed: 'User denied',
 }
 
+export function getHostAuthorityEpochForAgent(
+  epochByAgent: ReadonlyMap<string, number>,
+  agentRef: string
+): number {
+  return epochByAgent.get(agentRef) ?? 0
+}
+
 export async function loadWorkflowRunsWithArtifactsForWorkflowTarget(
   target: Pick<WorkflowCompletionNotificationTarget, 'namespace' | 'name'>
 ): Promise<WorkflowRunsResult> {
@@ -324,7 +331,7 @@ export function useAppController() {
   )
   const getHostAuthorityEpoch = useCallback(
     (agentRef: string) =>
-      hostAuthorityEpochByAgentRef.current.get(agentRef) ?? hostAuthorityEpochRef.current,
+      getHostAuthorityEpochForAgent(hostAuthorityEpochByAgentRef.current, agentRef),
     []
   )
   useEffect(() => {

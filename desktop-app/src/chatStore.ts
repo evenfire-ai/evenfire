@@ -196,18 +196,12 @@ function parseChatIndex(raw: string): ChatIndex {
     (candidate.lastActiveChatId !== null && typeof candidate.lastActiveChatId !== 'string') ||
     typeof candidate.onboardingDismissed !== 'boolean' ||
     !Array.isArray(candidate.chats) ||
-    (candidate.deletedChatIds !== undefined &&
-      (!Array.isArray(candidate.deletedChatIds) ||
-        !candidate.deletedChatIds.every((id: unknown) => typeof id === 'string'))) ||
     (candidate.deletedChatTombstones !== undefined &&
       (!Array.isArray(candidate.deletedChatTombstones) ||
         !candidate.deletedChatTombstones.every(isChatDeleteTombstone))) ||
     (candidate.pendingChatCleanup !== undefined &&
       (!Array.isArray(candidate.pendingChatCleanup) ||
-        !candidate.pendingChatCleanup.every(isChatDeleteTombstone))) ||
-    (candidate.pendingCleanupChatIds !== undefined &&
-      (!Array.isArray(candidate.pendingCleanupChatIds) ||
-        !candidate.pendingCleanupChatIds.every((id: unknown) => typeof id === 'string')))
+        !candidate.pendingChatCleanup.every(isChatDeleteTombstone)))
   ) {
     throw new Error('Invalid chat index')
   }
@@ -324,7 +318,6 @@ function emptyIndex(): ChatIndex {
     lastActiveChatId: null,
     onboardingDismissed: false,
     chats: [],
-    deletedChatIds: [],
   }
 }
 
@@ -357,20 +350,15 @@ export class ChatStore {
     return current
   }
 
-  private isDeletedInScope(index: ChatIndex, chatId: string, scope = this.authorityScope): boolean {
-    if (
+  private isDeletedInScope(index: ChatIndex, chatId: string): boolean {
+    return Boolean(
       index.deletedChatTombstones?.some(
         tombstone =>
           tombstone.chatId === chatId &&
-          (!scope || sameChatAuthorityScope(tombstone.authorityScope, scope))
+          (!this.authorityScope ||
+            sameChatAuthorityScope(tombstone.authorityScope, this.authorityScope))
       )
-    ) {
-      return true
-    }
-    // Legacy entries were global inside an env/user store. Retain that behavior
-    // for the unscoped legacy account and for stores used without authority
-    // context, but never carry an unknowable old-team deletion into a new team.
-    return Boolean(index.deletedChatIds?.includes(chatId) && (!scope || scope.teamId === null))
+    )
   }
 
   /**

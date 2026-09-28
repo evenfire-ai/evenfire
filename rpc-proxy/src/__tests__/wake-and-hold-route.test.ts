@@ -351,6 +351,27 @@ describe('POST /rpc/hosts/:hostRef/messages wake-and-hold triggers', () => {
     expect(controlApiMock.requestHostWakeFromControlApi).not.toHaveBeenCalled()
   })
 
+  it('a wake retry that times out returns 504 instead of 502', async () => {
+    const timeout = new Error('aborted')
+    timeout.name = 'AbortError'
+    serviceMock.forwardHostMessageToHost
+      .mockRejectedValueOnce(hostDownError())
+      .mockRejectedValueOnce(timeout)
+    controlApiMock.requestHostWakeFromControlApi.mockResolvedValue({
+      kind: 'active',
+      wakeGeneration: null,
+    })
+
+    const response = await postMessage(makeApp()).expect(504)
+
+    expect(response.body).toEqual({ error: 'Gateway Timeout' })
+    expect(serviceMock.forwardHostMessageToHost).toHaveBeenCalledTimes(2)
+    expect(serviceMock.forwardHostMessageToHost.mock.calls[1][2]).toEqual({
+      async: false,
+      timeoutMs: expect.any(Number),
+    })
+  })
+
   it('a token without wake scope keeps the original full upstream timeout', async () => {
     authTokenMock.verifyRpcToken.mockReturnValue({
       ...VALID_CLAIMS,

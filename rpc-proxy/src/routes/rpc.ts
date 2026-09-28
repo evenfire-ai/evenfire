@@ -46,7 +46,6 @@ const RFC1123_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/
 // own copy (the two services share no package, so each names its own).
 const SESSIONS_LIMIT_CAP = 100
 const MESSAGES_LIMIT_CAP = 200
-/** A confirmed stateless host may be suspended and spend seconds failing DNS/connect. */
 
 function isSafeUpstreamPathSegment(value: string): boolean {
   return (

@@ -3671,9 +3671,10 @@ export class HostReconciler {
         // Preserve UID/resourceVersion and every applied field. Conflicts
         // re-read this object before retrying; replicas is the only field that
         // may change. An unverified legacy object must never be scaled.
+        const replicas = effective?.allowScaleUpDuringHold ? 1 : (existing.spec.replicas ?? 1)
         return {
           ...existing,
-          spec: { ...existing.spec, replicas: 1 },
+          spec: { ...existing.spec, replicas },
         }
       }
       return this.buildDeployment(
@@ -4799,19 +4800,28 @@ export class HostReconciler {
         return false
       }
     }
-    const holdAppliedRuntime = async (): Promise<void> => {
+    const holdAppliedRuntime = async (allowScaleUp: boolean): Promise<void> => {
+      await this.provisionRuntimeTokenRevision(host, {
+        forceFreshForWake: allowScaleUp,
+        targetSuspended: lifecycle.effective.state === 'suspended',
+      })
+      revalidateHostMutationBoundary()
       const applied = await this.ensureDeployment(
         host,
         mounts,
         undefined,
-        lifecycle.effective,
+        { ...lifecycle.effective, allowScaleUpDuringHold: allowScaleUp },
         undefined,
         revalidateHostMutationBoundary
       )
       revalidateHostMutationBoundary()
-      this.lifecycle.markHostNotSuspended(host.name)
+      if (lifecycle.effective.state !== 'suspended' || allowScaleUp) {
+        this.lifecycle.markHostNotSuspended(host.name)
+      }
       const deploymentReady =
-        applied && (await this.checkDeploymentReady(host.name, host.namespace))
+        lifecycle.effective.state !== 'suspended' &&
+        applied &&
+        (await this.checkDeploymentReady(host.name, host.namespace))
       revalidateHostMutationBoundary()
       const ready = deploymentReady && pvcApplied && serviceApplied && npFailures.length === 0
       const failures = [
@@ -4836,9 +4846,11 @@ export class HostReconciler {
           ? 'Waiting for CommunicationChannel inventory before creating runtime'
           : failures.length > 0
             ? `degraded — Host runtime boundary incomplete while preserving applied runtime (${failures.join('; ')})`
-            : deploymentReady
-              ? 'CommunicationChannel inventory unavailable; preserving applied runtime with one replica'
-              : 'CommunicationChannel inventory unavailable; preserved applied runtime is not Ready',
+            : lifecycle.effective.state === 'suspended' && !allowScaleUp
+              ? 'CommunicationChannel inventory unavailable; preserving suspended Host replicas'
+              : deploymentReady
+                ? 'CommunicationChannel inventory unavailable; preserving applied runtime'
+                : 'CommunicationChannel inventory unavailable; preserved applied runtime is not Ready',
       })
     }
 
@@ -4925,7 +4937,7 @@ export class HostReconciler {
     revalidateHostMutationBoundary()
 
     if (lifecycle.effective.suspensionBlocked) {
-      await holdAppliedRuntime()
+      await holdAppliedRuntime(forceFreshForWake)
       return
     }
 

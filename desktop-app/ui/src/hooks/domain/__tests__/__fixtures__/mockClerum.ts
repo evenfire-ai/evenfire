@@ -89,7 +89,9 @@ export function installMockClerum(): MockClerum {
     })),
     delete: vi.fn(async () => ({ cleanupPending: false })),
     loadMessages: vi.fn(async () => []),
-    appendMessages: vi.fn(async () => undefined),
+    appendMessages: vi.fn(
+      async (_agentRef: string, _chatId: string, _messages: unknown[]) => undefined
+    ),
     upsertMessages: vi.fn(async (agentRef: string, chatId: string, messages: unknown[]) => {
       const unseen = messages.filter(message => {
         const id = (message as { id?: unknown }).id

@@ -54,10 +54,9 @@ function localIndex(chats: Array<{ id: string; title: string }>): ChatIndex {
 }
 
 describe('scoped deletion visibility', () => {
-  it('filters tombstones by environment, user, and team while keeping legacy reads conservative', () => {
+  it('filters tombstones by environment, user, and team', () => {
     const index: ChatIndex = {
       ...localIndex([]),
-      deletedChatIds: ['legacy-delete'],
       deletedChatTombstones: [
         {
           chatId: 'team-a-delete',
@@ -90,7 +89,7 @@ describe('scoped deletion visibility', () => {
         userId: 'user-1',
         teamId: null,
       })
-    ).toEqual(['legacy-delete'])
+    ).toEqual([])
   })
 })
 

@@ -45,6 +45,7 @@ const ENTRY_TTL_MARGIN_MS = 5_000
 const MAX_TRACKED_WAKE_COORDINATIONS = 1_000
 const WAKE_SCOPE = 'host:wake:write' as const
 const ADMISSION_RETRY_DELAYS_MS = [250, 500, 1_000]
+const MIN_ADMISSION_RETRY_TIMEOUT_MS = 100
 /** Leaves room for one final upstream timeout before Desktop's 60s deadline. */
 export const MAX_REQUEST_HOLD_MS = 48_000
 
@@ -140,7 +141,7 @@ export function wakeCoordinationKey(claims: RpcAccessClaims, hostRef: string): s
  * hold budget so a token that cannot survive the wake call is not treated as
  * usable for it.
  */
-export function isWakeCapable(claims: RpcAccessClaims, hostRef: string, now: number): boolean {
+function isWakeCapable(claims: RpcAccessClaims, hostRef: string, now: number): boolean {
   const tokenExpMs = claims.exp * 1000
   if (tokenExpMs - TOKEN_EXP_SAFETY_MARGIN_MS <= now) return false
   if (!claims.scopes.includes(WAKE_SCOPE)) return false
@@ -673,7 +674,7 @@ export async function respondWithWakeAndHold(
         }
         try {
           const remainingMs = deadlineMs - Date.now()
-          if (remainingMs <= 0) break
+          if (remainingMs < MIN_ADMISSION_RETRY_TIMEOUT_MS) break
           await options.attemptUpstream(Math.min(config.upstreamTimeoutMs, remainingMs))
           return
         } catch (error) {

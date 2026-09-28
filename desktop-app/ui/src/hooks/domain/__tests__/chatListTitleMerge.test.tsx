@@ -63,7 +63,6 @@ function localIndex(
       updatedAt: NOW,
       messageCount: 0,
     })),
-    deletedChatIds,
     deletedChatTombstones: deletedChatIds.map(chatId => ({ chatId, authorityScope })),
   }
 }

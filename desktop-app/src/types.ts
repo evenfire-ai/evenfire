@@ -936,14 +936,10 @@ export interface ChatIndex {
   lastActiveChatId: string | null
   onboardingDismissed: boolean
   chats: ChatMetadata[]
-  /** Legacy tombstones from pre-scoped versions; retained for read compatibility. */
-  deletedChatIds?: string[]
   /** New deletions are isolated to their complete authority identity. */
   deletedChatTombstones?: ChatDeleteTombstone[]
   /** Durable artifact-cleanup work, retried only in the owning authority scope. */
   pendingChatCleanup?: ChatDeleteTombstone[]
-  /** Legacy pending cleanup field, read for compatibility with intermediate builds. */
-  pendingCleanupChatIds?: string[]
 }
 
 export interface ChatDeleteResult {

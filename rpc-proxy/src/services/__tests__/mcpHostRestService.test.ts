@@ -5,7 +5,7 @@ import {
 } from '../mcpHostRestService.js'
 
 describe('host message availability probe', () => {
-  it('aborts at the requested short timeout with a distinct wake-eligible reason', async () => {
+  it('aborts at the requested short timeout with the standard abort reason', async () => {
     vi.useFakeTimers()
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(
       (_input, init) =>
@@ -20,7 +20,7 @@ describe('host message availability probe', () => {
         { timeoutMs: 750 }
       )
       const rejection = expect(pending).rejects.toMatchObject({
-        name: 'HostAvailabilityProbeTimeoutError',
+        name: 'AbortError',
       })
       await vi.advanceTimersByTimeAsync(750)
       await rejection

@@ -166,10 +166,14 @@ function httpErrorStatus(err: unknown): number | undefined {
     const causeStatus = (err as { cause?: { status?: unknown } }).cause?.status
     if (typeof causeStatus === 'number') return causeStatus
   }
-  // ApiError puts the response status before the body. Using the first token
-  // keeps a 503 body that mentions 403 from becoming a revocation signal.
-  const match = /\b([1-5]\d{2})\b/.exec(errorText(err))
-  return match ? Number(match[1]) : undefined
+  // Parse only labeled HTTP statuses so digits in a host name or body aren't
+  // mistaken for the response status.
+  const match =
+    /^(?:http\s+)?(?<leading>[1-5]\d{2})\b|\b(?:http(?:\s+status)?|status(?:\s+code)?)\s*[:=]?\s*(?<labeled>[1-5]\d{2})\b|\((?<parenthesized>[1-5]\d{2})\)/i.exec(
+      errorText(err)
+    )
+  const status = match?.groups?.leading ?? match?.groups?.labeled ?? match?.groups?.parenthesized
+  return status ? Number(status) : undefined
 }
 
 /** A transcript 404 is ambiguous: absence, authority and wake failure share it. */

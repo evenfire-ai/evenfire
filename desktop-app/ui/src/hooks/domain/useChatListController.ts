@@ -175,13 +175,13 @@ function sameAuthorityScope(left: ChatAuthorityScope, right: ChatAuthorityScope)
 }
 
 export function deletedChatIdsForScope(index: ChatIndex, scope: ChatAuthorityScope): string[] {
-  const scoped = (index.deletedChatTombstones ?? [])
-    .filter(tombstone => sameAuthorityScope(tombstone.authorityScope, scope))
-    .map(tombstone => tombstone.chatId)
-  // Legacy IDs have no known team owner. Keep their historic behavior for the
-  // unscoped account, but don't carry them into a different new team.
-  const legacy = scope.teamId === null ? (index.deletedChatIds ?? []) : []
-  return [...new Set([...legacy, ...scoped])]
+  return [
+    ...new Set(
+      (index.deletedChatTombstones ?? [])
+        .filter(tombstone => sameAuthorityScope(tombstone.authorityScope, scope))
+        .map(tombstone => tombstone.chatId)
+    ),
+  ]
 }
 
 export function useChatListController({

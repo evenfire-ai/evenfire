@@ -22,7 +22,13 @@ import {
   HostLifecycleAssessment,
   SuspendFromHeartbeatOutcome,
 } from './statelessLifecycle.types'
-import { HostCRD, HostCondition, HostCrdStatus, HostLifecycleStatus } from './types'
+import {
+  HostCRD,
+  HostCondition,
+  HostCrdStatus,
+  HostLifecycleState,
+  HostLifecycleStatus,
+} from './types'
 import { getErrorCode } from './utils'
 
 // ─── Stateless lifecycle (Stage 2) ─────────────────────────────────────────
@@ -33,7 +39,7 @@ const PLURAL_HOSTS = 'hosts'
 const STATELESS_REJECTED_CONDITION_TYPE = 'StatelessEnableRejected'
 const COMMUNICATION_CHANNEL_CACHE_UNSYNCED_REASON = 'CommunicationChannelCacheUnsynced'
 const COMMUNICATION_CHANNEL_CACHE_UNSYNCED_MESSAGE =
-  'CommunicationChannel cache is not synchronized; stateless lifecycle is held active'
+  'CommunicationChannel cache is not synchronized; stateless lifecycle transitions are held'
 const ACTIVE_COMMUNICATION_CHANNELS_REASON = 'ActiveCommunicationChannels'
 /**
  * Host CR annotation carrying the monotonic wake generation (Stage 4.3).
@@ -323,7 +329,10 @@ export class StatelessLifecycleExecutor {
     }
 
     if (!this.isCommunicationChannelCacheSynced()) {
-      return this.holdActiveDuringChannelCacheRecovery(wakeHandledGeneration)
+      return this.holdActiveDuringChannelCacheRecovery(
+        wakeHandledGeneration,
+        host.status?.lifecycle?.state ?? 'active'
+      )
     }
 
     // Accepted: preserve the durable state from the CRD status — a suspended
@@ -358,12 +367,13 @@ export class StatelessLifecycleExecutor {
 
   /** Unknown channel inventory requires preserving the applied Deployment. */
   private holdActiveDuringChannelCacheRecovery(
-    wakeHandledGeneration: number
+    wakeHandledGeneration: number,
+    state: HostLifecycleState = 'active'
   ): HostLifecycleAssessment {
     return {
-      effective: { stateless: true, state: 'active', suspensionBlocked: true },
+      effective: { stateless: true, state, suspensionBlocked: true },
       lifecycle: {
-        state: 'active',
+        state,
         wakeHandledGeneration,
         reason: COMMUNICATION_CHANNEL_CACHE_UNSYNCED_MESSAGE,
       },
@@ -397,7 +407,10 @@ export class StatelessLifecycleExecutor {
         !this.isCommunicationChannelCacheSynced() &&
         assessment.condition.reason === ACTIVE_COMMUNICATION_CHANNELS_REASON
       ) {
-        return this.holdActiveDuringChannelCacheRecovery(assessment.lifecycle.wakeHandledGeneration)
+        return this.holdActiveDuringChannelCacheRecovery(
+          assessment.lifecycle.wakeHandledGeneration,
+          assessment.effective.state
+        )
       }
       return assessment
     }
@@ -405,7 +418,10 @@ export class StatelessLifecycleExecutor {
     const { reasons, messages } = this.communicationChannelPolicyRejection(hostName)
     if (reasons.length === 0) {
       if (!this.isCommunicationChannelCacheSynced() && !assessment.effective.suspensionBlocked) {
-        return this.holdActiveDuringChannelCacheRecovery(assessment.lifecycle.wakeHandledGeneration)
+        return this.holdActiveDuringChannelCacheRecovery(
+          assessment.lifecycle.wakeHandledGeneration,
+          assessment.effective.state
+        )
       }
       return assessment
     }
@@ -611,13 +627,11 @@ export class StatelessLifecycleExecutor {
           freshLifecycle?.wakeHandledGeneration ?? 0
         )
         const cachedState = host.status?.lifecycle?.state ?? 'active'
-        // Confirmed rejection and channel-cache uncertainty both require an
-        // active state and an explanatory reason, even when the cached state
-        // was already active. A state-only discriminator would treat that
-        // reason as an echo and drop it; it could also preserve a fresh drain
-        // decision made just before the cache lost authority.
-        const assessmentForcesActive =
-          assessment.condition.status === 'True' || assessment.effective.suspensionBlocked === true
+        // Confirmed rejection requires active even when the cached state was
+        // already active. Cache uncertainty is different: preserve the fresh
+        // durable state and block scale/template transitions until authority
+        // returns.
+        const assessmentForcesActive = assessment.condition.status === 'True'
         const assessmentIntendsStateOverride = assessment.lifecycle.state !== cachedState
         let lifecycle: HostLifecycleStatus
         if (assessmentIntendsStateOverride || assessmentForcesActive) {
@@ -1407,7 +1421,7 @@ export class StatelessLifecycleExecutor {
 
     // Cache recovery uses the full reconcile's owned, resource-version-fenced
     // replica-only update. Do not send the unfenced wake scale patch here.
-    if (!this.isCommunicationChannelCacheSynced()) return false
+    if (!this.isCommunicationChannelCacheSynced()) return true
 
     // Minimal scale patch — NOT the full buildDeployment replace. It also
     // starts the pod even when the heavy body aborts early (e.g. on a

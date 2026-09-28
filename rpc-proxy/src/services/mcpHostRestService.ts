@@ -141,13 +141,7 @@ export async function forwardHostMessageToHost(
   const query = options?.async ? '?async=true' : ''
   const abortController = new AbortController()
   const timeout = setTimeout(() => {
-    if (options?.timeoutMs !== undefined) {
-      const error = new Error('Initial host availability probe timed out')
-      error.name = 'HostAvailabilityProbeTimeoutError'
-      abortController.abort(error)
-    } else {
-      abortController.abort()
-    }
+    abortController.abort()
   }, options?.timeoutMs ?? config.upstreamTimeoutMs)
   try {
     const response = await fetch(`${baseUrl}/v1/runtime/messages${query}`, {

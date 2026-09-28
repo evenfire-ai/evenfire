@@ -2,10 +2,23 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { scheduleAfterFirstPaint } from '../scheduleAfterFirstPaint'
 import {
+  getHostAuthorityEpochForAgent,
   loadWorkflowRunsWithArtifactsForApprovalRefresh,
   loadWorkflowRunsWithArtifactsForWorkflowTarget,
   scheduleAfterFirstPaintForSession,
 } from '../useAppController'
+
+describe('getHostAuthorityEpochForAgent', () => {
+  it('keeps Host X chat-list authority unchanged when Host Y is revoked', () => {
+    const epochs = new Map<string, number>()
+    const hostXChatListEpoch = getHostAuthorityEpochForAgent(epochs, 'host-x')
+
+    epochs.set('host-y', 1)
+
+    expect(getHostAuthorityEpochForAgent(epochs, 'host-x')).toBe(hostXChatListEpoch)
+    expect(getHostAuthorityEpochForAgent(epochs, 'host-y')).toBe(1)
+  })
+})
 
 function installWorkflowHarness(runsResult: unknown) {
   const runs = vi.fn(async () => runsResult)

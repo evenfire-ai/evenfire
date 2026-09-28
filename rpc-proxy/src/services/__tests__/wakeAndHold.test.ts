@@ -664,6 +664,22 @@ describe('post-resolution re-forward hardening (respondWithWakeAndHold)', () => 
     expect(res.statusCode).toBe(200)
   })
 
+  it('skips an admission retry when less than 100 ms remains', async () => {
+    const { coordinator, requestWake } = makeCoordinator()
+    requestWake.mockResolvedValue({ kind: 'active', wakeGeneration: null })
+    const res = makeRes()
+    const attemptUpstream = vi.fn(async (_timeoutMs: number) => {})
+    const pending = respondWithWakeAndHold({
+      ...respondOptions(coordinator, res, attemptUpstream),
+      deadlineMs: Date.now() + 99,
+    })
+
+    await pending
+
+    expect(attemptUpstream).not.toHaveBeenCalled()
+    expect(res.statusCode).toBe(503)
+  })
+
   it('(d) two concurrent holds for different hosts do not cross-cancel each other', async () => {
     const { coordinator, requestWake, probeReady } = makeCoordinator()
     requestWake.mockResolvedValue({ kind: 'wake-requested', wakeGeneration: 1 })
