@@ -344,6 +344,33 @@ describe('Spec 65 v2 Host-RPC admission checkpoint', () => {
     )
   })
 
+  it('admits a wake-only signed token without requiring unrelated Host scopes', async () => {
+    const token = signRpcAccessToken({
+      sub: SUBJECT,
+      typ: 'user',
+      accessScope: 'team',
+      teamId: 'team-a',
+      scopes: ['host:wake:write'],
+      hostRefs: [HOST_REF],
+      jti: 'host-rpc-admission-wake-only-token',
+    })
+    await request(app())
+      .post(
+        '/rpc/access/users/' +
+          SUBJECT +
+          '/mcp-hosts/' +
+          encodeURIComponent(HOST_REF) +
+          '/host-rpc-admission'
+      )
+      .set('x-rpc-access-token', token)
+      .expect(204)
+    expect(admission.checkAndIncrement).toHaveBeenCalledOnce()
+    expect(admission.checkAndIncrement).toHaveBeenCalledWith(
+      'host-rpc-admission:' + SUBJECT,
+      config.hostRpcAdmissionRlPerMin
+    )
+  })
+
   it('invalid legacy scope, subject/Host claim, and body consume no admission unit', async () => {
     const token = signRpcAccessToken({
       sub: SUBJECT,

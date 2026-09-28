@@ -308,6 +308,7 @@ export function createRpcAccessUsersRouter(
     `${hostAccessPath}/host-rpc-admission`,
     requireValidRpcAccessTokenAny([
       'host:message:invoke',
+      'host:wake:write',
       'host:status:read',
       'host:health:read',
       'host:activity:read',
