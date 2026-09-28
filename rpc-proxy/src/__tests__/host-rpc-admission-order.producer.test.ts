@@ -89,6 +89,7 @@ const signedAccessToken = signRpcAccessToken({
     'host:session:read',
     'host:session:write',
     'host:model:write',
+    'host:model:read',
   ],
   hostRefs: ['chatllm'],
   jti: 'producer-token-jti',
@@ -115,6 +116,23 @@ const CASES = [
   },
   { name: 'session read', path: '/rpc/hosts/chatllm/sessions', method: 'get' as const },
   {
+    name: 'session transcript read',
+    path: `/rpc/hosts/chatllm/sessions/chatllm/${CHAT}/messages`,
+    method: 'get' as const,
+  },
+  {
+    name: 'session context breakdown read',
+    path: `/rpc/hosts/chatllm/sessions/chatllm/${CHAT}/context-breakdown`,
+    method: 'get' as const,
+  },
+  {
+    name: 'session rename',
+    path: `/rpc/hosts/chatllm/sessions/chatllm/${CHAT}/name`,
+    method: 'patch' as const,
+    body: { title: 'Renamed session' },
+  },
+  { name: 'model catalog read', path: '/rpc/hosts/chatllm/models', method: 'get' as const },
+  {
     name: 'model write',
     path: '/rpc/hosts/chatllm/model',
     method: 'post' as const,
@@ -126,7 +144,19 @@ const CASES = [
     method: 'get' as const,
     expectedStatus: 404,
   },
+  {
+    name: 'task cancel',
+    path: `/rpc/hosts/chatllm/tasks/${TASK}/cancel`,
+    method: 'post' as const,
+    expectedStatus: 404,
+  },
   { name: 'telemetry read', path: '/rpc/hosts/chatllm/health', method: 'get' as const },
+  { name: 'status snapshot read', path: '/rpc/hosts/chatllm/status', method: 'get' as const },
+  {
+    name: 'activity snapshot read',
+    path: '/rpc/hosts/chatllm/activity?limit=50',
+    method: 'get' as const,
+  },
   { name: 'status stream open', path: '/rpc/hosts/chatllm/status/stream', method: 'get' as const },
   {
     name: 'activity stream open',
