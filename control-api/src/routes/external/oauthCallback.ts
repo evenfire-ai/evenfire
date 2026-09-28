@@ -168,6 +168,10 @@ export function createOAuthCallbackRouter(gateway: K8sGateway): Router {
           return res.status(400).json({ error: 'server_missing_context' })
         case 'context_membership_denied':
           return res.status(403).json({ error: 'context_membership_denied' })
+        case 'remote_oauth_spec_incoherent':
+          return res
+            .status(409)
+            .json({ error: 'remote_oauth_spec_incoherent', reason: result.reason })
         case 'secret_missing':
           return res.status(503).json(integrationNotConfigured(oauthClientId, result.secret))
         case 'unsupported_provider':

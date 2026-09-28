@@ -279,9 +279,10 @@ spec:
                     bearerInBody:
                       type: boolean
                       description: >-
-                        REMOTE only (D-8). Token goes in the request body, not the
-                        Authorization header. No default (required-by-CEL for remote).
-                        Immutable (pinned at install; runtime never re-derives).
+                        REMOTE only (D-8). Whether the AS wants the token in the request
+                        body instead of the Authorization header. Must be false: the
+                        runtime only sends the header (enforced by CEL). No default
+                        (required-by-CEL for remote). Immutable (pinned at install).
                     supportsRefresh:
                       type: boolean
                       description: >-
@@ -665,8 +666,11 @@ spec:
                 # charset). Exempts ONLY remote (source == 'remote' short-circuits);
                 # baked (source absent) AND generic get the slug narrow, since a
                 # generic client_id IS spec.oauth.id and must be a callback-path-safe slug.
-                - rule: "!has(self.oauth) || (has(self.oauth.source) && self.oauth.source == 'remote') || !has(self.oauth.id) || self.oauth.id.matches('^[a-z0-9-]{1,63}$')"
-                  message: "baked/generic spec.oauth.id must match ^[a-z0-9-]{1,63}$"
+                # 'remote' is reserved: baked/generic callbacks route by /oauth-callback/<id>,
+                # and /oauth-callback/remote is the single stable redirect every remote
+                # client registers, so a baked/generic server with that id would share it.
+                - rule: "!has(self.oauth) || (has(self.oauth.source) && self.oauth.source == 'remote') || !has(self.oauth.id) || (self.oauth.id.matches('^[a-z0-9-]{1,63}$') && self.oauth.id != 'remote')"
+                  message: "baked/generic spec.oauth.id must match ^[a-z0-9-]{1,63}$ and must not be 'remote' (reserved for the remote OAuth callback)"
                 # BAKED-REQ: baked (no source) requires the classic adapter quartet.
                 - rule: "!has(self.oauth) || has(self.oauth.source) || (has(self.oauth.id) && has(self.oauth.provider) && has(self.oauth.clientIdRef) && has(self.oauth.clientSecretRef))"
                   message: "baked spec.oauth (no source) requires id, provider, clientIdRef and clientSecretRef"
@@ -727,14 +731,21 @@ spec:
                 # no secret); confidential = both refs. Mixed pairing is rejected.
                 - rule: "!has(self.oauth) || !has(self.oauth.source) || self.oauth.source != 'generic' || (has(self.oauth.clientIdRef) == has(self.oauth.clientSecretRef))"
                   message: "generic spec.oauth must set clientIdRef and clientSecretRef together (confidential) or neither (public)"
-                # REMOTE-SECRET-PAIRING: remote secret refs are BOTH-OR-NEITHER. Unlike
-                # generic, remote must NOT tie refs to clientMode: the three valid remote
-                # shapes are public (no refs), DCR-confidential (no refs — the secret lives
-                # in the encrypted dynamic_clients store, DEC-8), and pre-registered-
-                # confidential (both refs). So confidential is legal WITH or WITHOUT refs;
-                # the only invalid shape is exactly-one-ref (a half-declared secret source).
-                - rule: "!has(self.oauth) || !has(self.oauth.source) || self.oauth.source != 'remote' || (has(self.oauth.clientIdRef) == has(self.oauth.clientSecretRef))"
-                  message: "remote spec.oauth must set clientIdRef and clientSecretRef together or neither"
+                # REMOTE-SECRET-PAIRING: the three valid remote shapes are public (no refs),
+                # DCR-confidential (no refs — the secret lives in the encrypted
+                # dynamic_clients store) and pre-registered-confidential (both refs). So
+                # refs are both-or-neither, and public additionally forbids them: a public
+                # client has no secret, and the runtime cannot honor refs declared on one.
+                # Confidential stays legal WITH or WITHOUT refs, so presence of refs must
+                # not be required by clientMode (that would break DCR-confidential).
+                - rule: "!has(self.oauth) || !has(self.oauth.source) || self.oauth.source != 'remote' || ((has(self.oauth.clientIdRef) == has(self.oauth.clientSecretRef)) && (!has(self.oauth.clientMode) || self.oauth.clientMode != 'public' || !has(self.oauth.clientIdRef)))"
+                  message: "remote spec.oauth must set clientIdRef and clientSecretRef together or neither, and neither when clientMode is public"
+                # REMOTE-BEARER-HEADER: mcp-host always sends the access token in the
+                # Authorization header, so a remote server that needs it in the request
+                # body cannot be served. The field stays required (REMOTE-REQ) but only
+                # false is admissible.
+                - rule: "!has(self.oauth) || !has(self.oauth.source) || self.oauth.source != 'remote' || !has(self.oauth.bearerInBody) || self.oauth.bearerInBody == false"
+                  message: "remote spec.oauth.bearerInBody must be false; the access token is only sent in the Authorization header"
                 # SOURCE-VALUE-IMM: IMM-5 pins source PRESENCE; this pins the VALUE so a
                 # generic⇄remote flip in place is rejected even though both keep source set.
                 - rule: "!has(oldSelf.oauth) || !has(self.oauth) || !has(oldSelf.oauth.source) || !has(self.oauth.source) || oldSelf.oauth.source == self.oauth.source"

@@ -31,7 +31,11 @@ import { deriveOAuthEncryptionKey } from '../src/oauth/encryption.js'
 import { bootstrapSharedOAuthGrant, getOAuthGrant } from '../src/oauth/store.js'
 import { buildRemoteOAuthSpec } from '../src/routes/admin/remoteMcp.js'
 import { runProactiveRefreshSweep } from '../src/services/oauthProactiveRefreshCron.js'
-import { PILOTS, makeDiscoveryTransport } from './fixtures/remoteOAuthDiscovery.js'
+import {
+  PILOTS,
+  type PilotFixture,
+  makeDiscoveryTransport,
+} from './fixtures/remoteOAuthDiscovery.js'
 import { MockGateway } from './mockGateway.js'
 
 const VALIDATED_IP = '93.184.216.34'
@@ -260,5 +264,99 @@ describeRealPostgres('proactive refresh sweep — installation identity (real Po
         WHERE recipe_name = 'cron-legacy'`
     )
     expect(rows).toEqual([{ has_rt: true, cr_uid: null }])
+  })
+
+  // Invariant 8: a remote CR the CRD now rejects (public + secret refs, or
+  // bearerInBody: true) may still exist from a write that bypassed the install
+  // route. The sweep must not spend its refresh token; the row counts as `error`.
+  it('never POSTs the refresh of an incoherent remote server; the row counts as error', async () => {
+    await dbPool.query('DELETE FROM oauth_grants')
+    const gateway = new MockGateway(NS)
+    const PRE_REGISTERED_ID = 'client-abc'
+
+    // public + refs has no producer: the pre-registered-confidential output with
+    // clientMode flipped, as an in-place edit would leave it. The Secret exists so
+    // the only thing that can stop the POST is the coherence check.
+    const preRegistered = buildRemoteOAuthSpec(discovery, {
+      clientMode: 'confidential',
+      grantScope: 'context',
+      clientSecretName: 'srv-oauth-client',
+      preRegisteredClientId: PRE_REGISTERED_ID,
+    })
+    gateway.seedSecret('srv-oauth-client', NS, {
+      data: {
+        client_id: Buffer.from(PRE_REGISTERED_ID).toString('base64'),
+        client_secret: Buffer.from('pre-registered-secret').toString('base64'),
+      },
+    })
+
+    // bearerInBody: true is what the real builder emits for a body-only resource;
+    // the install route rejects it, so only a bypassing write can persist it.
+    const bodyOnly: PilotFixture = {
+      ...PILOTS.notion,
+      prm: {
+        ...PILOTS.notion.prm,
+        json: JSON.stringify({
+          ...JSON.parse(PILOTS.notion.prm.json),
+          bearer_methods_supported: ['body'],
+        }),
+      },
+    }
+    const bodyOutcome = await discoverRemoteOAuth(bodyOnly.mcpUrl, {
+      transport: makeDiscoveryTransport(bodyOnly),
+      resolveDns: async () => [VALIDATED_IP],
+    })
+    if (!bodyOutcome.ok) throw new Error(`fixture discovery failed: ${bodyOutcome.error.kind}`)
+    const bearerInBody = buildRemoteOAuthSpec(bodyOutcome.result, {
+      clientMode: 'public',
+      grantScope: 'context',
+      cimdClientId: oauthId(),
+    })
+    expect(bearerInBody.bearerInBody).toBe(true)
+
+    const cases = [
+      { name: 'cron-pubrefs', oauth: { ...preRegistered, clientMode: 'public' as const } },
+      { name: 'cron-bib', oauth: bearerInBody },
+    ]
+    for (const c of cases) {
+      await gateway.createResource(
+        'mcpservers',
+        {
+          metadata: { name: c.name },
+          spec: { contextRef: CONTEXT, auth: { type: 'oauth' }, oauth: c.oauth },
+        },
+        NS
+      )
+      const cr = (await gateway.getResource('mcpservers', c.name, NS)) as {
+        metadata: { uid: string }
+      }
+      const { inserted } = await bootstrapSharedOAuthGrant(db, KEY, {
+        ownerKind: 'mcpserver',
+        recipeNamespace: NS,
+        recipeName: c.name,
+        contextId: CONTEXT,
+        oauthClientId: c.oauth.id as string,
+        bootstrappedByUserId: 'user-1',
+        provider: 'remote',
+        accessToken: `AT-${c.name}`,
+        refreshToken: `RT-${c.name}`,
+        accessTokenExpiresInSec: IN_WINDOW_SEC,
+        crUid: cr.metadata.uid,
+      })
+      expect(inserted).toBe(true)
+    }
+
+    tokenEndpoint.posts.length = 0
+    const summary = await sweep(gateway)
+
+    expect(summary.candidates).toBe(2)
+    expect(summary.outcomes.error).toBe(2)
+    expect(summary.outcomes.ok).toBe(0)
+    expect(tokenEndpoint.posts).toHaveLength(0)
+    const { rows } = await dbPool.query(
+      `SELECT recipe_name FROM oauth_grants
+        WHERE refresh_token_encrypted IS NOT NULL ORDER BY recipe_name`
+    )
+    expect(rows).toEqual([{ recipe_name: 'cron-bib' }, { recipe_name: 'cron-pubrefs' }])
   })
 })

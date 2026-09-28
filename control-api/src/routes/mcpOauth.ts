@@ -15,6 +15,8 @@ import { deriveOAuthEncryptionKey } from '../oauth/encryption.js'
 import { integrationNotConfigured, isSecretNotFound } from '../oauth/integrationNotConfigured.js'
 import {
   type McpServerOAuthDecl,
+  RemoteOAuthSpecIncoherentError,
+  assertRemoteOAuthSpecCoherent,
   buildMcpServerGrantKey,
   readCrUid,
   resolveServerOAuth,
@@ -469,6 +471,9 @@ export function createMcpOauthRouter(gateway: K8sGateway): Router {
         if (authType !== 'oauth' || !resolved) {
           return res.status(400).json({ error: 'not_oauth_server' })
         }
+        // Checked up front, not only through the refresh reader: a still-fresh
+        // access token is served without ever reading the owner declaration.
+        assertRemoteOAuthSpecCoherent(server)
 
         // Bifurcate by grantScope read from the server. The KEY comes from the
         // shared derivation (`buildMcpServerGrantKey`, D4) so the mint, the
@@ -565,6 +570,9 @@ export function createMcpOauthRouter(gateway: K8sGateway): Router {
               .json({ error: 'refresh_failed', status: result.status, detail: result.detail })
         }
       } catch (err) {
+        if (err instanceof RemoteOAuthSpecIncoherentError) {
+          return res.status(409).json({ error: err.code, reason: err.reason })
+        }
         next(err)
       }
     }

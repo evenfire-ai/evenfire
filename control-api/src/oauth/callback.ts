@@ -3,6 +3,10 @@ import type { PinnedTransport } from '../http/pinnedFetch.js'
 import { pinnedFetch } from '../http/pinnedFetch.js'
 import type { DnsResolver } from '../http/validateMcpServerSpec.js'
 import { getDynamicClient } from './dynamicClientStore.js'
+import {
+  type RemoteOAuthSpecIncoherence,
+  RemoteOAuthSpecIncoherentError,
+} from './mcpServerOAuthSpec.js'
 import { deriveCodeVerifier } from './pkce.js'
 import {
   type GenericAdapterConfig,
@@ -198,7 +202,8 @@ export interface McpServerOAuthReader {
   /**
    * Resolve an OAuth McpServer by name from the mcp-servers namespace. Returns
    * null when the server does not exist or is not a usable OAuth server, so
-   * callers fail closed. May throw {@link RecipeNotFoundError} for a hard 404.
+   * callers fail closed. May throw {@link RecipeNotFoundError} for a hard 404, or
+   * {@link RemoteOAuthSpecIncoherentError} for a remote spec the runtime cannot honor.
    */
   read(mcpServerName: string): Promise<McpServerOAuthSubject | null>
 }
@@ -340,6 +345,11 @@ export type CallbackResult =
    * 403, no persist.
    */
   | { kind: 'context_membership_denied' }
+  /**
+   * mcp subject whose remote `spec.oauth` the runtime cannot honor (public client
+   * with secret refs, or bearerInBody). Fail closed BEFORE the code is exchanged.
+   */
+  | { kind: 'remote_oauth_spec_incoherent'; reason: RemoteOAuthSpecIncoherence }
   | { kind: 'secret_missing'; secret: string }
   | { kind: 'unsupported_provider'; provider: string }
   | { kind: 'provider_token_exchange_failed'; status: number; body: string }
@@ -493,6 +503,9 @@ async function handleMcpOAuthCallback(
     subject = await deps.mcpServerReader.read(claims.mcpServerName)
   } catch (err) {
     if (err instanceof RecipeNotFoundError) return { kind: 'server_not_found' }
+    if (err instanceof RemoteOAuthSpecIncoherentError) {
+      return { kind: 'remote_oauth_spec_incoherent', reason: err.reason }
+    }
     throw err
   }
   if (!subject) return { kind: 'server_not_found' }

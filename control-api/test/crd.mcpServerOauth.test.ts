@@ -425,7 +425,7 @@ describe('McpServer CRD — OAuth surface (U1)', () => {
   // evaluator is vendored, that limitation is R3-S8), NOT behavioral checks. Semantic
   // verification (half-ref rejected on create / ref repoint rejected on update) is
   // `kubectl --dry-run=server` against a live cluster, not here.
-  it('pairs remote client_id/secret refs both-or-neither (REMOTE-SECRET-PAIRING)', () => {
+  it('pairs remote refs both-or-neither and forbids them on public (REMOTE-SECRET-PAIRING)', () => {
     const rule = specRules.find(
       r =>
         r.rule.includes("self.oauth.source != 'remote'") &&
@@ -435,9 +435,28 @@ describe('McpServer CRD — OAuth surface (U1)', () => {
         Boolean(r.message?.includes('together or neither'))
     )
     expect(rule, 'REMOTE-SECRET-PAIRING rule present').toBeDefined()
-    // both-or-neither ⇒ the rule must NOT tie refs to clientMode; requiring refs for
-    // confidential would break DCR-confidential (secret in the encrypted store, DEC-8).
-    expect(rule?.rule).not.toContain('clientMode')
+    // RP-R4-CUI1-01: public carries no refs. clientMode is has()-guarded so a remote
+    // object missing it (already rejected by REMOTE-REQ) cannot CEL-error here.
+    expect(rule?.rule).toContain(
+      "(!has(self.oauth.clientMode) || self.oauth.clientMode != 'public' || !has(self.oauth.clientIdRef))"
+    )
+    expect(rule?.message).toMatch(/neither when clientMode is public/)
+    // Confidential stays legal WITH or WITHOUT refs: requiring refs for confidential
+    // would break DCR-confidential (secret in the encrypted store, DEC-8).
+    expect(rule?.rule).not.toContain("clientMode == 'confidential'")
+    expect(rule?.rule).not.toContain("clientMode != 'confidential'")
+  })
+
+  it('pins remote bearerInBody to false in its own rule (REMOTE-BEARER-HEADER)', () => {
+    const rule = specRules.find(r => r.rule.includes('self.oauth.bearerInBody == false'))
+    expect(rule, 'REMOTE-BEARER-HEADER rule present').toBeDefined()
+    expect(rule?.rule).toBe(
+      "!has(self.oauth) || !has(self.oauth.source) || self.oauth.source != 'remote' || !has(self.oauth.bearerInBody) || self.oauth.bearerInBody == false"
+    )
+    expect(rule?.message).toMatch(/bearerInBody must be false/)
+    // A distinct rule, not folded into REMOTE-REQ (which only pins presence).
+    const remoteReq = specRules.find(r => r.message?.includes('remote spec.oauth requires'))
+    expect(remoteReq?.rule).not.toContain('bearerInBody == false')
   })
 
   it('pins the remote secret posture (ref pair) as immutable across UPDATE (REMOTE-SECRET-IMM)', () => {
@@ -477,6 +496,19 @@ describe('McpServer CRD — OAuth surface (U1)', () => {
     // The exemption is now VALUE-gated on remote (not mere source presence), so
     // generic falls through to the slug narrow.
     expect(rule?.rule).toContain("has(self.oauth.source) && self.oauth.source == 'remote'")
+  })
+
+  it("reserves oauth.id 'remote' for baked/generic, inside the slug conjunct (DA-3)", () => {
+    const rule = specRules.find(r => r.rule.includes("self.oauth.id.matches('^[a-z0-9-]{1,63}$')"))
+    expect(rule?.rule).toContain(
+      "(self.oauth.id.matches('^[a-z0-9-]{1,63}$') && self.oauth.id != 'remote')"
+    )
+    // The remote carril stays exempt: its id is the AS-assigned client_id and its
+    // callback segment is the reserved constant, not the id.
+    expect(rule?.rule).toMatch(
+      /^!has\(self\.oauth\) \|\| \(has\(self\.oauth\.source\) && self\.oauth\.source == 'remote'\) \|\|/
+    )
+    expect(rule?.message).toMatch(/must not be 'remote'/)
   })
 
   it('re-gates REMOTE-REQ on source == remote so generic is not caught (REMOTE-REQ)', () => {

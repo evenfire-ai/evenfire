@@ -11,6 +11,7 @@
  * All read the SAME fields the SAME way and derive the SAME `oauth_grants` key
  * (`buildMcpServerGrantKey`), so the rule lives here once.
  */
+import { rootLogger } from '../observability/logger.js'
 import type {
   GenericClientRouting,
   OAuthClientDecl,
@@ -19,6 +20,8 @@ import type {
 } from './callback.js'
 import { MAX_EXTRA_AUTHORIZE_PARAMS, MAX_EXTRA_AUTHORIZE_PARAM_VALUE_LEN } from './genericKnobs.js'
 import type { OAuthGrantKey } from './store.js'
+
+const log = rootLogger.child({ module: 'mcp-server-oauth-spec' })
 
 export interface McpServerOAuthDecl {
   id?: unknown
@@ -52,7 +55,7 @@ export interface McpServerOAuthDecl {
 
 /** Minimal structural shape needed to resolve a server's OAuth grant coordinate. */
 export interface McpServerOAuthSpecInput {
-  metadata?: { uid?: unknown }
+  metadata?: { uid?: unknown; name?: unknown }
   spec?: {
     oauth?: McpServerOAuthDecl
     // `spec.contextRef` is REQUIRED + singular on the CRD ("the context this
@@ -188,6 +191,60 @@ export interface ResolvedServerOAuthSubject {
   crUid?: string
 }
 
+export type RemoteOAuthSpecIncoherence = 'public_client_with_secret_refs' | 'bearer_in_body'
+
+/**
+ * A remote `spec.oauth` the admission rules reject but that reached the apiserver
+ * anyway (CRD applied after the object, or a write that bypassed validation). The
+ * runtime cannot honor it, so consent, authorize-URL minting and token issuance
+ * refuse it with this specific error instead of degrading to a generic failure.
+ */
+export class RemoteOAuthSpecIncoherentError extends Error {
+  readonly code = 'remote_oauth_spec_incoherent'
+  constructor(readonly reason: RemoteOAuthSpecIncoherence) {
+    super(`remote spec.oauth is incoherent: ${reason}`)
+    this.name = 'RemoteOAuthSpecIncoherentError'
+  }
+}
+
+function remoteOAuthSpecIncoherence(oauth: McpServerOAuthDecl): RemoteOAuthSpecIncoherence | null {
+  if (
+    oauth.clientMode === 'public' &&
+    (oauth.clientIdRef != null || oauth.clientSecretRef != null)
+  ) {
+    return 'public_client_with_secret_refs'
+  }
+  if (oauth.bearerInBody === true) return 'bearer_in_body'
+  return null
+}
+
+/**
+ * Runtime mirror of the remote-carril coherence rules of the McpServer CRD
+ * (REMOTE-SECRET-PAIRING for `public`, REMOTE-BEARER-HEADER). Throws
+ * {@link RemoteOAuthSpecIncoherentError} for a remote server whose shape no
+ * install path produces; a no-op for every other lane.
+ *
+ * Deliberately NOT applied by {@link resolveServerOAuth}: that coordinate backs
+ * revoke and the grant-existence sweep, and an incoherent server must still be
+ * disconnectable and must not push the sweep into its fail-open branch.
+ */
+export function assertRemoteOAuthSpecCoherent(server: McpServerOAuthSpecInput): void {
+  const oauth = server.spec?.oauth
+  if (!oauth || oauth.source !== 'remote') return
+  const reason = remoteOAuthSpecIncoherence(oauth)
+  if (!reason) return
+  const name = server.metadata?.name
+  log.warn(
+    {
+      event: 'remote_oauth_spec_incoherent',
+      mcpServerName: typeof name === 'string' ? name : undefined,
+      reason,
+    },
+    'remote mcp-server oauth spec is incoherent; refusing consent and token issuance'
+  )
+  throw new RemoteOAuthSpecIncoherentError(reason)
+}
+
 /** Extract + type-validate the remote routing block from an untrusted `spec.oauth`. */
 function extractRemoteRouting(oauth: McpServerOAuthDecl): RemoteClientRouting | null {
   const clientMode = oauth.clientMode
@@ -224,7 +281,8 @@ function readRef(
 /**
  * Classify a remote client's secret source (DEC-18): refs present ⇒ K8s Secret
  * (pre-registered confidential); no refs + confidential ⇒ encrypted DCR store;
- * no refs + public ⇒ no secret.
+ * no refs + public ⇒ no secret. `public` with refs never reaches here:
+ * {@link assertRemoteOAuthSpecCoherent} rejects it first.
  */
 function resolveRemoteSecretSource(
   oauth: McpServerOAuthDecl,
@@ -321,8 +379,10 @@ function normalizeScopes(scopes: unknown): string[] | undefined {
  * Resolve a McpServer's full OAuth subject (decl + grant routing) for the U5
  * consent flow. Returns null when the server carries no usable OAuth
  * declaration (missing id/provider/clientIdRef/clientSecretRef) so callers fail
- * closed. Same field-reading rule as {@link resolveServerOAuth} — kept here so
- * the authorize-URL minter and the callback never drift (D4).
+ * closed. Throws {@link RemoteOAuthSpecIncoherentError} for a remote server whose
+ * shape the runtime cannot honor (see {@link assertRemoteOAuthSpecCoherent}).
+ * Same field-reading rule as {@link resolveServerOAuth} — kept here so the
+ * authorize-URL minter and the callback never drift (D4).
  *
  * Two lanes (C4/DEC-23), keyed uniformly by `oauth.id` (the install backfills it
  * for every remote mode, so the grant coordinate is uniform):
@@ -349,6 +409,7 @@ export function resolveServerOAuthSubject(
 
   // ─── Remote lane (`source:'remote'`) ─────────────────────────────────────
   if (oauth.source === 'remote') {
+    assertRemoteOAuthSpecCoherent(server)
     const remote = extractRemoteRouting(oauth)
     if (!remote) return null
     const secretSource = resolveRemoteSecretSource(oauth, remote.clientMode)
