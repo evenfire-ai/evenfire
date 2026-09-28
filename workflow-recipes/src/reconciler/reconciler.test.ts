@@ -9156,7 +9156,12 @@ describe('WorkflowRecipeReconciler', () => {
 
     await reconciler.reconcileDelete(recipe)
 
-    expect(workflowInfraCleanup).toHaveBeenCalledWith('test-recipe', 'sandbox-recipes', recipe.spec)
+    expect(workflowInfraCleanup).toHaveBeenCalledWith(
+      'test-recipe',
+      'sandbox-recipes',
+      recipe.spec,
+      recipe.metadata.uid
+    )
     expect(mockAppsApi.deleteNamespacedDeployment).toHaveBeenCalledWith({
       name: 'test-recipe-web-search-12345678',
       namespace: 'mcp-server',
@@ -9198,7 +9203,12 @@ describe('WorkflowRecipeReconciler', () => {
     await reconciler.reconcileDelete(recipe)
 
     expect(order).toEqual(['sdk-revoke-and-cleanup', 'workflow-cleanup'])
-    expect(workflowInfraCleanup).toHaveBeenCalledWith('test-recipe', 'sandbox-recipes', recipe.spec)
+    expect(workflowInfraCleanup).toHaveBeenCalledWith(
+      'test-recipe',
+      'sandbox-recipes',
+      recipe.spec,
+      recipe.metadata.uid
+    )
   })
 
   it('forwards custom coordinator workflow fields to the workflow reconciler', async () => {
