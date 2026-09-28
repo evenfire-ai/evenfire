@@ -49,6 +49,34 @@ describe('Spec 65 Control API Host-RPC admission transport', () => {
     } satisfies Partial<ControlApiHostRpcAdmissionError>)
   })
 
+  it.each([
+    ['Retry-After', undefined],
+    ['X-RateLimit-Limit', undefined],
+    ['X-RateLimit-Remaining', undefined],
+    ['X-RateLimit-Reset', undefined],
+    ['X-RateLimit-Remaining', '0x0'],
+    ['X-RateLimit-Limit', '0x12'],
+    ['X-RateLimit-Reset', '0x1'],
+  ])('rejects missing or non-canonical %s from the Control API producer', async (name, value) => {
+    const headers: Record<string, string> = {
+      'Retry-After': '17',
+      'X-RateLimit-Limit': '300',
+      'X-RateLimit-Remaining': '0',
+      'X-RateLimit-Reset': '1900000000',
+    }
+    if (value === undefined) delete headers[name!]
+    else headers[name!] = value
+    const fetchImpl = vi.fn(async () =>
+      Response.json({ error: 'Too Many Requests', retryAfterSeconds: 17 }, { status: 429, headers })
+    ) as unknown as typeof fetch
+    await expect(
+      requestHostRpcAdmission('subject-a', 'host-a', 'rpc-token', { fetchImpl })
+    ).rejects.toMatchObject({
+      status: 503,
+      body: { error: 'host_rpc_admission_unavailable' },
+    })
+  })
+
   it('fails closed with the approved typed 503 for store failure or malformed response', async () => {
     const unavailable = vi.fn(async () =>
       Response.json({ error: 'host_rpc_admission_unavailable' }, { status: 503 })
