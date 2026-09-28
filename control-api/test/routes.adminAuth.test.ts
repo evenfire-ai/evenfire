@@ -539,7 +539,7 @@ describe('routes/adminAuth', () => {
     app.use(createAdminAuthRouter())
 
     const res = await request(app).post('/admin/auth/control-admin-invitations/complete').send({
-      token: 'signed.jwt.value',
+      token: 'example.jwt.value',
       email: 'invitee@example.test',
       username: 'new-admin',
       password: 'example-password',
