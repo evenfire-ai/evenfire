@@ -3129,6 +3129,50 @@ async function applyMcpSecretRollbackPermitSchema(db: DbClient): Promise<void> {
   `)
 }
 
+// A control-admin invitation that, when accepted, hands the inviter's access to
+// the invitee and retires the inviter (completeControlAdminInvitation). The
+// column is additive and defaults false. 0118 refuses acceptance of a true row
+// unless the current pod opts in, so an N-1 pod cannot turn the hand-over
+// into a plain invite.
+async function applyControlAdminInvitationReplaceInviterSchema(db: DbClient): Promise<void> {
+  await db.query(`
+    ALTER TABLE control_admin_invitations
+      ADD COLUMN IF NOT EXISTS replace_inviter BOOLEAN NOT NULL DEFAULT false;
+  `)
+}
+
+// N-1 pods accept an invitation without reading replace_inviter. Without this
+// guard that acceptance commits, the departing admin stays active, and the
+// invitation cannot be replayed. Current pods set the transaction-local GUC
+// before the status update; any other updater fails and leaves the row pending.
+async function applyControlAdminReplaceInviterAcceptGuard(db: DbClient): Promise<void> {
+  await db.query(`
+    CREATE OR REPLACE FUNCTION control_admin_invitation_replace_inviter_accept_guard()
+    RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+    BEGIN
+      IF NEW.replace_inviter
+         AND NEW.status = 'accepted'
+         AND OLD.status IS DISTINCT FROM 'accepted'
+         AND current_setting('evenfire.replace_inviter_handover', true) IS DISTINCT FROM 'on'
+      THEN
+        RAISE EXCEPTION 'replace_inviter_requires_current_control_api'
+          USING ERRCODE = '23514';
+      END IF;
+      RETURN NEW;
+    END;
+    $$;
+
+    DROP TRIGGER IF EXISTS control_admin_invitations_replace_inviter_accept_guard
+      ON control_admin_invitations;
+    CREATE TRIGGER control_admin_invitations_replace_inviter_accept_guard
+      BEFORE UPDATE ON control_admin_invitations
+      FOR EACH ROW
+      EXECUTE FUNCTION control_admin_invitation_replace_inviter_accept_guard();
+  `)
+}
+
 // Exported (read-only) so the migration-order invariant test can assert the
 // array is monotonic by version-string. Applied strictly in array order and
 // tracked by full version-string in `schema_migrations`, so a non-monotonic
@@ -6209,35 +6253,44 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     apply: applyMcpSecretRollbackPermitSchema,
   },
   {
-    // Renumbered from 0116 while syncing onto dev: dev shipped
-    // 0116_mcp_secret_rollback_permits, so the oauth-19 dynamic-clients pair
-    // moves past it rather than claiming a version another migration already
-    // uses. Environments where this feature branch was already deployed (the
-    // oauth-19 dev cluster) recorded it under the pre-renumber 0116 name (see
-    // legacyVersions below); that entry lets the runner mark 0117 applied from
-    // the prior row instead of re-running the DDL and leaving an orphan
-    // schema_migrations entry. The legacy name is unique to this migration, so
-    // there is no false-skip.
-    version: '0117_dynamic_clients_table',
-    legacyVersions: ['0116_dynamic_clients_table'],
+    version: '0117_control_admin_invitation_replace_inviter',
+    apply: applyControlAdminInvitationReplaceInviterSchema,
+  },
+  {
+    version: '0118_control_admin_replace_inviter_accept_guard',
+    apply: applyControlAdminReplaceInviterAcceptGuard,
+  },
+  {
+    // Renumbered twice while syncing onto dev: 0116 -> 0117 -> 0119. The first
+    // sync brought dev's 0116_mcp_secret_rollback_permits; this one brought
+    // dev's 0117/0118 control-admin replace-inviter pair, which already shipped
+    // in a release, so the oauth-19 dynamic-clients migrations move past them
+    // rather than claiming a version another migration already uses.
+    // Environments where this feature branch was already deployed (the oauth-19
+    // dev cluster) recorded it under one of the earlier names; legacyVersions
+    // lets the runner mark 0119 applied from that prior row instead of
+    // re-running the DDL and leaving an orphan schema_migrations entry. Both
+    // prior names are unique to this migration, so there is no false-skip.
+    version: '0119_dynamic_clients_table',
+    legacyVersions: ['0116_dynamic_clients_table', '0117_dynamic_clients_table'],
     apply: applyDynamicClientsTable,
   },
   {
-    // Renumbered from 0117 while syncing onto dev (dev's 0116 pushed the whole
-    // dynamic-clients pair down by one; see the table migration above). Same
-    // legacyVersions rationale: the prior deploy recorded it under the
-    // pre-renumber 0117 name (see legacyVersions below), unique to this migration.
-    version: '0118_dynamic_clients_runtime_access',
-    legacyVersions: ['0117_dynamic_clients_runtime_access'],
+    // Renumbered twice while syncing onto dev (0117 -> 0118 -> 0120), moving in
+    // lockstep with the table migration above. Same legacyVersions rationale:
+    // the prior names are unique to this migration.
+    version: '0120_dynamic_clients_runtime_access',
+    legacyVersions: ['0117_dynamic_clients_runtime_access', '0118_dynamic_clients_runtime_access'],
     apply: applyDynamicClientsRuntimeAccess,
   },
   {
     // Install-identity columns for the DCR/OAuth state (install_id + cr_uid on
-    // dynamic_clients, cr_uid on oauth_grants). This branch is the first to ship
-    // 0119, so no legacyVersions are needed; if a later /sync-dev collides the
-    // number, this migration renumbers and the pre-renumber name moves to
-    // legacyVersions (the convention below).
-    version: '0119_oauth_install_identity',
+    // dynamic_clients, cr_uid on oauth_grants). Renumbered 0119 -> 0121 while
+    // syncing onto dev (dev's 0117/0118 pushed the oauth-19 migrations down by
+    // two); the pre-renumber name is unique to this migration, so legacyVersions
+    // marks it applied on environments that already ran it.
+    version: '0121_oauth_install_identity',
+    legacyVersions: ['0119_oauth_install_identity'],
     apply: applyOAuthInstallIdentity,
   },
 ]
