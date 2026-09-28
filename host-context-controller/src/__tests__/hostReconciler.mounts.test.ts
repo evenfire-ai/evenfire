@@ -172,6 +172,8 @@ function runtimeSecretAnnotations(host = makeHost(), refreshBefore = '2999-01-01
     'clerum.io/gfs-token-host-uid': host.uid!,
     'clerum.io/runtime-token-refresh-before': refreshBefore,
     'clerum.io/gfs-token-refresh-before': '2999-01-01T00:00:00.000Z',
+    'clerum.io/runtime-token-has-channel-ingress': 'false',
+    'clerum.io/runtime-token-fronts-oauth-server': 'false',
   }
 }
 
@@ -233,6 +235,7 @@ function runtimeSecretReconciler(opts: {
   const reconciler = new HostReconciler(makeStubKc(), {
     coreApi: coreApi as unknown as k8s.CoreV1Api,
     appsApi: appsApi as unknown as k8s.AppsV1Api,
+    isCommunicationChannelCacheSynced: () => true,
   })
   return { reconciler, coreApi, appsApi }
 }
@@ -1256,6 +1259,7 @@ describe('HostReconciler.reconcile — uses resolveContextMounts', () => {
     const stubKc = makeStubKc()
     const reconciler = new HostReconciler(stubKc, {
       resolveContextMounts,
+      isCommunicationChannelCacheSynced: () => true,
       // Stub APIs to capture the Deployment body and ack everything.
       coreApi: {
         readNamespacedSecret: readSecretWithChannelReaderRuntimeAuthLabels(),

@@ -5,11 +5,18 @@ import { mintHostGfsToken } from '../src/gfsHostBinding'
 import {
   type EffectiveHostLifecycle,
   HostReconciler,
+  OAUTH_USER_TOKEN_SCOPE,
   type ResolvedSfsMount,
 } from '../src/hostReconciler'
 import type { InfrastructureTelemetryReporter } from '../src/infrastructureTelemetryReporter'
 import { HostContextLogger } from '../src/logger'
 import { issueMcpHostRuntimeTokens } from '../src/mcpHostRuntimeTokenIssuerClient'
+import {
+  MCP_HOST_GFS_TOKEN_SECRET_KEY,
+  MCP_HOST_RUNTIME_TOKEN_SECRET_ACCESS_KEY,
+  MCP_HOST_RUNTIME_TOKEN_SECRET_CONTROL_KEY,
+  MCP_HOST_RUNTIME_TOKEN_SECRET_REFRESH_KEY,
+} from '../src/secretFactory'
 import { HostCRD, HostCrdStatus } from '../src/types'
 import {
   type MockAppsApi,
@@ -195,6 +202,98 @@ function runtimeTokenProvision(host: HostCRD, hasChannelIngress = false) {
   }
 }
 
+function runtimeCredentialRecord(
+  host: HostCRD,
+  options: {
+    gfsRefreshBefore?: string
+    frontsOAuthServer?: string
+    hasChannelIngress?: string
+    hostUid?: string
+    managedByHost?: boolean
+  } = {}
+) {
+  const data = {
+    [MCP_HOST_RUNTIME_TOKEN_SECRET_ACCESS_KEY]: Buffer.from('access-value').toString('base64'),
+    [MCP_HOST_RUNTIME_TOKEN_SECRET_REFRESH_KEY]: Buffer.from('refresh-value').toString('base64'),
+    [MCP_HOST_RUNTIME_TOKEN_SECRET_CONTROL_KEY]: Buffer.from('control-value').toString('base64'),
+    [MCP_HOST_GFS_TOKEN_SECRET_KEY]: Buffer.from('gfs-value').toString('base64'),
+  }
+  const revision = (
+    HostReconciler as unknown as {
+      runtimeTokenSecretRevision(data: Record<string, string>): string
+    }
+  ).runtimeTokenSecretRevision(data)
+  return {
+    metadata: {
+      name: `host-${host.name}-mcp-host-runtime-tokens`,
+      namespace: host.namespace,
+      resourceVersion: '88',
+      labels:
+        options.managedByHost === false
+          ? { 'clerum.io/managed-by': 'someone-else' }
+          : {
+              'clerum.io/managed-by': 'host-context-controller',
+              'clerum.io/host': host.name,
+            },
+      annotations: {
+        'clerum.io/gfs-token-host-uid': options.hostUid ?? host.uid ?? '',
+        'clerum.io/runtime-token-secret-revision': revision,
+        'clerum.io/runtime-token-has-channel-ingress': options.hasChannelIngress ?? 'false',
+        'clerum.io/runtime-token-fronts-oauth-server': options.frontsOAuthServer ?? 'false',
+        'clerum.io/gfs-token-refresh-before':
+          options.gfsRefreshBefore ?? '2999-01-01T00:00:00.000Z',
+      },
+    },
+    data,
+  } as unknown as k8s.V1Secret
+}
+
+function trustedRuntimeDeployment(
+  reconciler: HostReconciler,
+  host: HostCRD,
+  options: { readyReplicas?: number; replicas?: number } = {}
+) {
+  const deployment = reconciler.buildDeployment(host)
+  deployment.metadata = {
+    ...deployment.metadata,
+    uid: `deployment-${host.name}`,
+    resourceVersion: '91',
+    labels: {
+      ...(deployment.metadata?.labels ?? {}),
+      'clerum.io/managed-by': 'host-context-controller',
+      'clerum.io/host': host.name,
+    },
+    annotations: {
+      ...(deployment.metadata?.annotations ?? {}),
+      'clerum.io/host-uid': host.uid ?? '',
+    },
+  }
+  deployment.spec = { ...deployment.spec, replicas: options.replicas ?? 1 }
+  deployment.status = { readyReplicas: options.readyReplicas ?? 1 }
+  return deployment
+}
+
+function markPersistedRuntimeTrusted(
+  deployment: k8s.V1Deployment,
+  host: HostCRD,
+  readyReplicas = 1
+): k8s.V1Deployment {
+  deployment.metadata = {
+    ...deployment.metadata,
+    labels: {
+      ...(deployment.metadata?.labels ?? {}),
+      'clerum.io/managed-by': 'host-context-controller',
+      'clerum.io/host': host.name,
+    },
+    annotations: {
+      ...(deployment.metadata?.annotations ?? {}),
+      'clerum.io/host-uid': host.uid ?? '',
+    },
+  }
+  deployment.status = { readyReplicas }
+  return deployment
+}
+
 /** Model persisted API state so a loss-of-authority test cannot invent a template. */
 function persistHostDeployment(appsApi: MockAppsApi, host: HostCRD, initial: k8s.V1Deployment) {
   let live = structuredClone(initial)
@@ -313,12 +412,12 @@ describe('HostReconciler stateless lifecycle — buildDeployment replicas', () =
     expect(dep.spec?.replicas).toBe(1)
   })
 
-  it('forces stateless+suspended to replicas=1 while the channel cache is unsynced', () => {
+  it('preserves stateless+suspended replicas while the channel cache is unsynced', () => {
     const { reconciler } = createReconciler({
       isCommunicationChannelCacheSynced: () => false,
     })
     const dep = reconciler.buildDeployment(makeStatelessHost({ status: suspendedStatus() }))
-    expect(dep.spec?.replicas).toBe(1)
+    expect(dep.spec?.replicas).toBe(0)
     expect(dep.spec?.template.spec?.priorityClassName).toBe('clerum-interactive-host')
   })
 
@@ -811,6 +910,10 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
       countCommunicationChannels: () => 1,
       isCommunicationChannelCacheSynced: () => false,
     })
+    const read = appsApi.readNamespacedDeployment.getMockImplementation()!
+    appsApi.readNamespacedDeployment.mockImplementation(request =>
+      request.name === host.name ? Promise.reject({ code: 404 }) : read(request)
+    )
     customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(host))
     const applied = createReconciler().reconciler.buildDeployment(host)
     applied.metadata = { ...applied.metadata, uid: 'deployment-uid', resourceVersion: '74' }
@@ -971,7 +1074,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     expect(appsApi.replaceNamespacedDeployment).not.toHaveBeenCalled()
   })
 
-  it('preserves runtime credentials and the existing template during cache loss', async () => {
+  it('refreshes only the GFS token for a running held Host during cache loss', async () => {
     const host = makeStatelessHost({
       status: { lifecycle: { state: 'active', wakeHandledGeneration: 1 } },
     })
@@ -981,12 +1084,17 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(host))
     const applied = reconciler.buildDeployment(host)
     applied.spec!.template.metadata!.annotations = { 'example.org/applied': 'keep-exactly' }
+    markPersistedRuntimeTrusted(applied, host)
     const live = persistHostDeployment(appsApi, host, applied)
     const provision = vi
       .spyOn(reconciler as any, 'provisionRuntimeTokenRevision')
       .mockResolvedValue(runtimeTokenProvision(host))
     await reconciler.reconcile(host)
-    expect(provision).not.toHaveBeenCalled()
+    expect(provision).toHaveBeenCalledOnce()
+    expect(provision).toHaveBeenCalledWith(host, {
+      refreshGfsOnly: true,
+      targetSuspended: false,
+    })
     expect(live().spec!.replicas).toBe(1)
     expect(live().spec!.template).toEqual(applied.spec!.template)
     expect(rejectedCondition(lifecycleStatusWrites(customApi).at(-1)!).reason).toBe(
@@ -1032,7 +1140,14 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
       .spyOn(reconciler as any, 'provisionRuntimeTokenRevision')
       .mockResolvedValue(runtimeTokenProvision(host))
     await reconciler.reconcile(host)
-    expect(provision).not.toHaveBeenCalled()
+    expect(provision).toHaveBeenCalledOnce()
+    expect(provision).toHaveBeenCalledWith(host, {
+      forceFreshForWake: true,
+      targetSuspended: false,
+    })
+    expect(provision.mock.invocationCallOrder[0]).toBeLessThan(
+      appsApi.replaceNamespacedDeployment.mock.invocationCallOrder.at(-1)!
+    )
     expect(appsApi.patchNamespacedDeployment).not.toHaveBeenCalled()
     expect(live().spec!.replicas).toBe(1)
     expect(live().spec!.template).toEqual(applied.spec!.template)
@@ -1088,11 +1203,26 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
 
   it('preserves an independently confirmed desktop rejection while the channel cache is unknown', async () => {
     const host = makeStatelessHost({ spec: { desktop: { browser: true } } })
-    const { reconciler, appsApi, customApi } = createReconciler({
+    const { reconciler, appsApi, coreApi, customApi } = createReconciler({
       countCommunicationChannels: () => 1,
       isCommunicationChannelCacheSynced: () => false,
     })
     customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(host))
+    coreApi.readNamespacedSecret.mockResolvedValue({
+      metadata: {
+        resourceVersion: '1',
+        labels: {
+          'clerum.io/managed-by': 'host-context-controller',
+          'clerum.io/host': host.name,
+        },
+        annotations: {
+          'clerum.io/gfs-token-host-uid': host.uid,
+          'clerum.io/runtime-token-has-channel-ingress': 'true',
+          'clerum.io/runtime-token-fronts-oauth-server': 'false',
+        },
+      },
+      data: {},
+    } as any)
     await reconciler.reconcile(host)
     const condition = rejectedCondition(lifecycleStatusWrites(customApi).at(-1)!)
     expect(condition.reason).toBe('DesktopEnabled')
@@ -1102,6 +1232,270 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
         entry => entry.name === 'CLERUM_STATELESS_LIFECYCLE'
       )
     ).toBe(false)
+  })
+
+  it('defers a confirmed desktop rejection when no trusted scope observation exists', async () => {
+    const host = makeStatelessHost({ spec: { desktop: { browser: true } } })
+    const { reconciler, appsApi, customApi } = createReconciler({
+      countCommunicationChannels: () => 1,
+      isCommunicationChannelCacheSynced: () => false,
+    })
+    const readDeployment = appsApi.readNamespacedDeployment.getMockImplementation()!
+    appsApi.readNamespacedDeployment.mockImplementation(request =>
+      request.name === host.name ? Promise.reject({ code: 404 }) : readDeployment(request)
+    )
+    customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(host))
+
+    await reconciler.reconcile(host)
+
+    expect(rejectedCondition(lifecycleStatusWrites(customApi).at(-1)!).reason).toBe(
+      'DesktopEnabled'
+    )
+    expect(
+      [
+        ...appsApi.createNamespacedDeployment.mock.calls,
+        ...appsApi.replaceNamespacedDeployment.mock.calls,
+      ].filter(
+        ([request]) => (request as { body?: k8s.V1Deployment }).body?.metadata?.name === host.name
+      )
+    ).toHaveLength(0)
+    expect(reconciler.getStatus(host.name)).toMatchObject({ deployed: false, ready: false })
+  })
+
+  it('does not let a retained OAuth observation override a failed live probe', async () => {
+    const host = makeStatelessHost()
+    const { reconciler, coreApi } = createReconciler({
+      isCommunicationChannelCacheSynced: () => true,
+    })
+    coreApi.readNamespacedSecret.mockResolvedValue(
+      runtimeCredentialRecord(host, { frontsOAuthServer: 'true' })
+    )
+    reconciler.setHostFrontsOAuthServer(async () => {
+      throw new Error('oauth lookup unavailable')
+    })
+    vi.mocked(issueMcpHostRuntimeTokens).mockClear()
+
+    const provision = await (reconciler as any).ensureMcpHostRuntimeTokenSecret(host)
+
+    expect(provision).not.toBeNull()
+    expect(vi.mocked(issueMcpHostRuntimeTokens).mock.calls.at(-1)?.[2]).not.toContain(
+      OAUTH_USER_TOKEN_SCOPE
+    )
+    const write = coreApi.replaceNamespacedSecret.mock.calls.at(-1)?.[0].body as k8s.V1Secret
+    expect(write.metadata?.annotations?.['clerum.io/runtime-token-fronts-oauth-server']).toBe(
+      'false'
+    )
+  })
+
+  it('uses only retained scope observations while channel authority is unavailable', async () => {
+    const host = makeStatelessHost()
+    const { reconciler, coreApi } = createReconciler({
+      countCommunicationChannels: () => 0,
+      isCommunicationChannelCacheSynced: () => false,
+    })
+    coreApi.readNamespacedSecret.mockResolvedValue(
+      runtimeCredentialRecord(host, {
+        frontsOAuthServer: 'true',
+        hasChannelIngress: 'true',
+      })
+    )
+    const oauthProbe = vi
+      .spyOn(reconciler as any, 'frontsOAuthServer')
+      .mockImplementation(async () => {
+        throw new Error('live lookup must not run')
+      })
+    vi.mocked(issueMcpHostRuntimeTokens).mockClear()
+
+    const provision = await (reconciler as any).ensureMcpHostRuntimeTokenSecret(host)
+
+    expect(provision).not.toBeNull()
+    expect(oauthProbe).not.toHaveBeenCalled()
+    expect(vi.mocked(issueMcpHostRuntimeTokens).mock.calls.at(-1)?.[2]).toContain(
+      OAUTH_USER_TOKEN_SCOPE
+    )
+    const write = coreApi.replaceNamespacedSecret.mock.calls.at(-1)?.[0].body as k8s.V1Secret
+    expect(write.metadata?.annotations?.['clerum.io/runtime-token-fronts-oauth-server']).toBe(
+      'true'
+    )
+  })
+
+  it('does not renew held-runtime GFS before its refresh window', async () => {
+    const host = makeStatelessHost()
+    const { reconciler, appsApi, coreApi } = createReconciler({
+      isCommunicationChannelCacheSynced: () => false,
+    })
+    coreApi.readNamespacedSecret.mockResolvedValue(runtimeCredentialRecord(host))
+    appsApi.readNamespacedDeployment.mockResolvedValue(trustedRuntimeDeployment(reconciler, host))
+    vi.mocked(mintHostGfsToken).mockClear()
+
+    const provision = await (reconciler as any).ensureMcpHostRuntimeTokenSecret(host, {
+      refreshGfsOnly: true,
+    })
+
+    expect(provision).not.toBeNull()
+    expect(vi.mocked(mintHostGfsToken)).not.toHaveBeenCalled()
+    expect(coreApi.replaceNamespacedSecret).not.toHaveBeenCalled()
+  })
+
+  it('renews only held-runtime GFS at the refresh boundary', async () => {
+    const host = makeStatelessHost()
+    const { reconciler, appsApi, coreApi } = createReconciler({
+      isCommunicationChannelCacheSynced: () => false,
+    })
+    const record = runtimeCredentialRecord(host, {
+      gfsRefreshBefore: '2000-01-01T00:00:00.000Z',
+    })
+    coreApi.readNamespacedSecret.mockResolvedValue(record)
+    const deployment = trustedRuntimeDeployment(reconciler, host)
+    deployment.spec!.template!.metadata!.annotations = {
+      ...deployment.spec!.template!.metadata!.annotations,
+      'clerum.io/runtime-token-revision': 'applied-runtime-revision',
+    }
+    appsApi.readNamespacedDeployment.mockResolvedValue(deployment)
+    vi.mocked(mintHostGfsToken).mockClear()
+
+    const provision = await (reconciler as any).ensureMcpHostRuntimeTokenSecret(host, {
+      refreshGfsOnly: true,
+    })
+
+    expect(vi.mocked(mintHostGfsToken)).toHaveBeenCalledOnce()
+    expect(provision.revision).toBe('applied-runtime-revision')
+    const write = coreApi.replaceNamespacedSecret.mock.calls.at(-1)?.[0].body as k8s.V1Secret
+    expect(write.data?.[MCP_HOST_RUNTIME_TOKEN_SECRET_ACCESS_KEY]).toBe(
+      record.data?.[MCP_HOST_RUNTIME_TOKEN_SECRET_ACCESS_KEY]
+    )
+    expect(write.data?.[MCP_HOST_RUNTIME_TOKEN_SECRET_REFRESH_KEY]).toBe(
+      record.data?.[MCP_HOST_RUNTIME_TOKEN_SECRET_REFRESH_KEY]
+    )
+    expect(write.data?.[MCP_HOST_RUNTIME_TOKEN_SECRET_CONTROL_KEY]).toBe(
+      record.data?.[MCP_HOST_RUNTIME_TOKEN_SECRET_CONTROL_KEY]
+    )
+    expect(write.data?.[MCP_HOST_GFS_TOKEN_SECRET_KEY]).not.toBe(
+      record.data?.[MCP_HOST_GFS_TOKEN_SECRET_KEY]
+    )
+  })
+
+  it('never falls back to full issuance from a closed held-runtime GFS renewal', async () => {
+    const host = makeStatelessHost()
+    const { reconciler, appsApi, coreApi } = createReconciler({
+      isCommunicationChannelCacheSynced: () => false,
+    })
+    coreApi.readNamespacedSecret.mockRejectedValue({ code: 404 })
+    appsApi.readNamespacedDeployment.mockResolvedValue(trustedRuntimeDeployment(reconciler, host))
+    vi.mocked(issueMcpHostRuntimeTokens).mockClear()
+    vi.mocked(mintHostGfsToken).mockClear()
+
+    const provision = await (reconciler as any).ensureMcpHostRuntimeTokenSecret(host, {
+      refreshGfsOnly: true,
+    })
+
+    expect(provision).toBeNull()
+    expect(vi.mocked(issueMcpHostRuntimeTokens)).not.toHaveBeenCalled()
+    expect(vi.mocked(mintHostGfsToken)).not.toHaveBeenCalled()
+  })
+
+  it('does not treat a requested but unready held runtime as ready for GFS renewal', async () => {
+    const host = makeStatelessHost()
+    const { reconciler, appsApi, coreApi } = createReconciler({
+      isCommunicationChannelCacheSynced: () => false,
+    })
+    coreApi.readNamespacedSecret.mockResolvedValue(
+      runtimeCredentialRecord(host, { gfsRefreshBefore: '2000-01-01T00:00:00.000Z' })
+    )
+    appsApi.readNamespacedDeployment.mockResolvedValue(
+      trustedRuntimeDeployment(reconciler, host, { readyReplicas: 0 })
+    )
+    vi.mocked(mintHostGfsToken).mockClear()
+
+    const provision = await (reconciler as any).ensureMcpHostRuntimeTokenSecret(host, {
+      refreshGfsOnly: true,
+    })
+
+    expect(provision).toBeNull()
+    expect(vi.mocked(mintHostGfsToken)).not.toHaveBeenCalled()
+  })
+
+  it('does not reassign a prior Host UID during held-runtime GFS renewal', async () => {
+    const host = makeStatelessHost()
+    const { reconciler, appsApi, coreApi } = createReconciler({
+      isCommunicationChannelCacheSynced: () => false,
+    })
+    coreApi.readNamespacedSecret.mockResolvedValue(
+      runtimeCredentialRecord(host, { hostUid: 'prior-host-uid' })
+    )
+    appsApi.readNamespacedDeployment.mockResolvedValue(trustedRuntimeDeployment(reconciler, host))
+    vi.mocked(mintHostGfsToken).mockClear()
+
+    const provision = await (reconciler as any).ensureMcpHostRuntimeTokenSecret(host, {
+      refreshGfsOnly: true,
+    })
+
+    expect(provision).toBeNull()
+    expect(vi.mocked(mintHostGfsToken)).not.toHaveBeenCalled()
+    expect(coreApi.replaceNamespacedSecret).not.toHaveBeenCalled()
+  })
+
+  it('recovers an active held Deployment from zero after minting credentials on each pass', async () => {
+    const host = makeStatelessHost({
+      status: { lifecycle: { state: 'active', wakeHandledGeneration: 1 } },
+    })
+    const { reconciler, appsApi, customApi } = createReconciler({
+      isCommunicationChannelCacheSynced: () => false,
+    })
+    customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(host))
+    const applied = reconciler.buildDeployment(host)
+    applied.spec!.replicas = 0
+    applied.spec!.template.metadata!.annotations = { 'example.org/applied': 'keep-exactly' }
+    const live = persistHostDeployment(appsApi, host, applied)
+    const provision = vi
+      .spyOn(reconciler as any, 'provisionRuntimeTokenRevision')
+      .mockResolvedValue(runtimeTokenProvision(host))
+
+    await reconciler.reconcile(host)
+
+    expect(provision).toHaveBeenCalledOnce()
+    expect(provision).toHaveBeenCalledWith(host, {
+      forceFreshForWake: true,
+      targetSuspended: false,
+    })
+    expect(provision.mock.invocationCallOrder[0]).toBeLessThan(
+      appsApi.replaceNamespacedDeployment.mock.invocationCallOrder.at(-1)!
+    )
+    expect(live().spec!.replicas).toBe(1)
+    expect(live().spec!.template).toEqual(applied.spec!.template)
+  })
+
+  it('keeps an active held Deployment at zero when credential minting is unavailable', async () => {
+    const host = makeStatelessHost({
+      status: { lifecycle: { state: 'active', wakeHandledGeneration: 1 } },
+    })
+    const { reconciler, appsApi, customApi } = createReconciler({
+      isCommunicationChannelCacheSynced: () => false,
+    })
+    customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(host))
+    const applied = reconciler.buildDeployment(host)
+    applied.spec!.replicas = 0
+    markPersistedRuntimeTrusted(applied, host, 0)
+    const live = persistHostDeployment(appsApi, host, applied)
+    appsApi.replaceNamespacedDeployment.mockClear()
+    const provision = vi
+      .spyOn(reconciler as any, 'provisionRuntimeTokenRevision')
+      .mockResolvedValue(null)
+
+    await reconciler.reconcile(host)
+
+    expect(provision).toHaveBeenCalledOnce()
+    expect(provision).toHaveBeenCalledWith(host, {
+      forceFreshForWake: true,
+      targetSuspended: false,
+    })
+    expect(appsApi.replaceNamespacedDeployment).not.toHaveBeenCalled()
+    expect(live().spec!.replicas).toBe(0)
+    expect(reconciler.getStatus(host.name)).toMatchObject({
+      deployed: true,
+      ready: false,
+      message: 'Waiting for authoritative scope observation',
+    })
   })
 
   it('reconciles an active Host twice through cache loss without changing its session path or template', async () => {
@@ -1179,7 +1573,9 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
       isCommunicationChannelCacheSynced: () => cacheSynced,
     })
     const host = makeStatelessHost({ status: suspendedStatus(4) })
-    const live = persistHostDeployment(appsApi, host, reconciler.buildDeployment(host))
+    const applied = reconciler.buildDeployment(host)
+    markPersistedRuntimeTrusted(applied, host)
+    const live = persistHostDeployment(appsApi, host, applied)
     customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(host))
     const readPolicy = networkingApi.readNamespacedNetworkPolicy.getMockImplementation()!
     networkingApi.readNamespacedNetworkPolicy.mockImplementation(async request => {
@@ -1470,7 +1866,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     expect(provision).toHaveBeenCalledOnce()
   })
 
-  it('preserves runtime credentials during active cache loss without changing replicas', async () => {
+  it('refreshes only the GFS token during active cache loss without changing replicas', async () => {
     let cacheSynced = true
     const { reconciler, appsApi, customApi, networkingApi } = createReconciler({
       isCommunicationChannelCacheSynced: () => cacheSynced,
@@ -1478,7 +1874,9 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     const host = makeStatelessHost({
       status: { lifecycle: { state: 'active', wakeHandledGeneration: 1 } },
     })
-    const live = persistHostDeployment(appsApi, host, reconciler.buildDeployment(host))
+    const applied = reconciler.buildDeployment(host)
+    markPersistedRuntimeTrusted(applied, host)
+    const live = persistHostDeployment(appsApi, host, applied)
     customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(host))
     const readPolicy = networkingApi.readNamespacedNetworkPolicy.getMockImplementation()!
     networkingApi.readNamespacedNetworkPolicy.mockImplementation(async request => {
@@ -1492,7 +1890,11 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     await reconciler.reconcile(host)
     expect(networkingApi.readNamespacedNetworkPolicy).toHaveBeenCalled()
 
-    expect(provision).not.toHaveBeenCalled()
+    expect(provision).toHaveBeenCalledOnce()
+    expect(provision).toHaveBeenCalledWith(host, {
+      refreshGfsOnly: true,
+      targetSuspended: false,
+    })
     const deployment = live()
     expect(deployment.spec?.replicas).toBe(1)
     expect(envValue(deployment, 'CLERUM_STATELESS_LIFECYCLE')).toBe('true')

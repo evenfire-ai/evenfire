@@ -171,6 +171,7 @@ function createReconciler(
     coreApi: asCoreApi(coreApi),
     networkingApi: asNetworkingApi(networkingApi),
     rbacApi: asRbacApi(rbacApi),
+    isCommunicationChannelCacheSynced: () => true,
     infrastructureTelemetryReporter: options.infrastructureTelemetryReporter,
     administrativeOutcomeReporter: options.administrativeOutcomeReporter,
     newTelemetryOccurrenceId: options.newTelemetryOccurrenceId,

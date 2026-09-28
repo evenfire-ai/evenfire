@@ -231,7 +231,11 @@ export class StatelessLifecycleExecutor {
       return { stateless: false, state: 'active' }
     }
     if (!this.isCommunicationChannelCacheSynced()) {
-      return { stateless: true, state: 'active', suspensionBlocked: true }
+      return {
+        stateless: true,
+        state: host.status?.lifecycle?.state ?? 'active',
+        suspensionBlocked: true,
+      }
     }
     return { stateless: true, state: host.status?.lifecycle?.state ?? 'active' }
   }
@@ -1790,8 +1794,8 @@ export class StatelessLifecycleExecutor {
     assessment: HostLifecycleAssessment
   ): Promise<HostLifecycleAssessment | null> {
     if (assessment.effective.suspensionBlocked) {
-      // Cache authority loss intentionally forces active even when the fresh
-      // durable state is suspended; there is no scale-down to validate.
+      // Cache authority loss blocks lifecycle-driven scale-down; preserve the
+      // durable state for accurate reporting without mutating the Deployment.
       return assessment
     }
     if (!assessment.effective.stateless) {
