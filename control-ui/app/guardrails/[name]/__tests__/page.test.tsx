@@ -7,6 +7,7 @@ import GuardrailDetailPage from '../page'
 const navigation = vi.hoisted(() => ({
   params: { name: 'sample-hook', tab: 'details' as string | undefined },
   push: vi.fn(),
+  replace: vi.fn(),
   notFound: vi.fn(() => {
     throw new Error('NOT_FOUND')
   }),
@@ -18,7 +19,7 @@ const api = vi.hoisted(() => ({
 
 vi.mock('next/navigation', () => ({
   useParams: () => navigation.params,
-  useRouter: () => ({ push: navigation.push }),
+  useRouter: () => ({ push: navigation.push, replace: navigation.replace }),
   notFound: navigation.notFound,
 }))
 vi.mock('@lib/api', () => ({
@@ -31,31 +32,8 @@ vi.mock('@components/ConfirmDialog', () => ({
   useConfirmDialog: () => ({ confirm: vi.fn(), confirmDialog: null }),
 }))
 vi.mock('@components/Toast', () => ({ useToast: () => ({ showToast: vi.fn() }) }))
-vi.mock('@components/DetailPageShell', () => ({
-  DetailPageShell: ({
-    activeTab,
-    children,
-    tabs,
-  }: {
-    activeTab: string
-    children: ReactNode
-    tabs: Array<{ href: string; label: string; value: string }>
-  }) => (
-    <main>
-      <nav aria-label="Guardrail detail sections">
-        {tabs.map(tab => (
-          <a
-            key={tab.value}
-            aria-current={tab.value === activeTab ? 'page' : undefined}
-            href={tab.href}
-          >
-            {tab.label}
-          </a>
-        ))}
-      </nav>
-      {children}
-    </main>
-  ),
+vi.mock('@components/DashboardLayout', () => ({
+  DashboardLayout: ({ children }: { children: ReactNode }) => <main>{children}</main>,
 }))
 
 beforeEach(() => {
@@ -89,12 +67,25 @@ describe('guardrail detail routes', () => {
       )
     ).toBeInTheDocument()
     expect(
-      screen.getByRole('link', { name: tab === 'details' ? 'Details' : 'Agents with access' })
-    ).toHaveAttribute('aria-current', 'page')
-    expect(screen.getByRole('link', { name: 'Agents with access' })).toHaveAttribute(
-      'href',
-      '/guardrails/sample-hook/agents'
+      screen.getByRole('tab', { name: tab === 'details' ? 'Details' : 'Agents with access' })
+    ).toHaveAttribute('aria-selected', 'true')
+  })
+
+  it('switches sections and replaces the route when a tab is clicked in the real shell', async () => {
+    render(<GuardrailDetailPage />)
+    expect(
+      await screen.findByText('Runtime configuration reported by the installed hook.')
+    ).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Agents with access' }))
+
+    expect(screen.getByText('sample-agent')).toBeInTheDocument()
+    expect(screen.queryByText('Runtime configuration reported by the installed hook.')).toBeNull()
+    expect(screen.getByRole('tab', { name: 'Agents with access' })).toHaveAttribute(
+      'aria-selected',
+      'true'
     )
+    expect(navigation.replace).toHaveBeenCalledWith('/guardrails/sample-hook/agents')
   })
 
   it('rejects unknown tab routes', async () => {

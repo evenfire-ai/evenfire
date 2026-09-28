@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, render, screen, within } from '@testing-library/react'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { GfsMarkdownPreview } from '../GfsMarkdownPreview'
 import { ToastProvider } from '../Toast'
 
@@ -59,10 +61,17 @@ describe('GfsMarkdownPreview', () => {
       name: 'Markdown preview of inventory.md',
     })
     const table = within(article).getByRole('table')
+    expect(table).not.toHaveClass('cu-table')
     expect(within(table).getByRole('columnheader', { name: 'Item' })).toHaveAttribute(
       'scope',
       'col'
     )
+    const css = readFileSync(resolve(__dirname, '../../app/globals.css'), 'utf8')
+    const headerRule = css.match(
+      /\.cu-gfs-markdown-preview__content \.gfs-markdown-table-scroll th \{([^}]*)\}/
+    )?.[1]
+    expect(headerRule).toMatch(/font-size:\s*var\(--cu-font-size-md\)/)
+    expect(headerRule).toMatch(/text-transform:\s*none/)
     expect(within(table).getByRole('cell', { name: 'GFS files' })).toBeInTheDocument()
     expect(screen.getByRole('region', { name: 'Scrollable Markdown table' })).toHaveAttribute(
       'tabindex',

@@ -13105,7 +13105,7 @@ button.cu-gfs-tree__button:focus-visible,
 .cu-gfs-markdown-preview__content .gfs-markdown-table-scroll th {
   background: rgba(var(--cu-edge-rgb), 0.14);
   color: var(--cu-text);
-  font-size: inherit;
+  font-size: var(--cu-font-size-md);
   font-weight: 600;
   letter-spacing: normal;
   position: static;

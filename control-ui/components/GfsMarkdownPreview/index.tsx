@@ -61,7 +61,7 @@ const GFS_MARKDOWN_COMPONENTS: Components = {
         role="region"
         tabIndex={0}
       >
-        <DataTable {...props} className="cu-table gfs-markdown-table" variant="embedded">
+        <DataTable {...props} className="gfs-markdown-table" variant="embedded">
           {children}
         </DataTable>
       </TableViewport>
