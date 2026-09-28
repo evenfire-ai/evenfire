@@ -302,6 +302,34 @@ describe('rateLimiterService', () => {
     ).rejects.toThrow('rate limit store returned no admission state')
   })
 
+  it('strict backend failures are measured and logged without bucket or error-message leakage', async () => {
+    const bucketKey = 'host-rpc-admission:private-subject-sentinel'
+    const privateMessage = 'private-db-message-sentinel'
+    const warn = vi.spyOn(rootLogger, 'warn').mockImplementation(() => undefined)
+    const before = await errorCount()
+    const failure = Object.assign(new Error(privateMessage), { code: '08006' })
+    mockRateLimitPoolQuery.mockRejectedValueOnce(failure)
+
+    try {
+      await expect(checkAndIncrementStrict(bucketKey, 5)).rejects.toBe(failure)
+
+      expect((await errorCount()) - before).toBe(1)
+      expect(warn).toHaveBeenCalledTimes(1)
+      const fields = warn.mock.calls[0]?.[0]
+      expect(fields).toMatchObject({
+        event: 'rate_limit_db_error',
+        errorName: 'Error',
+        errorCode: '08006',
+        suppressed: 0,
+      })
+      expect(fields).not.toHaveProperty('err')
+      expect(JSON.stringify(fields)).not.toContain(bucketKey)
+      expect(JSON.stringify(fields)).not.toContain(privateMessage)
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
   it('cleanupExpiredBuckets removes rows older than 5 minutes', async () => {
     const now = 1_700_000_000_000
     // Seed two buckets: one old (>5 min ago), one fresh.
