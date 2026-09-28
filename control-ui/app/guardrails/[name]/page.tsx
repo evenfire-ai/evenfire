@@ -161,7 +161,6 @@ export default function GuardrailDetailPage() {
 
   function selectTab(tab: GuardrailTab) {
     setActiveTab(tab)
-    router.replace(guardrailTabHref(tab))
   }
 
   async function handleUninstall() {
@@ -201,6 +200,8 @@ export default function GuardrailDetailPage() {
       tabs={GUARDRAIL_DETAIL_TABS.map(tab => ({
         value: tab,
         label: GUARDRAIL_TAB_LABELS[tab],
+        href: guardrailTabHref(tab),
+        onLinkActivate: () => selectTab(tab),
       }))}
       title={name || 'Guardrail'}
       titleActions={

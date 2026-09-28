@@ -7,7 +7,6 @@ import GuardrailDetailPage from '../page'
 const navigation = vi.hoisted(() => ({
   params: { name: 'sample-hook', tab: 'details' as string | undefined },
   push: vi.fn(),
-  replace: vi.fn(),
   notFound: vi.fn(() => {
     throw new Error('NOT_FOUND')
   }),
@@ -19,8 +18,15 @@ const api = vi.hoisted(() => ({
 
 vi.mock('next/navigation', () => ({
   useParams: () => navigation.params,
-  useRouter: () => ({ push: navigation.push, replace: navigation.replace }),
+  useRouter: () => ({ push: navigation.push }),
   notFound: navigation.notFound,
+}))
+vi.mock('next/link', () => ({
+  default: ({ children, href, ...props }: { children: ReactNode; href: string }) => (
+    <a href={href} {...props}>
+      {children}
+    </a>
+  ),
 }))
 vi.mock('@lib/api', () => ({
   getLlmHook: api.getLlmHook,
@@ -69,9 +75,13 @@ describe('guardrail detail routes', () => {
     expect(
       screen.getByRole('tab', { name: tab === 'details' ? 'Details' : 'Agents with access' })
     ).toHaveAttribute('aria-selected', 'true')
+    expect(screen.getByRole('tab', { name: 'Agents with access' })).toHaveAttribute(
+      'href',
+      '/guardrails/sample-hook/agents'
+    )
   })
 
-  it('switches sections and replaces the route when a tab is clicked in the real shell', async () => {
+  it('switches sections when a tab link is clicked in the real shell', async () => {
     render(<GuardrailDetailPage />)
     expect(
       await screen.findByText('Runtime configuration reported by the installed hook.')
@@ -85,7 +95,10 @@ describe('guardrail detail routes', () => {
       'aria-selected',
       'true'
     )
-    expect(navigation.replace).toHaveBeenCalledWith('/guardrails/sample-hook/agents')
+    expect(screen.getByRole('tab', { name: 'Agents with access' })).toHaveAttribute(
+      'aria-current',
+      'page'
+    )
   })
 
   it('rejects unknown tab routes', async () => {
