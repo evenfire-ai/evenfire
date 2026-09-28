@@ -24,6 +24,7 @@ function realServiceGateway(opts: { pruneDisplayName: boolean }): {
     createResource: ResourceService['createResource']
     deleteResource: ResourceService['deleteResource']
     listResource: ResourceService['listResource']
+    getSecret: ReturnType<typeof vi.fn>
     deleteSecret: ReturnType<typeof vi.fn>
   }
   store: Map<string, Record<string, unknown>>
@@ -102,9 +103,13 @@ function realServiceGateway(opts: { pruneDisplayName: boolean }): {
     listNamespacedCustomObject,
   } as unknown as ConstructorParameters<typeof ResourceService>[0]
   const svc = new ResourceService(customApi, ns, { contexts: ns })
-  // deleteSecret lives on K8sGateway (not ResourceService); the mcp-server DELETE
-  // handler invokes it for the `<name>-credentials` secret. It is orthogonal to
-  // the allowlist-pruning path under test, so a no-op spy suffices.
+  // getSecret/deleteSecret live on K8sGateway (not ResourceService); the
+  // mcp-server DELETE handler reads and then deletes the `<name>-credentials`
+  // Secret. That cascade is orthogonal to the allowlist-pruning path under
+  // test, so the Secret is simply absent (404, the only "absent" read result).
+  const getSecret = vi.fn(async () => {
+    throw Object.assign(new Error('not found'), { statusCode: 404 })
+  })
   const deleteSecret = vi.fn(async () => ({ deleted: true }))
   const gateway = {
     getResource: svc.getResource.bind(svc),
@@ -112,6 +117,7 @@ function realServiceGateway(opts: { pruneDisplayName: boolean }): {
     createResource: svc.createResource.bind(svc),
     deleteResource: svc.deleteResource.bind(svc),
     listResource: svc.listResource.bind(svc),
+    getSecret,
     deleteSecret,
   }
   return { gateway, store, deleteNamespacedCustomObject, deleteSecret }

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import type { NextFunction, Request, Response } from 'express'
+import { ApiException } from '@kubernetes/client-node'
 import { lookup } from 'node:dns/promises'
 import request from 'supertest'
 import { config } from '../src/config.js'
@@ -1247,6 +1248,10 @@ describe('routes/resources', () => {
     config.mcpServersNamespace = 'mcpservers-ns'
 
     const gateway = {
+      // No credentials Secret: a 404 is the only read result that means "absent".
+      getSecret: vi
+        .fn()
+        .mockRejectedValue(Object.assign(new Error('not found'), { statusCode: 404 })),
       deleteResource: vi.fn().mockResolvedValue({ deleted: true }),
       deleteSecret: vi.fn().mockResolvedValue({ deleted: true }),
       listResource: vi.fn().mockResolvedValue([
@@ -1265,6 +1270,8 @@ describe('routes/resources', () => {
 
       await request(app).delete('/admin/mcp-servers/mcp-a').expect(200)
 
+      expect(gateway.getSecret).toHaveBeenCalledWith('mcp-a-credentials', 'mcpservers-ns')
+      expect(gateway.deleteSecret).not.toHaveBeenCalled()
       expect(gateway.deleteResource).toHaveBeenCalledWith('mcpservers', 'mcp-a', 'mcpservers-ns')
       expect(gateway.listResource).toHaveBeenCalledWith('contexts', 'contexts-ns')
       expect(gateway.updateResource).toHaveBeenCalledWith(
@@ -1282,6 +1289,98 @@ describe('routes/resources', () => {
     } finally {
       config.contextsNamespace = prevContextsNs
       config.mcpServersNamespace = prevMcpServersNs
+    }
+  })
+
+  // #807: a credentials Secret read that fails for any reason other than 404
+  // fails the DELETE before the CR is removed. Skipping the cascade instead
+  // would return 200 and leave a live credential behind.
+  function makeDeleteGateway(getSecretError: unknown) {
+    return {
+      getResource: vi
+        .fn()
+        .mockResolvedValue({ spec: { credentialsSecretRef: { name: 'cc-a-credentials' } } }),
+      getSecret: vi.fn().mockRejectedValue(getSecretError),
+      deleteResource: vi.fn().mockResolvedValue({ deleted: true }),
+      deleteSecret: vi.fn().mockResolvedValue({ deleted: true }),
+      listResource: vi.fn().mockResolvedValue([]),
+      updateResource: vi.fn().mockResolvedValue({}),
+    }
+  }
+
+  function makeDeleteApp(gateway: ReturnType<typeof makeDeleteGateway>) {
+    const app = express()
+    app.use(express.json())
+    app.use(createAdminResourcesRouter(gateway as never))
+    app.use(clerumErrorHandler)
+    return app
+  }
+
+  it('returns 502 and deletes nothing when the McpServer credentials Secret read is rejected', async () => {
+    const prevMcpServersNs = config.mcpServersNamespace
+    config.mcpServersNamespace = 'mcpservers-ns'
+    const gateway = makeDeleteGateway(controlApiForbiddenRead('mcp-a-credentials', 'mcpservers-ns'))
+    vi.spyOn(rootLogger, 'warn').mockImplementation(() => {})
+    try {
+      const res = await request(makeDeleteApp(gateway)).delete('/admin/mcp-servers/mcp-a')
+
+      expect(gateway.getSecret).toHaveBeenCalledTimes(1)
+      expect(gateway.getSecret).toHaveBeenCalledWith('mcp-a-credentials', 'mcpservers-ns')
+      expectRejectedSecretRead(res, 'mcp-a-credentials', 'mcpservers-ns')
+      expect(gateway.deleteResource).not.toHaveBeenCalled()
+      expect(gateway.deleteSecret).not.toHaveBeenCalled()
+      expect(gateway.updateResource).not.toHaveBeenCalled()
+    } finally {
+      config.mcpServersNamespace = prevMcpServersNs
+      vi.restoreAllMocks()
+    }
+  })
+
+  it('returns 502 and deletes nothing when the CommunicationChannel credentials Secret read is rejected', async () => {
+    const prevCcNs = config.communicationChannelsNamespace
+    config.communicationChannelsNamespace = 'cc-ns'
+    const gateway = makeDeleteGateway(controlApiForbiddenRead('cc-a-credentials', 'cc-ns'))
+    vi.spyOn(rootLogger, 'warn').mockImplementation(() => {})
+    try {
+      const res = await request(makeDeleteApp(gateway)).delete('/admin/communication-channels/cc-a')
+
+      expect(gateway.getResource).toHaveBeenCalledWith('communicationchannels', 'cc-a', 'cc-ns')
+      expect(gateway.getSecret).toHaveBeenCalledTimes(1)
+      expect(gateway.getSecret).toHaveBeenCalledWith('cc-a-credentials', 'cc-ns')
+      expectRejectedSecretRead(res, 'cc-a-credentials', 'cc-ns')
+      expect(gateway.deleteResource).not.toHaveBeenCalled()
+      expect(gateway.deleteSecret).not.toHaveBeenCalled()
+    } finally {
+      config.communicationChannelsNamespace = prevCcNs
+      vi.restoreAllMocks()
+    }
+  })
+
+  it('returns 503 and deletes nothing when the credentials Secret read gets an upstream 500', async () => {
+    const prevMcpServersNs = config.mcpServersNamespace
+    config.mcpServersNamespace = 'mcpservers-ns'
+    const gateway = makeDeleteGateway(
+      new ApiException(500, 'Internal Server Error', '{"kind":"Status","code":500}', {
+        'audit-id': '5f0c7a4e-secret-read',
+      })
+    )
+    vi.spyOn(rootLogger, 'warn').mockImplementation(() => {})
+    try {
+      const res = await request(makeDeleteApp(gateway)).delete('/admin/mcp-servers/mcp-a')
+
+      expect(gateway.getSecret).toHaveBeenCalledTimes(1)
+      expect(res.status).toBe(503)
+      expect(res.body.error).toBe('secret_read_failed')
+      expect(res.body.message).toBe(
+        'control-api could not read Secret "mcp-a-credentials" in namespace "mcpservers-ns": ' +
+          'the Kubernetes API server returned HTTP 500.'
+      )
+      expect(JSON.stringify(res.body)).not.toContain('5f0c7a4e-secret-read')
+      expect(gateway.deleteResource).not.toHaveBeenCalled()
+      expect(gateway.deleteSecret).not.toHaveBeenCalled()
+    } finally {
+      config.mcpServersNamespace = prevMcpServersNs
+      vi.restoreAllMocks()
     }
   })
 })
