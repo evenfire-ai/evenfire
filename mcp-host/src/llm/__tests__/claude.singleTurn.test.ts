@@ -1,6 +1,37 @@
 import { describe, expect, it, vi } from 'vitest'
 import { type ChatMessage, FinishReason } from '../../core/types'
+import { VISUAL_INPUT_LIMITS } from '../../visualInput/policy'
 import { ClaudeProvider } from '../claude'
+
+describe('Claude visual request limits', () => {
+  it.each([false, true])('bounds the final serialized request with cache=%s', async cache => {
+    const client = createMockClaudeClient()
+    const provider = new ClaudeProvider(client as never, 'claude-sonnet-4-6')
+    // Only serialization size is under test; decoding occurs upstream.
+    const messages: ChatMessage[] = [
+      {
+        role: 'user',
+        content: '',
+        contentParts: [{ type: 'image', mimeType: 'image/png', data: 'AA==' }],
+      },
+    ]
+    const large = 'x'.repeat(VISUAL_INPUT_LIMITS.requestBytes)
+    const operation = cache
+      ? provider.completeSingleTurnWithToolsAndCache(
+          { stable: large, context: '', stableHash: 'fixture', contextHash: 'fixture' },
+          messages,
+          [],
+          { verifyImageInput: true }
+        )
+      : provider.completeSingleTurnWithTools(
+          messages,
+          [{ name: 'large_schema', description: large, parameters: {} }],
+          { verifyImageInput: true }
+        )
+    await expect(operation).rejects.toMatchObject({ code: 'limit_exceeded' })
+    expect(client.messages.create).not.toHaveBeenCalled()
+  })
+})
 
 function createMockClaudeClient() {
   return {

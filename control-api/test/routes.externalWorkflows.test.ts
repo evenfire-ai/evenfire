@@ -25,6 +25,7 @@ vi.mock('../src/db.js', () => ({
       return mockPoolQuery(...args)
     },
   },
+  rateLimitPool: { query: (...args: unknown[]) => mockPoolQuery(...args) },
   withTransaction: (...args: unknown[]) => mockWithTransaction(...args),
 }))
 

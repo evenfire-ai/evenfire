@@ -1,6 +1,8 @@
 import React from 'react'
+import { SingleValueEditDialog } from '@clerum/frontend-components'
 import { IconRobot } from '../Sidebar/icons'
-import { IconCheck, IconPencil, IconX } from '../icons'
+import { IconPencil } from '../icons'
+import { Field, TextInput } from '../ui'
 import type { HostOverviewTabProps, HostTabKey } from './types'
 
 const DESCRIPTION_MAX_LENGTH = 100
@@ -103,17 +105,25 @@ export function HostOverviewTab({
 }: HostOverviewTabProps) {
   const shownName = displayName.trim() || hostName
   const [savingName, setSavingName] = React.useState(false)
+  const [nameError, setNameError] = React.useState('')
+  const [nameValid, setNameValid] = React.useState(true)
   const hasContext = Boolean(contextRef.trim())
   const trimmedDescription = description.trim()
   const shownDescription = truncateDescription(trimmedDescription) || 'No description provided.'
 
-  async function saveName() {
-    const nextName = nameDraft.trim()
+  async function saveName(value: string) {
+    const nextName = value.trim()
     if (!nextName || savingName) return
 
     setSavingName(true)
+    setNameError('')
     try {
-      await onSaveDisplayName(nextName)
+      const saved = await onSaveDisplayName(nextName)
+      if (!saved) {
+        setNameError(
+          'Could not save the agent name. Review the page error, reload the agent, and re-apply your change.'
+        )
+      }
     } finally {
       setSavingName(false)
     }
@@ -123,76 +133,40 @@ export function HostOverviewTab({
     <div className="cu-host-overview">
       <section className="cu-host-overview-identity" aria-label="Agent identity">
         <div className="cu-host-overview-identity__name-row">
-          {editingName ? (
-            <div className="cu-host-overview-identity__name-editor">
+          <>
+            <div className="cu-host-overview-identity__name">
               <span className="cu-host-overview-identity__icon" aria-hidden="true">
                 <IconRobot />
               </span>
-              <input
-                className="cu-input cu-host-overview-identity__name-input"
-                value={nameDraft}
-                onChange={event => onNameDraftChange(event.target.value)}
-                onKeyDown={event => {
-                  if (event.key === 'Enter') void saveName()
-                  if (event.key === 'Escape') onCancelNameEdit()
-                }}
-                aria-label="Agent name"
-                disabled={savingName}
-                autoFocus
-              />
-              <button
-                type="button"
-                className="cu-btn cu-btn--icon cu-btn--toolbar"
-                onClick={() => void saveName()}
-                disabled={savingName || !nameDraft.trim()}
-                aria-label="Save agent name"
-                title="Save agent name"
-              >
-                <IconCheck width={16} height={16} />
-              </button>
-              <button
-                type="button"
-                className="cu-btn cu-btn--icon cu-btn--ghost"
-                onClick={onCancelNameEdit}
-                disabled={savingName}
-                aria-label="Cancel editing agent name"
-                title="Cancel editing agent name"
-              >
-                <IconX width={16} height={16} />
-              </button>
-            </div>
-          ) : (
-            <>
-              <div className="cu-host-overview-identity__name">
-                <span className="cu-host-overview-identity__icon" aria-hidden="true">
-                  <IconRobot />
-                </span>
-                {/* QA: while the identity data loads the name is a skeleton —
-                 * never the slug fallback (same rule as the page title). */}
-                {loadingName ? (
-                  <span
-                    className="cu-skeleton cu-agent-detail-title-skeleton"
-                    role="progressbar"
-                    aria-label="Loading agent name"
-                  />
-                ) : (
-                  shownName
-                )}
-              </div>
-              {loadingName ? null : (
-                <button
-                  type="button"
-                  className="cu-btn cu-btn--icon cu-btn--ghost cu-host-overview-identity__edit"
-                  onClick={onStartNameEdit}
-                  disabled={savingName}
-                  aria-label="Edit agent name"
-                  title="Edit agent name"
-                >
-                  <IconPencil width={16} height={16} />
-                </button>
+              {/* QA: while the identity data loads the name is a skeleton —
+               * never the slug fallback (same rule as the page title). */}
+              {loadingName ? (
+                <span
+                  className="cu-skeleton cu-agent-detail-title-skeleton"
+                  role="progressbar"
+                  aria-label="Loading agent name"
+                />
+              ) : (
+                shownName
               )}
-            </>
-          )}
+            </div>
+            {loadingName ? null : (
+              <button
+                type="button"
+                className="cu-btn cu-btn--icon cu-btn--ghost cu-host-overview-identity__edit"
+                onClick={() => {
+                  setNameError('')
+                  setNameValid(true)
+                  onStartNameEdit()
+                }}
+                disabled={savingName}
+                aria-label="Edit agent name"
+                title="Edit agent name"
+              >
+                <IconPencil width={16} height={16} />
+              </button>
+            )}
+          </>
         </div>
         <div
           className="cu-host-overview-identity__description"
@@ -332,6 +306,40 @@ export function HostOverviewTab({
           </div>
         </section>
       </div>
+
+      <SingleValueEditDialog
+        open={editingName}
+        initialValue={editingName ? nameDraft : shownName}
+        title="Edit agent name"
+        description="Change the display name without changing the agent slug or route."
+        pending={savingName}
+        error={nameError || undefined}
+        isValid={nameValid}
+        isEqual={value => value === shownName}
+        discardLabel="Cancel editing agent name"
+        saveLabel="Save agent name"
+        onDismiss={() => {
+          setNameError('')
+          onCancelNameEdit()
+        }}
+        onSave={value => void saveName(value)}
+        renderEditor={({ value, onChange, disabled }) => (
+          <Field label="Agent name" htmlFor="host-display-name" required>
+            <TextInput
+              id="host-display-name"
+              aria-label="Agent name"
+              value={value}
+              onChange={event => {
+                const nextValue = event.target.value
+                setNameValid(nextValue.trim().length > 0)
+                onNameDraftChange(nextValue)
+                onChange(nextValue)
+              }}
+              disabled={disabled}
+            />
+          </Field>
+        )}
+      />
     </div>
   )
 }

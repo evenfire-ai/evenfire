@@ -6,10 +6,19 @@
  * guard in `isLlmProvider` (§1), and the factory fail-safe (§5.7).
  */
 import { describe, expect, it, vi } from 'vitest'
+import { LIMITS as GROK_LIMITS } from '@clerum/grok-provider-attempt-contract'
+import { LIMITS as CODEX_LIMITS } from '@clerum/llm-provider-attempt-contract'
 import { logger } from '../../logger'
 import { apiKeysFromEnv, createLLMProvider } from '../index'
 import { makeProvider } from '../registry'
-import { ALL_PROVIDERS, descriptorFor, isLlmProvider, primarySlot } from '../registryCore'
+import {
+  ALL_PROVIDERS,
+  SUBSCRIPTION_DEFAULT_CONTEXT_WINDOW_TOKENS,
+  descriptorFor,
+  isLlmProvider,
+  primarySlot,
+  resolveContextWindow,
+} from '../registryCore'
 
 describe('provider registry — auto-detection order (§5.9)', () => {
   it('preserves the dev priority prefix openai > claude > zai > bailian > vertex > bedrock', () => {
@@ -248,5 +257,49 @@ describe('codex-subscription zero-slot broker', () => {
     const provider = createLLMProvider({}, { provider: 'codex-subscription', name: 'gpt-5.1' })
     expect(provider?.getProviderType()).toBe('codex-subscription')
     delete process.env.MCP_HOST_CODEX_SUBSCRIPTION_ENABLED
+  })
+})
+
+describe('provider registry — contract message bound (#731)', () => {
+  it('T-R2-3b subscription providers carry their attempt contract maxMessages', () => {
+    // Read from the contracts, never written as a literal: origin/main still ships
+    // 128 where dev ships 1024, and a literal would drift from whichever it copied.
+    expect(descriptorFor('codex-subscription').maxMessages).toBe(CODEX_LIMITS.maxMessages)
+    expect(descriptorFor('grok-subscription').maxMessages).toBe(GROK_LIMITS.maxMessages)
+    // A provider without an attempt contract carries no message bound.
+    expect(descriptorFor('openai').maxMessages).toBeUndefined()
+  })
+})
+
+describe('provider registry — context window (#731 R3-4)', () => {
+  it('T-R3-4d subscription providers default to a 256k window when their catalog names none', () => {
+    expect(SUBSCRIPTION_DEFAULT_CONTEXT_WINDOW_TOKENS).toBe(256_000)
+    expect(descriptorFor('codex-subscription').defaultContextWindowTokens).toBe(256_000)
+    expect(descriptorFor('grok-subscription').defaultContextWindowTokens).toBe(256_000)
+    // Other providers keep CLERUM_CONTEXT_MAX_TOKENS.
+    expect(descriptorFor('openai').defaultContextWindowTokens).toBeUndefined()
+  })
+
+  it('T-R3-4d resolves the catalog window first, then the subscription default, then the env value', () => {
+    expect(resolveContextWindow('codex-subscription', 272_000, 100_000)).toEqual({
+      contextWindowTokens: 272_000,
+      source: 'catalog',
+    })
+    expect(resolveContextWindow('grok-subscription', undefined, 100_000)).toEqual({
+      contextWindowTokens: 256_000,
+      source: 'default',
+    })
+    expect(resolveContextWindow('openai', 400_000, 100_000)).toEqual({
+      contextWindowTokens: 400_000,
+      source: 'catalog',
+    })
+    expect(resolveContextWindow('openai', undefined, 100_000)).toEqual({
+      contextWindowTokens: 100_000,
+      source: 'env',
+    })
+    expect(resolveContextWindow('unregistered', undefined, 100_000)).toEqual({
+      contextWindowTokens: 100_000,
+      source: 'env',
+    })
   })
 })

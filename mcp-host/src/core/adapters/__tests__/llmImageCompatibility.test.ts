@@ -26,6 +26,7 @@ import { FailoverEngine } from '../../../llm/failover/engine'
 import type { LlmPolicy } from '../../../llm/failover/types'
 import type { ImageInputResolver } from '../../../llm/imageInput'
 import { CodexAuthorizeError } from '../../../llm/providerAttemptAuthorizer'
+import { VISUAL_INPUT_LIMITS } from '../../../visualInput/policy'
 import { LlmErrorCode } from '../../errors'
 import { stripHistoricalMedia } from '../../extensions/prePrune'
 import { appendToolResults } from '../../orchestration/toolUseLoopMessages'
@@ -108,6 +109,25 @@ const frameResult = (toolCallId: string, attachment: Attachment): ToolResult => 
 
 const screenshotResult = (toolCallId: string, attachmentId: string): ToolResult =>
   frameResult(toolCallId, imageAttachment(attachmentId))
+
+const gfsResult = (toolCallId: string, digit: string): ToolResult => {
+  const resourceId = digit.repeat(32)
+  const source = {
+    kind: 'gfs' as const,
+    drive: 'main',
+    resourceId,
+    gfsUri: `gfs://main/${resourceId}`,
+    version: 1,
+    name: `${digit}.png`,
+  }
+  return {
+    tool_call_id: toolCallId,
+    name: 'clerum__gfs_read',
+    content: JSON.stringify({ resource: source, delivery: 'image_input' }),
+    is_error: false,
+    attachments: [{ ...imageAttachment(`gfs-${digit}`), visualSource: source }],
+  }
+}
 
 /**
  * Two tool-loop iterations whose screenshots carry identical bytes, built the
@@ -435,6 +455,145 @@ describe('image source identity compatibility (#650)', () => {
     expect(imagePartsOf(legacyTools.completeWithTools[0].messages)).toHaveLength(1)
   })
 
+  it('keeps a later ordinary screenshot by demoting excess historical GFS images', async () => {
+    const messages: ChatMessage[] = []
+    const collected: Attachment[] = []
+    for (const digit of ['1', '2', '3']) {
+      appendToolResults(messages, [gfsResult(`gfs-${digit}`, digit)], collected)
+    }
+    appendToolResults(messages, [screenshotResult('late-shot', 'late-image')], collected)
+    const snapshot = structuredClone(messages)
+    expect(imagePartsOf(messages)).toHaveLength(4)
+
+    const legacy = recordingProvider({ cache: false, providerType: 'openai' })
+    await adapterFor(legacy.provider, 'gpt-4o', 'openai').completeWithTools({
+      messages,
+      tools: TOOLS,
+    })
+
+    const sent = legacy.completeWithTools[0].messages
+    expect(imagePartsOf(sent)).toHaveLength(3)
+    expect(imagePartsOf(sent).some(part => part.source?.kind === 'tool')).toBe(true)
+    expect(imagePartsOf(sent).filter(part => part.source?.kind === 'gfs')).toHaveLength(2)
+    expect(sent.find(message => message.tool_call_id === 'gfs-3')?.content).toContain(
+      '"delivery":"reference_only"'
+    )
+    expect(messages).toEqual(snapshot)
+  })
+
+  it('checks the provider-visible image view while preserving Codex source identities', async () => {
+    const messages: ChatMessage[] = []
+    const collected: Attachment[] = []
+    appendToolResults(messages, [gfsResult('gfs-read', 'a')], collected, true)
+    for (const digit of ['1', '2', '3']) {
+      appendToolResults(
+        messages,
+        [screenshotResult(`shot-${digit}`, `shot-${digit}`)],
+        collected,
+        true
+      )
+    }
+    const snapshot = structuredClone(messages)
+    expect(imagePartsOf(messages)).toHaveLength(4)
+
+    const legacy = recordingProvider({ cache: false, providerType: 'openai' })
+    await adapterFor(legacy.provider, 'gpt-4o', 'openai').completeWithTools({
+      messages,
+      tools: TOOLS,
+    })
+    expect(imagePartsOf(legacy.completeWithTools[0].messages)).toHaveLength(2)
+
+    const binding = recordingProvider({
+      cache: false,
+      providerType: 'codex-subscription',
+      imageSourceIdentity: true,
+    })
+    await adapterFor(binding.provider, 'gpt-5.3-codex', 'codex-subscription').completeWithTools({
+      messages,
+      tools: TOOLS,
+    })
+    expect(imagePartsOf(binding.completeWithTools[0].messages)).toHaveLength(3)
+    expect(
+      imagePartsOf(binding.completeWithTools[0].messages).every(
+        part => part.source?.kind === 'tool'
+      )
+    ).toBe(true)
+    expect(messages).toEqual(snapshot)
+  })
+
+  it('does not reject a later GFS read from API-key identity duplicates', async () => {
+    const messages: ChatMessage[] = []
+    const collected: Attachment[] = []
+    for (const digit of ['1', '2', '3']) {
+      appendToolResults(
+        messages,
+        [screenshotResult(`shot-${digit}`, `shot-${digit}`)],
+        collected,
+        true
+      )
+    }
+    appendToolResults(messages, [gfsResult('gfs-read', 'a')], collected, true)
+    expect(imagePartsOf(messages)).toHaveLength(4)
+
+    const legacy = recordingProvider({ cache: false, providerType: 'openai' })
+    await adapterFor(legacy.provider, 'gpt-4o', 'openai').completeWithTools({
+      messages,
+      tools: TOOLS,
+    })
+    expect(imagePartsOf(legacy.completeWithTools[0].messages)).toHaveLength(2)
+    expect(
+      imagePartsOf(legacy.completeWithTools[0].messages).some(part => part.source?.kind === 'gfs')
+    ).toBe(true)
+  })
+
+  it('demotes GFS when serialized bytes exceed the visual request bound', async () => {
+    const messages: ChatMessage[] = []
+    const collected: Attachment[] = []
+    const largeImage = Buffer.alloc(VISUAL_INPUT_LIMITS.fileBytes).toString('base64')
+    for (const digit of ['1', '2', '3']) {
+      const result = gfsResult(`gfs-${digit}`, digit)
+      result.attachments![0].dataBase64 = largeImage
+      appendToolResults(messages, [result], collected)
+    }
+    expect(imagePartsOf(messages)).toHaveLength(3)
+    const snapshot = structuredClone(messages)
+
+    const legacy = recordingProvider({ cache: false, providerType: 'openai' })
+    await adapterFor(legacy.provider, 'gpt-4o', 'openai').completeWithTools({
+      messages,
+      tools: TOOLS,
+    })
+    const sent = legacy.completeWithTools[0].messages
+    expect(imagePartsOf(sent)).toHaveLength(2)
+    expect(sent.find(message => message.tool_call_id === 'gfs-3')?.content).toContain(
+      '"delivery":"reference_only"'
+    )
+    expect(messages).toEqual(snapshot)
+  })
+
+  it('leaves ordinary-only image requests outside the GFS-specific cap', async () => {
+    const messages: ChatMessage[] = []
+    const collected: Attachment[] = []
+    for (const digit of ['1', '2', '3', '4']) {
+      appendToolResults(
+        messages,
+        [screenshotResult(`shot-${digit}`, `shot-${digit}`)],
+        collected,
+        true
+      )
+    }
+    const binding = recordingProvider({
+      cache: false,
+      providerType: 'codex-subscription',
+      imageSourceIdentity: true,
+    })
+    await adapterFor(binding.provider, 'gpt-5.3-codex', 'codex-subscription').completeWithTools({
+      messages,
+      tools: TOOLS,
+    })
+    expect(imagePartsOf(binding.completeWithTools[0].messages)).toHaveLength(4)
+  })
+
   it('keeps the pure API-key loop on the legacy shape with no markers and no extra message', async () => {
     const messages: ChatMessage[] = []
     const collected: Attachment[] = []
@@ -719,6 +878,62 @@ describe('Codex V2 transport wiring (#650)', () => {
     // ...while the canonical messages keep both identities for the next attempt.
     expect(messages).toEqual(snapshot)
     expect(imagePartsOf(messages)[1].sourceIdentityOnly).toBe(true)
+  })
+
+  it('reconsiders GFS capacity on each physical failover destination', async () => {
+    const authorize = vi.fn(async (_input: { request: CodexCompletionRequest }) => {
+      throw new CodexAuthorizeError('rate_limited', 'gateway answered 429')
+    })
+    const primary = new CodexSubscriptionProvider('gpt-5.3-codex', {
+      authorizer: { authorize },
+      proxy: { stream: vi.fn() },
+      attemptContext: () => ({
+        policyRevision: 1,
+        policyHash: 'b'.repeat(64),
+        hostRef: 'chatllm',
+      }),
+    } as unknown as CodexSubscriptionDeps)
+    const fallback = recordingProvider({ cache: false })
+    const policy: LlmPolicy = {
+      cooldownSeconds: 300,
+      triggerOn: ['rate_limited'],
+      fallbacks: [{ provider: 'openai', model: 'gpt-5.4' }],
+    }
+    const engine = new FailoverEngine(policy, { metricInc: () => {} })
+    const messages: ChatMessage[] = []
+    const collected: Attachment[] = []
+    appendToolResults(messages, [gfsResult('gfs-read', 'a')], collected, true)
+    for (const digit of ['1', '2', '3']) {
+      appendToolResults(
+        messages,
+        [screenshotResult(`shot-${digit}`, `shot-${digit}`)],
+        collected,
+        true
+      )
+    }
+    const snapshot = structuredClone(messages)
+    const wrapped = maybeWrapFailover({
+      primaryPort: adapterFor(primary, 'gpt-5.3-codex', 'codex-subscription'),
+      primaryPair: { provider: 'codex-subscription', model: 'gpt-5.3-codex' },
+      engine,
+      policy,
+      buildFallbackPort: () => adapterFor(fallback.provider, 'gpt-5.4', 'openai'),
+    })
+
+    await wrapped.completeWithTools({ messages, tools: TOOLS })
+
+    const codexRequest = authorize.mock.calls[0][0].request
+    if (codexRequest.schemaVersion !== 'codex-completion-request.v2')
+      throw new Error('expected a Codex V2 request')
+    const codexImages = codexRequest.messages
+      .flatMap(message => message.contentParts ?? [])
+      .filter((part): part is CodexMessagePartImageV2 => part.type === 'image')
+    expect(codexImages).toHaveLength(3)
+    expect(codexImages.every(part => part.source.kind === 'tool')).toBe(true)
+    const openaiImages = imagePartsOf(fallback.completeWithTools[0].messages)
+    expect(openaiImages).toHaveLength(2)
+    expect(openaiImages.some(part => part.source?.kind === 'gfs')).toBe(true)
+    expect(messages).toEqual(snapshot)
   })
 })
 

@@ -101,6 +101,52 @@ describe('runWorkflowRuntime GFS publishing', () => {
     }
   })
 
+  it('R1-L3: reports the run cancelled when the cancel arrives while the publish waits out a 429', async () => {
+    const tmp = await mkdtemp(join(tmpdir(), 'wrc-gfs-'))
+    const accessFile = join(tmp, 'access')
+    await writeFile(accessFile, 'runtime-access')
+    const fetchFn = vi.fn(
+      async () =>
+        new Response('{}', {
+          status: 429,
+          headers: { 'retry-after': '1', 'x-gfs-ratelimit-scope': 'agent_writes' },
+        })
+    )
+    vi.stubGlobal('fetch', fetchFn)
+    const previousFile = process.env.GFS_ACCESS_FILE
+    process.env.GFS_ACCESS_FILE = accessFile
+    try {
+      const deps = buildRuntimeDeps({
+        spec: {
+          namespace: 'sandbox-recipes',
+          name: 'publish-recipe',
+          steps: [{ id: 'publish' }],
+          gfs: { publishTargets: [{ drive: 'main', target: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' }] },
+        },
+      })
+      vi.mocked(deps.coordinator.runWorkflow).mockResolvedValue({ publish: { ok: true } })
+      // Not cancelled when the steps finish; cancelled by the end of the wait.
+      vi.mocked(deps.signals.hasSignal).mockReturnValueOnce(false).mockReturnValue(true)
+
+      const result = await runWorkflowRuntime(deps)
+
+      expect(result).toMatchObject({ exitCode: 1, workflowPhase: 'cancelled' })
+      expect(deps.status.reportWorkflowStatus).toHaveBeenCalledWith('cancelled')
+      // Witness: the publish was sent and denied, and the retry was not.
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+      expect(deps.status.reportWorkflowStatus).not.toHaveBeenCalledWith('failed', expect.anything())
+      expect(deps.status.reportWorkflowStatus).not.toHaveBeenCalledWith(
+        'completed',
+        expect.anything()
+      )
+    } finally {
+      vi.unstubAllGlobals()
+      if (previousFile === undefined) delete process.env.GFS_ACCESS_FILE
+      else process.env.GFS_ACCESS_FILE = previousFile
+      await rm(tmp, { recursive: true, force: true })
+    }
+  })
+
   it('fails the workflow when GFSC denies a configured publish target', async () => {
     const tmp = await mkdtemp(join(tmpdir(), 'wrc-gfs-'))
     const accessFile = join(tmp, 'access')

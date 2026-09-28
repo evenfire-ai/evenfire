@@ -121,11 +121,34 @@ const DEFAULT_CORE_POOL_IDLE_TIMEOUT_MS = 30_000
 const DEFAULT_CORE_POOL_CONNECTION_TIMEOUT_MS = 2_000
 const DEFAULT_CORE_POOL_STATEMENT_TIMEOUT_MS = 15_000
 
+// The Postgres rate limiter (`rate_limit_buckets` upserts and their prune) has
+// its own pool so a saturated core pool (session auth, SSE LISTEN clients,
+// polling) cannot starve it, and a limiter burst cannot take connections from
+// the rest of the service. synchronous_commit=off: the rows are 60 s counters
+// that the pruner deletes anyway, so losing the last ~200 ms of increments on
+// a Postgres crash is acceptable, and the commit no longer waits on WAL flush
+// while holding the hot bucket row lock.
+const MAX_RATE_LIMIT_POOL_MAX = 16
+const DEFAULT_RATE_LIMIT_POOL_MAX = 6
+const DEFAULT_RATE_LIMIT_POOL_IDLE_TIMEOUT_MS = 30_000
+const DEFAULT_RATE_LIMIT_POOL_CONNECTION_TIMEOUT_MS = 5_000
+const DEFAULT_RATE_LIMIT_POOL_STATEMENT_TIMEOUT_MS = 3_000
+export const RATE_LIMIT_POOL_SESSION_OPTIONS = '-c synchronous_commit=off'
+
+/**
+ * Unset, empty or whitespace-only means the default, as in config.ts. A set
+ * value outside `[min, max]`, or one that is not canonical decimal integer
+ * text, stops startup instead of silently becoming the default. Number() alone
+ * would also read '6.0', '0x6', '6e0' and ' 6' as 6.
+ */
 function boundedEnvInteger(name: string, fallback: number, min: number, max: number): number {
   const raw = process.env[name]
-  if (!raw) return fallback
+  if (raw === undefined || raw.trim() === '') return fallback
   const value = Number(raw)
-  return Number.isInteger(value) && value >= min && value <= max ? value : fallback
+  if (!/^(0|[1-9]\d*)$/.test(raw) || value < min || value > max) {
+    throw new Error(`${name} must be an integer in [${min}, ${max}], got ${JSON.stringify(raw)}`)
+  }
+  return value
 }
 
 export function createBoundedPgPool(
@@ -165,6 +188,41 @@ export function createCorePool(PoolClass: PoolConstructor = Pool): Pool {
 
 export const pool = createCorePool()
 export const corePool = pool
+
+export function rateLimitPoolBudget(): BoundedPoolBudget {
+  return {
+    max: boundedEnvInteger(
+      'RATE_LIMIT_POOL_MAX',
+      DEFAULT_RATE_LIMIT_POOL_MAX,
+      MIN_POOL_MAX,
+      MAX_RATE_LIMIT_POOL_MAX
+    ),
+    idleTimeoutMillis: DEFAULT_RATE_LIMIT_POOL_IDLE_TIMEOUT_MS,
+    connectionTimeoutMillis: boundedEnvInteger(
+      'RATE_LIMIT_POOL_CONNECTION_TIMEOUT_MS',
+      DEFAULT_RATE_LIMIT_POOL_CONNECTION_TIMEOUT_MS,
+      MIN_CONNECTION_TIMEOUT_MS,
+      MAX_CONNECTION_TIMEOUT_MS
+    ),
+    statementTimeoutMillis: boundedEnvInteger(
+      'RATE_LIMIT_POOL_STATEMENT_TIMEOUT_MS',
+      DEFAULT_RATE_LIMIT_POOL_STATEMENT_TIMEOUT_MS,
+      MIN_STATEMENT_TIMEOUT_MS,
+      MAX_STATEMENT_TIMEOUT_MS
+    ),
+  }
+}
+
+export function createRateLimitPool(PoolClass: PoolConstructor = Pool): Pool {
+  return createBoundedPgPoolForConnection(
+    config.pgConnectionString,
+    rateLimitPoolBudget(),
+    PoolClass,
+    RATE_LIMIT_POOL_SESSION_OPTIONS
+  )
+}
+
+export const rateLimitPool = createRateLimitPool()
 
 async function applyBaselineSchema(db: DbClient): Promise<void> {
   // Baseline includes additive Phase 0 workflow-trigger tables for fresh
@@ -3038,6 +3096,80 @@ async function applyControlAdminSessionVersionDefaultSchema(db: DbClient): Promi
           CHECK (session_version >= 1);
       END IF;
     END $$;
+  `)
+}
+
+async function applyMcpSecretRollbackPermitSchema(db: DbClient): Promise<void> {
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS mcp_secret_rollback_permits (
+      session_hash BYTEA NOT NULL CHECK (octet_length(session_hash) = 32),
+      namespace TEXT NOT NULL,
+      name TEXT NOT NULL,
+      uid TEXT NOT NULL,
+      resource_version TEXT NOT NULL,
+      expires_at TIMESTAMPTZ NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp(),
+      claim_token UUID,
+      claim_expires_at TIMESTAMPTZ,
+      PRIMARY KEY (session_hash, namespace, name),
+      CHECK (expires_at > created_at),
+      CHECK (expires_at <= created_at + INTERVAL '120 seconds'),
+      CHECK ((claim_token IS NULL) = (claim_expires_at IS NULL)),
+      CHECK (claim_expires_at IS NULL OR claim_expires_at <= expires_at)
+    );
+
+    CREATE INDEX IF NOT EXISTS mcp_secret_rollback_permits_expires_at_idx
+      ON mcp_secret_rollback_permits (expires_at);
+
+    REVOKE ALL ON TABLE mcp_secret_rollback_permits FROM PUBLIC;
+    GRANT SELECT, INSERT, UPDATE, DELETE
+      ON TABLE mcp_secret_rollback_permits TO control_api_runtime;
+    REVOKE TRUNCATE, REFERENCES, TRIGGER
+      ON TABLE mcp_secret_rollback_permits FROM control_api_runtime;
+  `)
+}
+
+// A control-admin invitation that, when accepted, hands the inviter's access to
+// the invitee and retires the inviter (completeControlAdminInvitation). The
+// column is additive and defaults false. 0118 refuses acceptance of a true row
+// unless the current pod opts in, so an N-1 pod cannot turn the hand-over
+// into a plain invite.
+async function applyControlAdminInvitationReplaceInviterSchema(db: DbClient): Promise<void> {
+  await db.query(`
+    ALTER TABLE control_admin_invitations
+      ADD COLUMN IF NOT EXISTS replace_inviter BOOLEAN NOT NULL DEFAULT false;
+  `)
+}
+
+// N-1 pods accept an invitation without reading replace_inviter. Without this
+// guard that acceptance commits, the departing admin stays active, and the
+// invitation cannot be replayed. Current pods set the transaction-local GUC
+// before the status update; any other updater fails and leaves the row pending.
+async function applyControlAdminReplaceInviterAcceptGuard(db: DbClient): Promise<void> {
+  await db.query(`
+    CREATE OR REPLACE FUNCTION control_admin_invitation_replace_inviter_accept_guard()
+    RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+    BEGIN
+      IF NEW.replace_inviter
+         AND NEW.status = 'accepted'
+         AND OLD.status IS DISTINCT FROM 'accepted'
+         AND current_setting('evenfire.replace_inviter_handover', true) IS DISTINCT FROM 'on'
+      THEN
+        RAISE EXCEPTION 'replace_inviter_requires_current_control_api'
+          USING ERRCODE = '23514';
+      END IF;
+      RETURN NEW;
+    END;
+    $$;
+
+    DROP TRIGGER IF EXISTS control_admin_invitations_replace_inviter_accept_guard
+      ON control_admin_invitations;
+    CREATE TRIGGER control_admin_invitations_replace_inviter_accept_guard
+      BEFORE UPDATE ON control_admin_invitations
+      FOR EACH ROW
+      EXECUTE FUNCTION control_admin_invitation_replace_inviter_accept_guard();
   `)
 }
 
@@ -6102,6 +6234,31 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
       // pinned `curated` provenance the sync is required never to overwrite —
       // freezing exactly the rows a test harness needs to be able to refresh.
     },
+  },
+  {
+    version: '0116_mcp_secret_rollback_permits',
+    // Renumbered twice while syncing onto dev: 0101 -> 0109 -> 0116. This branch
+    // introduced the migration as 0101; the first sync brought dev's 0101–0108
+    // (codex multi-connection through the SDK-link FK) and pushed it to 0109;
+    // this sync brought dev's 0109–0115 (grok subscriptions through the
+    // allowed-models image-input column), so 0109 is now taken by
+    // 0109_grok_subscription_connections and the migration moves to the end of
+    // the list rather than claiming a version another migration already uses.
+    // Environments where this feature branch was already deployed recorded it
+    // under one of the earlier names. legacyVersions lets the runner mark 0116
+    // applied from that prior row instead of re-running the DDL and leaving an
+    // orphan schema_migrations entry. Both prior names are unique to this
+    // migration, so there is no false-skip.
+    legacyVersions: ['0101_mcp_secret_rollback_permits', '0109_mcp_secret_rollback_permits'],
+    apply: applyMcpSecretRollbackPermitSchema,
+  },
+  {
+    version: '0117_control_admin_invitation_replace_inviter',
+    apply: applyControlAdminInvitationReplaceInviterSchema,
+  },
+  {
+    version: '0118_control_admin_replace_inviter_accept_guard',
+    apply: applyControlAdminReplaceInviterAcceptGuard,
   },
 ]
 

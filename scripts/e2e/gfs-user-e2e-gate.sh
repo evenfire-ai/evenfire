@@ -1,8 +1,15 @@
 #!/usr/bin/env bash
 # Authenticated end-user GFS gate. It fails loud, uses no mocks, and must run
-# only after deploy sync plus seed-test-data.sh on an allowed local profile.
+# only after deploy sync on an allowed local profile. It seeds its own test
+# users through the canonical seed (the body of `make minikube-seed-test-data`).
 # Proves singular delegation compatibility and atomic bulk grant/share behavior.
 set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+# shellcheck source=scripts/e2e/load-dotenv.sh
+source "${SCRIPT_DIR}/load-dotenv.sh"
+# shellcheck source=scripts/e2e/admin-credentials.sh
+source "${SCRIPT_DIR}/admin-credentials.sh"
 CONTEXT="${CONTEXT:?set CONTEXT to an allowed branch/clerum-test profile (never a prod context)}"
 GFS_NS="${GFS_NS:-gfs}"
 CONTROL_NS="${CONTROL_NS:-control-plane}"
@@ -14,7 +21,6 @@ EXT_PORT="${EXT_PORT:-8091}"
 DRIVE="${DRIVE:-main}"
 TIMEOUT="${TIMEOUT:-180}"
 TEST_USER_EMAIL="${TEST_USER_EMAIL:-test@clerum.io}"
-TEST_USER_PASSWORD="${TEST_USER_PASSWORD:-changeme123!}"
 TAG="${GFS_E2E_TAG:-$(kubectl --context="$CONTEXT" -n "$CONTROL_NS" get ns "$CONTROL_NS" -o jsonpath='{.metadata.uid}' 2>/dev/null | cut -c1-8 || echo run)}"
 RUN_NONCE="${GFS_E2E_NONCE:-$(date +%s)}"
 RUN_SUFFIX="$(printf '%s' "${TAG}-${RUN_NONCE}-$$" | shasum -a 256 | cut -c1-10)"
@@ -103,16 +109,23 @@ ic_http() {
       .catch(e => { process.stderr.write(e.message); process.exit(1) })
   ' "$1" "$2" "${3:-}"
 }
+# The credentials travel on stdin so the password never appears in argv.
 user_login() {
-  kc -n "$PROFILES_NS" exec "$EXT_POD" -- node -e '
-    const [email, password] = process.argv.slice(1)
-    fetch("http://localhost:'"$EXT_PORT"'/api/v1/auth/password-login", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email, password }),
-    }).then(async r => { process.stdout.write(r.status + "\t" + await r.text()) })
-      .catch(e => { process.stderr.write(e.message); process.exit(1) })
-  ' "$1" "$2"
+  local payload
+  payload="$(jq -cn --arg e "$1" --arg p "$2" '{email:$e,password:$p}')"
+  kc -n "$PROFILES_NS" exec -i "$EXT_POD" -- node -e '
+    let input = ""
+    process.stdin.setEncoding("utf8")
+    process.stdin.on("data", chunk => { input += chunk })
+    process.stdin.on("end", () => {
+      fetch("http://localhost:'"$EXT_PORT"'/api/v1/auth/password-login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: input,
+      }).then(async r => { process.stdout.write(r.status + "\t" + await r.text()) })
+        .catch(e => { process.stderr.write(e.message); process.exit(1) })
+    })
+  ' <<<"$payload"
 }
 user_http() {
   kc -n "$PROFILES_NS" exec "$EXT_POD" -- node -e '
@@ -182,17 +195,35 @@ cleanup() {
 }
 trap cleanup EXIT
 CONTROL_ADMIN_USER="${CONTROL_ADMIN_USER:-admin}"
+# The seed (scripts/e2e/seed-e2e-data.sh) sets the admin password from the
+# canonical repository .env, so the login resolves it the same way; the local
+# default applies only when neither the .env nor the environment has one.
 operator_admin_password() {
-  if [[ -n "${E2E_ADMIN_PASSWORD:-}" ]]; then printf '%s' "$E2E_ADMIN_PASSWORD"; return 0; fi
-  if [[ -n "${ADMIN_PASSWORD:-}" ]]; then printf '%s' "$ADMIN_PASSWORD"; return 0; fi
-  if [[ -n "${ADMIN_PASS:-}" ]]; then printf '%s' "$ADMIN_PASS"; return 0; fi
-  if [[ -n "${TEST_ADMIN_PASSWORD:-}" ]]; then printf '%s' "$TEST_ADMIN_PASSWORD"; return 0; fi
+  local local_default=""
   if [[ "$CONTEXT" == "clerum-test" || "$CONTEXT" =~ ^clerum-[a-z0-9][a-z0-9-]*-[0-9a-f]{8}$ ]]; then
-    printf '%s%s' 'changeme123' '!'
-    return 0
+    local_default="$(printf '%s%s' 'changeme123' '!')"
   fi
-  return 1
+  e2e_resolve_admin_password "$REPO_ROOT" "$local_default"
 }
+# The T2 bootstrap seeds the minimal profile, which creates no test* users, so
+# a freshly bootstrapped profile has no test user. The gate seeds its own users
+# through the canonical, idempotent admin-API seed instead of depending on a
+# manual step between runs. The seed opens its control-api port-forward on a
+# fixed local port and treats any listener there as ready, so refuse to start
+# while that port is taken: the listener could belong to another cluster.
+seed_test_users() {
+  local seed_port="${GFS_E2E_SEED_CAPI_PORT:-18090}"
+  if (echo >"/dev/tcp/127.0.0.1/$seed_port") >/dev/null 2>&1; then
+    die "local port $seed_port is already in use; set GFS_E2E_SEED_CAPI_PORT to a free port for the test-user seed"
+  fi
+  if CONTEXT="$CONTEXT" SEED_PROFILE=e2e E2E_DEV_LOGIN_EMAIL="$TEST_USER_EMAIL" \
+    CONTROL_API_LOCAL_PORT="$seed_port" bash "$SCRIPT_DIR/seed-e2e-data.sh" 2>&1 | sed 's/^/  seed: /'; then
+    ok "test users seeded through the canonical admin-API seed"
+  else
+    die "test-user seed failed on $CONTEXT"
+  fi
+}
+seed_test_users
 ensure_operator_session() {
   if [[ -n "${E2E_ADMIN_TOKEN:-}" ]]; then
     return 0
@@ -242,7 +273,7 @@ SCRATCH_RID="$(psql_one "SELECT resource_id FROM gfs_resources WHERE drive='$DRI
 [[ -n "$SCRATCH_RID" ]] && ok "resolved scratch rid ($SCRATCH_RID)" || die "scratch dir not found after seed"
 USER_ID="$(psql_one "SELECT id FROM users WHERE lower(email)=lower('$TEST_USER_EMAIL') LIMIT 1;")"
 [[ -n "$USER_ID" ]] && ok "resolved test user id ($USER_ID)" \
-  || die "test user '$TEST_USER_EMAIL' not found — run scripts/minikube/seed-test-data.sh first"
+  || die "test user '$TEST_USER_EMAIL' not found after the seed"
 USER_TEAM_ID="$(fixture_uuid authority-team)"
 kc -n "$CONTROL_NS" exec deploy/control-postgres -- psql -v ON_ERROR_STOP=1 -U postgres -d profiles \
   -c "INSERT INTO teams (id, name) VALUES ('$USER_TEAM_ID'::uuid, 'e2e-gfs-issue792-$RUN_SUFFIX'); INSERT INTO team_members (team_id, user_id, role, status) VALUES ('$USER_TEAM_ID'::uuid, '$USER_ID'::uuid, 'member', 'active');" >/dev/null
@@ -256,7 +287,14 @@ grant_body="$(jq -cn --arg d "$DRIVE" --arg r "$SCRATCH_RID" --argjson s "$autho
 resp="$(admin_http PUT /api/v1/gfs/grants "$grant_body")"
 assert_bulk_success "real user/team authority bulk grant" "$resp" "$authority_subjects"
 [[ "$(stored_subject_count gfs_grants "$authority_keys")" == "2" ]] && ok "bulk authority stored real direct-user and active-team targets" || die "real user/team authority rows missing"
-resp="$(user_login "$TEST_USER_EMAIL" "$TEST_USER_PASSWORD")"
+# seed-e2e-data.sh gives the test users the resolved admin password
+# (DESKTOP_LOGIN_CREDENTIAL=ADMIN_PASSWORD); an explicit TEST_USER_PASSWORD wins.
+if [[ -n "${TEST_USER_PASSWORD:-}" ]]; then
+  test_user_password="$TEST_USER_PASSWORD"
+else
+  test_user_password="$(operator_admin_password)" || die "test user credential is required: set TEST_USER_PASSWORD or ADMIN_PASSWORD in the canonical .env"
+fi
+resp="$(user_login "$TEST_USER_EMAIL" "$test_user_password")"
 [[ "$(http_status "$resp")" == "200" ]] || die "user password-login failed: $resp"
 USER_TOKEN="$(http_body "$resp" | jq -r '.token')"
 [[ -n "$USER_TOKEN" && "$USER_TOKEN" != "null" ]] && ok "user logged in (session token)" \
@@ -288,14 +326,27 @@ gb="$(psql_one "SELECT granted_by FROM gfs_grants WHERE drive='$DRIVE' AND resou
   || bad "expected granted_by='user:$USER_ID', got '$gb'"
 BULK_USER_ID="$(fixture_uuid grant-user)"; BULK_TEAM_ID="$(fixture_uuid grant-team)"; REJECT_USER_ID="$(fixture_uuid reject-user)"
 FIRST_HOST="1st:mcp-host/bulk-${RUN_SUFFIX}"; THIRD_HOST="3rd:sandbox-recipes/bulk-${RUN_SUFFIX}"
-grant_subjects="$(jq -cn --arg u "$BULK_USER_ID" --arg t "$BULK_TEAM_ID" --arg h1 "$FIRST_HOST" --arg h3 "$THIRD_HOST" '[{type:"user",id:$u},{type:"team",id:$t},{type:"host",id:$h1},{type:"host",id:$h3}]')"
-grant_keys="'user:$BULK_USER_ID','team:$BULK_TEAM_ID','host:$FIRST_HOST','host:$THIRD_HOST'"
+grant_subjects="$(jq -cn --arg u "$BULK_USER_ID" --arg t "$BULK_TEAM_ID" '[{type:"user",id:$u},{type:"team",id:$t}]')"
+grant_keys="'user:$BULK_USER_ID','team:$BULK_TEAM_ID'"
 bulk_body="$(jq -cn --arg d "$DRIVE" --arg r "$SCRATCH_RID" --argjson s "$grant_subjects" '{drive:$d,resourceId:$r,subjects:$s,permissions:["read","write"],inherit:false}')"
 resp="$(user_http "$USER_TOKEN" PUT /api/v1/me/gfs/grants "$bulk_body")"
 assert_bulk_success "mixed bulk grant" "$resp" "$grant_subjects"
-if [[ "$(stored_subject_count gfs_grants "$grant_keys")" == "4" ]]; then ok "mixed bulk grant stored all targets"
-else bad "mixed bulk grant did not store exactly four targets"; fi
-assert_correlated_audit "mixed bulk grant" "$grant_keys" 4
+if [[ "$(stored_subject_count gfs_grants "$grant_keys")" == "2" ]]; then ok "mixed bulk grant stored all targets"
+else bad "mixed bulk grant did not store exactly two targets"; fi
+assert_correlated_audit "mixed bulk grant" "$grant_keys" 2
+# An end user may grant only to their own agents (assertHostTargetsWithinCallerAgents
+# in control-api/src/routes/external/gfs.ts). Host subjects the test user does not
+# own reject the whole batch, and the valid user/team targets are not stored either.
+FOREIGN_USER_ID="$(fixture_uuid foreign-user)"; FOREIGN_TEAM_ID="$(fixture_uuid foreign-team)"
+foreign_subjects="$(jq -cn --arg u "$FOREIGN_USER_ID" --arg t "$FOREIGN_TEAM_ID" --arg h1 "$FIRST_HOST" --arg h3 "$THIRD_HOST" '[{type:"user",id:$u},{type:"team",id:$t},{type:"host",id:$h1},{type:"host",id:$h3}]')"
+foreign_keys="'user:$FOREIGN_USER_ID','team:$FOREIGN_TEAM_ID','host:$FIRST_HOST','host:$THIRD_HOST'"
+foreign_body="$(jq -cn --arg d "$DRIVE" --arg r "$SCRATCH_RID" --argjson s "$foreign_subjects" '{drive:$d,resourceId:$r,subjects:$s,permissions:["read","write"],inherit:false}')"
+resp="$(user_http "$USER_TOKEN" PUT /api/v1/me/gfs/grants "$foreign_body")"
+if [[ "$(http_status "$resp")" == "403" ]] && http_body "$resp" | jq -e '.error == "foreign_agent_forbidden" and .invalidIndexes == [2,3]' >/dev/null; then
+  ok "user grant to hosts the user does not own is rejected (403 foreign_agent_forbidden, indexes 2,3)"
+else bad "foreign host grant expected 403 foreign_agent_forbidden with invalidIndexes [2,3]: $resp"; fi
+if [[ "$(stored_subject_count gfs_grants "$foreign_keys")" == "0" ]]; then ok "foreign host grant wrote no partial rows"
+else bad "foreign host grant persisted a partial row"; fi
 HOST_READ="1st:mcp-host/read-${RUN_SUFFIX}"; HOST_WRITE="3rd:sandbox-recipes/write-${RUN_SUFFIX}"
 MULTI_FIRST="1st:mcp-host/multi-${RUN_SUFFIX}"; MULTI_THIRD="3rd:sandbox-recipes/multi-${RUN_SUFFIX}"
 host_labels=("host-only read grant" "host-only write grant" "multi-host read+write grant")

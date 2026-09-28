@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { useAgentChatActionsContext } from '@contexts/AgentChatActionsContext'
 import { useChatComposerStateContext } from '@contexts/ChatComposerStateContext'
 import { useMcpRuntimeContext } from '@contexts/McpRuntimeContext'
@@ -27,6 +28,7 @@ import { useContextsDataController } from '@hooks/domain/useContextsDataControll
 import { useMcpServersDataController } from '@hooks/domain/useMcpServersDataController'
 import { useClickOutside } from '@hooks/useClickOutside'
 import { useComposerDraft } from '@hooks/useComposerDraft'
+import { useFlyoutPosition } from '@hooks/useFlyoutPosition'
 import { useHostModels } from '@hooks/useHostModels'
 import { readImageHeaderDimensions } from '@lib/imageHeaderDimensions'
 import type { WorkflowRecipeListResult } from '../../../../src/types'
@@ -165,6 +167,25 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
   const composerInputWidthRef = useRef<number | null>(null)
   const composerFileInputRef = useRef<HTMLInputElement | null>(null)
   const composerMenuRef = useRef<HTMLSpanElement | null>(null)
+  // The reference submenu is portaled out of the composer (the drawer's
+  // overflow-clipping ancestors would otherwise crop it), so it needs an anchor
+  // ref per primary item and its own ref for click-outside + positioning.
+  const composerSubmenuRef = useRef<HTMLSpanElement | null>(null)
+  const pluginsItemRef = useRef<HTMLButtonElement | null>(null)
+  const connectorsItemRef = useRef<HTMLButtonElement | null>(null)
+  const agentFilesItemRef = useRef<HTMLButtonElement | null>(null)
+  const composerSubmenuAnchorRef =
+    composerSubmenu === 'connectors'
+      ? connectorsItemRef
+      : composerSubmenu === 'agent-files'
+        ? agentFilesItemRef
+        : pluginsItemRef
+  const submenuFlyoutPosition = useFlyoutPosition({
+    anchorRef: composerSubmenuAnchorRef,
+    flyoutRef: composerSubmenuRef,
+    open: composerMenuOpen && composerSubmenu !== null,
+    placement: 'right-of',
+  })
 
   // Issue #654: image capability comes from the host-projected per-model
   // decision shared with the selector and the send path — never from the
@@ -190,7 +211,10 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
   const agentFilesAvailable = Boolean(agentFilesState?.items?.length)
   const agentFilesDisabled = agentFilesLoading || !agentFilesAvailable
 
-  useClickOutside(composerMenuRef, composerMenuOpen, () => {
+  // Both refs: the submenu is portaled to document.body, so a mousedown on a
+  // submenu item is outside `composerMenuRef` and would close the menu before
+  // the item's click fires.
+  useClickOutside([composerMenuRef, composerSubmenuRef], composerMenuOpen, () => {
     setComposerMenuOpen(false)
     setComposerSubmenu(null)
   })
@@ -829,6 +853,9 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
                 <span className="composer-reference-menu-panel" role="menu">
                   <span className="composer-reference-menu-primary">
                     <MenuItem
+                      ref={pluginsItemRef}
+                      aria-haspopup="menu"
+                      aria-expanded={composerSubmenu === 'plugins'}
                       leadingIcon={<IconWorkflows />}
                       onMouseEnter={() => setComposerSubmenu('plugins')}
                       onFocus={() => setComposerSubmenu('plugins')}
@@ -838,6 +865,9 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
                       Plugins
                     </MenuItem>
                     <MenuItem
+                      ref={connectorsItemRef}
+                      aria-haspopup="menu"
+                      aria-expanded={composerSubmenu === 'connectors'}
                       leadingIcon={<IconConnectors />}
                       onMouseEnter={() => setComposerSubmenu('connectors')}
                       onFocus={() => setComposerSubmenu('connectors')}
@@ -848,7 +878,12 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
                     </MenuItem>
                     {SHOW_AGENT_FILES_UI ? (
                       <MenuItem
+                        ref={agentFilesItemRef}
                         aria-disabled={agentFilesDisabled}
+                        aria-haspopup={agentFilesDisabled ? 'menu' : undefined}
+                        aria-expanded={
+                          agentFilesDisabled ? composerSubmenu === 'agent-files' : undefined
+                        }
                         className={
                           agentFilesDisabled ? 'composer-reference-menu-item-disabled' : undefined
                         }
@@ -874,7 +909,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
                         onClick={openGlobalFilesModal}
                         role="menuitem"
                       >
-                        Global File System
+                        EvenDrive
                       </MenuItem>
                     ) : null}
                     <MenuItem
@@ -885,79 +920,88 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
                       Upload Files
                     </MenuItem>
                   </span>
-                  {composerSubmenu === 'plugins' ? (
-                    <span
-                      className="composer-reference-submenu composer-reference-submenu--plugins"
-                      role="menu"
-                    >
-                      {pluginsLoading ? (
-                        <span className="composer-reference-menu-empty">Loading plugins...</span>
-                      ) : pluginsError ? (
-                        <span className="composer-reference-menu-empty">{pluginsError}</span>
-                      ) : pluginOptions.length ? (
-                        pluginOptions.map(plugin => (
-                          <MenuItem
-                            key={plugin.id}
-                            onClick={() =>
-                              addComposerReference({
-                                id: plugin.id,
-                                type: 'plugin',
-                                namespace: plugin.namespace,
-                                name: plugin.name,
-                                label: plugin.label,
-                              })
-                            }
-                            role="menuitem"
-                          >
-                            {plugin.label}
-                          </MenuItem>
-                        ))
-                      ) : (
-                        <span className="composer-reference-menu-empty">No plugins available</span>
-                      )}
-                    </span>
-                  ) : null}
-                  {composerSubmenu === 'connectors' ? (
-                    <span
-                      className="composer-reference-submenu composer-reference-submenu--connectors"
-                      role="menu"
-                    >
-                      {connectorOptions.length ? (
-                        connectorOptions.map(connector => (
-                          <MenuItem
-                            key={connector.id}
-                            onClick={() =>
-                              addComposerReference({
-                                id: connector.id,
-                                type: 'connector',
-                                name: connector.name,
-                                label: connector.label,
-                              })
-                            }
-                            role="menuitem"
-                          >
-                            {connector.label}
-                          </MenuItem>
-                        ))
-                      ) : (
-                        <span className="composer-reference-menu-empty">
-                          No connectors available
-                        </span>
-                      )}
-                    </span>
-                  ) : null}
-                  {SHOW_AGENT_FILES_UI && composerSubmenu === 'agent-files' ? (
-                    <span
-                      className="composer-reference-submenu composer-reference-submenu--agent-files"
-                      role="menu"
-                    >
-                      <span className="composer-reference-menu-empty">
-                        {agentFilesLoading ? 'Loading Agent Files...' : 'No Agent Files Available'}
-                      </span>
-                    </span>
-                  ) : null}
                 </span>
               ) : null}
+              {/* The submenu is portaled to document.body and positioned with a
+                  fixed rect confined to the chat drawer. In-flow it was cropped
+                  by the drawer's overflow-clipping ancestors and the native
+                  embed painting over it; see useFlyoutPosition. */}
+              {composerMenuOpen && composerSubmenu !== null
+                ? createPortal(
+                    <span
+                      className="composer-reference-submenu"
+                      ref={composerSubmenuRef}
+                      role="menu"
+                      style={{
+                        left: submenuFlyoutPosition?.left ?? 0,
+                        top: submenuFlyoutPosition?.top ?? 0,
+                        // Hidden at the origin until the first layout pass sets a
+                        // real rect, so it never flashes in the top-left corner.
+                        visibility: submenuFlyoutPosition ? undefined : 'hidden',
+                      }}
+                    >
+                      {composerSubmenu === 'plugins' ? (
+                        pluginsLoading ? (
+                          <span className="composer-reference-menu-empty">Loading plugins...</span>
+                        ) : pluginsError ? (
+                          <span className="composer-reference-menu-empty">{pluginsError}</span>
+                        ) : pluginOptions.length ? (
+                          pluginOptions.map(plugin => (
+                            <MenuItem
+                              key={plugin.id}
+                              onClick={() =>
+                                addComposerReference({
+                                  id: plugin.id,
+                                  type: 'plugin',
+                                  namespace: plugin.namespace,
+                                  name: plugin.name,
+                                  label: plugin.label,
+                                })
+                              }
+                              role="menuitem"
+                            >
+                              {plugin.label}
+                            </MenuItem>
+                          ))
+                        ) : (
+                          <span className="composer-reference-menu-empty">
+                            No plugins available
+                          </span>
+                        )
+                      ) : composerSubmenu === 'connectors' ? (
+                        connectorOptions.length ? (
+                          connectorOptions.map(connector => (
+                            <MenuItem
+                              key={connector.id}
+                              onClick={() =>
+                                addComposerReference({
+                                  id: connector.id,
+                                  type: 'connector',
+                                  name: connector.name,
+                                  label: connector.label,
+                                })
+                              }
+                              role="menuitem"
+                            >
+                              {connector.label}
+                            </MenuItem>
+                          ))
+                        ) : (
+                          <span className="composer-reference-menu-empty">
+                            No connectors available
+                          </span>
+                        )
+                      ) : SHOW_AGENT_FILES_UI && composerSubmenu === 'agent-files' ? (
+                        <span className="composer-reference-menu-empty">
+                          {agentFilesLoading
+                            ? 'Loading Agent Files...'
+                            : 'No Agent Files Available'}
+                        </span>
+                      ) : null}
+                    </span>,
+                    document.body
+                  )
+                : null}
             </span>
             {hasComposerAttachments ? (
               <span className="composer-attachments-list composer-attachments-list--inline">

@@ -1,7 +1,10 @@
 import { createHash } from 'node:crypto'
 import type { PoolClient } from 'pg'
-import { pool } from '../db.js'
+import { pool, rateLimitPool } from '../db.js'
+import { LogThrottle } from '../observability/logThrottle.js'
 import { rootLogger } from '../observability/logger.js'
+import { rateLimitBackendErrorsTotal } from '../observability/metrics.js'
+import { boundedBucketKey } from './rateLimitBucketKey.js'
 
 /**
  * PG-backed sliding-window-ish rate limiter.
@@ -20,6 +23,10 @@ import { rootLogger } from '../observability/logger.js'
 
 const WINDOW_MS = 60_000
 
+// One rate_limit_db_error line per bucket key per window. Keys come from
+// clients, so the throttle also caps how many distinct keys it tracks.
+const dbErrorLogThrottle = new LogThrottle(WINDOW_MS)
+
 export type RateLimitCheck = {
   allowed: boolean
   remaining: number
@@ -28,6 +35,13 @@ export type RateLimitCheck = {
   count: number
   backendAvailable: boolean
 }
+
+/**
+ * Retry-After sent by the callers that fail closed with 503 when
+ * `backendAvailable` is false. The count is unknown in that case, so no
+ * window reset can be computed; a short fixed hint spreads the retries.
+ */
+export const RATE_LIMIT_BACKEND_RETRY_AFTER_SECONDS = 2
 
 export function currentWindowStartMs(nowMs = Date.now()): number {
   return Math.floor(nowMs / WINDOW_MS) * WINDOW_MS
@@ -51,7 +65,7 @@ export async function checkAndIncrement(
   cost = 1
 ): Promise<RateLimitCheck> {
   return checkAndIncrementWithQuery(
-    (text, values) => pool.query(text, values),
+    (text, values) => rateLimitPool.query(text, values),
     bucketKey,
     maxPerMinute,
     nowMs,
@@ -61,7 +75,7 @@ export async function checkAndIncrement(
 
 /**
  * Same atomic limiter operation against an explicitly supplied query
- * function. Production callers use the process-wide pool above; the narrow
+ * function. Production callers use the dedicated limiter pool above; the narrow
  * seam lets the real-Postgres integration suite exercise this exact SQL
  * against an isolated database without changing runtime ownership.
  */
@@ -75,6 +89,9 @@ export async function checkAndIncrementWithQuery(
   if (!Number.isSafeInteger(cost) || cost < 1) throw new Error('rate limit cost must be positive')
   const windowStartMs = currentWindowStartMs(nowMs)
   const resetMs = windowStartMs + WINDOW_MS
+  // Callers that build keys from client input without calling the middleware
+  // get the same bound; an already bounded key is returned unchanged.
+  const storedKey = boundedBucketKey(bucketKey)
 
   let result: { rows: unknown[] } | null | undefined
   try {
@@ -84,20 +101,33 @@ export async function checkAndIncrementWithQuery(
        ON CONFLICT (bucket_key, window_start_ms) DO UPDATE
          SET count = rate_limit_buckets.count + EXCLUDED.count
        RETURNING count`,
-      [bucketKey, windowStartMs, cost]
+      [storedKey, windowStartMs, cost]
     )
   } catch (err) {
-    // Fail-open on DB errors — the limiter is an abuse gate, not a security
-    // boundary. Log and let the request through so a DB blip cannot take
-    // down all traffic.
-    rootLogger.warn(
-      {
-        event: 'rate_limit_db_error',
-        bucketKey,
-        err: err instanceof Error ? err.message : String(err),
-      },
-      'rate limiter DB error, failing open'
-    )
+    // The service does not decide admission. It reports backendAvailable:false
+    // and each caller decides: rateLimitMiddleware answers 503 or counts the
+    // request in its process-memory fallback, and the external GFS limiter
+    // answers 503.
+    // Bucket keys carry user and workload ids; the log gets the same SHA-256
+    // the external GFS limiter logs as hashedKey, so the lines still join. It
+    // is a correlation id, not anonymization: unsalted, so a low-entropy key
+    // (an IP, an email) can be recovered by guessing. While the backend is
+    // down every request lands here, so the line is throttled per bucket key
+    // and the counter keeps the full count.
+    rateLimitBackendErrorsTotal.inc()
+    const hashedKey = createHash('sha256').update(storedKey).digest('hex')
+    const suppressed = dbErrorLogThrottle.admit(hashedKey)
+    if (suppressed !== undefined) {
+      rootLogger.warn(
+        {
+          event: 'rate_limit_db_error',
+          hashedKey,
+          err: err instanceof Error ? err.message : String(err),
+          suppressed,
+        },
+        'rate limiter DB error, backend unavailable'
+      )
+    }
     return {
       allowed: true,
       remaining: maxPerMinute,
@@ -107,8 +137,8 @@ export async function checkAndIncrementWithQuery(
       backendAvailable: false,
     }
   }
-  // Fail-open if the DB returns no row (e.g. test harness mocking pool.query
-  // with empty rows). Same rationale as the DB-error branch.
+  // No row (e.g. a test harness mocking pool.query with empty rows) is also
+  // reported as backendAvailable:false; the caller decides, as above.
   const rows = result && Array.isArray(result.rows) ? result.rows : []
   const row = (rows[0] ?? null) as { count: number | string } | null
   if (!row) {
@@ -190,6 +220,10 @@ function advisoryKey(value: string): AdvisoryLockKey {
   return { high: digest.readInt32BE(0), low: digest.readInt32BE(4) }
 }
 
+// The advisory-lock client stays on the core pool: advisory locks write no WAL,
+// so synchronous_commit=off buys nothing, and this client is held for the life
+// of the process, which would take one of the limiter pool's few connections
+// permanently.
 async function getConcurrencyClient(): Promise<PoolClient> {
   if (concurrencyClient) return concurrencyClient
   if (!concurrencyClientPromise) {
@@ -348,9 +382,10 @@ export async function acquireRateLimitConcurrencyLease(
  */
 export async function cleanupExpiredBuckets(nowMs = Date.now()): Promise<number> {
   const cutoff = nowMs - 5 * 60_000
-  const result = await pool.query(`DELETE FROM rate_limit_buckets WHERE window_start_ms < $1`, [
-    cutoff,
-  ])
+  const result = await rateLimitPool.query(
+    `DELETE FROM rate_limit_buckets WHERE window_start_ms < $1`,
+    [cutoff]
+  )
   return result.rowCount ?? 0
 }
 

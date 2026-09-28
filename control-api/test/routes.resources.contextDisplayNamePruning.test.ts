@@ -55,10 +55,13 @@ function realServiceGateway(opts: { pruneDisplayName: boolean }): {
   const replaceNamespacedCustomObject = vi.fn(
     async ({ name, body }: { name: string; body: Record<string, unknown> }) => {
       const persisted = persistWithPruning(body)
+      const existing = store.get(name)
+      const existingMetadata = existing?.metadata as Record<string, unknown> | undefined
       const stored = {
         ...persisted,
         metadata: {
           ...(persisted.metadata as Record<string, unknown>),
+          uid: existingMetadata?.uid ?? `uid-${name}`,
           resourceVersion: String(++rv),
         },
       }
@@ -73,6 +76,7 @@ function realServiceGateway(opts: { pruneDisplayName: boolean }): {
         ...persisted,
         metadata: {
           ...(persisted.metadata as Record<string, unknown>),
+          uid: `uid-${body.metadata.name}`,
           resourceVersion: String(++rv),
         },
       }

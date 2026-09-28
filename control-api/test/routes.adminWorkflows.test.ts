@@ -31,6 +31,9 @@ vi.mock('../src/db.js', () => ({
     query: (...args: unknown[]) => mockPoolQuery(...args),
     connect: (...args: unknown[]) => mockPoolConnect(...args),
   },
+  rateLimitPool: {
+    query: (...args: unknown[]) => mockPoolQuery(...args),
+  },
   withTransaction: (work: (db: { query: typeof mockPoolQuery }) => unknown) =>
     work({ query: mockPoolQuery }),
 }))

@@ -222,6 +222,30 @@ slots are all present and uses that provider's default model;
 > auto-select `bedrock`. Set `CLERUM_MODEL_PROVIDER` explicitly if that's not
 > what you want.
 
+### 4.7 Local minikube (`make minikube-setup`)
+
+`scripts/minikube/full-setup.sh` step 6f writes the `chatllm` Host's
+`spec.model` from `.env`, by the rule in `scripts/minikube/host-model.sh`:
+
+| `.env`                                        | Host model                                                                                                          |
+| --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `CLERUM_MODEL_PROVIDER` + `CLERUM_MODEL_NAME` | used as given                                                                                                       |
+| `CLERUM_MODEL_PROVIDER` only                  | that provider's default model (openai, claude, zai, bailian)                                                        |
+| `CLERUM_MODEL_NAME` only                      | **refused** — setup exits 1 naming both variables                                                                   |
+| neither, one or more of the four keys         | first key in the order `OPENAI_API_KEY`, `CLAUDE_API_KEY`, `ZAI_API_KEY`, `BAILIAN_API_KEY`, with its default model |
+| neither, no key                               | `openai/gpt-5.4-mini`, with a warning that the agent will not reply                                                 |
+
+The default models are the `defaultModel` values in
+`mcp-host/src/llm/registryCore.ts`. Any other provider needs both variables.
+
+Before applying the Host, setup checks the pair against `llm_allowed_models`
+in the profile's control-postgres (after migrations) and exits 1 on
+`HOST_MODEL_UNKNOWN` (no row), `HOST_MODEL_DISABLED` (row disabled) or
+`HOST_MODEL_CHECK_FAILED` (the query could not run). A name without a provider
+is refused because a model id belongs to one provider: pairing
+`CLERUM_MODEL_NAME=glm-4.7` with whichever key is present produced
+`openai/glm-4.7`, which no catalog serves.
+
 ---
 
 ## 5. The model allowlist

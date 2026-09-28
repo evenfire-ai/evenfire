@@ -16,19 +16,24 @@ const PROVIDER_ID = 'codex-subscription'
 const TICKET_TYP = 'codex-execution-ticket'
 
 const LIMITS = Object.freeze({
-  // V1 ceiling, and the V2 ceiling for everything that is not image data. The
-  // measurement that enforces the second half lives in
-  // `measureNonImageRequestBytes` below.
-  maxRequestBodyBytes: 1048576,
+  // 8 MiB of serialized request (#731). A 1M-token window is about 4 MB of
+  // text, and escaped JSON tool results cost 1.3-1.5x that, so this covers the
+  // largest listed model window; past it the model refuses on tokens first.
+  // It is the V1 ceiling, and the V2 ceiling for everything that is not image
+  // data; `measureNonImageRequestBytes` below enforces the second half. The
+  // element bound in checkStructure follows this value 1:1.
+  maxRequestBodyBytes: 8388608,
   /**
-   * V2 request/envelope ceiling. It is deliberately larger than
-   * `maxRequestBodyBytes` because a V2 body carries base64 image payloads, and
-   * it is deliberately larger than one hard-ceiling image (16 MiB decoded ≈
-   * 21.3 MiB encoded) plus the 1 MiB non-image share. Typical 5 / 9 requests
-   * fit in 14 MiB (`VISUAL_LIMITS.typicalEnvelopeBytes`); this 24 MiB number is
-   * the HTTP/nginx hard envelope, not the usual product target. It is not a
-   * text/tool allowance: `measureNonImageRequestBytes` keeps that share on the
-   * V1 ceiling.
+   * V2 request/envelope ceiling. It is larger than `maxRequestBodyBytes`
+   * because a V2 body carries base64 image payloads. It holds one hard-ceiling
+   * image (16 MiB decoded ≈ 21.3 MiB encoded) plus about 2.7 MiB of non-image
+   * data, so a V2 request carrying both a hard-ceiling image and more non-image
+   * data than that is refused here even though each share is under its own
+   * cap. Typical 5 / 9 requests fit in 14 MiB
+   * (`VISUAL_LIMITS.typicalEnvelopeBytes`); this 24 MiB number is the
+   * HTTP/nginx hard envelope, not the usual product target. It is not a
+   * text/tool allowance: `measureNonImageRequestBytes` keeps that share on
+   * `maxRequestBodyBytes`.
    */
   maxVisualRequestBodyBytes: 25165824,
   maxMessages: 1024,
@@ -42,7 +47,20 @@ const LIMITS = Object.freeze({
   // Free-form JSON trees (tool parameters, assistant tool-call arguments) may
   // nest at most this many containers. Bounds recursion before hashing.
   maxNestingDepth: 64,
+  // How long an execution ticket stays redeemable after authorize. control-api
+  // signs tickets with this TTL, and the proxy bounds its admission waits
+  // against the remaining ticket life, so both read it from here (#739).
+  executionTicketTtlMs: 60000,
 })
+
+// Room for the runtime envelope around a request held to
+// `maxRequestBodyBytes`: the execution ticket (a few KB by its claim bounds),
+// the request hash, the deadline, and the ids and revisions of the authorize
+// body. 16 KiB is several times that. Both proxies, the control-api authorizer
+// and the mcp-host authorizer import it, so a request one layer accepts is
+// never refused by the next for its envelope. A V2 envelope is bounded by
+// `maxVisualRequestBodyBytes` as a whole and gets no allowance on top of it.
+const ENVELOPE_ALLOWANCE_BYTES = 16 * 1024
 
 // Deepest free-form tree root inside a request: request > messages[] >
 // message > toolCalls[] > call > arguments. A request that nests deeper than
@@ -241,7 +259,7 @@ function measureNonImageRequestBytes(input) {
  * envelope. `requestBodyLimitBytes(body.request)` still gates the whole
  * wrapper (24 MiB only when the nested request declares V2). This helper
  * blanks image payloads inside `body.request` so wrapper fields — ids,
- * hashes, ticket links — stay on the 1 MiB non-image budget.
+ * hashes, ticket links — stay on the `maxRequestBodyBytes` non-image budget.
  */
 function measureNonImageAuthorizeBytes(body) {
   if (!isPlainObject(body)) {
@@ -263,7 +281,7 @@ function measureNonImageAuthorizeBytes(body) {
 /**
  * Proxy completion JSON includes `executionTicket`, which authorize never
  * measured. Blank images and drop the ticket so a body that sat under the
- * 1 MiB authorize budget is not 413'd on redeem by ~1 KB of JWT.
+ * `maxRequestBodyBytes` authorize budget is not 413'd on redeem by ~1 KB of JWT.
  */
 function measureNonImageCompletionBytes(body) {
   if (!isPlainObject(body)) {
@@ -314,7 +332,17 @@ function checkStructure(value, maxDepth) {
     const children = Array.isArray(node) ? node : Object.values(node).filter(child => child !== undefined)
     elements += children.length
     if (elements > LIMITS.maxRequestBodyBytes) {
-      return fail('limit', 'request exceeds maxRequestBodyBytes', 'size')
+      // Named distinctly from the byte measurement below, which refuses with
+      // the bare `request exceeds maxRequestBodyBytes`. Both are `limit`
+      // failures of kind `size`, so the wording is the only thing that tells a
+      // user report which guard fired.
+      // The remedy is the same for both - compaction - and the bound is reused
+      // rather than given a constant of its own: every element serializes to
+      // at least one byte, so a request of plain JSON data with more elements
+      // than the byte cap cannot fit under it either (#731). A value that
+      // JSON.stringify drops (a function, a symbol) is still counted here, so
+      // for such input this bound can only refuse earlier, never later.
+      return fail('limit', 'request exceeds maxRequestBodyBytes element bound', 'size')
     }
     for (const child of children) {
       if (child !== null && typeof child === 'object') stack.push(child, depth + 1)
@@ -527,7 +555,7 @@ function parseTransportHints(raw) {
  * looser root by accident.
  *
  * Two size gates run first, before any key, id or payload work:
- *   1. the whole body against this version's ceiling (24 MiB for V2, 1 MiB
+ *   1. the whole body against this version's ceiling (24 MiB for V2, 8 MiB
  *      otherwise), then
  *   2. for V2 only, the body with every image payload blanked against the V1
  *      ceiling — the images, not the text, are what the larger budget buys.
@@ -547,6 +575,10 @@ function parseCodexCompletionRequestRoot(input, schemaVersion, messageKeys) {
   } catch {
     return fail('invalid', 'request is not JSON-serializable')
   }
+  // The byte count covers the whole request, tool definitions included. A
+  // tool catalog that alone exceeds the cap is refused with this message and
+  // the Host labels it context length, although compaction shrinks only the
+  // conversation and cannot bring such a request under the cap.
   if (encoded > schemaRequestBodyLimit(schemaVersion)) {
     return fail(
       'limit',
@@ -753,10 +785,11 @@ function hashCodexCompletionRequest(request) {
  * request the contract rejects or a hash that disagrees with the request it
  * carries. Its exact UTF-8 byte length (JSON.stringify minus whitespace, the
  * same serialization the transport sends) must fit the ceiling of the schema it
- * carries — `requestBodyLimitBytes(request)`, i.e. 24 MiB for V2 and 1 MiB
- * otherwise — which is the number the proxy enforces through
- * CODEX_LLM_PROXY_MAX_BODY_BYTES. A deployment that lowers that proxy limit
- * below the contract limit is not covered by this measurement.
+ * carries — `requestBodyLimitBytes(request)`, i.e. 24 MiB for V2 and 8 MiB
+ * otherwise. The Host and the authorizer build it for V2 only, where 24 MiB is
+ * the number the proxy enforces through CODEX_LLM_PROXY_MAX_VISUAL_BODY_BYTES.
+ * A deployment that lowers that proxy limit below the contract limit is not
+ * covered by this measurement.
  *
  * The request inside the envelope already passed the V2 non-image budget, so
  * the V2 headroom here can only be spent by the ticket and the digest the
@@ -988,6 +1021,7 @@ module.exports = {
   PROVIDER_ID,
   TICKET_TYP,
   LIMITS,
+  ENVELOPE_ALLOWANCE_BYTES,
   VISUAL_LIMITS,
   requestBodyLimitBytes,
   measureNonImageAuthorizeBytes,

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { VISUAL_INPUT_LIMITS } from '../../visualInput/policy'
 import {
   TaskExecutionBudget,
   TaskLimitError,
@@ -51,6 +52,13 @@ describe('TaskExecutionBudget', () => {
     {},
     { elapsedActiveMs: -1, iterationsUsed: 0 },
     { elapsedActiveMs: 0, iterationsUsed: NaN },
+    {
+      elapsedActiveMs: 0,
+      iterationsUsed: 0,
+      durationMs: 1,
+      maxIterations: 1,
+      visualReadBytes: VISUAL_INPUT_LIMITS.readBytesPerTurn + 1,
+    },
   ])('rejects invalid durable accounting %s', value => {
     expect(() => parseTaskExecutionBudget(value)).toThrow('Invalid task execution budget')
   })

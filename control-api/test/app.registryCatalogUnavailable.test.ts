@@ -39,6 +39,7 @@ vi.mock('../src/middleware/rateLimitMiddleware.js', () => ({
   rateLimitMiddleware:
     () => (_req: express.Request, _res: express.Response, next: express.NextFunction) =>
       next(),
+  createRateLimitEnforcer: () => async () => true,
 }))
 
 describe('app: registry-unavailable forwarding at the global error handler (real middleware)', () => {

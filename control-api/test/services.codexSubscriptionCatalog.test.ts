@@ -56,7 +56,7 @@ describe('planCodexCatalogReconcile', () => {
     )
     expect(plan.mutateRows).toBe(true)
     expect(plan.inserts.map(model => model.model)).toEqual(['gpt-5.3-codex'])
-    expect(plan.refresh).toEqual(['gpt-5'])
+    expect(plan.refresh.map(model => model.model)).toEqual(['gpt-5'])
     expect(plan.stale).toEqual(['legacy-codex'])
     expect(plan.catalogStatus).toBe('ready')
     expect(plan.connectionStatus).toBeUndefined()

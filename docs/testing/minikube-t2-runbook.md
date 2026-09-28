@@ -42,8 +42,8 @@ make minikube-t2-runtime MINIKUBE_PROFILE=<generated-profile>
 ```
 
 `make minikube-t2-runtime` is valid only when the pre-gate marker already
-matches HEAD. `make minikube-pre-gate-sync` reconciles the profile; it does
-not emit a T2 verdict.
+matches HEAD and the current source fingerprint. `make minikube-pre-gate-sync`
+reconciles the profile; it does not emit a T2 verdict.
 
 The profile helper that generated the profile remains the source of truth for
 the profile metadata and random localhost port mapping. Resolve it from the
@@ -103,8 +103,18 @@ delete a PVC by default.
 ### Targeted sync
 
 When the pre-gate marker already matches the current worktree path and `HEAD`,
-the planner selects `already-synced` and `make minikube-t2` skips setup and
-`pre-gate-sync`. That is the T2-runtime precondition.
+and its `clusterFingerprint` still matches the fingerprint recomputed from the
+current source tree, the planner selects `already-synced` and
+`make minikube-t2` skips setup and `pre-gate-sync`. That is the T2-runtime
+precondition. A marker whose `HEAD` matches but whose source fingerprint does
+not (for example after an uncommitted edit or a rewritten generated file) is
+planned as `targeted-sync` with reason `source fingerprint changed since the
+pre-gate marker`; outside plan mode it fails with `HEAD_MARKER_MISMATCH`. A
+fingerprint that cannot be computed fails with `HEAD_MARKER_MISMATCH` in both
+modes. Agent state under `*/.claude/*` is not part of the fingerprint. After
+an in-run `pre-gate-sync`, T2 re-reads the marker it stamped, so the T0/T1
+attestation carries the fingerprint that `make minikube-t2-runtime` needs to
+reuse it.
 
 An already healthy profile whose marker is stale may use a targeted
 image/deployment update only when the diff since `origin/dev` is limited to a

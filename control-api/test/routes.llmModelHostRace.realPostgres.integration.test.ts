@@ -81,6 +81,7 @@ describeRealPostgres('llm-model reductor ↔ host referencer serialization (R1-H
 
   let adminPool: Pool
   let corePool: Pool
+  let limiterPool: Pool
   // Loaded dynamically AFTER the env points the module pool at the test DB.
   let mod: {
     createApp: (gateway: unknown) => import('express').Express
@@ -115,6 +116,8 @@ describeRealPostgres('llm-model reductor ↔ host referencer serialization (R1-H
     // Absorb it so teardown is clean (the pool is being torn down anyway).
     corePool = dbMod.pool as unknown as Pool
     corePool.on('error', () => {})
+    limiterPool = dbMod.rateLimitPool as unknown as Pool
+    limiterPool.on('error', () => {})
     const migratePool = new Pool({ connectionString })
     await dbMod.initDb({ connect: () => migratePool.connect() })
     await migratePool.end()
@@ -171,6 +174,7 @@ describeRealPostgres('llm-model reductor ↔ host referencer serialization (R1-H
     else process.env.CONTROL_API_PG_CONNECTION_STRING = previousPgEnv
     // Drain the module pool's connections first so DROP DATABASE has no live users.
     await corePool?.end().catch(() => {})
+    await limiterPool?.end().catch(() => {})
     if (!adminPool) return
     await adminPool.query(
       `SELECT pg_terminate_backend(pid) FROM pg_stat_activity

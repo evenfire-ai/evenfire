@@ -57,6 +57,7 @@ vi.mock('../src/services/registryConnectionDb.js', () => connDb)
 vi.mock('../src/services/rateLimiterService.js', () => ({
   checkAndIncrement: vi.fn(async () => ({
     allowed: true,
+    backendAvailable: true,
     remaining: 29,
     resetMs: Date.now() + 60000,
   })),
@@ -90,6 +91,7 @@ beforeEach(() => {
   connDb.isRegistryAuthActive.mockImplementation(async () => cfg.registryAuthEnabled)
   vi.mocked(checkAndIncrement).mockResolvedValue({
     allowed: true,
+    backendAvailable: true,
     remaining: 29,
     resetMs: Date.now() + 60000,
   } as never)
@@ -188,6 +190,7 @@ describe('GET /admin/registry/keys', () => {
   it('429 when the per-admin rate limit is exceeded', async () => {
     vi.mocked(checkAndIncrement).mockResolvedValue({
       allowed: false,
+      backendAvailable: true,
       remaining: 0,
       resetMs: Date.now() + 60000,
     } as never)

@@ -16,6 +16,7 @@ export interface SliSnapshot {
   orphanCandidates: number
   orphanBytes: number
   blobCleanupFailures: number
+  rateLimitDenied: { read: number; write: number }
 }
 
 function percentile(values: number[], p: number): number {
@@ -37,6 +38,7 @@ export class GfsMetrics {
   private orphanCandidates = 0
   private orphanBytes = 0
   private blobCleanupFailures = 0
+  private readonly rateLimitDenied = { read: 0, write: 0 }
 
   /** Cap retained latency samples so a long-running writer cannot grow unbounded. */
   private static readonly MAX_LAT_SAMPLES = 10_000
@@ -73,6 +75,10 @@ export class GfsMetrics {
   recordBlobCleanupFailure(): void {
     this.blobCleanupFailures += 1
   }
+  /** One agent request denied by the per-subject read or write budget. */
+  recordRateLimitDenial(kind: 'read' | 'write'): void {
+    this.rateLimitDenied[kind] += 1
+  }
 
   snapshot(): SliSnapshot {
     const totalCache = this.cacheHits + this.cacheMisses
@@ -87,6 +93,7 @@ export class GfsMetrics {
       orphanCandidates: this.orphanCandidates,
       orphanBytes: this.orphanBytes,
       blobCleanupFailures: this.blobCleanupFailures,
+      rateLimitDenied: { ...this.rateLimitDenied },
     }
   }
 
@@ -105,6 +112,8 @@ export class GfsMetrics {
       `gfs_blob_orphan_candidates ${s.orphanCandidates}`,
       `gfs_blob_orphan_bytes ${s.orphanBytes}`,
       `gfs_blob_cleanup_failures_total ${s.blobCleanupFailures}`,
+      `gfs_rate_limit_denied_total{kind="read"} ${s.rateLimitDenied.read}`,
+      `gfs_rate_limit_denied_total{kind="write"} ${s.rateLimitDenied.write}`,
     ]
     return lines.join('\n') + '\n'
   }

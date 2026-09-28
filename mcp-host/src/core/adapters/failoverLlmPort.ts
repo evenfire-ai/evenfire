@@ -17,6 +17,7 @@
  */
 import type { ClassifiedLike, FailoverEngine } from '../../llm/failover/engine'
 import type { FailoverTarget, LlmPolicy, ModelPair } from '../../llm/failover/types'
+import type { ImageInputCapability } from '../../visualInput/policy'
 import { LlmError } from '../errors'
 import type { LlmErrorCode } from '../errors'
 import type { LlmPort } from '../interfaces'
@@ -66,6 +67,17 @@ class FailoverLlmPort implements LlmPort {
     return this.o.engine.servedBy()?.model ?? this.o.primaryPair.model
   }
 
+  getImageInputCapability(signal?: AbortSignal): Promise<ImageInputCapability> {
+    // Admission follows the same live cooldown plan as dispatch. The adapter
+    // still rechecks the effective destination if it changes during the read.
+    for (const target of this.o.engine.planTargets(this.o.primaryPair)) {
+      const port = this.portFor(target)
+      if (port)
+        return port.getImageInputCapability?.(signal) ?? Promise.resolve({ status: 'unknown' })
+    }
+    return Promise.resolve({ status: 'unknown' })
+  }
+
   getTokenCounter(): TokenCounter {
     // The compaction/reasoning pre-flight counter is the primary's (built once
     // per task in buildLoopConfig). A cross-provider fallback uses a different
@@ -80,11 +92,11 @@ class FailoverLlmPort implements LlmPort {
   }
 
   complete(request: CompletionRequest): Promise<CompletionResponse> {
-    return this.run(port => port.complete(request))
+    return this.run(port => port.complete(request), request.signal)
   }
 
   completeWithTools(request: ToolCompletionRequest): Promise<ToolCompletionResponse> {
-    return this.run(port => port.completeWithTools(request))
+    return this.run(port => port.completeWithTools(request), request.signal)
   }
 
   private portFor(target: FailoverTarget): LlmPort | null {
@@ -97,7 +109,8 @@ class FailoverLlmPort implements LlmPort {
     return port
   }
 
-  private run<T>(call: (port: LlmPort) => Promise<T>): Promise<T> {
+  private async run<T>(call: (port: LlmPort) => Promise<T>, signal?: AbortSignal): Promise<T> {
+    signal?.throwIfAborted()
     return this.o.engine.run(
       this.o.primaryPair,
       target => {
@@ -107,9 +120,17 @@ class FailoverLlmPort implements LlmPort {
         // + `clerum_llm_fallback_total{to}` reflect it. A SAME-provider fallback
         // adapter was built with `servedModel = primaryModel` (R5.7), so its
         // `modelName()` is the session model, not `entry.model` (spec's FIX-2).
-        return { run: () => call(port), servedModel: port.modelName() }
+        return {
+          run: async () => {
+            signal?.throwIfAborted()
+            const result = await call(port)
+            signal?.throwIfAborted()
+            return result
+          },
+          servedModel: port.modelName(),
+        }
       },
-      classifyLlmError
+      err => (signal?.aborted ? null : classifyLlmError(err))
     )
   }
 }

@@ -1,10 +1,15 @@
 import {
+  GFS_TOOL_RESULT_IMAGE_TEXT,
+  TOOL_RESULT_IMAGE_TEXT,
+} from '../../visualInput/messageProjection'
+import {
   isInternalGeneratedArtifactAttachment,
   isInternalGeneratedArtifactSourceTool,
 } from '../tools/generatedArtifactAttachments'
 import type { Attachment, ChatMessage, MessageContentPart, ToolResult } from '../types'
 
 function shouldCollectAttachment(result: ToolResult, attachment: Attachment): boolean {
+  if (result.is_error || attachment.visualSource?.kind === 'gfs') return false
   if (attachment.kind === 'image') return true
   if (attachment.kind !== 'file') return false
   if (attachment.sourceTool === 'workflow_result') return result.name === 'workflow_result'
@@ -54,9 +59,6 @@ export function collectToolAttachments(
   return added
 }
 
-/** Text of the user message that carries tool-result frames. */
-const TOOL_RESULT_IMAGE_TEXT = 'Here are the screenshots from the tool results above.'
-
 /**
  * Wire-eligible images of ONE tool result, with their provenance.
  *
@@ -105,6 +107,35 @@ export function mergeCollectedAttachments(
   for (const attachment of attachments) appendCollectedAttachment(collected, attachment)
 }
 
+function sameImage(left: MessageContentPart, right: MessageContentPart): boolean {
+  return (
+    left.type === 'image' &&
+    right.type === 'image' &&
+    left.mimeType === right.mimeType &&
+    left.data === right.data &&
+    left.source?.kind === 'gfs' &&
+    right.source?.kind === 'gfs' &&
+    left.source.gfsUri === right.source.gfsUri &&
+    left.source.version === right.source.version
+  )
+}
+
+function imagePart(attachment: Attachment, toolCallId: string): MessageContentPart | null {
+  if (
+    attachment.kind !== 'image' ||
+    (attachment.mimeType !== 'image/jpeg' && attachment.mimeType !== 'image/png')
+  )
+    return null
+  return {
+    type: 'image',
+    mimeType: attachment.mimeType,
+    data: attachment.dataBase64,
+    ...(attachment.visualSource
+      ? { source: { ...attachment.visualSource, attachmentId: attachment.id, toolCallId } }
+      : {}),
+  }
+}
+
 export function appendToolResults(
   messages: ChatMessage[],
   toolResults: ToolResult[],
@@ -112,6 +143,7 @@ export function appendToolResults(
   preserveSourceIdentity = false
 ): void {
   const pendingImages: MessageContentPart[] = []
+  const existingParts = messages.flatMap(message => message.contentParts ?? [])
   const seenVisuals = new Set<string>()
   if (preserveSourceIdentity) {
     for (const message of messages) {
@@ -123,14 +155,29 @@ export function appendToolResults(
       }
     }
   }
-  for (const tr of toolResults) {
+  const prospectiveCollected = [...collectedAttachments]
+  const regularImagesByResult = toolResults.map(result => {
+    const retained = new Set(collectToolAttachments([result], prospectiveCollected))
+    return collectVisualImageParts(result, seenVisuals, retained, preserveSourceIdentity)
+  })
+  for (const [index, tr] of toolResults.entries()) {
     // The UI collection keeps its cross-iteration dedup contract; the visual
     // parts are collected independently so a repeated frame still carries the
     // tool call that produced THIS instance.
-    const legacyRetained = new Set(collectToolAttachments([tr], collectedAttachments))
-    pendingImages.push(
-      ...collectVisualImageParts(tr, seenVisuals, legacyRetained, preserveSourceIdentity)
-    )
+    collectToolAttachments([tr], collectedAttachments)
+    pendingImages.push(...regularImagesByResult[index])
+    if (!tr.is_error) {
+      for (const attachment of tr.attachments ?? []) {
+        if (attachment.visualSource?.kind !== 'gfs') continue
+        const part = imagePart(attachment, tr.tool_call_id)
+        if (
+          !part ||
+          [...existingParts, ...pendingImages].some(existing => sameImage(existing, part))
+        )
+          continue
+        pendingImages.push(part)
+      }
+    }
     messages.push({
       role: 'tool',
       content: tr.content,
@@ -143,9 +190,14 @@ export function appendToolResults(
   }
 
   if (pendingImages.length > 0) {
+    const imageText = pendingImages.some(
+      part => part.type === 'image' && part.source?.kind === 'gfs'
+    )
+      ? GFS_TOOL_RESULT_IMAGE_TEXT
+      : TOOL_RESULT_IMAGE_TEXT
     messages.push({
       role: 'user',
-      content: TOOL_RESULT_IMAGE_TEXT,
+      content: imageText,
       // #654 — the parts below came from tool results, not from the user. The
       // adapter withholds them (and says so in `content`) when the model has no
       // affirmative image-input evidence, instead of failing the whole turn.
@@ -153,7 +205,7 @@ export function appendToolResults(
       contentParts: [
         {
           type: 'text',
-          text: TOOL_RESULT_IMAGE_TEXT,
+          text: imageText,
           ...(pendingImages.every(part => part.sourceIdentityOnly)
             ? { sourceIdentityOnly: true as const }
             : {}),

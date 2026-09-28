@@ -126,10 +126,15 @@ Owned by `@clerum/grok-provider-attempt-contract`, a separate module from Codex
 message, not the conversation, and the 1:4 spread between the two numbers is a
 design choice rather than an arithmetic requirement: a turn of N calls adds
 N+1 messages, so a full 256-call turn occupies 257 of the 1024 message slots.
+`maxRequestBodyBytes` is 8388608 (8 MiB) for every request that carries no
+image, as for Codex (#731). It covers a 1M-token window serialized as escaped
+JSON. The proxy's body limit is that cap plus a 16 KiB envelope allowance,
+and the proxy admits bodies against an in-flight byte budget before parsing
+them.
 
 | Limit                 | Value   |
 | --------------------- | ------- |
-| maxRequestBodyBytes   | 1048576 |
+| maxRequestBodyBytes   | 8388608 |
 | maxMessages           | 1024    |
 | maxToolCalls          | 256     |
 | maxOutputTokens       | 16384   |
@@ -140,18 +145,24 @@ N+1 messages, so a full 256-call turn occupies 257 of the 1024 message slots.
 | maxQueueWaitMs        | 60000   |
 | upstreamIdleTimeoutMs | 600000  |
 | maxRetriesPerAttempt  | 1       |
+| executionTicketTtlMs  | 60000   |
 
 The limit values live only in the table above, which
 `grok-llm-proxy/test/contractFreeze.test.ts` checks against the fixture; the
 same suite pins the fixture to the contract `LIMITS` and the proxy
 `STREAM_LIMITS`.
 
+`maxConcurrentStreams` is 8 slots per proxy process, shared by every Host;
+per-Host fairness is tracked in #767.
+
 All three enforcement points read this module — the control-api authorizer,
 `grok-llm-proxy` and the Host — so a deployment that mixes versions rejects
 requests that fall between the old and the new bounds. Which code the caller
 sees depends on where the rejection happens: the control-api authorizer and
 the proxy both surface the contract parser's failure as `invalid_request`,
-while the Host raises `request_limit_exceeded` before it authorizes at all.
+while the Host raises `request_limit_exceeded` before it authorizes at all —
+for the four size refusals listed under that code below, and `invalid_request`
+for the other four, which no amount of compaction would fix.
 
 That symmetry holds for a request and not for a response, which is why the
 rollout order below is not interchangeable. A proxy carrying the new bound in
@@ -175,6 +186,15 @@ because the contract package carries no version identity a caller could
 present: the proxy has no way to tell which bound the Host on the other end
 was built with.
 
+The context window follows the same rules as Codex. The proxy keeps the
+catalog's `context_window` field, the name the Grok CLI model cache uses, when
+it is a positive integer no larger than 2147483647 (the Postgres `INTEGER`
+ceiling of `llm_allowed_models.context_window_tokens`), and omits it
+otherwise. control-api stores it on every catalog sync and keeps the stored
+value when a later catalog omits the field. When no window is stored, the Host
+uses 256000 for `grok-subscription` and logs `context_window_resolved` once per
+task with the window and its source (`catalog` or `default`).
+
 Proxy robustness (both proxies):
 
 - Admin catalog and connection-test upstream calls have a 15 s deadline that
@@ -187,10 +207,18 @@ Proxy robustness (both proxies):
   checks the abort signal before redeeming a ticket. It also rejects an
   invalid or out-of-bounds deadline before the redeem, so the single-use
   ticket is not consumed.
-- A stream-gate waiter still queued after `maxQueueWaitMs` is rejected
-  with `provider_unavailable` (reason `stream queue wait exceeded`). Queue
-  wait, the 15 s control-api redeem timeout and the first keepalive together
-  stay below the Host HTTP client's 300 s header timeout.
+- Each request gets one admission clock, stamped at arrival: arrival +
+  `maxQueueWaitMs`. The body budget and the stream gate both wait against
+  that same instant, so `maxQueueWaitMs` is the total time a request may
+  spend queued in the proxy. A waiter still queued when it runs out is
+  rejected with `provider_unavailable` (reason `body admission wait exceeded`
+  or `stream queue wait exceeded`). Queue wait, the 15 s control-api redeem
+  timeout and the first keepalive together (60 + 15 + 60 = 135 s) stay below
+  the Host HTTP client's 300 s header timeout.
+- The stream-gate wait also ends at the execution ticket's `exp`, with no
+  margin. A request still queued then is answered 503 `provider_unavailable`
+  without a redeem, and the proxy logs `grok_proxy_admission_refused` with
+  `reason: ticket_life`, `providerAttemptId` and `hostRef`.
 - A single attempt streams for at most `maxStreamDurationMs`: the minimum of the proxy configuration, `STREAM_LIMITS`, the contract
   `maxDeadlineMs` and the value control-api returns on redeem.
 - The proxy fails at startup when `GROK_LLM_PROXY_CONTROL_API_URL` or
@@ -260,12 +288,68 @@ For both providers, a stream counts as a completion only when it ends with
 
 Stable codes: `insufficient_scope`, `no_grant`, `model_not_allowed`,
 `budget_denied` (Host-side only), `connection_unavailable`,
-`provider_unavailable`, `origin_denied`, `ticket_invalid`, `ticket_replayed`,
-`request_hash_mismatch`, `client_upgrade_required`, `tool_call_limit_exceeded`,
-`tool_call_arguments_exceeded`, `invalid_request`, `sse_buffer_exceeded`,
-`stream_duration_exceeded`, `request_limit_exceeded` (Host-side only). The
-freeze gate checks that every code the proxy constructs is in the fixture's
-`errorTaxonomy`.
+`provider_unavailable`, `rate_limited`, `upstream_rejected`,
+`control_plane_unavailable`, `origin_denied`, `ticket_invalid`,
+`ticket_replayed`, `request_hash_mismatch`, `client_upgrade_required`, `tool_call_limit_exceeded`,
+`tool_call_arguments_exceeded`, `invalid_tool_arguments`, `invalid_request`,
+`sse_buffer_exceeded`, `stream_duration_exceeded`, `payload_too_large`,
+`context_length_exceeded`, `request_limit_exceeded` (Host-side only),
+`request_timeout`, `length_required`, `ticket_expired`,
+`unsupported_media_type`, `unknown_field`, `host_binding_mismatch`, `disabled`,
+`Unauthorized`, `not_found`, `internal_error`. The freeze gate checks that every
+code the proxy constructs, and every code it refuses a request with
+(`reject(res, <status>, <code>)`), is in the fixture's `errorTaxonomy`.
+
+- `request_timeout`: HTTP 408. A body granted admission was not read and
+  parsed within the proxy's read deadline; the upstream never saw it.
+- `length_required`: HTTP 411. The request carried `Transfer-Encoding` instead
+  of a `Content-Length`, so its size cannot be admitted before reading.
+- `unsupported_media_type`: HTTP 415. The body is not `application/json`, or it
+  carries a `Content-Encoding` (the parsers never inflate).
+- `length_required` and `unsupported_media_type` stay in the Host's generic
+  non-retryable bucket (`LLM_API_CALL_FAILED`): the Host sends a string body,
+  so its client always sets `Content-Length`, never sets `Content-Encoding` and
+  always sends `application/json`. Either code means a caller other than the
+  Host, or a Host defect, and retrying the same request cannot succeed.
+- `ticket_expired`: HTTP 403. The execution ticket outlived
+  `executionTicketTtlMs`. The proxy answers it directly when the ticket's
+  signature, audience, issuer and claims are valid and only `exp` has passed,
+  which body admission's wait can cause; it also passes the code through when
+  control-api refuses the redeem for the same reason. Every other ticket
+  failure is `ticket_invalid`. The Host retries it with a fresh authorization.
+- `unknown_field`: HTTP 400. The completion or admin body carries a top-level
+  field outside the schema.
+- `host_binding_mismatch`: HTTP 403. The execution ticket is bound to a Host
+  the caller's platform JWT does not name.
+- `disabled`: HTTP 404. The execution kill switch is off.
+- `Unauthorized`: HTTP 401. The platform JWT is missing or invalid.
+- `not_found`: HTTP 404. Unknown route on the runtime, admin or probe listener.
+- `internal_error`: HTTP 500. An unhandled error in the request pipeline.
+- `rate_limited`: HTTP 429. Either the upstream answered the completion with
+  429 (a subscription quota or rate limit), or the proxy's own limiter on the
+  completion endpoint (60 requests per minute, counted before authorization
+  and body parsing) refused the request. For an upstream 429 the proxy
+  forwards `Retry-After` only when it is delta-seconds from 1 to 3600; any
+  other value is dropped, never guessed. The header travels only on a JSON
+  reply: once SSE bytes are on the wire, the error frame carries the code
+  alone. The limiter's reply carries the `Retry-After` and draft-7
+  `RateLimit`/`RateLimit-Policy` headers that express-rate-limit sets.
+- `upstream_rejected`: HTTP 422. The upstream answered the completion with a
+  4xx that no narrower code covers, including a 402/403 entitlement refusal.
+  The same request would get the same answer, so it is not a provider outage.
+  It is not 502, because the gateways answer 502 when nothing behind them
+  answered. The upstream status travels as `upstreamStatus` on both paths
+  (`{"error":"upstream_rejected","upstreamStatus":403}`, or the same field on
+  the SSE error frame) and in the log line's `details`. The Host classifies
+  the code as `LLM_UPSTREAM_REJECTED` ("Provider Rejected Request"), not
+  retryable and without failover, and exposes the upstream status as the
+  classified error's `httpStatus`. The upstream status mapping is: 400
+  `invalid_request`, 401 `connection_unavailable`, 426
+  `client_upgrade_required`, 429 `rate_limited`, any other 4xx except 408
+  `upstream_rejected`, anything else (408 and 5xx included)
+  `provider_unavailable`.
+- `control_plane_unavailable`: HTTP 503. No control-plane process answered
+  the redeem; see "Control-plane outage" below.
 
 - `invalid_request`: the request body failed the transport schema (HTTP 400
   before redeem), or the upstream answered the completion with HTTP 400.
@@ -276,9 +360,15 @@ freeze gate checks that every code the proxy constructs is in the fixture's
   upstream body and returns HTTP 504, or an SSE error frame when text had
   already been streamed. The Host maps it to `LLM_STREAM_DURATION_EXCEEDED`.
   It is not retryable and not failover-eligible: another attempt would spend
-  the same budget on the same turn.
+  the same budget on the same turn. The 1800000 ms value is a policy choice,
+  not an upstream limit: the upstream publishes no maximum stream length.
+  Observed durations are recorded in
+  `grok_llm_proxy_stream_duration_seconds` (buckets up to 1800 s), which is
+  the data the cap should be revisited with.
 - Idle timeout: when the upstream sends no byte for `upstreamIdleTimeoutMs`
-  (the value read from the Grok Build client source), the proxy cancels the upstream
+  (the Grok Build CLI default `inference_idle_timeout_secs = 600`, read from
+  the config embedded in the closed grok-build 1.0.41 binary; no public
+  source exists to cite), the proxy cancels the upstream
   body and fails the attempt with `provider_unavailable` (HTTP 503, reason
   `upstream stream idle timeout`). That code stays retryable and
   failover-eligible, because a silent upstream is an outage of that provider,
@@ -309,8 +399,9 @@ freeze gate checks that every code the proxy constructs is in the fixture's
   not failover-eligible (failover class `null`), so the task fails with that
   code instead of `LLM_MODEL_OVERLOADED`.
 - `tool_call_arguments_exceeded`: the `arguments` text retained across one
-  response's pending tool calls crossed `MAX_TOOL_CALL_ARGUMENT_CHARS`
-  (`grok-llm-proxy/src/grokTransport.ts`, 1 MiB). `maxToolCalls` bounds how
+  response's pending tool calls crossed `MAX_TOOL_CALL_ARGUMENT_BYTES`
+  (`grok-llm-proxy/src/grokTransport.ts`, equal to `maxRequestBodyBytes`,
+  8 MiB, counted in UTF-8 bytes). `maxToolCalls` bounds how
   many calls a response may carry, never how large each one is, and the SSE
   buffer guard cannot see this: it bounds the unparsed tail between two `\n\n`
   boundaries and is reset on every read. Delivered like
@@ -321,19 +412,109 @@ freeze gate checks that every code the proxy constructs is in the fixture's
   proxy body carries only the code, the Host turns it into guidance for
   whoever composes the next turn (`grokProxyErrorMessage`): send a more bounded
   request — fewer items per call, narrower fields, or the work split across
-  several smaller calls. The bound and that wording are interim; issue #731
-  owns the end-to-end size budget and its own PR replaces both.
-- `request_limit_exceeded` (Host-side only): the request history exceeds
-  `maxMessages`. The Host raises it before authorization and maps it to
-  `LLM_CONTEXT_LENGTH_EXCEEDED`, not retryable.
+  several smaller calls. The bound and that wording are interim: the #731
+  request-size work classifies this refusal as context length (above) and
+  leaves the bound's value and the wording as they are.
+- `invalid_tool_arguments`: a tool call's `arguments` are not a JSON object —
+  truncated JSON or a non-object value. The transport refuses the whole
+  response instead of running the tool with `{}`, both when the call is closed
+  by `response.output_item.done` / `response.function_call_arguments.done` and
+  when a pending call is flushed at `response.completed`. Empty or
+  whitespace-only `arguments` on a call closed by one of those two events are
+  a call without parameters and reach the Host as `{}`; the Host still
+  validates `{}` against the tool's schema. A closing event with empty
+  `arguments` never replaces what the deltas already delivered, so truncated
+  deltas stay refused. Empty `arguments` on a call that was never closed,
+  flushed at `response.completed`, are refused like truncated JSON. A stream
+  that was
+  canceled or that the upstream failed keeps its own outcome (`canceled`,
+  `provider_unavailable`), because its open call is truncated as a
+  consequence. A stream that ends with no terminal event keeps the outcome
+  `unknown`: its open calls keep the name and count checks, their arguments
+  are not parsed, and none is delivered. Delivered like
+  `tool_call_limit_exceeded` — 422 carrying the
+  code, or an SSE error frame once text is on the wire. The Host maps it to
+  `LLM_INVALID_RESPONSE`, not retryable, failover class `null`.
+- `request_limit_exceeded` (Host-side only): the turn carries too much. The
+  Host raises it before authorization — so no provider attempt is spent — and
+  maps it to `LLM_CONTEXT_LENGTH_EXCEEDED`, not retryable, which the UI shows
+  as "Conversation Too Long". The upstream's own context-window refusal is
+  `context_length_exceeded`, below.
+
+  Four of the contract's `limit` refusals mean this, and the Host classifies on
+  the refusal message because `hashCanonicalGrokRequest` returns
+  `{ ok, code, message }` and nothing else:
+
+  | Refusal message                                     | Guard                             |
+  | --------------------------------------------------- | --------------------------------- |
+  | `request exceeds maxRequestBodyBytes`               | serialized UTF-8 byte cap         |
+  | `request exceeds maxRequestBodyBytes element bound` | element count in `checkStructure` |
+  | `messages exceed <maxMessages>`                     | message count                     |
+  | `messages[i].toolCalls exceed <maxToolCalls>`       | tool calls on one message         |
+
+  All four mean the conversation is too long, but compaction does not reach
+  them equally. The Host's context manager counts the serialized bytes and,
+  for this provider, the message count against the contract's `maxMessages`,
+  so it compacts before either bound. A single turn holding more than
+  `maxMessages` messages stays unshrinkable, because the cut never lands
+  inside a turn. `maxToolCalls` also bounds every response, so only history
+  produced by another provider can carry an over-long `toolCalls` array.
+
+  The element bound is named distinctly
+  from the byte cap so that a user report can tell which guard fired, not
+  because it is fixed differently: every element serializes to at least one
+  byte, so a request of plain JSON data with more elements than the byte cap
+  cannot fit under the byte cap either, and for such a request an
+  element-bound refusal is always also a byte-bound one. A value that
+  `JSON.stringify` drops (a function, a symbol) is still counted, so for other
+  input the element bound can only refuse earlier.
+
+  The byte cap covers the whole request, tool definitions included. A tool
+  catalog that alone exceeds it is refused with the same message and labelled
+  context length, although compaction shrinks only the conversation and cannot
+  bring that request under the cap.
+
+  The message count is refused by the Host's own guard before the canonical
+  hash runs; the other three reach this classification through the hash. Until
+  #731 the hash path reported them as `invalid_request`, which the UI rendered
+  as a retryable "Connection Error" and which invited the retry that reproduced
+  the refusal.
+
+  The contract's remaining `limit` refusals — nesting depth,
+  `generation.maxOutputTokens` and `deadlineMs` out of range — stay
+  `invalid_request`: a shorter conversation fixes none of them, and labelling
+  them a context-length failure would invite a compaction loop that cannot
+  converge.
+
+- `payload_too_large`: an envelope over a body limit, one hop after the Host's
+  own check. The authorize hop raises it for every HTTP 413, whether
+  control-api answered `payload_too_large` or the workflow-approval gateway's
+  `client_max_body_size`, in front of control-api, answered with no JSON error
+  code (`ProviderAttemptAuthorizer`). The Host's own whole-body check before
+  authorize raises it too, and so does the proxy's 413, with or without a
+  JSON body. The Host maps it to `LLM_CONTEXT_LENGTH_EXCEEDED`, not
+  retryable. No provider attempt is spent when authorize refused it.
+- `context_length_exceeded`: the upstream refused a prompt over the model's
+  context window. Recorded on 2026-09-23 against `/v1/responses` with
+  `grok-4.6`, the refusal is an HTTP 400 before any stream starts, with the
+  body `{"code":"invalid-argument","error":"Failed to start sampling:
+  [input_too_large] The prompt is too long for this model's context window
+  (<n> tokens > <window> tokens)"}`. The `code` field is generic, so the
+  transport keys on the `[input_too_large]` marker inside the `error` string.
+  It reads a non-success body once, up to 16 KiB, for both the log hint and
+  the marker; a 401, a body past the bound, and any other body keep the
+  status mapping (`invalid_request` for 400). The proxy answers HTTP 400
+  `{"error":"context_length_exceeded"}`, and the Host maps it to
+  `LLM_CONTEXT_LENGTH_EXCEEDED`, not retryable, failover class `null`. The
+  provider attempt was spent: the upstream received the request.
 
 `grok_proxy_attempt_failures_total{code}` counts failed attempts. Its label
 allowlist is `ATTEMPT_ERROR_STATUS` in `grok-llm-proxy/src/server.ts` — the
-same table that maps a code to its HTTP status — not the list above. The table
-is a superset: it also carries the control-api codes that never reach the Host
-as a provider error (`Unauthorized`, `ticket_expired`, `host_binding_mismatch`,
-`disabled`, `invalid_receipt`, `conflict`), and it omits the two Host-side codes
-above.
+same table that maps a code to its HTTP status — not the list above. The two
+differ: the table also carries two control-api codes the list does not publish
+(`invalid_receipt`, `conflict`), and it leaves out the two Host-side codes above
+and the proxy's own request refusals (`payload_too_large`, `length_required`,
+`unsupported_media_type`, `unknown_field`, `not_found`, `internal_error`).
 Anything outside the table is recorded as `other`, because a control-api error
 body is not bounded by the proxy. The raw code stays in the
 `grok_proxy_attempt_finished` log line.
@@ -341,6 +522,80 @@ A request the proxy refuses on its own request limits (stream queue full,
 queue wait exceeded, invalid deadline) reaches the Host as
 `provider_unavailable`. The metric labels it `request_limit` to keep it apart
 from upstream outages, and the log line carries the limit's fixed `reason`.
+
+### Control-plane outage
+
+control-api runs one replica with a `Recreate` strategy, so a rollout or a
+cluster update leaves it with no ready endpoint; the same happens when
+`control-api-rpc-gateway` restarts. In the minikube check of #720 a real
+restart left control-api without an endpoint for about 15 s, after about 30 s
+in which the terminating pod still answered. The proxy answers
+`control_plane_unavailable` only when no control-plane process produced a
+response to the redeem:
+
+- the redeem `fetch` rejected before any response, the 15 s request timeout
+  had not fired, and the undici cause code is `ECONNREFUSED`, `ENOTFOUND`,
+  `EAI_AGAIN`, `EHOSTUNREACH`, `ENETUNREACH` or `UND_ERR_CONNECT_TIMEOUT`.
+  The connection is refused only in the short window where the endpoint still
+  lists a pod that has exited. Once the endpoint is gone the SYN is dropped,
+  and undici gives up after its 10 s connect timeout with
+  `UND_ERR_CONNECT_TIMEOUT`;
+- the rpc gateway answered JSON `{"error":"control_plane_unavailable"}`. The
+  gateway writes that body itself, from an `error_page 502` named location,
+  when nginx generated the 502: the connection to control-api was refused, or
+  control-api closed it or sent an invalid header before a response. In the
+  last two cases control-api may already have processed the redeem, so the
+  code means that no response came back, not that the request never arrived.
+  The body passes through the proxy's JSON-`error` branch like a code
+  control-api returns;
+- the rpc gateway answered the same JSON body from its `error_page 504`
+  named location (#820). nginx generates a 504 for a connect timeout and for
+  a read or send timeout; the named location answers
+  `control_plane_unavailable` only when `$upstream_connect_time` is `-`,
+  which nginx leaves unset until the connection is made, so control-api never
+  received the redeem. This is the signal for most of a restart: once the
+  endpoint is gone the SYN is dropped and the connect times out. The redeem
+  locations set `proxy_connect_timeout 5s`, shorter than the proxy's 15 s
+  request timeout, so the proxy receives this answer instead of timing out.
+
+These stay `provider_unavailable`: `ECONNRESET` or another socket error after
+the request was sent, the 15 s timeout, a non-JSON 502/503/504 (a 504 from a
+read or send timeout, when control-api may be alive and slow, keeps nginx's
+own HTML page), and a JSON `provider_unavailable`. Finalize failures do not
+change: they are logged and never reach the caller, and the finalize
+locations keep nginx's default timeouts and error handling.
+
+Deployment order: an mcp-host from before #720 has no arm for
+`control_plane_unavailable` and classifies it as `LLM_API_CALL_FAILED`, not
+retryable and without failover, where the same outage used to be a retryable
+`provider_unavailable`. Roll out the mcp-host images first, including the one
+HCC sets as `CONTEXT_MAPPER_HOST_IMAGE`, and wait until every Host pod runs
+the new image; then roll out the proxies and the control-plane ConfigMap,
+restarting `control-api-rpc-gateway` and `nginx-workflow-approval-gateway`,
+which mount `nginx.conf` through `subPath`. `rate_limited` needs no order: an
+old Host already classifies it as a new one does. `upstream_rejected` needs
+none either: an old Host classifies it as `LLM_API_CALL_FAILED` ("Connection
+Error") without `httpStatus`, with the same behaviour (not retryable, no
+failover), and a Desktop from before #720 shows the generic "Error" label for
+`LLM_UPSTREAM_REJECTED`.
+
+The Host classifies `control_plane_unavailable` as
+`LLM_CONTROL_PLANE_UNAVAILABLE`, retryable, with the failover class
+`provider_unavailable`. The Host sets the same code when its own connect to
+the authorize gateway or to the proxy fails in the connect phase. The
+authorize location of `nginx-workflow-approval-gateway` answers the same JSON
+code for its own 502 and, like the redeem locations, for a 504 whose
+`$upstream_connect_time` is `-` (its `proxy_connect_timeout` is 5 s), and the
+Host reads it as the authorize error code. The tool-use loop retries it once after 350 ms, as it retries a retryable
+`LLM_API_CALL_FAILED`; before #720 a refused Host connect reached the loop as
+that code. The retry is a new provider attempt with a new authorize, so a
+redeemed ticket is never reused.
+
+The client logs `grok_proxy_control_api_unreachable` with `path` only. The
+`grok_proxy_attempt_finished` line carries `causeCode` whenever the failure
+is a rejected `fetch`: the undici cause code, such as `ECONNREFUSED`, and
+nothing else from the error. When both finalize tries fail, the `err` of
+`grok_proxy_finalize_failed` carries it instead; the hop line never does.
 
 ## Feature flags
 

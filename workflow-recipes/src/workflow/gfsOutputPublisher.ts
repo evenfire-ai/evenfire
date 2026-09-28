@@ -1,4 +1,5 @@
 import { readFile } from 'node:fs/promises'
+import { setTimeout as delay } from 'node:timers/promises'
 import type { WorkflowConfig } from '@clerum/workflow-runtime-core'
 
 export interface GfsPublishTarget {
@@ -16,6 +17,26 @@ export interface GfsOutputPublisherDeps {
   env?: NodeJS.ProcessEnv
   fetchFn?: typeof fetch
   readFileFn?: typeof readFile
+  sleepFn?: (ms: number) => Promise<void>
+  /** True once the run has been cancelled; read at least once a second during a retry wait. */
+  isCancelled?: () => boolean
+}
+
+/**
+ * The run was cancelled after a 429, before or during the Retry-After wait, so
+ * the retry was not sent. The caller reports the run as cancelled, not failed.
+ */
+export class GfsPublishCancelledError extends Error {
+  constructor() {
+    super('GFS output publish stopped: the workflow run was cancelled')
+    this.name = 'GfsPublishCancelledError'
+  }
+}
+
+interface AgentRetry {
+  fetchFn: typeof fetch
+  sleepFn: (ms: number) => Promise<void>
+  isCancelled: () => boolean
 }
 
 const DEFAULT_GFSC_READER_BASE_URL = 'http://gfsc.gfs.svc.cluster.local:8087'
@@ -23,6 +44,13 @@ const DEFAULT_GFSC_WRITER_BASE_URL = 'http://gfsc-writer.gfs.svc.cluster.local:8
 const RESOURCE_ID_RE = /^[a-fA-F0-9][a-fA-F0-9-]{30,40}[a-fA-F0-9]$/
 const HEADER_NAME = 'authorization'
 const HEADER_SCHEME = 'Bearer'
+// gfsc's per-replica agent limiter answers before the permission store and
+// the executor run, so a write it denied had no effect and sending it again
+// is safe. Upload-quota 429s carry other scopes and are not retried.
+const RETRYABLE_SCOPES = new Set(['agent_reads', 'agent_writes'])
+const MAX_RETRY_AFTER_SECONDS = 60
+// How often a retry wait checks for a cancel of the run.
+const CANCEL_CHECK_INTERVAL_MS = 1000
 
 export async function publishWorkflowOutputsToGfs(
   spec: GfsPublishWorkflowSpec,
@@ -38,6 +66,8 @@ export async function publishWorkflowOutputsToGfs(
   const env = deps.env ?? process.env
   const fetchFn = deps.fetchFn ?? fetch
   const readFileFn = deps.readFileFn ?? readFile
+  const sleepFn = deps.sleepFn ?? ((ms: number) => delay(ms))
+  const retry: AgentRetry = { fetchFn, sleepFn, isCancelled: deps.isCancelled ?? (() => false) }
   const accessFile = env.GFS_ACCESS_FILE?.trim()
   if (!accessFile) {
     throw new Error('GFS_ACCESS_FILE is required when spec.gfs.publishTargets is configured')
@@ -60,9 +90,10 @@ export async function publishWorkflowOutputsToGfs(
   )
 
   for (const target of targets) {
-    const parentId = await resolvePublishParent(target, accessValue, fetchFn, env)
-    const response = await fetchFn(
-      `${baseUrl(env.CLERUM_GFSC_WRITER_BASE_URL, DEFAULT_GFSC_WRITER_BASE_URL)}/v1/resources/${encodeURIComponent(parentId)}/children`,
+    const parentId = await resolvePublishParent(target, accessValue, retry, env)
+    const url = `${baseUrl(env.CLERUM_GFSC_WRITER_BASE_URL, DEFAULT_GFSC_WRITER_BASE_URL)}/v1/resources/${encodeURIComponent(parentId)}/children`
+    const response = await fetchWithAgentRetry(
+      url,
       {
         method: 'POST',
         headers: {
@@ -70,7 +101,8 @@ export async function publishWorkflowOutputsToGfs(
           'content-type': 'application/json',
         },
         body: JSON.stringify({ name, kind: 'file', content }),
-      }
+      },
+      retry
     )
     if (!response.ok) {
       throw new Error(
@@ -83,7 +115,7 @@ export async function publishWorkflowOutputsToGfs(
 async function resolvePublishParent(
   target: GfsPublishTarget,
   accessValue: string,
-  fetchFn: typeof fetch,
+  retry: AgentRetry,
   env: NodeJS.ProcessEnv
 ): Promise<string> {
   const rawTarget = target.target.trim()
@@ -92,9 +124,10 @@ async function resolvePublishParent(
     throw new Error(`unsupported GFS publish target: ${rawTarget}`)
   }
 
-  const response = await fetchFn(
+  const response = await fetchWithAgentRetry(
     `${baseUrl(env.CLERUM_GFSC_BASE_URL, DEFAULT_GFSC_READER_BASE_URL)}/v1/resolve?uri=${encodeURIComponent(rawTarget)}`,
-    { headers: { [HEADER_NAME]: `${HEADER_SCHEME} ${accessValue}` } }
+    { headers: { [HEADER_NAME]: `${HEADER_SCHEME} ${accessValue}` } },
+    retry
   )
   if (!response.ok) {
     throw new Error(
@@ -105,6 +138,43 @@ async function resolvePublishParent(
   const resourceId = payload.data?.resourceId ?? payload.data?.rid
   if (!resourceId) throw new Error('GFS output target resolve returned no resourceId')
   return resourceId
+}
+
+/**
+ * Sends the request, and once more after an agent-limiter 429 that states a
+ * delay of at most MAX_RETRY_AFTER_SECONDS. A second denial is returned for the
+ * caller to fail with its status. The wait can last up to a minute, so it is
+ * taken in CANCEL_CHECK_INTERVAL_MS steps and a cancel ends it, and the retry,
+ * within one step.
+ */
+async function fetchWithAgentRetry(
+  url: string,
+  init: RequestInit,
+  retry: AgentRetry
+): Promise<Response> {
+  const response = await retry.fetchFn(url, init)
+  const retryAfterSeconds = agentRetryAfterSeconds(response)
+  if (retryAfterSeconds === undefined) return response
+  await response.body?.cancel()
+  let remainingMs = retryAfterSeconds * 1000
+  while (remainingMs > 0) {
+    if (retry.isCancelled()) throw new GfsPublishCancelledError()
+    const stepMs = Math.min(CANCEL_CHECK_INTERVAL_MS, remainingMs)
+    await retry.sleepFn(stepMs)
+    remainingMs -= stepMs
+  }
+  if (retry.isCancelled()) throw new GfsPublishCancelledError()
+  return retry.fetchFn(url, init)
+}
+
+/** The Retry-After of a retryable agent-limiter 429, in seconds; undefined otherwise. */
+function agentRetryAfterSeconds(response: Response): number | undefined {
+  if (response.status !== 429) return undefined
+  if (!RETRYABLE_SCOPES.has(response.headers.get('x-gfs-ratelimit-scope') ?? '')) return undefined
+  const retryAfter = response.headers.get('retry-after') ?? ''
+  if (!/^[1-9][0-9]?$/.test(retryAfter)) return undefined
+  const seconds = Number(retryAfter)
+  return seconds <= MAX_RETRY_AFTER_SECONDS ? seconds : undefined
 }
 
 function outputFileName(workflowName: string, workflowRunId: string | null): string {

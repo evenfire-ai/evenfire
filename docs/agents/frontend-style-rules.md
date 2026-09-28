@@ -19,6 +19,51 @@ application guidance that must be combined with this shared document.
 - Consolidate variants that are semantically equivalent, but do not flatten
   intentional application differences.
 
+## Markdown rendering and editing
+
+- For Markdown surfaces in Control UI, Profile UI, and the Desktop renderer,
+  use `@uiw/react-md-editor` as the standard rendering and editing library.
+  Reuse an existing application adapter where one exists; otherwise add a
+  small app-local adapter around the library rather than duplicating a parser,
+  renderer, or editor integration. Keep the library as a direct dependency of
+  each application that imports it.
+- Choose the library API by intent. For display-only content, render with
+  `MDEditor.Markdown`; do not mount the editor in a disabled, read-only, or
+  `preview="preview"` state just to display a document. For editing, use
+  `MDEditor` through the app's editor adapter and select the intended editing
+  experience (`preview="edit"` for source-only editing or `preview="live"`
+  when an editable live preview is part of the design). A rendered document
+  must not become editable merely because it is focused or clicked.
+- Load the library in the way supported by the target runtime. For example,
+  Next.js surfaces that cannot server-render the editor/renderer must use the
+  established client-only dynamic import pattern. Do not copy framework
+  loading behavior into another application without checking its runtime.
+- Preserve Markdown semantics and the content's security boundary. Treat
+  Markdown as untrusted input: if the selected library pipeline parses raw HTML,
+  sanitize the resulting syntax tree after raw-HTML parsing and before rendering.
+  A `skipHtml` prop is not sufficient unless the exact selected renderer is
+  verified to honor it. Apply the owning app's safe URL policy to links and
+  other URL-bearing nodes, and do not cause untrusted Markdown to fetch remote
+  images or embed active content by default. Do not bypass these protections
+  through custom renderers or URL transforms.
+- Display-only output must retain semantic headings, lists, links, and other
+  supported document structure. Links and controls inside Markdown remain
+  independently operable; they must not be swallowed by a clickable/fake
+  button wrapper. If blank preview space also opens an editor, ignore
+  interactive descendants and provide a separately named, keyboard-operable
+  Edit button.
+- Test both the chosen mode and its observable contract: semantic output and
+  link behavior for rendering; value changes, keyboard operation, focus,
+  cancel/save, and validation for editing; plus unsafe HTML/URL/image behavior
+  where content can be untrusted.
+- A different renderer/parser is an exception, not a parallel default. Keep an
+  existing specialized pipeline only when the required behavior (such as
+  transformed chat annotations or streaming semantics) cannot be preserved by
+  the standard library without regression. Record the concrete limitation and
+  security/accessibility guarantees in the relevant app guidance or design
+  context, and cover that behavior with tests. Do not extend an exception to
+  ordinary document preview or editing surfaces.
+
 ## Types, constants, and imports
 
 - Do not declare exported or reusable `type` or `interface` definitions inside
@@ -79,6 +124,61 @@ application guidance that must be combined with this shared document.
 - Interactive hover states must not move, scale, translate, reposition, or
   brightness-filter controls. Use background, border, text color, and shadow
   tokens instead of `transform`, `translate`, `top`, `margin`, or `filter`.
+
+## Edit dialogs and modal workflows
+
+- From a read surface, edit one scalar value with `SingleValueEditDialog`;
+  do not transform the displayed value inline into an editor. For an existing
+  record with at most four simple controls, use `SimpleEditDialog`. The limit
+  does not apply to tabs, tables, rich text, repeatable collections,
+  verification, ordered policies, or long explanatory/review content.
+- Edit a child scalar or write-only value directly inside an already-active
+  parent editor. Its value participates in the parent's final Save; do not
+  open a nested dialog just to edit that child value.
+- Keep creation steppers only for actual sequence or dependency. Edit an
+  existing long-form record on a full page, choosing long-form or tabs to fit
+  the domain structure rather than reusing a creation stepper for grouping.
+- Model relationships with structural selection/action patterns, not scalar
+  form edits. Immediate toggles/actions and collection selection/actions are
+  distinct workflows, not ordinary edit dialogs.
+- Use the shared `@clerum/frontend-components` `DialogShell` as the modal
+  boundary. Compose it with `ConfirmationDialog`, `SingleValueEditDialog`,
+  `SimpleEditDialog`, `SecretEditField`, or `MultiSelectActionDialog` when that
+  primitive matches the interaction; keep routes, permissions, API calls, and
+  domain-specific validation in the owning application.
+- Keep dialog titles at the established modal heading level (`h3`). Provide a
+  useful accessible name and connect any explanatory copy and live feedback to
+  the dialog. Use alert-dialog semantics for consequential confirmations only.
+- A dialog opened from a keyboard-operable control must focus into the dialog,
+  contain Tab and Shift+Tab navigation, support Escape and explicit close or
+  cancel paths when safe, and return focus to its opener when dismissed. A
+  backdrop click may dismiss only when that matches the workflow.
+- Pending mutations must disable duplicate actions and prevent accidental
+  dismissal when the operation cannot safely be interrupted. Show progress and
+  actionable errors in the dialog; do not report success until the owning
+  mutation has completed.
+- Single-value editing must keep its draft atomic, distinguish unchanged,
+  invalid, and pending states, and avoid enabling Save when no change is made.
+  Multi-field dialogs must keep field ownership and validation in the app and
+  enable Save only when the form is valid, changed, and not pending.
+- Secret editing is write-only: never fetch or render an existing secret as an
+  input value. Represent keep, replace, clear, and restore as explicit states;
+  a blank untouched or restored input means preserve the existing value, not
+  clear it. Save interprets replaced as write and cleared as remove.
+- Multi-select action dialogs must expose labeled choices, preserve disabled
+  item constraints, filter by explicit searchable text, and enable the action
+  only when the selection is actionable and no load or mutation is pending.
+- Keep dialogs centered at narrow and regular viewports, using the shared
+  bounded width, viewport height, and padding conventions. Keep content
+  scrollable within the viewport and action controls reachable without
+  horizontal overflow; do not introduce an unapproved mobile sheet pattern.
+- Staged editors preserve drafts after failure, expose explicit completion,
+  and preserve the owning app's existing `resourceVersion`/CAS behavior.
+- Keep these primitives composable and semantic; do not encode API requests,
+  resource identities, access policy, or product-specific copy in the shared
+  package. Add a specialized primitive only after the same bounded behavior is
+  needed across applications. Shared presentation mechanics may live here;
+  routes, APIs, auth, permissions, CAS, and domain logic remain app-owned.
 
 ## Tables and record lists
 

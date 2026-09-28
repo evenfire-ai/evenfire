@@ -78,6 +78,7 @@ export interface SingleTurnProvider {
       temperature?: number
       tool_choice?: string
       signal?: AbortSignal
+      verifyImageInput?: boolean
     }
   ): Promise<ToolCompletionResponse>
 
@@ -107,6 +108,7 @@ export interface SingleTurnProvider {
       temperature?: number
       tool_choice?: string
       signal?: AbortSignal
+      verifyImageInput?: boolean
     }
   ): Promise<ToolCompletionResponse>
 

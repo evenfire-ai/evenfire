@@ -1624,6 +1624,419 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
     expect(createdServiceNames).not.toContain(serviceName)
   })
 
+  // The disabled branch applies no policy, so it must not report a summary: an
+  // empty summary reads as "evaluated, no conflict" and would clear a published
+  // WorkflowNetworkPolicyOwnership condition.
+  it('reports no NetworkPolicy summary when the SDK runtime is disabled', async () => {
+    const deps = makeDeps()
+    const reconciler = new WorkflowReconciler({
+      ...deps,
+      config: { ...deps.config, pluginWorkloadSdkEnabled: false },
+    })
+
+    const result = await reconciler.reconcilePluginWorkloadSdkOnly(
+      'sdk-only',
+      'uid-sdk-only',
+      sandboxNamespace,
+      sdkSpec({ steps: undefined })
+    )
+
+    expect(result.phase).toBe('active')
+    expect(result.message).toBe('Plugin Workload SDK runtime disabled')
+    expect(mockCoreApi.createNamespacedPod).not.toHaveBeenCalled()
+    expect(mockNetworkingApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    expect(result.networkPolicies).toBeUndefined()
+  })
+
+  describe('NetworkPolicy ownership conflicts', () => {
+    const foreignOwnedPolicy = (name: string) => ({
+      metadata: {
+        name,
+        namespace: sandboxNamespace,
+        resourceVersion: '7',
+        ownerReferences: [
+          {
+            apiVersion: 'apps/v1',
+            kind: 'Deployment',
+            name: 'another-controller',
+            uid: 'foreign-owner-uid',
+            controller: true,
+          },
+        ],
+      },
+      spec: { podSelector: {} },
+    })
+    const foreignOnly = (foreignName: string) =>
+      mockNetworkingApi.readNamespacedNetworkPolicy.mockImplementation(
+        async ({ name }: { name: string }) => {
+          if (name === foreignName) return foreignOwnedPolicy(foreignName)
+          throw { code: 404 }
+        }
+      )
+    const writesTo = (name: string) => [
+      ...mockNetworkingApi.createNamespacedNetworkPolicy.mock.calls.filter(
+        call => call[0].body.metadata.name === name
+      ),
+      ...mockNetworkingApi.replaceNamespacedNetworkPolicy.mock.calls.filter(
+        call => call[0].name === name
+      ),
+    ]
+    const createdNames = () =>
+      mockNetworkingApi.createNamespacedNetworkPolicy.mock.calls.map(
+        call => call[0].body.metadata.name
+      )
+    const ownershipCondition = (conditions: unknown) =>
+      (conditions as Array<{ type: string }> | undefined)?.find(
+        condition => condition.type === 'WorkflowNetworkPolicyOwnership'
+      )
+
+    it('SDK-only lane returns the conflict and leaves the foreign policy untouched', async () => {
+      const foreignName = 'sdk-only-workload-to-mcp-host-sdk-ingress'
+      foreignOnly(foreignName)
+      const reconciler = new WorkflowReconciler(makeDeps())
+
+      const result = await reconciler.reconcilePluginWorkloadSdkOnly(
+        'sdk-only',
+        'uid-sdk-only',
+        sandboxNamespace,
+        sdkSpec({ steps: undefined })
+      )
+
+      expect(mockNetworkingApi.readNamespacedNetworkPolicy).toHaveBeenCalledWith(
+        expect.objectContaining({ name: foreignName })
+      )
+      // The conflict did not stop the rest of the pass.
+      expect(createdNames()).toContain('sdk-only-workload-to-mcp-host-sdk-egress')
+      expect(result.phase).toBe('active')
+      expect(result.networkPolicies).toEqual({
+        conflicts: [{ policy: foreignName, reason: 'owner-reference-mismatch' }],
+        retryPending: false,
+      })
+      expect(writesTo(foreignName)).toHaveLength(0)
+    })
+
+    // Every eager host status that is not `ready` still ran the apply when it
+    // carries a summary, so the SDK-only lane must hand that summary on: dropping
+    // it would read as "returned before applying" and keep a stale condition.
+    it.each([
+      { status: 'awaiting_policy', phase: 'awaiting_policy' },
+      { status: 'deploying', phase: 'deploying' },
+      { status: 'provider_unavailable', phase: 'provider_unavailable' },
+      { status: 'failed', phase: 'failed' },
+    ] as const)(
+      'SDK-only lane passes the eager apply summary through on $status',
+      async ({ status, phase }) => {
+        const reconciler = new WorkflowReconciler(makeDeps())
+        const provisioner = (
+          reconciler as unknown as {
+            pluginWorkloadSdkProvisioner: {
+              ensureEagerSdkMcpHost: (...args: unknown[]) => unknown
+            }
+          }
+        ).pluginWorkloadSdkProvisioner
+        const foreignName = 'sdk-only-workload-to-mcp-host-sdk-ingress'
+        const ensure = vi.spyOn(provisioner, 'ensureEagerSdkMcpHost').mockResolvedValue({
+          status,
+          networkPolicies: {
+            conflicts: [{ policy: foreignName, reason: 'owner-reference-mismatch' }],
+            retryPending: true,
+          },
+        })
+
+        const result = await reconciler.reconcilePluginWorkloadSdkOnly(
+          'sdk-only',
+          'uid-sdk-only',
+          sandboxNamespace,
+          sdkSpec({ steps: undefined })
+        )
+
+        expect(ensure).toHaveBeenCalledTimes(1)
+        expect(ensure.mock.calls[0]?.[0]).toBe('sdk-only')
+        expect(result.phase).toBe(phase)
+        expect(result.networkPolicies).toEqual({
+          conflicts: [{ policy: foreignName, reason: 'owner-reference-mismatch' }],
+          retryPending: true,
+        })
+      }
+    )
+
+    it('workflow lane surfaces the conflict as a False condition and clears it on recovery', async () => {
+      const foreignName = 'sdk-recipe-workload-to-mcp-host-sdk-ingress'
+      foreignOnly(foreignName)
+      const reconciler = new WorkflowReconciler(makeDeps())
+
+      const first = await reconciler.reconcile(
+        'sdk-recipe',
+        'uid-sdk',
+        sandboxNamespace,
+        sdkSpec(),
+        { workflowExecution: { phase: 'initializing' } },
+        undefined,
+        'sdk-recipe',
+        undefined
+      )
+
+      expect(mockNetworkingApi.readNamespacedNetworkPolicy).toHaveBeenCalledWith(
+        expect.objectContaining({ name: foreignName })
+      )
+      expect(createdNames()).toContain('sdk-recipe-workload-to-mcp-host-sdk-egress')
+      expect(first.phase).not.toBe('failed')
+      expect(first.workflowPhase).not.toBe('failed')
+      expect(first.networkPolicyOwnershipConditions).toEqual([
+        expect.objectContaining({
+          type: 'WorkflowNetworkPolicyOwnership',
+          status: 'False',
+          reason: 'OwnershipConflict',
+          message: expect.stringContaining(foreignName),
+        }),
+      ])
+      // The condition travels only in its own field, never with the
+      // workflow-output conditions that patchStatus merges separately.
+      expect(ownershipCondition(first.workflowConditions)).toBeUndefined()
+      expect(writesTo(foreignName)).toHaveLength(0)
+
+      // The foreign owner goes away: the policy is created and the owned set
+      // is empty, so patchStatus removes the condition.
+      mockNetworkingApi.readNamespacedNetworkPolicy.mockRejectedValue({ code: 404 })
+      mockNetworkingApi.createNamespacedNetworkPolicy.mockClear()
+      const second = await reconciler.reconcile(
+        'sdk-recipe',
+        'uid-sdk',
+        sandboxNamespace,
+        sdkSpec(),
+        {
+          workflowExecution: { phase: 'initializing' },
+          conditions: first.networkPolicyOwnershipConditions,
+        },
+        undefined,
+        'sdk-recipe',
+        undefined
+      )
+
+      expect(createdNames()).toContain(foreignName)
+      expect(second.networkPolicyOwnershipConditions).toEqual([])
+    })
+
+    // The pass never reached the apply, so it cannot say whether the conflict is
+    // gone. The field stays undefined and patchStatus keeps the published one.
+    it('workflow lane leaves the ownership field undefined when the eager host fails before applying', async () => {
+      const reconciler = new WorkflowReconciler(makeDeps())
+      const provisioner = (
+        reconciler as unknown as {
+          pluginWorkloadSdkProvisioner: { ensureEagerSdkMcpHost: (...args: unknown[]) => unknown }
+        }
+      ).pluginWorkloadSdkProvisioner
+      const ensure = vi.spyOn(provisioner, 'ensureEagerSdkMcpHost').mockResolvedValue({
+        status: 'failed',
+      })
+      const existing = {
+        type: 'WorkflowNetworkPolicyOwnership',
+        status: 'False' as const,
+        reason: 'OwnershipConflict',
+        message: 'sdk-recipe-mcp-host-to-gfs (owner-reference-mismatch)',
+        lastTransitionTime: '2026-09-23T10:00:00.000Z',
+      }
+
+      const result = await reconciler.reconcile(
+        'sdk-recipe',
+        'uid-sdk',
+        sandboxNamespace,
+        sdkSpec(),
+        { workflowExecution: { phase: 'initializing' }, conditions: [existing] },
+        undefined,
+        'sdk-recipe',
+        undefined
+      )
+
+      expect(ensure).toHaveBeenCalledTimes(1)
+      expect(result.phase).toBe('failed')
+      expect(result).not.toHaveProperty('networkPolicyOwnershipConditions')
+      expect(ownershipCondition(result.workflowConditions)).toBeUndefined()
+    })
+
+    // The pod failed after the policies were applied, so the summary is a real
+    // evaluation and the conflict it found is published with the failure.
+    it('workflow lane publishes the evaluated set when the eager host fails after applying', async () => {
+      const reconciler = new WorkflowReconciler(makeDeps())
+      const provisioner = (
+        reconciler as unknown as {
+          pluginWorkloadSdkProvisioner: { ensureEagerSdkMcpHost: (...args: unknown[]) => unknown }
+        }
+      ).pluginWorkloadSdkProvisioner
+      const foreignName = 'sdk-recipe-mcp-host-to-gfs'
+      const ensure = vi.spyOn(provisioner, 'ensureEagerSdkMcpHost').mockResolvedValue({
+        status: 'failed',
+        networkPolicies: {
+          conflicts: [{ policy: foreignName, reason: 'owner-reference-mismatch' }],
+          retryPending: false,
+        },
+      })
+
+      const result = await reconciler.reconcile(
+        'sdk-recipe',
+        'uid-sdk',
+        sandboxNamespace,
+        sdkSpec(),
+        { workflowExecution: { phase: 'initializing' } },
+        undefined,
+        'sdk-recipe',
+        undefined
+      )
+
+      expect(ensure).toHaveBeenCalledTimes(1)
+      expect(result.phase).toBe('failed')
+      expect(result.networkPolicyOwnershipConditions).toEqual([
+        expect.objectContaining({
+          type: 'WorkflowNetworkPolicyOwnership',
+          status: 'False',
+          reason: 'OwnershipConflict',
+          message: expect.stringContaining(`${foreignName} (owner-reference-mismatch)`),
+        }),
+      ])
+    })
+
+    // The early return skips the run-lane apply, so the eager summary is the
+    // only source of the retry flag for this pass.
+    it('workflow lane asks for a retry when the eager host fails after a deferred policy', async () => {
+      const reconciler = new WorkflowReconciler(makeDeps())
+      const provisioner = (
+        reconciler as unknown as {
+          pluginWorkloadSdkProvisioner: { ensureEagerSdkMcpHost: (...args: unknown[]) => unknown }
+        }
+      ).pluginWorkloadSdkProvisioner
+      const ensure = vi.spyOn(provisioner, 'ensureEagerSdkMcpHost').mockResolvedValue({
+        status: 'failed',
+        networkPolicies: { conflicts: [], retryPending: true },
+      })
+
+      const result = await reconciler.reconcile(
+        'sdk-recipe',
+        'uid-sdk',
+        sandboxNamespace,
+        sdkSpec(),
+        { workflowExecution: { phase: 'initializing' } },
+        undefined,
+        'sdk-recipe',
+        undefined
+      )
+
+      expect(ensure).toHaveBeenCalledTimes(1)
+      expect(result.phase).toBe('failed')
+      expect(result.networkPolicyOwnershipConditions).toEqual([
+        expect.objectContaining({
+          type: 'WorkflowNetworkPoliciesConverged',
+          status: 'False',
+          reason: 'RetryPending',
+        }),
+      ])
+      expect(result.networkPolicyRetryPending).toBe(true)
+    })
+
+    // provider_unavailable overrides workflowConditions after the spread, so it
+    // must still carry the ownership set and the retry flag from the eager apply.
+    it('workflow lane publishes the eager apply summary on provider_unavailable', async () => {
+      const reconciler = new WorkflowReconciler(makeDeps())
+      const provisioner = (
+        reconciler as unknown as {
+          pluginWorkloadSdkProvisioner: { ensureEagerSdkMcpHost: (...args: unknown[]) => unknown }
+        }
+      ).pluginWorkloadSdkProvisioner
+      const foreignName = 'sdk-recipe-mcp-host-to-gfs'
+      const ensure = vi.spyOn(provisioner, 'ensureEagerSdkMcpHost').mockResolvedValue({
+        status: 'provider_unavailable',
+        networkPolicies: {
+          conflicts: [{ policy: foreignName, reason: 'owner-reference-mismatch' }],
+          retryPending: true,
+        },
+      })
+
+      const result = await reconciler.reconcile(
+        'sdk-recipe',
+        'uid-sdk',
+        sandboxNamespace,
+        sdkSpec(),
+        { workflowExecution: { phase: 'initializing' } },
+        undefined,
+        'sdk-recipe',
+        undefined
+      )
+
+      expect(ensure).toHaveBeenCalledTimes(1)
+      expect(result.phase).toBe('active')
+      expect(result.workflowConditions).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: 'PluginWorkloadSdkProviderUnavailable' }),
+        ])
+      )
+      expect(result.networkPolicyOwnershipConditions).toEqual([
+        expect.objectContaining({
+          type: 'WorkflowNetworkPolicyOwnership',
+          status: 'False',
+          reason: 'OwnershipConflict',
+          message: expect.stringContaining(`${foreignName} (owner-reference-mismatch)`),
+        }),
+        expect.objectContaining({
+          type: 'WorkflowNetworkPoliciesConverged',
+          status: 'False',
+          reason: 'RetryPending',
+        }),
+      ])
+      expect(result.networkPolicyRetryPending).toBe(true)
+    })
+
+    // A conflict that persists across passes keeps the time it was first seen,
+    // so the condition does not look like a new transition on every pass.
+    it('workflow lane keeps the first transition time of a persisting conflict', async () => {
+      const reconciler = new WorkflowReconciler(makeDeps())
+      const provisioner = (
+        reconciler as unknown as {
+          pluginWorkloadSdkProvisioner: { ensureEagerSdkMcpHost: (...args: unknown[]) => unknown }
+        }
+      ).pluginWorkloadSdkProvisioner
+      const foreignName = 'sdk-recipe-mcp-host-to-gfs'
+      const firstSeen = '2026-09-23T10:00:00.000Z'
+      const ensure = vi.spyOn(provisioner, 'ensureEagerSdkMcpHost').mockResolvedValue({
+        status: 'failed',
+        networkPolicies: {
+          conflicts: [{ policy: foreignName, reason: 'owner-reference-mismatch' }],
+          retryPending: false,
+        },
+      })
+
+      const result = await reconciler.reconcile(
+        'sdk-recipe',
+        'uid-sdk',
+        sandboxNamespace,
+        sdkSpec(),
+        {
+          workflowExecution: { phase: 'initializing' },
+          conditions: [
+            {
+              type: 'WorkflowNetworkPolicyOwnership',
+              status: 'False',
+              reason: 'OwnershipConflict',
+              message: `NetworkPolicy ownership conflict: ${foreignName} (owner-reference-mismatch)`,
+              lastTransitionTime: firstSeen,
+            },
+          ],
+        },
+        undefined,
+        'sdk-recipe',
+        undefined
+      )
+
+      expect(ensure).toHaveBeenCalledTimes(1)
+      expect(result.networkPolicyOwnershipConditions).toEqual([
+        expect.objectContaining({
+          type: 'WorkflowNetworkPolicyOwnership',
+          status: 'False',
+          message: expect.stringContaining(foreignName),
+          lastTransitionTime: firstSeen,
+        }),
+      ])
+    })
+  })
+
   it('creates a provider-free eager mcp-host for clientNotifications-only without an agent', async () => {
     const reconciler = new WorkflowReconciler(makeDeps())
     mockModelConfigHandler.configurePluginWorkloadSdkBootstrap.mockResolvedValue({

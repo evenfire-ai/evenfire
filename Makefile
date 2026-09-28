@@ -57,6 +57,9 @@ SERVICES := \
 
 # Services that have unit tests
 TEST_SERVICES := \
+	channel-reader \
+	gfs-controller \
+	workspace-files-controller \
 	workflow-approval-request-reader \
 	mcp-host \
 	host-context-controller \
@@ -73,15 +76,16 @@ TEST_SERVICES := \
 	profile-ui \
 	desktop-app \
 	mcp-servers \
+	mcp-servers/web-search \
 	packages/desktop-app-links \
 	packages/gfs-interaction-policy \
 	packages/workflow-runtime-core \
 	packages/workflow-sdk \
 	packages/network-policy-core \
+	packages/codex-catalog-projection \
 	packages/llm-provider-attempt-contract \
 	packages/llm-providers \
 	packages/grok-provider-attempt-contract
-
 
 # ── Optional private infra (gcp-*, promotion) ──────────────────────────────
 -include Makefile.infra
@@ -117,7 +121,7 @@ install-all: ## npm install in all services (parallel)
 
 # ── Unit Tests ───────────────────────────────────────────────────────
 .PHONY: test-unit-all
-test-unit-all: ## Run unit tests across all services
+test-unit-all: test-service-matrix ## Run unit tests across all services
 	@echo "Running unit tests..."
 	@failed=""; \
 	for svc in $(TEST_SERVICES); do \
@@ -128,6 +132,10 @@ test-unit-all: ## Run unit tests across all services
 		echo "FAILED:$$failed"; exit 1; \
 	fi
 	@echo "All unit tests passed."
+
+.PHONY: test-service-matrix
+test-service-matrix: ## Check local test coverage against the CI service matrix
+	@node scripts/dev/check-test-services.cjs $(TEST_SERVICES)
 
 .PHONY: test-codex-subscription-t0
 test-codex-subscription-t0: ## Run the Codex subscription T0 aggregator (counts, no skips)
@@ -1520,6 +1528,9 @@ help: ## Show this help
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
 		awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-24s\033[0m %s\n", $$1, $$2}'
 
+.PHONY: test-web-search-image
+test-web-search-image: ## Build and test the fetch_page image locally under its branch lease
+	@bash scripts/minikube/with-t2-mutation-lock.sh -- bash scripts/tests/test-web-search-image.sh
 .PHONY: minikube-build-627-github
 minikube-build-627-github: ## Build the reviewed GitHub MCP locally for the owned profile architecture
 	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \

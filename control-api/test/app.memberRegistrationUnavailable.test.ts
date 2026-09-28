@@ -18,6 +18,7 @@ vi.mock('../src/middleware/rateLimitMiddleware.js', () => ({
   rateLimitMiddleware:
     () => (_req: express.Request, _res: express.Response, next: express.NextFunction) =>
       next(),
+  createRateLimitEnforcer: () => async () => true,
 }))
 
 describe('app: member-registration unavailability maps to 503 (real error middleware)', () => {

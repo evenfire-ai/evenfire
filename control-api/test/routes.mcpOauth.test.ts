@@ -24,6 +24,7 @@ vi.mock('../src/services/notificationEmitter.js', () => ({
 vi.mock('../src/services/rateLimiterService.js', () => ({
   checkAndIncrement: vi.fn().mockResolvedValue({
     allowed: true,
+    backendAvailable: true,
     remaining: 59,
     resetMs: Date.now() + 60_000,
     windowStartMs: Date.now(),
@@ -608,6 +609,7 @@ describe('routes/mcp-oauth — POST /mcp-oauth/grants/exists (mini-spec 13)', ()
     seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user' })
     vi.mocked(checkAndIncrement).mockResolvedValueOnce({
       allowed: false,
+      backendAvailable: true,
       remaining: 0,
       resetMs: Date.now() + 60_000,
       windowStartMs: Date.now(),

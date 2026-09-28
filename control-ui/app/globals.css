@@ -5169,6 +5169,24 @@ td.cu-registry-description {
   gap: var(--cu-space-3);
 }
 
+.cu-detail-content-stack--panel-continuation {
+  padding: var(--cu-space-4);
+  border: 1px solid var(--cu-border);
+  border-top: 0;
+  border-bottom-right-radius: var(--cu-radius);
+  border-bottom-left-radius: var(--cu-radius);
+  background:
+    linear-gradient(150deg, rgba(var(--cu-edge-rgb), 0.16), transparent 38%),
+    rgba(var(--cu-panel-rgb), 0.58);
+  box-shadow: var(--cu-shadow);
+}
+
+@media (max-width: 720px) {
+  .cu-detail-content-stack--panel-continuation {
+    padding: var(--cu-space-3);
+  }
+}
+
 .cu-body-loading-skeleton {
   display: grid;
   gap: var(--cu-space-5);
@@ -5212,8 +5230,9 @@ td.cu-registry-description {
    first block below it has to drop the matching top edge or the seam shows as
    a stray rounded border. Applies to either card primitive that can lead the
    stack. */
-.cu-detail-content-stack > .cu-card:first-child,
-.cu-detail-content-stack > .cu-form-section:first-child {
+.cu-detail-content-stack:not(.cu-detail-content-stack--panel-continuation) > .cu-card:first-child,
+.cu-detail-content-stack:not(.cu-detail-content-stack--panel-continuation)
+  > .cu-form-section:first-child {
   border-top: 0;
   border-top-left-radius: 0;
   border-top-right-radius: 0;
@@ -7021,6 +7040,12 @@ td.cu-registry-description {
   color: var(--cu-text-soft);
   font-size: 0.75rem;
   line-height: 1.25;
+}
+
+.cu-agent-grant-picker .cu-selection-dropdown__option-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .cu-selection-dropdown__badge {
@@ -8929,7 +8954,7 @@ td.cu-registry-description {
 .cu-identity-section {
   display: grid;
   gap: var(--cu-space-3);
-  grid-template-rows: auto auto minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
   flex: 1;
   min-height: 0;
   border: 0;
@@ -8974,6 +8999,37 @@ td.cu-registry-description {
   min-height: 0;
 }
 
+.cu-identity-preview {
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  max-height: 100%;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: var(--cu-space-4);
+  border: 1px solid var(--cu-border-subtle);
+  border-radius: var(--cu-radius-sm);
+  background: var(--cu-surface);
+}
+
+.cu-identity-preview__loading,
+.cu-identity-preview__empty {
+  color: var(--cu-text-muted);
+}
+
+.cu-identity-dialog-editor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--cu-space-2);
+  flex: 1;
+  min-height: 0;
+}
+
+.cu-identity-dialog-editor .cu-markdown-editor {
+  flex: 1;
+  min-height: 0;
+}
+
 .cu-detail-flow-panel + .cu-card:has(.cu-identity-panel) {
   display: flex;
   flex-direction: column;
@@ -8997,6 +9053,8 @@ td.cu-registry-description {
 }
 
 .cu-agent-detail-scroll:has(> .cu-identity-panel) {
+  display: flex;
+  flex-direction: column;
   padding: 0;
 }
 
@@ -12480,7 +12538,11 @@ button.cu-gfs-tree__button:focus-visible,
   border: 1px solid var(--cu-border-subtle);
   border-radius: var(--cu-radius-sm);
   background: var(--cu-bg-elevated);
-  overflow: visible;
+  /* The viewport-fill card clips overflow and the app layout locks page
+     scrolling, so this frame is the file list's scroll container (same
+     contract as `.cu-table-wrap` for semantic tables). Without it, long
+     listings overflow visibly and get cut off at the card edge. */
+  overflow: auto;
 }
 
 .cu-gfs-loading {
@@ -12543,12 +12605,15 @@ button.cu-gfs-tree__button:focus-visible,
 }
 
 .cu-gfs-list__head {
+  position: sticky;
+  top: 0;
+  z-index: 2;
   padding: var(--cu-space-2) var(--cu-space-3);
   padding-inline: calc(var(--cu-space-3) + var(--cu-space-2));
   border-bottom: 1px solid var(--cu-border-subtle);
   background: var(--cu-surface-hover);
   color: var(--cu-text-muted);
-  font-size: 0.7rem;
+  font-size: var(--cu-font-size-2xs);
   font-weight: 700;
   letter-spacing: 0.06em;
   text-transform: uppercase;
@@ -12654,10 +12719,13 @@ button.cu-gfs-tree__button:focus-visible,
 .cu-gfs-list__actions {
   display: flex;
   align-items: center;
+  align-self: stretch;
   gap: var(--cu-space-1);
   grid-column: auto;
-  justify-self: end;
+  justify-content: flex-end;
+  justify-self: stretch;
   flex-wrap: nowrap;
+  cursor: pointer;
 }
 
 .cu-gfs-list__row .cu-gfs-list__row-action.cu-btn {
@@ -13936,6 +14004,13 @@ button.cu-gfs-tree__button:focus-visible,
   font-size: 0.75rem;
 }
 
+/* Quiet notice when the whole inherited-access derivation failed (R1-M3). */
+.cu-gfs-existing-access__notice {
+  margin: 0;
+  color: var(--cu-text-muted);
+  font-size: var(--cu-font-size-xs);
+}
+
 .cu-gfs-existing-access__list {
   display: grid;
   gap: var(--cu-space-2);
@@ -14035,6 +14110,78 @@ button.cu-gfs-tree__button:focus-visible,
   font-weight: 500;
 }
 
+/* Parent-folder confirmation for inherited access rows (Share dialog). */
+.cu-gfs-parent-update {
+  width: min(34rem, calc(100vw - (var(--cu-space-4) * 2)));
+}
+
+.cu-gfs-parent-update__learn-more {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--cu-link);
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+  cursor: pointer;
+}
+
+.cu-gfs-parent-update__learn-more:focus-visible {
+  outline: 2px solid var(--cu-focus);
+  outline-offset: 2px;
+}
+
+/* R1-H1: every affected ancestor folder plus the file, stacked. */
+.cu-gfs-parent-update__folders {
+  display: grid;
+  gap: var(--cu-space-1);
+}
+
+.cu-gfs-parent-update__folder {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--cu-space-2);
+  padding: var(--cu-space-1) var(--cu-space-2);
+  border: 1px solid var(--cu-border-subtle);
+  border-radius: var(--cu-radius-sm);
+  background: var(--cu-bg-subtle);
+}
+
+.cu-gfs-parent-update__name {
+  overflow: hidden;
+  color: var(--cu-text);
+  font-size: var(--cu-font-size-md);
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cu-gfs-parent-update__change {
+  display: flex;
+  align-items: center;
+  gap: var(--cu-space-1);
+  color: var(--cu-text-muted);
+  font-size: var(--cu-font-size-sm);
+}
+
+.cu-gfs-parent-update__role {
+  color: var(--cu-text-soft);
+  font-weight: 500;
+}
+
+.cu-gfs-parent-update__role--next {
+  color: var(--cu-text);
+}
+
+.cu-gfs-parent-update__help {
+  display: grid;
+  gap: var(--cu-space-2);
+  margin: 0;
+  padding-inline-start: 1.25rem;
+  color: var(--cu-text-muted);
+}
+
 .cu-gfs-existing-access__chips {
   display: inline-flex;
   flex-wrap: wrap;
@@ -14115,7 +14262,7 @@ button.cu-gfs-tree__button:focus-visible,
 
   .cu-gfs-list__actions {
     grid-column: auto;
-    justify-self: end;
+    justify-self: stretch;
   }
 
   .cu-gfs-manage-dialog__header {
@@ -14274,4 +14421,64 @@ button.cu-gfs-tree__button:focus-visible,
 
 .cu-llm-policy__actions {
   display: flex;
+}
+
+.cu-identity-preview__document {
+  width: 100%;
+  min-width: 0;
+}
+
+.cu-identity-preview__document > .cu-gfs-markdown-preview__content {
+  width: 100%;
+  max-width: none;
+  margin: 0;
+}
+
+.cu-identity-preview--editable {
+  cursor: pointer;
+}
+
+.cu-identity-preview--editable:hover {
+  border-color: var(--cu-accent);
+}
+
+.eft-dialog.cu-identity-edit-dialog {
+  width: 100%;
+  max-width: min(96vw, 90rem);
+  height: min(94vh, 64rem);
+  max-height: calc(100vh - 2 * var(--cu-space-4));
+  overflow: hidden;
+}
+
+.eft-dialog.cu-identity-edit-dialog .eft-dialog__content {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.eft-dialog.cu-identity-edit-dialog .eft-dialog__form {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+@supports (height: 100dvh) {
+  .eft-dialog.cu-identity-edit-dialog {
+    max-height: calc(100dvh - 2 * var(--cu-space-4));
+  }
+}
+
+@media (max-width: 40rem) {
+  .eft-dialog.cu-identity-edit-dialog {
+    height: calc(100vh - 2 * var(--cu-space-4));
+    max-width: 100%;
+  }
+
+  @supports (height: 100dvh) {
+    .eft-dialog.cu-identity-edit-dialog {
+      height: calc(100dvh - 2 * var(--cu-space-4));
+    }
+  }
 }

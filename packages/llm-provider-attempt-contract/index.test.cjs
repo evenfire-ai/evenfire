@@ -46,7 +46,18 @@ test('runtime exports stay aligned with the declaration file', () => {
   assert.deepEqual(Object.keys(contract).sort(), declared)
 })
 
-// The check above compares export names only. `LIMITS` is declared with literal
+// The proxy, control-api and mcp-host all import this allowance instead of
+// writing their own literal, so the declared literal type has to follow the
+// runtime value too.
+test('exports the 16 KiB envelope allowance with a matching declared literal', () => {
+  assert.equal(contract.ENVELOPE_ALLOWANCE_BYTES, 16 * 1024)
+  const declarations = fs.readFileSync(path.join(__dirname, 'index.d.ts'), 'utf8')
+  const declared = declarations.match(/export declare const ENVELOPE_ALLOWANCE_BYTES:\s*(\d+)\b/)
+  assert.ok(declared, 'index.d.ts must declare ENVELOPE_ALLOWANCE_BYTES as a numeric literal')
+  assert.equal(Number(declared[1]), contract.ENVELOPE_ALLOWANCE_BYTES)
+})
+
+// The export-name check above compares export names only. `LIMITS` is declared with literal
 // types, so a bound raised in the runtime module and left behind in the
 // declaration file compiles every TypeScript consumer against the old number
 // while the runtime accepts the new one.
@@ -74,6 +85,18 @@ test('declared LIMITS literals match the runtime values', () => {
   // fromEntries keeps the last of two members with the same name.
   assert.equal(Object.keys(declared).length, members.length, 'LIMITS declares a member twice')
   assert.deepEqual(declared, { ...contract.LIMITS })
+})
+
+// control-api signs execution tickets for this long and derives its ticket TTL
+// from this value; the proxies bound their admission waits against it (#739).
+test('LIMITS publishes the execution ticket TTL, declared as the same literal', () => {
+  assert.equal(contract.LIMITS.executionTicketTtlMs, 60000)
+  const declarations = fs.readFileSync(path.join(__dirname, 'index.d.ts'), 'utf8')
+  const block = declarations.match(/export declare const LIMITS: \{([\s\S]*?)\n\}/)
+  // Witness: the declaration block was found and read.
+  assert.ok(block, 'index.d.ts must declare a LIMITS object literal')
+  assert.match(block[1], /^\s*readonly maxRequestBodyBytes: 8388608$/m)
+  assert.match(block[1], /^\s*readonly executionTicketTtlMs: 60000$/m)
 })
 
 test('parses the bounded V1 request and hashes with SHA-256', () => {
@@ -393,6 +416,64 @@ test('large catalogs remain bounded by serialized request bytes including UTF-8'
     code: 'limit',
     kind: 'size',
     message: 'request exceeds maxRequestBodyBytes',
+  })
+})
+
+// A conversation whose size is data, not tools: tool calls answered by
+// minified JSON exports, the shape that filled the subscription paths.
+function dataHeavyConversation(targetBytes) {
+  const row = JSON.stringify({ id: 'c_0001', company: 'Northwind Labs', score: 42.5, tags: ['saas', 'partner'] })
+  const chunk = `[${new Array(Math.ceil((256 * 1024) / (row.length + 1))).fill(row).join(',')}]`
+  const request = {
+    ...BASE,
+    tools: [{ name: 'crm__export', description: 'Export CRM rows', parameters: { type: 'object' } }],
+    messages: [{ role: 'user', content: 'Summarize the CRM export.' }],
+  }
+  for (let i = 0; Buffer.byteLength(JSON.stringify(request), 'utf8') < targetBytes; i++) {
+    const id = `call-${i}`
+    request.messages.push({ role: 'assistant', content: '', toolCalls: [{ id, name: 'crm__export', arguments: { page: i } }] })
+    request.messages.push({ role: 'tool', content: chunk, toolCallId: id, name: 'crm__export' })
+  }
+  return request
+}
+
+// R3-1 (#731): the non-image request cap is 8 MiB. Customer workloads reached
+// the former 1 MiB with data, and 8 MiB carries a 1M-token window as escaped
+// JSON. The two byte-bound tests above derive their payload from LIMITS, so
+// they keep pinning the exact boundary at the new value.
+test('T-R3-1a maxRequestBodyBytes is 8 MiB', () => {
+  assert.equal(contract.LIMITS.maxRequestBodyBytes, 8 * 1024 * 1024)
+})
+
+test('T-R3-1b a 4 MiB conversation of tool results is accepted', () => {
+  const request = dataHeavyConversation(4 * 1024 * 1024)
+  assert.ok(Buffer.byteLength(JSON.stringify(request), 'utf8') >= 4 * 1024 * 1024)
+  const parsed = contract.parseCodexCompletionRequestV1(request)
+  assert.equal(parsed.ok, true, parsed.message)
+})
+
+test('T-E2 the element bound reports itself distinctly from the byte bound', () => {
+  // Before #731 two different guards refused with the identical sentence: the
+  // element count inside `checkStructure` and the real byte measurement that
+  // the two tests above pin. A user reporting `request exceeds
+  // maxRequestBodyBytes` therefore could not say which one fired. Compaction is the remedy either way;
+  // the distinct wording buys diagnosis, not a different fix (#731).
+  //
+  // What makes the two guards separable here is ORDER, not size:
+  // `checkStructure` runs before `JSON.stringify`, so the element count is
+  // refused first. The payload below is also ~3x the byte cap once serialized
+  // — by construction it has to be, since more elements than the byte cap
+  // cannot encode under it — so without that ordering the byte bound would
+  // claim it and this test would be pinning the wrong guard.
+  const refused = contract.parseCodexCompletionRequestV1({
+    ...BASE,
+    messages: new Array(contract.LIMITS.maxRequestBodyBytes + 1).fill({}),
+  })
+  assert.deepEqual(refused, {
+    ok: false,
+    code: 'limit',
+    kind: 'size',
+    message: 'request exceeds maxRequestBodyBytes element bound',
   })
 })
 
@@ -1002,8 +1083,8 @@ function nonImageBytes(request) {
   )
 }
 
-test('requestBodyLimitBytes: V2 declares 24 MiB; every other body keeps the 1 MiB ceiling', () => {
-  assert.equal(contract.LIMITS.maxRequestBodyBytes, 1048576)
+test('requestBodyLimitBytes: V2 declares 24 MiB; every other body keeps the 8 MiB ceiling', () => {
+  assert.equal(contract.LIMITS.maxRequestBodyBytes, 8388608)
   assert.equal(contract.LIMITS.maxVisualRequestBodyBytes, 25165824)
   assert.equal(contract.VISUAL_LIMITS.maxImages, 20)
   assert.equal(contract.VISUAL_LIMITS.typicalImageBytes, 5 * MIB)
@@ -1032,18 +1113,18 @@ test('requestBodyLimitBytes: V2 declares 24 MiB; every other body keeps the 1 Mi
     7,
     [],
   ]) {
-    assert.equal(contract.requestBodyLimitBytes(other), 1048576, String(other))
+    assert.equal(contract.requestBodyLimitBytes(other), contract.LIMITS.maxRequestBodyBytes, String(other))
   }
 })
 
-test('v2 preserves the non-image budget: text and tools stay on the 1 MiB ceiling', () => {
+test('v2 preserves the non-image budget: text and tools stay on the maxRequestBodyBytes ceiling', () => {
   const { maxRequestBodyBytes, maxVisualRequestBodyBytes } = contract.LIMITS
   const image = imagePart(IMAGE_DATA.png)
   const overflow = 'request exceeds maxRequestBodyBytes outside image data'
-  const longText = 'x'.repeat(2 * MIB)
+  const longText = 'x'.repeat(maxRequestBodyBytes + MIB)
 
-  // Images do not buy text: 2 MiB of content-class payload is refused far below
-  // the 24 MiB ceiling the same body is allowed to use for image data.
+  // Images do not buy text: content-class payload over the non-image cap is
+  // refused below the 24 MiB ceiling the same body may use for image data.
   const textHeavy = contract.parseCodexCompletionRequest(
     v2WithParts([image, { type: 'text', text: longText }], longText)
   )
@@ -1062,7 +1143,7 @@ test('v2 preserves the non-image budget: text and tools stay on the 1 MiB ceilin
   // Tool definitions are on the same caller-controlled budget.
   const toolHeavy = contract.parseCodexCompletionRequest({
     ...v2WithParts([image]),
-    tools: [{ name: 'read', description: 'y'.repeat(2 * MIB), parameters: {} }],
+    tools: [{ name: 'read', description: 'y'.repeat(maxRequestBodyBytes + MIB), parameters: {} }],
   })
   assert.equal(toolHeavy.ok, false)
   assert.equal(toolHeavy.code, 'limit')
@@ -1101,11 +1182,16 @@ test('v2 preserves the non-image budget: text and tools stay on the 1 MiB ceilin
 
 test('v2 total budget: the raw body is capped at 24 MiB and the three budgets stay consistent', () => {
   const { maxVisualRequestBodyBytes, maxRequestBodyBytes } = contract.LIMITS
-  // The V2 ceiling must cover the largest legal image set (3 x 5 MiB decoded, so
-  // ~21 MiB of canonical base64) plus the whole non-image share. Asserted so a
-  // future change to any of the three image numbers is caught here.
+  // The V2 ceiling covers the whole non-image share plus its envelope, and the
+  // largest legal image set (16 MiB decoded, ~21.3 MiB of canonical base64)
+  // plus a documented non-image floor. It does not cover both maxima at once
+  // (#731 raised the non-image share to 8 MiB); a request carrying both is
+  // refused by the whole-body gate. Asserted so a change to any of the image
+  // numbers or to either ceiling is caught here.
   const aggregateEncoded = 4 * Math.ceil(contract.VISUAL_LIMITS.maxTotalImageBytes / 3) + 8
-  assert.ok(aggregateEncoded + maxRequestBodyBytes < maxVisualRequestBodyBytes)
+  const nonImageFloorBesideMaxImages = 2.5 * 1024 * 1024
+  assert.ok(maxRequestBodyBytes + 16 * 1024 < maxVisualRequestBodyBytes)
+  assert.ok(maxVisualRequestBodyBytes - aggregateEncoded >= nonImageFloorBesideMaxImages)
 
   // Over the ceiling is refused by the size gate, before any payload work.
   const oversized = v2WithParts([imagePart('A'.repeat(maxVisualRequestBodyBytes))])
@@ -1365,7 +1451,7 @@ test('isBoundedId rejects empty, oversized, and non-id characters', () => {
   assert.equal(contract.isBoundedId(1), false)
 })
 
-test('measureNonImageAuthorizeBytes keeps wrapper fields on the 1 MiB budget', () => {
+test('measureNonImageAuthorizeBytes keeps wrapper fields on the maxRequestBodyBytes budget', () => {
   const image = imagePart(IMAGE_DATA.png)
   const request = {
     ...BASE,
@@ -1390,7 +1476,10 @@ test('measureNonImageAuthorizeBytes keeps wrapper fields on the 1 MiB budget', (
   assert.ok(nonImage < contract.LIMITS.maxRequestBodyBytes)
   assert.equal(contract.requestBodyLimitBytes(wrapper.request), 25165824)
 
-  const stuffed = { ...wrapper, invocationId: 'x'.repeat(2 * 1024 * 1024) }
+  const stuffed = {
+    ...wrapper,
+    invocationId: 'x'.repeat(contract.LIMITS.maxRequestBodyBytes + 1024 * 1024),
+  }
   assert.ok(contract.measureNonImageAuthorizeBytes(stuffed) > contract.LIMITS.maxRequestBodyBytes)
   assert.equal(contract.requestBodyLimitBytes(stuffed.request), 25165824)
 })

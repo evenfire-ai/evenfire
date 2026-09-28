@@ -28,6 +28,8 @@ describe('Codex catalog upstream bounds', () => {
       maxBodyBytes: 8 * 1_048_576,
       maxModels: 256,
       maxModelIdLength: 128,
+      maxDisplayNameLength: 256,
+      maxContextWindowTokens: 2_147_483_647,
     })
   })
 

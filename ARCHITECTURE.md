@@ -57,12 +57,12 @@ NetworkPolicy owned by whichever component is responsible for that selector.
 
 ### Agent runtime — `mcp-host`, `mcp-server` (both deny-all)
 
-| Service                                   | Role                                                                                   |
-| ----------------------------------------- | -------------------------------------------------------------------------------------- |
-| [mcp-host](mcp-host/)                     | The agent: LLM loop, MCP tool calling, state machine, approval gate, queue             |
-| [mcp-proxy](mcp-proxy/)                   | Optional centralized MCP router (`MCP_PROXY_ENABLED`); discovers servers via HCC       |
-| [stdio-bridge](stdio-bridge/)             | Sidecar translating stdio MCP transport to StreamableHTTP; injected by HCC             |
-| [nginx-egress-proxy](nginx-egress-proxy/) | Image only — the pinned egress path HCC deploys for remote (`spec.remote`) MCP servers |
+| Service                                   | Role                                                                                                             |
+| ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| [mcp-host](mcp-host/)                     | The agent: LLM loop, MCP tool calling, state machine, approval gate, queue                                       |
+| [mcp-proxy](mcp-proxy/)                   | Optional centralized MCP router (`MCP_PROXY_ENABLED`); discovers servers via HCC                                 |
+| [stdio-bridge](stdio-bridge/)             | Sidecar translating stdio MCP transport to StreamableHTTP; injected by HCC                                       |
+| [nginx-egress-proxy](nginx-egress-proxy/) | Image only — the pinned egress path HCC deploys for remote (`spec.remote`) MCP servers                           |
 | [mcp-servers](mcp-servers/)               | Platform-packaged MCP servers — first-party (Airtable, web-search) plus upstream images (MongoDB, Playwright, …) |
 
 ### Recipes & sandbox — `sandbox-recipes`, `sandbox-ui` (both deny-all)
@@ -140,8 +140,11 @@ flowchart TB
 ## Swapping LLM providers
 
 Set `CLERUM_MODEL_PROVIDER` to `openai | claude | zai | bailian` and supply the
-matching API key. One interface, no code change. See
-[mcp-host/README.md](mcp-host/README.md).
+matching API key. One interface, no code change. `CLERUM_MODEL_NAME` picks a
+model only together with `CLERUM_MODEL_PROVIDER`; minikube setup refuses it
+alone and defaults to `openai/gpt-5.4-mini` when no key is set. See
+[mcp-host/README.md](mcp-host/README.md) and
+[docs/llm-providers/README.md §4.7](docs/llm-providers/README.md#47-local-minikube-make-minikube-setup).
 
 ## Security
 

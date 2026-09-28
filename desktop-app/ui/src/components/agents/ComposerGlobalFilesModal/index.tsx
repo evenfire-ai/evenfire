@@ -119,7 +119,7 @@ export function ComposerGlobalFilesModal({ onAdd, onClose }: ComposerGlobalFiles
             <IconContexts />
           </span>
           <span className="composer-global-files-heading">
-            <span className="composer-global-files-eyebrow">Global File System</span>
+            <span className="composer-global-files-eyebrow">EvenDrive</span>
             <h3 id="composer-global-files-title">Choose files for this message</h3>
             <span className="muted">Browse shared folders and select multiple files.</span>
           </span>

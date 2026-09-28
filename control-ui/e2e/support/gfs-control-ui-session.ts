@@ -80,7 +80,7 @@ export async function openGlobalFileSystemFromSidebar(page: Page): Promise<void>
   await expect(directoriesSection).toBeVisible()
   await directoriesSection.click()
   const globalFileSystem = page.getByRole('link', {
-    name: 'Global File System',
+    name: 'EvenDrive',
     exact: true,
   })
   await expect(globalFileSystem).toBeVisible()
@@ -94,7 +94,7 @@ export async function openGfsFilePanel(
   await loginControlUi(page)
   await openGlobalFileSystemFromSidebar(page)
   await expect(page).toHaveURL(/\/global-file-system(?:$|\?)/, { timeout: 15_000 })
-  await expect(page.getByRole('region', { name: 'Global File System browser' })).toBeVisible()
+  await expect(page.getByRole('region', { name: 'EvenDrive browser' })).toBeVisible()
   const resources = page.getByRole('list', { name: 'Current folder resources' })
   await resources.getByRole('button', { name: fixture.name, exact: true }).click()
   const actions = resources.getByRole('button', {

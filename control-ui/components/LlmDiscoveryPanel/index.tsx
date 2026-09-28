@@ -2,6 +2,7 @@
 
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import {
+  ConfirmationDialog,
   DataTable,
   GroupedTableBody,
   TableStateRow,
@@ -58,6 +59,9 @@ export function LlmDiscoveryPanel({
   const [bulkEnabling, setBulkEnabling] = useState(false)
   const [expandedProviders, setExpandedProviders] = useState<Set<string>>(new Set())
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
+  const [enableConfirmation, setEnableConfirmation] = useState<
+    { kind: 'single'; model: LlmAllowedModel } | { kind: 'bulk' } | null
+  >(null)
   const statusRequestGeneration = useRef(0)
 
   const isInitialLoad = loading && items.length === 0
@@ -260,6 +264,13 @@ export function LlmDiscoveryPanel({
     showToast(message, { tone: 'error' })
   }
 
+  function confirmEnable() {
+    const confirmation = enableConfirmation
+    setEnableConfirmation(null)
+    if (confirmation?.kind === 'single') void handleEnable(confirmation.model)
+    if (confirmation?.kind === 'bulk') void handleBulkEnable()
+  }
+
   const reviewColumns: TableHeaderColumn[] = (
     [
       {
@@ -323,6 +334,28 @@ export function LlmDiscoveryPanel({
             </>
           }
           subtitle="Newly synced models land here disabled. Enable only the models you want available to agents and runtime."
+          secondaryActions={
+            selectedCount > 0 ? (
+              <>
+                <button
+                  type="button"
+                  className="cu-btn cu-btn--ghost cu-btn--sm"
+                  onClick={() => setSelectedIds(new Set())}
+                  disabled={bulkEnabling}
+                >
+                  Unselect all
+                </button>
+                <button
+                  type="button"
+                  className="cu-btn cu-btn--primary cu-btn--sm"
+                  onClick={() => setEnableConfirmation({ kind: 'bulk' })}
+                  disabled={bulkEnabling}
+                >
+                  {bulkEnabling ? 'Enabling…' : `Enable ${selectedCount} selected`}
+                </button>
+              </>
+            ) : undefined
+          }
           primaryAction={
             <button
               type="button"
@@ -373,20 +406,6 @@ export function LlmDiscoveryPanel({
             ) : null}
           </div>
         </div>
-
-        {selectedCount > 0 ? (
-          <div className="cu-discovery-bulkbar">
-            <span className="cu-muted">{selectedCount} selected</span>
-            <button
-              type="button"
-              className="cu-btn cu-btn--primary cu-btn--sm"
-              onClick={() => void handleBulkEnable()}
-              disabled={bulkEnabling}
-            >
-              {bulkEnabling ? 'Enabling…' : `Enable ${selectedCount} selected`}
-            </button>
-          </div>
-        ) : null}
 
         <TableViewport className="cu-table-wrap cu-table-wrap--sticky-header">
           <DataTable
@@ -487,7 +506,7 @@ export function LlmDiscoveryPanel({
                           <button
                             type="button"
                             className="cu-btn cu-btn--primary cu-btn--sm"
-                            onClick={() => void handleEnable(model)}
+                            onClick={() => setEnableConfirmation({ kind: 'single', model })}
                             disabled={pendingId === model.id || bulkEnabling}
                           >
                             {pendingId === model.id ? 'Enabling…' : 'Enable'}
@@ -502,6 +521,27 @@ export function LlmDiscoveryPanel({
           </DataTable>
         </TableViewport>
       </div>
+      <ConfirmationDialog
+        open={enableConfirmation !== null}
+        onCancel={() => setEnableConfirmation(null)}
+        onConfirm={confirmEnable}
+        title={
+          enableConfirmation?.kind === 'single'
+            ? `Enable ${modelLabel(enableConfirmation.model)}?`
+            : `Enable ${selectedCount} selected models?`
+        }
+        description={
+          enableConfirmation?.kind === 'single'
+            ? 'This model will become available to agents and runtime.'
+            : `This will enable ${selectedCount} models. Each model is updated independently.`
+        }
+        confirmLabel={
+          enableConfirmation?.kind === 'single'
+            ? `Enable ${modelLabel(enableConfirmation.model)}`
+            : `Enable ${selectedCount} models`
+        }
+        pending={pendingId !== null || bulkEnabling}
+      />
     </>
   )
 }

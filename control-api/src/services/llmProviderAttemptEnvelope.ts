@@ -15,10 +15,17 @@
  * imports this one, so defining them there would make this module read them
  * before they are initialized whenever the ticket module loads first.
  */
+import { LIMITS as GROK_CONTRACT_LIMITS } from '@clerum/grok-provider-attempt-contract'
+import { LIMITS as CODEX_CONTRACT_LIMITS } from '@clerum/llm-provider-attempt-contract'
 import { config } from '../config.js'
 
-export const CODEX_EXECUTION_TICKET_TTL_SECONDS = 60
-export const GROK_EXECUTION_TICKET_TTL_SECONDS = 60
+/**
+ * The ticket TTL is a published contract limit: the proxies bound their
+ * admission waits against it and the fixtures freeze it, so control-api signs
+ * tickets with the contract value rather than a copy of it (#739).
+ */
+export const CODEX_EXECUTION_TICKET_TTL_SECONDS = CODEX_CONTRACT_LIMITS.executionTicketTtlMs / 1000
+export const GROK_EXECUTION_TICKET_TTL_SECONDS = GROK_CONTRACT_LIMITS.executionTicketTtlMs / 1000
 
 /** Per-attempt stream cap control-api returns on redeem (30 min). */
 export const CODEX_MAX_STREAM_DURATION_MS = 1_800_000

@@ -3,12 +3,17 @@ import { createHash } from 'node:crypto'
 import { isIP } from 'node:net'
 import { config } from '../config.js'
 import type { ExternalGfsAuthority } from '../gfs/externalAuthority.js'
+import { LogThrottle } from '../observability/logThrottle.js'
 import { rootLogger } from '../observability/logger.js'
 import {
   externalGfsRateLimitDurationSeconds,
   externalGfsRateLimitRequestsTotal,
 } from '../observability/metrics.js'
-import { type RateLimitCheck, checkAndIncrement } from '../services/rateLimiterService.js'
+import {
+  RATE_LIMIT_BACKEND_RETRY_AFTER_SECONDS,
+  type RateLimitCheck,
+  checkAndIncrement,
+} from '../services/rateLimiterService.js'
 
 /**
  * The external Desktop GFS surface has a small, explicit operation matrix.
@@ -31,7 +36,7 @@ export type ExternalGfsOperation = {
   route: string
 }
 
-type ExternalGfsRateLimitPhase = 'pre-resolution' | 'resolved-operation'
+type ExternalGfsRateLimitPhase = 'pre-resolution' | 'resolved-operation' | 'edge-backstop'
 type Bucket = { key: string; maxPerMinute: number }
 
 type ExternalGfsAuthedRequest = Request & {
@@ -141,8 +146,29 @@ export function externalGfsOperationFor(
   return null
 }
 
+/**
+ * The hashedKey logged for a bucket: a correlation id that joins the Postgres
+ * and backstop lines, not anonymization. It is unsalted, so a low-entropy key
+ * (an IP, an email) can be recovered by guessing.
+ */
 function digest(value: string): string {
   return createHash('sha256').update(value).digest('hex')
+}
+
+/**
+ * The two bucket keys that the express backstops in routes/external/gfs.ts
+ * also use as their store keys. One key per actor on both limiters gives a
+ * Postgres denial and a backstop denial the same hashedKey in the logs.
+ */
+export function externalGfsTokenUserBucketKey(desktopUserId: string): string {
+  return `gfs-ext:pre:token:user:${desktopUserId}`
+}
+
+export function externalGfsResolvedActorBucketKey(
+  operationClass: Exclude<ExternalGfsOperationClass, 'token'>,
+  authority: Pick<ExternalGfsAuthority, 'kind' | 'tokenSubject'>
+): string {
+  return `gfs-ext:resolved:${operationClass}:actor:${authority.kind}:${authority.tokenSubject}`
 }
 
 function authenticatedSessionDigest(req: Request): string | null {
@@ -178,13 +204,30 @@ function sourceIpDigest(req: Request): string {
   return digest(externalGfsSourceIp(req))
 }
 
-function operationLimit(operationClass: ExternalGfsOperationClass): number {
-  return operationClass === 'resource' ||
-    operationClass === 'proxy-read' ||
-    operationClass === 'grants-read' ||
-    operationClass === 'shares-read'
-    ? config.externalGfsReadRlPerMin
-    : config.externalGfsOperationRlPerMin
+/**
+ * The per-minute budget of one operation class. The pre-resolution session and
+ * (class, IP) buckets, the resolved actor bucket and the class's express
+ * backstop in routes/external/gfs.ts all read it here, so one class cannot be
+ * metered under two different numbers. The switch is exhaustive: a new class
+ * does not compile until it is given a budget.
+ */
+export function externalGfsClassRlPerMin(
+  operationClass: Exclude<ExternalGfsOperationClass, 'token'>
+): number {
+  switch (operationClass) {
+    case 'resource':
+      return config.externalGfsResourceReadRlPerMin
+    case 'proxy-read':
+      return config.externalGfsProxyReadRlPerMin
+    case 'grants-read':
+      return config.externalGfsGrantsReadRlPerMin
+    case 'shares-read':
+      return config.externalGfsSharesReadRlPerMin
+    case 'resource-mutation':
+    case 'grants-mutation':
+    case 'shares-mutation':
+      return config.externalGfsOperationRlPerMin
+  }
 }
 
 function applyRateLimitHeaders(
@@ -210,11 +253,13 @@ function applyAllowedRateHeaders(
   res.setHeader('X-RateLimit-Reset', String(Math.floor(result.resetMs / 1000)))
 }
 
+const unavailableLogThrottle = new LogThrottle(60_000)
+
 function reportDecision(input: {
   bucket: Bucket
   operation: ExternalGfsOperation
   phase: ExternalGfsRateLimitPhase
-  outcome: 'allowed' | 'denied'
+  outcome: 'allowed' | 'denied' | 'unavailable'
   latencyMs: number
   authorityResolutionAvoided: boolean
 }): void {
@@ -228,8 +273,9 @@ function reportDecision(input: {
   externalGfsRateLimitRequestsTotal.inc(labels)
   externalGfsRateLimitDurationSeconds.observe(labels, input.latencyMs / 1_000)
 
-  // The hash gives operators a join key for a single limiter identity without
-  // exposing session tokens, source IPs, or stable internal IDs in logs.
+  // The hash is a join key for one limiter identity, so the raw key (session
+  // token, source IP, internal id) is not written. It is not anonymization: the
+  // SHA-256 is unsalted, and a low-entropy key such as an IP can be guessed.
   const fields = {
     event: 'external_gfs_rate_limit',
     operationClass: input.operation.operationClass,
@@ -240,11 +286,73 @@ function reportDecision(input: {
     latencyMs: input.latencyMs,
     authorityResolutionAvoided: input.authorityResolutionAvoided,
   }
-  if (input.outcome === 'denied') {
+  if (input.outcome === 'unavailable') {
+    // Every request fails while the backend is down, so the line is written
+    // once per key per minute; the counter above still records each one.
+    const suppressed = unavailableLogThrottle.admit(fields.hashedKey)
+    if (suppressed !== undefined) {
+      rootLogger.warn(
+        { ...fields, event: 'external_gfs_rate_limit_unavailable', suppressed },
+        'external GFS rate limit backend unavailable'
+      )
+    }
+  } else if (input.outcome === 'denied') {
     rootLogger.warn(fields, 'external GFS rate limit denied')
   } else {
     rootLogger.debug(fields, 'external GFS rate limit checked')
   }
+}
+
+/**
+ * Report a denial from one of the in-memory express backstops in
+ * routes/external/gfs.ts with the event and counter that reportDecision uses
+ * for the Postgres buckets, so both denial sources are visible in one place.
+ *
+ * `guard` is a log field only. The counter's label set is fixed in metrics.ts
+ * and prom-client throws on an undeclared label, which here would turn a 429
+ * into a 500.
+ *
+ * The counter records every denial. The warn line is written only for the
+ * first denial of a key in its window, so a client retrying in a loop costs
+ * one log line per minute instead of one per request.
+ */
+export function reportEdgeBackstopDenial(input: {
+  req: Request
+  guard: string
+  key: string
+  retryAfterSeconds: number
+  authorityResolutionAvoided: boolean
+  firstDenialInWindow: boolean
+}): void {
+  // Route-scoped backstops only run on classified routes. The ingress
+  // backstop runs on every /external/gfs path before the route table, so a
+  // path outside the operation matrix has no class and is reported as such.
+  const operation = externalGfsOperationFor(input.req)
+  const operationClass = operation === null ? 'unclassified' : operation.operationClass
+  const route = operation === null ? 'unclassified' : operation.route
+
+  externalGfsRateLimitRequestsTotal.inc({
+    operation_class: operationClass,
+    route,
+    outcome: 'denied',
+    phase: 'edge-backstop',
+    authority_resolution_avoided: input.authorityResolutionAvoided ? 'true' : 'false',
+  })
+  if (!input.firstDenialInWindow) return
+  rootLogger.warn(
+    {
+      event: 'external_gfs_rate_limit',
+      phase: 'edge-backstop',
+      guard: input.guard,
+      operationClass,
+      route,
+      hashedKey: digest(input.key),
+      retryAfterSeconds: input.retryAfterSeconds,
+      outcome: 'denied',
+      authorityResolutionAvoided: input.authorityResolutionAvoided,
+    },
+    'external GFS edge backstop denied'
+  )
 }
 
 async function enforceBuckets(input: {
@@ -258,6 +366,32 @@ async function enforceBuckets(input: {
     const startedAt = performance.now()
     const result = await checkAndIncrement(bucket.key, bucket.maxPerMinute)
     const latencyMs = performance.now() - startedAt
+    if (!result.backendAvailable) {
+      // The limiter could not count this request (pool exhausted, query error
+      // or no row), so it cannot tell whether the actor is over budget. The
+      // external GFS surface fails closed instead of letting an unmetered
+      // request reach authority resolution and gfsc (#764).
+      reportDecision({
+        bucket,
+        operation: input.operation,
+        phase: input.phase,
+        outcome: 'unavailable',
+        latencyMs,
+        authorityResolutionAvoided: input.phase === 'pre-resolution',
+      })
+      // Earlier buckets that admitted this request wrote their counts; a 503
+      // charged no budget, so it carries none of them.
+      input.res.removeHeader('X-RateLimit-Limit')
+      input.res.removeHeader('X-RateLimit-Remaining')
+      input.res.removeHeader('X-RateLimit-Reset')
+      input.res.setHeader('Retry-After', String(RATE_LIMIT_BACKEND_RETRY_AFTER_SECONDS))
+      input.res.setHeader('Cache-Control', 'no-store')
+      input.res.status(503).json({
+        error: 'gfs_rate_limit_unavailable',
+        retryAfterSeconds: RATE_LIMIT_BACKEND_RETRY_AFTER_SECONDS,
+      })
+      return false
+    }
     const allowed = result.allowed
     reportDecision({
       bucket,
@@ -310,7 +444,7 @@ export function externalGfsPreResolutionRateLimit(
       operation.operationClass === 'token'
         ? [
             {
-              key: `gfs-ext:pre:token:user:${desktopUserId}`,
+              key: externalGfsTokenUserBucketKey(desktopUserId),
               maxPerMinute: config.externalGfsTokenUserRlPerMin,
             },
             {
@@ -321,11 +455,11 @@ export function externalGfsPreResolutionRateLimit(
         : [
             {
               key: `gfs-ext:pre:${operation.operationClass}:session:${sessionDigest}`,
-              maxPerMinute: operationLimit(operation.operationClass),
+              maxPerMinute: externalGfsClassRlPerMin(operation.operationClass),
             },
             {
               key: `gfs-ext:pre:${operation.operationClass}:ip:${sourceIpDigest(req)}`,
-              maxPerMinute: operationLimit(operation.operationClass),
+              maxPerMinute: externalGfsClassRlPerMin(operation.operationClass),
             },
             {
               key: `gfs-ext:pre:ip:${sourceIpDigest(req)}`,
@@ -359,8 +493,8 @@ export function externalGfsResolvedOperationRateLimit(
       return
     }
     const bucket: Bucket = {
-      key: `gfs-ext:resolved:${operation.operationClass}:actor:${authority.kind}:${authority.tokenSubject}`,
-      maxPerMinute: operationLimit(operation.operationClass),
+      key: externalGfsResolvedActorBucketKey(operation.operationClass, authority),
+      maxPerMinute: externalGfsClassRlPerMin(operation.operationClass),
     }
     if (
       await enforceBuckets({

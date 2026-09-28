@@ -7,7 +7,13 @@ import { resolve } from 'node:path'
 import { EVENFIRE_REGISTRY_PULL_SECRET_NAME } from '@clerum/workflow-runtime-core'
 import { loadConfig } from '../config'
 import { WorkflowRecipeWatcher, shouldPatchRecipeStatus } from '../k8sClient'
-import { CronJobDef, WorkflowRecipeCRD, WorkflowRecipeGfsIntentSpec, WorkloadDef } from '../types'
+import {
+  CronJobDef,
+  StatusCondition,
+  WorkflowRecipeCRD,
+  WorkflowRecipeGfsIntentSpec,
+  WorkloadDef,
+} from '../types'
 import { INHERITED_PARENT_RESOURCES_ANNOTATION } from '../workflow/childRecipeFactory'
 import { buildCoordinatorGfsNetworkPolicy } from '../workflow/networkPolicyFactory'
 import { captureLogger } from './__tests__/captureLogger'
@@ -1312,6 +1318,7 @@ describe('WorkflowRecipeReconciler', () => {
         policyReady: true,
         verifiedAt: '2026-08-04T00:00:00.000Z',
       },
+      networkPolicies: { conflicts: [], retryPending: false },
     })
     const workflowReconcile = vi.fn()
     const setCodexReconcileContext = vi.fn()
@@ -1370,6 +1377,7 @@ describe('WorkflowRecipeReconciler', () => {
     const reconcilePluginWorkloadSdkOnly = vi.fn().mockResolvedValue({
       phase: 'active',
       message: 'Plugin Workload SDK mcp-host registered',
+      networkPolicies: { conflicts: [], retryPending: false },
     })
     ;(
       reconciler as unknown as {
@@ -1409,6 +1417,7 @@ describe('WorkflowRecipeReconciler', () => {
     const reconcilePluginWorkloadSdkOnly = vi.fn().mockResolvedValue({
       phase: 'deploying',
       message: 'Plugin Workload SDK mcp-host starting',
+      networkPolicies: { conflicts: [], retryPending: false },
     })
     ;(
       reconciler as unknown as {
@@ -1444,6 +1453,293 @@ describe('WorkflowRecipeReconciler', () => {
     })
   })
 
+  describe('SDK-only NetworkPolicy ownership condition', () => {
+    const ownershipCondition = {
+      type: 'WorkflowNetworkPolicyOwnership',
+      status: 'False' as const,
+      reason: 'OwnershipConflict',
+      message:
+        'NetworkPolicy ownership conflict: test-recipe-mcp-host-to-gfs (owner-reference-mismatch)',
+      lastTransitionTime: '2026-09-23T10:00:00.000Z',
+    }
+    const bootstrapProof = {
+      ready: true,
+      contractVersion: 2,
+      podUid: 'sdk-pod-uid',
+      provider: 'zai',
+      model: 'glm-4.7',
+      policyReady: true,
+      verifiedAt: '2026-08-04T00:00:00.000Z',
+    }
+    const sdkOnlyRecipe = (conditions?: unknown[]) =>
+      makeRecipe({
+        spec: {
+          agent: { provider: 'zai', model: 'glm-4.7' },
+          workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.1-alpine', port: 8080 }],
+          pluginWorkloadSdk: { promptBridge: {}, allowedCallers: ['app'] },
+        },
+        status: { phase: 'active', ...(conditions ? { conditions } : {}) },
+      } as Partial<WorkflowRecipeCRD>)
+    const stubSdkOnly = (resolved: Record<string, unknown>) => {
+      const reconcilePluginWorkloadSdkOnly = vi.fn().mockResolvedValue(resolved)
+      ;(
+        reconciler as unknown as { config: { pluginWorkloadSdkEnabled: boolean } }
+      ).config.pluginWorkloadSdkEnabled = true
+      ;(
+        reconciler as unknown as {
+          workflowReconciler: {
+            reconcilePluginWorkloadSdkOnly: typeof reconcilePluginWorkloadSdkOnly
+          }
+        }
+      ).workflowReconciler = { reconcilePluginWorkloadSdkOnly }
+      return reconcilePluginWorkloadSdkOnly
+    }
+
+    it('publishes a False condition naming each conflicting policy', async () => {
+      const sdkOnly = stubSdkOnly({
+        phase: 'active',
+        message: 'Plugin Workload SDK mcp-host registered',
+        pluginWorkloadSdkBootstrapProof: bootstrapProof,
+        networkPolicies: {
+          conflicts: [
+            {
+              policy: 'test-recipe-workload-to-mcp-host-sdk-ingress',
+              reason: 'owner-reference-mismatch',
+            },
+          ],
+          retryPending: false,
+        },
+      })
+
+      const result = await reconciler.reconcile(sdkOnlyRecipe())
+
+      expect(sdkOnly).toHaveBeenCalledTimes(1)
+      expect(result.phase).toBe('active')
+      expect(result.networkPolicyOwnershipConditions).toEqual([
+        expect.objectContaining({
+          type: 'WorkflowNetworkPolicyOwnership',
+          status: 'False',
+          reason: 'OwnershipConflict',
+          message: expect.stringContaining(
+            'test-recipe-workload-to-mcp-host-sdk-ingress (owner-reference-mismatch)'
+          ),
+        }),
+      ])
+    })
+
+    it('clears the condition with an explicit empty set once no policy conflicts', async () => {
+      const sdkOnly = stubSdkOnly({
+        phase: 'active',
+        message: 'Plugin Workload SDK mcp-host registered',
+        pluginWorkloadSdkBootstrapProof: bootstrapProof,
+        networkPolicies: { conflicts: [], retryPending: false },
+      })
+
+      const result = await reconciler.reconcile(sdkOnlyRecipe([ownershipCondition]))
+
+      expect(sdkOnly).toHaveBeenCalledTimes(1)
+      expect(result.phase).toBe('active')
+      expect(result.networkPolicyOwnershipConditions).toEqual([])
+    })
+
+    // `failed` can return before the apply, so the pass cannot say whether the
+    // conflict is gone. The field stays undefined and patchStatus keeps the
+    // published condition (see the patchStatus describe for the merge side).
+    it('leaves the ownership field undefined when the eager host fails before applying', async () => {
+      const sdkOnly = stubSdkOnly({
+        phase: 'failed',
+        message: 'Plugin Workload SDK promptBridge has no resolvable agent',
+      })
+
+      const result = await reconciler.reconcile(sdkOnlyRecipe([ownershipCondition]))
+
+      expect(sdkOnly).toHaveBeenCalledTimes(1)
+      expect(result.phase).toBe('failed')
+      expect(result.message).toBe('Plugin Workload SDK promptBridge has no resolvable agent')
+      expect(result).not.toHaveProperty('networkPolicyOwnershipConditions')
+    })
+
+    // The mcp-host pod failed after the apply, so the summary is a real
+    // evaluation: a conflict is published and an empty set clears the condition.
+    it('publishes the evaluated set when the eager host fails after applying', async () => {
+      const conflicted = stubSdkOnly({
+        phase: 'failed',
+        message: 'Plugin Workload SDK mcp-host could not start',
+        networkPolicies: {
+          conflicts: [
+            {
+              policy: 'test-recipe-workload-to-mcp-host-sdk-ingress',
+              reason: 'owner-reference-mismatch',
+            },
+          ],
+          retryPending: false,
+        },
+      })
+
+      const failedWithConflict = await reconciler.reconcile(sdkOnlyRecipe())
+
+      expect(conflicted).toHaveBeenCalledTimes(1)
+      expect(failedWithConflict.phase).toBe('failed')
+      expect(failedWithConflict.networkPolicyOwnershipConditions).toEqual([
+        expect.objectContaining({
+          type: 'WorkflowNetworkPolicyOwnership',
+          status: 'False',
+          reason: 'OwnershipConflict',
+          message: expect.stringContaining(
+            'test-recipe-workload-to-mcp-host-sdk-ingress (owner-reference-mismatch)'
+          ),
+        }),
+      ])
+
+      const converged = stubSdkOnly({
+        phase: 'failed',
+        message: 'Plugin Workload SDK mcp-host could not start',
+        networkPolicies: { conflicts: [], retryPending: false },
+      })
+
+      const failedConverged = await reconciler.reconcile(sdkOnlyRecipe([ownershipCondition]))
+
+      expect(converged).toHaveBeenCalledTimes(1)
+      expect(failedConverged.phase).toBe('failed')
+      expect(failedConverged.networkPolicyOwnershipConditions).toEqual([])
+    })
+
+    // A policy being deleted is retried on the transient path. The twin with
+    // retryPending false shows that no other input of the requeue expression is
+    // set, so the first requeue can only come from the pending retry.
+    it('requeues on the transient path while a policy is being deleted', async () => {
+      const pending = stubSdkOnly({
+        phase: 'active',
+        message: 'Plugin Workload SDK mcp-host registered',
+        pluginWorkloadSdkBootstrapProof: bootstrapProof,
+        networkPolicies: { conflicts: [], retryPending: true },
+      })
+
+      const retrying = await reconciler.reconcile(sdkOnlyRecipe())
+
+      expect(pending).toHaveBeenCalledTimes(1)
+      expect(retrying.phase).toBe('active')
+      expect(retrying.requeueAfterMs).toBe(TRANSIENT_REQUEUE_BASE_MS)
+      expect(retrying.requeueFixedInterval).toBe(false)
+      // Being deleted is not a conflict; the only owned condition is the
+      // RetryPending marker the short-circuits key their reapply on.
+      expect(retrying.networkPolicyOwnershipConditions).toEqual([
+        expect.objectContaining({
+          type: 'WorkflowNetworkPoliciesConverged',
+          status: 'False',
+          reason: 'RetryPending',
+        }),
+      ])
+
+      const settled = stubSdkOnly({
+        phase: 'active',
+        message: 'Plugin Workload SDK mcp-host registered',
+        pluginWorkloadSdkBootstrapProof: bootstrapProof,
+        networkPolicies: { conflicts: [], retryPending: false },
+      })
+
+      const steady = await reconciler.reconcile(sdkOnlyRecipe())
+
+      expect(settled).toHaveBeenCalledTimes(1)
+      expect(steady.phase).toBe('active')
+      expect(steady.requeueAfterMs).toBeUndefined()
+      expect(steady.networkPolicyOwnershipConditions).toEqual([])
+    })
+
+    // The mcp-host pod failed after an apply that left a policy being deleted.
+    // The `failed` return must still requeue, or nothing rewrites the policy
+    // until the next CR event. The twin with retryPending false shows the
+    // `failed` return sets no requeue of its own, so the first one can only
+    // come from the pending retry.
+    it('requeues a failed pass on the transient path while a policy is being deleted', async () => {
+      const pending = stubSdkOnly({
+        phase: 'failed',
+        message: 'Plugin Workload SDK mcp-host could not start',
+        networkPolicies: { conflicts: [], retryPending: true },
+      })
+
+      const retrying = await reconciler.reconcile(sdkOnlyRecipe())
+
+      expect(pending).toHaveBeenCalledTimes(1)
+      expect(retrying.phase).toBe('failed')
+      expect(retrying.message).toBe('Plugin Workload SDK mcp-host could not start')
+      expect(retrying.requeueAfterMs).toBe(TRANSIENT_REQUEUE_BASE_MS)
+      expect(retrying.requeueFixedInterval).toBe(false)
+      expect(retrying.networkPolicyOwnershipConditions).toEqual([
+        expect.objectContaining({
+          type: 'WorkflowNetworkPoliciesConverged',
+          status: 'False',
+          reason: 'RetryPending',
+        }),
+      ])
+
+      const settled = stubSdkOnly({
+        phase: 'failed',
+        message: 'Plugin Workload SDK mcp-host could not start',
+        networkPolicies: { conflicts: [], retryPending: false },
+      })
+
+      const terminal = await reconciler.reconcile(sdkOnlyRecipe())
+
+      expect(settled).toHaveBeenCalledTimes(1)
+      expect(terminal.phase).toBe('failed')
+      expect(terminal.message).toBe('Plugin Workload SDK mcp-host could not start')
+      expect(terminal.networkPolicyOwnershipConditions).toEqual([])
+      expect(terminal.requeueAfterMs).toBeUndefined()
+    })
+
+    // Removing spec.pluginWorkloadSdk tears the runtime down and falls through
+    // to the transport return without an SDK runtime. No policy is managed any
+    // more, so the lane must send `[]` (clear), not undefined (keep).
+    it('clears a published condition once the SDK capability is removed from the spec', async () => {
+      const sdkOnly = stubSdkOnly({})
+      const cleanupPluginWorkloadSdk = vi.fn().mockResolvedValue(undefined)
+      ;(
+        reconciler as unknown as {
+          workflowReconciler: { cleanupPluginWorkloadSdk: typeof cleanupPluginWorkloadSdk }
+        }
+      ).workflowReconciler.cleanupPluginWorkloadSdk = cleanupPluginWorkloadSdk
+      const recipe = makeRecipe({
+        spec: {
+          workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.1-alpine', port: 8080 }],
+        },
+        status: {
+          phase: 'active',
+          pluginWorkloadSdk: { state: 'validated', promptBridge: true, clientNotifications: false },
+          conditions: [ownershipCondition],
+        },
+      } as Partial<WorkflowRecipeCRD>)
+
+      const result = await reconciler.reconcile(recipe)
+
+      // Liveness witness: the capability-removal teardown ran and the pass
+      // reached the transport return, not the SDK-only lane.
+      expect(cleanupPluginWorkloadSdk).toHaveBeenCalledTimes(1)
+      expect(cleanupPluginWorkloadSdk).toHaveBeenCalledWith('test-recipe', {
+        preserveWorkflowRuntime: false,
+      })
+      expect(sdkOnly).not.toHaveBeenCalled()
+      expect(result.phase).not.toBe('failed')
+      expect(result.networkPolicyOwnershipConditions).toEqual([])
+      expect(shouldPatchRecipeStatus(recipe, result)).toBe(true)
+      // The pass itself may patch an intermediate phase; the status write under
+      // test is the one patchStatus adds.
+      const patchesBefore = mockCustomApi.patchNamespacedCustomObjectStatus.mock.calls.length
+
+      await reconciler.patchStatus(recipe, result)
+
+      expect(mockCustomApi.patchNamespacedCustomObjectStatus).toHaveBeenCalledTimes(
+        patchesBefore + 1
+      )
+      const conditions = mockCustomApi.patchNamespacedCustomObjectStatus.mock.calls.at(-1)![0].body
+        .status.conditions as Array<{ type: string }>
+      expect(conditions.length).toBeGreaterThan(0)
+      expect(conditions.map(condition => condition.type)).not.toContain(
+        'WorkflowNetworkPolicyOwnership'
+      )
+    })
+  })
+
   // awaiting_policy waits for an operator grant. The grant arrives by event
   // (handleGrantUpdateNotification) or by the 30s credential-refresh floor, so a
   // fixed 5s poll cannot make the state advance. It must keep requeueing, but on
@@ -1453,6 +1749,7 @@ describe('WorkflowRecipeReconciler', () => {
       const reconcilePluginWorkloadSdkOnly = vi.fn().mockResolvedValue({
         phase: 'awaiting_policy',
         message: 'operator policy pending (policy_not_ready)',
+        networkPolicies: { conflicts: [], retryPending: false },
       })
       ;(
         reconciler as unknown as {
@@ -1607,6 +1904,65 @@ describe('WorkflowRecipeReconciler', () => {
       preserveWorkflowRuntime: false,
     })
     expect(workflowReconcile).not.toHaveBeenCalled()
+  })
+
+  // The kill switch returns before the SDK-only lane, which is the only path
+  // that clears the ownership condition. With the runtime torn down no policy
+  // is managed, so a conflict published earlier is stale.
+  it('clears a published NetworkPolicy ownership condition after the feature-flag teardown', async () => {
+    const cleanupPluginWorkloadSdk = vi.fn().mockResolvedValue(undefined)
+    const reconcilePluginWorkloadSdkOnly = vi.fn()
+    ;(
+      reconciler as unknown as { config: { pluginWorkloadSdkEnabled: boolean } }
+    ).config.pluginWorkloadSdkEnabled = false
+    ;(
+      reconciler as unknown as {
+        workflowReconciler: {
+          cleanupPluginWorkloadSdk: typeof cleanupPluginWorkloadSdk
+          reconcilePluginWorkloadSdkOnly: typeof reconcilePluginWorkloadSdkOnly
+        }
+      }
+    ).workflowReconciler = { cleanupPluginWorkloadSdk, reconcilePluginWorkloadSdkOnly }
+    const ownershipConflict = {
+      type: 'WorkflowNetworkPolicyOwnership',
+      status: 'False' as const,
+      reason: 'OwnershipConflict',
+      message:
+        'NetworkPolicy ownership conflict: test-recipe-mcp-host-to-gfs (owner-reference-mismatch)',
+      lastTransitionTime: '2026-09-23T10:00:00.000Z',
+    }
+    const recipe = makeRecipe({
+      status: {
+        phase: 'active',
+        pluginWorkloadSdk: { state: 'validated', promptBridge: true, clientNotifications: false },
+        conditions: [ownershipConflict],
+      },
+      spec: {
+        workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.1-alpine', port: 8080 }],
+        pluginWorkloadSdk: { promptBridge: {}, allowedCallers: ['app'] },
+      },
+    } as Partial<WorkflowRecipeCRD>)
+
+    const result = await reconciler.reconcile(recipe)
+
+    // Liveness witness: the teardown ran and the kill-switch return produced
+    // this result, not the SDK-only lane.
+    expect(cleanupPluginWorkloadSdk).toHaveBeenCalledTimes(1)
+    expect(result.pluginWorkloadSdkTeardownConfirmed).toBe(true)
+    expect(reconcilePluginWorkloadSdkOnly).not.toHaveBeenCalled()
+    expect(result.networkPolicyOwnershipConditions).toEqual([])
+    // The watcher writes this result, so the cleared set reaches the status.
+    expect(shouldPatchRecipeStatus(recipe, result)).toBe(true)
+
+    await reconciler.patchStatus(recipe, result)
+
+    expect(mockCustomApi.patchNamespacedCustomObjectStatus).toHaveBeenCalledTimes(1)
+    const conditions = mockCustomApi.patchNamespacedCustomObjectStatus.mock.calls[0][0].body.status
+      .conditions as Array<{ type: string }>
+    expect(conditions.length).toBeGreaterThan(0)
+    expect(conditions.map(condition => condition.type)).not.toContain(
+      'WorkflowNetworkPolicyOwnership'
+    )
   })
 
   it('degrades an active recipe when observed child Deployment readiness drifts', async () => {
@@ -4093,6 +4449,90 @@ describe('WorkflowRecipeReconciler', () => {
         lastTransitionTime: 'now',
       },
     ])
+  })
+
+  describe('patchStatus and the NetworkPolicy ownership condition', () => {
+    const egressReady = {
+      type: 'ExternalEgressReady',
+      status: 'True' as const,
+      lastTransitionTime: 'old',
+    }
+    const ownershipConflict = {
+      type: 'WorkflowNetworkPolicyOwnership',
+      status: 'False' as const,
+      reason: 'OwnershipConflict',
+      message:
+        'NetworkPolicy ownership conflict: test-recipe-coord-to-wrc (owner-reference-mismatch)',
+      lastTransitionTime: 'old',
+    }
+    const recipeWithConflict = () =>
+      makeRecipe({
+        status: { phase: 'active', conditions: [egressReady, ownershipConflict] },
+      })
+    const patchedConditions = () => {
+      expect(mockCustomApi.patchNamespacedCustomObjectStatus).toHaveBeenCalledTimes(1)
+      return mockCustomApi.patchNamespacedCustomObjectStatus.mock.calls[0][0].body.status.conditions
+    }
+
+    it('keeps the condition when the result does not carry the ownership field', async () => {
+      // A pass that returns before applying the policies (in-progress short
+      // circuit, degraded retry, preflight) still patches status when the
+      // phase or message changes. The conflict is still live, so the
+      // condition and its lastTransitionTime must survive that patch.
+      await reconciler.patchStatus(recipeWithConflict(), {
+        phase: 'degraded',
+        message: 'Waiting for the workflow run',
+        workloadStatuses: [],
+      })
+
+      const patch = mockCustomApi.patchNamespacedCustomObjectStatus.mock.calls[0]?.[0].body
+      expect(patch?.status.phase).toBe('degraded')
+      expect(patchedConditions() ?? [egressReady, ownershipConflict]).toEqual([
+        egressReady,
+        ownershipConflict,
+      ])
+    })
+
+    it('keeps the condition when only the workflow-output conditions are cleared', async () => {
+      await reconciler.patchStatus(recipeWithConflict(), {
+        phase: 'active',
+        message: 'All workloads deployed',
+        workloadStatuses: [],
+        workflowConditions: [],
+      })
+
+      expect(patchedConditions() ?? [egressReady, ownershipConflict]).toEqual([
+        egressReady,
+        ownershipConflict,
+      ])
+    })
+
+    it('removes the condition when the owned set is empty', async () => {
+      await reconciler.patchStatus(recipeWithConflict(), {
+        phase: 'active',
+        message: 'All workloads deployed',
+        workloadStatuses: [],
+        networkPolicyOwnershipConditions: [],
+      })
+
+      expect(patchedConditions()).toEqual([egressReady])
+    })
+
+    it('replaces the condition with the fresh one', async () => {
+      const fresh = {
+        ...ownershipConflict,
+        message:
+          'NetworkPolicy ownership conflict: test-recipe-snippet-runner-egress (owner-reference-mismatch)',
+      }
+      await reconciler.patchStatus(recipeWithConflict(), {
+        phase: 'active',
+        message: 'All workloads deployed',
+        workloadStatuses: [],
+        networkPolicyOwnershipConditions: [fresh],
+      })
+
+      expect(patchedConditions()).toEqual([egressReady, fresh])
+    })
   })
 
   it('replaces and clears the SDK provider-unavailable condition on recovery', async () => {
@@ -9171,6 +9611,340 @@ describe('WorkflowRecipeReconciler', () => {
     expect(result.requeueFixedInterval).toBeFalsy()
   })
 
+  // A pass that reaches WorkflowReconciler.reconcile() (here the first deploy)
+  // and leaves a run-lane policy pending a retry requeues on the progress
+  // interval, with backoff: nothing bounds how long a deletion or a contention
+  // lasts. The passes of a running workflow stop at the short-circuits; those
+  // reapply the policies from the published marker (tests below).
+  it('requeues on the backoff path when a pass through reconcile() leaves a run-lane policy pending a retry', async () => {
+    const workflowReconcile = vi.fn().mockResolvedValue({
+      phase: 'active',
+      message: 'Workflow running',
+      workflowPhase: 'running',
+      networkPolicyRetryPending: true,
+    })
+    ;(
+      reconciler as unknown as {
+        workflowReconciler: {
+          reconcile: typeof workflowReconcile
+          validateWorkflowSpec: () => undefined
+        }
+      }
+    ).workflowReconciler = { reconcile: workflowReconcile, validateWorkflowSpec: () => undefined }
+
+    const recipe = makeRecipe({
+      spec: {
+        agent: { provider: 'zai', model: 'glm-4.7' },
+        steps: [{ id: 'research', instruction: 'run' }],
+      },
+      status: { phase: 'candidate' },
+    })
+
+    const result = await reconciler.reconcile(recipe)
+
+    expect(workflowReconcile).toHaveBeenCalledTimes(1)
+    expect(result.phase).toBe('active')
+    expect(result.requeueAfterMs).toBe(WORKFLOW_PROGRESS_REQUEUE_BASE_MS)
+    expect(result.requeueFixedInterval).toBe(false)
+  })
+
+  // An ownership conflict waits for an operator, so it publishes its condition
+  // and does not requeue.
+  it('does not requeue a run-lane ownership conflict but still publishes it', async () => {
+    const conflict = {
+      type: 'WorkflowNetworkPolicyOwnership',
+      status: 'False' as const,
+      reason: 'OwnershipConflict',
+      message:
+        'NetworkPolicy ownership conflict: test-recipe-coord-to-wrc (owner-reference-mismatch)',
+      lastTransitionTime: '2026-09-23T10:00:00.000Z',
+    }
+    const workflowReconcile = vi.fn().mockResolvedValue({
+      phase: 'active',
+      message: 'Workflow running',
+      workflowPhase: 'running',
+      networkPolicyOwnershipConditions: [conflict],
+    })
+    ;(
+      reconciler as unknown as {
+        workflowReconciler: {
+          reconcile: typeof workflowReconcile
+          validateWorkflowSpec: () => undefined
+        }
+      }
+    ).workflowReconciler = { reconcile: workflowReconcile, validateWorkflowSpec: () => undefined }
+
+    const recipe = makeRecipe({
+      spec: {
+        agent: { provider: 'zai', model: 'glm-4.7' },
+        steps: [{ id: 'research', instruction: 'run' }],
+      },
+      status: { phase: 'candidate' },
+    })
+
+    const result = await reconciler.reconcile(recipe)
+
+    expect(workflowReconcile).toHaveBeenCalledTimes(1)
+    expect(result.networkPolicyOwnershipConditions).toEqual([conflict])
+    expect(result.requeueAfterMs).toBeUndefined()
+  })
+
+  // The in-progress and active short-circuits return before reconcile(), so
+  // they reapply the run-lane policies themselves while the retry marker is
+  // published, and publish only status.conditions: a full status patch would
+  // recompute the SDK projection without a bootstrap proof.
+  describe('run-lane NetworkPolicy retry from the short-circuits', () => {
+    const retryMarker = {
+      type: 'WorkflowNetworkPoliciesConverged',
+      status: 'False' as const,
+      reason: 'RetryPending',
+      message:
+        'One or more run-lane NetworkPolicies are pending a retry (terminating or contended)',
+      lastTransitionTime: '2026-09-24T08:00:00.000Z',
+    }
+    const unrelatedCondition = {
+      type: 'WorkflowOutputPrepareGate',
+      status: 'True' as const,
+      reason: 'Ready',
+      message: 'ready',
+      lastTransitionTime: '2026-09-24T07:00:00.000Z',
+    }
+
+    function installRunLane(retryRunLaneNetworkPolicies: ReturnType<typeof vi.fn>) {
+      const stub = {
+        ensureMcpHostRuntimeCredentials: vi.fn().mockResolvedValue(undefined),
+        refreshRuntimeHttpEgressNetworkPolicies: vi
+          .fn()
+          .mockResolvedValue({ conflicts: [], retryPending: false }),
+        retryRunLaneNetworkPolicies,
+        validateWorkflowSpec: () => undefined,
+      }
+      ;(reconciler as unknown as { workflowReconciler: typeof stub }).workflowReconciler = stub
+      return stub
+    }
+
+    function runningRecipe(overrides: {
+      phase?: 'active' | 'deploying'
+      execPhase?: 'running' | 'completed'
+      conditions?: StatusCondition[]
+      runId?: string | null
+      dryRun?: boolean
+      deletionTimestamp?: string
+    }): WorkflowRecipeCRD {
+      const runId = overrides.runId === undefined ? 'run-42' : overrides.runId
+      return makeRecipe({
+        metadata: {
+          name: 'test-recipe',
+          namespace: 'sandbox-recipes',
+          uid: 'uid-123',
+          ...(runId ? { labels: { 'clerum.io/workflow-run-id': runId } } : {}),
+          ...(overrides.deletionTimestamp
+            ? { deletionTimestamp: overrides.deletionTimestamp }
+            : {}),
+        },
+        spec: {
+          agent: { provider: 'zai', model: 'glm-4.7' },
+          steps: [{ id: 'research', instruction: 'run' }],
+          ...(overrides.dryRun ? { dryRun: true } : {}),
+        },
+        status: {
+          phase: overrides.phase ?? 'active',
+          message: 'Workflow running',
+          workflowExecution: { phase: overrides.execPhase ?? 'running' },
+          conditions: overrides.conditions ?? [unrelatedCondition, retryMarker],
+        } as WorkflowRecipeCRD['status'],
+      })
+    }
+
+    function conditionPatches() {
+      return mockCustomApi.patchNamespacedCustomObjectStatus.mock.calls.map(
+        call => call[0] as { name: string; body: { status: Record<string, unknown> } }
+      )
+    }
+
+    it('reapplies from the active short-circuit and removes the marker with a conditions-only patch once converged', async () => {
+      const retry = vi.fn().mockResolvedValue({ conflicts: [], retryPending: false })
+      installRunLane(retry)
+      const recipe = runningRecipe({})
+
+      const result = await reconciler.reconcile(recipe)
+
+      expect(retry).toHaveBeenCalledTimes(1)
+      expect(retry.mock.calls[0][0]).toBe('test-recipe')
+      expect(retry.mock.calls[0][1]).toBe('uid-123')
+      expect(retry.mock.calls[0][4]).toBe('run-42')
+      const patches = conditionPatches()
+      expect(patches).toHaveLength(1)
+      expect(patches[0].name).toBe('test-recipe')
+      expect(Object.keys(patches[0].body.status)).toEqual(['conditions'])
+      expect(patches[0].body.status.conditions).toEqual([unrelatedCondition])
+      expect(recipe.status?.conditions).toEqual([unrelatedCondition])
+      expect(result).toMatchObject({ phase: 'active', skipStatusPatch: true })
+      expect(result.requeueAfterMs).toBeUndefined()
+    })
+
+    it('reapplies from the in-progress short-circuit and requeues on backoff while still pending', async () => {
+      const retry = vi.fn().mockResolvedValue({ conflicts: [], retryPending: true })
+      installRunLane(retry)
+      const recipe = runningRecipe({ phase: 'deploying' })
+
+      const result = await reconciler.reconcile(recipe)
+
+      expect(retry).toHaveBeenCalledTimes(1)
+      // The marker is unchanged, so no patch opens.
+      expect(conditionPatches()).toHaveLength(0)
+      expect(result.phase).toBe('active')
+      expect(result.requeueAfterMs).toBe(WORKFLOW_PROGRESS_REQUEUE_BASE_MS)
+      expect(result.requeueFixedInterval).toBe(false)
+    })
+
+    it('publishes a changed condition once across two pending passes', async () => {
+      const summary = {
+        conflicts: [{ policy: 'test-recipe-coord-to-wrc', reason: 'owner-reference-mismatch' }],
+        retryPending: true,
+      }
+      const retry = vi.fn().mockResolvedValue(summary)
+      installRunLane(retry)
+      const recipe = runningRecipe({})
+
+      await reconciler.reconcile(recipe)
+      const second = await reconciler.reconcile(recipe)
+
+      expect(retry).toHaveBeenCalledTimes(2)
+      const patches = conditionPatches()
+      expect(patches).toHaveLength(1)
+      expect(Object.keys(patches[0].body.status)).toEqual(['conditions'])
+      const published = patches[0].body.status.conditions as Array<{
+        type: string
+        reason?: string
+        lastTransitionTime?: string
+      }>
+      expect(published.map(c => c.type).sort()).toEqual([
+        'WorkflowNetworkPoliciesConverged',
+        'WorkflowNetworkPolicyOwnership',
+        'WorkflowOutputPrepareGate',
+      ])
+      // The marker keeps the time the retry began.
+      expect(
+        published.find(c => c.type === 'WorkflowNetworkPoliciesConverged')?.lastTransitionTime
+      ).toBe(retryMarker.lastTransitionTime)
+      expect(second.requeueAfterMs).toBe(WORKFLOW_PROGRESS_REQUEUE_BASE_MS)
+    })
+
+    it('does not reapply without the marker', async () => {
+      const retry = vi.fn()
+      const stub = installRunLane(retry)
+      const recipe = runningRecipe({ conditions: [unrelatedCondition] })
+
+      const result = await reconciler.reconcile(recipe)
+
+      // Witness: the active short-circuit ran.
+      expect(stub.ensureMcpHostRuntimeCredentials).toHaveBeenCalledTimes(1)
+      expect(retry).not.toHaveBeenCalled()
+      expect(conditionPatches()).toHaveLength(0)
+      expect(result.requeueAfterMs).toBeUndefined()
+    })
+
+    it('keeps the marker and requeues on backoff when the reapply throws', async () => {
+      const errorLog = captureLogger('error')
+      try {
+        const retry = vi.fn().mockRejectedValue(new Error('connect ECONNRESET'))
+        installRunLane(retry)
+        const recipe = runningRecipe({})
+
+        const result = await reconciler.reconcile(recipe)
+
+        expect(retry).toHaveBeenCalledTimes(1)
+        expect(errorLog).toHaveBeenCalledWith(
+          'Failed to reapply run-lane NetworkPolicies pending a retry; keeping the marker',
+          expect.objectContaining({ name: 'test-recipe' })
+        )
+        expect(conditionPatches()).toHaveLength(0)
+        expect(recipe.status?.conditions).toEqual([unrelatedCondition, retryMarker])
+        expect(result.phase).toBe('active')
+        expect(result.requeueAfterMs).toBe(TRANSIENT_REQUEUE_BASE_MS)
+        expect(result.requeueFixedInterval).toBe(false)
+      } finally {
+        errorLog.mockRestore()
+      }
+    })
+
+    it.each([
+      ['the coordinator GFS policy cannot open', { dryRun: true }],
+      ['the run awaits a trigger', { phase: 'deploying' as const, runId: null }],
+    ])('does not reapply when %s', async (_label, overrides) => {
+      const retry = vi.fn()
+      const stub = installRunLane(retry)
+      const recipe = runningRecipe(overrides)
+
+      await reconciler.reconcile(recipe)
+
+      // Witness: a short-circuit ran.
+      expect(stub.ensureMcpHostRuntimeCredentials).toHaveBeenCalledTimes(1)
+      expect(retry).not.toHaveBeenCalled()
+      expect(conditionPatches()).toHaveLength(0)
+    })
+
+    // A deleting recipe stops at the initial check, before any short-circuit.
+    it('does not reapply for a recipe being deleted', async () => {
+      const retry = vi.fn()
+      installRunLane(retry)
+      const recipe = runningRecipe({ deletionTimestamp: '2026-09-24T09:00:00Z' })
+
+      const result = await reconciler.reconcile(recipe)
+
+      // Witness: the pass stopped at the initial check.
+      expect(result.message).toBe('Recipe deleted during reconcile; skipped initial check')
+      expect(retry).not.toHaveBeenCalled()
+      expect(conditionPatches()).toHaveLength(0)
+    })
+
+    // A finished run no longer needs its policies, so the terminal branch drops
+    // the marker without reapplying, and keeps an ownership conflict.
+    it('removes the marker from the terminal branch without reapplying', async () => {
+      const ownershipConflict = {
+        type: 'WorkflowNetworkPolicyOwnership',
+        status: 'False' as const,
+        reason: 'OwnershipConflict',
+        message:
+          'NetworkPolicy ownership conflict: test-recipe-coord-to-wrc (owner-reference-mismatch)',
+        lastTransitionTime: '2026-09-24T08:00:00.000Z',
+      }
+      const retry = vi.fn()
+      const stub = installRunLane(retry)
+      const recipe = runningRecipe({
+        execPhase: 'completed',
+        conditions: [unrelatedCondition, ownershipConflict, retryMarker],
+      })
+
+      const result = await reconciler.reconcile(recipe)
+
+      // Witness: the terminal branch ran.
+      expect(stub.ensureMcpHostRuntimeCredentials).toHaveBeenCalledTimes(1)
+      expect(retry).not.toHaveBeenCalled()
+      const patches = conditionPatches()
+      expect(patches).toHaveLength(1)
+      expect(Object.keys(patches[0].body.status)).toEqual(['conditions'])
+      expect(patches[0].body.status.conditions).toEqual([unrelatedCondition, ownershipConflict])
+      expect(recipe.status?.conditions).toEqual([unrelatedCondition, ownershipConflict])
+      expect(result.phase).toBe('active')
+      expect(result.requeueAfterMs).toBeUndefined()
+    })
+
+    it('opens no patch from the terminal branch without the marker', async () => {
+      const retry = vi.fn()
+      const stub = installRunLane(retry)
+      const recipe = runningRecipe({ execPhase: 'completed', conditions: [unrelatedCondition] })
+
+      await reconciler.reconcile(recipe)
+
+      // Witness: the terminal branch ran.
+      expect(stub.ensureMcpHostRuntimeCredentials).toHaveBeenCalledTimes(1)
+      expect(retry).not.toHaveBeenCalled()
+      expect(conditionPatches()).toHaveLength(0)
+    })
+  })
+
   // §5 priority: a transient ERROR (skipStatusPatch) wins over PROGRESS even when
   // the phase is `deploying`. The error path keeps the TRANSIENT base + backoff
   // (requeueFixedInterval false), so genuine flakiness still backs off; it must
@@ -10757,6 +11531,67 @@ describe('WorkflowRecipeReconciler', () => {
     expect(mockCoreApi.createNamespacedPersistentVolumeClaim).not.toHaveBeenCalled()
     expect(mockAppsApi.createNamespacedDeployment).not.toHaveBeenCalled()
     expect(mockNetworkingApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
+  })
+
+  it('logs an error only when the runtime HTTP egress refresh leaves a NetworkPolicy pending a retry', async () => {
+    const errorLog = captureLogger('error')
+    try {
+      const refreshRuntimeHttpEgressNetworkPolicies = vi
+        .fn()
+        .mockResolvedValueOnce({ conflicts: [], retryPending: true })
+        .mockResolvedValueOnce({
+          conflicts: [
+            { policy: 'run-recipe-snippet-runner-egress', reason: 'owner-reference-mismatch' },
+          ],
+          retryPending: false,
+        })
+      ;(
+        reconciler as unknown as {
+          workflowReconciler: {
+            ensureCoordinatorRuntimeCredentials: ReturnType<typeof vi.fn>
+            ensureMcpHostRuntimeCredentials: ReturnType<typeof vi.fn>
+            refreshRuntimeHttpEgressNetworkPolicies: typeof refreshRuntimeHttpEgressNetworkPolicies
+          }
+        }
+      ).workflowReconciler = {
+        ensureCoordinatorRuntimeCredentials: vi.fn().mockResolvedValue(undefined),
+        ensureMcpHostRuntimeCredentials: vi.fn().mockResolvedValue(undefined),
+        refreshRuntimeHttpEgressNetworkPolicies,
+      }
+      const recipe = makeRecipe({
+        metadata: { name: 'run-recipe', namespace: 'sandbox-recipes', uid: 'uid-run' },
+        spec: { steps: [{ id: 'research', instruction: 'run' }] },
+        status: {
+          phase: 'active',
+          message: 'Workflow running',
+          workflowExecution: { phase: 'running' },
+        } as WorkflowRecipeCRD['status'],
+      })
+      const pendingRetryLogs = () =>
+        errorLog.mock.calls.filter(([msg]) =>
+          String(msg).includes('Runtime HTTP egress refresh left a NetworkPolicy pending a retry')
+        )
+
+      await reconciler.refreshInProgressWorkflowRuntimeCredentials(recipe)
+
+      expect(refreshRuntimeHttpEgressNetworkPolicies).toHaveBeenCalledTimes(1)
+      expect(refreshRuntimeHttpEgressNetworkPolicies).toHaveBeenCalledWith(
+        'sandbox-recipes',
+        'run-recipe',
+        'uid-run',
+        recipe.spec,
+        'run-recipe'
+      )
+      expect(pendingRetryLogs()).toHaveLength(1)
+
+      // A conflict alone was already logged at warn by the apply; it is not an error.
+      await reconciler.refreshInProgressWorkflowRuntimeCredentials(recipe)
+
+      expect(refreshRuntimeHttpEgressNetworkPolicies).toHaveBeenCalledTimes(2)
+      expect(pendingRetryLogs()).toHaveLength(1)
+    } finally {
+      errorLog.mockRestore()
+    }
   })
 
   it('requeues a transient DB provenance failure without downgrading to child identity', async () => {
@@ -15347,6 +16182,7 @@ describe('WorkflowRecipeReconciler', () => {
           policyReady: true,
           verifiedAt: '2026-08-04T00:00:00.000Z',
         },
+        networkPolicies: { conflicts: [], retryPending: false },
       })
       ;(
         reconciler as unknown as { config: { pluginWorkloadSdkEnabled: boolean } }
@@ -15391,6 +16227,7 @@ describe('WorkflowRecipeReconciler', () => {
           policyReady: true,
           verifiedAt: new Date().toISOString(),
         },
+        networkPolicies: { conflicts: [], retryPending: false },
       })
       ;(
         reconciler as unknown as { config: { pluginWorkloadSdkEnabled: boolean } }

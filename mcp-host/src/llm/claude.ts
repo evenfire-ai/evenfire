@@ -16,6 +16,8 @@ import {
   ToolCompletionResponse,
   ToolDefinition,
 } from '../core/types'
+import { logger } from '../logger'
+import { assertVisualRequestFits } from '../visualInput/requestPolicy'
 import { convertToClaudeMessages, separateSystemMessage } from './claude/messageTranslate'
 import { classifyByHttpStatus, classifyUnknown } from './errorClassification'
 import type { LlmProvider } from './registryCore'
@@ -32,7 +34,7 @@ export class ClaudeProvider implements SingleTurnProvider {
       this.client = apiKeyOrClient
     }
     this.defaultModel = defaultModel
-    console.log(`[Claude] Initialized with model: ${defaultModel}`)
+    logger.info({ model: defaultModel }, 'Claude transport initialized')
   }
 
   /**
@@ -188,6 +190,7 @@ export class ClaudeProvider implements SingleTurnProvider {
       temperature?: number
       tool_choice?: string
       signal?: AbortSignal
+      verifyImageInput?: boolean
     }
   ): Promise<ToolCompletionResponse> {
     const { systemPrompt, claudeMessages } = this.separateSystemMessage(messages)
@@ -199,17 +202,16 @@ export class ClaudeProvider implements SingleTurnProvider {
       input_schema: t.parameters as Anthropic.Tool['input_schema'],
     }))
 
-    const response = await this.client.messages.create(
-      {
-        model: this.defaultModel,
-        system: systemPrompt || undefined,
-        messages: formattedMessages,
-        tools: claudeTools.length > 0 ? claudeTools : undefined,
-        max_tokens: options?.max_tokens ?? 4096,
-        temperature: options?.temperature,
-      },
-      { signal: options?.signal }
-    )
+    const request: Anthropic.MessageCreateParamsNonStreaming = {
+      model: this.defaultModel,
+      system: systemPrompt || undefined,
+      messages: formattedMessages,
+      tools: claudeTools.length > 0 ? claudeTools : undefined,
+      max_tokens: options?.max_tokens ?? 4096,
+      temperature: options?.temperature,
+    }
+    assertVisualRequestFits(messages, request, options?.verifyImageInput === true)
+    const response = await this.client.messages.create(request, { signal: options?.signal })
 
     const textContent =
       response.content
@@ -260,6 +262,7 @@ export class ClaudeProvider implements SingleTurnProvider {
       temperature?: number
       tool_choice?: string
       signal?: AbortSignal
+      verifyImageInput?: boolean
     }
   ): Promise<ToolCompletionResponse> {
     const formattedMessages = this.convertToClaudeMessages(messages)
@@ -288,17 +291,16 @@ export class ClaudeProvider implements SingleTurnProvider {
       } as Anthropic.TextBlockParam)
     }
 
-    const response = await this.client.messages.create(
-      {
-        model: this.defaultModel,
-        system: systemBlocks.length > 0 ? systemBlocks : undefined,
-        messages: formattedMessages,
-        tools: claudeTools.length > 0 ? claudeTools : undefined,
-        max_tokens: options?.max_tokens ?? 4096,
-        temperature: options?.temperature,
-      },
-      { signal: options?.signal }
-    )
+    const request: Anthropic.MessageCreateParamsNonStreaming = {
+      model: this.defaultModel,
+      system: systemBlocks.length > 0 ? systemBlocks : undefined,
+      messages: formattedMessages,
+      tools: claudeTools.length > 0 ? claudeTools : undefined,
+      max_tokens: options?.max_tokens ?? 4096,
+      temperature: options?.temperature,
+    }
+    assertVisualRequestFits(messages, request, options?.verifyImageInput === true)
+    const response = await this.client.messages.create(request, { signal: options?.signal })
 
     const textContent =
       response.content

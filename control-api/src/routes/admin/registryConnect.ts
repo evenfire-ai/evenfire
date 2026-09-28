@@ -223,6 +223,7 @@ export function createRegistryConnectRouter(): Router {
         const sub = (req as UiAuthedRequest).adminAuth?.sub
         return sub ? `registry_connect_status:${sub}` : null
       },
+      onBackendUnavailable: 'process-memory',
     }),
     async (req, res, next) => {
       try {
@@ -333,6 +334,7 @@ export function createRegistryConnectRouter(): Router {
         const sub = (req as UiAuthedRequest).adminAuth?.sub
         return sub ? `registry_connect_request:${sub}` : null
       },
+      onBackendUnavailable: 'process-memory',
     }),
     async (req, res, next) => {
       try {
@@ -591,6 +593,7 @@ export function createRegistryConnectRouter(): Router {
         const sub = (req as UiAuthedRequest).adminAuth?.sub
         return sub ? `registry_connect_recover:${sub}` : null
       },
+      onBackendUnavailable: 'process-memory',
     }),
     async (req, res, next) => {
       try {

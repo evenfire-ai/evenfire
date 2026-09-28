@@ -81,6 +81,10 @@ export interface GfsConfig {
   blobCleanupSafetyWindowMs: number
   blobCleanupIntervalMs: number
   blobCleanupBatchSize: number
+  /** Per-subject agent (host principal) read budget per minute, per replica. */
+  agentReadRlPerMinPerReplica: number
+  /** Per-subject agent (host principal) write budget per minute, per replica. */
+  agentWriteRlPerMinPerReplica: number
   /** Maximum source objects admitted by one synchronous Copy request. */
   syncCopyMaxObjects: number
   /** Maximum observed source bytes admitted by one synchronous Copy request. */
@@ -112,6 +116,11 @@ function tuningMs(name: string, defaultMs: number): number {
   return value
 }
 
+export const AGENT_READ_RL_PER_MIN_DEFAULT = 300
+export const AGENT_WRITE_RL_PER_MIN_DEFAULT = 120
+/** 1000 requests per second per replica; a larger value is a typo, not a budget. */
+export const AGENT_RL_PER_MIN_MAX = 60000
+
 function positiveInteger(name: string, defaultValue: number, maximum: number): number {
   const raw = process.env[name]
   if (raw === undefined || raw === '') return defaultValue
@@ -123,17 +132,22 @@ function positiveInteger(name: string, defaultValue: number, maximum: number): n
 }
 
 /**
- * Copy admission limits intentionally have no compiled product ceiling. Only
- * an absent variable selects the documented default; an explicitly empty or
- * non-canonical positive decimal fails startup instead of falling back.
+ * Canonical positive decimal, optionally bounded. Only an absent variable
+ * selects the documented default; an explicitly empty or non-canonical value
+ * (`0x10`, `1e3`, ` 45 `, `45.0`, `045`, `+45`) fails startup instead of
+ * falling back. Copy admission limits pass no maximum: they intentionally have
+ * no compiled product ceiling.
  */
-function syncCopyPositiveInteger(name: string, defaultValue: number): number {
+function strictPositiveInteger(name: string, defaultValue: number, maximum?: number): number {
   const raw = process.env[name]
   if (raw === undefined) return defaultValue
-  if (!/^[1-9]\d*$/.test(raw)) {
-    throw new Error(`[gfsc] ${name} must be a positive safe integer, got: ${JSON.stringify(raw)}`)
+  const value = /^[1-9]\d*$/.test(raw) ? Number(raw) : Number.NaN
+  if (maximum !== undefined) {
+    if (!Number.isSafeInteger(value) || value > maximum) {
+      throw new Error(`[gfsc] ${name} must be an integer between 1 and ${maximum}, got: ${JSON.stringify(raw)}`)
+    }
+    return value
   }
-  const value = Number(raw)
   if (!Number.isSafeInteger(value)) {
     throw new Error(`[gfsc] ${name} must be a positive safe integer, got: ${JSON.stringify(raw)}`)
   }
@@ -388,11 +402,23 @@ export function loadConfig(): GfsConfig {
       2147483647
     ),
     blobCleanupBatchSize: positiveInteger('GFS_BLOB_CLEANUP_BATCH_SIZE', 100, 10000),
-    syncCopyMaxObjects: syncCopyPositiveInteger('GFS_SYNC_COPY_MAX_OBJECTS', 1000),
-    syncCopyMaxBytes: syncCopyPositiveInteger('GFS_SYNC_COPY_MAX_BYTES', 1073741824),
-    syncCopyTimeoutMs: syncCopyPositiveInteger('GFS_SYNC_COPY_TIMEOUT_MS', 30000),
-    syncRenameMaxObjects: syncCopyPositiveInteger('GFS_SYNC_RENAME_MAX_OBJECTS', 1000),
-    syncRenameTimeoutMs: syncCopyPositiveInteger('GFS_SYNC_RENAME_TIMEOUT_MS', 30000),
+    // The operator sets both explicitly (host-context-controller gfscEnv); the
+    // defaults cover a gfsc image that rolls out before the operator's env.
+    agentReadRlPerMinPerReplica: strictPositiveInteger(
+      'GFS_AGENT_READ_RL_PER_MIN_PER_REPLICA',
+      AGENT_READ_RL_PER_MIN_DEFAULT,
+      AGENT_RL_PER_MIN_MAX
+    ),
+    agentWriteRlPerMinPerReplica: strictPositiveInteger(
+      'GFS_AGENT_WRITE_RL_PER_MIN_PER_REPLICA',
+      AGENT_WRITE_RL_PER_MIN_DEFAULT,
+      AGENT_RL_PER_MIN_MAX
+    ),
+    syncCopyMaxObjects: strictPositiveInteger('GFS_SYNC_COPY_MAX_OBJECTS', 1000),
+    syncCopyMaxBytes: strictPositiveInteger('GFS_SYNC_COPY_MAX_BYTES', 1073741824),
+    syncCopyTimeoutMs: strictPositiveInteger('GFS_SYNC_COPY_TIMEOUT_MS', 30000),
+    syncRenameMaxObjects: strictPositiveInteger('GFS_SYNC_RENAME_MAX_OBJECTS', 1000),
+    syncRenameTimeoutMs: strictPositiveInteger('GFS_SYNC_RENAME_TIMEOUT_MS', 30000),
     uploadV2: uploadConfig(),
     devMode,
   }

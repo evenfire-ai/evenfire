@@ -1,7 +1,43 @@
 import { NextFunction, Request, Response } from 'express'
+import { DatabaseError } from 'pg'
 import { pool } from '../db.js'
+import { rootLogger } from '../observability/logger.js'
 import { AuthClaims, TeamRole } from '../profileTypes.js'
 import { verifyExternalSessionToken } from '../utils/auth/externalSessionAuthToken.js'
+
+/** Retry-After sent when the user row cannot be read to validate a session. */
+export const SESSION_BACKEND_RETRY_AFTER_SECONDS = 2
+
+// SQLSTATE classes that mean the server could not run the query: 08 connection
+// exception, 53 insufficient resources, 57 operator intervention (includes
+// 57014 statement timeout), 58 system error.
+const BACKEND_UNAVAILABLE_SQLSTATE_CLASSES = new Set(['08', '53', '57', '58'])
+
+// A Node system error code (ECONNREFUSED, ETIMEDOUT, EPIPE, ...). Node's own
+// argument and state errors use ERR_* codes, which this does not match.
+const SYSTEM_ERROR_CODE = /^E[A-Z]+$/
+
+/**
+ * True when the lookup failed because PostgreSQL could not be reached or could
+ * not run it:
+ * - a DatabaseError whose SQLSTATE class is 08, 53, 57 or 58;
+ * - a plain Error, which is how pg and pg-pool report an acquire timeout or a
+ *   dropped connection;
+ * - an error carrying a Node system code, as socket failures do (including the
+ *   AggregateError Node raises when every address of a host refuses).
+ * Anything else is a defect: a DatabaseError in another class (22P02, 42P01,
+ * ...) is in the query or the schema, and a TypeError or RangeError is in this
+ * process's code. A 503 would hide either one.
+ */
+function isBackendUnavailableError(error: unknown): boolean {
+  if (error instanceof DatabaseError) {
+    return BACKEND_UNAVAILABLE_SQLSTATE_CLASSES.has(String(error.code).slice(0, 2))
+  }
+  if (!(error instanceof Error)) return false
+  const code = (error as { code?: unknown }).code
+  if (typeof code === 'string' && SYSTEM_ERROR_CODE.test(code)) return true
+  return error.constructor === Error
+}
 
 export type ExternalAuthedRequest = Request & {
   externalAuth?: AuthClaims
@@ -66,7 +102,31 @@ async function requireValidExternalSessionTokenAsync(
       return
     }
 
-    if (!(await isCurrentExternalSession(claims))) {
+    let current: boolean
+    try {
+      current = await isCurrentExternalSession(claims)
+    } catch (error) {
+      // A query or schema defect goes to the error handler (500).
+      if (!isBackendUnavailableError(error)) throw error
+      // The users-table lookup could not run (pool acquire timeout, connection
+      // or statement timeout): the session could not be judged, which is
+      // neither a denial (401) nor a defect in this request (500).
+      rootLogger.warn(
+        {
+          event: 'external_session_backend_unavailable',
+          err: error instanceof Error ? error.message : String(error),
+        },
+        'external session validation could not reach PostgreSQL'
+      )
+      res.setHeader('Retry-After', String(SESSION_BACKEND_RETRY_AFTER_SECONDS))
+      res.setHeader('Cache-Control', 'no-store')
+      res.status(503).json({
+        error: 'session_backend_unavailable',
+        retryAfterSeconds: SESSION_BACKEND_RETRY_AFTER_SECONDS,
+      })
+      return
+    }
+    if (!current) {
       res.status(401).json({ error: 'Unauthorized' })
       return
     }

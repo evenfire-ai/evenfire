@@ -24,6 +24,7 @@ vi.mock('../src/services/notificationEmitter.js', () => ({
 vi.mock('../src/services/rateLimiterService.js', () => ({
   checkAndIncrement: vi.fn().mockResolvedValue({
     allowed: true,
+    backendAvailable: true,
     remaining: 59,
     resetMs: Date.now() + 60_000,
     windowStartMs: Date.now(),
@@ -138,8 +139,7 @@ describe('routes/recipe-oauth — GET /recipe-oauth/users (SEC-6)', () => {
   })
 
   it('401 without a broker token', async () => {
-    const res = await request(app)
-      .get('/api/v1/recipe-oauth/users?oauthClientId=google-gmail')
+    const res = await request(app).get('/api/v1/recipe-oauth/users?oauthClientId=google-gmail')
 
     expect(res.status).toBe(401)
   })
@@ -169,6 +169,7 @@ describe('routes/recipe-oauth — GET /recipe-oauth/users (SEC-6)', () => {
     seedRecipe(gateway, { name: 'leadforge', backgroundAccess: true })
     vi.mocked(checkAndIncrement).mockResolvedValueOnce({
       allowed: false,
+      backendAvailable: true,
       remaining: 0,
       resetMs: Date.now() + 30_000,
       windowStartMs: Date.now(),

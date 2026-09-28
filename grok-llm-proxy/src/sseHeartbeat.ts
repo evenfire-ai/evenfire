@@ -9,15 +9,18 @@ const KEEPALIVE = ': keepalive\n\n'
 
 /**
  * Well under the Host's 300 s undici headers/body timeouts, so a silent
- * upstream never reaches them: queue wait (60 s) + redeem (15 s) + one
- * interval stays below 300 s.
+ * upstream never reaches them: the admission clock (60 s) + redeem (15 s) +
+ * one interval stays below 300 s.
  */
 export const DEFAULT_HEARTBEAT_INTERVAL_MS = 15_000
 
 /**
- * Largest interval config accepts. The queue wait (60 s), the 15 s redeem and
- * one interval must still end before the Host's 300 s headers timeout, and
- * one interval must stay below its body timeout.
+ * Largest interval config accepts. Every wait a request performs before the
+ * redeem (body budget, stream gate) is bounded by one admission clock of
+ * `maxQueueWaitMs` (60 s) from arrival (#739 D1), so the queue time counts
+ * once: 60 s + the 15 s redeem + one 60 s interval = 135 s, which ends before
+ * the Host's 300 s headers timeout, and one interval stays below its body
+ * timeout.
  */
 export const MAX_HEARTBEAT_INTERVAL_MS = 60_000
 

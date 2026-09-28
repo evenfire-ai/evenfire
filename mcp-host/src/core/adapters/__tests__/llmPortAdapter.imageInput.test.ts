@@ -159,6 +159,102 @@ describe('#654 LlmPortAdapter image guard', () => {
     expect(messages[0].contentParts[0].type).toBe('image')
   })
 
+  it('uses catalog and transport evidence for GFS read admission', async () => {
+    const provider = fakeProvider('openai')
+    const adapter = new LlmPortAdapter(
+      provider,
+      'new-vision-model',
+      'openai',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      allow({ state: 'supported', evidence: CURATED_EVIDENCE })
+    )
+
+    await expect(adapter.getImageInputCapability()).resolves.toMatchObject({
+      status: 'supported',
+      provider: 'openai',
+      model: 'new-vision-model',
+    })
+  })
+
+  it('does not admit a GFS read when the catalog row is missing', async () => {
+    const provider = fakeProvider('openai')
+    const adapter = new LlmPortAdapter(provider, 'gpt-4.1', 'openai')
+
+    await expect(adapter.getImageInputCapability()).resolves.toEqual({ status: 'unknown' })
+  })
+
+  it('admits Codex GFS input only for a present catalog row with a supported transport', async () => {
+    const provider = fakeProvider('codex-subscription')
+    const catalogued = new LlmPortAdapter(
+      provider,
+      'gpt-5.6-luna',
+      'codex-subscription',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      () => ({})
+    )
+    const missing = new LlmPortAdapter(provider, 'gpt-5.6-luna', 'codex-subscription')
+
+    await expect(catalogued.getImageInputCapability()).resolves.toMatchObject({
+      status: 'supported',
+      provider: 'codex-subscription',
+      model: 'gpt-5.6-luna',
+    })
+    await expect(missing.getImageInputCapability()).resolves.toEqual({ status: 'unknown' })
+  })
+
+  it('rejects an aborted GFS admission request asynchronously', async () => {
+    const adapter = new LlmPortAdapter(fakeProvider('openai'), 'gpt-4.1', 'openai')
+    await expect(adapter.getImageInputCapability(AbortSignal.abort())).rejects.toMatchObject({
+      code: 'cancelled',
+    })
+  })
+
+  it('fails closed for expired catalog evidence or an unavailable resolver', async () => {
+    const provider = fakeProvider('openai')
+    const expired = new LlmPortAdapter(
+      provider,
+      'gpt-4.1',
+      'openai',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      allow({
+        state: 'supported',
+        evidence: {
+          ...CURATED_EVIDENCE,
+          checkedAt: '2020-01-01T00:00:00Z',
+          validUntil: '2020-01-02T00:00:00Z',
+        },
+      })
+    )
+    const unavailable = new LlmPortAdapter(
+      provider,
+      'gpt-4.1',
+      'openai',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      () => {
+        throw new Error('catalog unavailable')
+      }
+    )
+
+    await expect(expired.getImageInputCapability()).resolves.toEqual({ status: 'unknown' })
+    await expect(unavailable.getImageInputCapability()).resolves.toEqual({ status: 'unknown' })
+  })
+
   it('refuses the tool-less plain path that would drop the image (OpenAI family)', async () => {
     const provider = fakeProvider('openai')
     const adapter = new LlmPortAdapter(

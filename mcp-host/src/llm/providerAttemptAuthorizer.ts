@@ -1,17 +1,38 @@
 import {
+  ENVELOPE_ALLOWANCE_BYTES,
+  LIMITS,
   parseAuthorizeAttemptResponse,
   requestBodyLimitBytes,
 } from '@clerum/llm-provider-attempt-contract'
+import { fetchCauseCode, isConnectPhaseFailure } from './controlPlaneReachability'
+import { rateLimitedCode, retryAfterMs } from './retryAfter'
 
 export const AUTHORIZE_PATH = '/api/v1/mcp-host/llm/provider-attempts/authorize'
 
+/**
+ * Room for the authorize envelope around the contract-capped `request`: ids,
+ * revisions, hashes and recipe names, a few hundred bytes in practice. The
+ * contract owns the value and control-api imports the same one, so a request
+ * control-api would accept is never refused here for its envelope (#739).
+ */
+export const AUTHORIZE_ENVELOPE_ALLOWANCE_BYTES = ENVELOPE_ALLOWANCE_BYTES
+
+export type CodexAuthorizeErrorOptions = {
+  /** G1-11 (#720): the delay a 429 advised, read from its Retry-After. */
+  retryAfterMs?: number
+}
+
 export class CodexAuthorizeError extends Error {
+  readonly retryAfterMs?: number
+
   constructor(
     readonly code: string,
-    message: string
+    message: string,
+    options: CodexAuthorizeErrorOptions = {}
   ) {
     super(message)
     this.name = 'CodexAuthorizeError'
+    this.retryAfterMs = options.retryAfterMs
   }
 }
 
@@ -80,11 +101,17 @@ export class ProviderAttemptAuthorizer {
     expiresAt: string
   }> {
     const serialized = JSON.stringify(body)
-    const bodyLimit = requestBodyLimitBytes(body.request)
+    const requestLimit = requestBodyLimitBytes(body.request)
+    // The larger of the two budgets wins, as in control-api's authorizer: the
+    // non-image cap plus the envelope allowance, or the V2 visual envelope.
+    const bodyLimit = Math.max(
+      requestLimit,
+      LIMITS.maxRequestBodyBytes + AUTHORIZE_ENVELOPE_ALLOWANCE_BYTES
+    )
     if (Buffer.byteLength(serialized, 'utf8') > bodyLimit) {
       throw new CodexAuthorizeError(
         'payload_too_large',
-        `Codex request exceeds ${bodyLimit / (1024 * 1024)} MiB; use fewer or smaller images, or reduce context`
+        `Codex request exceeds ${requestLimit / (1024 * 1024)} MiB; use fewer or smaller images, or reduce context`
       )
     }
     const jwt = this.options.readPlatformJwt()
@@ -92,32 +119,56 @@ export class ProviderAttemptAuthorizer {
       throw new CodexAuthorizeError('no_grant', 'platform JWT is missing')
     }
     const fetchFn = this.options.fetchFn ?? fetch
-    const response = await fetchFn(this.options.authorizeUrl, {
-      method: 'POST',
-      headers: {
-        authorization: `Bearer ${jwt}`,
-        'content-type': 'application/json',
-      },
-      body: serialized,
-      ...(signal ? { signal } : {}),
-    })
+    let response: Response
+    try {
+      response = await fetchFn(this.options.authorizeUrl, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${jwt}`,
+          'content-type': 'application/json',
+        },
+        body: serialized,
+        ...(signal ? { signal } : {}),
+      })
+    } catch (err) {
+      // No live gateway process received the request (G1-7, #720). Every
+      // other rejection, the caller's abort included, is rethrown unchanged.
+      if (isConnectPhaseFailure(err, signal)) {
+        throw new CodexAuthorizeError(
+          'control_plane_unavailable',
+          `authorize could not reach the control plane (${fetchCauseCode(err)})`
+        )
+      }
+      throw err
+    }
     const payload = (await response.json().catch(() => ({}))) as Record<string, unknown>
     if (!response.ok) {
       if (response.status === 401 && retryOnUnauthorized && this.options.refreshOnUnauthorized) {
         await this.options.refreshOnUnauthorized()
         return this.authorizeOnce(body, false, signal)
       }
+      // Every 413 is a size refusal of this request, never a provider outage
+      // (#731): control-api answers `payload_too_large`, and the gateway in
+      // front of it (nginx `client_max_body_size`) answers with no JSON code.
+      // A 429 is a rate limit, not a provider outage (G1-6, G1-11, #720):
+      // control-api's own authorize limiters answer the reason phrase
+      // `Too Many Requests`, so only a machine code a 429 carries (such as
+      // `budget_denied`) replaces `rate_limited`; a 429 with no JSON code is
+      // `rate_limited` too.
       const code =
         response.status === 413
           ? 'payload_too_large'
-          : typeof payload.error === 'string'
-            ? payload.error
-            : 'provider_unavailable'
+          : response.status === 429
+            ? rateLimitedCode(payload.error)
+            : typeof payload.error === 'string'
+              ? payload.error
+              : 'provider_unavailable'
       throw new CodexAuthorizeError(
         code,
         code === 'payload_too_large'
           ? 'Codex request is too large; use fewer or smaller images, or reduce context'
-          : `authorize failed with ${response.status}`
+          : `authorize failed with ${response.status}`,
+        { retryAfterMs: response.status === 429 ? retryAfterMs(response) : undefined }
       )
     }
     for (const key of LEAK_KEYS) {

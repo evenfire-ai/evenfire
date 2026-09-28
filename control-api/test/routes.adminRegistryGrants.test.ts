@@ -80,6 +80,7 @@ vi.mock('../src/services/registryConnectionDb.js', async importOriginal => {
 vi.mock('../src/services/rateLimiterService.js', () => ({
   checkAndIncrement: vi.fn(async () => ({
     allowed: true,
+    backendAvailable: true,
     remaining: 29,
     resetMs: Date.now() + 60000,
   })),
@@ -113,6 +114,7 @@ beforeEach(() => {
   connDb.isRegistryAuthActive.mockImplementation(async () => cfg.registryAuthEnabled)
   vi.mocked(checkAndIncrement).mockResolvedValue({
     allowed: true,
+    backendAvailable: true,
     remaining: 29,
     resetMs: Date.now() + 60000,
   } as never)
@@ -397,7 +399,13 @@ describe('wire shape (real wrappers, stubbed registry fetch)', () => {
     )
     vi.mocked(createOrgGrant).mockImplementationOnce(real.createOrgGrant)
     real.__resetTokenCacheForTests()
-    stubFetch(() => new Response(JSON.stringify({ error: 'self_grant' }), { status: 400 }))
+    stubFetch(
+      () =>
+        new Response(JSON.stringify({ error: 'self_grant' }), {
+          status: 400,
+          headers: { 'content-type': 'application/json' },
+        })
+    )
     const res = await request(makeApp())
       .post('/admin/registry/grants')
       .send({ pluginName: '@acme/p', granteeOrg: 'acme' })

@@ -162,16 +162,16 @@ async function mintTokenForGeneration(
     signal: AbortSignal.timeout(READ_TIMEOUT_MS),
   })
   if (!res.ok) {
-    const body = await res.text()
+    await discardResponseBody(res)
     // Distinguish a rejected credential (rotate the secret) from an origin /
     // tunnel outage (page on-call about reachability, do NOT rotate). A 5xx at
     // the token endpoint is the registry origin or its tunnel being down, not a
     // bad client secret — the previous identical label sent on-call to rotate
     // secrets during an outage.
     if (res.status >= 500) {
-      throw new Error(`registry token endpoint unavailable (origin/tunnel): ${res.status} ${body}`)
+      throw new Error(`registry token endpoint unavailable (origin/tunnel): ${res.status}`)
     }
-    throw new Error(`registry credential rejected: ${res.status} ${body}`)
+    throw new Error(`registry credential rejected: ${res.status}`)
   }
   const json = (await res.json()) as { access_token: string; expires_in: number }
   const next = {
@@ -236,6 +236,15 @@ interface PaginatedResponse<T> {
 /** Retriable upstream statuses for an idempotent GET (gateway/tunnel hiccups). */
 const RETRIABLE_GET_STATUSES = new Set([502, 503, 504])
 
+async function discardResponseBody(res: Response): Promise<void> {
+  try {
+    await res.body?.cancel()
+  } catch {
+    // Releasing a failed upstream response is best-effort; preserve the original
+    // auth/status error when an undici stream is already closed.
+  }
+}
+
 function jitterSleep(baseMs: number): Promise<void> {
   // ~baseMs ± up to baseMs jitter so concurrent callers don't retry in lockstep.
   const ms = baseMs + Math.floor(Math.random() * baseMs)
@@ -285,10 +294,12 @@ async function authedFetch(
       // Existing behavior: a 401 means the cached token is stale (e.g. registry
       // key rotation) — evict and retry once with a fresh mint. Orthogonal to
       // the transient-status retry below.
+      await discardResponseBody(res)
       cached = null
       res = await send()
     }
     if (isGet && allowTransientRetry && RETRIABLE_GET_STATUSES.has(res.status)) {
+      await discardResponseBody(res)
       await jitterSleep(250)
       return attempt(false)
     }
@@ -315,7 +326,7 @@ async function registryFetch<T>(path: string, init?: RequestInit): Promise<T> {
     throw err
   }
   if (!res.ok) {
-    const body = await res.text()
+    await discardResponseBody(res)
     // A persistent 401 (authedFetch already evict-retried once) is a registry
     // machine-token / integration fault — NOT the admin's control-ui session.
     // Remap to 502 (so control-ui's global 401 handler never force-logs-out the
@@ -336,7 +347,7 @@ async function registryFetch<T>(path: string, init?: RequestInit): Promise<T> {
     // Attach the upstream status so the global error handler (app.ts) forwards
     // 4xx verbatim to the API client (a registry 404 stays a 404 — the
     // e2e-registry-publish-update-remove failure class).
-    throw Object.assign(new Error(`Registry ${res.status}: ${body}`), {
+    throw Object.assign(new Error(`Registry ${res.status}`), {
       status: res.status,
     })
   }
@@ -525,8 +536,8 @@ export async function downloadBundle(name: string, version: string): Promise<Buf
     { timeoutMs: BUNDLE_TIMEOUT_MS }
   )
   if (!res.ok) {
-    const body = await res.text()
-    throw new Error(`Registry ${res.status}: ${body}`)
+    await discardResponseBody(res)
+    throw new Error(`Registry ${res.status}`)
   }
   const arrayBuffer = await res.arrayBuffer()
   return Buffer.from(arrayBuffer)
@@ -590,20 +601,60 @@ export async function publishEntry(body: Record<string, unknown>): Promise<unkno
 // These proxy the registry's per-org owner surface (delivered by the machine-
 // grant + owner-entries registry PRs). Unlike registryFetch, this helper:
 //   • is 204/empty-aware (revokes return 204 with no body — res.json() would 500),
-//   • throws a RegistryProxyError carrying BOTH the upstream status AND the parsed
-//     { error: <code> } body, so the admin route can forward it verbatim to the UI
-//     (status alone can't disambiguate self_grant / grantee_reserved / plugin_public,
-//     all 400). Mirrors routes/admin/workflows/grants.routes.ts's typed passthrough.
+//   • throws a RegistryProxyError carrying the upstream status plus a narrowly
+//     allowlisted error code, so the admin route can preserve the UI's typed
+//     grant errors without reflecting arbitrary upstream diagnostics.
 // Built on authedFetch (machine Bearer + 401-evict-retry), same as registryFetch.
 
-/** Upstream registry error carrying the status + parsed body for verbatim proxy forwarding. */
+export type RegistryProxyErrorBody = { error: string }
+
+/** Upstream registry error carrying a status plus a safe, bounded error code. */
 export class RegistryProxyError extends Error {
   constructor(
     readonly status: number,
-    readonly body: unknown
+    readonly body: RegistryProxyErrorBody
   ) {
     super(`Registry ${status}`)
     this.name = 'RegistryProxyError'
+  }
+}
+
+// These are the only registry-owned codes that the current publisher UI renders
+// specially. Keeping the values as an explicit allowlist means an upstream error
+// cannot turn a raw message, HTML page, token, or credential into API output.
+const SAFE_REGISTRY_PROXY_ERROR_CODES = new Set([
+  'grantee_not_found',
+  'self_grant',
+  'plugin_public',
+  'grantee_reserved',
+  'plugin_not_found',
+])
+
+function registryProxyFallbackError(status: number): RegistryProxyErrorBody {
+  return { error: status >= 400 && status <= 599 ? `registry_${status}` : 'registry_error' }
+}
+
+function isJsonResponse(res: Response): boolean {
+  const contentType = res.headers.get('content-type')
+  if (!contentType) return false
+  const mediaType = contentType.split(';', 1)[0]?.trim().toLowerCase()
+  return mediaType === 'application/json' || mediaType?.endsWith('+json') === true
+}
+
+async function registryProxyErrorBody(res: Response): Promise<RegistryProxyErrorBody> {
+  const fallback = registryProxyFallbackError(res.status)
+  if (!isJsonResponse(res)) {
+    await discardResponseBody(res)
+    return fallback
+  }
+  try {
+    const parsed = (await res.json()) as unknown
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return fallback
+    const error = (parsed as { error?: unknown }).error
+    if (typeof error !== 'string' || !SAFE_REGISTRY_PROXY_ERROR_CODES.has(error)) return fallback
+    return { error }
+  } catch {
+    return fallback
   }
 }
 
@@ -613,21 +664,13 @@ async function orgRegistryFetch<T>(path: string, init?: RequestInit): Promise<T>
     // A persistent 401 (authedFetch already evict-retried once) is a machine-token /
     // integration fault, NOT the admin's session — remap to 502 at the transport so
     // every caller is protected and control-ui never force-logs-out on it. A 403
-    // (e.g. tenant client lacks registry:grant) is a real authz signal, forwarded verbatim.
+    // (e.g. tenant client lacks registry:grant) keeps its status and, when known,
+    // its safe typed code.
     if (res.status === 401) {
+      await discardResponseBody(res)
       throw new RegistryProxyError(502, { error: 'registry_integration_error' })
     }
-    const text = await res.text()
-    let body: unknown
-    try {
-      // Preserve the registry's typed { error:<code> } body verbatim; a non-JSON error
-      // body (HTML gateway page, plaintext) collapses to a synthetic code rather than
-      // reflecting arbitrary upstream markup as the machine-readable error.
-      body = text ? JSON.parse(text) : { error: `registry_${res.status}` }
-    } catch {
-      body = { error: `registry_${res.status}` }
-    }
-    throw new RegistryProxyError(res.status, body)
+    throw new RegistryProxyError(res.status, await registryProxyErrorBody(res))
   }
   // Empty body (204 or any empty 2xx) → undefined. A non-empty non-JSON 2xx body is an
   // integration fault, surfaced as a typed 502 rather than a raw SyntaxError → 500.

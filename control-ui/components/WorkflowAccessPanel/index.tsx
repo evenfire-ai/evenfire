@@ -1,7 +1,7 @@
 'use client'
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { RecordList, RecordListRow, RowActionMenu } from '@clerum/frontend-components'
+import { DialogShell, RecordList, RecordListRow, RowActionMenu } from '@clerum/frontend-components'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { SelectionDropdown } from '@components/SelectionDropdown'
 import { TabBar } from '@components/TabBar'
@@ -261,12 +261,12 @@ export function WorkflowAccessPanel(props: WorkflowAccessPanelProps): React.JSX.
     team => !selectedApprovalTeamSet.has(team.id)
   )
 
-  async function persistUserGrants(nextUserIds: string[]) {
+  async function persistUserGrants(nextUserIds: string[]): Promise<boolean> {
     if (mode === 'create') {
       onSelectedUserIdsChange(nextUserIds)
-      return
+      return true
     }
-    if (userGrants === null) return
+    if (userGrants === null) return false
     const current = selectedUserIds
     const added = nextUserIds.filter(id => !current.includes(id))
     const removed = current.filter(id => !nextUserIds.includes(id))
@@ -287,22 +287,24 @@ export function WorkflowAccessPanel(props: WorkflowAccessPanelProps): React.JSX.
       } else {
         showToast('Workflow user access updated.', { tone: 'success' })
       }
+      return true
     } catch (error) {
-      if (!mountedRef.current) return
+      if (!mountedRef.current) return false
       setSectionPatch('trigger-users', {
         mutateError: error instanceof Error ? error.message : 'Failed to save user grants',
       })
+      return false
     } finally {
       if (mountedRef.current) setSectionPatch('trigger-users', { mutating: false })
     }
   }
 
-  async function persistTeamGrants(nextTeamIds: string[]) {
+  async function persistTeamGrants(nextTeamIds: string[]): Promise<boolean> {
     if (mode === 'create') {
       onSelectedTeamIdsChange(nextTeamIds)
-      return
+      return true
     }
-    if (teamGrants === null) return
+    if (teamGrants === null) return false
     const current = selectedTeamIds
     const added = nextTeamIds.filter(id => !current.includes(id))
     const removed = current.filter(id => !nextTeamIds.includes(id))
@@ -317,22 +319,24 @@ export function WorkflowAccessPanel(props: WorkflowAccessPanelProps): React.JSX.
       } else {
         showToast('Workflow team access updated.', { tone: 'success' })
       }
+      return true
     } catch (error) {
-      if (!mountedRef.current) return
+      if (!mountedRef.current) return false
       setSectionPatch('trigger-teams', {
         mutateError: error instanceof Error ? error.message : 'Failed to save team grants',
       })
+      return false
     } finally {
       if (mountedRef.current) setSectionPatch('trigger-teams', { mutating: false })
     }
   }
 
-  async function persistApprovalTeams(nextTeamIds: string[]) {
+  async function persistApprovalTeams(nextTeamIds: string[]): Promise<boolean> {
     if (mode === 'create') {
       onSelectedApprovalTeamIdsChange(nextTeamIds)
-      return
+      return true
     }
-    if (approvalTeams === null) return
+    if (approvalTeams === null) return false
     const current = selectedApprovalTeamIds
     const added = nextTeamIds.filter(id => !current.includes(id))
     const removed = current.filter(id => !nextTeamIds.includes(id))
@@ -394,36 +398,41 @@ export function WorkflowAccessPanel(props: WorkflowAccessPanelProps): React.JSX.
       } else {
         showToast('Approval target teams updated.', { tone: 'success' })
       }
+      return true
     } catch (error) {
-      if (!mountedRef.current || isSilentApiError(error)) return
+      if (!mountedRef.current || isSilentApiError(error)) return false
       setSectionPatch('approval-target-teams', {
         mutateError:
           error instanceof Error ? error.message : 'Failed to save approval target teams',
       })
+      return false
     } finally {
       if (mountedRef.current) setSectionPatch('approval-target-teams', { mutating: false })
     }
   }
 
-  async function handleGrantUser() {
-    if (pickUserIds.length === 0) return
+  async function handleGrantUser(): Promise<boolean> {
+    if (pickUserIds.length === 0) return false
     const next = uniqueIds([...selectedUserIds, ...pickUserIds])
-    setPickUserIds([])
-    await persistUserGrants(next)
+    const saved = await persistUserGrants(next)
+    if (saved) setPickUserIds([])
+    return saved
   }
 
-  async function handleGrantTeam() {
-    if (pickTeamIds.length === 0) return
+  async function handleGrantTeam(): Promise<boolean> {
+    if (pickTeamIds.length === 0) return false
     const next = uniqueIds([...selectedTeamIds, ...pickTeamIds])
-    setPickTeamIds([])
-    await persistTeamGrants(next)
+    const saved = await persistTeamGrants(next)
+    if (saved) setPickTeamIds([])
+    return saved
   }
 
-  async function handleAllowApprovalTeam() {
-    if (pickApprovalTeamIds.length === 0) return
+  async function handleAllowApprovalTeam(): Promise<boolean> {
+    if (pickApprovalTeamIds.length === 0) return false
     const next = uniqueIds([...selectedApprovalTeamIds, ...pickApprovalTeamIds])
-    setPickApprovalTeamIds([])
-    await persistApprovalTeams(next)
+    const saved = await persistApprovalTeams(next)
+    if (saved) setPickApprovalTeamIds([])
+    return saved
   }
 
   async function handleRevokeUser(id: string) {
@@ -542,6 +551,7 @@ export function WorkflowAccessPanel(props: WorkflowAccessPanelProps): React.JSX.
           onPickChange={setPickUserIds}
           onGrant={handleGrantUser}
           onRevoke={handleRevokeUser}
+          useDialog={mode === 'edit'}
           emptyText={
             mode === 'edit'
               ? sectionByKey['trigger-users'].emptyEdit
@@ -563,6 +573,7 @@ export function WorkflowAccessPanel(props: WorkflowAccessPanelProps): React.JSX.
           onPickChange={setPickTeamIds}
           onGrant={handleGrantTeam}
           onRevoke={handleRevokeTeam}
+          useDialog={mode === 'edit'}
           emptyText={
             mode === 'edit'
               ? sectionByKey['trigger-teams'].emptyEdit
@@ -588,6 +599,7 @@ export function WorkflowAccessPanel(props: WorkflowAccessPanelProps): React.JSX.
           onPickChange={setPickApprovalTeamIds}
           onGrant={handleAllowApprovalTeam}
           onRevoke={handleRevokeApprovalTeam}
+          useDialog={mode === 'edit'}
           emptyText={
             mode === 'edit'
               ? sectionByKey['approval-target-teams'].emptyEdit
@@ -646,6 +658,7 @@ function AccessUserSection({
   onGrant,
   onRevoke,
   emptyText,
+  useDialog,
 }: {
   definition: AccessSectionDefinition
   rows: AccessUserRow[]
@@ -658,16 +671,19 @@ function AccessUserSection({
   inlineError?: string | null
   pickValue: string[]
   onPickChange: (next: string[]) => void
-  onGrant: () => void
+  onGrant: () => Promise<boolean>
   onRevoke: (id: string) => void
   emptyText: string
+  useDialog: boolean
 }) {
   const busy = state.mutating
   const userOptions = options.map(user => ({
     value: user.id,
     label: userLabel(user),
-    description: user.email,
+    badge: user.email,
   }))
+  const [dialogOpen, setDialogOpen] = useState(false)
+  const actionLabel = pickValue.length > 1 ? 'Add members' : definition.grantLabel
   return (
     <SectionShell
       definition={definition}
@@ -709,28 +725,95 @@ function AccessUserSection({
           ))}
         </RecordList>
       )}
-      <div className="cu-workflow-access__picker cu-workflow-access__picker--inline">
-        <SelectionDropdown
-          id={`workflow-${definition.key}-picker`}
-          inline
-          value={pickValue}
-          onChange={onPickChange}
-          options={userOptions}
-          placeholder={options.length === 0 ? 'All users already granted' : 'Pick users'}
-          searchPlaceholder="Search users..."
-          selectionLabel="Selected users"
-          emptyLabel="All users already granted."
-          disabled={busy || options.length === 0}
-        />
-        <button
-          className="cu-btn cu-btn--primary cu-btn--sm"
-          type="button"
-          disabled={pickValue.length === 0 || busy}
-          onClick={onGrant}
-        >
-          {pickValue.length > 1 ? 'Add members' : definition.grantLabel}
-        </button>
-      </div>
+      {useDialog ? (
+        <>
+          <button
+            className="cu-btn cu-btn--primary cu-btn--sm"
+            disabled={busy || !loaded || options.length === 0}
+            onClick={() => setDialogOpen(true)}
+            type="button"
+          >
+            {definition.grantLabel}
+          </button>
+          <DialogShell
+            busy={busy}
+            error={state.mutateError || inlineError || undefined}
+            footer={
+              <>
+                <button
+                  className="eft-dialog__button eft-dialog__button--secondary"
+                  disabled={busy}
+                  onClick={() => {
+                    onPickChange([])
+                    setDialogOpen(false)
+                  }}
+                  type="button"
+                >
+                  Cancel
+                </button>
+                <button
+                  className="eft-dialog__button eft-dialog__button--primary"
+                  disabled={!loaded || busy || pickValue.length === 0}
+                  onClick={async () => {
+                    if (await onGrant()) setDialogOpen(false)
+                  }}
+                  type="button"
+                >
+                  {busy ? 'Working…' : actionLabel}
+                </button>
+              </>
+            }
+            onDismiss={() => {
+              if (busy) return
+              onPickChange([])
+              setDialogOpen(false)
+            }}
+            open={dialogOpen}
+            size="large"
+            status={!loaded ? 'Loading members…' : undefined}
+            title={definition.grantLabel}
+          >
+            <div className="cu-field">
+              <label htmlFor={`workflow-${definition.key}-picker`}>Members</label>
+              <SelectionDropdown
+                id={`workflow-${definition.key}-picker`}
+                inline
+                value={pickValue}
+                onChange={onPickChange}
+                options={userOptions}
+                placeholder="Select members"
+                searchPlaceholder="Search members..."
+                selectionLabel="Selected members"
+                emptyLabel={loaded ? 'All users already granted.' : 'Loading members…'}
+                disabled={busy || !loaded || options.length === 0}
+              />
+            </div>
+          </DialogShell>
+        </>
+      ) : (
+        <div className="cu-workflow-access__picker cu-workflow-access__picker--inline">
+          <SelectionDropdown
+            id={`workflow-${definition.key}-picker`}
+            inline
+            value={pickValue}
+            onChange={onPickChange}
+            options={userOptions}
+            placeholder={options.length === 0 ? 'All users already granted' : 'Pick users'}
+            searchPlaceholder="Search users..."
+            selectionLabel="Selected users"
+            emptyLabel="All users already granted."
+            disabled={busy || options.length === 0}
+          />
+          <button
+            className="cu-btn cu-btn--primary cu-btn--sm"
+            type="button"
+            disabled={pickValue.length === 0 || busy}
+            onClick={() => void onGrant()}
+          >
+            {actionLabel}
+          </button>
+        </div>
+      )}
     </SectionShell>
   )
 }
@@ -748,6 +831,7 @@ function AccessTeamSection({
   onGrant,
   onRevoke,
   emptyText,
+  useDialog,
 }: {
   definition: AccessSectionDefinition
   rows: AccessTeamRow[]
@@ -760,15 +844,23 @@ function AccessTeamSection({
   inlineError?: string | null
   pickValue: string[]
   onPickChange: (next: string[]) => void
-  onGrant: () => void
+  onGrant: () => Promise<boolean>
   onRevoke: (id: string) => void
   emptyText: string
+  useDialog: boolean
 }) {
   const busy = state.mutating
   const teamOptions = options.map(team => ({
     value: team.id,
     label: teamLabel(team),
   }))
+  const [dialogOpen, setDialogOpen] = useState(false)
+  const actionLabel =
+    pickValue.length > 1
+      ? definition.key === 'approval-target-teams'
+        ? 'Allow teams'
+        : 'Add teams'
+      : definition.grantLabel
   return (
     <SectionShell
       definition={definition}
@@ -807,32 +899,95 @@ function AccessTeamSection({
           ))}
         </RecordList>
       )}
-      <div className="cu-workflow-access__picker cu-workflow-access__picker--inline">
-        <SelectionDropdown
-          id={`workflow-${definition.key}-picker`}
-          inline
-          value={pickValue}
-          onChange={onPickChange}
-          options={teamOptions}
-          placeholder={options.length === 0 ? 'All teams already selected' : 'Pick teams'}
-          searchPlaceholder="Search teams..."
-          selectionLabel="Selected teams"
-          emptyLabel="All teams already selected."
-          disabled={busy || options.length === 0}
-        />
-        <button
-          className="cu-btn cu-btn--primary cu-btn--sm"
-          type="button"
-          disabled={pickValue.length === 0 || busy}
-          onClick={onGrant}
-        >
-          {pickValue.length > 1
-            ? definition.key === 'approval-target-teams'
-              ? 'Allow teams'
-              : 'Add teams'
-            : definition.grantLabel}
-        </button>
-      </div>
+      {useDialog ? (
+        <>
+          <button
+            className="cu-btn cu-btn--primary cu-btn--sm"
+            disabled={busy || !loaded || options.length === 0}
+            onClick={() => setDialogOpen(true)}
+            type="button"
+          >
+            {definition.grantLabel}
+          </button>
+          <DialogShell
+            busy={busy}
+            error={state.mutateError || inlineError || undefined}
+            footer={
+              <>
+                <button
+                  className="eft-dialog__button eft-dialog__button--secondary"
+                  disabled={busy}
+                  onClick={() => {
+                    onPickChange([])
+                    setDialogOpen(false)
+                  }}
+                  type="button"
+                >
+                  Cancel
+                </button>
+                <button
+                  className="eft-dialog__button eft-dialog__button--primary"
+                  disabled={!loaded || busy || pickValue.length === 0}
+                  onClick={async () => {
+                    if (await onGrant()) setDialogOpen(false)
+                  }}
+                  type="button"
+                >
+                  {busy ? 'Working…' : actionLabel}
+                </button>
+              </>
+            }
+            onDismiss={() => {
+              if (busy) return
+              onPickChange([])
+              setDialogOpen(false)
+            }}
+            open={dialogOpen}
+            size="large"
+            status={!loaded ? 'Loading teams…' : undefined}
+            title={definition.grantLabel}
+          >
+            <div className="cu-field">
+              <label htmlFor={`workflow-${definition.key}-picker`}>Teams</label>
+              <SelectionDropdown
+                id={`workflow-${definition.key}-picker`}
+                inline
+                value={pickValue}
+                onChange={onPickChange}
+                options={teamOptions}
+                placeholder="Select teams"
+                searchPlaceholder="Search teams..."
+                selectionLabel="Selected teams"
+                emptyLabel={loaded ? 'All teams already selected.' : 'Loading teams…'}
+                disabled={busy || !loaded || options.length === 0}
+              />
+            </div>
+          </DialogShell>
+        </>
+      ) : (
+        <div className="cu-workflow-access__picker cu-workflow-access__picker--inline">
+          <SelectionDropdown
+            id={`workflow-${definition.key}-picker`}
+            inline
+            value={pickValue}
+            onChange={onPickChange}
+            options={teamOptions}
+            placeholder={options.length === 0 ? 'All teams already selected' : 'Pick teams'}
+            searchPlaceholder="Search teams..."
+            selectionLabel="Selected teams"
+            emptyLabel="All teams already selected."
+            disabled={busy || options.length === 0}
+          />
+          <button
+            className="cu-btn cu-btn--primary cu-btn--sm"
+            type="button"
+            disabled={pickValue.length === 0 || busy}
+            onClick={() => void onGrant()}
+          >
+            {actionLabel}
+          </button>
+        </div>
+      )}
     </SectionShell>
   )
 }

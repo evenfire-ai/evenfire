@@ -8,6 +8,7 @@ import type { InviteMemberDialogProps } from './types'
 export function InviteMemberDialog({
   isOpen,
   embedded = false,
+  showFooter = true,
   busy,
   name,
   email,
@@ -118,19 +119,21 @@ export function InviteMemberDialog({
 
       {error ? <div className="cu-banner cu-banner--error">{error}</div> : null}
 
-      <div className="cu-modal-panel__foot">
-        <Button type="button" variant="ghost" size="sm" onClick={onClose} disabled={busy}>
-          Cancel
-        </Button>
-        <Button
-          type="button"
-          variant="primary"
-          onClick={onSubmit}
-          disabled={busy || !name.trim() || !email.trim()}
-        >
-          {busy ? 'Sending…' : submitLabel}
-        </Button>
-      </div>
+      {showFooter ? (
+        <div className="cu-modal-panel__foot">
+          <Button type="button" variant="ghost" size="sm" onClick={onClose} disabled={busy}>
+            Cancel
+          </Button>
+          <Button
+            type="button"
+            variant="primary"
+            onClick={onSubmit}
+            disabled={busy || !name.trim() || !email.trim()}
+          >
+            {busy ? 'Sending…' : submitLabel}
+          </Button>
+        </div>
+      ) : null}
     </>
   )
 

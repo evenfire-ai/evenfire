@@ -51,17 +51,21 @@ export function DetailPageShell<T extends string>({
       >
         {tabs ? (
           <TabBar<T>
-            ariaLabel={tabAriaLabel}
-            activeValue={activeTab}
+            ariaLabel={tabAriaLabel ?? 'Detail sections'}
+            activeValue={activeTab as T}
             className={tabClassName}
-            onChange={onTabChange}
+            onChange={onTabChange as (value: T) => void}
             options={tabs}
           />
         ) : null}
       </CreateFlowPanel>
 
       {notice}
-      {error ? <div className="cu-banner cu-banner--error">{error}</div> : null}
+      {error ? (
+        <div className="cu-banner cu-banner--error" role="alert">
+          {error}
+        </div>
+      ) : null}
 
       {contentMode === 'plain' ? (
         <div className={cn('cu-detail-content-stack', contentClassName)}>{children}</div>

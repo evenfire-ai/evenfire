@@ -26,14 +26,14 @@ may still alert until an `express-rate-limit` **edge backstop** is added (see
 
 Tier defaults (requests/minute, per verified admin session identity unless noted):
 
-| Tier                         | Limit    | Config anchor                                              |
-| ---------------------------- | -------- | ---------------------------------------------------------- |
-| Admin public token           | 20       | `adminPublicTokenRlPerMin`                                 |
-| Admin workflow grant read    | 60       | `workflowGrantReadRateLimit`                               |
-| Admin workflow grant write   | 20       | `workflowGrantWriteRateLimit`                              |
-| Registry identity voucher    | 30       | inline in `registry.ts`                                    |
-| Registry connect request     | 3        | inline in `registryConnect.ts`                             |
-| External GFS read / mutation | 120 / 30 | `externalGfsReadRlPerMin` / `externalGfsOperationRlPerMin` |
+| Tier                                                           | Limit                   | Config anchor                  |
+| -------------------------------------------------------------- | ----------------------- | ------------------------------ |
+| Admin public token                                             | 20                      | `adminPublicTokenRlPerMin`     |
+| Admin workflow grant read                                      | 60                      | `workflowGrantReadRateLimit`   |
+| Admin workflow grant write                                     | 20                      | `workflowGrantWriteRateLimit`  |
+| Registry identity voucher                                      | 30                      | inline in `registry.ts`        |
+| Registry connect request                                       | 3                       | inline in `registryConnect.ts` |
+| External GFS read (resource, proxy, grants, shares) / mutation | 480, 480, 120, 120 / 90 | `externalGfsClassRlPerMin`     |
 
 ## PR #428 / F4 scope (fixed in branch)
 

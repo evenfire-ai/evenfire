@@ -684,8 +684,8 @@ describe('ensureRegistryPullSecret — concurrent create race', () => {
     // The winner's Secret appears between our 404 read and our create — in ONE namespace;
     // the pass's other namespaces are created normally.
     const create = mock.createSecret.bind(mock)
-    vi.spyOn(mock, 'createSecret').mockImplementation(async req => {
-      if ((req as { namespace?: string }).namespace !== NS) return create(req)
+    vi.spyOn(mock, 'createSecret').mockImplementation(async (req, opts) => {
+      if ((req as { namespace?: string }).namespace !== NS) return create(req, opts)
       mock.seedSecret(EVENFIRE_REGISTRY_PULL_SECRET_NAME, NS, {
         type: 'kubernetes.io/dockerconfigjson',
         labels: OURS,
@@ -710,8 +710,8 @@ describe('ensureRegistryPullSecret — concurrent create race', () => {
   it('records an unusable foreign race winner, so a caller that needs it still fails', async () => {
     const { gateway, mock } = gw()
     const create = mock.createSecret.bind(mock)
-    vi.spyOn(mock, 'createSecret').mockImplementation(async req => {
-      if ((req as { namespace?: string }).namespace !== NS) return create(req)
+    vi.spyOn(mock, 'createSecret').mockImplementation(async (req, opts) => {
+      if ((req as { namespace?: string }).namespace !== NS) return create(req, opts)
       mock.seedSecret(EVENFIRE_REGISTRY_PULL_SECRET_NAME, NS, { type: 'Opaque', data: {} })
       throw Object.assign(new Error('already exists'), { statusCode: 409, code: 409 })
     })
@@ -731,13 +731,13 @@ describe('ensureRegistryPullSecret — concurrent create race', () => {
     const create = mock.createSecret.bind(mock)
     const updateSpy = vi.spyOn(mock, 'updateSecret')
     let raced = false
-    vi.spyOn(mock, 'createSecret').mockImplementation(async req => {
+    vi.spyOn(mock, 'createSecret').mockImplementation(async (req, opts) => {
       if ((req as { namespace?: string }).namespace === NS && !raced) {
         raced = true
         // Created and deleted again before our re-read, so the re-read finds nothing.
         throw Object.assign(new Error('already exists'), { statusCode: 409, code: 409 })
       }
-      return create(req)
+      return create(req, opts)
     })
 
     await expect(ensureRegistryPullSecret(gateway, NS)).resolves.toBe('created')
@@ -1099,8 +1099,8 @@ describe('ensureRegistryPullSecrets — ownership taken over between the re-proo
   it('binds the adopt-the-winner write to the winner it just read', async () => {
     const { gateway, mock } = gw()
     const create = mock.createSecret.bind(mock)
-    vi.spyOn(mock, 'createSecret').mockImplementation(async req => {
-      if ((req as { namespace?: string }).namespace !== NS) return create(req)
+    vi.spyOn(mock, 'createSecret').mockImplementation(async (req, opts) => {
+      if ((req as { namespace?: string }).namespace !== NS) return create(req, opts)
       mock.seedSecret(EVENFIRE_REGISTRY_PULL_SECRET_NAME, NS, {
         type: 'kubernetes.io/dockerconfigjson',
         labels: OURS,

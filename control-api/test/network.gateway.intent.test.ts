@@ -382,7 +382,9 @@ describe('network/gateway intent (manifest-level)', () => {
 
   it('pins the shipped Codex proxy visual envelope to 24MiB', () => {
     const proxy = read(`${BASE}/control-plane/codex-llm-proxy.yaml`)
-    expect(proxy).toContain('CODEX_LLM_PROXY_MAX_BODY_BYTES: "1048576"')
+    // #731: the ordinary body limit is derived from the contract cap plus the
+    // envelope allowance, so the manifest must not pin it to a literal.
+    expect(proxy).not.toMatch(/^\s*CODEX_LLM_PROXY_MAX_BODY_BYTES:/m)
     expect(proxy).toContain('CODEX_LLM_PROXY_MAX_VISUAL_BODY_BYTES: "25165824"')
   })
 

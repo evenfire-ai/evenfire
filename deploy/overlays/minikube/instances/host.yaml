@@ -8,10 +8,11 @@ spec:
   contextRef: context1
   secretRef: chatllm-api-keys
   model:
-    # Overwritten by full-setup.sh step 6f, which auto-detects the provider
-    # from .env. This literal is only the apply-time placeholder.
-    provider: zai
-    name: glm-5.1
+    # Overwritten by full-setup.sh step 6f, which resolves the pair from .env
+    # (scripts/minikube/host-model.sh) and checks it against llm_allowed_models.
+    # This literal is only the apply-time placeholder: the no-key default.
+    provider: openai
+    name: gpt-5.4-mini
   workflowControl:
     scopes:
       - workflow:list

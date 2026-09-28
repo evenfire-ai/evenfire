@@ -1,0 +1,105 @@
+import type { SecretPreconditions } from '../types.js'
+
+// The ownership label every WorkflowRecipe Secret carries. It lives here, next
+// to the CAS helpers, so every route that can delete a Secret reads the SAME
+// constant. A literal duplicated in a second module would silently stop that
+// module's guard from firing the day this one changes.
+export const RECIPE_SECRET_LABEL_KEY = 'clerum.io/recipe-secret'
+export const RECIPE_SECRET_LABEL_VALUE = 'true'
+
+/** True when the Secret is owned by a WorkflowRecipe and must not be deleted by other routes. */
+export function isRecipeOwnedSecret(raw: unknown): boolean {
+  const labels = (raw as { metadata?: { labels?: Record<string, string> } } | undefined)?.metadata
+    ?.labels
+  return labels?.[RECIPE_SECRET_LABEL_KEY] === RECIPE_SECRET_LABEL_VALUE
+}
+
+/** The subset of a Kubernetes Secret that callers are allowed to observe. */
+export interface SecretResource {
+  metadata?: {
+    name?: string
+    namespace?: string
+    uid?: string
+    resourceVersion?: string
+    labels?: Record<string, string>
+    annotations?: Record<string, string>
+    ownerReferences?: Array<unknown>
+    finalizers?: string[]
+  }
+  type?: string
+  immutable?: boolean
+  data?: Record<string, string>
+  stringData?: Record<string, string>
+}
+
+/** A server-confirmed Secret identity and its restorable state. */
+export interface SecretSnapshot {
+  name: string
+  namespace: string
+  uid: string
+  resourceVersion: string
+  type?: string
+  labels?: Record<string, string>
+  annotations?: Record<string, string>
+  ownerReferences?: Array<unknown>
+  finalizers?: string[]
+  immutable?: boolean
+  data?: Record<string, string>
+  stringData?: Record<string, string>
+}
+
+/** Convert an apiserver response into the only mutation result callers may use for CAS. */
+export function toSecretSnapshot(
+  raw: unknown,
+  fallbackName: string,
+  fallbackNamespace: string
+): SecretSnapshot {
+  const source = (raw ?? {}) as SecretResource
+  const metadata = source.metadata
+  if (typeof metadata?.uid !== 'string' || typeof metadata.resourceVersion !== 'string') {
+    throw Object.assign(
+      new Error(`Secret/${fallbackName} did not return a complete Kubernetes identity`),
+      { status: 503, code: 'secret_identity_unavailable' }
+    )
+  }
+
+  return {
+    name: typeof metadata.name === 'string' && metadata.name.trim() ? metadata.name : fallbackName,
+    namespace:
+      typeof metadata.namespace === 'string' && metadata.namespace.trim()
+        ? metadata.namespace
+        : fallbackNamespace,
+    uid: metadata.uid,
+    resourceVersion: metadata.resourceVersion,
+    ...(typeof source.type === 'string' ? { type: source.type } : {}),
+    ...(metadata.labels ? { labels: metadata.labels } : {}),
+    ...(metadata.annotations ? { annotations: metadata.annotations } : {}),
+    ...(metadata.ownerReferences ? { ownerReferences: metadata.ownerReferences } : {}),
+    ...(metadata.finalizers ? { finalizers: metadata.finalizers } : {}),
+    ...(typeof source.immutable === 'boolean' ? { immutable: source.immutable } : {}),
+    ...(source.data ? { data: source.data } : {}),
+    ...(source.stringData ? { stringData: source.stringData } : {}),
+  }
+}
+
+/**
+ * Read a Secret identity at a boundary that may receive either the raw
+ * Kubernetes resource or the flat server-owned SecretSnapshot. Mutation
+ * routes must not depend on one representation accidentally being returned by
+ * a mock or a different gateway method.
+ */
+export function secretIdentityPreconditions(raw: unknown): SecretPreconditions | null {
+  const value = (raw ?? {}) as {
+    uid?: unknown
+    resourceVersion?: unknown
+    metadata?: { uid?: unknown; resourceVersion?: unknown }
+  }
+  const uid = typeof value.uid === 'string' ? value.uid : value.metadata?.uid
+  const resourceVersion =
+    typeof value.resourceVersion === 'string'
+      ? value.resourceVersion
+      : value.metadata?.resourceVersion
+  if (typeof uid !== 'string' || !uid.trim()) return null
+  if (typeof resourceVersion !== 'string' || !resourceVersion.trim()) return null
+  return { uid, resourceVersion }
+}

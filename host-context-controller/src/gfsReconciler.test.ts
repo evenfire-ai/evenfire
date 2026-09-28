@@ -28,6 +28,8 @@ const config: GfsFactoryConfig = {
   readerPgSecretKey: 'connection-string',
   driveName: 'main',
   tokenAudience: 'gfs-controller',
+  agentReadRlPerMinPerReplica: 300,
+  agentWriteRlPerMinPerReplica: 120,
 }
 
 const gfs: GlobalFileSystemCRD = {

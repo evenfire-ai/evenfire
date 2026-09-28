@@ -6,4 +6,4 @@ metadata:
   labels:
     app: grok-llm-proxy
 data:
-  GROK_LLM_PROXY_EXECUTION_ENABLED: 'false'
+  GROK_LLM_PROXY_EXECUTION_ENABLED: 'true'

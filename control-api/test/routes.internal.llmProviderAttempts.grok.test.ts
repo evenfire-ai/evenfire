@@ -42,6 +42,9 @@ const { createInternalLlmProviderAttemptRoutes } =
 const REDEEM = '/internal/llm/grok/provider-attempts/redeem'
 const FINALIZE = '/internal/llm/grok/provider-attempts/finalize'
 
+/** The ConfigMap writer the gateway hands the routes; the cluster is outside this process. */
+const materializer = { materialize: vi.fn(async () => {}) }
+
 /** Stand-in for internalServiceAuth: the header names the authenticated caller. */
 function makeApp() {
   const app = express()
@@ -55,7 +58,7 @@ function makeApp() {
     }
     next()
   })
-  app.use(createInternalLlmProviderAttemptRoutes())
+  app.use(createInternalLlmProviderAttemptRoutes(materializer))
   app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
     res.status(500).json({ error: 'internal', name: (err as Error)?.name })
   })
@@ -65,6 +68,7 @@ function makeApp() {
 describe('internal Grok provider-attempt routes', () => {
   beforeEach(() => {
     for (const fn of Object.values(services)) fn.mockReset()
+    materializer.materialize.mockClear()
   })
 
   describe('service identity', () => {
@@ -105,15 +109,39 @@ describe('internal Grok provider-attempt routes', () => {
           operation: 'drop_tables',
         })
       expect(res.status).toBe(200)
-      expect(services.redeemGrok).toHaveBeenCalledWith({
-        executionTicket: 'ticket',
-        requestHash: 'a'.repeat(64),
-        model: 'grok-4.6',
-        hostRef: undefined,
-        operation: 'completion_stream',
-      })
+      expect(services.redeemGrok).toHaveBeenCalledWith(
+        {
+          executionTicket: 'ticket',
+          requestHash: 'a'.repeat(64),
+          model: 'grok-4.6',
+          hostRef: undefined,
+          operation: 'completion_stream',
+        },
+        expect.objectContaining({ publishAllowlist: expect.any(Function) })
+      )
       expect(services.redeemCodex).not.toHaveBeenCalled()
     })
+
+    it.each([
+      ['grok-llm-proxy', REDEEM, services.redeemGrok],
+      ['codex-llm-proxy', '/internal/llm/provider-attempts/redeem', services.redeemCodex],
+    ] as const)(
+      'R9-19 hands the %s redemption a publish bound to the gateway ConfigMap writer',
+      async (service, path, redeem) => {
+        redeem.mockResolvedValue({ accessToken: 'access', attemptReceipt: 'r' })
+        const res = await request(makeApp())
+          .post(path)
+          .set('x-test-service', service)
+          .send({ executionTicket: 'ticket', requestHash: 'h' })
+        expect(res.status).toBe(200)
+        expect(redeem).toHaveBeenCalledTimes(1)
+
+        const deps = redeem.mock.calls[0]?.[1] as { publishAllowlist: () => Promise<void> }
+        expect(materializer.materialize).not.toHaveBeenCalled()
+        await deps.publishAllowlist()
+        expect(materializer.materialize).toHaveBeenCalledTimes(1)
+      }
+    )
 
     const redeemStatus: Array<[GrokProviderAttemptRedeemErrorCode, number]> = [
       ['disabled', 404],

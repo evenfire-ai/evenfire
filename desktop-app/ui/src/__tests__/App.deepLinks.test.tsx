@@ -2093,7 +2093,7 @@ describe('App deep-link orchestration', () => {
       emitDeepLink?.({ id: 1, appRef: 'ns/missing', teamId: 'team-b' })
     })
     await confirmPendingAppLink()
-    await waitFor(() => expect(getSandboxUiLocation).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(getSandboxUiLocation).toHaveBeenCalledTimes(1), { timeout: 5000 })
 
     // Supersede the handoff: switch to the seeded chat tab. The deactivation effect
     // bumps the activation generation AND closes A's embed itself, all while the

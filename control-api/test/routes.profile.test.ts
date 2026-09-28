@@ -132,6 +132,7 @@ describe('routes/profile', () => {
     rateLimitMock.checkAndIncrement.mockReset()
     rateLimitMock.checkAndIncrement.mockResolvedValue({
       allowed: true,
+      backendAvailable: true,
       remaining: 9,
       resetMs: Date.now() + 60_000,
       windowStartMs: Date.now(),

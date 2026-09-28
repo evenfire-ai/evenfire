@@ -1,13 +1,18 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import { rateLimit } from 'express-rate-limit'
+import { DatabaseError } from 'pg'
 import request from 'supertest'
 
 const poolQuery = vi.hoisted(() => vi.fn())
 const verifyToken = vi.hoisted(() => vi.fn())
+const loggerWarn = vi.hoisted(() => vi.fn())
 
 vi.mock('../src/db.js', () => ({
   pool: { query: (...args: unknown[]) => poolQuery(...args) },
+}))
+vi.mock('../src/observability/logger.js', () => ({
+  rootLogger: { warn: (...args: unknown[]) => loggerWarn(...args) },
 }))
 vi.mock('../src/utils/auth/externalSessionAuthToken.js', () => ({
   verifyExternalSessionToken: (...args: unknown[]) => verifyToken(...args),
@@ -22,6 +27,13 @@ const claims = {
   exp: Math.floor(Date.now() / 1000) + 3600,
 }
 
+/** A server-side error as pg raises it: a DatabaseError carrying a SQLSTATE. */
+function databaseError(sqlstate: string): DatabaseError {
+  const error = new DatabaseError(`server error ${sqlstate}`, 0, 'error')
+  error.code = sqlstate
+  return error
+}
+
 function app() {
   const server = express()
   server.get(
@@ -34,13 +46,19 @@ function app() {
     },
     (_req, res) => res.status(200).json({ ok: true })
   )
+  server.use(
+    (_err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+      res.status(500).json({ error: 'internal' })
+    }
+  )
   return server
 }
 
 describe('external session lifecycle gate', () => {
   beforeEach(() => {
-    poolQuery.mockClear()
-    verifyToken.mockClear()
+    poolQuery.mockReset()
+    verifyToken.mockReset()
+    loggerWarn.mockReset()
     poolQuery.mockResolvedValue({
       rows: [{ lifecycle_state: 'active', lifecycle_version: '4' }],
       rowCount: 1,
@@ -73,5 +91,87 @@ describe('external session lifecycle gate', () => {
     const response = await request(app()).get('/protected').set('x-user-session-token', 'session')
     expect(response.status).toBe(401)
     expect(poolQuery).not.toHaveBeenCalled()
+  })
+
+  it('answers 503 with Retry-After when the lifecycle row cannot be read', async () => {
+    verifyToken.mockReturnValueOnce(claims)
+    poolQuery.mockRejectedValueOnce(new Error('timeout exceeded when trying to connect'))
+    const response = await request(app()).get('/protected').set('x-user-session-token', 'session')
+    expect(response.status).toBe(503)
+    expect(response.body).toEqual({ error: 'session_backend_unavailable', retryAfterSeconds: 2 })
+    expect(response.headers['retry-after']).toBe('2')
+    expect(response.headers['cache-control']).toBe('no-store')
+    // Witness: the lookup was attempted exactly once, for the token's user.
+    expect(poolQuery).toHaveBeenCalledTimes(1)
+    expect(poolQuery.mock.calls[0]?.[1]).toEqual([claims.userId])
+    expect(loggerWarn).toHaveBeenCalledTimes(1)
+    expect(loggerWarn.mock.calls[0]?.[0]).toEqual({
+      event: 'external_session_backend_unavailable',
+      err: 'timeout exceeded when trying to connect',
+    })
+  })
+
+  it.each([
+    ['a pool acquire timeout', new Error('timeout exceeded when trying to connect')],
+    ['a dropped connection', new Error('Connection terminated unexpectedly')],
+    [
+      'a refused socket',
+      Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:5432'), { code: 'ECONNREFUSED' }),
+    ],
+    // Five characters, like a SQLSTATE, but a socket error: no SQLSTATE class.
+    ['a broken pipe', Object.assign(new Error('write EPIPE'), { code: 'EPIPE' })],
+    // Node raises this when every address of a multi-address host refuses.
+    [
+      'a refused socket on every address',
+      Object.assign(new AggregateError([], 'connect ECONNREFUSED'), { code: 'ECONNREFUSED' }),
+    ],
+    ['SQLSTATE 08006 connection_failure', databaseError('08006')],
+    ['SQLSTATE 53300 too_many_connections', databaseError('53300')],
+    ['SQLSTATE 57P01 admin_shutdown', databaseError('57P01')],
+    ['SQLSTATE 57014 query_canceled (statement timeout)', databaseError('57014')],
+    ['SQLSTATE 58000 system_error', databaseError('58000')],
+  ])('answers 503 for %s', async (_label, error) => {
+    verifyToken.mockReturnValueOnce(claims)
+    poolQuery.mockRejectedValueOnce(error)
+    const response = await request(app()).get('/protected').set('x-user-session-token', 'session')
+    expect(response.status).toBe(503)
+    expect(response.body).toEqual({ error: 'session_backend_unavailable', retryAfterSeconds: 2 })
+    expect(poolQuery).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([
+    ['SQLSTATE 22P02 invalid_text_representation', databaseError('22P02')],
+    ['SQLSTATE 42P01 undefined_table', databaseError('42P01')],
+    ['SQLSTATE 42703 undefined_column', databaseError('42703')],
+    // Defects in this process's code, not in the connection to PostgreSQL.
+    ['a TypeError', new TypeError("Cannot read properties of undefined (reading 'query')")],
+    ['a RangeError', new RangeError('Invalid array length')],
+    [
+      'a Node argument error',
+      Object.assign(new TypeError('The "string" argument must be of type string'), {
+        code: 'ERR_INVALID_ARG_TYPE',
+      }),
+    ],
+  ])('passes %s to the error handler as a 500, not a 503', async (_label, error) => {
+    verifyToken.mockReturnValueOnce(claims)
+    poolQuery.mockRejectedValueOnce(error)
+    const response = await request(app()).get('/protected').set('x-user-session-token', 'session')
+    expect(response.status).toBe(500)
+    expect(response.headers['retry-after']).toBeUndefined()
+    // Witness: the lookup ran and failed; the defect was not relabelled.
+    expect(poolQuery).toHaveBeenCalledTimes(1)
+    expect(loggerWarn).not.toHaveBeenCalled()
+  })
+
+  it('keeps 401 for an invalid token while the lifecycle backend is failing', async () => {
+    verifyToken.mockReturnValueOnce(null)
+    poolQuery.mockRejectedValue(new Error('timeout exceeded when trying to connect'))
+    const response = await request(app()).get('/protected').set('x-user-session-token', 'forged')
+    expect(response.status).toBe(401)
+    expect(response.body).toEqual({ error: 'Unauthorized' })
+    // Witness: the token was verified; the rejection came before any lookup.
+    expect(verifyToken).toHaveBeenCalledWith('forged')
+    expect(poolQuery).not.toHaveBeenCalled()
+    expect(loggerWarn).not.toHaveBeenCalled()
   })
 })

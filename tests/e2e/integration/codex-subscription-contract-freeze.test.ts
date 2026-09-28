@@ -66,11 +66,13 @@ const REQUIRED_LIMIT_KEYS = [
   'maxQueueWaitMs',
   'upstreamIdleTimeoutMs',
   'maxRetriesPerAttempt',
+  'executionTicketTtlMs',
 ] as const
 
 // Runtime `LIMITS` keys that the fixture also publishes. Each must carry the
 // same value on both sides.
 const PUBLISHED_RUNTIME_LIMIT_KEYS = [
+  'executionTicketTtlMs',
   'maxDeadlineMs',
   'maxMessages',
   'maxOutputTokens',
@@ -170,8 +172,12 @@ describe('codex-subscription contract freeze', () => {
       join(repoRoot, 'deploy/base/control-plane/codex-llm-proxy.yaml'),
       'utf8'
     )
-    expect(proxyDeploy).toContain(
-      `CODEX_LLM_PROXY_MAX_BODY_BYTES: "${localContract.LIMITS.maxRequestBodyBytes}"`
+    // #731: the ordinary body limit is left unset in the manifest so the proxy
+    // derives it from the contract cap plus its envelope allowance.
+    expect(proxyDeploy).not.toMatch(/^\s*CODEX_LLM_PROXY_MAX_BODY_BYTES:/m)
+    const proxyLimits = readFileSync(join(repoRoot, 'codex-llm-proxy/src/requestLimits.ts'), 'utf8')
+    expect(proxyLimits).toMatch(
+      /DEFAULT_MAX_BODY_BYTES = CONTRACT_LIMITS\.maxRequestBodyBytes \+ ENVELOPE_ALLOWANCE_BYTES/
     )
     expect(proxyDeploy).toContain(
       `CODEX_LLM_PROXY_MAX_VISUAL_BODY_BYTES: "${localContract.LIMITS.maxVisualRequestBodyBytes}"`
@@ -285,8 +291,10 @@ describe('codex-subscription contract freeze', () => {
 
     expect(limits?.maxToolCalls).toBe(256)
     expect(limits?.maxMessages).toBe(1024)
-    expect(limits?.maxRequestBodyBytes).toBe(1048576)
+    expect(limits?.maxRequestBodyBytes).toBe(8388608)
     expect(limits?.maxVisualRequestBodyBytes).toBe(25165824)
+    // control-api derives the execution ticket TTL from LIMITS (#739).
+    expect(limits?.executionTicketTtlMs).toBe(60000)
 
     // The architecture doc publishes the same limits as a table; a row that
     // drifts from the fixture misdescribes what the runtime enforces. The table
@@ -308,9 +316,20 @@ describe('codex-subscription contract freeze', () => {
     expect(Array.isArray(errors) && (errors as unknown[]).length > 0).toBe(true)
     for (const code of errors as unknown[]) {
       expect(typeof code).toBe('string')
-      expect(String(code)).toMatch(/^[a-z][a-z0-9_]+$/)
+      // Snake case, except `Unauthorized`: the wire code the proxy's platform
+      // JWT check answers 401 with, published as sent.
+      expect(String(code)).toMatch(/^(?:[a-z][a-z0-9_]+|Unauthorized)$/)
     }
+    // Codes the proxy emits directly (request_timeout, length_required,
+    // unsupported_media_type, ticket_expired) or passes through from redeem
+    // (ticket_expired).
+    expect(errors).toContain('request_timeout')
+    expect(errors).toContain('length_required')
+    expect(errors).toContain('ticket_expired')
+    expect(errors).toContain('unsupported_media_type')
     expect(errors).toContain('tool_call_limit_exceeded')
+    expect(errors).toContain('context_length_exceeded')
+    expect(errors).toContain('invalid_tool_arguments')
     expect(errors).toContain('stream_duration_exceeded')
     expect(errors).toContain('sse_buffer_exceeded')
     expect(new Set(errors as unknown[]).size, 'errorTaxonomy must not repeat a code').toBe(

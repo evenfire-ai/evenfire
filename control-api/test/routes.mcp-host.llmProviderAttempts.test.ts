@@ -13,6 +13,7 @@ import * as mcpHostJwt from '../src/utils/auth/mcpHostJwtToken.js'
 vi.mock('../src/services/rateLimiterService.js', () => ({
   checkAndIncrement: vi.fn().mockResolvedValue({
     allowed: true,
+    backendAvailable: true,
     remaining: 59,
     resetMs: Date.now() + 60_000,
     windowStartMs: Date.now(),

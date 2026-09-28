@@ -5,11 +5,12 @@
  *    delta histogram and tier-mismatch counter are still emitted;
  *  - when `dryRun: false`, the counter drives the tier directly.
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { logger } from '../../../logger'
 import { makeFakeConversation } from '../../conversation/__testing__/makeFakeConversation'
 import { PressureContextManager } from '../../extensions/contextManager'
-import type { ChatMessage } from '../../types'
-import { heuristicCount } from '../heuristic'
+import type { ChatMessage, ToolDefinition } from '../../types'
+import { heuristicCount, heuristicCountTools } from '../heuristic'
 import { tokenizerDryrunTierMismatchTotal } from '../metrics'
 import type { TokenCounter } from '../tokenCounter'
 
@@ -33,6 +34,20 @@ function tinyMessages(): ChatMessage[] {
   ]
 }
 
+/**
+ * `count` short user/assistant turns. The emergency tier keeps the last three,
+ * so a compaction of this history is visible in its length, not only in a new
+ * array reference.
+ */
+function turns(count: number): ChatMessage[] {
+  const msgs: ChatMessage[] = []
+  for (let i = 1; i <= count; i++) {
+    msgs.push({ role: 'user', content: `question ${i} a b c d e f` })
+    msgs.push({ role: 'assistant', content: `answer ${i} g h i j k l` })
+  }
+  return msgs
+}
+
 function getMismatchCount(from: string, to: string): number {
   const samples = (
     tokenizerDryrunTierMismatchTotal as unknown as {
@@ -50,6 +65,13 @@ function getMismatchCount(from: string, to: string): number {
 describe('PressureContextManager dry-run', () => {
   beforeEach(() => {
     tokenizerDryrunTierMismatchTotal.reset()
+  })
+
+  // T-E1b silences `logger.warn` and `console.warn`. Restoring them here rather
+  // than at the end of the test body keeps a failing assertion from leaking
+  // silenced spies into every later test in the file.
+  afterEach(() => {
+    vi.restoreAllMocks()
   })
 
   it('keeps heuristic-driven tier selection when dryRun=true', async () => {
@@ -70,7 +92,7 @@ describe('PressureContextManager dry-run', () => {
   })
 
   it('lets the counter drive the tier when dryRun=false', async () => {
-    const msgs = tinyMessages()
+    const msgs = turns(10)
     const heuristic = heuristicCount(msgs)
     // Same setup as above (heuristic would passthrough) but with dryRun
     // disabled the counter's high value should trigger compaction.
@@ -81,6 +103,41 @@ describe('PressureContextManager dry-run', () => {
     })
     const result = await manager.manage(msgs, makeFakeConversation())
     expect(result).not.toBe(msgs)
+    // The emergency tier ran: the last three turns remain, the newest intact.
+    expect(result.filter(m => m.role === 'user')).toHaveLength(3)
+    expect(result.at(-1)?.content).toBe(msgs.at(-1)?.content)
+  })
+
+  it('T-E1b a failing dry-run counter is reported through the service logger (#731)', async () => {
+    const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {})
+    const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const msgs = tinyMessages()
+    const counter = makeCounter(0)
+    counter.count = vi.fn(async () => {
+      throw new Error('counter unavailable')
+    })
+    const manager = new PressureContextManager(
+      Math.ceil(heuristicCount(msgs) / 0.5),
+      undefined,
+      undefined,
+      counter,
+      { dryRun: true }
+    )
+
+    const result = await manager.manage(msgs, makeFakeConversation())
+    // Liveness witness for the `console.warn` negative below: a decision was
+    // still made, from the heuristic, so the catch branch really executed.
+    // Without this the `not.toHaveBeenCalled` would pass on a `manage()` that
+    // threw or never reached the counter at all.
+    expect(result).toBe(msgs)
+    expect(counter.count).toHaveBeenCalledTimes(1)
+
+    expect(warnSpy).toHaveBeenCalledTimes(1)
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ component: 'ContextManager', err: expect.any(Error) }),
+      'dryrun counter failed; using heuristic'
+    )
+    expect(consoleSpy).not.toHaveBeenCalled()
   })
 
   it('falls back to heuristic when no counter is provided', async () => {
@@ -88,5 +145,136 @@ describe('PressureContextManager dry-run', () => {
     const manager = new PressureContextManager(1_000_000) // huge budget
     const result = await manager.manage(msgs, makeFakeConversation())
     expect(result).toBe(msgs) // passthrough
+  })
+})
+
+// The tool schemas travel in the same request the contract caps, so the gauge
+// that decides when to compact must count them (review r2, M2b). Every branch
+// of `computePressure` — no counter, dry-run, counter-driven — must see them.
+describe('PressureContextManager pressure includes the tool schemas', () => {
+  function bulkyTools(): ToolDefinition[] {
+    return [
+      {
+        name: 'crm_search_contacts',
+        description: 'Search CRM contacts',
+        parameters: {
+          type: 'object',
+          properties: { q: { type: 'string', description: 'x'.repeat(4_000) } },
+        },
+      },
+    ]
+  }
+
+  it('T-R2-2a tools push a conversation below 0.8 into compaction on the heuristic path', async () => {
+    const msgs = turns(10)
+    const tools = bulkyTools()
+    const maxTokens = Math.ceil(heuristicCount(msgs) / 0.7)
+    // Witness the arithmetic, so the two outcomes below can only differ by the tools term.
+    expect(heuristicCount(msgs) / maxTokens).toBeLessThan(0.8)
+    expect((heuristicCount(msgs) + heuristicCountTools(tools)) / maxTokens).toBeGreaterThanOrEqual(
+      0.95
+    )
+    const manager = new PressureContextManager(maxTokens)
+
+    expect(await manager.manage(msgs, makeFakeConversation())).toBe(msgs)
+    const result = await manager.manage(msgs, makeFakeConversation(), { tools })
+    expect(result).not.toBe(msgs)
+    // The emergency tier ran: the last three turns remain, the newest intact.
+    expect(result.filter(m => m.role === 'user')).toHaveLength(3)
+    expect(result.at(-1)?.content).toBe(msgs.at(-1)?.content)
+  })
+
+  it('T-R2-2b dry-run decides from messages plus tools and hands the tools to the counter', async () => {
+    const msgs = turns(10)
+    const tools = bulkyTools()
+    const maxTokens = Math.ceil(heuristicCount(msgs) / 0.7)
+    const counter = makeCounter(0) // would pass through if it decided
+    const manager = new PressureContextManager(maxTokens, undefined, undefined, counter, {
+      dryRun: true,
+    })
+
+    const result = await manager.manage(msgs, makeFakeConversation(), { tools })
+
+    expect(result).not.toBe(msgs)
+    expect(result.filter(m => m.role === 'user')).toHaveLength(3)
+    expect(counter.count).toHaveBeenCalledWith(msgs, tools)
+  })
+
+  it('T-R2-2c the counter-driven path hands the tools to the counter', async () => {
+    const msgs = tinyMessages()
+    const tools = bulkyTools()
+    const counter = makeCounter(0)
+    const manager = new PressureContextManager(1_000, undefined, undefined, counter, {
+      dryRun: false,
+    })
+
+    const result = await manager.manage(msgs, makeFakeConversation(), { tools })
+
+    // The counter reports 0, so its number decided: passthrough by reference.
+    expect(result).toBe(msgs)
+    expect(counter.count).toHaveBeenCalledTimes(1)
+    expect(counter.count).toHaveBeenCalledWith(msgs, tools)
+  })
+})
+
+// The system prompt travels in the same request as the messages and the tools:
+// identity files, the daily-log snapshot frozen at session start and the tool
+// guidance. It is not part of `messages`, so the gauge must add it in every
+// branch of `computePressure`, as it adds the tools (R9-14, L-6).
+describe('PressureContextManager pressure includes the system prompt', () => {
+  const asSystemMessage = (content: string): ChatMessage => ({ role: 'system', content })
+
+  // Messages at 0.7 of the window; the system prompt alone is about one window.
+  function setup() {
+    const msgs = turns(10)
+    const maxTokens = Math.ceil(heuristicCount(msgs) / 0.7)
+    const systemPrompt = '## Daily Log (frozen at session start)\n' + 'entry '.repeat(maxTokens)
+    return { msgs, maxTokens, systemPrompt }
+  }
+
+  it('T-R9-14a messages at 0.7 plus the system prompt over 0.8 are not passed through', async () => {
+    const { msgs, maxTokens, systemPrompt } = setup()
+    // Witness the arithmetic, so the two outcomes below can only differ by the
+    // system prompt term.
+    expect(heuristicCount(msgs) / maxTokens).toBeLessThan(0.8)
+    expect(heuristicCount([asSystemMessage(systemPrompt), ...msgs]) / maxTokens).toBeGreaterThan(
+      0.95
+    )
+    const manager = new PressureContextManager(maxTokens)
+
+    expect(await manager.manage(msgs, makeFakeConversation())).toBe(msgs)
+    const result = await manager.manage(msgs, makeFakeConversation(), { systemPrompt })
+
+    // The emergency tier ran: the last three turns remain, the newest intact.
+    expect(result.filter(m => m.role === 'user')).toHaveLength(3)
+    expect(result.at(-1)?.content).toBe(msgs.at(-1)?.content)
+  })
+
+  it('T-R9-14b dry-run decides with the system prompt and hands it to the counter', async () => {
+    const { msgs, maxTokens, systemPrompt } = setup()
+    const counter = makeCounter(0) // would pass through if it decided
+    const manager = new PressureContextManager(maxTokens, undefined, undefined, counter, {
+      dryRun: true,
+    })
+
+    const result = await manager.manage(msgs, makeFakeConversation(), { systemPrompt })
+
+    expect(result.filter(m => m.role === 'user')).toHaveLength(3)
+    expect(counter.count).toHaveBeenCalledWith([asSystemMessage(systemPrompt), ...msgs], [])
+  })
+
+  it('T-R9-14c the counter-driven path hands the system prompt to the counter', async () => {
+    const { msgs, systemPrompt } = setup()
+    const counter = makeCounter(0)
+    const manager = new PressureContextManager(1_000, undefined, undefined, counter, {
+      dryRun: false,
+    })
+
+    const result = await manager.manage(msgs, makeFakeConversation(), { systemPrompt })
+
+    // The counter reports 0, so its number decided: passthrough by reference.
+    expect(result).toBe(msgs)
+    expect(counter.count).toHaveBeenCalledTimes(1)
+    expect(counter.count).toHaveBeenCalledWith([asSystemMessage(systemPrompt), ...msgs], [])
   })
 })

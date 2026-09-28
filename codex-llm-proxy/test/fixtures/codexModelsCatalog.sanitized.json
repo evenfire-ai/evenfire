@@ -1,0 +1,22 @@
+{
+  "_provenance": {
+    "origin": "https://chatgpt.com/backend-api/codex/models",
+    "recordedBy": "Codex CLI 0.155.0-alpha.16 models cache",
+    "fetchedAt": "2026-09-22T20:16:19.046Z",
+    "sanitization": "Two of ten rows kept; each row reduced to its identity, display name and context-window fields. The envelope is the upstream one ({ models: [...] })."
+  },
+  "models": [
+    {
+      "slug": "gpt-5.6-sol",
+      "display_name": "GPT-5.6-Sol",
+      "context_window": 272000,
+      "max_context_window": 872000
+    },
+    {
+      "slug": "gpt-5.5",
+      "display_name": "GPT-5.5",
+      "context_window": 272000,
+      "max_context_window": 272000
+    }
+  ]
+}

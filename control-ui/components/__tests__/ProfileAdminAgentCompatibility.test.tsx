@@ -30,7 +30,25 @@ vi.mock('next/navigation', () => ({
 }))
 
 vi.mock('@components/DetailPageShell', () => ({
-  DetailPageShell: ({ children }: { children: React.ReactNode }) => <main>{children}</main>,
+  DetailPageShell: ({
+    actions,
+    children,
+    contentClassName,
+    title,
+  }: {
+    actions?: React.ReactNode
+    children: React.ReactNode
+    contentClassName?: string
+    title?: React.ReactNode
+  }) => (
+    <main>
+      <h1>{title}</h1>
+      <div aria-label="Detail actions">{actions}</div>
+      <div className={contentClassName} data-testid="detail-page-content">
+        {children}
+      </div>
+    </main>
+  ),
 }))
 
 vi.mock('../../lib/api', async () => {
@@ -131,6 +149,179 @@ afterEach(() => {
 })
 
 describe('profile-admin agent compatibility access', () => {
+  it('continues the detail panel surface through team tab content', async () => {
+    renderTeamDetails()
+    await waitFor(() =>
+      expect(screen.getByTestId('detail-page-content')).toHaveClass(
+        'cu-detail-content-stack--panel-continuation'
+      )
+    )
+  })
+
+  it('continues the detail panel surface and bolds member contact values', async () => {
+    navigationState.params = { userId: 'user-1', tab: 'contact' }
+    render(<UserDetailsPage />)
+
+    await screen.findByText('Member name')
+    const primaryEmailField = screen.getByText('Primary email').parentElement
+    expect(primaryEmailField).not.toBeNull()
+    expect(within(primaryEmailField as HTMLElement).getByText('member@example.com').tagName).toBe(
+      'STRONG'
+    )
+    expect(primaryEmailField?.querySelector('.cu-field__readonly')).toBeNull()
+    expect(screen.getByTestId('detail-page-content')).toHaveClass(
+      'cu-detail-content-stack--panel-continuation'
+    )
+  })
+
+  it('adds existing team members with the shared searchable chip picker and dialog', async () => {
+    vi.mocked(api.getAdminTeamContexts).mockResolvedValue({ teamId: 'team-1', contextIds: [] })
+    vi.mocked(api.getAdminTeamAgents).mockResolvedValue({
+      teamId: 'team-1',
+      agentNames: [],
+      deletedAgentNames: [],
+      deletedHistoryLimit: 10,
+    })
+    vi.mocked(api.addAdminTeamMember).mockResolvedValue({} as never)
+    navigationState.params = { teamId: 'team-1', tab: 'members' }
+    render(<TeamDetailsPage />)
+
+    await screen.findByRole('button', { name: 'Add member' })
+    fireEvent.click(screen.getByRole('button', { name: 'Add member' }))
+    const dialog = screen.getByRole('dialog', { name: 'Add member' })
+    expect(dialog).toHaveClass('eft-dialog')
+    fireEvent.click(within(dialog).getByRole('tab', { name: 'Existing member' }))
+    fireEvent.click(within(dialog).getByRole('option', { name: 'Member One, member@example.com' }))
+    expect(dialog.querySelector('.cu-selection-dropdown__chips')).toHaveTextContent('Member One')
+    expect(within(dialog).getByLabelText('Role')).toBeInTheDocument()
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Add member' }))
+
+    await waitFor(() =>
+      expect(api.addAdminTeamMember).toHaveBeenCalledWith('team-1', 'user-1', 'member')
+    )
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+  })
+
+  it('adds members to teams through the shared searchable chip picker and dialog', async () => {
+    vi.mocked(api.getAdminUserContexts).mockResolvedValue({ userId: 'user-1', contextIds: [] })
+    vi.mocked(api.getAdminUserAgents).mockResolvedValue({
+      userId: 'user-1',
+      agentNames: [],
+      deletedAgentNames: [],
+      deletedHistoryLimit: 10,
+    })
+    vi.mocked(api.addAdminTeamMember).mockResolvedValue({} as never)
+    navigationState.params = { userId: 'user-1', tab: 'teams' }
+    render(<UserDetailsPage />)
+
+    await screen.findByRole('button', { name: 'Add to team' })
+    fireEvent.click(screen.getByRole('button', { name: 'Add to team' }))
+    const dialog = screen.getByRole('dialog', { name: 'Add to team' })
+    expect(dialog).toHaveClass('eft-dialog')
+    fireEvent.click(within(dialog).getByRole('option', { name: 'Platform, 1 member' }))
+    expect(dialog.querySelector('.cu-selection-dropdown__chips')).toHaveTextContent('Platform')
+    expect(within(dialog).getByLabelText('Role')).toBeInTheDocument()
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Add to team' }))
+
+    await waitFor(() =>
+      expect(api.addAdminTeamMember).toHaveBeenCalledWith('team-1', 'user-1', 'member')
+    )
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+  })
+
+  it('renames a team through the scalar edit dialog and retains failures', async () => {
+    vi.mocked(api.getAdminTeam)
+      .mockResolvedValueOnce({ id: 'team-1', name: 'Platform' })
+      .mockResolvedValueOnce({ id: 'team-1', name: 'Platform Engineering (canonical)' })
+    vi.mocked(api.getAdminTeamContexts).mockResolvedValue({ teamId: 'team-1', contextIds: [] })
+    vi.mocked(api.getAdminTeamAgents).mockResolvedValue({
+      teamId: 'team-1',
+      agentNames: [],
+      deletedAgentNames: [],
+      deletedHistoryLimit: 10,
+    })
+    vi.mocked(api.renameAdminTeam)
+      .mockRejectedValueOnce(new Error('Rename failed'))
+      .mockResolvedValueOnce({ id: 'team-1', name: 'Platform Engineering' })
+    renderTeamDetails()
+
+    await screen.findByRole('heading', { name: 'Platform' })
+    fireEvent.click(screen.getByRole('button', { name: 'Team actions' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Rename team' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Rename team' })
+    const input = within(dialog).getByRole('textbox', { name: 'Team name' })
+    expect(input).toHaveValue('Platform')
+    fireEvent.change(input, { target: { value: 'Platform Engineering' } })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Rename team' }))
+
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('Rename failed')
+    expect(input).toHaveValue('Platform Engineering')
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Rename team' }))
+    await waitFor(() => expect(api.renameAdminTeam).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(api.getAdminTeam).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    expect(
+      screen.getByRole('heading', { name: 'Platform Engineering (canonical)' })
+    ).toBeInTheDocument()
+    expect(screen.getByText('Team renamed.')).toBeInTheDocument()
+  })
+
+  it('grants member agent access through the shared relationship dialog', async () => {
+    vi.mocked(api.getAdminUserContexts).mockResolvedValue({ userId: 'user-1', contextIds: [] })
+    vi.mocked(api.getAdminUserAgents).mockResolvedValue({
+      userId: 'user-1',
+      agentNames: [],
+      deletedAgentNames: [],
+      deletedHistoryLimit: 10,
+    })
+    vi.mocked(api.updateAdminUserAgents).mockResolvedValue({
+      userId: 'user-1',
+      agentNames: ['agent-alpha'],
+      deletedAgentNames: [],
+      deletedHistoryLimit: 10,
+    })
+    vi.mocked(api.updateAdminUserContexts).mockResolvedValue({
+      userId: 'user-1',
+      contextIds: ['ctx-alpha'],
+    })
+    renderUserDetails()
+
+    await screen.findByRole('button', { name: 'Grant agent' })
+    fireEvent.click(screen.getByRole('button', { name: 'Grant agent' }))
+    const dialog = screen.getByRole('dialog', { name: 'Grant agent access' })
+    fireEvent.click(within(dialog).getByRole('option', { name: /agent-alpha/ }))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Grant agent' }))
+
+    await waitFor(() =>
+      expect(api.updateAdminUserAgents).toHaveBeenCalledWith('user-1', ['agent-alpha'], [])
+    )
+    expect(api.updateAdminUserContexts).toHaveBeenCalledWith('user-1', ['ctx-alpha'])
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+  })
+
+  it('keeps the team agent chooser open with its selection when persistence fails', async () => {
+    vi.mocked(api.getAdminTeamContexts).mockResolvedValue({ teamId: 'team-1', contextIds: [] })
+    vi.mocked(api.getAdminTeamAgents).mockResolvedValue({
+      teamId: 'team-1',
+      agentNames: [],
+      deletedAgentNames: [],
+      deletedHistoryLimit: 10,
+    })
+    vi.mocked(api.updateAdminTeamAgents).mockRejectedValue(new Error('Agent grant failed'))
+    renderTeamDetails()
+
+    await screen.findByRole('button', { name: 'Add agent' })
+    fireEvent.click(screen.getByRole('button', { name: 'Add agent' }))
+    const dialog = screen.getByRole('dialog', { name: 'Add agent access' })
+    const option = within(dialog).getByRole('option', { name: /agent-alpha/ })
+    fireEvent.click(option)
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Add agent' }))
+
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('Agent grant failed')
+    expect(option).toHaveAttribute('aria-selected', 'true')
+    expect(screen.getByRole('dialog', { name: 'Add agent access' })).toBeInTheDocument()
+  })
+
   it('renders team agent loading skeleton rows as listitems', () => {
     vi.mocked(api.getAdminTeamAgents).mockReturnValue(new Promise(() => {}))
 

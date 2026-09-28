@@ -919,6 +919,7 @@ describe('codex subscription OAuth broker', () => {
       ok: false,
       catalogStatus: 'never_synced',
       reason: 'catalog_sync_failed',
+      persisted: false,
     })
   })
 
@@ -940,6 +941,7 @@ describe('codex subscription OAuth broker', () => {
       ok: false,
       catalogStatus: 'never_synced',
       reason: 'provider_unavailable',
+      persisted: false,
     })
   })
 })

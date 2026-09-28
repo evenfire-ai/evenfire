@@ -724,7 +724,7 @@ interface LLMProvider {
 - API key: `BAILIAN_API_KEY` / Secret key `bailian-api-key`
 - Implementation: same data-driven `openaiCompatible.ts` provider as ZAI
 
-**Provider selection**: Auto-detected from available API key (priority order: openai, claude, zai, bailian), or set explicitly via `CLERUM_MODEL_PROVIDER`.
+**Provider selection**: Auto-detected from available API key (priority order: openai, claude, zai, bailian), or set explicitly via `CLERUM_MODEL_PROVIDER`. `CLERUM_MODEL_NAME` applies only together with `CLERUM_MODEL_PROVIDER`; minikube setup refuses it alone, defaults to `openai/gpt-5.4-mini` when no key is set, and checks the pair against `llm_allowed_models` before applying the Host (see [LLM providers §4.7](../llm-providers/README.md#47-local-minikube-make-minikube-setup)).
 
 ### MCP Integration
 
@@ -817,27 +817,27 @@ The HTTP response is held open until the agent finishes processing. The response
 
 ### Configuration
 
-| Variable                              | Default          | Description                                                                                 |
-| ------------------------------------- | ---------------- | ------------------------------------------------------------------------------------------- |
-| `CLERUM_DEV_MODE`                     | `false`          | Enable dev mode                                                                             |
-| `CLERUM_HOST_NAME`                    | -                | Host CRD name (production, required)                                                        |
-| `CLERUM_NAMESPACE`                    | `"default"`      | Kubernetes namespace                                                                        |
-| `CLERUM_SERVER_PORT`                  | `8080`           | HTTP server port                                                                            |
-| `CLERUM_CONTEXT_MAPPER_URL`           | auto             | Context-mapper service URL                                                                  |
-| `CLERUM_CONTEXT_MAPPER_POLL_INTERVAL` | `30000`          | Poll interval (ms)                                                                          |
+| Variable                              | Default          | Description                                                                                                                                                            |
+| ------------------------------------- | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CLERUM_DEV_MODE`                     | `false`          | Enable dev mode                                                                                                                                                        |
+| `CLERUM_HOST_NAME`                    | -                | Host CRD name (production, required)                                                                                                                                   |
+| `CLERUM_NAMESPACE`                    | `"default"`      | Kubernetes namespace                                                                                                                                                   |
+| `CLERUM_SERVER_PORT`                  | `8080`           | HTTP server port                                                                                                                                                       |
+| `CLERUM_CONTEXT_MAPPER_URL`           | auto             | Context-mapper service URL                                                                                                                                             |
+| `CLERUM_CONTEXT_MAPPER_POLL_INTERVAL` | `30000`          | Poll interval (ms)                                                                                                                                                     |
 | `HCC_AUTHORITY_MAX_STALENESS_MS`      | `180000`         | Max retained HCC authority while HCC is unreachable (ms); operator-tunable, hard-capped at 600000; must be greater than the poll interval in cluster mode (issue #425) |
-| `CLERUM_MODEL_PROVIDER`               | auto-detected    | `"openai"`, `"claude"`, `"zai"`, or `"bailian"`                                             |
-| `CLERUM_MODEL_NAME`                   | provider default | Specific model name                                                                         |
-| `OPENAI_API_KEY`                      | -                | OpenAI key (dev mode)                                                                       |
-| `CLAUDE_API_KEY`                      | -                | Claude key (dev mode)                                                                       |
-| `ZAI_API_KEY`                         | -                | ZAI/z.ai key (dev mode)                                                                     |
-| `BAILIAN_API_KEY`                     | -                | Bailian/DashScope key (dev mode)                                                            |
-| `CLERUM_HOST_CONFIG`                  | -                | JSON host config (dev mode)                                                                 |
-| `CLERUM_MCP_SERVERS`                  | -                | JSON MCP server array (dev mode)                                                            |
-| `CLERUM_AGENT_TASK_DELAY`             | `3`            | Delay between tasks (ms)                                                                    |
-| `CLERUM_AGENT_MAX_TASK_DURATION`      | `86400000`         | Max active task duration, excluding approval waits (ms)                                                                      |
-| `CLERUM_AGENT_MAX_TOOL_CALLS`         | `1000`             | Max LLM/tool iterations per task, configured per Host process                                |
-| `CLERUM_AGENT_MAX_QUEUE_SIZE`         | `100`            | Max pending queue size                                                                      |
+| `CLERUM_MODEL_PROVIDER`               | auto-detected    | `"openai"`, `"claude"`, `"zai"`, or `"bailian"`                                                                                                                        |
+| `CLERUM_MODEL_NAME`                   | provider default | Specific model name; used only with `CLERUM_MODEL_PROVIDER`                                                                                                            |
+| `OPENAI_API_KEY`                      | -                | OpenAI key (dev mode)                                                                                                                                                  |
+| `CLAUDE_API_KEY`                      | -                | Claude key (dev mode)                                                                                                                                                  |
+| `ZAI_API_KEY`                         | -                | ZAI/z.ai key (dev mode)                                                                                                                                                |
+| `BAILIAN_API_KEY`                     | -                | Bailian/DashScope key (dev mode)                                                                                                                                       |
+| `CLERUM_HOST_CONFIG`                  | -                | JSON host config (dev mode)                                                                                                                                            |
+| `CLERUM_MCP_SERVERS`                  | -                | JSON MCP server array (dev mode)                                                                                                                                       |
+| `CLERUM_AGENT_TASK_DELAY`             | `3`              | Delay between tasks (ms)                                                                                                                                               |
+| `CLERUM_AGENT_MAX_TASK_DURATION`      | `86400000`       | Max active task duration, excluding approval waits (ms)                                                                                                                |
+| `CLERUM_AGENT_MAX_TOOL_CALLS`         | `1000`           | Max LLM/tool iterations per task, configured per Host process                                                                                                          |
+| `CLERUM_AGENT_MAX_QUEUE_SIZE`         | `100`            | Max pending queue size                                                                                                                                                 |
 
 ### Dependencies
 

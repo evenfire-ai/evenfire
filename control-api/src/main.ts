@@ -1,5 +1,5 @@
 import { config } from './config.js'
-import { assertDbReady, pool } from './db.js'
+import { assertDbReady, pool, rateLimitPool } from './db.js'
 import { K8sGateway } from './k8s.js'
 import { reconcileAllowedModelsConfigMapOnBoot } from './llmAllowedModelsBootReconcile.js'
 import { logRegistryConnectionState } from './registryBootGuard.js'
@@ -228,5 +228,6 @@ main().catch(error => {
   stopSubscriptionCatalogSyncCron()
   stopWorkflowApprovalTraceProjector()
   void pool.end()
+  void rateLimitPool.end()
   process.exit(1)
 })

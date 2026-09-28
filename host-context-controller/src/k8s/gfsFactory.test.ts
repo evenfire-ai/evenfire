@@ -39,6 +39,8 @@ const config: GfsFactoryConfig = {
   readerPgSecretKey: 'connection-string',
   driveName: 'main',
   tokenAudience: 'gfs-controller',
+  agentReadRlPerMinPerReplica: 300,
+  agentWriteRlPerMinPerReplica: 120,
 }
 
 function gfs(spec: GlobalFileSystemCRD['spec'] = {}): GlobalFileSystemCRD {
@@ -219,6 +221,30 @@ describe('gfsFactory writer Deployment', () => {
       if (role === 'writer') expect(byName('GFS_UPLOAD_V2_ENABLED')?.value).toBe('true')
       else expect(byName('GFS_UPLOAD_V2_ENABLED')).toBeUndefined()
     }
+  })
+
+  it('sets both agent rate-limit budgets from the operator config on every role', () => {
+    const configured = {
+      ...config,
+      agentReadRlPerMinPerReplica: 45,
+      agentWriteRlPerMinPerReplica: 7,
+    }
+    const roles = ['writer', 'reader'] as const
+    const seen: string[] = []
+    for (const role of roles) {
+      const env =
+        buildDeployment(gfs(), configured, role).spec?.template.spec?.containers[0].env ?? []
+      const byName = (name: string) => env.filter(item => item.name === name)
+      expect(byName('GFS_STORAGE_ROLE')[0]?.value).toBe(role)
+      expect(byName('GFS_AGENT_READ_RL_PER_MIN_PER_REPLICA')).toEqual([
+        { name: 'GFS_AGENT_READ_RL_PER_MIN_PER_REPLICA', value: '45' },
+      ])
+      expect(byName('GFS_AGENT_WRITE_RL_PER_MIN_PER_REPLICA')).toEqual([
+        { name: 'GFS_AGENT_WRITE_RL_PER_MIN_PER_REPLICA', value: '7' },
+      ])
+      seen.push(role)
+    }
+    expect(seen).toEqual(['writer', 'reader'])
   })
 
   it('runs non-root, drops all caps, read-only rootfs (reconciler owns securityContext)', () => {

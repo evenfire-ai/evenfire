@@ -1,0 +1,326 @@
+import { describe, expect, it } from 'vitest'
+import { prePrune } from '../core/extensions/prePrune'
+import { appendToolResults } from '../core/orchestration/toolUseLoopMessages'
+import type { Attachment, ChatMessage, PendingApproval, ToolResult } from '../core/types'
+import { projectGfsApproval } from './suspension'
+
+const source = {
+  kind: 'gfs' as const,
+  drive: 'main',
+  resourceId: 'a'.repeat(32),
+  gfsUri: `gfs://main/${'a'.repeat(32)}`,
+  version: 3,
+  name: 'neutral.png',
+}
+const image: Attachment = {
+  id: 'read-image',
+  kind: 'image',
+  mimeType: 'image/png',
+  encoding: 'base64',
+  // Projection/deduplication tests do not decode this synthetic payload.
+  dataBase64: 'image-payload-must-not-be-persisted',
+  visualSource: source,
+}
+const result = (id = 'read-1'): ToolResult => ({
+  tool_call_id: id,
+  name: 'clerum__gfs_read',
+  content: 'image prepared',
+  is_error: false,
+  attachments: [image],
+})
+
+describe('current-turn GFS image lifecycle', () => {
+  it('projects the GFS receipt and mixed visual carrier together on suspension', () => {
+    const gfs = {
+      ...result('read-gfs'),
+      content: JSON.stringify({
+        resource: source,
+        mimeType: 'image/png',
+        width: 2,
+        height: 2,
+        sizeBytes: 3,
+        delivery: 'image_input',
+      }),
+    }
+    const screenshot: ToolResult = {
+      tool_call_id: 'shot-1',
+      name: 'desktop_screenshot',
+      content: 'screenshot captured',
+      is_error: false,
+      attachments: [{ ...image, id: 'ordinary-shot', visualSource: undefined, dataBase64: 'QUJD' }],
+    }
+    const messages: ChatMessage[] = [
+      {
+        role: 'assistant',
+        content: '',
+        tool_calls: [
+          { id: 'read-gfs', name: 'clerum__gfs_read', arguments: {} },
+          { id: 'shot-1', name: 'desktop_screenshot', arguments: {} },
+        ],
+      },
+    ]
+    appendToolResults(messages, [gfs, screenshot], [])
+    const approval: PendingApproval = {
+      request_id: 'approval-mixed',
+      tool_name: 'shell_exec',
+      tool_call_id: 'pending-1',
+      description: 'pending operation',
+      parameters: { command: 'echo ready' },
+      context_snapshot: messages,
+    }
+
+    const projected = projectGfsApproval(approval)
+    const receipt = projected.context_snapshot.find(message => message.tool_call_id === 'read-gfs')!
+    const carrier = projected.context_snapshot.find(
+      message => message.imageOrigin === 'tool_result'
+    )!
+    const images = carrier.contentParts?.filter(part => part.type === 'image') ?? []
+
+    expect(JSON.parse(receipt.content)).toMatchObject({
+      delivery: 'reference_only',
+      reason: 'new_gfs_read_required_after_suspension',
+    })
+    expect(carrier.content).not.toContain('Images read by the tools above')
+    expect(carrier.content).toContain('new_gfs_read_required_after_suspension')
+    expect(images).toEqual([
+      expect.objectContaining({ data: 'QUJD', source: expect.objectContaining({ kind: 'tool' }) }),
+    ])
+    expect(JSON.stringify(projected)).not.toContain(image.dataBase64)
+    expect(projectGfsApproval(projected)).toEqual(projected)
+    expect(JSON.parse(gfs.content).delivery).toBe('image_input')
+  })
+
+  it('delivers a reread after the real historical-media pruning pass', () => {
+    const messages: ChatMessage[] = [
+      { role: 'user', content: 'inspect image' },
+      {
+        role: 'assistant',
+        content: '',
+        tool_calls: [{ id: 'read-1', name: 'clerum__gfs_read', arguments: {} }],
+      },
+    ]
+    appendToolResults(messages, [result()], [])
+    for (const content of ['follow-up one', 'follow-up two', 'read the image again'])
+      messages.push({ role: 'user', content })
+    const pruned = prePrune(messages)
+    expect(pruned.passesApplied).toContain('strip_media')
+    expect(pruned.messages.flatMap(m => m.contentParts ?? []).some(p => p.type === 'image')).toBe(
+      false
+    )
+    pruned.messages.push({
+      role: 'assistant',
+      content: '',
+      tool_calls: [{ id: 'read-again', name: 'clerum__gfs_read', arguments: {} }],
+    })
+    appendToolResults(pruned.messages, [result('read-again')], [])
+    const images = pruned.messages
+      .flatMap(m => m.contentParts ?? [])
+      .filter(p => p.type === 'image')
+    expect(images).toHaveLength(1)
+    expect(images[0].data).toBe(image.dataBase64)
+  })
+  it.each([true, false])(
+    'retains GFS for physical admission regardless of batch ordering (first=%s)',
+    first => {
+      const gfs = result()
+      const other: ToolResult = {
+        ...result('screenshots'),
+        name: 'screenshots',
+        attachments: [1, 2, 3].map(index => ({
+          ...image,
+          id: `screenshot-${index}`,
+          visualSource: undefined,
+          dataBase64: `screenshot-${index}`,
+        })),
+      }
+      const messages: ChatMessage[] = []
+      appendToolResults(messages, first ? [gfs, other] : [other, gfs], [])
+      const images = messages.flatMap(m => m.contentParts ?? []).filter(p => p.type === 'image')
+      expect(images).toHaveLength(4)
+      expect(images.filter(p => p.source?.kind === 'tool')).toHaveLength(3)
+      expect(images.filter(p => p.source?.kind === 'gfs')).toHaveLength(1)
+      expect(messages.find(m => m.tool_call_id === 'read-1')?.content).toBe('image prepared')
+      expect(gfs.attachments).toHaveLength(1)
+    }
+  )
+  it('reinserts a reread after the image leaves the context, without collecting it as a generated download', () => {
+    const messages: ChatMessage[] = []
+    const collected: Attachment[] = []
+    appendToolResults(messages, [result()], collected)
+    expect(
+      messages.flatMap(m => m.contentParts ?? []).filter(p => p.type === 'image')
+    ).toHaveLength(1)
+    expect(collected).toEqual([])
+    appendToolResults(messages, [result('read-2')], collected)
+    expect(
+      messages.flatMap(m => m.contentParts ?? []).filter(p => p.type === 'image')
+    ).toHaveLength(1)
+    for (const message of messages) delete message.contentParts
+    appendToolResults(messages, [result('read-3')], collected)
+    expect(
+      messages.flatMap(m => m.contentParts ?? []).filter(p => p.type === 'image')
+    ).toHaveLength(1)
+  })
+
+  it('does not promote images attached to a failed tool result', () => {
+    const messages: ChatMessage[] = []
+    const collected: Attachment[] = []
+    appendToolResults(messages, [{ ...result(), is_error: true }], collected)
+    expect(messages.some(m => m.contentParts?.some(p => p.type === 'image'))).toBe(false)
+    expect(collected).toEqual([])
+  })
+
+  it('preserves separate source/version associations for identical pixels', () => {
+    const messages: ChatMessage[] = []
+    appendToolResults(
+      messages,
+      [
+        result(),
+        {
+          ...result('read-other'),
+          attachments: [
+            { ...image, visualSource: { ...source, gfsUri: `gfs://main/${'b'.repeat(32)}` } },
+          ],
+        },
+      ],
+      []
+    )
+    const images = messages.flatMap(m => m.contentParts ?? []).filter(p => p.type === 'image')
+    expect(images).toHaveLength(2)
+  })
+
+  it('projects snapshots, completed results and lateral attachments without altering approval identity or pairings', () => {
+    const generated: Attachment = {
+      ...image,
+      id: 'existing-download',
+      kind: 'file',
+      mimeType: 'application/pdf',
+      dataBase64: 'existing-artifact',
+      visualSource: undefined,
+    }
+    const approval: PendingApproval = {
+      request_id: 'approval-1',
+      tool_name: 'shell_exec',
+      tool_call_id: 'pending-1',
+      description: 'pending operation',
+      parameters: { command: 'echo ready' },
+      context_snapshot: [
+        {
+          role: 'assistant',
+          content: '',
+          tool_calls: [{ id: 'read-1', name: 'clerum__gfs_read', arguments: {} }],
+        },
+        {
+          role: 'tool',
+          content: 'image prepared',
+          tool_call_id: 'read-1',
+          name: 'clerum__gfs_read',
+        },
+        {
+          role: 'user',
+          content: 'image',
+          contentParts: [{ type: 'image', mimeType: 'image/png', data: image.dataBase64, source }],
+        },
+      ],
+      completed_results: [result()],
+      attachments: [image, generated],
+      visualPayload: 'must-not-survive-projection',
+    } as PendingApproval & { visualPayload: string }
+    const projected = projectGfsApproval(approval)
+    expect(projected.parameters).toBe(approval.parameters)
+    expect(projected.request_id).toBe(approval.request_id)
+    expect(projected.tool_call_id).toBe(approval.tool_call_id)
+    expect(projected.context_snapshot.slice(0, 2)).toEqual(approval.context_snapshot.slice(0, 2))
+    expect(JSON.stringify(projected)).not.toContain(image.dataBase64)
+    expect(JSON.stringify(projected)).toContain('new_gfs_read_required_after_suspension')
+    expect(projected.attachments).toEqual([generated])
+    expect(projected.completed_results![0].tool_call_id).toBe('read-1')
+    expect(projectGfsApproval(projected)).toEqual(projected)
+    expect(approval.attachments).toHaveLength(2)
+    expect(projected).not.toHaveProperty('visualPayload')
+    // A later authorized read may produce another version; it must be new input.
+    appendToolResults(
+      projected.context_snapshot,
+      [
+        {
+          ...result('read-new'),
+          attachments: [{ ...image, visualSource: { ...source, version: 4 } }],
+        },
+      ],
+      []
+    )
+    const delivered = projected.context_snapshot
+      .flatMap(m => m.contentParts ?? [])
+      .filter(p => p.type === 'image')
+    expect(delivered).toHaveLength(1)
+    expect(delivered[0].source?.kind === 'gfs' ? delivered[0].source.version : undefined).toBe(4)
+  })
+
+  it('preserves non-GFS images while dropping unknown extra approval fields', () => {
+    const approval = {
+      request_id: 'approval-unsourced',
+      tool_name: 'shell_exec',
+      tool_call_id: 'pending-2',
+      description: 'pending operation',
+      parameters: { command: 'echo ready' },
+      context_snapshot: [
+        {
+          role: 'user',
+          content: 'image',
+          contentParts: [{ type: 'image', mimeType: 'image/png', data: image.dataBase64 }],
+        },
+      ],
+      completed_results: [
+        {
+          ...result('shot-1'),
+          name: 'screenshots',
+          attachments: [{ ...image, visualSource: undefined }],
+        },
+      ],
+      visualPayload: 'secret-pixels',
+    } as PendingApproval & { visualPayload: string }
+    const projected = projectGfsApproval(approval)
+    expect(JSON.stringify(projected)).toContain(image.dataBase64)
+    expect(JSON.stringify(projected)).not.toContain('secret-pixels')
+    expect(projected).not.toHaveProperty('visualPayload')
+    expect(projected.completed_results![0].attachments).toHaveLength(1)
+    expect(projected.context_snapshot[0].contentParts?.some(p => p.type === 'image')).toBe(true)
+  })
+
+  it('retains composer images when a GFS read in the same approval is projected', () => {
+    const composerImage = {
+      type: 'image' as const,
+      mimeType: 'image/png' as const,
+      data: 'Y29tcG9zZXI=',
+      source: { kind: 'attachment' as const, attachmentId: 'user-image', messageId: 'msg-1' },
+    }
+    const approval: PendingApproval = {
+      request_id: 'mixed-approval',
+      tool_name: 'shell_exec',
+      tool_call_id: 'pending-3',
+      description: 'pending operation',
+      parameters: {},
+      context_snapshot: [
+        {
+          role: 'user',
+          content: 'inspect',
+          contentParts: [{ type: 'text', text: 'inspect' }, composerImage],
+        },
+        {
+          role: 'user',
+          content: 'GFS read',
+          contentParts: [
+            { type: 'text', text: 'GFS read' },
+            { type: 'image', mimeType: 'image/png', data: image.dataBase64, source },
+          ],
+        },
+      ],
+      attachments: [image],
+    }
+
+    const projected = projectGfsApproval(approval)
+    expect(projected.context_snapshot[0].contentParts?.[1]).toEqual(composerImage)
+    expect(JSON.stringify(projected)).not.toContain(image.dataBase64)
+    expect(projected.attachments).toEqual([])
+  })
+})

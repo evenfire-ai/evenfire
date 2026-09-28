@@ -117,6 +117,7 @@ beforeEach(() => {
   cfg.registryUrl = 'https://example.com'
   rateLimiter.checkAndIncrement.mockResolvedValue({
     allowed: true,
+    backendAvailable: true,
     remaining: 9,
     resetMs: Date.now() + 60000,
   })
@@ -521,6 +522,7 @@ describe('registry connect flow', () => {
   it('GET 429s when the per-admin bucket is exceeded, without touching the registry', async () => {
     rateLimiter.checkAndIncrement.mockResolvedValue({
       allowed: false,
+      backendAvailable: true,
       remaining: 0,
       resetMs: Date.now() + 30000,
     })
@@ -558,6 +560,7 @@ describe('registry connect flow', () => {
     connDb.getRegistryConnection.mockResolvedValue(null)
     rateLimiter.checkAndIncrement.mockResolvedValue({
       allowed: false,
+      backendAvailable: true,
       remaining: 0,
       resetMs: Date.now() + 30000,
     })
@@ -1031,6 +1034,7 @@ describe('POST recover', () => {
     })
     rateLimiter.checkAndIncrement.mockResolvedValue({
       allowed: false,
+      backendAvailable: true,
       remaining: 0,
       resetMs: Date.now() + 30000,
     })
