@@ -20,6 +20,7 @@ import {
   acceptInvitationById,
   createSilentInvitationForTeams,
 } from '../src/services/directory/membership.js'
+import { retireDesktopUser } from '../src/services/directory/users.js'
 import './realPostgres.requirement.ts'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
@@ -497,6 +498,47 @@ describeRealPostgres('control admin replace-inviter invitations on real PostgreS
 
     expect(await teamRole(legacyTeam, accepted.data.userId)).toBe('admin')
     expect(await teamRole(inviterTeam, accepted.data.userId)).toBe('member')
+  })
+
+  it('never hands over the roles of an already retired same-email desktop user', async () => {
+    const inviter = await seedAdmin('retired-desk-ops')
+    const retiredDesktopId = await seedDesktopUser(inviter.email)
+    const team = await seedTeam('Retired desk')
+    await addTeamMember(team, retiredDesktopId, 'admin')
+    const retirer = await seedAdmin('retirer-ops')
+    await retireDesktopUser(
+      { kind: 'control_admin', controlAdminId: retirer.id },
+      retiredDesktopId,
+      'real-pg earlier retirement',
+      `earlier-${retiredDesktopId}`,
+      null,
+      { retainWithoutLinkHistory: true }
+    )
+    expect(await desktopLifecycle(retiredDesktopId)).toBe('retired')
+
+    const clientEmail = uniqueEmail('retired-desk-client')
+    const handover = await createControlAdminInvitation(clientEmail, inviter.id, {
+      replaceInviter: true,
+    })
+    if ('error' in handover) throw new Error(handover.error)
+    const clientDesktopInvitationId = await inviteDesktopAccess(clientEmail)
+    const completed = await completeControlAdminInvitation({
+      email: clientEmail,
+      invitationId: handover.id,
+      username: `retired-desk-${randomUUID().slice(0, 8)}`,
+      passwordHash: 'real-pg-replace-client',
+    })
+    if ('error' in completed) throw new Error(completed.error)
+    const accepted = await acceptInvitationById(clientEmail, clientDesktopInvitationId)
+    if ('error' in accepted) throw new Error(String(accepted.error))
+
+    expect(await adminStatus(inviter.id)).toBe('disabled')
+    expect(await teamRole(team, accepted.data.userId)).toBeUndefined()
+    const retirement = await testPool.query(
+      `SELECT retirement_reason FROM users WHERE id = $1::uuid`,
+      [retiredDesktopId]
+    )
+    expect(retirement.rows).toEqual([{ retirement_reason: 'real-pg earlier retirement' }])
   })
 
   it('refuses a hand-over that has nobody to receive the inviter team roles', async () => {
