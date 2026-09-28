@@ -304,6 +304,8 @@ run_t1() {
     t2_evidence_write T1 PASS "Real PostgreSQL suites executed with exact file identity and no skips; $T2_T1_COUNTS; duration=${t1_duration}s; orchestratorDuration=$((SECONDS - phase_started_seconds))s"
   else
     cat "$T2_T1_OUTPUT" >&2 || true
+    # Diagnostic persistence: keep the T1 output for inspection on failure.
+    cp "$T2_T1_OUTPUT" /private/tmp/t1-failure-diagnostic.out 2>&1 || true
     T2_T1_STATUS=FAIL
     t2_evidence_write T1 FAIL "Real PostgreSQL lane failed after $((SECONDS - phase_started_seconds))s"
     return 1
