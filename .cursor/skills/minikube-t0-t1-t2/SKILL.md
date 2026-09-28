@@ -162,6 +162,7 @@ T0=PASS|SKIPPED
 T1=PASS|SKIPPED
 T2=PASS
 NP08_HCC_AUTHORIZATION=PASS
+CONTROL_API_SECRET_READ_RBAC=PASS
 Health=PASS|NOT_RUN
 Playwright=PASS|NOT_RUN
 evidence=<path under .local-notes/infra/runs/>
@@ -192,8 +193,11 @@ recovery evidence.
 Failures print a stable code and a next safe command. Repair the FIRST
 reported precondition on the same HEAD. While debugging T1, use the standalone
 Real PostgreSQL target; finish with one full certification run. If T0/T1 lane
-evidence is already green and NP08, health, or Playwright fails, retry with
-`minikube-t2-runtime` on the same profile instead of repeating T0/T1. NP08 may
+evidence is already green and NP08, the control-api Secret read RBAC journey,
+health, or Playwright fails, retry with `minikube-t2-runtime` on the same
+profile instead of repeating T0/T1. If that journey printed
+`CONTROL_API_SECRET_READ_RBAC_ROLE_RESTORE_FAILED`, re-apply
+`deploy/base/mcp-host/rbac.yaml` on the profile context first. NP08 may
 observe a newer same-binding access token but must never refresh/reissue or
 consume the Host refresh-token lineage.
 Do not widen the command, switch clusters, reset PVCs, or delete locks with a

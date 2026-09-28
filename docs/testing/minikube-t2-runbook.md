@@ -82,7 +82,8 @@ terminated pods and the Health/Playwright journeys fail against it. Run
 `T2_PORT_FORWARD_COMMAND='MINIKUBE_PROFILE=<owned-profile> make -f .local-notes/minikube-profiles/branch.mk branch-profile-pf'`.
 T2 runs that command from its own working directory, so in a worktree without
 a local `.local-notes/` pass the absolute path of the main checkout's
-`branch.mk`. T2 runs it once, after NP-08 and before Health, only when
+`branch.mk`. T2 runs it once, after NP-08 and the control-api Secret read
+RBAC journey and before Health, only when
 `pre-gate-sync` ran in this invocation, and records `PortForwards=PASS`,
 `SKIPPED` (already synced), `NOT_RUN` (no registered hold and no command) or
 `FAIL` (`PORT_FORWARD_CONFLICT`: the command failed, or a registered hold
@@ -384,6 +385,37 @@ CI, static tests, T1, T2, Playwright, and product E2E scripts are separate
 evidence lanes. A green CI job or unit suite is not proof of T2 runtime
 behavior. A `T2_PREFLIGHT_PASS` line from the planner is not a T2 verdict.
 
+## control-api Secret read under revoked RBAC
+
+`scripts/e2e/e2e-control-api-secret-read-rbac.sh` runs right after NP-08. It
+removes only the `get` verb on Secrets from the `control-api-hosts-and-secrets`
+Role in `mcp-host` (a JSON patch guarded by `test` operations on the snapshot),
+waits until `kubectl auth can-i` as the control-api ServiceAccount answers
+`no`, and calls the merge and full-replace `PUT /api/v1/admin/secrets` paths
+and `POST /api/v1/admin/hosts` with a `secretRef`. Each must answer 502
+`secret_read_failed` with control-api's own message, with no ServiceAccount
+identity or apiserver headers, and without writing. The Role is then restored,
+its rules must equal the snapshot, and the same merge must answer 200.
+Requests run inside the control-api pod through
+`scripts/e2e/_lib/control-api-secret-read-runtime.mjs`, with the admin
+password and session cookie on stdin only.
+
+The phase runs under `scripts/minikube/run-with-deadline.mjs` (300 s timeout,
+120 s kill grace). On timeout or failure the journey's exit trap restores the
+Role and deletes the fixture Secret and Host. The restore is idempotent: it
+patches only while the rule holds the revoked verbs, only verifies when the
+original verbs are back, and refuses any other state. When the restore fails,
+the log prints `CONTROL_API_SECRET_READ_RBAC_ROLE_RESTORE_FAILED` and the T2
+next command says to re-apply `deploy/base/mcp-host/rbac.yaml` on the profile
+context and then run `make minikube-t2-runtime`. That file is the only
+definition of the Role; no overlay patches it.
+
+On the control-api side each rejected read is logged once by the global error
+handler as a `forwarded_integration_error` warn line carrying the response's
+`correlationId`, `upstreamStatus` (403 here) and `upstreamReason` (the
+apiserver's `metav1.Status` message). The response body carries only
+control-api's own message.
+
 ## NP-08 security evidence gates
 
 The NP-08 runtime conformance helpers are intentionally branch-owned, local
@@ -439,7 +471,8 @@ GHCR modes, even when the recorded gitHead is unchanged.
 Retry by phase. During a T1 failure, iterate with
 `minikube-t2-real-postgres`, then run one full `minikube-t2` certification once
 green. After exact-head T0/T1 lane evidence is already `PASS`, a failure in
-NP08, a user-facing health check, or Playwright is repaired and retried with
+NP08, the control-api Secret read RBAC journey, a user-facing health check, or
+Playwright is repaired and retried with
 `minikube-t2-runtime` on the same profile/context; repeating T0/T1 adds cost
 without new evidence. A bootstrap, marker, infrastructure, or final-preflight
 failure still uses the full target.

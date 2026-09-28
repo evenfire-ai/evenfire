@@ -10,6 +10,11 @@ import { memberRegistrationErrorResponse } from '../services/memberRegistrationE
 export const FORWARDABLE_INTEGRATION_CODES = new Set([
   'registry_unavailable',
   'registry_integration_error',
+  // SecretReadError / WorkflowRecipeListError (services/secretRead.ts):
+  // control-api's own apiserver read was rejected (502) or failed (503); the
+  // message is built from the resource name, namespace and status only.
+  'secret_read_failed',
+  'workflow_recipe_list_failed',
 ])
 
 // Stable machine-readable codes added to a forwarded 4xx body. Internal
@@ -144,7 +149,8 @@ function safeErrorLogStack(err: unknown): string | undefined {
  *   - any error carrying a 4xx status (via `.status` / `.statusCode` / `.code` /
  *     `.response.*`) is FORWARDED with a sanitized message — this is FIX-B: raw
  *     K8s 400/403/404/409/422 no longer collapse to 500;
- *   - allowlisted registry-integration 502/503 codes are forwarded verbatim;
+ *   - allowlisted integration 502/503 codes (registry, Secret read,
+ *     WorkflowRecipe list) are forwarded verbatim;
  *   - everything else (5xx, status-less, non-Error throws) → 500, unchanged.
  */
 export function clerumErrorHandler(
@@ -206,10 +212,11 @@ export function clerumErrorHandler(
     return
   }
 
-  // Allowlisted registry-integration errors carry a safe code + message we set
-  // ourselves (RegistryUnavailableError → 503; the 401 remap → 502). Forward
-  // them so the marketplace shows a clear message instead of a raw 500. The
-  // message is safe because only our own constructors set these codes.
+  // Allowlisted integration errors carry a safe code + message we set ourselves
+  // (RegistryUnavailableError → 503; the registry 401 remap → 502;
+  // SecretReadError / WorkflowRecipeListError → 502/503). Forward them so the
+  // UI shows a clear message instead of a raw 500. The message is safe because
+  // only our own constructors set these codes.
   const integrationCode = (err as { code?: unknown }).code
   const integrationStatus = (err as { status?: unknown }).status
   if (
@@ -218,19 +225,29 @@ export function clerumErrorHandler(
     typeof integrationCode === 'string' &&
     FORWARDABLE_INTEGRATION_CODES.has(integrationCode)
   ) {
+    // The apiserver read errors carry the upstream status and a log-safe reason
+    // (metav1.Status message or errno code, never headers); log them with the
+    // correlation id so one line explains the forwarded 502/503.
+    const upstream = err as { upstreamStatus?: unknown; upstreamReason?: unknown }
     log.warn(
       {
-        event: 'forwarded_registry_integration_error',
+        event: 'forwarded_integration_error',
         correlationId,
         status: integrationStatus,
         code: integrationCode,
         err: safeErrorLogMessage(err),
+        ...(upstream.upstreamStatus !== undefined
+          ? { upstreamStatus: upstream.upstreamStatus }
+          : {}),
+        ...(upstream.upstreamReason !== undefined
+          ? { upstreamReason: upstream.upstreamReason }
+          : {}),
       },
-      'forwarded registry integration error'
+      'forwarded integration error'
     )
     res.status(integrationStatus).json({
       error: integrationCode,
-      message: err instanceof Error ? err.message : 'Registry integration error',
+      message: err instanceof Error ? err.message : 'Integration error',
       correlationId,
     })
     return

@@ -29,6 +29,7 @@ import {
   releaseMcpSecretRollbackPermitClaim,
 } from '../../services/mcpSecretRollbackPermitService.js'
 import { invalidSecretDataKeyReason } from '../../services/secretKeys.js'
+import { listWorkflowRecipes, readSecretOrNull } from '../../services/secretRead.js'
 import { findSecretReferenceState } from '../../services/secretReferenceService.js'
 import {
   RECIPE_SECRET_LABEL_KEY,
@@ -244,11 +245,16 @@ async function findFallbackCredentialReferences(
 }
 
 function auditErrorFields(err: unknown): { name: string; message: string } {
+  const name = err instanceof Error ? err.name : typeof err
   const k8sErr = extractK8sError(err)
-  return {
-    name: err instanceof Error ? err.name : typeof err,
-    message: k8sErr?.message ?? (err instanceof Error ? err.message : String(err)),
+  if (!k8sErr) return { name, message: err instanceof Error ? err.message : String(err) }
+  // extractK8sError falls back to `err.message` when the metav1.Status body is
+  // empty, and a raw ApiException `.message` embeds every apiserver response
+  // header; log the status alone in that case.
+  if (err instanceof Error && k8sErr.message === err.message) {
+    return { name, message: `HTTP ${k8sErr.status}` }
   }
+  return { name, message: k8sErr.message }
 }
 
 function secretWriteKeys(body: unknown): Set<string> {
@@ -385,9 +391,13 @@ export function createAdminSecretsRouter(
           res.status(400).json({ error: 'name is required' })
           return
         }
-        const existing = (await gateway
-          .getSecret(name.trim(), config.secretsNamespace)
-          .catch(() => null)) as {
+        // Only a 404 means "no such Secret"; any other read failure throws a
+        // SecretReadError instead of a false "Secret not found".
+        const existing = (await readSecretOrNull(
+          gateway,
+          name.trim(),
+          config.secretsNamespace
+        )) as {
           data?: Record<string, string>
           stringData?: Record<string, string>
           metadata?: { labels?: Record<string, string> }
@@ -501,14 +511,11 @@ export function createAdminSecretsRouter(
       const replaceName = (req.body as { name?: unknown }).name
       let existingReplace: SecretSnapshot | null = null
       if (typeof replaceName === 'string' && replaceName.trim()) {
-        try {
-          existingReplace = (await gateway.getSecret(
-            replaceName.trim(),
-            config.secretsNamespace
-          )) as SecretSnapshot
-        } catch (err) {
-          if (extractHttpStatus(err) !== 404) throw err
-        }
+        existingReplace = (await readSecretOrNull(
+          gateway,
+          replaceName.trim(),
+          config.secretsNamespace
+        )) as SecretSnapshot | null
       }
       const existingReplaceLabels = existingReplace?.metadata?.labels
       const bodyLabels = (req.body as { labels?: Record<string, string> }).labels
@@ -815,7 +822,11 @@ export function createAdminSecretsRouter(
       // Rotation targets a Secret that already exists — creating one is POST's
       // job. Read it first so a missing Secret is a 404 instead of a silent
       // upsert, and so the ownership guard below sees the stored labels.
-      let existing: {
+      // A 401/403 (control-api's Role lacks the verb), any other non-404 HTTP
+      // status, and a failed connection throw a SecretReadError. Answering 404
+      // for them would tell the operator the credential does not exist when the
+      // API server refused or failed the read.
+      const existing = (await readSecretOrNull(gateway, name, targetNs)) as {
         metadata?: {
           labels?: Record<string, string>
           annotations?: Record<string, string>
@@ -823,18 +834,10 @@ export function createAdminSecretsRouter(
           resourceVersion?: string
         }
         data?: Record<string, string>
-      }
-      try {
-        existing = (await gateway.getSecret(name, targetNs)) as typeof existing
-      } catch (err) {
-        if (extractHttpStatus(err) === 404) {
-          res.status(404).json({ error: `Secret "${name}" not found in ${targetNs}` })
-          return
-        }
-        // 403 (Role missing the verb), 5xx, timeouts: propagate. Dressing them
-        // up as 404 would tell the operator "no such credential" when the truth
-        // is that the API server refused the read.
-        throw err
+      } | null
+      if (!existing) {
+        res.status(404).json({ error: `Secret "${name}" not found in ${targetNs}` })
+        return
       }
 
       // `mcp-server` is a shared namespace: WorkflowRecipe Secrets live here too
@@ -900,10 +903,9 @@ export function createAdminSecretsRouter(
             event: 'mcp-secret-rotated-affected-connectors-unavailable',
             name,
             namespace: targetNs,
-            err: {
-              name: err instanceof Error ? err.name : typeof err,
-              message: err instanceof Error ? err.message : String(err),
-            },
+            // auditErrorFields logs the metav1.Status message (or the status
+            // alone), never the raw ApiException `.message` and its headers.
+            err: auditErrorFields(err),
           },
           'Affected connectors unavailable after MCP Secret rotation'
         )
@@ -1039,17 +1041,19 @@ export function createAdminSecretsRouter(
           return
         }
       }
+      // A 404 is the only "absent": anything else throws a SecretReadError
+      // (502 for 401/403, 503 otherwise) after the claim is released, so the
+      // permit stays usable for the caller's retry.
       let existing: {
         metadata?: { labels?: Record<string, string>; uid?: string; resourceVersion?: string }
       } | null
       try {
-        existing = (await gateway.getSecret(name, config.mcpServersNamespace)) as typeof existing
+        existing = (await readSecretOrNull(
+          gateway,
+          name,
+          config.mcpServersNamespace
+        )) as typeof existing
       } catch (err) {
-        if (extractHttpStatus(err) === 404) {
-          await settleRollbackClaim('finalize')
-          res.status(404).json({ error: `Secret "${name}" not found` })
-          return
-        }
         await settleRollbackClaim('release')
         throw err
       }
@@ -1241,43 +1245,25 @@ export function createAdminSecretsRouter(
     }
   }
 
+  // A list failure throws WorkflowRecipeListError (502/503): answering
+  // "exists" on a 403/5xx would let a Secret claim a WorkflowRecipe that does
+  // not exist, and a recipe created later under that name would then pass the
+  // reconciler's ownership check.
   async function recipeExists(recipeName: string): Promise<boolean> {
-    try {
-      const items = (await gateway.listResource(
-        'workflowrecipes',
-        config.sandboxNamespace
-      )) as Array<{ metadata?: { name?: string } }>
-      return items.some(r => r.metadata?.name === recipeName)
-    } catch (err) {
-      // The ownership claim cannot be validated when the source of truth is
-      // unavailable. Fail closed before creating a Secret rather than treating
-      // an apiserver failure as proof that the recipe exists.
-      throw err
-    }
+    const items = (await listWorkflowRecipes(gateway, config.sandboxNamespace)) as Array<{
+      metadata?: { name?: string }
+    }>
+    return items.some(r => r.metadata?.name === recipeName)
   }
 
-  /**
-   * Read a Secret for an identity-fenced mutation, mapping ONLY a 404 to
-   * `null`. Every other read failure (403, 5xx, timeout) propagates: the
-   * recipe-secret PUT/DELETE fence compares the live UID/RV against the
-   * caller's, and collapsing an apiserver outage into "not found" would tell
-   * the operator the Secret is gone while it still exists — the same false
-   * proof `recipeExists` used to hand out before this PR made it fail closed.
-   */
-  async function readSecretOrNotFound(name: string, namespace: string): Promise<unknown | null> {
-    try {
-      return await gateway.getSecret(name, namespace)
-    } catch (err) {
-      if (extractHttpStatus(err) === 404) return null
-      throw err
-    }
-  }
-
+  // Only a 404 means "no recipe Secret". The recipe-secret PUT/DELETE fence
+  // compares the live UID/RV against the caller's, so any other read failure
+  // throws a SecretReadError instead of reporting the Secret as gone.
   async function getRecipeSecret(
     name: string,
     namespace = config.sandboxNamespace
   ): Promise<Record<string, unknown> | null> {
-    const existing = await readSecretOrNotFound(name, namespace)
+    const existing = await readSecretOrNull(gateway, name, namespace)
     if (!existing) return null
     const labels = ((existing as { metadata?: { labels?: Record<string, string> } }).metadata
       ?.labels || {}) as Record<string, string>
@@ -1461,7 +1447,7 @@ export function createAdminSecretsRouter(
       // Guardrail: refuse to mutate a workflow Secret that isn't a recipe
       // secret. Without this, the name alone could target coordinator tokens or
       // mcp-host/runtime auth Secrets that share an allowed namespace.
-      const existing = (await readSecretOrNotFound(name.trim(), targetNamespace)) as {
+      const existing = (await readSecretOrNull(gateway, name.trim(), targetNamespace)) as {
         metadata?: {
           labels?: Record<string, string>
           uid?: string

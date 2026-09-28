@@ -30,6 +30,7 @@ T2_T0_STATUS=NOT_RUN
 T2_T1_STATUS=NOT_RUN
 T2_T2_STATUS=NOT_RUN
 T2_NP08_HCC_AUTHORIZATION_STATUS=NOT_RUN
+T2_CONTROL_API_SECRET_READ_RBAC_STATUS=NOT_RUN
 T2_HEALTH_STATUS=NOT_RUN
 T2_PLAYWRIGHT_STATUS=NOT_RUN
 T2_PORT_FORWARD_STATUS=NOT_RUN
@@ -364,6 +365,61 @@ run_np08_hcc_authorization() {
   t2_fail NP08_HCC_AUTHORIZATION_FAILED 'deployed Host-to-HCC authorization journey failed'
 }
 
+# The journey revokes an RBAC verb on a live Role, so it runs under the
+# repository deadline runner: on timeout the runner sends SIGTERM to the
+# journey's process group, the journey's EXIT trap restores the Role and
+# deletes its fixtures, and SIGKILL follows only after the kill grace, which
+# covers the trap's bounded can-i wait (30 attempts) plus the fixture deletes.
+T2_SECRET_READ_RBAC_TIMEOUT_SECONDS=300
+T2_SECRET_READ_RBAC_KILL_GRACE_SECONDS=120
+
+run_control_api_secret_read_rbac() {
+  local log_file phase_started_seconds="$SECONDS" journey_status=0
+  log_file="$T2_EVIDENCE_DIR/logs/control-api-secret-read-rbac.log"
+  printf '[minikube-t2] control-api Secret read under revoked RBAC journey\n'
+  if ! command -v node >/dev/null 2>&1 || [ ! -f "$T2_DEADLINE_RUNNER" ]; then
+    T2_CONTROL_API_SECRET_READ_RBAC_STATUS=FAIL
+    T2_NEXT_COMMAND='restore Node.js and scripts/minikube/run-with-deadline.mjs, then re-run T2'
+    t2_fail LOCAL_DEPENDENCY_MISSING \
+      'the control-api Secret read RBAC journey requires the repository deadline runner'
+    return 1
+  fi
+  MINIKUBE_PROFILE="$T2_PROFILE" CLERUM_PROFILE_PORTS_ENV="$T2_PORTS_ENV" \
+    node "$T2_DEADLINE_RUNNER" \
+      --timeout-seconds "$T2_SECRET_READ_RBAC_TIMEOUT_SECONDS" \
+      --heartbeat-seconds 20 --kill-grace-seconds "$T2_SECRET_READ_RBAC_KILL_GRACE_SECONDS" \
+      --label t2-control-api-secret-read-rbac -- \
+      bash "$T2_PROJECT_DIR/scripts/e2e/e2e-control-api-secret-read-rbac.sh" \
+        --context "$T2_CONTEXT" >"$log_file" 2>&1 || journey_status=$?
+  if [ "$journey_status" -eq 0 ]; then
+    cat "$log_file"
+    T2_CONTROL_API_SECRET_READ_RBAC_STATUS=PASS
+    t2_evidence_write CONTROL_API_SECRET_READ_RBAC PASS \
+      "merge, full-replace, and Host secretRef reads answered 502 secret_read_failed without writing; Role restored and control merge answered 200; duration=$((SECONDS - phase_started_seconds))s"
+    return 0
+  fi
+
+  cat "$log_file" >&2 || true
+  T2_CONTROL_API_SECRET_READ_RBAC_STATUS=FAIL
+  t2_evidence_write CONTROL_API_SECRET_READ_RBAC FAIL \
+    "control-api Secret read under revoked RBAC journey failed; exit=$journey_status duration=$((SECONDS - phase_started_seconds))s; see the secret-safe local log"
+  T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE CONTROL_API_REAL_PG_CONTEXT=$T2_CONTEXT make minikube-t2-runtime"
+  if grep -Fq 'CONTROL_API_SECRET_READ_RBAC_ROLE_RESTORE_FAILED' "$log_file"; then
+    # The Role may still lack `get` on Secrets. The pre-gate marker already
+    # matches this HEAD, so a re-run plans no sync and applies no manifests.
+    # rbac.yaml is the only definition of that Role (no overlay patches it),
+    # so applying it restores the canonical rules.
+    T2_NEXT_COMMAND="re-apply deploy/base/mcp-host/rbac.yaml (Role control-api-hosts-and-secrets) on context $T2_CONTEXT, then run MINIKUBE_PROFILE=$T2_PROFILE CONTROL_API_REAL_PG_CONTEXT=$T2_CONTEXT make minikube-t2-runtime"
+  fi
+  if [ "$journey_status" -eq 124 ]; then
+    t2_fail CONTROL_API_SECRET_READ_RBAC_FAILED \
+      "control-api Secret read under revoked RBAC journey exceeded ${T2_SECRET_READ_RBAC_TIMEOUT_SECONDS}s"
+  else
+    t2_fail CONTROL_API_SECRET_READ_RBAC_FAILED \
+      "control-api Secret read under revoked RBAC journey failed with exit $journey_status"
+  fi
+}
+
 validate_healthcheck_contract() {
   T2_HEALTHCHECK_REQUIRED=false
   if ! [[ "$T2_HEALTHCHECK_KILL_GRACE_SECONDS" =~ ^[1-9][0-9]*$ ]] || \
@@ -588,6 +644,7 @@ main() {
   fi
   run_final_preflight
   run_np08_hcc_authorization
+  run_control_api_secret_read_rbac
   refresh_port_forwards_if_requested
   run_healthcheck_if_requested
   run_playwright_if_requested
@@ -602,12 +659,13 @@ main() {
     return 1
   fi
 
-  t2_evidence_write complete PASS "T0=$T2_T0_STATUS T1=$T2_T1_STATUS T2=$T2_T2_STATUS NP08_HCC_AUTHORIZATION=$T2_NP08_HCC_AUTHORIZATION_STATUS PortForwards=$T2_PORT_FORWARD_STATUS Health=$T2_HEALTH_STATUS Playwright=$T2_PLAYWRIGHT_STATUS"
+  t2_evidence_write complete PASS "T0=$T2_T0_STATUS T1=$T2_T1_STATUS T2=$T2_T2_STATUS NP08_HCC_AUTHORIZATION=$T2_NP08_HCC_AUTHORIZATION_STATUS CONTROL_API_SECRET_READ_RBAC=$T2_CONTROL_API_SECRET_READ_RBAC_STATUS PortForwards=$T2_PORT_FORWARD_STATUS Health=$T2_HEALTH_STATUS Playwright=$T2_PLAYWRIGHT_STATUS"
   printf 'MINIKUBE_T2_PASS\n'
   printf 'T0=%s\n' "$T2_T0_STATUS"
   printf 'T1=%s\n' "$T2_T1_STATUS"
   printf 'T2=%s\n' "$T2_T2_STATUS"
   printf 'NP08_HCC_AUTHORIZATION=%s\n' "$T2_NP08_HCC_AUTHORIZATION_STATUS"
+  printf 'CONTROL_API_SECRET_READ_RBAC=%s\n' "$T2_CONTROL_API_SECRET_READ_RBAC_STATUS"
   printf 'PortForwards=%s\n' "$T2_PORT_FORWARD_STATUS"
   printf 'Health=%s\n' "$T2_HEALTH_STATUS"
   printf 'Playwright=%s\n' "$T2_PLAYWRIGHT_STATUS"

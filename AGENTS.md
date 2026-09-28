@@ -224,8 +224,10 @@ Postgres 16, never the shared `control-postgres`.
 NP08 observes the existing Host access-token lineage and may reread a newer,
 same-binding persisted access token. It must never consume a refresh token,
 call refresh/reissue, or weaken single-use rotation. After T0/T1 have emitted
-an exact-head lane attestation, failures in NP08, a user-facing health check, or
-Playwright retry through `minikube-t2-runtime`; T1 failures may use the
+an exact-head lane attestation, failures in NP08, the control-api Secret read
+RBAC journey, a user-facing health check, or Playwright retry through
+`minikube-t2-runtime` (after a `CONTROL_API_SECRET_READ_RBAC_ROLE_RESTORE_FAILED`
+line, re-apply `deploy/base/mcp-host/rbac.yaml` first); T1 failures may use the
 standalone Real PostgreSQL target while iterating, followed by one full
 certification run once green.
 

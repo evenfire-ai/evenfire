@@ -20,6 +20,7 @@ set -u
 for file in "$MINIKUBE_DIR/profile-readiness.sh" "$ROOT/scripts/tests/test-minikube-profile-readiness.sh" "$COMMON" "$PREFLIGHT" "$T2" "$T1" "$T0" \
   "$ROOT/scripts/e2e/real-postgres-local-preflight.sh" \
   "$ROOT/scripts/e2e/e2e-np08-hcc-authorization.sh" \
+  "$ROOT/scripts/e2e/e2e-control-api-secret-read-rbac.sh" \
   "$ROOT/scripts/minikube/settle-gfs-reader-rollout.sh" \
   "$ROOT/scripts/minikube/wait-gfs-reader-ready.sh" \
   "$ROOT/scripts/minikube/gfs-rollout-shim/kubectl" \
@@ -99,7 +100,7 @@ for identity_file in "$COMMON" "$ROOT/scripts/minikube/sync-auth-key.sh" "$ROOT/
 done
 grep -Fq 'bash "$T2_PROJECT_DIR/scripts/tests/test-minikube-t2-contract.sh"' "$T2"
 
-required_codes="DEVELOPMENT_SCOPE_REQUIRED PROFILE_OWNERSHIP_MISMATCH PROFILE_BUSY PROFILE_LOCK_REQUIRED HEAD_MARKER_MISMATCH IMAGE_MANIFEST_MISMATCH BOOTSTRAP_REQUIRED CERTIFICATION_REQUIRED SECRET_MISSING CONFIGMAP_MISSING POSTGRES_NOT_READY REAL_PG_REQUIRED_BUT_UNAVAILABLE REAL_PG_SUITE_FAILED REAL_PG_REPORT_INCOMPLETE UNSUPPORTED_T1_CONCURRENCY ZERO_TESTS_EXECUTED PORT_FORWARD_CONFLICT NP08_HCC_AUTHORIZATION_FAILED PLAYWRIGHT_FAILED"
+required_codes="DEVELOPMENT_SCOPE_REQUIRED PROFILE_OWNERSHIP_MISMATCH PROFILE_BUSY PROFILE_LOCK_REQUIRED HEAD_MARKER_MISMATCH IMAGE_MANIFEST_MISMATCH BOOTSTRAP_REQUIRED CERTIFICATION_REQUIRED SECRET_MISSING CONFIGMAP_MISSING POSTGRES_NOT_READY REAL_PG_REQUIRED_BUT_UNAVAILABLE REAL_PG_SUITE_FAILED REAL_PG_REPORT_INCOMPLETE UNSUPPORTED_T1_CONCURRENCY ZERO_TESTS_EXECUTED PORT_FORWARD_CONFLICT NP08_HCC_AUTHORIZATION_FAILED CONTROL_API_SECRET_READ_RBAC_FAILED PLAYWRIGHT_FAILED"
 for code in $required_codes; do
   grep -Fq "$code" "$COMMON" "$PREFLIGHT" "$T2" "$T1" "$T1_LOCAL_PREFLIGHT"
 done
@@ -179,7 +180,8 @@ if [[ -z "$full_setup_lock_line" || -z "$full_setup_status_line" || "$full_setup
 fi
 for timed_phase in 't2_evidence_write planner PASS' 't2_evidence_write transition PASS' \
   't2_evidence_write pre-gate-sync PASS' 't2_evidence_write T1 PASS' \
-  't2_evidence_write T2 PASS' 't2_evidence_write NP08_HCC_AUTHORIZATION PASS'; do
+  't2_evidence_write T2 PASS' 't2_evidence_write NP08_HCC_AUTHORIZATION PASS' \
+  't2_evidence_write CONTROL_API_SECRET_READ_RBAC PASS'; do
   grep -Fq "$timed_phase" "$T2"
 done
 grep -Fq 'duration=' "$T2"
@@ -334,6 +336,39 @@ grep -Fq 'run_np08_hcc_authorization' "$T2"
 grep -Fq "CLERUM_PROFILE_PORTS_ENV=\"\$T2_PORTS_ENV\"" "$T2"
 grep -Fq 'NP08_HCC_AUTHORIZATION PASS' "$T2"
 grep -Fq "NP08_HCC_AUTHORIZATION=\$T2_NP08_HCC_AUTHORIZATION_STATUS" "$T2"
+grep -Fq 'T2_CONTROL_API_SECRET_READ_RBAC_STATUS=NOT_RUN' "$T2"
+grep -Fq 'scripts/e2e/e2e-control-api-secret-read-rbac.sh' "$T2"
+grep -Fq "CONTROL_API_SECRET_READ_RBAC=\$T2_CONTROL_API_SECRET_READ_RBAC_STATUS" "$T2"
+# The journey mutates a live Role, so it runs under the deadline runner with a
+# kill grace that leaves its EXIT trap time to restore the Role.
+grep -Fq -- '--label t2-control-api-secret-read-rbac' "$T2"
+grep -Fq 'T2_SECRET_READ_RBAC_TIMEOUT_SECONDS=300' "$T2"
+grep -Fq 'T2_SECRET_READ_RBAC_KILL_GRACE_SECONDS=120' "$T2"
+# A failed Role restore must name the manifest that repairs it, both in the
+# journey's own output and in the T2 next command.
+grep -Fq 'CONTROL_API_SECRET_READ_RBAC_ROLE_RESTORE_FAILED' "$T2"
+grep -Fq 'CONTROL_API_SECRET_READ_RBAC_ROLE_RESTORE_FAILED' "$ROOT/scripts/e2e/e2e-control-api-secret-read-rbac.sh"
+grep -Fxq "trap 'exit 143' TERM" "$ROOT/scripts/e2e/e2e-control-api-secret-read-rbac.sh"
+grep -Fxq "trap 'exit 130' INT" "$ROOT/scripts/e2e/e2e-control-api-secret-read-rbac.sh"
+grep -Fq 're-apply deploy/base/mcp-host/rbac.yaml (Role control-api-hosts-and-secrets) on context' "$T2"
+[[ -f "$ROOT/deploy/base/mcp-host/rbac.yaml" ]] || {
+  echo 'FAIL: deploy/base/mcp-host/rbac.yaml, named by the Role restore next command, is missing' >&2
+  exit 1
+}
+# The last exact-head preflight must come after the journey, so the T2 verdict
+# is issued on the runtime the journey left behind. That preflight checks the
+# marker, images, and readiness, not the Role; the journey itself verifies the
+# restored Role against its pre-E2E snapshot.
+if ! secret_read_rbac_call_line="$(grep -n '^  run_control_api_secret_read_rbac$' "$T2")"; then
+  echo 'FAIL: t2.sh never calls run_control_api_secret_read_rbac' >&2
+  exit 1
+fi
+secret_read_rbac_call_line="${secret_read_rbac_call_line%%:*}"
+last_final_preflight_line="$(grep -n '^  run_final_preflight$' "$T2" | tail -n 1 | cut -d: -f1)"
+if [[ -z "$last_final_preflight_line" || "$secret_read_rbac_call_line" -ge "$last_final_preflight_line" ]]; then
+  echo 'FAIL: the control-api Secret read RBAC journey does not run before the final runtime preflight' >&2
+  exit 1
+fi
 grep -Fq 'already-synced' "$T2" "$COMMON"
 grep -Fq 'T2_LOCK_TOKEN="$T2_LOCK_TOKEN"' "$T2"
 grep -Fq 'T2_PLAN_MODE=true T2_PLAN_FILE' "$T2"
@@ -716,4 +751,6 @@ bash "$ROOT/scripts/tests/test-minikube-build-section-headers.sh"
 bash "$ROOT/scripts/tests/test-minikube-pre-gate-shadow.sh"
 
 bash "$ROOT/scripts/tests/test-minikube-image-capability-fixture.sh"
+# In-pod client of the control-api Secret read RBAC journey.
+node --test "$ROOT/scripts/tests/test-control-api-secret-read-runtime.mjs"
 printf 'PASS: local Minikube T0/T1/T2 contract checks\n'
