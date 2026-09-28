@@ -171,7 +171,7 @@ describe('rename pending queue (spec 15 §2.5)', () => {
       renameError: 'Rename session failed (403)',
       readStatus: null,
       shouldRevoke: false,
-      shouldBeUncertain: true,
+      shouldBeUncertain: false,
     },
     {
       label: 'read also denied',
@@ -200,7 +200,7 @@ describe('rename pending queue (spec 15 §2.5)', () => {
           return reportedSessions([{ chatId: 'c1', title: 'old' }])
         }
       )
-      const { result } = renderController({
+      const { result, spies } = renderController({
         selectedAgent: 'agent-x',
         agentNames: ['agent-x'],
         onHostAccessRevoked: agentRef => revoked.add(agentRef),
@@ -214,7 +214,14 @@ describe('rename pending queue (spec 15 §2.5)', () => {
       expect(revoked.has('agent-x')).toBe(shouldRevoke)
       expect(uncertain.has('agent-x')).toBe(shouldBeUncertain)
       if (shouldRevoke) expect(result.current.chatList).toEqual([])
-      else expect(titleInList(result.current, 'c1')).toBe('new')
+      else if (shouldBeUncertain) expect(titleInList(result.current, 'c1')).toBe('new')
+      else {
+        expect(titleInList(result.current, 'c1')).toBe('old')
+        expect(spies.pushToast).toHaveBeenCalledWith(
+          'You do not have permission to rename this chat.',
+          'error'
+        )
+      }
     }
   )
 

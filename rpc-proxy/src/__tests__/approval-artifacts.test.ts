@@ -490,7 +490,8 @@ describe('POST /rpc/hosts/:hostRef/tasks/:taskId/cancel', () => {
     expect(serviceMock.forwardCancelToHost).toHaveBeenCalledWith(
       expect.objectContaining({ name: 'chatllm' }),
       'abc',
-      VALID_CLAIMS.sub
+      VALID_CLAIMS.sub,
+      expect.anything()
     )
   })
 

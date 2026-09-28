@@ -284,7 +284,7 @@ describe('revoked host catalog protection', () => {
   })
 
   it.each([401, 403])(
-    'hides cached sessions when the catalog returns an uncertain %i',
+    'keeps cached sessions visible when the catalog returns a generic %i twice',
     async status => {
       const blocked = new Set<string>()
       clerum.chat.getIndex.mockResolvedValue(
@@ -299,14 +299,15 @@ describe('revoked host catalog protection', () => {
         isHostAccessBlocked: agentRef => blocked.has(agentRef),
       })
 
-      await waitFor(() => expect(blocked.has('agent-a')).toBe(true))
-      expect(result.current.latestChatSessions.some(chat => chat.agentRef === 'agent-a')).toBe(
-        false
+      await waitFor(() =>
+        expect(result.current.latestChatSessions.some(chat => chat.id === 'protected-a')).toBe(true)
       )
+      expect(clerum.rpc.listSessions).toHaveBeenCalledTimes(2)
+      expect(blocked.has('agent-a')).toBe(false)
     }
   )
 
-  it('retains cached sessions when a 503 body merely mentions 403', async () => {
+  it('marks Host authority uncertain after a 503 catalog failure', async () => {
     const blocked = new Set<string>()
     clerum.chat.getIndex.mockResolvedValue(localIndex([{ id: 'cached-a', title: 'Cached chat' }]))
     clerum.rpc.listSessions.mockRejectedValue(
@@ -319,12 +320,9 @@ describe('revoked host catalog protection', () => {
       onHostAuthorityUncertain: agentRef => blocked.add(agentRef),
       isHostAccessBlocked: agentRef => blocked.has(agentRef),
     })
-    await waitFor(() =>
-      expect(result.current.latestChatSessions.some(chat => chat.id === 'cached-a')).toBe(true)
-    )
     await waitFor(() => expect(clerum.rpc.listSessions).toHaveBeenCalled())
-    expect(blocked.has('agent-a')).toBe(false)
-    expect(result.current.latestChatSessions.some(chat => chat.id === 'cached-a')).toBe(true)
+    await waitFor(() => expect(blocked.has('agent-a')).toBe(true))
+    expect(result.current.latestChatSessions.some(chat => chat.id === 'cached-a')).toBe(false)
   })
 })
 

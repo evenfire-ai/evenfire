@@ -16,6 +16,23 @@ import { type SessionFsmEvent, type SessionFsmStore, seedSessionSnapshots } from
 
 const SESSION_CATALOG_PAGE_LIMIT = 50
 
+async function readSessionCatalog(
+  chatStore: ReturnType<typeof useChatStore>,
+  agentRef: string,
+  query: Parameters<ReturnType<typeof useChatStore>['listSessions']>[1],
+  options: { force?: boolean } = {}
+): Promise<SessionsListResult> {
+  try {
+    return await chatStore.listSessions(agentRef, query, options)
+  } catch (error) {
+    // listSessions in the main process already refreshes an expired RPC token
+    // and retries once on 401. A second uncached read also distinguishes a
+    // catalog-specific denial from loss of Host authority.
+    if (!isAuthorizationError(error) || isConfirmedHostAccessRevoked(error)) throw error
+    return chatStore.listSessions(agentRef, query, { force: true })
+  }
+}
+
 // R1-M1: an 'offline' pending rename (a genuine network / 5xx failure) retries on
 // every listSessions poll and every `window 'online'` event. A deterministic 5xx
 // / 501 would otherwise re-issue the PATCH forever, so cap the auto-retries per
@@ -208,6 +225,7 @@ export function useChatListController({
   // Cross-agent "Latest sessions" list (badges live in the FSM, seeded below).
   const [latestChatSessions, setLatestChatSessions] = useState<LatestSidebarChatEntry[]>([])
   const [latestChatSessionsLoading, setLatestChatSessionsLoading] = useState(false)
+  const catalogOfflineByAgentRef = useRef(new Set<string>())
   const [latestCatalogMutationRevision, setLatestCatalogMutationRevision] = useState(0)
   // Selection requested for an agent before its chats have loaded, consumed by
   // the parent's agent-selection effect. Ref (not state): imperative, per-agent.
@@ -281,6 +299,7 @@ export function useChatListController({
     requestGenerationRef.current += 1
     authorityScopeGenerationRef.current += 1
     deletedChatIdsByAgentRef.current.clear()
+    catalogOfflineByAgentRef.current.clear()
   }, [isAuthenticated, scopeKey])
 
   // R1-H1 — the pending-rename queue is per-USER identity. mcp-host keys a chat
@@ -398,23 +417,30 @@ export function useChatListController({
       scheduleAfterFirstPaint(async () => {
         let serverResult: SessionsListResult
         try {
-          serverResult = await chatStore.listSessions(agentRef, {
+          serverResult = await readSessionCatalog(chatStore, agentRef, {
             agent: agentRef,
             limit: SESSION_CATALOG_PAGE_LIMIT,
           })
         } catch (error) {
           if (
-            isAuthorizationError(error) &&
             authorityScopeGenerationRef.current === authorityScopeGeneration &&
             getHostAuthorityEpoch(agentRef) === hostAuthorityEpoch &&
             currentAuthorityScopeRef.current === authorityScopeAtRequest &&
             !isHostAccessBlocked(agentRef)
           ) {
             if (isConfirmedHostAccessRevoked(error)) onHostAccessRevoked(agentRef)
-            else onHostAuthorityUncertain(agentRef)
+            else if (!isAuthorizationError(error)) onHostAuthorityUncertain(agentRef)
+            if (
+              !isConfirmedHostAccessRevoked(error) &&
+              !catalogOfflineByAgentRef.current.has(agentRef)
+            ) {
+              catalogOfflineByAgentRef.current.add(agentRef)
+              host.current?.pushToast('Chat list is offline. Showing saved chats.', 'info')
+            }
           }
           return
         }
+        catalogOfflineByAgentRef.current.delete(agentRef)
         if (
           selectedAgentRef.current !== agentRef ||
           requestGenerationRef.current !== requestGeneration ||
@@ -581,21 +607,28 @@ export function useChatListController({
     try {
       let serverResult: SessionsListResult
       try {
-        serverResult = await chatStore.listSessions(
+        serverResult = await readSessionCatalog(
+          chatStore,
           agentRef,
           { agent: agentRef, limit: SESSION_CATALOG_PAGE_LIMIT, cursor },
           { force: true }
         )
       } catch (error) {
         if (
-          isAuthorizationError(error) &&
           authorityScopeGenerationRef.current === authorityScopeGeneration &&
           getHostAuthorityEpoch(agentRef) === hostAuthorityEpoch &&
           currentAuthorityScopeRef.current === authorityScopeAtRequest &&
           !isHostAccessBlocked(agentRef)
         ) {
           if (isConfirmedHostAccessRevoked(error)) onHostAccessRevoked(agentRef)
-          else onHostAuthorityUncertain(agentRef)
+          else if (!isAuthorizationError(error)) onHostAuthorityUncertain(agentRef)
+          if (
+            !isConfirmedHostAccessRevoked(error) &&
+            !catalogOfflineByAgentRef.current.has(agentRef)
+          ) {
+            catalogOfflineByAgentRef.current.add(agentRef)
+            host.current?.pushToast('Chat list is offline. Showing saved chats.', 'info')
+          }
           return
         }
         if (
@@ -613,6 +646,7 @@ export function useChatListController({
         }
         return
       }
+      catalogOfflineByAgentRef.current.delete(agentRef)
       if (
         requestGenerationRef.current !== requestGeneration ||
         getHostAuthorityEpoch(agentRef) !== hostAuthorityEpoch ||
@@ -1006,13 +1040,21 @@ export function useChatListController({
           return
         }
         if (isAuthorizationError(error)) {
-          if (!requestStillCurrent() || isHostAccessBlocked(entry.agentRef)) return
+          if (
+            !requestStillCurrent() ||
+            isHostAccessBlocked(entry.agentRef) ||
+            pendingRenamesRef.current.get(key) !== entry
+          ) {
+            return
+          }
+          let readSucceeded = false
           try {
             await chatStore.listSessions(
               entry.agentRef,
               { agent: entry.agentRef, limit: 1 },
               { force: true }
             )
+            readSucceeded = true
           } catch (readError) {
             if (!requestStillCurrent() || isHostAccessBlocked(entry.agentRef)) return
             if (isConfirmedHostAccessRevoked(readError)) {
@@ -1023,10 +1065,26 @@ export function useChatListController({
               return
             }
           }
-          if (!requestStillCurrent() || isHostAccessBlocked(entry.agentRef)) return
+          if (
+            !requestStillCurrent() ||
+            isHostAccessBlocked(entry.agentRef) ||
+            pendingRenamesRef.current.get(key) !== entry
+          ) {
+            return
+          }
+          if (readSucceeded) {
+            if (pendingRenamesRef.current.get(key) === entry) {
+              pendingRenamesRef.current.delete(key)
+              if (entry.previousTitle) {
+                await applyLocalTitleOnly(entry.agentRef, entry.chatId, entry.previousTitle)
+              }
+            }
+            host.current?.pushToast('You do not have permission to rename this chat.', 'error')
+            return
+          }
           // Only the structured host denial proves revocation. A generic 403
-          // may be a stale/missing write capability, so block the host as
-          // uncertain and retain the optimistic rename for a later retry.
+          // may be a stale/missing write capability. If the read check also
+          // fails, preserve the existing uncertain-authority handling.
           onHostAuthorityUncertain(entry.agentRef)
           if (pendingRenamesRef.current.get(key) === entry) {
             entry.state = 'offline'
@@ -1402,13 +1460,12 @@ export function useChatListController({
             // on-demand pagination through `loadMoreChatSessions`.
             let serverResult: SessionsListResult
             try {
-              serverResult = await chatStore.listSessions(agentRef, {
+              serverResult = await readSessionCatalog(chatStore, agentRef, {
                 agent: agentRef,
                 limit: SESSION_CATALOG_PAGE_LIMIT,
               })
             } catch (error) {
               if (
-                isAuthorizationError(error) &&
                 !cancelled &&
                 authorityScopeGenerationRef.current === authorityScopeGeneration &&
                 currentAuthorityScopeRef.current === authorityScopeAtRequest &&
@@ -1416,10 +1473,18 @@ export function useChatListController({
                 !isHostAccessBlocked(agentRef)
               ) {
                 if (isConfirmedHostAccessRevoked(error)) onHostAccessRevoked(agentRef)
-                else onHostAuthorityUncertain(agentRef)
+                else if (!isAuthorizationError(error)) onHostAuthorityUncertain(agentRef)
+                if (
+                  !isConfirmedHostAccessRevoked(error) &&
+                  !catalogOfflineByAgentRef.current.has(agentRef)
+                ) {
+                  catalogOfflineByAgentRef.current.add(agentRef)
+                  host.current?.pushToast('Chat list is offline. Showing saved chats.', 'info')
+                }
               }
               return { agentRef, sessions: [] as SessionsListResult['items'] }
             }
+            catalogOfflineByAgentRef.current.delete(agentRef)
             if (
               currentAuthorityScopeRef.current !== authorityScopeAtRequest ||
               getHostAuthorityEpoch(agentRef) !== hostAuthorityEpochByAgent.get(agentRef) ||

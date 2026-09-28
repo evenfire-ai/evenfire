@@ -971,7 +971,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     expect(appsApi.replaceNamespacedDeployment).not.toHaveBeenCalled()
   })
 
-  it('refreshes runtime credentials while holding the existing template during cache loss', async () => {
+  it('preserves runtime credentials and the existing template during cache loss', async () => {
     const host = makeStatelessHost({
       status: { lifecycle: { state: 'active', wakeHandledGeneration: 1 } },
     })
@@ -986,7 +986,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
       .spyOn(reconciler as any, 'provisionRuntimeTokenRevision')
       .mockResolvedValue(runtimeTokenProvision(host))
     await reconciler.reconcile(host)
-    expect(provision).toHaveBeenCalledOnce()
+    expect(provision).not.toHaveBeenCalled()
     expect(live().spec!.replicas).toBe(1)
     expect(live().spec!.template).toEqual(applied.spec!.template)
     expect(rejectedCondition(lifecycleStatusWrites(customApi).at(-1)!).reason).toBe(
@@ -1010,10 +1010,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
 
     await reconciler.reconcile(host)
 
-    expect(provision).toHaveBeenCalledWith(host, {
-      forceFreshForWake: false,
-      targetSuspended: true,
-    })
+    expect(provision).not.toHaveBeenCalled()
     expect(live().spec!.replicas).toBe(0)
     expect(live().spec!.template).toEqual(applied.spec!.template)
     expect(lifecycleStatusWrites(customApi).at(-1)?.lifecycle).toMatchObject({
@@ -1035,10 +1032,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
       .spyOn(reconciler as any, 'provisionRuntimeTokenRevision')
       .mockResolvedValue(runtimeTokenProvision(host))
     await reconciler.reconcile(host)
-    expect(provision).toHaveBeenCalledWith(host, {
-      forceFreshForWake: true,
-      targetSuspended: false,
-    })
+    expect(provision).not.toHaveBeenCalled()
     expect(appsApi.patchNamespacedDeployment).not.toHaveBeenCalled()
     expect(live().spec!.replicas).toBe(1)
     expect(live().spec!.template).toEqual(applied.spec!.template)
@@ -1199,7 +1193,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     await reconciler.reconcile(host)
     expect(networkingApi.readNamespacedNetworkPolicy).toHaveBeenCalled()
 
-    expect(provision).toHaveBeenCalledOnce()
+    expect(provision).not.toHaveBeenCalled()
     const deployment = live()
     expect(deployment.spec?.replicas).toBe(0)
     expect(envValue(deployment, 'CLERUM_STATELESS_LIFECYCLE')).toBe('true')
@@ -1476,7 +1470,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     expect(provision).toHaveBeenCalledOnce()
   })
 
-  it('refreshes runtime credentials for active cache loss without changing replicas', async () => {
+  it('preserves runtime credentials during active cache loss without changing replicas', async () => {
     let cacheSynced = true
     const { reconciler, appsApi, customApi, networkingApi } = createReconciler({
       isCommunicationChannelCacheSynced: () => cacheSynced,
@@ -1498,7 +1492,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     await reconciler.reconcile(host)
     expect(networkingApi.readNamespacedNetworkPolicy).toHaveBeenCalled()
 
-    expect(provision).toHaveBeenCalledOnce()
+    expect(provision).not.toHaveBeenCalled()
     const deployment = live()
     expect(deployment.spec?.replicas).toBe(1)
     expect(envValue(deployment, 'CLERUM_STATELESS_LIFECYCLE')).toBe('true')

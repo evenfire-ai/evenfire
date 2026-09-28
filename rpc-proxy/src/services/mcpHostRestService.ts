@@ -179,11 +179,12 @@ export async function forwardHostMessageToHost(
 
 export async function forwardTaskResultFromHost(
   host: ResolvedServerConnection,
-  taskId: string
+  taskId: string,
+  timeoutMs = config.upstreamTimeoutMs
 ): Promise<Record<string, unknown> | null> {
   const baseUrl = host.url.replace(/\/+$/, '')
   const abortController = new AbortController()
-  const timeout = setTimeout(() => abortController.abort(), config.upstreamTimeoutMs)
+  const timeout = setTimeout(() => abortController.abort(), timeoutMs)
   try {
     const response = await fetch(
       `${baseUrl}/v1/runtime/tasks/${encodeURIComponent(taskId)}/result`,
@@ -222,11 +223,12 @@ export type CancelUpstreamResult = {
 export async function forwardCancelToHost(
   host: ResolvedServerConnection,
   taskId: string,
-  userId?: string
+  userId?: string,
+  timeoutMs = config.upstreamTimeoutMs
 ): Promise<CancelUpstreamResult> {
   const baseUrl = host.url.replace(/\/+$/, '')
   const abortController = new AbortController()
-  const timeout = setTimeout(() => abortController.abort(), config.upstreamTimeoutMs)
+  const timeout = setTimeout(() => abortController.abort(), timeoutMs)
   // Mirrors the approve/deny pattern: always forward userId so mcp-host can
   // apply the ownership check. Falls back to 'desktop-app' when absent.
   const upstreamBody = { userId: userId || 'desktop-app' }

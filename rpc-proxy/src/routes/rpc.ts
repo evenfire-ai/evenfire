@@ -625,11 +625,12 @@ export function createRpcRouter(): Router {
         // host:approval:write; wake capability rides on the token. A suspended
         // (network-down) or draining Host triggers a wake-and-hold instead of a
         // bare next(error)/passthrough.
-        const attempt = async () => {
+        const attempt = async (timeoutMs = config.upstreamTimeoutMs) => {
           const response = await fetch(`${baseUrl}/v1/runtime/approvals/approve`, {
             method: 'POST',
             headers: { 'content-type': 'application/json', ...host.headers },
             body: JSON.stringify(upstreamBody),
+            signal: AbortSignal.timeout(timeoutMs),
           })
           const body = await response.text()
           const draining = sessionDrainingFence(response, body)
@@ -688,11 +689,12 @@ export function createRpcRouter(): Router {
           requestId: parsed.toolCallId || parsed.requestId,
         }
         // Wake-eligible finite operation (§11.4): scope stays host:approval:write.
-        const attempt = async () => {
+        const attempt = async (timeoutMs = config.upstreamTimeoutMs) => {
           const response = await fetch(`${baseUrl}/v1/runtime/approvals/deny`, {
             method: 'POST',
             headers: { 'content-type': 'application/json', ...host.headers },
             body: JSON.stringify(upstreamBody),
+            signal: AbortSignal.timeout(timeoutMs),
           })
           const body = await response.text()
           const draining = sessionDrainingFence(response, body)
@@ -771,11 +773,11 @@ export function createRpcRouter(): Router {
         // host:session:read; wake capability rides on the token. A suspended
         // (network-down) or draining Host triggers a wake-and-hold instead of a
         // bare next(error)/passthrough.
-        const forwardSessionList = async () => {
+        const forwardSessionList = async (timeoutMs = config.upstreamTimeoutMs) => {
           const response = await fetch(upstreamUrl, {
             method: 'GET',
             headers: { ...host.headers },
-            signal: AbortSignal.timeout(config.upstreamTimeoutMs),
+            signal: AbortSignal.timeout(timeoutMs),
           })
           const body = await response.text()
           const draining = sessionDrainingFence(response, body)
@@ -872,11 +874,11 @@ export function createRpcRouter(): Router {
           `[RPC_PROXY] user=${auth.sub} host=${hostRef} method=get-session-messages agent=${agent} chatId=${chatId}`
         )
         // Wake-eligible finite operation (§11.4): scope stays host:session:read.
-        const forwardTranscript = async () => {
+        const forwardTranscript = async (timeoutMs = config.upstreamTimeoutMs) => {
           const response = await fetch(upstreamUrl, {
             method: 'GET',
             headers: { ...host.headers },
-            signal: AbortSignal.timeout(config.upstreamTimeoutMs),
+            signal: AbortSignal.timeout(timeoutMs),
           })
           const body = await response.text()
           const draining = sessionDrainingFence(response, body)
@@ -945,13 +947,13 @@ export function createRpcRouter(): Router {
           `[RPC_PROXY] user=${auth.sub} host=${hostRef} method=get-context-breakdown agent=${agent} chatId=${chatId}`
         )
         // Wake-eligible finite operation (§11.4): scope stays host:session:read.
-        const attempt = async () => {
+        const attempt = async (timeoutMs = config.upstreamTimeoutMs) => {
           const response = await fetch(
             `${baseUrl}/v1/runtime/sessions/${encodeURIComponent(agent)}/${encodeURIComponent(chatId)}/context-breakdown`,
             {
               method: 'GET',
               headers: { ...host.headers },
-              signal: AbortSignal.timeout(config.upstreamTimeoutMs),
+              signal: AbortSignal.timeout(timeoutMs),
             }
           )
           const body = await response.text()
@@ -1094,11 +1096,11 @@ export function createRpcRouter(): Router {
           : `${baseUrl}/v1/runtime/models`
         console.info(`[RPC_PROXY] user=${auth.sub} host=${hostRef} method=list-models`)
         // Wake-eligible finite operation (§11.4): scope stays host:session:read.
-        const attempt = async () => {
+        const attempt = async (timeoutMs = config.upstreamTimeoutMs) => {
           const response = await fetch(upstreamUrl, {
             method: 'GET',
             headers: { ...host.headers },
-            signal: AbortSignal.timeout(config.upstreamTimeoutMs),
+            signal: AbortSignal.timeout(timeoutMs),
           })
           const body = await response.text()
           const draining = sessionDrainingFence(response, body)
@@ -1160,11 +1162,12 @@ export function createRpcRouter(): Router {
         const baseUrl = host.url.replace(/\/+$/, '')
         console.info(`[RPC_PROXY] user=${auth.sub} host=${hostRef} method=set-model`)
         // Wake-eligible finite operation (§11.4): scope stays host:model:write.
-        const attempt = async () => {
+        const attempt = async (timeoutMs = config.upstreamTimeoutMs) => {
           const response = await fetch(`${baseUrl}/v1/runtime/model`, {
             method: 'POST',
             headers: { 'content-type': 'application/json', ...host.headers },
             body: JSON.stringify(body),
+            signal: AbortSignal.timeout(timeoutMs),
           })
           const upstreamBody = await response.text()
           const draining = sessionDrainingFence(response, upstreamBody)
@@ -1224,8 +1227,8 @@ export function createRpcRouter(): Router {
         console.info(
           `[RPC_PROXY] user=${auth.sub} host=${hostRef} method=get-task-result taskId=${taskId}`
         )
-        const attemptTaskResult = async () => {
-          const result = await forwardTaskResultFromHost(host, taskId)
+        const attemptTaskResult = async (timeoutMs = config.upstreamTimeoutMs) => {
+          const result = await forwardTaskResultFromHost(host, taskId, timeoutMs)
           if (!result) {
             res.status(404).json({ error: 'Task result not found' })
             return
@@ -1292,8 +1295,8 @@ export function createRpcRouter(): Router {
           `[RPC_PROXY] user=${auth.sub} host=${hostRef} method=cancel-task taskId=${taskId}`
         )
 
-        const attemptCancel = async () => {
-          const result = await forwardCancelToHost(host, taskId, auth.sub)
+        const attemptCancel = async (timeoutMs = config.upstreamTimeoutMs) => {
+          const result = await forwardCancelToHost(host, taskId, auth.sub, timeoutMs)
           if (result.body) {
             res
               .status(result.status)
@@ -1359,9 +1362,10 @@ export function createRpcRouter(): Router {
         }
         const baseUrl = host.url.replace(/\/+$/, '')
         // Wake-eligible finite operation (§11.4): scope stays host:task:read.
-        const attempt = async () => {
+        const attempt = async (timeoutMs = config.upstreamTimeoutMs) => {
           const response = await fetch(`${baseUrl}/v1/runtime/artifacts`, {
             headers: { ...host.headers },
+            signal: AbortSignal.timeout(timeoutMs),
           })
           const body = await response.text()
           const draining = sessionDrainingFence(response, body)
@@ -1428,11 +1432,12 @@ export function createRpcRouter(): Router {
         // Wake-eligible finite operation (§11.4): scope stays host:task:read.
         // The success path only commits (`res.send`) at the very end, so a
         // wake retry before that point is safe from duplicate delivery.
-        const attemptDownload = async () => {
+        const attemptDownload = async (timeoutMs = config.upstreamTimeoutMs) => {
           const response = await fetch(
             `${baseUrl}/v1/runtime/artifacts/${encodeURIComponent(filename)}/download`,
             {
               headers: { ...host.headers },
+              signal: AbortSignal.timeout(timeoutMs),
             }
           )
           if (!response.ok) {

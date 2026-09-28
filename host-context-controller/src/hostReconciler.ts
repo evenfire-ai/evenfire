@@ -4801,11 +4801,16 @@ export class HostReconciler {
       }
     }
     const holdAppliedRuntime = async (allowScaleUp: boolean): Promise<void> => {
-      await this.provisionRuntimeTokenRevision(host, {
-        forceFreshForWake: allowScaleUp,
-        targetSuspended: lifecycle.effective.state === 'suspended',
-      })
-      revalidateHostMutationBoundary()
+      if (this.ccCacheSyncedFn()) {
+        await this.provisionRuntimeTokenRevision(host, {
+          forceFreshForWake: allowScaleUp,
+          targetSuspended: lifecycle.effective.state === 'suspended',
+        })
+        revalidateHostMutationBoundary()
+      }
+      // The channel inventory is incomplete while its cache is unsynced. Defer
+      // scope-sensitive token minting until the next authoritative reconcile so
+      // a missing channel count cannot narrow the running Host's token scopes.
       const applied = await this.ensureDeployment(
         host,
         mounts,
