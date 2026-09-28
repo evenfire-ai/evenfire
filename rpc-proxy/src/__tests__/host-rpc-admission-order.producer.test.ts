@@ -266,6 +266,28 @@ describe('Spec 65 legacy Host-RPC admission ordering (real Control API token pro
     expect(events.values).toEqual(['admission', 'live-resolver'])
   })
 
+  it.each(['%2A', 'bad%25ref', 'bad%2Fref'])(
+    'rejects malformed progress-stream Host ref %s before admission and resolution',
+    async encodedHostRef => {
+      const response = await request(app())
+        .get(`/rpc/hosts/${encodedHostRef}/tasks/${TASK}/progress/stream`)
+        .set('authorization', `Bearer ${signedAccessToken}`)
+        .expect(400)
+      expect(response.body).toEqual({ error: 'Invalid hostRef' })
+      expect(events.values).toEqual([])
+      expect(controlApi.requestHostRpcAdmission).not.toHaveBeenCalled()
+      expect(service.resolveHostConnectionForUser).not.toHaveBeenCalled()
+    }
+  )
+
+  it('admits a valid progress-stream Host ref before live resolution', async () => {
+    await request(app())
+      .get(`/rpc/hosts/chatllm/tasks/${TASK}/progress/stream`)
+      .set('authorization', `Bearer ${signedAccessToken}`)
+      .expect(403)
+    expect(events.values).toEqual(['admission', 'live-resolver'])
+  })
+
   it('rejects invalid legacy route input after scope but before admission or live resolution', async () => {
     const response = await request(app())
       .get('/rpc/hosts/chatllm/sessions?limit=not-a-number')
