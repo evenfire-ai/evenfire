@@ -54,7 +54,12 @@ const mockGetMcpServers = vi.mocked(getMcpServers)
 const mockGetRegistryCredentialSchema = vi.mocked(getRegistryCredentialSchema)
 const mockUpdateMcpSecret = vi.mocked(updateMcpSecret)
 
-function server(options: { name: string; secretKey?: string; envVar?: string }): McpServerResource {
+function server(options: {
+  name: string
+  secretName?: string
+  secretKey?: string
+  envVar?: string
+}): McpServerResource {
   return {
     metadata: {
       name: options.name,
@@ -65,7 +70,7 @@ function server(options: { name: string; secretKey?: string; envVar?: string }):
     },
     spec: {
       envSecret: {
-        name: 'linear-credentials',
+        name: options.secretName ?? 'linear-credentials',
         keys: [
           {
             secretKey: options.secretKey ?? 'api-key',
@@ -184,6 +189,34 @@ describe('EditConnectorSecretPage', () => {
     ).toBeInTheDocument()
   })
 
+  it('uses the normalized Secret name for selection and rotation', async () => {
+    mockGetMcpServers.mockResolvedValue({
+      items: [server({ name: 'linear-conn', secretName: '  linear-credentials  ' })],
+    })
+    await renderPage()
+
+    expect(screen.getByRole('button', { name: 'Rotate credentials' })).toBeInTheDocument()
+    await submitRotation('API token', 'rotated')
+
+    expect(mockUpdateMcpSecret).toHaveBeenCalledWith('linear-credentials', {
+      'api-key': 'rotated',
+    })
+    expect(mockUpdateMcpSecret).not.toHaveBeenCalledWith('  linear-credentials  ', {
+      'api-key': 'rotated',
+    })
+  })
+
+  it('refuses rotation when the normalized connector Secret name differs from the URL', async () => {
+    mockGetMcpServers.mockResolvedValue({
+      items: [server({ name: 'linear-conn', secretName: '  other-credentials  ' })],
+    })
+    await renderPage()
+
+    expect(screen.getByText(/No connector currently references Secret/i)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Rotate credentials' })).not.toBeInTheDocument()
+    expect(mockUpdateMcpSecret).not.toHaveBeenCalled()
+  })
+
   it('latches to recreate mode when the rotation PUT answers 404', async () => {
     mockUpdateMcpSecret.mockRejectedValue(
       Object.assign(new Error('404 Not Found'), { status: 404 })
@@ -251,6 +284,15 @@ describe('EditConnectorSecretPage', () => {
     await renderPage()
 
     expect(screen.getByText(/No connector currently references Secret/i)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Rotate credentials' })).not.toBeInTheDocument()
+  })
+
+  it('shows the connector load error without presenting an empty result as verified', async () => {
+    mockGetMcpServers.mockRejectedValue(new Error('Connector list unavailable'))
+    await renderPage()
+
+    expect(screen.getByRole('alert')).toHaveTextContent('Connector list unavailable')
+    expect(screen.queryByText(/No connector currently references Secret/i)).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Rotate credentials' })).not.toBeInTheDocument()
   })
 })

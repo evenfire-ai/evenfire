@@ -22,8 +22,7 @@ import { getMcpServers } from '@lib/api'
 import type { McpServerResource } from '@lib/api'
 
 function serverRefersToSecret(server: McpServerResource, secretName: string): boolean {
-  const envSecret = server.spec?.envSecret as { name?: unknown } | undefined
-  return typeof envSecret?.name === 'string' && envSecret.name.trim() === secretName
+  return resolveEnvSecret(server.spec as Record<string, unknown> | undefined)?.name === secretName
 }
 
 function EditConnectorSecretContent() {
@@ -82,6 +81,10 @@ function EditConnectorSecretContent() {
       : servers[0]
   }, [servers, requestedServer])
   const selectedName = selected ? String(selected.metadata?.name ?? '') : ''
+  const selectedEnvSecret = selected
+    ? resolveEnvSecret(selected.spec as Record<string, unknown> | undefined)
+    : undefined
+  const secretMatches = selectedEnvSecret?.name === secretName
 
   function backToList() {
     router.push(CONTROL_ROUTES.secrets.connector)
@@ -100,13 +103,17 @@ function EditConnectorSecretContent() {
 
         <div className="cu-create-panel">
           <div className="cu-create-content">
-            {loadError ? <div className="cu-banner cu-banner--error">{loadError}</div> : null}
+            {loadError ? (
+              <div className="cu-banner cu-banner--error" role="alert">
+                {loadError}
+              </div>
+            ) : null}
 
             {servers === null ? (
               <p className="cu-muted" role="status">
                 Loading attached connectors…
               </p>
-            ) : servers.length === 0 ? (
+            ) : servers.length === 0 && !loadError ? (
               <div className="cu-banner cu-banner--error">
                 No connector currently references Secret <code>{secretName || '(unnamed)'}</code>.
                 Attach it to a connector before rotating it from here.
@@ -136,11 +143,18 @@ function EditConnectorSecretContent() {
                   </div>
                 ) : null}
 
-                {selected ? (
+                {selected && !secretMatches ? (
+                  <div className="cu-banner cu-banner--error" role="alert">
+                    This connector does not reference Secret <code>{secretName}</code>. Choose a
+                    connector that does.
+                  </div>
+                ) : null}
+
+                {selected && secretMatches ? (
                   <UpdateConnectorCredentials
                     key={selectedName}
                     serverName={selectedName}
-                    envSecret={resolveEnvSecret(selected.spec as Record<string, unknown>)}
+                    envSecret={selectedEnvSecret}
                     surface={resolveCredentialSurface(
                       selected.status?.conditions,
                       selected.spec as { managed?: boolean } | undefined

@@ -12,6 +12,8 @@ export function resolveEnvSecret(spec: Record<string, unknown> | undefined): Env
   if (!raw || typeof raw !== 'object') return undefined
   const candidate = raw as { name?: unknown; keys?: unknown }
   if (typeof candidate.name !== 'string' || !Array.isArray(candidate.keys)) return undefined
+  const name = candidate.name.trim()
+  if (!name) return undefined
   const keys = candidate.keys.filter(
     (k): k is EnvSecretKeyMapping =>
       Boolean(k) &&
@@ -19,7 +21,7 @@ export function resolveEnvSecret(spec: Record<string, unknown> | undefined): Env
       typeof (k as EnvSecretKeyMapping).envVar === 'string'
   )
   if (keys.length === 0) return undefined
-  return { name: candidate.name, keys }
+  return { name, keys }
 }
 
 /**
