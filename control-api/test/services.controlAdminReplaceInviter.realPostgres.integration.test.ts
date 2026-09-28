@@ -20,6 +20,7 @@ import {
   acceptInvitationById,
   createSilentInvitationForTeams,
 } from '../src/services/directory/membership.js'
+import './realPostgres.requirement.ts'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
@@ -107,6 +108,14 @@ describeRealPostgres('control admin replace-inviter invitations on real PostgreS
       purpose: 'admin_desktop_access',
     })
     return invitation.id
+  }
+
+  async function teamRole(teamId: string, userId: string): Promise<string | undefined> {
+    const result = await testPool.query(
+      `SELECT role FROM team_members WHERE team_id = $1::uuid AND user_id = $2::uuid AND status = 'active'`,
+      [teamId, userId]
+    )
+    return (result.rows[0] as { role?: string } | undefined)?.role
   }
 
   async function adminInvitationStatus(id: string): Promise<string | undefined> {
@@ -200,12 +209,19 @@ describeRealPostgres('control admin replace-inviter invitations on real PostgreS
     if ('error' in invitation) throw new Error(invitation.error)
     const desktopInvitationId = await inviteDesktopAccess(clientEmail)
     const unrelatedDesktopInvitationId = await inviteDesktopAccess(uniqueEmail('unrelated'))
+    const memberInvitation = await testPool.query(
+      `INSERT INTO invitations (email, role, status, purpose)
+       VALUES ($1, 'member', 'pending', 'member_invitation') RETURNING id::text AS id`,
+      [clientEmail]
+    )
+    const memberInvitationId = (memberInvitation.rows[0] as { id: string }).id
 
     await revokeControlAdminInvitation(invitation.id)
 
     expect(await adminInvitationStatus(invitation.id)).toBe('revoked')
     expect(await desktopInvitationStatus(desktopInvitationId)).toBe('revoked')
     expect(await desktopInvitationStatus(unrelatedDesktopInvitationId)).toBe('pending')
+    expect(await desktopInvitationStatus(memberInvitationId)).toBe('pending')
     expect(await adminStatus(inviter.id)).toBe('active')
     expect(await desktopLifecycle(inviterDesktopId)).toBe('active')
     await expect(
@@ -232,6 +248,17 @@ describeRealPostgres('control admin replace-inviter invitations on real PostgreS
        VALUES ($1::uuid, 'telegram', $2, 'ops-approval-channel', NOW())`,
       [inviterDesktopId, `tg-${inviterDesktopId}`]
     )
+    await testPool.query(
+      `INSERT INTO workflow_approval_medium_challenges
+         (user_id, medium, provider_user_id, code_hash, expires_at)
+       VALUES ($1::uuid, 'telegram', $2, 'example-code-hash', NOW() + INTERVAL '10 minutes')`,
+      [inviterDesktopId, `tg-${inviterDesktopId}`]
+    )
+    const otherAdmin = await seedAdmin('other-ops')
+    const otherEmail = uniqueEmail('other-client')
+    const otherInvitation = await createControlAdminInvitation(otherEmail, otherAdmin.id)
+    if ('error' in otherInvitation) throw new Error(otherInvitation.error)
+    const otherDesktopInvitationId = await inviteDesktopAccess(otherEmail)
 
     const clientEmail = uniqueEmail('client')
     const handover = await createControlAdminInvitation(clientEmail, inviter.id, {
@@ -301,17 +328,175 @@ describeRealPostgres('control admin replace-inviter invitations on real PostgreS
       [inviterDesktopId]
     )
     expect(approvalMedium.rows).toEqual([{ disabled: true }])
+    const challenge = await testPool.query(
+      `SELECT consumed_at IS NOT NULL AS consumed
+         FROM workflow_approval_medium_challenges WHERE user_id = $1::uuid`,
+      [inviterDesktopId]
+    )
+    expect(challenge.rows).toEqual([{ consumed: true }])
     const audit = await testPool.query(
       `SELECT actor_admin_id::text AS actor, target_admin_id::text AS target
          FROM control_admin_deletion_audit WHERE target_admin_id = $1::uuid`,
       [inviter.id]
     )
     expect(audit.rows).toEqual([{ actor: completed.id, target: inviter.id }])
+    const deletedEvent = await testPool.query(
+      `SELECT payload_metadata->>'reason_code' AS reason_code,
+              payload_metadata->>'detail_ref' AS detail_ref
+         FROM administrative_events
+        WHERE action = 'control_admin_deleted' AND target_human_sub = $1`,
+      [inviter.id]
+    )
+    expect(deletedEvent.rows).toEqual([
+      {
+        reason_code: 'control_admin_replaced',
+        detail_ref: `control_admin_invitation:${handover.id}`,
+      },
+    ])
 
     expect(await adminInvitationStatus(handover.id)).toBe('accepted')
     expect(await desktopInvitationStatus(clientDesktopInvitationId)).toBe('accepted')
     expect(await adminInvitationStatus(stray.id)).toBe('revoked')
     expect(await desktopInvitationStatus(strayDesktopInvitationId)).toBe('revoked')
+    // Only the inviter's own invitations are revoked.
+    expect(await adminInvitationStatus(otherInvitation.id)).toBe('pending')
+    expect(await desktopInvitationStatus(otherDesktopInvitationId)).toBe('pending')
+  })
+
+  it('finds the inviter desktop user by operator link after an admin email change', async () => {
+    const inviter = await seedAdmin('moved-ops')
+    const linkedDesktopId = await seedDesktopUser(inviter.email)
+    await seedOperatorLink(linkedDesktopId, inviter.id)
+    const team = await seedTeam('Moved')
+    await addTeamMember(team, linkedDesktopId, 'admin')
+    // completeControlAdminEmailChangeRequest updates control_admin_users only.
+    const movedEmail = uniqueEmail('moved-ops')
+    await testPool.query(`UPDATE control_admin_users SET email = $2 WHERE id = $1::uuid`, [
+      inviter.id,
+      movedEmail,
+    ])
+    const bystanderId = await seedDesktopUser(movedEmail)
+    const bystanderTeam = await seedTeam('Bystander')
+    await addTeamMember(bystanderTeam, bystanderId, 'member')
+
+    const clientEmail = uniqueEmail('moved-client')
+    const handover = await createControlAdminInvitation(clientEmail, inviter.id, {
+      replaceInviter: true,
+    })
+    if ('error' in handover) throw new Error(handover.error)
+    const clientDesktopInvitationId = await inviteDesktopAccess(clientEmail)
+    const completed = await completeControlAdminInvitation({
+      email: clientEmail,
+      invitationId: handover.id,
+      username: `moved-${randomUUID().slice(0, 8)}`,
+      passwordHash: 'real-pg-replace-client',
+    })
+    if ('error' in completed) throw new Error(completed.error)
+    const accepted = await acceptInvitationById(clientEmail, clientDesktopInvitationId)
+    if ('error' in accepted) throw new Error(String(accepted.error))
+
+    expect(await desktopLifecycle(linkedDesktopId)).toBe('retired')
+    expect(await teamRole(team, accepted.data.userId)).toBe('admin')
+    expect(await desktopLifecycle(bystanderId)).toBe('active')
+    expect(await teamRole(bystanderTeam, accepted.data.userId)).toBeUndefined()
+  })
+
+  it('never downgrades a role the new admin already holds or was invited with', async () => {
+    const inviter = await seedAdmin('keep-ops')
+    const inviterDesktopId = await seedDesktopUser(inviter.email)
+    const heldTeam = await seedTeam('Held')
+    const invitedTeam = await seedTeam('Invited')
+    await addTeamMember(heldTeam, inviterDesktopId, 'member')
+    await addTeamMember(invitedTeam, inviterDesktopId, 'member')
+    const clientEmail = uniqueEmail('keep-client')
+    const clientDesktopId = await seedDesktopUser(clientEmail)
+    await addTeamMember(heldTeam, clientDesktopId, 'admin')
+    const handover = await createControlAdminInvitation(clientEmail, inviter.id, {
+      replaceInviter: true,
+    })
+    if ('error' in handover) throw new Error(handover.error)
+    const desktopInvitation = await createSilentInvitationForTeams({
+      inviteeName: clientEmail,
+      email: clientEmail,
+      teamAssignments: [{ teamId: invitedTeam, role: 'admin' }],
+      fallbackRole: 'member',
+      purpose: 'admin_desktop_access',
+    })
+
+    const completed = await completeControlAdminInvitation({
+      email: clientEmail,
+      invitationId: handover.id,
+      username: `keep-${randomUUID().slice(0, 8)}`,
+      passwordHash: 'real-pg-replace-client',
+    })
+    if ('error' in completed) throw new Error(completed.error)
+    expect(await teamRole(heldTeam, clientDesktopId)).toBe('admin')
+    const accepted = await acceptInvitationById(clientEmail, desktopInvitation.id)
+    if ('error' in accepted) throw new Error(String(accepted.error))
+
+    expect(accepted.data.userId).toBe(clientDesktopId)
+    expect(await teamRole(heldTeam, clientDesktopId)).toBe('admin')
+    expect(await teamRole(invitedTeam, clientDesktopId)).toBe('admin')
+  })
+
+  it('refuses a hand-over that has nobody to receive the inviter team roles', async () => {
+    const inviter = await seedAdmin('nobody-ops')
+    const inviterDesktopId = await seedDesktopUser(inviter.email)
+    const team = await seedTeam('Nobody')
+    await addTeamMember(team, inviterDesktopId, 'admin')
+    const clientEmail = uniqueEmail('nobody-client')
+    const handover = await createControlAdminInvitation(clientEmail, inviter.id, {
+      replaceInviter: true,
+    })
+    if ('error' in handover) throw new Error(handover.error)
+
+    await expect(
+      completeControlAdminInvitation({
+        email: clientEmail,
+        invitationId: handover.id,
+        username: `nobody-${randomUUID().slice(0, 8)}`,
+        passwordHash: 'real-pg-replace-client',
+      })
+    ).resolves.toEqual({ error: 'replace_inviter_receiver_missing' })
+
+    expect(await adminInvitationStatus(handover.id)).toBe('pending')
+    expect(await adminStatus(inviter.id)).toBe('active')
+    expect(await desktopLifecycle(inviterDesktopId)).toBe('active')
+    expect(await teamRole(team, inviterDesktopId)).toBe('admin')
+    const admins = await testPool.query(
+      `SELECT 1 FROM control_admin_users WHERE lower(email) = lower($1)`,
+      [clientEmail]
+    )
+    expect(admins.rowCount).toBe(0)
+  })
+
+  it('accepts one of two concurrent hand-overs from the same inviter without a deadlock', async () => {
+    const inviter = await seedAdmin('twin-ops')
+    const emails = [uniqueEmail('twin-a'), uniqueEmail('twin-b')]
+    const invitations = []
+    for (const email of emails) {
+      const invitation = await createControlAdminInvitation(email, inviter.id, {
+        replaceInviter: true,
+      })
+      if ('error' in invitation) throw new Error(invitation.error)
+      invitations.push(invitation)
+    }
+
+    const results = await Promise.all(
+      invitations.map((invitation, index) =>
+        completeControlAdminInvitation({
+          email: emails[index],
+          invitationId: invitation.id,
+          username: `twin-${index}-${randomUUID().slice(0, 8)}`,
+          passwordHash: 'real-pg-replace-client',
+        })
+      )
+    )
+
+    const winners = results.filter(result => !('error' in result))
+    expect(winners).toHaveLength(1)
+    expect(results.filter(result => 'error' in result)).toEqual([{ error: 'not_found' }])
+    expect(await adminStatus(inviter.id)).toBe('disabled')
   })
 
   it('denies the retired inviter team-granted host access although its team rows stay active', async () => {
@@ -353,6 +538,7 @@ describeRealPostgres('control admin replace-inviter invitations on real PostgreS
       replaceInviter: true,
     })
     if ('error' in handover) throw new Error(handover.error)
+    await inviteDesktopAccess(clientEmail)
     const completed = await completeControlAdminInvitation({
       email: clientEmail,
       invitationId: handover.id,
@@ -481,6 +667,8 @@ describeRealPostgres('control admin replace-inviter invitations on real PostgreS
         username: `race-${randomUUID().slice(0, 8)}`,
         passwordHash: 'real-pg-replace-client',
       })
+      // Observe an early rejection here instead of as an unhandled rejection.
+      completion.catch(() => undefined)
       for (let attempt = 0; ; attempt += 1) {
         const waiting = await adminPool.query(
           `SELECT 1 FROM pg_stat_activity WHERE datname = $1 AND wait_event_type = 'Lock'`,
@@ -504,5 +692,5 @@ describeRealPostgres('control admin replace-inviter invitations on real PostgreS
       [email]
     )
     expect(admins.rowCount).toBe(0)
-  })
+  }, 15_000)
 })

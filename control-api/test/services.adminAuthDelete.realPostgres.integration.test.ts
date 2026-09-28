@@ -3,6 +3,7 @@ import { randomBytes, randomUUID } from 'node:crypto'
 import { Pool } from 'pg'
 import { initDb, pool } from '../src/db.js'
 import { deleteControlAdmin } from '../src/services/adminAuthService.js'
+import './realPostgres.requirement.ts'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
