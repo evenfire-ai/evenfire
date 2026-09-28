@@ -117,6 +117,15 @@ so it never queues behind a visual stream, and a declared length above the
 visual cap is refused 413 before reading. Anonymous, wrong-scope and admin requests keep the
 ordinary limit.
 
+**Per-principal visual share (B4).** In addition to the gate, each platform
+identity (`sub` plus sorted `hostRefs`) may hold at most 2 visual entries
+(running or queued) of the gate's 5. A token whose `sub` is missing, empty or
+not a string is refused 401 before any gate or share is taken. When the share
+is full, the proxy answers 503 `provider_unavailable` and logs
+`grok_proxy_admission_refused` with `reason: visual_host_share`. The share is
+released together with the visual slot: on read-deadline expiry, on client
+close before hand-off, and when the handler's finally block unwinds.
+
 The visual wait uses the request's single admission clock (arrival +
 `maxQueueWaitMs`, 60 s). Unlike the ordinary stream gate, it does not end at
 the ticket's `exp`. A ticket that expired while its visual body waited is
@@ -135,9 +144,9 @@ answered 503 `provider_unavailable` and logged as
 A client that disconnects while its request is queued frees its queue place
 only if Node sees the disconnect. Node keeps reading a queued request's socket
 until the unread body fills the request's buffer (about 16 KiB). A client that
-disconnects before that is seen at once: the wait is aborted, the place is
-freed, and the refusal is logged with `reason: visual_gate` and
-`detail: stream request was aborted`. Every real visual body is larger than
+disconnects before that is seen at once: the wait is aborted and the place is
+freed silently (an aborted waiter is not gate saturation, so it is not logged
+as `visual_gate`). Every real visual body is larger than
 8 MiB, so a disconnect is usually not seen while the request is queued. The
 place is then held until the grant or until the admission clock runs out
 (60 s). At the grant, Node reads the bytes that already reached the server.
@@ -353,8 +362,9 @@ the proxy both surface a size refusal (`kind: 'size'`) as HTTP 413
 (#784; the control-api authorizer answered `invalid_request` for size too
 before it), while the Host raises `request_limit_exceeded` before it
 authorizes at all — for the five size refusals listed under that code below —
-`attachment_too_large` for the image budget refusals, `payload_too_large` for
-the container bound (both classify as `ContextLengthExceeded`), and
+`attachment_too_large` for the image budget refusals (classified as
+`InvalidAttachment`), `payload_too_large` for the container, member and
+element bounds (classified as `ContextLengthExceeded`), and
 `invalid_request` for the rest, which no amount of compaction would fix.
 
 That symmetry holds for a request and not for a response, which is why the

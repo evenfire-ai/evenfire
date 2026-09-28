@@ -440,6 +440,16 @@ behavior changes:
     the in-flight byte budget before it releases its visual slot, so every
     request acquires in the order visual slot, byte budget, stream slot, and
     no two requests can wait on each other.
+
+    **Per-principal visual share (B4).** In addition to the gate, each
+    platform identity (`sub` plus sorted `hostRefs`) may hold at most 4
+    visual entries (running or queued) of the gate's 10. A token whose `sub`
+    is missing, empty or not a string is refused 401 before any gate or
+    share is taken. When the share is full, the proxy answers 503
+    `provider_unavailable` and logs `codex_proxy_admission_refused` with
+    `reason: visual_host_share`. The share is released together with the
+    visual slot: on read-deadline expiry, on client close before hand-off,
+    and when the handler's finally block unwinds.
   - It requires the redeem response to carry `maxStreamDurationMs` greater
     than 0. An absent value is a contract violation, not a default.
   - It logs one `codex_proxy_attempt_finished` event per completion attempt,
