@@ -1,7 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
+import { createServer } from 'node:http'
+import type { AddressInfo } from 'node:net'
 import request from 'supertest'
+import { config } from '../config.js'
 import { createRpcRouter } from '../routes/rpc.js'
+import { forwardHostMessageToHost } from '../services/mcpHostRestService.js'
 
 const authTokenMock = vi.hoisted(() => ({
   verifyRpcToken: vi.fn(),
@@ -62,6 +66,7 @@ const HOST_CONNECTION = {
   url: 'http://chatllm.mcp-host.svc.cluster.local:8080',
   headers: {},
 }
+const originalUpstreamTimeoutMs = config.upstreamTimeoutMs
 
 function makeApp() {
   const app = express()
@@ -98,6 +103,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.useRealTimers()
+  config.upstreamTimeoutMs = originalUpstreamTimeoutMs
 })
 
 describe('POST /rpc/hosts/:hostRef/messages wake-and-hold triggers', () => {
@@ -349,6 +355,34 @@ describe('POST /rpc/hosts/:hostRef/messages wake-and-hold triggers', () => {
 
     expect(response.body).toEqual({ error: 'Gateway Timeout' })
     expect(controlApiMock.requestHostWakeFromControlApi).not.toHaveBeenCalled()
+  })
+
+  it('returns 504 when the real host REST service times out a hanging HTTP request', async () => {
+    config.upstreamTimeoutMs = 25
+    const server = createServer(() => {
+      // Leave the request unanswered so the service timeout must abort it.
+    })
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject)
+      server.listen(0, '127.0.0.1', resolve)
+    })
+    const { port } = server.address() as AddressInfo
+    serviceMock.resolveHostConnectionForUser.mockResolvedValue({
+      ...HOST_CONNECTION,
+      url: `http://127.0.0.1:${port}`,
+    })
+    serviceMock.forwardHostMessageToHost.mockImplementation(
+      forwardHostMessageToHost as typeof serviceMock.forwardHostMessageToHost
+    )
+
+    try {
+      await postMessage(makeApp()).expect(504, { error: 'Gateway Timeout' })
+      expect(serviceMock.forwardHostMessageToHost).toHaveBeenCalledTimes(1)
+      expect(controlApiMock.requestHostWakeFromControlApi).not.toHaveBeenCalled()
+    } finally {
+      server.closeAllConnections()
+      await new Promise<void>(resolve => server.close(() => resolve()))
+    }
   })
 
   it('a wake retry that times out returns 504 instead of 502', async () => {

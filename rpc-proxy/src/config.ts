@@ -12,6 +12,7 @@ type Config = {
   controlApiServiceName: string
   controlApiCacheTtlMs: number
   artifactDownloadMaxBytes: number
+  artifactDownloadTimeoutMs: number
   streamMaxLifetimeMs: number
   streamIntervalMs: number
   streamKeepaliveMs: number
@@ -182,6 +183,10 @@ export const config: Config = {
   controlApiCacheTtlMs: Number(process.env.RPC_PROXY_CONTROL_API_CACHE_TTL_MS || 30000),
   artifactDownloadMaxBytes: parseArtifactDownloadMaxBytes(
     process.env.RPC_PROXY_ARTIFACT_DOWNLOAD_MAX_MB || '50'
+  ),
+  artifactDownloadTimeoutMs: parsePositiveIntMs(
+    'RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS',
+    process.env.RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS || '60000'
   ),
   streamMaxLifetimeMs: Number(process.env.RPC_PROXY_STREAM_MAX_LIFETIME_MS || 600000),
   streamIntervalMs: Number(process.env.RPC_PROXY_STREAM_INTERVAL_MS || 3000),

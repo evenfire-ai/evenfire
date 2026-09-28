@@ -1433,37 +1433,49 @@ export function createRpcRouter(): Router {
         // The success path only commits (`res.send`) at the very end, so a
         // wake retry before that point is safe from duplicate delivery.
         const attemptDownload = async (timeoutMs = config.upstreamTimeoutMs) => {
-          const response = await fetch(
-            `${baseUrl}/v1/runtime/artifacts/${encodeURIComponent(filename)}/download`,
-            {
-              headers: { ...host.headers },
-              signal: AbortSignal.timeout(timeoutMs),
-            }
-          )
-          if (!response.ok) {
-            const errBody = await response.text()
-            const draining = sessionDrainingFence(response, errBody)
-            if (draining) throw draining
-            res.status(response.status).send(errBody)
-            return
-          }
-          const contentType = response.headers.get('content-type') || 'application/octet-stream'
-          const safeFilename = filename.replace(/[^a-zA-Z0-9_.-]/g, '_')
-          const redaction = response.headers.get('x-clerum-redaction')
-          let buffer: Buffer
+          const controller = new AbortController()
+          let timeout = setTimeout(() => controller.abort(), timeoutMs)
           try {
-            buffer = await readArtifactResponseBuffer(response)
-          } catch (error) {
-            if (error instanceof ProxyArtifactTooLargeError) {
-              res.status(413).json({ error: 'Artifact too large to download' })
+            const response = await fetch(
+              `${baseUrl}/v1/runtime/artifacts/${encodeURIComponent(filename)}/download`,
+              {
+                headers: { ...host.headers },
+                signal: controller.signal,
+              }
+            )
+            // The upstream timeout protects connection and header latency. Once
+            // headers arrive, allow the separately bounded artifact transfer to
+            // finish; the small JSON-operation deadline must not truncate a
+            // valid large download while its body is streaming.
+            clearTimeout(timeout)
+            timeout = setTimeout(() => controller.abort(), config.artifactDownloadTimeoutMs)
+            if (!response.ok) {
+              const errBody = await response.text()
+              const draining = sessionDrainingFence(response, errBody)
+              if (draining) throw draining
+              res.status(response.status).send(errBody)
               return
             }
-            throw error
+            const contentType = response.headers.get('content-type') || 'application/octet-stream'
+            const safeFilename = filename.replace(/[^a-zA-Z0-9_.-]/g, '_')
+            const redaction = response.headers.get('x-clerum-redaction')
+            let buffer: Buffer
+            try {
+              buffer = await readArtifactResponseBuffer(response)
+            } catch (error) {
+              if (error instanceof ProxyArtifactTooLargeError) {
+                res.status(413).json({ error: 'Artifact too large to download' })
+                return
+              }
+              throw error
+            }
+            res.setHeader('Content-Type', contentType)
+            res.setHeader('Content-Disposition', `attachment; filename="${safeFilename}"`)
+            if (redaction) res.setHeader('X-Clerum-Redaction', redaction)
+            res.send(buffer)
+          } finally {
+            clearTimeout(timeout)
           }
-          res.setHeader('Content-Type', contentType)
-          res.setHeader('Content-Disposition', `attachment; filename="${safeFilename}"`)
-          if (redaction) res.setHeader('X-Clerum-Redaction', redaction)
-          res.send(buffer)
         }
         try {
           await attemptDownload()

@@ -3,6 +3,7 @@ import express from 'express'
 import request from 'supertest'
 import { config } from '../config.js'
 import { createRpcRouter } from '../routes/rpc.js'
+import { isUpstreamTimeoutError } from '../services/wakeAndHold.js'
 
 // ── Hoisted mocks ───────────────────────────────────────────────────
 const authTokenMock = vi.hoisted(() => ({
@@ -79,6 +80,10 @@ function makeApp() {
   // Generic error handler to avoid unhandled rejections in tests
   app.use(
     (err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+      if (isUpstreamTimeoutError(err)) {
+        res.status(504).json({ error: 'Gateway Timeout' })
+        return
+      }
       res.status(500).json({ error: err instanceof Error ? err.message : 'Internal error' })
     }
   )
@@ -104,6 +109,8 @@ function mockFetchResponse(
 // ── Setup / Teardown ────────────────────────────────────────────────
 const originalFetch = globalThis.fetch
 const originalArtifactDownloadMaxBytes = config.artifactDownloadMaxBytes
+const originalArtifactDownloadTimeoutMs = config.artifactDownloadTimeoutMs
+const originalUpstreamTimeoutMs = config.upstreamTimeoutMs
 
 beforeEach(() => {
   authTokenMock.verifyRpcToken.mockReset()
@@ -123,12 +130,35 @@ beforeEach(() => {
 afterEach(() => {
   globalThis.fetch = originalFetch
   config.artifactDownloadMaxBytes = originalArtifactDownloadMaxBytes
+  config.artifactDownloadTimeoutMs = originalArtifactDownloadTimeoutMs
+  config.upstreamTimeoutMs = originalUpstreamTimeoutMs
 })
 
 // =====================================================================
 // Approval Routes
 // =====================================================================
 describe('POST /rpc/hosts/:hostRef/approvals/approve', () => {
+  it('keeps the upstream timeout on the first approval attempt', async () => {
+    config.upstreamTimeoutMs = 20
+    let signal: AbortSignal | undefined
+    globalThis.fetch = vi.fn().mockImplementation((_url: string, init: RequestInit) => {
+      signal = init.signal as AbortSignal
+      return new Promise((_resolve, reject) => {
+        signal!.addEventListener('abort', () => reject(signal!.reason), { once: true })
+      })
+    })
+
+    const app = makeApp()
+    await request(app)
+      .post('/rpc/hosts/chatllm/approvals/approve')
+      .set('authorization', 'Bearer token')
+      .send({ toolCallId: 'tc-timeout' })
+      .expect(504)
+
+    expect(signal?.aborted).toBe(true)
+    expect(controlApiMock.requestHostWakeFromControlApi).not.toHaveBeenCalled()
+  })
+
   it('translates toolCallId to requestId in upstream body', async () => {
     let capturedBody: string | undefined
     globalThis.fetch = vi.fn().mockImplementation(async (_url: string, init: RequestInit) => {
@@ -615,6 +645,34 @@ describe('POST /rpc/hosts/:hostRef/tasks/:taskId/cancel', () => {
 })
 
 describe('GET /rpc/hosts/:hostRef/artifacts/:filename/download', () => {
+  it('allows the bounded body transfer to outlast the upstream header timeout', async () => {
+    config.upstreamTimeoutMs = 5
+    config.artifactDownloadTimeoutMs = 1_000
+    let signal: AbortSignal | undefined
+    globalThis.fetch = vi.fn().mockImplementation((_url: string, init: RequestInit) => {
+      signal = init.signal as AbortSignal
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        headers: new Headers({ 'content-type': 'application/octet-stream' }),
+        arrayBuffer: async () => {
+          await new Promise(resolve => setTimeout(resolve, 25))
+          expect(signal?.aborted).toBe(false)
+          return new TextEncoder().encode('slow-artifact').buffer as ArrayBuffer
+        },
+      } as unknown as Response)
+    })
+
+    const app = makeApp()
+    const response = await request(app)
+      .get('/rpc/hosts/chatllm/artifacts/slow.bin/download')
+      .set('authorization', 'Bearer token')
+      .expect(200)
+
+    expect(Buffer.from(response.body).toString()).toBe('slow-artifact')
+    expect(signal?.aborted).toBe(false)
+  })
+
   it("rejects filename containing '..'", async () => {
     // Express normalizes "../" in paths, so use URL-encoded dots to test
     // the validation logic when the param actually contains ".."
