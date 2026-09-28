@@ -1532,11 +1532,92 @@ export async function createMcpServer(payload: {
   return apiSend('POST', '/api/v1/admin/mcp-servers', payload) as Promise<McpServerResource>
 }
 
+/** Cleanup stages control-api reports as `pending` when an mcp-server uninstall stops. */
+export type McpServerUninstallStage =
+  | 'contexts'
+  | 'dynamic_client'
+  | 'oauth_grants'
+  | 'secrets'
+  | 'mcp_server'
+
+const MCP_SERVER_UNINSTALL_STAGE_LABELS: Record<McpServerUninstallStage, string> = {
+  contexts: 'agent access',
+  dynamic_client: 'OAuth client registration',
+  oauth_grants: 'OAuth grants',
+  secrets: 'connector Secrets',
+  mcp_server: 'connector resource',
+}
+
+export function isMcpServerUninstallStage(value: unknown): value is McpServerUninstallStage {
+  return typeof value === 'string' && Object.hasOwn(MCP_SERVER_UNINSTALL_STAGE_LABELS, value)
+}
+
+/**
+ * The uninstall stopped at a failing cleanup step; repeating the same DELETE
+ * resumes it. Keeps `status`/`code`/`body` so generic error handling that
+ * inspects them still works. Stages this client does not know are dropped from
+ * `pending` (the message then names only the known ones).
+ */
+export class McpServerUninstallIncompleteError extends Error {
+  readonly status = 503
+  readonly code = 'mcp_server_uninstall_incomplete'
+  /** Human-readable `pending`, e.g. " (pending cleanup: OAuth grants)"; empty when none is known. */
+  readonly pendingSummary: string
+  /**
+   * "is still installed", or "may still be installed" when the CR delete itself
+   * failed: that error does not tell whether the API server already accepted it.
+   */
+  readonly installState: string
+
+  constructor(
+    readonly pending: McpServerUninstallStage[],
+    readonly deleted: string[],
+    readonly body: Record<string, unknown>
+  ) {
+    const labels = pending.map(stage => MCP_SERVER_UNINSTALL_STAGE_LABELS[stage])
+    const pendingSummary = labels.length > 0 ? ` (pending cleanup: ${labels.join(', ')})` : ''
+    const installState = pending.includes('mcp_server')
+      ? 'may still be installed'
+      : 'is still installed'
+    super(
+      `Connector uninstall is incomplete${pendingSummary}. The connector ${installState}; retry the delete to finish.`
+    )
+    this.name = 'McpServerUninstallIncompleteError'
+    this.pendingSummary = pendingSummary
+    this.installState = installState
+  }
+}
+
+function toMcpServerUninstallIncompleteError(
+  err: unknown
+): McpServerUninstallIncompleteError | null {
+  if (!(err instanceof Error) || (err as Error & { status?: unknown }).status !== 503) {
+    return null
+  }
+  const body = apiErrorBody(err)
+  if (
+    !body ||
+    body.error !== 'mcp_server_uninstall_incomplete' ||
+    body.outcome !== 'repair_required'
+  ) {
+    return null
+  }
+  const pending = Array.isArray(body.pending) ? body.pending.filter(isMcpServerUninstallStage) : []
+  const deleted = Array.isArray(body.deleted)
+    ? body.deleted.filter((item): item is string => typeof item === 'string')
+    : []
+  return new McpServerUninstallIncompleteError(pending, deleted, body)
+}
+
 export async function deleteMcpServer(name: string) {
-  return apiSend('DELETE', `/api/v1/admin/mcp-servers/${encodeURIComponent(name)}`) as Promise<{
-    name: string
-    namespace?: string
-  }>
+  try {
+    return (await apiSend('DELETE', `/api/v1/admin/mcp-servers/${encodeURIComponent(name)}`)) as {
+      name: string
+      namespace?: string
+    }
+  } catch (err) {
+    throw toMcpServerUninstallIncompleteError(err) ?? err
+  }
 }
 
 export async function getMcpServer(name: string) {

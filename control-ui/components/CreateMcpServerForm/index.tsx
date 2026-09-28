@@ -9,6 +9,7 @@ import { IconX } from '@/components/icons'
 import { Button, Field, FormSection, SelectInput, TextInput } from '@/components/ui'
 import { getAgentDisplayName } from '@/lib/agentName'
 import {
+  McpServerUninstallIncompleteError,
   createMcpSecret,
   createMcpServer,
   deleteMcpSecret,
@@ -602,10 +603,15 @@ export function CreateMcpServerForm({
       )
       if (oauthScopeError) {
         const rollbackFailures: string[] = []
+        let incompleteUninstall: McpServerUninstallIncompleteError | null = null
         try {
           await deleteMcpServer(name)
-        } catch {
-          rollbackFailures.push('connector')
+        } catch (rollbackError) {
+          if (rollbackError instanceof McpServerUninstallIncompleteError) {
+            incompleteUninstall = rollbackError
+          } else {
+            rollbackFailures.push('connector')
+          }
         }
         if (createdSecretName) {
           try {
@@ -616,13 +622,15 @@ export function CreateMcpServerForm({
             rollbackFailures.push('Secret')
           }
         }
-        setError(
-          rollbackFailures.length === 0
-            ? oauthScopeError
-            : `${oauthScopeError} Automatic cleanup failed for the ${rollbackFailures.join(
-                ' and '
-              )}; remove it before retrying.`
-        )
+        const rollbackNotes = [
+          incompleteUninstall
+            ? `Automatic cleanup of connector "${name}" is incomplete${incompleteUninstall.pendingSummary}; it ${incompleteUninstall.installState}. Delete it from the Installed Connectors list to finish.`
+            : '',
+          rollbackFailures.length > 0
+            ? `Automatic cleanup failed for the ${rollbackFailures.join(' and ')}; remove it before retrying.`
+            : '',
+        ].filter(Boolean)
+        setError([oauthScopeError, ...rollbackNotes].join(' '))
         return
       }
 

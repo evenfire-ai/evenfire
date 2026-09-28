@@ -1,0 +1,6 @@
+{
+  "error": "mcp_server_uninstall_incomplete",
+  "outcome": "repair_required",
+  "pending": ["mcp_server"],
+  "deleted": ["Context/ctx-a (removed from allowlist)", "Secret/srv-credentials"]
+}

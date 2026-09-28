@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
+import { readFileSync } from 'node:fs'
 import request from 'supertest'
 import type { K8sGateway } from '../src/k8s.js'
 import { MockGateway } from './mockGateway.js'
@@ -66,6 +67,16 @@ async function allowlist(gw: MockGateway): Promise<string[]> {
 const grantsPurges = () =>
   dbMock.query.mock.calls.filter(([text]) => /DELETE\s+FROM\s+oauth_grants/i.test(text)).length
 
+// Golden wire bodies, versioned so control-ui's tests load these exact bytes instead of
+// retyping the shape; a producer change fails here and forces the golden to move.
+const wireGolden = (stage: string): unknown =>
+  JSON.parse(
+    readFileSync(
+      new URL(`./fixtures/wire/mcpServerUninstallIncomplete.${stage}.json`, import.meta.url),
+      'utf8'
+    )
+  )
+
 const conflict = () =>
   Object.assign(new Error('the object has been modified'), { statusCode: 409, code: 409 })
 const serverError = () =>
@@ -127,6 +138,7 @@ describe('DELETE /admin/mcp-servers/:name — cleanup before delete, 503 repair_
     const first = await request(app).delete(`/admin/mcp-servers/${SERVER}`)
 
     expect(first.status).toBe(503)
+    expect(first.body).toEqual(wireGolden('secrets'))
     expect(first.body.pending).toEqual(['secrets'])
     expect(first.body.deleted).toEqual(['Context/ctx-a (removed from allowlist)'])
     await expect(gw.getResource('mcpservers', SERVER, NS)).resolves.toBeTruthy()
@@ -154,6 +166,25 @@ describe('DELETE /admin/mcp-servers/:name — cleanup before delete, 503 repair_
     expect(grantsPurges()).toBe(0)
   })
 
+  it('a DB outage during the OAuth teardown reports both OAuth stages and keeps the CR', async () => {
+    const { gw, app } = await setup()
+    dbMock.query.mockImplementation(async (text: string) => {
+      if (/dynamic_clients|oauth_grants/i.test(text)) throw new Error('db unavailable')
+      return { rows: [], rowCount: 0 }
+    })
+
+    try {
+      const res = await request(app).delete(`/admin/mcp-servers/${SERVER}`)
+
+      expect(res.status).toBe(503)
+      expect(res.body).toEqual(wireGolden('oauth'))
+      await expect(gw.getResource('mcpservers', SERVER, NS)).resolves.toBeTruthy()
+      await expect(gw.getSecret(CREDENTIALS, NS)).resolves.toBeTruthy()
+    } finally {
+      dbMock.query.mockImplementation(async () => ({ rows: [], rowCount: 0 }))
+    }
+  })
+
   it('a CR delete failure reports mcp_server with every dependency already cleaned', async () => {
     const { gw, app } = await setup()
     vi.spyOn(gw, 'deleteResource').mockRejectedValueOnce(serverError())
@@ -161,6 +192,7 @@ describe('DELETE /admin/mcp-servers/:name — cleanup before delete, 503 repair_
     const res = await request(app).delete(`/admin/mcp-servers/${SERVER}`)
 
     expect(res.status).toBe(503)
+    expect(res.body).toEqual(wireGolden('mcp_server'))
     expect(res.body.pending).toEqual(['mcp_server'])
     expect(res.body.deleted).toEqual([
       'Context/ctx-a (removed from allowlist)',
