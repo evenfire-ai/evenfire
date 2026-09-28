@@ -75,6 +75,40 @@ describe('GfsImagePreviewBody', () => {
     expect(downloadPreview).not.toHaveBeenCalled()
   })
 
+  it('rejects missing and ambiguous sources before decoding or downloading', async () => {
+    const downloadPreview = stubDownload(new Uint8Array([1]).buffer)
+    const atobSpy = vi.spyOn(window, 'atob')
+    render(<GfsImagePreviewBody byteLength={1} fileName="image.png" mimeType="image/png" />)
+    expect(await screen.findByText('Image preview requires exactly one source')).toBeTruthy()
+    cleanup()
+    render(
+      <GfsImagePreviewBody
+        byteLength={1}
+        fileName="image.png"
+        mimeType="image/png"
+        gfsUri="gfs://main/image-1"
+        dataBase64="AQ=="
+      />
+    )
+    expect(await screen.findByText('Image preview requires exactly one source')).toBeTruthy()
+    expect(downloadPreview).not.toHaveBeenCalled()
+    expect(atobSpy).not.toHaveBeenCalled()
+  })
+
+  it('rejects oversized inline base64 before calling atob even with a small size hint', async () => {
+    const atobSpy = vi.spyOn(window, 'atob')
+    render(
+      <GfsImagePreviewBody
+        byteLength={1}
+        fileName="image.png"
+        mimeType="image/png"
+        dataBase64={'A'.repeat(Math.ceil((GFS_IMAGE_PREVIEW_MAX_BYTES + 1) / 3) * 4)}
+      />
+    )
+    expect(await screen.findByText(/Image previews are limited to 10 MB/)).toBeTruthy()
+    expect(atobSpy).not.toHaveBeenCalled()
+  })
+
   it('renders the heading at the requested level (a page uses h2)', async () => {
     stubDownload(new Uint8Array([1, 2, 3]).buffer)
     render(

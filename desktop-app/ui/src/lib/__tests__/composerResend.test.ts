@@ -161,20 +161,28 @@ describe('buildComposerResendDraft', () => {
     ])
   })
 
-  it('falls back to a name-only plugin reference when the chip label has no namespace', () => {
+  it('warns when a name-only plugin chip has no recoverable namespace', () => {
     const draft = buildComposerResendDraft({
       content: 'Run it',
       attachments: [{ id: 'chip-1', type: 'plugin', label: 'revenue', addedOrder: 0 }],
     })
 
-    expect(draft.referenceAttachments).toEqual([
-      {
-        id: 'plugin:resend:revenue',
-        type: 'plugin',
-        namespace: '',
-        name: 'revenue',
-        label: 'revenue',
-      },
+    expect(draft.referenceAttachments).toEqual([])
+    expect(draft.unrestorable).toEqual([{ type: 'plugin', label: 'revenue' }])
+  })
+
+  it('warns when file chips lack the path or URI needed to resend them', () => {
+    const draft = buildComposerResendDraft({
+      content: 'Read these',
+      attachments: [
+        { id: 'file', type: 'agent_file', label: 'todo.md' },
+        { id: 'global', type: 'global_file', label: 'Report' },
+      ],
+    })
+    expect(draft.referenceAttachments).toEqual([])
+    expect(draft.unrestorable).toEqual([
+      { type: 'agent_file', label: 'todo.md' },
+      { type: 'global_file', label: 'Report' },
     ])
   })
 

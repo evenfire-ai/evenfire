@@ -13,9 +13,8 @@
  *  2. The persisted `attachments` chips (locally optimistic messages) —
  *     uploaded files carry their base64 bytes, references carry labels only.
  *     Labels that still encode the identity (`ns/name`) are split back into
- *     structured fields; bare labels become best-effort references so the
- *     indicator chip still re-appears (re-selecting from the + menu restores
- *     the exact prompt coverage).
+ *     structured fields; bare labels without enough identity are reported as
+ *     unrestorable so the composer never shows a chip that send will omit.
  *
  * `response_file` attachments are never re-applied: they are artifacts the
  * previous reply generated, not inputs of the resent prompt.
@@ -26,6 +25,7 @@ import type {
   ComposerImageAttachment,
   ComposerReferenceAttachment,
 } from '../uiTypes'
+import { estimateBase64DecodedLength } from './base64Size'
 import { parseChatMessageDisplay } from './chatMessageAttachments'
 
 export type ComposerResendDraft = {
@@ -149,7 +149,7 @@ function buildResendImageAttachment(
     name: chip.filename || chip.label,
     mimeType,
     dataBase64,
-    sizeBytes: chip.sizeBytes ?? Math.floor((dataBase64.length * 3) / 4),
+    sizeBytes: chip.sizeBytes ?? estimateBase64DecodedLength(dataBase64),
     previewDataUrl: `data:${mimeType};base64,${dataBase64}`,
   }
 }
@@ -157,10 +157,11 @@ function buildResendImageAttachment(
 function buildPluginReference(
   label: string,
   structured: StructuredPlugin[]
-): Extract<ComposerReferenceAttachment, { type: 'plugin' }> {
+): Extract<ComposerReferenceAttachment, { type: 'plugin' }> | null {
+  const nameMatches = structured.filter(entry => entry.namespace && entry.name === label)
   const match =
     structured.find(entry => entry.namespace && `${entry.namespace}/${entry.name}` === label) ??
-    structured.find(entry => entry.namespace && entry.name === label) ??
+    (nameMatches.length === 1 ? nameMatches[0] : null) ??
     null
   if (match) {
     return {
@@ -181,7 +182,7 @@ function buildPluginReference(
       label: qualified[2],
     }
   }
-  return { id: `plugin:resend:${label}`, type: 'plugin', namespace: '', name: label, label }
+  return null
 }
 
 function buildConnectorReference(
@@ -195,14 +196,17 @@ function buildConnectorReference(
 function buildAgentFileReference(
   label: string,
   structured: StructuredAgentFile[]
-): Extract<ComposerReferenceAttachment, { type: 'agent_file' }> {
+): Extract<ComposerReferenceAttachment, { type: 'agent_file' }> | null {
+  const basenameMatches = structured.filter(
+    entry => entry.filesystemName && pathBasename(entry.path) === label
+  )
   const match =
     structured.find(
       entry =>
         entry.filesystemName &&
         `${entry.filesystemName}/${entry.path.replace(/^\/+/, '')}` === label
     ) ??
-    structured.find(entry => entry.filesystemName && pathBasename(entry.path) === label) ??
+    (basenameMatches.length === 1 ? basenameMatches[0] : null) ??
     null
   if (match) {
     const normalizedPath = match.path.replace(/^\/+|\/+$/g, '')
@@ -216,22 +220,13 @@ function buildAgentFileReference(
       label: pathBasename(normalizedPath) || match.filesystemName,
     }
   }
-  const normalizedLabel = label.replace(/^\/+|\/+$/g, '')
-  return {
-    id: `agent-file:resend:${normalizedLabel}`,
-    type: 'agent_file',
-    contextId: '',
-    filesystemName: '',
-    path: normalizedLabel,
-    kind: 'file',
-    label: pathBasename(normalizedLabel),
-  }
+  return null
 }
 
 function buildGlobalFileReference(
   label: string,
   structured: StructuredGlobalFile[]
-): Extract<ComposerReferenceAttachment, { type: 'global_file' }> {
+): Extract<ComposerReferenceAttachment, { type: 'global_file' }> | null {
   const match =
     structured.find(entry => entry.gfsUri && entry.label === label) ??
     structured.find(entry => entry.gfsUri && pathBasename(entry.gfsUri) === label) ??
@@ -246,14 +241,7 @@ function buildGlobalFileReference(
       label: match.label || pathBasename(match.gfsUri),
     }
   }
-  return {
-    id: `global-file:resend:${label}`,
-    type: 'global_file',
-    resourceId: '',
-    drive: '',
-    gfsUri: '',
-    label,
-  }
+  return null
 }
 
 /**
@@ -284,7 +272,9 @@ export function buildComposerResendDraft(
     }
     if (chip.type === 'response_file') continue
     if (chip.type === 'plugin') {
-      referenceAttachments.push(buildPluginReference(chip.label, structured.plugin))
+      const reference = buildPluginReference(chip.label, structured.plugin)
+      if (reference) referenceAttachments.push(reference)
+      else unrestorable.push({ type: chip.type, label: chip.label })
       continue
     }
     if (chip.type === 'connector') {
@@ -292,11 +282,15 @@ export function buildComposerResendDraft(
       continue
     }
     if (chip.type === 'agent_file') {
-      referenceAttachments.push(buildAgentFileReference(chip.label, structured.agentFile))
+      const reference = buildAgentFileReference(chip.label, structured.agentFile)
+      if (reference) referenceAttachments.push(reference)
+      else unrestorable.push({ type: chip.type, label: chip.label })
       continue
     }
     if (chip.type === 'global_file') {
-      referenceAttachments.push(buildGlobalFileReference(chip.label, structured.globalFile))
+      const reference = buildGlobalFileReference(chip.label, structured.globalFile)
+      if (reference) referenceAttachments.push(reference)
+      else unrestorable.push({ type: chip.type, label: chip.label })
     }
   }
 
