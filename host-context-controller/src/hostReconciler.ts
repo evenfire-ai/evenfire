@@ -5130,8 +5130,7 @@ export class HostReconciler {
         const provision = await this.provisionRuntimeTokenRevision(host, {
           forceFreshForWake: true,
           targetSuspended: lifecycle.effective.state === 'suspended',
-          preserveDeploymentTemplateOnWake:
-            !!liveDeployment && (liveDeployment.spec?.replicas ?? 1) === 0,
+          preserveDeploymentTemplateOnWake: true,
         })
         if (!provision) {
           this.setStatus(host.name, {
