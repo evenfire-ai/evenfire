@@ -8168,7 +8168,7 @@ td.cu-registry-description {
    panel, so this edit flow keeps its margins inside the panel like its
    siblings instead of sitting flush against the panel edges. */
 .cu-channel-edit-form {
-  padding: 1.9rem 2.35rem 1.1rem;
+  padding: var(--cu-space-7) var(--cu-space-7) var(--cu-space-4);
 }
 
 .cu-channel-edit-form .cu-create-actions {

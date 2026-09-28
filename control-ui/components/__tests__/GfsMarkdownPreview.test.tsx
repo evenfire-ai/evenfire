@@ -70,10 +70,8 @@ describe('GfsMarkdownPreview', () => {
     )
     expect(within(article).getByRole('heading', { name: 'Inventory' })).toBeInTheDocument()
     expect(within(article).getByRole('checkbox')).toBeDisabled()
-    expect(within(article).getByRole('img', { name: 'Trend chart' })).toHaveAttribute(
-      'referrerpolicy',
-      'no-referrer'
-    )
+    expect(within(article).queryByRole('img', { name: 'Trend chart' })).toBeNull()
+    expect(article).toHaveTextContent('Trend chart')
     expect(within(article).getByRole('link', { name: 'Documentation' })).toHaveAttribute(
       'target',
       '_blank'
@@ -93,5 +91,21 @@ describe('GfsMarkdownPreview', () => {
     expect(within(article).queryByRole('table')).not.toBeInTheDocument()
     expect(article).toHaveTextContent('Broken')
     expect(article).toHaveTextContent('not a separator')
+  })
+
+  it('renders inline raster images without allowing remote image requests', async () => {
+    renderMarkdownPreview(
+      '![Inline](data:image/png;base64,aGVsbG8=) ![Remote](https://example.com/private.png)'
+    )
+
+    const article = await screen.findByRole('article', {
+      name: 'Markdown preview of inventory.md',
+    })
+    expect(within(article).getByRole('img', { name: 'Inline' })).toHaveAttribute(
+      'src',
+      'data:image/png;base64,aGVsbG8='
+    )
+    expect(within(article).queryByRole('img', { name: 'Remote' })).toBeNull()
+    expect(article).toHaveTextContent('Remote')
   })
 })

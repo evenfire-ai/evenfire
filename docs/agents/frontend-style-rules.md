@@ -72,7 +72,7 @@ GFS Markdown/text file previews with ReactMarkdown + remark-gfm instead of
 tables inside a labelled, keyboard-focusable scrollable table region, which
 `MDEditor.Markdown` cannot preserve without regressing that behavior.
 Guarantees: no rehype-raw, so raw HTML stays inert; `urlTransform` restricts
-image `src` to `https:`/inline `data:image` URIs and link hrefs to
+image `src` to inline `data:image` URIs and link hrefs to
 `http(s):`/`mailto:`/`#` fragments; code blocks render as plain `pre` > `code`.
 The behavior is covered by the GfsMarkdownPreview test suites in both
 applications. This exception is scoped to these preview components only.

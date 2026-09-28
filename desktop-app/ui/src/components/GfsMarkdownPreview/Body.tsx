@@ -4,7 +4,7 @@
 // because the preview must render GFM tables inside a labelled, keyboard-
 // focusable scrollable table region, which `MDEditor.Markdown` cannot preserve
 // without regressing that behavior. Guarantees: no rehype-raw, so raw HTML
-// stays inert; urlTransform restricts `src` to https:/data:image URIs and link
+// stays inert; urlTransform restricts `src` to inline data:image URIs and link
 // hrefs to http(s):/mailto:/# fragments; code blocks render as plain `pre` >
 // `code`. Covered by the GfsMarkdownPreview and GfsMarkdownPreviewBody suites.
 import { useEffect, useId, useRef, useState } from 'react'
@@ -25,7 +25,7 @@ function isPlainTextName(fileName: string): boolean {
 function transformMarkdownUrl(url: string, key: string): string {
   const value = url.trim()
   if (key === 'src') {
-    return /^(?:https:\/\/|data:image\/(?:png|gif|jpe?g|webp);base64,)/i.test(value) ? value : ''
+    return /^data:image\/(?:png|gif|jpe?g|webp);base64,/i.test(value) ? value : ''
   }
   return /^(?:https?:\/\/|mailto:|#)/i.test(value) ? value : ''
 }

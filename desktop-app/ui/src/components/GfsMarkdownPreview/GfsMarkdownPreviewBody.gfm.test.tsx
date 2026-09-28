@@ -61,9 +61,8 @@ describe('GfsMarkdownPreviewBody GFM rendering', () => {
     expect(within(article).getByRole('heading', { name: 'Inventory', level: 1 })).toBeTruthy()
     expect((within(article).getByRole('checkbox') as HTMLInputElement).disabled).toBe(true)
     expect(within(article).getByText('outdated').tagName).toBe('DEL')
-    expect(
-      within(article).getByRole('img', { name: 'Trend chart' }).getAttribute('referrerpolicy')
-    ).toBe('no-referrer')
+    expect(within(article).queryByRole('img', { name: 'Trend chart' })).toBeNull()
+    expect(article.textContent).toContain('Trend chart')
     expect(
       within(article).getByRole('link', { name: 'Documentation' }).getAttribute('target')
     ).toBe('_blank')
@@ -90,5 +89,26 @@ describe('GfsMarkdownPreviewBody GFM rendering', () => {
     expect(article.textContent).toContain('Broken')
     expect(article.textContent).toContain('not a separator')
     expect(container.querySelector('script')).toBeNull()
+  })
+
+  it('renders inline raster images without allowing remote image requests', async () => {
+    const markdown =
+      '![Inline](data:image/png;base64,aGVsbG8=) ![Remote](https://example.com/private.png)'
+    stubDownload(markdown)
+
+    render(
+      <GfsMarkdownPreviewBody
+        byteLength={new TextEncoder().encode(markdown).byteLength}
+        fileName="inline.md"
+        gfsUri="gfs://main/inline"
+      />
+    )
+
+    const article = await screen.findByRole('article', { name: 'Markdown preview of inline.md' })
+    expect(within(article).getByRole('img', { name: 'Inline' }).getAttribute('src')).toBe(
+      'data:image/png;base64,aGVsbG8='
+    )
+    expect(within(article).queryByRole('img', { name: 'Remote' })).toBeNull()
+    expect(article.textContent).toContain('Remote')
   })
 })
