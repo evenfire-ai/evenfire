@@ -3130,13 +3130,46 @@ async function applyMcpSecretRollbackPermitSchema(db: DbClient): Promise<void> {
 }
 
 // A control-admin invitation that, when accepted, hands the inviter's access to
-// the invitee and retires the inviter (completeControlAdminInvitation). Additive
-// and defaulted false, so N-1 pods that never read the column keep today's
-// behavior.
+// the invitee and retires the inviter (completeControlAdminInvitation). The
+// column is additive and defaults false. 0118 refuses acceptance of a true row
+// unless the current pod opts in, so an N-1 pod cannot turn the hand-over
+// into a plain invite.
 async function applyControlAdminInvitationReplaceInviterSchema(db: DbClient): Promise<void> {
   await db.query(`
     ALTER TABLE control_admin_invitations
       ADD COLUMN IF NOT EXISTS replace_inviter BOOLEAN NOT NULL DEFAULT false;
+  `)
+}
+
+// N-1 pods accept an invitation without reading replace_inviter. Without this
+// guard that acceptance commits, the departing admin stays active, and the
+// invitation cannot be replayed. Current pods set the transaction-local GUC
+// before the status update; any other updater fails and leaves the row pending.
+async function applyControlAdminReplaceInviterAcceptGuard(db: DbClient): Promise<void> {
+  await db.query(`
+    CREATE OR REPLACE FUNCTION control_admin_invitation_replace_inviter_accept_guard()
+    RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+    BEGIN
+      IF NEW.replace_inviter
+         AND NEW.status = 'accepted'
+         AND OLD.status IS DISTINCT FROM 'accepted'
+         AND current_setting('evenfire.replace_inviter_handover', true) IS DISTINCT FROM 'on'
+      THEN
+        RAISE EXCEPTION 'replace_inviter_requires_current_control_api'
+          USING ERRCODE = '23514';
+      END IF;
+      RETURN NEW;
+    END;
+    $$;
+
+    DROP TRIGGER IF EXISTS control_admin_invitations_replace_inviter_accept_guard
+      ON control_admin_invitations;
+    CREATE TRIGGER control_admin_invitations_replace_inviter_accept_guard
+      BEFORE UPDATE ON control_admin_invitations
+      FOR EACH ROW
+      EXECUTE FUNCTION control_admin_invitation_replace_inviter_accept_guard();
   `)
 }
 
@@ -6222,6 +6255,10 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   {
     version: '0117_control_admin_invitation_replace_inviter',
     apply: applyControlAdminInvitationReplaceInviterSchema,
+  },
+  {
+    version: '0118_control_admin_replace_inviter_accept_guard',
+    apply: applyControlAdminReplaceInviterAcceptGuard,
   },
 ]
 

@@ -2,10 +2,14 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
 import { config } from '../src/config.js'
+import { rootLogger } from '../src/observability/logger.js'
 import { createAdminAuthRouter } from '../src/routes/admin/auth.js'
 
 const directorySvc = vi.hoisted(() => ({
   provisionAdminDesktopWorkspace: vi.fn(),
+  acceptInvitationById: vi.fn(),
+  getPendingMemberInvitationForEmail: vi.fn(),
+  setInvitationPasswordForUser: vi.fn(),
 }))
 // auth.ts imports provisionAdminDesktopWorkspace from the directory barrel; mock the barrel here.
 vi.mock('../src/services/directory/index.js', () => directorySvc)
@@ -506,5 +510,55 @@ describe('routes/adminAuth', () => {
       email: 'admin@example.com',
       passwordHash: expect.stringMatching(/^\$2/),
     })
+  })
+
+  it('logs a structured error when desktop acceptance fails after the admin invitation commits', async () => {
+    const invitationId = '11111111-1111-4111-8111-111111111111'
+    const adminId = '22222222-2222-4222-8222-222222222222'
+    controlAdminInvitationRegistrationSvc.validateControlAdminInvitationToken.mockResolvedValue({
+      email: 'invitee@example.test',
+      invitationUuid: invitationId,
+    })
+    adminSvc.completeControlAdminInvitation.mockResolvedValue({
+      id: adminId,
+      username: 'new-admin',
+      email: 'invitee@example.test',
+      passwordHash: 'hash',
+      sessionVersion: 1,
+      role: 'admin',
+      status: 'active',
+      failedAttempts: 0,
+      lockedUntil: null,
+    })
+    directorySvc.getPendingMemberInvitationForEmail.mockResolvedValue({ id: 'desk-invite' })
+    directorySvc.acceptInvitationById.mockResolvedValue({ error: 'user_retired' })
+    const errorLog = vi.spyOn(rootLogger, 'error').mockImplementation(() => undefined as never)
+
+    const app = express()
+    app.use(express.json())
+    app.use(createAdminAuthRouter())
+
+    const res = await request(app).post('/admin/auth/control-admin-invitations/complete').send({
+      token: 'signed.jwt.value',
+      email: 'invitee@example.test',
+      username: 'new-admin',
+      password: 'example-password',
+    })
+
+    expect(res.status).toBe(409)
+    expect(res.body).toEqual({ error: 'user_retired' })
+    expect(errorLog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: 'control_admin_desktop_acceptance_failed',
+        invitationId,
+        adminId,
+        errorCode: 'user_retired',
+      }),
+      expect.any(String)
+    )
+    const payload = errorLog.mock.calls[0]?.[0] as Record<string, unknown>
+    expect(payload).not.toHaveProperty('email')
+    expect(JSON.stringify(payload)).not.toContain('invitee@example.test')
+    errorLog.mockRestore()
   })
 })

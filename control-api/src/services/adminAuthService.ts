@@ -34,6 +34,8 @@ export type ControlAdminListItem = {
   status: 'active' | 'disabled' | 'pending_password'
   passwordPending?: boolean
   invitationId?: string
+  replaceInviter?: boolean
+  invitedByAdminId?: string | null
   gfsOperatorLink?: {
     desktopUserId: string
     controlAdminId: string
@@ -744,7 +746,8 @@ export async function listControlAdmins(): Promise<{
         ORDER BY a.created_at ASC`
     ),
     pool.query(
-      `SELECT id, email, expires_at, created_at, accepted_at
+      `SELECT id, email, expires_at, created_at, accepted_at,
+              invited_by_admin_id, replace_inviter
          FROM control_admin_invitations
         WHERE status = 'opened'
           AND expires_at > NOW()
@@ -834,6 +837,8 @@ export async function listControlAdmins(): Promise<{
           expires_at: Date
           created_at: Date
           accepted_at: Date | null
+          invited_by_admin_id: string | null
+          replace_inviter: boolean | null
         }
         return {
           id: `invitation:${record.id}`,
@@ -843,6 +848,8 @@ export async function listControlAdmins(): Promise<{
           status: 'pending_password' as const,
           passwordPending: true,
           invitationId: record.id,
+          replaceInviter: record.replace_inviter === true,
+          invitedByAdminId: record.invited_by_admin_id ?? null,
           lastLoginAt: null,
           createdAt: record.accepted_at
             ? record.accepted_at.toISOString()
@@ -858,7 +865,7 @@ export async function createControlAdminInvitation(
   email: string,
   invitedByAdminId: string,
   options: { replaceInviter?: boolean } = {}
-): Promise<ControlAdminInvitationRecord | { error: 'duplicate_email' }> {
+): Promise<ControlAdminInvitationRecord | { error: 'duplicate_email' | 'inviter_not_active' }> {
   const normalizedEmail = normalizeEmail(email)
   const replaceInviter = options.replaceInviter === true
   // Revoke expired active invitations first so the INSERT guard can treat any remaining
@@ -875,8 +882,16 @@ export async function createControlAdminInvitation(
   let result
   try {
     result = await pool.query(
-      `INSERT INTO control_admin_invitations(email, invited_by_admin_id, replace_inviter)
-       SELECT $1, $2, $3::boolean
+      `WITH locked_inviter AS (
+         SELECT id
+           FROM control_admin_users
+          WHERE id = $2::uuid
+            AND status = 'active'
+          FOR UPDATE
+       )
+       INSERT INTO control_admin_invitations(email, invited_by_admin_id, replace_inviter)
+       SELECT $1, locked_inviter.id, $3::boolean
+         FROM locked_inviter
         WHERE NOT EXISTS (
           SELECT 1 FROM control_admin_users WHERE lower(email) = lower($1)
         )
@@ -902,7 +917,14 @@ export async function createControlAdminInvitation(
     throw error
   }
 
-  if ((result.rowCount ?? 0) === 0) return { error: 'duplicate_email' }
+  if ((result.rowCount ?? 0) === 0) {
+    const inviter = await pool.query(`SELECT status FROM control_admin_users WHERE id = $1::uuid`, [
+      invitedByAdminId,
+    ])
+    const status = (inviter.rows[0] as { status?: string } | undefined)?.status
+    if (status !== 'active') return { error: 'inviter_not_active' }
+    return { error: 'duplicate_email' }
+  }
   return mapInvitationRow(result.rows[0] as never)
 }
 
@@ -1040,6 +1062,12 @@ export async function completeControlAdminInvitation(input: {
     )
     const admin = mapAdminRow(inserted.rows[0] as never)
 
+    // 0118 rejects this update unless the current pod opts in. An N-1 pod has
+    // no such opt-in, so it cannot accept a hand-over as a plain invitation.
+    if (invitation.replaceInviter) {
+      await db.query(`SELECT set_config('evenfire.replace_inviter_handover', 'on', true)`)
+    }
+
     await db.query(
       `UPDATE control_admin_invitations
           SET status = 'accepted',
@@ -1082,8 +1110,13 @@ const TEAM_ROLE_RANK = (column: string) =>
 
 /**
  * Hand the inviter's access to the invitee and retire the inviter, inside the
- * transaction that created the invitee's control admin. An inviter that is
- * gone or no longer active has nothing to hand over; the caller still commits.
+ * transaction that created the invitee's control admin.
+ *
+ * An inviter that is missing or not active is left as it is. That is not an
+ * empty hand-over: deleteControlAdmin disables the control admin and can leave
+ * the desktop user, its team memberships, and its approval accounts active.
+ * Skipping avoids retiring that desktop identity again and does not transfer
+ * its roles. The skip is logged with the invitation id and the inviter id.
  */
 async function replaceInviterInTransaction(
   db: DbClient,
@@ -1099,50 +1132,103 @@ async function replaceInviterInTransaction(
   const inviter = inviterResult.rows[0] as
     | { id: string; email: string | null; status: 'active' | 'disabled' }
     | undefined
-  if (!inviter || inviter.status !== 'active') return null
+  if (!inviter || inviter.status !== 'active') {
+    rootLogger.warn(
+      {
+        event: 'control_admin_replace_inviter_skipped',
+        invitationId: input.invitationId,
+        inviterAdminId: input.inviterAdminId,
+        inviterStatus: inviter?.status ?? 'missing',
+      },
+      'replace-inviter hand-over skipped because the inviter is not active'
+    )
+    return null
+  }
 
-  // The active operator link names the inviter's desktop user exactly; an admin
-  // email change (completeControlAdminEmailChangeRequest) never updates
-  // users.email. Invited admins have no link (links come only from
-  // initial_setup), so the shared email is their only mapping.
-  const linkedDesktop = await db.query(
-    `SELECT u.id::text AS id
+  // The most recent operator link names this admin's desktop user, revoked or
+  // not. An admin email change never updates users.email, and a revoked link
+  // must not fall through to that email. Email is only the mapping for an
+  // invited admin, who has no link history, and it must not select a user
+  // linked to a different admin.
+  const linkHistory = await db.query(
+    `SELECT u.id::text AS id, u.email, u.lifecycle_state
        FROM gfs_desktop_operator_links link
        JOIN users u ON u.id = link.user_id
       WHERE link.control_admin_id = $1::uuid
-        AND link.state = 'active'
-        AND u.lifecycle_state = 'active'
+      ORDER BY link.generation DESC, link.created_at DESC
+      LIMIT 1
       FOR UPDATE OF u`,
     [inviter.id]
   )
-  const inviterDesktop =
-    (linkedDesktop.rowCount ?? 0) > 0 || !inviter.email
-      ? linkedDesktop
-      : await db.query(
-          `SELECT id::text AS id
-             FROM users
-            WHERE lower(email) = lower($1)
-              AND lifecycle_state = 'active'
-            LIMIT 1
-            FOR UPDATE`,
-          [inviter.email]
-        )
-  const inviterDesktopUserId = (inviterDesktop.rows[0] as { id: string } | undefined)?.id ?? null
+  const linked = linkHistory.rows[0] as
+    | { id: string; email: string | null; lifecycle_state: string }
+    | undefined
+  let inviterDesktop: { id: string; email: string | null } | undefined
+  if (linked?.lifecycle_state === 'active') {
+    inviterDesktop = linked
+  } else if (!linked && inviter.email) {
+    const emailMatch = await db.query(
+      `SELECT u.id::text AS id, u.email
+         FROM users u
+        WHERE lower(u.email) = lower($1)
+          AND u.lifecycle_state = 'active'
+          AND NOT EXISTS (
+            SELECT 1
+              FROM gfs_desktop_operator_links l
+             WHERE l.user_id = u.id
+               AND l.control_admin_id <> $2::uuid
+          )
+        ORDER BY u.id
+        LIMIT 1
+        FOR UPDATE OF u`,
+      [inviter.email, inviter.id]
+    )
+    inviterDesktop = emailMatch.rows[0] as { id: string; email: string | null } | undefined
+  }
+  const inviterDesktopUserId = inviterDesktop?.id ?? null
+  const inviterDesktopEmail = inviterDesktop?.email ?? null
   // completeControlAdminInvitation always inserts the normalized invitation email.
   const newAdminEmail = input.newAdmin.email ?? ''
 
   if (inviterDesktopUserId) {
-    // Retiring the inviter must not drop team access nobody receives: without a
-    // desktop user or pending desktop invitation for the invitee, refuse.
+    // The invitee is the inviter's own desktop user. Copying roles onto that
+    // row and then retiring it drops the teams on the only person who held them.
+    if (
+      inviterDesktopEmail &&
+      newAdminEmail &&
+      inviterDesktopEmail.toLowerCase() === newAdminEmail.toLowerCase()
+    ) {
+      return 'replace_inviter_receiver_missing'
+    }
+
+    // Retiring the inviter must not drop team access nobody can receive. A
+    // non-active user holding the invitee email cannot accept the desktop
+    // invitation, and the inviter's own desktop user is not a receiver.
     const receiver = await db.query(
       `SELECT
          EXISTS(SELECT 1 FROM team_members WHERE user_id = $1::uuid AND status = 'active') AS has_roles,
-         EXISTS(SELECT 1 FROM users WHERE lower(email) = lower($2) AND lifecycle_state = 'active')
-           OR EXISTS(SELECT 1 FROM invitations
-                      WHERE lower(email) = lower($2)
-                        AND purpose = 'admin_desktop_access'
-                        AND status = 'pending'
-                        AND expires_at > NOW()) AS has_receiver`,
+         (
+           NOT EXISTS (
+             SELECT 1 FROM users
+              WHERE lower(email) = lower($2)
+                AND lifecycle_state <> 'active'
+           )
+           AND (
+             EXISTS (
+               SELECT 1 FROM users
+                WHERE lower(email) = lower($2)
+                  AND lifecycle_state = 'active'
+                  AND id <> $1::uuid
+             )
+             OR EXISTS (
+               SELECT 1 FROM invitations
+                WHERE lower(email) = lower($2)
+                  AND purpose = 'admin_desktop_access'
+                  AND status = 'pending'
+                  AND expires_at > NOW()
+             )
+           )
+         ) AS has_receiver`,
       [inviterDesktopUserId, newAdminEmail]
     )
     const { has_roles: hasRoles, has_receiver: hasReceiver } = receiver.rows[0] as {
@@ -1159,6 +1245,7 @@ async function replaceInviterInTransaction(
          JOIN users target
            ON lower(target.email) = lower($2)
           AND target.lifecycle_state = 'active'
+          AND target.id <> $1::uuid
         WHERE source.user_id = $1::uuid
           AND source.status = 'active'
        ON CONFLICT (team_id, user_id) DO UPDATE
@@ -1173,8 +1260,9 @@ async function replaceInviterInTransaction(
       [inviterDesktopUserId, newAdminEmail]
     )
     // (1b) The desktop invitation is accepted after this transaction commits
-    // (auth.ts:504-507) and upserts role = EXCLUDED.role (membership.ts:319-326),
-    // so the roles must also live on the invitation or 1a would be downgraded.
+    // (POST /admin/auth/control-admin-invitations/complete) and upserts
+    // role = EXCLUDED.role, so the copied role has to already be on the
+    // invitation or 1a would be downgraded.
     // Each copied role is the higher of the inviter's and any role the invitee's
     // desktop user already holds, which acceptance would otherwise overwrite.
     // Materialize a legacy single-team invitation first so adding rows cannot
@@ -1222,27 +1310,9 @@ async function replaceInviterInTransaction(
       [inviterDesktopUserId, newAdminEmail]
     )
 
-    // (2) Retire, never hard-delete, the inviter's desktop identity. Its approval
-    // medium accounts go first: the approval reader grants canApprove on an
-    // enabled account alone (workflowApprovalReader.ts:763-773) and never reads
-    // users.lifecycle_state; the retained tombstone path skips the disable that
-    // retireDesktopUser's hard-delete branch does (users.ts:483-499).
-    await db.query(
-      `UPDATE workflow_approval_medium_accounts
-          SET disabled_at = COALESCE(disabled_at, NOW()),
-              updated_at = NOW()
-        WHERE user_id = $1::uuid
-          AND disabled_at IS NULL`,
-      [inviterDesktopUserId]
-    )
-    await db.query(
-      `UPDATE workflow_approval_medium_challenges
-          SET consumed_at = COALESCE(consumed_at, NOW()),
-              expires_at = LEAST(expires_at, NOW())
-        WHERE user_id = $1::uuid
-          AND consumed_at IS NULL`,
-      [inviterDesktopUserId]
-    )
+    // (2) Retire, never hard-delete, the inviter's desktop identity.
+    // retireDesktopUser disables approval medium accounts on the tombstone
+    // path as well as the hard-delete path.
     await retireDesktopUserInTransaction(db, {
       actor: { kind: 'control_admin', controlAdminId: input.newAdmin.id },
       userId: inviterDesktopUserId,
