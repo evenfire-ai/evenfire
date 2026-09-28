@@ -109,7 +109,7 @@ type ResourceLister = { listResource(plural: string, namespace?: string): Promis
 // transport failures (503 "could not be reached"). The K8s client sets no
 // request timeout, so node-fetch's 'request-timeout' FetchError does not occur
 // on these reads; like any other status-less error it would be rethrown.
-function isTransportError(err: unknown): boolean {
+export function isTransportError(err: unknown): boolean {
   if (!(err instanceof Error)) return false
   if (err.name === 'AbortError') return true
   const e = err as { type?: unknown; code?: unknown }
@@ -119,7 +119,7 @@ function isTransportError(err: unknown): boolean {
 // The upstream HTTP status of a failed apiserver call, or null for a transport
 // failure. Any other error is not an apiserver failure and is rethrown
 // unchanged; the global handler then decides its status (500 for a plain Error).
-function upstreamStatusOrRethrow(err: unknown): number | null {
+export function upstreamStatusOrRethrow(err: unknown): number | null {
   const upstreamStatus = extractHttpStatus(err)
   if (upstreamStatus === null && !isTransportError(err)) throw err
   return upstreamStatus
@@ -130,7 +130,7 @@ function upstreamStatusOrRethrow(err: unknown): number | null {
 // extractK8sError falls back to `err.message` when the Status body is empty,
 // and a raw ApiException's `.message` embeds every apiserver response header,
 // so that fallback is discarded here.
-function upstreamReason(err: unknown, upstreamStatus: number | null): string | null {
+export function upstreamReason(err: unknown, upstreamStatus: number | null): string | null {
   if (upstreamStatus === null) {
     const code = (err as { code?: unknown }).code
     return typeof code === 'string' ? code : (err as Error).name
