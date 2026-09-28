@@ -232,6 +232,8 @@ function parseRoute(req: AuthedRequest): ParseResult {
     const taskId = String(req.params.taskId || '').trim()
     if (!hostRef) return fail('hostRef is required')
     const progress = route.endsWith('/progress/stream')
+    if (progress && (!safePathSegment(hostRef) || /[*%]/.test(hostRef)))
+      return fail('Invalid hostRef')
     if (
       progress
         ? !taskId || taskId.length > 128 || !/^[a-zA-Z0-9_-]+$/.test(taskId)
