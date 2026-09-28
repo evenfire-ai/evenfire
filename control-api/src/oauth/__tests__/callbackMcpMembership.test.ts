@@ -241,9 +241,11 @@ describe('handleOAuthCallback — mcp context membership guard (R3-L1)', () => {
     expect((values as unknown[]).at(-1)).toBe('uid-live-cr')
   })
 
-  // A grant with NO subject cr_uid (a legacy/authorize-url path that never read a
-  // live CR) persists cr_uid NULL — never crashes, and stays purgeable by any teardown.
-  it('persists cr_uid NULL when the subject carries no uid', async () => {
+  // Pins current behaviour for a subject read from a CR without `metadata.uid`,
+  // which a real apiserver never returns: the callback persists cr_uid NULL
+  // instead of failing closed. Such a row is still purgeable by any teardown, but
+  // the readers only serve it to a baked key of the same provider.
+  it('persists cr_uid NULL for a subject read from a CR without a uid (current behaviour)', async () => {
     const deps = buildDeps({
       subject: mcpSubject({ grantScope: 'user', contextRef: undefined, crUid: undefined }),
       userContextsReader: vi.fn(async () => ({ contextIds: [] })),

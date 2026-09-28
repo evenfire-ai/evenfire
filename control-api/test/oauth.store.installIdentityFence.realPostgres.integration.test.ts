@@ -2,10 +2,13 @@
  * Installation-identity fence on the grant READERS, on a real Postgres.
  *
  * A same-name reinstall of an OAuth McpServer gets a new `metadata.uid`. Grants
- * consented against the previous installation must be invisible to the readers
- * of the new one (`getOAuthGrant` / `oauthGrantExists`), even if the uninstall
- * never purged them — otherwise a reinstall that reuses the same `oauth.id`
- * silently re-authorizes every previous user.
+ * SEALED against the previous installation must be invisible to the readers of
+ * the new one (`getOAuthGrant` / `oauthGrantExists`), even if the uninstall never
+ * purged them — otherwise a reinstall that reuses the same `oauth.id` silently
+ * re-authorizes every previous user. An unsealed (legacy) grant, written by a pod
+ * without install identity, is visible only to a baked installation of the same
+ * provider; other lanes and providers are covered by
+ * `oauth.legacyGrantLaneFence.realPostgres.integration.test.ts`.
  *
  * Fixtures come from the real producers (T1): the two installations are created
  * in the gateway (which assigns each its uid, as the apiserver does), the reader
@@ -176,7 +179,7 @@ describeRealPostgres('grant readers fenced by the live installation uid (real Po
     expect((await getOAuthGrant(db, KEY, readerKey(old, name)))?.accessToken).toBe('at-shared')
   })
 
-  it('an unsealed (legacy) grant stays visible to the live installation', async () => {
+  it('an unsealed (legacy) grant stays visible to a baked installation of the same provider', async () => {
     const name = `fence-legacy-${randomUUID().slice(0, 8)}`
     const { live } = await installThenReinstall(name, 'user')
     await consentUser(name, 'user-1', undefined)

@@ -246,7 +246,7 @@ describeRealPostgres('proactive refresh sweep — installation identity (real Po
     expect(dead?.refreshToken).toBe('RT-DEAD')
   })
 
-  it('leaves an unsealed (legacy) grant to the reactive path: not enumerated, not POSTed', async () => {
+  it('never touches an unsealed (legacy) remote grant: not enumerated, not POSTed', async () => {
     await dbPool.query('DELETE FROM oauth_grants')
     const gateway = new MockGateway(NS)
     await createCr(gateway, 'cron-legacy')
