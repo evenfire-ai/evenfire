@@ -298,6 +298,28 @@ describe('Spec 65 legacy Host-RPC admission ordering (real Control API token pro
     expect(service.resolveHostConnectionForUser).not.toHaveBeenCalled()
   })
 
+  it('preserves session path-error precedence over malformed pagination before admission', async () => {
+    const invalidPath = await request(app())
+      .get('/rpc/hosts/chat%2Fllm/sessions/chatllm/session-a/messages?limit=not-a-number')
+      .set('authorization', `Bearer ${signedAccessToken}`)
+      .expect(400)
+
+    expect(invalidPath.body).toEqual({ error: 'Invalid hostRef, agent, or chatId' })
+    expect(events.values).toEqual([])
+    expect(controlApi.requestHostRpcAdmission).not.toHaveBeenCalled()
+    expect(service.resolveHostConnectionForUser).not.toHaveBeenCalled()
+
+    const invalidQuery = await request(app())
+      .get('/rpc/hosts/chatllm/sessions/chatllm/session-a/messages?limit=not-a-number')
+      .set('authorization', `Bearer ${signedAccessToken}`)
+      .expect(400)
+
+    expect(invalidQuery.body).toEqual({ error: 'Invalid session messages pagination query' })
+    expect(events.values).toEqual([])
+    expect(controlApi.requestHostRpcAdmission).not.toHaveBeenCalled()
+    expect(service.resolveHostConnectionForUser).not.toHaveBeenCalled()
+  })
+
   it.each([
     {
       name: 'approval write without an effective request ID',
