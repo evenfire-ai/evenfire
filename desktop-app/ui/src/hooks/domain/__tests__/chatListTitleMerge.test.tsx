@@ -284,7 +284,7 @@ describe('revoked host catalog protection', () => {
   })
 
   it.each([401, 403])(
-    'keeps cached sessions visible when the catalog returns a generic %i twice',
+    'blocks the Host after a generic %i catalog denial survives the forced retry',
     async status => {
       const blocked = new Set<string>()
       clerum.chat.getIndex.mockResolvedValue(
@@ -299,30 +299,28 @@ describe('revoked host catalog protection', () => {
         isHostAccessBlocked: agentRef => blocked.has(agentRef),
       })
 
-      await waitFor(() =>
-        expect(result.current.latestChatSessions.some(chat => chat.id === 'protected-a')).toBe(true)
-      )
+      await waitFor(() => expect(blocked.has('agent-a')).toBe(true))
       expect(clerum.rpc.listSessions).toHaveBeenCalledTimes(2)
-      expect(blocked.has('agent-a')).toBe(false)
+      expect(result.current.latestChatSessions.some(chat => chat.id === 'protected-a')).toBe(false)
     }
   )
 
-  it('marks Host authority uncertain after a 503 catalog failure', async () => {
+  it('keeps the selected agent and cached chat list after a 503 catalog failure', async () => {
     const blocked = new Set<string>()
     clerum.chat.getIndex.mockResolvedValue(localIndex([{ id: 'cached-a', title: 'Cached chat' }]))
-    clerum.rpc.listSessions.mockRejectedValue(
-      new Error('503 Service Unavailable: upstream body mentioned 403')
-    )
+    clerum.rpc.listSessions.mockRejectedValue(new Error('503 Service Unavailable'))
     const { result } = renderController({
-      selectedAgent: null,
+      selectedAgent: 'agent-a',
       agentNames: ['agent-a'],
       onHostAccessRevoked: agentRef => blocked.add(agentRef),
       onHostAuthorityUncertain: agentRef => blocked.add(agentRef),
       isHostAccessBlocked: agentRef => blocked.has(agentRef),
     })
     await waitFor(() => expect(clerum.rpc.listSessions).toHaveBeenCalled())
-    await waitFor(() => expect(blocked.has('agent-a')).toBe(true))
-    expect(result.current.latestChatSessions.some(chat => chat.id === 'cached-a')).toBe(false)
+    await waitFor(() =>
+      expect(result.current.chatList.some(chat => chat.id === 'cached-a')).toBe(true)
+    )
+    expect(blocked.has('agent-a')).toBe(false)
   })
 })
 

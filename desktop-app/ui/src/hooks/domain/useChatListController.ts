@@ -429,7 +429,7 @@ export function useChatListController({
             !isHostAccessBlocked(agentRef)
           ) {
             if (isConfirmedHostAccessRevoked(error)) onHostAccessRevoked(agentRef)
-            else if (!isAuthorizationError(error)) onHostAuthorityUncertain(agentRef)
+            else if (isAuthorizationError(error)) onHostAuthorityUncertain(agentRef)
             if (
               !isConfirmedHostAccessRevoked(error) &&
               !catalogOfflineByAgentRef.current.has(agentRef)
@@ -621,7 +621,7 @@ export function useChatListController({
           !isHostAccessBlocked(agentRef)
         ) {
           if (isConfirmedHostAccessRevoked(error)) onHostAccessRevoked(agentRef)
-          else if (!isAuthorizationError(error)) onHostAuthorityUncertain(agentRef)
+          else if (isAuthorizationError(error)) onHostAuthorityUncertain(agentRef)
           if (
             !isConfirmedHostAccessRevoked(error) &&
             !catalogOfflineByAgentRef.current.has(agentRef)
@@ -1473,7 +1473,7 @@ export function useChatListController({
                 !isHostAccessBlocked(agentRef)
               ) {
                 if (isConfirmedHostAccessRevoked(error)) onHostAccessRevoked(agentRef)
-                else if (!isAuthorizationError(error)) onHostAuthorityUncertain(agentRef)
+                else if (isAuthorizationError(error)) onHostAuthorityUncertain(agentRef)
                 if (
                   !isConfirmedHostAccessRevoked(error) &&
                   !catalogOfflineByAgentRef.current.has(agentRef)
