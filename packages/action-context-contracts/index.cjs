@@ -60,9 +60,12 @@ function normalizeSessionTitle(input) {
 function validateSessionRenameTitle(value) {
   const rawTitle = typeof value === 'string' ? value : ''
   const title = normalizeSessionTitle(rawTitle)
+  const exceedsCodePointLimit =
+    title.length > MAX_SESSION_TITLE_CODE_POINTS * 2 ||
+    Array.from(title).length > MAX_SESSION_TITLE_CODE_POINTS
   if (
     title.length === 0 ||
-    Array.from(title).length > MAX_SESSION_TITLE_CODE_POINTS ||
+    exceedsCodePointLimit ||
     Buffer.byteLength(title, 'utf8') > MAX_SESSION_TITLE_BYTES
   ) {
     return Object.freeze({ ok: false, error: 'invalid title' })
