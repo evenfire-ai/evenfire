@@ -37,24 +37,37 @@ const DIGEST_KEYS = new Set(['algorithm', 'hex'])
 const DETECTIONS = new Set(['magic', 'text_utf8', 'declared'])
 const SHA256_HEX = /^[0-9a-f]{64}$/
 const GFS_RID = /^[0-9a-f]{32}$/
+const FILE_REFERENCE_MAX_COUNT = 10
 
 // Characters JSON.stringify leaves raw that still break or hide model-visible
-// text: C1 controls, zero-width characters, the Unicode line and paragraph
-// separators, bidi embedding/override/isolate controls and the BOM.
+// text: DEL, C1 controls, soft hyphen and the Mongolian vowel separator,
+// Hangul fillers, zero-width characters, the Unicode line and paragraph
+// separators, bidi controls, invisible joiners and math operators, variation
+// selectors, the BOM and the Unicode tag block. Angle brackets are escaped too,
+// so a quoted value can never contribute a closing turn-context tag.
 const UNSAFE_AFTER_JSON =
-  /[\u{80}-\u{9f}\u{200b}-\u{200f}\u{2028}\u{2029}\u{202a}-\u{202e}\u{2066}-\u{2069}\u{feff}]/gu
+  /[<>\u{7f}\u{80}-\u{9f}\u{ad}\u{61c}\u{115f}\u{1160}\u{180e}\u{200b}-\u{200f}\u{2028}\u{2029}\u{202a}-\u{202e}\u{2060}-\u{2064}\u{2066}-\u{2069}\u{3164}\u{fe00}-\u{fe0f}\u{feff}\u{e0000}-\u{e007f}]/gu
 
 /**
  * Quotes a value for text a model reads (a file name, a path, a label). The
  * result is a JSON string literal with every line-breaking or invisible
- * character escaped, so the value stays on its line and inside its quotes.
+ * character escaped and angle brackets neutralized, so the value stays on its
+ * line and inside its quotes and cannot close the surrounding turn-context tag.
  */
 function quotePromptValue(value) {
   if (typeof value !== 'string') throw new TypeError('quotePromptValue requires a string.')
-  return JSON.stringify(value).replace(
-    UNSAFE_AFTER_JSON,
-    char => `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`
+  return JSON.stringify(value).replace(UNSAFE_AFTER_JSON, char =>
+    escapeCodePoint(char.codePointAt(0))
   )
+}
+
+/** One JSON \\uXXXX escape per code unit; an astral code point emits its pair. */
+function escapeCodePoint(codePoint) {
+  if (codePoint <= 0xffff) return `\\u${codePoint.toString(16).padStart(4, '0')}`
+  const offset = codePoint - 0x10000
+  const high = 0xd800 + Math.floor(offset / 0x400)
+  const low = 0xdc00 + (offset % 0x400)
+  return `\\u${high.toString(16)}\\u${low.toString(16)}`
 }
 
 /** A resource id as gfsc names it: 32 lowercase hex digits, without dashes. */
@@ -73,6 +86,12 @@ function isPlainObject(value) {
 
 function unknownKey(value, allowed) {
   return Object.keys(value).find(key => !allowed.has(key))
+}
+
+/** Client input echoed in a refusal message, bounded so it cannot relay megabytes. */
+function echo(value) {
+  const text = String(value)
+  return text.length > 40 ? `${text.slice(0, 40)}…` : text
 }
 
 function isNonEmptyString(value) {
@@ -117,7 +136,7 @@ function parseSource(source) {
   if (!isPlainObject(source)) return { problem: 'source must be an object' }
   if (source.kind === 'attachment') {
     const extra = unknownKey(source, ATTACHMENT_SOURCE_KEYS)
-    if (extra) return { problem: `source has unknown field ${extra}` }
+    if (extra) return { problem: `source has unknown field ${echo(extra)}` }
     if (!isNonEmptyString(source.attachmentId) || !isNonEmptyString(source.messageId)) {
       return { problem: 'attachment source requires attachmentId and messageId' }
     }
@@ -127,7 +146,7 @@ function parseSource(source) {
   }
   if (source.kind === 'gfs') {
     const extra = unknownKey(source, GFS_SOURCE_KEYS)
-    if (extra) return { problem: `source has unknown field ${extra}` }
+    if (extra) return { problem: `source has unknown field ${echo(extra)}` }
     if (
       !isNonEmptyString(source.drive) ||
       !isNonEmptyString(source.resourceId) ||
@@ -204,11 +223,11 @@ function parseFileReferenceV1(input) {
     return {
       ok: false,
       code: SCHEMA_VERSION_UNSUPPORTED,
-      message: `unsupported file reference schemaVersion ${JSON.stringify(input.schemaVersion)}; expected ${FILE_REFERENCE_SCHEMA_VERSION}`,
+      message: `unsupported file reference schemaVersion ${echo(JSON.stringify(input.schemaVersion))}; expected ${FILE_REFERENCE_SCHEMA_VERSION}`,
     }
   }
   const extra = unknownKey(input, TOP_LEVEL_KEYS)
-  if (extra) return fail(`file reference has unknown field ${extra}`)
+  if (extra) return fail(`file reference has unknown field ${echo(extra)}`)
 
   const source = parseSource(input.source)
   if (source.problem) return fail(source.problem)
@@ -315,6 +334,7 @@ function buildGfsFileReference(fields) {
 
 module.exports = {
   FILE_REFERENCE_SCHEMA_VERSION,
+  FILE_REFERENCE_MAX_COUNT,
   buildAttachmentFileReference,
   buildGfsFileReference,
   deriveFileReferenceId,

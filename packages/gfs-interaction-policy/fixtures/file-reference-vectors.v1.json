@@ -176,6 +176,64 @@
       }
     },
     {
+      "name": "attachment source without attachmentId",
+      "input": {
+        "schemaVersion": 1,
+        "id": "att:msg-1:att-1@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "source": {
+          "kind": "attachment",
+          "attachmentId": "",
+          "messageId": "msg-1"
+        },
+        "name": "notes.md",
+        "declaredMediaType": "text/markdown",
+        "detectedMediaType": "text/markdown",
+        "class": "markdown",
+        "detection": "text_utf8",
+        "mismatch": false,
+        "byteLength": 12,
+        "digest": {
+          "algorithm": "sha256",
+          "hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "textReadable": true,
+        "reader": "text",
+        "modelImageInput": "unsupported"
+      },
+      "expected": {
+        "ok": false,
+        "code": "FILE_REFERENCE_INVALID"
+      }
+    },
+    {
+      "name": "gfs source without drive",
+      "input": {
+        "schemaVersion": 1,
+        "id": "gfs:personal:3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c@v7",
+        "source": {
+          "kind": "gfs",
+          "drive": "",
+          "resourceId": "3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+          "gfsUri": "gfs://personal/3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+          "version": 7
+        },
+        "name": "q3.pdf",
+        "declaredMediaType": "application/pdf",
+        "detectedMediaType": "application/pdf",
+        "class": "pdf",
+        "detection": "declared",
+        "mismatch": false,
+        "byteLength": 2048,
+        "textReadable": false,
+        "reader": "none",
+        "modelImageInput": "unsupported"
+      },
+      "expected": {
+        "ok": false,
+        "code": "FILE_REFERENCE_INVALID"
+      }
+    },
+    {
       "name": "missing schemaVersion",
       "input": {
         "id": "att:msg-1:att-1@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",

@@ -113,4 +113,15 @@ describe('buildComposerFileReferences (#666)', () => {
     // Control: the unmodified selection builds.
     expect(buildComposerFileReferences([globalFile()])).toHaveLength(1)
   })
+
+  it('throws before sending more Global Files than the contract allows', () => {
+    const eleven = Array.from({ length: 11 }, (_, index) =>
+      globalFile({ label: `file-${index}.md` })
+    )
+    expect(() => buildComposerFileReferences(eleven)).toThrow(
+      'A message can reference at most 10 files.'
+    )
+    // Control: exactly ten still builds.
+    expect(buildComposerFileReferences(eleven.slice(0, 10))).toHaveLength(10)
+  })
 })

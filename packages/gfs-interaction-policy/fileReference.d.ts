@@ -18,7 +18,7 @@ export interface FileReferenceV1 {
    */
   id: string
   source: FileReferenceSource
-  /** Base name, NFC, 1-255 code points, no `/` or control characters. Builders normalize to NFC. */
+  /** Base name, NFC, 1-255 code points, no `/` or ASCII control characters (DEL included). Builders normalize to NFC. */
   name: string
   declaredMediaType: string | null
   detectedMediaType: string
@@ -43,11 +43,17 @@ export type FileReferenceParseResult =
 
 export declare const FILE_REFERENCE_SCHEMA_VERSION: 1
 
+/**
+ * The maximum number of file references one message may carry. Must match the
+ * mcp-host default for CLERUM_FILE_REFERENCE_MAX_COUNT.
+ */
+export declare const FILE_REFERENCE_MAX_COUNT: 10
+
 export declare function parseFileReferenceV1(input: unknown): FileReferenceParseResult
 
 /**
  * A JSON string literal of `value` with every line-breaking or invisible
- * character escaped, for text a model reads.
+ * character escaped and angle brackets neutralized, for text a model reads.
  */
 export declare function quotePromptValue(value: string): string
 

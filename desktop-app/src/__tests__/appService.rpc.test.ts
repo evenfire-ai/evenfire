@@ -240,7 +240,7 @@ describe('AppService.invokeHostMessage', () => {
 
     await expect(
       service.invokeHostMessage('chatllm', { content: 'hello', attachments: {} }, ['chatllm'])
-    ).rejects.toThrow('Image attachments must be a list.')
+    ).rejects.toThrow('Attachments must be a list.')
     expect(issueToken).not.toHaveBeenCalled()
     expect(service.rpcTokenManager.getOrIssue).not.toHaveBeenCalled()
     expect(service.rpcClient.invokeHostMessage).not.toHaveBeenCalled()

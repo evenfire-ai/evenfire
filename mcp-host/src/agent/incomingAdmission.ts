@@ -104,7 +104,20 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
       ...deps.limits,
       messageId: message.messageId,
     })
-    if (!validated.ok) return { success: false, error: validated.error }
+    if (!validated.ok) {
+      // R4-L10 — file attachments are refused before any image gate runs; log
+      // the code so an operator can tell why a turn was dropped.
+      deps.logger.info(
+        {
+          event: 'message_attachment_refused',
+          userId: message.sender,
+          chatId: message.threadId ?? null,
+          code: validated.error.code ?? null,
+        },
+        'Host runtime event'
+      )
+      return { success: false, error: validated.error }
+    }
 
     // Only images engage the image-capability gate, the revision check and the
     // visual model selection write. A file-only message runs on any model: the

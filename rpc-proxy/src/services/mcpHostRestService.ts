@@ -123,8 +123,8 @@ export type HostRuntimeMessageRequest = {
   messageId?: string
   traceContext?: TraceContextV1
   // Issue #666 — structured file references (`FileReferenceV1[]`), forwarded
-  // verbatim. mcp-host owns the contract and answers 400 with a typed code
-  // for any malformed value.
+  // verbatim. mcp-host owns the contract and answers 200 `success:false` with
+  // a typed code for any malformed value.
   fileReferences?: unknown
   [key: string]: unknown
 }

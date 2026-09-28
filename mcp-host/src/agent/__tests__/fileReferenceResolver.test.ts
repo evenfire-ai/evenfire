@@ -330,13 +330,25 @@ describe('resolveFileReferences (#666)', () => {
     }
   )
 
-  it('rethrows a TypeError that is not a known fetch failure', async () => {
+  it('wraps an unexpected rethrow in a fixed message, keeping the cause', async () => {
     const resolve = vi.fn<FileReferenceGfscClient['resolve']>(async () => {
-      throw new TypeError('not a fetch failure')
+      throw new TypeError('Headers.append: "Bearer secret-token" is an invalid header value.')
     })
-    await expect(resolveFileReferences([gfsReference()], { resolve })).rejects.toThrow(TypeError)
-    // Witness: the rejection came from gfsc's call, not from parsing before it.
+    let caught: unknown
+    try {
+      await resolveFileReferences([gfsReference()], { resolve })
+    } catch (error) {
+      caught = error
+    }
+    // Witness: the rejection came from gfsc's call, not from parsing before it,
+    // and the route-visible message never echoes token-shaped text.
     expect(resolve).toHaveBeenCalledTimes(1)
+    expect(caught).toBeInstanceOf(Error)
+    expect((caught as Error).message).toBe(
+      'file reference resolution failed: unexpected Host error'
+    )
+    expect((caught as Error).message).not.toContain('secret-token')
+    expect((caught as { cause?: unknown }).cause).toBeInstanceOf(TypeError)
   })
 
   it('fails transient on a timeout signal', async () => {
@@ -380,8 +392,19 @@ describe('resolveFileReferences (#666)', () => {
     const gfsc = client(() => {
       throw error
     })
-    await expect(resolveFileReferences([gfsReference()], gfsc)).rejects.toBe(error)
+    let caught: unknown
+    try {
+      await resolveFileReferences([gfsReference()], gfsc)
+    } catch (wrapper) {
+      caught = wrapper
+    }
+    // Witness: the original defect stays as the cause, but the route-visible
+    // message is the fixed one.
     expect(gfsc.resolve).toHaveBeenCalledTimes(1)
+    expect((caught as Error).message).toBe(
+      'file reference resolution failed: unexpected Host error'
+    )
+    expect((caught as { cause?: unknown }).cause).toBe(error)
   })
 
   it('fails invalid on a gfsc 400', async () => {
@@ -408,9 +431,13 @@ describe('resolveFileReferences (#666)', () => {
 
   it.each([
     ['a non-ok envelope', { ok: false }],
+    ['an ok envelope without data', { ok: true }],
+    ['an ok envelope with null data', { ok: true, data: null }],
     ['a text body', 'not json'],
     ['another drive', view({ drive: 'other' })],
     ['another resource', view({ resourceId: RID_2, rid: RID_2, gfsUri: `gfs://main/${RID_2}` })],
+    ['a missing rid', view({ rid: undefined })],
+    ['a mismatched rid', view({ rid: RID_2 })],
     ['another gfsUri', view({ gfsUri: `gfs://main/${RID_2}` })],
     ['an unknown kind', view({ kind: 'link' })],
     ['a fractional version', view({ version: 3.5 })],

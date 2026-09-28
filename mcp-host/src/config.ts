@@ -939,7 +939,7 @@ export const config: Config = {
   // to disable persistence entirely; the loop falls back to the pre-T1.5
   // path (full content inline).
   toolSpilloverEnabled: getEnvBool('CLERUM_TOOL_SPILLOVER_ENABLED', true),
-  toolSpilloverThresholdBytes: parseInt(getEnv('CLERUM_TOOL_SPILLOVER_THRESHOLD', '8192')!, 10),
+  toolSpilloverThresholdBytes: getExecutionLimit('CLERUM_TOOL_SPILLOVER_THRESHOLD', 8192),
   // TTL window for persisted blobs. Default 168h = 1 week. The resolver
   // double-checks the TTL on load even when GC hasn't pruned yet.
   spilloverTtlMs: parseInt(getEnv('CLERUM_SPILLOVER_TTL_HOURS', '168')!, 10) * 3600 * 1000,

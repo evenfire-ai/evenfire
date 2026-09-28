@@ -194,7 +194,7 @@ describe('sendAgentMessage — references the Host did not receive (#666 M1)', (
   })
 
   it.each(ACK_SHAPES)(
-    '%s ack that echoes only some sent ids shows the error',
+    '%s ack that echoes only some sent ids names the dropped count',
     async (shape, ack) => {
       const { result, spies } = await sendWithReferences(
         { ...ack, acceptedFileReferenceIds: [PLAN_ID] },
@@ -202,8 +202,10 @@ describe('sendAgentMessage — references the Host did not receive (#666 M1)', (
       )
 
       expect(sentReferenceIds()).toEqual([PLAN_ID, NOTES_ID])
-      expect(result.current.agentError).toBe(NOT_RECEIVED)
-      expect(spies.pushToast).toHaveBeenCalledWith(NOT_RECEIVED, 'error')
+      const partial =
+        'The Host did not receive 1 of the selected Global Files; the message was sent without them.'
+      expect(result.current.agentError).toBe(partial)
+      expect(spies.pushToast).toHaveBeenCalledWith(partial, 'error')
       expectAcceptedAck(shape, spies.pushToast)
       expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
     }

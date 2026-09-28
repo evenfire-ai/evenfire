@@ -94,6 +94,36 @@ describe('ComposerGlobalFilesModal', () => {
     expect(screen.queryByRole('button', { name: /retry file listing/i })).toBeNull()
   })
 
+  it('stops selecting at the shared ten-file message limit', () => {
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      accessibleResources: Array.from({ length: 11 }, (_, index) => ({
+        resourceId: `file-${index}`,
+        rid: `file-${index}`,
+        gfsUri: `gfs://main/file-${index}`,
+        drive: 'main',
+        parentResourceId: null,
+        name: `file-${index}.txt`,
+        kind: 'file',
+        path: `/file-${index}.txt`,
+        version: 1,
+        bytes: 12,
+      })),
+    })
+
+    renderModal()
+
+    const boxes = screen.getAllByRole('checkbox')
+    for (const box of boxes) act(() => fireEvent.click(box))
+    expect(boxes.slice(0, 10).every(box => box.checked)).toBe(true)
+    // The eleventh stayed unselectable and the footer names the limit.
+    expect(boxes[10]!.checked).toBe(false)
+    expect(boxes[10]!.disabled).toBe(true)
+    expect(screen.getByText('10').tagName).toBe('STRONG')
+    expect(screen.getByText('files selected')).toBeTruthy()
+    expect(screen.getByText('Up to 10 files per message.')).toBeTruthy()
+  })
+
   it('answers a rate-limited discovery with a retry, not "No shared files yet"', async () => {
     vi.useFakeTimers()
     const retryDiscovery = vi.fn()

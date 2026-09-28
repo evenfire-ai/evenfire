@@ -85,6 +85,22 @@ describe('chat message attachments', () => {
     ])
   })
 
+  it('reads a stored pre-#666 list whose first entry merely starts with a quote', () => {
+    const parsed = parseChatMessageDisplay(
+      [
+        'summarize both',
+        '',
+        HEADER,
+        'Global Files: "draft".md (gfs://main/0123), notes.md (gfs://main/abcd). These files were explicitly selected by the user.',
+      ].join('\n')
+    )
+
+    expect(parsed.attachments).toMatchObject([
+      { type: 'global_file', label: '"draft".md' },
+      { type: 'global_file', label: 'notes.md' },
+    ])
+  })
+
   it('shows no entries for a quoted list it cannot delimit', () => {
     const parsed = parseChatMessageDisplay(
       [

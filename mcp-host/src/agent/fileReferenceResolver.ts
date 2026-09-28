@@ -314,7 +314,11 @@ export async function resolveFileReferences(
         errorClass: error.errorClass,
         ...(error.status === undefined ? {} : { status: error.status }),
       }
-    throw error
+    // R4-M3 — undici puts the header value or a credentialed URL in the message
+    // of a causeless TypeError, and the message route answers error.message
+    // verbatim. Wrap the rethrow so only this fixed text can leave the Host;
+    // the cause keeps the original error for the log.
+    throw new Error('file reference resolution failed: unexpected Host error', { cause: error })
   } finally {
     clearTimeout(timer)
     controller.abort()

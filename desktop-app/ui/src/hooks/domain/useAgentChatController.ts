@@ -2781,9 +2781,16 @@ export function useAgentChatController({
               ? response.acceptedFileReferenceIds
               : []
           )
-          if (fileReferences.some(reference => !acceptedFileReferenceIds.has(reference.id))) {
-            setAgentError(FILE_REFERENCES_NOT_RECEIVED_MESSAGE)
-            pushToast(FILE_REFERENCES_NOT_RECEIVED_MESSAGE, 'error')
+          const droppedFiles = fileReferences.filter(
+            reference => !acceptedFileReferenceIds.has(reference.id)
+          )
+          if (droppedFiles.length > 0) {
+            const droppedMessage =
+              droppedFiles.length === fileReferences.length
+                ? FILE_REFERENCES_NOT_RECEIVED_MESSAGE
+                : `The Host did not receive ${droppedFiles.length} of the selected Global Files; the message was sent without them.`
+            setAgentError(droppedMessage)
+            pushToast(droppedMessage, 'error')
           }
         }
         const taskId =

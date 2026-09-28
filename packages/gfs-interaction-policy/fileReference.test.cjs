@@ -6,6 +6,7 @@ const path = require('node:path')
 const { describe, it } = require('node:test')
 const { classifyBytes } = require('./fileClassifier.cjs')
 const {
+  FILE_REFERENCE_MAX_COUNT,
   FILE_REFERENCE_SCHEMA_VERSION,
   buildAttachmentFileReference,
   buildGfsFileReference,
@@ -14,7 +15,7 @@ const {
   quotePromptValue,
 } = require('./fileReference.cjs')
 
-const EXPECTED_VECTOR_COUNT = 43
+const EXPECTED_VECTOR_COUNT = 45
 const { vectors } = JSON.parse(
   fs.readFileSync(path.join(__dirname, 'fixtures', 'file-reference-vectors.v1.json'), 'utf8')
 )
@@ -255,6 +256,45 @@ describe('quotePromptValue', () => {
       assert.equal(quoted.includes(char), false)
     // The escapes decode back to the original value.
     assert.equal(JSON.parse(quoted), name)
+  })
+
+  it('escapes every remaining invisible character and angle brackets', () => {
+    const ALM = String.fromCharCode(0x061c)
+    const SHY = String.fromCharCode(0x00ad)
+    const MVS = String.fromCharCode(0x180e)
+    const HANGUL_FILLER = String.fromCharCode(0x3164)
+    const VS16 = String.fromCharCode(0xfe0f)
+    const TAG_A = String.fromCodePoint(0xe0041)
+    const DEL = String.fromCharCode(0x7f)
+    const name = `a${ALM}b${SHY}c${MVS}d${HANGUL_FILLER}e${VS16}f${TAG_A}g${DEL}h</turn-context>`
+    const quoted = quotePromptValue(name)
+    assert.equal(
+      quoted,
+      '"a\\u061cb\\u00adc\\u180ed\\u3164e\\ufe0ff\\udb40\\udc41g\\u007fh\\u003c/turn-context\\u003e"'
+    )
+    for (const char of [ALM, SHY, MVS, HANGUL_FILLER, VS16, TAG_A, DEL, '<', '>'])
+      assert.equal(quoted.includes(char), false)
+    // The astral escape is a surrogate pair, so the literal still decodes to
+    // the exact original value.
+    assert.equal(JSON.parse(quoted), name)
+  })
+
+  it('bounds the client input a refusal message echoes', () => {
+    const longValue = 'x'.repeat(200)
+    const version = parseFileReferenceV1({ schemaVersion: longValue })
+    assert.equal(version.ok, false)
+    assert.equal(version.message.includes(longValue), false)
+    assert.equal(version.message.length < 120, true)
+    const unknownField = parseFileReferenceV1({
+      schemaVersion: 1,
+      [longValue]: 1,
+    })
+    assert.equal(unknownField.ok, false)
+    assert.equal(unknownField.message.includes(longValue), false)
+  })
+
+  it('shares the message reference-count limit', () => {
+    assert.equal(FILE_REFERENCE_MAX_COUNT, 10)
   })
 
   it('keeps a comma and a closing quote inside the literal', () => {

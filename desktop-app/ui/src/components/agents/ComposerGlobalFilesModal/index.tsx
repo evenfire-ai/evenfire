@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { FILE_REFERENCE_MAX_COUNT } from '@clerum/gfs-interaction-policy'
 import { Button, EmptyState, IconButton, StatusBanner } from '@components/Common'
 import { GfsFileIcon } from '@components/GfsFileIcon'
 import { GfsReadFailureCard } from '@components/GfsReadFailureCard'
@@ -37,6 +38,7 @@ export function ComposerGlobalFilesModal({ onAdd, onClose }: ComposerGlobalFiles
         delete next[file.id]
         return next
       }
+      if (Object.keys(previous).length >= FILE_REFERENCE_MAX_COUNT) return previous
       return { ...previous, [file.id]: file }
     })
   }, [])
@@ -229,6 +231,7 @@ export function ComposerGlobalFilesModal({ onAdd, onClose }: ComposerGlobalFiles
                       className="composer-global-files-checkbox"
                       type="checkbox"
                       checked={checked}
+                      disabled={!checked && selectedFiles.length >= FILE_REFERENCE_MAX_COUNT}
                       onChange={() => toggleFile(file)}
                     />
                     <span className="composer-global-files-entry-icon" aria-hidden="true">
@@ -289,6 +292,11 @@ export function ComposerGlobalFilesModal({ onAdd, onClose }: ComposerGlobalFiles
             <strong>{selectedFiles.length}</strong>
             <span>{selectedFiles.length === 1 ? 'file selected' : 'files selected'}</span>
           </span>
+          {selectedFiles.length >= FILE_REFERENCE_MAX_COUNT ? (
+            <span className="composer-global-files-selection-summary">
+              Up to {FILE_REFERENCE_MAX_COUNT} files per message.
+            </span>
+          ) : null}
           <span className="action-row">
             <Button color="neutral" onClick={onClose} size="sm" variant="ghost">
               Cancel

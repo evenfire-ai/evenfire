@@ -15,6 +15,7 @@ import type {
   ChatMessage,
   Conversation,
   PendingApproval,
+  ResumeSourceMessage,
   TraceContextV1,
   Turn,
   TurnToolCall,
@@ -173,10 +174,20 @@ export function reconstructPendingApproval(row: PendingApprovalRow): PendingAppr
     completed_results: deserializeCompletedResults(row.completed_results),
     intent_summary: row.intent_summary ?? undefined,
     traceContext: parseTraceContext(row.trace_context),
+    sourceMessage: parseSourceMessage(row.source_message),
     // U5 — rehydrate the connect_required discriminator so a cold restart does
     // NOT degrade a reactive-consent suspension into a generic approval.
     reason: normalizeConnectReason(row.reason),
     mcpServerName: row.mcp_server_name ?? undefined,
+  }
+}
+
+function parseSourceMessage(raw: string | null): ResumeSourceMessage | undefined {
+  if (!raw) return undefined
+  try {
+    return JSON.parse(raw) as ResumeSourceMessage
+  } catch {
+    return undefined
   }
 }
 

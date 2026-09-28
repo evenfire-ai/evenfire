@@ -80,9 +80,11 @@ type ParsedAttachmentList = { labels: string[]; quoted: boolean }
 /**
  * Reads the list the composer wrote as JSON string literals:
  * `"a", "b". <instruction>`. A list that does not parse as that form yields no
- * entries, because its boundaries cannot be known.
+ * entries, because its boundaries cannot be known. `null` marks the one case
+ * that is provably a pre-#666 list: a label parsed cleanly, then a dot glued
+ * to more list text instead of the sentence's instruction.
  */
-function parseQuotedAttachmentList(value: string): string[] {
+function parseQuotedAttachmentList(value: string): string[] | null {
   const labels: string[] = []
   let index = 0
   while (index < value.length && value[index] === '"') {
@@ -102,7 +104,10 @@ function parseQuotedAttachmentList(value: string): string[] {
       index += 2
       continue
     }
-    return value[index] === '.' || index === value.length ? labels : []
+    if (index >= value.length) return labels
+    if (value[index] !== '.') return []
+    const rest = value.slice(index + 1)
+    return rest === '' || rest.startsWith(' ') ? labels : null
   }
   return []
 }
@@ -110,7 +115,10 @@ function parseQuotedAttachmentList(value: string): string[] {
 /** Messages sent before #666 wrote the list unquoted; they are read as before. */
 function parseAttachmentList(value: string): ParsedAttachmentList {
   const trimmed = value.trimStart()
-  if (trimmed.startsWith('"')) return { labels: parseQuotedAttachmentList(trimmed), quoted: true }
+  if (trimmed.startsWith('"')) {
+    const labels = parseQuotedAttachmentList(trimmed)
+    if (labels !== null) return { labels, quoted: true }
+  }
   const itemList = trimmed.split(/\.\s+/)[0] ?? ''
   return {
     labels: itemList

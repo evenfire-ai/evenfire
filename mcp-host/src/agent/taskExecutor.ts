@@ -123,6 +123,7 @@ import {
   looksLikeWorkflowTriggerSuccess,
   workflowAccessDeniedResponseForMessage,
 } from './providerWorkflowAccessGate'
+import { sourceMessageForResume } from './sourceMessageForResume'
 import { TaskExecutionBudget, TaskLimitError } from './taskExecutionBudget'
 import { TurnTimingRecorder } from './turnTiming'
 import type { AgentConfig, ExecutorFailoverSupport } from './types'
@@ -1234,6 +1235,10 @@ export class TaskExecutor {
 
       case 'need_approval': {
         result.approval.task_budget = this.executionBudget.pause()
+        // #666 R4-M2 — persist the sanitized source message so a cold restart
+        // rebuilds the file-reference pins and attachment metadata. The inline
+        // bytes (dataBase64) never persist.
+        result.approval.sourceMessage = sourceMessageForResume(this.task.sourceMessage)
         // Durable write FIRST: under sqlite/dual the suspend can reject. We
         // must not tell the client "suspended" (SSE) or register the approval
         // before the durable state lands — otherwise a rejected write leaves a

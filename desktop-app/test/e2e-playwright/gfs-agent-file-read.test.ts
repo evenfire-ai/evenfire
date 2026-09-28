@@ -333,7 +333,8 @@ test.describe('GFS agent file read (issue #775)', () => {
 
   // Issue #666: the Global Files picker sends the selection as a structured
   // FileReference; the Host resolves it and lists it in the turn context. The
-  // message names no file, so the read can only come from the reference.
+  // message body carries no gfs:// URI, so the read can only come from the
+  // structured reference.
   // Requires a renderer built with VITE_SHOW_GLOBAL_FILE_SYSTEM_COMPOSER_ITEM=true
   // (scripts/e2e/playwright-dev.sh exports it before the Desktop build).
   test('agent reads a file selected in the Global Files picker (#666)', async () => {

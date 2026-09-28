@@ -1,4 +1,5 @@
 import {
+  FILE_REFERENCE_MAX_COUNT,
   type FileReferenceV1,
   buildGfsFileReference,
   classifyBytes,
@@ -7,9 +8,9 @@ import type { ComposerGlobalFileReference, ComposerReferenceAttachment } from '.
 
 /**
  * Builds the structured FileReference v1 for one Global Files selection
- * (#666). The picker lists no media type and no bytes, so the class comes
- * from the file name alone (`detection: 'declared'`); mcp-host resolves the
- * reference against GFS before the model sees it.
+ * (#666). The picker lists no media type and no bytes: classification falls
+ * back to the name, and a zero-byte selection classifies as empty text;
+ * mcp-host resolves the reference against GFS before the model sees it.
  */
 function globalFileReference(reference: ComposerGlobalFileReference): FileReferenceV1 {
   const built = buildGfsFileReference({
@@ -36,9 +37,11 @@ function globalFileReference(reference: ComposerGlobalFileReference): FileRefere
 export function buildComposerFileReferences(
   references: ComposerReferenceAttachment[]
 ): FileReferenceV1[] {
-  return references
-    .filter(
-      (reference): reference is ComposerGlobalFileReference => reference.type === 'global_file'
-    )
-    .map(globalFileReference)
+  const globalFiles = references.filter(
+    (reference): reference is ComposerGlobalFileReference => reference.type === 'global_file'
+  )
+  if (globalFiles.length > FILE_REFERENCE_MAX_COUNT) {
+    throw new Error(`A message can reference at most ${FILE_REFERENCE_MAX_COUNT} files.`)
+  }
+  return globalFiles.map(globalFileReference)
 }

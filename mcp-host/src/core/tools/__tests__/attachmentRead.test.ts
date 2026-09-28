@@ -107,6 +107,23 @@ describe('clerum__attachment_read', () => {
     expect(output.content).not.toContain('notes.txt')
   })
 
+  it('answers without bytes when a cold restart kept only attachment metadata', async () => {
+    const [withBytes] = admitted([
+      rawFile('file-1', 'notes.txt', 'text/plain', Buffer.from(SENTINEL)),
+    ])
+    const metadata: Partial<Attachment> = { ...withBytes! }
+    delete metadata.dataBase64
+    const tool = toolFor([metadata as Attachment])
+    const { body } = await read(tool, { attachmentId: 'file-1' })
+    expect(body).toEqual({
+      attachmentId: 'file-1',
+      referenceId: withBytes!.fileReference!.id,
+      kind: 'binary',
+      reader: 'none',
+      reason: 'bytes_unavailable_after_restart',
+    })
+  })
+
   it('returns a typed binary result for a reader=none file without decoding it', async () => {
     const pdf = Buffer.from(`%PDF-1.7\n${SENTINEL}\n%%EOF\n`)
     const [file] = admitted([rawFile('file-1', 'report.pdf', 'application/pdf', pdf)])

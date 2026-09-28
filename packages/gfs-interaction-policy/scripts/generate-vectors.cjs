@@ -407,6 +407,22 @@ const references = [
     ok
   ),
   r('name of 255 code points', { ...attachmentBase, name: `${'ñ'.repeat(252)}.md` }, ok),
+  r(
+    'attachment source without attachmentId',
+    {
+      ...attachmentBase,
+      source: { ...attachmentBase.source, attachmentId: '' },
+    },
+    invalid
+  ),
+  r(
+    'gfs source without drive',
+    {
+      ...gfsBase,
+      source: { ...gfsBase.source, drive: '' },
+    },
+    invalid
+  ),
   r('missing schemaVersion', without(attachmentBase, 'schemaVersion'), unsupported),
   r('schemaVersion 2', { ...attachmentBase, schemaVersion: 2 }, unsupported),
   r('schemaVersion as a string', { ...attachmentBase, schemaVersion: '1' }, unsupported),

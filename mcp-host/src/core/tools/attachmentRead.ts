@@ -47,7 +47,7 @@ export type AttachmentReadResult =
       referenceId: FileReferenceV1['id']
       kind: 'binary'
       reader: 'none'
-      reason: 'no_reader_for_class' | 'text_decode_rejected'
+      reason: 'no_reader_for_class' | 'text_decode_rejected' | 'bytes_unavailable_after_restart'
     }
 
 const ERROR_MESSAGES: Record<AttachmentReadErrorCode, string> = {
@@ -143,6 +143,16 @@ export class AttachmentReadTool implements Tool {
     const reference = attachment?.fileReference
     if (!attachment || !reference) return this.error('attachment_not_found', start)
     const identity = { attachmentId: attachment.id, referenceId: reference.id }
+
+    // #666 R4-M2 — a cold restart persists attachment metadata but never the
+    // inline bytes, so the tool answers honestly instead of crashing on
+    // Buffer.from(undefined).
+    if (typeof attachment.dataBase64 !== 'string') {
+      return this.ok(
+        { ...identity, kind: 'binary', reader: 'none', reason: 'bytes_unavailable_after_restart' },
+        start
+      )
+    }
 
     const offset = params.offset ?? 0
     const maxBytes = params.maxBytes ?? this.maxBytesPerCall

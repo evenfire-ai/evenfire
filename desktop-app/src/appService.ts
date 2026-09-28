@@ -3325,7 +3325,7 @@ export class AppService {
     }
     // A malformed request is rejected before any token is issued for it.
     if (request.attachments != null && !Array.isArray(request.attachments)) {
-      throw new Error('Image attachments must be a list.')
+      throw new Error('Attachments must be a list.')
     }
     if (request.fileReferences !== undefined && !Array.isArray(request.fileReferences)) {
       throw new Error('File references must be a list.')
