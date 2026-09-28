@@ -274,7 +274,12 @@ describeRealPostgres('external GFS rate limits under concurrent load (real Postg
     const server = http.createServer(app)
     await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
     const { port } = server.address() as AddressInfo
-    const agent = new http.Agent({ keepAlive: true })
+    // Bound the client sockets below the kernel accept queue. macOS caps the
+    // listen backlog at kern.ipc.somaxconn (128), so an unbounded agent opening
+    // 481 connections at once gets ECONNRESET before the app sees a request.
+    // 64 in flight still exceeds both production pools (core 10, limiter 6),
+    // so the limiter keeps contending on Postgres.
+    const agent = new http.Agent({ keepAlive: true, maxSockets: 64 })
     if (openServer) throw new Error('a scenario server is already open')
     openServer = {
       close: () => {
