@@ -15,6 +15,7 @@ import {
   getRecipeSecrets,
   getRecipes,
 } from '../../lib/api'
+import { buildMcpServerReference } from '../../test/fixtures/mcpServer'
 import { buildSecretSummary } from '../../test/fixtures/secretSummary'
 import { SecretsTable } from '../SecretsTable'
 import { ToastProvider } from '../Toast'
@@ -309,20 +310,18 @@ describe('SecretsTable — connector marketplace source', () => {
   it('derives registryEntries from catalog-id/version ANNOTATIONS (org-scoped install)', async () => {
     getMcpServersMock.mockResolvedValue({
       items: [
-        {
-          metadata: {
-            name: 'newtenantwf-conn',
-            annotations: {
-              'clerum.io/catalog-id': '@newtenantwf/conn',
-              'clerum.io/catalog-version': '1.0.0',
-            },
-            labels: {
-              'clerum.io/managed-by': 'control-api',
-              'clerum.io/server-mode': 'local',
-            },
+        buildMcpServerReference({
+          name: 'newtenantwf-conn',
+          secretName: 'newtenantwf-conn-credentials',
+          annotations: {
+            'clerum.io/catalog-id': '@newtenantwf/conn',
+            'clerum.io/catalog-version': '1.0.0',
           },
-          spec: { envSecret: { name: 'newtenantwf-conn-credentials' } },
-        },
+          labels: {
+            'clerum.io/managed-by': 'control-api',
+            'clerum.io/server-mode': 'local',
+          },
+        }),
       ],
     })
 
@@ -336,17 +335,15 @@ describe('SecretsTable — connector marketplace source', () => {
   it('still derives registryEntries from LABELS for legacy (pre-annotation) installs', async () => {
     getMcpServersMock.mockResolvedValue({
       items: [
-        {
-          metadata: {
-            name: 'legacy-conn',
-            labels: {
-              'clerum.io/catalog-id': 'mcp-filesystem',
-              'clerum.io/catalog-version': '2.3.0',
-              'clerum.io/managed-by': 'control-api',
-            },
+        buildMcpServerReference({
+          name: 'legacy-conn',
+          secretName: 'legacy-conn-credentials',
+          labels: {
+            'clerum.io/catalog-id': 'mcp-filesystem',
+            'clerum.io/catalog-version': '2.3.0',
+            'clerum.io/managed-by': 'control-api',
           },
-          spec: { envSecret: { name: 'legacy-conn-credentials' } },
-        },
+        }),
       ],
     })
 
@@ -360,21 +357,19 @@ describe('SecretsTable — connector marketplace source', () => {
   it('prefers ANNOTATIONS over LABELS when both are present', async () => {
     getMcpServersMock.mockResolvedValue({
       items: [
-        {
-          metadata: {
-            name: 'both-conn',
-            annotations: {
-              'clerum.io/catalog-id': '@org/new',
-              'clerum.io/catalog-version': '9.9.9',
-            },
-            labels: {
-              'clerum.io/catalog-id': 'stale',
-              'clerum.io/catalog-version': '0.0.1',
-              'clerum.io/managed-by': 'control-api',
-            },
+        buildMcpServerReference({
+          name: 'both-conn',
+          secretName: 'both-conn-credentials',
+          annotations: {
+            'clerum.io/catalog-id': '@org/new',
+            'clerum.io/catalog-version': '9.9.9',
           },
-          spec: { envSecret: { name: 'both-conn-credentials' } },
-        },
+          labels: {
+            'clerum.io/catalog-id': 'stale',
+            'clerum.io/catalog-version': '0.0.1',
+            'clerum.io/managed-by': 'control-api',
+          },
+        }),
       ],
     })
 
@@ -620,16 +615,14 @@ describe('SecretsTable — connector row actions', () => {
   function mockConnectorRow() {
     getMcpServersMock.mockResolvedValue({
       items: [
-        {
-          metadata: {
-            name: 'linear-conn',
-            annotations: {
-              'clerum.io/catalog-id': 'mcp-linear',
-              'clerum.io/catalog-version': '1.4.0',
-            },
+        buildMcpServerReference({
+          name: 'linear-conn',
+          secretName: 'linear-credentials',
+          annotations: {
+            'clerum.io/catalog-id': 'mcp-linear',
+            'clerum.io/catalog-version': '1.4.0',
           },
-          spec: { envSecret: { name: 'linear-credentials' } },
-        },
+        }),
       ],
     })
   }
@@ -679,14 +672,8 @@ describe('SecretsTable — connector row actions', () => {
   it('navigates Update without a server filter when several connectors share the secret', async () => {
     getMcpServersMock.mockResolvedValue({
       items: [
-        {
-          metadata: { name: 'conn-a' },
-          spec: { envSecret: { name: 'shared-credentials' } },
-        },
-        {
-          metadata: { name: 'conn-b' },
-          spec: { envSecret: { name: 'shared-credentials' } },
-        },
+        buildMcpServerReference({ name: 'conn-a', secretName: 'shared-credentials' }),
+        buildMcpServerReference({ name: 'conn-b', secretName: 'shared-credentials' }),
       ],
     })
     renderTable()
@@ -697,6 +684,34 @@ describe('SecretsTable — connector row actions', () => {
     fireEvent.click(screen.getByRole('menuitem', { name: 'Update' }))
 
     expect(mockPush).toHaveBeenCalledWith('/secrets/connector/shared-credentials/edit')
+  })
+
+  it('keeps a non-canonical Secret reference distinct from its trimmed name', async () => {
+    getMcpServersMock.mockResolvedValue({
+      items: [
+        buildMcpServerReference({ name: 'canonical-conn', secretName: 'linear-credentials' }),
+        buildMcpServerReference({ name: 'stale-conn', secretName: '  linear-credentials  ' }),
+      ],
+    })
+    renderTable()
+
+    const malformedIdentity = await screen.findByText(
+      (_, element) =>
+        element?.tagName === 'CODE' && element.textContent === '"  linear-credentials  "'
+    )
+    const malformedRow = malformedIdentity.closest('tr')!
+    const canonicalRow = screen.getByText('linear-credentials').closest('tr')!
+    expect(within(malformedRow).getByText('1 server(s): stale-conn')).toBeInTheDocument()
+    expect(within(canonicalRow).getByText('1 server(s): canonical-conn')).toBeInTheDocument()
+    expect(within(canonicalRow).queryByText(/stale-conn/)).not.toBeInTheDocument()
+
+    fireEvent.click(within(malformedRow).getByRole('button'))
+    expect(screen.getByRole('menuitem', { name: /^Add/ })).toHaveAttribute('aria-disabled', 'true')
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Update' }))
+    expect(mockPush).toHaveBeenCalledWith(
+      '/secrets/connector/%20%20linear-credentials%20%20/edit?server=stale-conn'
+    )
+    expect(apiSendMock).not.toHaveBeenCalled()
   })
 
   it('still prefills the create flow from the row Add action', async () => {

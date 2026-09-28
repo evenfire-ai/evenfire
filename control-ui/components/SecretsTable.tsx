@@ -49,10 +49,7 @@ type McpSecretRow = {
 }
 type RecipeSecretStatus = 'provisioned' | 'missing'
 type RecipeSecretRowOwnership =
-  | { kind: 'shared' }
-  | { kind: 'owner-recipe'; recipeName: string }
-  | { kind: 'unlabeled' }
-  | null // missing rows: not yet provisioned, ownership chosen at create time.
+  { kind: 'shared' } | { kind: 'owner-recipe'; recipeName: string } | { kind: 'unlabeled' } | null // missing rows: not yet provisioned, ownership chosen at create time.
 type RecipeSecretRow = {
   name: string
   namespace: string
@@ -231,7 +228,7 @@ export function SecretsTable({
         const serverName = typeof metadata.name === 'string' ? metadata.name.trim() : ''
         const spec = (item.spec ?? {}) as Record<string, unknown>
         const envSecret = (spec.envSecret ?? {}) as Record<string, unknown>
-        const secretName = typeof envSecret.name === 'string' ? String(envSecret.name).trim() : ''
+        const secretName = typeof envSecret.name === 'string' ? envSecret.name : ''
         if (!secretName) continue
 
         const row = addSecret(secretName)
@@ -672,7 +669,13 @@ export function SecretsTable({
                 ) : (
                   mcpSort.sortedRows.map(row => (
                     <tr key={row.name}>
-                      <td>{row.name}</td>
+                      <td>
+                        {row.name === row.name.trim() ? (
+                          row.name
+                        ) : (
+                          <code>{JSON.stringify(row.name)}</code>
+                        )}
+                      </td>
                       <td style={{ color: 'var(--cu-text-soft)', fontSize: '0.8125rem' }}>
                         {row.servers.length > 0
                           ? `${row.servers.length} server(s): ${row.servers.join(', ')}`
@@ -691,6 +694,8 @@ export function SecretsTable({
                             {
                               key: 'add',
                               label: 'Add',
+                              disabled: row.name !== row.name.trim(),
+                              disabledReason: 'The connector stores a non-canonical Secret name.',
                               onClick: () => {
                                 const source =
                                   row.registrySources.length === 1

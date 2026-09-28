@@ -10,6 +10,7 @@ import { IconKey } from '@components/Sidebar/icons'
 import { TabBar } from '@components/TabBar'
 import { UpdateConnectorCredentials } from '@components/UpdateConnectorCredentials'
 import {
+  nonCanonicalEnvSecretName,
   resolveEnvSecret,
   resolveRegistryCredentialSource,
 } from '@components/UpdateConnectorCredentials/mcpServerCredentialResolvers'
@@ -39,7 +40,15 @@ function EditConnectorSecretContent() {
       return value ?? ''
     }
   }, [params])
-  const requestedServer = (searchParams.get('server') ?? '').trim()
+  const serverQueryValues = searchParams.getAll('server')
+  const requestedServer = serverQueryValues[0]
+  const serverQueryError =
+    serverQueryValues.length > 0 &&
+    (serverQueryValues.length !== 1 ||
+      !requestedServer ||
+      requestedServer !== requestedServer.trim())
+      ? 'Choose exactly one connector from this Secret. The server link is invalid.'
+      : ''
 
   const [servers, setServers] = useState<McpServerResource[] | null>(null)
   const [loadError, setLoadError] = useState('')
@@ -54,12 +63,7 @@ function EditConnectorSecretContent() {
     getMcpServers()
       .then(result => {
         if (cancelled) return
-        const attached = (result.items ?? [])
-          .filter(server => serverRefersToSecret(server, secretName))
-          .sort((a, b) =>
-            String(a.metadata?.name ?? '').localeCompare(String(b.metadata?.name ?? ''))
-          )
-        setServers(attached)
+        setServers(result.items ?? [])
       })
       .catch(error => {
         if (!cancelled) {
@@ -74,12 +78,56 @@ function EditConnectorSecretContent() {
     }
   }, [secretName])
 
+  const attachedServers = useMemo(
+    () =>
+      (servers ?? [])
+        .filter(server => serverRefersToSecret(server, secretName))
+        .sort((a, b) =>
+          String(a.metadata?.name ?? '').localeCompare(String(b.metadata?.name ?? ''))
+        ),
+    [servers, secretName]
+  )
+  const nonCanonicalReferences = useMemo(
+    () =>
+      (servers ?? [])
+        .map(server => ({
+          connector: String(server.metadata?.name ?? ''),
+          name: nonCanonicalEnvSecretName(server.spec as Record<string, unknown> | undefined),
+        }))
+        .filter(ref => ref.name !== undefined && ref.name.trim() === secretName.trim()),
+    [servers, secretName]
+  )
+  const identityError =
+    secretName !== secretName.trim()
+      ? `Secret name in the URL is non-canonical: ${JSON.stringify(secretName)}. Correct the connector reference before editing credentials.`
+      : nonCanonicalReferences.length > 0
+        ? `Connector ${nonCanonicalReferences.map(ref => ref.connector).join(', ')} stores a non-canonical Secret name: ${nonCanonicalReferences.map(ref => JSON.stringify(ref.name)).join(', ')}. Correct the connector reference before editing credentials.`
+        : ''
+  const unknownServerError =
+    servers !== null &&
+    !loadError &&
+    !identityError &&
+    !serverQueryError &&
+    serverQueryValues.length === 1 &&
+    !attachedServers.some(server => server.metadata?.name === requestedServer)
+      ? `Connector ${requestedServer} does not reference this Secret. Choose a connector that does.`
+      : ''
+
   const selected = useMemo(() => {
-    if (!servers || servers.length === 0) return undefined
-    return requestedServer
-      ? servers.find(s => String(s.metadata?.name ?? '') === requestedServer)
-      : servers[0]
-  }, [servers, requestedServer])
+    if (serverQueryError || unknownServerError || identityError || attachedServers.length === 0) {
+      return undefined
+    }
+    return serverQueryValues.length === 1
+      ? attachedServers.find(s => String(s.metadata?.name ?? '') === requestedServer)
+      : attachedServers[0]
+  }, [
+    attachedServers,
+    identityError,
+    requestedServer,
+    serverQueryError,
+    serverQueryValues.length,
+    unknownServerError,
+  ])
   const selectedName = selected ? String(selected.metadata?.name ?? '') : ''
   const selectedEnvSecret = selected
     ? resolveEnvSecret(selected.spec as Record<string, unknown> | undefined)
@@ -108,24 +156,43 @@ function EditConnectorSecretContent() {
                 {loadError}
               </div>
             ) : null}
+            {identityError ? (
+              <div className="cu-banner cu-banner--error" role="alert">
+                {identityError}
+              </div>
+            ) : null}
+            {serverQueryError ? (
+              <div className="cu-banner cu-banner--error" role="alert">
+                {serverQueryError}
+              </div>
+            ) : null}
+            {unknownServerError ? (
+              <div className="cu-banner cu-banner--error" role="alert">
+                {unknownServerError}
+              </div>
+            ) : null}
 
             {servers === null ? (
               <p className="cu-muted" role="status">
                 Loading attached connectors…
               </p>
-            ) : servers.length === 0 && !loadError ? (
+            ) : attachedServers.length === 0 &&
+              !loadError &&
+              !identityError &&
+              !serverQueryError &&
+              !unknownServerError ? (
               <div className="cu-banner cu-banner--error">
                 No connector currently references Secret <code>{secretName || '(unnamed)'}</code>.
                 Attach it to a connector before rotating it from here.
               </div>
             ) : (
               <>
-                {servers.length > 1 ? (
+                {attachedServers.length > 1 ? (
                   <TabBar
                     activeValue={selectedName}
                     ariaLabel="Connectors referencing this secret"
                     className="cu-tabs--flush"
-                    options={servers.map(server => {
+                    options={attachedServers.map(server => {
                       const name = String(server.metadata?.name ?? '')
                       return {
                         value: name,
@@ -134,13 +201,6 @@ function EditConnectorSecretContent() {
                       }
                     })}
                   />
-                ) : null}
-
-                {requestedServer && !selected ? (
-                  <div className="cu-banner cu-banner--error" role="alert">
-                    Connector <code>{requestedServer}</code> does not reference this Secret. Choose
-                    a connector that does.
-                  </div>
                 ) : null}
 
                 {selected && !secretMatches ? (

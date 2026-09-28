@@ -13,6 +13,7 @@ import { TabBar } from '@components/TabBar'
 import { useToast } from '@components/Toast'
 import { UpdateConnectorCredentials } from '@components/UpdateConnectorCredentials'
 import {
+  nonCanonicalEnvSecretName,
   resolveEnvSecret,
   resolveRegistryCredentialSource,
 } from '@components/UpdateConnectorCredentials/mcpServerCredentialResolvers'
@@ -261,6 +262,9 @@ export default function EditMcpServerPage() {
   const envSecret = server?.spec
     ? resolveEnvSecret(server.spec as Record<string, unknown>)
     : undefined
+  const nonCanonicalSecretName = server?.spec
+    ? nonCanonicalEnvSecretName(server.spec as Record<string, unknown>)
+    : undefined
   const registryCredentialSource = useMemo(
     () => resolveRegistryCredentialSource(server?.metadata),
     [server?.metadata]
@@ -326,17 +330,25 @@ export default function EditMcpServerPage() {
           ) : server ? (
             activeTab === 'credentials' ? (
               <div className="cu-connector-edit-form">
-                <UpdateConnectorCredentials
-                  serverName={name}
-                  envSecret={envSecret}
-                  registryCredentialSource={registryCredentialSource}
-                  surface={resolveCredentialSurface(
-                    server.status?.conditions,
-                    server.spec as { managed?: boolean } | undefined
-                  )}
-                  // Ownership is a spec fact, independent of observed status.
-                  recipeOwned={isRecipeOwned(server.spec as { managed?: boolean } | undefined)}
-                />
+                {nonCanonicalSecretName !== undefined ? (
+                  <div className="cu-banner cu-banner--error" role="alert">
+                    This connector stores a non-canonical Secret name:{' '}
+                    <code>{JSON.stringify(nonCanonicalSecretName)}</code>. Correct the connector
+                    reference before editing credentials.
+                  </div>
+                ) : (
+                  <UpdateConnectorCredentials
+                    serverName={name}
+                    envSecret={envSecret}
+                    registryCredentialSource={registryCredentialSource}
+                    surface={resolveCredentialSurface(
+                      server.status?.conditions,
+                      server.spec as { managed?: boolean } | undefined
+                    )}
+                    // Ownership is a spec fact, independent of observed status.
+                    recipeOwned={isRecipeOwned(server.spec as { managed?: boolean } | undefined)}
+                  />
+                )}
               </div>
             ) : activeTab === 'access' ? (
               <div className="cu-connector-edit-form cu-connector-edit-content">

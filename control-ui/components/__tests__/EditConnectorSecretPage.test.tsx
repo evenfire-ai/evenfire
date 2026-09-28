@@ -12,7 +12,7 @@ import {
   getRegistryCredentialSchema,
   updateMcpSecret,
 } from '../../lib/api'
-import type { McpServerResource } from '../../lib/api'
+import { buildMcpServerReference } from '../../test/fixtures/mcpServer'
 
 // These tests prove the PAGE wiring: the rotation form, its rollout
 // verification, and the 404→recreate latch all belong to the shared
@@ -59,28 +59,15 @@ function server(options: {
   secretName?: string
   secretKey?: string
   envVar?: string
-}): McpServerResource {
-  return {
-    metadata: {
-      name: options.name,
-      annotations: {
-        'clerum.io/catalog-id': 'mcp-linear',
-        'clerum.io/catalog-version': '1.4.0',
-      },
+}) {
+  return buildMcpServerReference({
+    ...options,
+    secretName: options.secretName ?? 'linear-credentials',
+    annotations: {
+      'clerum.io/catalog-id': 'mcp-linear',
+      'clerum.io/catalog-version': '1.4.0',
     },
-    spec: {
-      envSecret: {
-        name: options.secretName ?? 'linear-credentials',
-        keys: [
-          {
-            secretKey: options.secretKey ?? 'api-key',
-            envVar: options.envVar ?? 'LINEAR_API_KEY',
-          },
-        ],
-      },
-    },
-    status: { conditions: [] },
-  }
+  })
 }
 
 /** Drains chained microtasks without real timers — same contract as the
@@ -189,32 +176,34 @@ describe('EditConnectorSecretPage', () => {
     ).toBeInTheDocument()
   })
 
-  it('uses the normalized Secret name for selection and rotation', async () => {
+  it('refuses a non-canonical stored Secret name without rotating its trimmed alias', async () => {
     mockGetMcpServers.mockResolvedValue({
       items: [server({ name: 'linear-conn', secretName: '  linear-credentials  ' })],
     })
     await renderPage()
 
-    expect(screen.getByRole('button', { name: 'Rotate credentials' })).toBeInTheDocument()
-    await submitRotation('API token', 'rotated')
-
-    expect(mockUpdateMcpSecret).toHaveBeenCalledWith('linear-credentials', {
-      'api-key': 'rotated',
-    })
-    expect(mockUpdateMcpSecret).not.toHaveBeenCalledWith('  linear-credentials  ', {
-      'api-key': 'rotated',
-    })
+    expect(screen.getByRole('alert').textContent).toContain(
+      'Connector linear-conn stores a non-canonical Secret name: "  linear-credentials  "'
+    )
+    expect(screen.queryByRole('button', { name: 'Rotate credentials' })).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('API token')).not.toBeInTheDocument()
+    expect(mockUpdateMcpSecret).not.toHaveBeenCalled()
+    expect(mockCreateMcpSecret).not.toHaveBeenCalled()
   })
 
-  it('refuses rotation when the normalized connector Secret name differs from the URL', async () => {
+  it('refuses the raw non-canonical Secret identity linked from the table', async () => {
+    navigation.params = { name: '  linear-credentials  ' }
     mockGetMcpServers.mockResolvedValue({
-      items: [server({ name: 'linear-conn', secretName: '  other-credentials  ' })],
+      items: [server({ name: 'linear-conn', secretName: '  linear-credentials  ' })],
     })
     await renderPage()
 
-    expect(screen.getByText(/No connector currently references Secret/i)).toBeInTheDocument()
+    expect(screen.getByRole('alert').textContent).toContain(
+      'Secret name in the URL is non-canonical: "  linear-credentials  "'
+    )
     expect(screen.queryByRole('button', { name: 'Rotate credentials' })).not.toBeInTheDocument()
     expect(mockUpdateMcpSecret).not.toHaveBeenCalled()
+    expect(mockCreateMcpSecret).not.toHaveBeenCalled()
   })
 
   it('latches to recreate mode when the rotation PUT answers 404', async () => {
@@ -263,20 +252,37 @@ describe('EditConnectorSecretPage', () => {
     expect(screen.getByRole('button', { name: 'Rotate credentials' })).toBeInTheDocument()
   })
 
-  it('does not rotate through a different connector when a deep link names an unattached server', async () => {
-    navigation.searchParams = new URLSearchParams('?server=stale-conn')
+  it.each([
+    ['empty', '?server='],
+    ['whitespace-only', '?server=%20%20'],
+    ['duplicate', '?server=alpha-conn&server=linear-conn'],
+    ['unknown', '?server=stale-conn'],
+  ])('rejects an %s server query without a credential form', async (_, query) => {
+    navigation.searchParams = new URLSearchParams(query)
     mockGetMcpServers.mockResolvedValue({
       items: [server({ name: 'alpha-conn' }), server({ name: 'linear-conn' })],
     })
 
     await renderPage()
 
+    expect(screen.getByRole('alert')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Rotate credentials' })).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('API token')).not.toBeInTheDocument()
+    expect(mockUpdateMcpSecret).not.toHaveBeenCalled()
+    expect(mockCreateMcpSecret).not.toHaveBeenCalled()
+  })
+
+  it('rejects an unknown server even when no connectors reference the Secret', async () => {
+    navigation.searchParams = new URLSearchParams('?server=stale-conn')
+    mockGetMcpServers.mockResolvedValue({ items: [] })
+    await renderPage()
+
     expect(screen.getByRole('alert')).toHaveTextContent(
       'Connector stale-conn does not reference this Secret.'
     )
     expect(screen.queryByRole('button', { name: 'Rotate credentials' })).not.toBeInTheDocument()
-    expect(screen.queryByLabelText('API token')).not.toBeInTheDocument()
     expect(mockUpdateMcpSecret).not.toHaveBeenCalled()
+    expect(mockCreateMcpSecret).not.toHaveBeenCalled()
   })
 
   it('explains when no connector currently references the secret', async () => {

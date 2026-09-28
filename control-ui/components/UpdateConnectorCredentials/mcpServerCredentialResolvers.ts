@@ -1,5 +1,14 @@
 import type { EnvSecret, EnvSecretKeyMapping, McpServerResource } from '@lib/api'
 
+export function nonCanonicalEnvSecretName(
+  spec: Record<string, unknown> | undefined
+): string | undefined {
+  const raw = spec?.envSecret
+  if (!raw || typeof raw !== 'object') return undefined
+  const name = (raw as { name?: unknown }).name
+  return typeof name === 'string' && name !== name.trim() ? name : undefined
+}
+
 /**
  * Narrows `server.spec.envSecret` (typed as `unknown` on the generic
  * `AnyRecord` spec) into the shape UpdateConnectorCredentials needs. A
@@ -12,8 +21,7 @@ export function resolveEnvSecret(spec: Record<string, unknown> | undefined): Env
   if (!raw || typeof raw !== 'object') return undefined
   const candidate = raw as { name?: unknown; keys?: unknown }
   if (typeof candidate.name !== 'string' || !Array.isArray(candidate.keys)) return undefined
-  const name = candidate.name.trim()
-  if (!name) return undefined
+  if (!candidate.name || nonCanonicalEnvSecretName(spec) !== undefined) return undefined
   const keys = candidate.keys.filter(
     (k): k is EnvSecretKeyMapping =>
       Boolean(k) &&
@@ -21,7 +29,7 @@ export function resolveEnvSecret(spec: Record<string, unknown> | undefined): Env
       typeof (k as EnvSecretKeyMapping).envVar === 'string'
   )
   if (keys.length === 0) return undefined
-  return { name, keys }
+  return { name: candidate.name, keys }
 }
 
 /**
