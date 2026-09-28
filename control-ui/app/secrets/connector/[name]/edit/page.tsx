@@ -77,7 +77,9 @@ function EditConnectorSecretContent() {
 
   const selected = useMemo(() => {
     if (!servers || servers.length === 0) return undefined
-    return servers.find(s => String(s.metadata?.name ?? '') === requestedServer) ?? servers[0]
+    return requestedServer
+      ? servers.find(s => String(s.metadata?.name ?? '') === requestedServer)
+      : servers[0]
   }, [servers, requestedServer])
   const selectedName = selected ? String(selected.metadata?.name ?? '') : ''
 
@@ -91,7 +93,7 @@ function EditConnectorSecretContent() {
         <CreatePageHeader
           icon={<IconKey />}
           title={`Edit connector secret${secretName ? `: ${secretName}` : ''}`}
-          subtitle="Rotate the values stored in this Secret through a connector that references it. Values are write-only; keys you leave blank keep their current value."
+          subtitle="Update the values stored in this Secret through a connector that references it. Values are write-only; the form explains which keys are required."
           backLabel="Back to secrets"
           onBack={backToList}
         />
@@ -125,6 +127,13 @@ function EditConnectorSecretContent() {
                       }
                     })}
                   />
+                ) : null}
+
+                {requestedServer && !selected ? (
+                  <div className="cu-banner cu-banner--error" role="alert">
+                    Connector <code>{requestedServer}</code> does not reference this Secret. Choose
+                    a connector that does.
+                  </div>
                 ) : null}
 
                 {selected ? (

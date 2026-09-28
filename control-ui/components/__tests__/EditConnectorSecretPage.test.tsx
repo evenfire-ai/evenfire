@@ -230,6 +230,22 @@ describe('EditConnectorSecretPage', () => {
     expect(screen.getByRole('button', { name: 'Rotate credentials' })).toBeInTheDocument()
   })
 
+  it('does not rotate through a different connector when a deep link names an unattached server', async () => {
+    navigation.searchParams = new URLSearchParams('?server=stale-conn')
+    mockGetMcpServers.mockResolvedValue({
+      items: [server({ name: 'alpha-conn' }), server({ name: 'linear-conn' })],
+    })
+
+    await renderPage()
+
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      'Connector stale-conn does not reference this Secret.'
+    )
+    expect(screen.queryByRole('button', { name: 'Rotate credentials' })).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('API token')).not.toBeInTheDocument()
+    expect(mockUpdateMcpSecret).not.toHaveBeenCalled()
+  })
+
   it('explains when no connector currently references the secret', async () => {
     mockGetMcpServers.mockResolvedValue({ items: [] })
     await renderPage()
