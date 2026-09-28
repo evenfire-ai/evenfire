@@ -642,6 +642,8 @@ export type ControlAdminListItem = {
   status: 'active' | 'disabled' | 'pending_password'
   passwordPending?: boolean
   invitationId?: string
+  replaceInviter?: boolean
+  invitedByAdminId?: string | null
   gfsOperatorLink?: {
     desktopUserId: string
     controlAdminId: string

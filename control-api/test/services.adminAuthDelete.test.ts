@@ -115,4 +115,27 @@ describe('deleteControlAdmin lifecycle transition', () => {
     expect(linkService.retireParentInTransaction).toHaveBeenCalledOnce()
     expect(eventService.appendInTransaction).toHaveBeenCalledOnce()
   })
+
+  it('retires inside the caller transaction with the caller reason', async () => {
+    const { retireControlAdminInTransaction } = await import('../src/services/adminAuthService.js')
+    db.withTransaction.mockClear()
+    const tx = { query: async (text: string) => queryResult(text) }
+
+    await expect(
+      retireControlAdminInTransaction(tx, {
+        actorAdminId: 'actor-admin',
+        adminId: 'target-admin',
+        reason: 'control_admin_replaced',
+      })
+    ).resolves.toEqual({ deleted: true })
+
+    expect(db.withTransaction).not.toHaveBeenCalled()
+    expect(linkService.retireParentInTransaction).toHaveBeenCalledWith(tx, {
+      kind: 'control_admin',
+      parentId: 'target-admin',
+      actor: { kind: 'control_admin', controlAdminId: 'actor-admin' },
+      reason: 'control_admin_replaced',
+    })
+    expect(eventService.appendInTransaction).toHaveBeenCalledOnce()
+  })
 })
