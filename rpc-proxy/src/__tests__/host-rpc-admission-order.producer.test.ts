@@ -3,6 +3,7 @@ import express from 'express'
 import { execFileSync } from 'node:child_process'
 import { resolve } from 'node:path'
 import request from 'supertest'
+import { encodeSessionsCursor, sessionsCursorScope } from '@clerum/action-context-contracts'
 import { signRpcAccessToken } from '../../../control-api/src/utils/auth/rpcAuthToken.js'
 
 const events = vi.hoisted(() => ({ values: [] as string[] }))
@@ -217,6 +218,30 @@ describe('Spec 65 legacy Host-RPC admission ordering (real Control API token pro
       .expect(403)
     expect(controlApi.requestHostRpcAdmission).not.toHaveBeenCalled()
     expect(service.resolveHostConnectionForUser).not.toHaveBeenCalled()
+  })
+
+  it('rejects a malformed sessions cursor before admission and live Host work', async () => {
+    const response = await request(app())
+      .get('/rpc/hosts/chatllm/sessions?cursor=not-json')
+      .set('authorization', `Bearer ${signedAccessToken}`)
+      .expect(400)
+    expect(response.body).toEqual({ error: 'Invalid sessions cursor' })
+    expect(events.values).toEqual([])
+    expect(controlApi.requestHostRpcAdmission).not.toHaveBeenCalled()
+    expect(service.resolveHostConnectionForUser).not.toHaveBeenCalled()
+  })
+
+  it('admits a session list request with a Control API-compatible cursor', async () => {
+    const cursor = encodeSessionsCursor(
+      '2026-04-22T00:00:00.000Z',
+      'session-a',
+      sessionsCursorScope(USER)
+    )
+    await request(app())
+      .get(`/rpc/hosts/chatllm/sessions?cursor=${encodeURIComponent(cursor)}`)
+      .set('authorization', `Bearer ${signedAccessToken}`)
+      .expect(403)
+    expect(events.values).toEqual(['admission', 'live-resolver'])
   })
 
   it('rejects invalid legacy route input after scope but before admission or live resolution', async () => {

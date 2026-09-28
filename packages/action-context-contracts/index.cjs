@@ -97,6 +97,48 @@ function validateHostApprovalRequestId(value) {
   return Object.freeze({ ok: true, requestId: value })
 }
 
+function sessionsCursorScope(userSub, agent) {
+  return createHash('sha256')
+    .update(JSON.stringify([userSub, agent ?? null]))
+    .digest('base64url')
+    .slice(0, 24)
+}
+
+function decodeSessionsCursor(cursor, expectedScope) {
+  if (!cursor) return null
+  try {
+    const parsed = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'))
+    const milliseconds = typeof parsed.updatedAt === 'string' ? Date.parse(parsed.updatedAt) : NaN
+    if (
+      parsed.version !== 1 ||
+      typeof parsed.scope !== 'string' ||
+      parsed.scope.length === 0 ||
+      (expectedScope !== undefined && parsed.scope !== expectedScope) ||
+      typeof parsed.updatedAt !== 'string' ||
+      !Number.isFinite(milliseconds) ||
+      new Date(milliseconds).toISOString() !== parsed.updatedAt ||
+      typeof parsed.key !== 'string' ||
+      parsed.key.length === 0
+    ) {
+      return null
+    }
+    return Object.freeze({
+      version: 1,
+      scope: parsed.scope,
+      updatedAt: parsed.updatedAt,
+      key: parsed.key,
+    })
+  } catch {
+    return null
+  }
+}
+
+function encodeSessionsCursor(updatedAt, key, scope = 'unscoped') {
+  return Buffer.from(JSON.stringify({ version: 1, scope, updatedAt, key }), 'utf8').toString(
+    'base64url'
+  )
+}
+
 const ACCESS_RESOURCE_TYPES = Object.freeze([
   'user',
   'team',
@@ -1206,6 +1248,9 @@ module.exports = {
   validateSessionRenameTitle,
   validateHostModelSelectionRequest,
   validateHostApprovalRequestId,
+  sessionsCursorScope,
+  decodeSessionsCursor,
+  encodeSessionsCursor,
   createMessageRetryHostWakeRequest,
   validateActionAuthorityHostWakeRequest,
   deriveMessageRetryHostWakeCheckpoint,

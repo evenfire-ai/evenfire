@@ -34,6 +34,20 @@ test('Host route deterministic validators preserve approval, model, and title ru
   })
 })
 
+test('session cursor encoding and validation share the runtime wire contract', () => {
+  const scope = contracts.sessionsCursorScope('user-a', 'chatllm')
+  const cursor = contracts.encodeSessionsCursor('2026-04-22T00:00:00.000Z', 'session-a', scope)
+  assert.deepEqual(contracts.decodeSessionsCursor(cursor, scope), {
+    version: 1,
+    scope,
+    updatedAt: '2026-04-22T00:00:00.000Z',
+    key: 'session-a',
+  })
+  assert.equal(contracts.decodeSessionsCursor(cursor, contracts.sessionsCursorScope('user-b')), null)
+  assert.equal(contracts.decodeSessionsCursor('not-json', scope), null)
+  assert.equal(contracts.decodeSessionsCursor('', scope), null)
+})
+
 test('operation identifiers and generated v2 scopes are bijective', () => {
   assert.equal(new Set(contracts.ACTION_OPERATION_IDS).size, contracts.ACTION_OPERATION_IDS.length)
   assert.equal(contracts.ACTION_OPERATION_SCOPES.length, contracts.ACTION_OPERATION_IDS.length)

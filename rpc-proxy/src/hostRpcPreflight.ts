@@ -1,5 +1,7 @@
 import type { NextFunction, Response } from 'express'
 import {
+  decodeSessionsCursor,
+  sessionsCursorScope,
   validateHostApprovalRequestId,
   validateHostModelSelectionRequest,
   validateSessionRenameTitle,
@@ -119,6 +121,11 @@ function parseRoute(req: AuthedRequest): ParseResult {
       (limit !== undefined && limit < 1)
     )
       return fail('Invalid session pagination query')
+    if (
+      rawCursor !== undefined &&
+      !decodeSessionsCursor(cursor, sessionsCursorScope(req.auth!.sub, agent))
+    )
+      return fail('Invalid sessions cursor')
     return {
       value: {
         ...base,
