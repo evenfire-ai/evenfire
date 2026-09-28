@@ -601,6 +601,16 @@ export function CodexSubscriptionHub() {
           ? await syncGrokSubscriptionCatalog(row.connectionKey)
           : await syncCodexSubscriptionCatalog(row.connectionKey)
       } catch (err) {
+        // A rejected saved credential changes the persisted grant before the
+        // sync endpoint responds. Reflect that transition in the open dialog
+        // immediately so its connected indicator becomes a Reconnect action.
+        if (err && typeof err === 'object' && 'code' in err && err.code === 'reauth_required') {
+          setEditing(current =>
+            current && hubRowId(current) === hubRowId(row)
+              ? { ...current, status: 'reauth_required', catalogStatus: 'auth-rejected' }
+              : current
+          )
+        }
         setError(catalogSyncErrorMessage(err, brand))
         return
       }

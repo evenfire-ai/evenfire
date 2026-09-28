@@ -1290,7 +1290,7 @@ describe('CodexSubscriptionHub catalog re-sync', () => {
   // message by design, and for this one that produced `400 Bad Request -
   // reauth_required` — the least readable message on the most common
   // recoverable failure.
-  it('tells the operator to sign in again when the saved credentials are rejected', async () => {
+  it('shows Reconnect for Grok in the open dialog when saved credentials are rejected', async () => {
     fetchMock.mockResolvedValueOnce(makeResponse(400, { error: 'reauth_required' }))
 
     const dialog = await openGrokDialog()
@@ -1304,6 +1304,36 @@ describe('CodexSubscriptionHub catalog re-sync', () => {
     // that rendered no error at all would satisfy the absence for free.
     expect(within(dialog).queryByText(/400 Bad Request/)).not.toBeInTheDocument()
     expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(await within(dialog).findByText('Reauthorization required')).toBeInTheDocument()
+    const reconnect = await within(dialog).findByRole('button', { name: 'Reconnect Grok' })
+    expect(reconnect).toBeVisible()
+    expect(reconnect).toBeEnabled()
+    expect(within(dialog).queryByTestId('codex-signin-connected')).not.toBeInTheDocument()
+  })
+
+  it('shows Reconnect for ChatGPT in the open dialog when saved credentials are rejected', async () => {
+    fetchMock.mockResolvedValueOnce(makeResponse(400, { error: 'reauth_required' }))
+
+    renderHub()
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'Actions for ChatGPT subscription Team A' })
+    )
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Update' }))
+    const dialog = await screen.findByRole('dialog', {
+      name: 'Update ChatGPT subscription Team A',
+    })
+    await within(dialog).findByLabelText('gpt-5.1')
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Sync catalog' }))
+
+    expect(await within(dialog).findByText('Reauthorization required')).toBeInTheDocument()
+    const reconnect = await within(dialog).findByRole('button', { name: 'Reconnect ChatGPT' })
+    expect(reconnect).toBeVisible()
+    expect(reconnect).toBeEnabled()
+    expect(within(dialog).queryByTestId('codex-signin-connected')).not.toBeInTheDocument()
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(url).toContain('/codex-subscription/connections/codex-aaa/catalog/sync')
+    expect(init.method).toBe('POST')
   })
 
   it('says the provider did not answer when the credential refresh is unavailable', async () => {

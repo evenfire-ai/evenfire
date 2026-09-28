@@ -6788,13 +6788,13 @@ td.cu-registry-description {
 }
 
 .cu-agent-select__option:focus-visible {
-  box-shadow: inset 0 0 0 2px var(--cu-focus);
+  box-shadow: inset 0 0 0 2px var(--cu-text);
 }
 
 .cu-agent-select__option[data-active='true']:focus-visible {
   box-shadow:
     inset 0 0 0 1px var(--cu-accent),
-    inset 0 0 0 3px var(--cu-focus);
+    inset 0 0 0 3px var(--cu-text);
 }
 
 .cu-agent-select__empty {
@@ -7037,13 +7037,13 @@ td.cu-registry-description {
 }
 
 .cu-selection-dropdown__option:focus-visible {
-  box-shadow: inset 0 0 0 2px var(--cu-focus);
+  box-shadow: inset 0 0 0 2px var(--cu-text);
 }
 
 .cu-selection-dropdown__option[data-selected='true']:focus-visible {
   box-shadow:
     inset 0 0 0 1px var(--cu-accent),
-    inset 0 0 0 3px var(--cu-focus);
+    inset 0 0 0 3px var(--cu-text);
 }
 
 .cu-selection-dropdown__option-leading {
