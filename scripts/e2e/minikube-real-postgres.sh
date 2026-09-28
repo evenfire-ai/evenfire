@@ -282,8 +282,14 @@ PY
 
 list_real_pg_files() {
   local package="$1"
+  # Stress suites open hundreds of concurrent connections against a single
+  # throwaway Docker PostgreSQL. CI's service containers handle that load;
+  # local Docker networking on macOS resets some connections (ECONNRESET)
+  # before the rate limiter or the test assertions can run. They stay in CI
+  # and are excluded from the local T1 lane only.
   find "$PROJECT_DIR/$package" -type f -name '*realPostgres*.test.ts' \
-    ! -name 'realPostgres.requirement.ts' -print | sort
+    ! -name 'realPostgres.requirement.ts' \
+    ! -name '*Stress.realPostgres*' -print | sort
 }
 
 is_isolated_control_api_file() {
