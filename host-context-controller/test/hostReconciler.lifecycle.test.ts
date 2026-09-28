@@ -268,7 +268,9 @@ function trustedRuntimeDeployment(
       'clerum.io/host-uid': host.uid ?? '',
     },
   }
-  deployment.spec = { ...deployment.spec, replicas: options.replicas ?? 1 }
+  if (deployment.spec) {
+    deployment.spec.replicas = options.replicas ?? 1
+  }
   deployment.status = { readyReplicas: options.readyReplicas ?? 1 }
   return deployment
 }
