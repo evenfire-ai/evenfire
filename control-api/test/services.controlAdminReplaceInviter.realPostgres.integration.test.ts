@@ -439,6 +439,66 @@ describeRealPostgres('control admin replace-inviter invitations on real PostgreS
     expect(await teamRole(invitedTeam, clientDesktopId)).toBe('admin')
   })
 
+  it('reactivates a deleted membership with the inviter role, not its stale role', async () => {
+    const inviter = await seedAdmin('stale-ops')
+    const inviterDesktopId = await seedDesktopUser(inviter.email)
+    const team = await seedTeam('Stale')
+    await addTeamMember(team, inviterDesktopId, 'member')
+    const clientEmail = uniqueEmail('stale-client')
+    const clientDesktopId = await seedDesktopUser(clientEmail)
+    await testPool.query(
+      `INSERT INTO team_members (team_id, user_id, role, status) VALUES ($1::uuid, $2::uuid, 'admin', 'deleted')`,
+      [team, clientDesktopId]
+    )
+    const handover = await createControlAdminInvitation(clientEmail, inviter.id, {
+      replaceInviter: true,
+    })
+    if ('error' in handover) throw new Error(handover.error)
+
+    const completed = await completeControlAdminInvitation({
+      email: clientEmail,
+      invitationId: handover.id,
+      username: `stale-${randomUUID().slice(0, 8)}`,
+      passwordHash: 'real-pg-replace-client',
+    })
+    if ('error' in completed) throw new Error(completed.error)
+
+    expect(await teamRole(team, clientDesktopId)).toBe('member')
+  })
+
+  it('keeps the fallback team of a legacy single-team desktop invitation', async () => {
+    const inviter = await seedAdmin('legacy-ops')
+    const inviterDesktopId = await seedDesktopUser(inviter.email)
+    const inviterTeam = await seedTeam('Legacy inviter')
+    const legacyTeam = await seedTeam('Legacy invited')
+    await addTeamMember(inviterTeam, inviterDesktopId, 'member')
+    const clientEmail = uniqueEmail('legacy-client')
+    const handover = await createControlAdminInvitation(clientEmail, inviter.id, {
+      replaceInviter: true,
+    })
+    if ('error' in handover) throw new Error(handover.error)
+    // Written before invitation_teams existed: only invitations.team_id is set.
+    const legacy = await testPool.query(
+      `INSERT INTO invitations (team_id, email, role, status, purpose)
+       VALUES ($1::uuid, $2, 'admin', 'pending', 'admin_desktop_access') RETURNING id::text AS id`,
+      [legacyTeam, clientEmail]
+    )
+    const legacyInvitationId = (legacy.rows[0] as { id: string }).id
+
+    const completed = await completeControlAdminInvitation({
+      email: clientEmail,
+      invitationId: handover.id,
+      username: `legacy-${randomUUID().slice(0, 8)}`,
+      passwordHash: 'real-pg-replace-client',
+    })
+    if ('error' in completed) throw new Error(completed.error)
+    const accepted = await acceptInvitationById(clientEmail, legacyInvitationId)
+    if ('error' in accepted) throw new Error(String(accepted.error))
+
+    expect(await teamRole(legacyTeam, accepted.data.userId)).toBe('admin')
+    expect(await teamRole(inviterTeam, accepted.data.userId)).toBe('member')
+  })
+
   it('refuses a hand-over that has nobody to receive the inviter team roles', async () => {
     const inviter = await seedAdmin('nobody-ops')
     const inviterDesktopId = await seedDesktopUser(inviter.email)
