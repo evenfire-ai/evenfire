@@ -139,6 +139,14 @@ function encodeSessionsCursor(updatedAt, key, scope = 'unscoped') {
   )
 }
 
+function validateHostActivityLimit(value) {
+  const limit = Number(value || '50')
+  if (!Number.isFinite(limit) || limit <= 0) {
+    return Object.freeze({ ok: false, error: 'limit must be a positive number' })
+  }
+  return Object.freeze({ ok: true, limit })
+}
+
 const ACCESS_RESOURCE_TYPES = Object.freeze([
   'user',
   'team',
@@ -1251,6 +1259,7 @@ module.exports = {
   sessionsCursorScope,
   decodeSessionsCursor,
   encodeSessionsCursor,
+  validateHostActivityLimit,
   createMessageRetryHostWakeRequest,
   validateActionAuthorityHostWakeRequest,
   deriveMessageRetryHostWakeCheckpoint,

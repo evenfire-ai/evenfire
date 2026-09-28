@@ -1681,7 +1681,7 @@ export function createRpcRouter(): Router {
       try {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
-        const { hostRef } = getHostRpcPreflight(req)
+        const { hostRef, limit = 50 } = getHostRpcPreflight(req)
         if (!(await admitLegacyHostRpcRequest(req, res, hostRef))) return
         const host = await resolveHostConnectionForUser(
           auth.sub,
@@ -1693,7 +1693,6 @@ export function createRpcRouter(): Router {
           res.status(403).json({ error: 'Forbidden: user cannot access this host' })
           return
         }
-        const limit = Number(req.query.limit || 50)
         const sinceEventId =
           typeof req.query.sinceEventId === 'string' ? req.query.sinceEventId : undefined
         const activity = await forwardHostActivity(host, limit, sinceEventId)

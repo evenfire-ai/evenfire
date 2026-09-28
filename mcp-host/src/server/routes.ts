@@ -5,6 +5,7 @@ import {
   validateHostApprovalRequestId,
   validateHostModelSelectionRequest,
 } from '@clerum/action-context-contracts'
+import { validateHostActivityLimit } from '@clerum/action-context-contracts'
 import { ConversationError, ConversationErrorCode } from '../core/errors'
 import type { ApprovalDecision } from '../core/extensions/approvalTypes'
 import { isTraceContextV1 } from '../core/types'
@@ -517,12 +518,12 @@ export async function handleActivityRoute(
       json(res, 501, { hostRef: 'unknown', version: '1.0', items: [], nextCursor: null })
       return
     }
-    const limitRaw = String(req.query.limit || '50')
-    const limit = Number(limitRaw)
-    if (!Number.isFinite(limit) || limit <= 0) {
-      badRequest(res, 'limit must be a positive number')
+    const parsedLimit = validateHostActivityLimit(req.query.limit)
+    if (!parsedLimit.ok) {
+      badRequest(res, parsedLimit.error)
       return
     }
+    const limit = parsedLimit.limit
     const sinceEventId =
       typeof req.query.sinceEventId === 'string' ? req.query.sinceEventId : undefined
     const snapshot = await handlers.activitySnapshotHandler(

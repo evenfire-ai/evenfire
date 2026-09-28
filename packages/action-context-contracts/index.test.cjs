@@ -48,6 +48,17 @@ test('session cursor encoding and validation share the runtime wire contract', (
   assert.equal(contracts.decodeSessionsCursor('', scope), null)
 })
 
+test('Host activity limits preserve the producer range and reject invalid numbers', () => {
+  assert.deepEqual(contracts.validateHostActivityLimit(undefined), { ok: true, limit: 50 })
+  assert.deepEqual(contracts.validateHostActivityLimit('25'), { ok: true, limit: 25 })
+  for (const invalid of ['0', '-1', 'not-a-number', 'Infinity', 'NaN']) {
+    assert.deepEqual(contracts.validateHostActivityLimit(invalid), {
+      ok: false,
+      error: 'limit must be a positive number',
+    })
+  }
+})
+
 test('operation identifiers and generated v2 scopes are bijective', () => {
   assert.equal(new Set(contracts.ACTION_OPERATION_IDS).size, contracts.ACTION_OPERATION_IDS.length)
   assert.equal(contracts.ACTION_OPERATION_SCOPES.length, contracts.ACTION_OPERATION_IDS.length)

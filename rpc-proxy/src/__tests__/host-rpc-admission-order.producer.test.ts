@@ -244,6 +244,28 @@ describe('Spec 65 legacy Host-RPC admission ordering (real Control API token pro
     expect(events.values).toEqual(['admission', 'live-resolver'])
   })
 
+  it.each(['0', '-1', 'not-a-number', 'Infinity', 'NaN'])(
+    'rejects invalid activity limit %s before admission and live Host work',
+    async limit => {
+      const response = await request(app())
+        .get(`/rpc/hosts/chatllm/activity?limit=${encodeURIComponent(limit)}`)
+        .set('authorization', `Bearer ${signedAccessToken}`)
+        .expect(400)
+      expect(response.body).toEqual({ error: 'limit must be a positive number' })
+      expect(events.values).toEqual([])
+      expect(controlApi.requestHostRpcAdmission).not.toHaveBeenCalled()
+      expect(service.resolveHostConnectionForUser).not.toHaveBeenCalled()
+    }
+  )
+
+  it('admits a valid activity limit once before live Host resolution', async () => {
+    await request(app())
+      .get('/rpc/hosts/chatllm/activity?limit=25')
+      .set('authorization', `Bearer ${signedAccessToken}`)
+      .expect(403)
+    expect(events.values).toEqual(['admission', 'live-resolver'])
+  })
+
   it('rejects invalid legacy route input after scope but before admission or live resolution', async () => {
     const response = await request(app())
       .get('/rpc/hosts/chatllm/sessions?limit=not-a-number')
