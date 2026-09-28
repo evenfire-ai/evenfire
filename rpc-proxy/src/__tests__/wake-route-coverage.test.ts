@@ -2,11 +2,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Response as ExpressResponse } from 'express'
 import express from 'express'
 import request from 'supertest'
+import { config } from '../config.js'
 import {
   createRpcRouter,
   respondControlApiHostAccessRejection,
   respondUpstreamUnavailable,
 } from '../routes/rpc.js'
+import { isUpstreamTimeoutError } from '../services/wakeAndHold.js'
 
 // ── Issue #791 §11.4/§11.5 — extend wake-and-hold to the remaining finite
 // Desktop routes, and prove terminal-response (duplicate-write) safety in the
@@ -72,6 +74,10 @@ function makeApp() {
   app.use(createRpcRouter())
   app.use(
     (err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+      if (isUpstreamTimeoutError(err)) {
+        res.status(504).json({ error: 'Gateway Timeout' })
+        return
+      }
       res.status(500).json({ error: err instanceof Error ? err.message : 'Internal error' })
     }
   )
@@ -103,6 +109,7 @@ function drainingResponse(): Response {
 }
 
 const originalFetch = globalThis.fetch
+const originalUpstreamTimeoutMs = config.upstreamTimeoutMs
 
 beforeEach(() => {
   vi.clearAllMocks()
@@ -115,6 +122,54 @@ beforeEach(() => {
 
 afterEach(() => {
   globalThis.fetch = originalFetch
+  config.upstreamTimeoutMs = originalUpstreamTimeoutMs
+})
+
+describe('finite route upstream deadlines', () => {
+  it.each([
+    {
+      label: 'deny approval',
+      scope: 'host:approval:write',
+      path: '/rpc/hosts/chatllm/approvals/deny',
+      body: { toolCallId: 'tc-timeout' },
+    },
+    {
+      label: 'set model',
+      scope: 'host:model:write',
+      path: '/rpc/hosts/chatllm/model',
+      body: { chatId: 'c1', model: 'claude-haiku-4-5' },
+    },
+    {
+      label: 'list artifacts',
+      scope: 'host:task:read',
+      path: '/rpc/hosts/chatllm/artifacts',
+      body: null,
+    },
+  ])('$label returns 504 when the actual upstream deadline aborts a hung fetch', async row => {
+    config.upstreamTimeoutMs = 30
+    authTokenMock.verifyRpcToken.mockReturnValue(claims([row.scope, 'host:wake:write']))
+    let upstreamSignal: AbortSignal | undefined
+    const fetchMock = vi.fn().mockImplementation((_url: string, init: RequestInit) => {
+      upstreamSignal = init.signal as AbortSignal
+      return new Promise((_resolve, reject) => {
+        upstreamSignal!.addEventListener('abort', () => reject(upstreamSignal!.reason), {
+          once: true,
+        })
+      })
+    })
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+
+    const app = makeApp()
+    const outgoing = row.body
+      ? request(app).post(row.path).send(row.body)
+      : request(app).get(row.path)
+    const res = await outgoing.set('authorization', 'Bearer tok').expect(504)
+
+    expect(res.body).toEqual({ error: 'Gateway Timeout' })
+    expect(upstreamSignal?.aborted).toBe(true)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(controlApiMock.requestHostWakeFromControlApi).not.toHaveBeenCalled()
+  })
 })
 
 describe('§11.4 wake coverage — GET /rpc/hosts/:hostRef/models', () => {
