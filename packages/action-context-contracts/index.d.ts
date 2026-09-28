@@ -406,11 +406,9 @@ export declare function decodeSessionsCursor(
   cursor: string | undefined,
   expectedScope?: string
 ): SessionsCursorWire | null
-export declare function encodeSessionsCursor(
-  updatedAt: string,
-  key: string,
-  scope?: string
-): string
-export declare function validateHostActivityLimit(value: unknown):
+export declare function encodeSessionsCursor(updatedAt: string, key: string, scope?: string): string
+export declare function validateHostActivityLimit(
+  value: unknown
+):
   | Readonly<{ ok: true; limit: number }>
   | Readonly<{ ok: false; error: 'limit must be a positive number' }>

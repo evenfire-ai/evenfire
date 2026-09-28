@@ -66,7 +66,10 @@ test('session cursor encoding and validation share the runtime wire contract', (
     updatedAt: '2026-04-22T00:00:00.000Z',
     key: 'session-a',
   })
-  assert.equal(contracts.decodeSessionsCursor(cursor, contracts.sessionsCursorScope('user-b')), null)
+  assert.equal(
+    contracts.decodeSessionsCursor(cursor, contracts.sessionsCursorScope('user-b')),
+    null
+  )
   assert.equal(contracts.decodeSessionsCursor('not-json', scope), null)
   assert.equal(contracts.decodeSessionsCursor('', scope), null)
 })
