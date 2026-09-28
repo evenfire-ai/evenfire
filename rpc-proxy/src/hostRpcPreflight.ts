@@ -2,6 +2,7 @@ import type { NextFunction, Response } from 'express'
 import {
   decodeSessionsCursor,
   sessionsCursorScope,
+  validateHostActivityLimit,
   validateHostApprovalRequestId,
   validateHostModelSelectionRequest,
   validateSessionRenameTitle,
@@ -271,6 +272,11 @@ function parseRoute(req: AuthedRequest): ParseResult {
     route.endsWith('/activity/stream')
   ) {
     if (!hostRef) return fail('hostRef is required')
+    if (route === 'GET /rpc/hosts/:hostRef/activity') {
+      const parsedLimit = validateHostActivityLimit(req.query.limit)
+      if (!parsedLimit.ok) return fail(parsedLimit.error)
+      return { value: { ...base, limit: parsedLimit.limit } }
+    }
     if (
       (route.endsWith('/status/stream') || route.endsWith('/activity/stream')) &&
       /[*%]/.test(hostRef)
