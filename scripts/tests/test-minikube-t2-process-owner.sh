@@ -57,7 +57,8 @@ case "$mode" in
   pid=) suffix=pid ;;
   *) exit 1 ;;
 esac
-[ ! -f "${T2_PS_DATA_DIR:?}/${pid}.${suffix}" ] || cat "${T2_PS_DATA_DIR}/${pid}.${suffix}"
+[ -f "${T2_PS_DATA_DIR:?}/${pid}.${suffix}" ] || exit 1
+cat "${T2_PS_DATA_DIR}/${pid}.${suffix}"
 EOF_PS
 chmod +x "$PS_BIN/ps"
 
@@ -115,13 +116,21 @@ run_process_check "$TEST_DIR/exact.out"
 
 # A registered record must remain visible to the verdict even when the live
 # process disappears from ps(1). This protects the fail-closed ownership scan
-# from treating a stale/dead pidfile as "nothing to check".
-rm -f "$PS_DATA/$PID.command"
+# from treating a stale/dead pidfile as "nothing to check" or deleting it.
+rm -f "$PS_DATA/$PID.command" "$PS_DATA/$PID.pid"
+if T2_PS_DATA_DIR="$PS_DATA" PATH="$PS_BIN:$PATH" ps -p "$PID" -o pid= >/dev/null 2>&1; then
+  printf 'FAIL: dead-PID fixture did not make ps fail\n' >&2
+  exit 1
+fi
 if run_process_check "$TEST_DIR/stale-record.out"; then
   printf 'FAIL: stale registered port-forward record was ignored\n' >&2
   exit 1
 fi
 grep -Fq PORT_FORWARD_CONFLICT "$TEST_DIR/stale-record.out"
+[ -f "$RECORD" ] || {
+  printf 'FAIL: final process check removed the dead owner record\n' >&2
+  exit 1
+}
 set_process_fixture kubectl "$exact_command"
 
 printf '%s\n' 'different process start' >"$PS_DATA/$PID.start"

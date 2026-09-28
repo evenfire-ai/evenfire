@@ -1063,7 +1063,9 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(host))
     const applied = reconciler.buildDeployment(host)
     applied.status = { readyReplicas: 1 }
-    persistHostDeployment(appsApi, host, applied)
+    const live = persistHostDeployment(appsApi, host, applied)
+    const templateBefore = structuredClone(live().spec!.template)
+    const replicasBefore = live().spec!.replicas
 
     coreApi.readNamespacedPersistentVolumeClaim.mockRejectedValueOnce(new Error('PVC read failed'))
     coreApi.readNamespacedService.mockRejectedValueOnce(new Error('Service read failed'))
@@ -1072,23 +1074,38 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
       .mockRejectedValueOnce(new Error('ingress policy failed'))
     const gfsEgress = vi
       .spyOn(reconciler as any, 'ensureMcpHostGfsEgressNetworkPolicy')
-      .mockResolvedValue(undefined)
+      .mockResolvedValue('up_to_date')
     const codexEgress = vi
       .spyOn(reconciler as any, 'reconcileMcpHostCodexProxyEgressNetworkPolicy')
-      .mockResolvedValue(undefined)
+      .mockResolvedValue('up_to_date')
 
     await reconciler.reconcile(host)
 
-    expect(coreApi.readNamespacedPersistentVolumeClaim).toHaveBeenCalledOnce()
-    expect(coreApi.readNamespacedService).toHaveBeenCalledOnce()
+    expect(coreApi.readNamespacedPersistentVolumeClaim).toHaveBeenCalledWith({
+      namespace: host.namespace,
+      name: `${host.name}-workspace`,
+    })
+    expect(coreApi.readNamespacedService).toHaveBeenCalledWith({
+      namespace: host.namespace,
+      name: host.name,
+    })
     expect(ingress).toHaveBeenCalledOnce()
+    expect(ingress).toHaveBeenCalledWith(host)
     expect(gfsEgress).toHaveBeenCalledOnce()
     expect(codexEgress).toHaveBeenCalledOnce()
+    expect(live().spec!.replicas).toBe(replicasBefore)
+    expect(live().spec!.template).toEqual(templateBefore)
     expect(reconciler.getStatus(host.name)).toMatchObject({
       deployed: true,
       ready: false,
-      message: expect.stringContaining('Host runtime boundary incomplete'),
+      message: expect.stringContaining('Host PVC: PVC read failed'),
     })
+    expect(reconciler.getStatus(host.name)?.message).toContain('Host Service: Service read failed')
+    expect(reconciler.getStatus(host.name)?.message).toContain(
+      'mcp-host ingress: ingress policy failed'
+    )
+    expect(reconciler.getStatus(host.name)?.message).not.toContain('GFS egress')
+    expect(reconciler.getStatus(host.name)?.message).not.toContain('Codex proxy egress')
   })
 
   it('does not report a Deployment applied when create conflict is followed by a missing read', async () => {

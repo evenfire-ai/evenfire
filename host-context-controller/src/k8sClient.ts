@@ -1759,9 +1759,9 @@ export class McpServerWatcher implements McpServerProvider {
         void this.requestHostFleetReconcile('CommunicationChannel recovery', lifecycleGeneration)
         return true
       } catch (error) {
-        console.error(
-          '[K8s] CommunicationChannel cache recovery failed; stateless lifecycle remains held active:',
-          error
+        hccLogger.error(
+          '[K8s] CommunicationChannel cache recovery failed; preserving durable Host lifecycle state:',
+          { err: error }
         )
         return false
       }
@@ -3957,8 +3957,8 @@ export class McpServerWatcher implements McpServerProvider {
       if (err) {
         console.error('[K8s] CommunicationChannel watch error:', err)
       }
-      console.log(
-        '[K8s] CommunicationChannel watch ended; holding stateless lifecycle active until snapshot recovery'
+      hccLogger.info(
+        '[K8s] CommunicationChannel watch ended; preserving durable Host lifecycle state until snapshot recovery'
       )
       void this.requestHostFleetReconcile(
         'CommunicationChannel watch interruption',

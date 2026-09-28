@@ -1100,24 +1100,8 @@ t2_process_check() {
   for pid_file in "$T2_PROFILE_ROOT/$T2_PROFILE"/pids/*.pid; do
     [ -f "$pid_file" ] || continue
     recorded_pid="$(sed -n '1p' "$pid_file" 2>/dev/null || true)"
-    # Auto-clean definitively dead profile-owned PID records instead of
-    # blocking the entire T2 certification. The T0 contract tests and
-    # pre-gate-sync legitimately create port-forwards whose processes
-    # terminate when their parent make exits; leaving stale records
-    # makes every subsequent T2 run fail with PORT_FORWARD_CONFLICT.
-    # A PID that is not running is safe to remove only when the record
-    # still belongs to this exact profile.
     if ! pf_owner_validate_pid "$recorded_pid" ||
        ! t2_pid_file_matches_process "$pid_file" "$recorded_pid"; then
-      if pf_owner_validate_pid "$recorded_pid" &&
-         ! ps -p "$recorded_pid" -o pid= >/dev/null 2>&1; then
-        # The recorded process is definitively dead; clean the stale
-        # record so T2 can start fresh port-forwards.
-        printf '[minikube-t2] auto-cleaned dead port-forward record: %s (pid=%s)\n' \
-          "$pid_file" "$recorded_pid" >&2
-        rm -f -- "$pid_file"
-        continue
-      fi
       T2_NEXT_COMMAND='repair the exact profile-owned port-forward record before rerunning T2'
       t2_fail PORT_FORWARD_CONFLICT "registered port-forward ownership is stale or invalid: $pid_file"
       return 1
