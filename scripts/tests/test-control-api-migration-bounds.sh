@@ -41,7 +41,7 @@ grep -q 'applyPendingPr1Migrations' "$DB_FILE" || \
 grep -q 'CREATE INDEX CONCURRENTLY' "$INDEX_PLAN_FILE" || \
   fail "existing-table indexes are not prepared concurrently"
 
-index_count="$(grep -c "^    migrationVersion: '010[79]_" "$INDEX_PLAN_FILE")"
+index_count="$(grep -c "^    migrationVersion: '010[9b]_" "$INDEX_PLAN_FILE")"
 [ "$index_count" = "25" ] || fail "expected 25 online indexes, found $index_count"
 
 grep -q 'activeDeadlineSeconds' "$DEPLOY_FILE" || \
