@@ -59,35 +59,40 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
     expect(currentCollisions).toEqual([])
   })
 
-  it('recognizes the previously deployed entity-change migration without reapplying its DDL', async () => {
+  it('recognizes both previously deployed entity-change migration versions without reapplying DDL', async () => {
     const { CONTROL_API_MIGRATIONS, initDb } = await import('../src/db.js')
     const migration = CONTROL_API_MIGRATIONS.find(
-      candidate => candidate.version === '0117_durable_entity_change_feed'
+      candidate => candidate.version === '0119_durable_entity_change_feed'
     )
-    expect(migration?.legacyVersions).toEqual(['0116_durable_entity_change_feed'])
+    expect(migration?.legacyVersions).toEqual([
+      '0116_durable_entity_change_feed',
+      '0117_durable_entity_change_feed',
+    ])
 
-    const appliedVersions = CONTROL_API_MIGRATIONS.filter(
-      candidate => candidate.version !== migration?.version
-    ).map(candidate => ({ version: candidate.version }))
-    appliedVersions.push({ version: '0116_durable_entity_change_feed' })
-    const query = vi.fn(async (sql: string) =>
-      sql.includes('SELECT version FROM schema_migrations')
-        ? { rows: appliedVersions, rowCount: appliedVersions.length }
-        : { rows: [], rowCount: 0 }
-    )
-    const release = vi.fn()
+    for (const legacyVersion of migration?.legacyVersions ?? []) {
+      const appliedVersions = CONTROL_API_MIGRATIONS.filter(
+        candidate => candidate.version !== migration?.version
+      ).map(candidate => ({ version: candidate.version }))
+      appliedVersions.push({ version: legacyVersion })
+      const query = vi.fn(async (sql: string) =>
+        sql.includes('SELECT version FROM schema_migrations')
+          ? { rows: appliedVersions, rowCount: appliedVersions.length }
+          : { rows: [], rowCount: 0 }
+      )
+      const release = vi.fn()
 
-    await initDb({ connect: vi.fn().mockResolvedValue({ query, release }) } as never)
+      await initDb({ connect: vi.fn().mockResolvedValue({ query, release }) } as never)
 
-    const statements = query.mock.calls.map(([sql]) => sql)
-    expect(statements).not.toContainEqual(
-      expect.stringContaining('CREATE TABLE IF NOT EXISTS entity_change_feed')
-    )
-    expect(query).toHaveBeenCalledWith(
-      expect.stringContaining('INSERT INTO schema_migrations(version)'),
-      ['0117_durable_entity_change_feed']
-    )
-    expect(release).toHaveBeenCalledOnce()
+      const statements = query.mock.calls.map(([sql]) => sql)
+      expect(statements).not.toContainEqual(
+        expect.stringContaining('CREATE TABLE IF NOT EXISTS entity_change_feed')
+      )
+      expect(query).toHaveBeenCalledWith(
+        expect.stringContaining('INSERT INTO schema_migrations(version)'),
+        ['0119_durable_entity_change_feed']
+      )
+      expect(release).toHaveBeenCalledOnce()
+    }
   })
 
   it('requires 0116_mcp_secret_rollback_permits to persist expiring rollback permits', async () => {

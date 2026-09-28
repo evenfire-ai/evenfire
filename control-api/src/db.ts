@@ -6262,10 +6262,11 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     apply: applyControlAdminReplaceInviterAcceptGuard,
   },
   {
-    version: '0117_durable_entity_change_feed',
-    // The feature branch originally recorded this schema as 0116. Retain that
-    // applied-migration identity so a previously deployed branch is not rerun.
-    legacyVersions: ['0116_durable_entity_change_feed'],
+    version: '0119_durable_entity_change_feed',
+    // This feature was deployed both before the two replace-inviter migrations
+    // and at its original 0117 slot. Preserve both identities so the sync does
+    // not rerun entity-change DDL in either previously deployed environment.
+    legacyVersions: ['0116_durable_entity_change_feed', '0117_durable_entity_change_feed'],
     apply: applyEntityChangeSchema,
   },
 ]
