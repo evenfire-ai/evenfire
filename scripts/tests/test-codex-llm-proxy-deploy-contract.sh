@@ -99,21 +99,24 @@ if named_containers != ["codex-llm-proxy"]:
 
 # Measured on the shipping design (#739 D5): eight 8 MiB streams, two 24 MiB
 # visual streams and three queued 8 MiB bodies peaked at 790 MiB of RSS with a
-# 384 MiB old space and at 886-1009 MiB without it. The capped peak does not fit
-# 768Mi; the limit is that peak plus 25 %, rounded up to 1Gi. The request is
-# 768Mi (owner decision on review M4), near the peak, so a busy node does not
-# schedule the pod on memory it cannot give it under load.
+# 384 MiB old space and at 886-1009 MiB without it. When the three ordinary
+# bodies carry the worst structure the contract admits (#806 Q1), a 384 MiB old
+# space aborts while parsing them, and a 512 MiB one is the smallest that
+# survives; that load peaked at 1095-1129 MiB of RSS. The limit is that peak
+# plus 25 %, rounded up to 1536Mi. The request stays at 768Mi (owner decision on
+# review M4), so the scheduler reserves what the ordinary load uses and the
+# worst-structure burst is covered by the limit alone.
 memory_limit = re.search(r"limits:\n\s+cpu: \S+\n\s+memory: (\S+)", text)
 memory_request = re.search(r"requests:\n\s+cpu: \S+\n\s+memory: (\S+)", text)
 heap_cap = re.search(
     r"- name: NODE_OPTIONS\n\s+value: \"--max-old-space-size=(\d+)\"", text
 )
-if not memory_limit or memory_limit.group(1) != "1Gi":
-    errors.append("proxy memory limit must be 1Gi")
+if not memory_limit or memory_limit.group(1) != "1536Mi":
+    errors.append("proxy memory limit must be 1536Mi")
 if not memory_request or memory_request.group(1) != "768Mi":
     errors.append("proxy memory request must be 768Mi")
-if not heap_cap or heap_cap.group(1) != "384":
-    errors.append("proxy must cap the V8 old space at 384 MiB through NODE_OPTIONS")
+if not heap_cap or heap_cap.group(1) != "512":
+    errors.append("proxy must cap the V8 old space at 512 MiB through NODE_OPTIONS")
 
 # #739 D6: on SIGTERM the proxy stops accepting and waits for its open streams
 # (main.ts awaits servers.close()), so the grace period must outlast the

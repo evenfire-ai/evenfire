@@ -24,24 +24,31 @@ const WORKFLOW_RECIPES = readFileSync(
 /** Headroom between the last in-flight request finishing and SIGKILL. */
 const SHUTDOWN_MARGIN_SECONDS = 20
 /**
- * The larger of the two measured peaks, both with the heap capped at 384 MiB
- * (tsc build, one process, upstream request through undici):
- * - D5 (#739): eight 8 MiB streams and three queued 8 MiB bodies, 511 MiB
- *   (#739 measured 509.8);
- * - D5 plus the visual slot (#784): the same load and one ~36 MB V2 stream
- *   (a 20 MiB PNG and 8 MiB of text), 775.4 MiB.
- * Both were measured by hand, not by this suite. The 775.4 is the largest of
- * three runs (771.3, 775.4, 765 MiB), taken on 2026-09-24 on macOS with
- * Node v24.18.0 and recorded in the message of the commit that introduced
- * this constant (`git log -S775.4 -- grok-llm-proxy/test/deployManifest.test.ts`).
- * Re-measure before changing it.
+ * Heap cap the peak below was measured with. At 384 MiB the process aborts
+ * while it parses the three admitted ordinary bodies when each one carries the
+ * worst structure the contract admits (262144 containers, 262144 members,
+ * 1048576 elements), before any stream reaches the upstream. 512 MiB is the
+ * smallest cap that survives that load.
  */
-const CAPPED_PEAK_RSS_MIB = 775.4
+const HEAP_CAP_MIB = 512
+/**
+ * The largest measured peak, heap capped at HEAP_CAP_MIB (tsc build, one
+ * process, upstream request through undici, macOS, Node v24.18.0):
+ * - D5 (#739): eight 8 MiB streams and three queued 8 MiB bodies with a
+ *   text tool description: 511 MiB at a 384 MiB cap;
+ * - D5 plus the visual slot (#784), same text load: 775.4 MiB at 384;
+ * - the same load with every ordinary body carrying the worst structure the
+ *   contract admits (#806 Q1), plus one ~36 MB V2 stream: 1096.8 and 1110.7
+ *   MiB in two runs at 512. That is the recorded peak.
+ * Measured by hand, not by this suite (harness: 8 held streams, 3 queued
+ * bodies, 1 visual body). Re-measure before changing it.
+ */
+const CAPPED_PEAK_RSS_MIB = 1110.7
 const MEMORY_HEADROOM = 1.25
 /**
- * Owner decision on review M4 (#739): the request sits just below
- * CAPPED_PEAK_RSS_MIB (D5 plus one visual stream), so a busy node does not
- * schedule the pod on memory it cannot give it under load.
+ * Owner decision on review M4 (#739): the request stays at 768Mi. It sits
+ * below the limit, so the scheduler reserves what the ordinary load uses and
+ * the worst-structure burst is covered by the limit alone.
  */
 const MEMORY_REQUEST_MIB = 768
 
@@ -94,12 +101,13 @@ describe('grok-llm-proxy base manifest', () => {
     expect(grace).toBe(Math.ceil(worstCaseMs / 1000) + SHUTDOWN_MARGIN_SECONDS)
   })
 
-  it('T-DEP-2 caps the heap below the memory limit, keeps the limit 25% above the D5-plus-visual peak and requests 768Mi', () => {
+  it('T-DEP-2 caps the heap below the memory limit, keeps the limit 25% above the worst-structure-plus-visual peak and requests 768Mi', () => {
     const nodeOptions = activeLines(MANIFEST).findIndex((line) => /name:\s*NODE_OPTIONS\s*$/.test(line))
     expect(nodeOptions, 'the container must set NODE_OPTIONS').toBeGreaterThanOrEqual(0)
     const heap = /--max-old-space-size=(\d+)/.exec(activeLines(MANIFEST)[nodeOptions + 1] ?? '')
     expect(heap, 'NODE_OPTIONS must cap the heap').not.toBeNull()
     const limit = resourceMemory('limits')
+    expect(Number(heap![1])).toBe(HEAP_CAP_MIB)
     expect(Number(heap![1])).toBeLessThan(limit)
     expect(resourceMemory('requests')).toBeLessThanOrEqual(limit)
     expect(resourceMemory('requests')).toBe(MEMORY_REQUEST_MIB)
