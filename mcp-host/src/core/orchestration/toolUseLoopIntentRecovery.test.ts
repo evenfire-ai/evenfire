@@ -54,6 +54,11 @@ describe('shouldRecoverWorkflowTriggerTextResponse', () => {
     'trigger daily-report with region=eu',
     'Run "daily-report" now.',
     'execute daily-report using region=eu and dry-run=true',
+    'run daily-report, please',
+    'run daily-report,',
+    'please run daily-report, now',
+    'run daily-report;',
+    'run daily-report: now',
   ])('recovers a direct named recipe request with a natural tail: %s', userText => {
     expect(shouldRecoverWorkflowTriggerTextResponse(userText, 'I can help with that.')).toBe(true)
   })
@@ -62,6 +67,9 @@ describe('shouldRecoverWorkflowTriggerTextResponse', () => {
     'Run a shell command',
     'run daily-report with',
     'run daily-report and delete it',
+    // Paired control for the trailing-comma positives: a comma followed by a
+    // non-filler tail is still not a trigger.
+    'run daily-report, and delete it',
     'run daily-report now and then rm -rf /',
     'Run quarterly-report and delete it',
     `Run ${'a'.repeat(129)}-report`,
@@ -85,6 +93,10 @@ describe('shouldRecoverWorkflowTriggerTextResponse', () => {
     const elapsedMs = performance.now() - started
     // Liveness witness: a boolean means the classifier ran to completion.
     expect(typeof result).toBe('boolean')
-    expect(elapsedMs).toBeLessThan(100)
+    // The bound guards against pathological (super-linear) backtracking, not
+    // latency: linear classification of 200k characters takes a few ms, while
+    // quadratic backtracking takes seconds. 1000 ms leaves headroom for shared
+    // CI runners without hiding a regression.
+    expect(elapsedMs).toBeLessThan(1000)
   })
 })

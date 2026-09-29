@@ -83,7 +83,8 @@ export function shouldRecoverWorkflowArtifactTextResponse(userText: string): boo
 }
 
 // A direct trigger is `[can you] [please] <verb> [the] <one token>` followed only
-// by filler (`now`, `please`, `again`), sentence punctuation, or `with|using`
+// by filler (`now`, `please`, `again`, `immediately`), trailing punctuation
+// (`.`, `!`, `?`, `,`, `;`, `:`), or `with|using`
 // arguments. The head regex is anchored and every quantifier is bounded or
 // separated from its neighbours by a literal, so it stays linear on adversarial
 // input; the tail is checked with string operations instead of a second regex.
@@ -94,7 +95,7 @@ const RECIPE_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)+$/i
 
 function stripTrailingSentencePunctuation(value: string): string {
   let end = value.length
-  while (end > 0 && '.!?'.includes(value[end - 1])) end--
+  while (end > 0 && '.!?,;:'.includes(value[end - 1])) end--
   return value.slice(0, end)
 }
 
