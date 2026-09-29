@@ -160,7 +160,9 @@ function runtimeAdmissionRetryAfter(response: Response): number {
     return RUNTIME_ADMISSION_RETRY_AFTER_SECONDS_DEFAULT
   }
   const seconds = Number(value)
-  return Number.isSafeInteger(seconds) && seconds >= 1 && seconds <= 60
+  return Number.isSafeInteger(seconds) &&
+    seconds >= 1 &&
+    seconds <= RUNTIME_ADMISSION_RETRY_AFTER_SECONDS_MAX
     ? seconds
     : RUNTIME_ADMISSION_RETRY_AFTER_SECONDS_DEFAULT
 }
@@ -550,7 +552,11 @@ export class RPCClient {
     hostRef: string
     limit: number
   }): Promise<NotificationDelivery[]> {
-    if (Date.now() < this.notificationAdmissionRetryUntil) return []
+    if (Date.now() < this.notificationAdmissionRetryUntil) {
+      throw new RuntimeServiceAdmissionLimitedError(
+        Math.max(1, Math.ceil((this.notificationAdmissionRetryUntil - Date.now()) / 1000))
+      )
+    }
 
     const response = await fetch(
       `${this.baseUrl}/v1/runtime/workflow-approval-notifications/claim`,
@@ -562,9 +568,9 @@ export class RPCClient {
       }
     )
     if (response.status === 429) {
-      this.notificationAdmissionRetryUntil =
-        Date.now() + runtimeAdmissionRetryAfter(response) * 1000
-      return []
+      const retryAfterSeconds = runtimeAdmissionRetryAfter(response)
+      this.notificationAdmissionRetryUntil = Date.now() + retryAfterSeconds * 1000
+      throw new RuntimeServiceAdmissionLimitedError(retryAfterSeconds)
     }
     const body = (await response.json().catch(() => ({}))) as FetchDeliveriesResponse & {
       error?: string
@@ -834,16 +840,20 @@ export class RPCClient {
       status?: 'completed'
     }>
   > {
-    if (Date.now() < this.cronResultsAdmissionRetryUntil) return []
+    if (Date.now() < this.cronResultsAdmissionRetryUntil) {
+      throw new RuntimeServiceAdmissionLimitedError(
+        Math.max(1, Math.ceil((this.cronResultsAdmissionRetryUntil - Date.now()) / 1000))
+      )
+    }
     try {
       const response = await fetch(`${this.baseUrl}/v1/runtime/cron/results`, {
         method: 'GET',
         headers: this.runtimeHeaders(),
       })
       if (response.status === 429) {
-        this.cronResultsAdmissionRetryUntil =
-          Date.now() + runtimeAdmissionRetryAfter(response) * 1000
-        return []
+        const retryAfterSeconds = runtimeAdmissionRetryAfter(response)
+        this.cronResultsAdmissionRetryUntil = Date.now() + retryAfterSeconds * 1000
+        throw new RuntimeServiceAdmissionLimitedError(retryAfterSeconds)
       }
       if (!response.ok) return []
       const data = (await response.json()) as {
@@ -859,7 +869,8 @@ export class RPCClient {
         }>
       }
       return data.results || []
-    } catch {
+    } catch (error) {
+      if (error instanceof RuntimeServiceAdmissionLimitedError) throw error
       // Silent — cron results are best-effort
       return []
     }
