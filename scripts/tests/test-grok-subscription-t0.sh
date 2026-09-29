@@ -292,6 +292,7 @@ require_real_pg_suite "control-api/test/services.llmProviderAttemptAuthorization
 run_group "mcp-host grok" "mcp-host" \
   "src/llm/__tests__/grokSubscription.test.ts" \
   "src/llm/__tests__/attachmentBudgetRefusal.test.ts" \
+  "src/llm/__tests__/imageSource.test.ts" \
   "src/llm/__tests__/grokLlmProxyClient.test.ts" \
   "src/llm/__tests__/imageInput.test.ts" \
   "src/llm/__tests__/providerAttemptAuthorizer.test.ts" \

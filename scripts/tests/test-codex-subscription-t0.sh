@@ -304,6 +304,7 @@ run_group "codex-llm-proxy" "codex-llm-proxy" \
 
 run_group "mcp-host" "mcp-host" \
   "src/__tests__/bodylimits.test.ts" \
+  "src/llm/__tests__/imageSource.test.ts" \
   "src/capabilities/toolCatalogTools.test.ts" \
   "src/core/orchestration/__tests__/approvedToolsLifecycle.integration.test.ts" \
   "src/core/orchestration/__tests__/toolUseLoop.spillover.test.ts" \
