@@ -45,14 +45,14 @@ function HomeContent() {
           <p className="body-copy">
             {desktopAppHref ? (
               <a className="cu-home-desktop-link" href={desktopAppHref}>
-                Open Desktop App <IconExternalLink />
+                Set up Desktop App <IconExternalLink />
               </a>
             ) : (
               <span
                 className="cu-home-desktop-link cu-home-desktop-link--unavailable"
                 aria-disabled="true"
               >
-                Open Desktop App <IconExternalLink />
+                Set up Desktop App <IconExternalLink />
               </span>
             )}{' '}
             instead
