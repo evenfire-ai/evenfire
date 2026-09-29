@@ -708,46 +708,20 @@ export class HostReconciler {
 
   /**
    * Whether this Host fronts an enabled `auth.type: oauth` mcp-server, gating
-   * the derive-only `oauth:user-token` runtime scope. Fails CLOSED (false) when
-   * the cross-CRD read throws: an uncertain read must never grant the scope.
+   * the derive-only `oauth:user-token` runtime scope. A read that failed after
+   * its retries is reported as unobserved instead of collapsing to `false`:
+   * "scope unknown" is not "scope revoked". Callers decide what an unknown
+   * answer means — the issuance path fails closed only where that cannot strip
+   * a grant the running pod holds, and the deployment drift guard
+   * (`currentScopeMatchesProvision`) never forces a re-mint on it. An uncertain
+   * read never grants the scope.
    *
    * Each call is an INDEPENDENT live point-in-time read (mirrors
    * `hasChannelIngress`); the value is deliberately not cached across a
-   * reconcile. Callers that need one consistent value within a unit of work
-   * resolve it once and thread the same bool (see the issuance path, which
-   * threads it into the mint-scope derive and the drift hash so they never
-   * diverge); the deployment drift guard re-reads it on purpose to catch a
-   * scope change mid-reconcile.
-   */
-  private async frontsOAuthServer(host: HostCRD): Promise<boolean> {
-    const observation = await this.observeFrontsOAuthServer(host)
-    if (observation.observed) return observation.frontsOAuthServer
-    // All attempts threw. Residual honesty: a SUSTAINED apiserver outage (every
-    // attempt throws) still fails CLOSED here and can flip the scope off. That is
-    // correct — a sustained outage is a genuine "scope unknown" situation, not a
-    // blip — the retry only smooths over transient blips, never a real outage.
-    log.warn(
-      'failed to resolve whether Host fronts an oauth mcp-server after retries; failing closed (no oauth:user-token scope)',
-      {
-        host: host.name,
-        namespace: host.namespace,
-        contextRef: host.spec.contextRef,
-        attempts: observation.attempts,
-        err:
-          observation.error instanceof Error
-            ? observation.error.message
-            : String(observation.error),
-      }
-    )
-    return false
-  }
-
-  /**
-   * The live McpServer-backed OAuth observation behind `frontsOAuthServer`,
-   * reporting a read that failed after its retries instead of collapsing it to
-   * `false`. The CommunicationChannel-loss issuance path needs that distinction:
-   * it has no authoritative channel inventory, so it must not replace an
-   * unknown OAuth answer with a retained one that could re-grant a revoked scope.
+   * reconcile. The issuance path resolves it once and threads the same bool
+   * into the mint-scope derive and the drift hash so they never diverge; the
+   * deployment drift guard re-reads it on purpose to catch a scope change
+   * mid-reconcile.
    */
   private async observeFrontsOAuthServer(
     host: HostCRD
@@ -1831,6 +1805,28 @@ export class HostReconciler {
     )
   }
 
+  /**
+   * Deployment drift guard: does the provisioned credential still match the
+   * Host's current scope contract? An OAuth read that failed after its retries
+   * is "scope unknown", so it matches a provision minted under either OAuth
+   * answer instead of collapsing to `false` and forcing a re-mint that would
+   * strip oauth:user-token and roll the Deployment. The issuance path owns the
+   * decision to narrow the grant (see `ensureMcpHostRuntimeTokenSecret`).
+   */
+  private currentScopeMatchesProvision(
+    host: HostCRD,
+    provision: RuntimeTokenProvision,
+    live: Awaited<ReturnType<HostReconciler['observeFrontsOAuthServer']>>
+  ): boolean {
+    if (live.observed) {
+      return provision.scopeHash === this.runtimeScopeHashFor(host, live.frontsOAuthServer)
+    }
+    return (
+      provision.scopeHash === this.runtimeScopeHashFor(host, true) ||
+      provision.scopeHash === this.runtimeScopeHashFor(host, false)
+    )
+  }
+
   private async refreshCodexSnapshot(): Promise<void> {
     try {
       const cm = await this.coreApi.readNamespacedConfigMap({
@@ -2050,6 +2046,78 @@ export class HostReconciler {
           )
           return null
         }
+        const projection = this.projectCodexForHost(host)
+        const grokProjection = this.projectGrokForHost(host)
+        const decideRefresh = (
+          frontsOAuth: boolean
+        ): {
+          refresh: boolean
+          rolloutRequired: boolean
+          reason: string
+          refreshTokenExpMs?: number
+        } => {
+          let decided: {
+            refresh: boolean
+            rolloutRequired: boolean
+            reason: string
+            refreshTokenExpMs?: number
+          } = existing
+            ? HostReconciler.runtimeTokenRefreshDecision(
+                host,
+                existing,
+                nowMs,
+                hasChannelIngress,
+                frontsOAuth,
+                projection,
+                grokProjection
+              )
+            : { refresh: true, rolloutRequired: false, reason: 'missing_secret' }
+          if (
+            existing &&
+            HostReconciler.deploymentRestartedAfterRuntimeSecretIssued(existing, deployment)
+          ) {
+            // A manual restart after the runtime Secret was issued starts pods with
+            // env-var bootstrap tokens from that older Secret. Force a re-issue and
+            // rollout so every restarted pod observes a fresh, unconsumed token pair.
+            decided = {
+              refresh: true,
+              rolloutRequired: true,
+              reason: 'deployment_restarted_after_secret_issued',
+            }
+          }
+
+          // Revoked-on-wake guard: the mcp-host runtime refresh token is
+          // single-use-rotating (control-api revokes the prior JTI on every
+          // refresh). A pod that is about to boot -- wake (scale 0->1), missing
+          // Deployment, or a not-Ready (re)starting pod -- reads its bootstrap
+          // refresh token from THIS Secret. If the pre-suspend pod already
+          // rotated, the copy in the Secret is REVOKED, so an exp-based "reuse"
+          // hands the booting pod a dead token and readiness 503s forever. When
+          // a new pod will consume the Secret, force a fresh mint + rollout even
+          // though the decoded exp is far out. Reuse stays correct only for a
+          // running, Ready pod that never re-reads the Secret (churn fix).
+          if (
+            existingRevision &&
+            decided.refresh === false &&
+            HostReconciler.deploymentNeedsFreshBootstrap(
+              deployment,
+              existingRevision,
+              existing,
+              options
+            )
+          ) {
+            decided = {
+              refresh: true,
+              rolloutRequired: true,
+              reason: 'fresh_mint_for_booting_pod',
+              ...(decided.refreshTokenExpMs !== undefined
+                ? { refreshTokenExpMs: decided.refreshTokenExpMs }
+                : {}),
+            }
+          }
+          return decided
+        }
+
         // Resolve ONCE per issuance and thread the SAME frontsOAuthServer bool and
         // codex projection into the mint-scope derive, the refresh decision, the
         // scope hash and the stored annotation, so the minted token and the drift
@@ -2059,37 +2127,59 @@ export class HostReconciler {
         // on the CommunicationChannel cache, so it stays live during channel
         // cache loss: an admin who removed the OAuth mcp-server while the channel
         // watch was down must not have `oauth:user-token` re-granted from the
-        // retained annotation on a held wake. The retained value is used only
-        // when the live read failed after its retries and it cannot widen the
-        // grant (`false`); otherwise the mint is skipped (fail closed).
+        // retained annotation on a held wake.
+        //
+        // A live read that failed after its retries is "scope unknown", not
+        // "scope revoked". It resolves to `false` (fail closed) only when that
+        // cannot narrow a grant the running pod holds: the retained value is
+        // `false`, or there is no trusted retained value while channel authority
+        // is synced. A retained `true` under synced authority defers the decision
+        // while the credential needs no renewal, so an McpServer relist does not
+        // strip oauth:user-token and roll the Deployment; once the credential must
+        // be renewed, the renewal mints without the unobserved scope. Under channel
+        // cache loss the mint is skipped instead.
+        const liveFrontsOAuth = await this.observeFrontsOAuthServer(host)
         let observedFrontsOAuth: boolean
-        if (cacheSynced) {
-          observedFrontsOAuth = await this.frontsOAuthServer(host)
+        if (liveFrontsOAuth.observed) {
+          observedFrontsOAuth = liveFrontsOAuth.frontsOAuthServer
         } else {
-          const liveFrontsOAuth = await this.observeFrontsOAuthServer(host)
-          if (liveFrontsOAuth.observed) {
-            observedFrontsOAuth = liveFrontsOAuth.frontsOAuthServer
-          } else if (retainedFrontsOAuth === false) {
+          const observationFailure = {
+            host: host.name,
+            namespace: host.namespace,
+            observation: 'frontsOAuthServer',
+            attempts: liveFrontsOAuth.attempts,
+            err:
+              liveFrontsOAuth.error instanceof Error
+                ? liveFrontsOAuth.error.message
+                : String(liveFrontsOAuth.error),
+          }
+          if (retainedFrontsOAuth === false || (cacheSynced && retainedFrontsOAuth !== true)) {
+            log.warn(
+              'failed to resolve whether Host fronts an oauth mcp-server after retries; failing closed (no oauth:user-token scope)',
+              observationFailure
+            )
+            observedFrontsOAuth = false
+          } else if (cacheSynced) {
+            if (!decideRefresh(true).refresh) {
+              log.warn(
+                'deferring runtime token decision: OAuth observation unavailable and retained scope grants oauth:user-token',
+                observationFailure
+              )
+              return null
+            }
+            log.warn(
+              'renewing runtime token without oauth:user-token: OAuth observation unavailable when the credential must be renewed',
+              observationFailure
+            )
             observedFrontsOAuth = false
           } else {
             log.warn(
               'skipping runtime token mint during channel cache loss without an authoritative OAuth observation',
-              {
-                host: host.name,
-                namespace: host.namespace,
-                observation: 'frontsOAuthServer',
-                attempts: liveFrontsOAuth.attempts,
-                err:
-                  liveFrontsOAuth.error instanceof Error
-                    ? liveFrontsOAuth.error.message
-                    : String(liveFrontsOAuth.error),
-              }
+              observationFailure
             )
             return null
           }
         }
-        const projection = this.projectCodexForHost(host)
-        const grokProjection = this.projectGrokForHost(host)
         const scopeHash = HostReconciler.runtimeTokenScopeHash(
           host,
           hasChannelIngress,
@@ -2097,65 +2187,7 @@ export class HostReconciler {
           projection,
           grokProjection
         )
-        let decision: {
-          refresh: boolean
-          rolloutRequired: boolean
-          reason: string
-          refreshTokenExpMs?: number
-        } = existing
-          ? HostReconciler.runtimeTokenRefreshDecision(
-              host,
-              existing,
-              nowMs,
-              hasChannelIngress,
-              observedFrontsOAuth,
-              projection,
-              grokProjection
-            )
-          : { refresh: true, rolloutRequired: false, reason: 'missing_secret' }
-        if (
-          existing &&
-          HostReconciler.deploymentRestartedAfterRuntimeSecretIssued(existing, deployment)
-        ) {
-          // A manual restart after the runtime Secret was issued starts pods with
-          // env-var bootstrap tokens from that older Secret. Force a re-issue and
-          // rollout so every restarted pod observes a fresh, unconsumed token pair.
-          decision = {
-            refresh: true,
-            rolloutRequired: true,
-            reason: 'deployment_restarted_after_secret_issued',
-          }
-        }
-
-        // Revoked-on-wake guard: the mcp-host runtime refresh token is
-        // single-use-rotating (control-api revokes the prior JTI on every
-        // refresh). A pod that is about to boot -- wake (scale 0->1), missing
-        // Deployment, or a not-Ready (re)starting pod -- reads its bootstrap
-        // refresh token from THIS Secret. If the pre-suspend pod already
-        // rotated, the copy in the Secret is REVOKED, so an exp-based "reuse"
-        // hands the booting pod a dead token and readiness 503s forever. When
-        // a new pod will consume the Secret, force a fresh mint + rollout even
-        // though the decoded exp is far out. Reuse stays correct only for a
-        // running, Ready pod that never re-reads the Secret (churn fix).
-        if (
-          existingRevision &&
-          decision.refresh === false &&
-          HostReconciler.deploymentNeedsFreshBootstrap(
-            deployment,
-            existingRevision,
-            existing,
-            options
-          )
-        ) {
-          decision = {
-            refresh: true,
-            rolloutRequired: true,
-            reason: 'fresh_mint_for_booting_pod',
-            ...(decision.refreshTokenExpMs !== undefined
-              ? { refreshTokenExpMs: decision.refreshTokenExpMs }
-              : {}),
-          }
-        }
+        const decision = decideRefresh(observedFrontsOAuth)
 
         if (existing && existingRevision && !decision.refresh) {
           const deploymentRevision = HostReconciler.deploymentRuntimeTokenRevision(deployment)
@@ -5411,8 +5443,10 @@ export class HostReconciler {
     const ensureCurrentRuntimeTokenScope = async (): Promise<void> => {
       for (let attempt = 1; attempt <= 3; attempt++) {
         revalidateHostMutationBoundary()
-        const currentScopeHash = this.runtimeScopeHashFor(host, await this.frontsOAuthServer(host))
-        if (requireRuntimeTokenProvision().scopeHash === currentScopeHash) return
+        const currentOAuth = await this.observeFrontsOAuthServer(host)
+        if (this.currentScopeMatchesProvision(host, requireRuntimeTokenProvision(), currentOAuth)) {
+          return
+        }
 
         runtimeTokenProvision = await this.provisionRuntimeTokenRevision(host, {
           forceFreshForWake: false,
@@ -5425,11 +5459,16 @@ export class HostReconciler {
           throw error
         }
         revalidateHostMutationBoundary()
-        const postProvisionScopeHash = this.runtimeScopeHashFor(
-          host,
-          await this.frontsOAuthServer(host)
-        )
-        if (requireRuntimeTokenProvision().scopeHash === postProvisionScopeHash) return
+        const postProvisionOAuth = await this.observeFrontsOAuthServer(host)
+        if (
+          this.currentScopeMatchesProvision(
+            host,
+            requireRuntimeTokenProvision(),
+            postProvisionOAuth
+          )
+        ) {
+          return
+        }
 
         log.warn('CommunicationChannel scope contract changed during token provisioning', {
           host: host.name,
@@ -5455,7 +5494,7 @@ export class HostReconciler {
         }
         await ensureCurrentRuntimeTokenScope()
         const effective = await resolveDeploymentLifecycle()
-        const currentScopeHash = this.runtimeScopeHashFor(host, await this.frontsOAuthServer(host))
+        const currentOAuth = await this.observeFrontsOAuthServer(host)
         // The OAuth lookup can await I/O after the last lifecycle observation.
         // Retry assessment rather than committing a now-obsolete mode.
         if (
@@ -5464,7 +5503,7 @@ export class HostReconciler {
         ) {
           continue
         }
-        if (requireRuntimeTokenProvision().scopeHash === currentScopeHash) {
+        if (this.currentScopeMatchesProvision(host, requireRuntimeTokenProvision(), currentOAuth)) {
           revalidateHostMutationBoundary()
           return {
             lifecycle: effective,

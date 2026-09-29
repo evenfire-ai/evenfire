@@ -1735,12 +1735,17 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     vi.spyOn(reconciler as any, 'provisionRuntimeTokenRevision').mockResolvedValue(
       runtimeTokenProvision(host)
     )
-    vi.spyOn(reconciler as any, 'frontsOAuthServer').mockImplementation(async () => {
-      if (++lookup === 2) synced = false
-      return false
+    // The final lookup loses channel authority and its McpServer read fails too:
+    // neither an unobservable OAuth answer nor the lost authority may commit
+    // the template.
+    reconciler.setHostFrontsOAuthServer(async () => {
+      if (++lookup === 1) return false
+      synced = false
+      throw new Error('mcp-server watch retired')
     })
     await reconciler.reconcile(host)
-    expect(lookup).toBe(2)
+    // One observed lookup, then the final lookup's three attempts.
+    expect(lookup).toBe(4)
     expect(live().spec!.template).toEqual(applied.spec!.template)
     expect(rejectedCondition(lifecycleStatusWrites(customApi).at(-1)!).reason).toBe(
       'CommunicationChannelCacheUnsynced'
@@ -1808,7 +1813,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     expect(reconciler.getStatus(host.name)).toMatchObject({ deployed: false, ready: false })
   })
 
-  it('does not let a retained OAuth observation override a failed live probe', async () => {
+  it('does not let a failed live probe narrow a retained OAuth grant before its renewal window', async () => {
     const host = makeStatelessHost()
     const { reconciler, coreApi } = createReconciler({
       isCommunicationChannelCacheSynced: () => true,
@@ -1816,21 +1821,21 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     coreApi.readNamespacedSecret.mockResolvedValue(
       await mintedRuntimeCredentialRecord(host, { frontsOAuthServer: true })
     )
-    reconciler.setHostFrontsOAuthServer(async () => {
+    const oauthResolver = vi.fn(async (): Promise<boolean> => {
       throw new Error('oauth lookup unavailable')
     })
+    reconciler.setHostFrontsOAuthServer(oauthResolver)
     vi.mocked(issueMcpHostRuntimeTokens).mockClear()
 
     const provision = await (reconciler as any).ensureMcpHostRuntimeTokenSecret(host)
 
-    expect(provision).not.toBeNull()
-    expect(vi.mocked(issueMcpHostRuntimeTokens).mock.calls.at(-1)?.[2]).not.toContain(
-      OAUTH_USER_TOKEN_SCOPE
-    )
-    const write = coreApi.replaceNamespacedSecret.mock.calls.at(-1)?.[0].body as k8s.V1Secret
-    expect(write.metadata?.annotations?.['clerum.io/runtime-token-fronts-oauth-server']).toBe(
-      'false'
-    )
+    // Liveness witness: the record was read and the live probe ran all its attempts.
+    expect(coreApi.readNamespacedSecret).toHaveBeenCalled()
+    expect(oauthResolver).toHaveBeenCalledTimes(3)
+    expect(provision).toBeNull()
+    expect(vi.mocked(issueMcpHostRuntimeTokens)).not.toHaveBeenCalled()
+    expect(coreApi.replaceNamespacedSecret).not.toHaveBeenCalled()
+    expect(coreApi.createNamespacedSecret).not.toHaveBeenCalled()
   })
 
   it('uses the retained channel observation but a live OAuth observation while channel authority is unavailable', async () => {
@@ -1862,6 +1867,166 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     expect(write.metadata?.annotations).toMatchObject({
       'clerum.io/runtime-token-fronts-oauth-server': 'true',
       'clerum.io/runtime-token-has-channel-ingress': 'true',
+    })
+  })
+
+  describe('McpServer OAuth observation unavailable while channel authority is synced', () => {
+    /**
+     * A Host whose Ready pod runs a consumed credential that grants
+     * oauth:user-token, over stateful Secret and Deployment mocks.
+     */
+    async function oauthGrantedRuntime(annotations: Record<string, string> = {}) {
+      const host = makeHost()
+      const { reconciler, appsApi, coreApi } = createReconciler()
+      let record = await mintedRuntimeCredentialRecord(host, {
+        frontsOAuthServer: true,
+        annotations,
+      })
+      const secretName = record.metadata!.name!
+      const readSecret = coreApi.readNamespacedSecret.getMockImplementation()!
+      coreApi.readNamespacedSecret.mockImplementation(request =>
+        request.name === secretName ? Promise.resolve(structuredClone(record)) : readSecret(request)
+      )
+      coreApi.replaceNamespacedSecret.mockImplementation(async request => {
+        if (request.name === secretName) record = structuredClone(request.body as k8s.V1Secret)
+        return request.body
+      })
+      let live = trustedRuntimeDeployment(reconciler, host)
+      live.spec!.template!.metadata!.annotations = {
+        ...live.spec!.template!.metadata!.annotations,
+        'clerum.io/runtime-token-revision':
+          record.metadata!.annotations!['clerum.io/runtime-token-secret-revision'],
+      }
+      const readDeployment = appsApi.readNamespacedDeployment.getMockImplementation()!
+      appsApi.readNamespacedDeployment.mockImplementation(request =>
+        request.name === host.name
+          ? Promise.resolve(structuredClone(live))
+          : readDeployment(request)
+      )
+      const replaceDeployment = appsApi.replaceNamespacedDeployment.getMockImplementation()!
+      appsApi.replaceNamespacedDeployment.mockImplementation(async request => {
+        if (request.name !== host.name) return replaceDeployment(request)
+        // The replaced pod stays Ready, as a running runtime does.
+        live = { ...structuredClone(request.body), status: { readyReplicas: 1 } }
+        return live
+      })
+      const hostDeploymentWrites = () =>
+        [
+          ...appsApi.createNamespacedDeployment.mock.calls,
+          ...appsApi.replaceNamespacedDeployment.mock.calls,
+          ...appsApi.patchNamespacedDeployment.mock.calls,
+        ].filter(([request]) => (request as { name?: string }).name === host.name)
+      return {
+        host,
+        reconciler,
+        appsApi,
+        coreApi,
+        record: () => record,
+        hostDeploymentWrites,
+      }
+    }
+
+    it('keeps oauth:user-token and does not roll the Deployment when the McpServer probe fails between relists', async () => {
+      const { host, reconciler, appsApi, record, hostDeploymentWrites } =
+        await oauthGrantedRuntime()
+      const oauthResolver = vi.fn(async (): Promise<boolean> => true)
+      reconciler.setHostFrontsOAuthServer(oauthResolver)
+      const issue = vi.mocked(issueMcpHostRuntimeTokens)
+      issue.mockClear()
+      for (let pass = 1; pass <= 3; pass++) await reconciler.reconcile(host)
+      // The steady state is stable: no runtime mint while the grant is observed.
+      expect(issue).not.toHaveBeenCalled()
+
+      oauthResolver.mockImplementation(async () => {
+        throw new Error('mcp-server watch retired')
+      })
+      oauthResolver.mockClear()
+      appsApi.createNamespacedDeployment.mockClear()
+      appsApi.replaceNamespacedDeployment.mockClear()
+      appsApi.patchNamespacedDeployment.mockClear()
+      const warn = vi.spyOn(HostContextLogger.prototype, 'warn').mockImplementation(() => undefined)
+      try {
+        await reconciler.reconcile(host)
+
+        expect(issue).not.toHaveBeenCalled()
+        expect(hostDeploymentWrites()).toHaveLength(0)
+        expect(record().metadata!.annotations).toMatchObject({
+          'clerum.io/runtime-token-fronts-oauth-server': 'true',
+          'clerum.io/runtime-token-rollout-required': 'false',
+        })
+        // Liveness witness: the live probe ran all its attempts and the reconcile
+        // deferred with the reason it could not decide.
+        expect(oauthResolver).toHaveBeenCalledTimes(3)
+        expect(warn).toHaveBeenCalledWith(
+          'deferring runtime token decision: OAuth observation unavailable and retained scope grants oauth:user-token',
+          {
+            host: host.name,
+            namespace: host.namespace,
+            observation: 'frontsOAuthServer',
+            attempts: 3,
+            err: 'mcp-server watch retired',
+          }
+        )
+        expect(reconciler.getStatus(host.name)).toMatchObject({
+          deployed: true,
+          ready: false,
+          message: 'Waiting for authoritative scope observation',
+        })
+      } finally {
+        warn.mockRestore()
+      }
+    })
+
+    it('lets the Deployment drift guard keep an observed grant when its own McpServer read fails', async () => {
+      const { host, reconciler, record } = await oauthGrantedRuntime()
+      const oauthResolver = vi.fn(async (): Promise<boolean> => true)
+      reconciler.setHostFrontsOAuthServer(oauthResolver)
+      const issue = vi.mocked(issueMcpHostRuntimeTokens)
+      issue.mockClear()
+      for (let pass = 1; pass <= 3; pass++) await reconciler.reconcile(host)
+      expect(issue).not.toHaveBeenCalled()
+      const steadyStatus = structuredClone(reconciler.getStatus(host.name))
+
+      // Issuance observes the grant; every later read (the drift guard's) fails.
+      oauthResolver.mockClear()
+      oauthResolver.mockImplementation(async () => {
+        if (oauthResolver.mock.calls.length === 1) return true
+        throw new Error('mcp-server watch retired')
+      })
+      await reconciler.reconcile(host)
+
+      // Liveness witness: the drift guard read after issuance and exhausted its retries.
+      expect(oauthResolver.mock.calls.length).toBeGreaterThanOrEqual(4)
+      expect(issue).not.toHaveBeenCalled()
+      expect(reconciler.getStatus(host.name)).toEqual(steadyStatus)
+      expect(record().metadata!.annotations).toMatchObject({
+        'clerum.io/runtime-token-fronts-oauth-server': 'true',
+        'clerum.io/runtime-token-rollout-required': 'false',
+      })
+    })
+
+    it('falls back to a fail-closed mint when the OAuth observation is unavailable inside the renewal window', async () => {
+      const { host, reconciler, record } = await oauthGrantedRuntime({
+        'clerum.io/runtime-token-refresh-before': '2000-01-01T00:00:00.000Z',
+      })
+      const oauthResolver = vi.fn(async (): Promise<boolean> => {
+        throw new Error('mcp-server watch retired')
+      })
+      reconciler.setHostFrontsOAuthServer(oauthResolver)
+      const issue = vi.mocked(issueMcpHostRuntimeTokens)
+      issue.mockClear()
+
+      const provision = await (reconciler as any).ensureMcpHostRuntimeTokenSecret(host)
+
+      // Liveness witness: the live probe ran all its attempts before the mint.
+      expect(oauthResolver).toHaveBeenCalledTimes(3)
+      expect(provision).not.toBeNull()
+      expect(issue).toHaveBeenCalledOnce()
+      expect(issue.mock.calls[0]?.[2]).not.toContain(OAUTH_USER_TOKEN_SCOPE)
+      expect(record().metadata!.annotations).toMatchObject({
+        'clerum.io/runtime-token-fronts-oauth-server': 'false',
+        'clerum.io/runtime-token-rollout-required': 'true',
+      })
     })
   })
 
