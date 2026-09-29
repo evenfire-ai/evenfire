@@ -1,12 +1,13 @@
 // Renderer exception recorded in docs/agents/frontend-style-rules.md
 // ("Markdown rendering and editing"): this read-only GFS markdown preview uses
-// ReactMarkdown + remark-gfm instead of the standard @uiw/react-md-editor
-// because the preview must render GFM tables inside a labelled, keyboard-
-// focusable scrollable table region, which `MDEditor.Markdown` cannot preserve
-// without regressing that behavior. Guarantees: no rehype-raw, so raw HTML
-// stays inert; urlTransform restricts `src` to inline data:image URIs and link
-// hrefs to http(s):/mailto:/# fragments; code blocks render as plain `pre` >
-// `code`. Covered by the GfsMarkdownPreview and GfsMarkdownPreviewBody suites.
+// ReactMarkdown + remark-gfm as the established, tested preview integration.
+// GFM tables use a labelled, keyboard-focusable scroll region.
+// MDEditor.Markdown supports custom table components; switching requires a
+// separate migration that revalidates rendering, keyboard operation, and
+// untrusted-content handling. Guarantees: no rehype-raw, so raw HTML stays
+// inert; urlTransform restricts `src` to inline data:image URIs and links to
+// http(s):/mailto:/# fragments; code blocks render as plain `pre` > `code`.
+// Covered by the GfsMarkdownPreview and GfsMarkdownPreviewBody suites.
 import { useEffect, useId, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import type { Components } from 'react-markdown'
