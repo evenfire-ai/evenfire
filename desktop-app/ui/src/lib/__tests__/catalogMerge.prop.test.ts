@@ -174,6 +174,77 @@ describe('mergeCatalogPage', () => {
     )
   })
 
+  it('orders known dates newest first with an unparseable date as the epoch (fixed oracle)', () => {
+    // The property test above checks order with the production comparator, so an
+    // inverted comparator or a different fallback for NaN passes it. This case
+    // states the expected order literally.
+    const cached: Entry[] = [
+      { id: 'jan', title: 'Jan', updatedAt: '2026-01-01T00:00:00.000Z', messageCount: 0 },
+      { id: 'invalid', title: 'Invalid', updatedAt: 'no-fecha', messageCount: 0 },
+      { id: 'pre-epoch', title: 'Pre', updatedAt: '1969-06-01T00:00:00.000Z', messageCount: 0 },
+      { id: 'mar', title: 'Mar', updatedAt: '2026-03-01T00:00:00.000Z', messageCount: 0 },
+    ]
+    const sessions: Session[] = [
+      { chatId: 'feb', title: 'Feb', lastActivityAt: '2026-02-01T00:00:00.000Z' },
+    ]
+    expect(merge(cached, sessions, {}).map(entry => entry.id)).toEqual([
+      'mar',
+      'feb',
+      'jan',
+      'invalid',
+      'pre-epoch',
+    ])
+  })
+
+  it('names the placeholder after the cached entry id, not the reported chat id', () => {
+    // Entry and session share a key but not an id, so the two placeholder calls
+    // are distinguishable. The cached title is empty and the server has none, so
+    // the placeholder is what the entry ends up titled.
+    const calls: string[] = []
+    const merged = mergeCatalogPage<Entry, Session>({
+      cached: [
+        { id: 'cached-id', title: '', updatedAt: '2026-01-01T00:00:00.000Z', messageCount: 0 },
+      ],
+      sessions: [{ chatId: 'reported-chat-id', lastActivityAt: '2026-02-01T00:00:00.000Z' }],
+      entryKey: () => 'shared-key',
+      sessionKey: () => 'shared-key',
+      entryPendingRename: () => 'none',
+      sessionPendingRename: () => 'none',
+      placeholderFor: chatId => {
+        calls.push(chatId)
+        return `Chat ${chatId}`
+      },
+      serverOnlyEntry: (session, title) => ({
+        id: session.chatId,
+        title,
+        updatedAt: session.lastActivityAt,
+        messageCount: 0,
+      }),
+    })
+    // Liveness witness: the merge reached the placeholder path for the shared key.
+    expect(calls).toEqual(['cached-id'])
+    expect(merged.map(entry => entry.title)).toEqual(['Chat cached-id'])
+  })
+
+  it('names a server-only session placeholder after its chat id', () => {
+    const merged = mergeCatalogPage<Entry, Session>({
+      cached: [],
+      sessions: [{ chatId: 'reported-chat-id', lastActivityAt: '2026-02-01T00:00:00.000Z' }],
+      entryKey: entry => entry.id,
+      sessionKey: session => session.chatId,
+      entryPendingRename: () => 'none',
+      sessionPendingRename: () => 'none',
+      placeholderFor,
+      serverOnlyEntry: (session, title) => ({
+        id: session.chatId,
+        title,
+        updatedAt: session.lastActivityAt,
+        messageCount: 0,
+      }),
+    })
+    expect(merged.map(entry => entry.title)).toEqual(['Chat reported-chat-id'])
+  })
+
   it('keeps a pending local rename over a server title (case E)', () => {
     const cached: Entry[] = [
       { id: 'a', title: 'Renamed', updatedAt: '2026-09-12T00:00:00.000Z', messageCount: 3 },

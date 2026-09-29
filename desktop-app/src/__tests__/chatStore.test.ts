@@ -399,6 +399,304 @@ describe('deleteChat', () => {
   })
 })
 
+// ── deletion identity guards ─────────────────────────────────────────────────
+
+/**
+ * The store's authority scope can change while a deletion is in flight (sign-out,
+ * account or environment switch). Every `sameChatDeletionIdentity` guard inside
+ * the cleanup path exists for that window, so each test moves the scope from
+ * inside a filesystem call the cleanup is awaiting and then checks what the
+ * cleanup did NOT do afterwards. Every negative check is paired with a witness
+ * that the call which moved the scope really ran.
+ */
+describe('deleted-chat cleanup when the identity changes mid-operation', () => {
+  const FOREIGN_SCOPES = [
+    ['a different user', { ...TEAM_A_SCOPE, userId: 'user-b' }],
+    ['a different environment', { ...TEAM_A_SCOPE, environmentKey: 'env-b' }],
+  ] as const
+  const CHAT_ID = 'mid-operation-chat'
+
+  function snapshotRootPath(chatId: string): string {
+    return agentPath('chats', '.snapshots', Buffer.from(chatId, 'utf8').toString('base64url'))
+  }
+
+  async function seedChat(chatId: string): Promise<void> {
+    await store.createChat('agent-1', chatId)
+    await store.saveMessages('agent-1', chatId, [
+      { id: 'm1', role: 'user', content: 'private', timestamp: 1 },
+    ])
+    const sibling = chatSnapshotDir(chatId, 'previous', 'sibling')
+    await fs.mkdir(sibling, { recursive: true })
+    await fs.writeFile(join(sibling, 'marker'), 'sibling')
+    await expect(fs.access(chatCacheDir(chatId))).resolves.toBeUndefined()
+    await expect(fs.access(join(sibling, 'marker'))).resolves.toBeUndefined()
+  }
+
+  /** Records every `fs.rm` path and runs `afterRm` once the real removal finished. */
+  function interceptRm(afterRm: (path: string) => void): string[] {
+    const realRm = fs.rm.bind(fs)
+    const paths: string[] = []
+    vi.spyOn(fs, 'rm').mockImplementation(async (...args) => {
+      paths.push(String(args[0]))
+      await realRm(...(args as Parameters<typeof fs.rm>))
+      afterRm(String(args[0]))
+    })
+    return paths
+  }
+
+  async function expectTombstoneAndCleanupStillQueued(chatId: string): Promise<void> {
+    const index = await store.getIndex('agent-1')
+    expect(index.deletedChatTombstones).toContainEqual({
+      chatId,
+      authorityScope: TEAM_A_SCOPE,
+    })
+    expect(index.pendingChatCleanup).toContainEqual({ chatId, authorityScope: TEAM_A_SCOPE })
+  }
+
+  /** The interrupted cleanup stays resumable: the owning identity finishes it. */
+  async function expectOwningIdentityFinishesCleanup(chatId: string): Promise<void> {
+    vi.restoreAllMocks()
+    store.setAuthorityScope(TEAM_A_SCOPE)
+    await store.retryPendingDeleteCleanups(TEAM_A_SCOPE)
+    expect((await store.getIndex('agent-1')).pendingChatCleanup).toEqual([])
+    await expect(fs.access(chatCacheDir(chatId))).rejects.toThrow()
+    await expect(fs.access(snapshotRootPath(chatId))).rejects.toThrow()
+  }
+
+  function failingRm(): void {
+    vi.spyOn(fs, 'rm').mockRejectedValue(Object.assign(new Error('denied'), { code: 'EACCES' }))
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+  }
+
+  type CleanupInternals = {
+    finishPendingDeleteCleanup(
+      agentRef: string,
+      tombstone: { chatId: string; authorityScope: unknown }
+    ): Promise<boolean>
+  }
+
+  it.each(FOREIGN_SCOPES)(
+    'stops before the next removal when the identity changes to %s during one',
+    async (_label, foreign) => {
+      await seedChat(CHAT_ID)
+      const removed = interceptRm(() => store.setAuthorityScope(foreign))
+
+      await expect(store.deleteChat('agent-1', CHAT_ID, TEAM_A_SCOPE)).resolves.toEqual({
+        cleanupPending: true,
+      })
+
+      // Witness: the first removal ran (and moved the scope); none followed it.
+      expect(removed).toHaveLength(1)
+      await expect(fs.access(chatCacheDir(CHAT_ID))).resolves.toBeUndefined()
+      await expectTombstoneAndCleanupStillQueued(CHAT_ID)
+      await expectOwningIdentityFinishesCleanup(CHAT_ID)
+    }
+  )
+
+  it.each(FOREIGN_SCOPES)(
+    'removes nothing when the identity changes to %s while the legacy quarantine is listed',
+    async (_label, foreign) => {
+      await seedChat(CHAT_ID)
+      const realReaddir = fs.readdir.bind(fs)
+      const listed: string[] = []
+      vi.spyOn(fs, 'readdir').mockImplementation(async (...args) => {
+        listed.push(String(args[0]))
+        try {
+          // The quarantine directory does not exist here: the real listing fails
+          // with ENOENT, which the cleanup treats as "nothing quarantined".
+          return await realReaddir(...(args as Parameters<typeof fs.readdir>))
+        } finally {
+          if (String(args[0]) === agentPath('.corrupt')) store.setAuthorityScope(foreign)
+        }
+      })
+      const removed = interceptRm(() => undefined)
+
+      await expect(store.deleteChat('agent-1', CHAT_ID, TEAM_A_SCOPE)).resolves.toEqual({
+        cleanupPending: true,
+      })
+
+      // Witness: the quarantine listing ran (and moved the scope) before any removal.
+      expect(listed).toContain(agentPath('.corrupt'))
+      expect(removed).toEqual([])
+      await expect(fs.access(chatCacheDir(CHAT_ID))).resolves.toBeUndefined()
+      await expectTombstoneAndCleanupStillQueued(CHAT_ID)
+      await expectOwningIdentityFinishesCleanup(CHAT_ID)
+    }
+  )
+
+  it.each(FOREIGN_SCOPES)(
+    'leaves the snapshot siblings alone when the identity changes to %s during the last artifact removal',
+    async (_label, foreign) => {
+      await seedChat(CHAT_ID)
+      const removed = interceptRm(path => {
+        if (path === chatCacheDir(CHAT_ID)) store.setAuthorityScope(foreign)
+      })
+
+      await expect(store.deleteChat('agent-1', CHAT_ID, TEAM_A_SCOPE)).resolves.toEqual({
+        cleanupPending: true,
+      })
+
+      // Witness: the chat directory really was removed (moving the scope), and the
+      // snapshot siblings, which the cleanup removes right after it, were not.
+      expect(removed).toContain(chatCacheDir(CHAT_ID))
+      await expect(fs.access(chatCacheDir(CHAT_ID))).rejects.toThrow()
+      expect(removed).not.toContain(snapshotRootPath(CHAT_ID))
+      await expect(
+        fs.access(join(chatSnapshotDir(CHAT_ID, 'previous', 'sibling'), 'marker'))
+      ).resolves.toBeUndefined()
+      await expectTombstoneAndCleanupStillQueued(CHAT_ID)
+      await expectOwningIdentityFinishesCleanup(CHAT_ID)
+    }
+  )
+
+  it.each(FOREIGN_SCOPES)(
+    'keeps the cleanup queued when the identity changes to %s during the snapshot sibling removal',
+    async (_label, foreign) => {
+      await seedChat(CHAT_ID)
+      const removed = interceptRm(path => {
+        if (path === snapshotRootPath(CHAT_ID)) store.setAuthorityScope(foreign)
+      })
+
+      await expect(store.deleteChat('agent-1', CHAT_ID, TEAM_A_SCOPE)).resolves.toEqual({
+        cleanupPending: true,
+      })
+
+      // Witness: every artifact removal ran, the last one moved the scope, and the
+      // pending entry was still not cleared for an identity that no longer owns it.
+      expect(removed.at(-1)).toBe(snapshotRootPath(CHAT_ID))
+      await expect(fs.access(chatCacheDir(CHAT_ID))).rejects.toThrow()
+      await expect(fs.access(snapshotRootPath(CHAT_ID))).rejects.toThrow()
+      await expectTombstoneAndCleanupStillQueued(CHAT_ID)
+      await expectOwningIdentityFinishesCleanup(CHAT_ID)
+    }
+  )
+
+  it.each(FOREIGN_SCOPES)(
+    'does not start the cleanup when the identity changes to %s while the deletion is persisted',
+    async (_label, foreign) => {
+      await seedChat(CHAT_ID)
+      const realRename = fs.rename.bind(fs)
+      const indexRenames: string[] = []
+      vi.spyOn(fs, 'rename').mockImplementation(async (...args) => {
+        await realRename(...(args as Parameters<typeof fs.rename>))
+        if (String(args[1]) === agentPath('index.json')) {
+          indexRenames.push(String(args[1]))
+          store.setAuthorityScope(foreign)
+        }
+      })
+      const realReaddir = fs.readdir.bind(fs)
+      const listed: string[] = []
+      vi.spyOn(fs, 'readdir').mockImplementation(async (...args) => {
+        listed.push(String(args[0]))
+        return realReaddir(...(args as Parameters<typeof fs.readdir>))
+      })
+      const removed = interceptRm(() => undefined)
+
+      await expect(store.deleteChat('agent-1', CHAT_ID, TEAM_A_SCOPE)).resolves.toEqual({
+        cleanupPending: true,
+      })
+
+      // Witness: the deletion was persisted (moving the scope) before the cleanup
+      // would have listed the quarantine or removed anything.
+      expect(indexRenames.length).toBeGreaterThan(0)
+      expect(listed).not.toContain(agentPath('.corrupt'))
+      expect(removed).toEqual([])
+      await expectTombstoneAndCleanupStillQueued(CHAT_ID)
+      await expectOwningIdentityFinishesCleanup(CHAT_ID)
+    }
+  )
+
+  it.each(FOREIGN_SCOPES)(
+    "keeps another identity's pending entry for the same chat when the owner finishes (%s)",
+    async (_label, foreign) => {
+      failingRm()
+      await store.deleteChat('agent-1', 'shared-chat-id', TEAM_A_SCOPE)
+      store.setAuthorityScope(foreign)
+      await store.deleteChat('agent-1', 'shared-chat-id', foreign)
+      expect((await store.getIndex('agent-1')).pendingChatCleanup).toEqual([
+        { chatId: 'shared-chat-id', authorityScope: TEAM_A_SCOPE },
+        { chatId: 'shared-chat-id', authorityScope: foreign },
+      ])
+      vi.restoreAllMocks()
+
+      store.setAuthorityScope(TEAM_A_SCOPE)
+      await store.retryPendingDeleteCleanups(TEAM_A_SCOPE)
+
+      // Witness: the owner's own entry was processed and cleared; the other
+      // identity's entry for the same chat id is still queued, its tombstone too.
+      const index = await store.getIndex('agent-1')
+      expect(index.pendingChatCleanup).toEqual([
+        { chatId: 'shared-chat-id', authorityScope: foreign },
+      ])
+      expect(index.deletedChatTombstones).toHaveLength(2)
+    }
+  )
+
+  it('hands only entries of the calling identity to the cleanup', async () => {
+    const foreign = { ...TEAM_A_SCOPE, userId: 'user-b' }
+    failingRm()
+    await store.deleteChat('agent-1', 'foreign-entry', TEAM_A_SCOPE)
+    store.setAuthorityScope(foreign)
+    await store.deleteChat('agent-1', 'own-entry', foreign)
+    vi.restoreAllMocks()
+    expect((await store.getIndex('agent-1')).pendingChatCleanup).toHaveLength(2)
+    const finish = vi.spyOn(store as unknown as CleanupInternals, 'finishPendingDeleteCleanup')
+
+    await store.retryPendingDeleteCleanups(foreign)
+
+    // Witness: the retry did hand work to the cleanup (the calling identity's entry).
+    expect(finish.mock.calls.map(call => call[1].chatId)).toEqual(['own-entry'])
+    expect((await store.getIndex('agent-1')).pendingChatCleanup).toEqual([
+      { chatId: 'foreign-entry', authorityScope: TEAM_A_SCOPE },
+    ])
+  })
+
+  it('stops the retry sweep when the identity changes to another user during it', async () => {
+    failingRm()
+    await store.deleteChat('agent-1', 'sweep-1', TEAM_A_SCOPE)
+    await store.deleteChat('agent-1', 'sweep-2', TEAM_A_SCOPE)
+    vi.restoreAllMocks()
+    expect((await store.getIndex('agent-1')).pendingChatCleanup).toHaveLength(2)
+    const finish = vi.spyOn(store as unknown as CleanupInternals, 'finishPendingDeleteCleanup')
+    const removed = interceptRm(() =>
+      store.setAuthorityScope({ ...TEAM_A_SCOPE, userId: 'user-b' })
+    )
+
+    await store.retryPendingDeleteCleanups(TEAM_A_SCOPE)
+
+    // Witness: the first entry was handed to the cleanup and its removal moved the
+    // scope; the second entry was never handed over, and both stay queued.
+    expect(removed).toHaveLength(1)
+    expect(finish).toHaveBeenCalledTimes(1)
+    expect((await store.getIndex('agent-1')).pendingChatCleanup).toHaveLength(2)
+  })
+
+  it('records one tombstone and one pending entry when the same chat is deleted twice', async () => {
+    await seedChat(CHAT_ID)
+    failingRm()
+
+    await expect(store.deleteChat('agent-1', CHAT_ID, TEAM_A_SCOPE)).resolves.toEqual({
+      cleanupPending: true,
+    })
+    // Witness: the first deletion queued its entries before the repeat.
+    const afterFirst = await store.getIndex('agent-1')
+    expect(afterFirst.deletedChatTombstones).toHaveLength(1)
+    expect(afterFirst.pendingChatCleanup).toHaveLength(1)
+
+    await expect(store.deleteChat('agent-1', CHAT_ID, TEAM_A_SCOPE)).resolves.toEqual({
+      cleanupPending: true,
+    })
+
+    const afterSecond = await store.getIndex('agent-1')
+    expect(afterSecond.deletedChatTombstones).toEqual([
+      { chatId: CHAT_ID, authorityScope: TEAM_A_SCOPE },
+    ])
+    expect(afterSecond.pendingChatCleanup).toEqual([
+      { chatId: CHAT_ID, authorityScope: TEAM_A_SCOPE },
+    ])
+  })
+})
+
 // ── tombstone durability ─────────────────────────────────────────────────────
 
 describe('tombstone durability', () => {

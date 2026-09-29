@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { AuthClient } from '../authClient.js'
 import { ApiError, requestJson } from '../httpClient.js'
-import { RpcProxyClient } from '../rpcProxyClient.js'
+import { RpcProxyClient, SandboxUiSessionError } from '../rpcProxyClient.js'
+import { SharedFilesClient } from '../sharedFilesClient.js'
 import {
   ERROR_EXCERPT_MAX_CHARS,
   HOST_ACCESS_DENIED_MESSAGE,
@@ -159,6 +161,109 @@ describe('bounded upstream error excerpts', () => {
   })
 })
 
+describe('bounded upstream error excerpts at every remaining call site', () => {
+  const HUGE = 'y'.repeat(100 * 1024)
+  const BOUNDED = `${'y'.repeat(ERROR_EXCERPT_MAX_CHARS)}…`
+  const signal = () => new AbortController().signal
+
+  // Each entry drives one `boundedErrorExcerpt` call site through the public
+  // method that owns it and names the exact message it must produce.
+  const SITES: Array<[string, () => Promise<unknown>, string]> = [
+    [
+      'RpcProxyClient.mintSandboxUiSession',
+      () => new RpcProxyClient().mintSandboxUiSession('t', 'ns', 'app'),
+      `sandbox-ui session mint failed (500): ${BOUNDED}`,
+    ],
+    [
+      'RpcProxyClient.requestSandboxUiOauthAuthorizeUrl',
+      () => new RpcProxyClient().requestSandboxUiOauthAuthorizeUrl('t', 'ns', 'app', 'client'),
+      `sandbox-ui authorize-url request failed (500): ${BOUNDED}`,
+    ],
+    [
+      'RpcProxyClient.requestMcpOauthAuthorizeUrl',
+      () => new RpcProxyClient().requestMcpOauthAuthorizeUrl('t', 'server'),
+      `mcp-oauth authorize-url request failed (500): ${BOUNDED}`,
+    ],
+    [
+      'RpcProxyClient.openHostStatusStream',
+      () => new RpcProxyClient().openHostStatusStream('t', 'host', () => undefined, signal()),
+      `Host stream failed (500): ${BOUNDED}`,
+    ],
+    [
+      'RpcProxyClient.denyToolCall',
+      () => new RpcProxyClient().denyToolCall('t', 'host', 'task', 'tool', 'reason'),
+      `Deny failed (500): ${BOUNDED}`,
+    ],
+    [
+      'RpcProxyClient.cancelTask',
+      () => new RpcProxyClient().cancelTask('t', 'host', 'task'),
+      `cancelTask failed (500): ${BOUNDED}`,
+    ],
+    [
+      'RpcProxyClient.downloadArtifact',
+      () => new RpcProxyClient().downloadArtifact('t', 'host', 'file.txt'),
+      `Download artifact failed (500): ${BOUNDED}`,
+    ],
+    [
+      'RpcProxyClient.getContextBreakdown',
+      () => new RpcProxyClient().getContextBreakdown('t', 'host', 'agent', 'chat'),
+      `Get context breakdown failed (500): ${BOUNDED}`,
+    ],
+    [
+      'RpcProxyClient.postDesktopSession',
+      () => new RpcProxyClient().postDesktopSession('t', 'host'),
+      `Desktop session exchange failed: 500 ${BOUNDED}`,
+    ],
+    [
+      'AuthClient.openWorkflowNotificationStream',
+      () => new AuthClient().openWorkflowNotificationStream('t', () => undefined, signal()),
+      `Notification stream failed (500): ${BOUNDED}`,
+    ],
+    [
+      'AuthClient.downloadWorkflowRunArtifact',
+      () => new AuthClient().downloadWorkflowRunArtifact('t', 'ns', 'flow', 'run', 'out.txt'),
+      `Download workflow artifact failed (500): ${BOUNDED}`,
+    ],
+    [
+      'SharedFilesClient.downloadFile',
+      () => new SharedFilesClient().downloadFile('t', 'ctx', 'sfs', 'a.txt'),
+      `500 Internal Server Error: ${BOUNDED}`,
+    ],
+  ]
+
+  it.each(SITES)('bounds the upstream body in the message of %s', async (_name, call, message) => {
+    const fetchMock = stubResponse(500, 'Internal Server Error', HUGE)
+
+    const error = await call().then(
+      () => null,
+      (e: unknown) => e as Error & { status?: number; bodyText?: string; body?: string }
+    )
+
+    // Liveness witness: the request went out and the failure path really ran.
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(error).toBeInstanceOf(Error)
+    // The message carries the 512-character excerpt and nothing beyond it, while the
+    // full upstream body stays on the typed error for diagnostics.
+    expect(error?.message).toBe(message)
+    expect(error?.message.length).toBeLessThan(700)
+    const fullBody = error?.bodyText ?? error?.body
+    if (fullBody !== undefined) expect(fullBody).toBe(HUGE)
+  })
+
+  it('keeps the typed status of the sandbox-ui session error while bounding its message', async () => {
+    stubResponse(500, 'Internal Server Error', HUGE)
+
+    const error = await new RpcProxyClient().mintSandboxUiSession('t', 'ns', 'app').then(
+      () => null,
+      (e: unknown) => e
+    )
+
+    expect(error).toBeInstanceOf(SandboxUiSessionError)
+    expect((error as SandboxUiSessionError).status).toBe(500)
+    expect((error as SandboxUiSessionError).body).toBe(HUGE)
+  })
+})
+
 describe('upstreamErrors helpers', () => {
   it('collapses whitespace, cuts at the bound with an ellipsis and defuses reserved tokens', () => {
     expect(boundedErrorExcerpt('  a\n\n b\t c  ')).toBe('a b c')
@@ -166,6 +271,17 @@ describe('upstreamErrors helpers', () => {
     expect(cut).toBe(`${'z'.repeat(ERROR_EXCERPT_MAX_CHARS)}…`)
     const defused = boundedErrorExcerpt('a host_access_revoked and HOST_ACCESS_DENIED here')
     expect(defused).toBe('a host-access-revoked and host-access-DENIED here')
+  })
+
+  it('cuts exactly above the bound: 511 and 512 characters are kept, 513 gets the ellipsis', () => {
+    expect(ERROR_EXCERPT_MAX_CHARS).toBe(512)
+    const kept511 = 'q'.repeat(ERROR_EXCERPT_MAX_CHARS - 1)
+    const kept512 = 'q'.repeat(ERROR_EXCERPT_MAX_CHARS)
+    const cut513 = 'q'.repeat(ERROR_EXCERPT_MAX_CHARS + 1)
+
+    expect(boundedErrorExcerpt(kept511)).toBe(kept511)
+    expect(boundedErrorExcerpt(kept512)).toBe(kept512)
+    expect(boundedErrorExcerpt(cut513)).toBe(`${kept512}…`)
   })
 
   it('decides Host-access messages from the parsed code of a 403 only', () => {

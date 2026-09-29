@@ -1209,7 +1209,25 @@ export class AppService {
           }
         }
       } finally {
-        if (shouldRestore) this.chatStoreHomeTeamId = null
+        if (shouldRestore) {
+          this.chatStoreHomeTeamId = null
+          // A failed switch back leaves the session on the hop team while the
+          // store is still bound to the pinned home team. Rebind so the store
+          // scope and the delete-fence authority (both derived from
+          // chatStoreTeamId) agree again. A rebind failure is logged and never
+          // replaces the error of the operation or of the failed restore.
+          const sessionUserId = this.me?.id
+          if (sessionUserId && this.me?.teamId !== originalTeamId) {
+            try {
+              await this.bindCurrentChatStore(sessionUserId)
+            } catch (rebindError) {
+              console.error(
+                '[AppService] Failed to rebind the chat store after a failed team restore:',
+                rebindError
+              )
+            }
+          }
+        }
         releaseTransientHop?.()
       }
     } finally {
