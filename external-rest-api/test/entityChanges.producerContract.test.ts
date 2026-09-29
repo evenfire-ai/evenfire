@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Request, Response } from 'express'
 import express from 'express'
 import { EventEmitter } from 'node:events'
@@ -19,7 +19,10 @@ const producerMocks = vi.hoisted(() => ({
 const producerConfig = vi.hoisted(() => ({
   entityChangeStreamHeartbeatMs: 20_000,
   entityChangeStreamMaxLifetimeMs: 600_000,
-  entityChangeStreamPollMs: 250,
+  entityChangeStreamPollMs: 1000,
+  entityChangeUserVisibilityRefreshMs: 4000,
+  entityChangeStreamMaxConnections: 256,
+  entityChangeStreamMaxConnectionsPerPrincipal: 8,
 }))
 const producerMetrics = vi.hoisted(() => ({
   entityChangeStreamConnectionsActive: { inc: vi.fn(), dec: vi.fn() },
@@ -56,6 +59,7 @@ vi.mock('../../desktop-app/src/config.js', () => ({
 }))
 
 const CURSOR = 'd119f895-1ef8-4e73-8f08-f9754919682a'
+const NEXT_CURSOR = '7a823ef5-ef6b-44d2-9dc2-b13862be831f'
 
 class ProducerRequest extends EventEmitter {
   query: Record<string, unknown> = {}
@@ -92,12 +96,14 @@ class ProducerResponse extends EventEmitter {
   }
 }
 
-async function captureControlApiProducerFrame(): Promise<string> {
-  producerMocks.readEntityChangeCheckpoint.mockResolvedValue({
-    resyncRequired: false,
-    cursor: CURSOR,
-    scopes: ['gfs'],
-  })
+async function flushAsyncWork(iterations = 12): Promise<void> {
+  for (let index = 0; index < iterations; index += 1) await Promise.resolve()
+}
+
+async function startControlApiProducer(
+  principalKind: 'user' | 'operator',
+  principalId: string
+): Promise<{ response: ProducerResponse }> {
   const req = new ProducerRequest()
   const res = new ProducerResponse()
   streamEntityChanges(
@@ -105,17 +111,23 @@ async function captureControlApiProducerFrame(): Promise<string> {
     res as unknown as Response,
     null,
     async () => true,
-    'user'
+    principalKind,
+    principalId
   )
-  await vi.waitFor(() => expect(res.frames.length).toBeGreaterThan(0))
-  closeActiveEntityChangeStreams()
-  await vi.waitFor(() => expect(res.writableEnded).toBe(true))
-  const frame = res.frames
+  await flushAsyncWork()
+  if (!res.headersSent) throw new Error('Control API producer did not start the stream')
+  return { response: res }
+}
+
+function frameTypes(response: ProducerResponse): string[] {
+  return response.frames.map(value => (JSON.parse(value) as { type: string }).type)
+}
+
+function frameFrom(response: ProducerResponse, type: string): string {
+  const frame = response.frames
     .map(value => value.trim())
-    .find(value => {
-      return (JSON.parse(value) as { type?: string }).type === 'scope.invalidated'
-    })
-  if (!frame) throw new Error('Control API producer did not emit a scope invalidation')
+    .find(value => (JSON.parse(value) as { type?: string }).type === type)
+  if (!frame) throw new Error(`Control API producer did not emit ${type}`)
   return frame
 }
 
@@ -137,14 +149,36 @@ describe('Control API entity-change producer contract', () => {
     vi.unstubAllGlobals()
   })
 
-  it('emits one Control API frame that survives proxy framing and both client parsers', async () => {
-    const producerFrame = await captureControlApiProducerFrame()
+  afterEach(async () => {
+    closeActiveEntityChangeStreams()
+    await flushAsyncWork()
+    vi.useRealTimers()
+    vi.unstubAllGlobals()
+  })
+
+  it('proxies user frames at the configured visibility cadence to the Desktop parser', async () => {
+    vi.useFakeTimers()
+    const producer = await startControlApiProducer('user', 'user-1')
+    expect(frameTypes(producer.response)).toEqual(['resync_required'])
+
+    await vi.advanceTimersByTimeAsync(producerConfig.entityChangeUserVisibilityRefreshMs)
+    await flushAsyncWork()
+    expect(frameTypes(producer.response)).toEqual(['resync_required', 'scope.invalidated'])
+    closeActiveEntityChangeStreams()
+    await flushAsyncWork()
+
+    const producerFrames = producer.response.frames
+    expect(frameTypes(producer.response)).toEqual([
+      'resync_required',
+      'scope.invalidated',
+      'stream.closing',
+    ])
     const encoder = new TextEncoder()
     externalControlApi.controlApiStreamRequest.mockResolvedValueOnce(
       new Response(
         new ReadableStream<Uint8Array>({
           start(controller) {
-            controller.enqueue(encoder.encode(`${producerFrame}\n`))
+            controller.enqueue(encoder.encode(producerFrames.join('')))
             controller.close()
           },
         }),
@@ -159,7 +193,7 @@ describe('Control API entity-change producer contract', () => {
       .get('/entity-changes/stream')
       .set('authorization', 'Bearer session-token')
       .expect(200)
-    expect(proxied.text.trim()).toBe(producerFrame)
+    expect(proxied.text).toBe(producerFrames.join(''))
 
     vi.stubGlobal(
       'fetch',
@@ -177,9 +211,66 @@ describe('Control API entity-change producer contract', () => {
       event => desktopEvents.push(event as unknown as Record<string, unknown>),
       new AbortController().signal
     )
-    expect(desktopEvents[1]).toEqual(JSON.parse(producerFrame))
-
-    expect(parseEntityChangeFrame(producerFrame)).toEqual(JSON.parse(producerFrame))
+    expect(desktopEvents.map(event => event.type)).toEqual([
+      'open',
+      'resync_required',
+      'scope.invalidated',
+      'stream.closing',
+    ])
+    expect(parseEntityChangeFrame(frameFrom(producer.response, 'scope.invalidated'))).toMatchObject(
+      {
+        type: 'scope.invalidated',
+        scopes: ['gfs', 'authorization'],
+      }
+    )
     expect(JSON.stringify(desktopEvents)).not.toContain('file-contents')
+  })
+
+  it('feeds operator resync, invalidation, heartbeat and closing frames through Control UI parsing', async () => {
+    vi.useFakeTimers()
+    let checkpoint = {
+      resyncRequired: true,
+      cursor: CURSOR,
+      scopes: [] as Array<'gfs' | 'authorization'>,
+    }
+    producerMocks.readEntityChangeCheckpoint.mockImplementation(async () => checkpoint)
+    let wakeFeed: (() => void) | undefined
+    producerMocks.subscribeEntityChangeFeedWake.mockImplementation((wake: () => void) => {
+      wakeFeed = wake
+      return vi.fn()
+    })
+
+    const producer = await startControlApiProducer('operator', 'operator-1')
+    expect(frameTypes(producer.response)).toEqual(['resync_required'])
+    checkpoint = { resyncRequired: false, cursor: NEXT_CURSOR, scopes: ['gfs'] }
+    wakeFeed?.()
+    await flushAsyncWork()
+    checkpoint = { resyncRequired: false, cursor: NEXT_CURSOR, scopes: [] }
+    await vi.advanceTimersByTimeAsync(producerConfig.entityChangeStreamHeartbeatMs)
+    await flushAsyncWork()
+    closeActiveEntityChangeStreams()
+    await flushAsyncWork()
+
+    expect(frameTypes(producer.response)).toEqual([
+      'resync_required',
+      'scope.invalidated',
+      'heartbeat',
+      'stream.closing',
+    ])
+    const controlUiEvents = producer.response.frames
+      .map(value => parseEntityChangeFrame(value.trim()))
+      .filter((event): event is NonNullable<typeof event> => event !== null)
+    expect(controlUiEvents.map(event => event.type)).toEqual([
+      'resync_required',
+      'scope.invalidated',
+      'heartbeat',
+      'stream.closing',
+    ])
+    expect(controlUiEvents[1]).toMatchObject({ type: 'scope.invalidated', scopes: ['gfs'] })
+    expect(controlUiEvents[2]).toMatchObject({ type: 'heartbeat', cursor: NEXT_CURSOR })
+    expect(controlUiEvents[3]).toMatchObject({
+      type: 'stream.closing',
+      reason: 'server_shutdown',
+    })
   })
 })
