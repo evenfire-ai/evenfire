@@ -1477,6 +1477,8 @@ export class WorkflowRecipeReconciler {
    * pending a retry would stay unapplied until the run ends. The retry
    * re-prunes as well, with a verdict computed for this pass: a prune that
    * failed is what set the marker, so an apply-only retry could never clear it.
+   * The Codex and Grok proxy policies are never revoked by this retry, since
+   * a run may be using them; the first reconcile() after the run prunes them.
    *
    * Returns the requeue delay the short-circuit must add: the progress base
    * while a policy is still pending, the transient base when the apply threw
@@ -1962,6 +1964,16 @@ export class WorkflowRecipeReconciler {
           skipStatusPatch: true,
           requeueAfterMs: TRANSIENT_REQUEUE_BASE_MS,
         }
+      }
+
+      // B3(a): the awaiting-trigger, terminal, in-progress and active
+      // short-circuits below return before the first-deploy path that calls
+      // ensureOAuthBrokerTokenSecret, so the token-ADDED re-reconcile would
+      // never reach the reap. Only the delete branch runs here (issuance stays
+      // on the first-deploy path and the rotation loop), and the delete ledger
+      // bounds it to one DELETE per generation or ADDED.
+      if (!rb.recipeHasBackgroundAccessClient(recipe)) {
+        await this.ensureOAuthBrokerTokenSecret(recipe)
       }
 
       if (
@@ -7518,13 +7530,14 @@ export class WorkflowRecipeReconciler {
 
     if (!rb.recipeHasBackgroundAccessClient(recipe)) {
       const generation = recipe.metadata.generation
-      if (!this.oauthBrokerDeleteLedger.shouldDeleteSecret(recipeName, generation)) {
+      if (!this.oauthBrokerDeleteLedger.shouldDeleteSecret(recipe.metadata)) {
         createLogger('wrc', recipeName).info(
           'Skipping oauth-broker-token delete; generation already seen',
           { recipe: recipeName, generation }
         )
         return
       }
+      const epochBeforeDelete = this.oauthBrokerDeleteLedger.secretEpoch(recipeName)
       const outcome = await observeNamespacedDelete(() =>
         this.coreApi.deleteNamespacedSecret({ name: secretName, namespace: ns })
       )
@@ -7543,8 +7556,14 @@ export class WorkflowRecipeReconciler {
           ...deleteOutcomeFields(outcome),
         })
       }
-      if (shouldRecordDelete(outcome)) {
-        this.oauthBrokerDeleteLedger.recordSecretDelete(recipeName, generation)
+      if (
+        shouldRecordDelete(outcome) &&
+        !this.oauthBrokerDeleteLedger.recordSecretDelete(recipe.metadata, epochBeforeDelete)
+      ) {
+        log.info('oauth-broker-token Secret re-added during delete; not recording', {
+          recipe: recipeName,
+          generation,
+        })
       }
       return
     }
@@ -7610,7 +7629,7 @@ export class WorkflowRecipeReconciler {
     if (!policy) {
       const recipeName = recipe.metadata.name
       const generation = recipe.metadata.generation
-      if (!this.oauthBrokerDeleteLedger.shouldDeletePolicy(recipeName, generation)) {
+      if (!this.oauthBrokerDeleteLedger.shouldDeletePolicy(recipe.metadata)) {
         createLogger('wrc', recipeName).info(
           'Skipping oauth-broker-egress delete; generation already seen',
           { recipe: recipeName, generation }
@@ -7636,7 +7655,7 @@ export class WorkflowRecipeReconciler {
         })
       }
       if (shouldRecordDelete(outcome)) {
-        this.oauthBrokerDeleteLedger.recordPolicyDelete(recipeName, generation)
+        this.oauthBrokerDeleteLedger.recordPolicyDelete(recipe.metadata)
       }
       return
     }

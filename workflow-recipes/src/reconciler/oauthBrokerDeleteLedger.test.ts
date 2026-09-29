@@ -1,68 +1,136 @@
 import { describe, expect, it } from 'vitest'
-import { OAUTH_BROKER_NP_TTL_MS, OAuthBrokerDeleteLedger } from './oauthBrokerDeleteLedger'
+import {
+  OAUTH_BROKER_NP_TTL_MS,
+  OAuthBrokerDeleteLedger,
+  type OAuthBrokerLedgerRecipe,
+} from './oauthBrokerDeleteLedger'
+
+function ref(name: string, generation: number, uid = `uid-${name}`): OAuthBrokerLedgerRecipe {
+  return { name, uid, generation }
+}
+
+function recordSecret(ledger: OAuthBrokerDeleteLedger, recipe: OAuthBrokerLedgerRecipe): void {
+  expect(ledger.recordSecretDelete(recipe, ledger.secretEpoch(recipe.name))).toBe(true)
+}
 
 describe('OAuthBrokerDeleteLedger', () => {
   it('remembers a Secret delete for the recorded generation only', () => {
     const ledger = new OAuthBrokerDeleteLedger()
-    expect(ledger.shouldDeleteSecret('r', 4)).toBe(true)
-    ledger.recordSecretDelete('r', 4)
-    expect(ledger.shouldDeleteSecret('r', 4)).toBe(false)
-    expect(ledger.shouldDeleteSecret('r', 5)).toBe(true)
+    expect(ledger.shouldDeleteSecret(ref('r', 4))).toBe(true)
+    recordSecret(ledger, ref('r', 4))
+    expect(ledger.shouldDeleteSecret(ref('r', 4))).toBe(false)
+    expect(ledger.shouldDeleteSecret(ref('r', 5))).toBe(true)
   })
 
-  it('keeps one entry per recipe: a newer generation replaces the older one', () => {
+  it('keeps the highest generation per recipe: an older generation arriving late is skipped', () => {
     const ledger = new OAuthBrokerDeleteLedger()
-    ledger.recordSecretDelete('r', 4)
-    ledger.recordSecretDelete('r', 5)
-    // Generations only increase, so the older key is dead weight. Not remembering it
-    // is what bounds the ledger at one entry per recipe instead of one per spec edit.
-    expect(ledger.shouldDeleteSecret('r', 5)).toBe(false)
-    expect(ledger.shouldDeleteSecret('r', 4)).toBe(true)
+    recordSecret(ledger, ref('r', 4))
+    recordSecret(ledger, ref('r', 5))
+    expect(ledger.shouldDeleteSecret(ref('r', 5))).toBe(false)
+    expect(ledger.shouldDeleteSecret(ref('r', 4))).toBe(false)
+    expect(ledger.shouldDeleteSecret(ref('r', 6))).toBe(true)
 
-    ledger.recordPolicyDelete('r', 4, 0)
-    ledger.recordPolicyDelete('r', 5, 0)
-    expect(ledger.shouldDeletePolicy('r', 5, 1)).toBe(false)
-    expect(ledger.shouldDeletePolicy('r', 4, 1)).toBe(true)
+    ledger.recordPolicyDelete(ref('r', 4), 0)
+    ledger.recordPolicyDelete(ref('r', 5), 0)
+    expect(ledger.shouldDeletePolicy(ref('r', 5), 1)).toBe(false)
+    expect(ledger.shouldDeletePolicy(ref('r', 4), 1)).toBe(false)
+    expect(ledger.shouldDeletePolicy(ref('r', 6), 1)).toBe(true)
+  })
+
+  it('an older generation recorded late does not lower the recorded generation', () => {
+    const ledger = new OAuthBrokerDeleteLedger()
+    recordSecret(ledger, ref('r', 5))
+    recordSecret(ledger, ref('r', 3))
+    expect(ledger.shouldDeleteSecret(ref('r', 4))).toBe(false)
+
+    ledger.recordPolicyDelete(ref('r', 5), 0)
+    ledger.recordPolicyDelete(ref('r', 3), 0)
+    expect(ledger.shouldDeletePolicy(ref('r', 4), 1)).toBe(false)
+  })
+
+  it('a recipe recreated under the same name (new uid) deletes again at any generation', () => {
+    const ledger = new OAuthBrokerDeleteLedger()
+    recordSecret(ledger, ref('r', 5, 'uid-old'))
+    ledger.recordPolicyDelete(ref('r', 5, 'uid-old'), 0)
+    expect(ledger.shouldDeleteSecret(ref('r', 1, 'uid-old'))).toBe(false)
+    expect(ledger.shouldDeletePolicy(ref('r', 1, 'uid-old'), 1)).toBe(false)
+
+    expect(ledger.shouldDeleteSecret(ref('r', 1, 'uid-new'))).toBe(true)
+    expect(ledger.shouldDeletePolicy(ref('r', 1, 'uid-new'), 1)).toBe(true)
+
+    // Recording the recreated recipe replaces the old uid's higher generation.
+    recordSecret(ledger, ref('r', 1, 'uid-new'))
+    expect(ledger.shouldDeleteSecret(ref('r', 1, 'uid-new'))).toBe(false)
+    expect(ledger.shouldDeleteSecret(ref('r', 2, 'uid-new'))).toBe(true)
   })
 
   it('does not let one recipe suppress another', () => {
     const ledger = new OAuthBrokerDeleteLedger()
-    ledger.recordSecretDelete('a', 1)
-    expect(ledger.shouldDeleteSecret('a', 1)).toBe(false)
-    expect(ledger.shouldDeleteSecret('a-b', 1)).toBe(true)
-    expect(ledger.shouldDeleteSecret('b', 1)).toBe(true)
+    recordSecret(ledger, ref('a', 1))
+    expect(ledger.shouldDeleteSecret(ref('a', 1))).toBe(false)
+    expect(ledger.shouldDeleteSecret(ref('a-b', 1))).toBe(true)
+    expect(ledger.shouldDeleteSecret(ref('b', 1))).toBe(true)
   })
 
   it('expires the NetworkPolicy entry after the TTL', () => {
     const ledger = new OAuthBrokerDeleteLedger()
-    ledger.recordPolicyDelete('r', 4, 1_000)
-    expect(ledger.shouldDeletePolicy('r', 4, 1_000 + OAUTH_BROKER_NP_TTL_MS - 1)).toBe(false)
-    expect(ledger.shouldDeletePolicy('r', 4, 1_000 + OAUTH_BROKER_NP_TTL_MS)).toBe(true)
+    ledger.recordPolicyDelete(ref('r', 4), 1_000)
+    expect(ledger.shouldDeletePolicy(ref('r', 4), 1_000 + OAUTH_BROKER_NP_TTL_MS - 1)).toBe(false)
+    expect(ledger.shouldDeletePolicy(ref('r', 4), 1_000 + OAUTH_BROKER_NP_TTL_MS)).toBe(true)
   })
 
   it('invalidateSecret re-arms only the Secret side; the NetworkPolicy TTL survives', () => {
     const ledger = new OAuthBrokerDeleteLedger()
-    ledger.recordSecretDelete('r', 4)
-    ledger.recordPolicyDelete('r', 4, 0)
-    expect(ledger.shouldDeleteSecret('r', 4)).toBe(false)
-    expect(ledger.shouldDeletePolicy('r', 4, 1)).toBe(false)
+    recordSecret(ledger, ref('r', 4))
+    ledger.recordPolicyDelete(ref('r', 4), 0)
+    expect(ledger.shouldDeleteSecret(ref('r', 4))).toBe(false)
+    expect(ledger.shouldDeletePolicy(ref('r', 4), 1)).toBe(false)
 
     ledger.invalidateSecret('r')
-    expect(ledger.shouldDeleteSecret('r', 4)).toBe(true)
-    expect(ledger.shouldDeletePolicy('r', 4, 1)).toBe(false)
+    expect(ledger.shouldDeleteSecret(ref('r', 4))).toBe(true)
+    expect(ledger.shouldDeletePolicy(ref('r', 4), 1)).toBe(false)
+  })
+
+  it('does not record a Secret delete when an invalidation landed after the epoch was read', () => {
+    const ledger = new OAuthBrokerDeleteLedger()
+    const epochBeforeDelete = ledger.secretEpoch('r')
+    ledger.invalidateSecret('r')
+    expect(ledger.recordSecretDelete(ref('r', 4), epochBeforeDelete)).toBe(false)
+    expect(ledger.shouldDeleteSecret(ref('r', 4))).toBe(true)
+
+    // Liveness witness: with a fresh epoch the same record is accepted.
+    expect(ledger.recordSecretDelete(ref('r', 4), ledger.secretEpoch('r'))).toBe(true)
+    expect(ledger.shouldDeleteSecret(ref('r', 4))).toBe(false)
+  })
+
+  it('an invalidation for one recipe does not reject another recipe record', () => {
+    const ledger = new OAuthBrokerDeleteLedger()
+    const epochBeforeDelete = ledger.secretEpoch('r2')
+    ledger.invalidateSecret('r')
+    expect(ledger.recordSecretDelete(ref('r2', 4), epochBeforeDelete)).toBe(true)
+    expect(ledger.shouldDeleteSecret(ref('r2', 4))).toBe(false)
   })
 
   it('invalidate drops both sides for the named recipe and no other', () => {
     const ledger = new OAuthBrokerDeleteLedger()
-    ledger.recordSecretDelete('r', 4)
-    ledger.recordPolicyDelete('r', 4, 0)
-    ledger.recordSecretDelete('r2', 4)
-    ledger.recordPolicyDelete('r2', 4, 0)
+    recordSecret(ledger, ref('r', 4))
+    ledger.recordPolicyDelete(ref('r', 4), 0)
+    recordSecret(ledger, ref('r2', 4))
+    ledger.recordPolicyDelete(ref('r2', 4), 0)
 
     ledger.invalidate('r')
-    expect(ledger.shouldDeleteSecret('r', 4)).toBe(true)
-    expect(ledger.shouldDeletePolicy('r', 4, 1)).toBe(true)
-    expect(ledger.shouldDeleteSecret('r2', 4)).toBe(false)
-    expect(ledger.shouldDeletePolicy('r2', 4, 1)).toBe(false)
+    expect(ledger.shouldDeleteSecret(ref('r', 4))).toBe(true)
+    expect(ledger.shouldDeletePolicy(ref('r', 4), 1)).toBe(true)
+    expect(ledger.shouldDeleteSecret(ref('r2', 4))).toBe(false)
+    expect(ledger.shouldDeletePolicy(ref('r2', 4), 1)).toBe(false)
+  })
+
+  it('a DELETE in flight across a recipe deletion that followed an ADDED is not recorded', () => {
+    const ledger = new OAuthBrokerDeleteLedger()
+    ledger.invalidateSecret('r')
+    const epochBeforeDelete = ledger.secretEpoch('r')
+    ledger.invalidate('r')
+    expect(ledger.recordSecretDelete(ref('r', 4), epochBeforeDelete)).toBe(false)
+    expect(ledger.shouldDeleteSecret(ref('r', 4))).toBe(true)
   })
 })

@@ -231,6 +231,11 @@ type RunLaneNetworkPolicyApplyResult =
       reason: 'terminating' | 'contended'
     }
   | { policy: string; action: 'conflict'; reason: NetworkPolicyConflictReason }
+/** Why a Codex/Grok proxy policy survives a prune that does not desire it. */
+interface RunLaneProxyKeepReasons {
+  codex?: 'uncertain' | 'run-in-progress'
+  grok?: 'uncertain' | 'run-in-progress'
+}
 // Read-then-write rounds per NetworkPolicy and pass. Three rounds is at most
 // three writes, the same as the create plus two replaces it replaced.
 const NETWORK_POLICY_APPLY_ROUNDS = 3
@@ -2990,11 +2995,14 @@ export class WorkflowReconciler {
    * active short-circuits return before reconcile(), so a policy a previous
    * pass left pending (terminating, contended, or a prune that failed) would
    * otherwise stay as it is until the run ends. Runs the same build, apply and
-   * prune unit reconcile() runs, with a verdict computed now: an uncertain
-   * Codex or Grok verdict keeps its proxy policy, and the catalog gate keeps
-   * everything the run lane does not own. A prune that failed sets
-   * retryPending, so without the prune here the marker would requeue forever
-   * and never reach the leftover.
+   * prune unit reconcile() runs, with a verdict computed now, with one
+   * difference: the Codex and Grok proxy policies are never revoked here.
+   * The verdict can change while a step is using the proxy, so a revoke
+   * mid-run would cut its egress; a proxy the verdict still requires is
+   * created (an allow), and one it no longer wants is pruned by the first
+   * reconcile() after the run. The catalog gate keeps everything the run lane
+   * does not own. A prune that failed sets retryPending, so without the prune
+   * here the marker would requeue forever and never reach the leftover.
    */
   async retryRunLaneNetworkPolicies(
     recipeName: string,
@@ -3019,7 +3027,7 @@ export class WorkflowReconciler {
       runtimeScopeRecipeName,
       codexView
     )
-    return this.applyWorkflowNetworkPolicies(
+    const { policies, catalog } = await this.buildWorkflowNetworkPoliciesForSpec(
       recipeName,
       recipeUid,
       spec,
@@ -3029,6 +3037,10 @@ export class WorkflowReconciler {
       false,
       codexVerdict.grokProjection
     )
+    return this.applyAndPruneRunLaneNetworkPolicies(recipeName, recipeUid, policies, catalog, {
+      codex: 'run-in-progress',
+      grok: 'run-in-progress',
+    })
   }
 
   async ensureCoordinatorRuntimeCredentials(
@@ -3435,16 +3447,26 @@ export class WorkflowReconciler {
       eagerSdkMcpHost,
       grokProjection
     )
+    return this.applyAndPruneRunLaneNetworkPolicies(recipeName, recipeUid, policies, catalog, {
+      codex: codexProjection.eligibility === 'uncertain' ? 'uncertain' : undefined,
+      grok: grokProjection?.eligibility === 'uncertain' ? 'uncertain' : undefined,
+    })
+  }
+
+  private async applyAndPruneRunLaneNetworkPolicies(
+    recipeName: string,
+    recipeUid: string,
+    policies: k8s.V1NetworkPolicy[],
+    catalog: Set<string>,
+    keepProxies: RunLaneProxyKeepReasons
+  ): Promise<WorkflowNetworkPolicyApplySummary> {
     const summary = await this.applyNetworkPolicyList(policies)
     const policyNames = new Set(policies.map(policy => policy.metadata?.name))
     const prune = await this.pruneUndesiredRunLaneNetworkPolicies(
       recipeName,
       policyNames,
       catalog,
-      {
-        skipCodexProxy: codexProjection.eligibility === 'uncertain',
-        skipGrokProxy: grokProjection?.eligibility === 'uncertain',
-      }
+      keepProxies
     )
     if (prune.retryPending) summary.retryPending = true
     const legacy = await this.pruneLegacyMcpServersInternetEgressPolicy(recipeName, recipeUid)
@@ -3457,18 +3479,20 @@ export class WorkflowReconciler {
    * Two-term selector only (`managed-by=wrc`): a single-term recipe selector
    * would also return the recipes-lane policies in the same namespace.
    * Universe is the factory catalog (GFS never in it), not LIST \ desired.
-   * Uncertain Codex/Grok eligibility keeps those proxy names even when they
-   * are absent from this pass's desired set.
+   * A Codex/Grok proxy with a keep reason (an uncertain verdict, or a run in
+   * progress on the retry path) survives even when it is absent from this
+   * pass's desired set. A listed policy with an ownerReference is skipped,
+   * matching the apply's ownership veto.
    */
   private async pruneUndesiredRunLaneNetworkPolicies(
     recipeName: string,
     desiredNames: Set<string | undefined>,
     catalog: Set<string>,
-    uncertain: { skipCodexProxy: boolean; skipGrokProxy: boolean }
+    keepProxies: RunLaneProxyKeepReasons
   ): Promise<{ retryPending: boolean }> {
     const namespace = this.deps.config.sandboxNamespace
     const labelSelector = `clerum.io/recipe=${recipeName},clerum.io/managed-by=wrc`
-    let list: { items?: Array<{ metadata?: { name?: string } }> }
+    let list: { items?: k8s.V1NetworkPolicy[] }
     try {
       list = await this.deps.networkingApi.listNamespacedNetworkPolicy({
         namespace,
@@ -3487,19 +3511,17 @@ export class WorkflowReconciler {
     for (const policy of list.items ?? []) {
       const name = policy.metadata?.name
       if (!name || desiredNames.has(name)) continue
-      if (name === codexProxyPolicyName && uncertain.skipCodexProxy) {
+      const keepReason =
+        name === codexProxyPolicyName
+          ? keepProxies.codex
+          : name === grokProxyPolicyName
+            ? keepProxies.grok
+            : undefined
+      if (keepReason) {
         this.log.debug('Skipping run-lane NP prune', {
           recipe: recipeName,
           policy: name,
-          reason: 'uncertain',
-        })
-        continue
-      }
-      if (name === grokProxyPolicyName && uncertain.skipGrokProxy) {
-        this.log.debug('Skipping run-lane NP prune', {
-          recipe: recipeName,
-          policy: name,
-          reason: 'uncertain',
+          reason: keepReason,
         })
         continue
       }
@@ -3508,6 +3530,18 @@ export class WorkflowReconciler {
           recipe: recipeName,
           policy: name,
           reason: 'not-in-catalog',
+        })
+        continue
+      }
+      // Same ownership veto the run-lane apply uses: a policy under our name
+      // that carries an ownerReference belongs to someone else, and the apply
+      // already refuses to replace it.
+      const ownership = classifyOwnerlessNetworkPolicyOwnership(policy)
+      if (ownership.kind !== 'owned') {
+        this.log.warn('Skipping run-lane NP prune', {
+          recipe: recipeName,
+          policy: name,
+          reason: ownership.kind === 'conflict' ? ownership.reason : ownership.kind,
         })
         continue
       }

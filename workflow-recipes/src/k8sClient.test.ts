@@ -17,6 +17,7 @@ import {
   workflowRecipeFromWatchObject,
 } from './k8sClient'
 import { captureLogger } from './reconciler/__tests__/captureLogger'
+import { buildOAuthBrokerTokenSecret } from './reconciler/resourceBuilder'
 import type { SecretEventType, SecretLike } from './reconciler/secretWatcher'
 import type { WorkflowRecipeCRD } from './types'
 
@@ -3345,13 +3346,12 @@ describe('handleOAuthBrokerTokenAdded', () => {
     secretLoops.length = 0
     await (internal as unknown as { startSecretWatch: () => Promise<void> }).startSecretWatch()
 
-    const brokerToken = {
-      metadata: {
-        name: 'wf-no-bg-oauth-broker-token',
-        labels: { 'clerum.io/component': 'oauth-broker-token', 'clerum.io/recipe': 'no-bg' },
-      },
-      data: { token: 'x' },
-    }
+    // The Secret WRC itself writes, not a hand-written copy of its labels.
+    const brokerToken = buildOAuthBrokerTokenSecret(
+      'no-bg',
+      'jwt',
+      internal.config.sandboxNamespace
+    )
 
     // Liveness witness: the sandbox-namespace watcher exists and reaches the handler.
     const sandbox = secretLoops.find(l => l.namespace === internal.config.sandboxNamespace)

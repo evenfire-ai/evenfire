@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { buildOAuthBrokerTokenSecret } from './resourceBuilder'
 import { OWNER_RECIPE_LABEL_KEY, SHARED_LABEL_KEY } from './secretOwnership'
 import { SecretReverseIndex } from './secretReverseIndex'
 import { SecretWatcher } from './secretWatcher'
@@ -230,16 +231,9 @@ describe('SecretWatcher', () => {
         invalidated.push(recipeName)
       }
     )
-    const brokerSecret = {
-      metadata: {
-        name: 'wf-test-recipe-oauth-broker-token',
-        labels: {
-          'clerum.io/component': 'oauth-broker-token',
-          'clerum.io/recipe': 'test-recipe',
-        },
-      },
-      data: { 'broker-token': 'eA==' },
-    }
+    // The Secret WRC itself writes, so a drift in the builder's labels or
+    // name breaks this test instead of passing against a hand-written copy.
+    const brokerSecret = buildOAuthBrokerTokenSecret('test-recipe', 'jwt', 'sandbox-recipes')
 
     watcher.handleEvent('ADDED', brokerSecret)
     watcher.handleEvent('ADDED', brokerSecret)
@@ -265,33 +259,24 @@ describe('SecretWatcher', () => {
         invalidated.push(recipeName)
       }
     )
-    const labels = {
-      'clerum.io/component': 'oauth-broker-token',
-      'clerum.io/recipe': 'test-recipe',
-    }
+    const canonical = buildOAuthBrokerTokenSecret('test-recipe', 'jwt', 'sandbox-recipes')
 
     watcher.handleEvent('ADDED', {
-      metadata: { name: 'forged-oauth-broker-token', labels },
-      data: { 'broker-token': 'eA==' },
+      ...canonical,
+      metadata: { ...canonical.metadata, name: 'forged-oauth-broker-token' },
     })
     watcher.handleEvent('ADDED', {
+      ...canonical,
       metadata: {
-        name: 'wf-test-recipe-oauth-broker-token',
-        labels: { 'clerum.io/component': 'other', 'clerum.io/recipe': 'test-recipe' },
+        ...canonical.metadata,
+        labels: { ...canonical.metadata?.labels, 'clerum.io/component': 'other' },
       },
-      data: { 'broker-token': 'eA==' },
     })
-    watcher.handleEvent('MODIFIED', {
-      metadata: { name: 'wf-test-recipe-oauth-broker-token', labels },
-      data: { 'broker-token': 'eA==' },
-    })
+    watcher.handleEvent('MODIFIED', canonical)
     expect(invalidated).toEqual([])
     // Liveness witness: the same watcher does invalidate for the canonical
     // ADDED, so the empty list above is not the callback being unwired.
-    watcher.handleEvent('ADDED', {
-      metadata: { name: 'wf-test-recipe-oauth-broker-token', labels },
-      data: { 'broker-token': 'eA==' },
-    })
+    watcher.handleEvent('ADDED', canonical)
     expect(invalidated).toEqual(['test-recipe'])
     vi.advanceTimersByTime(DEBOUNCE_MS)
     expect(enqueued).toEqual([])

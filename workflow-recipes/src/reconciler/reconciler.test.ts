@@ -15603,6 +15603,131 @@ describe('WorkflowRecipeReconciler', () => {
       infoSpy.mockRestore()
       vi.useRealTimers()
     })
+
+    it('R1-L2: a late pass carrying an older generation does not re-delete the Secret', async () => {
+      const infoSpy = captureLogger('info')
+      await reconciler.ensureOAuthBrokerTokenSecret(reapRecipe(4))
+      await reconciler.ensureOAuthBrokerTokenSecret(reapRecipe(5))
+      // Liveness witness: both newer-generation deletes really ran.
+      expect(secretDeletes()).toBe(2)
+
+      await reconciler.ensureOAuthBrokerTokenSecret(reapRecipe(4))
+      expect(secretDeletes()).toBe(2)
+      expect(infoSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Skipping oauth-broker-token delete'),
+        expect.objectContaining({ recipe: 'test-recipe', generation: 4 })
+      )
+      infoSpy.mockRestore()
+    })
+
+    it('R1-L2: a late pass carrying an older generation does not re-delete the NetworkPolicy', async () => {
+      const infoSpy = captureLogger('info')
+      await reapPolicy(reapRecipe(4))
+      await reapPolicy(reapRecipe(5))
+      // Liveness witness: both newer-generation deletes really ran.
+      expect(policyDeletes()).toBe(2)
+
+      await reapPolicy(reapRecipe(4))
+      expect(policyDeletes()).toBe(2)
+      expect(infoSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Skipping oauth-broker-egress delete'),
+        expect.objectContaining({ recipe: 'test-recipe', generation: 4 })
+      )
+      infoSpy.mockRestore()
+    })
+
+    it('R1-L2: a recipe recreated under the same name is reaped even at a lower generation', async () => {
+      await reconciler.ensureOAuthBrokerTokenSecret(reapRecipe(5))
+      await reapPolicy(reapRecipe(5))
+      expect(secretDeletes()).toBe(1)
+      expect(policyDeletes()).toBe(1)
+
+      // The recipe DELETE event was missed, so nothing invalidated the ledger.
+      const recreated = makeRecipe({
+        metadata: {
+          name: 'test-recipe',
+          namespace: 'sandbox-recipes',
+          uid: 'uid-recreated',
+          generation: 1,
+        },
+      })
+      await reconciler.ensureOAuthBrokerTokenSecret(recreated)
+      await reapPolicy(recreated)
+      expect(secretDeletes()).toBe(2)
+      expect(policyDeletes()).toBe(2)
+    })
+
+    it('R1-L1: an ADDED invalidation that lands while the DELETE is in flight is not overwritten', async () => {
+      const recipe = reapRecipe(4)
+      mockCoreApi.deleteNamespacedSecret.mockImplementationOnce(async () => {
+        // Another writer recreated the Secret and its ADDED was handled before
+        // this DELETE returned.
+        reconciler.invalidateOAuthBrokerSecretLedger('test-recipe')
+        throw { code: 404 }
+      })
+      await reconciler.ensureOAuthBrokerTokenSecret(recipe)
+      expect(secretDeletes()).toBe(1)
+
+      await reconciler.ensureOAuthBrokerTokenSecret(recipe)
+      expect(secretDeletes()).toBe(2)
+
+      // Liveness witness for the ledger itself: with no racing ADDED the
+      // second delete is recorded and the next same-generation pass skips.
+      await reconciler.ensureOAuthBrokerTokenSecret(recipe)
+      expect(secretDeletes()).toBe(2)
+    })
+
+    describe.each([
+      ['active', 'running'],
+      ['terminal', 'completed'],
+    ] as const)('R1-L13: the %s workflow short-circuit', (_label, execPhase) => {
+      it('reaps a token Secret the recipe must not have, without the inner reconcile', async () => {
+        const workflowReconcile = vi.fn()
+        ;(
+          reconciler as unknown as {
+            workflowReconciler: {
+              reconcile: typeof workflowReconcile
+              validateWorkflowSpec: () => undefined
+              ensureMcpHostRuntimeCredentials?: () => Promise<void>
+            }
+          }
+        ).workflowReconciler = {
+          reconcile: workflowReconcile,
+          validateWorkflowSpec: () => undefined,
+          ensureMcpHostRuntimeCredentials: vi.fn().mockResolvedValue(undefined),
+        }
+        const recipe = makeRecipe({
+          spec: {
+            agent: { provider: 'zai', model: 'glm-4.7' },
+            workloads: [],
+            steps: [{ id: 'run-qa', instruction: 'Validate the QA API workload.' }],
+          },
+          // Triggered run: awaitsTriggeredRun=false, so the pass stops at the
+          // active (running) or terminal (completed) short-circuit.
+          metadata: {
+            name: 'test-recipe',
+            namespace: 'sandbox-recipes',
+            uid: 'uid-123',
+            generation: 4,
+            labels: { 'clerum.io/workflow-run-id': 'run-123' },
+          },
+          status: { phase: 'active', workflowExecution: { phase: execPhase } },
+        })
+
+        // The watch ADDED re-arms the ledger and enqueues this reconcile.
+        reconciler.invalidateOAuthBrokerSecretLedger('test-recipe')
+        const result = await reconciler.reconcile(recipe)
+
+        // Witness that the short-circuit was taken, not the first-deploy path.
+        expect(workflowReconcile).not.toHaveBeenCalled()
+        expect(result.phase).toBe('active')
+        expect(secretDeletes()).toBe(1)
+
+        // The ledger still bounds it: a second pass of the same generation skips.
+        await reconciler.reconcile(recipe)
+        expect(secretDeletes()).toBe(1)
+      })
+    })
   })
 
   describe('G2 skipStatusPatch must not leave GFS deleted', () => {
@@ -15746,6 +15871,13 @@ describe('WorkflowRecipeReconciler', () => {
           },
           {
             metadata: {
+              name: `${RECIPE}-snippet-runner-egress`,
+              namespace: 'sandbox-recipes',
+              labels: { 'clerum.io/recipe': RECIPE, 'clerum.io/managed-by': 'wrc' },
+            },
+          },
+          {
+            metadata: {
               name: `${RECIPE}-mcp-host-to-grok-proxy`,
               namespace: 'sandbox-recipes',
               labels: { 'clerum.io/recipe': RECIPE, 'clerum.io/managed-by': 'wrc' },
@@ -15763,15 +15895,19 @@ describe('WorkflowRecipeReconciler', () => {
         'run-g2'
       )
 
-      // Liveness witness: the retry ran the prune LIST that listed GFS, so the
-      // absence of a GFS DELETE below is the catalog gate holding, not a retry
-      // that never reached the prune.
+      // Liveness witness: the retry ran the prune and deleted an undesired
+      // catalog sibling, so the absence of a GFS DELETE below is the catalog
+      // gate holding, not a retry that never reached the prune.
       expect(mockNetworkingApi.listNamespacedNetworkPolicy).toHaveBeenCalled()
       expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith(
-        expect.objectContaining({ name: `${RECIPE}-mcp-host-to-grok-proxy` })
+        expect.objectContaining({ name: `${RECIPE}-snippet-runner-egress` })
       )
       expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalledWith(
         expect.objectContaining({ name: GFS })
+      )
+      // The retry runs mid-run, so it never revokes a Codex/Grok proxy.
+      expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalledWith(
+        expect.objectContaining({ name: `${RECIPE}-mcp-host-to-grok-proxy` })
       )
     })
   })
