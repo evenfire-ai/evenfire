@@ -78,12 +78,13 @@ describe('control-api canonical host access client', () => {
   const FORBIDDEN_BODY = { error: 'Forbidden' }
 
   // R1-M6: the denial reason (read from the response header, never the body)
-  // decides whether Desktop may treat the loss as a revocation. Only the three
-  // reasons that prove removed access map to `host_access_revoked`.
+  // decides whether Desktop may treat the loss as a revocation. Only the two
+  // reasons that prove removed access map to `host_access_revoked`;
+  // `subject_mismatch` is a request-shape error (R3-L8).
   it.each([
     ['team_membership_missing', 'host_access_revoked'],
     ['directory_grant_missing', 'host_access_revoked'],
-    ['subject_mismatch', 'host_access_revoked'],
+    ['subject_mismatch', 'host_access_denied'],
     ['host_disabled', 'host_access_denied'],
     ['host_missing', 'host_access_denied'],
     ['host_claim_missing', 'host_access_denied'],
@@ -122,9 +123,14 @@ describe('control-api canonical host access client', () => {
   })
 
   it('a non-direct-run 403 with a non-JSON body still honours the header', async () => {
+    // A revoking reason: a denied-anyway reason would pass even if the header
+    // were ignored.
     const fetchImpl = vi.fn(
       async () =>
-        new Response('not json', { status: 403, headers: { [REASON_HEADER]: 'subject_mismatch' } })
+        new Response('not json', {
+          status: 403,
+          headers: { [REASON_HEADER]: 'team_membership_missing' },
+        })
     )
 
     await expect(

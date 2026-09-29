@@ -15,13 +15,16 @@ export type HostAccessDenial = { denied: true; code: HostAccessDenialCode }
 /**
  * control-api denial reasons (control-api `RpcHostAccessDenialReason`) that
  * prove the access was actually removed from the user. Every other reason
- * (`host_disabled`, `host_missing`, `host_claim_missing`, an unknown or absent
- * reason) is a denial that does not prove revocation.
+ * (`host_disabled`, `host_missing`, `host_claim_missing`, `subject_mismatch`,
+ * an unknown or absent reason) is a denial that does not prove revocation.
+ * `subject_mismatch` in particular: rpc-proxy calls
+ * `/rpc/access/users/:userId/...` with the token's own `sub` as `userId`
+ * (control-api `routes/rpc-access/users.ts`), so a mismatch is a request-shape
+ * error, never a grant that was removed.
  */
 const REVOKED_CONTROL_API_REASONS: ReadonlySet<string> = new Set([
   'team_membership_missing',
   'directory_grant_missing',
-  'subject_mismatch',
 ])
 
 export function hostAccessDenialCodeForReason(reason: unknown): HostAccessDenialCode {

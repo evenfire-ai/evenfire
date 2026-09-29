@@ -6,6 +6,7 @@ import { createRpcRouter } from '../routes/rpc.js'
 import { createRpcHostActivityStreamRouter } from '../routes/rpcHostActivityStream.js'
 import { createRpcHostProgressStreamRouter } from '../routes/rpcHostProgressStream.js'
 import { createRpcHostStatusStreamRouter } from '../routes/rpcHostStatusStream.js'
+import { hostAccessDenialCodeForReason } from '../services/hostAccessDenial.js'
 
 // PR #849 R1-M6 producer side (also R1-L7 on the rpc-proxy side).
 //
@@ -205,13 +206,24 @@ describe('host authorization 403 carries a machine-readable code at every site',
   })
 })
 
+describe('R3-L8 hostAccessDenialCodeForReason', () => {
+  it('subject_mismatch is a denial; removed membership and grants are revocations', () => {
+    // Positive controls: the revoked set is live.
+    expect(hostAccessDenialCodeForReason('team_membership_missing')).toBe('host_access_revoked')
+    expect(hostAccessDenialCodeForReason('directory_grant_missing')).toBe('host_access_revoked')
+    expect(hostAccessDenialCodeForReason('subject_mismatch')).toBe('host_access_denied')
+  })
+})
+
 describe('control-api 403 reason -> code mapping', () => {
   const status = DENYING_ROUTES.find(route => route.label === 'status')!
 
   it.each([
     ['team_membership_missing', 'host_access_revoked'],
     ['directory_grant_missing', 'host_access_revoked'],
-    ['subject_mismatch', 'host_access_revoked'],
+    // R3-L8: the route's userId is the token's own sub, so a mismatch is a
+    // request-shape error, not a removed grant.
+    ['subject_mismatch', 'host_access_denied'],
     ['host_disabled', 'host_access_denied'],
     ['host_missing', 'host_access_denied'],
     ['host_claim_missing', 'host_access_denied'],
@@ -245,7 +257,9 @@ describe('control-api 403 reason -> code mapping', () => {
     }
   )
 
-  it.each(['directory_grant_missing', 'team_membership_missing', 'subject_mismatch'])(
+  // Only reasons that map to host_access_revoked as a header give this test
+  // power: a denied-anyway reason would pass even if the body were read.
+  it.each(['directory_grant_missing', 'team_membership_missing'])(
     'a legacy body-only reason %s (no header) is ignored -> host_access_denied',
     async reason => {
       // Proves the 403 body is never read: the same reason that maps to
