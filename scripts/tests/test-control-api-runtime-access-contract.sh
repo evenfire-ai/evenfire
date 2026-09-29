@@ -9,7 +9,8 @@ relation_count="$(awk -F '\t' '!/^[[:space:]]*(#|$)/ { count++ } END { print cou
 duplicate_count="$(awk -F '\t' '!/^[[:space:]]*(#|$)/ { seen[$1]++ } END { for (name in seen) if (seen[name] > 1) count++ } END { print count + 0 }' "$PROFILE_FILE")"
 invalid_count="$(awk -F '\t' '!/^[[:space:]]*(#|$)/ && (NF != 2 || $1 !~ /^[a-z][a-z0-9_]*$/ || $2 !~ /^(legacy_dml|upsert|append|read|link_lifecycle|none)$/) { count++ } END { print count + 0 }' "$PROFILE_FILE")"
 
-if [[ "$relation_count" != "96" || "$duplicate_count" != "0" || "$invalid_count" != "0" ]] || \
+if [[ "$relation_count" != "97" || "$duplicate_count" != "0" || "$invalid_count" != "0" ]] || \
+  ! grep -qx $'dynamic_clients\tlegacy_dml' "$PROFILE_FILE" || \
   ! grep -qx $'entity_change_feed\tnone' "$PROFILE_FILE" || \
   ! grep -qx $'entity_change_outbox\tnone' "$PROFILE_FILE" || \
   ! grep -qx $'entity_change_watermark\tnone' "$PROFILE_FILE" || \
