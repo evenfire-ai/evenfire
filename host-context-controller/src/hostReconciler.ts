@@ -1874,7 +1874,11 @@ export class HostReconciler {
     options: BootstrapOptions = {}
   ): Promise<RuntimeTokenProvision | null> {
     let lastErr: unknown = null
-    for (let attempt = 1; attempt <= 3; attempt++) {
+    // The held GFS-only renewal runs inside a reconcile that keeps a Ready
+    // runtime in place; it gets one attempt so a failing renewal never blocks
+    // that reconcile on backoff. The next hold pass retries it.
+    const maxAttempts = options.refreshGfsOnly ? 1 : 3
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
         const expectedGfsSubject = makeExpectedHostGfsSubject(host.namespace, host.name)
         if (!expectedGfsSubject) {
@@ -2415,16 +2419,16 @@ export class HostReconciler {
           host: host.name,
           namespace: host.namespace,
           attempt,
-          maxAttempts: 3,
+          maxAttempts,
           error: String(err),
         })
-        if (attempt < 3) {
+        if (attempt < maxAttempts) {
           await new Promise(resolve => setTimeout(resolve, delayMs))
         }
       }
     }
     throw new Error(
-      `Failed to ensure mcp-host-runtime-token Secret for host "${host.name}" after 3 attempts: ${String(lastErr)}`
+      `Failed to ensure mcp-host-runtime-token Secret for host "${host.name}" after ${maxAttempts} attempt${maxAttempts === 1 ? '' : 's'}: ${String(lastErr)}`
     )
   }
 
@@ -5214,10 +5218,29 @@ export class HostReconciler {
         (lifecycle.effective.state === 'active' || wakeOnRunningRuntime) &&
         runtimeIsReady
       ) {
-        const provision = await this.provisionRuntimeTokenRevision(host, {
-          targetSuspended: false,
-          refreshGfsOnly: true,
-        })
+        let provision: RuntimeTokenProvision | null
+        try {
+          provision = await this.provisionRuntimeTokenRevision(host, {
+            targetSuspended: false,
+            refreshGfsOnly: true,
+          })
+        } catch (error) {
+          // The Ready runtime keeps serving on the credential it holds; a failed
+          // renewal is reported, not turned into an undeployed Host. The next
+          // hold pass renews again.
+          log.warn('held runtime credential renewal failed; keeping the Ready runtime', {
+            host: host.name,
+            namespace: host.namespace,
+            err: error instanceof Error ? error.message : String(error),
+          })
+          this.enqueueControllerError(host, 'RuntimeCredentialRenewalFailed', error)
+          this.setStatus(host.name, {
+            deployed: true,
+            ready: runtimeIsReady,
+            message: 'Held runtime credential renewal failed; runtime kept',
+          })
+          return
+        }
         if (!provision) {
           this.setStatus(host.name, {
             deployed: true,

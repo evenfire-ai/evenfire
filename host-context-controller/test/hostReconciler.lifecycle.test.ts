@@ -2600,6 +2600,71 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     }
   })
 
+  it('keeps a Ready held runtime deployed when its GFS renewal fails, without retry backoff', async () => {
+    const host = makeStatelessHost({
+      status: { lifecycle: { state: 'active', wakeHandledGeneration: 1 } },
+    })
+    const infrastructureTelemetryReporter = createTelemetryReporterMock()
+    const { reconciler, appsApi, coreApi, customApi } = createReconciler({
+      isCommunicationChannelCacheSynced: () => false,
+      infrastructureTelemetryReporter,
+    })
+    customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(host))
+    reconciler.setHostFrontsOAuthServer(async () => false)
+    // A running pod's consumed record whose GFS credential is due for renewal.
+    const record = await mintedRuntimeCredentialRecord(host, {
+      annotations: { 'clerum.io/gfs-token-refresh-before': '2000-01-01T00:00:00.000Z' },
+    })
+    const runtimeSecretName = record.metadata!.name!
+    const readSecret = coreApi.readNamespacedSecret.getMockImplementation()!
+    coreApi.readNamespacedSecret.mockImplementation(request =>
+      request.name === runtimeSecretName
+        ? Promise.resolve(structuredClone(record))
+        : readSecret(request)
+    )
+    const applied = trustedRuntimeDeployment(reconciler, host)
+    applied.spec!.template!.metadata!.annotations = {
+      ...applied.spec!.template!.metadata!.annotations,
+      'clerum.io/runtime-token-revision':
+        record.metadata!.annotations!['clerum.io/runtime-token-secret-revision'],
+    }
+    const live = persistHostDeployment(appsApi, host, applied)
+    const gfsMint = vi.mocked(mintHostGfsToken)
+    const defaultGfsMint = gfsMint.getMockImplementation()!
+    gfsMint.mockClear()
+    gfsMint.mockImplementation(async () => {
+      throw new Error('gfs token endpoint unavailable')
+    })
+    vi.mocked(issueMcpHostRuntimeTokens).mockClear()
+    try {
+      const started = performance.now()
+      await reconciler.reconcile(host)
+      const elapsedMs = performance.now() - started
+
+      // Liveness witness: the hold attempted the GFS renewal exactly once.
+      expect(gfsMint).toHaveBeenCalledOnce()
+      expect(elapsedMs).toBeLessThan(1000)
+      expect(reconciler.getStatus(host.name)).toEqual({
+        deployed: true,
+        ready: true,
+        message: 'Held runtime credential renewal failed; runtime kept',
+      })
+      const controllerErrors = vi
+        .mocked(infrastructureTelemetryReporter.enqueue)
+        .mock.calls.filter(([event]) => event.telemetryType === 'controller_error')
+      expect(controllerErrors).toHaveLength(1)
+      expect(controllerErrors[0]![0].payload).toMatchObject({
+        reason_code: 'RuntimeCredentialRenewalFailed',
+        status: 'failed',
+      })
+      expect(live().spec!.replicas).toBe(1)
+      expect(live().spec!.template).toEqual(applied.spec!.template)
+      expect(vi.mocked(issueMcpHostRuntimeTokens)).not.toHaveBeenCalled()
+    } finally {
+      gfsMint.mockImplementation(defaultGfsMint)
+    }
+  })
+
   it('recovers an active held Deployment from zero after minting credentials on each pass', async () => {
     const host = makeStatelessHost({
       status: { lifecycle: { state: 'active', wakeHandledGeneration: 1 } },
