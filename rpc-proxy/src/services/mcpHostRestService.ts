@@ -122,6 +122,10 @@ export type HostRuntimeMessageRequest = {
   // is deduped (replayed) instead of re-executed.
   messageId?: string
   traceContext?: TraceContextV1
+  // Issue #666 — structured file references (`FileReferenceV1[]`), forwarded
+  // verbatim. mcp-host owns the contract and answers 200 `success:false` with
+  // a typed code for any malformed value.
+  fileReferences?: unknown
   [key: string]: unknown
 }
 
@@ -159,14 +163,32 @@ export async function forwardHostMessageToHost(
 
     let body: Record<string, unknown> = {}
     if (rawBody.trim()) {
+      let parsed: unknown
+      let parseError: string | undefined
       try {
-        const parsed = JSON.parse(rawBody) as unknown
-        body =
-          parsed && typeof parsed === 'object' && !Array.isArray(parsed)
-            ? (parsed as Record<string, unknown>)
-            : {}
-      } catch {
-        body = {}
+        parsed = JSON.parse(rawBody) as unknown
+      } catch (error) {
+        parseError = error instanceof Error ? error.name : 'unknown'
+      }
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        body = parsed as Record<string, unknown>
+      } else {
+        // mcp-host answers every accepted message with a JSON object, so this is
+        // a broken or foreign upstream. The message may already be admitted, so
+        // the answer stays an empty ack instead of an error that would invite a
+        // resend; the log is the trace of what was received.
+        console.warn(
+          JSON.stringify({
+            event: 'host_message_ack_unreadable',
+            hostRef: payload.hostRef,
+            messageId: payload.messageId,
+            status: response.status,
+            contentType: response.headers.get('content-type'),
+            reason: parseError ?? 'not_an_object',
+            bodyLength: rawBody.length,
+            bodySnippet: rawBody.slice(0, 300),
+          })
+        )
       }
     }
     return body

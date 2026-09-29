@@ -89,6 +89,48 @@ export enum LlmErrorCode {
   ModelNotAllowed = 'LLM_MODEL_NOT_ALLOWED',
 }
 
+/**
+ * Issue #666 — rejections of an inline `kind:'file'` attachment at admission.
+ * All terminal: resending the same bytes cannot succeed. No code rejects a file
+ * for its type; an unreadable class is admitted and reported as `reader:'none'`.
+ */
+export enum FileAttachmentErrorCode {
+  /** Shape, encoding, declared size or file name is invalid. */
+  Invalid = 'FILE_ATTACHMENT_INVALID',
+  /** The decoded file exceeds `CLERUM_ATTACHMENT_FILE_MAX_BYTES`. */
+  TooLarge = 'FILE_ATTACHMENT_TOO_LARGE',
+  /** The recomputed sha256 differs from the declared digest. */
+  DigestMismatch = 'FILE_ATTACHMENT_DIGEST_MISMATCH',
+}
+
+/**
+ * Issue #666 — structured file references on an incoming message.
+ * `SchemaVersionUnsupported` and `Invalid` reject the message (terminal).
+ * `CheckFailed` rejects it because the Host could not ask gfsc about the
+ * references. The remaining codes name an availability the Host resolved; the
+ * message is still admitted and the reference is listed with that availability
+ * in the turn.
+ */
+export enum FileReferenceErrorCode {
+  /** The reference declares a `schemaVersion` this Host does not implement. */
+  SchemaVersionUnsupported = 'FILE_REFERENCE_SCHEMA_VERSION_UNSUPPORTED',
+  /** Shape, count or GFS identity of the reference is invalid. */
+  Invalid = 'FILE_REFERENCE_INVALID',
+  NotFound = 'FILE_REFERENCE_NOT_FOUND',
+  Denied = 'FILE_REFERENCE_DENIED',
+  /** The file changed since the reference was taken. */
+  Stale = 'FILE_REFERENCE_STALE',
+  NotAFile = 'FILE_REFERENCE_NOT_A_FILE',
+  TooLarge = 'FILE_REFERENCE_TOO_LARGE',
+  /** The Host cannot serve this reference (no `gfs.read` scope, or not a GFS source). */
+  Unsupported = 'FILE_REFERENCE_UNSUPPORTED',
+  /**
+   * gfsc could not be asked, or its answer could not be used: retryable only
+   * when the failure was transient (timeout, network, 429, 5xx).
+   */
+  CheckFailed = 'FILE_REFERENCE_CHECK_FAILED',
+}
+
 export class LlmError extends AgentError {
   constructor(
     message: string,

@@ -1,6 +1,7 @@
 /**
  * Configuration settings loaded from environment variables.
  */
+import { FILE_REFERENCE_MAX_COUNT } from '@clerum/gfs-interaction-policy'
 import type { ApprovalConfig } from './core/extensions/approvalTypes'
 import type { GuardrailsConfig } from './core/guardrails/config'
 import { NativeToolConfig } from './core/interfaces'
@@ -239,6 +240,16 @@ export interface Config {
   enableResponseAttachments: boolean
   attachmentMaxCount: number
   attachmentMaxBytes: number
+  /** Decoded bytes per incoming `kind:'file'` attachment (issue #666). */
+  attachmentFileMaxBytes: number
+  /** Bytes one `clerum__attachment_read` call may return (issue #666). */
+  attachmentTextReadMaxBytes: number
+  /**
+   * Structured file references one incoming message may carry (issue #666).
+   * The shared contract constant the Desktop composer also enforces; not
+   * operator-tunable, because the Desktop cannot observe a Host-only value.
+   */
+  fileReferenceMaxCount: number
   activityBufferSize: number
   activityMaxEventBytes: number
 
@@ -487,6 +498,12 @@ function buildDevHostConfig(provider?: LlmProvider, modelName?: string): HostSpe
 }
 
 const devMode = getEnvBool('CLERUM_DEV_MODE', false)
+// Read once: the top-level field documents the limit, `nativeTool` carries it
+// to `clerum__attachment_read` (#666).
+const attachmentTextReadMaxBytes = getExecutionLimit(
+  'CLERUM_ATTACHMENT_TEXT_READ_MAX_BYTES',
+  262_144
+)
 const configuredWorkflowEnabled = getEnvBool('CLERUM_WORKFLOW_ENABLED', false)
 const configuredRuntimeKind = resolveMcpHostRuntimeKind({
   workflowEnabled: configuredWorkflowEnabled,
@@ -985,7 +1002,7 @@ export const config: Config = {
   // to disable persistence entirely; the loop falls back to the pre-T1.5
   // path (full content inline).
   toolSpilloverEnabled: getEnvBool('CLERUM_TOOL_SPILLOVER_ENABLED', true),
-  toolSpilloverThresholdBytes: parseInt(getEnv('CLERUM_TOOL_SPILLOVER_THRESHOLD', '8192')!, 10),
+  toolSpilloverThresholdBytes: getExecutionLimit('CLERUM_TOOL_SPILLOVER_THRESHOLD', 8192),
   // TTL window for persisted blobs. Default 168h = 1 week. The resolver
   // double-checks the TTL on load even when GC hasn't pruned yet.
   spilloverTtlMs: parseInt(getEnv('CLERUM_SPILLOVER_TTL_HOURS', '168')!, 10) * 3600 * 1000,
@@ -1011,12 +1028,16 @@ export const config: Config = {
     // native tool registry (which only receives NativeToolConfig) can steer
     // the cron_manage stateless notice.
     statelessLifecycle: getEnvBool('CLERUM_STATELESS_LIFECYCLE', false),
+    attachmentTextReadMaxBytes,
   },
 
   // Attachment delivery
   enableResponseAttachments: getEnvBool('CLERUM_ENABLE_RESPONSE_ATTACHMENTS', true),
   attachmentMaxCount: parseInt(getEnv('CLERUM_ATTACHMENT_MAX_COUNT', '3')!, 10),
   attachmentMaxBytes: parseInt(getEnv('CLERUM_ATTACHMENT_MAX_BYTES', '52428800')!, 10),
+  attachmentFileMaxBytes: getExecutionLimit('CLERUM_ATTACHMENT_FILE_MAX_BYTES', 3_145_728),
+  attachmentTextReadMaxBytes,
+  fileReferenceMaxCount: FILE_REFERENCE_MAX_COUNT,
   activityBufferSize: parseInt(getEnv('MCP_HOST_ACTIVITY_BUFFER_SIZE', '1000')!, 10),
   activityMaxEventBytes: parseInt(getEnv('MCP_HOST_ACTIVITY_MAX_EVENT_BYTES', '2048')!, 10),
 
