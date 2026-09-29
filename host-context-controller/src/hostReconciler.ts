@@ -720,6 +720,41 @@ export class HostReconciler {
    * scope change mid-reconcile.
    */
   private async frontsOAuthServer(host: HostCRD): Promise<boolean> {
+    const observation = await this.observeFrontsOAuthServer(host)
+    if (observation.observed) return observation.frontsOAuthServer
+    // All attempts threw. Residual honesty: a SUSTAINED apiserver outage (every
+    // attempt throws) still fails CLOSED here and can flip the scope off. That is
+    // correct — a sustained outage is a genuine "scope unknown" situation, not a
+    // blip — the retry only smooths over transient blips, never a real outage.
+    log.warn(
+      'failed to resolve whether Host fronts an oauth mcp-server after retries; failing closed (no oauth:user-token scope)',
+      {
+        host: host.name,
+        namespace: host.namespace,
+        contextRef: host.spec.contextRef,
+        attempts: observation.attempts,
+        err:
+          observation.error instanceof Error
+            ? observation.error.message
+            : String(observation.error),
+      }
+    )
+    return false
+  }
+
+  /**
+   * The live McpServer-backed OAuth observation behind `frontsOAuthServer`,
+   * reporting a read that failed after its retries instead of collapsing it to
+   * `false`. The CommunicationChannel-loss issuance path needs that distinction:
+   * it has no authoritative channel inventory, so it must not replace an
+   * unknown OAuth answer with a retained one that could re-grant a revoked scope.
+   */
+  private async observeFrontsOAuthServer(
+    host: HostCRD
+  ): Promise<
+    | { observed: true; frontsOAuthServer: boolean }
+    | { observed: false; attempts: number; error: unknown }
+  > {
     // Bounded retry that absorbs a TRANSIENT apiserver blip without touching the
     // authoritative-`false` path. Contract of the underlying resolver: a real
     // scope change (the server genuinely stopped fronting an oauth mcp-server)
@@ -736,7 +771,7 @@ export class HostReconciler {
     let lastErr: unknown
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       try {
-        return await this.hostFrontsOAuthServerFn(host)
+        return { observed: true, frontsOAuthServer: await this.hostFrontsOAuthServerFn(host) }
       } catch (err) {
         lastErr = err
         if (attempt < MAX_ATTEMPTS) {
@@ -745,21 +780,7 @@ export class HostReconciler {
         }
       }
     }
-    // All attempts threw. Residual honesty: a SUSTAINED apiserver outage (every
-    // attempt throws) still fails CLOSED here and can flip the scope off. That is
-    // correct — a sustained outage is a genuine "scope unknown" situation, not a
-    // blip — the retry only smooths over transient blips, never a real outage.
-    log.warn(
-      'failed to resolve whether Host fronts an oauth mcp-server after retries; failing closed (no oauth:user-token scope)',
-      {
-        host: host.name,
-        namespace: host.namespace,
-        contextRef: host.spec.contextRef,
-        attempts: MAX_ATTEMPTS,
-        err: lastErr instanceof Error ? lastErr.message : String(lastErr),
-      }
-    )
-    return false
+    return { observed: false, attempts: MAX_ATTEMPTS, error: lastErr }
   }
 
   /**
@@ -1566,6 +1587,18 @@ export class HostReconciler {
     return (deployment?.status?.readyReplicas ?? 0) > 0
   }
 
+  /**
+   * The binding covers the Deployment UID and its runtime-token-revision
+   * annotation only. It does not bind the rest of the pod template, so a
+   * template edit that keeps both values still matches.
+   *
+   * This is deliberate: there is no pod-template hash. The record and the
+   * Deployment belong to the same Host, and any principal that can edit the
+   * pod template can already read the runtime-token Secret, so a template hash
+   * would add no isolation. A hash would also have to be computed on the
+   * apiserver-defaulted object, which never equals the applied body, so it
+   * would fail to match and re-mint the credentials on every reconcile.
+   */
   private static bootstrapBindingMatchesDeployment(
     record: Pick<k8s.V1Secret, 'metadata'>,
     deployment: k8s.V1Deployment | null
@@ -2012,22 +2045,39 @@ export class HostReconciler {
         // codex projection into the mint-scope derive, the refresh decision, the
         // scope hash and the stored annotation, so the minted token and the drift
         // hash never diverge.
+        //
+        // The OAuth observation reads the McpServer cache, which does not depend
+        // on the CommunicationChannel cache, so it stays live during channel
+        // cache loss: an admin who removed the OAuth mcp-server while the channel
+        // watch was down must not have `oauth:user-token` re-granted from the
+        // retained annotation on a held wake. The retained value is used only
+        // when the live read failed after its retries and it cannot widen the
+        // grant (`false`); otherwise the mint is skipped (fail closed).
         let observedFrontsOAuth: boolean
         if (cacheSynced) {
           observedFrontsOAuth = await this.frontsOAuthServer(host)
         } else {
-          if (retainedFrontsOAuth === null) {
+          const liveFrontsOAuth = await this.observeFrontsOAuthServer(host)
+          if (liveFrontsOAuth.observed) {
+            observedFrontsOAuth = liveFrontsOAuth.frontsOAuthServer
+          } else if (retainedFrontsOAuth === false) {
+            observedFrontsOAuth = false
+          } else {
             log.warn(
-              'skipping runtime token mint during channel cache loss without retained OAuth observation',
+              'skipping runtime token mint during channel cache loss without an authoritative OAuth observation',
               {
                 host: host.name,
                 namespace: host.namespace,
                 observation: 'frontsOAuthServer',
+                attempts: liveFrontsOAuth.attempts,
+                err:
+                  liveFrontsOAuth.error instanceof Error
+                    ? liveFrontsOAuth.error.message
+                    : String(liveFrontsOAuth.error),
               }
             )
             return null
           }
-          observedFrontsOAuth = retainedFrontsOAuth
         }
         const projection = this.projectCodexForHost(host)
         const grokProjection = this.projectGrokForHost(host)
@@ -5064,7 +5114,6 @@ export class HostReconciler {
     let pvcApplied = true
     let serviceApplied = true
     const resourceErrors: unknown[] = []
-    const resourceFailureMessages = new Map<'Host PVC' | 'Host Service', string>()
     const npFailures: string[] = []
     const ensureIndependentResource = async (
       kind: 'Host PVC' | 'Host Service',
@@ -5075,8 +5124,6 @@ export class HostReconciler {
       } catch (error) {
         if (isBenignSupersessionError(error)) throw error
         resourceErrors.push(error)
-        const message = error instanceof Error ? error.message : String(error)
-        resourceFailureMessages.set(kind, `${kind}: ${message}`)
         log.error('Failed to reconcile Host resource', {
           host: host.name,
           resource: kind,
@@ -5087,6 +5134,9 @@ export class HostReconciler {
     }
     const holdAppliedRuntime = async (wakeRequested: boolean): Promise<void> => {
       const liveDeployment = await this.readHostDeploymentOrNull(host)
+      // A legacy Deployment without a runtime-token-revision annotation is not
+      // a preserved wake target, so it stays at zero replicas until channel
+      // authority returns and the normal path rewrites its template.
       const preservedWakeTarget =
         HostReconciler.deploymentBelongsToHost(liveDeployment, host) &&
         (liveDeployment?.spec?.replicas ?? 1) === 0 &&
@@ -5129,7 +5179,9 @@ export class HostReconciler {
       if (provisioningRequired) {
         const provision = await this.provisionRuntimeTokenRevision(host, {
           forceFreshForWake: true,
-          targetSuspended: lifecycle.effective.state === 'suspended',
+          // This mint exists only to scale the Host up from zero, so the
+          // target is never suspended.
+          targetSuspended: false,
           preserveDeploymentTemplateOnWake: true,
         })
         if (!provision) {
@@ -5160,13 +5212,11 @@ export class HostReconciler {
         (await this.checkDeploymentReady(host.name, host.namespace))
       revalidateHostMutationBoundary()
       const ready = deploymentReady && pvcApplied && serviceApplied && npFailures.length === 0
+      // PVC/Service read errors were already thrown before the hold; only
+      // non-throwing convergence failures reach this point.
       const failures = [
-        ...(!pvcApplied
-          ? [resourceFailureMessages.get('Host PVC') ?? 'Host PVC did not converge']
-          : []),
-        ...(!serviceApplied
-          ? [resourceFailureMessages.get('Host Service') ?? 'Host Service did not converge']
-          : []),
+        ...(!pvcApplied ? ['Host PVC did not converge'] : []),
+        ...(!serviceApplied ? ['Host Service did not converge'] : []),
         ...npFailures,
       ]
       this.advanceReconcileGeneration(host.name)
@@ -5188,6 +5238,17 @@ export class HostReconciler {
                 ? 'CommunicationChannel inventory unavailable; preserving applied runtime'
                 : 'CommunicationChannel inventory unavailable; preserved applied runtime is not Ready',
       })
+      // Mirror the normal path: a runtime expected to run (including a held
+      // wake from zero) is polled until Ready; a degraded boundary is not,
+      // because the poll would overwrite the degraded verdict with "Running".
+      if (
+        applied &&
+        !deploymentReady &&
+        failures.length === 0 &&
+        (lifecycle.effective.state !== 'suspended' || allowScaleUp)
+      ) {
+        this.pollReadiness(host.name, host.namespace)
+      }
     }
 
     revalidateHostMutationBoundary()
@@ -5272,17 +5333,19 @@ export class HostReconciler {
     }
     revalidateHostMutationBoundary()
 
-    if (lifecycle.effective.suspensionBlocked) {
-      await holdAppliedRuntime(forceFreshForWake)
-      return
-    }
-
+    // PVC/Service errors abort before any credential or Deployment mutation,
+    // on the hold path as on the normal path.
     if (resourceErrors.length === 1) throw resourceErrors[0]
     if (resourceErrors.length > 1) {
       throw new AggregateError(
         resourceErrors,
         `Failed to reconcile Host resources for "${host.name}"`
       )
+    }
+
+    if (lifecycle.effective.suspensionBlocked) {
+      await holdAppliedRuntime(forceFreshForWake)
+      return
     }
 
     // Bootstrap captures the scope contract used for issuance. The Deployment

@@ -297,6 +297,16 @@ export class StatelessLifecycleTracker implements HeartbeatLifecycleTracker {
    */
   private readonly wakeStartupGraceUntilByHost = new Map<string, number>()
   /**
+   * Hosts whose durable state was already checked with a fresh read during the
+   * current suspension-blocked (CommunicationChannel authority loss) epoch. The
+   * cached Host can be stale about a `draining` write that landed just before
+   * the loss, so the first blocked beat bypasses the cached state once; later
+   * beats in the same epoch revert only on cached `draining` evidence instead of
+   * issuing a fresh GET and a skip log on every heartbeat of the outage. The
+   * entry is dropped on the first beat that is no longer blocked.
+   */
+  private readonly suspensionBlockedFreshCheckDone = new Set<string>()
+  /**
    * Last FULLY successful heartbeat poll reported by the poller (AP-3 feed
    * evidence). Undefined until the first report — the silent-emitter expiry
    * branch treats an unreported feed as NOT demonstrably healthy and re-arms.
@@ -343,6 +353,7 @@ export class StatelessLifecycleTracker implements HeartbeatLifecycleTracker {
     this.lastBeatByHost.clear()
     this.lastWakeHandledGenerationByHost.clear()
     this.wakeStartupGraceUntilByHost.clear()
+    this.suspensionBlockedFreshCheckDone.clear()
   }
 
   /**
@@ -432,6 +443,9 @@ export class StatelessLifecycleTracker implements HeartbeatLifecycleTracker {
       return { drain: false }
     }
     const effective = this.reconciler.getEffectiveLifecycle(host)
+    if (!effective.suspensionBlocked) {
+      this.suspensionBlockedFreshCheckDone.delete(hostRef)
+    }
     if (!effective.stateless) {
       // Rejected/disabled stateless lifecycle: never drain. The reconciler's
       // StatelessEnableRejected condition already names the reason.
@@ -440,7 +454,12 @@ export class StatelessLifecycleTracker implements HeartbeatLifecycleTracker {
     }
     if (effective.suspensionBlocked) {
       this.clearDrainGrace(hostRef)
-      await this.cancelDrainOnEvidence(hostRef, host, true)
+      if (this.suspensionBlockedFreshCheckDone.has(hostRef)) {
+        await this.cancelDrainOnEvidence(hostRef, host)
+      } else if (await this.cancelDrainOnEvidence(hostRef, host, true)) {
+        // A failed fresh check is retried on the next blocked beat.
+        this.suspensionBlockedFreshCheckDone.add(hostRef)
+      }
       return { drain: false }
     }
     this.noteWakeHandledGeneration(hostRef, host)
@@ -625,14 +644,16 @@ export class StatelessLifecycleTracker implements HeartbeatLifecycleTracker {
     hostRef: string,
     host: HostCRD,
     bypassCachedState = false
-  ): Promise<void> {
+  ): Promise<boolean> {
     if (!bypassCachedState && (host.status?.lifecycle?.state ?? 'active') !== 'draining') {
-      return
+      return true
     }
     try {
       await this.reconciler.markHostActiveFromHeartbeat(host)
+      return true
     } catch (err) {
       console.error(`[StatelessLifecycleTracker] Cancel-drain revert failed for "${hostRef}":`, err)
+      return false
     }
   }
 

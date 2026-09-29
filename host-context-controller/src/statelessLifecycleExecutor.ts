@@ -333,7 +333,7 @@ export class StatelessLifecycleExecutor {
     }
 
     if (!this.isCommunicationChannelCacheSynced()) {
-      return this.holdActiveDuringChannelCacheRecovery(
+      return this.holdDurableStateDuringChannelCacheRecovery(
         wakeHandledGeneration,
         host.status?.lifecycle?.state ?? 'active'
       )
@@ -370,7 +370,7 @@ export class StatelessLifecycleExecutor {
   }
 
   /** Unknown channel inventory requires preserving the applied Deployment. */
-  private holdActiveDuringChannelCacheRecovery(
+  private holdDurableStateDuringChannelCacheRecovery(
     wakeHandledGeneration: number,
     state: HostLifecycleState = 'active'
   ): HostLifecycleAssessment {
@@ -411,7 +411,7 @@ export class StatelessLifecycleExecutor {
         !this.isCommunicationChannelCacheSynced() &&
         assessment.condition.reason === ACTIVE_COMMUNICATION_CHANNELS_REASON
       ) {
-        return this.holdActiveDuringChannelCacheRecovery(
+        return this.holdDurableStateDuringChannelCacheRecovery(
           assessment.lifecycle.wakeHandledGeneration,
           assessment.effective.state
         )
@@ -422,7 +422,7 @@ export class StatelessLifecycleExecutor {
     const { reasons, messages } = this.communicationChannelPolicyRejection(hostName)
     if (reasons.length === 0) {
       if (!this.isCommunicationChannelCacheSynced() && !assessment.effective.suspensionBlocked) {
-        return this.holdActiveDuringChannelCacheRecovery(
+        return this.holdDurableStateDuringChannelCacheRecovery(
           assessment.lifecycle.wakeHandledGeneration,
           assessment.effective.state
         )

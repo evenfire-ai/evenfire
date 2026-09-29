@@ -113,7 +113,7 @@ function makeStatelessHost(
   }
 }
 
-function createReconciler() {
+function createReconciler(options: { isCommunicationChannelCacheSynced?: () => boolean } = {}) {
   const appsApi = createMockAppsApi()
   const coreApi = createMockCoreApi()
   const networkingApi = createMockNetworkingApi()
@@ -140,7 +140,7 @@ function createReconciler() {
     // Heartbeat cases model the steady state after the watcher completed its
     // CommunicationChannel initial list. Cache-startup fail-closed behavior
     // is covered in hostReconciler.lifecycle.test.ts.
-    isCommunicationChannelCacheSynced: () => true,
+    isCommunicationChannelCacheSynced: options.isCommunicationChannelCacheSynced ?? (() => true),
   })
 
   return { reconciler, appsApi, coreApi, networkingApi, rbacApi, customApi }
@@ -1527,6 +1527,34 @@ describe('HostReconciler.markHostActiveFromHeartbeat', () => {
 
     await expect(reconciler.markHostActiveFromHeartbeat(host)).rejects.toThrow('api conflict')
     expect(host.status?.lifecycle?.state).toBe('draining')
+  })
+
+  it('reverts a draining Host while channel authority loss blocks suspension', async () => {
+    // A suspension-blocked Host can still be draining from a decision made
+    // before the loss. Cancel-drain must stay available, otherwise the emitter
+    // remains fenced behind {drain:true} for the whole outage.
+    const { reconciler, customApi } = createReconciler({
+      isCommunicationChannelCacheSynced: () => false,
+    })
+    const host = makeStatelessHost({
+      status: { lifecycle: { state: 'draining', wakeHandledGeneration: 4 } },
+    })
+    customApi.getNamespacedCustomObject.mockResolvedValue(
+      freshHostRead({ state: 'draining', wakeHandledGeneration: 4 })
+    )
+    expect(reconciler.getEffectiveLifecycle(host)).toEqual({
+      stateless: true,
+      state: 'draining',
+      suspensionBlocked: true,
+    })
+
+    await reconciler.markHostActiveFromHeartbeat(host)
+
+    expect(customApi.getNamespacedCustomObject).toHaveBeenCalled()
+    const writes = lifecycleStatusWrites(customApi)
+    expect(writes).toHaveLength(1)
+    expect(writes[0].lifecycle).toEqual({ state: 'active', wakeHandledGeneration: 4 })
+    expect(host.status?.lifecycle?.state).toBe('active')
   })
 })
 describe('HostReconciler heartbeat cores — fresh-read guard (cross-instance staleness)', () => {

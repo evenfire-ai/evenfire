@@ -2828,7 +2828,7 @@ export class McpServerWatcher implements McpServerProvider {
     } catch (error) {
       console.error(
         '[K8s] CommunicationChannel initial load failed; ccCacheSynced remains false ' +
-          '(B2 preserves channel-reader replicas and holds stateless lifecycle active):',
+          '(B2 preserves channel-reader replicas, preserving durable Host lifecycle state):',
         error
       )
     }

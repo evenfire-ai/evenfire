@@ -7480,7 +7480,7 @@ describe('McpServerWatcher.start ordering (#281 R6-bis)', () => {
     expect(watcher.isCommunicationChannelCacheSynced()).toBe(false)
     expect(errorSpy).toHaveBeenCalledWith(
       '[K8s] CommunicationChannel initial load failed; ccCacheSynced remains false ' +
-        '(B2 preserves channel-reader replicas and holds stateless lifecycle active):',
+        '(B2 preserves channel-reader replicas, preserving durable Host lifecycle state):',
       expect.any(Error)
     )
 

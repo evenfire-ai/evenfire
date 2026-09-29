@@ -210,6 +210,69 @@ describe('StatelessLifecycleTracker — D8 idle rule', () => {
     expect(port.suspendHostFromHeartbeat).not.toHaveBeenCalled()
   })
 
+  it('fresh-checks a suspension-blocked Host once per channel authority loss epoch', async () => {
+    const port = makePort()
+    const blocked = { stateless: true, state: 'active', suspensionBlocked: true }
+    port.getEffectiveLifecycle.mockReturnValue(blocked)
+    const tracker = makeTracker({ port, host: makeHost() })
+
+    await expect(tracker.handleHeartbeat(payload())).resolves.toEqual({ drain: false })
+    expect(port.getEffectiveLifecycle).toHaveBeenCalledTimes(1)
+    expect(port.markHostActiveFromHeartbeat).toHaveBeenCalledTimes(1)
+
+    await expect(tracker.handleHeartbeat(payload())).resolves.toEqual({ drain: false })
+    expect(port.getEffectiveLifecycle).toHaveBeenCalledTimes(2)
+    expect(port.markHostActiveFromHeartbeat).toHaveBeenCalledTimes(1)
+
+    port.getEffectiveLifecycle.mockReturnValue({ stateless: true, state: 'active' })
+    await expect(tracker.handleHeartbeat(payload())).resolves.toEqual({ drain: false })
+    expect(port.getEffectiveLifecycle).toHaveBeenCalledTimes(3)
+    expect(port.markHostActiveFromHeartbeat).toHaveBeenCalledTimes(1)
+
+    port.getEffectiveLifecycle.mockReturnValue(blocked)
+    await expect(tracker.handleHeartbeat(payload())).resolves.toEqual({ drain: false })
+    expect(port.getEffectiveLifecycle).toHaveBeenCalledTimes(4)
+    expect(port.markHostActiveFromHeartbeat).toHaveBeenCalledTimes(2)
+    expect(port.suspendHostFromHeartbeat).not.toHaveBeenCalled()
+  })
+
+  it('retries a failed suspension-blocked fresh check and still reverts cached draining evidence', async () => {
+    const port = makePort()
+    port.getEffectiveLifecycle.mockReturnValue({
+      stateless: true,
+      state: 'active',
+      suspensionBlocked: true,
+    })
+    port.markHostActiveFromHeartbeat.mockRejectedValueOnce(new Error('api down'))
+    let cachedHost = makeHost()
+    const tracker = new StatelessLifecycleTracker({
+      idleMinutes: 30,
+      idleFloorMinutes: 15,
+      drainGraceMs: 60_000,
+      maxUptimeHours: 72,
+      reconciler: port as unknown as StatelessLifecycleReconcilerPort,
+      getHost: () => cachedHost,
+      now: () => NOW,
+    })
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    try {
+      await tracker.handleHeartbeat(payload())
+      await tracker.handleHeartbeat(payload())
+      expect(port.markHostActiveFromHeartbeat).toHaveBeenCalledTimes(2)
+      expect(errors).toHaveBeenCalledOnce()
+
+      await tracker.handleHeartbeat(payload())
+      expect(port.markHostActiveFromHeartbeat).toHaveBeenCalledTimes(2)
+
+      cachedHost = makeHost({ lifecycle: { state: 'draining', wakeHandledGeneration: 0 } })
+      await tracker.handleHeartbeat(payload())
+      expect(port.markHostActiveFromHeartbeat).toHaveBeenCalledTimes(3)
+      expect(port.markHostActiveFromHeartbeat).toHaveBeenLastCalledWith(cachedHost)
+    } finally {
+      errors.mockRestore()
+    }
+  })
+
   it('answers drain:false for an unknown host', async () => {
     const port = makePort()
     const tracker = new StatelessLifecycleTracker({
