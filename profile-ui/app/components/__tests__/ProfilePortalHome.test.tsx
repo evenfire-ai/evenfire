@@ -45,7 +45,7 @@ vi.mock('next/link', () => ({
 
 beforeEach(() => {
   api.getDesktopEnvironment.mockReset()
-  api.getDesktopEnvironment.mockImplementation(() => desktopEnvironment)
+  api.getDesktopEnvironment.mockResolvedValue(desktopEnvironment)
 })
 
 afterEach(cleanup)
@@ -86,7 +86,6 @@ describe('Profile Portal home desktop setup link', () => {
 
   it('labels the environment setup handoff accurately', async () => {
     const environment = desktopEnvironment
-    api.getDesktopEnvironment.mockResolvedValue(environment)
 
     render(<Page />)
 
