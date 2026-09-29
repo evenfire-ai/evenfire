@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { buildGuardrailDetailScenario } from '../../../../test/fixtures/guardrailProducer'
 import GuardrailTabPage from '../[tab]/page'
 import GuardrailDetailPage from '../page'
 
@@ -45,19 +46,9 @@ vi.mock('@components/DashboardLayout', () => ({
 beforeEach(() => {
   vi.clearAllMocks()
   navigation.params.tab = 'details'
-  api.getLlmHook.mockResolvedValue({
-    metadata: { name: 'sample-hook' },
-    spec: { path: '/check', lifecyclePoints: ['preCall'] },
-    status: { conditions: [{ type: 'Ready', status: 'True' }] },
-  })
-  api.getHosts.mockResolvedValue({
-    items: [
-      {
-        metadata: { name: 'sample-agent' },
-        spec: { guardrails: { hooks: { preCall: [{ id: 'sample-hook' }] } } },
-      },
-    ],
-  })
+  const { hook, hosts } = buildGuardrailDetailScenario()
+  api.getLlmHook.mockResolvedValue(hook)
+  api.getHosts.mockResolvedValue(hosts)
 })
 afterEach(cleanup)
 

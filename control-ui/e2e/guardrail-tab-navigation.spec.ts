@@ -1,39 +1,48 @@
 import { expect, test } from '@playwright/test'
+import { buildGuardrailDetailScenario } from '../test/fixtures/guardrailProducer'
 
 if (process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH) {
   test.use({ launchOptions: { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH } })
 }
 
-const hook = {
-  metadata: { name: 'sample-hook' },
-  spec: { path: '/check', lifecyclePoints: ['preCall'], failMode: 'open' },
-  status: { conditions: [{ type: 'Ready', status: 'True' }] },
-}
+const scenario = buildGuardrailDetailScenario()
+let unexpectedApiPaths: string[] = []
 
 test.beforeEach(async ({ page }) => {
+  unexpectedApiPaths = []
   await page.route('**/control-api/**', async route => {
     const path = new URL(route.request().url()).pathname
-    const body = path.endsWith('/api/v1/admin/auth/me')
-      ? { me: { id: 'admin-1', username: 'admin', email: 'admin@example.com' } }
-      : path.endsWith('/api/v1/admin/llm-hooks/sample-hook')
-        ? hook
-        : path.endsWith('/api/v1/admin/hosts')
-          ? {
-              items: [
-                {
-                  metadata: { name: 'sample-agent' },
-                  spec: { guardrails: { hooks: { preCall: [{ id: 'sample-hook' }] } } },
-                },
-              ],
-            }
-          : path.endsWith('/api/v1/admin/control-admin-bridge/status')
-            ? {
-                admin: { id: 'admin-1', email: 'admin@example.com', username: 'admin' },
-                member: { id: 'member-1', email: 'admin@example.com' },
-              }
-            : {}
+    let body: unknown
+    if (path === '/control-api/api/v1/admin/auth/me') {
+      body = { me: { id: 'admin-1', username: 'admin', email: 'admin@example.com' } }
+    } else if (path === '/control-api/api/v1/admin/llm-hooks/sample-hook') {
+      body = scenario.hook
+    } else if (path === '/control-api/api/v1/admin/hosts') {
+      body = scenario.hosts
+    } else if (path === '/control-api/api/v1/admin/settings/bridge-status') {
+      body = {
+        admin: {
+          id: 'admin-1',
+          username: 'admin',
+          email: 'admin@example.com',
+          emailConfirmed: true,
+          pendingEmailChange: null,
+        },
+        member: { id: 'member-1', email: 'admin@example.com' },
+      }
+    } else if (path === '/control-api/api/v1/admin/registry/publish-scope') {
+      body = { scope: null, curator: false, orgName: null }
+    } else {
+      unexpectedApiPaths.push(path)
+      await route.fulfill({ status: 500, body: `Unexpected API request: ${path}` })
+      return
+    }
     await route.fulfill({ contentType: 'application/json', body: JSON.stringify(body) })
   })
+})
+
+test.afterEach(() => {
+  expect(unexpectedApiPaths).toEqual([])
 })
 
 test('guardrail tab links support deep links and browser Back', async ({ page }) => {
