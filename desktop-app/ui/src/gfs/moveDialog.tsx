@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState } from 'react'
-import { useInfiniteQuery } from '@tanstack/react-query'
+import { useInfiniteQuery, useQueryClient } from '@tanstack/react-query'
 import { Button, IconButton, StatusBanner } from '@components/Common'
 import { IconCheck, IconChevronRight, IconClose, IconContexts } from '@components/SidebarNav/icons'
 import { GFS_DRIVE_MAIN } from '@constants/gfsBrowser'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import type { GfsBrowserChild } from '@hooks/domain/useGfsBrowserController'
 import { describeGfsReadError } from '@lib/gfsGrantErrors'
+import { isGfsChildrenDenied, purgeDeniedGfsChildren } from './deniedChildren'
 import type { GfsMoveDialogProps } from './moveDialog.types'
 
 type SelectedDestination = Pick<GfsBrowserChild, 'resourceId' | 'name'>
@@ -54,9 +55,11 @@ function GfsMoveTreeFolder({
   onSelect,
   onAuthorityFailure,
 }: GfsMoveTreeFolderProps) {
+  const queryClient = useQueryClient()
   const isExpanded = expandedFolderIds.has(folder.resourceId)
+  const childQueryKey = desktopQueryKeys.gfsChildren(scope, folder.resourceId, GFS_DRIVE_MAIN)
   const childQuery = useInfiniteQuery({
-    queryKey: desktopQueryKeys.gfsChildren(scope, folder.resourceId, GFS_DRIVE_MAIN),
+    queryKey: childQueryKey,
     queryFn: ({ pageParam }) =>
       window.clerum.gfs.listChildren(folder.resourceId, GFS_DRIVE_MAIN, pageParam),
     enabled: isExpanded,
@@ -64,18 +67,22 @@ function GfsMoveTreeFolder({
     getNextPageParam: lastPage => lastPage.nextCursor ?? undefined,
   })
   const childError = errorMessage(childQuery.error)
+  const childDenied = isGfsChildrenDenied(childQuery.error)
   const childFolders = useMemo(
     () =>
-      folderItems(
-        (childQuery.data?.pages ?? []).flatMap(page => page.items),
-        new Set([targetResourceId, ...ancestors])
-      ),
-    [ancestors, childQuery.data, targetResourceId]
+      childDenied
+        ? []
+        : folderItems(
+            (childQuery.data?.pages ?? []).flatMap(page => page.items),
+            new Set([targetResourceId, ...ancestors])
+          ),
+    [ancestors, childDenied, childQuery.data, targetResourceId]
   )
 
   useEffect(() => {
+    if (childQuery.error) purgeDeniedGfsChildren(queryClient, childQueryKey, childQuery.error)
     if (childError) onAuthorityFailure?.(childError)
-  }, [childError, onAuthorityFailure])
+  }, [childError, childQuery.error, childQueryKey, onAuthorityFailure, queryClient])
 
   const loadingChildren = Boolean(isExpanded && childQuery.isFetching && !childQuery.data)
   const hasMoreChildren = Boolean(childQuery.hasNextPage)

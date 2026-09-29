@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useInfiniteQuery } from '@tanstack/react-query'
+import { useInfiniteQuery, useQueryClient } from '@tanstack/react-query'
 import { Badge, Button, IconButton, StatusBanner } from '@components/Common'
 import { GfsFileIcon } from '@components/GfsFileIcon'
 import { GFS_DRIVE_MAIN } from '@constants/gfsBrowser'
@@ -11,6 +11,7 @@ import {
 import { saveGfsFileToDisk } from '@lib/gfsDownload'
 import { resolveGfsPreview } from '@lib/gfsPreview'
 import { sanitizeAppTabTitle } from '@lib/sanitizeAppTabTitle'
+import { isGfsChildrenDenied, purgeDeniedGfsChildren } from '@/gfs/deniedChildren'
 import { IconChevronRight, IconContexts } from '../icons'
 import type { FileExplorerNodeProps, FileExplorerTreeProps } from './types'
 
@@ -64,6 +65,7 @@ function FileExplorerNode({
   onActivateFile,
   onAuthorityFailure,
 }: FileExplorerNodeProps) {
+  const queryClient = useQueryClient()
   const isDirectory = node.kind === 'directory'
   const isExpanded = isDirectory && expandedIds.has(node.resourceId)
   const isSelected = selectedId === node.resourceId
@@ -75,8 +77,9 @@ function FileExplorerNode({
   // (older servers) is treated as unknown, not unreadable.
   const isUnreadable = node.readable === false
 
+  const childQueryKey = desktopQueryKeys.gfsChildren(scope, node.resourceId, GFS_DRIVE_MAIN)
   const childQuery = useInfiniteQuery({
-    queryKey: desktopQueryKeys.gfsChildren(scope, node.resourceId, GFS_DRIVE_MAIN),
+    queryKey: childQueryKey,
     queryFn: ({ pageParam }) =>
       window.clerum.gfs.listChildren(node.resourceId, GFS_DRIVE_MAIN, pageParam),
     // Gate on live access as the controller's own children query does: a revoked
@@ -95,14 +98,18 @@ function FileExplorerNode({
     getNextPageParam: lastPage => lastPage.nextCursor ?? undefined,
   })
   const childError = errorMessage(childQuery.error)
+  const childDenied = isGfsChildrenDenied(childQuery.error)
   const childItems = useMemo(
-    () => sortTreeItems((childQuery.data?.pages ?? []).flatMap(page => page.items)),
-    [childQuery.data]
+    () =>
+      childDenied ? [] : sortTreeItems((childQuery.data?.pages ?? []).flatMap(page => page.items)),
+    [childDenied, childQuery.data]
   )
 
   useEffect(() => {
+    if (!childQuery.error) return
+    purgeDeniedGfsChildren(queryClient, childQueryKey, childQuery.error)
     if (childError) onAuthorityFailure(childError)
-  }, [childError, onAuthorityFailure])
+  }, [childError, childQuery.error, childQueryKey, onAuthorityFailure, queryClient])
 
   // Deferred folder toggle: cancelled by a double-click within the window.
   const clickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
