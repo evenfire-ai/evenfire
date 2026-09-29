@@ -87,24 +87,26 @@ if "CONTROL_API_INTERNAL_SERVICE_TOKENS" in text:
 
 # Eight 8 MiB streams and three queued 8 MiB bodies (#739 D5) peaked at 511 MiB
 # of RSS with a 384 MiB old space (#739 measured 509.8); one ~36 MB V2 stream in
-# the visual slot (#784) raised that to 775 MiB. When the three ordinary bodies
-# carry the worst structure the contract admits (#806 Q1), a 384 MiB old space
-# aborts while parsing them, and a 512 MiB one is the smallest that survives;
-# with one visual stream that load peaked at 1097-1111 MiB of RSS. The limit is
-# that peak plus 25 %, rounded up to 1536Mi. The request stays at 768Mi (owner
-# decision on review M4), so the scheduler reserves what the ordinary load uses
-# and the worst-structure burst is covered by the limit alone.
+# the visual slot (#784) raised that to 775 MiB. The byte-based BodyBudget also
+# admits about eight compact bodies of the worst structure the contract admits
+# (#806 Q1), each a ~44 MiB tree once parsed. With 8 held streams, 8 queued
+# bodies and one V2 stream, a 640 MiB old space passed 3 of 3 for Grok and
+# aborted 3 of 3 for Codex, and 768 MiB passed both in 3 of 3; that load peaked
+# at 1212-1482 MiB of RSS on macOS (not cgroup memory). The limit is the
+# maximum plus 25 %, rounded up to 2048Mi. The request stays at 768Mi (owner
+# decision on review M4), so the scheduler reserves 768Mi and the burst up to
+# the limit is not reserved on the node.
 memory_limit = re.search(r"limits:\n\s+cpu: \S+\n\s+memory: (\S+)", text)
 memory_request = re.search(r"requests:\n\s+cpu: \S+\n\s+memory: (\S+)", text)
 heap_cap = re.search(
     r"- name: NODE_OPTIONS\n\s+value: \"--max-old-space-size=(\d+)\"", text
 )
-if not memory_limit or memory_limit.group(1) != "1536Mi":
-    errors.append("proxy memory limit must be 1536Mi")
+if not memory_limit or memory_limit.group(1) != "2048Mi":
+    errors.append("proxy memory limit must be 2048Mi")
 if not memory_request or memory_request.group(1) != "768Mi":
     errors.append("proxy memory request must be 768Mi")
-if not heap_cap or heap_cap.group(1) != "512":
-    errors.append("proxy must cap the V8 old space at 512 MiB through NODE_OPTIONS")
+if not heap_cap or heap_cap.group(1) != "768":
+    errors.append("proxy must cap the V8 old space at 768 MiB through NODE_OPTIONS")
 
 # #739 D6: on SIGTERM the proxy stops accepting and waits for its open streams
 # (main.ts awaits servers.close()), so the grace period must outlast the

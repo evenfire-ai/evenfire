@@ -24,31 +24,31 @@ const WORKFLOW_RECIPES = readFileSync(
 /** Headroom between the last in-flight request finishing and SIGKILL. */
 const SHUTDOWN_MARGIN_SECONDS = 20
 /**
- * Heap cap the peak below was measured with. At 384 MiB the process aborts
- * while it parses the three admitted ordinary bodies when each one carries the
- * worst structure the contract admits (262144 containers, 262144 members,
- * 1048576 elements), before any stream reaches the upstream. 512 MiB is the
- * smallest cap that survives that load.
+ * Heap cap the peak below was measured with. The byte-based BodyBudget admits
+ * about eight compact bodies of the worst structure the contract admits
+ * (262144 containers, 262144 members, 1048576 elements; 2.8 MiB each), and each
+ * parsed tree costs about 44 MiB after a collection. With 8 held streams, 8
+ * queued bodies and one V2 stream, a 640 MiB cap aborted the Codex proxy in 3
+ * of 3 runs (Grok passed 3 of 3); 768 MiB passed both proxies in 3 of 3.
+ * 768 MiB is the smallest cap tested that passes both, not a proven minimum.
  */
-const HEAP_CAP_MIB = 512
+const HEAP_CAP_MIB = 768
 /**
- * The largest measured peak, heap capped at HEAP_CAP_MIB (tsc build, one
- * process, upstream request through undici, macOS, Node v24.18.0):
- * - D5 (#739): eight 8 MiB streams and three queued 8 MiB bodies with a
- *   text tool description: 511 MiB at a 384 MiB cap;
- * - D5 plus the visual slot (#784), same text load: 775.4 MiB at 384;
- * - the same load with every ordinary body carrying the worst structure the
- *   contract admits (#806 Q1), plus one ~36 MB V2 stream: 1096.8 and 1110.7
- *   MiB in two runs at 512. That is the recorded peak.
- * Measured by hand, not by this suite (harness: 8 held streams, 3 queued
- * bodies, 1 visual body). Re-measure before changing it.
+ * The largest measured peak RSS, heap capped at HEAP_CAP_MIB (real proxy built
+ * with tsc, upstream request through undici, macOS, Node v24.18.0, the compact
+ * worst-structure shape: 8 held streams, 8 queued bodies, one ~36 MB V2
+ * stream). Three runs: 1357.1, 1481.6 and 1212.5 MiB. The recorded peak is the
+ * maximum, because the run-to-run spread on macOS is over 100 MiB and RSS
+ * there is not cgroup memory. The earlier sparse-shape peaks (511 MiB at
+ * heap 384, 775.4 MiB with the visual slot) are lower.
+ * Measured by hand, not by this suite. Re-measure before changing it.
  */
-const CAPPED_PEAK_RSS_MIB = 1110.7
+const CAPPED_PEAK_RSS_MIB = 1481.6
 const MEMORY_HEADROOM = 1.25
 /**
- * Owner decision on review M4 (#739): the request stays at 768Mi. It sits
- * below the limit, so the scheduler reserves what the ordinary load uses and
- * the worst-structure burst is covered by the limit alone.
+ * The request stays at 768Mi (owner decision on review M4, #739). It sits
+ * below the limit, so the scheduler reserves 768Mi while the pod can burst to
+ * the limit. That burst is not reserved on the node.
  */
 const MEMORY_REQUEST_MIB = 768
 
@@ -101,7 +101,7 @@ describe('grok-llm-proxy base manifest', () => {
     expect(grace).toBe(Math.ceil(worstCaseMs / 1000) + SHUTDOWN_MARGIN_SECONDS)
   })
 
-  it('T-DEP-2 caps the heap below the memory limit, keeps the limit 25% above the worst-structure-plus-visual peak and requests 768Mi', () => {
+  it('T-DEP-2 caps the heap below the memory limit, keeps the limit 25% above the worst-structure peak and requests 768Mi', () => {
     const nodeOptions = activeLines(MANIFEST).findIndex((line) => /name:\s*NODE_OPTIONS\s*$/.test(line))
     expect(nodeOptions, 'the container must set NODE_OPTIONS').toBeGreaterThanOrEqual(0)
     const heap = /--max-old-space-size=(\d+)/.exec(activeLines(MANIFEST)[nodeOptions + 1] ?? '')
