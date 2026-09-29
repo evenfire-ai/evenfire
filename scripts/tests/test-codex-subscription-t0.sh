@@ -293,6 +293,7 @@ run_group "codex-llm-proxy" "codex-llm-proxy" \
   "test/metrics.test.ts" \
   "test/originPolicy.test.ts" \
   "test/redaction.test.ts" \
+  "test/releaseAtAcceptance.test.ts" \
   "test/requestLimits.test.ts" \
   "test/runtimePath.hermetic.e2e.test.ts" \
   "test/server.security.test.ts" \

@@ -24,6 +24,7 @@ import type { GrokLlmProxyConfig } from './config.js'
 import { ControlApiClient, ControlApiClientError, fetchCauseCode } from './controlApiClient.js'
 import {
   GrokTransportError,
+  type StreamGrokCompletionInput,
   UpstreamTimeoutError,
   listGrokModels,
   streamGrokCompletion,
@@ -711,7 +712,7 @@ export function createProxyApps(
         res.setHeader('cache-control', 'no-cache')
         const started = Date.now()
         const stream = deps.streamCompletion ?? streamGrokCompletion
-        const result = await stream({
+        const streamInput: StreamGrokCompletionInput = {
           executionTicket: parsed.data.executionTicket,
           requestHash: parsed.data.requestHash,
           request: parsed.data.request,
@@ -739,7 +740,13 @@ export function createProxyApps(
           onUpstreamAccepted: () => {
             gated.grokBodyRelease?.()
             gated.grokBodyRelease = undefined
+            // Every reference to the parsed tree ends with the reservation: a
+            // live stream keeps this frame, `parsed` and `streamInput` for as
+            // long as the upstream answers, and an 8-wide gate of dense trees
+            // would otherwise outlast the budget that admitted them.
             req.body = undefined
+            parsed.data.request = {}
+            streamInput.request = undefined
           },
           finalize: input => client.finalize(input),
           fetchFn,
@@ -749,7 +756,8 @@ export function createProxyApps(
             else textChunks += 1
             return writeSseChunk(res, `data: ${JSON.stringify(frame)}\n\n`, abort.signal)
           },
-        })
+        }
+        const result = await stream(streamInput)
         stopHeartbeat?.()
         res.write(
           `data: ${JSON.stringify({ type: 'done', outcome: result.outcome, ...(result.usage ? { usage: result.usage } : {}) })}\n\n`

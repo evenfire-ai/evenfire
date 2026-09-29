@@ -116,9 +116,23 @@ export type StreamCodexCompletionResult = {
   usage?: SafeUsage
 }
 
-export async function streamCodexCompletion(
-  input: StreamCodexCompletionInput
-): Promise<StreamCodexCompletionResult> {
+/**
+ * The validated request, handed from the pre-dispatch checks to the upstream
+ * write. It is emptied as soon as the upstream body is built, so a live stream
+ * never keeps the parsed tree (up to LIMITS.maxRequestElements values) alive.
+ */
+type HeldRequest = { request: CodexCompletionRequest | undefined; requestId: string }
+
+/**
+ * Every check that needs the whole request, in a synchronous function: its
+ * locals end with the call, and only the model, the bounded deadline and the
+ * holder survive into the long-lived async frame of the stream.
+ */
+function prepareCodexCompletion(input: StreamCodexCompletionInput): {
+  held: HeldRequest
+  model: string
+  boundedDeadlineMs: number
+} {
   const parsed = parseCodexCompletionRequest(input.request)
   if (!parsed.ok) {
     throw new CodexTransportError(
@@ -146,6 +160,17 @@ export async function streamCodexCompletion(
     input.deadlineMs ?? request.deadlineMs,
     input.maxDeadlineMs
   )
+  return {
+    held: { request, requestId: request.requestId },
+    model: request.model,
+    boundedDeadlineMs,
+  }
+}
+
+export async function streamCodexCompletion(
+  input: StreamCodexCompletionInput
+): Promise<StreamCodexCompletionResult> {
+  const { held, model, boundedDeadlineMs } = prepareCodexCompletion(input)
   // A client that disconnected before dispatch must not consume the ticket:
   // nothing was redeemed, so there is no attempt receipt to finalize.
   if (input.signal?.aborted) {
@@ -154,11 +179,11 @@ export async function streamCodexCompletion(
   const redeemed = await input.redeem({
     executionTicket: input.executionTicket,
     requestHash: input.requestHash,
-    model: request.model,
+    model,
     hostRef: input.ticket.hostRef,
     operation: 'completion_stream',
   })
-  if (redeemed.transport.servedModel !== request.model) {
+  if (redeemed.transport.servedModel !== model) {
     await finalizeQuietly(input, redeemed, 'error')
     throw new CodexTransportError('model_not_allowed', 'served model does not match the request')
   }
@@ -172,7 +197,7 @@ export async function streamCodexCompletion(
   const started = Date.now()
   try {
     const streamed = await readUpstreamStream({
-      request,
+      held,
       accessToken,
       chatgptAccountId: redeemed.chatgptAccountId,
       deadlineMs,
@@ -243,7 +268,7 @@ async function finalizeQuietly(
 }
 
 async function readUpstreamStream(input: {
-  request: CodexCompletionRequest
+  held: HeldRequest
   accessToken: string
   chatgptAccountId?: string
   deadlineMs: number
@@ -329,6 +354,25 @@ class UpstreamDeadline {
   }
 }
 
+/**
+ * Serialize the upstream body and empty the holder. Synchronous, so the tree
+ * and the intermediate payload are unreachable once it returns; only the
+ * serialized string and the tool-name map outlive the call.
+ */
+function buildUpstreamBody(held: HeldRequest): { names: ToolNameMap; body: string } {
+  const request = held.request
+  if (!request) throw new Error('the upstream request was already released')
+  const names = new ToolNameMap([
+    ...(request.tools ?? []).map(tool => tool.name),
+    ...request.messages.flatMap(message =>
+      message.role === 'assistant' ? (message.toolCalls ?? []).map(call => call.name) : []
+    ),
+  ])
+  const body = JSON.stringify(toUpstreamPayload(request, names))
+  held.request = undefined
+  return { names, body }
+}
+
 async function dispatchUpstreamStream(
   input: Parameters<typeof readUpstreamStream>[0],
   deadline: UpstreamDeadline
@@ -338,7 +382,7 @@ async function dispatchUpstreamStream(
   const headers = chatgptUpstreamHeaders(input.accessToken, {
     'content-type': 'application/json',
     accept: 'text/event-stream',
-    session_id: input.request.requestId,
+    session_id: input.held.requestId,
     ...(input.chatgptAccountId ? { 'chatgpt-account-id': input.chatgptAccountId } : {}),
   })
   if (!headers['chatgpt-account-id']) {
@@ -347,12 +391,7 @@ async function dispatchUpstreamStream(
       'Codex access token is missing ChatGPT account id'
     )
   }
-  const names = new ToolNameMap([
-    ...(input.request.tools ?? []).map(tool => tool.name),
-    ...input.request.messages.flatMap(message =>
-      message.role === 'assistant' ? (message.toolCalls ?? []).map(call => call.name) : []
-    ),
-  ])
+  const { names, body } = buildUpstreamBody(input.held)
   const response = await deadline.waitUpstream(
     fetchFrozenOrigin({
       url,
@@ -362,7 +401,7 @@ async function dispatchUpstreamStream(
         method: 'POST',
         signal,
         headers,
-        body: JSON.stringify(toUpstreamPayload(input.request, names)),
+        body,
       },
     }),
     signal
