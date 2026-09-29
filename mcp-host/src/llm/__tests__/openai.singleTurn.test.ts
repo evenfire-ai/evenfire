@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { type ChatMessage, FinishReason, type ToolDefinition } from '../../core/types'
+import { TOOL_RESULT_IMAGE_TEXT } from '../../visualInput/messageProjection'
 import { OpenAIProvider } from '../openai'
 
 function createMockOpenAIClient() {
@@ -232,9 +233,9 @@ describe('OpenAI contentParts in user messages (screenshot images)', () => {
       },
       {
         role: 'user',
-        content: 'Here are the screenshots from the tool results above.',
+        content: TOOL_RESULT_IMAGE_TEXT,
         contentParts: [
-          { type: 'text', text: 'Here are the screenshots from the tool results above.' },
+          { type: 'text', text: TOOL_RESULT_IMAGE_TEXT },
           { type: 'image', mimeType: 'image/png', data: 'iVBORw0KGgo=' },
         ],
       },
@@ -250,7 +251,7 @@ describe('OpenAI contentParts in user messages (screenshot images)', () => {
     expect(userImgMsg.content).toHaveLength(2)
     expect(userImgMsg.content[0]).toEqual({
       type: 'text',
-      text: 'Here are the screenshots from the tool results above.',
+      text: TOOL_RESULT_IMAGE_TEXT,
     })
     expect(userImgMsg.content[1]).toEqual({
       type: 'image_url',

@@ -27,6 +27,7 @@ import type { LlmPolicy } from '../../../llm/failover/types'
 import { type GrokSubscriptionDeps, GrokSubscriptionProvider } from '../../../llm/grokSubscription'
 import type { ImageInputResolver } from '../../../llm/imageInput'
 import { CodexAuthorizeError } from '../../../llm/providerAttemptAuthorizer'
+import { TOOL_RESULT_IMAGE_TEXT } from '../../../visualInput/messageProjection'
 import { VISUAL_INPUT_LIMITS } from '../../../visualInput/policy'
 import { LlmErrorCode } from '../../errors'
 import { stripHistoricalMedia } from '../../extensions/prePrune'
@@ -86,7 +87,7 @@ const TOOLS: ToolDefinition[] = [
   { name: 'desktop_screenshot', description: 'Capture the desktop', parameters: {} },
 ]
 
-const EXPLANATORY_TEXT = 'Here are the screenshots from the tool results above.'
+const EXPLANATORY_TEXT = TOOL_RESULT_IMAGE_TEXT
 
 const imageAttachment = (
   id: string,
