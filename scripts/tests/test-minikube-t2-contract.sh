@@ -26,6 +26,7 @@ for file in "$MINIKUBE_DIR/profile-readiness.sh" "$ROOT/scripts/tests/test-minik
   "$ROOT/scripts/tests/lib/minikube-fixture-repo.sh" \
   "$ROOT/scripts/tests/test-minikube-t2-public-boundary.sh" \
   "$ROOT/scripts/tests/test-minikube-t2-scenarios.sh" \
+  "$ROOT/scripts/tests/test-branch-profile-lifecycle.sh" \
   "$ROOT/scripts/tests/test-minikube-t2-proxy-runtime.sh" \
   "$ROOT/scripts/tests/test-minikube-t2-control-api-runtime.sh" \
   "$ROOT/scripts/tests/test-minikube-image-capability-fixture.sh" \

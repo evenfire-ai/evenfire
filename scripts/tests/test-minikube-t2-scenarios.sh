@@ -546,27 +546,17 @@ bash "$ROOT/scripts/tests/test-minikube-t2-process-owner.sh"
 grep -Fq 'REUSE_DB=true' "$ROOT/scripts/minikube/t2.sh"
 grep -Fq 'CONTROL_DB_RESET_PVC_UID' "$ROOT/scripts/minikube/t2.sh"
 
-# branch-profile.sh cannot be executed here (it needs a live cluster), so pin the
-# lifecycle contract on the body of each function. Each check reads one function,
-# and first asserts that the body is non-empty so a renamed function fails loudly.
+# branch-profile.sh lifecycle (preflight, start, status, pf, health, pf-health,
+# stop-pf, stop, delete, prepare-shims) is exercised end to end against a
+# fixture repository with PATH stubs for kubectl, minikube, helm, docker and
+# curl; it asserts exit codes, the stub call log and pidfile state.
+bash "$ROOT/scripts/tests/test-branch-profile-lifecycle.sh"
+# The one path the stubs do not reach: a failed stop of an existing record
+# inside start_pf. start_pf runs under `|| failed++`, where errexit is
+# suspended, so it must return explicitly.
 BRANCH_PROFILE="$ROOT/scripts/minikube-profiles/branch-profile.sh"
-profile_fn_body() {
-  local body
-  body="$(awk -v fn="$1" '$0 == fn "() {" { on = 1; next } on && $0 == "}" { exit } on { print }' "$BRANCH_PROFILE")"
-  [[ -n "$body" ]] || fail "branch-profile.sh function $1 not found or empty"
-  printf '%s\n' "$body"
-}
-[[ "$(profile_fn_body cmd_stop)" == *'cmd_stop_pf'* ]] || fail 'branch-profile-stop must clear port-forward records before minikube stop'
-[[ "$(profile_fn_body cmd_delete)" == *'cmd_stop_pf'* ]] || fail 'branch-profile-delete must clear port-forward records before minikube delete'
-[[ "$(profile_fn_body cmd_pf)" == *'|| failed=$((failed + 1))'* ]] || fail 'branch-profile-pf must attempt every forward before failing'
-[[ "$(profile_fn_body cmd_pf)" == *'(( failed > 0 ))'* ]] || fail 'branch-profile-pf must fail when any forward failed'
-[[ "$(profile_fn_body cmd_health)" == *'|| failed=$((failed + 1))'* ]] || fail 'branch-profile-health must probe every service before failing'
-[[ "$(profile_fn_body cmd_health)" == *'(( failed > 0 ))'* ]] || fail 'branch-profile-health must fail when any probe failed'
-[[ "$(profile_fn_body cmd_status)" == *'|| minikube_status=$?'* ]] || fail 'branch-profile-status must report a stopped cluster instead of aborting under set -e'
-[[ "$(profile_fn_body cmd_status)" != *'|| true'* ]] || fail 'branch-profile-status must not mask kubectl failures'
-[[ "$(profile_fn_body cmd_start)" != *'--context='*'config current-context'* ]] || fail 'branch-profile-start must read the global current-context, not the profile context'
-[[ "$(profile_fn_body cmd_start)" == *'"${after_context}" == "${PROFILE}"'* ]] || fail 'branch-profile-start must fail only when minikube switched the context onto the profile'
-[[ "$(profile_fn_body validate_profile_name)" == *'clerum-[a-z0-9]'* ]] || fail 'branch-profile must positively require the local clerum-* namespace'
-[[ "$(profile_fn_body start_pf)" == *'stop_own_pf'*'|| return 1'* ]] || fail 'start_pf must return explicitly on a failed stop because errexit is suspended under || failed++'
+start_pf_body="$(awk '$0 == "start_pf() {" { on = 1; next } on && $0 == "}" { exit } on { print }' "$BRANCH_PROFILE")"
+[[ -n "$start_pf_body" ]] || fail 'branch-profile.sh function start_pf not found or empty'
+[[ "$start_pf_body" == *'stop_own_pf'*'|| return 1'* ]] || fail 'start_pf must return explicitly on a failed stop because errexit is suspended under || failed++'
 
 printf 'PASS: local Minikube T0/T1/T2 scenario checks\n'

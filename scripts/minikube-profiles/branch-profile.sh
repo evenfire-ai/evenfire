@@ -78,14 +78,12 @@ file_value() {
 }
 
 validate_host() {
-  case "${HOST}" in
-    127.0.0.1|localhost) URL_HOST="${HOST}" ;;
-    ::1|\[::1\])
-      HOST=::1
-      URL_HOST='[::1]'
-      ;;
-    *) die "HOST must be a loopback address, got: ${HOST}" ;;
-  esac
+  # ports.env URLs and every port-forward ownership record are bound to
+  # 127.0.0.1 (kubectl port-forward --address=127.0.0.1). Accepting another
+  # loopback spelling here would publish URLs no forward listens on.
+  [[ "${HOST}" == 127.0.0.1 ]] ||
+    die "HOST must be 127.0.0.1 (the only address branch-profile forwards bind), got: ${HOST}"
+  URL_HOST=127.0.0.1
 }
 
 normalize_cache_root() {
@@ -107,10 +105,13 @@ normalize_cache_root() {
 validate_profile_name() {
   [[ ${#PROFILE} -le 63 && "${PROFILE}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]] ||
     die "resolver returned an unsafe profile name: ${PROFILE}"
-  # Positive check: a branch profile is always a local clerum-* profile. The
-  # denylist below only names shared profiles known today; this rejects the rest.
-  [[ "${PROFILE}" =~ ^clerum-[a-z0-9][a-z0-9._-]*$ ]] ||
-    die "resolver returned a profile outside the local clerum-* namespace: ${PROFILE}"
+  # Positive check: a branch profile is always clerum-<branch slug>-<owner id
+  # prefix>. The hex suffix is what separates it from shared profiles such as
+  # clerum-dev, which also match clerum-*; the denylist below only names the
+  # shared profiles known today. {7,8} matches the branch-scoped check in
+  # scripts/e2e/e2e-plugin-workload-sdk.sh.
+  [[ "${PROFILE}" =~ ^clerum-[a-z0-9][a-z0-9._-]*-[0-9a-f]{7,8}$ ]] ||
+    die "resolver returned a profile outside the branch-scoped clerum-<branch>-<owner-id> namespace: ${PROFILE}"
   case "${PROFILE}" in
     *gke*|*prod*|*staging*|clerum-test|default|minikube)
       die "resolver returned a shared or protected profile: ${PROFILE}" ;;
@@ -635,29 +636,43 @@ select_mcp_service() {
   return 3
 }
 
+# Sets STOP_PF_OUTCOME to absent, stopped (the library verified and stopped or
+# cleared the record) or retired (PID reuse proven; nothing signalled).
 stop_own_pf() {
   local name="$1" namespace="$2" service="$3" local_port="$4" remote_port="$5"
-  local pidfile="${PIDS_DIR}/${name}.pid" comm
-  [[ -e "${pidfile}" || -L "${pidfile}" ]] || return 0
-  if pf_owner_cleanup_record "${pidfile}" "${PROFILE}" "${PROFILE}" "${REPO_DIR}" \
-    "${namespace}" "${service}" "${local_port}" "${remote_port}"; then
+  local pidfile="${PIDS_DIR}/${name}.pid" state actual_start
+  STOP_PF_OUTCOME=""
+  if [[ ! -e "${pidfile}" && ! -L "${pidfile}" ]]; then
+    STOP_PF_OUTCOME=absent
     return 0
   fi
-  # PID reuse: the live process is not this lane's kubectl. Do not signal it.
-  # Drop only the stale record so the next forward records a separate PID.
-  if pf_owner_read_record "${pidfile}"; then
-    comm="$(ps -p "${PF_OWNER_RECORD_PID}" -o comm= 2>/dev/null || true)"
-    case "${comm}" in
-      kubectl | */kubectl) ;;
-      *)
-        printf 'retiring reused port-forward record without signalling pid=%s\n' \
-          "${PF_OWNER_RECORD_PID}"
-        pf_owner_remove_dead_record "${pidfile}" || return 1
-        return 0
-        ;;
-    esac
+  if pf_owner_cleanup_record "${pidfile}" "${PROFILE}" "${PROFILE}" "${REPO_DIR}" \
+    "${namespace}" "${service}" "${local_port}" "${remote_port}"; then
+    STOP_PF_OUTCOME=stopped
+    return 0
   fi
-  printf 'ERROR: refusing to stop unverified port-forward record: %s\n' "${pidfile}" >&2
+  # PID reuse is the only case retired here: the record is this worktree's own
+  # binding, and its PID now names a live process that started at a different
+  # time, so the recorded kubectl no longer exists. That process is never
+  # signalled; only the stale record is dropped. A foreign binding, an
+  # unreadable record, or a live process whose start still matches the record
+  # is kept, because nothing proves it stale.
+  if pf_owner_read_record "${pidfile}" 2>/dev/null &&
+    pf_owner_record_matches "${PROFILE}" "${PROFILE}" "${REPO_DIR}" \
+      "${namespace}" "${service}" "${local_port}" "${remote_port}"; then
+    state="$(pf_owner_process_state "${PF_OWNER_RECORD_PID}")"
+    if [[ "${state}" == live ]] &&
+      actual_start="$(pf_owner_process_start "${PF_OWNER_RECORD_PID}")" &&
+      [[ "${actual_start}" != "${PF_OWNER_RECORD_START}" ]]; then
+      printf 'retiring %s record: pid=%s now belongs to a process started %s, not the recorded kubectl started %s; that process was not signalled\n' \
+        "${name}" "${PF_OWNER_RECORD_PID}" "${actual_start}" "${PF_OWNER_RECORD_START}"
+      pf_owner_remove_dead_record "${pidfile}" || return 1
+      STOP_PF_OUTCOME=retired
+      return 0
+    fi
+  fi
+  printf 'ERROR: kept port-forward record %s: it could not be verified as this worktree'"'"'s kubectl forward (reason above) and no process was signalled. Confirm its PID is not a port-forward you still need, then remove the file by hand.\n' \
+    "${pidfile}" >&2
   return 1
 }
 
@@ -812,10 +827,17 @@ rewrite_shim() {
 cmd_prepare_shims() {
   require_command git shasum perl
   persist_state
-  mkdir -p "${CACHE_DIR}/scripts"
-  if [[ -L "${SHIMS_DIR}" || -L "${DEPLOY_SHIM_DIR}" ]]; then
-    die "BRANCH_PROFILE_SHIM_SYMLINK: refusing to replace symlink shim dirs"
+  # rm -rf and cp -R below resolve every parent component, so a symlinked
+  # scripts/ directory would redirect the delete and the copy outside the
+  # profile. CACHE_DIR itself was verified as a real directory by persist_state.
+  local shims_parent="${CACHE_DIR}/scripts"
+  if [[ -L "${shims_parent}" || -L "${SHIMS_DIR}" || -L "${DEPLOY_SHIM_DIR}" || -L "${SHIM_ENV}" ]]; then
+    die "BRANCH_PROFILE_SHIM_SYMLINK: refusing symlinked shim paths under ${CACHE_DIR}"
   fi
+  mkdir -p "${shims_parent}"
+  [[ -d "${shims_parent}" && ! -L "${shims_parent}" &&
+     "$(cd -- "${shims_parent}" && pwd -P)" == "${CACHE_DIR}/scripts" ]] ||
+    die "BRANCH_PROFILE_SHIM_SYMLINK: ${shims_parent} does not resolve inside ${CACHE_DIR}"
   umask 077
   rm -rf "${SHIMS_DIR}" "${DEPLOY_SHIM_DIR}"
   cp -R "${REPO_DIR}/scripts/minikube" "${SHIMS_DIR}"
@@ -833,7 +855,16 @@ cmd_prepare_shims() {
   # fails on its own instead of hiding behind the other. The earlier combined
   # expression carried two alternatives that matched nothing in the current upstream.
   rewrite_shim "${SHIMS_DIR}/seed-test-data.sh" 's#: "\$\{CONTEXT:=clerum-test\}"#: "\${CONTEXT:=\${MINIKUBE_PROFILE:-clerum-test}}"#g' "seed-test-data.sh CONTEXT default"
-  rewrite_shim "${SHIMS_DIR}/seed-test-data.sh" 's#export ADMIN_PASSWORD E2E_DEV_LOGIN_EMAIL CONTEXT#: "\${ALLOWED_CONTEXTS:=\${CONTEXT}}"\nexport ADMIN_PASSWORD E2E_DEV_LOGIN_EMAIL CONTEXT ALLOWED_CONTEXTS#g' "seed-test-data.sh ALLOWED_CONTEXTS"
+  # The seed authorizes only the context it runs against. Default the allowlist
+  # to CONTEXT only when CONTEXT is this validated branch profile, baked in as a
+  # literal; any other CONTEXT (clerum, clerum-dev, ...) must not authorize
+  # itself. PROFILE passed validate_profile_name, so it holds no perl or shell
+  # metacharacters.
+  local allowlist_line allowlist_expr
+  allowlist_line='if [ "\$CONTEXT" = "'"${PROFILE}"'" ]; then : "\${ALLOWED_CONTEXTS:=\$CONTEXT}"; fi'
+  printf -v allowlist_expr 's#\nexport ADMIN_PASSWORD E2E_DEV_LOGIN_EMAIL CONTEXT ALLOWED_CONTEXTS #\n%s\nexport ADMIN_PASSWORD E2E_DEV_LOGIN_EMAIL CONTEXT ALLOWED_CONTEXTS #g' \
+    "${allowlist_line}"
+  rewrite_shim "${SHIMS_DIR}/seed-test-data.sh" "${allowlist_expr}" "seed-test-data.sh ALLOWED_CONTEXTS"
   rewrite_shim "${SHIMS_DIR}/build-images.sh" 's#MANIFEST_FILE="\$\{PROJECT_DIR\}/deploy/minikube/\.image-manifest.json"#MANIFEST_FILE="\${BRANCH_PROFILE_DEPLOY_DIR:-\${PROJECT_DIR}/deploy}/minikube/.image-manifest.json"#g' "build-images.sh"
   # full-setup.sh resolves BRANCH_PROFILE_DEPLOY_DIR natively (ACTIVE_MINIKUBE_*),
   # so it needs no path rewrite; rewrite_shim would fail on it as a no-op.
@@ -887,6 +918,19 @@ cmd_start() {
   if [[ "${after_context}" == "${PROFILE}" && "${before_context}" != "${PROFILE}" ]]; then
     printf 'ERROR: minikube switched the kubectl current-context from %s to %s despite --keep-context\n' \
       "${before_context:-<unset>}" "${after_context}" >&2
+    # The switch belongs to this command, so undo it before failing: another
+    # session may be relying on the context it had selected.
+    if [[ -n "${before_context}" ]]; then
+      if kubectl config use-context "${before_context}" >/dev/null; then
+        printf 'restored the kubectl current-context to %s\n' "${before_context}" >&2
+      else
+        printf 'ERROR: could not restore the kubectl current-context to %s; it is still %s\n' \
+          "${before_context}" "${after_context}" >&2
+      fi
+    else
+      printf 'ERROR: no current-context was set before the start, so none was restored; it is still %s\n' \
+        "${after_context}" >&2
+    fi
     exit 1
   fi
   run_bounded minikube-status "${MINIKUBE_STATUS_TIMEOUT_SECONDS}" \
@@ -1099,24 +1143,69 @@ cmd_stop_pf() {
     name="$(basename "${pidfile}" .pid)"
     resolve_stop_pf_binding "${name}" "${pidfile}" || return 1
   done
+  # Attempt every record, so one record that cannot be verified does not leave
+  # the verified ones running; the kept records are listed and fail the call.
+  local -a kept=()
   for pidfile in "${pidfiles[@]}"; do
     name="$(basename "${pidfile}" .pid)"
-    resolve_stop_pf_binding "${name}" "${pidfile}" || return 1
-    stop_own_pf "${name}" "${STOP_PF_NAMESPACE}" "${STOP_PF_SERVICE}" \
-      "${STOP_PF_LOCAL_PORT}" "${STOP_PF_REMOTE_PORT}" || return 1
-    printf 'stopped or cleared verified %s record\n' "${name}"
+    if ! resolve_stop_pf_binding "${name}" "${pidfile}"; then
+      kept+=("${pidfile}")
+      continue
+    fi
+    if ! stop_own_pf "${name}" "${STOP_PF_NAMESPACE}" "${STOP_PF_SERVICE}" \
+      "${STOP_PF_LOCAL_PORT}" "${STOP_PF_REMOTE_PORT}"; then
+      kept+=("${pidfile}")
+      continue
+    fi
+    case "${STOP_PF_OUTCOME}" in
+      stopped | absent) printf 'stopped or cleared verified %s record\n' "${name}" ;;
+      retired) printf 'retired stale %s record after PID reuse\n' "${name}" ;;
+      *)
+        printf 'ERROR: unexpected stop outcome for %s: %s\n' "${pidfile}" "${STOP_PF_OUTCOME:-<empty>}" >&2
+        kept+=("${pidfile}")
+        ;;
+    esac
   done
+  if (( ${#kept[@]} > 0 )); then
+    printf 'ERROR: %s port-forward record(s) kept:\n' "${#kept[@]}" >&2
+    printf '  %s\n' "${kept[@]}" >&2
+    return 1
+  fi
+}
+
+# Runs cmd_stop_pf in a subshell so that a refusal inside it (including a die)
+# is reported without preventing the minikube operation that follows.
+stop_pf_before_minikube() {
+  local status=0
+  ( cmd_stop_pf ) || status=$?
+  return "${status}"
+}
+
+report_kept_pf_records() {
+  local operation="$1"
+  printf 'ERROR: minikube %s ran for profile %s, but port-forward records listed above were kept; the next T2 preflight will refuse them with PORT_FORWARD_CONFLICT until they are removed\n' \
+    "${operation}" "${PROFILE}" >&2
 }
 
 cmd_stop() {
   require_existing_profile
   # Clear the verified port-forward records first: a stopped cluster leaves
   # records naming dead kubectl processes, and the next T2 preflight refuses
-  # them with PORT_FORWARD_CONFLICT.
-  cmd_stop_pf
+  # them with PORT_FORWARD_CONFLICT. A record that cannot be verified is kept
+  # and reported, and must not strand the profile running: the stop still
+  # happens and the command fails at the end.
+  local pf_status=0 minikube_status=0
+  stop_pf_before_minikube || pf_status=$?
   printf 'stopping minikube profile: %s\n' "${PROFILE}"
   run_bounded minikube-stop "${MINIKUBE_STOP_TIMEOUT_SECONDS}" \
-    minikube -p "${PROFILE}" stop
+    minikube -p "${PROFILE}" stop || minikube_status=$?
+  if (( pf_status != 0 )); then
+    report_kept_pf_records stop
+  fi
+  if (( minikube_status != 0 )); then
+    return "${minikube_status}"
+  fi
+  (( pf_status == 0 )) || return 1
 }
 
 cmd_setup() {
@@ -1146,10 +1235,20 @@ cmd_delete() {
   fi
   # The registry (pids/*.pid) outlives the cluster; clear the port-forward
   # records so the deleted profile does not leave PORT_FORWARD_CONFLICT behind.
-  cmd_stop_pf
+  # As in cmd_stop, a kept record is reported and fails the command, but does
+  # not block the confirmed delete.
+  local pf_status=0 minikube_status=0
+  stop_pf_before_minikube || pf_status=$?
   printf 'deleting minikube profile: %s\n' "${PROFILE}"
   run_bounded minikube-delete "${MINIKUBE_DELETE_TIMEOUT_SECONDS}" \
-    minikube -p "${PROFILE}" delete
+    minikube -p "${PROFILE}" delete || minikube_status=$?
+  if (( pf_status != 0 )); then
+    report_kept_pf_records delete
+  fi
+  if (( minikube_status != 0 )); then
+    return "${minikube_status}"
+  fi
+  (( pf_status == 0 )) || return 1
 }
 
 cmd_e2e_plan() {
