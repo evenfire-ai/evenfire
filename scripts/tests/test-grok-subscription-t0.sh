@@ -15,7 +15,7 @@ set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 FAIL=0
 GROUPS_RUN=0
-EXPECTED_GROUPS=9
+EXPECTED_GROUPS=10
 REGISTERED=()
 COUNT_SUMMARY=""
 
@@ -340,6 +340,27 @@ run_group "control-ui grok" "control-ui" \
   "lib/__tests__/llm.test.ts" \
   "lib/hooks/__tests__/useGrokSubscriptionEnabled.test.tsx"
 
+# The Grok composer budget (16 MiB per image, 16 MiB decoded total, no pixel
+# bound) is desktop code. It needs Node 24 and the Electron runtime, exactly as
+# the Codex desktop group does; a test result from another runtime is not counted.
+node_major=$(node --version | sed -n 's/^v\([0-9][0-9]*\).*/\1/p')
+if [[ "${node_major}" != "24" ]]; then
+  fail "Desktop T0 requires Node 24.x (got $(node --version))"
+else
+  pass "Node $(node --version) for Desktop T0"
+  if ! (
+    cd "${ROOT}/desktop-app"
+    npm run verify:electron
+  ); then
+    fail "desktop-app verify:electron failed"
+  else
+    pass "desktop-app verify:electron"
+    run_group "desktop-app grok" "desktop-app" \
+      "ui/src/constants/__tests__/attachments.test.ts" \
+      "ui/src/components/agents/__tests__/ComposerPanel.test.tsx"
+  fi
+fi
+
 echo "── grok-llm-proxy deploy contract ──"
 if require_file "scripts/tests/test-grok-llm-proxy-deploy-contract.sh" &&
    require_file "tests/e2e/fixtures/grok-subscription/sanitized-upstream-contract.json"; then
@@ -361,9 +382,23 @@ is_registered() {
   done
   return 1
 }
+# The scan proves nothing when it looks at nothing: a missing root only makes
+# `find` write to stderr, and an empty result would read as "all registered".
+# So every root must exist and the scan must find candidates.
+suite_roots=(grok-llm-proxy/test packages/grok-provider-attempt-contract)
+named_roots=(control-api mcp-host workflow-recipes host-context-controller control-ui)
+scan_roots_missing=0
+for scan_root in "${suite_roots[@]}" "${named_roots[@]}"; do
+  if [[ ! -d "${ROOT}/${scan_root}" ]]; then
+    fail "unlisted-suite scan root ${scan_root} is missing"
+    scan_roots_missing=1
+  fi
+done
 unlisted=0
+candidates=0
 while IFS= read -r rel; do
   [[ -n "${rel}" ]] || continue
+  candidates=$((candidates + 1))
   if ! is_registered "${rel}"; then
     fail "unlisted Grok suite ${rel}"
     unlisted=1
@@ -371,15 +406,18 @@ while IFS= read -r rel; do
 done < <(
   cd "${ROOT}" &&
     {
-      find grok-llm-proxy/test packages/grok-provider-attempt-contract \
+      find "${suite_roots[@]}" \
         -name node_modules -prune -o -type f \( -name '*.test.ts' -o -name '*.test.cjs' \) -print
-      find control-api mcp-host workflow-recipes host-context-controller control-ui \
+      find "${named_roots[@]}" \
         \( -name node_modules -o -name dist -o -name .next -o -name coverage \) -prune -o \
         -type f -iname '*grok*' \( -name '*.test.ts' -o -name '*.test.tsx' \) -print
     } | sort -u
 )
-if [[ "${unlisted}" -eq 0 ]]; then
-  pass "every Grok suite is registered in T0"
+if [[ "${candidates}" -eq 0 ]]; then
+  fail "unlisted-suite scan found no Grok test files"
+fi
+if [[ "${unlisted}" -eq 0 && "${scan_roots_missing}" -eq 0 && "${candidates}" -gt 0 ]]; then
+  pass "every Grok suite is registered in T0 (${candidates} candidates scanned)"
 fi
 
 if [[ "${GROUPS_RUN}" -ne "${EXPECTED_GROUPS}" ]]; then

@@ -392,6 +392,7 @@ else
       "src/__tests__/devIsolation.test.ts" \
       "ui/src/components/agents/__tests__/ComposerPanel.test.tsx" \
       "ui/src/components/agents/__tests__/ModelSelector.test.tsx" \
+      "ui/src/constants/__tests__/attachments.test.ts" \
       "ui/src/hooks/__tests__/useHostModels.test.tsx" \
       "ui/src/hooks/domain/__tests__/useAgentChatController.pendingModel.test.tsx"
   fi
@@ -407,9 +408,23 @@ is_registered() {
   done
   return 1
 }
+# The scan proves nothing when it looks at nothing: a missing root only makes
+# `find` write to stderr, and an empty result would read as "all registered".
+# So every root must exist and the scan must find candidates.
+suite_roots=(codex-llm-proxy/test packages/llm-provider-attempt-contract)
+named_roots=(control-api mcp-host workflow-recipes host-context-controller control-ui)
+scan_roots_missing=0
+for scan_root in "${suite_roots[@]}" "${named_roots[@]}"; do
+  if [[ ! -d "${ROOT}/${scan_root}" ]]; then
+    fail "unlisted-suite scan root ${scan_root} is missing"
+    scan_roots_missing=1
+  fi
+done
 unlisted=0
+candidates=0
 while IFS= read -r rel; do
   [[ -n "${rel}" ]] || continue
+  candidates=$((candidates + 1))
   if ! is_registered "${rel}"; then
     fail "unlisted Codex suite ${rel}"
     unlisted=1
@@ -417,15 +432,18 @@ while IFS= read -r rel; do
 done < <(
   cd "${ROOT}" &&
     {
-      find codex-llm-proxy/test packages/llm-provider-attempt-contract \
+      find "${suite_roots[@]}" \
         -name node_modules -prune -o -type f \( -name '*.test.ts' -o -name '*.test.cjs' \) -print
-      find control-api mcp-host workflow-recipes host-context-controller control-ui \
+      find "${named_roots[@]}" \
         \( -name node_modules -o -name dist -o -name .next -o -name coverage \) -prune -o \
         -type f -iname '*codex*' \( -name '*.test.ts' -o -name '*.test.tsx' \) -print
     } | sort -u
 )
-if [[ "${unlisted}" -eq 0 ]]; then
-  pass "every Codex suite is registered in T0"
+if [[ "${candidates}" -eq 0 ]]; then
+  fail "unlisted-suite scan found no Codex test files"
+fi
+if [[ "${unlisted}" -eq 0 && "${scan_roots_missing}" -eq 0 && "${candidates}" -gt 0 ]]; then
+  pass "every Codex suite is registered in T0 (${candidates} candidates scanned)"
 fi
 
 if [[ "${GROUPS_RUN}" -ne 12 ]]; then
