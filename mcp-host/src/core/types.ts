@@ -6,6 +6,8 @@
  *
  * Phase 1: Pure type definitions — no runtime behavior changes.
  */
+import type { FileReferenceDigest, FileReferenceV1 } from '@clerum/gfs-interaction-policy'
+import type { IncomingMessage as HostIncomingMessage } from '../server/types'
 import type { GfsImageSource } from '../visualInput/policy'
 import type { SystemPromptParts } from './reasoning/systemPrompt'
 
@@ -130,6 +132,42 @@ export interface Attachment {
   producer?: string
   /** Producer-validated provenance; never supplied by model arguments. */
   visualSource?: GfsImageSource
+  /** Inline `kind:'file'` only: media type the host detected from the bytes. */
+  detectedMediaType?: string
+  /** Inline `kind:'file'` only: digest the host recomputed and verified. */
+  digest?: FileReferenceDigest
+  /**
+   * Inline `kind:'file'` only, set by admission. Internal: it is described to
+   * the model through the turn context and never serialized as content.
+   */
+  fileReference?: FileReferenceV1
+}
+
+/** #666 R4-M2 — file-attachment metadata kept for durable resume, no bytes. */
+export type ResumeFileAttachment = Omit<Attachment, 'dataBase64'> & { kind: 'file' }
+
+/**
+ * #666 R4-M2 — the source message persisted with an approval so a cold
+ * restart rebuilds the file-reference pins and attachment lines. Image
+ * attachments are dropped (their content lives in the frozen snapshot) and
+ * inline file bytes (dataBase64) never persist.
+ */
+export type ResumeSourceMessage = Pick<
+  HostIncomingMessage,
+  | 'content'
+  | 'channelType'
+  | 'channelId'
+  | 'sender'
+  | 'timestamp'
+  | 'messageId'
+  | 'hostRef'
+  | 'threadId'
+  | 'imageModel'
+  | 'fileReferenceResolutions'
+> & {
+  /** Only the team scope survives; the channel's raw payload is not persisted. */
+  metadata?: { teamId: string }
+  attachments?: ResumeFileAttachment[]
 }
 
 // ─── Completion Types ───────────────────────────────────────
@@ -601,6 +639,12 @@ export interface PendingApproval {
   /** Attachments collected before suspension. Kept off the LLM message context
    *  but preserved across approval resume so response-file downloads survive. */
   attachments?: Attachment[]
+  /**
+   * #666 R4-M2 — the sanitized source message persisted with the approval so a
+   * cold restart rebuilds the file-reference pins and attachment metadata.
+   * Inline attachment bytes (dataBase64) are stripped before persisting.
+   */
+  sourceMessage?: ResumeSourceMessage
   /** Intent summary (LLM's explanation of why this tool was called),
    *  captured at suspend time so resumeAfterApproval can preserve it on the
    *  re-emitted tool_start event. */
