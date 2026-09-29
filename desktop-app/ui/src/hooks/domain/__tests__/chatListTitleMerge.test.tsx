@@ -23,6 +23,7 @@ import {
   ipcHostWaking,
   ipcHttpError,
   ipcServerErrorMentioning403,
+  wrapLikeElectronIpc,
 } from './__fixtures__/ipcErrors'
 import { type MockClerum, installMockClerum, uninstallMockClerum } from './__fixtures__/mockClerum'
 
@@ -453,9 +454,45 @@ describe('revoked host catalog protection', () => {
     )
   })
 
-  // NEW-dui-2: 429 and 5xx keep the cursor, tell the user once per attempt and
-  // never retry on their own.
+  // R3-L10: the main process validates the cursor before any request and throws
+  // without an HTTP status (`ipc.ts` sanitizeSessionsListQuery). Re-sending the
+  // same cursor repeats that refusal, so it ends the page chain like a 400.
+  it('clears a load-more cursor the main process refuses without an HTTP status', async () => {
+    const rejection = wrapLikeElectronIpc('rpc:listSessions', new Error('Invalid sessions cursor'))
+    expect(httpErrorStatus(rejection)).toBeUndefined()
+    clerum.rpc.listSessions.mockImplementation(
+      async (_agentRef: string, _teamId: string | undefined, query?: { cursor?: string }) => {
+        if (query?.cursor) throw rejection
+        return serverSessions([{ agent: 'agent-x', chatId: 'remote-page-1' }], 'cursor-refused')
+      }
+    )
+    const controller = renderController()
+
+    await waitFor(() => expect(controller.result.current.chatListHasMoreRemoteSessions).toBe(true))
+    await act(async () => {
+      await controller.result.current.loadMoreChatSessions()
+    })
+    await act(async () => {
+      await controller.result.current.loadMoreChatSessions()
+    })
+
+    // Witness: the refused cursor was sent exactly once.
+    expect(
+      clerum.rpc.listSessions.mock.calls.filter(
+        call => (call[2] as { cursor?: string } | undefined)?.cursor === 'cursor-refused'
+      )
+    ).toHaveLength(1)
+    expect(controller.result.current.chatListHasMoreRemoteSessions).toBe(false)
+    expect(controller.spies.pushToast).not.toHaveBeenCalledWith(
+      expect.stringContaining("Couldn't load more chats"),
+      'info'
+    )
+  })
+
+  // NEW-dui-2: 408, 429 and 5xx keep the cursor, tell the user once per attempt
+  // and never retry on their own. A 408 is retryable (RFC 9110 §15.5.9).
   it.each([
+    [408, 'Request Timeout'],
     [429, 'Too Many Requests'],
     [503, 'Service Unavailable'],
   ])('preserves the load-more cursor after a retryable %s', async (status, statusText) => {

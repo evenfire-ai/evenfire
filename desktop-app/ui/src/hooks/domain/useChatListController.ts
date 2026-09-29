@@ -16,6 +16,7 @@ import {
   isConfirmedHostAccessRevoked,
   isHostAvailabilityError,
   isHttpServerError,
+  isInvalidSessionsCursorError,
   isNetworkError,
 } from '../../lib/format'
 import { scheduleAfterFirstPaint } from '../scheduleAfterFirstPaint'
@@ -153,18 +154,20 @@ const byLastActivityDesc = (a: { lastActivityAt: string }, b: { lastActivityAt: 
 
 /**
  * A load-more failure the same cursor can never recover from: any client error
- * other than an authorization status (handled as authority) or a rate limit
- * (retryable). Re-sending the cursor after a 400/404/409/410 only repeats the
- * rejection, so the page chain ends here.
+ * other than an authorization status (handled as authority), a request timeout
+ * or a rate limit (both retryable, RFC 9110), plus the main process's own
+ * status-less cursor refusal. Re-sending the cursor after a 400/404/409/410
+ * only repeats the rejection, so the page chain ends here.
  */
 function isTerminalCatalogCursorError(error: unknown): boolean {
   const status = httpErrorStatus(error)
+  if (status === undefined) return isInvalidSessionsCursorError(error)
   return (
-    status !== undefined &&
     status >= 400 &&
     status < 500 &&
     status !== 401 &&
     status !== 403 &&
+    status !== 408 &&
     status !== 429
   )
 }

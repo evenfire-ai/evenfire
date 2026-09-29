@@ -225,6 +225,18 @@ export function isAuthorizationError(err: unknown): boolean {
   return status === 401 || status === 403
 }
 
+/**
+ * The main process refused a sessions cursor before issuing any request
+ * (`sanitizeSessionsListQuery` in `ipc.ts`). That refusal carries no HTTP
+ * status, only its fixed message behind the IPC wrapper.
+ */
+export function isInvalidSessionsCursorError(err: unknown): boolean {
+  return (
+    httpErrorStatus(err) === undefined &&
+    /(?:^|error: )invalid sessions cursor$/.test(errorText(err))
+  )
+}
+
 export function isHttp403(err: unknown): boolean {
   return httpErrorStatus(err) === 403
 }

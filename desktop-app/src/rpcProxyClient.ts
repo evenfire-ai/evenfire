@@ -168,6 +168,12 @@ function parseToolSteps(value: unknown, label: string): MessageToolStep[] {
   })
 }
 
+/**
+ * Longest sessions cursor the `rpc:listSessions` IPC handler accepts
+ * (`sanitizeSessionsListQuery` in `ipc.ts`; mcp-host enforces the same bound).
+ */
+const SESSIONS_CURSOR_MAX_LENGTH = 2048
+
 // Exported for tests: renderer/parser tests derive their fixtures from the real
 // producer (pr-discipline T1) instead of hand-mocking the parsed shape.
 export function parseSessionsListResult(value: unknown): SessionsListResult {
@@ -250,12 +256,24 @@ export function parseSessionsListResult(value: unknown): SessionsListResult {
     }
   })
   if (record.items.length > 0 && items.length === 0 && firstItemError) throw firstItemError
+  const nextCursor =
+    record.nextCursor != null
+      ? wireString(record.nextCursor, 'sessions response.nextCursor')
+      : undefined
+  // R3-L10: the `rpc:listSessions` IPC handler refuses a longer cursor before
+  // any request, so handing one to the renderer would only produce a status-less
+  // error on "Load more". End the page chain here instead. The cursor is opaque
+  // upstream state: log its length only, never its value.
+  const cursorTooLong = nextCursor !== undefined && nextCursor.length > SESSIONS_CURSOR_MAX_LENGTH
+  if (cursorTooLong) {
+    console.warn(
+      `[RpcProxyClient] Dropped a sessions nextCursor of ${nextCursor.length} characters (limit ${SESSIONS_CURSOR_MAX_LENGTH})`
+    )
+  }
   return {
     items,
     ...(droppedItemCount > 0 ? { droppedItemCount } : {}),
-    ...(record.nextCursor != null
-      ? { nextCursor: wireString(record.nextCursor, 'sessions response.nextCursor') }
-      : {}),
+    ...(nextCursor !== undefined && !cursorTooLong ? { nextCursor } : {}),
   }
 }
 

@@ -215,6 +215,47 @@ describe('RpcProxyClient.listSessions', () => {
     })
   })
 
+  // R3-L10: the `rpc:listSessions` IPC handler refuses a cursor longer than
+  // 2048 characters, so a page cursor that long must never reach the renderer.
+  it.each([
+    [2048, true],
+    [3000, false],
+  ])('keeps a %s-character nextCursor only within the IPC cursor limit', async (length, kept) => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const nextCursor = 'c'.repeat(length)
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          items: [
+            {
+              agent: 'agent-a',
+              chatId: 'chat-a',
+              turnCount: 1,
+              lastActivityAt: '2026-01-01T00:00:00.000Z',
+            },
+          ],
+          nextCursor,
+        }),
+      })
+    )
+
+    const result = await client.listSessions('token', 'host')
+
+    // Witness: the page itself is still delivered in both cases.
+    expect(result.items.map(item => item.chatId)).toEqual(['chat-a'])
+    expect(result.nextCursor).toBe(kept ? nextCursor : undefined)
+    if (kept) {
+      expect(warn).not.toHaveBeenCalled()
+    } else {
+      expect(warn).toHaveBeenCalledTimes(1)
+      const logged = warn.mock.calls[0].map(String).join(' ')
+      expect(logged).toContain(String(length))
+      expect(logged).not.toContain('ccc')
+    }
+  })
+
   it('keeps valid catalog entries when one item is malformed and omits unknown states', async () => {
     vi.stubGlobal(
       'fetch',
