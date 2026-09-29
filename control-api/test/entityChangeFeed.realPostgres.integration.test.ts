@@ -378,23 +378,38 @@ describeRealPostgres('entity change feed real PostgreSQL contract', () => {
       [`entity-change-checkpoint-${randomUUID()}`]
     )
     await instancePool.query('SELECT * FROM entity_change_dispatch_batch(1000, 86400)')
-    const lastEvent = await instancePool.query<{ cursor: string; sequence: string }>(
+    const staleEvent = await instancePool.query<{ cursor: string; sequence: string }>(
       'SELECT cursor::text, sequence::text FROM entity_change_feed ORDER BY sequence DESC LIMIT 1'
     )
+    // Advance the watermark beyond the cursor that will expire. Otherwise the
+    // cursor under test is itself the current watermark, which correctly means
+    // the client is caught up and must not receive a resync.
+    await instancePool.query(
+      `INSERT INTO gfs_resources (drive, name, kind) VALUES ($1, 'checkpoint-newer', 'file')`,
+      [`entity-change-checkpoint-newer-${randomUUID()}`]
+    )
+    await instancePool.query('SELECT * FROM entity_change_dispatch_batch(1000, 86400)')
+    const current = await instancePool.query<{ current_cursor: string; sequence: string }>(
+      `SELECT current_cursor::text, sequence::text
+         FROM entity_change_watermark WHERE singleton = true`
+    )
+    expect(current.rows[0]?.current_cursor).not.toBe(staleEvent.rows[0]?.cursor)
+
     // No listener is involved here: the durable query is the fallback after a missed NOTIFY.
     const recovery = await instancePool.query<{
       needs_resync: boolean
       invalidated_scopes: string[]
     }>('SELECT * FROM entity_change_read_checkpoint($1::uuid, $2)', [
-      lastEvent.rows[0]?.cursor,
+      staleEvent.rows[0]?.cursor,
       10000,
     ])
     expect(recovery.rows[0]?.needs_resync).toBe(false)
 
     await instancePool.query(
-      `UPDATE entity_change_feed SET created_at = clock_timestamp() - interval '2 days'
-        WHERE sequence = $1`,
-      [lastEvent.rows[0]?.sequence]
+      `UPDATE entity_change_feed
+          SET created_at = clock_timestamp() - interval '2 days'
+        WHERE sequence <= $1`,
+      [current.rows[0]?.sequence]
     )
     await instancePool.query('SELECT * FROM entity_change_dispatch_batch(1000, 86400)')
     const expired = await instancePool.query<{
@@ -402,7 +417,7 @@ describeRealPostgres('entity change feed real PostgreSQL contract', () => {
       current_cursor: string
       invalidated_scopes: string[]
     }>('SELECT * FROM entity_change_read_checkpoint($1::uuid, $2)', [
-      lastEvent.rows[0]?.cursor,
+      staleEvent.rows[0]?.cursor,
       10000,
     ])
     expect(expired.rows[0]?.needs_resync).toBe(true)
