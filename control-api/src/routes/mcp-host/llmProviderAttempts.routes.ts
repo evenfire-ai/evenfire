@@ -29,7 +29,7 @@ import { llmProviderAttemptAuthorizeRateLimits } from '../workflows/shared/rateL
 
 const log = rootLogger.child({ module: 'mcp-host-llm-provider-attempts' })
 
-// A8 D4: JSON.parse allocates one heap object per container, so a body under
+// JSON.parse allocates one heap object per container, so a body under
 // the byte limit can exhaust the heap before either authorizer runs. The
 // parser scans the raw bytes first. Every bound below is derived key-by-key
 // from both contracts at the larger of the two values, so the scan refuses no
@@ -181,19 +181,25 @@ export function createMcpHostLlmProviderAttemptRoutes(gateway: K8sGateway): Rout
   // answered here, because body-parser attaches the raw body to them as
   // `err.body` and the global error handler would parse it again. The other
   // parser errors (`request.aborted`, `request.size.invalid`, `stream.*`)
-  // carry no body and go to the global handler, which logs no body.
+  // carry no body and go to the global handler, which logs no body. The log
+  // carries only the fixed parser `type` and the status: `err.message` of a
+  // JSON.parse error can quote a fragment of the body.
   router.use((err: unknown, _req: Request, res: Response, next: NextFunction) => {
     const typed = err as { type?: string; status?: number }
+    const refuse = (status: number, error: string): void => {
+      log.warn({ event: 'llm_provider_attempt_body_refused', type: typed.type, status })
+      res.status(status).json({ error })
+    }
     if (typed.type === 'entity.too.large' || typed.status === 413) {
-      res.status(413).json({ error: 'payload_too_large' })
+      refuse(413, 'payload_too_large')
       return
     }
     if (typed.type === 'encoding.unsupported' || typed.type === 'charset.unsupported') {
-      res.status(415).json({ error: 'unsupported_media_type' })
+      refuse(415, 'unsupported_media_type')
       return
     }
     if (typed.type === 'entity.parse.failed' || typed.type === 'body.structure.too.deep') {
-      res.status(400).json({ error: 'invalid_request' })
+      refuse(400, 'invalid_request')
       return
     }
     next(err)

@@ -21,6 +21,24 @@ import { LlmProviderAttemptAuthorizeError } from '../src/services/llmProviderAtt
 import * as authorizer from '../src/services/llmProviderAttemptAuthorizer.js'
 import * as mcpHostJwt from '../src/utils/auth/mcpHostJwtToken.js'
 
+// Capture structured logs so the refusal event can be asserted without pino
+// transports. Every other logger method is a no-op.
+const { mockLogWarn } = vi.hoisted(() => ({ mockLogWarn: vi.fn() }))
+vi.mock('../src/observability/logger.js', () => {
+  const makeLogger = (): unknown =>
+    new Proxy(
+      {},
+      {
+        get(_t, prop) {
+          if (prop === 'warn') return mockLogWarn
+          if (prop === 'child') return () => makeLogger()
+          return () => {}
+        },
+      }
+    )
+  return { rootLogger: makeLogger() }
+})
+
 vi.mock('../src/services/rateLimiterService.js', () => ({
   checkAndIncrement: vi.fn().mockResolvedValue({
     allowed: true,
@@ -155,7 +173,7 @@ describe('POST /api/v1/mcp-host/llm/provider-attempts/authorize', () => {
 
   // The route parser admits the Grok 35 MiB envelope for both providers, so a
   // Codex body between the two visual caps now reaches the Codex authorizer,
-  // and that authorizer is what must refuse it (#806 review, L1).
+  // and that authorizer is what must refuse it (#806 review).
   it('refuses a Codex V2 body between the Codex and Grok visual caps in the Codex authorizer', async () => {
     const actual = await vi.importActual<
       typeof import('../src/services/llmProviderAttemptAuthorizer.js')
@@ -346,11 +364,11 @@ describe('POST /api/v1/mcp-host/llm/provider-attempts/authorize', () => {
   })
 })
 
-// A8 D4: JSON.parse allocates one heap object per container, so a 35 MiB body
+// JSON.parse allocates one heap object per container, so a 35 MiB body
 // of empty containers exhausts the heap before any authorizer check runs, and
 // a gzip body inflates past the byte limit's intent. The route parser refuses
 // both from the raw bytes.
-describe('authorize raw-body scan before JSON.parse (A8 D4)', () => {
+describe('authorize raw-body scan before JSON.parse', () => {
   const SCAN_LIMITS = MCP_HOST_BODY_STRUCTURE_LIMITS
   const UNBOUNDED = {
     maxStructuralBytes: Infinity,
@@ -363,6 +381,7 @@ describe('authorize raw-body scan before JSON.parse (A8 D4)', () => {
 
   beforeEach(() => {
     vi.mocked(authorizer.authorizeLlmProviderAttempt).mockReset()
+    mockLogWarn.mockReset()
   })
 
   async function withRoute(run: (url: string) => Promise<void>): Promise<void> {
@@ -630,6 +649,88 @@ describe('authorize raw-body scan before JSON.parse (A8 D4)', () => {
       expect(authorizer.authorizeLlmProviderAttempt).toHaveBeenCalledTimes(1)
     })
   })
+
+  it('answers 400 to a 5000-deep and a 150000-deep body without recursion or the authorizer', async () => {
+    // JSON.stringify overflows the stack on a body this deep, so the scan is
+    // the only bound: the authorizer no longer checks nesting itself.
+    await withRoute(async url => {
+      for (const depth of [5000, 150000]) {
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: headers(),
+          body: deepBody(depth),
+        })
+        expect(response.status).toBe(400)
+        expect(await response.json()).toEqual({ error: 'invalid_request' })
+      }
+      // Same depth under a key the authorizer does not accept: refused by the scan too.
+      const unknownKey = await fetch(url, {
+        method: 'POST',
+        headers: headers(),
+        body: `{"request":{},"extra":${'['.repeat(150000)}${']'.repeat(150000)}}`,
+      })
+      expect(unknownKey.status).toBe(400)
+      expect(authorizer.authorizeLlmProviderAttempt).not.toHaveBeenCalled()
+      // Witness: a body at the depth bound reaches the authorizer.
+      fixtureAuthorizer()
+      const atBound = await fetch(url, {
+        method: 'POST',
+        headers: headers(),
+        body: deepBody(SCAN_LIMITS.maxDepth),
+      })
+      expect(atBound.status).toBe(400)
+      expect(authorizer.authorizeLlmProviderAttempt).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  it('logs the fixed refusal type for a structural 413, a byte-limit 413, a too.deep 400 and a 415, never the body', async () => {
+    const marker = 'BODY-TEXT-MUST-NOT-BE-LOGGED'
+    const overContainers = `{"secret":"${marker}","pad":[${'[],'.repeat(SCAN_LIMITS.maxContainers)}[]]}`
+    const tooDeep = `{"secret":"${marker}","pad":${'['.repeat(SCAN_LIMITS.maxDepth)}${']'.repeat(SCAN_LIMITS.maxDepth)}}`
+    const byteLimit = Math.max(
+      CODEX_LIMITS.maxVisualRequestBodyBytes,
+      GROK_LIMITS.maxVisualRequestBodyBytes
+    )
+    const overBytes = `{"secret":"${marker}","pad":"${'x'.repeat(byteLimit)}"}`
+    const refusalEvents = () =>
+      mockLogWarn.mock.calls
+        .map(([fields]) => fields as { event?: string; type?: string; status?: number })
+        .filter(fields => fields?.event === 'llm_provider_attempt_body_refused')
+    await withRoute(async url => {
+      const structural = await fetch(url, {
+        method: 'POST',
+        headers: headers(),
+        body: overContainers,
+      })
+      expect(structural.status).toBe(413)
+      const deep = await fetch(url, { method: 'POST', headers: headers(), body: tooDeep })
+      expect(deep.status).toBe(400)
+      const bytes = await fetch(url, { method: 'POST', headers: headers(), body: overBytes })
+      expect(bytes.status).toBe(413)
+      const encoded = await fetch(url, {
+        method: 'POST',
+        headers: headers({ 'content-encoding': 'gzip' }),
+        body: new Uint8Array(gzipSync('{}')),
+      })
+      expect(encoded.status).toBe(415)
+      expect(authorizer.authorizeLlmProviderAttempt).not.toHaveBeenCalled()
+    })
+    // Liveness witness: the event was logged four times, once per refusal.
+    expect(refusalEvents()).toEqual([
+      {
+        event: 'llm_provider_attempt_body_refused',
+        type: 'body.structure.too.many.containers',
+        status: 413,
+      },
+      { event: 'llm_provider_attempt_body_refused', type: 'body.structure.too.deep', status: 400 },
+      { event: 'llm_provider_attempt_body_refused', type: 'entity.too.large', status: 413 },
+      { event: 'llm_provider_attempt_body_refused', type: 'encoding.unsupported', status: 415 },
+    ])
+    // No logged argument carries the body text or the raw error message.
+    for (const args of mockLogWarn.mock.calls) {
+      expect(JSON.stringify(args)).not.toContain(marker)
+    }
+  }, 60_000)
 })
 
 describe('resolveHostAssignedAssignment', () => {

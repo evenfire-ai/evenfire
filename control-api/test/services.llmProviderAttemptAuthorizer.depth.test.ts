@@ -1,15 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { config } from '../src/config.js'
 import {
-  LlmProviderAttemptAuthorizeError,
   type LlmProviderAttemptAuthorizerDeps,
   authorizeLlmProviderAttempt,
 } from '../src/services/llmProviderAttemptAuthorizer.js'
 import type { McpHostAccessClaims } from '../src/utils/auth/mcpHostJwtToken.js'
 
-// B-L6: a deeply nested authorize body must fail closed as invalid_request
-// before the authorizer serializes it. Without the guard, JSON.stringify throws
-// a RangeError that the route maps to a 500.
+// The contracts cap nesting inside the authorizer (64 containers in tool
+// parameters and tool-call arguments). The route's raw-body scan bounds the
+// whole body at 70 containers before JSON.parse; its end-to-end depth test is
+// in routes.mcp-host.llmProviderAttempts.test.ts.
 
 const PROVIDERS = [
   {
@@ -55,24 +55,20 @@ function wireBody(p: ProviderCase, parametersJson: string, extra = ''): Record<s
   ) as Record<string, unknown>
 }
 
-function nestedArrays(depth: number): string {
-  return `{"x":${'['.repeat(depth)}${']'.repeat(depth)}}`
-}
-
 function nestedObjects(depth: number): string {
   return `${'{"n":'.repeat(depth - 1)}{}${'}'.repeat(depth - 1)}`
 }
 
-const GUARD_PASSED = new Error('guard passed: assignment lookup reached')
+const CAP_PASSED = new Error('contract cap passed: assignment lookup reached')
 
 function deps(): Partial<LlmProviderAttemptAuthorizerDeps> {
   return {
     enabled: true,
-    resolveAssignment: vi.fn().mockRejectedValue(GUARD_PASSED),
+    resolveAssignment: vi.fn().mockRejectedValue(CAP_PASSED),
   }
 }
 
-describe('authorizeLlmProviderAttempt nesting depth guard', () => {
+describe('authorizeLlmProviderAttempt contract nesting cap', () => {
   const previousGrokFlag = config.grokSubscriptionEnabled
 
   beforeEach(() => {
@@ -84,36 +80,16 @@ describe('authorizeLlmProviderAttempt nesting depth guard', () => {
   })
 
   for (const p of PROVIDERS) {
-    for (const depth of [5000, 150000]) {
-      it(`rejects a ${depth}-deep ${p.provider} request with invalid_request, not a RangeError`, async () => {
-        const body = wireBody(p, nestedArrays(depth))
-        const current = deps()
-        const attempt = authorizeLlmProviderAttempt(claims(p.scope), body, current)
-        await expect(attempt).rejects.toBeInstanceOf(LlmProviderAttemptAuthorizeError)
-        await expect(attempt).rejects.toMatchObject({ code: 'invalid_request' })
-        await expect(attempt).rejects.toThrow(/nesting depth/)
-        expect(current.resolveAssignment).not.toHaveBeenCalled()
-      })
-    }
-
-    it(`rejects deep nesting under an unknown ${p.provider} body key before serializing`, async () => {
-      const body = wireBody(p, '{"type":"object"}', `,"extra":${nestedArrays(150000)}`)
-      const current = deps()
-      const attempt = authorizeLlmProviderAttempt(claims(p.scope), body, current)
-      await expect(attempt).rejects.toMatchObject({ code: 'invalid_request' })
-      await expect(attempt).rejects.toThrow(/nesting depth/)
-    })
-
-    it(`lets a ${p.provider} request with 64-deep tool parameters past the guard`, async () => {
+    it(`lets a ${p.provider} request with 64-deep tool parameters past the contract cap`, async () => {
       const body = wireBody(p, nestedObjects(64))
       const current = deps()
       await expect(authorizeLlmProviderAttempt(claims(p.scope), body, current)).rejects.toBe(
-        GUARD_PASSED
+        CAP_PASSED
       )
       expect(current.resolveAssignment).toHaveBeenCalledTimes(1)
     })
 
-    it(`lets a ${p.provider} request with 64-deep assistant tool-call arguments past the guard`, async () => {
+    it(`lets a ${p.provider} request with 64-deep assistant tool-call arguments past the contract cap`, async () => {
       // The deepest accepted tree: body > request > messages[] > message >
       // toolCalls[] > call > arguments, then 64 levels inside arguments.
       const body = wireBody(p, '{"type":"object"}')
@@ -123,7 +99,7 @@ describe('authorizeLlmProviderAttempt nesting depth guard', () => {
       )
       const current = deps()
       await expect(authorizeLlmProviderAttempt(claims(p.scope), body, current)).rejects.toBe(
-        GUARD_PASSED
+        CAP_PASSED
       )
     })
 

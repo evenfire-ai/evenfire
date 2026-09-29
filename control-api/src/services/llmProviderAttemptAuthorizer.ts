@@ -158,11 +158,6 @@ const defaultDeps = (): LlmProviderAttemptAuthorizerDeps => ({
 
 export { computeCodexPolicyHash }
 
-// body > request > messages[] > message > toolCalls[] > call > arguments: the
-// deepest free-form tree the contracts accept sits six containers below the
-// body root, and may itself nest maxNestingDepth containers.
-const MAX_AUTHORIZE_BODY_DEPTH = Math.max(LIMITS.maxNestingDepth, GROK_LIMITS.maxNestingDepth) + 6
-
 /**
  * #731 — room for the authorize envelope around the contract-capped `request`:
  * ids, revisions, hashes and recipe names, a few hundred bytes in practice.
@@ -175,28 +170,6 @@ const MAX_AUTHORIZE_BODY_DEPTH = Math.max(LIMITS.maxNestingDepth, GROK_LIMITS.ma
  * one.
  */
 export const AUTHORIZE_ENVELOPE_ALLOWANCE_BYTES = ENVELOPE_ALLOWANCE_BYTES
-
-/**
- * Reject an over-deep body before anything serializes it. Iterative, so an
- * attacker-controlled nesting depth cannot overflow the stack here; without it
- * JSON.stringify throws a RangeError that surfaces as a 500.
- */
-function assertBodyNestingWithinLimit(body: Record<string, unknown>): void {
-  const stack: Array<[unknown, number]> = [[body, 1]]
-  while (stack.length > 0) {
-    const [node, depth] = stack.pop()!
-    if (depth > MAX_AUTHORIZE_BODY_DEPTH) {
-      throw new LlmProviderAttemptAuthorizeError(
-        'invalid_request',
-        'request body exceeds the maximum nesting depth'
-      )
-    }
-    const children = Array.isArray(node) ? node : Object.values(node as Record<string, unknown>)
-    for (const child of children) {
-      if (child !== null && typeof child === 'object') stack.push([child, depth + 1])
-    }
-  }
-}
 
 function firstUnknownKey(body: Record<string, unknown>): string | null {
   for (const key of Object.keys(body)) {
@@ -277,7 +250,8 @@ async function authorizeGrokProviderAttempt(
       'mcp-host JWT lacks the llm:grok:execute scope'
     )
   }
-  assertBodyNestingWithinLimit(body)
+  // The route's raw-body scan bounds nesting depth before parsing, so
+  // JSON.stringify cannot overflow the stack here.
   const serialized = JSON.stringify(body)
   // Same budgets as the Codex path (#784): the larger of the non-image cap plus
   // the envelope allowance and the V2 visual envelope bounds the whole body;
@@ -683,7 +657,8 @@ export async function authorizeLlmProviderAttempt(
       'mcp-host JWT lacks the llm:codex:execute scope'
     )
   }
-  assertBodyNestingWithinLimit(body)
+  // The route's raw-body scan bounds nesting depth before parsing, so
+  // JSON.stringify cannot overflow the stack here.
   const serialized = JSON.stringify(body)
   // The larger of the two budgets wins, as on the gateway's client_max_body_size:
   // the non-image cap plus the envelope allowance (#731), or the V2 visual

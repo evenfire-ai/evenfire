@@ -293,8 +293,8 @@ classifies it as `ContextLengthExceeded`, not retryable.
 
 Follow-up: a refusal metric by type (`body.structure.*`) and a histogram of
 structure counts per request, to check the bounds against real use. The
-262144-member and 1048576-element values are subject to the separate V5
-memory gate; the container measurements above do not validate them.
+262144-member and 1048576-element values need a separate memory
+measurement; the container measurements above do not validate them.
 
 ### Compatibility and deployment order
 
@@ -441,7 +441,7 @@ behavior changes:
     request acquires in the order visual slot, byte budget, stream slot, and
     no two requests can wait on each other.
 
-    **Per-principal visual share (B4).** In addition to the gate, each
+    **Per-principal visual share.** In addition to the gate, each
     platform identity (`sub` plus sorted `hostRefs`) may hold at most 4
     visual entries (running or queued) of the gate's 10. A token whose `sub`
     is missing, empty or not a string is refused 401 before any gate or
