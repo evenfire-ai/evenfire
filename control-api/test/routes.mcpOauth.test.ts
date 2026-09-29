@@ -61,6 +61,15 @@ function seedOauthServer(
   )
 }
 
+// The uid the gateway assigned to the seeded CR — the installation identity the
+// grant readers are fenced by. Read back from the producer, never invented.
+async function liveUid(gateway: MockGateway, name: string): Promise<string> {
+  const cr = (await gateway.getResource('mcpservers', name, MCP_NS)) as {
+    metadata: { uid: string }
+  }
+  return cr.metadata.uid
+}
+
 // Control JWT derived from the REAL minter (T1) — no hand-forged token.
 function controlToken(scopes: Array<'oauth:user-token'> = ['oauth:user-token']): string {
   return issueMcpHostControlJwt('mcp-host', 'standalone', ['mcp-host/standalone'], { scopes }).token
@@ -113,6 +122,36 @@ describe('routes/mcp-oauth — POST /mcp-oauth/user-token (U1)', () => {
     expect(res.status).toBe(401)
   })
 
+  it('isolates the rate-limit bucket per standalone host (no sub collapse)', async () => {
+    // Every standalone 1st-party host shares sub=<hostsNamespace>/standalone, so
+    // keying the limiter by sub would drop all of them in one bucket. The bucket
+    // key must be the verified per-host principal (hostRefs[0]) instead.
+    seedOauthServer(gateway, { name: 'gdrive' })
+    vi.mocked(checkAndIncrement).mockClear()
+
+    const tokenA = issueMcpHostControlJwt('mcp-host', 'standalone', ['host-a'], {
+      scopes: ['oauth:user-token'],
+    }).token
+    const tokenB = issueMcpHostControlJwt('mcp-host', 'standalone', ['host-b'], {
+      scopes: ['oauth:user-token'],
+    }).token
+
+    await request(app)
+      .post('/api/v1/mcp-oauth/user-token')
+      .set('Authorization', `Bearer ${tokenA}`)
+      .send({ mcpServerName: 'gdrive', userId: 'user-1' })
+    await request(app)
+      .post('/api/v1/mcp-oauth/user-token')
+      .set('Authorization', `Bearer ${tokenB}`)
+      .send({ mcpServerName: 'gdrive', userId: 'user-1' })
+
+    const keys = vi.mocked(checkAndIncrement).mock.calls.map(call => call[0])
+    expect(keys).toHaveLength(2)
+    expect(keys[0]).toBe('mcp-oauth:mcp-host/host/host-a')
+    expect(keys[1]).toBe('mcp-oauth:mcp-host/host/host-b')
+    expect(keys[0]).not.toBe(keys[1])
+  })
+
   it('403 with a valid control JWT that lacks the oauth:user-token scope', async () => {
     seedOauthServer(gateway, { name: 'gdrive' })
     const res = await request(app)
@@ -148,7 +187,16 @@ describe('routes/mcp-oauth — POST /mcp-oauth/user-token (U1)', () => {
         sql.includes('FROM oauth_grants') &&
         sql.includes("grant_kind = 'user'")
     )
-    expect(grantQuery?.[1]).toEqual(['mcpserver', MCP_NS, 'gdrive', 'user-1', 'google-drive'])
+    expect(grantQuery?.[1]).toEqual([
+      'mcpserver',
+      MCP_NS,
+      'gdrive',
+      'user-1',
+      'google-drive',
+      await liveUid(gateway, 'gdrive'),
+      // Baked CR: the reader key carries its provider for unsealed legacy rows.
+      'google',
+    ])
   })
 
   it('404 no_grant when no row exists', async () => {
@@ -214,7 +262,16 @@ describe('routes/mcp-oauth — POST /mcp-oauth/user-token (U1)', () => {
         sql.includes("grant_kind = 'shared'")
     )
     // owner, ns, name, contextId(=contextRef), clientId — userId NOT a coordinate.
-    expect(grantQuery?.[1]).toEqual(['mcpserver', MCP_NS, 'gdrive', 'ctx-A', 'google-drive'])
+    expect(grantQuery?.[1]).toEqual([
+      'mcpserver',
+      MCP_NS,
+      'gdrive',
+      'ctx-A',
+      'google-drive',
+      await liveUid(gateway, 'gdrive'),
+      // Baked CR: the reader key carries its provider for unsealed legacy rows.
+      'google',
+    ])
   })
 
   // Guardian (T5): a caller with the scope must NOT be able to fetch another
@@ -261,7 +318,16 @@ describe('routes/mcp-oauth — POST /mcp-oauth/user-token (U1)', () => {
         sql.includes('FROM oauth_grants') &&
         sql.includes("grant_kind = 'shared'")
     )
-    expect(grantQuery?.[1]).toEqual(['mcpserver', MCP_NS, 'gdrive', 'ctx-A', 'google-drive'])
+    expect(grantQuery?.[1]).toEqual([
+      'mcpserver',
+      MCP_NS,
+      'gdrive',
+      'ctx-A',
+      'google-drive',
+      await liveUid(gateway, 'gdrive'),
+      // Baked CR: the reader key carries its provider for unsealed legacy rows.
+      'google',
+    ])
   })
 
   // Fail-closed: a context-flavor server that is missing its CRD-required
@@ -489,7 +555,16 @@ describe('routes/mcp-oauth — POST /mcp-oauth/grants/exists (mini-spec 13)', ()
         sql.includes('FROM oauth_grants') &&
         sql.includes("grant_kind = 'user'")
     )
-    expect(grantQuery?.[1]).toEqual(['mcpserver', MCP_NS, 'gdrive', 'nobody', 'google-drive'])
+    expect(grantQuery?.[1]).toEqual([
+      'mcpserver',
+      MCP_NS,
+      'gdrive',
+      'nobody',
+      'google-drive',
+      await liveUid(gateway, 'gdrive'),
+      // Baked CR: the reader key carries its provider for unsealed legacy rows.
+      'google',
+    ])
   })
 
   it('200: reports exists:true when the SELECT 1 finds a row', async () => {
@@ -580,7 +655,16 @@ describe('routes/mcp-oauth — POST /mcp-oauth/grants/exists (mini-spec 13)', ()
         sql.includes("grant_kind = 'shared'")
     )
     // contextId coordinate is the authoritative ctx-real, NOT the body ctx-foreign.
-    expect(grantQuery?.[1]).toEqual(['mcpserver', MCP_NS, 'team', 'ctx-real', 'google-drive'])
+    expect(grantQuery?.[1]).toEqual([
+      'mcpserver',
+      MCP_NS,
+      'team',
+      'ctx-real',
+      'google-drive',
+      await liveUid(gateway, 'team'),
+      // Baked CR: the reader key carries its provider for unsealed legacy rows.
+      'google',
+    ])
   })
 
   // FIX A: a malformed entry must NOT be dropped (that breaks positional/tuple

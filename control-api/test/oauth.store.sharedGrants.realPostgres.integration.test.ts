@@ -8,6 +8,7 @@ import { deriveOAuthEncryptionKey } from '../src/oauth/encryption.js'
 import {
   bootstrapSharedOAuthGrant,
   getOAuthGrant,
+  oauthGrantExists,
   refreshOAuthGrantTokens,
   upsertOAuthGrant,
 } from '../src/oauth/store.js'
@@ -27,6 +28,9 @@ function databaseUrl(baseUrl: string, database: string): string {
 }
 
 const KEY = deriveOAuthEncryptionKey(config.oauthEncryptionKey)
+// The McpServer installation these grants were consented against; readers carry
+// the live CR's uid, writers seal with it.
+const INSTALL_UID = 'uid-install-1'
 
 describeRealPostgres('oauth store — shared grants (real Postgres)', () => {
   const database = `control_api_shared_grants_${randomUUID().replace(/-/g, '')}`
@@ -63,6 +67,7 @@ describeRealPostgres('oauth store — shared grants (real Postgres)', () => {
     recipeName: server,
     contextId,
     oauthClientId: 'google-drive',
+    crUid: INSTALL_UID,
   })
 
   it('bootstrap is first-wins; a token refresh preserves bootstrapped_by and updates tokens', async () => {
@@ -169,6 +174,7 @@ describeRealPostgres('oauth store — shared grants (real Postgres)', () => {
       oauthClientId: 'google-drive',
       provider: 'google',
       accessToken: 'USER-TOKEN',
+      crUid: INSTALL_UID,
     })
     await bootstrapSharedOAuthGrant(db, KEY, {
       ...sharedKey(server, 'ctx-1'),
@@ -183,6 +189,7 @@ describeRealPostgres('oauth store — shared grants (real Postgres)', () => {
       recipeName: server,
       userId: 'user-1',
       oauthClientId: 'google-drive',
+      crUid: INSTALL_UID,
     })
     const sharedGrant = await getOAuthGrant(db, KEY, sharedKey(server, 'ctx-1'))
     expect(userGrant?.accessToken).toBe('USER-TOKEN')

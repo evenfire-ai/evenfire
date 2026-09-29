@@ -44,6 +44,7 @@ llm_provider_attempts	upsert
 member_registration_credentials	upsert
 mcp_secret_rollback_permits	legacy_dml
 notification_deliveries	legacy_dml
+dynamic_clients	legacy_dml
 oauth_grants	legacy_dml
 plugin_workload_sdk_credential_ticket_jtis	legacy_dml
 plugin_workload_sdk_invocation_attempts	legacy_dml

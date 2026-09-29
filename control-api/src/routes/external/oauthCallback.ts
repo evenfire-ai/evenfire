@@ -90,6 +90,9 @@ export function createOAuthCallbackRouter(gateway: K8sGateway): Router {
       }
       const resolved = resolveServerOAuthSubject(server)
       if (!resolved) return null
+      // `resolved.crUid` seals grants written by this consent to the CR's identity:
+      // the uid is the apiserver's, unique per object, so a same-name reinstall's
+      // teardown never purges this installation's grant and its readers never see it.
       return { namespace: config.mcpServersNamespace, ...resolved }
     },
   }
@@ -105,6 +108,9 @@ export function createOAuthCallbackRouter(gateway: K8sGateway): Router {
       const { oauthClientId } = req.params
       const code = typeof req.query.code === 'string' ? req.query.code : ''
       const state = typeof req.query.state === 'string' ? req.query.state : ''
+      // RFC 9207 issuer — validated on the remote lane against the pinned
+      // `issForCallback` inside handleOAuthCallback (AS mix-up defence).
+      const iss = typeof req.query.iss === 'string' ? req.query.iss : undefined
 
       if (!code || !state) {
         return res.status(400).json({ error: 'missing_code_or_state' })
@@ -113,7 +119,7 @@ export function createOAuthCallbackRouter(gateway: K8sGateway): Router {
       const redirectUri = buildPublicCallbackUrl(req, oauthClientId, config.oauthCallbackBaseUrl)
 
       const result = await handleOAuthCallback(
-        { oauthClientId, code, state, redirectUri },
+        { oauthClientId, code, state, redirectUri, iss },
         {
           db: { query: (text, values) => pool.query(text, values) },
           recipeReader,
@@ -143,6 +149,15 @@ export function createOAuthCallbackRouter(gateway: K8sGateway): Router {
             )
         case 'invalid_state':
           return res.status(400).json({ error: 'invalid_state', reason: result.reason })
+        case 'issuer_mismatch':
+          // RFC 9207 mix-up defence — no issuer echo. 400, consistent with the
+          // sibling invalid_state mapping.
+          return res.status(400).json({ error: 'issuer_mismatch' })
+        case 'issuer_binding_required':
+          // RFC 9207 mix-up defence, absence case: the remote server pinned no
+          // issuer at install, so the shared remote callback cannot attribute the
+          // code. Fail closed — same 400 class, distinct error for operator triage.
+          return res.status(400).json({ error: 'issuer_binding_required' })
         case 'unknown_oauth_client':
           return res.status(400).json({ error: 'unknown_oauth_client' })
         case 'recipe_not_found':
@@ -153,6 +168,10 @@ export function createOAuthCallbackRouter(gateway: K8sGateway): Router {
           return res.status(400).json({ error: 'server_missing_context' })
         case 'context_membership_denied':
           return res.status(403).json({ error: 'context_membership_denied' })
+        case 'remote_oauth_spec_incoherent':
+          return res
+            .status(409)
+            .json({ error: 'remote_oauth_spec_incoherent', reason: result.reason })
         case 'secret_missing':
           return res.status(503).json(integrationNotConfigured(oauthClientId, result.secret))
         case 'unsupported_provider':
@@ -172,6 +191,20 @@ export function createOAuthCallbackRouter(gateway: K8sGateway): Router {
   return router
 }
 
+/**
+ * Normalize the configured public callback base URL into a bare origin (trailing
+ * slashes stripped), or `null` when none is configured. This is the SAME origin
+ * derivation `buildPublicCallbackUrl` uses for its configured branch; the CIMD
+ * document (`oauth/cimd.ts`) reuses it so the served `client_id` / `redirect_uris`
+ * share a byte-identical origin with the callback redirect. Unlike the callback,
+ * CIMD callers must NOT fall back to the request Host (an AS would see the
+ * internal proxy Host), so this returns `null` for them to fail closed on.
+ */
+export function normalizeConfiguredOrigin(configuredBaseUrl?: string): string | null {
+  if (!configuredBaseUrl || configuredBaseUrl.length === 0) return null
+  return configuredBaseUrl.replace(/\/+$/, '')
+}
+
 export function buildPublicCallbackUrl(
   req: { protocol: string; get: (h: string) => string | undefined },
   oauthClientId: string,
@@ -188,9 +221,8 @@ export function buildPublicCallbackUrl(
   // public base URL (CONTROL_API_OAUTH_CALLBACK_BASE_URL). Fall back to the
   // request Host for local/dev where none is set.
   const origin =
-    configuredBaseUrl && configuredBaseUrl.length > 0
-      ? configuredBaseUrl.replace(/\/+$/, '')
-      : `${req.protocol}://${req.get('host') ?? 'localhost'}`
+    normalizeConfiguredOrigin(configuredBaseUrl) ??
+    `${req.protocol}://${req.get('host') ?? 'localhost'}`
   return `${origin}/api/v1/oauth-callback/${encodeURIComponent(oauthClientId)}`
 }
 
