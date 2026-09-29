@@ -1,12 +1,41 @@
 'use client'
 
+import { useEffect, useState } from 'react'
 import { useAuth } from '@components/AuthContext'
 import { AuthGate } from '@components/AuthGate'
+import { IconExternalLink } from '@components/icons'
+import { getDesktopEnvironment } from '@lib/api'
+import type { DesktopEnvironmentResponse } from '@/app/types/api'
+
+function getDesktopAppHref(environment: DesktopEnvironmentResponse): string | null {
+  if (!environment.externalRestApiBaseUrl) return null
+  const params = new URLSearchParams({
+    externalRestApiBaseUrl: environment.externalRestApiBaseUrl,
+    tenantName: environment.appName || 'Evenfire',
+  })
+  return `evenfire://desktop-environment?${params.toString()}`
+}
 
 function HomeContent() {
   const { authState } = useAuth()
   const me = authState.me
   const displayName = me?.profile?.displayName || me?.name || me?.email || 'there'
+  const [desktopAppHref, setDesktopAppHref] = useState<string | null>(null)
+
+  useEffect(() => {
+    let isCurrent = true
+    void getDesktopEnvironment()
+      .then(environment => {
+        if (isCurrent) setDesktopAppHref(getDesktopAppHref(environment))
+      })
+      .catch(() => {
+        if (isCurrent) setDesktopAppHref(null)
+      })
+
+    return () => {
+      isCurrent = false
+    }
+  }, [])
 
   return (
     <section className="cu-page-stack">
@@ -14,7 +43,29 @@ function HomeContent() {
         <div className="cu-card__body">
           <p className="eyebrow">Evenfire Profile</p>
           <h2 className="page-title page-title--large">Welcome, {displayName}</h2>
-          <p className="body-copy">You are signed in to your Evenfire profile.</p>
+        </div>
+      </div>
+
+      <div className="cu-card">
+        <div className="cu-card__body">
+          <p className="body-copy">
+            You are signed in to the Evenfire <strong>Profile Portal</strong>.
+          </p>
+          <p className="body-copy">
+            {desktopAppHref ? (
+              <a className="cu-home-desktop-link" href={desktopAppHref}>
+                Open Desktop App <IconExternalLink />
+              </a>
+            ) : (
+              <span
+                className="cu-home-desktop-link cu-home-desktop-link--unavailable"
+                aria-disabled="true"
+              >
+                Open Desktop App <IconExternalLink />
+              </span>
+            )}{' '}
+            instead
+          </p>
         </div>
       </div>
 

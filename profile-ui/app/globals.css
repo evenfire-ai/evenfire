@@ -298,6 +298,37 @@ code {
   text-decoration: underline;
 }
 
+.cu-home-desktop-link {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--cu-space-1);
+  color: var(--cu-link);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.cu-home-desktop-link:hover,
+.cu-home-desktop-link:focus-visible {
+  color: var(--cu-link-hover);
+  text-decoration: underline;
+}
+
+.cu-home-desktop-link:focus-visible {
+  border-radius: 2px;
+  outline: 2px solid rgba(var(--cu-focus-rgb), 0.8);
+  outline-offset: 2px;
+}
+
+.cu-home-desktop-link--unavailable {
+  color: var(--cu-text-soft);
+  cursor: default;
+}
+
+.cu-home-desktop-link--unavailable:hover {
+  color: var(--cu-text-soft);
+  text-decoration: none;
+}
+
 .cu-auth-return-link {
   margin-top: var(--cu-space-4);
 }
