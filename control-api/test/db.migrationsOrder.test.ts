@@ -95,6 +95,22 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
     }
   })
 
+  it('registers an additive migration for expired entity-change cursor convergence', async () => {
+    const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
+    const migration = CONTROL_API_MIGRATIONS.find(
+      candidate => candidate.version === '0120_entity_change_checkpoint_cursor_convergence'
+    )
+    expect(migration).toBeDefined()
+    if (!migration) return
+
+    const query = vi.fn().mockResolvedValue({ rows: [], rowCount: 0 })
+    await migration.apply({ query } as never)
+
+    const sql = query.mock.calls.map(([statement]) => String(statement)).join('\n')
+    expect(sql).toMatch(/IF requested_cursor = current_cursor THEN/i)
+    expect(sql).not.toMatch(/current_watermark > pruned_watermark/i)
+  })
+
   it('requires 0116_mcp_secret_rollback_permits to persist expiring rollback permits', async () => {
     const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
     // Renumbered twice while syncing onto dev: 0101 -> 0109 -> 0116. The earlier

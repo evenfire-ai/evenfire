@@ -14,7 +14,10 @@ import {
   applyCodexSubscriptionConnectionSchema,
 } from './services/codexSubscriptionConnection.js'
 import { applyCodexSubscriptionOAuthStateSchema } from './services/codexSubscriptionOAuthState.js'
-import { applyEntityChangeSchema } from './services/entityChangeSchema.js'
+import {
+  applyEntityChangeCheckpointSchema,
+  applyEntityChangeSchema,
+} from './services/entityChangeSchema.js'
 import {
   applyGfsUploadCleanupSchema,
   applyGfsUploadFinalizingSchema,
@@ -6268,6 +6271,10 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     // not rerun entity-change DDL in either previously deployed environment.
     legacyVersions: ['0116_durable_entity_change_feed', '0117_durable_entity_change_feed'],
     apply: applyEntityChangeSchema,
+  },
+  {
+    version: '0120_entity_change_checkpoint_cursor_convergence',
+    apply: applyEntityChangeCheckpointSchema,
   },
 ]
 

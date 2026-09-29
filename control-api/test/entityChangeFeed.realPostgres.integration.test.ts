@@ -399,6 +399,7 @@ describeRealPostgres('entity change feed real PostgreSQL contract', () => {
     await instancePool.query('SELECT * FROM entity_change_dispatch_batch(1000, 86400)')
     const expired = await instancePool.query<{
       needs_resync: boolean
+      current_cursor: string
       invalidated_scopes: string[]
     }>('SELECT * FROM entity_change_read_checkpoint($1::uuid, $2)', [
       lastEvent.rows[0]?.cursor,
@@ -407,6 +408,33 @@ describeRealPostgres('entity change feed real PostgreSQL contract', () => {
     expect(expired.rows[0]?.needs_resync).toBe(true)
     expect(expired.rows[0]?.invalidated_scopes).toEqual(['gfs', 'authorization'])
     expect(JSON.stringify(expired.rows)).not.toContain(resource.rows[0]?.resource_id)
+
+    // The resync response advances to the current watermark. Reusing that
+    // server-issued cursor is caught up even when retention has pruned every
+    // corresponding feed row; an idle client must not receive resync forever.
+    const returnedCursor = expired.rows[0]?.current_cursor
+    expect(returnedCursor).toBeTruthy()
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const resumed = await instancePool.query<{
+        needs_resync: boolean
+        current_cursor: string
+        invalidated_scopes: string[]
+      }>('SELECT * FROM entity_change_read_checkpoint($1::uuid, $2)', [returnedCursor, 10000])
+      expect(resumed.rows[0]?.needs_resync).toBe(false)
+      expect(resumed.rows[0]?.current_cursor).toBe(returnedCursor)
+      expect(resumed.rows[0]?.invalidated_scopes).toEqual([])
+    }
+
+    const freshClient = await instancePool.query<{
+      needs_resync: boolean
+      current_cursor: string
+      invalidated_scopes: string[]
+    }>('SELECT * FROM entity_change_read_checkpoint($1::uuid, $2)', [
+      '00000000-0000-0000-0000-000000000000',
+      10000,
+    ])
+    expect(freshClient.rows[0]?.needs_resync).toBe(true)
+    expect(freshClient.rows[0]?.invalidated_scopes).toEqual(['gfs', 'authorization'])
   })
 
   it('coalesces latest-state invalidations and keeps feed storage behind the runtime boundary', async () => {

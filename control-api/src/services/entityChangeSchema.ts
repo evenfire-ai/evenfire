@@ -226,6 +226,20 @@ export async function applyEntityChangeSchema(db: DbClient): Promise<void> {
     END;
     $$;
 
+    REVOKE ALL ON FUNCTION entity_change_dispatch_batch(INTEGER, INTEGER) FROM PUBLIC;
+    GRANT EXECUTE ON FUNCTION entity_change_dispatch_batch(INTEGER, INTEGER) TO control_api_runtime;
+  `)
+
+  await applyEntityChangeCheckpointSchema(db)
+}
+
+/**
+ * Repairable checkpoint function contract. Kept separate so deployed databases
+ * can receive correctness fixes through an additive migration instead of
+ * relying on an already-applied migration body to execute again.
+ */
+export async function applyEntityChangeCheckpointSchema(db: DbClient): Promise<void> {
+  await db.query(`
     DROP FUNCTION IF EXISTS entity_change_read_checkpoint(UUID);
     CREATE OR REPLACE FUNCTION entity_change_read_checkpoint(
       requested_cursor UUID,
@@ -265,8 +279,10 @@ export async function applyEntityChangeSchema(db: DbClient): Promise<void> {
         SELECT sequence INTO cursor_sequence FROM public.entity_change_feed
          WHERE cursor = requested_cursor;
       END IF;
-      IF cursor_sequence IS NULL AND requested_cursor = current_cursor AND
-         current_watermark > pruned_watermark THEN
+      -- The current cursor is caught up even when retention has pruned every
+      -- feed row at or before the watermark. Advancing to this cursor after a
+      -- resync must converge instead of returning resync_required on every poll.
+      IF requested_cursor = current_cursor THEN
         cursor_sequence := current_watermark;
       END IF;
       IF cursor_sequence IS NULL OR cursor_sequence < pruned_watermark OR
@@ -287,9 +303,7 @@ export async function applyEntityChangeSchema(db: DbClient): Promise<void> {
     END;
     $$;
 
-    REVOKE ALL ON FUNCTION entity_change_dispatch_batch(INTEGER, INTEGER) FROM PUBLIC;
     REVOKE ALL ON FUNCTION entity_change_read_checkpoint(UUID, INTEGER) FROM PUBLIC;
-    GRANT EXECUTE ON FUNCTION entity_change_dispatch_batch(INTEGER, INTEGER) TO control_api_runtime;
     GRANT EXECUTE ON FUNCTION entity_change_read_checkpoint(UUID, INTEGER) TO control_api_runtime;
   `)
 }
