@@ -84,8 +84,14 @@ const DESKTOP_READS_2026_09_18 = (
   ) as { offsetsMs: number[] }
 ).offsetsMs
 
-/** Open client sockets per scenario; under the 128-entry macOS listen backlog. */
-const MAX_CLIENT_SOCKETS = 64
+/**
+ * Client socket cap per scenario. macOS only: its listen backlog is limited by
+ * kern.ipc.somaxconn (128), so 481 simultaneous connects reset the overflow with
+ * ECONNRESET before any request reaches the limiter, and the cap stays under that
+ * backlog. Elsewhere (Linux CI) the agent is uncapped, so every scenario keeps its
+ * full request concurrency in flight.
+ */
+const MAX_CLIENT_SOCKETS = process.platform === 'darwin' ? 64 : Infinity
 
 /** Every read class at `read`: for scenarios that exercise one read class. */
 function uniformBudgets(read: number, operation: number, ip: number): Budgets {
@@ -277,10 +283,9 @@ describeRealPostgres('external GFS rate limits under concurrent load (real Postg
     const server = http.createServer(app)
     await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
     const { port } = server.address() as AddressInfo
-    // The listen backlog is capped by the OS (kern.ipc.somaxconn is 128 on macOS), so
-    // 481 simultaneous connects reset the overflow with ECONNRESET before any request
-    // reaches the limiter. Bound the open sockets below that cap; the agent queues the
-    // rest and the server still handles a full socket pool of requests concurrently.
+    // On macOS the agent is capped (see MAX_CLIENT_SOCKETS): it queues the requests
+    // beyond the cap, so up to 64 are in flight at once instead of all of them. On other
+    // platforms maxSockets is Infinity, the Node default, and every request is in flight.
     const agent = new http.Agent({ keepAlive: true, maxSockets: MAX_CLIENT_SOCKETS })
     if (openServer) throw new Error('a scenario server is already open')
     openServer = {
@@ -763,7 +768,7 @@ describeRealPostgres('external GFS rate limits under concurrent load (real Postg
     })
   }, 120_000)
 
-  it('E1: 481 concurrent reads by one actor at the production budget: 480 allowed, one Postgres 429, no 503', async () => {
+  it('E1: 481 reads issued together by one actor at the production budget: 480 allowed, one Postgres 429, no 503', async () => {
     const budgets = PRODUCTION_BUDGETS
     const { send } = await startScenario(budgets)
     const userId = await seedUser()

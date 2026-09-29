@@ -115,7 +115,7 @@ marker to the current worktree, rebuilds only the known affected image
 selectors, and restarts only their deployments. A fresh profile, an explicit
 forced sync, or an unmapped runtime path must fall back to the established
 complete image build. A service-only update may use the targeted path when the
-profile is already healthy; record it as a *targeted sync* and prove the
+profile is already healthy; record it as a _targeted sync_ and prove the
 affected deployment is Ready plus its user-facing health endpoint. Do not
 report that as a full reconcile or as T2.
 
@@ -224,10 +224,13 @@ also exit zero; a green reporter cannot hide a teardown, worker, OOM, signal,
 or partial-selection failure. Run the local Node/package/Docker preflight
 before expensive T0 work. That preflight (`packages=2`) only checks host
 `vitest`+`pg` in `control-api` and `gfs-controller`. `pre-gate-sync` later
-runs host `npm test` in each changed package (`external-rest-api`,
+runs host `npm test` in each changed package (`packages/workflow-runtime-core`,
+`packages/network-policy-core`, `control-api`, `external-rest-api`,
 `rpc-proxy`, `mcp-host`, `host-context-controller`, `workflow-recipes`,
-`control-ui`, `desktop-app`, and the `packages/*` listed in the
-minikube-t0-t1-t2 skill). `sh: vitest: command not found` /
+`packages/workflow-sdk`, `workflow-approval-request-reader`, `control-ui`,
+and `desktop-app`; `gfs-controller` is not on that list, and the
+minikube-t0-t1-t2 skill `reference.md` carries the same list).
+`sh: vitest: command not found` /
 `minikube-pre-gate-sync` Error 127 after planner PASS and Ready deployments
 is a missing host `npm ci` in that directory — not GFS and not a license
 for a new profile. Install every remaining pre-gate package, then re-enter
