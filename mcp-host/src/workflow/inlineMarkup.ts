@@ -281,6 +281,15 @@ function withPlaceholdersKept(text: string): string {
   })
 }
 
+/**
+ * `label` as the text of a markdown link. A bracket, or a backslash that ends
+ * the label, is escaped so it prints instead of ending the label; an escape the
+ * label already holds is kept whole, so it prints as it does outside a link.
+ */
+function linkLabel(label: string): string {
+  return label.replace(/\\[\s\S]?|[[\]]/g, m => (m.length === 2 ? m : `\\${m}`))
+}
+
 function htmlSegmentToMarkdown(text: string): string {
   const html = withListMarkers(withoutScripts(withoutComments(withPlaceholdersKept(text)))).replace(
     LINE_BREAK,
@@ -290,8 +299,7 @@ function htmlSegmentToMarkdown(text: string): string {
     .replace(IMG_TAG, imageMarkdown)
     .replace(ANCHOR, (_whole: string, tag: string, label: string) => {
       const href = HREF.exec(tag)?.[1]
-      // Brackets in the label are escaped, so they print instead of ending it.
-      return href ? `[${label.replace(/[[\]]/g, '\\$&')}](${href})` : label
+      return href ? `[${linkLabel(label)}](${href})` : label
     })
     .replace(BOLD_TAG, tag => styleMark('bold', tag))
     .replace(ITALIC_TAG, tag => styleMark('italics', tag))

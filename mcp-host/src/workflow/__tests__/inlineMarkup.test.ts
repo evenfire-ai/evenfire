@@ -184,6 +184,38 @@ describe('inline markdown', () => {
     ])
   })
 
+  it('prints backslashes in the label of an HTML link as the text around it prints them', () => {
+    const labels = [
+      'C:\\Users\\',
+      'a\\',
+      '\\',
+      'a \\[1\\] b',
+      '[\\]',
+      'a\\\\]',
+      '\\*x\\*',
+      'path\\to',
+      '&#92;[1]',
+    ]
+    for (const label of labels) {
+      const outside = inlineSpans(label)
+        .map(s => s.text)
+        .join('')
+      expect(inlineSpans(`<a href="https://x.com/a">${label}</a> end`), label).toEqual([
+        { text: outside, link: 'https://x.com/a' },
+        { text: ' end' },
+      ])
+    }
+    expect(htmlToMarkdownInline('<a href="https://x.test/a">C:\\dir\\</a>')).toBe(
+      '[C:\\dir\\\\](https://x.test/a)'
+    )
+    expect(htmlToMarkdownInline('<a href="https://x.test/a">a \\[1\\] b</a>')).toBe(
+      '[a \\[1\\] b](https://x.test/a)'
+    )
+    expect(htmlToMarkdownInline('<a href="https://x.test/a">[1] a]b</a>')).toBe(
+      '[\\[1\\] a\\]b](https://x.test/a)'
+    )
+  })
+
   it('keeps balanced parentheses in a link target', () => {
     expect(inlineSpans('[wiki](https://en.wikipedia.org/wiki/Foo_(bar)) end')).toEqual([
       { text: 'wiki', link: 'https://en.wikipedia.org/wiki/Foo_(bar)' },
