@@ -11,7 +11,6 @@ import {
   ChatMessage as CoreChatMessage,
   FinishReason,
   MessageContentImageSource,
-  MessageContentPart,
   ToolCompletionResponse,
   ToolDefinition,
   textContentFromParts,
@@ -23,6 +22,7 @@ import {
 } from './attachmentBudgetRefusal'
 import { CodexLlmProxyClient, CodexProxyError } from './codexLlmProxyClient'
 import { classifyUnknown } from './errorClassification'
+import { projectImageSource } from './imageSource'
 import { CodexAuthorizeError, ProviderAttemptAuthorizer } from './providerAttemptAuthorizer'
 import { rateLimitRetryDelayMs, waitBeforeRetry } from './rateLimitRetry'
 import { type LlmProvider, descriptorFor } from './registryCore'
@@ -162,7 +162,6 @@ export type CodexSubscriptionDeps = {
  * itself cannot succeed, so neither may trigger a retry or a provider fallback.
  */
 const CODEX_REQUEST_INVALID = 'invalid_request'
-const CODEX_IMAGE_SOURCE_INVALID = 'image_source_invalid'
 /** A local image budget refusal (`ATTACHMENT_BUDGET_REFUSALS`). */
 const CODEX_ATTACHMENT_TOO_LARGE = 'attachment_too_large'
 
@@ -182,45 +181,6 @@ type ProjectedMessage = {
   name?: string
   toolCallId?: string
   toolCalls?: Array<{ id: string; name: string; arguments: Record<string, unknown> }>
-}
-
-/**
- * Provenance for one image part. The shared contract requires a source on every
- * Codex V2 image and bounds its id charset; this checks only presence and shape,
- * so the contract stays the single owner of format and size limits.
- */
-function imageSourceError(detail: string): CodexAuthorizeError {
-  return new CodexAuthorizeError(
-    CODEX_IMAGE_SOURCE_INVALID,
-    `image part has no usable provenance source (${detail}); host producers must attach the attachment or tool call it came from`
-  )
-}
-
-function projectImageSource(
-  part: Extract<MessageContentPart, { type: 'image' }>
-): MessageContentImageSource {
-  const source = part.source
-  if (!source) throw imageSourceError('missing source')
-  if (source.kind === 'attachment') {
-    if (!source.attachmentId?.trim()) throw imageSourceError('empty attachmentId')
-    if (!source.messageId?.trim()) throw imageSourceError('empty messageId')
-    return {
-      kind: 'attachment',
-      attachmentId: source.attachmentId,
-      messageId: source.messageId,
-    }
-  }
-  if (source.kind === 'tool') {
-    if (!source.attachmentId?.trim()) throw imageSourceError('empty attachmentId')
-    if (!source.toolCallId?.trim()) throw imageSourceError('empty toolCallId')
-    return { kind: 'tool', attachmentId: source.attachmentId, toolCallId: source.toolCallId }
-  }
-  if (source.kind === 'gfs') {
-    if (!source.attachmentId?.trim()) throw imageSourceError('empty attachmentId')
-    if (!source.toolCallId?.trim()) throw imageSourceError('empty toolCallId')
-    return { kind: 'tool', attachmentId: source.attachmentId, toolCallId: source.toolCallId }
-  }
-  throw imageSourceError('unknown source kind')
 }
 
 function assertTerminalCodexOutcome(result: {

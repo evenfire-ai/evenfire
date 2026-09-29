@@ -12,7 +12,6 @@ import {
   ChatMessage as CoreChatMessage,
   FinishReason,
   MessageContentImageSource,
-  MessageContentPart,
   ToolCompletionResponse,
   ToolDefinition,
   textContentFromParts,
@@ -24,6 +23,7 @@ import {
 } from './attachmentBudgetRefusal'
 import { classifyUnknown } from './errorClassification'
 import { GrokLlmProxyClient, GrokProxyError } from './grokLlmProxyClient'
+import { projectImageSource } from './imageSource'
 import { CodexAuthorizeError, ProviderAttemptAuthorizer } from './providerAttemptAuthorizer'
 import { rateLimitRetryDelayMs, waitBeforeRetry } from './rateLimitRetry'
 import { type LlmProvider, descriptorFor } from './registryCore'
@@ -127,7 +127,6 @@ const ATTACHMENT_BUDGET_REFUSALS = buildAttachmentBudgetRefusals({
  * itself cannot succeed, so neither may trigger a retry or a provider fallback.
  */
 const GROK_REQUEST_INVALID = 'invalid_request'
-const GROK_IMAGE_SOURCE_INVALID = 'image_source_invalid'
 /** A local image budget refusal (`ATTACHMENT_BUDGET_REFUSALS`). */
 const GROK_ATTACHMENT_TOO_LARGE = 'attachment_too_large'
 
@@ -147,48 +146,6 @@ type ProjectedMessage = {
   name?: string
   toolCallId?: string
   toolCalls?: Array<{ id: string; name: string; arguments: Record<string, unknown> }>
-}
-
-/**
- * Provenance for one image part. The Grok contract requires a source on every
- * V2 image and bounds its id charset; this checks only presence and shape, so
- * the contract stays the single owner of format and size limits. The twin of
- * `projectImageSource` in `codexSubscription.ts`.
- */
-function imageSourceError(detail: string): CodexAuthorizeError {
-  return new CodexAuthorizeError(
-    GROK_IMAGE_SOURCE_INVALID,
-    `image part has no usable provenance source (${detail}); host producers must attach the attachment or tool call it came from`
-  )
-}
-
-function projectImageSource(
-  part: Extract<MessageContentPart, { type: 'image' }>
-): MessageContentImageSource {
-  const source = part.source
-  if (!source) throw imageSourceError('missing source')
-  if (source.kind === 'attachment') {
-    if (!source.attachmentId?.trim()) throw imageSourceError('empty attachmentId')
-    if (!source.messageId?.trim()) throw imageSourceError('empty messageId')
-    return {
-      kind: 'attachment',
-      attachmentId: source.attachmentId,
-      messageId: source.messageId,
-    }
-  }
-  if (source.kind === 'tool') {
-    if (!source.attachmentId?.trim()) throw imageSourceError('empty attachmentId')
-    if (!source.toolCallId?.trim()) throw imageSourceError('empty toolCallId')
-    return { kind: 'tool', attachmentId: source.attachmentId, toolCallId: source.toolCallId }
-  }
-  // A GFS read (#670) is a tool result: the contract names it by its read's
-  // attachment and tool call, as Codex does.
-  if (source.kind === 'gfs') {
-    if (!source.attachmentId?.trim()) throw imageSourceError('empty attachmentId')
-    if (!source.toolCallId?.trim()) throw imageSourceError('empty toolCallId')
-    return { kind: 'tool', attachmentId: source.attachmentId, toolCallId: source.toolCallId }
-  }
-  throw imageSourceError('unknown source kind')
 }
 
 function mapGrokUsage(usage?: { inputTokens: number; outputTokens: number }): {
