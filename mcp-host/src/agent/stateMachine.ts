@@ -760,6 +760,9 @@ export class AgentStateMachine extends EventEmitter {
     const rehydrated = await this.coldStartLoader.loadPendingApprovals(now)
     for (const entry of rehydrated) {
       if (!entry.session_key) throw new Error('rehydrated approval is missing its session key')
+      // The persisted message has no inline file bytes (ResumeSourceMessage).
+      // Task carries the wider incoming type; the readers of file attachments
+      // check `dataBase64` at runtime (attachmentRead.ts) instead of assuming it.
       const sourceMessage = entry.source_message as Task['sourceMessage']
       const task: Task = {
         id: entry.task_id,

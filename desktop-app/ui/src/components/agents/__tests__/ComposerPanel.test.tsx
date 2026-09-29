@@ -122,7 +122,23 @@ vi.mock('@hooks/useHostModels', () => ({
   useHostModels: () => composerModelState,
 }))
 vi.mock('../ComposerAgentFilesModal', () => ({ ComposerAgentFilesModal: () => null }))
-vi.mock('../ComposerGlobalFilesModal', () => ({ ComposerGlobalFilesModal: () => null }))
+const globalFilesMock = vi.hoisted(() => ({
+  showComposerItem: false,
+  modalProps: undefined as { attachedIds: readonly string[] } | undefined,
+}))
+
+vi.mock('@constants/agentFeatures', async importOriginal => ({
+  ...(await importOriginal<typeof import('@constants/agentFeatures')>()),
+  get SHOW_GLOBAL_FILE_SYSTEM_COMPOSER_ITEM() {
+    return globalFilesMock.showComposerItem
+  },
+}))
+vi.mock('../ComposerGlobalFilesModal', () => ({
+  ComposerGlobalFilesModal: (props: { attachedIds: readonly string[] }) => {
+    globalFilesMock.modalProps = props
+    return null
+  },
+}))
 const annotationCanvasMock = vi.hoisted(() => ({
   onSave: undefined as ((updated: ComposerImageAttachment) => void) | undefined,
 }))
@@ -152,6 +168,8 @@ beforeEach(() => {
 afterEach(() => {
   cleanup()
   annotationCanvasMock.onSave = undefined
+  globalFilesMock.showComposerItem = false
+  globalFilesMock.modalProps = undefined
   draftState.value = ''
   draftState.set.mockReset()
   Object.assign(composerState, {
@@ -273,6 +291,43 @@ describe.each([
     expect(textarea.selectionStart).toBe(4)
     expect(textarea.selectionEnd).toBe(8)
     otherInput.remove()
+  })
+})
+
+describe('ComposerPanel EvenDrive picker', () => {
+  it('hands the picker the ids of the global files already in the composer, and only those', () => {
+    globalFilesMock.showComposerItem = true
+    Object.assign(composerState, {
+      composerReferenceAttachments: [
+        {
+          id: 'global-file:main:aaaa',
+          type: 'global_file',
+          resourceId: 'aaaa',
+          drive: 'main',
+          gfsUri: 'gfs://main/aaaa',
+          label: 'a.md',
+          version: 1,
+          bytes: 1,
+        },
+        {
+          id: 'agent-file:ctx:/b.md',
+          type: 'agent_file',
+          contextId: 'ctx',
+          filesystemName: 'ctx',
+          path: '/b.md',
+          kind: 'file',
+          label: 'b.md',
+        },
+      ],
+    })
+    render(<ComposerPanel inline={false} />)
+    // Liveness witness: the modal is not mounted until EvenDrive is chosen.
+    expect(globalFilesMock.modalProps).toBeUndefined()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add context' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: /EvenDrive/ }))
+
+    expect(globalFilesMock.modalProps?.attachedIds).toEqual(['global-file:main:aaaa'])
   })
 })
 

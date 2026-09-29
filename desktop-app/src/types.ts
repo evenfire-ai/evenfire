@@ -1,3 +1,4 @@
+import type { FileReferenceV1 } from '@clerum/gfs-interaction-policy'
 import type { ImageInputDecision } from './imageInputDecision'
 
 export type Role = 'admin' | 'inviter' | 'member'
@@ -538,6 +539,11 @@ export type HostMessageRequest = {
   model?: string
   /** CAS base captured with a visual message's explicit model choice. */
   modelSelectionRevision?: number
+  /**
+   * Issue #666 — Global Files selected in the composer, as structured
+   * references. mcp-host re-authorizes each one before the task exists.
+   */
+  fileReferences?: FileReferenceV1[]
   [key: string]: unknown
 }
 
@@ -578,6 +584,17 @@ export type HostMessageResponse = {
    * ignored the selection.
    */
   modelSelectionRevision?: number
+  /**
+   * #666 — the attachment ids the Host admitted with this message. Absent when
+   * the Host predates the field or the send carried no attachments.
+   */
+  acceptedAttachmentIds?: readonly string[]
+  /**
+   * #666 — the FileReference ids the Host admitted with this message. A sent
+   * reference whose id is missing here did not reach the Host; the message was
+   * delivered without it.
+   */
+  acceptedFileReferenceIds?: readonly string[]
   approval?: {
     taskId: string
     requestId: string

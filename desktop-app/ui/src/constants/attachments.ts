@@ -1,4 +1,4 @@
-// Must match INCOMING_IMAGE_MAX_COUNT in mcp-host/src/agent/incomingImageAttachments.ts.
+// Must match INCOMING_ATTACHMENT_MAX_COUNT in mcp-host/src/agent/incomingAttachments.ts.
 export const COMPOSER_MAX_IMAGE_ATTACHMENTS = 20
 
 /**
