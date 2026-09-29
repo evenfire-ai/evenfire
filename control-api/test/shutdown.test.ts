@@ -7,6 +7,16 @@ import {
 } from '../src/shutdown.js'
 
 describe('Control API shutdown', () => {
+  it('stops the OAuth proactive refresh cron before database pools close', () => {
+    const names = [...CONTROL_API_SHUTDOWN_STEP_NAMES] as string[]
+    const cronIndex = names.indexOf('oauth-proactive-refresh-cron')
+    const poolIndex = names.indexOf('core-database-pool')
+
+    expect(names).toContain('oauth-proactive-refresh-cron')
+    expect(cronIndex).toBeGreaterThanOrEqual(0)
+    expect(poolIndex).toBeGreaterThan(cronIndex)
+  })
+
   it('closes every registered resource in order and continues after failures', async () => {
     const completed: string[] = []
     const actions = Object.fromEntries(
@@ -23,6 +33,9 @@ describe('Control API shutdown', () => {
 
     expect(completed).toEqual(CONTROL_API_SHUTDOWN_STEP_NAMES)
     expect(Object.keys(actions).sort()).toEqual([...CONTROL_API_SHUTDOWN_STEP_NAMES].sort())
+    expect(completed.indexOf('oauth-proactive-refresh-cron')).toBeLessThan(
+      completed.indexOf('core-database-pool')
+    )
     expect(result.errors.map(error => error.name)).toEqual(['rate-limit-cleanup'])
     expect(result.timedOut).toBe(false)
   })

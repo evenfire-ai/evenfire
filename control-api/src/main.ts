@@ -92,6 +92,7 @@ const shutdown = createShutdownHandler(async () => {
       'workflow-runs-archive-cron': stopWorkflowRunsArchiveCron,
       'workflow-schedule-worker': stopWorkflowScheduleWorker,
       'workflow-approval-notification-worker': stopWorkflowApprovalNotificationDeliveryWorker,
+      'oauth-proactive-refresh-cron': stopOauthProactiveRefreshCron,
       'workflow-approval-trace-projector': stopWorkflowApprovalTraceProjector,
       'entity-change-dispatcher': stopEntityChangeDispatcher,
       'core-database-pool': () => pool.end(),
@@ -317,12 +318,19 @@ async function main(): Promise<void> {
       reactiveBufferMs: REACTIVE_REFRESH_BUFFER_MS,
       dcrWarnMs: config.oauthDcrSecretWarnMs,
     })
-    console.log(
-      `[ControlAPI] OAuth proactive refresh cron enabled (interval=${config.oauthProactiveRefreshIntervalMs}ms, Bp=${config.oauthProactiveRefreshBufferMs}ms, Wc=${config.oauthDcrSecretWarnMs}ms)`
+    logger.info(
+      {
+        event: 'oauth_proactive_refresh_cron_enabled',
+        intervalMs: config.oauthProactiveRefreshIntervalMs,
+        proactiveBufferMs: config.oauthProactiveRefreshBufferMs,
+        dcrWarnMs: config.oauthDcrSecretWarnMs,
+      },
+      'OAuth proactive refresh cron enabled'
     )
   } else {
-    console.log(
-      '[ControlAPI] OAuth proactive refresh cron disabled (OAUTH_PROACTIVE_REFRESH_CRON_ENABLED not "true")'
+    logger.info(
+      { event: 'oauth_proactive_refresh_cron_disabled' },
+      'OAuth proactive refresh cron disabled'
     )
   }
 
