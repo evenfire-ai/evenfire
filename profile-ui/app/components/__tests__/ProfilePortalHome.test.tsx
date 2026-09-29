@@ -84,6 +84,24 @@ describe('Profile Portal home desktop setup link', () => {
     expect(screen.queryByRole('link', { name: 'Set up Desktop App' })).not.toBeInTheDocument()
   })
 
+  it('explains unavailable setup when discovery has no External REST API URL', async () => {
+    api.getDesktopEnvironment.mockResolvedValue({
+      ...desktopEnvironment,
+      externalRestApiBaseUrl: '',
+    })
+
+    render(<Page />)
+
+    const unavailableStatus = await screen.findByRole('status')
+
+    expect(unavailableStatus).toHaveTextContent('Desktop app setup is unavailable right now.')
+    expect(screen.getByRole('link', { name: 'Settings' })).toHaveAttribute(
+      'href',
+      '/settings/profile'
+    )
+    expect(screen.queryByRole('link', { name: 'Set up Desktop App' })).not.toBeInTheDocument()
+  })
+
   it('labels the environment setup handoff accurately', async () => {
     const environment = desktopEnvironment
 
