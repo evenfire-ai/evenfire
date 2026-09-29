@@ -575,8 +575,9 @@ describe('grok visual stream-gate handoff', () => {
       const port = listen(
         createProxyApps(config({ maxBodyBytes, maxVisualBodyBytes: 1024 * 1024 }))
       )
-      // JSON.parse accepts this depth; JSON.stringify and the contract's byte
-      // measurement throw RangeError on it.
+      // JSON.parse accepts this depth. The raw-body scan refuses it (400
+      // body.structure.too.deep) before parsing; the visual slot must still be
+      // released.
       const depth = 20_000
       const body =
         `{"executionTicket":"invalid-ticket","requestHash":"${'a'.repeat(64)}",` +

@@ -134,10 +134,10 @@ redeem. Once a slot is granted, the body must be read and parsed within
 `BODY_READ_DEADLINE_MS` (10 s); otherwise the proxy answers 408
 `request_timeout` with `connection: close` and frees the slot. After the grant,
 the slot is also freed when the response closes for any other reason, which
-covers every refusal before the stream starts. The handler bounds the nesting
-depth of the parsed envelope (`LIMITS.maxNestingDepth + 6`, the control-api
-formula) before serializing it, and answers a deeper body 400
-`invalid_request`. A visual-gate refusal (queue full, wait exceeded) is
+covers every refusal before the stream starts. The raw-body scan
+refuses a body nested deeper than 70 (`BODY_STRUCTURE_LIMITS.maxDepth`) with
+400 `invalid_request` before `JSON.parse`, so `JSON.stringify` and the byte
+measurement never see a deeper tree. A visual-gate refusal (queue full, wait exceeded) is
 answered 503 `provider_unavailable` and logged as
 `grok_proxy_admission_refused` with `reason: visual_gate`.
 

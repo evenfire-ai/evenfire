@@ -108,33 +108,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
 }
 
-// body > request > messages[] > message > toolCalls[] > call > arguments: the
-// deepest free-form tree the contract accepts sits six containers below the
-// body root, and may itself nest maxNestingDepth containers. control-api
-// bounds its authorize body the same way (MAX_AUTHORIZE_BODY_DEPTH).
-const MAX_COMPLETION_BODY_DEPTH = LIMITS.maxNestingDepth + 6
-
-/**
- * True when the parsed body nests deeper than any envelope the contract
- * accepts. JSON.parse accepts far deeper input than JSON.stringify and the
- * contract's byte measurement can walk: both throw RangeError on it, before
- * the handler has released its admission. Iterative, so the depth cannot
- * overflow the stack here.
- */
-function exceedsCompletionBodyDepth(body: unknown): boolean {
-  if (body === null || typeof body !== 'object') return false
-  const stack: Array<[object, number]> = [[body, 1]]
-  for (let entry = stack.pop(); entry; entry = stack.pop()) {
-    const [node, depth] = entry
-    if (depth > MAX_COMPLETION_BODY_DEPTH) return true
-    const children: unknown[] = Array.isArray(node) ? node : Object.values(node)
-    for (const child of children) {
-      if (child !== null && typeof child === 'object') stack.push([child, depth + 1])
-    }
-  }
-  return false
-}
-
 function reject(res: Response, status: number, code: string): void {
   if (res.headersSent) return
   logger.warn({ event: 'grok_proxy_denied', code }, 'request denied')
@@ -144,7 +117,9 @@ function reject(res: Response, status: number, code: string): void {
 // A8: every JSON parser scans the raw body before JSON.parse. JSON.parse
 // allocates one heap object per container, so a body within the byte limit
 // can still exhaust the heap; the scan refuses a body denser, more nested or
-// with more containers than any request the contract accepts.
+// with more containers than any request the contract accepts. Its depth bound
+// (LIMITS.maxNestingDepth + 6) also keeps JSON.stringify and the contract's
+// byte measurement from throwing RangeError on a deep body after parse.
 const verifyBodyStructure = createBodyStructureVerify(BODY_STRUCTURE_LIMITS)
 
 function boundedErrorHandler(err: unknown, _req: Request, res: Response, _next: () => void): void {
@@ -529,11 +504,6 @@ export function createProxyApps(
     if (!req.is('application/json')) {
       releaseAdmission()
       reject(res, 415, 'unsupported_media_type')
-      return
-    }
-    if (exceedsCompletionBodyDepth(req.body)) {
-      releaseAdmission()
-      reject(res, 400, 'invalid_request')
       return
     }
     const request = isRecord(req.body) ? req.body.request : undefined
