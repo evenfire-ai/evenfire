@@ -216,6 +216,21 @@ describe('inline markdown', () => {
     )
   })
 
+  it('ends a link label at its first unescaped bracket, so an escaped "](" names no target', () => {
+    expect(inlineSpans('[a \\](b](https://x.com/a)')).toEqual([
+      { text: 'a ](b', link: 'https://x.com/a' },
+    ])
+    expect(inlineSpans('[a \\](file:///etc/passwd](https://x.com/a)')).toEqual([
+      { text: 'a ](file:///etc/passwd', link: 'https://x.com/a' },
+    ])
+    expect(inlineSpans('<a href="https://x.com/a">a](javascript:alert(1)</a>')).toEqual([
+      { text: 'a](javascript:alert(1)', link: 'https://x.com/a' },
+    ])
+    expect(inlineSpans('<a href="https://x.com/a">![i](p.png) \\[1\\]</a>')).toEqual([
+      { text: '![i](p.png) [1]', link: 'https://x.com/a' },
+    ])
+  })
+
   it('keeps balanced parentheses in a link target', () => {
     expect(inlineSpans('[wiki](https://en.wikipedia.org/wiki/Foo_(bar)) end')).toEqual([
       { text: 'wiki', link: 'https://en.wikipedia.org/wiki/Foo_(bar)' },

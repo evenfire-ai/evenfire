@@ -631,6 +631,16 @@ function withoutMarks(text: string): string {
   return text.replace(NONCHARACTERS, '')
 }
 
+/**
+ * Where the label of the link `token` ends: at its first bracket not escaped,
+ * so an escaped "](" inside the label is not read as the start of the target.
+ */
+function linkLabelEnd(token: string): number {
+  let at = 1
+  while (at < token.length && token[at] !== ']') at += token[at] === '\\' ? 2 : 1
+  return at
+}
+
 /** The atom `token` as a span, before the emphasis around it is applied. */
 function atomSpan(token: string): InlineSpan {
   if (token.startsWith('![')) {
@@ -641,7 +651,7 @@ function atomSpan(token: string): InlineSpan {
     }
   }
   if (token.startsWith('[')) {
-    const split = token.indexOf('](')
+    const split = linkLabelEnd(token)
     return {
       text: decodeEntities(unescapeMarkdown(withoutMarks(token.slice(1, split)))),
       link: decodeEntities(token.slice(split + 2, -1)),
