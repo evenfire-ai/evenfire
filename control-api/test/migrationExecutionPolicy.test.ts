@@ -43,6 +43,9 @@ describe('D34 migration execution policy', () => {
     ])
     expect(PR1_MIGRATION_VERSIONS).not.toContain('0117_control_admin_invitation_replace_inviter')
     expect(PR1_MIGRATION_VERSIONS).not.toContain('0118_control_admin_replace_inviter_accept_guard')
+    expect(PR1_MIGRATION_VERSIONS).not.toContain('0119_dynamic_clients_table')
+    expect(PR1_MIGRATION_VERSIONS).not.toContain('0120_dynamic_clients_runtime_access')
+    expect(PR1_MIGRATION_VERSIONS).not.toContain('0121_oauth_install_identity')
   })
 
   it('freezes the owner-approved timeout and Job values', () => {
