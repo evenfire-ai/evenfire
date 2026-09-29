@@ -82,6 +82,7 @@ type OpenPreviewState =
       mimeType: string
       rid: string
       version: number
+      reloadVersion: number
       unavailable: boolean
     }
   | {
@@ -91,6 +92,7 @@ type OpenPreviewState =
       fileName: string
       rid: string
       version: number
+      reloadVersion: number
       unavailable: boolean
     }
   | {
@@ -101,6 +103,7 @@ type OpenPreviewState =
       mimeType: string
       rid: string
       version: number
+      reloadVersion: number
       unavailable: boolean
     }
 
@@ -400,7 +403,6 @@ export function GfsBrowser(): React.JSX.Element {
     OpenPreviewState,
     { kind: 'video' }
   > | null>(null)
-  const [previewReloadVersion, setPreviewReloadVersion] = useState(0)
   const previewRefreshGenerationRef = useRef(0)
   const scheduleEntityChangeRecoveryRef = useRef<(() => void) | null>(null)
   const openPreviewsRef = useRef<OpenPreviewState[]>([])
@@ -746,10 +748,23 @@ export function GfsBrowser(): React.JSX.Element {
       const previews = openPreviewsRef.current
       if (previews.length > 0) {
         const generation = ++previewRefreshGenerationRef.current
-        setImagePreview(preview => (preview ? { ...preview, unavailable: true } : preview))
-        setMarkdownPreview(preview => (preview ? { ...preview, unavailable: true } : preview))
-        setVideoPreview(preview => (preview ? { ...preview, unavailable: true } : preview))
-        setPreviewReloadVersion(version => version + 1)
+        const markUnavailable = (preview: OpenPreviewState) => {
+          setImagePreview(current =>
+            current?.gfsUri === preview.gfsUri && !current.unavailable
+              ? { ...current, unavailable: true, reloadVersion: current.reloadVersion + 1 }
+              : current
+          )
+          setMarkdownPreview(current =>
+            current?.gfsUri === preview.gfsUri && !current.unavailable
+              ? { ...current, unavailable: true, reloadVersion: current.reloadVersion + 1 }
+              : current
+          )
+          setVideoPreview(current =>
+            current?.gfsUri === preview.gfsUri && !current.unavailable
+              ? { ...current, unavailable: true, reloadVersion: current.reloadVersion + 1 }
+              : current
+          )
+        }
         void Promise.all<ResolvedPreviewUpdate | null>(
           previews.map(async preview => {
             try {
@@ -761,28 +776,80 @@ export function GfsBrowser(): React.JSX.Element {
                 bytes: number
                 version: number
                 rid: string
+                resourceId: string
+                gfsUri: string
               }
-              if (resolved.kind !== 'file') return null
+              if (generation !== previewRefreshGenerationRef.current) return null
+              if (resolved.kind !== 'file') {
+                markUnavailable(preview)
+                return null
+              }
               const imageMimeType = gfsImagePreviewMimeType(resolved.name)
               const videoMimeType = gfsVideoPreviewMimeType(resolved.name)
-              const shared = {
-                gfsUri: preview.gfsUri,
-                byteLength: resolved.bytes,
-                fileName: resolved.name,
-                rid: resolved.rid,
-                version: resolved.version,
-                unavailable: false,
-              }
+              let candidate: ResolvedPreviewUpdate | null = null
               if (preview.kind === 'image') {
-                return imageMimeType ? { ...shared, kind: 'image', mimeType: imageMimeType } : null
+                candidate = imageMimeType
+                  ? {
+                      kind: 'image',
+                      gfsUri: resolved.gfsUri,
+                      byteLength: resolved.bytes,
+                      fileName: resolved.name,
+                      rid: resolved.rid,
+                      version: resolved.version,
+                      mimeType: imageMimeType,
+                      reloadVersion: preview.reloadVersion + 1,
+                      unavailable: false,
+                    }
+                  : null
+              } else if (preview.kind === 'video') {
+                candidate = videoMimeType
+                  ? {
+                      kind: 'video',
+                      gfsUri: resolved.gfsUri,
+                      byteLength: resolved.bytes,
+                      fileName: resolved.name,
+                      rid: resolved.rid,
+                      version: resolved.version,
+                      mimeType: videoMimeType,
+                      reloadVersion: preview.reloadVersion + 1,
+                      unavailable: false,
+                    }
+                  : null
+              } else {
+                candidate = isGfsMarkdownPreviewFile(resolved.name)
+                  ? {
+                      kind: 'markdown',
+                      gfsUri: resolved.gfsUri,
+                      byteLength: resolved.bytes,
+                      fileName: resolved.name,
+                      rid: resolved.rid,
+                      version: resolved.version,
+                      reloadVersion: preview.reloadVersion + 1,
+                      unavailable: false,
+                    }
+                  : null
               }
-              if (preview.kind === 'video') {
-                return videoMimeType ? { ...shared, kind: 'video', mimeType: videoMimeType } : null
+              if (!candidate) {
+                markUnavailable(preview)
+                return null
               }
-              return isGfsMarkdownPreviewFile(resolved.name)
-                ? { ...shared, kind: 'markdown' }
-                : null
+              if (candidate.version < preview.version) return null
+              const candidateMimeType = 'mimeType' in candidate ? candidate.mimeType : undefined
+              const currentMimeType = 'mimeType' in preview ? preview.mimeType : undefined
+              const unchanged =
+                !preview.unavailable &&
+                candidate.kind === preview.kind &&
+                candidate.gfsUri === preview.gfsUri &&
+                candidate.rid === preview.rid &&
+                candidate.fileName === preview.fileName &&
+                candidate.byteLength === preview.byteLength &&
+                candidate.version === preview.version &&
+                candidateMimeType === currentMimeType
+              return unchanged ? null : candidate
             } catch (error) {
+              if (generation !== previewRefreshGenerationRef.current) return null
+              const status = entityChangeErrorStatus(error)
+              if (status === 403 || status === 404) markUnavailable(preview)
               if (isTransientEntityChangeRefetchError(error)) scheduleRecovery()
               return null
             }
@@ -793,13 +860,18 @@ export function GfsBrowser(): React.JSX.Element {
             if (!update) continue
             if (update.kind === 'image') {
               setImagePreview(current => (current?.gfsUri === update.gfsUri ? update : current))
+              setMarkdownPreview(current => (current?.gfsUri === update.gfsUri ? null : current))
+              setVideoPreview(current => (current?.gfsUri === update.gfsUri ? null : current))
             } else if (update.kind === 'video') {
               setVideoPreview(current => (current?.gfsUri === update.gfsUri ? update : current))
+              setImagePreview(current => (current?.gfsUri === update.gfsUri ? null : current))
+              setMarkdownPreview(current => (current?.gfsUri === update.gfsUri ? null : current))
             } else {
               setMarkdownPreview(current => (current?.gfsUri === update.gfsUri ? update : current))
+              setImagePreview(current => (current?.gfsUri === update.gfsUri ? null : current))
+              setVideoPreview(current => (current?.gfsUri === update.gfsUri ? null : current))
             }
           }
-          setPreviewReloadVersion(version => version + 1)
         })
       }
       const visibleCrumb = currentCrumbRef.current
@@ -980,6 +1052,7 @@ export function GfsBrowser(): React.JSX.Element {
         mimeType,
         rid: child.rid,
         version: child.version,
+        reloadVersion: 0,
         unavailable: false,
       })
       return true
@@ -992,6 +1065,7 @@ export function GfsBrowser(): React.JSX.Element {
         fileName: child.name,
         rid: child.rid,
         version: child.version,
+        reloadVersion: 0,
         unavailable: false,
       })
       return true
@@ -1006,6 +1080,7 @@ export function GfsBrowser(): React.JSX.Element {
         mimeType: videoMimeType,
         rid: child.rid,
         version: child.version,
+        reloadVersion: 0,
         unavailable: false,
       })
       return true
@@ -2361,7 +2436,7 @@ export function GfsBrowser(): React.JSX.Element {
 
       {imagePreview ? (
         <GfsImagePreview
-          key={previewReloadVersion}
+          key={`${imagePreview.gfsUri}:${imagePreview.reloadVersion}`}
           byteLength={imagePreview.byteLength}
           fileName={imagePreview.fileName}
           mimeType={imagePreview.mimeType}
@@ -2373,7 +2448,7 @@ export function GfsBrowser(): React.JSX.Element {
 
       {markdownPreview ? (
         <GfsMarkdownPreview
-          key={previewReloadVersion}
+          key={`${markdownPreview.gfsUri}:${markdownPreview.reloadVersion}`}
           byteLength={markdownPreview.byteLength}
           fileName={markdownPreview.fileName}
           rid={markdownPreview.rid}
@@ -2384,7 +2459,7 @@ export function GfsBrowser(): React.JSX.Element {
 
       {videoPreview ? (
         <GfsVideoPreview
-          key={previewReloadVersion}
+          key={`${videoPreview.gfsUri}:${videoPreview.reloadVersion}`}
           byteLength={videoPreview.byteLength}
           fileName={videoPreview.fileName}
           mimeType={videoPreview.mimeType}

@@ -750,8 +750,8 @@ describe('GfsBrowser', () => {
           resourceId: 'id-12',
           rid: 'r12',
           name: 'avatar.PNG',
-          bytes: 4,
-          version: 2,
+          bytes: 0,
+          version: 0,
         }
       }
       return { items: [], nextCursor: null }
@@ -761,17 +761,144 @@ describe('GfsBrowser', () => {
       streamControllers[0]!.enqueue(new TextEncoder().encode(`${producerFrame}\n`))
     })
 
-    const unavailableDialog = await screen.findByRole('dialog', { name: 'File unavailable' })
-    expect(within(unavailableDialog).queryByRole('img')).toBeNull()
-    await screen.findByText('remote-folder')
-    const recoveredDialog = await screen.findByRole('dialog', { name: 'avatar.PNG' })
+    await waitFor(() => {
+      expect(treeFailureUsed).toBe(true)
+      expect(previewFailureUsed).toBe(true)
+    })
+    expect(screen.getByRole('dialog', { name: 'avatar.PNG' })).toBe(originalDialog)
     expect(
-      await within(recoveredDialog).findByRole('img', { name: 'Preview of avatar.PNG' })
+      await within(originalDialog).findByRole('img', { name: 'Preview of avatar.PNG' })
     ).toBeTruthy()
+    expect(mockGfsFetchFileBlob).toHaveBeenCalledTimes(1)
+    await screen.findByText('remote-folder')
+    expect(mockGfsFetchFileBlob).toHaveBeenCalledTimes(1)
     expect(treeFailureUsed).toBe(true)
     expect(previewFailureUsed).toBe(true)
     expect(mockApiGet).toHaveBeenCalledWith('/api/v1/gfs/resolve', { uri: 'gfs://main/r12' })
   })
+
+  it.each(['avatar.PNG', 'notes.md', 'demo.mp4'])(
+    'does not reload an unchanged open %s preview after a scope invalidation',
+    async fileName => {
+      const rootId = '11111111-1111-1111-1111-111111111111'
+      const fileResourceId = '22222222-2222-2222-2222-222222222222'
+      const fileRid = fileResourceId.replace(/-/g, '')
+      const file = {
+        ...child(fileName, 'file', 12, 2),
+        resourceId: fileResourceId,
+        rid: fileRid,
+        gfsUri: `gfs://main/${fileRid}`,
+      }
+      let resolvedFile = toResolveView({
+        resourceId: file.resourceId,
+        drive: 'main',
+        name: fileName,
+        kind: 'file',
+        pathCache: `/${fileName}`,
+        bytes: file.bytes,
+        version: file.version,
+        updatedAt: '2026-09-28T00:00:00.000Z',
+      })
+      const streamControllers: ReadableStreamDefaultController<Uint8Array>[] = []
+      mockApiGet.mockImplementation(async (path: string, query?: Record<string, string>) => {
+        if (path === '/api/v1/gfs/tree') {
+          return { rootResourceId: rootId, items: [file], nextCursor: null }
+        }
+        if (path === `/api/v1/gfs/resources/${rootId}/children`) {
+          return { items: [file], nextCursor: null }
+        }
+        if (path === '/api/v1/gfs/resolve' && query?.uri === file.gfsUri) return resolvedFile
+        if (path === '/api/v1/gfs/resolve') {
+          return resolvedFolderView(rootId, 'main', '/', 1)
+        }
+        return { items: [], nextCursor: null }
+      })
+      mockGfsFetchFileBlob.mockResolvedValue(
+        new Blob(['# unchanged preview\n\nbody'], { type: 'text/plain' })
+      )
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+          const body = new ReadableStream<Uint8Array>({
+            start(controller) {
+              streamControllers.push(controller)
+              init?.signal?.addEventListener('abort', () => controller.close(), { once: true })
+            },
+          })
+          return new Response(body, {
+            status: 200,
+            headers: { 'content-type': 'application/x-ndjson' },
+          })
+        })
+      )
+
+      renderBrowser()
+      await waitFor(() => expect(streamControllers).toHaveLength(1))
+      fireEvent.click(await screen.findByRole('button', { name: fileName }))
+      const dialog = await screen.findByRole('dialog', { name: fileName })
+      if (fileName.endsWith('.PNG')) {
+        await within(dialog).findByRole('img', { name: `Preview of ${fileName}` })
+      } else if (fileName.endsWith('.md')) {
+        await within(dialog).findByRole('heading', { name: 'unchanged preview' })
+      } else {
+        await within(dialog).findByLabelText(`Video preview of ${fileName}`)
+      }
+      expect(mockGfsFetchFileBlob).toHaveBeenCalledTimes(1)
+
+      const frame = await controlApiProducerFrame(['authorization'])
+      await act(async () => {
+        streamControllers[0]!.enqueue(new TextEncoder().encode(`${frame}\n`))
+      })
+      await waitFor(() =>
+        expect(mockApiGet).toHaveBeenCalledWith('/api/v1/gfs/resolve', { uri: file.gfsUri })
+      )
+      expect(screen.getByRole('dialog', { name: fileName })).toBe(dialog)
+      expect(mockGfsFetchFileBlob).toHaveBeenCalledTimes(1)
+      if (fileName.endsWith('.PNG')) {
+        expect(within(dialog).getByRole('img', { name: `Preview of ${fileName}` })).toBeVisible()
+      } else if (fileName.endsWith('.md')) {
+        expect(within(dialog).getByRole('heading', { name: 'unchanged preview' })).toBeVisible()
+      } else {
+        expect(within(dialog).getByLabelText(`Video preview of ${fileName}`)).toBeVisible()
+      }
+
+      resolvedFile = toResolveView({
+        resourceId: file.resourceId,
+        drive: 'main',
+        name: fileName,
+        kind: 'file',
+        pathCache: `/${fileName}`,
+        bytes: file.bytes + 1,
+        version: file.version + 1,
+        updatedAt: '2026-09-28T00:00:01.000Z',
+      })
+      const changedFrame = await controlApiProducerFrame(['authorization'])
+      await act(async () => {
+        streamControllers.at(-1)!.enqueue(new TextEncoder().encode(`${changedFrame}\n`))
+      })
+      await waitFor(() => {
+        expect(
+          mockApiGet.mock.calls.filter(
+            ([path, query]) => path === '/api/v1/gfs/resolve' && query?.uri === file.gfsUri
+          )
+        ).toHaveLength(2)
+      })
+      await waitFor(() => expect(mockGfsFetchFileBlob).toHaveBeenCalledTimes(2))
+      const refreshedDialog = screen.getByRole('dialog', { name: fileName })
+      expect(refreshedDialog).not.toBe(dialog)
+      if (fileName.endsWith('.PNG')) {
+        expect(
+          within(refreshedDialog).getByRole('img', { name: `Preview of ${fileName}` })
+        ).toBeVisible()
+      } else if (fileName.endsWith('.md')) {
+        expect(
+          within(refreshedDialog).getByRole('heading', { name: 'unchanged preview' })
+        ).toBeVisible()
+      } else {
+        expect(within(refreshedDialog).getByLabelText(`Video preview of ${fileName}`)).toBeVisible()
+      }
+    }
+  )
 
   it('rebuilds the open directory breadcrumbs after a remote move', async () => {
     const rootId = '11111111-1111-1111-1111-111111111111'
