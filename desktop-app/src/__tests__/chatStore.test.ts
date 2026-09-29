@@ -836,6 +836,94 @@ describe('tombstone durability', () => {
     expect(sidecar.deletedChatTombstones).toEqual([tombstone('a')])
     expect((await store.listChats('agent-1')).map(chat => chat.id)).toEqual(['b'])
   })
+
+  /** Records every readFile path and fails the sidecar read with `code` when given. */
+  function spyReadFile(failSidecarWith?: string): string[] {
+    const originalReadFile = fs.readFile.bind(fs)
+    const read: string[] = []
+    vi.spyOn(fs, 'readFile').mockImplementation(async (...args) => {
+      const filePath = String(args[0])
+      read.push(filePath)
+      if (failSidecarWith && filePath === agentPath('.tombstones.json')) {
+        throw transientFileReadError(failSidecarWith)
+      }
+      return originalReadFile(...(args as Parameters<typeof fs.readFile>))
+    })
+    return read
+  }
+
+  it('propagates a sidecar read failure other than ENOENT instead of dropping the tombstones', async () => {
+    await store.createChat('agent-1', 'gone')
+    await store.deleteChat('agent-1', 'gone', TEAM_A_SCOPE)
+    // A missing catalog makes the read recover tombstones from the sidecar.
+    await fs.rm(agentPath('index.json'))
+    const read = spyReadFile('EACCES')
+
+    const restarted = new ChatStore(tempDir)
+    restarted.setAuthorityScope(TEAM_A_SCOPE)
+    await expect(restarted.getIndex('agent-1')).rejects.toMatchObject({ code: 'EACCES' })
+
+    // Witness: the rejection came from the sidecar read.
+    expect(read).toContain(agentPath('.tombstones.json'))
+  })
+
+  it('reports a sidecar with an unknown shape once and recovers as if it were absent', async () => {
+    await store.createChat('agent-1', 'gone')
+    await store.deleteChat('agent-1', 'gone', TEAM_A_SCOPE)
+    await fs.rm(agentPath('index.json'))
+    // Well-formed tombstones under an unknown version: the version alone must reject it.
+    await fs.writeFile(
+      agentPath('.tombstones.json'),
+      JSON.stringify({
+        version: 99,
+        deletedChatTombstones: [tombstone('gone')],
+        pendingChatCleanup: [],
+      })
+    )
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+
+    const restarted = new ChatStore(tempDir)
+    restarted.setAuthorityScope(TEAM_A_SCOPE)
+    const first = await restarted.getIndex('agent-1')
+    await restarted.getIndex('agent-1')
+
+    expect(first.chats).toEqual([])
+    expect(first.deletedChatTombstones).toBeUndefined()
+    // Witness: the rejection was reported, once, naming the agent.
+    const reports = warn.mock.calls.filter(
+      call => String(call[0]).includes('tombstone sidecar') && String(call[0]).includes('"agent-1"')
+    )
+    expect(reports).toHaveLength(1)
+  })
+
+  it('does not merge the sidecar into a readable index, only into a recovered one', async () => {
+    await store.createChat('agent-1', 'kept')
+    await store.createChat('agent-1', 'gone')
+    await store.deleteChat('agent-1', 'gone', TEAM_A_SCOPE)
+    const sidecar = await readJsonFile<{ deletedChatTombstones: unknown[] }>(
+      agentPath('.tombstones.json')
+    )
+    sidecar.deletedChatTombstones.push(tombstone('sidecar-only'))
+    await fs.writeFile(agentPath('.tombstones.json'), JSON.stringify(sidecar))
+    const read = spyReadFile()
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const restarted = new ChatStore(tempDir)
+    restarted.setAuthorityScope(TEAM_A_SCOPE)
+
+    const valid = await restarted.getIndex('agent-1')
+
+    expect(valid.chats.map(chat => chat.id)).toEqual(['kept'])
+    expect(valid.deletedChatTombstones).toEqual([tombstone('gone')])
+    expect(read).toContain(agentPath('index.json'))
+    expect(read).not.toContain(agentPath('.tombstones.json'))
+
+    // Control: once the catalog is corrupt, the same read does merge the sidecar.
+    await fs.writeFile(agentPath('index.json'), '{"version":2,"chats":[')
+    const recovered = await restarted.getIndex('agent-1')
+
+    expect(read).toContain(agentPath('.tombstones.json'))
+    expect(recovered.deletedChatTombstones).toEqual([tombstone('gone'), tombstone('sidecar-only')])
+  })
 })
 
 describe('deleted-chat cleanup failure reporting', () => {
