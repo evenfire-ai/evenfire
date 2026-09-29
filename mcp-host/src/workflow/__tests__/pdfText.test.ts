@@ -196,6 +196,60 @@ describe('right-to-left text', () => {
   })
 })
 
+// A body face that draws Hebrew and shapes it, as Liberation Sans does, sets the
+// spaces and digits of a right-to-left line in the same face as its letters.
+// pdfmake splits a run into words and fontkit reverses each word on its own.
+describe('right-to-left text in a face that also sets its spaces and digits', () => {
+  const broad: PdfGlyphSource = {
+    ...source,
+    familyFor: () => 'Broad',
+    reversesRtl: () => true,
+    isFallback: () => false,
+  }
+  const inBroad = { ...ctx, font: 'Broad' }
+
+  function broadRuns(text: string, context = inBroad): Array<Record<string, unknown>> {
+    const node = { text }
+    new PdfTypesetter(broad).typeset(node as unknown as Content, context)
+    return runs(node)
+  }
+
+  it('hands its words over in display order, each in the order fontkit reverses', () => {
+    // Shown as "100 \u05DD\u05D5\u05DC\u05E9": the number at the left, read left to right.
+    expect(broadRuns('\u05E9\u05DC\u05D5\u05DD 100').map(r => r.text)).toEqual([
+      '100',
+      ' ',
+      '\u05E9\u05DC\u05D5\u05DD',
+    ])
+    // Shown as "\u05DD\u05DC\u05D5\u05E2 \u05DD\u05D5\u05DC\u05E9": the first word at the right.
+    expect(broadRuns('\u05E9\u05DC\u05D5\u05DD \u05E2\u05D5\u05DC\u05DD').map(r => r.text)).toEqual(
+      ['\u05E2\u05D5\u05DC\u05DD', ' ', '\u05E9\u05DC\u05D5\u05DD']
+    )
+  })
+
+  it('keeps each word fontkit reverses whole, so pdfmake cannot split it at a slash', () => {
+    const out = broadRuns('\u05DB\u05DF/\u05DC\u05D0 100')
+    const word = out.find(r => String(r.text).includes('/'))
+    expect(word).toMatchObject({ text: '\u05DB\u05DF/\u05DC\u05D0', noWrap: true })
+    expect(out.find(r => r.text === '100')?.noWrap).toBeUndefined()
+  })
+
+  it('breaks lines after a word pdfmake keeps whole', () => {
+    const words = Array.from({ length: 10 }, (_, i) => String.fromCodePoint(0x5d0 + i).repeat(4))
+    const out = broadRuns(words.join(' '), { ...inBroad, width: 100 })
+    // A break inside a run kept whole would be lost.
+    expect(out.some(r => r.noWrap && String(r.text).includes('\n'))).toBe(false)
+    const lines = out
+      .map(r => r.text)
+      .join('')
+      .split('\n')
+    expect(lines.length).toBeGreaterThan(2)
+    // The first line holds the first words, the first of them at the right.
+    expect(lines[0].trim().split(' ').reverse()[0]).toBe(words[0])
+    expect(lines.flatMap(l => l.trim().split(' ')).sort()).toEqual([...words].sort())
+  })
+})
+
 describe('long words', () => {
   it('breaks a stretch with no break in it wherever it fills the line', () => {
     const { node } = typeset({ text: `data: ${'A'.repeat(1000)} end` }, { ...ctx, width: 100 })

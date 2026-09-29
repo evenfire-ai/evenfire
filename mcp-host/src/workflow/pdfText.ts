@@ -82,6 +82,20 @@ function scriptDirection(ch: string): 'L' | 'R' | undefined {
   return RTL_SCRIPT.test(ch) ? 'R' : 'L'
 }
 
+/** A glyph of spaces only; a tab in code is set as four. */
+const SPACES = /^ +$/
+
+/** `glyphs` as alternating stretches of spaces and of everything else, which pdfkit shapes apart. */
+function spaceSeparated(glyphs: Glyph[]): Glyph[][] {
+  const out: Glyph[][] = []
+  for (const g of glyphs) {
+    const last = out[out.length - 1]
+    if (last && SPACES.test(last[0].text) === SPACES.test(g.text)) last.push(g)
+    else out.push([g])
+  }
+  return out
+}
+
 /**
  * Bounds, in ems, on the line a run's face asks for. pdfkit sizes a line from
  * the face's ascent and descent: Courier's leave code lines touching, and
@@ -453,12 +467,15 @@ export class PdfTypesetter {
     const runs: Props[] = []
     lines.forEach((line, i) => {
       const lineRuns = this.runs(line, ctx)
-      // The break rides on the line's last run: a run holding only '\n' is
-      // laid out as an extra empty line.
+      // The break rides on the line's last run, so pdfmake cannot wrap it onto
+      // an extra empty line. A run pdfmake keeps whole ignores a break inside
+      // it, so after one the break gets a run of its own, in the same face so
+      // the line keeps its height.
       if (i < lines.length - 1) {
         const last = lineRuns[lineRuns.length - 1]
-        if (last) last.text = `${String(last.text)}\n`
-        else lineRuns.push({ text: '\n' })
+        if (!last) lineRuns.push({ text: '\n' })
+        else if (last.noWrap) lineRuns.push({ ...last, noWrap: false, text: '\n' })
+        else last.text = `${String(last.text)}\n`
       }
       runs.push(...lineRuns)
     })
@@ -588,9 +605,14 @@ export class PdfTypesetter {
 
   /**
    * Adjacent glyphs sharing a face and properties, merged into pdfmake runs,
-   * without mixing left-to-right and right-to-left letters in one run. A run
-   * fontkit sets right to left is reversed by fontkit once shaped, so it is
-   * handed over in reverse display order.
+   * without mixing left-to-right and right-to-left letters in one run.
+   *
+   * fontkit reverses a piece of text it shapes once it finds a right-to-left
+   * letter in it, but pdfmake splits a run into words and pdfkit shapes each
+   * space-delimited piece on its own, keeping the pieces in the order given.
+   * A right-to-left run in a face fontkit shapes is therefore handed over a
+   * word at a time in display order, each word with a right-to-left letter
+   * reversed and kept whole.
    */
   private runs(glyphs: Glyph[], ctx: TypesetContext): Props[] {
     const runs: Props[] = []
@@ -599,14 +621,21 @@ export class PdfTypesetter {
       | undefined
     const flush = (): void => {
       if (!current) return
-      const reversed = current.direction === 'R' && this.glyphs.reversesRtl(current.family)
-      const ordered = reversed ? [...current.glyphs].reverse() : current.glyphs
-      const run: Props = { ...current.props, text: ordered.map(g => g.text).join('') }
-      if (current.family !== ctx.font || current.props.font !== undefined) run.font = current.family
-      const lineHeight = this.lineHeightFor(current.family, current.props, ctx)
-      if (lineHeight !== undefined) run.lineHeight = lineHeight
-      this.families.add(current.family)
-      runs.push(run)
+      const { family, props } = current
+      const shaped = current.direction === 'R' && this.glyphs.reversesRtl(family)
+      for (const piece of shaped ? spaceSeparated(current.glyphs) : [current.glyphs]) {
+        const reversed = shaped && piece.some(g => scriptDirection(g.text) === 'R')
+        const ordered = reversed ? [...piece].reverse() : piece
+        const run: Props = { ...props, text: ordered.map(g => g.text).join('') }
+        // pdfmake would otherwise split it again at a hyphen or a slash, and
+        // fontkit reverse each part on its own.
+        if (reversed) run.noWrap = true
+        if (family !== ctx.font || props.font !== undefined) run.font = family
+        const lineHeight = this.lineHeightFor(family, props, ctx)
+        if (lineHeight !== undefined) run.lineHeight = lineHeight
+        runs.push(run)
+      }
+      this.families.add(family)
       current = undefined
     }
     for (const g of glyphs) {
