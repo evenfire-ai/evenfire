@@ -48,6 +48,14 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
     expect(duplicates, `duplicate version-string(s):\n${duplicates.join('\n')}`).toEqual([])
   })
 
+  it('assigns each migration a unique numeric slot', async () => {
+    const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
+    const slots = CONTROL_API_MIGRATIONS.map(migration => migration.version.slice(0, 4))
+    const duplicates = slots.filter((slot, index) => slots.indexOf(slot) !== index)
+
+    expect(duplicates, `duplicate migration slot(s):\n${duplicates.join('\n')}`).toEqual([])
+  })
+
   it('keeps legacy aliases unique and distinct from current versions', async () => {
     const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
     const current = new Set(CONTROL_API_MIGRATIONS.map(migration => migration.version))
@@ -59,14 +67,15 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
     expect(currentCollisions).toEqual([])
   })
 
-  it('recognizes both previously deployed entity-change migration versions without reapplying DDL', async () => {
+  it('recognizes all previously deployed feed migration versions without reapplying DDL', async () => {
     const { CONTROL_API_MIGRATIONS, initDb } = await import('../src/db.js')
     const migration = CONTROL_API_MIGRATIONS.find(
-      candidate => candidate.version === '0119_durable_entity_change_feed'
+      candidate => candidate.version === '0122_durable_entity_change_feed'
     )
     expect(migration?.legacyVersions).toEqual([
       '0116_durable_entity_change_feed',
       '0117_durable_entity_change_feed',
+      '0119_durable_entity_change_feed',
     ])
 
     for (const legacyVersion of migration?.legacyVersions ?? []) {
@@ -89,16 +98,47 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
       )
       expect(query).toHaveBeenCalledWith(
         expect.stringContaining('INSERT INTO schema_migrations(version)'),
-        ['0119_durable_entity_change_feed']
+        ['0122_durable_entity_change_feed']
       )
       expect(release).toHaveBeenCalledOnce()
     }
   })
 
+  it('recognizes the deployed checkpoint version without reapplying its function DDL', async () => {
+    const { CONTROL_API_MIGRATIONS, initDb } = await import('../src/db.js')
+    const migration = CONTROL_API_MIGRATIONS.find(
+      candidate => candidate.version === '0123_entity_change_checkpoint_cursor_convergence'
+    )
+    expect(migration?.legacyVersions).toEqual(['0120_entity_change_checkpoint_cursor_convergence'])
+
+    const appliedVersions = CONTROL_API_MIGRATIONS.filter(
+      candidate => candidate.version !== migration?.version
+    ).map(candidate => ({ version: candidate.version }))
+    appliedVersions.push({ version: '0120_entity_change_checkpoint_cursor_convergence' })
+    const query = vi.fn(async (sql: string) =>
+      sql.includes('SELECT version FROM schema_migrations')
+        ? { rows: appliedVersions, rowCount: appliedVersions.length }
+        : { rows: [], rowCount: 0 }
+    )
+    const release = vi.fn()
+
+    await initDb({ connect: vi.fn().mockResolvedValue({ query, release }) } as never)
+
+    const statements = query.mock.calls.map(([sql]) => String(sql))
+    expect(statements).not.toContainEqual(
+      expect.stringContaining('CREATE OR REPLACE FUNCTION entity_change_read_checkpoint')
+    )
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO schema_migrations(version)'),
+      ['0123_entity_change_checkpoint_cursor_convergence']
+    )
+    expect(release).toHaveBeenCalledOnce()
+  })
+
   it('registers an additive migration for expired entity-change cursor convergence', async () => {
     const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
     const migration = CONTROL_API_MIGRATIONS.find(
-      candidate => candidate.version === '0120_entity_change_checkpoint_cursor_convergence'
+      candidate => candidate.version === '0123_entity_change_checkpoint_cursor_convergence'
     )
     expect(migration).toBeDefined()
     if (!migration) return
