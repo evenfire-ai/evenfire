@@ -51,6 +51,7 @@ for file in "$MINIKUBE_DIR/profile-readiness.sh" "$ROOT/scripts/tests/test-minik
   "$ROOT/scripts/tests/test-minikube-pre-gate-shadow.sh" \
   "$ROOT/scripts/tests/test-minikube-fenced-recovery-render.sh" \
   "$ROOT/scripts/tests/test-minikube-t2-process-owner.sh" \
+  "$ROOT/scripts/tests/test-minikube-t1-reporter-report.sh" \
   "$ROOT/scripts/tests/test-minikube-explicit-context.sh" \
   "$ROOT/scripts/tests/test-minikube-t2-evidence.sh" \
   "$ROOT/scripts/tests/test-minikube-targeted-health.sh" \
@@ -59,6 +60,7 @@ for file in "$MINIKUBE_DIR/profile-readiness.sh" "$ROOT/scripts/tests/test-minik
 done
 "$ROOT/scripts/tests/test-minikube-t1-port-forward-owner.sh"
 "$ROOT/scripts/tests/test-minikube-t2-process-owner.sh"
+"$ROOT/scripts/tests/test-minikube-t1-reporter-report.sh"
 "$ROOT/scripts/tests/test-minikube-explicit-context.sh"
 "$ROOT/scripts/tests/test-minikube-t2-evidence.sh"
 "$ROOT/scripts/tests/test-minikube-targeted-health.sh"

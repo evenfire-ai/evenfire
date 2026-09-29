@@ -149,5 +149,34 @@ if run_process_check "$TEST_DIR/duplicate.out"; then
   exit 1
 fi
 grep -Fq PORT_FORWARD_CONFLICT "$TEST_DIR/duplicate.out"
+rm -f -- "$SECOND_RECORD"
+
+# A record whose first line is not a PID is an ownership failure and must stay
+# on disk. The baseline run proves the fixture alone is accepted, so the refusal
+# below can only come from the malformed record.
+run_process_check "$TEST_DIR/malformed-baseline.out" || {
+  printf 'FAIL: exact ownership fixture was rejected before the malformed record existed\n' >&2
+  exit 1
+}
+MALFORMED_RECORD="$PID_DIR/control-ui-malformed.pid"
+printf '%s\n' 'not-a-pid' 'trailing line' >"$MALFORMED_RECORD"
+malformed_before="$(cat "$MALFORMED_RECORD")"
+if run_process_check "$TEST_DIR/malformed.out"; then
+  printf 'FAIL: a port-forward record whose first line is not a PID was accepted\n' >&2
+  exit 1
+fi
+grep -Fq PORT_FORWARD_CONFLICT "$TEST_DIR/malformed.out"
+grep -Fq "$MALFORMED_RECORD" "$TEST_DIR/malformed.out" || {
+  printf 'FAIL: the conflict did not name the malformed record\n' >&2
+  exit 1
+}
+[ -f "$MALFORMED_RECORD" ] && [ "$(cat "$MALFORMED_RECORD")" = "$malformed_before" ] || {
+  printf 'FAIL: the process check removed or rewrote the malformed record\n' >&2
+  exit 1
+}
+[ -f "$RECORD" ] || {
+  printf 'FAIL: the process check removed the valid owner record\n' >&2
+  exit 1
+}
 
 printf 'PASS: T2 process inventory requires one exact structured port-forward owner\n'

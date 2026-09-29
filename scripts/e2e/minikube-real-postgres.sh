@@ -266,6 +266,8 @@ sanitize_file() {
   [ -f "$file" ] || return 0
   T1_REDACT_PASSWORD="${T1_REDACT_PASSWORD:-${PG_PASSWORD:-}}" python3 - "$file" <<'PY'
 from pathlib import Path
+from urllib.parse import quote
+import json
 import os
 import re
 import sys
@@ -273,8 +275,13 @@ path = Path(sys.argv[1])
 text = path.read_text(errors="replace")
 password = os.environ.get("T1_REDACT_PASSWORD", "")
 if password:
-    text = text.replace(password, "<password-redacted>")
-text = re.sub(r"postgres(?:ql)?://[^\s\"'<>]+", "<minikube-postgres-dsn-redacted>", text)
+    # The Vitest JSON reporter stores messages as JSON strings and a DSN
+    # builder percent-encodes the password, so redact those spellings too.
+    for spelling in (json.dumps(password)[1:-1], quote(password, safe=""), password):
+        text = text.replace(spelling, "<password-redacted>")
+# Stop at a backslash: inside the JSON reporter a DSN is followed by the escape
+# that closes its string (\"), and consuming it leaves invalid JSON.
+text = re.sub(r"postgres(?:ql)?://[^\s\"'<>\\]+", "<minikube-postgres-dsn-redacted>", text)
 text = re.sub(r"(?i)(authorization:\s*bearer\s+)[^\s]+", r"\1<token-redacted>", text)
 path.write_text(text)
 PY
@@ -357,6 +364,49 @@ import sys
 port = sys.stdin.read().strip()
 print("postgresql://postgres@127.0.0.1:" + port + "/postgres", end="")
 ')"
+}
+
+# Print the reporter counters and every non-passing file and test. The file must
+# already have gone through sanitize_file. A suite that fails before any test
+# runs (beforeAll, import error) has no assertionResults: its only diagnosis is
+# the file-level `message`, so it is printed right after the FAILED FILE line.
+print_reporter_failure_details() {
+  python3 - "$1" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+result = json.loads(Path(sys.argv[1]).read_text())
+print(
+    "T1 reporter counters:",
+    {
+        key: result.get(key)
+        for key in (
+            "success",
+            "numTotalTestSuites",
+            "numPassedTestSuites",
+            "numFailedTestSuites",
+            "numPendingTestSuites",
+            "numTotalTests",
+            "numPassedTests",
+            "numFailedTests",
+            "numPendingTests",
+        )
+    },
+)
+for test_result in result.get("testResults", []):
+    if test_result.get("status") == "passed":
+        continue
+    print(f"FAILED FILE: {test_result.get('name')}")
+    if test_result.get("message"):
+        print(test_result["message"])
+    for assertion in test_result.get("assertionResults", []):
+        if assertion.get("status") == "passed":
+            continue
+        print(f"FAILED TEST: {assertion.get('fullName') or assertion.get('title')}")
+        for message in assertion.get("failureMessages", []):
+            print(message)
+PY
 }
 
 run_suite() {
@@ -474,40 +524,7 @@ PY
      [ "$passed_suites" -ne "$total_suites" ] || [ "$failed_suites" -ne 0 ] || \
      [ "$failed_tests" -ne 0 ]; then
     cat "$log_file" >&2 || true
-    python3 - "$json_file" <<'PY' >&2 || true
-import json
-import sys
-from pathlib import Path
-
-result = json.loads(Path(sys.argv[1]).read_text())
-print(
-    "T1 reporter counters:",
-    {
-        key: result.get(key)
-        for key in (
-            "success",
-            "numTotalTestSuites",
-            "numPassedTestSuites",
-            "numFailedTestSuites",
-            "numPendingTestSuites",
-            "numTotalTests",
-            "numPassedTests",
-            "numFailedTests",
-            "numPendingTests",
-        )
-    },
-)
-for test_result in result.get("testResults", []):
-    if test_result.get("status") == "passed":
-        continue
-    print(f"FAILED FILE: {test_result.get('name')}")
-    for assertion in test_result.get("assertionResults", []):
-        if assertion.get("status") == "passed":
-            continue
-        print(f"FAILED TEST: {assertion.get('fullName') or assertion.get('title')}")
-        for message in assertion.get("failureMessages", []):
-            print(message)
-PY
+    print_reporter_failure_details "$json_file" >&2 || true
     T1_NEXT_COMMAND='repair the failed or incomplete Real PostgreSQL lane, then re-run T1'
     die_t1 REAL_PG_SUITE_FAILED "Real PostgreSQL reporter did not pass every suite in $package ($lane)"
   fi
