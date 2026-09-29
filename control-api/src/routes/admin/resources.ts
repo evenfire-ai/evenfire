@@ -4,6 +4,7 @@ import {
   type DbClient,
   advisoryLockModelNames,
   boundCarrierTransactionIdleTimeout,
+  pool,
   withTransaction,
 } from '../../db.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
@@ -11,6 +12,8 @@ import { enforceNamespace } from '../../http/namespaceAudit.js'
 import { validateCommunicationChannelSpec } from '../../http/validateCommunicationChannelSpec.js'
 import { validateMcpServerSpecPreflight } from '../../http/validateMcpServerSpec.js'
 import { K8sGateway } from '../../k8s.js'
+import { deriveOAuthEncryptionKey } from '../../oauth/encryption.js'
+import { uninstallMcpServer } from '../../oauth/mcpServerUninstall.js'
 import { rootLogger } from '../../observability/logger.js'
 import { stripHookRefFromHosts } from '../../services/hostGuardrailRefs.js'
 import {
@@ -513,6 +516,13 @@ function hostValidationDeps(db: DbClient) {
 
 export function createAdminResourcesRouter(gateway: K8sGateway): Router {
   const router = Router()
+  // Uses the module-level `log` (= exported `adminResourcesLogger`). A local
+  // child here would shadow it with a different instance, so handler logs would
+  // bypass any spy/redaction attached to the exported logger.
+  // Reliable local revocation of a remote server's DCR client on uninstall; the
+  // AS-side RFC 7592 delete is courtesy (real pinned transport in production).
+  const oauthEncryptionKey = deriveOAuthEncryptionKey(config.oauthEncryptionKey)
+  const dcrDb: DbClient = { query: (text, values) => pool.query(text, values) }
 
   // Middleware: enforce namespace per resource type and audit any injection attempt.
   // Uses enforceNamespace() consistently with all other admin routers.
@@ -1068,6 +1078,42 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
       const { plural, ns } = resolveResource(req.params.resource)!
       const name = req.params.name
 
+      if (plural === 'mcpservers') {
+        const outcome = await uninstallMcpServer(
+          {
+            gateway,
+            db: dcrDb,
+            encryptionKey: oauthEncryptionKey,
+            dcrDeps: { logger: log },
+            contextsNamespace: resourceNamespace('contexts'),
+            logger: log,
+          },
+          { name, namespace: ns }
+        )
+        if (outcome.status === 'completed') {
+          res.status(200).json(outcome.crDeleteResponse)
+          return
+        }
+        if (outcome.status === 'incomplete') {
+          res.status(503).json({
+            error: 'mcp_server_uninstall_incomplete',
+            outcome: 'repair_required',
+            pending: outcome.pending,
+            deleted: outcome.deleted,
+          })
+          return
+        }
+        if (outcome.status === 'not_found') {
+          // Every cleanup runs before the CR delete, so a missing CR means "already clean"
+          // or "deleted out of band". Cleaning by name here would have no uid to fence
+          // by: it could delete a CR a reinstall recreated after this read, or the Secret
+          // a pre-registered reinstall creates before its CR.
+          throw new K8sNotFoundError(`mcpservers/${name} not found`)
+        }
+        const unhandled: never = outcome
+        throw new Error(`unhandled mcp-server uninstall outcome: ${JSON.stringify(unhandled)}`)
+      }
+
       // CommunicationChannel: read the credentialsSecretRef name FIRST (we
       // can't read the CC after it's deleted), then delete the CC, then
       // delete the Secret. The CC-first order means HCC's SecretInformer
@@ -1131,9 +1177,6 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
         plural === 'communicationchannels' && ccSecretRefName
           ? await captureSecretForCleanup(ccSecretRefName)
           : null
-      const mcpCredentialsSecretName = `${name}-credentials`
-      const mcpSecretCleanup =
-        plural === 'mcpservers' ? await captureSecretForCleanup(mcpCredentialsSecretName) : null
 
       const deleted = await gateway.deleteResource(plural, name, ns)
 
@@ -1165,80 +1208,6 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
               )
             }
           }
-        }
-      }
-
-      if (plural === 'mcpservers') {
-        const contextsNs = resourceNamespace('contexts')
-        if (mcpSecretCleanup && mcpSecretCleanup.status !== 'ready') {
-          log.warn(
-            {
-              secretName: mcpCredentialsSecretName,
-              namespace: ns,
-              reason: mcpSecretCleanup.status,
-            },
-            'Skipped MCP credentials Secret cleanup'
-          )
-        } else if (mcpSecretCleanup) {
-          try {
-            await gateway.deleteSecret(mcpCredentialsSecretName, ns, mcpSecretCleanup.precondition)
-            log.info(
-              { secretName: mcpCredentialsSecretName, namespace: ns },
-              'Deleted MCP credentials Secret'
-            )
-          } catch (err) {
-            if (extractK8sStatusCode(err) === 404) {
-              log.info(
-                { secretName: mcpCredentialsSecretName, namespace: ns },
-                'MCP credentials Secret already gone'
-              )
-            } else {
-              // The McpServer is already gone, so a 200 is still the honest
-              // outcome — but this is a cleanup FAILURE, not an absence. The
-              // previous catch reported every error class, 403 included, as
-              // "no Secret to delete", telling the operator a credential had
-              // been removed while it was still live.
-              log.error(
-                { secretName: mcpCredentialsSecretName, namespace: ns, err },
-                'McpServer delete succeeded but credentials cleanup failed'
-              )
-            }
-          }
-        }
-
-        try {
-          const ctxList = (await gateway.listResource('contexts', contextsNs)) as Array<{
-            metadata?: { name?: string }
-            spec?: Record<string, unknown> & {
-              contextId?: string
-              description?: string
-              mcpServers?: string[]
-            }
-          }>
-          for (const ctx of ctxList) {
-            const ctxName = ctx.metadata?.name
-            const servers = ctx.spec?.mcpServers ?? []
-            if (ctxName && servers.includes(name)) {
-              await gateway.updateResource(
-                'contexts',
-                ctxName,
-                {
-                  spec: {
-                    ...ctx.spec,
-                    contextId: ctx.spec?.contextId ?? ctxName,
-                    mcpServers: servers.filter(s => s !== name),
-                  } as Record<string, unknown>,
-                },
-                contextsNs
-              )
-              log.info(
-                { serverName: name, contextName: ctxName },
-                'Removed MCP server from Context allowlist'
-              )
-            }
-          }
-        } catch (err) {
-          log.error({ serverName: name, err }, 'Failed to clean up Context allowlists')
         }
       }
 

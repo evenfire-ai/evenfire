@@ -1,9 +1,17 @@
 import { describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
-import { config } from '../src/config.js'
-import { createAdminResourcesRouter } from '../src/routes/admin/resources.js'
-import { ResourceService } from '../src/services/resourceService.js'
+
+// The McpServer uninstall tears OAuth state down before deleting the CR and answers
+// 503 when that fails, so it needs a DB that answers (empty: nothing to tear down).
+vi.mock('../src/db.js', async importActual => {
+  const actual = await importActual<typeof import('../src/db.js')>()
+  return { ...actual, pool: { query: vi.fn(async () => ({ rows: [], rowCount: 0 })) } }
+})
+
+const { config } = await import('../src/config.js')
+const { createAdminResourcesRouter } = await import('../src/routes/admin/resources.js')
+const { ResourceService } = await import('../src/services/resourceService.js')
 
 // R1-M6 — deploy-order guard against silent pruning of the additive context
 // `spec.displayName` field (PR #304).
@@ -103,14 +111,14 @@ function realServiceGateway(opts: { pruneDisplayName: boolean }): {
     listNamespacedCustomObject,
   } as unknown as ConstructorParameters<typeof ResourceService>[0]
   const svc = new ResourceService(customApi, ns, { contexts: ns })
-  // getSecret/deleteSecret live on K8sGateway (not ResourceService); the
-  // mcp-server DELETE handler reads and then deletes the `<name>-credentials`
-  // Secret. That cascade is orthogonal to the allowlist-pruning path under
-  // test, so the Secret is simply absent (404, the only "absent" read result).
-  const getSecret = vi.fn(async () => {
-    throw Object.assign(new Error('not found'), { statusCode: 404 })
-  })
+  // getSecret/deleteSecret live on K8sGateway (not ResourceService). The mcp-server
+  // uninstall snapshots the server's Secrets before cleaning up; that cascade is
+  // orthogonal to the allowlist-pruning path under test, so no Secret exists (404,
+  // the only "absent" read result).
   const deleteSecret = vi.fn(async () => ({ deleted: true }))
+  const getSecret = vi.fn(async (name: string) => {
+    throw Object.assign(new Error(`secrets "${name}" not found`), { code: 404 })
+  })
   const gateway = {
     getResource: svc.getResource.bind(svc),
     updateResource: svc.updateResource.bind(svc),
@@ -235,6 +243,13 @@ describe('routes/resources — context spec.displayName deploy-order guard (R1-M
         },
       },
       config.contextsNamespace
+    )
+    // A missing McpServer answers 404 without touching any Context, so the server
+    // under uninstall must exist.
+    await gateway.createResource(
+      'mcpservers',
+      { metadata: { name: 'srv-target' }, spec: {} },
+      config.mcpServersNamespace
     )
     const app = makeApp(gateway)
 

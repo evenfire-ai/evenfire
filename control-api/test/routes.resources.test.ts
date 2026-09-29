@@ -39,6 +39,9 @@ vi.mock('../src/db.js', async () => {
     advisoryLockModelName: async () => {},
     advisoryLockModelNames: async () => {},
     boundCarrierTransactionIdleTimeout: async () => {},
+    // The McpServer uninstall runs its OAuth teardown before the CR delete and answers
+    // 503 when it fails, so it needs a DB that answers (empty: nothing to tear down).
+    pool: { query: async () => ({ rows: [], rowCount: 0 }) },
   }
 })
 
@@ -1247,21 +1250,24 @@ describe('routes/resources', () => {
     config.contextsNamespace = 'contexts-ns'
     config.mcpServersNamespace = 'mcpservers-ns'
 
-    const gateway = {
-      // No credentials Secret: a 404 is the only read result that means "absent".
-      getSecret: vi
-        .fn()
-        .mockRejectedValue(Object.assign(new Error('not found'), { statusCode: 404 })),
-      deleteResource: vi.fn().mockResolvedValue({ deleted: true }),
-      deleteSecret: vi.fn().mockResolvedValue({ deleted: true }),
-      listResource: vi.fn().mockResolvedValue([
-        {
-          metadata: { name: 'ctx-a' },
-          spec: { contextId: 'ctx-a', description: 'desc', mcpServers: ['mcp-a', 'mcp-b'] },
-        },
-      ]),
-      updateResource: vi.fn().mockResolvedValue({}),
-    }
+    // Stateful gateway: the Context and the CR carry the uid/resourceVersion the
+    // apiserver always returns, which the fenced strip and delete depend on.
+    const gateway = new MockGateway('mcpservers-ns')
+    const cr = (await gateway.createResource(
+      'mcpservers',
+      { metadata: { name: 'mcp-a' }, spec: {} },
+      'mcpservers-ns'
+    )) as { metadata: { uid: string } }
+    await gateway.createResource(
+      'contexts',
+      {
+        metadata: { name: 'ctx-a' },
+        spec: { contextId: 'ctx-a', description: 'desc', mcpServers: ['mcp-a', 'mcp-b'] },
+      },
+      'contexts-ns'
+    )
+    const deleteSpy = vi.spyOn(gateway, 'deleteResource')
+    const updateSpy = vi.spyOn(gateway, 'updateResource')
 
     try {
       const app = express()
@@ -1270,20 +1276,20 @@ describe('routes/resources', () => {
 
       await request(app).delete('/admin/mcp-servers/mcp-a').expect(200)
 
-      expect(gateway.getSecret).toHaveBeenCalledWith('mcp-a-credentials', 'mcpservers-ns')
-      expect(gateway.deleteSecret).not.toHaveBeenCalled()
-      expect(gateway.deleteResource).toHaveBeenCalledWith('mcpservers', 'mcp-a', 'mcpservers-ns')
-      expect(gateway.listResource).toHaveBeenCalledWith('contexts', 'contexts-ns')
-      expect(gateway.updateResource).toHaveBeenCalledWith(
+      expect(deleteSpy).toHaveBeenCalledWith('mcpservers', 'mcp-a', 'mcpservers-ns', {
+        uid: cr.metadata.uid,
+      })
+      await expect(gateway.getResource('mcpservers', 'mcp-a', 'mcpservers-ns')).rejects.toThrow()
+      await expect(gateway.getResource('contexts', 'ctx-a', 'contexts-ns')).resolves.toMatchObject({
+        spec: { contextId: 'ctx-a', description: 'desc', mcpServers: ['mcp-b'] },
+      })
+      // The strip is fenced on the Context identity it read.
+      expect(updateSpy).toHaveBeenCalledWith(
         'contexts',
         'ctx-a',
-        {
-          spec: {
-            contextId: 'ctx-a',
-            description: 'desc',
-            mcpServers: ['mcp-b'],
-          },
-        },
+        expect.objectContaining({
+          metadata: { uid: expect.any(String), resourceVersion: '1' },
+        }),
         'contexts-ns'
       )
     } finally {
@@ -1316,17 +1322,40 @@ describe('routes/resources', () => {
     return app
   }
 
-  it('returns 502 and deletes nothing when the McpServer credentials Secret read is rejected', async () => {
+  // The McpServer DELETE runs through the shared uninstall orchestrator, which
+  // snapshots both dependent Secrets before any mutation. A snapshot read that
+  // fails for any reason other than 404 stops the run at the `secrets` stage.
+  function makeMcpDeleteGateway(getSecretError: unknown) {
+    return {
+      ...makeDeleteGateway(getSecretError),
+      getResource: vi.fn().mockResolvedValue({ metadata: { uid: 'cr-uid-a' }, spec: {} }),
+    }
+  }
+
+  it('answers 503 and deletes nothing when the McpServer credentials Secret read is rejected', async () => {
     const prevMcpServersNs = config.mcpServersNamespace
     config.mcpServersNamespace = 'mcpservers-ns'
-    const gateway = makeDeleteGateway(controlApiForbiddenRead('mcp-a-credentials', 'mcpservers-ns'))
+    const gateway = makeMcpDeleteGateway(
+      controlApiForbiddenRead('mcp-a-credentials', 'mcpservers-ns')
+    )
     vi.spyOn(rootLogger, 'warn').mockImplementation(() => {})
+    vi.spyOn(rootLogger, 'error').mockImplementation(() => {})
     try {
       const res = await request(makeDeleteApp(gateway)).delete('/admin/mcp-servers/mcp-a')
 
-      expect(gateway.getSecret).toHaveBeenCalledTimes(1)
+      // Liveness witness: both dependent Secrets were snapshotted, so the stop
+      // came from the read, not from an earlier exit.
       expect(gateway.getSecret).toHaveBeenCalledWith('mcp-a-credentials', 'mcpservers-ns')
-      expectRejectedSecretRead(res, 'mcp-a-credentials', 'mcpservers-ns')
+      expect(gateway.getSecret).toHaveBeenCalledWith('mcp-a-oauth-client', 'mcpservers-ns')
+      expect(res.status).toBe(503)
+      expect(res.body).toMatchObject({
+        error: 'mcp_server_uninstall_incomplete',
+        outcome: 'repair_required',
+        pending: ['secrets'],
+        deleted: [],
+      })
+      expect(JSON.stringify(res.body)).not.toContain('system:serviceaccount')
+      expect(JSON.stringify(res.body)).not.toContain('audit-id')
       expect(gateway.deleteResource).not.toHaveBeenCalled()
       expect(gateway.deleteSecret).not.toHaveBeenCalled()
       expect(gateway.updateResource).not.toHaveBeenCalled()
@@ -1356,25 +1385,26 @@ describe('routes/resources', () => {
     }
   })
 
-  it('returns 503 and deletes nothing when the credentials Secret read gets an upstream 500', async () => {
+  it('answers 503 and deletes nothing when the McpServer credentials Secret read gets an upstream 500', async () => {
     const prevMcpServersNs = config.mcpServersNamespace
     config.mcpServersNamespace = 'mcpservers-ns'
-    const gateway = makeDeleteGateway(
+    const gateway = makeMcpDeleteGateway(
       new ApiException(500, 'Internal Server Error', '{"kind":"Status","code":500}', {
         'audit-id': '5f0c7a4e-secret-read',
       })
     )
     vi.spyOn(rootLogger, 'warn').mockImplementation(() => {})
+    vi.spyOn(rootLogger, 'error').mockImplementation(() => {})
     try {
       const res = await request(makeDeleteApp(gateway)).delete('/admin/mcp-servers/mcp-a')
 
-      expect(gateway.getSecret).toHaveBeenCalledTimes(1)
+      expect(gateway.getSecret).toHaveBeenCalledWith('mcp-a-credentials', 'mcpservers-ns')
       expect(res.status).toBe(503)
-      expect(res.body.error).toBe('secret_read_failed')
-      expect(res.body.message).toBe(
-        'control-api could not read Secret "mcp-a-credentials" in namespace "mcpservers-ns": ' +
-          'the Kubernetes API server returned HTTP 500.'
-      )
+      expect(res.body).toMatchObject({
+        error: 'mcp_server_uninstall_incomplete',
+        pending: ['secrets'],
+        deleted: [],
+      })
       expect(JSON.stringify(res.body)).not.toContain('5f0c7a4e-secret-read')
       expect(gateway.deleteResource).not.toHaveBeenCalled()
       expect(gateway.deleteSecret).not.toHaveBeenCalled()
