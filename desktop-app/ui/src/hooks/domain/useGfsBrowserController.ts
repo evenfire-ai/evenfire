@@ -322,6 +322,8 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   const authorityEpochRef = useRef(Date.now())
 
   const current = crumbs.length ? crumbs[crumbs.length - 1] : null
+  const currentCrumbRef = useRef<GfsCrumb | null>(current)
+  currentCrumbRef.current = current
   const currentIsDirectory = current?.kind === 'directory'
   // Scope gfs cache/crumbs by environment too (spec §5.2): the same user/team
   // pair addresses different resources across clusters, so an env switch must

@@ -95,6 +95,7 @@ function authValue(me: AuthContextValue['me']): AuthContextValue {
 
 function Probe() {
   const ctrl = useGfsBrowserController()
+  const [backgroundRefreshOutcome, setBackgroundRefreshOutcome] = useState('not-run')
   return (
     <>
       <div data-testid="current">{ctrl.current?.resourceId ?? 'none'}</div>
@@ -116,6 +117,7 @@ function Probe() {
       <div data-testid="open-error">{ctrl.openError ?? 'none'}</div>
       <div data-testid="loading">{ctrl.loading ? 'loading' : 'idle'}</div>
       <div data-testid="loading-accessible">{ctrl.loadingAccessible ? 'loading' : 'idle'}</div>
+      <div data-testid="background-refresh-outcome">{backgroundRefreshOutcome}</div>
       <div data-testid="row-affordances">{ctrl.rowAffordances?.held.join(',') ?? 'none'}</div>
       <div data-testid="held-permissions">{ctrl.affordances?.held.join(',') ?? 'none'}</div>
       {ctrl.items.map(item => (
@@ -146,7 +148,12 @@ function Probe() {
       </button>
       <button
         type="button"
-        onClick={() => swallow(ctrl.refreshCurrentLocation({ background: true }))}
+        onClick={() => {
+          void ctrl
+            .refreshCurrentLocation({ background: true })
+            .then(updated => setBackgroundRefreshOutcome(updated ? 'updated' : 'superseded'))
+            .catch(() => setBackgroundRefreshOutcome('failed'))
+        }}
       >
         background refresh current location
       </button>
@@ -387,11 +394,15 @@ describe('useGfsBrowserController', () => {
     const deferredUserNavigation = new Promise<typeof folderB>(resolve => {
       finishUserNavigation = resolve
     })
+    let finishBackgroundRefresh!: (resource: typeof folderA) => void
+    const deferredBackgroundRefresh = new Promise<typeof folderA>(resolve => {
+      finishBackgroundRefresh = resolve
+    })
     const resolve = vi
       .fn()
       .mockResolvedValueOnce(folderA)
       .mockImplementationOnce(() => deferredUserNavigation)
-      .mockResolvedValueOnce(folderA)
+      .mockImplementationOnce(() => deferredBackgroundRefresh)
 
     Object.defineProperty(window, 'clerum', {
       configurable: true,
@@ -418,9 +429,14 @@ describe('useGfsBrowserController', () => {
     await act(async () => {
       screen.getByRole('button', { name: 'background refresh current location' }).click()
     })
+    await waitFor(() => expect(resolve).toHaveBeenCalledTimes(3))
     await act(async () => finishUserNavigation(folderB))
 
     await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('folder-b'))
+    await act(async () => finishBackgroundRefresh(folderA))
+    await waitFor(() =>
+      expect(screen.getByTestId('background-refresh-outcome').textContent).toBe('superseded')
+    )
   })
 
   it('exposes the presented verdict for a failed affordances read, not the IPC wrapper', async () => {
