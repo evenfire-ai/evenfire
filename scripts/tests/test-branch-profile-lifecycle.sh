@@ -217,6 +217,8 @@ case " $* " in
     fi
     ;;
   *" status "*) exit "$(cat "${state}/minikube-status-rc")" ;;
+  *" stop "*) [[ ! -e "${state}/minikube-stop-fails" ]] || exit 9 ;;
+  *" delete "*) [[ ! -e "${state}/minikube-delete-fails" ]] || exit 11 ;;
 esac
 EOF_MINIKUBE
 
@@ -271,7 +273,7 @@ reset_state() {
     profiles/external-rest-api rpc-proxy/rpc-proxy >"${state}/services"
   : >"${state}/reachable"
   rm -f "${state}/fail-get-deploy" "${state}/curl-fail" "${state}/start-switches-context" \
-    "${state}/pf-ignores-term"
+    "${state}/pf-ignores-term" "${state}/minikube-stop-fails" "${state}/minikube-delete-fails"
 }
 
 # bp <label> <action> [NAME=value ...]
@@ -532,6 +534,20 @@ assert_rc 0 'pf before delete'
 bp delete-clean delete "CONFIRM_DELETE=${profile}"
 assert_rc 0 'delete with verified records'
 assert_log_has "minikube -p ${profile} delete pidfiles=0" 'delete clears every record before minikube delete'
+
+# A failed minikube stop or delete is the command's exit code, even when every
+# port-forward record was cleared.
+reset_state
+: >"${state}/minikube-stop-fails"
+bp stop-minikube-fails stop
+assert_rc 9 'stop returns the exit code of a failed minikube stop'
+assert_log_has "minikube -p ${profile} stop pidfiles=0" 'stop ran the failing minikube stop with no records left'
+
+reset_state
+: >"${state}/minikube-delete-fails"
+bp delete-minikube-fails delete "CONFIRM_DELETE=${profile}"
+assert_rc 11 'delete returns the exit code of a failed minikube delete'
+assert_log_has "minikube -p ${profile} delete pidfiles=0" 'delete ran the failing minikube delete with no records left'
 
 # === stop-pf attempts every record ============================================
 # record_pf_pids <name...>: PF_PIDS gets the recorded PID of each named forward.
