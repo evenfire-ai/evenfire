@@ -1,29 +1,17 @@
 import React from 'react'
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import '@testing-library/jest-dom/vitest'
 import { cleanup, render, screen } from '@testing-library/react'
 import { buildDesktopEnvironmentLink } from '@lib/desktopAppLinks'
 import type { DesktopEnvironmentResponse } from '@/app/types/api'
-import { buildDesktopEnvironmentResponse } from '../../../../external-rest-api/src/routes/desktopEnvironmentResponse.js'
+import desktopEnvironmentFixture from '@/test/fixtures/desktop-environment-response.json'
 import Page from '../../page'
 
 const api = vi.hoisted(() => ({
   getDesktopEnvironment: vi.fn(),
 }))
 
-const originalDesktopEnvironmentConfig = {
-  appName: process.env.EXTERNAL_REST_API_DESKTOP_APP_NAME,
-  externalRestApiBaseUrl: process.env.EXTERNAL_REST_API_PUBLIC_BASE_URL,
-  rpcProxyBaseUrl: process.env.EXTERNAL_REST_API_DESKTOP_RPC_PROXY_BASE_URL,
-}
-
-function getDesktopEnvironmentFromProducer(): DesktopEnvironmentResponse {
-  return buildDesktopEnvironmentResponse({
-    desktopAppName: process.env.EXTERNAL_REST_API_DESKTOP_APP_NAME ?? '',
-    publicBaseUrl: process.env.EXTERNAL_REST_API_PUBLIC_BASE_URL ?? '',
-    desktopRpcProxyBaseUrl: process.env.EXTERNAL_REST_API_DESKTOP_RPC_PROXY_BASE_URL ?? '',
-  })
-}
+const desktopEnvironment: DesktopEnvironmentResponse = desktopEnvironmentFixture
 
 vi.mock('@lib/api', () => ({
   getDesktopEnvironment: api.getDesktopEnvironment,
@@ -55,35 +43,9 @@ vi.mock('next/link', () => ({
   ),
 }))
 
-beforeAll(() => {
-  process.env.EXTERNAL_REST_API_PUBLIC_BASE_URL = 'https://api.example.com'
-  process.env.EXTERNAL_REST_API_DESKTOP_RPC_PROXY_BASE_URL = 'https://rpc.example.com/'
-  process.env.EXTERNAL_REST_API_DESKTOP_APP_NAME = 'Example Tenant'
-})
-
-afterAll(() => {
-  if (originalDesktopEnvironmentConfig.externalRestApiBaseUrl === undefined) {
-    delete process.env.EXTERNAL_REST_API_PUBLIC_BASE_URL
-  } else {
-    process.env.EXTERNAL_REST_API_PUBLIC_BASE_URL =
-      originalDesktopEnvironmentConfig.externalRestApiBaseUrl
-  }
-  if (originalDesktopEnvironmentConfig.rpcProxyBaseUrl === undefined) {
-    delete process.env.EXTERNAL_REST_API_DESKTOP_RPC_PROXY_BASE_URL
-  } else {
-    process.env.EXTERNAL_REST_API_DESKTOP_RPC_PROXY_BASE_URL =
-      originalDesktopEnvironmentConfig.rpcProxyBaseUrl
-  }
-  if (originalDesktopEnvironmentConfig.appName === undefined) {
-    delete process.env.EXTERNAL_REST_API_DESKTOP_APP_NAME
-  } else {
-    process.env.EXTERNAL_REST_API_DESKTOP_APP_NAME = originalDesktopEnvironmentConfig.appName
-  }
-})
-
 beforeEach(() => {
   api.getDesktopEnvironment.mockReset()
-  api.getDesktopEnvironment.mockImplementation(getDesktopEnvironmentFromProducer)
+  api.getDesktopEnvironment.mockImplementation(() => desktopEnvironment)
 })
 
 afterEach(cleanup)
@@ -123,7 +85,7 @@ describe('Profile Portal home desktop setup link', () => {
   })
 
   it('labels the environment setup handoff accurately', async () => {
-    const environment = getDesktopEnvironmentFromProducer()
+    const environment = desktopEnvironment
     api.getDesktopEnvironment.mockResolvedValue(environment)
 
     render(<Page />)
@@ -139,7 +101,7 @@ describe('Profile Portal home desktop setup link', () => {
   })
 
   it('builds the setup link from the production discovery response', () => {
-    const environment = getDesktopEnvironmentFromProducer()
+    const environment = desktopEnvironment
     const href = buildDesktopEnvironmentLink(environment)
 
     expect(href).not.toBeNull()
