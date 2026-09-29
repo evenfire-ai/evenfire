@@ -9,6 +9,7 @@
  */
 import { logger } from '../logger'
 import { McpServerInfo, McpTool, ToolCallResult } from '../types'
+import { catalogBootstrapMetrics } from './catalogBootstrapMetrics'
 import {
   McpAuthError,
   McpClient,
@@ -16,7 +17,15 @@ import {
   type McpToolCallOptions,
   staticTokenProvider,
 } from './client'
-import { ServerStatusTracker } from './serverStatus'
+import type { GrantExistsQuery, GrantExistsResult } from './grantExistenceClient'
+import { grantCoordKey } from './grantExistenceClient'
+import {
+  type GrantExistenceChecker,
+  type GrantProbe,
+  type McpCatalogBootstrapConfig,
+  createGrantProbe,
+} from './grantProbe'
+import { ServerStatusTracker, extractStructuredHttpStatus, isAuthError } from './serverStatus'
 
 export interface McpStatusRefreshSummary {
   serverCount: number
@@ -34,6 +43,110 @@ export interface McpAdmissionControl {
   scheduleCleanup?: (cleanup: McpDetachedServerCleanup) => void
 }
 export type McpDetachedServerCleanup = () => Promise<void>
+
+/**
+ * Optional dependencies for eager catalog bootstrap and the SHARED oauth-context
+ * grant gate. Omitting `grantExistence` (or its policy config) keeps the manager
+ * on today's lazy admission — no bootstrap, no gate — so every existing 3-arg
+ * `new McpManager(...)` construction behaves identically.
+ */
+export interface McpManagerOptions {
+  /** Batch grant-existence checker (control-api `grants/exists`); no checker → no probe. */
+  grantExistence?: GrantExistenceChecker
+  /** LRU cap on live per-user partitions (main.ts OAUTH_USER_PARTITION_MAX). */
+  userPartitionMax?: number
+  /** Probe-policy knobs, injected so grantProbe never imports config.ts. */
+  catalogBootstrap?: McpCatalogBootstrapConfig
+  /** Injectable clock for tests. */
+  now?: () => number
+}
+
+/** Per-turn options for the eager catalog bootstrap (§6.1). */
+export interface McpCatalogBootstrapOptions {
+  /**
+   * Ends this turn's WAIT for its admissions early — the call returns with
+   * whatever landed and the rest counted as `pending`, exactly as when the wait
+   * budget expires. It does NOT abort the admissions: they are owned by the
+   * manager and coalesced (per-user via `ensureInFlight`, SHARED cross-user), so
+   * one turn's abort must never tear down a connection another turn/user depends
+   * on. §6.1 step 7/M4 mention `signal` on the admission, but §6.5/§7.3 require
+   * the abort to leave an in-flight admission running — the latter is the
+   * governing reading, so the signal is wired to the wait only.
+   */
+  signal?: AbortSignal
+}
+
+/**
+ * Outcome of one `bootstrapUserCatalog` call (§6.1). Every count is a disjoint
+ * tally of how a candidate was resolved; `skipped` breaks the non-admitted ones
+ * down by reason so the operator can tell a kill-switch (`disabled`) from a
+ * budget cap (`budget_exhausted`) from a definitive absence (`absent`).
+ */
+export interface McpCatalogBootstrapSummary {
+  /** Servers that survived the M12–M16 skip gates (i.e. were probe candidates). */
+  candidates: number
+  /** Coordinates actually sent to the `grants/exists` batch. */
+  probed: number
+  /** Admissions that resolved within the wait budget. */
+  admitted: number
+  /** Admissions still in flight when the wait budget expired (they continue). */
+  pending: number
+  skipped: Partial<
+    Record<
+      | 'disabled'
+      | 'no_user'
+      | 'no_factory'
+      | 'no_checker'
+      | 'manager_closed'
+      | 'gate'
+      | 'live'
+      | 'in_flight'
+      | 'cap'
+      | 'absent_cached'
+      | 'failed_cached'
+      | 'budget_exhausted'
+      | 'probe_unknown'
+      | 'absent'
+      | 'admission_failed',
+      number
+    >
+  >
+  /** Milliseconds the call waited on admissions. */
+  waitedMs: number
+  /** The wait budget expired with admissions still pending. */
+  timedOut: boolean
+}
+
+/** The partition a bootstrap candidate would open, keyed by its grant coordinate. */
+export interface BootstrapCandidate {
+  key: string
+  kind: 'user' | 'shared'
+  serverName: string
+}
+
+/** Input to the pure `selectBootstrapCandidates` classifier (§6.1). */
+export interface SelectBootstrapCandidatesInput {
+  userId: string
+  infos: Iterable<McpServerInfo>
+  /** clients.has — a live partition already exists for the key (M13). */
+  hasLive: (key: string) => boolean
+  /** ensureInFlight.has || pendingAdmissions.has — an admission is under way (M13). */
+  hasInFlight: (key: string) => boolean
+  /** A token-provider factory is wired (oauth-context is a candidate only then, M7). */
+  factoryPresent: boolean
+  /** Live per-user partition count (partitionLastUsed.size) for the cap check (M14). */
+  userPartitionCount: number
+  /** LRU cap on per-user partitions; undefined disables the cap. */
+  userPartitionMax: number | undefined
+}
+
+/** Output of `selectBootstrapCandidates`: what to probe and how to correlate it. */
+export interface BootstrapCandidateSelection {
+  queries: GrantExistsQuery[]
+  /** grant coordinate → the partition to open on `exists:true`. */
+  byCoord: Map<string, BootstrapCandidate>
+  skipped: Partial<Record<'gate' | 'live' | 'in_flight' | 'cap', number>>
+}
 
 interface PendingAdmission {
   attempt: symbol
@@ -136,15 +249,50 @@ export class McpManager {
   private proxyUrl?: string
   private statusTracker: ServerStatusTracker
   private tokenProviderFactory?: McpTokenProviderFactory
+  // One probe instance per manager (bootstrap + SHARED gate share it). Undefined
+  // when no grant checker (or its config) is injected → lazy admission as today.
+  private readonly grantProbe?: GrantProbe
+  // Kill-switch: the probe is built whenever a checker + config are present, but
+  // the SHARED gate (and bootstrap) only engage while enabled. `enabled=false`
+  // ⇒ every rail falls back to today's eager/lazy admission.
+  private readonly catalogBootstrapEnabled: boolean
+  // Probe/admission timeouts for bootstrap-initiated connections. Kept alongside
+  // grantProbe (which owns the negative-cache/backoff knobs) because the manager
+  // — not the probe — owns the wait budget and the per-connection timeout.
+  private readonly catalogBootstrap?: McpCatalogBootstrapConfig
+  // LRU cap the bootstrap honors so it never thrashes admit→evict above the cap.
+  private readonly userPartitionMax?: number
+  // Injected clock (tests) so bootstrap metric labeling reads the same time base
+  // the probe policy decides on. Production uses Date.now.
+  private readonly now: () => number
+  // Coalesces concurrent bootstraps for the SAME user onto one plan/probe/admit
+  // (§6.1 step 2). Cleared on flota reset so a fresh manager starts empty.
+  private readonly bootstrapInFlight: Map<string, Promise<McpCatalogBootstrapSummary>> = new Map()
+  // Remote oauth-context servers currently registered WITHOUT an authenticated
+  // SHARED connection (no grant yet). Membership drives the once-per-transition
+  // `mcp_oauth_shared_awaiting_grant` log — discovery re-probes every poll, so
+  // logging per poll would be noise; we log only on entering/leaving the set.
+  private readonly sharedAwaitingGrant: Set<string> = new Set()
 
   constructor(
     proxyUrl?: string,
     statusTracker?: ServerStatusTracker,
-    tokenProviderFactory?: McpTokenProviderFactory
+    tokenProviderFactory?: McpTokenProviderFactory,
+    options?: McpManagerOptions
   ) {
     this.proxyUrl = proxyUrl
     this.statusTracker = statusTracker ?? new ServerStatusTracker()
     this.tokenProviderFactory = tokenProviderFactory
+    // A probe is inert without both a checker and its policy config; either
+    // absent → stay on today's lazy admission (bootstrap and SHARED gate off).
+    this.now = options?.now ?? Date.now
+    this.grantProbe =
+      options?.grantExistence && options?.catalogBootstrap
+        ? createGrantProbe(options.grantExistence, options.catalogBootstrap, this.now)
+        : undefined
+    this.catalogBootstrapEnabled = options?.catalogBootstrap?.enabled ?? false
+    this.catalogBootstrap = options?.catalogBootstrap
+    this.userPartitionMax = options?.userPartitionMax
     if (proxyUrl) {
       logger.info({ component: 'McpManager' }, 'Proxy mode enabled')
     }
@@ -207,25 +355,49 @@ export class McpManager {
     return this.clients.get(this.sharedKey(serverName))
   }
 
+  /**
+   * A remote oauth server's status is NEVER derived from a platform probe. A
+   * probe (`probeTools`) is a real tools/list round-trip, and a spec-compliant
+   * remote 401s on any token-less request while an authenticated probe would
+   * spend a user's / context's OAuth token on a platform heartbeat (mini-spec 19
+   * §D-6). Its status is derived from the authenticated per-user catalog cache
+   * (a pure in-memory read) plus the `connect_required` marker set at call time.
+   */
+  private isRemoteOauthServer(serverName: string): boolean {
+    const info = this.serverInfos.get(serverName)
+    return info?.remote === true && this.isOauthServer(info)
+  }
+
+  private isOauthServer(serverConfig: McpServerInfo): boolean {
+    return serverConfig.authKind === 'oauth-user' || serverConfig.authKind === 'oauth-context'
+  }
+
   private buildTokenProvider(
     serverConfig: McpServerInfo,
     principal: McpPrincipal,
     eagerToken: string | undefined
   ): McpTokenProvider | undefined {
-    if (serverConfig.authKind === 'oauth-user' || serverConfig.authKind === 'oauth-context') {
+    if (this.isOauthServer(serverConfig)) {
       // oauth: JIT resolution via the injected factory (broker per-user /
-      // per-context, or token-less representative). No factory (dev/tests) →
-      // token-less, which fails closed on a server that requires auth.
-      //
-      // PRECONDITION (v1 class-a, spec §10.1 VERIFIED / mini-spec 03 §5): catalog
-      // population relies on the SHARED representative connecting WITHOUT auth —
-      // i.e. the server must serve initialize/tools/list unauthenticated and only
-      // 401 on tools/call (own-image, static catalog). A class-b upstream that
-      // auth-gates discovery is OUT of v1 scope and needs the deferred
-      // CRD-declared-schema path (mini-spec 03 §5/§8 "fuente de schema declarado").
-      return this.tokenProviderFactory
-        ? this.tokenProviderFactory(serverConfig, principal)
-        : staticTokenProvider(undefined)
+      // per-context, or token-less representative).
+      if (this.tokenProviderFactory) {
+        return this.tokenProviderFactory(serverConfig, principal)
+      }
+      // No factory (dev/tests). Behavior forks on remote vs local, because their
+      // catalog preconditions are opposite:
+      //   - LOCAL (v1 class-a, mini-spec 03 §5): the server serves
+      //     initialize/tools/list WITHOUT auth and only 401s on tools/call, so a
+      //     token-less SHARED representative still populates the catalog. Preserve
+      //     that — `staticTokenProvider(undefined)`.
+      //   - REMOTE (mini-spec 19 §D-6): a spec-compliant upstream 401s already at
+      //     `initialize`. A token-less provider here would let a dev server that
+      //     does NOT enforce auth connect and populate a token-less catalog,
+      //     MASKING the authenticated rail (and, worse, hiding that the same
+      //     server 401s in prod). Fail closed: return no provider. `undefined`
+      //     resolves to a token-less connection, but the eager-admission path
+      //     (addServer) never treats a remote-oauth SHARED representative as a
+      //     "populated catalog" — see the remote-oauth branch there.
+      return serverConfig.remote ? undefined : staticTokenProvider(undefined)
     }
     // static/none/bearer/basic/apiKey: preserve today's frozen-token behavior.
     return staticTokenProvider(eagerToken)
@@ -304,8 +476,11 @@ export class McpManager {
 
   /**
    * Add and connect to an MCP server (SHARED partition — the eager coordinator
-   * path). oauth-user servers admit only the token-less representative here;
-   * per-user partitions are lazily admitted on demand via callTool.
+   * path). LOCAL oauth-user servers admit only the token-less representative
+   * here; per-user partitions are lazily admitted on demand via callTool. REMOTE
+   * oauth servers open NO token-less SHARED representative (mini-spec 19 §D-6, see
+   * the remote-oauth branch below): the catalog is authenticated per-user (or, for
+   * oauth-context, over the authenticated SHARED grant).
    */
   async addServer(
     serverConfig: McpServerInfo,
@@ -355,6 +530,70 @@ export class McpManager {
       return 'applied'
     }
 
+    // ── Remote oauth: no token-less SHARED representative (mini-spec 19 §D-6) ──
+    // A LOCAL oauth server serves initialize/tools/list unauthenticated, so the
+    // eager SHARED representative can populate the catalog token-less. A REMOTE
+    // spec-compliant server 401s already at `initialize`, so that representative
+    // CANNOT be token-less. Handle the eager SHARED admission by flavor:
+    //   - oauth-user: no shared grant exists → the catalog is authenticated
+    //     PER-USER (each user's partition does the authenticated initialize/
+    //     tools/list, admitted lazily on first tool call, surfaced through the
+    //     per-user representative fallback in representativeClient/getAllTools).
+    //   - no factory (dev/tests): nothing can authenticate the representative →
+    //     fail closed rather than degrade to a masking token-less catalog.
+    // Both register the server (so per-user admission and status derive from it)
+    // but open no SHARED connection.
+    //   - oauth-context WITH a factory is the one flavor whose SHARED
+    //     representative CAN authenticate (on its context grant) and IS the
+    //     catalog — but only once that grant exists. Opening it before the grant
+    //     lands connects token-less against a lenient upstream and caches a
+    //     token-less catalog. So when the grant gate is engaged we probe first:
+    //     the SHARED opens ONLY on a confirmed grant; without one the server is
+    //     registered connected-with-0-tools and discovery re-probes each poll,
+    //     admitting the SHARED within one poll of the grant landing.
+    if (serverConfig.remote && this.isOauthServer(serverConfig)) {
+      const sharedAuthenticates =
+        serverConfig.authKind === 'oauth-context' && this.tokenProviderFactory !== undefined
+      if (!sharedAuthenticates) {
+        const installed = this.serverInfos.get(serverConfig.name)
+        if (installed && JSON.stringify(installed) === JSON.stringify(serverConfig)) {
+          control.onCommit?.()
+          return 'applied'
+        }
+        // Config changed (or first registration): drop any live per-user
+        // partitions so they rebuild lazily against the new revision — the remote
+        // analogue of replaceServer's per-user eviction. There is no SHARED
+        // representative to keep, so keepKey matches nothing.
+        this.evictPartitionsExcept(serverConfig.name, this.sharedKey(serverConfig.name), control)
+        // A server that WAS a gated oauth-context (and may be awaiting a grant) is
+        // no longer one here — it must leave the awaiting-grant set.
+        this.leaveSharedAwaitingGrant(serverConfig.name)
+        this.serverInfos.set(serverConfig.name, serverConfig)
+        // Reflect whatever the (per-user) representative catalog already holds —
+        // 0 right after an eviction / until a user with a live grant connects. The
+        // heartbeat refreshes this from the authenticated per-user catalog, never
+        // a token-less probe.
+        this.statusTracker.markConnected(
+          serverConfig.name,
+          this.representativeClient(serverConfig.name)?.availableTools.length ?? 0
+        )
+        control.onCommit?.()
+        return 'applied'
+      }
+      // oauth-context + factory: gate the SHARED admission on a confirmed grant
+      // when the probe is engaged. No probe / kill-switch off ⇒ fall through to
+      // the eager path below (today's behavior, M10 by absence).
+      if (this.grantProbe && this.catalogBootstrapEnabled) {
+        return this.addGatedSharedOauthContext(serverConfig, authToken, control)
+      }
+    }
+
+    // Reaching the general SHARED path means this is NOT a gated oauth-context
+    // this poll (a re-purpose to static/none/local-oauth, or the gate off). A
+    // gated oauth-context still awaiting its grant returns above, so this never
+    // clears a legitimately-awaiting server — only re-purposed ones.
+    this.leaveSharedAwaitingGrant(serverConfig.name)
+
     const key = this.sharedKey(serverConfig.name)
 
     // Check if already connected (SHARED partition)
@@ -376,6 +615,183 @@ export class McpManager {
   }
 
   /**
+   * SHARED oauth-context admission gated on a confirmed grant (§6.2). A live
+   * client or an in-flight admission short-circuits (M13, idempotent + coalesced);
+   * otherwise a single-coordinate probe decides: a confirmed grant (or an
+   * indeterminate probe, fail-open like today) opens the authenticated SHARED;
+   * a definitive absence registers the server connected-with-0-tools and opens
+   * NOTHING, so no token-less catalog is cached and discovery re-probes each poll.
+   */
+  private async addGatedSharedOauthContext(
+    serverConfig: McpServerInfo,
+    authToken: string | undefined,
+    control: McpAdmissionControl
+  ): Promise<McpAdmissionOutcome> {
+    const key = this.sharedKey(serverConfig.name)
+
+    // A live SHARED representative is today's path: same config → no-op,
+    // changed → replace (never re-probes a connection that already exists).
+    if (this.clients.has(key)) {
+      const installed = this.serverInfos.get(serverConfig.name)
+      if (installed && JSON.stringify(installed) === JSON.stringify(serverConfig)) {
+        control.onCommit?.()
+        return 'applied'
+      }
+      return this.replaceServer(serverConfig, authToken, control)
+    }
+
+    // A SHARED admission already in flight (a concurrent discovery poll or the
+    // turn bootstrap): coalesce onto it instead of probing/opening a second
+    // connection (M13). If it landed a client we are done; otherwise it failed or
+    // was absent, so fall through to a fresh probe.
+    const inFlight = this.ensureInFlight.get(key)
+    if (inFlight) {
+      await inFlight
+      if (this.clients.has(key)) {
+        control.onCommit?.()
+        return 'applied'
+      }
+    }
+
+    const verdict = await this.grantProbe!.probeOne({ mcpServerName: serverConfig.name })
+    if (verdict === 'absent') {
+      return this.registerSharedAwaitingGrant(serverConfig, control)
+    }
+    // 'present' (grant confirmed) or 'unknown' (probe indeterminate → fail-open,
+    // connect as today: a down control-api must not empty the catalog).
+    return this.admitSharedOauthContext(serverConfig, control)
+  }
+
+  /**
+   * Open the authenticated SHARED oauth-context representative and register the
+   * admission under the SHARED key so a concurrent discovery poll or the turn
+   * bootstrap coalesces onto this single connection. `evictPartitionsExcept`
+   * preserves this key (keepKey = sharedKey), so a config-change eviction never
+   * orphans the in-flight admission.
+   */
+  private admitSharedOauthContext(
+    serverConfig: McpServerInfo,
+    control: McpAdmissionControl,
+    options?: McpToolCallOptions
+  ): Promise<McpAdmissionOutcome> {
+    const key = this.sharedKey(serverConfig.name)
+
+    // Coalesce at admission time, not only at selection. Both callers — the
+    // discovery gate (addGatedSharedOauthContext) and the eager bootstrap —
+    // pre-check live/in-flight, then `await` a grant probe (an RTT) before
+    // reaching here; in that gap the OTHER caller can land or start the SHARED
+    // connection. Without this re-check each would open its own, burning a
+    // broker-bucket unit and breaking §6.5's single-SHARED-connection guarantee
+    // (pendingAdmissions still fences the double-install, but not the connect).
+    // A live representative → adopt it; an in-flight admission → hang off it.
+    if (this.clients.has(key)) {
+      control.onCommit?.()
+      return Promise.resolve('applied')
+    }
+    const coalesced = this.ensureInFlight.get(key)
+    if (coalesced) {
+      return coalesced.then(() => {
+        if (this.clients.has(key)) {
+          control.onCommit?.()
+          return 'applied'
+        }
+        // The admission we adopted settled without a live client (it failed or
+        // was superseded). Surface it as a failure so the bootstrap tracker
+        // caches it and warns, rather than opening a second connection here.
+        throw new Error(`SHARED oauth-context admission did not connect: ${serverConfig.name}`)
+      })
+    }
+
+    this.exitSharedAwaitingGrant(serverConfig.name)
+    const tokenProvider = this.buildTokenProvider(serverConfig, SHARED_PRINCIPAL, undefined)
+    const admission = this.connectAndInstall(
+      key,
+      serverConfig,
+      tokenProvider,
+      control,
+      true,
+      options
+    )
+    const tracked = admission.then(
+      () => undefined,
+      () => undefined
+    )
+    const cleared = tracked.finally(() => {
+      if (this.ensureInFlight.get(key) === cleared) this.ensureInFlight.delete(key)
+    })
+    this.ensureInFlight.set(key, cleared)
+    return admission
+  }
+
+  /**
+   * No confirmed grant (M9): register the server connected-with-0-tools without
+   * opening any SHARED connection — the exact shape an oauth-user server shows
+   * with no live per-user partition. On a config change, evict stale partitions
+   * (mirror of the fail-closed remote-oauth branch) and refresh serverInfos/status;
+   * on an unchanged re-poll, just commit. The catalog stays empty until the grant
+   * lands and discovery/bootstrap re-probes.
+   */
+  private registerSharedAwaitingGrant(
+    serverConfig: McpServerInfo,
+    control: McpAdmissionControl
+  ): McpAdmissionOutcome {
+    const installed = this.serverInfos.get(serverConfig.name)
+    if (!(installed && JSON.stringify(installed) === JSON.stringify(serverConfig))) {
+      this.evictPartitionsExcept(serverConfig.name, this.sharedKey(serverConfig.name), control)
+      this.serverInfos.set(serverConfig.name, serverConfig)
+      this.statusTracker.markConnected(serverConfig.name, 0)
+    }
+    this.enterSharedAwaitingGrant(serverConfig.name)
+    control.onCommit?.()
+    return 'applied'
+  }
+
+  /** Log (once) that a SHARED oauth-context is now awaiting its grant. */
+  private enterSharedAwaitingGrant(serverName: string): void {
+    if (this.sharedAwaitingGrant.has(serverName)) return
+    this.sharedAwaitingGrant.add(serverName)
+    catalogBootstrapMetrics.awaitingGrant(this.sharedAwaitingGrant.size)
+    logger.info(
+      {
+        component: 'McpManager',
+        event: 'mcp_oauth_shared_awaiting_grant',
+        serverName,
+        state: 'entered',
+      },
+      'SHARED oauth-context awaiting grant; no token-less connection opened'
+    )
+  }
+
+  /** Log (once) that a SHARED oauth-context left the awaiting-grant state. */
+  private exitSharedAwaitingGrant(serverName: string): void {
+    if (!this.sharedAwaitingGrant.delete(serverName)) return
+    catalogBootstrapMetrics.awaitingGrant(this.sharedAwaitingGrant.size)
+    logger.info(
+      {
+        component: 'McpManager',
+        event: 'mcp_oauth_shared_awaiting_grant',
+        serverName,
+        state: 'resolved',
+      },
+      'SHARED oauth-context grant confirmed; opening authenticated connection'
+    )
+  }
+
+  /**
+   * Silently drop a server from the awaiting-grant set when it is removed or
+   * re-purposed (config no longer a gated oauth-context). Distinct from
+   * exitSharedAwaitingGrant, whose 'resolved' log asserts a grant was confirmed —
+   * which did NOT happen here — so this transition is not logged. Leaving the
+   * membership behind would both retain a stale entry and suppress the next
+   * genuine 'entered' log after a re-registration.
+   */
+  private leaveSharedAwaitingGrant(serverName: string): void {
+    if (this.sharedAwaitingGrant.delete(serverName)) {
+      catalogBootstrapMetrics.awaitingGrant(this.sharedAwaitingGrant.size)
+    }
+  }
+
+  /**
    * Shared connect+install core reused by the eager SHARED path (addServer) and
    * the lazy per-user path (ensureClient) — one fencing machine (D4), keyed by
    * ClientKey. `ownsServerStatus` gates the per-serverName status writes so a
@@ -386,7 +802,8 @@ export class McpManager {
     serverConfig: McpServerInfo,
     tokenProvider: McpTokenProvider | undefined,
     control: McpAdmissionControl,
-    ownsServerStatus: boolean
+    ownsServerStatus: boolean,
+    options?: McpToolCallOptions
   ): Promise<McpAdmissionOutcome> {
     const admissionLifecycleEpoch = this.lifecycleEpoch
     const externalIsCurrent = control.isCurrent ?? (() => true)
@@ -400,7 +817,7 @@ export class McpManager {
     if (ownsServerStatus) this.statusTracker.markConnecting(serverConfig.name)
 
     try {
-      await client.connect()
+      await client.connect(options ?? {})
       if (!isCurrent() || this.pendingAdmissions.get(key)?.attempt !== attempt) {
         await this.scheduleClientCleanup(client, control)
         this.discardPendingAdmission(key, attempt, serverConfig.name)
@@ -508,7 +925,11 @@ export class McpManager {
    * connect+install fencing as the eager path. Concurrent callers for the same
    * partition coalesce onto one admission.
    */
-  private async ensureClient(serverName: string, userId: string): Promise<void> {
+  private async ensureClient(
+    serverName: string,
+    userId: string,
+    options?: McpToolCallOptions
+  ): Promise<void> {
     const key = this.userKey(serverName, userId)
     if (this.clients.has(key)) return
     const existing = this.ensureInFlight.get(key)
@@ -519,7 +940,7 @@ export class McpManager {
       throw new Error(`MCP server not connected: ${serverName}`)
     }
     const tokenProvider = this.buildTokenProvider(info, userPrincipal(userId), undefined)
-    const admission = this.connectAndInstall(key, info, tokenProvider, {}, false).then(
+    const admission = this.connectAndInstall(key, info, tokenProvider, {}, false, options).then(
       () => undefined
     )
     const tracked = admission.finally(() => {
@@ -729,6 +1150,7 @@ export class McpManager {
     this.byServer.delete(serverName)
     this.serverInfos.delete(serverName)
     this.statusTracker.remove(serverName)
+    this.leaveSharedAwaitingGrant(serverName)
 
     return async () => {
       await this.runDetachedCleanups(cleanups)
@@ -783,6 +1205,10 @@ export class McpManager {
     this.ensureInFlight.clear()
     this.partitionLastUsed.clear()
     this.partitionInFlight.clear()
+    this.sharedAwaitingGrant.clear()
+    catalogBootstrapMetrics.awaitingGrant(0)
+    this.bootstrapInFlight.clear()
+    this.grantProbe?.reset()
     this.statusTracker.reset()
     return cleanups
   }
@@ -873,6 +1299,295 @@ export class McpManager {
    * per-user partition (lazily admitted). oauth-user with no/anonymous userId is
    * rejected fail-closed BEFORE any token is resolved.
    */
+  /**
+   * Fail-closed admission gates (enabled → authoritative → ready) shared by the
+   * lazy per-user callTool path and the eager catalog bootstrap. serverInfos
+   * retains disabled / not-ready / non-authoritative servers (each eager skip
+   * branch does serverInfos.set before returning), so without this gate a lazy
+   * per-user admission would connect and execute against a server the operator
+   * disabled or that is not ready. A non-admissible server is operator intent
+   * (disabled) or transient/unauthoritative infra (not_ready) — NOT an auth
+   * failure, so the messages stay distinct from the "Authentication required"
+   * cases. Mirrors the eager admission gates in addServer.
+   */
+  private admissionGate(
+    info: McpServerInfo | undefined
+  ): { ok: true } | { ok: false; error: string } {
+    return evaluateAdmissionGate(info)
+  }
+
+  /**
+   * Eagerly open the remote OAuth partitions this user already has a grant for,
+   * so the turn's catalog carries their tools BEFORE the LLM needs them (§6.1) —
+   * without a prior failed `callTool`. Idempotent and best-effort: steady-state
+   * (every partition already live) costs zero round-trips, a down control-api
+   * degrades to today's lazy admission, and a candidate whose admission overruns
+   * the wait budget keeps connecting in the background (the tool loop reflects it
+   * on its next iteration). Never touches per-serverName status (admissions run
+   * with ownsServerStatus=false), never evicts, never probes tools.
+   */
+  async bootstrapUserCatalog(
+    userId: string,
+    options: McpCatalogBootstrapOptions = {}
+  ): Promise<McpCatalogBootstrapSummary> {
+    // Step 1 — total preconditions, each naming its single reason. The three
+    // dependency skips stay distinct (a kill-switch is not a missing checker is
+    // not a missing factory) so an operator can tell why bootstrap did nothing.
+    if (!userId || userId === 'anonymous') return skipAllSummary('no_user')
+    if (this.closed) return skipAllSummary('manager_closed')
+    if (!this.catalogBootstrapEnabled) return skipAllSummary('disabled')
+    if (!this.tokenProviderFactory) return skipAllSummary('no_factory')
+    if (!this.grantProbe || !this.catalogBootstrap) return skipAllSummary('no_checker')
+
+    // Step 2 — coalesce concurrent bootstraps of the SAME user onto one run so N
+    // simultaneous turns issue one plan/probe and one admission per partition.
+    const existing = this.bootstrapInFlight.get(userId)
+    if (existing) return existing
+    const run = this.runCatalogBootstrap(userId, this.grantProbe, this.catalogBootstrap, options)
+    this.bootstrapInFlight.set(userId, run)
+    try {
+      return await run
+    } finally {
+      if (this.bootstrapInFlight.get(userId) === run) this.bootstrapInFlight.delete(userId)
+    }
+  }
+
+  private async runCatalogBootstrap(
+    userId: string,
+    probe: GrantProbe,
+    config: McpCatalogBootstrapConfig,
+    options: McpCatalogBootstrapOptions
+  ): Promise<McpCatalogBootstrapSummary> {
+    const skipped: McpCatalogBootstrapSummary['skipped'] = {}
+    const bump = (reason: keyof McpCatalogBootstrapSummary['skipped'], n = 1): void => {
+      if (n > 0) skipped[reason] = (skipped[reason] ?? 0) + n
+    }
+
+    // Step 3 — classify candidates (pure). serverInfos values are always defined,
+    // so the gate inside never sees undefined.
+    const selection = selectBootstrapCandidates({
+      userId,
+      infos: this.serverInfos.values(),
+      hasLive: key => this.clients.has(key),
+      hasInFlight: key => this.ensureInFlight.has(key) || this.pendingAdmissions.has(key),
+      factoryPresent: this.tokenProviderFactory !== undefined,
+      userPartitionCount: this.partitionLastUsed.size,
+      userPartitionMax: this.userPartitionMax,
+    })
+    for (const [reason, count] of Object.entries(selection.skipped)) {
+      bump(reason as keyof McpCatalogBootstrapSummary['skipped'], count ?? 0)
+    }
+
+    const candidates = selection.queries.length
+    // Step 4 — nothing to probe (steady-state): zero round-trips, no log.
+    if (candidates === 0) {
+      catalogBootstrapMetrics.runFinished('noop', 0)
+      return {
+        candidates: 0,
+        probed: 0,
+        admitted: 0,
+        pending: 0,
+        skipped,
+        waitedMs: 0,
+        timedOut: false,
+      }
+    }
+
+    // Steps 5–6 — plan then execute the probe. The plan's non-ask buckets are
+    // cache/budget skips; a throw from execute (endpoint down/timeout/429) leaves
+    // every asked coordinate unknown — execute already backed off and released
+    // its in-flight reservations, so the turn simply proceeds on lazy admission.
+    const plan = probe.plan(selection.queries)
+    bump('absent_cached', plan.absentCached.length)
+    bump('failed_cached', plan.failedCached.length)
+    bump('budget_exhausted', plan.budgetExhausted.length)
+    bump('in_flight', plan.inFlight.length)
+    const probed = plan.ask.length
+    // Non-ask probe dispositions are known before execute (so a throw still
+    // counts them). budgetExhausted is all-or-nothing: paused (P4) vs over-budget
+    // (P6). The planner collapses both, so read the live pause to label them.
+    catalogBootstrapMetrics.probes({
+      cached_absent: plan.absentCached.length,
+      cached_failed: plan.failedCached.length,
+      ...(probe.snapshot().pausedUntil > this.now()
+        ? { paused: plan.budgetExhausted.length }
+        : { budget: plan.budgetExhausted.length }),
+    })
+
+    let results: GrantExistsResult[]
+    try {
+      results = await probe.execute(plan.ask)
+    } catch {
+      bump('probe_unknown', plan.ask.length)
+      catalogBootstrapMetrics.probes({ unknown: plan.ask.length })
+      catalogBootstrapMetrics.runFinished('error', 0)
+      const summary: McpCatalogBootstrapSummary = {
+        candidates,
+        probed,
+        admitted: 0,
+        pending: 0,
+        skipped,
+        waitedMs: 0,
+        timedOut: false,
+      }
+      this.logBootstrap(summary)
+      return summary
+    }
+
+    // Step 7 — decide per ASKED coordinate (the authoritative set of what we
+    // probed): admit on a confirmed grant, cache a definitive absence, treat a
+    // missing / non-boolean result as unknown. Never admit on a malformed datum.
+    const resultByCoord = new Map<string, GrantExistsResult>()
+    for (const r of results) resultByCoord.set(grantCoordKey(r.mcpServerName, r.userId), r)
+    const admissions: Array<{
+      coord: string
+      candidate: BootstrapCandidate
+      promise: Promise<unknown>
+    }> = []
+    let present = 0
+    let unknownResults = 0
+    let absentResults = 0
+    for (const query of plan.ask) {
+      const coord = grantCoordKey(query.mcpServerName, query.userId)
+      const candidate = selection.byCoord.get(coord)
+      const result = resultByCoord.get(coord)
+      if (!candidate || !result || typeof result.exists !== 'boolean') {
+        bump('probe_unknown')
+        unknownResults += 1
+        continue
+      }
+      if (result.exists) {
+        present += 1
+        const promise = this.admitBootstrapCandidate(userId, candidate, config)
+        if (promise) admissions.push({ coord, candidate, promise })
+      } else {
+        probe.recordAbsent(coord)
+        bump('absent')
+        absentResults += 1
+      }
+    }
+    catalogBootstrapMetrics.probes({
+      present,
+      absent: absentResults,
+      unknown: unknownResults,
+    })
+
+    // Step 9 — per-admission bookkeeping. Runs whenever each admission settles,
+    // even after the wait budget expires (the admission is coalesced in
+    // ensureInFlight and the loop's next iteration sees it). oauth-user stamps
+    // partitionLastUsed so a bootstrapped-but-never-called partition is still
+    // idle-evictable (M4). A rejected admission caches the failure (P2) and warns
+    // WITHOUT a token or body.
+    let admitted = 0
+    const pendingCoords = new Set(admissions.map(a => a.coord))
+    const tracked = admissions.map(a =>
+      a.promise.then(
+        () => {
+          pendingCoords.delete(a.coord)
+          admitted += 1
+          if (a.candidate.kind === 'user') this.partitionLastUsed.set(a.candidate.key, Date.now())
+          probe.recordAdmissionOk(a.coord)
+          catalogBootstrapMetrics.admission(
+            a.candidate.kind === 'user' ? 'per-user' : 'shared',
+            'ok'
+          )
+        },
+        (err: unknown) => {
+          pendingCoords.delete(a.coord)
+          probe.recordAdmissionFailure(a.coord)
+          bump('admission_failed')
+          catalogBootstrapMetrics.admission(
+            a.candidate.kind === 'user' ? 'per-user' : 'shared',
+            'failed'
+          )
+          logger.warn(
+            {
+              component: 'McpManager',
+              event: 'mcp_catalog_bootstrap_admission_failed',
+              serverName: a.candidate.serverName,
+              partition: a.candidate.kind === 'user' ? 'per-user' : 'shared',
+              err,
+            },
+            'MCP catalog bootstrap admission failed'
+          )
+        }
+      )
+    )
+
+    // Step 8 — bounded wait: resolve at min(all-settled, waitBudget). Pending
+    // admissions keep running; timedOut records that the budget cut the wait.
+    const start = Date.now()
+    let timedOut = false
+    if (tracked.length > 0) {
+      timedOut = await raceWithBudget(
+        Promise.allSettled(tracked),
+        config.waitBudgetMs,
+        options.signal
+      )
+    }
+
+    const summary: McpCatalogBootstrapSummary = {
+      candidates,
+      probed,
+      admitted,
+      pending: pendingCoords.size,
+      // Snapshot: background admission callbacks (`admission_failed`) keep mutating
+      // the live `skipped` after the wait budget/abort frees this summary, so the
+      // returned object must not alias the object those callbacks bump.
+      skipped: { ...skipped },
+      waitedMs: Date.now() - start,
+      timedOut,
+    }
+    // Step 10 — log the summary (candidates > 0 here; steady-state returned above).
+    // timedOut is read on the returned summary because a background admission may
+    // have flipped `admitted` between the wait and here without changing whether
+    // the budget cut the wait.
+    const runOutcome =
+      admissions.length === 0
+        ? 'skipped'
+        : timedOut
+          ? 'timed_out'
+          : admitted === admissions.length
+            ? 'admitted'
+            : 'partial'
+    catalogBootstrapMetrics.runFinished(runOutcome, summary.waitedMs)
+    this.logBootstrap(summary)
+    return summary
+  }
+
+  /**
+   * Open one bootstrap candidate's partition, bounded ONLY by connectTimeoutMs
+   * (invariant 11) so a bootstrap-initiated connect can never inherit the SDK's
+   * ~25-min default and pin a coalesced `ensureInFlight` entry. The turn's
+   * `signal` is deliberately NOT threaded here: admissions are owned by the
+   * manager and coalesced (per-user via `ensureInFlight`, SHARED cross-user), so
+   * one turn's abort must never tear down a connection another turn/user depends
+   * on (§6.5/§7.3). The abort instead cuts only THIS turn's wait, in
+   * `raceWithBudget`. oauth-user rides the lazy per-user path
+   * (ownsServerStatus=false); oauth-context adopts the SHARED admission,
+   * coalesced with discovery on the SHARED key.
+   */
+  private admitBootstrapCandidate(
+    userId: string,
+    candidate: BootstrapCandidate,
+    config: McpCatalogBootstrapConfig
+  ): Promise<unknown> | undefined {
+    const connectOptions: McpToolCallOptions = { timeoutMs: config.connectTimeoutMs }
+    if (candidate.kind === 'user') {
+      return this.ensureClient(candidate.serverName, userId, connectOptions)
+    }
+    const info = this.serverInfos.get(candidate.serverName)
+    if (!info) return undefined
+    return this.admitSharedOauthContext(info, {}, connectOptions)
+  }
+
+  private logBootstrap(summary: McpCatalogBootstrapSummary): void {
+    logger.info(
+      { component: 'McpManager', event: 'mcp_catalog_bootstrap', ...summary },
+      'MCP catalog bootstrap'
+    )
+  }
+
   async callTool(
     fullToolName: string,
     args: Record<string, unknown>,
@@ -929,40 +1644,30 @@ export class McpManager {
       }
       key = this.userKey(serverName, userId)
       // Fail-closed: replicate the eager addServer admission gates
-      // (enabled → authoritative → ready, manager.ts:276-305) before opening a
-      // per-user connection with the caller's OAuth token. serverInfos retains
-      // disabled/not-ready/non-authoritative servers (each skip branch there
-      // does serverInfos.set before returning), so without this gate a lazy
-      // per-user admission would connect and execute against a server the
-      // operator disabled or that is not ready. A non-admissible server is
-      // operator intent (disabled) or transient/unauthoritative infra
-      // (not_ready) — NOT an auth failure, so surface it distinctly from the
-      // "Authentication required" cases above.
-      if (!info?.enabled) {
-        return {
-          toolName: fullToolName,
-          result: { error: `MCP server disabled: ${serverName}` },
-          isError: true,
-        }
-      }
-      if (info.status?.authoritative === false || !info.status?.ready) {
-        const detail = info.status?.message ? ` (${info.status.message})` : ''
-        return {
-          toolName: fullToolName,
-          result: { error: `MCP server not ready: ${serverName}${detail}` },
-          isError: true,
-        }
+      // (enabled → authoritative → ready) before opening a per-user connection
+      // with the caller's OAuth token — see admissionGate for why.
+      const gate = this.admissionGate(info)
+      if (!gate.ok) {
+        return { toolName: fullToolName, result: { error: gate.error }, isError: true }
       }
       try {
         await this.ensureClient(serverName, userId)
       } catch (error) {
-        return {
+        const result: ToolCallResult = {
           toolName: fullToolName,
           result: {
             error: `Authentication required for ${serverName}: ${error instanceof Error ? error.message : 'connection failed'}`,
           },
           isError: true,
         }
+        // A 401 during the per-user admission's `initialize` is the same
+        // re-consent signal as a 401 on `tools/call`; without the marker the
+        // desktop cannot offer the reconnect flow. A 403 (insufficient scope)
+        // stays unmarked (terminal), mirroring the McpAuthError path below.
+        if (isAuthError(error) && extractStructuredHttpStatus(error) === 401) {
+          result.connectRequired = { mcpServerName: serverName }
+        }
+        return result
       }
     } else {
       key = this.sharedKey(serverName)
@@ -1069,7 +1774,13 @@ export class McpManager {
     // oauth grantScope='user' server into per-user clients, but a status round
     // probes each server once via its representative; iterating raw clients would
     // double-count those partitions in the summary tally.
-    const entries = [...this.byServer.keys()]
+    // Remote oauth servers are excluded from the probe set: their status is
+    // derived from the per-user catalog cache below, never a token-less/platform
+    // probe (see isRemoteOauthServer / mini-spec 19 §D-6).
+    const allServers = [...this.byServer.keys()]
+    const remoteOauthServers = allServers.filter(name => this.isRemoteOauthServer(name))
+    const entries = allServers
+      .filter(name => !this.isRemoteOauthServer(name))
       .map(name => [name, this.probeRepresentativeClient(name)] as const)
       .filter((entry): entry is readonly [string, McpClient] => entry[1] !== undefined)
     if (options.signal?.aborted) {
@@ -1136,6 +1847,16 @@ export class McpManager {
         this.statusTracker.updateToolCount(name, 0, { refreshError: result.error })
       }
     }
+    // Remote oauth: refresh the tool count from the authenticated per-user catalog
+    // cache (representativeClient, no network) instead of a probe — the token-safe
+    // status derivation of mini-spec 19 §D-6. These servers are absent from the
+    // summary tally on purpose (no probe was issued, no token spent).
+    for (const name of remoteOauthServers) {
+      const representative = this.representativeClient(name)
+      if (representative) {
+        this.statusTracker.updateToolCount(name, representative.availableTools.length)
+      }
+    }
     return summary
   }
 
@@ -1174,4 +1895,163 @@ export class McpManager {
   hasConnectedServers(): boolean {
     return this.byServer.size > 0
   }
+}
+
+/**
+ * Fail-closed admission gate (enabled → authoritative → ready), shared by the
+ * lazy per-user callTool path (`McpManager.admissionGate`) and the eager
+ * bootstrap classifier (`selectBootstrapCandidates`) so the two can never drift
+ * (D4). The error strings are load-bearing — `callTool` returns them verbatim.
+ */
+export function evaluateAdmissionGate(
+  info: McpServerInfo | undefined
+): { ok: true } | { ok: false; error: string } {
+  if (!info?.enabled) {
+    return { ok: false, error: `MCP server disabled: ${info?.name}` }
+  }
+  if (info.status?.authoritative === false || !info.status?.ready) {
+    const detail = info.status?.message ? ` (${info.status.message})` : ''
+    return { ok: false, error: `MCP server not ready: ${info.name}${detail}` }
+  }
+  return { ok: true }
+}
+
+/**
+ * Pure classifier for `bootstrapUserCatalog` (§6.1, tables M1/M2/M7/M12–M14):
+ * which remote-oauth servers this user should probe a grant for, keyed by the
+ * partition each would open. No I/O, no manager state mutated — property-tested.
+ * A local/static server is silently out of scope (M1/M2); every other exclusion
+ * is tallied in `skipped`. `oauth-context` is a candidate only with a factory
+ * (M7); a live/in-flight partition (M13) or an over-cap per-user admission (M14)
+ * is skipped so steady-state yields zero candidates and zero round-trips.
+ */
+export function selectBootstrapCandidates(
+  input: SelectBootstrapCandidatesInput
+): BootstrapCandidateSelection {
+  const {
+    userId,
+    infos,
+    hasLive,
+    hasInFlight,
+    factoryPresent,
+    userPartitionCount,
+    userPartitionMax,
+  } = input
+  const queries: GrantExistsQuery[] = []
+  const byCoord = new Map<string, BootstrapCandidate>()
+  const skipped: BootstrapCandidateSelection['skipped'] = {}
+  const bump = (reason: keyof BootstrapCandidateSelection['skipped']): void => {
+    skipped[reason] = (skipped[reason] ?? 0) + 1
+  }
+
+  for (const info of infos) {
+    // M1/M2 — only a remote oauth server is a bootstrap candidate.
+    if (info.remote !== true) continue
+    if (info.authKind !== 'oauth-user' && info.authKind !== 'oauth-context') continue
+
+    // M12 — replicate the lazy callTool admission gate. serverInfos values are
+    // always defined, so the gate never degrades to "disabled: undefined".
+    if (!evaluateAdmissionGate(info).ok) {
+      bump('gate')
+      continue
+    }
+
+    let key: string
+    let kind: 'user' | 'shared'
+    let query: GrantExistsQuery
+    if (info.authKind === 'oauth-user') {
+      key = serializeClientKey(info.name, userPrincipal(userId))
+      kind = 'user'
+      query = { mcpServerName: info.name, userId }
+    } else {
+      // M7 — an oauth-context SHARED can authenticate only through the factory.
+      if (!factoryPresent) continue
+      key = serializeClientKey(info.name, SHARED_PRINCIPAL)
+      kind = 'shared'
+      query = { mcpServerName: info.name }
+    }
+
+    // M13 — idempotency: a live partition or an in-flight admission is not a
+    // candidate. Steady-state ⇒ zero candidates ⇒ zero round-trips.
+    if (hasLive(key)) {
+      bump('live')
+      continue
+    }
+    if (hasInFlight(key)) {
+      bump('in_flight')
+      continue
+    }
+    // M14 — cap: never bootstrap a NEW per-user partition above the LRU cap. The
+    // lazy callTool path still admits (today's behavior); this only avoids
+    // bootstrap-induced admit→evict thrash above the cap.
+    if (
+      kind === 'user' &&
+      userPartitionMax !== undefined &&
+      userPartitionCount >= userPartitionMax
+    ) {
+      bump('cap')
+      continue
+    }
+
+    queries.push(query)
+    byCoord.set(grantCoordKey(info.name, kind === 'user' ? userId : undefined), {
+      key,
+      kind,
+      serverName: info.name,
+    })
+  }
+
+  return { queries, byCoord, skipped }
+}
+
+/** A total-skip summary naming the single precondition that stopped bootstrap. */
+function skipAllSummary(
+  reason: keyof McpCatalogBootstrapSummary['skipped']
+): McpCatalogBootstrapSummary {
+  return {
+    candidates: 0,
+    probed: 0,
+    admitted: 0,
+    pending: 0,
+    skipped: { [reason]: 1 },
+    waitedMs: 0,
+    timedOut: false,
+  }
+}
+
+/**
+ * Resolve `false` when `settled` (a non-rejecting Promise, e.g.
+ * `Promise.allSettled`) resolves first, else `true` when the wait ends early —
+ * either `budgetMs` elapses OR `signal` aborts. The loser is left running: the
+ * abort (like the budget) cuts only the WAIT, never the manager-owned admissions
+ * behind `settled`, which keep connecting in the background (§6.5/§7.3). An
+ * already-aborted signal ends the wait on the next tick.
+ */
+function raceWithBudget(
+  settled: Promise<unknown>,
+  budgetMs: number,
+  signal?: AbortSignal
+): Promise<boolean> {
+  return new Promise<boolean>(resolve => {
+    let done = false
+    const finishEarly = (): void => {
+      if (done) return
+      done = true
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', finishEarly)
+      resolve(true)
+    }
+    const timer = setTimeout(finishEarly, budgetMs)
+    if (signal) {
+      if (signal.aborted) queueMicrotask(finishEarly)
+      else signal.addEventListener('abort', finishEarly, { once: true })
+    }
+    void settled.then(() => {
+      if (done) return
+      done = true
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', finishEarly)
+      resolve(false)
+    })
+  })
 }

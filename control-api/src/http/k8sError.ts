@@ -32,3 +32,32 @@ export function extractK8sError(err: unknown): { status: number; message: string
   }
   return null
 }
+
+/**
+ * Client-safe reason for a failed K8s call, for text that leaves the process (response
+ * bodies, warnings). Unlike `extractK8sError` it never falls back to `err.message`: a
+ * client-node `ApiException` builds that message from the full apiserver response,
+ * response headers included. Only the metav1.Status `message` is used, then a fixed
+ * status text; an error without a K8s status gets the caller's fixed fallback.
+ * A 401/403 always gets the fixed text: its Status message names control-api's own
+ * ServiceAccount ("User \"system:serviceaccount:…\" cannot delete resource …").
+ */
+export function k8sSafeFailureMessage(err: unknown, fallback: string): string {
+  const status = extractK8sError(err)?.status
+  if (status === undefined) return fallback
+  if (status === 401 || status === 403) return `K8s error ${status}`
+  const body = (err as { body?: unknown }).body
+  let statusMessage: unknown
+  if (body && typeof body === 'object') {
+    statusMessage = (body as { message?: unknown }).message
+  } else if (typeof body === 'string') {
+    try {
+      statusMessage = (JSON.parse(body) as { message?: unknown }).message
+    } catch {
+      // Not a metav1.Status: never forward the raw body.
+    }
+  }
+  return typeof statusMessage === 'string' && statusMessage.length > 0
+    ? statusMessage
+    : `K8s error ${status}`
+}
