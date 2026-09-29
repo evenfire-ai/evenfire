@@ -1974,11 +1974,13 @@ export class WorkflowRecipeReconciler {
       // bounds it to one DELETE per generation or ADDED. It runs only once a
       // token ADDED was observed for the recipe: a fresh process would otherwise
       // send one DELETE per recipe, and the Secret watch's initial list replays
-      // ADDED for every token that exists.
-      if (
+      // ADDED for every token that exists. The first-deploy path below skips
+      // its own call when this one ran, so a failed DELETE is not repeated in
+      // the same pass.
+      const oauthBrokerTokenReapedEarly =
         !rb.recipeHasBackgroundAccessClient(recipe) &&
         this.oauthBrokerDeleteLedger.secretEpoch(recipe.metadata.name) !== 0
-      ) {
+      if (oauthBrokerTokenReapedEarly) {
         await this.ensureOAuthBrokerTokenSecret(recipe)
       }
 
@@ -2307,7 +2309,11 @@ export class WorkflowRecipeReconciler {
           name,
         })
         try {
-          const workflowDeploy = await this.deployWorkflowWorkloads(recipe, name)
+          const workflowDeploy = await this.deployWorkflowWorkloads(
+            recipe,
+            name,
+            oauthBrokerTokenReapedEarly
+          )
           workflowInternalDependencyConditions = workflowDeploy.internalDependencyConditions
           workflowWorkloadConditions = workflowDeploy.workloadConditions
           workflowTransportNetworkConditions = workflowDeploy.transportNetworkConditions
@@ -3648,7 +3654,8 @@ export class WorkflowRecipeReconciler {
 
   private async deployWorkflowWorkloads(
     recipe: WorkflowRecipeCRD,
-    name: string
+    name: string,
+    oauthBrokerTokenReapedEarly: boolean
   ): Promise<{
     internalDependencyConditions: StatusCondition[]
     secretOwnershipConditions: StatusCondition[]
@@ -3740,14 +3747,17 @@ export class WorkflowRecipeReconciler {
     // Provision the OAuth broker token Secret before workloads so the
     // RECIPE_OAUTH_BROKER_TOKEN secretKeyRef resolves on first pod start.
     // Non-fatal — same rationale as the non-workflow branch above. The
-    // periodic rotation loop will retry on its own cadence.
-    try {
-      await this.ensureOAuthBrokerTokenSecret(recipe)
-    } catch (err) {
-      createLogger('wrc', recipe.metadata.name).warn(
-        'Broker-token issuance failed during workflow reconciliation; rotation will retry',
-        { name, err }
-      )
+    // periodic rotation loop will retry on its own cadence. Skipped when the
+    // early reap in reconcile() already ran the delete branch for this pass.
+    if (!oauthBrokerTokenReapedEarly) {
+      try {
+        await this.ensureOAuthBrokerTokenSecret(recipe)
+      } catch (err) {
+        createLogger('wrc', recipe.metadata.name).warn(
+          'Broker-token issuance failed during workflow reconciliation; rotation will retry',
+          { name, err }
+        )
+      }
     }
 
     // Create/update workload resources in dependency order. Secret ownership was

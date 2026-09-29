@@ -3269,9 +3269,13 @@ describe('WorkflowRecipeReconciler', () => {
         const deployWorkflowWorkloads = () =>
           (
             reconciler as unknown as {
-              deployWorkflowWorkloads: (r: WorkflowRecipeCRD, n: string) => Promise<unknown>
+              deployWorkflowWorkloads: (
+                r: WorkflowRecipeCRD,
+                n: string,
+                oauthBrokerTokenReapedEarly: boolean
+              ) => Promise<unknown>
             }
-          ).deployWorkflowWorkloads(recipe, recipe.metadata.name)
+          ).deployWorkflowWorkloads(recipe, recipe.metadata.name, false)
         await deployWorkflowWorkloads()
         const created = onlyPost(mockCoreApi.createNamespacedService)
         const name = created.body.metadata.name
@@ -15839,6 +15843,75 @@ describe('WorkflowRecipeReconciler', () => {
         await reconciler.reconcile(current)
         expect(secretDeletes()).toBe(1)
       })
+    })
+
+    function installFirstDeployWorkflow(): {
+      recipe: WorkflowRecipeCRD
+      workflowReconcile: ReturnType<typeof vi.fn>
+    } {
+      const workflowReconcile = vi.fn().mockResolvedValue({
+        phase: 'deploying',
+        message: 'Workflow infrastructure created',
+        workflowPhase: 'initializing',
+      })
+      ;(
+        reconciler as unknown as {
+          workflowReconciler: {
+            reconcile: typeof workflowReconcile
+            validateWorkflowSpec: () => undefined
+          }
+        }
+      ).workflowReconciler = { reconcile: workflowReconcile, validateWorkflowSpec: () => undefined }
+      const recipe = makeRecipe({
+        metadata: {
+          name: 'test-recipe',
+          namespace: 'sandbox-recipes',
+          uid: 'uid-123',
+          generation: 4,
+        },
+        spec: {
+          workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.1-alpine', port: 8080 }],
+          steps: [{ id: 'run', run: snippetRun() }],
+        },
+      })
+      return { recipe, workflowReconcile }
+    }
+
+    it('R2-L3: without a token ADDED the first-deploy pass still sends its one DELETE', async () => {
+      const { recipe, workflowReconcile } = installFirstDeployWorkflow()
+
+      await reconciler.reconcile(recipe)
+
+      // Witness that the pass went through deployWorkflowWorkloads.
+      expect(workflowReconcile).toHaveBeenCalledTimes(1)
+      expect(secretDeletes()).toBe(1)
+    })
+
+    it('R2-L3: a first-deploy pass sends one token DELETE when it fails, and the next pass retries', async () => {
+      const { recipe, workflowReconcile } = installFirstDeployWorkflow()
+      let tokenDeletes = 0
+      mockCoreApi.deleteNamespacedSecret.mockImplementation(async ({ name }: { name: string }) => {
+        if (name !== SECRET_NAME) return {}
+        tokenDeletes += 1
+        if (tokenDeletes === 1) throw { code: 503 }
+        return {}
+      })
+      try {
+        // A token ADDED was observed, so the early reap runs in this pass.
+        reconciler.invalidateOAuthBrokerSecretLedger('test-recipe')
+        await reconciler.reconcile(recipe)
+
+        // Witness that the pass went through deployWorkflowWorkloads.
+        expect(workflowReconcile).toHaveBeenCalledTimes(1)
+        expect(secretDeletes()).toBe(1)
+
+        // The failed DELETE was not recorded, so the next pass retries it.
+        await reconciler.reconcile(recipe)
+        expect(workflowReconcile).toHaveBeenCalledTimes(2)
+        expect(secretDeletes()).toBe(2)
+      } finally {
+        mockCoreApi.deleteNamespacedSecret.mockResolvedValue({})
+      }
     })
   })
 
