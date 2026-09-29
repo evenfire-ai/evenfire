@@ -1748,6 +1748,32 @@ test('the body scan admits every request the contract admits, at each bound', ()
   assert.ok(scanned.structuralBytes <= contract.measureNonImageCompletionBytes(completion) + '"":"",'.length)
 })
 
+test('the body scan treats a container holding only whitespace as empty', () => {
+  const limits = contract.BODY_STRUCTURE_LIMITS
+  for (const [json, elements] of [
+    ['[ ]', 1],
+    ['{ \n }', 1],
+    ['[\n]', 1],
+    ['[\t\r\n ]', 1],
+    ['[[ ], { \n }, [\n]]', 4],
+    // Liveness witnesses: a container with a value inside is still counted.
+    ['[ 0 ]', 2],
+    ['{ "a" : 0 }', 2],
+    ['[\n[ ]\n]', 2],
+  ]) {
+    assert.equal(contract.scanJsonStructure(Buffer.from(json), limits).elements, elements, json)
+  }
+  // The element bound sees the same counts: three whitespace-only containers in
+  // an array make 4 values, and a fourth makes 5.
+  const tight = { ...limits, maxElements: 4 }
+  assert.equal(contract.scanJsonStructure(Buffer.from('[[ ],[\n],{ }]'), tight).elements, 4)
+  assert.throws(() => contract.scanJsonStructure(Buffer.from('[[ ],[\n],{ },[]]'), tight), {
+    name: 'BodyStructureError',
+    status: 413,
+    type: 'body.structure.too.many.elements',
+  })
+})
+
 test('the verify hook refuses a charset other than UTF-8 and scans UTF-8 bodies', () => {
   const verify = contract.createBodyStructureVerify(contract.BODY_STRUCTURE_LIMITS)
   const body = Buffer.from('{"a":[1]}')

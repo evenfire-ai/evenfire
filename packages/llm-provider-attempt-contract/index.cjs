@@ -53,16 +53,17 @@ const LIMITS = Object.freeze({
   // maxRequestBodyBytes with about four million of them, and three such
   // bodies at once exhaust a proxy capped at --max-old-space-size=384. A
   // conversation needs a few thousand containers; tool results are strings
-  // and never count. The A8 measurement at this bound is in
+  // and never count. The memory measurement at this bound is in
   // codex-llm-proxy/src/requestLimits.ts. Must equal the Grok contract's
   // value.
   maxRequestContainers: 262144,
   // Object members in one request, counted over every object in the tree.
   // JSON.parse keeps one property slot per member, so a body of short keys
   // with tiny values fits the byte cap with millions of members and exhausts
-  // the proxy heap before the request is ever authorized. A realistic
-  // request is about 190k members (A9 model window), and this bound leaves
-  // about 1.38 times that headroom. Must equal the Grok contract's value.
+  // the proxy heap before the request is ever authorized. A request that
+  // fills a 1M-token model window is about 190k members, and this bound
+  // leaves about 1.38 times that headroom. Must equal the Grok contract's
+  // value.
   maxRequestMembers: 262144,
   // Total JSON values in one request, including the root. A compact array of
   // zeros fits the byte cap while JSON.parse allocates an element per value.
@@ -267,15 +268,9 @@ function requestBodyLimitBytes(request) {
 }
 
 /**
- * UTF-8 length of a request with every image payload replaced by an empty
- * string: the caller-controlled text/tool share of the body.
- *
- * V2's larger ceiling exists for image data only, so this share stays on the V1
- * budget and declaring V2 never buys 24 MiB of text or tool definitions. The
- * measurement builds a detached shadow — the input's key order, shallow copies,
- * only image `data` blanked — measures it and discards it. The original
- * request, its hash and its projection are never touched, so this cannot change
- * what is authorized or signed.
+ * Copy of `messages` with the `data` of every image part replaced by an empty
+ * string. Only the touched objects are copied (shallow); the input is not
+ * modified.
  */
 function blankImagePayloadsInMessages(messages) {
   if (!Array.isArray(messages)) return messages
@@ -291,6 +286,17 @@ function blankImagePayloadsInMessages(messages) {
   })
 }
 
+/**
+ * UTF-8 length of a request with every image payload replaced by an empty
+ * string: the caller-controlled text/tool share of the body.
+ *
+ * V2's larger ceiling exists for image data only, so this share stays on the V1
+ * budget and declaring V2 never buys 24 MiB of text or tool definitions. The
+ * measurement builds a detached shadow — the input's key order, shallow copies,
+ * only image `data` blanked — measures it and discards it. The original
+ * request, its hash and its projection are never touched, so this cannot change
+ * what is authorized or signed.
+ */
 function measureNonImageRequestBytes(input) {
   return Buffer.byteLength(
     JSON.stringify({ ...input, messages: blankImagePayloadsInMessages(input.messages) }),

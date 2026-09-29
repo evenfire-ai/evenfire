@@ -50,8 +50,11 @@ function requestContract(request: unknown): RequestContract {
  * revisions, hashes and recipe names, a few hundred bytes in practice. The
  * contract owns the value and control-api imports the same one, so a request
  * control-api would accept is never refused here for its envelope (#739).
- * This is the Codex value; a Grok request uses the Grok contract's own
- * allowance through `requestContract`.
+ * Production code does not read this export: the authorizer takes the
+ * allowance from `requestContract(request).envelopeAllowanceBytes`, which
+ * selects the Grok contract's value for a Grok request. This export is the
+ * Codex value, kept so `providerAttemptAuthorizer.test.ts` can pin it to the
+ * contract.
  */
 export const AUTHORIZE_ENVELOPE_ALLOWANCE_BYTES = ENVELOPE_ALLOWANCE_BYTES
 

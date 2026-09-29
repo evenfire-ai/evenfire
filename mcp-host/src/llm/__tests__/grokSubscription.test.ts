@@ -1296,6 +1296,36 @@ describe('GrokSubscriptionProvider image input (#784)', () => {
     }
   )
 
+  it('T-G4b-6c classifies image_source_invalid as a non-retryable ApiCallFailed with no failover', () => {
+    const provider = new GrokSubscriptionProvider('grok-4.6', deps() as never)
+    const message = 'image part has no usable provenance source (missing source)'
+
+    const classified = provider.classifyError(
+      new CodexAuthorizeError('image_source_invalid', message)
+    )
+
+    expect(classified).toEqual({
+      code: LlmErrorCode.ApiCallFailed,
+      retryable: false,
+      message,
+      providerCode: 'image_source_invalid',
+      providerDispatched: false,
+    })
+    expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
+
+    // Liveness witness: a retryable code classified by the same provider does
+    // retry and fail over, so the assertions above are not satisfied by a
+    // classifier that never retries.
+    const retryable = provider.classifyError(
+      new GrokProxyError(
+        'provider_unavailable',
+        'proxy stream failed with 503 (provider_unavailable)'
+      )
+    )
+    expect(retryable.retryable).toBe(true)
+    expect(classifyFailoverClass(retryable.code, retryable.retryable)).not.toBeNull()
+  })
+
   const MIB = 1024 * 1024
   const GROK_ATTACHMENT_REFUSALS: Array<{
     name: string

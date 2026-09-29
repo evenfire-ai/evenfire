@@ -39,8 +39,9 @@ Limits, from the xAI documentation (grok-4.5, 4.6 and 4.7 list
 - JPEG and PNG only. WebP and GIF are refused.
 
 There is **no dimension or pixel limit**. The validator reads the PNG or
-JPEG header to check the container, and never refuses on width or height; a
-declared 9000×9000 PNG is accepted and reaches the upstream. This differs from
+JPEG header to check the container. It has no upper bound on width or height
+(a declared 9000×9000 PNG is accepted and reaches the upstream); it refuses
+only a zero dimension. This differs from
 Codex, whose 2048 px bound comes from its measured endpoint. The validator
 checks canonical base64, MIME/container framing and header dimensions; it does
 not decode pixels.
@@ -117,7 +118,7 @@ so it never queues behind a visual stream, and a declared length above the
 visual cap is refused 413 before reading. Anonymous, wrong-scope and admin requests keep the
 ordinary limit.
 
-**Per-principal visual share (B4).** In addition to the gate, each platform
+**Per-principal visual share.** In addition to the gate, each platform
 identity (`sub` plus sorted `hostRefs`) may hold at most 2 visual entries
 (running or queued) of the gate's 5. A token whose `sub` is missing, empty or
 not a string is refused 401 before any gate or share is taken. When the share
@@ -932,16 +933,28 @@ Grok annotations. A new control-api also republishes on boot.
    `GROK_LLM_PROXY_EXECUTION_ENABLED`. `MCP_HOST_GROK_SUBSCRIPTION_ENABLED`
    follows automatically through HCC and WRC.
 
-Image input (#784) on a deployment where the Grok flags are already on:
-deploy control-api and `grok-llm-proxy` first, wait until every pod of both
-runs the new image, and only then deploy the four Host images. V2 has no flag
-of its own, so a new Host sends an image-bearing request as soon as it runs.
-An old control-api refuses it (400 `invalid_request`, or 413 above its 24 MiB
-route parser), and an old proxy refuses it after the attempt was authorized
-(400 `invalid_request`, or 413 above its 8 MiB parser, which the user sees as
-"Conversation Too Long"). Step 4's Host-before-proxy rule protects a
-response-side bound, `maxToolCalls`, whose band a new proxy would bill and an
-old Host would discard. #784 leaves `maxToolCalls` (256) unchanged, so the rule
+Image input (#784) on a deployment where the Grok flags are already on: roll
+out `grok-llm-proxy` first, then control-api, then the four Host images, and
+wait until every pod of each runs the new image before starting the next.
+V2 has no version negotiation and no flag of its own: a new Host sends an
+image-bearing request as soon as it runs, and nothing tells it what the
+control-api or the proxy behind it accepts. Each mixed-version pairing fails
+closed, and what the user sees is:
+
+| Pairing | Request | What happens | What the user sees |
+| --- | --- | --- | --- |
+| new Host, old control-api | V2 within the old route parser | refused at authorize with 400 `invalid_request`; no attempt row, nothing sent | "Connection Error" (`LLM_API_CALL_FAILED`, not retryable) |
+| new Host, old control-api | V2 above the old route parser (24 MiB) | refused at authorize with 413 `payload_too_large` | "Conversation Too Long" (`LLM_CONTEXT_LENGTH_EXCEEDED`); shortening the text does not help |
+| new Host, new control-api, old proxy | V2 within the old proxy parser | authorized (ticket and attempt row written), refused by the proxy with 400 `invalid_request`; one attempt consumed, nothing sent upstream | "Connection Error" |
+| new Host, new control-api, old proxy | V2 above the old proxy parser (8 MiB) | authorized, refused by the proxy with 413 `payload_too_large` | "Conversation Too Long" |
+| old Host, any control-api and proxy | V1 only | unchanged | nothing new |
+
+The order proxy, control-api, Host keeps a V2 request from being authorized
+against a proxy that will refuse it: with the proxy already new, an old
+control-api refuses V2 before any attempt is recorded. Step 4's
+Host-before-proxy rule protects a response-side bound, `maxToolCalls`, whose
+band a new proxy would bill and an old Host would discard. #784 leaves
+`maxToolCalls` (256) unchanged, so the rule
 does not apply to this upgrade. #784 does tighten request-side V1 bounds: it
 adds `maxRequestContainers` and `maxRequestMembers` (262144 each) and lowers
 the element bound from 8388608 to `maxRequestElements` (1048576). A request
@@ -977,7 +990,11 @@ the flags stay off until step 6, and steps 1-6 apply as written.
 
 Image input (#784) alone, with the Grok flags left on: roll back the four Host
 images first and wait until no Host pod runs a #784 image, then roll back
-`grok-llm-proxy` and control-api — the upgrade order reversed. V2 has no flag
+control-api and `grok-llm-proxy` — the upgrade order reversed. A visual request
+already queued at the proxy waits at most until its 60 s admission deadline
+(see "Proxy admission"), so wait at least that long after the last Host is
+rolled back, and for any running visual stream to end, before replacing the
+proxy pods. V2 has no flag
 of its own, so a #784 Host keeps sending image-bearing V2 requests; an older
 control-api refuses them at authorize (400 `invalid_request`, or 413 above its
 24 MiB route parser) and an older proxy refuses them after the attempt was
