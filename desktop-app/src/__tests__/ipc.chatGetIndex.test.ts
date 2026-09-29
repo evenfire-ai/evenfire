@@ -133,10 +133,29 @@ describe('chat:getIndex', () => {
     expect(tombstones(index)).toEqual(['deleted-chat'])
   })
 
-  it('still returns the tombstones and reports the code when the chats directory is unreadable', async () => {
-    vi.spyOn(fs, 'readdir').mockRejectedValueOnce(
-      Object.assign(new Error('permission denied'), { code: 'EACCES' })
+  it('retries only the cleanups of the agent being read once the bind sweep ran', async () => {
+    const binding = await import('../chatStoreBinding.js')
+    // Earlier reads in this file already consumed the sweep of the bind.
+    const retry = vi.spyOn(binding.requireChatStore(), 'retryPendingDeleteCleanups')
+    const readdir = vi.spyOn(fs, 'readdir')
+
+    const index = await call('chat:getIndex', { agentRef: 'agent-1' })
+
+    expect(retry).toHaveBeenCalledWith(TEAM_A, 'agent-1')
+    expect(readdir.mock.calls.map(entry => String(entry[0]))).not.toContain(
+      join(base, 'env-a', 'user-a')
     )
+    expect(tombstones(index)).toEqual(['deleted-chat'])
+  })
+
+  it('still returns the tombstones and reports the code when the chats directory is unreadable', async () => {
+    const binding = await import('../chatStoreBinding.js')
+    // Re-binding the same user (a team switch or a catalog refresh) arms the
+    // sweep over every agent directory for the next read.
+    await binding.bindChatStoreForUser('user-a', 'env-a', { teamId: 'team-a' })
+    const readdir = vi
+      .spyOn(fs, 'readdir')
+      .mockRejectedValueOnce(Object.assign(new Error('permission denied'), { code: 'EACCES' }))
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
 
     const index = await call('chat:getIndex', { agentRef: 'agent-1' })
@@ -144,5 +163,9 @@ describe('chat:getIndex', () => {
     const report = warn.mock.calls.find(entry => String(entry[0]).includes('[chat:getIndex]'))
     expect(String(report?.[0])).toContain('(EACCES)')
     expect(tombstones(index)).toEqual(['deleted-chat'])
+    // The sweep that failed stays armed: the next read walks the directory again.
+    await call('chat:getIndex', { agentRef: 'agent-1' })
+    const userDir = join(base, 'env-a', 'user-a')
+    expect(readdir.mock.calls.map(entry => String(entry[0]))).toEqual([userDir, userDir])
   })
 })

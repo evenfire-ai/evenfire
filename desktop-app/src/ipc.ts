@@ -1729,9 +1729,11 @@ export function registerIpcHandlers(service: AppService): void {
     // chats directory) would otherwise reject the read and leave the renderer
     // without the tombstones it filters deleted chats with. The failure is
     // reported with its code and the cleanup stays queued for the next read.
+    // Only this agent's queue is retried (the renderer reads every agent in a
+    // fan-out); the store walks every agent once per bind on its own.
     try {
       const authority = service.getChatDeletionFenceAuthority()
-      await store.retryPendingDeleteCleanups(authority.authorityScope)
+      await store.retryPendingDeleteCleanups(authority.authorityScope, agentRef)
     } catch (error) {
       const code = (error as NodeJS.ErrnoException | undefined)?.code
       console.warn(

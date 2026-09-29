@@ -1004,6 +1004,125 @@ describe('deleted-chat cleanup failure reporting', () => {
   })
 })
 
+/**
+ * `chat:getIndex` retries the pending cleanups before every read and the
+ * renderer reads every agent's index in a fan-out, so a retry that walks every
+ * agent costs N·(N+1) index reads per fan-out. The first retry after a bind
+ * walks every agent once; later retries touch only the agent being read.
+ */
+describe('pending cleanup retry per agent', () => {
+  const AGENTS = ['agent-1', 'agent-2', 'agent-3', 'agent-4', 'agent-5']
+  const indexPathOf = (agentRef: string) => join(tempDir, agentRef, 'index.json')
+
+  async function queueFailedCleanup(agentRef: string, chatId: string): Promise<void> {
+    await store.createChat(agentRef, chatId)
+    await store.saveMessages(agentRef, chatId, [
+      { id: 'm1', role: 'user', content: 'x', timestamp: 1 },
+    ])
+    const rm = vi
+      .spyOn(fs, 'rm')
+      .mockRejectedValue(Object.assign(new Error('denied'), { code: 'EACCES' }))
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    await expect(store.deleteChat(agentRef, chatId, TEAM_A_SCOPE)).resolves.toEqual({
+      cleanupPending: true,
+    })
+    rm.mockRestore()
+    warn.mockRestore()
+  }
+
+  /** Records every read of an agent's index.json until the mocks are restored. */
+  function recordIndexReads(): string[] {
+    const originalReadFile = fs.readFile.bind(fs)
+    const reads: string[] = []
+    vi.spyOn(fs, 'readFile').mockImplementation(async (...args) => {
+      const filePath = String(args[0])
+      if (filePath.endsWith('index.json')) reads.push(filePath)
+      return originalReadFile(...(args as Parameters<typeof fs.readFile>))
+    })
+    return reads
+  }
+
+  async function pendingOf(agentRef: string) {
+    return (await store.getIndex(agentRef)).pendingChatCleanup ?? []
+  }
+
+  it('walks every agent once after a bind, then reads only the requested agent', async () => {
+    for (const agentRef of AGENTS) await queueFailedCleanup(agentRef, `pending-${agentRef}`)
+    // Witness: every agent really has a queued cleanup.
+    for (const agentRef of AGENTS) expect(await pendingOf(agentRef)).toHaveLength(1)
+    store.setAuthorityScope(TEAM_A_SCOPE)
+    const reads = recordIndexReads()
+
+    await store.retryPendingDeleteCleanups(TEAM_A_SCOPE, 'agent-1')
+    // The sweep reads each agent's index to find its queue, and once more to
+    // drop the finished entry.
+    expect(reads).toHaveLength(2 * AGENTS.length)
+    const afterSweep = reads.length
+    for (const agentRef of AGENTS.slice(1)) {
+      await store.retryPendingDeleteCleanups(TEAM_A_SCOPE, agentRef)
+    }
+
+    expect(reads.slice(afterSweep)).toEqual(AGENTS.slice(1).map(indexPathOf))
+    expect(reads).toHaveLength(3 * AGENTS.length - 1)
+    vi.restoreAllMocks()
+    for (const agentRef of AGENTS) expect(await pendingOf(agentRef)).toEqual([])
+  })
+
+  it('finishes a cleanup queued after the sweep on the next read of that agent', async () => {
+    await store.createChat('agent-1', 'kept')
+    store.setAuthorityScope(TEAM_A_SCOPE)
+    await store.retryPendingDeleteCleanups(TEAM_A_SCOPE, 'agent-1')
+    await queueFailedCleanup('agent-3', 'late-delete')
+    // Witness: the cleanup is really queued and its artifacts are on disk.
+    expect(await pendingOf('agent-3')).toHaveLength(1)
+    await expect(fs.access(join(tempDir, 'agent-3', 'chats', 'late-delete'))).resolves.toBe(
+      undefined
+    )
+    const reads = recordIndexReads()
+
+    await store.retryPendingDeleteCleanups(TEAM_A_SCOPE, 'agent-3')
+
+    const retryReads = [...reads]
+    vi.restoreAllMocks()
+    expect(await pendingOf('agent-3')).toEqual([])
+    await expect(fs.access(join(tempDir, 'agent-3', 'chats', 'late-delete'))).rejects.toThrow()
+    // Only agent-3 was touched: read to find its queue, then to drop the entry.
+    expect(retryReads).toEqual([indexPathOf('agent-3'), indexPathOf('agent-3')])
+  })
+
+  it('walks every agent again after the next bind', async () => {
+    for (const agentRef of AGENTS.slice(0, 3)) await store.createChat(agentRef, 'kept')
+    store.setAuthorityScope(TEAM_A_SCOPE)
+    const reads = recordIndexReads()
+
+    await store.retryPendingDeleteCleanups(TEAM_A_SCOPE, 'agent-1')
+    await store.retryPendingDeleteCleanups(TEAM_A_SCOPE, 'agent-1')
+    // A team switch of the same user rebinds the store.
+    store.setAuthorityScope(TEAM_B_SCOPE)
+    await store.retryPendingDeleteCleanups(TEAM_B_SCOPE, 'agent-1')
+
+    const sweep = AGENTS.slice(0, 3).map(indexPathOf)
+    expect(reads).toEqual([...sweep, indexPathOf('agent-1'), ...sweep])
+  })
+
+  it('keeps the sweep armed when the agents directory cannot be listed', async () => {
+    for (const agentRef of AGENTS.slice(0, 2)) await store.createChat(agentRef, 'kept')
+    store.setAuthorityScope(TEAM_A_SCOPE)
+    const readdir = vi
+      .spyOn(fs, 'readdir')
+      .mockRejectedValueOnce(Object.assign(new Error('permission denied'), { code: 'EACCES' }))
+
+    await expect(store.retryPendingDeleteCleanups(TEAM_A_SCOPE, 'agent-1')).rejects.toMatchObject({
+      code: 'EACCES',
+    })
+    const reads = recordIndexReads()
+    await store.retryPendingDeleteCleanups(TEAM_A_SCOPE, 'agent-1')
+
+    expect(readdir.mock.calls.map(call => String(call[0]))).toEqual([tempDir, tempDir])
+    expect(reads).toEqual(AGENTS.slice(0, 2).map(indexPathOf))
+  })
+})
+
 // ── messages ─────────────────────────────────────────────────────────────────
 
 describe('messages', () => {

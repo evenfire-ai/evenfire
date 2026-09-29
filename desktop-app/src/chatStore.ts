@@ -394,6 +394,8 @@ export class ChatStore {
   private readonly pageSize: number
   private readonly maxLocalSyncedMessages: number
   private authorityScope: ChatAuthorityScope | null = null
+  /** Set by every bind; the next cleanup retry walks every agent once. */
+  private pendingCleanupSweep = true
 
   constructor(
     private readonly baseDir: string,
@@ -405,6 +407,7 @@ export class ChatStore {
 
   setAuthorityScope(scope: ChatAuthorityScope): void {
     this.authorityScope = Object.freeze({ ...scope })
+    this.pendingCleanupSweep = true
   }
 
   getAuthorityScope(): ChatAuthorityScope | null {
@@ -1962,36 +1965,63 @@ export class ChatStore {
     }
   }
 
-  async retryPendingDeleteCleanups(authorityScope: ChatAuthorityScope): Promise<void> {
+  /**
+   * Retries the calling identity's queued artifact cleanups. With `agentRef`
+   * only that agent's queue is retried, except on the first retry after a bind
+   * (`setAuthorityScope`), which walks every agent once so the queues of agents
+   * that are not read again still finish. Without `agentRef` every agent is
+   * walked.
+   */
+  async retryPendingDeleteCleanups(
+    authorityScope: ChatAuthorityScope,
+    agentRef?: string
+  ): Promise<void> {
     const scope = this.requireDeletionIdentity(authorityScope)
+    if (agentRef !== undefined && !this.pendingCleanupSweep) {
+      await this.retryAgentPendingDeleteCleanups(agentRef, scope)
+      return
+    }
+    this.pendingCleanupSweep = false
     let entries
     try {
       entries = await fs.readdir(this.baseDir, { withFileTypes: true })
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
+      // The walk did not happen: the next retry attempts it again.
+      this.pendingCleanupSweep = true
       throw error
     }
     for (const entry of entries) {
       if (!entry.isDirectory()) continue
-      const agentRef = entry.name
-      try {
-        const index = await this.getIndex(agentRef)
-        const pending = (index.pendingChatCleanup ?? []).filter(item =>
-          sameChatDeletionIdentity(item.authorityScope, scope)
-        )
-        for (const tombstone of pending) {
-          if (!this.authorityScope || !sameChatDeletionIdentity(this.authorityScope, scope)) return
-          await this.serializeChat(agentRef, tombstone.chatId, () =>
-            this.finishPendingDeleteCleanup(agentRef, tombstone)
-          )
-        }
-      } catch (error) {
-        // An unrelated or unreadable agent index must not prevent other durable
-        // cleanup entries from being retried on the next authorized read, but the
-        // failure is reported (once per agent and code), never swallowed.
-        this.warnCleanupFailureOnce(agentRef, null, error)
-      }
+      if (!(await this.retryAgentPendingDeleteCleanups(entry.name, scope))) return
     }
+  }
+
+  /** Retries one agent's queue; false once the identity changed and retrying must stop. */
+  private async retryAgentPendingDeleteCleanups(
+    agentRef: string,
+    scope: ChatAuthorityScope
+  ): Promise<boolean> {
+    try {
+      const index = await this.getIndex(agentRef)
+      const pending = (index.pendingChatCleanup ?? []).filter(item =>
+        sameChatDeletionIdentity(item.authorityScope, scope)
+      )
+      for (const tombstone of pending) {
+        if (!this.authorityScope || !sameChatDeletionIdentity(this.authorityScope, scope)) {
+          return false
+        }
+        await this.serializeChat(agentRef, tombstone.chatId, () =>
+          this.finishPendingDeleteCleanup(agentRef, tombstone)
+        )
+      }
+    } catch (error) {
+      // An unrelated or unreadable agent index must not prevent other durable
+      // cleanup entries from being retried on the next authorized read, but the
+      // failure is reported (once per agent and code), never swallowed.
+      this.warnCleanupFailureOnce(agentRef, null, error)
+    }
+    return true
   }
 
   async loadMessages(
