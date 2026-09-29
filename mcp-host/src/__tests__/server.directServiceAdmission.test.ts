@@ -1,6 +1,55 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { AddressInfo } from 'node:net'
+import { resolve } from 'node:path'
 import { DirectServiceAdmission } from '../server/directServiceAdmission'
+
+type ChannelReaderMessage = {
+  content: string
+  channelType: 'slack'
+  channelId: string
+  sender: string
+  timestamp: Date
+  messageId: string
+}
+
+type WorkflowReaderConfig = {
+  port: number
+  mcpHostBaseUrl: string
+  mcpHostRef: string
+  mcpHostTargets: Array<{ hostRef: string; baseUrl: string }>
+  enabledMedia: Set<string>
+  mcpHostTimeoutMs: number
+  mcpHostMessageTimeoutMs: number
+  rateLimitWindowMs: number
+  rateLimitMaxRequests: number
+  controlApiBaseUrl: string
+  controlApiToken: string
+  controlApiTimeoutMs: number
+  channelReaderUrlTemplate: string
+  channelReaderHandoffToken: string
+  channelReaderHandoffTimeoutMs: number
+}
+
+const runtimeTestEnvironmentKeys = [
+  'CLERUM_ENABLE_AUTH',
+  'CLERUM_HOST_NAME',
+  'CLERUM_DEV_MODE',
+  'CLERUM_HOST_REF',
+  'LOG_LEVEL',
+  'MCP_HOST_RPC_PROXY_EDGE_TOKEN',
+  'RPC_PROXY_MCP_HOST_EDGE_TOKEN',
+] as const
+
+let runtimeTestEnvironmentBefore: Map<string, string | undefined> | undefined
+
+afterEach(() => {
+  if (!runtimeTestEnvironmentBefore) return
+  for (const [key, value] of runtimeTestEnvironmentBefore) {
+    if (value === undefined) delete process.env[key]
+    else process.env[key] = value
+  }
+  runtimeTestEnvironmentBefore = undefined
+})
 
 describe('DirectServiceAdmission', () => {
   it('uses one fixed 60-second bucket and admits exactly 600 requests', () => {
@@ -16,6 +65,9 @@ describe('DirectServiceAdmission', () => {
 
 describe('direct trusted service runtime admission', () => {
   it('bounds real channel-reader producer requests before message work', async () => {
+    runtimeTestEnvironmentBefore = new Map(
+      runtimeTestEnvironmentKeys.map(key => [key, process.env[key]])
+    )
     process.env.CLERUM_ENABLE_AUTH = 'false'
     process.env.CLERUM_HOST_NAME = 'chatllm'
     process.env.CLERUM_DEV_MODE = 'true'
@@ -26,9 +78,43 @@ describe('direct trusted service runtime admission', () => {
     vi.resetModules()
 
     const { RPCServer } = await import('../server')
-    const { RPCClient } = await import('../../../channel-reader/src/rpcClient')
-    const { submitMcpHostDecision } =
-      await import('../../../workflow-approval-request-reader/src/mcpHostClient')
+    const channelReaderModule = resolve(process.cwd(), '../channel-reader/src/rpcClient.ts')
+    const { RPCClient } = (await import(channelReaderModule)) as {
+      RPCClient: new (baseUrl: string) => {
+        sendMessage: (message: ChannelReaderMessage) => Promise<{
+          success: boolean
+          error?: {
+            code?: string
+            message?: string
+            retryable?: boolean
+            retryAfterSeconds?: number
+          }
+        }>
+      }
+    }
+    const workflowReaderModule = resolve(
+      process.cwd(),
+      '../workflow-approval-request-reader/src/mcpHostClient.ts'
+    )
+    const { submitMcpHostDecision } = (await import(workflowReaderModule)) as {
+      submitMcpHostDecision: (
+        config: WorkflowReaderConfig,
+        command: {
+          approvalRequestId: string
+          mcpHostRef: string
+          medium: 'slack'
+          providerUserId: string
+          providerWorkspaceId: string
+          providerChannelId: string
+          providerEventId: string
+          decision: 'approve'
+        }
+      ) => Promise<{
+        ok: boolean
+        status?: number
+        error?: string
+      }>
+    }
     const server = new RPCServer(0)
     const messageHandler = vi.fn(async () => ({ success: true, status: 'completed' as const }))
     const decisionHandler = vi.fn(async () => ({
@@ -97,8 +183,17 @@ describe('direct trusted service runtime admission', () => {
       })
       let rpcProxyHeaders: Record<string, string> = {}
       try {
-        const { resolveHostConnectionForUser } =
-          await import('../../../rpc-proxy/src/services/mcpProxyService')
+        const rpcProxyModule = resolve(
+          process.cwd(),
+          '../rpc-proxy/src/services/mcpProxyService.ts'
+        )
+        const { resolveHostConnectionForUser } = (await import(rpcProxyModule)) as {
+          resolveHostConnectionForUser: (
+            userId: string,
+            hostRef: string,
+            rpcAccessToken: string
+          ) => Promise<{ headers: Record<string, string> } | null>
+        }
         const connection = await resolveHostConnectionForUser(
           'verified-user',
           'chatllm',
@@ -171,32 +266,27 @@ describe('direct trusted service runtime admission', () => {
       expect(workflowResult).toMatchObject({ ok: false, status: 409, error: 'denied' })
       expect(decisionHandler).toHaveBeenCalledTimes(1)
 
-      const denied = await fetch(`http://127.0.0.1:${address.port}/v1/runtime/messages`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-clerum-edge-caller': 'channel-reader',
-          'x-clerum-edge-host-ref': 'chatllm',
-          'x-clerum-edge-channel-type': 'slack',
-          'x-clerum-edge-channel-id': 'channel-over-limit',
-          'x-clerum-edge-sender': 'sender-over-limit',
-        },
-        body: JSON.stringify({
-          content: 'hello',
-          channelType: 'slack',
-          channelId: 'channel-over-limit',
-          sender: 'sender-over-limit',
-          timestamp: new Date().toISOString(),
-          messageId: 'message-over-limit',
-        }),
+      const denied = await client.sendMessage({
+        content: 'hello',
+        channelType: 'slack',
+        channelId: 'channel-over-limit',
+        sender: 'sender-over-limit',
+        timestamp: new Date(),
+        messageId: 'message-over-limit',
       })
 
-      expect(denied.status).toBe(429)
-      expect(denied.headers.get('retry-after')).toMatch(/^[1-9]\d*$/)
-      expect(await denied.json()).toEqual({
-        error: 'runtime_service_admission_limited',
-        retryAfterSeconds: expect.any(Number),
+      expect(denied).toMatchObject({
+        success: false,
+        error: {
+          code: 'RUNTIME_SERVICE_ADMISSION_LIMITED',
+          message: 'MCP Host service admission temporarily limited this request',
+          retryable: true,
+          provider: 'mcp-host',
+          retryAfterSeconds: expect.any(Number),
+        },
       })
+      expect(denied.error?.retryAfterSeconds).toBeGreaterThanOrEqual(1)
+      expect(denied.error?.retryAfterSeconds).toBeLessThanOrEqual(60)
       expect(messageHandler).toHaveBeenCalledTimes(600)
     } finally {
       quiet.mockRestore()
