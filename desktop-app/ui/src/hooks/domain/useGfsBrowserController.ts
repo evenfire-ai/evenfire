@@ -807,6 +807,17 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     if (!queryAuthorizationError || accessState === 'revoked') return
     revokeAccess()
   }, [accessState, queryAuthorizationError, revokeAccess])
+  const currentFolderUnavailable =
+    currentIsDirectory &&
+    childrenQuery.error !== null &&
+    [403, 404].includes(parseHttpStatus(toMessage(childrenQuery.error)) ?? 0)
+  useEffect(() => {
+    if (!currentFolderUnavailable) return
+    // A soft scope invalidation preserves rows while the authoritative read is
+    // pending. Once that read proves this open folder is denied or gone, none
+    // of its cached descendants may remain visible in this browser session.
+    clearGfsState()
+  }, [clearGfsState, currentFolderUnavailable])
   const accessibleResources = useMemo<GfsAccessibleResource[]>(
     () =>
       authorityPending

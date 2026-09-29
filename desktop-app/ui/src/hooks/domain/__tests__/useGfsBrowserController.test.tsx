@@ -2007,6 +2007,55 @@ describe('useGfsBrowserController', () => {
     expect(lastHarnessQueryClient?.getQueryData(childrenKey)).toBeUndefined()
   })
 
+  it('keeps a folder listing during revalidation, then purges it after authoritative 403', async () => {
+    const root = await resolveResource(
+      resolvedDirectory('root', 'Root', { gfsUri: 'gfs://main/root' })
+    )
+    const child = childView('private-child', 'private.md', 'file', { parentResourceId: 'root' })
+    let denyRefresh!: (error: Error) => void
+    const deniedRefresh = new Promise<never>((_resolve, reject) => {
+      denyRefresh = reject
+    })
+    const listChildren = vi
+      .fn()
+      .mockResolvedValueOnce(await listChildrenPage([child]))
+      .mockImplementationOnce(() => deniedRefresh)
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve: vi.fn(async () => root),
+          listChildren,
+          affordances: vi.fn(async () => ({
+            held: ['read'],
+            canDelegate: false,
+            grantableBits: [],
+            canCreateShare: false,
+          })),
+        },
+      },
+    })
+
+    render(<Probe />, { wrapper: ProductionHarness })
+    await act(async () => screen.getByRole('button', { name: 'open' }).click())
+    await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('root'))
+    await waitFor(() => expect(screen.getByTestId('items-count').textContent).toBe('1'))
+
+    const childrenKey = desktopQueryKeys.gfsChildren(':user-a:team-a', 'root', 'main')
+    void lastHarnessQueryClient?.invalidateQueries({ queryKey: childrenKey })
+    await waitFor(() => expect(listChildren).toHaveBeenCalledTimes(2))
+    expect(screen.getByTestId('current').textContent).toBe('root')
+    expect(screen.getByTestId('items-count').textContent).toBe('1')
+
+    await act(async () =>
+      denyRefresh(new Error('403 Forbidden: resource unavailable httpStatus=403'))
+    )
+    await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('none'))
+    expect(screen.getByTestId('items-count').textContent).toBe('0')
+    expect(lastHarnessQueryClient?.getQueryData(childrenKey)).toBeUndefined()
+  })
+
   it('revalidates accessible resources on remount even under production cache defaults', async () => {
     const listAccessible = vi.fn(async () => ({ items: [], nextCursor: null }))
     Object.defineProperty(window, 'clerum', {
