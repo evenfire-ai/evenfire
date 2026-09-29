@@ -7584,6 +7584,10 @@ export class WorkflowRecipeReconciler {
       return
     }
 
+    // This generation wants the token: a queued pass still carrying an older
+    // generation without backgroundAccess must not delete it after its ADDED.
+    this.oauthBrokerDeleteLedger.noteSecretProvisioned(recipe.metadata)
+
     let existing: k8s.V1Secret | null = null
     try {
       existing = await this.coreApi.readNamespacedSecret({ name: secretName, namespace: ns })

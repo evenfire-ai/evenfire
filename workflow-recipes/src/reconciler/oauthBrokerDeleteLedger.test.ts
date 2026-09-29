@@ -91,6 +91,33 @@ describe('OAuthBrokerDeleteLedger', () => {
     expect(ledger.shouldDeletePolicy(ref('r', 4), 1)).toBe(false)
   })
 
+  it('R2-L1: an ADDED after a newer generation provisioned the token does not re-arm an older pass', () => {
+    const ledger = new OAuthBrokerDeleteLedger()
+    // gen4 has no backgroundAccess: the Secret is reaped and recorded.
+    recordSecret(ledger, ref('r', 4))
+    // gen5 turns backgroundAccess on and the token is issued.
+    ledger.noteSecretProvisioned(ref('r', 5))
+    // The token's watch ADDED.
+    ledger.invalidateSecret('r')
+
+    // A queued pass still carrying the gen4 object must not delete the live token.
+    expect(ledger.shouldDeleteSecret(ref('r', 4))).toBe(false)
+    // Liveness witness: a newer generation that drops backgroundAccess reaps it.
+    expect(ledger.shouldDeleteSecret(ref('r', 6))).toBe(true)
+  })
+
+  it('R2-L1: invalidateSecret keeps the watermark: below it stays skipped, at it re-arms', () => {
+    const ledger = new OAuthBrokerDeleteLedger()
+    recordSecret(ledger, ref('r', 5))
+    ledger.invalidateSecret('r')
+    expect(ledger.shouldDeleteSecret(ref('r', 4))).toBe(false)
+    expect(ledger.shouldDeleteSecret(ref('r', 5))).toBe(true)
+
+    // Recording the re-armed delete disarms it again.
+    recordSecret(ledger, ref('r', 5))
+    expect(ledger.shouldDeleteSecret(ref('r', 5))).toBe(false)
+  })
+
   it('does not record a Secret delete when an invalidation landed after the epoch was read', () => {
     const ledger = new OAuthBrokerDeleteLedger()
     const epochBeforeDelete = ledger.secretEpoch('r')

@@ -15681,6 +15681,70 @@ describe('WorkflowRecipeReconciler', () => {
       expect(secretDeletes()).toBe(2)
     })
 
+    it('R2-L1: a stale pass of an older generation does not delete the token a newer one provisioned', async () => {
+      const issue = vi
+        .spyOn(brokerIssuer, 'issueOAuthBrokerToken')
+        .mockResolvedValue({ brokerToken: 'issued-token' } as Awaited<
+          ReturnType<typeof brokerIssuer.issueOAuthBrokerToken>
+        >)
+      const infoSpy = captureLogger('info')
+      try {
+        // gen4 has no backgroundAccess: the Secret is reaped and recorded.
+        await reconciler.ensureOAuthBrokerTokenSecret(reapRecipe(4))
+        expect(secretDeletes()).toBe(1)
+
+        // gen5 turns backgroundAccess on and the token is issued.
+        const withBackgroundAccess = makeRecipe({
+          metadata: {
+            name: 'test-recipe',
+            namespace: 'sandbox-recipes',
+            uid: 'uid-123',
+            generation: 5,
+          },
+          spec: {
+            workloads: [
+              { id: 'app', type: 'deployment', image: 'nginx:1.30.1-alpine', port: 8080 },
+            ],
+            oauthClients: [
+              {
+                id: 'gmail',
+                provider: 'google',
+                clientIdRef: { name: 'creds', key: 'client-id' },
+                clientSecretRef: { name: 'creds', key: 'client-secret' },
+                scopes: ['https://www.googleapis.com/auth/gmail.readonly'],
+                backgroundAccess: true,
+              },
+            ],
+          },
+        })
+        mockCoreApi.readNamespacedSecret.mockRejectedValueOnce({ code: 404 })
+        await reconciler.ensureOAuthBrokerTokenSecret(withBackgroundAccess)
+        // Witness that the issuance branch ran for gen5.
+        expect(issue).toHaveBeenCalledTimes(1)
+        expect(
+          mockCoreApi.createNamespacedSecret.mock.calls.filter(
+            ([arg]) => arg.body?.metadata?.name === SECRET_NAME
+          )
+        ).toHaveLength(1)
+
+        // The token's watch ADDED, then a queued pass still carrying gen4.
+        reconciler.invalidateOAuthBrokerSecretLedger('test-recipe')
+        await reconciler.ensureOAuthBrokerTokenSecret(reapRecipe(4))
+        expect(secretDeletes()).toBe(1)
+        expect(infoSpy).toHaveBeenCalledWith(
+          expect.stringContaining('Skipping oauth-broker-token delete'),
+          expect.objectContaining({ recipe: 'test-recipe', generation: 4 })
+        )
+
+        // Liveness witness: a newer generation that drops backgroundAccess reaps it.
+        await reconciler.ensureOAuthBrokerTokenSecret(reapRecipe(6))
+        expect(secretDeletes()).toBe(2)
+      } finally {
+        infoSpy.mockRestore()
+        issue.mockRestore()
+      }
+    })
+
     describe.each([
       ['active', 'running'],
       ['terminal', 'completed'],

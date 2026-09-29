@@ -4,16 +4,24 @@
  * 1h TTL so a later pass can reap a leftover without a watch. Indexing only
  * by recipe name is the E.6 vacuity mutation: a generation bump must miss.
  *
- * One entry per recipe, holding the highest generation recorded for the
- * recipe's current uid. A pass whose generation is at or below that value is
- * skipped: a queued pass still carrying an older object must not delete what
- * a newer generation provisioned. A different uid is a recipe recreated under
- * the same name, whose generations restart at 1, so it always deletes and
- * replaces the entry even when the recipe DELETE event was missed.
+ * One entry per recipe, holding the highest generation (the watermark) seen
+ * for the recipe's current uid. A pass whose generation is below the
+ * watermark is always skipped: a queued pass still carrying an older object
+ * must not delete what a newer generation provisioned. A pass at the
+ * watermark is skipped unless a token ADDED re-armed it. A different uid is a
+ * recipe recreated under the same name, whose generations restart at 1, so it
+ * always deletes and replaces the entry even when the recipe DELETE event was
+ * missed.
  *
- * `invalidateSecret` bumps a per-recipe epoch. A Secret delete is recorded
- * only when the epoch is unchanged since before the DELETE was sent, so an
- * ADDED handled while the DELETE is in flight is not overwritten by it.
+ * The Secret watermark rises on a recorded delete and on
+ * `noteSecretProvisioned`, which the backgroundAccess branch calls for the
+ * generation that wants the token.
+ *
+ * `invalidateSecret` (a token ADDED) keeps the uid and the watermark and
+ * re-arms the delete only for passes at or above the watermark. It also bumps
+ * a per-recipe epoch: a Secret delete is recorded only when the epoch is
+ * unchanged since before the DELETE was sent, so an ADDED handled while the
+ * DELETE is in flight is not overwritten by it.
  */
 
 export const OAUTH_BROKER_NP_TTL_MS = 60 * 60 * 1000
@@ -25,12 +33,17 @@ export interface OAuthBrokerLedgerRecipe {
   generation?: number
 }
 
-interface SecretEntry {
+interface WatermarkEntry {
   uid: string | undefined
   generation: number
 }
 
-interface PolicyEntry extends SecretEntry {
+interface SecretEntry extends WatermarkEntry {
+  /** A token ADDED landed after the watermark was set. */
+  rearmed: boolean
+}
+
+interface PolicyEntry extends WatermarkEntry {
   expiresAt: number
 }
 
@@ -38,7 +51,7 @@ function normalizeGeneration(generation: number | undefined): number {
   return generation ?? 0
 }
 
-function coversPass(entry: SecretEntry | undefined, recipe: OAuthBrokerLedgerRecipe): boolean {
+function coversPass(entry: WatermarkEntry | undefined, recipe: OAuthBrokerLedgerRecipe): boolean {
   return (
     entry !== undefined &&
     entry.uid === recipe.uid &&
@@ -46,7 +59,10 @@ function coversPass(entry: SecretEntry | undefined, recipe: OAuthBrokerLedgerRec
   )
 }
 
-function nextEntry(entry: SecretEntry | undefined, recipe: OAuthBrokerLedgerRecipe): SecretEntry {
+function nextEntry(
+  entry: WatermarkEntry | undefined,
+  recipe: OAuthBrokerLedgerRecipe
+): WatermarkEntry {
   const generation = normalizeGeneration(recipe.generation)
   if (entry !== undefined && entry.uid === recipe.uid) {
     return { uid: recipe.uid, generation: Math.max(entry.generation, generation) }
@@ -61,7 +77,11 @@ export class OAuthBrokerDeleteLedger {
   private epochClock = 0
 
   shouldDeleteSecret(recipe: OAuthBrokerLedgerRecipe): boolean {
-    return !coversPass(this.secrets.get(recipe.name), recipe)
+    const entry = this.secrets.get(recipe.name)
+    if (entry === undefined || entry.uid !== recipe.uid) return true
+    const generation = normalizeGeneration(recipe.generation)
+    if (generation !== entry.generation) return generation > entry.generation
+    return entry.rearmed
   }
 
   /** Read before sending the DELETE and hand back to `recordSecretDelete`. */
@@ -75,8 +95,23 @@ export class OAuthBrokerDeleteLedger {
    */
   recordSecretDelete(recipe: OAuthBrokerLedgerRecipe, epochBeforeDelete: number): boolean {
     if (this.secretEpoch(recipe.name) !== epochBeforeDelete) return false
-    this.secrets.set(recipe.name, nextEntry(this.secrets.get(recipe.name), recipe))
+    this.raiseSecretWatermark(recipe)
     return true
+  }
+
+  /**
+   * The recipe's generation wants the token (backgroundAccess), so no pass at
+   * or below it may delete the Secret, even after a later token ADDED.
+   */
+  noteSecretProvisioned(recipe: OAuthBrokerLedgerRecipe): void {
+    this.raiseSecretWatermark(recipe)
+  }
+
+  private raiseSecretWatermark(recipe: OAuthBrokerLedgerRecipe): void {
+    const entry = this.secrets.get(recipe.name)
+    const generation = normalizeGeneration(recipe.generation)
+    if (entry !== undefined && entry.uid === recipe.uid && generation < entry.generation) return
+    this.secrets.set(recipe.name, { uid: recipe.uid, generation, rearmed: false })
   }
 
   shouldDeletePolicy(recipe: OAuthBrokerLedgerRecipe, nowMs = Date.now()): boolean {
@@ -93,13 +128,15 @@ export class OAuthBrokerDeleteLedger {
   }
 
   /**
-   * A recreated token Secret re-arms only the Secret side. The NetworkPolicy
-   * TTL is not tied to that Secret, and a watch reconnect replays ADDED for
-   * every existing token, so clearing the policy side here would cost one
-   * extra DELETE per recipe after each reconnect.
+   * A recreated token Secret re-arms only the Secret side, and only for
+   * passes at or above the watermark; the uid and watermark are kept. The
+   * NetworkPolicy TTL is not tied to that Secret, and a watch reconnect
+   * replays ADDED for every existing token, so clearing the policy side here
+   * would cost one extra DELETE per recipe after each reconnect.
    */
   invalidateSecret(recipeName: string): void {
-    this.secrets.delete(recipeName)
+    const entry = this.secrets.get(recipeName)
+    if (entry !== undefined) entry.rearmed = true
     this.epochClock += 1
     this.secretEpochs.set(recipeName, this.epochClock)
   }
