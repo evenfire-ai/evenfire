@@ -2,9 +2,10 @@ import { AgentStateMachine } from './agent'
 import { LlmErrorCode } from './core/errors'
 import type { Attachment } from './core/types'
 import type { TaskLifecycle } from './lifecycle/taskLifecycle'
+import type { TaskRecord } from './lifecycle/types'
 import { logger } from './logger'
 import { MessageQueue, Task, TaskResponsePayload } from './queue'
-import type { TaskError, TaskStatus } from './queue'
+import type { TaskError } from './queue'
 import { ResultStore } from './resultStore'
 import type { IncomingMessage, MessageResponse } from './server'
 import { parseBackgroundPrefix, serializeSessionKey } from './session'
@@ -317,26 +318,39 @@ export class IncomingMessageHandler {
   private duplicateSuppressedResponse(admission: {
     reason: 'duplicate_task_id' | 'duplicate_delivery'
     priorTaskId: string
-    priorStatus: TaskStatus
+    prior: TaskRecord
   }): MessageResponse {
-    const { reason, priorTaskId, priorStatus } = admission
+    const { reason, priorTaskId, prior } = admission
+    const priorStatus = prior.status
     logger.warn(
       { taskId: this.task.id, reason, priorTaskId, priorStatus },
       'Duplicate delivery suppressed'
     )
-    const record = this.deps.taskLifecycle.get(priorTaskId)
+    // #666 — a success names the attachments and file references the first
+    // delivery admitted, as the first response did; without them a client reads
+    // a Host that dropped them. `prior` is the record admission read, so a TTL
+    // eviction since then cannot remove them.
+    const accepted: Pick<MessageResponse, 'acceptedAttachmentIds' | 'acceptedFileReferenceIds'> = {
+      ...(prior.acceptedAttachmentIds.length
+        ? { acceptedAttachmentIds: [...prior.acceptedAttachmentIds] }
+        : {}),
+      ...(prior.acceptedFileReferenceIds.length
+        ? { acceptedFileReferenceIds: [...prior.acceptedFileReferenceIds] }
+        : {}),
+    }
     if (priorStatus === 'completed') {
       return {
         success: true,
         status: 'completed',
-        response: record?.response,
-        attachments: this.deps.sanitizeAttachments(record?.attachments),
+        response: prior.response,
+        attachments: this.deps.sanitizeAttachments(prior.attachments),
         model: this.deps.getModel(),
         taskId: priorTaskId,
+        ...accepted,
       }
     }
     if (priorStatus === 'failed' || priorStatus === 'cancelled') {
-      const error: TaskError = record?.error ?? {
+      const error: TaskError = prior.error ?? {
         code: 'TASK_ALREADY_TERMINAL',
         message: `Duplicate delivery suppressed — original task ${priorTaskId} is ${priorStatus}`,
         retryable: false,
@@ -355,6 +369,7 @@ export class IncomingMessageHandler {
       success: true,
       status: 'pending',
       taskId: priorTaskId,
+      ...accepted,
     }
   }
 

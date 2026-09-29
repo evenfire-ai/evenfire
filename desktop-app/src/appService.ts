@@ -3418,7 +3418,10 @@ export class AppService {
     }
     // A malformed request is rejected before any token is issued for it.
     if (request.attachments != null && !Array.isArray(request.attachments)) {
-      throw new Error('Image attachments must be a list.')
+      throw new Error('Attachments must be a list.')
+    }
+    if (request.fileReferences !== undefined && !Array.isArray(request.fileReferences)) {
+      throw new Error('File references must be a list.')
     }
     const effectiveHostRefs = hostRefs && hostRefs.length > 0 ? hostRefs : [targetHostRef]
     const rpc = await this.issueRpcTokenForHostRefs(
@@ -3451,6 +3454,9 @@ export class AppService {
       ...(request.modelSelectionRevision === undefined
         ? {}
         : { modelSelectionRevision: request.modelSelectionRevision }),
+      // Structured references (#666): parsed at the IPC boundary; rpc-proxy
+      // forwards them and mcp-host resolves each one.
+      ...(request.fileReferences === undefined ? {} : { fileReferences: request.fileReferences }),
     }
     try {
       return await this.rpcClient.invokeHostMessage(

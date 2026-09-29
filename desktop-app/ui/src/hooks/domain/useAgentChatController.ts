@@ -18,6 +18,7 @@ import {
   getComposerDraftRevision,
   setComposerDraft,
 } from '@lib/composerDraftStore'
+import { buildComposerFileReferences } from '@lib/composerFileReferences'
 import { buildComposerRequestContent } from '@lib/composerReferencesPrompt'
 import {
   confirmHostModelSelectionFromSend,
@@ -125,6 +126,8 @@ const MAX_MESSAGES_WITH_ACTIVITY_PER_AGENT = 50
 const LOCAL_MESSAGE_PAGE_SIZE = 80
 const SERVER_TURN_PAGE_SIZE = 40
 const MAX_RECONCILE_DELTA_PAGES = 5
+const FILE_REFERENCES_NOT_RECEIVED_MESSAGE =
+  'The Host did not receive the selected Global Files; the message was sent without them.'
 const LATEST_PAGE_FALLBACK_WINDOW = Symbol('latest-page-fallback-window')
 const DELTA_RECONCILIATION_WINDOW = Symbol('delta-reconciliation-window')
 type ReconciliationMessagesResult = SessionMessagesResult & {
@@ -2806,6 +2809,20 @@ export function useAgentChatController({
         visualModelForSend = selection.intentModel ?? selection.effectiveModel ?? undefined
         visualModelRevisionForSend = selection.confirmedRevision ?? undefined
       }
+      // #666 — build the structured references before anything is cleared or
+      // created. A selection past the shared limit (or an invalid reference)
+      // must leave the composer and its draft as the user typed them, with the
+      // reason on screen, instead of failing after the send cleared the composer.
+      let fileReferencesForSend: ReturnType<typeof buildComposerFileReferences>
+      try {
+        fileReferencesForSend = buildComposerFileReferences(effectiveReferences)
+      } catch (error) {
+        const blocker = error instanceof Error ? error.message : String(error)
+        setAgentError(blocker)
+        pushToast(blocker, 'error')
+        releaseSendSetup()
+        return
+      }
       let sendChatId = currentChatId ?? activeChatId
       const sendStillAuthorized = () =>
         sendScope === sendScopeGeneration.current &&
@@ -3011,6 +3028,7 @@ export function useAgentChatController({
         if (!sendStillAuthorized()) return
         const pendingModel = pendingModelForSend
         const requestModel = requestModelForRetention
+        const fileReferences = fileReferencesForSend
         const request = {
           content: effectiveContentForRequest,
           channelType: 'rpc',
@@ -3024,6 +3042,7 @@ export function useAgentChatController({
           ...(visualModelRevisionForSend === undefined
             ? {}
             : { modelSelectionRevision: visualModelRevisionForSend }),
+          ...(fileReferences.length > 0 ? { fileReferences } : {}),
         }
 
         const response = await window.clerum.rpc.invokeHostMessage(
@@ -3074,9 +3093,38 @@ export function useAgentChatController({
             { force: true }
           )
         }
+        // #666 M1 — a Host or rpc-proxy that predates fileReferences drops them
+        // and still accepts the message. The ack lists the reference ids the
+        // Host admitted; a sent id missing from it never reached the Host. The
+        // send itself stands and is not retried.
         const taskId =
           (typeof responseRecord.taskId === 'string' ? responseRecord.taskId : undefined) ||
           (typeof responseRecord.id === 'string' ? responseRecord.id : undefined)
+        // An ack with no fields at all is not a Host ack: rpc-proxy answers `{}`
+        // when the Host's 2xx body is not JSON. It says nothing about which
+        // references the Host received, so it is not read as a drop. An older
+        // Host's ack still carries `success`, a `taskId` or a reply.
+        const ackIsEmpty = Object.keys(responseRecord).length === 0
+        let fileReferencesDropped = false
+        if (ackOk && !ackIsEmpty && fileReferences.length > 0) {
+          const acceptedFileReferenceIds = new Set<string>(
+            Array.isArray(response.acceptedFileReferenceIds)
+              ? response.acceptedFileReferenceIds
+              : []
+          )
+          const droppedFiles = fileReferences.filter(
+            reference => !acceptedFileReferenceIds.has(reference.id)
+          )
+          if (droppedFiles.length > 0) {
+            fileReferencesDropped = true
+            const droppedMessage =
+              droppedFiles.length === fileReferences.length
+                ? FILE_REFERENCES_NOT_RECEIVED_MESSAGE
+                : `The Host did not receive ${droppedFiles.length} of the selected Global Files; the message was sent without them.`
+            setAgentError(droppedMessage)
+            pushToast(droppedMessage, 'error')
+          }
+        }
 
         if (!taskId) {
           // Synchronous (non-async) response — a direct reply or a structured error.
@@ -3154,7 +3202,9 @@ export function useAgentChatController({
               status: previous.events.length ? 'completed' : 'no_activity',
               errorMessage: undefined,
             }))
-            pushToast(`Message sent to ${sendAgent}.`, 'success')
+            // The dropped-files error above already told the user what happened;
+            // a success toast right after it would contradict it.
+            if (!fileReferencesDropped) pushToast(`Message sent to ${sendAgent}.`, 'success')
           }
           activityInFlightByAgentRef.current[sendAgent] = (
             activityInFlightByAgentRef.current[sendAgent] || []
@@ -3247,10 +3297,10 @@ export function useAgentChatController({
           normalized.includes('payload too large')
         const kind = classifyErrorKind(message)
         const fallback = isRequestEntityTooLarge
-          ? 'Runtime payload limit hit. This environment still needs updated rpc-proxy and mcp-host deployments for image uploads.'
+          ? 'Send fewer or smaller attachments. If small attachments are refused too, the rpc-proxy and mcp-host deployments may predate the current payload limits.'
           : errorRecoveryHint(kind)
         const friendlyMessage = isRequestEntityTooLarge
-          ? 'Image payload is larger than the currently deployed runtime limit.'
+          ? 'The message is larger than the deployed runtime accepts (images or attached files).'
           : kind === 'waking'
             ? 'Agent is waking up.'
             : kind === 'network'

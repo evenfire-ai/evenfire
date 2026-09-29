@@ -1,10 +1,18 @@
 {
   "name": "@clerum/gfs-interaction-policy",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "Shared browser-safe GFS upload collision, naming, retry, and reservation policy",
+  "description": "Shared browser-safe GFS upload collision, naming, retry, and reservation policy, FileReference v1 contract, and byte-based file classifier",
   "main": "index.cjs",
   "types": "index.d.ts",
+  "files": [
+    "index.cjs",
+    "index.d.ts",
+    "fileClassifier.cjs",
+    "fileClassifier.d.ts",
+    "fileReference.cjs",
+    "fileReference.d.ts"
+  ],
   "exports": {
     ".": {
       "types": "./index.d.ts",
@@ -13,8 +21,8 @@
     }
   },
   "scripts": {
-    "build": "node --check index.cjs",
-    "test": "node --test index.test.cjs"
+    "build": "node --check index.cjs && node --check fileClassifier.cjs && node --check fileReference.cjs",
+    "test": "node --test index.test.cjs fileReference.test.cjs fileClassifier.test.cjs"
   },
   "license": "MIT"
 }
