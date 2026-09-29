@@ -26,7 +26,7 @@ import { type IncomingMessage, type Server, type ServerResponse, createServer } 
 import type { AddressInfo } from 'node:net'
 import request from 'supertest'
 import {
-  hashGrokCompletionRequestV1,
+  hashGrokCompletionRequest,
   parseGrokCompletionRequestV1,
 } from '@clerum/grok-provider-attempt-contract'
 import type { GrokLlmProxyConfig } from '../src/config.js'
@@ -322,7 +322,7 @@ describe('hermetic Grok authorize → proxy → fixture upstream → finalize', 
     const original = structuredClone(raw)
     const parsed = parseGrokCompletionRequestV1(raw)
     if (!parsed.ok) throw new Error(parsed.message)
-    const requestHash = hashGrokCompletionRequestV1(parsed.value)
+    const requestHash = hashGrokCompletionRequest(parsed.value)
     const providerAttemptId = 'att-hermetic-grok-1'
 
     const res = await request(servers.runtimeApp)
@@ -394,7 +394,7 @@ describe('hermetic Grok authorize → proxy → fixture upstream → finalize', 
     const raw = completionRequest()
     const parsed = parseGrokCompletionRequestV1(raw)
     if (!parsed.ok) throw new Error(parsed.message)
-    const requestHash = hashGrokCompletionRequestV1(parsed.value)
+    const requestHash = hashGrokCompletionRequest(parsed.value)
 
     const res = await request(servers.runtimeApp)
       .post('/internal/runtime/v1/grok/completions')
@@ -449,7 +449,7 @@ describe('hermetic Grok authorize → proxy → fixture upstream → finalize', 
     const raw = completionRequest()
     const parsed = parseGrokCompletionRequestV1(raw)
     if (!parsed.ok) throw new Error(parsed.message)
-    const requestHash = hashGrokCompletionRequestV1(parsed.value)
+    const requestHash = hashGrokCompletionRequest(parsed.value)
 
     const res = await request(servers.runtimeApp)
       .post('/internal/runtime/v1/grok/completions')
@@ -495,7 +495,7 @@ describe('hermetic per-response tool-call limit', () => {
       const raw = { ...completionRequest(), tools: [structuredClone(UPDATE_TOOL)] }
       const parsed = parseGrokCompletionRequestV1(raw)
       if (!parsed.ok) throw new Error(parsed.message)
-      const requestHash = hashGrokCompletionRequestV1(parsed.value)
+      const requestHash = hashGrokCompletionRequest(parsed.value)
       const res = await request(proxy.runtimeApp)
         .post('/internal/runtime/v1/grok/completions')
         .set('Authorization', `Bearer ${platformToken(RECIPE_HOST_REF)}`)

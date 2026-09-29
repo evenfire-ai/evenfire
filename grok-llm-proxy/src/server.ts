@@ -148,6 +148,13 @@ function boundedErrorHandler(err: unknown, _req: Request, res: Response, _next: 
     reject(res, 400, 'invalid_request', type)
     return
   }
+  // The client closed the connection before it sent the whole body. Nobody
+  // reads a response, so none is written; the budget or visual slot is
+  // released by the response's `close` hook.
+  if (typed?.type === 'request.aborted') {
+    logger.info({ event: 'grok_proxy_request_aborted', type }, 'client aborted the request body')
+    return
+  }
   // body-parser attaches the raw body to an error thrown by `verify` or by
   // JSON.parse. Such an error is logged by its type and status only.
   if (typed?.body !== undefined) {
@@ -250,7 +257,19 @@ function bodyAdmission(
           next(err)
           return
         }
-        if (!abort.signal.aborted) reject(res, 503, 'provider_unavailable')
+        if (abort.signal.aborted) return
+        // RequestLimitError messages are fixed strings with no request data.
+        logger.warn(
+          {
+            event: 'grok_proxy_admission_refused',
+            reason: 'body_budget',
+            code: err.code,
+            kind: err.kind,
+            detail: err.message,
+          },
+          'admission refused'
+        )
+        reject(res, 503, 'provider_unavailable')
       }
     )
   }
@@ -544,6 +563,8 @@ export function createProxyApps(
     // Declaring V2 raises only the image budget. Text, tools and wrapper
     // fields stay on the contract's maxRequestBodyBytes non-image ceiling, plus
     // the same envelope allowance control-api's authorizer grants its wrapper.
+    // The min stays: `createProxyApps` accepts a config that did not pass
+    // `loadConfig` (bodyAdmission.test.ts builds one with a 16 KiB body limit).
     if (
       wholeBodyBytes > Math.min(configuredLimit, envelopeLimit) ||
       measureNonImageCompletionBytes(req.body) >
@@ -601,8 +622,6 @@ export function createProxyApps(
       // to req 'close' aborts the Grok hop on every call (3–12ms canceled).
       // Abort only when the client drops the response before we finish writing.
       abortWhenClientDisconnects(req, res, abort)
-      const visualRequest =
-        (parsed.data.request as { schemaVersion?: unknown }).schemaVersion === SCHEMA_VERSION_V2
       // One `grok_proxy_attempt_finished` line per attempt. Identifiers and
       // counts only: never the body, ticket, frames, tool names or arguments.
       const attempt = {
@@ -664,7 +683,7 @@ export function createProxyApps(
             throw err
           }
         }
-        if (visualRequest && wholeBodyBytes > config.maxBodyBytes) {
+        if (visualDeclared && wholeBodyBytes > config.maxBodyBytes) {
           release = gated.grokStreamRelease
           gated.grokStreamRelease = undefined
         } else if (gated.grokStreamRelease) {
@@ -780,6 +799,9 @@ export function createProxyApps(
               : {}),
             // RequestLimitError messages are fixed strings with no request data.
             ...(err instanceof RequestLimitError ? { reason: err.message } : {}),
+            // An error no class above maps is a handler defect answered 503:
+            // the error itself is logged, or nothing would show it.
+            ...(isMappedError(err) ? {} : { err }),
             // G1-4: a failed fetch's cause code only, never its message or URL.
             ...(causeCode ? { causeCode } : {}),
             deliveredAs,
@@ -1009,13 +1031,31 @@ function failureLabel(code: string): string {
   return Object.hasOwn(ATTEMPT_ERROR_STATUS, code) ? code : 'other'
 }
 
+type MappedError =
+  | OriginDeniedError
+  | RequestLimitError
+  | GrokTransportError
+  | ControlApiClientError
+
+/**
+ * True for the errors `mapError` answers with a status of their own. Anything
+ * else is a defect in the handler; it is answered 503 like an outage, so the
+ * caller logs the error itself to keep it visible.
+ */
+function isMappedError(err: unknown): err is MappedError {
+  return (
+    err instanceof OriginDeniedError ||
+    err instanceof RequestLimitError ||
+    err instanceof GrokTransportError ||
+    err instanceof ControlApiClientError
+  )
+}
+
 function mapError(err: unknown): { status: number; code: string } {
+  if (!isMappedError(err)) return { status: 503, code: 'provider_unavailable' }
   if (err instanceof OriginDeniedError) return { status: 403, code: 'origin_denied' }
   if (err instanceof RequestLimitError) return { status: 503, code: 'provider_unavailable' }
-  if (err instanceof GrokTransportError || err instanceof ControlApiClientError) {
-    return { status: attemptErrorStatus(err.code), code: err.code }
-  }
-  return { status: 503, code: 'provider_unavailable' }
+  return { status: attemptErrorStatus(err.code), code: err.code }
 }
 
 /**

@@ -6,7 +6,6 @@ import {
   LIMITS,
   type GrokCompletionRequestV2,
   hashGrokCompletionRequest,
-  hashGrokCompletionRequestV1,
   parseGrokCompletionRequest,
   parseGrokCompletionRequestV1,
 } from '@clerum/grok-provider-attempt-contract'
@@ -56,7 +55,7 @@ function headerOf(init: RequestInit | undefined, name: string): string | undefin
   return (init?.headers as Record<string, string> | undefined)?.[name]
 }
 
-const REQUEST_HASH = hashGrokCompletionRequestV1(REQUEST)
+const REQUEST_HASH = hashGrokCompletionRequest(REQUEST)
 
 function accessTokenFor(label: string): string {
   const encoded = Buffer.from(
@@ -1366,7 +1365,7 @@ describe('streamGrokCompletion', () => {
       generation: { toolChoice: 'auto' as const },
       transportHints: { promptCacheKey: 'sess-1' },
     }
-    const requestHash = hashGrokCompletionRequestV1(request)
+    const requestHash = hashGrokCompletionRequest(request)
     const fetchFn = vi.fn(async (_url: FetchInput, _init?: RequestInit) =>
       sseResponse(['data: {"type":"response.completed","response":{"usage":{}}}\n\n'])
     )
@@ -1431,7 +1430,7 @@ describe('streamGrokCompletion', () => {
         { role: 'tool' as const, content: 'previous result', toolCallId: 'previous', name },
       ],
     }
-    const requestHash = hashGrokCompletionRequestV1(request)
+    const requestHash = hashGrokCompletionRequest(request)
     expect(parseGrokCompletionRequestV1(request).ok).toBe(true)
     const original = structuredClone(request)
     const emitted: unknown[] = []
@@ -1495,7 +1494,7 @@ describe('streamGrokCompletion', () => {
     expect(result.outcome).toBe('success')
     expect(emitted).toContainEqual({ type: 'tool_call', id: 'new-call', name, arguments: {} })
     expect(request).toEqual(original)
-    expect(hashGrokCompletionRequestV1(request)).toBe(requestHash)
+    expect(hashGrokCompletionRequest(request)).toBe(requestHash)
   })
 
   it('rejects an unregistered alias in a completed stream before emitting any calls', async () => {
@@ -1509,7 +1508,7 @@ describe('streamGrokCompletion', () => {
       ...REQUEST,
       tools: [{ name: 'known.read', description: 'Read a record', parameters: { type: 'object' } }],
     }
-    const requestHash = hashGrokCompletionRequestV1(request)
+    const requestHash = hashGrokCompletionRequest(request)
     const fetchFn = vi.fn(async (_url: unknown, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body))
       return sseResponse([
@@ -1599,7 +1598,7 @@ describe('streamGrokCompletion', () => {
       ],
       generation: { maxOutputTokens: 4096, temperature: 0.2 },
     }
-    const requestHash = hashGrokCompletionRequestV1(request)
+    const requestHash = hashGrokCompletionRequest(request)
     const fetchFn = vi.fn(async (_url: FetchInput, _init?: RequestInit) =>
       sseResponse(['data: {"type":"response.completed","response":{"usage":{}}}\n\n'])
     )
@@ -1632,7 +1631,7 @@ describe('streamGrokCompletion', () => {
     // until a live SuperGrok probe confirms /v1/responses accepts it.
     expect(GROK_UPSTREAM_TEMPERATURE_PROBE_CONFIRMED).toBe(false)
     expect(body).not.toHaveProperty('temperature')
-    expect(hashGrokCompletionRequestV1(request)).toBe(requestHash)
+    expect(hashGrokCompletionRequest(request)).toBe(requestHash)
     expect(body).not.toHaveProperty('text')
     expect(body).not.toHaveProperty('service_tier')
   })

@@ -5,7 +5,7 @@ import { EventEmitter } from 'node:events'
 import { request as httpRequest } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import {
-  hashGrokCompletionRequestV1,
+  hashGrokCompletionRequest,
   parseGrokCompletionRequestV1,
 } from '@clerum/grok-provider-attempt-contract'
 import type { GrokLlmProxyConfig } from '../src/config.js'
@@ -122,7 +122,7 @@ describe('slow SSE consumer', () => {
     }
     const parsed = parseGrokCompletionRequestV1(raw)
     if (!parsed.ok) throw new Error(parsed.message)
-    const requestHash = hashGrokCompletionRequestV1(parsed.value)
+    const requestHash = hashGrokCompletionRequest(parsed.value)
 
     const finalizes: string[] = []
     const client = {

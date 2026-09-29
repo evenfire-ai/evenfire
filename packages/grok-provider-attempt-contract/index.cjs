@@ -711,10 +711,6 @@ function parseGrokCompletionRequestV1(input) {
   return parseGrokCompletionRequestRoot(input, SCHEMA_VERSION, MESSAGE_KEYS)
 }
 
-function hashGrokCompletionRequestV1(request) {
-  return createHash('sha256').update(stableStringify(request)).digest('hex')
-}
-
 /**
  * Minimal image provenance for V2. Closed union: an attachment that arrived
  * with a user message, or one produced by a tool call. It is hashed with the
@@ -1103,7 +1099,6 @@ module.exports = {
   parseGrokCompletionRequestV1,
   parseGrokCompletionRequestV2,
   parseGrokCompletionRequest,
-  hashGrokCompletionRequestV1,
   hashGrokCompletionRequest,
   hashCanonicalGrokRequest,
   buildGrokProxyEnvelope,

@@ -18,7 +18,7 @@ import type { AddressInfo } from 'node:net'
 import { gzipSync } from 'node:zlib'
 import {
   LIMITS,
-  hashGrokCompletionRequestV1,
+  hashGrokCompletionRequest,
   parseGrokCompletionRequestV1,
 } from '@clerum/grok-provider-attempt-contract'
 import type { GrokLlmProxyConfig } from '../src/config.js'
@@ -105,7 +105,7 @@ function completionBody(contentChars: number, attempt: string, ticketLifetimeSec
   }
   const parsed = parseGrokCompletionRequestV1(raw)
   if (!parsed.ok) throw new Error(parsed.message)
-  const requestHash = hashGrokCompletionRequestV1(parsed.value)
+  const requestHash = hashGrokCompletionRequest(parsed.value)
   return JSON.stringify({
     executionTicket: sign(
       {
@@ -367,9 +367,28 @@ describe('grok-llm-proxy body admission (#731 R3-2)', () => {
       )
       expect(await settle(proxy.redeemed)).toBe(BUDGET_BODIES)
 
-      const overflow = await post(proxy.port, payload('overflow'))
-      expect(overflow.status).toBe(503)
-      expect(JSON.parse(overflow.body)).toEqual({ error: 'provider_unavailable' })
+      const warn = vi.spyOn(logger, 'warn')
+      try {
+        const overflow = await post(proxy.port, payload('overflow'))
+        // Witnesses: the refusal was answered, and the admission logged why.
+        expect(overflow.status).toBe(503)
+        expect(JSON.parse(overflow.body)).toEqual({ error: 'provider_unavailable' })
+        const logged = warn.mock.calls.map(call => call[0] as unknown as Record<string, unknown>)
+        expect(logged.filter(entry => entry?.event === 'grok_proxy_denied')).toEqual([
+          { event: 'grok_proxy_denied', code: 'provider_unavailable' },
+        ])
+        expect(logged.filter(entry => entry?.event === 'grok_proxy_admission_refused')).toEqual([
+          {
+            event: 'grok_proxy_admission_refused',
+            reason: 'body_budget',
+            code: 'provider_unavailable',
+            kind: 'queue_full',
+            detail: expect.any(String),
+          },
+        ])
+      } finally {
+        warn.mockRestore()
+      }
 
       // Liveness: every queued request is still served once the budget frees.
       proxy.releaseAll()

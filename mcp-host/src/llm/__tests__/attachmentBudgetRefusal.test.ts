@@ -133,12 +133,49 @@ const CODEX = {
 }
 
 // The one message no request can produce today: Codex `maxImagePixels` equals
-// `maxImageDimension` squared and the dimension check runs first. It is written
-// in the shape of the dimension message the contract does produce.
-const CODEX_PIXELS = CODEX.dimension.replace(
-  `image dimension exceeds ${CODEX_VISUAL_LIMITS.maxImageDimension}`,
-  `image pixel count exceeds ${CODEX_VISUAL_LIMITS.maxImagePixels}`
+// `maxImageDimension` squared and the dimension check runs first, so the
+// contract's pixel refusal is unreachable through `hashCanonicalCodexRequest`.
+// Its wording is read from the contract source, not copied: the template is
+// located in `visualPayload.cjs` and filled with the real limit, so a reworded
+// contract message stops this suite at load instead of leaving a stale copy.
+const codexPixelTemplate = /`(image pixel count exceeds \$\{VISUAL_LIMITS\.maxImagePixels\})`/.exec(
+  readFileSync(
+    join(__dirname, '../../../../packages/llm-provider-attempt-contract/visualPayload.cjs'),
+    'utf8'
+  )
 )
+if (!codexPixelTemplate) {
+  throw new Error('the Codex contract no longer has an image pixel count refusal')
+}
+const CODEX_PIXELS = `messages[0].contentParts[1]: ${codexPixelTemplate[1].replace(
+  /\$\{VISUAL_LIMITS\.maxImagePixels\}/,
+  String(CODEX_VISUAL_LIMITS.maxImagePixels)
+)}`
+
+/**
+ * Every row of `table` matches exactly one of the contract's image refusal
+ * `messages`, and every message matches exactly one row, so a row cannot be
+ * added, dropped or left matching nothing without this failing.
+ */
+function expectTableCoversExactly(
+  table: ReadonlyArray<{ pattern: RegExp }>,
+  messages: readonly string[]
+): void {
+  expect(messages.length).toBeGreaterThan(0)
+  expect(table.length).toBe(messages.length)
+  for (const message of messages) {
+    expect(
+      table.filter(row => row.pattern.test(message)),
+      message
+    ).toHaveLength(1)
+  }
+  for (const row of table) {
+    expect(
+      messages.filter(message => row.pattern.test(message)),
+      String(row.pattern)
+    ).toHaveLength(1)
+  }
+}
 
 describe('attachmentBudgetRefusal (#784)', () => {
   it('names the Grok limits in the per-image, total and whole-body sentences', () => {
@@ -166,8 +203,14 @@ describe('attachmentBudgetRefusal (#784)', () => {
     expect(attachmentBudgetRefusalMessageFor(CODEX_TABLE, CODEX_PIXELS, true)).toBe(
       `An attached image is too large: it has more than ${CODEX_VISUAL_LIMITS.maxImagePixels.toLocaleString('en-US')} pixels. Resize it and send it again.`
     )
-    expect(GROK_TABLE).toHaveLength(3)
-    expect(CODEX_TABLE).toHaveLength(5)
+    expectTableCoversExactly(GROK_TABLE, [GROK.perImage, GROK.total, GROK.visualBody])
+    expectTableCoversExactly(CODEX_TABLE, [
+      CODEX.perImage,
+      CODEX.dimension,
+      CODEX_PIXELS,
+      CODEX.total,
+      CODEX.visualBody,
+    ])
     expect(attachmentBudgetRefusalMessageFor(GROK_TABLE, CODEX.dimension, true)).toBeUndefined()
     expect(attachmentBudgetRefusalMessageFor(GROK_TABLE, CODEX_PIXELS, true)).toBeUndefined()
   })

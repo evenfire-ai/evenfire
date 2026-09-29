@@ -368,9 +368,28 @@ describe('codex-llm-proxy body admission (#731 R3-2)', () => {
       )
       expect(await settle(proxy.redeemed)).toBe(BUDGET_BODIES)
 
-      const overflow = await post(proxy.port, payload('overflow'))
-      expect(overflow.status).toBe(503)
-      expect(JSON.parse(overflow.body)).toEqual({ error: 'provider_unavailable' })
+      const warn = vi.spyOn(logger, 'warn')
+      try {
+        const overflow = await post(proxy.port, payload('overflow'))
+        // Witnesses: the refusal was answered, and the admission logged why.
+        expect(overflow.status).toBe(503)
+        expect(JSON.parse(overflow.body)).toEqual({ error: 'provider_unavailable' })
+        const logged = warn.mock.calls.map(call => call[0] as unknown as Record<string, unknown>)
+        expect(logged.filter(entry => entry?.event === 'codex_proxy_denied')).toEqual([
+          { event: 'codex_proxy_denied', code: 'provider_unavailable' },
+        ])
+        expect(logged.filter(entry => entry?.event === 'codex_proxy_admission_refused')).toEqual([
+          {
+            event: 'codex_proxy_admission_refused',
+            reason: 'body_budget',
+            code: 'provider_unavailable',
+            kind: 'queue_full',
+            detail: expect.any(String),
+          },
+        ])
+      } finally {
+        warn.mockRestore()
+      }
 
       // Liveness: every queued request is still served once the budget frees.
       proxy.releaseAll()

@@ -39,7 +39,7 @@ type MergedBodyStructureLimits = Readonly<
   Record<keyof typeof BODY_STRUCTURE_LIMITS | keyof typeof GROK_BODY_STRUCTURE_LIMITS, number>
 >
 
-function mergeBodyStructureLimits(
+export function mergeBodyStructureLimits(
   ...contracts: ReadonlyArray<Readonly<Record<string, number>>>
 ): MergedBodyStructureLimits {
   const merged: Record<string, number> = {}

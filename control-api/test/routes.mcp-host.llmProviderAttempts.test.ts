@@ -15,6 +15,7 @@ import {
 import {
   MCP_HOST_BODY_STRUCTURE_LIMITS,
   createMcpHostLlmProviderAttemptRoutes,
+  mergeBodyStructureLimits,
   resolveHostAssignedAssignment,
 } from '../src/routes/mcp-host/llmProviderAttempts.routes.js'
 import { LlmProviderAttemptAuthorizeError } from '../src/services/llmProviderAttemptAuthorizer.js'
@@ -459,6 +460,18 @@ describe('authorize raw-body scan before JSON.parse', () => {
     for (const [key, value] of expected) {
       expect(SCAN_LIMITS[key as keyof typeof SCAN_LIMITS]).toBe(value)
     }
+  })
+
+  it('takes the larger value per key when the two contracts diverge, in either order', () => {
+    // Both contracts are equal today, so the merge over the real limits cannot
+    // tell a maximum from a copy of one input. Diverging inputs can: each
+    // contract holds the larger value for one key, and each holds a key alone.
+    const first = { maxContainers: 10, maxDepth: 90, onlyFirst: 3 }
+    const second = { maxContainers: 40, maxDepth: 70, onlySecond: 5 }
+    const expected = { maxContainers: 40, maxDepth: 90, onlyFirst: 3, onlySecond: 5 }
+    expect(mergeBodyStructureLimits(first, second)).toEqual(expected)
+    expect(mergeBodyStructureLimits(second, first)).toEqual(expected)
+    expect(Object.isFrozen(mergeBodyStructureLimits(first, second))).toBe(true)
   })
 
   it('refuses a gzip body and a non-UTF-8 charset with 415 without reading them as JSON', async () => {

@@ -318,7 +318,6 @@ export declare function parseGrokCompletionRequestV2(
 export declare function parseGrokCompletionRequest(
   input: unknown
 ): ContractResult<GrokCompletionRequest>
-export declare function hashGrokCompletionRequestV1(request: GrokCompletionRequestV1): string
 export declare function hashGrokCompletionRequest(request: GrokCompletionRequest): string
 /**
  * Canonical client hash: JSON wire round-trip, parseGrokCompletionRequest

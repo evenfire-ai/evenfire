@@ -8,7 +8,6 @@ import {
   ENVELOPE_ALLOWANCE_BYTES as CONTRACT_ENVELOPE_ALLOWANCE_BYTES,
   LIMITS,
   hashGrokCompletionRequest,
-  hashGrokCompletionRequestV1,
   parseGrokCompletionRequest,
   parseGrokCompletionRequestV1,
 } from '@clerum/grok-provider-attempt-contract'
@@ -658,7 +657,7 @@ describe('grok-llm-proxy execution kill switch', () => {
     }
     const parsed = parseGrokCompletionRequestV1(raw)
     if (!parsed.ok) throw new Error(parsed.message)
-    const requestHash = hashGrokCompletionRequestV1(parsed.value)
+    const requestHash = hashGrokCompletionRequest(parsed.value)
     const executionTicket = sign(
       {
         jti: '33333333-3333-4333-8333-333333333333',
@@ -968,7 +967,7 @@ describe('grok-llm-proxy attempt telemetry', () => {
     }
     const parsed = parseGrokCompletionRequestV1(raw)
     if (!parsed.ok) throw new Error(parsed.message)
-    const requestHash = hashGrokCompletionRequestV1(parsed.value)
+    const requestHash = hashGrokCompletionRequest(parsed.value)
     // Applied after hashing: the ticket stays bound to the untampered request,
     // so the transport's parser rejects the body before any hash comparison.
     tamper?.(raw)
@@ -1309,6 +1308,64 @@ describe('grok-llm-proxy attempt telemetry', () => {
         headers: retryAfter === undefined ? {} : { 'retry-after': retryAfter },
       })) as typeof fetch
   }
+
+  it('logs the error of an unmapped handler failure while it still answers 503 provider_unavailable', async () => {
+    const boom = new Error('boom')
+    const failingClient = {
+      async redeem(): Promise<RedeemAttemptSuccess> {
+        throw boom
+      },
+      async finalize(): Promise<FinalizeAttemptSuccess> {
+        throw new Error('finalize must not run after a failed redeem')
+      },
+    } as unknown as ControlApiClient
+    const { res, lines } = await run({
+      providerAttemptId: 'att-unmapped-error',
+      controlApiClient: failingClient,
+    })
+    // Witnesses: the request reached the handler's catch and was logged once.
+    expect(res.status).toBe(503)
+    expect(res.body).toEqual({ error: 'provider_unavailable' })
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toMatchObject({
+      providerAttemptId: 'att-unmapped-error',
+      outcome: 'failed',
+      code: 'provider_unavailable',
+      httpStatus: 503,
+    })
+    expect(lines[0]?.err).toBe(boom)
+  })
+
+  it('logs a mapped transport failure without an err entry', async () => {
+    const { res, lines } = await run({
+      providerAttemptId: 'att-mapped-transport-error',
+      fetchFn: rateLimitedUpstream('7'),
+    })
+    // Witnesses: the failure reached the same catch and produced its attempt line.
+    expect(res.status).toBe(429)
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toMatchObject({
+      providerAttemptId: 'att-mapped-transport-error',
+      outcome: 'failed',
+      code: 'rate_limited',
+    })
+    expect('err' in (lines[0] ?? {})).toBe(false)
+  })
+
+  it('logs a mapped control-api failure without an err entry', async () => {
+    const { res, lines } = await run({
+      providerAttemptId: 'att-mapped-control-api-error',
+      deniedCode: 'ticket_expired',
+    })
+    expect(res.status).toBeGreaterThanOrEqual(400)
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toMatchObject({
+      providerAttemptId: 'att-mapped-control-api-error',
+      outcome: 'failed',
+      code: 'ticket_expired',
+    })
+    expect('err' in (lines[0] ?? {})).toBe(false)
+  })
 
   it('(g1-1a) answers 429 rate_limited and forwards a valid upstream Retry-After', async () => {
     const { res, receipts, lines, metricsText } = await run({
@@ -1970,7 +2027,7 @@ describe('grok-llm-proxy ticket-aware stream-gate wait (#739 D1-bis)', () => {
     }
     const parsed = parseGrokCompletionRequestV1(raw)
     if (!parsed.ok) throw new Error(parsed.message)
-    const requestHash = hashGrokCompletionRequestV1(parsed.value)
+    const requestHash = hashGrokCompletionRequest(parsed.value)
     const executionTicket = jwt.sign(
       {
         jti: '77777777-7777-4777-8777-777777777777',
@@ -2281,7 +2338,7 @@ describe('grok-llm-proxy body budget release on upstream acceptance (#739 D2)', 
     }
     const parsed = parseGrokCompletionRequestV1(raw)
     if (!parsed.ok) throw new Error(parsed.message)
-    const requestHash = hashGrokCompletionRequestV1(parsed.value)
+    const requestHash = hashGrokCompletionRequest(parsed.value)
     return JSON.stringify({
       executionTicket:
         executionTicket ??
@@ -2633,7 +2690,7 @@ describe('grok-llm-proxy graceful drain on shutdown (#739 D6)', () => {
     }
     const parsed = parseGrokCompletionRequestV1(raw)
     if (!parsed.ok) throw new Error(parsed.message)
-    const requestHash = hashGrokCompletionRequestV1(parsed.value)
+    const requestHash = hashGrokCompletionRequest(parsed.value)
     const executionTicket = sign(
       {
         jti: '99999999-9999-4999-8999-999999999999',

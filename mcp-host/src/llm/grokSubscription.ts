@@ -60,6 +60,17 @@ const GROK_REQUEST_INVALID = 'invalid_request'
 /** A local image budget refusal (`ATTACHMENT_BUDGET_REFUSALS`). */
 const GROK_ATTACHMENT_TOO_LARGE = 'attachment_too_large'
 
+/**
+ * The code for a canonical-request refusal that is not an attachment refusal:
+ * a conversation-volume limit is a context-length failure, any other `size`
+ * refusal is `payload_too_large`, and everything else is an invalid request.
+ */
+function canonicalRefusalCode(refusal: { code: string; message: string; kind?: string }): string {
+  if (isContextLengthRefusal(refusal.code, refusal.message)) return 'request_limit_exceeded'
+  if (refusal.kind === 'size') return 'payload_too_large'
+  return GROK_REQUEST_INVALID
+}
+
 function mapGrokUsage(usage?: { inputTokens: number; outputTokens: number }): {
   usage: { input_tokens: number; output_tokens: number; total_tokens: number }
   usage_reported: boolean
@@ -466,14 +477,7 @@ export class GrokSubscriptionProvider implements SingleTurnProvider {
       if (attachmentRefusal !== undefined) {
         throw new CodexAuthorizeError(GROK_ATTACHMENT_TOO_LARGE, attachmentRefusal)
       }
-      throw new CodexAuthorizeError(
-        isContextLengthRefusal(canonical.code, canonical.message)
-          ? 'request_limit_exceeded'
-          : canonical.kind === 'size'
-            ? 'payload_too_large'
-            : GROK_REQUEST_INVALID,
-        canonical.message
-      )
+      throw new CodexAuthorizeError(canonicalRefusalCode(canonical), canonical.message)
     }
     const { request, requestHash } = canonical.value
     const context = this.deps.attemptContext({ model: this.model })

@@ -1342,6 +1342,65 @@ describe('codex-llm-proxy attempt telemetry', () => {
       })) as typeof fetch
   }
 
+  it('logs the error of an unmapped handler failure while it still answers 503 provider_unavailable', async () => {
+    const boom = new Error('boom')
+    const failingClient = {
+      async redeem(): Promise<RedeemAttemptSuccess> {
+        throw boom
+      },
+      async finalize(): Promise<FinalizeAttemptSuccess> {
+        throw new Error('finalize must not run after a failed redeem')
+      },
+    } as unknown as ControlApiClient
+    const { res, lines } = await run('att-unmapped-error', 0, 0, undefined, undefined, {
+      controlApiClient: failingClient,
+    })
+    // Witnesses: the request reached the handler's catch and was logged once.
+    expect(res.status).toBe(503)
+    expect(res.body).toEqual({ error: 'provider_unavailable' })
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toMatchObject({
+      providerAttemptId: 'att-unmapped-error',
+      outcome: 'failed',
+      code: 'provider_unavailable',
+      httpStatus: 503,
+    })
+    expect(lines[0]?.err).toBe(boom)
+  })
+
+  it('logs a mapped transport failure without an err entry', async () => {
+    const { res, lines } = await run('att-mapped-transport-error', 0, 0, undefined, undefined, {
+      fetchFn: rateLimitedUpstream('7'),
+    })
+    // Witnesses: the failure reached the same catch and produced its attempt line.
+    expect(res.status).toBe(429)
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toMatchObject({
+      providerAttemptId: 'att-mapped-transport-error',
+      outcome: 'failed',
+      code: 'rate_limited',
+    })
+    expect('err' in (lines[0] ?? {})).toBe(false)
+  })
+
+  it('logs a mapped control-api failure without an err entry', async () => {
+    const { res, lines } = await run(
+      'att-mapped-control-api-error',
+      0,
+      0,
+      undefined,
+      'ticket_expired'
+    )
+    expect(res.status).toBeGreaterThanOrEqual(400)
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toMatchObject({
+      providerAttemptId: 'att-mapped-control-api-error',
+      outcome: 'failed',
+      code: 'ticket_expired',
+    })
+    expect('err' in (lines[0] ?? {})).toBe(false)
+  })
+
   it('(g1-1a) answers 429 rate_limited and forwards a valid upstream Retry-After', async () => {
     const { res, receipts, lines, metricsText } = await run(
       'att-rate-http',

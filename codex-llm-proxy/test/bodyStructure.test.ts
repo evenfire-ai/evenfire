@@ -1,5 +1,6 @@
 import { generateKeyPairSync } from 'node:crypto'
 import { createServer } from 'node:http'
+import { type Socket, createConnection } from 'node:net'
 import jwt from 'jsonwebtoken'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
@@ -234,6 +235,33 @@ function post(
     headers: { Authorization: `Bearer ${platformToken()}`, 'content-type': contentType },
     body,
   })
+}
+
+/**
+ * Opens a connection, sends the headers of a POST that declares all of `body`
+ * and then only its first `sentBytes`. The caller closes the socket. `body`
+ * must be ASCII so a character is a byte.
+ */
+function sendPartialBody(
+  port: number,
+  body: string,
+  sentBytes: number
+): { socket: Socket; errors: Error[] } {
+  const errors: Error[] = []
+  const socket = createConnection({ host: '127.0.0.1', port })
+  socket.on('error', err => errors.push(err))
+  socket.write(
+    [
+      `POST ${COMPLETIONS_PATH} HTTP/1.1`,
+      'Host: 127.0.0.1',
+      `Authorization: Bearer ${platformToken()}`,
+      'Content-Type: application/json',
+      `Content-Length: ${body.length}`,
+      '',
+      body.slice(0, sentBytes),
+    ].join('\r\n')
+  )
+  return { socket, errors }
 }
 
 function adminPermit(): string {
@@ -664,6 +692,74 @@ describe('codex proxy raw-body structure bounds', () => {
       { event: 'codex_proxy_denied', code: 'payload_too_large', type: 'entity.too.large' },
     ])
   })
+
+  it('logs a client that leaves mid-body as an abort, not an error, and releases its budget reservation', async () => {
+    const info = vi.spyOn(logger, 'info')
+    const error = vi.spyOn(logger, 'error')
+    const acquire = vi.spyOn(BodyBudget.prototype, 'acquire')
+    const port = listen(createProxyApps(config()))
+    const body = bodyWithFiller('codex-completion-request.v1', '[]')
+
+    const client = sendPartialBody(port, body, Math.floor(body.length / 2))
+    // Witness: the body holds its reservation while it is being read.
+    await waitFor(() => acquire.mock.calls.length === 1, 'the body took no budget')
+    const budget = acquire.mock.contexts[0] as BodyBudget
+    await waitFor(() => budget.inFlightBytes === body.length, 'the body was not granted its bytes')
+
+    client.socket.destroy()
+    const aborted = (): unknown[] =>
+      info.mock.calls
+        .map(([entry]) => entry)
+        .filter(
+          entry =>
+            (entry as { event?: unknown } | undefined)?.event === 'codex_proxy_request_aborted'
+        )
+    await waitFor(() => aborted().length === 1, 'the abort was not logged')
+    expect(aborted()).toEqual([{ event: 'codex_proxy_request_aborted', type: 'request.aborted' }])
+    await waitFor(() => budget.inFlightBytes === 0, 'the reservation was not released')
+
+    // Witness: the budget is usable, a follow-up body is admitted and reaches the ticket check.
+    const admitted = await post(port, body)
+    expect(admitted.status).toBe(403)
+    expect(await admitted.json()).toEqual({ error: 'ticket_invalid' })
+    expect(acquire).toHaveBeenCalledTimes(2)
+    expect(error).not.toHaveBeenCalled()
+    expect(client.errors).toEqual([])
+  }, 15_000)
+
+  it('logs a client that leaves mid-way through a visual body as an abort and frees the visual slot', async () => {
+    const info = vi.spyOn(logger, 'info')
+    const error = vi.spyOn(logger, 'error')
+    const acquire = vi.spyOn(visualStreamGate, 'acquire')
+    const port = listen(createProxyApps(config({ maxBodyBytes: 4096 })))
+    const compact = bodyWithFiller('codex-completion-request.v2', '[]')
+    const body = `${compact}${' '.repeat(4096)}`
+    expect(body.length).toBeGreaterThan(4096)
+
+    const client = sendPartialBody(port, body, Math.floor(body.length / 2))
+    // Witness: the body holds the visual slot while it is being read.
+    await waitFor(() => visualStreamGate.snapshot().running === 1, 'the body took no visual slot')
+
+    client.socket.destroy()
+    const aborted = (): unknown[] =>
+      info.mock.calls
+        .map(([entry]) => entry)
+        .filter(
+          entry =>
+            (entry as { event?: unknown } | undefined)?.event === 'codex_proxy_request_aborted'
+        )
+    await waitFor(() => aborted().length === 1, 'the abort was not logged')
+    expect(aborted()).toEqual([{ event: 'codex_proxy_request_aborted', type: 'request.aborted' }])
+    await waitFor(() => visualStreamGate.snapshot().running === 0, 'the visual slot was not released')
+
+    // Witness: the gate is usable, a follow-up body takes the slot and reaches the ticket check.
+    const admitted = await post(port, body)
+    expect(admitted.status).toBe(403)
+    expect(await admitted.json()).toEqual({ error: 'ticket_invalid' })
+    expect(acquire).toHaveBeenCalledTimes(2)
+    expect(error).not.toHaveBeenCalled()
+    expect(client.errors).toEqual([])
+  }, 15_000)
 
   it('logs only the type and status of an unmapped verify error', async () => {
     const warn = vi.spyOn(logger, 'warn')

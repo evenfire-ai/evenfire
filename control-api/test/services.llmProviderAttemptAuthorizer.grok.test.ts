@@ -6,7 +6,6 @@ import {
   LIMITS,
   computeGrokPolicyHash,
   hashGrokCompletionRequest,
-  hashGrokCompletionRequestV1,
 } from '@clerum/grok-provider-attempt-contract'
 import { config } from '../src/config.js'
 import {
@@ -305,7 +304,7 @@ describe('authorizeLlmProviderAttempt grok-subscription', () => {
     expect(result).toMatchObject({
       providerAttemptId: '33333333-3333-4333-8333-333333333333',
       executionTicket: 'grok-ticket.jwt',
-      requestHash: hashGrokCompletionRequestV1(REQUEST),
+      requestHash: hashGrokCompletionRequest(REQUEST),
     })
     expect(grokRepos.getConnection).toHaveBeenCalledWith(expect.anything(), 'team-grok')
     expect(current.evaluateBudget).toHaveBeenCalledWith(
@@ -439,7 +438,7 @@ describe('authorizeLlmProviderAttempt grok-subscription', () => {
       const result = await authorizeLlmProviderAttempt(claims(), payload, current)
       expect(result).toMatchObject({
         executionTicket: 'grok-ticket.jwt',
-        requestHash: hashGrokCompletionRequestV1(request),
+        requestHash: hashGrokCompletionRequest(request),
       })
       expect(current.insertAttempt).toHaveBeenCalledTimes(1)
     })

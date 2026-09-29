@@ -30,6 +30,11 @@ const SHUTDOWN_MARGIN_SECONDS = 20
  *   (#739 measured 509.8);
  * - D5 plus the visual slot (#784): the same load and one ~36 MB V2 stream
  *   (a 20 MiB PNG and 8 MiB of text), 775.4 MiB.
+ * Both were measured by hand, not by this suite. The 775.4 is the largest of
+ * three runs (771.3, 775.4, 765 MiB), taken on 2026-09-24 on macOS with
+ * Node v24.18.0 and recorded in the message of the commit that introduced
+ * this constant (`git log -S775.4 -- grok-llm-proxy/test/deployManifest.test.ts`).
+ * Re-measure before changing it.
  */
 const CAPPED_PEAK_RSS_MIB = 775.4
 const MEMORY_HEADROOM = 1.25

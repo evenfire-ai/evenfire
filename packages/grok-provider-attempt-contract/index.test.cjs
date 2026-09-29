@@ -110,7 +110,7 @@ test('does not import Codex LIMITS or Codex provider id', () => {
 test('parses the bounded V1 request and hashes with SHA-256', () => {
   const parsed = contract.parseGrokCompletionRequestV1(BASE)
   assert.equal(parsed.ok, true)
-  const digest = contract.hashGrokCompletionRequestV1(parsed.value)
+  const digest = contract.hashGrokCompletionRequest(parsed.value)
   assert.match(digest, /^[a-f0-9]{64}$/)
 })
 
@@ -209,7 +209,7 @@ function serverHash(wireRequest) {
   const onWire = JSON.parse(JSON.stringify({ request: wireRequest })).request
   const parsed = contract.parseGrokCompletionRequestV1(onWire)
   assert.equal(parsed.ok, true, parsed.message)
-  return contract.hashGrokCompletionRequestV1(parsed.value)
+  return contract.hashGrokCompletionRequest(parsed.value)
 }
 
 test('golden digests: well-formed requests keep their pre-change hashes on every path', () => {
@@ -247,7 +247,7 @@ test('golden digests: well-formed requests keep their pre-change hashes on every
   for (const entry of golden) {
     const parsed = contract.parseGrokCompletionRequestV1(entry.request)
     assert.equal(parsed.ok, true, `${entry.name}: ${parsed.message}`)
-    assert.equal(contract.hashGrokCompletionRequestV1(parsed.value), entry.sha256, entry.name)
+    assert.equal(contract.hashGrokCompletionRequest(parsed.value), entry.sha256, entry.name)
     const canonical = contract.hashCanonicalGrokRequest(entry.request)
     assert.equal(canonical.ok, true, entry.name)
     assert.equal(canonical.value.requestHash, entry.sha256, entry.name)

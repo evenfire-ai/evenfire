@@ -30,6 +30,17 @@ export function grokProxyErrorMessage(code: string, status?: number): string {
     : `proxy stream failed with ${status} (${code})`
 }
 
+/**
+ * The code for an envelope the contract refused. Every `limit` failure maps to
+ * `payload_too_large` here, including the count, nesting and range kinds; the
+ * authorize and transport callers map only `kind: 'size'` that way.
+ */
+function envelopeRefusalCode(contractCode: string): string {
+  if (contractCode === 'limit') return 'payload_too_large'
+  if (contractCode === 'request_hash_mismatch') return 'request_hash_mismatch'
+  return 'invalid_request'
+}
+
 export type GrokProxyErrorOptions = {
   /**
    * Whether a request had already left this process when the error was
@@ -135,13 +146,9 @@ export class GrokLlmProxyClient {
         request: input.request as GrokCompletionRequest,
       })
       if (!envelope.ok) {
-        const code =
-          envelope.code === 'limit'
-            ? 'payload_too_large'
-            : envelope.code === 'request_hash_mismatch'
-              ? 'request_hash_mismatch'
-              : 'invalid_request'
-        throw new GrokProxyError(code, envelope.message, { dispatched: false })
+        throw new GrokProxyError(envelopeRefusalCode(envelope.code), envelope.message, {
+          dispatched: false,
+        })
       }
       if (
         input.deadlineMs !== undefined &&
