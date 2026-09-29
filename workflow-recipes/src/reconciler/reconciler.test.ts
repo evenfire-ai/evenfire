@@ -15745,58 +15745,6 @@ describe('WorkflowRecipeReconciler', () => {
       }
     })
 
-    describe.each([
-      ['active', 'running'],
-      ['terminal', 'completed'],
-    ] as const)('R1-L13: the %s workflow short-circuit', (_label, execPhase) => {
-      it('reaps a token Secret the recipe must not have, without the inner reconcile', async () => {
-        const workflowReconcile = vi.fn()
-        ;(
-          reconciler as unknown as {
-            workflowReconciler: {
-              reconcile: typeof workflowReconcile
-              validateWorkflowSpec: () => undefined
-              ensureMcpHostRuntimeCredentials?: () => Promise<void>
-            }
-          }
-        ).workflowReconciler = {
-          reconcile: workflowReconcile,
-          validateWorkflowSpec: () => undefined,
-          ensureMcpHostRuntimeCredentials: vi.fn().mockResolvedValue(undefined),
-        }
-        const recipe = makeRecipe({
-          spec: {
-            agent: { provider: 'zai', model: 'glm-4.7' },
-            workloads: [],
-            steps: [{ id: 'run-qa', instruction: 'Validate the QA API workload.' }],
-          },
-          // Triggered run: awaitsTriggeredRun=false, so the pass stops at the
-          // active (running) or terminal (completed) short-circuit.
-          metadata: {
-            name: 'test-recipe',
-            namespace: 'sandbox-recipes',
-            uid: 'uid-123',
-            generation: 4,
-            labels: { 'clerum.io/workflow-run-id': 'run-123' },
-          },
-          status: { phase: 'active', workflowExecution: { phase: execPhase } },
-        })
-
-        // The watch ADDED re-arms the ledger and enqueues this reconcile.
-        reconciler.invalidateOAuthBrokerSecretLedger('test-recipe')
-        const result = await reconciler.reconcile(recipe)
-
-        // Witness that the short-circuit was taken, not the first-deploy path.
-        expect(workflowReconcile).not.toHaveBeenCalled()
-        expect(result.phase).toBe('active')
-        expect(secretDeletes()).toBe(1)
-
-        // The ledger still bounds it: a second pass of the same generation skips.
-        await reconciler.reconcile(recipe)
-        expect(secretDeletes()).toBe(1)
-      })
-    })
-
     function shortCircuitWorkflowRecipe(
       spec: Partial<WorkflowRecipeCRD['spec']>,
       status: WorkflowRecipeCRD['status'],
@@ -15822,7 +15770,10 @@ describe('WorkflowRecipeReconciler', () => {
 
     const RUN_LABEL = { 'clerum.io/workflow-run-id': 'run-123' }
 
-    describe.each([
+    // Every workflow pass that returns before the first-deploy path. A triggered
+    // run (RUN_LABEL) has awaitsTriggeredRun=false; the onDemand recipe without
+    // one idles awaiting its trigger.
+    const WORKFLOW_SHORT_CIRCUITS = [
       {
         label: 'awaiting-trigger',
         recipe: () =>
@@ -15871,43 +15822,77 @@ describe('WorkflowRecipeReconciler', () => {
           message: 'Dry-run: preview generated, no resources created',
         },
       },
-    ])('R2-L2: the $label workflow short-circuit on a fresh process', ({ recipe, expected }) => {
-      it('sends no token DELETE until a token ADDED arrives, then exactly one', async () => {
-        const workflowReconcile = vi.fn()
-        ;(
-          reconciler as unknown as {
-            workflowReconciler: {
-              reconcile: typeof workflowReconcile
-              validateWorkflowSpec: () => undefined
-              ensureMcpHostRuntimeCredentials?: () => Promise<void>
-            }
+    ]
+
+    function installShortCircuitWorkflowReconciler(): ReturnType<typeof vi.fn> {
+      const workflowReconcile = vi.fn()
+      ;(
+        reconciler as unknown as {
+          workflowReconciler: {
+            reconcile: typeof workflowReconcile
+            validateWorkflowSpec: () => undefined
+            ensureMcpHostRuntimeCredentials?: () => Promise<void>
           }
-        ).workflowReconciler = {
-          reconcile: workflowReconcile,
-          validateWorkflowSpec: () => undefined,
-          ensureMcpHostRuntimeCredentials: vi.fn().mockResolvedValue(undefined),
         }
-        const current = recipe()
+      ).workflowReconciler = {
+        reconcile: workflowReconcile,
+        validateWorkflowSpec: () => undefined,
+        ensureMcpHostRuntimeCredentials: vi.fn().mockResolvedValue(undefined),
+      }
+      return workflowReconcile
+    }
 
-        // A restarted process: no token ADDED has been observed for the recipe.
-        for (let pass = 0; pass < 3; pass++) {
+    // The four short-circuits the early reap in reconcileWorkflowRecipe names.
+    describe.each(WORKFLOW_SHORT_CIRCUITS.filter(({ label }) => label !== 'dryRun'))(
+      'R1-L13: the $label workflow short-circuit',
+      ({ recipe, expected }) => {
+        it('reaps a token Secret the recipe must not have, without the inner reconcile', async () => {
+          const workflowReconcile = installShortCircuitWorkflowReconciler()
+          const current = recipe()
+
+          // The watch ADDED re-arms the ledger and enqueues this reconcile.
+          reconciler.invalidateOAuthBrokerSecretLedger('test-recipe')
           const result = await reconciler.reconcile(current)
-          // Witness that each pass took the short-circuit under test.
+
+          // Witness that the short-circuit was taken, not the first-deploy path.
+          expect(workflowReconcile).not.toHaveBeenCalled()
           expect(result).toMatchObject(expected)
-        }
-        expect(workflowReconcile).not.toHaveBeenCalled()
-        expect(secretDeletes()).toBe(0)
+          expect(secretDeletes()).toBe(1)
 
-        // The watch relist replays ADDED for a token that really exists.
-        reconciler.invalidateOAuthBrokerSecretLedger('test-recipe')
-        await reconciler.reconcile(current)
-        expect(secretDeletes()).toBe(1)
+          // The ledger still bounds it: a second pass of the same generation skips.
+          await reconciler.reconcile(current)
+          expect(secretDeletes()).toBe(1)
+        })
+      }
+    )
 
-        // The ledger bounds it: the next pass of the same generation skips.
-        await reconciler.reconcile(current)
-        expect(secretDeletes()).toBe(1)
-      })
-    })
+    describe.each(WORKFLOW_SHORT_CIRCUITS)(
+      'R2-L2: the $label workflow short-circuit on a fresh process',
+      ({ recipe, expected }) => {
+        it('sends no token DELETE until a token ADDED arrives, then exactly one', async () => {
+          const workflowReconcile = installShortCircuitWorkflowReconciler()
+          const current = recipe()
+
+          // A restarted process: no token ADDED has been observed for the recipe.
+          for (let pass = 0; pass < 3; pass++) {
+            const result = await reconciler.reconcile(current)
+            // Witness that each pass took the short-circuit under test.
+            expect(result).toMatchObject(expected)
+          }
+          expect(workflowReconcile).not.toHaveBeenCalled()
+          expect(secretDeletes()).toBe(0)
+
+          // The watch relist replays ADDED for a token that really exists.
+          reconciler.invalidateOAuthBrokerSecretLedger('test-recipe')
+          await reconciler.reconcile(current)
+          expect(secretDeletes()).toBe(1)
+
+          // The ledger bounds it: the next pass of the same generation skips.
+          await reconciler.reconcile(current)
+          expect(secretDeletes()).toBe(1)
+        })
+      }
+    )
 
     function installFirstDeployWorkflow(): {
       recipe: WorkflowRecipeCRD
