@@ -203,6 +203,61 @@ describe('turnsToChatMessages', () => {
     )
   })
 
+  it('does not resend references from a same-text idle echo onto a context-free server turn', () => {
+    const incoming = turnsToChatMessages([
+      { number: 1, user_input: 'first', started_at: new Date(1).toISOString() },
+      { number: 2, user_input: 'repeat', started_at: new Date(3).toISOString() },
+    ])
+    const localEcho: ChatMessage = {
+      id: 'idle-echo',
+      role: 'user',
+      content: 'repeat',
+      timestamp: 2,
+      task_id: 'settled-task',
+      attachments: [
+        { id: 'plugin', type: 'plugin', label: 'profits/revenue' },
+        {
+          id: 'agent-file',
+          type: 'agent_file',
+          label: 'todo.md',
+          filesystemName: 'shared-fs',
+          path: 'notes/todo.md',
+        },
+        {
+          id: 'global-file',
+          type: 'global_file',
+          label: 'Report',
+          gfsUri: 'gfs://drive-7/res-9',
+          drive: 'drive-7',
+          resourceId: 'res-9',
+        },
+        {
+          id: 'image',
+          type: 'uploaded_file',
+          label: 'chart.png',
+          filename: 'chart.png',
+          mimeType: 'image/png',
+          encoding: 'base64',
+          dataBase64: 'AQ==',
+          sizeBytes: 1,
+        },
+      ],
+    }
+    const merged = mergeAuthoritativeServerMessages(
+      [incoming[0]!, localEcho, incoming[1]!],
+      incoming,
+      { activeTaskIds: new Set() }
+    )
+    expect(merged.map(message => message.id)).toEqual(['turn-1-user', 'turn-2-user'])
+    const serverUser = merged[1]!
+    expect(serverUser.attachments).toMatchObject([{ type: 'uploaded_file', dataBase64: 'AQ==' }])
+    const draft = buildComposerResendDraft(serverUser)
+    expect(draft.content).toBe('repeat')
+    expect(draft.imageAttachments).toHaveLength(1)
+    expect(draft.referenceAttachments).toEqual([])
+    expect(draft.unrestorable).toEqual([])
+  })
+
   it('preserves turn order for multi-turn transcripts', () => {
     const msgs = turnsToChatMessages([
       { number: 1, user_input: 'a', response: 'A', started_at: '2026-04-22T10:00:00Z' },

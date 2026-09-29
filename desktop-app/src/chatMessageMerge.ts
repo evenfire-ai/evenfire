@@ -80,6 +80,19 @@ function mergeAttachmentChips(
   ]
 }
 
+function collapseSafeAttachments(
+  attachments: ChatMessageAttachment[] | undefined
+): ChatMessageAttachment[] | undefined {
+  return attachments?.filter(
+    attachment =>
+      Boolean(attachment.dataBase64) ||
+      (attachment.type !== 'plugin' &&
+        attachment.type !== 'connector' &&
+        attachment.type !== 'agent_file' &&
+        attachment.type !== 'global_file')
+  )
+}
+
 function preferredServerMessage(
   server: ChatMessage,
   local: ChatMessage | undefined,
@@ -413,10 +426,11 @@ export function mergeAuthoritativeServerMessages(
   const hydratedReplacements = authoritative.map(message => {
     const local = localByServerMessage.get(message)
     let hydrated = preferredServerMessage(message, local, { copyLocalMetadata: Boolean(local) })
-    // Merge the DURABLE side metadata of a collapsed idle echo onto its
-    // authoritative slot row (§6.2, R2-M1). Bounded to attachments/toolSteps only,
-    // gap-filling and non-destructive: whatever `hydrated` already supplies wins, so
-    // the row only gains fields the reconciled server turn lacked. It deliberately
+    // Merge safe side metadata of a collapsed idle echo onto its authoritative
+    // slot row (§6.2, R2-M1). A same-text collapse does not prove that a local
+    // plugin/file reference belonged to this server turn; Resend must not turn
+    // that unverified reference into a new prompt attachment. Keep byte-bearing
+    // files and non-reference artifacts, plus toolSteps. It deliberately
     // does NOT use preferredServerMessage/copyLocalMetadata here: that path also
     // copies `task_id` (echo identity), which is correct for D-1 replacement (the
     // server IS the live task's echo) but WRONG for an idle collapse — the task is
@@ -429,7 +443,10 @@ export function mergeAuthoritativeServerMessages(
     if (collapsedEcho) {
       hydrated = {
         ...hydrated,
-        attachments: mergeAttachmentChips(hydrated.attachments, collapsedEcho.attachments),
+        attachments: mergeAttachmentChips(
+          hydrated.attachments,
+          collapseSafeAttachments(collapsedEcho.attachments)
+        ),
         toolSteps: hydrated.toolSteps?.length ? hydrated.toolSteps : collapsedEcho.toolSteps,
       }
     }

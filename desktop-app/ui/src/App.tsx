@@ -131,7 +131,9 @@ const SANDBOX_UI_DEEP_LINK_MANUAL_TEAM_CHANGE_MESSAGE =
 // stored route untouched — the caller must NOT invoke the setter, because
 // passing `undefined` to it would erase A's previously-saved route.
 type OutgoingRouteDecision =
-  { action: 'set'; routePath: string } | { action: 'clear' } | { action: 'preserve' }
+  | { action: 'set'; routePath: string }
+  | { action: 'clear' }
+  | { action: 'preserve' }
 
 async function readOutgoingRouteDecision(
   outgoingAppRef: string | undefined

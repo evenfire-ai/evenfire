@@ -306,10 +306,12 @@ describe('ComposerPanel reference submenu portaling', () => {
 
   it('keeps the menu mounted through a mousedown on a portaled submenu item so its click fires', async () => {
     // A clickable plugin so the submenu holds a real menuitem, not an empty state.
-    window.clerum.workflows.list = vi.fn(async (): Promise<WorkflowRecipeListResult> => ({
-      items: [{ metadata: { namespace: 'ns', name: 'plug-a' } }],
-      count: 1,
-    }))
+    window.clerum.workflows.list = vi.fn(
+      async (): Promise<WorkflowRecipeListResult> => ({
+        items: [{ metadata: { namespace: 'ns', name: 'plug-a' } }],
+        count: 1,
+      })
+    )
     render(<ComposerPanel inline={false} />)
 
     fireEvent.click(screen.getByRole('button', { name: 'Add context' }))
