@@ -5,16 +5,7 @@ import { useAuth } from '@components/AuthContext'
 import { AuthGate } from '@components/AuthGate'
 import { IconExternalLink } from '@components/icons'
 import { getDesktopEnvironment } from '@lib/api'
-import type { DesktopEnvironmentResponse } from '@/app/types/api'
-
-function getDesktopAppHref(environment: DesktopEnvironmentResponse): string | null {
-  if (!environment.externalRestApiBaseUrl) return null
-  const params = new URLSearchParams({
-    externalRestApiBaseUrl: environment.externalRestApiBaseUrl,
-    tenantName: environment.appName || 'Evenfire',
-  })
-  return `evenfire://desktop-environment?${params.toString()}`
-}
+import { buildDesktopEnvironmentLink } from '@lib/desktopAppLinks'
 
 function HomeContent() {
   const { authState } = useAuth()
@@ -26,7 +17,7 @@ function HomeContent() {
     let isCurrent = true
     void getDesktopEnvironment()
       .then(environment => {
-        if (isCurrent) setDesktopAppHref(getDesktopAppHref(environment))
+        if (isCurrent) setDesktopAppHref(buildDesktopEnvironmentLink(environment))
       })
       .catch(() => {
         if (isCurrent) setDesktopAppHref(null)
