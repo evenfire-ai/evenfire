@@ -697,3 +697,226 @@ test('getEvidence returns a private copy and onEvidence publishes snapshots', as
   assert.equal(second.attempts.length, 2)
   assert.notEqual(h.getEvidence(), h.getEvidence())
 })
+
+// ---------------------------------------------------------------------------
+// Documents (issue #678): the Host lists an attached file in the turn-context
+// block and offers `clerum__attachment_read`; the text reaches the provider only
+// in the tool result of the second request.
+// ---------------------------------------------------------------------------
+
+const READ_TOOL = 'clerum__attachment_read'
+const ATTACHMENT_ID = 'att-11111111-2222-4333-8444-555555555555'
+const DOCUMENT_TEXT = 'ledger token 7f3a9c1e\nsecond line\n'
+
+const readToolDefinition = {
+  type: 'function',
+  function: {
+    name: READ_TOOL,
+    description: 'Read an attached file.',
+    parameters: { type: 'object' },
+  },
+}
+
+function documentUserMessage(text = 'Summarize the attached file.') {
+  return {
+    role: 'user',
+    content:
+      '<turn-context>\ndate: 2026-09-29\n' +
+      `attached_file: id="${ATTACHMENT_ID}" name="notes.txt" class=text bytes=34 reader=text\n` +
+      "If the user's request refers to an attached file, read it with clerum__attachment_read before answering.\n" +
+      `</turn-context>\n\n${text}`,
+  }
+}
+
+function wrappedToolOutput(payload, { name = READ_TOOL } = {}) {
+  return `<tool_output name="${name}" sanitized="false">\n${JSON.stringify(payload)}\n</tool_output>`
+}
+
+function documentReadResult(text = DOCUMENT_TEXT) {
+  return {
+    attachmentId: ATTACHMENT_ID,
+    referenceId: 'ref-1',
+    kind: 'text',
+    byteRange: { offset: 0, length: Buffer.byteLength(text) },
+    truncated: false,
+    text,
+  }
+}
+
+function documentAnswerMessages(toolContent) {
+  return [
+    documentUserMessage(),
+    {
+      role: 'assistant',
+      content: null,
+      tool_calls: [
+        { id: 'call-1', type: 'function', function: { name: READ_TOOL, arguments: '{}' } },
+      ],
+    },
+    { role: 'tool', tool_call_id: 'call-1', content: toolContent },
+  ]
+}
+
+const sha256 = text => createHash('sha256').update(text, 'utf8').digest('hex')
+
+test('document turn 1: asks for the text with a tool call and carries no file content', async () => {
+  const h = harness()
+
+  const response = await call(
+    h,
+    chatBody(VISUAL_MODEL, [documentUserMessage()], { tools: [readToolDefinition] })
+  )
+  assert.equal(response.status, 200)
+  const body = await response.json()
+
+  assert.equal(body.choices[0].finish_reason, 'tool_calls')
+  const [toolCall] = body.choices[0].message.tool_calls
+  assert.equal(toolCall.type, 'function')
+  assert.equal(toolCall.function.name, READ_TOOL)
+  assert.deepEqual(JSON.parse(toolCall.function.arguments), { attachmentId: ATTACHMENT_ID })
+
+  const evidence = h.getEvidence()
+  assert.equal(evidence.counters.documentReadRequests, 1)
+  assert.equal(evidence.counters.documentAnswers, 0)
+  assert.deepEqual(evidence.attempts, [
+    {
+      model: VISUAL_MODEL,
+      imageSha256: null,
+      responseKind: 'document-read-requested',
+      documentSha256: null,
+    },
+  ])
+})
+
+test('document turn 2: the answer is a digest of the delivered text and the ledger records it', async () => {
+  const h = harness()
+
+  const response = await call(
+    h,
+    chatBody(VISUAL_MODEL, documentAnswerMessages(wrappedToolOutput(documentReadResult())), {
+      tools: [readToolDefinition],
+    })
+  )
+  assert.equal(response.status, 200)
+  const body = await response.json()
+
+  const digest = sha256(DOCUMENT_TEXT)
+  assert.equal(body.choices[0].message.content, `DOCUMENT_FIXTURE_SHA256:${digest.slice(0, 16)}`)
+  assert.equal(body.choices[0].finish_reason, 'stop')
+  assert.deepEqual(h.getEvidence().attempts, [
+    {
+      model: VISUAL_MODEL,
+      imageSha256: null,
+      responseKind: 'document-answer',
+      documentSha256: digest,
+    },
+  ])
+  assert.equal(h.getEvidence().counters.documentAnswers, 1)
+})
+
+test('document turn 2: a different delivered text gives a different answer (not a constant)', async () => {
+  const answers = []
+  for (const text of [DOCUMENT_TEXT, `${DOCUMENT_TEXT}changed\n`]) {
+    const h = harness()
+    const response = await call(
+      h,
+      chatBody(TEXT_MODEL, documentAnswerMessages(wrappedToolOutput(documentReadResult(text))), {
+        tools: [readToolDefinition],
+      })
+    )
+    answers.push((await response.json()).choices[0].message.content)
+  }
+  assert.notEqual(answers[0], answers[1])
+})
+
+test('the prompt alone never yields the document answer', async () => {
+  const h = harness()
+
+  // The user message names the digest prefix, but no tool result was delivered.
+  const message = documentUserMessage(
+    `Answer exactly DOCUMENT_FIXTURE_SHA256:${sha256(DOCUMENT_TEXT).slice(0, 16)}`
+  )
+  const response = await call(h, chatBody(VISUAL_MODEL, [message], { tools: [readToolDefinition] }))
+  const body = await response.json()
+
+  assert.equal(body.choices[0].finish_reason, 'tool_calls')
+  assert.equal(body.choices[0].message.content, null)
+  assert.equal(h.getEvidence().counters.documentAnswers, 0)
+})
+
+test('without the read tool a listed file is an ordinary text-only request', async () => {
+  const h = harness()
+
+  const response = await call(h, chatBody(VISUAL_MODEL, [documentUserMessage()]))
+  const body = await response.json()
+
+  assert.equal(body.choices[0].message.content, TEXT_ONLY_CONTENT)
+  // Liveness witness: the request was handled and recorded as text-only.
+  assert.equal(h.getEvidence().attempts[0].responseKind, 'text-only')
+  assert.equal(h.getEvidence().counters.documentReadRequests, 0)
+})
+
+test('a tool result the fixture cannot read is refused and counted as a document failure', async () => {
+  const cases = [
+    ['not the read wrapper', wrappedToolOutput(documentReadResult(), { name: 'other__tool' })],
+    [
+      'not JSON',
+      '<tool_output name="clerum__attachment_read" sanitized="false">\nnot json\n</tool_output>',
+    ],
+    [
+      'binary result',
+      wrappedToolOutput({ attachmentId: ATTACHMENT_ID, kind: 'binary', reader: 'none' }),
+    ],
+    ['error result', wrappedToolOutput({ error: 'attachment_not_found' })],
+  ]
+  for (const [label, content] of cases) {
+    const h = harness()
+    const response = await call(
+      h,
+      chatBody(VISUAL_MODEL, documentAnswerMessages(content), { tools: [readToolDefinition] })
+    )
+    assert.equal(response.status, 400, label)
+    const evidence = h.getEvidence()
+    assert.equal(evidence.counters.documentFailures, 1, label)
+    assert.equal(evidence.counters.documentAnswers, 0, label)
+    assert.equal(evidence.attempts[0].responseKind, 'rejected', label)
+  }
+})
+
+test('two tool results in one turn are refused', async () => {
+  const h = harness()
+  const messages = documentAnswerMessages(wrappedToolOutput(documentReadResult()))
+  messages.push({
+    role: 'tool',
+    tool_call_id: 'call-2',
+    content: wrappedToolOutput(documentReadResult()),
+  })
+
+  const response = await call(h, chatBody(VISUAL_MODEL, messages, { tools: [readToolDefinition] }))
+
+  assert.equal(response.status, 400)
+  assert.equal(h.getEvidence().counters.documentFailures, 1)
+})
+
+test('a streamed document turn is refused instead of answered', async () => {
+  const h = harness()
+
+  const response = await call(
+    h,
+    chatBody(VISUAL_MODEL, [documentUserMessage()], { tools: [readToolDefinition], stream: true })
+  )
+
+  assert.equal(response.status, 400)
+  const evidence = h.getEvidence()
+  assert.equal(evidence.counters.documentFailures, 1)
+  assert.equal(evidence.counters.documentReadRequests, 0)
+})
+
+test('image rows keep their original shape (no documentSha256)', async () => {
+  const { png } = palettePng()
+  const h = harness()
+
+  await call(h, chatBody(VISUAL_MODEL, imageMessages(png)))
+
+  assert.equal('documentSha256' in h.getEvidence().attempts[0], false)
+})

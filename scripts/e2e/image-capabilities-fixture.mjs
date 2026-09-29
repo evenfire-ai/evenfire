@@ -22,6 +22,31 @@ export const fixtureConfigKeys = [
   'CONTROL_API_REAL_PG_CONTEXT',
 ]
 
+/**
+ * The Playwright journeys this runner can drive against the swapped Host. The
+ * lane is chosen by `IMAGE_CAPABILITIES_LANE` and only from this closed set, so
+ * an environment value can never name an arbitrary config path.
+ */
+export const playwrightLanes = {
+  image: {
+    config: 'desktop-app/test/e2e-playwright/playwright.image-capabilities.config.ts',
+    label: 'image-capabilities-playwright',
+  },
+  'document-upload': {
+    config: 'desktop-app/test/e2e-playwright/playwright.document-upload.config.ts',
+    label: 'document-upload-playwright',
+  },
+}
+
+export function playwrightLaneConfig(env) {
+  const lane = env.IMAGE_CAPABILITIES_LANE ?? 'image'
+  if (!Object.hasOwn(playwrightLanes, lane))
+    throw new Error(
+      `IMAGE_CAPABILITIES_LANE must be one of ${Object.keys(playwrightLanes).join(', ')} (received ${JSON.stringify(lane)})`
+    )
+  return { lane, ...playwrightLanes[lane] }
+}
+
 export function proveImages(manifest, observed, head, profile) {
   if (!/^[a-f0-9]{40}$/.test(head) || manifest.profile !== profile)
     throw new Error('Fixture image ownership mismatch')
@@ -157,6 +182,7 @@ async function main() {
   )
     throw new Error('Matching branch profile and context required')
   command('bash', ['scripts/minikube/require-t2-mutation-lock.sh'])
+  const { lane, config: laneConfig, label: laneLabel } = playwrightLaneConfig(process.env)
   const head = command('git', ['rev-parse', 'HEAD']).trim()
   const branch = command('git', ['branch', '--show-current']).trim()
   if (command('git', ['status', '--porcelain']).trim()) throw new Error('Clean checkout required')
@@ -715,7 +741,7 @@ async function main() {
       QA_RECORDER_ROOT: evidence,
     }
     command('npm', ['run', 'verify:electron', '--prefix', 'desktop-app'])
-    process.stdout.write(`Image capability fixture ready: ${state.runId}\n`)
+    process.stdout.write(`Image capability fixture ready: ${state.runId} (lane ${lane})\n`)
     const output = command(
       'node',
       [
@@ -727,12 +753,12 @@ async function main() {
         '--kill-grace-seconds',
         '5',
         '--label',
-        'image-capabilities-playwright',
+        laneLabel,
         '--',
         'node',
         'desktop-app/node_modules/@playwright/test/cli.js',
         'test',
-        '--config=desktop-app/test/e2e-playwright/playwright.image-capabilities.config.ts',
+        `--config=${laneConfig}`,
       ],
       { env: environment, timeout: 930_000 }
     )

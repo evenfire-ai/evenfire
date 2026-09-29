@@ -52,10 +52,24 @@ export const FIXTURE_RESPONSE_KIND = {
   tileColors: 'tile-colors',
   textOnly: 'text-only',
   rejected: 'rejected',
+  // Issue #678: the two provider turns of an attachment read. The first asks for
+  // the `clerum__attachment_read` tool; the second answers from the text the tool
+  // delivered.
+  documentReadRequested: 'document-read-requested',
+  documentAnswer: 'document-answer',
 } as const
 
 /** The fixture's text-only answer. It names no image and no color. */
 export const FIXTURE_TEXT_ONLY_CONTENT = 'IMAGE_FIXTURE_TEXT_OK'
+
+/**
+ * Prefix of the fixture's document answer. The answer is this prefix plus the
+ * first {@link FIXTURE_DOCUMENT_ANSWER_DIGEST_CHARS} hex characters of the
+ * sha256 of the text the Host delivered to the model, so it cannot be produced
+ * from the prompt alone.
+ */
+export const FIXTURE_DOCUMENT_ANSWER_PREFIX = 'DOCUMENT_FIXTURE_SHA256:'
+export const FIXTURE_DOCUMENT_ANSWER_DIGEST_CHARS = 16
 
 const SHA256_HEX = /^[a-f0-9]{64}$/
 const MINIKUBE_PROFILE_PATTERN = /^[a-z0-9][a-z0-9-]{0,62}$/
@@ -250,6 +264,12 @@ export interface FixtureProviderAttempt {
   /** Digest of the exact PNG bytes that reached the wire, or null when none did. */
   imageSha256: string | null
   responseKind: string
+  /**
+   * Digest of the document text that reached the wire in a tool-result message.
+   * The fixture omits the field on image rows, so it is `undefined` there and
+   * `null` on the read-request row, which carries no document yet.
+   */
+  documentSha256?: string | null
 }
 
 export interface FixtureEvidenceCounters {
@@ -261,6 +281,9 @@ export interface FixtureEvidenceCounters {
   textOnlyResponses: number
   textModelImageRefusals: number
   blockedEgress: number
+  documentReadRequests: number
+  documentAnswers: number
+  documentFailures: number
 }
 
 export interface ImageCapabilityEvidenceSnapshot {
@@ -284,6 +307,9 @@ const COUNTER_KEYS: readonly (keyof FixtureEvidenceCounters)[] = [
   'textOnlyResponses',
   'textModelImageRefusals',
   'blockedEgress',
+  'documentReadRequests',
+  'documentAnswers',
+  'documentFailures',
 ]
 
 function requireCounters(value: unknown, source: string): FixtureEvidenceCounters {
@@ -322,6 +348,20 @@ function requireAttemptRow(value: unknown, index: number, source: string): Fixtu
       `${source}: attempts[${index}].responseKind must be one of ${KNOWN_RESPONSE_KINDS.join(', ')} ` +
         `(received ${JSON.stringify(responseKind)})`
     )
+  }
+
+  // Present only on document rows; an image row must not grow the field.
+  if ('documentSha256' in value) {
+    const documentSha256 = value.documentSha256
+    if (
+      documentSha256 !== null &&
+      !(typeof documentSha256 === 'string' && SHA256_HEX.test(documentSha256))
+    ) {
+      throw new Error(
+        `${source}: attempts[${index}].documentSha256 must be a sha256 hex digest or null`
+      )
+    }
+    return { model, imageSha256, responseKind, documentSha256 }
   }
 
   return { model, imageSha256, responseKind }
@@ -467,7 +507,8 @@ export function appendedAttempts(
       !current ||
       current.model !== row.model ||
       current.imageSha256 !== row.imageSha256 ||
-      current.responseKind !== row.responseKind
+      current.responseKind !== row.responseKind ||
+      current.documentSha256 !== row.documentSha256
     ) {
       throw new Error(
         `[image-capabilities] ledger row ${index} changed between reads; the ledger must be append-only.`

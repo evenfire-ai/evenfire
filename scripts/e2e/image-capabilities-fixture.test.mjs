@@ -6,6 +6,7 @@ import {
   fixtureImage,
   installSignalRestore,
   modelInputs,
+  playwrightLaneConfig,
   proveImages,
   requireOwnedResource,
   runAnnotation,
@@ -23,6 +24,26 @@ function manifest() {
     derivedFrom: { [fixtureImage]: { ref: baseImage, id: ids[baseImage] } },
   }
 }
+
+test('the Playwright lane defaults to the image journey and accepts only known lanes', () => {
+  assert.deepEqual(playwrightLaneConfig({}), {
+    lane: 'image',
+    config: 'desktop-app/test/e2e-playwright/playwright.image-capabilities.config.ts',
+    label: 'image-capabilities-playwright',
+  })
+  assert.deepEqual(playwrightLaneConfig({ IMAGE_CAPABILITIES_LANE: 'document-upload' }), {
+    lane: 'document-upload',
+    config: 'desktop-app/test/e2e-playwright/playwright.document-upload.config.ts',
+    label: 'document-upload-playwright',
+  })
+  for (const lane of ['', 'documents', '../evil.config.ts', '__proto__', 'toString']) {
+    assert.throws(
+      () => playwrightLaneConfig({ IMAGE_CAPABILITIES_LANE: lane }),
+      /IMAGE_CAPABILITIES_LANE must be one of image, document-upload/,
+      lane
+    )
+  }
+})
 
 test('requires both exact source revisions and the live derived-base identity', () => {
   assert.deepEqual(proveImages(manifest(), ids, head, profile), { head, profile, images: ids })
