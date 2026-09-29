@@ -933,7 +933,7 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
    */
   private handleOAuthBrokerTokenAdded(namespace: string, recipeName: string): void {
     if (namespace !== this.config.sandboxNamespace) return
-    this.reconciler.invalidateOAuthBrokerDeleteLedger(recipeName)
+    this.reconciler.invalidateOAuthBrokerSecretLedger(recipeName)
     const recipe = this.recipes.get(recipeName)
     if (recipe && !recipeHasBackgroundAccessClient(recipe)) {
       this.triggerSecretDrivenReconcile(recipeName)

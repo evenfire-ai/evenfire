@@ -823,7 +823,11 @@ cmd_prepare_shims() {
 
   rewrite_shim "${SHIMS_DIR}/generate-keys.sh" 's#OUTPUT="\$\{PROJECT_DIR\}/deploy/minikube/secrets/jwt-signing-keys.yaml"#OUTPUT="\${BRANCH_PROFILE_DEPLOY_DIR:-\${PROJECT_DIR}/deploy}/minikube/secrets/jwt-signing-keys.yaml"#g' "generate-keys.sh"
   rewrite_shim "${SHIMS_DIR}/seed-test-data.sh" 's#REPO_ROOT="\$\(cd "\$\{SCRIPT_DIR\}/\.\./\.\." && pwd\)"#REPO_ROOT="\${CLERUM_PROJECT_DIR:-\$(cd \"\${SCRIPT_DIR}/../..\" && pwd)}"#g' "seed-test-data.sh REPO_ROOT"
-  rewrite_shim "${SHIMS_DIR}/seed-test-data.sh" 's#: "\$\{CONTEXT:=\$\(kubectl config current-context\)\}"#: "\${CONTEXT:=\${MINIKUBE_PROFILE:-\$(kubectl config current-context)}}"#g; s#export ADMIN_PASSWORD E2E_TEST_EMAIL E2E_TEST_PASSWORD CONTEXT#: "\${ALLOWED_CONTEXTS:=\${CONTEXT}}"\nexport ADMIN_PASSWORD E2E_TEST_EMAIL E2E_TEST_PASSWORD CONTEXT ALLOWED_CONTEXTS#g; s#export ADMIN_PASSWORD E2E_DEV_LOGIN_EMAIL CONTEXT#: "\${ALLOWED_CONTEXTS:=\${CONTEXT}}"\nexport ADMIN_PASSWORD E2E_DEV_LOGIN_EMAIL CONTEXT ALLOWED_CONTEXTS#g' "seed-test-data.sh CONTEXT"
+  # One call per substitution, so an upstream edit that stops matching one of them
+  # fails on its own instead of hiding behind the other. The earlier combined
+  # expression carried two alternatives that matched nothing in the current upstream.
+  rewrite_shim "${SHIMS_DIR}/seed-test-data.sh" 's#: "\$\{CONTEXT:=clerum-test\}"#: "\${CONTEXT:=\${MINIKUBE_PROFILE:-clerum-test}}"#g' "seed-test-data.sh CONTEXT default"
+  rewrite_shim "${SHIMS_DIR}/seed-test-data.sh" 's#export ADMIN_PASSWORD E2E_DEV_LOGIN_EMAIL CONTEXT#: "\${ALLOWED_CONTEXTS:=\${CONTEXT}}"\nexport ADMIN_PASSWORD E2E_DEV_LOGIN_EMAIL CONTEXT ALLOWED_CONTEXTS#g' "seed-test-data.sh ALLOWED_CONTEXTS"
   rewrite_shim "${SHIMS_DIR}/build-images.sh" 's#MANIFEST_FILE="\$\{PROJECT_DIR\}/deploy/minikube/\.image-manifest.json"#MANIFEST_FILE="\${BRANCH_PROFILE_DEPLOY_DIR:-\${PROJECT_DIR}/deploy}/minikube/.image-manifest.json"#g' "build-images.sh"
   # full-setup.sh resolves BRANCH_PROFILE_DEPLOY_DIR natively (ACTIVE_MINIKUBE_*),
   # so it needs no path rewrite; rewrite_shim would fail on it as a no-op.
@@ -1098,7 +1102,7 @@ cmd_setup() {
   MINIKUBE_PROFILE="${PROFILE}" \
   CLERUM_PROJECT_DIR="${REPO_DIR}" \
   BRANCH_PROFILE_DEPLOY_DIR="${DEPLOY_SHIM_DIR}" \
-  "${SHIMS_DIR}/full-setup.sh" "${setup_args[@]}"
+  "${SHIMS_DIR}/full-setup.sh" ${setup_args[@]+"${setup_args[@]}"}
 }
 
 cmd_delete() {

@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type * as k8s from '@kubernetes/client-node'
 import type { CodexExecutionProjection } from '@clerum/codex-catalog-projection'
 import { mintRecipeHostGfsToken } from '../../../src/gfsBinding'
+import { captureLogger } from '../../../src/reconciler/__tests__/captureLogger'
 import {
   resolveStatefulSetHeadlessServiceName,
   resolveWorkloadMcpServerLabel,
@@ -3242,14 +3243,33 @@ describe('WorkflowReconciler — reconcile loop', () => {
       )
     }
 
+    /**
+     * Liveness witness for the negative prune tests: a catalog member that is not
+     * desired sits in the same LIST and must be deleted. If the prune loop never
+     * ran, "X was not deleted" would hold anyway; the sibling's delete proves the
+     * loop iterated over the listed items.
+     */
+    function seedPrunableSibling(apiserver: ReturnType<typeof makeApiserverNetworkingApi>): void {
+      seedLivePolicy(apiserver, GROK_PROXY, WRC_LABELS)
+    }
+
+    function expectPrunableSiblingDeleted(
+      apiserver: ReturnType<typeof makeApiserverNetworkingApi>
+    ): void {
+      expect(sandboxDeletes(apiserver.api).map(d => d.name)).toContain(GROK_PROXY)
+      expect(apiserver.live.has(apiserver.key(SANDBOX, GROK_PROXY))).toBe(false)
+    }
+
     it('does not delete a listed name that is outside the run-lane catalog', async () => {
       const apiserver = makeApiserverNetworkingApi()
       seedLivePolicy(apiserver, `${RECIPE}-obsolete-wrc`, WRC_LABELS)
+      seedPrunableSibling(apiserver)
       const reconciler = new WorkflowReconciler(makeDeps({ networkingApi: apiserver.api as never }))
 
       await applyPolicies(reconciler)
 
       expectListWitness(apiserver.api)
+      expectPrunableSiblingDeleted(apiserver)
       expect(sandboxDeletes(apiserver.api).map(d => d.name)).not.toContain(`${RECIPE}-obsolete-wrc`)
       expect(apiserver.live.has(apiserver.key(SANDBOX, `${RECIPE}-obsolete-wrc`))).toBe(true)
     })
@@ -3356,10 +3376,12 @@ describe('WorkflowReconciler — reconcile loop', () => {
     it('does not delete a listed policy that is in the desired set', async () => {
       const apiserver = makeApiserverNetworkingApi()
       seedLivePolicy(apiserver, COORD_TO_WRC, WRC_LABELS)
+      seedPrunableSibling(apiserver)
       const reconciler = new WorkflowReconciler(makeDeps({ networkingApi: apiserver.api as never }))
 
       await applyPolicies(reconciler)
 
+      expectPrunableSiblingDeleted(apiserver)
       expect(sandboxDeletes(apiserver.api).filter(d => d.name === COORD_TO_WRC)).toEqual([])
       expect(apiserver.live.has(apiserver.key(SANDBOX, COORD_TO_WRC))).toBe(true)
     })
@@ -3370,11 +3392,13 @@ describe('WorkflowReconciler — reconcile loop', () => {
         'clerum.io/recipe': RECIPE,
         'clerum.io/managed-by': 'workflow-recipes',
       })
+      seedPrunableSibling(apiserver)
       const reconciler = new WorkflowReconciler(makeDeps({ networkingApi: apiserver.api as never }))
 
       await applyPolicies(reconciler)
 
       expectListWitness(apiserver.api)
+      expectPrunableSiblingDeleted(apiserver)
       expect(sandboxDeletes(apiserver.api).map(d => d.name)).not.toContain(
         `${RECIPE}-oauth-broker-egress`
       )
@@ -3460,11 +3484,13 @@ describe('WorkflowReconciler — reconcile loop', () => {
         'clerum.io/recipe': RECIPE,
         'clerum.io/managed-by': 'workflow-recipes',
       })
+      seedPrunableSibling(apiserver)
       const reconciler = new WorkflowReconciler(makeDeps({ networkingApi: apiserver.api as never }))
 
       await applyPolicies(reconciler, { awaitsTriggeredRun: true })
 
       expectListWitness(apiserver.api)
+      expectPrunableSiblingDeleted(apiserver)
       expect(sandboxDeletes(apiserver.api).map(d => d.name)).not.toContain(COORD_TO_MCP_HOST)
       expect(apiserver.live.has(apiserver.key(SANDBOX, COORD_TO_MCP_HOST))).toBe(true)
     })
@@ -3507,6 +3533,76 @@ describe('WorkflowReconciler — reconcile loop', () => {
       const summary = await applyPolicies(reconciler)
       expect(summary.retryPending).toBe(true)
       expect(apiserver.live.has(apiserver.key(SANDBOX, GROK_PROXY))).toBe(true)
+    })
+
+    it.each([
+      { code: 404, retryPending: false },
+      { code: 409, retryPending: true },
+      { code: 500, retryPending: true },
+    ])(
+      'prune DELETE answering $code sets retryPending=$retryPending',
+      async ({ code, retryPending }) => {
+        const apiserver = makeApiserverNetworkingApi()
+        seedLivePolicy(apiserver, GROK_PROXY, WRC_LABELS)
+        apiserver.api.deleteNamespacedNetworkPolicy.mockImplementation(
+          async ({ name, namespace }: { name: string; namespace: string }) => {
+            if (name === GROK_PROXY) throw { code }
+            if (!apiserver.live.delete(apiserver.key(namespace, name))) throw { code: 404 }
+            return {}
+          }
+        )
+        const reconciler = new WorkflowReconciler(
+          makeDeps({ networkingApi: apiserver.api as never })
+        )
+
+        const summary = await applyPolicies(reconciler)
+
+        // Liveness witness: the prune reached the DELETE for the leftover.
+        expect(sandboxDeletes(apiserver.api).map(d => d.name)).toContain(GROK_PROXY)
+        expect(summary.retryPending).toBe(retryPending)
+      }
+    )
+
+    it('logs prune failures as an error object, never as a pre-flattened message string', async () => {
+      const errorLog = captureLogger('error')
+      try {
+        // A client exception whose message embeds the response body and headers: the
+        // logger only redacts those when it receives the error itself.
+        const failure = Object.assign(new Error('HTTP-Code: 403 Body: "{}" Headers: {}'), {
+          code: 403,
+        })
+        const apiserver = makeApiserverNetworkingApi()
+        seedLivePolicy(apiserver, GROK_PROXY, WRC_LABELS)
+        apiserver.api.deleteNamespacedNetworkPolicy.mockImplementation(
+          async ({ name, namespace }: { name: string; namespace: string }) => {
+            if (name === GROK_PROXY) throw failure
+            if (!apiserver.live.delete(apiserver.key(namespace, name))) throw { code: 404 }
+            return {}
+          }
+        )
+        apiserver.api.listNamespacedNetworkPolicy.mockRejectedValueOnce(failure)
+        const reconciler = new WorkflowReconciler(
+          makeDeps({ networkingApi: apiserver.api as never })
+        )
+
+        await applyPolicies(reconciler) // LIST fails
+        await applyPolicies(reconciler) // LIST ok, DELETE of the leftover fails
+
+        const fields = (message: string) =>
+          errorLog.mock.calls.find(([msg]) => msg === message)?.[1] as
+            | Record<string, unknown>
+            | undefined
+        for (const message of [
+          'Run-lane NP prune LIST failed; apply outcome is kept',
+          'Run-lane NP prune delete failed',
+        ]) {
+          expect(fields(message), message).toBeDefined()
+          expect(fields(message)?.err).toBe(failure)
+          expect(fields(message)).not.toHaveProperty('error')
+        }
+      } finally {
+        errorLog.mockRestore()
+      }
     })
 
     it('marks retryPending when the legacy internet NP DELETE fails', async () => {
@@ -5259,6 +5355,123 @@ describe('WorkflowReconciler — reconcile loop', () => {
           const second = await reconciler.retryRunLaneNetworkPolicies('test-wf', 'uid-123', spec())
           expect(legacyDeletes()).toHaveLength(2)
           expect(second.retryPending).toBe(false)
+        })
+
+        // The retry computes its own verdict. These tests pin it: a proxy the
+        // fresh verdict still wants (or cannot decide about) survives, and one
+        // it no longer wants goes. The sibling delete is the liveness witness
+        // in every case: the prune loop demonstrably iterated the same LIST.
+        describe('with a fresh Codex/Grok verdict', () => {
+          const CODEX_LIVE = 'test-wf-mcp-host-to-codex-proxy'
+          const projection = (overrides: Record<string, unknown>) => ({
+            targets: [],
+            eligibleTargets: [],
+            derivedScopes: [],
+            requiresCodexProxyEgress: false,
+            requiresGrokProxyEgress: false,
+            driftHashInput: '',
+            catalogContentHash: null,
+            catalogRevision: null,
+            connectionRevision: null,
+            eligibility: 'ineligible',
+            reason: 'static_only',
+            ...overrides,
+          })
+
+          function seedProxy(apiserver: Converged, name: string) {
+            apiserver.live.set(apiserver.key('sandbox-recipes', name), {
+              apiVersion: 'networking.k8s.io/v1',
+              kind: 'NetworkPolicy',
+              metadata: {
+                name,
+                namespace: 'sandbox-recipes',
+                labels: { 'clerum.io/recipe': 'test-wf', 'clerum.io/managed-by': 'wrc' },
+              },
+              spec: { podSelector: {}, policyTypes: ['Egress'] },
+            })
+          }
+
+          async function retryWith(
+            verdict: { codex: Record<string, unknown>; grok: Record<string, unknown> },
+            proxies: string[]
+          ) {
+            const { apiserver, reconciler } = await convergedRunLane()
+            apiserver.api.listNamespacedNetworkPolicy.mockClear()
+            for (const name of proxies) seedProxy(apiserver, name)
+            const verdictSpy = vi.spyOn(reconciler as never, 'codexVerdictFor').mockReturnValue({
+              projection: projection(verdict.codex),
+              grokProjection: projection(verdict.grok),
+            } as never)
+            try {
+              // An agent recipe with a run id needs mcp-host, the only consumer of
+              // the Codex/Grok proxy policies; the snippet spec above never wants them.
+              const summary = await reconciler.retryRunLaneNetworkPolicies(
+                'test-wf',
+                'uid-123',
+                makeSpec(),
+                'test-wf',
+                'run-1'
+              )
+              expect(verdictSpy).toHaveBeenCalledTimes(1)
+              return { apiserver, summary }
+            } finally {
+              verdictSpy.mockRestore()
+            }
+          }
+
+          // The baseline lane is the snippet one, so switching to an agent spec also
+          // prunes its snippet policies. Only the proxy policies are under test here.
+          const deletedNames = (apiserver: Converged) =>
+            apiserver.api.deleteNamespacedNetworkPolicy.mock.calls
+              .map(([arg]) => arg.name)
+              .filter(name => name.endsWith('-proxy'))
+
+          it('keeps a proxy the fresh verdict still requires and prunes the undesired twin', async () => {
+            const { apiserver, summary } = await retryWith(
+              {
+                codex: {
+                  eligibility: 'eligible',
+                  requiresCodexProxyEgress: true,
+                  reason: 'granted',
+                },
+                grok: {},
+              },
+              [CODEX_LIVE, LEFTOVER]
+            )
+
+            expect(apiserver.api.listNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
+            expect(deletedNames(apiserver)).toEqual([LEFTOVER])
+            expect(apiserver.live.has(apiserver.key('sandbox-recipes', CODEX_LIVE))).toBe(true)
+            expect(summary.retryPending).toBe(false)
+          })
+
+          it('keeps both proxies while the verdict is uncertain, and reports no leftover', async () => {
+            const { apiserver, summary } = await retryWith(
+              {
+                codex: { eligibility: 'uncertain', reason: 'forbidden' },
+                grok: { eligibility: 'uncertain', reason: 'forbidden' },
+              },
+              [CODEX_LIVE, LEFTOVER]
+            )
+
+            expect(apiserver.api.listNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
+            expect(deletedNames(apiserver)).toEqual([])
+            expect(apiserver.live.has(apiserver.key('sandbox-recipes', CODEX_LIVE))).toBe(true)
+            expect(apiserver.live.has(apiserver.key('sandbox-recipes', LEFTOVER))).toBe(true)
+            expect(summary.retryPending).toBe(false)
+          })
+
+          it('prunes a proxy once the fresh verdict decides it is no longer wanted', async () => {
+            const { apiserver, summary } = await retryWith({ codex: {}, grok: {} }, [
+              CODEX_LIVE,
+              LEFTOVER,
+            ])
+
+            expect(apiserver.api.listNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
+            expect(deletedNames(apiserver).sort()).toEqual([CODEX_LIVE, LEFTOVER].sort())
+            expect(apiserver.live.has(apiserver.key('sandbox-recipes', CODEX_LIVE))).toBe(false)
+            expect(summary.retryPending).toBe(false)
+          })
         })
       })
     })

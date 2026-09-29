@@ -3247,7 +3247,7 @@ export class WorkflowReconciler {
       this.log.error('Legacy mcp-servers internet NP delete failed', {
         recipe: recipeName,
         ...deleteOutcomeFields(outcome),
-        error: outcome.error instanceof Error ? outcome.error.message : String(outcome.error),
+        err: outcome.error,
       })
       return { retryPending: true }
     }
@@ -3477,7 +3477,7 @@ export class WorkflowReconciler {
     } catch (error: unknown) {
       this.log.error('Run-lane NP prune LIST failed; apply outcome is kept', {
         recipe: recipeName,
-        error: error instanceof Error ? error.message : String(error),
+        err: error,
       })
       return { retryPending: true }
     }
@@ -3519,7 +3519,7 @@ export class WorkflowReconciler {
           recipe: recipeName,
           policy: name,
           ...deleteOutcomeFields(outcome),
-          error: outcome.error instanceof Error ? outcome.error.message : String(outcome.error),
+          err: outcome.error,
         })
         retryPending = true
       }

@@ -272,16 +272,16 @@ assert_contains "${DETACHED_OUTPUT}" "repo_root:" "detached output includes repo
 assert_contains "${DETACHED_OUTPUT}" "${DETACHED_WT}" "detached output uses current worktree root"
 assert_contains "${DETACHED_OUTPUT}" "primary_checkout:" "detached output includes primary checkout label"
 assert_contains "${DETACHED_OUTPUT}" "${MAIN_REPO}" "detached output resolves primary checkout"
-assert_contains "${DETACHED_OUTPUT}" "detached:" "detached output includes detached label"
-assert_contains "${DETACHED_OUTPUT}" "yes" "detached output reports detached state"
-assert_contains "${DETACHED_OUTPUT}" "profile_helper_local:" "detached output includes local helper label"
-assert_contains "${DETACHED_OUTPUT}" "no" "detached output tolerates missing local scripts helper"
-assert_contains "${DETACHED_OUTPUT}" "profile_helper_primary:" "detached output includes primary helper label"
-assert_contains "${DETACHED_OUTPUT}" "yes" "detached output finds primary scripts helper"
+# A bare "yes"/"no" matches any line of the packet, so each value is asserted on
+# its own label row, formatted exactly as the packet's kv() prints it.
+kv_row() { printf '%-30s %s' "$1:" "$2"; }
+assert_contains "${DETACHED_OUTPUT}" "$(kv_row detached yes)" "detached output reports detached state"
+assert_contains "${DETACHED_OUTPUT}" "$(kv_row profile_helper_local no)" "detached output tolerates missing local scripts helper"
+assert_contains "${DETACHED_OUTPUT}" "$(kv_row profile_helper_primary yes)" "detached output finds primary scripts helper"
 assert_not_contains "${DETACHED_OUTPUT}" "unbound variable" "detached output has no shell unbound-variable warnings"
 
 # A run that skipped its assertions must not exit 0.
-if (( PASSED < 44 )); then
-  fail "expected at least 44 passing assertions, got ${PASSED}"
+if (( PASSED < 41 )); then
+  fail "expected at least 41 passing assertions, got ${PASSED}"
 fi
 exit "${FAIL}"

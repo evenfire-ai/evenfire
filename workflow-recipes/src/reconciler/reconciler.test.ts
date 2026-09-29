@@ -7473,6 +7473,35 @@ describe('WorkflowRecipeReconciler', () => {
     )
   })
 
+  // The legacy internet NP ledger is keyed by recipeUid and cleared from
+  // cleanupPluginWorkloadSdk only when the uid is passed. The SDK-only delete
+  // path is the one that has to hand it over.
+  it('reconcileDelete hands the recipe uid to the SDK cleanup on the SDK-only path', async () => {
+    const cleanupPluginWorkloadSdk = vi.fn().mockResolvedValue(undefined)
+    ;(
+      reconciler as unknown as {
+        workflowReconciler: { cleanupPluginWorkloadSdk: typeof cleanupPluginWorkloadSdk }
+      }
+    ).workflowReconciler = { cleanupPluginWorkloadSdk }
+    const recipe = makeRecipe({
+      metadata: { name: 'test-recipe', namespace: 'sandbox-recipes', uid: 'uid-sdk-delete' },
+      spec: {
+        workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.1-alpine', port: 8080 }],
+      },
+      status: {
+        phase: 'active',
+        pluginWorkloadSdk: { state: 'validated', promptBridge: true, clientNotifications: false },
+      },
+    } as Partial<WorkflowRecipeCRD>)
+
+    await reconciler.reconcileDelete(recipe)
+
+    expect(cleanupPluginWorkloadSdk).toHaveBeenCalledTimes(1)
+    expect(cleanupPluginWorkloadSdk).toHaveBeenCalledWith('test-recipe', {
+      recipeUid: 'uid-sdk-delete',
+    })
+  })
+
   // ─── Phase 8: Namespace Splitting ─────────────────────────────────
 
   it('R.8.1 — non-MCP workload deploys to sandbox-recipes namespace', async () => {
@@ -15457,9 +15486,23 @@ describe('WorkflowRecipeReconciler', () => {
       await reconciler.ensureOAuthBrokerTokenSecret(recipe)
       expect(secretDeletes()).toBe(1)
 
-      reconciler.invalidateOAuthBrokerDeleteLedger('test-recipe')
+      reconciler.invalidateOAuthBrokerSecretLedger('test-recipe')
       await reconciler.ensureOAuthBrokerTokenSecret(recipe)
       expect(secretDeletes()).toBe(2)
+    })
+
+    it('ADDED invalidation re-arms the Secret delete but keeps the NetworkPolicy TTL', async () => {
+      const recipe = reapRecipe(4)
+      await reconciler.ensureOAuthBrokerTokenSecret(recipe)
+      await reapPolicy(recipe)
+      expect(secretDeletes()).toBe(1)
+      expect(policyDeletes()).toBe(1)
+
+      reconciler.invalidateOAuthBrokerSecretLedger('test-recipe')
+      await reconciler.ensureOAuthBrokerTokenSecret(recipe)
+      await reapPolicy(recipe)
+      expect(secretDeletes()).toBe(2)
+      expect(policyDeletes()).toBe(1)
     })
 
     it('deletes the Secret again after reconcileDelete invalidates the ledger', async () => {
@@ -15521,8 +15564,10 @@ describe('WorkflowRecipeReconciler', () => {
       expect(policyDeletes()).toBe(2)
     })
 
-    it('c3: generation 0 on one recipe does not skip another recipe with undefined generation', async () => {
+    it('c3: a recorded delete for one recipe does not skip another recipe', async () => {
       await reconciler.ensureOAuthBrokerTokenSecret(reapRecipe(0))
+      // Liveness witness: the first recipe's delete really ran.
+      expect(secretDeletes()).toBe(1)
       const other = makeRecipe({
         metadata: {
           name: 'other-recipe',
@@ -15621,6 +15666,16 @@ describe('WorkflowRecipeReconciler', () => {
               labels: { 'clerum.io/recipe': RECIPE, 'clerum.io/managed-by': 'wrc' },
             },
           },
+          {
+            // Liveness witness: an ordinary catalog member that is not desired sits in
+            // the same LIST and must be deleted, so "GFS was not deleted" cannot hold
+            // just because the prune never iterated.
+            metadata: {
+              name: `${RECIPE}-mcp-host-to-grok-proxy`,
+              namespace: 'sandbox-recipes',
+              labels: { 'clerum.io/recipe': RECIPE, 'clerum.io/managed-by': 'wrc' },
+            },
+          },
         ],
       })
       const inner = installRealInner()
@@ -15666,6 +15721,9 @@ describe('WorkflowRecipeReconciler', () => {
       )
 
       expect(result, result.message).toMatchObject({ skipStatusPatch: true })
+      expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith(
+        expect.objectContaining({ name: `${RECIPE}-mcp-host-to-grok-proxy` })
+      )
       expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalledWith(
         expect.objectContaining({ name: GFS })
       )
@@ -15686,6 +15744,13 @@ describe('WorkflowRecipeReconciler', () => {
               labels: { 'clerum.io/recipe': RECIPE, 'clerum.io/managed-by': 'wrc' },
             },
           },
+          {
+            metadata: {
+              name: `${RECIPE}-mcp-host-to-grok-proxy`,
+              namespace: 'sandbox-recipes',
+              labels: { 'clerum.io/recipe': RECIPE, 'clerum.io/managed-by': 'wrc' },
+            },
+          },
         ],
       })
       const inner = installRealInner()
@@ -15702,6 +15767,9 @@ describe('WorkflowRecipeReconciler', () => {
       // absence of a GFS DELETE below is the catalog gate holding, not a retry
       // that never reached the prune.
       expect(mockNetworkingApi.listNamespacedNetworkPolicy).toHaveBeenCalled()
+      expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith(
+        expect.objectContaining({ name: `${RECIPE}-mcp-host-to-grok-proxy` })
+      )
       expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalledWith(
         expect.objectContaining({ name: GFS })
       )

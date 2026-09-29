@@ -167,5 +167,8 @@ describe('waitForPodDeletion', () => {
         pollIntervalMs: 5,
       })
     ).resolves.toBe(false)
+    // Liveness witness: `false` also results if the wait never polled. Several GETs
+    // that each answered 200 show it kept looking until the timeout.
+    expect(readNamespacedPod.mock.calls.length).toBeGreaterThan(1)
   })
 })

@@ -948,8 +948,13 @@ export class WorkflowRecipeReconciler {
     WorkflowRecipeReconcilerDeps['verifyWorkflowRunProvenance']
   >
 
-  invalidateOAuthBrokerDeleteLedger(recipeName: string): void {
-    this.oauthBrokerDeleteLedger.invalidate(recipeName)
+  /**
+   * Re-arms the Secret delete for a recipe whose token Secret was (re)created.
+   * The NetworkPolicy TTL is untouched: a watch reconnect replays ADDED for
+   * every existing token and must not reset it.
+   */
+  invalidateOAuthBrokerSecretLedger(recipeName: string): void {
+    this.oauthBrokerDeleteLedger.invalidateSecret(recipeName)
   }
 
   constructor(kc: k8s.KubeConfig, config?: OperatorConfig, deps?: WorkflowRecipeReconcilerDeps) {
