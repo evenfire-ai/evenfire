@@ -601,6 +601,23 @@ assert_output_lacks 'stopped or cleared verified control-ui record' 'stop-pf mus
 assert_file "${pids_dir}/control-ui.pid" 'stop-pf keeps another worktree record'
 rm -f "${pids_dir}/control-ui.pid"
 
+# Same PID-reuse shape as the retirement below (live PID, different start
+# time), but the record is bound to another worktree: the binding check in
+# stop_own_pf must keep it, because nothing proves the other worktree's
+# forward is gone.
+reset_state
+start_foreign_process
+write_control_ui_record "${FOREIGN_PID}" 'Mon Jan  1 00:00:00 2024' "${other_worktree}"
+bp stop-pf-foreign-worktree-live stop-pf
+assert_rc 1 'stop-pf with a live other-worktree record whose start differs'
+assert_output_has 'belongs to a different profile, context, worktree, service, or port binding' \
+  'stop-pf ran the ownership check on the live other-worktree record'
+assert_output_has "  ${pids_dir}/control-ui.pid" 'stop-pf lists the kept other-worktree record'
+assert_output_lacks 'retiring' 'stop-pf must not retire a live other-worktree record'
+assert_file "${pids_dir}/control-ui.pid" 'stop-pf keeps a live other-worktree record'
+assert_alive "${FOREIGN_PID}" 'stop-pf never signals the process behind another worktree record'
+rm -f "${pids_dir}/control-ui.pid"
+
 reset_state
 start_foreign_process
 write_control_ui_record "${FOREIGN_PID}" "$(pf_owner_process_start "${FOREIGN_PID}")" "${repo}"
