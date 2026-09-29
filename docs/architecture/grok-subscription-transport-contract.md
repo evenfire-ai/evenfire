@@ -360,13 +360,13 @@ sees depends on where the rejection happens: the control-api authorizer and
 the proxy both surface a size refusal (`kind: 'size'`) as HTTP 413
 `payload_too_large` and every other parser failure as `invalid_request`
 (#784; the control-api authorizer answered `invalid_request` for size too
-before it), while the Host raises `request_limit_exceeded` before it
-authorizes at all — for the five size refusals listed under that code below —
-`attachment_too_large` for the image budget refusals (classified as
-`InvalidAttachment`), `request_limit_exceeded` for the element bound and
-`payload_too_large` for the container and member bounds (all three
-classified as `ContextLengthExceeded`), and
-`invalid_request` for the rest, which no amount of compaction would fix.
+before it), while the Host, before it authorizes at all, raises
+`request_limit_exceeded` for the five volume refusals listed under that code
+below (the element bound among them), `attachment_too_large` for the image
+budget refusals (classified as `InvalidAttachment`), `payload_too_large` for
+the container and member bounds (classified, like `request_limit_exceeded`,
+as `ContextLengthExceeded`), and `invalid_request` for the rest, which no
+amount of compaction would fix.
 
 That symmetry holds for a request and not for a response, which is why the
 rollout order below is not interchangeable. A proxy carrying the new bound in
@@ -939,10 +939,15 @@ of its own, so a new Host sends an image-bearing request as soon as it runs.
 An old control-api refuses it (400 `invalid_request`, or 413 above its 24 MiB
 route parser), and an old proxy refuses it after the attempt was authorized
 (400 `invalid_request`, or 413 above its 8 MiB parser, which the user sees as
-"Conversation Too Long"). Step 4's Host-before-proxy rule comes from a change
-of the V1 bounds; #784 leaves them unchanged (8 MiB body, 256 tool calls,
-1024 messages), so it does not apply to this upgrade. On a fresh rollout the
-flags stay off until step 6, and steps 1-6 apply as written.
+"Conversation Too Long"). Step 4's Host-before-proxy rule protects a
+response-side bound, `maxToolCalls`, whose band a new proxy would bill and an
+old Host would discard. #784 leaves `maxToolCalls` (256) unchanged, so the rule
+does not apply to this upgrade. #784 does tighten request-side V1 bounds: it
+adds `maxRequestContainers` and `maxRequestMembers` (262144 each) and lowers
+the element bound from 8388608 to `maxRequestElements` (1048576). A request
+over them is refused by control-api at authorize or by the proxy before
+redeem, so no upstream call is made and nothing is billed. On a fresh rollout
+the flags stay off until step 6, and steps 1-6 apply as written.
 
 ## Rollback order
 
@@ -969,6 +974,18 @@ flags stay off until step 6, and steps 1-6 apply as written.
    - Under 0113, a revoked Grok key can no longer be reconnected by the old
      code path. That attempt fails on the unique key index instead of reviving
      the key.
+
+Image input (#784) alone, with the Grok flags left on: roll back the four Host
+images first and wait until no Host pod runs a #784 image, then roll back
+`grok-llm-proxy` and control-api — the upgrade order reversed. V2 has no flag
+of its own, so a #784 Host keeps sending image-bearing V2 requests; an older
+control-api refuses them at authorize (400 `invalid_request`, or 413 above its
+24 MiB route parser) and an older proxy refuses them after the attempt was
+authorized (400 `invalid_request`, or 413 above its 8 MiB parser). With the
+Hosts rolled back first only V1 requests remain, and the older control-api and
+proxy accept every V1 request the newer ones accept, since their structural
+bounds are looser. Steps 1-4 above do not apply: the flags stay on and #784
+adds no migration.
 
 ## SDK bootstrap
 

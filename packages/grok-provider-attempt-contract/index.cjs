@@ -199,12 +199,20 @@ const RECEIPT_KEYS = new Set([
 ])
 const USAGE_KEYS = new Set(['inputTokens', 'outputTokens'])
 
-// `kind` classifies a `limit` failure. The proxy and control-api answer
-// `kind: 'size'` with payload_too_large and every other failure with
-// invalid_request. `size` covers the byte budget and the aggregate structural
-// counts (containers, members, elements) that a shorter conversation can fix.
-// The V2 image count sets `count`; depth and other range bounds carry no kind
-// because compaction cannot fix them.
+// `kind` classifies a `limit` failure; no other code carries one. The proxy
+// and control-api answer `kind: 'size'` with payload_too_large and every
+// other failure, with or without a kind, with invalid_request.
+// - `size`: the byte budgets (the whole request, the V2 non-image share, the
+//   proxy envelope, each image's decoded bytes, the total image bytes) and
+//   the container, member and element bounds.
+// - `count`: the V2 image count.
+// - no kind: nesting depth, the message and tool-call counts, and the
+//   maxOutputTokens and deadlineMs ranges.
+// A kind decides the HTTP answer, not whether compaction can fix the refusal:
+// `size` also marks the image budgets, and the message and tool-call counts
+// carry no kind although the Host treats them as context length. The Host
+// therefore classifies by message (CONTEXT_LENGTH_REFUSALS in
+// mcp-host/src/llm/grokSubscription.ts).
 function fail(code, message, kind) {
   return kind ? { ok: false, code, message, kind } : { ok: false, code, message }
 }

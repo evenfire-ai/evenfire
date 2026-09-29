@@ -309,7 +309,10 @@ async function authorizeGrokProviderAttempt(
   assertClaimBinding(body, claims)
   const parsed = parseGrokCompletionRequest(body.request)
   if (!parsed.ok) {
-    // `kind: 'size'` is 413: byte ceilings. Range, count and depth stay 400.
+    // `kind: 'size'` is 413: the byte budgets and the container, member and
+    // element bounds. Every other refusal is 400, including the image count
+    // (`kind: 'count'`) and the message, tool-call, depth and range bounds
+    // (no kind).
     throw new LlmProviderAttemptAuthorizeError(
       parsed.code === 'limit' && parsed.kind === 'size' ? 'payload_too_large' : 'invalid_request',
       parsed.message
@@ -715,7 +718,9 @@ export async function authorizeLlmProviderAttempt(
 
   const parsed = parseCodexCompletionRequest(body.request)
   if (!parsed.ok) {
-    // `kind: 'size'` is 413: byte ceilings and image geometry. Range, count and depth stay 400.
+    // `kind: 'size'` is 413: the byte budgets, the image geometry and the
+    // container, member and element bounds. `range`, `count` and `depth`
+    // stay 400.
     throw new LlmProviderAttemptAuthorizeError(
       parsed.code === 'limit' && parsed.kind === 'size' ? 'payload_too_large' : 'invalid_request',
       parsed.message

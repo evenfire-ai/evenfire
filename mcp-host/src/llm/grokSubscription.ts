@@ -752,8 +752,9 @@ export class GrokSubscriptionProvider implements SingleTurnProvider {
           : {}),
       }
     }
-    // V1 stays byte-identical for every text-only turn; one message with parts
-    // moves the whole request to V2, which is the only version that carries them.
+    // V1 stays byte-identical for a turn with no contentParts. One message with
+    // parts, even text-only parts left by redaction, moves the whole request to
+    // V2, the only version that carries them.
     if (!projectedMessages.some(message => message.contentParts !== undefined)) {
       return { schemaVersion: 'grok-completion-request.v1', ...request }
     }

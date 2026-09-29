@@ -643,8 +643,8 @@ code the proxy constructs, and every code it refuses a request with
   the refusal message: `hashCanonicalCodexRequest` returns
   `{ ok, code, message, kind }`, but `kind` cannot tell them apart from the
   image budgets, because `size` covers the conversation bytes and the image
-  byte and dimension budgets alike, and `count` covers `maxMessages` and
-  `maxImages` alike.
+  byte and dimension budgets alike, and `count` covers `maxMessages`,
+  `maxToolCalls` and `maxImages` alike.
 
   | Refusal message                                          | Guard                             |
   | -------------------------------------------------------- | --------------------------------- |
