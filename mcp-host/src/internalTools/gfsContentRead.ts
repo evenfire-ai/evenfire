@@ -82,7 +82,8 @@ async function requireOk(response: Response, signal: AbortSignal): Promise<void>
   throw new Error(`gfsc ${response.status}: ${detail || response.statusText}`)
 }
 
-function normalizeRid(value: unknown): string | null {
+/** A resource id as gfsc names it: 32 lowercase hex digits, without dashes. */
+export function normalizeRid(value: unknown): string | null {
   if (typeof value !== 'string') return null
   const normalized = value.replace(/-/g, '').toLowerCase()
   return /^[a-f0-9]{32}$/.test(normalized) ? normalized : null
@@ -90,7 +91,8 @@ function normalizeRid(value: unknown): string | null {
 
 function metadataSnapshot(
   bytes: Buffer,
-  args: { drive: string; resourceId: string }
+  args: { drive: string; resourceId: string },
+  expectedVersion?: number
 ): { source: GfsImageSource; size: number } {
   let envelope: { ok?: unknown; data?: unknown }
   try {
@@ -117,6 +119,11 @@ function metadataSnapshot(
     (data.bytes as number) < 0
   )
     throw new VisualInputError('invalid_response')
+  // A pinned read is stale as soon as the version differs, whatever else changed
+  // with it: a newer version that grew past the limit or became a directory is
+  // still reported as the version conflict the tool promises.
+  if (expectedVersion !== undefined && data.version !== expectedVersion)
+    throw new VisualInputError('version_conflict')
   if (data.kind !== 'file') throw new VisualInputError('unsupported_format')
   if ((data.bytes as number) > VISUAL_INPUT_LIMITS.fileBytes)
     throw new VisualInputError('limit_exceeded')
@@ -134,8 +141,10 @@ function metadataSnapshot(
 }
 
 function assertContentHeaders(response: Response, source: GfsImageSource, size: number): void {
-  const version = response.headers.get('x-gfs-version')
-  if (response.headers.get('x-gfs-uri') !== source.gfsUri || version !== String(source.version))
+  // Content for another resource is not a newer version of this one.
+  if (response.headers.get('x-gfs-uri') !== source.gfsUri)
+    throw new VisualInputError('identity_mismatch')
+  if (response.headers.get('x-gfs-version') !== String(source.version))
     throw new VisualInputError('version_conflict')
   const encoding = response.headers.get('content-encoding')
   if (encoding && encoding.toLowerCase() !== 'identity')
@@ -194,7 +203,8 @@ export async function readGfsContent(
       await requireOk(metadata, signal)
       snapshot = metadataSnapshot(
         await collect(metadata, VISUAL_INPUT_LIMITS.metadataBytes, signal),
-        args
+        args,
+        options.expectedVersion
       )
     } finally {
       metadataReservation.release()

@@ -1197,6 +1197,9 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
       ) : null}
       {globalFilesModalOpen ? (
         <ComposerGlobalFilesModal
+          attachedIds={composerReferenceAttachments
+            .filter(attachment => attachment.type === 'global_file')
+            .map(attachment => attachment.id)}
           onAdd={onAddComposerReferenceAttachments}
           onClose={() => setGlobalFilesModalOpen(false)}
         />
