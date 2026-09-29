@@ -20,6 +20,7 @@ import {
   issueMcpHostRuntimeTokens,
   issueMcpHostWorkflowControlToken,
 } from '../../../src/workflow/mcpHostRuntimeTokenIssuerClient'
+import { buildWorkflowNetworkPolicies } from '../../../src/workflow/networkPolicyFactory'
 import {
   buildArtifactReaderHeadlessService,
   buildMcpHostHeadlessService,
@@ -5463,14 +5464,16 @@ describe('WorkflowReconciler — reconcile loop', () => {
           expect(second.retryPending).toBe(false)
         })
 
-        // The retry computes its own verdict. Every case also asserts the
-        // create of an agent lane the spec wants (`expectAgentLaneApplied`): that
-        // is the liveness witness proving the retry built and applied this spec,
-        // so "no proxy was deleted" cannot pass because the retry never ran.
+        // The retry computes its own verdict, and the verdict decides only
+        // which proxy it creates: the retry prunes nothing (see the per-path
+        // table on retryRunLaneNetworkPolicies), so a live proxy survives
+        // every verdict and one case covers them all. Both cases assert the
+        // create of a policy the spec wants as the liveness witness, so a
+        // negative assertion cannot pass because the retry never applied.
         describe('with a fresh Codex/Grok verdict', () => {
           const SNIPPET_SIBLING = 'test-wf-snippet-runner-egress'
           const AGENT_LANE = 'test-wf-coord-to-mcp-host'
-          const CODEX_LIVE = 'test-wf-mcp-host-to-codex-proxy'
+          const CODEX_PROXY = 'test-wf-mcp-host-to-codex-proxy'
           const projection = (overrides: Record<string, unknown>) => ({
             targets: [],
             eligibleTargets: [],
@@ -5485,27 +5488,48 @@ describe('WorkflowReconciler — reconcile loop', () => {
             reason: 'static_only',
             ...overrides,
           })
+          const REQUIRED = { eligibility: 'eligible', reason: 'granted' }
 
-          function seedProxy(apiserver: Converged, name: string) {
-            apiserver.live.set(apiserver.key('sandbox-recipes', name), {
-              apiVersion: 'networking.k8s.io/v1',
-              kind: 'NetworkPolicy',
-              metadata: {
-                name,
-                namespace: 'sandbox-recipes',
-                labels: { 'clerum.io/recipe': 'test-wf', 'clerum.io/managed-by': 'wrc' },
+          // The proxy policies as the factory emits them for this recipe, stored
+          // the way the apiserver returns them.
+          function seedProxies(apiserver: Converged) {
+            const config = makeConfig()
+            const proxies = buildWorkflowNetworkPolicies(
+              {
+                recipeName: 'test-wf',
+                sandboxNamespace: config.sandboxNamespace,
+                controlPlaneNamespace: config.controlPlaneNamespace,
+                mcpServerNamespace: config.mcpServerNamespace,
+                wrcPort: config.wrcPort,
+                mcpHostPort: config.mcpHostPort,
+                includeMcpHost: true,
+                includeCodexProxyEgress: true,
+                includeGrokProxyEgress: true,
               },
-              spec: { podSelector: {}, policyTypes: ['Egress'] },
-            })
+              []
+            ).filter(policy => [CODEX_PROXY, GROK_PROXY].includes(policy.metadata?.name ?? ''))
+            expect(proxies.map(policy => policy.metadata?.name).sort()).toEqual([
+              CODEX_PROXY,
+              GROK_PROXY,
+            ])
+            for (const policy of proxies) {
+              apiserver.live.set(
+                apiserver.key('sandbox-recipes', policy.metadata!.name!),
+                asApiserverNetworkPolicy({
+                  ...policy,
+                  metadata: { ...policy.metadata, namespace: 'sandbox-recipes' },
+                })
+              )
+            }
           }
 
           async function retryWith(
             verdict: { codex: Record<string, unknown>; grok: Record<string, unknown> },
-            proxies: string[]
+            seed: boolean
           ) {
             const { apiserver, reconciler } = await convergedRunLane()
             apiserver.api.listNamespacedNetworkPolicy.mockClear()
-            for (const name of proxies) seedProxy(apiserver, name)
+            if (seed) seedProxies(apiserver)
             const verdictSpy = vi.spyOn(reconciler as never, 'codexVerdictFor').mockReturnValue({
               projection: projection(verdict.codex),
               grokProjection: projection(verdict.grok),
@@ -5527,98 +5551,42 @@ describe('WorkflowReconciler — reconcile loop', () => {
             }
           }
 
-          // The baseline lane is the snippet one. Switching to an agent spec
-          // mid-run keeps its snippet policies; only the proxies are under test.
-          const deletedNames = (apiserver: Converged) =>
-            apiserver.api.deleteNamespacedNetworkPolicy.mock.calls
-              .map(([arg]) => arg.name)
-              .filter(name => name.endsWith('-proxy'))
-
-          function expectAgentLaneApplied(apiserver: Converged): void {
-            expect(
-              apiserver.api.createNamespacedNetworkPolicy.mock.calls.map(
-                ([arg]) => arg.body.metadata?.name
-              )
-            ).toContain(AGENT_LANE)
-            expect(apiserver.live.has(apiserver.key('sandbox-recipes', SNIPPET_SIBLING))).toBe(true)
-          }
-
-          it('keeps a proxy the fresh verdict still requires, and the undesired twin', async () => {
-            const { apiserver, summary } = await retryWith(
-              {
-                codex: {
-                  eligibility: 'eligible',
-                  requiresCodexProxyEgress: true,
-                  reason: 'granted',
-                },
-                grok: {},
-              },
-              [CODEX_LIVE, GROK_PROXY]
+          const createdNames = (apiserver: Converged) =>
+            apiserver.api.createNamespacedNetworkPolicy.mock.calls.map(
+              ([arg]) => arg.body.metadata?.name
             )
-
-            expect(apiserver.api.listNamespacedNetworkPolicy).toHaveBeenCalledTimes(0)
-            expectAgentLaneApplied(apiserver)
-            expect(deletedNames(apiserver)).toEqual([])
-            expect(apiserver.live.has(apiserver.key('sandbox-recipes', CODEX_LIVE))).toBe(true)
-            expect(apiserver.live.has(apiserver.key('sandbox-recipes', GROK_PROXY))).toBe(true)
-            expect(summary.retryPending).toBe(false)
-          })
-
-          it('keeps both proxies while the verdict is uncertain, and reports no leftover', async () => {
-            const { apiserver, summary } = await retryWith(
-              {
-                codex: { eligibility: 'uncertain', reason: 'forbidden' },
-                grok: { eligibility: 'uncertain', reason: 'forbidden' },
-              },
-              [CODEX_LIVE, GROK_PROXY]
-            )
-
-            expect(apiserver.api.listNamespacedNetworkPolicy).toHaveBeenCalledTimes(0)
-            expectAgentLaneApplied(apiserver)
-            expect(deletedNames(apiserver)).toEqual([])
-            expect(apiserver.live.has(apiserver.key('sandbox-recipes', CODEX_LIVE))).toBe(true)
-            expect(apiserver.live.has(apiserver.key('sandbox-recipes', GROK_PROXY))).toBe(true)
-            expect(summary.retryPending).toBe(false)
-          })
 
           // Decision: the retry never revokes a Codex/Grok proxy. It runs only
-          // while a run is in progress or active, the path without the marker
-          // never prunes proxies mid-run, and a step of the running run may still
-          // be calling the proxy. The next reconcile() after the run prunes it.
-          it('never revokes a proxy mid-run, even when the fresh verdict no longer wants it', async () => {
-            const { apiserver, summary } = await retryWith({ codex: {}, grok: {} }, [
-              CODEX_LIVE,
-              GROK_PROXY,
-            ])
+          // while a run is in progress or active, and a step of the running run
+          // may still be calling the proxy. The retired verdict is the one under
+          // which reconcile() deletes the proxy, so it is the case pinned here.
+          it('never revokes a live proxy mid-run, whatever the verdict', async () => {
+            const { apiserver, summary } = await retryWith({ codex: {}, grok: {} }, true)
 
+            expect(createdNames(apiserver)).toContain(AGENT_LANE)
+            expect(apiserver.live.has(apiserver.key('sandbox-recipes', SNIPPET_SIBLING))).toBe(true)
             expect(apiserver.api.listNamespacedNetworkPolicy).toHaveBeenCalledTimes(0)
-            expectAgentLaneApplied(apiserver)
-            expect(deletedNames(apiserver)).toEqual([])
-            expect(apiserver.live.has(apiserver.key('sandbox-recipes', CODEX_LIVE))).toBe(true)
+            expect(apiserver.api.deleteNamespacedNetworkPolicy).toHaveBeenCalledTimes(0)
+            expect(apiserver.live.has(apiserver.key('sandbox-recipes', CODEX_PROXY))).toBe(true)
             expect(apiserver.live.has(apiserver.key('sandbox-recipes', GROK_PROXY))).toBe(true)
             // A kept proxy is not a pending retry, so the marker can clear.
             expect(summary.retryPending).toBe(false)
           })
 
-          it('still creates a proxy the fresh verdict requires (an allow, never a revoke)', async () => {
+          // The verdict-dependent half: a required proxy is created (an allow)
+          // and a retired one is not, so a retry that ignores the verdict,
+          // creating both or neither, fails here.
+          it('creates only the proxy the fresh verdict requires', async () => {
             const { apiserver, summary } = await retryWith(
-              {
-                codex: {
-                  eligibility: 'eligible',
-                  requiresCodexProxyEgress: true,
-                  reason: 'granted',
-                },
-                grok: {},
-              },
-              []
+              { codex: { ...REQUIRED, requiresCodexProxyEgress: true }, grok: {} },
+              false
             )
 
-            expect(
-              apiserver.api.createNamespacedNetworkPolicy.mock.calls.map(
-                ([arg]) => arg.body.metadata?.name
-              )
-            ).toContain(CODEX_LIVE)
-            expect(apiserver.live.has(apiserver.key('sandbox-recipes', CODEX_LIVE))).toBe(true)
+            expect(createdNames(apiserver)).toContain(AGENT_LANE)
+            expect(createdNames(apiserver)).toContain(CODEX_PROXY)
+            expect(apiserver.live.has(apiserver.key('sandbox-recipes', CODEX_PROXY))).toBe(true)
+            expect(createdNames(apiserver)).not.toContain(GROK_PROXY)
+            expect(apiserver.live.has(apiserver.key('sandbox-recipes', GROK_PROXY))).toBe(false)
             expect(summary.retryPending).toBe(false)
           })
         })
