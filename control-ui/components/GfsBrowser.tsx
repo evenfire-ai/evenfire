@@ -33,7 +33,14 @@ import {
   IconX,
 } from '@components/icons'
 import { Button, Field, TextInput } from '@components/ui'
-import { apiGet, apiSend, getGfsResourceByPath, gfsDownload, isSilentApiError } from '@lib/api'
+import {
+  apiGet,
+  apiSend,
+  getGfsResourceByPath,
+  gfsDownload,
+  handleControlUIUnauthorized,
+  isSilentApiError,
+} from '@lib/api'
 import { parseEntityChangeFrame } from '@lib/entityChangeStream'
 import { isGfsDocumentFile } from '@lib/gfsDocumentFile'
 import {
@@ -1036,6 +1043,11 @@ export function GfsBrowser(): React.JSX.Element {
             headers: { accept: 'application/x-ndjson' },
             signal: controller.signal,
           })
+          if (response.status === 401) {
+            active = false
+            handleControlUIUnauthorized()
+            return
+          }
           if (!response.ok || !response.body) {
             throw new Error(`Entity-change stream returned ${response.status}`)
           }
@@ -1064,6 +1076,11 @@ export function GfsBrowser(): React.JSX.Element {
                   invalidateVisibleState(frame.cursor)
                 } else if (frame.type === 'stream.closing') {
                   await reader.cancel()
+                  if (frame.reason === 'session_expired') {
+                    active = false
+                    handleControlUIUnauthorized()
+                    return
+                  }
                   break
                 }
                 newline = pending.indexOf('\n')

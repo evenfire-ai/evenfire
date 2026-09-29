@@ -89,10 +89,14 @@ export function isSilentApiError(error: unknown): boolean {
   return Boolean(error && typeof error === 'object' && (error as { silent?: unknown }).silent)
 }
 
-function handleUnauthorized(): never {
+/** Route non-JSON authenticated transports through the same session-expiry handler as API calls. */
+export function handleControlUIUnauthorized(): void {
   clearAdminAuthToken()
-  const handler = getGlobalAuthErrorHandler()
-  handler?.()
+  getGlobalAuthErrorHandler()?.()
+}
+
+function handleUnauthorized(): never {
+  handleControlUIUnauthorized()
   throw new AuthExpiredError()
 }
 

@@ -17,6 +17,7 @@ import {
   getRecipes,
   gfsDownload,
   gfsFetchFileBlob,
+  handleControlUIUnauthorized,
   putGfsGrant,
 } from '@lib/api'
 import {
@@ -37,6 +38,7 @@ import { ToastProvider } from '../Toast'
 vi.mock('@lib/api', () => ({
   apiGet: vi.fn(),
   apiSend: vi.fn(),
+  handleControlUIUnauthorized: vi.fn(),
   GFS_UPLOAD_TIMEOUT_MS: 300000,
   getAdminTeams: vi.fn(),
   getAdminUsers: vi.fn(),
@@ -101,6 +103,7 @@ vi.mock('../../../control-api/src/observability/metrics.js', () => controlApiPro
 
 const mockApiGet = apiGet as unknown as ReturnType<typeof vi.fn>
 const mockApiSend = apiSend as unknown as ReturnType<typeof vi.fn>
+const mockHandleControlUIUnauthorized = vi.mocked(handleControlUIUnauthorized)
 const mockGetAdminUsers = vi.mocked(getAdminUsers)
 const mockGetAdminTeams = vi.mocked(getAdminTeams)
 const mockGetGfsGrants = vi.mocked(getGfsGrants)
@@ -178,6 +181,35 @@ async function controlApiProducerFrame(
       return (JSON.parse(value) as { type?: string }).type === 'scope.invalidated'
     })
   if (!frame) throw new Error('Control API producer did not emit a scope invalidation')
+  return frame
+}
+
+async function controlApiSessionExpiredProducerFrame(): Promise<string> {
+  const cursor = 'd119f895-1ef8-4e73-8f08-f9754919682a'
+  controlApiProducer.readEntityChangeCheckpoint.mockResolvedValue({
+    resyncRequired: false,
+    cursor,
+    scopes: ['gfs'],
+  })
+  let authorizationChecks = 0
+  const req = new ControlApiProducerRequest()
+  const res = new ControlApiProducerResponse()
+  streamEntityChanges(
+    req as unknown as Parameters<typeof streamEntityChanges>[0],
+    res as unknown as Parameters<typeof streamEntityChanges>[1],
+    null,
+    async () => ++authorizationChecks === 1,
+    'operator',
+    'operator-session-expiry-test'
+  )
+  await vi.waitFor(() => expect(res.writableEnded).toBe(true))
+  const frame = res.frames
+    .map(value => value.trim())
+    .find(value => {
+      const parsed = JSON.parse(value) as { type?: string; reason?: string }
+      return parsed.type === 'stream.closing' && parsed.reason === 'session_expired'
+    })
+  if (!frame) throw new Error('Control API producer did not emit session_expired')
   return frame
 }
 
@@ -263,6 +295,7 @@ describe('GfsBrowser', () => {
     controlApiProducer.subscribeEntityChangeFeedWake.mockReset().mockReturnValue(vi.fn())
     mockApiGet.mockReset()
     mockApiSend.mockReset()
+    mockHandleControlUIUnauthorized.mockReset()
     mockGetAdminUsers.mockReset()
     mockGetAdminTeams.mockReset()
     mockGetGfsGrants.mockReset()
@@ -622,6 +655,35 @@ describe('GfsBrowser', () => {
     expect(await sessionB.findByText('remote-folder')).toBeTruthy()
     expect(fetch).toHaveBeenCalledTimes(2)
     expect(JSON.stringify(mockApiSend.mock.calls)).toContain('remote-folder')
+  })
+
+  it('routes producer-issued session expiry through the existing auth handler and stops the stream', async () => {
+    mockApiGet.mockResolvedValue({ items: [], nextCursor: null })
+    const frame = await controlApiSessionExpiredProducerFrame()
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(`${frame}\n`, {
+          status: 200,
+          headers: { 'content-type': 'application/x-ndjson' },
+        })
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    renderBrowser()
+
+    await waitFor(() => expect(mockHandleControlUIUnauthorized).toHaveBeenCalledOnce())
+    expect(fetchMock).toHaveBeenCalledOnce()
+  })
+
+  it('routes an unauthenticated stream 401 through the existing auth handler without retrying', async () => {
+    mockApiGet.mockResolvedValue({ items: [], nextCursor: null })
+    const fetchMock = vi.fn(async () => new Response(null, { status: 401 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    renderBrowser()
+
+    await waitFor(() => expect(mockHandleControlUIUnauthorized).toHaveBeenCalledOnce())
+    expect(fetchMock).toHaveBeenCalledOnce()
   })
 
   it('keeps the loaded list and Rename dialog visible during a soft stream refresh', async () => {
