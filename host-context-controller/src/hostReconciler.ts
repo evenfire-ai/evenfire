@@ -5137,17 +5137,25 @@ export class HostReconciler {
       // A legacy Deployment without a runtime-token-revision annotation is not
       // a preserved wake target, so it stays at zero replicas until channel
       // authority returns and the normal path rewrites its template.
-      const preservedWakeTarget =
+      const appliedHostRuntime =
         HostReconciler.deploymentBelongsToHost(liveDeployment, host) &&
-        (liveDeployment?.spec?.replicas ?? 1) === 0 &&
         HostReconciler.deploymentRuntimeTokenRevision(liveDeployment) !== ''
+      const liveReplicas = liveDeployment?.spec?.replicas ?? 1
+      const preservedWakeTarget = appliedHostRuntime && liveReplicas === 0
+      // A suspension recorded in status whose scale-down never reached the
+      // Deployment leaves the applied runtime running. A wake on it needs no
+      // mint and no replica change: it is held like any running runtime.
+      const wakeOnRunningRuntime = wakeRequested && appliedHostRuntime && liveReplicas > 0
       const runtimeIsReady =
         !!liveDeployment &&
         HostReconciler.deploymentBelongsToHost(liveDeployment, host) &&
         HostReconciler.deploymentReady(liveDeployment)
       const scaleUpForRecovery = lifecycle.effective.state === 'active' && preservedWakeTarget
       const allowScaleUp = preservedWakeTarget && (wakeRequested || scaleUpForRecovery)
-      if (!liveDeployment || ((wakeRequested || scaleUpForRecovery) && !preservedWakeTarget)) {
+      if (
+        !liveDeployment ||
+        ((wakeRequested || scaleUpForRecovery) && !preservedWakeTarget && !wakeOnRunningRuntime)
+      ) {
         this.setStatus(host.name, {
           deployed: !!liveDeployment,
           ready: false,
@@ -5161,7 +5169,10 @@ export class HostReconciler {
         // A pod starting from zero will consume bootstrap credentials. Mint and
         // persist them before the replica-only update; a failed mint aborts here.
         provisioningRequired = true
-      } else if (lifecycle.effective.state === 'active' && runtimeIsReady) {
+      } else if (
+        (lifecycle.effective.state === 'active' || wakeOnRunningRuntime) &&
+        runtimeIsReady
+      ) {
         const provision = await this.provisionRuntimeTokenRevision(host, {
           targetSuspended: false,
           refreshGfsOnly: true,
@@ -5203,11 +5214,13 @@ export class HostReconciler {
         revalidateHostMutationBoundary
       )
       revalidateHostMutationBoundary()
-      if (lifecycle.effective.state !== 'suspended' || allowScaleUp) {
+      const runtimeExpectedToRun =
+        lifecycle.effective.state !== 'suspended' || allowScaleUp || wakeOnRunningRuntime
+      if (runtimeExpectedToRun) {
         this.lifecycle.markHostNotSuspended(host.name)
       }
       const deploymentReady =
-        lifecycle.effective.state !== 'suspended' &&
+        (lifecycle.effective.state !== 'suspended' || wakeOnRunningRuntime) &&
         applied &&
         (await this.checkDeploymentReady(host.name, host.namespace))
       revalidateHostMutationBoundary()
@@ -5232,7 +5245,7 @@ export class HostReconciler {
           ? 'Waiting for CommunicationChannel inventory before creating runtime'
           : failures.length > 0
             ? `degraded — Host runtime boundary incomplete while preserving applied runtime (${failures.join('; ')})`
-            : lifecycle.effective.state === 'suspended' && !allowScaleUp
+            : !runtimeExpectedToRun
               ? 'CommunicationChannel inventory unavailable; preserving suspended Host replicas'
               : deploymentReady
                 ? 'CommunicationChannel inventory unavailable; preserving applied runtime'
@@ -5241,12 +5254,7 @@ export class HostReconciler {
       // Mirror the normal path: a runtime expected to run (including a held
       // wake from zero) is polled until Ready; a degraded boundary is not,
       // because the poll would overwrite the degraded verdict with "Running".
-      if (
-        applied &&
-        !deploymentReady &&
-        failures.length === 0 &&
-        (lifecycle.effective.state !== 'suspended' || allowScaleUp)
-      ) {
+      if (applied && !deploymentReady && failures.length === 0 && runtimeExpectedToRun) {
         this.pollReadiness(host.name, host.namespace)
       }
     }

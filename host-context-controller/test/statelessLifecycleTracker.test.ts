@@ -236,6 +236,51 @@ describe('StatelessLifecycleTracker — D8 idle rule', () => {
     expect(port.suspendHostFromHeartbeat).not.toHaveBeenCalled()
   })
 
+  it('repeats the suspension-blocked fresh check after the tracker is stopped', async () => {
+    const port = makePort()
+    port.getEffectiveLifecycle.mockReturnValue({
+      stateless: true,
+      state: 'active',
+      suspensionBlocked: true,
+    })
+    const tracker = makeTracker({ port, host: makeHost() })
+
+    await expect(tracker.handleHeartbeat(payload())).resolves.toEqual({ drain: false })
+    await expect(tracker.handleHeartbeat(payload())).resolves.toEqual({ drain: false })
+    // The epoch's single fresh check ran, and the second blocked beat skipped it.
+    expect(port.getEffectiveLifecycle).toHaveBeenCalledTimes(2)
+    expect(port.markHostActiveFromHeartbeat).toHaveBeenCalledTimes(1)
+
+    tracker.stop()
+    await expect(tracker.handleHeartbeat(payload())).resolves.toEqual({ drain: false })
+    expect(port.getEffectiveLifecycle).toHaveBeenCalledTimes(3)
+    expect(port.markHostActiveFromHeartbeat).toHaveBeenCalledTimes(2)
+    expect(port.suspendHostFromHeartbeat).not.toHaveBeenCalled()
+  })
+
+  it('reports a cancel-drain with nothing to revert as settled', async () => {
+    const port = makePort()
+    const tracker = makeTracker({ port })
+    const cancelDrain = (
+      tracker as unknown as {
+        cancelDrainOnEvidence(hostRef: string, host: HostCRD, bypass?: boolean): Promise<boolean>
+      }
+    ).cancelDrainOnEvidence.bind(tracker)
+    const active = makeHost()
+    const suspended = makeHost({ lifecycle: { state: 'suspended', wakeHandledGeneration: 0 } })
+    const draining = makeHost({ lifecycle: { state: 'draining', wakeHandledGeneration: 0 } })
+
+    // Cached active or suspended evidence needs no revert: settled, no write.
+    await expect(cancelDrain(active.name, active)).resolves.toBe(true)
+    await expect(cancelDrain(suspended.name, suspended)).resolves.toBe(true)
+    expect(port.markHostActiveFromHeartbeat).not.toHaveBeenCalled()
+
+    // Liveness witness: cached draining evidence does reach the revert write.
+    await expect(cancelDrain(draining.name, draining)).resolves.toBe(true)
+    expect(port.markHostActiveFromHeartbeat).toHaveBeenCalledOnce()
+    expect(port.markHostActiveFromHeartbeat).toHaveBeenCalledWith(draining)
+  })
+
   it('retries a failed suspension-blocked fresh check and still reverts cached draining evidence', async () => {
     const port = makePort()
     port.getEffectiveLifecycle.mockReturnValue({

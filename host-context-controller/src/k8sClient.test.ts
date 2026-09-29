@@ -10769,8 +10769,10 @@ describe('McpServerWatcher.hostFrontsOAuthServer (oauth:user-token scope probe)'
   })
 
   /** Drive the REAL getServerInfosByContext: populate the server cache and answer
-   *  the Context read the producer makes with an allow-list of those servers. */
+   *  the Context read the producer makes with an allow-list of those servers.
+   *  The cache is an observation only while its LIST -> WATCH pair is live. */
   const withServers = (watcher: McpServerWatcher, servers: any[]): void => {
+    markMcpServerInventoryAuthoritative(watcher)
     for (const s of servers) (watcher as any).servers.set(s.name, s)
     mocks.getNamespacedCustomObject.mockImplementation(async ({ plural }: { plural: string }) =>
       plural === 'contexts'
@@ -10813,6 +10815,60 @@ describe('McpServerWatcher.hostFrontsOAuthServer (oauth:user-token scope probe)'
     const watcher = new McpServerWatcher()
     withServers(watcher, [])
     await expect((watcher as any).hostFrontsOAuthServer(hostFor('ctx'))).resolves.toBe(false)
+    watcher.stop()
+  })
+
+  /** The resolver McpServerWatcher wires into HostReconciler at construction. */
+  const wiredResolver = (watcher: McpServerWatcher): ((host: HostCRD) => Promise<boolean>) => {
+    const calls = (watcher.getHostReconciler() as any).setHostFrontsOAuthServer.mock.calls
+    expect(calls).toHaveLength(1)
+    return calls[0][0]
+  }
+
+  it('does not serve a retired McpServer cache that would grant the OAuth scope', async () => {
+    const watcher = new McpServerWatcher()
+    withServers(watcher, [serverCRD({ name: 'notion', auth: { type: 'oauth' }, enabled: true })])
+    const resolve = wiredResolver(watcher)
+    // Liveness witness: while the inventory is authoritative, this same cache
+    // and wired resolver grant the scope.
+    await expect(resolve(hostFor('ctx'))).resolves.toBe(true)
+
+    // A McpServer watch outage retires the inventory but keeps its last cache,
+    // which still holds the enabled OAuth server an admin may have disabled.
+    expect((watcher as any).retireMcpServerWatch()).toBe(true)
+    expect((watcher as any).servers.get('notion')?.spec.enabled).toBe(true)
+
+    await expect(resolve(hostFor('ctx'))).rejects.toThrow(
+      'McpServer inventory is not authoritative; OAuth scope is unobserved'
+    )
+    watcher.stop()
+  })
+
+  it('does not serve a McpServer cache that lost authority during the Context read', async () => {
+    const watcher = new McpServerWatcher()
+    withServers(watcher, [serverCRD({ name: 'notion', auth: { type: 'oauth' }, enabled: true })])
+    const contextRead = deferred<unknown>()
+    const contextReads: string[] = []
+    mocks.getNamespacedCustomObject.mockImplementation(
+      async ({ plural, name }: { plural: string; name: string }) => {
+        contextReads.push(`${plural}/${name}`)
+        return contextRead.promise
+      }
+    )
+
+    const pending = wiredResolver(watcher)(hostFor('ctx'))
+    await flushMicrotasks()
+    // Liveness witness: the observation reached the live Context read.
+    expect(contextReads).toEqual(['contexts/ctx'])
+    expect((watcher as any).retireMcpServerWatch()).toBe(true)
+    contextRead.resolve({
+      metadata: { name: 'ctx', namespace: 'mcp-server' },
+      spec: { contextId: 'ctx', mcpServers: ['notion'] },
+    })
+
+    await expect(pending).rejects.toThrow(
+      'McpServer inventory lost authority during the OAuth scope read'
+    )
     watcher.stop()
   })
 })

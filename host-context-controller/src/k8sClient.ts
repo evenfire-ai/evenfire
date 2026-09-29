@@ -2519,9 +2519,22 @@ export class McpServerWatcher implements McpServerProvider {
    * already filters to enabled + allowed servers) that mcp-host discovery uses,
    * so HCC does not need a second cross-CRD read path. HostReconciler wraps this
    * call in a fail-closed guard, so a thrown read there yields no oauth scope.
+   *
+   * A retired McpServer watch keeps its last `servers` cache, so an answer read
+   * from it is only an observation while the same LIST -> WATCH generation stays
+   * authoritative across the whole read. Otherwise this throws: a server an
+   * admin disabled during the outage must not re-grant the scope from the stale
+   * cache, and HostReconciler treats the throw as an unobserved read.
    */
   private async hostFrontsOAuthServer(host: HostCRD): Promise<boolean> {
+    const watchGeneration = this.mcpWatchGeneration
+    if (!this.hasMcpServerInventoryAuthority(watchGeneration)) {
+      throw new Error('McpServer inventory is not authoritative; OAuth scope is unobserved')
+    }
     const servers = await this.getServerInfosByContext(host.spec.contextRef)
+    if (!this.hasMcpServerInventoryAuthority(watchGeneration)) {
+      throw new Error('McpServer inventory lost authority during the OAuth scope read')
+    }
     return servers.some(server => server.enabled && server.auth?.type === 'oauth')
   }
 

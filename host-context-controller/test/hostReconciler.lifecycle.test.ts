@@ -1297,6 +1297,62 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     expect(poll).toHaveBeenCalledWith(host.name, host.namespace)
   })
 
+  it.each([
+    {
+      runtime: 'Ready',
+      readyReplicas: 1,
+      ready: true,
+      message: 'CommunicationChannel inventory unavailable; preserving applied runtime',
+    },
+    {
+      runtime: 'not Ready',
+      readyReplicas: 0,
+      ready: false,
+      message: 'CommunicationChannel inventory unavailable; preserved applied runtime is not Ready',
+    },
+  ])(
+    'holds a held wake on a suspended Host whose applied runtime still runs ($runtime)',
+    async ({ readyReplicas, ready, message }) => {
+      // The suspension reached the Host status but its scale-down never reached
+      // the Deployment, so the applied runtime still runs at one replica.
+      const host = makeStatelessHost({ status: suspendedStatus() })
+      host.annotations = { 'clerum.io/wake-requested': '1' }
+      const { reconciler, appsApi, customApi } = createReconciler({
+        isCommunicationChannelCacheSynced: () => false,
+      })
+      customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(host))
+      const applied = reconciler.buildDeployment(host)
+      applied.spec!.replicas = 1
+      applied.spec!.template!.metadata!.annotations = {
+        ...applied.spec!.template!.metadata!.annotations,
+        'clerum.io/runtime-token-revision': 'applied-runtime-revision',
+      }
+      markPersistedRuntimeTrusted(applied, host, readyReplicas)
+      const live = persistHostDeployment(appsApi, host, applied)
+      const templateBefore = structuredClone(live().spec!.template)
+      const provision = vi
+        .spyOn(reconciler as any, 'provisionRuntimeTokenRevision')
+        .mockResolvedValue(runtimeTokenProvision(host))
+      const readySpy = vi.spyOn(reconciler as any, 'checkDeploymentReady')
+      const poll = vi.spyOn(reconciler as any, 'pollReadiness').mockImplementation(() => undefined)
+
+      await reconciler.reconcile(host)
+
+      // Liveness witness: the held pass reached its readiness check.
+      expect(readySpy).toHaveBeenCalledWith(host.name, host.namespace)
+      await expect(readySpy.mock.results[0].value).resolves.toBe(readyReplicas > 0)
+      expect(reconciler.getStatus(host.name)).toEqual({ deployed: true, ready, message })
+      // A running runtime renews only its GFS credential; it never mints for
+      // the wake, and a not-Ready one is polled instead of renewed.
+      expect(provision.mock.calls).toEqual(
+        readyReplicas > 0 ? [[host, { targetSuspended: false, refreshGfsOnly: true }]] : []
+      )
+      expect(poll.mock.calls).toEqual(readyReplicas > 0 ? [] : [[host.name, host.namespace]])
+      expect(live().spec!.replicas).toBe(1)
+      expect(live().spec!.template).toEqual(templateBefore)
+    }
+  )
+
   it('does not report a Deployment applied when create conflict is followed by a missing read', async () => {
     const host = makeStatelessHost()
     const { reconciler, appsApi } = createReconciler()
@@ -1405,6 +1461,105 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
       state: 'suspended',
       wakeHandledGeneration: 3,
     })
+  })
+
+  it('keeps a preserved suspended wake target at zero replicas during cache loss without a pending wake', async () => {
+    // This Deployment IS a preserved wake target (applied runtime revision at
+    // zero replicas), so only the missing wake keeps the hold from minting
+    // bootstrap credentials and scaling it up.
+    const host = makeStatelessHost({ status: suspendedStatus() })
+    const { reconciler, appsApi, customApi } = createReconciler({
+      isCommunicationChannelCacheSynced: () => false,
+    })
+    customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(host))
+    const applied = reconciler.buildDeployment(host)
+    applied.spec!.replicas = 0
+    applied.spec!.template!.metadata!.annotations = {
+      ...applied.spec!.template!.metadata!.annotations,
+      'clerum.io/runtime-token-revision': 'applied-runtime-revision',
+    }
+    markPersistedRuntimeTrusted(applied, host, 0)
+    const live = persistHostDeployment(appsApi, host, applied)
+    const templateBefore = structuredClone(live().spec!.template)
+    const provision = vi
+      .spyOn(reconciler as any, 'provisionRuntimeTokenRevision')
+      .mockResolvedValue(runtimeTokenProvision(host))
+    const ensureDeployment = vi.spyOn(reconciler as any, 'ensureDeployment')
+    const poll = vi.spyOn(reconciler as any, 'pollReadiness').mockImplementation(() => undefined)
+
+    await reconciler.reconcile(host)
+
+    // Liveness witness: the pass read the live Deployment and applied the hold
+    // with the suspended, cache-loss lifecycle.
+    expect(
+      appsApi.readNamespacedDeployment.mock.calls.filter(([request]) => request.name === host.name)
+        .length
+    ).toBeGreaterThan(0)
+    expect(ensureDeployment).toHaveBeenCalledOnce()
+    expect(ensureDeployment.mock.calls[0][3]).toMatchObject({
+      state: 'suspended',
+      suspensionBlocked: true,
+      allowScaleUpDuringHold: false,
+    })
+    await expect(ensureDeployment.mock.results[0].value).resolves.toBe(true)
+    expect(reconciler.getStatus(host.name)).toEqual({
+      deployed: true,
+      ready: false,
+      message: 'CommunicationChannel inventory unavailable; preserving suspended Host replicas',
+    })
+    expect(provision).not.toHaveBeenCalled()
+    expect(poll).not.toHaveBeenCalled()
+    expect(live().spec!.replicas).toBe(0)
+    expect(live().spec!.template).toEqual(templateBefore)
+  })
+
+  it('does not poll readiness when the held Deployment disappears before it is applied', async () => {
+    // An active, not-Ready held runtime with a complete boundary is polled, so
+    // only the unapplied Deployment keeps the poll from running.
+    const host = makeStatelessHost({
+      status: { lifecycle: { state: 'active', wakeHandledGeneration: 1 } },
+    })
+    const { reconciler, appsApi, customApi } = createReconciler({
+      isCommunicationChannelCacheSynced: () => false,
+    })
+    customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(host))
+    const applied = reconciler.buildDeployment(host)
+    markPersistedRuntimeTrusted(applied, host, 0)
+    persistHostDeployment(appsApi, host, applied)
+    const persistedRead = appsApi.readNamespacedDeployment.getMockImplementation()!
+    let deleted = false
+    appsApi.readNamespacedDeployment.mockImplementation(request =>
+      deleted && request.name === host.name ? Promise.reject({ code: 404 }) : persistedRead(request)
+    )
+    const realEnsureDeployment = (reconciler as any).ensureDeployment.bind(reconciler)
+    const ensureDeployment = vi
+      .spyOn(reconciler as any, 'ensureDeployment')
+      .mockImplementation(async (...args: unknown[]) => {
+        // The Deployment is deleted after the hold read it and before it is applied.
+        deleted = true
+        return realEnsureDeployment(...args)
+      })
+    const readySpy = vi.spyOn(reconciler as any, 'checkDeploymentReady')
+    const poll = vi.spyOn(reconciler as any, 'pollReadiness').mockImplementation(() => undefined)
+
+    await reconciler.reconcile(host)
+
+    // Liveness witness: the hold reached ensureDeployment, whose re-read found
+    // the Deployment gone and left it unapplied.
+    expect(ensureDeployment).toHaveBeenCalledOnce()
+    await expect(ensureDeployment.mock.results[0].value).resolves.toBe(false)
+    expect(reconciler.getStatus(host.name)).toEqual({
+      deployed: false,
+      ready: false,
+      message: 'Waiting for CommunicationChannel inventory before creating runtime',
+    })
+    expect(
+      appsApi.createNamespacedDeployment.mock.calls.filter(
+        ([request]) => request.body.metadata.name === host.name
+      )
+    ).toHaveLength(0)
+    expect(readySpy).not.toHaveBeenCalled()
+    expect(poll).not.toHaveBeenCalled()
   })
 
   it('uses the fenced replica-only update for a pending wake during cache loss', async () => {
@@ -1686,8 +1841,22 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
             throw new Error('McpServer read unavailable')
           },
         })
-
-      await reconciler.reconcile(host)
+      const warn = vi.spyOn(HostContextLogger.prototype, 'warn').mockImplementation(() => undefined)
+      try {
+        await reconciler.reconcile(host)
+        expect(warn).toHaveBeenCalledWith(
+          'skipping runtime token mint during channel cache loss without an authoritative OAuth observation',
+          {
+            host: host.name,
+            namespace: host.namespace,
+            observation: 'frontsOAuthServer',
+            attempts: 3,
+            err: 'McpServer read unavailable',
+          }
+        )
+      } finally {
+        warn.mockRestore()
+      }
 
       expect(runtimeRecordReads.length).toBeGreaterThan(0)
       expect(oauthResolver).toHaveBeenCalledTimes(3)
