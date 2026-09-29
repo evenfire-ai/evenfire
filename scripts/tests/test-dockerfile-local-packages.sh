@@ -191,13 +191,13 @@ assert_copy_before_every_ci profile-ui/Dockerfile desktop-app-links frontend-com
 assert_copy_before_every_ci host-context-controller/Dockerfile \
   image-policy llm-providers network-policy-core workflow-recipe-capability-policy
 assert_copy_before_every_ci mcp-host/Dockerfile \
-  grok-provider-attempt-contract llm-provider-attempt-contract llm-providers
+  gfs-interaction-policy grok-provider-attempt-contract llm-provider-attempt-contract llm-providers
 assert_copy_before_every_ci mcp-host/Dockerfile.desktop \
-  grok-provider-attempt-contract llm-provider-attempt-contract llm-providers
+  gfs-interaction-policy grok-provider-attempt-contract llm-provider-attempt-contract llm-providers
 assert_copy_before_every_ci mcp-host/Dockerfile.full \
-  grok-provider-attempt-contract llm-provider-attempt-contract llm-providers
+  gfs-interaction-policy grok-provider-attempt-contract llm-provider-attempt-contract llm-providers
 assert_copy_before_every_ci mcp-host/Dockerfile.slim \
-  grok-provider-attempt-contract llm-provider-attempt-contract llm-providers
+  gfs-interaction-policy grok-provider-attempt-contract llm-provider-attempt-contract llm-providers
 
 # workflow-runtime-core is built in a separate stage before workflow-recipes;
 # these are the packages needed by that stage, while the application install

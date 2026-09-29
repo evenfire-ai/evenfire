@@ -378,7 +378,7 @@ export function createRpcRouter(): Router {
         if (body.attachments != null && !Array.isArray(body.attachments)) {
           res
             .status(400)
-            .json({ error: 'invalid_attachments', message: 'Image attachments must be a list.' })
+            .json({ error: 'invalid_attachments', message: 'Attachments must be a list.' })
           return
         }
         const forwardedBody: HostRuntimeMessageRequest = {
@@ -391,6 +391,7 @@ export function createRpcRouter(): Router {
           metadata: rpcInvocationContext(auth),
           threadId: desktopSessionId,
           attachments: Array.isArray(body.attachments) ? body.attachments : undefined,
+          ...(body.fileReferences === undefined ? {} : { fileReferences: body.fileReferences }),
           ...(body.modelSelectionRevision === undefined
             ? {}
             : { modelSelectionRevision: body.modelSelectionRevision }),
