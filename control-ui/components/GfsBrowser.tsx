@@ -405,7 +405,6 @@ export function GfsBrowser(): React.JSX.Element {
     { kind: 'video' }
   > | null>(null)
   const previewRefreshGenerationRef = useRef(0)
-  const scheduleEntityChangeRecoveryRef = useRef<(() => void) | null>(null)
   const openPreviewsRef = useRef<OpenPreviewState[]>([])
   openPreviewsRef.current = [imagePreview, markdownPreview, videoPreview].filter(
     (preview): preview is OpenPreviewState => preview !== null
@@ -550,10 +549,7 @@ export function GfsBrowser(): React.JSX.Element {
         }
       } catch (err) {
         if (!isCurrent()) return
-        if (isTransientEntityChangeRefetchError(err)) scheduleEntityChangeRecoveryRef.current?.()
         if (!isSilentApiError(err)) {
-          // Background revalidation keeps the (stale) rows visible but still
-          // surfaces the failure instead of silently ignoring it.
           setError(err instanceof Error ? err.message : 'Failed to load EvenDrive')
         }
       } finally {
@@ -693,8 +689,6 @@ export function GfsBrowser(): React.JSX.Element {
         invalidateVisibleState()
       }, delay)
     }
-    scheduleEntityChangeRecoveryRef.current = scheduleRecovery
-
     const revalidateActionTargets = async (signal: AbortSignal) => {
       const targets = new Map<string, GfsChild>()
       for (const target of [selectedRef.current, renameTargetRef.current, moveTargetRef.current]) {
@@ -748,6 +742,64 @@ export function GfsBrowser(): React.JSX.Element {
       )
     }
 
+    const refreshVisibleDirectory = async (crumb: Crumb, signal: AbortSignal): Promise<void> => {
+      const path =
+        crumb.id === null
+          ? '/api/v1/gfs/tree'
+          : `/api/v1/gfs/resources/${encodeURIComponent(crumb.id)}/children`
+      const targetPageCount = Math.max(1, loadedPageCountRef.current)
+      try {
+        let page = (await apiGet(path, { drive: DRIVE }, { signal })) as TreePage
+        const rootResourceId = page.rootResourceId
+        const refreshedItems = [...page.items]
+        let nextPageCursor = page.nextCursor
+        let fetchedPageCount = 1
+        for (let index = 1; index < targetPageCount && nextPageCursor; index += 1) {
+          page = (await apiGet(
+            path,
+            { drive: DRIVE, cursor: nextPageCursor },
+            { signal }
+          )) as TreePage
+          refreshedItems.push(...page.items)
+          nextPageCursor = page.nextCursor
+          fetchedPageCount += 1
+          if (signal.aborted) return
+        }
+        if (signal.aborted || currentCrumbRef.current?.id !== crumb.id) return
+        if (crumb.id === null && rootResourceId) {
+          setCrumbs(previous =>
+            previous[0]?.id === null
+              ? [
+                  {
+                    ...previous[0],
+                    id: rootResourceId,
+                    rid: ridOfResourceId(rootResourceId),
+                  },
+                  ...previous.slice(1),
+                ]
+              : previous
+          )
+        }
+        setItems(sortChildrenWithDirectoriesFirst(refreshedItems))
+        setNextCursor(nextPageCursor)
+        loadedPageCountRef.current = fetchedPageCount
+        if (crumb.id !== null) {
+          childCacheRef.current.set(crumb.id, {
+            items: refreshedItems,
+            nextCursor: nextPageCursor,
+            loadedPageCount: fetchedPageCount,
+          })
+        }
+        setError('')
+      } catch (error) {
+        if (signal.aborted || currentCrumbRef.current?.id !== crumb.id) return
+        if (!isSilentApiError(error)) {
+          setError(error instanceof Error ? error.message : 'Failed to refresh EvenDrive')
+        }
+        if (isTransientEntityChangeRefetchError(error)) scheduleRecovery()
+      }
+    }
+
     invalidateVisibleState = (cursor?: string) => {
       // A committed remote change supersedes any local move/retry ancestry
       // reconstruction still in flight. Its older response must not replace
@@ -765,7 +817,6 @@ export function GfsBrowser(): React.JSX.Element {
       const signal = revalidationController.signal
       childCacheRef.current.clear()
       revalidateNextLoadRef.current = false
-      setError('')
       void revalidateActionTargets(signal)
       const previews = openPreviewsRef.current
       if (previews.length > 0) {
@@ -900,10 +951,9 @@ export function GfsBrowser(): React.JSX.Element {
       }
       const visibleCrumb = currentCrumbRef.current
       if (!visibleCrumb) return
-      // Keep loaded rows, pagination, selection, and action dialogs visible
-      // while the authoritative background read runs. `load` has a separate
-      // sequence for background work, so it cannot cancel user navigation.
-      void load(visibleCrumb, undefined, { background: true, signal })
+      // Stream-triggered reads have their own non-destructive path. They never
+      // enter the navigation/paging loader or clear its rows, dialogs, or error.
+      void refreshVisibleDirectory(visibleCrumb, signal)
       if (visibleCrumb.id === null) return
 
       const visibleResourceId = visibleCrumb.id
@@ -1034,9 +1084,6 @@ export function GfsBrowser(): React.JSX.Element {
       entityChangeRefetchControllerRef.current = null
       if (retryTimer) clearTimeout(retryTimer)
       if (recoveryTimer) clearTimeout(recoveryTimer)
-      if (scheduleEntityChangeRecoveryRef.current === scheduleRecovery) {
-        scheduleEntityChangeRecoveryRef.current = null
-      }
     }
   }, [load])
 

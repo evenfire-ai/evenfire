@@ -781,6 +781,82 @@ describe('GfsBrowser', () => {
     )
   })
 
+  it('keeps the visible error and browser state while a stream refresh retries', async () => {
+    const streamControllers: ReadableStreamDefaultController<Uint8Array>[] = []
+    const report = child('report.md', 'file', 1, 2)
+    mockApiGet.mockResolvedValueOnce({ items: [report], nextCursor: null })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            streamControllers.push(controller)
+            init?.signal?.addEventListener('abort', () => controller.close(), { once: true })
+          },
+        })
+        return new Response(body, {
+          status: 200,
+          headers: { 'content-type': 'application/x-ndjson' },
+        })
+      })
+    )
+
+    renderBrowser()
+    await waitFor(() => expect(streamControllers).toHaveLength(1))
+    await screen.findByRole('button', { name: 'report.md' })
+    await openResourceMenu('report.md')
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Rename' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Rename file' })
+    const frame = await controlApiProducerFrame()
+
+    let releaseRetry: ((page: { items: (typeof report)[]; nextCursor: null }) => void) | undefined
+    let treeReads = 0
+    mockApiGet.mockImplementation(async (path: string, query?: Record<string, string>) => {
+      if (path === '/api/v1/gfs/tree') {
+        treeReads += 1
+        if (treeReads === 1) {
+          throw Object.assign(new Error('503 Service Unavailable'), { status: 503 })
+        }
+        return new Promise(resolve => {
+          releaseRetry = resolve
+        })
+      }
+      if (path === '/api/v1/gfs/resolve' && query?.uri === report.gfsUri) {
+        return {
+          resourceId: report.resourceId,
+          rid: report.rid,
+          gfsUri: report.gfsUri,
+          name: report.name,
+          kind: report.kind,
+          bytes: report.bytes,
+          version: report.version,
+        }
+      }
+      return { items: [], nextCursor: null }
+    })
+
+    await act(async () => {
+      streamControllers[0]!.enqueue(new TextEncoder().encode(`${frame}\n`))
+    })
+    await waitFor(() => expect(treeReads).toBe(1))
+    expect(screen.getByRole('button', { name: 'report.md' })).toBeVisible()
+    expect(screen.getByRole('dialog', { name: 'Rename file' })).toBe(dialog)
+    expect(screen.getByRole('alert')).toHaveTextContent('503 Service Unavailable')
+
+    await waitFor(() => expect(releaseRetry).toBeDefined(), { timeout: 1500 })
+    expect(treeReads).toBe(2)
+    expect(screen.getByRole('button', { name: 'report.md' })).toBeVisible()
+    expect(screen.getByRole('dialog', { name: 'Rename file' })).toBe(dialog)
+    expect(screen.getByRole('alert')).toHaveTextContent('503 Service Unavailable')
+
+    await act(async () => {
+      releaseRetry?.({ items: [report], nextCursor: null })
+    })
+    expect(screen.getByRole('button', { name: 'report.md' })).toBeVisible()
+    expect(screen.getByRole('dialog', { name: 'Rename file' })).toBe(dialog)
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
   it.each(['avatar.PNG', 'notes.md', 'demo.mp4'])(
     'does not reload an unchanged open %s preview after a scope invalidation',
     async fileName => {
