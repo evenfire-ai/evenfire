@@ -102,20 +102,37 @@ normalize_cache_root() {
   fi
 }
 
+# Refuses the kube contexts shared across sessions or clusters: the Clerum dev
+# and production contexts, the default minikube and Docker Desktop contexts,
+# every GKE context (gke_<project>_<zone>_<cluster>, covered by *gke*) and the
+# protected names profile-owner.sh also refuses. Matching is case-insensitive.
+refuse_shared_profile_name() {
+  local name="$1" normalized
+  normalized="$(printf '%s' "${name}" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
+  case "${normalized}" in
+    clerum | clerum-dev | clerum-test | minikube | docker-desktop | default | *gke* | *prod* | *staging*)
+      die "BRANCH_PROFILE_SHARED_CONTEXT: refusing shared or protected profile: ${name}" ;;
+  esac
+}
+
 validate_profile_name() {
   [[ ${#PROFILE} -le 63 && "${PROFILE}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]] ||
     die "resolver returned an unsafe profile name: ${PROFILE}"
-  # Positive check: a branch profile is always clerum-<branch slug>-<owner id
-  # prefix>. The hex suffix is what separates it from shared profiles such as
-  # clerum-dev, which also match clerum-*; the denylist below only names the
-  # shared profiles known today. {7,8} matches the branch-scoped check in
-  # scripts/e2e/e2e-plugin-workload-sdk.sh.
+  refuse_shared_profile_name "${PROFILE}"
+  # An explicitly selected profile (MINIKUBE_PROFILE / BRANCH_PROFILE_PROFILE)
+  # has already passed profile-owner.sh's ownership check (repo, branch and
+  # owner id). It may predate the hashed naming, so only the local clerum-*
+  # namespace is required of it.
+  if [[ -n "${EXPLICIT_PROFILE}" && "${PROFILE}" == "${EXPLICIT_PROFILE}" ]]; then
+    [[ "${PROFILE}" =~ ^clerum-[a-z0-9][a-z0-9._-]*$ ]] ||
+      die "explicit profile is outside the local clerum-* namespace: ${PROFILE}"
+    return 0
+  fi
+  # A profile the resolver derives on its own is always
+  # clerum-<branch slug>-<owner id prefix> (profile_owner_stable_profile in
+  # scripts/minikube/profile-owner.sh), so it must carry the hex suffix.
   [[ "${PROFILE}" =~ ^clerum-[a-z0-9][a-z0-9._-]*-[0-9a-f]{7,8}$ ]] ||
     die "resolver returned a profile outside the branch-scoped clerum-<branch>-<owner-id> namespace: ${PROFILE}"
-  case "${PROFILE}" in
-    *gke*|*prod*|*staging*|clerum-test|default|minikube)
-      die "resolver returned a shared or protected profile: ${PROFILE}" ;;
-  esac
 }
 
 set_profile_paths() {
@@ -465,6 +482,10 @@ resolve_explicit_profile_override() {
     die "explicit profile selectors disagree (BRANCH_PROFILE_PROFILE=${BRANCH_PROFILE_PROFILE}, MINIKUBE_PROFILE=${MINIKUBE_PROFILE_SELECTION})"
   fi
   EXPLICIT_PROFILE="${BRANCH_PROFILE_PROFILE:-${MINIKUBE_PROFILE_SELECTION}}"
+  # Refuse a shared context by name before the resolver reads anything for it.
+  if [[ -n "${EXPLICIT_PROFILE}" ]]; then
+    refuse_shared_profile_name "${EXPLICIT_PROFILE}"
+  fi
 }
 
 init_profile() {

@@ -344,20 +344,76 @@ for bad_host in localhost ::1 '[::1]'; do
 done
 
 # === explicit profile outside the branch-scoped namespace =====================
+# write_owned_profile_copy <name>: a profile directory whose metadata this
+# worktree owns (same repo, branch and owner id as the branch profile), so
+# profile-owner.sh accepts it and only branch-profile.sh's own name rules decide.
+write_owned_profile_copy() {
+  local name="$1" dir="${cache_root}/$1"
+  mkdir -p "${dir}"
+  cp "${profile_dir}/ports.env" "${dir}/ports.env"
+  awk -v wanted="${name}" -F= '$1 == "PROFILE" { print "PROFILE=" wanted; next } { print }' \
+    "${profile_dir}/profile.env" >"${dir}/profile.env"
+}
+
 reset_state
 bp explicit-own resolve "MINIKUBE_PROFILE=${profile}"
 assert_rc 0 'explicit selection of the branch-owned profile'
 assert_output_has "PROFILE=${profile}" 'explicit selection of the branch-owned profile'
-shared_dir="${cache_root}/clerum-dev"
-mkdir -p "${shared_dir}"
-cp "${profile_dir}/ports.env" "${shared_dir}/ports.env"
-awk -v wanted=clerum-dev -F= '$1 == "PROFILE" { print "PROFILE=" wanted; next } { print }' \
-  "${profile_dir}/profile.env" >"${shared_dir}/profile.env"
+write_owned_profile_copy clerum-dev
 bp explicit-shared resolve MINIKUBE_PROFILE=clerum-dev
 assert_rc 1 'explicit selection of clerum-dev'
 assert_output_has 'clerum-dev' 'explicit selection of clerum-dev names the refused profile'
 assert_output_lacks 'PROFILE=clerum-dev' 'explicit selection of clerum-dev must not resolve'
-rm -rf "${shared_dir}"
+rm -rf "${cache_root:?}/clerum-dev"
+
+# An explicitly adopted profile that profile-owner.sh proves this worktree owns
+# may predate the hashed clerum-<branch>-<owner-id> naming; it is accepted.
+adopted=clerum-oauth19
+write_owned_profile_copy "${adopted}"
+reset_state
+bp adopted-resolve resolve "MINIKUBE_PROFILE=${adopted}"
+assert_rc 0 'explicit selection of an owned profile without the hashed suffix'
+assert_output_has "PROFILE=${adopted}" 'explicit selection of an owned profile without the hashed suffix'
+reset_state
+bp adopted-status status "MINIKUBE_PROFILE=${adopted}"
+assert_rc 0 'status of an owned profile without the hashed suffix'
+assert_log_has "minikube -p ${adopted} status" 'status ran minikube status for the adopted profile'
+reset_state
+bp adopted-stop stop "MINIKUBE_PROFILE=${adopted}"
+assert_rc 0 'stop of an owned profile without the hashed suffix'
+assert_log_has "minikube -p ${adopted} stop" 'stop ran minikube stop for the adopted profile'
+
+# A profile the resolver derives on its own (no explicit selection) must still
+# carry the hashed suffix. With the branch profile set aside, the adopted
+# profile is the only persisted record for this worktree and branch.
+mv "${profile_dir}" "${tmp}/branch-profile-aside"
+reset_state
+bp derived-unhashed resolve
+assert_rc 1 'resolver-derived profile without the hashed suffix'
+assert_output_has "outside the branch-scoped clerum-<branch>-<owner-id> namespace: ${adopted}" \
+  'the resolver found the unhashed profile and refused it'
+assert_output_lacks "PROFILE=${adopted}" 'a resolver-derived unhashed profile must not resolve'
+mv "${tmp}/branch-profile-aside" "${profile_dir}"
+rm -rf "${cache_root:?}/${adopted}"
+
+# Shared contexts are refused by name in every subcommand, before the resolver
+# runs and before any kubectl or minikube call, even with owned metadata.
+for shared in clerum-dev gke_sample-project_us-central1-a_shared-cluster; do
+  write_owned_profile_copy "${shared}"
+  for action in resolve info preflight prepare-shims start status pf pf-health health \
+    stop-pf stop setup delete e2e-plan sync-plan; do
+    reset_state
+    bp "shared-${shared%%_*}-${action}" "${action}" "MINIKUBE_PROFILE=${shared}" \
+      "CONFIRM_DELETE=${shared}" "CONFIRM_PROFILE=${shared}"
+    assert_rc 1 "${action} with MINIKUBE_PROFILE=${shared}"
+    # Witness: the refusal comes from the shared-context denylist and names it.
+    assert_output_has "BRANCH_PROFILE_SHARED_CONTEXT: refusing shared or protected profile: ${shared}" \
+      "${action} with MINIKUBE_PROFILE=${shared}"
+    assert_log_lacks 'minikube' "${action} with MINIKUBE_PROFILE=${shared} must not call minikube"
+    assert_log_lacks 'kubectl' "${action} with MINIKUBE_PROFILE=${shared} must not call kubectl"
+  done
+  rm -rf "${cache_root:?}/${shared}"
+done
 
 # === status ===================================================================
 reset_state
