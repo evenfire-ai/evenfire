@@ -3,6 +3,7 @@
  * cold restart rebuilds the file-reference pins and attachment lines.
  */
 import { describe, expect, it } from 'vitest'
+import type { AuthorityBindingV2 } from '@clerum/action-context-contracts'
 import type { Attachment } from '../../core/types'
 import type { IncomingMessage } from '../../server'
 import { sourceMessageForResume } from '../sourceMessageForResume'
@@ -138,6 +139,47 @@ describe('sourceMessageForResume (#666 R4-M2)', () => {
     })
     expect(resumed?.content).toBe('Read the attached notes')
     expect(resumed).not.toHaveProperty('metadata')
+  })
+
+  it('preserves only the non-bearer v2 authority binding needed after resume', () => {
+    const authorityV2: AuthorityBindingV2 = {
+      version: 2,
+      userId: '11111111-1111-4111-8111-111111111111',
+      sid: '22222222-2222-4222-8222-222222222222',
+      sessionVersion: 3,
+      delegationJti: '33333333-3333-4333-8333-333333333333',
+      operationId: 'chat.message.invoke',
+      resource: {
+        environmentId: 'cluster.local/evenfire',
+        type: 'host',
+        canonicalId: 'host:mcp-host/chatllm',
+        logicalId: 'mcp-host/chatllm',
+        displayName: 'chatllm',
+      },
+      target: {
+        hostRef: 'mcp-host/chatllm',
+        channelType: 'rpc',
+        channelId: 'chatllm',
+        messageId: 'message-1',
+      },
+      targetHash: `th2_${'a'.repeat(43)}`,
+      accessPathId: `ap1_${'b'.repeat(43)}`,
+      authorizationRevision: `ar1_${'c'.repeat(43)}`,
+      pathKind: 'direct',
+      effectiveTeamId: null,
+      behaviorBindingHash: `bh2_${'d'.repeat(43)}`,
+    }
+    const resumed = sourceMessageForResume({
+      ...sourceMessage([]),
+      authorityV2,
+      providerIdentity: { medium: 'slack', providerUserId: 'SENTINEL-raw-identity' },
+      metadata: { rawPayload: 'SENTINEL-raw-payload' },
+    })
+
+    expect(resumed?.authorityV2).toEqual(authorityV2)
+    expect(resumed).not.toHaveProperty('providerIdentity')
+    expect(resumed).not.toHaveProperty('rawPayload')
+    expect(JSON.stringify(resumed)).not.toContain('SENTINEL')
   })
 
   it('returns undefined without a source message', () => {

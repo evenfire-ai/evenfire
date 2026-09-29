@@ -362,11 +362,7 @@ export interface ConversationStore {
 
   /** Sync write-through: pending_approval must be durable before notifying
    *  the user (channel callback may happen immediately). */
-  persistSuspend(
-    conv: Conversation,
-    approval: PendingApproval,
-    sourceMessage?: Record<string, unknown>
-  ): Promise<void>
+  persistSuspend(conv: Conversation, approval: PendingApproval): Promise<void>
   /** Sync write-through: approval state change before returning 200 to the
    *  client and resuming the executor. */
   persistApprovalResolved(
@@ -572,11 +568,7 @@ export class InMemoryConversationStore implements ConversationStore {
     /* no-op — RAM-only store does not persist counters */
   }
 
-  async persistSuspend(
-    _conv: Conversation,
-    _approval: PendingApproval,
-    _sourceMessage?: Record<string, unknown>
-  ): Promise<void> {
+  async persistSuspend(_conv: Conversation, _approval: PendingApproval): Promise<void> {
     /* no-op */
   }
 

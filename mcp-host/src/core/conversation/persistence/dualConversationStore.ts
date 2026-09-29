@@ -345,14 +345,10 @@ export class DualConversationStore implements ConversationStore {
     ])
   }
 
-  async persistSuspend(
-    conv: Conversation,
-    approval: PendingApproval,
-    sourceMessage?: Record<string, unknown>
-  ): Promise<void> {
+  async persistSuspend(conv: Conversation, approval: PendingApproval): Promise<void> {
     await Promise.all([
-      this.memory.persistSuspend(conv, approval, sourceMessage),
-      this.sqlite.persistSuspend(conv, approval, sourceMessage),
+      this.memory.persistSuspend(conv, approval),
+      this.sqlite.persistSuspend(conv, approval),
     ])
   }
 
