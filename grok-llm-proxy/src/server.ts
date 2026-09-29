@@ -936,9 +936,8 @@ const ATTEMPT_ERROR_STATUS: Record<string, number> = {
   // The upstream's refusal of a prompt over the model's context window, at the
   // upstream's own status class (R10).
   context_length_exceeded: 400,
-  // A V2 request over one of its byte budgets (image, total or non-image
-  // share), refused by the contract before redeem, or a body over the proxy's
-  // own caps.
+  // A contract `size` refusal before redeem (a byte budget, or the container,
+  // member or element bound), or a body over the proxy's own caps.
   payload_too_large: 413,
   Unauthorized: 401,
   origin_denied: 403,

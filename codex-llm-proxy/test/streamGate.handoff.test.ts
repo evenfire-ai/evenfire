@@ -807,9 +807,11 @@ describe('visual stream-gate handoff', () => {
     // Once the unread body exceeds the request's buffer, Node stops reading the
     // socket, so a queued client's disconnect is not seen and `aborted` never
     // fires. The place is held until the grant or the admission deadline. At the
-    // grant Node reads the bytes that already reached the server; here that is
-    // the whole body, so the dead client's request runs through the handler,
-    // which frees the slot. This pins that bound.
+    // grant the parser reads the bytes that already reached the server. Usually
+    // that is only part of the body, so raw-body fails with `request.aborted`
+    // and the parser's error callback frees the slot; if the whole body arrived
+    // before the disconnect, the request runs through the handler, which frees
+    // it. Either way the slot is freed only at the grant; this pins that bound.
     it('holds the queue place of a disconnected large-body waiter until its grant', async () => {
       const maxBodyBytes = smallCaps()
       const acquire = vi.spyOn(visualStreamGate, 'acquire')

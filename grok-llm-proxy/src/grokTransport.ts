@@ -149,9 +149,10 @@ export async function streamGrokCompletion(
 ): Promise<StreamGrokCompletionResult> {
   const parsed = parseGrokCompletionRequest(input.request)
   if (!parsed.ok) {
-    // A byte budget (image, total, non-image share) is a size refusal; every
-    // other contract failure is a malformed request. Both codes stay literal
-    // for the contract-freeze scanner.
+    // A `size` refusal (a byte budget, or the container, member or element
+    // bound) is payload_too_large; every other contract failure, including the
+    // image, message and tool-call counts, is invalid_request. Both codes stay
+    // literal for the contract-freeze scanner.
     if (parsed.kind === 'size') throw new GrokTransportError('payload_too_large', parsed.message)
     throw new GrokTransportError('invalid_request', parsed.message)
   }
