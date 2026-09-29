@@ -15728,6 +15728,118 @@ describe('WorkflowRecipeReconciler', () => {
         expect(secretDeletes()).toBe(1)
       })
     })
+
+    function shortCircuitWorkflowRecipe(
+      spec: Partial<WorkflowRecipeCRD['spec']>,
+      status: WorkflowRecipeCRD['status'],
+      labels: Record<string, string>
+    ): WorkflowRecipeCRD {
+      return makeRecipe({
+        spec: {
+          agent: { provider: 'zai', model: 'glm-4.7' },
+          workloads: [],
+          steps: [{ id: 'run-qa', instruction: 'Validate the QA API workload.' }],
+          ...spec,
+        },
+        metadata: {
+          name: 'test-recipe',
+          namespace: 'sandbox-recipes',
+          uid: 'uid-123',
+          generation: 4,
+          labels,
+        },
+        status,
+      })
+    }
+
+    const RUN_LABEL = { 'clerum.io/workflow-run-id': 'run-123' }
+
+    describe.each([
+      {
+        label: 'awaiting-trigger',
+        recipe: () =>
+          shortCircuitWorkflowRecipe(
+            { triggers: { onDemand: { allowedActors: ['user'] } } },
+            { phase: 'active' },
+            {}
+          ),
+        expected: { phase: 'active', message: 'Workflow trigger infrastructure registered' },
+      },
+      {
+        label: 'active',
+        recipe: () =>
+          shortCircuitWorkflowRecipe(
+            {},
+            { phase: 'active', workflowExecution: { phase: 'running' } },
+            RUN_LABEL
+          ),
+        expected: { phase: 'active', message: 'Workflow running' },
+      },
+      {
+        label: 'in-progress',
+        recipe: () =>
+          shortCircuitWorkflowRecipe(
+            {},
+            { phase: 'deploying', workflowExecution: { phase: 'running' } },
+            RUN_LABEL
+          ),
+        expected: { phase: 'active', message: 'Workflow running' },
+      },
+      {
+        label: 'terminal',
+        recipe: () =>
+          shortCircuitWorkflowRecipe(
+            {},
+            { phase: 'active', workflowExecution: { phase: 'completed' } },
+            RUN_LABEL
+          ),
+        expected: { phase: 'active', message: 'Workflow completed' },
+      },
+      {
+        label: 'dryRun',
+        recipe: () => shortCircuitWorkflowRecipe({ dryRun: true }, { phase: 'approved' }, {}),
+        expected: {
+          phase: 'candidate',
+          message: 'Dry-run: preview generated, no resources created',
+        },
+      },
+    ])('R2-L2: the $label workflow short-circuit on a fresh process', ({ recipe, expected }) => {
+      it('sends no token DELETE until a token ADDED arrives, then exactly one', async () => {
+        const workflowReconcile = vi.fn()
+        ;(
+          reconciler as unknown as {
+            workflowReconciler: {
+              reconcile: typeof workflowReconcile
+              validateWorkflowSpec: () => undefined
+              ensureMcpHostRuntimeCredentials?: () => Promise<void>
+            }
+          }
+        ).workflowReconciler = {
+          reconcile: workflowReconcile,
+          validateWorkflowSpec: () => undefined,
+          ensureMcpHostRuntimeCredentials: vi.fn().mockResolvedValue(undefined),
+        }
+        const current = recipe()
+
+        // A restarted process: no token ADDED has been observed for the recipe.
+        for (let pass = 0; pass < 3; pass++) {
+          const result = await reconciler.reconcile(current)
+          // Witness that each pass took the short-circuit under test.
+          expect(result).toMatchObject(expected)
+        }
+        expect(workflowReconcile).not.toHaveBeenCalled()
+        expect(secretDeletes()).toBe(0)
+
+        // The watch relist replays ADDED for a token that really exists.
+        reconciler.invalidateOAuthBrokerSecretLedger('test-recipe')
+        await reconciler.reconcile(current)
+        expect(secretDeletes()).toBe(1)
+
+        // The ledger bounds it: the next pass of the same generation skips.
+        await reconciler.reconcile(current)
+        expect(secretDeletes()).toBe(1)
+      })
+    })
   })
 
   describe('G2 skipStatusPatch must not leave GFS deleted', () => {

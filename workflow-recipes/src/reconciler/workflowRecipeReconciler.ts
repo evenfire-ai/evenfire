@@ -1971,8 +1971,14 @@ export class WorkflowRecipeReconciler {
       // ensureOAuthBrokerTokenSecret, so the token-ADDED re-reconcile would
       // never reach the reap. Only the delete branch runs here (issuance stays
       // on the first-deploy path and the rotation loop), and the delete ledger
-      // bounds it to one DELETE per generation or ADDED.
-      if (!rb.recipeHasBackgroundAccessClient(recipe)) {
+      // bounds it to one DELETE per generation or ADDED. It runs only once a
+      // token ADDED was observed for the recipe: a fresh process would otherwise
+      // send one DELETE per recipe, and the Secret watch's initial list replays
+      // ADDED for every token that exists.
+      if (
+        !rb.recipeHasBackgroundAccessClient(recipe) &&
+        this.oauthBrokerDeleteLedger.secretEpoch(recipe.metadata.name) !== 0
+      ) {
         await this.ensureOAuthBrokerTokenSecret(recipe)
       }
 
