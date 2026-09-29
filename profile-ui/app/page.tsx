@@ -59,10 +59,10 @@ function HomeContent() {
             </p>
           ) : (
             <p className="body-copy">
+              Prefer the desktop app?{' '}
               <a className="cu-home-desktop-link" href={desktopAppLink.href}>
                 Set up Desktop App <IconExternalLink />
-              </a>{' '}
-              instead
+              </a>
             </p>
           )}
         </div>

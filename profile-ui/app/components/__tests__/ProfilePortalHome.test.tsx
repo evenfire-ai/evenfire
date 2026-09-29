@@ -78,7 +78,10 @@ describe('Profile Portal home desktop setup link', () => {
     render(<Page />)
 
     const setupLink = await screen.findByRole('link', { name: 'Set up Desktop App' })
+    const setupCopy = setupLink.closest('p')
 
+    expect(setupCopy).toHaveTextContent('Prefer the desktop app?')
+    expect(setupCopy).not.toHaveTextContent('instead')
     expect(setupLink).toHaveAttribute(
       'href',
       'evenfire://desktop-environment?externalRestApiBaseUrl=https%3A%2F%2Fapi.example.com&tenantName=Evenfire+Test'
