@@ -29,6 +29,7 @@ import { createInternalLlmProviderAttemptRoutes } from './routes/internal/llmPro
 import { createInternalOAuthRouter } from './routes/internal/oauth.js'
 import { createInternalPluginWorkloadSdkRouter } from './routes/internal/pluginWorkloadSdk.js'
 import { createInternalPr2ReadinessEvidenceRouter } from './routes/internal/pr2ReadinessEvidence.js'
+import { createInternalRpcProxyLegacySessionAdmissionRouter } from './routes/internal/rpcProxyLegacySessionAdmission.js'
 import { createInternalSandboxUiRouter } from './routes/internal/sandboxUi.js'
 import { createInternalApprovalPromptHistoryRouter } from './routes/internal/tracing/approvalPromptHistory.routes.js'
 import { createInternalUsageEventsRouter } from './routes/internal/usageEvents.js'
@@ -261,6 +262,7 @@ export function createApp(gateway: K8sGateway) {
   // the router so the `/internal/sandbox-ui/...` path does not collide with
   // the `/external` and `/rpc` prefix gates above.
   api.use(createInternalSandboxUiRouter(gateway))
+  api.use(createInternalRpcProxyLegacySessionAdmissionRouter())
   // OAuth helpers (rpc-proxy → control-api). Route-level requireInternalService
   // gates the boundary; the public-facing cookie-authed endpoints live in
   // rpc-proxy and forward here with the user identity asserted in the body.

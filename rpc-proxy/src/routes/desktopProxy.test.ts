@@ -25,6 +25,7 @@ const delegationMock = vi.hoisted(() => ({
 
 const authorityMock = vi.hoisted(() => ({ authorizeActionV2: vi.fn() }))
 const leaseMock = vi.hoisted(() => ({ startActiveViewLease: vi.fn() }))
+const legacyAdmissionMock = vi.hoisted(() => ({ admit: vi.fn() }))
 const proxyMock = vi.hoisted(() => ({
   web: vi.fn((_req: unknown, res: express.Response) => res.status(200).end()),
   ws: vi.fn(),
@@ -38,6 +39,10 @@ vi.mock('../actionAuthorityV2.js', async importOriginal => ({
   authorizeActionV2: authorityMock.authorizeActionV2,
 }))
 vi.mock('../services/activeViewLease.js', () => leaseMock)
+vi.mock('../services/controlApiRestService.js', async importOriginal => ({
+  ...(await importOriginal<typeof import('../services/controlApiRestService.js')>()),
+  admitLegacySessionCreation: legacyAdmissionMock.admit,
+}))
 
 // Mock http-proxy to avoid real proxy connections
 vi.mock('http-proxy', () => ({
@@ -131,6 +136,7 @@ beforeEach(() => {
   delegationMock.verifyUserDelegationV2.mockReset()
   authorityMock.authorizeActionV2.mockReset()
   leaseMock.startActiveViewLease.mockReset()
+  legacyAdmissionMock.admit.mockReset().mockResolvedValue({ allowed: true })
   proxyMock.web.mockClear()
   proxyMock.ws.mockClear()
   leaseMock.startActiveViewLease.mockReturnValue({ close: vi.fn() })
@@ -180,6 +186,7 @@ describe('POST /desktop/:hostRef/session (JWT-only)', () => {
     expect(res.body).toEqual({ error: 'authority_unavailable' })
     expect(mockHcc).not.toHaveBeenCalled()
     expect(authorityMock.authorizeActionV2).not.toHaveBeenCalled()
+    expect(legacyAdmissionMock.admit).not.toHaveBeenCalled()
   })
 
   it('issues session cookie when desktop is running', async () => {
@@ -201,8 +208,70 @@ describe('POST /desktop/:hostRef/session (JWT-only)', () => {
     expect(res.headers['set-cookie']?.[0]).toMatch(
       /^clerum_desktop_session=.+; Path=\/api\/v1\/desktop\/chatllm; HttpOnly; SameSite=Strict; Max-Age=\d+$/
     )
+    expect(legacyAdmissionMock.admit).toHaveBeenCalledWith(token)
     // No Secure flag in dev/test (NODE_ENV !== production); cookie must work over HTTP port-forwards.
     expect(res.headers['set-cookie']?.[0]).not.toMatch(/; Secure/)
+  })
+
+  it('limits repeated legacy session opens before HCC readiness work', async () => {
+    mockHcc.mockImplementation(async () => ({
+      ok: true,
+      json: async () => ({ status: 'running', hostRef: 'chatllm' }),
+    }))
+
+    const app = makeApp()
+    const token = signTestJwt(['desktop:view'], ['chatllm'])
+    let admitted = 0
+    legacyAdmissionMock.admit.mockImplementation(async () => {
+      admitted += 1
+      return admitted <= 60
+        ? { allowed: true }
+        : {
+            allowed: false,
+            status: 429,
+            retryAfterSeconds: 7,
+            headers: {
+              'X-RateLimit-Limit': '60',
+              'X-RateLimit-Remaining': '0',
+              'X-RateLimit-Reset': '1800000000',
+            },
+          }
+    })
+    const responses = []
+    for (let index = 0; index < 61; index += 1) {
+      responses.push(
+        await request(app)
+          .post('/desktop/chatllm/session')
+          .set('authorization', `Bearer ${token}`)
+          .send({})
+      )
+    }
+
+    expect(responses.slice(0, 60).every(response => response.status === 200)).toBe(true)
+    expect(responses[60].status).toBe(429)
+    expect(responses[60].headers['retry-after']).toBe('7')
+    expect(mockHcc).toHaveBeenCalledTimes(60)
+    expect(legacyAdmissionMock.admit).toHaveBeenCalledTimes(61)
+  })
+
+  it('fails closed on admission-store unavailability before HCC work', async () => {
+    legacyAdmissionMock.admit.mockResolvedValue({
+      allowed: false,
+      status: 503,
+      retryAfterSeconds: 2,
+      headers: {},
+    })
+    const token = signTestJwt(['desktop:view'], ['chatllm'])
+
+    const res = await request(makeApp())
+      .post('/desktop/chatllm/session')
+      .set('authorization', `Bearer ${token}`)
+      .send({})
+      .expect(503)
+
+    expect(res.body).toEqual({ error: 'rate_limit_unavailable', retryAfterSeconds: 2 })
+    expect(res.headers['retry-after']).toBe('2')
+    expect(mockHcc).not.toHaveBeenCalled()
   })
 
   it('adds Secure flag to session cookie when NODE_ENV=production', async () => {
@@ -282,6 +351,7 @@ describe('POST /desktop/:hostRef/session (JWT-only)', () => {
       .send({})
 
     expect(res.status).toBe(403)
+    expect(legacyAdmissionMock.admit).not.toHaveBeenCalled()
   })
 
   it('returns 403 when hostRef not in JWT hostRefs', async () => {
@@ -294,6 +364,7 @@ describe('POST /desktop/:hostRef/session (JWT-only)', () => {
       .send({})
 
     expect(res.status).toBe(403)
+    expect(legacyAdmissionMock.admit).not.toHaveBeenCalled()
   })
 })
 

@@ -15,6 +15,7 @@ import './mcp/catalogBootstrapMetrics'
 import './mcp/statusHeartbeatMetrics'
 import './observability/processMetrics'
 import { requireScope } from './server/authMiddleware'
+import { DirectServiceAdmission } from './server/directServiceAdmission'
 import {
   getRuntimeCallerContext,
   runtimeActionTargetMatches,
@@ -296,6 +297,7 @@ export class RPCServer {
   private workflowRouter: ReturnType<typeof createWorkflowRouter> | null = null
   private artifactSecretEntriesProvider: (() => ArtifactSecretEntry[]) | null = null
   private lifecycleGate: RuntimeLifecycleGate | null = null
+  private readonly directServiceAdmission = new DirectServiceAdmission()
 
   constructor(port: number = 8080) {
     this.port = port
@@ -406,21 +408,27 @@ export class RPCServer {
         ['chat.message.invoke']
       ),
       async (req, res) => {
-        // Stage 3 (stateless-agents) — reversible DRAINING fence. While the
-        // host is draining/drained, new intake is rejected with the exact
-        // code rpc-proxy keys on; the in-flight turn keeps running. The
-        // fence lifts immediately on drain-cancel (no restart). Body stays
-        // minimal on purpose: no activity details leak to callers.
-        if (this.lifecycleGate?.isIntakeFenced()) {
-          // H2 self-heal: record that new work arrived while fenced so the next
-          // heartbeat surfaces pendingIntake=true and HCC/control-api can cancel
-          // the drain deterministically. The 503 still goes back to rpc-proxy,
-          // which holds and redrives the message once the fence lifts.
-          this.lifecycleGate.noteFencedIntake()
-          json(res, 503, { code: 'host_draining' })
-          return
+        // Preserve the established RPC Proxy precedence. Direct trusted
+        // service input is cheaply validated and admitted inside the route
+        // handler before the lifecycle fence or protected message work.
+        const caller = getRuntimeCallerContext(req)
+        if (caller?.caller === 'rpc-proxy') {
+          // Stage 3 (stateless-agents) — reversible DRAINING fence. While the
+          // host is draining/drained, new intake is rejected with the exact
+          // code rpc-proxy keys on; the in-flight turn keeps running. The
+          // fence lifts immediately on drain-cancel (no restart). Body stays
+          // minimal on purpose: no activity details leak to callers.
+          if (this.lifecycleGate?.isIntakeFenced()) {
+            // H2 self-heal: record that new work arrived while fenced so the next
+            // heartbeat surfaces pendingIntake=true and HCC/control-api can cancel
+            // the drain deterministically. The 503 still goes back to rpc-proxy,
+            // which holds and redrives the message once the fence lifts.
+            this.lifecycleGate.noteFencedIntake()
+            json(res, 503, { code: 'host_draining' })
+            return
+          }
+          this.lifecycleGate?.noteIntakeActivity()
         }
-        this.lifecycleGate?.noteIntakeActivity()
         await handleMessageRoute(req, res, this.routeDeps())
       }
     )
@@ -923,6 +931,16 @@ export class RPCServer {
 
   private routeDeps() {
     return {
+      directServiceAdmission: () => this.directServiceAdmission.admit(),
+      afterDirectMessageAdmission: (_req: Request, res: Response) => {
+        if (this.lifecycleGate?.isIntakeFenced()) {
+          this.lifecycleGate.noteFencedIntake()
+          json(res, 503, { code: 'host_draining' })
+          return false
+        }
+        this.lifecycleGate?.noteIntakeActivity()
+        return true
+      },
       messageHandler: this.messageHandler,
       statusHandler: this.statusHandler,
       approvalHandler: this.approvalHandler,

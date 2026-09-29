@@ -82,6 +82,62 @@ describe('ChannelReader provider event idempotency', () => {
     expect(rpc.sendMessage).not.toHaveBeenCalled()
   })
 
+  it('does not consume provider events when authorization admission is unavailable', async () => {
+    vi.useFakeTimers()
+    const rpc = rpcClient()
+    rpc.authorizeProviderMessage = vi
+      .fn()
+      .mockResolvedValueOnce({ authorized: false, reason: 'error', retryAfterSeconds: 2 })
+      .mockResolvedValueOnce({ authorized: true })
+    const reader = new ChannelReader({
+      rpcClient: rpc,
+      notificationDeliveryClient: null,
+      adapters: new Map(),
+    })
+    const message = telegramMessage()
+
+    await reader.handleMessages([message, message])
+    expect(rpc.authorizeProviderMessage).toHaveBeenCalledOnce()
+
+    await vi.advanceTimersByTimeAsync(2_000)
+    await reader.handleMessages([message])
+
+    expect(rpc.authorizeProviderMessage).toHaveBeenCalledTimes(2)
+    expect(rpc.sendMessage).toHaveBeenCalledOnce()
+  })
+
+  it('keeps provider events retryable after direct message admission rejects them', async () => {
+    vi.useFakeTimers()
+    const rpc = rpcClient()
+    rpc.sendMessage = vi
+      .fn()
+      .mockResolvedValueOnce({
+        success: false,
+        error: {
+          code: 'RUNTIME_SERVICE_ADMISSION_LIMITED',
+          message: 'temporarily limited',
+          retryable: true,
+          provider: 'mcp-host',
+          retryAfterSeconds: 5,
+        },
+      })
+      .mockResolvedValueOnce(completedResponse)
+    const reader = new ChannelReader({
+      rpcClient: rpc,
+      notificationDeliveryClient: null,
+      adapters: new Map(),
+    })
+    const message = telegramMessage()
+
+    await reader.handleMessages([message, message])
+    expect(rpc.sendMessage).toHaveBeenCalledOnce()
+
+    await vi.advanceTimersByTimeAsync(5_000)
+    await reader.handleMessages([message])
+
+    expect(rpc.sendMessage).toHaveBeenCalledTimes(2)
+  })
+
   it('records denied provider events so duplicate redelivery does not reauthorize', async () => {
     const rpc = rpcClient()
     rpc.authorizeProviderMessage = vi

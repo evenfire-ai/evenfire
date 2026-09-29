@@ -37,6 +37,7 @@ export interface TaskError {
   message: string
   retryable: boolean
   provider: string
+  retryAfterSeconds?: number
 }
 
 /**
@@ -143,11 +144,34 @@ export interface ChannelReaderRuntimeSource {
   sender: string
 }
 
+const RUNTIME_ADMISSION_RETRY_AFTER_SECONDS_DEFAULT = 1
+const RUNTIME_ADMISSION_RETRY_AFTER_SECONDS_MAX = 60
+
+export class RuntimeServiceAdmissionLimitedError extends Error {
+  constructor(readonly retryAfterSeconds: number) {
+    super(`MCP Host runtime service admission limited the request for ${retryAfterSeconds}s`)
+    this.name = 'RuntimeServiceAdmissionLimitedError'
+  }
+}
+
+function runtimeAdmissionRetryAfter(response: Response): number {
+  const value = response.headers.get('retry-after')
+  if (!value || !/^(?:0|[1-9]\d{0,2})$/.test(value)) {
+    return RUNTIME_ADMISSION_RETRY_AFTER_SECONDS_DEFAULT
+  }
+  const seconds = Number(value)
+  return Number.isSafeInteger(seconds) && seconds >= 1 && seconds <= 60
+    ? seconds
+    : RUNTIME_ADMISSION_RETRY_AFTER_SECONDS_DEFAULT
+}
+
 /**
  * RPC Client for communicating with mcp-host.
  */
 export class RPCClient {
   private readonly baseUrl: string
+  private notificationAdmissionRetryUntil = 0
+  private cronResultsAdmissionRetryUntil = 0
 
   constructor(baseUrl: string) {
     this.baseUrl = baseUrl
@@ -203,6 +227,26 @@ export class RPCClient {
         body: JSON.stringify(payload),
       })
 
+      if (response.status === 429) {
+        const retryAfter = response.headers.get('retry-after')
+        const parsedRetryAfter =
+          retryAfter && /^(?:0|[1-9]\d{0,2})$/.test(retryAfter) ? Number(retryAfter) : NaN
+        const retryAfterSeconds =
+          Number.isSafeInteger(parsedRetryAfter) && parsedRetryAfter >= 1 && parsedRetryAfter <= 60
+            ? parsedRetryAfter
+            : undefined
+        return {
+          success: false,
+          error: {
+            code: 'RUNTIME_SERVICE_ADMISSION_LIMITED',
+            message: 'MCP Host service admission temporarily limited this request',
+            retryable: true,
+            provider: 'mcp-host',
+            ...(retryAfterSeconds === undefined ? {} : { retryAfterSeconds }),
+          },
+        }
+      }
+
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}: ${response.statusText}`)
       }
@@ -236,9 +280,11 @@ export class RPCClient {
     }
   }
 
-  async authorizeProviderMessage(
-    identity: ProviderIdentity
-  ): Promise<{ authorized: boolean; reason?: 'unresolved' | 'error' }> {
+  async authorizeProviderMessage(identity: ProviderIdentity): Promise<{
+    authorized: boolean
+    reason?: 'unresolved' | 'error'
+    retryAfterSeconds?: number
+  }> {
     try {
       const response = await fetch(`${this.baseUrl}/v1/runtime/provider-messages/authorize`, {
         method: 'POST',
@@ -250,7 +296,25 @@ export class RPCClient {
         }),
         body: JSON.stringify({ providerIdentity: identity }),
       })
-      if (!response.ok) return { authorized: false }
+      if (!response.ok) {
+        if (response.status === 429 || response.status >= 500) {
+          const retryAfter = response.headers.get('retry-after')
+          const parsedRetryAfter =
+            retryAfter && /^(?:0|[1-9]\d{0,2})$/.test(retryAfter) ? Number(retryAfter) : NaN
+          const retryAfterSeconds =
+            Number.isSafeInteger(parsedRetryAfter) &&
+            parsedRetryAfter >= 1 &&
+            parsedRetryAfter <= 60
+              ? parsedRetryAfter
+              : undefined
+          return {
+            authorized: false,
+            reason: 'error',
+            ...(retryAfterSeconds === undefined ? {} : { retryAfterSeconds }),
+          }
+        }
+        return { authorized: false }
+      }
       const body = (await response.json()) as { authorized?: unknown; reason?: unknown }
       if (body.authorized === true) return { authorized: true }
       return body.reason === 'unresolved' || body.reason === 'error'
@@ -261,7 +325,7 @@ export class RPCClient {
         '[RPC] Provider message authorization failed closed:',
         error instanceof Error ? error.message : error
       )
-      return { authorized: false }
+      return { authorized: false, reason: 'error' }
     }
   }
 
@@ -486,6 +550,8 @@ export class RPCClient {
     hostRef: string
     limit: number
   }): Promise<NotificationDelivery[]> {
+    if (Date.now() < this.notificationAdmissionRetryUntil) return []
+
     const response = await fetch(
       `${this.baseUrl}/v1/runtime/workflow-approval-notifications/claim`,
       {
@@ -495,6 +561,11 @@ export class RPCClient {
         body: JSON.stringify(params),
       }
     )
+    if (response.status === 429) {
+      this.notificationAdmissionRetryUntil =
+        Date.now() + runtimeAdmissionRetryAfter(response) * 1000
+      return []
+    }
     const body = (await response.json().catch(() => ({}))) as FetchDeliveriesResponse & {
       error?: string
     }
@@ -739,6 +810,9 @@ export class RPCClient {
         headers: this.runtimeHeaders(source),
       }
     )
+    if (response.status === 429) {
+      throw new RuntimeServiceAdmissionLimitedError(runtimeAdmissionRetryAfter(response))
+    }
     if (!response.ok) {
       throw new Error(`Failed to get task result: ${response.status}`)
     }
@@ -760,11 +834,17 @@ export class RPCClient {
       status?: 'completed'
     }>
   > {
+    if (Date.now() < this.cronResultsAdmissionRetryUntil) return []
     try {
       const response = await fetch(`${this.baseUrl}/v1/runtime/cron/results`, {
         method: 'GET',
         headers: this.runtimeHeaders(),
       })
+      if (response.status === 429) {
+        this.cronResultsAdmissionRetryUntil =
+          Date.now() + runtimeAdmissionRetryAfter(response) * 1000
+        return []
+      }
       if (!response.ok) return []
       const data = (await response.json()) as {
         results: Array<{
@@ -789,13 +869,21 @@ export class RPCClient {
    * Acknowledge delivery of a cron result.
    */
   async acknowledgeCronResult(taskId: string, source: ChannelReaderRuntimeSource): Promise<void> {
-    try {
-      await fetch(`${this.baseUrl}/v1/runtime/cron/results/${taskId}`, {
-        method: 'DELETE',
-        headers: this.runtimeHeaders(source),
-      })
-    } catch (error) {
-      console.error(`[RPC] Failed to acknowledge cron result ${taskId}:`, error)
+    if (Date.now() < this.cronResultsAdmissionRetryUntil) {
+      throw new RuntimeServiceAdmissionLimitedError(
+        Math.max(1, Math.ceil((this.cronResultsAdmissionRetryUntil - Date.now()) / 1000))
+      )
+    }
+    const response = await fetch(`${this.baseUrl}/v1/runtime/cron/results/${taskId}`, {
+      method: 'DELETE',
+      headers: this.runtimeHeaders(source),
+    })
+    if (response.status === 429) {
+      this.cronResultsAdmissionRetryUntil = Date.now() + runtimeAdmissionRetryAfter(response) * 1000
+      throw new RuntimeServiceAdmissionLimitedError(runtimeAdmissionRetryAfter(response))
+    }
+    if (!response.ok) {
+      throw new Error(`Failed to acknowledge cron result: ${response.status}`)
     }
   }
 
