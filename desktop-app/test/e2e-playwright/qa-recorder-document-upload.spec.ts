@@ -150,6 +150,14 @@ function fileChips(page: Page) {
   return page.getByTestId('composer-file-chip')
 }
 
+/** The attachment list a sent user message renders (`MessageAttachmentList`). */
+function sentMessageAttachments(page: Page) {
+  return page.getByLabel('Message attachments')
+}
+
+/** Per-file ceiling the composer enforces; it mirrors the Host default (3 MiB). */
+const COMPOSER_FILE_LIMIT_BYTES = 3 * 1024 * 1024
+
 /** Start a blank chat and prove the thread is empty before anything is sent. */
 async function startBlankChat(page: Page) {
   await page.getByTestId('nav-new-chat').click()
@@ -292,10 +300,40 @@ test('document-upload fixture: an attached text file reaches the model through t
     await assertBinding()
     await openConfiguredAgentChat(page, env.hostRef)
 
-    await test.step('the document is admitted as a ready file chip and the send is enabled', async () => {
+    await test.step('a blank chat is ready on the supported model', async () => {
       await startBlankChat(page)
       await selectSupportedModel(page, IMAGE_CAPABILITY_FIXTURE_MODELS.supported)
+    })
 
+    await test.step('a file one byte over the limit is refused with its reason and leaves no chip', async () => {
+      const oversized = {
+        fileName: `too-big-${randomBytes(3).toString('hex')}.txt`,
+        mimeType: 'text/plain',
+        buffer: Buffer.alloc(COMPOSER_FILE_LIMIT_BYTES + 1, 0x61),
+      }
+      await attachDocument(page, oversized)
+      // Liveness witness: the refusal the composer had to produce is on screen.
+      const refusal = page.getByRole('alert').filter({ hasText: oversized.fileName })
+      await expect(refusal).toHaveCount(1, { timeout: 15_000 })
+      await expect(refusal).toContainText(/a file can be at most 3\.0 MiB/)
+      await expect(fileChips(page)).toHaveCount(0)
+    })
+
+    await test.step('a ready chip can be removed before sending', async () => {
+      const throwaway = {
+        fileName: `remove-me-${randomBytes(3).toString('hex')}.txt`,
+        mimeType: 'text/plain',
+        buffer: Buffer.from(`discarded ${randomBytes(6).toString('hex')}\n`, 'utf8'),
+      }
+      await attachDocument(page, throwaway)
+      const chip = fileChips(page).filter({ hasText: throwaway.fileName })
+      await expect(chip).toHaveCount(1, { timeout: 20_000 })
+      await expect(chip).toHaveAttribute('data-file-status', 'ready', { timeout: 20_000 })
+      await page.getByRole('button', { name: `Remove ${throwaway.fileName}` }).click()
+      await expect(fileChips(page)).toHaveCount(0, { timeout: 15_000 })
+    })
+
+    await test.step('the document is admitted as a ready file chip and the send is enabled', async () => {
       await attachDocument(page, document)
       const chip = fileChips(page).filter({ hasText: document.fileName })
       await expect(chip).toHaveCount(1, { timeout: 20_000 })
@@ -313,6 +351,9 @@ test('document-upload fixture: an attached text file reaches the model through t
 
       await expect(page.getByTestId('message-list')).toBeVisible({ timeout: 20_000 })
       await expect(page.locator('[data-chat-message-id]')).toHaveCount(2, { timeout: 120_000 })
+      // The sent bubble shows the attachment the user picked, not only the model's answer.
+      await expect(sentMessageAttachments(page)).toHaveCount(1, { timeout: 20_000 })
+      await expect(sentMessageAttachments(page)).toContainText(document.fileName)
       const response = page.getByTestId('agent-response').locator('.message-block.markdown-content')
       await expect(response).toHaveCount(1, { timeout: 120_000 })
       await expect(response).toContainText(documentAnswerRegex(documentSha), { timeout: 120_000 })
