@@ -774,7 +774,11 @@ describe('GfsBrowser', () => {
     expect(mockGfsFetchFileBlob).toHaveBeenCalledTimes(1)
     expect(treeFailureUsed).toBe(true)
     expect(previewFailureUsed).toBe(true)
-    expect(mockApiGet).toHaveBeenCalledWith('/api/v1/gfs/resolve', { uri: 'gfs://main/r12' })
+    expect(mockApiGet).toHaveBeenCalledWith(
+      '/api/v1/gfs/resolve',
+      { uri: 'gfs://main/r12' },
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
+    )
   })
 
   it.each(['avatar.PNG', 'notes.md', 'demo.mp4'])(
@@ -850,7 +854,11 @@ describe('GfsBrowser', () => {
         streamControllers[0]!.enqueue(new TextEncoder().encode(`${frame}\n`))
       })
       await waitFor(() =>
-        expect(mockApiGet).toHaveBeenCalledWith('/api/v1/gfs/resolve', { uri: file.gfsUri })
+        expect(mockApiGet).toHaveBeenCalledWith(
+          '/api/v1/gfs/resolve',
+          { uri: file.gfsUri },
+          expect.objectContaining({ signal: expect.any(AbortSignal) })
+        )
       )
       expect(screen.getByRole('dialog', { name: fileName })).toBe(dialog)
       expect(mockGfsFetchFileBlob).toHaveBeenCalledTimes(1)
@@ -992,10 +1000,11 @@ describe('GfsBrowser', () => {
     await within(breadcrumb).findByRole('button', { name: 'new-parent' })
     expect(within(breadcrumb).getByRole('button', { name: 'renamed-folder' })).toBeTruthy()
     expect(within(breadcrumb).queryByRole('button', { name: 'old-parent' })).toBeNull()
-    expect(mockApiGet).toHaveBeenCalledWith('/api/v1/gfs/by-path', {
-      drive: 'main',
-      path: '/new-parent/renamed-folder',
-    })
+    expect(mockApiGet).toHaveBeenCalledWith(
+      '/api/v1/gfs/by-path',
+      { drive: 'main', path: '/new-parent/renamed-folder' },
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
+    )
 
     mockApiSend.mockResolvedValueOnce({
       ok: true,

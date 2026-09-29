@@ -330,6 +330,7 @@ export function GfsBrowser(): React.JSX.Element {
   const [error, setError] = useState('')
   const loadSeqRef = useRef(0)
   const backgroundLoadSeqRef = useRef(0)
+  const entityChangeRefetchControllerRef = useRef<AbortController | null>(null)
   const loadedPageCountRef = useRef(1)
   const loadedLocationRef = useRef<string | null | undefined>(undefined)
   // Operator selects a resource to delegate access on (grant panel).
@@ -456,19 +457,28 @@ export function GfsBrowser(): React.JSX.Element {
   const currentLabel = current?.name === '/' ? DRIVE : current?.name || DRIVE
 
   const load = useCallback(
-    async (crumb: Crumb, cursor?: string, options?: { background?: boolean }): Promise<void> => {
+    async (
+      crumb: Crumb,
+      cursor?: string,
+      options?: { background?: boolean; signal?: AbortSignal }
+    ): Promise<void> => {
       const appending = Boolean(cursor)
       const background = Boolean(options?.background)
+      if (!background) {
+        entityChangeRefetchControllerRef.current?.abort()
+        entityChangeRefetchControllerRef.current = null
+      }
       // Background revalidation has its own sequence: it can be superseded by
       // user navigation, but never invalidates that navigation's request.
       const navigationSeq = background ? loadSeqRef.current : ++loadSeqRef.current
       const backgroundSeqAtStart = backgroundLoadSeqRef.current
       const backgroundSeq = background ? ++backgroundLoadSeqRef.current : undefined
       const isCurrent = () =>
-        background
+        !options?.signal?.aborted &&
+        (background
           ? backgroundLoadSeqRef.current === backgroundSeq && loadSeqRef.current === navigationSeq
           : loadSeqRef.current === navigationSeq &&
-            backgroundLoadSeqRef.current === backgroundSeqAtStart
+            backgroundLoadSeqRef.current === backgroundSeqAtStart)
       if (!background && !cursor) loadedPageCountRef.current = 1
       if (appending) {
         setLoadingMore(true)
@@ -485,14 +495,18 @@ export function GfsBrowser(): React.JSX.Element {
             : `/api/v1/gfs/resources/${encodeURIComponent(crumb.id)}/children`
         const query: Record<string, string> = { drive: DRIVE }
         if (cursor) query.cursor = cursor
-        let page = (await apiGet(path, query)) as TreePage
+        const fetchPage = (pageQuery: Record<string, string>) =>
+          options?.signal
+            ? apiGet(path, pageQuery, { signal: options.signal })
+            : apiGet(path, pageQuery)
+        let page = (await fetchPage(query)) as TreePage
         let allItems = [...page.items]
         let finalCursor = page.nextCursor
         let fetchedPageCount = 1
         if (background) {
           const targetPageCount = loadedPageCountRef.current
           for (let index = 1; index < targetPageCount && finalCursor; index += 1) {
-            page = (await apiGet(path, { drive: DRIVE, cursor: finalCursor })) as TreePage
+            page = (await fetchPage({ drive: DRIVE, cursor: finalCursor })) as TreePage
             allItems.push(...page.items)
             finalCursor = page.nextCursor
             fetchedPageCount += 1
@@ -681,7 +695,7 @@ export function GfsBrowser(): React.JSX.Element {
     }
     scheduleEntityChangeRecoveryRef.current = scheduleRecovery
 
-    const revalidateActionTargets = async () => {
+    const revalidateActionTargets = async (signal: AbortSignal) => {
       const targets = new Map<string, GfsChild>()
       for (const target of [selectedRef.current, renameTargetRef.current, moveTargetRef.current]) {
         if (target) targets.set(target.resourceId, target)
@@ -689,9 +703,11 @@ export function GfsBrowser(): React.JSX.Element {
       await Promise.all(
         Array.from(targets.values(), async target => {
           try {
-            const resolved = (await apiGet('/api/v1/gfs/resolve', {
-              uri: target.gfsUri,
-            })) as {
+            const resolved = (await apiGet(
+              '/api/v1/gfs/resolve',
+              { uri: target.gfsUri },
+              { signal }
+            )) as {
               resourceId: string
               rid: string
               gfsUri: string
@@ -700,6 +716,7 @@ export function GfsBrowser(): React.JSX.Element {
               bytes: number
               version: number
             }
+            if (signal.aborted) return
             const current: GfsChild = {
               ...target,
               resourceId: resolved.resourceId,
@@ -714,6 +731,7 @@ export function GfsBrowser(): React.JSX.Element {
             setRenameTarget(value => (value?.resourceId === target.resourceId ? current : value))
             setMoveTarget(value => (value?.resourceId === target.resourceId ? current : value))
           } catch (error) {
+            if (signal.aborted) return
             const status = entityChangeErrorStatus(error)
             if (status === 403 || status === 404) {
               setSelected(value => (value?.resourceId === target.resourceId ? null : value))
@@ -741,10 +759,14 @@ export function GfsBrowser(): React.JSX.Element {
         recoveryTimer = null
         recoveryDelay = 500
       }
+      entityChangeRefetchControllerRef.current?.abort()
+      const revalidationController = new AbortController()
+      entityChangeRefetchControllerRef.current = revalidationController
+      const signal = revalidationController.signal
       childCacheRef.current.clear()
       revalidateNextLoadRef.current = false
       setError('')
-      void revalidateActionTargets()
+      void revalidateActionTargets(signal)
       const previews = openPreviewsRef.current
       if (previews.length > 0) {
         const generation = ++previewRefreshGenerationRef.current
@@ -768,9 +790,11 @@ export function GfsBrowser(): React.JSX.Element {
         void Promise.all<ResolvedPreviewUpdate | null>(
           previews.map(async preview => {
             try {
-              const resolved = (await apiGet('/api/v1/gfs/resolve', {
-                uri: preview.gfsUri,
-              })) as {
+              const resolved = (await apiGet(
+                '/api/v1/gfs/resolve',
+                { uri: preview.gfsUri },
+                { signal }
+              )) as {
                 kind: string
                 name: string
                 bytes: number
@@ -779,7 +803,7 @@ export function GfsBrowser(): React.JSX.Element {
                 resourceId: string
                 gfsUri: string
               }
-              if (generation !== previewRefreshGenerationRef.current) return null
+              if (signal.aborted || generation !== previewRefreshGenerationRef.current) return null
               if (resolved.kind !== 'file') {
                 markUnavailable(preview)
                 return null
@@ -847,7 +871,7 @@ export function GfsBrowser(): React.JSX.Element {
                 candidateMimeType === currentMimeType
               return unchanged ? null : candidate
             } catch (error) {
-              if (generation !== previewRefreshGenerationRef.current) return null
+              if (signal.aborted || generation !== previewRefreshGenerationRef.current) return null
               const status = entityChangeErrorStatus(error)
               if (status === 403 || status === 404) markUnavailable(preview)
               if (isTransientEntityChangeRefetchError(error)) scheduleRecovery()
@@ -855,7 +879,7 @@ export function GfsBrowser(): React.JSX.Element {
             }
           })
         ).then(updates => {
-          if (generation !== previewRefreshGenerationRef.current) return
+          if (signal.aborted || generation !== previewRefreshGenerationRef.current) return
           for (const update of updates) {
             if (!update) continue
             if (update.kind === 'image') {
@@ -879,7 +903,7 @@ export function GfsBrowser(): React.JSX.Element {
       // Keep loaded rows, pagination, selection, and action dialogs visible
       // while the authoritative background read runs. `load` has a separate
       // sequence for background work, so it cannot cancel user navigation.
-      void load(visibleCrumb, undefined, { background: true })
+      void load(visibleCrumb, undefined, { background: true, signal })
       if (visibleCrumb.id === null) return
 
       const visibleResourceId = visibleCrumb.id
@@ -890,19 +914,22 @@ export function GfsBrowser(): React.JSX.Element {
         let refreshed: Crumb[] = [rootCrumb]
         let retryHierarchy = false
         try {
-          const resolved = (await apiGet('/api/v1/gfs/resolve', {
-            uri: `gfs://${DRIVE}/${visibleCrumb.rid ?? ridOfResourceId(visibleResourceId)}`,
-          })) as GfsResolvedLocation
+          const resolved = (await apiGet(
+            '/api/v1/gfs/resolve',
+            { uri: `gfs://${DRIVE}/${visibleCrumb.rid ?? ridOfResourceId(visibleResourceId)}` },
+            { signal }
+          )) as GfsResolvedLocation
           if (resolved.kind !== 'directory' || !resolved.path?.startsWith('/')) {
             throw new Error('Current GFS folder is no longer available')
           }
           let path = ''
           for (const segment of resolved.path.split('/').filter(Boolean)) {
             path += `/${segment}`
-            const ancestor = (await apiGet('/api/v1/gfs/by-path', {
-              drive: DRIVE,
-              path,
-            })) as GfsResolvedLocation
+            const ancestor = (await apiGet(
+              '/api/v1/gfs/by-path',
+              { drive: DRIVE, path },
+              { signal }
+            )) as GfsResolvedLocation
             if (ancestor.kind !== 'directory') {
               throw new Error('GFS folder hierarchy changed during refresh')
             }
@@ -912,6 +939,7 @@ export function GfsBrowser(): React.JSX.Element {
             throw new Error('GFS folder hierarchy changed during refresh')
           }
         } catch (error) {
+          if (signal.aborted) return
           // Do not keep presenting the stale hierarchy if the current folder
           // was deleted, moved during resolution, or is no longer authorized.
           if (isTransientEntityChangeRefetchError(error)) {
@@ -923,6 +951,7 @@ export function GfsBrowser(): React.JSX.Element {
         }
         if (
           generation !== hierarchyRefreshGenerationRef.current ||
+          signal.aborted ||
           trailEpoch !== trailReconstructionEpochRef.current ||
           currentCrumbRef.current?.id !== visibleResourceId
         ) {
@@ -1001,6 +1030,8 @@ export function GfsBrowser(): React.JSX.Element {
     return () => {
       active = false
       controller.abort()
+      entityChangeRefetchControllerRef.current?.abort()
+      entityChangeRefetchControllerRef.current = null
       if (retryTimer) clearTimeout(retryTimer)
       if (recoveryTimer) clearTimeout(recoveryTimer)
       if (scheduleEntityChangeRecoveryRef.current === scheduleRecovery) {
