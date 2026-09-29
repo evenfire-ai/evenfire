@@ -160,6 +160,20 @@ async function defaultDnsResolver(hostname: string): Promise<string[]> {
   return answers.map(answer => answer.address)
 }
 
+/**
+ * From a set of resolved addresses, return the ones that must be treated as
+ * BLOCKED: a non-IPv4 answer (cannot be range-checked, so fail closed) or an
+ * IPv4 that overlaps a private/metadata/link-local/multicast/reserved/internal
+ * range. Shared (D4) by the egress preflight and {@link validateOAuthEndpointUrl}
+ * so both classify resolved IPs by the exact same rule.
+ */
+function filterBlockedIpv4(addresses: string[]): string[] {
+  return addresses.filter(address => {
+    if (ipv4ToInt(address) === null) return true
+    return validatePublicCidr(`${address}/32`) !== null
+  })
+}
+
 /** Parse a Kubernetes resource quantity like "4000m" or "8Gi" into a number. */
 function parseCpuMillicores(val: string): number | null {
   if (val.endsWith('m')) return parseInt(val, 10)
@@ -419,10 +433,7 @@ export async function validateMcpServerSpecPreflight(
           )
           return
         }
-        const blocked = addresses.filter(address => {
-          if (ipv4ToInt(address) === null) return true
-          return validatePublicCidr(`${address}/32`) !== null
-        })
+        const blocked = filterBlockedIpv4(addresses)
         if (blocked.length > 0) {
           fields.forEach(field =>
             errors.push({
@@ -447,6 +458,111 @@ export async function validateMcpServerSpecPreflight(
   )
 
   return errors
+}
+
+/**
+ * Kernel core: validate an OAuth endpoint URL (spec 19 §4) AND return the resolved
+ * IPv4 addresses. scheme https + public host + resolve→non-blocked IPs, reusing
+ * isPublicDnsHostname/filterBlockedIpv4. `resolveDns` is injectable ⇒ testable in
+ * Vitest without a cluster.
+ *
+ * This is the single source of truth for the rule: both {@link validateOAuthEndpointUrl}
+ * (thin wrapper discarding the addresses) and {@link resolveValidatedOAuthEndpoint}
+ * (the pin, which CONSUMES the addresses so the socket connects to the exact IPs the
+ * validator resolved — closing the TOCTOU/DNS-rebinding window, H2) call it. The two
+ * MUST never drift, so the resolve+filter logic lives here once.
+ *
+ * `addresses` is the deduplicated set of resolved IPv4 addresses. When `errors` is
+ * empty it is guaranteed non-empty and all non-blocked (public) — the pin candidates.
+ */
+async function validateAndResolveOAuthEndpoint(
+  rawUrl: string,
+  field: string,
+  options: { resolveDns?: DnsResolver } = {}
+): Promise<{ errors: ValidationError[]; addresses: string[] }> {
+  let url: URL
+  try {
+    url = new URL(rawUrl)
+  } catch {
+    return { errors: [{ field, message: 'must be a valid absolute URL' }], addresses: [] }
+  }
+
+  const errors: ValidationError[] = []
+  if (url.protocol !== 'https:') {
+    errors.push({ field, message: 'must use https' })
+  }
+
+  const host = url.hostname
+  if (!isPublicDnsHostname(host)) {
+    // Same rule as the egress preflight: only syntactically-public hosts are
+    // resolved. An internal/literal/malformed host is rejected without a DNS
+    // lookup (never resolve to probe internal names).
+    errors.push({ field, message: 'host must be a public DNS hostname' })
+    return { errors, addresses: [] }
+  }
+
+  const resolveDns = options.resolveDns ?? defaultDnsResolver
+  let addresses: string[] = []
+  try {
+    addresses = Array.from(new Set(await resolveDns(host)))
+    if (addresses.length === 0) {
+      errors.push({ field, message: `host "${host}" did not resolve to an IPv4 A record` })
+    } else {
+      const blocked = filterBlockedIpv4(addresses)
+      if (blocked.length > 0) {
+        errors.push({
+          field,
+          message:
+            `host "${host}" resolved to blocked IPv4 address(es): ${blocked.join(', ')}. ` +
+            'OAuth endpoints must not resolve to private, metadata, link-local, multicast, reserved, or internal ranges.',
+        })
+      }
+    }
+  } catch (error) {
+    errors.push({
+      field,
+      message: `host "${host}" could not be resolved: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    })
+  }
+
+  return { errors, addresses }
+}
+
+/**
+ * Kernel de política sobre una URL de endpoint OAuth (spec 19 §4): scheme https +
+ * host público + resolve→IP no bloqueada. `resolveDns` inyectable ⇒ testeable en
+ * Vitest sin cluster. Devuelve [] si válida. Seam compartido para el carril
+ * self-hosted 'generic' (S3-B2) y el remoto (spec 02).
+ */
+export async function validateOAuthEndpointUrl(
+  rawUrl: string,
+  field: string,
+  options: { resolveDns?: DnsResolver } = {}
+): Promise<ValidationError[]> {
+  const { errors } = await validateAndResolveOAuthEndpoint(rawUrl, field, options)
+  return errors
+}
+
+/**
+ * Same rule as {@link validateOAuthEndpointUrl}, but on success RETURNS the resolved
+ * IPv4 addresses so a caller can PIN the socket to those exact IPs (spec 02 §4,
+ * H2 DNS-rebinding/TOCTOU). The addresses are the deduplicated, all-public set the
+ * validator resolved; a pinned fetch feeds them to its `lookup` so the connection
+ * cannot re-resolve to a private/metadata host between validation and connect.
+ *
+ * Fail-closed: any validation error (bad scheme, non-public host, blocked/empty
+ * resolution) yields `{ ok: false, errors }` and no addresses.
+ */
+export async function resolveValidatedOAuthEndpoint(
+  rawUrl: string,
+  field: string,
+  options: { resolveDns?: DnsResolver } = {}
+): Promise<{ ok: true; addresses: string[] } | { ok: false; errors: ValidationError[] }> {
+  const { errors, addresses } = await validateAndResolveOAuthEndpoint(rawUrl, field, options)
+  if (errors.length > 0) return { ok: false, errors }
+  return { ok: true, addresses }
 }
 
 export async function validateEgressBindingsPreflight(

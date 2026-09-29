@@ -20,75 +20,53 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { McpServerInfo } from '../../types'
-import type { BrokerTokenProviderDeps } from '../brokerTokenProvider'
-import { createBrokerTokenProvider } from '../brokerTokenProvider'
-import type { McpTokenProvider } from '../client'
 import {
   type GrantExistsResult,
-  buildGrantExistenceQueries,
   checkGrantExistence,
   selectRevokedPartitionKeys,
 } from '../grantExistenceClient'
-import {
-  type LiveOAuthPartition,
-  McpManager,
-  type McpPrincipal,
-  type McpTokenProviderFactory,
-  serializeClientKey,
-  userPrincipal,
-} from '../manager'
+import type { GrantExistenceChecker, McpCatalogBootstrapConfig } from '../grantProbe'
+import { type LiveOAuthPartition, McpManager, serializeClientKey, userPrincipal } from '../manager'
+import { type RemoteUpstreamState, brokerWiring, sweepOnce } from './helpers/brokerWiring'
+
+/** Bootstrap config for the inv-18 sweep case (values are irrelevant to the sweep). */
+function sweepBootstrapConfig(): McpCatalogBootstrapConfig {
+  return {
+    enabled: true,
+    waitBudgetMs: 4000,
+    probeTimeoutMs: 2000,
+    connectTimeoutMs: 8000,
+    negativeTtlMs: 15000,
+    failureTtlMs: 60000,
+    probesPerMin: 20,
+    backoffMs: 30000,
+  }
+}
 
 // ─── transport-aware SDK mock (Bearer presence drives the 401) ────────────────
-
-interface MockTransport {
-  requestHeaders: Record<string, string>
-  close: ReturnType<typeof vi.fn>
-}
-const sdk: {
-  transports: MockTransport[]
-  callToolImpl: ((auth: string) => Promise<unknown>) | null
-} = { transports: [], callToolImpl: null }
-
-vi.mock('@modelcontextprotocol/sdk/client/index.js', () => ({
-  Client: class MockClient {
-    private transport: MockTransport | null = null
-    connect = vi.fn(async (t: MockTransport) => {
-      this.transport = t
-    })
-    close = vi.fn().mockResolvedValue(undefined)
-    listTools = vi.fn(async () => ({
-      tools: [{ name: 'do', description: 'demo tool', inputSchema: { type: 'object' } }],
-    }))
-    callTool = vi.fn(async () => {
-      const auth = this.transport?.requestHeaders?.['Authorization']
-      // No Bearer models "no grant → no token"; the server rejects with 401.
-      if (!auth) {
-        const err = new Error('http 401') as Error & { code: number }
-        err.code = 401
-        throw err
-      }
-      if (sdk.callToolImpl) return sdk.callToolImpl(auth)
-      return { content: [{ type: 'text', text: 'ok' }], authorization: auth }
-    })
-  },
+// The lenient upstream (accepts initialize token-less, 401s at tools/call) and
+// the broker+exists wiring both come from the shared helper (T1: one source of
+// truth). The state is a plain literal in a synchronous vi.hoisted; each vi.mock
+// factory dynamically imports the builder — a factory runs before the file's
+// static imports resolve, so it cannot reference them directly.
+const sdk = vi.hoisted<RemoteUpstreamState>(() => ({
+  transports: [],
+  probeAuth: [],
+  callToolImpl: null,
+  toolCall401Count: 0,
 }))
-
-vi.mock('@modelcontextprotocol/sdk/client/streamableHttp.js', () => ({
-  StreamableHTTPClientTransport: class MockStreamable {
-    requestHeaders: Record<string, string>
-    close = vi.fn().mockResolvedValue(undefined)
-    constructor(_url: URL, opts?: { requestInit?: { headers?: Record<string, string> } }) {
-      this.requestHeaders = opts?.requestInit?.headers ?? {}
-      sdk.transports.push(this as unknown as MockTransport)
-    }
-  },
-}))
-
-vi.mock('@modelcontextprotocol/sdk/client/sse.js', () => ({
-  SSEClientTransport: class MockSSE {
-    close = vi.fn().mockResolvedValue(undefined)
-  },
-}))
+vi.mock('@modelcontextprotocol/sdk/client/index.js', async () => {
+  const { remoteUpstream } = await import('./helpers/brokerWiring')
+  return remoteUpstream({ strict: false }, sdk).clientModule
+})
+vi.mock('@modelcontextprotocol/sdk/client/streamableHttp.js', async () => {
+  const { remoteUpstream } = await import('./helpers/brokerWiring')
+  return remoteUpstream({ strict: false }, sdk).transportModule
+})
+vi.mock('@modelcontextprotocol/sdk/client/sse.js', async () => {
+  const { remoteUpstream } = await import('./helpers/brokerWiring')
+  return remoteUpstream({ strict: false }, sdk).sseModule
+})
 
 // ─── fixtures ─────────────────────────────────────────────────────────────────
 
@@ -119,78 +97,6 @@ function staticServer(name = 'airtable'): McpServerInfo {
     enabled: true,
     status: { deployed: true, ready: true },
   }
-}
-
-/**
- * A single fake `fetch` for both broker endpoints, reading a shared grant store.
- * `/user-token` mints while the grant exists (404 otherwise); `/grants/exists`
- * echoes the query coordinates and reports existence from the SAME store — the
- * control-api response shape reproduced faithfully.
- */
-function brokerWiring(grantStore: Set<string>): {
-  deps: BrokerTokenProviderDeps
-  factory: McpTokenProviderFactory
-  existsCalls: Array<Array<{ mcpServerName: string; userId?: string }>>
-  failExistsWith?: (status: number) => void
-} {
-  const existsCalls: Array<Array<{ mcpServerName: string; userId?: string }>> = []
-  let existsStatus = 200
-  const fetchImpl = vi.fn(async (url: string, init: RequestInit) => {
-    const body = JSON.parse(init.body as string)
-    if (url.endsWith('/api/v1/mcp-oauth/user-token')) {
-      const has = grantStore.has(`${body.mcpServerName}:${body.userId ?? ''}`)
-      return (has
-        ? {
-            status: 200,
-            json: async () => ({ token: `tok-${body.userId ?? 'ctx'}`, expiresAt: null }),
-          }
-        : { status: 404, json: async () => ({ error: 'no_grant' }) }) as unknown as Response
-    }
-    if (url.endsWith('/api/v1/mcp-oauth/grants/exists')) {
-      existsCalls.push(body.queries)
-      if (existsStatus !== 200) {
-        return {
-          status: existsStatus,
-          json: async () => ({ error: 'boom' }),
-        } as unknown as Response
-      }
-      const results: GrantExistsResult[] = body.queries.map(
-        (q: { mcpServerName: string; userId?: string }) => ({
-          mcpServerName: q.mcpServerName,
-          ...(q.userId !== undefined ? { userId: q.userId } : {}),
-          exists: grantStore.has(`${q.mcpServerName}:${q.userId ?? ''}`),
-        })
-      )
-      return { status: 200, json: async () => ({ results }) } as unknown as Response
-    }
-    throw new Error(`unexpected url ${url}`)
-  })
-  const deps: BrokerTokenProviderDeps = {
-    gatewayUrl: () => 'http://gw:8092',
-    controlToken: () => 'ctl',
-    fetchImpl: fetchImpl as unknown as typeof fetch,
-  }
-  const factory: McpTokenProviderFactory = (
-    server: McpServerInfo,
-    principal: McpPrincipal
-  ): McpTokenProvider => {
-    if (server.authKind === 'oauth-context') {
-      return createBrokerTokenProvider(server, {}, deps)
-    }
-    if (server.authKind === 'oauth-user' && principal.kind === 'user') {
-      return createBrokerTokenProvider(server, { userId: principal.userId }, deps)
-    }
-    return { resolve: async () => undefined, refresh: async () => undefined }
-  }
-  return { deps, factory, existsCalls, failExistsWith: (s: number) => (existsStatus = s) }
-}
-
-/** The sweep exactly as main.ts wires it (no duplicated decision logic). */
-async function sweepOnce(manager: McpManager, deps: BrokerTokenProviderDeps): Promise<number> {
-  const partitions = manager.listLiveOAuthPartitions()
-  if (partitions.length === 0) return 0
-  const results = await checkGrantExistence(deps, buildGrantExistenceQueries(partitions))
-  return manager.evictRevokedPartitions(selectRevokedPartitionKeys(partitions, results))
 }
 
 beforeEach(() => {
@@ -390,6 +296,40 @@ describe('listLiveOAuthPartitions', () => {
         key: serializeClientKey('ctx-gh', { kind: 'shared' }),
       },
     ])
+  })
+
+  // ── invariant 18: a bootstrapped partition is a full-fledged sweep subject ──
+  it('a bootstrapped partition appears in the sweep and is evicted on exists:false', async () => {
+    const grantStore = new Set(['gh:alice'])
+    const { deps, factory } = brokerWiring(grantStore)
+    const grantExistence: GrantExistenceChecker = (queries, { timeoutMs }) =>
+      checkGrantExistence({ ...deps, timeoutMs }, queries)
+    const manager = new McpManager(undefined, undefined, factory, {
+      grantExistence,
+      catalogBootstrap: sweepBootstrapConfig(),
+    })
+    // The bootstrap only considers REMOTE oauth servers (M1/M2).
+    await manager.addServer({ ...oauthUserServer('gh'), remote: true })
+
+    // No prior callTool: the partition is opened by the bootstrap alone.
+    const summary = await manager.bootstrapUserCatalog('alice')
+    expect(summary.admitted).toBe(1)
+
+    // It is exposed to the sweep exactly like a lazily-admitted partition.
+    const live = manager.listLiveOAuthPartitions()
+    expect(live).toEqual([
+      {
+        flavor: 'oauth-user',
+        serverName: 'gh',
+        userId: 'alice',
+        key: serializeClientKey('gh', userPrincipal('alice')),
+      },
+    ])
+
+    // Revoke the grant → the sweep evicts the bootstrapped partition.
+    grantStore.delete('gh:alice')
+    expect(await sweepOnce(manager, deps)).toBe(1)
+    expect(manager.listLiveOAuthPartitions()).toEqual([])
   })
 })
 

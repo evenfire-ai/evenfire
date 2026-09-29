@@ -8,6 +8,7 @@ import { buildAuthorizeUrl } from '../../oauth/authorizeUrlHelper.js'
 import {
   type McpServerOAuthReader,
   type McpServerOAuthSubject,
+  REMOTE_CALLBACK_CLIENT_SEGMENT,
   RecipeNotFoundError,
   type RecipeReader,
   type RecipeWithOAuthClients,
@@ -18,12 +19,13 @@ import { deriveOAuthEncryptionKey } from '../../oauth/encryption.js'
 import { integrationNotConfigured, isSecretNotFound } from '../../oauth/integrationNotConfigured.js'
 import {
   type McpServerOAuthSpecInput,
+  RemoteOAuthSpecIncoherentError,
   buildMcpServerGrantKey,
   resolveServerOAuth,
   resolveServerOAuthSubject,
 } from '../../oauth/mcpServerOAuthSpec.js'
+import { getAccessTokenReactive } from '../../oauth/reactiveTokenHelper.js'
 import { deleteOAuthGrant } from '../../oauth/store.js'
-import { getAccessToken } from '../../oauth/tokenHelper.js'
 import { getUserContexts } from '../../services/directory/index.js'
 import { K8sNotFoundError } from '../../services/resourceService.js'
 import { buildPublicCallbackUrl } from '../external/oauthCallback.js'
@@ -189,18 +191,29 @@ export function createInternalOAuthRouter(gateway: K8sGateway): Router {
         }
 
         const authType = server?.spec?.auth?.type
-        const resolved = resolveServerOAuthSubject(server)
-        if (authType !== 'oauth' || !resolved) {
+        let subject: ReturnType<typeof resolveServerOAuthSubject> = null
+        let incoherent: RemoteOAuthSpecIncoherentError | undefined
+        try {
+          subject = resolveServerOAuthSubject(server)
+        } catch (err) {
+          if (!(err instanceof RemoteOAuthSpecIncoherentError)) throw err
+          incoherent = err
+        }
+        // An incoherent remote server is refused only after the membership gate, so
+        // a non-member learns nothing about its configuration; until then the gates
+        // run on its grant coordinate, derived by the same rule.
+        const coord = subject ?? (incoherent ? resolveServerOAuth(server) : null)
+        if (authType !== 'oauth' || !coord) {
           return res.status(400).json({ error: 'not_oauth_server' })
         }
 
         // Context-identity servers: the AUTHORITATIVE Context is spec.contextRef.
         // A body contextId, if present, must match it (cross-context guard).
-        if (resolved.grantScope === 'context') {
-          if (!resolved.contextRef) {
+        if (coord.grantScope === 'context') {
+          if (!coord.contextRef) {
             return res.status(400).json({ error: 'server_missing_context' })
           }
-          if (typeof contextId === 'string' && contextId !== resolved.contextRef) {
+          if (typeof contextId === 'string' && contextId !== coord.contextRef) {
             return res.status(400).json({ error: 'context_mismatch' })
           }
         }
@@ -221,16 +234,30 @@ export function createInternalOAuthRouter(gateway: K8sGateway): Router {
         // (D4). Deliberately NOT resolveInvocableMcpServersForContexts: that
         // applies U3's grant-presence gate, which filters out servers WITHOUT a
         // grant — exactly the ones connect exists to bootstrap (chicken-and-egg).
-        if (!resolved.contextRef) {
+        if (!coord.contextRef) {
           return res.status(403).json({ error: 'context_membership_denied' })
         }
         const { contextIds } = await getUserContexts(userId)
-        if (!contextIds.includes(resolved.contextRef)) {
+        if (!contextIds.includes(coord.contextRef)) {
           return res.status(403).json({ error: 'context_membership_denied' })
         }
+        if (incoherent) throw incoherent
+        const resolved = subject
+        if (!resolved) return res.status(400).json({ error: 'not_oauth_server' })
 
         const oauthClientId = resolved.decl.id
-        const redirectUri = buildPublicCallbackUrl(req, oauthClientId, config.oauthCallbackBaseUrl)
+        // Remote lane registers ONE stable redirect_uri (`/oauth-callback/remote`),
+        // so the callback URL segment is the reserved constant, NOT the client id —
+        // the real binding rides the signed state. Baked keeps the per-client
+        // segment. The exchange re-derives the same redirect_uri from this segment.
+        const callbackSegment = resolved.decl.remote
+          ? REMOTE_CALLBACK_CLIENT_SEGMENT
+          : oauthClientId
+        const redirectUri = buildPublicCallbackUrl(
+          req,
+          callbackSegment,
+          config.oauthCallbackBaseUrl
+        )
 
         const result = await buildAuthorizeUrl(
           {
@@ -285,6 +312,9 @@ export function createInternalOAuthRouter(gateway: K8sGateway): Router {
             return res.status(500).json({ error: 'internal_error' })
         }
       } catch (err) {
+        if (err instanceof RemoteOAuthSpecIncoherentError) {
+          return res.status(409).json({ error: err.code, reason: err.reason })
+        }
         next(err)
       }
     }
@@ -517,7 +547,7 @@ export function createInternalOAuthRouter(gateway: K8sGateway): Router {
           return res.status(400).json({ error: 'invalid_recipe_namespace' })
         }
 
-        const result = await getAccessToken(
+        const result = await getAccessTokenReactive(
           {
             grantKind: 'user',
             recipeNamespace: recipeNs,
