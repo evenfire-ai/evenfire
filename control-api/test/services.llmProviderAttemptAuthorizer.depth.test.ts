@@ -59,6 +59,19 @@ function nestedArrays(depth: number): string {
   return `{"x":${'['.repeat(depth)}${']'.repeat(depth)}}`
 }
 
+/** Iterative (stack-free) depth of a JSON tree: the root container is level 1. */
+function nestingDepth(root: unknown): number {
+  let deepest = 0
+  const pending: Array<{ value: unknown; level: number }> = [{ value: root, level: 1 }]
+  for (let next = pending.pop(); next !== undefined; next = pending.pop()) {
+    if (typeof next.value !== 'object' || next.value === null) continue
+    deepest = Math.max(deepest, next.level)
+    const children = Array.isArray(next.value) ? next.value : Object.values(next.value)
+    for (const child of children) pending.push({ value: child, level: next.level + 1 })
+  }
+  return deepest
+}
+
 function nestedObjects(depth: number): string {
   return `${'{"n":'.repeat(depth - 1)}{}${'}'.repeat(depth - 1)}`
 }
@@ -87,19 +100,10 @@ describe('authorizeLlmProviderAttempt nesting depth guard', () => {
     for (const depth of [5000, 150000]) {
       it(`rejects a ${depth}-deep ${p.provider} request with invalid_request, not a RangeError`, async () => {
         const body = wireBody(p, nestedArrays(depth))
-        // Exercising serialization at this depth proves the fixture reaches
-        // the scanner. Whether V8's JSON.stringify overflows the stack at
-        // exactly this depth is platform-dependent; the depth guard below is
-        // the platform-independent contract.
-        if (depth === 150000) {
-          try {
-            JSON.stringify(body)
-          } catch {
-            // A RangeError here confirms the fixture exceeds serializer
-            // limits; completing without an error is equally acceptable on
-            // runtimes with deeper native stacks.
-          }
-        }
+        // Whether V8's JSON.stringify overflows the stack at this depth is
+        // platform-dependent, so the fixture is verified by measuring its
+        // depth instead; the guard below is the platform-independent contract.
+        expect(nestingDepth(body)).toBeGreaterThanOrEqual(depth)
         const current = deps()
         const attempt = authorizeLlmProviderAttempt(claims(p.scope), body, current)
         await expect(attempt).rejects.toBeInstanceOf(LlmProviderAttemptAuthorizeError)
@@ -111,6 +115,7 @@ describe('authorizeLlmProviderAttempt nesting depth guard', () => {
 
     it(`rejects deep nesting under an unknown ${p.provider} body key before serializing`, async () => {
       const body = wireBody(p, '{"type":"object"}', `,"extra":${nestedArrays(150000)}`)
+      expect(nestingDepth(body)).toBeGreaterThanOrEqual(150000)
       const current = deps()
       const attempt = authorizeLlmProviderAttempt(claims(p.scope), body, current)
       await expect(attempt).rejects.toMatchObject({ code: 'invalid_request' })

@@ -1,9 +1,10 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
 import type { K8sGateway } from '../src/k8s.js'
 import { createRpcAccessUsersRouter } from '../src/routes/rpc-access/users.js'
 import { DirectRunBindingConflictError } from '../src/services/tracing/directRunAttributionBindingService.js'
+import { signRpcAccessToken } from '../src/utils/auth/rpcAuthToken.js'
 
 /**
  * HTTP-level tests for the authorization gate on:
@@ -45,39 +46,56 @@ vi.mock('../src/services/directory/index.js', () => svc)
 // token — the R2 per-session model-selector flow — is accepted, and that a
 // `mcp:servers:list`-only token is still rejected) run against the REAL
 // middleware + REAL signed tokens in routes.profile.test.ts.
-vi.mock('../src/middleware/rpcAccessAuth.js', () => ({
-  requireValidRpcAccessToken:
-    () =>
-    (
-      req: { params: Record<string, string>; rpcAuth?: Record<string, unknown> },
-      _res: unknown,
-      next: () => void
-    ) => {
-      req.rpcAuth = {
-        ...req.rpcAuth,
-        sub: req.params.userId,
-        hostRefs: [req.params.hostRef],
-      }
-      next()
-    },
-  requireValidRpcAccessTokenAny:
-    () =>
-    (
-      req: { params: Record<string, string>; rpcAuth?: Record<string, unknown> },
-      _res: unknown,
-      next: () => void
-    ) => {
-      req.rpcAuth = {
-        ...req.rpcAuth,
-        sub: req.params.userId,
-        hostRefs: [req.params.hostRef],
-      }
-      next()
-    },
-  requireRpcTokenUserMatch: () => (_req: unknown, _res: unknown, next: () => void) => next(),
-  requireRpcTokenTeamMatch: () => (_req: unknown, _res: unknown, next: () => void) => next(),
-  requireRpcTokenHostMatch: () => (_req: unknown, _res: unknown, next: () => void) => next(),
+//
+// The stub is steerable per test through `authState`, always reset in
+// afterEach: `claims` overrides fields the stub would otherwise derive from the
+// URL (so `sub` / `hostRefs` can be made to disagree with it), `omitClaims`
+// lets the request through with no `rpcAuth` at all, and `realMiddleware`
+// delegates to the REAL middleware so a genuine scope denial can be observed.
+const authState = vi.hoisted(() => ({
+  claims: {} as Record<string, unknown>,
+  omitClaims: false,
+  realMiddleware: false,
 }))
+
+vi.mock('../src/middleware/rpcAccessAuth.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/middleware/rpcAccessAuth.js')>()
+  type StubReq = { params: Record<string, string>; rpcAuth?: Record<string, unknown> }
+  const stubAuth = (req: StubReq, next: () => void) => {
+    if (!authState.omitClaims) {
+      req.rpcAuth = {
+        ...req.rpcAuth,
+        sub: req.params.userId,
+        hostRefs: [req.params.hostRef],
+        ...authState.claims,
+      }
+    }
+    next()
+  }
+  return {
+    requireValidRpcAccessToken:
+      (...args: Parameters<typeof actual.requireValidRpcAccessToken>) =>
+      (req: StubReq, res: unknown, next: () => void) =>
+        authState.realMiddleware
+          ? actual.requireValidRpcAccessToken(...args)(req as never, res as never, next)
+          : stubAuth(req, next),
+    requireValidRpcAccessTokenAny:
+      (...args: Parameters<typeof actual.requireValidRpcAccessTokenAny>) =>
+      (req: StubReq, res: unknown, next: () => void) =>
+        authState.realMiddleware
+          ? actual.requireValidRpcAccessTokenAny(...args)(req as never, res as never, next)
+          : stubAuth(req, next),
+    requireRpcTokenUserMatch: () => (_req: unknown, _res: unknown, next: () => void) => next(),
+    requireRpcTokenTeamMatch: () => (_req: unknown, _res: unknown, next: () => void) => next(),
+    requireRpcTokenHostMatch: () => (_req: unknown, _res: unknown, next: () => void) => next(),
+  }
+})
+
+afterEach(() => {
+  authState.claims = {}
+  authState.omitClaims = false
+  authState.realMiddleware = false
+})
 
 type HostCRD = { metadata: { name: string }; spec?: { enabled?: boolean } }
 
@@ -106,6 +124,10 @@ function buildApp(hosts: HostCRD[], rpcAuth?: { teamId?: string }, bindingBudget
   )
   return { app, gatewayStub, bindingService }
 }
+
+// Pinned literally on purpose: rpc-proxy reads this exact header name, so the
+// test must fail if the exported constant is ever renamed.
+const DENIAL_HEADER = 'x-host-access-denial-reason'
 
 const DIRECT_BINDING_BODY = {
   runId: '00000000-0000-4000-8000-000000000123',
@@ -187,6 +209,7 @@ describe('POST /rpc/access/users/:userId/mcp-hosts/:hostRef — atomic access an
       .post(`/rpc/access/users/${userId}/mcp-hosts/host-a`)
       .send(DIRECT_BINDING_BODY)
       .expect(403)
+      .expect(DENIAL_HEADER, 'directory_grant_missing')
 
     expect(gatewayStub.listResource).not.toHaveBeenCalled()
     expect(bindingService.bind).not.toHaveBeenCalled()
@@ -344,6 +367,9 @@ describe('GET /rpc/access/users/:userId/mcp-hosts/:hostRef — CHECK #1 (user_ag
       .get(`/rpc/access/users/${userId}/mcp-hosts/${hostRef}`)
       .expect(403)
 
+    // The reason travels out of band so the body below can stay byte-identical.
+    expect(res.headers[DENIAL_HEADER]).toBe('directory_grant_missing')
+
     // CRITICAL contract: the response body MUST be exactly {"error":"Forbidden"}.
     // The Desktop App error "No permitted scopes/hostRefs for requested RPC token"
     // is a CLIENT-SIDE translation of this 21-byte backend response. If you
@@ -366,6 +392,7 @@ describe('GET /rpc/access/users/:userId/mcp-hosts/:hostRef — CHECK #1 (user_ag
       .get(`/rpc/access/users/user-has-chatllm-only/mcp-hosts/product`)
       .expect(403)
     expect(res.body).toEqual({ error: 'Forbidden' })
+    expect(res.headers[DENIAL_HEADER]).toBe('directory_grant_missing')
   })
 
   it("is an exact-string match (no substring bypass) — user with 'allinone' cannot access 'allinone2'", async () => {
@@ -423,6 +450,7 @@ describe('GET /rpc/access/users/:userId/mcp-hosts/:hostRef — CHECK #2 (Host CR
       .get(`/rpc/access/users/user-orphan/mcp-hosts/researcher`)
       .expect(403)
     expect(res.body).toEqual({ error: 'Forbidden' })
+    expect(res.headers[DENIAL_HEADER]).toBe('host_missing')
   })
 
   it('returns 403 when the gateway returns an empty list of hosts', async () => {
@@ -445,6 +473,7 @@ describe('GET /rpc/access/users/:userId/mcp-hosts/:hostRef — CHECK #3 (host mu
     ])
     const res = await request(app).get(`/rpc/access/users/u/mcp-hosts/product`).expect(403)
     expect(res.body).toEqual({ error: 'Forbidden' })
+    expect(res.headers[DENIAL_HEADER]).toBe('host_disabled')
   })
 
   it('returns 200 when spec.enabled is undefined (default permissive, the common case)', async () => {
@@ -537,6 +566,7 @@ describe('GET /rpc/access/users/:userId/mcp-hosts/:hostRef — team-level access
       .get(`/rpc/access/users/${userId}/mcp-hosts/${hostRef}`)
       .expect(403)
     expect(res.body).toEqual({ error: 'Forbidden' })
+    expect(res.headers[DENIAL_HEADER]).toBe('directory_grant_missing')
   })
 
   it('returns 403 when user_agents is empty AND no teamId is in the token', async () => {
@@ -547,6 +577,7 @@ describe('GET /rpc/access/users/:userId/mcp-hosts/:hostRef — team-level access
 
     const res = await request(app).get(`/rpc/access/users/u/mcp-hosts/development`).expect(403)
     expect(res.body).toEqual({ error: 'Forbidden' })
+    expect(res.headers[DENIAL_HEADER]).toBe('directory_grant_missing')
     // getTeamAgents must NOT be called when there is no teamId to look up
     expect(svc.getTeamAgents).not.toHaveBeenCalled()
   })
@@ -579,5 +610,179 @@ describe('Sibling endpoint sanity: GET /rpc/access/users/:userId/agents', () => 
     const { app } = buildApp([])
     const res = await request(app).get(`/rpc/access/users/u/agents`).expect(200)
     expect(res.body).toEqual({ userId: 'u', agentNames: ['chatllm', 'product'] })
+  })
+})
+
+describe('host access denial reason header (rpc-proxy contract)', () => {
+  beforeEach(() => {
+    svc.getUserAgents.mockReset()
+    svc.getCurrentTeam.mockReset()
+    svc.getTeamAgents.mockReset()
+  })
+
+  const HOST_URL = (userId: string, hostRef: string) =>
+    `/rpc/access/users/${userId}/mcp-hosts/${hostRef}`
+  const KNOWN_HOSTS: HostCRD[] = [{ metadata: { name: 'host-a' }, spec: { enabled: true } }]
+
+  type DenialCase = {
+    reason: string
+    arrange: (userId: string) => { hosts: HostCRD[]; rpcAuth?: { teamId?: string } }
+  }
+
+  // One case per control-api denial reason that reaches the handler. `arrange`
+  // wires the directory / claims / Host CRs so exactly that reason fires.
+  const DENIAL_CASES: DenialCase[] = [
+    {
+      reason: 'directory_grant_missing',
+      arrange: userId => {
+        svc.getUserAgents.mockResolvedValue({ userId, agentNames: [] })
+        return { hosts: KNOWN_HOSTS }
+      },
+    },
+    {
+      reason: 'team_membership_missing',
+      arrange: userId => {
+        svc.getUserAgents.mockResolvedValue({ userId, agentNames: [] })
+        svc.getCurrentTeam.mockResolvedValue(null)
+        return { hosts: KNOWN_HOSTS, rpcAuth: { teamId: 'team-gone' } }
+      },
+    },
+    {
+      reason: 'subject_mismatch',
+      arrange: userId => {
+        svc.getUserAgents.mockResolvedValue({ userId, agentNames: ['host-a'] })
+        authState.claims = { sub: 'someone-else' }
+        return { hosts: KNOWN_HOSTS }
+      },
+    },
+    {
+      reason: 'host_claim_missing',
+      arrange: userId => {
+        svc.getUserAgents.mockResolvedValue({ userId, agentNames: ['host-a'] })
+        authState.claims = { hostRefs: ['other-host'] }
+        return { hosts: KNOWN_HOSTS }
+      },
+    },
+    {
+      reason: 'host_missing',
+      arrange: userId => {
+        svc.getUserAgents.mockResolvedValue({ userId, agentNames: ['host-a'] })
+        return { hosts: [] }
+      },
+    },
+    {
+      reason: 'host_disabled',
+      arrange: userId => {
+        svc.getUserAgents.mockResolvedValue({ userId, agentNames: ['host-a'] })
+        return { hosts: [{ metadata: { name: 'host-a' }, spec: { enabled: false } }] }
+      },
+    },
+  ]
+
+  it.each(DENIAL_CASES)(
+    'GET 403 carries the reason $reason in the header and keeps the 21-byte body',
+    async ({ reason, arrange }) => {
+      const userId = 'user-1'
+      const { hosts, rpcAuth } = arrange(userId)
+      const { app } = buildApp(hosts, rpcAuth)
+
+      const res = await request(app).get(HOST_URL(userId, 'host-a')).expect(403)
+
+      expect(res.headers[DENIAL_HEADER]).toBe(reason)
+      expect(res.body).toEqual({ error: 'Forbidden' })
+      expect(Buffer.byteLength(res.text, 'utf-8')).toBe(21)
+    }
+  )
+
+  it.each(DENIAL_CASES)(
+    'POST 403 carries the reason $reason in the header, keeps the 21-byte body and records no binding',
+    async ({ reason, arrange }) => {
+      const userId = 'user-1'
+      const { hosts, rpcAuth } = arrange(userId)
+      const { app, bindingService } = buildApp(hosts, rpcAuth)
+
+      const res = await request(app)
+        .post(HOST_URL(userId, 'host-a'))
+        .send(DIRECT_BINDING_BODY)
+        .expect(403)
+
+      expect(res.headers[DENIAL_HEADER]).toBe(reason)
+      expect(res.body).toEqual({ error: 'Forbidden' })
+      expect(Buffer.byteLength(res.text, 'utf-8')).toBe(21)
+      // Witness for the negative: the route was entered and denied by the
+      // handler (header present above), and it never reached the binding step.
+      expect(bindingService.bind).not.toHaveBeenCalled()
+    }
+  )
+
+  it('GET without verified claims is denied with claims_missing', async () => {
+    authState.omitClaims = true
+    const { app } = buildApp(KNOWN_HOSTS)
+
+    const res = await request(app).get(HOST_URL('user-1', 'host-a')).expect(403)
+
+    expect(res.headers[DENIAL_HEADER]).toBe('claims_missing')
+    expect(Buffer.byteLength(res.text, 'utf-8')).toBe(21)
+    expect(svc.getUserAgents).not.toHaveBeenCalled()
+  })
+
+  it('POST without verified claims is denied with claims_missing', async () => {
+    authState.omitClaims = true
+    const { app, bindingService } = buildApp(KNOWN_HOSTS)
+
+    const res = await request(app)
+      .post(HOST_URL('user-1', 'host-a'))
+      .send(DIRECT_BINDING_BODY)
+      .expect(403)
+
+    expect(res.headers[DENIAL_HEADER]).toBe('claims_missing')
+    expect(Buffer.byteLength(res.text, 'utf-8')).toBe(21)
+    expect(bindingService.bind).not.toHaveBeenCalled()
+  })
+
+  it('a successful authorization carries no denial header', async () => {
+    svc.getUserAgents.mockResolvedValue({ userId: 'user-1', agentNames: ['host-a'] })
+    const { app } = buildApp(KNOWN_HOSTS)
+
+    const res = await request(app).get(HOST_URL('user-1', 'host-a')).expect(200)
+
+    expect(res.body.hostRef).toBe('host-a')
+    expect(res.headers[DENIAL_HEADER]).toBeUndefined()
+  })
+
+  it('a middleware scope denial carries no denial header (only handler denials do)', async () => {
+    authState.realMiddleware = true
+    svc.getUserAgents.mockResolvedValue({ userId: 'user-1', agentNames: [] })
+    const { app } = buildApp(KNOWN_HOSTS)
+    const tokenWith = (scopes: Array<'mcp:servers:list' | 'host:status:read'>, jti: string) =>
+      signRpcAccessToken({
+        sub: 'user-1',
+        typ: 'user',
+        teamId: 'team-1',
+        role: 'member',
+        scopes,
+        hostRefs: ['host-a'],
+        jti,
+      })
+
+    // Scope not in the route's allow-list: the REAL middleware answers 403.
+    const scopeDenied = await request(app)
+      .get(HOST_URL('user-1', 'host-a'))
+      .set('x-rpc-access-token', tokenWith(['mcp:servers:list'], 'rpc-jti-scope-denied'))
+      .expect(403)
+    expect(scopeDenied.body).toEqual({ error: 'Forbidden' })
+    expect(scopeDenied.headers[DENIAL_HEADER]).toBeUndefined()
+    // Witness: the handler never ran for the scope denial.
+    expect(svc.getUserAgents).not.toHaveBeenCalled()
+
+    // Same real middleware, allowed scope: the handler runs and its denial DOES
+    // carry the header, proving the absence above is the middleware's doing.
+    const handlerDenied = await request(app)
+      .get(HOST_URL('user-1', 'host-a'))
+      .set('x-rpc-access-token', tokenWith(['host:status:read'], 'rpc-jti-handler-denied'))
+      .expect(403)
+    // The token carries a teamId and the directory stub knows no such team.
+    expect(handlerDenied.headers[DENIAL_HEADER]).toBe('team_membership_missing')
+    expect(svc.getUserAgents).toHaveBeenCalledTimes(1)
   })
 })
