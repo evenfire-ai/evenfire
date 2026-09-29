@@ -1925,10 +1925,19 @@ export class HostReconciler {
             )
             return null
           }
+          // A fresh bootstrap is consumed here when it is bound to this
+          // Deployment (a wake bootstrap) or when a Ready Deployment already
+          // runs its revision (a normal mint whose pod booted before channel
+          // authority was lost). The pod rotates the single-use refresh token
+          // it booted with, so leaving the record fresh would later roll a new
+          // pod onto that revoked token. The pass returns after the one write;
+          // GFS renewal follows on the next hold pass.
           if (
             existing.metadata?.annotations?.[RUNTIME_TOKEN_BOOTSTRAP_STATE_ANNOTATION] ===
               RUNTIME_TOKEN_BOOTSTRAP_STATE_FRESH &&
-            HostReconciler.bootstrapBindingMatchesDeployment(existing, deployment)
+            (HostReconciler.bootstrapBindingMatchesDeployment(existing, deployment) ||
+              (HostReconciler.deploymentReady(deployment) &&
+                HostReconciler.deploymentRuntimeTokenRevision(deployment) === existingRevision))
           ) {
             const appliedRevision = HostReconciler.deploymentRuntimeTokenRevision(deployment)
             if (HostReconciler.deploymentReady(deployment)) {

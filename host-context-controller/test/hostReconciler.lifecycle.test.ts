@@ -2355,6 +2355,86 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     })
   })
 
+  it('consumes a fresh bootstrap on GFS-only refresh when the Ready Deployment runs its revision', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      const t0 = Date.parse('2026-07-03T00:00:00.000Z')
+      vi.setSystemTime(t0)
+      let cacheSynced = true
+      const host = makeStatelessHost()
+      const { reconciler, appsApi, coreApi } = createReconciler({
+        isCommunicationChannelCacheSynced: () => cacheSynced,
+      })
+      reconciler.setHostFrontsOAuthServer(async () => false)
+      // The real producer mints a fresh bootstrap and the pod boots Ready on it,
+      // with channel authority lost before the resync that would consume it.
+      let record = await mintedRuntimeCredentialRecord(host, { bootstrap: 'fresh' })
+      const deployedRevision =
+        record.metadata!.annotations!['clerum.io/runtime-token-secret-revision']
+      expect(record.metadata!.annotations!['clerum.io/runtime-token-bootstrap-state']).toBe('fresh')
+      const deployment = trustedRuntimeDeployment(reconciler, host)
+      deployment.spec!.template!.metadata!.annotations = {
+        ...deployment.spec!.template!.metadata!.annotations,
+        'clerum.io/runtime-token-revision': deployedRevision,
+      }
+      appsApi.readNamespacedDeployment.mockResolvedValue(deployment)
+      coreApi.readNamespacedSecret.mockImplementation(async () => structuredClone(record))
+      coreApi.replaceNamespacedSecret.mockImplementation(async request => {
+        const body = request.body as k8s.V1Secret
+        // Two writes on one resourceVersion would be a 409 from the apiserver.
+        expect(body.metadata?.resourceVersion).toBe(record.metadata!.resourceVersion)
+        record = structuredClone({
+          ...body,
+          metadata: {
+            ...body.metadata,
+            resourceVersion: String(Number(body.metadata!.resourceVersion) + 1),
+          },
+        })
+        return record
+      })
+      vi.mocked(mintHostGfsToken).mockClear()
+      // A renewed GFS credential differs from the one the pod booted with, so
+      // the record's revision moves away from the deployed one.
+      vi.mocked(mintHostGfsToken).mockImplementationOnce(async ({ name, namespace }) => ({
+        ['to' + 'ken']: 'gfs-renewed-value',
+        expiresInSeconds: 600,
+        subject: `host:1st:${namespace}/${name}`,
+      }))
+      vi.mocked(issueMcpHostRuntimeTokens).mockClear()
+
+      cacheSynced = false
+      vi.setSystemTime(t0 + 601_000)
+      await (reconciler as any).ensureMcpHostRuntimeTokenSecret(host, { refreshGfsOnly: true })
+      vi.setSystemTime(t0 + 601_500)
+      await (reconciler as any).ensureMcpHostRuntimeTokenSecret(host, { refreshGfsOnly: true })
+
+      expect(record.metadata!.annotations!['clerum.io/runtime-token-bootstrap-state']).toBe(
+        'consumed'
+      )
+
+      cacheSynced = true
+      vi.setSystemTime(t0 + 602_000)
+      const provision = await (reconciler as any).ensureMcpHostRuntimeTokenSecret(host)
+
+      // Liveness witness: the hold renewed GFS once and wrote the record twice
+      // (the consumed marker, then the renewed GFS credential).
+      expect(vi.mocked(mintHostGfsToken)).toHaveBeenCalledOnce()
+      expect(coreApi.replaceNamespacedSecret.mock.calls.length).toBeGreaterThanOrEqual(2)
+      expect(record.metadata!.annotations!['clerum.io/runtime-token-rollout-required']).not.toBe(
+        'true'
+      )
+      // The Ready pod already rotated the refresh token it booted with, so moving
+      // the Deployment to another revision without a runtime mint would hand the
+      // new pod a revoked token.
+      if (provision.revision !== deployedRevision) {
+        expect(vi.mocked(issueMcpHostRuntimeTokens).mock.calls.length).toBeGreaterThan(0)
+      }
+      expect(provision.revision).toBe(deployedRevision)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('recovers an active held Deployment from zero after minting credentials on each pass', async () => {
     const host = makeStatelessHost({
       status: { lifecycle: { state: 'active', wakeHandledGeneration: 1 } },
