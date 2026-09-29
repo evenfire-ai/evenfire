@@ -634,6 +634,28 @@ assert_file "${pids_dir}/control-ui.pid" 'stop-pf keeps a live other-worktree re
 assert_alive "${FOREIGN_PID}" 'stop-pf never signals the process behind another worktree record'
 rm -f "${pids_dir}/control-ui.pid"
 
+# pf must not start a forward over a record it could not stop: start_pf runs
+# under `|| failed++`, where errexit is suspended, so a failed stop_own_pf has
+# to return explicitly or the control-ui forward is launched anyway.
+reset_state
+write_control_ui_record "$(dead_pid)" 'Mon Jan  1 00:00:00 2024' "${other_worktree}"
+bp pf-over-foreign-record pf
+assert_rc 1 'pf with another worktree control-ui record'
+assert_output_has 'belongs to a different profile, context, worktree, service, or port binding' \
+  'pf ran the ownership check on the other-worktree control-ui record'
+assert_output_has '1 port-forward(s) failed to start' 'pf counts the control-ui forward it refused to start'
+# Witness: the other required forwards were launched in the same run.
+assert_log_count 'port-forward --address=127.0.0.1' 3 'pf starts every other present service'
+assert_log_count 'port-forward --address=127.0.0.1 svc/control-ui' 0 \
+  'pf must not launch a control-ui forward over a record it could not stop'
+pf_owner_read_record "${pids_dir}/control-ui.pid" || fail 'the other-worktree control-ui record is unreadable'
+[[ "${PF_OWNER_RECORD_WORKTREE}" == "${other_worktree}" ]] ||
+  fail "pf replaced the other-worktree control-ui record (worktree=${PF_OWNER_RECORD_WORKTREE})"
+ok
+rm -f "${pids_dir}/control-ui.pid"
+bp pf-over-foreign-record-cleanup stop-pf
+assert_rc 0 'stop-pf clears the forwards pf started next to the foreign record'
+
 reset_state
 start_foreign_process
 write_control_ui_record "${FOREIGN_PID}" "$(pf_owner_process_start "${FOREIGN_PID}")" "${repo}"

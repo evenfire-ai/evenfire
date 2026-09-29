@@ -549,14 +549,8 @@ grep -Fq 'CONTROL_DB_RESET_PVC_UID' "$ROOT/scripts/minikube/t2.sh"
 # branch-profile.sh lifecycle (preflight, start, status, pf, health, pf-health,
 # stop-pf, stop, delete, prepare-shims) is exercised end to end against a
 # fixture repository with PATH stubs for kubectl, minikube, helm, docker and
-# curl; it asserts exit codes, the stub call log and pidfile state.
+# curl; it asserts exit codes, the stub call log and pidfile state, including
+# that pf never launches a forward over a record start_pf could not stop.
 bash "$ROOT/scripts/tests/test-branch-profile-lifecycle.sh"
-# The one path the stubs do not reach: a failed stop of an existing record
-# inside start_pf. start_pf runs under `|| failed++`, where errexit is
-# suspended, so it must return explicitly.
-BRANCH_PROFILE="$ROOT/scripts/minikube-profiles/branch-profile.sh"
-start_pf_body="$(awk '$0 == "start_pf() {" { on = 1; next } on && $0 == "}" { exit } on { print }' "$BRANCH_PROFILE")"
-[[ -n "$start_pf_body" ]] || fail 'branch-profile.sh function start_pf not found or empty'
-[[ "$start_pf_body" == *'stop_own_pf'*'|| return 1'* ]] || fail 'start_pf must return explicitly on a failed stop because errexit is suspended under || failed++'
 
 printf 'PASS: local Minikube T0/T1/T2 scenario checks\n'
