@@ -1158,14 +1158,10 @@ cmd_stop_pf() {
     return 0
   fi
   local pidfile name
-  # Validate the complete filename set before stopping anything. An unknown
-  # record must not cause a partially applied cleanup.
-  for pidfile in "${pidfiles[@]}"; do
-    name="$(basename "${pidfile}" .pid)"
-    resolve_stop_pf_binding "${name}" "${pidfile}" || return 1
-  done
-  # Attempt every record, so one record that cannot be verified does not leave
-  # the verified ones running; the kept records are listed and fail the call.
+  # Attempt every record, so one record that cannot be verified (an unknown
+  # name, an unreadable MCP binding, or a record stop_own_pf cannot prove is
+  # this worktree's) does not leave the verified ones running; the kept
+  # records are listed and fail the call.
   local -a kept=()
   for pidfile in "${pidfiles[@]}"; do
     name="$(basename "${pidfile}" .pid)"

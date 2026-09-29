@@ -533,6 +533,62 @@ bp delete-clean delete "CONFIRM_DELETE=${profile}"
 assert_rc 0 'delete with verified records'
 assert_log_has "minikube -p ${profile} delete pidfiles=0" 'delete clears every record before minikube delete'
 
+# === stop-pf attempts every record ============================================
+# record_pf_pids <name...>: PF_PIDS gets the recorded PID of each named forward.
+record_pf_pids() {
+  local name
+  PF_PIDS=()
+  for name in "$@"; do
+    pf_owner_read_record "${pids_dir}/${name}.pid" || fail "${name} record is unreadable"
+    PF_PIDS+=("${PF_OWNER_RECORD_PID}")
+  done
+  ok
+}
+
+# An unknown pidfile name is kept and reported, and does not stop the verified
+# records from being stopped before minikube stop runs.
+reset_state
+bp stop-stray-pf pf
+assert_rc 0 'pf before a stop with a stray record'
+record_pf_pids control-ui control-api external-rest-api rpc-proxy
+printf '12345\n' >"${pids_dir}/stray.pid"
+bp stop-stray stop
+assert_rc_nonzero 'stop with a stray record among verified ones'
+# pidfiles=1: only the stray record was left when minikube stop ran.
+assert_log_has "minikube -p ${profile} stop pidfiles=1" 'stop cleared the verified records before minikube stop'
+assert_output_has 'stopped or cleared verified rpc-proxy record' 'stop reached the verified records'
+for name in control-ui control-api external-rest-api rpc-proxy; do
+  assert_no_file "${pids_dir}/${name}.pid" "stop removes the verified ${name} record next to a stray one"
+done
+for pid in "${PF_PIDS[@]}"; do
+  assert_dead "${pid}" 'stop terminates every verified forward next to a stray record'
+done
+assert_file "${pids_dir}/stray.pid" 'stop keeps the stray record'
+assert_output_has "  ${pids_dir}/stray.pid" 'stop lists the kept stray record'
+rm -f "${pids_dir}/stray.pid"
+
+# The first record in glob order cannot be verified; every later verified
+# record is still stopped and removed.
+reset_state
+bp stop-pf-first-unverified-pf pf
+assert_rc 0 'pf before a stop-pf whose first record is unverifiable'
+record_pf_pids control-api
+orphaned_control_api_pid="${PF_PIDS[0]}"
+record_pf_pids control-ui external-rest-api rpc-proxy
+printf '12345\n' >"${pids_dir}/control-api.pid"
+bp stop-pf-first-unverified stop-pf
+assert_rc 1 'stop-pf whose first record is unverifiable'
+for name in control-ui external-rest-api rpc-proxy; do
+  assert_no_file "${pids_dir}/${name}.pid" "stop-pf removes ${name} after an unverifiable first record"
+done
+for pid in "${PF_PIDS[@]}"; do
+  assert_dead "${pid}" 'stop-pf terminates the verified forwards after an unverifiable first record'
+done
+assert_file "${pids_dir}/control-api.pid" 'stop-pf keeps the unverifiable first record'
+assert_output_has "  ${pids_dir}/control-api.pid" 'stop-pf lists the kept first record'
+kill -KILL "${orphaned_control_api_pid}" 2>/dev/null || true
+rm -f "${pids_dir}/control-api.pid"
+
 # === stop-pf keeps records it cannot prove are stale ==========================
 reset_state
 write_control_ui_record "$(dead_pid)" 'Mon Jan  1 00:00:00 2024' "${other_worktree}"
