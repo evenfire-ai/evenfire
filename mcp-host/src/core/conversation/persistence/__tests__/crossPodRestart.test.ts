@@ -9,6 +9,7 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import { type AuthorityBindingV2, hashActionTarget } from '@clerum/action-context-contracts'
+import { sourceMessageForResume } from '../../../../agent/sourceMessageForResume'
 import { AgentStateMachine } from '../../../../agent/stateMachine'
 import { TaskLifecycle } from '../../../../lifecycle/taskLifecycle'
 import { logger } from '../../../../logger'
@@ -100,24 +101,21 @@ describe('Cross-pod-restart resume — P.3 invariant #3', () => {
     const convA = await managerA.getOrCreate(sessionKey)
     await managerA.startTurn(convA, message.content, task.id, task.traceContext ?? null)
     expect(convA.traceContext).toEqual(traceContext)
-    await managerA.suspendForApproval(
-      convA,
-      {
-        request_id: 'req-cross-pod',
-        tool_name: 'shell_exec',
-        tool_call_id: 'tc-cross-pod',
-        parameters: { command: 'rm -rf /' },
-        description: 'dangerous',
-        context_snapshot: [],
-        task_budget: {
-          elapsedActiveMs: 0,
-          iterationsUsed: 1,
-          durationMs: 86400000,
-          maxIterations: 1000,
-        },
+    await managerA.suspendForApproval(convA, {
+      request_id: 'req-cross-pod',
+      tool_name: 'shell_exec',
+      tool_call_id: 'tc-cross-pod',
+      parameters: { command: 'rm -rf /' },
+      description: 'dangerous',
+      context_snapshot: [],
+      sourceMessage: sourceMessageForResume(message),
+      task_budget: {
+        elapsedActiveMs: 0,
+        iterationsUsed: 1,
+        durationMs: 86400000,
+        maxIterations: 1000,
       },
-      { ...message }
-    )
+    })
     await podA.shutdown()
 
     // Pod B — fresh worker, same dbPath. The pending_approval must come back.
@@ -194,18 +192,15 @@ describe('Cross-pod-restart resume — P.3 invariant #3', () => {
       source: 'rpc',
     })
     await managerA.startTurn(convA, sourceMessage.content, 'legacy-task')
-    await managerA.suspendForApproval(
-      convA,
-      {
-        request_id: 'req-v1-restart',
-        tool_name: 'shell_exec',
-        tool_call_id: 'tc-v1-restart',
-        parameters: { command: 'printf legacy' },
-        description: 'legacy desktop approval',
-        context_snapshot: [],
-      },
-      sourceMessage
-    )
+    await managerA.suspendForApproval(convA, {
+      request_id: 'req-v1-restart',
+      tool_name: 'shell_exec',
+      tool_call_id: 'tc-v1-restart',
+      parameters: { command: 'printf legacy' },
+      description: 'legacy desktop approval',
+      context_snapshot: [],
+      sourceMessage: sourceMessageForResume(sourceMessage),
+    })
     podA.worker.db
       .prepare('UPDATE pending_approvals SET task_budget = ? WHERE request_id = ?')
       .run('legacy', 'req-v1-restart')
@@ -265,23 +260,14 @@ describe('Cross-pod-restart resume — P.3 invariant #3', () => {
       source: 'rpc',
     })
     await manager.startTurn(conv, 'needs approval', 'task-corrupt-authority')
-    await manager.suspendForApproval(
-      conv,
-      {
-        request_id: 'req-corrupt-authority',
-        tool_name: 'shell_exec',
-        tool_call_id: 'tc-corrupt-authority',
-        parameters: {},
-        description: 'corrupt authority fixture',
-        context_snapshot: [],
-        task_budget: {
-          elapsedActiveMs: 0,
-          iterationsUsed: 1,
-          durationMs: 86_400_000,
-          maxIterations: 1000,
-        },
-      },
-      {
+    await manager.suspendForApproval(conv, {
+      request_id: 'req-corrupt-authority',
+      tool_name: 'shell_exec',
+      tool_call_id: 'tc-corrupt-authority',
+      parameters: {},
+      description: 'corrupt authority fixture',
+      context_snapshot: [],
+      sourceMessage: sourceMessageForResume({
         content: 'needs approval',
         channelType: 'rpc',
         channelId: 'agent',
@@ -289,8 +275,14 @@ describe('Cross-pod-restart resume — P.3 invariant #3', () => {
         timestamp: new Date().toISOString(),
         messageId: 'msg-corrupt',
         hostRef: 'chatllm',
-      }
-    )
+      })!,
+      task_budget: {
+        elapsedActiveMs: 0,
+        iterationsUsed: 1,
+        durationMs: 86_400_000,
+        maxIterations: 1000,
+      },
+    })
     pod.worker.db
       .prepare('UPDATE pending_approvals SET source_message = ? WHERE request_id = ?')
       .run('{"channelType":"rpc","authorityV2":{"version":2}}', 'req-corrupt-authority')

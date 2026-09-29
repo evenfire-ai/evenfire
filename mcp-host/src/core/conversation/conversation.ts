@@ -502,11 +502,7 @@ export class ConversationManager {
    * MUST land before the channel notification fires. The store handles
    * that via `enqueueSync`; this method awaits the ACK before returning.
    */
-  async suspendForApproval(
-    conversation: Conversation,
-    approval: PendingApproval,
-    sourceMessage?: Record<string, unknown>
-  ): Promise<void> {
+  async suspendForApproval(conversation: Conversation, approval: PendingApproval): Promise<void> {
     const renewing =
       conversation.state === ConversationState.AwaitingApproval &&
       conversation.pending_approval?.legacy_budget === true &&
@@ -527,7 +523,7 @@ export class ConversationManager {
     conversation.pending_approval = projected
     conversation.updated_at = new Date()
     try {
-      await this.store.persistSuspend(conversation, projected, sourceMessage)
+      await this.store.persistSuspend(conversation, projected)
     } catch (err) {
       // Under the sqlite/dual store the durable write can reject (worker
       // timeout, SQLITE_BUSY, worker exit). Roll back the in-RAM mutation so

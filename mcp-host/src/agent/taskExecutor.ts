@@ -1266,8 +1266,7 @@ export class TaskExecutor {
         try {
           await this.deps.conversationManager.suspendForApproval(
             this.conversation!,
-            result.approval,
-            this.task.sourceMessage ? { ...this.task.sourceMessage } : undefined
+            result.approval
           )
         } catch (err) {
           if (!result.approval.replaces_request_id)
