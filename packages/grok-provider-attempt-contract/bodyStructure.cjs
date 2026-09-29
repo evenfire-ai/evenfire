@@ -5,8 +5,9 @@
  *
  * JSON.parse allocates one heap object per container, so a body of `[],`
  * repeated costs far more heap than its byte count suggests: one 36 MB body
- * of that shape aborts a proxy running with --max-old-space-size=384, and
- * three 8 MiB ones at once do the same. A byte limit alone cannot prevent
+ * of that shape aborts a proxy running with --max-old-space-size=384 (the cap
+ * when this was first measured; the deployed cap is now 768), and three 8 MiB
+ * ones at once do the same. A byte limit alone cannot prevent
  * this. This scan runs as the body-parser `verify` hook, after the body is
  * read and before it is parsed, and refuses a body whose structure could
  * not belong to a request the contract accepts:

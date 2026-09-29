@@ -93,7 +93,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): GrokLlmProxyCo
       `GROK_LLM_PROXY_MAX_VISUAL_BODY_BYTES must be at least ${LIMITS.maxVisualRequestBodyBytes}, the contract maxVisualRequestBodyBytes`
     )
   }
-  // The 1536Mi memory limit was measured with one visual stream at the contract
+  // The 2048Mi memory limit was measured with one visual stream at the contract
   // ceiling only (see VISUAL_STREAM_LIMITS). A larger value would admit bodies
   // that measurement never covered.
   if (maxVisualBodyBytes > LIMITS.maxVisualRequestBodyBytes) {

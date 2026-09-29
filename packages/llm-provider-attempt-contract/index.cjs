@@ -51,8 +51,8 @@ const LIMITS = Object.freeze({
   // Objects and arrays in one request, the root included. JSON.parse
   // allocates a heap object for each, so a request of empty containers fits
   // maxRequestBodyBytes with about four million of them, and three such
-  // bodies at once exhaust a proxy capped at --max-old-space-size=384. A
-  // conversation needs a few thousand containers; tool results are strings
+  // bodies at once exhaust a proxy capped at --max-old-space-size=384 (the
+  // cap when measured; the deployed cap is now 768). A conversation needs a few thousand containers; tool results are strings
   // and never count. The memory measurement at this bound is in
   // codex-llm-proxy/src/requestLimits.ts. Must equal the Grok contract's
   // value.

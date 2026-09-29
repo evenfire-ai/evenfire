@@ -84,18 +84,21 @@ spec:
                 secretKeyRef:
                   name: grok-llm-proxy-secrets
                   key: GROK_LLM_PROXY_CONTROL_API_TOKEN
-            # Caps V8's old space under the 1536Mi limit, so heap growth is
+            # Caps V8's old space under the 2048Mi limit, so heap growth is
             # bounded and collected before the kernel kills the pod. The cap
             # does not lower the peak: with eight 8 MiB streams and three
             # queued 8 MiB bodies (#739 D5), RSS measured 511 MiB at a 384 MiB
             # cap and 480-511 MiB without it. One ~36 MB V2 stream in the
-            # visual slot on top of that load (#784) raised it to 775 MiB. When
-            # the three ordinary bodies carry the worst structure the contract
-            # admits (#806 Q1), 384 MiB aborts while parsing them; 512 MiB is
-            # the smallest cap that survives, and that load peaked at
-            # 1097-1111 MiB of RSS.
+            # visual slot on top of that load (#784) raised it to 775 MiB. The
+            # byte-based BodyBudget also admits about eight compact bodies of
+            # the worst structure the contract admits (#806 Q1), each a ~44 MiB
+            # tree once parsed. With 8 held streams, 8 queued bodies and one
+            # V2 stream, 640 MiB passed 3 of 3 for Grok (it aborts the Codex
+            # proxy) and 768 MiB passed both; that load peaked at 1212-1482 MiB
+            # of RSS on macOS, which is not cgroup memory. 768 MiB is the
+            # smallest cap tested that passes both, not a proven minimum.
             - name: NODE_OPTIONS
-              value: "--max-old-space-size=512"
+              value: "--max-old-space-size=768"
           ports:
             - name: runtime
               containerPort: 8080
@@ -122,7 +125,7 @@ spec:
               memory: 768Mi
             limits:
               cpu: 250m
-              memory: 1536Mi
+              memory: 2048Mi
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

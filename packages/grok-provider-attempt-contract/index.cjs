@@ -65,8 +65,8 @@ const LIMITS = Object.freeze({
   // Objects and arrays in one request, the root included. JSON.parse
   // allocates a heap object for each, so a request of empty containers fits
   // maxRequestBodyBytes with about four million of them, and three such
-  // bodies at once exhaust a proxy capped at --max-old-space-size=384. In
-  // the Grok proxy, three ordinary bodies and one visual body at twice this
+  // bodies at once exhaust a proxy capped at --max-old-space-size=384 (the
+  // cap when measured; the deployed cap is now 768). In the Grok proxy, three ordinary bodies and one visual body at twice this
   // bound kept 197 MiB resident after a full GC. A conversation needs a few
   // thousand containers; tool results are strings and never count. Must equal
   // the Codex contract's value.

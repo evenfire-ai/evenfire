@@ -164,15 +164,21 @@ calls through undici, 29 runs): #739's D5 load (eight 8 MiB streams held and
 three 8 MiB bodies queued) peaked at 511 MiB, and D5 plus one 36.3 MB V2 stream
 in the visual gate peaked at 775.4 MiB. A body at the structure limits (262144
 containers, 262144 members, 1048576 elements) is a worse load: the byte budget
-admits about five dense 4.7 MiB bodies at once, and each parse allocates a tree
-of about 39 MiB plus transient copies. At a 384 MiB heap cap that load aborted
-with out-of-memory before any upstream call; at 512 MiB it passed with a peak
-RSS of 1097-1111 MiB. The manifest therefore sets `--max-old-space-size=512`, a
-1536Mi limit and a 768Mi request, and
+admits about eight compact bodies of that structure (2.8 MiB each) or about
+five at 4.7 MiB, and each parse allocates a tree of about 44 MiB once collected,
+plus transient copies. At a 384 MiB heap cap that load aborted with
+out-of-memory before any upstream call. With 8 held streams, 8 queued bodies
+and one V2 stream, 640 MiB passed Grok (peak RSS 1118-1250 MiB) but aborted
+the Codex proxy in 3 of 3 runs, and 768 MiB passed both proxies in 3 of 3
+(Grok peak RSS 1212-1482 MiB). macOS RSS is not cgroup memory and varied by
+about 100 MiB between runs; 768 MiB is the smallest cap tested that passes
+both, not a proven minimum. The manifest therefore sets
+`--max-old-space-size=768`, a 2048Mi limit and a 768Mi request, and
 `grok-llm-proxy/test/deployManifest.test.ts` requires the limit to be at least
-1.25 × that peak (`ceil(1110.7 × 1.25)` = 1389 MiB). The in-cluster peak is
-not measured. The heap cap is a resource change only: the resident heap after
-GC at that load was 176.6-208.4 MiB, above the 200 MiB target recorded for
+1.25 × the largest peak (`ceil(1481.6 × 1.25)` = 1852 MiB). The in-cluster peak
+is not measured (keyper-labs/evenfire-infra#102). The heap cap is a resource
+change only: the resident heap after GC at that load was 420.8 MiB, above the
+200 MiB target recorded for
 `BODY_STRUCTURE_LIMITS`, so lowering the resident set needs a code change
 (a structure-weighted body budget, and parsing after the stream slot is
 granted), which is tracked separately.
@@ -460,7 +466,7 @@ Proxy robustness (both proxies):
 
 `JSON.parse` allocates one heap object per container before any contract
 check runs, so a body within the byte limit can exhaust the proxy's heap cap
-(512 MiB, measured; see "Memory" above). A 36700158-byte body of `[],` padding aborted `grok-llm-proxy`, and so
+(768 MiB, measured; see "Memory" above). A 36700158-byte body of `[],` padding aborted `grok-llm-proxy`, and so
 did three ordinary 8 MiB bodies of 4117647 empty containers each, which the
 contract accepted. The fix is the same in both proxies and both contracts, and
 is described in full, with the measurement, under "Body structure before

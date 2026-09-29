@@ -723,8 +723,8 @@ export function createProxyApps(
             abort.signal.addEventListener('abort', stopHeartbeat, { once: true })
           },
           // #739 D2: the body has been written upstream, so its budget
-          // reservation ends here rather than with the stream. The parsed
-          // copy the transport streams from stays; the raw one is dropped.
+          // reservation ends here rather than with the stream. Both the raw
+          // body and the parsed copy are dropped below (#806 Q1).
           onUpstreamAccepted: () => {
             gated.codexBodyRelease?.()
             gated.codexBodyRelease = undefined

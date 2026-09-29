@@ -91,7 +91,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): CodexLlmProxyC
       `CODEX_LLM_PROXY_MAX_VISUAL_BODY_BYTES must be at least ${LIMITS.maxVisualRequestBodyBytes}, the contract maxVisualRequestBodyBytes`
     )
   }
-  // The 1536Mi memory limit was measured with two visual streams at the contract
+  // The 2048Mi memory limit was measured with two visual streams at the contract
   // ceiling only (see IN_FLIGHT_BODY_BUDGET_BODIES). A larger value would admit
   // bodies that measurement never covered.
   if (maxVisualBodyBytes > LIMITS.maxVisualRequestBodyBytes) {

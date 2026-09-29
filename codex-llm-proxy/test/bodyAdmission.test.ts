@@ -4,8 +4,10 @@
  * At an 8 MiB request cap, the stream gate alone would let 24 bodies in (8
  * running plus 16 queued). Thirteen bodies in flight (eight streams, two
  * visual, three queued; #739 D5) already peaked at 790 MiB of RSS with the
- * heap capped, so 24 would not fit the proxy's 1536Mi limit by that ratio (not
- * measured at 24). These tests drive the real runtime app over HTTP and use
+ * heap capped. That ratio puts 24 bodies well above 1 GiB (not measured at
+ * 24), and it does not hold for structure-dense bodies, whose parsed trees
+ * cost far more than their bytes (#806 Q1). These tests drive the real
+ * runtime app over HTTP and use
  * the control-api `redeem` call as the witness: it runs only after the whole
  * body was read, JSON-parsed, contract-parsed and hash-checked, so the number
  * of attempts held there is the number of bodies in memory.
