@@ -108,6 +108,18 @@ interface FakeChart {
   updates: number
 }
 
+/**
+ * The bodies of the page's script elements, each ended where a browser ends
+ * it: at the first "</script" in any case. Every script tag must be a bare
+ * <script> this reading pairs, so no script on the page goes unseen here.
+ */
+function pageScripts(html: string): string[] {
+  const elements = [...html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script\b[^>]*>/gi)]
+  expect(elements.map(m => m[1])).toEqual(elements.map(() => ''))
+  expect(html.match(/<\/?script\b/gi) ?? []).toHaveLength(2 * elements.length)
+  return elements.map(m => m[2])
+}
+
 /** Run the page script against a minimal DOM and a Chart stub. */
 function runPageScript(
   html: string,
@@ -118,7 +130,7 @@ function runPageScript(
   emitMediaChange: () => void
   setVars: (vars: Record<string, string>) => void
 } {
-  const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(m => m[1])
+  const scripts = pageScripts(html)
   const pageScript = scripts[scripts.length - 1]
   let vars = opts.vars
   const charts = new Map<string, FakeChart>()
