@@ -99,6 +99,11 @@ describeRealPostgres('resolveConnectorsForAgents tri-state (real Postgres)', () 
     return g
   }
 
+  // The uid the gateway assigned to the server — what the consent callback seals
+  // the grant with and what the gate reads it back by.
+  const uidOf = async (g: MockGateway, name: string) =>
+    ((await g.getResource('mcpservers', name, NS)) as { metadata: { uid: string } }).metadata.uid
+
   const statusOf = async (g: MockGateway, userId: string, serverName: string) => {
     const agents = await resolveConnectorsForAgents(
       g,
@@ -117,6 +122,7 @@ describeRealPostgres('resolveConnectorsForAgents tri-state (real Postgres)', () 
       ownerKind: 'mcpserver',
       recipeNamespace: NS,
       recipeName: 'gdrive-u',
+      crUid: await uidOf(g, 'gdrive-u'),
       userId: 'alice',
       oauthClientId: 'client-gdrive-u',
       provider: 'google',
@@ -135,6 +141,7 @@ describeRealPostgres('resolveConnectorsForAgents tri-state (real Postgres)', () 
       ownerKind: 'mcpserver',
       recipeNamespace: NS,
       recipeName: 'gdrive-s',
+      crUid: await uidOf(g, 'gdrive-s'),
       contextId: 'ctx-1',
       oauthClientId: 'client-gdrive-s',
       bootstrappedByUserId: 'bob',
@@ -152,6 +159,7 @@ describeRealPostgres('resolveConnectorsForAgents tri-state (real Postgres)', () 
       ownerKind: 'mcpserver',
       recipeNamespace: NS,
       recipeName: 'gdrive-x',
+      crUid: await uidOf(g, 'gdrive-x'),
       userId: 'carol',
       oauthClientId: 'client-gdrive-x',
       provider: 'google',

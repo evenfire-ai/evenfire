@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
+import { ApiException } from '@kubernetes/client-node'
 import { lookup } from 'node:dns/promises'
 import request from 'supertest'
 import { config } from '../src/config.js'
@@ -1450,9 +1451,14 @@ describe('POST /admin/registry/install', () => {
     })
   })
 
-  it('preserves dependencies after an ambiguous concurrent Context change', async () => {
+  // A concurrent Context writer moves the resourceVersion between the attach's read
+  // and its write. The attach re-reads and re-applies its edit to the fresh list
+  // instead of replaying the stale one (which would drop the other writer's change)
+  // or failing the install.
+  it('merges into a concurrently changed Context allowlist instead of replaying a stale one', async () => {
     vi.mocked(getEntryVersion).mockResolvedValueOnce(MOCK_ENTRY)
     vi.mocked(getCredentialSchema).mockResolvedValueOnce(MOCK_SCHEMA_REQUIRED)
+    vi.mocked(reportInstall).mockResolvedValueOnce({ acknowledged: true, stored: true })
 
     const gw = new MockGateway('mcp-server')
     await gw.createResource('contexts', {
@@ -1491,14 +1497,79 @@ describe('POST /admin/registry/install', () => {
         registryEntryVersion: '1.0.0',
         credentials: { AIRTABLE_API_KEY: ['context', 'race'].join('-') },
       })
+      .expect(201)
+
+    expect(res.body.contextUpdated).toBe(true)
+    await expect(gw.getResource('contexts', 'default-context')).resolves.toMatchObject({
+      spec: { mcpServers: ['concurrent-writer', 'my-airtable'] },
+    })
+    await expect(gw.getResource('mcpservers', 'my-airtable', 'mcp-server')).resolves.toMatchObject({
+      metadata: { uid: expect.any(String), resourceVersion: expect.any(String) },
+    })
+    await expect(gw.getSecret('my-airtable-credentials', 'mcp-server')).resolves.toMatchObject({
+      metadata: { uid: expect.any(String), resourceVersion: expect.any(String) },
+    })
+  })
+
+  // Sibling of the merge above: the Context is rewritten before EVERY attach write, so
+  // the bounded retry runs out. The install must not guess — the CR and its Secret stay
+  // for repair and the other writers' entries are not clobbered.
+  it('gives up after the bounded attach retries when the Context keeps changing', async () => {
+    vi.mocked(getEntryVersion).mockResolvedValueOnce(MOCK_ENTRY)
+    vi.mocked(getCredentialSchema).mockResolvedValueOnce(MOCK_SCHEMA_REQUIRED)
+
+    const gw = new MockGateway('mcp-server')
+    await gw.createResource('contexts', {
+      metadata: { name: 'default-context' },
+      spec: { contextId: 'default-context', mcpServers: [] },
+    })
+    const originalUpdate = gw.updateResource.bind(gw)
+    let attachWrites = 0
+    vi.spyOn(gw, 'updateResource').mockImplementation(async (plural, name, body, ns) => {
+      // Only the attach writes carry the new server; the ambiguous-outcome fence
+      // rewrites the pre-attach snapshot and must reach the gateway untouched.
+      const servers = (body.spec as { mcpServers?: string[] }).mcpServers ?? []
+      if (plural === 'contexts' && servers.includes('my-airtable')) {
+        attachWrites += 1
+        const current = (await gw.getResource('contexts', name, ns)) as {
+          metadata: { resourceVersion: string }
+          spec: { mcpServers?: string[] }
+        }
+        await originalUpdate(
+          'contexts',
+          name,
+          {
+            metadata: { resourceVersion: current.metadata.resourceVersion },
+            spec: {
+              ...current.spec,
+              mcpServers: [...(current.spec.mcpServers ?? []), `writer-${attachWrites}`],
+            },
+          },
+          ns
+        )
+      }
+      return originalUpdate(plural, name, body, ns)
+    })
+
+    const app = makeApp(gw as unknown as import('../src/k8s.js').K8sGateway)
+    const res = await request(app)
+      .post('/admin/registry/install')
+      .send({
+        serverName: 'my-airtable',
+        contextRef: 'default-context',
+        registryEntryName: 'airtable-mcp',
+        registryEntryVersion: '1.0.0',
+        credentials: { AIRTABLE_API_KEY: ['context', 'storm'].join('-') },
+      })
       .expect(503)
 
     expect(res.body).toMatchObject({
       error: 'registry_install_outcome_ambiguous',
       outcome: 'repair_required',
     })
+    expect(attachWrites).toBe(3)
     await expect(gw.getResource('contexts', 'default-context')).resolves.toMatchObject({
-      spec: { mcpServers: ['concurrent-writer'] },
+      spec: { mcpServers: ['writer-1', 'writer-2', 'writer-3'] },
     })
     await expect(gw.getResource('mcpservers', 'my-airtable', 'mcp-server')).resolves.toMatchObject({
       metadata: { uid: expect.any(String), resourceVersion: expect.any(String) },
@@ -3284,6 +3355,10 @@ describe('SSRF remote URL validation', () => {
 
 // ── Uninstall flow (§9.5) ───────────────────────────────────────────────────
 describe('DELETE /admin/registry/uninstall/:serverName', () => {
+  // The OAuth teardown runs before the CR delete; these cases have no OAuth state, and
+  // the real-Postgres path is covered in routes.registryUninstall.realPostgres.
+  const emptyUninstallDb = { query: async () => ({ rows: [], rowCount: 0 }) }
+
   function makeApp(gw = new MockGateway('mcp-server')) {
     if (!(gw as unknown as { _seeded?: boolean })._seeded) {
       gw.createResource('mcpservers', {
@@ -3298,7 +3373,11 @@ describe('DELETE /admin/registry/uninstall/:serverName', () => {
     }
     const app = express()
     app.use(express.json())
-    app.use(createAdminRegistryRouter(gw as unknown as import('../src/k8s.js').K8sGateway))
+    app.use(
+      createAdminRegistryRouter(gw as unknown as import('../src/k8s.js').K8sGateway, {
+        uninstallDb: emptyUninstallDb,
+      })
+    )
     app.use(
       (err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
         res.status(500).json({ error: err instanceof Error ? err.message : 'unknown' })
@@ -3401,15 +3480,37 @@ describe('DELETE /admin/registry/uninstall/:serverName', () => {
     expect(gw.secretReadChecks).toBeGreaterThanOrEqual(2)
   })
 
-  it('handles non-existent server gracefully', async () => {
-    const { app } = makeApp()
+  // A missing CR answers 200 with a `not found` warning and touches NOTHING: every
+  // cleanup runs before the CR delete, so a name-addressed cleanup here would have no
+  // uid to fence against a same-name reinstall (whose Secret a pre-registered install
+  // writes before its CR).
+  it('handles a non-existent server as not found without cleaning up by name', async () => {
+    const gw = new MockGateway('mcp-server')
+    await gw.createResource('contexts', {
+      metadata: { name: 'ctx1' },
+      spec: { contextId: 'ctx1', mcpServers: ['nonexistent'] },
+    })
+    gw.seedSecret('nonexistent-credentials', 'mcp-server', { stringData: { K: 'v' } })
+    ;(gw as unknown as { _seeded?: boolean })._seeded = true
+    const { app } = makeApp(gw)
 
     const res = await request(app).delete('/admin/registry/uninstall/nonexistent').expect(200)
 
-    expect(res.body.resourceName).toBe('nonexistent')
+    expect(res.body).toMatchObject({
+      resourceName: 'nonexistent',
+      deleted: [],
+      warnings: ['McpServer/nonexistent: not found'],
+    })
+    await expect(gw.getSecret('nonexistent-credentials', 'mcp-server')).resolves.toBeTruthy()
+    await expect(gw.getResource('contexts', 'ctx1')).resolves.toMatchObject({
+      spec: { mcpServers: ['nonexistent'] },
+    })
   })
 
-  it('does not delete a replacement Secret that wins after the resource delete', async () => {
+  // The Secrets are now deleted BEFORE the CR, fenced on the snapshot taken with the
+  // CR read. A replacement written in between is a different object: its delete is
+  // refused (409), the uninstall stops with the CR kept, and the replacement survives.
+  it('does not delete a replacement Secret written between the capture and its delete', async () => {
     const gw = new MockGateway('mcp-server')
     await gw.createResource(
       'mcpservers',
@@ -3423,31 +3524,140 @@ describe('DELETE /admin/registry/uninstall/:serverName', () => {
     })
     ;(gw as unknown as { _seeded?: boolean })._seeded = true
 
-    const originalDeleteResource = gw.deleteResource.bind(gw)
+    const originalDeleteSecret = gw.deleteSecret.bind(gw)
     let raced = false
-    vi.spyOn(gw, 'deleteResource').mockImplementation(async (...args) => {
-      if (args[0] === 'mcpservers' && !raced) {
+    vi.spyOn(gw, 'deleteSecret').mockImplementation(async (name, ns, precondition) => {
+      if (name === secretName && !raced) {
         raced = true
-        const result = await originalDeleteResource(...args)
-        await gw.deleteSecret(secretName, 'mcp-server')
+        await originalDeleteSecret(secretName, 'mcp-server')
         gw.seedSecret(secretName, 'mcp-server', {
           uid: 'uid-secret-replacement',
           resourceVersion: '1',
         })
-        return result
       }
-      return originalDeleteResource(...args)
+      return originalDeleteSecret(name, ns, precondition)
     })
 
     const { app } = makeApp(gw)
     const res = await request(app).delete('/admin/registry/uninstall/secret-race').expect(503)
 
     expect(res.body).toMatchObject({
-      error: 'registry_uninstall_outcome_ambiguous',
+      error: 'registry_uninstall_partial',
       outcome: 'repair_required',
+      pending: ['secrets'],
     })
     await expect(gw.getSecret(secretName, 'mcp-server')).resolves.toMatchObject({
       metadata: { uid: 'uid-secret-replacement', resourceVersion: '1' },
+    })
+    await expect(gw.getResource('mcpservers', 'secret-race', 'mcp-server')).resolves.toBeTruthy()
+  })
+
+  // Contexts live in `config.contextsNamespace`; the strip used to list them in the
+  // McpServer's namespace, missing every Context whenever the two differ.
+  it('strips the allowlist in the contexts namespace, not the McpServer one', async () => {
+    const prevContextsNs = config.contextsNamespace
+    config.contextsNamespace = 'contexts-ns'
+    try {
+      const gw = new MockGateway('mcp-server')
+      await gw.createResource(
+        'mcpservers',
+        { metadata: { name: 'split-ns' }, spec: { image: 'test:1.0' } },
+        'mcp-server'
+      )
+      await gw.createResource(
+        'contexts',
+        { metadata: { name: 'ctx1' }, spec: { contextId: 'ctx1', mcpServers: ['split-ns', 'b'] } },
+        'contexts-ns'
+      )
+      ;(gw as unknown as { _seeded?: boolean })._seeded = true
+      const { app } = makeApp(gw)
+
+      const res = await request(app).delete('/admin/registry/uninstall/split-ns').expect(200)
+
+      expect(res.body.deleted).toContain('McpServer/split-ns')
+      await expect(gw.getResource('contexts', 'ctx1', 'contexts-ns')).resolves.toMatchObject({
+        spec: { mcpServers: ['b'] },
+      })
+    } finally {
+      config.contextsNamespace = prevContextsNs
+    }
+  })
+
+  // Allowlists hold bare names, so a same-name McpServer outside the canonical
+  // namespace would take the canonical server's entries with it.
+  it('refuses to uninstall an McpServer outside the canonical namespace, touching nothing', async () => {
+    const gw = new MockGateway('mcp-server')
+    await gw.createResource(
+      'mcpservers',
+      { metadata: { name: 'installed-srv' }, spec: { image: 'test:homonym' } },
+      'sandbox-recipes'
+    )
+    const { app } = makeApp(gw)
+
+    const res = await request(app)
+      .delete('/admin/registry/uninstall/installed-srv?namespace=sandbox-recipes')
+      .expect(422)
+
+    expect(res.body.error).toContain(config.mcpServersNamespace)
+    await expect(
+      gw.getResource('mcpservers', 'installed-srv', 'sandbox-recipes')
+    ).resolves.toBeTruthy()
+    await expect(gw.getResource('contexts', 'ctx1')).resolves.toMatchObject({
+      spec: { mcpServers: ['installed-srv'] },
+    })
+  })
+
+  // A client-node ApiException's `.message` embeds the apiserver response headers;
+  // nothing the uninstall reports may carry it.
+  it('never reports a K8s exception message (response headers) in warnings', async () => {
+    const leaky = () =>
+      new ApiException(401, 'Unauthorized', undefined, { 'audit-id': 'leaked-audit-id' })
+    const readGw = new MockGateway('mcp-server')
+    ;(readGw as unknown as { _seeded?: boolean })._seeded = true
+    vi.spyOn(readGw, 'getResource').mockRejectedValueOnce(leaky())
+    const read = await request(makeApp(readGw).app)
+      .delete('/admin/registry/uninstall/installed-srv')
+      .expect(503)
+
+    const { app, gw } = makeApp()
+    vi.spyOn(gw, 'deleteResource').mockRejectedValueOnce(leaky())
+    const del = await request(app).delete('/admin/registry/uninstall/installed-srv').expect(503)
+
+    for (const body of [read.body, del.body]) {
+      expect(body.warnings).toEqual(['McpServer/installed-srv: K8s error 401'])
+      expect(JSON.stringify(body)).not.toMatch(/Headers:|leaked-audit-id/)
+    }
+  })
+
+  // A Secret whose delete cannot be fenced (no uid/resourceVersion) would be orphaned
+  // once the CR is gone, so the uninstall refuses to start instead of skipping it. A
+  // real apiserver always sets both; the empty uid stands for a gateway that dropped it.
+  it('stops before any change when a Secret has no identity to fence its delete on', async () => {
+    const gw = new MockGateway('mcp-server')
+    await gw.createResource('mcpservers', {
+      metadata: { name: 'installed-srv' },
+      spec: { image: 'test:1.0' },
+    })
+    await gw.createResource('contexts', {
+      metadata: { name: 'ctx1' },
+      spec: { contextId: 'ctx1', mcpServers: ['installed-srv'] },
+    })
+    gw.seedSecret('installed-srv-credentials', 'mcp-server', { uid: '', resourceVersion: '1' })
+    ;(gw as unknown as { _seeded?: boolean })._seeded = true
+    const { app } = makeApp(gw)
+
+    const res = await request(app).delete('/admin/registry/uninstall/installed-srv').expect(503)
+
+    expect(res.body).toMatchObject({
+      error: 'registry_uninstall_partial',
+      outcome: 'repair_required',
+      pending: ['secrets'],
+      deleted: [],
+      warnings: ['Secret/installed-srv-credentials: identity unavailable'],
+    })
+    await expect(gw.getResource('mcpservers', 'installed-srv', 'mcp-server')).resolves.toBeTruthy()
+    await expect(gw.getResource('contexts', 'ctx1')).resolves.toMatchObject({
+      spec: { mcpServers: ['installed-srv'] },
     })
   })
 

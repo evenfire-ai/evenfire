@@ -458,6 +458,7 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       'codex_subscription_oauth_states',
       'gfs_desktop_operator_links',
       'desktop_user_retirement_operations',
+      'dynamic_clients',
     ] as const
     const controlApiRelations = await relationPrivileges(dbPool, 'control_api_runtime')
     const expectedControlApiRelations: Record<string, string[]> = {
@@ -480,6 +481,9 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       codex_subscription_oauth_states: ['INSERT', 'SELECT', 'UPDATE'],
       gfs_desktop_operator_links: ['INSERT', 'SELECT', 'UPDATE'],
       desktop_user_retirement_operations: ['INSERT', 'SELECT', 'UPDATE'],
+      // dynamicClientStore does INSERT ... ON CONFLICT DO UPDATE, SELECT and
+      // DELETE, so the runtime role needs the full legacy_dml envelope.
+      dynamic_clients: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
     }
     for (const relation of exactControlApiRelations) {
       expectPrivileges(
@@ -490,6 +494,14 @@ describeRealPostgres('control-api real Postgres migrations', () => {
     expectPrivileges([...(controlApiRelations.gfs_blob_manifests ?? new Set())], [])
     expectPrivileges([...(controlApiRelations.gfs_upload_parts ?? new Set())], [])
     expectPrivileges([...(controlApiRelations.gfs_upload_sessions ?? new Set())], [])
+
+    // The identity sequence must carry the legacy_rw (USAGE/SELECT/UPDATE)
+    // envelope; without it BIGSERIAL default fails on INSERT under the role.
+    const controlApiSequences = await sequencePrivileges(dbPool, 'control_api_runtime')
+    expectPrivileges(
+      [...(controlApiSequences.dynamic_clients_id_seq ?? new Set())],
+      ['SELECT', 'UPDATE', 'USAGE']
+    )
 
     const linkUserId = randomUUID()
     const linkAdminId = randomUUID()
