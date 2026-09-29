@@ -15,6 +15,7 @@ import {
   trustedEdgeActionContextHeader,
 } from '../routeActionBindingV2.js'
 import { startActiveViewLease } from '../services/activeViewLease.js'
+import { admitLegacySessionCreation } from '../services/controlApiRestService.js'
 import { normalizeViewPath } from '../services/sandboxUiPath.js'
 import { listSandboxUiApps, lookupSandboxUiRegistry } from '../services/sandboxUiRegistry.js'
 import {
@@ -98,6 +99,18 @@ function teamIdForSandboxUiRegistry(req: AuthedRequest): string | undefined {
 
 function isV2ViewRequest(req: AuthedRequest): boolean {
   return Boolean(req.userDelegationV2 && req.authorizedActionV2)
+}
+
+const KUBERNETES_DNS_LABEL_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/
+const KUBERNETES_DNS_SUBDOMAIN_RE =
+  /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/
+
+function isCanonicalSandboxSessionRef(recipeNs: string, recipeName: string): boolean {
+  return (
+    KUBERNETES_DNS_LABEL_RE.test(recipeNs) &&
+    recipeName.length <= 253 &&
+    KUBERNETES_DNS_SUBDOMAIN_RE.test(recipeName)
+  )
 }
 
 function requireV2Delegation(req: AuthedRequest, res: Response, next: () => void): void {
@@ -372,8 +385,26 @@ export function createSandboxUiSessionRouter(): Router {
         return
       }
       const { recipeNs, recipeName } = req.params
+      if (!isCanonicalSandboxSessionRef(recipeNs, recipeName)) {
+        res.status(400).json({ error: 'invalid_recipe_ref' })
+        return
+      }
       const userId = req.auth!.sub
       const teamId = teamIdForSandboxUiRegistry(req)
+
+      const admission = await admitLegacySessionCreation(extractAuthToken(req))
+      if (!admission.allowed) {
+        res.setHeader('Retry-After', String(admission.retryAfterSeconds))
+        res.setHeader('Cache-Control', 'no-store')
+        for (const [name, value] of Object.entries(admission.headers)) {
+          res.setHeader(name, value)
+        }
+        res.status(admission.status).json({
+          error: admission.status === 429 ? 'Too Many Requests' : 'rate_limit_unavailable',
+          retryAfterSeconds: admission.retryAfterSeconds,
+        })
+        return
+      }
 
       const result = await lookupSandboxUiRegistry(recipeNs, recipeName, userId, teamId)
       switch (result.kind) {

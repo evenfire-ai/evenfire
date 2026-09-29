@@ -9,6 +9,7 @@ import {
   rejectUnadmittedV2DerivedView,
 } from '../routeActionBindingV2.js'
 import { startActiveViewLease } from '../services/activeViewLease.js'
+import { admitLegacySessionCreation } from '../services/controlApiRestService.js'
 import { DesktopSessionService } from '../services/desktopSessionService.js'
 import { tokenDeclaresV2, verifyUserDelegationV2 } from '../userDelegationV2.js'
 
@@ -127,12 +128,32 @@ function createStatusRoute(): Router {
 function createSessionRoute(): Router {
   const router = Router()
 
-  const openOrReconnect = async (req: AuthedRequest, res: Response): Promise<void> => {
+  const openOrReconnect = async (
+    req: AuthedRequest,
+    res: Response,
+    admitLegacySession = false
+  ): Promise<void> => {
     const { hostRef } = req.params
 
     if (!v2OrLegacyHostAllowed(req, hostRef)) {
       res.status(403).json({ error: 'hostRef not permitted by JWT' })
       return
+    }
+
+    if (admitLegacySession && !isV2ViewRequest(req)) {
+      const admission = await admitLegacySessionCreation(extractAuthToken(req))
+      if (!admission.allowed) {
+        res.setHeader('Retry-After', String(admission.retryAfterSeconds))
+        res.setHeader('Cache-Control', 'no-store')
+        for (const [name, value] of Object.entries(admission.headers)) {
+          res.setHeader(name, value)
+        }
+        res.status(admission.status).json({
+          error: admission.status === 429 ? 'Too Many Requests' : 'rate_limit_unavailable',
+          retryAfterSeconds: admission.retryAfterSeconds,
+        })
+        return
+      }
     }
 
     // HCC remains readiness-only. The earlier v2 checkpoint is the sole
@@ -187,7 +208,7 @@ function createSessionRoute(): Router {
     rejectUnadmittedV2DerivedView,
     requireScope('desktop:view'),
     async (req: AuthedRequest, res: Response) => {
-      await openOrReconnect(req, res)
+      await openOrReconnect(req, res, true)
     }
   )
 

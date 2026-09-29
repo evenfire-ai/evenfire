@@ -84,6 +84,80 @@ export class ControlApiHostMessageAdmissionError extends Error {
   }
 }
 
+export type LegacySessionAdmissionResult =
+  | { allowed: true }
+  | {
+      allowed: false
+      status: 429 | 503
+      retryAfterSeconds: number
+      headers: Record<string, string>
+    }
+
+const LEGACY_SESSION_ADMISSION_FALLBACK_RETRY_AFTER_SECONDS = 2
+
+function boundedRetryAfter(value: string | null): number | null {
+  if (!value || !/^(?:0|[1-9]\d{0,2})$/.test(value)) return null
+  const seconds = Number(value)
+  return Number.isSafeInteger(seconds) && seconds >= 1 && seconds <= 60 ? seconds : null
+}
+
+function boundedRateHeader(value: string | null, maxDigits = 12): string | null {
+  if (!value || value.length > maxDigits || !/^(?:0|[1-9]\d*)$/.test(value)) return null
+  return value
+}
+
+/**
+ * Claims the shared durable verified-subject budget before legacy session
+ * routes touch HCC or the Sandbox registry. Network/protocol failures fail
+ * closed with a sanitized bounded retry response.
+ */
+export async function admitLegacySessionCreation(
+  rpcAccessToken: string
+): Promise<LegacySessionAdmissionResult> {
+  let response: Response
+  try {
+    response = await fetch(`${controlApiBaseUrl()}/internal/rpc-proxy/legacy-session-admission`, {
+      method: 'POST',
+      headers: controlApiHeaders(rpcAccessToken),
+      signal: upstreamAbortSignal(),
+    })
+  } catch {
+    return {
+      allowed: false,
+      status: 503,
+      retryAfterSeconds: LEGACY_SESSION_ADMISSION_FALLBACK_RETRY_AFTER_SECONDS,
+      headers: {},
+    }
+  }
+
+  if (response.status === 204 && response.ok) return { allowed: true }
+  if (response.status !== 429 && response.status !== 503) {
+    return {
+      allowed: false,
+      status: 503,
+      retryAfterSeconds: LEGACY_SESSION_ADMISSION_FALLBACK_RETRY_AFTER_SECONDS,
+      headers: {},
+    }
+  }
+
+  const retryAfterSeconds =
+    boundedRetryAfter(response.headers.get('retry-after')) ??
+    LEGACY_SESSION_ADMISSION_FALLBACK_RETRY_AFTER_SECONDS
+  if (response.status === 503) {
+    return { allowed: false, status: 503, retryAfterSeconds, headers: {} }
+  }
+
+  const headers: Record<string, string> = {}
+  const limit = boundedRateHeader(response.headers.get('x-ratelimit-limit'))
+  const remaining = boundedRateHeader(response.headers.get('x-ratelimit-remaining'))
+  const reset = boundedRateHeader(response.headers.get('x-ratelimit-reset'))
+  if (limit !== null) headers['X-RateLimit-Limit'] = limit
+  if (remaining !== null) headers['X-RateLimit-Remaining'] = remaining
+  if (reset !== null) headers['X-RateLimit-Reset'] = reset
+
+  return { allowed: false, status: 429, retryAfterSeconds, headers }
+}
+
 // Typed rejection for the connectors read-model, mirroring the host rail above.
 // A generic Error collapses to 500 in the app error handler, which the desktop
 // reads as non-refreshable — so an expired/rotated rpc access token (401) would

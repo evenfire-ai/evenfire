@@ -50,6 +50,8 @@ function isNonNegativeSafeInteger(value: unknown): value is number {
 }
 
 export type RouteHandlers = {
+  directServiceAdmission?: () => { allowed: true } | { allowed: false; retryAfterSeconds: number }
+  afterDirectMessageAdmission?: (req: Request, res: Response) => boolean
   messageHandler: MessageHandler | null
   statusHandler: StatusHandler | null
   approvalHandler: ApprovalHandler | null
@@ -75,6 +77,33 @@ export type RouteHandlers = {
   modelsListHandler?: ModelsListHandler | null
   setModelHandler?: SetModelHandler | null
   setTitleHandler?: SetTitleHandler | null
+}
+
+/**
+ * Charges only direct trusted service-plane callers. Authenticated RPC Proxy
+ * ingress remains under its existing Spec 62 / 65 / 48 admission boundaries.
+ * The outer runtimeEdgeGuard has already authenticated/accepted this caller.
+ */
+function admitDirectServiceRequest(req: Request, res: Response, handlers: RouteHandlers): boolean {
+  const caller = getRuntimeCallerContext(req)?.caller
+  if (caller === 'rpc-proxy') return true
+  if (caller !== 'channel-reader' && caller !== 'workflow-approval-request-reader') return true
+
+  const result = handlers.directServiceAdmission?.()
+  if (!result || result.allowed) return true
+
+  const retryAfterSeconds = Math.max(1, Math.min(60, Math.floor(result.retryAfterSeconds)))
+  res.setHeader('Retry-After', String(retryAfterSeconds))
+  res.setHeader('Cache-Control', 'no-store')
+  logger.warn(
+    { event: 'runtime_direct_service_admission_denied' },
+    'direct trusted service runtime admission limit reached'
+  )
+  json(res, 429, {
+    error: 'runtime_service_admission_limited',
+    retryAfterSeconds,
+  })
+  return false
 }
 
 function isSessionOwnershipError(error: unknown): boolean {
@@ -424,6 +453,15 @@ export async function handleMessageRoute(
       ? fileReferences.references
       : undefined
 
+    if (!admitDirectServiceRequest(req, res, handlers)) return
+    if (
+      getRuntimeCallerContext(req)?.caller !== 'rpc-proxy' &&
+      handlers.afterDirectMessageAdmission &&
+      !handlers.afterDirectMessageAdmission(req, res)
+    ) {
+      return
+    }
+
     logger.info(
       { channelType: message.channelType, sender: message.sender },
       '[Server] Received message'
@@ -656,6 +694,8 @@ export async function handleApprovalRoute(
       }
     }
 
+    if (!admitDirectServiceRequest(req, res, handlers)) return
+
     const decision: ApprovalDecision = {
       userId,
       requestId,
@@ -760,6 +800,7 @@ export async function handleProviderMessageAuthorizationRoute(
       json(res, 403, { authorized: false, error: 'Runtime edge source mismatch' })
       return
     }
+    if (!admitDirectServiceRequest(req, res, handlers)) return
     const result = await handlers.providerMessageAuthorizationHandler({
       providerIdentity: parsed.providerIdentity,
     })
@@ -812,6 +853,8 @@ export async function handleProviderWorkflowApprovalDecisionRoute(
       return
     }
 
+    if (!admitDirectServiceRequest(req, res, handlers)) return
+
     const result = await handlers.providerWorkflowApprovalDecisionHandler({
       approvalRequestId,
       decision: parsed.decision,
@@ -859,6 +902,8 @@ export async function handleProviderWorkflowApprovalResolveRoute(
       json(res, 403, { error: 'Runtime edge source mismatch' })
       return
     }
+
+    if (!admitDirectServiceRequest(req, res, handlers)) return
 
     const result = await handlers.providerWorkflowApprovalResolveHandler({
       recipeName,
@@ -966,6 +1011,8 @@ export async function handleProviderWorkflowResultRequestRoute(
       return
     }
 
+    if (!admitDirectServiceRequest(req, res, handlers)) return
+
     const result = await handlers.providerWorkflowResultRequestHandler(
       {
         ...(workflowName ? { workflowName } : {}),
@@ -1057,12 +1104,14 @@ export async function handleWorkflowApprovalNotificationClaimRoute(
       return
     }
     const limit = Number(body.limit ?? 10)
+    const claimLimit = Number.isFinite(limit) ? Math.max(1, Math.min(50, Math.floor(limit))) : 10
+    if (!admitDirectServiceRequest(req, res, handlers)) return
     const result = await handlers.workflowApprovalNotificationClaimHandler({
       medium,
       providerChannelIds,
       providerWorkspaceId: nullableString(body.providerWorkspaceId),
       hostRef,
-      limit: Number.isFinite(limit) ? Math.max(1, Math.min(50, Math.floor(limit))) : 10,
+      limit: claimLimit,
     })
     if ('error' in result) {
       json(res, 502, { deliveries: [], error: result.error })
@@ -1110,6 +1159,7 @@ export async function handleWorkflowApprovalNotificationTerminalRoute(
       json(res, 403, { error: 'Runtime edge source mismatch' })
       return
     }
+    if (!admitDirectServiceRequest(req, res, handlers)) return
     const result = await handlers.workflowApprovalNotificationTerminalHandler(id, action, {
       medium,
       providerUserId,
@@ -1165,6 +1215,7 @@ export async function handleWorkflowApprovalMediumEnrollmentRoute(
       json(res, 403, { error: 'Runtime edge source mismatch' })
       return
     }
+    if (!admitDirectServiceRequest(req, res, handlers)) return
     const result = await handlers.workflowApprovalMediumEnrollmentHandler({
       nonce,
       medium,
@@ -1222,6 +1273,7 @@ export async function handleTelegramWorkflowApprovalVerificationRoute(
       json(res, 403, { error: 'Runtime edge source mismatch' })
       return
     }
+    if (!admitDirectServiceRequest(req, res, handlers)) return
     const result = await handlers.telegramWorkflowApprovalVerificationHandler({
       code,
       providerUserId,
@@ -1260,6 +1312,7 @@ export async function handleTaskResultRoute(
       json(res, 501, { success: false, error: 'Task result handler not configured' })
       return
     }
+    if (!admitDirectServiceRequest(req, res, handlers)) return
 
     const result = await handlers.taskResultHandler(taskId, getRuntimeCallerContext(req))
     if (result === null) {
@@ -1281,6 +1334,7 @@ export function handleCronResultsRoute(req: Request, res: Response, handlers: Ro
     json(res, 501, { results: [] })
     return
   }
+  if (!admitDirectServiceRequest(req, res, handlers)) return
 
   const results = handlers.cronResultsHandler(getRuntimeCallerContext(req))
   json(res, 200, { results })
@@ -1296,6 +1350,7 @@ export function handleCronResultAckRoute(
     json(res, 501, { success: false, error: 'Handler not configured' })
     return
   }
+  if (!admitDirectServiceRequest(req, res, handlers)) return
 
   const deleted = handlers.cronResultAckHandler(taskId, getRuntimeCallerContext(req))
   json(res, 200, { success: deleted })
@@ -1756,6 +1811,7 @@ export async function handleProgressStreamRoute(
     json(res, 501, { error: 'Progress stream unavailable' })
     return
   }
+  if (!admitDirectServiceRequest(req, res, handlers)) return
 
   // SSE headers FIRST (before subscription to avoid race)
   res.setHeader('Content-Type', 'text/event-stream')

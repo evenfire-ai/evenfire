@@ -18,7 +18,12 @@ import {
 import type { NotificationDeliveryClient } from './notificationDeliveryClient'
 import { createProgressStream } from './progressClient'
 import { formatFinalMessage, formatProgressUpdate } from './progressFormatter'
-import { type ChannelReaderRuntimeSource, MessageResponse, RPCClient } from './rpcClient'
+import {
+  type ChannelReaderRuntimeSource,
+  MessageResponse,
+  RPCClient,
+  RuntimeServiceAdmissionLimitedError,
+} from './rpcClient'
 import { type TraceContextV1, mintChannelTraceContext } from './traceContext'
 import {
   Attachment,
@@ -89,6 +94,7 @@ interface PendingApprovalState {
 
 interface ProcessedProviderEvent {
   seenAt: number
+  retryAfterAt?: number
 }
 
 /** Stale approval entries are cleaned up after this interval. */
@@ -1472,13 +1478,22 @@ export class ChannelReader {
       console.log('-'.repeat(50))
 
       const providerEventKey = this.providerEventDedupeKey(msg)
-      if (providerEventKey && this.processedProviderEvents.has(providerEventKey)) {
-        console.warn(`[Main] Duplicate provider message ignored: ${providerEventKey}`)
-        continue
+      if (providerEventKey) {
+        const processedEvent = this.processedProviderEvents.get(providerEventKey)
+        if (processedEvent?.retryAfterAt && Date.now() >= processedEvent.retryAfterAt) {
+          this.processedProviderEvents.delete(providerEventKey)
+        } else if (processedEvent) {
+          console.warn(`[Main] Duplicate provider message ignored: ${providerEventKey}`)
+          continue
+        }
       }
       if (msg.providerIdentity && this.rpcClient.authorizeProviderMessage) {
         const authorization = await this.rpcClient.authorizeProviderMessage(msg.providerIdentity)
         if (!authorization.authorized) {
+          if (authorization.reason === 'error') {
+            this.deferProviderEvent(msg, authorization.retryAfterSeconds)
+            continue
+          }
           if (providerEventKey) {
             this.processedProviderEvents.set(providerEventKey, { seenAt: Date.now() })
           }
@@ -1544,6 +1559,7 @@ export class ChannelReader {
           console.error(`[Main] Progress flow failed, falling back:`, err)
           // Fall back to synchronous
           const response = await this.rpcClient.sendMessage(runtimeMsg, { traceContext })
+          this.releaseProviderEventAfterAdmissionLimit(msg, response)
           if (response.success && response.status === 'waiting_approval' && response.approval) {
             const { taskId, requestId, userId, notification } = response.approval
             console.log(`[Main] Tool approval needed (task: ${taskId}, request: ${requestId})`)
@@ -1584,6 +1600,7 @@ export class ChannelReader {
       } else {
         // Email: existing synchronous flow
         const response = await this.rpcClient.sendMessage(runtimeMsg, { traceContext })
+        this.releaseProviderEventAfterAdmissionLimit(msg, response)
 
         if (response.success && response.status === 'waiting_approval' && response.approval) {
           const { taskId, requestId, userId, notification } = response.approval
@@ -1637,6 +1654,25 @@ export class ChannelReader {
     }
 
     return ['message', msg.channelType, msg.channelId, msg.sender, messageId].join(':')
+  }
+
+  private deferProviderEvent(msg: Message, retryAfterSeconds = 1): void {
+    const eventKey = this.providerEventDedupeKey(msg)
+    if (eventKey) {
+      const boundedRetryAfterSeconds =
+        Number.isSafeInteger(retryAfterSeconds) && retryAfterSeconds >= 1 && retryAfterSeconds <= 60
+          ? retryAfterSeconds
+          : 1
+      this.processedProviderEvents.set(eventKey, {
+        seenAt: Date.now(),
+        retryAfterAt: Date.now() + boundedRetryAfterSeconds * 1000,
+      })
+    }
+  }
+
+  private releaseProviderEventAfterAdmissionLimit(msg: Message, response: MessageResponse): void {
+    if (response.error?.code !== 'RUNTIME_SERVICE_ADMISSION_LIMITED') return
+    this.deferProviderEvent(msg, response.error.retryAfterSeconds)
   }
 
   /**
@@ -1849,6 +1885,7 @@ export class ChannelReader {
   ): Promise<void> {
     // 1. Send message with async=true
     const response = await this.rpcClient.sendMessage(msg, { async: true, traceContext })
+    this.releaseProviderEventAfterAdmissionLimit(msg, response)
 
     if (!response.taskId) {
       console.log('[Main] No taskId returned from async send, falling back to sync')
@@ -2068,9 +2105,14 @@ export class ChannelReader {
 
         void (async () => {
           const deadline = Date.now() + RESULT_POLL_FALLBACK_TIMEOUT_MS
+          let retryDelayMs = RESULT_POLL_FALLBACK_INTERVAL_MS
           while (!finalDelivered && Date.now() < deadline) {
-            await new Promise(resolve => setTimeout(resolve, RESULT_POLL_FALLBACK_INTERVAL_MS))
+            await new Promise(resolve =>
+              setTimeout(resolve, Math.min(retryDelayMs, Math.max(0, deadline - Date.now())))
+            )
+            retryDelayMs = RESULT_POLL_FALLBACK_INTERVAL_MS
             if (finalDelivered) return
+            if (Date.now() >= deadline) return
             try {
               const delivered = await deliverFinalResult()
               if (delivered) {
@@ -2079,6 +2121,12 @@ export class ChannelReader {
                 return
               }
             } catch (err) {
+              if (err instanceof RuntimeServiceAdmissionLimitedError) {
+                retryDelayMs = Math.max(
+                  RESULT_POLL_FALLBACK_INTERVAL_MS,
+                  err.retryAfterSeconds * 1000
+                )
+              }
               console.error(`[Main] result polling fallback failed for task ${taskId}:`, err)
             }
           }
