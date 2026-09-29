@@ -84,6 +84,9 @@ const DESKTOP_READS_2026_09_18 = (
   ) as { offsetsMs: number[] }
 ).offsetsMs
 
+/** Open client sockets per scenario; under the 128-entry macOS listen backlog. */
+const MAX_CLIENT_SOCKETS = 64
+
 /** Every read class at `read`: for scenarios that exercise one read class. */
 function uniformBudgets(read: number, operation: number, ip: number): Budgets {
   return { resource: read, proxy: read, grants: read, shares: read, operation, ip }
@@ -274,7 +277,11 @@ describeRealPostgres('external GFS rate limits under concurrent load (real Postg
     const server = http.createServer(app)
     await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
     const { port } = server.address() as AddressInfo
-    const agent = new http.Agent({ keepAlive: true })
+    // The listen backlog is capped by the OS (kern.ipc.somaxconn is 128 on macOS), so
+    // 481 simultaneous connects reset the overflow with ECONNRESET before any request
+    // reaches the limiter. Bound the open sockets below that cap; the agent queues the
+    // rest and the server still handles a full socket pool of requests concurrently.
+    const agent = new http.Agent({ keepAlive: true, maxSockets: MAX_CLIENT_SOCKETS })
     if (openServer) throw new Error('a scenario server is already open')
     openServer = {
       close: () => {
