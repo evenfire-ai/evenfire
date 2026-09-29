@@ -814,13 +814,16 @@ if [[ "${cluster_changed}" == "true" ]]; then
   ensure_evenfire_registry
   incremental_restart_targets
 
-  # Both nginx gateway configs are mounted through subPath. Kubernetes updates
-  # the ConfigMaps but not the files in existing pods, so a deployment sync
-  # must roll both before any SDK or NP-08 runtime assertion.
+  # All three nginx gateway configs are mounted through subPath. Kubernetes
+  # updates the ConfigMaps but not the files in existing pods, so a deployment
+  # sync must roll all three before any SDK or NP-08 runtime assertion. The
+  # rpc gateway carries the redeem error_page mapping (#720).
   if [[ "${INCREMENTAL_FULL_DEPLOYMENT}" == "true" ||
         "${FORCE_RESTART}" == "true" ]]; then
     rollout_restart_with_retry control-plane nginx-workflow-approval-gateway
     rollout_if_present control-plane nginx-workflow-approval-gateway
+    rollout_restart_with_retry control-plane control-api-rpc-gateway
+    rollout_if_present control-plane control-api-rpc-gateway
     rollout_restart_with_retry control-plane host-context-controller-api-gateway
     rollout_if_present control-plane host-context-controller-api-gateway
   fi

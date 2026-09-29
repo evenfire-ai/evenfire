@@ -8,7 +8,7 @@ const ORDERED_LIST_PATTERN = /^\s*\d+[.)]\s+(.+)$/
 const DIVIDER_PATTERN = /^\s{0,3}((\*\s*){3,}|(-\s*){3,}|(_\s*){3,})$/
 const FENCE_PATTERN = /^\s*(```|~~~)\s*([\w-]+)?\s*$/
 
-function safeMarkdownHref(rawHref: string): string | null {
+export function safeMarkdownHref(rawHref: string): string | null {
   const href = rawHref.trim()
   if (/^https?:\/\//i.test(href) || /^mailto:/i.test(href) || href.startsWith('#')) return href
   return null

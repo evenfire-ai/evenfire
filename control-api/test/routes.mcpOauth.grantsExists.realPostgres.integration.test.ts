@@ -132,6 +132,47 @@ describeRealPostgres('resolveBatchGrantExistence (real Postgres)', () => {
     ])
   })
 
+  // A same-name reinstall gets a new uid. A grant consented against the previous
+  // installation must read as gone, so mcp-host evicts the token it still caches.
+  it('(uid) a grant of a previous installation reports exists:false after a same-name reinstall', async () => {
+    const uidOf = async (name: string) =>
+      ((await gateway.getResource('mcpservers', name, NS)) as { metadata: { uid: string } })
+        .metadata.uid
+    const consent = (userId: string, crUid: string) =>
+      upsertOAuthGrant(db, KEY, {
+        grantKind: 'user',
+        ownerKind: 'mcpserver',
+        recipeNamespace: NS,
+        recipeName: 'gdrive-u',
+        userId,
+        oauthClientId: CLIENT_ID,
+        provider: 'google',
+        accessToken: `at-${userId}`,
+        crUid,
+      })
+
+    seedUserServer('gdrive-u')
+    await consent('alice', await uidOf('gdrive-u'))
+    expect(await resolve([{ mcpServerName: 'gdrive-u', userId: 'alice' }])).toEqual([
+      { mcpServerName: 'gdrive-u', userId: 'alice', exists: true },
+    ])
+
+    // Uninstall without purging the grant, then reinstall under the same name.
+    await gateway.deleteResource('mcpservers', 'gdrive-u', NS)
+    seedUserServer('gdrive-u')
+    await consent('bob', await uidOf('gdrive-u'))
+
+    expect(
+      await resolve([
+        { mcpServerName: 'gdrive-u', userId: 'alice' },
+        { mcpServerName: 'gdrive-u', userId: 'bob' },
+      ])
+    ).toEqual([
+      { mcpServerName: 'gdrive-u', userId: 'alice', exists: false },
+      { mcpServerName: 'gdrive-u', userId: 'bob', exists: true },
+    ])
+  })
+
   it('(c2) distinguishes two userIds on the SAME server within one batch (real grants)', async () => {
     seedUserServer('gdrive-u')
     // alice consents; bob does not.

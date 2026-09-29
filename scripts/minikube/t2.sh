@@ -257,6 +257,12 @@ run_pre_gate() {
   # minikube-restart-all). A host `kubectl port-forward svc/...` stays bound to
   # the pod it resolved at start, so the host hold is stale from here on.
   T2_PRE_GATE_SYNC_RAN=true
+  # pre-gate-sync has just run against a live profile, so bootstrap is no
+  # longer pending. Re-read the marker it stamped: the lanes attestation and
+  # the final preflight carry its fingerprint, and a marker that does not
+  # describe the current source fails here instead of at NP-08.
+  T2_BOOTSTRAP_REQUIRED=false
+  t2_marker_check || return 1
   t2_evidence_write pre-gate-sync PASS \
     "duration=$((SECONDS - phase_started_seconds))s setupHandoffExpected=$setup_handoff_expected"
 }

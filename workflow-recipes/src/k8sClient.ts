@@ -61,6 +61,7 @@ import {
   CODEX_CONNECTION_REF_ANNOTATION,
   SUBSCRIPTION_CONNECTION_REF_ANNOTATION,
 } from './workflow/llmAllowedModelsSnapshot'
+import { networkPolicyConditionsChanged } from './workflow/workflowReconciler'
 
 function grantIdentityFingerprint(
   recipe: { metadata?: { annotations?: Record<string, string> } } | undefined
@@ -166,6 +167,19 @@ export function shouldPatchRecipeStatus(
     ownedConditionsChanged(recipe.status?.conditions, result.transportNetworkConditions, [
       TRANSPORT_NETWORK_CONDITION_TYPE,
     ])
+  )
+    return true
+
+  // A NetworkPolicy ownership conflict or a pending retry changes neither
+  // phase nor message, so without this clause those conditions would not be
+  // published or cleared on a pass where nothing else changed. An undefined
+  // field means the pass never reached the apply, so it does not force a patch.
+  if (
+    result.networkPolicyOwnershipConditions !== undefined &&
+    networkPolicyConditionsChanged(
+      recipe.status?.conditions,
+      result.networkPolicyOwnershipConditions
+    )
   )
     return true
 

@@ -4,6 +4,7 @@ import {
   type DbClient,
   advisoryLockModelNames,
   boundCarrierTransactionIdleTimeout,
+  pool,
   withTransaction,
 } from '../../db.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
@@ -11,14 +12,22 @@ import { enforceNamespace } from '../../http/namespaceAudit.js'
 import { validateCommunicationChannelSpec } from '../../http/validateCommunicationChannelSpec.js'
 import { validateMcpServerSpecPreflight } from '../../http/validateMcpServerSpec.js'
 import { K8sGateway } from '../../k8s.js'
+import { deriveOAuthEncryptionKey } from '../../oauth/encryption.js'
+import { uninstallMcpServer } from '../../oauth/mcpServerUninstall.js'
+import { rootLogger } from '../../observability/logger.js'
 import { stripHookRefFromHosts } from '../../services/hostGuardrailRefs.js'
 import {
   K8sConflictError,
   K8sNotFoundError,
   type MutableResourceSnapshot,
 } from '../../services/resourceService.js'
+import { captureSecretForCleanup } from '../../services/secretCleanup.js'
 import { secretKeyNames } from '../../services/secretKeyNames.js'
-import { ClerumResourceType } from '../../types.js'
+import {
+  ClerumResourceType,
+  type ResourcePreconditions,
+  type SecretPreconditions,
+} from '../../types.js'
 import {
   registerCommunicationChannelCredentialsRoutes,
   validateCommunicationChannelCredentials,
@@ -38,6 +47,9 @@ import {
 import { collectResourceSpecFieldIssues, validateResourceName } from './resourceFieldValidation.js'
 import type { StaleModelWarning } from './staleModelWarning.js'
 
+export const adminResourcesLogger = rootLogger.child({ module: 'admin-resources' })
+const log = adminResourcesLogger
+
 const PROVIDER_SETTINGS_FIELDS: Readonly<Record<string, readonly string[]>> = {
   telegramSettings: ['botHandle', 'replyOnlyWhenMentioned'],
   slackSettings: ['workspaceId', 'botHandle', 'replyOnlyWhenMentioned', 'replyInThreads'],
@@ -46,6 +58,7 @@ const PROVIDER_SETTINGS_FIELDS: Readonly<Record<string, readonly string[]>> = {
 
 type CommunicationChannelSpecSnapshot = {
   spec: Record<string, unknown>
+  uid?: string
   resourceVersion?: string
 }
 
@@ -55,10 +68,26 @@ function recordValue(value: unknown): Record<string, unknown> | null {
     : null
 }
 
-function resourceVersionFromResource(resource: unknown): string | undefined {
+function resourcePreconditionsFromResource(resource: unknown): ResourcePreconditions | undefined {
   const metadata = recordValue((resource as { metadata?: unknown } | null)?.metadata)
+  const uid = metadata?.uid
   const resourceVersion = metadata?.resourceVersion
-  return typeof resourceVersion === 'string' && resourceVersion ? resourceVersion : undefined
+  if (typeof uid !== 'string' || !uid || typeof resourceVersion !== 'string' || !resourceVersion) {
+    return undefined
+  }
+  return { uid, resourceVersion }
+}
+
+function credentialPreconditionsFromObject(object: unknown): SecretPreconditions | undefined {
+  const metadata = recordValue((object as { metadata?: unknown } | null)?.metadata)
+  const flat = recordValue(object)
+  const uid = typeof flat?.uid === 'string' ? flat.uid : metadata?.uid
+  const resourceVersion =
+    typeof flat?.resourceVersion === 'string' ? flat.resourceVersion : metadata?.resourceVersion
+  if (typeof uid !== 'string' || !uid || typeof resourceVersion !== 'string' || !resourceVersion) {
+    return undefined
+  }
+  return { uid, resourceVersion }
 }
 
 function missingPersistedProviderSetting(
@@ -82,7 +111,7 @@ function missingPersistedProviderSetting(
 }
 
 function sendPrunedProviderSettingError(res: Response, field: string): void {
-  console.warn(`[Admin] CommunicationChannel provider setting was pruned: ${field}`)
+  log.warn({ field }, 'CommunicationChannel provider setting was pruned')
   res.status(409).json({
     code: 'communication_channel_crd_outdated',
     error:
@@ -95,21 +124,33 @@ async function rollbackPrunedCommunicationChannelCreate(
   gateway: K8sGateway,
   name: string,
   namespace: string,
-  credentialsSecretName?: string
+  credentialsSecretName?: string,
+  resourcePreconditions?: ResourcePreconditions,
+  credentialPreconditions?: SecretPreconditions
 ): Promise<void> {
-  try {
-    await gateway.deleteResource('communicationchannels', name, namespace)
-  } catch (err) {
-    console.warn(
-      `[Admin] cc pruned-setting rollback failed for "${name}": ${err instanceof Error ? err.message : String(err)}`
-    )
+  if (resourcePreconditions) {
+    try {
+      await gateway.deleteResource('communicationchannels', name, namespace, resourcePreconditions)
+    } catch (err) {
+      log.warn({ name, err }, 'CommunicationChannel pruned-setting rollback failed')
+    }
+  } else {
+    log.warn({ name }, 'CommunicationChannel pruned-setting rollback skipped: identity unavailable')
   }
   if (!credentialsSecretName) return
-  try {
-    await gateway.deleteSecret(credentialsSecretName, namespace)
-  } catch (err) {
-    console.warn(
-      `[Admin] cc credentials rollback failed for "${credentialsSecretName}": ${err instanceof Error ? err.message : String(err)}`
+  if (credentialPreconditions) {
+    try {
+      await gateway.deleteSecret(credentialsSecretName, namespace, credentialPreconditions)
+    } catch (err) {
+      log.warn(
+        { secretName: credentialsSecretName, err },
+        'CommunicationChannel credentials rollback failed'
+      )
+    }
+  } else {
+    log.warn(
+      { secretName: credentialsSecretName },
+      'CommunicationChannel credentials rollback skipped: identity unavailable'
     )
   }
 }
@@ -122,10 +163,10 @@ async function loadCommunicationChannelSpecSnapshot(
   try {
     const existing = await gateway.getResource('communicationchannels', name, namespace)
     const spec = recordValue((existing as { spec?: unknown } | null)?.spec)
-    const resourceVersion = resourceVersionFromResource(existing)
+    const identity = resourcePreconditionsFromResource(existing)
     return {
       spec: spec ? { ...spec } : {},
-      ...(resourceVersion ? { resourceVersion } : {}),
+      ...(identity ?? {}),
     }
   } catch (err) {
     if (extractK8sStatusCode(err) === 404) return null
@@ -138,29 +179,29 @@ async function rollbackPrunedCommunicationChannelUpdate(
   name: string,
   namespace: string,
   snapshot: CommunicationChannelSpecSnapshot | null,
-  resourceVersion?: string
+  resourcePreconditions?: ResourcePreconditions
 ): Promise<void> {
   if (!snapshot) return
+  if (!resourcePreconditions?.uid || !resourcePreconditions.resourceVersion) {
+    log.warn({ name }, 'CommunicationChannel rollback skipped: identity unavailable')
+    return
+  }
   try {
     const restored = await gateway.updateResource(
       'communicationchannels',
       name,
       {
-        ...(resourceVersion ? { metadata: { resourceVersion } } : {}),
+        metadata: resourcePreconditions,
         spec: snapshot.spec,
       },
       namespace
     )
     const missingField = missingPersistedProviderSetting(snapshot.spec, restored)
     if (missingField) {
-      console.warn(
-        `[Admin] cc pruned-setting rollback for "${name}" could not restore ${missingField}`
-      )
+      log.warn({ name, field: missingField }, 'CommunicationChannel rollback did not restore field')
     }
   } catch (err) {
-    console.warn(
-      `[Admin] cc pruned-setting rollback failed for "${name}": ${err instanceof Error ? err.message : String(err)}`
-    )
+    log.warn({ name, err }, 'CommunicationChannel pruned-setting rollback failed')
   }
 }
 
@@ -199,7 +240,7 @@ function contextDisplayNameNotPersisted(
 }
 
 function sendPrunedDisplayNameError(res: Response): void {
-  console.warn('[Admin] Context spec.displayName was pruned by the apiserver (CRD outdated)')
+  log.warn('Context spec.displayName was pruned by the apiserver (CRD outdated)')
   res.status(409).json({
     code: 'context_crd_outdated',
     error:
@@ -219,16 +260,17 @@ function sendPrunedDisplayNameError(res: Response): void {
 async function rollbackPrunedContextCreate(
   gateway: K8sGateway,
   name: string,
-  namespace: string
+  namespace: string,
+  resourcePreconditions?: ResourcePreconditions
 ): Promise<void> {
+  if (!resourcePreconditions) {
+    log.warn({ name }, 'Context pruned-displayName rollback skipped: identity unavailable')
+    return
+  }
   try {
-    await gateway.deleteResource('contexts', name, namespace)
+    await gateway.deleteResource('contexts', name, namespace, resourcePreconditions)
   } catch (err) {
-    const safeName = String(name).replace(/[\r\n]/g, '')
-    const safeErrMsg = (err instanceof Error ? err.message : String(err)).replace(/[\r\n]/g, '')
-    console.warn(
-      `[Admin] context pruned-displayName rollback failed for "${safeName}": ${safeErrMsg}`
-    )
+    log.warn({ name, err }, 'Context pruned-displayName rollback failed')
   }
 }
 
@@ -470,6 +512,13 @@ function hostValidationDeps(db: DbClient) {
 
 export function createAdminResourcesRouter(gateway: K8sGateway): Router {
   const router = Router()
+  // Uses the module-level `log` (= exported `adminResourcesLogger`). A local
+  // child here would shadow it with a different instance, so handler logs would
+  // bypass any spy/redaction attached to the exported logger.
+  // Reliable local revocation of a remote server's DCR client on uninstall; the
+  // AS-side RFC 7592 delete is courtesy (real pinned transport in production).
+  const oauthEncryptionKey = deriveOAuthEncryptionKey(config.oauthEncryptionKey)
+  const dcrDb: DbClient = { query: (text, values) => pool.query(text, values) }
 
   // Middleware: enforce namespace per resource type and audit any injection attempt.
   // Uses enforceNamespace() consistently with all other admin routers.
@@ -588,12 +637,14 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
           return
         }
         const secretName = ccCredentialsSecretName(ccName)
-        await gateway.createSecret({
+        let createdCredentialPreconditions: SecretPreconditions | undefined
+        const createdCredential = await gateway.createSecret({
           name: secretName,
           namespace: ns,
           type: 'Opaque',
           stringData: credentialValidation.values,
         })
+        createdCredentialPreconditions = credentialPreconditionsFromObject(createdCredential)
         // Inject credentialsSecretRef into the CC spec; strip the
         // non-CRD `credentials` envelope so it does not leak into the
         // CustomObjects API call.
@@ -609,7 +660,14 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
           const created = await gateway.createResource(plural, ccBody, ns)
           const missingField = missingPersistedProviderSetting(ccBody.spec, created)
           if (missingField) {
-            await rollbackPrunedCommunicationChannelCreate(gateway, ccName, ns, secretName)
+            await rollbackPrunedCommunicationChannelCreate(
+              gateway,
+              ccName,
+              ns,
+              secretName,
+              resourcePreconditionsFromResource(created),
+              createdCredentialPreconditions
+            )
             sendPrunedProviderSettingError(res, missingField)
             return
           }
@@ -618,11 +676,19 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
           // Best-effort rollback. 404 from a stale Secret read or a
           // missing-secret race is tolerable — log and bubble the
           // original CRD error up so the caller sees the failure cause.
-          try {
-            await gateway.deleteSecret(secretName, ns)
-          } catch (rollbackErr) {
-            console.warn(
-              `[Admin] cc credentials rollback failed for "${secretName}": ${rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr)}`
+          if (createdCredentialPreconditions) {
+            try {
+              await gateway.deleteSecret(secretName, ns, createdCredentialPreconditions)
+            } catch (rollbackErr) {
+              log.warn(
+                { secretName, err: rollbackErr },
+                'CommunicationChannel credentials rollback failed'
+              )
+            }
+          } else {
+            log.warn(
+              { secretName },
+              'CommunicationChannel credentials rollback skipped: identity unavailable'
             )
           }
           throw err
@@ -703,7 +769,13 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
       if (plural === 'communicationchannels' && body.spec) {
         const missingField = missingPersistedProviderSetting(body.spec, created)
         if (missingField) {
-          await rollbackPrunedCommunicationChannelCreate(gateway, body.metadata.name, ns)
+          await rollbackPrunedCommunicationChannelCreate(
+            gateway,
+            body.metadata.name,
+            ns,
+            undefined,
+            resourcePreconditionsFromResource(created)
+          )
           sendPrunedProviderSettingError(res, missingField)
           return
         }
@@ -713,7 +785,12 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
         body.spec &&
         contextDisplayNameNotPersisted(body.spec, created)
       ) {
-        await rollbackPrunedContextCreate(gateway, body.metadata.name, ns)
+        await rollbackPrunedContextCreate(
+          gateway,
+          body.metadata.name,
+          ns,
+          resourcePreconditionsFromResource(created)
+        )
         sendPrunedDisplayNameError(res)
         return
       }
@@ -893,6 +970,9 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
             ...body,
             metadata: {
               ...body.metadata,
+              ...(previousCommunicationChannelSpec?.uid
+                ? { uid: previousCommunicationChannelSpec.uid }
+                : {}),
               ...(body.metadata?.resourceVersion ||
               !previousCommunicationChannelSpec?.resourceVersion
                 ? {}
@@ -948,7 +1028,7 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
               req.params.name,
               ns,
               previousCommunicationChannelSpec,
-              resourceVersionFromResource(updated)
+              resourcePreconditionsFromResource(updated)
             )
             sendPrunedProviderSettingError(res, missingField)
             return
@@ -994,6 +1074,42 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
       const { plural, ns } = resolveResource(req.params.resource)!
       const name = req.params.name
 
+      if (plural === 'mcpservers') {
+        const outcome = await uninstallMcpServer(
+          {
+            gateway,
+            db: dcrDb,
+            encryptionKey: oauthEncryptionKey,
+            dcrDeps: { logger: log },
+            contextsNamespace: resourceNamespace('contexts'),
+            logger: log,
+          },
+          { name, namespace: ns }
+        )
+        if (outcome.status === 'completed') {
+          res.status(200).json(outcome.crDeleteResponse)
+          return
+        }
+        if (outcome.status === 'incomplete') {
+          res.status(503).json({
+            error: 'mcp_server_uninstall_incomplete',
+            outcome: 'repair_required',
+            pending: outcome.pending,
+            deleted: outcome.deleted,
+          })
+          return
+        }
+        if (outcome.status === 'not_found') {
+          // Every cleanup runs before the CR delete, so a missing CR means "already clean"
+          // or "deleted out of band". Cleaning by name here would have no uid to fence
+          // by: it could delete a CR a reinstall recreated after this read, or the Secret
+          // a pre-registered reinstall creates before its CR.
+          throw new K8sNotFoundError(`mcpservers/${name} not found`)
+        }
+        const unhandled: never = outcome
+        throw new Error(`unhandled mcp-server uninstall outcome: ${JSON.stringify(unhandled)}`)
+      }
+
       // CommunicationChannel: read the credentialsSecretRef name FIRST (we
       // can't read the CC after it's deleted), then delete the CC, then
       // delete the Secret. The CC-first order means HCC's SecretInformer
@@ -1017,69 +1133,44 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
         }
       }
 
+      // Capture the credential Secret identity BEFORE deleting the parent CR: a
+      // same-name Secret created in the gap belongs to a different owner, and a
+      // name-addressed delete afterwards would remove it.
+      const ccSecretCleanup =
+        plural === 'communicationchannels' && ccSecretRefName
+          ? await captureSecretForCleanup(gateway, ccSecretRefName, ns, log)
+          : null
+
       const deleted = await gateway.deleteResource(plural, name, ns)
 
-      if (plural === 'communicationchannels' && ccSecretRefName) {
-        try {
-          await gateway.deleteSecret(ccSecretRefName, ns)
-          console.log(`[Admin] Deleted CC credentials Secret "${ccSecretRefName}" in ${ns}`)
-        } catch (err) {
-          if (extractK8sStatusCode(err) === 404) {
-            console.log(`[Admin] CC credentials Secret "${ccSecretRefName}" already gone in ${ns}`)
-          } else {
-            // CC is already gone; log and swallow so the operator gets a 200
-            // and can clean the orphan Secret manually if needed.
-            console.error(
-              `[Admin] CC delete succeeded but credentials Secret "${ccSecretRefName}" cleanup failed:`,
-              err
+      if (plural === 'communicationchannels' && ccSecretRefName && ccSecretCleanup) {
+        if (ccSecretCleanup.status !== 'ready') {
+          log.warn(
+            { secretName: ccSecretRefName, namespace: ns, reason: ccSecretCleanup.status },
+            'Skipped CommunicationChannel credentials Secret cleanup'
+          )
+        } else {
+          try {
+            await gateway.deleteSecret(ccSecretRefName, ns, ccSecretCleanup.precondition)
+            log.info(
+              { secretName: ccSecretRefName, namespace: ns },
+              'Deleted CommunicationChannel credentials Secret'
             )
-          }
-        }
-      }
-
-      if (plural === 'mcpservers') {
-        const contextsNs = resourceNamespace('contexts')
-        try {
-          await gateway.deleteSecret(`${name}-credentials`, ns)
-          console.log(`[Admin] Deleted credentials secret "${name}-credentials" in ${ns}`)
-        } catch (err) {
-          console.log(
-            `[Admin] No credentials secret to delete for "${name}": ${err instanceof Error ? err.message : String(err)}`
-          )
-        }
-
-        try {
-          const ctxList = (await gateway.listResource('contexts', contextsNs)) as Array<{
-            metadata?: { name?: string }
-            spec?: Record<string, unknown> & {
-              contextId?: string
-              description?: string
-              mcpServers?: string[]
-            }
-          }>
-          for (const ctx of ctxList) {
-            const ctxName = ctx.metadata?.name
-            const servers = ctx.spec?.mcpServers ?? []
-            if (ctxName && servers.includes(name)) {
-              await gateway.updateResource(
-                'contexts',
-                ctxName,
-                {
-                  spec: {
-                    ...ctx.spec,
-                    contextId: ctx.spec?.contextId ?? ctxName,
-                    mcpServers: servers.filter(s => s !== name),
-                  } as Record<string, unknown>,
-                },
-                contextsNs
+          } catch (err) {
+            if (extractK8sStatusCode(err) === 404) {
+              log.info(
+                { secretName: ccSecretRefName, namespace: ns },
+                'CommunicationChannel credentials Secret already gone'
               )
-              console.log(`[Admin] Removed "${name}" from Context "${ctxName}" allowlist`)
+            } else {
+              // CC is already gone; log and swallow so the operator gets a 200
+              // and can clean the orphan Secret manually if needed.
+              log.error(
+                { secretName: ccSecretRefName, namespace: ns, err },
+                'CommunicationChannel delete succeeded but credentials cleanup failed'
+              )
             }
           }
-        } catch (err) {
-          console.error(
-            `[Admin] Failed to clean up Context allowlists for "${name}": ${err instanceof Error ? err.message : String(err)}`
-          )
         }
       }
 

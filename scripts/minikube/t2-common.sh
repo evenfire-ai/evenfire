@@ -15,6 +15,8 @@ if [ -z "$T2_SCRIPT_DIR" ]; then T2_SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SO
 . "$T2_SCRIPT_DIR/port-forward-owner.sh"
 # shellcheck source=profile-readiness.sh
 . "$T2_SCRIPT_DIR/profile-readiness.sh"
+# shellcheck source=pre-gate-marker.sh
+. "$T2_SCRIPT_DIR/pre-gate-marker.sh"
 T2_PROJECT_DIR="$T2_PROJECT_DIR"
 if [ -z "$T2_PROJECT_DIR" ]; then T2_PROJECT_DIR="$(cd -- "$T2_SCRIPT_DIR/../.." && pwd -P)"; fi
 T2_PROFILE="$T2_PROFILE"
@@ -489,6 +491,28 @@ PY
         ;;
       *) T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-setup-local"; t2_fail BOOTSTRAP_REQUIRED 'pre-gate marker is incomplete' ;;
     esac
+    # Explicit so a caller in an `||` context (errexit suspended) cannot fall
+    # through to the fingerprint check with the error text as marker values.
+    return 1
+  fi
+  local marker_fingerprint source_fingerprint
+  IFS=$'\t' read -r marker_fingerprint _ <<< "$marker_values"
+  # A marker for this HEAD is current only while the working tree still hashes
+  # to the digest it was stamped with; NP-08 recomputes the same digest.
+  if ! source_fingerprint="$(pre_gate_marker_cluster_fingerprint "$T2_PROJECT_DIR")"; then
+    T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-t2"
+    t2_fail HEAD_MARKER_MISMATCH 'source fingerprint could not be computed'
+    return 1
+  fi
+  if [ "$source_fingerprint" != "$marker_fingerprint" ]; then
+    if [ "$T2_PLAN_MODE" = true ]; then
+      T2_MARKER_MATCHES_HEAD=false
+      T2_PLAN_REASON='source fingerprint changed since the pre-gate marker'
+      return 0
+    fi
+    T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-t2"
+    t2_fail HEAD_MARKER_MISMATCH 'source fingerprint changed since the pre-gate marker'
+    return 1
   fi
   T2_MARKER_MATCHES_HEAD=true
   IFS=$'\t' read -r T2_CLUSTER_FINGERPRINT T2_IMAGE_SOURCE T2_IMAGE_TAG \

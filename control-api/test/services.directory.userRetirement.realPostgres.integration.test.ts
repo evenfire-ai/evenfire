@@ -111,6 +111,18 @@ describeRealPostgres('retireDesktopUser on real PostgreSQL', () => {
                'active', 'initial_setup', $2::uuid, 1)`,
       [userId, actorId]
     )
+    await testPool.query(
+      `INSERT INTO workflow_approval_medium_accounts
+         (user_id, medium, provider_user_id, communication_channel_ref, verified_at)
+       VALUES ($1::uuid, 'telegram', $2, 'linked-approval-channel', NOW())`,
+      [userId, `tg-${userId}`]
+    )
+    await testPool.query(
+      `INSERT INTO workflow_approval_medium_challenges
+         (user_id, medium, provider_user_id, code_hash, expires_at)
+       VALUES ($1::uuid, 'telegram', $2, 'example-code-hash', NOW() + INTERVAL '10 minutes')`,
+      [userId, `tg-${userId}`]
+    )
 
     const result = await retireDesktopUser(
       { kind: 'control_admin', controlAdminId: actorId },
@@ -174,6 +186,18 @@ describeRealPostgres('retireDesktopUser on real PostgreSQL', () => {
         lifecycle_operation_id: result.operationId,
       },
     ])
+    const approval = await testPool.query(
+      `SELECT disabled_at IS NOT NULL AS disabled
+         FROM workflow_approval_medium_accounts WHERE user_id = $1::uuid`,
+      [userId]
+    )
+    expect(approval.rows).toEqual([{ disabled: true }])
+    const challenge = await testPool.query(
+      `SELECT consumed_at IS NOT NULL AS consumed
+         FROM workflow_approval_medium_challenges WHERE user_id = $1::uuid`,
+      [userId]
+    )
+    expect(challenge.rows).toEqual([{ consumed: true }])
   })
 
   it('retires a user after the Control UI already revoked the link without changing the tombstone', async () => {

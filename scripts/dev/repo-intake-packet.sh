@@ -2,6 +2,26 @@
 set -euo pipefail
 
 BASE_REF="${REPO_INTAKE_BASE_REF:-origin/dev}"
+MEASURE=false
+HISTORICAL=false
+# Measurement mode uses the development base unless a historical comparison
+# is explicitly requested. It never changes the normal T2 intake policy.
+if [[ "${1:-}" == "--measure" ]]; then
+  MEASURE=true
+  BASE_REF=origin/dev
+  shift
+  if [[ "${1:-}" == "--historical-base" ]]; then
+    [[ $# -ge 2 && -n "$2" && "$2" != -* ]] || { echo 'ERROR: historical base required' >&2; exit 2; }
+    HISTORICAL=true
+    BASE_REF="$2"
+    shift 2
+  fi
+  [[ "${1:-}" == "--" && $# -ge 2 ]] || { echo 'Usage: repo-intake-packet.sh --measure [--historical-base REF] -- COMMAND [ARG...]' >&2; exit 2; }
+  shift
+elif (( $# )); then
+  echo 'ERROR: unknown repo intake arguments' >&2
+  exit 2
+fi
 SCRIPT_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 BLOCKERS=()
 WARNINGS=()
@@ -85,12 +105,19 @@ collect_touched_areas() {
 }
 
 count_status() {
-  local line xy x y
+  local line xy x y status_out
   STATUS_TOTAL=0
   STATUS_STAGED=0
   STATUS_UNSTAGED=0
   STATUS_UNTRACKED=0
   STATUS_CONFLICTS=0
+  # Zero counts from an unreadable status would look like a clean tree; the
+  # measurement gate blocks on STATUS_READABLE=false.
+  STATUS_READABLE=true
+  if ! status_out="$(git status --porcelain=v1 -uall 2>/dev/null)"; then
+    STATUS_READABLE=false
+    return 0
+  fi
 
   while IFS= read -r line; do
     [[ -n "${line}" ]] || continue
@@ -108,7 +135,7 @@ count_status() {
     case "${xy}" in
       DD|AU|UD|UA|DU|AA|UU) STATUS_CONFLICTS=$((STATUS_CONFLICTS + 1)) ;;
     esac
-  done < <(git status --porcelain=v1 -uall 2>/dev/null || true)
+  done <<< "${status_out}"
 }
 
 resolve_primary_checkout() {
@@ -176,11 +203,38 @@ if [[ -n "${BASE_COMMIT}" ]]; then
     BLOCKERS+=("branch_missing_${BASE_REF}_commits")
   elif [[ "${BASE_AHEAD}" != "n/a" && "${BASE_AHEAD}" -gt 0 ]]; then
     BASE_STATUS="contains_base_with_${BASE_AHEAD}_local_commits"
-  else
+  elif [[ "${BASE_AHEAD}" == "0" && "${BASE_BEHIND}" == "0" ]]; then
     BASE_STATUS="at_base"
+  else
+    BASE_STATUS="unknown"
+    BLOCKERS+=("base_comparison_failed")
   fi
 else
   BLOCKERS+=("missing_${BASE_REF}")
+fi
+
+if [[ "${MEASURE}" == true ]]; then
+  [[ "${DETACHED}" == no || "${HISTORICAL}" == true ]] || BLOCKERS+=("detached_measurement")
+  count_status
+  [[ "${STATUS_READABLE}" == true ]] || BLOCKERS+=("status_unreadable")
+  (( STATUS_CONFLICTS == 0 )) || BLOCKERS+=("unresolved_conflicts")
+  kv "measurement_head" "${HEAD_FULL}"
+  kv "measurement_base_ref" "${BASE_REF}"
+  kv "measurement_base_commit" "${BASE_COMMIT:-missing}"
+  kv "measurement_base_status" "${BASE_STATUS}"
+  kv "measurement_dirty_count" "${STATUS_TOTAL}"
+  kv "measurement_ref_source" "local_git_refs_no_fetch"
+  if (( ${#BLOCKERS[@]} )); then
+    kv "measurement_readiness" "blocked"
+    kv "blockers" "$(join_blockers)"
+    exit 2
+  fi
+  if [[ "${HISTORICAL}" == true ]]; then
+    kv "measurement_readiness" "historical_non_certifying"
+  else
+    kv "measurement_readiness" "base_check_passed_not_a_lane_verdict"
+  fi
+  exec "$@"
 fi
 
 UPSTREAM_AHEAD="n/a"

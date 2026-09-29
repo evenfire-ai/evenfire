@@ -234,8 +234,8 @@ export function ControlAdminsPanel({
   async function handleRevokeGfsOperatorLink(admin: ControlAdminListItem) {
     const label = admin.email ? `${admin.username} (${admin.email})` : admin.username
     const shouldRevoke = await confirm({
-      title: 'Revoke Desktop GFS operator access',
-      message: `Revoke Desktop GFS operator access for ${label}? The Control Admin, both passwords, and unrelated Control Plane access will remain unchanged.`,
+      title: 'Revoke Desktop EvenDrive operator access',
+      message: `Revoke Desktop EvenDrive operator access for ${label}? The Control Admin, both passwords, and unrelated Control Plane access will remain unchanged.`,
       confirmLabel: 'Revoke access',
       tone: 'danger',
     })
@@ -246,7 +246,9 @@ export function ControlAdminsPanel({
     try {
       const link = admin.gfsOperatorLink
       if (!link || link.status !== 'active' || !Number.isInteger(link.rowVersion)) {
-        throw new Error('The current GFS operator-link version is unavailable; refresh and retry.')
+        throw new Error(
+          'The current EvenDrive operator-link version is unavailable; refresh and retry.'
+        )
       }
       const result = await revokeControlAdminGfsOperatorLink(admin.id, {
         rowVersion: link.rowVersion,
@@ -272,15 +274,15 @@ export function ControlAdminsPanel({
       )
       showToast(
         result.revoked
-          ? 'Desktop GFS operator access revoked.'
-          : 'Desktop GFS operator access was already revoked.',
+          ? 'Desktop EvenDrive operator access revoked.'
+          : 'Desktop EvenDrive operator access was already revoked.',
         { tone: 'success' }
       )
     } catch (revokeError) {
       setError(
         revokeError instanceof Error
           ? revokeError.message
-          : 'Failed to revoke Desktop GFS operator access'
+          : 'Failed to revoke Desktop EvenDrive operator access'
       )
     } finally {
       setRevokingGfsLinkAdminId(null)
@@ -290,8 +292,8 @@ export function ControlAdminsPanel({
   async function handleReactivateGfsOperatorLink(admin: ControlAdminListItem) {
     const label = admin.email ? `${admin.username} (${admin.email})` : admin.username
     const shouldReactivate = await confirm({
-      title: 'Reactivate Desktop GFS operator access',
-      message: `Reactivate Desktop GFS operator access for ${label}? This creates a new audited link generation without changing passwords or unrelated access.`,
+      title: 'Reactivate Desktop EvenDrive operator access',
+      message: `Reactivate Desktop EvenDrive operator access for ${label}? This creates a new audited link generation without changing passwords or unrelated access.`,
       confirmLabel: 'Reactivate access',
       tone: 'default',
     })
@@ -299,7 +301,7 @@ export function ControlAdminsPanel({
 
     const link = admin.gfsOperatorLink
     if (!link || link.status !== 'revoked' || !Number.isInteger(link.rowVersion)) {
-      setError('The revoked GFS operator-link version is unavailable; refresh and retry.')
+      setError('The revoked EvenDrive operator-link version is unavailable; refresh and retry.')
       return
     }
     setReactivatingGfsLinkAdminId(admin.id)
@@ -329,15 +331,15 @@ export function ControlAdminsPanel({
       )
       showToast(
         result.reactivated
-          ? 'Desktop GFS operator access reactivated.'
-          : 'Desktop GFS operator access remains revoked.',
+          ? 'Desktop EvenDrive operator access reactivated.'
+          : 'Desktop EvenDrive operator access remains revoked.',
         { tone: 'success' }
       )
     } catch (reactivateError) {
       setError(
         reactivateError instanceof Error
           ? reactivateError.message
-          : 'Failed to reactivate Desktop GFS operator access'
+          : 'Failed to reactivate Desktop EvenDrive operator access'
       )
     } finally {
       setReactivatingGfsLinkAdminId(null)
@@ -458,7 +460,7 @@ export function ControlAdminsPanel({
               />
               <TableHeaderCell
                 activeDirection={adminSort.key === 'gfs' ? adminSort.direction : null}
-                label="Desktop GFS access"
+                label="Desktop EvenDrive access"
                 onSort={() => adminSort.sortBy('gfs')}
               />
               <TableHeaderCell
@@ -548,8 +550,8 @@ export function ControlAdminsPanel({
                                   key: 'revoke-gfs',
                                   label:
                                     revokingGfsLinkAdminId === admin.id
-                                      ? 'Revoking GFS…'
-                                      : 'Revoke GFS',
+                                      ? 'Revoking EvenDrive…'
+                                      : 'Revoke EvenDrive',
                                   disabled: revokingGfsLinkAdminId === admin.id,
                                   onClick: () => void handleRevokeGfsOperatorLink(admin),
                                   danger: true,
@@ -562,8 +564,8 @@ export function ControlAdminsPanel({
                                   key: 'reactivate-gfs',
                                   label:
                                     reactivatingGfsLinkAdminId === admin.id
-                                      ? 'Reactivating GFS…'
-                                      : 'Reactivate GFS',
+                                      ? 'Reactivating EvenDrive…'
+                                      : 'Reactivate EvenDrive',
                                   disabled: reactivatingGfsLinkAdminId === admin.id,
                                   onClick: () => void handleReactivateGfsOperatorLink(admin),
                                 },

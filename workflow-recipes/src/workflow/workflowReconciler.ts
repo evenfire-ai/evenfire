@@ -32,6 +32,13 @@ import {
   isRetryableInfraError,
 } from '../reconciler/k8sErrors'
 import {
+  type NetworkPolicyConflictReason,
+  type NetworkPolicyConvergenceDecision,
+  buildNetworkPolicyReplacement,
+  classifyOwnerlessNetworkPolicyOwnership,
+  decideNetworkPolicyConvergence,
+} from '../reconciler/networkPolicyConvergence'
+import {
   resolveStatefulSetHeadlessServiceName,
   resolveWorkloadMcpServerLabel,
   resolveWorkloadRuntimeResourceName,
@@ -90,6 +97,7 @@ import {
   type McpHostRuntimeTokenRefreshResult,
   NO_MCP_HOST_RUNTIME_TOKEN_REFRESH,
   PluginWorkloadSdkProvisioner,
+  type WorkflowNetworkPolicyApplySummary,
 } from './pluginWorkloadSdkProvisioner'
 import type {
   PluginWorkloadSdkRevocationClient,
@@ -194,6 +202,27 @@ const RUNTIME_HTTP_EGRESS_PREVIOUS_EXPIRES_AT_ANNOTATION =
 const RUNTIME_HTTP_EGRESS_PREVIOUS_CIDR_EXPIRIES_ANNOTATION =
   'clerum.io/runtime-http-egress-previous-cidr-expiries'
 const RUNTIME_HTTP_EGRESS_RESOLVED_AT_ANNOTATION = 'clerum.io/runtime-http-egress-resolved-at'
+// The run lane authors these keys even when desired omits them, so a stale
+// live value is drift and the replacement drops it.
+const RUNTIME_HTTP_EGRESS_OWNED_ANNOTATIONS: ReadonlySet<string> = new Set([
+  RUNTIME_HTTP_EGRESS_CURRENT_CIDRS_ANNOTATION,
+  RUNTIME_HTTP_EGRESS_PREVIOUS_CIDRS_ANNOTATION,
+  RUNTIME_HTTP_EGRESS_PREVIOUS_EXPIRES_AT_ANNOTATION,
+  RUNTIME_HTTP_EGRESS_PREVIOUS_CIDR_EXPIRIES_ANNOTATION,
+  RUNTIME_HTTP_EGRESS_RESOLVED_AT_ANNOTATION,
+])
+
+type RunLaneNetworkPolicyApplyResult =
+  | { policy: string; action: 'created' | 'replaced' | 'unchanged' }
+  | {
+      policy: string
+      action: 'retry'
+      reason: 'terminating' | 'contended'
+    }
+  | { policy: string; action: 'conflict'; reason: NetworkPolicyConflictReason }
+// Read-then-write rounds per NetworkPolicy and pass. Three rounds is at most
+// three writes, the same as the create plus two replaces it replaced.
+const NETWORK_POLICY_APPLY_ROUNDS = 3
 const MCP_HOST_READINESS_WAIT_TIMEOUT_MS = 4 * 60_000
 const DNS_SUBDOMAIN_RE =
   /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/
@@ -216,6 +245,73 @@ export interface PluginWorkloadSdkCleanupOptions {
   preserveWorkflowRuntime?: boolean
 }
 
+export const NETWORK_POLICY_OWNERSHIP_CONDITION_TYPE = 'WorkflowNetworkPolicyOwnership'
+
+/**
+ * Published only as `False/RetryPending` while a run-lane NetworkPolicy is
+ * left pending a retry (terminating or contended), and removed once the
+ * policies converge. The WRC short-circuits of a running workflow never reach
+ * `reconcile()`, so this marker is what tells them to apply the policies again.
+ */
+export const NETWORK_POLICIES_CONVERGED_CONDITION_TYPE = 'WorkflowNetworkPoliciesConverged'
+
+const NETWORK_POLICY_RETRY_PENDING_MESSAGE =
+  'One or more run-lane NetworkPolicies are pending a retry (terminating or contended)'
+
+/**
+ * Merged by its own group in `patchStatus`, apart from the workflow-output
+ * group: a pass that never reached the policy apply leaves the field
+ * undefined, and the published conditions must survive that pass's patch.
+ */
+export const NETWORK_POLICY_OWNERSHIP_CONDITION_TYPES = new Set([
+  NETWORK_POLICY_OWNERSHIP_CONDITION_TYPE,
+  NETWORK_POLICIES_CONVERGED_CONDITION_TYPE,
+])
+
+/**
+ * Whether `fresh` differs from the conditions of the NetworkPolicy group
+ * already in `existing`, by status, reason and message. `lastTransitionTime`
+ * and every type outside the group are ignored, so a pass that republishes the
+ * same conditions opens no status patch.
+ */
+export function networkPolicyConditionsChanged(
+  existing: StatusCondition[] | undefined,
+  fresh: StatusCondition[]
+): boolean {
+  const signal = (conditions: StatusCondition[]) =>
+    conditions
+      .filter(c => NETWORK_POLICY_OWNERSHIP_CONDITION_TYPES.has(c.type))
+      .map(c => `${c.type}\u0000${c.status}\u0000${c.reason ?? ''}\u0000${c.message ?? ''}`)
+      .sort()
+      .join('\u0001')
+  return signal(existing ?? []) !== signal(fresh)
+}
+
+/** True when the published status still carries the retry marker. */
+export function hasNetworkPolicyRetryPendingMarker(
+  conditions: StatusCondition[] | undefined
+): boolean {
+  return (conditions ?? []).some(
+    c => c.type === NETWORK_POLICIES_CONVERGED_CONDITION_TYPE && c.status === 'False'
+  )
+}
+
+function buildNetworkPolicyRetryPendingCondition(
+  now: string,
+  existingConditions?: StatusCondition[]
+): StatusCondition {
+  const existing = existingConditions?.find(
+    c => c.type === NETWORK_POLICIES_CONVERGED_CONDITION_TYPE && c.status === 'False'
+  )
+  return {
+    type: NETWORK_POLICIES_CONVERGED_CONDITION_TYPE,
+    status: 'False',
+    reason: 'RetryPending',
+    message: NETWORK_POLICY_RETRY_PENDING_MESSAGE,
+    lastTransitionTime: existing?.lastTransitionTime ?? now,
+  }
+}
+
 export const WORKFLOW_OUTPUT_CONDITION_TYPES = new Set([
   'WorkflowOutputRwoCompatibility',
   'WorkflowOutputWrcManagedLifecycle',
@@ -223,6 +319,64 @@ export const WORKFLOW_OUTPUT_CONDITION_TYPES = new Set([
   'WorkflowOutputExternalClaim',
   'WorkflowOutputLegacyGlobalClaim',
 ])
+
+/**
+ * The ownership condition for one policy apply pass: `False` naming every
+ * policy another controller owns, or `[]` when no policy is owned by another
+ * controller (a pending retry does not count as a conflict). The result goes in
+ * `networkPolicyOwnershipConditions`, where `[]` removes a previously published
+ * condition and `undefined` keeps it. `lastTransitionTime` follows `status`, as
+ * the Kubernetes condition convention has it: a change in the set of
+ * conflicting policies rewrites `message` and keeps the time the conflict began.
+ */
+export function buildNetworkPolicyOwnershipConditions(
+  summary: WorkflowNetworkPolicyApplySummary,
+  now: string,
+  existingConditions?: StatusCondition[]
+): StatusCondition[] {
+  if (summary.conflicts.length === 0) return []
+  const conflicts = summary.conflicts
+    .map(conflict => `${conflict.policy} (${conflict.reason})`)
+    .sort()
+    .join(', ')
+  const existing = existingConditions?.find(
+    c => c.type === NETWORK_POLICY_OWNERSHIP_CONDITION_TYPE && c.status === 'False'
+  )
+  return [
+    {
+      type: NETWORK_POLICY_OWNERSHIP_CONDITION_TYPE,
+      status: 'False',
+      reason: 'OwnershipConflict',
+      message: `NetworkPolicy ownership conflict: ${conflicts}`,
+      lastTransitionTime: existing?.lastTransitionTime ?? now,
+    },
+  ]
+}
+
+/**
+ * The status fields one policy apply pass contributes, shared by the run lane
+ * and the SDK-only lane so both translate a summary the same way. No summary
+ * (the pass returned before the apply) yields neither field, which keeps the
+ * published conditions. A summary always yields the group's conditions, `[]`
+ * included: the ownership condition when a policy conflicts, and the retry
+ * marker plus the retry flag when a policy was left pending a retry.
+ */
+export function translateNetworkPolicyApplySummary(
+  summary: WorkflowNetworkPolicyApplySummary | undefined,
+  existingConditions: StatusCondition[] | undefined,
+  now: string
+): Pick<WorkflowReconcileResult, 'networkPolicyOwnershipConditions' | 'networkPolicyRetryPending'> {
+  if (summary === undefined) return {}
+  return {
+    networkPolicyOwnershipConditions: [
+      ...buildNetworkPolicyOwnershipConditions(summary, now, existingConditions),
+      ...(summary.retryPending
+        ? [buildNetworkPolicyRetryPendingCondition(now, existingConditions)]
+        : []),
+    ],
+    ...(summary.retryPending ? { networkPolicyRetryPending: true } : {}),
+  }
+}
 
 interface CoordinatorTokenRefreshOptions {
   includeMcpHostToken?: boolean
@@ -238,6 +392,12 @@ interface RuntimeHttpEgressPolicyState {
   effectiveCidrs: string[]
   annotations: Record<string, string>
 }
+
+type RuntimeHttpEgressPolicyRead =
+  | { kind: 'absent' }
+  | { kind: 'foreign' }
+  | { kind: 'terminating'; annotations: Record<string, string> }
+  | { kind: 'live'; annotations: Record<string, string> }
 
 type PublicHttpEgressClass = 'exact-host' | 'public-web'
 
@@ -338,6 +498,28 @@ function latestDate(a: Date | undefined, b: Date | undefined): Date | undefined 
   if (!a) return b
   if (!b) return a
   return a.getTime() >= b.getTime() ? a : b
+}
+
+/**
+ * The latest live resolved-at when every policy the apply writes exists and
+ * already carries the computed CIDR state. Undefined when a policy is missing,
+ * any CIDR state annotation changed (a previous-CIDR overlap expiry included),
+ * or no live value parses, so the caller stamps the current time.
+ */
+function unchangedRuntimeHttpEgressResolvedAt(
+  liveAnnotationSets: Array<Record<string, string> | undefined>,
+  computed: Record<string, string>
+): Date | undefined {
+  let latest: Date | undefined
+  for (const live of liveAnnotationSets) {
+    if (!live) return undefined
+    for (const key of RUNTIME_HTTP_EGRESS_OWNED_ANNOTATIONS) {
+      if (key === RUNTIME_HTTP_EGRESS_RESOLVED_AT_ANNOTATION) continue
+      if (live[key] !== computed[key]) return undefined
+    }
+    latest = latestDate(latest, parseDate(live[RUNTIME_HTTP_EGRESS_RESOLVED_AT_ANNOTATION]))
+  }
+  return latest
 }
 
 function addRuntimeHttpEgressPreviousExpiry(
@@ -714,6 +896,13 @@ export interface WorkflowReconcileResult {
   clearWorkflowExecution?: boolean
   workflowConditions?: StatusCondition[]
   /**
+   * The `WorkflowNetworkPolicyOwnership` condition from this pass's policy
+   * apply. Undefined when the pass returned before the apply, which keeps the
+   * published condition; `[]` when no policy is owned by another controller (a
+   * pending retry does not count as a conflict), which removes it.
+   */
+  networkPolicyOwnershipConditions?: StatusCondition[]
+  /**
    * Set when a transient K8s API blip aborted reconcile: the caller must NOT
    * patch the CRD status (preserve the current execution state) and should
    * requeue. Propagated up through WRC's ReconcileResult.
@@ -723,6 +912,14 @@ export interface WorkflowReconcileResult {
   pluginWorkloadSdkBootstrapProof?: EagerSdkBootstrapProof
   /** Eager host identity is ready, but prompt policy awaits operator action. */
   pluginWorkloadSdkPolicyPending?: boolean
+  /**
+   * A NetworkPolicy this pass left unwritten and wants retried: it is
+   * terminating, or it was still contended after the bounded apply rounds.
+   * The caller requeues and publishes the RetryPending marker, which lets the
+   * recipe reconciler's short-circuits reapply the policies (see its requeue
+   * comment).
+   */
+  networkPolicyRetryPending?: boolean
 }
 
 function mcpHostReadinessMessage(readiness: PodReadiness): string {
@@ -1159,9 +1356,16 @@ export class WorkflowReconciler {
     phase: 'active' | 'awaiting_policy' | 'deploying' | 'failed' | 'provider_unavailable'
     message: string
     pluginWorkloadSdkBootstrapProof?: EagerSdkBootstrapProof
+    /** Undefined when the eager host returned before applying the policies. */
+    networkPolicies?: WorkflowNetworkPolicyApplySummary
   }> {
     if (!this.deps.config.pluginWorkloadSdkEnabled || !spec.pluginWorkloadSdk) {
-      return { phase: 'active', message: 'Plugin Workload SDK runtime disabled' }
+      // Nothing is applied here, so no summary: an empty one would read as
+      // "evaluated, no conflict" and clear a published ownership condition.
+      return {
+        phase: 'active',
+        message: 'Plugin Workload SDK runtime disabled',
+      }
     }
     if ((spec.steps?.length ?? 0) > 0) {
       throw new Error('SDK-only runtime requires spec.steps to be absent or empty')
@@ -1188,15 +1392,16 @@ export class WorkflowReconciler {
       `${recipeName}-mcp-host`,
       this.deps.config.sandboxNamespace
     )
-    const status = await this.pluginWorkloadSdkProvisioner.ensureEagerSdkMcpHost(
-      recipeName,
-      recipeUid,
-      namespace,
-      runtimeScopeRecipeName,
-      spec,
-      runtime,
-      { mcpHostPhase, codexVerdict }
-    )
+    const { status, networkPolicies } =
+      await this.pluginWorkloadSdkProvisioner.ensureEagerSdkMcpHost(
+        recipeName,
+        recipeUid,
+        namespace,
+        runtimeScopeRecipeName,
+        spec,
+        runtime,
+        { mcpHostPhase, codexVerdict }
+      )
     const bootstrapProof = this.pluginWorkloadSdkProvisioner.getBootstrapProof(recipeName)
     switch (status) {
       case 'ready':
@@ -1204,22 +1409,33 @@ export class WorkflowReconciler {
           phase: 'active',
           message: 'Plugin Workload SDK mcp-host registered',
           pluginWorkloadSdkBootstrapProof: bootstrapProof,
+          networkPolicies,
         }
       case 'awaiting_policy':
         return {
           phase: 'awaiting_policy',
           message: `Plugin Workload SDK operator policy pending (${pluginWorkloadSdkPolicyReason(spec, bootstrapProof)})`,
           pluginWorkloadSdkBootstrapProof: bootstrapProof,
+          networkPolicies,
         }
       case 'deploying':
-        return { phase: 'deploying', message: 'Plugin Workload SDK mcp-host starting' }
+        return {
+          phase: 'deploying',
+          message: 'Plugin Workload SDK mcp-host starting',
+          networkPolicies,
+        }
       case 'provider_unavailable':
         return {
           phase: 'provider_unavailable',
           message: 'Plugin Workload SDK mcp-host provider unavailable',
+          networkPolicies,
         }
       case 'failed':
-        return { phase: 'failed', message: 'Plugin Workload SDK mcp-host could not start' }
+        return {
+          phase: 'failed',
+          message: 'Plugin Workload SDK mcp-host could not start',
+          networkPolicies,
+        }
     }
   }
 
@@ -1533,9 +1749,14 @@ export class WorkflowReconciler {
       new Date().toISOString(),
       currentStatus?.conditions
     )
+    // Empty until this pass applies the policies, then what the apply found.
+    // A return before the apply leaves it empty, and patchStatus keeps the
+    // published condition.
+    let networkPolicyStatus: ReturnType<typeof translateNetworkPolicyApplySummary> = {}
     const withWorkflowConditions = (result: WorkflowReconcileResult): WorkflowReconcileResult => ({
       ...result,
       workflowConditions,
+      ...networkPolicyStatus,
     })
     const outputAnchorPodName = runtime.output.anchorRequired
       ? buildWorkflowOutputAnchorPodName(runtimeScopeRecipeName)
@@ -1664,17 +1885,26 @@ export class WorkflowReconciler {
           // let a concurrently-reconciled recipe's failed refresh hand over a
           // null binding that read as decidable — a binding-less v3 configure
           // that wipes the live host binding.
-          const eagerStatus = await this.pluginWorkloadSdkProvisioner.ensureEagerSdkMcpHost(
-            recipeName,
-            recipeUid,
-            namespace,
-            runtimeScopeRecipeName,
-            spec,
-            runtime,
-            { mcpHostPhase, codexVerdict }
-          )
+          const { status: eagerStatus, networkPolicies: eagerNetworkPolicies } =
+            await this.pluginWorkloadSdkProvisioner.ensureEagerSdkMcpHost(
+              recipeName,
+              recipeUid,
+              namespace,
+              runtimeScopeRecipeName,
+              spec,
+              runtime,
+              { mcpHostPhase, codexVerdict }
+            )
           const eagerBootstrapProof =
             this.pluginWorkloadSdkProvisioner.getBootstrapProof(recipeName)
+          // No summary means the host returned before the apply, so the pass
+          // cannot say whether a conflict is gone. A `failed` pod after the
+          // apply still carries a real summary and publishes it.
+          networkPolicyStatus = translateNetworkPolicyApplySummary(
+            eagerNetworkPolicies,
+            currentStatus?.conditions,
+            new Date().toISOString()
+          )
           if (eagerStatus === 'failed') {
             return withWorkflowConditions({
               phase: 'failed',
@@ -1691,9 +1921,11 @@ export class WorkflowReconciler {
             // "still booting".
             const providerUnavailableMessage = `Plugin Workload SDK mcp-host provider unavailable: /configure failed repeatedly (${classification})`
             return {
-              phase: 'active',
-              message: providerUnavailableMessage,
-              clearWorkflowExecution: true,
+              ...withWorkflowConditions({
+                phase: 'active',
+                message: providerUnavailableMessage,
+                clearWorkflowExecution: true,
+              }),
               workflowConditions: [
                 ...workflowConditions,
                 buildStatusCondition(
@@ -2123,7 +2355,7 @@ export class WorkflowReconciler {
       // already active, and custom coordinators can call WRC immediately on
       // startup. Applying allow policies first avoids a startup race where the
       // first status/probe request is blocked before coord-to-wrc exists.
-      await this.applyWorkflowNetworkPolicies(
+      const runLaneNetworkPolicies = await this.applyWorkflowNetworkPolicies(
         recipeName,
         recipeUid,
         spec,
@@ -2132,6 +2364,11 @@ export class WorkflowReconciler {
         codexVerdict.projection,
         false,
         codexVerdict.grokProjection
+      )
+      networkPolicyStatus = translateNetworkPolicyApplySummary(
+        runLaneNetworkPolicies,
+        currentStatus?.conditions,
+        new Date().toISOString()
       )
 
       // 6. Create Pods — mcp-host FIRST, then coordinator. If the coordinator
@@ -2707,6 +2944,50 @@ export class WorkflowReconciler {
     )
   }
 
+  /**
+   * Reapply the run-lane NetworkPolicies outside reconcile(). The running and
+   * active short-circuits return before reconcile(), so a policy a previous
+   * pass left pending (terminating or contended) would otherwise stay as it is
+   * until the run ends. Builds the same set reconcile() applies and only
+   * applies it: no codex, grok or legacy prune, because those follow an
+   * eligibility verdict that can change while a run is in progress.
+   */
+  async retryRunLaneNetworkPolicies(
+    recipeName: string,
+    recipeUid: string,
+    spec: WorkflowRecipeSpec,
+    runtimeScopeRecipeName = recipeName,
+    workflowRunId?: string
+  ): Promise<WorkflowNetworkPolicyApplySummary> {
+    const runId = workflowRunId?.trim()
+    const runtime = deriveWorkflowRuntimePlan(spec, {
+      recipeName,
+      runtimeScopeRecipeName,
+      workflowRunId: runId,
+      pluginWorkloadSdkEnabled: this.deps.config.pluginWorkloadSdkEnabled,
+    })
+    const awaitsTriggeredRun = runtime.mcpHost.required && !runId
+    const codexView = await this.refreshCodexSnapshot()
+    const codexVerdict = this.codexVerdictFor(
+      spec,
+      recipeUid,
+      recipeName,
+      runtimeScopeRecipeName,
+      codexView
+    )
+    const policies = await this.buildWorkflowNetworkPoliciesForSpec(
+      recipeName,
+      recipeUid,
+      spec,
+      runtime,
+      awaitsTriggeredRun,
+      codexVerdict.projection,
+      false,
+      codexVerdict.grokProjection
+    )
+    return this.applyNetworkPolicyList(policies)
+  }
+
   async ensureCoordinatorRuntimeCredentials(
     recipeNamespace: string,
     recipeName: string,
@@ -2733,14 +3014,19 @@ export class WorkflowReconciler {
     })
   }
 
+  /**
+   * Reapply the runtime HTTP egress policies outside reconcile(). Returns what
+   * the apply could not converge: this path has no status to publish it on, so
+   * the caller logs it.
+   */
   async refreshRuntimeHttpEgressNetworkPolicies(
     _recipeNamespace: string,
     recipeName: string,
     recipeUid: string,
     spec: WorkflowRecipeSpec,
     _runtimeScopeRecipeName = recipeName
-  ): Promise<void> {
-    if (!this.needsRuntimeHttpEgressRefresh(spec)) return
+  ): Promise<WorkflowNetworkPolicyApplySummary> {
+    if (!this.needsRuntimeHttpEgressRefresh(spec)) return { conflicts: [], retryPending: false }
     let policies: k8s.V1NetworkPolicy[]
     try {
       policies = await this.buildRuntimeHttpEgressNetworkPoliciesForSpec(
@@ -2752,9 +3038,7 @@ export class WorkflowReconciler {
       await this.pruneExpiredRuntimeHttpEgressNetworkPolicyOverlaps(recipeName, recipeUid, spec)
       throw error
     }
-    for (const policy of policies) {
-      await this.applyNetworkPolicy(policy)
-    }
+    return this.applyNetworkPolicyList(policies)
   }
 
   private async buildRuntimeHttpEgressNetworkPoliciesForSpec(
@@ -2877,8 +3161,16 @@ export class WorkflowReconciler {
       runtimeHttpEgressPolicyNames,
       state
     )
-    for (const policy of policies) {
-      await this.applyNetworkPolicy(policy)
+    const pruned = await this.applyNetworkPolicyList(policies)
+    // The refresh rethrows the DNS error after this prune, so this line is the
+    // only record that a policy still carries the CIDRs the prune meant to drop.
+    // A conflict is warn-logged by applyNetworkPolicy and not published here:
+    // this path runs outside reconcile() and writes no status.
+    if (pruned.retryPending) {
+      this.log.error(
+        'DNS-failure prune left a NetworkPolicy pending a retry; a later refresh retries it',
+        { recipeName }
+      )
     }
   }
 
@@ -3049,7 +3341,7 @@ export class WorkflowReconciler {
     codexProjection: CodexExecutionProjection,
     eagerSdkMcpHost = false,
     grokProjection?: CodexExecutionProjection & { requiresGrokProxyEgress?: boolean }
-  ): Promise<void> {
+  ): Promise<WorkflowNetworkPolicyApplySummary> {
     const policies = await this.buildWorkflowNetworkPoliciesForSpec(
       recipeName,
       recipeUid,
@@ -3060,9 +3352,7 @@ export class WorkflowReconciler {
       eagerSdkMcpHost,
       grokProjection
     )
-    for (const policy of policies) {
-      await this.applyNetworkPolicy(policy)
-    }
+    const summary = await this.applyNetworkPolicyList(policies)
     const policyNames = new Set(policies.map(policy => policy.metadata?.name))
     const codexProxyPolicyName = `${recipeName}-mcp-host-to-codex-proxy`
     const grokProxyPolicyName = `${recipeName}-mcp-host-to-grok-proxy`
@@ -3084,6 +3374,27 @@ export class WorkflowReconciler {
       )
     }
     await this.pruneLegacyMcpServersInternetEgressPolicy(recipeName)
+    return summary
+  }
+
+  /**
+   * Apply each policy and collect what the pass could not converge. A conflict
+   * or a pending retry leaves that one policy as it is and the loop moves on;
+   * each caller decides how to surface both, so neither fails the pass.
+   */
+  private async applyNetworkPolicyList(
+    policies: k8s.V1NetworkPolicy[]
+  ): Promise<WorkflowNetworkPolicyApplySummary> {
+    const summary: WorkflowNetworkPolicyApplySummary = { conflicts: [], retryPending: false }
+    for (const policy of policies) {
+      const applied = await this.applyNetworkPolicy(policy)
+      if (applied.action === 'conflict') {
+        summary.conflicts.push({ policy: applied.policy, reason: applied.reason })
+      } else if (applied.action === 'retry') {
+        summary.retryPending = true
+      }
+    }
+    return summary
   }
 
   private async resolveRuntimeHttpEgressPolicyState(
@@ -3097,13 +3408,21 @@ export class WorkflowReconciler {
     )
     const currentSerialized = serializeCidrs(currentCidrs)
     const previousExpiries = new Map<string, Date>()
+    const liveAnnotationSets: Array<Record<string, string> | undefined> = []
 
     // Coordinator and snippet policies share one WorkflowRecipe runtimeEgress contract.
     // Merge valid annotations from all matching policies so a partial refresh or restart
     // preserves the widest still-active overlap window before writing identical state back.
     // Taking the latest expiration avoids one policy shortening another policy's DNS rollover.
     for (const policyName of policyNames) {
-      const annotations = await this.readNetworkPolicyAnnotations(namespace, policyName)
+      const live = await this.readRuntimeHttpEgressPolicy(namespace, policyName)
+      // The apply leaves a foreign or terminating policy unwritten, so its
+      // annotations stop following DNS. Merging them reopened the overlap for
+      // its stale CIDR and re-stamped resolved-at on every pass; counting it as
+      // missing would re-stamp too. It is left out of the state entirely.
+      if (live.kind === 'foreign' || live.kind === 'terminating') continue
+      const annotations = live.kind === 'live' ? live.annotations : undefined
+      liveAnnotationSets.push(annotations)
       if (!annotations) continue
 
       const existingCurrent = parseCidrsAnnotation(
@@ -3153,8 +3472,6 @@ export class WorkflowReconciler {
 
     const annotations: Record<string, string> = {
       [RUNTIME_HTTP_EGRESS_CURRENT_CIDRS_ANNOTATION]: currentSerialized,
-      // Observability only; policy decisions use current/previous CIDR annotations above.
-      [RUNTIME_HTTP_EGRESS_RESOLVED_AT_ANNOTATION]: now.toISOString(),
     }
     if (activePreviousCidrs.length > 0) {
       const activePreviousExpiries = new Map(activePreviousEntries)
@@ -3169,6 +3486,14 @@ export class WorkflowReconciler {
       annotations[RUNTIME_HTTP_EGRESS_PREVIOUS_CIDR_EXPIRIES_ANNOTATION] =
         serializeRuntimeHttpEgressCidrExpiries(activePreviousExpiries)
     }
+    // Observability only; policy decisions use current/previous CIDR annotations above.
+    // The key records the last change of the CIDR state annotations, not the last resolution:
+    // stamping every pass made each refresh a replace of an otherwise converged policy.
+    // A pass that finds any sibling policy missing, or no parseable live value,
+    // stamps the current time on every policy, so the siblings are replaced once.
+    annotations[RUNTIME_HTTP_EGRESS_RESOLVED_AT_ANNOTATION] = (
+      unchangedRuntimeHttpEgressResolvedAt(liveAnnotationSets, annotations) ?? now
+    ).toISOString()
 
     return { currentCidrs, effectiveCidrs, annotations }
   }
@@ -3184,8 +3509,12 @@ export class WorkflowReconciler {
     let prunedPrevious = false
 
     for (const policyName of policyNames) {
-      const annotations = await this.readNetworkPolicyAnnotations(namespace, policyName)
-      if (!annotations) continue
+      const live = await this.readRuntimeHttpEgressPolicy(namespace, policyName)
+      // A foreign policy's CIDRs are not this workflow's state. A terminating
+      // one still counts: the prune only drops expired entries, and its apply
+      // defers that policy and reports the pending retry.
+      if (live.kind === 'absent' || live.kind === 'foreign') continue
+      const annotations = live.annotations
 
       for (const cidr of parseTrustedRuntimeHttpEgressCidrsAnnotation(
         annotations[RUNTIME_HTTP_EGRESS_CURRENT_CIDRS_ANNOTATION]
@@ -3269,17 +3598,24 @@ export class WorkflowReconciler {
     return this.runtimeHttpEgressOverlapMs * 2
   }
 
-  private async readNetworkPolicyAnnotations(
+  /**
+   * Read a run-lane policy and classify it the way applyNetworkPolicy will. The
+   * run-lane policies carry no ownerReferences, so the ownership veto of
+   * decideNetworkPolicyConvergence reduces to the ownerless classification.
+   */
+  private async readRuntimeHttpEgressPolicy(
     namespace: string,
     name: string
-  ): Promise<Record<string, string> | undefined> {
-    try {
-      const policy = await this.deps.networkingApi.readNamespacedNetworkPolicy({ namespace, name })
-      return policy.metadata?.annotations ?? {}
-    } catch (error: unknown) {
-      if (getErrorCode(error) === 404) return undefined
-      throw error
+  ): Promise<RuntimeHttpEgressPolicyRead> {
+    const policy = await this.readNetworkPolicyOrNull(name, namespace)
+    if (!policy) return { kind: 'absent' }
+    if (classifyOwnerlessNetworkPolicyOwnership(policy).kind !== 'owned') {
+      return { kind: 'foreign' }
     }
+    const annotations = policy.metadata?.annotations ?? {}
+    return policy.metadata?.deletionTimestamp
+      ? { kind: 'terminating', annotations }
+      : { kind: 'live', annotations }
   }
 
   private annotateRuntimeHttpEgressPolicies(
@@ -4598,41 +4934,122 @@ export class WorkflowReconciler {
     }
   }
 
-  private async applyNetworkPolicy(policy: k8s.V1NetworkPolicy): Promise<void> {
+  private async readNetworkPolicyOrNull(
+    name: string,
+    namespace: string
+  ): Promise<k8s.V1NetworkPolicy | null> {
+    try {
+      return await this.deps.networkingApi.readNamespacedNetworkPolicy({ name, namespace })
+    } catch (error: unknown) {
+      if (getErrorCode(error) === 404) return null
+      throw error
+    }
+  }
+
+  /**
+   * Read first, then write only when the live object differs from desired. The
+   * write is a full-object PUT: desired spec and annotations, plus the live
+   * labels, finalizers and annotations outside the owned key set. Owned
+   * annotations that desired no longer carries are therefore removed, and
+   * foreign ones are kept.
+   *
+   * Each round reads the policy again. An absent policy is created; a present
+   * one goes through `decideNetworkPolicyConvergence`. A 409 on the create, or
+   * a 404 or 409 on the PUT, means another writer moved the object between
+   * the read and the write, so the next round reads it again. A policy that
+   * disappears is therefore recreated in the same pass. After
+   * `NETWORK_POLICY_APPLY_ROUNDS` rounds the policy is reported as
+   * `retry/contended`; that bound matches the write count of the previous
+   * create-then-replace-twice apply.
+   *
+   * Ownership conflicts, terminating objects and contention are returned, not
+   * thrown: the workflow reconcile catch turns every error it does not
+   * classify as transient into a terminal `failed`. Any other API error still
+   * propagates.
+   */
+  private async applyNetworkPolicy(
+    policy: k8s.V1NetworkPolicy
+  ): Promise<RunLaneNetworkPolicyApplyResult> {
     const name = policy.metadata?.name
     const namespace = policy.metadata?.namespace
     if (!name || !namespace)
       throw new Error('NetworkPolicy metadata.name and namespace are required')
 
-    try {
-      await this.deps.networkingApi.createNamespacedNetworkPolicy({ namespace, body: policy })
-      this.log.info(`Created NetworkPolicy "${name}"`)
-      return
-    } catch (error: unknown) {
-      if (getErrorCode(error) !== 409) throw error
-    }
+    for (let round = 0; round < NETWORK_POLICY_APPLY_ROUNDS; round += 1) {
+      const existing = await this.readNetworkPolicyOrNull(name, namespace)
+      if (!existing) {
+        try {
+          await this.deps.networkingApi.createNamespacedNetworkPolicy({ namespace, body: policy })
+          this.log.info(`Created NetworkPolicy "${name}"`)
+          return { policy: name, action: 'created' }
+        } catch (error: unknown) {
+          // Another writer created it after our read: read it again.
+          if (getErrorCode(error) !== 409) throw error
+          continue
+        }
+      }
 
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      const existing = await this.deps.networkingApi.readNamespacedNetworkPolicy({
-        name,
-        namespace,
-      })
-      policy.metadata = {
-        ...policy.metadata,
-        resourceVersion: existing.metadata?.resourceVersion,
-      }
-      try {
-        await this.deps.networkingApi.replaceNamespacedNetworkPolicy({
-          name,
-          namespace,
-          body: policy,
-        })
-        this.log.info(`Updated NetworkPolicy "${name}"`)
-        return
-      } catch (error: unknown) {
-        if (getErrorCode(error) !== 409 || attempt === 1) throw error
+      const decision: NetworkPolicyConvergenceDecision = decideNetworkPolicyConvergence(
+        'workload-egress',
+        policy,
+        existing,
+        RUNTIME_HTTP_EGRESS_OWNED_ANNOTATIONS
+      )
+      switch (decision.action) {
+        case 'unchanged':
+          this.log.info(`Unchanged NetworkPolicy "${name}"; skipping update`, { namespace })
+          return { policy: name, action: 'unchanged' }
+        case 'conflict':
+          this.log.warn(`NetworkPolicy "${name}" is not owned by this workflow; leaving it`, {
+            namespace,
+            reason: decision.reason,
+          })
+          return { policy: name, action: 'conflict', reason: decision.reason }
+        case 'retry':
+          this.log.warn(`NetworkPolicy "${name}" cannot be written yet; retrying later`, {
+            namespace,
+            reason: decision.reason,
+          })
+          return { policy: name, action: 'retry', reason: decision.reason }
+        case 'replace':
+          try {
+            await this.deps.networkingApi.replaceNamespacedNetworkPolicy({
+              name,
+              namespace,
+              body: buildNetworkPolicyReplacement(
+                policy,
+                existing,
+                RUNTIME_HTTP_EGRESS_OWNED_ANNOTATIONS
+              ),
+            })
+            this.log.info(`Updated NetworkPolicy "${name}"`, { namespace, reason: decision.reason })
+            return { policy: name, action: 'replaced' }
+          } catch (error: unknown) {
+            // 404: deleted after our read. 409: changed after our read. Either
+            // way the next round reads it again and decides from that.
+            const code = getErrorCode(error)
+            if (code !== 404 && code !== 409) throw error
+          }
+          break
+        default: {
+          // Unreachable while every action has a case; a new action fails to
+          // compile here instead of falling through to a write.
+          const unhandled: never = decision
+          throw new Error(
+            `NetworkPolicy "${name}": unhandled convergence action ${String(
+              (unhandled as { action: unknown }).action
+            )}`
+          )
+        }
       }
     }
+    // Contention, not a defect: another writer moved the policy after every
+    // one of our reads. Leave it for a later pass.
+    this.log.warn(
+      `NetworkPolicy "${name}" is still contended after ${NETWORK_POLICY_APPLY_ROUNDS} write attempts; retrying later`,
+      { namespace, reason: 'contended' }
+    )
+    return { policy: name, action: 'retry', reason: 'contended' }
   }
 
   private async safeDelete(deleteFn: () => Promise<unknown>): Promise<void> {

@@ -500,6 +500,51 @@ describe('shared frontend components', () => {
     expect(screen.queryByRole('menu')).not.toBeInTheDocument()
   })
 
+  it('opens a class-A action menu from the whole cell without adding a tab stop', () => {
+    const onNavigate = vi.fn()
+    render(
+      <table>
+        <tbody>
+          <tr onClick={onNavigate}>
+            <td data-testid="action-cell">
+              <RowActionMenu
+                ariaLabel="Actions for Alpha"
+                actions={[{ key: 'view', label: 'View', onSelect: vi.fn() }]}
+              />
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    )
+
+    const cell = screen.getByTestId('action-cell')
+    expect(cell).not.toHaveAttribute('tabindex')
+    fireEvent.click(cell)
+    expect(screen.getByRole('menu')).toBeInTheDocument()
+    expect(onNavigate).not.toHaveBeenCalled()
+    expect(screen.getAllByRole('button')).toHaveLength(1)
+  })
+
+  it('does not widen a mixed-control action cell', () => {
+    render(
+      <table>
+        <tbody>
+          <tr>
+            <td data-testid="mixed-cell">
+              <button type="button">Pin</button>
+              <RowActionMenu
+                ariaLabel="Actions for Alpha"
+                actions={[{ key: 'view', label: 'View', onSelect: vi.fn() }]}
+              />
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    )
+    fireEvent.click(screen.getByTestId('mixed-cell'))
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument()
+  })
+
   it('disables the trigger when every row action is unavailable', () => {
     const onDelete = vi.fn()
     render(

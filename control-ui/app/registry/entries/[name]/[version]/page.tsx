@@ -27,13 +27,11 @@ import RegistryEntryDetailLoading from './loading'
 export const dynamic = 'force-dynamic'
 
 function RegistryEntryActionsMenu({
-  onEdit,
   onRemove,
   removing,
   sourceRepoUrl,
   canManage,
 }: {
-  onEdit: () => void
   onRemove: () => void
   removing: boolean
   sourceRepoUrl: string | null
@@ -90,17 +88,6 @@ function RegistryEntryActionsMenu({
           ) : null}
           {canManage ? (
             <>
-              <button
-                type="button"
-                className="cu-kebab__item"
-                role="menuitem"
-                onClick={() => {
-                  setOpen(false)
-                  onEdit()
-                }}
-              >
-                Edit
-              </button>
               <button
                 type="button"
                 className="cu-kebab__item cu-kebab__item--danger"
@@ -268,7 +255,7 @@ function RegistryEntryDetailContent() {
               }
               backLabel="Back to Marketplace"
               onBack={backToCatalog}
-              titleActions={
+              actions={
                 entry ? (
                   <>
                     {entry.status === 'published' ? (
@@ -287,8 +274,16 @@ function RegistryEntryDetailContent() {
                         </button>
                       )
                     ) : null}
+                    {canManageEntry ? (
+                      <button
+                        type="button"
+                        className="cu-btn cu-btn--secondary cu-btn--sm"
+                        onClick={editEntry}
+                      >
+                        Edit entry
+                      </button>
+                    ) : null}
                     <RegistryEntryActionsMenu
-                      onEdit={editEntry}
                       onRemove={() => void handleRemove()}
                       removing={removing}
                       sourceRepoUrl={sourceRepoUrl}

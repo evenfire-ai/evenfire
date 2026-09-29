@@ -6,6 +6,8 @@ import {
 } from '../src/oauth/callback.js'
 import { deriveOAuthEncryptionKey, encryptOAuthSecret } from '../src/oauth/encryption.js'
 import { getAccessToken } from '../src/oauth/tokenHelper.js'
+import { type McpServerResource, normalizeMcpServerOwnerDecl } from '../src/routes/mcpOauth.js'
+import { MockGateway } from './mockGateway.js'
 
 // R1-B1 — refresh↔DELETE race. A disconnect (DELETE) can land between the token
 // read (`getOAuthGrant`) and the refresh write. Refresh MUST NOT resurrect the
@@ -63,9 +65,14 @@ const okRefreshFetch = vi.fn(
  * refresh WRITE reports 0 affected rows — the grant was DELETEd concurrently.
  * Records every SQL string so the test can assert no INSERT was issued.
  */
-function dbDeletedDuringRefresh() {
+function dbDeletedDuringRefresh(
+  identity: { owner_kind: string; cr_uid: string | null } = {
+    owner_kind: 'recipe',
+    cr_uid: null,
+  }
+) {
   const staleRow = {
-    owner_kind: 'mcpserver',
+    ...identity,
     recipe_namespace: 'sandbox-recipes',
     recipe_name: 'gdrive',
     user_id: 'user-1',
@@ -100,7 +107,6 @@ describe('getAccessToken — refresh↔DELETE race (R1-B1)', () => {
     const result = await getAccessToken(
       {
         grantKind: 'user',
-        ownerKind: 'mcpserver',
         recipeNamespace: 'sandbox-recipes',
         recipeName: 'gdrive',
         userId: 'user-1',
@@ -120,6 +126,71 @@ describe('getAccessToken — refresh↔DELETE race (R1-B1)', () => {
     // And crucially, the write path must be an UPDATE — never an INSERT that
     // would recreate the disconnected grant.
     expect(sqls.some(s => s.includes('INSERT INTO oauth_grants'))).toBe(false)
+    expect(sqls.some(s => s.includes('UPDATE oauth_grants'))).toBe(true)
+  })
+
+  it('an mcp-server grant sealed with the live CR uid behaves the same', async () => {
+    const gateway = new MockGateway('sandbox-recipes')
+    await gateway.createResource(
+      'mcpservers',
+      {
+        metadata: { name: 'gdrive' },
+        spec: {
+          contextRef: 'ctx-1',
+          auth: { type: 'oauth' },
+          oauth: {
+            id: 'salesforce',
+            provider: 'salesforce',
+            clientIdRef: { name: 'salesforce-creds', key: 'client-id' },
+            clientSecretRef: { name: 'salesforce-creds', key: 'client-secret' },
+            scopes: ['api', 'refresh_token'],
+          },
+        },
+      },
+      'sandbox-recipes'
+    )
+    const server = (await gateway.getResource(
+      'mcpservers',
+      'gdrive',
+      'sandbox-recipes'
+    )) as McpServerResource & { metadata: { uid: string } }
+    const { db, sqls } = dbDeletedDuringRefresh({
+      owner_kind: 'mcpserver',
+      cr_uid: server.metadata.uid,
+    })
+
+    const result = await getAccessToken(
+      {
+        grantKind: 'user',
+        ownerKind: 'mcpserver',
+        recipeNamespace: 'sandbox-recipes',
+        recipeName: 'gdrive',
+        userId: 'user-1',
+        oauthClientId: 'salesforce',
+        crUid: server.metadata.uid,
+      },
+      {
+        db,
+        recipeReader: {
+          read: async name =>
+            normalizeMcpServerOwnerDecl(
+              (await gateway.getResource(
+                'mcpservers',
+                name,
+                'sandbox-recipes'
+              )) as McpServerResource
+            ),
+        },
+        secretReader,
+        fetchFn: okRefreshFetch as unknown as typeof fetch,
+        encryptionKey: KEY,
+      }
+    )
+
+    expect(result.kind).toBe('no_grant')
+    expect(sqls.some(s => s.includes('INSERT INTO oauth_grants'))).toBe(false)
+    // Reaching the UPDATE proves the engine uid check let the sealed grant through (this fake
+    // returns the row to any SELECT, so the SQL fence itself is covered by the real-PG suites).
     expect(sqls.some(s => s.includes('UPDATE oauth_grants'))).toBe(true)
   })
 })

@@ -4,8 +4,10 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { AppHeader } from '../index'
 
 // Mini-spec 04a §C/R3: the chat-drawer toggle lives in the app header, between
-// the search and the notification bell. It renders only when `drawerAvailable`
-// (never on a chat tab) and drives `onToggleChatDrawer`.
+// the search and the notification bell. The interactive button renders only when
+// `drawerAvailable` (never on a chat tab) and drives `onToggleChatDrawer`. When
+// the drawer is unavailable but the handler is wired, an inert placeholder holds
+// the toggle's slot so hiding it doesn't reflow the search pill and bell.
 
 vi.mock('@hooks/domain/useAgentsDataController', () => ({
   useAgentsDataController: () => ({ accessCatalog: null }),
@@ -68,9 +70,42 @@ describe('AppHeader chat-drawer toggle', () => {
     expect(screen.queryByRole('button', { name: 'Open chat drawer' })).toBeNull()
   })
 
+  it('reserves the toggle slot with an inert placeholder on a chat tab', () => {
+    const { container } = render(
+      <AppHeader placement="titlebar" drawerAvailable={false} onToggleChatDrawer={vi.fn()} />
+    )
+    // The interactive control is gone, but its slot is held so the search pill
+    // and bell keep their position when the toggle appears/disappears.
+    const placeholder = screen.getByTestId('chat-drawer-toggle-placeholder')
+    expect(placeholder.tagName).toBe('SPAN')
+    expect(placeholder.getAttribute('aria-hidden')).toBe('true')
+    // Carries `.chat-drawer-toggle` — the class that sizes the box — so it
+    // reserves the real toggle's footprint (jsdom can't measure layout, so the
+    // shared sizing class is the closest guard against the slot collapsing).
+    expect(placeholder.classList.contains('chat-drawer-toggle')).toBe(true)
+
+    // Same position as the real toggle: between the search (.header-left) and the
+    // bell (.header-utilities).
+    const left = container.querySelector('.header-left')
+    const utilities = container.querySelector('.header-utilities')
+    expect(left).not.toBeNull()
+    expect(utilities).not.toBeNull()
+    expect(
+      left!.compareDocumentPosition(placeholder) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy()
+    expect(
+      placeholder.compareDocumentPosition(utilities!) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy()
+  })
+
   it('is hidden when no toggle handler is wired', () => {
     render(<AppHeader placement="titlebar" drawerAvailable={true} />)
     expect(screen.queryByTestId('chat-drawer-toggle')).toBeNull()
+  })
+
+  it('reserves no slot when no toggle handler is wired', () => {
+    render(<AppHeader placement="titlebar" drawerAvailable={false} />)
+    expect(screen.queryByTestId('chat-drawer-toggle-placeholder')).toBeNull()
   })
 
   it('renders between search and bell on a non-chat tab, reflecting the closed state', () => {

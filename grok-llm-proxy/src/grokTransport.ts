@@ -435,15 +435,41 @@ async function dispatchUpstreamStream(
         'xAI requires a newer Grok client version for subscription inference; contact support to upgrade Evenfire’s Grok client'
       )
     }
-    if (response.status === 402 || response.status === 403) {
+    if (response.status === 429) {
+      const retryAfter = retryAfterSeconds(response)
       throw new GrokTransportError(
-        'provider_unavailable',
-        'upstream entitlement denied the Grok request'
+        'rate_limited',
+        'upstream rate limited the Grok request',
+        retryAfter === undefined ? undefined : { retryAfterSeconds: retryAfter }
+      )
+    }
+    // G1-3 (#720): any other 4xx, including a 402/403 entitlement refusal, is
+    // what the same request would get again, so it is not retried or failed
+    // over from. A 408 is transient.
+    if (response.status >= 400 && response.status < 500 && response.status !== 408) {
+      throw new GrokTransportError(
+        'upstream_rejected',
+        `upstream rejected the Grok request with status ${response.status}`,
+        { upstreamStatus: response.status }
       )
     }
     throw new GrokTransportError('provider_unavailable', 'upstream completion failed')
   }
   return consumeSse(response.body, input.onFrame, signal, names, deadline)
+}
+
+// G1-1 (#720): Retry-After is forwarded only as whole seconds in 1..3600, the
+// rule mcp-host's gfsClient applies. An HTTP date or any other value is absent.
+// mcp-host parses what this forwards with its own copy of the rule
+// (`retryAfterMs` in mcp-host/src/llm/retryAfter.ts), and the Codex proxy has a
+// third (#799); a change here goes to both, or the Host drops the retry.
+const MAX_RETRY_AFTER_SECONDS = 3600
+
+function retryAfterSeconds(response: Response): number | undefined {
+  const raw = response.headers.get('retry-after')?.trim()
+  if (raw === undefined || !/^[1-9][0-9]{0,3}$/.test(raw)) return undefined
+  const seconds = Number(raw)
+  return seconds <= MAX_RETRY_AFTER_SECONDS ? seconds : undefined
 }
 
 // R10 (M1): a non-success completion body is read once, up to this bound, for

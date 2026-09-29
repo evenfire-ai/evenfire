@@ -11,7 +11,8 @@
  * The closed catalogue of error classes that may trigger a fallback (spec
  * §3-R5.2). Defined as a mapping over the real `(LlmErrorCode, retryable)`
  * tuples — `provider_unavailable` has no dedicated error code; it composes
- * `ModelOverloaded ∪ (ApiCallFailed ∧ retryable)`. See {@link classifyFailoverClass}.
+ * `ModelOverloaded ∪ ControlPlaneUnavailable ∪ (ApiCallFailed ∧ retryable)`.
+ * See {@link classifyFailoverClass}.
  */
 export type FailoverClass = 'insufficient_quota' | 'auth' | 'provider_unavailable' | 'rate_limited'
 

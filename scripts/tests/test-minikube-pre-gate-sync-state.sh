@@ -105,12 +105,35 @@ if incremental_contains 'control-api/*) incremental_add_target control-api contr
    incremental_contains 'rpc-proxy/*) incremental_add_target rpc-proxy rpc-proxy rpc-proxy' &&
    incremental_contains 'host-context-controller/*) incremental_add_target host-context-controller control-plane host-context-controller' &&
    incremental_contains 'control-ui/*) incremental_add_target control-ui control-plane control-ui' &&
-   incremental_contains 'packages/gfs-interaction-policy/*) incremental_add_target control-ui control-plane control-ui' &&
+   incremental_contains 'packages/gfs-interaction-policy/*)' &&
    incremental_contains 'tests/e2e/fixtures/workflow-plugin-sdk-e2e/*)' &&
    incremental_contains 'incremental_add_target workflow-plugin-sdk-e2e sandbox-recipes workflow-plugin-sdk-e2e'; then
   pass "incremental sync maps known runtime paths to their own images and deployments"
 else
   fail "incremental sync does not map known runtime paths precisely"
+fi
+
+# A two-line case body cannot be proven by grep (the mcp-host target line also
+# exists under mcp-host/*), so classify the path for real and compare targets.
+gfs_policy_targets="$(
+  PROJECT_DIR="$PWD"
+  PROFILE=fake
+  KC="kubectl --context=fake"
+  FORCE_CLUSTER_SYNC=false
+  FORCE_RESTART=false
+  IMAGE_SOURCE=local
+  IMAGE_TAG=test
+  IMAGES_GENERATED_AT=test
+  log() { :; }
+  # shellcheck source=/dev/null
+  source "$INCREMENTAL_SCRIPT"
+  incremental_classify_path packages/gfs-interaction-policy/fileClassifier.cjs
+  printf '%s\n' ${INCREMENTAL_TARGETS[@]+"${INCREMENTAL_TARGETS[@]}"}
+)"
+if [[ "$gfs_policy_targets" == $'control-ui|control-plane|control-ui\nmcp-host|mcp-host|chatllm' ]]; then
+  pass "a gfs-interaction-policy change reshadows Control UI and mcp-host"
+else
+  fail "gfs-interaction-policy maps to the wrong consumers: ${gfs_policy_targets:-<none>}"
 fi
 
 if contains 'incremental_plan' &&
@@ -131,7 +154,7 @@ else
   fail "pre-gate sync does not use the shared idempotent auth-key sync helper"
 fi
 
-if contains 'Both nginx gateway configs are mounted through subPath' &&
+if contains 'All three nginx gateway configs are mounted through subPath' &&
    contains 'INCREMENTAL_FULL_DEPLOYMENT' &&
    contains 'rollout_restart_with_retry control-plane nginx-workflow-approval-gateway' &&
    contains 'rollout_if_present control-plane nginx-workflow-approval-gateway' &&
@@ -139,6 +162,25 @@ if contains 'Both nginx gateway configs are mounted through subPath' &&
   pass "pre-gate sync refreshes the subPath-mounted workflow gateway after deployment changes"
 else
   fail "pre-gate sync can leave a stale workflow gateway after ConfigMap changes"
+fi
+
+# The rpc gateway serves the Codex and Grok redeem locations, whose
+# error_page 502 mapping (#720) only exists in the ConfigMap until the pod
+# restarts, because nginx.conf is mounted through subPath.
+rpc_gateway_restart_line="$(grep -nF 'rollout_restart_with_retry control-plane control-api-rpc-gateway' "$SCRIPT" | head -n 1 | cut -d: -f1)"
+rpc_gateway_wait_line="$(grep -nF 'rollout_if_present control-plane control-api-rpc-gateway' "$SCRIPT" | head -n 1 | cut -d: -f1)"
+workflow_gateway_restart_line="$(grep -nF 'rollout_restart_with_retry control-plane nginx-workflow-approval-gateway' "$SCRIPT" | head -n 1 | cut -d: -f1)"
+restart_block_end_line="$(grep -nF 'assert_workflow_gateway_prompt_bridge_finalization_route' "$SCRIPT" | head -n 1 | cut -d: -f1)"
+if [[ -n "$rpc_gateway_restart_line" &&
+      -n "$rpc_gateway_wait_line" &&
+      -n "$workflow_gateway_restart_line" &&
+      -n "$restart_block_end_line" &&
+      "$workflow_gateway_restart_line" -lt "$rpc_gateway_restart_line" &&
+      "$rpc_gateway_restart_line" -lt "$rpc_gateway_wait_line" &&
+      "$rpc_gateway_wait_line" -lt "$restart_block_end_line" ]]; then
+  pass "pre-gate restarts and waits for the subPath-mounted rpc gateway with the other nginx gateways"
+else
+  fail "pre-gate can leave a stale control-api-rpc-gateway after its ConfigMap changes"
 fi
 
 hcc_gateway_restart_line="$(grep -nF 'rollout_restart_with_retry control-plane host-context-controller-api-gateway' "$SCRIPT" | head -n 1 | cut -d: -f1)"
@@ -222,6 +264,41 @@ else
   pass "shared pre-gate marker helper propagates hashing failures instead of stamping empty input"
 fi
 rm -rf "${marker_failure_dir}"
+
+# Agent tooling rewrites `.claude/` state files on its own schedule. Hashing
+# them lets a marker stamped by pre-gate-sync stop matching the source seconds
+# later, with no source change at all (evenfire PR #773, run 8d).
+agent_state_dir="$(mktemp -d)"
+mkdir -p "${agent_state_dir}/workflow-recipes/src/.claude" \
+  "${agent_state_dir}/workflow-recipes/.claude" \
+  "${agent_state_dir}/deploy/minikube"
+printf 'export const a = 1\n' >"${agent_state_dir}/workflow-recipes/src/index.ts"
+printf '{"step":1}\n' >"${agent_state_dir}/workflow-recipes/.claude/plan-state.json"
+printf '{"step":1}\n' >"${agent_state_dir}/workflow-recipes/src/.claude/plan-state.json"
+printf '{"images":1}\n' >"${agent_state_dir}/deploy/minikube/.image-manifest.json"
+# shellcheck source=/dev/null
+agent_state_fp() { (source "$MARKER_SCRIPT" && pre_gate_marker_fingerprint_dir "${agent_state_dir}" "$1"); }
+wr_before="$(agent_state_fp workflow-recipes)"
+printf '{"step":2}\n' >"${agent_state_dir}/workflow-recipes/.claude/plan-state.json"
+printf '{"step":2}\n' >"${agent_state_dir}/workflow-recipes/src/.claude/plan-state.json"
+wr_after_state="$(agent_state_fp workflow-recipes)"
+printf 'export const a = 2\n' >"${agent_state_dir}/workflow-recipes/src/index.ts"
+wr_after_source="$(agent_state_fp workflow-recipes)"
+deploy_before="$(agent_state_fp deploy)"
+printf '{"images":2}\n' >"${agent_state_dir}/deploy/minikube/.image-manifest.json"
+deploy_after="$(agent_state_fp deploy)"
+if [[ "${wr_before}" =~ ^[0-9a-f]{40}$ && "${wr_before}" == "${wr_after_state}" ]]; then
+  pass "pre-gate fingerprint ignores agent state under .claude/ directories"
+else
+  fail "pre-gate fingerprint changes when agent tooling rewrites .claude/ state (${wr_before} -> ${wr_after_state})"
+fi
+if [[ "${wr_after_source}" =~ ^[0-9a-f]{40}$ && "${wr_after_source}" != "${wr_after_state}" &&
+      "${deploy_before}" =~ ^[0-9a-f]{40}$ && "${deploy_after}" != "${deploy_before}" ]]; then
+  pass "pre-gate fingerprint still changes for source files and ignored deploy inputs"
+else
+  fail "pre-gate fingerprint no longer sees source or ignored deploy inputs"
+fi
+rm -rf "${agent_state_dir}"
 
 control_api_migration_line="$(grep -nF 'run-control-api-db-migration.sh' "$SCRIPT" | head -n 1 | cut -d: -f1)"
 runtime_roles_line="$(grep -nF 'provision-control-api-runtime-roles.sh' "$SCRIPT" | head -n 1 | cut -d: -f1)"

@@ -8,7 +8,13 @@ import {
   waitFor,
   within,
 } from '@testing-library/react'
-import { apiSend, getMcpServers, getRecipeSecrets, getRecipes } from '../../lib/api'
+import {
+  apiSend,
+  deleteRecipeSecret,
+  getMcpServers,
+  getRecipeSecrets,
+  getRecipes,
+} from '../../lib/api'
 import { buildSecretSummary } from '../../test/fixtures/secretSummary'
 import { SecretsTable } from '../SecretsTable'
 import { ToastProvider } from '../Toast'
@@ -25,6 +31,7 @@ vi.mock('../../lib/api', async () => {
   return {
     ...actual,
     apiSend: vi.fn(),
+    deleteRecipeSecret: vi.fn(),
     getMcpServers: vi.fn(),
     getRecipeSecrets: vi.fn(),
     getRecipes: vi.fn(),
@@ -32,6 +39,7 @@ vi.mock('../../lib/api', async () => {
 })
 
 const apiSendMock = vi.mocked(apiSend)
+const deleteRecipeSecretMock = vi.mocked(deleteRecipeSecret)
 const getMcpServersMock = vi.mocked(getMcpServers)
 const getRecipeSecretsMock = vi.mocked(getRecipeSecrets)
 const getRecipesMock = vi.mocked(getRecipes)
@@ -41,6 +49,8 @@ const getRecipesMock = vi.mocked(getRecipes)
 beforeEach(() => {
   apiSendMock.mockReset()
   apiSendMock.mockResolvedValue(undefined as never)
+  deleteRecipeSecretMock.mockReset()
+  deleteRecipeSecretMock.mockResolvedValue(undefined as never)
 })
 
 function renderTable(
@@ -374,6 +384,85 @@ describe('SecretsTable — connector marketplace source', () => {
       expect(screen.getByText(/@org\/new@9\.9\.9/)).toBeTruthy()
     })
     expect(screen.queryByText(/stale@0\.0\.1/)).toBeNull()
+  })
+})
+
+describe('SecretsTable — recipe deletion identity', () => {
+  beforeEach(() => {
+    getMcpServersMock.mockReset()
+    getRecipeSecretsMock.mockReset()
+    getRecipesMock.mockReset()
+    mockReplace.mockClear()
+    mockPush.mockClear()
+  })
+
+  afterEach(() => {
+    cleanup()
+  })
+
+  it('requires a refresh before deleting a legacy row without identity', async () => {
+    getRecipeSecretsMock.mockResolvedValue({
+      items: [
+        {
+          name: 'legacy-recipe-credentials',
+          namespace: 'sandbox-recipes',
+          keys: ['api-key'],
+          ownership: { kind: 'shared' },
+        },
+      ],
+    })
+    getRecipesMock.mockResolvedValue({ items: [] })
+
+    renderTable('recipe')
+
+    const trigger = await screen.findByRole('button', {
+      name: 'Actions for recipe secret legacy-recipe-credentials',
+    })
+    fireEvent.click(trigger)
+    const deleteAction = screen.getByRole('menuitem', { name: 'Delete' })
+    expect(deleteAction).not.toBeDisabled()
+    fireEvent.click(deleteAction)
+
+    expect(
+      await screen.findByText(
+        'Secret legacy-recipe-credentials has no current identity. Refresh the page and review the latest state before deleting it.'
+      )
+    ).toBeInTheDocument()
+    expect(deleteRecipeSecretMock).not.toHaveBeenCalled()
+  })
+
+  it('sends the listed identity when deleting a current recipe Secret', async () => {
+    getRecipeSecretsMock.mockResolvedValue({
+      items: [
+        {
+          name: 'current-recipe-credentials',
+          namespace: 'sandbox-recipes',
+          keys: ['api-key'],
+          ownership: { kind: 'shared' },
+          uid: 'uid-current-recipe-credentials',
+          resourceVersion: '7',
+        },
+      ],
+    })
+    getRecipesMock.mockResolvedValue({ items: [] })
+
+    renderTable('recipe')
+
+    const trigger = await screen.findByRole('button', {
+      name: 'Actions for recipe secret current-recipe-credentials',
+    })
+    fireEvent.click(trigger)
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Delete' }))
+    const dialog = await screen.findByRole('alertdialog', { name: 'Delete Recipe Secret' })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Delete' }))
+
+    await waitFor(() => {
+      expect(deleteRecipeSecretMock).toHaveBeenCalledWith(
+        'current-recipe-credentials',
+        'sandbox-recipes',
+        { uid: 'uid-current-recipe-credentials', resourceVersion: '7' }
+      )
+    })
   })
 })
 

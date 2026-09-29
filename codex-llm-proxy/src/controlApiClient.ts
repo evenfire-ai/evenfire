@@ -42,11 +42,43 @@ export type ControlApiClientConfig = {
 export class ControlApiClientError extends Error {
   constructor(
     readonly code: string,
-    message: string
+    message: string,
+    // The fetch failure's cause code, for the attempt log (G1-4).
+    readonly causeCode?: string
   ) {
     super(message)
     this.name = 'ControlApiClientError'
   }
+}
+
+// G1-4 (#720): fetch failure codes that prove no control-plane process got
+// the request: nothing accepted the connection, the name did not resolve, no
+// route existed, or the TCP connect timed out. A reset, or anything after the
+// request timeout fired, may have reached a live process and stays ambiguous.
+// The Grok proxy carries the same set; the proxies share no module (#799).
+const CONNECT_PHASE_CODES: ReadonlySet<string> = new Set([
+  'ECONNREFUSED',
+  'ENOTFOUND',
+  'EAI_AGAIN',
+  'EHOSTUNREACH',
+  'ENETUNREACH',
+  'UND_ERR_CONNECT_TIMEOUT',
+])
+
+// The code undici puts on a failed fetch's cause. Only a code-shaped string is
+// returned, so nothing else from the error can reach a log.
+export function fetchCauseCode(err: unknown): string | undefined {
+  if (!(err instanceof Error)) return undefined
+  const cause: unknown = (err as { cause?: unknown }).cause
+  if (typeof cause !== 'object' || cause === null) return undefined
+  const code: unknown = (cause as { code?: unknown }).code
+  return typeof code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(code) ? code : undefined
+}
+
+function isConnectPhaseFailure(err: unknown, signal: AbortSignal): boolean {
+  if (signal.aborted || !(err instanceof TypeError)) return false
+  const code = fetchCauseCode(err)
+  return code !== undefined && CONNECT_PHASE_CODES.has(code)
 }
 
 export class ControlApiClient {
@@ -96,16 +128,34 @@ export class ControlApiClient {
   private async post(path: string, payload: Record<string, unknown>): Promise<unknown> {
     const base = this.config.baseUrl.replace(/\/+$/, '')
     const fetchFn = this.config.fetchFn ?? fetch
-    const response = await fetchFn(`${base}${path.startsWith('/') ? path : `/${path}`}`, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        authorization: `Bearer ${this.config.serviceToken}`,
-        'x-service-token': this.config.serviceName,
-      },
-      body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(CONTROL_API_REQUEST_TIMEOUT_MS),
-    })
+    const signal = AbortSignal.timeout(CONTROL_API_REQUEST_TIMEOUT_MS)
+    let response: Response
+    try {
+      response = await fetchFn(`${base}${path.startsWith('/') ? path : `/${path}`}`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${this.config.serviceToken}`,
+          'x-service-token': this.config.serviceName,
+        },
+        body: JSON.stringify(payload),
+        signal,
+      })
+    } catch (err) {
+      if (!isConnectPhaseFailure(err, signal)) throw err
+      const causeCode = fetchCauseCode(err)
+      // The cause code travels on the error to the attempt line (redeem) or
+      // codex_proxy_finalize_failed's err, so this line records only the hop.
+      logger.warn(
+        { event: 'codex_proxy_control_api_unreachable', path },
+        'control API is unreachable'
+      )
+      throw new ControlApiClientError(
+        'control_plane_unavailable',
+        'control API is unreachable',
+        causeCode
+      )
+    }
     const raw = await response.text()
     let parsed: unknown = null
     if (raw) {
