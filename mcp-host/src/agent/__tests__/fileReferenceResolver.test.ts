@@ -14,6 +14,7 @@ import {
   classifyBytes,
 } from '@clerum/gfs-interaction-policy'
 import { type GfsRuntimeEnv, GfscHttpError, createGfscClient } from '../../internalTools/gfsClient'
+import { logger } from '../../logger'
 import { VISUAL_INPUT_LIMITS } from '../../visualInput/policy'
 import {
   FILE_REFERENCE_AVAILABILITY_CODES,
@@ -349,6 +350,28 @@ describe('resolveFileReferences (#666)', () => {
     )
     expect((caught as Error).message).not.toContain('secret-token')
     expect((caught as { cause?: unknown }).cause).toBeInstanceOf(TypeError)
+  })
+
+  it('logs the original error class of an unexpected rethrow, not the wrapper', async () => {
+    const original = new TypeError(
+      'Headers.append: "Bearer secret-token" is an invalid header value.'
+    )
+    const resolve = vi.fn<FileReferenceGfscClient['resolve']>(async () => {
+      throw original
+    })
+    const logged = vi.spyOn(logger, 'error').mockImplementation(() => undefined)
+    try {
+      await expect(resolveFileReferences([gfsReference()], { resolve })).rejects.toThrow(
+        'file reference resolution failed: unexpected Host error'
+      )
+      // The log call is the witness: the serializer reduces `err` to name, code
+      // and status, so passing the original (not the wrapper) is what keeps the
+      // class visible and the message out.
+      expect(logged).toHaveBeenCalledTimes(1)
+      expect(logged.mock.calls[0]![0]).toEqual({ err: original })
+    } finally {
+      logged.mockRestore()
+    }
   })
 
   it('fails transient on a timeout signal', async () => {

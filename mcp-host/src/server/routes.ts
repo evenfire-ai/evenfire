@@ -316,30 +316,6 @@ export async function handleMessageRoute(
       return
     }
 
-    // Issue #666 — a malformed reference or an unknown schema version refuses
-    // the whole message: the turn must not run without the file it names. The
-    // refusal is a 200 `MessageResponse`, like every other admission refusal,
-    // so rpc-proxy relays its code instead of reporting a failed upstream.
-    const fileReferences = parseIncomingFileReferences(
-      message.fileReferences,
-      config.fileReferenceMaxCount
-    )
-    if (!fileReferences.ok) {
-      json(res, 200, {
-        success: false,
-        error: {
-          code: fileReferences.code,
-          message: fileReferences.message,
-          retryable: false,
-          provider: 'unknown',
-        },
-      })
-      return
-    }
-    message.fileReferences = fileReferences.references.length
-      ? fileReferences.references
-      : undefined
-
     // Identity invariant for the desktop / rpc channel: the sender MUST be the
     // trusted rpc-proxy edge user, regardless of what the body claims.
     // rpc-proxy already does this; re-enforcing here is defense-in-depth for
@@ -376,6 +352,31 @@ export async function handleMessageRoute(
         return
       }
     }
+
+    // Issue #666 — after the caller checks, so an unauthenticated request learns
+    // nothing about the reference limit. A malformed reference or an unknown schema version refuses
+    // the whole message: the turn must not run without the file it names. The
+    // refusal is a 200 `MessageResponse`, like every other admission refusal,
+    // so rpc-proxy relays its code instead of reporting a failed upstream.
+    const fileReferences = parseIncomingFileReferences(
+      message.fileReferences,
+      config.fileReferenceMaxCount
+    )
+    if (!fileReferences.ok) {
+      json(res, 200, {
+        success: false,
+        error: {
+          code: fileReferences.code,
+          message: fileReferences.message,
+          retryable: false,
+          provider: 'unknown',
+        },
+      })
+      return
+    }
+    message.fileReferences = fileReferences.references.length
+      ? fileReferences.references
+      : undefined
 
     logger.info(
       { channelType: message.channelType, sender: message.sender },

@@ -12,6 +12,7 @@ import { type FileReferenceV1, parseFileReferenceV1 } from '@clerum/gfs-interact
 import { FileReferenceErrorCode } from '../core/errors'
 import type { TurnContextReferencedFile } from '../core/orchestration/turnContext'
 import { GfscHttpError } from '../internalTools/gfsClient'
+import { logger } from '../logger'
 import { VISUAL_INPUT_LIMITS } from '../visualInput/policy'
 
 export type FileReferenceAvailability =
@@ -318,10 +319,11 @@ export async function resolveFileReferences(
     // of a causeless TypeError, and the message route answers error.message
     // verbatim. Wrap the rethrow so only this fixed text can leave the Host;
     // the cause keeps the original error for a caller that inspects it. The
-    // route logs `err` through the Host logger, whose serializer keeps only name,
-    // code and status of that Error and does not follow `cause`, so the original
-    // message stays out of the log too; the cost is that the log line does not
-    // name the original error class.
+    // route logs the wrapper through the Host logger, whose serializer keeps only
+    // name, code and status of an Error and does not follow `cause`, so the
+    // original class would be lost. Log the original here instead: the same
+    // serializer reduces it to name, code and status and drops its message.
+    logger.error({ err: error }, '[FileReferences] unexpected error while resolving references')
     throw new Error('file reference resolution failed: unexpected Host error', { cause: error })
   } finally {
     clearTimeout(timer)

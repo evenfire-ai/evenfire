@@ -538,4 +538,27 @@ describe('handleMessageRoute — structured file references (#666)', () => {
     })
     expect(dispatch).toHaveBeenCalledTimes(1)
   })
+
+  it('answers 401 before it looks at the references of an unauthenticated request', async () => {
+    const tooMany = Array.from({ length: FILE_REFERENCE_MAX_COUNT + 1 }, (_, i) => reference(i + 1))
+    const { dispatch, handlers } = route()
+
+    // Witness: with a caller, the same body reaches the reference check and is
+    // refused for its count, so the 401 below is the caller check running first.
+    const authenticated = makeRes()
+    await handleMessageRoute(request(tooMany), authenticated.res, handlers)
+    expect(authenticated.statusCode).toBe(200)
+    expect(authenticated.jsonBody).toMatchObject({
+      success: false,
+      error: { code: 'FILE_REFERENCE_INVALID' },
+    })
+
+    const anonymous = makeRes()
+    const unauthenticatedRequest = request(tooMany)
+    delete (unauthenticatedRequest as { runtimeCaller?: unknown }).runtimeCaller
+    await handleMessageRoute(unauthenticatedRequest, anonymous.res, handlers)
+    expect(anonymous.statusCode).toBe(401)
+    expect(anonymous.jsonBody).toEqual({ error: 'Missing rpc edge caller context' })
+    expect(dispatch).not.toHaveBeenCalled()
+  })
 })
