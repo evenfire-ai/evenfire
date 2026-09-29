@@ -653,6 +653,7 @@ export function createRpcRouter(): Router {
           res.status(400).json({ error: 'hostRef is required' })
           return
         }
+        const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
         const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
           teamId: auth.teamId,
         })
@@ -696,6 +697,7 @@ export function createRpcRouter(): Router {
             host,
             claims: auth,
             rpcAccessToken,
+            deadlineMs: wakeDeadlineMs,
             attemptUpstream: attempt,
             respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
           })
@@ -721,6 +723,7 @@ export function createRpcRouter(): Router {
           res.status(400).json({ error: 'hostRef is required' })
           return
         }
+        const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
         const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
           teamId: auth.teamId,
         })
@@ -760,6 +763,7 @@ export function createRpcRouter(): Router {
             host,
             claims: auth,
             rpcAccessToken,
+            deadlineMs: wakeDeadlineMs,
             attemptUpstream: attempt,
             respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
           })
@@ -803,6 +807,7 @@ export function createRpcRouter(): Router {
           res.status(400).json({ error: 'Invalid session pagination query' })
           return
         }
+        const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
         const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
           teamId: auth.teamId,
         })
@@ -854,6 +859,7 @@ export function createRpcRouter(): Router {
             host,
             claims: auth,
             rpcAccessToken,
+            deadlineMs: wakeDeadlineMs,
             // idempotent GET: a re-issued read cannot duplicate a side effect
             retryUntilDeadline: true,
             attemptUpstream: forwardSessionList,
@@ -905,6 +911,7 @@ export function createRpcRouter(): Router {
           res.status(400).json({ error: 'Invalid session messages pagination query' })
           return
         }
+        const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
         const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
           teamId: auth.teamId,
         })
@@ -957,6 +964,7 @@ export function createRpcRouter(): Router {
             host,
             claims: auth,
             rpcAccessToken,
+            deadlineMs: wakeDeadlineMs,
             // idempotent GET: a re-issued read cannot duplicate a side effect
             retryUntilDeadline: true,
             attemptUpstream: forwardTranscript,
@@ -992,6 +1000,7 @@ export function createRpcRouter(): Router {
           res.status(400).json({ error: 'Invalid hostRef, agent, or chatId' })
           return
         }
+        const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
         const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
           teamId: auth.teamId,
         })
@@ -1033,6 +1042,7 @@ export function createRpcRouter(): Router {
             host,
             claims: auth,
             rpcAccessToken,
+            deadlineMs: wakeDeadlineMs,
             // idempotent GET: a re-issued read cannot duplicate a side effect
             retryUntilDeadline: true,
             attemptUpstream: attempt,
@@ -1145,6 +1155,7 @@ export function createRpcRouter(): Router {
           res.status(400).json({ error: 'hostRef is required' })
           return
         }
+        const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
         const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
           teamId: auth.teamId,
         })
@@ -1185,6 +1196,7 @@ export function createRpcRouter(): Router {
             host,
             claims: auth,
             rpcAccessToken,
+            deadlineMs: wakeDeadlineMs,
             // idempotent GET: a re-issued read cannot duplicate a side effect
             retryUntilDeadline: true,
             attemptUpstream: attempt,
@@ -1214,6 +1226,7 @@ export function createRpcRouter(): Router {
           res.status(400).json({ error: 'hostRef is required' })
           return
         }
+        const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
         const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
           teamId: auth.teamId,
         })
@@ -1256,6 +1269,7 @@ export function createRpcRouter(): Router {
             host,
             claims: auth,
             rpcAccessToken,
+            deadlineMs: wakeDeadlineMs,
             attemptUpstream: attempt,
             respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
           })
@@ -1285,6 +1299,7 @@ export function createRpcRouter(): Router {
           return
         }
 
+        const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
         const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
           teamId: auth.teamId,
         })
@@ -1317,6 +1332,7 @@ export function createRpcRouter(): Router {
               host,
               claims: auth,
               rpcAccessToken,
+              deadlineMs: wakeDeadlineMs,
               // idempotent GET: a re-issued read cannot duplicate a side effect
               retryUntilDeadline: true,
               attemptUpstream: attemptTaskResult,
@@ -1354,6 +1370,7 @@ export function createRpcRouter(): Router {
           return
         }
 
+        const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
         const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
           teamId: auth.teamId,
         })
@@ -1392,6 +1409,7 @@ export function createRpcRouter(): Router {
               host,
               claims: auth,
               rpcAccessToken,
+              deadlineMs: wakeDeadlineMs,
               attemptUpstream: attemptCancel,
               respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
             })
@@ -1426,6 +1444,7 @@ export function createRpcRouter(): Router {
           res.status(400).json({ error: 'Invalid host reference' })
           return
         }
+        const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
         const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
           teamId: auth.teamId,
         })
@@ -1459,6 +1478,7 @@ export function createRpcRouter(): Router {
             host,
             claims: auth,
             rpcAccessToken,
+            deadlineMs: wakeDeadlineMs,
             // idempotent GET: a re-issued read cannot duplicate a side effect
             retryUntilDeadline: true,
             attemptUpstream: attempt,
@@ -1500,6 +1520,7 @@ export function createRpcRouter(): Router {
           res.status(400).json({ error: 'Invalid filename' })
           return
         }
+        const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
         const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
           teamId: auth.teamId,
         })
@@ -1579,6 +1600,7 @@ export function createRpcRouter(): Router {
             host,
             claims: auth,
             rpcAccessToken,
+            deadlineMs: wakeDeadlineMs,
             // idempotent GET: a re-issued read cannot duplicate a side effect
             retryUntilDeadline: true,
             attemptUpstream: attemptDownload,

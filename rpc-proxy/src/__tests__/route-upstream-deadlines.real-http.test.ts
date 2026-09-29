@@ -6,7 +6,11 @@ import request from 'supertest'
 import { config } from '../config.js'
 import { apiErrorHandler } from '../errorHandler.js'
 import { createRpcRouter } from '../routes/rpc.js'
-import { forwardCancelToHost, forwardHostMessageToHost } from '../services/mcpHostRestService.js'
+import {
+  forwardCancelToHost,
+  forwardHostMessageToHost,
+  forwardTaskResultFromHost,
+} from '../services/mcpHostRestService.js'
 
 // PR #849 R2-M3 / R1-M12 / R1-M13 / NEW-rpx-1 / NEW-sec-4.
 //
@@ -52,6 +56,7 @@ vi.mock('../services/controlApiRestService.js', () => controlApiMock)
 const ALL_SCOPES = [
   'host:approval:write',
   'host:model:write',
+  'host:session:read',
   'host:task:read',
   'host:message:invoke',
   'host:wake:write',
@@ -602,5 +607,136 @@ describe('artifacts list keeps a finite first-attempt deadline', () => {
     expect(seen.map(entry => entry.url)).toEqual(['/v1/runtime/artifacts'])
     await vi.waitFor(() => expect(seen[0]!.closedEarly).toBe(true))
     expect(controlApiMock.requestHostWakeFromControlApi).not.toHaveBeenCalled()
+  })
+})
+
+// R3-L7: the hold deadline is pinned when the request arrives, before the Host
+// connection is resolved, so a slow resolution is charged to the same hold
+// budget instead of extending it. The wake retry never answers, so the request
+// ends when the hold deadline aborts it.
+const HELD_ROUTES = [
+  {
+    label: 'send message',
+    method: 'post',
+    path: '/rpc/hosts/chatllm/messages',
+    body: { content: 'hello' },
+    upstreamPath: '/v1/runtime/messages',
+  },
+  {
+    label: 'approve',
+    method: 'post',
+    path: '/rpc/hosts/chatllm/approvals/approve',
+    body: { toolCallId: 'tc-1' },
+    upstreamPath: '/v1/runtime/approvals/approve',
+  },
+  {
+    label: 'deny',
+    method: 'post',
+    path: '/rpc/hosts/chatllm/approvals/deny',
+    body: { toolCallId: 'tc-1' },
+    upstreamPath: '/v1/runtime/approvals/deny',
+  },
+  {
+    label: 'set model',
+    method: 'post',
+    path: '/rpc/hosts/chatllm/model',
+    body: { chatId: 'c1', model: 'claude-haiku-4-5' },
+    upstreamPath: '/v1/runtime/model',
+  },
+  {
+    label: 'cancel task',
+    method: 'post',
+    path: '/rpc/hosts/chatllm/tasks/task-1/cancel',
+    body: {},
+    upstreamPath: '/v1/runtime/tasks/task-1/cancel',
+  },
+  {
+    label: 'list sessions',
+    method: 'get',
+    path: '/rpc/hosts/chatllm/sessions',
+    upstreamPath: '/v1/runtime/sessions',
+  },
+  {
+    label: 'session transcript',
+    method: 'get',
+    path: '/rpc/hosts/chatllm/sessions/agent-1/chat-1/messages',
+    upstreamPath: '/v1/runtime/sessions/agent-1/chat-1/messages',
+  },
+  {
+    label: 'context breakdown',
+    method: 'get',
+    path: '/rpc/hosts/chatllm/sessions/agent-1/chat-1/context-breakdown',
+    upstreamPath: '/v1/runtime/sessions/agent-1/chat-1/context-breakdown',
+  },
+  {
+    label: 'list models',
+    method: 'get',
+    path: '/rpc/hosts/chatllm/models',
+    upstreamPath: '/v1/runtime/models',
+  },
+  {
+    label: 'task result',
+    method: 'get',
+    path: '/rpc/hosts/chatllm/tasks/task-1/result',
+    upstreamPath: '/v1/runtime/tasks/task-1/result',
+  },
+  {
+    label: 'list artifacts',
+    method: 'get',
+    path: '/rpc/hosts/chatllm/artifacts',
+    upstreamPath: '/v1/runtime/artifacts',
+  },
+  {
+    label: 'artifact download',
+    method: 'get',
+    path: '/rpc/hosts/chatllm/artifacts/report.bin/download',
+    upstreamPath: '/v1/runtime/artifacts/report.bin/download',
+  },
+] as const
+
+const HOST_RESOLUTION_LATENCY_MS = 500
+const PINNED_HOLD_MS = 1_600
+
+describe.each(HELD_ROUTES)('R3-L7 $label pins the hold deadline before host resolution', route => {
+  it('a slow host resolution is charged to the hold budget', async () => {
+    config.upstreamTimeoutMs = 30_000
+    config.artifactDownloadTimeoutMs = 30_000
+    config.wakeMaxHoldMs = PINNED_HOLD_MS
+    serviceMock.forwardTaskResultFromHost.mockImplementation(
+      forwardTaskResultFromHost as typeof serviceMock.forwardTaskResultFromHost
+    )
+    serviceMock.forwardCancelToHost.mockImplementation(
+      forwardCancelToHost as typeof serviceMock.forwardCancelToHost
+    )
+    await startUpstream((req, _res, index) => {
+      if (index === 0) dropConnection(req) // first attempt: host down
+      // the wake retry is never answered
+    })
+    const { port } = server!.address() as AddressInfo
+    serviceMock.resolveHostConnectionForUser.mockImplementation(async () => {
+      await new Promise(resolve => setTimeout(resolve, HOST_RESOLUTION_LATENCY_MS))
+      return { name: 'chatllm', url: `http://127.0.0.1:${port}`, headers: {} }
+    })
+
+    const startedAt = Date.now()
+    const call =
+      route.method === 'post'
+        ? request(makeApp()).post(route.path).set('authorization', 'Bearer tok').send(route.body)
+        : request(makeApp()).get(route.path).set('authorization', 'Bearer tok')
+    const res = await call.expect(504)
+    const elapsed = Date.now() - startedAt
+
+    expect(res.body).toEqual({ error: 'Gateway Timeout' })
+    // Witness: the slow resolution ran, the first attempt reached the upstream,
+    // a wake was requested and the retry reached the upstream before the
+    // deadline aborted it.
+    expect(serviceMock.resolveHostConnectionForUser).toHaveBeenCalledTimes(1)
+    expect(controlApiMock.requestHostWakeFromControlApi).toHaveBeenCalledTimes(1)
+    expect(seen.map(entry => entry.url)).toEqual([route.upstreamPath, route.upstreamPath])
+    await vi.waitFor(() => expect(seen[1]!.closedEarly).toBe(true))
+    // Pinned at arrival: the whole request fits in the hold budget. Pinned after
+    // the resolution it would take HOST_RESOLUTION_LATENCY_MS longer.
+    expect(elapsed).toBeGreaterThanOrEqual(PINNED_HOLD_MS - 100)
+    expect(elapsed).toBeLessThan(PINNED_HOLD_MS + 400)
   })
 })
