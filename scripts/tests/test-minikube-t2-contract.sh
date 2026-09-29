@@ -364,6 +364,24 @@ if [ -z "$post_runtime_process_check_line" ] || [ -z "$complete_pass_line" ] ||
   echo 'FAIL: T2 does not revalidate port-forward ownership before complete PASS' >&2
   exit 1
 fi
+# t2_evidence_init opens every evidence file with `preflight RUNNING`. The
+# planner closes it; each certification writer must close it too, or a PASS
+# attestation keeps a phase whose latest status reads as still running.
+preflight_plan_body="$(awk '/^run_preflight_plan\(\) \{$/,/^\}$/' "$T2")"
+if [ -z "$preflight_plan_body" ] ||
+   ! grep -Fq 't2_evidence_write preflight PASS' <<<"$preflight_plan_body"; then
+  echo 'FAIL: T2 certification evidence never closes the preflight phase opened by t2_evidence_init' >&2
+  exit 1
+fi
+# awk prints an empty line number when nothing matches, so the explicit FAIL
+# below reports the gap instead of pipefail ending the script silently.
+t1_evidence_init_line="$(awk '$0 == "  t2_evidence_init" { line = NR } END { print line }' "$T1")"
+t1_preflight_pass_line="$(awk 'index($0, "t2_evidence_write preflight PASS") { line = NR } END { print line }' "$T1")"
+if [ -z "$t1_evidence_init_line" ] || [ -z "$t1_preflight_pass_line" ] ||
+   [ "$t1_preflight_pass_line" -le "$t1_evidence_init_line" ]; then
+  echo 'FAIL: T1 certification evidence never closes the preflight phase opened by t2_evidence_init' >&2
+  exit 1
+fi
 if ! grep -Fq 'instead of already-synced' "$T2"; then
   echo 'FAIL: final T2 preflight does not require already-synced' >&2
   exit 1

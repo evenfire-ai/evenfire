@@ -603,6 +603,8 @@ main() {
     T1_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-setup-local"
     die_t1 POSTGRES_NOT_READY 'control-postgres did not become Ready'
   fi
+  # Close the phase t2_evidence_init opened before the suites start.
+  t2_evidence_write preflight PASS 'marker, process and control-postgres readiness checks passed'
 
   T1_TMP_DIR="$(mktemp -d "$T1_TMP_ROOT/evenfire-t1.XXXXXX")"
   PG_USER="$(secret_field POSTGRES_USER)"
