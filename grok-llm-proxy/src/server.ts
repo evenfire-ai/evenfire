@@ -108,13 +108,20 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
 }
 
-function reject(res: Response, status: number, code: string): void {
+/**
+ * `type` is the fixed error type of a refused body (body-parser's or the
+ * structure scan's), never a message or any part of the body.
+ */
+function reject(res: Response, status: number, code: string, type?: string): void {
   if (res.headersSent) return
-  logger.warn({ event: 'grok_proxy_denied', code }, 'request denied')
+  logger.warn(
+    type === undefined ? { event: 'grok_proxy_denied', code } : { event: 'grok_proxy_denied', code, type },
+    'request denied'
+  )
   res.status(status).json({ error: code })
 }
 
-// A8: every JSON parser scans the raw body before JSON.parse. JSON.parse
+// Every JSON parser scans the raw body before JSON.parse. JSON.parse
 // allocates one heap object per container, so a body within the byte limit
 // can still exhaust the heap; the scan refuses a body denser, more nested or
 // with more containers than any request the contract accepts. Its depth bound
@@ -124,18 +131,21 @@ const verifyBodyStructure = createBodyStructureVerify(BODY_STRUCTURE_LIMITS)
 
 function boundedErrorHandler(err: unknown, _req: Request, res: Response, _next: () => void): void {
   const typed = err as { type?: string; status?: number; body?: unknown }
+  // The refusals below share one response code per status, so the logged type
+  // is what tells a structural 413 from a byte-limit 413.
+  const type = typeof typed?.type === 'string' ? typed.type : undefined
   if (typed?.type === 'entity.too.large' || typed?.status === 413) {
-    reject(res, 413, 'payload_too_large')
+    reject(res, 413, 'payload_too_large', type)
     return
   }
   // R9-1: the parsers run with `inflate: false`, so body-parser refuses an
   // encoded body before reading it.
   if (typed?.type === 'encoding.unsupported' || typed?.type === 'charset.unsupported') {
-    reject(res, 415, 'unsupported_media_type')
+    reject(res, 415, 'unsupported_media_type', type)
     return
   }
   if (err instanceof SyntaxError || typed?.type === 'body.structure.too.deep') {
-    reject(res, 400, 'invalid_request')
+    reject(res, 400, 'invalid_request', type)
     return
   }
   // body-parser attaches the raw body to an error thrown by `verify` or by
@@ -370,7 +380,7 @@ export function createProxyApps(
       ordinaryJson(req, res, next)
       return
     }
-    // B4 / A11.7 V3: one principal gets a fair share of the visual gate, so a
+    // One principal gets a fair share of the visual gate, so a
     // single host cannot fill the entries every other host also needs. The
     // share is taken before the gate wait, so queued entries count too.
     const platform = req.grokPlatform
@@ -403,7 +413,19 @@ export function createProxyApps(
       const releasePrincipalShare = (): void => {
         if (!principalShareHeld) return
         principalShareHeld = false
-        const remaining = (visualPrincipalAdmissions.get(visualPrincipal) ?? 1) - 1
+        const held = visualPrincipalAdmissions.get(visualPrincipal)
+        if (held === undefined) {
+          // A held share always has an entry, so a missing one is a counting
+          // defect. This runs from `close` handlers, where a throw has no
+          // caller to reach, so it is logged and the release completes.
+          logger.error(
+            { event: 'grok_proxy_error', reason: 'principal_share_missing', sub: platform.sub },
+            'visual principal share missing at release'
+          )
+          visualPrincipalAdmissions.delete(visualPrincipal)
+          return
+        }
+        const remaining = held - 1
         if (remaining > 0) visualPrincipalAdmissions.set(visualPrincipal, remaining)
         else visualPrincipalAdmissions.delete(visualPrincipal)
       }
@@ -454,7 +476,7 @@ export function createProxyApps(
       }, bodyReadDeadlineMs)
       res.once('close', () => {
         clearTimeout(readDeadline)
-        // Backstop only while the admission is still held here. A kept
+        // The close handler releases only while the slot is still held here. A kept
         // visual body transfers `req.grokStreamRelease` into the handler,
         // which clears the field and releases in its outer `finally`. A
         // demoted body releases through `releaseAdmission` before it joins
@@ -646,7 +668,7 @@ export function createProxyApps(
           release = gated.grokStreamRelease
           gated.grokStreamRelease = undefined
         } else if (gated.grokStreamRelease) {
-          // A8 D3: a demoted body was read through the visual gate, so it holds
+          // A demoted body was read through the visual gate, so it holds
           // no body-budget reservation. It takes one for its compact size
           // before it gives up the visual slot, so the 8-wide stream gate
           // never holds more resident bodies than the budget admits. Every

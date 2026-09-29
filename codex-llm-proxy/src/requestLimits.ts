@@ -21,15 +21,17 @@ export const DEFAULT_MAX_BODY_BYTES = CONTRACT_LIMITS.maxRequestBodyBytes + ENVE
  * (the raw buffer, the decoded string, the parsed object, the contract copy and
  * more than one serialization of it). Without this bound the stream gate would
  * let 24 bodies in.
- * Bodies over the ordinary cap never take this budget: they are V2 visual
- * envelopes, bounded by `visualStreamGate` instead, so the declared bodies a pod
- * can hold at once are 3 x 8 MiB here plus 2 x 24 MiB there. Measured with the
+ * A body whose Content-Length exceeds the ordinary cap is read under
+ * `visualStreamGate`. If it parses to a size within the ordinary cap
+ * (demotion), it takes a reservation for that size before releasing the
+ * visual slot, so the declared bodies a pod can hold at once are still 3 x 8
+ * MiB here plus 2 x 24 MiB there. Measured with the
  * full load the gates admit (eight 8 MiB streams, two 24 MiB visual streams
  * and three queued 8 MiB bodies, #739 D5), the process peaked at 790 MiB of
  * RSS with `--max-old-space-size=384` and at 886-1009 MiB with an uncapped
  * heap, which is why the deployment sets that cap and a 1Gi memory limit.
  *
- * A8 — bytes alone do not bound the parse: JSON.parse allocates one heap
+ * Bytes alone do not bound the parse: JSON.parse allocates one heap
  * object per container, so the contracts cap containers at
  * `maxRequestContainers` (262 144) and every parser scans the raw body for it
  * before JSON.parse. Measured in this proxy (tsc build,

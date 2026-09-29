@@ -34,8 +34,9 @@ const SHUTDOWN_MARGIN_SECONDS = 20
 const CAPPED_PEAK_RSS_MIB = 775.4
 const MEMORY_HEADROOM = 1.25
 /**
- * Owner decision on review M4 (#739): the request sits near the D5 peak, so a
- * busy node does not schedule the pod on memory it cannot give it under load.
+ * Owner decision on review M4 (#739): the request sits just below
+ * CAPPED_PEAK_RSS_MIB (D5 plus one visual stream), so a busy node does not
+ * schedule the pod on memory it cannot give it under load.
  */
 const MEMORY_REQUEST_MIB = 768
 
@@ -88,7 +89,7 @@ describe('grok-llm-proxy base manifest', () => {
     expect(grace).toBe(Math.ceil(worstCaseMs / 1000) + SHUTDOWN_MARGIN_SECONDS)
   })
 
-  it('T-DEP-2 caps the heap below the memory limit, keeps the limit above the D5 peak and requests 768Mi', () => {
+  it('T-DEP-2 caps the heap below the memory limit, keeps the limit 25% above the D5-plus-visual peak and requests 768Mi', () => {
     const nodeOptions = activeLines(MANIFEST).findIndex((line) => /name:\s*NODE_OPTIONS\s*$/.test(line))
     expect(nodeOptions, 'the container must set NODE_OPTIONS').toBeGreaterThanOrEqual(0)
     const heap = /--max-old-space-size=(\d+)/.exec(activeLines(MANIFEST)[nodeOptions + 1] ?? '')

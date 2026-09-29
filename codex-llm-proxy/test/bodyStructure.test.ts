@@ -19,7 +19,7 @@ import {
 } from '../src/requestLimits.js'
 import { type ProxyRuntimeDeps, createProxyApps } from '../src/server.js'
 
-// A8: JSON.parse allocates one heap object per container, so a body that fits
+// JSON.parse allocates one heap object per container, so a body that fits
 // every byte limit can still exhaust the proxy heap. Every parser scans the raw
 // body against BODY_STRUCTURE_LIMITS before JSON.parse runs. These tests pin
 // where each refusal happens (before the parse) and that a body at both the
@@ -287,7 +287,7 @@ function controlledStream() {
   return { calls, impl }
 }
 
-describe('codex proxy raw-body structure bounds (A8)', () => {
+describe('codex proxy raw-body structure bounds', () => {
   const streams: Array<ReturnType<typeof controlledStream>> = []
   const serversToClose: Array<{ close: () => Promise<void> }> = []
   const listeners: Array<ReturnType<typeof createServer>> = []
@@ -619,10 +619,50 @@ describe('codex proxy raw-body structure bounds (A8)', () => {
     const refused = await post(port, over)
     expect(refused.status).toBe(413)
     expect(warn).toHaveBeenCalledWith(
-      { event: 'codex_proxy_denied', code: 'payload_too_large' },
+      {
+        event: 'codex_proxy_denied',
+        code: 'payload_too_large',
+        type: 'body.structure.too.many.containers',
+      },
       'request denied'
     )
     expect(loggedText(warn, error, info)).not.toContain(MARKER)
+  })
+
+  it('logs the fixed refusal type of a structural 413, a byte-limit 413 and a too-deep 400', async () => {
+    const warn = vi.spyOn(logger, 'warn')
+    const denied = (): unknown[] =>
+      warn.mock.calls
+        .map(([entry]) => entry)
+        .filter(entry => (entry as { event?: unknown } | undefined)?.event === 'codex_proxy_denied')
+    const port = listen(createProxyApps(config({ maxBodyBytes: 4096 })))
+
+    const base = measure(bodyWithFiller('codex-completion-request.v2', wideNumbers(1))).structuralBytes
+    const count = Math.ceil((BODY_STRUCTURE_LIMITS.maxStructuralBytes + 1 - base) / 9) + 1
+    const dense = await post(port, bodyWithFiller('codex-completion-request.v2', wideNumbers(count)))
+    expect(dense.status).toBe(413)
+
+    const deep = await post(port, bodyWithDepth(BODY_STRUCTURE_LIMITS.maxDepth + 1))
+    expect(deep.status).toBe(400)
+
+    // The admin parser answers a declared length over its limit from the
+    // header, as body-parser's `entity.too.large`.
+    const adminPort = listen(createProxyApps(config({ maxBodyBytes: 4096 })), 'adminApp')
+    const tooLarge = await fetch(`http://127.0.0.1:${adminPort}/internal/admin/v1/codex/models`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${adminPermit()}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ filler: 'x'.repeat(4096) }),
+    })
+    expect(tooLarge.status).toBe(413)
+    expect(await tooLarge.json()).toEqual({ error: 'payload_too_large' })
+
+    // The two 413s carry the same response code; only the logged type tells
+    // them apart. The exact list is also the witness that each refusal ran.
+    expect(denied()).toEqual([
+      { event: 'codex_proxy_denied', code: 'payload_too_large', type: 'body.structure.too.dense' },
+      { event: 'codex_proxy_denied', code: 'invalid_request', type: 'body.structure.too.deep' },
+      { event: 'codex_proxy_denied', code: 'payload_too_large', type: 'entity.too.large' },
+    ])
   })
 
   it('logs only the type and status of an unmapped verify error', async () => {
@@ -644,7 +684,8 @@ describe('codex proxy raw-body structure bounds (A8)', () => {
     const error = vi.spyOn(logger, 'error')
     const fault = new Error('visual gate fault')
     const acquire = vi.spyOn(visualStreamGate, 'acquire').mockRejectedValueOnce(fault)
-    const largeParses = spyLargeParses()
+    const parse = vi.spyOn(JSON, 'parse')
+    const parsedTexts = (): unknown[] => parse.mock.calls.map(([text]) => text)
     const port = listen(createProxyApps(config({ maxBodyBytes: 4096 })))
 
     const body = bodyWithContainers('codex-completion-request.v2', 8)
@@ -656,7 +697,14 @@ describe('codex proxy raw-body structure bounds (A8)', () => {
     expect(await res.json()).toEqual({ error: 'internal_error' })
     expect(acquire).toHaveBeenCalledTimes(1)
     expect(error).toHaveBeenCalledWith({ event: 'codex_proxy_error', err: fault }, 'unhandled request error')
-    expect(largeParses()).not.toContain(padded.length)
+    expect(parsedTexts()).not.toContain(padded)
+
+    // Witness: the same body through a working gate reaches JSON.parse as this
+    // exact text, so the assertion above would see a parse had one happened.
+    const admitted = await post(port, padded)
+    expect(admitted.status).toBe(403)
+    expect(acquire).toHaveBeenCalledTimes(2)
+    expect(parsedTexts()).toContain(padded)
   })
 
   describe('a demoted visual body (declared above the ordinary cap, compact below it)', () => {

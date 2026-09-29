@@ -63,7 +63,8 @@ const SHARED_LIMIT_KEYS = [
 // SHARED_LIMIT_KEYS. Keeping it runtime-only takes one: add it here.
 // maxVisualRequestBodyBytes stays here while the subscription endpoint is
 // unmeasured for images: the fixture describes the measured upstream.
-// maxRequestContainers bounds the proxies' parse memory (A8), not the upstream.
+// maxRequestContainers bounds the proxies' parse memory (JSON.parse allocates
+// one heap object per container), not the upstream.
 const RUNTIME_ONLY_LIMIT_KEYS = [
   'maxIdLength',
   'maxNestingDepth',
@@ -141,7 +142,9 @@ function emittedTransportCodes(): { codes: Set<string>; sites: number; construct
 }
 
 // Every direct HTTP refusal in src, `reject(res, <status>, <code>)`, with its code.
-const REJECT_SITE = /reject\(res,\s*[^,()]+,\s*([^,()]+?)\s*\)/g
+// The body-parser error handler also passes `type`, the parser's fixed error
+// type, which is logged and never sent, so it is the one fourth argument allowed.
+const REJECT_SITE = /reject\(res,\s*[^,()]+,\s*([^,()]+?)\s*(?:,\s*type\s*)?\)/g
 // Refusal codes are wire strings; `Unauthorized` is the one spelled in capitals.
 const REJECT_CODE_LITERAL = /^'([A-Za-z][A-Za-z0-9_]+)'$/
 // The only computed code a refusal may carry, as its exact source text:

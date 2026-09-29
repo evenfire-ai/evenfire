@@ -8,6 +8,7 @@ import {
   VISUAL_PER_HOST_MAX_ADMITTED,
   VISUAL_STREAM_LIMITS,
   assertBoundedDeadline,
+  visualStreamGate,
 } from '../src/requestLimits.js'
 import { DEFAULT_HEARTBEAT_INTERVAL_MS, MAX_HEARTBEAT_INTERVAL_MS } from '../src/sseHeartbeat.js'
 
@@ -408,5 +409,23 @@ describe('StreamGate', () => {
     await expect(gate.acquire()).rejects.toBeInstanceOf(RequestLimitError)
     for (const release of held) release()
     for (const waiter of queued) (await waiter)()
+  })
+
+  it('builds the shared visual gate from VISUAL_STREAM_LIMITS', async () => {
+    const { maxConcurrentStreams, maxQueuedRequests } = VISUAL_STREAM_LIMITS
+    const held: Array<() => void> = []
+    for (let i = 0; i < maxConcurrentStreams; i += 1) held.push(await visualStreamGate.acquire())
+    expect(visualStreamGate.snapshot()).toEqual({ running: maxConcurrentStreams, queued: 0 })
+    // Width: every caller past maxConcurrentStreams queues instead of running.
+    const queued = Array.from({ length: maxQueuedRequests }, () => visualStreamGate.acquire())
+    expect(visualStreamGate.snapshot()).toEqual({
+      running: maxConcurrentStreams,
+      queued: maxQueuedRequests,
+    })
+    // Queue capacity: the caller after maxQueuedRequests is refused.
+    await expect(visualStreamGate.acquire()).rejects.toMatchObject({ kind: 'queue_full' })
+    for (const release of held) release()
+    for (const waiter of queued) (await waiter)()
+    expect(visualStreamGate.snapshot()).toEqual({ running: 0, queued: 0 })
   })
 })

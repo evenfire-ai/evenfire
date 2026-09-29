@@ -478,23 +478,74 @@ describe('visual stream-gate handoff', () => {
     }
 
     it('refuses a platform token whose sub is not a non-empty string with 401', async () => {
-      const port = listen(createProxyApps(config()))
+      const maxBodyBytes =
+        Buffer.byteLength(completionPayload('codex-completion-request.v1').body) + 512
+      const acquire = vi.spyOn(visualStreamGate, 'acquire')
+      const port = listen(createProxyApps(config({ maxBodyBytes, maxVisualBodyBytes: 1024 * 1024 })))
       const claims = {
         hostRefs: ['research-host'],
         workflowControlScopes: ['llm:codex:execute'],
         scope: 'workflow:approval:request',
       }
+      // Each body is large enough to take the visual gate once its token passes.
       for (const bearerToken of [
         sign(claims, 'workflow-approvals'),
         sign({ ...claims, sub: '' }, 'workflow-approvals'),
         sign({ ...claims, sub: 403 }, 'workflow-approvals'),
       ]) {
-        const res = await postBody(port, bearerToken, JSON.stringify({ probe: 1 }))
+        const res = await postBody(port, bearerToken, invalidTicketBody(maxBodyBytes))
         expect(res.status).toBe(401)
         expect(await res.json()).toEqual({ error: 'Unauthorized' })
       }
-      // Liveness witness: none of those requests reached body admission.
-      expect(visualStreamGate.snapshot()).toEqual({ running: 0, queued: 0 })
+      expect(acquire).not.toHaveBeenCalled()
+
+      // Positive control: the same body with a valid sub reaches the visual
+      // gate and then the ticket check.
+      const admitted = await postBody(
+        port,
+        sign({ ...claims, sub: 'default/research-host' }, 'workflow-approvals'),
+        invalidTicketBody(maxBodyBytes)
+      )
+      expect(admitted.status).toBe(403)
+      expect(await admitted.json()).toEqual({ error: 'ticket_invalid' })
+      expect(acquire).toHaveBeenCalledTimes(1)
+    })
+
+    it('logs an error and completes the release when the principal share is missing', async () => {
+      const maxBodyBytes =
+        Buffer.byteLength(completionPayload('codex-completion-request.v1').body) + 512
+      const acquire = vi.spyOn(visualStreamGate, 'acquire')
+      const error = vi.spyOn(logger, 'error')
+      const port = listen(createProxyApps(config({ maxBodyBytes, maxVisualBodyBytes: 1024 * 1024 })))
+
+      // Liveness witness: a normal visual request takes and releases its share
+      // without the error.
+      await expectNextVisualAdmitted(port, maxBodyBytes)
+      expect(acquire).toHaveBeenCalledTimes(1)
+      expect(error).not.toHaveBeenCalled()
+
+      // Force the defect: the share is counted at admission but never stored,
+      // so the release finds no entry for the principal.
+      const principal = JSON.stringify(['default/research-host', 'research-host'])
+      const originalSet = Map.prototype.set
+      const set = vi
+        .spyOn(Map.prototype, 'set')
+        .mockImplementation(function (this: Map<unknown, unknown>, key: unknown, value: unknown) {
+          if (key === principal) return this
+          return originalSet.call(this, key, value)
+        })
+      await expectNextVisualAdmitted(port, maxBodyBytes)
+      expect(set).toHaveBeenCalledWith(principal, 1)
+      expect(acquire).toHaveBeenCalledTimes(2)
+      expect(error).toHaveBeenCalledTimes(1)
+      expect(error).toHaveBeenCalledWith(
+        { event: 'codex_proxy_error', reason: 'principal_share_missing', sub: 'default/research-host' },
+        'visual principal share missing at release'
+      )
+      await waitFor(
+        () => visualStreamGate.snapshot().running === 0 && visualStreamGate.snapshot().queued === 0,
+        'the visual slot was not released after the missing share'
+      )
     })
 
     it('admits at most four visual entries per principal while another principal proceeds', async () => {
@@ -520,7 +571,7 @@ describe('visual stream-gate handoff', () => {
         'host A did not take both running visual slots'
       )
       const third = postBody(port, platformToken(), invalidTicketBody(maxBodyBytes))
-      postBody(port, platformToken(), invalidTicketBody(maxBodyBytes))
+      const fourth = postBody(port, platformToken(), invalidTicketBody(maxBodyBytes))
       await waitFor(
         () => visualStreamGate.snapshot().queued === 2,
         'host A did not take two queued visual entries'
@@ -561,6 +612,9 @@ describe('visual stream-gate handoff', () => {
       const thirdRes = await third
       expect(thirdRes.status).toBe(403)
       expect(await thirdRes.json()).toEqual({ error: 'ticket_invalid' })
+      const fourthRes = await fourth
+      expect(fourthRes.status).toBe(403)
+      expect(await fourthRes.json()).toEqual({ error: 'ticket_invalid' })
       const otherRes = await otherHost
       expect(otherRes.status).toBe(403)
       expect(await otherRes.json()).toEqual({ error: 'ticket_invalid' })
@@ -898,10 +952,10 @@ describe('visual stream-gate handoff', () => {
       await holder
     })
 
-    // M1 regression: after the handler takes a visual slot for the stream
-    // (hand-off), a client disconnect must not free the slot or the principal
-    // share early. The `res.close` backstop only runs while the slot is still
-    // held in selectTransportBudget; once the handler owns it the slot is freed
+    // After the handler takes a visual slot for the stream (hand-off), a
+    // client disconnect must not free the slot or the principal share early.
+    // The close handler releases only while the slot is still held in
+    // selectTransportBudget; once the handler owns it the slot is freed
     // by the handler's own `finally` when it finishes unwinding. Freeing it on
     // close after hand-off would admit another large body over the gate width
     // while the disconnected request's parsed body is still resident.
@@ -949,7 +1003,8 @@ describe('visual stream-gate handoff', () => {
       // hang holds it). Its slot and the queue place must both persist.
       abort.abort()
       expect(await holderA).toBeInstanceOf(Error)
-      // Give the close backstop time to (wrongly) fire before the assertion.
+      // Wait long enough for the close handler to run before the assertion; it
+      // must find the slot handed off and release nothing.
       await new Promise(resolve => setTimeout(resolve, 300))
       expect(visualStreamGate.snapshot()).toEqual({ running: 2, queued: 1 })
       expect(acquire).toHaveBeenCalledTimes(3)

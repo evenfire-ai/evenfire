@@ -21,13 +21,15 @@ export const DEFAULT_MAX_BODY_BYTES = CONTRACT_LIMITS.maxRequestBodyBytes + ENVE
  * buffer, the decoded string, the parsed object, the contract copy and the
  * canonical serialization). Without this bound the stream gate would let 24
  * bodies in.
- * Bodies over the ordinary cap never take this budget: they are V2 visual
- * envelopes, bounded by `visualStreamGate` instead. With eight 8 MiB streams
- * and three queued 8 MiB bodies (#739 D5) the process peaked at 511 MiB of
- * RSS with `--max-old-space-size=384` (#739 measured 509.8) and at 480-511
- * MiB with an uncapped heap. That is past the former 256Mi limit, which is why the deployment sets
- * that cap. The full load the gates admit adds one visual stream; see
- * `VISUAL_STREAM_LIMITS` for that peak and the memory limit it sets.
+ * A body whose Content-Length exceeds the ordinary cap is read under
+ * `visualStreamGate`. If it parses to a size within the ordinary cap
+ * (demotion), it takes a reservation for that size before releasing the
+ * visual slot. With eight 8 MiB streams and three queued 8 MiB bodies (#739
+ * D5) the process peaked at 511 MiB of RSS with `--max-old-space-size=384`
+ * (#739 measured 509.8) and at 480-511 MiB with an uncapped heap, which is
+ * why the deployment sets that heap cap. The full load the gates admit adds
+ * one visual stream; `VISUAL_STREAM_LIMITS` records that peak and the 1Gi
+ * memory limit it sets.
  */
 export const IN_FLIGHT_BODY_BUDGET_BODIES = 3
 

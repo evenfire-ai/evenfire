@@ -823,23 +823,41 @@ describe('grok-llm-proxy startup config', () => {
     expect(() => loadConfig({ ...base, GROK_LLM_PROXY_MAX_VISUAL_BODY_BYTES: '1024' })).toThrow(
       /^GROK_LLM_PROXY_MAX_VISUAL_BODY_BYTES must be at least 36700160,/
     )
-    // Witness: the ceiling itself and any larger value load.
+    // Witness: the ceiling itself loads.
     expect(
       loadConfig({
         ...base,
         GROK_LLM_PROXY_MAX_VISUAL_BODY_BYTES: String(LIMITS.maxVisualRequestBodyBytes),
       }).maxVisualBodyBytes
     ).toBe(LIMITS.maxVisualRequestBodyBytes)
-    expect(
+  })
+
+  // The 1Gi memory limit was measured with one visual stream at the contract
+  // ceiling. A larger visual limit would admit bodies that measurement never
+  // covered, so the proxy refuses to start with one.
+  it('refuses a visual body limit above the contract visual ceiling', () => {
+    expect(() =>
       loadConfig({
         ...base,
         GROK_LLM_PROXY_MAX_VISUAL_BODY_BYTES: String(LIMITS.maxVisualRequestBodyBytes + 1),
+      })
+    ).toThrow(
+      `GROK_LLM_PROXY_MAX_VISUAL_BODY_BYTES must be at most ${LIMITS.maxVisualRequestBodyBytes}, the contract maxVisualRequestBodyBytes`
+    )
+    expect(() =>
+      loadConfig({ ...base, GROK_LLM_PROXY_MAX_VISUAL_BODY_BYTES: String(64 * 1024 * 1024) })
+    ).toThrow(/^GROK_LLM_PROXY_MAX_VISUAL_BODY_BYTES must be at most 36700160,/)
+    // Witness: the ceiling itself loads.
+    expect(
+      loadConfig({
+        ...base,
+        GROK_LLM_PROXY_MAX_VISUAL_BODY_BYTES: String(LIMITS.maxVisualRequestBodyBytes),
       }).maxVisualBodyBytes
-    ).toBe(LIMITS.maxVisualRequestBodyBytes + 1)
+    ).toBe(LIMITS.maxVisualRequestBodyBytes)
   })
 
-  // Y2 — with an equal budget every visual envelope would also fit the
-  // ordinary parser's cap, so the visual gate's separate admission and memory
+  // With an equal budget every visual envelope would also fit the ordinary
+  // parser's cap, so the visual gate's separate admission and memory
   // accounting would never engage.
   it('refuses a visual body limit less than or equal to the ordinary body limit', () => {
     const equal = LIMITS.maxVisualRequestBodyBytes
@@ -861,14 +879,16 @@ describe('grok-llm-proxy startup config', () => {
     ).toThrow(
       'GROK_LLM_PROXY_MAX_VISUAL_BODY_BYTES must be greater than GROK_LLM_PROXY_MAX_BODY_BYTES'
     )
-    // Liveness witness: one byte above the ordinary limit loads.
+    // Liveness witness: a visual limit one byte above the ordinary limit loads.
+    // The visual limit is pinned to the contract ceiling, so the ordinary limit
+    // moves instead.
     expect(
       loadConfig({
         ...base,
-        GROK_LLM_PROXY_MAX_BODY_BYTES: String(equal),
-        GROK_LLM_PROXY_MAX_VISUAL_BODY_BYTES: String(equal + 1),
+        GROK_LLM_PROXY_MAX_BODY_BYTES: String(equal - 1),
+        GROK_LLM_PROXY_MAX_VISUAL_BODY_BYTES: String(equal),
       }).maxVisualBodyBytes
-    ).toBe(equal + 1)
+    ).toBe(equal)
   })
 
   it('T-R2-6c-grok does not refuse a request at the contract cap with a real ticket as payload_too_large', async () => {
@@ -2229,7 +2249,7 @@ describe('grok-llm-proxy ticket-aware stream-gate wait (#739 D1-bis)', () => {
  * copies of it are alive: reading, parsing, hashing and forwarding. That phase
  * ends when the upstream fetch resolves, because the whole request body has
  * been written by then. The reservation is released there instead of when the
- * SSE stream closes; the response's `close` event stays the backstop for every
+ * SSE stream closes; the response's `close` event still releases it on every
  * path that never reaches the upstream.
  */
 describe('grok-llm-proxy body budget release on upstream acceptance (#739 D2)', () => {

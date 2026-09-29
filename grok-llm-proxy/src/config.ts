@@ -93,7 +93,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): GrokLlmProxyCo
       `GROK_LLM_PROXY_MAX_VISUAL_BODY_BYTES must be at least ${LIMITS.maxVisualRequestBodyBytes}, the contract maxVisualRequestBodyBytes`
     )
   }
-  // Y2 — an equal or lower budget would collapse visual admission into the
+  // The 1Gi memory limit was measured with one visual stream at the contract
+  // ceiling only (see VISUAL_STREAM_LIMITS). A larger value would admit bodies
+  // that measurement never covered.
+  if (maxVisualBodyBytes > LIMITS.maxVisualRequestBodyBytes) {
+    throw new Error(
+      `GROK_LLM_PROXY_MAX_VISUAL_BODY_BYTES must be at most ${LIMITS.maxVisualRequestBodyBytes}, the contract maxVisualRequestBodyBytes`
+    )
+  }
+  // An equal or lower budget would collapse visual admission into the
   // ordinary parser's cap, so the visual gate's separate accounting would
   // never engage.
   if (maxVisualBodyBytes <= maxBodyBytes) {

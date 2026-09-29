@@ -30,7 +30,7 @@ export function verifyPlatformJwt(
     if (!Array.isArray(claims.hostRefs) || !Array.isArray(claims.workflowControlScopes)) {
       return null
     }
-    // A11.7 V3: `sub` becomes part of the per-principal visual admission key,
+    // `sub` becomes part of the per-principal visual admission key,
     // so a missing, empty or non-string sub must fail verification instead of
     // collapsing every such caller onto the literal principal "undefined".
     const sub = claims.sub

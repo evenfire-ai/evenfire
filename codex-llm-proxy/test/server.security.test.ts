@@ -7,11 +7,14 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   ENVELOPE_ALLOWANCE_BYTES as CONTRACT_ENVELOPE_ALLOWANCE_BYTES,
   LIMITS,
+  hashCodexCompletionRequest,
   hashCodexCompletionRequestV1,
+  parseCodexCompletionRequest,
   parseCodexCompletionRequestV1,
 } from '@clerum/llm-provider-attempt-contract'
 import { verifyAdminPermit } from '../src/auth/adminPermitVerifier.js'
 import { verifyExecutionTicket } from '../src/auth/executionTicketVerifier.js'
+import { CodexTransportError } from '../src/codexTransport.js'
 import { loadConfig, type CodexLlmProxyConfig } from '../src/config.js'
 import {
   ControlApiClient,
@@ -27,6 +30,7 @@ import {
   ENVELOPE_ALLOWANCE_BYTES,
   RequestLimitError,
   STREAM_LIMITS,
+  VISUAL_STREAM_LIMITS,
   streamGate,
   visualStreamGate,
 } from '../src/requestLimits.js'
@@ -269,6 +273,48 @@ describe('codex-llm-proxy security surface', () => {
     expect(visualStreamGate.snapshot()).toEqual({ running: 0, queued: 0 })
     acquire.mockRestore()
   }, 30_000)
+
+  it('answers a transport payload_too_large with HTTP 413 before any SSE byte', async () => {
+    const raw = {
+      schemaVersion: 'codex-completion-request.v1',
+      requestId: 'req-payload-too-large',
+      idempotencyKey: 'idem-payload-too-large',
+      provider: 'codex-subscription',
+      model: 'gpt-5.1',
+      messages: [{ role: 'user', content: 'hello' }],
+    }
+    const parsed = parseCodexCompletionRequestV1(raw)
+    if (!parsed.ok) throw new Error(parsed.message)
+    const requestHash = hashCodexCompletionRequestV1(parsed.value)
+    const executionTicket = sign(
+      {
+        jti: '12121212-1212-4121-8121-121212121212',
+        typ: 'codex-execution-ticket',
+        hostRef: 'research-host',
+        model: 'gpt-5.1',
+        requestHash,
+        providerAttemptId: 'att-payload-too-large',
+      },
+      'codex-llm-proxy'
+    )
+    let streamCalls = 0
+    const { runtimeApp, probeApp } = createProxyApps(config({ maxBodyBytes: 65_536 }), {
+      streamCompletion: async () => {
+        streamCalls += 1
+        throw new CodexTransportError('payload_too_large', 'request exceeds maxVisualRequestBodyBytes')
+      },
+    })
+    const res = await request(runtimeApp)
+      .post('/internal/runtime/v1/codex/completions')
+      .set('Authorization', `Bearer ${platformToken()}`)
+      .send({ executionTicket, requestHash, request: raw })
+    // Witness: the request reached the transport.
+    expect(streamCalls).toBe(1)
+    expect(res.status).toBe(413)
+    expect(res.body).toEqual({ error: 'payload_too_large' })
+    const metricsText = (await request(probeApp).get('/metrics')).text
+    expect(metricsText).toMatch(/^codex_proxy_attempt_failures_total\{code="payload_too_large"\} 1$/m)
+  })
 
   it('does not let a V2 declaration raise the non-image budget to 24 MiB', async () => {
     const { runtimeApp } = createProxyApps(config({ maxBodyBytes: DEFAULT_MAX_BODY_BYTES }))
@@ -589,8 +635,39 @@ describe('codex-llm-proxy security surface', () => {
     expect(loadConfig(required).maxVisualBodyBytes).toBe(24 * 1024 * 1024)
   })
 
-  // Y2 — with an equal budget every visual envelope would also fit the
-  // ordinary parser's cap, so the visual gate's separate admission and memory
+  // The 1Gi memory limit was measured with two visual streams at the contract
+  // ceiling. A larger visual limit would admit bodies that measurement never
+  // covered, so the proxy refuses to start with one.
+  it('refuses a visual body limit above the contract visual ceiling', () => {
+    const required = {
+      CODEX_LLM_PROXY_JWT_PUBLIC_KEY: publicKey,
+      CODEX_LLM_PROXY_CONTROL_API_URL:
+        'http://control-api-rpc-gateway.control-plane.svc.cluster.local:8090/api/v1',
+      CODEX_LLM_PROXY_CONTROL_API_TOKEN: 'dev-codex-llm-proxy-token',
+    }
+    expect(LIMITS.maxVisualRequestBodyBytes).toBe(25_165_824)
+    expect(() =>
+      loadConfig({
+        ...required,
+        CODEX_LLM_PROXY_MAX_VISUAL_BODY_BYTES: String(LIMITS.maxVisualRequestBodyBytes + 1),
+      })
+    ).toThrow(
+      `CODEX_LLM_PROXY_MAX_VISUAL_BODY_BYTES must be at most ${LIMITS.maxVisualRequestBodyBytes}, the contract maxVisualRequestBodyBytes`
+    )
+    expect(() =>
+      loadConfig({ ...required, CODEX_LLM_PROXY_MAX_VISUAL_BODY_BYTES: String(64 * 1024 * 1024) })
+    ).toThrow(/^CODEX_LLM_PROXY_MAX_VISUAL_BODY_BYTES must be at most 25165824,/)
+    // Witness: the ceiling itself loads.
+    expect(
+      loadConfig({
+        ...required,
+        CODEX_LLM_PROXY_MAX_VISUAL_BODY_BYTES: String(LIMITS.maxVisualRequestBodyBytes),
+      }).maxVisualBodyBytes
+    ).toBe(LIMITS.maxVisualRequestBodyBytes)
+  })
+
+  // With an equal budget every visual envelope would also fit the ordinary
+  // parser's cap, so the visual gate's separate admission and memory
   // accounting would never engage.
   it('refuses a visual body limit less than or equal to the ordinary body limit', () => {
     const required = {
@@ -618,14 +695,16 @@ describe('codex-llm-proxy security surface', () => {
     ).toThrow(
       'CODEX_LLM_PROXY_MAX_VISUAL_BODY_BYTES must be greater than CODEX_LLM_PROXY_MAX_BODY_BYTES'
     )
-    // Liveness witness: one byte above the ordinary limit loads.
+    // Liveness witness: a visual limit one byte above the ordinary limit loads.
+    // The visual limit is pinned to the contract ceiling, so the ordinary limit
+    // moves instead.
     expect(
       loadConfig({
         ...required,
-        CODEX_LLM_PROXY_MAX_BODY_BYTES: String(equal),
-        CODEX_LLM_PROXY_MAX_VISUAL_BODY_BYTES: String(equal + 1),
+        CODEX_LLM_PROXY_MAX_BODY_BYTES: String(equal - 1),
+        CODEX_LLM_PROXY_MAX_VISUAL_BODY_BYTES: String(equal),
       }).maxVisualBodyBytes
-    ).toBe(equal + 1)
+    ).toBe(equal)
   })
 })
 
@@ -1939,6 +2018,89 @@ describe('codex-llm-proxy ticket-aware stream-gate wait (#739 D1-bis)', () => {
       await releaseAndDrain(slots)
     }
   }, 30_000)
+
+  /** A V2 envelope past `maxBodyBytes`, so it takes the visual gate. */
+  function visualEnvelope(providerAttemptId: string, ticketLifeMs: number): Record<string, unknown> {
+    const raw: Record<string, unknown> = {
+      schemaVersion: 'codex-completion-request.v2',
+      requestId: `req-${providerAttemptId}`,
+      idempotencyKey: `idem-${providerAttemptId}`,
+      provider: 'codex-subscription',
+      model: 'gpt-5.1',
+      messages: [{ role: 'user', content: 'x'.repeat(80_000) }],
+    }
+    const parsed = parseCodexCompletionRequest(raw)
+    if (!parsed.ok) throw new Error(parsed.message)
+    const requestHash = hashCodexCompletionRequest(parsed.value)
+    const executionTicket = jwt.sign(
+      {
+        jti: '78787878-7878-4787-8787-787878787878',
+        typ: 'codex-execution-ticket',
+        hostRef: 'research-host',
+        model: 'gpt-5.1',
+        requestHash,
+        providerAttemptId,
+        exp: (Date.now() + ticketLifeMs) / 1000,
+      },
+      privateKey,
+      { algorithm: 'RS256', issuer: 'control-api', audience: 'codex-llm-proxy' }
+    )
+    return { executionTicket, requestHash, request: raw }
+  }
+
+  // R17-2 on the visual path: the visual gate is taken before the body is
+  // parsed, so the ticket is read only once a slot frees. A ticket that died
+  // during that wait reaches the ticket gate expired, and the answer is the
+  // retryable ticket_expired, not the stream gate's ticket-life refusal.
+  it('T-R17-2-visual answers ticket_expired when the ticket died while the body waited at the visual gate', async () => {
+    fakeClock()
+    const warn = vi.spyOn(logger, 'warn')
+    const held: Array<() => void> = []
+    try {
+      for (let i = 0; i < VISUAL_STREAM_LIMITS.maxConcurrentStreams; i += 1) {
+        held.push(await visualStreamGate.acquire())
+      }
+      const control = countingClient('granted')
+      const apps = createProxyApps(config({ maxBodyBytes: 65_536 }), {
+        controlApiClient: control.client,
+        fetchFn: upstream,
+        lookup,
+      })
+      const ticketLifeMs = 20_000
+      const body = visualEnvelope('att-visual-expired', ticketLifeMs)
+      expect(Buffer.byteLength(JSON.stringify(body))).toBeGreaterThan(65_536)
+      const reply = request(apps.runtimeApp)
+        .post(COMPLETIONS)
+        .set('Authorization', `Bearer ${platformToken()}`)
+        .send(body)
+        .then(res => res)
+      await until(() => visualStreamGate.snapshot().queued === 1, 'the body queueing at the visual gate')
+
+      await vi.advanceTimersByTimeAsync(ticketLifeMs)
+      // Witness: the body was still waiting for a slot at the ticket's expiry.
+      expect(await withinReal(reply, 100)).toBeUndefined()
+      held.pop()?.()
+      // One stream-gate poll interval.
+      await vi.advanceTimersByTimeAsync(10)
+      const res = await withinReal(reply, 2_000)
+      expect(res?.status).toBe(403)
+      expect(res?.body).toEqual({ error: 'ticket_expired' })
+      expect(control.redeems()).toBe(0)
+
+      const events = warn.mock.calls.map(call => call[0] as unknown as Record<string, unknown>)
+      expect(events.filter(entry => entry?.event === 'codex_proxy_denied')).toEqual([
+        { event: 'codex_proxy_denied', code: 'ticket_expired' },
+      ])
+      expect(events.filter(entry => entry?.event === 'codex_proxy_admission_refused')).toEqual([])
+      // The ticket refusal released the visual slot the body was parsed under.
+      expect(visualStreamGate.snapshot()).toEqual({ running: held.length, queued: 0 })
+      expect(streamGate.snapshot()).toEqual({ running: 0, queued: 0 })
+    } finally {
+      for (const release of held.splice(0)) release()
+      vi.useRealTimers()
+      warn.mockRestore()
+    }
+  }, 30_000)
 })
 
 /**
@@ -1946,7 +2108,7 @@ describe('codex-llm-proxy ticket-aware stream-gate wait (#739 D1-bis)', () => {
  * copies of it are alive: reading, parsing, hashing and forwarding. That phase
  * ends when the upstream fetch resolves, because the whole request body has
  * been written by then. The reservation is released there instead of when the
- * SSE stream closes; the response's `close` event stays the backstop for every
+ * SSE stream closes; the response's `close` event still releases it on every
  * path that never reaches the upstream.
  */
 describe('codex-llm-proxy body budget release on upstream acceptance (#739 D2)', () => {
