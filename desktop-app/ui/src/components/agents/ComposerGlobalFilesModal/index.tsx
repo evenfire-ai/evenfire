@@ -17,8 +17,18 @@ function referenceId(drive: string, resourceId: string): string {
   return `global-file:${drive}:${resourceId}`
 }
 
-export function ComposerGlobalFilesModal({ onAdd, onClose }: ComposerGlobalFilesModalProps) {
+export function ComposerGlobalFilesModal({
+  attachedIds,
+  onAdd,
+  onClose,
+}: ComposerGlobalFilesModalProps) {
   const ctrl = useGfsBrowserController()
+  // The limit is per message, so files attached in an earlier open of this
+  // picker use up part of it. Without this each open allowed a fresh
+  // FILE_REFERENCE_MAX_COUNT and the send was refused after the fact.
+  const attached = useMemo(() => new Set(attachedIds), [attachedIds])
+  const alreadyAttached = attached.size
+  const capacity = Math.max(0, FILE_REFERENCE_MAX_COUNT - alreadyAttached)
   const closeButtonRef = useRef<HTMLButtonElement | null>(null)
   const [selected, setSelected] = useState<ComposerGlobalFileSelection>({})
 
@@ -31,17 +41,21 @@ export function ComposerGlobalFilesModal({ onAdd, onClose }: ComposerGlobalFiles
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [onClose])
 
-  const toggleFile = useCallback((file: ComposerGlobalFileReference) => {
-    setSelected(previous => {
-      if (previous[file.id]) {
-        const next = { ...previous }
-        delete next[file.id]
-        return next
-      }
-      if (Object.keys(previous).length >= FILE_REFERENCE_MAX_COUNT) return previous
-      return { ...previous, [file.id]: file }
-    })
-  }, [])
+  const toggleFile = useCallback(
+    (file: ComposerGlobalFileReference) => {
+      setSelected(previous => {
+        if (attached.has(file.id)) return previous
+        if (previous[file.id]) {
+          const next = { ...previous }
+          delete next[file.id]
+          return next
+        }
+        if (Object.keys(previous).length >= capacity) return previous
+        return { ...previous, [file.id]: file }
+      })
+    },
+    [attached, capacity]
+  )
 
   const selectedFiles = useMemo(() => Object.values(selected), [selected])
   const entries = ctrl.current ? ctrl.items : ctrl.accessibleResources
@@ -221,7 +235,8 @@ export function ComposerGlobalFilesModal({ onAdd, onClose }: ComposerGlobalFiles
                   version: entry.version,
                   bytes: entry.bytes,
                 }
-                const checked = Boolean(selected[id])
+                const isAttached = attached.has(id)
+                const checked = isAttached || Boolean(selected[id])
                 return (
                   <label
                     className={`composer-global-files-row composer-global-files-row--file${checked ? ' composer-global-files-row--selected' : ''}`}
@@ -231,7 +246,7 @@ export function ComposerGlobalFilesModal({ onAdd, onClose }: ComposerGlobalFiles
                       className="composer-global-files-checkbox"
                       type="checkbox"
                       checked={checked}
-                      disabled={!checked && selectedFiles.length >= FILE_REFERENCE_MAX_COUNT}
+                      disabled={isAttached || (!checked && selectedFiles.length >= capacity)}
                       onChange={() => toggleFile(file)}
                     />
                     <span className="composer-global-files-entry-icon" aria-hidden="true">
@@ -242,7 +257,7 @@ export function ComposerGlobalFilesModal({ onAdd, onClose }: ComposerGlobalFiles
                       <small>{formatSharedFileSize(entry.bytes)}</small>
                     </span>
                     <span className="composer-global-files-selected-label">
-                      {checked ? 'Selected' : 'Select'}
+                      {isAttached ? 'Attached' : checked ? 'Selected' : 'Select'}
                     </span>
                   </label>
                 )
@@ -292,9 +307,10 @@ export function ComposerGlobalFilesModal({ onAdd, onClose }: ComposerGlobalFiles
             <strong>{selectedFiles.length}</strong>
             <span>{selectedFiles.length === 1 ? 'file selected' : 'files selected'}</span>
           </span>
-          {selectedFiles.length >= FILE_REFERENCE_MAX_COUNT ? (
-            <span className="composer-global-files-selection-summary">
-              Up to {FILE_REFERENCE_MAX_COUNT} files per message.
+          {selectedFiles.length >= capacity ? (
+            <span className="composer-global-files-selection-summary" role="status">
+              Up to {FILE_REFERENCE_MAX_COUNT} files per message
+              {alreadyAttached > 0 ? ` (${alreadyAttached} already attached)` : ''}.
             </span>
           ) : null}
           <span className="action-row">

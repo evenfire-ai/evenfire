@@ -43,10 +43,14 @@ function baseController() {
   }
 }
 
-function renderModal() {
+function attachedElsewhere(count: number): string[] {
+  return Array.from({ length: count }, (_, index) => `global-file:main:elsewhere-${index}`)
+}
+
+function renderModal(attachedIds: string[] = []) {
   const onAdd = vi.fn()
   const onClose = vi.fn()
-  render(<ComposerGlobalFilesModal onAdd={onAdd} onClose={onClose} />)
+  render(<ComposerGlobalFilesModal attachedIds={attachedIds} onAdd={onAdd} onClose={onClose} />)
   return { onAdd, onClose }
 }
 
@@ -113,7 +117,7 @@ describe('ComposerGlobalFilesModal', () => {
 
     renderModal()
 
-    const boxes = screen.getAllByRole('checkbox')
+    const boxes = screen.getAllByRole<HTMLInputElement>('checkbox')
     for (const box of boxes) act(() => fireEvent.click(box))
     expect(boxes.slice(0, 10).every(box => box.checked)).toBe(true)
     // The eleventh stayed unselectable and the footer names the limit.
@@ -122,6 +126,74 @@ describe('ComposerGlobalFilesModal', () => {
     expect(screen.getByText('10').tagName).toBe('STRONG')
     expect(screen.getByText('files selected')).toBeTruthy()
     expect(screen.getByText('Up to 10 files per message.')).toBeTruthy()
+  })
+
+  it('counts files already in the composer against the ten-file message limit', () => {
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      accessibleResources: Array.from({ length: 6 }, (_, index) => ({
+        resourceId: `file-${index}`,
+        rid: `file-${index}`,
+        gfsUri: `gfs://main/file-${index}`,
+        drive: 'main',
+        parentResourceId: null,
+        name: `file-${index}.txt`,
+        kind: 'file',
+        path: `/file-${index}.txt`,
+        version: 1,
+        bytes: 12,
+      })),
+    })
+
+    const { onAdd } = renderModal(attachedElsewhere(7))
+
+    const boxes = screen.getAllByRole<HTMLInputElement>('checkbox')
+    for (const box of boxes) act(() => fireEvent.click(box))
+    // Liveness witness: the picker did select, so the stop below is the limit
+    // and not a modal that ignores clicks.
+    expect(boxes.slice(0, 3).every(box => box.checked)).toBe(true)
+    expect(boxes.slice(3).every(box => !box.checked && box.disabled)).toBe(true)
+    expect(screen.getByText('Up to 10 files per message (7 already attached).')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Attach 3' }))
+    expect(onAdd).toHaveBeenCalledTimes(1)
+    expect(onAdd.mock.calls[0]![0]).toHaveLength(3)
+    // The limit summary is announced when it appears.
+    expect(screen.getByRole('status').textContent).toContain('7 already attached')
+  })
+
+  it('shows a file already in the composer as attached and does not count it twice', () => {
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      accessibleResources: Array.from({ length: 2 }, (_, index) => ({
+        resourceId: `file-${index}`,
+        rid: `file-${index}`,
+        gfsUri: `gfs://main/file-${index}`,
+        drive: 'main',
+        parentResourceId: null,
+        name: `file-${index}.txt`,
+        kind: 'file',
+        path: `/file-${index}.txt`,
+        version: 1,
+        bytes: 12,
+      })),
+    })
+
+    // Nine attached, one of them file-0: one slot is left for file-1.
+    const { onAdd } = renderModal([...attachedElsewhere(8), 'global-file:main:file-0'])
+
+    const [attachedBox, freeBox] = screen.getAllByRole<HTMLInputElement>('checkbox')
+    expect(attachedBox!.checked).toBe(true)
+    expect(attachedBox!.disabled).toBe(true)
+    expect(screen.getByText('Attached')).toBeTruthy()
+    // Liveness witness: the free row is selectable, so the disabled state above
+    // belongs to the attached row and not to a modal that blocks every click.
+    expect(freeBox!.disabled).toBe(false)
+    act(() => fireEvent.click(freeBox!))
+    expect(freeBox!.checked).toBe(true)
+    fireEvent.click(screen.getByRole('button', { name: 'Attach 1' }))
+    expect(onAdd.mock.calls[0]![0].map((file: { id: string }) => file.id)).toEqual([
+      'global-file:main:file-1',
+    ])
   })
 
   it('answers a rate-limited discovery with a retry, not "No shared files yet"', async () => {

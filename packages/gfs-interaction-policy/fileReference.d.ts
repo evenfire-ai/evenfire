@@ -44,16 +44,18 @@ export type FileReferenceParseResult =
 export declare const FILE_REFERENCE_SCHEMA_VERSION: 1
 
 /**
- * The maximum number of file references one message may carry. Must match the
- * mcp-host default for CLERUM_FILE_REFERENCE_MAX_COUNT.
+ * The maximum number of file references one message may carry. mcp-host
+ * admission and the Desktop composer both enforce this single export, so the
+ * two cannot disagree.
  */
 export declare const FILE_REFERENCE_MAX_COUNT: 10
 
 export declare function parseFileReferenceV1(input: unknown): FileReferenceParseResult
 
 /**
- * A JSON string literal of `value` with every line-breaking or invisible
- * character escaped and angle brackets neutralized, for text a model reads.
+ * A JSON string literal of `value` in which every control, format, line or
+ * paragraph separator and default-ignorable character is escaped and angle
+ * brackets are neutralized, for text a model reads.
  */
 export declare function quotePromptValue(value: string): string
 

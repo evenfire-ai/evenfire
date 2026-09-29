@@ -556,14 +556,14 @@ export class SqliteConversationStore implements ConversationStore {
       }
       const approval =
         conv.pending_approval ?? reconstructPendingApproval(row.approval as PendingApprovalRow)
-      const sourceMessage = row.approval.source_message
-        ? (JSON.parse(row.approval.source_message) as Record<string, unknown>)
-        : undefined
       out.push({
         sessionKey,
         approval,
         taskId: row.approval.task_id,
-        sourceMessage,
+        // One parse of the column, typed, in reconstructPendingApproval. The
+        // cold-start loader hands this value to the resumed task, so it is the
+        // path the file version pins take after a restart.
+        sourceMessage: approval.sourceMessage,
         // expires_at is REAL (epoch seconds); convert to ms so the
         // cold-start loader's TTL compare against `Date.now()` is a direct
         // numeric compare.

@@ -39,20 +39,25 @@ const SHA256_HEX = /^[0-9a-f]{64}$/
 const GFS_RID = /^[0-9a-f]{32}$/
 const FILE_REFERENCE_MAX_COUNT = 10
 
-// Characters JSON.stringify leaves raw that still break or hide model-visible
-// text: DEL, C1 controls, soft hyphen and the Mongolian vowel separator,
-// Hangul fillers, zero-width characters, the Unicode line and paragraph
-// separators, bidi controls, invisible joiners and math operators, variation
-// selectors, the BOM and the Unicode tag block. Angle brackets are escaped too,
-// so a quoted value can never contribute a closing turn-context tag.
-const UNSAFE_AFTER_JSON =
-  /[<>\u{7f}\u{80}-\u{9f}\u{ad}\u{61c}\u{115f}\u{1160}\u{180e}\u{200b}-\u{200f}\u{2028}\u{2029}\u{202a}-\u{202e}\u{2060}-\u{2064}\u{2066}-\u{2069}\u{3164}\u{fe00}-\u{fe0f}\u{feff}\u{e0000}-\u{e007f}]/gu
+// Code points JSON.stringify leaves raw that still break or hide model-visible
+// text, selected by Unicode property so the set follows the engine's Unicode
+// version instead of a hand-kept range list: control characters (Cc: DEL and
+// C1), format characters (Cf: zero-width, bidi, joiners, tag characters,
+// interlinear marks), the line and paragraph separators (Zl, Zp) and every
+// Default_Ignorable_Code_Point (variation selectors, Hangul fillers, the
+// combining grapheme joiner, the Mongolian free variation selectors, and the
+// unassigned code points reserved as ignorable). Angle brackets are escaped too,
+// so a quoted value can never contribute a closing turn-context tag. Non-ASCII
+// spaces (Zs, such as U+00A0), private-use code points and other unassigned code
+// points occupy visible width or a replacement glyph and stay raw.
+const UNSAFE_AFTER_JSON = /[<>\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}]/gu
 
 /**
  * Quotes a value for text a model reads (a file name, a path, a label). The
- * result is a JSON string literal with every line-breaking or invisible
- * character escaped and angle brackets neutralized, so the value stays on its
- * line and inside its quotes and cannot close the surrounding turn-context tag.
+ * result is a JSON string literal in which every control, format, line or
+ * paragraph separator and default-ignorable character is escaped, and angle
+ * brackets are neutralized, so the value stays on its line and inside its quotes
+ * and cannot close the surrounding turn-context tag.
  */
 function quotePromptValue(value) {
   if (typeof value !== 'string') throw new TypeError('quotePromptValue requires a string.')

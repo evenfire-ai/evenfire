@@ -1,7 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Request, Response } from 'express'
 import { createHash } from 'node:crypto'
-import { buildGfsFileReference, classifyBytes } from '@clerum/gfs-interaction-policy'
+import {
+  FILE_REFERENCE_MAX_COUNT,
+  buildGfsFileReference,
+  classifyBytes,
+} from '@clerum/gfs-interaction-policy'
 import { type IncomingAdmissionDeps, createIncomingAdmission } from '../../agent/incomingAdmission'
 import { config } from '../../config'
 import { ConversationError, ConversationErrorCode } from '../../core/errors'
@@ -484,8 +488,8 @@ describe('handleMessageRoute — structured file references (#666)', () => {
     })
   })
 
-  it('accepts exactly the configured maximum', async () => {
-    const refs = Array.from({ length: config.fileReferenceMaxCount }, (_, i) => reference(i + 1))
+  it('accepts exactly the contract maximum', async () => {
+    const refs = Array.from({ length: FILE_REFERENCE_MAX_COUNT }, (_, i) => reference(i + 1))
     const { dispatch, handlers } = route()
     const captured = makeRes()
     await handleMessageRoute(request(refs), captured.res, handlers)
@@ -496,7 +500,7 @@ describe('handleMessageRoute — structured file references (#666)', () => {
   it.each([
     [
       'more references than the limit',
-      () => Array.from({ length: config.fileReferenceMaxCount + 1 }, (_, i) => reference(i + 1)),
+      () => Array.from({ length: FILE_REFERENCE_MAX_COUNT + 1 }, (_, i) => reference(i + 1)),
       'FILE_REFERENCE_INVALID',
     ],
     ['a non-list value', () => ({ id: 'x' }), 'FILE_REFERENCE_INVALID'],

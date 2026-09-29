@@ -6,8 +6,9 @@ function normalizeComposerReferenceName(value: string): string {
 }
 
 /**
- * Each value is a JSON string literal with line-breaking and invisible
- * characters escaped, so a name cannot add a line or an entry to this section.
+ * Each value is a JSON string literal in which control, format, separator and
+ * default-ignorable characters are escaped, so a name cannot add a line or an
+ * entry to this section.
  * parseChatMessageDisplay reads the same form back.
  */
 function quotedList(values: string[]): string {

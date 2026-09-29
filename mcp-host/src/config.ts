@@ -1,6 +1,7 @@
 /**
  * Configuration settings loaded from environment variables.
  */
+import { FILE_REFERENCE_MAX_COUNT } from '@clerum/gfs-interaction-policy'
 import type { ApprovalConfig } from './core/extensions/approvalTypes'
 import type { GuardrailsConfig } from './core/guardrails/config'
 import { NativeToolConfig } from './core/interfaces'
@@ -236,7 +237,11 @@ export interface Config {
   attachmentFileMaxBytes: number
   /** Bytes one `clerum__attachment_read` call may return (issue #666). */
   attachmentTextReadMaxBytes: number
-  /** Structured file references one incoming message may carry (issue #666). */
+  /**
+   * Structured file references one incoming message may carry (issue #666).
+   * The shared contract constant the Desktop composer also enforces; not
+   * operator-tunable, because the Desktop cannot observe a Host-only value.
+   */
   fileReferenceMaxCount: number
   activityBufferSize: number
   activityMaxEventBytes: number
@@ -974,7 +979,7 @@ export const config: Config = {
   attachmentMaxBytes: parseInt(getEnv('CLERUM_ATTACHMENT_MAX_BYTES', '52428800')!, 10),
   attachmentFileMaxBytes: getExecutionLimit('CLERUM_ATTACHMENT_FILE_MAX_BYTES', 3_145_728),
   attachmentTextReadMaxBytes,
-  fileReferenceMaxCount: getExecutionLimit('CLERUM_FILE_REFERENCE_MAX_COUNT', 10),
+  fileReferenceMaxCount: FILE_REFERENCE_MAX_COUNT,
   activityBufferSize: parseInt(getEnv('MCP_HOST_ACTIVITY_BUFFER_SIZE', '1000')!, 10),
   activityMaxEventBytes: parseInt(getEnv('MCP_HOST_ACTIVITY_MAX_EVENT_BYTES', '2048')!, 10),
 

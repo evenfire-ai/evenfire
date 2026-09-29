@@ -279,6 +279,53 @@ describe('quotePromptValue', () => {
     assert.equal(JSON.parse(quoted), name)
   })
 
+  it('leaves no control, format, separator or default-ignorable code point raw', () => {
+    // The specification is the Unicode property set, not a range list: walk
+    // every scalar value so a code point the engine's Unicode version adds
+    // later is caught too. The matched count is a liveness witness (a scan
+    // that matched nothing would pass the negative assertion below vacuously)
+    // and is a floor, never an equality, because it grows with Unicode.
+    const hidden = /[<>\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}]/u
+    let scanned = 0
+    let matched = 0
+    for (let codePoint = 0; codePoint <= 0x10ffff; codePoint += 1) {
+      if (codePoint >= 0xd800 && codePoint <= 0xdfff) continue
+      const char = String.fromCodePoint(codePoint)
+      const quoted = quotePromptValue(`a${char}b`)
+      scanned += 1
+      if (hidden.test(char)) {
+        matched += 1
+        assert.equal(
+          hidden.test(quoted.slice(1, -1)),
+          false,
+          `U+${codePoint.toString(16).toUpperCase()} survived raw`
+        )
+      }
+      assert.equal(JSON.parse(quoted), `a${char}b`)
+    }
+    assert.equal(scanned, 0x110000 - 0x800)
+    assert.ok(matched > 1000, `only ${matched} code points matched the hidden set`)
+    // Negative control: text outside the hidden set stays raw. The last space
+    // in the sample is U+00A0 (Zs), which the quoting leaves as it is.
+    assert.equal(quotePromptValue('a é 日 😀  '), '"a é 日 😀  "')
+  })
+
+  it('escapes named format and ignorable code points beyond the ASCII and C1 controls', () => {
+    const cases = [
+      [0x034f, '\\u034f'],
+      [0x206a, '\\u206a'],
+      [0x206f, '\\u206f'],
+      [0xfff9, '\\ufff9'],
+      [0xfffb, '\\ufffb'],
+      [0x0600, '\\u0600'],
+      [0xe0100, '\\udb40\\udd00'],
+      [0xe01ef, '\\udb40\\uddef'],
+    ]
+    for (const [codePoint, escaped] of cases) {
+      assert.equal(quotePromptValue(`a${String.fromCodePoint(codePoint)}b`), `"a${escaped}b"`)
+    }
+  })
+
   it('bounds the client input a refusal message echoes', () => {
     const longValue = 'x'.repeat(200)
     const version = parseFileReferenceV1({ schemaVersion: longValue })

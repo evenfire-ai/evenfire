@@ -184,11 +184,9 @@ export function reconstructPendingApproval(row: PendingApprovalRow): PendingAppr
 
 function parseSourceMessage(raw: string | null): ResumeSourceMessage | undefined {
   if (!raw) return undefined
-  try {
-    return JSON.parse(raw) as ResumeSourceMessage
-  } catch {
-    return undefined
-  }
+  // A corrupt row throws, like context_snapshot, parameters and task_budget:
+  // dropping it would silently resume without the file version pins.
+  return JSON.parse(raw) as ResumeSourceMessage
 }
 
 function mapState(raw: string): ConversationState {

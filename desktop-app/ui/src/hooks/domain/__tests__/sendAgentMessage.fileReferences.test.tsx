@@ -247,6 +247,99 @@ describe('sendAgentMessage — references the Host did not receive (#666 M1)', (
   })
 })
 
+describe('sendAgentMessage — file limit (#666 M4)', () => {
+  function manyFiles(count: number): ComposerGlobalFileReference[] {
+    return Array.from({ length: count }, (_, index) => {
+      const rid = index.toString(16).padStart(32, 'a')
+      return {
+        ...planFile,
+        id: `global-file:main:${rid}`,
+        resourceId: rid,
+        gfsUri: `gfs://main/${rid}`,
+        label: `f${index}.md`,
+      }
+    })
+  }
+
+  it('refuses an eleventh file before anything is cleared or sent', async () => {
+    clerum.rpc.invokeHostMessage.mockResolvedValue({ response: 'done' })
+    const { result, spies } = renderController()
+    await settleMount()
+
+    // Two picker opens, each within the ten-file limit on its own.
+    act(() => {
+      result.current.handleAddComposerReferenceAttachments(manyFiles(6))
+    })
+    act(() => {
+      result.current.handleAddComposerReferenceAttachments(manyFiles(11).slice(6))
+    })
+    // Liveness witness: all eleven are in the composer, so the refusal below
+    // comes from the limit and not from an empty selection.
+    expect(result.current.composerReferenceAttachments).toHaveLength(11)
+
+    await act(async () => {
+      await result.current.handleSendAgentMessage('Summarize the files')
+    })
+
+    const limit = 'A message can reference at most 10 files.'
+    expect(result.current.agentError).toBe(limit)
+    expect(spies.pushToast).toHaveBeenCalledWith(limit, 'error')
+    expect(clerum.rpc.invokeHostMessage).not.toHaveBeenCalled()
+    // The composer keeps the selection so the user can remove one and resend.
+    expect(result.current.composerReferenceAttachments).toHaveLength(11)
+    expect(result.current.agentSending).toBe(false)
+  })
+
+  it('sends after the user removes the extra file, so the refusal does not lock the composer', async () => {
+    clerum.rpc.invokeHostMessage.mockResolvedValue({ response: 'done' })
+    const { result } = renderController()
+    await settleMount()
+
+    const files = manyFiles(11)
+    act(() => {
+      result.current.handleAddComposerReferenceAttachments(files)
+    })
+    await act(async () => {
+      await result.current.handleSendAgentMessage('Summarize the files')
+    })
+    // Liveness witness: the first attempt was refused.
+    expect(result.current.agentError).toBe('A message can reference at most 10 files.')
+    expect(clerum.rpc.invokeHostMessage).not.toHaveBeenCalled()
+
+    act(() => {
+      result.current.handleRemoveComposerReferenceAttachment(files[10]!.id)
+    })
+    // Removing a file answers the refusal, so the error goes away with it.
+    expect(result.current.agentError).toBeNull()
+
+    await act(async () => {
+      await result.current.handleSendAgentMessage('Summarize the files')
+    })
+    expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
+  })
+
+  it('refuses a selection whose reference cannot be built, before anything is cleared or sent', async () => {
+    clerum.rpc.invokeHostMessage.mockResolvedValue({ response: 'done' })
+    const { result, spies } = renderController()
+    await settleMount()
+
+    act(() => {
+      result.current.handleAddComposerReferenceAttachments([
+        { ...planFile, label: 'drafts/plan.md' },
+      ])
+    })
+    await act(async () => {
+      await result.current.handleSendAgentMessage('Summarize the plan')
+    })
+
+    expect(result.current.agentError).toMatch(/^Global file reference is invalid \(/)
+    expect(spies.pushToast).toHaveBeenCalledWith(result.current.agentError, 'error')
+    expect(clerum.rpc.invokeHostMessage).not.toHaveBeenCalled()
+    expect(result.current.composerReferenceAttachments).toHaveLength(1)
+    expect(result.current.agentSending).toBe(false)
+  })
+})
+
 describe('sendAgentMessage — payload too large (#666 L12)', () => {
   it('names images and attached files in the 413 message', async () => {
     clerum.rpc.invokeHostMessage.mockRejectedValue(new Error('Request Entity Too Large'))

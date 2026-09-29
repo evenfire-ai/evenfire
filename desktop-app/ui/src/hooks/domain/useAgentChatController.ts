@@ -2545,6 +2545,20 @@ export function useAgentChatController({
         visualModelForSend = selection.intentModel ?? selection.effectiveModel ?? undefined
         visualModelRevisionForSend = selection.confirmedRevision ?? undefined
       }
+      // #666 — build the structured references before anything is cleared or
+      // created. A selection past the shared limit (or an invalid reference)
+      // must leave the composer and its draft as the user typed them, with the
+      // reason on screen, instead of failing after the send cleared the composer.
+      let fileReferencesForSend: ReturnType<typeof buildComposerFileReferences>
+      try {
+        fileReferencesForSend = buildComposerFileReferences(effectiveReferences)
+      } catch (error) {
+        const blocker = error instanceof Error ? error.message : String(error)
+        setAgentError(blocker)
+        pushToast(blocker, 'error')
+        agentSendInFlightRef.current = false
+        return
+      }
       let sendChatId = activeChatId
       // Captured for the retention snapshot: the model this attempt actually
       // asked for (issue #654), readable from the catch below.
@@ -2706,7 +2720,7 @@ export function useAgentChatController({
         if (sendScope !== sendScopeGeneration.current) return
         const pendingModel = pendingModelForSend
         const requestModel = requestModelForRetention
-        const fileReferences = buildComposerFileReferences(effectiveReferences)
+        const fileReferences = fileReferencesForSend
         const request = {
           content: effectiveContentForRequest,
           channelType: 'rpc',

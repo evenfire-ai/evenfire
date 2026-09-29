@@ -8,6 +8,7 @@
  */
 import { type Mock, describe, expect, it, vi } from 'vitest'
 import { createHash } from 'node:crypto'
+import { FileAttachmentErrorCode } from '../../core/errors'
 import type { IncomingMessage, MessageResponse, SetModelResult } from '../../server/types'
 import { type IncomingAdmissionDeps, createIncomingAdmission } from '../incomingAdmission'
 
@@ -430,6 +431,27 @@ describe('#666 file attachments at admission', () => {
     // A file never reaches the image gate, so its verdict cannot refuse the turn.
     expect(spies.resolveImageInput).not.toHaveBeenCalled()
     expect(refusalLogs(spies)).toHaveLength(0)
+  })
+
+  it('logs the code of a file attachment refused before any image gate runs', async () => {
+    const { admit, spies } = makeAdmission()
+    const tampered = {
+      ...fileAttachment(),
+      digest: { algorithm: 'sha256' as const, hex: '0'.repeat(64) },
+    }
+
+    const response = await admit(message({ attachments: [tampered as never] }))
+
+    // Witness: admission really refused the turn, and did so on the attachment.
+    expect(response.success).toBe(false)
+    const code = (response as { error?: { code?: string } }).error?.code
+    expect(code).toBe(FileAttachmentErrorCode.DigestMismatch)
+    expect(spies.dispatch).toHaveBeenCalledTimes(0)
+    const logged = spies.info.mock.calls
+      .map(call => call[0] as Record<string, unknown>)
+      .filter(fields => fields.event === 'message_attachment_refused')
+    expect(logged).toEqual([expect.objectContaining({ code })])
+    expect(spies.resolveImageInput).not.toHaveBeenCalled()
   })
 
   it('still refuses an image sent with a file on a model that cannot read images', async () => {

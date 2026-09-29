@@ -112,7 +112,7 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
           event: 'message_attachment_refused',
           userId: message.sender,
           chatId: message.threadId ?? null,
-          code: validated.error.code ?? null,
+          code: validated.error.code,
         },
         'Host runtime event'
       )
