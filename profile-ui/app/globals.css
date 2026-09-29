@@ -319,16 +319,6 @@ code {
   outline-offset: 2px;
 }
 
-.cu-home-desktop-link--unavailable {
-  color: var(--cu-text-soft);
-  cursor: default;
-}
-
-.cu-home-desktop-link--unavailable:hover {
-  color: var(--cu-text-soft);
-  text-decoration: none;
-}
-
 .cu-auth-return-link {
   margin-top: var(--cu-space-4);
 }
