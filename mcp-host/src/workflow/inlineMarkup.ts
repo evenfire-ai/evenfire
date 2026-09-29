@@ -283,11 +283,12 @@ function withPlaceholdersKept(text: string): string {
 
 /**
  * `label` as the text of a markdown link. A bracket, or a backslash that ends
- * the label, is escaped so it prints instead of ending the label; an escape the
- * label already holds is kept whole, so it prints as it does outside a link.
+ * the label or stands before a style mark, is escaped so it prints instead of
+ * ending the label; an escape the label already holds is kept whole, so it
+ * prints as it does outside a link.
  */
 function linkLabel(label: string): string {
-  return label.replace(/\\[\s\S]?|[[\]]/g, m => (m.length === 2 ? m : `\\${m}`))
+  return label.replace(/\\[^\uFDD0-\uFDEF]?|[[\]]/g, m => (m.length === 2 ? m : `\\${m}`))
 }
 
 function htmlSegmentToMarkdown(text: string): string {
@@ -297,14 +298,16 @@ function htmlSegmentToMarkdown(text: string): string {
   )
   return separate(separate(html, BLOCK_EDGE, '\n'), CELL_EDGE, ' ')
     .replace(IMG_TAG, imageMarkdown)
-    .replace(ANCHOR, (_whole: string, tag: string, label: string) => {
-      const href = HREF.exec(tag)?.[1]
-      return href ? `[${linkLabel(label)}](${href})` : label
-    })
     .replace(BOLD_TAG, tag => styleMark('bold', tag))
     .replace(ITALIC_TAG, tag => styleMark('italics', tag))
     .replace(CODE_TAG, '`')
     .replace(STRIKE_TAG, tag => styleMark('strike', tag))
+    .replace(ANCHOR, (_whole: string, tag: string, label: string) => {
+      const href = HREF.exec(tag)?.[1]
+      // The label is escaped without its tags, so each backslash is read beside
+      // the character that follows it in the printed text.
+      return href ? `[${linkLabel(label.replace(HTML_TAG, ''))}](${href})` : label
+    })
     .replace(HTML_TAG, '')
 }
 

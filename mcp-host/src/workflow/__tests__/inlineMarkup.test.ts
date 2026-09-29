@@ -195,6 +195,9 @@ describe('inline markdown', () => {
       '\\*x\\*',
       'path\\to',
       '&#92;[1]',
+      '<span>C:\\Users\\</span>',
+      'a\\<u>]</u> b',
+      'x\\<b>\\</b>',
     ]
     for (const label of labels) {
       const outside = inlineSpans(label)
