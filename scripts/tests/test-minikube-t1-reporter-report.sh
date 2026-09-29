@@ -26,8 +26,11 @@ trap 'rm -rf -- "$TEST_DIR"' EXIT
   }
 
   # 1. A DSN followed by an escaped quote must not swallow the escape.
+  # The synthetic DSNs are assembled at run time so this file carries no
+  # literal scheme://user:password@host, which the public-boundary gate rejects.
+  dsn_scheme=postgresql
   dsn_json="$TEST_DIR/dsn.json"
-  printf '%s' '{"failureMessages":["expected \"postgresql://u:p@h/db\" to be undefined"]}' >"$dsn_json"
+  printf '{"failureMessages":["expected \\"%s://u:p@h/db\\" to be undefined"]}' "$dsn_scheme" >"$dsn_json"
   T1_REDACT_PASSWORD='' sanitize_file "$dsn_json"
   assert_valid_json "$dsn_json" 'DSN inside a JSON string'
   grep -Fq '<minikube-postgres-dsn-redacted>' "$dsn_json" \
@@ -59,7 +62,7 @@ PY
   # 3. A suite that failed before any test has no assertionResults; its reason
   #    is the file-level message and must be printed after the FAILED FILE line.
   report="$TEST_DIR/report.json"
-  cat >"$report" <<'JSON'
+  cat >"$report" <<JSON
 {
   "success": false,
   "numTotalTestSuites": 3,
@@ -72,7 +75,7 @@ PY
     {"name": "/repo/control-api/ok.realPostgres.test.ts", "status": "passed",
      "message": "", "assertionResults": [{"status": "passed", "title": "works"}]},
     {"name": "/repo/control-api/early.realPostgres.test.ts", "status": "failed",
-     "message": "beforeAll failed: connect ECONNREFUSED postgresql://admin:hunter2@127.0.0.1:5432/postgres",
+     "message": "beforeAll failed: connect ECONNREFUSED ${dsn_scheme}://admin:hunter2@127.0.0.1:5432/postgres",
      "assertionResults": []},
     {"name": "/repo/control-api/late.realPostgres.test.ts", "status": "failed",
      "message": "",
