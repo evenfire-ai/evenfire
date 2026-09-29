@@ -527,20 +527,42 @@ export function isHostDrainingError(error: unknown): boolean {
   return upstream.status === 503 && String(upstream.bodySnippet || '').includes('host_draining')
 }
 
+/**
+ * undici's own header/body timers (300 s defaults). They fire on a connection
+ * the host accepted, so they prove a slow host, not a down one: a timeout, and
+ * never a reason to wake and re-issue the request.
+ */
+const UNDICI_TIMEOUT_CODES: ReadonlySet<unknown> = new Set([
+  'UND_ERR_HEADERS_TIMEOUT',
+  'UND_ERR_BODY_TIMEOUT',
+])
+
 /** Fetch uses AbortError for controller aborts and TimeoutError for
- * AbortSignal.timeout(). Both represent the same sanitized 504 boundary. */
+ * AbortSignal.timeout(); undici's own header/body timers reject with their
+ * code on `cause`. All represent the same sanitized 504 boundary. An
+ * UpstreamBodyReadError is a timeout when the body read it wraps was one. */
 export function isUpstreamTimeoutError(error: unknown): boolean {
-  return error instanceof Error && (error.name === 'AbortError' || error.name === 'TimeoutError')
+  if (!(error instanceof Error)) return false
+  if (error.name === 'AbortError' || error.name === 'TimeoutError') return true
+  if (error.name === 'UpstreamBodyReadError') return isUpstreamTimeoutError(error.cause)
+  return UNDICI_TIMEOUT_CODES.has((error as Error & { cause?: { code?: unknown } }).cause?.code)
 }
 
 /**
  * True for a network-level fetch failure against the upstream host (no HTTP
- * response at all — suspended pod, no endpoints). Excludes AbortError (today's
- * 504 path) and UpstreamHostError (the host answered).
+ * response at all — suspended pod, no endpoints). Excludes timeouts (today's
+ * 504 path), UpstreamHostError (the host answered) and UpstreamBodyReadError
+ * (the headers arrived, so the host received the request).
  */
 export function isHostDownNetworkError(error: unknown): boolean {
   if (!(error instanceof Error)) return false
-  if (isUpstreamTimeoutError(error) || error.name === 'UpstreamHostError') return false
+  if (
+    isUpstreamTimeoutError(error) ||
+    error.name === 'UpstreamHostError' ||
+    error.name === 'UpstreamBodyReadError'
+  ) {
+    return false
+  }
   const cause = (error as Error & { cause?: { code?: unknown } }).cause
   const details = `${error.message} ${String(cause?.code || '')}`.toLowerCase()
   return (

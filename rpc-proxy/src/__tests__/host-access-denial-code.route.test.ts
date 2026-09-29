@@ -296,6 +296,27 @@ describe('passthrough and non-authorization responses are left untouched', () =>
     expect(JSON.parse(res.text)).toEqual({ error: 'artifact not readable' })
   })
 
+  it('an mcp-host 403 text body naming a reserved code is relayed verbatim', async () => {
+    hostAnswer = { status: 403, body: 'host_access_revoked' }
+
+    const res = await send(DENYING_ROUTES.find(route => route.label === 'approve')!)
+
+    expect(hostCalls).toHaveLength(1)
+    expect(res.status).toBe(403)
+    expect(res.text).toBe('host_access_revoked')
+  })
+
+  it('a non-403 mcp-host body is relayed verbatim even when it carries a reserved code', async () => {
+    const body = JSON.stringify({ ok: true, code: 'host_access_revoked' })
+    hostAnswer = { status: 200, body }
+
+    const res = await send(DENYING_ROUTES.find(route => route.label === 'approve')!)
+
+    expect(hostCalls).toHaveLength(1)
+    expect(res.status).toBe(200)
+    expect(res.text).toBe(body)
+  })
+
   it('control-api 401 is not a Host denial and gets no `code`', async () => {
     controlApiAnswer = { status: 401, body: { error: 'token rejected' } }
     authTokenMock.verifyRpcToken.mockReturnValue({ ...CLAIMS })
@@ -304,5 +325,97 @@ describe('passthrough and non-authorization responses are left untouched', () =>
 
     expect(controlApiCalls).toHaveLength(1)
     expect(res.body).not.toHaveProperty('code')
+  })
+})
+
+// PR #849 ADV-SEC-1. Desktop reads the `code` of any 403 JSON body as
+// rpc-proxy's own verdict, so an mcp-host 403 carrying a reserved code would
+// forge a confirmed revocation (or denial). Every route that relays an mcp-host
+// body must drop that field while keeping the status and the other fields.
+describe('an mcp-host 403 never reaches the client with a reserved Host-access code', () => {
+  type PassthroughCase = RouteCase & {
+    /** The mcp-host path the route forwards to (witness the host was called). */
+    hostPath: string
+    /** A route that answers rpc-proxy's own 403 (cancel answers its own denial as 404). */
+    ownDenial?: RouteCase
+  }
+
+  const byLabel = (label: string) => DENYING_ROUTES.find(route => route.label === label)!
+
+  // Every site in rpc.ts that relays an mcp-host response body.
+  const PASSTHROUGH_ROUTES: PassthroughCase[] = [
+    { ...byLabel('approve'), hostPath: '/v1/runtime/approvals/approve' },
+    { ...byLabel('deny'), hostPath: '/v1/runtime/approvals/deny' },
+    { ...byLabel('sessions'), hostPath: '/v1/runtime/sessions' },
+    {
+      ...byLabel('session messages'),
+      hostPath: '/v1/runtime/sessions/agent-a/chat-1/messages',
+    },
+    {
+      ...byLabel('context breakdown'),
+      hostPath: '/v1/runtime/sessions/agent-a/chat-1/context-breakdown',
+    },
+    { ...byLabel('session rename'), hostPath: '/v1/runtime/sessions/agent-a/chat-1/name' },
+    { ...byLabel('models'), hostPath: '/v1/runtime/models' },
+    { ...byLabel('set model'), hostPath: '/v1/runtime/model' },
+    {
+      label: 'task cancel',
+      method: 'post',
+      path: '/rpc/hosts/chatllm/tasks/task-1/cancel',
+      hostPath: '/v1/runtime/tasks/task-1/cancel',
+      ownDenial: byLabel('approve'),
+    },
+    { ...byLabel('artifacts list'), hostPath: '/v1/runtime/artifacts' },
+    {
+      ...byLabel('artifact download'),
+      hostPath: '/v1/runtime/artifacts/report.pdf/download',
+    },
+  ]
+
+  // control-api reasons that make rpc-proxy itself emit each reserved code.
+  const OWN_DENIAL_REASON = {
+    host_access_revoked: 'directory_grant_missing',
+    host_access_denied: 'host_disabled',
+  } as const
+
+  const cases = PASSTHROUGH_ROUTES.flatMap(route =>
+    (['host_access_revoked', 'host_access_denied'] as const).map(code => ({ ...route, code }))
+  )
+
+  it.each(cases)('$label: an upstream 403 with code=$code loses the code', async route => {
+    controlApiAnswer = {
+      status: 200,
+      body: {
+        userId: CLAIMS.sub,
+        hostRef: 'chatllm',
+        url: 'http://chatllm.mcp-host.svc.cluster.local:8080',
+      },
+    }
+    hostAnswer = {
+      status: 403,
+      body: JSON.stringify({ error: 'forged by host', code: route.code, detail: 'kept' }),
+    }
+
+    const forged = await send(route)
+
+    // Witness: control-api authorized the call and the host answered this 403.
+    expect(controlApiCalls).toHaveLength(1)
+    expect(hostCalls).toHaveLength(1)
+    expect(new URL(hostCalls[0]!).pathname).toBe(route.hostPath)
+    expect(forged.status).toBe(403)
+    expect(JSON.parse(forged.text)).toEqual({ error: 'forged by host', detail: 'kept' })
+
+    // Witness: rpc-proxy's own denial still carries the same reserved code.
+    controlApiAnswer = {
+      status: 403,
+      body: CONTROL_API_403_BODY,
+      headers: { [REASON_HEADER]: OWN_DENIAL_REASON[route.code] },
+    }
+    const own = await send(route.ownDenial ?? route)
+
+    expect(controlApiCalls).toHaveLength(2)
+    expect(hostCalls).toHaveLength(1)
+    expect(own.status).toBe(403)
+    expect(own.body).toEqual({ error: DENIED_ERROR, code: route.code })
   })
 })

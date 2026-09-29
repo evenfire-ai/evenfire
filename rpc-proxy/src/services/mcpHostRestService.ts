@@ -1,6 +1,7 @@
 import { config } from '../config.js'
 import type { TraceContextV1 } from '../traceContext.js'
 import { ResolvedServerConnection } from '../types.js'
+import { readMutatingResponseBody } from './upstreamBody.js'
 
 /**
  * Per-MCP-server health row as emitted by mcp-host and forwarded by rpc-proxy.
@@ -245,7 +246,9 @@ export async function forwardCancelToHost(
         signal: abortController.signal,
       }
     )
-    const body = await response.text()
+    // Cancel is a mutating POST without an idempotency key: a body failure
+    // after the headers must not re-issue it through the wake path.
+    const body = await readMutatingResponseBody(response)
     return {
       status: response.status,
       body,

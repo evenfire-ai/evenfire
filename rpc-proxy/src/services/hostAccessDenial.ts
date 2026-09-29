@@ -41,6 +41,38 @@ export function isHostAccessDenied<T extends object>(
   return (resolved as Partial<HostAccessDenial>).denied === true
 }
 
+const RESERVED_HOST_ACCESS_CODES: ReadonlySet<unknown> = new Set<HostAccessDenialCode>([
+  'host_access_revoked',
+  'host_access_denied',
+])
+
+/**
+ * The body rpc-proxy may relay for an upstream (mcp-host) response. Desktop
+ * trusts the `code` of a 403 JSON body as rpc-proxy's own authorization verdict,
+ * so a passthrough 403 must never carry a reserved Host-access code: an mcp-host
+ * could otherwise forge a "confirmed revocation" that hides the agent. Such a
+ * `code` field is dropped; the status and every other field are kept. A non-403
+ * status, a non-JSON body and a JSON value that is not an object pass unchanged
+ * (Desktop reads the code only from a parsed JSON object of a 403).
+ */
+export function withoutReservedHostAccessCode(status: number, body: string): string {
+  if (status !== 403) return body
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(body)
+  } catch {
+    // Not JSON: Desktop cannot read a `code` from it, so it is relayed as is.
+    return body
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return body
+  const { code, ...rest } = parsed as Record<string, unknown>
+  if (!RESERVED_HOST_ACCESS_CODES.has(code)) return body
+  console.warn(
+    `[RPC_PROXY] dropped reserved host-access code from an upstream 403 body code=${String(code)}`
+  )
+  return JSON.stringify(rest)
+}
+
 /** The single writer of rpc-proxy's own Host authorization 403. */
 export function respondHostAccessDenied(
   res: ExpressResponse,

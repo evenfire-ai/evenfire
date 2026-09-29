@@ -1,4 +1,5 @@
 import type { NextFunction, Request, Response } from 'express'
+import { UpstreamBodyReadError } from './services/upstreamBody.js'
 import { isUpstreamTimeoutError } from './services/wakeAndHold.js'
 
 /**
@@ -28,6 +29,13 @@ export function apiErrorHandler(
 ): void {
   if (isUpstreamTimeoutError(err)) {
     res.status(504).json({ error: 'Gateway Timeout' })
+    return
+  }
+
+  // The upstream answered with headers and its body then failed: a gateway
+  // failure on a request the host received, never an rpc-proxy fault (500).
+  if (err instanceof UpstreamBodyReadError) {
+    res.status(502).json({ error: 'Upstream host unavailable' })
     return
   }
 

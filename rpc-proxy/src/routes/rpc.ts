@@ -21,6 +21,7 @@ import {
   type HostAccessDenialCode,
   isHostAccessDenied,
   respondHostAccessDenied,
+  withoutReservedHostAccessCode,
 } from '../services/hostAccessDenial.js'
 import {
   type HostRuntimeMessageRequest,
@@ -36,6 +37,7 @@ import {
   resolveServerConnectionForUser,
   validateRpcRequest,
 } from '../services/mcpProxyService.js'
+import { readMutatingResponseBody } from '../services/upstreamBody.js'
 import {
   isUpstreamTimeoutError,
   isWakeEligibleHostError,
@@ -112,6 +114,23 @@ function guardedNext(res: ExpressResponse, next: NextFunction, error: unknown): 
     return
   }
   next(error)
+}
+
+/**
+ * The single writer of a relayed mcp-host response body. Every passthrough
+ * route answers through here so an upstream 403 can never carry the reserved
+ * Host-access `code` that only respondHostAccessDenied may set. `contentType`
+ * is set only by the routes that relay the upstream content type.
+ */
+function sendUpstreamBody(
+  res: ExpressResponse,
+  status: number,
+  body: string,
+  contentType?: string
+): void {
+  res.status(status)
+  if (contentType !== undefined) res.type(contentType)
+  res.send(withoutReservedHostAccessCode(status, body))
 }
 
 /**
@@ -661,10 +680,10 @@ export function createRpcRouter(): Router {
             body: JSON.stringify(upstreamBody),
             signal: mutatingCallSignal(timeoutMs),
           })
-          const body = await response.text()
+          const body = await readMutatingResponseBody(response)
           const draining = sessionDrainingFence(response, body)
           if (draining) throw draining
-          res.status(response.status).send(body)
+          sendUpstreamBody(res, response.status, body)
         }
         try {
           await attempt()
@@ -725,10 +744,10 @@ export function createRpcRouter(): Router {
             body: JSON.stringify(upstreamBody),
             signal: mutatingCallSignal(timeoutMs),
           })
-          const body = await response.text()
+          const body = await readMutatingResponseBody(response)
           const draining = sessionDrainingFence(response, body)
           if (draining) throw draining
-          res.status(response.status).send(body)
+          sendUpstreamBody(res, response.status, body)
         }
         try {
           await attempt()
@@ -811,10 +830,12 @@ export function createRpcRouter(): Router {
           const body = await response.text()
           const draining = sessionDrainingFence(response, body)
           if (draining) throw draining
-          res
-            .status(response.status)
-            .type(response.headers.get('content-type') || 'application/json')
-            .send(body)
+          sendUpstreamBody(
+            res,
+            response.status,
+            body,
+            response.headers.get('content-type') || 'application/json'
+          )
         }
         try {
           await forwardSessionList()
@@ -912,10 +933,12 @@ export function createRpcRouter(): Router {
           const body = await response.text()
           const draining = sessionDrainingFence(response, body)
           if (draining) throw draining
-          res
-            .status(response.status)
-            .type(response.headers.get('content-type') || 'application/json')
-            .send(body)
+          sendUpstreamBody(
+            res,
+            response.status,
+            body,
+            response.headers.get('content-type') || 'application/json'
+          )
         }
         try {
           await forwardTranscript()
@@ -988,10 +1011,12 @@ export function createRpcRouter(): Router {
           const body = await response.text()
           const draining = sessionDrainingFence(response, body)
           if (draining) throw draining
-          res
-            .status(response.status)
-            .type(response.headers.get('content-type') || 'application/json')
-            .send(body)
+          sendUpstreamBody(
+            res,
+            response.status,
+            body,
+            response.headers.get('content-type') || 'application/json'
+          )
         }
         try {
           await attempt()
@@ -1081,10 +1106,12 @@ export function createRpcRouter(): Router {
             }
           )
           const body = await response.text()
-          res
-            .status(response.status)
-            .type(response.headers.get('content-type') || 'application/json')
-            .send(body)
+          sendUpstreamBody(
+            res,
+            response.status,
+            body,
+            response.headers.get('content-type') || 'application/json'
+          )
         } catch (error) {
           respondUpstreamUnavailable(res, error)
         }
@@ -1134,10 +1161,12 @@ export function createRpcRouter(): Router {
           const body = await response.text()
           const draining = sessionDrainingFence(response, body)
           if (draining) throw draining
-          res
-            .status(response.status)
-            .type(response.headers.get('content-type') || 'application/json')
-            .send(body)
+          sendUpstreamBody(
+            res,
+            response.status,
+            body,
+            response.headers.get('content-type') || 'application/json'
+          )
         }
         try {
           await attempt()
@@ -1198,13 +1227,15 @@ export function createRpcRouter(): Router {
             body: JSON.stringify(body),
             signal: mutatingCallSignal(timeoutMs),
           })
-          const upstreamBody = await response.text()
+          const upstreamBody = await readMutatingResponseBody(response)
           const draining = sessionDrainingFence(response, upstreamBody)
           if (draining) throw draining
-          res
-            .status(response.status)
-            .type(response.headers.get('content-type') || 'application/json')
-            .send(upstreamBody)
+          sendUpstreamBody(
+            res,
+            response.status,
+            upstreamBody,
+            response.headers.get('content-type') || 'application/json'
+          )
         }
         try {
           await attempt()
@@ -1327,10 +1358,12 @@ export function createRpcRouter(): Router {
         const attemptCancel = async (timeoutMs = config.upstreamTimeoutMs) => {
           const result = await forwardCancelToHost(host, taskId, auth.sub, timeoutMs)
           if (result.body) {
-            res
-              .status(result.status)
-              .type(result.contentType || 'application/json')
-              .send(result.body)
+            sendUpstreamBody(
+              res,
+              result.status,
+              result.body,
+              result.contentType || 'application/json'
+            )
           } else {
             res.status(result.status).end()
           }
@@ -1403,7 +1436,7 @@ export function createRpcRouter(): Router {
           const body = await response.text()
           const draining = sessionDrainingFence(response, body)
           if (draining) throw draining
-          res.status(response.status).send(body)
+          sendUpstreamBody(res, response.status, body)
         }
         try {
           await attempt()
@@ -1499,7 +1532,7 @@ export function createRpcRouter(): Router {
               const errBody = await response.text()
               const draining = sessionDrainingFence(response, errBody)
               if (draining) throw draining
-              res.status(response.status).send(errBody)
+              sendUpstreamBody(res, response.status, errBody)
               return
             }
             const contentType = response.headers.get('content-type') || 'application/octet-stream'

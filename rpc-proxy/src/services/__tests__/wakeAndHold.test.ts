@@ -3,6 +3,7 @@ import type { Response as ExpressResponse } from 'express'
 import { config } from '../../config.js'
 import type { ResolvedServerConnection, RpcAccessClaims, RpcScope } from '../../types.js'
 import type { HostWakeApiResponse } from '../controlApiRestService.js'
+import { UpstreamBodyReadError } from '../upstreamBody.js'
 import {
   WakeAndHoldCoordinator,
   type WakeCoordinatorDeps,
@@ -425,6 +426,20 @@ describe('host error classification', () => {
       bodySnippet: '',
     })
     expect(isHostDownNetworkError(upstream)).toBe(false)
+  })
+
+  // ADV-HCC-1: the wrapper's message embeds the body failure's text, which can
+  // itself read like a down host ("read ECONNRESET", "socket hang up"). The
+  // headers arrived, so it is still never a down-host signal.
+  it('never classifies a body failure after the headers as a down host', () => {
+    const bodyFailure = new Error('read ECONNRESET')
+    // Witness: the same failure raised before fetch() resolved IS a down host.
+    expect(isHostDownNetworkError(bodyFailure)).toBe(true)
+
+    expect(isHostDownNetworkError(new UpstreamBodyReadError(bodyFailure))).toBe(false)
+    expect(isHostDownNetworkError(new UpstreamBodyReadError(new Error('socket hang up')))).toBe(
+      false
+    )
   })
 })
 

@@ -6,7 +6,7 @@ import request from 'supertest'
 import { config } from '../config.js'
 import { apiErrorHandler } from '../errorHandler.js'
 import { createRpcRouter } from '../routes/rpc.js'
-import { forwardHostMessageToHost } from '../services/mcpHostRestService.js'
+import { forwardCancelToHost, forwardHostMessageToHost } from '../services/mcpHostRestService.js'
 
 // PR #849 R2-M3 / R1-M12 / R1-M13 / NEW-rpx-1 / NEW-sec-4.
 //
@@ -110,6 +110,54 @@ async function startUpstream(handler: Handler): Promise<void> {
 /** Ends the TCP connection without a response: undici reports it as `fetch failed`. */
 function dropConnection(req: IncomingMessage): void {
   req.socket.destroy()
+}
+
+/**
+ * Sends the 200 headers and part of the body, then kills the socket: undici
+ * resolves `fetch()` and the body read fails with `terminated` (UND_ERR_SOCKET).
+ */
+function sendHeadersThenDestroy(req: IncomingMessage, res: ServerResponse): void {
+  res.writeHead(200, { 'content-type': 'application/json' })
+  res.write('{"applied":', () => {
+    setTimeout(() => req.socket.destroy(), 20)
+  })
+}
+
+// The symbol undici's setGlobalDispatcher writes; Node's fetch reads it per call.
+const UNDICI_GLOBAL_DISPATCHER = Symbol.for('undici.globalDispatcher.1')
+type UndiciDispatcher = { close(): Promise<void> }
+type UndiciAgentClass = new (options: {
+  headersTimeout: number
+  bodyTimeout: number
+}) => UndiciDispatcher
+
+/**
+ * Runs `fn` with Node's own undici Agent swapped for one whose header/body
+ * timers are 200 ms instead of 300 s, so undici's real UND_ERR_HEADERS_TIMEOUT /
+ * UND_ERR_BODY_TIMEOUT errors are produced by the production fetch calls.
+ */
+async function withShortUndiciTimeouts<T>(fn: () => Promise<T>): Promise<T> {
+  const globals = globalThis as unknown as Record<symbol, UndiciDispatcher | undefined>
+  if (!globals[UNDICI_GLOBAL_DISPATCHER]) {
+    // Node creates its global Agent on the first fetch: make one to a
+    // throwaway server so the upstream under test sees no extra request.
+    const warmup = createServer((_req, res) => res.end())
+    await new Promise<void>(resolve => warmup.listen(0, '127.0.0.1', resolve))
+    const { port } = warmup.address() as AddressInfo
+    await (await fetch(`http://127.0.0.1:${port}/`)).text()
+    await new Promise<void>(resolve => warmup.close(() => resolve()))
+  }
+  const original = globals[UNDICI_GLOBAL_DISPATCHER]
+  if (!original) throw new Error('Node fetch did not install an undici global dispatcher')
+  const Agent = original.constructor as UndiciAgentClass
+  const shortAgent = new Agent({ headersTimeout: 200, bodyTimeout: 200 })
+  globals[UNDICI_GLOBAL_DISPATCHER] = shortAgent
+  try {
+    return await fn()
+  } finally {
+    globals[UNDICI_GLOBAL_DISPATCHER] = original
+    await shortAgent.close()
+  }
 }
 
 const original = {
@@ -264,6 +312,92 @@ describe.each(MUTATING_ROUTES)('R2-M3 / R1-M12 $label route deadlines', route =>
     expect(seen.map(entry => `${entry.method} ${entry.url}`)).toEqual([
       `POST ${route.upstreamPath}`,
     ])
+  })
+
+  // ADV-HCC-1 / ADV-SEC-3: once the response headers arrived the host has the
+  // POST (it may already have applied it), so a socket that dies mid-body is a
+  // 502 for this one request, never a down host to wake and re-POST to.
+  it('a socket that dies after the response headers answers 502 with exactly one POST', async () => {
+    await startUpstream(sendHeadersThenDestroy)
+
+    const res = await post(route).expect(502)
+
+    expect(res.body).toEqual({ error: 'Upstream host unavailable' })
+    // Witness: the first attempt reached the upstream and got its headers out.
+    expect(seen.map(entry => `${entry.method} ${entry.url}`)).toEqual([
+      `POST ${route.upstreamPath}`,
+    ])
+    expect(controlApiMock.requestHostWakeFromControlApi).not.toHaveBeenCalled()
+  })
+
+  it('a wake retry whose body dies after the headers answers 502 without a third POST', async () => {
+    config.wakeMaxHoldMs = 4_000
+    await startUpstream((req, res, index) => {
+      // First attempt: dropped before the headers (host down, wake). Retry:
+      // headers, then the socket dies mid-body.
+      if (index === 0) dropConnection(req)
+      else sendHeadersThenDestroy(req, res)
+    })
+
+    const res = await post(route).expect(502)
+
+    expect(res.body).toEqual({ error: 'Upstream host unavailable' })
+    // Witness: the pre-headers failure did wake and re-issue once.
+    expect(controlApiMock.requestHostWakeFromControlApi).toHaveBeenCalledTimes(1)
+    expect(seen.map(entry => entry.url)).toEqual([route.upstreamPath, route.upstreamPath])
+  })
+
+  // undici's own header timer fires on a connection the host accepted: a slow
+  // host, not a down one. It must answer 504, not wake and re-issue the POST.
+  it("undici's headers timeout answers 504 with exactly one POST", async () => {
+    await startUpstream(() => {
+      // never answers: the upstream holds the POST
+    })
+
+    const res = await withShortUndiciTimeouts(() => post(route).expect(504))
+
+    expect(res.body).toEqual({ error: 'Gateway Timeout' })
+    expect(seen.map(entry => `${entry.method} ${entry.url}`)).toEqual([
+      `POST ${route.upstreamPath}`,
+    ])
+    expect(controlApiMock.requestHostWakeFromControlApi).not.toHaveBeenCalled()
+  })
+
+  it("undici's body timeout after the headers answers 504 with exactly one POST", async () => {
+    await startUpstream((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.write('{"applied":') // then stalls
+    })
+
+    const res = await withShortUndiciTimeouts(() => post(route).expect(504))
+
+    expect(res.body).toEqual({ error: 'Gateway Timeout' })
+    expect(seen.map(entry => `${entry.method} ${entry.url}`)).toEqual([
+      `POST ${route.upstreamPath}`,
+    ])
+    expect(controlApiMock.requestHostWakeFromControlApi).not.toHaveBeenCalled()
+  })
+})
+
+describe('ADV-HCC-1 task cancel is not re-issued after the response headers', () => {
+  it('a socket that dies after the response headers answers 502 with exactly one POST', async () => {
+    serviceMock.forwardCancelToHost.mockImplementation(
+      forwardCancelToHost as typeof serviceMock.forwardCancelToHost
+    )
+    await startUpstream(sendHeadersThenDestroy)
+
+    const res = await request(makeApp())
+      .post('/rpc/hosts/chatllm/tasks/task-1/cancel')
+      .set('authorization', 'Bearer tok')
+      .expect(502)
+
+    expect(res.body).toEqual({ error: 'Upstream host unavailable' })
+    // Witness: the real forwardCancelToHost reached the upstream once.
+    expect(serviceMock.forwardCancelToHost).toHaveBeenCalledTimes(1)
+    expect(seen.map(entry => `${entry.method} ${entry.url}`)).toEqual([
+      'POST /v1/runtime/tasks/task-1/cancel',
+    ])
+    expect(controlApiMock.requestHostWakeFromControlApi).not.toHaveBeenCalled()
   })
 })
 
