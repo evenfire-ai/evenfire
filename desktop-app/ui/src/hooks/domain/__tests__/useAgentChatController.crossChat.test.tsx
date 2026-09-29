@@ -14,19 +14,24 @@ import { useAgentChatController } from '@hooks/domain/useAgentChatController'
 import { useComposerDraft } from '@hooks/useComposerDraft'
 import { getComposerDraft, resetComposerDraftStore } from '@lib/composerDraftStore'
 import type { TaskProgressStreamEvent } from '../../../../../src/types'
+import { useHarnessHostAuthority } from './__fixtures__/hostAuthorityHarness'
+import {
+  ipcGenericForbidden,
+  ipcHostAccessDenied,
+  ipcHostAccessRevoked,
+  ipcHostWaking,
+  ipcHttpError,
+  ipcServerErrorMentioning403,
+} from './__fixtures__/ipcErrors'
 
 type ProgressHandler = (event: TaskProgressStreamEvent) => void | Promise<void>
+// Record every hold the controller requests; the hold itself goes through the
+// production store (useHarnessHostAuthority), so epochs are real.
 const revokedAgents = new Set<string>()
 const uncertainAgents = new Set<string>()
-const onHostAccessRevoked = (agentRef: string) => {
-  revokedAgents.add(agentRef)
+const recordHold = (agentRef: string, kind: 'revoked' | 'uncertain') => {
+  ;(kind === 'revoked' ? revokedAgents : uncertainAgents).add(agentRef)
 }
-const onHostAuthorityUncertain = (agentRef: string) => {
-  uncertainAgents.add(agentRef)
-}
-const isHostAccessBlocked = (agentRef: string) =>
-  revokedAgents.has(agentRef) || uncertainAgents.has(agentRef)
-const getHostAuthorityEpoch = () => 0
 
 function getDraftInputValue(): string {
   return (screen.getByTestId('draft-input') as HTMLInputElement).value
@@ -160,19 +165,22 @@ function AgentChatHarness() {
   const [selectionState, setSelectionState] = React.useState('idle')
   const [sendState, setSendState] = React.useState('idle')
   const [selectedAgent, setSelectedAgent] = React.useState('trader')
+  const hostAuthority = useHarnessHostAuthority(recordHold)
   const vm = useAgentChatController({
     selectedAgent,
     agentNames: ['trader', 'chatllm-stateless'],
     currentTeamId: 'team-1',
+    chatAuthorityTeamId: 'team-1',
     currentEnvironmentKey: 'env-test',
     currentTeamName: 'Team One',
     isAuthenticated: true,
     loadMenuData: true,
     navItem: 'chat',
-    onHostAccessRevoked,
-    onHostAuthorityUncertain,
-    isHostAccessBlocked,
-    getHostAuthorityEpoch,
+    onHostAccessRevoked: hostAuthority.onHostAccessRevoked,
+    onHostAuthorityUncertain: hostAuthority.onHostAuthorityUncertain,
+    isHostAccessBlocked: hostAuthority.isHostAccessBlocked,
+    getHostAuthorityEpoch: hostAuthority.getHostAuthorityEpoch,
+    hostAuthorityRevision: hostAuthority.revision,
     pushToast: vi.fn(),
     pushNotification: vi.fn(),
     agentDisplayName: (agentName: string) => agentName,
@@ -522,7 +530,7 @@ describe('useAgentChatController (cross-chat, migrated)', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
     await waitFor(() => expect(invokeHostMessage).toHaveBeenCalledTimes(1))
 
-    loadSessionMessages.mockRejectedValue(new Error('403 forbidden: host_access_revoked'))
+    loadSessionMessages.mockRejectedValue(await ipcHostAccessRevoked('rpc:loadSessionMessages'))
     fireEvent.click(screen.getByRole('button', { name: `Select chat ${chatId}` }))
     await waitFor(() => expect(revokedAgents.has('trader')).toBe(true))
     await waitFor(() => expect(screen.getByTestId('active-chat-id').textContent).toBe(''))
@@ -537,38 +545,70 @@ describe('useAgentChatController (cross-chat, migrated)', () => {
     expect(progressHandlers.has('late-task')).toBe(false)
   })
 
+  // R2-B1: every failure is the real RpcProxyClient rejection wrapped the way
+  // Electron IPC wraps it, never a hand-written bare message.
   it.each([
     {
       label: '401',
-      sendError: '401 unauthorized',
+      sendError: () =>
+        ipcHttpError('rpc:invokeHostMessage', 401, 'Unauthorized', { error: 'expired' }),
       readError: null,
       revoked: false,
       uncertain: true,
     },
     {
       label: 'exact Host-wide 403',
-      sendError: '403 Forbidden: host_access_revoked',
-      readError: '503 unavailable',
+      sendError: () => ipcHostAccessRevoked('rpc:invokeHostMessage'),
+      readError: () =>
+        ipcHttpError('rpc:listSessions', 503, 'Service Unavailable', { error: 'unavailable' }),
       revoked: true,
       uncertain: false,
     },
     {
+      label: 'host_access_denied 403 with readable catalog',
+      sendError: () => ipcHostAccessDenied('rpc:invokeHostMessage'),
+      readError: null,
+      revoked: false,
+      uncertain: false,
+    },
+    {
       label: 'generic 403 with readable catalog',
-      sendError: '403 missing send scope',
+      sendError: () => ipcGenericForbidden('rpc:invokeHostMessage'),
       readError: null,
       revoked: false,
       uncertain: false,
     },
     {
       label: 'generic 403 with denied catalog',
-      sendError: '403 missing send scope',
-      readError: '403 forbidden',
+      sendError: () => ipcGenericForbidden('rpc:invokeHostMessage'),
+      readError: () => ipcGenericForbidden('rpc:listSessions'),
       revoked: false,
       uncertain: true,
     },
     {
+      label: 'generic 403 with revoked catalog',
+      sendError: () => ipcGenericForbidden('rpc:invokeHostMessage'),
+      readError: () => ipcHostAccessRevoked('rpc:listSessions'),
+      revoked: true,
+      uncertain: false,
+    },
+    {
       label: '404',
-      sendError: '404 transient',
+      sendError: () => ipcHttpError('rpc:invokeHostMessage', 404, 'Not Found', { error: 'gone' }),
+      readError: null,
+      revoked: false,
+      uncertain: false,
+    },
+    {
+      label: '503 whose body mentions 403',
+      sendError: () => ipcServerErrorMentioning403('rpc:invokeHostMessage'),
+      readError: null,
+      revoked: false,
+      uncertain: false,
+    },
+    {
+      label: 'waking Host named support-401',
+      sendError: async () => ipcHostWaking('rpc:invokeHostMessage', 'support-401'),
       readError: null,
       revoked: false,
       uncertain: false,
@@ -576,8 +616,10 @@ describe('useAgentChatController (cross-chat, migrated)', () => {
   ])(
     'send $label applies the transcript authority decision',
     async ({ sendError, readError, revoked, uncertain }) => {
+      const sendFailure = await sendError()
+      const readFailure = readError ? await readError() : null
       const { invokeHostMessage, listSessions } = installClerumHarness()
-      invokeHostMessage.mockRejectedValueOnce(new Error(sendError))
+      invokeHostMessage.mockRejectedValueOnce(sendFailure)
       render(
         <AgentTaskTrackerProvider>
           <AgentChatHarness />
@@ -586,9 +628,11 @@ describe('useAgentChatController (cross-chat, migrated)', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Create chat' }))
       await waitFor(() => expect(screen.getByTestId('active-chat-id').textContent).not.toBe(''))
       const chatId = screen.getByTestId('active-chat-id').textContent || ''
-      if (readError) listSessions.mockRejectedValue(new Error(readError))
+      if (readFailure) listSessions.mockRejectedValue(readFailure)
       fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
       await waitFor(() => expect(screen.getByTestId('send-state').textContent).toBe('settled'))
+      // Liveness witness: the send reached the producer and failed with it.
+      expect(invokeHostMessage).toHaveBeenCalledTimes(1)
       expect(revokedAgents.has('trader')).toBe(revoked)
       expect(uncertainAgents.has('trader')).toBe(uncertain)
       if (revoked) {

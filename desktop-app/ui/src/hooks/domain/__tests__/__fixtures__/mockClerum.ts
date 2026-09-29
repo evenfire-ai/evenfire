@@ -61,12 +61,19 @@ export interface MockClerum {
   hasProgressHandler: (taskId: string) => boolean
   /** True once an activity handler exists for `hostRef`. */
   hasActivityHandler: (hostRef: string) => boolean
+  /** What the fake store holds for one chat after append/upsert writes. */
+  persistedMessages: (agentRef: string, chatId: string) => Array<Record<string, unknown>>
 }
 
 export function installMockClerum(): MockClerum {
   const progressHandlers = new Map<string, Handler>()
   const activityHandlers = new Map<string, Handler>()
-  const upsertedMessageIds = new Set<string>()
+  // What the fake store holds per chat, so `upsertMessages` can merge like the
+  // real `ChatStore.upsertMessages` instead of dropping a second write of an id.
+  const persistedByChat = new Map<string, Array<Record<string, unknown>>>()
+  const persistedKey = (agentRef: string, chatId: string) => `${agentRef}\u0000${chatId}`
+  const persistedIndexOf = (persisted: Array<Record<string, unknown>>, id: string) =>
+    persisted.findIndex(message => message.id === id)
 
   const isoNow = () => new Date().toISOString()
 
@@ -89,16 +96,40 @@ export function installMockClerum(): MockClerum {
     })),
     delete: vi.fn(async () => ({ cleanupPending: false })),
     loadMessages: vi.fn(async () => []),
-    appendMessages: vi.fn(
-      async (_agentRef: string, _chatId: string, _messages: unknown[]) => undefined
-    ),
+    appendMessages: vi.fn(async (agentRef: string, chatId: string, messages: unknown[]) => {
+      const key = persistedKey(agentRef, chatId)
+      persistedByChat.set(key, [
+        ...(persistedByChat.get(key) ?? []),
+        ...(messages as Array<Record<string, unknown>>),
+      ])
+    }),
+    /**
+     * Mirrors `ChatStore.upsertMessages` (src/chatStore.ts, the id branch of
+     * `mergeReconciledMessages`): per chat, an id already persisted is replaced
+     * in place and keeps its existing `task_id`; a new id is appended. New ids
+     * still go through `appendMessages` so suites that count persisted turns
+     * keep observing them there.
+     */
     upsertMessages: vi.fn(async (agentRef: string, chatId: string, messages: unknown[]) => {
-      const unseen = messages.filter(message => {
-        const id = (message as { id?: unknown }).id
-        if (typeof id !== 'string' || upsertedMessageIds.has(id)) return false
-        upsertedMessageIds.add(id)
-        return true
-      })
+      const key = persistedKey(agentRef, chatId)
+      const persisted = persistedByChat.get(key) ?? []
+      const unseen: Array<Record<string, unknown>> = []
+      for (const message of messages as Array<Record<string, unknown>>) {
+        const id = message.id
+        if (typeof id !== 'string') {
+          throw new Error(`mockClerum.upsertMessages: message without a string id in ${chatId}`)
+        }
+        const index = persistedIndexOf(persisted, id)
+        if (index < 0) {
+          const pending = persistedIndexOf(unseen, id)
+          if (pending < 0) unseen.push(message)
+          else unseen[pending] = message
+          continue
+        }
+        const taskId = persisted[index]?.task_id ?? message.task_id
+        persisted[index] = { ...message, ...(taskId !== undefined ? { task_id: taskId } : {}) }
+      }
+      persistedByChat.set(key, persisted)
       if (unseen.length) await chat.appendMessages(agentRef, chatId, unseen)
     }),
     replaceMessages: vi.fn(async () => undefined),
@@ -160,6 +191,9 @@ export function installMockClerum(): MockClerum {
     },
     hasProgressHandler: (taskId: string) => progressHandlers.has(taskId),
     hasActivityHandler: (hostRef: string) => activityHandlers.has(hostRef),
+    persistedMessages: (agentRef: string, chatId: string) => [
+      ...(persistedByChat.get(persistedKey(agentRef, chatId)) ?? []),
+    ],
   }
 
   Object.defineProperty(window, 'clerum', {

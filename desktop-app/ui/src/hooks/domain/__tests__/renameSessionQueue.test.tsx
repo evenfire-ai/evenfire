@@ -16,6 +16,7 @@ import { parseSessionsListResult } from '../../../../../src/rpcProxyClient'
 import type { ChatIndex } from '../../../../../src/types'
 import { MAX_RENAME_SYNC_ATTEMPTS, deletedChatIdsForScope } from '../useChatListController'
 import { renderController } from './__fixtures__/controllerHarness'
+import { ipcGenericForbidden, ipcHostAccessRevoked, ipcHttpError } from './__fixtures__/ipcErrors'
 import { type MockClerum, installMockClerum, uninstallMockClerum } from './__fixtures__/mockClerum'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -54,7 +55,9 @@ function localIndex(chats: Array<{ id: string; title: string }>): ChatIndex {
 }
 
 describe('scoped deletion visibility', () => {
-  it('filters tombstones by environment, user, and team', () => {
+  // Same identity as main's `sameChatDeletionIdentity`: environment + user. A
+  // deletion confirmed under one team keeps holding after a team switch.
+  it('filters tombstones by environment and user, across team switches', () => {
     const index: ChatIndex = {
       ...localIndex([]),
       deletedChatTombstones: [
@@ -66,30 +69,24 @@ describe('scoped deletion visibility', () => {
           chatId: 'other-environment-delete',
           authorityScope: { environmentKey: 'env-2', userId: 'user-1', teamId: 'team-a' },
         },
+        {
+          chatId: 'other-user-delete',
+          authorityScope: { environmentKey: 'env-1', userId: 'user-2', teamId: 'team-a' },
+        },
       ],
     }
 
+    for (const teamId of ['team-a', 'team-b', null]) {
+      expect(
+        deletedChatIdsForScope(index, { environmentKey: 'env-1', userId: 'user-1', teamId })
+      ).toEqual(['team-a-delete'])
+    }
     expect(
-      deletedChatIdsForScope(index, {
-        environmentKey: 'env-1',
-        userId: 'user-1',
-        teamId: 'team-a',
-      })
-    ).toEqual(['team-a-delete'])
+      deletedChatIdsForScope(index, { environmentKey: 'env-2', userId: 'user-1', teamId: null })
+    ).toEqual(['other-environment-delete'])
     expect(
-      deletedChatIdsForScope(index, {
-        environmentKey: 'env-1',
-        userId: 'user-1',
-        teamId: 'team-b',
-      })
-    ).toEqual([])
-    expect(
-      deletedChatIdsForScope(index, {
-        environmentKey: 'env-1',
-        userId: 'user-1',
-        teamId: null,
-      })
-    ).toEqual([])
+      deletedChatIdsForScope(index, { environmentKey: 'env-1', userId: 'user-2', teamId: 'x' })
+    ).toEqual(['other-user-delete'])
   })
 })
 
@@ -158,45 +155,57 @@ function reportedSessions(chats: Array<{ chatId: string; title?: string }>) {
 }
 
 describe('rename pending queue (spec 15 §2.5)', () => {
+  // R2-B1: the rename and read failures are the real RpcProxyClient rejections
+  // wrapped the way Electron IPC wraps them.
   it.each([
     {
       label: 'exact Host denial',
-      renameError: 'Rename session failed (403): host_access_revoked',
-      readStatus: null,
+      renameError: () => ipcHostAccessRevoked('rpc:renameSession'),
+      readError: null,
       shouldRevoke: true,
       shouldBeUncertain: false,
     },
     {
       label: 'operation-scope denial',
-      renameError: 'Rename session failed (403)',
-      readStatus: null,
+      renameError: () => ipcGenericForbidden('rpc:renameSession'),
+      readError: null,
       shouldRevoke: false,
       shouldBeUncertain: false,
     },
     {
       label: 'read also denied',
-      renameError: 'Rename session failed (403)',
-      readStatus: 403,
+      renameError: () => ipcGenericForbidden('rpc:renameSession'),
+      readError: () => ipcGenericForbidden('rpc:listSessions'),
       shouldRevoke: false,
       shouldBeUncertain: true,
     },
     {
+      label: 'read revoked',
+      renameError: () => ipcGenericForbidden('rpc:renameSession'),
+      readError: () => ipcHostAccessRevoked('rpc:listSessions'),
+      shouldRevoke: true,
+      shouldBeUncertain: false,
+    },
+    {
       label: 'read unavailable',
-      renameError: 'Rename session failed (403)',
-      readStatus: 503,
+      renameError: () => ipcGenericForbidden('rpc:renameSession'),
+      readError: () =>
+        ipcHttpError('rpc:listSessions', 503, 'Service Unavailable', { error: 'unavailable' }),
       shouldRevoke: false,
       shouldBeUncertain: true,
     },
   ])(
     '$label applies the transcript authority decision',
-    async ({ renameError, readStatus, shouldRevoke, shouldBeUncertain }) => {
+    async ({ renameError, readError, shouldRevoke, shouldBeUncertain }) => {
       const revoked = new Set<string>()
       const uncertain = new Set<string>()
+      const renameFailure = await renameError()
+      const readFailure = readError ? await readError() : null
       clerum.chat.getIndex.mockResolvedValue(localIndex([{ id: 'c1', title: 'old' }]))
-      clerum.rpc.renameSession.mockRejectedValue(new Error(renameError))
+      clerum.rpc.renameSession.mockRejectedValue(renameFailure)
       clerum.rpc.listSessions.mockImplementation(
         async (_hostRef: string, _teamId: string | undefined, query?: { limit?: number }) => {
-          if (query?.limit === 1 && readStatus !== null) throw new Error(`${readStatus} response`)
+          if (query?.limit === 1 && readFailure !== null) throw readFailure
           return reportedSessions([{ chatId: 'c1', title: 'old' }])
         }
       )
@@ -211,6 +220,8 @@ describe('rename pending queue (spec 15 §2.5)', () => {
       await act(async () => {
         await result.current.handleRenameChatForAgent('agent-x', 'c1', 'new')
       })
+      // Liveness witness: the rename reached the producer.
+      expect(clerum.rpc.renameSession).toHaveBeenCalledWith('agent-x', 'agent-x', 'c1', 'new')
       expect(revoked.has('agent-x')).toBe(shouldRevoke)
       expect(uncertain.has('agent-x')).toBe(shouldBeUncertain)
       if (shouldRevoke) expect(result.current.chatList).toEqual([])

@@ -365,6 +365,14 @@ interface UseAgentChatControllerParams {
   onHostAuthorityUncertain: (agentRef: string) => void
   isHostAccessBlocked: (agentRef: string) => boolean
   getHostAuthorityEpoch: (agentRef: string) => number
+  /** Changes whenever a Host is held, released, or the authority scope resets. */
+  hostAuthorityRevision: number
+  /**
+   * The authenticated principal's own team (`me.teamId`), with no directory
+   * fallback. The chat delete fence and its tombstones are scoped to it, the
+   * same value AppService's `getChatDeletionFenceAuthority` uses.
+   */
+  chatAuthorityTeamId: string
 }
 
 export function useAgentChatController({
@@ -388,17 +396,20 @@ export function useAgentChatController({
   onHostAuthorityUncertain,
   isHostAccessBlocked,
   getHostAuthorityEpoch,
+  hostAuthorityRevision,
+  chatAuthorityTeamId,
 }: UseAgentChatControllerParams) {
   const chatStore = useChatStore()
   const userScopeKey = currentUserId ?? 'unknown-user'
   const normalizedTeamId = String(currentTeamId || '').trim() || null
+  const fenceTeamId = chatAuthorityTeamId.trim() || null
   const authorityScope = useMemo(
     () => ({
       environmentKey: currentEnvironmentKey,
       userId: userScopeKey,
-      teamId: normalizedTeamId,
+      teamId: fenceTeamId,
     }),
-    [currentEnvironmentKey, normalizedTeamId, userScopeKey]
+    [currentEnvironmentKey, fenceTeamId, userScopeKey]
   )
   const authenticatedScope = `${currentEnvironmentKey}:${userScopeKey}:${normalizedTeamId ?? ''}`
 
@@ -454,6 +465,7 @@ export function useAgentChatController({
     host: chatListHostRef,
     isHostAccessBlocked,
     getHostAuthorityEpoch,
+    hostAuthorityRevision,
     onHostAccessRevoked: onCatalogHostAccessRevoked,
     onHostAuthorityUncertain: onCatalogHostAuthorityUncertain,
   })
@@ -1094,6 +1106,7 @@ export function useAgentChatController({
       },
       shouldAutoSelectLatest: () => navItem === DESKTOP_ROUTES.chat,
       pushToast,
+      agentDisplayName,
     }
   })
 

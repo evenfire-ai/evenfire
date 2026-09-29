@@ -15,7 +15,9 @@ import {
   resetComposerDraftStore,
   setComposerDraft,
 } from '@lib/composerDraftStore'
+import { localIndex, serverSessions } from './__fixtures__/catalogFixtures'
 import { renderController } from './__fixtures__/controllerHarness'
+import { ipcGenericForbidden, ipcHostAccessRevoked } from './__fixtures__/ipcErrors'
 import { type MockClerum, installMockClerum, uninstallMockClerum } from './__fixtures__/mockClerum'
 
 let clerum: MockClerum
@@ -1093,6 +1095,110 @@ describe('switchToChat (unified, D.4)', () => {
       }
     }
   )
+
+  // R1-M8: the two hold kinds share one tear-down of the Host's live work and
+  // differ only in what they hide. An uncertain hold (401 after refresh, or a 403
+  // without a revocation code) must not destroy state the user may still own
+  // once the hold is released: the chat and its list stay. The deselection
+  // itself is the `onHostAuthorityUncertain` callback (`useAppController`).
+  it('uncertain host-access hold releases the tracker, resets the chat state and deselects the agent, but does not hide the agent or clear the list; a confirmed revocation does', async () => {
+    const chatKey = makeTaskKey('agent-x', 'older-hold')
+    const runScenario = async (readError: () => Promise<Error>) => {
+      const revoked = new Set<string>()
+      const uncertain = new Set<string>()
+      clerum.rpc.loadSessionMessages.mockReset()
+      clerum.chat.getIndex.mockResolvedValue(localIndex([{ id: 'older-hold', title: 'Held chat' }]))
+      clerum.chat.loadMessages.mockResolvedValue([])
+      clerum.rpc.listSessions.mockResolvedValue(
+        serverSessions([{ agent: 'agent-x', chatId: 'older-hold' }])
+      )
+      clerum.rpc.loadSessionMessages.mockImplementation(
+        async (_hostRef, _agent, chatId, _teamId, query?: { beforeTurn?: number }) => {
+          if (query?.beforeTurn !== undefined) throw await readError()
+          return {
+            agent: 'agent-x',
+            chatId,
+            state: 'processing',
+            activeTaskId: 'task-hold',
+            turns: [turn(5, 'question')],
+            hasMoreBefore: true,
+            hasMoreAfter: false,
+          }
+        }
+      )
+      // Stable callbacks, like the production `useCallback`s: a new
+      // `isHostAccessBlocked` identity per render would re-run the
+      // agent-selection effect, which clears the list of a blocked Host by itself.
+      const isHostAccessBlocked = (agentRef: string) =>
+        revoked.has(agentRef) || uncertain.has(agentRef)
+      const controller = renderController({
+        onHostAccessRevoked: agentRef => revoked.add(agentRef),
+        onHostAuthorityUncertain: agentRef => uncertain.add(agentRef),
+        isHostAccessBlocked,
+      })
+      await settleMount()
+      await waitFor(() =>
+        expect(controller.result.current.chatList.map(chat => chat.id)).toContain('older-hold')
+      )
+      await waitFor(() =>
+        expect(controller.result.current.latestChatSessions.map(chat => chat.id)).toContain(
+          'older-hold'
+        )
+      )
+      await act(async () => {
+        await controller.result.current.switchToChat('agent-x', 'older-hold')
+      })
+      // Liveness: the tracker is following the task, the FSM tracks the chat and
+      // an older page exists, so the tear-down below has something to undo.
+      await waitFor(() => expect(clerum.hasProgressHandler('task-hold')).toBe(true))
+      const phaseBefore = controller.result.current.sessionFsmStore.getState(chatKey)?.phase
+      expect(phaseBefore).toBeDefined()
+      expect(phaseBefore).not.toBe('idle')
+      expect(controller.result.current.hasOlderMessages).toBe(true)
+
+      await act(async () => {
+        await controller.result.current.handleLoadOlderMessages()
+      })
+      const observed = {
+        revoked: revoked.has('agent-x'),
+        uncertain: uncertain.has('agent-x'),
+        trackerFollowsTask: clerum.hasProgressHandler('task-hold'),
+        phaseAfter: controller.result.current.sessionFsmStore.getState(chatKey)?.phase,
+        activeChatId: controller.result.current.activeChatId,
+      }
+      // The published lists mask a held Host on their own. Lift the hold to read
+      // the state underneath: what the hold tore down is what is gone.
+      revoked.clear()
+      uncertain.clear()
+      act(() => controller.rerender())
+      const unmasked = {
+        chatListIds: controller.result.current.chatList.map(chat => chat.id),
+        latestIds: controller.result.current.latestChatSessions.map(chat => chat.id),
+      }
+      controller.unmount()
+      return { phaseBefore, ...observed, ...unmasked }
+    }
+
+    const held = await runScenario(() => ipcGenericForbidden('rpc:loadSessionMessages'))
+    expect(held.uncertain).toBe(true)
+    expect(held.revoked).toBe(false)
+    expect(held.trackerFollowsTask).toBe(false)
+    expect(held.phaseAfter).not.toBe(held.phaseBefore)
+    expect(held.chatListIds).toEqual(['older-hold'])
+    expect(held.latestIds).toEqual(['older-hold'])
+    expect(held.activeChatId).toBe('older-hold')
+
+    const revokedRun = await runScenario(() => ipcHostAccessRevoked('rpc:loadSessionMessages'))
+    expect(revokedRun.revoked).toBe(true)
+    expect(revokedRun.uncertain).toBe(false)
+    // Same tear-down of the Host's live work...
+    expect(revokedRun.trackerFollowsTask).toBe(false)
+    expect(revokedRun.phaseAfter).not.toBe(revokedRun.phaseBefore)
+    // ...plus the hide: the list is cleared and the chat is closed.
+    expect(revokedRun.chatListIds).toEqual([])
+    expect(revokedRun.latestIds).toEqual([])
+    expect(revokedRun.activeChatId).toBeNull()
+  })
 
   it('re-fetches the newest cached turn so a response completed after caching is recovered', async () => {
     clerum.chat.loadMessages.mockResolvedValue([

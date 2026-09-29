@@ -27,6 +27,7 @@ import type { NavItem } from '../../../uiTypes'
 import { useAgentChatController } from '../useAgentChatController'
 // React 18/19 needs this flag for act() to flush effects in the test env.
 import { useHostPrewarmController } from '../useHostPrewarmController'
+import { useHarnessHostAuthority } from './__fixtures__/hostAuthorityHarness'
 import { installMockClerum, uninstallMockClerum } from './__fixtures__/mockClerum'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -81,27 +82,25 @@ interface HarnessProps {
   isAuthenticated: boolean
   navItem: NavItem
 }
-const onHostAccessRevoked = () => {}
-const onHostAuthorityUncertain = () => {}
-const isHostAccessBlocked = () => false
-const getHostAuthorityEpoch = () => 0
-
 /** Both real hooks, mounted together under the task-tracker the chat controller needs. */
 function useBothControllers({ selectedAgent, agentNames, isAuthenticated, navItem }: HarnessProps) {
   useHostPrewarmController({ agentNames, isAuthenticated })
+  const hostAuthority = useHarnessHostAuthority()
   return useAgentChatController({
     selectedAgent,
     agentNames,
     currentTeamId: 'team-1',
+    chatAuthorityTeamId: 'team-1',
     currentEnvironmentKey: 'env-test',
     currentTeamName: 'Team 1',
     isAuthenticated,
     loadMenuData: true,
     navItem,
-    onHostAccessRevoked,
-    onHostAuthorityUncertain,
-    isHostAccessBlocked,
-    getHostAuthorityEpoch,
+    onHostAccessRevoked: hostAuthority.onHostAccessRevoked,
+    onHostAuthorityUncertain: hostAuthority.onHostAuthorityUncertain,
+    isHostAccessBlocked: hostAuthority.isHostAccessBlocked,
+    getHostAuthorityEpoch: hostAuthority.getHostAuthorityEpoch,
+    hostAuthorityRevision: hostAuthority.revision,
     ...stableCallbacks,
   })
 }

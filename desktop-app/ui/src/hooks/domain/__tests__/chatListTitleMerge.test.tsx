@@ -12,10 +12,18 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { makeTaskKey } from '@contexts/AgentTaskTrackerContext'
 import { act, waitFor } from '@testing-library/react'
-import { parseSessionsListResult } from '../../../../../src/rpcProxyClient'
-import type { ChatIndex, SessionsListResult } from '../../../../../src/types'
-import { httpErrorStatus } from '../../../lib/format'
+import type { SessionsListResult } from '../../../../../src/types'
+import { httpErrorStatus, isConfirmedHostAccessRevoked } from '../../../lib/format'
+import { deferred, localIndex, serverSessions } from './__fixtures__/catalogFixtures'
 import { renderController } from './__fixtures__/controllerHarness'
+import {
+  ipcGenericForbidden,
+  ipcHostAccessDenied,
+  ipcHostAccessRevoked,
+  ipcHostWaking,
+  ipcHttpError,
+  ipcServerErrorMentioning403,
+} from './__fixtures__/ipcErrors'
 import { type MockClerum, installMockClerum, uninstallMockClerum } from './__fixtures__/mockClerum'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -31,62 +39,79 @@ afterEach(() => {
   uninstallMockClerum()
 })
 
-const NOW = '2026-09-12T00:00:00.000Z'
-
 describe('HTTP status parsing through Electron IPC', () => {
   it.each([
-    ['Error invoking remote method: Error: 403 Forbidden: host_access_revoked', 403],
-    ['Error invoking remote method: Error: 401 Unauthorized', 401],
-    ['Error invoking remote method: Error: 503 Service Unavailable: upstream mentioned 403', 503],
+    [
+      "Error invoking remote method 'rpc:listSessions': Error: 403 Forbidden: host_access_revoked",
+      403,
+    ],
+    ["Error invoking remote method 'rpc:listSessions': Error: 401 Unauthorized", 401],
+    [
+      "Error invoking remote method 'rpc:listSessions': Error: 503 Service Unavailable: upstream mentioned 403",
+      503,
+    ],
     ["Error invoking remote method 'rpc:invoke': Error: 403 Forbidden", 403],
     ['request to support-401 failed', undefined],
   ])('parses %s as %s', (message, expected) => {
     expect(httpErrorStatus(message)).toBe(expected)
   })
+
+  // Electron never emits the wrapper without the quoted channel, so a
+  // quote-less prefix is not stripped and no status is read through it.
+  it('does not strip a wrapper that lacks the quoted channel Electron always emits', () => {
+    expect(
+      httpErrorStatus("Error invoking remote method 'rpc:listSessions': Error: 403 Forbidden")
+    ).toBe(403)
+    expect(httpErrorStatus('Error invoking remote method: Error: 403 Forbidden')).toBeUndefined()
+  })
+
+  // R2-B1 / NEW-dui-3: every shape the real producers emit, wrapped by IPC.
+  it.each([
+    ['listSessions revoked', () => ipcHostAccessRevoked('rpc:listSessions'), 403, true],
+    [
+      'loadSessionMessages revoked',
+      () => ipcHostAccessRevoked('rpc:loadSessionMessages'),
+      403,
+      true,
+    ],
+    ['renameSession revoked', () => ipcHostAccessRevoked('rpc:renameSession'), 403, true],
+    ['invokeHostMessage revoked', () => ipcHostAccessRevoked('rpc:invokeHostMessage'), 403, true],
+    ['getTaskResult revoked', () => ipcHostAccessRevoked('rpc:getTaskResult'), 403, true],
+    ['listSessions host_access_denied', () => ipcHostAccessDenied('rpc:listSessions'), 403, false],
+    ['List sessions failed (403)', () => ipcGenericForbidden('rpc:listSessions'), 403, false],
+    ['Rename session failed (403)', () => ipcGenericForbidden('rpc:renameSession'), 403, false],
+    ['ApiError 403 Forbidden: …', () => ipcGenericForbidden('rpc:invokeHostMessage'), 403, false],
+    [
+      'ApiError 401 Unauthorized: …',
+      () => ipcHttpError('rpc:getTaskResult', 401, 'Unauthorized', { error: 'expired' }),
+      401,
+      false,
+    ],
+    [
+      'List sessions 503 body mentions 403',
+      () => ipcServerErrorMentioning403('rpc:listSessions'),
+      503,
+      false,
+    ],
+    [
+      'ApiError 503 body mentions 403',
+      () => ipcServerErrorMentioning403('rpc:invokeHostMessage'),
+      503,
+      false,
+    ],
+    [
+      'host_waking for support-401',
+      async () => ipcHostWaking('rpc:invokeHostMessage', 'support-401'),
+      undefined,
+      false,
+    ],
+  ])('classifies the real %s', async (_label, build, status, revoked) => {
+    const error = await build()
+    expect(error.message).toMatch(/^Error invoking remote method 'rpc:[A-Za-z]+': Error: /)
+    expect(httpErrorStatus(error)).toBe(status)
+    expect(isConfirmedHostAccessRevoked(error)).toBe(revoked)
+  })
 })
-
-/** Parse a raw wire payload through the real producer parser (T1). */
-function serverSessions(
-  items: Array<{ agent: string; chatId: string; title?: string }>
-): SessionsListResult {
-  return parseSessionsListResult({
-    items: items.map(i => ({
-      agent: i.agent,
-      chatId: i.chatId,
-      turnCount: 1,
-      lastActivityAt: NOW,
-      ...(i.title !== undefined ? { title: i.title } : {}),
-    })),
-  })
-}
-
-function localIndex(
-  chats: Array<{ id: string; title: string }>,
-  deletedChatIds: string[] = []
-): ChatIndex {
-  const authorityScope = { environmentKey: 'env-test', userId: 'unknown-user', teamId: 'team-1' }
-  return {
-    version: 1,
-    lastActiveChatId: null,
-    onboardingDismissed: false,
-    chats: chats.map(c => ({
-      id: c.id,
-      title: c.title,
-      createdAt: NOW,
-      updatedAt: NOW,
-      messageCount: 0,
-    })),
-    deletedChatTombstones: deletedChatIds.map(chatId => ({ chatId, authorityScope })),
-  }
-}
-
-function deferred<T>() {
-  let resolve!: (value: T) => void
-  const promise = new Promise<T>(finish => {
-    resolve = finish
-  })
-  return { promise, resolve }
-}
 
 describe('chat list title merge (spec 15 §2.2, cases A–D)', () => {
   it('case A: server-only session with a title shows the server title (no placeholder)', async () => {
@@ -223,7 +248,6 @@ describe('confirmed deletion catalog protection', () => {
 
 describe('revoked host catalog protection', () => {
   it('filters held-host sessions from the sidebar while retaining them for recovery', async () => {
-    const blocked = new Set<string>()
     clerum.chat.getIndex.mockResolvedValue(localIndex([]))
     clerum.rpc.listSessions.mockResolvedValue(
       serverSessions([{ agent: 'agent-a', chatId: 'cached-session', title: 'Private title' }])
@@ -231,7 +255,6 @@ describe('revoked host catalog protection', () => {
     const controller = renderController({
       selectedAgent: null,
       agentNames: ['agent-a'],
-      isHostAccessBlocked: agentRef => blocked.has(agentRef),
     })
 
     await waitFor(() =>
@@ -240,15 +263,16 @@ describe('revoked host catalog protection', () => {
       ])
     )
 
-    blocked.add('agent-a')
-    controller.rerender()
+    controller.hostAuthority.hold('agent-a', 'uncertain')
+    expect(controller.hostAuthority.isBlocked('agent-a')).toBe(true)
     expect(controller.result.current.latestChatSessions).toEqual([])
 
-    blocked.delete('agent-a')
-    controller.rerender()
-    expect(controller.result.current.latestChatSessions.map(session => session.id)).toEqual([
-      'cached-session',
-    ])
+    controller.hostAuthority.release('agent-a')
+    await waitFor(() =>
+      expect(controller.result.current.latestChatSessions.map(session => session.id)).toEqual([
+        'cached-session',
+      ])
+    )
   })
 
   it('hides a nonselected host after 403 and blocks direct reselection', async () => {
@@ -273,7 +297,7 @@ describe('revoked host catalog protection', () => {
     )
 
     clerum.rpc.loadSessionMessages.mockRejectedValue(
-      new Error('403 forbidden: host_access_revoked')
+      await ipcHostAccessRevoked('rpc:loadSessionMessages')
     )
     await expect(
       controller.result.current.reconcileChat(makeTaskKey('agent-y', 'protected-y'), {
@@ -296,54 +320,89 @@ describe('revoked host catalog protection', () => {
     )
   })
 
-  it.each([401, 403])(
-    'blocks the Host after a generic %i catalog denial survives the forced retry',
-    async status => {
-      const blocked = new Set<string>()
+  it.each([
+    [
+      'List sessions failed (401)',
+      () => ipcHttpError('rpc:listSessions', 401, 'Unauthorized', { error: 'expired' }),
+    ],
+    ['List sessions failed (403)', () => ipcGenericForbidden('rpc:listSessions')],
+    ['403 Forbidden: host_access_denied', () => ipcHostAccessDenied('rpc:listSessions')],
+  ])(
+    'holds the Host as uncertain after a generic %s survives the forced retry',
+    async (_label, build) => {
+      const revoked = new Set<string>()
+      const uncertain = new Set<string>()
       clerum.chat.getIndex.mockResolvedValue(
         localIndex([{ id: 'protected-a', title: 'Cached protected chat' }])
       )
-      clerum.rpc.listSessions.mockRejectedValue(new Error(`${status} forbidden`))
+      clerum.rpc.listSessions.mockRejectedValue(await build())
       const { result } = renderController({
         selectedAgent: null,
         agentNames: ['agent-a'],
-        onHostAccessRevoked: agentRef => blocked.add(agentRef),
-        onHostAuthorityUncertain: agentRef => blocked.add(agentRef),
-        isHostAccessBlocked: agentRef => blocked.has(agentRef),
+        onHostAccessRevoked: agentRef => revoked.add(agentRef),
+        onHostAuthorityUncertain: agentRef => uncertain.add(agentRef),
+        isHostAccessBlocked: agentRef => revoked.has(agentRef) || uncertain.has(agentRef),
       })
 
-      await waitFor(() => expect(blocked.has('agent-a')).toBe(true))
+      await waitFor(() => expect(uncertain.has('agent-a')).toBe(true))
+      expect(revoked.has('agent-a')).toBe(false)
       expect(clerum.rpc.listSessions).toHaveBeenCalledTimes(2)
       expect(result.current.latestChatSessions.some(chat => chat.id === 'protected-a')).toBe(false)
     }
   )
 
+  it('revokes the Host on the first confirmed catalog denial without a forced retry', async () => {
+    const revoked = new Set<string>()
+    const uncertain = new Set<string>()
+    clerum.chat.getIndex.mockResolvedValue(
+      localIndex([{ id: 'protected-a', title: 'Cached protected chat' }])
+    )
+    clerum.rpc.listSessions.mockRejectedValue(await ipcHostAccessRevoked('rpc:listSessions'))
+    const { result, spies } = renderController({
+      selectedAgent: null,
+      agentNames: ['agent-a'],
+      onHostAccessRevoked: agentRef => revoked.add(agentRef),
+      onHostAuthorityUncertain: agentRef => uncertain.add(agentRef),
+      isHostAccessBlocked: agentRef => revoked.has(agentRef) || uncertain.has(agentRef),
+    })
+
+    await waitFor(() => expect(revoked.has('agent-a')).toBe(true))
+    expect(uncertain.has('agent-a')).toBe(false)
+    expect(clerum.rpc.listSessions).toHaveBeenCalledTimes(1)
+    expect(result.current.latestChatSessions.some(chat => chat.id === 'protected-a')).toBe(false)
+    expect(spies.pushToast).not.toHaveBeenCalledWith(expect.stringContaining('Chat list'), 'info')
+  })
+
   it('keeps the selected agent and cached chat list after a 503 catalog failure', async () => {
-    const blocked = new Set<string>()
     clerum.chat.getIndex.mockResolvedValue(localIndex([{ id: 'cached-a', title: 'Cached chat' }]))
-    clerum.rpc.listSessions.mockRejectedValue(new Error('503 Service Unavailable'))
+    clerum.rpc.listSessions.mockRejectedValue(
+      await ipcHttpError('rpc:listSessions', 503, 'Service Unavailable', {
+        error: 'upstream unavailable',
+      })
+    )
     const controller = renderController({
       selectedAgent: 'agent-a',
       agentNames: ['agent-a'],
-      onHostAccessRevoked: agentRef => blocked.add(agentRef),
-      onHostAuthorityUncertain: agentRef => blocked.add(agentRef),
-      isHostAccessBlocked: agentRef => blocked.has(agentRef),
+      // R2-L4: the toast names the Host the way the catalog displays it.
+      agentDisplayName: agentRef => (agentRef === 'agent-a' ? 'Research Agent' : agentRef),
     })
     await waitFor(() => expect(clerum.rpc.listSessions).toHaveBeenCalled())
     await waitFor(() =>
       expect(controller.result.current.chatList.some(chat => chat.id === 'cached-a')).toBe(true)
     )
-    expect(blocked.has('agent-a')).toBe(false)
+    expect(controller.hostAuthority.isBlocked('agent-a')).toBe(false)
     await waitFor(() => expect(controller.spies.pushToast).toHaveBeenCalledTimes(1))
     expect(controller.spies.pushToast).toHaveBeenCalledWith(
-      'Chat list for agent-a is offline. Showing saved chats.',
+      'Chat list for Research Agent is offline. Showing saved chats.',
       'info'
     )
   })
 
   it('does not show the offline toast for a client-side catalog error', async () => {
     clerum.chat.getIndex.mockResolvedValue(localIndex([{ id: 'cached-a', title: 'Cached chat' }]))
-    clerum.rpc.listSessions.mockRejectedValue(new Error('400 Bad Request: invalid cursor'))
+    clerum.rpc.listSessions.mockRejectedValue(
+      await ipcHttpError('rpc:listSessions', 400, 'Bad Request', { error: 'invalid cursor' })
+    )
     const controller = renderController({
       selectedAgent: 'agent-a',
       agentNames: ['agent-a'],
@@ -359,14 +418,16 @@ describe('revoked host catalog protection', () => {
     )
   })
 
-  it('clears a rejected load-more cursor after a client-side cursor error', async () => {
+  // NEW-dui-2: every non-auth, non-429 client error ends the page chain.
+  it.each([
+    [400, 'Bad Request', { error: 'Invalid sessions cursor' }],
+    [404, 'Not Found', { error: 'cursor session not found' }],
+  ])('clears a rejected load-more cursor after a terminal %s', async (status, statusText, body) => {
+    const rejection = await ipcHttpError('rpc:listSessions', status, statusText, body)
     clerum.rpc.listSessions.mockImplementation(
       async (_agentRef: string, _teamId: string | undefined, query?: { cursor?: string }) => {
-        if (query?.cursor) throw new Error('400 Bad Request: Invalid sessions cursor')
-        return {
-          ...serverSessions([{ agent: 'agent-x', chatId: 'remote-page-1' }]),
-          nextCursor: 'cursor-invalid',
-        }
+        if (query?.cursor) throw rejection
+        return serverSessions([{ agent: 'agent-x', chatId: 'remote-page-1' }], 'cursor-invalid')
       }
     )
     const controller = renderController()
@@ -375,42 +436,67 @@ describe('revoked host catalog protection', () => {
     await act(async () => {
       await controller.result.current.loadMoreChatSessions()
     })
-
     expect(controller.result.current.chatListHasMoreRemoteSessions).toBe(false)
+
+    // The cursor is gone: a second request never re-sends it.
+    await act(async () => {
+      await controller.result.current.loadMoreChatSessions()
+    })
     expect(
       clerum.rpc.listSessions.mock.calls.filter(
         call => (call[2] as { cursor?: string } | undefined)?.cursor === 'cursor-invalid'
       )
     ).toHaveLength(1)
+    expect(controller.spies.pushToast).not.toHaveBeenCalledWith(
+      expect.stringContaining("Couldn't load more chats"),
+      'info'
+    )
   })
 
-  it('preserves the load-more cursor during a transient rate limit', async () => {
+  // NEW-dui-2: 429 and 5xx keep the cursor, tell the user once per attempt and
+  // never retry on their own.
+  it.each([
+    [429, 'Too Many Requests'],
+    [503, 'Service Unavailable'],
+  ])('preserves the load-more cursor after a retryable %s', async (status, statusText) => {
+    const rejection = await ipcHttpError('rpc:listSessions', status, statusText, {
+      error: 'try later',
+    })
     clerum.rpc.listSessions.mockImplementation(
       async (_agentRef: string, _teamId: string | undefined, query?: { cursor?: string }) => {
-        if (query?.cursor) throw new Error('429 Too Many Requests')
-        return {
-          ...serverSessions([{ agent: 'agent-x', chatId: 'remote-page-1' }]),
-          nextCursor: 'cursor-rate-limited',
-        }
+        if (query?.cursor) throw rejection
+        return serverSessions([{ agent: 'agent-x', chatId: 'remote-page-1' }], 'cursor-retryable')
       }
     )
-    const controller = renderController()
+    const controller = renderController({
+      agentDisplayName: agentRef => (agentRef === 'agent-x' ? 'Agent X' : agentRef),
+    })
 
     await waitFor(() => expect(controller.result.current.chatListHasMoreRemoteSessions).toBe(true))
     await act(async () => {
       await controller.result.current.loadMoreChatSessions()
     })
     expect(controller.result.current.chatListHasMoreRemoteSessions).toBe(true)
+    expect(controller.spies.pushToast).toHaveBeenCalledTimes(1)
+    expect(controller.spies.pushToast).toHaveBeenCalledWith(
+      "Couldn't load more chats for Agent X. Try again shortly.",
+      'info'
+    )
 
     await act(async () => {
       await controller.result.current.loadMoreChatSessions()
     })
+    await act(async () => {
+      await new Promise(resolve => setTimeout(resolve, 20))
+    })
 
+    // Exactly the two user-initiated attempts: no automatic retry loop.
     expect(
       clerum.rpc.listSessions.mock.calls.filter(
-        call => (call[2] as { cursor?: string } | undefined)?.cursor === 'cursor-rate-limited'
+        call => (call[2] as { cursor?: string } | undefined)?.cursor === 'cursor-retryable'
       )
     ).toHaveLength(2)
+    expect(controller.spies.pushToast).toHaveBeenCalledTimes(2)
   })
 })
 

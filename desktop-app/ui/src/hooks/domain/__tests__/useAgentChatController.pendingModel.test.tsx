@@ -17,12 +17,9 @@ import { useComposerDraft } from '@hooks/useComposerDraft'
 import { resetComposerDraftStore } from '@lib/composerDraftStore'
 import { resetHostModelSelectionStore } from '@lib/hostModelSelectionStore'
 import type { TaskProgressStreamEvent } from '../../../../../src/types'
+import { useHarnessHostAuthority } from './__fixtures__/hostAuthorityHarness'
 
 type ProgressHandler = (event: TaskProgressStreamEvent) => void | Promise<void>
-const onHostAccessRevoked = () => {}
-const onHostAuthorityUncertain = () => {}
-const isHostAccessBlocked = () => false
-const getHostAuthorityEpoch = () => 0
 
 function createChatMeta(chatId: string) {
   const now = new Date().toISOString()
@@ -130,19 +127,22 @@ function installClerumHarness() {
 }
 
 function AgentChatHarness() {
+  const hostAuthority = useHarnessHostAuthority()
   const vm = useAgentChatController({
     selectedAgent: 'trader',
     agentNames: ['trader'],
     currentTeamId: 'team-1',
+    chatAuthorityTeamId: 'team-1',
     currentEnvironmentKey: 'env-test',
     currentTeamName: 'Team One',
     isAuthenticated: true,
     loadMenuData: true,
     navItem: 'chat',
-    onHostAccessRevoked,
-    onHostAuthorityUncertain,
-    isHostAccessBlocked,
-    getHostAuthorityEpoch,
+    onHostAccessRevoked: hostAuthority.onHostAccessRevoked,
+    onHostAuthorityUncertain: hostAuthority.onHostAuthorityUncertain,
+    isHostAccessBlocked: hostAuthority.isHostAccessBlocked,
+    getHostAuthorityEpoch: hostAuthority.getHostAuthorityEpoch,
+    hostAuthorityRevision: hostAuthority.revision,
     pushToast: vi.fn(),
     pushNotification: vi.fn(),
     agentDisplayName: (agentName: string) => agentName,

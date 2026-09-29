@@ -11,6 +11,11 @@ import type {
 import { AGENT_WORKSPACE_ROUTES, DESKTOP_ROUTES } from '../constants/navigation'
 import { pickLatestAgent } from '../lib/agents'
 import { toPrettyJson } from '../lib/format'
+import {
+  type HostAuthorityHoldKind,
+  type HostAuthorityStore,
+  createHostAuthorityStore,
+} from '../lib/hostAuthorityStore'
 import { selectUnauthenticatedView } from '../lib/unauthenticatedView'
 import { summarizeWorkflowResource } from '../lib/workflows'
 import type {
@@ -69,13 +74,6 @@ const DENY_REASON_BY_SOURCE: Record<ApprovalDecisionTarget['source'], string> = 
   // U5: connect_completed is only ever an approve/resume — this deny reason is
   // unreachable, present solely to satisfy the exhaustive source map.
   connect_completed: 'User denied',
-}
-
-export function getHostAuthorityEpochForAgent(
-  epochByAgent: ReadonlyMap<string, number>,
-  agentRef: string
-): number {
-  return epochByAgent.get(agentRef) ?? 0
 }
 
 export async function loadWorkflowRunsWithArtifactsForWorkflowTarget(
@@ -219,7 +217,12 @@ export function useAppController() {
   // here (see refreshAuthenticatedData / handleLogout / switchTeamForWorkspace).
   const connectorsData = useConnectorsController()
   const teamsData = useTeamsDataController()
-  const currentTeamId = auth.me?.teamId || teamsData.currentTeamId || ''
+  // The authenticated principal's own team: the ONE place `me.teamId` is read.
+  // The chat-list cache scope (`currentTeamId`) may fall back to the display
+  // directory when it is empty; the delete fence (`chatAuthorityTeamId`) never
+  // does, because a directory team was never proven to be the session's.
+  const principalTeamId = auth.me?.teamId ?? ''
+  const currentTeamId = principalTeamId || teamsData.currentTeamId || ''
   const availableTeamIds = useMemo(() => teamsData.teams.map(team => team.id), [teamsData.teams])
   const authenticatedPrincipalIdentity =
     auth.isAuthenticated && auth.me
@@ -316,44 +319,34 @@ export function useAppController() {
   const authorityScope = `${auth.runtimeConfigState?.envKey ?? ''}:${auth.isAuthenticated}:${authenticatedPrincipalIdentity ?? ''}:${currentTeamId}`
   const authorityScopeRef = useRef(authorityScope)
   authorityScopeRef.current = authorityScope
-  const hostAuthorityEpochRef = useRef(0)
-  const hostAuthorityEpochByAgentRef = useRef(new Map<string, number>())
   const navigationIntentEpochRef = useRef(0)
-  const blockedHostsRef = useRef(
-    new Map<string, { kind: 'revoked' | 'uncertain'; epoch: number }>()
-  )
+  // Lazy-init: the factory must run once per mount, like the FSM store.
+  const hostAuthorityRef = useRef<HostAuthorityStore | null>(null)
+  if (!hostAuthorityRef.current) hostAuthorityRef.current = createHostAuthorityStore()
+  const hostAuthority = hostAuthorityRef.current
   const [hostAuthorityRevision, setHostAuthorityRevision] = useState(0)
   const selectedAgentRef = useRef(nav.selectedAgent)
   selectedAgentRef.current = nav.selectedAgent
   const isHostAccessBlocked = useCallback(
-    (agentRef: string) => blockedHostsRef.current.has(agentRef),
-    []
+    (agentRef: string) => hostAuthority.isBlocked(agentRef),
+    [hostAuthority]
   )
   const getHostAuthorityEpoch = useCallback(
-    (agentRef: string) =>
-      getHostAuthorityEpochForAgent(hostAuthorityEpochByAgentRef.current, agentRef),
-    []
+    (agentRef: string) => hostAuthority.getEpoch(agentRef),
+    [hostAuthority]
   )
   useEffect(() => {
-    blockedHostsRef.current.clear()
-    hostAuthorityEpochRef.current += 1
-    hostAuthorityEpochByAgentRef.current.clear()
+    hostAuthority.reset()
     setHostAuthorityRevision(revision => revision + 1)
-  }, [authorityScope])
+  }, [authorityScope, hostAuthority])
   const blockHostAccess = useCallback(
-    (agentRef: string, kind: 'revoked' | 'uncertain') => {
-      const existing = blockedHostsRef.current.get(agentRef)
-      if (existing?.kind === 'revoked' && kind === 'uncertain') return
-      blockedHostsRef.current.set(agentRef, {
-        kind,
-        epoch: ++hostAuthorityEpochRef.current,
-      })
-      hostAuthorityEpochByAgentRef.current.set(agentRef, hostAuthorityEpochRef.current)
+    (agentRef: string, kind: HostAuthorityHoldKind) => {
+      if (!hostAuthority.hold(agentRef, kind)) return
       setHostAuthorityRevision(revision => revision + 1)
       if (selectedAgentRef.current === agentRef) nav.setSelectedAgent(null)
       void agentsData.refresh()
     },
-    [agentsData.refresh, nav.setSelectedAgent]
+    [agentsData.refresh, hostAuthority, nav.setSelectedAgent]
   )
   const onHostAccessRevoked = useCallback(
     (agentRef: string) => blockHostAccess(agentRef, 'revoked'),
@@ -363,26 +356,23 @@ export function useAppController() {
     (agentRef: string) => blockHostAccess(agentRef, 'uncertain'),
     [blockHostAccess]
   )
-  const verifyHostAccess = useCallback(async (agentRef: string): Promise<boolean> => {
-    const blocked = blockedHostsRef.current.get(agentRef)
-    if (!blocked) return true
-    const scope = authorityScopeRef.current
-    const epoch = blocked.epoch
-    try {
-      await window.clerum.rpc.listSessions(agentRef, undefined, { agent: agentRef, limit: 1 })
-    } catch {
-      return false
-    }
-    if (
-      authorityScopeRef.current !== scope ||
-      blockedHostsRef.current.get(agentRef)?.epoch !== epoch
-    )
-      return false
-    blockedHostsRef.current.delete(agentRef)
-    hostAuthorityEpochByAgentRef.current.set(agentRef, ++hostAuthorityEpochRef.current)
-    setHostAuthorityRevision(revision => revision + 1)
-    return true
-  }, [])
+  const verifyHostAccess = useCallback(
+    async (agentRef: string): Promise<boolean> => {
+      const heldAtEpoch = hostAuthority.heldAtEpoch(agentRef)
+      if (heldAtEpoch === undefined) return true
+      const scope = authorityScopeRef.current
+      try {
+        await window.clerum.rpc.listSessions(agentRef, undefined, { agent: agentRef, limit: 1 })
+      } catch {
+        return false
+      }
+      if (authorityScopeRef.current !== scope || !hostAuthority.release(agentRef, heldAtEpoch))
+        return false
+      setHostAuthorityRevision(revision => revision + 1)
+      return true
+    },
+    [hostAuthority]
+  )
   const chat = useAgentChatController({
     selectedAgent: nav.selectedAgent,
     agentNames: agentsData.agentNames,
@@ -404,6 +394,8 @@ export function useAppController() {
     onHostAuthorityUncertain,
     isHostAccessBlocked,
     getHostAuthorityEpoch,
+    hostAuthorityRevision,
+    chatAuthorityTeamId: principalTeamId,
   })
 
   // §4.7.4: the ONE central approval-decision function, bound to the chat

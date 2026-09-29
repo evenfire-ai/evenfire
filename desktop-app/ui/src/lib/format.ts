@@ -159,6 +159,23 @@ function errorText(err: unknown): string {
   return (err instanceof Error ? err.message : String(err)).toLowerCase()
 }
 
+/**
+ * Every producer puts the response status in the first few dozen characters
+ * (`NNN StatusText: …`, `List sessions failed (NNN): …`). Parsing a bounded
+ * prefix keeps the cost of a status read independent of an upstream body that
+ * an error message may echo.
+ */
+const HTTP_STATUS_PARSE_MAX_CHARS = 2048
+
+/**
+ * Labeled statuses must be introduced by the start of the text, whitespace or
+ * `(`, and separated from the digits by `:`/`=` or whitespace, so a Host named
+ * `status401` or `support-http500` never yields a status. Each quantifier is
+ * followed by a disjoint token, which keeps a long whitespace run linear.
+ */
+const HTTP_STATUS_PATTERN =
+  /^(?:http\s+)?(?<leading>[1-5]\d{2})\b|(?:^|[\s(])(?:http(?:\s+status)?|status(?:\s+code)?)(?:\s*[:=]\s*|\s+)(?<labeled>[1-5]\d{2})\b|\((?<parenthesized>[1-5]\d{2})\)/i
+
 /** IPC preserves error messages but not always custom status fields. */
 export function httpErrorStatus(err: unknown): number | undefined {
   if (err && typeof err === 'object') {
@@ -167,14 +184,28 @@ export function httpErrorStatus(err: unknown): number | undefined {
     const causeStatus = (err as { cause?: { status?: unknown } }).cause?.status
     if (typeof causeStatus === 'number') return causeStatus
   }
+  const text = stripIpcWrapper(errorText(err).slice(0, HTTP_STATUS_PARSE_MAX_CHARS))
+  // AppService's Host-availability projection carries no status, only the
+  // Host reference, whose digits are never a response status.
+  if (text.startsWith('host_waking:') || text.startsWith('host_draining:')) return undefined
   // Parse only labeled HTTP statuses so digits in a host name or body aren't
   // mistaken for the response status.
-  const match =
-    /^(?:http\s+)?(?<leading>[1-5]\d{2})\b|\b(?:http(?:\s+status)?|status(?:\s+code)?)\s*[:=]?\s*(?<labeled>[1-5]\d{2})\b|\((?<parenthesized>[1-5]\d{2})\)/i.exec(
-      stripIpcWrapper(errorText(err))
-    )
+  const match = HTTP_STATUS_PATTERN.exec(text)
   const status = match?.groups?.leading ?? match?.groups?.labeled ?? match?.groups?.parenthesized
   return status ? Number(status) : undefined
+}
+
+const HOST_AVAILABILITY_BODY_PATTERN = /"code"\s*:\s*"host_(?:waking|draining)"/
+
+/**
+ * The Host is waking or draining: an expected transition, not an outage. Invoke
+ * failures arrive as AppService's `host_waking:`/`host_draining:` projection;
+ * catalog reads arrive as the rpc-proxy 503 whose body carries the same code.
+ */
+export function isHostAvailabilityError(err: unknown): boolean {
+  const text = stripIpcWrapper(errorText(err).slice(0, HTTP_STATUS_PARSE_MAX_CHARS))
+  if (text.startsWith('host_waking:') || text.startsWith('host_draining:')) return true
+  return httpErrorStatus(err) === 503 && HOST_AVAILABILITY_BODY_PATTERN.test(text)
 }
 
 /** True when the parsed response status is in the server-error range. */
