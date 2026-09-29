@@ -388,6 +388,8 @@ export function createProxyApps(
           event: 'grok_proxy_admission_refused',
           reason: 'visual_host_share',
           limit: VISUAL_PER_HOST_MAX_ADMITTED,
+          sub: platform.sub,
+          hostRefs: [...platform.hostRefs].sort(),
         },
         'admission refused'
       )

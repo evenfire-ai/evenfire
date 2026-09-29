@@ -530,11 +530,16 @@ describe('visual stream-gate handoff', () => {
       const fifth = await postBody(port, platformToken(), invalidTicketBody(maxBodyBytes))
       expect(fifth.status).toBe(503)
       expect(await fifth.json()).toEqual({ error: 'provider_unavailable' })
+      // The refusal names the principal it applied to, so an operator can tell
+      // which host was throttled.
       expect(warn).toHaveBeenCalledWith(
-        expect.objectContaining({
+        {
           event: 'codex_proxy_admission_refused',
           reason: 'visual_host_share',
-        }),
+          limit: VISUAL_PER_HOST_MAX_ADMITTED,
+          sub: 'default/research-host',
+          hostRefs: ['research-host'],
+        },
         'admission refused'
       )
       // The share refusal happens before the global gate is touched.
