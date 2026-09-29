@@ -698,6 +698,85 @@ describe('GfsBrowser', () => {
     expect(screen.getByRole('dialog', { name: 'Rename file' })).toBe(dialog)
   })
 
+  it('purges the current folder after stream revalidation proves it is forbidden', async () => {
+    const rootId = '11111111-1111-1111-1111-111111111111'
+    const report = child('report.md', 'file', 1, 4)
+    const resolvedReport = toResolveView({
+      resourceId: report.resourceId,
+      drive: 'main',
+      name: report.name,
+      kind: 'file',
+      pathCache: report.path,
+      bytes: report.bytes,
+      version: report.version,
+      updatedAt: '2026-09-28T00:00:00.000Z',
+    })
+    const streamControllers: ReadableStreamDefaultController<Uint8Array>[] = []
+    let rejectRefresh!: (error: Error) => void
+    let childrenReads = 0
+    mockApiGet.mockImplementation(async (path: string, query?: Record<string, string>) => {
+      if (path === '/api/v1/gfs/tree') {
+        return { rootResourceId: rootId, items: [report], nextCursor: null }
+      }
+      if (path === `/api/v1/gfs/resources/${rootId}/children`) {
+        childrenReads += 1
+        if (childrenReads === 2) {
+          return new Promise((_resolve, reject) => {
+            rejectRefresh = reject
+          })
+        }
+        return { items: [report], nextCursor: null }
+      }
+      if (path === '/api/v1/gfs/resolve' && query?.uri === report.gfsUri) {
+        return resolvedReport
+      }
+      if (path === '/api/v1/gfs/resolve') {
+        return resolvedFolderView(rootId, 'main', '/', 1)
+      }
+      return { items: [], nextCursor: null }
+    })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            streamControllers.push(controller)
+            init?.signal?.addEventListener('abort', () => controller.close(), { once: true })
+          },
+        })
+        return new Response(body, {
+          status: 200,
+          headers: { 'content-type': 'application/x-ndjson' },
+        })
+      })
+    )
+
+    renderBrowser()
+    await waitFor(() => expect(streamControllers).toHaveLength(1))
+    await screen.findByRole('button', { name: 'report.md' })
+    await openResourceMenu('report.md')
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Rename' }))
+    await screen.findByRole('dialog', { name: 'Rename file' })
+
+    const frame = await controlApiProducerFrame()
+    await act(async () => {
+      streamControllers[0]!.enqueue(new TextEncoder().encode(`${frame}\n`))
+    })
+    expect(screen.getByRole('button', { name: 'report.md' })).toBeVisible()
+    expect(screen.getByRole('dialog', { name: 'Rename file' })).toBeVisible()
+
+    await act(async () => {
+      rejectRefresh(Object.assign(new Error('403 Forbidden'), { status: 403 }))
+    })
+
+    await waitFor(() => {
+      expect(screen.queryByRole('button', { name: 'report.md' })).toBeNull()
+      // The folder listing is no longer authorized, but the item-target
+      // revalidation independently proved this file remains accessible.
+      expect(screen.getByRole('dialog', { name: 'Rename file' })).toBeVisible()
+    })
+  })
+
   it('recovers the current list and open preview after one transient invalidation refetch failure', async () => {
     const streamControllers: ReadableStreamDefaultController<Uint8Array>[] = []
     let treeFailureUsed = false

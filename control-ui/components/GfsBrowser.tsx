@@ -796,7 +796,18 @@ export function GfsBrowser(): React.JSX.Element {
         if (!isSilentApiError(error)) {
           setError(error instanceof Error ? error.message : 'Failed to refresh EvenDrive')
         }
-        if (isTransientEntityChangeRefetchError(error)) scheduleRecovery()
+        const status = entityChangeErrorStatus(error)
+        if (status === 403 || status === 404) {
+          // A soft invalidation preserves rows until the authoritative read
+          // resolves. Once that read proves this folder cannot be listed, its
+          // old rows are no longer safe to display or reuse on navigation.
+          setItems([])
+          setNextCursor(null)
+          loadedPageCountRef.current = 1
+          if (crumb.id !== null) childCacheRef.current.delete(crumb.id)
+        } else if (isTransientEntityChangeRefetchError(error)) {
+          scheduleRecovery()
+        }
       }
     }
 
