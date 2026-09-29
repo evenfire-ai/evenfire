@@ -2,3 +2,9 @@
 # keeps it out of the repository's language statistics: it is produced by
 # control-api/scripts/regenerate-models-dev-snapshot.mjs and never hand-edited.
 control-api/src/data/modelsDevSnapshot.ts linguist-generated=true
+
+# Vitest/Jest snapshots are generated from rendered output and legitimately
+# carry trailing whitespace (HTML/JSX text nodes such as "…for " before an
+# inline <strong>). Exempt them from git's whitespace checks so `git diff
+# --check` (the T0 gate) does not flag generated content it must not rewrite.
+*.snap -whitespace

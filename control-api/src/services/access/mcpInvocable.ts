@@ -88,7 +88,7 @@ interface ContextCR {
 }
 
 interface McpServerCR {
-  metadata?: { name?: string }
+  metadata?: { name?: string; uid?: string }
   spec?: {
     enabled?: boolean
     auth?: { type?: string }
@@ -393,9 +393,9 @@ export async function resolveMcpServersForAgents(
     // Directory identity remains useful when optional MCP catalog enrichment
     // is temporarily unavailable — but the degradation must be observable, or
     // a broken mcpservers list path reads as "this agent has no tools".
-    console.error(
-      '[mcpInvocable] mcpservers list failed; directory served without MCP catalog:',
-      err instanceof Error ? err.message : String(err)
+    log.error(
+      { err: err instanceof Error ? err.message : String(err) },
+      'mcpservers list failed; directory served without MCP catalog'
     )
   }
 
@@ -425,9 +425,9 @@ export async function resolveMcpServersForAgents(
     } catch (err) {
       // Preserve the authorized directory DTOs with an empty tool catalog —
       // loudly, so a Context-read outage is distinguishable from "no tools".
-      console.error(
-        '[mcpInvocable] context allowlist load failed; directory served with empty tool catalogs:',
-        err instanceof Error ? err.message : String(err)
+      log.error(
+        { err: err instanceof Error ? err.message : String(err) },
+        'context allowlist load failed; directory served with empty tool catalogs'
       )
     }
   }
@@ -500,8 +500,9 @@ function classifyConnector(server: McpServerCR, grantPresent: ReadonlySet<string
   }
   // Provider is the non-secret panel label. Derive it directly from
   // `spec.oauth.provider`, consistent with the oauth-ness gate above — NOT via
-  // `resolveServerOAuthSubject`, which additionally requires clientIdRef/
-  // clientSecretRef and would drop the label for an oauth server missing them.
+  // `resolveServerOAuthSubject`, whose baked lane still requires clientIdRef/
+  // clientSecretRef (and whose remote lane sets `provider:'remote'`, not the panel
+  // label). This gate only needs the grant coordinate (`resolveServerOAuth`).
   const providerRaw = server.spec?.oauth?.provider
   const provider =
     typeof providerRaw === 'string' && providerRaw.length > 0 ? providerRaw : undefined
