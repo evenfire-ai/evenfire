@@ -1,5 +1,9 @@
 import { ApiError } from '../../../../../../src/httpClient'
 import { RpcProxyClient } from '../../../../../../src/rpcProxyClient'
+import {
+  HOST_ACCESS_DENIED_CODE,
+  HOST_ACCESS_REVOKED_CODE,
+} from '../../../../../../src/upstreamErrors'
 
 /**
  * Renderer-side error fixtures built from the REAL main-process producers.
@@ -95,7 +99,7 @@ export async function ipcHostAccessRevoked(channel: RpcChannel): Promise<Error> 
   const error = await rejectionOf(
     jsonResponse(403, 'Forbidden', {
       error: HOST_ACCESS_DENIAL_ERROR,
-      code: 'host_access_revoked',
+      code: HOST_ACCESS_REVOKED_CODE,
     }),
     callFor(channel)
   )
@@ -110,7 +114,7 @@ export async function ipcHostAccessDenied(channel: RpcChannel): Promise<Error> {
   const error = await rejectionOf(
     jsonResponse(403, 'Forbidden', {
       error: HOST_ACCESS_DENIAL_ERROR,
-      code: 'host_access_denied',
+      code: HOST_ACCESS_DENIED_CODE,
     }),
     callFor(channel)
   )
@@ -155,8 +159,10 @@ export function ipcServerErrorMentioning403(channel: RpcChannel): Promise<Error>
  * name contains a status-looking number (R1-M16: `support-401 is waking`).
  * `AppService` pulls in Electron main-process modules, so the mapping's text
  * is reproduced here; `appService.hostWaking.test.ts` pins the producer side.
+ * Only the Host send path maps a waking Host to this text (R3-L15); every other
+ * channel surfaces the raw 503, so build those with `ipcHttpError`.
  */
-export function ipcHostWaking(channel: RpcChannel, hostRef: string): Error {
+export function ipcHostWaking(channel: 'rpc:invokeHostMessage', hostRef: string): Error {
   const cause = new ApiError(
     '503 Service Unavailable: Host is waking up',
     503,

@@ -1267,7 +1267,13 @@ describe('switchToChat (unified, D.4)', () => {
     ])
   })
 
-  it('ignores a send 403 from the prior team scope', async () => {
+  // R3-M3: the scope-change negative and its same-scope control share one
+  // IPC-shaped revocation, so the control proves the classifier fires when the
+  // team does not change and the negative cannot pass by never classifying.
+  it.each([
+    ['ignores a send 403 from the prior team scope', 'team-after', false],
+    ['holds the Host on a send 403 within the same team scope', 'team-before', true],
+  ] as const)('%s', async (_label, teamAtRejection, expectedRevoked) => {
     const revoked = new Set<string>()
     let rejectSend!: (reason: unknown) => void
     clerum.rpc.invokeHostMessage.mockImplementation(
@@ -1287,14 +1293,15 @@ describe('switchToChat (unified, D.4)', () => {
       await controller.result.current.switchToChat('agent-x', 'old-team-chat')
     })
 
+    const denial = await ipcHostAccessRevoked('rpc:invokeHostMessage')
     const pendingSend = controller.result.current.handleSendAgentMessage('hello')
     await waitFor(() => expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1))
-    controller.rerender({ currentTeamId: 'team-after' })
+    controller.rerender({ currentTeamId: teamAtRejection })
     await act(async () => {
-      rejectSend(new Error('403 forbidden'))
+      rejectSend(denial)
       await pendingSend
     })
-    expect(revoked.has('agent-x')).toBe(false)
+    expect(revoked.has('agent-x')).toBe(expectedRevoked)
   })
 
   it('ignores an older-message 403 from the prior team scope', async () => {
@@ -1333,11 +1340,12 @@ describe('switchToChat (unified, D.4)', () => {
     await act(async () => {
       await controller.result.current.switchToChat('agent-x', 'old-team-chat')
     })
+    const denial = await ipcGenericForbidden('rpc:loadSessionMessages')
     const pendingOlder = controller.result.current.handleLoadOlderMessages()
     await waitFor(() => expect(rejectOlder).toEqual(expect.any(Function)))
     controller.rerender({ currentTeamId: 'team-after' })
     await act(async () => {
-      rejectOlder(new Error('403 forbidden'))
+      rejectOlder(denial)
       await pendingOlder
     })
     expect(revoked.has('agent-x')).toBe(false)
@@ -1419,7 +1427,9 @@ describe('switchToChat (unified, D.4)', () => {
       await waitFor(() => expect(clerum.rpc.getTaskResult).toHaveBeenCalledTimes(1))
 
       if (action === 'revocation') {
-        clerum.rpc.loadSessionMessages.mockRejectedValue(new Error('403 forbidden'))
+        clerum.rpc.loadSessionMessages.mockRejectedValue(
+          await ipcHostAccessRevoked('rpc:loadSessionMessages')
+        )
         await act(async () => {
           await controller.result.current.reconcileChat(makeTaskKey('agent-x', 'late-result'), {
             reason: 'authority_refresh',

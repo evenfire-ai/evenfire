@@ -538,7 +538,17 @@ describe('revoked host catalog protection', () => {
 })
 
 describe('host authority verification', () => {
-  it('discards a pre-verification authorization denial after the host authority epoch advances', async () => {
+  // R3-M3: the epoch negative and its same-epoch control share one IPC-shaped
+  // revocation (never retried, so it reaches the classifier directly); the
+  // control proves the denial holds the Host when the epoch does not advance.
+  it.each([
+    [
+      'discards a pre-verification authorization denial after the host authority epoch advances',
+      1,
+      false,
+    ],
+    ['holds the Host on a catalog denial when the host authority epoch is unchanged', 0, true],
+  ] as const)('%s', async (_label, epochAdvance, expectedRevoked) => {
     let hostAuthorityEpoch = 0
     const revoked = new Set<string>()
     const uncertain = new Set<string>()
@@ -562,11 +572,15 @@ describe('host authority verification', () => {
       getHostAuthorityEpoch: () => hostAuthorityEpoch,
     })
 
+    const denial = await ipcHostAccessRevoked('rpc:listSessions')
     await waitFor(() => expect(clerum.rpc.listSessions).toHaveBeenCalled())
-    hostAuthorityEpoch += 1
-    rejectFirst(new Error('403 stale'))
+    hostAuthorityEpoch += epochAdvance
+    rejectFirst(denial)
     await waitFor(() => expect(controller.result.current.latestChatSessionsLoading).toBe(false))
-    expect(revoked.has('agent-x')).toBe(false)
+    await act(async () => {
+      await new Promise(resolve => setTimeout(resolve, 20))
+    })
+    expect(revoked.has('agent-x')).toBe(expectedRevoked)
     expect(uncertain.has('agent-x')).toBe(false)
   })
 })
@@ -602,7 +616,9 @@ describe('late global catalog response', () => {
       )
 
       if (action === 'revocation') {
-        clerum.rpc.loadSessionMessages.mockRejectedValue(new Error('403 forbidden'))
+        clerum.rpc.loadSessionMessages.mockRejectedValue(
+          await ipcHostAccessRevoked('rpc:loadSessionMessages')
+        )
         await act(async () => {
           await controller.result.current.reconcileChat(makeTaskKey('agent-a', 'session-a'), {
             reason: 'background_refresh',

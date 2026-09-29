@@ -5,7 +5,6 @@ import {
   ipcGenericForbidden,
   ipcHostAccessDenied,
   ipcHostAccessRevoked,
-  ipcHostWaking,
   ipcHttpError,
   ipcServerErrorMentioning403,
 } from '../../../hooks/domain/__tests__/__fixtures__/ipcErrors'
@@ -215,7 +214,14 @@ describe('TaskTracker', () => {
     ],
     [
       'waking Host named support-401',
-      async () => ipcHostWaking('rpc:getTaskResult', 'support-401'),
+      // getTaskResult does not map a waking Host (only the send path does), so
+      // the renderer sees rpc-proxy's raw structured 503.
+      () =>
+        ipcHttpError('rpc:getTaskResult', 503, 'Service Unavailable', {
+          code: 'host_waking',
+          hostRef: 'support-401',
+          retryAfterMs: 2000,
+        }),
       'result_fetch',
       undefined,
     ],
