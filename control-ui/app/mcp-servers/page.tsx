@@ -15,7 +15,8 @@ import type {
 } from '../../components/McpServerTable.types'
 import { useToast } from '../../components/Toast'
 import {
-  apiSend,
+  McpServerUninstallIncompleteError,
+  deleteMcpServer,
   getAgentTeams,
   getAgentUsers,
   getContexts,
@@ -183,7 +184,8 @@ export default function McpServersPage() {
   const [updatingAgentAccessKey, setUpdatingAgentAccessKey] = useState<string | null>(null)
   const { confirm, confirmDialog } = useConfirmDialog()
 
-  async function loadAll() {
+  /** Resolves to the load error it displayed, or '' when the reload succeeded. */
+  async function loadAll(): Promise<string> {
     setLoading(true)
     setError('')
     setAccessWarning('')
@@ -263,9 +265,12 @@ export default function McpServersPage() {
       setAgentTargets(nextAgentTargets)
       setBindingsByConnectorName(nextBindings)
       setAccessByConnectorKey(nextAccessByConnectorKey)
+      return ''
     } catch (e) {
-      if (isSilentApiError(e)) return
-      setError(e instanceof Error ? e.message : 'Failed to load connectors')
+      if (isSilentApiError(e)) return ''
+      const message = e instanceof Error ? e.message : 'Failed to load connectors'
+      setError(message)
+      return message
     } finally {
       setLoading(false)
     }
@@ -283,11 +288,25 @@ export default function McpServersPage() {
     setDeletingKey(key)
     setError('')
     try {
-      await apiSend('DELETE', `/api/v1/admin/mcp-servers/${encodeURIComponent(server.name)}`)
+      await deleteMcpServer(server.name)
       await loadAll()
       showToast(`Connector ${key} deleted.`, { tone: 'success' })
     } catch (e) {
       if (isSilentApiError(e)) return
+      if (e instanceof McpServerUninstallIncompleteError) {
+        // Part of the cleanup already ran (e.g. agent access removed) while the
+        // connector stays listed; reload so the row reflects that before retrying.
+        const refreshError = await loadAll()
+        setError(
+          [
+            `${key}: ${e.message}`,
+            refreshError && `The list could not be refreshed: ${refreshError}`,
+          ]
+            .filter(Boolean)
+            .join(' ')
+        )
+        return
+      }
       setError(e instanceof Error ? e.message : `Failed to delete ${key}`)
     } finally {
       setDeletingKey(null)
@@ -420,6 +439,7 @@ export default function McpServersPage() {
         deletingKey={deletingKey}
         onRefresh={loadAll}
         onCreate={() => router.push(CONTROL_ROUTES.connectors.new)}
+        onAddRemote={() => router.push(CONTROL_ROUTES.connectors.remoteNew)}
         onInstallFromRegistry={() => router.push(CONTROL_ROUTES.marketplace.root)}
         refreshing={loading}
         loading={loading && mcpServers.length === 0}
