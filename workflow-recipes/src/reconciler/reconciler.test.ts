@@ -15698,6 +15698,10 @@ describe('WorkflowRecipeReconciler', () => {
         'run-g2'
       )
 
+      // Liveness witness: the retry ran the prune LIST that listed GFS, so the
+      // absence of a GFS DELETE below is the catalog gate holding, not a retry
+      // that never reached the prune.
+      expect(mockNetworkingApi.listNamespacedNetworkPolicy).toHaveBeenCalled()
       expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalledWith(
         expect.objectContaining({ name: GFS })
       )

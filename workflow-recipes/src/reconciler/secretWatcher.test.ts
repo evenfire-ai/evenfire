@@ -286,6 +286,13 @@ describe('SecretWatcher', () => {
       data: { 'broker-token': 'eA==' },
     })
     expect(invalidated).toEqual([])
+    // Liveness witness: the same watcher does invalidate for the canonical
+    // ADDED, so the empty list above is not the callback being unwired.
+    watcher.handleEvent('ADDED', {
+      metadata: { name: 'wf-test-recipe-oauth-broker-token', labels },
+      data: { 'broker-token': 'eA==' },
+    })
+    expect(invalidated).toEqual(['test-recipe'])
     vi.advanceTimersByTime(DEBOUNCE_MS)
     expect(enqueued).toEqual([])
     watcher.stop()

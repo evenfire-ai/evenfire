@@ -3251,12 +3251,77 @@ describe('WorkflowRecipeWatcher wiring — grant-update listener lifecycle (issu
   })
 })
 
-describe('startSecretWatch oauth ADDED callback', () => {
-  it('4th SecretWatcher argument only invalidates the ledger', () => {
-    const source = (
-      WorkflowRecipeWatcher.prototype as unknown as { startSecretWatch: () => Promise<void> }
-    ).startSecretWatch.toString()
-    expect(source).toContain('invalidateOAuthBrokerDeleteLedger')
-    expect(source).not.toContain('triggerSecretDrivenReconcile(recipeName)')
+describe('handleOAuthBrokerTokenAdded', () => {
+  type BrokerAddedInternal = {
+    config: { sandboxNamespace: string }
+    reconciler: { invalidateOAuthBrokerDeleteLedger: (recipeName: string) => void }
+    recipes: Map<string, WorkflowRecipeCRD>
+    eventQueue: { enqueue: (key: string, task: () => Promise<void>) => unknown }
+    handleOAuthBrokerTokenAdded: (namespace: string, recipeName: string) => void
+  }
+
+  function recipeWith(name: string, backgroundAccess: boolean): WorkflowRecipeCRD {
+    const recipe = makeWorkflowRecipe({ metadata: { name, namespace: 'sandbox-recipes' } })
+    recipe.spec = {
+      ...recipe.spec,
+      oauthClients: backgroundAccess
+        ? [
+            {
+              id: 'gmail',
+              provider: 'google',
+              clientIdRef: { name: 'creds', key: 'client-id' },
+              clientSecretRef: { name: 'creds', key: 'client-secret' },
+              scopes: ['https://www.googleapis.com/auth/gmail.readonly'],
+              backgroundAccess: true,
+            },
+          ]
+        : [],
+    } as WorkflowRecipeCRD['spec']
+    return recipe
+  }
+
+  function setup() {
+    const watcher = new WorkflowRecipeWatcher(
+      {
+        makeApiClient: vi.fn(() => ({})),
+      } as unknown as import('@kubernetes/client-node').KubeConfig,
+      null
+    )
+    const internal = watcher as unknown as BrokerAddedInternal
+    const invalidate = vi.fn()
+    const enqueue = vi.fn()
+    internal.reconciler = { invalidateOAuthBrokerDeleteLedger: invalidate }
+    internal.eventQueue = { enqueue }
+    internal.recipes = new Map([
+      ['no-bg', recipeWith('no-bg', false)],
+      ['with-bg', recipeWith('with-bg', true)],
+    ])
+    return { internal, invalidate, enqueue }
+  }
+
+  it('re-arms the ledger and re-reconciles a recipe that must not have a broker token', () => {
+    const { internal, invalidate, enqueue } = setup()
+    internal.handleOAuthBrokerTokenAdded(internal.config.sandboxNamespace, 'no-bg')
+    expect(invalidate).toHaveBeenCalledWith('no-bg')
+    expect(enqueue).toHaveBeenCalledTimes(1)
+    expect(enqueue.mock.calls[0]?.[0]).toBe('no-bg')
+  })
+
+  it('only invalidates for an opted-in recipe: a watch reconnect replays ADDED for every token', () => {
+    const { internal, invalidate, enqueue } = setup()
+    internal.handleOAuthBrokerTokenAdded(internal.config.sandboxNamespace, 'with-bg')
+    expect(invalidate).toHaveBeenCalledWith('with-bg')
+    expect(enqueue).not.toHaveBeenCalled()
+  })
+
+  it('ignores a same-named Secret outside the sandbox namespace', () => {
+    const { internal, invalidate, enqueue } = setup()
+    // Liveness witness: the same call in the sandbox namespace does act.
+    internal.handleOAuthBrokerTokenAdded(internal.config.sandboxNamespace, 'no-bg')
+    expect(invalidate).toHaveBeenCalledTimes(1)
+    expect(enqueue).toHaveBeenCalledTimes(1)
+    internal.handleOAuthBrokerTokenAdded('mcp-server', 'no-bg')
+    expect(invalidate).toHaveBeenCalledTimes(1)
+    expect(enqueue).toHaveBeenCalledTimes(1)
   })
 })

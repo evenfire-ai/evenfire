@@ -60,11 +60,10 @@ export class SecretWatcher {
     const name = secret.metadata?.name
     if (!name) return
 
-    // B3(a): ADDED of the canonical broker token invalidates the ledger even
-    // when the key-set matches a previous observation (dedup would drop it).
-    // Invalidate only — a watch reconnect replays ADDED for every Secret and
-    // must not force a reconcile storm. The 30s ownership backstop (and any
-    // later key-set/ownership fan-out) issues the next delete.
+    // B3(a): ADDED of the canonical broker token is reported even when the
+    // key-set matches a previous observation (dedup would drop it). This
+    // watcher never enqueues on it: a watch reconnect replays ADDED for every
+    // Secret, so the callback owner decides whether a reconcile is needed.
     if (type === 'ADDED') {
       const recipeName = resolveOAuthBrokerTokenWatchRecipe(name, secret.metadata?.labels)
       if (recipeName) {

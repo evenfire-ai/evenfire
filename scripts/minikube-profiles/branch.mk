@@ -15,18 +15,13 @@ ARGS ?=
 
 .DEFAULT_GOAL := branch-profile-info
 
+# Exported, not interpolated into the recipe: a value containing a quote, `$`
+# or a backtick would otherwise be re-parsed by the shell.
+export HOST CACHE_ROOT MINIKUBE_MEMORY MINIKUBE_CPUS MINIKUBE_CNI MINIKUBE_DRIVER
+export CONFIRM_DELETE CONFIRM_PROFILE BRANCH_PROFILE_PROFILE ARGS
+
 define run_branch_profile
-@HOST="$(HOST)" \
-CACHE_ROOT="$(CACHE_ROOT)" \
-MINIKUBE_MEMORY="$(MINIKUBE_MEMORY)" \
-MINIKUBE_CPUS="$(MINIKUBE_CPUS)" \
-MINIKUBE_CNI="$(MINIKUBE_CNI)" \
-MINIKUBE_DRIVER="$(MINIKUBE_DRIVER)" \
-CONFIRM_DELETE="$(CONFIRM_DELETE)" \
-CONFIRM_PROFILE="$(CONFIRM_PROFILE)" \
-BRANCH_PROFILE_PROFILE="$(BRANCH_PROFILE_PROFILE)" \
-ARGS="$(ARGS)" \
-"$(BRANCH_PROFILE_SCRIPT)" "$(1)"
+@"$(BRANCH_PROFILE_SCRIPT)" "$(1)"
 endef
 
 .PHONY: branch-profile-resolve

@@ -911,15 +911,32 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
         this.secretReverseIndex,
         name => this.triggerSecretDrivenReconcile(name),
         10_000,
-        // Invalidate only. SecretWatcher must not enqueue on oauth ADDED:
-        // a watch reconnect replays ADDED for every broker token.
-        recipeName => {
-          this.reconciler.invalidateOAuthBrokerDeleteLedger(recipeName)
-        }
+        recipeName => this.handleOAuthBrokerTokenAdded(namespace, recipeName)
       )
       const loop = new K8sSecretWatchLoop(this.kc, namespace, handler)
       this.secretWatchLoops.push(loop)
       await loop.start()
+    }
+  }
+
+  /**
+   * B3(a): a broker token Secret appeared. The token lives only in the sandbox
+   * namespace, so an ADDED for a same-named Secret elsewhere is ignored.
+   *
+   * The delete ledger is always re-armed. A recipe with no backgroundAccess
+   * client must not have the token at all, so it is also re-reconciled to reap
+   * it: the broker rotation loop skips such recipes and the ownership backstop
+   * only covers recipes that reference named Secrets, so nothing else would
+   * issue the delete before the next CRD event. An opted-in recipe legitimately
+   * owns its token and only invalidates, because a watch reconnect replays
+   * ADDED for every broker token and must not force a reconcile storm.
+   */
+  private handleOAuthBrokerTokenAdded(namespace: string, recipeName: string): void {
+    if (namespace !== this.config.sandboxNamespace) return
+    this.reconciler.invalidateOAuthBrokerDeleteLedger(recipeName)
+    const recipe = this.recipes.get(recipeName)
+    if (recipe && !recipeHasBackgroundAccessClient(recipe)) {
+      this.triggerSecretDrivenReconcile(recipeName)
     }
   }
 

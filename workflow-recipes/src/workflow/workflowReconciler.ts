@@ -254,6 +254,12 @@ export interface PluginWorkloadSdkCleanupOptions {
    * remains the owner of shared runtime resources.
    */
   preserveWorkflowRuntime?: boolean
+  /**
+   * Set when the recipe itself is being deleted. An SDK-only recipe never
+   * reaches `reconcileDelete`, so this is the only place its legacy internet
+   * policy ledger entry can be forgotten.
+   */
+  recipeUid?: string
 }
 
 export const NETWORK_POLICY_OWNERSHIP_CONDITION_TYPE = 'WorkflowNetworkPolicyOwnership'
@@ -1465,6 +1471,9 @@ export class WorkflowReconciler {
     const ns = this.deps.config.sandboxNamespace
     const preserveWorkflowRuntime = options.preserveWorkflowRuntime === true
     this.pluginWorkloadSdkProvisioner.clearRecipeState(recipeName)
+    if (options.recipeUid) {
+      this.forgetLegacyMcpServersInternetEgress(recipeName, options.recipeUid)
+    }
     const sdkNetworkPolicyNames = [
       `${recipeName}-workload-to-mcp-host-sdk-ingress`,
       `${recipeName}-workload-to-mcp-host-sdk-egress`,
@@ -2979,10 +2988,13 @@ export class WorkflowReconciler {
   /**
    * Reapply the run-lane NetworkPolicies outside reconcile(). The running and
    * active short-circuits return before reconcile(), so a policy a previous
-   * pass left pending (terminating or contended) would otherwise stay as it is
-   * until the run ends. Builds the same set reconcile() applies and only
-   * applies it: no codex, grok or legacy prune, because those follow an
-   * eligibility verdict that can change while a run is in progress.
+   * pass left pending (terminating, contended, or a prune that failed) would
+   * otherwise stay as it is until the run ends. Runs the same build, apply and
+   * prune unit reconcile() runs, with a verdict computed now: an uncertain
+   * Codex or Grok verdict keeps its proxy policy, and the catalog gate keeps
+   * everything the run lane does not own. A prune that failed sets
+   * retryPending, so without the prune here the marker would requeue forever
+   * and never reach the leftover.
    */
   async retryRunLaneNetworkPolicies(
     recipeName: string,
@@ -3007,7 +3019,7 @@ export class WorkflowReconciler {
       runtimeScopeRecipeName,
       codexView
     )
-    const { policies } = await this.buildWorkflowNetworkPoliciesForSpec(
+    return this.applyWorkflowNetworkPolicies(
       recipeName,
       recipeUid,
       spec,
@@ -3017,7 +3029,6 @@ export class WorkflowReconciler {
       false,
       codexVerdict.grokProjection
     )
-    return this.applyNetworkPolicyList(policies)
   }
 
   async ensureCoordinatorRuntimeCredentials(
@@ -3208,6 +3219,11 @@ export class WorkflowReconciler {
 
   private legacyMcpServersInternetEgressKey(recipeName: string, recipeUid?: string): string {
     return recipeUid && recipeUid.length > 0 ? recipeUid : recipeName
+  }
+
+  private forgetLegacyMcpServersInternetEgress(recipeName: string, recipeUid?: string): void {
+    this.prunedLegacyMcpServersInternetEgress.delete(recipeName)
+    if (recipeUid) this.prunedLegacyMcpServersInternetEgress.delete(recipeUid)
   }
 
   private async pruneLegacyMcpServersInternetEgressPolicy(
@@ -3779,8 +3795,7 @@ export class WorkflowReconciler {
     const log = createLogger('wrc', recipeName)
     log.info(`Deleting workflow resources`)
     this.pluginWorkloadSdkProvisioner.clearRecipeState(recipeName)
-    this.prunedLegacyMcpServersInternetEgress.delete(recipeName)
-    if (recipeUid) this.prunedLegacyMcpServersInternetEgress.delete(recipeUid)
+    this.forgetLegacyMcpServersInternetEgress(recipeName, recipeUid)
 
     // Best-effort cleanup of the recipe's subdirectory on the workflow output PVC.
     // Must run BEFORE pod deletion while mcp-host is still reachable; failures

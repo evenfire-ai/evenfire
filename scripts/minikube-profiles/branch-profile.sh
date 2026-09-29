@@ -790,6 +790,19 @@ cmd_preflight() {
   printf '  %s\n' "${PORTS_ENV}"
 }
 
+# perl -0pi exits 0 when its pattern matches nothing, so an upstream edit to a
+# shimmed script would leave the shim un-rewritten and the profile bound to the
+# wrong paths or context with no error. Fail unless the rewrite changed the file.
+rewrite_shim() {
+  local file="$1" expr="$2" label="$3"
+  local before after
+  before="$(shasum "${file}")" || die "BRANCH_PROFILE_SHIM_REWRITE_FAILED: ${label}"
+  perl -0pi -e "${expr}" "${file}" || die "BRANCH_PROFILE_SHIM_REWRITE_FAILED: ${label}"
+  after="$(shasum "${file}")" || die "BRANCH_PROFILE_SHIM_REWRITE_FAILED: ${label}"
+  [[ "${before}" != "${after}" ]] ||
+    die "BRANCH_PROFILE_SHIM_REWRITE_NOOP: ${label} matched nothing; the upstream script changed"
+}
+
 cmd_prepare_shims() {
   require_command git shasum perl
   persist_state
@@ -808,18 +821,12 @@ cmd_prepare_shims() {
       die "BRANCH_PROFILE_SHIM_REWRITE_FAILED: ${file}"
   done < <(find "${SHIMS_DIR}" -type f -name '*.sh' | sort)
 
-  perl -0pi -e 's#OUTPUT="\$\{PROJECT_DIR\}/deploy/minikube/secrets/jwt-signing-keys.yaml"#OUTPUT="\${BRANCH_PROFILE_DEPLOY_DIR:-\${PROJECT_DIR}/deploy}/minikube/secrets/jwt-signing-keys.yaml"#g' "${SHIMS_DIR}/generate-keys.sh" ||
-    die "BRANCH_PROFILE_SHIM_REWRITE_FAILED: generate-keys.sh"
-  perl -0pi -e 's#REPO_ROOT="\$\(cd "\$\{SCRIPT_DIR\}/\.\./\.\." && pwd\)"#REPO_ROOT="\${CLERUM_PROJECT_DIR:-\$(cd \"\${SCRIPT_DIR}/../..\" && pwd)}"#g' "${SHIMS_DIR}/seed-test-data.sh" ||
-    die "BRANCH_PROFILE_SHIM_REWRITE_FAILED: seed-test-data.sh REPO_ROOT"
-  perl -0pi -e 's#: "\$\{CONTEXT:=\$\(kubectl config current-context\)\}"#: "\${CONTEXT:=\${MINIKUBE_PROFILE:-\$(kubectl config current-context)}}"#g; s#export ADMIN_PASSWORD E2E_TEST_EMAIL E2E_TEST_PASSWORD CONTEXT#: "\${ALLOWED_CONTEXTS:=\${CONTEXT}}"\nexport ADMIN_PASSWORD E2E_TEST_EMAIL E2E_TEST_PASSWORD CONTEXT ALLOWED_CONTEXTS#g; s#export ADMIN_PASSWORD E2E_DEV_LOGIN_EMAIL CONTEXT#: "\${ALLOWED_CONTEXTS:=\${CONTEXT}}"\nexport ADMIN_PASSWORD E2E_DEV_LOGIN_EMAIL CONTEXT ALLOWED_CONTEXTS#g' "${SHIMS_DIR}/seed-test-data.sh" ||
-    die "BRANCH_PROFILE_SHIM_REWRITE_FAILED: seed-test-data.sh CONTEXT"
-  perl -0pi -e 's#MANIFEST_FILE="\$\{PROJECT_DIR\}/deploy/minikube/\.image-manifest.json"#MANIFEST_FILE="\${BRANCH_PROFILE_DEPLOY_DIR:-\${PROJECT_DIR}/deploy}/minikube/.image-manifest.json"#g' "${SHIMS_DIR}/build-images.sh" ||
-    die "BRANCH_PROFILE_SHIM_REWRITE_FAILED: build-images.sh"
-  perl -0pi -e 's#BASE_MINIKUBE_KUSTOMIZE_DIR="\$\{PROJECT_DIR\}/deploy/overlays/minikube"#BASE_MINIKUBE_KUSTOMIZE_DIR="\${BRANCH_PROFILE_DEPLOY_DIR:-\${PROJECT_DIR}/deploy}/overlays/minikube"#g; s#LOCAL_MEMBER_REGISTRATION_KUSTOMIZE_DIR="\$\{PROJECT_DIR\}/deploy/overlays/minikube-local-member-registration"#LOCAL_MEMBER_REGISTRATION_KUSTOMIZE_DIR="\${BRANCH_PROFILE_DEPLOY_DIR:-\${PROJECT_DIR}/deploy}/overlays/minikube-local-member-registration"#g' "${SHIMS_DIR}/full-setup.sh" ||
-    die "BRANCH_PROFILE_SHIM_REWRITE_FAILED: full-setup.sh overlays"
-  perl -0pi -e 's#CONTEXT="\$\{PROFILE\}" "\$\{PROJECT_DIR\}/deploy/scripts/minikube-detect-k8s-api-ip.sh"#CONTEXT="\${PROFILE}" OVERLAY_DIR="\${BRANCH_PROFILE_DEPLOY_DIR:-\${PROJECT_DIR}/deploy}/overlays/minikube" "\${PROJECT_DIR}/deploy/scripts/minikube-detect-k8s-api-ip.sh"#g; s#kubectl kustomize "\$\{PROJECT_DIR\}/deploy/overlays/minikube"#kubectl kustomize "\${BRANCH_PROFILE_DEPLOY_DIR:-\${PROJECT_DIR}/deploy}/overlays/minikube"#g' "${SHIMS_DIR}/full-setup.sh" ||
-    die "BRANCH_PROFILE_SHIM_REWRITE_FAILED: full-setup.sh detect"
+  rewrite_shim "${SHIMS_DIR}/generate-keys.sh" 's#OUTPUT="\$\{PROJECT_DIR\}/deploy/minikube/secrets/jwt-signing-keys.yaml"#OUTPUT="\${BRANCH_PROFILE_DEPLOY_DIR:-\${PROJECT_DIR}/deploy}/minikube/secrets/jwt-signing-keys.yaml"#g' "generate-keys.sh"
+  rewrite_shim "${SHIMS_DIR}/seed-test-data.sh" 's#REPO_ROOT="\$\(cd "\$\{SCRIPT_DIR\}/\.\./\.\." && pwd\)"#REPO_ROOT="\${CLERUM_PROJECT_DIR:-\$(cd \"\${SCRIPT_DIR}/../..\" && pwd)}"#g' "seed-test-data.sh REPO_ROOT"
+  rewrite_shim "${SHIMS_DIR}/seed-test-data.sh" 's#: "\$\{CONTEXT:=\$\(kubectl config current-context\)\}"#: "\${CONTEXT:=\${MINIKUBE_PROFILE:-\$(kubectl config current-context)}}"#g; s#export ADMIN_PASSWORD E2E_TEST_EMAIL E2E_TEST_PASSWORD CONTEXT#: "\${ALLOWED_CONTEXTS:=\${CONTEXT}}"\nexport ADMIN_PASSWORD E2E_TEST_EMAIL E2E_TEST_PASSWORD CONTEXT ALLOWED_CONTEXTS#g; s#export ADMIN_PASSWORD E2E_DEV_LOGIN_EMAIL CONTEXT#: "\${ALLOWED_CONTEXTS:=\${CONTEXT}}"\nexport ADMIN_PASSWORD E2E_DEV_LOGIN_EMAIL CONTEXT ALLOWED_CONTEXTS#g' "seed-test-data.sh CONTEXT"
+  rewrite_shim "${SHIMS_DIR}/build-images.sh" 's#MANIFEST_FILE="\$\{PROJECT_DIR\}/deploy/minikube/\.image-manifest.json"#MANIFEST_FILE="\${BRANCH_PROFILE_DEPLOY_DIR:-\${PROJECT_DIR}/deploy}/minikube/.image-manifest.json"#g' "build-images.sh"
+  # full-setup.sh resolves BRANCH_PROFILE_DEPLOY_DIR natively (ACTIVE_MINIKUBE_*),
+  # so it needs no path rewrite; rewrite_shim would fail on it as a no-op.
 
   chmod +x "${SHIMS_DIR}"/*.sh
   cat >"${SHIM_ENV}" <<EOF_SHIMS

@@ -3090,6 +3090,37 @@ describe('WorkflowReconciler — reconcile loop', () => {
     })
   })
 
+  it('keys the legacy internet NP ledger by recipe uid, so a recreated recipe deletes again', async () => {
+    const networkingApi = makeNetworkingApi() as ReturnType<typeof makeNetworkingApi>
+    const reconciler = new WorkflowReconciler(
+      makeDeps({
+        networkingApi: networkingApi as never,
+      })
+    )
+    const legacyDeletes = () =>
+      networkingApi.deleteNamespacedNetworkPolicy.mock.calls.filter(
+        ([arg]) =>
+          arg.name === 'test-wf-mcp-servers-egress-internet' && arg.namespace === 'mcp-server'
+      )
+    const reconcileWithUid = (uid: string) =>
+      reconciler.reconcile(
+        'test-wf',
+        uid,
+        'sandbox-recipes',
+        makeSpec({ mcpServers: ['redis-mcp'] })
+      )
+
+    await reconcileWithUid('uid-a')
+    await reconcileWithUid('uid-a')
+    // Witness: the ledger suppresses the repeat for the same uid.
+    expect(legacyDeletes()).toHaveLength(1)
+
+    // Same name, new uid, and no reconcileDelete seen by this process (another
+    // replica handled the delete): a new identity must not be suppressed.
+    await reconcileWithUid('uid-b')
+    expect(legacyDeletes()).toHaveLength(2)
+  })
+
   describe('B2 desired-set NetworkPolicy prune', () => {
     const RECIPE = 'test-wf'
     const SANDBOX = 'sandbox-recipes'
@@ -3333,7 +3364,7 @@ describe('WorkflowReconciler — reconcile loop', () => {
       expect(apiserver.live.has(apiserver.key(SANDBOX, COORD_TO_WRC))).toBe(true)
     })
 
-    it('does not prune a recipes-lane policy; LIST uses the two-term selector once', async () => {
+    it('does not prune an uncatalogued policy carrying the recipe label pair; LIST is issued once', async () => {
       const apiserver = makeApiserverNetworkingApi()
       seedLivePolicy(apiserver, `${RECIPE}-oauth-broker-egress`, {
         'clerum.io/recipe': RECIPE,
@@ -3505,6 +3536,14 @@ describe('WorkflowReconciler — reconcile loop', () => {
       expect(summary.retryPending).toBe(true)
       expect(sandboxDeletes(apiserver.api)).toEqual([])
       expect(apiserver.live.has(apiserver.key(SANDBOX, GROK_PROXY))).toBe(true)
+      // The apply outcome survives: the legacy internet policy prune that runs
+      // after the catalog prune is still attempted despite the failed LIST.
+      expect(apiserver.api.listNamespacedNetworkPolicy).toHaveBeenCalled()
+      expect(
+        apiserver.api.deleteNamespacedNetworkPolicy.mock.calls.filter(
+          ([arg]: [{ name: string }]) => arg.name === `${RECIPE}-mcp-servers-egress-internet`
+        )
+      ).toHaveLength(1)
     })
   })
 
@@ -5120,6 +5159,107 @@ describe('WorkflowReconciler — reconcile loop', () => {
         expect(apiserver.api.createNamespacedNetworkPolicy).toHaveBeenCalledTimes(0)
         expect(apiserver.api.replaceNamespacedNetworkPolicy).toHaveBeenCalledTimes(0)
         expect(apiserver.api.deleteNamespacedNetworkPolicy).toHaveBeenCalledTimes(0)
+      })
+
+      // A prune failure sets retryPending, and this pass is the only one that
+      // runs while the run is in progress or active. It has to prune again, or
+      // the marker requeues forever without ever reaching the leftover.
+      describe('when a prune left a leftover behind', () => {
+        const LEFTOVER = 'test-wf-mcp-host-to-grok-proxy'
+        const TWO_TERM_SELECTOR = 'clerum.io/recipe=test-wf,clerum.io/managed-by=wrc'
+        type Converged = Awaited<ReturnType<typeof convergedRunLane>>['apiserver']
+
+        function seedLeftover(apiserver: Converged) {
+          apiserver.live.set(apiserver.key('sandbox-recipes', LEFTOVER), {
+            apiVersion: 'networking.k8s.io/v1',
+            kind: 'NetworkPolicy',
+            metadata: {
+              name: LEFTOVER,
+              namespace: 'sandbox-recipes',
+              labels: { 'clerum.io/recipe': 'test-wf', 'clerum.io/managed-by': 'wrc' },
+            },
+            spec: { podSelector: {}, policyTypes: ['Egress'] },
+          })
+        }
+
+        it('deletes the leftover on the retry pass', async () => {
+          const { apiserver, reconciler } = await convergedRunLane()
+          apiserver.api.listNamespacedNetworkPolicy.mockClear()
+          seedLeftover(apiserver)
+
+          const summary = await reconciler.retryRunLaneNetworkPolicies('test-wf', 'uid-123', spec())
+
+          expect(apiserver.api.listNamespacedNetworkPolicy).toHaveBeenCalledWith({
+            namespace: 'sandbox-recipes',
+            labelSelector: TWO_TERM_SELECTOR,
+          })
+          expect(summary).toEqual({ conflicts: [], retryPending: false })
+          expect(apiserver.live.has(apiserver.key('sandbox-recipes', LEFTOVER))).toBe(false)
+          expect(
+            apiserver.api.deleteNamespacedNetworkPolicy.mock.calls.map(([arg]) => arg.name)
+          ).toEqual([LEFTOVER])
+        })
+
+        it('keeps reporting the retry until the leftover delete succeeds', async () => {
+          const { apiserver, reconciler } = await convergedRunLane()
+          apiserver.api.listNamespacedNetworkPolicy.mockClear()
+          seedLeftover(apiserver)
+          apiserver.api.deleteNamespacedNetworkPolicy.mockRejectedValueOnce({
+            code: 403,
+            message: 'forbidden',
+          })
+
+          const first = await reconciler.retryRunLaneNetworkPolicies('test-wf', 'uid-123', spec())
+          expect(apiserver.api.listNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
+          expect(first.retryPending).toBe(true)
+          expect(apiserver.live.has(apiserver.key('sandbox-recipes', LEFTOVER))).toBe(true)
+
+          const second = await reconciler.retryRunLaneNetworkPolicies('test-wf', 'uid-123', spec())
+          expect(second).toEqual({ conflicts: [], retryPending: false })
+          expect(apiserver.live.has(apiserver.key('sandbox-recipes', LEFTOVER))).toBe(false)
+        })
+
+        it('keeps reporting the retry while the prune LIST fails', async () => {
+          const { apiserver, reconciler } = await convergedRunLane()
+          apiserver.api.listNamespacedNetworkPolicy.mockClear()
+          seedLeftover(apiserver)
+          apiserver.api.listNamespacedNetworkPolicy.mockRejectedValueOnce({
+            code: 500,
+            message: 'boom',
+          })
+
+          const first = await reconciler.retryRunLaneNetworkPolicies('test-wf', 'uid-123', spec())
+          expect(apiserver.api.listNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
+          expect(first.retryPending).toBe(true)
+          expect(apiserver.live.has(apiserver.key('sandbox-recipes', LEFTOVER))).toBe(true)
+
+          const second = await reconciler.retryRunLaneNetworkPolicies('test-wf', 'uid-123', spec())
+          expect(second.retryPending).toBe(false)
+          expect(apiserver.live.has(apiserver.key('sandbox-recipes', LEFTOVER))).toBe(false)
+        })
+
+        it('retries a failed legacy internet policy delete', async () => {
+          const apiserver = makeApiserverNetworkingApi()
+          const reconciler = new WorkflowReconciler(
+            makeDeps({ networkingApi: apiserver.api as never })
+          )
+          apiserver.api.deleteNamespacedNetworkPolicy.mockRejectedValueOnce({
+            code: 403,
+            message: 'forbidden',
+          })
+          const legacyDeletes = () =>
+            apiserver.api.deleteNamespacedNetworkPolicy.mock.calls.filter(
+              ([arg]) => arg.name === 'test-wf-mcp-servers-egress-internet'
+            )
+
+          const first = await reconciler.retryRunLaneNetworkPolicies('test-wf', 'uid-123', spec())
+          expect(legacyDeletes()).toHaveLength(1)
+          expect(first.retryPending).toBe(true)
+
+          const second = await reconciler.retryRunLaneNetworkPolicies('test-wf', 'uid-123', spec())
+          expect(legacyDeletes()).toHaveLength(2)
+          expect(second.retryPending).toBe(false)
+        })
       })
     })
   })

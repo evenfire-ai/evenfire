@@ -1302,8 +1302,11 @@ describe('WorkflowReconciler.reconcileDelete — orphaned Service cleanup', () =
 
       await reconciler.teardownComputePodsForTerminalRun('wf-run-7')
 
+      // Witness: the teardown ran (three DELETEs) and none of them was
+      // preceded by a raw pod GET, which getPodPresence alone would not show.
       expect(crashRecoveryMocks.deletePodIfExists).toHaveBeenCalledTimes(3)
       expect(crashRecoveryMocks.getPodPresence).not.toHaveBeenCalled()
+      expect(mockCoreApi.readNamespacedPod).not.toHaveBeenCalled()
     })
 
     it('is idempotent: a second pass still DELETE-first (404-safe)', async () => {
@@ -2118,6 +2121,40 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
       namespace: sandboxNamespace,
     })
     expect(mockCoreApi.createNamespacedPod).not.toHaveBeenCalled()
+  })
+
+  it('forgets the legacy internet policy ledger entry when an SDK-only recipe is cleaned up', async () => {
+    const reconciler = new WorkflowReconciler(makeDeps())
+    const legacyDeletes = () =>
+      mockNetworkingApi.deleteNamespacedNetworkPolicy.mock.calls.filter(
+        ([arg]) => arg.name === 'sdk-only-mcp-servers-egress-internet'
+      )
+    const reconcileSdkOnly = () =>
+      reconciler.reconcilePluginWorkloadSdkOnly(
+        'sdk-only',
+        'uid-sdk-only',
+        sandboxNamespace,
+        sdkSpec({
+          agent: undefined,
+          steps: undefined,
+          pluginWorkloadSdk: {
+            clientNotifications: { allowedEventTypes: ['e2e.test'] },
+            allowedCallers: ['sdk-caller'],
+          },
+        })
+      )
+
+    await reconcileSdkOnly()
+    // The witness: the first pass reached the legacy prune and recorded it, so
+    // a second pass skips the DELETE.
+    expect(legacyDeletes()).toHaveLength(1)
+    await reconcileSdkOnly()
+    expect(legacyDeletes()).toHaveLength(1)
+
+    await reconciler.cleanupPluginWorkloadSdk('sdk-only', { recipeUid: 'uid-sdk-only' })
+    await reconcileSdkOnly()
+
+    expect(legacyDeletes()).toHaveLength(2)
   })
 
   it('defers absence reads until pod deletion completes so 404s cannot become unhandled rejections', async () => {

@@ -1089,7 +1089,7 @@ export class WorkflowRecipeReconciler {
    */
   private async cleanupPluginWorkloadSdkOrThrow(
     recipeName: string,
-    options: { preserveWorkflowRuntime?: boolean } = {}
+    options: { preserveWorkflowRuntime?: boolean; recipeUid?: string } = {}
   ): Promise<void> {
     if (!this.workflowReconciler) {
       throw new Error('workflow subsystem is not initialized; SDK cleanup cannot be confirmed')
@@ -1469,9 +1469,9 @@ export class WorkflowRecipeReconciler {
    * Applies the run-lane NetworkPolicies again from a short-circuit when the
    * published status carries the retry marker. Those short-circuits never
    * reach `WorkflowReconciler.reconcile()`, so without this a policy left
-   * pending a retry would stay unapplied until the run ends. Nothing is
-   * pruned: the prune decisions depend on the eligibility verdicts that only
-   * the full pass computes.
+   * pending a retry would stay unapplied until the run ends. The retry
+   * re-prunes as well, with a verdict computed for this pass: a prune that
+   * failed is what set the marker, so an apply-only retry could never clear it.
    *
    * Returns the requeue delay the short-circuit must add: the progress base
    * while a policy is still pending, the transient base when the apply threw
@@ -3955,7 +3955,7 @@ export class WorkflowRecipeReconciler {
     // a capability may have been removed in an update before Kubernetes emits
     // the final delete event, and cleanup must still revoke its host tokens.
     if (recipe.spec.pluginWorkloadSdk || recipe.status?.pluginWorkloadSdk) {
-      await this.cleanupPluginWorkloadSdkOrThrow(name)
+      await this.cleanupPluginWorkloadSdkOrThrow(name, { recipeUid: recipe.metadata.uid })
     }
 
     await this.cleanupDelegationIfNeeded(recipe)
