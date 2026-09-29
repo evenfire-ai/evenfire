@@ -29,7 +29,12 @@ export const DEFAULT_MAX_BODY_BYTES = CONTRACT_LIMITS.maxRequestBodyBytes + ENVE
  * full load the gates admit (eight 8 MiB streams, two 24 MiB visual streams
  * and three queued 8 MiB bodies, #739 D5), the process peaked at 790 MiB of
  * RSS with `--max-old-space-size=384` and at 886-1009 MiB with an uncapped
- * heap, which is why the deployment sets that cap and a 1Gi memory limit.
+ * heap, which is why the deployment sets a heap cap. The budget counts bytes,
+ * not structure: bodies at the worst structure the contract admits (262 144
+ * containers, 262 144 members) are 4.7 MiB each, so it admits about five of
+ * them parsing at once, each a ~39 MiB tree. That aborted the process at a
+ * 384 MiB heap cap; the deployment uses 512 MiB and a 1536Mi memory limit,
+ * the peak of that load (1095-1129 MiB of RSS) plus 25 % (#806 Q1).
  *
  * Bytes alone do not bound the parse: JSON.parse allocates one heap
  * object per container, so the contracts cap containers at
@@ -83,7 +88,7 @@ export const STREAM_LIMITS = {
  * The pod cannot hold the ordinary 8-stream gate across a 24 MiB image, so
  * those requests are a tighter sibling and a V2 request keeps the slot until
  * the stream ends. Small bodies, including every valid V1, must not enter this
- * gate. The 1Gi limit is sized for these two slots plus the ordinary body
+ * gate. The 1536Mi limit is sized for these two slots plus the ordinary body
  * budget; widening either one needs a new memory measurement first.
  */
 export const VISUAL_STREAM_LIMITS = {

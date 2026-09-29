@@ -27,9 +27,13 @@ export const DEFAULT_MAX_BODY_BYTES = CONTRACT_LIMITS.maxRequestBodyBytes + ENVE
  * visual slot. With eight 8 MiB streams and three queued 8 MiB bodies (#739
  * D5) the process peaked at 511 MiB of RSS with `--max-old-space-size=384`
  * (#739 measured 509.8) and at 480-511 MiB with an uncapped heap, which is
- * why the deployment sets that heap cap. The full load the gates admit adds
- * one visual stream; `VISUAL_STREAM_LIMITS` records that peak and the 1Gi
- * memory limit it sets.
+ * why the deployment sets a heap cap. The full load the gates admit adds
+ * one visual stream; `VISUAL_STREAM_LIMITS` records that peak and the memory
+ * limit it sets. The budget counts bytes, not structure: bodies at the worst
+ * structure the contract admits (262 144 containers, 262 144 members) are
+ * 4.7 MiB each, so it admits about five of them parsing at once, each a
+ * ~39 MiB tree. That aborted the process at a 384 MiB heap cap; the
+ * deployment uses 512 MiB (#806 Q1).
  */
 export const IN_FLIGHT_BODY_BUDGET_BODIES = 3
 
@@ -74,9 +78,11 @@ export const STREAM_LIMITS = {
  * Measured with the full load the gates admit (the D5 load above plus one
  * ~36 MB V2 stream: a 20 MiB PNG and 8 MiB of text; tsc build, one process,
  * `--max-old-space-size=384`, upstream request through undici), the process
- * peaked at 775 MiB of RSS, against 511 MiB for D5 alone. The deployment's
- * 1Gi memory limit is that peak plus 25 %, rounded up; widening this gate or
- * the ordinary body budget needs a new memory measurement first.
+ * peaked at 775 MiB of RSS, against 511 MiB for D5 alone. With the ordinary
+ * bodies at the worst structure and a 512 MiB heap cap, the same load peaked
+ * at 1097-1111 MiB. The deployment's 1536Mi memory limit is that peak plus
+ * 25 %, rounded up; widening this gate or the ordinary body budget needs a
+ * new memory measurement first.
  */
 export const VISUAL_STREAM_LIMITS = {
   maxConcurrentStreams: 1,

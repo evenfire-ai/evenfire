@@ -241,8 +241,9 @@ window and its source (`catalog` or `default`).
 ### Body structure before parse (#806)
 
 `JSON.parse` allocates one heap object per container before any contract
-check runs, so a body within the byte limit can exhaust a heap capped at
-384 MiB. A 25165824-byte body of `[],` padding aborted `codex-llm-proxy`, and
+check runs, so a body within the byte limit can exhaust a capped heap (384 MiB
+in the measurements below; the manifest now caps it at 512 MiB, see the end of
+this section). A 25165824-byte body of `[],` padding aborted `codex-llm-proxy`, and
 the contracts accepted 4117647 containers in an 8 MiB request. Both contracts
 therefore bound the structure as well as the bytes, and every parser checks the
 raw body before parsing it.
@@ -290,6 +291,20 @@ run peaked at 319.6 MiB, and at 1048576 the process aborted. A new value must
 keep every run at exit 0 with five of five admitted, at most 200 MiB after GC
 and at most 280 MiB sampled peak. These figures are lower bounds: the
 serializations made while forwarding are not included.
+
+Worst-structure load (r16, macOS, Node v24.18.0, tsc build, real proxy with
+undici to a loopback upstream, 29 runs across both proxies). The bodies above
+carry only containers. A body at all three limits (262144 containers, 262144
+members, 1048576 elements) parses into about 39 MiB, and the byte budget
+admits about five of them at once. Codex with two visual bodies at that shape:
+384 MiB heap aborted out of memory with zero upstream hits, 512 MiB passed
+(resident after GC 224.8 MiB, peak RSS 1095-1129 MiB). Scales 1.5 and 2 of the
+same shape passed at 384 MiB, so the abort is specific to the densest bodies.
+The manifest therefore sets `--max-old-space-size=512` and a 1536Mi limit
+(`ceil(1129.2 × 1.25)` = 1412 MiB, pinned by `deployManifest.test.ts`), with
+the request kept at 768Mi. The resident heap at 512 MiB is still above the
+200 MiB target, so a structure-weighted body budget and parsing after the
+stream slot is granted remain open as a code change.
 
 The bound does not refuse realistic requests. Tool results and message
 content are strings, which count only as structural bytes for their quotes; a

@@ -638,7 +638,7 @@ describe('codex-llm-proxy security surface', () => {
     expect(loadConfig(required).maxVisualBodyBytes).toBe(24 * 1024 * 1024)
   })
 
-  // The 1Gi memory limit was measured with two visual streams at the contract
+  // The 1536Mi memory limit was measured with two visual streams at the contract
   // ceiling. A larger visual limit would admit bodies that measurement never
   // covered, so the proxy refuses to start with one.
   it('refuses a visual body limit above the contract visual ceiling', () => {
