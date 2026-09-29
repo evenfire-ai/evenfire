@@ -107,6 +107,10 @@ normalize_cache_root() {
 validate_profile_name() {
   [[ ${#PROFILE} -le 63 && "${PROFILE}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]] ||
     die "resolver returned an unsafe profile name: ${PROFILE}"
+  # Positive check: a branch profile is always a local clerum-* profile. The
+  # denylist below only names shared profiles known today; this rejects the rest.
+  [[ "${PROFILE}" =~ ^clerum-[a-z0-9][a-z0-9._-]*$ ]] ||
+    die "resolver returned a profile outside the local clerum-* namespace: ${PROFILE}"
   case "${PROFILE}" in
     *gke*|*prod*|*staging*|clerum-test|default|minikube)
       die "resolver returned a shared or protected profile: ${PROFILE}" ;;
@@ -696,8 +700,10 @@ start_pf() {
   fi
   (( service_status == 0 )) || return "${service_status}"
 
-  stop_own_pf "${name}" "${namespace}" "${service}" "${local_port}" "${remote_port}"
-  check_port_free "${name}" "${local_port}"
+  # start_pf runs under `|| failed++` in cmd_pf, where set -e is suspended, so
+  # every step that can fail returns explicitly instead of relying on errexit.
+  stop_own_pf "${name}" "${namespace}" "${service}" "${local_port}" "${remote_port}" || return 1
+  check_port_free "${name}" "${local_port}" || return 1
   nohup kubectl "--context=${PROFILE}" -n "${namespace}" port-forward --address=127.0.0.1 "svc/${service}" "${local_port}:${remote_port}" >"${log_file}" 2>&1 </dev/null &
   pid=$!
   pf_owner_pause "${PF_STARTUP_DELAY:-0.2}"
@@ -864,9 +870,11 @@ cmd_start() {
   check_docker_ready
   check_all_ports_free
   persist_state
+  # The global current-context is shared with every other session on this
+  # machine, so read it without --context and only fail when minikube itself
+  # moved it onto this profile.
   local before_context after_context
-  before_context="$(kubectl "--context=${PROFILE}" "--request-timeout=${KUBECTL_REQUEST_TIMEOUT}" \
-    config current-context 2>/dev/null || true)"
+  before_context="$(kubectl config current-context 2>/dev/null || true)"
   printf 'starting minikube profile: %s\n' "${PROFILE}"
   run_bounded minikube-start "${MINIKUBE_START_TIMEOUT_SECONDS}" minikube start \
     -p "${PROFILE}" \
@@ -875,10 +883,10 @@ cmd_start() {
     --cpus="${MINIKUBE_CPUS}" \
     --cni="${MINIKUBE_CNI}" \
     --driver="${MINIKUBE_DRIVER}"
-  after_context="$(kubectl "--context=${PROFILE}" "--request-timeout=${KUBECTL_REQUEST_TIMEOUT}" \
-    config current-context 2>/dev/null || true)"
-  if [[ "${before_context}" != "${after_context}" ]]; then
-    printf 'ERROR: kubectl current-context changed from %s to %s\n' "${before_context}" "${after_context}" >&2
+  after_context="$(kubectl config current-context 2>/dev/null || true)"
+  if [[ "${after_context}" == "${PROFILE}" && "${before_context}" != "${PROFILE}" ]]; then
+    printf 'ERROR: minikube switched the kubectl current-context from %s to %s despite --keep-context\n' \
+      "${before_context:-<unset>}" "${after_context}" >&2
     exit 1
   fi
   run_bounded minikube-status "${MINIKUBE_STATUS_TIMEOUT_SECONDS}" \
@@ -890,20 +898,24 @@ cmd_start() {
 cmd_status() {
   require_existing_profile
   printf 'profile: %s\n\n' "${PROFILE}"
+  # `minikube status` exits non-zero for a stopped cluster. Report that state
+  # and the reachability line, then return the status code so a stopped
+  # profile is still visible to callers.
+  local minikube_status=0
   run_bounded minikube-status "${MINIKUBE_STATUS_TIMEOUT_SECONDS}" \
-    minikube -p "${PROFILE}" status
+    minikube -p "${PROFILE}" status || minikube_status=$?
   printf '\n'
   if cluster_reachable; then
     kubectl "--context=${PROFILE}" "--request-timeout=${KUBECTL_REQUEST_TIMEOUT}" get nodes
     printf '\n'
-    kubectl "--context=${PROFILE}" "--request-timeout=${KUBECTL_REQUEST_TIMEOUT}" \
-      get deploy -A 2>/dev/null || true
+    kubectl "--context=${PROFILE}" "--request-timeout=${KUBECTL_REQUEST_TIMEOUT}" get deploy -A
     printf '\n'
-    kubectl "--context=${PROFILE}" "--request-timeout=${KUBECTL_REQUEST_TIMEOUT}" \
-      get sts -A 2>/dev/null || true
+    kubectl "--context=${PROFILE}" "--request-timeout=${KUBECTL_REQUEST_TIMEOUT}" get sts -A
   else
     printf 'cluster not reachable for context %s\n' "${PROFILE}"
+    (( minikube_status != 0 )) || minikube_status=1
   fi
+  return "${minikube_status}"
 }
 
 cmd_pf() {
@@ -916,25 +928,34 @@ cmd_pf() {
   fi
   persist_state
 
-  start_pf control-ui control-plane control-ui "${CONTROL_UI_PORT}" 3000 true
-  start_pf profile-ui profiles profile-ui "${PROFILE_UI_PORT}" 3001 false
-  start_pf control-api control-plane control-api "${CONTROL_API_PORT}" 8090 true
-  start_pf external-rest-api profiles external-rest-api "${EXTERNAL_REST_API_PORT}" 8091 true
-  start_pf member-registration-service profiles member-registration-service "${MEMBER_REGISTRATION_SERVICE_PORT}" 8092 false
-  start_pf rpc-proxy rpc-proxy rpc-proxy "${RPC_PROXY_PORT}" 8094 true
-  start_pf registry-api registry registry-api "${REGISTRY_API_PORT}" 8085 false
-  start_pf workflow-approval-reader channels workflow-approval-request-reader "${WORKFLOW_APPROVAL_READER_PORT}" 8098 false
+  # Start every forward before judging the set: stopping at the first failure
+  # hides which of the others were healthy and leaves a partial hold behind
+  # with no summary. Each failure is counted and the command fails at the end.
+  local failed=0
+  start_pf control-ui control-plane control-ui "${CONTROL_UI_PORT}" 3000 true || failed=$((failed + 1))
+  start_pf profile-ui profiles profile-ui "${PROFILE_UI_PORT}" 3001 false || failed=$((failed + 1))
+  start_pf control-api control-plane control-api "${CONTROL_API_PORT}" 8090 true || failed=$((failed + 1))
+  start_pf external-rest-api profiles external-rest-api "${EXTERNAL_REST_API_PORT}" 8091 true || failed=$((failed + 1))
+  start_pf member-registration-service profiles member-registration-service "${MEMBER_REGISTRATION_SERVICE_PORT}" 8092 false || failed=$((failed + 1))
+  start_pf rpc-proxy rpc-proxy rpc-proxy "${RPC_PROXY_PORT}" 8094 true || failed=$((failed + 1))
+  start_pf registry-api registry registry-api "${REGISTRY_API_PORT}" 8085 false || failed=$((failed + 1))
+  start_pf workflow-approval-reader channels workflow-approval-request-reader "${WORKFLOW_APPROVAL_READER_PORT}" 8098 false || failed=$((failed + 1))
   local mcp_service mcp_status=0
   mcp_service="$(select_mcp_service)" || mcp_status=$?
   if (( mcp_status == 3 )); then
     printf 'SKIP %-32s optional service absent (mcp-host/chatllm or mcp-host/mcp-host)\n' mcp-host
   elif (( mcp_status == 0 )); then
-    start_pf mcp-host mcp-host "${mcp_service}" "${MCP_HOST_PORT}" 8080 false
+    start_pf mcp-host mcp-host "${mcp_service}" "${MCP_HOST_PORT}" 8080 false || failed=$((failed + 1))
   else
-    return "${mcp_status}"
+    printf 'ERROR: unable to select the mcp-host service (status %s)\n' "${mcp_status}" >&2
+    failed=$((failed + 1))
   fi
   printf '\nlogs: %s\n' "${LOGS_DIR}"
   printf 'pids: %s\n' "${PIDS_DIR}"
+  if (( failed > 0 )); then
+    printf 'ERROR: %s port-forward(s) failed to start\n' "${failed}" >&2
+    return 1
+  fi
 }
 
 cmd_health() {
@@ -945,23 +966,31 @@ cmd_health() {
     exit 1
   fi
 
-  check_health control-ui control-plane control-ui control-ui "${CONTROL_UI_URL}" true "${CONTROL_UI_PORT}" 3000
-  check_health profile-ui profiles profile-ui profile-ui "${PROFILE_UI_URL}" false "${PROFILE_UI_PORT}" 3001
-  check_health control-api control-plane control-api control-api "${CONTROL_API_URL%/}/health" true "${CONTROL_API_PORT}" 8090
-  check_health external-rest-api profiles external-rest-api external-rest-api "${EXTERNAL_REST_API_URL%/}/health" true "${EXTERNAL_REST_API_PORT}" 8091
-  check_health member-registration-service profiles member-registration-service member-registration-service "${MEMBER_REGISTRATION_SERVICE_URL%/}/health" false "${MEMBER_REGISTRATION_SERVICE_PORT}" 8092
-  check_health rpc-proxy rpc-proxy rpc-proxy rpc-proxy "${RPC_PROXY_URL%/}/health" true "${RPC_PROXY_PORT}" 8094
-  check_health registry-api registry registry-api registry-api "${REGISTRY_API_URL%/}/health" false "${REGISTRY_API_PORT}" 8085
-  check_health workflow-approval-reader channels workflow-approval-request-reader workflow-approval-reader "${WORKFLOW_APPROVAL_READER_URL%/}/health" false "${WORKFLOW_APPROVAL_READER_PORT}" 8098
+  # Probe every service so one dead forward does not hide the state of the
+  # rest; the command still fails when any probe failed.
+  local failed=0
+  check_health control-ui control-plane control-ui control-ui "${CONTROL_UI_URL}" true "${CONTROL_UI_PORT}" 3000 || failed=$((failed + 1))
+  check_health profile-ui profiles profile-ui profile-ui "${PROFILE_UI_URL}" false "${PROFILE_UI_PORT}" 3001 || failed=$((failed + 1))
+  check_health control-api control-plane control-api control-api "${CONTROL_API_URL%/}/health" true "${CONTROL_API_PORT}" 8090 || failed=$((failed + 1))
+  check_health external-rest-api profiles external-rest-api external-rest-api "${EXTERNAL_REST_API_URL%/}/health" true "${EXTERNAL_REST_API_PORT}" 8091 || failed=$((failed + 1))
+  check_health member-registration-service profiles member-registration-service member-registration-service "${MEMBER_REGISTRATION_SERVICE_URL%/}/health" false "${MEMBER_REGISTRATION_SERVICE_PORT}" 8092 || failed=$((failed + 1))
+  check_health rpc-proxy rpc-proxy rpc-proxy rpc-proxy "${RPC_PROXY_URL%/}/health" true "${RPC_PROXY_PORT}" 8094 || failed=$((failed + 1))
+  check_health registry-api registry registry-api registry-api "${REGISTRY_API_URL%/}/health" false "${REGISTRY_API_PORT}" 8085 || failed=$((failed + 1))
+  check_health workflow-approval-reader channels workflow-approval-request-reader workflow-approval-reader "${WORKFLOW_APPROVAL_READER_URL%/}/health" false "${WORKFLOW_APPROVAL_READER_PORT}" 8098 || failed=$((failed + 1))
   local mcp_service mcp_status=0
   mcp_service="$(select_mcp_service)" || mcp_status=$?
   if (( mcp_status == 3 )); then
     printf 'SKIP %-32s optional service absent (mcp-host/chatllm or mcp-host/mcp-host)\n' mcp-host
   elif (( mcp_status == 0 )); then
     check_health mcp-host mcp-host "${mcp_service}" mcp-host \
-      "${MCP_HOST_URL%/}/v1/runtime/health" false "${MCP_HOST_PORT}" 8080
+      "${MCP_HOST_URL%/}/v1/runtime/health" false "${MCP_HOST_PORT}" 8080 || failed=$((failed + 1))
   else
-    return "${mcp_status}"
+    printf 'ERROR: unable to select the mcp-host service (status %s)\n' "${mcp_status}" >&2
+    failed=$((failed + 1))
+  fi
+  if (( failed > 0 )); then
+    printf 'ERROR: %s health check(s) failed\n' "${failed}" >&2
+    return 1
   fi
 }
 
@@ -1081,6 +1110,10 @@ cmd_stop_pf() {
 
 cmd_stop() {
   require_existing_profile
+  # Clear the verified port-forward records first: a stopped cluster leaves
+  # records naming dead kubectl processes, and the next T2 preflight refuses
+  # them with PORT_FORWARD_CONFLICT.
+  cmd_stop_pf
   printf 'stopping minikube profile: %s\n' "${PROFILE}"
   run_bounded minikube-stop "${MINIKUBE_STOP_TIMEOUT_SECONDS}" \
     minikube -p "${PROFILE}" stop
@@ -1111,6 +1144,9 @@ cmd_delete() {
     printf 'ERROR: refusing delete. Re-run with CONFIRM_DELETE=%s\n' "${PROFILE}" >&2
     exit 1
   fi
+  # The registry (pids/*.pid) outlives the cluster; clear the port-forward
+  # records so the deleted profile does not leave PORT_FORWARD_CONFLICT behind.
+  cmd_stop_pf
   printf 'deleting minikube profile: %s\n' "${PROFILE}"
   run_bounded minikube-delete "${MINIKUBE_DELETE_TIMEOUT_SECONDS}" \
     minikube -p "${PROFILE}" delete
