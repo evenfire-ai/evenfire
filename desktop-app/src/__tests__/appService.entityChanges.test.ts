@@ -24,6 +24,7 @@ function setSyntheticSessionToken(service: object, value: string): void {
   if (!Reflect.set(service, ['session', 'Token'].join(''), value)) {
     throw new Error('Unable to set synthetic session fixture')
   }
+  Reflect.set(service, 'entityChangeSessionToken', value)
 }
 
 describe('AppService entity-change fan-out', () => {
@@ -141,7 +142,7 @@ describe('AppService.startEntityChangeStream session expiry', () => {
     service.stopEntityChangeStream('stream-1', 7)
   })
 
-  it('does not reconnect after the server announces session expiry', async () => {
+  it('removes dead subscribers after the server announces session expiry', async () => {
     const service = new AppService() as any
     setSyntheticSessionToken(service, 'session-token')
     service.authClient = {
@@ -164,6 +165,141 @@ describe('AppService.startEntityChangeStream session expiry', () => {
 
     expect(events.map(event => event.type)).toEqual(['open', 'stream.closing'])
     expect(service.authClient.openEntityChangeStream).toHaveBeenCalledOnce()
+    expect(service.entityChangeSubscribers.size).toBe(0)
     service.stopEntityChangeStream('stream-1', 7)
+  })
+
+  it('rebinds a stale expired connection once to the newer committed session', async () => {
+    const service = new AppService() as any
+    setSyntheticSessionToken(service, 'old-session-token')
+    const opens: Array<{
+      token: string
+      cursor: string | null
+      onEvent: (event: EntityChangeStreamEvent) => void
+      signal: AbortSignal
+    }> = []
+    service.authClient = {
+      openEntityChangeStream: vi.fn((token, cursor, onEvent, signal) => {
+        opens.push({ token, cursor, onEvent, signal })
+        return new Promise<void>(resolve => {
+          signal.addEventListener('abort', () => resolve(), { once: true })
+        })
+      }),
+    }
+    service.startEntityChangeStream('stream-1', 7, vi.fn())
+    await flushAsyncWork()
+    Reflect.set(service, 'entityChangeSessionToken', 'new-committed-session-token')
+    Reflect.set(service, 'entityChangeSessionGeneration', 1)
+
+    opens[0]?.onEvent({
+      type: 'stream.closing',
+      schemaVersion: 1,
+      cursor: '00000000-0000-0000-0000-000000000002',
+      reason: 'session_expired',
+    })
+    await flushAsyncWork()
+
+    expect(opens.map(entry => entry.token)).toEqual([
+      'old-session-token',
+      'new-committed-session-token',
+    ])
+    expect(opens[1]?.cursor).toBeNull()
+    expect(service.entityChangeSubscribers.size).toBe(1)
+    service.stopEntityChangeStream('stream-1', 7)
+  })
+
+  it('does not strand subscribers when expiry is deferred through a transient hop', async () => {
+    const service = new AppService() as any
+    setSyntheticSessionToken(service, 'committed-session-token')
+    let publish!: (event: EntityChangeStreamEvent) => void
+    service.authClient = {
+      openEntityChangeStream: vi.fn((_token, _cursor, onEvent, signal) => {
+        publish = onEvent
+        return new Promise<void>(resolve => {
+          signal.addEventListener('abort', () => resolve(), { once: true })
+        })
+      }),
+    }
+    const events: EntityChangeStreamEvent[] = []
+    const releaseTransientHop = service.enterGfsTransientTeamHop()
+    service.startEntityChangeStream('stream-1', 7, (event: EntityChangeStreamEvent) => {
+      events.push(event)
+    })
+    await flushAsyncWork()
+
+    publish({
+      type: 'stream.closing',
+      schemaVersion: 1,
+      cursor: '00000000-0000-0000-0000-000000000003',
+      reason: 'session_expired',
+    })
+    await flushAsyncWork()
+
+    expect(events).toEqual([])
+    expect(service.entityChangeSubscribers.size).toBe(1)
+    releaseTransientHop()
+    expect(events.map(event => event.type)).toEqual(['stream.closing'])
+    expect(service.entityChangeSubscribers.size).toBe(0)
+  })
+})
+
+describe('AppService entity-change stream team-context lifecycle', () => {
+  it('never reconnects with a transient team token and rebinds after the hop', async () => {
+    vi.useFakeTimers()
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    const service = new AppService() as any
+    setSyntheticSessionToken(service, 'committed-session-token')
+    service.me = { id: 'user-1', teamId: 'team-a' }
+    service.gfsScopeIdentity = {}
+    service.bindCurrentChatStore = vi.fn()
+    service.tokenStore = { setSessionToken: vi.fn() }
+
+    const opened: Array<{ token: string; signal: AbortSignal }> = []
+    let finishFirstStream!: () => void
+    service.authClient = {
+      openEntityChangeStream: vi.fn((token, _cursor, _onEvent, signal) => {
+        opened.push({ token, signal })
+        return new Promise<void>(resolve => {
+          if (opened.length === 1) finishFirstStream = resolve
+          signal.addEventListener('abort', () => resolve(), { once: true })
+        })
+      }),
+      switchTeam: vi.fn(async (_token, teamId) => ({
+        token: teamId === 'team-b' ? 'transient-team-context-token' : 'restored-session-token',
+      })),
+      getMe: vi.fn(async token => ({
+        id: 'user-1',
+        teamId: token === 'transient-team-context-token' ? 'team-b' : 'team-a',
+      })),
+    }
+
+    let finishOperation!: () => void
+    const operationGate = new Promise<void>(resolve => {
+      finishOperation = resolve
+    })
+    try {
+      service.startEntityChangeStream('stream-1', 7, vi.fn())
+      await flushAsyncWork()
+      expect(opened[0]?.token).toBe('committed-session-token')
+
+      const teamOperation = service.runWithTeamContext('team-b', async () => operationGate)
+      await flushAsyncWork()
+      expect(service.sessionToken).toBe('transient-team-context-token')
+
+      finishFirstStream()
+      await flushAsyncWork()
+      await vi.advanceTimersByTimeAsync(1000)
+
+      expect(opened.map(entry => entry.token)).not.toContain('transient-team-context-token')
+
+      finishOperation()
+      await teamOperation
+      await flushAsyncWork()
+      expect(opened.map(entry => entry.token)).toContain('restored-session-token')
+    } finally {
+      service.stopEntityChangeStream('stream-1', 7)
+      vi.useRealTimers()
+      vi.restoreAllMocks()
+    }
   })
 })

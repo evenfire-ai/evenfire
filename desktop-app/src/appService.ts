@@ -931,6 +931,9 @@ export class AppService {
     { ownerId: number; onEvent: (event: EntityChangeStreamEvent) => void }
   >()
   private entityChangeConnectionStop: ((opts?: { silent?: boolean }) => void) | null = null
+  private entityChangeSessionToken: string | null = null
+  private entityChangeSessionGeneration = 0
+  private entityChangeSessionExpiryDeferred = false
   private entityChangeCursor: string | null = null
   private progressStreams = new Map<
     string,
@@ -1030,6 +1033,10 @@ export class AppService {
       this.profileUiBaseUrlCache = null
       this.accessCatalog = null
       await this.tokenStore.setSessionToken(token, getActiveEnvKey())
+      if (this.gfsTransientTeamHopDepth === 0) {
+        this.updateEntityChangeSessionToken(token)
+        this.restartEntityChangeStreamForSessionReplacement()
+      }
     }
     if (options.refreshMe) {
       try {
@@ -1117,6 +1124,10 @@ export class AppService {
       if (released) return
       released = true
       this.gfsTransientTeamHopDepth = Math.max(0, this.gfsTransientTeamHopDepth - 1)
+      if (this.gfsTransientTeamHopDepth === 0 && this.entityChangeSessionExpiryDeferred) {
+        this.entityChangeSessionExpiryDeferred = false
+        this.emitEntityChangeSessionExpired()
+      }
     }
   }
 
@@ -1156,6 +1167,7 @@ export class AppService {
       let activeToken = originalToken
       const shouldSwitch = originalTeamId !== targetTeamId
       const shouldRestore = Boolean(originalTeamId && shouldSwitch)
+      let restoredOriginalTeam = false
       const releaseTransientHop = shouldSwitch ? this.enterGfsTransientTeamHop() : undefined
 
       try {
@@ -1172,6 +1184,7 @@ export class AppService {
           if (shouldRestore) {
             try {
               await this.switchSessionToTeam(originalTeamId, this.requireSessionToken())
+              restoredOriginalTeam = true
             } catch (restoreError) {
               if (!operationError) throw restoreError
               console.warn(
@@ -1179,6 +1192,10 @@ export class AppService {
                 restoreError
               )
             }
+          }
+          if (restoredOriginalTeam && this.sessionToken) {
+            this.updateEntityChangeSessionToken(this.sessionToken)
+            this.restartEntityChangeStreamForSessionReplacement()
           }
         }
       } finally {
@@ -1250,6 +1267,7 @@ export class AppService {
 
   private clearAuthenticatedSessionState(): void {
     this.sessionGeneration += 1
+    this.updateEntityChangeSessionToken(null)
     this.gfsAuthEpoch += 1
     this.gfsDispatchBlocked = true
     this.gfsScopeIdentity = null
@@ -1410,6 +1428,8 @@ export class AppService {
         return { authenticated: Boolean(this.sessionToken && this.me), me: this.me }
       }
       this.me = restoredMe
+      this.updateEntityChangeSessionToken(token)
+      this.restartEntityChangeStreamForSessionReplacement()
       this.accessCatalog = null
       this.teamDirectoryCache = null
       this.workflowApprovalTeamById.clear()
@@ -1496,6 +1516,7 @@ export class AppService {
     this.sessionGeneration += 1
     this.sessionToken = result.token
     this.me = result.me
+    this.updateEntityChangeSessionToken(result.token)
     this.restartEntityChangeStreamForSessionReplacement()
     await this.bindCurrentChatStore(result.me.id)
     this.accessCatalog = null
@@ -2777,8 +2798,50 @@ export class AppService {
     }
   }
 
+  private updateEntityChangeSessionToken(token: string | null): void {
+    if (this.entityChangeSessionToken === token) return
+    this.entityChangeSessionToken = token
+    this.entityChangeSessionGeneration += 1
+  }
+
+  private handleEntityChangeSessionExpiry(connectionGeneration: number): void {
+    const hasNewerCommittedSession =
+      this.entityChangeSessionGeneration > connectionGeneration &&
+      Boolean(this.entityChangeSessionToken)
+    if (hasNewerCommittedSession) {
+      this.restartEntityChangeStreamForSessionReplacement()
+      return
+    }
+
+    this.entityChangeConnectionStop?.({ silent: true })
+    if (this.gfsTransientTeamHopDepth > 0) {
+      this.entityChangeSessionExpiryDeferred = true
+      return
+    }
+
+    this.emitEntityChangeSessionExpired()
+  }
+
+  private emitEntityChangeSessionExpired(): void {
+    this.emitEntityChangeEvent({
+      type: 'stream.closing',
+      schemaVersion: 1,
+      cursor: this.entityChangeCursor ?? '00000000-0000-0000-0000-000000000000',
+      reason: 'session_expired',
+    })
+    this.entityChangeSubscribers.clear()
+  }
+
   private ensureEntityChangeConnection(): void {
     if (this.entityChangeConnectionStop || this.entityChangeSubscribers.size === 0) return
+    if (
+      !this.entityChangeSessionToken &&
+      this.sessionToken &&
+      this.gfsTransientTeamHopDepth === 0
+    ) {
+      this.updateEntityChangeSessionToken(this.sessionToken)
+    }
+    if (!this.entityChangeSessionToken) return
     let closed = false
     let abortController: AbortController | null = null
     let retryTimer: NodeJS.Timeout | null = null
@@ -2795,36 +2858,33 @@ export class AppService {
       if (this.entityChangeConnectionStop === stop) this.entityChangeConnectionStop = null
       if (!opts?.silent) this.emitEntityChangeEvent({ type: 'closed' })
     }
-    const stopForSessionExpiry = () => stop({ silent: true })
     this.entityChangeConnectionStop = stop
 
     const connect = async () => {
       if (closed) return
+      const connectionToken = this.entityChangeSessionToken
+      const connectionGeneration = this.entityChangeSessionGeneration
+      if (!connectionToken) return
       abortController = new AbortController()
       try {
         await this.authClient.openEntityChangeStream(
-          this.requireSessionToken(),
+          connectionToken,
           this.entityChangeCursor,
           event => {
             if (closed) return
             if (event.type === 'open') backoffMs = 1000
-            this.emitEntityChangeEvent(event)
             if (event.type === 'stream.closing' && event.reason === 'session_expired') {
-              stopForSessionExpiry()
+              this.handleEntityChangeSessionExpiry(connectionGeneration)
+              return
             }
+            this.emitEntityChangeEvent(event)
           },
           abortController.signal
         )
       } catch (error) {
         if (!closed) {
           if (error instanceof ApiError && error.status === 401) {
-            this.emitEntityChangeEvent({
-              type: 'stream.closing',
-              schemaVersion: 1,
-              cursor: this.entityChangeCursor ?? '00000000-0000-0000-0000-000000000000',
-              reason: 'session_expired',
-            })
-            stopForSessionExpiry()
+            this.handleEntityChangeSessionExpiry(connectionGeneration)
           } else {
             this.emitEntityChangeEvent({
               type: 'error',
@@ -2845,6 +2905,7 @@ export class AppService {
   }
 
   private restartEntityChangeStreamForSessionReplacement(): void {
+    this.entityChangeSessionExpiryDeferred = false
     this.entityChangeCursor = null
     this.entityChangeConnectionStop?.({ silent: true })
     this.ensureEntityChangeConnection()
@@ -3015,6 +3076,7 @@ export class AppService {
     for (const entry of Array.from(this.hostStatusStreams.values())) entry.stop({ silent: true })
     for (const entry of Array.from(this.notificationStreams.values())) entry.stop({ silent: true })
     this.entityChangeSubscribers.clear()
+    this.entityChangeSessionExpiryDeferred = false
     this.entityChangeConnectionStop?.({ silent: true })
     this.entityChangeCursor = null
   }
@@ -3223,6 +3285,7 @@ export class AppService {
         throw error
       }
       this.activateGfsAuthScope()
+      this.updateEntityChangeSessionToken(this.sessionToken)
       this.stopAllStreams()
       // Grants are keyed by userId, not by team, so they carry over — but every
       // cached org/agents/contexts answer is now about the wrong team. Drop the
