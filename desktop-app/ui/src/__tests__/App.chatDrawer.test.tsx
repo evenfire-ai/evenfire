@@ -2,7 +2,7 @@
 import { useReducer } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useNotificationsContext } from '@contexts/NotificationsContext'
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { DESKTOP_ROUTES } from '@constants/navigation'
 import { useAppController } from '@hooks/useAppController'
 import type { GfsPreviewResource } from '@lib/gfsPreview'
@@ -1256,6 +1256,105 @@ describe('App plugin previewable handoff — routes through resolveGfsPreview (R
     expect(previewTabs()).toHaveLength(0)
     expect(currentController.openPreviewSection).not.toHaveBeenCalled()
     expect(currentController.navItem).toBe(DESKTOP_ROUTES.files)
+  })
+})
+
+describe('App live GFS preview revalidation', () => {
+  let currentController: AppController
+  let dispatchEntityChange: ((event: unknown) => void) | null
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    dispatchEntityChange = null
+    const workspaceTabs = openPreviewTab(createWorkspaceTabsState('chat-tab-1'), {
+      id: 'preview-md',
+      title: 'README.md',
+      gfsUri: 'gfs://main/readme',
+      fileKind: 'markdown',
+      byteLength: 14,
+      resourceVersion: 3,
+    })
+    currentController = makeController({ workspaceTabs } as Partial<AppController>)
+    vi.mocked(useAppController).mockImplementation(() => useReactiveController(currentController))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        shortcuts: { onCommand: vi.fn(() => vi.fn()) },
+        app: { rendererReady: vi.fn().mockResolvedValue(undefined) },
+        entityChanges: {
+          subscribe: vi.fn((handler: (event: unknown) => void) => {
+            dispatchEntityChange = handler
+            return Promise.resolve(vi.fn())
+          }),
+        },
+        gfs: { resolve: vi.fn() },
+        sandboxUi: {
+          listApps: vi.fn().mockResolvedValue({ apps: [] }),
+          listPendingDeepLinks: vi.fn().mockResolvedValue({ links: [] }),
+          clearPendingDeepLinks: vi.fn().mockResolvedValue(undefined),
+          onDeepLink: vi.fn(() => vi.fn()),
+          setVisible: vi.fn().mockResolvedValue(undefined),
+          setBounds: vi.fn().mockResolvedValue(undefined),
+          focusActive: vi.fn().mockResolvedValue(true),
+          close: vi.fn().mockResolvedValue(undefined),
+        },
+      } as unknown as Window['clerum'],
+    })
+  })
+
+  afterEach(() => {
+    cleanup()
+    delete (window as { clerum?: unknown }).clerum
+  })
+
+  it('preserves an unchanged preview during soft scope revalidation and purges only on 403', async () => {
+    const resolve = vi.mocked(window.clerum.gfs.resolve)
+    let finishResolve!: (value: ReturnType<typeof resolvedFile>) => void
+    resolve.mockImplementationOnce(
+      () =>
+        new Promise(resolvePromise => {
+          finishResolve = resolvePromise
+        }) as never
+    )
+    render(<App />)
+    await waitFor(() => expect(dispatchEntityChange).toBeTypeOf('function'))
+
+    const initial = () => currentController.workspaceTabs.tabs.find(tab => tab.id === 'preview-md')
+    const before = initial()
+    expect(before?.kind).toBe('preview')
+    act(() =>
+      dispatchEntityChange?.({
+        type: 'scope.invalidated',
+        schemaVersion: 1,
+        cursor: 'cursor-1',
+        scopes: ['authorization'],
+      })
+    )
+    expect(initial()).toEqual(before)
+
+    await act(async () => {
+      finishResolve(
+        resolvedFile('readme', 'README.md', {
+          gfsUri: 'gfs://main/readme',
+          bytes: 14,
+          version: 3,
+        })
+      )
+    })
+    expect(initial()).toEqual(before)
+
+    resolve.mockRejectedValueOnce(Object.assign(new Error('403 Forbidden'), { status: 403 }))
+    act(() =>
+      dispatchEntityChange?.({
+        type: 'scope.invalidated',
+        schemaVersion: 1,
+        cursor: 'cursor-2',
+        scopes: ['authorization'],
+      })
+    )
+    await waitFor(() =>
+      expect(initial()?.kind === 'preview' && initial()?.preview?.unavailable).toBe(true)
+    )
   })
 })
 

@@ -169,6 +169,14 @@ function errorCode(error: unknown): string {
   return String(record.code || record.cause?.code || '').toUpperCase()
 }
 
+function resourceStatus(error: unknown): number | undefined {
+  if (!error || typeof error !== 'object') return undefined
+  const status = (error as { status?: unknown }).status
+  if (typeof status === 'number') return status
+  const match = errorMessage(error).match(/(?:^|\D)(403|404)(?:\D|$)/)
+  return match ? Number(match[1]) : undefined
+}
+
 function isTransientSandboxUiTeamContextError(error: unknown): boolean {
   const message = errorMessage(error).toLowerCase()
   if (
@@ -940,22 +948,6 @@ export function App() {
       previewRefreshGenerationRef.current.set(gfsUri, generation)
       const isCurrentGeneration = () =>
         previewRefreshGenerationRef.current.get(gfsUri) === generation
-      // Invalidation is intentionally coarse, so purge/hide cached preview
-      // content before resolving the current authorization and metadata. This
-      // prevents revoked/deleted bytes from remaining visible during a slow
-      // authoritative refetch; a successful resolve remounts the generic body.
-      setWorkspaceTabs(state =>
-        refreshPreviewTab(state, gfsUri, {
-          status: 'unavailable',
-          shellTitle: 'File unavailable',
-          isCurrentGeneration,
-        })
-      )
-      setPluginGfsPreview(current =>
-        isCurrentGeneration() && current?.gfsUri === gfsUri
-          ? { ...current, unavailable: true, reloadVersion: current.reloadVersion + 1 }
-          : current
-      )
       try {
         const resource = await window.clerum.gfs.resolve(gfsUri)
         if (previewRefreshGenerationRef.current.get(gfsUri) !== generation) return
@@ -1026,29 +1018,37 @@ export function App() {
         if (retryTimer !== undefined) window.clearTimeout(retryTimer)
         previewRetryTimersRef.current.delete(gfsUri)
         previewRetryAttemptRef.current.delete(gfsUri)
-      } catch {
+      } catch (error) {
         if (previewRefreshGenerationRef.current.get(gfsUri) !== generation) return
-        setWorkspaceTabs(state =>
-          refreshPreviewTab(state, gfsUri, {
-            status: 'unavailable',
-            shellTitle: 'File unavailable',
-            isCurrentGeneration,
+        const status = resourceStatus(error)
+        if (status === 403 || status === 404) {
+          setWorkspaceTabs(state =>
+            refreshPreviewTab(state, gfsUri, {
+              status: 'unavailable',
+              shellTitle: 'File unavailable',
+              isCurrentGeneration,
+            })
+          )
+          setPluginGfsPreview(current =>
+            isCurrentGeneration() && current?.gfsUri === gfsUri
+              ? { ...current, unavailable: true, reloadVersion: current.reloadVersion + 1 }
+              : current
+          )
+          void queryClient.invalidateQueries({
+            queryKey: desktopQueryKeys.gfsRoot,
+            refetchType: 'active',
           })
-        )
-        setPluginGfsPreview(current =>
-          isCurrentGeneration() && current?.gfsUri === gfsUri
-            ? { ...current, unavailable: true, reloadVersion: current.reloadVersion + 1 }
-            : current
-        )
-        queryClient.removeQueries({ queryKey: desktopQueryKeys.gfsRoot })
-        const attempt = (previewRetryAttemptRef.current.get(gfsUri) ?? 0) + 1
-        previewRetryAttemptRef.current.set(gfsUri, attempt)
-        const delayMs = Math.min(5000 * 2 ** Math.min(attempt - 1, 4), 60_000)
-        const retryTimer = window.setTimeout(() => {
-          previewRetryTimersRef.current.delete(gfsUri)
-          void refreshOpenPreview(gfsUri, true)
-        }, delayMs)
-        previewRetryTimersRef.current.set(gfsUri, retryTimer)
+        }
+        if (status === undefined || status === 429 || status >= 500) {
+          const attempt = (previewRetryAttemptRef.current.get(gfsUri) ?? 0) + 1
+          previewRetryAttemptRef.current.set(gfsUri, attempt)
+          const delayMs = Math.min(5000 * 2 ** Math.min(attempt - 1, 4), 60_000)
+          const retryTimer = window.setTimeout(() => {
+            previewRetryTimersRef.current.delete(gfsUri)
+            void refreshOpenPreview(gfsUri, true)
+          }, delayMs)
+          previewRetryTimersRef.current.set(gfsUri, retryTimer)
+        }
       }
     },
     [queryClient, setWorkspaceTabs]
@@ -1060,16 +1060,15 @@ export function App() {
     if (typeof entityChangeBridge?.subscribe !== 'function') return
     let active = true
     let stopSubscription: (() => Promise<void>) | null = null
-    const unsubscribeGfs = entityChangeRegistry.subscribe(['gfs', 'authorization'], event => {
+    const unsubscribeGfs = entityChangeRegistry.subscribe(['gfs', 'authorization'], () => {
       setRemoteGfsChangeEpoch(epoch => epoch + 1)
-      if (event.scopes.includes('authorization')) {
-        void queryClient.resetQueries({ queryKey: desktopQueryKeys.gfsRoot })
-      } else {
-        void queryClient.invalidateQueries({
-          queryKey: desktopQueryKeys.gfsRoot,
-          refetchType: 'active',
-        })
-      }
+      // Scope invalidations are soft convergence hints, not proof that cached
+      // data is no longer authorized. Keep visible/paginated rows while active
+      // queries refetch; only an authoritative 403/404 purges a preview.
+      void queryClient.invalidateQueries({
+        queryKey: desktopQueryKeys.gfsRoot,
+        refetchType: 'active',
+      })
       const resources = new Set(
         workspaceTabsRef.current.tabs
           .filter(tab => tab.kind === 'preview' && tab.preview)
