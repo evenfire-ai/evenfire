@@ -203,6 +203,59 @@ describe('loadEmbeddableImage', () => {
     expect(loadEmbeddableImage('pct.svg', outputDir, [])).toMatchObject({ width: 50, height: 40 })
   })
 
+  it('reads an SVG after the declaration, comments and doctype an XML file may open with', async () => {
+    const root =
+      '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="8"><rect width="12" height="8"/></svg>'
+    const files: Record<string, string> = {
+      'decl.svg': `<?xml version="1.0" encoding="UTF-8"?>\n${root}`,
+      'comments.svg': `\n  <!-- Generator: x -->\n<!---->\t<!-- <svg> named in a comment -->${root}`,
+      'doctype.svg':
+        '<?xml version="1.0" standalone="no"?>\n<!-- a -->\n' +
+        '<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" ' +
+        `"http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">\n${root}`,
+    }
+    for (const [name, text] of Object.entries(files)) {
+      fs.writeFileSync(path.join(outputDir, name), text)
+    }
+    await predecodeImages(Object.keys(files), outputDir)
+    for (const name of Object.keys(files)) {
+      expect(loadEmbeddableImage(name, outputDir, []), name).toMatchObject({
+        format: 'png',
+        width: 12,
+        height: 8,
+      })
+    }
+  })
+
+  it('does not read as SVG a prolog that never reaches the <svg> root', async () => {
+    const root =
+      '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="8"><rect width="12" height="8"/></svg>'
+    const files: Record<string, string> = {
+      'unclosed.svg': `<!-- never closed ${root}`,
+      'html.svg': `<!-- a --><html>${root}</html>`,
+      'stray.svg': `<!-- a --> text --> ${root}`,
+    }
+    for (const [name, text] of Object.entries(files)) {
+      fs.writeFileSync(path.join(outputDir, name), text)
+    }
+    await predecodeImages(Object.keys(files), outputDir)
+    for (const name of Object.keys(files)) {
+      const warnings: string[] = []
+      expect(loadEmbeddableImage(name, outputDir, warnings), name).toBeUndefined()
+      expect(warnings).toEqual([`'${name}' is not an image this tool can read and was left out.`])
+    }
+  })
+
+  it('reads a prolog of back-to-back comments with the last one open in linear time', async () => {
+    // Every "--><!--" could end one comment or sit inside a longer one, so a
+    // pattern that let a comment run past its first "-->" tried each way.
+    fs.writeFileSync(path.join(outputDir, 'comments.svg'), `<!--${'--><!--'.repeat(30)}`)
+    const started = performance.now()
+    await predecodeImages(['comments.svg'], outputDir)
+    expect(performance.now() - started).toBeLessThan(2000)
+    expect(loadEmbeddableImage('comments.svg', outputDir, [])).toBeUndefined()
+  })
+
   it('does not decode an image whose header declares an enormous size', async () => {
     const gif = Buffer.from(
       'R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==',

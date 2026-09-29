@@ -367,9 +367,23 @@ function boundedSvg(buf: Buffer): Buffer | undefined {
   )
 }
 
+/**
+ * Whether the bytes open an SVG document: an optional XML declaration, then
+ * comments, an optional doctype and the <svg> root. A comment ends at its first
+ * "-->", as in XML, so the prolog is read in one pass.
+ */
 function isSvg(buf: Buffer): boolean {
-  const head = buf.toString('utf8', 0, Math.min(buf.length, 1024)).trimStart()
-  return /^(?:<\?xml[^>]*>\s*)?(?:<!--[\s\S]*?-->\s*)*(?:<!DOCTYPE[^>]*>\s*)?<svg\b/i.test(head)
+  let head = buf
+    .toString('utf8', 0, Math.min(buf.length, 1024))
+    .trimStart()
+    .replace(/^<\?xml[^>]*>/i, '')
+    .trimStart()
+  while (head.startsWith('<!--')) {
+    const close = head.indexOf('-->', 4)
+    if (close < 0) return false
+    head = head.slice(close + 3).trimStart()
+  }
+  return /^(?:<!DOCTYPE[^>]*>\s*)?<svg\b/i.test(head)
 }
 
 /** Bytes safe to hand to the decoder, or undefined for a format or size this tool does not convert. */
