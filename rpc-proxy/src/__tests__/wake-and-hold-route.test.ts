@@ -4,6 +4,7 @@ import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import request from 'supertest'
 import { config } from '../config.js'
+import { apiErrorHandler } from '../errorHandler.js'
 import { createRpcRouter } from '../routes/rpc.js'
 import { forwardHostMessageToHost } from '../services/mcpHostRestService.js'
 
@@ -73,11 +74,7 @@ function makeApp() {
   const app = express()
   app.use(express.json())
   app.use(createRpcRouter())
-  app.use(
-    (err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
-      res.status(500).json({ error: err instanceof Error ? err.message : 'Internal error' })
-    }
-  )
+  app.use(apiErrorHandler)
   return app
 }
 

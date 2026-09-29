@@ -1,8 +1,15 @@
 import { describe, expect, it, vi } from 'vitest'
+import { config } from '../../config.js'
 import {
+  forwardCancelToHost,
+  forwardHostActivity,
+  forwardHostHealth,
   forwardHostMessageToHost,
+  forwardHostStatus,
+  forwardTaskResultFromHost,
   __test__normalizeHostStatusPayload as normalize,
 } from '../mcpHostRestService.js'
+import { isUpstreamTimeoutError } from '../wakeAndHold.js'
 
 describe('host message availability probe', () => {
   it('aborts at the requested short timeout with the standard abort reason', async () => {
@@ -30,6 +37,97 @@ describe('host message availability probe', () => {
       vi.useRealTimers()
     }
   })
+})
+
+// Every upstream forwarder aborts its own fetch when the deadline fires. What
+// the caller sees is whatever `signal.reason` is: the app's 504 mapping and the
+// wake coordinator both classify by error NAME (AbortError / TimeoutError), so
+// an abort that carries a custom reason would be reported as a 500 / 502.
+describe('upstream forwarders abort with the standard classified reason', () => {
+  const HOST = { name: 'chatllm', url: 'http://chatllm:8080', headers: {} }
+
+  const PRODUCERS: Array<{
+    label: string
+    timeoutMs: number
+    call: () => Promise<unknown>
+  }> = [
+    {
+      label: 'forwardHostMessageToHost',
+      timeoutMs: 750,
+      call: () =>
+        forwardHostMessageToHost(
+          HOST,
+          { content: 'hello', hostRef: 'chatllm' },
+          { timeoutMs: 750 }
+        ),
+    },
+    {
+      label: 'forwardTaskResultFromHost',
+      timeoutMs: 640,
+      call: () => forwardTaskResultFromHost(HOST, 'task-1', 640),
+    },
+    {
+      label: 'forwardCancelToHost',
+      timeoutMs: 530,
+      call: () => forwardCancelToHost(HOST, 'task-1', 'user-1', 530),
+    },
+    {
+      label: 'forwardHostStatus',
+      timeoutMs: config.upstreamTimeoutMs,
+      call: () => forwardHostStatus(HOST),
+    },
+    {
+      label: 'forwardHostHealth',
+      timeoutMs: config.upstreamTimeoutMs,
+      call: () => forwardHostHealth(HOST),
+    },
+    {
+      label: 'forwardHostActivity',
+      timeoutMs: config.upstreamTimeoutMs,
+      call: () => forwardHostActivity(HOST, 10),
+    },
+  ]
+
+  it.each(PRODUCERS)(
+    '$label rejects with an AbortError at its deadline, not earlier',
+    async ({ timeoutMs, call }) => {
+      vi.useFakeTimers()
+      let signal: AbortSignal | undefined
+      const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(
+        (_input, init) =>
+          new Promise((_resolve, reject) => {
+            signal = init?.signal as AbortSignal
+            signal.addEventListener('abort', () => reject(signal!.reason))
+          })
+      )
+      try {
+        const pending = call()
+        const rejection = pending.then(
+          () => {
+            throw new Error('expected the forwarder to reject at its deadline')
+          },
+          (error: unknown) => error
+        )
+
+        // Liveness witness: the request is in flight and still un-aborted just
+        // before the deadline, so the rejection below is the deadline timer.
+        await vi.advanceTimersByTimeAsync(timeoutMs - 1)
+        expect(fetchMock).toHaveBeenCalledTimes(1)
+        expect(signal?.aborted).toBe(false)
+
+        await vi.advanceTimersByTimeAsync(1)
+        const error = await rejection
+
+        expect(signal?.aborted).toBe(true)
+        expect(error).toBeInstanceOf(Error)
+        expect((error as Error).name).toBe('AbortError')
+        expect(isUpstreamTimeoutError(error)).toBe(true)
+      } finally {
+        fetchMock.mockRestore()
+        vi.useRealTimers()
+      }
+    }
+  )
 })
 
 const baseUpstream = {

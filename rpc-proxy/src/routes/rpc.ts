@@ -18,6 +18,11 @@ import {
   requestHostWakeFromControlApi,
 } from '../services/controlApiRestService.js'
 import {
+  type HostAccessDenialCode,
+  isHostAccessDenied,
+  respondHostAccessDenied,
+} from '../services/hostAccessDenial.js'
+import {
   type HostRuntimeMessageRequest,
   forwardCancelToHost,
   forwardHostActivity,
@@ -32,7 +37,6 @@ import {
   validateRpcRequest,
 } from '../services/mcpProxyService.js'
 import {
-  MAX_REQUEST_HOLD_MS,
   isUpstreamTimeoutError,
   isWakeEligibleHostError,
   respondWithWakeAndHold,
@@ -124,33 +128,55 @@ function sessionDrainingFence(response: Response, body: string): Error | null {
   })
 }
 
-function controlApiHostAccessRejectionStatus(error: unknown): 401 | 403 | 409 | null {
+export type ControlApiHostAccessRejection =
+  | { status: 401 | 409 }
+  | { status: 403; code: HostAccessDenialCode }
+
+function controlApiHostAccessRejection(error: unknown): ControlApiHostAccessRejection | null {
   if (!(error instanceof Error) || error.name !== 'ControlApiHostAccessRejectedError') {
     return null
   }
-  const status = (error as Error & { status?: unknown }).status
-  return status === 401 || status === 403 || status === 409 ? status : null
+  const { status, denialCode } = error as Error & { status?: unknown; denialCode?: unknown }
+  if (status === 401 || status === 409) return { status }
+  if (
+    status === 403 &&
+    (denialCode === 'host_access_revoked' || denialCode === 'host_access_denied')
+  ) {
+    return { status, code: denialCode }
+  }
+  return null
 }
 
 export function respondControlApiHostAccessRejection(
   res: ExpressResponse,
-  status: 401 | 403 | 409
+  rejection: ControlApiHostAccessRejection
 ): void {
   if (res.headersSent) {
     console.warn(
-      `[RPC_PROXY] suppressing duplicate terminal response (host-access-rejection ${status})`
+      `[RPC_PROXY] suppressing duplicate terminal response (host-access-rejection ${rejection.status})`
     )
     return
   }
-  if (status === 401) {
+  if (rejection.status === 401) {
     res.status(401).json({ error: 'Unauthorized' })
     return
   }
-  if (status === 403) {
-    res.status(403).json({ error: 'Forbidden: user cannot access this host' })
+  if (rejection.status === 403) {
+    respondHostAccessDenied(res, rejection.code)
     return
   }
   res.status(409).json({ error: 'Direct run attribution conflict' })
+}
+
+/**
+ * Abort signal for a MUTATING upstream call (approve, deny, set-model). The
+ * first attempt has no client-side timeout: aborting a request the upstream may
+ * already have applied would answer 504 for a change that took effect, and the
+ * user's retry would then hit "No pending approval". Only a wake-and-hold retry
+ * passes `timeoutMs`, bounded by the hold deadline.
+ */
+function mutatingCallSignal(timeoutMs: number | undefined): AbortSignal | undefined {
+  return timeoutMs === undefined ? undefined : AbortSignal.timeout(timeoutMs)
 }
 
 class ProxyArtifactTooLargeError extends Error {
@@ -404,7 +430,7 @@ export function createRpcRouter(): Router {
             : {}),
         }
 
-        const wakeDeadlineMs = Date.now() + Math.min(config.wakeMaxHoldMs, MAX_REQUEST_HOLD_MS)
+        const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
         const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
           teamId: auth.teamId,
           ...(traceContext.sessionId
@@ -417,8 +443,8 @@ export function createRpcRouter(): Router {
               }
             : {}),
         })
-        if (!host) {
-          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
+        if (isHostAccessDenied(host)) {
+          respondHostAccessDenied(res, host)
           return
         }
         if (host.attributionBindingStatus === 'unavailable') {
@@ -465,6 +491,9 @@ export function createRpcRouter(): Router {
               claims: auth,
               rpcAccessToken,
               deadlineMs: wakeDeadlineMs,
+              // The per-request messageId makes a re-presented POST a
+              // duplicate_delivery replay, so retrying until the deadline is safe.
+              retryUntilDeadline: true,
               attemptUpstream: async timeoutMs => {
                 const retried = await forwardHostMessageToHost(host, forwardedBody, {
                   async: isAsync,
@@ -485,9 +514,9 @@ export function createRpcRouter(): Router {
         // the wake path (which would re-forward an already-delivered message).
         res.status(200).json(upstreamResponse)
       } catch (error) {
-        const rejectedStatus = controlApiHostAccessRejectionStatus(error)
-        if (rejectedStatus) {
-          respondControlApiHostAccessRejection(res, rejectedStatus)
+        const rejection = controlApiHostAccessRejection(error)
+        if (rejection) {
+          respondControlApiHostAccessRejection(res, rejection)
           return
         }
         console.warn(
@@ -523,8 +552,8 @@ export function createRpcRouter(): Router {
         const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
           teamId: auth.teamId,
         })
-        if (!host) {
-          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
+        if (isHostAccessDenied(host)) {
+          respondHostAccessDenied(res, host)
           return
         }
 
@@ -607,8 +636,8 @@ export function createRpcRouter(): Router {
         const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
           teamId: auth.teamId,
         })
-        if (!host) {
-          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
+        if (isHostAccessDenied(host)) {
+          respondHostAccessDenied(res, host)
           return
         }
         const baseUrl = host.url.replace(/\/+$/, '')
@@ -625,12 +654,12 @@ export function createRpcRouter(): Router {
         // host:approval:write; wake capability rides on the token. A suspended
         // (network-down) or draining Host triggers a wake-and-hold instead of a
         // bare next(error)/passthrough.
-        const attempt = async (timeoutMs = config.upstreamTimeoutMs) => {
+        const attempt = async (timeoutMs?: number) => {
           const response = await fetch(`${baseUrl}/v1/runtime/approvals/approve`, {
             method: 'POST',
             headers: { 'content-type': 'application/json', ...host.headers },
             body: JSON.stringify(upstreamBody),
-            signal: AbortSignal.timeout(timeoutMs),
+            signal: mutatingCallSignal(timeoutMs),
           })
           const body = await response.text()
           const draining = sessionDrainingFence(response, body)
@@ -675,8 +704,8 @@ export function createRpcRouter(): Router {
         const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
           teamId: auth.teamId,
         })
-        if (!host) {
-          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
+        if (isHostAccessDenied(host)) {
+          respondHostAccessDenied(res, host)
           return
         }
         const baseUrl = host.url.replace(/\/+$/, '')
@@ -689,12 +718,12 @@ export function createRpcRouter(): Router {
           requestId: parsed.toolCallId || parsed.requestId,
         }
         // Wake-eligible finite operation (§11.4): scope stays host:approval:write.
-        const attempt = async (timeoutMs = config.upstreamTimeoutMs) => {
+        const attempt = async (timeoutMs?: number) => {
           const response = await fetch(`${baseUrl}/v1/runtime/approvals/deny`, {
             method: 'POST',
             headers: { 'content-type': 'application/json', ...host.headers },
             body: JSON.stringify(upstreamBody),
-            signal: AbortSignal.timeout(timeoutMs),
+            signal: mutatingCallSignal(timeoutMs),
           })
           const body = await response.text()
           const draining = sessionDrainingFence(response, body)
@@ -757,8 +786,8 @@ export function createRpcRouter(): Router {
         const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
           teamId: auth.teamId,
         })
-        if (!host) {
-          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
+        if (isHostAccessDenied(host)) {
+          respondHostAccessDenied(res, host)
           return
         }
         const baseUrl = host.url.replace(/\/+$/, '')
@@ -855,8 +884,8 @@ export function createRpcRouter(): Router {
         const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
           teamId: auth.teamId,
         })
-        if (!host) {
-          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
+        if (isHostAccessDenied(host)) {
+          respondHostAccessDenied(res, host)
           return
         }
         const baseUrl = host.url.replace(/\/+$/, '')
@@ -938,8 +967,8 @@ export function createRpcRouter(): Router {
         const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
           teamId: auth.teamId,
         })
-        if (!host) {
-          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
+        if (isHostAccessDenied(host)) {
+          respondHostAccessDenied(res, host)
           return
         }
         const baseUrl = host.url.replace(/\/+$/, '')
@@ -1019,8 +1048,8 @@ export function createRpcRouter(): Router {
         const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
           teamId: auth.teamId,
         })
-        if (!host) {
-          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
+        if (isHostAccessDenied(host)) {
+          respondHostAccessDenied(res, host)
           return
         }
         const baseUrl = host.url.replace(/\/+$/, '')
@@ -1085,8 +1114,8 @@ export function createRpcRouter(): Router {
         const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
           teamId: auth.teamId,
         })
-        if (!host) {
-          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
+        if (isHostAccessDenied(host)) {
+          respondHostAccessDenied(res, host)
           return
         }
         const baseUrl = host.url.replace(/\/+$/, '')
@@ -1150,8 +1179,8 @@ export function createRpcRouter(): Router {
         const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
           teamId: auth.teamId,
         })
-        if (!host) {
-          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
+        if (isHostAccessDenied(host)) {
+          respondHostAccessDenied(res, host)
           return
         }
         const body = req.body as Record<string, unknown>
@@ -1162,12 +1191,12 @@ export function createRpcRouter(): Router {
         const baseUrl = host.url.replace(/\/+$/, '')
         console.info(`[RPC_PROXY] user=${auth.sub} host=${hostRef} method=set-model`)
         // Wake-eligible finite operation (§11.4): scope stays host:model:write.
-        const attempt = async (timeoutMs = config.upstreamTimeoutMs) => {
+        const attempt = async (timeoutMs?: number) => {
           const response = await fetch(`${baseUrl}/v1/runtime/model`, {
             method: 'POST',
             headers: { 'content-type': 'application/json', ...host.headers },
             body: JSON.stringify(body),
-            signal: AbortSignal.timeout(timeoutMs),
+            signal: mutatingCallSignal(timeoutMs),
           })
           const upstreamBody = await response.text()
           const draining = sessionDrainingFence(response, upstreamBody)
@@ -1219,7 +1248,7 @@ export function createRpcRouter(): Router {
         const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
           teamId: auth.teamId,
         })
-        if (!host) {
+        if (isHostAccessDenied(host)) {
           res.status(404).json({ error: 'Host not found or not accessible' })
           return
         }
@@ -1286,7 +1315,7 @@ export function createRpcRouter(): Router {
         const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
           teamId: auth.teamId,
         })
-        if (!host) {
+        if (isHostAccessDenied(host)) {
           res.status(404).json({ error: 'Host not found or not accessible' })
           return
         }
@@ -1356,12 +1385,16 @@ export function createRpcRouter(): Router {
         const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
           teamId: auth.teamId,
         })
-        if (!host) {
-          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
+        if (isHostAccessDenied(host)) {
+          respondHostAccessDenied(res, host)
           return
         }
         const baseUrl = host.url.replace(/\/+$/, '')
         // Wake-eligible finite operation (§11.4): scope stays host:task:read.
+        // Unlike approve/deny/model this is a read-only list of small JSON: a
+        // timeout cannot leave a half-applied change, and without one a hung
+        // host would pin this socket. It therefore keeps a finite deadline on
+        // the first attempt as well.
         const attempt = async (timeoutMs = config.upstreamTimeoutMs) => {
           const response = await fetch(`${baseUrl}/v1/runtime/artifacts`, {
             headers: { ...host.headers },
@@ -1424,15 +1457,18 @@ export function createRpcRouter(): Router {
         const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
           teamId: auth.teamId,
         })
-        if (!host) {
-          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
+        if (isHostAccessDenied(host)) {
+          respondHostAccessDenied(res, host)
           return
         }
         const baseUrl = host.url.replace(/\/+$/, '')
         // Wake-eligible finite operation (§11.4): scope stays host:task:read.
         // The success path only commits (`res.send`) at the very end, so a
         // wake retry before that point is safe from duplicate delivery.
-        const attemptDownload = async (timeoutMs = config.upstreamTimeoutMs) => {
+        const attemptDownload = async (
+          timeoutMs = config.upstreamTimeoutMs,
+          holdDeadlineMs?: number
+        ) => {
           const controller = new AbortController()
           let timeout = setTimeout(() => controller.abort(), timeoutMs)
           try {
@@ -1446,9 +1482,19 @@ export function createRpcRouter(): Router {
             // The upstream timeout protects connection and header latency. Once
             // headers arrive, allow the separately bounded artifact transfer to
             // finish; the small JSON-operation deadline must not truncate a
-            // valid large download while its body is streaming.
+            // valid large download while its body is streaming. On a wake retry
+            // the transfer is also bounded by what is left of the hold budget,
+            // so a stalled body cannot outlive the request deadline.
             clearTimeout(timeout)
-            timeout = setTimeout(() => controller.abort(), config.artifactDownloadTimeoutMs)
+            timeout = setTimeout(
+              () => controller.abort(),
+              holdDeadlineMs === undefined
+                ? config.artifactDownloadTimeoutMs
+                : Math.min(
+                    config.artifactDownloadTimeoutMs,
+                    Math.max(0, holdDeadlineMs - Date.now())
+                  )
+            )
             if (!response.ok) {
               const errBody = await response.text()
               const draining = sessionDrainingFence(response, errBody)
@@ -1514,8 +1560,8 @@ export function createRpcRouter(): Router {
         const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
           teamId: auth.teamId,
         })
-        if (!host) {
-          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
+        if (isHostAccessDenied(host)) {
+          respondHostAccessDenied(res, host)
           return
         }
         const limit = Number(req.query.limit || 50)
@@ -1552,8 +1598,8 @@ export function createRpcRouter(): Router {
         const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
           teamId: auth.teamId,
         })
-        if (!host) {
-          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
+        if (isHostAccessDenied(host)) {
+          respondHostAccessDenied(res, host)
           return
         }
 
@@ -1593,8 +1639,8 @@ export function createRpcRouter(): Router {
         const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
           teamId: auth.teamId,
         })
-        if (!host) {
-          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
+        if (isHostAccessDenied(host)) {
+          respondHostAccessDenied(res, host)
           return
         }
 

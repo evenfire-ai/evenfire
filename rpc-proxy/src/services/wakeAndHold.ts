@@ -45,9 +45,14 @@ const ENTRY_TTL_MARGIN_MS = 5_000
 const MAX_TRACKED_WAKE_COORDINATIONS = 1_000
 const WAKE_SCOPE = 'host:wake:write' as const
 const ADMISSION_RETRY_DELAYS_MS = [250, 500, 1_000]
-const MIN_ADMISSION_RETRY_TIMEOUT_MS = 100
-/** Leaves room for one final upstream timeout before Desktop's 60s deadline. */
-export const MAX_REQUEST_HOLD_MS = 48_000
+/**
+ * An admission retry with less budget than this cannot outlast the upstream's
+ * own admission latency: it would time out AFTER the upstream applied the
+ * request, turning an applied-once operation into a 504. Below it the request
+ * answers a retryable 503 host_waking instead. Bounded by `upstreamTimeoutMs`
+ * so a deliberately short upstream timeout still gets a retry.
+ */
+const MIN_ADMISSION_RETRY_TIMEOUT_MS = 1_000
 
 export type WakeHoldOutcome =
   /** Host is (or just became) reachable — re-issue the upstream request now. */
@@ -613,13 +618,28 @@ export type RespondWithWakeAndHoldOptions = {
   claims: RpcAccessClaims
   /** Raw bearer forwarded to the wake plane when the caller is wake-capable. */
   rpcAccessToken: string
-  /** Re-issues the original upstream request with a deadline-bounded timeout. */
-  attemptUpstream: (timeoutMs: number) => Promise<void>
+  /**
+   * Re-issues the original upstream request with a deadline-bounded timeout.
+   * The route's FIRST attempt runs without a client-side timeout for mutating
+   * calls; `timeoutMs` only ever applies to these hold retries. `deadlineMs`
+   * is the absolute request deadline, for phases after the headers (a body
+   * transfer) that `timeoutMs` alone does not bound.
+   */
+  attemptUpstream: (timeoutMs: number, deadlineMs: number) => Promise<void>
   /** Writes today's error response (502/504) — the pre-wake behavior. */
   respondLegacy: (error: unknown) => void
   coordinator?: WakeAndHoldCoordinator
   /** Absolute deadline captured before a route's initial availability probe. */
   deadlineMs?: number
+  /**
+   * Keep re-issuing the request (with backoff) until it is accepted or the
+   * deadline expires. Only safe when the upstream dedupes a re-presented
+   * request: `/messages` carries a per-request `messageId` that mcp-host's
+   * admission sink dedupes. Every other route re-issues at most ONCE after the
+   * hold: approve/deny/model/cancel have no idempotency key, so each extra
+   * POST risks a duplicate side effect. Defaults to false.
+   */
+  retryUntilDeadline?: boolean
 }
 
 /**
@@ -636,8 +656,7 @@ export async function respondWithWakeAndHold(
 ): Promise<void> {
   const coordinator = options.coordinator ?? hostWakeCoordinator
   const safeHostRef = sanitizeHostRefForLog(options.hostRef)
-  const deadlineMs =
-    options.deadlineMs ?? Date.now() + Math.min(config.wakeMaxHoldMs, MAX_REQUEST_HOLD_MS)
+  const deadlineMs = options.deadlineMs ?? Date.now() + config.wakeMaxHoldMs
   if (options.res.headersSent) {
     // A response is already committed for this request: parking it could only
     // ever produce a duplicate upstream delivery. Refuse loudly.
@@ -662,6 +681,9 @@ export async function respondWithWakeAndHold(
   switch (outcome.kind) {
     case 'proceed': {
       let availabilityFailures = 0
+      let attempts = 0
+      const maxAttempts = options.retryUntilDeadline ? Infinity : 1
+      const minAttemptTimeoutMs = Math.min(MIN_ADMISSION_RETRY_TIMEOUT_MS, config.upstreamTimeoutMs)
       while (Date.now() < deadlineMs) {
         if (options.res.headersSent) {
           // Resolution latch: the response was committed while this retry
@@ -674,8 +696,9 @@ export async function respondWithWakeAndHold(
         }
         try {
           const remainingMs = deadlineMs - Date.now()
-          if (remainingMs < MIN_ADMISSION_RETRY_TIMEOUT_MS) break
-          await options.attemptUpstream(Math.min(config.upstreamTimeoutMs, remainingMs))
+          if (remainingMs < minAttemptTimeoutMs) break
+          attempts++
+          await options.attemptUpstream(Math.min(config.upstreamTimeoutMs, remainingMs), deadlineMs)
           return
         } catch (error) {
           if (options.res.headersSent) {
@@ -690,6 +713,9 @@ export async function respondWithWakeAndHold(
             return
           }
           if (isWakeEligibleHostError(error)) {
+            // Single-retry routes stop here: the host is still unreachable
+            // after the wake, so the caller gets the retryable 503 below.
+            if (attempts >= maxAttempts) break
             const remainingMs = deadlineMs - Date.now()
             const delayMs =
               ADMISSION_RETRY_DELAYS_MS[
@@ -716,7 +742,7 @@ export async function respondWithWakeAndHold(
         return
       }
       console.warn(
-        `[RPC_PROXY] wake-hold admission deadline exceeded host=${safeHostRef} lastKnownState=${outcome.lastKnownState}`
+        `[RPC_PROXY] wake-hold admission ended without an accepted attempt host=${safeHostRef} attempts=${attempts} lastKnownState=${outcome.lastKnownState}`
       )
       respondHostWaking(options.res, {
         hostRef: options.hostRef,

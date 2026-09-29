@@ -475,11 +475,12 @@ describe('post-resolution re-forward hardening (respondWithWakeAndHold)', () => 
   function respondOptions(
     coordinator: WakeAndHoldCoordinator,
     res: FakeRes,
-    attemptUpstream: (timeoutMs: number) => Promise<void>,
+    attemptUpstream: (timeoutMs: number, deadlineMs: number) => Promise<void>,
     overrides?: {
       hostRef?: string
       host?: ResolvedServerConnection
       respondLegacy?: (error: unknown) => void
+      retryUntilDeadline?: boolean
     }
   ) {
     const hostRef = overrides?.hostRef ?? 'chatllm'
@@ -490,6 +491,7 @@ describe('post-resolution re-forward hardening (respondWithWakeAndHold)', () => 
       claims: holdClaims(hostRef, Date.now() + 3_600_000),
       rpcAccessToken: 'rpc-token',
       attemptUpstream,
+      retryUntilDeadline: overrides?.retryUntilDeadline,
       respondLegacy:
         overrides?.respondLegacy ??
         ((_error: unknown) => {
@@ -572,7 +574,9 @@ describe('post-resolution re-forward hardening (respondWithWakeAndHold)', () => 
       .mockImplementationOnce(async () => {
         res.status(200).json({ success: true, taskId: 't-3' })
       })
-    const pending = respondWithWakeAndHold(respondOptions(coordinator, res, attemptUpstream))
+    const pending = respondWithWakeAndHold(
+      respondOptions(coordinator, res, attemptUpstream, { retryUntilDeadline: true })
+    )
 
     await vi.advanceTimersByTimeAsync(750) // 0ms + 250ms + 750ms attempts
     await pending
@@ -591,7 +595,9 @@ describe('post-resolution re-forward hardening (respondWithWakeAndHold)', () => 
       if (!upstreamAdmits) throw upstreamDrainingError()
       res.status(200).json({ success: true, taskId: 't-late-admission' })
     })
-    const pending = respondWithWakeAndHold(respondOptions(coordinator, res, attemptUpstream))
+    const pending = respondWithWakeAndHold(
+      respondOptions(coordinator, res, attemptUpstream, { retryUntilDeadline: true })
+    )
 
     await vi.advanceTimersByTimeAsync(1_250)
     expect(attemptUpstream).toHaveBeenCalledTimes(3)
@@ -614,11 +620,13 @@ describe('post-resolution re-forward hardening (respondWithWakeAndHold)', () => 
     const res = makeRes()
     const attemptUpstream = vi.fn().mockRejectedValue(upstreamDrainingError())
     const pending = respondWithWakeAndHold({
-      ...respondOptions(coordinator, res, attemptUpstream),
-      deadlineMs: Date.now() + 1_000,
+      ...respondOptions(coordinator, res, attemptUpstream, { retryUntilDeadline: true }),
+      deadlineMs: Date.now() + 2_500,
     })
 
-    await vi.advanceTimersByTimeAsync(1_000)
+    // Attempts at 0, 250 and 750 ms; at 1750 ms only 750 ms remain, below the
+    // admission floor, so no fourth attempt is made.
+    await vi.advanceTimersByTimeAsync(2_500)
     await pending
     expect(attemptUpstream).toHaveBeenCalledTimes(3)
     expect(res.statusCode).toBe(503)
@@ -635,14 +643,14 @@ describe('post-resolution re-forward hardening (respondWithWakeAndHold)', () => 
       throw upstreamDrainingError()
     })
     const pending = respondWithWakeAndHold({
-      ...respondOptions(coordinator, res, attemptUpstream),
-      deadlineMs: Date.now() + 500,
+      ...respondOptions(coordinator, res, attemptUpstream, { retryUntilDeadline: true }),
+      deadlineMs: Date.now() + 1_500,
     })
 
-    await vi.advanceTimersByTimeAsync(500)
+    await vi.advanceTimersByTimeAsync(1_500)
     await pending
 
-    expect(attemptUpstream.mock.calls.map(([timeoutMs]) => timeoutMs)).toEqual([500, 250])
+    expect(attemptUpstream.mock.calls.map(([timeoutMs]) => timeoutMs)).toEqual([1_500, 1_250])
     expect(res.statusCode).toBe(503)
   })
 
@@ -653,31 +661,104 @@ describe('post-resolution re-forward hardening (respondWithWakeAndHold)', () => 
     const attemptUpstream = vi.fn(async (_timeoutMs: number) => {
       res.status(200).json({ success: true, taskId: 't-capped' })
     })
+    const deadlineMs = Date.now() + config.upstreamTimeoutMs + 5_000
     const pending = respondWithWakeAndHold({
       ...respondOptions(coordinator, res, attemptUpstream),
-      deadlineMs: Date.now() + config.upstreamTimeoutMs + 5_000,
+      deadlineMs,
     })
 
     await pending
 
-    expect(attemptUpstream).toHaveBeenCalledWith(config.upstreamTimeoutMs)
+    expect(attemptUpstream).toHaveBeenCalledWith(config.upstreamTimeoutMs, deadlineMs)
     expect(res.statusCode).toBe(200)
   })
 
-  it('skips an admission retry when less than 100 ms remains', async () => {
+  // R1-M13: the retry floor sat at 100 ms, below the upstream's admission
+  // latency, so a retry with a sliver of budget timed out AFTER the upstream
+  // applied the request (applied-once + 504). Below the floor the caller gets a
+  // retryable 503 instead.
+  it('skips an admission retry when less than the 1 s floor remains', async () => {
     const { coordinator, requestWake } = makeCoordinator()
     requestWake.mockResolvedValue({ kind: 'active', wakeGeneration: null })
     const res = makeRes()
     const attemptUpstream = vi.fn(async (_timeoutMs: number) => {})
     const pending = respondWithWakeAndHold({
       ...respondOptions(coordinator, res, attemptUpstream),
-      deadlineMs: Date.now() + 99,
+      deadlineMs: Date.now() + 999,
     })
 
     await pending
 
     expect(attemptUpstream).not.toHaveBeenCalled()
     expect(res.statusCode).toBe(503)
+    expect(res.body).toMatchObject({ code: 'host_waking' })
+  })
+
+  it('lets a deliberately short upstream timeout retry below the 1 s floor', async () => {
+    const { coordinator, requestWake } = makeCoordinator()
+    requestWake.mockResolvedValue({ kind: 'active', wakeGeneration: null })
+    const res = makeRes()
+    const attemptUpstream = vi.fn(async (_timeoutMs: number) => {
+      res.status(200).json({ ok: true })
+    })
+    const previous = config.upstreamTimeoutMs
+    config.upstreamTimeoutMs = 300
+    try {
+      const pending = respondWithWakeAndHold({
+        ...respondOptions(coordinator, res, attemptUpstream),
+        deadlineMs: Date.now() + 400,
+      })
+      await pending
+    } finally {
+      config.upstreamTimeoutMs = previous
+    }
+
+    expect(attemptUpstream).toHaveBeenCalledTimes(1)
+    expect(attemptUpstream.mock.calls[0]![0]).toBe(300)
+    expect(res.statusCode).toBe(200)
+  })
+
+  // R1-M12: without an idempotency key every extra POST is a duplicate side
+  // effect, so a route that does not opt in gets ONE retry after the wake.
+  it('re-issues a non-idempotent request at most once, then answers host_waking', async () => {
+    const { coordinator, requestWake } = makeCoordinator()
+    requestWake.mockResolvedValue({ kind: 'active', wakeGeneration: null })
+    const res = makeRes()
+    const attemptUpstream = vi.fn(async (_timeoutMs: number) => {
+      throw upstreamDrainingError()
+    })
+    const pending = respondWithWakeAndHold(respondOptions(coordinator, res, attemptUpstream))
+
+    await vi.advanceTimersByTimeAsync(MAX_HOLD_MS)
+    await pending
+
+    expect(attemptUpstream).toHaveBeenCalledTimes(1)
+    expect(res.statusCode).toBe(503)
+    expect(res.body).toMatchObject({ code: 'host_waking', hostRef: 'chatllm' })
+    await vi.advanceTimersByTimeAsync(MAX_HOLD_MS * 3)
+    expect(attemptUpstream).toHaveBeenCalledTimes(1)
+  })
+
+  it('opting in with retryUntilDeadline keeps re-issuing until the host admits the request', async () => {
+    const { coordinator, requestWake } = makeCoordinator()
+    requestWake.mockResolvedValue({ kind: 'active', wakeGeneration: null })
+    const res = makeRes()
+    const attemptUpstream = vi
+      .fn()
+      .mockRejectedValueOnce(upstreamDrainingError())
+      .mockRejectedValueOnce(upstreamDrainingError())
+      .mockImplementationOnce(async () => {
+        res.status(200).json({ ok: true })
+      })
+    const pending = respondWithWakeAndHold(
+      respondOptions(coordinator, res, attemptUpstream, { retryUntilDeadline: true })
+    )
+
+    await vi.advanceTimersByTimeAsync(750)
+    await pending
+
+    expect(attemptUpstream).toHaveBeenCalledTimes(3)
+    expect(res.statusCode).toBe(200)
   })
 
   it('(d) two concurrent holds for different hosts do not cross-cancel each other', async () => {

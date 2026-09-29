@@ -2,8 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
 import { config } from '../config.js'
+import { apiErrorHandler } from '../errorHandler.js'
 import { createRpcRouter } from '../routes/rpc.js'
-import { isUpstreamTimeoutError } from '../services/wakeAndHold.js'
 
 // ── Hoisted mocks ───────────────────────────────────────────────────
 const authTokenMock = vi.hoisted(() => ({
@@ -77,16 +77,7 @@ function makeApp() {
   const app = express()
   app.use(express.json())
   app.use(createRpcRouter())
-  // Generic error handler to avoid unhandled rejections in tests
-  app.use(
-    (err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
-      if (isUpstreamTimeoutError(err)) {
-        res.status(504).json({ error: 'Gateway Timeout' })
-        return
-      }
-      res.status(500).json({ error: err instanceof Error ? err.message : 'Internal error' })
-    }
-  )
+  app.use(apiErrorHandler)
   return app
 }
 
@@ -138,24 +129,25 @@ afterEach(() => {
 // Approval Routes
 // =====================================================================
 describe('POST /rpc/hosts/:hostRef/approvals/approve', () => {
-  it('keeps the upstream timeout on the first approval attempt', async () => {
+  // R2-M3: approve mutates state on the host. A client-side abort of the first
+  // attempt would answer 504 for an approval the host may already have applied.
+  // Real-socket coverage (slow upstream, hung retry) lives in
+  // route-upstream-deadlines.real-http.test.ts.
+  it('sends the first approval attempt without a client-side abort signal', async () => {
     config.upstreamTimeoutMs = 20
-    let signal: AbortSignal | undefined
-    globalThis.fetch = vi.fn().mockImplementation((_url: string, init: RequestInit) => {
-      signal = init.signal as AbortSignal
-      return new Promise((_resolve, reject) => {
-        signal!.addEventListener('abort', () => reject(signal!.reason), { once: true })
-      })
-    })
+    const fetchMock = vi
+      .fn()
+      .mockImplementation(async () => mockFetchResponse(200, JSON.stringify({ ok: true })))
+    globalThis.fetch = fetchMock
 
-    const app = makeApp()
-    await request(app)
+    await request(makeApp())
       .post('/rpc/hosts/chatllm/approvals/approve')
       .set('authorization', 'Bearer token')
-      .send({ toolCallId: 'tc-timeout' })
-      .expect(504)
+      .send({ toolCallId: 'tc-no-deadline' })
+      .expect(200)
 
-    expect(signal?.aborted).toBe(true)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect((fetchMock.mock.calls[0]![1] as RequestInit).signal).toBeUndefined()
     expect(controlApiMock.requestHostWakeFromControlApi).not.toHaveBeenCalled()
   })
 
@@ -252,7 +244,10 @@ describe('POST /rpc/hosts/:hostRef/approvals/approve', () => {
   })
 
   it('returns 403 when host is not accessible', async () => {
-    serviceMock.resolveHostConnectionForUser.mockResolvedValue(null)
+    serviceMock.resolveHostConnectionForUser.mockResolvedValue({
+      denied: true,
+      code: 'host_access_denied',
+    })
 
     const app = makeApp()
     await request(app)
@@ -371,7 +366,10 @@ describe('POST /rpc/hosts/:hostRef/approvals/deny', () => {
   })
 
   it('returns 403 when host is not accessible', async () => {
-    serviceMock.resolveHostConnectionForUser.mockResolvedValue(null)
+    serviceMock.resolveHostConnectionForUser.mockResolvedValue({
+      denied: true,
+      code: 'host_access_denied',
+    })
 
     const app = makeApp()
     await request(app)
@@ -449,7 +447,10 @@ describe('GET /rpc/hosts/:hostRef/artifacts', () => {
   })
 
   it('returns 403 when host is not accessible', async () => {
-    serviceMock.resolveHostConnectionForUser.mockResolvedValue(null)
+    serviceMock.resolveHostConnectionForUser.mockResolvedValue({
+      denied: true,
+      code: 'host_access_denied',
+    })
 
     const app = makeApp()
     await request(app)
@@ -578,7 +579,10 @@ describe('POST /rpc/hosts/:hostRef/tasks/:taskId/cancel', () => {
       ...VALID_CLAIMS,
       scopes: ['host:message:invoke'],
     })
-    serviceMock.resolveHostConnectionForUser.mockResolvedValue(null)
+    serviceMock.resolveHostConnectionForUser.mockResolvedValue({
+      denied: true,
+      code: 'host_access_denied',
+    })
 
     const app = makeApp()
     await request(app)
@@ -892,7 +896,10 @@ describe('GET /rpc/hosts/:hostRef/artifacts/:filename/download', () => {
   })
 
   it('returns 403 when host is not accessible', async () => {
-    serviceMock.resolveHostConnectionForUser.mockResolvedValue(null)
+    serviceMock.resolveHostConnectionForUser.mockResolvedValue({
+      denied: true,
+      code: 'host_access_denied',
+    })
 
     const app = makeApp()
     await request(app)

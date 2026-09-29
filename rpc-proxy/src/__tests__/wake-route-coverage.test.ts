@@ -3,12 +3,12 @@ import type { Response as ExpressResponse } from 'express'
 import express from 'express'
 import request from 'supertest'
 import { config } from '../config.js'
+import { apiErrorHandler } from '../errorHandler.js'
 import {
   createRpcRouter,
   respondControlApiHostAccessRejection,
   respondUpstreamUnavailable,
 } from '../routes/rpc.js'
-import { isUpstreamTimeoutError } from '../services/wakeAndHold.js'
 
 // ── Issue #791 §11.4/§11.5 — extend wake-and-hold to the remaining finite
 // Desktop routes, and prove terminal-response (duplicate-write) safety in the
@@ -72,15 +72,7 @@ function makeApp() {
   const app = express()
   app.use(express.json())
   app.use(createRpcRouter())
-  app.use(
-    (err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
-      if (isUpstreamTimeoutError(err)) {
-        res.status(504).json({ error: 'Gateway Timeout' })
-        return
-      }
-      res.status(500).json({ error: err instanceof Error ? err.message : 'Internal error' })
-    }
-  )
+  app.use(apiErrorHandler)
   return app
 }
 
@@ -125,7 +117,12 @@ afterEach(() => {
   config.upstreamTimeoutMs = originalUpstreamTimeoutMs
 })
 
-describe('finite route upstream deadlines', () => {
+// R2-M3: deny and set-model mutate host state, so their FIRST attempt carries no
+// client-side deadline (a timeout would 504 a change the host may have applied).
+// Only the read-only artifacts list keeps a finite first-attempt deadline. The
+// real-socket versions of these (slow upstream, hung wake retry) are in
+// route-upstream-deadlines.real-http.test.ts.
+describe('first-attempt upstream deadlines', () => {
   it.each([
     {
       label: 'deny approval',
@@ -139,15 +136,28 @@ describe('finite route upstream deadlines', () => {
       path: '/rpc/hosts/chatllm/model',
       body: { chatId: 'c1', model: 'claude-haiku-4-5' },
     },
-    {
-      label: 'list artifacts',
-      scope: 'host:task:read',
-      path: '/rpc/hosts/chatllm/artifacts',
-      body: null,
-    },
-  ])('$label returns 504 when the actual upstream deadline aborts a hung fetch', async row => {
+  ])('$label sends its first attempt without an abort signal', async row => {
     config.upstreamTimeoutMs = 30
     authTokenMock.verifyRpcToken.mockReturnValue(claims([row.scope, 'host:wake:write']))
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(mockFetchResponse(200, JSON.stringify({ ok: true })))
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+
+    await request(makeApp())
+      .post(row.path)
+      .send(row.body)
+      .set('authorization', 'Bearer tok')
+      .expect(200)
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect((fetchMock.mock.calls[0]![1] as RequestInit).signal).toBeUndefined()
+    expect(controlApiMock.requestHostWakeFromControlApi).not.toHaveBeenCalled()
+  })
+
+  it('list artifacts returns 504 when the upstream deadline aborts a hung fetch', async () => {
+    config.upstreamTimeoutMs = 30
+    authTokenMock.verifyRpcToken.mockReturnValue(claims(['host:task:read', 'host:wake:write']))
     let upstreamSignal: AbortSignal | undefined
     const fetchMock = vi.fn().mockImplementation((_url: string, init: RequestInit) => {
       upstreamSignal = init.signal as AbortSignal
@@ -159,11 +169,10 @@ describe('finite route upstream deadlines', () => {
     })
     globalThis.fetch = fetchMock as unknown as typeof fetch
 
-    const app = makeApp()
-    const outgoing = row.body
-      ? request(app).post(row.path).send(row.body)
-      : request(app).get(row.path)
-    const res = await outgoing.set('authorization', 'Bearer tok').expect(504)
+    const res = await request(makeApp())
+      .get('/rpc/hosts/chatllm/artifacts')
+      .set('authorization', 'Bearer tok')
+      .expect(504)
 
     expect(res.body).toEqual({ error: 'Gateway Timeout' })
     expect(upstreamSignal?.aborted).toBe(true)
@@ -607,8 +616,24 @@ describe('§11.5 route outer-catch responders guard headersSent (one-shot settle
   it('respondControlApiHostAccessRejection is a no-op once the response is committed', () => {
     const res = makeRes(true)
     expect(() =>
-      respondControlApiHostAccessRejection(res as unknown as ExpressResponse, 403)
+      respondControlApiHostAccessRejection(res as unknown as ExpressResponse, {
+        status: 403,
+        code: 'host_access_revoked',
+      })
     ).not.toThrow()
     expect(res.statusCode).toBe(0)
+  })
+
+  it('respondControlApiHostAccessRejection writes the 403 with its denial code when uncommitted', () => {
+    const res = makeRes(false)
+    respondControlApiHostAccessRejection(res as unknown as ExpressResponse, {
+      status: 403,
+      code: 'host_access_revoked',
+    })
+    expect(res.statusCode).toBe(403)
+    expect(res.body).toEqual({
+      error: 'Forbidden: user cannot access this host',
+      code: 'host_access_revoked',
+    })
   })
 })
