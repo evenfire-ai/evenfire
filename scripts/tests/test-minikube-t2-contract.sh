@@ -587,6 +587,62 @@ if grep -Fq "$redaction_secret" "$redaction_file"; then
   exit 1
 fi
 
+# The local T1 lane skips a named list of CI-only suites. It must remove
+# exactly those files, never a filename pattern: a future *Stress* suite stays
+# in the lane, and a listed suite that no longer exists fails the lane instead
+# of leaving an exclusion that matches nothing.
+t1_excl_root="$tmp/t1-excluded-suites"
+t1_excl_name='routes.externalGfsRateLimitStress.realPostgres.integration.test.ts'
+mkdir -p "$t1_excl_root/control-api/test"
+for name in keep.realPostgres.integration.test.ts other.newStress.realPostgres.integration.test.ts "$t1_excl_name"; do
+  printf 'fixture\n' >"$t1_excl_root/control-api/test/$name"
+done
+t1_excl_listing="$(bash -c '
+  set -euo pipefail
+  source "$1"
+  PROJECT_DIR="$2"
+  list_real_pg_files control-api
+' bash "$T1" "$t1_excl_root")"
+if ! grep -Fq 'keep.realPostgres.integration.test.ts' <<<"$t1_excl_listing"; then
+  echo 'FAIL: the local T1 listing dropped an ordinary Real PostgreSQL suite' >&2
+  exit 1
+fi
+if ! grep -Fq 'other.newStress.realPostgres.integration.test.ts' <<<"$t1_excl_listing"; then
+  echo 'FAIL: the local T1 exclusion is a filename pattern and hid an unlisted *Stress* suite' >&2
+  exit 1
+fi
+if grep -Fq "$t1_excl_name" <<<"$t1_excl_listing"; then
+  echo 'FAIL: the local T1 listing still includes the excluded CI-only stress suite' >&2
+  exit 1
+fi
+if ! T1_EXCL_ROOT="$t1_excl_root" bash -c '
+  set -euo pipefail
+  source "$1"
+  PROJECT_DIR="$T1_EXCL_ROOT"
+  require_excluded_real_pg_suites
+' bash "$T1" 2>"$tmp/t1-excl-present.err"; then
+  echo 'FAIL: the excluded-suite check refused a tree where the listed suite exists' >&2
+  cat "$tmp/t1-excl-present.err" >&2
+  exit 1
+fi
+rm "$t1_excl_root/control-api/test/$t1_excl_name"
+if T1_EXCL_ROOT="$t1_excl_root" bash -c '
+  set -euo pipefail
+  source "$1"
+  PROJECT_DIR="$T1_EXCL_ROOT"
+  T1_TMP_DIR="$(mktemp -d)"
+  trap '\''rm -rf "$T1_TMP_DIR"'\'' EXIT
+  require_excluded_real_pg_suites
+' bash "$T1" 2>"$tmp/t1-excl-missing.err"; then
+  echo 'FAIL: the excluded-suite check accepted a listed suite that no longer exists' >&2
+  exit 1
+fi
+if ! grep -Fq "$t1_excl_name" "$tmp/t1-excl-missing.err"; then
+  echo 'FAIL: the excluded-suite refusal does not name the missing suite' >&2
+  cat "$tmp/t1-excl-missing.err" >&2
+  exit 1
+fi
+
 # A complete green reporter is not sufficient evidence when npm/Vitest exits
 # non-zero during teardown, worker shutdown, OOM handling, or signal cleanup.
 # Exercise the adjudicator with representative failure statuses without Docker

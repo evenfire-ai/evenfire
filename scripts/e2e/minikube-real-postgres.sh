@@ -280,16 +280,43 @@ path.write_text(text)
 PY
 }
 
+# Stress suites open hundreds of concurrent connections against a single
+# throwaway Docker PostgreSQL. CI's service containers handle that load;
+# local Docker networking on macOS resets some connections (ECONNRESET)
+# before the rate limiter or the test assertions can run. They stay in CI
+# (ci-public.yml lists each one) and are excluded from the local T1 lane only.
+# The list names files, not a filename pattern: a pattern would also hide a
+# future suite the reporter's exact-file check could never notice was missing.
+LOCAL_T1_EXCLUDED_REAL_PG_SUITES=(
+  'control-api/test/routes.externalGfsRateLimitStress.realPostgres.integration.test.ts'
+)
+
 list_real_pg_files() {
-  local package="$1"
-  # Stress suites open hundreds of concurrent connections against a single
-  # throwaway Docker PostgreSQL. CI's service containers handle that load;
-  # local Docker networking on macOS resets some connections (ECONNRESET)
-  # before the rate limiter or the test assertions can run. They stay in CI
-  # and are excluded from the local T1 lane only.
-  find "$PROJECT_DIR/$package" -type f -name '*realPostgres*.test.ts' \
-    ! -name 'realPostgres.requirement.ts' \
-    ! -name '*Stress.realPostgres*' -print | sort
+  local package="$1" path suite excluded
+  while IFS= read -r path; do
+    excluded=false
+    for suite in "${LOCAL_T1_EXCLUDED_REAL_PG_SUITES[@]}"; do
+      if [ "$path" = "$PROJECT_DIR/$suite" ]; then
+        excluded=true
+      fi
+    done
+    if [ "$excluded" = false ]; then
+      printf '%s\n' "$path"
+    fi
+  done < <(find "$PROJECT_DIR/$package" -type f -name '*realPostgres*.test.ts' \
+    ! -name 'realPostgres.requirement.ts' -print | sort)
+}
+
+# A listed suite that was renamed or deleted must fail the lane: an exclusion
+# that matches nothing would go on looking like a deliberate CI-only carve-out.
+require_excluded_real_pg_suites() {
+  local suite
+  for suite in "${LOCAL_T1_EXCLUDED_REAL_PG_SUITES[@]}"; do
+    [ -f "$PROJECT_DIR/$suite" ] || {
+      T1_NEXT_COMMAND='update LOCAL_T1_EXCLUDED_REAL_PG_SUITES in scripts/e2e/minikube-real-postgres.sh to the current suite path, then re-run T1'
+      die_t1 ZERO_TESTS_EXECUTED "excluded CI-only suite no longer exists: $suite"
+    }
+  done
 }
 
 is_isolated_control_api_file() {
@@ -479,6 +506,8 @@ PY
   if [ "$success" -ne 1 ] || [ "$total_suites" -le 0 ] || \
      [ "$passed_suites" -ne "$total_suites" ] || [ "$failed_suites" -ne 0 ] || \
      [ "$failed_tests" -ne 0 ]; then
+    cat "$log_file" >&2 || true
+    cat "$json_file" >&2 || true
     T1_NEXT_COMMAND='repair the failed or incomplete Real PostgreSQL lane, then re-run T1'
     die_t1 REAL_PG_SUITE_FAILED "Real PostgreSQL reporter did not pass every suite in $package ($lane)"
   fi
@@ -587,6 +616,7 @@ user, password, port = sys.stdin.buffer.read().split(b"\0")[:3]
 print("postgresql://" + quote(user.decode(), safe="") + ":" + quote(password.decode(), safe="") + "@127.0.0.1:" + port.decode() + "/postgres", end="")
 ')"
   require_isolated_control_api_files
+  require_excluded_real_pg_suites
   start_isolated_postgres
   T1_GFS_RESTORE_REQUIRED=true
   run_suite control-api isolated "$ISOLATED_DSN"
