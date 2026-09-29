@@ -23,6 +23,7 @@ import type {
   ComposerImageAttachment,
   ComposerReferenceAttachment,
   FailedAgentSend,
+  ReadyComposerFileAttachment,
 } from '../uiTypes'
 
 export interface RetainedSendSnapshot {
@@ -33,6 +34,8 @@ export interface RetainedSendSnapshot {
   taskId?: string
   content: string
   attachments: ComposerImageAttachment[]
+  /** Documents already read and hashed; a retry sends them without reading again. */
+  files: ReadyComposerFileAttachment[]
   references: ComposerReferenceAttachment[]
   /** Model the guard validated for this send, when one was captured. */
   model?: string
@@ -45,7 +48,13 @@ export interface RetainedSendSnapshot {
 
 export type RetainedSendReason =
   /** Retained as soon as the composer cleared; outcome still unknown. */
-  'awaiting_terminal' | 'post_failed' | 'sync_error_envelope' | 'async_task_failed' | 'stream_lost'
+  | 'awaiting_terminal'
+  | 'post_failed'
+  | 'sync_error_envelope'
+  | 'async_task_failed'
+  | 'stream_lost'
+  /** The Host did not confirm every attached document (#678, D13). */
+  | 'host_files_unsupported'
 
 /** Each controller owns its bytes; no module-global data survives an identity change. */
 export function createRetainedSendStore(changed: () => void) {
@@ -154,13 +163,19 @@ export function createRetainedSendStore(changed: () => void) {
     releaseRetainedSend(agentRef, chatId, userMessageId)
   }
 
-  /** Task-based counterpart of `releaseSucceededRetainedSend`. */
+  /**
+   * Task-based counterpart of `releaseSucceededRetainedSend`. A task that
+   * succeeded without the documents the Host never received keeps its snapshot:
+   * those files exist nowhere else.
+   */
   function releaseSucceededRetainedSendsForTask(taskId: string): void {
-    const succeeded = [...snapshots.values()].filter(snapshot => snapshot.taskId === taskId)
+    const succeeded = [...snapshots.values()].filter(
+      snapshot => snapshot.taskId === taskId && snapshot.reason !== 'host_files_unsupported'
+    )
     for (const snapshot of succeeded) {
       releaseRetainedFailuresForChat(snapshot.agentRef, snapshot.chatId, snapshot.timestamp)
+      releaseRetainedSend(snapshot.agentRef, snapshot.chatId, snapshot.userMessageId)
     }
-    releaseRetainedSendsForTask(taskId)
   }
 
   /**

@@ -1,5 +1,9 @@
 import type { ReactNode, RefObject } from 'react'
-import type { ComposerImageAttachment, ComposerReferenceAttachment } from '../../uiTypes'
+import type {
+  ComposerFileAttachment,
+  ComposerImageAttachment,
+  ComposerReferenceAttachment,
+} from '../../uiTypes'
 
 /**
  * Stable, cross-cutting chat actions. These are `useCallback` handlers plus the
@@ -19,6 +23,9 @@ export interface AgentChatActionsContextValue {
   handleAddComposerImageAttachments: (attachments: ComposerImageAttachment[]) => void
   handleUpdateComposerImageAttachment: (attachment: ComposerImageAttachment) => void
   handleRemoveComposerImageAttachment: (attachmentId: string) => void
+  handleAddComposerFiles: (files: File[], textBytes: number) => void
+  handleRemoveComposerFileAttachment: (attachmentId: string) => void
+  handleRestoreComposerFiles: (files: ComposerFileAttachment[]) => void
   handleAddComposerReferenceAttachments: (attachments: ComposerReferenceAttachment[]) => void
   handleRemoveComposerReferenceAttachment: (attachmentId: string) => void
   handleSendAgentMessage: (text: string) => Promise<void>

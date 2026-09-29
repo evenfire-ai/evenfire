@@ -8058,6 +8058,20 @@ h3 {
   text-overflow: ellipsis;
 }
 
+.composer-attachment-chip-meta {
+  display: block;
+  font-size: var(--font-size-2xs);
+  line-height: 1.2;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.composer-attachment-chip-meta--failed {
+  color: var(--danger);
+}
+
 .composer-attachment-remove {
   border: none;
   background: transparent;

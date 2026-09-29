@@ -7,7 +7,7 @@ import { resolve } from 'node:path'
 import {
   CODEX_COMPOSER_MAX_IMAGE_BYTES,
   CODEX_COMPOSER_MAX_IMAGE_DIMENSION,
-  COMPOSER_MAX_IMAGE_ATTACHMENTS,
+  COMPOSER_MAX_ATTACHMENTS,
   COMPOSER_MAX_IMAGE_BYTES,
   COMPOSER_MAX_TOTAL_IMAGE_BASE64_BYTES,
 } from '@constants/attachments'
@@ -17,7 +17,11 @@ import {
   imageInputBlockMessage,
 } from '../../../../../src/imageInputDecision'
 import type { WorkflowRecipeListResult } from '../../../../../src/types'
-import type { ComposerImageAttachment, FailedAgentSend } from '../../../uiTypes'
+import type {
+  ComposerFileAttachment,
+  ComposerImageAttachment,
+  FailedAgentSend,
+} from '../../../uiTypes'
 import { ComposerPanel } from '../ComposerPanel'
 
 // Resolve the stylesheet relative to THIS test file (not process.cwd()) so the
@@ -28,6 +32,7 @@ const composerStyles = readFileSync(resolve(__dirname, '../../../styles.css'), '
 
 const composerState: ChatComposerStateContextValue = {
   composerImageAttachments: [],
+  composerFileAttachments: [],
   composerReferenceAttachments: [],
   agentSending: false,
   agentError: null,
@@ -45,6 +50,8 @@ const actionsMock = {
   handleAddComposerImageAttachments: vi.fn(),
   handleUpdateComposerImageAttachment: vi.fn(),
   handleRemoveComposerImageAttachment: vi.fn(),
+  handleAddComposerFiles: vi.fn(),
+  handleRemoveComposerFileAttachment: vi.fn(),
   handleAddComposerReferenceAttachments: vi.fn(),
   handleRemoveComposerReferenceAttachment: vi.fn(),
   handleSendAgentMessage: vi.fn(),
@@ -173,6 +180,7 @@ afterEach(() => {
   draftState.set.mockReset()
   Object.assign(composerState, {
     composerImageAttachments: [],
+    composerFileAttachments: [],
     composerReferenceAttachments: [],
     agentSending: false,
     agentError: null,
@@ -568,7 +576,8 @@ describe('ComposerPanel with an image-capable model', () => {
       expect(timesClicked()).toBe(1)
 
       const fileInput = pickerInput(container)
-      expect(fileInput.accept).toBe('image/jpeg,image/png')
+      // Any document can be picked (#678); the picker no longer filters to images.
+      expect(fileInput.accept).toBe('')
       expect(fileInput.multiple).toBe(true)
       fireEvent.change(fileInput, { target: { files: [imageFile('photo.png', 'image/png')] } })
 
@@ -643,7 +652,8 @@ describe('ComposerPanel with an image-capable model', () => {
     expect(expectSinglePreparedImage().mimeType).toBe('image/png')
   })
 
-  it('explains a rejected file type and still attaches the valid image in the same batch', async () => {
+  it('routes a non-PNG/JPEG file to the document path and the valid image to the image path', async () => {
+    draftState.value = 'abc'
     const { container } = render(<ComposerPanel inline />)
 
     fireEvent.change(pickerInput(container), {
@@ -653,10 +663,16 @@ describe('ComposerPanel with an image-capable model', () => {
     })
 
     await waitFor(() => expect(actionsMock.handleAddComposerImageAttachments).toHaveBeenCalled())
-    expect(screen.getByRole('alert').textContent).toBe(
-      'animation.gif is not supported. Use PNG or JPEG.'
-    )
     expect(expectSinglePreparedImage().name).toBe('good.png')
+    // Liveness witness: the document path ran, with the draft's byte length for the body budget.
+    expect(actionsMock.handleAddComposerFiles).toHaveBeenCalledTimes(1)
+    const [documents, textBytes] = actionsMock.handleAddComposerFiles.mock.calls[0] as [
+      File[],
+      number,
+    ]
+    expect(documents.map(file => file.name)).toEqual(['animation.gif'])
+    expect(textBytes).toBe(3)
+    expect(screen.queryByRole('alert')).toBeNull()
   })
 
   it('explains an oversize image and attaches nothing', async () => {
@@ -674,7 +690,7 @@ describe('ComposerPanel with an image-capable model', () => {
   })
 
   it('attaches 20 images from one pick and says how many did not fit', async () => {
-    expect(COMPOSER_MAX_IMAGE_ATTACHMENTS).toBe(20)
+    expect(COMPOSER_MAX_ATTACHMENTS).toBe(20)
     const { container } = render(<ComposerPanel inline />)
     const files = Array.from({ length: 22 }, (_, index) =>
       imageFile(`photo-${index + 1}.png`, 'image/png', [...PNG_BYTES, index])
@@ -690,7 +706,7 @@ describe('ComposerPanel with an image-capable model', () => {
       files.slice(0, 20).map(file => file.name)
     )
     expect(screen.getByRole('alert').textContent).toBe(
-      'You can attach up to 20 images per message; 2 images were not added.'
+      'A message can carry at most 20 attachments; 2 images were not added.'
     )
   })
 
@@ -773,7 +789,7 @@ describe('ComposerPanel with an image-capable model', () => {
     expect(actionsMock.handleAddComposerImageAttachments).not.toHaveBeenCalled()
   })
 
-  it('does not let a dropped non-image take one of the free image slots', async () => {
+  it('sends a dropped document to the document path without taking an image slot', async () => {
     // 18 of the 20 slots are taken; the drop carries a PDF ahead of two PNGs.
     composerState.composerImageAttachments = Array.from({ length: 18 }, (_, index) => ({
       id: `attached-${index + 1}`,
@@ -802,8 +818,12 @@ describe('ComposerPanel with an image-capable model', () => {
     )
     const [batch] = addedBatches()
     expect(batch?.map(attachment => attachment.name)).toEqual(['a.png', 'b.png'])
-    // The only message is the PDF refusal: no image was counted as skipped.
-    expect(screen.getByRole('alert').textContent).toBe('doc.pdf is not supported. Use PNG or JPEG.')
+    // Liveness witness: the PDF reached the document path, not the image path.
+    expect(actionsMock.handleAddComposerFiles).toHaveBeenCalledTimes(1)
+    const [documents] = actionsMock.handleAddComposerFiles.mock.calls[0] as [File[], number]
+    expect(documents.map(file => file.name)).toEqual(['doc.pdf'])
+    // No image was counted as skipped, so nothing is reported.
+    expect(screen.queryByRole('alert')).toBeNull()
   })
 })
 
@@ -953,6 +973,7 @@ describe('ComposerPanel failed-send recovery actions', () => {
   const failedSend: FailedAgentSend = {
     content: 'inspect this image',
     attachments: [],
+    files: [],
     references: [],
     message: 'Image input evidence changed',
     kind: 'upstream',
@@ -1002,5 +1023,136 @@ describe('ComposerPanel failed-send recovery actions', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Retry last send' }))
     expect(actionsMock.handleRetryFailedAgentSend).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('ComposerPanel document attachments (#678)', () => {
+  const readyClassification = {
+    class: 'text' as const,
+    detectedMediaType: 'text/plain',
+    detection: 'text_utf8' as const,
+    textReadable: true,
+    reader: 'text' as const,
+    modelImageInput: 'unsupported' as const,
+    mismatch: false,
+  }
+
+  function readyFile(
+    overrides: Partial<Extract<ComposerFileAttachment, { status: 'ready' }>> = {}
+  ) {
+    return {
+      id: 'file-1',
+      type: 'file' as const,
+      filename: 'notes.txt',
+      sizeBytes: 2048,
+      declaredMediaType: 'text/plain',
+      status: 'ready' as const,
+      classification: readyClassification,
+      dataBase64: 'aGVsbG8=',
+      digestHex: 'a'.repeat(64),
+      ...overrides,
+    }
+  }
+
+  function sendButton(): HTMLButtonElement {
+    return screen.getByRole('button', { name: 'Send message' }) as HTMLButtonElement
+  }
+
+  it('shows a ready document chip and lets a message with only that document be sent', () => {
+    composerState.composerFileAttachments = [readyFile()]
+    render(<ComposerPanel inline />)
+
+    const chip = screen.getByTestId('composer-file-chip')
+    expect(chip.textContent).toContain('notes.txt')
+    expect(chip.textContent).toContain('2.0 KiB · text')
+    expect(chip.getAttribute('data-file-status')).toBe('ready')
+    expect(sendButton().disabled).toBe(false)
+  })
+
+  it('removes a document through its chip button', () => {
+    composerState.composerFileAttachments = [readyFile()]
+    render(<ComposerPanel inline />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Remove notes.txt' }))
+    expect(actionsMock.handleRemoveComposerFileAttachment).toHaveBeenCalledWith('file-1')
+  })
+
+  it.each(['selected', 'reading'] as const)('blocks the send while a document is %s', status => {
+    composerState.composerFileAttachments = [
+      {
+        id: 'file-2',
+        type: 'file',
+        filename: 'big.pdf',
+        sizeBytes: 1024,
+        declaredMediaType: 'application/pdf',
+        status,
+      },
+    ]
+    draftState.value = 'read this'
+    render(<ComposerPanel inline />)
+
+    // Liveness witness: the chip for this very file is on screen with its reading state.
+    expect(screen.getByTestId('composer-file-chip').textContent).toContain('Reading...')
+    expect(sendButton().disabled).toBe(true)
+  })
+
+  it('keeps a failed document on screen with its reason and blocks the send until it is removed', () => {
+    composerState.composerFileAttachments = [
+      {
+        id: 'file-3',
+        type: 'file',
+        filename: 'broken.bin',
+        sizeBytes: 10,
+        declaredMediaType: '',
+        status: 'failed',
+        error: 'broken.bin could not be read.',
+      },
+    ]
+    draftState.value = 'hello'
+    render(<ComposerPanel inline />)
+
+    expect(screen.getByTestId('composer-file-chip').getAttribute('data-file-status')).toBe('failed')
+    expect(screen.getByRole('alert').textContent).toBe('broken.bin could not be read.')
+    expect(sendButton().disabled).toBe(true)
+  })
+
+  it('says when the agent has no reader for an attached document', () => {
+    composerState.composerFileAttachments = [
+      readyFile({
+        id: 'file-4',
+        filename: 'archive.zip',
+        classification: { ...readyClassification, class: 'binary_unsupported', reader: 'none' },
+      }),
+    ]
+    render(<ComposerPanel inline />)
+
+    expect(screen.getByTestId('composer-file-chip').textContent).toContain('No reader available')
+    expect(screen.getByRole('status').textContent).toBe(
+      'archive.zip is attached, but the agent has no reader for this kind of file.'
+    )
+    expect(sendButton().disabled).toBe(false)
+  })
+
+  it('warns when the bytes do not match the name or type', () => {
+    composerState.composerFileAttachments = [
+      readyFile({
+        id: 'file-5',
+        filename: 'report.txt',
+        classification: { ...readyClassification, class: 'pdf', mismatch: true },
+      }),
+    ]
+    render(<ComposerPanel inline />)
+
+    expect(screen.getByRole('status').textContent).toBe(
+      'report.txt looks like a pdf file, not what its name or type says. It is attached as it is.'
+    )
+  })
+
+  it('keeps send disabled with an empty draft and no attachment of any kind', () => {
+    render(<ComposerPanel inline />)
+
+    // Witness: nothing renders for documents, and the button itself is the guard under test.
+    expect(screen.queryByTestId('composer-file-chip')).toBeNull()
+    expect(sendButton().disabled).toBe(true)
   })
 })

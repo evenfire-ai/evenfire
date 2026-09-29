@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react'
 import type {
+  ComposerFileAttachment,
   ComposerImageAttachment,
   ComposerReferenceAttachment,
   FailedAgentSend,
@@ -14,6 +15,7 @@ import type {
 export interface ChatComposerStateContextValue {
   activeChatId: string | null
   composerImageAttachments: ComposerImageAttachment[]
+  composerFileAttachments: ComposerFileAttachment[]
   composerReferenceAttachments: ComposerReferenceAttachment[]
   agentSending: boolean
   agentError: string | null

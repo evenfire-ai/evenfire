@@ -856,7 +856,7 @@ describe('TaskTracker', () => {
 })
 
 describe('TaskTracker — coordinator API (spec §4.2)', () => {
-  const RESEND = { content: 'hi', attachments: [], references: [] }
+  const RESEND = { content: 'hi', attachments: [], files: [], references: [] }
 
   it('attach() is idempotent for the same (key, taskId)', () => {
     expect(tracker.attach(KEY, 'task-1', 'um-1')).toBe(true)

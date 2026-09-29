@@ -1,5 +1,9 @@
 import type { ChatMessageAttachment } from '../../../src/types'
-import type { ComposerImageAttachment, ComposerReferenceAttachment } from '../uiTypes'
+import type {
+  ComposerImageAttachment,
+  ComposerReferenceAttachment,
+  ReadyComposerFileAttachment,
+} from '../uiTypes'
 
 type ParsedChatMessageDisplay = {
   content: string
@@ -10,7 +14,7 @@ function attachmentOrder(value: { addedOrder?: number }, fallbackIndex: number):
   return value.addedOrder ?? fallbackIndex
 }
 
-function formatUploadedFileTooltip(attachment: ComposerImageAttachment): string {
+function formatUploadedFileTooltip(attachment: { sizeBytes: number }): string {
   return `Uploaded File - ${Math.max(1, Math.round(attachment.sizeBytes / 1024))} KB`
 }
 
@@ -131,7 +135,8 @@ function parseAttachmentList(value: string): ParsedAttachmentList {
 
 export function buildChatMessageAttachments(
   imageAttachments: ComposerImageAttachment[],
-  referenceAttachments: ComposerReferenceAttachment[]
+  referenceAttachments: ComposerReferenceAttachment[],
+  fileAttachments: ReadyComposerFileAttachment[]
 ): ChatMessageAttachment[] {
   const referenceItems = referenceAttachments.map((attachment, index): ChatMessageAttachment => {
     const type = attachment.type
@@ -160,7 +165,17 @@ export function buildChatMessageAttachments(
       addedOrder: attachmentOrder(attachment, fallbackIndex),
     }
   })
-  return [...referenceItems, ...imageItems].sort(
+  const fileItems = fileAttachments.map((attachment, index): ChatMessageAttachment => {
+    const fallbackIndex = referenceItems.length + imageItems.length + index
+    return {
+      id: attachment.id,
+      type: 'uploaded_file',
+      label: attachment.filename,
+      tooltip: formatUploadedFileTooltip(attachment),
+      addedOrder: attachmentOrder(attachment, fallbackIndex),
+    }
+  })
+  return [...referenceItems, ...imageItems, ...fileItems].sort(
     (a, b) => attachmentOrder(a, 0) - attachmentOrder(b, 0)
   )
 }

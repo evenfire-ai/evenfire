@@ -29,6 +29,11 @@ export function useAgentChatActionsValue(vm: AppVm): AgentChatActionsContextValu
   const handleRemoveComposerImageAttachment = useStableCallback(
     vm.handleRemoveComposerImageAttachment
   )
+  const handleAddComposerFiles = useStableCallback(vm.handleAddComposerFiles)
+  const handleRemoveComposerFileAttachment = useStableCallback(
+    vm.handleRemoveComposerFileAttachment
+  )
+  const handleRestoreComposerFiles = useStableCallback(vm.handleRestoreComposerFiles)
   const handleAddComposerReferenceAttachments = useStableCallback(
     vm.handleAddComposerReferenceAttachments
   )
@@ -54,6 +59,9 @@ export function useAgentChatActionsValue(vm: AppVm): AgentChatActionsContextValu
       handleAddComposerImageAttachments,
       handleUpdateComposerImageAttachment,
       handleRemoveComposerImageAttachment,
+      handleAddComposerFiles,
+      handleRemoveComposerFileAttachment,
+      handleRestoreComposerFiles,
       handleAddComposerReferenceAttachments,
       handleRemoveComposerReferenceAttachment,
       handleSendAgentMessage,
@@ -74,6 +82,9 @@ export function useAgentChatActionsValue(vm: AppVm): AgentChatActionsContextValu
       handleAddComposerImageAttachments,
       handleUpdateComposerImageAttachment,
       handleRemoveComposerImageAttachment,
+      handleAddComposerFiles,
+      handleRemoveComposerFileAttachment,
+      handleRestoreComposerFiles,
       handleAddComposerReferenceAttachments,
       handleRemoveComposerReferenceAttachment,
       handleSendAgentMessage,

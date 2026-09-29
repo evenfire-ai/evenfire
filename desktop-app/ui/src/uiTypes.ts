@@ -1,3 +1,4 @@
+import type { FileClassification } from '@clerum/gfs-interaction-policy'
 import type {
   ChatMessageAttachment,
   HostActivityEvent,
@@ -159,6 +160,7 @@ export type AppErrorKind = 'network' | 'auth' | 'validation' | 'upstream' | 'wak
 export type FailedAgentSend = {
   content: string
   attachments: ComposerImageAttachment[]
+  files: ReadyComposerFileAttachment[]
   references: ComposerReferenceAttachment[]
   message: string
   kind: AppErrorKind
@@ -258,6 +260,38 @@ export type ComposerImageAttachment = {
   sizeBytes: number
   previewDataUrl: string
 }
+
+type ComposerFileAttachmentBase = {
+  id: string
+  addedOrder?: number
+  type: 'file'
+  filename: string
+  /** Size the picker reported; the bytes read must match it. */
+  sizeBytes: number
+  /** Media type the browser attached to the file; empty when it has none. */
+  declaredMediaType: string
+}
+
+/**
+ * A document picked for the current message (#678). It is read completely in
+ * the renderer (`selected` → `reading`) before it can be sent; only a `ready`
+ * file travels, as an inline `kind:'file'` attachment. `failed` keeps the
+ * reason on screen until the user removes the chip.
+ */
+export type ComposerFileAttachment = ComposerFileAttachmentBase &
+  (
+    | { status: 'selected' | 'reading' }
+    | { status: 'failed'; error: string }
+    | {
+        status: 'ready'
+        classification: FileClassification
+        dataBase64: string
+        digestHex: string
+      }
+  )
+
+/** A document that is fully read and hashed: the only state that can be sent. */
+export type ReadyComposerFileAttachment = Extract<ComposerFileAttachment, { status: 'ready' }>
 
 export type ComposerPluginReference = {
   id: string

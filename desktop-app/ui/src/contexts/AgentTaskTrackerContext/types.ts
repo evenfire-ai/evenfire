@@ -1,4 +1,9 @@
-import type { ComposerImageAttachment, ComposerReferenceAttachment, ProgressStep } from '@/uiTypes'
+import type {
+  ComposerImageAttachment,
+  ComposerReferenceAttachment,
+  ProgressStep,
+  ReadyComposerFileAttachment,
+} from '@/uiTypes'
 import type { ChatMessageAttachment } from '../../../../src/types'
 
 /**
@@ -126,6 +131,7 @@ export interface TrackerCallbacks {
 export interface ResendPayload {
   content: string
   attachments: ComposerImageAttachment[]
+  files: ReadyComposerFileAttachment[]
   references: ComposerReferenceAttachment[]
 }
 

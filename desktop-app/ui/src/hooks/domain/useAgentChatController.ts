@@ -6,6 +6,7 @@ import {
   parseTaskKey,
   useAgentTaskTracker,
 } from '@contexts/AgentTaskTrackerContext'
+import { COMPOSER_MAX_ATTACHMENTS, COMPOSER_MAX_NON_IMAGE_BODY_BYTES } from '@constants/attachments'
 import {
   buildChatMessageAttachments,
   buildResponseFileAttachments,
@@ -16,6 +17,7 @@ import {
   getComposerDraftRevision,
   setComposerDraft,
 } from '@lib/composerDraftStore'
+import { composerNonImageBodyBytes, formatFileSize } from '@lib/composerFileAdmission'
 import { buildComposerFileReferences } from '@lib/composerFileReferences'
 import { buildComposerRequestContent } from '@lib/composerReferencesPrompt'
 import {
@@ -59,6 +61,7 @@ import type {
   FailedAgentSend,
   NavItem,
   ProgressStep,
+  ReadyComposerFileAttachment,
   TaskProgress,
   Tone,
 } from '../../uiTypes'
@@ -123,6 +126,11 @@ const SERVER_TURN_PAGE_SIZE = 40
 const MAX_RECONCILE_DELTA_PAGES = 5
 const FILE_REFERENCES_NOT_RECEIVED_MESSAGE =
   'The Host did not receive the selected Global Files; the message was sent without them.'
+// #678 D13 — a Host that predates `kind:'file'` either rejects the attachment
+// with LLM_INVALID_ATTACHMENT or drops it and still accepts the message.
+const HOST_FILE_ATTACHMENTS_UNSUPPORTED_MESSAGE =
+  'The Host does not accept file attachments yet; the message was not delivered with them. Your files are kept so you can retry once the Host is updated.'
+const HOST_INVALID_ATTACHMENT_CODE = 'LLM_INVALID_ATTACHMENT'
 const LATEST_PAGE_FALLBACK_WINDOW = Symbol('latest-page-fallback-window')
 const DELTA_RECONCILIATION_WINDOW = Symbol('delta-reconciliation-window')
 type ReconciliationMessagesResult = SessionMessagesResult & {
@@ -629,6 +637,7 @@ export function useAgentChatController({
 
   const {
     composerImageAttachments,
+    composerFileAttachments,
     composerAttachmentRevisionRef,
     composerReferenceAttachments,
     resetComposerAttachments,
@@ -637,9 +646,22 @@ export function useAgentChatController({
     handleAddComposerImageAttachments,
     handleUpdateComposerImageAttachment,
     handleRemoveComposerImageAttachment,
+    handleAddComposerFiles,
+    handleRemoveComposerFileAttachment,
+    handleRestoreComposerFiles,
     handleAddComposerReferenceAttachments,
     handleRemoveComposerReferenceAttachment,
   } = useComposerAttachments({ selectedAgent, clearSendError: clearComposerSendError })
+
+  // Only a fully read and hashed document can travel with a message (#678).
+  const readyComposerFiles = useMemo(
+    () =>
+      composerFileAttachments.filter(
+        (file): file is ReadyComposerFileAttachment => file.status === 'ready'
+      ),
+    [composerFileAttachments]
+  )
+  const composerFilesBlockSend = composerFileAttachments.some(file => file.status !== 'ready')
 
   const { chatEndRef, scrollChatToBottom } = useChatScroll({
     selectedAgent,
@@ -1282,16 +1304,33 @@ export function useAgentChatController({
   }, [cancelOlderMessagesLoad, currentTeamId, navItem, selectedAgent])
 
   const mapComposerAttachmentsToHostRequest = (
-    attachments: ComposerImageAttachment[]
-  ): HostMessageAttachment[] =>
-    attachments.map(att => ({
-      id: att.id,
-      kind: 'image',
-      mimeType: att.mimeType,
-      encoding: 'base64',
-      dataBase64: att.dataBase64,
-      filename: att.name,
-    }))
+    attachments: ComposerImageAttachment[],
+    files: ReadyComposerFileAttachment[]
+  ): HostMessageAttachment[] => [
+    ...attachments.map(
+      (att): HostMessageAttachment => ({
+        id: att.id,
+        kind: 'image',
+        mimeType: att.mimeType,
+        encoding: 'base64',
+        dataBase64: att.dataBase64,
+        filename: att.name,
+      })
+    ),
+    ...files.map(
+      (file): HostMessageAttachment => ({
+        id: file.id,
+        kind: 'file',
+        filename: file.filename,
+        mimeType: file.declaredMediaType,
+        detectedMediaType: file.classification.detectedMediaType,
+        encoding: 'base64',
+        dataBase64: file.dataBase64,
+        sizeBytes: file.sizeBytes,
+        digest: { algorithm: 'sha256', hex: file.digestHex },
+      })
+    ),
+  ]
 
   // ─── Activity / progress state updaters (hoisted from sendAgentMessage so the
   //     tracker subscription effect and tracker callbacks can share them) ───
@@ -2002,6 +2041,7 @@ export function useAgentChatController({
             setFailedAgentSend({
               content: resend.content,
               attachments: resend.attachments,
+              files: resend.files,
               references: resend.references,
               message: result.message,
               kind: 'network',
@@ -2494,6 +2534,7 @@ export function useAgentChatController({
     async (
       content: string,
       attachments: ComposerImageAttachment[] = composerImageAttachments,
+      files: ReadyComposerFileAttachment[] = readyComposerFiles,
       references: ComposerReferenceAttachment[] = composerReferenceAttachments,
       preserveComposer = false
     ) => {
@@ -2503,10 +2544,14 @@ export function useAgentChatController({
       const originalAttachmentRevision = composerAttachmentRevisionRef.current
       const trimmedContent = content.trim()
       const effectiveAttachments = [...attachments]
+      const effectiveFiles = [...files]
       const effectiveReferences = [...references]
       if (
         !selectedAgent ||
-        (!trimmedContent && !effectiveAttachments.length && !effectiveReferences.length)
+        (!trimmedContent &&
+          !effectiveAttachments.length &&
+          !effectiveFiles.length &&
+          !effectiveReferences.length)
       )
         return
       // Per-(agent, chat) re-entry guard: a chat with a running task can't start
@@ -2559,6 +2604,41 @@ export function useAgentChatController({
         agentSendInFlightRef.current = false
         return
       }
+      // #678 — the content the Host receives is fixed before anything is created
+      // or cleared, so the shared per-message limits are checked against the
+      // exact request and a refusal leaves the composer as the user typed it.
+      const baseContentForRequest =
+        trimmedContent ||
+        (effectiveAttachments.length && effectiveFiles.length
+          ? 'Please analyze the attached image(s) and file(s).'
+          : effectiveFiles.length
+            ? 'Please analyze the attached file(s).'
+            : effectiveAttachments.length
+              ? 'Please analyze the attached image(s).'
+              : 'Please use the attached context.')
+      const effectiveContentForRequest = buildComposerRequestContent(
+        baseContentForRequest,
+        effectiveReferences
+      )
+      if (effectiveFiles.length > 0) {
+        const attachmentCount = effectiveAttachments.length + effectiveFiles.length
+        const nonImageBodyBytes = composerNonImageBodyBytes({
+          files: effectiveFiles,
+          textBytes: new TextEncoder().encode(effectiveContentForRequest).length,
+        })
+        const blocker =
+          attachmentCount > COMPOSER_MAX_ATTACHMENTS
+            ? `A message can carry at most ${COMPOSER_MAX_ATTACHMENTS} attachments.`
+            : nonImageBodyBytes > COMPOSER_MAX_NON_IMAGE_BODY_BYTES
+              ? `The attached files and text take more than ${formatFileSize(COMPOSER_MAX_NON_IMAGE_BODY_BYTES)} once encoded. Remove a file or shorten the message.`
+              : null
+        if (blocker) {
+          setAgentError(blocker)
+          pushToast(blocker, 'error')
+          agentSendInFlightRef.current = false
+          return
+        }
+      }
       let sendChatId = activeChatId
       // Captured for the retention snapshot: the model this attempt actually
       // asked for (issue #654), readable from the catch below.
@@ -2607,18 +2687,10 @@ export function useAgentChatController({
         }
       }
       const userMessageId = crypto.randomUUID()
-      const baseContentForRequest =
-        trimmedContent ||
-        (effectiveAttachments.length
-          ? 'Please analyze the attached image(s).'
-          : 'Please use the attached context.')
-      const effectiveContentForRequest = buildComposerRequestContent(
-        baseContentForRequest,
-        effectiveReferences
-      )
       const displayAttachments = buildChatMessageAttachments(
         effectiveAttachments,
-        effectiveReferences
+        effectiveReferences,
+        effectiveFiles
       )
       const userMessage: AgentChatMessage = {
         id: userMessageId,
@@ -2648,9 +2720,11 @@ export function useAgentChatController({
             trimmedContent ||
             (effectiveAttachments.length > 0
               ? `Images: ${effectiveAttachments.map(att => att.name).join(', ')}`
-              : effectiveReferences.length > 0
-                ? `Context: ${effectiveReferences.map(ref => ref.label).join(', ')}`
-                : '')
+              : effectiveFiles.length > 0
+                ? `Files: ${effectiveFiles.map(file => file.filename).join(', ')}`
+                : effectiveReferences.length > 0
+                  ? `Context: ${effectiveReferences.map(ref => ref.label).join(', ')}`
+                  : '')
           const autoTitle = truncateTitle(autoTitleSeed)
           if (autoTitle) {
             // spec 15 §2.5/B19: the client-derived auto-title stays LOCAL only —
@@ -2692,6 +2766,7 @@ export function useAgentChatController({
         userMessageId,
         content: trimmedContent,
         attachments: effectiveAttachments,
+        files: effectiveFiles,
         references: effectiveReferences,
         model: requestModelForRetention,
         reason: 'awaiting_terminal',
@@ -2727,8 +2802,8 @@ export function useAgentChatController({
           channelId: sendAgent,
           threadId: sendChatId || undefined,
           attachments:
-            effectiveAttachments.length > 0
-              ? mapComposerAttachmentsToHostRequest(effectiveAttachments)
+            effectiveAttachments.length > 0 || effectiveFiles.length > 0
+              ? mapComposerAttachmentsToHostRequest(effectiveAttachments, effectiveFiles)
               : undefined,
           ...(requestModel ? { model: requestModel } : {}),
           ...(visualModelRevisionForSend === undefined
@@ -2817,6 +2892,26 @@ export function useAgentChatController({
             pushToast(droppedMessage, 'error')
           }
         }
+        // #678 D13 — the same rule for documents. An ack that lists which
+        // attachments the Host admitted and omits a sent file means an older
+        // Host dropped it. Unlike a Global File reference, the document exists
+        // only in this composer, so the send keeps its snapshot and shows the
+        // failure instead of looking delivered.
+        let filesNotDeliveredMessage: string | null = null
+        if (ackOk && !ackIsEmpty && effectiveFiles.length > 0) {
+          const acceptedAttachmentIds = new Set<string>(
+            Array.isArray(response.acceptedAttachmentIds) ? response.acceptedAttachmentIds : []
+          )
+          const undelivered = effectiveFiles.filter(file => !acceptedAttachmentIds.has(file.id))
+          if (undelivered.length > 0) {
+            filesNotDeliveredMessage =
+              undelivered.length === effectiveFiles.length
+                ? HOST_FILE_ATTACHMENTS_UNSUPPORTED_MESSAGE
+                : `The Host did not receive ${undelivered.length} of the attached files. Your files are kept so you can retry.`
+            setAgentError(filesNotDeliveredMessage)
+            pushToast(filesNotDeliveredMessage, 'error')
+          }
+        }
 
         if (!taskId) {
           // Synchronous (non-async) response — a direct reply or a structured error.
@@ -2869,13 +2964,20 @@ export function useAgentChatController({
             // The input was cleared before the round-trip: retain it (memory
             // only) so the failure is recoverable, and restore the text into the
             // composer only when it is still the same chat with no newer draft.
-            const failureMessage =
-              typeof errorRecord?.message === 'string' ? errorRecord.message : content
+            // #678 D13 — a Host that predates `kind:'file'` rejects the send
+            // with LLM_INVALID_ATTACHMENT; say what that means for the files.
+            const hostRejectedFiles =
+              effectiveFiles.length > 0 && errorRecord?.code === HOST_INVALID_ATTACHMENT_CODE
+            const failureMessage = hostRejectedFiles
+              ? HOST_FILE_ATTACHMENTS_UNSUPPORTED_MESSAGE
+              : typeof errorRecord?.message === 'string'
+                ? errorRecord.message
+                : content
             failRetainedSend(
               sendAgent,
               sendChatId ?? null,
               userMessageId,
-              'sync_error_envelope',
+              hostRejectedFiles ? 'host_files_unsupported' : 'sync_error_envelope',
               failureMessage,
               'upstream'
             )
@@ -2885,6 +2987,22 @@ export function useAgentChatController({
               errorMessage: failureMessage,
             }))
             pushToast(`Message to ${sendAgent} failed: ${failureMessage || 'error'}`, 'error')
+          } else if (filesNotDeliveredMessage) {
+            // The Host answered but never received the documents: keep the
+            // snapshot (and its files) with the failure instead of releasing it.
+            failRetainedSend(
+              sendAgent,
+              sendChatId ?? null,
+              userMessageId,
+              'host_files_unsupported',
+              filesNotDeliveredMessage,
+              'upstream'
+            )
+            updateMessageActivity(sendAgent, userMessageId, previous => ({
+              ...previous,
+              status: 'error',
+              errorMessage: filesNotDeliveredMessage,
+            }))
           } else {
             // Terminal success: release this payload and the older failures of
             // the chat it supersedes.
@@ -2913,6 +3031,16 @@ export function useAgentChatController({
           await chatStore.appendMessages(sendAgent, sendChatId, [persistedUserMessage])
         }
         attachTaskIdToRetainedSend(sendAgent, sendChatId ?? null, userMessageId, taskId)
+        if (filesNotDeliveredMessage) {
+          // The task runs without the documents; the snapshot survives its
+          // success (see releaseSucceededRetainedSendsForTask).
+          markRetainedSendReason(
+            taskId,
+            'host_files_unsupported',
+            filesNotDeliveredMessage,
+            'upstream'
+          )
+        }
         activityTaskToMessageByAgentRef.current[sendAgent] = {
           ...(activityTaskToMessageByAgentRef.current[sendAgent] || {}),
           [taskId]: userMessageId,
@@ -2935,6 +3063,7 @@ export function useAgentChatController({
           tracker.setResend(taskId, {
             content: trimmedContent,
             attachments: effectiveAttachments,
+            files: effectiveFiles,
             references: effectiveReferences,
           })
           const taskKey = makeTaskKey(sendAgent, sendChatId)
@@ -2975,6 +3104,7 @@ export function useAgentChatController({
         setFailedAgentSend({
           content: trimmedContent,
           attachments: effectiveAttachments,
+          files: effectiveFiles,
           references: effectiveReferences,
           message,
           kind,
@@ -3029,10 +3159,12 @@ export function useAgentChatController({
       selectedAgent,
       activeChatId,
       composerImageAttachments,
+      readyComposerFiles,
       composerReferenceAttachments,
       chatList,
       chatStore,
       clearComposerAfterSend,
+      markRetainedSendReason,
       fsm,
       applyLocalTitleOnly,
       pushToast,
@@ -3050,9 +3182,23 @@ export function useAgentChatController({
 
   const handleSendAgentMessage = useCallback(
     async (text: string) => {
-      await sendAgentMessage(text, composerImageAttachments, composerReferenceAttachments)
+      // A document still being read, or one that failed, is not part of the
+      // message: sending now would silently leave it out.
+      if (composerFilesBlockSend) return
+      await sendAgentMessage(
+        text,
+        composerImageAttachments,
+        readyComposerFiles,
+        composerReferenceAttachments
+      )
     },
-    [composerImageAttachments, composerReferenceAttachments, sendAgentMessage]
+    [
+      composerFilesBlockSend,
+      composerImageAttachments,
+      readyComposerFiles,
+      composerReferenceAttachments,
+      sendAgentMessage,
+    ]
   )
 
   const visibleRetainedFailure = useMemo(() => {
@@ -3083,7 +3229,14 @@ export function useAgentChatController({
     if (!visibleFailure) return
     const previous = visibleFailure
     const retainedBefore = lastRetainedSendIdRef.current
-    await sendAgentMessage(previous.content, previous.attachments, previous.references, true)
+    // The retained files are already read and hashed: a retry never reads them again.
+    await sendAgentMessage(
+      previous.content,
+      previous.attachments,
+      previous.files,
+      previous.references,
+      true
+    )
     // A retry refused before dispatch (image guard, running task, a send already
     // in flight) retained nothing, so the old snapshot is still the only copy of
     // the payload: keep it and the failure it shows. Once a newer send has
@@ -3125,6 +3278,7 @@ export function useAgentChatController({
     if (
       getComposerDraft(activeChatId) ||
       composerImageAttachments.length ||
+      composerFileAttachments.length ||
       composerReferenceAttachments.length
     ) {
       pushToast('Keep or clear the current draft before recovering the earlier input.', 'error')
@@ -3137,14 +3291,17 @@ export function useAgentChatController({
         previewDataUrl: `data:${attachment.mimeType};base64,${attachment.dataBase64}`,
       }))
     )
+    handleRestoreComposerFiles(visibleFailure.files)
     handleAddComposerReferenceAttachments(visibleFailure.references)
     handleDiscardFailedAgentSend()
   }, [
     visibleFailure,
     activeChatId,
     composerImageAttachments,
+    composerFileAttachments,
     composerReferenceAttachments,
     pushToast,
+    handleRestoreComposerFiles,
     handleAddComposerImageAttachments,
     handleAddComposerReferenceAttachments,
     handleDiscardFailedAgentSend,
@@ -3322,6 +3479,7 @@ export function useAgentChatController({
     sessionFsmStore: fsm,
     progressByAgentMessage,
     composerImageAttachments,
+    composerFileAttachments,
     composerReferenceAttachments,
     agentSending,
     // A fresh send-time error (a blocked image send, a new POST failure) wins;
@@ -3357,6 +3515,9 @@ export function useAgentChatController({
     handleAddComposerImageAttachments,
     handleUpdateComposerImageAttachment,
     handleRemoveComposerImageAttachment,
+    handleAddComposerFiles,
+    handleRemoveComposerFileAttachment,
+    handleRestoreComposerFiles,
     handleAddComposerReferenceAttachments,
     handleRemoveComposerReferenceAttachment,
     cancelTask,

@@ -2290,6 +2290,7 @@ export function App() {
     () => ({
       activeChatId: vm.activeChatId,
       composerImageAttachments: vm.composerImageAttachments,
+      composerFileAttachments: vm.composerFileAttachments,
       composerReferenceAttachments: vm.composerReferenceAttachments,
       agentSending: vm.agentSending,
       agentError: vm.agentError,
@@ -2300,6 +2301,7 @@ export function App() {
     [
       vm.activeChatId,
       vm.composerImageAttachments,
+      vm.composerFileAttachments,
       vm.composerReferenceAttachments,
       vm.agentSending,
       vm.agentError,
