@@ -5,6 +5,7 @@ import {
   COMPOSER_MAX_IMAGE_BYTES,
   COMPOSER_MAX_TOTAL_IMAGE_BASE64_BYTES,
   composerImageBudget,
+  composerImageCountedBytes,
 } from '../attachments'
 
 const MIB = 1024 * 1024
@@ -15,18 +16,19 @@ describe('composerImageBudget', () => {
     expect(budget).toEqual({
       maxImageBytes: 16777216,
       total: {
-        maxBase64Bytes: 22369624,
+        counts: 'decoded',
+        maxBytes: 16777216,
         labelBytes: 16777216,
       },
       maxDimension: null,
       sizeUnit: 'MiB',
     })
-    // 16 MiB decoded, expressed as base64: the total rpc-proxy and mcp-host
-    // accept for one message, not the 20 MiB xAI allows per image.
+    // The total is the decoded 16 MiB that rpc-proxy and mcp-host accept for
+    // one message, not the 20 MiB xAI allows per image. The composer sums the
+    // decoded `sizeBytes` of each image, so the check matches the ingress to
+    // the byte.
     expect(budget.maxImageBytes).toBe(16 * MIB)
-    expect(budget.total?.maxBase64Bytes).toBe(4 * Math.ceil((16 * MIB) / 3))
-    // The copy names the decoded total (16 MiB), not the base64 bytes the
-    // picker counts (which would round to "21 MiB").
+    expect(budget.total?.maxBytes).toBe(16 * MIB)
     expect(budget.total?.labelBytes).toBe(16 * MIB)
     expect(15 * MIB).toBeLessThanOrEqual(budget.maxImageBytes)
     expect(17 * MIB).toBeGreaterThan(budget.maxImageBytes)
@@ -49,7 +51,8 @@ describe('composerImageBudget', () => {
       expect(composerImageBudget(provider)).toEqual({
         maxImageBytes: COMPOSER_MAX_IMAGE_BYTES,
         total: {
-          maxBase64Bytes: COMPOSER_MAX_TOTAL_IMAGE_BASE64_BYTES,
+          counts: 'base64',
+          maxBytes: COMPOSER_MAX_TOTAL_IMAGE_BASE64_BYTES,
           labelBytes: COMPOSER_MAX_TOTAL_IMAGE_BASE64_BYTES,
         },
         maxDimension: null,
@@ -59,4 +62,21 @@ describe('composerImageBudget', () => {
       expect(COMPOSER_MAX_TOTAL_IMAGE_BASE64_BYTES).toBe(8 * MIB)
     }
   )
+})
+
+describe('composerImageCountedBytes', () => {
+  // 5 base64 characters decode to 3 bytes or fewer, so the two units differ.
+  const attachment = { dataBase64: 'AAAAA', sizeBytes: 3 }
+
+  it('counts decoded bytes for a decoded total', () => {
+    const total = composerImageBudget('grok-subscription').total
+    expect(total).not.toBeNull()
+    expect(composerImageCountedBytes(total!, attachment)).toBe(3)
+  })
+
+  it('counts base64 characters for a base64 total', () => {
+    const total = composerImageBudget('anthropic').total
+    expect(total).not.toBeNull()
+    expect(composerImageCountedBytes(total!, attachment)).toBe(5)
+  })
 })

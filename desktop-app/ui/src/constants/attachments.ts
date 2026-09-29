@@ -28,28 +28,31 @@ export const CODEX_COMPOSER_MAX_IMAGE_DIMENSION = 2048
  * not the xAI limit; only tool screenshots can use the contract's 20 MiB.
  */
 export const GROK_COMPOSER_MAX_IMAGE_BYTES = 16 * 1024 * 1024
-/** The same 16 MiB ingress total, as the base64 bytes the composer counts. */
-export const GROK_COMPOSER_MAX_TOTAL_IMAGE_BASE64_BYTES =
-  4 * Math.ceil(GROK_COMPOSER_MAX_IMAGE_BYTES / 3)
-
 export const COMPOSER_ACCEPT_IMAGE_MIME_TYPES = ['image/jpeg', 'image/png'] as const
 
 export const CODEX_SUBSCRIPTION_PROVIDER = 'codex-subscription'
 export const GROK_SUBSCRIPTION_PROVIDER = 'grok-subscription'
 
 /**
- * The composer aggregate one message must fit in. The general branch counts
- * and names base64 MB (#669); Grok enforces the base64 encoding of the shared
- * 16 MiB ingress total but names the decoded figure (#784).
+ * The composer aggregate one message must fit in. The general branch sums and
+ * names base64 MB (#669). Grok sums the decoded bytes of each image, which is
+ * what the shared 16 MiB ingress total counts (#784).
  */
 export type ComposerImageTotalBudget = {
-  /** Combined base64 bytes the composer counts and enforces. */
-  maxBase64Bytes: number
-  /**
-   * Bytes the total-limit copy names. For Grok this is the decoded ingress
-   * total, not the base64 bytes the picker counts.
-   */
+  /** What the composer sums: base64 characters or decoded image bytes. */
+  counts: 'base64' | 'decoded'
+  /** Limit on that sum, in the unit named by `counts`. */
+  maxBytes: number
+  /** Bytes the total-limit copy names. */
   labelBytes: number
+}
+
+/** Bytes one attachment adds to the sum the budget's `counts` names. */
+export function composerImageCountedBytes(
+  total: ComposerImageTotalBudget,
+  attachment: { dataBase64: string; sizeBytes: number }
+): number {
+  return total.counts === 'base64' ? attachment.dataBase64.length : attachment.sizeBytes
 }
 
 export type ComposerImageBudget = {
@@ -78,7 +81,8 @@ export function composerImageBudget(provider: string | null | undefined): Compos
     return {
       maxImageBytes: GROK_COMPOSER_MAX_IMAGE_BYTES,
       total: {
-        maxBase64Bytes: GROK_COMPOSER_MAX_TOTAL_IMAGE_BASE64_BYTES,
+        counts: 'decoded',
+        maxBytes: GROK_COMPOSER_MAX_IMAGE_BYTES,
         labelBytes: GROK_COMPOSER_MAX_IMAGE_BYTES,
       },
       maxDimension: null,
@@ -88,7 +92,8 @@ export function composerImageBudget(provider: string | null | undefined): Compos
   return {
     maxImageBytes: COMPOSER_MAX_IMAGE_BYTES,
     total: {
-      maxBase64Bytes: COMPOSER_MAX_TOTAL_IMAGE_BASE64_BYTES,
+      counts: 'base64',
+      maxBytes: COMPOSER_MAX_TOTAL_IMAGE_BASE64_BYTES,
       labelBytes: COMPOSER_MAX_TOTAL_IMAGE_BASE64_BYTES,
     },
     maxDimension: null,
