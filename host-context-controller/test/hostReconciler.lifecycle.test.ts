@@ -202,6 +202,14 @@ function runtimeTokenProvision(host: HostCRD, hasChannelIngress = false) {
   }
 }
 
+/**
+ * A hand-built credential record with the identity, revision and refresh-window
+ * annotations only. It deliberately omits the bootstrap-state, rollout marker
+ * and scope hash the producer always writes, so it models a legacy record. It
+ * is kept for the held-runtime identity guards and the GFS renewal window,
+ * which read none of those. A test whose decision depends on the bootstrap or
+ * scope annotations uses `mintedRuntimeCredentialRecord` instead.
+ */
 function runtimeCredentialRecord(
   host: HostCRD,
   options: {
@@ -303,6 +311,102 @@ function encodedRuntimeRefreshMaterial(expiresAtMs: number): string {
     encode({ exp: Math.floor(expiresAtMs / 1000) }),
     'test-signature',
   ].join('.')
+}
+
+const PRODUCER_RUNTIME_ANNOTATIONS = [
+  'clerum.io/runtime-token-bootstrap-state',
+  'clerum.io/runtime-token-rollout-required',
+  'clerum.io/runtime-token-scope-hash',
+] as const
+
+/** Fails loud when a credential fixture lacks an annotation the producer always writes. */
+function assertProducerRuntimeAnnotations(record: k8s.V1Secret): k8s.V1Secret {
+  const annotations = record.metadata?.annotations ?? {}
+  const missing = PRODUCER_RUNTIME_ANNOTATIONS.filter(key => !(key in annotations))
+  if (missing.length > 0) {
+    throw new Error(`runtime credential fixture lacks producer annotations: ${missing.join(', ')}`)
+  }
+  return record
+}
+
+/**
+ * The runtime credential record as HCC persists it, produced by one real
+ * `ensureMcpHostRuntimeTokenSecret` mint pass on a dedicated producer
+ * reconciler, so the caller's API mocks record none of the producer's calls.
+ * The written `stringData` is stored as base64 `data`, the way the apiserver
+ * returns it. With `bootstrap: 'consumed'` (the default) a second real pass
+ * against a Ready Deployment running the minted revision consumes the
+ * bootstrap, which is what a running pod's record looks like. `annotations`
+ * overrides only what a test drives explicitly.
+ */
+async function mintedRuntimeCredentialRecord(
+  host: HostCRD,
+  options: {
+    frontsOAuthServer?: boolean
+    hasChannelIngress?: boolean
+    bootstrap?: 'fresh' | 'consumed'
+    annotations?: Record<string, string>
+  } = {}
+): Promise<k8s.V1Secret> {
+  const {
+    reconciler: producer,
+    appsApi,
+    coreApi,
+  } = createReconciler({
+    countCommunicationChannels: () => (options.hasChannelIngress ? 1 : 0),
+  })
+  producer.setHostFrontsOAuthServer(async () => options.frontsOAuthServer ?? false)
+  const issue = vi.mocked(issueMcpHostRuntimeTokens)
+  const issueDefaults = issue.getMockImplementation()
+  if (!issueDefaults) throw new Error('issueMcpHostRuntimeTokens mock has no implementation')
+  // A decodable refresh token, so a later reuse decision can reach `current`.
+  issue.mockImplementationOnce(async (...args) => ({
+    ...(await issueDefaults(...args)),
+    refreshToken: encodedRuntimeRefreshMaterial(Date.now() + 3_600_000),
+  }))
+  coreApi.readNamespacedSecret.mockRejectedValue({ code: 404 })
+  await (producer as any).ensureMcpHostRuntimeTokenSecret(host)
+  const created = coreApi.createNamespacedSecret.mock.calls.at(-1)?.[0].body as
+    | k8s.V1Secret
+    | undefined
+  if (!created?.stringData) throw new Error('producer pass wrote no runtime credential Secret')
+  let record: k8s.V1Secret = {
+    ...created,
+    metadata: { ...created.metadata, resourceVersion: '88' },
+    data: Object.fromEntries(
+      Object.entries(created.stringData).map(([key, value]) => [
+        key,
+        Buffer.from(value).toString('base64'),
+      ])
+    ),
+  }
+  delete record.stringData
+  if (options.bootstrap !== 'fresh') {
+    const revision = record.metadata?.annotations?.['clerum.io/runtime-token-secret-revision']
+    if (!revision) throw new Error('producer pass wrote no runtime credential revision')
+    const running = trustedRuntimeDeployment(producer, host)
+    running.spec!.template!.metadata!.annotations = {
+      ...running.spec!.template!.metadata!.annotations,
+      'clerum.io/runtime-token-revision': revision,
+    }
+    appsApi.readNamespacedDeployment.mockResolvedValue(running)
+    coreApi.readNamespacedSecret.mockResolvedValue(record)
+    await (producer as any).ensureMcpHostRuntimeTokenSecret(host)
+    const consumed = coreApi.replaceNamespacedSecret.mock.calls.at(-1)?.[0].body as
+      | k8s.V1Secret
+      | undefined
+    if (
+      consumed?.metadata?.annotations?.['clerum.io/runtime-token-bootstrap-state'] !== 'consumed'
+    ) {
+      throw new Error('producer pass did not consume the runtime credential bootstrap')
+    }
+    record = consumed
+  }
+  record.metadata = {
+    ...record.metadata,
+    annotations: { ...(record.metadata?.annotations ?? {}), ...options.annotations },
+  }
+  return assertProducerRuntimeAnnotations(record)
 }
 
 function withReadableRuntimeRefreshMaterial(record: k8s.V1Secret): k8s.V1Secret {
@@ -1710,7 +1814,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
       isCommunicationChannelCacheSynced: () => true,
     })
     coreApi.readNamespacedSecret.mockResolvedValue(
-      runtimeCredentialRecord(host, { frontsOAuthServer: 'true' })
+      await mintedRuntimeCredentialRecord(host, { frontsOAuthServer: true })
     )
     reconciler.setHostFrontsOAuthServer(async () => {
       throw new Error('oauth lookup unavailable')
@@ -1737,9 +1841,9 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
       isCommunicationChannelCacheSynced: () => false,
     })
     coreApi.readNamespacedSecret.mockResolvedValue(
-      runtimeCredentialRecord(host, {
-        frontsOAuthServer: 'false',
-        hasChannelIngress: 'true',
+      await mintedRuntimeCredentialRecord(host, {
+        frontsOAuthServer: false,
+        hasChannelIngress: true,
       })
     )
     const oauthResolver = vi.fn(async () => true)
