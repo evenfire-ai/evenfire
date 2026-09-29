@@ -1474,11 +1474,12 @@ export class WorkflowRecipeReconciler {
    * Applies the run-lane NetworkPolicies again from a short-circuit when the
    * published status carries the retry marker. Those short-circuits never
    * reach `WorkflowReconciler.reconcile()`, so without this a policy left
-   * pending a retry would stay unapplied until the run ends. The retry
-   * re-prunes as well, with a verdict computed for this pass: a prune that
-   * failed is what set the marker, so an apply-only retry could never clear it.
-   * The Codex and Grok proxy policies are never revoked by this retry, since
-   * a run may be using them; the first reconcile() after the run prunes them.
+   * pending a retry would stay unapplied until the run ends. The retry only
+   * applies the desired policies, with a verdict computed for this pass; it
+   * prunes no run-lane policy, because the run's pods may still use any lane.
+   * A marker set by a failed reconcile() prune clears here once the applies
+   * converge, and the leftover waits for the next reconcile() pass or the
+   * finalizer sweep (see `WorkflowReconciler.retryRunLaneNetworkPolicies`).
    *
    * Returns the requeue delay the short-circuit must add: the progress base
    * while a policy is still pending, the transient base when the apply threw
