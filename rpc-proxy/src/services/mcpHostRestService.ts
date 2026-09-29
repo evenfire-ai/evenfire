@@ -221,8 +221,10 @@ export async function forwardTaskResultFromHost(
       }
     )
     if (response.status === 404) return null
-    if (!response.ok) throw new UpstreamHostError(response.status, '')
     const rawBody = await response.text()
+    // The body carries mcp-host's `host_draining` fence, which is what makes a
+    // draining 503 wake-eligible (isHostDrainingError reads bodySnippet).
+    if (!response.ok) throw new UpstreamHostError(response.status, rawBody.slice(0, 300))
     if (!rawBody.trim()) return null
     try {
       const parsed = JSON.parse(rawBody) as unknown

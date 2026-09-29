@@ -854,6 +854,8 @@ export function createRpcRouter(): Router {
             host,
             claims: auth,
             rpcAccessToken,
+            // idempotent GET: a re-issued read cannot duplicate a side effect
+            retryUntilDeadline: true,
             attemptUpstream: forwardSessionList,
             respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
           })
@@ -955,6 +957,8 @@ export function createRpcRouter(): Router {
             host,
             claims: auth,
             rpcAccessToken,
+            // idempotent GET: a re-issued read cannot duplicate a side effect
+            retryUntilDeadline: true,
             attemptUpstream: forwardTranscript,
             respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
           })
@@ -1029,6 +1033,8 @@ export function createRpcRouter(): Router {
             host,
             claims: auth,
             rpcAccessToken,
+            // idempotent GET: a re-issued read cannot duplicate a side effect
+            retryUntilDeadline: true,
             attemptUpstream: attempt,
             respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
           })
@@ -1179,6 +1185,8 @@ export function createRpcRouter(): Router {
             host,
             claims: auth,
             rpcAccessToken,
+            // idempotent GET: a re-issued read cannot duplicate a side effect
+            retryUntilDeadline: true,
             attemptUpstream: attempt,
             respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
           })
@@ -1309,6 +1317,8 @@ export function createRpcRouter(): Router {
               host,
               claims: auth,
               rpcAccessToken,
+              // idempotent GET: a re-issued read cannot duplicate a side effect
+              retryUntilDeadline: true,
               attemptUpstream: attemptTaskResult,
               respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
             })
@@ -1449,6 +1459,8 @@ export function createRpcRouter(): Router {
             host,
             claims: auth,
             rpcAccessToken,
+            // idempotent GET: a re-issued read cannot duplicate a side effect
+            retryUntilDeadline: true,
             attemptUpstream: attempt,
             respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
           })
@@ -1567,6 +1579,8 @@ export function createRpcRouter(): Router {
             host,
             claims: auth,
             rpcAccessToken,
+            // idempotent GET: a re-issued read cannot duplicate a side effect
+            retryUntilDeadline: true,
             attemptUpstream: attemptDownload,
             respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
           })

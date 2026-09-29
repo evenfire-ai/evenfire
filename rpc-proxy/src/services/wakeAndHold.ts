@@ -655,10 +655,12 @@ export type RespondWithWakeAndHoldOptions = {
   deadlineMs?: number
   /**
    * Keep re-issuing the request (with backoff) until it is accepted or the
-   * deadline expires. Only safe when the upstream dedupes a re-presented
-   * request: `/messages` carries a per-request `messageId` that mcp-host's
-   * admission sink dedupes. Every other route re-issues at most ONCE after the
-   * hold: approve/deny/model/cancel have no idempotency key, so each extra
+   * deadline expires. Only safe when a re-issued request cannot duplicate a
+   * side effect: the idempotent GET reads (sessions, transcript, context
+   * breakdown, models, task result, artifacts list and download, which commits
+   * only at `res.send`), and `/messages`, whose per-request `messageId`
+   * mcp-host's admission sink dedupes. Approve/deny/model/cancel have no
+   * idempotency key, so they re-issue at most ONCE after the hold: each extra
    * POST risks a duplicate side effect. Defaults to false.
    */
   retryUntilDeadline?: boolean
