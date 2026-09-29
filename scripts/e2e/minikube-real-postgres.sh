@@ -277,13 +277,17 @@ password = os.environ.get("T1_REDACT_PASSWORD", "")
 if password:
     # Every spelling the password can take in a log or in the Vitest JSON
     # reporter: verbatim, JSON-escaped once (a reporter message) and twice (a
-    # JSON document quoted inside a message), percent-encoded by Python's
-    # quote() and by JavaScript's encodeURIComponent, which keeps !~*'() literal.
-    once = json.dumps(password)[1:-1]
+    # JSON document quoted inside a message) in both ensure_ascii spellings
+    # (JavaScript's JSON.stringify keeps non-ASCII literal; Python's default
+    # writes \uXXXX), percent-encoded by Python's quote() and by JavaScript's
+    # encodeURIComponent, which keeps !~*'() literal.
+    escaped = []
+    for ensure_ascii in (True, False):
+        once = json.dumps(password, ensure_ascii=ensure_ascii)[1:-1]
+        escaped += [once, json.dumps(once, ensure_ascii=ensure_ascii)[1:-1]]
     spellings = (
         password,
-        once,
-        json.dumps(once)[1:-1],
+        *escaped,
         quote(password, safe=""),
         quote(password, safe="-_.!~*'()"),
     )

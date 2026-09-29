@@ -59,6 +59,28 @@ PY
   grep -Fq '<password-redacted>' "$pw_json" || fail 'password was not redacted'
   grep -Fq 's3cr' "$pw_json" && fail 'a spelling of the password survived redaction'
 
+  # 2a. A non-ASCII password written by the Vitest reporter's real encoder.
+  #     JSON.stringify keeps non-ASCII characters literal (Python's default
+  #     ensure_ascii=True would write ä instead), so the redactor must know
+  #     both spellings, escaped once (a reporter message) and twice (a JSON
+  #     document quoted inside a message).
+  for non_ascii_password in 'Qzä"ss' 'Qzä\ss'; do
+    non_ascii_json="$TEST_DIR/non-ascii.json"
+    node -e '
+      const fs = require("fs")
+      const [file, password] = process.argv.slice(1)
+      const inner = JSON.stringify({ failureMessages: ["auth failed for " + password] })
+      fs.writeFileSync(file, JSON.stringify({ testResults: [{ message: "auth failed for " + password, inner }] }))
+    ' "$non_ascii_json" "$non_ascii_password"
+    [ "$(grep -o 'Qz' "$non_ascii_json" | wc -l | tr -d ' ')" = 2 ] \
+      || fail "non-ASCII fixture does not contain both spellings of $non_ascii_password (liveness witness missing)"
+    T1_REDACT_PASSWORD="$non_ascii_password" sanitize_file "$non_ascii_json"
+    assert_valid_json "$non_ascii_json" "non-ASCII password $non_ascii_password"
+    [ "$(grep -o '<password-redacted>' "$non_ascii_json" | wc -l | tr -d ' ')" = 2 ] \
+      || fail "non-ASCII password $non_ascii_password was not redacted in both spellings"
+    grep -Fq 'Qz' "$non_ascii_json" && fail "a spelling of the non-ASCII password $non_ascii_password survived redaction"
+  done
+
   # 2b. Spellings of a secret the first two cases did not cover. Each fixture
   #     is built from real producers (json.dump, quote, a DSN template) and
   #     first shown to contain the secret, so a redactor that never ran cannot
