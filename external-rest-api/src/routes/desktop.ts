@@ -2,6 +2,7 @@ import { Router } from 'express'
 import { config } from '../config.js'
 import { requireAuth } from '../middleware/auth.js'
 import { releaseManifest } from '../releaseManifest.js'
+import { buildDesktopEnvironmentResponse } from './desktopEnvironmentResponse.js'
 
 export function createDesktopRouter(): Router {
   const router = Router()
@@ -9,11 +10,13 @@ export function createDesktopRouter(): Router {
   // Public discovery only: returns non-secret tenant URLs so setup can resolve
   // the RPC proxy after the user confirms the External REST API host.
   router.get('/desktop/environment', (_req, res) => {
-    res.status(200).json({
-      appName: config.desktopAppName,
-      externalRestApiBaseUrl: config.publicBaseUrl,
-      rpcProxyBaseUrl: config.desktopRpcProxyBaseUrl,
-    })
+    res.status(200).json(
+      buildDesktopEnvironmentResponse({
+        desktopAppName: config.desktopAppName,
+        publicBaseUrl: config.publicBaseUrl,
+        desktopRpcProxyBaseUrl: config.desktopRpcProxyBaseUrl,
+      })
+    )
   })
 
   router.get('/desktop/release', requireAuth, (_req, res) => {

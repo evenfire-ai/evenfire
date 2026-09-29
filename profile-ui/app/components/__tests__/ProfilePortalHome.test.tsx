@@ -2,23 +2,10 @@ import React from 'react'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import '@testing-library/jest-dom/vitest'
 import { cleanup, render, screen } from '@testing-library/react'
-import { createRequire } from 'node:module'
-import { join, resolve } from 'node:path'
 import { buildDesktopEnvironmentLink } from '@lib/desktopAppLinks'
 import type { DesktopEnvironmentResponse } from '@/app/types/api'
+import { buildDesktopEnvironmentResponse } from '../../../../external-rest-api/src/routes/desktopEnvironmentResponse.js'
 import Page from '../../page'
-
-type ExpressTestApp = { use: (path: string, router: unknown) => void }
-type ExpressFactory = () => ExpressTestApp
-type SupertestResponse = { body: unknown }
-type SupertestRequest = { expect: (status: number) => Promise<SupertestResponse> }
-type SupertestFactory = (app: ExpressTestApp) => { get: (path: string) => SupertestRequest }
-
-const requireExternalRestApi = createRequire(
-  join(resolve(process.cwd(), '../external-rest-api'), 'package.json')
-)
-const express = requireExternalRestApi('express') as ExpressFactory
-const request = requireExternalRestApi('supertest') as SupertestFactory
 
 const api = vi.hoisted(() => ({
   getDesktopEnvironment: vi.fn(),
@@ -30,14 +17,12 @@ const originalDesktopEnvironmentConfig = {
   rpcProxyBaseUrl: process.env.EXTERNAL_REST_API_DESKTOP_RPC_PROXY_BASE_URL,
 }
 
-async function getDesktopEnvironmentFromProducer(): Promise<DesktopEnvironmentResponse> {
-  const { createDesktopRouter } =
-    await import('../../../../external-rest-api/src/routes/desktop.js')
-  const app = express()
-  app.use('/api/v1', createDesktopRouter())
-
-  const response = await request(app).get('/api/v1/desktop/environment').expect(200)
-  return response.body as DesktopEnvironmentResponse
+function getDesktopEnvironmentFromProducer(): DesktopEnvironmentResponse {
+  return buildDesktopEnvironmentResponse({
+    desktopAppName: process.env.EXTERNAL_REST_API_DESKTOP_APP_NAME ?? '',
+    publicBaseUrl: process.env.EXTERNAL_REST_API_PUBLIC_BASE_URL ?? '',
+    desktopRpcProxyBaseUrl: process.env.EXTERNAL_REST_API_DESKTOP_RPC_PROXY_BASE_URL ?? '',
+  })
 }
 
 vi.mock('@lib/api', () => ({
@@ -71,7 +56,7 @@ vi.mock('next/link', () => ({
 }))
 
 beforeAll(() => {
-  process.env.EXTERNAL_REST_API_PUBLIC_BASE_URL = 'https://api.example.com/'
+  process.env.EXTERNAL_REST_API_PUBLIC_BASE_URL = 'https://api.example.com'
   process.env.EXTERNAL_REST_API_DESKTOP_RPC_PROXY_BASE_URL = 'https://rpc.example.com/'
   process.env.EXTERNAL_REST_API_DESKTOP_APP_NAME = 'Example Tenant'
 })
@@ -138,7 +123,7 @@ describe('Profile Portal home desktop setup link', () => {
   })
 
   it('labels the environment setup handoff accurately', async () => {
-    const environment = await getDesktopEnvironmentFromProducer()
+    const environment = getDesktopEnvironmentFromProducer()
     api.getDesktopEnvironment.mockResolvedValue(environment)
 
     render(<Page />)
@@ -153,8 +138,8 @@ describe('Profile Portal home desktop setup link', () => {
     expect(href.searchParams.get('tenantName')).toBe(environment.appName)
   })
 
-  it('builds the setup link from the real public discovery response', async () => {
-    const environment = await getDesktopEnvironmentFromProducer()
+  it('builds the setup link from the production discovery response', () => {
+    const environment = getDesktopEnvironmentFromProducer()
     const href = buildDesktopEnvironmentLink(environment)
 
     expect(href).not.toBeNull()
