@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { EventEmitter } from 'node:events'
 import { pool, withTransaction } from '../src/db.js'
 import {
   ExternalSessionBackendUnavailableError,
@@ -29,7 +30,8 @@ describe('external session database failure provenance', () => {
     const applicationFailure = new Error('session policy invariant failed')
     const query = vi.fn().mockResolvedValue({ rows: [], rowCount: 0 })
     const release = vi.fn()
-    vi.spyOn(pool, 'connect').mockResolvedValueOnce({ query, release } as never)
+    const client = Object.assign(new EventEmitter(), { query, release })
+    vi.spyOn(pool, 'connect').mockResolvedValueOnce(client as never)
 
     await expect(
       withTransaction(
