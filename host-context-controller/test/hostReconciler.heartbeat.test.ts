@@ -1556,6 +1556,37 @@ describe('HostReconciler.markHostActiveFromHeartbeat', () => {
     expect(writes[0].lifecycle).toEqual({ state: 'active', wakeHandledGeneration: 4 })
     expect(host.status?.lifecycle?.state).toBe('active')
   })
+
+  it.each([
+    { channels: 1, expectedWrites: 0, finalState: 'draining' },
+    { channels: 0, expectedWrites: 1, finalState: 'active' },
+  ] as const)(
+    'reverts a same-revision draining Host only while its fresh read is stateless (channels=$channels)',
+    async ({ channels, expectedWrites, finalState }) => {
+      // Channel ingress makes a Host effectively not stateless, so the lifecycle
+      // it would revert is not the one the stateless executor owns.
+      const { reconciler, customApi } = createReconciler()
+      reconciler.setCountCommunicationChannels(() => channels)
+      const host = {
+        ...makeStatelessHost({
+          status: { lifecycle: { state: 'draining', wakeHandledGeneration: 3 } },
+        }),
+        generation: 5,
+      }
+      const fresh = freshHostRead({ state: 'draining', wakeHandledGeneration: 3 })
+      customApi.getNamespacedCustomObject.mockResolvedValue({
+        ...fresh,
+        metadata: { ...fresh.metadata, generation: 5, resourceVersion: 'rv-draining' },
+      })
+
+      await reconciler.markHostActiveFromHeartbeat(host)
+
+      // Liveness witness: the decision was taken on exactly one fresh read.
+      expect(customApi.getNamespacedCustomObject).toHaveBeenCalledOnce()
+      expect(customApi.patchNamespacedCustomObjectStatus).toHaveBeenCalledTimes(expectedWrites)
+      expect(host.status?.lifecycle?.state).toBe(finalState)
+    }
+  )
 })
 describe('HostReconciler heartbeat cores — fresh-read guard (cross-instance staleness)', () => {
   // The Host watch callback builds a brand-new HostCRD per ADDED/MODIFIED
