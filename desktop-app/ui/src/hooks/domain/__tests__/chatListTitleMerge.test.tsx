@@ -13,6 +13,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { makeTaskKey } from '@contexts/AgentTaskTrackerContext'
 import { act, waitFor } from '@testing-library/react'
 import type { SessionsListResult } from '../../../../../src/types'
+import {
+  HOST_ACCESS_REVOKED_CODE,
+  HOST_ACCESS_REVOKED_MESSAGE,
+} from '../../../../../src/upstreamErrors'
 import { httpErrorStatus, isConfirmedHostAccessRevoked } from '../../../lib/format'
 import { deferred, localIndex, serverSessions } from './__fixtures__/catalogFixtures'
 import { renderController } from './__fixtures__/controllerHarness'
@@ -110,6 +114,23 @@ describe('HTTP status parsing through Electron IPC', () => {
     const error = await build()
     expect(error.message).toMatch(/^Error invoking remote method 'rpc:[A-Za-z]+': Error: /)
     expect(httpErrorStatus(error)).toBe(status)
+    expect(isConfirmedHostAccessRevoked(error)).toBe(revoked)
+  })
+
+  // R3-L16: only the upstream projection's exact text confirms a revocation.
+  // No producer emits a rename-prefixed revocation, so that spelling is not
+  // accepted either; every case still carries a parsed 403.
+  it.each([
+    ['the IPC-wrapped Host-wide revocation', HOST_ACCESS_REVOKED_MESSAGE, true],
+    [
+      'a rename-prefixed revocation no producer emits',
+      `Rename session failed (403): ${HOST_ACCESS_REVOKED_CODE}`,
+      false,
+    ],
+    ['the real generic rename denial', 'Rename session failed (403)', false],
+  ])('confirms revocation only for %s', (_label, message, revoked) => {
+    const error = wrapLikeElectronIpc('rpc:renameSession', new Error(message))
+    expect(httpErrorStatus(error)).toBe(403)
     expect(isConfirmedHostAccessRevoked(error)).toBe(revoked)
   })
 })

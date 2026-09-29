@@ -245,9 +245,7 @@ export function isHttp403(err: unknown): boolean {
 export function isConfirmedHostAccessRevoked(err: unknown): boolean {
   return (
     httpErrorStatus(err) === 403 &&
-    /(?:^|error: )(?:403 forbidden: host_access_revoked|rename session failed \(403\): host_access_revoked)$/.test(
-      errorText(err)
-    )
+    /(?:^|error: )403 forbidden: host_access_revoked$/.test(errorText(err))
   )
 }
 
