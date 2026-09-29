@@ -173,7 +173,12 @@ def nginx_block(text, header):
 authorize_block = nginx_block(cm, "location = /api/v1/mcp-host/llm/provider-attempts/authorize {")
 if authorize_block is None:
     errors.append("workflow-approval gateway must keep the exact-match authorize location")
-elif 'client_max_body_size 36700160;' not in authorize_block:
+elif not re.search(
+    r"^\s*client_max_body_size\s+36700160\s*;\s*$",
+    # Inline comments are not directives: "1m; # ... 36700160;" must not pass.
+    re.sub(r"[ \t]+#.*$", "", authorize_block, flags=re.M),
+    re.M,
+):
     errors.append("workflow-approval gateway authorize route must allow the 35 MiB Grok visual envelope")
 wrc_disabled = re.compile(r'- name: WRC_GROK_SUBSCRIPTION_ENABLED\n\s+value: "false"\n')
 if not wrc_disabled.search(active(manifest.parent / "workflow-recipes.yaml")):

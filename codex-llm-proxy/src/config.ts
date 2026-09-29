@@ -87,7 +87,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): CodexLlmProxyC
     LIMITS.maxVisualRequestBodyBytes
   )
   if (maxVisualBodyBytes < LIMITS.maxVisualRequestBodyBytes) {
-    throw new Error('Visual Codex requests require the full shared envelope byte budget')
+    throw new Error(
+      `CODEX_LLM_PROXY_MAX_VISUAL_BODY_BYTES must be at least ${LIMITS.maxVisualRequestBodyBytes}, the contract maxVisualRequestBodyBytes`
+    )
   }
   // The 1Gi memory limit was measured with two visual streams at the contract
   // ceiling only (see IN_FLIGHT_BODY_BUDGET_BODIES). A larger value would admit

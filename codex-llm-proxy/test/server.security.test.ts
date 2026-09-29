@@ -631,7 +631,10 @@ describe('codex-llm-proxy security surface', () => {
         ...required,
         CODEX_LLM_PROXY_MAX_VISUAL_BODY_BYTES: '1024',
       })
-    ).toThrow(/shared envelope byte budget/)
+    ).toThrow(
+      `CODEX_LLM_PROXY_MAX_VISUAL_BODY_BYTES must be at least ${LIMITS.maxVisualRequestBodyBytes}, the contract maxVisualRequestBodyBytes`
+    )
+    // Witness: the default (no override) loads at the contract value.
     expect(loadConfig(required).maxVisualBodyBytes).toBe(24 * 1024 * 1024)
   })
 
