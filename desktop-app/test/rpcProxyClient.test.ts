@@ -210,9 +210,26 @@ describe('RpcProxyClient — renameSession() (spec 15 Fase B)', () => {
   it.each([
     {
       status: 403,
-      body: JSON.stringify({ error: 'Forbidden: user cannot access this host' }),
+      body: JSON.stringify({
+        error: 'Forbidden: user cannot access this host',
+        code: 'host_access_revoked',
+      }),
       marked: true,
     },
+    {
+      status: 403,
+      body: JSON.stringify({
+        error: 'Forbidden: user cannot access this host',
+        code: 'host_access_denied',
+      }),
+      marked: false,
+    },
+    {
+      status: 403,
+      body: JSON.stringify({ error: 'Forbidden: user cannot access this host' }),
+      marked: false,
+    },
+    { status: 403, body: JSON.stringify({ error: 'host_access_revoked' }), marked: false },
     {
       status: 403,
       body: JSON.stringify({ error: 'Forbidden: missing rename scope' }),
@@ -221,11 +238,14 @@ describe('RpcProxyClient — renameSession() (spec 15 Fase B)', () => {
     { status: 403, body: 'Forbidden: user cannot access this host', marked: false },
     {
       status: 503,
-      body: JSON.stringify({ error: 'Forbidden: user cannot access this host' }),
+      body: JSON.stringify({
+        error: 'Forbidden: user cannot access this host',
+        code: 'host_access_revoked',
+      }),
       marked: false,
     },
   ])(
-    'marks exact Host-wide denial only for authoritative 403 body ($status, $marked)',
+    'marks Host-wide revocation only for a 403 whose body carries code host_access_revoked ($status, $marked)',
     async ({ status, body, marked }) => {
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(body, { status })))
       const client = new RpcProxyClient()
@@ -233,6 +253,8 @@ describe('RpcProxyClient — renameSession() (spec 15 Fase B)', () => {
         .renameSession('rpc-token', 'chatllm', 'chatllm', 'chat-1', 'name')
         .catch((caught: Error) => caught)
       expect(error).toBeInstanceOf(Error)
+      // Liveness witness: the request reached the HTTP-error path and reported its status.
+      expect((error as Error).message).toContain(String(status))
       expect((error as Error).message.includes('host_access_revoked')).toBe(marked)
     }
   )

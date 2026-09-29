@@ -872,6 +872,12 @@ export class AppService {
   // token in sessionToken. Existing GFS jobs keep their captured token and
   // scope, but new GFS operations must not capture that temporary token.
   private gfsTransientTeamHopDepth = 0
+  // While a `runWithTeamContext` hop that will restore the original team is in
+  // flight, `me.teamId` holds the borrowed team. The chat store (and the delete
+  // fence derived from it) stays on the original team: rebinding it for the hop
+  // and back would expose the deliberate team's chats to the borrowed scope for
+  // the length of an RPC.
+  private chatStoreHomeTeamId: string | null = null
   // A finite RPC may temporarily borrow another team session. Keep the
   // deliberate user-owned GFS scope stable across that hop so in-flight jobs
   // are not invalidated by the transient `me` value.
@@ -1009,10 +1015,16 @@ export class AppService {
     }
   }
 
+  /** The team the chat store and the delete fence are scoped to (see chatStoreHomeTeamId). */
+  private chatStoreTeamId(): string | null {
+    if (this.chatStoreHomeTeamId !== null) return this.chatStoreHomeTeamId
+    return this.me?.teamId ?? null
+  }
+
   private async bindCurrentChatStore(userId: string): Promise<void> {
     await bindChatStoreForUser(userId, getActiveEnvKey(), {
       legacyEnvKeys: getActiveLegacyEnvKeys(),
-      teamId: this.me?.id === userId ? this.me.teamId : null,
+      teamId: this.me?.id === userId ? this.chatStoreTeamId() : null,
     })
   }
 
@@ -1026,7 +1038,7 @@ export class AppService {
       authorityScope: {
         environmentKey: getActiveEnvKey(),
         userId: this.me.id,
-        teamId: String(this.me.teamId || '').trim() || null,
+        teamId: String(this.chatStoreTeamId() || '').trim() || null,
       },
       sessionGeneration: this.sessionGeneration,
     }
@@ -1171,6 +1183,7 @@ export class AppService {
       const shouldSwitch = originalTeamId !== targetTeamId
       const shouldRestore = Boolean(originalTeamId && shouldSwitch)
       const releaseTransientHop = shouldSwitch ? this.enterGfsTransientTeamHop() : undefined
+      if (shouldRestore) this.chatStoreHomeTeamId = originalTeamId
 
       try {
         if (shouldSwitch) {
@@ -1196,6 +1209,7 @@ export class AppService {
           }
         }
       } finally {
+        if (shouldRestore) this.chatStoreHomeTeamId = null
         releaseTransientHop?.()
       }
     } finally {

@@ -98,6 +98,17 @@ function sameChatAuthorityScope(left: ChatAuthorityScope, right: ChatAuthoritySc
   )
 }
 
+/**
+ * The identity a local deletion is bound to: environment + user. The store is
+ * rooted at `<env>/<user>/<agentRef>`, so together with the per-agent index this
+ * is the Host/agent identity the chat belongs to. The session team is NOT part
+ * of it: it is rebound from `me.teamId` on every team switch, and a deletion the
+ * user confirmed for a Host's chat must keep holding after that switch.
+ */
+function sameChatDeletionIdentity(left: ChatAuthorityScope, right: ChatAuthorityScope): boolean {
+  return left.environmentKey === right.environmentKey && left.userId === right.userId
+}
+
 function normalizePositiveInteger(value: number | undefined, fallback: number): number {
   if (value === undefined) return fallback
   if (!Number.isFinite(value)) return fallback
@@ -178,7 +189,13 @@ function samePageEntry(left: ChatPageEntry, right: ChatPageEntry): boolean {
   )
 }
 
-function parseChatIndex(raw: string): ChatIndex {
+interface ParsedChatIndex {
+  index: ChatIndex
+  /** Tombstone / pending-cleanup entries dropped because they were malformed. */
+  droppedTombstoneEntries: number
+}
+
+function parseChatIndex(raw: string): ParsedChatIndex {
   const parsed = JSON.parse(raw) as unknown
   if (!parsed || typeof parsed !== 'object') {
     throw new Error('Invalid chat index')
@@ -197,11 +214,8 @@ function parseChatIndex(raw: string): ChatIndex {
     typeof candidate.onboardingDismissed !== 'boolean' ||
     !Array.isArray(candidate.chats) ||
     (candidate.deletedChatTombstones !== undefined &&
-      (!Array.isArray(candidate.deletedChatTombstones) ||
-        !candidate.deletedChatTombstones.every(isChatDeleteTombstone))) ||
-    (candidate.pendingChatCleanup !== undefined &&
-      (!Array.isArray(candidate.pendingChatCleanup) ||
-        !candidate.pendingChatCleanup.every(isChatDeleteTombstone)))
+      !Array.isArray(candidate.deletedChatTombstones)) ||
+    (candidate.pendingChatCleanup !== undefined && !Array.isArray(candidate.pendingChatCleanup))
   ) {
     throw new Error('Invalid chat index')
   }
@@ -222,7 +236,62 @@ function parseChatIndex(raw: string): ChatIndex {
       throw new Error('Invalid chat index entry')
     }
   }
-  return { ...candidate, version: INDEX_VERSION } as unknown as ChatIndex
+  // One malformed tombstone must not condemn the whole catalog (and with it every
+  // other tombstone): drop only the malformed entries and report the count.
+  let droppedTombstoneEntries = 0
+  const keepValidTombstones = (
+    entries: unknown[] | undefined
+  ): ChatDeleteTombstone[] | undefined => {
+    if (entries === undefined) return undefined
+    const valid = entries.filter(isChatDeleteTombstone)
+    droppedTombstoneEntries += entries.length - valid.length
+    return valid
+  }
+  const deletedChatTombstones = keepValidTombstones(candidate.deletedChatTombstones as unknown[])
+  const pendingChatCleanup = keepValidTombstones(candidate.pendingChatCleanup as unknown[])
+  const index = { ...candidate, version: INDEX_VERSION } as unknown as ChatIndex
+  if (deletedChatTombstones) index.deletedChatTombstones = deletedChatTombstones
+  if (pendingChatCleanup) index.pendingChatCleanup = pendingChatCleanup
+  return { index, droppedTombstoneEntries }
+}
+
+/**
+ * Durable copy of the tombstone and pending-cleanup lists, written next to
+ * `index.json`. A corrupt catalog is quarantined and replaced by an empty one;
+ * without this copy every confirmed local deletion of that agent would be
+ * forgotten and the deleted chats could be recreated from the server.
+ */
+const TOMBSTONE_SIDECAR_VERSION = 1
+
+interface TombstoneSidecar {
+  version: typeof TOMBSTONE_SIDECAR_VERSION
+  deletedChatTombstones: ChatDeleteTombstone[]
+  pendingChatCleanup: ChatDeleteTombstone[]
+}
+
+/**
+ * `deletedChatTombstones` are intentionally unbounded and never pruned: a
+ * deleted chat is never reopened, and the tombstone is what keeps a late write
+ * (a server session sync, a delayed append) from resurrecting it. An entry costs
+ * ~209 bytes (measured), so the growth is negligible. Do not add a cap or an
+ * expiry: evicting a tombstone would let exactly that late write bring the
+ * deleted chat back. Only `pendingChatCleanup` entries are removed, once the
+ * chat's artifacts are gone.
+ */
+function mergeTombstones(
+  primary: ChatDeleteTombstone[] | undefined,
+  recovered: ChatDeleteTombstone[]
+): ChatDeleteTombstone[] {
+  const merged = [...(primary ?? [])]
+  for (const candidate of recovered) {
+    const present = merged.some(
+      existing =>
+        existing.chatId === candidate.chatId &&
+        sameChatAuthorityScope(existing.authorityScope, candidate.authorityScope)
+    )
+    if (!present) merged.push(candidate)
+  }
+  return merged
 }
 
 class UnsupportedChatIndexVersionError extends Error {
@@ -350,13 +419,26 @@ export class ChatStore {
     return current
   }
 
+  /**
+   * Same check as `requireAuthorityScope` but on the deletion identity
+   * (environment + user): pending-cleanup retries must keep working after a team
+   * switch, and must still refuse another user or environment.
+   */
+  private requireDeletionIdentity(expected: ChatAuthorityScope): ChatAuthorityScope {
+    const current = this.authorityScope
+    if (!current || !sameChatDeletionIdentity(current, expected)) {
+      throw new Error('Chat deletion authority scope changed')
+    }
+    return current
+  }
+
   private isDeletedInScope(index: ChatIndex, chatId: string): boolean {
     return Boolean(
       index.deletedChatTombstones?.some(
         tombstone =>
           tombstone.chatId === chatId &&
           (!this.authorityScope ||
-            sameChatAuthorityScope(tombstone.authorityScope, this.authorityScope))
+            sameChatDeletionIdentity(tombstone.authorityScope, this.authorityScope))
       )
     )
   }
@@ -369,6 +451,9 @@ export class ChatStore {
    */
   private indexChains = new Map<string, Promise<unknown>>()
   private chatChains = new Map<string, Promise<unknown>>()
+  private tombstoneSidecarSerialized = new Map<string, string>()
+  private warnedTombstoneAgents = new Set<string>()
+  private warnedCleanupFailures = new Set<string>()
   private cleanedSnapshotSiblingKeys = new Set<string>()
   private compatibilityCheckedKeys = new Set<string>()
   private compatibilityWindows = new Map<string, ChatMessage[]>()
@@ -434,6 +519,14 @@ export class ChatStore {
 
   private indexPath(agentRef: string): string {
     return join(this.agentDir(agentRef), 'index.json')
+  }
+
+  /**
+   * Dot-prefixed, so it can never equal `${chatId}.json` (chat ids may not start
+   * with a dot) nor the `index.json` catalog.
+   */
+  private tombstoneSidecarPath(agentRef: string): string {
+    return join(this.agentDir(agentRef), '.tombstones.json')
   }
 
   private corruptIndexPath(agentRef: string): string {
@@ -1503,22 +1596,91 @@ export class ChatStore {
     return pruned.meta
   }
 
+  /**
+   * The tombstones persisted in the sidecar, or null when there is none.
+   * An unreadable sidecar is reported (once per agent) and treated as absent:
+   * the catalog it protects is being rebuilt from an empty one already, and the
+   * next tombstone write replaces it.
+   */
+  private async readTombstoneSidecar(agentRef: string): Promise<TombstoneSidecar | null> {
+    let raw: string
+    try {
+      raw = await fs.readFile(this.tombstoneSidecarPath(agentRef), 'utf-8')
+    } catch (error) {
+      if (isNotFoundError(error)) return null
+      throw error
+    }
+    try {
+      const parsed = JSON.parse(raw) as Record<string, unknown>
+      if (
+        parsed?.version !== TOMBSTONE_SIDECAR_VERSION ||
+        !Array.isArray(parsed.deletedChatTombstones) ||
+        !Array.isArray(parsed.pendingChatCleanup)
+      ) {
+        throw new Error('Invalid tombstone sidecar')
+      }
+      return {
+        version: TOMBSTONE_SIDECAR_VERSION,
+        deletedChatTombstones: parsed.deletedChatTombstones.filter(isChatDeleteTombstone),
+        pendingChatCleanup: parsed.pendingChatCleanup.filter(isChatDeleteTombstone),
+      }
+    } catch (error) {
+      if (!this.warnedTombstoneAgents.has(`sidecar:${agentRef}`)) {
+        this.warnedTombstoneAgents.add(`sidecar:${agentRef}`)
+        console.warn(
+          `[chatStore] Unreadable tombstone sidecar for "${agentRef}"; deleted-chat tombstones cannot be recovered`,
+          error
+        )
+      }
+      return null
+    }
+  }
+
+  /** Adds the sidecar's tombstones (deduplicated) to an index read from disk. */
+  private async withRecoveredTombstones(agentRef: string, index: ChatIndex): Promise<ChatIndex> {
+    const sidecar = await this.readTombstoneSidecar(agentRef)
+    if (!sidecar) return index
+    const deletedChatTombstones = mergeTombstones(
+      index.deletedChatTombstones,
+      sidecar.deletedChatTombstones
+    )
+    const pendingChatCleanup = mergeTombstones(index.pendingChatCleanup, sidecar.pendingChatCleanup)
+    if (deletedChatTombstones.length > 0) index.deletedChatTombstones = deletedChatTombstones
+    if (pendingChatCleanup.length > 0) index.pendingChatCleanup = pendingChatCleanup
+    return index
+  }
+
   async getIndex(agentRef: string): Promise<ChatIndex> {
     let raw: string
     try {
       raw = await fs.readFile(this.indexPath(agentRef), 'utf-8')
     } catch (error) {
-      if (isNotFoundError(error)) return emptyIndex()
+      // A missing catalog (fresh agent, or one quarantined earlier) still owes
+      // the tombstones its sidecar holds.
+      if (isNotFoundError(error)) {
+        return this.withRecoveredTombstones(agentRef, emptyIndex())
+      }
       throw error
     }
     try {
-      return parseChatIndex(raw)
+      const { index, droppedTombstoneEntries } = parseChatIndex(raw)
+      if (droppedTombstoneEntries === 0) return index
+      const warnKey = `dropped:${agentRef}`
+      if (!this.warnedTombstoneAgents.has(warnKey)) {
+        this.warnedTombstoneAgents.add(warnKey)
+        console.warn(
+          `[chatStore] Dropped ${droppedTombstoneEntries} malformed tombstone entr${droppedTombstoneEntries === 1 ? 'y' : 'ies'} from the chat index of "${agentRef}"`
+        )
+      }
+      return this.withRecoveredTombstones(agentRef, index)
     } catch (error) {
       if (error instanceof UnsupportedChatIndexVersionError) throw error
       // Preserve unreadable catalog bytes for bounded recovery/diagnostics, but
       // detach them from the writable path so a torn index cannot brick every
       // chat mutation. Paged transcripts live under chats/ and remain untouched;
       // the catalog can be repopulated by the server as normal writes resume.
+      // The tombstone sidecar survives the quarantine, so confirmed local
+      // deletions keep holding on the rebuilt catalog.
       const source = this.indexPath(agentRef)
       const target = this.corruptIndexPath(agentRef)
       await fs.mkdir(dirname(target), { recursive: true, mode: 0o700 })
@@ -1533,7 +1695,7 @@ export class ChatStore {
           })
         }
       }
-      return emptyIndex()
+      return this.withRecoveredTombstones(agentRef, emptyIndex())
     }
   }
 
@@ -1550,6 +1712,26 @@ export class ChatStore {
     // Visibility atomicity alone does not make the catalog durable across power loss.
     const target = this.indexPath(agentRef)
     await this.writeJsonAtomic(target, normalized, 2)
+    await this.saveTombstoneSidecar(agentRef, normalized)
+  }
+
+  /**
+   * Mirrors the tombstone lists into the sidecar (atomically, after the index)
+   * whenever they change. Skipped for an agent that never had a tombstone.
+   */
+  private async saveTombstoneSidecar(agentRef: string, index: ChatIndex): Promise<void> {
+    const sidecar: TombstoneSidecar = {
+      version: TOMBSTONE_SIDECAR_VERSION,
+      deletedChatTombstones: index.deletedChatTombstones ?? [],
+      pendingChatCleanup: index.pendingChatCleanup ?? [],
+    }
+    const serialized = JSON.stringify(sidecar)
+    const known = this.tombstoneSidecarSerialized.get(agentRef)
+    const nothingToProtect =
+      sidecar.deletedChatTombstones.length === 0 && sidecar.pendingChatCleanup.length === 0
+    if (known === serialized || (known === undefined && nothingToProtect)) return
+    await this.writeJsonAtomic(this.tombstoneSidecarPath(agentRef), sidecar)
+    this.tombstoneSidecarSerialized.set(agentRef, serialized)
   }
 
   async listChats(agentRef: string): Promise<ChatMetadata[]> {
@@ -1657,6 +1839,22 @@ export class ChatStore {
     return { cleanupPending: !cleaned }
   }
 
+  /**
+   * A deleted chat's cleanup is retried on every catalog read, so a permanent
+   * failure (EACCES on the chat dir) would repeat forever. Report it once per
+   * (agent, chat, error code) instead of on every retry, and never hide it.
+   */
+  private warnCleanupFailureOnce(agentRef: string, chatId: string | null, error: unknown): void {
+    const code = (error as NodeJS.ErrnoException | undefined)?.code ?? 'UNKNOWN'
+    const key = JSON.stringify([agentRef, chatId, code])
+    if (this.warnedCleanupFailures.has(key)) return
+    this.warnedCleanupFailures.add(key)
+    console.warn(
+      `[chatStore] Deleted-chat cleanup failed for agent "${agentRef}"${chatId ? ` chat "${chatId}"` : ''} (${code}); it stays queued and is retried`,
+      error
+    )
+  }
+
   private async removeChatArtifacts(
     agentRef: string,
     chatId: string,
@@ -1668,9 +1866,12 @@ export class ChatStore {
       corruptLegacyEntries = await fs.readdir(corruptLegacyDir)
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') corruptLegacyEntries = []
-      else return false
+      else {
+        this.warnCleanupFailureOnce(agentRef, chatId, error)
+        return false
+      }
     }
-    if (!this.authorityScope || !sameChatAuthorityScope(this.authorityScope, authorityScope)) {
+    if (!this.authorityScope || !sameChatDeletionIdentity(this.authorityScope, authorityScope)) {
       return false
     }
     const paths = [
@@ -1686,26 +1887,28 @@ export class ChatStore {
     ]
     let allRemoved = true
     for (const target of paths) {
-      if (!this.authorityScope || !sameChatAuthorityScope(this.authorityScope, authorityScope)) {
+      if (!this.authorityScope || !sameChatDeletionIdentity(this.authorityScope, authorityScope)) {
         return false
       }
       try {
         await fs.rm(target.path, { recursive: target.recursive, force: true })
-      } catch {
+      } catch (error) {
+        this.warnCleanupFailureOnce(agentRef, chatId, error)
         allRemoved = false
       }
     }
-    if (!this.authorityScope || !sameChatAuthorityScope(this.authorityScope, authorityScope)) {
+    if (!this.authorityScope || !sameChatDeletionIdentity(this.authorityScope, authorityScope)) {
       return false
     }
     try {
       await this.removePagedChatSnapshotSiblings(agentRef, chatId)
-    } catch {
+    } catch (error) {
+      this.warnCleanupFailureOnce(agentRef, chatId, error)
       allRemoved = false
     }
     return (
       allRemoved &&
-      Boolean(this.authorityScope && sameChatAuthorityScope(this.authorityScope, authorityScope))
+      Boolean(this.authorityScope && sameChatDeletionIdentity(this.authorityScope, authorityScope))
     )
   }
 
@@ -1715,7 +1918,7 @@ export class ChatStore {
   ): Promise<boolean> {
     if (
       !this.authorityScope ||
-      !sameChatAuthorityScope(this.authorityScope, tombstone.authorityScope)
+      !sameChatDeletionIdentity(this.authorityScope, tombstone.authorityScope)
     ) {
       return false
     }
@@ -1726,35 +1929,37 @@ export class ChatStore {
         tombstone.chatId,
         tombstone.authorityScope
       )
-    } catch {
+    } catch (error) {
+      this.warnCleanupFailureOnce(agentRef, tombstone.chatId, error)
       return false
     }
     if (
       !artifactsRemoved ||
       !this.authorityScope ||
-      !sameChatAuthorityScope(this.authorityScope, tombstone.authorityScope)
+      !sameChatDeletionIdentity(this.authorityScope, tombstone.authorityScope)
     ) {
       return false
     }
     try {
       await this.serializeIndex(agentRef, async () => {
-        this.requireAuthorityScope(tombstone.authorityScope)
+        this.requireDeletionIdentity(tombstone.authorityScope)
         const index = await this.getIndex(agentRef)
         index.pendingChatCleanup = (index.pendingChatCleanup ?? []).filter(
           existing =>
             existing.chatId !== tombstone.chatId ||
-            !sameChatAuthorityScope(existing.authorityScope, tombstone.authorityScope)
+            !sameChatDeletionIdentity(existing.authorityScope, tombstone.authorityScope)
         )
         await this.saveIndex(agentRef, index)
       })
       return true
-    } catch {
+    } catch (error) {
+      this.warnCleanupFailureOnce(agentRef, tombstone.chatId, error)
       return false
     }
   }
 
   async retryPendingDeleteCleanups(authorityScope: ChatAuthorityScope): Promise<void> {
-    const scope = this.requireAuthorityScope(authorityScope)
+    const scope = this.requireDeletionIdentity(authorityScope)
     let entries
     try {
       entries = await fs.readdir(this.baseDir, { withFileTypes: true })
@@ -1764,21 +1969,23 @@ export class ChatStore {
     }
     for (const entry of entries) {
       if (!entry.isDirectory()) continue
-      let agentRef = entry.name
+      const agentRef = entry.name
       try {
         const index = await this.getIndex(agentRef)
         const pending = (index.pendingChatCleanup ?? []).filter(item =>
-          sameChatAuthorityScope(item.authorityScope, scope)
+          sameChatDeletionIdentity(item.authorityScope, scope)
         )
         for (const tombstone of pending) {
-          if (!this.authorityScope || !sameChatAuthorityScope(this.authorityScope, scope)) return
+          if (!this.authorityScope || !sameChatDeletionIdentity(this.authorityScope, scope)) return
           await this.serializeChat(agentRef, tombstone.chatId, () =>
             this.finishPendingDeleteCleanup(agentRef, tombstone)
           )
         }
-      } catch {
+      } catch (error) {
         // An unrelated or unreadable agent index must not prevent other durable
-        // cleanup entries from being retried on the next authorized read.
+        // cleanup entries from being retried on the next authorized read, but the
+        // failure is reported (once per agent and code), never swallowed.
+        this.warnCleanupFailureOnce(agentRef, null, error)
       }
     }
   }

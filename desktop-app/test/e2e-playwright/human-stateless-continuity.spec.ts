@@ -1,3 +1,20 @@
+/**
+ * Recorded human journey: two Hosts (stateful + stateless), Desktop restart,
+ * cache, and two verified stateless wake episodes. It mutates the cluster
+ * (suspends and wakes Hosts) and sends four real model turns.
+ *
+ * Environment (no repository doc covers these; this header is the reference):
+ * - `HUMAN_E2E_STATELESS_CONTINUITY=1` opts in. Without exactly `1` the whole
+ *   file is skipped (see the `test.skip` below), so the default lane never
+ *   mutates a cluster.
+ * - `HUMAN_E2E_KUBE_CONTEXT=<context>` is required and must equal the
+ *   global-setup context (`E2E_K8S_CONTEXT` / `KUBECONTEXT` / `K8S_CONTEXT`,
+ *   default `clerum-test`), so the journey cannot mutate a different cluster
+ *   than the one the suite was set up against.
+ * - `QA_RECORDER_CONFIRM_CHAT` acknowledges the model cost.
+ * - Optional Host overrides: `HUMAN_E2E_STATEFUL_HOST`, `HUMAN_E2E_STATELESS_HOST`,
+ *   `HUMAN_E2E_STATEFUL_HOST_RESOURCE`, `HUMAN_E2E_STATELESS_HOST_RESOURCE`.
+ */
 import { type ElectronApplication, type Locator, type Page, expect, test } from '@playwright/test'
 import { type ChildProcess, execFile } from 'node:child_process'
 import { writeFileSync } from 'node:fs'
@@ -406,6 +423,16 @@ test('human journey — two Hosts, restart, cache, and two verified stateless wa
 
   let app: ElectronApplication | undefined
   let page: Page | undefined
+  // The handles are cleared while Electron is closed between steps; a step that
+  // uses one while it is cleared must fail loudly, not act on `undefined`.
+  const currentApp = (): ElectronApplication => {
+    if (!app) throw new Error('Electron app is not running at this step')
+    return app
+  }
+  const currentPage = (): Page => {
+    if (!page) throw new Error('Desktop page is not open at this step')
+    return page
+  }
   let firstProfilePath = ''
 
   const metrics: JourneyMetrics = {
@@ -558,7 +585,7 @@ test('human journey — two Hosts, restart, cache, and two verified stateless wa
 
     await test.step('exit Electron and prove a real replicas-0 suspension', async () => {
       const closeStarted = Date.now()
-      const electronChild = app.process()
+      const electronChild = currentApp().process()
       await finalizeRecording(app, page)
       await closeElectron(app, electronChild)
       metrics.first_close_ms = Date.now() - closeStarted
@@ -619,8 +646,8 @@ test('human journey — two Hosts, restart, cache, and two verified stateless wa
     })
 
     await test.step('prepare and send from a second verified cold stateless state', async () => {
-      await openExactSession(page, statelessTitle, STATELESS_HOST)
-      const composer = page.getByRole('textbox', { name: 'Agent message composer' })
+      await openExactSession(currentPage(), statelessTitle, STATELESS_HOST)
+      const composer = currentPage().getByRole('textbox', { name: 'Agent message composer' })
       await composer.fill('')
       const secondSuspended = await waitForStatelessSuspended(SUSPEND_TIMEOUT_MS)
       metrics.second_suspend_ms = secondSuspended.elapsedMs
@@ -630,7 +657,7 @@ test('human journey — two Hosts, restart, cache, and two verified stateless wa
 
       const followPrompt = `Earlier I gave you a token. Reply with exactly that token followed by ${statelessFollowMarker}.`
       await humanType(composer, followPrompt)
-      await expect(page.getByTestId('send-button')).toBeEnabled()
+      await expect(currentPage().getByTestId('send-button')).toBeEnabled()
       // The catalog prewarm after reopen is measured separately by
       // second_launch_to_stateless_ready_ms. This fresh snapshot proves that
       // the second send is itself a cold wake intent, not a continuation of
@@ -650,16 +677,16 @@ test('human journey — two Hosts, restart, cache, and two verified stateless wa
         readyObserved = true
         return { result, observedAt: Date.now() }
       })
-      const taskStepper = page.getByTestId('progress-stepper')
+      const taskStepper = currentPage().getByTestId('progress-stepper')
       const stepperBaseline = await taskStepper.count()
       const sendStarted = Date.now()
-      await page.getByTestId('send-button').click()
-      await expect(page.getByTestId('message-list')).toContainText(statelessFollowMarker, {
+      await currentPage().getByTestId('send-button').click()
+      await expect(currentPage().getByTestId('message-list')).toContainText(statelessFollowMarker, {
         timeout: 30_000,
       })
       metrics.cold_send_to_user_message_visible_ms = Date.now() - sendStarted
 
-      const followResponse = page
+      const followResponse = currentPage()
         .getByTestId('agent-response')
         .filter({ hasText: statelessFollowMarker })
       const stepperWatch = expect
@@ -688,7 +715,7 @@ test('human journey — two Hosts, restart, cache, and two verified stateless wa
         )
         .toBe(true)
       const outcome = await resolveColdSend(
-        page,
+        currentPage(),
         statelessFollowMarker,
         statelessMarker,
         sendStarted
@@ -698,10 +725,14 @@ test('human journey — two Hosts, restart, cache, and two verified stateless wa
       metrics.cold_send_to_response_ms = Date.now() - sendStarted
       metrics.cold_send_retries = outcome.retries
       await expect(composer).toHaveValue('', { timeout: 150_000 })
-      await expect(page.getByTestId('send-button')).toHaveAttribute('aria-label', 'Send message', {
-        timeout: 150_000,
-      })
-      await expect(page.getByTestId('send-button')).toBeDisabled({ timeout: 150_000 })
+      await expect(currentPage().getByTestId('send-button')).toHaveAttribute(
+        'aria-label',
+        'Send message',
+        {
+          timeout: 150_000,
+        }
+      )
+      await expect(currentPage().getByTestId('send-button')).toBeDisabled({ timeout: 150_000 })
       metrics.cold_send_to_composer_idle_ms = Date.now() - sendStarted
       await stepperWatch
 
@@ -712,31 +743,35 @@ test('human journey — two Hosts, restart, cache, and two verified stateless wa
       expect(readyAfterSend.result.snapshot.readyReplicas).toBeGreaterThan(0)
       expect(readyAfterSend.result.snapshot.imageIds).toEqual(metrics.stateless_image_ids_before)
       await expect(
-        page.getByTestId('agent-response').filter({ hasText: statelessFollowMarker })
+        currentPage().getByTestId('agent-response').filter({ hasText: statelessFollowMarker })
       ).toContainText(statelessFollowMarker, { timeout: 30_000 })
-      await screenshotAndLog(page, testInfo, '07-stateless-context-continuity-after-cold-send')
+      await screenshotAndLog(
+        currentPage(),
+        testInfo,
+        '07-stateless-context-continuity-after-cold-send'
+      )
     })
 
     await test.step('stateful control remains continuous and responsive', async () => {
-      await openExactSession(page, statefulTitle, STATEFUL_HOST)
-      await expect(page.getByTestId('message-list')).toContainText(statefulMarker, {
+      await openExactSession(currentPage(), statefulTitle, STATEFUL_HOST)
+      await expect(currentPage().getByTestId('message-list')).toContainText(statefulMarker, {
         timeout: 30_000,
       })
       const statefulTimings = await sendMarker(
-        page,
+        currentPage(),
         statefulFollowMarker,
         `What was the earlier token in this conversation? Reply with that token followed by ${statefulFollowMarker}.`
       )
       metrics.stateful_follow_up_to_user_message_visible_ms = statefulTimings.toUserMessageMs
       metrics.stateful_follow_up_to_response_ms = statefulTimings.toResponseMs
       await expect(
-        page.getByTestId('agent-response').filter({ hasText: statefulFollowMarker })
+        currentPage().getByTestId('agent-response').filter({ hasText: statefulFollowMarker })
       ).toContainText(statefulMarker)
       const statefulAfter = await readHostSnapshot(STATEFUL_DEPLOYMENT, STATEFUL_HOST_RESOURCE)
       metrics.stateful_pod_after = statefulAfter.podNames
       expect(statefulAfter.readyReplicas).toBeGreaterThan(0)
       expect(statefulAfter.podNames.join(',')).toBe(metrics.stateful_pod_before.join(','))
-      await screenshotAndLog(page, testInfo, '08-stateful-control-continuity')
+      await screenshotAndLog(currentPage(), testInfo, '08-stateful-control-continuity')
     })
   } finally {
     await finalizeRecording(app, page).catch(() => undefined)

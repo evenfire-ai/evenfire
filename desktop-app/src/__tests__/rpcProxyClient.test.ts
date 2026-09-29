@@ -44,15 +44,20 @@ describe('RpcProxyClient.listSessions', () => {
     }
   )
 
-  it('projects the exact Host access denial from catalog and transcript reads', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockResolvedValue({
-        ok: false,
-        status: 403,
-        text: async () => JSON.stringify({ error: 'Forbidden: user cannot access this host' }),
-      })
-    )
+  // The rpc-proxy denial bodies exactly as the contract defines them: status 403,
+  // the human `error` text, and a machine `code` that says whether access was
+  // actually removed (`host_access_revoked`) or merely refused (`host_access_denied`).
+  const rpcProxyDenial = (code?: string) =>
+    JSON.stringify({ error: 'Forbidden: user cannot access this host', ...(code ? { code } : {}) })
+
+  const stubForbidden = (body: string) => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: false, status: 403, text: async () => body })
+    vi.stubGlobal('fetch', fetchMock)
+    return fetchMock
+  }
+
+  it('projects a confirmed revocation (code host_access_revoked) from every raw-fetch site', async () => {
+    const fetchMock = stubForbidden(rpcProxyDenial('host_access_revoked'))
 
     await expect(client.listSessions('token', 'host')).rejects.toThrow(
       '403 Forbidden: host_access_revoked'
@@ -60,6 +65,75 @@ describe('RpcProxyClient.listSessions', () => {
     await expect(client.loadSessionMessages('token', 'host', 'agent-a', 'chat-a')).rejects.toThrow(
       '403 Forbidden: host_access_revoked'
     )
+    await expect(client.renameSession('token', 'host', 'agent-a', 'chat-a', 'T')).rejects.toThrow(
+      '403 Forbidden: host_access_revoked'
+    )
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+  })
+
+  it('projects an own-denial without revocation (code host_access_denied) as its own message', async () => {
+    const fetchMock = stubForbidden(rpcProxyDenial('host_access_denied'))
+
+    for (const call of [
+      () => client.listSessions('token', 'host'),
+      () => client.loadSessionMessages('token', 'host', 'agent-a', 'chat-a'),
+      () => client.renameSession('token', 'host', 'agent-a', 'chat-a', 'T'),
+    ]) {
+      const error = await call().then(
+        () => null,
+        (e: unknown) => e as Error
+      )
+      expect(error?.message).toBe('403 Forbidden: host_access_denied')
+      expect(error?.message).not.toContain('host_access_revoked')
+    }
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+  })
+
+  it.each([
+    ['the pre-contract body (error text only, no code)', rpcProxyDenial()],
+    [
+      'a JSON body whose error is the revoked token but has no code',
+      '{"error":"host_access_revoked"}',
+    ],
+    [
+      'a JSON body carrying the revoked token in a non-code field',
+      '{"reason":"host_access_revoked"}',
+    ],
+    ['a text body ending in the revoked token', 'Forbidden: host_access_revoked'],
+    ['a code of another kind', '{"code":"missing_scope","error":"host_access_revoked"}'],
+  ])('does not forge a confirmed revocation from %s', async (_label, body) => {
+    const fetchMock = stubForbidden(body)
+
+    for (const call of [
+      () => client.listSessions('token', 'host'),
+      () => client.loadSessionMessages('token', 'host', 'agent-a', 'chat-a'),
+      () => client.renameSession('token', 'host', 'agent-a', 'chat-a', 'T'),
+    ]) {
+      const error = await call().then(
+        () => null,
+        (e: unknown) => e as Error & { status?: number }
+      )
+      // Liveness witness: the failure path ran and kept the plain 403 text.
+      expect(error?.message).toMatch(/failed \(403\)/)
+      expect(error?.status).toBe(403)
+      expect(error?.message).not.toContain('host_access_revoked')
+    }
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+  })
+
+  it('bounds an oversized upstream body in the message while ApiError keeps it whole', async () => {
+    const huge = `{"detail":"${'x'.repeat(100 * 1024)}"}`
+    stubForbidden(huge)
+
+    const error = (await client.listSessions('token', 'host').then(
+      () => null,
+      (e: unknown) => e
+    )) as Error & { status?: number; bodyText?: string }
+    expect(error).toBeInstanceOf(Error)
+    // Status stays first so the renderer's status parsing keeps working.
+    expect(error.message.startsWith('List sessions failed (403): ')).toBe(true)
+    expect(error.message.length).toBeLessThan(600)
+    expect(error.bodyText).toBe(huge)
   })
 
   it('keeps a generic catalog 403 uncertain', async () => {

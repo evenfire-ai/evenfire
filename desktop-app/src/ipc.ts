@@ -1707,8 +1707,21 @@ export function registerIpcHandlers(service: AppService): void {
     const agentRef = sanitizeString(payload?.agentRef)
     if (!agentRef) throw new Error('agentRef is required')
     const store = requireChatStore()
-    const authority = service.getChatDeletionFenceAuthority()
-    await store.retryPendingDeleteCleanups(authority.authorityScope)
+    // The catalog read must never depend on the deleted-chat artifact cleanup:
+    // a cleanup failure (scope changed mid-flight, no session, an unreadable
+    // chats directory) would otherwise reject the read and leave the renderer
+    // without the tombstones it filters deleted chats with. The failure is
+    // reported with its code and the cleanup stays queued for the next read.
+    try {
+      const authority = service.getChatDeletionFenceAuthority()
+      await store.retryPendingDeleteCleanups(authority.authorityScope)
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException | undefined)?.code
+      console.warn(
+        `[chat:getIndex] Deleted-chat cleanup retry failed for agent "${agentRef}"${code ? ` (${code})` : ''}; returning the index with its tombstones`,
+        error
+      )
+    }
     return store.getIndex(agentRef)
   })
 
