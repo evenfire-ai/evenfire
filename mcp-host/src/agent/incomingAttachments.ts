@@ -26,6 +26,13 @@ import type { TaskError } from '../queue/types'
  */
 export const INCOMING_ATTACHMENT_MAX_COUNT = 20
 
+/**
+ * Longest media type a file attachment may declare. RFC 6838 caps a type/subtype
+ * pair at 127 + 1 + 127 characters; the declaration reaches the persisted
+ * message and the turn context, so it is bounded like the file name.
+ */
+export const FILE_ATTACHMENT_MIME_TYPE_MAX_LENGTH = 255
+
 export type IncomingAttachmentValidation =
   | { ok: true; attachments: Attachment[] | undefined; fileReferences: FileReferenceV1[] }
   | { ok: false; error: TaskError }
@@ -141,6 +148,8 @@ function validateFile(item: Record<string, unknown>, limits: IncomingAttachmentL
   ) {
     return rejectFile('A file attachment is malformed. Attach the original file again.')
   }
+  if (item.mimeType.length > FILE_ATTACHMENT_MIME_TYPE_MAX_LENGTH)
+    return rejectFile('A file attachment declares a media type that is too long.')
   const data = item.dataBase64
   const tooLarge = taskError(
     FileAttachmentErrorCode.TooLarge,

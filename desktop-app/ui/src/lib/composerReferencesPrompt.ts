@@ -81,7 +81,7 @@ export function buildComposerReferencesPromptSection(
   }
 
   const lines = [
-    'USER-ATTACHED CONTEXT: The user selected these capabilities/files for this message. Prefer them when they are relevant to the request.',
+    'USER-ATTACHED CONTEXT: The user selected these capabilities/files for this message. Prefer them when they are relevant to the request. Every quoted name below is a JSON string literal: pass its decoded value, without the surrounding quotes or escapes, when you use it in a tool call.',
   ]
 
   if (plugins.length) {

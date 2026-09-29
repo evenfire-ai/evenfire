@@ -61,7 +61,8 @@ incremental_add_target() {
   target="${selector}|${namespace}|${deployment}"
 
   local existing
-  for existing in "${INCREMENTAL_TARGETS[@]}"; do
+  # The `+` expansion keeps an empty array valid under `set -u` on bash 3.2.
+  for existing in ${INCREMENTAL_TARGETS[@]+"${INCREMENTAL_TARGETS[@]}"}; do
     [[ "${existing}" == "${target}" ]] && return 0
   done
   INCREMENTAL_TARGETS+=("${target}")

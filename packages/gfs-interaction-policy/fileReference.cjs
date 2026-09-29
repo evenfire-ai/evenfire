@@ -185,7 +185,7 @@ function parseSource(source) {
 function parseDigest(digest) {
   if (!isPlainObject(digest)) return { problem: 'digest must be an object' }
   const extra = unknownKey(digest, DIGEST_KEYS)
-  if (extra) return { problem: `digest has unknown field ${extra}` }
+  if (extra) return { problem: `digest has unknown field ${echo(extra)}` }
   if (
     digest.algorithm !== 'sha256' ||
     typeof digest.hex !== 'string' ||

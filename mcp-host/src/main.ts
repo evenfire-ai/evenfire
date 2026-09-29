@@ -2008,6 +2008,7 @@ function handleIncomingMessage(
 const fileReferenceGfsEnv = { get: (key: string): string | undefined => process.env[key] }
 const fileReferenceGfsGate = createFileReferenceGfsGate({
   inspectScopes: () => inspectGfsToolScopes(fileReferenceGfsEnv),
+  approvalTools: () => (currentHost?.spec.approval || config.approvalConfig)?.tools,
   client: createGfscClient(fileReferenceGfsEnv, {
     maxRetryWaitMs: VISUAL_INPUT_LIMITS.validationTimeoutMs,
   }),

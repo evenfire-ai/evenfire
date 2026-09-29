@@ -152,7 +152,21 @@ export type ResumeFileAttachment = Omit<Attachment, 'dataBase64'> & { kind: 'fil
  * attachments are dropped (their content lives in the frozen snapshot) and
  * inline file bytes (dataBase64) never persist.
  */
-export type ResumeSourceMessage = Omit<HostIncomingMessage, 'attachments'> & {
+export type ResumeSourceMessage = Pick<
+  HostIncomingMessage,
+  | 'content'
+  | 'channelType'
+  | 'channelId'
+  | 'sender'
+  | 'timestamp'
+  | 'messageId'
+  | 'hostRef'
+  | 'threadId'
+  | 'imageModel'
+  | 'fileReferenceResolutions'
+> & {
+  /** Only the team scope survives; the channel's raw payload is not persisted. */
+  metadata?: { teamId: string }
   attachments?: ResumeFileAttachment[]
 }
 

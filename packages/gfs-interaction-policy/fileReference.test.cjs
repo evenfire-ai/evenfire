@@ -338,6 +338,32 @@ describe('quotePromptValue', () => {
     })
     assert.equal(unknownField.ok, false)
     assert.equal(unknownField.message.includes(longValue), false)
+
+    const markdown = new TextEncoder().encode('# Notes\n')
+    const built = buildAttachmentFileReference({
+      attachmentId: 'att-1',
+      messageId: 'msg-1',
+      name: 'notes.md',
+      declaredMediaType: 'text/markdown',
+      byteLength: markdown.length,
+      digestHex: HEX,
+      classification: classifyBytes({
+        bytes: markdown,
+        totalByteLength: markdown.length,
+        declaredMediaType: 'text/markdown',
+        filename: 'notes.md',
+      }),
+    })
+    assert.equal(built.ok, true, built.ok ? '' : built.message)
+    const unknownDigestField = parseFileReferenceV1({
+      ...built.value,
+      digest: { ...built.value.digest, [longValue]: 1 },
+    })
+    assert.equal(unknownDigestField.ok, false)
+    // Witness: the refusal came from the digest branch, not from another check.
+    assert.match(unknownDigestField.message, /^digest has unknown field /)
+    assert.equal(unknownDigestField.message.includes(longValue), false)
+    assert.equal(unknownDigestField.message.length < 120, true)
   })
 
   it('shares the message reference-count limit', () => {

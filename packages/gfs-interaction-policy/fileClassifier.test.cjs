@@ -81,11 +81,14 @@ describe('classifyBytes', () => {
 })
 
 describe('isomorphic module', () => {
-  it('uses no Node-only API, so the renderer can load it', () => {
-    const source = fs.readFileSync(path.join(__dirname, 'fileClassifier.cjs'), 'utf8')
-    assert.match(source, /TextDecoder/, 'the module source was not read')
-    assert.doesNotMatch(source, /\bBuffer\b/)
-    assert.doesNotMatch(source, /require\(['"]node:/)
-    assert.doesNotMatch(source, /require\(['"](?:crypto|fs|path|zlib)['"]\)/)
-  })
+  // The renderer loads all three modules (index.cjs re-exports the other two).
+  for (const file of ['fileClassifier.cjs', 'fileReference.cjs', 'index.cjs']) {
+    it(`${file} uses no Node-only API, so the renderer can load it`, () => {
+      const source = fs.readFileSync(path.join(__dirname, file), 'utf8')
+      assert.match(source, /module\.exports/, `the ${file} source was not read`)
+      assert.doesNotMatch(source, /\bBuffer\b/)
+      assert.doesNotMatch(source, /require\(['"]node:/)
+      assert.doesNotMatch(source, /require\(['"](?:crypto|fs|path|zlib)['"]\)/)
+    })
+  }
 })

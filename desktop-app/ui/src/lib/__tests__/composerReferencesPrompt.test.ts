@@ -50,6 +50,8 @@ describe('composer references prompt helpers', () => {
     expect(prompt).toContain('Connectors: "github"')
     expect(prompt).toContain('prefix before "__" exactly matches')
     expect(prompt).toContain('Agent Files: "assets/invite.png"')
+    // The quoted names are declared as JSON literals so the model passes them decoded.
+    expect(prompt).toContain('Every quoted name below is a JSON string literal')
     expect(prompt).toContain('clerum__context_files_read')
     // The Global Files line names the selection; the read instruction now comes
     // from the Host's turn context for the structured fileReferences (#666).

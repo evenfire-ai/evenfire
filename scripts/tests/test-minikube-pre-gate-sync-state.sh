@@ -128,7 +128,7 @@ gfs_policy_targets="$(
   # shellcheck source=/dev/null
   source "$INCREMENTAL_SCRIPT"
   incremental_classify_path packages/gfs-interaction-policy/fileClassifier.cjs
-  printf '%s\n' "${INCREMENTAL_TARGETS[@]}"
+  printf '%s\n' ${INCREMENTAL_TARGETS[@]+"${INCREMENTAL_TARGETS[@]}"}
 )"
 if [[ "$gfs_policy_targets" == $'control-ui|control-plane|control-ui\nmcp-host|mcp-host|chatllm' ]]; then
   pass "a gfs-interaction-policy change reshadows Control UI and mcp-host"

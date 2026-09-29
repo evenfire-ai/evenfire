@@ -5,7 +5,9 @@
  * a hand-written fixture.
  */
 import { afterEach, describe, expect, it } from 'vitest'
+import { createHash } from 'node:crypto'
 import { buildGfsFileReference, classifyBytes } from '@clerum/gfs-interaction-policy'
+import { validateIncomingAttachments } from '../../../../agent/incomingAttachments'
 import { sourceMessageForResume } from '../../../../agent/sourceMessageForResume'
 import { prepareStatements } from '../../../../db/statements'
 import type { PendingApprovalRow } from '../../../../db/worker/protocol'
@@ -102,6 +104,74 @@ describe('#666 R4-M2 — source message resume round-trip', () => {
     // The sanitizer itself is pinned in sourceMessageForResume.test.ts and the
     // executor call site in taskExecutor.test.ts; this fixture is hand-built, so
     // it only proves the column stores what it is given.
+  })
+
+  it('persists a really admitted file: reference, digest and detected type survive, bytes and raw payload do not', async () => {
+    const bytes = Buffer.from('SENTINEL-666-admitted-bytes')
+    const admission = validateIncomingAttachments(
+      [
+        {
+          id: 'file-1',
+          kind: 'file',
+          mimeType: 'text/plain',
+          detectedMediaType: 'text/plain',
+          encoding: 'base64',
+          dataBase64: bytes.toString('base64'),
+          filename: 'notes.txt',
+          sizeBytes: bytes.length,
+          digest: { algorithm: 'sha256', hex: createHash('sha256').update(bytes).digest('hex') },
+        },
+      ],
+      { maxCount: 20, maxBytes: 1_000_000, maxFileBytes: 3_145_728, messageId: 'message-real' }
+    )
+    if (!admission.ok) throw new Error(`fixture rejected: ${admission.error.code}`)
+
+    handle = makeSqliteStore()
+    const manager = new ConversationManager(handle.store)
+    const conv = await manager.getOrCreate(SESSION_KEY)
+    await manager.startTurn(conv, 'read the notes', 'task-real')
+    const incoming = {
+      content: 'read the notes',
+      channelType: 'rpc',
+      channelId: 'chatllm',
+      sender: 'user-1',
+      timestamp: '2026-09-29T10:00:00Z',
+      messageId: 'message-real',
+      hostRef: 'chatllm',
+      attachments: admission.attachments,
+      metadata: { teamId: 'team-1', raw: 'SENTINEL-666-raw-metadata' },
+      providerIdentity: { provider: 'SENTINEL-666-identity' },
+    } as unknown as Parameters<typeof sourceMessageForResume>[0]
+    await handle.store.persistSuspend(conv, {
+      request_id: 'req-real',
+      tool_name: 'internal__do',
+      parameters: {},
+      description: 'Approve internal__do',
+      tool_call_id: 'call-real',
+      context_snapshot: [],
+      sourceMessage: sourceMessageForResume(incoming),
+      task_budget: {
+        elapsedActiveMs: 0,
+        iterationsUsed: 1,
+        durationMs: 86400000,
+        maxIterations: 1000,
+      },
+    })
+
+    const s = prepareStatements(handle.worker.db)
+    const row = s.selectPendingApprovalBySession.get(conv.id) as PendingApprovalRow
+    // Liveness witness: the column was written and holds the message.
+    expect(row.source_message).toContain('read the notes')
+    expect(row.source_message).not.toContain(bytes.toString('base64'))
+    expect(row.source_message).not.toContain('SENTINEL-666')
+    const resumed = reconstructPendingApproval(row).sourceMessage
+    expect(resumed?.metadata).toEqual({ teamId: 'team-1' })
+    const [file] = resumed?.attachments ?? []
+    expect(file).toMatchObject({ id: 'file-1', kind: 'file', filename: 'notes.txt' })
+    expect(file?.fileReference?.id).toBe(admission.attachments?.[0]?.fileReference?.id)
+    expect(file?.digest?.hex).toBe(admission.attachments?.[0]?.digest?.hex)
+    expect(file?.detectedMediaType).toBe('text/plain')
+    expect(file).not.toHaveProperty('dataBase64')
   })
 
   it('rebuilds the file version pins on the cold-start listing without the attachment bytes', async () => {

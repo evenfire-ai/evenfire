@@ -7,11 +7,16 @@ import type { GfsToolScopeInspection } from '../../internalTools/gfsClient'
 import { createFileReferenceGfsGate } from '../fileReferenceGfsGate'
 import type { FileReferenceGfscClient } from '../fileReferenceResolver'
 
-function gate(inspection: GfsToolScopeInspection) {
+function gate(inspection: GfsToolScopeInspection, approvalTools?: Record<string, boolean>) {
   const client: FileReferenceGfscClient = { resolve: vi.fn() }
   const logger = { warn: vi.fn(), error: vi.fn() }
   const inspectScopes = vi.fn(() => inspection)
-  const access = createFileReferenceGfsGate({ inspectScopes, client, logger })
+  const access = createFileReferenceGfsGate({
+    inspectScopes,
+    approvalTools: () => approvalTools,
+    client,
+    logger,
+  })
   return { access, client, logger, inspectScopes }
 }
 
@@ -50,6 +55,38 @@ describe('createFileReferenceGfsGate (#666)', () => {
       'Host runtime event'
     )
     expect(logger.error).not.toHaveBeenCalled()
+  })
+
+  it.each(['clerum__gfs_stat', 'clerum__gfs_resolve', 'clerum__gfs_read'])(
+    'answers unsupported when approval.tools forces %s to approval, before asking gfsc',
+    tool => {
+      const { access, logger, inspectScopes } = gate(
+        { status: 'ok', scopes: new Set(['gfs.read']) },
+        { [tool]: true }
+      )
+      expect(access()).toEqual({ status: 'unsupported' })
+      expect(logger.warn).toHaveBeenCalledWith(
+        { event: 'file_reference_gfs_unavailable', reason: 'read_tool_requires_approval' },
+        'Host runtime event'
+      )
+      // Witness: the decision came from the approval override, not the token.
+      expect(inspectScopes).not.toHaveBeenCalled()
+    }
+  )
+
+  it.each([
+    ['an override that waives approval', { clerum__gfs_read: false }],
+    ['an override on a tool admission does not use', { clerum__gfs_write: true }],
+    ['no overrides at all', undefined],
+  ])('keeps the client available with %s', (_label, approvalTools) => {
+    const { access, client, logger, inspectScopes } = gate(
+      { status: 'ok', scopes: new Set(['gfs.read']) },
+      approvalTools
+    )
+    expect(access()).toEqual({ status: 'available', client })
+    // Witness: the token was inspected, so the approval check let the message through.
+    expect(inspectScopes).toHaveBeenCalledTimes(1)
+    expect(logger.warn).not.toHaveBeenCalled()
   })
 
   it.each([

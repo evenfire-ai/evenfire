@@ -3,7 +3,7 @@
  * was taken at: a different metadata snapshot fails before any content request.
  */
 import { describe, expect, it, vi } from 'vitest'
-import { VisualInputBudget } from '../visualInput/policy'
+import { VISUAL_INPUT_LIMITS, VisualInputBudget } from '../visualInput/policy'
 import { readGfsContent } from './gfsContentRead'
 
 const FILE_ID = '1234567890abcdef1234567890abcdef'
@@ -11,7 +11,7 @@ const FILE_URI = `gfs://main/${FILE_ID}`
 const READ_ARGS = { drive: 'main', resourceId: FILE_ID }
 const SENTINEL = Buffer.from('SENTINEL-666-gfs-version')
 
-function harness(version: number) {
+function harness(version: number, snapshot: { kind?: string; bytes?: number } = {}) {
   const request = vi.fn(async (path: string, _init: RequestInit, _deadlineMs: number) => {
     if (!path.includes('/content?'))
       return new Response(
@@ -22,10 +22,10 @@ function harness(version: number) {
             rid: FILE_ID,
             drive: 'main',
             gfsUri: FILE_URI,
-            kind: 'file',
+            kind: snapshot.kind ?? 'file',
             name: 'notes.txt',
             version,
-            bytes: SENTINEL.length,
+            bytes: snapshot.bytes ?? SENTINEL.length,
           },
         }),
         { headers: { 'content-type': 'application/json' } }
@@ -72,6 +72,29 @@ describe('readGfsContent expectedVersion (#666)', () => {
       expect(contentRequests()).toBe(0)
       expect(budget.readBytes).toBe(0)
       expect(budget.residentBytes).toBe(0)
+    }
+  )
+
+  it.each([
+    ['grew past the file limit', { bytes: VISUAL_INPUT_LIMITS.fileBytes + 1 }, 'limit_exceeded'],
+    ['became a directory', { kind: 'directory' }, 'unsupported_format'],
+  ])(
+    'reports a pinned read as version_conflict when the newer version %s',
+    async (_name, snapshot, unpinnedCode) => {
+      // Witness: without the pin the same snapshot is refused for its own
+      // reason, so the pinned result below comes from the version check running
+      // first and not from the snapshot being acceptable.
+      const unpinned = harness(4, snapshot)
+      await expect(
+        readGfsContent(unpinned.request, READ_ARGS, { budget: unpinned.budget })
+      ).rejects.toMatchObject({ code: unpinnedCode })
+
+      const pinned = harness(4, snapshot)
+      await expect(
+        readGfsContent(pinned.request, READ_ARGS, { budget: pinned.budget, expectedVersion: 3 })
+      ).rejects.toMatchObject({ code: 'version_conflict' })
+      expect(pinned.metadataRequests()).toBe(1)
+      expect(pinned.contentRequests()).toBe(0)
     }
   )
 

@@ -18,7 +18,7 @@ let uuidCounter = 0
 const RID = '0123456789abcdef0123456789abcdef'
 
 const planFile: ComposerGlobalFileReference = {
-  id: `global-file:${RID}`,
+  id: `global-file:main:${RID}`,
   type: 'global_file',
   resourceId: RID,
   drive: 'main',
@@ -109,7 +109,7 @@ const NOT_RECEIVED =
 
 const notesFile: ComposerGlobalFileReference = {
   ...planFile,
-  id: `global-file:${RID.replace('0', 'f')}`,
+  id: `global-file:main:${RID.replace('0', 'f')}`,
   resourceId: RID.replace('0', 'f'),
   gfsUri: `gfs://main/${RID.replace('0', 'f')}`,
   label: 'notes.md',
@@ -151,9 +151,23 @@ function sentReferenceIds(): string[] {
 }
 
 /** Proves the accepted-ack branch ran, whatever the ack shape. */
-function expectAcceptedAck(shape: string, pushToast: ReturnType<typeof vi.fn>) {
+function expectAcceptedAck(
+  shape: string,
+  pushToast: ReturnType<typeof vi.fn>,
+  droppedMessage?: string
+) {
   if (shape === 'synchronous') {
-    expect(pushToast).toHaveBeenCalledWith('Message sent to agent-x.', 'success')
+    if (droppedMessage === undefined) {
+      expect(pushToast).toHaveBeenCalledWith('Message sent to agent-x.', 'success')
+      return
+    }
+    // A send that lost its files shows only the error that says so: a success
+    // toast beside it would contradict it. The error toast is the witness that
+    // the accepted branch ran, and no other error toast may appear with it.
+    expect(pushToast).not.toHaveBeenCalledWith('Message sent to agent-x.', 'success')
+    expect(pushToast.mock.calls.filter(([, kind]) => kind === 'error')).toEqual([
+      [droppedMessage, 'error'],
+    ])
     return
   }
   expect(clerum.chat.appendMessages).toHaveBeenCalledWith(
@@ -173,7 +187,7 @@ describe('sendAgentMessage — references the Host did not receive (#666 M1)', (
       expect(result.current.agentError).toBe(NOT_RECEIVED)
       expect(spies.pushToast).toHaveBeenCalledWith(NOT_RECEIVED, 'error')
       // The send stands: accepted, not failed, and not resent.
-      expectAcceptedAck(shape, spies.pushToast)
+      expectAcceptedAck(shape, spies.pushToast, NOT_RECEIVED)
       expect(result.current.failedAgentSend).toBeNull()
       expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
     }
@@ -206,7 +220,7 @@ describe('sendAgentMessage — references the Host did not receive (#666 M1)', (
         'The Host did not receive 1 of the selected Global Files; the message was sent without them.'
       expect(result.current.agentError).toBe(partial)
       expect(spies.pushToast).toHaveBeenCalledWith(partial, 'error')
-      expectAcceptedAck(shape, spies.pushToast)
+      expectAcceptedAck(shape, spies.pushToast, partial)
       expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
     }
   )

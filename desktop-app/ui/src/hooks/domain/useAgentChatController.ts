@@ -2789,6 +2789,7 @@ export function useAgentChatController({
         // and still accepts the message. The ack lists the reference ids the
         // Host admitted; a sent id missing from it never reached the Host. The
         // send itself stands and is not retried.
+        let fileReferencesDropped = false
         if (ackOk && fileReferences.length > 0) {
           const acceptedFileReferenceIds = new Set<string>(
             Array.isArray(response.acceptedFileReferenceIds)
@@ -2799,6 +2800,7 @@ export function useAgentChatController({
             reference => !acceptedFileReferenceIds.has(reference.id)
           )
           if (droppedFiles.length > 0) {
+            fileReferencesDropped = true
             const droppedMessage =
               droppedFiles.length === fileReferences.length
                 ? FILE_REFERENCES_NOT_RECEIVED_MESSAGE
@@ -2887,7 +2889,9 @@ export function useAgentChatController({
               status: previous.events.length ? 'completed' : 'no_activity',
               errorMessage: undefined,
             }))
-            pushToast(`Message sent to ${sendAgent}.`, 'success')
+            // The dropped-files error above already told the user what happened;
+            // a success toast right after it would contradict it.
+            if (!fileReferencesDropped) pushToast(`Message sent to ${sendAgent}.`, 'success')
           }
           activityInFlightByAgentRef.current[sendAgent] = (
             activityInFlightByAgentRef.current[sendAgent] || []

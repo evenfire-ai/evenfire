@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import { createHash } from 'node:crypto'
-import { INCOMING_ATTACHMENT_MAX_COUNT, validateIncomingAttachments } from '../incomingAttachments'
+import {
+  FILE_ATTACHMENT_MIME_TYPE_MAX_LENGTH,
+  INCOMING_ATTACHMENT_MAX_COUNT,
+  validateIncomingAttachments,
+} from '../incomingAttachments'
 
 // The #669 image cases below are unchanged. They moved with the validator and
 // now also pass the file options (issue #666), which the image branch never reads.
@@ -442,6 +446,26 @@ describe('file attachment validation (issue #666)', () => {
     const badName = validateIncomingAttachments([{ ...notes, filename: 'dir/notes.md' }], limits)
     expect(badName.ok === false && badName.error.message).toBe(
       'A file attachment has an invalid name. Rename the file and attach it again.'
+    )
+  })
+
+  it('refuses a declared media type longer than the bound', () => {
+    const atBound = 'a'.repeat(FILE_ATTACHMENT_MIME_TYPE_MAX_LENGTH)
+    // Witness: a type exactly at the bound is admitted, so the refusal below
+    // comes from the length check and not from another rule.
+    expect(admitOne({ ...notes, mimeType: atBound }).attachment).toMatchObject({
+      mimeType: atBound,
+    })
+    const tooLong = validateIncomingAttachments(
+      [{ ...notes, mimeType: 'a'.repeat(FILE_ATTACHMENT_MIME_TYPE_MAX_LENGTH + 1) }],
+      limits
+    )
+    expect(tooLong).toMatchObject({
+      ok: false,
+      error: { code: 'FILE_ATTACHMENT_INVALID', retryable: false },
+    })
+    expect(tooLong.ok === false && tooLong.error.message).toBe(
+      'A file attachment declares a media type that is too long.'
     )
   })
 

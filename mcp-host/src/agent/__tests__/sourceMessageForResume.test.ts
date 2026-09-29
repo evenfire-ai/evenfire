@@ -89,6 +89,57 @@ describe('sourceMessageForResume (#666 R4-M2)', () => {
     expect(resumed?.messageId).toBe('message-1')
   })
 
+  it('persists only the fields a restart reads, not the raw channel payload', () => {
+    const message = {
+      ...sourceMessage([]),
+      threadId: 'thread-1',
+      imageModel: { provider: 'openai', model: 'gpt-image' },
+      metadata: { teamId: 'team-1', slackBotToken: 'SENTINEL-666-raw-metadata' },
+      providerIdentity: { provider: 'SENTINEL-666-identity' },
+      traceContext: { traceparent: 'SENTINEL-666-trace' },
+      model: { provider: 'SENTINEL-666-model', model: 'm' },
+      modelSelectionRevision: 7,
+      fileReferences: [{ id: 'SENTINEL-666-reference' }],
+    } as unknown as IncomingMessage
+    const resumed = sourceMessageForResume(message)
+    // Liveness witness: what a restart reads is still there.
+    expect(resumed).toMatchObject({
+      content: 'Read the attached notes',
+      sender: 'user-1',
+      channelType: 'rpc',
+      channelId: 'chatllm',
+      threadId: 'thread-1',
+      hostRef: 'chatllm',
+      messageId: 'message-1',
+      imageModel: { provider: 'openai', model: 'gpt-image' },
+      metadata: { teamId: 'team-1' },
+    })
+    expect(resumed?.fileReferenceResolutions).toHaveLength(1)
+    expect(Object.keys(resumed ?? {}).sort()).toEqual([
+      'channelId',
+      'channelType',
+      'content',
+      'fileReferenceResolutions',
+      'hostRef',
+      'imageModel',
+      'messageId',
+      'metadata',
+      'sender',
+      'threadId',
+      'timestamp',
+    ])
+    expect(JSON.stringify(resumed)).not.toContain('SENTINEL-666')
+  })
+
+  it('drops metadata that carries no team scope', () => {
+    const resumed = sourceMessageForResume({
+      ...sourceMessage([]),
+      metadata: { slackBotToken: 'SENTINEL-666-raw-metadata' },
+    })
+    expect(resumed?.content).toBe('Read the attached notes')
+    expect(resumed).not.toHaveProperty('metadata')
+  })
+
   it('returns undefined without a source message', () => {
     expect(sourceMessageForResume(undefined)).toBeUndefined()
   })

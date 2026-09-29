@@ -91,7 +91,8 @@ export function normalizeRid(value: unknown): string | null {
 
 function metadataSnapshot(
   bytes: Buffer,
-  args: { drive: string; resourceId: string }
+  args: { drive: string; resourceId: string },
+  expectedVersion?: number
 ): { source: GfsImageSource; size: number } {
   let envelope: { ok?: unknown; data?: unknown }
   try {
@@ -118,6 +119,11 @@ function metadataSnapshot(
     (data.bytes as number) < 0
   )
     throw new VisualInputError('invalid_response')
+  // A pinned read is stale as soon as the version differs, whatever else changed
+  // with it: a newer version that grew past the limit or became a directory is
+  // still reported as the version conflict the tool promises.
+  if (expectedVersion !== undefined && data.version !== expectedVersion)
+    throw new VisualInputError('version_conflict')
   if (data.kind !== 'file') throw new VisualInputError('unsupported_format')
   if ((data.bytes as number) > VISUAL_INPUT_LIMITS.fileBytes)
     throw new VisualInputError('limit_exceeded')
@@ -197,17 +203,13 @@ export async function readGfsContent(
       await requireOk(metadata, signal)
       snapshot = metadataSnapshot(
         await collect(metadata, VISUAL_INPUT_LIMITS.metadataBytes, signal),
-        args
+        args,
+        options.expectedVersion
       )
     } finally {
       metadataReservation.release()
     }
     if (signal.aborted) throw new VisualInputError('cancelled')
-    if (
-      options.expectedVersion !== undefined &&
-      snapshot.source.version !== options.expectedVersion
-    )
-      throw new VisualInputError('version_conflict')
     if (snapshot.size > budget.remainingReadBytes) throw new VisualInputError('limit_exceeded')
     // The source snapshot provides an exact bound: chunks and concatenation can
     // coexist, so reserve twice that size before beginning the content request.
