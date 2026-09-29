@@ -1711,13 +1711,17 @@ export class ChatStore {
     // Flush the temp file before rename and the containing directory afterward.
     // Visibility atomicity alone does not make the catalog durable across power loss.
     const target = this.indexPath(agentRef)
-    await this.writeJsonAtomic(target, normalized, 2)
     await this.saveTombstoneSidecar(agentRef, normalized)
+    await this.writeJsonAtomic(target, normalized, 2)
   }
 
   /**
-   * Mirrors the tombstone lists into the sidecar (atomically, after the index)
-   * whenever they change. Skipped for an agent that never had a tombstone.
+   * Mirrors the tombstone lists into the sidecar (atomically) whenever they
+   * change. Skipped for an agent that never had a tombstone. It is written
+   * before the index, so a rejected save has committed no catalog change. A
+   * crash between the two writes leaves the sidecar ahead of the index; an
+   * index read without dropped tombstone entries is authoritative and ignores
+   * it, and the next save realigns the sidecar with the index.
    */
   private async saveTombstoneSidecar(agentRef: string, index: ChatIndex): Promise<void> {
     const sidecar: TombstoneSidecar = {

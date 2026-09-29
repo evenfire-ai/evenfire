@@ -801,6 +801,41 @@ describe('tombstone durability', () => {
     const unreadable = warn.mock.calls.filter(call => String(call[0]).includes('tombstone sidecar'))
     expect(unreadable).toHaveLength(1)
   })
+
+  it('commits nothing when the sidecar write of a delete fails, and a retry commits both', async () => {
+    await store.createChat('agent-1', 'a')
+    await store.createChat('agent-1', 'b')
+    const originalWriteFile = fs.writeFile.bind(fs)
+    const written: string[] = []
+    const writeFile = vi.spyOn(fs, 'writeFile').mockImplementation(async (...args) => {
+      const filePath = String(args[0])
+      written.push(filePath)
+      if (filePath.endsWith('.tombstones.json.tmp')) {
+        throw Object.assign(new Error('no space left on device'), { code: 'ENOSPC' })
+      }
+      return originalWriteFile(...(args as Parameters<typeof fs.writeFile>))
+    })
+
+    await expect(store.deleteChat('agent-1', 'a', TEAM_A_SCOPE)).rejects.toMatchObject({
+      code: 'ENOSPC',
+    })
+
+    // Witness: the rejected save reached the sidecar write.
+    expect(written.some(path => path.endsWith('.tombstones.json.tmp'))).toBe(true)
+    // The rejected delete left the catalog as it was.
+    expect((await store.listChats('agent-1')).map(chat => chat.id)).toEqual(['a', 'b'])
+    expect(written.some(path => path.endsWith('index.json.tmp'))).toBe(false)
+
+    writeFile.mockRestore()
+    await expect(store.deleteChat('agent-1', 'a', TEAM_A_SCOPE)).resolves.toEqual({
+      cleanupPending: false,
+    })
+    const sidecar = await readJsonFile<{ deletedChatTombstones: unknown[] }>(
+      agentPath('.tombstones.json')
+    )
+    expect(sidecar.deletedChatTombstones).toEqual([tombstone('a')])
+    expect((await store.listChats('agent-1')).map(chat => chat.id)).toEqual(['b'])
+  })
 })
 
 describe('deleted-chat cleanup failure reporting', () => {
