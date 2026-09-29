@@ -193,6 +193,17 @@ describe('sendAgentMessage — references the Host did not receive (#666 M1)', (
     }
   )
 
+  it('does not read an empty ack (the proxy answer to an unreadable Host body) as a drop', async () => {
+    const { result, spies } = await sendWithReferences({}, [planFile])
+
+    // Witness: the send went out with the reference and was not marked failed.
+    expect(sentReferenceIds()).toEqual([PLAN_ID])
+    expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
+    expect(result.current.failedAgentSend).toBeNull()
+    expect(result.current.agentError).toBeNull()
+    expect(spies.pushToast).not.toHaveBeenCalledWith(NOT_RECEIVED, 'error')
+  })
+
   it.each(ACK_SHAPES)('%s ack that echoes every sent id shows no error', async (shape, ack) => {
     const { result, spies } = await sendWithReferences(
       { ...ack, acceptedFileReferenceIds: [PLAN_ID, NOTES_ID] },

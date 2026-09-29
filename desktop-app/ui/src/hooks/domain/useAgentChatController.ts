@@ -2789,8 +2789,16 @@ export function useAgentChatController({
         // and still accepts the message. The ack lists the reference ids the
         // Host admitted; a sent id missing from it never reached the Host. The
         // send itself stands and is not retried.
+        const taskId =
+          (typeof responseRecord.taskId === 'string' ? responseRecord.taskId : undefined) ||
+          (typeof responseRecord.id === 'string' ? responseRecord.id : undefined)
+        // An ack with no fields at all is not a Host ack: rpc-proxy answers `{}`
+        // when the Host's 2xx body is not JSON. It says nothing about which
+        // references the Host received, so it is not read as a drop. An older
+        // Host's ack still carries `success`, a `taskId` or a reply.
+        const ackIsEmpty = Object.keys(responseRecord).length === 0
         let fileReferencesDropped = false
-        if (ackOk && fileReferences.length > 0) {
+        if (ackOk && !ackIsEmpty && fileReferences.length > 0) {
           const acceptedFileReferenceIds = new Set<string>(
             Array.isArray(response.acceptedFileReferenceIds)
               ? response.acceptedFileReferenceIds
@@ -2809,9 +2817,6 @@ export function useAgentChatController({
             pushToast(droppedMessage, 'error')
           }
         }
-        const taskId =
-          (typeof responseRecord.taskId === 'string' ? responseRecord.taskId : undefined) ||
-          (typeof responseRecord.id === 'string' ? responseRecord.id : undefined)
 
         if (!taskId) {
           // Synchronous (non-async) response — a direct reply or a structured error.
