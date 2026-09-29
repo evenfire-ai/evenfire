@@ -20,7 +20,7 @@ import {
   sanitizeForFont,
 } from '../fonts'
 import { INTERNAL_TOOLS } from '../internalTools'
-import { readPdf } from './support/pdfText'
+import { type TextFragment, readPdf } from './support/pdfText'
 
 describe('font provisioning', () => {
   it('registers a face without relying on the base image', () => {
@@ -213,8 +213,35 @@ const hasRtlFaces =
   pdfGlyphSource().familyFor(0x0645, PDF_FONT_FAMILY) !== undefined &&
   pdfGlyphSource().familyFor(0x05e9, PDF_FONT_FAMILY) !== undefined
 
+/** A BaseFont name without the tag pdfkit puts before a subset. */
+function untagged(font: string): string {
+  return font.replace(/^[A-Z]{6}\+/, '')
+}
+
+/** BaseFont names, untagged, of the regular and bold faces a PDF embeds for `family`. */
+async function embeddedFaces(family: string, sample: string, dir: string): Promise<string[]> {
+  const PdfPrinter = require('pdfmake')
+  const doc = new PdfPrinter(pdfGlyphSource().descriptors([family])).createPdfKitDocument({
+    content: [
+      { text: sample, font: family },
+      { text: sample, font: family, bold: true },
+    ],
+    defaultStyle: { font: family },
+  })
+  const file = path.join(dir, 'probe.pdf')
+  await new Promise<void>((resolve, reject) => {
+    const out = fs.createWriteStream(file).on('finish', resolve).on('error', reject)
+    doc.pipe(out)
+    doc.end()
+  })
+  const pages = await readPdf(file)
+  return [...new Set(pages[0].fragments.map(f => untagged(f.font)))]
+}
+
 describe.skipIf(!hasRtlFaces)('Arabic and Hebrew in a PDF', () => {
-  it('embeds faces for both scripts and leaves nothing out', async () => {
+  it('sets each script in the face chosen for it, in display order, leaving nothing out', async () => {
+    // Which faces those are depends on the image: script faces where Noto is
+    // installed, a broad face such as DejaVu Sans or the body face elsewhere.
     const outputDir = fs.mkdtempSync(path.join(os.tmpdir(), 'clerum-rtl-'))
     try {
       const tool = INTERNAL_TOOLS.find(t => t.name === 'clerum__generate_pdf')!
@@ -229,9 +256,43 @@ describe.skipIf(!hasRtlFaces)('Arabic and Hebrew in a PDF', () => {
       expect(result.success).toBe(true)
       expect(result.content).not.toMatch(/left out/)
       const pages = await readPdf(path.join(outputDir, 'rtl.pdf'))
-      const fonts = new Set(pages[0].fragments.map(f => f.font))
-      expect([...fonts].some(f => /Arabic/i.test(f))).toBe(true)
-      expect([...fonts].some(f => /Hebrew/i.test(f))).toBe(true)
+
+      // Each line as drawn, left to right, read back from the text layer.
+      const lines = new Map<number, TextFragment[]>()
+      for (const f of pages[0].fragments) {
+        const y = Math.round(f.y)
+        lines.set(y, [...(lines.get(y) ?? []), f])
+      }
+      const shown = [...lines.values()].map(line =>
+        line
+          .sort((a, b) => a.x0 - b.x0)
+          .map(f => f.text)
+          .join('')
+          .trim()
+      )
+      expect(shown).toEqual(
+        expect.arrayContaining([
+          '\u0631\u064A\u0631\u0642\u062A',
+          '\u0645\u0644\u0627\u0639\u0644\u0627\u0628 \u0627\u0628\u062D\u0631\u0645',
+          '100 \u05DD\u05D5\u05DC\u05E9',
+        ])
+      )
+
+      const glyphs = pdfGlyphSource()
+      const arabic = await embeddedFaces(
+        glyphs.familyFor(0x0645, PDF_FONT_FAMILY)!,
+        '\u0645',
+        outputDir
+      )
+      const hebrew = await embeddedFaces(
+        glyphs.familyFor(0x05e9, PDF_FONT_FAMILY)!,
+        '\u05E9',
+        outputDir
+      )
+      for (const f of pages[0].fragments) {
+        if (/\p{Script=Arabic}/u.test(f.text)) expect(arabic, f.text).toContain(untagged(f.font))
+        if (/\p{Script=Hebrew}/u.test(f.text)) expect(hebrew, f.text).toContain(untagged(f.font))
+      }
     } finally {
       fs.rmSync(outputDir, { recursive: true, force: true })
     }
