@@ -532,8 +532,14 @@ describe('RPCClient - read-side direct mcp-host calls', () => {
       limit: 10,
     }
 
-    await expect(client.fetchDeliveries(params)).resolves.toEqual([])
-    await expect(client.fetchDeliveries(params)).resolves.toEqual([])
+    await expect(client.fetchDeliveries(params)).rejects.toMatchObject({
+      name: 'RuntimeServiceAdmissionLimitedError',
+      retryAfterSeconds: 12,
+    })
+    await expect(client.fetchDeliveries(params)).rejects.toMatchObject({
+      name: 'RuntimeServiceAdmissionLimitedError',
+      retryAfterSeconds: 12,
+    })
     expect(mockFetch).toHaveBeenCalledOnce()
 
     await vi.advanceTimersByTimeAsync(12_000)
@@ -548,8 +554,14 @@ describe('RPCClient - read-side direct mcp-host calls', () => {
       .mockReturnValueOnce(mockOkResponse({ results: [] }))
 
     const client = new RPCClient('http://mcp-host:8080')
-    await expect(client.getCronResults()).resolves.toEqual([])
-    await expect(client.getCronResults()).resolves.toEqual([])
+    await expect(client.getCronResults()).rejects.toMatchObject({
+      name: 'RuntimeServiceAdmissionLimitedError',
+      retryAfterSeconds: 5,
+    })
+    await expect(client.getCronResults()).rejects.toMatchObject({
+      name: 'RuntimeServiceAdmissionLimitedError',
+      retryAfterSeconds: 5,
+    })
     expect(mockFetch).toHaveBeenCalledOnce()
 
     await vi.advanceTimersByTimeAsync(5_000)
