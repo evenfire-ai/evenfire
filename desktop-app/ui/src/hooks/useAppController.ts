@@ -58,6 +58,7 @@ import {
   createResetWorkflowSelection,
 } from './domain/useWorkflowController.types'
 import { scheduleAfterFirstPaint } from './scheduleAfterFirstPaint'
+import { useChatStore } from './useChatStore'
 
 // U5 cold-start buffer: how long an OAuth completion whose sessions are not yet
 // seeded is retried against later snapshots before it is discarded. Long enough
@@ -339,14 +340,18 @@ export function useAppController() {
     hostAuthority.reset()
     setHostAuthorityRevision(revision => revision + 1)
   }, [authorityScope, hostAuthority])
+  const { invalidateSessionCatalog } = useChatStore()
   const blockHostAccess = useCallback(
     (agentRef: string, kind: HostAuthorityHoldKind) => {
+      // F4: a catalog request issued before the hold must not be shared with a
+      // reader that starts after `verifyHostAccess` releases it.
+      invalidateSessionCatalog(agentRef)
       if (!hostAuthority.hold(agentRef, kind)) return
       setHostAuthorityRevision(revision => revision + 1)
       if (selectedAgentRef.current === agentRef) nav.setSelectedAgent(null)
       void agentsData.refresh()
     },
-    [agentsData.refresh, hostAuthority, nav.setSelectedAgent]
+    [agentsData.refresh, hostAuthority, invalidateSessionCatalog, nav.setSelectedAgent]
   )
   const onHostAccessRevoked = useCallback(
     (agentRef: string) => blockHostAccess(agentRef, 'revoked'),

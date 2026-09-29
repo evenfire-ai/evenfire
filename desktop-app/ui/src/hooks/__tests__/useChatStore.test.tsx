@@ -48,6 +48,39 @@ describe('useChatStore remote request cache', () => {
     expect(listSessions).toHaveBeenCalledTimes(2)
   })
 
+  // F4: holding a Host drops its cached catalog requests (every query) and
+  // leaves every other Host's entries shared. The scope itself contains ':',
+  // so the Host is matched on the entry, not parsed out of the key.
+  it('invalidates only the held Host catalog entries', async () => {
+    const listSessions = vi.fn(async () => ({ items: [] }))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { rpc: { listSessions } },
+    })
+    const { result } = renderHook(() => useChatStore())
+    const readAll = () =>
+      Promise.all([
+        result.current.listSessions('host', { agent: 'host', limit: 50 }),
+        result.current.listSessions('host', { agent: 'host', limit: 50, cursor: 'page-2' }),
+        result.current.listSessions('host-b', { agent: 'host-b', limit: 50 }),
+      ])
+    const callsFor = (hostRef: string) =>
+      listSessions.mock.calls.filter(call => (call as unknown[])[0] === hostRef).length
+
+    result.current.setRemoteCacheScope('authenticated:user-f4:team-f4')
+    await readAll()
+    await readAll()
+    // Witness: the cache is live (three distinct keys, one upstream call each).
+    expect(callsFor('host')).toBe(2)
+    expect(callsFor('host-b')).toBe(1)
+
+    result.current.invalidateSessionCatalog('host')
+    await readAll()
+
+    expect(callsFor('host')).toBe(4)
+    expect(callsFor('host-b')).toBe(1)
+  })
+
   // #654 M12 — the host-model catalog has exactly one cache, in
   // `hostModelSelectionStore`, which also owns revision ordering. A second TTL
   // layer here could only serve a response read BEFORE a write, which is the

@@ -40,6 +40,8 @@ const SESSION_CATALOG_TTL_MS = 5_000
 
 type CachedRequest<T> = {
   expiresAt: number
+  /** Host the request was issued against; the key's scope segment may contain ':'. */
+  hostRef: string
   promise: Promise<T>
 }
 
@@ -168,6 +170,7 @@ export function useChatStore() {
       })
       sessionCatalogRequests.set(key, {
         expiresAt: Date.now() + SESSION_CATALOG_TTL_MS,
+        hostRef,
         promise,
       })
       return promise
@@ -209,6 +212,14 @@ export function useChatStore() {
   const clearCachedRemoteData = useCallback(() => {
     sessionCatalogRequests.clear()
     sessionCatalogSource = null
+  }, [])
+  // F4: a catalog request issued before a Host hold carries the authority of
+  // that moment. Dropping it when the Host is held keeps a reader that starts
+  // after `verifyHostAccess` released the hold from sharing it.
+  const invalidateSessionCatalog = useCallback((hostRef: string) => {
+    for (const [key, cached] of sessionCatalogRequests) {
+      if (cached.hostRef === hostRef) sessionCatalogRequests.delete(key)
+    }
   }, [])
   const setRemoteCacheScope = useCallback((scope: string) => {
     if (remoteCacheScope === scope) return
@@ -280,6 +291,7 @@ export function useChatStore() {
     setHostModel,
     renameSession,
     clearCachedRemoteData,
+    invalidateSessionCatalog,
     setRemoteCacheScope,
     setPendingModel,
     getPendingModel,
