@@ -4703,6 +4703,11 @@ td.cu-registry-description {
   color: var(--cu-text-soft);
 }
 
+/* Canonical-URL suggestion action inside the dead-transport banner. */
+.cu-transport-suggestion {
+  margin-top: var(--cu-space-1);
+}
+
 /* Catalog-attention banner (stale-but-referenced models) on /llm-models. */
 .cu-model-attention__lede {
   margin: 0 0 var(--cu-space-2);
@@ -14421,6 +14426,46 @@ button.cu-gfs-tree__button:focus-visible,
 
 .cu-llm-policy__actions {
   display: flex;
+}
+
+/* ── Generic OAuth carril install wizard (S3-B4) ──────────────────────────── */
+.cu-generic-field-row {
+  display: flex;
+  align-items: center;
+  gap: var(--cu-space-2);
+}
+
+.cu-generic-field-row > :first-child {
+  flex: 1;
+  min-width: 0;
+}
+
+.cu-generic-origin {
+  flex: none;
+  white-space: nowrap;
+}
+
+.cu-generic-toggles {
+  display: flex;
+  flex-direction: column;
+  gap: var(--cu-space-2);
+}
+
+.cu-generic-params {
+  display: flex;
+  flex-direction: column;
+  gap: var(--cu-space-2);
+}
+
+.cu-generic-param-row {
+  display: flex;
+  align-items: center;
+  gap: var(--cu-space-2);
+}
+
+.cu-generic-param-row > input {
+  flex: 1;
+  min-width: 0;
 }
 
 .cu-identity-preview__document {

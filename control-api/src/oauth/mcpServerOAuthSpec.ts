@@ -11,7 +11,17 @@
  * All read the SAME fields the SAME way and derive the SAME `oauth_grants` key
  * (`buildMcpServerGrantKey`), so the rule lives here once.
  */
+import { rootLogger } from '../observability/logger.js'
+import type {
+  GenericClientRouting,
+  OAuthClientDecl,
+  RemoteClientRouting,
+  ServerOAuthSecretSource,
+} from './callback.js'
+import { MAX_EXTRA_AUTHORIZE_PARAMS, MAX_EXTRA_AUTHORIZE_PARAM_VALUE_LEN } from './genericKnobs.js'
 import type { OAuthGrantKey } from './store.js'
+
+const log = rootLogger.child({ module: 'mcp-server-oauth-spec' })
 
 export interface McpServerOAuthDecl {
   id?: unknown
@@ -21,10 +31,31 @@ export interface McpServerOAuthDecl {
   scopes?: unknown
   backgroundAccess?: unknown
   grantScope?: unknown
+  // Remote MCP-OAuth lane (`source:'remote'`, C1.5/C2/C3). Untrusted CR data →
+  // every field is validated before use; a malformed remote block fails closed.
+  source?: unknown
+  clientMode?: unknown
+  authorizationEndpoint?: unknown
+  tokenEndpoint?: unknown
+  resource?: unknown
+  bearerInBody?: unknown
+  supportsRefresh?: unknown
+  issForCallback?: unknown
+  // Generic self-hosted lane (`source:'generic'`, DEC-28). Untrusted CR data →
+  // every field is validated before use; a malformed generic block fails closed.
+  refreshEndpoint?: unknown
+  tokenRequestFormat?: unknown
+  tokenAuthMethod?: unknown
+  scopeSeparator?: unknown
+  sendScope?: unknown
+  usePkce?: unknown
+  includeResponseType?: unknown
+  extraAuthorizeParams?: unknown
 }
 
 /** Minimal structural shape needed to resolve a server's OAuth grant coordinate. */
 export interface McpServerOAuthSpecInput {
+  metadata?: { uid?: unknown; name?: unknown }
   spec?: {
     oauth?: McpServerOAuthDecl
     // `spec.contextRef` is REQUIRED + singular on the CRD ("the context this
@@ -41,10 +72,50 @@ export interface ResolvedServerOAuth {
   grantScope: GrantScope
   /** Authoritative Context of the server (spec.contextRef); undefined if absent. */
   contextRef?: string
+  /**
+   * metadata.uid of the CR this resolution was read from — the installation
+   * identity grant reads are fenced by. Undefined when the object carried none.
+   */
+  crUid?: string
+  /**
+   * The CR's `spec.oauth.provider`, present only on the baked lane. It lets the
+   * store serve an unsealed (legacy) grant written by a pod without install
+   * identity, and only one of this same provider.
+   */
+  legacyProvider?: string
 }
 
 /**
- * Derive `{ oauthClientId, grantScope, contextRef }` from a McpServer's
+ * OAuth lane of a McpServer. `unknown` is a `source` value no reader recognises;
+ * callers that need a decl keep treating it as baked, but it never qualifies for
+ * legacy (unsealed) grants.
+ */
+export type McpServerOAuthLane = 'baked' | 'remote' | 'generic' | 'unknown'
+
+/**
+ * The single lane classifier for `spec.oauth.source`: absent (undefined/null) ⇒
+ * baked; the literals `'remote'`/`'generic'`; any other value (including `''`) ⇒
+ * unknown.
+ */
+export function readOAuthLane(oauth: McpServerOAuthDecl): McpServerOAuthLane {
+  const source = oauth.source
+  if (source === undefined || source === null) return 'baked'
+  if (source === 'remote' || source === 'generic') return source
+  return 'unknown'
+}
+
+/**
+ * The apiserver's `metadata.uid` of a McpServer, or undefined when absent or not
+ * a non-empty string. Never defaulted: an unknown identity must not match a
+ * sealed grant.
+ */
+export function readCrUid(server: McpServerOAuthSpecInput): string | undefined {
+  const uid = server.metadata?.uid
+  return typeof uid === 'string' && uid.length > 0 ? uid : undefined
+}
+
+/**
+ * Derive `{ oauthClientId, grantScope, contextRef, crUid }` from a McpServer's
  * `spec.oauth`. Returns null when the server carries no usable OAuth id, so
  * callers fail closed. `grantScope` defaults to `'user'` for anything other
  * than the explicit `'context'` sentinel (U1: immutable per server, CEL-guarded).
@@ -57,7 +128,19 @@ export function resolveServerOAuth(server: McpServerOAuthSpecInput): ResolvedSer
     typeof server.spec?.contextRef === 'string' && server.spec.contextRef.length > 0
       ? server.spec.contextRef
       : undefined
-  return { oauthClientId: oauth.id, grantScope, contextRef }
+  const legacyProvider =
+    readOAuthLane(oauth) === 'baked' &&
+    typeof oauth.provider === 'string' &&
+    oauth.provider.length > 0
+      ? oauth.provider
+      : undefined
+  return {
+    oauthClientId: oauth.id,
+    grantScope,
+    contextRef,
+    crUid: readCrUid(server),
+    ...(legacyProvider ? { legacyProvider } : {}),
+  }
 }
 
 /** The coordinates the caller supplies to derive an mcp-server grant key. */
@@ -87,6 +170,11 @@ export interface McpServerGrantKeyCoords {
  *
  * It intentionally does NOT read the token or touch the DB — it only maps a
  * resolved OAuth declaration + coordinates to a key.
+ *
+ * A missing `crUid` never yields null: the key is still built and the store
+ * treats an mcp-server key without a uid as matching no row. Returning null here
+ * would push the grant-existence sweep into its fail-open branch (`exists:true`),
+ * so a revoked token cached in mcp-host would never be evicted.
  */
 export function buildMcpServerGrantKey(
   resolved: ResolvedServerOAuth,
@@ -103,6 +191,8 @@ export function buildMcpServerGrantKey(
       recipeName: coords.mcpServerName,
       contextId: resolved.contextRef,
       oauthClientId: resolved.oauthClientId,
+      crUid: resolved.crUid,
+      ...(resolved.legacyProvider ? { legacyProvider: resolved.legacyProvider } : {}),
     }
   }
   if (typeof coords.userId !== 'string' || coords.userId.length === 0) return null
@@ -113,6 +203,8 @@ export function buildMcpServerGrantKey(
     recipeName: coords.mcpServerName,
     userId: coords.userId,
     oauthClientId: resolved.oauthClientId,
+    crUid: resolved.crUid,
+    ...(resolved.legacyProvider ? { legacyProvider: resolved.legacyProvider } : {}),
   }
 }
 
@@ -123,61 +215,302 @@ export function buildMcpServerGrantKey(
  * the same broker/refresh machinery stays owner-agnostic.
  */
 export interface ResolvedServerOAuthSubject {
-  decl: {
-    id: string
-    provider: string
-    clientIdRef: { name: string; key: string }
-    clientSecretRef: { name: string; key: string }
-    scopes?: string[]
-    backgroundAccess?: boolean
-  }
+  /**
+   * The `oauthClients[]`-compatible client decl. For BAKED (no `source`) it is
+   * byte-identical to the confidential-K8s shape (id/provider + both refs). For
+   * REMOTE (`source:'remote'`) it carries `remote` routing + a `secretSource`
+   * discriminator and OMITS `clientSecretRef`/`clientIdRef` unless the mode is
+   * pre-registered-confidential (`k8s-secret`).
+   */
+  decl: OAuthClientDecl
   grantScope: GrantScope
   /** Authoritative Context (spec.contextRef); undefined if absent. */
   contextRef?: string
+  /** metadata.uid of the CR this subject was read from; undefined if absent. */
+  crUid?: string
+}
+
+export type RemoteOAuthSpecIncoherence = 'public_client_with_secret_refs' | 'bearer_in_body'
+
+/**
+ * A remote `spec.oauth` the admission rules reject but that reached the apiserver
+ * anyway (CRD applied after the object, or a write that bypassed validation). The
+ * runtime cannot honor it, so consent, authorize-URL minting and token issuance
+ * refuse it with this specific error instead of degrading to a generic failure.
+ */
+export class RemoteOAuthSpecIncoherentError extends Error {
+  readonly code = 'remote_oauth_spec_incoherent'
+  constructor(readonly reason: RemoteOAuthSpecIncoherence) {
+    super(`remote spec.oauth is incoherent: ${reason}`)
+    this.name = 'RemoteOAuthSpecIncoherentError'
+  }
+}
+
+function remoteOAuthSpecIncoherence(oauth: McpServerOAuthDecl): RemoteOAuthSpecIncoherence | null {
+  if (
+    oauth.clientMode === 'public' &&
+    (oauth.clientIdRef != null || oauth.clientSecretRef != null)
+  ) {
+    return 'public_client_with_secret_refs'
+  }
+  if (oauth.bearerInBody === true) return 'bearer_in_body'
+  return null
+}
+
+/**
+ * Runtime mirror of the remote-carril coherence rules of the McpServer CRD
+ * (REMOTE-SECRET-PAIRING for `public`, REMOTE-BEARER-HEADER). Throws
+ * {@link RemoteOAuthSpecIncoherentError} for a remote server whose shape no
+ * install path produces; a no-op for every other lane.
+ *
+ * Deliberately NOT applied by {@link resolveServerOAuth}: that coordinate backs
+ * revoke and the grant-existence sweep, and an incoherent server must still be
+ * disconnectable and must not push the sweep into its fail-open branch.
+ */
+export function assertRemoteOAuthSpecCoherent(server: McpServerOAuthSpecInput): void {
+  const oauth = server.spec?.oauth
+  if (!oauth || readOAuthLane(oauth) !== 'remote') return
+  const reason = remoteOAuthSpecIncoherence(oauth)
+  if (!reason) return
+  const name = server.metadata?.name
+  log.warn(
+    {
+      event: 'remote_oauth_spec_incoherent',
+      mcpServerName: typeof name === 'string' ? name : undefined,
+      reason,
+    },
+    'remote mcp-server oauth spec is incoherent; refusing consent and token issuance'
+  )
+  throw new RemoteOAuthSpecIncoherentError(reason)
+}
+
+/** Extract + type-validate the remote routing block from an untrusted `spec.oauth`. */
+function extractRemoteRouting(oauth: McpServerOAuthDecl): RemoteClientRouting | null {
+  const clientMode = oauth.clientMode
+  if (clientMode !== 'public' && clientMode !== 'confidential') return null
+  const authorizationEndpoint = oauth.authorizationEndpoint
+  const tokenEndpoint = oauth.tokenEndpoint
+  if (typeof authorizationEndpoint !== 'string' || authorizationEndpoint.length === 0) return null
+  if (typeof tokenEndpoint !== 'string' || tokenEndpoint.length === 0) return null
+  const resource =
+    typeof oauth.resource === 'string' && oauth.resource.length > 0 ? oauth.resource : undefined
+  const issForCallback =
+    typeof oauth.issForCallback === 'string' && oauth.issForCallback.length > 0
+      ? oauth.issForCallback
+      : undefined
+  return {
+    authorizationEndpoint,
+    tokenEndpoint,
+    resource,
+    clientMode,
+    bearerInBody: oauth.bearerInBody === true,
+    supportsRefresh: oauth.supportsRefresh === true,
+    issForCallback,
+  }
+}
+
+/** Read a nested `{name,key}` ref, returning null unless BOTH are non-empty strings. */
+function readRef(
+  ref: { name?: unknown; key?: unknown } | undefined
+): { name: string; key: string } | null {
+  if (!ref || typeof ref.name !== 'string' || typeof ref.key !== 'string') return null
+  return { name: ref.name, key: ref.key }
+}
+
+/**
+ * Classify a remote client's secret source (DEC-18): refs present ⇒ K8s Secret
+ * (pre-registered confidential); no refs + confidential ⇒ encrypted DCR store;
+ * no refs + public ⇒ no secret. `public` with refs never reaches here:
+ * {@link assertRemoteOAuthSpecCoherent} rejects it first.
+ */
+function resolveRemoteSecretSource(
+  oauth: McpServerOAuthDecl,
+  clientMode: 'public' | 'confidential'
+): ServerOAuthSecretSource {
+  const clientIdRef = readRef(oauth.clientIdRef)
+  const clientSecretRef = readRef(oauth.clientSecretRef)
+  if (clientIdRef && clientSecretRef) {
+    return { kind: 'k8s-secret', clientIdRef, clientSecretRef }
+  }
+  return clientMode === 'confidential' ? { kind: 'dcr-store' } : { kind: 'public' }
+}
+
+/**
+ * Read the optional `extraAuthorizeParams` map, keeping only string-valued keys and
+ * enforcing the same bounds as the install-side schema (genericKnobs). A CR can be
+ * written straight to the apiserver, bypassing admission, so the runtime reader is
+ * the last gate before these land in the authorize URL: over-long values are dropped
+ * (never truncated or forwarded) and the map is capped at MAX_EXTRA_AUTHORIZE_PARAMS.
+ */
+function extractExtraAuthorizeParams(raw: unknown): Record<string, string> | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const out: Record<string, string> = {}
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof v !== 'string' || v.length > MAX_EXTRA_AUTHORIZE_PARAM_VALUE_LEN) continue
+    out[k] = v
+    if (Object.keys(out).length >= MAX_EXTRA_AUTHORIZE_PARAMS) break
+  }
+  return Object.keys(out).length > 0 ? out : undefined
+}
+
+/**
+ * Extract + type-validate the generic routing block from an untrusted `spec.oauth`
+ * (DEC-28). The three wire enums (`tokenRequestFormat`/`tokenAuthMethod`/
+ * `scopeSeparator`) fail closed to null when malformed; the booleans read as
+ * `=== true` (absent ⇒ false), mirroring the remote block's boolean handling.
+ */
+function extractGenericRouting(oauth: McpServerOAuthDecl): GenericClientRouting | null {
+  const authorizationEndpoint = oauth.authorizationEndpoint
+  const tokenEndpoint = oauth.tokenEndpoint
+  if (typeof authorizationEndpoint !== 'string' || authorizationEndpoint.length === 0) return null
+  if (typeof tokenEndpoint !== 'string' || tokenEndpoint.length === 0) return null
+  const tokenRequestFormat = oauth.tokenRequestFormat
+  if (tokenRequestFormat !== 'form' && tokenRequestFormat !== 'json') return null
+  const tokenAuthMethod = oauth.tokenAuthMethod
+  if (tokenAuthMethod !== 'body' && tokenAuthMethod !== 'basic') return null
+  const scopeSeparator = oauth.scopeSeparator
+  if (scopeSeparator !== 'space' && scopeSeparator !== 'comma') return null
+  const refreshEndpoint =
+    typeof oauth.refreshEndpoint === 'string' && oauth.refreshEndpoint.length > 0
+      ? oauth.refreshEndpoint
+      : undefined
+  const resource =
+    typeof oauth.resource === 'string' && oauth.resource.length > 0 ? oauth.resource : undefined
+  return {
+    authorizationEndpoint,
+    tokenEndpoint,
+    refreshEndpoint,
+    resource,
+    tokenRequestFormat,
+    tokenAuthMethod,
+    scopeSeparator,
+    sendScope: oauth.sendScope === true,
+    usePkce: oauth.usePkce === true,
+    includeResponseType: oauth.includeResponseType === true,
+    supportsRefresh: oauth.supportsRefresh === true,
+    extraAuthorizeParams: extractExtraAuthorizeParams(oauth.extraAuthorizeParams),
+  }
+}
+
+/**
+ * Classify a generic client's secret source (DEC-28): NEITHER ref ⇒ public (no
+ * secret; `client_id` IS `oauth.id`); BOTH refs ⇒ k8s-secret (reuse the shared
+ * shape). Exactly one ref is a half-declared config ⇒ null (fail closed), never
+ * silently treated as public.
+ */
+function resolveGenericSecretSource(oauth: McpServerOAuthDecl): ServerOAuthSecretSource | null {
+  const clientIdRef = readRef(oauth.clientIdRef)
+  const clientSecretRef = readRef(oauth.clientSecretRef)
+  if (clientIdRef && clientSecretRef) {
+    return { kind: 'k8s-secret', clientIdRef, clientSecretRef }
+  }
+  if (clientIdRef || clientSecretRef) return null
+  return { kind: 'public' }
+}
+
+function normalizeScopes(scopes: unknown): string[] | undefined {
+  return Array.isArray(scopes)
+    ? scopes.filter((s): s is string => typeof s === 'string')
+    : undefined
 }
 
 /**
  * Resolve a McpServer's full OAuth subject (decl + grant routing) for the U5
  * consent flow. Returns null when the server carries no usable OAuth
  * declaration (missing id/provider/clientIdRef/clientSecretRef) so callers fail
- * closed. Same field-reading rule as {@link resolveServerOAuth} — kept here so
- * the authorize-URL minter and the callback never drift (D4).
+ * closed. Throws {@link RemoteOAuthSpecIncoherentError} for a remote server whose
+ * shape the runtime cannot honor (see {@link assertRemoteOAuthSpecCoherent}).
+ * Same field-reading rule as {@link resolveServerOAuth} — kept here so the
+ * authorize-URL minter and the callback never drift (D4).
+ *
+ * Two lanes (C4/DEC-23), keyed uniformly by `oauth.id` (the install backfills it
+ * for every remote mode, so the grant coordinate is uniform):
+ *   - BAKED (no `source`): behaves EXACTLY as before — confidential-K8s, both
+ *     refs required, `provider` required; returns the same decl shape. A public
+ *     baked mcp-server is still not representable, so nothing reachable changes.
+ *   - REMOTE (`source:'remote'`): `provider` is NOT required (no baked adapter);
+ *     the decl carries `remote` routing + a `secretSource` discriminator and
+ *     drops `clientSecretRef`/`clientIdRef` unless the mode is
+ *     pre-registered-confidential. Stays PURE/synchronous — the caller reads the
+ *     secret (K8s Secret or `getDynamicClient`) per `secretSource`.
  */
 export function resolveServerOAuthSubject(
   server: McpServerOAuthSpecInput
 ): ResolvedServerOAuthSubject | null {
   const oauth = server.spec?.oauth
   if (!oauth || typeof oauth.id !== 'string' || oauth.id.length === 0) return null
-  if (typeof oauth.provider !== 'string' || oauth.provider.length === 0) return null
-  const clientIdRef = oauth.clientIdRef
-  const clientSecretRef = oauth.clientSecretRef
-  if (
-    !clientIdRef ||
-    typeof clientIdRef.name !== 'string' ||
-    typeof clientIdRef.key !== 'string' ||
-    !clientSecretRef ||
-    typeof clientSecretRef.name !== 'string' ||
-    typeof clientSecretRef.key !== 'string'
-  ) {
-    return null
-  }
   const grantScope: GrantScope = oauth.grantScope === 'context' ? 'context' : 'user'
   const contextRef =
     typeof server.spec?.contextRef === 'string' && server.spec.contextRef.length > 0
       ? server.spec.contextRef
       : undefined
+  const crUid = readCrUid(server)
+  const lane = readOAuthLane(oauth)
+
+  // ─── Remote lane (`source:'remote'`) ─────────────────────────────────────
+  if (lane === 'remote') {
+    assertRemoteOAuthSpecCoherent(server)
+    const remote = extractRemoteRouting(oauth)
+    if (!remote) return null
+    const secretSource = resolveRemoteSecretSource(oauth, remote.clientMode)
+    const decl: OAuthClientDecl = {
+      id: oauth.id,
+      // No baked provider on the remote lane; exchange/refresh/authorize branch on
+      // `remote` before any provider-adapter lookup. `'remote'` is the persisted /
+      // displayed label.
+      provider: 'remote',
+      scopes: normalizeScopes(oauth.scopes),
+      backgroundAccess: oauth.backgroundAccess === true,
+      remote,
+      secretSource,
+    }
+    if (secretSource.kind === 'k8s-secret') {
+      decl.clientIdRef = secretSource.clientIdRef
+      decl.clientSecretRef = secretSource.clientSecretRef
+    }
+    return { decl, grantScope, contextRef, crUid }
+  }
+
+  // ─── Generic self-hosted lane (`source:'generic'`, DEC-28) ────────────────
+  if (lane === 'generic') {
+    const generic = extractGenericRouting(oauth)
+    if (!generic) return null
+    const secretSource = resolveGenericSecretSource(oauth)
+    if (!secretSource) return null
+    const decl: OAuthClientDecl = {
+      id: oauth.id,
+      // No baked provider on the generic lane; exchange/refresh/authorize branch on
+      // `generic` before any provider-adapter lookup. `'generic'` is the persisted /
+      // displayed label only — it NEVER reaches ADAPTERS/KNOWN_OAUTH_PROVIDERS.
+      provider: 'generic',
+      scopes: normalizeScopes(oauth.scopes),
+      backgroundAccess: oauth.backgroundAccess === true,
+      generic,
+      secretSource,
+    }
+    if (secretSource.kind === 'k8s-secret') {
+      decl.clientIdRef = secretSource.clientIdRef
+      decl.clientSecretRef = secretSource.clientSecretRef
+    }
+    return { decl, grantScope, contextRef, crUid }
+  }
+
+  // ─── Baked lane (byte-identical to before) ───────────────────────────────
+  if (typeof oauth.provider !== 'string' || oauth.provider.length === 0) return null
+  const clientIdRef = readRef(oauth.clientIdRef)
+  const clientSecretRef = readRef(oauth.clientSecretRef)
+  if (!clientIdRef || !clientSecretRef) return null
   return {
     decl: {
       id: oauth.id,
       provider: oauth.provider,
-      clientIdRef: { name: clientIdRef.name, key: clientIdRef.key },
-      clientSecretRef: { name: clientSecretRef.name, key: clientSecretRef.key },
-      scopes: Array.isArray(oauth.scopes)
-        ? oauth.scopes.filter((s): s is string => typeof s === 'string')
-        : undefined,
+      clientIdRef,
+      clientSecretRef,
+      scopes: normalizeScopes(oauth.scopes),
       backgroundAccess: oauth.backgroundAccess === true,
     },
     grantScope,
     contextRef,
+    crUid,
   }
 }

@@ -21,6 +21,11 @@ import { syncDiscoveredModels } from './services/llmCatalogSync.js'
 import { startLlmCatalogSyncCron, stopLlmCatalogSyncCron } from './services/llmCatalogSyncCron.js'
 import { runBootEnrollment } from './services/memberRegistrationEnrollment.js'
 import {
+  REACTIVE_REFRESH_BUFFER_MS,
+  startOauthProactiveRefreshCron,
+  stopOauthProactiveRefreshCron,
+} from './services/oauthProactiveRefreshCron.js'
+import {
   startPluginWorkloadSdkMaintenanceCron,
   stopPluginWorkloadSdkMaintenanceCron,
 } from './services/pluginWorkloadSdkMaintenanceCron.js'
@@ -302,6 +307,22 @@ async function main(): Promise<void> {
     logger.info(
       { event: 'control_api_workflow_approval_delivery_disabled' },
       'Workflow approval delivery disabled'
+    )
+  }
+
+  if (config.oauthProactiveRefreshCronEnabled) {
+    startOauthProactiveRefreshCron(gateway, {
+      intervalMs: config.oauthProactiveRefreshIntervalMs,
+      proactiveBufferMs: config.oauthProactiveRefreshBufferMs,
+      reactiveBufferMs: REACTIVE_REFRESH_BUFFER_MS,
+      dcrWarnMs: config.oauthDcrSecretWarnMs,
+    })
+    console.log(
+      `[ControlAPI] OAuth proactive refresh cron enabled (interval=${config.oauthProactiveRefreshIntervalMs}ms, Bp=${config.oauthProactiveRefreshBufferMs}ms, Wc=${config.oauthDcrSecretWarnMs}ms)`
+    )
+  } else {
+    console.log(
+      '[ControlAPI] OAuth proactive refresh cron disabled (OAUTH_PROACTIVE_REFRESH_CRON_ENABLED not "true")'
     )
   }
 

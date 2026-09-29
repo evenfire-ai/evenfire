@@ -2,6 +2,11 @@ import type { ReactNode } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render as rtlRender, screen, waitFor } from '@testing-library/react'
 import * as api from '../../lib/api'
+import {
+  MCP_SERVER_PENDING_BODY,
+  SECRETS_PENDING_BODY,
+  uninstallIncompleteResponse,
+} from '../../test/fixtures/mcpServerUninstall'
 import { CreateMcpServerForm } from '../CreateMcpServerForm'
 import { ToastProvider } from '../Toast'
 
@@ -455,6 +460,56 @@ describe('CreateMcpServerForm — submit', () => {
     expect(api.getContext).not.toHaveBeenCalled()
     expect(api.updateContext).not.toHaveBeenCalled()
   })
+
+  it.each([
+    {
+      body: SECRETS_PENDING_BODY,
+      expected:
+        'Automatic cleanup of connector "shared-drive" is incomplete (pending cleanup: connector Secrets); it is still installed. Delete it from the Installed Connectors list to finish.',
+    },
+    {
+      body: MCP_SERVER_PENDING_BODY,
+      expected:
+        'Automatic cleanup of connector "shared-drive" is incomplete (pending cleanup: connector resource); it may still be installed. Delete it from the Installed Connectors list to finish.',
+    },
+  ])(
+    'tells the operator an incomplete rollback and what is pending ($body.pending)',
+    async ({ body, expected }) => {
+      vi.mocked(api.getHosts).mockResolvedValueOnce({
+        items: [
+          { metadata: { name: 'agent-alpha' }, spec: { contextRef: 'ctx-alpha' } },
+          { metadata: { name: 'agent-beta' }, spec: { contextRef: 'ctx-beta' } },
+        ],
+      })
+      vi.mocked(api.createMcpServer).mockResolvedValueOnce({
+        metadata: { name: 'shared-drive' },
+        spec: { contextRef: 'ctx-alpha', oauth: { grantScope: 'context' } },
+      })
+      // The real client parses the producer's 503 body; only the network is stubbed.
+      vi.mocked(api.deleteMcpServer).mockImplementationOnce(async name => {
+        const actual = await vi.importActual<typeof import('../../lib/api')>('../../lib/api')
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(uninstallIncompleteResponse(body)))
+        try {
+          return await actual.deleteMcpServer(name)
+        } finally {
+          vi.unstubAllGlobals()
+        }
+      })
+      render(<CreateMcpServerForm onCancel={vi.fn()} onCreated={vi.fn()} />)
+      await fillIdentity('shared-drive')
+      goToAccessStep()
+      await selectAgents('agent-alpha', 'agent-beta')
+      continueToSecretsStep()
+      chooseNoCredentials()
+
+      fireEvent.click(screen.getByRole('button', { name: 'Create connector' }))
+
+      expect(await screen.findByText(expected, { exact: false })).toBeInTheDocument()
+      expect(
+        screen.queryByText(/Automatic cleanup failed for the connector/)
+      ).not.toBeInTheDocument()
+    }
+  )
 
   it('creates a private access scope when no agents are selected', async () => {
     const onCreated = vi.fn()
