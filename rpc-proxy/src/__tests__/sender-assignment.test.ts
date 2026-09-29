@@ -152,6 +152,87 @@ describe('POST /rpc/hosts/:hostRef/messages — sender assignment invariant', ()
   })
 })
 
+describe('POST /rpc/hosts/:hostRef/messages — structured file references (#666)', () => {
+  const RID = '1234567890abcdef1234567890abcdef'
+  const fileReference = {
+    schemaVersion: 1,
+    id: `gfs:main:${RID}@v3`,
+    source: {
+      kind: 'gfs',
+      drive: 'main',
+      resourceId: RID,
+      gfsUri: `gfs://main/${RID}`,
+      version: 3,
+    },
+    name: 'plan.md',
+    declaredMediaType: 'text/markdown',
+    detectedMediaType: 'text/markdown',
+    class: 'markdown',
+    detection: 'declared',
+    mismatch: false,
+    byteLength: 120,
+    textReadable: true,
+    reader: 'text',
+    modelImageInput: 'unsupported',
+  }
+
+  beforeEach(() => {
+    authTokenMock.verifyRpcToken.mockReturnValue(VALID_CLAIMS)
+    serviceMock.resolveHostConnectionForUser.mockResolvedValue(HOST_CONNECTION)
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('forwards the references verbatim and relays the accepted ids', async () => {
+    serviceMock.forwardHostMessageToHost.mockResolvedValue({
+      success: true,
+      status: 'pending',
+      taskId: 'task-1',
+      acceptedFileReferenceIds: [fileReference.id],
+    })
+    const response = await request(makeApp())
+      .post('/rpc/hosts/chatllm/messages')
+      .set('authorization', 'Bearer token')
+      .send({ content: 'Summarize the plan', threadId: 'chat-1', fileReferences: [fileReference] })
+      .expect(200)
+
+    expect(serviceMock.forwardHostMessageToHost).toHaveBeenCalledTimes(1)
+    const forwardedBody = serviceMock.forwardHostMessageToHost.mock.calls[0][1]
+    expect(forwardedBody.fileReferences).toEqual([fileReference])
+    expect(response.body.acceptedFileReferenceIds).toEqual([fileReference.id])
+  })
+
+  it('leaves a malformed value for mcp-host to refuse with its typed code', async () => {
+    serviceMock.forwardHostMessageToHost.mockResolvedValue({ success: true, status: 'completed' })
+    await request(makeApp())
+      .post('/rpc/hosts/chatllm/messages')
+      .set('authorization', 'Bearer token')
+      .send({ content: 'hi', fileReferences: { id: 'not-a-list' } })
+      .expect(200)
+
+    expect(serviceMock.forwardHostMessageToHost.mock.calls[0][1].fileReferences).toEqual({
+      id: 'not-a-list',
+    })
+  })
+
+  it('omits the field when the client sends no references', async () => {
+    serviceMock.forwardHostMessageToHost.mockResolvedValue({ success: true, status: 'completed' })
+    await request(makeApp())
+      .post('/rpc/hosts/chatllm/messages')
+      .set('authorization', 'Bearer token')
+      .send({ content: 'hi', threadId: 'chat-1' })
+      .expect(200)
+
+    // Witness: the message was forwarded with its content.
+    expect(serviceMock.forwardHostMessageToHost).toHaveBeenCalledTimes(1)
+    const forwardedBody = serviceMock.forwardHostMessageToHost.mock.calls[0][1]
+    expect(forwardedBody.content).toBe('hi')
+    expect(forwardedBody).not.toHaveProperty('fileReferences')
+  })
+})
+
 describe('POST /rpc/hosts/:hostRef/approvals/approve — userId identity invariant', () => {
   beforeEach(() => {
     authTokenMock.verifyRpcToken.mockReturnValue({

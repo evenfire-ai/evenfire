@@ -174,10 +174,16 @@ export function useComposerAttachments({
     [clearSendError]
   )
 
-  const handleRemoveComposerReferenceAttachment = useCallback((attachmentId: string) => {
-    composerAttachmentRevisionRef.current += 1
-    setComposerReferenceAttachments(previous => previous.filter(att => att.id !== attachmentId))
-  }, [])
+  const handleRemoveComposerReferenceAttachment = useCallback(
+    (attachmentId: string) => {
+      composerAttachmentRevisionRef.current += 1
+      setComposerReferenceAttachments(previous => previous.filter(att => att.id !== attachmentId))
+      // Removing a file is how the user answers the "at most 10 files" refusal,
+      // so the refusal must not stay on screen afterwards.
+      clearSendError()
+    },
+    [clearSendError]
+  )
 
   return {
     composerImageAttachments,
