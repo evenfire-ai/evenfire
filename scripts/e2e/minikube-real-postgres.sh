@@ -275,14 +275,40 @@ path = Path(sys.argv[1])
 text = path.read_text(errors="replace")
 password = os.environ.get("T1_REDACT_PASSWORD", "")
 if password:
-    # The Vitest JSON reporter stores messages as JSON strings and a DSN
-    # builder percent-encodes the password, so redact those spellings too.
-    for spelling in (json.dumps(password)[1:-1], quote(password, safe=""), password):
+    # Every spelling the password can take in a log or in the Vitest JSON
+    # reporter: verbatim, JSON-escaped once (a reporter message) and twice (a
+    # JSON document quoted inside a message), percent-encoded by Python's
+    # quote() and by JavaScript's encodeURIComponent, which keeps !~*'() literal.
+    once = json.dumps(password)[1:-1]
+    spellings = (
+        password,
+        once,
+        json.dumps(once)[1:-1],
+        quote(password, safe=""),
+        quote(password, safe="-_.!~*'()"),
+    )
+    # Longest first so a spelling that contains another is replaced whole.
+    for spelling in sorted(set(spellings), key=len, reverse=True):
         text = text.replace(spelling, "<password-redacted>")
-# Stop at a backslash: inside the JSON reporter a DSN is followed by the escape
-# that closes its string (\"), and consuming it leaves invalid JSON.
-text = re.sub(r"postgres(?:ql)?://[^\s\"'<>\\]+", "<minikube-postgres-dsn-redacted>", text)
-text = re.sub(r"(?i)(authorization:\s*bearer\s+)[^\s]+", r"\1<token-redacted>", text)
+# A DSN loses its scheme-to-host span, credentials included, whatever the
+# password is. The scheme is case-insensitive and the userinfo runs to the first
+# "@", including the JSON escapes (\" and \\) a reporter message adds inside a
+# password. The host part stops at a backslash: inside the JSON reporter a DSN
+# is followed by the escape that closes its string (\"), and consuming it leaves
+# invalid JSON.
+text = re.sub(
+    r"(?i)postgres(?:ql)?://(?:(?:[^\s\"\\@]|\\[\"\\])*@)?[^\s\"'<>\\]+",
+    "<minikube-postgres-dsn-redacted>",
+    text,
+)
+# libpq conninfo (password=...), quoted or bare. A bare value stops at a quote
+# or a backslash so it cannot swallow the end of a JSON string.
+text = re.sub(
+    r"(?i)(password\s*=\s*)(?:'(?:\\.|[^'\\])*'|[^\s\"'\\]+)",
+    r"\1<password-redacted>",
+    text,
+)
+text = re.sub(r"(?i)(authorization:\s*bearer\s+)[^\s\"'\\]+", r"\1<token-redacted>", text)
 path.write_text(text)
 PY
 }
