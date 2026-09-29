@@ -6475,24 +6475,6 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     apply: applyDynamicClientsTable,
   },
   {
-    // Renumbered twice while syncing onto dev (0117 -> 0118 -> 0120), moving in
-    // lockstep with the table migration above. Same legacyVersions rationale:
-    // the prior names are unique to this migration.
-    version: '0120_dynamic_clients_runtime_access',
-    legacyVersions: ['0117_dynamic_clients_runtime_access', '0118_dynamic_clients_runtime_access'],
-    apply: applyDynamicClientsRuntimeAccess,
-  },
-  {
-    // Install-identity columns for the DCR/OAuth state (install_id + cr_uid on
-    // dynamic_clients, cr_uid on oauth_grants). Renumbered 0119 -> 0121 while
-    // syncing onto dev (dev's 0117/0118 pushed the oauth-19 migrations down by
-    // two); the pre-renumber name is unique to this migration, so legacyVersions
-    // marks it applied on environments that already ran it.
-    version: '0121_oauth_install_identity',
-    legacyVersions: ['0119_oauth_install_identity'],
-    apply: applyOAuthInstallIdentity,
-  },
-  {
     // Reassigned after FINAL_DEV added parent migrations through 0121. Preserve
     // every previously published PR2 identity so deployed schemas are not rerun.
     version: '0119_pr2_readiness_evidence',
@@ -6518,8 +6500,24 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     apply: applyWorkflowRunFailureReasonSchema,
   },
   {
+    // Renumbered twice while syncing onto dev (0117 -> 0118 -> 0120), moving in
+    // lockstep with the table migration above. Same legacyVersions rationale:
+    // the prior names are unique to this migration.
+    version: '0120_dynamic_clients_runtime_access',
+    legacyVersions: ['0117_dynamic_clients_runtime_access', '0118_dynamic_clients_runtime_access'],
+    apply: applyDynamicClientsRuntimeAccess,
+  },
+  {
     version: '0120_r31_runtime_behavior_sources',
     apply: applyR31RuntimeBehaviorSourcesSchema,
+  },
+  {
+    // Install-identity columns for the DCR/OAuth state (install_id + cr_uid on
+    // dynamic_clients, cr_uid on oauth_grants). Renumbered 0119 -> 0121 while
+    // syncing onto dev; the pre-renumber name is unique to this migration.
+    version: '0121_oauth_install_identity',
+    legacyVersions: ['0119_oauth_install_identity'],
+    apply: applyOAuthInstallIdentity,
   },
 ]
 
@@ -6917,9 +6915,7 @@ export async function assertDbReady(db: DbClient = pool): Promise<void> {
 
 export async function withTransaction<T>(
   work: (db: DbTransactionClient) => Promise<T>,
-  txPoolOrOptions:
-    | Pool
-    | { onDatabaseFailure?: (error: unknown) => unknown } = pool
+  txPoolOrOptions: Pool | { onDatabaseFailure?: (error: unknown) => unknown } = pool
 ): Promise<T> {
   // Tests may inject a Pool to exercise client lifecycle behavior. Session
   // persistence callers may instead provide a failure mapper so database
