@@ -16129,20 +16129,26 @@ describe('WorkflowRecipeReconciler', () => {
         'run-g2'
       )
 
-      // Liveness witness: the retry ran the prune and deleted an undesired
-      // catalog sibling, so the absence of a GFS DELETE below is the catalog
-      // gate holding, not a retry that never reached the prune.
-      expect(mockNetworkingApi.listNamespacedNetworkPolicy).toHaveBeenCalled()
-      expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith(
-        expect.objectContaining({ name: `${RECIPE}-snippet-runner-egress` })
-      )
-      expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalledWith(
-        expect.objectContaining({ name: GFS })
-      )
-      // The retry runs mid-run, so it never revokes a Codex/Grok proxy.
-      expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalledWith(
-        expect.objectContaining({ name: `${RECIPE}-mcp-host-to-grok-proxy` })
-      )
+      // Liveness witness: the retry built this agent spec and applied a lane
+      // it wants, so the absent DELETEs below are the retry declining to
+      // prune mid-run, not a retry that never ran.
+      expect(
+        mockNetworkingApi.createNamespacedNetworkPolicy.mock.calls.some(
+          ([arg]) => arg.body?.metadata?.name === `${RECIPE}-coord-to-mcp-host`
+        )
+      ).toBe(true)
+      // The run's pods are live, so the retry revokes no lane: not the
+      // reserved GFS policy, not a sibling the spec no longer wants, and not
+      // a Codex/Grok proxy.
+      for (const name of [
+        GFS,
+        `${RECIPE}-snippet-runner-egress`,
+        `${RECIPE}-mcp-host-to-grok-proxy`,
+      ]) {
+        expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalledWith(
+          expect.objectContaining({ name })
+        )
+      }
     })
   })
 

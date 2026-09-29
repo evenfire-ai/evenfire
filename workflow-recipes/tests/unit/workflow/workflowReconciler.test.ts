@@ -5297,12 +5297,89 @@ describe('WorkflowReconciler — reconcile loop', () => {
         expect(apiserver.api.deleteNamespacedNetworkPolicy).toHaveBeenCalledTimes(0)
       })
 
-      // A prune failure sets retryPending, and this pass is the only one that
-      // runs while the run is in progress or active. It has to prune again, or
-      // the marker requeues forever without ever reaching the leftover.
+      // The retry runs only from the in-progress and active short-circuits,
+      // where the run's pods are live and may still use any lane the spec
+      // wanted when they were created. It applies what the current spec wants
+      // and prunes nothing; the next reconcile() pass prunes the rest.
+      describe('when the spec no longer wants a live lane', () => {
+        const SNIPPET_LANES = [
+          'test-wf-coord-to-snippet-runner',
+          'test-wf-coord-to-snippet-runner-ingress',
+          'test-wf-snippet-runner-egress',
+        ]
+        const AGENT_LANE = 'test-wf-coord-to-mcp-host'
+
+        it('keeps it on a mid-run retry and still applies the lanes the spec wants', async () => {
+          const { apiserver, reconciler } = await convergedRunLane()
+          apiserver.api.listNamespacedNetworkPolicy.mockClear()
+
+          // An agent recipe with a run id wants the mcp-host lanes and none of
+          // the snippet lanes the converged snippet recipe created.
+          const summary = await reconciler.retryRunLaneNetworkPolicies(
+            'test-wf',
+            'uid-123',
+            makeSpec(),
+            'test-wf',
+            'run-1'
+          )
+
+          // Liveness witness: the retry built the agent lane and created it.
+          expect(
+            apiserver.api.createNamespacedNetworkPolicy.mock.calls.map(
+              ([arg]) => arg.body.metadata?.name
+            )
+          ).toContain(AGENT_LANE)
+          expect(apiserver.live.has(apiserver.key('sandbox-recipes', AGENT_LANE))).toBe(true)
+          for (const name of SNIPPET_LANES) {
+            expect(apiserver.live.has(apiserver.key('sandbox-recipes', name)), name).toBe(true)
+          }
+          expect(apiserver.api.listNamespacedNetworkPolicy).toHaveBeenCalledTimes(0)
+          expect(apiserver.api.deleteNamespacedNetworkPolicy).toHaveBeenCalledTimes(0)
+          expect(summary).toEqual({ conflicts: [], retryPending: false })
+        })
+
+        it('prunes it on the next reconcile() pass', async () => {
+          const { apiserver, reconciler } = await convergedRunLane()
+          await reconciler.retryRunLaneNetworkPolicies(
+            'test-wf',
+            'uid-123',
+            makeSpec(),
+            'test-wf',
+            'run-1'
+          )
+          expect(
+            apiserver.live.has(apiserver.key('sandbox-recipes', 'test-wf-snippet-runner-egress'))
+          ).toBe(true)
+
+          const result = await reconciler.reconcile(
+            'test-wf',
+            'uid-123',
+            'sandbox-recipes',
+            makeSpec(),
+            undefined,
+            undefined,
+            'test-wf',
+            'run-1'
+          )
+
+          expect(result.workflowPhase).not.toBe('failed')
+          const deleted = apiserver.api.deleteNamespacedNetworkPolicy.mock.calls.map(
+            ([arg]) => arg.name
+          )
+          for (const name of SNIPPET_LANES) {
+            expect(deleted, name).toContain(name)
+            expect(apiserver.live.has(apiserver.key('sandbox-recipes', name)), name).toBe(false)
+          }
+          expect(apiserver.live.has(apiserver.key('sandbox-recipes', AGENT_LANE))).toBe(true)
+        })
+      })
+
+      // A reconcile() prune that failed sets the retry marker. The retry
+      // does not prune, so it clears the marker once its applies converge,
+      // and the leftover waits for the next reconcile() pass.
       describe('when a prune left a leftover behind', () => {
-        // A catalog member the snippet lane does not want and that no eligibility
-        // verdict governs: the retry must prune it so the marker can clear.
+        // A catalog member the snippet lane does not want and that no
+        // eligibility verdict governs.
         const LEFTOVER = 'test-wf-coord-to-mcp-host'
         const GROK_PROXY = 'test-wf-mcp-host-to-grok-proxy'
         const TWO_TERM_SELECTOR = 'clerum.io/recipe=test-wf,clerum.io/managed-by=wrc'
@@ -5321,59 +5398,45 @@ describe('WorkflowReconciler — reconcile loop', () => {
           })
         }
 
-        it('deletes the leftover on the retry pass', async () => {
+        it('keeps it through the retry, which clears the marker, and prunes it on the next reconcile()', async () => {
           const { apiserver, reconciler } = await convergedRunLane()
-          apiserver.api.listNamespacedNetworkPolicy.mockClear()
-          seedLeftover(apiserver)
-
-          const summary = await reconciler.retryRunLaneNetworkPolicies('test-wf', 'uid-123', spec())
-
-          expect(apiserver.api.listNamespacedNetworkPolicy).toHaveBeenCalledWith({
-            namespace: 'sandbox-recipes',
-            labelSelector: TWO_TERM_SELECTOR,
-          })
-          expect(summary).toEqual({ conflicts: [], retryPending: false })
-          expect(apiserver.live.has(apiserver.key('sandbox-recipes', LEFTOVER))).toBe(false)
-          expect(
-            apiserver.api.deleteNamespacedNetworkPolicy.mock.calls.map(([arg]) => arg.name)
-          ).toEqual([LEFTOVER])
-        })
-
-        it('keeps reporting the retry until the leftover delete succeeds', async () => {
-          const { apiserver, reconciler } = await convergedRunLane()
-          apiserver.api.listNamespacedNetworkPolicy.mockClear()
           seedLeftover(apiserver)
           apiserver.api.deleteNamespacedNetworkPolicy.mockRejectedValueOnce({
             code: 403,
             message: 'forbidden',
           })
 
-          const first = await reconciler.retryRunLaneNetworkPolicies('test-wf', 'uid-123', spec())
-          expect(apiserver.api.listNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
-          expect(first.retryPending).toBe(true)
+          const failed = await reconciler.reconcile('test-wf', 'uid-123', 'sandbox-recipes', spec())
+          expect(failed.networkPolicyRetryPending).toBe(true)
           expect(apiserver.live.has(apiserver.key('sandbox-recipes', LEFTOVER))).toBe(true)
 
-          const second = await reconciler.retryRunLaneNetworkPolicies('test-wf', 'uid-123', spec())
-          expect(second).toEqual({ conflicts: [], retryPending: false })
-          expect(apiserver.live.has(apiserver.key('sandbox-recipes', LEFTOVER))).toBe(false)
-        })
-
-        it('keeps reporting the retry while the prune LIST fails', async () => {
-          const { apiserver, reconciler } = await convergedRunLane()
           apiserver.api.listNamespacedNetworkPolicy.mockClear()
-          seedLeftover(apiserver)
-          apiserver.api.listNamespacedNetworkPolicy.mockRejectedValueOnce({
-            code: 500,
-            message: 'boom',
-          })
-
-          const first = await reconciler.retryRunLaneNetworkPolicies('test-wf', 'uid-123', spec())
-          expect(apiserver.api.listNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
-          expect(first.retryPending).toBe(true)
+          apiserver.api.createNamespacedNetworkPolicy.mockClear()
+          apiserver.api.deleteNamespacedNetworkPolicy.mockClear()
+          expect(
+            apiserver.live.delete(apiserver.key('sandbox-recipes', 'test-wf-coord-to-wrc'))
+          ).toBe(true)
+          const retried = await reconciler.retryRunLaneNetworkPolicies('test-wf', 'uid-123', spec())
+          // Liveness witness: the retry applied the lane the spec wants.
+          expect(
+            apiserver.api.createNamespacedNetworkPolicy.mock.calls.map(
+              ([arg]) => arg.body.metadata?.name
+            )
+          ).toEqual(['test-wf-coord-to-wrc'])
+          expect(retried).toEqual({ conflicts: [], retryPending: false })
+          expect(apiserver.api.listNamespacedNetworkPolicy).toHaveBeenCalledTimes(0)
+          expect(apiserver.api.deleteNamespacedNetworkPolicy).toHaveBeenCalledTimes(0)
           expect(apiserver.live.has(apiserver.key('sandbox-recipes', LEFTOVER))).toBe(true)
 
-          const second = await reconciler.retryRunLaneNetworkPolicies('test-wf', 'uid-123', spec())
-          expect(second.retryPending).toBe(false)
+          const pruned = await reconciler.reconcile('test-wf', 'uid-123', 'sandbox-recipes', spec())
+          expect(pruned.networkPolicyRetryPending).toBeFalsy()
+          expect(apiserver.api.listNamespacedNetworkPolicy).toHaveBeenCalledWith({
+            namespace: 'sandbox-recipes',
+            labelSelector: TWO_TERM_SELECTOR,
+          })
+          expect(
+            apiserver.api.deleteNamespacedNetworkPolicy.mock.calls.map(([arg]) => arg.name)
+          ).toEqual([LEFTOVER])
           expect(apiserver.live.has(apiserver.key('sandbox-recipes', LEFTOVER))).toBe(false)
         })
 
@@ -5400,15 +5463,13 @@ describe('WorkflowReconciler — reconcile loop', () => {
           expect(second.retryPending).toBe(false)
         })
 
-        // The retry computes its own verdict. These tests pin it: a proxy the
-        // fresh verdict still wants (or cannot decide about) survives, and one
-        // it no longer wants goes. Every case also asserts the delete of a
-        // snippet-lane sibling the agent spec no longer wants
-        // (`expectSnippetSiblingPruned`): that is the liveness witness proving
-        // the prune loop iterated the same LIST, so "no proxy was deleted"
-        // cannot pass because the loop never ran.
+        // The retry computes its own verdict. Every case also asserts the
+        // create of an agent lane the spec wants (`expectAgentLaneApplied`): that
+        // is the liveness witness proving the retry built and applied this spec,
+        // so "no proxy was deleted" cannot pass because the retry never ran.
         describe('with a fresh Codex/Grok verdict', () => {
           const SNIPPET_SIBLING = 'test-wf-snippet-runner-egress'
+          const AGENT_LANE = 'test-wf-coord-to-mcp-host'
           const CODEX_LIVE = 'test-wf-mcp-host-to-codex-proxy'
           const projection = (overrides: Record<string, unknown>) => ({
             targets: [],
@@ -5466,20 +5527,20 @@ describe('WorkflowReconciler — reconcile loop', () => {
             }
           }
 
-          // The baseline lane is the snippet one, so switching to an agent spec also
-          // prunes its snippet policies. Only the proxy policies are under test here.
+          // The baseline lane is the snippet one. Switching to an agent spec
+          // mid-run keeps its snippet policies; only the proxies are under test.
           const deletedNames = (apiserver: Converged) =>
             apiserver.api.deleteNamespacedNetworkPolicy.mock.calls
               .map(([arg]) => arg.name)
               .filter(name => name.endsWith('-proxy'))
 
-          function expectSnippetSiblingPruned(apiserver: Converged): void {
+          function expectAgentLaneApplied(apiserver: Converged): void {
             expect(
-              apiserver.api.deleteNamespacedNetworkPolicy.mock.calls.map(([arg]) => arg.name)
-            ).toContain(SNIPPET_SIBLING)
-            expect(apiserver.live.has(apiserver.key('sandbox-recipes', SNIPPET_SIBLING))).toBe(
-              false
-            )
+              apiserver.api.createNamespacedNetworkPolicy.mock.calls.map(
+                ([arg]) => arg.body.metadata?.name
+              )
+            ).toContain(AGENT_LANE)
+            expect(apiserver.live.has(apiserver.key('sandbox-recipes', SNIPPET_SIBLING))).toBe(true)
           }
 
           it('keeps a proxy the fresh verdict still requires, and the undesired twin', async () => {
@@ -5495,8 +5556,8 @@ describe('WorkflowReconciler — reconcile loop', () => {
               [CODEX_LIVE, GROK_PROXY]
             )
 
-            expect(apiserver.api.listNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
-            expectSnippetSiblingPruned(apiserver)
+            expect(apiserver.api.listNamespacedNetworkPolicy).toHaveBeenCalledTimes(0)
+            expectAgentLaneApplied(apiserver)
             expect(deletedNames(apiserver)).toEqual([])
             expect(apiserver.live.has(apiserver.key('sandbox-recipes', CODEX_LIVE))).toBe(true)
             expect(apiserver.live.has(apiserver.key('sandbox-recipes', GROK_PROXY))).toBe(true)
@@ -5512,8 +5573,8 @@ describe('WorkflowReconciler — reconcile loop', () => {
               [CODEX_LIVE, GROK_PROXY]
             )
 
-            expect(apiserver.api.listNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
-            expectSnippetSiblingPruned(apiserver)
+            expect(apiserver.api.listNamespacedNetworkPolicy).toHaveBeenCalledTimes(0)
+            expectAgentLaneApplied(apiserver)
             expect(deletedNames(apiserver)).toEqual([])
             expect(apiserver.live.has(apiserver.key('sandbox-recipes', CODEX_LIVE))).toBe(true)
             expect(apiserver.live.has(apiserver.key('sandbox-recipes', GROK_PROXY))).toBe(true)
@@ -5530,8 +5591,8 @@ describe('WorkflowReconciler — reconcile loop', () => {
               GROK_PROXY,
             ])
 
-            expect(apiserver.api.listNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
-            expectSnippetSiblingPruned(apiserver)
+            expect(apiserver.api.listNamespacedNetworkPolicy).toHaveBeenCalledTimes(0)
+            expectAgentLaneApplied(apiserver)
             expect(deletedNames(apiserver)).toEqual([])
             expect(apiserver.live.has(apiserver.key('sandbox-recipes', CODEX_LIVE))).toBe(true)
             expect(apiserver.live.has(apiserver.key('sandbox-recipes', GROK_PROXY))).toBe(true)

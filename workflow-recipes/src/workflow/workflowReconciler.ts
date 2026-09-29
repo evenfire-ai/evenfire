@@ -233,8 +233,8 @@ type RunLaneNetworkPolicyApplyResult =
   | { policy: string; action: 'conflict'; reason: NetworkPolicyConflictReason }
 /** Why a Codex/Grok proxy policy survives a prune that does not desire it. */
 interface RunLaneProxyKeepReasons {
-  codex?: 'uncertain' | 'run-in-progress'
-  grok?: 'uncertain' | 'run-in-progress'
+  codex?: 'uncertain'
+  grok?: 'uncertain'
 }
 // Read-then-write rounds per NetworkPolicy and pass. Three rounds is at most
 // three writes, the same as the create plus two replaces it replaced.
@@ -2993,16 +2993,26 @@ export class WorkflowReconciler {
   /**
    * Reapply the run-lane NetworkPolicies outside reconcile(). The running and
    * active short-circuits return before reconcile(), so a policy a previous
-   * pass left pending (terminating, contended, or a prune that failed) would
-   * otherwise stay as it is until the run ends. Runs the same build, apply and
-   * prune unit reconcile() runs, with a verdict computed now, with one
-   * difference: the Codex and Grok proxy policies are never revoked here.
-   * The verdict can change while a step is using the proxy, so a revoke
-   * mid-run would cut its egress; a proxy the verdict still requires is
-   * created (an allow), and one it no longer wants is pruned by the first
-   * reconcile() after the run. The catalog gate keeps everything the run lane
-   * does not own. A prune that failed sets retryPending, so without the prune
-   * here the marker would requeue forever and never reach the leftover.
+   * pass left pending (terminating or contended) would otherwise stay as it is
+   * until the run ends. Builds the desired set with a verdict computed now and
+   * applies it, but prunes no run-lane policy: the run's pods are live and may
+   * still use any lane the spec wanted when they were created, so a revoke here
+   * cuts their traffic. Only the legacy mcp-servers internet policy, which no
+   * spec wants, is still deleted. retryPending reflects the applies and that
+   * delete, so a marker a failed reconcile() prune set clears here and the
+   * leftover waits for the next reconcile() pass or the finalizer sweep.
+   *
+   * What each path may delete (verdict = Codex/Grok eligibility; it governs
+   * only the proxy lanes, every other catalog lane follows the spec alone):
+   *
+   * | path                 | proxy required | proxy uncertain | proxy retired | other lane, not desired |
+   * | reconcile() pass     | applied        | kept if live    | pruned        | pruned                 |
+   * | mid-run retry (this) | applied        | kept if live    | kept          | kept                   |
+   * | terminal teardown    | kept           | kept            | kept          | kept                   |
+   *
+   * A desired lane is applied on both apply paths; an uncertain verdict never
+   * creates a proxy. Terminal teardown deletes compute pods, not policies; the
+   * finalizer deletes every recipe policy.
    */
   async retryRunLaneNetworkPolicies(
     recipeName: string,
@@ -3027,7 +3037,7 @@ export class WorkflowReconciler {
       runtimeScopeRecipeName,
       codexView
     )
-    const { policies, catalog } = await this.buildWorkflowNetworkPoliciesForSpec(
+    const { policies } = await this.buildWorkflowNetworkPoliciesForSpec(
       recipeName,
       recipeUid,
       spec,
@@ -3037,10 +3047,10 @@ export class WorkflowReconciler {
       false,
       codexVerdict.grokProjection
     )
-    return this.applyAndPruneRunLaneNetworkPolicies(recipeName, recipeUid, policies, catalog, {
-      codex: 'run-in-progress',
-      grok: 'run-in-progress',
-    })
+    const summary = await this.applyNetworkPolicyList(policies)
+    const legacy = await this.pruneLegacyMcpServersInternetEgressPolicy(recipeName, recipeUid)
+    if (legacy.retryPending) summary.retryPending = true
+    return summary
   }
 
   async ensureCoordinatorRuntimeCredentials(
@@ -3479,10 +3489,11 @@ export class WorkflowReconciler {
    * Two-term selector only (`managed-by=wrc`): a single-term recipe selector
    * would also return the recipes-lane policies in the same namespace.
    * Universe is the factory catalog (GFS never in it), not LIST \ desired.
-   * A Codex/Grok proxy with a keep reason (an uncertain verdict, or a run in
-   * progress on the retry path) survives even when it is absent from this
-   * pass's desired set. A listed policy with an ownerReference is skipped,
-   * matching the apply's ownership veto.
+   * A Codex/Grok proxy with a keep reason (an uncertain verdict) survives even
+   * when it is absent from this pass's desired set. A listed policy with an
+   * ownerReference is skipped, matching the apply's ownership veto. Only
+   * reconcile() prunes; the mid-run retry never calls this (see
+   * retryRunLaneNetworkPolicies for the per-path table).
    */
   private async pruneUndesiredRunLaneNetworkPolicies(
     recipeName: string,
