@@ -304,6 +304,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   const [openError, setOpenError] = useState<string | null>(null)
   const [resolving, setResolving] = useState(false)
   const openUriGenerationRef = useRef(0)
+  const backgroundOpenUriGenerationRef = useRef(0)
   // Any browser-location update supersedes an in-flight URI resolution. This
   // includes navigation through the tree/crumbs as well as metadata updates,
   // so an older refresh (including a late 403/404) cannot overwrite a newer
@@ -901,13 +902,22 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         : null
 
   const openUri = useCallback(
-    async (uri: string, options?: { clearIfUnavailable?: boolean }) => {
-      const generation = ++openUriGenerationRef.current
-      setOpenError(null)
-      setResolving(true)
+    async (uri: string, options?: { clearIfUnavailable?: boolean; background?: boolean }) => {
+      const background = options?.background === true
+      const generation = background ? openUriGenerationRef.current : ++openUriGenerationRef.current
+      const backgroundGeneration = background ? ++backgroundOpenUriGenerationRef.current : undefined
+      const isCurrent = () =>
+        openUriGenerationRef.current === generation &&
+        (!background ||
+          (backgroundOpenUriGenerationRef.current === backgroundGeneration &&
+            currentCrumbRef.current?.gfsUri === uri))
+      if (!background) {
+        setOpenError(null)
+        setResolving(true)
+      }
       try {
         const resource = await window.clerum.gfs.resolve(uri.trim())
-        if (openUriGenerationRef.current !== generation) return false
+        if (!isCurrent()) return false
         const crumb: GfsCrumb = {
           resourceId: resource.resourceId,
           gfsUri: resource.gfsUri,
@@ -928,7 +938,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
           try {
             const parentRid = parentResourceId.replace(/-/g, '').toLowerCase()
             const parent = await window.clerum.gfs.resolve(`gfs://${resource.drive}/${parentRid}`)
-            if (openUriGenerationRef.current !== generation) return false
+            if (!isCurrent()) return false
             if (parent.kind !== 'directory') break
             if (parent.name) {
               ancestors.push({
@@ -948,11 +958,11 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
           }
         }
 
-        if (openUriGenerationRef.current !== generation) return false
+        if (!isCurrent()) return false
         setCrumbsState([...ancestors.reverse(), crumb])
         return crumb
       } catch (error) {
-        if (openUriGenerationRef.current !== generation) return false
+        if (!isCurrent()) return false
         const message = toMessage(error)
         // Opening a URI is an operation on one resource. A generic 403 may be
         // a per-resource policy decision; only a session-authority failure
@@ -972,17 +982,20 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         }
         return false
       } finally {
-        if (openUriGenerationRef.current === generation) setResolving(false)
+        if (!background && openUriGenerationRef.current === generation) setResolving(false)
       }
     },
     [handleAuthorityFailure, queryClient]
   )
 
-  const refreshCurrentLocation = useCallback(async () => {
-    const uri = current?.gfsUri
-    if (!uri) return false
-    return openUri(uri, { clearIfUnavailable: true })
-  }, [current?.gfsUri, openUri])
+  const refreshCurrentLocation = useCallback(
+    async (options?: { background?: boolean }) => {
+      const uri = current?.gfsUri
+      if (!uri) return false
+      return openUri(uri, { clearIfUnavailable: true, background: options?.background })
+    },
+    [current?.gfsUri, openUri]
+  )
 
   // Move refreshes the old parent's children, the destination's children,
   // and the accessible roots in one shot via refreshGfs. The moved resource's

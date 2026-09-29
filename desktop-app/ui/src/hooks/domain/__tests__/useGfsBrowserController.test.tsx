@@ -144,6 +144,15 @@ function Probe() {
       <button type="button" onClick={() => swallow(ctrl.refreshCurrentLocation())}>
         refresh current location
       </button>
+      <button
+        type="button"
+        onClick={() => swallow(ctrl.refreshCurrentLocation({ background: true }))}
+      >
+        background refresh current location
+      </button>
+      <button type="button" onClick={() => swallow(ctrl.openUri('gfs://main/folder-b'))}>
+        open user destination
+      </button>
       <button type="button" onClick={() => swallow(ctrl.refreshAffordances())}>
         refresh permissions
       </button>
@@ -366,6 +375,53 @@ describe('useGfsBrowserController', () => {
       })
     }
   )
+
+  it('does not let a live background refresh supersede a pending user navigation', async () => {
+    const folderA = await resolveResource(
+      resolvedDirectory('folder-a', 'Folder A', { gfsUri: 'gfs://main/root' })
+    )
+    const folderB = await resolveResource(
+      resolvedDirectory('folder-b', 'Folder B', { gfsUri: 'gfs://main/folder-b' })
+    )
+    let finishUserNavigation!: (resource: typeof folderB) => void
+    const deferredUserNavigation = new Promise<typeof folderB>(resolve => {
+      finishUserNavigation = resolve
+    })
+    const resolve = vi
+      .fn()
+      .mockResolvedValueOnce(folderA)
+      .mockImplementationOnce(() => deferredUserNavigation)
+      .mockResolvedValueOnce(folderA)
+
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          resolve,
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+          affordances: vi.fn(async () => ({
+            held: [],
+            canDelegate: false,
+            grantableBits: [],
+            canCreateShare: false,
+          })),
+        },
+      },
+    })
+
+    render(<Probe />, { wrapper: Harness })
+    await act(async () => screen.getByRole('button', { name: 'open' }).click())
+    await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('folder-a'))
+
+    screen.getByRole('button', { name: 'open user destination' }).click()
+    await waitFor(() => expect(resolve).toHaveBeenCalledTimes(2))
+    await act(async () => {
+      screen.getByRole('button', { name: 'background refresh current location' }).click()
+    })
+    await act(async () => finishUserNavigation(folderB))
+
+    await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('folder-b'))
+  })
 
   it('exposes the presented verdict for a failed affordances read, not the IPC wrapper', async () => {
     // Every rejection that crosses ipcRenderer.invoke arrives wrapped in

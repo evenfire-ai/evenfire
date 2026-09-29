@@ -316,7 +316,7 @@ export function FilesPage({
     if (remoteGfsChangeEpoch === undefined) return
     if (lastRemoteGfsChangeEpochRef.current === remoteGfsChangeEpoch) return
     lastRemoteGfsChangeEpochRef.current = remoteGfsChangeEpoch
-    void ctrl.refreshCurrentLocation()
+    void ctrl.refreshCurrentLocation({ background: true })
   }, [ctrl.refreshCurrentLocation, remoteGfsChangeEpoch])
 
   // Warm the cache for directory rows in the current view so clicking into a
