@@ -136,12 +136,19 @@ describe('first-attempt upstream deadlines', () => {
       path: '/rpc/hosts/chatllm/model',
       body: { chatId: 'c1', model: 'claude-haiku-4-5' },
     },
-  ])('$label sends its first attempt without an abort signal', async row => {
+  ])('$label sends its first attempt without a client-side deadline', async row => {
     config.upstreamTimeoutMs = 30
     authTokenMock.verifyRpcToken.mockReturnValue(claims([row.scope, 'host:wake:write']))
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValue(mockFetchResponse(200, JSON.stringify({ ok: true })))
+    // The first attempt carries only the client-disconnect signal (R3-L6): it
+    // must outlive several upstream timeouts without being aborted.
+    let firstSignal: AbortSignal | undefined
+    let abortedWhenAnswered: boolean | undefined
+    const fetchMock = vi.fn().mockImplementation(async (_url: string, init: RequestInit) => {
+      firstSignal = init.signal as AbortSignal
+      await new Promise(resolve => setTimeout(resolve, config.upstreamTimeoutMs * 3))
+      abortedWhenAnswered = firstSignal.aborted
+      return mockFetchResponse(200, JSON.stringify({ ok: true }))
+    })
     globalThis.fetch = fetchMock as unknown as typeof fetch
 
     await request(makeApp())
@@ -151,7 +158,8 @@ describe('first-attempt upstream deadlines', () => {
       .expect(200)
 
     expect(fetchMock).toHaveBeenCalledTimes(1)
-    expect((fetchMock.mock.calls[0]![1] as RequestInit).signal).toBeUndefined()
+    expect(firstSignal).toBeInstanceOf(AbortSignal)
+    expect(abortedWhenAnswered).toBe(false)
     expect(controlApiMock.requestHostWakeFromControlApi).not.toHaveBeenCalled()
   })
 

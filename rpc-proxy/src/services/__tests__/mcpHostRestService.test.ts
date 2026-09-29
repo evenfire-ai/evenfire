@@ -67,11 +67,6 @@ describe('upstream forwarders abort with the standard classified reason', () => 
       call: () => forwardTaskResultFromHost(HOST, 'task-1', 640),
     },
     {
-      label: 'forwardCancelToHost',
-      timeoutMs: 530,
-      call: () => forwardCancelToHost(HOST, 'task-1', 'user-1', 530),
-    },
-    {
       label: 'forwardHostStatus',
       timeoutMs: config.upstreamTimeoutMs,
       call: () => forwardHostStatus(HOST),
@@ -128,6 +123,52 @@ describe('upstream forwarders abort with the standard classified reason', () => 
       }
     }
   )
+})
+
+// R3-L4 / R3-L6: task cancel is a mutating POST with no idempotency key, so it
+// owns no deadline. The route passes one signal that carries the wake-hold
+// deadline (retry only) and the client's disconnect.
+describe('forwardCancelToHost aborts only through the caller signal', () => {
+  const HOST = { name: 'chatllm', url: 'http://chatllm:8080', headers: {} }
+
+  it('stays in flight past the upstream timeout and rejects with the caller abort reason', async () => {
+    vi.useFakeTimers()
+    let signal: AbortSignal | undefined
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(
+      (_input, init) =>
+        new Promise((_resolve, reject) => {
+          signal = init?.signal as AbortSignal
+          signal.addEventListener('abort', () => reject(signal!.reason))
+        })
+    )
+    try {
+      const controller = new AbortController()
+      const pending = forwardCancelToHost(HOST, 'task-1', 'user-1', controller.signal)
+      const rejection = pending.then(
+        () => {
+          throw new Error('expected the forwarder to reject when the caller aborts')
+        },
+        (error: unknown) => error
+      )
+
+      // Liveness witness: the POST is in flight on the caller's own signal, and
+      // four upstream timeouts later nothing has aborted it.
+      await vi.advanceTimersByTimeAsync(config.upstreamTimeoutMs * 4)
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      expect(signal).toBe(controller.signal)
+      expect(signal?.aborted).toBe(false)
+
+      const reason = new DOMException('The operation was aborted.', 'AbortError')
+      controller.abort(reason)
+      const error = await rejection
+
+      expect(error).toBe(reason)
+      expect(isUpstreamTimeoutError(error)).toBe(true)
+    } finally {
+      fetchMock.mockRestore()
+      vi.useRealTimers()
+    }
+  })
 })
 
 const baseUpstream = {

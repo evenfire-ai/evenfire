@@ -188,14 +188,22 @@ export function respondControlApiHostAccessRejection(
 }
 
 /**
- * Abort signal for a MUTATING upstream call (approve, deny, set-model). The
- * first attempt has no client-side timeout: aborting a request the upstream may
- * already have applied would answer 504 for a change that took effect, and the
- * user's retry would then hit "No pending approval". Only a wake-and-hold retry
- * passes `timeoutMs`, bounded by the hold deadline.
+ * Abort signal for a MUTATING upstream call (approve, deny, set-model, task
+ * cancel). The first attempt has no client-side timeout by design: aborting a
+ * request the upstream may already have applied would answer 504 for a change
+ * that took effect, and the user's retry would then hit "No pending approval".
+ * Only a wake-and-hold retry passes `timeoutMs`, bounded by the hold deadline.
+ * A client that disconnects before the response is written aborts the call on
+ * every attempt, so a gone client never pins the upstream socket.
  */
-function mutatingCallSignal(timeoutMs: number | undefined): AbortSignal | undefined {
-  return timeoutMs === undefined ? undefined : AbortSignal.timeout(timeoutMs)
+function mutatingCallSignal(timeoutMs: number | undefined, res: ExpressResponse): AbortSignal {
+  const clientGone = new AbortController()
+  res.once('close', () => {
+    if (!res.writableFinished) clientGone.abort(new Error('client disconnected'))
+  })
+  return timeoutMs === undefined
+    ? clientGone.signal
+    : AbortSignal.any([clientGone.signal, AbortSignal.timeout(timeoutMs)])
 }
 
 class ProxyArtifactTooLargeError extends Error {
@@ -680,7 +688,7 @@ export function createRpcRouter(): Router {
             method: 'POST',
             headers: { 'content-type': 'application/json', ...host.headers },
             body: JSON.stringify(upstreamBody),
-            signal: mutatingCallSignal(timeoutMs),
+            signal: mutatingCallSignal(timeoutMs, res),
           })
           const body = await readMutatingResponseBody(response)
           const draining = sessionDrainingFence(response, body)
@@ -746,7 +754,7 @@ export function createRpcRouter(): Router {
             method: 'POST',
             headers: { 'content-type': 'application/json', ...host.headers },
             body: JSON.stringify(upstreamBody),
-            signal: mutatingCallSignal(timeoutMs),
+            signal: mutatingCallSignal(timeoutMs, res),
           })
           const body = await readMutatingResponseBody(response)
           const draining = sessionDrainingFence(response, body)
@@ -1247,7 +1255,7 @@ export function createRpcRouter(): Router {
             method: 'POST',
             headers: { 'content-type': 'application/json', ...host.headers },
             body: JSON.stringify(body),
-            signal: mutatingCallSignal(timeoutMs),
+            signal: mutatingCallSignal(timeoutMs, res),
           })
           const upstreamBody = await readMutatingResponseBody(response)
           const draining = sessionDrainingFence(response, upstreamBody)
@@ -1383,8 +1391,13 @@ export function createRpcRouter(): Router {
           `[RPC_PROXY] user=${auth.sub} host=${hostRef} method=cancel-task taskId=${taskId}`
         )
 
-        const attemptCancel = async (timeoutMs = config.upstreamTimeoutMs) => {
-          const result = await forwardCancelToHost(host, taskId, auth.sub, timeoutMs)
+        const attemptCancel = async (timeoutMs?: number) => {
+          const result = await forwardCancelToHost(
+            host,
+            taskId,
+            auth.sub,
+            mutatingCallSignal(timeoutMs, res)
+          )
           if (result.body) {
             sendUpstreamBody(
               res,

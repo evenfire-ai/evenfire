@@ -245,41 +245,37 @@ export type CancelUpstreamResult = {
   contentType: string | null
 }
 
+/**
+ * Task cancel is a mutating POST without an idempotency key, so it owns no
+ * deadline: the caller's `signal` carries the client disconnect and, on a
+ * wake-and-hold retry only, the hold deadline (rpc.ts `mutatingCallSignal`).
+ */
 export async function forwardCancelToHost(
   host: ResolvedServerConnection,
   taskId: string,
-  userId?: string,
-  timeoutMs = config.upstreamTimeoutMs
+  userId: string | undefined,
+  signal: AbortSignal
 ): Promise<CancelUpstreamResult> {
   const baseUrl = host.url.replace(/\/+$/, '')
-  const abortController = new AbortController()
-  const timeout = setTimeout(() => abortController.abort(), timeoutMs)
   // Mirrors the approve/deny pattern: always forward userId so mcp-host can
   // apply the ownership check. Falls back to 'desktop-app' when absent.
   const upstreamBody = { userId: userId || 'desktop-app' }
-  try {
-    const response = await fetch(
-      `${baseUrl}/v1/runtime/tasks/${encodeURIComponent(taskId)}/cancel`,
-      {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          ...host.headers,
-        },
-        body: JSON.stringify(upstreamBody),
-        signal: abortController.signal,
-      }
-    )
-    // Cancel is a mutating POST without an idempotency key: a body failure
-    // after the headers must not re-issue it through the wake path.
-    const body = await readMutatingResponseBody(response)
-    return {
-      status: response.status,
-      body,
-      contentType: response.headers.get('content-type'),
-    }
-  } finally {
-    clearTimeout(timeout)
+  const response = await fetch(`${baseUrl}/v1/runtime/tasks/${encodeURIComponent(taskId)}/cancel`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      ...host.headers,
+    },
+    body: JSON.stringify(upstreamBody),
+    signal,
+  })
+  // Cancel is a mutating POST without an idempotency key: a body failure
+  // after the headers must not re-issue it through the wake path.
+  const body = await readMutatingResponseBody(response)
+  return {
+    status: response.status,
+    body,
+    contentType: response.headers.get('content-type'),
   }
 }
 

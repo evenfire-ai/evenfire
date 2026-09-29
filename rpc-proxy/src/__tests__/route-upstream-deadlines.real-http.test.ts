@@ -1,6 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
-import { type IncomingMessage, type Server, type ServerResponse, createServer } from 'node:http'
+import {
+  type IncomingMessage,
+  type Server,
+  type ServerResponse,
+  createServer,
+  request as httpRequest,
+} from 'node:http'
 import type { AddressInfo } from 'node:net'
 import request from 'supertest'
 import { config } from '../config.js'
@@ -738,5 +744,107 @@ describe.each(HELD_ROUTES)('R3-L7 $label pins the hold deadline before host reso
     // the resolution it would take HOST_RESOLUTION_LATENCY_MS longer.
     expect(elapsed).toBeGreaterThanOrEqual(PINNED_HOLD_MS - 100)
     expect(elapsed).toBeLessThan(PINNED_HOLD_MS + 400)
+  })
+})
+
+// R3-L6: the first attempt of a mutating call has no client-side timeout (an
+// abort after the upstream applied it would answer 504 for a change that took
+// effect), but a client that is gone must still release the upstream socket.
+const DISCONNECT_ROUTES = [
+  ...MUTATING_ROUTES,
+  {
+    label: 'cancel task',
+    path: '/rpc/hosts/chatllm/tasks/task-1/cancel',
+    body: {},
+    upstreamPath: '/v1/runtime/tasks/task-1/cancel',
+  },
+] as const
+
+const CLIENT_GONE_RELEASE_MS = 500
+
+describe.each(DISCONNECT_ROUTES)(
+  'R3-L6 $label releases the upstream call when the client disconnects',
+  route => {
+    it('a client that goes away closes the in-flight upstream socket', async () => {
+      serviceMock.forwardCancelToHost.mockImplementation(
+        forwardCancelToHost as typeof serviceMock.forwardCancelToHost
+      )
+      await startUpstream(() => {
+        // never answered: only the client disconnect can end the upstream call
+      })
+      const proxy = makeApp().listen(0, '127.0.0.1')
+      await new Promise<void>((resolve, reject) => {
+        proxy.once('listening', resolve)
+        proxy.once('error', reject)
+      })
+      try {
+        const { port } = proxy.address() as AddressInfo
+        const payload = JSON.stringify(route.body)
+        const clientErrors: string[] = []
+        const clientReq = httpRequest({
+          host: '127.0.0.1',
+          port,
+          method: 'POST',
+          path: route.path,
+          headers: {
+            authorization: 'Bearer tok',
+            'content-type': 'application/json',
+            'content-length': Buffer.byteLength(payload),
+          },
+        })
+        // Recorded, not ignored: destroying the request is the event under test.
+        clientReq.on('error', error => clientErrors.push(error.message))
+        clientReq.end(payload)
+
+        // Witness: the POST reached the upstream and is in flight.
+        await vi.waitFor(() => expect(seen).toHaveLength(1), { timeout: 2_000, interval: 10 })
+        expect(seen[0]!.closedEarly).toBe(false)
+
+        clientReq.destroy()
+        const disconnectedAt = Date.now()
+        await vi.waitFor(() => expect(seen[0]!.closedEarly).toBe(true), {
+          timeout: CLIENT_GONE_RELEASE_MS,
+          interval: 10,
+        })
+        expect(Date.now() - disconnectedAt).toBeLessThan(CLIENT_GONE_RELEASE_MS)
+        expect(clientErrors).toEqual(['socket hang up'])
+        expect(seen.map(entry => `${entry.method} ${entry.url}`)).toEqual([
+          `POST ${route.upstreamPath}`,
+        ])
+        expect(controlApiMock.requestHostWakeFromControlApi).not.toHaveBeenCalled()
+      } finally {
+        proxy.closeAllConnections()
+        await new Promise<void>(resolve => proxy.close(() => resolve()))
+      }
+    })
+  }
+)
+
+// R3-L4: task cancel is mutating like approve/deny/model, so its first attempt
+// has no client-side timeout either: a slow upstream answer is relayed.
+describe('R3-L4 task cancel first attempt has no client-side timeout', () => {
+  it('relays an upstream answer that arrives after upstreamTimeoutMs', async () => {
+    config.upstreamTimeoutMs = 200
+    serviceMock.forwardCancelToHost.mockImplementation(
+      forwardCancelToHost as typeof serviceMock.forwardCancelToHost
+    )
+    await startUpstream((_req, res) => {
+      setTimeout(() => {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ cancelled: true }))
+      }, 400)
+    })
+
+    const res = await request(makeApp())
+      .post('/rpc/hosts/chatllm/tasks/task-1/cancel')
+      .set('authorization', 'Bearer tok')
+      .expect(200)
+
+    expect(res.body).toEqual({ cancelled: true })
+    // Witness: exactly one POST, answered in full by the upstream.
+    expect(seen).toEqual([
+      { method: 'POST', url: '/v1/runtime/tasks/task-1/cancel', closedEarly: false },
+    ])
+    expect(controlApiMock.requestHostWakeFromControlApi).not.toHaveBeenCalled()
   })
 })

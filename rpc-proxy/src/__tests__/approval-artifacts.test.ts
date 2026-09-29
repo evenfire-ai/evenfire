@@ -133,11 +133,18 @@ describe('POST /rpc/hosts/:hostRef/approvals/approve', () => {
   // attempt would answer 504 for an approval the host may already have applied.
   // Real-socket coverage (slow upstream, hung retry) lives in
   // route-upstream-deadlines.real-http.test.ts.
-  it('sends the first approval attempt without a client-side abort signal', async () => {
+  it('sends the first approval attempt without a client-side deadline', async () => {
     config.upstreamTimeoutMs = 20
-    const fetchMock = vi
-      .fn()
-      .mockImplementation(async () => mockFetchResponse(200, JSON.stringify({ ok: true })))
+    // The first attempt carries only the client-disconnect signal (R3-L6): it
+    // must outlive several upstream timeouts without being aborted.
+    let firstSignal: AbortSignal | undefined
+    let abortedWhenAnswered: boolean | undefined
+    const fetchMock = vi.fn().mockImplementation(async (_url: string, init: RequestInit) => {
+      firstSignal = init.signal as AbortSignal
+      await new Promise(resolve => setTimeout(resolve, config.upstreamTimeoutMs * 3))
+      abortedWhenAnswered = firstSignal.aborted
+      return mockFetchResponse(200, JSON.stringify({ ok: true }))
+    })
     globalThis.fetch = fetchMock
 
     await request(makeApp())
@@ -147,7 +154,8 @@ describe('POST /rpc/hosts/:hostRef/approvals/approve', () => {
       .expect(200)
 
     expect(fetchMock).toHaveBeenCalledTimes(1)
-    expect((fetchMock.mock.calls[0]![1] as RequestInit).signal).toBeUndefined()
+    expect(firstSignal).toBeInstanceOf(AbortSignal)
+    expect(abortedWhenAnswered).toBe(false)
     expect(controlApiMock.requestHostWakeFromControlApi).not.toHaveBeenCalled()
   })
 
