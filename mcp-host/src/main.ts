@@ -1044,7 +1044,13 @@ async function initializeMcpServers(): Promise<void> {
         new McpManager(
           config.mcpProxyEnabled ? config.mcpProxyUrl : undefined,
           undefined,
-          createMcpTokenProviderFactory()
+          createMcpTokenProviderFactory(),
+          {
+            grantExistence: (queries, { timeoutMs }) =>
+              checkGrantExistence({ ...brokerTokenProviderDeps(), timeoutMs }, queries),
+            userPartitionMax: OAUTH_USER_PARTITION_MAX,
+            catalogBootstrap: config.mcpCatalogBootstrap,
+          }
         ),
       getAuthToken: async (serverName, expectedRevision) => {
         return ensureAuthenticatedContextMapperClient().getAuthToken(serverName, expectedRevision)
@@ -3118,7 +3124,13 @@ async function startDevMode(): Promise<void> {
   mcpManager = new McpManager(
     config.mcpProxyEnabled ? config.mcpProxyUrl : undefined,
     undefined,
-    createMcpTokenProviderFactory()
+    createMcpTokenProviderFactory(),
+    {
+      grantExistence: (queries, { timeoutMs }) =>
+        checkGrantExistence({ ...brokerTokenProviderDeps(), timeoutMs }, queries),
+      userPartitionMax: OAUTH_USER_PARTITION_MAX,
+      catalogBootstrap: config.mcpCatalogBootstrap,
+    }
   )
 
   if (config.devMcpServers && config.devMcpServers.length > 0) {
