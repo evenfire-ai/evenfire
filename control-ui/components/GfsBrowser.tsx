@@ -70,6 +70,7 @@ interface TreePage {
   items: GfsChild[]
   nextCursor: string | null
   rootResourceId?: string
+  loadedPageCount?: number
 }
 
 type OpenPreviewState =
@@ -146,6 +147,22 @@ function folderResourceToCrumb(
     gfsUri: resource.gfsUri,
     ...(Number.isSafeInteger(resource.version) ? { version: resource.version } : {}),
   }
+}
+
+function sameCrumbTrail(left: Crumb[], right: Crumb[]): boolean {
+  return (
+    left.length === right.length &&
+    left.every((crumb, index) => {
+      const other = right[index]
+      return (
+        crumb.id === other?.id &&
+        crumb.rid === other.rid &&
+        crumb.gfsUri === other.gfsUri &&
+        crumb.name === other.name &&
+        crumb.version === other.version
+      )
+    })
+  )
 }
 
 /** Verdict of a breadcrumb ancestry reconstruction attempt (R7-M1 race).
@@ -294,6 +311,12 @@ function isTransientEntityChangeRefetchError(error: unknown): boolean {
   )
 }
 
+function entityChangeErrorStatus(error: unknown): number | undefined {
+  if (!error || typeof error !== 'object') return undefined
+  const status = (error as { status?: unknown }).status
+  return typeof status === 'number' ? status : undefined
+}
+
 export function GfsBrowser(): React.JSX.Element {
   const { showToast } = useToast()
   const [crumbs, setCrumbs] = useState<Crumb[]>([{ id: null, rid: null, name: '/' }])
@@ -302,13 +325,23 @@ export function GfsBrowser(): React.JSX.Element {
   const [loading, setLoading] = useState(true)
   const [loadingMore, setLoadingMore] = useState(false)
   const [error, setError] = useState('')
+  const loadSeqRef = useRef(0)
+  const backgroundLoadSeqRef = useRef(0)
+  const loadedPageCountRef = useRef(1)
+  const loadedLocationRef = useRef<string | null | undefined>(undefined)
   // Operator selects a resource to delegate access on (grant panel).
   const [selected, setSelected] = useState<GfsChild | null>(null)
+  const selectedRef = useRef(selected)
+  selectedRef.current = selected
   const [renameTarget, setRenameTarget] = useState<GfsChild | null>(null)
+  const renameTargetRef = useRef(renameTarget)
+  renameTargetRef.current = renameTarget
   const [renaming, setRenaming] = useState(false)
   const [renameError, setRenameError] = useState('')
   const [renameValid, setRenameValid] = useState(true)
   const [deleteOpen, setDeleteOpen] = useState(false)
+  const deleteOpenRef = useRef(deleteOpen)
+  deleteOpenRef.current = deleteOpen
   // "Open EvenDrive link" dialog launched from the folder ⋯ menus.
   const [openLinkOpen, setOpenLinkOpen] = useState(false)
   const [openLinkResolving, setOpenLinkResolving] = useState(false)
@@ -329,6 +362,8 @@ export function GfsBrowser(): React.JSX.Element {
   const [dragOverFolderId, setDragOverFolderId] = useState<string | null>(null)
   const [movingResourceId, setMovingResourceId] = useState<string | null>(null)
   const [moveTarget, setMoveTarget] = useState<GfsChild | null>(null)
+  const moveTargetRef = useRef(moveTarget)
+  moveTargetRef.current = moveTarget
   // R5-M1 recovery: the Move PATCH succeeded but the breadcrumb trail could
   // not be reconstructed from the folder's new location. The trail stays
   // as-was — explicitly stale, never shortened and presented as
@@ -422,9 +457,17 @@ export function GfsBrowser(): React.JSX.Element {
     async (crumb: Crumb, cursor?: string, options?: { background?: boolean }): Promise<void> => {
       const appending = Boolean(cursor)
       const background = Boolean(options?.background)
-      // Only the newest load may apply results; a superseded navigation's
-      // response (including a background revalidation) must be dropped.
-      const seq = ++loadSeqRef.current
+      // Background revalidation has its own sequence: it can be superseded by
+      // user navigation, but never invalidates that navigation's request.
+      const navigationSeq = background ? loadSeqRef.current : ++loadSeqRef.current
+      const backgroundSeqAtStart = backgroundLoadSeqRef.current
+      const backgroundSeq = background ? ++backgroundLoadSeqRef.current : undefined
+      const isCurrent = () =>
+        background
+          ? backgroundLoadSeqRef.current === backgroundSeq && loadSeqRef.current === navigationSeq
+          : loadSeqRef.current === navigationSeq &&
+            backgroundLoadSeqRef.current === backgroundSeqAtStart
+      if (!background && !cursor) loadedPageCountRef.current = 1
       if (appending) {
         setLoadingMore(true)
       } else if (!background) {
@@ -440,8 +483,21 @@ export function GfsBrowser(): React.JSX.Element {
             : `/api/v1/gfs/resources/${encodeURIComponent(crumb.id)}/children`
         const query: Record<string, string> = { drive: DRIVE }
         if (cursor) query.cursor = cursor
-        const page = (await apiGet(path, query)) as TreePage
-        if (seq !== loadSeqRef.current) return
+        let page = (await apiGet(path, query)) as TreePage
+        let allItems = [...page.items]
+        let finalCursor = page.nextCursor
+        let fetchedPageCount = 1
+        if (background) {
+          const targetPageCount = loadedPageCountRef.current
+          for (let index = 1; index < targetPageCount && finalCursor; index += 1) {
+            page = (await apiGet(path, { drive: DRIVE, cursor: finalCursor })) as TreePage
+            allItems.push(...page.items)
+            finalCursor = page.nextCursor
+            fetchedPageCount += 1
+            if (!isCurrent()) return
+          }
+        }
+        if (!isCurrent()) return
         if (crumb.id === null && page.rootResourceId) {
           setCrumbs(prev =>
             prev[0]?.id === null
@@ -456,21 +512,28 @@ export function GfsBrowser(): React.JSX.Element {
               : prev
           )
         }
-        const sortedItems = sortChildrenWithDirectoriesFirst(page.items)
+        const sortedItems = sortChildrenWithDirectoriesFirst(allItems)
         setItems(prev => (cursor ? [...prev, ...sortedItems] : sortedItems))
-        setNextCursor(page.nextCursor)
+        setNextCursor(finalCursor)
+        if (background) loadedPageCountRef.current = fetchedPageCount
+        else if (cursor) loadedPageCountRef.current += 1
         // Keep the folder cache coherent with what the server just returned:
         // navigation, refresh-after-mutation, and pagination all land here, so
         // a later openDirectory() can never serve rows older than this load.
         if (crumb.id !== null) {
           const existing = childCacheRef.current.get(crumb.id)
           childCacheRef.current.set(crumb.id, {
-            items: cursor ? [...(existing?.items ?? []), ...page.items] : page.items,
-            nextCursor: page.nextCursor,
+            items: cursor ? [...(existing?.items ?? []), ...allItems] : allItems,
+            nextCursor: finalCursor,
+            loadedPageCount: cursor
+              ? (existing?.loadedPageCount ?? 1) + 1
+              : background
+                ? fetchedPageCount
+                : 1,
           })
         }
       } catch (err) {
-        if (seq !== loadSeqRef.current) return
+        if (!isCurrent()) return
         if (isTransientEntityChangeRefetchError(err)) scheduleEntityChangeRecoveryRef.current?.()
         if (!isSilentApiError(err)) {
           // Background revalidation keeps the (stale) rows visible but still
@@ -478,7 +541,7 @@ export function GfsBrowser(): React.JSX.Element {
           setError(err instanceof Error ? err.message : 'Failed to load EvenDrive')
         }
       } finally {
-        if (seq === loadSeqRef.current) {
+        if (isCurrent()) {
           if (appending) setLoadingMore(false)
           else if (!background) setLoading(false)
         }
@@ -533,7 +596,6 @@ export function GfsBrowser(): React.JSX.Element {
   const childCacheRef = useRef<Map<string, TreePage>>(new Map())
   // Monotonic load sequence: only the newest load() may apply its results,
   // so a slow response cannot clobber the folder the user navigated to next.
-  const loadSeqRef = useRef(0)
   // True after openDirectory() served cached data; the next useEffect pass
   // runs a BACKGROUND revalidation instead of a clearing reload, so the user
   // keeps the cached rows (no spinner) while the server state re-syncs.
@@ -575,6 +637,9 @@ export function GfsBrowser(): React.JSX.Element {
   }, [items])
 
   useEffect(() => {
+    const locationKey = current.id ?? '$root'
+    const sameLocation = loadedLocationRef.current === locationKey
+    loadedLocationRef.current = locationKey
     if (revalidateNextLoadRef.current) {
       revalidateNextLoadRef.current = false
       // Stale-while-revalidate: cached rows stay on screen (no spinner) while
@@ -582,7 +647,7 @@ export function GfsBrowser(): React.JSX.Element {
       void load(current, undefined, { background: true })
       return
     }
-    void load(current)
+    void load(current, undefined, sameLocation ? { background: true } : undefined)
     // Reload whenever the current folder changes (navigation).
   }, [current, load])
 
@@ -614,6 +679,55 @@ export function GfsBrowser(): React.JSX.Element {
     }
     scheduleEntityChangeRecoveryRef.current = scheduleRecovery
 
+    const revalidateActionTargets = async () => {
+      const targets = new Map<string, GfsChild>()
+      for (const target of [selectedRef.current, renameTargetRef.current, moveTargetRef.current]) {
+        if (target) targets.set(target.resourceId, target)
+      }
+      await Promise.all(
+        Array.from(targets.values(), async target => {
+          try {
+            const resolved = (await apiGet('/api/v1/gfs/resolve', {
+              uri: target.gfsUri,
+            })) as {
+              resourceId: string
+              rid: string
+              gfsUri: string
+              name: string
+              kind: string
+              bytes: number
+              version: number
+            }
+            const current: GfsChild = {
+              ...target,
+              resourceId: resolved.resourceId,
+              rid: resolved.rid,
+              gfsUri: resolved.gfsUri,
+              name: resolved.name,
+              kind: resolved.kind,
+              bytes: resolved.bytes,
+              version: resolved.version,
+            }
+            setSelected(value => (value?.resourceId === target.resourceId ? current : value))
+            setRenameTarget(value => (value?.resourceId === target.resourceId ? current : value))
+            setMoveTarget(value => (value?.resourceId === target.resourceId ? current : value))
+          } catch (error) {
+            const status = entityChangeErrorStatus(error)
+            if (status === 403 || status === 404) {
+              setSelected(value => (value?.resourceId === target.resourceId ? null : value))
+              setRenameTarget(value => (value?.resourceId === target.resourceId ? null : value))
+              setMoveTarget(value => (value?.resourceId === target.resourceId ? null : value))
+              if (selectedRef.current?.resourceId === target.resourceId && deleteOpenRef.current) {
+                setDeleteOpen(false)
+              }
+            } else if (isTransientEntityChangeRefetchError(error)) {
+              scheduleRecovery()
+            }
+          }
+        })
+      )
+    }
+
     invalidateVisibleState = (cursor?: string) => {
       // A committed remote change supersedes any local move/retry ancestry
       // reconstruction still in flight. Its older response must not replace
@@ -627,14 +741,8 @@ export function GfsBrowser(): React.JSX.Element {
       }
       childCacheRef.current.clear()
       revalidateNextLoadRef.current = false
-      setSelected(null)
-      setRenameTarget(null)
-      setDeleteOpen(false)
-      setMoveTarget(null)
-      setItems([])
-      setNextCursor(null)
       setError('')
-      setLoading(true)
+      void revalidateActionTargets()
       const previews = openPreviewsRef.current
       if (previews.length > 0) {
         const generation = ++previewRefreshGenerationRef.current
@@ -696,10 +804,11 @@ export function GfsBrowser(): React.JSX.Element {
       }
       const visibleCrumb = currentCrumbRef.current
       if (!visibleCrumb) return
-      if (visibleCrumb.id === null) {
-        void load(visibleCrumb)
-        return
-      }
+      // Keep loaded rows, pagination, selection, and action dialogs visible
+      // while the authoritative background read runs. `load` has a separate
+      // sequence for background work, so it cannot cancel user navigation.
+      void load(visibleCrumb, undefined, { background: true })
+      if (visibleCrumb.id === null) return
 
       const visibleResourceId = visibleCrumb.id
       const generation = ++hierarchyRefreshGenerationRef.current
@@ -748,7 +857,7 @@ export function GfsBrowser(): React.JSX.Element {
           return
         }
         if (!retryHierarchy) {
-          setCrumbs(refreshed)
+          if (!sameCrumbTrail(crumbsRef.current, refreshed)) setCrumbs(refreshed)
           setTrailRecovery(null)
         }
       })()
@@ -804,9 +913,9 @@ export function GfsBrowser(): React.JSX.Element {
           if (!controller.signal.aborted) throw new Error('Entity-change stream ended')
         } catch {
           if (!active || controller.signal.aborted) return
-          // A reconnect may have missed commits. Refetch current authorized state
-          // before retrying rather than assuming the old cursor is complete.
-          invalidateVisibleState()
+          // A transport failure is not evidence that authorization or resource
+          // state changed. The feed cursor remains authoritative for recovery;
+          // preserve visible state and reconnect with bounded backoff.
           await new Promise<void>(resolve => {
             retryTimer = setTimeout(resolve, retryDelay + Math.random() * retryDelay)
           })
@@ -850,6 +959,7 @@ export function GfsBrowser(): React.JSX.Element {
       // user gets fresh data without a loading spinner (decision table above).
       setItems(sortChildrenWithDirectoriesFirst(cached.items))
       setNextCursor(cached.nextCursor)
+      loadedPageCountRef.current = cached.loadedPageCount ?? 1
       setError('')
       setLoading(false)
       revalidateNextLoadRef.current = true
