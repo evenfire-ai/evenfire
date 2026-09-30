@@ -1424,6 +1424,38 @@ describe('App live GFS preview revalidation', () => {
       expect(previews.every(tab => tab.preview?.unavailable)).toBe(true)
     })
   })
+
+  it('does not retry a preview after its last tab owner closes', async () => {
+    vi.useFakeTimers()
+    const resolve = vi.mocked(window.clerum.gfs.resolve)
+    resolve.mockRejectedValue(new Error('upstream unavailable httpStatus=503'))
+    render(<App />)
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(dispatchEntityChange).toBeTypeOf('function')
+
+    await act(async () => {
+      dispatchEntityChange?.({
+        type: 'scope.invalidated',
+        schemaVersion: 1,
+        cursor: 'cursor-retry',
+        scopes: ['gfs'],
+      })
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(resolve).toHaveBeenCalledTimes(1)
+
+    act(() => currentController.setWorkspaceTabs({ tabs: [], activeTabId: null }))
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000)
+    })
+
+    expect(resolve).toHaveBeenCalledTimes(1)
+    vi.useRealTimers()
+  })
 })
 
 // Mini-spec 05: below the minimum panel width the drawer is SUPPRESSED (hidden,

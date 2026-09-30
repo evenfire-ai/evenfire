@@ -45,6 +45,7 @@ import {
   shouldRevalidateGfsQuery,
 } from '@lib/gfsEntityChangeState'
 import { resolveGfsPreview } from '@lib/gfsPreview'
+import { retireClosedGfsPreviewOwners } from '@lib/gfsPreviewRetryOwnership'
 import { desktopQueryClient } from '@lib/queryClient'
 import {
   canProcessSandboxUiDeepLinks,
@@ -857,6 +858,24 @@ export function App() {
   const previewRefreshGenerationRef = React.useRef(new Map<string, number>())
   const previewRetryTimersRef = React.useRef(new Map<string, number>())
   const previewRetryAttemptRef = React.useRef(new Map<string, number>())
+  const previewOwnersRef = React.useRef(new Set<string>())
+
+  React.useEffect(() => {
+    const currentOwners = new Set(
+      workspaceTabs.tabs
+        .filter(tab => tab.kind === 'preview' && tab.preview)
+        .map(tab => tab.preview!.gfsUri)
+    )
+    if (pluginGfsPreview) currentOwners.add(pluginGfsPreview.gfsUri)
+    retireClosedGfsPreviewOwners(
+      previewOwnersRef.current,
+      currentOwners,
+      previewRetryTimersRef.current,
+      previewRetryAttemptRef.current,
+      previewRefreshGenerationRef.current,
+      timer => window.clearTimeout(timer)
+    )
+  }, [pluginGfsPreview?.gfsUri, workspaceTabs.tabs])
 
   React.useEffect(() => {
     const off = window.clerum.pluginSdk?.onOpenGfsResource?.(resource => {
