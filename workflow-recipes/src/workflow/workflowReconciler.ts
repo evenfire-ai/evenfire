@@ -332,13 +332,15 @@ export function networkPolicyConditionsChanged(
   return signal(existing ?? []) !== signal(fresh)
 }
 
-/** True when the published status still carries the retry marker. */
+/**
+ * True when the published marker says an apply is pending a retry. A marker
+ * that carries only a pending prune does not count: the retry prunes nothing,
+ * so reapplying for it would do no work.
+ */
 export function hasNetworkPolicyRetryPendingMarker(
   conditions: StatusCondition[] | undefined
 ): boolean {
-  return (conditions ?? []).some(
-    c => c.type === NETWORK_POLICIES_CONVERGED_CONDITION_TYPE && c.status === 'False'
-  )
+  return networkPolicyMarkerFacts(conditions).applyPending
 }
 
 /**

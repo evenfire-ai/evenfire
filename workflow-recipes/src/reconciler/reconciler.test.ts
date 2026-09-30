@@ -9981,6 +9981,63 @@ describe('WorkflowRecipeReconciler', () => {
       expect(result.requeueAfterMs).toBeUndefined()
     })
 
+    // A marker naming both facts: the retry still owes an apply, and a
+    // reconcile() prune still owes a DELETE.
+    const retryAndPruneMarker = {
+      ...retryMarker,
+      message:
+        'One or more run-lane NetworkPolicies are pending a retry (terminating or contended), and one or more the spec no longer wants are pending a delete',
+    }
+
+    it('reapplies from the active short-circuit for a marker that names both facts, and keeps the prune fact', async () => {
+      const retry = vi.fn().mockResolvedValue({ conflicts: [], retryPending: false })
+      installRunLane(retry)
+      const recipe = runningRecipe({ conditions: [unrelatedCondition, retryAndPruneMarker] })
+
+      const result = await reconciler.reconcile(recipe)
+
+      expect(retry).toHaveBeenCalledTimes(1)
+      const patches = conditionPatches()
+      expect(patches).toHaveLength(1)
+      expect(patches[0].body.status.conditions).toEqual([
+        unrelatedCondition,
+        expect.objectContaining({
+          type: 'WorkflowNetworkPoliciesConverged',
+          status: 'False',
+          reason: 'PrunePending',
+          lastTransitionTime: retryMarker.lastTransitionTime,
+        }),
+      ])
+      expect(result.requeueAfterMs).toBeUndefined()
+    })
+
+    it('rewrites a marker that names both facts to PrunePending from the terminal branch', async () => {
+      const retry = vi.fn()
+      const stub = installRunLane(retry)
+      const recipe = runningRecipe({
+        execPhase: 'completed',
+        conditions: [unrelatedCondition, retryAndPruneMarker],
+      })
+
+      await reconciler.reconcile(recipe)
+
+      // Witness: the terminal branch ran.
+      expect(stub.ensureMcpHostRuntimeCredentials).toHaveBeenCalledTimes(1)
+      expect(retry).not.toHaveBeenCalled()
+      const patches = conditionPatches()
+      expect(patches).toHaveLength(1)
+      expect(Object.keys(patches[0].body.status)).toEqual(['conditions'])
+      expect(patches[0].body.status.conditions).toEqual([
+        unrelatedCondition,
+        expect.objectContaining({
+          type: 'WorkflowNetworkPoliciesConverged',
+          status: 'False',
+          reason: 'PrunePending',
+          lastTransitionTime: retryMarker.lastTransitionTime,
+        }),
+      ])
+    })
+
     it('opens no patch from the terminal branch without the marker', async () => {
       const retry = vi.fn()
       const stub = installRunLane(retry)

@@ -68,8 +68,10 @@ import {
   WORKFLOW_OUTPUT_CONDITION_TYPES,
   WorkflowReconciler,
   WorkflowReconcilerDeps,
+  buildNetworkPolicyConvergedCondition,
   hasNetworkPolicyRetryPendingMarker,
   networkPolicyConditionsChanged,
+  networkPolicyMarkerFacts,
   translateNetworkPolicyApplySummary,
 } from '../workflow/workflowReconciler'
 import { evaluateComputedValues } from './computedValuesEvaluator'
@@ -1472,14 +1474,16 @@ export class WorkflowRecipeReconciler {
 
   /**
    * Applies the run-lane NetworkPolicies again from a short-circuit when the
-   * published status carries the retry marker. Those short-circuits never
-   * reach `WorkflowReconciler.reconcile()`, so without this a policy left
-   * pending a retry would stay unapplied until the run ends. The retry only
-   * applies the desired policies, with a verdict computed for this pass; it
-   * prunes no run-lane policy, because the run's pods may still use any lane.
-   * A marker set by a failed reconcile() prune clears here once the applies
-   * converge, and the leftover waits for the next reconcile() pass or the
-   * finalizer sweep (see `WorkflowReconciler.retryRunLaneNetworkPolicies`).
+   * published marker says an apply is pending a retry. Those short-circuits
+   * never reach `WorkflowReconciler.reconcile()`, so without this a policy
+   * left pending a retry would stay unapplied until the run ends. The retry
+   * only applies the desired policies, with a verdict computed for this pass;
+   * it prunes no run-lane policy, because the run's pods may still use any
+   * lane. A marker that carries only a pending prune (`PrunePending`) does not
+   * enter: the retry could not clear it. A pending prune carried next to the
+   * apply survives the retry, and the leftover waits for the next reconcile()
+   * pass or the finalizer sweep (see
+   * `WorkflowReconciler.retryRunLaneNetworkPolicies`).
    *
    * Returns the requeue delay the short-circuit must add: the progress base
    * while a policy is still pending, the transient base when the apply threw
@@ -1534,17 +1538,27 @@ export class WorkflowRecipeReconciler {
   }
 
   /**
-   * Drops the retry marker once the run is terminal: the run no longer needs
-   * its policies, so there is nothing left to retry. The ownership condition,
-   * if any, stays published.
+   * Settles the marker once the run is terminal. The run no longer needs its
+   * policies, so a pending apply is dropped: there is nothing left to retry.
+   * A pending prune is kept: the terminal teardown deletes the run's pods, not
+   * its run-lane policies, so the leftover is still live and only a later
+   * reconcile() prune or the finalizer removes it. The ownership condition, if
+   * any, stays published. Opens a patch only when the marker changes.
    */
-  private async clearNetworkPolicyRetryMarker(recipe: WorkflowRecipeCRD): Promise<void> {
+  private async settleNetworkPolicyMarkerForTerminalRun(recipe: WorkflowRecipeCRD): Promise<void> {
     const existing = recipe.status?.conditions
-    if (!hasNetworkPolicyRetryPendingMarker(existing)) return
-    await this.publishNetworkPolicyConditions(
-      recipe,
-      (existing ?? []).filter(c => c.type !== NETWORK_POLICIES_CONVERGED_CONDITION_TYPE)
+    const { prunePending } = networkPolicyMarkerFacts(existing)
+    const marker = buildNetworkPolicyConvergedCondition(
+      { applyPending: false, prunePending },
+      new Date().toISOString(),
+      existing
     )
+    const settled = [
+      ...(existing ?? []).filter(c => c.type !== NETWORK_POLICIES_CONVERGED_CONDITION_TYPE),
+      ...(marker ? [marker] : []),
+    ]
+    if (!networkPolicyConditionsChanged(existing, settled)) return
+    await this.publishNetworkPolicyConditions(recipe, settled)
   }
 
   /**
@@ -2051,7 +2065,7 @@ export class WorkflowRecipeReconciler {
         // torn down above; this teardown is idempotent/404-tolerant).
         const terminalOwnership = await this.revokeOrRequeueSteadyWorkflow(recipe, derivedPhase)
         if (terminalOwnership) return terminalOwnership
-        await this.clearNetworkPolicyRetryMarker(recipe)
+        await this.settleNetworkPolicyMarkerForTerminalRun(recipe)
         // The recipe phase may remain active across running -> completed. Still
         // patch once if the top-level message is stale so UIs do not show a
         // completed execution as still running.
@@ -2461,9 +2475,12 @@ export class WorkflowRecipeReconciler {
         // WorkflowNetworkPoliciesConverged=False/RetryPending marker. The
         // requeued pass can stop at a short-circuit above, before
         // WorkflowReconciler.reconcile(): the in-progress and active
-        // short-circuits reapply the run-lane policies while the marker is
-        // present, and the terminal branch removes it. The awaiting-trigger
-        // short-circuit does not reapply; the triggered run applies them.
+        // short-circuits reapply the run-lane policies while the marker names
+        // a pending apply, and the terminal branch drops that fact. A pending
+        // prune (PrunePending) adds no requeue and survives both; only a
+        // later reconcile() prune or the finalizer clears it. The
+        // awaiting-trigger short-circuit does not reapply; the triggered run
+        // applies them.
         requeueAfterMs: result.skipStatusPatch
           ? TRANSIENT_REQUEUE_BASE_MS
           : result.phase === 'deploying' ||
