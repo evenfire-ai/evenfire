@@ -478,6 +478,13 @@ export function GfsBrowser(): React.JSX.Element {
     ): Promise<void> => {
       const appending = Boolean(cursor)
       const background = Boolean(options?.background)
+      if (!background) {
+        // User navigation or a foreground mutation refresh owns the next
+        // visible result. Cancel stream-triggered reads so an older response
+        // for the same folder cannot overwrite it.
+        entityChangeRefetchControllerRef.current?.abort()
+        entityChangeRefetchControllerRef.current = null
+      }
       const loadArbiter = loadArbiterRef.current
       const loadToken = background ? loadArbiter.beginBackground() : loadArbiter.beginForeground()
       const isCurrent = () => !options?.signal?.aborted && loadArbiter.isCurrent(loadToken)
