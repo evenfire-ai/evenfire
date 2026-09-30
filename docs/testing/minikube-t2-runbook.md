@@ -7,7 +7,8 @@ URLs, DSNs, credentials, customer data, or raw runtime logs.
 ## Scope and entry points
 
 The contract is local-development-only. It requires a clean development
-branch descended from the current `origin/dev`, a generated profile owned by
+branch descended from the current `origin/dev` (the commit pinned when the lane
+takes its profile lease; see Ownership and concurrency), a generated profile owned by
 that canonical worktree path plus branch, and an explicit Kubernetes context
 for that profile. Exact-HEAD freshness is proved by the deployed marker and
 gate evidence, not by reallocating a profile after every commit.
@@ -156,6 +157,17 @@ serialize through the atomic sibling directory
 concurrent loser fails closed and never removes either the stale directory or
 the winner's replacement lock.
 
+The lease owner also pins `origin/dev`. It records the commit it resolved as
+`ORIGIN_DEV` in the lock record and exports it as `T2_PINNED_ORIGIN_DEV`; every
+child of the lease validates ancestry against that pin instead of re-reading
+the remote-tracking ref, which a `git fetch` in any worktree of the repository
+moves. A move is reported as `origin/dev moved during the lane` and does not
+invalidate the lane. The pin is honored only under an inherited lease, must be
+a full commit SHA present in the repository, and must still be an ancestor of
+the local `origin/dev`: a force-push of `dev` during the lane, a lease child
+without a pin, or a pin that differs from the owner's record fails with
+`DEVELOPMENT_SCOPE_REQUIRED` or `PROFILE_OWNERSHIP_MISMATCH`.
+
 The pre-gate marker must contain the current worktree identifier, exact `HEAD`,
 cluster fingerprint, image coordinate, and the exact `imagesGeneratedAt` value
 from the image manifest. A mismatch—including a new image acquisition at the
@@ -176,8 +188,8 @@ in the final preflight after optional journeys; planner mode does not certify it
 Health and Playwright commands inherit the parent's opaque lease token,
 profile, explicit context, repository, and lock root for that invocation only.
 A nested mutation wrapper revalidates the full repository/branch/HEAD/profile/
-context/worktree/lock-key binding and live owner before using the lease. A
-missing token or mismatched binding fails; the journey cannot acquire a second
+context/worktree/lock-key/`origin/dev` binding and live owner before using the
+lease. A missing token or mismatched binding fails; the journey cannot acquire a second
 lease or redirect an inherited lease to another profile. Hermetic coverage is
 `bash scripts/tests/test-minikube-t2-proxy-runtime.sh`.
 
@@ -464,7 +476,7 @@ failure still uses the full target.
 
 Each run writes a sanitized `evidence.json` below the ignored local path
 `.local-notes/infra/runs/<timestamp>-<sha>/`. It contains branch/`HEAD`,
-`origin/dev`, merge-base, worktree path, profile/context identifiers,
+the `origin/dev` pinned at lane start, merge-base, worktree path, profile/context identifiers,
 fingerprint and image-manifest references, phase timestamps, lane statuses,
 test counts, and references to local log files. It never contains Secret
 values, DSNs, tokens, kubeconfig data, private URLs, user data, screenshots, or

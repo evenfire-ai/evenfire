@@ -18,7 +18,8 @@ ambiguous ownership metadata must fail closed instead of regenerating ports.
 
 Before reusing a profile, record and compare all of the following:
 
-- active worktree path, branch, `HEAD`, and `origin/dev`;
+- active worktree path, branch, `HEAD`, and `origin/dev` (the value the T2
+  lease owner pinned at lane start, not a later re-read of the ref);
 - target Minikube profile and explicit Kubernetes context;
 - the pre-gate state marker: `worktreeId`, `gitHead`, `clusterFingerprint`,
   and the exact `imagesGeneratedAt` value from the image manifest;

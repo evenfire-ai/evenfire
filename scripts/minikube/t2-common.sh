@@ -224,6 +224,56 @@ t2_canonical_path() {
   (cd -- "$1" 2>/dev/null && pwd -P)
 }
 
+# refs/remotes/origin/dev is shared by every worktree of this repository, so a
+# fetch from any of them moves it while a lane runs. The lease owner reads it
+# once (t2_lock_acquire exports T2_PINNED_ORIGIN_DEV) and every child of that
+# lease validates against the pin. The pin is honored only under an inherited
+# lease: an exported pin cannot certify a branch against an older dev, and a
+# lease child that lost the pin fails instead of re-reading the moved ref.
+t2_resolve_origin_dev() {
+  local pin="${T2_PINNED_ORIGIN_DEV:-}" current
+  current="$(git -C "$T2_PROJECT_DIR" rev-parse --verify origin/dev 2>/dev/null || true)"
+  if [ "${T2_SKIP_LOCK:-}" != true ]; then
+    if [ -n "$pin" ]; then
+      T2_NEXT_COMMAND='unset T2_PINNED_ORIGIN_DEV; the lease owner pins origin/dev for its children'
+      t2_fail DEVELOPMENT_SCOPE_REQUIRED 'T2_PINNED_ORIGIN_DEV is only honored under an inherited T2 lease'
+      return 1
+    fi
+    T2_ORIGIN_DEV="$current"
+    return 0
+  fi
+  if [ -z "$pin" ]; then
+    T2_NEXT_COMMAND='run this child from the T2 lease owner, which exports T2_PINNED_ORIGIN_DEV'
+    t2_fail DEVELOPMENT_SCOPE_REQUIRED 'an inherited T2 lease carries no pinned origin/dev'
+    return 1
+  fi
+  if [[ ! "$pin" =~ ^[0-9a-f]{40}$ ]]; then
+    T2_NEXT_COMMAND='run this child from the T2 lease owner, which exports the full origin/dev SHA'
+    t2_fail DEVELOPMENT_SCOPE_REQUIRED 'T2_PINNED_ORIGIN_DEV is not a full commit SHA'
+    return 1
+  fi
+  if ! git -C "$T2_PROJECT_DIR" cat-file -e "$pin^{commit}" 2>/dev/null; then
+    T2_NEXT_COMMAND='run this child from the T2 lease owner of this repository'
+    t2_fail DEVELOPMENT_SCOPE_REQUIRED 'T2_PINNED_ORIGIN_DEV is not a commit in this repository'
+    return 1
+  fi
+  if [ -z "$current" ]; then
+    T2_NEXT_COMMAND='fetch origin/dev and run from a named development branch'
+    t2_fail DEVELOPMENT_SCOPE_REQUIRED 'branch, HEAD, or origin/dev could not be resolved'
+    return 1
+  fi
+  if ! git -C "$T2_PROJECT_DIR" merge-base --is-ancestor "$pin" "$current"; then
+    T2_NEXT_COMMAND='origin/dev was rewritten during the lane; merge the current origin/dev, then re-run T2'
+    t2_fail DEVELOPMENT_SCOPE_REQUIRED 'the pinned origin/dev is not an ancestor of the current origin/dev'
+    return 1
+  fi
+  if [ "$current" != "$pin" ]; then
+    printf '[minikube-t2] origin/dev moved during the lane: pinned %s, local ref now %s; validating against the pin\n' \
+      "$pin" "$current" >&2
+  fi
+  T2_ORIGIN_DEV="$pin"
+}
+
 t2_repo_metadata() {
   local actual_root remote_url
   actual_root="$(git -C "$T2_PROJECT_DIR" rev-parse --show-toplevel 2>/dev/null || true)"
@@ -243,7 +293,7 @@ t2_repo_metadata() {
   fi
   T2_BRANCH="$(git -C "$T2_PROJECT_DIR" branch --show-current 2>/dev/null || true)"
   T2_HEAD="$(git -C "$T2_PROJECT_DIR" rev-parse --verify HEAD 2>/dev/null || true)"
-  T2_ORIGIN_DEV="$(git -C "$T2_PROJECT_DIR" rev-parse --verify origin/dev 2>/dev/null || true)"
+  t2_resolve_origin_dev || return 1
   if [ -z "$T2_BRANCH" ] || [ -z "$T2_HEAD" ] || [ -z "$T2_ORIGIN_DEV" ]; then
     T2_NEXT_COMMAND='fetch origin/dev and run from a named development branch'
     t2_fail DEVELOPMENT_SCOPE_REQUIRED 'branch, HEAD, or origin/dev could not be resolved'
@@ -1200,6 +1250,11 @@ t2_lock_process_matches() {
 t2_lock_acquire() {
   local process_start reclaim_dir=""
   t2_lock_profile_id_check || return 1
+  if [ -z "${T2_ORIGIN_DEV:-}" ]; then
+    T2_NEXT_COMMAND='resolve repository metadata (t2_repo_metadata) before acquiring the profile lock'
+    t2_fail DEVELOPMENT_SCOPE_REQUIRED 'the lease owner has no origin/dev to pin'
+    return 1
+  fi
   mkdir -p "$T2_LOCK_ROOT"
   T2_LOCK_DIR="$T2_LOCK_ROOT/$T2_PROFILE.lock"
   T2_LOCK_KEY="$(t2_lock_key)"
@@ -1273,6 +1328,7 @@ PROFILE=$T2_PROFILE
 CONTEXT=$T2_CONTEXT
 WORKTREE_ID=$T2_WORKTREE_ID
 LOCK_KEY=$T2_LOCK_KEY
+ORIGIN_DEV=$T2_ORIGIN_DEV
 TOKEN=$T2_LOCK_TOKEN
 PID=$$
 PROCESS_START=$process_start
@@ -1281,6 +1337,9 @@ EOF
   if [ -n "$reclaim_dir" ]; then
     rmdir "$reclaim_dir" 2>/dev/null || true
   fi
+  # Children of this lease validate against the origin/dev read here, not
+  # against the shared remote-tracking ref (see t2_resolve_origin_dev).
+  export T2_PINNED_ORIGIN_DEV="$T2_ORIGIN_DEV"
   T2_LOCK_HELD=true
   T2_LOCK_RELEASED=false
 }
@@ -1302,7 +1361,7 @@ t2_lock_validate_inherited() {
     t2_fail PROFILE_LOCK_REQUIRED 'inherited profile lock token is missing or does not match'
     return 1
   fi
-  for owner_key in REPOSITORY BRANCH HEAD PROFILE CONTEXT WORKTREE_ID LOCK_KEY; do
+  for owner_key in REPOSITORY BRANCH HEAD PROFILE CONTEXT WORKTREE_ID LOCK_KEY ORIGIN_DEV; do
     case "$owner_key" in
       REPOSITORY) expected_pid="$T2_PROJECT_DIR" ;;
       BRANCH) expected_pid="$T2_BRANCH" ;;
@@ -1311,8 +1370,12 @@ t2_lock_validate_inherited() {
       CONTEXT) expected_pid="$T2_CONTEXT" ;;
       WORKTREE_ID) expected_pid="$T2_WORKTREE_ID" ;;
       LOCK_KEY) expected_pid="$T2_LOCK_KEY" ;;
+      ORIGIN_DEV) expected_pid="${T2_PINNED_ORIGIN_DEV:-}" ;;
     esac
-    if [ "$(t2_lock_owner_value "$owner_key" || true)" != "$expected_pid" ]; then
+    # An empty pin never matches, even against a lock written before the
+    # owner recorded ORIGIN_DEV.
+    if [ -z "$expected_pid" ] && [ "$owner_key" = ORIGIN_DEV ] ||
+      [ "$(t2_lock_owner_value "$owner_key" || true)" != "$expected_pid" ]; then
       T2_NEXT_COMMAND='re-run the operation from the worktree/profile that owns the T2 lock'
       t2_fail PROFILE_OWNERSHIP_MISMATCH "profile lock owner does not match $owner_key"
       return 1
