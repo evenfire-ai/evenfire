@@ -161,10 +161,16 @@ if [[ "${1:-}" == config ]]; then
       exit 0
       ;;
     # kube-contexts holds one "<context> <server>" line per kubeconfig context.
+    # get-contexts-fails makes the kubeconfig unreadable, as a malformed file
+    # or one kubectl cannot open does.
     get-contexts)
       [[ "$*" == 'config get-contexts -o name' ]] || {
         printf 'kubectl stub: unsupported config call: %s\n' "$*" >&2
         exit 64
+      }
+      [[ ! -e "${state}/get-contexts-fails" ]] || {
+        printf 'error: stub: unable to read the kubeconfig\n' >&2
+        exit 1
       }
       awk '{ print $1 }' "${state}/kube-contexts"
       exit 0
@@ -184,6 +190,17 @@ if [[ "${1:-}" == config ]]; then
         printf 'error: context was not found for specified context: %s\n' "${wanted}" >&2
         exit 1
       }
+      # Two server markers model a dangling context: @missing-cluster names a
+      # cluster the kubeconfig does not define, which `view --minify` refuses
+      # as client-go does; @empty-server is a cluster entry with no server,
+      # for which the jsonpath prints nothing.
+      case "${server}" in
+        @missing-cluster)
+          printf 'error: cannot locate cluster %s\n' "${wanted}" >&2
+          exit 1
+          ;;
+        @empty-server) exit 0 ;;
+      esac
       printf '%s' "${server}"
       exit 0
       ;;
@@ -357,7 +374,7 @@ reset_state() {
     profiles/external-rest-api rpc-proxy/rpc-proxy >"${state}/services"
   : >"${state}/reachable"
   rm -f "${state}/fail-get-deploy" "${state}/curl-fail" "${state}/start-switches-context" \
-    "${state}/use-context-fails" "${state}/minikube-start-fails" \
+    "${state}/use-context-fails" "${state}/minikube-start-fails" "${state}/get-contexts-fails" \
     "${state}/pf-ignores-term" "${state}/minikube-stop-fails" "${state}/minikube-delete-fails" \
     "${state}/node-label" "${state}/minikube-profile-list-fails" "${state}/docker-info-fails"
   # By default the branch profile's context is this local Minikube, minikube
@@ -620,6 +637,49 @@ for action in start delete; do
     "${action} read the DNS-named context's server from the local kubeconfig"
   assert_no_calls_to minikube "${action} of a profile whose context is a remote DNS name must not call minikube"
   assert_log_lacks 'kubectl --context=' "${action} of a profile whose context is a remote DNS name must not address the cluster"
+done
+
+# Each refusal of the kubeconfig read names its own cause. An unreadable
+# kubeconfig and a dangling context (a context whose cluster is not defined,
+# or whose cluster has no server) are not remote endpoints: reporting them as
+# BRANCH_PROFILE_REMOTE_CONTEXT sends the operator after a cluster that does
+# not exist. The remote loops above are the witness that a non-local endpoint
+# still refuses as BRANCH_PROFILE_REMOTE_CONTEXT.
+for action in start status pf pf-health health stop setup delete; do
+  reset_state
+  : >"${state}/get-contexts-fails"
+  bp "kubeconfig-unreadable-${action}" "${action}" "CONFIRM_DELETE=${profile}" "CONFIRM_PROFILE=${profile}"
+  assert_rc 1 "${action} of a profile whose kubeconfig cannot be read"
+  assert_output_has 'BRANCH_PROFILE_KUBECONFIG_UNREADABLE: unable to read the kubeconfig contexts' \
+    "${action} of a profile whose kubeconfig cannot be read"
+  assert_output_lacks 'BRANCH_PROFILE_REMOTE_CONTEXT' \
+    "${action} of a profile whose kubeconfig cannot be read is not a remote context"
+  assert_log_has 'kubectl config get-contexts -o name' "${action} tried to read the kubeconfig contexts"
+  assert_log_lacks 'kubectl config view' "${action} stopped at the unreadable context list"
+  assert_no_calls_to minikube "${action} of a profile whose kubeconfig cannot be read must not call minikube"
+  assert_log_lacks 'kubectl --context=' "${action} of a profile whose kubeconfig cannot be read must not address the cluster"
+  assert_no_calls_to docker "${action} of a profile whose kubeconfig cannot be read must not reach Docker"
+
+  for dangling in missing-cluster empty-server; do
+    reset_state
+    write_kube_contexts "${profile}" "@${dangling}"
+    bp "context-${dangling}-${action}" "${action}" "CONFIRM_DELETE=${profile}" "CONFIRM_PROFILE=${profile}"
+    assert_rc 1 "${action} of a profile whose context is dangling (${dangling})"
+    if [[ "${dangling}" == missing-cluster ]]; then
+      assert_output_has "BRANCH_PROFILE_CONTEXT_DANGLING: kube context ${profile} is in the kubeconfig, but kubectl could not resolve its cluster" \
+        "${action} of a profile whose context names an undefined cluster"
+    else
+      assert_output_has "BRANCH_PROFILE_CONTEXT_DANGLING: kube context ${profile} has no API server" \
+        "${action} of a profile whose context has an empty server"
+    fi
+    assert_output_lacks 'BRANCH_PROFILE_REMOTE_CONTEXT' \
+      "${action} of a profile whose context is dangling (${dangling}) is not a remote context"
+    assert_log_has "kubectl config view --raw --minify --context=${profile}" \
+      "${action} read the dangling context (${dangling}) from the local kubeconfig"
+    assert_no_calls_to minikube "${action} of a profile whose context is dangling (${dangling}) must not call minikube"
+    assert_log_lacks 'kubectl --context=' "${action} of a profile whose context is dangling (${dangling}) must not address the cluster"
+    assert_no_calls_to docker "${action} of a profile whose context is dangling (${dangling}) must not reach Docker"
+  done
 done
 
 # The reported shape: an adopted clerum-* profile named like a remote cluster's
