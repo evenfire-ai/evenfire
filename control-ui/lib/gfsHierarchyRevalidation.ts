@@ -37,9 +37,12 @@ export async function resolveGfsHierarchy(input: {
   if (current.kind !== 'directory') return { kind: 'missing' }
   if (!current.path || !current.path.startsWith('/')) return { kind: 'preserve' }
 
+  const segments = current.path.split('/').filter(Boolean)
+  if (segments.length === 0) return { kind: 'resolved', ancestors: [] }
+
   const ancestors: GfsHierarchyResource[] = []
   let path = ''
-  for (const segment of current.path.split('/').filter(Boolean)) {
+  for (const segment of segments) {
     path += `/${segment}`
     let ancestor: GfsHierarchyResource
     try {
