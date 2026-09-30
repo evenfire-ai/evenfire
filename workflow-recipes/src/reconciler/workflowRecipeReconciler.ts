@@ -7768,7 +7768,7 @@ export class WorkflowRecipeReconciler {
       const recipeName = recipe.metadata.name
       const generation = recipe.metadata.generation
       if (!this.oauthBrokerDeleteLedger.shouldDeletePolicy(recipe.metadata)) {
-        createLogger('wrc', recipeName).info(
+        createLogger('wrc', recipeName).debug(
           'Skipping oauth-broker-egress delete; generation already seen',
           { recipe: recipeName, generation }
         )
