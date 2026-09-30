@@ -107,7 +107,8 @@ export function LlmCredentialFields({
   const [removedSeededKeys, setRemovedSeededKeys] = useState<ReadonlySet<string>>(() => new Set())
   // Providers the operator surfaced with "＋ Add provider" this session. Resets
   // with the mount (the update modal mounts fresh per row; the create flow
-  // remounts per step) — a remount is auto-cured by the draft term below.
+  // keeps the editor mounted across steps, so a mid-create remount is rare)
+  // — a remount is auto-cured by the draft term below.
   const [manuallyAdded, setManuallyAdded] = useState<ReadonlySet<LlmProvider>>(() => new Set())
   const [replacingStoredKeys, setReplacingStoredKeys] = useState<ReadonlySet<string>>(
     () => new Set()
