@@ -146,4 +146,96 @@ describe('GfsBrowser authoritative revalidation integration', () => {
       expect(screen.queryByRole('button', { name: 'stale.txt' })).toBeNull()
     }
   )
+
+  it('keeps all loaded pages visible while a scope invalidation revalidates them', async () => {
+    const work = child('folder-1', 'rid-folder-1', 'work', 'directory')
+    const first = child('file-1', 'rid-file-1', 'first.txt', 'file')
+    const second = child('file-2', 'rid-file-2', 'second.txt', 'file')
+    const folderPath = '/control-api/api/v1/gfs/resources/folder-1/children'
+    let finishRefresh!: (response: Response) => void
+    const refresh = new Promise<Response>(resolve => {
+      finishRefresh = resolve
+    })
+    let folderPageReads = 0
+    let streamController: ReadableStreamDefaultController<Uint8Array> | null = null
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input), 'http://control-ui.test')
+        if (url.pathname.endsWith('/api/v1/gfs/entity-changes/stream')) {
+          return new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                streamController = controller
+                init?.signal?.addEventListener('abort', () => controller.close(), { once: true })
+              },
+            }),
+            { status: 200, headers: { 'content-type': 'application/x-ndjson' } }
+          )
+        }
+        if (url.pathname.endsWith('/api/v1/gfs/tree')) {
+          return jsonResponse({ rootResourceId: 'root-1', items: [work], nextCursor: null })
+        }
+        if (url.pathname === '/control-api/api/v1/gfs/resources/root-1/children') {
+          return jsonResponse({ items: [work], nextCursor: null })
+        }
+        if (url.pathname === folderPath) {
+          const cursor = url.searchParams.get('cursor')
+          if (cursor) return jsonResponse({ items: [second], nextCursor: null })
+          folderPageReads += 1
+          if (folderPageReads === 1) return jsonResponse({ items: [first], nextCursor: 'page-2' })
+          return refresh
+        }
+        if (
+          url.pathname.endsWith('/api/v1/gfs/resolve') ||
+          url.pathname.endsWith('/api/v1/gfs/by-path')
+        ) {
+          return jsonResponse({
+            resourceId: 'folder-1',
+            rid: 'rid-folder-1',
+            gfsUri: 'gfs://main/rid-folder-1',
+            name: 'work',
+            kind: 'directory',
+            path: '/work',
+            version: 1,
+          })
+        }
+        return jsonResponse({ items: [], nextCursor: null })
+      })
+    )
+
+    render(
+      <ToastProvider>
+        <GfsBrowser />
+      </ToastProvider>
+    )
+    await waitFor(() => expect(streamController).not.toBeNull())
+    await screen.findByRole('button', { name: 'work' })
+    await waitFor(() => expect(folderPageReads).toBe(1))
+    await act(async () => new Promise(resolve => setTimeout(resolve, 0)))
+    fireEvent.click(screen.getByRole('button', { name: 'work' }))
+    await screen.findByRole('button', { name: 'first.txt' })
+    fireEvent.click(await screen.findByRole('button', { name: 'Load more' }))
+    await screen.findByRole('button', { name: 'second.txt' })
+
+    await act(async () => {
+      streamController!.enqueue(
+        new TextEncoder().encode(
+          `${JSON.stringify({
+            schemaVersion: 1,
+            type: 'scope.invalidated',
+            cursor: 'd119f895-1ef8-4e73-8f08-f9754919682a',
+            scopes: ['gfs'],
+          })}\n`
+        )
+      )
+    })
+    await waitFor(() => expect(folderPageReads).toBeGreaterThan(1))
+    expect(screen.getByRole('button', { name: 'first.txt' })).toBeVisible()
+    expect(screen.getByRole('button', { name: 'second.txt' })).toBeVisible()
+
+    await act(async () => finishRefresh(jsonResponse({ items: [first], nextCursor: 'page-2' })))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'second.txt' })).toBeVisible())
+    expect(screen.getByRole('button', { name: 'first.txt' })).toBeVisible()
+  })
 })
