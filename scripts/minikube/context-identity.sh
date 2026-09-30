@@ -5,7 +5,8 @@
 # (scripts/minikube-profiles/branch-profile.sh) so both apply the same rule.
 # Every input is an argument, nothing is printed on a negative answer, and no
 # function here contacts a cluster: callers fetch the kubeconfig endpoint, the
-# node list and the Minikube IP themselves, with their own timeouts.
+# node list, the Minikube IP and the Minikube profile list themselves, with
+# their own timeouts.
 
 # kube_endpoint_host <server-url>
 # Prints the lowercased host of an API server URL (brackets stripped from an
@@ -73,5 +74,48 @@ for node in payload.get("items", []):
         if address.get("type") == "InternalIP" and address.get("address") == expected_ip:
             raise SystemExit(0)
 raise SystemExit(1)
+PY
+}
+
+# minikube_profile_list_names <profile-list-json> <profile>
+# Answers whether `minikube profile list -o json` output lists <profile>, as a
+# valid or an invalid profile. Returns 0 when it does, 1 when it does not, and
+# 2 when the output is not {"invalid": [...], "valid": [...]} with an object
+# carrying a non-empty string "Name" in every entry: an error body, a missing
+# list or an unnamed entry cannot say which profiles exist, so it is never read
+# as "not listed".
+minikube_profile_list_names() {
+  local profiles_json="${1:-}" profile="${2:-}"
+  [[ -n "${profiles_json}" && -n "${profile}" ]] || return 2
+  python3 - "${profiles_json}" "${profile}" <<'PY'
+import json
+import sys
+
+
+def listed_names(payload):
+    if not isinstance(payload, dict):
+        return None
+    names = []
+    for key in ("valid", "invalid"):
+        entries = payload.get(key)
+        if not isinstance(entries, list):
+            return None
+        for entry in entries:
+            if not isinstance(entry, dict):
+                return None
+            name = entry.get("Name")
+            if not isinstance(name, str) or not name:
+                return None
+            names.append(name)
+    return names
+
+
+try:
+    names = listed_names(json.loads(sys.argv[1]))
+except (ValueError, RecursionError):
+    names = None
+if names is None:
+    raise SystemExit(2)
+raise SystemExit(0 if sys.argv[2] in names else 1)
 PY
 }

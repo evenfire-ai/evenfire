@@ -656,7 +656,8 @@ load_context_identity() {
   # shellcheck source=/dev/null
   . "${CONTEXT_IDENTITY_SCRIPT}"
   local function_name
-  for function_name in kube_endpoint_host kube_endpoint_is_local minikube_nodes_identify_profile; do
+  for function_name in kube_endpoint_host kube_endpoint_is_local minikube_nodes_identify_profile \
+    minikube_profile_list_names; do
     declare -F "${function_name}" >/dev/null ||
       die "CONTEXT_IDENTITY_API_INVALID: missing ${function_name} in ${CONTEXT_IDENTITY_SCRIPT}"
   done
@@ -690,6 +691,30 @@ require_local_context_endpoint() {
   [[ -n "${server}" ]] || return 0
   kube_endpoint_is_local "${server}" ||
     die "BRANCH_PROFILE_REMOTE_CONTEXT: kube context ${PROFILE} points at a non-local API server ($(kube_endpoint_host "${server}")); refusing to run minikube or kubectl against it. That context may belong to a cluster in use: stop and ask before renaming or removing it"
+}
+
+# stop and delete address a profile that may not answer, so the node identity
+# check below cannot run for them. A local endpoint alone admits another local
+# cluster, or one on a private address, whose context carries the profile's
+# name, and `minikube -p <p> delete` for a profile minikube does not know
+# removes that context. So when a context named after the profile exists,
+# minikube must list the profile (valid or invalid) before either runs. An
+# unreadable profile list is a refusal, never an empty one. A missing context
+# is allowed for the reason given above require_local_context_endpoint.
+require_context_profile_known_to_minikube() {
+  load_context_identity
+  local server profiles status=0
+  server="$(kube_context_server "${PROFILE}")" || exit 1
+  [[ -n "${server}" ]] || return 0
+  profiles="$(run_bounded minikube-profile-list "${MINIKUBE_STATUS_TIMEOUT_SECONDS}" \
+    minikube profile list -o json)" ||
+    die "BRANCH_PROFILE_MINIKUBE_PROFILES_UNREADABLE: minikube profile list failed; refusing to run minikube -p ${PROFILE} while kube context ${PROFILE} exists"
+  minikube_profile_list_names "${profiles}" "${PROFILE}" || status=$?
+  case "${status}" in
+    0) ;;
+    1) die "BRANCH_PROFILE_UNKNOWN_MINIKUBE_PROFILE: minikube lists no profile ${PROFILE}, but kube context ${PROFILE} exists and points at $(kube_endpoint_host "${server}"); refusing to run minikube -p ${PROFILE}, which would act on that context. It may belong to another local cluster: stop and ask before renaming or removing it" ;;
+    *) die "BRANCH_PROFILE_MINIKUBE_PROFILES_UNREADABLE: minikube profile list printed no readable profile lists; refusing to run minikube -p ${PROFILE} while kube context ${PROFILE} exists" ;;
+  esac
 }
 
 # A local endpoint is necessary but not sufficient: the context may name
@@ -1294,6 +1319,7 @@ report_kept_pf_records() {
 cmd_stop() {
   require_existing_profile
   require_local_context_endpoint
+  require_context_profile_known_to_minikube
   # Clear the verified port-forward records first: a stopped cluster leaves
   # records naming dead kubectl processes, and the next T2 preflight refuses
   # them with PORT_FORWARD_CONFLICT. A record that cannot be verified is kept
@@ -1340,6 +1366,7 @@ cmd_delete() {
     exit 1
   fi
   require_local_context_endpoint
+  require_context_profile_known_to_minikube
   # The registry (pids/*.pid) outlives the cluster; clear the port-forward
   # records so the deleted profile does not leave PORT_FORWARD_CONFLICT behind.
   # As in cmd_stop, a kept record is reported and fails the command, but does
