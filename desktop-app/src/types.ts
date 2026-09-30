@@ -661,6 +661,7 @@ export type DesktopRuntimeConfigState = {
   isLocalhost: boolean
   selectorVisible: boolean
   activeOptionId: string | null
+  currentConfig?: DesktopRuntimeConfig
   /**
    * Stable, filesystem-safe namespacing key for the ACTIVE environment (spec
    * §5.1). Derived from `new URL(externalRestApiBaseUrl).origin`; every local

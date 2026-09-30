@@ -876,6 +876,7 @@ export function getDesktopRuntimeConfigState(): DesktopRuntimeConfigState {
     isLocalhost,
     selectorVisible,
     activeOptionId,
+    currentConfig: current,
     envKey: resolveEnvKey(current.externalRestApiBaseUrl, current.rpcProxyBaseUrl),
     storagePath: explicitRuntimeConfigPath() || runtimeConfigDirectoryPath(),
     options,

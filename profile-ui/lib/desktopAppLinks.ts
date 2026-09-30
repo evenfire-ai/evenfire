@@ -15,6 +15,9 @@ export function buildDesktopEnvironmentLink(
     externalRestApiBaseUrl: environment.externalRestApiBaseUrl,
     tenantName: environment.appName || 'Evenfire',
   })
+  if (environment.rpcProxyBaseUrl) {
+    params.set('rpcProxyBaseUrl', environment.rpcProxyBaseUrl)
+  }
   return `evenfire://desktop-environment?${params.toString()}`
 }
 

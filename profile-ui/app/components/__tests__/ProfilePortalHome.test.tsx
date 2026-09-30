@@ -50,7 +50,7 @@ beforeEach(() => {
 
 afterEach(cleanup)
 
-describe('Profile Portal home desktop setup link', () => {
+describe('Profile Portal home desktop app link', () => {
   it('keeps the welcome, portal prompt, and account summary in three cards', () => {
     api.getDesktopEnvironment.mockReturnValue(new Promise(() => {}))
 
@@ -66,7 +66,7 @@ describe('Profile Portal home desktop setup link', () => {
     render(<Page />)
 
     expect(screen.getByRole('status')).toHaveTextContent('Checking desktop app setup…')
-    expect(screen.queryByRole('link', { name: 'Set up Desktop App' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: 'Open Desktop App' })).not.toBeInTheDocument()
   })
 
   it('explains unavailable setup and links to Settings when discovery fails', async () => {
@@ -81,7 +81,7 @@ describe('Profile Portal home desktop setup link', () => {
       'href',
       '/settings/profile'
     )
-    expect(screen.queryByRole('link', { name: 'Set up Desktop App' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: 'Open Desktop App' })).not.toBeInTheDocument()
   })
 
   it('explains unavailable setup when discovery has no External REST API URL', async () => {
@@ -99,25 +99,25 @@ describe('Profile Portal home desktop setup link', () => {
       'href',
       '/settings/profile'
     )
-    expect(screen.queryByRole('link', { name: 'Set up Desktop App' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: 'Open Desktop App' })).not.toBeInTheDocument()
   })
 
-  it('labels the environment setup handoff accurately', async () => {
+  it('labels the environment handoff as opening the desktop app instead', async () => {
     const environment = desktopEnvironment
 
     render(<Page />)
 
-    const setupLink = await screen.findByRole('link', { name: 'Set up Desktop App' })
-    const setupCopy = setupLink.closest('p')
-    const href = new URL(setupLink.getAttribute('href') ?? '')
+    const openLink = await screen.findByRole('link', { name: 'Open Desktop App' })
+    const handoffCopy = openLink.closest('p')
+    const href = new URL(openLink.getAttribute('href') ?? '')
 
-    expect(setupCopy).toHaveTextContent('Prefer the desktop app?')
-    expect(setupCopy).not.toHaveTextContent('instead')
+    expect(handoffCopy).toHaveTextContent('Open Desktop App instead.')
     expect(href.searchParams.get('externalRestApiBaseUrl')).toBe(environment.externalRestApiBaseUrl)
     expect(href.searchParams.get('tenantName')).toBe(environment.appName)
+    expect(href.searchParams.get('rpcProxyBaseUrl')).toBe(environment.rpcProxyBaseUrl)
   })
 
-  it('builds the setup link from the production discovery response', () => {
+  it('builds the desktop app link from the production discovery response', () => {
     const environment = desktopEnvironment
     const href = buildDesktopEnvironmentLink(environment)
 
@@ -129,5 +129,6 @@ describe('Profile Portal home desktop setup link', () => {
       environment.externalRestApiBaseUrl
     )
     expect(parsedLink.searchParams.get('tenantName')).toBe(environment.appName)
+    expect(parsedLink.searchParams.get('rpcProxyBaseUrl')).toBe(environment.rpcProxyBaseUrl)
   })
 })
