@@ -22,6 +22,10 @@ export function purgeDeniedGfsChildren(
     if (!Array.isArray(pages)) return current
     return {
       ...current,
+      // setQueryData records a successful cache write and can clear TanStack's
+      // error field. Keep denial separate from successful empty-list data so
+      // consumers cannot render a revoked folder as a valid empty folder.
+      accessDenied: true,
       pages: pages.map(page =>
         page && typeof page === 'object' && 'items' in page && Array.isArray(page.items)
           ? { ...page, items: [], nextCursor: null }
@@ -32,7 +36,13 @@ export function purgeDeniedGfsChildren(
   return true
 }
 
-export function isGfsChildrenDenied(error: unknown): boolean {
+export function isGfsChildrenDenied(error: unknown, data?: unknown): boolean {
   const status = parseHttpStatus(errorMessage(error))
-  return status === 403 || status === 404
+  if (status === 403 || status === 404) return true
+  return Boolean(
+    data &&
+    typeof data === 'object' &&
+    'accessDenied' in data &&
+    (data as { accessDenied?: unknown }).accessDenied === true
+  )
 }

@@ -66,8 +66,10 @@ function GfsMoveTreeFolder({
     initialPageParam: undefined as string | undefined,
     getNextPageParam: lastPage => lastPage.nextCursor ?? undefined,
   })
-  const childError = errorMessage(childQuery.error)
-  const childDenied = isGfsChildrenDenied(childQuery.error)
+  const childDenied = isGfsChildrenDenied(childQuery.error, childQuery.data)
+  const childError = childDenied
+    ? 'This folder is no longer available.'
+    : errorMessage(childQuery.error)
   const childFolders = useMemo(
     () =>
       childDenied
