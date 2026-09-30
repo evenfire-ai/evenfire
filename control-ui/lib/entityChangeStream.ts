@@ -17,7 +17,7 @@ export function entityChangeStreamUrl(cursor?: string): string {
   return controlApiUrl(`/api/v1/gfs/entity-changes/stream${query}`)
 }
 
-/** Parse one NDJSON frame. Unknown versions/types fail safe into full invalidation. */
+/** Parse one NDJSON frame. Safe v1 extensions are skipped; unsupported schemas are rejected. */
 export function parseEntityChangeFrame(line: string): EntityChangeFrame | null {
   if (!line.trim()) return null
   let value: unknown
@@ -32,39 +32,42 @@ export function parseEntityChangeFrame(line: string): EntityChangeFrame | null {
     throw new Error('Invalid entity-change cursor')
   }
   if (frame.schemaVersion !== 1 || typeof frame.type !== 'string') {
-    return {
-      schemaVersion: 1,
-      type: 'resync_required',
-      cursor: frame.cursor,
-      scopes: ['gfs', 'authorization'],
-    }
+    throw new Error('Unsupported entity-change schema version')
   }
-  if (
-    frame.type === 'resync_required' ||
-    frame.type === 'scope.invalidated' ||
-    frame.type === 'heartbeat' ||
-    frame.type === 'stream.closing'
-  ) {
-    const scopes = Array.isArray(frame.scopes)
-      ? frame.scopes.filter(
-          (scope): scope is 'gfs' | 'authorization' => scope === 'gfs' || scope === 'authorization'
-        )
-      : undefined
+  if (frame.type === 'resync_required' || frame.type === 'scope.invalidated') {
+    if (!Array.isArray(frame.scopes) || frame.scopes.length === 0) {
+      throw new Error('Invalid entity-change scopes')
+    }
+    const scopes = frame.scopes.filter(
+      (scope): scope is 'gfs' | 'authorization' => scope === 'gfs' || scope === 'authorization'
+    )
+    if (scopes.length === 0) return null
     return {
       schemaVersion: 1,
       type: frame.type,
       cursor: frame.cursor,
-      ...(scopes ? { scopes } : {}),
-      ...(typeof frame.observedAt === 'string' ? { observedAt: frame.observedAt } : {}),
-      ...(typeof frame.reason === 'string'
-        ? { reason: frame.reason as EntityChangeFrame['reason'] }
-        : {}),
+      scopes,
     }
   }
-  return {
-    schemaVersion: 1,
-    type: 'resync_required',
-    cursor: frame.cursor,
-    scopes: ['gfs', 'authorization'],
+  if (frame.type === 'heartbeat') {
+    if (typeof frame.observedAt !== 'string') throw new Error('Invalid entity-change heartbeat')
+    return {
+      schemaVersion: 1,
+      type: 'heartbeat',
+      cursor: frame.cursor,
+      observedAt: frame.observedAt,
+    }
   }
+  if (frame.type === 'stream.closing') {
+    const reasons = ['max_lifetime', 'session_expired', 'server_shutdown', 'slow_consumer']
+    if (typeof frame.reason !== 'string' || !reasons.includes(frame.reason)) return null
+    return {
+      schemaVersion: 1,
+      type: 'stream.closing',
+      cursor: frame.cursor,
+      reason: frame.reason as EntityChangeFrame['reason'],
+    }
+  }
+  // Schema v1 extensions are defined to be safely ignorable by older clients.
+  return null
 }

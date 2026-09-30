@@ -36,23 +36,17 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function parseEntityChangeStreamFrame(value: unknown): EntityChangeStreamEvent | null {
-  if (!isRecord(value)) return null
+  if (!isRecord(value)) throw new Error('Entity change stream contained a malformed frame')
   const cursor = typeof value.cursor === 'string' ? value.cursor : ''
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(cursor)) {
-    return null
+    throw new Error('Entity change stream contained an invalid cursor')
   }
   if (value.schemaVersion !== 1 || typeof value.type !== 'string') {
-    return {
-      type: 'resync_required',
-      schemaVersion: 1,
-      cursor,
-      scopes: ['gfs', 'authorization'],
-    }
+    throw new Error('Entity change stream contained an unsupported schema version')
   }
   if (value.type === 'resync_required' || value.type === 'scope.invalidated') {
-    if (!Array.isArray(value.scopes) || value.scopes.length === 0) {
-      return null
-    }
+    if (!Array.isArray(value.scopes) || value.scopes.length === 0)
+      throw new Error('Entity change stream contained invalid scopes')
     const scopes = value.scopes.filter(
       (scope): scope is 'gfs' | 'authorization' => scope === 'gfs' || scope === 'authorization'
     )
@@ -66,7 +60,7 @@ function parseEntityChangeStreamFrame(value: unknown): EntityChangeStreamEvent |
   }
   if (value.type === 'heartbeat') {
     if (typeof value.observedAt !== 'string') {
-      return null
+      throw new Error('Entity change stream contained an invalid heartbeat')
     }
     return {
       type: 'heartbeat',
@@ -90,12 +84,8 @@ function parseEntityChangeStreamFrame(value: unknown): EntityChangeStreamEvent |
       >['reason'],
     }
   }
-  return {
-    type: 'resync_required',
-    schemaVersion: 1,
-    cursor,
-    scopes: ['gfs', 'authorization'],
-  }
+  // Schema v1 extensions are defined to be safely ignorable by older clients.
+  return null
 }
 
 function parsePendingWorkflowApproval(value: unknown): PendingWorkflowApproval | null {
@@ -610,7 +600,7 @@ export class AuthClient {
         throw new Error('Entity change stream contained invalid JSON')
       }
       const frame = parseEntityChangeStreamFrame(decoded)
-      if (!frame) throw new Error('Entity change stream contained an unsupported frame')
+      if (!frame) return
       onEvent(frame)
     }
     const processChunk = (chunk: string) => {

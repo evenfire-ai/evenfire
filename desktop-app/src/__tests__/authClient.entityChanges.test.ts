@@ -20,14 +20,17 @@ function stream(lines: unknown[]): ReadableStream<Uint8Array> {
 describe('AuthClient.openEntityChangeStream', () => {
   beforeEach(() => vi.unstubAllGlobals())
 
-  it('validates coarse feed frames and turns unknown versions into full resync', async () => {
+  it('skips forward-compatible frames without interrupting later supported events', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn().mockResolvedValue({
         ok: true,
         body: stream([
           { schemaVersion: 1, type: 'scope.invalidated', cursor: CURSOR, scopes: ['gfs'] },
-          { schemaVersion: 2, type: 'future.event', cursor: CURSOR, entityId: 'private-id' },
+          { schemaVersion: 1, type: 'scope.invalidated', cursor: CURSOR, scopes: ['future-scope'] },
+          { schemaVersion: 1, type: 'stream.closing', cursor: CURSOR, reason: 'future-reason' },
+          { schemaVersion: 1, type: 'future.event', cursor: CURSOR, entityId: 'private-id' },
+          { schemaVersion: 1, type: 'heartbeat', cursor: CURSOR, observedAt: 'now' },
         ]),
       })
     )
@@ -41,12 +44,7 @@ describe('AuthClient.openEntityChangeStream', () => {
     expect(events).toEqual([
       { type: 'open' },
       { schemaVersion: 1, type: 'scope.invalidated', cursor: CURSOR, scopes: ['gfs'] },
-      {
-        schemaVersion: 1,
-        type: 'resync_required',
-        cursor: CURSOR,
-        scopes: ['gfs', 'authorization'],
-      },
+      { schemaVersion: 1, type: 'heartbeat', cursor: CURSOR, observedAt: 'now' },
     ])
     expect(JSON.stringify(events)).not.toContain('private-id')
     expect(fetch).toHaveBeenCalledWith(
@@ -55,6 +53,30 @@ describe('AuthClient.openEntityChangeStream', () => {
         headers: expect.objectContaining({ authorization: 'Bearer session-token' }),
       })
     )
+  })
+
+  it('rejects an unsupported schema without converting it into a destructive resync', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        body: stream([
+          { schemaVersion: 1, type: 'scope.invalidated', cursor: CURSOR, scopes: ['gfs'] },
+          { schemaVersion: 2, type: 'future.event', cursor: CURSOR, entityId: 'private-id' },
+        ]),
+      })
+    )
+    const events: Array<Record<string, unknown>> = []
+    await expect(
+      new AuthClient().openEntityChangeStream(
+        'session-token',
+        null,
+        event => events.push(event as unknown as Record<string, unknown>),
+        new AbortController().signal
+      )
+    ).rejects.toThrow('unsupported schema version')
+    expect(events.map(event => event.type)).toEqual(['open', 'scope.invalidated'])
+    expect(JSON.stringify(events)).not.toContain('private-id')
   })
 
   it('rejects malformed cursors rather than exposing arbitrary stream payloads', async () => {
@@ -74,6 +96,6 @@ describe('AuthClient.openEntityChangeStream', () => {
         () => undefined,
         new AbortController().signal
       )
-    ).rejects.toThrow('unsupported frame')
+    ).rejects.toThrow('invalid cursor')
   })
 })

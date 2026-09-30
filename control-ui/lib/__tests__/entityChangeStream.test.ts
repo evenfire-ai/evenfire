@@ -24,17 +24,40 @@ describe('parseEntityChangeFrame', () => {
     })
   })
 
-  it('turns unknown versions and event types into a full safe resynchronization', () => {
+  it('skips unknown scopes, close reasons, and forward-compatible event types', () => {
     expect(
+      parseEntityChangeFrame(
+        JSON.stringify({
+          schemaVersion: 1,
+          type: 'scope.invalidated',
+          cursor: CURSOR,
+          scopes: ['future-scope'],
+        })
+      )
+    ).toBeNull()
+    expect(
+      parseEntityChangeFrame(
+        JSON.stringify({
+          schemaVersion: 1,
+          type: 'stream.closing',
+          cursor: CURSOR,
+          reason: 'future-reason',
+        })
+      )
+    ).toBeNull()
+    expect(
+      parseEntityChangeFrame(
+        JSON.stringify({ schemaVersion: 1, type: 'future.event', cursor: CURSOR })
+      )
+    ).toBeNull()
+  })
+
+  it('rejects unsupported schemas instead of forcing a resync of visible state', () => {
+    expect(() =>
       parseEntityChangeFrame(
         JSON.stringify({ schemaVersion: 2, type: 'future.event', cursor: CURSOR })
       )
-    ).toEqual({
-      schemaVersion: 1,
-      type: 'resync_required',
-      cursor: CURSOR,
-      scopes: ['gfs', 'authorization'],
-    })
+    ).toThrow('Unsupported entity-change schema version')
   })
 
   it('rejects malformed JSON and invalid cursors', () => {
