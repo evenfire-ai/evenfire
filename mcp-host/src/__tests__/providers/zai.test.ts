@@ -44,6 +44,7 @@ function toolCallResponse(toolName = 'search') {
         message: {
           role: 'assistant',
           content: null,
+          reasoning_content: 'Keep this reasoning across the tool call',
           tool_calls: [
             {
               id: 'tc1',
@@ -118,6 +119,42 @@ describe("ZaiProvider (OpenAICompatibleProvider, id='zai')", () => {
     expect(result.tool_calls).not.toBeNull()
     expect(result.tool_calls!.length).toBeGreaterThan(0)
     expect(result.tool_calls![0].name).toBe('web_search')
+  })
+
+  it('preserves GLM reasoning_content on the assistant tool-call round trip', async () => {
+    const provider = makeZai('glm-5.3')
+    const mockClient = createMockOpenAIClient()
+    mockClient.chat.completions.create.mockResolvedValue(toolCallResponse('shell_exec'))
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(provider as any)['client'] = mockClient
+
+    const result = await provider.completeSingleTurnWithTools(
+      [
+        { role: 'user', content: 'Run the probe' },
+        {
+          role: 'assistant',
+          content: '',
+          reasoning_content: 'Prior GLM reasoning',
+          tool_calls: [
+            {
+              id: 'previous-call',
+              name: 'shell_exec',
+              arguments: { command: 'printf prior' },
+            },
+          ],
+        },
+        { role: 'tool', tool_call_id: 'previous-call', content: 'prior' },
+      ],
+      []
+    )
+
+    expect(result.reasoning_content).toBe('Keep this reasoning across the tool call')
+    const request = mockClient.chat.completions.create.mock.calls[0][0]
+    const assistant = request.messages.find(
+      (message: { role: string; tool_calls?: unknown }) =>
+        message.role === 'assistant' && message.tool_calls
+    )
+    expect(assistant.reasoning_content).toBe('Prior GLM reasoning')
   })
 
   it('propagates API errors from the underlying client', async () => {
