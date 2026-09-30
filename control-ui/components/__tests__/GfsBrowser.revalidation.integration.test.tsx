@@ -538,6 +538,116 @@ describe('GfsBrowser authoritative revalidation integration', () => {
     expect(screen.getByRole('button', { name: 'first.txt' })).toBeVisible()
   })
 
+  it('replays an invalidation canceled by Load more after pagination settles', async () => {
+    const work = child('folder-1', 'rid-folder-1', 'work', 'directory')
+    const first = child('file-1', 'rid-file-1', 'first.txt', 'file')
+    const second = child('file-2', 'rid-file-2', 'second.txt', 'file')
+    const remote = child('file-3', 'rid-file-3', 'remote.txt', 'file')
+    const folderPath = '/control-api/api/v1/gfs/resources/folder-1/children'
+    let finishPage!: (response: Response) => void
+    const pendingPage = new Promise<Response>(resolve => {
+      finishPage = resolve
+    })
+    let streamController: ReadableStreamDefaultController<Uint8Array> | null = null
+    let initialReads = 0
+    let streamRefreshReads = 0
+    let cursorReads = 0
+    let pageStarted = false
+    let folderOpened = false
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input), 'http://control-ui.test')
+        if (url.pathname.endsWith('/api/v1/gfs/entity-changes/stream')) {
+          return new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                streamController = controller
+                init?.signal?.addEventListener('abort', () => controller.close(), { once: true })
+              },
+            }),
+            { status: 200, headers: { 'content-type': 'application/x-ndjson' } }
+          )
+        }
+        if (url.pathname.endsWith('/api/v1/gfs/tree')) {
+          return jsonResponse({ rootResourceId: 'root-1', items: [work], nextCursor: null })
+        }
+        if (url.pathname === '/control-api/api/v1/gfs/resources/root-1/children') {
+          return jsonResponse({ items: [work], nextCursor: null })
+        }
+        if (url.pathname === folderPath) {
+          const cursor = url.searchParams.get('cursor')
+          if (cursor) {
+            cursorReads += 1
+            if (cursorReads === 1) {
+              pageStarted = true
+              return pendingPage
+            }
+            return jsonResponse({ items: [second], nextCursor: null })
+          }
+          if (!folderOpened || initialReads++ === 0) {
+            return jsonResponse({ items: [first], nextCursor: 'page-2' })
+          }
+          streamRefreshReads += 1
+          if (streamRefreshReads === 1) {
+            return new Promise<Response>((_resolve, reject) => {
+              init?.signal?.addEventListener(
+                'abort',
+                () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })),
+                { once: true }
+              )
+            })
+          }
+          return jsonResponse({ items: [first, remote], nextCursor: 'page-2' })
+        }
+        if (
+          url.pathname.endsWith('/api/v1/gfs/resolve') ||
+          url.pathname.endsWith('/api/v1/gfs/by-path')
+        ) {
+          return jsonResponse({
+            resourceId: 'folder-1',
+            rid: 'rid-folder-1',
+            gfsUri: 'gfs://main/rid-folder-1',
+            name: 'work',
+            kind: 'directory',
+            path: '/work',
+            version: 1,
+          })
+        }
+        return jsonResponse({ items: [], nextCursor: null })
+      })
+    )
+
+    render(
+      <ToastProvider>
+        <GfsBrowser />
+      </ToastProvider>
+    )
+    await waitFor(() => expect(streamController).not.toBeNull())
+    await screen.findByRole('button', { name: 'work' })
+    folderOpened = true
+    fireEvent.click(screen.getByRole('button', { name: 'work' }))
+    await screen.findByRole('button', { name: 'first.txt' })
+    await waitFor(() => expect(initialReads).toBeGreaterThan(0))
+
+    const producerFrame = await controlApiProducerFrame()
+    await act(async () => {
+      streamController!.enqueue(new TextEncoder().encode(`${producerFrame}\n`))
+    })
+    await waitFor(() => expect(streamRefreshReads).toBe(1))
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Load more' }))
+    await waitFor(() => expect(pageStarted).toBe(true))
+    expect(screen.getByRole('button', { name: 'first.txt' })).toBeVisible()
+    await act(async () => finishPage(jsonResponse({ items: [second], nextCursor: null })))
+    await screen.findByRole('button', { name: 'second.txt' })
+
+    await screen.findByRole('button', { name: 'remote.txt' }, { timeout: 2_000 })
+    expect(streamRefreshReads).toBe(2)
+    expect(screen.getByRole('button', { name: 'first.txt' })).toBeVisible()
+    expect(screen.getByRole('button', { name: 'second.txt' })).toBeVisible()
+  })
+
   it('recovers the rendered list after a real API-client stream refresh fails once', async () => {
     const existingFile = child('file-1', 'rid-file-1', 'existing.txt', 'file')
     const remoteFolder = child('folder-2', 'rid-folder-2', 'remote-folder', 'directory')

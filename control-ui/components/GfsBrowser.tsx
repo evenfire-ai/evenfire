@@ -346,6 +346,9 @@ export function GfsBrowser(): React.JSX.Element {
   const loadArbiterRef = useRef(new GfsLoadArbiter())
   const entityChangeRefetchControllerRef = useRef<AbortController | null>(null)
   const loadedPageCountRef = useRef(1)
+  const foregroundLoadsInFlightRef = useRef(0)
+  const pendingStreamRevalidationRef = useRef(false)
+  const requestStreamRevalidationRef = useRef<(cursor?: string) => void>(() => undefined)
   const loadedLocationRef = useRef<string | null | undefined>(undefined)
   // Operator selects a resource to delegate access on (grant panel).
   const [selected, setSelected] = useState<GfsChild | null>(null)
@@ -479,10 +482,15 @@ export function GfsBrowser(): React.JSX.Element {
       const appending = Boolean(cursor)
       const background = Boolean(options?.background)
       if (!background) {
+        foregroundLoadsInFlightRef.current += 1
         // User navigation or a foreground mutation refresh owns the next
         // visible result. Cancel stream-triggered reads so an older response
         // for the same folder cannot overwrite it.
-        entityChangeRefetchControllerRef.current?.abort()
+        const activeStreamRefetch = entityChangeRefetchControllerRef.current
+        if (activeStreamRefetch) {
+          activeStreamRefetch.abort()
+          pendingStreamRevalidationRef.current = true
+        }
         entityChangeRefetchControllerRef.current = null
       }
       const loadArbiter = loadArbiterRef.current
@@ -566,6 +574,13 @@ export function GfsBrowser(): React.JSX.Element {
           setError(err instanceof Error ? err.message : 'Failed to load EvenDrive')
         }
       } finally {
+        if (!background) {
+          foregroundLoadsInFlightRef.current = Math.max(0, foregroundLoadsInFlightRef.current - 1)
+          if (foregroundLoadsInFlightRef.current === 0 && pendingStreamRevalidationRef.current) {
+            pendingStreamRevalidationRef.current = false
+            requestStreamRevalidationRef.current()
+          }
+        }
         if (isCurrent()) {
           if (appending) setLoadingMore(false)
           else if (!background) setLoading(false)
@@ -699,6 +714,7 @@ export function GfsBrowser(): React.JSX.Element {
       100
     )
     const invalidateVisibleState = (cursor?: string) => revalidationScheduler.request(cursor)
+    requestStreamRevalidationRef.current = invalidateVisibleState
     const scheduleRecovery = () => {
       if (!active || recoveryTimer) return
       const delay = recoveryDelay
@@ -810,6 +826,14 @@ export function GfsBrowser(): React.JSX.Element {
     }
 
     performVisibleStateRevalidation = async (cursor?: string) => {
+      // Foreground navigation and pagination own their results. If a stream
+      // invalidation arrives while either is in flight, run one authoritative
+      // refresh after the user operation settles rather than superseding it or
+      // losing the invalidation.
+      if (foregroundLoadsInFlightRef.current > 0) {
+        pendingStreamRevalidationRef.current = true
+        return
+      }
       // Retire an older same-folder focus/cache refresh before publishing the
       // newer stream-authoritative listing. Its late response must not win.
       loadArbiterRef.current.beginStreamRevalidation()
@@ -1137,6 +1161,7 @@ export function GfsBrowser(): React.JSX.Element {
       revalidationScheduler.dispose()
       entityChangeRefetchControllerRef.current?.abort()
       entityChangeRefetchControllerRef.current = null
+      requestStreamRevalidationRef.current = () => undefined
       if (retryTimer) clearTimeout(retryTimer)
       if (recoveryTimer) clearTimeout(recoveryTimer)
     }
