@@ -87,6 +87,11 @@ describeRealPostgres('mcpInvocable grant-presence gate (real Postgres)', () => {
     return g
   }
 
+  // The uid the gateway assigned to the server — what the consent callback seals
+  // the grant with and what the gate reads it back by.
+  const uidOf = async (g: MockGateway, name: string) =>
+    ((await g.getResource('mcpservers', name, NS)) as { metadata: { uid: string } }).metadata.uid
+
   const list = async (g: MockGateway, userId: string) =>
     (await resolveInvocableMcpServersForContexts(g, NS, ['ctx-1'], userId, db)).map(s => s.name)
 
@@ -99,6 +104,7 @@ describeRealPostgres('mcpInvocable grant-presence gate (real Postgres)', () => {
       ownerKind: 'mcpserver',
       recipeNamespace: NS,
       recipeName: 'gdrive-u',
+      crUid: await uidOf(g, 'gdrive-u'),
       userId: 'alice',
       oauthClientId: CLIENT_ID,
       provider: 'google',
@@ -118,6 +124,7 @@ describeRealPostgres('mcpInvocable grant-presence gate (real Postgres)', () => {
       ownerKind: 'mcpserver',
       recipeNamespace: NS,
       recipeName: 'gdrive-s',
+      crUid: await uidOf(g, 'gdrive-s'),
       contextId: 'ctx-1',
       oauthClientId: CLIENT_ID,
       bootstrappedByUserId: 'bob',
@@ -140,6 +147,7 @@ describeRealPostgres('mcpInvocable grant-presence gate (real Postgres)', () => {
       ownerKind: 'mcpserver',
       recipeNamespace: NS,
       recipeName: 'gdrive-w',
+      crUid: await uidOf(g, 'gdrive-w'),
       userId: 'dave',
       oauthClientId: CLIENT_ID,
       provider: 'google',
@@ -154,6 +162,7 @@ describeRealPostgres('mcpInvocable grant-presence gate (real Postgres)', () => {
       ownerKind: 'mcpserver',
       recipeNamespace: NS,
       recipeName: 'gdrive-w',
+      crUid: await uidOf(g, 'gdrive-w'),
       contextId: 'ctx-1',
       oauthClientId: CLIENT_ID,
       bootstrappedByUserId: 'erin',
@@ -171,6 +180,7 @@ describeRealPostgres('mcpInvocable grant-presence gate (real Postgres)', () => {
       ownerKind: 'mcpserver',
       recipeNamespace: NS,
       recipeName: 'gdrive-x',
+      crUid: await uidOf(g, 'gdrive-x'),
       userId: 'carol',
       oauthClientId: CLIENT_ID,
       provider: 'google',

@@ -12,6 +12,7 @@ import {
   oauthGrantExists,
   upsertOAuthGrant,
 } from '../src/oauth/store.js'
+import { MockGateway } from './mockGateway.js'
 
 // T1/T4 — the disconnect composition (buildMcpServerGrantKey → deleteOAuthGrant)
 // exercised against grant rows built by the REAL producers (`upsertOAuthGrant` /
@@ -34,15 +35,24 @@ function databaseUrl(baseUrl: string, database: string): string {
 const KEY = deriveOAuthEncryptionKey(config.oauthEncryptionKey)
 const NS = config.mcpServersNamespace
 
-/** A minimal McpServer CR, resolved through the REAL resolver the endpoint uses. */
-function resolvedFor(grantScope: 'user' | 'context', contextRef: string) {
-  const resolved = resolveServerOAuth({
-    spec: {
-      contextRef,
-      oauth: { id: 'google-drive', provider: 'google', grantScope },
+/**
+ * A minimal McpServer CR created in the gateway (which assigns its `metadata.uid`,
+ * as the apiserver does) and resolved through the REAL resolver the endpoint uses.
+ */
+async function resolvedFor(name: string, grantScope: 'user' | 'context', contextRef: string) {
+  const gateway = new MockGateway(NS)
+  await gateway.createResource(
+    'mcpservers',
+    {
+      metadata: { name },
+      spec: { contextRef, oauth: { id: 'google-drive', provider: 'google', grantScope } },
     },
-  })
-  if (!resolved) throw new Error('fixture server did not resolve to OAuth')
+    NS
+  )
+  const resolved = resolveServerOAuth(
+    (await gateway.getResource('mcpservers', name, NS)) as Parameters<typeof resolveServerOAuth>[0]
+  )
+  if (!resolved?.crUid) throw new Error('fixture server did not resolve to OAuth with a uid')
   return resolved
 }
 
@@ -75,8 +85,9 @@ describeRealPostgres('mcp-server grant disconnect composition (real Postgres)', 
   })
 
   it('user flavor: deletes ONLY the caller-owned grant (a peer on the same server survives)', async () => {
-    const resolved = resolvedFor('user', 'ctx-9')
-    // Two members each connect the SAME user-scope server (real producer).
+    const resolved = await resolvedFor('gdrive', 'user', 'ctx-9')
+    // Two members each connect the SAME user-scope server (real producer), sealed
+    // with the installation uid as the consent callback does.
     for (const userId of ['user-a', 'user-b']) {
       await upsertOAuthGrant(db, KEY, {
         grantKind: 'user',
@@ -88,6 +99,7 @@ describeRealPostgres('mcp-server grant disconnect composition (real Postgres)', 
         provider: 'google',
         accessToken: `at-${userId}`,
         refreshToken: `rt-${userId}`,
+        crUid: resolved.crUid,
       })
     }
 
@@ -99,31 +111,20 @@ describeRealPostgres('mcp-server grant disconnect composition (real Postgres)', 
     expect(keyA).not.toBeNull()
     await deleteOAuthGrant(db, keyA!)
 
-    // Observable state (T4): user-a's grant is gone, user-b's is untouched.
-    expect(
-      await oauthGrantExists(db, {
-        grantKind: 'user',
-        ownerKind: 'mcpserver',
-        recipeNamespace: NS,
-        recipeName: 'gdrive',
-        userId: 'user-a',
-        oauthClientId: 'google-drive',
-      })
-    ).toBe(false)
-    expect(
-      await oauthGrantExists(db, {
-        grantKind: 'user',
-        ownerKind: 'mcpserver',
-        recipeNamespace: NS,
-        recipeName: 'gdrive',
-        userId: 'user-b',
-        oauthClientId: 'google-drive',
-      })
-    ).toBe(true)
+    // Observable state (T4), read with the same key derivation the readers use:
+    // user-a's grant is gone, user-b's is untouched.
+    const readKey = (userId: string) =>
+      buildMcpServerGrantKey(resolved, {
+        mcpServersNamespace: NS,
+        mcpServerName: 'gdrive',
+        userId,
+      })!
+    expect(await oauthGrantExists(db, readKey('user-a'))).toBe(false)
+    expect(await oauthGrantExists(db, readKey('user-b'))).toBe(true)
   })
 
   it('context flavor: deletes ONLY the target Context grant (a sibling shared grant survives)', async () => {
-    const resolved = resolvedFor('context', 'ctx-A')
+    const resolved = await resolvedFor('teamdrive', 'context', 'ctx-A')
     // Two DIFFERENT Contexts each bootstrap a shared identity on the SAME server
     // (real producer). ctx-B is the sibling that must survive — the mirror of
     // the user-flavor case's user-b, so a shared DELETE that lost its
@@ -139,6 +140,7 @@ describeRealPostgres('mcp-server grant disconnect composition (real Postgres)', 
         provider: 'google',
         accessToken: `shared-at-${contextId}`,
         refreshToken: `shared-rt-${contextId}`,
+        crUid: resolved.crUid,
       })
       expect(inserted).toBe(true)
     }
@@ -162,6 +164,7 @@ describeRealPostgres('mcp-server grant disconnect composition (real Postgres)', 
         recipeName: 'teamdrive',
         contextId: 'ctx-A',
         oauthClientId: 'google-drive',
+        crUid: resolved.crUid,
       })
     ).toBe(false)
     // … but the sibling ctx-B shared grant on the SAME server SURVIVES. Drop the
@@ -174,6 +177,7 @@ describeRealPostgres('mcp-server grant disconnect composition (real Postgres)', 
         recipeName: 'teamdrive',
         contextId: 'ctx-B',
         oauthClientId: 'google-drive',
+        crUid: resolved.crUid,
       })
     ).toBe(true)
   })

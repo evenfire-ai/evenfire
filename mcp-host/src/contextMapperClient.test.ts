@@ -308,6 +308,126 @@ describe('ContextMapperClient Host-scoped v2 inventory', () => {
     )
   })
 
+  it('projects a remote=true policy flag from the v2 inventory (mini-spec 19 §D-6)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValue(
+          new Response(
+            JSON.stringify(inventory([authorizedServer({ authKind: 'oauth-user', remote: true })])),
+            { status: 200 }
+          )
+        )
+    )
+    const client = new ContextMapperClient('http://context-mapper.test', {
+      authentication: authentication(),
+    })
+
+    const result = await client.pollServers()
+    expect(result.servers[0].remote).toBe(true)
+  })
+
+  it('fail-safes an absent remote flag to local (undefined, not false)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify(inventory([authorizedServer({ authKind: 'oauth-user' })])), {
+          status: 200,
+        })
+      )
+    )
+    const client = new ContextMapperClient('http://context-mapper.test', {
+      authentication: authentication(),
+    })
+
+    const result = await client.pollServers()
+    // HCC omits `remote` when false, so an absent flag must decode to undefined
+    // (treated as local everywhere downstream), never a spurious `false` object key.
+    expect(result.servers[0].remote).toBeUndefined()
+  })
+
+  it('rejects a present-but-non-boolean remote flag (decoder strictness)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValue(
+          new Response(JSON.stringify(inventory([authorizedServer({ remote: 'yes' })])), {
+            status: 200,
+          })
+        )
+    )
+    const client = new ContextMapperClient('http://context-mapper.test', {
+      authentication: authentication(),
+    })
+
+    await expect(client.pollServers()).rejects.toThrow(
+      'HCC inventory response contains an invalid remote flag'
+    )
+  })
+
+  it('projects a bearerInBody=true transport quirk from the v2 inventory (mini-spec 19 §D-8)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValue(
+          new Response(
+            JSON.stringify(
+              inventory([
+                authorizedServer({ authKind: 'oauth-user', remote: true, bearerInBody: true }),
+              ])
+            ),
+            { status: 200 }
+          )
+        )
+    )
+    const client = new ContextMapperClient('http://context-mapper.test', {
+      authentication: authentication(),
+    })
+
+    const result = await client.pollServers()
+    expect(result.servers[0].bearerInBody).toBe(true)
+  })
+
+  it('fail-safes an absent bearerInBody flag to header (undefined, not false)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify(inventory([authorizedServer({ authKind: 'oauth-user' })])), {
+          status: 200,
+        })
+      )
+    )
+    const client = new ContextMapperClient('http://context-mapper.test', {
+      authentication: authentication(),
+    })
+
+    const result = await client.pollServers()
+    // HCC omits `bearerInBody` when false, so an absent flag must decode to
+    // undefined (treated as header everywhere downstream), never a spurious key.
+    expect(result.servers[0].bearerInBody).toBeUndefined()
+  })
+
+  it('rejects a present-but-non-boolean bearerInBody flag (decoder strictness)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify(inventory([authorizedServer({ bearerInBody: 1 })])), {
+          status: 200,
+        })
+      )
+    )
+    const client = new ContextMapperClient('http://context-mapper.test', {
+      authentication: authentication(),
+    })
+
+    await expect(client.pollServers()).rejects.toThrow(
+      'HCC inventory response contains an invalid bearerInBody flag'
+    )
+  })
+
   it('still rejects forbidden metadata even when a valid authKind is present (guard intact, I1)', async () => {
     vi.stubGlobal(
       'fetch',
