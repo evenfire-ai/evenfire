@@ -1081,6 +1081,16 @@ const RUN_LANE_CATALOG_PLACEHOLDER_SERVER = '_catalog'
  * pass config alone makes catalog == desired and prune never deletes a leftover.
  * Awaiting-trigger already tears down the mcp-host pod unless eager SDK; pruning
  * those NPs is the same "mcp-host is not live" decision, not an accidental retire.
+ *
+ * An empty server list is replaced by the `_catalog` placeholder so
+ * `${recipe}-mcp-host-to-servers`, which the factory emits only for a
+ * non-empty list, stays in the universe and its leftover is pruned. The
+ * per-server `${recipe}-wf-mcp-ingress-<server>` names come only from the
+ * servers passed in, so the ingress policy of a server the spec no longer
+ * lists is never in the catalog; it lives in the mcp-server namespace, which
+ * the prune does not list either, and stays until the finalizer's label sweep
+ * there. The mcp-host egress side is exact: `-mcp-host-to-servers` selects
+ * only the listed servers.
  */
 export function buildRunLaneNetworkPolicyCatalog(
   applyConfig: NetworkPolicyConfig,

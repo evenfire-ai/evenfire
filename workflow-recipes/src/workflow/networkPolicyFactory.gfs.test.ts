@@ -189,4 +189,26 @@ describe('workflow GFS NetworkPolicy', () => {
     expect(catalog.has('daily-report-mcp-host-to-grok-proxy')).toBe(true)
     expect(catalog.has('daily-report-coordinator-to-gfs')).toBe(false)
   })
+
+  it('an empty server list keeps mcp-host-to-servers prunable and no per-server ingress name', () => {
+    const serverEgress = 'daily-report-mcp-host-to-servers'
+    const perServerIngress = 'daily-report-wf-mcp-ingress-web-search'
+    const desired = new Set(
+      buildWorkflowNetworkPolicies(baseConfig, [])
+        .map(policy => policy.metadata?.name)
+        .filter((name): name is string => Boolean(name))
+    )
+    const emptyCatalog = buildRunLaneNetworkPolicyCatalog(baseConfig, [])
+    // The server egress lane is not desired but stays in the prune universe,
+    // so its leftover is deleted once the recipe lists no MCP server.
+    expect(desired.has(serverEgress)).toBe(false)
+    expect(emptyCatalog.has(serverEgress)).toBe(true)
+    // A server's ingress policy is named after the server, so the catalog
+    // cannot name one the spec no longer lists: that leftover is not pruned.
+    expect(emptyCatalog.has(perServerIngress)).toBe(false)
+    // Liveness witness: the same name is in the catalog while the server is listed.
+    expect(buildRunLaneNetworkPolicyCatalog(baseConfig, ['web-search']).has(perServerIngress)).toBe(
+      true
+    )
+  })
 })
