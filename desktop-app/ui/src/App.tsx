@@ -1105,22 +1105,25 @@ export function App() {
     let stopSubscription: (() => Promise<void>) | null = null
     let gfsRevalidationInFlight = false
     let gfsRevalidationPending = false
+    let gfsHardRecoveryPending = false
     const gfsQueryFilter = {
       queryKey: desktopQueryKeys.gfsRoot,
       predicate: (query: { queryKey: readonly unknown[] }) =>
         shouldRevalidateGfsQuery(query.queryKey),
     }
-    const revalidateGfs = () => {
+    const revalidateGfs = (hardRecovery = false) => {
       if (!active) return
       if (gfsRevalidationInFlight) {
         gfsRevalidationPending = true
+        gfsHardRecoveryPending ||= hardRecovery
         return
       }
       gfsRevalidationInFlight = true
-      const foregroundReadWasActive = queryClient.isFetching(gfsQueryFilter) > 0
+      const queryFilter = hardRecovery ? { queryKey: desktopQueryKeys.gfsRoot } : gfsQueryFilter
+      const foregroundReadWasActive = queryClient.isFetching(queryFilter) > 0
       setRemoteGfsChangeEpoch(epoch => epoch + 1)
       void queryClient
-        .invalidateQueries({ ...gfsQueryFilter, refetchType: 'active' }, { cancelRefetch: false })
+        .invalidateQueries({ ...queryFilter, refetchType: 'active' }, { cancelRefetch: false })
         .then(async () => {
           const resources = new Set(
             workspaceTabsRef.current.tabs
@@ -1135,19 +1138,24 @@ export function App() {
           gfsRevalidationInFlight = false
           if (!active) return
           if (gfsRevalidationPending || foregroundReadWasActive) {
+            const nextIsHardRecovery =
+              gfsHardRecoveryPending || (hardRecovery && foregroundReadWasActive)
             gfsRevalidationPending = false
-            revalidateGfs()
+            gfsHardRecoveryPending = false
+            revalidateGfs(nextIsHardRecovery)
           }
         })
     }
-    const unsubscribeGfs = entityChangeRegistry.subscribe(['gfs', 'authorization'], () => {
+    const unsubscribeGfs = entityChangeRegistry.subscribe(['gfs', 'authorization'], event => {
       // Scope invalidations are soft convergence hints, not proof that cached
       // data is no longer authorized. Keep visible/paginated rows while active
       // queries refetch; only an authoritative 403/404 purges a preview.
       // TanStack's default refetch cancels an active request. Serialize these
       // soft passes and retain one trailing pass so a second frame cannot abort
       // a foreground navigation/page chain or lose a mutation during that read.
-      revalidateGfs()
+      // Resync also refreshes cached permission affordances; inactive caches stay
+      // invalidated and re-read when they are next mounted.
+      revalidateGfs(event.type === 'resync_required')
     })
     void entityChangeBridge
       .subscribe(event => entityChangeRegistry.dispatch(event))

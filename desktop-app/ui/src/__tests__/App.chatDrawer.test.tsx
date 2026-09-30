@@ -1519,6 +1519,51 @@ describe('App live GFS preview revalidation', () => {
     expect(listChildren).toHaveBeenCalledTimes(4)
   })
 
+  it('hard-resyncs active permission affordances as well as open previews', async () => {
+    const affordanceKey = desktopQueryKeys.gfsAffordances('session', 'folder', 'main')
+    const affordances = vi.fn(async () => ({ held: ['read'] }))
+    Object.assign(window.clerum.gfs, { affordances })
+    desktopQueryClient.setQueryData(affordanceKey, { held: [] })
+    const resolve = vi.mocked(window.clerum.gfs.resolve).mockResolvedValue(
+      resolvedFile('readme', 'README.md', {
+        gfsUri: 'gfs://main/readme',
+        bytes: 14,
+        version: 4,
+      }) as never
+    )
+
+    function CurrentFolderAffordances() {
+      useQuery({
+        queryKey: affordanceKey,
+        queryFn: () => window.clerum.gfs.affordances('folder', 'main'),
+      })
+      return null
+    }
+
+    render(
+      <QueryClientProvider client={desktopQueryClient}>
+        <CurrentFolderAffordances />
+        <App />
+      </QueryClientProvider>
+    )
+    await waitFor(() => expect(dispatchEntityChange).toBeTypeOf('function'))
+    act(() =>
+      dispatchEntityChange?.({
+        schemaVersion: 1,
+        type: 'resync_required',
+        cursor: '00000000-0000-0000-0000-000000000000',
+        scopes: ['gfs', 'authorization'],
+      })
+    )
+
+    await waitFor(() => expect(affordances).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(resolve).toHaveBeenCalledTimes(1))
+    expect(desktopQueryClient.getQueryData(affordanceKey)).toEqual({ held: ['read'] })
+    expect(
+      currentController.workspaceTabs.tabs.find(tab => tab.id === 'preview-md')?.preview
+    ).toMatchObject({ resourceVersion: 4 })
+  })
+
   it('preserves an unchanged preview during soft scope revalidation and purges only on 403', async () => {
     const resolve = vi.mocked(window.clerum.gfs.resolve)
     const invalidateQueries = vi
