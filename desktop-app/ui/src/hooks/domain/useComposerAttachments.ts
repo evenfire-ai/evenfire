@@ -3,6 +3,45 @@ import { COMPOSER_MAX_IMAGE_ATTACHMENTS } from '@constants/attachments'
 import { clearComposerDraft, clearComposerDraftAfterSend } from '@lib/composerDraftStore'
 import type { ComposerImageAttachment, ComposerReferenceAttachment } from '../../uiTypes'
 
+export interface ComposerImageMergePrediction {
+  /** Incoming attachments that would take a slot in the composer. */
+  kept: number
+  /** Incoming byte-identical copies of attachments already held (not added). */
+  duplicates: number
+  /** Incoming attachments the 20-image cap leaves no room for (lost). */
+  dropped: number
+}
+
+/**
+ * Mirrors `handleAddComposerImageAttachments`'s dedupe/cap rules exactly, so a
+ * caller that restores a payload can honestly report what will survive before
+ * the state update lands (used by the cancel-restore toast).
+ */
+export function predictComposerImageMerge(
+  existing: ComposerImageAttachment[],
+  incoming: ComposerImageAttachment[]
+): ComposerImageMergePrediction {
+  const accepted = [...existing]
+  let kept = 0
+  let duplicates = 0
+  for (const attachment of incoming) {
+    if (accepted.length >= COMPOSER_MAX_IMAGE_ATTACHMENTS) break
+    const duplicate = accepted.some(
+      candidate =>
+        candidate.mimeType === attachment.mimeType &&
+        candidate.sizeBytes === attachment.sizeBytes &&
+        candidate.dataBase64 === attachment.dataBase64
+    )
+    if (duplicate) {
+      duplicates += 1
+      continue
+    }
+    accepted.push(attachment)
+    kept += 1
+  }
+  return { kept, duplicates, dropped: incoming.length - kept - duplicates }
+}
+
 interface UseComposerAttachmentsParams {
   /** Attachments are per-agent; switching agents clears the pending composer. */
   selectedAgent: string | null

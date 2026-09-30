@@ -6,6 +6,7 @@ import {
   parseTaskKey,
   useAgentTaskTracker,
 } from '@contexts/AgentTaskTrackerContext'
+import { COMPOSER_MAX_IMAGE_ATTACHMENTS } from '@constants/attachments'
 import {
   buildChatMessageAttachments,
   buildResponseFileAttachments,
@@ -94,7 +95,7 @@ import {
 } from './useChatListController'
 import { type ActiveChatVisibility, useChatNotifications } from './useChatNotifications'
 import { useChatScroll } from './useChatScroll'
-import { useComposerAttachments } from './useComposerAttachments'
+import { predictComposerImageMerge, useComposerAttachments } from './useComposerAttachments'
 import type { PushToastOptions } from './useToastController'
 
 // Re-exported from `useChatListController` (§4.4) so external importers
@@ -3501,13 +3502,19 @@ export function useAgentChatController({
    * released), but the attachments of the canceled message return to the
    * composer so the user can reuse them. In-memory only: the composer state,
    * not GFS or any persisted store, owns the kept attachments.
+   *
+   * The toast reports what actually survived the composer's image cap, and its
+   * Discard-all action is bound to the agent that was canceled: the toast can
+   * outlive an agent switch, and clearing the composer of a DIFFERENT agent
+   * would destroy that agent's own pending attachments.
    */
   const restoreComposerAttachmentsAfterCancel = useCallback(
-    (taskId: string) => {
+    (taskId: string, agentRef: string) => {
       const snapshots = getRetainedSendsForTask(taskId)
       const images = snapshots.flatMap(snapshot => snapshot.attachments)
       const references = snapshots.flatMap(snapshot => snapshot.references)
       if (!images.length && !references.length) return
+      const { dropped } = predictComposerImageMerge(composerImageAttachments, images)
       handleAddComposerImageAttachments(
         images.map(attachment => ({
           ...attachment,
@@ -3515,12 +3522,26 @@ export function useAgentChatController({
         }))
       )
       handleAddComposerReferenceAttachments(references)
-      pushToast('Attachments kept', 'info', {
-        action: { label: 'Discard all', onAction: resetComposerAttachments },
+      const message =
+        dropped > 0
+          ? `Attachments kept — ${dropped} of ${images.length} ${dropped === 1 ? 'image exceeds' : 'images exceed'} the ${COMPOSER_MAX_IMAGE_ATTACHMENTS}-image limit and ${dropped === 1 ? 'was' : 'were'} dropped.`
+          : 'Attachments kept'
+      pushToast(message, 'info', {
+        action: {
+          label: 'Discard all',
+          onAction: () => {
+            // Attachments are per-agent; chat switches do not change who owns
+            // them, but an agent switch does — no-op instead of clearing
+            // another agent's composer.
+            if (activeChatVisibilityRef.current.selectedAgent !== agentRef) return
+            resetComposerAttachments()
+          },
+        },
       })
     },
     [
       getRetainedSendsForTask,
+      composerImageAttachments,
       handleAddComposerImageAttachments,
       handleAddComposerReferenceAttachments,
       pushToast,
@@ -3579,7 +3600,7 @@ export function useAgentChatController({
         // payload resent, so nothing will read the retained snapshot again. The
         // attachments themselves return to the composer (STORY-38) before the
         // snapshot that carried them is released.
-        restoreComposerAttachmentsAfterCancel(taskId)
+        restoreComposerAttachmentsAfterCancel(taskId, hostRef)
         releaseRetainedSendsForTask(taskId)
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
@@ -3587,7 +3608,7 @@ export function useAgentChatController({
           markCancelled('Task already finished or is no longer active.')
           // The task is gone upstream, so it can no longer produce a terminal
           // event — same reasoning as the successful cancel above.
-          restoreComposerAttachmentsAfterCancel(taskId)
+          restoreComposerAttachmentsAfterCancel(taskId, hostRef)
           releaseRetainedSendsForTask(taskId)
           pushToast('That task is no longer active.', 'info')
           return

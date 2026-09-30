@@ -67,11 +67,18 @@ afterEach(() => {
   uninstallMockClerum()
 })
 
+function keptToastCall(
+  spies: ReturnType<typeof renderController>['spies']
+): [string, unknown, { action?: ToastMessageAction } | undefined] | undefined {
+  return spies.pushToast.mock.calls.find(([message]) =>
+    String(message).startsWith('Attachments kept')
+  ) as ReturnType<typeof keptToastCall>
+}
+
 function keptToastAction(
   spies: ReturnType<typeof renderController>['spies']
 ): ToastMessageAction | undefined {
-  const call = spies.pushToast.mock.calls.find(([message]) => message === 'Attachments kept')
-  return call?.[2]?.action
+  return keptToastCall(spies)?.[2]?.action
 }
 
 /** Mounts with a capable model catalog, then attaches an image + a reference. */
@@ -170,5 +177,75 @@ describe('STORY-38 — attachments survive message cancel', () => {
       expect.stringContaining('Failed to cancel task'),
       'error'
     )
+  })
+
+  it('reports images the composer cap drops instead of claiming all were kept (L2)', async () => {
+    const sent = [0, 1, 2].map(index => ({
+      ...image,
+      id: `sent-${index}`,
+      name: `sent-${index}.png`,
+      dataBase64: `c2VudC0-${index}`,
+      previewDataUrl: `data:image/png;base64,c2VudC0-${index}`,
+    }))
+    const rendered = renderController()
+    await waitFor(() => expect(clerum.chat.getIndex).toHaveBeenCalled())
+    await act(async () => {
+      await loadHostModels(modelTransport, 'agent-x', null)
+    })
+    act(() => rendered.result.current.handleAddComposerImageAttachments(sent))
+    await sendAsync(rendered.result, 'task-cap')
+
+    // While the task runs, the user fills the composer to the 20-image cap.
+    const filler = Array.from({ length: 19 }, (_, index) => ({
+      ...image,
+      id: `filler-${index}`,
+      name: `filler-${index}.png`,
+      dataBase64: `ZmlsbGVy-${index}`,
+      previewDataUrl: `data:image/png;base64,ZmlsbGVy-${index}`,
+    }))
+    act(() => rendered.result.current.handleAddComposerImageAttachments(filler))
+    expect(rendered.result.current.composerImageAttachments).toHaveLength(19)
+
+    await act(async () => {
+      await rendered.result.current.cancelTask('task-cap')
+    })
+
+    // 19 held + 1 free slot: only 1 of the 3 canceled images returns, and the
+    // toast must say so instead of a plain "Attachments kept".
+    expect(rendered.result.current.composerImageAttachments).toHaveLength(20)
+    const call = keptToastCall(rendered.spies)
+    expect(call?.[0]).toBe(
+      'Attachments kept — 2 of 3 images exceed the 20-image limit and were dropped.'
+    )
+    expect(call?.[1]).toBe('info')
+    expect(call?.[2]?.action?.label).toBe('Discard all')
+  })
+
+  it('never clears another agent composer from a stale Discard all toast (L3)', async () => {
+    const { result, spies, rerender } = await mountedControllerWithAttachments()
+    await sendAsync(result, 'task-switch')
+
+    await act(async () => {
+      await result.current.cancelTask('task-switch')
+    })
+    const staleAction = keptToastAction(spies)
+    expect(staleAction?.label).toBe('Discard all')
+
+    // The toast outlives an agent switch; the new agent's composer holds its
+    // own fresh attachment that the stale action must not destroy.
+    rerender({ selectedAgent: 'agent-y', agentNames: ['agent-x', 'agent-y'] })
+    const otherAgentImage = {
+      ...image,
+      id: 'agent-y-image',
+      dataBase64: 'YWdlbnQteQ',
+      previewDataUrl: 'data:image/png;base64,YWdlbnQteQ',
+    }
+    act(() => result.current.handleAddComposerImageAttachments([otherAgentImage]))
+    expect(result.current.composerImageAttachments).toHaveLength(1)
+
+    act(() => staleAction?.onAction())
+
+    expect(result.current.composerImageAttachments).toHaveLength(1)
+    expect(result.current.composerImageAttachments[0]).toMatchObject({ id: 'agent-y-image' })
   })
 })
