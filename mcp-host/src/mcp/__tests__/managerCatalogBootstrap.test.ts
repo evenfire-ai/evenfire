@@ -49,7 +49,7 @@ vi.mock('@modelcontextprotocol/sdk/client/sse.js', async () => {
 // resolver is stubbed so these tests never touch DNS.
 vi.mock('../../core/net/ssrf', () => ({
   SsrfBlockedError: class SsrfBlockedError extends Error {},
-  resolvePinnedPublicIp: vi.fn(async () => '203.0.113.10'),
+  resolvePinnedPublicIp: vi.fn(async () => '93.184.216.34'),
 }))
 
 function remoteOauthUserServer(name = 'gh'): McpServerInfo {
