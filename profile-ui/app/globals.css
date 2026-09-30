@@ -154,7 +154,7 @@ code {
 .cu-page-stack {
   display: grid;
   gap: 0.85rem;
-  max-width: 720px;
+  max-width: 1120px;
   margin-inline: auto;
 }
 
