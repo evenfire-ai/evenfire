@@ -1654,7 +1654,14 @@ describe('App live GFS preview revalidation', () => {
     render(<App />)
     await waitFor(() => expect(dispatchEntityChange).toBeTypeOf('function'))
 
-    act(() => dispatchEntityChange?.({ ...USER_SCOPE_INVALIDATED }))
+    act(() =>
+      dispatchEntityChange?.({
+        schemaVersion: 1,
+        type: 'stream.closing',
+        cursor: '00000000-0000-0000-0000-000000000000',
+        reason: 'session_expired',
+      })
+    )
 
     await waitFor(() => {
       const previews = currentController.workspaceTabs.tabs.filter(tab => tab.kind === 'preview')
