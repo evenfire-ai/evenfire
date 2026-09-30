@@ -129,6 +129,23 @@ function withNonCanonicalTailBits(base64: string): string {
   return base64.slice(0, lastIndex) + mutated + base64.slice(lastIndex + 1)
 }
 
+/**
+ * Replace the final padded sextet with `sextet`. With '/' (63) every unused
+ * low bit is set, so the payload decodes to the same length but is not the
+ * canonical encoding of its bytes.
+ */
+function withFinalSextet(base64: string, sextet: string): string {
+  const padding = base64.endsWith('==') ? 2 : base64.endsWith('=') ? 1 : 0
+  if (padding === 0) throw new Error('fixture expects a padded base64 payload')
+  const lastIndex = base64.length - 1 - padding
+  return base64.slice(0, lastIndex) + sextet + base64.slice(lastIndex + 1)
+}
+
+/** The same bytes in the URL-safe alphabet (RFC 4648 §5): '-' for '+', '_' for '/'. */
+function toUrlSafeBase64(base64: string): string {
+  return base64.replace(/\+/g, '-').replace(/\//g, '_')
+}
+
 function imageAttachment(
   id: string,
   sizeBytes: number,
@@ -477,6 +494,26 @@ describe('rpc-proxy chat message body budget', () => {
       expect(serviceMock.forwardHostMessageToHost).not.toHaveBeenCalled()
     })
 
+    it('does not credit an 11MiB file whose base64 uses the URL-safe alphabet', async () => {
+      const bytes = Buffer.alloc(FILE_MAX_BYTES, 0x61)
+      // 0xfbefbe encodes as '++++' and 0xffffff as '////'.
+      bytes.set([0xfb, 0xef, 0xbe, 0xff, 0xff, 0xff], 0)
+      const standard = { ...textFile('f1', FILE_MAX_BYTES), dataBase64: bytes.toString('base64') }
+      const urlSafe = { ...standard, dataBase64: toUrlSafeBase64(standard.dataBase64) }
+      expect(standard.dataBase64.startsWith('++++////')).toBe(true)
+      expect(urlSafe.dataBase64.startsWith('----____')).toBe(true)
+      // Sanity: Node's permissive decoder reads both alphabets to the same bytes,
+      // so only the alphabet rule can refuse the credit.
+      expect(Buffer.from(urlSafe.dataBase64, 'base64').equals(bytes)).toBe(true)
+      expect((await postMessage(messageWithShare([standard], KIB))).status).toBe(200)
+      expect(serviceMock.forwardHostMessageToHost).toHaveBeenCalledTimes(1)
+      vi.clearAllMocks()
+      // Uncredited, the ~14.7MiB of base64 is charged to the 6MiB share.
+      const response = await postMessage(messageWithShare([urlSafe], KIB))
+      expect(response.status).toBe(413)
+      expect(serviceMock.forwardHostMessageToHost).not.toHaveBeenCalled()
+    })
+
     it.each([
       { label: 'no digest', mutate: ({ digest: _d, ...rest }: Record<string, unknown>) => rest },
       {
@@ -634,6 +671,27 @@ describe('rpc-proxy chat message body budget', () => {
       ],
     })
     expect(response.status).toBe(413)
+  })
+
+  it("does not credit base64 whose final padded sextet is '/'", async () => {
+    const canonical = pngBase64(5 * MIB)
+    const slashTail = withFinalSextet(canonical, '/')
+    expect(slashTail).not.toBe(canonical)
+    // Sanity: permissive decoding still yields the same length, so the only
+    // thing that can reject this payload is the canonical-encoding rule.
+    expect(Buffer.from(slashTail, 'base64').length).toBe(Buffer.from(canonical, 'base64').length)
+    const withImage = (dataBase64: string) => ({
+      content: 'x'.repeat(MIB),
+      attachments: [
+        { id: 'a1', kind: 'image', mimeType: 'image/png', encoding: 'base64', dataBase64 },
+      ],
+    })
+    expect((await postMessage(withImage(canonical))).status).toBe(200)
+    expect(serviceMock.forwardHostMessageToHost).toHaveBeenCalledTimes(1)
+    vi.clearAllMocks()
+    const response = await postMessage(withImage(slashTail))
+    expect(response.status).toBe(413)
+    expect(serviceMock.forwardHostMessageToHost).not.toHaveBeenCalled()
   })
 
   it('keeps the 10mb parser on authenticated non-chat JSON routes', async () => {

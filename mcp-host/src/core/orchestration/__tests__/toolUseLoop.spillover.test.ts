@@ -219,7 +219,7 @@ describe('executeSingleTool — T1.5 spillover wiring', () => {
     expect(result.spillover_ref).toBeUndefined()
   })
 
-  it('never spills the output of clerum__spillover_read (no recursion)', async () => {
+  it('the storage name guard never spills clerum__spillover_read output, even from a tool without spilloverExempt', async () => {
     const big = 'X'.repeat(512)
     const result = await executeSingleTool(
       { id: 'call-1', name: 'clerum__spillover_read', arguments: {} },
