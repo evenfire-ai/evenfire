@@ -96,6 +96,33 @@ export async function getUserAgents(userId: string, db: Pick<DbClient, 'query'> 
   }
 }
 
+export async function getReachableAgentNames(
+  userId: string,
+  db: Pick<DbClient, 'query'> = pool
+): Promise<{ userId: string; agentNames: string[] }> {
+  const result = await db.query(
+    `SELECT ua.agent_name
+       FROM user_agents ua
+       JOIN users u ON u.id = ua.user_id
+      WHERE ua.user_id = $1
+        AND u.lifecycle_state = 'active'
+      UNION
+     SELECT ta.agent_name
+       FROM team_agents ta
+       JOIN team_members tm ON tm.team_id = ta.team_id
+       JOIN users u ON u.id = tm.user_id
+      WHERE tm.user_id = $1
+        AND tm.status = 'active'
+        AND u.lifecycle_state = 'active'
+   ORDER BY agent_name ASC`,
+    [userId]
+  )
+  return {
+    userId,
+    agentNames: result.rows.map(row => String((row as { agent_name: string }).agent_name)),
+  }
+}
+
 export async function listUsersByAgent(agentName: string) {
   const resolvedAgentName = agentName.trim()
   if (!resolvedAgentName) return []
