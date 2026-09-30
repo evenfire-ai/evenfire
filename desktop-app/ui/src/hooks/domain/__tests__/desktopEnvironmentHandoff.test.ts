@@ -143,3 +143,42 @@ describe('Desktop environment handoff concurrency', () => {
     )
   })
 })
+
+describe('Desktop environment origin matching', () => {
+  it.each([
+    [
+      'a REST host suffix',
+      {
+        ...targetEnvironment,
+        externalRestApiBaseUrl: 'https://api.example.test.evil.tld',
+      },
+    ],
+    [
+      'a different REST port',
+      {
+        ...targetEnvironment,
+        externalRestApiBaseUrl: 'https://api.example.test:8443',
+      },
+    ],
+    [
+      'a downgraded REST scheme',
+      {
+        ...targetEnvironment,
+        externalRestApiBaseUrl: 'http://api.example.test',
+      },
+    ],
+    ['a missing RPC endpoint', { ...targetEnvironment, rpcProxyBaseUrl: '' }],
+  ])('does not switch to a saved environment with %s', async (_case, linkedEnvironment) => {
+    const { handler, selectRuntimeConfig, setPendingDesktopEnvironmentSetup } = createHandler(
+      () => ({ booting: false, busy: false, authTransitioning: false, isAuthenticated: false })
+    )
+
+    await handler(linkedEnvironment)
+
+    expect(selectRuntimeConfig).not.toHaveBeenCalled()
+    expect(setPendingDesktopEnvironmentSetup).toHaveBeenCalledWith({
+      ...linkedEnvironment,
+      rpcProxyBaseUrl: '',
+    })
+  })
+})
