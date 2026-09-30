@@ -2,7 +2,12 @@
 import { type ReactNode, useState } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AuthContext, type AuthContextValue } from '@contexts/AuthContext'
-import { QueryClient, QueryClientProvider, focusManager } from '@tanstack/react-query'
+import {
+  QueryClient,
+  QueryClientProvider,
+  focusManager,
+  useQueryClient,
+} from '@tanstack/react-query'
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
 import { desktopQueryDefaults } from '@lib/queryClient'
 import {
@@ -12,6 +17,7 @@ import {
   resolveResource,
   resolvedDirectory,
 } from '@/gfs/__fixtures__/gfsProducerFixtures'
+import { shouldRevalidateGfsQuery } from '@/lib/gfsEntityChangeState'
 import { desktopQueryKeys } from '../queryKeys'
 import { useGfsBrowserController } from '../useGfsBrowserController'
 
@@ -95,6 +101,7 @@ function authValue(me: AuthContextValue['me']): AuthContextValue {
 
 function Probe() {
   const ctrl = useGfsBrowserController()
+  const queryClient = useQueryClient()
   const [backgroundRefreshOutcome, setBackgroundRefreshOutcome] = useState('not-run')
   return (
     <>
@@ -162,6 +169,21 @@ function Probe() {
       </button>
       <button type="button" onClick={() => swallow(ctrl.refreshAffordances())}>
         refresh permissions
+      </button>
+      <button
+        type="button"
+        onClick={() =>
+          void queryClient.invalidateQueries({
+            queryKey: desktopQueryKeys.gfsRoot,
+            predicate: query => shouldRevalidateGfsQuery(query.queryKey),
+            refetchType: 'active',
+          })
+        }
+      >
+        revalidate GFS scope
+      </button>
+      <button type="button" onClick={() => ctrl.loadMore()}>
+        load more
       </button>
       <button
         type="button"
@@ -269,6 +291,87 @@ function ProductionHarness({ children }: { children: ReactNode }) {
 }
 
 describe('useGfsBrowserController', () => {
+  it('keeps loaded pages and avoids per-row reads during a scope revalidation', async () => {
+    const root = await resolveResource(
+      resolvedDirectory('root', 'Root', { gfsUri: 'gfs://main/root' })
+    )
+    const firstPageItems = Array.from({ length: 30 }, (_, index) =>
+      childView(`row-${index}`, `row-${index}.md`, 'file', { parentResourceId: 'root' })
+    )
+    const secondPageItems = [childView('row-30', 'row-30.md', 'file', { parentResourceId: 'root' })]
+    const firstPage = await listChildrenPage(firstPageItems, 'next-page')
+    const secondPage = await listChildrenPage(secondPageItems)
+    let finishFirstRefresh!: (page: typeof firstPage) => void
+    let finishSecondRefresh!: (page: typeof secondPage) => void
+    const pendingFirstRefresh = new Promise<typeof firstPage>(resolve => {
+      finishFirstRefresh = resolve
+    })
+    const pendingSecondRefresh = new Promise<typeof secondPage>(resolve => {
+      finishSecondRefresh = resolve
+    })
+    const listChildren = vi.fn((_resourceId: string, _drive: string, cursor?: string) => {
+      const call = listChildren.mock.calls.length
+      if (call === 3) return pendingFirstRefresh
+      if (call === 4) return pendingSecondRefresh
+      return cursor ? secondPage : firstPage
+    })
+    const listAccessible = vi.fn(async () => ({ items: [], nextCursor: null }))
+    const affordances = vi.fn(async () => ({
+      held: ['read'],
+      canDelegate: false,
+      grantableBits: [],
+      canCreateShare: false,
+    }))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: { listAccessible, resolve: vi.fn(async () => root), listChildren, affordances },
+      },
+    })
+
+    render(<Probe />, { wrapper: ProductionHarness })
+    await act(async () => screen.getByRole('button', { name: 'open' }).click())
+    await waitFor(() => expect(screen.getByTestId('items-count').textContent).toBe('30'))
+    await waitFor(() => expect(affordances).toHaveBeenCalledTimes(31))
+
+    await act(async () => screen.getByRole('button', { name: 'load more' }).click())
+    await waitFor(() => expect(screen.getByTestId('items-count').textContent).toBe('31'))
+    await waitFor(() => expect(affordances).toHaveBeenCalledTimes(32))
+
+    const childrenKey = desktopQueryKeys.gfsChildren(':user-a:team-a', 'root', 'main')
+    const affordanceKey = desktopQueryKeys.gfsAffordances(':user-a:team-a', 'row-0', 'main')
+
+    await act(async () => screen.getByRole('button', { name: 'revalidate GFS scope' }).click())
+    await waitFor(() => expect(listChildren).toHaveBeenCalledTimes(3))
+    expect(screen.getByTestId('items-count').textContent).toBe('31')
+    expect(affordances).toHaveBeenCalledTimes(32)
+    const cachedChildren = lastHarnessQueryClient?.getQueryData<{
+      pages: Array<{ items: Array<{ resourceId: string }> }>
+    }>(childrenKey)
+    expect(cachedChildren?.pages).toHaveLength(2)
+    expect(cachedChildren?.pages[0]?.items).toEqual(
+      expect.arrayContaining([expect.objectContaining({ resourceId: 'row-0' })])
+    )
+    expect(cachedChildren?.pages[1]?.items).toEqual([
+      expect.objectContaining({ resourceId: 'row-30' }),
+    ])
+
+    await act(async () => finishFirstRefresh(firstPage))
+    await waitFor(() => expect(listChildren).toHaveBeenCalledTimes(4))
+    expect(screen.getByTestId('items-count').textContent).toBe('31')
+    await act(async () => finishSecondRefresh(secondPage))
+    await waitFor(() => expect(listChildren).toHaveBeenCalledTimes(4))
+    await waitFor(() => expect(affordances).toHaveBeenCalledTimes(32))
+
+    // Two retained pages are refetched, but the 31 cached row permission
+    // queries are not repeated on a periodic scope tick.
+    expect(listAccessible).toHaveBeenCalledTimes(2)
+    expect(affordances).toHaveBeenCalledTimes(32)
+    expect(screen.getByTestId('items-count').textContent).toBe('31')
+    expect(shouldRevalidateGfsQuery(childrenKey)).toBe(true)
+    expect(shouldRevalidateGfsQuery(affordanceKey)).toBe(false)
+  })
+
   afterEach(() => {
     cleanup()
     lastHarnessQueryClient = null
