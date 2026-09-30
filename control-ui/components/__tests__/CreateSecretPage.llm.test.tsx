@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render as rtlRender, screen, waitFor } from '@testing-library/react'
 import { ToastProvider } from '@components/Toast'
 import { apiSend } from '@lib/api'
-import CreateSecretPage from '../new/page'
+import CreateSecretPage from '../../app/secrets/new/page'
 
 const mockPush = vi.fn()
 let searchParams = new URLSearchParams('scope=llm')
