@@ -26,6 +26,11 @@ const sources = {
   mcpHost: readFileSync(join(repoRoot, 'mcp-host/src/server.ts'), 'utf8'),
   composer: readFileSync(join(repoRoot, 'desktop-app/ui/src/constants/attachments.ts'), 'utf8'),
   hostConfig: readFileSync(join(repoRoot, 'mcp-host/src/config.ts'), 'utf8'),
+  hostAdmission: readFileSync(join(repoRoot, 'mcp-host/src/agent/incomingAttachments.ts'), 'utf8'),
+  rpcProxyForwardingTest: readFileSync(
+    join(repoRoot, 'rpc-proxy/src/__tests__/wake-and-hold-route.test.ts'),
+    'utf8'
+  ),
 }
 
 function soleMatch(source: string, pattern: RegExp, label: string): RegExpMatchArray {
@@ -68,7 +73,21 @@ const SERVER_LIMITS: ReadonlyArray<readonly [string, number]> = [
   ['MAX_FILE_BASE64_BYTES_TOTAL', 16 * MIB],
 ]
 
+/** Declarations both parsers must spell identically, with the value they must have. */
+const SERVER_DECLARATIONS: ReadonlyArray<readonly [string, string]> = [
+  ['BASE64_RE', '/^[A-Za-z0-9+/]+={0,2}$/'],
+  ['PNG_SIGNATURE', 'Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])'],
+  ['JPEG_SIGNATURE', 'Buffer.from([0xff, 0xd8, 0xff])'],
+]
+
+/** One trimmed source line of `functionText` that starts with `prefix`. */
+function soleLine(functionText: string, prefix: string, label: string): string {
+  const escaped = prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return soleMatch(functionText, new RegExp(`^ *${escaped}.*$`, 'm'), label)[0].trim()
+}
+
 const BUDGET_FUNCTIONS = [
+  'base64SextetValue',
   'decodedBase64Bytes',
   'inspectChatImageBudget',
   'inspectChatFileBudget',
@@ -89,6 +108,14 @@ describe('chat body budget parity across rpc-proxy, mcp-host and the composer (#
     expect(mcpHost).toBe(rpcProxy)
   })
 
+  it.each(SERVER_DECLARATIONS)('both parsers declare %s as the same value', (name, expected) => {
+    const pattern = new RegExp(`^const ${name} = (.+)$`, 'm')
+    const rpcProxy = soleMatch(sources.rpcProxy, pattern, `rpc-proxy ${name}`)[1]
+    const mcpHost = soleMatch(sources.mcpHost, pattern, `mcp-host ${name}`)[1]
+    expect(rpcProxy).toBe(expected)
+    expect(mcpHost).toBe(rpcProxy)
+  })
+
   it.each(BUDGET_FUNCTIONS)('both parsers implement %s identically', name => {
     const rpcProxy = functionSource(sources.rpcProxy, name, 'rpc-proxy')
     const mcpHost = functionSource(sources.mcpHost, name, 'mcp-host')
@@ -99,13 +126,18 @@ describe('chat body budget parity across rpc-proxy, mcp-host and the composer (#
 
   it('credits a file by its decoded size, bounded by the per-file and total quotas', () => {
     const inspect = functionSource(sources.rpcProxy, 'inspectChatFileBudget', 'rpc-proxy')
-    expect(inspect).toContain('decoded > MAX_FILE_DECODED_BYTES')
-    expect(inspect).toContain('credited + dataBase64.length > MAX_FILE_BASE64_BYTES_TOTAL')
-    expect(inspect).toContain('counted >= MAX_CHAT_FILES')
-    expect(inspect).toContain('SHA256_HEX_RE.test(digest.hex)')
+    expect(soleLine(inspect, 'if (decoded === null', 'per-file credit condition')).toBe(
+      'if (decoded === null || decoded <= 0 || decoded > MAX_FILE_DECODED_BYTES) continue'
+    )
+    expect(soleLine(inspect, 'if (counted >=', 'file quota condition')).toBe(
+      'if (counted >= MAX_CHAT_FILES || credited + dataBase64.length > MAX_FILE_BASE64_BYTES_TOTAL) {'
+    )
+    expect(soleLine(inspect, '!SHA256_HEX_RE.test(', 'digest condition')).toBe(
+      '!SHA256_HEX_RE.test(digest.hex)'
+    )
     const exceeds = functionSource(sources.rpcProxy, 'chatBodyExceedsNonImageBudget', 'rpc-proxy')
-    expect(exceeds).toContain(
-      'rawBodyBytes - images.creditedBase64 - files.creditedBase64 > MAX_NON_IMAGE_BODY_BYTES'
+    expect(soleLine(exceeds, 'return rawBodyBytes', 'non-image share condition')).toBe(
+      'return rawBodyBytes - images.creditedBase64 - files.creditedBase64 > MAX_NON_IMAGE_BODY_BYTES'
     )
   })
 
@@ -127,11 +159,26 @@ describe('chat body budget parity across rpc-proxy, mcp-host and the composer (#
         'COMPOSER_MAX_TOTAL_FILE_BASE64_BYTES',
         constantValue(sources.rpcProxy, 'MAX_FILE_BASE64_BYTES_TOTAL', 'rpc-proxy'),
       ],
-      ['COMPOSER_MAX_ATTACHMENTS', constantValue(sources.rpcProxy, 'MAX_CHAT_FILES', 'rpc-proxy')],
+      // The composer counts images and files together, as the Host admission does;
+      // MAX_CHAT_FILES bounds only the credited files.
+      [
+        'COMPOSER_MAX_ATTACHMENTS',
+        constantValue(sources.hostAdmission, 'INCOMING_ATTACHMENT_MAX_COUNT', 'mcp-host admission'),
+      ],
     ]
     for (const [name, serverValue] of composer) {
       expect(constantValue(sources.composer, name, 'composer'), name).toBe(serverValue)
     }
+  })
+
+  it('the composer reserves the headroom rpc-proxy is tested to add when forwarding', () => {
+    expect(constantValue(sources.composer, 'COMPOSER_FORWARDED_FIELDS_BYTES', 'composer')).toBe(
+      constantValue(
+        sources.rpcProxyForwardingTest,
+        'DESKTOP_FORWARDED_FIELDS_HEADROOM_BYTES',
+        'rpc-proxy forwarding test'
+      )
+    )
   })
 
   it('the Host admission default equals the per-file credit ceiling', () => {
