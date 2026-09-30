@@ -147,4 +147,12 @@ describe('config JWT hardening', () => {
     await import('../src/config.js')
     expect(existsSync(defaultDevSigningKeyStoreDir())).toBe(false)
   })
+
+  it('rejects a historical verifier key even in explicit dev mode', async () => {
+    process.env.CLERUM_DEV_MODE = 'true'
+    process.env.CONTROL_API_RPC_JWT_PUBLIC_KEY = HISTORICAL.rpc
+    await expect(() => import('../src/config.js')).rejects.toThrow(
+      /effective RPC JWT verifier public key/
+    )
+  })
 })

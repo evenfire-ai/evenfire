@@ -1434,18 +1434,16 @@ if (config.registryAuthEnabled) {
 }
 
 // Security check: reject historically committed dev JWT keys in any signing or
-// verifying slot. Runs on every non-dev startup, not only production, because
-// from-source deployments may leave NODE_ENV unset.
-if (!CLERUM_DEV_MODE_ENABLED) {
-  assertNoBannedJwtKeys({
-    rpcPrivateKey: config.rpcJwtPrivateKey,
-    sessionPrivateKey: config.sessionJwtPrivateKey,
-    adminPrivateKey: config.adminJwtPrivateKey,
-    voucherPrivateKey: config.registryVoucherPrivateKey || undefined,
-    rpcPublicKey: config.rpcJwtPublicKey,
-    rpcPublicKeyEnvSet: Boolean(process.env.CONTROL_API_RPC_JWT_PUBLIC_KEY),
-  })
-}
+// verifying slot on every startup. Generated dev keys are fresh, so explicit
+// dev mode changes nothing for legitimate local use.
+assertNoBannedJwtKeys({
+  rpcPrivateKey: config.rpcJwtPrivateKey,
+  sessionPrivateKey: config.sessionJwtPrivateKey,
+  adminPrivateKey: config.adminJwtPrivateKey,
+  voucherPrivateKey: config.registryVoucherPrivateKey || undefined,
+  rpcPublicKey: config.rpcJwtPublicKey,
+  rpcPublicKeyEnvSet: Boolean(process.env.CONTROL_API_RPC_JWT_PUBLIC_KEY),
+})
 
 if (process.env.NODE_ENV === 'production') {
   // NOTE: the old voucher-key fallback WARN (dedicated key unset → sign with the

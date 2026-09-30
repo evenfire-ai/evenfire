@@ -179,4 +179,24 @@ describe('devSigningKeys persistence contract', () => {
       warn.mockRestore()
     }
   })
+
+  it('rejects a store directory with loose permissions on reuse', () => {
+    const store = tempStore()
+    loadOrGenerateDevJwtPrivateKey('rpc', store)
+    chmodSync(store, 0o755)
+    expect(() => loadOrGenerateDevJwtPrivateKey('rpc', store)).toThrow(
+      /Dev JWT key store directory has group\/other permissions/
+    )
+  })
+
+  it('rejects a symlinked store directory even when reusing a key', () => {
+    const realStore = tempStore()
+    const linkStore = `${tempStore()}-dirlink`
+    tempDirs.push(linkStore)
+    loadOrGenerateDevJwtPrivateKey('session', realStore)
+    symlinkSync(realStore, linkStore)
+    expect(() => loadOrGenerateDevJwtPrivateKey('session', linkStore)).toThrow(
+      /Dev JWT key store path is not a directory/
+    )
+  })
 })

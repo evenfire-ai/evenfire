@@ -11,14 +11,13 @@ function generateNonDevPem(): string {
 
 /**
  * Populate every CONTROL_API env var that the prod path requires so that
-  // Non-dev RPC/session/admin JWT keys; the banned-key guard fingerprints the
-  // full public key, so ordinary RSA-2048 material is fine.
- * `src/config.ts`.
+ * config evaluation reaches the key guards rather than throwing earlier on a
+ * missing required env. Mirrors `requiredOrDevDefault` callsites in
  */
 function applyProdEnv(env: Record<string, string | undefined>): void {
   env.NODE_ENV = 'production'
-  // Non-dev RPC/session/admin JWT keys — the existing prod guard rejects the
-  // hardcoded dev fingerprints.
+  // Non-dev RPC/session/admin JWT keys; the banned-key guard fingerprints the
+  // full public key, so ordinary RSA-2048 material is fine.
   env.CONTROL_API_RPC_JWT_PRIVATE_KEY = generateNonDevPem()
   env.CONTROL_API_SESSION_JWT_PRIVATE_KEY = generateNonDevPem()
   env.CONTROL_API_ADMIN_JWT_PRIVATE_KEY = generateNonDevPem()

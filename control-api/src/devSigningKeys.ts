@@ -1,5 +1,13 @@
-import { createPrivateKey, generateKeyPairSync } from 'node:crypto'
-import { type Stats, lstatSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { createPrivateKey, generateKeyPairSync, randomBytes } from 'node:crypto'
+import {
+  type Stats,
+  linkSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs'
 import { dirname, join } from 'node:path'
 import { validateRsaPrivateKeyPem } from './bannedDevSigningKeys.js'
 
@@ -110,22 +118,33 @@ export function loadOrGenerateDevJwtPrivateKey(
   storeDir: string = DEFAULT_STORE_DIR
 ): string {
   const filePath = join(storeDir, `${slot}.pem`)
+  // Validate the store boundary on every path, including pure reuse of an
+  // already-persisted key.
+  ensureStoreDir(storeDir)
   const existing = readPersistedKey(filePath, slot)
   if (existing) {
     warnOnce()
     return existing
   }
-  ensureStoreDir(storeDir)
   const { privateKey } = generateKeyPairSync('rsa', {
     modulusLength: 2048,
     privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
     publicKeyEncoding: { type: 'spki', format: 'pem' },
   })
+  createPrivateKey(privateKey) // sanity: the generated key must re-parse
+  // Publish atomically: write a complete 0600 temp file, then hard-link it
+  // under the final name. link(2) fails with EEXIST when another process won,
+  // and readers can only ever observe a fully written key.
+  const tempPath = `${filePath}.tmp-${process.pid.toString(36)}-${randomBytes(6).toString('hex')}`
   try {
-    writeFileSync(filePath, privateKey, { flag: 'wx', mode: 0o600 })
+    writeFileSync(tempPath, privateKey, { mode: 0o600 })
+    assertOwnedRegularFile(tempPath)
+    linkSync(tempPath, filePath)
+    unlinkSync(tempPath)
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
-      // Another local process created the key first; adopt it.
+      removeIfPresent(tempPath)
+      // Another local process published a complete key first; adopt it.
       const winner = readPersistedKey(filePath, slot)
       if (winner) {
         warnOnce()
@@ -135,7 +154,6 @@ export function loadOrGenerateDevJwtPrivateKey(
     throw err
   }
   assertOwnedRegularFile(filePath)
-  createPrivateKey(privateKey) // sanity: the generated key must re-parse
   warnOnce()
   return privateKey.trim()
 }
@@ -147,4 +165,12 @@ function warnOnce(): void {
     '[ControlAPI] Dev JWT signing keys are active (CLERUM_DEV_MODE). Keys are generated locally ' +
       'and stored under control-api/.dev-keys; they are never valid for production deployments.'
   )
+}
+
+function removeIfPresent(path: string): void {
+  try {
+    unlinkSync(path)
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
+  }
 }

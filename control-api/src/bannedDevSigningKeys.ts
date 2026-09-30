@@ -42,7 +42,8 @@ export function isBannedSigningKeyPem(
   fingerprints: ReadonlySet<string> = BANNED_DEV_JWT_PUBLIC_KEY_FINGERPRINTS
 ): boolean {
   try {
-    return fingerprints.has(spkiDerFingerprint(createPublicKey(privateKeyPem)))
+    const signingKey = createPrivateKey(privateKeyPem)
+    return fingerprints.has(spkiDerFingerprint(createPublicKey(signingKey)))
   } catch {
     return false
   }
@@ -55,6 +56,12 @@ export function isBannedSigningKeyPem(
  * itself is never included in the message.
  */
 export function validateRsaPrivateKeyPem(privateKeyPem: string, envName: string): string {
+  const envelopes = privateKeyPem.match(/-----BEGIN [A-Z0-9 ]*KEY-----/g) ?? []
+  if (envelopes.length !== 1 || !/-----BEGIN (?:RSA )?PRIVATE KEY-----/.test(envelopes[0])) {
+    throw new Error(
+      `${envName} must contain exactly one PEM private key; concatenated key bundles are rejected.`
+    )
+  }
   let key: KeyObject
   try {
     key = createPrivateKey(privateKeyPem)
@@ -122,11 +129,14 @@ export function assertNoBannedJwtKeys(
     )
   }
   if (input.rpcPublicKeyEnvSet) {
-    const derived = createPublicKey(input.rpcPrivateKey)
-      .export({ type: 'spki', format: 'pem' })
-      .toString()
-      .trim()
-    if (derived !== input.rpcPublicKey.trim()) {
+    let suppliedDer: Buffer
+    try {
+      suppliedDer = createPublicKey(input.rpcPublicKey).export({ type: 'spki', format: 'der' })
+    } catch {
+      throw new Error('CONTROL_API_RPC_JWT_PUBLIC_KEY must be a valid PEM-encoded public key')
+    }
+    const derivedDer = createPublicKey(input.rpcPrivateKey).export({ type: 'spki', format: 'der' })
+    if (!derivedDer.equals(suppliedDer)) {
       throw new Error(
         'CONTROL_API_RPC_JWT_PUBLIC_KEY must correspond to CONTROL_API_RPC_JWT_PRIVATE_KEY'
       )

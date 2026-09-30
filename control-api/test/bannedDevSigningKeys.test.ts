@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { generateKeyPairSync } from 'node:crypto'
+import { createPublicKey } from 'node:crypto'
 import {
   BANNED_DEV_JWT_PUBLIC_KEY_FINGERPRINTS as DEFAULT_BANNED_FINGERPRINTS,
   assertNoBannedJwtKeys as assertGuard,
@@ -58,7 +59,9 @@ describe('bannedDevSigningKeys', () => {
       privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
       publicKeyEncoding: { type: 'spki', format: 'pem' },
     })
-    expect(() => validateSigningPem(ec.publicKey, 'TEST_ENV')).toThrow(/must be a PEM-encoded/)
+    expect(() => validateSigningPem(ec.publicKey, 'TEST_ENV')).toThrow(
+      /must contain exactly one PEM private key/
+    )
     expect(() => validateSigningPem(ec.privateKey, 'TEST_ENV')).toThrow(/must be an RSA key/)
   })
 
@@ -127,5 +130,52 @@ describe('bannedDevSigningKeys', () => {
         new Set(['0'.repeat(64)])
       )
     ).not.toThrow()
+  })
+
+  it('rejects concatenated key bundles instead of fingerprinting a decoy half', () => {
+    const target = makeFresh()
+    const decoy = makeFresh()
+    const fingerprints = new Set([publicKeyFingerprint(target.public)])
+    for (const combined of [
+      `${decoy.public}\n${target.signing}`,
+      `${target.signing}\n${decoy.public}`,
+    ]) {
+      expect(() => validateSigningPem(combined, 'TEST_ENV')).toThrow(
+        /must contain exactly one PEM private key/
+      )
+      expect(() =>
+        assertGuard(
+          {
+            rpcPrivateKey: combined,
+            sessionPrivateKey: makeFresh().signing,
+            adminPrivateKey: makeFresh().signing,
+            rpcPublicKey: makeFresh().public,
+            rpcPublicKeyEnvSet: false,
+          },
+          fingerprints
+        )
+      ).toThrow(/historically committed dev JWT key/)
+    }
+  })
+
+  it('accepts equivalent verifier encodings and rejects different keys by identity', () => {
+    const fresh = makeFresh()
+    const fingerprints = new Set(['0'.repeat(64)])
+    const pkcs1 = createPublicKey(fresh.public).export({ type: 'pkcs1', format: 'pem' }).toString()
+    const crlf = fresh.public.trim().replace(/\n/g, '\r\n')
+    for (const equivalent of [pkcs1, crlf]) {
+      expect(() =>
+        assertGuard(
+          {
+            rpcPrivateKey: fresh.signing,
+            sessionPrivateKey: makeFresh().signing,
+            adminPrivateKey: makeFresh().signing,
+            rpcPublicKey: equivalent,
+            rpcPublicKeyEnvSet: true,
+          },
+          fingerprints
+        )
+      ).not.toThrow()
+    }
   })
 })
