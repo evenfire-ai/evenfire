@@ -393,7 +393,9 @@ describe('App deep-link orchestration', () => {
 
     expect(confirmDialogHarness.props?.title).toBe('Add desktop environment?')
     const dialogBody = renderToStaticMarkup(<>{confirmDialogHarness.props?.body}</>)
-    expect(dialogBody).toContain('This environment is not saved in Evenfire Desktop yet.')
+    expect(dialogBody).toContain(
+      'Review the service URLs for <strong>Example tenant</strong>. Continue only if you trust them.'
+    )
     expect(dialogBody).toContain('https://rpc.example.test')
   })
 

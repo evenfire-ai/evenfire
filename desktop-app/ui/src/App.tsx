@@ -2430,10 +2430,10 @@ export function App() {
       body={
         <>
           <p>
-            This environment is not saved in Evenfire Desktop yet. Add{' '}
-            <strong>{vm.pendingDesktopEnvironmentSetup.appName || 'Evenfire'}</strong>.
+            Review the service URLs for{' '}
+            <strong>{vm.pendingDesktopEnvironmentSetup.appName || 'Evenfire'}</strong>. Continue
+            only if you trust them.
           </p>
-          <p>Only continue if you trust these service URLs:</p>
           <p className="auth-environment-confirm-url">
             {vm.pendingDesktopEnvironmentSetup.externalRestApiBaseUrl}
           </p>
