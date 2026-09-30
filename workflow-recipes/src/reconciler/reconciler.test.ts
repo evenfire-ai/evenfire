@@ -15879,24 +15879,29 @@ describe('WorkflowRecipeReconciler', () => {
       ).toHaveLength(1)
     })
 
-    it('deletes the NetworkPolicy once for the same generation, then again after the 1h TTL', async () => {
+    it('R4-L2: deletes the NetworkPolicy once for the same generation, then again after the 1h TTL, logging the skip at debug', async () => {
       vi.useFakeTimers()
       vi.setSystemTime(new Date('2026-09-25T00:00:00.000Z'))
       const recipe = reapRecipe(4)
-      const infoSpy = captureLogger('info')
+      const logs = captureLoggerLevels(['debug', 'info'] as const)
 
       await reapPolicy(recipe)
       await reapPolicy(recipe)
       expect(policyDeletes()).toBe(1)
-      expect(infoSpy).toHaveBeenCalledWith(
+      // Witness: the skip is logged, at debug.
+      expect(logs.calls.debug).toHaveBeenCalledWith(
         expect.stringContaining('Skipping oauth-broker-egress delete'),
         expect.objectContaining({ recipe: 'test-recipe', generation: 4 })
+      )
+      expect(logs.calls.info).not.toHaveBeenCalledWith(
+        expect.stringContaining('Skipping oauth-broker-egress delete'),
+        expect.anything()
       )
 
       vi.setSystemTime(new Date('2026-09-25T01:00:00.000Z'))
       await reapPolicy(recipe)
       expect(policyDeletes()).toBe(2)
-      infoSpy.mockRestore()
+      logs.restore()
       vi.useRealTimers()
     })
 
@@ -15917,8 +15922,8 @@ describe('WorkflowRecipeReconciler', () => {
       debugSpy.mockRestore()
     })
 
-    it('R1-L2: a late pass carrying an older generation does not re-delete the NetworkPolicy', async () => {
-      const infoSpy = captureLogger('info')
+    it('R1-L2: a late pass carrying an older generation does not re-delete the NetworkPolicy, and R4-L2 logs the skip at debug', async () => {
+      const logs = captureLoggerLevels(['debug', 'info'] as const)
       await reapPolicy(reapRecipe(4))
       await reapPolicy(reapRecipe(5))
       // Liveness witness: both newer-generation deletes really ran.
@@ -15926,11 +15931,16 @@ describe('WorkflowRecipeReconciler', () => {
 
       await reapPolicy(reapRecipe(4))
       expect(policyDeletes()).toBe(2)
-      expect(infoSpy).toHaveBeenCalledWith(
+      // Witness: the skip is logged, at debug.
+      expect(logs.calls.debug).toHaveBeenCalledWith(
         expect.stringContaining('Skipping oauth-broker-egress delete'),
         expect.objectContaining({ recipe: 'test-recipe', generation: 4 })
       )
-      infoSpy.mockRestore()
+      expect(logs.calls.info).not.toHaveBeenCalledWith(
+        expect.stringContaining('Skipping oauth-broker-egress delete'),
+        expect.anything()
+      )
+      logs.restore()
     })
 
     it('R1-L2: a recipe recreated under the same name is reaped even at a lower generation', async () => {
