@@ -3,6 +3,7 @@ import {
   parseCodexCompletionRequest,
 } from '@clerum/llm-provider-attempt-contract'
 import { fetchCauseCode, isConnectPhaseFailure } from './controlPlaneReachability'
+import { canonicalRefusalCode } from './imageSource'
 import { rateLimitedCode, retryAfterMs } from './retryAfter'
 import { upstreamRejectedStatus } from './upstreamRejected'
 
@@ -107,7 +108,9 @@ export class CodexLlmProxyClient {
     ) {
       const parsed = parseCodexCompletionRequest(input.request)
       if (!parsed.ok) {
-        throw new CodexProxyError('invalid_request', parsed.message, { dispatched: false })
+        throw new CodexProxyError(canonicalRefusalCode(parsed), parsed.message, {
+          dispatched: false,
+        })
       }
       if (input.deadlineMs !== undefined && input.deadlineMs !== parsed.value.deadlineMs) {
         throw new CodexProxyError(
@@ -122,12 +125,12 @@ export class CodexLlmProxyClient {
         request: parsed.value,
       })
       if (!envelope.ok) {
+        // The providers' canonical mapping (review R4-L6), so the client and
+        // the pre-dispatch checks agree; only the hash mismatch is its own code.
         const code =
-          envelope.code === 'limit'
-            ? 'payload_too_large'
-            : envelope.code === 'request_hash_mismatch'
-              ? 'request_hash_mismatch'
-              : 'invalid_request'
+          envelope.code === 'request_hash_mismatch'
+            ? 'request_hash_mismatch'
+            : canonicalRefusalCode(envelope)
         throw new CodexProxyError(code, envelope.message, { dispatched: false })
       }
       body = envelope.value
