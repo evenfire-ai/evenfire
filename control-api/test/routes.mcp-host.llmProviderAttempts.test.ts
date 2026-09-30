@@ -744,6 +744,37 @@ describe('authorize raw-body scan before JSON.parse', () => {
       expect(JSON.stringify(args)).not.toContain(marker)
     }
   }, 60_000)
+
+  // Review R3 nit b: the refusal is logged through the request-scoped logger,
+  // which carries the correlationId, as the global error handler does.
+  it('logs a body refusal through req.log when the request has one', async () => {
+    const requestWarn = vi.fn()
+    const app = express()
+    app.use((req, _res, next) => {
+      // `Request.log` is declared by middleware/correlationId.ts.
+      ;(req as { log?: unknown }).log = { warn: requestWarn }
+      next()
+    })
+    const api = express.Router()
+    api.use(createMcpHostLlmProviderAttemptRoutes({ getResource: vi.fn() } as never))
+    app.use('/api/v1', api)
+    const res = await request(app)
+      .post('/api/v1/mcp-host/llm/provider-attempts/authorize')
+      .set(headers({ 'content-encoding': 'gzip' }))
+      .send(Buffer.from(gzipSync('{}')))
+    expect(res.status).toBe(415)
+    // Witness: the request logger received the refusal.
+    expect(requestWarn).toHaveBeenCalledExactlyOnceWith({
+      event: 'llm_provider_attempt_body_refused',
+      type: 'encoding.unsupported',
+      status: 415,
+    })
+    const moduleRefusals = mockLogWarn.mock.calls.filter(
+      ([fields]) => (fields as { event?: string })?.event === 'llm_provider_attempt_body_refused'
+    )
+    expect(moduleRefusals).toEqual([])
+    expect(authorizer.authorizeLlmProviderAttempt).not.toHaveBeenCalled()
+  })
 })
 
 describe('resolveHostAssignedAssignment', () => {

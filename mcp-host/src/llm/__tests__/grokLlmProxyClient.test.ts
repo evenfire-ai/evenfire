@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
   LIMITS as GROK_LIMITS,
+  GROK_VISUAL_LIMITS,
   buildGrokProxyEnvelope,
   hashGrokCompletionRequest,
   parseGrokCompletionRequest,
@@ -74,6 +75,15 @@ function visualInput() {
   }
 }
 type VisualInput = ReturnType<typeof visualInput>
+
+/** The fixture's single user message, with its parts. */
+function visualMessage(input: VisualInput) {
+  const [message] = input.request.messages
+  if (!message || !('contentParts' in message) || !message.contentParts) {
+    throw new Error('fixture message has no contentParts')
+  }
+  return { ...message, contentParts: message.contentParts }
+}
 
 const STREAM_INPUT = {
   executionTicket: 'ticket-123456',
@@ -155,6 +165,50 @@ describe('GrokLlmProxyClient', () => {
       'an envelope the contract rejects',
       (input: VisualInput) => ({ ...input, executionTicket: 'short' }),
       { code: 'invalid_request', message: 'executionTicket is invalid' },
+    ],
+    // Review R3 nit c: the envelope refusal uses the providers' canonical
+    // mapping, so an image count is not a size refusal.
+    [
+      'more images than the contract allows',
+      (input: VisualInput) => {
+        const message = visualMessage(input)
+        const image = message.contentParts.find(part => part.type === 'image')
+        if (!image) throw new Error('fixture has no image part')
+        const images = Array.from({ length: GROK_VISUAL_LIMITS.maxImages + 1 }, (_, i) => ({
+          ...image,
+          source: { kind: 'attachment' as const, attachmentId: `att-${i}`, messageId: 'msg-1' },
+        }))
+        const contentParts = [{ type: 'text' as const, text: message.content }, ...images]
+        return {
+          ...input,
+          request: { ...input.request, messages: [{ ...message, contentParts }] },
+        }
+      },
+      {
+        code: 'invalid_request',
+        message: `request exceeds ${GROK_VISUAL_LIMITS.maxImages} images`,
+      },
+    ],
+    [
+      'text over the non-image budget',
+      (input: VisualInput) => {
+        const message = visualMessage(input)
+        const text = 'x'.repeat(GROK_LIMITS.maxRequestBodyBytes)
+        const parts = message.contentParts.map(part =>
+          part.type === 'text' ? { ...part, text } : part
+        )
+        return {
+          ...input,
+          request: {
+            ...input.request,
+            messages: [{ ...message, content: text, contentParts: parts }],
+          },
+        }
+      },
+      {
+        code: 'request_limit_exceeded',
+        message: 'request exceeds maxRequestBodyBytes outside image data',
+      },
     ],
   ])('T-G4c-5 refuses %s before the proxy hop', async (_label, mutate, expected) => {
     const fetchFn = vi.fn<typeof fetch>(
