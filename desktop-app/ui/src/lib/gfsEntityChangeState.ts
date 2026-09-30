@@ -31,3 +31,11 @@ export function expireGfsPreviewTabs(state: WorkspaceTabsState): WorkspaceTabsSt
     state
   )
 }
+
+/** Make the plugin overlay unavailable once; repeated unchanged invalidations are idempotent. */
+export function markPluginGfsPreviewUnavailable<
+  T extends { gfsUri: string; reloadVersion: number; unavailable?: boolean },
+>(current: T | null, gfsUri: string): T | null {
+  if (!current || current.gfsUri !== gfsUri || current.unavailable) return current
+  return { ...current, unavailable: true, reloadVersion: current.reloadVersion + 1 }
+}

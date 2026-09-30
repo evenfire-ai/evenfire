@@ -42,6 +42,7 @@ import { EntityChangeRegistry } from '@lib/entityChangeRegistry'
 import {
   authoritativeGfsStatus,
   expireGfsPreviewTabs,
+  markPluginGfsPreviewUnavailable,
   shouldRevalidateGfsQuery,
 } from '@lib/gfsEntityChangeState'
 import { resolveGfsPreview } from '@lib/gfsPreview'
@@ -986,9 +987,7 @@ export function App() {
             })
           )
           setPluginGfsPreview(current =>
-            isCurrentGeneration() && current?.gfsUri === gfsUri
-              ? { ...current, unavailable: true, reloadVersion: current.reloadVersion + 1 }
-              : current
+            isCurrentGeneration() ? markPluginGfsPreviewUnavailable(current, gfsUri) : current
           )
           return
         }
@@ -1012,7 +1011,7 @@ export function App() {
           )
             return current
           if (preview.kind !== 'image') {
-            return { ...current, unavailable: true, reloadVersion: current.reloadVersion + 1 }
+            return markPluginGfsPreviewUnavailable(current, gfsUri)
           }
           if (
             !current.unavailable &&
@@ -1053,9 +1052,7 @@ export function App() {
           previewRetryAttemptRef.current.clear()
           setWorkspaceTabs(expireGfsPreviewTabs)
           setPluginGfsPreview(current =>
-            current && !current.unavailable
-              ? { ...current, unavailable: true, reloadVersion: current.reloadVersion + 1 }
-              : current
+            markPluginGfsPreviewUnavailable(current, current?.gfsUri ?? '')
           )
           void queryClient.removeQueries({ queryKey: desktopQueryKeys.gfsRoot })
           return
@@ -1069,9 +1066,7 @@ export function App() {
             })
           )
           setPluginGfsPreview(current =>
-            isCurrentGeneration() && current?.gfsUri === gfsUri
-              ? { ...current, unavailable: true, reloadVersion: current.reloadVersion + 1 }
-              : current
+            isCurrentGeneration() ? markPluginGfsPreviewUnavailable(current, gfsUri) : current
           )
           void queryClient.invalidateQueries({
             queryKey: desktopQueryKeys.gfsRoot,
