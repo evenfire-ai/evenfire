@@ -333,6 +333,7 @@ export async function runToolUseLoop(
             role: 'assistant',
             content: result.content ?? '',
             tool_calls: result.calls,
+            reasoning_content: result.reasoning_content,
           })
 
           for (const message of messages) {

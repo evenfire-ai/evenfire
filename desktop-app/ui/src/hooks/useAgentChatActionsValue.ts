@@ -18,6 +18,7 @@ export function useAgentChatActionsValue(vm: AppVm): AgentChatActionsContextValu
   const handleCreateChat = useStableCallback(vm.handleCreateChat)
   const handleRenameChat = useStableCallback(vm.handleRenameChat)
   const handleRenameChatForAgent = useStableCallback(vm.handleRenameChatForAgent)
+  const captureChatDeleteFence = useStableCallback(vm.captureChatDeleteFence)
   const handleDeleteChat = useStableCallback(vm.handleDeleteChat)
   const handleDeleteChatForAgent = useStableCallback(vm.handleDeleteChatForAgent)
   const handleSelectChat = useStableCallback(vm.handleSelectChat)
@@ -52,6 +53,7 @@ export function useAgentChatActionsValue(vm: AppVm): AgentChatActionsContextValu
       handleCreateChat,
       handleRenameChat,
       handleRenameChatForAgent,
+      captureChatDeleteFence,
       handleDeleteChat,
       handleDeleteChatForAgent,
       handleSelectChat,
@@ -75,6 +77,7 @@ export function useAgentChatActionsValue(vm: AppVm): AgentChatActionsContextValu
       handleCreateChat,
       handleRenameChat,
       handleRenameChatForAgent,
+      captureChatDeleteFence,
       handleDeleteChat,
       handleDeleteChatForAgent,
       handleSelectChat,

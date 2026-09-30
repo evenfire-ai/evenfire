@@ -56,7 +56,8 @@ describe('formatBudgetScope', () => {
 
 describe('formatBudgetAmount', () => {
   it('formats cost amounts with the budget currency', () => {
-    expect(formatBudgetAmount(12.5, 'cost', 'USD')).toContain('12.5')
+    // Locale-independent: accept both decimal separators (12.5 and 12,5).
+    expect(formatBudgetAmount(12.5, 'cost', 'USD')).toMatch(/12[.,]5/)
     expect(formatBudgetAmount(12.5, 'cost', 'USD')).toMatch(/\$|USD/)
   })
 

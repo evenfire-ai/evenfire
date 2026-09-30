@@ -11,6 +11,11 @@ import type {
 import { AGENT_WORKSPACE_ROUTES, DESKTOP_ROUTES } from '../constants/navigation'
 import { pickLatestAgent } from '../lib/agents'
 import { toPrettyJson } from '../lib/format'
+import {
+  type HostAuthorityHoldKind,
+  type HostAuthorityStore,
+  createHostAuthorityStore,
+} from '../lib/hostAuthorityStore'
 import { selectUnauthenticatedView } from '../lib/unauthenticatedView'
 import { summarizeWorkflowResource } from '../lib/workflows'
 import type {
@@ -53,6 +58,7 @@ import {
   createResetWorkflowSelection,
 } from './domain/useWorkflowController.types'
 import { scheduleAfterFirstPaint } from './scheduleAfterFirstPaint'
+import { useChatStore } from './useChatStore'
 
 // U5 cold-start buffer: how long an OAuth completion whose sessions are not yet
 // seeded is retried against later snapshots before it is discarded. Long enough
@@ -212,7 +218,12 @@ export function useAppController() {
   // here (see refreshAuthenticatedData / handleLogout / switchTeamForWorkspace).
   const connectorsData = useConnectorsController()
   const teamsData = useTeamsDataController()
-  const currentTeamId = auth.me?.teamId || teamsData.currentTeamId || ''
+  // The authenticated principal's own team: the ONE place `me.teamId` is read.
+  // The chat-list cache scope (`currentTeamId`) may fall back to the display
+  // directory when it is empty; the delete fence (`chatAuthorityTeamId`) never
+  // does, because a directory team was never proven to be the session's.
+  const principalTeamId = auth.me?.teamId ?? ''
+  const currentTeamId = principalTeamId || teamsData.currentTeamId || ''
   const availableTeamIds = useMemo(() => teamsData.teams.map(team => team.id), [teamsData.teams])
   const authenticatedPrincipalIdentity =
     auth.isAuthenticated && auth.me
@@ -306,11 +317,73 @@ export function useAppController() {
     (agentName: string) => agentsData.agentDisplayByName[agentName] ?? agentName,
     [agentsData.agentDisplayByName]
   )
+  const authorityScope = `${auth.runtimeConfigState?.envKey ?? ''}:${auth.isAuthenticated}:${authenticatedPrincipalIdentity ?? ''}:${currentTeamId}`
+  const authorityScopeRef = useRef(authorityScope)
+  authorityScopeRef.current = authorityScope
+  const navigationIntentEpochRef = useRef(0)
+  // Lazy-init: the factory must run once per mount, like the FSM store.
+  const hostAuthorityRef = useRef<HostAuthorityStore | null>(null)
+  if (!hostAuthorityRef.current) hostAuthorityRef.current = createHostAuthorityStore()
+  const hostAuthority = hostAuthorityRef.current
+  const [hostAuthorityRevision, setHostAuthorityRevision] = useState(0)
+  const selectedAgentRef = useRef(nav.selectedAgent)
+  selectedAgentRef.current = nav.selectedAgent
+  const isHostAccessBlocked = useCallback(
+    (agentRef: string) => hostAuthority.isBlocked(agentRef),
+    [hostAuthority]
+  )
+  const getHostAuthorityEpoch = useCallback(
+    (agentRef: string) => hostAuthority.getEpoch(agentRef),
+    [hostAuthority]
+  )
+  useEffect(() => {
+    hostAuthority.reset()
+    setHostAuthorityRevision(revision => revision + 1)
+  }, [authorityScope, hostAuthority])
+  const { invalidateSessionCatalog } = useChatStore()
+  const blockHostAccess = useCallback(
+    (agentRef: string, kind: HostAuthorityHoldKind) => {
+      // F4: a catalog request issued before the hold must not be shared with a
+      // reader that starts after `verifyHostAccess` releases it.
+      invalidateSessionCatalog(agentRef)
+      if (!hostAuthority.hold(agentRef, kind)) return
+      setHostAuthorityRevision(revision => revision + 1)
+      if (selectedAgentRef.current === agentRef) nav.setSelectedAgent(null)
+      void agentsData.refresh()
+    },
+    [agentsData.refresh, hostAuthority, invalidateSessionCatalog, nav.setSelectedAgent]
+  )
+  const onHostAccessRevoked = useCallback(
+    (agentRef: string) => blockHostAccess(agentRef, 'revoked'),
+    [blockHostAccess]
+  )
+  const onHostAuthorityUncertain = useCallback(
+    (agentRef: string) => blockHostAccess(agentRef, 'uncertain'),
+    [blockHostAccess]
+  )
+  const verifyHostAccess = useCallback(
+    async (agentRef: string): Promise<boolean> => {
+      const heldAtEpoch = hostAuthority.heldAtEpoch(agentRef)
+      if (heldAtEpoch === undefined) return true
+      const scope = authorityScopeRef.current
+      try {
+        await window.clerum.rpc.listSessions(agentRef, undefined, { agent: agentRef, limit: 1 })
+      } catch {
+        return false
+      }
+      if (authorityScopeRef.current !== scope || !hostAuthority.release(agentRef, heldAtEpoch))
+        return false
+      setHostAuthorityRevision(revision => revision + 1)
+      return true
+    },
+    [hostAuthority]
+  )
   const chat = useAgentChatController({
     selectedAgent: nav.selectedAgent,
     agentNames: agentsData.agentNames,
     currentUserId: auth.me?.id,
     currentTeamId,
+    currentEnvironmentKey: auth.runtimeConfigState?.envKey ?? '',
     currentTeamName,
     isAuthenticated: auth.isAuthenticated,
     loadMenuData: postPaintDataReady,
@@ -322,6 +395,12 @@ export function useAppController() {
     showDesktopNotification: notificationSettings.showDesktopNotification,
     openAgentConversationFromNotification,
     decideApprovalFromNotification,
+    onHostAccessRevoked,
+    onHostAuthorityUncertain,
+    isHostAccessBlocked,
+    getHostAuthorityEpoch,
+    hostAuthorityRevision,
+    chatAuthorityTeamId: principalTeamId,
   })
 
   // §4.7.4: the ONE central approval-decision function, bound to the chat
@@ -597,7 +676,10 @@ export function useAppController() {
   useEffect(() => {
     if (!auth.isAuthenticated) return
     if (agentsData.accessCatalog && nav.selectedAgent) {
-      if (!agentsData.agentNames.includes(nav.selectedAgent)) {
+      if (
+        !agentsData.agentNames.includes(nav.selectedAgent) ||
+        isHostAccessBlocked(nav.selectedAgent)
+      ) {
         nav.setSelectedAgent(null)
       }
     }
@@ -607,6 +689,7 @@ export function useAppController() {
     auth.isAuthenticated,
     nav.selectedAgent,
     nav.setSelectedAgent,
+    isHostAccessBlocked,
   ])
 
   const switchTeamForWorkspace = useCallback(
@@ -859,7 +942,7 @@ export function useAppController() {
   ])
 
   // ─── Cross-domain: handleOpenAgentWorkspace ───
-  const handleOpenAgentWorkspace = useCallback(
+  const openAgentWorkspace = useCallback(
     (agentName: string, route: AgentWorkspaceRoute = AGENT_WORKSPACE_ROUTES.connectors) => {
       if (!agentName) return
       chat.setPendingChatSelection(agentName, null)
@@ -878,9 +961,30 @@ export function useAppController() {
       nav.setSelectedAgentRoute,
     ]
   )
+  const handleOpenAgentWorkspace = useCallback(
+    (agentName: string, route: AgentWorkspaceRoute = AGENT_WORKSPACE_ROUTES.connectors) => {
+      if (!agentName) return
+      const navigationIntentEpoch = ++navigationIntentEpochRef.current
+      if (!isHostAccessBlocked(agentName)) {
+        openAgentWorkspace(agentName, route)
+        return
+      }
+      const scope = authorityScopeRef.current
+      void verifyHostAccess(agentName).then(verified => {
+        if (
+          verified &&
+          authorityScopeRef.current === scope &&
+          navigationIntentEpochRef.current === navigationIntentEpoch
+        ) {
+          openAgentWorkspace(agentName, route)
+        }
+      })
+    },
+    [isHostAccessBlocked, openAgentWorkspace, verifyHostAccess]
+  )
 
   // ─── Cross-domain: handleSelectChatAgent (Chat page agent picker) ───
-  const handleSelectChatAgent = useCallback(
+  const selectChatAgent = useCallback(
     (
       agentName: string,
       options: {
@@ -981,6 +1085,27 @@ export function useAppController() {
       nav.setSelectedAgentRoute,
     ]
   )
+  const handleSelectChatAgent = useCallback(
+    (agentName: string, options: Parameters<typeof selectChatAgent>[1] = {}) => {
+      if (!agentName) return
+      const navigationIntentEpoch = ++navigationIntentEpochRef.current
+      if (!isHostAccessBlocked(agentName)) {
+        selectChatAgent(agentName, options)
+        return
+      }
+      const scope = authorityScopeRef.current
+      void verifyHostAccess(agentName).then(verified => {
+        if (
+          verified &&
+          authorityScopeRef.current === scope &&
+          navigationIntentEpochRef.current === navigationIntentEpoch
+        ) {
+          selectChatAgent(agentName, options)
+        }
+      })
+    },
+    [isHostAccessBlocked, selectChatAgent, verifyHostAccess]
+  )
 
   // ─── Cross-domain: handleNavSelect (extended) ───
   const handleNavSelect = useCallback(
@@ -1037,6 +1162,7 @@ export function useAppController() {
         if (requiresTeamSwitch) {
           await ensureTeamContext({ teamId: targetTeamId })
         }
+        if (isHostAccessBlocked(targetAgent) && !(await verifyHostAccess(targetAgent))) return
 
         if (stayInDrawer) {
           // handleSelectChatAgent(keepNavItem) sets the active chat without
@@ -1090,6 +1216,8 @@ export function useAppController() {
       ensureTeamContext,
       fullSetStatus,
       handleSelectChatAgent,
+      isHostAccessBlocked,
+      verifyHostAccess,
       nav.activateChatTab,
       nav.navItem,
       nav.selectedAgent,
@@ -1336,6 +1464,8 @@ export function useAppController() {
     // Navigation
     navItem: nav.navItem,
     selectedAgent: nav.selectedAgent,
+    isHostAccessBlocked,
+    hostAuthorityRevision,
     selectedAgentRoute: nav.selectedAgentRoute,
     setSelectedAgent: nav.setSelectedAgent,
     handleNavSelect,
@@ -1420,6 +1550,7 @@ export function useAppController() {
     handleCreateChat: chat.handleCreateChat,
     handleRenameChat: chat.handleRenameChat,
     handleRenameChatForAgent: chat.handleRenameChatForAgent,
+    captureChatDeleteFence: chat.captureChatDeleteFence,
     handleDeleteChat: chat.handleDeleteChat,
     handleDeleteChatForAgent: chat.handleDeleteChatForAgent,
     handleSelectChat: chat.handleSelectChat,

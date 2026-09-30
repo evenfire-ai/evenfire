@@ -129,9 +129,11 @@ describe('useAgentChatController — characterization (D.0)', () => {
         { limit: 40 }
       )
       expect(clerum.chat.create).toHaveBeenCalledWith('agent-x', 'chat-2')
-      // Server is source of truth → replace, not append.
+      // Server is source of truth → replace, not append (nor upsert, which the
+      // real store keeps apart from append).
       expect(clerum.chat.replaceMessages).toHaveBeenCalled()
       expect(clerum.chat.appendMessages).not.toHaveBeenCalled()
+      expect(clerum.chat.upsertMessages).not.toHaveBeenCalled()
       // spec 15 §2.2/A19: the first-turn auto-title is shown EPHEMERALLY in the
       // sidebar (observable output, T4) but is NOT persisted via rename — the
       // server title is authoritative and a persisted client-derived title would
@@ -330,8 +332,18 @@ describe('useAgentChatController — characterization (D.0)', () => {
       await sendPromise
 
       expect(sendResolved).toBe(true)
-      // user message + assistant reply
-      expect(clerum.chat.appendMessages).toHaveBeenCalledTimes(2)
+      // The user message is upserted before the POST and the assistant reply is
+      // appended after the terminal; the store holds both, in order.
+      const chatId = result.current.activeChatId!
+      await waitFor(async () =>
+        expect(
+          (await clerum.persistedMessages('agent-x', chatId)).map(m => [m.role, m.content])
+        ).toEqual([
+          ['user', 'hola'],
+          ['assistant', 'done!'],
+        ])
+      )
+      expect(clerum.chat.appendMessages).toHaveBeenCalledTimes(1)
       expect(clerum.rpc.getTaskResult).toHaveBeenCalledWith('agent-x', 'task-abc', ['agent-x'])
       expect(spies.pushToast).toHaveBeenCalledWith('Message sent to agent-x.', 'success')
     })
@@ -428,12 +440,59 @@ describe('useAgentChatController — characterization (D.0)', () => {
       })
       await sendPromise
 
-      expect(spies.pushToast).toHaveBeenCalledWith('Message to agent-x failed: LLM down', 'error')
+      // The failure toast follows the store write of the error reply.
+      await waitFor(() =>
+        expect(spies.pushToast).toHaveBeenCalledWith('Message to agent-x failed: LLM down', 'error')
+      )
       const appended = clerum.chat.appendMessages.mock.calls.at(-1)?.[2] as
         | Array<{ isError?: boolean; errorCode?: string }>
         | undefined
       expect(appended?.[0]?.isError).toBe(true)
       expect(appended?.[0]?.errorCode).toBe('provider_error')
+    })
+
+    it('does not toast or repaint a terminal error after its append crosses a team switch', async () => {
+      const pendingAppend = deferred<void>()
+      clerum.rpc.invokeHostMessage.mockResolvedValue({ taskId: 'task-old-team' })
+      clerum.chat.appendMessages.mockImplementation(
+        async (_agentRef: string, _chatId: string, messages: Array<{ role?: string }>) => {
+          if (messages[0]?.role === 'assistant') await pendingAppend.promise
+        }
+      )
+      const controller = renderController({ currentTeamId: 'team-before' })
+      await settleMount()
+      await act(async () => {
+        await controller.result.current.handleSendAgentMessage('question')
+      })
+      await waitFor(() => expect(clerum.hasProgressHandler('task-old-team')).toBe(true))
+
+      clerum.emitTaskProgress('task-old-team', {
+        type: 'terminal',
+        data: {
+          taskId: 'task-old-team',
+          status: 'failed',
+          error: { message: 'protected old-team failure', code: 'provider_error' },
+        },
+      })
+      await waitFor(() =>
+        expect(
+          clerum.chat.appendMessages.mock.calls.some(
+            call => (call[2] as Array<{ role?: string }>)[0]?.role === 'assistant'
+          )
+        ).toBe(true)
+      )
+      controller.rerender({ currentTeamId: 'team-after' })
+      const toastCount = controller.spies.pushToast.mock.calls.length
+      const notificationCount = controller.spies.pushNotification.mock.calls.length
+      const progressAfterSwitch = controller.result.current.progressByMessageId
+
+      await act(async () => {
+        pendingAppend.resolve()
+        await pendingAppend.promise
+      })
+      expect(controller.spies.pushToast.mock.calls.length).toBe(toastCount)
+      expect(controller.spies.pushNotification.mock.calls.length).toBe(notificationCount)
+      expect(controller.result.current.progressByMessageId).toEqual(progressAfterSwitch)
     })
 
     it('4.6 marks the task cancelled without fetching a result', async () => {
@@ -523,11 +582,12 @@ describe('useAgentChatController — characterization (D.0)', () => {
         sendError = e
       })
 
-      // Flush the async send setup until the progress subscription is wired.
+      // Flush the async send setup until the progress subscription is wired. The
+      // send persists the user turn to the real ChatStore first, which is disk
+      // I/O that fake timers do not advance: poll for the subscription instead.
       await act(async () => {
-        await vi.advanceTimersByTimeAsync(0)
+        await vi.waitFor(() => expect(clerum.hasProgressHandler('task-abc')).toBe(true))
       })
-      expect(clerum.hasProgressHandler('task-abc')).toBe(true)
 
       await act(async () => {
         // Open the stream, then go silent and advance past the 30s watchdog.
@@ -542,7 +602,12 @@ describe('useAgentChatController — characterization (D.0)', () => {
       })
       await sendPromise
 
-      expect(spies.pushToast).toHaveBeenCalledWith(expect.stringContaining('failed'), 'error')
+      // The failure toast follows the store write of the error reply.
+      await act(async () => {
+        await vi.waitFor(() =>
+          expect(spies.pushToast).toHaveBeenCalledWith(expect.stringContaining('failed'), 'error')
+        )
+      })
       expect(result.current.agentSending).toBe(false)
       expect(sendError).toBeNull() // controller catches internally, does not reject
     })
@@ -573,9 +638,12 @@ describe('useAgentChatController — characterization (D.0)', () => {
         | undefined
       expect(appended?.[0]?.isError).toBe(true)
       expect(appended?.[0]?.content).toContain('Failed to retrieve task result')
-      expect(spies.pushToast).toHaveBeenCalledWith(
-        expect.stringContaining('Failed to retrieve result'),
-        'error'
+      // The failure toast follows the store write of the error reply.
+      await waitFor(() =>
+        expect(spies.pushToast).toHaveBeenCalledWith(
+          expect.stringContaining('Failed to retrieve result'),
+          'error'
+        )
       )
     })
 
@@ -591,10 +659,11 @@ describe('useAgentChatController — characterization (D.0)', () => {
       })
 
       const sendPromise = result.current.handleSendAgentMessage('hola').catch(() => undefined)
+      // The user turn is persisted to the real ChatStore (disk I/O fake timers do
+      // not advance) before the subscription is wired: poll for it.
       await act(async () => {
-        await vi.advanceTimersByTimeAsync(0)
+        await vi.waitFor(() => expect(clerum.hasProgressHandler('task-abc')).toBe(true))
       })
-      expect(clerum.hasProgressHandler('task-abc')).toBe(true)
 
       await act(async () => {
         // Never emit 'open'. Advance past the 5s connection timeout.
@@ -602,9 +671,15 @@ describe('useAgentChatController — characterization (D.0)', () => {
       })
       await sendPromise
 
-      const progress = result.current.progressByAgentMessage['agent-x']
-      const entry = progress && Object.values(progress)[0]
-      expect(entry?.status).toBe('error')
+      // The timeout's recovery reads the store (disk I/O) before it settles the
+      // entry as an error: poll for the settled state.
+      await act(async () => {
+        await vi.waitFor(() => {
+          const progress = result.current.progressByAgentMessage['agent-x']
+          const entry = progress && Object.values(progress)[0]
+          expect(entry?.status).toBe('error')
+        })
+      })
     })
 
     // ── stream-recovery spec: a lost stream reconciles instead of failing ──
@@ -801,6 +876,9 @@ describe('useAgentChatController — characterization (D.0)', () => {
         })
       })
 
+      // The reconcile reads the local store (IPC; here the real ChatStore's disk
+      // read) before it fetches the server turns, so wait for that fetch.
+      await waitFor(() => expect(clerum.rpc.loadSessionMessages).toHaveBeenCalled())
       // The live subscription has fired for the `failed` state, but the reconcile
       // is still pending → no message may be painted as an error (no flash).
       const midProgress = result.current.progressByAgentMessage['agent-x'] ?? {}
@@ -894,8 +972,22 @@ describe('useAgentChatController — characterization (D.0)', () => {
         })
       })
 
-      // The durable reply lands as a delta; no error/resend and no zombie block.
-      await waitFor(() => expect(clerum.chat.appendMessages).toHaveBeenCalled())
+      // The durable reply lands in the reconciled transcript the controller writes
+      // back with `replaceMessages`; no error/resend and no zombie block. (The old
+      // wait on `appendMessages` was met by the user turn the fake store forwarded
+      // there, never by the reply.)
+      await waitFor(() =>
+        expect(
+          clerum.chat.replaceMessages.mock.calls.some(call =>
+            (call[2] as Array<{ role?: string; content?: string }>).some(
+              message => message.role === 'assistant' && message.content === 'here is your report'
+            )
+          )
+        ).toBe(true)
+      )
+      expect(result.current.chatMessages).toContainEqual(
+        expect.objectContaining({ role: 'assistant', content: 'here is your report' })
+      )
       expect(spies.pushToast).not.toHaveBeenCalledWith(expect.stringContaining('failed'), 'error')
       expect(result.current.failedAgentSend).toBeNull()
       await sendPromise
@@ -942,10 +1034,9 @@ describe('useAgentChatController — characterization (D.0)', () => {
       })
 
       // The durable error is rendered as a failed assistant message. Wait for the
-      // ASSISTANT append specifically: `appendMessages` fires first for the user
-      // message, so a bare "was called" wait would race the recovery's append
-      // (which lands after the `getTaskResult` await) — read the last call only
-      // once its message is the error bubble.
+      // ASSISTANT append specifically: the recovery's append lands after the
+      // `getTaskResult` await — read the last call only once its message is the
+      // error bubble.
       await waitFor(() => {
         const last = clerum.chat.appendMessages.mock.calls.at(-1)?.[2]?.[0] as
           | { isError?: boolean }
@@ -958,9 +1049,12 @@ describe('useAgentChatController — characterization (D.0)', () => {
       expect(appended?.[0]?.isError).toBe(true)
       expect(appended?.[0]?.errorCode).toBe('BUDGET_EXCEEDED')
       expect(appended?.[0]?.content).toContain('Token budget exceeded')
-      expect(spies.pushToast).toHaveBeenCalledWith(
-        'Message to agent-x failed: Token budget exceeded for this workspace.',
-        'error'
+      // The failure toast follows the store write of the error reply.
+      await waitFor(() =>
+        expect(spies.pushToast).toHaveBeenCalledWith(
+          'Message to agent-x failed: Token budget exceeded for this workspace.',
+          'error'
+        )
       )
       // #654 deliberately retains failed input, while preserving the real
       // budget error instead of presenting a misleading lost-connection error.
@@ -1007,8 +1101,8 @@ describe('useAgentChatController — characterization (D.0)', () => {
         })
       })
 
-      // Wait for the ASSISTANT append specifically (the user-message append fires
-      // first; the recovery's reply lands after the `getTaskResult` await).
+      // Wait for the ASSISTANT append specifically (the recovery's reply lands
+      // after the `getTaskResult` await).
       await waitFor(() => {
         const last = clerum.chat.appendMessages.mock.calls.at(-1)?.[2]?.[0] as
           | { role?: string }
@@ -1713,10 +1807,14 @@ describe('useAgentChatController — characterization (D.0)', () => {
       // The user message was persisted (a chat was auto-created and the typed
       // input written to it) — the input is durable across reload.
       expect(clerum.chat.create).toHaveBeenCalled()
-      expect(clerum.chat.appendMessages).toHaveBeenCalledWith(
+      expect(clerum.chat.upsertMessages).toHaveBeenCalledWith(
         'agent-x',
         expect.any(String),
         expect.arrayContaining([expect.objectContaining({ role: 'user', content: 'persist me' })])
+      )
+      const persisted = await clerum.persistedMessages('agent-x', result.current.activeChatId!)
+      expect(persisted).toContainEqual(
+        expect.objectContaining({ role: 'user', content: 'persist me', task_id: 'task-ga' })
       )
     })
   })
