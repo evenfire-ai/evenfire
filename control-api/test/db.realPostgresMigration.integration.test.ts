@@ -2009,6 +2009,7 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       }
     } finally {
       await attackerPool?.end()
+      await dbPool.query(`DROP OWNED BY ${quoteIdent(attackerRole)}`)
       await adminPool.query(`DROP ROLE IF EXISTS ${quoteIdent(attackerRole)}`)
     }
   })
