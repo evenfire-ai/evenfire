@@ -33,6 +33,12 @@ export const COMPOSER_MAX_REQUEST_BODY_BYTES = 24 * 1024 * 1024
 /** JSON envelope around the text and the attachments: model, revision, keys. */
 export const COMPOSER_REQUEST_ENVELOPE_BYTES = 4096
 /**
+ * Fields rpc-proxy adds to the Host request before mcp-host measures it
+ * (`rpc-proxy/src/routes/rpc.ts`): `sender`, `messageId`, `metadata` and the
+ * trace context, about 720 bytes at their largest.
+ */
+export const COMPOSER_FORWARDED_FIELDS_BYTES = 2048
+/**
  * JSON around one `kind:'file'` entry besides its base64 and its filename:
  * the id, the two media types, the sha256 hex and the fixed keys.
  */

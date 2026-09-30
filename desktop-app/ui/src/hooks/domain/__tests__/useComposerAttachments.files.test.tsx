@@ -8,6 +8,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { COMPOSER_MAX_ATTACHMENTS, COMPOSER_MAX_FILE_BYTES } from '@constants/attachments'
+import { buildComposerFileReferences } from '@lib/composerFileReferences'
+import { composerRequestBaseContent } from '@lib/composerHostRequest'
+import { buildComposerRequestContent } from '@lib/composerReferencesPrompt'
+import type { ComposerGlobalFileReference } from '../../../uiTypes'
 import { useComposerAttachments } from '../useComposerAttachments'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -317,5 +321,114 @@ describe('useComposerAttachments — documents (#678)', () => {
     })
 
     expect(result.current.composerFileAttachments).toEqual(kept)
+  })
+
+  function globalReferences(count: number, label: (index: number) => string) {
+    return Array.from({ length: count }, (_, index): ComposerGlobalFileReference => {
+      const resourceId = index.toString(16).padStart(32, '0')
+      return {
+        id: `global-file:main:${resourceId}`,
+        type: 'global_file',
+        resourceId,
+        drive: 'main',
+        gfsUri: `gfs://main/${resourceId}`,
+        label: label(index),
+        version: 1,
+        bytes: 2048,
+      }
+    })
+  }
+
+  function refusalTexts(result: ReturnType<typeof render>['result']): string[] {
+    return result.current.composerFileRefusals.map(refusal => refusal.text)
+  }
+
+  it('counts the selected references and the agent against the 6 MiB share', () => {
+    const { result } = render()
+    const references = globalReferences(4, () => `${'文'.repeat(251)}.txt`)
+    act(() => {
+      result.current.handleAddComposerReferenceAttachments(references)
+    })
+    const doc = new File([new Uint8Array(1024)], 'doc.txt', { type: 'text/plain' })
+    const utf8 = (value: unknown) => new TextEncoder().encode(JSON.stringify(value)).length
+    const contentBytes = (draft: string) =>
+      utf8(buildComposerRequestContent(composerRequestBaseContent(draft, 0, 1), references))
+    // Everything the share holds besides the draft, each part as the request
+    // body carries it: envelope, fields rpc-proxy adds, the text with its
+    // references section, the serialized references, the agent twice and the
+    // file details.
+    const referencesBytes = utf8(buildComposerFileReferences(references))
+    const fixedBytes =
+      4096 +
+      2048 +
+      (contentBytes('x') - 1) +
+      referencesBytes +
+      2 * utf8('agent-x') +
+      utf8('doc.txt') +
+      640
+    const boundary = 6 * 1024 * 1024 - fixedBytes
+    // The text grows one byte per draft character: the arithmetic above holds.
+    expect(contentBytes('x'.repeat(boundary))).toBe(contentBytes('x') - 1 + boundary)
+    // Leaving the references out would admit the refused draft below.
+    expect(referencesBytes).toBeGreaterThan(1)
+
+    act(() => {
+      result.current.handleAddComposerFiles([doc], 'x'.repeat(boundary + 1))
+    })
+    expect(refusalTexts(result)).toEqual([
+      'doc.txt does not fit: the text and attachment details can take at most 6.0 MiB per message once encoded.',
+    ])
+    expect(result.current.composerFileAttachments).toHaveLength(0)
+
+    // Liveness witness: the draft that fills the share exactly is admitted.
+    act(() => {
+      result.current.handleAddComposerFiles([doc], 'x'.repeat(boundary))
+    })
+    expect(refusalTexts(result)).toEqual([])
+    expect(statuses(result)).toEqual(['reading'])
+  })
+
+  it('refuses a file while no agent is selected, and admits it for an agent', () => {
+    const doc = textFile('doc.txt', 'hello')
+    const withoutAgent = render(null)
+    act(() => {
+      withoutAgent.result.current.handleAddComposerFiles([doc], '')
+    })
+    expect(refusalTexts(withoutAgent.result)).toEqual(['Select an agent before attaching files.'])
+    expect(withoutAgent.result.current.composerFileAttachments).toHaveLength(0)
+
+    const withAgent = render('agent-x')
+    act(() => {
+      withAgent.result.current.handleAddComposerFiles([doc], '')
+    })
+    expect(refusalTexts(withAgent.result)).toEqual([])
+    expect(statuses(withAgent.result)).toEqual(['reading'])
+  })
+
+  it('refuses a file beside more than 10 Global Files references, and admits it beside 10', () => {
+    const doc = textFile('doc.txt', 'hello')
+    const eleven = render()
+    act(() => {
+      eleven.result.current.handleAddComposerReferenceAttachments(
+        globalReferences(11, index => `file-${index}.md`)
+      )
+    })
+    act(() => {
+      eleven.result.current.handleAddComposerFiles([doc], '')
+    })
+    expect(refusalTexts(eleven.result)).toEqual(['A message can reference at most 10 files.'])
+    expect(eleven.result.current.composerFileAttachments).toHaveLength(0)
+
+    const ten = render()
+    act(() => {
+      ten.result.current.handleAddComposerReferenceAttachments(
+        globalReferences(10, index => `file-${index}.md`)
+      )
+    })
+    act(() => {
+      ten.result.current.handleAddComposerFiles([doc], '')
+    })
+    expect(refusalTexts(ten.result)).toEqual([])
+    expect(statuses(ten.result)).toEqual(['reading'])
   })
 })

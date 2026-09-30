@@ -2865,40 +2865,46 @@ export function useAgentChatController({
         baseContentForRequest,
         effectiveReferences
       )
-      if (effectiveFiles.length > 0) {
-        // The limits rpc-proxy and mcp-host enforce, most specific first: the
-        // count, the file quota, the share left for text and file details, then
-        // the whole body (images included), so the reason names what to remove.
-        const requestForBudget = {
-          content: effectiveContentForRequest,
-          fileReferences: fileReferencesForSend,
-          hostRef: sendAgent,
-          files: effectiveFiles,
-          images: effectiveAttachments,
-        }
-        let blocker: string | null = null
-        if (effectiveAttachments.length + effectiveFiles.length > COMPOSER_MAX_ATTACHMENTS) {
-          blocker = `A message can carry at most ${COMPOSER_MAX_ATTACHMENTS} attachments.`
-        } else if (composerFileBase64Bytes(effectiveFiles) > COMPOSER_MAX_TOTAL_FILE_BASE64_BYTES) {
-          blocker = `The attached files take more than ${formatFileSize(COMPOSER_MAX_TOTAL_FILE_BASE64_BYTES)} once encoded. Remove a file.`
-        } else if (
-          composerNonImageShareBytes(requestForBudget) > COMPOSER_MAX_NON_IMAGE_BODY_BYTES
-        ) {
-          blocker = `The message text and file details take more than ${formatFileSize(COMPOSER_MAX_NON_IMAGE_BODY_BYTES)} once encoded. Shorten the message or remove a file.`
-        } else if (
-          composerRequestBodyBytes(
-            requestForBudget,
-            effectiveAttachments.reduce((total, image) => total + image.dataBase64.length, 0)
-          ) > COMPOSER_MAX_REQUEST_BODY_BYTES
-        ) {
-          blocker = `The attachments and text take more than ${formatFileSize(COMPOSER_MAX_REQUEST_BODY_BYTES)} once encoded. Remove an attachment or shorten the message.`
-        }
-        if (blocker) {
-          setAgentError(blocker)
-          pushToast(blocker, 'error')
-          releaseSendSetup()
-          return
-        }
+      // The limits rpc-proxy and mcp-host enforce, most specific first: the
+      // count, the file quota, the share left for text and attachment details,
+      // then the whole body (images included), so the reason names what to
+      // remove. The share applies to every send; the others only when files
+      // are attached.
+      const requestForBudget = {
+        content: effectiveContentForRequest,
+        fileReferences: fileReferencesForSend,
+        hostRef: sendAgent,
+        files: effectiveFiles,
+        images: effectiveAttachments,
+      }
+      const hasFiles = effectiveFiles.length > 0
+      let budgetBlocker: string | null = null
+      if (
+        hasFiles &&
+        effectiveAttachments.length + effectiveFiles.length > COMPOSER_MAX_ATTACHMENTS
+      ) {
+        budgetBlocker = `A message can carry at most ${COMPOSER_MAX_ATTACHMENTS} attachments.`
+      } else if (
+        hasFiles &&
+        composerFileBase64Bytes(effectiveFiles) > COMPOSER_MAX_TOTAL_FILE_BASE64_BYTES
+      ) {
+        budgetBlocker = `The attached files take more than ${formatFileSize(COMPOSER_MAX_TOTAL_FILE_BASE64_BYTES)} once encoded. Remove a file.`
+      } else if (composerNonImageShareBytes(requestForBudget) > COMPOSER_MAX_NON_IMAGE_BODY_BYTES) {
+        budgetBlocker = `The message text and attachment details take more than ${formatFileSize(COMPOSER_MAX_NON_IMAGE_BODY_BYTES)} once encoded. Shorten the message or remove an attachment.`
+      } else if (
+        hasFiles &&
+        composerRequestBodyBytes(
+          requestForBudget,
+          effectiveAttachments.reduce((total, image) => total + image.dataBase64.length, 0)
+        ) > COMPOSER_MAX_REQUEST_BODY_BYTES
+      ) {
+        budgetBlocker = `The attachments and text take more than ${formatFileSize(COMPOSER_MAX_REQUEST_BODY_BYTES)} once encoded. Remove an attachment or shorten the message.`
+      }
+      if (budgetBlocker) {
+        setAgentError(budgetBlocker)
+        pushToast(budgetBlocker, 'error')
+        releaseSendSetup()
+        return
       }
       let sendChatId = currentChatId ?? activeChatId
       const sendStillAuthorized = () =>

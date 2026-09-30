@@ -1,6 +1,7 @@
 import { type FileReferenceV1, classifyBytes } from '@clerum/gfs-interaction-policy'
 import {
   COMPOSER_FILE_ENTRY_METADATA_BYTES,
+  COMPOSER_FORWARDED_FIELDS_BYTES,
   COMPOSER_MAX_ATTACHMENTS,
   COMPOSER_MAX_FILE_BYTES,
   COMPOSER_MAX_NON_IMAGE_BODY_BYTES,
@@ -54,15 +55,18 @@ export function base64Length(sizeBytes: number): number {
   return Math.ceil(sizeBytes / 3) * 4
 }
 
+/** UTF-8 bytes of `value` as `JSON.stringify` writes it into the request body. */
+function jsonBytes(value: unknown): number {
+  return textEncoder.encode(JSON.stringify(value)).length
+}
+
 /**
  * Bytes one `kind:'file'` entry adds to the JSON request body besides its
  * base64: the file name and the fixed fields. rpc-proxy and mcp-host charge
  * these to the non-image share; only the base64 is credited to the file quota.
  */
 export function composerFileDetailBytes(file: { filename: string }): number {
-  return (
-    textEncoder.encode(JSON.stringify(file.filename)).length + COMPOSER_FILE_ENTRY_METADATA_BYTES
-  )
+  return jsonBytes(file.filename) + COMPOSER_FILE_ENTRY_METADATA_BYTES
 }
 
 /** Bytes of base64 the file quota is charged for these files. */
@@ -71,22 +75,32 @@ export function composerFileBase64Bytes(files: ReadonlyArray<{ sizeBytes: number
 }
 
 /**
- * Bytes of one request body that rpc-proxy and mcp-host credit to neither the
- * image quota nor the file quota: the JSON envelope, the message text and the
- * non-base64 fields of every `kind:'file'`.
+ * Upper bound of the bytes of one request body that rpc-proxy and mcp-host
+ * credit to neither the image quota nor the file quota, measured as they
+ * measure it: the JSON body after rpc-proxy has added its own fields. It
+ * counts the envelope, those fields, the text and the references as JSON
+ * (escapes included), the agent (sent as `channelId` and as `hostRef`), and
+ * the name and fixed fields of every attachment. Only attachment base64 is
+ * left out.
  */
 export function composerNonImageShareBytes(request: ComposerNonImageShareRequest): number {
   return (
     COMPOSER_REQUEST_ENVELOPE_BYTES +
-    textEncoder.encode(request.content).length +
-    request.files.reduce((total, file) => total + composerFileDetailBytes(file), 0)
+    COMPOSER_FORWARDED_FIELDS_BYTES +
+    jsonBytes(request.content) +
+    (request.fileReferences.length ? jsonBytes(request.fileReferences) : 0) +
+    2 * jsonBytes(request.hostRef) +
+    request.files.reduce((total, file) => total + composerFileDetailBytes(file), 0) +
+    request.images.reduce(
+      (total, image) => total + jsonBytes(image.name) + COMPOSER_FILE_ENTRY_METADATA_BYTES,
+      0
+    )
   )
 }
 
 /**
  * Bytes of the whole request body: the non-image share plus the base64 of the
- * files and of the images. An image entry is counted with the same fixed-field
- * allowance as a file entry, which is an upper bound.
+ * files and of the images.
  */
 export function composerRequestBodyBytes(
   request: ComposerNonImageShareRequest & {
@@ -95,10 +109,7 @@ export function composerRequestBodyBytes(
   imageBase64Bytes: number
 ): number {
   return (
-    composerNonImageShareBytes(request) +
-    composerFileBase64Bytes(request.files) +
-    imageBase64Bytes +
-    request.images.length * COMPOSER_FILE_ENTRY_METADATA_BYTES
+    composerNonImageShareBytes(request) + composerFileBase64Bytes(request.files) + imageBase64Bytes
   )
 }
 
@@ -135,7 +146,7 @@ export function composerFileAdmissionError(
   }
   const bodyBytes = composerNonImageShareBytes({ ...context.request, files })
   if (bodyBytes > COMPOSER_MAX_NON_IMAGE_BODY_BYTES) {
-    return `${file.name} does not fit: the text and file details can take at most ${formatFileSize(COMPOSER_MAX_NON_IMAGE_BODY_BYTES)} per message once encoded.`
+    return `${file.name} does not fit: the text and attachment details can take at most ${formatFileSize(COMPOSER_MAX_NON_IMAGE_BODY_BYTES)} per message once encoded.`
   }
   return null
 }

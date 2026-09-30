@@ -2,6 +2,9 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { COMPOSER_MAX_ATTACHMENTS } from '@constants/attachments'
 import { clearComposerDraft, clearComposerDraftAfterSend } from '@lib/composerDraftStore'
 import { composerFileAdmissionError, readComposerFile } from '@lib/composerFileAdmission'
+import { buildComposerFileReferences } from '@lib/composerFileReferences'
+import { composerRequestBaseContent } from '@lib/composerHostRequest'
+import { buildComposerRequestContent } from '@lib/composerReferencesPrompt'
 import type {
   ComposerFileAttachment,
   ComposerFileRefusal,
@@ -48,8 +51,10 @@ export function useComposerAttachments({
   // asynchronous read decide from the latest attachments, not from the render
   // that started them.
   const composerFilesRef = useRef<ComposerFileAttachment[]>([])
-  const composerImageCountRef = useRef(0)
-  composerImageCountRef.current = composerImageAttachments.length
+  const composerImagesRef = useRef<ComposerImageAttachment[]>([])
+  composerImagesRef.current = composerImageAttachments
+  const composerReferencesRef = useRef<ComposerReferenceAttachment[]>([])
+  composerReferencesRef.current = composerReferenceAttachments
 
   const commitComposerFiles = useCallback(
     (update: (previous: ComposerFileAttachment[]) => ComposerFileAttachment[]) => {
@@ -200,14 +205,39 @@ export function useComposerAttachments({
       composerAttachmentRevisionRef.current += 1
       if (!files.length) return
       const refusals: ComposerFileRefusal[] = []
+      // Admission measures the request the files would be sent with: the
+      // content with its references section, the structured references and the
+      // agent it is posted to. Without an agent, or with references the send
+      // itself would refuse, no file can be admitted.
+      const images = composerImagesRef.current
+      const references = composerReferencesRef.current
+      let referencesProblem: string | null = null
+      let fileReferences: ReturnType<typeof buildComposerFileReferences> = []
+      try {
+        fileReferences = buildComposerFileReferences(references)
+      } catch (error) {
+        referencesProblem = error instanceof Error ? error.message : String(error)
+      }
       for (const file of files) {
         const id = crypto.randomUUID()
         const current = composerFilesRef.current
-        const error = composerFileAdmissionError(file, {
-          attachedCount: composerImageCountRef.current + current.length,
-          files: current,
-          request: { content: draft, fileReferences: [], hostRef: selectedAgent ?? '', images: [] },
-        })
+        const error =
+          selectedAgent === null
+            ? 'Select an agent before attaching files.'
+            : (referencesProblem ??
+              composerFileAdmissionError(file, {
+                attachedCount: images.length + current.length,
+                files: current,
+                request: {
+                  content: buildComposerRequestContent(
+                    composerRequestBaseContent(draft.trim(), images.length, current.length + 1),
+                    references
+                  ),
+                  fileReferences,
+                  hostRef: selectedAgent,
+                  images,
+                },
+              }))
         composerAttachmentOrderRef.current += 1
         const base = {
           id,

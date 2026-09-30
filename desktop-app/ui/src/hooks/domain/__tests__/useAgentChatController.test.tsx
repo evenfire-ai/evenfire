@@ -14,10 +14,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { makeTaskKey } from '@contexts/AgentTaskTrackerContext/types'
 import { act, waitFor } from '@testing-library/react'
 import { classifyBytes } from '@clerum/gfs-interaction-policy'
-import { base64Length } from '@lib/composerFileAdmission'
+import { base64Length, composerNonImageShareBytes } from '@lib/composerFileAdmission'
+import { buildComposerFileReferences } from '@lib/composerFileReferences'
+import { buildComposerRequestContent } from '@lib/composerReferencesPrompt'
 import { loadHostModels, resetHostModelSelectionStore } from '@lib/hostModelSelectionStore'
 import type { HostModelsResult } from '../../../../../src/types'
-import type { ComposerImageAttachment, ReadyComposerFileAttachment } from '../../../uiTypes'
+import type {
+  ComposerGlobalFileReference,
+  ComposerImageAttachment,
+  ReadyComposerFileAttachment,
+} from '../../../uiTypes'
 import { renderController } from './__fixtures__/controllerHarness'
 import { type MockClerum, installMockClerum, uninstallMockClerum } from './__fixtures__/mockClerum'
 
@@ -1875,7 +1881,7 @@ describe('interrupted generated-file contract', () => {
 describe('sendAgentMessage — per-message limits for documents (#678)', () => {
   const MIB = 1024 * 1024
   const TEXT_SHARE_BLOCKER =
-    'The message text and file details take more than 6.0 MiB once encoded. Shorten the message or remove a file.'
+    'The message text and attachment details take more than 6.0 MiB once encoded. Shorten the message or remove an attachment.'
   const FILE_QUOTA_BLOCKER =
     'The attached files take more than 16.0 MiB once encoded. Remove a file.'
   const REQUEST_BODY_BLOCKER =
@@ -1951,9 +1957,10 @@ describe('sendAgentMessage — per-message limits for documents (#678)', () => {
   it('refuses text that overflows the 6 MiB share beside an 11 MiB file, and sends one byte less', async () => {
     const big = readyTextFile('file-big', 'big.txt', 11 * MIB)
     const rendered = await mountedWithFiles([big])
-    // Envelope (4096) + text + the file's JSON name and fixed fields; the file's
-    // base64 is credited to the file quota.
-    const fullShareText = 6 * MIB - 4096 - JSON.stringify('big.txt').length - 640
+    // Envelope (4096) + the fields rpc-proxy adds (2048) + the text as a JSON
+    // string (+2 quotes) + the agent twice as a JSON string (2 × 9) + the file's
+    // JSON name and fixed fields; the file's base64 is credited to the file quota.
+    const fullShareText = 6 * MIB - 4096 - 2048 - 2 - 18 - JSON.stringify('big.txt').length - 640
 
     await act(async () => {
       await rendered.result.current.handleSendAgentMessage('x'.repeat(fullShareText + 1))
@@ -2045,5 +2052,121 @@ describe('sendAgentMessage — per-message limits for documents (#678)', () => {
     })
     expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
     expect(sentAttachmentIds()).toHaveLength(20)
+  })
+
+  const utf8Bytes = (value: string) => new TextEncoder().encode(value).length
+
+  /** Four Global Files references whose names take three UTF-8 bytes per character. */
+  function wideNameReferences(): ComposerGlobalFileReference[] {
+    return Array.from({ length: 4 }, (_, index) => {
+      const resourceId = String(index).repeat(32)
+      return {
+        id: `global-file:main:${resourceId}`,
+        type: 'global_file' as const,
+        resourceId,
+        drive: 'main',
+        gfsUri: `gfs://main/${resourceId}`,
+        label: `${'文'.repeat(251)}.txt`,
+        version: 1,
+        bytes: 2048,
+      }
+    })
+  }
+
+  it('counts the serialized references and the agent in the 6 MiB share, and sends the draft that fills it', async () => {
+    const references = wideNameReferences()
+    const rendered = await mountedWithFiles([readyTextFile('file-doc', 'doc.txt', 1024)])
+    act(() => rendered.result.current.handleAddComposerReferenceAttachments(references))
+    const jsonBytes = (value: unknown) => utf8Bytes(JSON.stringify(value))
+    const contentBytes = (draft: string) =>
+      jsonBytes(buildComposerRequestContent(draft, references))
+    // Everything the share holds besides the draft, each part as the request
+    // body carries it: envelope, fields rpc-proxy adds, the text with its
+    // references section, the serialized references, the agent twice and the
+    // file details.
+    const referencesBytes = jsonBytes(buildComposerFileReferences(references))
+    const fixedBytes =
+      4096 +
+      2048 +
+      (contentBytes('x') - 1) +
+      referencesBytes +
+      2 * jsonBytes('agent-x') +
+      jsonBytes('doc.txt') +
+      640
+    const boundary = 6 * MIB - fixedBytes
+    // The text grows one byte per draft character: the arithmetic above holds.
+    expect(contentBytes('x'.repeat(boundary))).toBe(contentBytes('x') - 1 + boundary)
+    // Leaving the references out would let the blocked draft below through.
+    expect(referencesBytes).toBeGreaterThan(1)
+
+    await act(async () => {
+      await rendered.result.current.handleSendAgentMessage('x'.repeat(boundary + 1))
+    })
+    expectBlocked(rendered, TEXT_SHARE_BLOCKER)
+    expect(rendered.result.current.composerFileAttachments).toHaveLength(1)
+    expect(rendered.result.current.composerReferenceAttachments).toHaveLength(4)
+
+    await act(async () => {
+      await rendered.result.current.handleSendAgentMessage('x'.repeat(boundary))
+    })
+    expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
+    const request = clerum.rpc.invokeHostMessage.mock.calls[0]?.[1] as {
+      content: string
+      fileReferences: Parameters<typeof composerNonImageShareBytes>[0]['fileReferences']
+      attachments: Array<Record<string, unknown>>
+    }
+    // The request carries the text and references the boundary was computed from.
+    expect(request.content).toBe(buildComposerRequestContent('x'.repeat(boundary), references))
+    expect(request.fileReferences).toEqual(buildComposerFileReferences(references))
+    // The estimate bounds what is posted: the request as serialized without the
+    // base64 the file quota credits, plus 1 KiB for the fields rpc-proxy adds.
+    const postedShareBytes = utf8Bytes(
+      JSON.stringify({
+        ...request,
+        attachments: request.attachments.map(attachment => ({ ...attachment, dataBase64: '' })),
+      })
+    )
+    expect(
+      composerNonImageShareBytes({
+        content: request.content,
+        fileReferences: request.fileReferences,
+        hostRef: 'agent-x',
+        files: [{ filename: 'doc.txt' }],
+        images: [],
+      })
+    ).toBeGreaterThanOrEqual(postedShareBytes + 1024)
+  })
+
+  it('counts the JSON escaping of the text in the share, and sends fewer escaped characters', async () => {
+    const rendered = await mountedWithFiles([readyTextFile('file-doc', 'doc.txt', 1024)])
+    // A newline is one byte typed and two once escaped in the JSON body.
+    await act(async () => {
+      await rendered.result.current.handleSendAgentMessage(`a${'\n'.repeat(3.5 * MIB)}b`)
+    })
+    expectBlocked(rendered, TEXT_SHARE_BLOCKER)
+
+    await act(async () => {
+      await rendered.result.current.handleSendAgentMessage(`a${'\n'.repeat(2 * MIB)}b`)
+    })
+    expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
+    expect(sentAttachmentIds()).toEqual(['file-doc'])
+  })
+
+  it('checks the share on a send without attachments, and sends shorter text', async () => {
+    clerum.rpc.invokeHostMessage.mockResolvedValue({ response: 'done' })
+    const rendered = renderController()
+    await settleMount()
+    // A double quote is one byte typed and two once escaped in the JSON body.
+    await act(async () => {
+      await rendered.result.current.handleSendAgentMessage('"'.repeat(Math.floor(3.2 * MIB)))
+    })
+    expectBlocked(rendered, TEXT_SHARE_BLOCKER)
+
+    await act(async () => {
+      await rendered.result.current.handleSendAgentMessage('"'.repeat(Math.floor(2.9 * MIB)))
+    })
+    expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
+    const request = clerum.rpc.invokeHostMessage.mock.calls[0]?.[1] as { content: string }
+    expect(request.content).toHaveLength(Math.floor(2.9 * MIB))
   })
 })

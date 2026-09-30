@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { createHash } from 'node:crypto'
 import {
   COMPOSER_FILE_ENTRY_METADATA_BYTES,
+  COMPOSER_FORWARDED_FIELDS_BYTES,
   COMPOSER_MAX_ATTACHMENTS,
   COMPOSER_MAX_FILE_BYTES,
   COMPOSER_MAX_NON_IMAGE_BODY_BYTES,
@@ -18,6 +19,17 @@ import {
   fileNameProblem,
   readComposerFile,
 } from '../composerFileAdmission'
+import { buildComposerFileReferences } from '../composerFileReferences'
+
+/** UTF-8 bytes of a value as JSON.stringify writes it into the request body. */
+function jsonBytes(value: unknown): number {
+  return new TextEncoder().encode(JSON.stringify(value)).length
+}
+
+/** The fixed part of the share: the envelope, the fields rpc-proxy adds, and
+ *  `channelId` plus `hostRef`, both the agent `agent-1`. */
+const FIXED_SHARE_BYTES =
+  COMPOSER_REQUEST_ENVELOPE_BYTES + COMPOSER_FORWARDED_FIELDS_BYTES + 2 * jsonBytes('agent-1')
 
 /** The rest of a posted request whose message text is `content`. */
 function requestWithText(content = '') {
@@ -183,17 +195,19 @@ describe('composerFileAdmissionError (#678)', () => {
         request: requestWithText('a'.repeat(COMPOSER_MAX_NON_IMAGE_BODY_BYTES)),
       })
     ).toBe(
-      'a.bin does not fit: the text and file details can take at most 6.0 MiB per message once encoded.'
+      'a.bin does not fit: the text and attachment details can take at most 6.0 MiB per message once encoded.'
     )
   })
 
   it('admits an 11 MiB file beside text that fills the 6 MiB share exactly (#678)', () => {
     const file = { name: 'big.bin', size: COMPOSER_MAX_FILE_BYTES }
-    // The share holds the envelope, the text and the file's JSON name plus
-    // fixed fields; the file's base64 is credited to the file quota.
+    // The share holds the fixed part, the text as a JSON string (two quotes)
+    // and the file's JSON name plus fixed fields; the file's base64 is credited
+    // to the file quota.
     const fullShareText =
       COMPOSER_MAX_NON_IMAGE_BODY_BYTES -
-      COMPOSER_REQUEST_ENVELOPE_BYTES -
+      FIXED_SHARE_BYTES -
+      2 -
       JSON.stringify('big.bin').length -
       COMPOSER_FILE_ENTRY_METADATA_BYTES
     expect(
@@ -207,7 +221,7 @@ describe('composerFileAdmissionError (#678)', () => {
         ...EMPTY_CONTEXT,
         request: requestWithText('a'.repeat(fullShareText + 1)),
       })
-    ).toContain('the text and file details can take at most 6.0 MiB')
+    ).toContain('the text and attachment details can take at most 6.0 MiB')
   })
 
   it.each([
@@ -232,10 +246,7 @@ describe('composer request body accounting (#678)', () => {
   it('charges the envelope, the text and the file details, but not the file base64, to the share', () => {
     const file = { filename: 'a.pdf', sizeBytes: 1000 }
     expect(composerNonImageShareBytes({ ...requestWithText('a'.repeat(50)), files: [file] })).toBe(
-      COMPOSER_REQUEST_ENVELOPE_BYTES +
-        50 +
-        JSON.stringify('a.pdf').length +
-        COMPOSER_FILE_ENTRY_METADATA_BYTES
+      FIXED_SHARE_BYTES + 52 + JSON.stringify('a.pdf').length + COMPOSER_FILE_ENTRY_METADATA_BYTES
     )
     expect(composerFileDetailBytes(file)).toBe(
       JSON.stringify('a.pdf').length + COMPOSER_FILE_ENTRY_METADATA_BYTES
@@ -255,12 +266,68 @@ describe('composer request body accounting (#678)', () => {
       files,
       images: [{ name: 'one.png' }, { name: 'two.png' }],
     }
+    // The image names and fixed fields are already in the share.
     expect(composerRequestBodyBytes(request, 8_000)).toBe(
-      composerNonImageShareBytes(request) +
-        base64Length(1000) +
-        8_000 +
+      composerNonImageShareBytes(request) + base64Length(1000) + 8_000
+    )
+  })
+
+  it('charges the text as the JSON string the request carries, escapes included (R1-H1)', () => {
+    // A newline is written as two bytes (\n), plus the two quotes.
+    expect(composerNonImageShareBytes({ ...requestWithText('\n'.repeat(1000)), files: [] })).toBe(
+      FIXED_SHARE_BYTES + 2 * 1000 + 2
+    )
+    // A quote is two bytes too; a non-ASCII character keeps its UTF-8 length.
+    expect(composerNonImageShareBytes({ ...requestWithText('"ñ'), files: [] })).toBe(
+      FIXED_SHARE_BYTES + 2 + 2 + 2
+    )
+  })
+
+  it('charges the serialized fileReferences next to the text (R1-H1)', () => {
+    const fileReferences = buildComposerFileReferences(
+      ['0123456789abcdef0123456789abcdef', 'fedcba9876543210fedcba9876543210'].map(
+        (resourceId, index) => ({
+          id: `global-file:main:${resourceId}`,
+          type: 'global_file' as const,
+          resourceId,
+          drive: 'main',
+          gfsUri: `gfs://main/${resourceId}`,
+          label: `${'文'.repeat(200)}-${index}.md`,
+          version: 1,
+          bytes: 2048,
+        })
+      )
+    )
+    const withoutReferences = composerNonImageShareBytes({ ...requestWithText('hi'), files: [] })
+    expect(
+      composerNonImageShareBytes({ ...requestWithText('hi'), fileReferences, files: [] }) -
+        withoutReferences
+    ).toBe(new TextEncoder().encode(JSON.stringify(fileReferences)).length)
+    expect(fileReferences).toHaveLength(2)
+  })
+
+  it('charges the name and fixed fields of every image to the share (R1-H1)', () => {
+    const withoutImages = composerNonImageShareBytes({ ...requestWithText('hi'), files: [] })
+    expect(
+      composerNonImageShareBytes({
+        ...requestWithText('hi'),
+        files: [],
+        images: [{ name: 'scan.png' }, { name: 'ñ.png' }],
+      }) - withoutImages
+    ).toBe(
+      JSON.stringify('scan.png').length +
+        JSON.stringify('ñ.png').length +
+        1 +
         2 * COMPOSER_FILE_ENTRY_METADATA_BYTES
     )
+  })
+
+  it('charges the agent twice, as channelId and as hostRef (R1-H1)', () => {
+    const request = { ...requestWithText('hi'), files: [] }
+    expect(
+      composerNonImageShareBytes({ ...request, hostRef: 'agent-12' }) -
+        composerNonImageShareBytes(request)
+    ).toBe(2)
   })
 
   it('measures a multi-byte name in UTF-8 bytes', () => {
