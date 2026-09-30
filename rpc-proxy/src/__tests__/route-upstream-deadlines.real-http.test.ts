@@ -63,6 +63,7 @@ const ALL_SCOPES = [
   'host:approval:write',
   'host:model:write',
   'host:session:read',
+  'host:session:write',
   'host:task:read',
   'host:message:invoke',
   'host:wake:write',
@@ -751,12 +752,20 @@ describe.each(HELD_ROUTES)('R3-L7 $label pins the hold deadline before host reso
 // abort after the upstream applied it would answer 504 for a change that took
 // effect), but a client that is gone must still release the upstream socket.
 const DISCONNECT_ROUTES = [
-  ...MUTATING_ROUTES,
+  ...MUTATING_ROUTES.map(route => ({ ...route, method: 'POST' as const })),
   {
     label: 'cancel task',
+    method: 'POST',
     path: '/rpc/hosts/chatllm/tasks/task-1/cancel',
     body: {},
     upstreamPath: '/v1/runtime/tasks/task-1/cancel',
+  },
+  {
+    label: 'rename session',
+    method: 'PATCH',
+    path: '/rpc/hosts/chatllm/sessions/chatllm/chat-1/name',
+    body: { title: 'Renamed chat' },
+    upstreamPath: '/v1/runtime/sessions/chatllm/chat-1/name',
   },
 ] as const
 
@@ -784,7 +793,7 @@ describe.each(DISCONNECT_ROUTES)(
         const clientReq = httpRequest({
           host: '127.0.0.1',
           port,
-          method: 'POST',
+          method: route.method,
           path: route.path,
           headers: {
             authorization: 'Bearer tok',
@@ -809,7 +818,7 @@ describe.each(DISCONNECT_ROUTES)(
         expect(Date.now() - disconnectedAt).toBeLessThan(CLIENT_GONE_RELEASE_MS)
         expect(clientErrors).toEqual(['socket hang up'])
         expect(seen.map(entry => `${entry.method} ${entry.url}`)).toEqual([
-          `POST ${route.upstreamPath}`,
+          `${route.method} ${route.upstreamPath}`,
         ])
         expect(controlApiMock.requestHostWakeFromControlApi).not.toHaveBeenCalled()
       } finally {
@@ -848,7 +857,7 @@ describe.each(DISCONNECT_ROUTES)(
         const clientReq = httpRequest({
           host: '127.0.0.1',
           port,
-          method: 'POST',
+          method: route.method,
           path: route.path,
           headers: {
             authorization: 'Bearer tok',

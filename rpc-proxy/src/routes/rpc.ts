@@ -192,7 +192,8 @@ export function respondControlApiHostAccessRejection(
  * cancel). The first attempt has no client-side timeout by design: aborting a
  * request the upstream may already have applied would answer 504 for a change
  * that took effect, and the user's retry would then hit "No pending approval".
- * Only a wake-and-hold retry passes `timeoutMs`, bounded by the hold deadline.
+ * Only a wake-and-hold retry passes `timeoutMs`, bounded by the hold deadline;
+ * session rename, which has no wake retry, passes its plain upstream timeout.
  * A client that disconnects before the response is written aborts the call on
  * every attempt, so a gone client never pins the upstream socket.
  */
@@ -1132,7 +1133,9 @@ export function createRpcRouter(): Router {
               method: 'PATCH',
               headers: { 'content-type': 'application/json', ...host.headers },
               body: JSON.stringify(req.body),
-              signal: AbortSignal.timeout(config.upstreamTimeoutMs),
+              // No wake retry re-issues a rename, so the timeout stays; a client
+              // that leaves still releases the upstream call.
+              signal: mutatingCallSignal(config.upstreamTimeoutMs, res),
             }
           )
           const body = await response.text()
