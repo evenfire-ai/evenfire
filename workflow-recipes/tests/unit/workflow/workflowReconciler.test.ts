@@ -3681,14 +3681,16 @@ describe('WorkflowReconciler — reconcile loop', () => {
       expect(summary.retryPending).toBe(false)
     })
 
-    it('keeps the apply outcome when the prune LIST fails', async () => {
+    // R4-L6: a failed LIST evaluated nothing. It is not a DELETE that did
+    // not land, so it is its own prune fact, `unevaluated`.
+    it('R4-L6: marks the prune unevaluated, not pending, and keeps the apply outcome when the prune LIST fails', async () => {
       const apiserver = makeApiserverNetworkingApi()
       seedLivePolicy(apiserver, GROK_PROXY, WRC_LABELS)
       apiserver.api.listNamespacedNetworkPolicy.mockRejectedValue({ code: 500, message: 'boom' })
       const reconciler = new WorkflowReconciler(makeDeps({ networkingApi: apiserver.api as never }))
 
       const summary = await applyPolicies(reconciler)
-      expect(summary.prune).toBe('pending')
+      expect(summary.prune).toBe('unevaluated')
       expect(summary.retryPending).toBe(false)
       expect(sandboxDeletes(apiserver.api)).toEqual([])
       expect(apiserver.live.has(apiserver.key(SANDBOX, GROK_PROXY))).toBe(true)
@@ -5478,6 +5480,34 @@ describe('WorkflowReconciler — reconcile loop', () => {
             apiserver.api.deleteNamespacedNetworkPolicy.mock.calls.map(([arg]) => arg.name)
           ).toEqual([LEFTOVER])
           expect(apiserver.live.has(apiserver.key('sandbox-recipes', LEFTOVER))).toBe(false)
+        })
+
+        it('R4-L6: publishes PruneUnevaluated, with no retry flag, from a reconcile() whose prune LIST failed', async () => {
+          const { apiserver, reconciler } = await convergedRunLane()
+          seedLeftover(apiserver)
+          const liveList = apiserver.api.listNamespacedNetworkPolicy.getMockImplementation()!
+          apiserver.api.listNamespacedNetworkPolicy.mockImplementation(
+            async (arg: { namespace: string; labelSelector?: string }) => {
+              if (arg.labelSelector === TWO_TERM_SELECTOR) throw { code: 500, message: 'boom' }
+              return liveList(arg)
+            }
+          )
+          apiserver.api.listNamespacedNetworkPolicy.mockClear()
+
+          const failed = await reconciler.reconcile('test-wf', 'uid-123', 'sandbox-recipes', spec())
+
+          // Liveness witness: the prune issued its LIST, and it failed.
+          expect(apiserver.api.listNamespacedNetworkPolicy).toHaveBeenCalledWith({
+            namespace: 'sandbox-recipes',
+            labelSelector: TWO_TERM_SELECTOR,
+          })
+          expect(apiserver.live.has(apiserver.key('sandbox-recipes', LEFTOVER))).toBe(true)
+          expect(failed.networkPolicyRetryPending).toBeFalsy()
+          expect(
+            (failed.networkPolicyOwnershipConditions ?? []).filter(
+              c => c.type === 'WorkflowNetworkPoliciesConverged'
+            )
+          ).toMatchObject([{ status: 'False', reason: 'PruneUnevaluated' }])
         })
 
         // The legacy mcp-servers internet policy is a prune like any other:
@@ -9229,25 +9259,106 @@ describe('translateNetworkPolicyApplySummary', () => {
       })
     })
   })
+
+  // R4-L6: a failed prune LIST evaluated nothing, so the prune fact is
+  // `unevaluated`, never `pending`. It has its own reasons, carries over like
+  // `pending`, and sets no retry flag of its own.
+  describe('prune-unevaluated', () => {
+    const convergedMarkers = (result: ReturnType<typeof translateNetworkPolicyApplySummary>) =>
+      (result.networkPolicyOwnershipConditions ?? []).filter(
+        c => c.type === 'WorkflowNetworkPoliciesConverged'
+      )
+
+    it('R4-L6: publishes PruneUnevaluated without the retry flag when the prune LIST failed', () => {
+      const result = translateNetworkPolicyApplySummary(
+        { conflicts: [], retryPending: false, prune: 'unevaluated' },
+        [publishedConflict],
+        now
+      )
+
+      expect(convergedMarkers(result)).toMatchObject([
+        { status: 'False', reason: 'PruneUnevaluated', lastTransitionTime: now },
+      ])
+      expect(result.networkPolicyRetryPending).toBeUndefined()
+    })
+
+    it('R4-L6: publishes RetryAndPruneUnevaluated for a pending retry and an unevaluated prune', () => {
+      const result = translateNetworkPolicyApplySummary(
+        { conflicts: [], retryPending: true, prune: 'unevaluated' },
+        [],
+        now
+      )
+
+      expect(convergedMarkers(result)).toMatchObject([
+        { status: 'False', reason: 'RetryAndPruneUnevaluated' },
+      ])
+      expect(result.networkPolicyRetryPending).toBe(true)
+    })
+
+    it('R4-L6: carries a published PruneUnevaluated marker through a summary without a prune fact', () => {
+      const published = translateNetworkPolicyApplySummary(
+        { conflicts: [], retryPending: false, prune: 'unevaluated' },
+        [],
+        earlier
+      ).networkPolicyOwnershipConditions!
+      // Liveness witness: the pass that failed its LIST published the marker.
+      expect(convergedMarkers({ networkPolicyOwnershipConditions: published })).toMatchObject([
+        { reason: 'PruneUnevaluated' },
+      ])
+
+      const carried = translateNetworkPolicyApplySummary(
+        { conflicts: [], retryPending: false },
+        published,
+        now
+      )
+      expect(carried).toStrictEqual({ networkPolicyOwnershipConditions: published })
+
+      const retried = translateNetworkPolicyApplySummary(
+        { conflicts: [], retryPending: true },
+        published,
+        now
+      )
+      expect(convergedMarkers(retried)).toMatchObject([
+        { reason: 'RetryAndPruneUnevaluated', lastTransitionTime: earlier },
+      ])
+    })
+  })
 })
 
 // R4-L5: each combination of facts has its own reason, and the facts are read
 // back from the reason alone. A reworded message must not change what a
-// published marker means.
+// published marker means. R4-L6: the prune fact has three values (Table A),
+// so there are five combinations with a marker.
 describe('networkPolicyMarkerFacts', () => {
   const now = '2026-09-23T12:00:00.000Z'
   const combinations = [
-    { applyPending: true, prunePending: false },
-    { applyPending: false, prunePending: true },
-    { applyPending: true, prunePending: true },
-  ]
+    { apply: 'pending', prune: 'converged' },
+    { apply: 'converged', prune: 'pending' },
+    { apply: 'converged', prune: 'unevaluated' },
+    { apply: 'pending', prune: 'pending' },
+    { apply: 'pending', prune: 'unevaluated' },
+  ] as const
 
   it('R4-L5: a pending apply and a pending prune publish their own reason', () => {
-    const marker = buildNetworkPolicyConvergedCondition(
-      { applyPending: true, prunePending: true },
-      now
-    )
+    const marker = buildNetworkPolicyConvergedCondition({ apply: 'pending', prune: 'pending' }, now)
     expect(marker?.reason).toBe('RetryAndPrunePending')
+  })
+
+  it('R4-L6: an unevaluated prune publishes its own reason, alone or with a pending apply', () => {
+    expect(
+      buildNetworkPolicyConvergedCondition({ apply: 'converged', prune: 'unevaluated' }, now)
+        ?.reason
+    ).toBe('PruneUnevaluated')
+    expect(
+      buildNetworkPolicyConvergedCondition({ apply: 'pending', prune: 'unevaluated' }, now)?.reason
+    ).toBe('RetryAndPruneUnevaluated')
+  })
+
+  it('R4-L6: converged facts publish no marker and read back from no marker', () => {
+    expect(
+      buildNetworkPolicyConvergedCondition({ apply: 'converged', prune: 'converged' }, now)
+    ).toBeUndefined()
+    expect(networkPolicyMarkerFacts([])).toStrictEqual({ apply: 'converged', prune: 'converged' })
   })
 
   it.each(combinations)(
@@ -9255,17 +9366,18 @@ describe('networkPolicyMarkerFacts', () => {
     facts => {
       const marker = buildNetworkPolicyConvergedCondition(facts, now)
       // Liveness witness: the builder published a marker for these facts.
-      expect(marker).toMatchObject({ type: 'WorkflowNetworkPoliciesConverged', status: 'False' })
+      expect(marker?.type).toBe('WorkflowNetworkPoliciesConverged')
+      expect(marker?.status).toBe('False')
       expect(networkPolicyMarkerFacts([marker!])).toStrictEqual(facts)
       expect(networkPolicyMarkerFacts([{ ...marker!, message: 'reworded' }])).toStrictEqual(facts)
     }
   )
 
-  it('R4-L5: the three reasons are distinct', () => {
+  it('R4-L5: every combination has a distinct reason', () => {
     const reasons = combinations.map(
       facts => buildNetworkPolicyConvergedCondition(facts, now)?.reason
     )
-    expect(new Set(reasons).size).toBe(3)
+    expect(new Set(reasons).size).toBe(combinations.length)
   })
 })
 

@@ -9986,7 +9986,7 @@ describe('WorkflowRecipeReconciler', () => {
     // reconcile() prune still owes a DELETE. Built by the production builder,
     // so the fixture cannot drift from what a pass publishes.
     const retryAndPruneMarker = buildNetworkPolicyConvergedCondition(
-      { applyPending: true, prunePending: true },
+      { apply: 'pending', prune: 'pending' },
       retryMarker.lastTransitionTime
     )!
 
