@@ -11,7 +11,7 @@ import { COMPOSER_MAX_ATTACHMENTS, COMPOSER_MAX_FILE_BYTES } from '@constants/at
 import { buildComposerFileReferences } from '@lib/composerFileReferences'
 import { composerRequestBaseContent } from '@lib/composerHostRequest'
 import { buildComposerRequestContent } from '@lib/composerReferencesPrompt'
-import type { ComposerGlobalFileReference } from '../../../uiTypes'
+import type { ComposerGlobalFileReference, ComposerImageAttachment } from '../../../uiTypes'
 import { useComposerAttachments } from '../useComposerAttachments'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -36,6 +36,23 @@ function render(selectedAgent: string | null = 'agent-x') {
 
 function statuses(result: ReturnType<typeof render>['result']): string[] {
   return result.current.composerFileAttachments.map(file => file.status)
+}
+
+function refusalTexts(result: ReturnType<typeof render>['result']): string[] {
+  return result.current.composerFileRefusals.map(refusal => refusal.text)
+}
+
+/** A prepared image whose bytes differ from every other index. */
+function image(index: number): ComposerImageAttachment {
+  const dataBase64 = btoa(`image ${index}`)
+  return {
+    id: `img-${index}`,
+    name: `image-${index}.png`,
+    mimeType: 'image/png',
+    dataBase64,
+    sizeBytes: `image ${index}`.length,
+    previewDataUrl: `data:image/png;base64,${dataBase64}`,
+  }
 }
 
 describe('useComposerAttachments — documents (#678)', () => {
@@ -264,18 +281,8 @@ describe('useComposerAttachments — documents (#678)', () => {
       (hook: ReturnType<typeof render>) => hook.rerender({ agent: 'agent-other' }),
     ],
     [
-      'an image attach',
-      (hook: ReturnType<typeof render>) =>
-        hook.result.current.handleAddComposerImageAttachments([
-          {
-            id: 'img-1',
-            name: 'a.png',
-            mimeType: 'image/png',
-            dataBase64: 'aGVsbG8=',
-            sizeBytes: 5,
-            previewDataUrl: 'data:image/png;base64,aGVsbG8=',
-          },
-        ]),
+      'an attach with no documents',
+      (hook: ReturnType<typeof render>) => hook.result.current.handleAddComposerFiles([], ''),
     ],
   ])('clears the refusal on %s', (_label, clear) => {
     const hook = render()
@@ -290,6 +297,47 @@ describe('useComposerAttachments — documents (#678)', () => {
     })
 
     expect(hook.result.current.composerFileRefusals).toEqual([])
+  })
+
+  it('keeps the refusal of a document when the same gesture also attaches an image', () => {
+    const { result } = render()
+    const huge = textFile('huge.bin', 'x')
+    Object.defineProperty(huge, 'size', { configurable: true, value: COMPOSER_MAX_FILE_BYTES + 1 })
+
+    // One drop: the panel routes the documents first, then the images.
+    act(() => {
+      result.current.handleAddComposerFiles([huge], '')
+      result.current.handleAddComposerImageAttachments([image(1)])
+    })
+
+    // Witness: the image of the same gesture was attached.
+    expect(result.current.composerImageAttachments.map(item => item.id)).toEqual(['img-1'])
+    expect(refusalTexts(result)).toHaveLength(1)
+    expect(refusalTexts(result)[0]).toMatch(/^huge\.bin is .* at most 11\.0 MiB/)
+  })
+
+  it('refuses with a notice an image that arrives after the last free slot was taken', async () => {
+    const { result } = render()
+    act(() => {
+      result.current.handleAddComposerImageAttachments(
+        Array.from({ length: COMPOSER_MAX_ATTACHMENTS - 1 }, (_, index) => image(index))
+      )
+    })
+    // Twin: 19 images are attached and one slot is free.
+    expect(result.current.composerImageAttachments).toHaveLength(COMPOSER_MAX_ATTACHMENTS - 1)
+
+    act(() => {
+      result.current.handleAddComposerFiles([textFile('doc.txt', 'doc')], '')
+      result.current.handleAddComposerImageAttachments([
+        { ...image(COMPOSER_MAX_ATTACHMENTS), name: 'late.png' },
+      ])
+    })
+
+    await waitFor(() => expect(statuses(result)).toEqual(['ready']))
+    expect(result.current.composerImageAttachments).toHaveLength(COMPOSER_MAX_ATTACHMENTS - 1)
+    expect(refusalTexts(result)).toEqual([
+      `"late.png" was not attached: a message can carry at most ${COMPOSER_MAX_ATTACHMENTS} attachments.`,
+    ])
   })
 
   it('clears the documents when the selected agent changes', async () => {
@@ -337,10 +385,6 @@ describe('useComposerAttachments — documents (#678)', () => {
         bytes: 2048,
       }
     })
-  }
-
-  function refusalTexts(result: ReturnType<typeof render>['result']): string[] {
-    return result.current.composerFileRefusals.map(refusal => refusal.text)
   }
 
   it('counts the selected references and the agent against the 6 MiB share', () => {

@@ -679,9 +679,9 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
         else documents.push(file)
       }
       setComposerAttachmentError(null)
-      if (documents.length > 0) {
-        onAddComposerFiles(documents, draft)
-      }
+      // Called for every gesture, with `[]` when it carried only images: this
+      // is what replaces the document notices of the previous gesture.
+      onAddComposerFiles(documents, draft)
       if (images.length > 0) void prepareComposerImageAttachments(images, source)
     },
     [draft, inferComposerImageMimeType, onAddComposerFiles, prepareComposerImageAttachments]

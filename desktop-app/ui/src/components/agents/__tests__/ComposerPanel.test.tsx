@@ -824,6 +824,27 @@ describe('ComposerPanel with an image-capable model', () => {
     // No image was counted as skipped, so nothing is reported.
     expect(screen.queryByRole('alert')).toBeNull()
   })
+
+  it('routes an image-only drop through the document path once, with no documents', async () => {
+    draftState.value = 'caption'
+    const { container } = render(<ComposerPanel inline />)
+    const shell = container.querySelector('.composer-input-shell') as HTMLElement
+
+    fireEvent.drop(shell, {
+      dataTransfer: {
+        files: [imageFile('only.png', 'image/png', [...PNG_BYTES, 7])],
+        types: ['Files'],
+      },
+    })
+
+    // Witness: the image of the drop was attached.
+    await waitFor(() =>
+      expect(actionsMock.handleAddComposerImageAttachments).toHaveBeenCalledTimes(1)
+    )
+    expect(expectSinglePreparedImage().name).toBe('only.png')
+    // The empty call is what replaces the notices of the previous gesture.
+    expect(actionsMock.handleAddComposerFiles.mock.calls).toEqual([[[], 'caption']])
+  })
 })
 
 describe('ComposerPanel Codex image budgets', () => {

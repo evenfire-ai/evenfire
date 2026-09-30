@@ -52,7 +52,6 @@ export function useComposerAttachments({
   // that started them.
   const composerFilesRef = useRef<ComposerFileAttachment[]>([])
   const composerImagesRef = useRef<ComposerImageAttachment[]>([])
-  composerImagesRef.current = composerImageAttachments
   const composerReferencesRef = useRef<ComposerReferenceAttachment[]>([])
   composerReferencesRef.current = composerReferenceAttachments
 
@@ -61,6 +60,17 @@ export function useComposerAttachments({
       const next = update(composerFilesRef.current)
       composerFilesRef.current = next
       setComposerFileAttachments(next)
+    },
+    []
+  )
+
+  // Images and files share one per-message count, so both mirrors must hold
+  // what a gesture has already added before its next attach is decided.
+  const commitComposerImages = useCallback(
+    (update: (previous: ComposerImageAttachment[]) => ComposerImageAttachment[]) => {
+      const next = update(composerImagesRef.current)
+      composerImagesRef.current = next
+      setComposerImageAttachments(next)
     },
     []
   )
@@ -82,11 +92,11 @@ export function useComposerAttachments({
 
   const clearComposerImageAttachments = useCallback(() => {
     composerAttachmentRevisionRef.current += 1
-    setComposerImageAttachments(previous => {
+    commitComposerImages(previous => {
       revokeComposerPreviewUrls(previous)
       return []
     })
-  }, [revokeComposerPreviewUrls])
+  }, [commitComposerImages, revokeComposerPreviewUrls])
 
   const clearComposerFileAttachments = useCallback(() => {
     composerAttachmentRevisionRef.current += 1
@@ -124,14 +134,19 @@ export function useComposerAttachments({
     (attachments: ComposerImageAttachment[]) => {
       composerAttachmentRevisionRef.current += 1
       if (!attachments.length) return
-      // A new attach replaces the notice about documents refused earlier.
-      setComposerFileRefusals([])
-      setComposerImageAttachments(previous => {
+      // The documents of the same gesture were routed first and replaced the
+      // notices; an image refused here is added to them, never replaces them.
+      const refusals: ComposerFileRefusal[] = []
+      commitComposerImages(previous => {
         const next = [...previous]
         for (const attachment of attachments) {
           // Images and files share one per-message count.
           if (next.length + composerFilesRef.current.length >= COMPOSER_MAX_ATTACHMENTS) {
             revokeComposerPreviewUrls([attachment])
+            refusals.push({
+              id: attachment.id,
+              text: `"${attachment.name}" was not attached: a message can carry at most ${COMPOSER_MAX_ATTACHMENTS} attachments.`,
+            })
             continue
           }
           const duplicate = next.some(
@@ -152,15 +167,16 @@ export function useComposerAttachments({
         }
         return next
       })
+      if (refusals.length) setComposerFileRefusals(previous => [...previous, ...refusals])
       clearSendError()
     },
-    [clearSendError, revokeComposerPreviewUrls]
+    [clearSendError, commitComposerImages, revokeComposerPreviewUrls]
   )
 
   const handleUpdateComposerImageAttachment = useCallback(
     (attachment: ComposerImageAttachment) => {
       composerAttachmentRevisionRef.current += 1
-      setComposerImageAttachments(previous => {
+      commitComposerImages(previous => {
         const index = previous.findIndex(item => item.id === attachment.id)
         if (index === -1) {
           revokeComposerPreviewUrls([attachment])
@@ -176,13 +192,13 @@ export function useComposerAttachments({
       })
       clearSendError()
     },
-    [clearSendError, revokeComposerPreviewUrls]
+    [clearSendError, commitComposerImages, revokeComposerPreviewUrls]
   )
 
   const handleRemoveComposerImageAttachment = useCallback(
     (attachmentId: string) => {
       composerAttachmentRevisionRef.current += 1
-      setComposerImageAttachments(previous => {
+      commitComposerImages(previous => {
         const removed = previous.filter(att => att.id === attachmentId)
         if (removed.length) {
           revokeComposerPreviewUrls(removed)
@@ -190,21 +206,26 @@ export function useComposerAttachments({
         return previous.filter(att => att.id !== attachmentId)
       })
     },
-    [revokeComposerPreviewUrls]
+    [commitComposerImages, revokeComposerPreviewUrls]
   )
 
   /**
    * Adds picked documents (#678). Each accepted file appears at once as
    * `reading` and becomes `ready` when its bytes are read and hashed. A file
    * that breaks a limit, or cannot be read, gets no chip: its reason is shown
-   * as a refusal notice instead, so a refusal is never silent. Each attach
-   * replaces the refusals of the previous one.
+   * as a refusal notice instead, so a refusal is never silent. The composer
+   * calls this once per gesture, with `[]` when the gesture carried only
+   * images, so each gesture replaces the refusals of the previous one; images
+   * of the same gesture refused later add to them.
    */
   const handleAddComposerFiles = useCallback(
     (files: File[], draft: string) => {
       composerAttachmentRevisionRef.current += 1
-      if (!files.length) return
       const refusals: ComposerFileRefusal[] = []
+      if (!files.length) {
+        setComposerFileRefusals(refusals)
+        return
+      }
       // Admission measures the request the files would be sent with: the
       // content with its references section, the structured references and the
       // agent it is posted to. Without an agent, or with references the send
