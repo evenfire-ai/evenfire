@@ -451,6 +451,49 @@ STUB
   cleanup_fixture "$d"
 }
 
+# minikube-verify-images only reads the manifest and the daemon; its recipe has
+# no lock wrapper, so T2_SKIP_LOCK / T2_LOCK_TOKEN on that call do nothing and
+# read as if it needed the lease. It is called without them. If the recipe ever
+# gains a lock wrapper, the Makefile check below fails first and the call must
+# pass the lease like the build and pull calls above.
+assert_verify_images_is_called_without_the_lock_lease() {
+  local d out_local out_ghcr rc_local rc_ghcr verify_calls bare_calls recipe
+  recipe="$(awk '/^minikube-verify-images:/{f=1;next} f&&/^[^\t]/{exit} f' "$REPO_ROOT/Makefile")"
+  d="$(mktemp -d)"
+  prepare_repo "$d"
+  cat > "$d/bin/make" <<'STUB'
+#!/usr/bin/env bash
+printf 'make %s T2_SKIP_LOCK=%s\n' "$*" "${T2_SKIP_LOCK:-}" >>"${TEST_LOG_FILE:?}"
+exit 0
+STUB
+  chmod +x "$d/bin/make"
+  out_local="$(
+    PATH="$d/bin:$PATH" TEST_LOG_FILE="$d/ops.log" \
+    IMAGE_SOURCE=local IMAGE_TAG="" T2_SKIP_LOCK="" T2_LOCK_TOKEN="parent-lease-token" \
+      run_incremental "$d" 'INCREMENTAL_FULL_IMAGE_BUILD=true; incremental_build_images'
+  )"
+  rc_local=$?
+  out_ghcr="$(
+    PATH="$d/bin:$PATH" TEST_LOG_FILE="$d/ops.log" \
+    IMAGE_SOURCE=ghcr IMAGE_TAG="$PIN_TAG" T2_SKIP_LOCK="" T2_LOCK_TOKEN="parent-lease-token" \
+      run_incremental "$d" 'INCREMENTAL_REPULL_ALL=true; INCREMENTAL_TARGETS=(); incremental_build_images'
+  )"
+  rc_ghcr=$?
+  verify_calls="$(grep -c '^make minikube-verify-images ' "$d/ops.log")"
+  bare_calls="$(grep -Fxc 'make minikube-verify-images T2_SKIP_LOCK=' "$d/ops.log")"
+  # Liveness: one verify call per path (full build and re-pull), and the recipe
+  # is the verify-only build script, before the absence of a lease means anything.
+  if [ "$rc_local" -eq 0 ] && [ "$rc_ghcr" -eq 0 ] \
+     && [ "$verify_calls" = 2 ] && [ "$bare_calls" = 2 ] \
+     && grep -Fq 'build-images.sh --verify-only' <<< "$recipe" \
+     && ! grep -Fq 'mutation-lock' <<< "$recipe"; then
+    pass "verify-images takes no lock and is called without the lock lease"
+  else
+    fail "expected two verify-images calls without T2_SKIP_LOCK and a lock-free recipe; rc_local=$rc_local rc_ghcr=$rc_ghcr verify=$verify_calls bare=$bare_calls log=$(cat "$d/ops.log") recipe=$recipe out_local=$out_local out_ghcr=$out_ghcr"
+  fi
+  cleanup_fixture "$d"
+}
+
 # An unmapped runtime path in ghcr mode is the one case the shadow cannot cover:
 # there is no image to build. Passing here would gate against undeployed code,
 # so it must stop, name the path, and name a remedy that works.
@@ -1126,6 +1169,7 @@ assert_a_failed_retag_fails_the_pre_gate
 assert_a_full_sync_in_ghcr_mode_repulls_instead_of_building_everything
 assert_local_mode_still_builds_everything_on_a_full_image_build
 assert_full_image_calls_inherit_the_parent_profile_lock
+assert_verify_images_is_called_without_the_lock_lease
 assert_an_unmapped_change_hard_fails_in_ghcr_mode_with_a_remedy
 assert_an_unresolvable_baseline_hard_fails_in_ghcr_mode
 assert_the_release_image_revision_label_supplies_the_missing_baseline

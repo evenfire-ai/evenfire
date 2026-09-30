@@ -454,8 +454,9 @@ incremental_build_images() {
       cd "${PROJECT_DIR}"
       # pre-gate-sync already holds the profile lock; the target's lock wrapper
       # must validate that lease instead of acquiring it again (PROFILE_BUSY).
+      # minikube-verify-images has no lock wrapper and needs no lease.
       T2_SKIP_LOCK=true T2_LOCK_TOKEN="${T2_LOCK_TOKEN}" make minikube-build-images
-      T2_SKIP_LOCK=true T2_LOCK_TOKEN="${T2_LOCK_TOKEN}" make minikube-verify-images
+      make minikube-verify-images
     )
     return 0
   fi
@@ -490,7 +491,7 @@ incremental_build_images_ghcr() {
       cd "${PROJECT_DIR}"
       # Same inherited lease as the full local build above.
       T2_SKIP_LOCK=true T2_LOCK_TOKEN="${T2_LOCK_TOKEN}" make minikube-pull-images
-      T2_SKIP_LOCK=true T2_LOCK_TOKEN="${T2_LOCK_TOKEN}" make minikube-verify-images
+      make minikube-verify-images
     )
   fi
 
