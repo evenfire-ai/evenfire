@@ -181,7 +181,10 @@ describeRealPostgres('GFS reader and writer login isolation', () => {
         rows: [{ current_user: 'gfs_controller_reader' }],
       })
     } finally {
-      await Promise.all([freshWriter.end(), freshReader.end()])
+      await Promise.all([
+        endPoolAndWaitForClients(freshWriter),
+        endPoolAndWaitForClients(freshReader),
+      ])
     }
   })
 

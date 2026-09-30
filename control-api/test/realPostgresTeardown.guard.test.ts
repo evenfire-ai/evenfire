@@ -25,6 +25,7 @@ const PLAIN_END = /\b(\w+)\.end\(\)/g
 interface ScannedSuite {
   file: string
   terminators: string[]
+  plainEnds: number
   violations: string[]
 }
 
@@ -40,10 +41,11 @@ function scanSuites(): ScannedSuite[] {
       const source = readFileSync(join(testDir, file), 'utf8')
       if (!source.includes('pg_terminate_backend')) return []
       const terminators = [...new Set([...source.matchAll(TERMINATE_QUERY)].map(match => match[1]))]
-      const violations = [...source.matchAll(PLAIN_END)]
+      const plainEnds = [...source.matchAll(PLAIN_END)]
+      const violations = plainEnds
         .filter(match => !terminators.includes(match[1]))
         .map(match => `${file}:${lineOf(source, match.index)} ${match[0]}`)
-      return [{ file, terminators, violations }]
+      return [{ file, terminators, plainEnds: plainEnds.length, violations }]
     })
 }
 
@@ -51,13 +53,15 @@ describe('real-Postgres teardown guard (R4-L11)', () => {
   it('ends every pool other than the terminating one through endPoolAndWaitForClients', () => {
     const suites = scanSuites()
 
-    // Witnesses: the scan reached suites that terminate backends, and in each
-    // one it identified the pool that runs the terminate. Without both, an
+    // Witnesses: the scan reached suites that terminate backends, in each one
+    // it identified the pool that runs the terminate, and it matched plain
+    // `.end()` calls at all (the terminating pools' own). Without them, an
     // empty violation list would say nothing.
     expect(suites.length).toBeGreaterThan(0)
     expect(suites.filter(suite => suite.terminators.length === 0).map(suite => suite.file)).toEqual(
       []
     )
+    expect(suites.reduce((sum, suite) => sum + suite.plainEnds, 0)).toBeGreaterThan(0)
 
     expect(suites.flatMap(suite => suite.violations)).toEqual([])
   })

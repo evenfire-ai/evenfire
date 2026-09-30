@@ -121,7 +121,7 @@ describeRealPostgres('llm-model reductor ↔ host referencer serialization (R1-H
     limiterPool.on('error', () => {})
     const migratePool = new Pool({ connectionString })
     await dbMod.initDb({ connect: () => migratePool.connect() })
-    await migratePool.end()
+    await endPoolAndWaitForClients(migratePool)
 
     const appMod = await import('../src/app.js')
     const configMod = await import('../src/config.js')

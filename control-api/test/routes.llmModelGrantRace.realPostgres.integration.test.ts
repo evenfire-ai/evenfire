@@ -138,7 +138,7 @@ describeRealPostgres('llm-model reductor ↔ grant upsert serialization (R1-H3 f
     limiterPool.on('error', () => {})
     const migratePool = new Pool({ connectionString })
     await dbMod.initDb({ connect: () => migratePool.connect() })
-    await migratePool.end()
+    await endPoolAndWaitForClients(migratePool)
 
     racePool = new Pool({ connectionString })
     racePool.on('error', () => {})
