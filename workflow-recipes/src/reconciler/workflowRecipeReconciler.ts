@@ -1986,15 +1986,11 @@ export class WorkflowRecipeReconciler {
       // ensureOAuthBrokerTokenSecret, so the token-ADDED re-reconcile would
       // never reach the reap. Only the delete branch runs here (issuance stays
       // on the first-deploy path and the rotation loop), and the delete ledger
-      // bounds it to one DELETE per generation or ADDED. It runs only once a
-      // token ADDED was observed for the recipe: a fresh process would otherwise
-      // send one DELETE per recipe, and the Secret watch's initial list replays
-      // ADDED for every token that exists. The first-deploy path below skips
+      // decides: no DELETE until a token ADDED was observed for the recipe,
+      // then one per generation or ADDED. The first-deploy path below skips
       // its own call when this one ran, so a failed DELETE is not repeated in
       // the same pass.
-      const oauthBrokerTokenReapedEarly =
-        !rb.recipeHasBackgroundAccessClient(recipe) &&
-        this.oauthBrokerDeleteLedger.secretEpoch(recipe.metadata.name) !== 0
+      const oauthBrokerTokenReapedEarly = !rb.recipeHasBackgroundAccessClient(recipe)
       if (oauthBrokerTokenReapedEarly) {
         await this.ensureOAuthBrokerTokenSecret(recipe)
       }
@@ -7565,8 +7561,9 @@ export class WorkflowRecipeReconciler {
     if (!rb.recipeHasBackgroundAccessClient(recipe)) {
       const generation = recipe.metadata.generation
       if (!this.oauthBrokerDeleteLedger.shouldDeleteSecret(recipe.metadata)) {
-        createLogger('wrc', recipeName).info(
-          'Skipping oauth-broker-token delete; generation already seen',
+        // Every non-backgroundAccess pass reaches this, so it stays at debug.
+        createLogger('wrc', recipeName).debug(
+          'Skipping oauth-broker-token delete; no token seen, or this generation already reaped it',
           { recipe: recipeName, generation }
         )
         return

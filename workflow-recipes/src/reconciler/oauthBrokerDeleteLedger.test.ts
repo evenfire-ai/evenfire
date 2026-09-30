@@ -13,9 +13,33 @@ function recordSecret(ledger: OAuthBrokerDeleteLedger, recipe: OAuthBrokerLedger
   expect(ledger.recordSecretDelete(recipe, ledger.secretEpoch(recipe.name))).toBe(true)
 }
 
+/**
+ * The Secret watch observed the recipe's token (an ADDED, or the relist that
+ * replays one). Every Secret-side case below starts here: without it the
+ * ledger answers false for every pass, so a false would prove nothing.
+ */
+function tokenSeen(ledger: OAuthBrokerDeleteLedger, name: string): void {
+  ledger.invalidateSecret(name)
+}
+
 describe('OAuthBrokerDeleteLedger', () => {
+  it('never deletes a Secret it never saw a token for', () => {
+    const ledger = new OAuthBrokerDeleteLedger()
+    for (const generation of [0, 1, 4]) {
+      expect(ledger.shouldDeleteSecret(ref('r', generation))).toBe(false)
+    }
+    // A recipe recreated under the same name does not bypass it either.
+    expect(ledger.shouldDeleteSecret(ref('r', 1, 'uid-recreated'))).toBe(false)
+
+    // Liveness witness: the token ADDED arms the delete, for that recipe only.
+    tokenSeen(ledger, 'r')
+    expect(ledger.shouldDeleteSecret(ref('r', 4))).toBe(true)
+    expect(ledger.shouldDeleteSecret(ref('r2', 4))).toBe(false)
+  })
+
   it('remembers a Secret delete for the recorded generation only', () => {
     const ledger = new OAuthBrokerDeleteLedger()
+    tokenSeen(ledger, 'r')
     expect(ledger.shouldDeleteSecret(ref('r', 4))).toBe(true)
     recordSecret(ledger, ref('r', 4))
     expect(ledger.shouldDeleteSecret(ref('r', 4))).toBe(false)
@@ -24,6 +48,7 @@ describe('OAuthBrokerDeleteLedger', () => {
 
   it('keeps the highest generation per recipe: an older generation arriving late is skipped', () => {
     const ledger = new OAuthBrokerDeleteLedger()
+    tokenSeen(ledger, 'r')
     recordSecret(ledger, ref('r', 4))
     recordSecret(ledger, ref('r', 5))
     expect(ledger.shouldDeleteSecret(ref('r', 5))).toBe(false)
@@ -39,9 +64,12 @@ describe('OAuthBrokerDeleteLedger', () => {
 
   it('an older generation recorded late does not lower the recorded generation', () => {
     const ledger = new OAuthBrokerDeleteLedger()
+    tokenSeen(ledger, 'r')
     recordSecret(ledger, ref('r', 5))
     recordSecret(ledger, ref('r', 3))
     expect(ledger.shouldDeleteSecret(ref('r', 4))).toBe(false)
+    // Liveness witness: the watermark is 5, not unset.
+    expect(ledger.shouldDeleteSecret(ref('r', 6))).toBe(true)
 
     ledger.recordPolicyDelete(ref('r', 5), 0)
     ledger.recordPolicyDelete(ref('r', 3), 0)
@@ -50,6 +78,7 @@ describe('OAuthBrokerDeleteLedger', () => {
 
   it('a recipe recreated under the same name (new uid) deletes again at any generation', () => {
     const ledger = new OAuthBrokerDeleteLedger()
+    tokenSeen(ledger, 'r')
     recordSecret(ledger, ref('r', 5, 'uid-old'))
     ledger.recordPolicyDelete(ref('r', 5, 'uid-old'), 0)
     expect(ledger.shouldDeleteSecret(ref('r', 1, 'uid-old'))).toBe(false)
@@ -66,6 +95,9 @@ describe('OAuthBrokerDeleteLedger', () => {
 
   it('does not let one recipe suppress another', () => {
     const ledger = new OAuthBrokerDeleteLedger()
+    tokenSeen(ledger, 'a')
+    tokenSeen(ledger, 'a-b')
+    tokenSeen(ledger, 'b')
     recordSecret(ledger, ref('a', 1))
     expect(ledger.shouldDeleteSecret(ref('a', 1))).toBe(false)
     expect(ledger.shouldDeleteSecret(ref('a-b', 1))).toBe(true)
@@ -79,8 +111,15 @@ describe('OAuthBrokerDeleteLedger', () => {
     expect(ledger.shouldDeletePolicy(ref('r', 4), 1_000 + OAUTH_BROKER_NP_TTL_MS)).toBe(true)
   })
 
+  it('never saw a token: the NetworkPolicy side still deletes, it is not tied to the Secret', () => {
+    const ledger = new OAuthBrokerDeleteLedger()
+    expect(ledger.shouldDeleteSecret(ref('r', 4))).toBe(false)
+    expect(ledger.shouldDeletePolicy(ref('r', 4), 1)).toBe(true)
+  })
+
   it('invalidateSecret re-arms only the Secret side; the NetworkPolicy TTL survives', () => {
     const ledger = new OAuthBrokerDeleteLedger()
+    tokenSeen(ledger, 'r')
     recordSecret(ledger, ref('r', 4))
     ledger.recordPolicyDelete(ref('r', 4), 0)
     expect(ledger.shouldDeleteSecret(ref('r', 4))).toBe(false)
@@ -93,6 +132,7 @@ describe('OAuthBrokerDeleteLedger', () => {
 
   it('R2-L1: an ADDED after a newer generation provisioned the token does not re-arm an older pass', () => {
     const ledger = new OAuthBrokerDeleteLedger()
+    tokenSeen(ledger, 'r')
     // gen4 has no backgroundAccess: the Secret is reaped and recorded.
     recordSecret(ledger, ref('r', 4))
     // gen5 turns backgroundAccess on and the token is issued.
@@ -108,6 +148,7 @@ describe('OAuthBrokerDeleteLedger', () => {
 
   it('R2-L1: invalidateSecret keeps the watermark: below it stays skipped, at it re-arms', () => {
     const ledger = new OAuthBrokerDeleteLedger()
+    tokenSeen(ledger, 'r')
     recordSecret(ledger, ref('r', 5))
     ledger.invalidateSecret('r')
     expect(ledger.shouldDeleteSecret(ref('r', 4))).toBe(false)
@@ -132,6 +173,7 @@ describe('OAuthBrokerDeleteLedger', () => {
 
   it('an invalidation for one recipe does not reject another recipe record', () => {
     const ledger = new OAuthBrokerDeleteLedger()
+    tokenSeen(ledger, 'r2')
     const epochBeforeDelete = ledger.secretEpoch('r2')
     ledger.invalidateSecret('r')
     expect(ledger.recordSecretDelete(ref('r2', 4), epochBeforeDelete)).toBe(true)
@@ -140,16 +182,24 @@ describe('OAuthBrokerDeleteLedger', () => {
 
   it('invalidate drops both sides for the named recipe and no other', () => {
     const ledger = new OAuthBrokerDeleteLedger()
+    tokenSeen(ledger, 'r')
+    tokenSeen(ledger, 'r2')
     recordSecret(ledger, ref('r', 4))
     ledger.recordPolicyDelete(ref('r', 4), 0)
     recordSecret(ledger, ref('r2', 4))
     ledger.recordPolicyDelete(ref('r2', 4), 0)
 
     ledger.invalidate('r')
-    expect(ledger.shouldDeleteSecret(ref('r', 4))).toBe(true)
+    // The recipe is gone with its token: nothing to delete until a new ADDED.
+    expect(ledger.shouldDeleteSecret(ref('r', 5))).toBe(false)
     expect(ledger.shouldDeletePolicy(ref('r', 4), 1)).toBe(true)
     expect(ledger.shouldDeleteSecret(ref('r2', 4))).toBe(false)
     expect(ledger.shouldDeletePolicy(ref('r2', 4), 1)).toBe(false)
+
+    // The watermark went too: after the next ADDED a generation below the
+    // old one deletes.
+    tokenSeen(ledger, 'r')
+    expect(ledger.shouldDeleteSecret(ref('r', 3))).toBe(true)
   })
 
   it('a DELETE in flight across a recipe deletion that followed an ADDED is not recorded', () => {
@@ -158,6 +208,10 @@ describe('OAuthBrokerDeleteLedger', () => {
     const epochBeforeDelete = ledger.secretEpoch('r')
     ledger.invalidate('r')
     expect(ledger.recordSecretDelete(ref('r', 4), epochBeforeDelete)).toBe(false)
-    expect(ledger.shouldDeleteSecret(ref('r', 4))).toBe(true)
+
+    // Nothing was recorded: after the next ADDED a lower generation deletes,
+    // which a watermark at 4 would have skipped.
+    tokenSeen(ledger, 'r')
+    expect(ledger.shouldDeleteSecret(ref('r', 3))).toBe(true)
   })
 })

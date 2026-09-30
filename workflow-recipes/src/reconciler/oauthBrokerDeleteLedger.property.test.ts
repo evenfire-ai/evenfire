@@ -64,12 +64,14 @@ function apply(ledger: OAuthBrokerDeleteLedger, op: Op): void {
 }
 
 /** A recorded delete and a provisioned token raise the watermark the same way. */
-function applyToModel(model: Map<string, ModelEntry>, op: Op): void {
+function applyToModel(model: Map<string, ModelEntry>, seen: Set<string>, op: Op): void {
   if (op.kind === 'invalidate') {
     model.delete(op.name)
+    seen.delete(op.name)
     return
   }
   if (op.kind === 'invalidateSecret') {
+    seen.add(op.name)
     const entry = model.get(op.name)
     if (entry) entry.rearmed = true
     return
@@ -83,13 +85,23 @@ function applyToModel(model: Map<string, ModelEntry>, op: Op): void {
   }
 }
 
-function checkAgainstModel(ledger: OAuthBrokerDeleteLedger, model: Map<string, ModelEntry>): void {
+function checkAgainstModel(
+  ledger: OAuthBrokerDeleteLedger,
+  model: Map<string, ModelEntry>,
+  seen: Set<string>
+): void {
   for (const query of QUERIES) {
     const entry = model.get(query.name)
     const generation = query.generation ?? 0
     const actual = ledger.shouldDeleteSecret(query)
     const where = `${query.name}/${query.uid}/gen${generation} model=${JSON.stringify(entry)}`
 
+    // No token ADDED since the process started or the recipe was deleted:
+    // there is no token to reap.
+    if (!seen.has(query.name)) {
+      expect(actual, `no token seen must skip: ${where}`).toBe(false)
+      continue
+    }
     // A recipe never recorded, or recreated under the same name, always deletes.
     if (!entry || entry.uid !== query.uid) {
       expect(actual, `uid change must delete: ${where}`).toBe(true)
@@ -108,15 +120,16 @@ function checkAgainstModel(ledger: OAuthBrokerDeleteLedger, model: Map<string, M
 }
 
 describe('OAuthBrokerDeleteLedger Secret-side properties', () => {
-  it('matches the uid / watermark / re-arm model over record, provision, invalidateSecret and invalidate', () => {
+  it('matches the token-seen / uid / watermark / re-arm model over record, provision, invalidateSecret and invalidate', () => {
     fc.assert(
       fc.property(fc.array(opArb, { maxLength: 30 }), ops => {
         const ledger = new OAuthBrokerDeleteLedger()
         const model = new Map<string, ModelEntry>()
+        const seen = new Set<string>()
         for (const op of ops) {
           apply(ledger, op)
-          applyToModel(model, op)
-          checkAgainstModel(ledger, model)
+          applyToModel(model, seen, op)
+          checkAgainstModel(ledger, model, seen)
         }
       }),
       { numRuns: 5000 }
@@ -146,6 +159,7 @@ describe('OAuthBrokerDeleteLedger Secret-side properties', () => {
         fc.integer({ min: 1, max: MAX_GENERATION }),
         (uid, watermark) => {
           const ledger = new OAuthBrokerDeleteLedger()
+          ledger.invalidateSecret('a')
           record(ledger, { name: 'a', uid, generation: watermark })
           ledger.invalidateSecret('a')
           for (let generation = 0; generation <= MAX_GENERATION; generation++) {

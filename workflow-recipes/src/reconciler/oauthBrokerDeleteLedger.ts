@@ -13,6 +13,9 @@
  * always deletes and replaces the entry even when the recipe DELETE event was
  * missed.
  *
+ * The Secret side deletes only after the Secret watch observed the recipe's
+ * token (a non-zero epoch): a recipe that never had one gets no DELETE.
+ *
  * The Secret watermark rises on a recorded delete and on
  * `noteSecretProvisioned`, which the backgroundAccess branch calls for the
  * generation that wants the token.
@@ -77,6 +80,10 @@ export class OAuthBrokerDeleteLedger {
   private epochClock = 0
 
   shouldDeleteSecret(recipe: OAuthBrokerLedgerRecipe): boolean {
+    // No token ADDED since this process started or the recipe was deleted:
+    // the Secret watch's initial list replays ADDED for every token that
+    // exists, so there is no token to reap and a DELETE would only 404.
+    if (this.secretEpoch(recipe.name) === 0) return false
     const entry = this.secrets.get(recipe.name)
     if (entry === undefined || entry.uid !== recipe.uid) return true
     const generation = normalizeGeneration(recipe.generation)

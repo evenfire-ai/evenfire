@@ -23,7 +23,7 @@ import {
   WorkflowReconciler,
   translateNetworkPolicyApplySummary,
 } from '../workflow/workflowReconciler'
-import { captureLogger } from './__tests__/captureLogger'
+import { captureLogger, captureLoggerLevels } from './__tests__/captureLogger'
 import { defaultFqdnLookup } from './fqdnResolver'
 import { isRetryableInfraError } from './k8sErrors'
 import type { NetworkPolicyFamily } from './networkPolicyConvergence'
@@ -15510,22 +15510,33 @@ describe('WorkflowRecipeReconciler', () => {
       ).reconcileOAuthBrokerEgressPolicy(recipe)
     }
 
+    /**
+     * The Secret watch observed the recipe's token (an ADDED, or the relist
+     * that replays one). The Secret-side cases start here: without it the
+     * ledger reaps nothing, so a skipped DELETE would prove nothing.
+     */
+    function tokenSeen(recipeName = 'test-recipe'): void {
+      reconciler.invalidateOAuthBrokerSecretLedger(recipeName)
+    }
+
     it('deletes the Secret once for the same generation and logs the skip', async () => {
       const recipe = reapRecipe(4)
-      const infoSpy = captureLogger('info')
+      tokenSeen()
+      const debugSpy = captureLogger('debug')
 
       await reconciler.ensureOAuthBrokerTokenSecret(recipe)
       await reconciler.ensureOAuthBrokerTokenSecret(recipe)
 
       expect(secretDeletes()).toBe(1)
-      expect(infoSpy).toHaveBeenCalledWith(
+      expect(debugSpy).toHaveBeenCalledWith(
         expect.stringContaining('Skipping oauth-broker-token delete'),
         expect.objectContaining({ recipe: 'test-recipe', generation: 4 })
       )
-      infoSpy.mockRestore()
+      debugSpy.mockRestore()
     })
 
     it('deletes the Secret again when metadata.generation changes', async () => {
+      tokenSeen()
       await reconciler.ensureOAuthBrokerTokenSecret(reapRecipe(4))
       await reconciler.ensureOAuthBrokerTokenSecret(reapRecipe(4))
       expect(secretDeletes()).toBe(1)
@@ -15534,7 +15545,8 @@ describe('WorkflowRecipeReconciler', () => {
       expect(secretDeletes()).toBe(2)
     })
 
-    it('deletes the Secret again on a new process (fresh reconciler)', async () => {
+    it('a new process sends no token DELETE until the watch replays the token ADDED, then one', async () => {
+      tokenSeen()
       await reconciler.ensureOAuthBrokerTokenSecret(reapRecipe(4))
       expect(secretDeletes()).toBe(1)
 
@@ -15542,11 +15554,17 @@ describe('WorkflowRecipeReconciler', () => {
         verifyWorkflowRunProvenance: mockVerifyWorkflowRunProvenance,
       })
       await next.ensureOAuthBrokerTokenSecret(reapRecipe(4))
+      expect(secretDeletes()).toBe(1)
+
+      // The Secret watch's initial list replays ADDED for a token that exists.
+      next.invalidateOAuthBrokerSecretLedger('test-recipe')
+      await next.ensureOAuthBrokerTokenSecret(reapRecipe(4))
       expect(secretDeletes()).toBe(2)
     })
 
     it('deletes the Secret again after ADDED invalidation', async () => {
       const recipe = reapRecipe(4)
+      tokenSeen()
       await reconciler.ensureOAuthBrokerTokenSecret(recipe)
       await reconciler.ensureOAuthBrokerTokenSecret(recipe)
       expect(secretDeletes()).toBe(1)
@@ -15558,6 +15576,7 @@ describe('WorkflowRecipeReconciler', () => {
 
     it('ADDED invalidation re-arms the Secret delete but keeps the NetworkPolicy TTL', async () => {
       const recipe = reapRecipe(4)
+      tokenSeen()
       await reconciler.ensureOAuthBrokerTokenSecret(recipe)
       await reapPolicy(recipe)
       expect(secretDeletes()).toBe(1)
@@ -15570,20 +15589,29 @@ describe('WorkflowRecipeReconciler', () => {
       expect(policyDeletes()).toBe(1)
     })
 
-    it('deletes the Secret again after reconcileDelete invalidates the ledger', async () => {
+    it('reconcileDelete drops the ledger: no DELETE until a new token ADDED, then even below the old watermark', async () => {
       const recipe = reapRecipe(4)
+      tokenSeen()
       await reconciler.ensureOAuthBrokerTokenSecret(recipe)
       await reconciler.ensureOAuthBrokerTokenSecret(recipe)
       expect(secretDeletes()).toBe(1)
 
       await reconciler.reconcileDelete(recipe)
       mockCoreApi.deleteNamespacedSecret.mockClear()
+      // The finalizer deleted the token with the recipe; nothing is left to reap.
       await reconciler.ensureOAuthBrokerTokenSecret(recipe)
+      expect(secretDeletes()).toBe(0)
+
+      // A token ADDED for a recipe under the same name: the old watermark is
+      // gone, so a lower generation deletes.
+      tokenSeen()
+      await reconciler.ensureOAuthBrokerTokenSecret(reapRecipe(3))
       expect(secretDeletes()).toBe(1)
     })
 
     it('G3: does not record a Secret delete after DELETE 403 or 500', async () => {
       const recipe = reapRecipe(4)
+      tokenSeen()
       mockCoreApi.deleteNamespacedSecret.mockRejectedValue({ code: 403 })
       await reconciler.ensureOAuthBrokerTokenSecret(recipe)
       await reconciler.ensureOAuthBrokerTokenSecret(recipe)
@@ -15600,6 +15628,7 @@ describe('WorkflowRecipeReconciler', () => {
     it('G3: records a Secret delete after DELETE 404 and skips the next same-generation call', async () => {
       mockCoreApi.deleteNamespacedSecret.mockRejectedValue({ code: 404 })
       const recipe = reapRecipe(7)
+      tokenSeen()
       await reconciler.ensureOAuthBrokerTokenSecret(recipe)
       await reconciler.ensureOAuthBrokerTokenSecret(recipe)
       expect(secretDeletes()).toBe(1)
@@ -15630,6 +15659,8 @@ describe('WorkflowRecipeReconciler', () => {
     })
 
     it('c3: a recorded delete for one recipe does not skip another recipe', async () => {
+      tokenSeen()
+      tokenSeen('other-recipe')
       await reconciler.ensureOAuthBrokerTokenSecret(reapRecipe(0))
       // Liveness witness: the first recipe's delete really ran.
       expect(secretDeletes()).toBe(1)
@@ -15670,7 +15701,8 @@ describe('WorkflowRecipeReconciler', () => {
     })
 
     it('R1-L2: a late pass carrying an older generation does not re-delete the Secret', async () => {
-      const infoSpy = captureLogger('info')
+      tokenSeen()
+      const debugSpy = captureLogger('debug')
       await reconciler.ensureOAuthBrokerTokenSecret(reapRecipe(4))
       await reconciler.ensureOAuthBrokerTokenSecret(reapRecipe(5))
       // Liveness witness: both newer-generation deletes really ran.
@@ -15678,11 +15710,11 @@ describe('WorkflowRecipeReconciler', () => {
 
       await reconciler.ensureOAuthBrokerTokenSecret(reapRecipe(4))
       expect(secretDeletes()).toBe(2)
-      expect(infoSpy).toHaveBeenCalledWith(
+      expect(debugSpy).toHaveBeenCalledWith(
         expect.stringContaining('Skipping oauth-broker-token delete'),
         expect.objectContaining({ recipe: 'test-recipe', generation: 4 })
       )
-      infoSpy.mockRestore()
+      debugSpy.mockRestore()
     })
 
     it('R1-L2: a late pass carrying an older generation does not re-delete the NetworkPolicy', async () => {
@@ -15702,6 +15734,7 @@ describe('WorkflowRecipeReconciler', () => {
     })
 
     it('R1-L2: a recipe recreated under the same name is reaped even at a lower generation', async () => {
+      tokenSeen()
       await reconciler.ensureOAuthBrokerTokenSecret(reapRecipe(5))
       await reapPolicy(reapRecipe(5))
       expect(secretDeletes()).toBe(1)
@@ -15724,6 +15757,7 @@ describe('WorkflowRecipeReconciler', () => {
 
     it('R1-L1: an ADDED invalidation that lands while the DELETE is in flight is not overwritten', async () => {
       const recipe = reapRecipe(4)
+      tokenSeen()
       mockCoreApi.deleteNamespacedSecret.mockImplementationOnce(async () => {
         // Another writer recreated the Secret and its ADDED was handled before
         // this DELETE returned.
@@ -15748,8 +15782,9 @@ describe('WorkflowRecipeReconciler', () => {
         .mockResolvedValue({ brokerToken: 'issued-token' } as Awaited<
           ReturnType<typeof brokerIssuer.issueOAuthBrokerToken>
         >)
-      const infoSpy = captureLogger('info')
+      const debugSpy = captureLogger('debug')
       try {
+        tokenSeen()
         // gen4 has no backgroundAccess: the Secret is reaped and recorded.
         await reconciler.ensureOAuthBrokerTokenSecret(reapRecipe(4))
         expect(secretDeletes()).toBe(1)
@@ -15792,7 +15827,7 @@ describe('WorkflowRecipeReconciler', () => {
         reconciler.invalidateOAuthBrokerSecretLedger('test-recipe')
         await reconciler.ensureOAuthBrokerTokenSecret(reapRecipe(4))
         expect(secretDeletes()).toBe(1)
-        expect(infoSpy).toHaveBeenCalledWith(
+        expect(debugSpy).toHaveBeenCalledWith(
           expect.stringContaining('Skipping oauth-broker-token delete'),
           expect.objectContaining({ recipe: 'test-recipe', generation: 4 })
         )
@@ -15801,7 +15836,7 @@ describe('WorkflowRecipeReconciler', () => {
         await reconciler.ensureOAuthBrokerTokenSecret(reapRecipe(6))
         expect(secretDeletes()).toBe(2)
       } finally {
-        infoSpy.mockRestore()
+        debugSpy.mockRestore()
         issue.mockRestore()
       }
     })
@@ -15987,13 +16022,32 @@ describe('WorkflowRecipeReconciler', () => {
       return { recipe, workflowReconcile }
     }
 
-    it('R2-L3: without a token ADDED the first-deploy pass still sends its one DELETE', async () => {
+    it('R3-L11: without a token ADDED the first-deploy pass sends no DELETE and logs the skip once, at debug', async () => {
       const { recipe, workflowReconcile } = installFirstDeployWorkflow()
+      const skips = (spy: ReturnType<typeof vi.fn>) =>
+        spy.mock.calls.filter(
+          ([message]) =>
+            typeof message === 'string' && message.startsWith('Skipping oauth-broker-token delete')
+        )
+      const logs = captureLoggerLevels(['debug', 'info'] as const)
+      try {
+        await reconciler.reconcile(recipe)
 
+        // Witness that the pass went through deployWorkflowWorkloads.
+        expect(workflowReconcile).toHaveBeenCalledTimes(1)
+        // Witness that the reap ran and the ledger declined it, once per pass.
+        expect(skips(logs.calls.debug)).toHaveLength(1)
+        expect(skips(logs.calls.info)).toHaveLength(0)
+        expect(secretDeletes()).toBe(0)
+      } finally {
+        logs.restore()
+      }
+
+      // Liveness witness: once the watch replays the token ADDED, the next
+      // pass sends its one DELETE.
+      tokenSeen()
       await reconciler.reconcile(recipe)
-
-      // Witness that the pass went through deployWorkflowWorkloads.
-      expect(workflowReconcile).toHaveBeenCalledTimes(1)
+      expect(workflowReconcile).toHaveBeenCalledTimes(2)
       expect(secretDeletes()).toBe(1)
     })
 
