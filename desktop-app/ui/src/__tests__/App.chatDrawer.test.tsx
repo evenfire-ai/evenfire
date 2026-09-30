@@ -19,7 +19,12 @@ import {
 } from '@lib/workspaceTabs'
 import { mapKindToRoute, settingsSectionForRoute } from '@lib/workspaceTabsRoute'
 import { App } from '@/App'
-import { openGfsResourcePayload, resolvedFile } from '@/gfs/__fixtures__/gfsProducerFixtures'
+import { USER_SCOPE_INVALIDATED } from '@/gfs/__fixtures__/entityChangeFixtures'
+import {
+  openGfsResourcePayload,
+  resolveDeniedMessage,
+  resolvedFile,
+} from '@/gfs/__fixtures__/gfsProducerFixtures'
 import type { AppNotification } from '@/uiTypes'
 
 // The universal tab store now lives inside the controller (single writer;
@@ -1333,14 +1338,7 @@ describe('App live GFS preview revalidation', () => {
     const initial = () => currentController.workspaceTabs.tabs.find(tab => tab.id === 'preview-md')
     const before = initial()
     expect(before?.kind).toBe('preview')
-    act(() =>
-      dispatchEntityChange?.({
-        type: 'scope.invalidated',
-        schemaVersion: 1,
-        cursor: 'cursor-1',
-        scopes: ['authorization'],
-      })
-    )
+    act(() => dispatchEntityChange?.({ ...USER_SCOPE_INVALIDATED }))
     const queryFilter = invalidateQueries.mock.calls.at(-1)?.[0]
     expect(queryFilter?.queryKey).toEqual(desktopQueryKeys.gfsRoot)
     expect(
@@ -1367,28 +1365,20 @@ describe('App live GFS preview revalidation', () => {
     expect(initial()).toEqual(before)
 
     resolve.mockRejectedValueOnce(
-      new Error('upstream dependency reported 404 while fetching httpStatus=500')
+      new Error(
+        await resolveDeniedMessage(
+          'gfs://main/readme',
+          { code: 'upstream', message: 'dependency reported 404 while fetching' },
+          500
+        )
+      )
     )
-    act(() =>
-      dispatchEntityChange?.({
-        type: 'scope.invalidated',
-        schemaVersion: 1,
-        cursor: 'cursor-2',
-        scopes: ['authorization'],
-      })
-    )
+    act(() => dispatchEntityChange?.({ ...USER_SCOPE_INVALIDATED }))
     await waitFor(() => expect(resolve).toHaveBeenCalledTimes(2))
     expect(initial()).toEqual(before)
 
-    resolve.mockRejectedValueOnce(new Error('resource denied httpStatus=403'))
-    act(() =>
-      dispatchEntityChange?.({
-        type: 'scope.invalidated',
-        schemaVersion: 1,
-        cursor: 'cursor-3',
-        scopes: ['authorization'],
-      })
-    )
+    resolve.mockRejectedValueOnce(new Error(await resolveDeniedMessage('gfs://main/readme')))
+    act(() => dispatchEntityChange?.({ ...USER_SCOPE_INVALIDATED }))
     await waitFor(() =>
       expect(initial()?.kind === 'preview' && initial()?.preview?.unavailable).toBe(true)
     )
@@ -1405,23 +1395,21 @@ describe('App live GFS preview revalidation', () => {
       resourceVersion: 7,
     })
     const resolve = vi.mocked(window.clerum.gfs.resolve)
+    const expiredSessionMessage = await resolveDeniedMessage(
+      'gfs://main/readme',
+      { code: 'session_expired', message: 'session expired' },
+      401
+    )
     resolve.mockImplementation(uri => {
       if (uri === 'gfs://main/readme') {
-        return Promise.reject(new Error('session expired httpStatus=401')) as never
+        return Promise.reject(new Error(expiredSessionMessage)) as never
       }
       return new Promise(() => {}) as never
     })
     render(<App />)
     await waitFor(() => expect(dispatchEntityChange).toBeTypeOf('function'))
 
-    act(() =>
-      dispatchEntityChange?.({
-        type: 'scope.invalidated',
-        schemaVersion: 1,
-        cursor: 'cursor-expired',
-        scopes: ['authorization'],
-      })
-    )
+    act(() => dispatchEntityChange?.({ ...USER_SCOPE_INVALIDATED }))
 
     await waitFor(() => {
       const previews = currentController.workspaceTabs.tabs.filter(tab => tab.kind === 'preview')
@@ -1431,9 +1419,14 @@ describe('App live GFS preview revalidation', () => {
   })
 
   it('does not retry a preview after its last tab owner closes', async () => {
+    const unavailableMessage = await resolveDeniedMessage(
+      'gfs://main/readme',
+      { code: 'upstream', message: 'upstream unavailable' },
+      503
+    )
     vi.useFakeTimers()
     const resolve = vi.mocked(window.clerum.gfs.resolve)
-    resolve.mockRejectedValue(new Error('upstream unavailable httpStatus=503'))
+    resolve.mockRejectedValue(new Error(unavailableMessage))
     render(<App />)
     await act(async () => {
       await Promise.resolve()
@@ -1442,12 +1435,7 @@ describe('App live GFS preview revalidation', () => {
     expect(dispatchEntityChange).toBeTypeOf('function')
 
     await act(async () => {
-      dispatchEntityChange?.({
-        type: 'scope.invalidated',
-        schemaVersion: 1,
-        cursor: 'cursor-retry',
-        scopes: ['gfs'],
-      })
+      dispatchEntityChange?.({ ...USER_SCOPE_INVALIDATED })
       await Promise.resolve()
       await Promise.resolve()
     })
