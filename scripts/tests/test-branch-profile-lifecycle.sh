@@ -148,7 +148,16 @@ if [[ "${1:-}" == config ]]; then
       exit 0
       ;;
     use-context)
+      [[ ! -e "${state}/use-context-fails" ]] || { printf 'stub: use-context failed\n' >&2; exit 1; }
       printf '%s\n' "${3:?use-context needs a name}" >"${state}/current-context"
+      exit 0
+      ;;
+    unset)
+      [[ "$*" == 'config unset current-context' ]] || {
+        printf 'kubectl stub: unsupported config call: %s\n' "$*" >&2
+        exit 64
+      }
+      : >"${state}/current-context"
       exit 0
       ;;
     # kube-contexts holds one "<context> <server>" line per kubeconfig context.
@@ -276,9 +285,16 @@ case " $* " in
     }
     cat "${state}/minikube-profile-list"
     ;;
+  # start-switches-context makes start leave the global current-context on the
+  # profile (minikube v1.38.1 UpdateEndpoint repair ignores --keep-context), or
+  # on the context the file names (another session switching it meanwhile).
   *" start "*)
     if [[ -e "${state}/start-switches-context" ]]; then
-      printf '%s\n' "${profile}" >"${state}/current-context"
+      if [[ -s "${state}/start-switches-context" ]]; then
+        cat "${state}/start-switches-context" >"${state}/current-context"
+      else
+        printf '%s\n' "${profile}" >"${state}/current-context"
+      fi
     fi
     ;;
   *" status "*) exit "$(cat "${state}/minikube-status-rc")" ;;
@@ -339,6 +355,7 @@ reset_state() {
     profiles/external-rest-api rpc-proxy/rpc-proxy >"${state}/services"
   : >"${state}/reachable"
   rm -f "${state}/fail-get-deploy" "${state}/curl-fail" "${state}/start-switches-context" \
+    "${state}/use-context-fails" \
     "${state}/pf-ignores-term" "${state}/minikube-stop-fails" "${state}/minikube-delete-fails" \
     "${state}/node-label" "${state}/minikube-profile-list-fails" "${state}/docker-info-fails"
   # By default the branch profile's context is this local Minikube, minikube
@@ -685,6 +702,21 @@ assert_log_count 'port-forward --address=127.0.0.1' 4 'pf starts one forward per
 pf_owner_read_record "${pids_dir}/control-ui.pid" || fail 'control-ui record is unreadable'
 control_ui_pid="${PF_OWNER_RECORD_PID}"
 assert_alive "${control_ui_pid}" 'the recorded control-ui forward is live'
+# The global current-context names another session's cluster (reset_state);
+# pf never reads or changes it: the identity check runs through
+# --context=<profile> before the first forward, and every cluster call names it.
+assert_log_order "kubectl --context=${profile} --request-timeout=10s get nodes -o json" 'port-forward --address=127.0.0.1' \
+  'pf verifies the cluster identity before the first forward'
+cluster_calls="$(grep '^kubectl ' "${state}/calls.log" | grep -v '^kubectl config ' || true)"
+[[ -n "${cluster_calls}" ]] || fail 'pf made no cluster call'
+ok
+unscoped="$(grep -Fv -- "kubectl --context=${profile} " <<<"${cluster_calls}" || true)"
+[[ -z "${unscoped}" ]] || fail "pf made cluster calls without --context=${profile}: ${unscoped}"
+ok
+assert_log_lacks 'kubectl config current-context' 'pf never reads the global context'
+assert_log_lacks 'kubectl config use-context' 'pf never changes the global context'
+[[ "$(cat "${state}/current-context")" == other-session-context ]] || fail 'pf changed the global context'
+ok
 
 reset_state
 bp health-ok health
@@ -1110,18 +1142,59 @@ assert_log_has "minikube start -p ${profile} --keep-context" 'start runs minikub
 assert_log_has "minikube -p ${profile} status" 'start checks status after a clean start'
 [[ "$(cat "${state}/current-context")" == other-session-context ]] || fail 'start changed the global context'
 ok
+assert_log_lacks 'kubectl config use-context' 'start that keeps the global context restores nothing'
 
+# minikube v1.38.1 repairs the kubeconfig endpoint of a restarted profile with
+# KeepContext false, so the switch is expected on every restart: start puts the
+# previous context back and continues, because every call it makes names
+# --context=<profile> and the cluster identity is checked through it.
 reset_state
 : >"${state}/start-switches-context"
 bp start-switches-context start
-assert_rc 1 'start after minikube switched the global context'
-assert_log_has "minikube start -p ${profile} --keep-context" 'start ran minikube start before detecting the switch'
-assert_output_has 'switched the kubectl current-context' 'start reports the switch'
+assert_rc 0 'start after minikube switched the global context'
+assert_output_has "WARN: minikube moved the kubectl current-context from other-session-context to ${profile}" \
+  'start reports the switch and its cause'
 assert_log_has 'kubectl config use-context other-session-context' 'start restores the previous global context'
 [[ "$(cat "${state}/current-context")" == other-session-context ]] ||
   fail "start left the global context on $(cat "${state}/current-context")"
 ok
-assert_log_lacks "minikube -p ${profile} status" 'start stops after detecting the switch'
+assert_log_order 'kubectl config use-context other-session-context' "minikube -p ${profile} status" \
+  'start restores the global context before it continues'
+assert_log_has "kubectl --context=${profile} --request-timeout=10s get nodes -o json" \
+  'start verifies the cluster identity through --context after the switch'
+
+reset_state
+: >"${state}/start-switches-context"
+: >"${state}/use-context-fails"
+bp start-restore-fails start
+assert_rc 1 'start whose restore of the global context fails'
+assert_log_has 'kubectl config use-context other-session-context' 'start attempted the restore'
+assert_output_has "ERROR: could not restore the kubectl current-context to other-session-context; it is still ${profile}" \
+  'start reports the failed restore'
+assert_log_lacks "minikube -p ${profile} status" 'start stops when the global context stays on the profile'
+
+reset_state
+: >"${state}/current-context"
+: >"${state}/start-switches-context"
+bp start-switches-unset-context start
+assert_rc 0 'start after minikube set a global context where none was set'
+assert_log_has 'kubectl config unset current-context' 'start clears the context minikube set'
+[[ ! -s "${state}/current-context" ]] || fail "start left the global context on $(cat "${state}/current-context")"
+ok
+assert_log_has "minikube -p ${profile} status" 'start continues after clearing the context'
+
+# Another session may switch the global context while minikube runs; start
+# only undoes a switch onto its own profile, so that choice is left alone.
+reset_state
+printf 'third-session-context\n' >"${state}/start-switches-context"
+bp start-other-session-switch start
+assert_rc 0 'start while another session switched the global context'
+assert_log_has "minikube -p ${profile} status" 'start ran past the global-context check'
+assert_log_lacks 'kubectl config use-context' 'start does not overwrite the other session context'
+assert_log_lacks 'kubectl config unset' 'start does not clear the other session context'
+[[ "$(cat "${state}/current-context")" == third-session-context ]] ||
+  fail "start replaced the other session context with $(cat "${state}/current-context")"
+ok
 
 # === prepare-shims: symlinks and the seed allowlist ===========================
 reset_state
