@@ -39,7 +39,7 @@ export async function applyEntityChangeSchema(db: DbClient): Promise<void> {
       ON entity_change_feed (created_at, sequence);
 
     CREATE OR REPLACE FUNCTION entity_change_capture_resource() RETURNS trigger
-      LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
     DECLARE
       resource_key UUID;
       event_kind TEXT;
@@ -96,7 +96,7 @@ export async function applyEntityChangeSchema(db: DbClient): Promise<void> {
     $$;
 
     CREATE OR REPLACE FUNCTION entity_change_capture_scope() RETURNS trigger
-      LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
     DECLARE
       capture_scope TEXT;
       capture_type TEXT;
@@ -168,7 +168,7 @@ export async function applyEntityChangeSchema(db: DbClient): Promise<void> {
       requested_batch_size INTEGER,
       retention_seconds INTEGER
     ) RETURNS TABLE (feed_sequence BIGINT, feed_cursor UUID, feed_scope TEXT)
-      LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
     DECLARE
       changed_scopes TEXT[];
       changed_scope TEXT;
@@ -251,7 +251,7 @@ export async function applyEntityChangeCheckpointSchema(db: DbClient): Promise<v
         current_sequence BIGINT,
         invalidated_scopes TEXT[]
       )
-      LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
     DECLARE
       cursor_sequence BIGINT;
       current_watermark BIGINT;
@@ -305,5 +305,23 @@ export async function applyEntityChangeCheckpointSchema(db: DbClient): Promise<v
 
     REVOKE ALL ON FUNCTION entity_change_read_checkpoint(UUID, INTEGER) FROM PUBLIC;
     GRANT EXECUTE ON FUNCTION entity_change_read_checkpoint(UUID, INTEGER) TO control_api_runtime;
+  `)
+}
+
+/**
+ * Repair the pinned path on databases that already applied the original
+ * entity-change migrations. PostgreSQL implicitly searches pg_temp first for
+ * relations and types unless it is explicitly listed at the end.
+ */
+export async function applyEntityChangeDefinerSearchPathSchema(db: DbClient): Promise<void> {
+  await db.query(`
+    ALTER FUNCTION entity_change_capture_resource()
+      SET search_path = pg_catalog, public, pg_temp;
+    ALTER FUNCTION entity_change_capture_scope()
+      SET search_path = pg_catalog, public, pg_temp;
+    ALTER FUNCTION entity_change_dispatch_batch(INTEGER, INTEGER)
+      SET search_path = pg_catalog, public, pg_temp;
+    ALTER FUNCTION entity_change_read_checkpoint(UUID, INTEGER)
+      SET search_path = pg_catalog, public, pg_temp;
   `)
 }

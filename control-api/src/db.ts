@@ -16,6 +16,7 @@ import {
 import { applyCodexSubscriptionOAuthStateSchema } from './services/codexSubscriptionOAuthState.js'
 import {
   applyEntityChangeCheckpointSchema,
+  applyEntityChangeDefinerSearchPathSchema,
   applyEntityChangeSchema,
 } from './services/entityChangeSchema.js'
 import {
@@ -6318,6 +6319,10 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     // duplicate DDL while recording the new monotonic version.
     legacyVersions: ['0120_entity_change_checkpoint_cursor_convergence'],
     apply: applyEntityChangeCheckpointSchema,
+  },
+  {
+    version: '0124_entity_change_definer_search_path',
+    apply: applyEntityChangeDefinerSearchPathSchema,
   },
 ]
 

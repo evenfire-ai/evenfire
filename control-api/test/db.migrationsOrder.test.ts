@@ -151,6 +151,33 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
     expect(sql).not.toMatch(/current_watermark > pruned_watermark/i)
   })
 
+  it('registers an additive temp-schema repair for entity-change definer functions', async () => {
+    const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
+    const migration = CONTROL_API_MIGRATIONS.find(
+      candidate => candidate.version === '0124_entity_change_definer_search_path'
+    )
+    expect(migration).toBeDefined()
+    if (!migration) return
+
+    const query = vi.fn().mockResolvedValue({ rows: [], rowCount: 0 })
+    await migration.apply({ query } as never)
+
+    const sql = query.mock.calls.map(([statement]) => String(statement)).join('\n')
+    for (const functionName of [
+      'entity_change_capture_resource',
+      'entity_change_capture_scope',
+      'entity_change_dispatch_batch',
+      'entity_change_read_checkpoint',
+    ]) {
+      expect(sql).toMatch(
+        new RegExp(
+          `ALTER FUNCTION ${functionName}[\\s\\S]+?SET search_path = pg_catalog, public, pg_temp`,
+          'i'
+        )
+      )
+    }
+  })
+
   it('requires 0116_mcp_secret_rollback_permits to persist expiring rollback permits', async () => {
     const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
     // Renumbered twice while syncing onto dev: 0101 -> 0109 -> 0116. The earlier

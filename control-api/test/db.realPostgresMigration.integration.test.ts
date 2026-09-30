@@ -1858,6 +1858,83 @@ describeRealPostgres('control-api real Postgres migrations', () => {
     }
   })
 
+  it('prevents temp-type shadowing in entity-change SECURITY DEFINER triggers', async () => {
+    const { CONTROL_API_MIGRATIONS, initDb } = await import('../src/db.js')
+    await initDb({ connect: () => dbPool.connect() })
+
+    const attackerRole = `entity_change_shadow_${randomBytes(5).toString('hex')}`
+    const attackerPassword = randomBytes(24).toString('hex')
+    let attackerPool: Pool | undefined
+    try {
+      await adminPool.query(
+        `CREATE ROLE ${quoteIdent(attackerRole)} LOGIN PASSWORD '${attackerPassword}'`
+      )
+      await adminPool.query(`GRANT gfs_controller TO ${quoteIdent(attackerRole)}`)
+      const attackerUrl = new URL(connectionString)
+      attackerUrl.username = attackerRole
+      attackerUrl.password = attackerPassword
+      attackerPool = new Pool({ connectionString: attackerUrl.toString(), max: 1 })
+
+      const attacker = await attackerPool.connect()
+      try {
+        await attacker.query('CREATE TEMP TABLE temp_schema_bootstrap (id INTEGER)')
+        await attacker.query(`
+          CREATE FUNCTION pg_temp.entity_change_shadow_check(value pg_catalog.text)
+          RETURNS BOOLEAN LANGUAGE plpgsql AS $$
+          BEGIN
+            RAISE EXCEPTION 'temporary type shadow executed as %', current_user;
+          END;
+          $$
+        `)
+        await attacker.query(`
+          CREATE DOMAIN pg_temp.text AS pg_catalog.text
+            CHECK (pg_temp.entity_change_shadow_check(VALUE))
+        `)
+
+        const resourceId = randomUUID()
+        await expect(
+          attacker.query(
+            `INSERT INTO gfs_resources (resource_id, drive, name, kind, path_cache)
+             VALUES ($1, $2, 'shadow-probe', 'file', '/shadow-probe')`,
+            [resourceId, `shadow-${randomUUID()}`]
+          )
+        ).resolves.toBeDefined()
+        const stored = await dbPool.query('SELECT 1 FROM gfs_resources WHERE resource_id = $1', [
+          resourceId,
+        ])
+        expect(stored.rowCount).toBe(1)
+      } finally {
+        attacker.release()
+      }
+
+      const migrationVersions = await adminPool.query<{ version: string }>(
+        `SELECT version FROM schema_migrations WHERE version = $1`,
+        ['0124_entity_change_definer_search_path']
+      )
+      expect(migrationVersions.rows).toHaveLength(1)
+
+      const functionPaths = await dbPool.query<{ function_name: string; config: string[] | null }>(`
+        SELECT procedure.proname AS function_name, procedure.proconfig AS config
+          FROM pg_proc procedure
+          JOIN pg_namespace namespace ON namespace.oid = procedure.pronamespace
+         WHERE namespace.nspname = 'public'
+           AND procedure.proname IN (
+             'entity_change_capture_resource',
+             'entity_change_capture_scope',
+             'entity_change_dispatch_batch',
+             'entity_change_read_checkpoint'
+           )
+      `)
+      expect(functionPaths.rows).toHaveLength(4)
+      for (const { config } of functionPaths.rows) {
+        expect(config).toContain('search_path=pg_catalog, public, pg_temp')
+      }
+    } finally {
+      await attackerPool?.end()
+      await adminPool.query(`DROP ROLE IF EXISTS ${quoteIdent(attackerRole)}`)
+    }
+  })
+
   it('commits GFS grant/share batches atomically and invalidates only after commit', async () => {
     const operator = await dbPool.query<{ id: string }>(
       `SELECT id::text FROM control_admin_users
