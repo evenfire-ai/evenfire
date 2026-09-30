@@ -2,6 +2,7 @@
 import { useReducer } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useNotificationsContext } from '@contexts/NotificationsContext'
+import { QueryClientProvider, useInfiniteQuery, useQueries, useQuery } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { DESKTOP_ROUTES } from '@constants/navigation'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
@@ -1358,8 +1359,92 @@ describe('App live GFS preview revalidation', () => {
 
   afterEach(() => {
     cleanup()
+    desktopQueryClient.removeQueries({ queryKey: desktopQueryKeys.gfsRoot })
     vi.restoreAllMocks()
     delete (window as { clerum?: unknown }).clerum
+  })
+
+  it('keeps the 30-row, two-page, one-preview refresh under the 32-read budget', async () => {
+    const rows = Array.from({ length: 30 }, (_, index) => ({
+      resourceId: `resource-${index}`,
+      rid: `rid-${index}`,
+      gfsUri: `gfs://main/resource-${index}`,
+      drive: 'main',
+      parentResourceId: 'folder',
+      name: `row-${index}.md`,
+      kind: 'file' as const,
+      path: null,
+      version: 1,
+      bytes: 1,
+    }))
+    const firstPage = { items: rows.slice(0, 15), nextCursor: 'page-2' }
+    const secondPage = { items: rows.slice(15), nextCursor: null }
+    const listChildren = vi.fn(async (_id: string, _drive?: string, cursor?: string) =>
+      cursor === 'page-2' ? secondPage : firstPage
+    )
+    const listAccessible = vi.fn(async () => ({ items: [], nextCursor: null }))
+    const affordances = vi.fn(async () => ({ held: [] }))
+    const resolve = vi.mocked(window.clerum.gfs.resolve).mockResolvedValue(
+      resolvedFile('readme', 'README.md', {
+        gfsUri: 'gfs://main/readme',
+        bytes: 14,
+        version: 3,
+      }) as never
+    )
+    Object.assign(window.clerum.gfs, { listChildren, listAccessible, affordances })
+
+    const childrenKey = desktopQueryKeys.gfsChildren('session', 'folder', 'main')
+    const accessibleKey = desktopQueryKeys.gfsAccessible('session', 'main')
+    desktopQueryClient.setQueryData(childrenKey, {
+      pages: [firstPage, secondPage],
+      pageParams: [undefined, 'page-2'],
+    })
+    desktopQueryClient.setQueryData(accessibleKey, { items: [], nextCursor: null })
+    rows.forEach(row => {
+      desktopQueryClient.setQueryData(
+        desktopQueryKeys.gfsAffordances('session', row.resourceId, 'main'),
+        { held: [] }
+      )
+    })
+
+    function ReadBudgetObservers() {
+      useQuery({ queryKey: accessibleKey, queryFn: () => window.clerum.gfs.listAccessible('main') })
+      useInfiniteQuery({
+        queryKey: childrenKey,
+        queryFn: ({ pageParam }) => window.clerum.gfs.listChildren('folder', 'main', pageParam),
+        initialPageParam: undefined as string | undefined,
+        getNextPageParam: page => page.nextCursor ?? undefined,
+      })
+      useQueries({
+        queries: rows.map(row => ({
+          queryKey: desktopQueryKeys.gfsAffordances('session', row.resourceId, 'main'),
+          queryFn: () => window.clerum.gfs.affordances(row.resourceId, 'main'),
+        })),
+      })
+      return null
+    }
+
+    render(
+      <QueryClientProvider client={desktopQueryClient}>
+        <ReadBudgetObservers />
+        <App />
+      </QueryClientProvider>
+    )
+    await waitFor(() => expect(dispatchEntityChange).toBeTypeOf('function'))
+    listChildren.mockClear()
+    listAccessible.mockClear()
+    affordances.mockClear()
+
+    act(() => dispatchEntityChange?.({ ...USER_SCOPE_INVALIDATED }))
+    await waitFor(() => expect(resolve).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(listChildren).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(listAccessible).toHaveBeenCalledTimes(1))
+
+    const measuredReads =
+      resolve.mock.calls.length + listChildren.mock.calls.length + listAccessible.mock.calls.length
+    expect(affordances).not.toHaveBeenCalled()
+    expect(measuredReads).toBe(4)
+    expect(measuredReads).toBeLessThanOrEqual(32)
   })
 
   it('preserves an unchanged preview during soft scope revalidation and purges only on 403', async () => {
