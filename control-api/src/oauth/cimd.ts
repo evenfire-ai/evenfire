@@ -2,7 +2,7 @@ import { Router } from 'express'
 import { config } from '../config.js'
 import { type Logger, rootLogger } from '../observability/logger.js'
 import { normalizeConfiguredOrigin } from '../routes/external/oauthCallback.js'
-import { REMOTE_CALLBACK_CLIENT_SEGMENT } from './callback.js'
+import { REMOTE_CALLBACK_PATH, buildRemoteRedirectUri } from './remoteCallback.js'
 
 /**
  * Client ID Metadata Document (CIMD, SEP-991), served by control-api as the
@@ -21,7 +21,12 @@ export interface CimdDocument {
   /** SEP-991: the client_id IS this document's own public URL (byte-identical to the fetch URL). */
   client_id: string
   client_name: string
-  /** Stable remote callback segment; server disambiguation rides the signed `state` (C1.5). */
+  /**
+   * Only the SHARED remote callback: this one platform identity is accepted by every AS
+   * that trusts the document, so listing per-server URIs here would let any such AS
+   * redirect to any server and void the per-server separation. CIMD is therefore only
+   * offered against an AS that returns `iss` (RFC 9207).
+   */
   redirect_uris: readonly string[]
   /** Public client — no client_secret. */
   token_endpoint_auth_method: 'none'
@@ -36,12 +41,9 @@ export const CIMD_ROUTE_PATH = '/.well-known/evenfire-mcp-client'
 /** Full public path of the served document (what `client_id` must equal, minus origin). */
 const CIMD_PUBLIC_PATH = `/api/v1${CIMD_ROUTE_PATH}`
 
-/**
- * Stable remote-lane callback segment. C1.5 honours this exact oauthClientId, and
- * C2 DCR (`dcr.ts`) derives its `redirect_uris` from the same constant so the CIMD
- * document and a dynamically-registered client advertise a byte-identical callback.
- */
-export const REMOTE_CALLBACK_PATH = `/api/v1/oauth-callback/${REMOTE_CALLBACK_CLIENT_SEGMENT}`
+// The shared remote callback path, defined by the single redirect-URI builder
+// (`remoteCallback.ts`). Re-exported for the existing importers of this module.
+export { REMOTE_CALLBACK_PATH }
 
 /**
  * Build the frozen CIMD document for a given public `origin` (scheme://host, no
@@ -54,7 +56,7 @@ export function buildCimdDocument(origin: string): Readonly<CimdDocument> {
   return Object.freeze<CimdDocument>({
     client_id: `${origin}${CIMD_PUBLIC_PATH}`,
     client_name: 'Evenfire',
-    redirect_uris: Object.freeze([`${origin}${REMOTE_CALLBACK_PATH}`]),
+    redirect_uris: Object.freeze([buildRemoteRedirectUri({ origin, variant: 'shared' })]),
     token_endpoint_auth_method: 'none',
     grant_types: Object.freeze(['authorization_code', 'refresh_token']),
     response_types: Object.freeze(['code']),

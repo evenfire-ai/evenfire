@@ -2,6 +2,7 @@ import { type PinnedFetchError, type PinnedTransport, pinnedFetch } from '../htt
 import type { DnsResolver, ValidationError } from '../http/validateMcpServerSpec.js'
 import { type Logger, rootLogger } from '../observability/logger.js'
 import type { DiscoveryResult } from './discovery.js'
+import type { RemoteCallbackVariant } from './remoteCallback.js'
 
 /**
  * Dynamic Client Registration client (RFC 7591), spec 02 C2 / D-5 / DEC-18.
@@ -59,6 +60,11 @@ export interface DcrRegistrationResponse {
   /** RFC 7592 management endpoint. */
   registration_client_uri?: string
   token_endpoint_auth_method?: string
+  /**
+   * RFC 7591 §3.2.1: the AS echoes the registered metadata, including the redirect
+   * URIs it actually accepted. Untrusted — check it with {@link verifyDcrRedirectUris}.
+   */
+  redirect_uris?: unknown
   [k: string]: unknown
 }
 
@@ -320,4 +326,45 @@ export async function registerDynamicClient(
     effectiveAuthMethod: presentedAuthMethod,
     effectiveClientMode,
   }
+}
+
+export type DcrRedirectUrisCheck =
+  | { ok: true }
+  | { ok: false; reason: 'redirect_uris_missing' | 'redirect_uris_mismatch' }
+
+/**
+ * Check the `redirect_uris` a registration response reports against the ones we sent.
+ *
+ *   per-server: REQUIRED and exactly equal (same strings, no normalization). The
+ *               per-server redirect URI is the only mix-up defence there, so a client
+ *               the AS registered with a different or unreported URI cannot be trusted
+ *               to redirect only to this installation.
+ *   shared:     the response `iss` is the defence, so an ABSENT (or `null`) field is
+ *               tolerated (ASes that omit the echo keep working); a PRESENT one that
+ *               differs still fails.
+ *
+ * Comparison is set equality over exact strings (RFC 7591 gives the array no order).
+ * Pure; the caller turns a failure into an install failure with RFC 7592 cleanup.
+ */
+export function verifyDcrRedirectUris(input: {
+  variant: RemoteCallbackVariant
+  requested: readonly string[]
+  response: Pick<DcrRegistrationResponse, 'redirect_uris'>
+}): DcrRedirectUrisCheck {
+  const reported = input.response.redirect_uris
+  // JSON `null` is how some serializers spell an omitted field, so it counts as absent.
+  if (reported === undefined || reported === null) {
+    return input.variant === 'shared'
+      ? { ok: true }
+      : { ok: false, reason: 'redirect_uris_missing' }
+  }
+  if (
+    !Array.isArray(reported) ||
+    reported.length !== input.requested.length ||
+    !reported.every(uri => typeof uri === 'string' && input.requested.includes(uri)) ||
+    !input.requested.every(uri => reported.includes(uri))
+  ) {
+    return { ok: false, reason: 'redirect_uris_mismatch' }
+  }
+  return { ok: true }
 }

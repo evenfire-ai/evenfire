@@ -18,20 +18,15 @@ import {
   isKnownOAuthProvider,
   parseRemoteTokenResponse,
 } from './providers.js'
+import { REMOTE_CALLBACK_CLIENT_SEGMENT } from './remoteCallback.js'
 import type { OAuthMcpStateClaims } from './state.js'
 import { signOAuthState, verifyOAuthStateSignature } from './state.js'
 import { bootstrapSharedOAuthGrant, setUserGrantBackground, upsertOAuthGrant } from './store.js'
 
-/**
- * Reserved last URL segment of the STABLE remote OAuth callback
- * (`/api/v1/oauth-callback/remote`). The remote lane (CIMD/DCR) registers ONE
- * fixed redirect_uri, so the URL segment is a constant and the real client
- * binding rides the signed state (`subjectKind:'mcp'` + `mcpServerName`, both
- * re-resolved authoritatively). `cimd.ts` derives `REMOTE_CALLBACK_PATH` from
- * this. Kept here (not in `cimd.ts`) to avoid an import cycle
- * (callback → cimd → external/oauthCallback → callback).
- */
-export const REMOTE_CALLBACK_CLIENT_SEGMENT = 'remote'
+// Reserved last URL segment of the shared remote OAuth callback. Defined in
+// `remoteCallback.ts` (the single redirect-URI builder); re-exported for the existing
+// importers of this module.
+export { REMOTE_CALLBACK_CLIENT_SEGMENT }
 
 /**
  * Discriminator for WHERE an mcp-server's OAuth client credentials live

@@ -131,6 +131,20 @@ let rfc9207Result: DiscoveryResult
 // real producer (T1) by documented substitution of the Notion PRM's
 // `bearer_methods_supported` to `["body"]` — the only field changed.
 let bodyBearerResult: DiscoveryResult
+// Real Linear DiscoveryResult (T1): the 2026-09-29 Linear probe advertises CIMD + `none`
+// AND RFC 9207, so it still resolves to CIMD on the shared callback.
+let linearResult: DiscoveryResult
+// An AS that genuinely offers NO registration endpoint, derived from the real producer
+// (T1) by documented subtraction: the real Linear pilot minus `registration_endpoint`.
+// Linear keeps CIMD + RFC 9207, so discovery resolves to `cimd`, never `dcr`.
+let noDcrResult: DiscoveryResult
+
+/** Documented T1 subtraction: drop `registration_endpoint` from a pilot's AS metadata. */
+function withoutRegistrationEndpoint<T extends { as: { json: string } }>(pilot: T): T {
+  const as = JSON.parse(pilot.as.json)
+  delete as.registration_endpoint
+  return { ...pilot, as: { ...pilot.as, json: JSON.stringify(as) } }
+}
 
 /**
  * Documented T1 substitution: add `authorization_response_iss_parameter_supported`
@@ -190,6 +204,22 @@ beforeAll(async () => {
   if (!bodyBearerOutcome.ok)
     throw new Error(`body-bearer fixture discovery failed: ${bodyBearerOutcome.error.kind}`)
   bodyBearerResult = bodyBearerOutcome.result
+
+  const linearOutcome = await actual.discoverRemoteOAuth(PILOTS.linear.mcpUrl, {
+    transport: makeDiscoveryTransport(PILOTS.linear),
+    resolveDns: async () => ['93.184.216.34'],
+  })
+  if (!linearOutcome.ok)
+    throw new Error(`linear fixture discovery failed: ${linearOutcome.error.kind}`)
+  linearResult = linearOutcome.result
+
+  const noDcrOutcome = await actual.discoverRemoteOAuth(PILOTS.linear.mcpUrl, {
+    transport: makeDiscoveryTransport(withoutRegistrationEndpoint(PILOTS.linear)),
+    resolveDns: async () => ['93.184.216.34'],
+  })
+  if (!noDcrOutcome.ok)
+    throw new Error(`no-DCR fixture discovery failed: ${noDcrOutcome.error.kind}`)
+  noDcrResult = noDcrOutcome.result
 })
 
 beforeEach(() => {
@@ -210,18 +240,39 @@ describe('POST /admin/mcp-servers/remote/discover (dry-run)', () => {
     expect(discoverRemoteOAuth).not.toHaveBeenCalled()
   })
 
-  it('returns the "Detected" prefill for a CIMD server → 200', async () => {
+  it('returns the "Detected" prefill for a CIMD server (Linear: CIMD + RFC 9207) → 200', async () => {
+    expect(linearResult.registrationMode).toBe('cimd')
+    mockDiscovery(linearResult)
+    const res = await request(makeApp(gatewayWithContext()))
+      .post('/admin/mcp-servers/remote/discover')
+      .send({ baseUrl: 'https://mcp.linear.app/mcp' })
+    expect(res.status).toBe(200)
+    expect(res.body.detected.registrationMode).toBe('cimd')
+    expect(res.body.detected.endpoints.token).toBe('https://mcp.linear.app/token')
+    expect(res.body.detected.resource).toBe('https://mcp.linear.app/mcp')
+    expect(res.body.detected.issForCallback).toBe('https://mcp.linear.app')
+    expect(res.body.detected.quirks).toEqual({ bearerInBody: false, supportsRefresh: true })
+    // No DCR marker for a CIMD server.
+    expect(res.body.detected.dcr).toBeUndefined()
+  })
+
+  it('CIMD-capable AS WITHOUT RFC 9207 (Notion) is detected as DCR, not CIMD → 200', async () => {
+    // Notion advertises CIMD + `none` but no `iss`: CIMD's single platform identity can
+    // only list the shared callback, so discovery falls back to its registration endpoint.
+    expect(notionResult.registrationMode).toBe('dcr')
     mockDiscovery(notionResult)
     const res = await request(makeApp(gatewayWithContext()))
       .post('/admin/mcp-servers/remote/discover')
       .send({ baseUrl: 'https://mcp.notion.com/mcp' })
     expect(res.status).toBe(200)
-    expect(res.body.detected.registrationMode).toBe('cimd')
+    expect(res.body.detected.registrationMode).toBe('dcr')
+    expect(res.body.detected.issForCallback).toBeUndefined()
     expect(res.body.detected.endpoints.token).toBe('https://mcp.notion.com/token')
-    expect(res.body.detected.resource).toBe('https://mcp.notion.com')
-    expect(res.body.detected.quirks).toEqual({ bearerInBody: false, supportsRefresh: true })
-    // No DCR marker for a CIMD server.
-    expect(res.body.detected.dcr).toBeUndefined()
+    expect(res.body.detected.dcr).toEqual({
+      available: true,
+      clientMode: 'public',
+      supportsRefresh: true,
+    })
   })
 
   it('marks DCR mode available (C2) with resolved clientMode + supportsRefresh → 200', async () => {
@@ -447,13 +498,15 @@ describe('POST /admin/mcp-servers/remote (install saga)', () => {
   })
 
   it('rejects mode "dcr" when server-side discovery resolves a non-DCR AS → 400 mode_unsupported', async () => {
-    // The AS actually offers CIMD (not DCR); the operator's "dcr" request loses.
-    mockDiscovery(notionResult)
+    // The AS offers CIMD but no registration endpoint; the operator's "dcr" request loses.
+    expect(noDcrResult.endpoints.registration).toBeUndefined()
+    expect(noDcrResult.registrationMode).toBe('cimd')
+    mockDiscovery(noDcrResult)
     const gw = gatewayWithContext('ctx-a')
     const res = await request(makeApp(gw)).post('/admin/mcp-servers/remote').send({
       serverName: 'stripe-remote',
       contextRef: 'ctx-a',
-      baseUrl: 'https://mcp.notion.com/mcp',
+      baseUrl: 'https://mcp.linear.app/mcp',
       mode: 'dcr',
     })
     expect(res.status).toBe(400)

@@ -43,8 +43,11 @@ export const NOTION_AS_JSON =
 export const LINEAR_PRM_JSON =
   '{"resource":"https://mcp.linear.app/mcp","authorization_servers":["https://mcp.linear.app"],"scopes_supported":["read","write"],"bearer_methods_supported":["header"]}'
 // AS: GET https://mcp.linear.app/.well-known/oauth-authorization-server → 200
+// Re-probed 2026-09-29: Linear now advertises RFC 9207
+// (`authorization_response_iss_parameter_supported: true`), which the 2026-09-20 bytes
+// did not carry. Byte-identical otherwise.
 export const LINEAR_AS_JSON =
-  '{"issuer":"https://mcp.linear.app","authorization_endpoint":"https://mcp.linear.app/authorize","token_endpoint":"https://mcp.linear.app/token","registration_endpoint":"https://mcp.linear.app/register","scopes_supported":["read","write","openid","email"],"response_types_supported":["code"],"response_modes_supported":["query"],"grant_types_supported":["authorization_code","refresh_token","urn:ietf:params:oauth:grant-type:jwt-bearer"],"authorization_grant_profiles_supported":["urn:ietf:params:oauth:grant-profile:id-jag"],"token_endpoint_auth_methods_supported":["client_secret_basic","client_secret_post","none"],"revocation_endpoint":"https://mcp.linear.app/token","code_challenge_methods_supported":["S256"],"client_id_metadata_document_supported":true,"resource":"https://mcp.linear.app/mcp","resource_metadata":"https://mcp.linear.app/.well-known/oauth-protected-resource/mcp"}'
+  '{"issuer":"https://mcp.linear.app","authorization_endpoint":"https://mcp.linear.app/authorize","token_endpoint":"https://mcp.linear.app/token","registration_endpoint":"https://mcp.linear.app/register","scopes_supported":["read","write","openid","email"],"response_types_supported":["code"],"response_modes_supported":["query"],"grant_types_supported":["authorization_code","refresh_token","urn:ietf:params:oauth:grant-type:jwt-bearer"],"authorization_grant_profiles_supported":["urn:ietf:params:oauth:grant-profile:id-jag"],"token_endpoint_auth_methods_supported":["client_secret_basic","client_secret_post","none"],"revocation_endpoint":"https://mcp.linear.app/token","code_challenge_methods_supported":["S256"],"authorization_response_iss_parameter_supported":true,"client_id_metadata_document_supported":true,"resource":"https://mcp.linear.app/mcp","resource_metadata":"https://mcp.linear.app/.well-known/oauth-protected-resource/mcp"}'
 
 // ─── Sentry (PRM SOLO path-suffixed; root → 404; 401 trae WWW-Authenticate) ─
 // 401 header emitted identically on GET and POST of https://mcp.sentry.dev/mcp
@@ -199,6 +202,67 @@ export const VERCEL_PILOT: PilotFixture = {
       headers: { 'content-type': 'text/html; charset=utf-8' },
     },
     'https://mcp.vercel.com/': { status: 200, headers: { 'content-type': 'text/event-stream' } },
+  },
+}
+
+// ─── Atlassian v2 + Dropbox — ASes WITHOUT RFC 9207 (sondeo en vivo 2026-09-29) ──
+//
+// The exact bytes both servers returned on 2026-09-29 (curl, `Accept: application/json`).
+// Neither AS advertises `authorization_response_iss_parameter_supported`, so both take
+// the per-server callback path and the same-site rule applies to their endpoints.
+//
+// PROVENANCE (curl, 2026-09-29):
+//   GET https://mcp.atlassian.com/v2/mcp → 401  www-authenticate: Bearer resource_metadata="https://mcp.atlassian.com/.well-known/oauth-protected-resource/v2/mcp"
+//   GET https://mcp.atlassian.com/.well-known/oauth-protected-resource/v2/mcp → 200
+//   GET https://auth.atlassian.com/.well-known/oauth-authorization-server/VCeDsk8ZHncYF1g234fKtc4lNipbBhu3 → 200
+//   GET https://auth.atlassian.com/VCeDsk8ZHncYF1g234fKtc4lNipbBhu3/.well-known/openid-configuration → 404
+//   GET https://mcp.dropbox.com/mcp → 401  www-authenticate: Bearer resource_metadata="https://mcp.dropbox.com/.well-known/oauth-protected-resource/mcp", error="invalid_token", error_description="missing bearer token"
+//   GET https://mcp.dropbox.com/.well-known/oauth-protected-resource/mcp → 200
+//   GET https://www.dropbox.com/.well-known/oauth-authorization-server → 200
+//
+// Atlassian: CIMD + DCR + `none`, every endpoint on atlassian.com (same site as the
+// issuer) → DCR, never CIMD. Dropbox: token and revocation endpoints on
+// api.dropboxapi.com while the issuer is www.dropbox.com → cross-site.
+
+export const ATLASSIAN_V2_WWW_AUTHENTICATE =
+  'Bearer resource_metadata="https://mcp.atlassian.com/.well-known/oauth-protected-resource/v2/mcp"'
+export const ATLASSIAN_V2_PRM_JSON =
+  '{"resource":"https://mcp.atlassian.com/v2/mcp","authorization_servers":["https://auth.atlassian.com/VCeDsk8ZHncYF1g234fKtc4lNipbBhu3"],"bearer_methods_supported":["header"],"scopes_supported":["read:me","read:account","offline_access","email","read:jira:agent-interface","write:jira:agent-interface","search:jira:agent-interface","delete:jira:agent-interface","manage:jira:agent-interface","read:confluence:agent-interface","write:confluence:agent-interface","search:confluence:agent-interface","search:rovo:agent-interface","search:code:agent-interface","read:all:twg","write:all:twg","read:goals:agent-interface","write:goals:agent-interface","read:projects:agent-interface","write:projects:agent-interface","read:bitbucket:agent-interface","write:bitbucket:agent-interface","read:loom:agent-interface","write:loom:agent-interface","read:talent:agent-interface","write:talent:agent-interface","read:jira-align:agent-interface","write:jira-align:agent-interface","read:teams:agent-interface","write:teams:agent-interface","read:artifacts:agent-interface","write:artifacts:agent-interface","read:capacity-planning:agent-interface","write:capacity-planning:agent-interface","read:focus:agent-interface","write:focus:agent-interface","read:assets:agent-interface","write:assets:agent-interface"],"resource_documentation":"https://www.atlassian.com/platform/remote-mcp-server"}'
+export const ATLASSIAN_V2_AS_JSON =
+  '{"authorization_endpoint":"https://auth.atlassian.com/authorize","client_id_metadata_document_supported":true,"code_challenge_methods_supported":["S256"],"grant_types_supported":["authorization_code","client_credentials","refresh_token","urn:ietf:params:oauth:grant-type:token-revoke","urn:ietf:params:oauth:grant-type:jwt-bearer","urn:ietf:params:oauth:grant-type:token-exchange"],"issuer":"https://auth.atlassian.com/VCeDsk8ZHncYF1g234fKtc4lNipbBhu3","jwks_uri":"https://auth.atlassian.com/.well-known/jwks.json","pushed_authorization_request_endpoint":"https://auth.atlassian.com/oauth/par","registration_endpoint":"https://auth.atlassian.com/VCeDsk8ZHncYF1g234fKtc4lNipbBhu3/dcr/register","response_types_supported":["code","token"],"revocation_endpoint":"https://auth.atlassian.com/oauth/revoke","token_endpoint":"https://auth.atlassian.com/oauth/token","token_endpoint_auth_methods_supported":["none","client_secret_post","client_secret_basic","private_key_jwt"]}'
+
+export const ATLASSIAN_V2_PILOT: PilotFixture = {
+  name: 'atlassian-v2',
+  mcpUrl: 'https://mcp.atlassian.com/v2/mcp',
+  wwwAuthenticate: ATLASSIAN_V2_WWW_AUTHENTICATE,
+  prm: {
+    url: 'https://mcp.atlassian.com/.well-known/oauth-protected-resource/v2/mcp',
+    json: ATLASSIAN_V2_PRM_JSON,
+  },
+  as: {
+    url: 'https://auth.atlassian.com/.well-known/oauth-authorization-server/VCeDsk8ZHncYF1g234fKtc4lNipbBhu3',
+    json: ATLASSIAN_V2_AS_JSON,
+  },
+}
+
+export const DROPBOX_WWW_AUTHENTICATE =
+  'Bearer resource_metadata="https://mcp.dropbox.com/.well-known/oauth-protected-resource/mcp", error="invalid_token", error_description="missing bearer token"'
+export const DROPBOX_PRM_JSON =
+  '{"resource":"https://mcp.dropbox.com/mcp","authorization_servers":["https://www.dropbox.com"],"scopes_supported":["account_info.read","file_requests.read","file_requests.write","files.content.read","files.content.write","files.metadata.read","files.metadata.write","sharing.read","sharing.write"]}'
+export const DROPBOX_AS_JSON =
+  '{"issuer": "https://www.dropbox.com", "authorization_endpoint": "https://www.dropbox.com/oauth2/authorize", "token_endpoint": "https://api.dropboxapi.com/oauth2/token", "revocation_endpoint": "https://api.dropboxapi.com/2/auth/token/revoke", "scopes_supported": ["account_info.read", "contacts.read", "contacts.write", "files.metadata.read", "files.content.read", "files.content.write", "files.permanent_delete", "files.metadata.write", "sharing.read", "sharing.write", "file_requests.read", "file_requests.write", "openid", "profile", "email", "account_info.write", "backup.read", "backup.write", "dash/content.read", "dash/content.write", "team_info.read", "team_info.write", "sessions.list", "sessions.modify", "members.read", "members.write", "members.delete", "groups.read", "groups.write", "events.read", "team_data.governance.read", "team_data.governance.write", "team_data.member", "team_data.content.read", "team_data.content.write", "team_data.team_space", "files.team_metadata.write", "events.write", "files.team_metadata.read"], "response_types_supported": ["code"], "grant_types_supported": ["authorization_code", "client_credentials", "refresh_token", "device_code"], "code_challenge_methods_supported": ["plain", "S256"], "token_endpoint_auth_methods_supported": ["client_secret_post", "client_secret_basic", "none"], "registration_endpoint": "https://www.dropbox.com/oauth2/register"}'
+
+export const DROPBOX_PILOT: PilotFixture = {
+  name: 'dropbox',
+  mcpUrl: 'https://mcp.dropbox.com/mcp',
+  wwwAuthenticate: DROPBOX_WWW_AUTHENTICATE,
+  prm: {
+    url: 'https://mcp.dropbox.com/.well-known/oauth-protected-resource/mcp',
+    json: DROPBOX_PRM_JSON,
+  },
+  as: {
+    url: 'https://www.dropbox.com/.well-known/oauth-authorization-server',
+    json: DROPBOX_AS_JSON,
   },
 }
 
