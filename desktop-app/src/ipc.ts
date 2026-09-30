@@ -837,10 +837,28 @@ export function registerIpcHandlers(service: AppService): void {
     })
     if (!entityChangeOwnerCleanupRegistered.has(ownerId)) {
       entityChangeOwnerCleanupRegistered.add(ownerId)
-      event.sender.once('destroyed', () => {
+      let cleanedUp = false
+      const cleanup = () => {
+        if (cleanedUp) return
+        cleanedUp = true
         service.stopEntityChangeStreamsForOwner(ownerId)
         entityChangeOwnerCleanupRegistered.delete(ownerId)
-      })
+        event.sender.removeListener('did-start-navigation', onMainFrameNavigation)
+        event.sender.removeListener('render-process-gone', onRendererProcessGone)
+        event.sender.removeListener('destroyed', cleanup)
+      }
+      const onMainFrameNavigation = (
+        _navigationEvent: Electron.Event,
+        _navigationUrl: string,
+        _isInPlace: boolean,
+        isMainFrame: boolean
+      ) => {
+        if (isMainFrame) cleanup()
+      }
+      const onRendererProcessGone = (_event: Electron.Event) => cleanup()
+      event.sender.on('did-start-navigation', onMainFrameNavigation)
+      event.sender.on('render-process-gone', onRendererProcessGone)
+      event.sender.once('destroyed', cleanup)
     }
     return { streamId }
   })
