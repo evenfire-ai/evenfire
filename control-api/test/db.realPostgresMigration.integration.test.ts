@@ -30,6 +30,7 @@ import { PostgresGovernedSessionReplayRepository } from '../src/services/tracing
 import { projectAcceptedUsageEvents } from '../src/services/tracing/usageProjection.js'
 import { ingestUsageEventsInTransaction } from '../src/services/usageEvents.js'
 import { signRpcAccessToken } from '../src/utils/auth/rpcAuthToken.js'
+import './realPostgres.requirement.ts'
 
 type PrivilegeExpectation = Record<string, Set<string>>
 
@@ -1731,6 +1732,130 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       [auditId]
     )
     expect(stored.rows).toEqual([{ sequence_no: auditId, subject: 'host:1st:mcp-host/chatllm' }])
+  })
+
+  it('recognizes deployed entity-change aliases without replaying migration DDL', async () => {
+    const { CONTROL_API_MIGRATIONS, initDb } = await import('../src/db.js')
+    const connector = { connect: () => dbPool.connect() }
+    await initDb(connector)
+
+    const feedMigration = CONTROL_API_MIGRATIONS.find(
+      migration => migration.version === '0122_durable_entity_change_feed'
+    )
+    const checkpointMigration = CONTROL_API_MIGRATIONS.find(
+      migration => migration.version === '0123_entity_change_checkpoint_cursor_convergence'
+    )
+    expect(feedMigration?.legacyVersions).toEqual([
+      '0116_durable_entity_change_feed',
+      '0117_durable_entity_change_feed',
+      '0119_durable_entity_change_feed',
+    ])
+    expect(checkpointMigration?.legacyVersions).toEqual([
+      '0120_entity_change_checkpoint_cursor_convergence',
+    ])
+    if (!feedMigration || !checkpointMigration) return
+
+    const captureDefinition = await dbPool.query<{ definition: string }>(
+      `SELECT pg_get_functiondef('entity_change_capture_resource()'::regprocedure) AS definition`
+    )
+    const checkpointDefinition = await dbPool.query<{ definition: string }>(
+      `SELECT pg_get_functiondef(
+         'entity_change_read_checkpoint(uuid,integer)'::regprocedure
+       ) AS definition`
+    )
+
+    const setLegacyVersion = async (legacyVersion: string, versions: readonly string[]) => {
+      await dbPool.query(`DELETE FROM schema_migrations WHERE version = ANY($1::text[])`, [
+        versions,
+      ])
+      await dbPool.query('INSERT INTO schema_migrations(version) VALUES ($1)', [legacyVersion])
+    }
+
+    try {
+      for (const legacyVersion of feedMigration.legacyVersions ?? []) {
+        await setLegacyVersion(legacyVersion, [
+          feedMigration.version,
+          ...(feedMigration.legacyVersions ?? []),
+        ])
+        await dbPool.query(`
+          CREATE OR REPLACE FUNCTION entity_change_capture_resource() RETURNS trigger
+            LANGUAGE plpgsql AS $$
+          BEGIN
+            RAISE EXCEPTION 'legacy entity-change feed migration was reapplied';
+          END;
+          $$
+        `)
+
+        await initDb(connector)
+
+        const recorded = await dbPool.query<{ version: string }>(
+          `SELECT version FROM schema_migrations
+            WHERE version = ANY($1::text[]) ORDER BY version`,
+          [[feedMigration.version, legacyVersion]]
+        )
+        expect(recorded.rows.map(row => row.version)).toContain(feedMigration.version)
+        await expect(
+          dbPool.query(
+            `INSERT INTO gfs_resources (drive, name, kind)
+             VALUES ($1, 'legacy-alias-probe', 'file')`,
+            [`legacy-alias-${randomUUID()}`]
+          )
+        ).rejects.toThrow('legacy entity-change feed migration was reapplied')
+
+        await dbPool.query(captureDefinition.rows[0]!.definition)
+      }
+
+      await setLegacyVersion(checkpointMigration.legacyVersions?.[0] ?? '', [
+        checkpointMigration.version,
+        ...(checkpointMigration.legacyVersions ?? []),
+      ])
+      await dbPool.query(`
+        CREATE OR REPLACE FUNCTION entity_change_read_checkpoint(
+          requested_cursor UUID,
+          maximum_recovery_events INTEGER
+        ) RETURNS TABLE (
+          needs_resync BOOLEAN,
+          current_cursor UUID,
+          current_sequence BIGINT,
+          invalidated_scopes TEXT[]
+        ) LANGUAGE plpgsql AS $$
+        BEGIN
+          RAISE EXCEPTION 'legacy entity-change checkpoint migration was reapplied';
+        END;
+        $$
+      `)
+
+      await initDb(connector)
+
+      const checkpointVersions = await dbPool.query<{ version: string }>(
+        `SELECT version FROM schema_migrations
+          WHERE version = ANY($1::text[]) ORDER BY version`,
+        [[checkpointMigration.version, ...(checkpointMigration.legacyVersions ?? [])]]
+      )
+      expect(checkpointVersions.rows.map(row => row.version)).toContain(checkpointMigration.version)
+      await expect(
+        dbPool.query(
+          `SELECT * FROM entity_change_read_checkpoint(
+             '00000000-0000-0000-0000-000000000000'::uuid, 100
+           )`
+        )
+      ).rejects.toThrow('legacy entity-change checkpoint migration was reapplied')
+    } finally {
+      await dbPool.query(captureDefinition.rows[0]!.definition)
+      await dbPool.query(checkpointDefinition.rows[0]!.definition)
+      await dbPool.query(`DELETE FROM schema_migrations WHERE version = ANY($1::text[])`, [
+        [
+          feedMigration.version,
+          ...(feedMigration.legacyVersions ?? []),
+          checkpointMigration.version,
+          ...(checkpointMigration.legacyVersions ?? []),
+        ],
+      ])
+      await dbPool.query('INSERT INTO schema_migrations(version) VALUES ($1), ($2)', [
+        feedMigration.version,
+        checkpointMigration.version,
+      ])
+    }
   })
 
   it('commits GFS grant/share batches atomically and invalidates only after commit', async () => {
