@@ -92,4 +92,26 @@ describe('GfsImagePreview layout', () => {
       expect((modal as HTMLElement).style.right).toBe('0px')
     })
   })
+
+  it('keeps the unavailable image dialog named and closable', async () => {
+    const downloadPreview = vi.fn(async () => {
+      throw new Error('404 File unavailable')
+    })
+    window.clerum.gfs.downloadPreview = downloadPreview
+    render(
+      <GfsImagePreview
+        byteLength={3}
+        fileName="diagram.png"
+        gfsUri="gfs://main/image-1"
+        mimeType="image/png"
+        onClose={vi.fn()}
+      />
+    )
+
+    expect(await screen.findByText(/File unavailable/)).toBeTruthy()
+    const dialog = screen.getByRole('dialog', { name: 'diagram.png' })
+    const title = screen.getByRole('heading', { name: 'diagram.png' })
+    expect(dialog.getAttribute('aria-labelledby')).toBe(title.id)
+    expect(screen.getByRole('button', { name: 'Close image preview' })).toBeTruthy()
+  })
 })
