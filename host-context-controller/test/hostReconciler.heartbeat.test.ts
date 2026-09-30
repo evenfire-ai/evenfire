@@ -113,7 +113,7 @@ function makeStatelessHost(
   }
 }
 
-function createReconciler() {
+function createReconciler(options: { isCommunicationChannelCacheSynced?: () => boolean } = {}) {
   const appsApi = createMockAppsApi()
   const coreApi = createMockCoreApi()
   const networkingApi = createMockNetworkingApi()
@@ -140,7 +140,7 @@ function createReconciler() {
     // Heartbeat cases model the steady state after the watcher completed its
     // CommunicationChannel initial list. Cache-startup fail-closed behavior
     // is covered in hostReconciler.lifecycle.test.ts.
-    isCommunicationChannelCacheSynced: () => true,
+    isCommunicationChannelCacheSynced: options.isCommunicationChannelCacheSynced ?? (() => true),
   })
 
   return { reconciler, appsApi, coreApi, networkingApi, rbacApi, customApi }
@@ -1076,7 +1076,7 @@ describe('HostReconciler.suspendHostFromHeartbeat', () => {
       expect(appsApi.replaceNamespacedDeployment).not.toHaveBeenCalled()
       expect(host.status?.lifecycle?.state).toBe('draining')
       const staleLines = logSpy.mock.calls
-        .map(args => String(args[0]))
+        .map(args => JSON.parse(String(args[0])).msg as string)
         .filter(line => line.includes('phase=drained_report_stale'))
       expect(staleLines).toEqual([
         expect.stringMatching(
@@ -1117,7 +1117,7 @@ describe('HostReconciler.suspendHostFromHeartbeat', () => {
       expect(appsApi.createNamespacedDeployment).not.toHaveBeenCalled()
       expect(appsApi.replaceNamespacedDeployment).not.toHaveBeenCalled()
       const staleLines = logSpy.mock.calls
-        .map(args => String(args[0]))
+        .map(args => JSON.parse(String(args[0])).msg as string)
         .filter(line => line.includes('phase=drained_report_stale'))
       expect(staleLines).toEqual([
         expect.stringMatching(
@@ -1528,6 +1528,65 @@ describe('HostReconciler.markHostActiveFromHeartbeat', () => {
     await expect(reconciler.markHostActiveFromHeartbeat(host)).rejects.toThrow('api conflict')
     expect(host.status?.lifecycle?.state).toBe('draining')
   })
+
+  it('reverts a draining Host while channel authority loss blocks suspension', async () => {
+    // A suspension-blocked Host can still be draining from a decision made
+    // before the loss. Cancel-drain must stay available, otherwise the emitter
+    // remains fenced behind {drain:true} for the whole outage.
+    const { reconciler, customApi } = createReconciler({
+      isCommunicationChannelCacheSynced: () => false,
+    })
+    const host = makeStatelessHost({
+      status: { lifecycle: { state: 'draining', wakeHandledGeneration: 4 } },
+    })
+    customApi.getNamespacedCustomObject.mockResolvedValue(
+      freshHostRead({ state: 'draining', wakeHandledGeneration: 4 })
+    )
+    expect(reconciler.getEffectiveLifecycle(host)).toEqual({
+      stateless: true,
+      state: 'draining',
+      suspensionBlocked: true,
+    })
+
+    await reconciler.markHostActiveFromHeartbeat(host)
+
+    expect(customApi.getNamespacedCustomObject).toHaveBeenCalled()
+    const writes = lifecycleStatusWrites(customApi)
+    expect(writes).toHaveLength(1)
+    expect(writes[0].lifecycle).toEqual({ state: 'active', wakeHandledGeneration: 4 })
+    expect(host.status?.lifecycle?.state).toBe('active')
+  })
+
+  it.each([
+    { channels: 1, expectedWrites: 0, finalState: 'draining' },
+    { channels: 0, expectedWrites: 1, finalState: 'active' },
+  ] as const)(
+    'reverts a same-revision draining Host only while its fresh read is stateless (channels=$channels)',
+    async ({ channels, expectedWrites, finalState }) => {
+      // Channel ingress makes a Host effectively not stateless, so the lifecycle
+      // it would revert is not the one the stateless executor owns.
+      const { reconciler, customApi } = createReconciler()
+      reconciler.setCountCommunicationChannels(() => channels)
+      const host = {
+        ...makeStatelessHost({
+          status: { lifecycle: { state: 'draining', wakeHandledGeneration: 3 } },
+        }),
+        generation: 5,
+      }
+      const fresh = freshHostRead({ state: 'draining', wakeHandledGeneration: 3 })
+      customApi.getNamespacedCustomObject.mockResolvedValue({
+        ...fresh,
+        metadata: { ...fresh.metadata, generation: 5, resourceVersion: 'rv-draining' },
+      })
+
+      await reconciler.markHostActiveFromHeartbeat(host)
+
+      // Liveness witness: the decision was taken on exactly one fresh read.
+      expect(customApi.getNamespacedCustomObject).toHaveBeenCalledOnce()
+      expect(customApi.patchNamespacedCustomObjectStatus).toHaveBeenCalledTimes(expectedWrites)
+      expect(host.status?.lifecycle?.state).toBe(finalState)
+    }
+  )
 })
 describe('HostReconciler heartbeat cores — fresh-read guard (cross-instance staleness)', () => {
   // The Host watch callback builds a brand-new HostCRD per ADDED/MODIFIED
@@ -1876,7 +1935,7 @@ describe('HostReconciler.markHostDrainingFromHeartbeat — AP-1 entry-epoch guar
       expect(customApi.patchNamespacedCustomObjectStatus).not.toHaveBeenCalled()
       expect(host.status?.lifecycle?.state).toBe('active')
       const staleLines = logSpy.mock.calls
-        .map(args => String(args[0]))
+        .map(args => JSON.parse(String(args[0])).msg as string)
         .filter(line => line.includes('phase=draining_write_stale'))
       expect(staleLines).toEqual([
         expect.stringMatching(
@@ -1914,7 +1973,7 @@ describe('HostReconciler.markHostDrainingFromHeartbeat — AP-1 entry-epoch guar
 
       expect(customApi.patchNamespacedCustomObjectStatus).not.toHaveBeenCalled()
       const staleLines = logSpy.mock.calls
-        .map(args => String(args[0]))
+        .map(args => JSON.parse(String(args[0])).msg as string)
         .filter(line => line.includes('phase=draining_write_stale'))
       expect(staleLines).toEqual([
         expect.stringMatching(
@@ -2018,7 +2077,7 @@ describe('HostReconciler reconcile — stateless replicas derive from FRESH stat
       // pod is never scaled to 0.
       expect(hostDeploymentBody(appsApi, 'stateless-host').spec?.replicas).toBe(1)
       const guardLines = logSpy.mock.calls
-        .map(args => String(args[0]))
+        .map(args => JSON.parse(String(args[0])).msg as string)
         .filter(line => line.includes('disagrees with fresh'))
       expect(guardLines).toEqual([
         '[HostReconciler] Stateless replicas guard for "stateless-host": cached lifecycle state "suspended" disagrees with fresh "active" — deriving replicas from FRESH state',

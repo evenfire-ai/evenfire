@@ -1,3 +1,7 @@
 export { AgentChatActionsContext, AgentChatActionsProvider } from './context'
 export { useAgentChatActionsContext } from './useAgentChatActionsContext'
-export type { AgentChatActionsContextValue, AgentChatActionsProviderProps } from './types'
+export type {
+  AgentChatActionsContextValue,
+  AgentChatActionsProviderProps,
+  QueuedChatDelete,
+} from './types'
