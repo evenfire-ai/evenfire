@@ -1,137 +1,77 @@
 import { describe, expect, it } from 'vitest'
-import type { RemoteDetected, RemoteTransportProbe } from '../../../lib/remoteMcp.types'
+import type { RemoteTransportProbe } from '../../../lib/remoteMcp.types'
 import {
-  CANVA_AS_JSON,
-  CANVA_DETECTED,
-  CANVA_PRM_JSON,
-  DCR_CONFIDENTIAL_AS_JSON,
-  DCR_CONFIDENTIAL_DETECTED,
-  DCR_PUBLIC_AS_JSON,
-  DCR_PUBLIC_DETECTED,
   type InitializeProbeObservation,
-  LINEAR_AS_JSON,
-  LINEAR_DETECTED,
-  LINEAR_PRM_JSON,
-  NOTION_AS_JSON,
-  NOTION_DETECTED,
   NOTION_MCP_INITIALIZE,
-  NOTION_PRM_JSON,
   NOTION_TRANSPORT_ALIVE,
-  SENTRY_AS_JSON,
-  SENTRY_DETECTED,
-  SENTRY_PRM_JSON,
   VERCEL_MCP_INITIALIZE,
   VERCEL_ROOT_INITIALIZE,
   VERCEL_ROOT_PRM_JSON,
   VERCEL_TRANSPORT_DEAD,
 } from '../remoteMcpDiscovery'
+import {
+  ALL_DISCOVER_BODIES,
+  ATLASSIAN_DISCOVER,
+  LINEAR_DISCOVER,
+  NOTION_DISCOVER,
+  PRE_REGISTERED_PER_SERVER_DISCOVER,
+} from '../remoteMcpWire'
 
 /**
- * This is NOT a cross-service contract test — control-api is not importable from
- * control-ui, so nothing here fails when the real producer drifts. The producer
- * contract for the discover response (`res.body.detected`) is pinned by control-api
- * `test/routes.adminRemoteMcp.test.ts`. What this file guarantees is narrower: each
- * hand-derived `detected` fixture equals a LOCAL re-projection of the verbatim raw
- * probe bytes, so a fixture cannot silently encode an invented shape.
- *
- * DRIFT LIMIT: projectDetected is a HAND MIRROR of the producer logic
- * (`discoverRemoteOAuth` + `selectRegistrationMode`/`deriveQuirks` in
- * control-api/src/oauth/discovery.ts, shaped into `detected` by the remoteMcp.ts
- * route). control-api is not importable from control-ui, so a change to that logic
- * does NOT fail this test on its own — it only catches fixture-vs-copy drift. Any
- * edit to the producer projection must be reflected here, or these fixtures certify
- * a stale shape. The producer carries the reverse pointer.
+ * The `/discover` bodies are control-api's own responses (golden wire files captured
+ * from the real router), so they are not re-projected here. What this block pins is
+ * the part of that contract the wizard's decisions rest on; a golden that moves in a
+ * way the wizard does not handle fails here, next to the fixture, rather than as a
+ * confusing wizard test failure.
  */
-function projectDetected(prmJson: string, asJson: string): RemoteDetected {
-  const prm = JSON.parse(prmJson) as Record<string, unknown>
-  const as = JSON.parse(asJson) as Record<string, unknown>
+describe('remote MCP `/discover` goldens carry the callback contract the wizard relies on', () => {
+  it('the pilots resolve as the backend decides today', () => {
+    expect(LINEAR_DISCOVER.detected.registrationMode).toBe('cimd')
+    expect(LINEAR_DISCOVER.callback?.variant).toBe('shared')
+    // Notion offers CIMD but not RFC 9207, so it can only install by DCR.
+    expect(NOTION_DISCOVER.detected.registrationMode).toBe('dcr')
+    expect(NOTION_DISCOVER.callback?.variant).toBe('per-server')
+    expect(ATLASSIAN_DISCOVER.detected.registrationMode).toBe('dcr')
+    expect(PRE_REGISTERED_PER_SERVER_DISCOVER.detected.registrationMode).toBe('manual')
+  })
 
-  const authMethods = (as.token_endpoint_auth_methods_supported as string[] | undefined) ?? []
-  const hasRegistration = typeof as.registration_endpoint === 'string'
-  // D-3, dry-run (no pre-registered client): cimd > dcr > manual.
-  const registrationMode =
-    as.client_id_metadata_document_supported === true && authMethods.includes('none')
-      ? 'cimd'
-      : hasRegistration
-        ? 'dcr'
-        : 'manual'
+  for (const { name, body } of ALL_DISCOVER_BODIES) {
+    it(`${name}: without RFC 9207 never CIMD, and the variant follows issForCallback`, () => {
+      const hasIss = Boolean(body.detected.issForCallback)
+      expect(body.callback?.variant).toBe(hasIss ? 'shared' : 'per-server')
+      if (!hasIss) expect(body.detected.registrationMode).not.toBe('cimd')
+    })
 
-  const prmScopes = prm.scopes_supported as string[] | undefined
-  const asScopes = as.scopes_supported as string[] | undefined
-  const scopes = prmScopes ?? asScopes ?? []
+    it(`${name}: endpoint hosts are reported iff per-server, and match the endpoints`, () => {
+      const hosts = body.detected.asEndpointHosts
+      if (body.callback?.variant !== 'per-server') {
+        expect(hosts).toBeUndefined()
+        return
+      }
+      const { authorization, token, registration } = body.detected.endpoints
+      expect(hosts).toEqual({
+        authorization: new URL(authorization).hostname,
+        token: new URL(token).hostname,
+        ...(registration ? { registration: new URL(registration).hostname } : {}),
+      })
+    })
 
-  const bearerMethods = prm.bearer_methods_supported as string[] | undefined
-  const bearerInBody = Array.isArray(bearerMethods)
-    ? bearerMethods.includes('body') && !bearerMethods.includes('header')
-    : false
-  const grantTypes = as.grant_types_supported as string[] | undefined
-  const supportsRefresh = grantTypes?.includes('refresh_token') ?? false
-
-  const detected: RemoteDetected = {
-    registrationMode: registrationMode as RemoteDetected['registrationMode'],
-    endpoints: {
-      authorization: as.authorization_endpoint as string,
-      token: as.token_endpoint as string,
-      ...(hasRegistration ? { registration: as.registration_endpoint as string } : {}),
-    },
-    resource: prm.resource as string,
-    issuer: as.issuer as string,
-    ...(as.authorization_response_iss_parameter_supported === true
-      ? { issForCallback: as.issuer as string }
-      : {}),
-    scopes,
-    quirks: { bearerInBody, supportsRefresh },
-  }
-  if (registrationMode === 'dcr') {
-    detected.dcr = {
-      available: true,
-      clientMode: authMethods.includes('none') ? 'public' : 'confidential',
-      supportsRefresh,
-    }
-  }
-  return detected
-}
-
-describe('remote MCP `detected` fixtures match the real probe bytes', () => {
-  const cases: Array<{ name: string; prm: string; as: string; fixture: RemoteDetected }> = [
-    { name: 'notion', prm: NOTION_PRM_JSON, as: NOTION_AS_JSON, fixture: NOTION_DETECTED },
-    { name: 'linear', prm: LINEAR_PRM_JSON, as: LINEAR_AS_JSON, fixture: LINEAR_DETECTED },
-    { name: 'sentry', prm: SENTRY_PRM_JSON, as: SENTRY_AS_JSON, fixture: SENTRY_DETECTED },
-    { name: 'canva', prm: CANVA_PRM_JSON, as: CANVA_AS_JSON, fixture: CANVA_DETECTED },
-    {
-      name: 'dcr-public',
-      prm: NOTION_PRM_JSON,
-      as: DCR_PUBLIC_AS_JSON,
-      fixture: DCR_PUBLIC_DETECTED,
-    },
-    {
-      name: 'dcr-confidential',
-      prm: NOTION_PRM_JSON,
-      as: DCR_CONFIDENTIAL_AS_JSON,
-      fixture: DCR_CONFIDENTIAL_DETECTED,
-    },
-  ]
-
-  for (const { name, prm, as, fixture } of cases) {
-    it(`${name}: fixture equals the producer projection of the raw bytes`, () => {
-      expect(fixture).toEqual(projectDetected(prm, as))
+    it(`${name}: the redirect URI template carries the placeholders its mode needs`, () => {
+      const callback = body.callback
+      if (!callback?.configured) {
+        expect(callback?.redirectUriTemplate).toBeUndefined()
+        return
+      }
+      const template = callback.redirectUriTemplate ?? ''
+      if (callback.variant === 'shared') {
+        expect(template).not.toMatch(/\{/)
+      } else if (body.detected.registrationMode === 'dcr') {
+        expect(template).toMatch(/\/\{serverName\}\/\{installId\}$/)
+      } else {
+        expect(template).toMatch(/\/\{serverName\}$/)
+      }
     })
   }
-
-  it('the four CIMD pilots resolve to cimd and carry a registration endpoint', () => {
-    for (const fixture of [NOTION_DETECTED, LINEAR_DETECTED, SENTRY_DETECTED, CANVA_DETECTED]) {
-      expect(fixture.registrationMode).toBe('cimd')
-      expect(fixture.endpoints.registration).toBeTruthy()
-      expect(fixture.dcr).toBeUndefined()
-    }
-  })
-
-  it('only sentry advertises issForCallback (RFC 9207)', () => {
-    expect(SENTRY_DETECTED.issForCallback).toBe('https://mcp.sentry.dev')
-    expect(NOTION_DETECTED.issForCallback).toBeUndefined()
-    expect(LINEAR_DETECTED.issForCallback).toBeUndefined()
-    expect(CANVA_DETECTED.issForCallback).toBeUndefined()
-  })
 })
 
 /**

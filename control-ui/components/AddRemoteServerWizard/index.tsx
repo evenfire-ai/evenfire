@@ -4,9 +4,11 @@ import React, { useEffect, useMemo, useState } from 'react'
 import { CreateFlowPanel } from '@components/CreateFlowPanel'
 import { CreateStepFlow } from '@components/CreateStepFlow'
 import { useToast } from '@components/Toast'
+import { IconCopy } from '@components/icons'
 import { Button, Field, SelectInput, TextInput } from '@components/ui'
 import { getContexts, isSilentApiError } from '@lib/api'
 import type { ContextResource } from '@lib/api'
+import { copyTextToClipboard } from '@lib/clipboard'
 import { contextResourceName } from '@lib/contextIdentity'
 import {
   buildRemoteInstallRequest,
@@ -19,11 +21,18 @@ import {
   installRemoteServer,
   mapRemoteDiscoverError,
   mapRemoteInstallError,
+  remoteCallbackBlocker,
+  remotePreRegisteredRedirectUri,
   requiresPreRegisteredCredentials,
   shouldWarnNoRefresh,
   transportBlocksContinue,
 } from '@lib/remoteMcp'
-import type { RemoteDetected, RemoteGrantScope, RemoteTransportProbe } from '@lib/remoteMcp.types'
+import type {
+  RemoteCallbackPreview,
+  RemoteDetected,
+  RemoteGrantScope,
+  RemoteTransportProbe,
+} from '@lib/remoteMcp.types'
 import {
   GRANT_SCOPE_OPTIONS,
   REGISTRATION_MODE_HINT,
@@ -31,7 +40,12 @@ import {
   REMOTE_WIZARD_STEPS,
   REMOTE_WIZARD_STEP_DETAILS,
 } from './constants'
-import type { AddRemoteServerWizardProps } from './types'
+import type {
+  AddRemoteServerWizardProps,
+  AsEndpointHostsSummaryProps,
+  InstalledRedirectUri,
+  RedirectUriCopyProps,
+} from './types'
 
 const STEP_TITLE_ID = 'add-remote-server-step-title'
 
@@ -60,6 +74,8 @@ export function AddRemoteServerWizard({
   // MCP transport probe result for the current URL. A `dead` probe clears
   // `detected` and holds the wizard on step 0; the others never block.
   const [transport, setTransport] = useState<RemoteTransportProbe | null>(null)
+  // Callback preview for the current detection; undefined on an older control-api.
+  const [callback, setCallback] = useState<RemoteCallbackPreview | undefined>(undefined)
 
   // Step 1 — configuration
   const [clientId, setClientId] = useState('')
@@ -69,6 +85,9 @@ export function AddRemoteServerWizard({
   // Step 2 — install
   const [installing, setInstalling] = useState(false)
   const [installError, setInstallError] = useState('')
+  // A pre-registered install holds here so the operator can copy the redirect URI
+  // the AS must hold before leaving the wizard.
+  const [installed, setInstalled] = useState<InstalledRedirectUri | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -105,11 +124,20 @@ export function AddRemoteServerWizard({
   const inconclusiveTransport = transport?.status === 'inconclusive' ? transport : null
   const aliveTransport = transport?.status === 'alive' ? transport : null
 
+  const callbackBlocker = detected ? remoteCallbackBlocker({ detected, callback }) : ''
+  const preRegisteredRedirectUri = needsCredentials
+    ? remotePreRegisteredRedirectUri(callback, serverName)
+    : null
+  const asEndpointHosts = detected?.asEndpointHosts
+
   const credentialsComplete =
     !needsCredentials || (clientId.trim().length > 0 && clientSecret.length > 0)
-  const step1Valid = Boolean(detected) && identifiersValid && credentialsComplete
+  const step1Valid =
+    Boolean(detected) && identifiersValid && credentialsComplete && callbackBlocker === ''
 
   function canSelectStep(target: number): boolean {
+    // Once installed, going back would offer a second install of the same server.
+    if (installed) return target === 2
     if (target === 0) return true
     if (target === 1) return Boolean(detected) && identifiersValid
     return step1Valid
@@ -127,16 +155,28 @@ export function AddRemoteServerWizard({
   function resetDetection() {
     setDetected(null)
     setTransport(null)
+    setCallback(undefined)
     setDiscoverError('')
+  }
+
+  async function copyRedirectUri(uri: string) {
+    const ok = await copyTextToClipboard(uri)
+    showToast(ok ? 'Redirect URI copied.' : 'Copy failed — select and copy the URI manually.', {
+      tone: ok ? 'success' : 'error',
+    })
   }
 
   async function runDetect() {
     setDetecting(true)
     setDiscoverError('')
     setTransport(null)
+    setCallback(undefined)
     try {
-      const { detected: nextDetected, transport: nextTransport } =
-        await discoverRemoteServer(trimmedBaseUrl)
+      const {
+        detected: nextDetected,
+        transport: nextTransport,
+        callback: nextCallback,
+      } = await discoverRemoteServer(trimmedBaseUrl)
       if (transportBlocksContinue(nextTransport)) {
         // Dead MCP transport: never install a URL the probe proved dead. Hold on
         // step 0, surface the reason (and any canonical URL suggestion), and keep
@@ -147,6 +187,7 @@ export function AddRemoteServerWizard({
       }
       setDetected(nextDetected)
       setTransport(nextTransport ?? null)
+      setCallback(nextCallback)
       setStep(1)
     } catch (e) {
       if (isSilentApiError(e)) return
@@ -173,10 +214,18 @@ export function AddRemoteServerWizard({
       })
       const res = await installRemoteServer(body)
       showToast(`Remote server ${res.serverName} installed.`, { tone: 'success' })
+      if (res.registrationMode === 'pre-registered' && res.redirectUri) {
+        setInstalled({
+          redirectUri: res.redirectUri,
+          changedSincePreview:
+            preRegisteredRedirectUri !== null && preRegisteredRedirectUri !== res.redirectUri,
+        })
+        return
+      }
       onInstalled()
     } catch (e) {
       if (isSilentApiError(e)) return
-      setInstallError(mapRemoteInstallError(e))
+      setInstallError(mapRemoteInstallError(e, { callbackVariant: callback?.variant }))
     } finally {
       setInstalling(false)
     }
@@ -189,7 +238,7 @@ export function AddRemoteServerWizard({
       <form
         onSubmit={event => {
           event.preventDefault()
-          if (step === 2) void runInstall()
+          if (step === 2 && !installed) void runInstall()
         }}
       >
         <CreateStepFlow
@@ -367,6 +416,25 @@ export function AddRemoteServerWizard({
 
               <p className="cu-field__hint">{REGISTRATION_MODE_HINT[detected.registrationMode]}</p>
 
+              {callbackBlocker ? (
+                <div className="cu-banner cu-banner--error" role="alert">
+                  {callbackBlocker}
+                </div>
+              ) : null}
+
+              {asEndpointHosts ? (
+                <AsEndpointHostsSummary hosts={asEndpointHosts} withExplanation />
+              ) : null}
+
+              {needsCredentials && preRegisteredRedirectUri ? (
+                <Field
+                  label="Redirect URI"
+                  description="Register this exact URI in the provider’s OAuth client before users connect."
+                >
+                  <RedirectUriCopy uri={preRegisteredRedirectUri} onCopy={copyRedirectUri} />
+                </Field>
+              ) : null}
+
               {needsCredentials ? (
                 <div className="cu-form-grid">
                   <Field
@@ -421,7 +489,25 @@ export function AddRemoteServerWizard({
             </div>
           ) : null}
 
-          {step === 2 && detected && installMode ? (
+          {step === 2 && installed ? (
+            <div className="cu-form-stack cu-agent-form-stack">
+              <p className="cu-field__hint">
+                {serverName} is installed. Users can connect once this redirect URI is registered in
+                the provider’s OAuth client.
+              </p>
+              {installed.changedSincePreview ? (
+                <div className="cu-banner cu-banner--warning" role="status">
+                  The authorization server changed since detection, so this redirect URI differs
+                  from the one shown before. Register this one.
+                </div>
+              ) : null}
+              <Field label="Redirect URI" description="Register this exact URI at the provider.">
+                <RedirectUriCopy uri={installed.redirectUri} onCopy={copyRedirectUri} />
+              </Field>
+            </div>
+          ) : null}
+
+          {step === 2 && !installed && detected && installMode ? (
             <div className="cu-form-stack cu-agent-form-stack">
               <section className="cu-summary-list" aria-label="Install summary">
                 <div className="cu-summary-list__row">
@@ -456,7 +542,15 @@ export function AddRemoteServerWizard({
                   <span>Token endpoint</span>
                   <strong>{detected.endpoints.token}</strong>
                 </div>
+                {preRegisteredRedirectUri ? (
+                  <div className="cu-summary-list__row">
+                    <span>Redirect URI</span>
+                    <strong>{preRegisteredRedirectUri}</strong>
+                  </div>
+                ) : null}
               </section>
+
+              {asEndpointHosts ? <AsEndpointHostsSummary hosts={asEndpointHosts} /> : null}
 
               {noRefresh ? (
                 <div className="cu-banner cu-banner--warning" role="status">
@@ -480,14 +574,21 @@ export function AddRemoteServerWizard({
           ) : null}
 
           <div className="cu-create-actions">
-            <Button
-              disabled={detecting || installing}
-              onClick={() => (step === 0 ? onCancel() : setStep(current => current - 1))}
-              size="sm"
-              variant="ghost"
-            >
-              {step === 0 ? 'Cancel' : 'Back'}
-            </Button>
+            {installed ? (
+              <Button onClick={onInstalled} size="sm" variant="primary">
+                Done
+              </Button>
+            ) : null}
+            {installed ? null : (
+              <Button
+                disabled={detecting || installing}
+                onClick={() => (step === 0 ? onCancel() : setStep(current => current - 1))}
+                size="sm"
+                variant="ghost"
+              >
+                {step === 0 ? 'Cancel' : 'Back'}
+              </Button>
+            )}
 
             {step === 0 ? (
               detected ? (
@@ -518,7 +619,7 @@ export function AddRemoteServerWizard({
               </Button>
             ) : null}
 
-            {step === 2 ? (
+            {step === 2 && !installed ? (
               <Button
                 disabled={!step1Valid || installing}
                 loading={installing}
@@ -533,5 +634,53 @@ export function AddRemoteServerWizard({
         </CreateStepFlow>
       </form>
     </CreateFlowPanel>
+  )
+}
+
+function RedirectUriCopy({ uri, onCopy }: RedirectUriCopyProps) {
+  return (
+    <div className="cu-table-actions">
+      <TextInput value={uri} readOnly monospace aria-label="Redirect URI" />
+      <Button
+        type="button"
+        variant="ghost"
+        size="sm"
+        icon
+        onClick={() => onCopy(uri)}
+        aria-label="Copy redirect URI"
+      >
+        <IconCopy width={16} height={16} />
+      </Button>
+    </div>
+  )
+}
+
+function AsEndpointHostsSummary({ hosts, withExplanation = false }: AsEndpointHostsSummaryProps) {
+  return (
+    <>
+      {withExplanation ? (
+        <div className="cu-banner cu-banner--info" role="note">
+          This authorization server does not identify itself in its OAuth responses (RFC 9207), so
+          the connector trusts these hosts because they share the issuer’s domain. Confirm they
+          belong to the provider before installing.
+        </div>
+      ) : null}
+      <section className="cu-summary-list" aria-label="Authorization server hosts">
+        <div className="cu-summary-list__row">
+          <span>Authorization host</span>
+          <strong>{hosts.authorization}</strong>
+        </div>
+        <div className="cu-summary-list__row">
+          <span>Token host</span>
+          <strong>{hosts.token}</strong>
+        </div>
+        {hosts.registration ? (
+          <div className="cu-summary-list__row">
+            <span>Registration host</span>
+            <strong>{hosts.registration}</strong>
+          </div>
+        ) : null}
+      </section>
+    </>
   )
 }
