@@ -172,7 +172,11 @@ describe('sourceMessageForResume (#666 R4-M2)', () => {
     const resumed = sourceMessageForResume({
       ...sourceMessage([]),
       authorityV2,
-      providerIdentity: { medium: 'slack', providerUserId: 'SENTINEL-raw-identity' },
+      providerIdentity: {
+        medium: 'slack',
+        providerUserId: 'SENTINEL-raw-identity',
+        providerChannelId: 'SENTINEL-raw-channel',
+      },
       metadata: { rawPayload: 'SENTINEL-raw-payload' },
     })
 

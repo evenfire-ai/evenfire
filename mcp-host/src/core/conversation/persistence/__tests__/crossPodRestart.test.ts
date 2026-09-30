@@ -182,7 +182,7 @@ describe('Cross-pod-restart resume — P.3 invariant #3', () => {
       timestamp: new Date().toISOString(),
       messageId: 'legacy-message-1',
       hostRef: 'chatllm',
-    }
+    } satisfies IncomingMessage
     const podA = makeSqliteStore({ dbPath, cacheSize: 4 })
     const managerA = new ConversationManager(podA.store)
     const convA = await managerA.getOrCreate(sessionKey, {
