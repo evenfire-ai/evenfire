@@ -984,6 +984,63 @@ assert_log_has 'kubectl config get-contexts -o name' 'delete without a kube cont
 assert_log_lacks 'minikube profile list' 'delete without a kube context must not need minikube profile list'
 assert_log_has "minikube -p ${profile} delete pidfiles=0" 'delete of a profile without a kube context ran'
 
+# === stop / delete: a cluster that answers must identify the profile =========
+# minikube listing the profile does not prove that the context named after it
+# reaches that profile's cluster: another local cluster, or a LAN cluster on a
+# private address, can sit behind it. When the cluster answers, stop and
+# delete check the node identity, as start, status, pf and health do, before
+# clearing any port-forward record or running minikube -p. A stopped profile
+# cannot answer, so an unreachable cluster is still stopped and deleted.
+for action in stop delete; do
+  reset_state
+  bp "foreign-identity-${action}-pf" pf
+  assert_rc 0 "pf before ${action} of a profile whose reachable cluster is another"
+  printf 'lan-cluster\n' >"${state}/node-label"
+  : >"${state}/calls.log"
+  bp "foreign-identity-${action}" "${action}" "CONFIRM_DELETE=${profile}"
+  assert_output_has 'BRANCH_PROFILE_CONTEXT_IDENTITY' "${action} of a profile whose reachable cluster is another"
+  assert_output_has "BRANCH_PROFILE_CONTEXT_IDENTITY: kube context ${profile} does not identify Minikube profile ${profile} at 192.168.49.2" \
+    "${action} of a profile whose reachable cluster is another"
+  assert_rc 1 "${action} of a profile whose reachable cluster is another"
+  # Witness: the cluster answered, and the identity was read from it and from
+  # minikube.
+  assert_log_has "kubectl --context=${profile} --request-timeout=10s cluster-info" \
+    "${action} asked whether the cluster answers"
+  assert_log_has "minikube -p ${profile} ip" "${action} asked minikube for the profile's IP"
+  assert_log_has "kubectl --context=${profile} --request-timeout=10s get nodes -o json" \
+    "${action} read the node identity"
+  assert_log_lacks "minikube -p ${profile} ${action}" \
+    "${action} of a profile whose reachable cluster is another must not run minikube ${action}"
+  assert_file "${pids_dir}/control-ui.pid" \
+    "${action} of a profile whose reachable cluster is another keeps the port-forward records"
+  rm -f "${state}/node-label"
+  bp "foreign-identity-${action}-stop-pf" stop-pf
+  assert_rc 0 "stop-pf after the refused ${action}"
+done
+
+for action in stop delete; do
+  reset_state
+  bp "own-identity-${action}" "${action}" "CONFIRM_DELETE=${profile}"
+  assert_rc 0 "${action} of a profile whose reachable cluster identifies it"
+  assert_log_order "kubectl --context=${profile} --request-timeout=10s get nodes -o json" \
+    "minikube -p ${profile} ${action} pidfiles=0" \
+    "${action} checked the node identity before minikube ${action}"
+done
+
+for action in stop delete; do
+  reset_state
+  rm -f "${state}/reachable"
+  bp "unreachable-identity-${action}" "${action}" "CONFIRM_DELETE=${profile}"
+  assert_rc 0 "${action} of a profile whose cluster does not answer"
+  # Witness: the reachability probe ran and found no cluster.
+  assert_log_has "kubectl --context=${profile} --request-timeout=10s cluster-info" \
+    "${action} of a profile whose cluster does not answer asked whether it answers"
+  assert_log_lacks 'get nodes -o json' \
+    "${action} of a profile whose cluster does not answer must not read the node identity"
+  assert_log_has "minikube -p ${profile} ${action} pidfiles=0" \
+    "${action} of a profile whose cluster does not answer still ran minikube ${action}"
+done
+
 # === start / setup: the same check before minikube creates or deploys ========
 # `minikube start -p <p>` for a profile minikube does not know creates that
 # profile and writes the kubeconfig context of its name, and setup hands the
