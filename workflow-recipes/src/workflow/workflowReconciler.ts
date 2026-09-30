@@ -3079,17 +3079,37 @@ export class WorkflowReconciler {
    * reconcile() pass or the finalizer's label sweep, the legacy policy for the
    * next reconcile() pass.
    *
-   * What each path may delete (verdict = Codex/Grok eligibility; it governs
-   * only the proxy lanes, every other catalog lane follows the spec alone):
+   * What each path does to a run-lane policy (verdict = Codex/Grok
+   * eligibility; it governs only the proxy lanes, every other catalog lane
+   * follows the spec alone; legacy = `<recipe>-mcp-servers-egress-internet`):
    *
-   * | path                 | proxy required | proxy uncertain | proxy retired | other lane, not desired |
-   * | reconcile() pass     | applied        | kept if live    | pruned        | pruned                 |
-   * | mid-run retry (this) | applied        | kept if live    | kept          | kept                   |
-   * | terminal teardown    | kept           | kept            | kept          | kept                   |
+   * | path                 | proxy required | proxy uncertain | proxy retired | other lane, not desired | legacy          |
+   * | reconcile() pass     | applied        | kept if live    | pruned        | pruned                  | deleted         |
+   * | mid-run retry (this) | applied        | kept if live    | kept          | kept                    | kept            |
+   * | terminal teardown    | kept           | kept            | kept          | kept                    | kept            |
+   * | finalizer            | deleted        | deleted         | deleted       | deleted                 | only if labeled |
+   *
+   * What a failed write leaves behind, per path:
+   *
+   * | path                 | on failure                                                                                  |
+   * | reconcile() pass     | apply terminating/contended: `RetryPending`, requeue. Non-404 DELETE (prune or legacy) or a failed LIST: `PrunePending`, no requeue |
+   * | mid-run retry (this) | apply still pending: marker kept, progress requeue. Apply threw: marker kept, transient requeue. A pending prune is carried over |
+   * | terminal teardown    | a pending apply is dropped; a pending prune is kept (`PrunePending`)                         |
+   * | finalizer            | a non-404 DELETE is logged by `safeDelete` and not rethrown, so the finalizer completes     |
    *
    * A desired lane is applied on both apply paths; an uncertain verdict never
-   * creates a proxy. Terminal teardown deletes compute pods, not policies; the
-   * finalizer deletes every recipe policy.
+   * creates a proxy. Terminal teardown deletes a run-scoped run's compute pods
+   * and its cross-namespace transport workloads, and, for every terminal
+   * recipe, revokes `<recipe>-coordinator-to-gfs` unless the run completed and
+   * that policy may open; that policy is outside the run-lane catalog. It
+   * deletes no run-lane policy. The finalizer deletes a fixed list of run-lane
+   * names and sweeps by the recipe labels in the sandbox and mcp-server
+   * namespaces; the legacy policy has no name-based delete there and goes only
+   * if it carries those labels.
+   *
+   * reconcile(), and so its prune, also runs while the run's pods are live:
+   * the WRC falls through to it for a run in `initializing` or `recovering`,
+   * and for any in-progress run while transport network readiness is pending.
    */
   async retryRunLaneNetworkPolicies(
     recipeName: string,
