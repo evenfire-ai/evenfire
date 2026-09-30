@@ -453,6 +453,73 @@ describe('routes/entityChangeStream', () => {
     vi.useRealTimers()
   })
 
+  it('closes before writing when the buffered response is already over the byte limit', async () => {
+    serviceMock.readEntityChangeCheckpoint.mockResolvedValue({
+      resyncRequired: false,
+      cursor: CURSOR,
+      scopes: ['gfs'],
+    })
+    const req = new FakeRequest()
+    const res = new FakeResponse()
+    res.writableLength = 64 * 1024
+
+    streamEntityChanges(
+      req as unknown as Request,
+      res as unknown as Response,
+      CURSOR,
+      async () => true,
+      'operator',
+      'operator-buffer-limit'
+    )
+
+    try {
+      await vi.waitFor(() => expect(res.writableEnded).toBe(true))
+      expect(res.frames).toEqual([])
+      expect(serviceMock.readEntityChangeCheckpoint).toHaveBeenCalledOnce()
+    } finally {
+      closeActiveEntityChangeStreams()
+    }
+  })
+
+  it('emits an operator heartbeat on the configured cadence without a feed change', async () => {
+    vi.useFakeTimers()
+    serviceMock.readEntityChangeCheckpoint.mockResolvedValue({
+      resyncRequired: false,
+      cursor: CURSOR,
+      scopes: [],
+    })
+    const req = new FakeRequest()
+    const res = new FakeResponse()
+
+    streamEntityChanges(
+      req as unknown as Request,
+      res as unknown as Response,
+      CURSOR,
+      async () => true,
+      'operator',
+      'operator-heartbeat'
+    )
+
+    try {
+      await vi.advanceTimersByTimeAsync(0)
+      expect(res.frames).toEqual([])
+      await vi.advanceTimersByTimeAsync(configMock.entityChangeStreamHeartbeatMs)
+
+      expect(res.frames.map(frame => JSON.parse(frame))).toContainEqual(
+        expect.objectContaining({
+          schemaVersion: 1,
+          type: 'heartbeat',
+          cursor: CURSOR,
+          observedAt: expect.any(String),
+        })
+      )
+    } finally {
+      closeActiveEntityChangeStreams()
+      await vi.advanceTimersByTimeAsync(0)
+      vi.useRealTimers()
+    }
+  })
+
   it('closes the HTTP response after a timed-out slow-consumer write', async () => {
     configMock.entityChangeStreamMaxConnections = 1
     configMock.entityChangeStreamMaxConnectionsPerPrincipal = 1
