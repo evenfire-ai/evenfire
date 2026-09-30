@@ -10455,6 +10455,11 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
   color: var(--text);
 }
 
+/* TASK-172 — an interactive pill acts as a button, so it must read as one. */
+.ui-pill--interactive {
+  cursor: pointer;
+}
+
 .ui-pill--interactive:hover {
   background: var(--surface-hover);
   border-color: rgba(var(--accent-rgb), 0.42);
