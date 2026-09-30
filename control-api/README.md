@@ -172,10 +172,17 @@ Auth settings:
 
 Local development: run with `CLERUM_DEV_MODE=true` and no signing-key env vars.
 Control API generates one RSA-2048 key per slot under the gitignored
-`control-api/.dev-keys/` directory (`0700` directory, `0600` files) on first
-use and reuses it across restarts. Outside dev mode the three env vars above
-are always required, and keys whose public halves were ever committed to this
-repository are rejected in every slot, including the RPC verifier public key.
+`control-api/.dev-keys/` directory (`0700` directory, `0600` signing files,
+`0644` derived public files) on first use, reuses it across restarts, and
+publishes each derived public half as `<slot>.public.pem`. When
+`rpc-proxy` and `external-rest-api` also run with `CLERUM_DEV_MODE=true`, they
+load `rpc.public.pem` and `session.public.pem` from that store, so a monorepo
+dev boot keeps one shared key identity. Set `EVENFIRE_DEV_KEY_STORE` to
+relocate the store, or set the explicit `RPC_PROXY_JWT_PUBLIC_KEY` /
+`EXTERNAL_REST_API_JWT_PUBLIC_KEY` env vars to override it. Outside dev mode
+the three env vars above are always required, and keys whose public halves
+were ever committed to this repository are rejected in every slot, including
+the RPC verifier public key.
 
 - `CONTROL_API_RPC_JWT_PRIVATE_KEY`: RSA private key used to sign RPC access JWTs for `rpc-proxy` (RS256).
 - `CONTROL_API_JWT_ISSUER`: expected `iss` for session token signing and verification.

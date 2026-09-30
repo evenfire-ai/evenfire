@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+
 type Config = {
   port: number
   jsonBodyLimit: string
@@ -138,6 +141,38 @@ function parseExternalGfsEdgeRateLimits() {
 
 const externalGfsEdgeRateLimits = parseExternalGfsEdgeRateLimits()
 
+function serviceRoot(): string {
+  // Works in every supported runtime: CommonJS (dist and ts-node) resolves
+  // __dirname to <service>/dist or <service>/src; Vitest's ESM transform falls
+  // back to the service working directory used by every test/npm script.
+  return typeof __dirname === 'string' && __dirname ? dirname(__dirname) : process.cwd()
+}
+
+/**
+ * In explicit dev mode, verify with the public half control-api publishes next
+ * to its generated session signing key, so a monorepo dev boot keeps one
+ * shared key identity across the signer and this verifier.
+ * EVENFIRE_DEV_KEY_STORE can relocate the store; EXTERNAL_REST_API_JWT_PUBLIC_KEY
+ * always takes precedence.
+ */
+function resolveSessionJwtPublicKey(): string {
+  const fromEnv = process.env.EXTERNAL_REST_API_JWT_PUBLIC_KEY
+  if (fromEnv) return fromEnv
+  if (process.env.CLERUM_DEV_MODE === 'true') {
+    const storeDir =
+      process.env.EVENFIRE_DEV_KEY_STORE ?? join(serviceRoot(), '..', 'control-api', '.dev-keys')
+    const publicPath = join(storeDir, 'session.public.pem')
+    try {
+      return readFileSync(publicPath, 'utf8')
+    } catch {
+      throw new Error(
+        `CLERUM_DEV_MODE=true requires the control-api dev key store at ${storeDir}. ` +
+          'Start control-api once with CLERUM_DEV_MODE=true, or set EXTERNAL_REST_API_JWT_PUBLIC_KEY.'
+      )
+    }
+  }
+  return DEV_SESSION_JWT_PUBLIC_KEY
+}
 export const config: Config = {
   port: Number(process.env.EXTERNAL_REST_API_PORT || 8091),
   jsonBodyLimit: process.env.EXTERNAL_REST_API_JSON_BODY_LIMIT || '150mb',
@@ -162,9 +197,7 @@ export const config: Config = {
   })(),
   controlApiServiceName:
     process.env.EXTERNAL_REST_API_CONTROL_API_SERVICE_NAME || 'external-rest-api',
-  jwtPublicKey: normalizePem(
-    requiredOrDevDefault('EXTERNAL_REST_API_JWT_PUBLIC_KEY', DEV_SESSION_JWT_PUBLIC_KEY)
-  ),
+  jwtPublicKey: normalizePem(resolveSessionJwtPublicKey()),
   jwtIssuer: requiredOrDevDefault('EXTERNAL_REST_API_JWT_ISSUER', 'control-api'),
   jwtAudience: requiredOrDevDefault('EXTERNAL_REST_API_JWT_AUDIENCE', 'profile-ui'),
   profileSessionCookieTtlSeconds: positiveIntegerFromEnv(

@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+
 type Config = {
   port: number
   corsOrigin: string[] | '*'
@@ -184,14 +187,43 @@ RRu+QZm3Lo+5AiCaHkijDCglHsXLhqsYi2AdRiavD1Gk9LKP/ztKw7q/D6fYFzmO
 QwIDAQAB
 -----END PUBLIC KEY-----`)
 
+function serviceRoot(): string {
+  // Works in every supported runtime: CommonJS (dist and ts-node) resolves
+  // __dirname to <service>/dist or <service>/src; Vitest's ESM transform falls
+  // back to the service working directory used by every test/npm script.
+  return typeof __dirname === 'string' && __dirname ? dirname(__dirname) : process.cwd()
+}
+
+/**
+ * In explicit dev mode, verify with the public half control-api publishes next
+ * to its generated RPC signing key, so a monorepo dev boot keeps one shared
+ * key identity across the signer and this verifier. EVENFIRE_DEV_KEY_STORE can
+ * relocate the store; RPC_PROXY_JWT_PUBLIC_KEY always takes precedence.
+ */
+function resolveRpcJwtPublicKey(): string {
+  const fromEnv = process.env.RPC_PROXY_JWT_PUBLIC_KEY
+  if (fromEnv) return fromEnv
+  if (process.env.CLERUM_DEV_MODE === 'true') {
+    const storeDir =
+      process.env.EVENFIRE_DEV_KEY_STORE ?? join(serviceRoot(), '..', 'control-api', '.dev-keys')
+    const publicPath = join(storeDir, 'rpc.public.pem')
+    try {
+      return readFileSync(publicPath, 'utf8')
+    } catch {
+      throw new Error(
+        `CLERUM_DEV_MODE=true requires the control-api dev key store at ${storeDir}. ` +
+          'Start control-api once with CLERUM_DEV_MODE=true, or set RPC_PROXY_JWT_PUBLIC_KEY.'
+      )
+    }
+  }
+  return DEV_RPC_JWT_PUBLIC_KEY
+}
 export const config: Config = {
   port: Number(process.env.RPC_PROXY_PORT || 8094),
   corsOrigin: parseCorsOrigin(
     requiredOrDevDefault('RPC_PROXY_CORS_ORIGIN', 'http://localhost:3000')
   ),
-  jwtPublicKey: normalizePem(
-    requiredOrDevDefault('RPC_PROXY_JWT_PUBLIC_KEY', DEV_RPC_JWT_PUBLIC_KEY)
-  ),
+  jwtPublicKey: normalizePem(resolveRpcJwtPublicKey()),
   jwtIssuer: requiredOrDevDefault('RPC_PROXY_JWT_ISSUER', 'control-api'),
   jwtAudience: requiredOrDevDefault('RPC_PROXY_JWT_AUDIENCE', 'rpc-proxy'),
   upstreamTimeoutMs: parsePositiveIntMs(

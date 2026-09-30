@@ -1,4 +1,4 @@
-import { createPrivateKey, generateKeyPairSync, randomBytes } from 'node:crypto'
+import { createPrivateKey, createPublicKey, generateKeyPairSync, randomBytes } from 'node:crypto'
 import {
   type Stats,
   linkSync,
@@ -22,7 +22,7 @@ export type DevJwtSlot = 'rpc' | 'session' | 'admin'
  * falls back to the service working directory used by every test/npm script.
  */
 const SERVICE_ROOT = typeof __dirname === 'string' && __dirname ? dirname(__dirname) : process.cwd()
-const DEFAULT_STORE_DIR = join(SERVICE_ROOT, '.dev-keys')
+const DEFAULT_STORE_DIR = process.env.EVENFIRE_DEV_KEY_STORE ?? join(SERVICE_ROOT, '.dev-keys')
 
 export function defaultDevSigningKeyStoreDir(): string {
   return DEFAULT_STORE_DIR
@@ -107,6 +107,53 @@ function readPersistedKey(filePath: string, slot: DevJwtSlot): string | undefine
 
 let warnedOnce = false
 
+function readStoredDerivedPublic(publicPath: string): string | undefined {
+  const stats = lstatSync(publicPath, { throwIfNoEntry: false })
+  if (!stats) return undefined
+  if (stats.isSymbolicLink() || !stats.isFile()) {
+    throw new Error(`Dev JWT key store public path is not a regular file: ${publicPath}`)
+  }
+  return readFileSync(publicPath, 'utf8').trim()
+}
+
+/**
+ * Publish the verifying half derived from the signing material as
+ * `<slot>.public.pem` (0644 inside the 0700 store). Sibling dev verifiers read
+ * this file so the monorepo dev boot shares one key identity; it is never
+ * written independently, and an existing copy that disagrees with the signing
+ * material is a hard error.
+ */
+function ensureDerivedPublicKey(slot: DevJwtSlot, storeDir: string, signingPem: string): void {
+  const publicPath = join(storeDir, `${slot}.public.pem`)
+  const derived = createPublicKey(signingPem)
+    .export({ type: 'spki', format: 'pem' })
+    .toString()
+    .trim()
+  const existing = readStoredDerivedPublic(publicPath)
+  if (existing !== undefined) {
+    if (existing !== derived) {
+      throw new Error(
+        `Dev JWT key store public file does not match its signing material: ${publicPath}. ` +
+          'Delete the store only if you accept losing local dev tokens.'
+      )
+    }
+    return
+  }
+  const tempPath = `${publicPath}.tmp-${process.pid.toString(36)}-${randomBytes(6).toString('hex')}`
+  try {
+    writeFileSync(tempPath, derived, { mode: 0o644 })
+    linkSync(tempPath, publicPath)
+    unlinkSync(tempPath)
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
+      removeIfPresent(tempPath)
+      // Another process published first; its content is validated on the next read.
+      return
+    }
+    throw err
+  }
+}
+
 /**
  * Returns the dev private key for a slot, generating and persisting it with
  * exclusive creation on first use. Concurrent first starts converge on one
@@ -123,6 +170,8 @@ export function loadOrGenerateDevJwtPrivateKey(
   ensureStoreDir(storeDir)
   const existing = readPersistedKey(filePath, slot)
   if (existing) {
+    warnOnce()
+    ensureDerivedPublicKey(slot, storeDir, existing)
     warnOnce()
     return existing
   }
@@ -148,13 +197,18 @@ export function loadOrGenerateDevJwtPrivateKey(
       const winner = readPersistedKey(filePath, slot)
       if (winner) {
         warnOnce()
+        ensureDerivedPublicKey(slot, storeDir, winner)
+        warnOnce()
         return winner
       }
     }
     throw err
   }
   assertOwnedRegularFile(filePath)
+  assertOwnedRegularFile(filePath)
+  ensureDerivedPublicKey(slot, storeDir, privateKey)
   warnOnce()
+  return privateKey.trim()
   return privateKey.trim()
 }
 

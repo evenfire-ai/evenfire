@@ -1,5 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { spawn, spawnSync } from 'node:child_process'
+import { createPublicKey } from 'node:crypto'
 import {
   chmodSync,
   mkdirSync,
@@ -197,6 +198,44 @@ describe('devSigningKeys persistence contract', () => {
     symlinkSync(realStore, linkStore)
     expect(() => loadOrGenerateDevJwtPrivateKey('session', linkStore)).toThrow(
       /Dev JWT key store path is not a directory/
+    )
+  })
+
+  it('publishes the derived verifying half next to the signing material', () => {
+    const store = tempStore()
+    const signing = loadOrGenerateDevJwtPrivateKey('rpc', store)
+    const publicPath = join(store, 'rpc.public.pem')
+    const published = readFileSync(publicPath, 'utf8').trim()
+    expect(published).toBe(
+      createPublicKey(signing).export({ type: 'spki', format: 'pem' }).toString().trim()
+    )
+    expect(statSync(publicPath).mode & 0o777).toBe(0o644)
+    loadOrGenerateDevJwtPrivateKey('rpc', store)
+    expect(readFileSync(publicPath, 'utf8').trim()).toBe(published)
+  })
+
+  it('backfills a missing verifying half on reuse', () => {
+    const store = tempStore()
+    const signing = loadOrGenerateDevJwtPrivateKey('session', store)
+    rmSync(join(store, 'session.public.pem'))
+    loadOrGenerateDevJwtPrivateKey('session', store)
+    expect(readFileSync(join(store, 'session.public.pem'), 'utf8').trim()).toBe(
+      createPublicKey(signing).export({ type: 'spki', format: 'pem' }).toString().trim()
+    )
+  })
+
+  it('rejects a published verifying half that disagrees with the signing material', () => {
+    const store = tempStore()
+    loadOrGenerateDevJwtPrivateKey('admin', store)
+    const other = loadOrGenerateDevJwtPrivateKey('rpc', store)
+    rmSync(join(store, 'admin.public.pem'))
+    writeFileSync(
+      join(store, 'admin.public.pem'),
+      createPublicKey(other).export({ type: 'spki', format: 'pem' }).toString(),
+      { mode: 0o644 }
+    )
+    expect(() => loadOrGenerateDevJwtPrivateKey('admin', store)).toThrow(
+      /public file does not match its signing material/
     )
   })
 })
