@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { AppService } from '../appService.js'
+import { config } from '../config.js'
 import { ApiError } from '../httpClient.js'
 import type { EntityChangeStreamEvent } from '../types.js'
 
@@ -157,6 +158,59 @@ describe('AppService entity-change fan-out', () => {
 })
 
 describe('AppService.startEntityChangeStream session expiry', () => {
+  it('does not retry an old committed token against a changing environment', async () => {
+    vi.useFakeTimers()
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    const originalBaseUrl = config.externalRestApiBaseUrl
+    const environmentA = 'https://environment-a.example'
+    const environmentB = 'https://environment-b.example'
+    config.externalRestApiBaseUrl = environmentA
+    const service = new AppService() as any
+    service.sessionToken = 'environment-a-committed-token'
+    service.me = { id: 'user-1', teamId: 'team-1' }
+    setSyntheticSessionToken(service, 'environment-a-committed-token')
+    service.beginPrewarmAuthTransition = () => () => undefined
+    service.suspendDesktopGfsUploadsForAuthBoundary = vi.fn().mockResolvedValue(undefined)
+    service.activateGfsAuthScope = vi.fn()
+    service.stopAllStreams = vi.fn()
+    service.tokenStore = { clearSessionToken: vi.fn().mockResolvedValue(undefined) }
+    const opened: Array<{ token: string; baseUrl: string }> = []
+    service.authClient = {
+      openEntityChangeStream: vi.fn(async (token: string) => {
+        opened.push({ token, baseUrl: config.externalRestApiBaseUrl })
+        throw new Error('temporary connection failure')
+      }),
+    }
+
+    let finishPersistence!: () => void
+    try {
+      service.startEntityChangeStream('stream-1', 7, vi.fn())
+      await flushAsyncWork()
+      expect(opened).toEqual([{ token: 'environment-a-committed-token', baseUrl: environmentA }])
+
+      const switching = service.applyRuntimeEnvironmentChange(async () => {
+        config.externalRestApiBaseUrl = environmentB
+        await new Promise<void>(resolve => {
+          finishPersistence = resolve
+        })
+      })
+      await flushAsyncWork()
+      await vi.advanceTimersByTimeAsync(1_000)
+      await flushAsyncWork()
+
+      expect(opened).toHaveLength(1)
+      finishPersistence()
+      await switching
+      expect(service.sessionToken).toBeNull()
+      expect(opened).toHaveLength(1)
+    } finally {
+      config.externalRestApiBaseUrl = originalBaseUrl
+      service.stopEntityChangeStream('stream-1', 7)
+      vi.useRealTimers()
+      vi.restoreAllMocks()
+    }
+  })
+
   it('does not reset reconnect backoff on synthetic transport-open callbacks', async () => {
     vi.useFakeTimers()
     vi.spyOn(Math, 'random').mockReturnValue(0)

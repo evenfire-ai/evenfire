@@ -959,6 +959,7 @@ export class AppService {
   private entityChangeConnectionStop: ((opts?: { silent?: boolean }) => void) | null = null
   private entityChangeSessionToken: string | null = null
   private entityChangeSessionGeneration = 0
+  private entityChangeEnvironmentSwitching = false
   private entityChangeSessionExpiryDeferred = false
   private entityChangeCursor: string | null = null
   private progressStreams = new Map<
@@ -1667,12 +1668,14 @@ export class AppService {
   }
 
   private async applyRuntimeEnvironmentChange(operation: () => Promise<void>): Promise<void> {
+    const oldEnvKey = getActiveEnvKey()
+    const oldBaseUrl = normalizeDesktopUploadBaseUrl(config.externalRestApiBaseUrl)
+    const oldLegacyEnvKeys = getActiveLegacyEnvKeys()
     const releasePrewarm = this.beginPrewarmAuthTransition()
     try {
-      const oldEnvKey = getActiveEnvKey()
-      const oldBaseUrl = normalizeDesktopUploadBaseUrl(config.externalRestApiBaseUrl)
-      const oldLegacyEnvKeys = getActiveLegacyEnvKeys()
       const hadAuthenticatedScope = Boolean(this.sessionToken && this.me)
+      this.entityChangeEnvironmentSwitching = true
+      this.entityChangeConnectionStop?.({ silent: true })
       // Invalidate a restore that may still be awaiting keychain/getMe before it
       // can bind an old-environment token to the newly selected runtime.
       this.sessionGeneration += 1
@@ -1680,7 +1683,11 @@ export class AppService {
       try {
         await operation()
       } catch (error) {
-        if (hadAuthenticatedScope && this.sessionToken && this.me) this.activateGfsAuthScope()
+        const environmentUnchanged =
+          getActiveEnvKey() === oldEnvKey &&
+          normalizeDesktopUploadBaseUrl(config.externalRestApiBaseUrl) === oldBaseUrl
+        if (!environmentUnchanged) this.clearAuthenticatedSessionState()
+        else if (hadAuthenticatedScope && this.sessionToken && this.me) this.activateGfsAuthScope()
         throw error
       }
       const boundaryChanged =
@@ -1693,6 +1700,13 @@ export class AppService {
         this.activateGfsAuthScope()
       }
     } finally {
+      this.entityChangeEnvironmentSwitching = false
+      if (
+        getActiveEnvKey() === oldEnvKey &&
+        normalizeDesktopUploadBaseUrl(config.externalRestApiBaseUrl) === oldBaseUrl
+      ) {
+        this.ensureEntityChangeConnection()
+      }
       releasePrewarm()
     }
   }
@@ -2938,6 +2952,7 @@ export class AppService {
   }
 
   private ensureEntityChangeConnection(): void {
+    if (this.entityChangeEnvironmentSwitching) return
     if (this.entityChangeConnectionStop || this.entityChangeSubscribers.size === 0) return
     if (
       !this.entityChangeSessionToken &&
