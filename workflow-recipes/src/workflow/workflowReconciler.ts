@@ -287,23 +287,49 @@ export const NETWORK_POLICY_OWNERSHIP_CONDITION_TYPE = 'WorkflowNetworkPolicyOwn
  *   later `reconcile()` prune that lands, or the finalizer, clears it; every
  *   other path carries it over.
  *
- * Both facts together are one `RetryPending` marker with its own message.
+ * Both facts together are one `RetryAndPrunePending` marker. Each combination
+ * has its own reason and the facts are read back from the reason alone.
  */
 export const NETWORK_POLICIES_CONVERGED_CONDITION_TYPE = 'WorkflowNetworkPoliciesConverged'
-
-const NETWORK_POLICY_RETRY_PENDING_REASON = 'RetryPending'
-const NETWORK_POLICY_PRUNE_PENDING_REASON = 'PrunePending'
-const NETWORK_POLICY_RETRY_PENDING_MESSAGE =
-  'One or more run-lane NetworkPolicies are pending a retry (terminating or contended)'
-const NETWORK_POLICY_PRUNE_PENDING_MESSAGE =
-  'One or more run-lane NetworkPolicies the spec no longer wants are pending a delete; the next reconcile() pass or the finalizer removes them'
-const NETWORK_POLICY_RETRY_AND_PRUNE_PENDING_MESSAGE =
-  'One or more run-lane NetworkPolicies are pending a retry (terminating or contended), and one or more the spec no longer wants are pending a delete'
 
 /** The two facts the WorkflowNetworkPoliciesConverged marker carries. */
 export interface NetworkPolicyMarkerFacts {
   applyPending: boolean
   prunePending: boolean
+}
+
+/**
+ * One reason per combination of facts. The facts are read back from the
+ * reason alone; `message` is prose for operators and is never compared.
+ */
+const NETWORK_POLICY_MARKER_REASONS = {
+  RetryPending: {
+    facts: { applyPending: true, prunePending: false },
+    message: 'One or more run-lane NetworkPolicies are pending a retry (terminating or contended)',
+  },
+  PrunePending: {
+    facts: { applyPending: false, prunePending: true },
+    message:
+      'One or more run-lane NetworkPolicies the spec no longer wants are pending a delete; the next reconcile() pass or the finalizer removes them',
+  },
+  RetryAndPrunePending: {
+    facts: { applyPending: true, prunePending: true },
+    message:
+      'One or more run-lane NetworkPolicies are pending a retry (terminating or contended), and one or more the spec no longer wants are pending a delete',
+  },
+} as const satisfies Record<string, { facts: NetworkPolicyMarkerFacts; message: string }>
+
+type NetworkPolicyMarkerReason = keyof typeof NETWORK_POLICY_MARKER_REASONS
+
+function isNetworkPolicyMarkerReason(
+  reason: string | undefined
+): reason is NetworkPolicyMarkerReason {
+  return reason !== undefined && Object.hasOwn(NETWORK_POLICY_MARKER_REASONS, reason)
+}
+
+function networkPolicyMarkerReason(facts: NetworkPolicyMarkerFacts): NetworkPolicyMarkerReason {
+  if (facts.applyPending) return facts.prunePending ? 'RetryAndPrunePending' : 'RetryPending'
+  return 'PrunePending'
 }
 
 /**
@@ -358,16 +384,10 @@ export function networkPolicyMarkerFacts(
   const marker = (conditions ?? []).find(
     c => c.type === NETWORK_POLICIES_CONVERGED_CONDITION_TYPE && c.status === 'False'
   )
-  if (marker?.reason === NETWORK_POLICY_PRUNE_PENDING_REASON) {
-    return { applyPending: false, prunePending: true }
+  if (!isNetworkPolicyMarkerReason(marker?.reason)) {
+    return { applyPending: false, prunePending: false }
   }
-  if (marker?.reason === NETWORK_POLICY_RETRY_PENDING_REASON) {
-    return {
-      applyPending: true,
-      prunePending: marker.message === NETWORK_POLICY_RETRY_AND_PRUNE_PENDING_MESSAGE,
-    }
-  }
-  return { applyPending: false, prunePending: false }
+  return { ...NETWORK_POLICY_MARKER_REASONS[marker.reason].facts }
 }
 
 /**
@@ -384,17 +404,12 @@ export function buildNetworkPolicyConvergedCondition(
   const existing = existingConditions?.find(
     c => c.type === NETWORK_POLICIES_CONVERGED_CONDITION_TYPE && c.status === 'False'
   )
+  const reason = networkPolicyMarkerReason(facts)
   return {
     type: NETWORK_POLICIES_CONVERGED_CONDITION_TYPE,
     status: 'False',
-    reason: facts.applyPending
-      ? NETWORK_POLICY_RETRY_PENDING_REASON
-      : NETWORK_POLICY_PRUNE_PENDING_REASON,
-    message: facts.applyPending
-      ? facts.prunePending
-        ? NETWORK_POLICY_RETRY_AND_PRUNE_PENDING_MESSAGE
-        : NETWORK_POLICY_RETRY_PENDING_MESSAGE
-      : NETWORK_POLICY_PRUNE_PENDING_MESSAGE,
+    reason,
+    message: NETWORK_POLICY_MARKER_REASONS[reason].message,
     lastTransitionTime: existing?.lastTransitionTime ?? now,
   }
 }
