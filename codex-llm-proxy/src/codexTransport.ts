@@ -5,7 +5,11 @@ import {
   parseCodexCompletionRequest,
 } from '@clerum/llm-provider-attempt-contract'
 import { chatgptUpstreamHeaders } from './chatgptUpstreamHeaders.js'
-import type { FinalizeAttemptSuccess, RedeemAttemptSuccess } from './controlApiClient.js'
+import {
+  type FinalizeAttemptSuccess,
+  type RedeemAttemptSuccess,
+  fetchCauseCode,
+} from './controlApiClient.js'
 import { logger } from './logger.js'
 import {
   CODEX_CATALOG_ORIGIN,
@@ -42,11 +46,27 @@ export class CodexTransportError extends Error {
   constructor(
     readonly code: string,
     message: string,
-    readonly details?: Readonly<Record<string, number | string>>
+    readonly details?: Readonly<Record<string, number | string>>,
+    options?: ErrorOptions
   ) {
-    super(message)
+    super(message, options)
     this.name = 'CodexTransportError'
   }
+}
+
+/**
+ * Review R3-L1: a fetch that failed on the network is undici's TypeError, whose
+ * cause message names the upstream address. It becomes a mapped transport error
+ * that keeps only the cause code, so the attempt line logs `causeCode` and never
+ * the error itself. An error with no code-shaped cause is returned undefined and
+ * stays unmapped, which logs it as a handler defect.
+ */
+function upstreamFetchFailure(err: unknown): CodexTransportError | undefined {
+  const code = fetchCauseCode(err)
+  if (code === undefined) return undefined
+  return new CodexTransportError('provider_unavailable', 'upstream fetch failed', undefined, {
+    cause: { code },
+  })
 }
 
 /**
@@ -225,7 +245,7 @@ export async function streamCodexCompletion(
       throw err
     }
     outcome = 'error'
-    throw err
+    throw upstreamFetchFailure(err) ?? err
   } finally {
     void accessToken
     await finalizeQuietly(input, redeemed, outcome, usage)
@@ -999,7 +1019,7 @@ export async function listCodexModels(input: {
     })
   } catch (err) {
     if (signal.aborted) throw catalogTimeoutError()
-    throw err
+    throw catalogFetchFailure(err)
   }
   if (response.status === 401 || response.status === 403)
     return { outcome: 'auth-rejected', models: [] }
@@ -1015,7 +1035,16 @@ export async function listCodexModels(input: {
     return { outcome: 'unavailable', models: [] }
   }
   const raw = await readBoundedCatalogBody(response, signal)
-  const body = JSON.parse(raw) as unknown
+  let body: unknown
+  try {
+    body = JSON.parse(raw)
+  } catch {
+    logger.warn(
+      { event: 'codex_catalog_upstream', reason: 'invalid_json' },
+      'Codex catalog upstream returned a body that is not JSON'
+    )
+    throw new CodexTransportError('provider_unavailable', 'catalog upstream body is not JSON')
+  }
   return { outcome: 'ready', models: normalizeModels(body) }
 }
 
@@ -1081,6 +1110,19 @@ function normalizeModels(body: unknown): CatalogModel[] {
   return models
 }
 
+// Review R3-L9: the admin route answers a catalog failure with a refusal line
+// that carries only the code, so the cause code of a failed fetch is logged
+// here before the mapped error is thrown.
+function catalogFetchFailure(err: unknown): unknown {
+  const failure = upstreamFetchFailure(err)
+  if (!failure) return err
+  logger.warn(
+    { event: 'codex_catalog_upstream', causeCode: fetchCauseCode(err) },
+    'Codex catalog upstream fetch failed'
+  )
+  return failure
+}
+
 function catalogTimeoutError(): CodexTransportError {
   return new CodexTransportError('provider_unavailable', 'catalog upstream deadline exceeded')
 }
@@ -1112,7 +1154,7 @@ async function readBoundedCatalogBody(response: Response, signal: AbortSignal): 
     await reader.cancel().catch(() => undefined)
     if (err instanceof CodexTransportError) throw err
     if (signal.aborted) throw catalogTimeoutError()
-    throw err
+    throw catalogFetchFailure(err)
   } finally {
     if (onAbort) signal.removeEventListener('abort', onAbort)
     try {
