@@ -38,6 +38,7 @@ import { ToastProvider } from '../Toast'
 vi.mock('@lib/api', () => ({
   apiGet: vi.fn(),
   apiSend: vi.fn(),
+  controlApiUrl: (path: string) => `/control-api${path}`,
   handleControlUIUnauthorized: vi.fn(),
   GFS_UPLOAD_TIMEOUT_MS: 300000,
   getAdminTeams: vi.fn(),
@@ -753,9 +754,9 @@ describe('GfsBrowser', () => {
       streamControllers[0]!.enqueue(new TextEncoder().encode(`${frame}\n`))
     })
 
+    await waitFor(() => expect(childrenReads).toBe(2))
     expect(screen.getByRole('button', { name: 'report.md' })).toBeVisible()
     expect(screen.getByRole('dialog', { name: 'Rename file' })).toBe(dialog)
-    expect(childrenReads).toBe(2)
 
     await act(async () => {
       releaseRefresh({ items: [report], nextCursor: null })
@@ -849,6 +850,7 @@ describe('GfsBrowser', () => {
     await act(async () => {
       streamControllers[0]!.enqueue(new TextEncoder().encode(`${frame}\n`))
     })
+    await waitFor(() => expect(childrenReads).toBe(2))
     expect(screen.getByRole('button', { name: 'report.md' })).toBeVisible()
     expect(screen.getByRole('dialog', { name: 'Rename file' })).toBeVisible()
 
