@@ -162,7 +162,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
   // Per-chat draft from the module-scoped store. Typing only re-renders this
   // component (it's the sole subscriber); the value is restored automatically when
   // activeChatId changes and survives the inline→docked composer swap.
-  const [draft, setDraft] = useComposerDraft(activeChatId)
+  const [draft, setDraft] = useComposerDraft(activeChatId, selectedAgent ?? undefined)
   const composerInputRef = useRef<HTMLTextAreaElement | null>(null)
   const composerInputWidthRef = useRef<number | null>(null)
   const composerFileInputRef = useRef<HTMLInputElement | null>(null)
@@ -1197,6 +1197,9 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
       ) : null}
       {globalFilesModalOpen ? (
         <ComposerGlobalFilesModal
+          attachedIds={composerReferenceAttachments
+            .filter(attachment => attachment.type === 'global_file')
+            .map(attachment => attachment.id)}
           onAdd={onAddComposerReferenceAttachments}
           onClose={() => setGlobalFilesModalOpen(false)}
         />

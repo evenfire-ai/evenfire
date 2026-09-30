@@ -13,6 +13,10 @@ const REGISTRY_PATH = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   '../../../control-api/src/routes/admin/registry.ts'
 )
+const GATEWAY_PATH = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '../../../control-api/test/mockGateway.ts'
+)
 
 /** Execute the registry install producer's Secret-name and envSecret expressions. */
 function registrySecretFactory(): {
@@ -110,6 +114,38 @@ function registrySecretFactory(): {
     .filter(candidate => candidate.pos < registryAnnotations[0].pos)
     .at(-1)
   if (!labels) throw new Error('Registry labels producer changed; rederive the frontend fixture')
+  const gatewaySource = ts.createSourceFile(
+    GATEWAY_PATH,
+    readFileSync(GATEWAY_PATH, 'utf8'),
+    ts.ScriptTarget.Latest,
+    true
+  )
+  const gatewayMetadata: ts.Expression[] = []
+  function visitGateway(node: ts.Node): void {
+    if (
+      ts.isVariableDeclaration(node) &&
+      node.name.getText(gatewaySource) === 'row' &&
+      node.initializer &&
+      ts.isObjectLiteralExpression(node.initializer)
+    ) {
+      const metadata = node.initializer.properties.find(
+        property =>
+          ts.isPropertyAssignment(property) && property.name.getText(gatewaySource) === 'metadata'
+      )
+      if (
+        metadata &&
+        ts.isPropertyAssignment(metadata) &&
+        metadata.initializer.getText(gatewaySource).includes('this.allocateUid(plural, ns')
+      ) {
+        gatewayMetadata.push(metadata.initializer)
+      }
+    }
+    ts.forEachChild(node, visitGateway)
+  }
+  visitGateway(gatewaySource)
+  if (gatewayMetadata.length !== 1) {
+    throw new Error('API response metadata producer changed; rederive the frontend fixture')
+  }
   const compiled = ts.transpileModule(
     `const produce = (secretName, credSchema) => (${expression});
      const produceName = (serverName) => (${nameExpression});
@@ -117,7 +153,7 @@ function registrySecretFactory(): {
      const produceMetadata = (body, serverName, targetNs, isLocal, mcpServerSpec, resourceOperationId) => {
        const registryLabels = ${labels.getText(source)};
        const registryAnnotations = ${registryAnnotations[0].getText(source)};
-       return { ...(${registryResourceMetadata[0].getText(source)}), namespace: targetNs };
+       return (${registryResourceMetadata[0].getText(source)});
      };`,
     { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } }
   ).outputText
@@ -138,20 +174,41 @@ function registrySecretFactory(): {
       resourceOperationId: string
     ) => NonNullable<McpServerResource['metadata']>
   }
+  const gatewayCompiled = ts.transpileModule(
+    `function produceResponseMetadata(body, ns, plural) {
+       return (${gatewayMetadata[0].getText(gatewaySource)});
+     }`,
+    { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } }
+  ).outputText
+  const produceResponseMetadata = new Function(
+    `${gatewayCompiled}\nreturn produceResponseMetadata;`
+  )() as (
+    this: { allocateUid: (plural: string, namespace: string, name: string) => string },
+    body: { metadata: NonNullable<McpServerResource['metadata']> },
+    namespace: string,
+    plural: string
+  ) => NonNullable<McpServerResource['metadata']>
 
   return {
     name: producers.produceName,
     envSecret: (secretName, keyNames) =>
       producers.produce(secretName, { keys: keyNames.map(name => ({ name })) }),
-    metadata: input =>
-      producers.produceMetadata(
+    metadata: input => {
+      const metadata = producers.produceMetadata(
         { registryEntryName: input.catalogId, registryEntryVersion: input.catalogVersion },
         input.serverName,
         input.namespace,
         true,
         input.spec,
         '00000000-0000-4000-8000-000000000001'
-      ),
+      )
+      return produceResponseMetadata.call(
+        { allocateUid: (plural, namespace, name) => `uid-${plural}-${namespace}-${name}-1` },
+        { metadata },
+        input.namespace,
+        'mcpservers'
+      )
+    },
   }
 }
 

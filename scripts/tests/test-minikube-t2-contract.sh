@@ -51,6 +51,7 @@ for file in "$MINIKUBE_DIR/profile-readiness.sh" "$ROOT/scripts/tests/test-minik
   "$ROOT/scripts/tests/test-minikube-pre-gate-shadow.sh" \
   "$ROOT/scripts/tests/test-minikube-fenced-recovery-render.sh" \
   "$ROOT/scripts/tests/test-minikube-t2-process-owner.sh" \
+  "$ROOT/scripts/tests/test-minikube-t1-reporter-report.sh" \
   "$ROOT/scripts/tests/test-minikube-explicit-context.sh" \
   "$ROOT/scripts/tests/test-minikube-t2-evidence.sh" \
   "$ROOT/scripts/tests/test-minikube-targeted-health.sh" \
@@ -59,6 +60,7 @@ for file in "$MINIKUBE_DIR/profile-readiness.sh" "$ROOT/scripts/tests/test-minik
 done
 "$ROOT/scripts/tests/test-minikube-t1-port-forward-owner.sh"
 "$ROOT/scripts/tests/test-minikube-t2-process-owner.sh"
+"$ROOT/scripts/tests/test-minikube-t1-reporter-report.sh"
 "$ROOT/scripts/tests/test-minikube-explicit-context.sh"
 "$ROOT/scripts/tests/test-minikube-t2-evidence.sh"
 "$ROOT/scripts/tests/test-minikube-targeted-health.sh"
@@ -360,6 +362,24 @@ complete_pass_line="$(grep -nF 't2_evidence_write complete PASS' "$T2" | tail -1
 if [ -z "$post_runtime_process_check_line" ] || [ -z "$complete_pass_line" ] ||
    [ "$post_runtime_process_check_line" -ge "$complete_pass_line" ]; then
   echo 'FAIL: T2 does not revalidate port-forward ownership before complete PASS' >&2
+  exit 1
+fi
+# t2_evidence_init opens every evidence file with `preflight RUNNING`. The
+# planner closes it; each certification writer must close it too, or a PASS
+# attestation keeps a phase whose latest status reads as still running.
+preflight_plan_body="$(awk '/^run_preflight_plan\(\) \{$/,/^\}$/' "$T2")"
+if [ -z "$preflight_plan_body" ] ||
+   ! grep -Fq 't2_evidence_write preflight PASS' <<<"$preflight_plan_body"; then
+  echo 'FAIL: T2 certification evidence never closes the preflight phase opened by t2_evidence_init' >&2
+  exit 1
+fi
+# awk prints an empty line number when nothing matches, so the explicit FAIL
+# below reports the gap instead of pipefail ending the script silently.
+t1_evidence_init_line="$(awk '$0 == "  t2_evidence_init" { line = NR } END { print line }' "$T1")"
+t1_preflight_pass_line="$(awk 'index($0, "t2_evidence_write preflight PASS") { line = NR } END { print line }' "$T1")"
+if [ -z "$t1_evidence_init_line" ] || [ -z "$t1_preflight_pass_line" ] ||
+   [ "$t1_preflight_pass_line" -le "$t1_evidence_init_line" ]; then
+  echo 'FAIL: T1 certification evidence never closes the preflight phase opened by t2_evidence_init' >&2
   exit 1
 fi
 if ! grep -Fq 'instead of already-synced' "$T2"; then

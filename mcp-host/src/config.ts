@@ -1,6 +1,7 @@
 /**
  * Configuration settings loaded from environment variables.
  */
+import { FILE_REFERENCE_MAX_COUNT } from '@clerum/gfs-interaction-policy'
 import type { ApprovalConfig } from './core/extensions/approvalTypes'
 import type { GuardrailsConfig } from './core/guardrails/config'
 import { NativeToolConfig } from './core/interfaces'
@@ -10,6 +11,7 @@ import {
   parseCodexToolPresentation,
 } from './core/orchestration/toolPresentationPolicy'
 import { ALL_PROVIDERS, type LlmProvider, descriptorFor, isLlmProvider } from './llm/registryCore'
+import type { McpCatalogBootstrapConfig } from './mcp/grantProbe'
 import { HostSpec, McpServerInfo, MemoryConfig, ModelConfig, PersonalizationConfig } from './types'
 
 /** Route families projected by WRC into a recipe-bound mcp-host. */
@@ -108,6 +110,12 @@ export interface Config {
   // Per-heartbeat round budget. A stalled MCP server must not retain the
   // scheduler in-flight forever or cause overlapping rounds.
   mcpStatusHeartbeatTimeoutMs: number
+
+  // Eager catalog-bootstrap probe policy. Bounds how often a user turn / the
+  // SHARED oauth-context gate asks control-api "does this grant exist?" so the
+  // probe cannot starve the host's own token issuance on the shared 60/min
+  // bucket. `enabled` is the kill-switch back to today's lazy admission.
+  mcpCatalogBootstrap: McpCatalogBootstrapConfig
 
   // Agent configuration
   agentTaskDelay: number
@@ -232,6 +240,16 @@ export interface Config {
   enableResponseAttachments: boolean
   attachmentMaxCount: number
   attachmentMaxBytes: number
+  /** Decoded bytes per incoming `kind:'file'` attachment (issue #666). */
+  attachmentFileMaxBytes: number
+  /** Bytes one `clerum__attachment_read` call may return (issue #666). */
+  attachmentTextReadMaxBytes: number
+  /**
+   * Structured file references one incoming message may carry (issue #666).
+   * The shared contract constant the Desktop composer also enforces; not
+   * operator-tunable, because the Desktop cannot observe a Host-only value.
+   */
+  fileReferenceMaxCount: number
   activityBufferSize: number
   activityMaxEventBytes: number
 
@@ -480,6 +498,12 @@ function buildDevHostConfig(provider?: LlmProvider, modelName?: string): HostSpe
 }
 
 const devMode = getEnvBool('CLERUM_DEV_MODE', false)
+// Read once: the top-level field documents the limit, `nativeTool` carries it
+// to `clerum__attachment_read` (#666).
+const attachmentTextReadMaxBytes = getExecutionLimit(
+  'CLERUM_ATTACHMENT_TEXT_READ_MAX_BYTES',
+  262_144
+)
 const configuredWorkflowEnabled = getEnvBool('CLERUM_WORKFLOW_ENABLED', false)
 const configuredRuntimeKind = resolveMcpHostRuntimeKind({
   workflowEnabled: configuredWorkflowEnabled,
@@ -536,6 +560,57 @@ export function validateHccAuthorityTiming(
       `CLERUM_CONTEXT_MAPPER_POLL_INTERVAL (${contextMapperPollIntervalMs}ms) must be less than HCC_AUTHORITY_MAX_STALENESS_MS (${hccAuthorityMaxStalenessMs}ms)`
     )
   }
+}
+
+/**
+ * Parse one positive-integer knob, failing startup closed on a set-but-invalid
+ * value rather than silently falling back — a mistyped probe budget must be
+ * visible at boot, not degrade the shared rate-limit bucket in production.
+ */
+function parseBootstrapNumber(key: string, defaultValue: number, min = 1): number {
+  const raw = process.env[key]
+  const value = raw === undefined ? defaultValue : Number(raw)
+  if (!Number.isFinite(value) || value < min) {
+    throw new Error(`${key} must be a finite number >= ${min} (got '${raw}')`)
+  }
+  return value
+}
+
+// control-api rate-limits `user-token` AND `grants/exists` under one shared
+// `mcp_oauth_broker` bucket (default 60/min per host). If the per-turn probe
+// budget could reach that ceiling, probes alone could starve token issuance —
+// the exact host self-DoS this module exists to prevent. Guard against an
+// operator setting probesPerMin at or above the bucket; mirrors control-api's
+// CONTROL_API_OAUTH_BROKER_RL_PER_MIN default.
+const OAUTH_BROKER_SHARED_BUCKET_PER_MIN = 60
+
+/**
+ * Build the eager catalog-bootstrap probe policy from env. Fail-fast on a probe
+ * timeout that meets or exceeds the wait budget: a probe slower than the whole
+ * turn budget can never complete in time, so the config is nonsensical.
+ */
+export function buildMcpCatalogBootstrapConfig(): McpCatalogBootstrapConfig {
+  const cfg: McpCatalogBootstrapConfig = {
+    enabled: getEnvBool('MCP_CATALOG_BOOTSTRAP_ENABLED', true),
+    waitBudgetMs: parseBootstrapNumber('MCP_CATALOG_BOOTSTRAP_WAIT_BUDGET_MS', 4000),
+    probeTimeoutMs: parseBootstrapNumber('MCP_CATALOG_BOOTSTRAP_PROBE_TIMEOUT_MS', 2000),
+    connectTimeoutMs: parseBootstrapNumber('MCP_CATALOG_BOOTSTRAP_CONNECT_TIMEOUT_MS', 8000),
+    negativeTtlMs: parseBootstrapNumber('MCP_CATALOG_BOOTSTRAP_NEGATIVE_TTL_MS', 15000),
+    failureTtlMs: parseBootstrapNumber('MCP_CATALOG_BOOTSTRAP_FAILURE_TTL_MS', 60000),
+    probesPerMin: parseBootstrapNumber('MCP_CATALOG_BOOTSTRAP_PROBES_PER_MIN', 20),
+    backoffMs: parseBootstrapNumber('MCP_CATALOG_BOOTSTRAP_BACKOFF_MS', 30000),
+  }
+  if (cfg.probeTimeoutMs >= cfg.waitBudgetMs) {
+    throw new Error(
+      `MCP_CATALOG_BOOTSTRAP_PROBE_TIMEOUT_MS (${cfg.probeTimeoutMs}ms) must be less than MCP_CATALOG_BOOTSTRAP_WAIT_BUDGET_MS (${cfg.waitBudgetMs}ms)`
+    )
+  }
+  if (cfg.probesPerMin >= OAUTH_BROKER_SHARED_BUCKET_PER_MIN) {
+    throw new Error(
+      `MCP_CATALOG_BOOTSTRAP_PROBES_PER_MIN (${cfg.probesPerMin}) must be less than the shared mcp_oauth_broker bucket (${OAUTH_BROKER_SHARED_BUCKET_PER_MIN}/min) so probes cannot starve user-token issuance`
+    )
+  }
+  return cfg
 }
 
 // In dev mode, try CLERUM_HOST_CONFIG first, then fall back to building from env vars
@@ -927,7 +1002,7 @@ export const config: Config = {
   // to disable persistence entirely; the loop falls back to the pre-T1.5
   // path (full content inline).
   toolSpilloverEnabled: getEnvBool('CLERUM_TOOL_SPILLOVER_ENABLED', true),
-  toolSpilloverThresholdBytes: parseInt(getEnv('CLERUM_TOOL_SPILLOVER_THRESHOLD', '8192')!, 10),
+  toolSpilloverThresholdBytes: getExecutionLimit('CLERUM_TOOL_SPILLOVER_THRESHOLD', 8192),
   // TTL window for persisted blobs. Default 168h = 1 week. The resolver
   // double-checks the TTL on load even when GC hasn't pruned yet.
   spilloverTtlMs: parseInt(getEnv('CLERUM_SPILLOVER_TTL_HOURS', '168')!, 10) * 3600 * 1000,
@@ -953,12 +1028,16 @@ export const config: Config = {
     // native tool registry (which only receives NativeToolConfig) can steer
     // the cron_manage stateless notice.
     statelessLifecycle: getEnvBool('CLERUM_STATELESS_LIFECYCLE', false),
+    attachmentTextReadMaxBytes,
   },
 
   // Attachment delivery
   enableResponseAttachments: getEnvBool('CLERUM_ENABLE_RESPONSE_ATTACHMENTS', true),
   attachmentMaxCount: parseInt(getEnv('CLERUM_ATTACHMENT_MAX_COUNT', '3')!, 10),
   attachmentMaxBytes: parseInt(getEnv('CLERUM_ATTACHMENT_MAX_BYTES', '52428800')!, 10),
+  attachmentFileMaxBytes: getExecutionLimit('CLERUM_ATTACHMENT_FILE_MAX_BYTES', 3_145_728),
+  attachmentTextReadMaxBytes,
+  fileReferenceMaxCount: FILE_REFERENCE_MAX_COUNT,
   activityBufferSize: parseInt(getEnv('MCP_HOST_ACTIVITY_BUFFER_SIZE', '1000')!, 10),
   activityMaxEventBytes: parseInt(getEnv('MCP_HOST_ACTIVITY_MAX_EVENT_BYTES', '2048')!, 10),
 
@@ -1057,4 +1136,7 @@ export const config: Config = {
     }
     return { enabled, ...seed }
   })(),
+
+  // Eager catalog-bootstrap probe policy (fail-fast validated at load).
+  mcpCatalogBootstrap: buildMcpCatalogBootstrapConfig(),
 }

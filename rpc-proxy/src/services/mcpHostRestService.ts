@@ -1,6 +1,7 @@
 import { config } from '../config.js'
 import type { TraceContextV1 } from '../traceContext.js'
 import { ResolvedServerConnection } from '../types.js'
+import { readMutatingResponseBody } from './upstreamBody.js'
 
 /**
  * Per-MCP-server health row as emitted by mcp-host and forwarded by rpc-proxy.
@@ -122,6 +123,10 @@ export type HostRuntimeMessageRequest = {
   // is deduped (replayed) instead of re-executed.
   messageId?: string
   traceContext?: TraceContextV1
+  // Issue #666 — structured file references (`FileReferenceV1[]`), forwarded
+  // verbatim. mcp-host owns the contract and answers 200 `success:false` with
+  // a typed code for any malformed value.
+  fileReferences?: unknown
   [key: string]: unknown
 }
 
@@ -131,7 +136,7 @@ export type HostRuntimeMessageRequest = {
 export async function forwardHostMessageToHost(
   host: ResolvedServerConnection,
   message: HostRuntimeMessageRequest,
-  options?: { async?: boolean }
+  options?: { async?: boolean; timeoutMs?: number }
 ): Promise<Record<string, unknown>> {
   const payload = {
     ...message,
@@ -140,7 +145,9 @@ export async function forwardHostMessageToHost(
   const baseUrl = host.url.replace(/\/+$/, '')
   const query = options?.async ? '?async=true' : ''
   const abortController = new AbortController()
-  const timeout = setTimeout(() => abortController.abort(), config.upstreamTimeoutMs)
+  const timeout = setTimeout(() => {
+    abortController.abort()
+  }, options?.timeoutMs ?? config.upstreamTimeoutMs)
   try {
     const response = await fetch(`${baseUrl}/v1/runtime/messages${query}`, {
       method: 'POST',
@@ -159,14 +166,32 @@ export async function forwardHostMessageToHost(
 
     let body: Record<string, unknown> = {}
     if (rawBody.trim()) {
+      let parsed: unknown
+      let parseError: string | undefined
       try {
-        const parsed = JSON.parse(rawBody) as unknown
-        body =
-          parsed && typeof parsed === 'object' && !Array.isArray(parsed)
-            ? (parsed as Record<string, unknown>)
-            : {}
-      } catch {
-        body = {}
+        parsed = JSON.parse(rawBody) as unknown
+      } catch (error) {
+        parseError = error instanceof Error ? error.name : 'unknown'
+      }
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        body = parsed as Record<string, unknown>
+      } else {
+        // mcp-host answers every accepted message with a JSON object, so this is
+        // a broken or foreign upstream. The message may already be admitted, so
+        // the answer stays an empty ack instead of an error that would invite a
+        // resend; the log is the trace of what was received.
+        console.warn(
+          JSON.stringify({
+            event: 'host_message_ack_unreadable',
+            hostRef: payload.hostRef,
+            messageId: payload.messageId,
+            status: response.status,
+            contentType: response.headers.get('content-type'),
+            reason: parseError ?? 'not_an_object',
+            bodyLength: rawBody.length,
+            bodySnippet: rawBody.slice(0, 300),
+          })
+        )
       }
     }
     return body
@@ -177,11 +202,12 @@ export async function forwardHostMessageToHost(
 
 export async function forwardTaskResultFromHost(
   host: ResolvedServerConnection,
-  taskId: string
+  taskId: string,
+  timeoutMs = config.upstreamTimeoutMs
 ): Promise<Record<string, unknown> | null> {
   const baseUrl = host.url.replace(/\/+$/, '')
   const abortController = new AbortController()
-  const timeout = setTimeout(() => abortController.abort(), config.upstreamTimeoutMs)
+  const timeout = setTimeout(() => abortController.abort(), timeoutMs)
   try {
     const response = await fetch(
       `${baseUrl}/v1/runtime/tasks/${encodeURIComponent(taskId)}/result`,
@@ -195,8 +221,10 @@ export async function forwardTaskResultFromHost(
       }
     )
     if (response.status === 404) return null
-    if (!response.ok) throw new UpstreamHostError(response.status, '')
     const rawBody = await response.text()
+    // The body carries mcp-host's `host_draining` fence, which is what makes a
+    // draining 503 wake-eligible (isHostDrainingError reads bodySnippet).
+    if (!response.ok) throw new UpstreamHostError(response.status, rawBody.slice(0, 300))
     if (!rawBody.trim()) return null
     try {
       const parsed = JSON.parse(rawBody) as unknown
@@ -217,38 +245,38 @@ export type CancelUpstreamResult = {
   contentType: string | null
 }
 
+/**
+ * Task cancel is a mutating POST without an idempotency key, so it owns no
+ * deadline: the caller's `signal` carries the client disconnect and, on a
+ * wake-and-hold retry only, the hold deadline (rpc.ts `mutatingCallSignal`).
+ */
 export async function forwardCancelToHost(
   host: ResolvedServerConnection,
   taskId: string,
-  userId?: string
+  userId: string,
+  signal: AbortSignal
 ): Promise<CancelUpstreamResult> {
+  // mcp-host applies its ownership check to this userId, so it must be the
+  // caller's own subject; a stand-in identity would be checked instead.
+  if (!userId) throw new Error('task cancel requires the caller subject')
   const baseUrl = host.url.replace(/\/+$/, '')
-  const abortController = new AbortController()
-  const timeout = setTimeout(() => abortController.abort(), config.upstreamTimeoutMs)
-  // Mirrors the approve/deny pattern: always forward userId so mcp-host can
-  // apply the ownership check. Falls back to 'desktop-app' when absent.
-  const upstreamBody = { userId: userId || 'desktop-app' }
-  try {
-    const response = await fetch(
-      `${baseUrl}/v1/runtime/tasks/${encodeURIComponent(taskId)}/cancel`,
-      {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          ...host.headers,
-        },
-        body: JSON.stringify(upstreamBody),
-        signal: abortController.signal,
-      }
-    )
-    const body = await response.text()
-    return {
-      status: response.status,
-      body,
-      contentType: response.headers.get('content-type'),
-    }
-  } finally {
-    clearTimeout(timeout)
+  const upstreamBody = { userId }
+  const response = await fetch(`${baseUrl}/v1/runtime/tasks/${encodeURIComponent(taskId)}/cancel`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      ...host.headers,
+    },
+    body: JSON.stringify(upstreamBody),
+    signal,
+  })
+  // Cancel is a mutating POST without an idempotency key: a body failure
+  // after the headers must not re-issue it through the wake path.
+  const body = await readMutatingResponseBody(response)
+  return {
+    status: response.status,
+    body,
+    contentType: response.headers.get('content-type'),
   }
 }
 

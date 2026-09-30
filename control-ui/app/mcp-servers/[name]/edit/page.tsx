@@ -8,6 +8,7 @@ import { CreateFlowPanel } from '@components/CreateFlowPanel'
 import { CreatePageHeader } from '@components/CreatePageHeader'
 import { DashboardLayout } from '@components/DashboardLayout'
 import { EgressEditor } from '@components/EgressEditor'
+import { OAuthImmutableFields } from '@components/OAuthImmutableFields'
 import { IconCable } from '@components/Sidebar/icons'
 import { TabBar } from '@components/TabBar'
 import { useToast } from '@components/Toast'
@@ -44,6 +45,7 @@ import {
   sortAccessPrincipals,
 } from '@lib/connectorAccess'
 import type { EgressEditorStatus } from '@lib/egressModel'
+import { extractOAuthImmutables, oauthClientSecretRefName } from '@lib/oauthInstall'
 
 function parseConnectorEditTab(value: string | string[] | undefined): ConnectorEditTab {
   const candidate = Array.isArray(value) ? value[0] : value
@@ -265,6 +267,9 @@ export default function EditMcpServerPage() {
   const nonCanonicalSecretName = server?.spec
     ? nonCanonicalEnvSecretName(server.spec as Record<string, unknown>)
     : undefined
+  const oauthImmutables = server?.spec
+    ? extractOAuthImmutables(server.spec as Record<string, unknown>)
+    : null
   const registryCredentialSource = useMemo(
     () => resolveRegistryCredentialSource(server?.metadata),
     [server?.metadata]
@@ -336,6 +341,14 @@ export default function EditMcpServerPage() {
                     <code>{JSON.stringify(nonCanonicalSecretName)}</code>. Correct the connector
                     reference before editing credentials.
                   </div>
+                ) : oauthImmutables ? (
+                  // OAuth credentials live in clientSecretRef, not envSecret.
+                  <OAuthImmutableFields
+                    oauth={oauthImmutables}
+                    credentialSecretName={oauthClientSecretRefName(
+                      server.spec as Record<string, unknown>
+                    )}
+                  />
                 ) : (
                   <UpdateConnectorCredentials
                     serverName={name}
