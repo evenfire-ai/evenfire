@@ -24,6 +24,9 @@ export const DEV_POST_0106_MIGRATION_VERSIONS = Object.freeze([
   '0116_mcp_secret_rollback_permits',
   '0117_control_admin_invitation_replace_inviter',
   '0118_control_admin_replace_inviter_accept_guard',
+  '0119_dynamic_clients_table',
+  '0120_dynamic_clients_runtime_access',
+  '0121_oauth_install_identity',
 ] as const)
 
 const NON_PR1_POST_0106_MIGRATION_VERSIONS = new Set<string>(DEV_POST_0106_MIGRATION_VERSIONS)

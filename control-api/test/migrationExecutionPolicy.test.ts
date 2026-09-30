@@ -32,10 +32,13 @@ const FRESH_TABLE_INDEXES = Object.freeze([
 
 describe('D34 migration execution policy', () => {
   it('classifies inherited control-admin migrations as parent-dev migrations', () => {
-    expect(DEV_POST_0106_MIGRATION_VERSIONS.slice(-3)).toEqual([
+    expect(DEV_POST_0106_MIGRATION_VERSIONS.slice(-6)).toEqual([
       '0116_mcp_secret_rollback_permits',
       '0117_control_admin_invitation_replace_inviter',
       '0118_control_admin_replace_inviter_accept_guard',
+      '0119_dynamic_clients_table',
+      '0120_dynamic_clients_runtime_access',
+      '0121_oauth_install_identity',
     ])
     expect(PR1_MIGRATION_VERSIONS).not.toContain('0117_control_admin_invitation_replace_inviter')
     expect(PR1_MIGRATION_VERSIONS).not.toContain('0118_control_admin_replace_inviter_accept_guard')
@@ -257,8 +260,8 @@ describe('D34 PR1 migration runner', () => {
     })
 
     expect(applied).toEqual([...DEV_POST_0106_MIGRATION_VERSIONS, ...PR1_MIGRATION_VERSIONS])
-    expect(queries.filter(({ sql }) => sql === 'BEGIN')).toHaveLength(19)
-    expect(queries.filter(({ sql }) => sql === 'COMMIT')).toHaveLength(19)
+    expect(queries.filter(({ sql }) => sql === 'BEGIN')).toHaveLength(22)
+    expect(queries.filter(({ sql }) => sql === 'COMMIT')).toHaveLength(22)
     expect(queries.filter(({ sql }) => sql === 'ROLLBACK')).toHaveLength(0)
   })
 
