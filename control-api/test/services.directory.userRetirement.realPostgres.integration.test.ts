@@ -4,6 +4,7 @@ import { Pool } from 'pg'
 import { initDb, pool } from '../src/db.js'
 import { retireDesktopUser } from '../src/services/directory/users.js'
 import { gfsDesktopOperatorLinkService } from '../src/services/gfsDesktopOperatorLinkService.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
@@ -56,7 +57,7 @@ describeRealPostgres('retireDesktopUser on real PostgreSQL', () => {
 
   afterAll(async () => {
     corePoolConnectSpy?.mockRestore()
-    await testPool?.end()
+    await endPoolAndWaitForClients(testPool)
     if (!adminPool) return
     await adminPool.query(
       `SELECT pg_terminate_backend(pid) FROM pg_stat_activity

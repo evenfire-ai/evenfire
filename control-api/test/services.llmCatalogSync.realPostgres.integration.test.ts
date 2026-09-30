@@ -5,6 +5,7 @@ import type { ImageInputCapability } from '@clerum/llm-providers'
 import { initDb } from '../src/db.js'
 import { type CatalogSyncResult, syncDiscoveredModels } from '../src/services/llmCatalogSync.js'
 import { loadStub, trimSnapshot, withModalities } from './helpers/modelsDevFixtures.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 import './realPostgres.requirement.ts'
 
 // R1-M2: run `syncDiscoveredModels` against a REAL PostgreSQL. The in-memory
@@ -211,7 +212,7 @@ describeRealPostgres('syncDiscoveredModels on real PostgreSQL (#654 image_input)
   })
 
   afterAll(async () => {
-    await dbPool?.end()
+    await endPoolAndWaitForClients(dbPool)
     if (!adminPool) return
     await adminPool.query(
       `SELECT pg_terminate_backend(pid)

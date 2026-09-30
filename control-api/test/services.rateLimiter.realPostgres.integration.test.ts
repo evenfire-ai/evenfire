@@ -6,6 +6,7 @@ import {
   acquireRateLimitConcurrencyLease,
   checkAndIncrementWithQuery,
 } from '../src/services/rateLimiterService.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
@@ -40,7 +41,7 @@ describeRealPostgres('rate limiter atomicity on real PostgreSQL', () => {
 
   afterAll(async () => {
     await pool?.query('DELETE FROM rate_limit_buckets WHERE bucket_key = $1', [bucketKey])
-    await pool?.end()
+    await endPoolAndWaitForClients(pool)
     if (!adminPool) return
     await adminPool.query(
       `SELECT pg_terminate_backend(pid) FROM pg_stat_activity

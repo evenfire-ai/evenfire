@@ -3,6 +3,7 @@ import { randomBytes, randomUUID } from 'node:crypto'
 import { Pool } from 'pg'
 import { initDb, pool } from '../src/db.js'
 import { deleteControlAdmin } from '../src/services/adminAuthService.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 import './realPostgres.requirement.ts'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
@@ -74,7 +75,7 @@ describeRealPostgres('deleteControlAdmin on real PostgreSQL', () => {
   afterAll(async () => {
     querySpy?.mockRestore()
     connectSpy?.mockRestore()
-    await testPool?.end()
+    await endPoolAndWaitForClients(testPool)
     if (!adminPool) return
     await adminPool.query(
       `SELECT pg_terminate_backend(pid) FROM pg_stat_activity

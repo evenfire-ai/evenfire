@@ -2,6 +2,7 @@ import { afterAll, beforeAll, expect, vi, describe as vitestDescribe } from 'vit
 import { it } from 'vitest'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { Pool, type PoolClient } from 'pg'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 // issue #375 M3 (jozer review): controllable PASSTHROUGH seam. Everything stays
 // real (the actual append implementation runs) until a test arms `failNext`,
@@ -111,9 +112,9 @@ describeRealPostgres(
         /* teardown */
       }
       listenClient?.release()
-      await listenPool?.end()
-      await db?.pool.end()
-      await db?.rateLimitPool.end()
+      await endPoolAndWaitForClients(listenPool)
+      await endPoolAndWaitForClients(db?.pool)
+      await endPoolAndWaitForClients(db?.rateLimitPool)
       if (previousPgConnectionString === undefined) {
         delete process.env.CONTROL_API_PG_CONNECTION_STRING
       } else {
