@@ -1141,6 +1141,16 @@ body.cu-body {
   overflow: auto;
 }
 
+/* The usage dashboard's body is the flexed child of a viewport-fill card whose
+   ancestors are all height-capped or overflow-hidden (.cu-main is locked to
+   100vh with overflow hidden, .cu-card clips). Without its own scroll, content
+   past the fold — the breakdown list under the fixed-height chart — is clipped
+   with no scrollbar anywhere. The body owns the overflow, so the panel header
+   stays visible while the content scrolls. */
+.cu-card--viewport-fill > .cu-card__body.cu-usage-body {
+  overflow: auto;
+}
+
 .cu-not-found {
   text-align: center;
 }
