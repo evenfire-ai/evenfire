@@ -28,6 +28,7 @@ STATE_TEMP_PROFILE=""
 STATE_TEMP_PORTS=""
 STATE_NEW_CACHE_DIR=false
 PORT_FORWARD_OWNER_LOADED=false
+CONTEXT_IDENTITY_LOADED=false
 
 die() {
   printf 'ERROR: %s\n' "$*" >&2
@@ -102,10 +103,16 @@ normalize_cache_root() {
   fi
 }
 
-# Refuses the kube contexts shared across sessions or clusters: the Clerum dev
-# and production contexts, the default minikube and Docker Desktop contexts,
-# every GKE context (gke_<project>_<zone>_<cluster>, covered by *gke*) and the
-# protected names profile-owner.sh also refuses. Matching is case-insensitive.
+# Refuses by name the kube contexts shared across sessions or clusters: the
+# Clerum dev and production contexts, the default minikube and Docker Desktop
+# contexts, GKE contexts under their generated gke_<project>_<zone>_<cluster>
+# name (covered by *gke*) and the protected names profile-owner.sh also
+# refuses. Matching is case-insensitive. A name list cannot recognise a renamed
+# remote context, so this is only the first barrier: the profile must also be
+# owned (profile-owner.sh) and in the clerum-* namespace, and before any
+# minikube -p or kubectl --context call its kube context must point at a local
+# API server (require_local_context_endpoint) and, once the cluster answers,
+# identify this Minikube profile (require_profile_cluster_identity).
 refuse_shared_profile_name() {
   local name="$1" normalized
   normalized="$(printf '%s' "${name}" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
@@ -520,6 +527,7 @@ init_profile() {
   normalize_cache_root
   PROFILE_OWNER_SCRIPT="${REPO_DIR}/scripts/minikube/profile-owner.sh"
   PORT_FORWARD_OWNER_SCRIPT="${REPO_DIR}/scripts/minikube/port-forward-owner.sh"
+  CONTEXT_IDENTITY_SCRIPT="${REPO_DIR}/scripts/minikube/context-identity.sh"
   DOCKER_CLI_ENV_SCRIPT="${REPO_DIR}/scripts/minikube/docker-cli-env.sh"
   DEADLINE_RUNNER="${REPO_DIR}/scripts/minikube/run-with-deadline.mjs"
   [[ -f "${PROFILE_OWNER_SCRIPT}" && -x "${PROFILE_OWNER_SCRIPT}" && ! -L "${PROFILE_OWNER_SCRIPT}" ]] ||
@@ -634,6 +642,69 @@ load_port_forward_owner() {
   [[ "${HOST}" == 127.0.0.1 ]] ||
     die 'PORT_FORWARD_OWNER_BINDING_INVALID: PF ownership records require HOST=127.0.0.1'
   PORT_FORWARD_OWNER_LOADED=true
+}
+
+load_context_identity() {
+  [[ "${CONTEXT_IDENTITY_LOADED}" == true ]] && return 0
+  require_command kubectl python3
+  if [[ ! -f "${CONTEXT_IDENTITY_SCRIPT}" || ! -r "${CONTEXT_IDENTITY_SCRIPT}" || -L "${CONTEXT_IDENTITY_SCRIPT}" ]]; then
+    die "CONTEXT_IDENTITY_UNAVAILABLE: refusing to address a cluster without ${CONTEXT_IDENTITY_SCRIPT}"
+  fi
+
+  # The predicates the T2 lane applies in t2_context_check and
+  # t2_profile_context_identity_check (scripts/minikube/t2-common.sh).
+  # shellcheck source=/dev/null
+  . "${CONTEXT_IDENTITY_SCRIPT}"
+  local function_name
+  for function_name in kube_endpoint_host kube_endpoint_is_local minikube_nodes_identify_profile; do
+    declare -F "${function_name}" >/dev/null ||
+      die "CONTEXT_IDENTITY_API_INVALID: missing ${function_name} in ${CONTEXT_IDENTITY_SCRIPT}"
+  done
+  CONTEXT_IDENTITY_LOADED=true
+}
+
+# kube_context_server <context>: prints the API server of the kubeconfig
+# context named <context>, or nothing when there is no such context. It reads
+# the kubeconfig only and never contacts a cluster.
+kube_context_server() {
+  local context="$1" contexts server
+  contexts="$(kubectl config get-contexts -o name)" ||
+    die 'BRANCH_PROFILE_REMOTE_CONTEXT: unable to read the kubeconfig contexts'
+  grep -Fqx -- "${context}" <<<"${contexts}" || return 0
+  server="$(kubectl config view --raw --minify "--context=${context}" -o 'jsonpath={.clusters[0].cluster.server}')" ||
+    die "BRANCH_PROFILE_REMOTE_CONTEXT: unable to read the API server of kube context ${context}"
+  [[ -n "${server}" ]] ||
+    die "BRANCH_PROFILE_REMOTE_CONTEXT: kube context ${context} has no API server"
+  printf '%s' "${server}"
+}
+
+# minikube -p and kubectl --context address a cluster by context name alone, and
+# `minikube -p <p> delete` on a profile minikube does not know removes the
+# kubeconfig context of that name. So a context named after the profile must
+# point at this machine before either runs. A missing context is allowed:
+# minikube start creates it, and kubectl cannot reach a cluster through it.
+require_local_context_endpoint() {
+  load_context_identity
+  local server
+  server="$(kube_context_server "${PROFILE}")" || exit 1
+  [[ -n "${server}" ]] || return 0
+  kube_endpoint_is_local "${server}" ||
+    die "BRANCH_PROFILE_REMOTE_CONTEXT: kube context ${PROFILE} points at a non-local API server ($(kube_endpoint_host "${server}")); refusing to run minikube or kubectl against it. That context may belong to a cluster in use: stop and ask before renaming or removing it"
+}
+
+# A local endpoint is necessary but not sufficient: the context may name
+# another local Minikube profile, or a LAN cluster on a private address. The
+# cluster must have a node labelled minikube.k8s.io/name=<profile> at the IP
+# `minikube -p <profile> ip` reports.
+require_profile_cluster_identity() {
+  load_context_identity
+  local expected_ip nodes_json
+  expected_ip="$(run_bounded minikube-ip "${MINIKUBE_STATUS_TIMEOUT_SECONDS}" minikube -p "${PROFILE}" ip)" ||
+    die "BRANCH_PROFILE_CONTEXT_IDENTITY: minikube did not report an IP for profile ${PROFILE}"
+  nodes_json="$(kubectl "--context=${PROFILE}" "--request-timeout=${KUBECTL_REQUEST_TIMEOUT}" get nodes -o json)" ||
+    die "BRANCH_PROFILE_CONTEXT_IDENTITY: unable to read the nodes of kube context ${PROFILE}"
+  minikube_nodes_identify_profile "${nodes_json}" "${PROFILE}" "${expected_ip}" ||
+    die "BRANCH_PROFILE_CONTEXT_IDENTITY: kube context ${PROFILE} does not identify Minikube profile ${PROFILE} at ${expected_ip:-<no IP>}; refusing to use it"
 }
 
 probe_service() {
@@ -927,6 +998,7 @@ ensure_shims() {
 
 cmd_start() {
   require_command git minikube kubectl helm shasum
+  require_local_context_endpoint
   check_docker_ready
   check_all_ports_free
   persist_state
@@ -964,12 +1036,14 @@ cmd_start() {
   fi
   run_bounded minikube-status "${MINIKUBE_STATUS_TIMEOUT_SECONDS}" \
     minikube -p "${PROFILE}" status
+  require_profile_cluster_identity
   kubectl "--context=${PROFILE}" "--request-timeout=${KUBECTL_REQUEST_TIMEOUT}" cluster-info
   kubectl "--context=${PROFILE}" "--request-timeout=${KUBECTL_REQUEST_TIMEOUT}" get nodes
 }
 
 cmd_status() {
   require_existing_profile
+  require_local_context_endpoint
   printf 'profile: %s\n\n' "${PROFILE}"
   # `minikube status` exits non-zero for a stopped cluster. Report that state
   # and the reachability line, then return the status code so a stopped
@@ -979,6 +1053,7 @@ cmd_status() {
     minikube -p "${PROFILE}" status || minikube_status=$?
   printf '\n'
   if cluster_reachable; then
+    require_profile_cluster_identity
     kubectl "--context=${PROFILE}" "--request-timeout=${KUBECTL_REQUEST_TIMEOUT}" get nodes
     printf '\n'
     kubectl "--context=${PROFILE}" "--request-timeout=${KUBECTL_REQUEST_TIMEOUT}" get deploy -A
@@ -995,10 +1070,12 @@ cmd_pf() {
   require_command git kubectl curl shasum
   require_existing_profile
   load_port_forward_owner
+  require_local_context_endpoint
   if ! cluster_reachable; then
     printf 'ERROR: cluster not reachable for context %s\n' "${PROFILE}" >&2
     exit 1
   fi
+  require_profile_cluster_identity
   persist_state
 
   # Start every forward before judging the set: stopping at the first failure
@@ -1034,10 +1111,12 @@ cmd_pf() {
 cmd_health() {
   require_existing_profile
   load_port_forward_owner
+  require_local_context_endpoint
   if ! cluster_reachable; then
     printf 'ERROR: cluster not reachable for context %s\n' "${PROFILE}" >&2
     exit 1
   fi
+  require_profile_cluster_identity
 
   # Probe every service so one dead forward does not hide the state of the
   # rest; the command still fails when any probe failed.
@@ -1214,6 +1293,7 @@ report_kept_pf_records() {
 
 cmd_stop() {
   require_existing_profile
+  require_local_context_endpoint
   # Clear the verified port-forward records first: a stopped cluster leaves
   # records naming dead kubectl processes, and the next T2 preflight refuses
   # them with PORT_FORWARD_CONFLICT. A record that cannot be verified is kept
@@ -1237,6 +1317,7 @@ cmd_setup() {
   require_command git minikube kubectl helm shasum perl
   require_existing_profile
   require_profile_confirmation setup
+  require_local_context_endpoint
   check_docker_ready
   persist_state
   ensure_shims
@@ -1258,6 +1339,7 @@ cmd_delete() {
     printf 'ERROR: refusing delete. Re-run with CONFIRM_DELETE=%s\n' "${PROFILE}" >&2
     exit 1
   fi
+  require_local_context_endpoint
   # The registry (pids/*.pid) outlives the cluster; clear the port-forward
   # records so the deleted profile does not leave PORT_FORWARD_CONFLICT behind.
   # As in cmd_stop, a kept record is reported and fails the command, but does
