@@ -63,6 +63,19 @@ describe('AnthropicTokenCounter', () => {
     expect(counter.lastObservedInputTokens()).toBe(555)
   })
 
+  it('remembers the decision heuristic stamped with observed usage', () => {
+    const client = makeClient(() => ({ input_tokens: 1 }))
+    const counter = new AnthropicTokenCounter(client, 'claude-opus-4-7')
+    counter.recordObservedUsage({
+      input_tokens: 555,
+      output_tokens: 22,
+      decision_heuristic: 500,
+    })
+    expect(counter.lastObservedDecisionHeuristic()).toBe(500)
+    counter.recordObservedUsage({ input_tokens: 8, output_tokens: 1 })
+    expect(counter.lastObservedDecisionHeuristic()).toBeNull()
+  })
+
   it('countSync returns the heuristic upper bound (no sync path on Anthropic)', () => {
     const client = makeClient(() => ({ input_tokens: 1 }))
     const counter = new AnthropicTokenCounter(client, 'claude-opus-4-7')

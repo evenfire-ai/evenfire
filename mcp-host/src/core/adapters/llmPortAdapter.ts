@@ -25,6 +25,7 @@ import { LlmError, LlmErrorCode } from '../errors'
 import { LlmPort } from '../interfaces'
 import type { SystemPromptParts } from '../reasoning/systemPrompt'
 import { redactDiagnosticField } from '../redactDiagnostics.js'
+import { decisionHeuristicTokens } from '../tokenizer/heuristic'
 import type { TokenCounter } from '../tokenizer/tokenCounter'
 import {
   ChatMessage,
@@ -33,6 +34,7 @@ import {
   MessageRole,
   ToolCompletionRequest,
   ToolCompletionResponse,
+  ToolDefinition,
   UsageContext,
 } from '../types'
 
@@ -44,9 +46,32 @@ import {
  * (OpenAI / ZAI / Bailian) keep working unchanged.
  */
 function prependConcatSystem(parts: SystemPromptParts, messages: ChatMessage[]): ChatMessage[] {
-  const content = [parts.stable, parts.context].filter(s => s && s.length > 0).join('\n\n')
+  const content = concatSystemPrompt(parts)
   if (!content) return messages
   return [{ role: 'system', content }, ...messages]
+}
+
+/** Same join `TaskExecutor.systemPromptFor` counts on the cache path. */
+function concatSystemPrompt(parts: SystemPromptParts): string {
+  return [parts.stable, parts.context].filter(s => s && s.length > 0).join('\n\n')
+}
+
+/**
+ * Byte heuristic of the request the provider just billed. The legacy path
+ * already carries the system message inside `messages`; the cache path keeps
+ * it in `systemPromptParts`. Counting either shape twice would make the next
+ * compaction floor add tools and the system prompt on top of a bill that
+ * already included them.
+ */
+function decisionHeuristicForRequest(request: {
+  messages: ChatMessage[]
+  tools?: ToolDefinition[]
+  systemPromptParts?: SystemPromptParts
+}): number {
+  const systemPrompt = request.systemPromptParts
+    ? concatSystemPrompt(request.systemPromptParts)
+    : undefined
+  return decisionHeuristicTokens(request.messages, request.tools ?? [], systemPrompt)
 }
 
 /**
@@ -192,7 +217,7 @@ export class LlmPortAdapter implements LlmPort {
       const messages = this.fitGfsImages(request, this.providerMessages(guardedMessages))
       const response = await this.dispatchComplete({ ...request, messages })
       logger.info({ finishReason: response.finish_reason }, 'LLM completion finished')
-      this.recordUsage(requestId, request.usageContext, response.usage)
+      this.recordUsage(requestId, request.usageContext, response.usage, request)
       return response
     } catch (err) {
       this.handleProviderError(err)
@@ -228,7 +253,7 @@ export class LlmPortAdapter implements LlmPort {
         { finishReason: response.finish_reason, toolCallCount, usage: response.usage },
         'LLM tool completion finished'
       )
-      this.recordUsage(requestId, request.usageContext, response.usage)
+      this.recordUsage(requestId, request.usageContext, response.usage, request)
       return response
     } catch (err) {
       this.handleProviderError(err)
@@ -608,14 +633,25 @@ export class LlmPortAdapter implements LlmPort {
           cache_read_tokens?: number
           cache_write_tokens?: number
         }
-      | undefined
+      | undefined,
+    decisionSource?: {
+      messages: ChatMessage[]
+      tools?: ToolDefinition[]
+      systemPromptParts?: SystemPromptParts
+    }
   ): void {
     const usageContext = requestUsageContext ?? this.defaultUsageContext
     if (usage && this.tokenCounter) {
-      // Hermes `update_from_response`: stamp the counter with the
-      // authoritative input_tokens so the next compaction decision can skip
-      // the network call.
-      this.tokenCounter.recordObservedUsage(usage)
+      // Stamp billed input and the heuristic of this request. The next
+      // compaction decision uses the bill as a floor and adds heuristic
+      // growth; it does not replace the live count with the last bill.
+      this.tokenCounter.recordObservedUsage({
+        input_tokens: usage.input_tokens,
+        output_tokens: usage.output_tokens,
+        ...(decisionSource
+          ? { decision_heuristic: decisionHeuristicForRequest(decisionSource) }
+          : {}),
+      })
     }
     // T2.2 — observe cache histograms whenever the response carried the
     // cache_*_tokens fields (Anthropic populates them; concat-fallback

@@ -97,3 +97,21 @@ export function heuristicCountTools(tools: ToolDefinition[]): number {
   }
   return total
 }
+
+/**
+ * Byte heuristic the compaction gate and the usage stamp must share.
+ *
+ * `systemPrompt === undefined` means the prompt is already inside `messages`
+ * (the legacy wire shape). A string, including `''`, is prepended as one
+ * system message — the same rule `PressureContextManager` uses when the
+ * cache path carries the prompt out of band.
+ */
+export function decisionHeuristicTokens(
+  messages: ChatMessage[],
+  tools: ToolDefinition[] = [],
+  systemPrompt?: string
+): number {
+  const counted: ChatMessage[] =
+    systemPrompt === undefined ? messages : [{ role: 'system', content: systemPrompt }, ...messages]
+  return heuristicCount(counted) + heuristicCountTools(tools)
+}
