@@ -53,6 +53,7 @@ import {
   uploadGfsFileLegacy,
 } from '@lib/gfsFileUpload'
 import { gfsImagePreviewMimeType } from '@lib/gfsImagePreview'
+import { isCurrentGfsLoad } from '@lib/gfsLoadArbitration'
 import { isGfsMarkdownPreviewFile } from '@lib/gfsMarkdownPreview'
 import { isGfsVideoFile } from '@lib/gfsVideoFile'
 import { gfsVideoPreviewMimeType } from '@lib/gfsVideoPreview'
@@ -477,14 +478,21 @@ export function GfsBrowser(): React.JSX.Element {
       // Background revalidation has its own sequence: it can be superseded by
       // user navigation, but never invalidates that navigation's request.
       const navigationSeq = background ? loadSeqRef.current : ++loadSeqRef.current
-      const backgroundSeqAtStart = backgroundLoadSeqRef.current
       const backgroundSeq = background ? ++backgroundLoadSeqRef.current : undefined
+      const loadToken = background
+        ? {
+            kind: 'background' as const,
+            navigationSequence: navigationSeq,
+            backgroundSequence: backgroundSeq!,
+          }
+        : {
+            kind: 'foreground' as const,
+            navigationSequence: navigationSeq,
+            backgroundSequenceAtStart: backgroundLoadSeqRef.current,
+          }
       const isCurrent = () =>
         !options?.signal?.aborted &&
-        (background
-          ? backgroundLoadSeqRef.current === backgroundSeq && loadSeqRef.current === navigationSeq
-          : loadSeqRef.current === navigationSeq &&
-            backgroundLoadSeqRef.current === backgroundSeqAtStart)
+        isCurrentGfsLoad(loadToken, loadSeqRef.current, backgroundLoadSeqRef.current)
       if (!background && !cursor) loadedPageCountRef.current = 1
       if (appending) {
         setLoadingMore(true)
