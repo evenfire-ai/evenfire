@@ -21,11 +21,22 @@ async function flushAsyncWork(iterations = 6): Promise<void> {
   for (let index = 0; index < iterations; index += 1) await Promise.resolve()
 }
 
-function setSyntheticSessionToken(service: object, value: string): void {
-  if (!Reflect.set(service, ['session', 'Token'].join(''), value)) {
-    throw new Error('Unable to set synthetic session fixture')
+function mutableServiceState(service: object): {
+  sessionToken?: string | null
+  entityChangeSessionToken?: string | null
+  entityChangeSessionGeneration?: number
+} {
+  return service as unknown as {
+    sessionToken?: string | null
+    entityChangeSessionToken?: string | null
+    entityChangeSessionGeneration?: number
   }
-  Reflect.set(service, 'entityChangeSessionToken', value)
+}
+
+function setSyntheticSessionToken(service: object, value: string): void {
+  const state = mutableServiceState(service)
+  state.sessionToken = value
+  state.entityChangeSessionToken = value
 }
 
 describe('AppService entity-change fan-out', () => {
@@ -64,7 +75,7 @@ describe('AppService entity-change fan-out', () => {
     opened[0]?.onEvent({
       type: 'stream.closing',
       schemaVersion: 1,
-      cursor: '00000000-0000-0000-0000-000000000001',
+      cursor: '00000000-0000-0000-0000-000000000000',
       reason: 'session_expired',
     })
     await flushAsyncWork()
@@ -106,8 +117,8 @@ describe('AppService entity-change fan-out', () => {
     publish({
       type: 'scope.invalidated',
       schemaVersion: 1,
-      cursor: 'd119f895-1ef8-4e73-8f08-f9754919682a',
-      scopes: ['gfs'],
+      cursor: '00000000-0000-0000-0000-000000000000',
+      scopes: ['gfs', 'authorization'],
     })
     await flushAsyncWork()
 
@@ -156,8 +167,8 @@ describe('AppService entity-change fan-out', () => {
     opens[0]?.onEvent({
       type: 'scope.invalidated',
       schemaVersion: 1,
-      cursor: 'd119f895-1ef8-4e73-8f08-f9754919682a',
-      scopes: ['gfs'],
+      cursor: '00000000-0000-0000-0000-000000000000',
+      scopes: ['gfs', 'authorization'],
     })
     setSyntheticSessionToken(service, 'new-session-token')
 
@@ -378,7 +389,7 @@ describe('AppService.startEntityChangeStream session expiry', () => {
         onEvent({
           type: 'stream.closing',
           schemaVersion: 1,
-          cursor: '00000000-0000-0000-0000-000000000001',
+          cursor: '00000000-0000-0000-0000-000000000000',
           reason: 'session_expired',
         })
       }),
@@ -416,13 +427,14 @@ describe('AppService.startEntityChangeStream session expiry', () => {
     }
     service.startEntityChangeStream('stream-1', 7, vi.fn())
     await flushAsyncWork()
-    Reflect.set(service, 'entityChangeSessionToken', 'new-committed-session-token')
-    Reflect.set(service, 'entityChangeSessionGeneration', 1)
+    const state = mutableServiceState(service)
+    state.entityChangeSessionToken = 'new-committed-session-token'
+    state.entityChangeSessionGeneration = 1
 
     opens[0]?.onEvent({
       type: 'stream.closing',
       schemaVersion: 1,
-      cursor: '00000000-0000-0000-0000-000000000002',
+      cursor: '00000000-0000-0000-0000-000000000000',
       reason: 'session_expired',
     })
     await flushAsyncWork()
@@ -458,7 +470,7 @@ describe('AppService.startEntityChangeStream session expiry', () => {
     publish({
       type: 'stream.closing',
       schemaVersion: 1,
-      cursor: '00000000-0000-0000-0000-000000000003',
+      cursor: '00000000-0000-0000-0000-000000000000',
       reason: 'session_expired',
     })
     await flushAsyncWork()
