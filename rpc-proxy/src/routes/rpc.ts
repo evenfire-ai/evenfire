@@ -39,6 +39,7 @@ import {
 } from '../services/mcpProxyService.js'
 import { readMutatingResponseBody } from '../services/upstreamBody.js'
 import {
+  isHostPayloadTooLargeError,
   isUpstreamTimeoutError,
   isWakeEligibleHostError,
   respondWithWakeAndHold,
@@ -537,6 +538,12 @@ export function createRpcRouter(): Router {
               },
               respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
             })
+            return
+          }
+          if (isHostPayloadTooLargeError(error)) {
+            // Same body as chatJsonBody's own 413, so the Desktop maps a Host
+            // refusal and a proxy refusal identically.
+            res.status(413).json({ error: 'Payload Too Large' })
             return
           }
           respondUpstreamUnavailable(res, error)

@@ -528,6 +528,16 @@ export function isHostDrainingError(error: unknown): boolean {
 }
 
 /**
+ * True for an upstream 413 from mcp-host: the Host refused the body as too
+ * large, which is the client's error to fix, not a sign the Host is
+ * unavailable. Matched structurally (name + status) like isHostDrainingError.
+ */
+export function isHostPayloadTooLargeError(error: unknown): boolean {
+  if (!(error instanceof Error) || error.name !== 'UpstreamHostError') return false
+  return (error as Error & { status?: unknown }).status === 413
+}
+
+/**
  * undici's own header/body timers (300 s defaults). They fire on a connection
  * the host accepted, so they prove a slow host, not a down one: a timeout, and
  * never a reason to wake and re-issue the request.

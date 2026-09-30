@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
+import { randomUUID } from 'node:crypto'
 import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import request from 'supertest'
@@ -67,6 +68,11 @@ const HOST_CONNECTION = {
   url: 'http://chatllm.mcp-host.svc.cluster.local:8080',
   headers: {},
 }
+// Mirrors desktop-app/ui/src/constants/attachments.ts COMPOSER_FORWARDED_FIELDS_BYTES:
+// the bytes rpc-proxy may add to a Desktop body before forwarding it to the Host.
+const DESKTOP_FORWARDED_FIELDS_HEADROOM_BYTES = 2048
+// traceContext.ts caps each correlation ref at 256 characters; `edge-request:` is 13.
+const LONGEST_RETAINED_REQUEST_ID_LENGTH = 256 - 'edge-request:'.length
 const originalUpstreamTimeoutMs = config.upstreamTimeoutMs
 const originalFetch = globalThis.fetch
 
@@ -343,6 +349,95 @@ describe('POST /rpc/hosts/:hostRef/messages wake-and-hold triggers', () => {
 
     expect(response.body).toEqual({ error: 'Upstream host unavailable' })
     expect(controlApiMock.requestHostWakeFromControlApi).not.toHaveBeenCalled()
+  })
+
+  it('passes a real Host 413 through as 413 Payload Too Large without entering the wake hold', async () => {
+    let hostHits = 0
+    const server = createServer((req, res) => {
+      hostHits += 1
+      req.resume()
+      req.on('end', () => {
+        res.writeHead(413, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ error: 'Payload Too Large' }))
+      })
+    })
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject)
+      server.listen(0, '127.0.0.1', resolve)
+    })
+    const { port } = server.address() as AddressInfo
+    serviceMock.resolveHostConnectionForUser.mockResolvedValue({
+      ...HOST_CONNECTION,
+      url: `http://127.0.0.1:${port}`,
+    })
+    serviceMock.forwardHostMessageToHost.mockImplementation(
+      forwardHostMessageToHost as typeof serviceMock.forwardHostMessageToHost
+    )
+
+    try {
+      const response = await postMessage(makeApp())
+
+      expect(response.status).toBe(413)
+      expect(response.body).toEqual({ error: 'Payload Too Large' })
+      expect(hostHits).toBe(1)
+      expect(controlApiMock.requestHostWakeFromControlApi).not.toHaveBeenCalled()
+    } finally {
+      server.closeAllConnections()
+      await new Promise<void>(resolve => server.close(() => resolve()))
+    }
+  })
+
+  it('forwards at most the Desktop headroom of bytes beyond the inbound Desktop body', async () => {
+    let forwardedRaw = ''
+    const server = createServer((req, res) => {
+      const chunks: Buffer[] = []
+      req.on('data', chunk => chunks.push(chunk as Buffer))
+      req.on('end', () => {
+        forwardedRaw = Buffer.concat(chunks).toString('utf8')
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ success: true, taskId: 't-growth' }))
+      })
+    })
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject)
+      server.listen(0, '127.0.0.1', resolve)
+    })
+    const { port } = server.address() as AddressInfo
+    authTokenMock.verifyRpcToken.mockReturnValue({
+      ...VALID_CLAIMS,
+      sub: randomUUID(),
+      teamId: randomUUID(),
+    })
+    serviceMock.resolveHostConnectionForUser.mockResolvedValue({
+      ...HOST_CONNECTION,
+      url: `http://127.0.0.1:${port}`,
+    })
+    serviceMock.forwardHostMessageToHost.mockImplementation(
+      forwardHostMessageToHost as typeof serviceMock.forwardHostMessageToHost
+    )
+    const inboundRaw = JSON.stringify({ content: 'hello', threadId: randomUUID() })
+
+    try {
+      await request(makeApp())
+        .post('/rpc/hosts/chatllm/messages')
+        .set('authorization', 'Bearer token')
+        .set('content-type', 'application/json')
+        .set('x-request-id', 'r'.repeat(LONGEST_RETAINED_REQUEST_ID_LENGTH))
+        .send(inboundRaw)
+        .expect(200)
+
+      const forwarded = JSON.parse(forwardedRaw) as {
+        traceContext: { correlationRefs: string[] }
+      }
+      // Witness: the longest retained x-request-id is among the forwarded refs.
+      expect(forwarded.traceContext.correlationRefs.length).toBe(3)
+      expect(Buffer.byteLength(forwardedRaw) - Buffer.byteLength(inboundRaw)).toBeLessThanOrEqual(
+        DESKTOP_FORWARDED_FIELDS_HEADROOM_BYTES
+      )
+    } finally {
+      server.closeAllConnections()
+      await new Promise<void>(resolve => server.close(() => resolve()))
+    }
   })
 
   it('an upstream AbortError keeps the 504 path without entering the wake hold', async () => {
