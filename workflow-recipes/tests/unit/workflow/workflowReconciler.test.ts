@@ -9067,6 +9067,81 @@ describe('translateNetworkPolicyApplySummary', () => {
       networkPolicyRetryPending: true,
     })
   })
+
+  // R3-L3: a prune that could not delete (a non-404 DELETE, a failed LIST, or
+  // a failed legacy delete) is its own fact. It is published as PrunePending
+  // and never sets the retry flag: nothing in the run's short-circuits can
+  // prune, so a requeue would only repeat the failed DELETE.
+  describe('prune-pending', () => {
+    const publishedPruneMarker = {
+      type: 'WorkflowNetworkPoliciesConverged',
+      status: 'False' as const,
+      reason: 'PrunePending',
+      message:
+        'One or more run-lane NetworkPolicies the spec no longer wants are pending a delete; the next reconcile() pass or the finalizer removes them',
+      lastTransitionTime: earlier,
+    }
+
+    it('publishes PrunePending without the retry flag when only the prune is pending', () => {
+      const result = translateNetworkPolicyApplySummary(
+        { conflicts: [], retryPending: false, prune: 'pending' },
+        [publishedConflict],
+        now
+      )
+
+      expect(result).toStrictEqual({
+        networkPolicyOwnershipConditions: [{ ...publishedPruneMarker, lastTransitionTime: now }],
+      })
+    })
+
+    it('keeps a published PrunePending marker when a summary without a prune fact converges', () => {
+      // The mid-run retry prunes nothing, so its summary says nothing about the
+      // prune and must not clear the fact a reconcile() pass published.
+      const result = translateNetworkPolicyApplySummary(
+        { conflicts: [], retryPending: false },
+        [publishedPruneMarker],
+        now
+      )
+
+      expect(result).toStrictEqual({ networkPolicyOwnershipConditions: [publishedPruneMarker] })
+      expect(
+        networkPolicyConditionsChanged(
+          [publishedPruneMarker],
+          result.networkPolicyOwnershipConditions!
+        )
+      ).toBe(false)
+      // Witness: a summary that did prune is authoritative and clears it.
+      expect(
+        translateNetworkPolicyApplySummary(
+          { conflicts: [], retryPending: false, prune: 'converged' },
+          [publishedPruneMarker],
+          now
+        )
+      ).toStrictEqual({ networkPolicyOwnershipConditions: [] })
+    })
+
+    it('reports a pending retry and a carried prune in one RetryPending marker', () => {
+      const result = translateNetworkPolicyApplySummary(
+        { conflicts: [], retryPending: true },
+        [publishedPruneMarker],
+        now
+      )
+
+      expect(result).toStrictEqual({
+        networkPolicyOwnershipConditions: [
+          {
+            type: 'WorkflowNetworkPoliciesConverged',
+            status: 'False',
+            reason: 'RetryPending',
+            message:
+              'One or more run-lane NetworkPolicies are pending a retry (terminating or contended), and one or more the spec no longer wants are pending a delete',
+            lastTransitionTime: earlier,
+          },
+        ],
+        networkPolicyRetryPending: true,
+      })
+    })
+  })
 })
 
 describe('networkPolicyConditionsChanged', () => {
