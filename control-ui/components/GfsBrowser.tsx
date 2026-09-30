@@ -487,7 +487,10 @@ export function GfsBrowser(): React.JSX.Element {
       }
       const loadArbiter = loadArbiterRef.current
       const loadToken = background ? loadArbiter.beginBackground() : loadArbiter.beginForeground()
-      const isCurrent = () => !options?.signal?.aborted && loadArbiter.isCurrent(loadToken)
+      const isCurrent = () =>
+        !options?.signal?.aborted &&
+        loadArbiter.isCurrent(loadToken) &&
+        currentCrumbRef.current?.id === crumb.id
       if (!background && !cursor) loadedPageCountRef.current = 1
       if (appending) {
         setLoadingMore(true)
@@ -662,6 +665,7 @@ export function GfsBrowser(): React.JSX.Element {
     const locationKey = current.id ?? '$root'
     const sameLocation = loadedLocationRef.current === locationKey
     loadedLocationRef.current = locationKey
+    if (!sameLocation) setLoadingMore(false)
     if (revalidateNextLoadRef.current) {
       revalidateNextLoadRef.current = false
       // Stale-while-revalidate: cached rows stay on screen (no spinner) while

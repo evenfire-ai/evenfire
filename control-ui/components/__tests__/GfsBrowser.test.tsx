@@ -412,6 +412,51 @@ describe('GfsBrowser', () => {
     expect(mockApiGet).toHaveBeenCalledWith('/api/v1/gfs/tree', { drive: 'main' })
   })
 
+  it('does not append a pending root page into a cached folder opened meanwhile', async () => {
+    const alpha = child('alpha', 'directory', 1)
+    let resolveRootPage: ((value: unknown) => void) | undefined
+    const pendingRootPage = new Promise<unknown>(resolve => {
+      resolveRootPage = resolve
+    })
+    mockApiGet.mockImplementation((path: string, query?: Record<string, string>) => {
+      if (path === '/api/v1/gfs/tree') {
+        return query?.cursor === 'root-page-2'
+          ? pendingRootPage
+          : Promise.resolve({
+              items: [alpha],
+              nextCursor: 'root-page-2',
+            })
+      }
+      if (path === '/api/v1/gfs/resources/id-1/children') {
+        return Promise.resolve({ items: [child('alpha-only.txt', 'file', 3)], nextCursor: null })
+      }
+      return Promise.resolve({ items: [], nextCursor: null })
+    })
+
+    renderBrowser()
+    const folderButton = await screen.findByRole('button', { name: 'alpha' })
+    await waitFor(() =>
+      expect(mockApiGet).toHaveBeenCalledWith('/api/v1/gfs/resources/id-1/children', {
+        drive: 'main',
+      })
+    )
+    await act(async () => Promise.resolve())
+
+    fireEvent.click(screen.getByRole('button', { name: 'Load more' }))
+    await screen.findByText('Loading…')
+    fireEvent.click(folderButton)
+    await screen.findByText('alpha-only.txt')
+
+    await act(async () => {
+      resolveRootPage?.({ items: [child('root-page-2.txt', 'file', 2)], nextCursor: null })
+      await pendingRootPage
+    })
+
+    const visibleItems = screen.getByRole('list', { name: 'Current folder resources' })
+    expect(visibleItems).toHaveTextContent('alpha-only.txt')
+    expect(visibleItems).not.toHaveTextContent('root-page-2.txt')
+  })
+
   it('orders directories first, then files, both alphabetically', async () => {
     mockApiGet.mockResolvedValueOnce({
       items: [
