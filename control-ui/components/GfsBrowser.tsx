@@ -1739,16 +1739,10 @@ export function GfsBrowser(): React.JSX.Element {
           )}
 
           {!loading && items.length > 0 ? (
-            <p className="cu-gfs-list-count">
-              Showing{' '}
-              {nextCursor ? (
-                <>
-                  {items.length} of {items.length}+
-                </>
-              ) : (
-                <>all {items.length}</>
-              )}{' '}
-              items.
+            <p className="cu-gfs-list-count" aria-live="polite">
+              {nextCursor
+                ? `Showing the first ${items.length} items.`
+                : `Showing all ${items.length} items.`}
             </p>
           ) : null}
 

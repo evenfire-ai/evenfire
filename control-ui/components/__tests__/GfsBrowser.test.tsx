@@ -2578,7 +2578,10 @@ describe('GfsBrowser', () => {
     })
     renderBrowser()
 
-    expect(await screen.findByText('Showing 2 of 2+ items.')).toBeTruthy()
+    const count = await screen.findByText('Showing the first 2 items.')
+    // WCAG 4.1.3: the count changes after Load more, so updates must be
+    // announced politely.
+    expect(count).toHaveAttribute('aria-live', 'polite')
     expect(
       screen.getByText(
         'The listing is truncated at the page cap — Load more fetches the next page.'
@@ -2599,7 +2602,7 @@ describe('GfsBrowser', () => {
     })
     renderBrowser()
 
-    expect(await screen.findByText('Showing 2 of 2+ items.')).toBeTruthy()
+    expect(await screen.findByText('Showing the first 2 items.')).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: 'Load more' }))
 
     expect(await screen.findByText('Showing all 3 items.')).toBeTruthy()
