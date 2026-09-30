@@ -258,6 +258,58 @@ describe('AppService.startEntityChangeStream session expiry', () => {
     }
   })
 
+  it('reconnects a half-open stream after the idle deadline without invalidating entities', async () => {
+    vi.useFakeTimers()
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    const service = new AppService() as any
+    setSyntheticSessionToken(service, 'session-token')
+    const attempts: Array<{
+      onEvent: (event: EntityChangeStreamEvent) => void
+      signal: AbortSignal
+    }> = []
+    service.authClient = {
+      openEntityChangeStream: vi.fn((_token, _cursor, onEvent, signal) => {
+        attempts.push({ onEvent, signal })
+        return new Promise<void>(resolve => {
+          signal.addEventListener('abort', () => resolve(), { once: true })
+        })
+      }),
+    }
+    const events: EntityChangeStreamEvent[] = []
+
+    try {
+      service.startEntityChangeStream('stream-1', 7, (event: EntityChangeStreamEvent) => {
+        events.push(event)
+      })
+      await flushAsyncWork()
+      expect(attempts).toHaveLength(1)
+
+      await vi.advanceTimersByTimeAsync(100_000)
+      expect(attempts[0]?.signal.aborted).toBe(false)
+      attempts[0]?.onEvent({
+        schemaVersion: 1,
+        type: 'heartbeat',
+        cursor: '00000000-0000-0000-0000-000000000000',
+        observedAt: '2026-09-30T00:00:00.000Z',
+      })
+      await vi.advanceTimersByTimeAsync(129_999)
+      expect(attempts[0]?.signal.aborted).toBe(false)
+      attempts[0]?.onEvent({ type: 'open' })
+      await vi.advanceTimersByTimeAsync(1)
+      expect(attempts[0]?.signal.aborted).toBe(true)
+      expect(events.map(event => event.type)).not.toContain('scope.invalidated')
+      expect(events.map(event => event.type)).not.toContain('resync_required')
+
+      await vi.advanceTimersByTimeAsync(1_000)
+      await flushAsyncWork()
+      expect(attempts).toHaveLength(2)
+    } finally {
+      service.stopEntityChangeStream('stream-1', 7)
+      vi.useRealTimers()
+      vi.restoreAllMocks()
+    }
+  })
+
   it('turns an initial 401 into a terminal session-expired frame without reconnecting', async () => {
     const service = new AppService() as any
     setSyntheticSessionToken(service, 'session-token')

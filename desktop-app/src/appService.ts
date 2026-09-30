@@ -94,6 +94,9 @@ import {
 // makes the failure feel slower than it already did.
 const BACKEND_PROBE_TIMEOUT_MS = 1500
 const ENTITY_CHANGE_RETRY_AFTER_CAP_MS = 5 * 60 * 1000
+// Two maximum server heartbeat intervals plus its maximum poll delay. This
+// matches the operator-stream liveness watchdog and bounds half-open sockets.
+const ENTITY_CHANGE_STREAM_IDLE_TIMEOUT_MS = 2 * (60_000 + 5_000)
 
 const HOST_WAKE_SCOPE: RpcScope = 'host:wake:write'
 const PROFILE_UI_BASE_URL_ORIGIN_ERROR =
@@ -2968,16 +2971,29 @@ export class AppService {
     let closed = false
     let abortController: AbortController | null = null
     let retryTimer: NodeJS.Timeout | null = null
+    let idleTimer: NodeJS.Timeout | null = null
     let backoffMs = 1000
     let serverRetryAfterMs: number | undefined
     const clearRetry = () => {
       if (retryTimer) clearTimeout(retryTimer)
       retryTimer = null
     }
+    const clearIdleTimer = () => {
+      if (idleTimer) clearTimeout(idleTimer)
+      idleTimer = null
+    }
+    const armIdleTimer = (attemptController: AbortController) => {
+      clearIdleTimer()
+      idleTimer = setTimeout(() => {
+        idleTimer = null
+        if (!closed && abortController === attemptController) attemptController.abort()
+      }, ENTITY_CHANGE_STREAM_IDLE_TIMEOUT_MS)
+    }
     const stop = (opts?: { silent?: boolean }) => {
       if (closed) return
       closed = true
       clearRetry()
+      clearIdleTimer()
       abortController?.abort()
       if (this.entityChangeConnectionStop === stop) this.entityChangeConnectionStop = null
       if (!opts?.silent) this.emitEntityChangeEvent({ type: 'closed' })
@@ -2989,7 +3005,9 @@ export class AppService {
       const connectionToken = this.entityChangeSessionToken
       const connectionGeneration = this.entityChangeSessionGeneration
       if (!connectionToken) return
-      abortController = new AbortController()
+      const attemptController = new AbortController()
+      abortController = attemptController
+      armIdleTimer(attemptController)
       try {
         await this.authClient.openEntityChangeStream(
           connectionToken,
@@ -3002,6 +3020,7 @@ export class AppService {
               event.type === 'resync_required' ||
               event.type === 'stream.closing'
             ) {
+              armIdleTimer(attemptController)
               // Transport-open is synthetic: it proves only that fetch
               // returned headers. Reset retry pressure only after the server
               // produces a validated schema-v1 frame.
@@ -3013,7 +3032,7 @@ export class AppService {
             }
             this.emitEntityChangeEvent(event)
           },
-          abortController.signal
+          attemptController.signal
         )
       } catch (error) {
         if (!closed) {
@@ -3032,6 +3051,7 @@ export class AppService {
         }
       } finally {
         if (closed) return
+        clearIdleTimer()
         clearRetry()
         const localBackoffMs = backoffMs + Math.floor(Math.random() * Math.max(1, backoffMs * 0.2))
         const delay = Math.max(localBackoffMs, serverRetryAfterMs ?? 0)

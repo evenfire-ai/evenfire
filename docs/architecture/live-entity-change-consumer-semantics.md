@@ -7,6 +7,7 @@ may coalesce intermediate changes while disconnected or under load.
 | Input | Desktop | Control UI | Required visible result |
 | --- | --- | --- | --- |
 | `heartbeat` | Update transport liveness only. | Update transport liveness only. | No query, list, selection, dialog, or preview mutation. |
+| Silent/half-open stream | Abort an idle connection after 130 seconds without a validated server frame, then use bounded reconnect/backoff. | Use the same established 130-second operator watchdog. | Watchdog is transport-only; synthetic open does not reset it and expiry never invalidates entity state. |
 | User `scope.invalidated` | Softly revalidate active GFS state and open resources. | Use soft semantics if received. | Keep loaded pages and preview bytes until authoritative reads establish a change or denial. |
 | Operator `scope.invalidated` | Use the soft path if received. | Coalesce a bounded burst into one active and one trailing authoritative pass. | Preserve rows, selection, dialogs, errors, and unchanged previews while reads run. |
 | User navigation or pagination during refresh | Foreground work wins; background work cannot replace its destination. | Bind results to location, operation, cursor, and generation. Defer a pending scope refresh across load-more. | A stale page never appears in another folder; the pending refresh eventually runs. |
