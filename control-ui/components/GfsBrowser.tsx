@@ -808,6 +808,9 @@ export function GfsBrowser(): React.JSX.Element {
     }
 
     performVisibleStateRevalidation = async (cursor?: string) => {
+      // Retire an older same-folder focus/cache refresh before publishing the
+      // newer stream-authoritative listing. Its late response must not win.
+      backgroundLoadSeqRef.current += 1
       // A committed remote change supersedes any local move/retry ancestry
       // reconstruction still in flight. Its older response must not replace
       // the hierarchy we are about to refetch from the authoritative API.
