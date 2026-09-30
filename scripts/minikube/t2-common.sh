@@ -290,7 +290,7 @@ t2_profile_scope() {
     "$T2_PROJECT_DIR" "$T2_BRANCH" "$T2_PROFILE"; then
     case "$PROFILE_OWNER_ERROR_CODE" in
       PROFILE_METADATA_MISSING)
-        T2_NEXT_COMMAND='resolve or generate profile.env with the branch profile helper, then retry' ;;
+        T2_NEXT_COMMAND='restore profile.env from a backup or stop and ask; the branch profile helper never regenerates metadata for an existing profile directory' ;;
       PROFILE_PORTS_MISSING)
         T2_NEXT_COMMAND='restore the persisted profile-owned ports.env; never regenerate adopted ports' ;;
       PROFILE_PORTS_INVALID)

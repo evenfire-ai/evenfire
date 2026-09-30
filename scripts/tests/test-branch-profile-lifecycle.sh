@@ -400,6 +400,35 @@ assert_log_lacks 'minikube' 'an owned profile outside clerum-* must not reach mi
 assert_log_lacks 'kubectl' 'an owned profile outside clerum-* must not reach kubectl'
 rm -rf "${cache_root:?}/my-aks-shared"
 
+# A profile directory without profile.env is PROFILE_METADATA_MISSING, for an
+# explicitly adopted profile and for the derived branch profile alike. Nothing
+# regenerates that metadata (branch-profile-start only creates it when the
+# directory does not exist), so the refusal must name the code and the only
+# safe next step, and must not reach minikube or kubectl.
+mv "${cache_root}/${adopted}/profile.env" "${tmp}/adopted-profile.env"
+reset_state
+bp adopted-metadata-missing start "MINIKUBE_PROFILE=${adopted}"
+assert_rc 1 'start of an adopted profile without profile.env'
+assert_output_has "PROFILE_METADATA_MISSING: profile metadata for ${adopted} is missing or unreadable" \
+  'the refusal of an adopted profile without profile.env names the code'
+assert_output_has 'never regenerates it for an existing one' \
+  'the refusal of an adopted profile without profile.env does not point at branch-profile-start'
+assert_log_lacks 'minikube' 'an adopted profile without profile.env must not reach minikube'
+assert_log_lacks 'kubectl' 'an adopted profile without profile.env must not reach kubectl'
+mv "${tmp}/adopted-profile.env" "${cache_root}/${adopted}/profile.env"
+
+mv "${profile_dir}/profile.env" "${tmp}/branch-profile.env"
+reset_state
+bp derived-metadata-missing start
+assert_rc 1 'start of the branch profile without profile.env'
+assert_output_has "PROFILE_METADATA_MISSING: profile metadata for this branch is missing or unreadable" \
+  'the refusal of the branch profile without profile.env names the code'
+assert_output_has 'never regenerates it for an existing one' \
+  'the refusal of the branch profile without profile.env does not point at branch-profile-start'
+assert_log_lacks 'minikube' 'a branch profile without profile.env must not reach minikube'
+assert_log_lacks 'kubectl' 'a branch profile without profile.env must not reach kubectl'
+mv "${tmp}/branch-profile.env" "${profile_dir}/profile.env"
+
 # A profile the resolver derives on its own (no explicit selection) must still
 # carry the hashed suffix. With the branch profile set aside, the adopted
 # profile is the only persisted record for this worktree and branch.

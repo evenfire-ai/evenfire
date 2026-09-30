@@ -268,6 +268,14 @@ resolve_profile() {
     apply_resolution "${output}"
     return 0
   fi
+  # Missing metadata for an existing profile directory has one safe next step.
+  # branch-profile-start only creates metadata when the directory does not
+  # exist, so pointing at it here would send the operator into this refusal
+  # again, or, without the explicit selection, into a brand-new profile.
+  if [[ "${output}" == *PROFILE_METADATA_MISSING:* ]]; then
+    printf '%s\n' "${output}" >&2
+    die "PROFILE_METADATA_MISSING: profile metadata for ${EXPLICIT_PROFILE:-this branch} is missing or unreadable; restore profile.env from a backup or stop and ask. branch-profile-start only creates metadata when the profile directory does not exist and never regenerates it for an existing one"
+  fi
   if [[ -n "${EXPLICIT_PROFILE}" || ${status} -ne 3 || "${output}" != *PROFILE_NOT_FOUND:* ]]; then
     printf '%s\n' "${output}" >&2
     die 'profile ownership resolution failed closed'

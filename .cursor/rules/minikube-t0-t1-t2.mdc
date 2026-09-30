@@ -118,9 +118,9 @@ runner. `run_if_changed` dirs: `packages/workflow-runtime-core`,
 list. `npm ci` the named dir **and every remaining** package that lacks
 `node_modules/.bin/vitest`, then re-enter `make minikube-t2` on the same
 HEAD/profile. `PROFILE_METADATA_MISSING` surfaces as
-`PROFILE_OWNERSHIP_MISMATCH`: resolve via this worktree's
-`scripts/minikube-profiles/branch.mk`,
-never invent ports. Do not edit tracked files while `make minikube-t2`
+`PROFILE_OWNERSHIP_MISMATCH`: restore `profile.env` or stop and ask
+(`scripts/minikube-profiles/branch.mk` never regenerates metadata for an
+existing profile directory), never invent ports. Do not edit tracked files while `make minikube-t2`
 is running: T0 fixtures fail with `fixture mutated the host checkout
 working tree`, and T2 refuses a dirty tree (`DEVELOPMENT_SCOPE_REQUIRED`).
 
