@@ -169,6 +169,27 @@ describe('forwardCancelToHost aborts only through the caller signal', () => {
       vi.useRealTimers()
     }
   })
+
+  // mcp-host checks cancel ownership against this userId, so a missing caller
+  // subject must fail here instead of being replaced by a stand-in identity.
+  it('forwards the caller subject and refuses an empty one before any request', async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(async () => new Response(null, { status: 204 }))
+    try {
+      await forwardCancelToHost(HOST, 'task-1', 'user-1', new AbortController().signal)
+      // Control and liveness witness: a real subject reaches the upstream body.
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      expect(JSON.parse(String(fetchMock.mock.calls[0]![1]?.body))).toEqual({ userId: 'user-1' })
+
+      await expect(
+        forwardCancelToHost(HOST, 'task-1', '', new AbortController().signal)
+      ).rejects.toThrow('task cancel requires the caller subject')
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+    } finally {
+      fetchMock.mockRestore()
+    }
+  })
 })
 
 const baseUpstream = {

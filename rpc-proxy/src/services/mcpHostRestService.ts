@@ -253,13 +253,14 @@ export type CancelUpstreamResult = {
 export async function forwardCancelToHost(
   host: ResolvedServerConnection,
   taskId: string,
-  userId: string | undefined,
+  userId: string,
   signal: AbortSignal
 ): Promise<CancelUpstreamResult> {
+  // mcp-host applies its ownership check to this userId, so it must be the
+  // caller's own subject; a stand-in identity would be checked instead.
+  if (!userId) throw new Error('task cancel requires the caller subject')
   const baseUrl = host.url.replace(/\/+$/, '')
-  // Mirrors the approve/deny pattern: always forward userId so mcp-host can
-  // apply the ownership check. Falls back to 'desktop-app' when absent.
-  const upstreamBody = { userId: userId || 'desktop-app' }
+  const upstreamBody = { userId }
   const response = await fetch(`${baseUrl}/v1/runtime/tasks/${encodeURIComponent(taskId)}/cancel`, {
     method: 'POST',
     headers: {
