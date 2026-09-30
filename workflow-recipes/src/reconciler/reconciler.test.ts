@@ -15589,7 +15589,26 @@ describe('WorkflowRecipeReconciler', () => {
       expect(policyDeletes()).toBe(1)
     })
 
-    it('reconcileDelete drops the ledger: no DELETE until a new token ADDED, then even below the old watermark', async () => {
+    function recreatedRecipe(): WorkflowRecipeCRD {
+      return makeRecipe({
+        metadata: {
+          name: 'test-recipe',
+          namespace: 'sandbox-recipes',
+          uid: 'uid-recreated',
+          generation: 1,
+        },
+      })
+    }
+
+    /** Fails only the token Secret DELETE; every other Secret DELETE succeeds. */
+    function failTokenDelete(code: number): void {
+      mockCoreApi.deleteNamespacedSecret.mockImplementation(async ({ name }: { name: string }) => {
+        if (name === SECRET_NAME) throw { code }
+        return {}
+      })
+    }
+
+    it('R4-L1: after the finalizer deleted the token, a recreated recipe sends no DELETE until a new token ADDED, then even below the old watermark', async () => {
       const recipe = reapRecipe(4)
       tokenSeen()
       await reconciler.ensureOAuthBrokerTokenSecret(recipe)
@@ -15597,15 +15616,73 @@ describe('WorkflowRecipeReconciler', () => {
       expect(secretDeletes()).toBe(1)
 
       await reconciler.reconcileDelete(recipe)
+      // Witness for the premise: the finalizer sent the token DELETE, and the
+      // default mock answers it 2xx.
+      expect(secretDeletes()).toBe(2)
       mockCoreApi.deleteNamespacedSecret.mockClear()
-      // The finalizer deleted the token with the recipe; nothing is left to reap.
-      await reconciler.ensureOAuthBrokerTokenSecret(recipe)
-      expect(secretDeletes()).toBe(0)
+
+      const debugSpy = captureLogger('debug')
+      try {
+        await reconciler.ensureOAuthBrokerTokenSecret(recreatedRecipe())
+        await reconciler.ensureOAuthBrokerTokenSecret(recreatedRecipe())
+        expect(secretDeletes()).toBe(0)
+        // Liveness witness: both passes reached the ledger and it declined.
+        expect(
+          debugSpy.mock.calls.filter(
+            ([message, fields]) =>
+              typeof message === 'string' &&
+              message.startsWith('Skipping oauth-broker-token delete') &&
+              (fields as { generation?: number }).generation === 1
+          )
+        ).toHaveLength(2)
+      } finally {
+        debugSpy.mockRestore()
+      }
 
       // A token ADDED for a recipe under the same name: the old watermark is
       // gone, so a lower generation deletes.
       tokenSeen()
       await reconciler.ensureOAuthBrokerTokenSecret(reapRecipe(3))
+      expect(secretDeletes()).toBe(1)
+    })
+
+    it('R4-L1: a finalizer whose token DELETE failed keeps the token seen, so a recreated recipe deletes it once', async () => {
+      tokenSeen()
+      failTokenDelete(500)
+      try {
+        await reconciler.reconcileDelete(reapRecipe(4))
+        // Witness: the finalizer sent the token DELETE and it failed.
+        expect(secretDeletes()).toBe(1)
+      } finally {
+        mockCoreApi.deleteNamespacedSecret.mockResolvedValue({})
+      }
+      mockCoreApi.deleteNamespacedSecret.mockClear()
+
+      // The recipe is recreated under the same name without backgroundAccess.
+      await reconciler.ensureOAuthBrokerTokenSecret(recreatedRecipe())
+      await reconciler.ensureOAuthBrokerTokenSecret(recreatedRecipe())
+      expect(secretDeletes()).toBe(1)
+    })
+
+    it('R4-L1: a token ADDED while the finalizer DELETE is in flight keeps the token seen', async () => {
+      tokenSeen()
+      mockCoreApi.deleteNamespacedSecret.mockImplementation(async ({ name }: { name: string }) => {
+        // The recipe was recreated and its token ADDED was handled before the
+        // finalizer's DELETE of the old token returned.
+        if (name === SECRET_NAME) reconciler.invalidateOAuthBrokerSecretLedger('test-recipe')
+        return {}
+      })
+      try {
+        await reconciler.reconcileDelete(reapRecipe(4))
+        // Witness: the finalizer sent the token DELETE.
+        expect(secretDeletes()).toBe(1)
+      } finally {
+        mockCoreApi.deleteNamespacedSecret.mockResolvedValue({})
+      }
+      mockCoreApi.deleteNamespacedSecret.mockClear()
+
+      await reconciler.ensureOAuthBrokerTokenSecret(recreatedRecipe())
+      await reconciler.ensureOAuthBrokerTokenSecret(recreatedRecipe())
       expect(secretDeletes()).toBe(1)
     })
 
