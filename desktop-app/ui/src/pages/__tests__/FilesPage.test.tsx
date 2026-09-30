@@ -3279,6 +3279,204 @@ describe('FilesPage', () => {
     expect(pushToast).toHaveBeenCalledWith('Too many file requests — try again in 7s.', 'error')
   })
 
+  it('downloads a folder recursively as one zip with progress and a skip notice (BUG-175)', async () => {
+    vi.useFakeTimers()
+    const listChildren = vi.fn(async () => ({
+      items: [
+        {
+          resourceId: 'doc-1',
+          rid: 'doc-1',
+          gfsUri: 'gfs://main/doc-1',
+          drive: 'main',
+          parentResourceId: 'folder-1',
+          name: 'plan.md',
+          kind: 'file' as const,
+          path: '/Assets/plan.md',
+          version: 0,
+          bytes: 4,
+        },
+        {
+          resourceId: 'hidden-1',
+          rid: 'hidden-1',
+          gfsUri: 'gfs://main/hidden-1',
+          drive: 'main',
+          parentResourceId: 'folder-1',
+          name: 'secret.txt',
+          kind: 'file' as const,
+          path: '/Assets/secret.txt',
+          version: 0,
+          bytes: 4,
+          readable: false,
+        },
+      ],
+      nextCursor: null,
+    }))
+    const download = vi.fn(async () => ({ bytes: new Uint8Array([1, 2, 3, 4]).buffer }))
+    const pushToast = vi.fn()
+    const createObjectURL = vi.fn(() => 'blob:folder-zip')
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: createObjectURL })
+    Object.defineProperty(URL, 'revokeObjectURL', {
+      configurable: true,
+      value: vi.fn(),
+    })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { listChildren, download } },
+    })
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      accessibleResources: [
+        {
+          resourceId: 'folder-1',
+          rid: 'folder-1',
+          gfsUri: 'gfs://main/folder-1',
+          drive: 'main',
+          parentResourceId: null,
+          name: 'Assets',
+          kind: 'directory',
+          path: '/Assets',
+          version: 0,
+          bytes: 0,
+          sources: ['grant'],
+          permissions: ['read'],
+          coversDescendants: false,
+        },
+      ],
+    })
+
+    renderFilesPage(pushToast)
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Options for Assets' }))
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Download as zip' }))
+    })
+
+    // The job is in flight with a visible status strip before anything saved.
+    expect(screen.getByTestId('gfs-zip-progress').getAttribute('role')).toBe('status')
+    // Walk the throttled listing + download (500 ms of spacing per request).
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000)
+    })
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(screen.queryByTestId('gfs-zip-progress')).toBeNull()
+
+    expect(listChildren).toHaveBeenCalledWith('folder-1', 'main', undefined)
+    expect(download).toHaveBeenCalledWith('gfs://main/doc-1')
+    expect(createObjectURL).toHaveBeenCalledWith(expect.any(Blob))
+    expect(click).toHaveBeenCalled()
+    const savedName = (click.mock.instances[0] as HTMLAnchorElement | undefined)?.download
+    expect(savedName).toBe('Assets.zip')
+    expect(pushToast).toHaveBeenCalledWith('Downloaded Assets.zip (1 file)', 'success')
+    expect(pushToast).toHaveBeenCalledWith(
+      'Skipped 1 entry: Assets/secret.txt (No access)',
+      'warn',
+      expect.anything()
+    )
+  })
+
+  it('refuses a folder zip over the size limit with a clear message and saves nothing', async () => {
+    vi.useFakeTimers()
+    const listChildren = vi.fn(async () => ({
+      items: [
+        {
+          resourceId: 'huge-1',
+          rid: 'huge-1',
+          gfsUri: 'gfs://main/huge-1',
+          drive: 'main',
+          parentResourceId: 'folder-1',
+          name: 'huge.bin',
+          kind: 'file' as const,
+          path: '/Assets/huge.bin',
+          version: 0,
+          bytes: 1024 * 1024 * 1024 + 1,
+        },
+      ],
+      nextCursor: null,
+    }))
+    const download = vi.fn(async () => ({ bytes: new ArrayBuffer(0) }))
+    const pushToast = vi.fn()
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { listChildren, download } },
+    })
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      accessibleResources: [
+        {
+          resourceId: 'folder-1',
+          rid: 'folder-1',
+          gfsUri: 'gfs://main/folder-1',
+          drive: 'main',
+          parentResourceId: null,
+          name: 'Assets',
+          kind: 'directory',
+          path: '/Assets',
+          version: 0,
+          bytes: 0,
+          sources: ['grant'],
+          permissions: ['read'],
+          coversDescendants: false,
+        },
+      ],
+    })
+
+    renderFilesPage(pushToast)
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Options for Assets' }))
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Download as zip' }))
+      await vi.advanceTimersByTimeAsync(5_000)
+    })
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(screen.queryByTestId('gfs-zip-progress')).toBeNull()
+
+    expect(download).not.toHaveBeenCalled()
+    expect(click).not.toHaveBeenCalled()
+    expect(pushToast).toHaveBeenCalledWith(
+      expect.stringContaining('exceeds the 1 GiB folder-zip limit'),
+      'error'
+    )
+  })
+
+  it('omits Download as zip for a folder the session cannot read', async () => {
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      accessibleResources: [
+        {
+          resourceId: 'folder-9',
+          rid: 'folder-9',
+          gfsUri: 'gfs://main/folder-9',
+          drive: 'main',
+          parentResourceId: null,
+          name: 'Locked',
+          kind: 'directory',
+          path: '/Locked',
+          version: 0,
+          bytes: 0,
+          readable: false,
+          sources: ['grant'],
+          permissions: [],
+          coversDescendants: false,
+        },
+      ],
+    })
+
+    renderFilesPage()
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Options for Locked' }))
+    })
+
+    expect(screen.queryByRole('menuitem', { name: 'Download as zip' })).toBeNull()
+  })
+
   it('shows the document icon for txt, md, pdf, doc and docx files instead of the clip', () => {
     hookMock.useGfsBrowserController.mockReturnValue({
       ...baseController(),
@@ -4137,6 +4335,7 @@ describe('FilesPage', () => {
       'Open EvenDrive link',
       'Rename',
       'Move to…',
+      'Download as zip',
       'Delete',
     ]
     // The active folder is already open, so its menu is the row menu minus the

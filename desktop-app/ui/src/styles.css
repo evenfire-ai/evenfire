@@ -15269,6 +15269,39 @@ pre {
   font-size: var(--font-size-sm);
 }
 
+/* BUG-175 — folder-zip assembly progress strip. */
+.da-gfs-zip-progress {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1-5);
+  border: 1px solid rgba(var(--accent-rgb), 0.35);
+  border-radius: var(--radius-control);
+  background: rgba(var(--panel-rgb), 0.72);
+  color: var(--text);
+  padding: var(--space-1-5) var(--space-2);
+  font-size: var(--font-size-sm);
+  line-height: 1.35;
+}
+
+.da-gfs-zip-progress__label {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.da-gfs-zip-progress__label::before {
+  content: '';
+  flex: 0 0 auto;
+  width: var(--space-1);
+  height: var(--space-1);
+  border-radius: 999px;
+  background: var(--accent);
+  margin-right: var(--space-1-5);
+  display: inline-block;
+  animation: da-gfs-loading-dot 1.2s ease-in-out infinite;
+}
+
 .da-gfs-loading__dots {
   display: inline-flex;
   align-items: center;

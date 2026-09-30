@@ -40,8 +40,14 @@ import {
   useGfsBrowserController,
 } from '@hooks/domain/useGfsBrowserController'
 import { isEventFromNestedInteractive } from '@lib/clickableRowProps'
-import { saveGfsFileToDisk } from '@lib/gfsDownload'
+import { saveBytesToDisk, saveGfsFileToDisk } from '@lib/gfsDownload'
 import { assertGfsFileUploadSize } from '@lib/gfsFileUpload'
+import {
+  GfsFolderZipLimitError,
+  type GfsFolderZipProgress,
+  createGfsFolderZip,
+  describeZipSkips,
+} from '@lib/gfsFolderZip'
 import {
   describeGfsGrantError,
   describeGfsReadError,
@@ -274,6 +280,13 @@ export function FilesPage({
   >(null)
   const [dragActive, setDragActive] = useState(false)
   const [droppedUploadCount, setDroppedUploadCount] = useState(0)
+  // BUG-175 — live folder-zip job for the progress strip; null when idle. One
+  // job at a time: the walk holds the shared GFS read budget.
+  const [zipJob, setZipJob] = useState<{
+    folderName: string
+    progress: GfsFolderZipProgress
+  } | null>(null)
+  const zipJobRef = useRef(false)
   const [draggingResourceId, setDraggingResourceId] = useState<string | null>(null)
   const [dragOverFolderId, setDragOverFolderId] = useState<string | null>(null)
   const [movingResourceId, setMovingResourceId] = useState<string | null>(null)
@@ -795,6 +808,52 @@ export function FilesPage({
     }
   }
 
+  /**
+   * BUG-175 — recursive folder export as one zip archive, assembled in the
+   * renderer. The walk is throttled to the shared GFS read budget, refuses
+   * over the size/entry ceilings with a clear message, and reports entries it
+   * had to skip (no access / permission denied) in a visible notice after the
+   * save so the archive's holes are never silent.
+   */
+  const handleFolderZipDownload = async (folder: GfsDriveResource) => {
+    if (zipJobRef.current) return
+    zipJobRef.current = true
+    const initialProgress: GfsFolderZipProgress = {
+      phase: 'listing',
+      filesFound: 0,
+      filesAdded: 0,
+      currentPath: null,
+    }
+    setZipJob({ folderName: folder.name, progress: initialProgress })
+    try {
+      const result = await createGfsFolderZip(
+        { resourceId: folder.resourceId, drive: folder.drive || GFS_DRIVE_MAIN, name: folder.name },
+        {
+          onProgress: progress => setZipJob({ folderName: folder.name, progress }),
+        }
+      )
+      saveBytesToDisk(result.bytes, result.fileName)
+      pushToast?.(
+        `Downloaded ${result.fileName} (${result.fileCount} ${result.fileCount === 1 ? 'file' : 'files'})`,
+        'success'
+      )
+      if (result.skipped.length) {
+        pushToast?.(describeZipSkips(result.skipped), 'warn', { durationMs: 10_000 })
+      }
+    } catch (zipError) {
+      if (!failClosedOnAuthorizationError(zipError)) {
+        const message =
+          zipError instanceof GfsFolderZipLimitError
+            ? zipError.message
+            : describeGfsReadError(zipError).message
+        pushToast?.(message, 'error')
+      }
+    } finally {
+      zipJobRef.current = false
+      setZipJob(null)
+    }
+  }
+
   const handleCopyLink = async (uri: string) => {
     try {
       await navigator.clipboard.writeText(uri)
@@ -1298,6 +1357,12 @@ export function FilesPage({
     onRename: gates.canRename ? () => openRenameTarget(folder) : undefined,
     onMove: () => setMoveTarget(folder),
     onDelete: gates.canDelete ? () => setDeleteTarget(folder) : undefined,
+    onDownloadZip:
+      folder.readable === false
+        ? undefined
+        : () => {
+            void handleFolderZipDownload(folder)
+          },
   })
 
   const visibleResources = useMemo<GfsDriveResource[]>(() => {
@@ -1543,6 +1608,18 @@ export function FilesPage({
                 ? `Uploading ${droppedUploadCount} ${droppedUploadCount === 1 ? 'file' : 'files'}…`
                 : droppedUploadRestriction ||
                   `Drop files to upload to ${current?.name || 'this folder'}`}
+            </div>
+          ) : null}
+
+          {zipJob ? (
+            <div className="da-gfs-zip-progress" role="status" data-testid="gfs-zip-progress">
+              <span className="da-gfs-zip-progress__label">
+                {zipJob.progress.phase === 'listing'
+                  ? `Preparing ${zipJob.folderName}.zip — reading folder contents…`
+                  : zipJob.progress.phase === 'downloading'
+                    ? `Preparing ${zipJob.folderName}.zip — downloading ${zipJob.progress.filesAdded} of ${zipJob.progress.filesFound} ${zipJob.progress.filesFound === 1 ? 'file' : 'files'}…`
+                    : `Preparing ${zipJob.folderName}.zip — assembling archive…`}
+              </span>
             </div>
           ) : null}
 
