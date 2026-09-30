@@ -33,8 +33,9 @@ test under `.local-notes/qa-recorder/runs/desktop-app/` (git-ignored).
 | Settings + chat smoke | `qa-recorder-settings-chat.spec.ts`      | 1 — Settings tabs + one chat message                                                | `QA_RECORDER_CONFIRM_CHAT` (required)          | ✅     |
 | Image capabilities    | `qa-recorder-image-capabilities.spec.ts` | 2 — capability gate on a text-only model, fixture-backed image answer               | `QA_RECORDER_CONFIRM_CHAT` (required)          | ✅     |
 | Model selector        | `qa-recorder-model-selector.spec.ts`     | 1 — a multi-model catalog lists rows without capability tags                        | —                                              | ✅     |
+| Document upload       | `qa-recorder-document-upload.spec.ts`    | 1 — attached text file read through the read tool (fixture lane only)               | `IMAGE_CAPABILITIES_RUN_ID` (runner-set)       | ✅     |
 
-**Totals: 13 specs, 22 tests.** Read-only journeys need no confirmation flag; every
+**Totals: 14 specs, 23 tests.** Read-only journeys need no confirmation flag; every
 journey still calls the loopback health guard on both API URLs — except against a
 non-loopback target, where `QA_RECORDER_ALLOW_REMOTE=1` skips the precheck, so a
 wrong URL surfaces as an Electron timeout instead of a fast refusal. Mutating / paid

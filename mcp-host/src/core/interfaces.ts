@@ -115,6 +115,14 @@ export interface Tool {
   supportsProgressOutput?(): boolean
   /** Local implementation-owned bounded cleanup after execution is stopped. */
   timeoutCleanupMs?(): number
+  /**
+   * Optional. Return true when the tool's output is bounded by its own
+   * contract (the caller chose the page, or the output is a blob already
+   * spilled once), so the tool loop ships it inline instead of replacing it
+   * with a spillover summary. Tools that do not opt in are spilled at the
+   * configured threshold.
+   */
+  spilloverExempt?(): boolean
 }
 
 // ─── Channel ────────────────────────────────────────────────
@@ -252,11 +260,9 @@ export interface NativeToolConfig {
   /** Cron×stateless (CLERUM_STATELESS_LIFECYCLE): steers the cron_manage
    *  stateless notice. Optional so existing construction sites stay valid. */
   statelessLifecycle?: boolean
-  /** Per-call byte ceiling of `clerum__attachment_read` (#666). Registering the
-   *  tool for a message with `kind:'file'` attachments requires it. */
+  /** Per-call byte ceiling and default page of `clerum__attachment_read`
+   *  (#666). Registering the tool for a message with `kind:'file'` attachments
+   *  requires it. Pages are shipped inline, so the value is measured against
+   *  the context budget, not the spillover threshold. */
   attachmentTextReadMaxBytes?: number
-  /** Result size at which the tool loop spills a tool result
-   *  (`CLERUM_TOOL_SPILLOVER_THRESHOLD`). `clerum__attachment_read` states it in
-   *  its description, so registering that tool requires it too (#666). */
-  toolSpilloverThresholdBytes?: number
 }

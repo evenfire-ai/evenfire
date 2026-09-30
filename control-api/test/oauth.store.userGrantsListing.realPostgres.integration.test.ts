@@ -11,6 +11,7 @@ import {
   listUserOAuthGrants,
   upsertOAuthGrant,
 } from '../src/oauth/store.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 // T1/T3/T4/T5 (spec 04 U1/U3) — the owner-generalised grant listing exercised
 // against grants written by the REAL producer (`upsertOAuthGrant`), never a
@@ -54,7 +55,7 @@ describeRealPostgres('listUserOAuthGrants / listUserGrantsForServer (real Postgr
   })
 
   afterAll(async () => {
-    await dbPool?.end()
+    await endPoolAndWaitForClients(dbPool)
     if (adminPool) {
       await adminPool.query(
         `SELECT pg_terminate_backend(pid) FROM pg_stat_activity

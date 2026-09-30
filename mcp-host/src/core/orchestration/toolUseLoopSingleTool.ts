@@ -168,11 +168,15 @@ export async function executeSingleTool(
     })
 
     // T1.5 — Spillover. If the sanitized output exceeds the configured byte
-    // threshold (and the tool isn't itself `clerum__spillover_read` or an
-    // error), persist the blob out-of-band and replace `content` with a
-    // rich JSON summary. The lateral `spillover_ref` field carries the URI
-    // (P0-002 Opción D) so the resume path can resolve in O(1) without
-    // re-parsing the LLM-bound JSON body.
+    // threshold (and is not an error), persist the blob out-of-band and
+    // replace `content` with a rich JSON summary. The lateral `spillover_ref`
+    // field carries the URI (P0-002 Opción D) so the resume path can resolve
+    // in O(1) without re-parsing the LLM-bound JSON body.
+    //
+    // A tool whose output is already bounded by its own contract declares
+    // `spilloverExempt()` (`clerum__spillover_read` reads back a blob that was
+    // spilled once; `clerum__attachment_read` returns the page the caller
+    // asked for) and is shipped inline whatever its size (#666, #678).
     //
     // `rawContent` keeps the original blob untouched so the progress reporter
     // (and the workflow read-only fallbacks) still see the real output.
@@ -182,7 +186,7 @@ export async function executeSingleTool(
       config.spilloverStorage &&
       config.taskId &&
       !output.is_error &&
-      call.name !== 'clerum__spillover_read'
+      tool.spilloverExempt?.() !== true
     ) {
       try {
         const summary = await config.spilloverStorage.maybePersist({

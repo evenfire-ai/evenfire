@@ -148,7 +148,7 @@ describe('chat message attachments', () => {
     ]
 
     expect(
-      buildChatMessageAttachments(images, references).map(attachment => attachment.label)
+      buildChatMessageAttachments(images, references, []).map(attachment => attachment.label)
     ).toEqual(['first', 'logo.png', 'second'])
   })
 

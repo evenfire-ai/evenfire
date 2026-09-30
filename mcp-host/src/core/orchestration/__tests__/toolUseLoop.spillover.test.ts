@@ -233,6 +233,23 @@ describe('executeSingleTool — T1.5 spillover wiring', () => {
     expect(result.spillover_ref).toBeUndefined()
   })
 
+  it('never spills a tool that declares spilloverExempt, whatever its name', async () => {
+    const big = 'X'.repeat(512)
+    const exempt: Tool = { ...tool('file_read', big), spilloverExempt: () => true }
+    const result = await executeSingleTool(
+      { id: 'call-1', name: 'file_read', arguments: {} },
+      configFor({ tools: [exempt], storage, taskId: 'taskA' })
+    )
+    expect(result.content).toBe(big)
+    expect(result.spillover_ref).toBeUndefined()
+    // Witness: the same output from a tool without the declaration spills.
+    const control = await executeSingleTool(
+      { id: 'call-2', name: 'file_read', arguments: {} },
+      configFor({ tools: [tool('file_read', big)], storage, taskId: 'taskA' })
+    )
+    expect(control.spillover_ref).toBe('spillover://taskA/call-2.json')
+  })
+
   it('skips spillover entirely when storage is undefined (pre-T1.5 behavior)', async () => {
     const big = 'X'.repeat(512)
     const result = await executeSingleTool(

@@ -17,6 +17,7 @@ import {
   upsertDynamicClient,
 } from '../src/oauth/dynamicClientStore.js'
 import { deriveOAuthEncryptionKey } from '../src/oauth/encryption.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 /**
  * Install-identity store primitives, observed as SURVIVING ROWS and returned
@@ -135,7 +136,7 @@ describeRealPostgres('dynamicClientStore install identity (real Postgres)', () =
   })
 
   afterAll(async () => {
-    await dbPool?.end()
+    await endPoolAndWaitForClients(dbPool)
     if (adminPool) {
       await adminPool.query(
         `SELECT pg_terminate_backend(pid) FROM pg_stat_activity

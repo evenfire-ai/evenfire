@@ -8,7 +8,10 @@
  *
  *   - `reader:'text'`: strict UTF-8 text, paged by byte `offset` and `maxBytes`
  *     (at most `attachmentTextReadMaxBytes` per call). A page never splits a
- *     code point, so the text never carries U+FFFD.
+ *     code point, so the text never carries U+FFFD. The caller bounds the
+ *     page, so the tool is exempt from tool-output spillover and every page
+ *     reaches the model inline (#678); `attachmentTextReadMaxBytes` is sized
+ *     against the context budget for that reason.
  *   - `reader:'none'`: a typed binary result; the bytes are never decoded.
  *
  * The text-or-binary rule is the one `clerum__gfs_read` applies
@@ -30,9 +33,9 @@ export type AttachmentReadErrorCode = 'attachment_not_found' | 'range_invalid'
 // digest). Name, class, size and reader are already on the file's
 // `attached_file` line, so they are not repeated on every page.
 //
-// Key order is part of the contract: spillover keeps the first and last 400
-// characters of the serialized result, so the paging fields come first and the
-// text last. A spilled page's `head` then shows `byteRange` and `truncated`.
+// Key order is part of the contract: the paging fields come first and the
+// text last, so any reader that sees only the start of the serialized result
+// (a preview, a truncated log line) still sees `byteRange` and `truncated`.
 export type AttachmentReadResult =
   | {
       attachmentId: string
@@ -64,14 +67,10 @@ export class AttachmentReadTool implements Tool {
   /** Decoded bytes and the whole-file text check, per attachmentId. */
   private readonly decoded = new Map<string, { bytes: Buffer; isText: boolean }>()
 
-  /**
-   * @param spilloverThresholdBytes the tool-output spillover threshold, or
-   *   null when this execution has no spillover storage (results stay inline).
-   */
+  /** @param maxBytesPerCall the per-call ceiling and the default page. */
   constructor(
     private readonly sourceMessage: IncomingMessage,
-    private readonly maxBytesPerCall: number,
-    private readonly spilloverThresholdBytes: number | null
+    private readonly maxBytesPerCall: number
   ) {}
 
   name(): string {
@@ -82,11 +81,7 @@ export class AttachmentReadTool implements Tool {
     return (
       'Read a file attached to the current message, by the attachmentId listed as attached_file in the turn context. ' +
       'Files with reader=text return UTF-8 text; read further pages with offset when truncated is true. ' +
-      (this.spilloverThresholdBytes === null
-        ? ''
-        : `A page whose result reaches the tool-output spillover threshold (${this.spilloverThresholdBytes} bytes) is returned as a spillover summary. ` +
-          'Read it with clerum__spillover_read on its spillover_ref, or pass a smaller maxBytes. ' +
-          'The result is a JSON object whose last field is text, so the head of a spillover summary shows byteRange and truncated. ') +
+      `A page is returned whole, up to maxBytes (default ${this.maxBytesPerCall} bytes); pass a smaller maxBytes to read less at a time. ` +
       'Files with reader=none return a binary result without content. ' +
       'A reader=text file whose bytes fail the text check also returns a binary result; ' +
       'say the file cannot be read instead of guessing its content.'
@@ -126,6 +121,12 @@ export class AttachmentReadTool implements Tool {
 
   requiresApproval(): boolean {
     return false
+  }
+
+  spilloverExempt(): boolean {
+    // The caller bounds the page with `maxBytes`; replacing it with a
+    // spillover summary would make the model ask for the same bytes twice.
+    return true
   }
 
   traceDescriptor(): ToolTraceDescriptor {

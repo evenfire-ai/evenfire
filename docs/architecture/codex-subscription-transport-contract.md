@@ -71,7 +71,9 @@ the shared visual envelope budget refuses to start.
 Desktop enforces the 16 MiB individual and 16 MiB combined hard attachment
 budgets (usual target remains 5 / 9 MiB).
 RPC and Host permit a 24 MiB JSON body only on their message POST routes; chat
-non-image bytes stay on the 6 MiB share. Non-chat rpc-proxy and Host control
+text and envelope bytes stay on the 6 MiB share. Qualifying `kind:'file'`
+attachments (at most 11 MiB decoded each) have their own 16 MiB base64 quota,
+like images, and everything stays under the 24 MiB body. Non-chat rpc-proxy and Host control
 routes keep the 10 MB ordinary JSON cap. The proxy's larger
 parser requires a valid platform identity on the visual completion route.
 Admin and unauthenticated requests retain the ordinary configured body limit.

@@ -37,6 +37,44 @@ describe('#666 file ingress configuration', () => {
     }
   )
 
+  it('defaults the per-file attachment limit to 11MiB, the parser file quota (#678)', async () => {
+    vi.resetModules()
+    // Precondition: the default is what is under test, so the variable must be unset.
+    expect(process.env.CLERUM_ATTACHMENT_FILE_MAX_BYTES).toBeUndefined()
+    const { config } = await import('./config')
+    expect(config.attachmentFileMaxBytes).toBe(11_534_336)
+  })
+
+  it('defaults the attachment text page to 64 KiB, under a quarter of the default compaction budget', async () => {
+    vi.resetModules()
+    // Precondition: the default is what is under test, so the variable must be unset.
+    expect(process.env.CLERUM_ATTACHMENT_TEXT_READ_MAX_BYTES).toBeUndefined()
+    const { config } = await import('./config')
+    expect(config.attachmentTextReadMaxBytes).toBe(65_536)
+    expect(config.nativeTool.attachmentTextReadMaxBytes).toBe(65_536)
+    // The page is inline, so it is measured against the context budget, not
+    // the spillover threshold: bytes / 4 heuristic tokens, 0.8 pressure.
+    expect(Math.ceil(65_536 / 4)).toBeLessThanOrEqual(0.8 * config.contextMaxTokens * 0.25)
+  })
+
+  it.each(['0', 'abc', '2147483648'])(
+    'rejects a per-file attachment limit of %j at config load, naming the variable',
+    async value => {
+      vi.resetModules()
+      vi.stubEnv('CLERUM_ATTACHMENT_FILE_MAX_BYTES', value)
+      await expect(import('./config')).rejects.toThrow(
+        'CLERUM_ATTACHMENT_FILE_MAX_BYTES must be a valid bounded integer'
+      )
+    }
+  )
+
+  it('loads an explicit per-file attachment limit', async () => {
+    vi.resetModules()
+    vi.stubEnv('CLERUM_ATTACHMENT_FILE_MAX_BYTES', '3145728')
+    const { config } = await import('./config')
+    expect(config.attachmentFileMaxBytes).toBe(3_145_728)
+  })
+
   it('loads an explicit spillover threshold', async () => {
     vi.resetModules()
     vi.stubEnv(SPILLOVER, '16384')

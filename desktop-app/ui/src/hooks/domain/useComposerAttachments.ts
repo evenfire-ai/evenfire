@@ -1,7 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { COMPOSER_MAX_IMAGE_ATTACHMENTS } from '@constants/attachments'
+import { COMPOSER_MAX_ATTACHMENTS } from '@constants/attachments'
 import { clearComposerDraft, clearComposerDraftAfterSend } from '@lib/composerDraftStore'
-import type { ComposerImageAttachment, ComposerReferenceAttachment } from '../../uiTypes'
+import { composerFileAdmissionError, readComposerFile } from '@lib/composerFileAdmission'
+import type {
+  ComposerFileAttachment,
+  ComposerFileRefusal,
+  ComposerImageAttachment,
+  ComposerReferenceAttachment,
+} from '../../uiTypes'
 
 interface UseComposerAttachmentsParams {
   /** Attachments are per-agent; switching agents clears the pending composer. */
@@ -32,8 +38,27 @@ export function useComposerAttachments({
   const [composerReferenceAttachments, setComposerReferenceAttachments] = useState<
     ComposerReferenceAttachment[]
   >([])
+  const [composerFileAttachments, setComposerFileAttachments] = useState<ComposerFileAttachment[]>(
+    []
+  )
+  const [composerFileRefusals, setComposerFileRefusals] = useState<ComposerFileRefusal[]>([])
   const composerAttachmentOrderRef = useRef(0)
   const composerAttachmentRevisionRef = useRef(0)
+  // Mirrors of the state above. Admission of a file and the completion of its
+  // asynchronous read decide from the latest attachments, not from the render
+  // that started them.
+  const composerFilesRef = useRef<ComposerFileAttachment[]>([])
+  const composerImageCountRef = useRef(0)
+  composerImageCountRef.current = composerImageAttachments.length
+
+  const commitComposerFiles = useCallback(
+    (update: (previous: ComposerFileAttachment[]) => ComposerFileAttachment[]) => {
+      const next = update(composerFilesRef.current)
+      composerFilesRef.current = next
+      setComposerFileAttachments(next)
+    },
+    []
+  )
 
   const revokeComposerPreviewUrls = useCallback((attachments: ComposerImageAttachment[]) => {
     composerAttachmentRevisionRef.current += 1
@@ -58,11 +83,19 @@ export function useComposerAttachments({
     })
   }, [revokeComposerPreviewUrls])
 
-  /** Clear BOTH pending attachment kinds (revoking image blob URLs). */
+  const clearComposerFileAttachments = useCallback(() => {
+    composerAttachmentRevisionRef.current += 1
+    // A read still in flight finds no entry for its id and is dropped.
+    commitComposerFiles(() => [])
+  }, [commitComposerFiles])
+
+  /** Clear every pending attachment kind (revoking image blob URLs). */
   const resetComposerAttachments = useCallback(() => {
     clearComposerImageAttachments()
+    clearComposerFileAttachments()
+    setComposerFileRefusals([])
     setComposerReferenceAttachments([])
-  }, [clearComposerImageAttachments])
+  }, [clearComposerFileAttachments, clearComposerImageAttachments])
 
   /** Post-send cleanup: clear the persisted draft for this chat, then the pending
    *  attachments. Combines the three original send-path calls into one. */
@@ -86,10 +119,13 @@ export function useComposerAttachments({
     (attachments: ComposerImageAttachment[]) => {
       composerAttachmentRevisionRef.current += 1
       if (!attachments.length) return
+      // A new attach replaces the notice about documents refused earlier.
+      setComposerFileRefusals([])
       setComposerImageAttachments(previous => {
         const next = [...previous]
         for (const attachment of attachments) {
-          if (next.length >= COMPOSER_MAX_IMAGE_ATTACHMENTS) {
+          // Images and files share one per-message count.
+          if (next.length + composerFilesRef.current.length >= COMPOSER_MAX_ATTACHMENTS) {
             revokeComposerPreviewUrls([attachment])
             continue
           }
@@ -152,6 +188,91 @@ export function useComposerAttachments({
     [revokeComposerPreviewUrls]
   )
 
+  /**
+   * Adds picked documents (#678). Each accepted file appears at once as
+   * `reading` and becomes `ready` when its bytes are read and hashed. A file
+   * that breaks a limit, or cannot be read, gets no chip: its reason is shown
+   * as a refusal notice instead, so a refusal is never silent. Each attach
+   * replaces the refusals of the previous one.
+   */
+  const handleAddComposerFiles = useCallback(
+    (files: File[], textBytes: number) => {
+      composerAttachmentRevisionRef.current += 1
+      if (!files.length) return
+      const refusals: ComposerFileRefusal[] = []
+      for (const file of files) {
+        const id = crypto.randomUUID()
+        const current = composerFilesRef.current
+        const error = composerFileAdmissionError(file, {
+          attachedCount: composerImageCountRef.current + current.length,
+          files: current,
+          textBytes,
+        })
+        composerAttachmentOrderRef.current += 1
+        const base = {
+          id,
+          addedOrder: composerAttachmentOrderRef.current,
+          type: 'file' as const,
+          filename: file.name,
+          sizeBytes: file.size,
+          declaredMediaType: file.type,
+        }
+        if (error) {
+          refusals.push({ id, text: error })
+          continue
+        }
+        commitComposerFiles(previous => [...previous, { ...base, status: 'reading' }])
+        void readComposerFile(file, id).then(result => {
+          // A file removed while it was read (by the user, a send or an agent
+          // change) leaves neither a chip nor a notice.
+          if (!composerFilesRef.current.some(item => item.id === id)) return
+          if (result.status === 'failed') {
+            commitComposerFiles(previous => previous.filter(item => item.id !== id))
+            setComposerFileRefusals(previous => [...previous, { id, text: result.error }])
+            return
+          }
+          commitComposerFiles(previous => {
+            if (
+              previous.some(
+                item =>
+                  item.id !== id &&
+                  item.status === 'ready' &&
+                  item.filename === result.filename &&
+                  item.digestHex === result.digestHex
+              )
+            ) {
+              return previous.filter(item => item.id !== id)
+            }
+            return previous.map(item =>
+              item.id === id ? { ...result, addedOrder: item.addedOrder } : item
+            )
+          })
+        })
+      }
+      setComposerFileRefusals(refusals)
+      clearSendError()
+    },
+    [clearSendError, commitComposerFiles]
+  )
+
+  const handleRemoveComposerFileAttachment = useCallback(
+    (attachmentId: string) => {
+      composerAttachmentRevisionRef.current += 1
+      commitComposerFiles(previous => previous.filter(item => item.id !== attachmentId))
+      clearSendError()
+    },
+    [clearSendError, commitComposerFiles]
+  )
+
+  /** Puts back files that were attached to a send that failed. */
+  const handleRestoreComposerFiles = useCallback(
+    (files: ComposerFileAttachment[]) => {
+      composerAttachmentRevisionRef.current += 1
+      commitComposerFiles(() => files)
+    },
+    [commitComposerFiles]
+  )
+
   const handleAddComposerReferenceAttachments = useCallback(
     (attachments: ComposerReferenceAttachment[]) => {
       composerAttachmentRevisionRef.current += 1
@@ -187,6 +308,8 @@ export function useComposerAttachments({
 
   return {
     composerImageAttachments,
+    composerFileAttachments,
+    composerFileRefusals,
     composerAttachmentRevisionRef,
     composerReferenceAttachments,
     resetComposerAttachments,
@@ -195,6 +318,9 @@ export function useComposerAttachments({
     handleAddComposerImageAttachments,
     handleUpdateComposerImageAttachment,
     handleRemoveComposerImageAttachment,
+    handleAddComposerFiles,
+    handleRemoveComposerFileAttachment,
+    handleRestoreComposerFiles,
     handleAddComposerReferenceAttachments,
     handleRemoveComposerReferenceAttachment,
   }

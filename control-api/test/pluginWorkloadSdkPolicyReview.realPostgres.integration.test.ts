@@ -6,6 +6,7 @@ import {
   addPluginWorkloadSdkPolicyReviewProvenance,
   repairPluginWorkloadSdkLegacyGrantPolicies,
 } from '../src/services/pluginWorkloadSdkSchema.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
@@ -33,7 +34,7 @@ describeRealPostgres('Plugin Workload SDK policy review provenance on real Postg
   })
 
   afterAll(async () => {
-    await dbPool?.end()
+    await endPoolAndWaitForClients(dbPool)
     if (!adminPool) return
     await adminPool.query(
       `SELECT pg_terminate_backend(pid)

@@ -547,7 +547,7 @@ export type HostMessageRequest = {
   [key: string]: unknown
 }
 
-export type HostMessageAttachment = {
+export type HostImageAttachment = {
   id: string
   kind: 'image'
   mimeType: 'image/jpeg' | 'image/png'
@@ -555,6 +555,26 @@ export type HostMessageAttachment = {
   dataBase64: string
   filename?: string
 }
+
+/**
+ * #678 — a document of any type sent inline. `sizeBytes` is the decoded length
+ * and `digest.hex` the sha256 of those bytes; mcp-host recomputes both and
+ * classifies the bytes itself, so `detectedMediaType` is the renderer's claim.
+ */
+export type HostFileAttachment = {
+  id: string
+  kind: 'file'
+  filename: string
+  /** Media type the OS or browser reported; empty when it reported none. */
+  mimeType: string
+  detectedMediaType: string
+  encoding: 'base64'
+  dataBase64: string
+  sizeBytes: number
+  digest: { algorithm: 'sha256'; hex: string }
+}
+
+export type HostMessageAttachment = HostImageAttachment | HostFileAttachment
 
 /**
  * Structured error returned by mcp-host when an LLM call fails.

@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { Pool, type PoolClient } from 'pg'
 import request from 'supertest'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 // rateLimitMiddleware's 'process-memory' mode against real PostgreSQL: with
 // every limiter pool connection held, a real route's limiter cannot count in
@@ -115,8 +116,8 @@ describeRealPostgres('rateLimitMiddleware process-memory mode (real PostgreSQL)'
       if (value === undefined) delete process.env[key]
       else process.env[key] = value
     }
-    await corePool?.end().catch(() => {})
-    await limiterPool?.end().catch(() => {})
+    await endPoolAndWaitForClients(corePool).catch(() => {})
+    await endPoolAndWaitForClients(limiterPool).catch(() => {})
     if (!adminPool) return
     await adminPool.query(
       `SELECT pg_terminate_backend(pid) FROM pg_stat_activity

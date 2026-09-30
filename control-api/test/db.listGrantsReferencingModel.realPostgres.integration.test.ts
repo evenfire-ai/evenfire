@@ -3,6 +3,7 @@ import { randomBytes } from 'node:crypto'
 import { Pool } from 'pg'
 import { initDb } from '../src/db.js'
 import { listGrantsReferencingModel } from '../src/services/pluginWorkloadSdkDb.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 // FIX C (T1/T3): exercise the REAL jsonb `@>` containment of
 // listGrantsReferencingModel against a real Postgres — the risky part the unit
@@ -63,7 +64,7 @@ describeRealPostgres('listGrantsReferencingModel jsonb containment on real Postg
   })
 
   afterAll(async () => {
-    await dbPool?.end()
+    await endPoolAndWaitForClients(dbPool)
     if (!adminPool) return
     await adminPool.query(
       `SELECT pg_terminate_backend(pid)

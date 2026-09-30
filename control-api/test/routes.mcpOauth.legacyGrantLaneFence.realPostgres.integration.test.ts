@@ -37,6 +37,7 @@ import {
   legacyConsent,
   reinstallServer,
 } from './fixtures/legacyOAuthGrant.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 import { MockGateway } from './mockGateway.js'
 
 // The broker reads grants through the app's shared pool; point it at this suite's
@@ -114,7 +115,7 @@ describeRealPostgres('legacy grants seen by the broker, gate and sweep (real Pos
 
   afterAll(async () => {
     testDb.pool = undefined
-    await dbPool?.end()
+    await endPoolAndWaitForClients(dbPool)
     if (adminPool) {
       await adminPool.query(
         `SELECT pg_terminate_backend(pid) FROM pg_stat_activity

@@ -15,7 +15,8 @@ per-image / 16 MiB aggregate / 24 MiB envelope ceiling, plus the 2048 px
 model bound. Exercise 5 MiB, 12 MiB (exceptional, above 10 MiB), 10+5 MiB
 and 3x5 MiB acceptance, plus overflow above 16 MiB. V1 and V2 non-image fields keep an 8 MiB ceiling
 (#731), and beside a hard-ceiling image the 24 MiB envelope leaves about 2.7 MiB of non-image data;
-chat non-image bytes stay at 6 MiB; unrelated rpc-proxy and Host control routes keep the 10 MB ordinary JSON cap. The larger proxy parser must not admit an
+chat text and envelope bytes stay at 6 MiB, while qualifying `kind:'file'` attachments (at most 11 MiB decoded each)
+have their own 16 MiB base64 quota under the same 24 MiB body; unrelated rpc-proxy and Host control routes keep the 10 MB ordinary JSON cap. The larger proxy parser must not admit an
 anonymous, wrong-scope or admin request, or enlarge V1's effective body limit.
 Changing these budgets does not change OAuth, grants, ticket binding, origins,
 fallback, or connection selection. Local capacity evidence is separate from

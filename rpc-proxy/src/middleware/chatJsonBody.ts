@@ -1,7 +1,7 @@
 import express, { type NextFunction, type Request, type Response } from 'express'
 
 /**
- * Body budgets for chat payloads carrying base64 image attachments.
+ * Body budgets for chat payloads carrying base64 image and file attachments.
  *
  * Usual product target is 5MiB / 9MiB / 14MiB at 2048 px. Hard hop credit is
  * 16MiB per image and 16MiB total so a poorly compressed 2048 PNG may exceed
@@ -13,8 +13,13 @@ import express, { type NextFunction, type Request, type Response } from 'express
  *     still fits. The 6MiB non-image share is a separate ceiling, not added
  *     on top of that image.
  *   - MAX_NON_IMAGE_BODY_BYTES bounds the same body MINUS credited image
- *     base64. Without that subtraction the attachment budget would become a
- *     general 24MiB text budget.
+ *     base64 and MINUS credited file base64. Without those subtractions the
+ *     attachment budgets would become a general 24MiB text budget.
+ *
+ * `kind:'file'` has its own quota (issue #678): at most 11MiB decoded per file
+ * and 16MiB of base64 in total, credited exactly like images. The text, the
+ * JSON envelope and the non-base64 fields of each file entry stay in the 6MiB
+ * share, so a text-only message keeps its 6MiB ceiling.
  *
  * Mount `chatJsonBody` on `POST /rpc/hosts/:hostRef/messages` right after
  * authentication so unauthenticated callers never trigger this parser.
@@ -24,6 +29,10 @@ const MAX_NON_IMAGE_BODY_BYTES = 6 * 1024 * 1024
 const MAX_CHAT_IMAGES = 20
 const MAX_IMAGE_DECODED_BYTES = 16 * 1024 * 1024
 const MAX_IMAGE_DECODED_BYTES_TOTAL = 16 * 1024 * 1024
+const MAX_CHAT_FILES = 20
+const MAX_FILE_DECODED_BYTES = 11 * 1024 * 1024
+const MAX_FILE_BASE64_BYTES_TOTAL = 16 * 1024 * 1024
+const SHA256_HEX_RE = /^[0-9a-f]{64}$/
 const BASE64_RE = /^[A-Za-z0-9+/]+={0,2}$/
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
 const JPEG_SIGNATURE = Buffer.from([0xff, 0xd8, 0xff])
@@ -119,10 +128,68 @@ function inspectChatImageBudget(body: unknown): {
   return { creditedBase64: credited, rejectImages: false }
 }
 
+/**
+ * Byte length of the base64 that counts against the file quota. Only a
+ * `kind:'file'` attachment with the exact wire shape the composer produces
+ * qualifies: `encoding: 'base64'`, a non-empty file name, a sha256 digest of
+ * 64 lowercase hex characters, canonical non-empty base64 of at most 11MiB
+ * decoded, within a 20-file / 16MiB-of-base64 total. A qualifying file that
+ * would break the count or the total is fail-loud rather than charged as text.
+ * Anything else is charged to the non-image budget, so a claim cannot be
+ * smuggled through by mislabelling a payload. The proxy never hashes: the Host
+ * verifies size, digest and class at admission.
+ */
+function inspectChatFileBudget(body: unknown): {
+  creditedBase64: number
+  rejectFiles: boolean
+} {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return { creditedBase64: 0, rejectFiles: false }
+  }
+  const attachments = (body as { attachments?: unknown }).attachments
+  if (!Array.isArray(attachments)) return { creditedBase64: 0, rejectFiles: false }
+
+  let credited = 0
+  let counted = 0
+  for (const attachment of attachments) {
+    if (!attachment || typeof attachment !== 'object') continue
+    const candidate = attachment as {
+      kind?: unknown
+      encoding?: unknown
+      filename?: unknown
+      digest?: unknown
+      dataBase64?: unknown
+    }
+    if (candidate.kind !== 'file' || candidate.encoding !== 'base64') continue
+    if (typeof candidate.filename !== 'string' || candidate.filename.length === 0) continue
+    const digest = candidate.digest as { algorithm?: unknown; hex?: unknown } | null | undefined
+    if (
+      !digest ||
+      typeof digest !== 'object' ||
+      digest.algorithm !== 'sha256' ||
+      typeof digest.hex !== 'string' ||
+      !SHA256_HEX_RE.test(digest.hex)
+    ) {
+      continue
+    }
+    const dataBase64 = typeof candidate.dataBase64 === 'string' ? candidate.dataBase64 : ''
+    const decoded = decodedBase64Bytes(dataBase64)
+    if (decoded === null || decoded <= 0 || decoded > MAX_FILE_DECODED_BYTES) continue
+    if (counted >= MAX_CHAT_FILES || credited + dataBase64.length > MAX_FILE_BASE64_BYTES_TOTAL) {
+      return { creditedBase64: credited, rejectFiles: true }
+    }
+    credited += dataBase64.length
+    counted += 1
+  }
+  return { creditedBase64: credited, rejectFiles: false }
+}
+
 function chatBodyExceedsNonImageBudget(rawBodyBytes: number, body: unknown): boolean {
-  const budget = inspectChatImageBudget(body)
-  if (budget.rejectImages) return true
-  return rawBodyBytes - budget.creditedBase64 > MAX_NON_IMAGE_BODY_BYTES
+  const images = inspectChatImageBudget(body)
+  if (images.rejectImages) return true
+  const files = inspectChatFileBudget(body)
+  if (files.rejectFiles) return true
+  return rawBodyBytes - images.creditedBase64 - files.creditedBase64 > MAX_NON_IMAGE_BODY_BYTES
 }
 
 const chatJsonParser = express.json({

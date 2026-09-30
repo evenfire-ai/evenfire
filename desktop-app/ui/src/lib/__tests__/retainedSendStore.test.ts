@@ -12,6 +12,7 @@ function snapshot(
     userMessageId,
     content: userMessageId,
     attachments: [],
+    files: [],
     references: [],
     reason: 'post_failed',
     timestamp,
@@ -87,5 +88,46 @@ describe('retainedSendStore — superseded failures (#654 M2)', () => {
 
     expect(held(store, ALL)).toEqual(['chat-1/awaiting', 'chat-1/succeeded', 'chat-2/other-chat'])
     expect(store.getLatestRetainedSendSnapshotForChat('agent-x', 'chat-1')).toBeUndefined()
+  })
+})
+
+describe('retainedSendStore — documents the Host never received (#678 D13)', () => {
+  it('keeps the snapshot of a task that succeeded without its files', () => {
+    const store = createRetainedSendStore(vi.fn())
+    store.retainSendSnapshot(snapshot('older', 100))
+    store.retainSendSnapshot(
+      snapshot('with-files', 200, { reason: 'awaiting_terminal', failure: undefined })
+    )
+    store.attachTaskIdToRetainedSend('agent-x', 'chat-1', 'with-files', 'task-files')
+    store.markRetainedSendReason(
+      'task-files',
+      'host_files_unsupported',
+      'The Host does not accept file attachments yet.',
+      'upstream'
+    )
+
+    store.releaseSucceededRetainedSendsForTask('task-files')
+
+    // Liveness witness: the flagged snapshot is still there, marked with its reason.
+    const kept = store.getRetainedSendSnapshot('agent-x', 'chat-1', 'with-files')
+    expect(kept?.reason).toBe('host_files_unsupported')
+    // The success released nobody, not even the older failure it would supersede.
+    expect(held(store, ['chat-1/older', 'chat-1/with-files'])).toEqual([
+      'chat-1/older',
+      'chat-1/with-files',
+    ])
+  })
+
+  it('still releases a succeeded task whose files reached the Host', () => {
+    const store = createRetainedSendStore(vi.fn())
+    store.retainSendSnapshot(
+      snapshot('delivered', 200, { reason: 'awaiting_terminal', failure: undefined })
+    )
+    store.attachTaskIdToRetainedSend('agent-x', 'chat-1', 'delivered', 'task-ok')
+    expect(held(store, ['chat-1/delivered'])).toEqual(['chat-1/delivered'])
+
+    store.releaseSucceededRetainedSendsForTask('task-ok')
+
+    expect(held(store, ['chat-1/delivered'])).toEqual([])
   })
 })
