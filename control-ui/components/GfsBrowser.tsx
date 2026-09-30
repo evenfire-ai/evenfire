@@ -704,33 +704,12 @@ export function GfsBrowser(): React.JSX.Element {
       await Promise.all(
         Array.from(targets.values(), async target => {
           try {
-            const resolved = (await apiGet(
-              '/api/v1/gfs/resolve',
-              { uri: target.gfsUri },
-              { signal }
-            )) as {
-              resourceId: string
-              rid: string
-              gfsUri: string
-              name: string
-              kind: string
-              bytes: number
-              version: number
-            }
+            await apiGet('/api/v1/gfs/resolve', { uri: target.gfsUri }, { signal })
             if (signal.aborted) return
-            const current: GfsChild = {
-              ...target,
-              resourceId: resolved.resourceId,
-              rid: resolved.rid,
-              gfsUri: resolved.gfsUri,
-              name: resolved.name,
-              kind: resolved.kind,
-              bytes: resolved.bytes,
-              version: resolved.version,
-            }
-            setSelected(value => (value?.resourceId === target.resourceId ? current : value))
-            setRenameTarget(value => (value?.resourceId === target.resourceId ? current : value))
-            setMoveTarget(value => (value?.resourceId === target.resourceId ? current : value))
+            // This read confirms the dialog's target is still visible; it must
+            // not silently advance the version the operator is confirming.
+            // Keep the original target snapshot so the existing ifMatch CAS can
+            // report a stale write rather than applying to unconfirmed state.
           } catch (error) {
             if (signal.aborted) return
             const status = entityChangeErrorStatus(error)

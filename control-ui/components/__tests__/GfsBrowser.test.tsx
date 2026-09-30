@@ -689,7 +689,7 @@ describe('GfsBrowser', () => {
   it('keeps the loaded list and Rename dialog visible during a soft stream refresh', async () => {
     const rootId = '11111111-1111-1111-1111-111111111111'
     const report = child('report.md', 'file', 1, 4)
-    const resolvedReport = toResolveView({
+    let resolvedReport = toResolveView({
       resourceId: report.resourceId,
       drive: 'main',
       name: report.name,
@@ -744,6 +744,10 @@ describe('GfsBrowser', () => {
     fireEvent.click(screen.getByRole('menuitem', { name: 'Rename' }))
     const dialog = await screen.findByRole('dialog', { name: 'Rename file' })
 
+    // The user's open dialog represents version 4. A stream revalidation may
+    // learn that the resource is now version 5, but it must not silently change
+    // the version the user is confirming.
+    resolvedReport = { ...resolvedReport, version: 5 }
     const frame = await controlApiProducerFrame(['authorization'])
     await act(async () => {
       streamControllers[0]!.enqueue(new TextEncoder().encode(`${frame}\n`))
@@ -758,6 +762,27 @@ describe('GfsBrowser', () => {
     })
     expect(await screen.findByRole('button', { name: 'report.md' })).toBeVisible()
     expect(screen.getByRole('dialog', { name: 'Rename file' })).toBe(dialog)
+
+    await waitFor(() =>
+      expect(mockApiGet).toHaveBeenCalledWith(
+        '/api/v1/gfs/resolve',
+        { uri: report.gfsUri },
+        expect.objectContaining({ signal: expect.any(AbortSignal) })
+      )
+    )
+    mockApiSend.mockResolvedValue({ data: { resourceId: report.resourceId, version: 6 } })
+    fireEvent.change(screen.getByRole('textbox', { name: 'New name' }), {
+      target: { value: 'renamed.md' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Rename' }))
+    await waitFor(() =>
+      expect(mockApiSend).toHaveBeenCalledWith(
+        'PATCH',
+        `/api/v1/gfs/resources/${encodeURIComponent(report.resourceId)}`,
+        { drive: 'main', newName: 'renamed.md', ifMatch: 4 },
+        { drive: 'main' }
+      )
+    )
   })
 
   it('purges the current folder after stream revalidation proves it is forbidden', async () => {
