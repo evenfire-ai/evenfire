@@ -534,6 +534,9 @@ jobs:
       - name: Test HCC watch-recovery gate coordination
         run: bash scripts/tests/test-hcc-watch-recovery-gate.sh
 
+      - name: Test autoresearch gate wrappers
+        run: bash scripts/tests/test-autoresearch-gates.sh
+
       - name: Test HCC watch recovery TLS proxy and configuration restoration
         run: |
           bash scripts/tests/test-hcc-watch-api-proxy.sh
@@ -541,6 +544,9 @@ jobs:
 
       - name: Test HCC watch-churn readiness gate contract
         run: bash scripts/tests/test-hcc-watch-churn-readiness-gate.sh
+
+      - name: Test HCC stateless cache-containment gate contract
+        run: bash scripts/tests/test-hcc-stateless-cache-containment.sh
 
       - name: HCC policy lifecycle and restoration contracts
         run: |

@@ -840,14 +840,14 @@ describe('HostWizard — baseline render', () => {
 })
 
 describe('HostWizard — Agent type (stateless lifecycle)', () => {
-  it('hides the Agent type selector from the create flow', async () => {
+  it('shows the Agent type selector in the create flow', async () => {
     await renderWizard()
 
-    expect(screen.queryByText('Agent type')).not.toBeInTheDocument()
-    expect(screen.queryByRole('radio', { name: /Stateful \(always on\)/i })).not.toBeInTheDocument()
+    expect(screen.getByText('Agent type')).toBeInTheDocument()
+    expect(screen.getByRole('radio', { name: /Stateful \(always on\)/i })).toBeInTheDocument()
     expect(
-      screen.queryByRole('radio', { name: /Stateless \(suspends when idle\)/i })
-    ).not.toBeInTheDocument()
+      screen.getByRole('radio', { name: /Stateless \(suspends when idle\)/i })
+    ).toBeInTheDocument()
   })
 
   it('omits spec.lifecycle from the created Host when Stateful is kept (absent = disabled)', async () => {
@@ -867,6 +867,24 @@ describe('HostWizard — Agent type (stateless lifecycle)', () => {
     const payload = hostCall![2] as { spec: Record<string, unknown> }
     expect('lifecycle' in payload.spec).toBe(false)
     expect('workflowControl' in payload.spec).toBe(false)
+  })
+
+  it('sends spec.lifecycle.stateless when Stateless is selected', async () => {
+    await renderWizard()
+    fireEvent.click(screen.getByRole('radio', { name: /Stateless \(suspends when idle\)/i }))
+    await walkToAccessStep({ agentName: 'stateless-agent' })
+    continueToConnectorsStep()
+    submitFromConnectorsStep()
+
+    await waitFor(() => {
+      expect(api.apiSend).toHaveBeenCalledWith('POST', '/api/v1/admin/hosts', expect.any(Object))
+    })
+    const hostCall = vi
+      .mocked(api.apiSend)
+      .mock.calls.find(call => call[0] === 'POST' && call[1] === '/api/v1/admin/hosts')
+    expect(hostCall).toBeDefined()
+    const payload = hostCall![2] as { spec: { lifecycle?: { stateless?: boolean } } }
+    expect(payload.spec.lifecycle).toEqual({ stateless: true })
   })
 })
 

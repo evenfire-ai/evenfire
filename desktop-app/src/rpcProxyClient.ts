@@ -23,6 +23,7 @@ import {
   SessionsListResult,
   SetHostModelResult,
 } from './types.js'
+import { boundedErrorExcerpt, hostAccessDenialMessage } from './upstreamErrors.js'
 
 export type { SandboxUiApp } from './types.js'
 
@@ -167,6 +168,12 @@ function parseToolSteps(value: unknown, label: string): MessageToolStep[] {
   })
 }
 
+/**
+ * Longest sessions cursor the `rpc:listSessions` IPC handler accepts
+ * (`sanitizeSessionsListQuery` in `ipc.ts`; mcp-host enforces the same bound).
+ */
+const SESSIONS_CURSOR_MAX_LENGTH = 2048
+
 // Exported for tests: renderer/parser tests derive their fixtures from the real
 // producer (pr-discipline T1) instead of hand-mocking the parsed shape.
 export function parseSessionsListResult(value: unknown): SessionsListResult {
@@ -249,12 +256,24 @@ export function parseSessionsListResult(value: unknown): SessionsListResult {
     }
   })
   if (record.items.length > 0 && items.length === 0 && firstItemError) throw firstItemError
+  const nextCursor =
+    record.nextCursor != null
+      ? wireString(record.nextCursor, 'sessions response.nextCursor')
+      : undefined
+  // R3-L10: the `rpc:listSessions` IPC handler refuses a longer cursor before
+  // any request, so handing one to the renderer would only produce a status-less
+  // error on "Load more". End the page chain here instead. The cursor is opaque
+  // upstream state: log its length only, never its value.
+  const cursorTooLong = nextCursor !== undefined && nextCursor.length > SESSIONS_CURSOR_MAX_LENGTH
+  if (cursorTooLong) {
+    console.warn(
+      `[RpcProxyClient] Dropped a sessions nextCursor of ${nextCursor.length} characters (limit ${SESSIONS_CURSOR_MAX_LENGTH})`
+    )
+  }
   return {
     items,
     ...(droppedItemCount > 0 ? { droppedItemCount } : {}),
-    ...(record.nextCursor != null
-      ? { nextCursor: wireString(record.nextCursor, 'sessions response.nextCursor') }
-      : {}),
+    ...(nextCursor !== undefined && !cursorTooLong ? { nextCursor } : {}),
   }
 }
 
@@ -425,7 +444,9 @@ export class SandboxUiSessionError extends Error {
   readonly status: number
   readonly body: string
   constructor(status: number, body: string) {
-    super(`sandbox-ui session mint failed (${status}): ${body || '<empty body>'}`)
+    super(
+      `sandbox-ui session mint failed (${status}): ${boundedErrorExcerpt(body) || '<empty body>'}`
+    )
     this.status = status
     this.body = body
     this.name = 'SandboxUiSessionError'
@@ -454,6 +475,16 @@ function errorCodeFromBody(body: string): string | null {
   } catch {
     return null
   }
+}
+
+/**
+ * The single producer of Host-access denial errors for the raw-`fetch` methods:
+ * the message strings and the `code` rule live in `upstreamErrors.ts` and are
+ * shared with `httpClient.requestJson`.
+ */
+function hostAccessDenialError(status: number, body: string): ApiError | null {
+  const message = hostAccessDenialMessage(status, body)
+  return message ? new ApiError(message, status, body) : null
 }
 
 export class RpcProxyClient {
@@ -574,7 +605,11 @@ export class RpcProxyClient {
       return { status }
     }
     const body = await readErrorBody(response)
-    throw new ApiError(`Prewarm failed (${response.status}): ${body}`, response.status, body)
+    throw new ApiError(
+      `Prewarm failed (${response.status}): ${boundedErrorExcerpt(body)}`,
+      response.status,
+      body
+    )
   }
 
   async getHostHealth(rpcAccessToken: string, hostRef: string): Promise<HostRuntimeHealth> {
@@ -685,7 +720,7 @@ export class RpcProxyClient {
     if (!response.ok) {
       const body = await response.text()
       throw new Error(
-        `sandbox-ui authorize-url request failed (${response.status}): ${body || '<empty>'}`
+        `sandbox-ui authorize-url request failed (${response.status}): ${boundedErrorExcerpt(body) || '<empty>'}`
       )
     }
     const json = (await response.json()) as { authorizeUrl?: unknown }
@@ -732,7 +767,7 @@ export class RpcProxyClient {
     if (!response.ok) {
       const body = await response.text()
       throw new ApiError(
-        `mcp-oauth authorize-url request failed (${response.status}): ${body || '<empty>'}`,
+        `mcp-oauth authorize-url request failed (${response.status}): ${boundedErrorExcerpt(body) || '<empty>'}`,
         response.status,
         body
       )
@@ -765,7 +800,9 @@ export class RpcProxyClient {
     })
     if (!response.ok) {
       const body = await response.text()
-      throw new Error(`Host stream failed (${response.status}): ${body || response.statusText}`)
+      throw new Error(
+        `Host stream failed (${response.status}): ${boundedErrorExcerpt(body) || response.statusText}`
+      )
     }
     if (!response.body) {
       throw new Error('Host stream missing response body')
@@ -887,7 +924,11 @@ export class RpcProxyClient {
       const body = await response.text()
       // ApiError (not a bare Error) so `AppService.shouldRefreshRpcToken` can see
       // the 401/403 status and drive the retry-after-refresh (§4.5-7).
-      throw new ApiError(`Approve failed (${response.status}): ${body}`, response.status, body)
+      throw new ApiError(
+        `Approve failed (${response.status}): ${boundedErrorExcerpt(body)}`,
+        response.status,
+        body
+      )
     }
     return parseApprovalDecisionResponse(response)
   }
@@ -913,7 +954,11 @@ export class RpcProxyClient {
     )
     if (!response.ok) {
       const body = await response.text()
-      throw new ApiError(`Deny failed (${response.status}): ${body}`, response.status, body)
+      throw new ApiError(
+        `Deny failed (${response.status}): ${boundedErrorExcerpt(body)}`,
+        response.status,
+        body
+      )
     }
     return parseApprovalDecisionResponse(response)
   }
@@ -934,7 +979,11 @@ export class RpcProxyClient {
     )
     if (!response.ok) {
       const body = await response.text()
-      throw new ApiError(`cancelTask failed (${response.status}): ${body}`, response.status, body)
+      throw new ApiError(
+        `cancelTask failed (${response.status}): ${boundedErrorExcerpt(body)}`,
+        response.status,
+        body
+      )
     }
   }
 
@@ -954,7 +1003,7 @@ export class RpcProxyClient {
     if (!response.ok) {
       const body = await response.text()
       throw new ApiError(
-        `List artifacts failed (${response.status}): ${body}`,
+        `List artifacts failed (${response.status}): ${boundedErrorExcerpt(body)}`,
         response.status,
         body
       )
@@ -975,7 +1024,7 @@ export class RpcProxyClient {
     )
     if (!response.ok) {
       const body = await response.text()
-      throw new Error(`Download artifact failed (${response.status}): ${body}`)
+      throw new Error(`Download artifact failed (${response.status}): ${boundedErrorExcerpt(body)}`)
     }
     return Buffer.from(await response.arrayBuffer())
   }
@@ -996,8 +1045,10 @@ export class RpcProxyClient {
     })
     if (!response.ok) {
       const body = await response.text()
+      const hostAccessDenial = hostAccessDenialError(response.status, body)
+      if (hostAccessDenial) throw hostAccessDenial
       throw new ApiError(
-        `List sessions failed (${response.status}): ${body}`,
+        `List sessions failed (${response.status}): ${boundedErrorExcerpt(body)}`,
         response.status,
         body
       )
@@ -1032,14 +1083,16 @@ export class RpcProxyClient {
       signal: withTimeout(),
     })
     if (response.status === 404) {
-      // Keep the '404' token in the message: the renderer's `isHttp404` matches on
-      // it to evict a stale local chat.
+      // Preserve the status for the renderer. A transcript 404 is ambiguous
+      // during Host wake and never confirms that local data may be deleted.
       throw new ApiError(`Session not found (404)`, 404, '')
     }
     if (!response.ok) {
       const body = await response.text()
+      const hostAccessDenial = hostAccessDenialError(response.status, body)
+      if (hostAccessDenial) throw hostAccessDenial
       throw new ApiError(
-        `Load session messages failed (${response.status}): ${body}`,
+        `Load session messages failed (${response.status}): ${boundedErrorExcerpt(body)}`,
         response.status,
         body
       )
@@ -1082,7 +1135,7 @@ export class RpcProxyClient {
     if (!response.ok) {
       const body = await response.text()
       throw new ApiError(
-        `Get context breakdown failed (${response.status}): ${body}`,
+        `Get context breakdown failed (${response.status}): ${boundedErrorExcerpt(body)}`,
         response.status,
         body
       )
@@ -1125,7 +1178,7 @@ export class RpcProxyClient {
     if (!response.ok) {
       const body = await readErrorBody(response)
       throw new ApiError(
-        `Get host models failed (${response.status}): ${body}`,
+        `Get host models failed (${response.status}): ${boundedErrorExcerpt(body)}`,
         response.status,
         body
       )
@@ -1185,7 +1238,7 @@ export class RpcProxyClient {
         )
       }
       throw new ApiError(
-        `Set host model failed (${response.status}): ${body}`,
+        `Set host model failed (${response.status}): ${boundedErrorExcerpt(body)}`,
         response.status,
         body
       )
@@ -1229,6 +1282,8 @@ export class RpcProxyClient {
       // Body may echo the invalid title; read it for the ApiError payload but
       // keep the raw title out of the human-facing message.
       const body = await readErrorBody(response)
+      const hostAccessDenial = hostAccessDenialError(response.status, body)
+      if (hostAccessDenial) throw hostAccessDenial
       throw new ApiError(`Rename session failed (${response.status})`, response.status, body)
     }
     const parsed = (await response.json().catch(() => ({}))) as { title?: unknown }
@@ -1272,7 +1327,7 @@ export class RpcProxyClient {
     if (!res.ok) {
       const text = await readErrorBody(res)
       throw new ApiError(
-        `Desktop session exchange failed: ${res.status} ${text || res.statusText}`,
+        `Desktop session exchange failed: ${res.status} ${boundedErrorExcerpt(text) || res.statusText}`,
         res.status,
         text
       )
