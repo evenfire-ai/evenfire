@@ -1,8 +1,41 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { EventEmitter } from 'node:events'
+import {
+  closeActiveEntityChangeStreams,
+  streamEntityChanges,
+} from '../../../control-api/src/routes/entityChangeStream.js'
 import { GfsBrowser } from '../GfsBrowser'
 import { ToastProvider } from '../Toast'
+
+const controlApiProducer = vi.hoisted(() => ({
+  isEntityChangeCursor: vi.fn(),
+  readEntityChangeCheckpoint: vi.fn(),
+  subscribeEntityChangeFeedWake: vi.fn(),
+}))
+const controlApiProducerConfig = vi.hoisted(() => ({
+  entityChangeStreamHeartbeatMs: 20_000,
+  entityChangeStreamMaxLifetimeMs: 600_000,
+  entityChangeStreamPollMs: 250,
+  entityChangeUserVisibilityRefreshMs: 4_000,
+  entityChangeStreamMaxConnections: 256,
+  entityChangeStreamMaxConnectionsPerPrincipal: 32,
+}))
+const controlApiProducerMetrics = vi.hoisted(() => ({
+  entityChangeStreamConnectionsActive: { inc: vi.fn(), dec: vi.fn() },
+  entityChangeStreamDisconnectsTotal: { inc: vi.fn(), dec: vi.fn() },
+  entityChangeStreamFramesSentTotal: { inc: vi.fn(), dec: vi.fn() },
+  entityChangeStreamResyncRequiredTotal: { inc: vi.fn(), dec: vi.fn() },
+}))
+
+vi.mock('../../../control-api/src/config.js', () => ({ config: controlApiProducerConfig }))
+vi.mock('../../../control-api/src/db.js', () => ({ pool: {} }))
+vi.mock('../../../control-api/src/services/entityChangeService.js', () => controlApiProducer)
+vi.mock('../../../control-api/src/observability/logger.js', () => ({
+  rootLogger: { child: () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn() }) },
+}))
+vi.mock('../../../control-api/src/observability/metrics.js', () => controlApiProducerMetrics)
 
 function jsonResponse(value: unknown): Response {
   return new Response(JSON.stringify(value), {
@@ -24,9 +57,74 @@ function child(resourceId: string, rid: string, name: string, kind: string) {
   }
 }
 
+class ProducerRequest extends EventEmitter {
+  query: Record<string, unknown> = {}
+  setTimeout = vi.fn()
+}
+
+class ProducerResponse extends EventEmitter {
+  statusCode = 200
+  headersSent = false
+  destroyed = false
+  writableEnded = false
+  writableLength = 0
+  frames: string[] = []
+  status(code: number): this {
+    this.statusCode = code
+    return this
+  }
+  setHeader(): void {}
+  flushHeaders(): void {
+    this.headersSent = true
+  }
+  write(frame: string): boolean {
+    this.frames.push(frame)
+    return true
+  }
+  end(): void {
+    this.writableEnded = true
+    this.emit('close')
+  }
+  json(): this {
+    return this
+  }
+}
+
+async function controlApiProducerFrame(): Promise<string> {
+  const cursor = 'd119f895-1ef8-4e73-8f08-f9754919682a'
+  controlApiProducer.isEntityChangeCursor.mockImplementation((value: string) =>
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)
+  )
+  controlApiProducer.readEntityChangeCheckpoint.mockResolvedValue({
+    resyncRequired: false,
+    cursor,
+    scopes: ['gfs'],
+  })
+  controlApiProducer.subscribeEntityChangeFeedWake.mockReturnValue(vi.fn())
+  const req = new ProducerRequest()
+  const res = new ProducerResponse()
+  streamEntityChanges(
+    req as never,
+    res as never,
+    null,
+    async () => true,
+    'operator',
+    'control-ui-integration'
+  )
+  await vi.waitFor(() => expect(res.frames.length).toBeGreaterThan(0))
+  const frame = res.frames
+    .map(value => value.trim())
+    .find(value => (JSON.parse(value) as { type?: string }).type === 'scope.invalidated')
+  closeActiveEntityChangeStreams()
+  await vi.waitFor(() => expect(res.writableEnded).toBe(true))
+  if (!frame) throw new Error('Control API producer did not emit a scope invalidation')
+  return frame
+}
+
 describe('GfsBrowser authoritative revalidation integration', () => {
   afterEach(() => {
     cleanup()
+    closeActiveEntityChangeStreams()
     vi.unstubAllGlobals()
     vi.restoreAllMocks()
   })
@@ -237,5 +335,61 @@ describe('GfsBrowser authoritative revalidation integration', () => {
     await act(async () => finishRefresh(jsonResponse({ items: [first], nextCursor: 'page-2' })))
     await waitFor(() => expect(screen.getByRole('button', { name: 'second.txt' })).toBeVisible())
     expect(screen.getByRole('button', { name: 'first.txt' })).toBeVisible()
+  })
+
+  it('recovers the rendered list after a real API-client stream refresh fails once', async () => {
+    const existingFile = child('file-1', 'rid-file-1', 'existing.txt', 'file')
+    const remoteFolder = child('folder-2', 'rid-folder-2', 'remote-folder', 'directory')
+    let rootChildReads = 0
+    let streamController: ReadableStreamDefaultController<Uint8Array> | null = null
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input), 'http://control-ui.test')
+        if (url.pathname.endsWith('/api/v1/gfs/entity-changes/stream')) {
+          return new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                streamController = controller
+                init?.signal?.addEventListener('abort', () => controller.close(), { once: true })
+              },
+            }),
+            { status: 200, headers: { 'content-type': 'application/x-ndjson' } }
+          )
+        }
+        if (url.pathname.endsWith('/api/v1/gfs/tree')) {
+          return jsonResponse({ rootResourceId: 'root-1', items: [], nextCursor: null })
+        }
+        if (url.pathname.endsWith('/api/v1/gfs/resources/root-1/children')) {
+          rootChildReads += 1
+          if (rootChildReads === 1) {
+            return jsonResponse({ items: [existingFile], nextCursor: null })
+          }
+          if (rootChildReads === 2) return new Response('temporary failure', { status: 503 })
+          return jsonResponse({
+            items: [existingFile, remoteFolder],
+            nextCursor: null,
+          })
+        }
+        return jsonResponse({ items: [], nextCursor: null })
+      })
+    )
+
+    render(
+      <ToastProvider>
+        <GfsBrowser />
+      </ToastProvider>
+    )
+    await waitFor(() => expect(streamController).not.toBeNull())
+    await screen.findByRole('button', { name: 'existing.txt' })
+    await act(async () => {
+      streamController!.enqueue(new TextEncoder().encode(`${await controlApiProducerFrame()}\n`))
+    })
+
+    await waitFor(() => expect(rootChildReads).toBe(2))
+    expect(screen.getByRole('button', { name: 'existing.txt' })).toBeVisible()
+    await screen.findByText('remote-folder', {}, { timeout: 2_000 })
+    expect(rootChildReads).toBe(3)
+    expect(screen.getByRole('button', { name: 'existing.txt' })).toBeVisible()
   })
 })
