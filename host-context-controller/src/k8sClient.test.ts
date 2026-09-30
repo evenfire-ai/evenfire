@@ -75,7 +75,8 @@ async function readLabeledConvergenceMetric(
     | 'clerum_hcc_netpol_resync_ticks_skipped_total'
     | 'clerum_hcc_netpol_defaults_only_ticks_total'
     | 'clerum_hcc_host_fleet_lifecycle_catch_total'
-    | 'clerum_hcc_host_fleet_requests_total',
+    | 'clerum_hcc_host_fleet_requests_total'
+    | 'clerum_hcc_oauth_reobservation_total',
   labels: Record<string, string>
 ): Promise<number> {
   const metric = registry.getSingleMetric(name)
@@ -253,6 +254,8 @@ const mocks = vi.hoisted(() => {
   const serverFullReconcile = vi.fn().mockResolvedValue(undefined)
   const hostFullReconcile = vi.fn().mockResolvedValue(undefined)
   const hostReconcileHosts = vi.fn().mockResolvedValue(undefined)
+  const takeHostsAwaitingOAuthObservation = vi.fn().mockReturnValue([])
+  const requeueHostsAwaitingOAuthObservation = vi.fn().mockImplementation(() => undefined)
   const sfsFullReconcile = vi.fn().mockResolvedValue(undefined)
   const watch = vi.fn().mockResolvedValue({ abort: vi.fn() })
   const hostListCallOptions = vi.fn()
@@ -268,6 +271,8 @@ const mocks = vi.hoisted(() => {
     serverFullReconcile,
     hostFullReconcile,
     hostReconcileHosts,
+    takeHostsAwaitingOAuthObservation,
+    requeueHostsAwaitingOAuthObservation,
     sfsFullReconcile,
     watch,
     hostListCallOptions,
@@ -398,6 +403,8 @@ vi.mock('./hostReconciler', () => ({
   HostReconciler: class {
     fullReconcile = mocks.hostFullReconcile
     reconcileHosts = mocks.hostReconcileHosts
+    takeHostsAwaitingOAuthObservation = mocks.takeHostsAwaitingOAuthObservation
+    requeueHostsAwaitingOAuthObservation = mocks.requeueHostsAwaitingOAuthObservation
     reconcile = vi.fn()
     reconcileDelete = vi.fn()
     setResolveContextMounts = vi.fn()
@@ -495,6 +502,8 @@ vi.mock('./sharedFileSystemReconciler', () => ({
 beforeEach(() => {
   mocks.hostFullReconcile.mockReset().mockResolvedValue(undefined)
   mocks.hostReconcileHosts.mockReset().mockResolvedValue(undefined)
+  mocks.takeHostsAwaitingOAuthObservation.mockReset().mockReturnValue([])
+  mocks.requeueHostsAwaitingOAuthObservation.mockReset().mockImplementation(() => undefined)
 })
 
 describe('MCP authorization store Kubernetes 404 normalization', () => {
@@ -969,7 +978,7 @@ describe('McpServerWatcher startup', () => {
         }
         return { abort: vi.fn() }
       })
-      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const errorSpy = vi.spyOn(hccLogger, 'error').mockImplementation(() => {})
       const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
       const watcher = new McpServerWatcher()
       stubAuthoritativeInventoryWatch(watcher, 'McpServer')
@@ -1041,7 +1050,7 @@ describe('McpServerWatcher startup', () => {
         }
         return { abort: vi.fn() }
       })
-      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const errorSpy = vi.spyOn(hccLogger, 'error').mockImplementation(() => {})
       const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
       const watcher = new McpServerWatcher()
       // The McpServer lane runs for real (LIST + WATCH) so its bootstrap
@@ -1115,7 +1124,7 @@ describe('McpServerWatcher startup', () => {
         }
         return { abort: vi.fn() }
       })
-      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const errorSpy = vi.spyOn(hccLogger, 'error').mockImplementation(() => {})
       const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
       const watcher = new McpServerWatcher()
       // The Context lane runs for real (LIST + WATCH) so its bootstrap
@@ -1166,8 +1175,8 @@ describe('McpServerWatcher startup', () => {
       }
       return { items: [] }
     })
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const errorSpy = vi.spyOn(hccLogger, 'error').mockImplementation(() => {})
+    const warnSpy = vi.spyOn(hccLogger, 'warn').mockImplementation(() => {})
     const watcher = new McpServerWatcher()
     stubAuthoritativeInventoryWatch(watcher, 'McpServer')
     stubAuthoritativeInventoryWatch(watcher, 'Context')
@@ -1225,8 +1234,8 @@ describe('McpServerWatcher startup', () => {
       }
       return { abort: vi.fn() }
     })
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const errorSpy = vi.spyOn(hccLogger, 'error').mockImplementation(() => {})
+    const warnSpy = vi.spyOn(hccLogger, 'warn').mockImplementation(() => {})
     const watcher = new McpServerWatcher()
     stubAuthoritativeInventoryWatch(watcher, 'McpServer')
     stubAuthoritativeInventoryWatch(watcher, 'Context')
@@ -1408,7 +1417,7 @@ describe('McpServerWatcher startup', () => {
           return { items: [] }
         }
       )
-      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const errorSpy = vi.spyOn(hccLogger, 'error').mockImplementation(() => {})
       const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
       const watcher = new McpServerWatcher()
 
@@ -1417,7 +1426,7 @@ describe('McpServerWatcher startup', () => {
 
         expect(errorSpy).toHaveBeenCalledWith(
           `[K8s] Initial ${kind} inventory is unavailable; HCC remains unready while in-process recovery continues:`,
-          expect.objectContaining({ message: `${failingPlural} inventory unavailable` })
+          { err: expect.objectContaining({ message: `${failingPlural} inventory unavailable` }) }
         )
         expect(watcher.isReadinessInventoryAuthoritative()).toBe(false)
         expect((watcher as any)[recoveryTimerField]).not.toBeNull()
@@ -1446,8 +1455,8 @@ describe('McpServerWatcher startup', () => {
           return { items: [] }
         }
       )
-      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
-      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      const errorSpy = vi.spyOn(hccLogger, 'error').mockImplementation(() => {})
+      const warnSpy = vi.spyOn(hccLogger, 'warn').mockImplementation(() => {})
       const watcher = new McpServerWatcher()
 
       try {
@@ -1455,7 +1464,7 @@ describe('McpServerWatcher startup', () => {
 
         expect(errorSpy).toHaveBeenCalledWith(
           `[K8s] Initial ${kind} inventory is unavailable; HCC remains unready while in-process recovery continues:`,
-          expect.objectContaining({ message: `${kind} snapshot missing resourceVersion` })
+          { err: expect.objectContaining({ message: `${kind} snapshot missing resourceVersion` }) }
         )
         expect(watcher.isReadinessInventoryAuthoritative()).toBe(false)
         expect((watcher as any)[recoveryTimerField]).not.toBeNull()
@@ -5116,7 +5125,7 @@ describe('McpServerWatcher startup', () => {
     ;(watcher as any).netPolReconciler.reconcileExternalEgress.mockRejectedValueOnce(
       new Error('replacement policy unavailable')
     )
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const errorSpy = vi.spyOn(hccLogger, 'error').mockImplementation(() => {})
 
     await (watcher as any).getMcpServerWatchCallback(7)('MODIFIED', current)
 
@@ -5575,7 +5584,7 @@ describe('McpServerWatcher startup', () => {
   })
 
   it('names a generic NetworkPolicy catch failure failed instead of aborted-bump', async () => {
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const errorSpy = vi.spyOn(hccLogger, 'error').mockImplementation(() => {})
     const watcher = new McpServerWatcher()
     ;(watcher as any).contextCacheSynced = true
     ;(watcher as any).mcpServerCacheSynced = true
@@ -5794,7 +5803,7 @@ describe('McpServerWatcher startup', () => {
       .mockRejectedValueOnce(new Error('initial runtime reconciliation failed'))
       .mockRejectedValueOnce(new Error('initial runtime reconciliation still unavailable'))
       .mockResolvedValueOnce(undefined)
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const errorSpy = vi.spyOn(hccLogger, 'error').mockImplementation(() => {})
     const retryMetricBefore = await readInitialConvergenceMetric(
       'clerum_hcc_initial_convergence_retries_total',
       'McpServer'
@@ -5845,7 +5854,7 @@ describe('McpServerWatcher startup', () => {
     mocks.serverFullReconcile.mockRejectedValueOnce(
       new Error('initial runtime reconciliation unavailable')
     )
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const errorSpy = vi.spyOn(hccLogger, 'error').mockImplementation(() => {})
 
     await (watcher as any).runInitialMcpServerConvergence()
 
@@ -5887,7 +5896,7 @@ describe('McpServerWatcher startup', () => {
           options?.onAuthoritativeRevocationComplete?.()
         }
       )
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const errorSpy = vi.spyOn(hccLogger, 'error').mockImplementation(() => {})
     const watcher = new McpServerWatcher()
     stubAuthoritativeInventoryWatch(watcher, 'McpServer')
     stubAuthoritativeInventoryWatch(watcher, 'Context')
@@ -6011,7 +6020,7 @@ describe('McpServerWatcher startup', () => {
     async (kind, method) => {
       vi.useFakeTimers()
       const failure = new Error(`${method} unavailable`)
-      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const errorSpy = vi.spyOn(hccLogger, 'error').mockImplementation(() => {})
       const watcher = new McpServerWatcher()
       stubAuthoritativeInventoryWatch(watcher, 'McpServer')
       stubAuthoritativeInventoryWatch(watcher, 'Context')
@@ -6029,10 +6038,9 @@ describe('McpServerWatcher startup', () => {
       await expect(watcher.start()).resolves.toBeUndefined()
       await vi.advanceTimersByTimeAsync(0)
 
-      expect(errorSpy).toHaveBeenCalledWith(
-        `[K8s] ${kind} background watch failed to start:`,
-        failure
-      )
+      expect(errorSpy).toHaveBeenCalledWith(`[K8s] ${kind} background watch failed to start:`, {
+        err: failure,
+      })
       expect(rejectedWatch).toHaveBeenCalledOnce()
       expect(mocks.netPolFullReconcile).toHaveBeenCalledOnce()
 
@@ -6212,8 +6220,8 @@ describe('McpServerWatcher startup', () => {
     const netPol = (watcher as any).netPolReconciler
     const dnsFailure = new Error('dns resolution failed')
     netPol.reconcileExternalEgress.mockRejectedValueOnce(dnsFailure)
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const errorSpy = vi.spyOn(hccLogger, 'error').mockImplementation(() => {})
+    const warnSpy = vi.spyOn(hccLogger, 'warn').mockImplementation(() => {})
     stubAuthoritativeInventoryWatch(watcher, 'McpServer')
     stubAuthoritativeInventoryWatch(watcher, 'Context')
     vi.spyOn(watcher as any, 'startSharedFileSystemWatch').mockImplementation(async () => undefined)
@@ -6235,7 +6243,7 @@ describe('McpServerWatcher startup', () => {
     expect((watcher as any).initialConvergenceRetryTimers.has('NetworkPolicy')).toBe(false)
     expect(errorSpy).not.toHaveBeenCalledWith(
       '[K8s] Initial NetworkPolicy background reconciliation failed:',
-      dnsFailure
+      { err: dnsFailure }
     )
 
     watcher.stop()
@@ -7543,7 +7551,7 @@ describe('McpServerWatcher.start ordering (#281 R6-bis)', () => {
     const ccWatchSpy = vi
       .spyOn(watcher as any, 'startCommunicationChannelWatch')
       .mockResolvedValue(undefined)
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const errorSpy = vi.spyOn(hccLogger, 'error').mockImplementation(() => {})
 
     await expect(watcher.start()).resolves.toBeUndefined()
     expect(ccWatchSpy).toHaveBeenCalledTimes(1)
@@ -7551,7 +7559,7 @@ describe('McpServerWatcher.start ordering (#281 R6-bis)', () => {
     expect(errorSpy).toHaveBeenCalledWith(
       '[K8s] CommunicationChannel initial load failed; ccCacheSynced remains false ' +
         '(B2 preserves channel-reader replicas, preserving durable Host lifecycle state):',
-      expect.any(Error)
+      { err: expect.any(Error) }
     )
 
     errorSpy.mockRestore()
@@ -7689,7 +7697,7 @@ describe('McpServerWatcher CommunicationChannel cache recovery', () => {
       namespace: 'channels',
       spec: { hostRef: 'stateless-host' },
     })
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const errorSpy = vi.spyOn(hccLogger, 'error').mockImplementation(() => {})
 
     await expect((watcher as any).recoverCommunicationChannelCache()).resolves.toBe(false)
 
@@ -7800,7 +7808,7 @@ describe('McpServerWatcher CommunicationChannel cache recovery', () => {
     const fleetFailure = new Error('fleet did not converge')
     mocks.hostReconcileHosts.mockRejectedValueOnce(fleetFailure).mockResolvedValueOnce(undefined)
     const watcher = newContextAuthoritativeWatcher()
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const errorSpy = vi.spyOn(hccLogger, 'error').mockImplementation(() => {})
     const lifecycleGeneration = (watcher as any).beginCommunicationChannelLifecycleTransition()
 
     try {
@@ -7819,7 +7827,7 @@ describe('McpServerWatcher CommunicationChannel cache recovery', () => {
 
       expect(errorSpy).toHaveBeenCalledWith(
         '[K8s] Host reconciliation after CommunicationChannel watch interruption failed:',
-        fleetFailure
+        { err: fleetFailure }
       )
       await vi.advanceTimersByTimeAsync(300000)
       expect(mocks.hostReconcileHosts).toHaveBeenCalledTimes(2)
@@ -7842,7 +7850,7 @@ describe('McpServerWatcher CommunicationChannel cache recovery', () => {
       return { items: [] }
     })
     const watcher = newContextAuthoritativeWatcher()
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const errorSpy = vi.spyOn(hccLogger, 'error').mockImplementation(() => {})
     const lifecycleGeneration = (watcher as any).beginCommunicationChannelLifecycleTransition()
 
     try {
@@ -8507,6 +8515,351 @@ describe('McpServerWatcher CommunicationChannel cache recovery', () => {
     )
 
     watcher.stop()
+  })
+})
+
+describe('McpServerWatcher deferred OAuth re-observation', () => {
+  function resetDeferredOAuthMocks(): void {
+    vi.clearAllMocks()
+    mocks.watch.mockReset().mockResolvedValue({ abort: vi.fn() })
+    mocks.listNamespacedCustomObject.mockImplementation(async ({ plural }: { plural: string }) => {
+      if (plural === 'mcpservers') {
+        return { metadata: { resourceVersion: '942-mcp-rv' }, items: [] }
+      }
+      return { items: [] }
+    })
+    mocks.hostFullReconcile.mockReset().mockResolvedValue(undefined)
+    mocks.hostReconcileHosts.mockReset().mockResolvedValue(undefined)
+    mocks.takeHostsAwaitingOAuthObservation.mockReset().mockReturnValue([])
+    mocks.requeueHostsAwaitingOAuthObservation.mockReset().mockImplementation(() => undefined)
+  }
+
+  function makeHost(name: string): HostCRD {
+    return {
+      name,
+      namespace: 'mcp-host',
+      uid: `${name}-uid`,
+      spec: { host: name, contextRef: 'context-a', secretRef: `${name}-secret` },
+    }
+  }
+
+  function makeWatcherWithHosts(...names: string[]): McpServerWatcher {
+    const watcher = newContextAuthoritativeWatcher()
+    markHostInventoryAuthoritative(watcher)
+    for (const name of names) {
+      ;(watcher as any).hosts.set(name, makeHost(name))
+    }
+    return watcher
+  }
+
+  function useRealPendingSet(pending: Set<string>): void {
+    mocks.takeHostsAwaitingOAuthObservation.mockImplementation(() => {
+      const names = [...pending]
+      pending.clear()
+      return names
+    })
+    mocks.requeueHostsAwaitingOAuthObservation.mockImplementation(names => {
+      for (const name of names) pending.add(name)
+    })
+  }
+
+  async function readOauthReobservationMetric(
+    trigger: 'mcpserver_recovery' | 'periodic_retry',
+    result: 'reconciled' | 'requeued' | 'failed'
+  ): Promise<number> {
+    return readLabeledConvergenceMetric('clerum_hcc_oauth_reobservation_total', {
+      trigger,
+      result,
+    })
+  }
+
+  beforeEach(() => {
+    resetDeferredOAuthMocks()
+  })
+
+  afterEach(() => {
+    resetDeferredOAuthMocks()
+  })
+
+  it('T3a: reconciles only deferred Hosts after McpServer authority recovers', async () => {
+    const hostA = makeHost('host-a')
+    const hostB = makeHost('host-b')
+    const watcher = makeWatcherWithHosts('host-a', 'host-b')
+    mocks.takeHostsAwaitingOAuthObservation.mockReturnValue(['host-a'])
+    const reconciler = watcher.getHostReconciler()
+    const reconciledBefore = await readOauthReobservationMetric('mcpserver_recovery', 'reconciled')
+
+    try {
+      await expect((watcher as any).recoverMcpServerInventoryAndWatch()).resolves.toBe(true)
+
+      expect(mocks.takeHostsAwaitingOAuthObservation).toHaveBeenCalledTimes(1)
+      expect(reconciler.reconcile).toHaveBeenCalledTimes(1)
+      expect(reconciler.reconcile).toHaveBeenCalledWith(hostA, 'retry')
+      expect(reconciler.reconcile).not.toHaveBeenCalledWith(hostB, 'retry')
+      expect(mocks.requeueHostsAwaitingOAuthObservation).toHaveBeenCalledWith(['host-a'])
+      expect(await readOauthReobservationMetric('mcpserver_recovery', 'reconciled')).toBe(
+        reconciledBefore + 1
+      )
+    } finally {
+      watcher.stop()
+    }
+  })
+
+  it('T3a: requeues deferred Hosts when Host-effect admission is rejected', async () => {
+    const watcher = makeWatcherWithHosts('host-a', 'host-b')
+    ;(watcher as any).hostCacheSynced = false
+    mocks.takeHostsAwaitingOAuthObservation.mockReturnValue(['host-a'])
+    const scheduleRecovery = vi
+      .spyOn(watcher as any, 'scheduleHostCacheRecovery')
+      .mockImplementation(() => {})
+    const reconciler = watcher.getHostReconciler()
+    const requeuedBefore = await readOauthReobservationMetric('mcpserver_recovery', 'requeued')
+    const reconciledBefore = await readOauthReobservationMetric('mcpserver_recovery', 'reconciled')
+
+    try {
+      await expect((watcher as any).recoverMcpServerInventoryAndWatch()).resolves.toBe(true)
+
+      expect(mocks.takeHostsAwaitingOAuthObservation).toHaveBeenCalledTimes(1)
+      expect(mocks.requeueHostsAwaitingOAuthObservation).toHaveBeenCalledWith(['host-a'])
+      expect(reconciler.reconcile).not.toHaveBeenCalled()
+      expect(await readOauthReobservationMetric('mcpserver_recovery', 'requeued')).toBe(
+        requeuedBefore + 1
+      )
+      expect(await readOauthReobservationMetric('mcpserver_recovery', 'reconciled')).toBe(
+        reconciledBefore
+      )
+    } finally {
+      scheduleRecovery.mockRestore()
+      watcher.stop()
+    }
+  })
+
+  it('T9a: drops an admitted deferred Host that is absent from the live Host cache', async () => {
+    const hostA = makeHost('host-a')
+    const hostB = makeHost('host-b')
+    const watcher = makeWatcherWithHosts('host-a', 'host-b')
+    mocks.takeHostsAwaitingOAuthObservation.mockReturnValue(['host-a', 'host-gone'])
+    const reconciler = watcher.getHostReconciler()
+    const reconciledBefore = await readOauthReobservationMetric('mcpserver_recovery', 'reconciled')
+    const requeuedBefore = await readOauthReobservationMetric('mcpserver_recovery', 'requeued')
+
+    try {
+      await expect((watcher as any).recoverMcpServerInventoryAndWatch()).resolves.toBe(true)
+
+      expect(reconciler.reconcile).toHaveBeenCalledTimes(1)
+      expect(reconciler.reconcile).toHaveBeenCalledWith(hostA, 'retry')
+      expect(reconciler.reconcile).not.toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'host-gone' }),
+        'retry'
+      )
+      expect(mocks.requeueHostsAwaitingOAuthObservation).toHaveBeenCalledWith(['host-a'])
+      expect(mocks.requeueHostsAwaitingOAuthObservation).not.toHaveBeenCalledWith(['host-gone'])
+      expect((watcher as any).hosts.has('host-b')).toBe(true)
+      expect(await readOauthReobservationMetric('mcpserver_recovery', 'reconciled')).toBe(
+        reconciledBefore + 1
+      )
+      expect(await readOauthReobservationMetric('mcpserver_recovery', 'requeued')).toBe(
+        requeuedBefore
+      )
+    } finally {
+      watcher.stop()
+    }
+  })
+
+  it('T11: requeues a Host when reconciliation removes its pending mark and then throws', async () => {
+    const pending = new Set(['host-a'])
+    const hostA = makeHost('host-a')
+    const watcher = makeWatcherWithHosts('host-a', 'host-b')
+    useRealPendingSet(pending)
+    const reconciler = watcher.getHostReconciler()
+    const failure = new Error('post-observation resource failure')
+    reconciler.reconcile.mockImplementation(async () => {
+      pending.delete('host-a')
+      throw failure
+    })
+    const warnSpy = vi.spyOn(hccLogger, 'warn').mockImplementation(() => {})
+    const failedBefore = await readOauthReobservationMetric('mcpserver_recovery', 'failed')
+    const reconciledBefore = await readOauthReobservationMetric('mcpserver_recovery', 'reconciled')
+    const requeuedBefore = await readOauthReobservationMetric('mcpserver_recovery', 'requeued')
+
+    try {
+      await expect((watcher as any).recoverMcpServerInventoryAndWatch()).resolves.toBe(true)
+
+      expect(reconciler.reconcile).toHaveBeenCalledTimes(1)
+      expect(reconciler.reconcile).toHaveBeenCalledWith(hostA, 'retry')
+      expect(mocks.requeueHostsAwaitingOAuthObservation).toHaveBeenCalledTimes(2)
+      expect(mocks.requeueHostsAwaitingOAuthObservation).toHaveBeenNthCalledWith(1, ['host-a'])
+      expect(mocks.requeueHostsAwaitingOAuthObservation).toHaveBeenNthCalledWith(2, ['host-a'])
+      expect([...pending]).toEqual(['host-a'])
+      expect(warnSpy).toHaveBeenCalledWith(
+        '[K8s] requeued Hosts awaiting OAuth observation',
+        expect.objectContaining({
+          trigger: 'mcpserver_recovery',
+          host: 'host-a',
+          err: failure,
+        })
+      )
+      expect(await readOauthReobservationMetric('mcpserver_recovery', 'failed')).toBe(
+        failedBefore + 1
+      )
+      expect(await readOauthReobservationMetric('mcpserver_recovery', 'reconciled')).toBe(
+        reconciledBefore
+      )
+      expect(await readOauthReobservationMetric('mcpserver_recovery', 'requeued')).toBe(
+        requeuedBefore
+      )
+    } finally {
+      warnSpy.mockRestore()
+      watcher.stop()
+    }
+  })
+
+  it('T12: retries a failed deferred Host through the periodic resync while CC stays down', async () => {
+    const pending = new Set(['host-a'])
+    const hostA = makeHost('host-a')
+    const watcher = makeWatcherWithHosts('host-a', 'host-b')
+    useRealPendingSet(pending)
+    const reconciler = watcher.getHostReconciler()
+    const failure = new Error('deferred Host reconciliation failed')
+    reconciler.reconcile
+      .mockImplementationOnce(async () => {
+        throw failure
+      })
+      .mockImplementationOnce(async () => {
+        pending.delete('host-a')
+      })
+    ;(watcher as any).ccCacheSynced = false
+    ;(watcher as any).mcpServerCacheSynced = true
+    const recoverCommunicationChannelCache = vi
+      .spyOn(watcher as any, 'recoverCommunicationChannelCache')
+      .mockResolvedValue(false)
+    const requestHostFleetReconcile = vi
+      .spyOn(watcher as any, 'requestHostFleetReconcile')
+      .mockResolvedValue(undefined)
+    const failedBefore = await readOauthReobservationMetric('periodic_retry', 'failed')
+    const reconciledBefore = await readOauthReobservationMetric('periodic_retry', 'reconciled')
+
+    try {
+      await (watcher as any).performHostResync()
+      expect(reconciler.reconcile).toHaveBeenCalledTimes(1)
+      expect(reconciler.reconcile).toHaveBeenCalledWith(hostA, 'retry')
+      expect([...pending]).toEqual(['host-a'])
+
+      await (watcher as any).performHostResync()
+      expect(reconciler.reconcile).toHaveBeenCalledTimes(2)
+      expect([...pending]).toEqual([])
+      expect(recoverCommunicationChannelCache).toHaveBeenCalledTimes(2)
+      expect(requestHostFleetReconcile).not.toHaveBeenCalled()
+      expect(mocks.hostFullReconcile).not.toHaveBeenCalled()
+      expect((watcher as any).hosts.has('host-b')).toBe(true)
+      expect(await readOauthReobservationMetric('periodic_retry', 'failed')).toBe(failedBefore + 1)
+      expect(await readOauthReobservationMetric('periodic_retry', 'reconciled')).toBe(
+        reconciledBefore + 1
+      )
+    } finally {
+      recoverCommunicationChannelCache.mockRestore()
+      requestHostFleetReconcile.mockRestore()
+      watcher.stop()
+    }
+  })
+
+  it('T13: preserves a deferred Host until a successful observation acknowledges it', async () => {
+    const pending = new Set(['host-a'])
+    const hostA = makeHost('host-a')
+    const hostB = makeHost('host-b')
+    const watcher = makeWatcherWithHosts('host-a', 'host-b')
+    useRealPendingSet(pending)
+    const reconciler = watcher.getHostReconciler()
+    reconciler.reconcile
+      .mockImplementationOnce(async () => undefined)
+      .mockImplementationOnce(async () => undefined)
+      .mockImplementationOnce(async () => {
+        pending.delete('host-a')
+      })
+    ;(watcher as any).ccCacheSynced = false
+    ;(watcher as any).mcpServerCacheSynced = true
+    const recoverCommunicationChannelCache = vi
+      .spyOn(watcher as any, 'recoverCommunicationChannelCache')
+      .mockResolvedValue(false)
+    const requestHostFleetReconcile = vi
+      .spyOn(watcher as any, 'requestHostFleetReconcile')
+      .mockResolvedValue(undefined)
+
+    try {
+      await (watcher as any).performHostResync()
+      expect([...pending]).toEqual(['host-a'])
+
+      await (watcher as any).performHostResync()
+      expect(reconciler.reconcile).toHaveBeenCalledTimes(2)
+      expect(reconciler.reconcile).toHaveBeenNthCalledWith(1, hostA, 'retry')
+      expect(reconciler.reconcile).toHaveBeenNthCalledWith(2, hostA, 'retry')
+      expect([...pending]).toEqual(['host-a'])
+
+      await (watcher as any).performHostResync()
+      expect(reconciler.reconcile).toHaveBeenCalledTimes(3)
+      expect([...pending]).toEqual([])
+
+      await (watcher as any).performHostResync()
+      expect(reconciler.reconcile).toHaveBeenCalledTimes(3)
+      expect(mocks.takeHostsAwaitingOAuthObservation).toHaveBeenCalledTimes(4)
+      expect(recoverCommunicationChannelCache).toHaveBeenCalledTimes(4)
+      expect(requestHostFleetReconcile).not.toHaveBeenCalled()
+      expect(mocks.hostFullReconcile).not.toHaveBeenCalled()
+      expect((watcher as any).hosts.has('host-b')).toBe(true)
+    } finally {
+      recoverCommunicationChannelCache.mockRestore()
+      requestHostFleetReconcile.mockRestore()
+      watcher.stop()
+    }
+  })
+
+  it('T14: dispatches a pending Host marked after the McpServer recovery snapshot', async () => {
+    const pending = new Set<string>()
+    const hostLate = makeHost('host-late')
+    const watcher = makeWatcherWithHosts('host-late', 'host-other')
+    useRealPendingSet(pending)
+    const reconciler = watcher.getHostReconciler()
+    reconciler.reconcile.mockImplementation(async () => {
+      pending.delete('host-late')
+    })
+    const reconciledBefore = await readOauthReobservationMetric('periodic_retry', 'reconciled')
+
+    try {
+      await expect((watcher as any).recoverMcpServerInventoryAndWatch()).resolves.toBe(true)
+      expect(mocks.takeHostsAwaitingOAuthObservation).toHaveBeenCalledTimes(1)
+      expect(reconciler.reconcile).not.toHaveBeenCalled()
+
+      reconciler.requeueHostsAwaitingOAuthObservation(['host-late'])
+      ;(watcher as any).ccCacheSynced = false
+      ;(watcher as any).mcpServerCacheSynced = true
+      const recoverCommunicationChannelCache = vi
+        .spyOn(watcher as any, 'recoverCommunicationChannelCache')
+        .mockResolvedValue(false)
+      const requestHostFleetReconcile = vi
+        .spyOn(watcher as any, 'requestHostFleetReconcile')
+        .mockResolvedValue(undefined)
+
+      try {
+        await (watcher as any).performHostResync()
+
+        expect(mocks.takeHostsAwaitingOAuthObservation).toHaveBeenCalledTimes(2)
+        expect(reconciler.reconcile).toHaveBeenCalledTimes(1)
+        expect(reconciler.reconcile).toHaveBeenCalledWith(hostLate, 'retry')
+        expect(mocks.requeueHostsAwaitingOAuthObservation).toHaveBeenCalledWith(['host-late'])
+        expect(recoverCommunicationChannelCache).toHaveBeenCalledTimes(1)
+        expect(requestHostFleetReconcile).not.toHaveBeenCalled()
+        expect(mocks.hostFullReconcile).not.toHaveBeenCalled()
+        expect((watcher as any).hosts.has('host-other')).toBe(true)
+        expect(await readOauthReobservationMetric('periodic_retry', 'reconciled')).toBe(
+          reconciledBefore + 1
+        )
+      } finally {
+        recoverCommunicationChannelCache.mockRestore()
+        requestHostFleetReconcile.mockRestore()
+      }
+    } finally {
+      watcher.stop()
+    }
   })
 })
 
@@ -9756,7 +10109,7 @@ describe('McpServerWatcher Host watch generation', () => {
       return { items: [] }
     })
     const watcher = newContextAuthoritativeWatcher()
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const errorSpy = vi.spyOn(hccLogger, 'error').mockImplementation(() => {})
 
     await (watcher as any).requestHostFleetReconcile('Periodic resync', undefined, 'full')
 
@@ -9766,7 +10119,7 @@ describe('McpServerWatcher Host watch generation', () => {
     expect((watcher as any).hostCacheRecoveryTimer).not.toBeNull()
     expect(errorSpy).toHaveBeenCalledWith(
       '[K8s] Host reconciliation after Periodic resync failed:',
-      expect.objectContaining({ message: 'Host snapshot missing resourceVersion' })
+      { err: expect.objectContaining({ message: 'Host snapshot missing resourceVersion' }) }
     )
 
     errorSpy.mockRestore()

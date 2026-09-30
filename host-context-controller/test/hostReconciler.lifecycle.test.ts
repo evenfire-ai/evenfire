@@ -4941,6 +4941,7 @@ describe('HostReconciler stateless lifecycle — guarded image pull policy (Stag
         // Witness: every bounded OAuth attempt ran before the deferral.
         expect(oauth).toHaveBeenCalledTimes(3)
         expect(await wakeRefreshCount('deferred_oauth_unobserved')).toBe(deferredBefore + 1)
+        expect(reconciler.takeHostsAwaitingOAuthObservation()).toEqual([host.name])
         expect(warn).toHaveBeenCalledWith(
           expect.stringContaining('deferring runtime token decision'),
           expect.objectContaining({
@@ -4952,6 +4953,51 @@ describe('HostReconciler stateless lifecycle — guarded image pull policy (Stag
       } finally {
         warn.mockRestore()
       }
+    })
+
+    it('T3b: retains an OAuth-deferred wake until a successful observation narrows the mint', async () => {
+      const { host, reconciler, appsApi, coreApi, liveRecord } = await boundWakeRuntime({
+        replicas: 0,
+        readyReplicas: 0,
+        retainedFrontsOAuth: true,
+        cacheSynced: () => false,
+      })
+      const oauth = vi.fn(async (): Promise<boolean> => {
+        throw new Error('McpServer observation unavailable')
+      })
+      reconciler.setHostFrontsOAuthServer(oauth)
+      const issue = vi.mocked(issueMcpHostRuntimeTokens)
+      issue.mockClear()
+      await reconciler.reconcile(host)
+      expect(oauth).toHaveBeenCalledTimes(3)
+      expect(coreApi.readNamespacedSecret).toHaveBeenCalled()
+      expect(issue).not.toHaveBeenCalled()
+      const pending = reconciler.takeHostsAwaitingOAuthObservation()
+      expect(pending).toEqual([host.name])
+      // Restore the destructive snapshot so successful observation must ACK it.
+      reconciler.requeueHostsAwaitingOAuthObservation(pending)
+      oauth.mockClear().mockResolvedValue(false)
+      await reconciler.reconcile(host)
+      expect(oauth).toHaveBeenCalled()
+      expect(issue).toHaveBeenCalledOnce()
+      expect(issue.mock.calls[0]![2]).not.toContain(OAUTH_USER_TOKEN_SCOPE)
+      expect(
+        liveRecord().metadata!.annotations!['clerum.io/runtime-token-fronts-oauth-server']
+      ).toBe('false')
+      expect(appsApi.replaceNamespacedDeployment).toHaveBeenCalled()
+      expect(reconciler.takeHostsAwaitingOAuthObservation()).toEqual([])
+    })
+
+    it('T9b: removes a deferred Host after its owned runtime resources are deleted', async () => {
+      const { host, reconciler, appsApi, coreApi } = await boundWakeRuntime()
+      reconciler.requeueHostsAwaitingOAuthObservation([host.name])
+      await reconciler.reconcileDelete(host.name, host.namespace)
+      expect(appsApi.deleteNamespacedDeployment).toHaveBeenCalledWith({
+        name: host.name,
+        namespace: host.namespace,
+      })
+      expect(coreApi.deleteNamespacedSecret).toHaveBeenCalled()
+      expect(reconciler.takeHostsAwaitingOAuthObservation()).toEqual([])
     })
 
     it('T7: does not force a wake refresh for a suspended target after authority returns', async () => {

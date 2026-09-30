@@ -304,6 +304,12 @@ export const heldWakeTemplateRefreshTotal = counter({
   labelNames: ['result'] as const,
 })
 
+export const oauthReobservationTotal = counter({
+  name: 'clerum_hcc_oauth_reobservation_total',
+  help: 'Targeted deferred OAuth re-observation attempts: resolved dispatches, denied admission requeues, or failures. A resolved dispatch does not certify an observation or mint.',
+  labelNames: ['trigger', 'result'] as const,
+})
+
 // Outcomes partition completed creates; sum created, conflict, and error for
 // completed attempts. The bounded kind inventory includes the read-first Secret.
 export const CREATE_KINDS = [

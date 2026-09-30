@@ -547,6 +547,7 @@ export class HostReconciler {
   private readonly now: () => Date
   private readonly newTelemetryOccurrenceId: () => string
   private readonly statusMap: Map<string, HostRuntimeStatus> = new Map()
+  private readonly hostsAwaitingOAuthObservation = new Set<string>()
   private codexSnapshot: CodexCatalogSnapshot = { flagEnabled: false }
   private lastCodexConfigMap: k8s.V1ConfigMap | undefined
   private readonly readinessTimers: Map<string, ReturnType<typeof setTimeout>> = new Map()
@@ -712,6 +713,16 @@ export class HostReconciler {
    */
   setHostFrontsOAuthServer(fn: HostFrontsOAuthServerFn): void {
     this.hostFrontsOAuthServerFn = fn
+  }
+
+  takeHostsAwaitingOAuthObservation(): string[] {
+    const names = [...this.hostsAwaitingOAuthObservation]
+    this.hostsAwaitingOAuthObservation.clear()
+    return names
+  }
+
+  requeueHostsAwaitingOAuthObservation(names: string[]): void {
+    for (const name of names) this.hostsAwaitingOAuthObservation.add(name)
   }
 
   /**
@@ -2171,6 +2182,7 @@ export class HostReconciler {
         const liveFrontsOAuth = await this.observeFrontsOAuthServer(host)
         let observedFrontsOAuth: boolean
         if (liveFrontsOAuth.observed) {
+          this.hostsAwaitingOAuthObservation.delete(host.name)
           observedFrontsOAuth = liveFrontsOAuth.frontsOAuthServer
         } else {
           const observationFailure = {
@@ -2198,6 +2210,7 @@ export class HostReconciler {
                 'deferring runtime token decision: OAuth observation unavailable and retained scope grants oauth:user-token',
                 observationFailure
               )
+              this.hostsAwaitingOAuthObservation.add(host.name)
               return null
             }
             log.warn(
@@ -2210,6 +2223,7 @@ export class HostReconciler {
               'skipping runtime token mint during channel cache loss without an authoritative OAuth observation',
               observationFailure
             )
+            this.hostsAwaitingOAuthObservation.add(host.name)
             return null
           }
         }
@@ -5785,6 +5799,7 @@ export class HostReconciler {
       await this.deleteHostRuntimeResources(name, namespace)
       this.clearStatus(name)
       this.desktopHosts.delete(name)
+      this.hostsAwaitingOAuthObservation.delete(name)
       // The delete path has no uid to key by, so every entry for this
       // namespace/name goes: the object is gone and no outcome will carry its
       // evidence (#696).
