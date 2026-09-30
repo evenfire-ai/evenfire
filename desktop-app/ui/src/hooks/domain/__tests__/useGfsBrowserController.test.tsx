@@ -2203,7 +2203,7 @@ describe('useGfsBrowserController', () => {
     )
     expect(screen.getByTestId('access-state').textContent).toBe('active')
     expect(screen.getByTestId('accessible-count').textContent).toBe('1')
-    expect(lastHarnessQueryClient?.getQueryData(childrenKey)).toBeUndefined()
+    await waitFor(() => expect(lastHarnessQueryClient?.getQueryData(childrenKey)).toBeUndefined())
   })
 
   it('does not let an old folder denial cancel a pending destination navigation', async () => {
