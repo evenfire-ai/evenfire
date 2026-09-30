@@ -385,6 +385,21 @@ bp adopted-stop stop "MINIKUBE_PROFILE=${adopted}"
 assert_rc 0 'stop of an owned profile without the hashed suffix'
 assert_log_has "minikube -p ${adopted} stop" 'stop ran minikube stop for the adopted profile'
 
+# Ownership alone is not enough on the explicit path: the name must also be in
+# the local clerum-* namespace, which keeps out EKS/AKS or arbitrary contexts
+# that are not on the shared-context denylist.
+write_owned_profile_copy my-aks-shared
+reset_state
+bp explicit-outside-namespace resolve MINIKUBE_PROFILE=my-aks-shared
+assert_rc 1 'explicit selection of an owned profile outside clerum-*'
+# Witness: the refusal comes from the clerum-* namespace check, not the denylist.
+assert_output_has 'explicit profile is outside the local clerum-* namespace: my-aks-shared' \
+  'explicit selection of an owned profile outside clerum-*'
+assert_output_lacks 'PROFILE=my-aks-shared' 'an owned profile outside clerum-* must not resolve'
+assert_log_lacks 'minikube' 'an owned profile outside clerum-* must not reach minikube'
+assert_log_lacks 'kubectl' 'an owned profile outside clerum-* must not reach kubectl'
+rm -rf "${cache_root:?}/my-aks-shared"
+
 # A profile the resolver derives on its own (no explicit selection) must still
 # carry the hashed suffix. With the branch profile set aside, the adopted
 # profile is the only persisted record for this worktree and branch.
