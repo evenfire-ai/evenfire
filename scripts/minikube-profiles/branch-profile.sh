@@ -132,7 +132,7 @@ validate_profile_name() {
   # clerum-<branch slug>-<owner id prefix> (profile_owner_stable_profile in
   # scripts/minikube/profile-owner.sh), so it must carry the hex suffix.
   [[ "${PROFILE}" =~ ^clerum-[a-z0-9][a-z0-9._-]*-[0-9a-f]{7,8}$ ]] ||
-    die "resolver returned a profile outside the branch-scoped clerum-<branch>-<owner-id> namespace: ${PROFILE}"
+    die "resolver returned a profile outside the branch-scoped clerum-<branch>-<owner-id> namespace: ${PROFILE}; select an adopted profile explicitly with MINIKUBE_PROFILE=<name>"
 }
 
 set_profile_paths() {

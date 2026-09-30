@@ -409,6 +409,8 @@ bp derived-unhashed resolve
 assert_rc 1 'resolver-derived profile without the hashed suffix'
 assert_output_has "outside the branch-scoped clerum-<branch>-<owner-id> namespace: ${adopted}" \
   'the resolver found the unhashed profile and refused it'
+assert_output_has 'select an adopted profile explicitly with MINIKUBE_PROFILE=<name>' \
+  'the refusal of a resolver-derived unhashed profile says how to select it'
 assert_output_lacks "PROFILE=${adopted}" 'a resolver-derived unhashed profile must not resolve'
 mv "${tmp}/branch-profile-aside" "${profile_dir}"
 rm -rf "${cache_root:?}/${adopted}"
