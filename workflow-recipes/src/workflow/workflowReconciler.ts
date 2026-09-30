@@ -3403,7 +3403,7 @@ export class WorkflowReconciler {
    * | mid-run retry (this) | applied        | kept if live    | kept          | kept                    | kept            |
    * | legacy retry         | untouched      | untouched       | untouched     | untouched               | deleted, backoff |
    * | terminal teardown    | kept           | kept            | kept          | kept                    | kept            |
-   * | finalizer            | deleted        | deleted         | deleted       | deleted                 | only if labeled |
+   * | finalizer            | deleted        | deleted         | deleted       | deleted                 | deleted         |
    *
    * Table A, what each writer publishes (`networkPolicyMarkerConditions`).
    * The facts are A (apply: `converged | pending`), P (prune: `converged |
@@ -3458,8 +3458,8 @@ export class WorkflowReconciler {
    * that policy may open; that policy is outside the run-lane catalog. It
    * deletes no run-lane policy. The finalizer deletes a fixed list of run-lane
    * names and sweeps by the recipe labels in the sandbox and mcp-server
-   * namespaces; the legacy policy has no name-based delete there and goes only
-   * if it carries those labels.
+   * namespaces; the legacy policy predates those labels and is deleted by
+   * name in the mcp-server namespace.
    *
    * reconcile(), and so its prune, also runs while the run's pods are live:
    * the WRC falls through to it for a run in `initializing` or `recovering`,
@@ -4451,8 +4451,9 @@ export class WorkflowReconciler {
     // NP-02: wf-mcp-host-ingress lives in mcpServerNamespace, not sandboxNamespace.
     // NP-03: now one NP per mcp-server (named `wf-mcp-ingress-${mcpServerName}`).
     // List-by-label is the cleanest cleanup — all managed NPs have recipe label.
-    const mcpServerNpNames: string[] = [] // legacy single-NP name no longer used;
-    // per-mcp-server NPs are deleted via label selector below.
+    // Per-mcp-server NPs are deleted via label selector below. The legacy
+    // internet policy predates those labels, so it is deleted by name (R4-L4).
+    const mcpServerNpNames: string[] = [`${recipeName}-mcp-servers-egress-internet`]
     const mcpNs = this.deps.config.mcpServerNamespace
 
     const cleanupTasks: Array<{ label: string; run: () => Promise<void> }> = [
