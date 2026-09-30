@@ -75,7 +75,9 @@ non-image bytes stay on the 6 MiB share. Non-chat rpc-proxy and Host control
 routes keep the 10 MB ordinary JSON cap. The proxy's larger
 parser requires a valid platform identity on the visual completion route.
 Admin and unauthenticated requests retain the ordinary configured body limit.
-`CODEX_LLM_PROXY_MAX_VISUAL_BODY_BYTES` controls the visual transport ceiling;
+`CODEX_LLM_PROXY_MAX_VISUAL_BODY_BYTES` is the visual transport ceiling and
+must equal the contract cap: the proxy refuses to start when it is configured
+below or above it;
 `CODEX_LLM_PROXY_MAX_BODY_BYTES` continues to control ordinary requests; the
 manifest leaves it unset so the proxy derives it from the contract cap plus the
 envelope allowance.

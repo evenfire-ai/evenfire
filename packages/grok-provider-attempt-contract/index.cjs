@@ -213,7 +213,7 @@ const USAGE_KEYS = new Set(['inputTokens', 'outputTokens'])
 // `size` also marks the image budgets, and the message and tool-call counts
 // carry no kind although the Host treats them as context length. The Host
 // therefore classifies by message (CONTEXT_LENGTH_REFUSALS in
-// mcp-host/src/llm/grokSubscription.ts).
+// mcp-host/src/llm/imageSource.ts).
 function fail(code, message, kind) {
   return kind ? { ok: false, code, message, kind } : { ok: false, code, message }
 }

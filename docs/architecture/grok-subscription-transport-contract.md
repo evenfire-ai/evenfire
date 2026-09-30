@@ -97,7 +97,8 @@ Where the envelope is enforced:
   `client_max_body_size 36700160`;
 - `grok-llm-proxy` reads a V2 body with a separate parser whose limit is
   `GROK_LLM_PROXY_MAX_VISUAL_BODY_BYTES`, 36700160 in the base manifest; the
-  proxy refuses to start when it is configured below the contract cap.
+  value must equal the contract cap, and the proxy refuses to start when it is
+  configured below or above it.
 
 V2 has no outer deadline. Its deadline is `request.deadlineMs`, part of the
 authorized hash. The Host refuses to stream with a deadline other than the
@@ -168,7 +169,8 @@ admits about eight compact bodies of that structure (2.8 MiB each) or about
 five at 4.7 MiB, and each parse allocates a tree of about 44 MiB once collected,
 plus transient copies. At a 384 MiB heap cap that load aborted with
 out-of-memory before any upstream call. With 8 held streams, 8 queued bodies
-and one V2 stream, 640 MiB passed Grok (peak RSS 1118-1250 MiB) but aborted
+and the visual gate full (one V2 stream for Grok, two for Codex, whose gate is
+two wide), 640 MiB passed Grok (peak RSS 1118-1250 MiB) but aborted
 the Codex proxy in 3 of 3 runs, and 768 MiB passed both proxies in 3 of 3
 (Grok peak RSS 1212-1482 MiB). macOS RSS is not cgroup memory and varied by
 about 100 MiB between runs; 768 MiB is the smallest cap tested that passes
@@ -207,7 +209,12 @@ Errors:
   `invalid_request` before #784), and the proxy refuses size with 413
   `payload_too_large`. The Host maps `payload_too_large` to
   `LLM_CONTEXT_LENGTH_EXCEEDED`, not retryable.
-- Images are never stripped silently and never trigger a provider fallback.
+- Images are never stripped silently, and a size refusal never triggers a
+  provider fallback. A 503 from the visual gate or from the per-principal
+  share (`visual_gate`, `visual_host_share`) is different: the proxy answers
+  `provider_unavailable`, the Host classifies it as `LLM_MODEL_OVERLOADED`,
+  retryable, and a Host with a fallback provider configured fails over on it.
+  Whether that should stay retryable is tracked in #868.
 
 Desktop. The composer budget for `grok-subscription` is 16 MiB per image and
 16 MiB decoded in total, with no dimension bound. That is the shared rpc-proxy
@@ -958,8 +965,12 @@ Grok annotations. A new control-api also republishes on boot.
    follows automatically through HCC and WRC.
 
 Image input (#784) on a deployment where the Grok flags are already on: roll
-out `grok-llm-proxy` first, then control-api, then the four Host images, and
-wait until every pod of each runs the new image before starting the next.
+out `grok-llm-proxy` first, then control-api together with the control-plane
+ConfigMap, then the four Host images, and wait until every pod of each runs
+the new image before starting the next. With the ConfigMap, restart
+`nginx-workflow-approval-gateway`: it mounts `nginx.conf` through `subPath`,
+so it keeps the old authorize `client_max_body_size` (25165824) until its pods
+are replaced.
 V2 has no version negotiation and no flag of its own: a new Host sends an
 image-bearing request as soon as it runs, and nothing tells it what the
 control-api or the proxy behind it accepts. Each mixed-version pairing fails
@@ -969,6 +980,7 @@ closed, and what the user sees is:
 | --- | --- | --- | --- |
 | new Host, old control-api | V2 within the old route parser | refused at authorize with 400 `invalid_request`; no attempt row, nothing sent | "Connection Error" (`LLM_API_CALL_FAILED`, not retryable) |
 | new Host, old control-api | V2 above the old route parser (24 MiB) | refused at authorize with 413 `payload_too_large` | "Conversation Too Long" (`LLM_CONTEXT_LENGTH_EXCEEDED`); shortening the text does not help |
+| new Host, new control-api, gateway not restarted | V2 between 24 MiB and 35 MiB | refused by nginx with a 413 that carries no JSON code, before control-api; no attempt row, nothing sent | "Conversation Too Long" (the Host maps every authorize 413 to `payload_too_large`) |
 | new Host, new control-api, old proxy | V2 within the old proxy parser | authorized (ticket and attempt row written), refused by the proxy with 400 `invalid_request`; one attempt consumed, nothing sent upstream | "Connection Error" |
 | new Host, new control-api, old proxy | V2 above the old proxy parser (8 MiB) | authorized, refused by the proxy with 413 `payload_too_large` | "Conversation Too Long" |
 | old Host, any control-api and proxy | V1 only | unchanged | nothing new |

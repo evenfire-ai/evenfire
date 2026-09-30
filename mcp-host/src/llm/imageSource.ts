@@ -162,7 +162,8 @@ export function projectMessage(message: ChatMessage, invalidRequestCode: string)
  * cannot replace the message here: `size` covers the conversation bytes and the
  * image byte budgets alike (the Codex contract adds dimension budgets), and a
  * shorter conversation fixes the first and not the second. `count` covers
- * `maxImages` in both contracts and `maxMessages` in the Codex one. So the
+ * `maxImages` in both contracts, and `maxMessages` and `maxToolCalls` in the
+ * Codex one. So the
  * message stays the discriminator at this boundary (#731). The byte pattern is
  * a prefix so it covers the `outside image data` check of a V2 request. The
  * element bound has its own explicit pattern.

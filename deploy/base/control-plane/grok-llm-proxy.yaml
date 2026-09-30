@@ -93,8 +93,8 @@ spec:
             # byte-based BodyBudget also admits about eight compact bodies of
             # the worst structure the contract admits (#806 Q1), each a ~44 MiB
             # tree once parsed. With 8 held streams, 8 queued bodies and one
-            # V2 stream, 640 MiB passed 3 of 3 for Grok (it aborts the Codex
-            # proxy) and 768 MiB passed both; that load peaked at 1212-1482 MiB
+            # V2 stream (two on the Codex proxy), 640 MiB passed 3 of 3 for
+            # Grok (it aborts the Codex proxy) and 768 MiB passed both; that load peaked at 1212-1482 MiB
             # of RSS on macOS, which is not cgroup memory. 768 MiB is the
             # smallest cap tested that passes both, not a proven minimum.
             - name: NODE_OPTIONS
