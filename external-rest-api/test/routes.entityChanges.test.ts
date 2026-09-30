@@ -89,29 +89,29 @@ describe('routes/entityChanges', () => {
     )
   })
 
-  it('propagates authorization and cursor errors from control-api', async () => {
+  it('passes an expired-cursor resync instruction as an NDJSON frame', async () => {
     authTokenMock.verifyToken.mockReturnValueOnce(claims)
-    const error = new controlApiClientMock.ControlApiError(
-      'expired cursor',
-      410,
-      { error: 'resync_required' },
-      { 'retry-after': '1' }
-    )
-    controlApiClientMock.controlApiStreamRequest.mockRejectedValueOnce(error)
-    const app = makeApp()
-    app.use(
-      (err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
-        const status = (err as { status?: number }).status ?? 500
-        res.status(status).json({ error: 'unexpected' })
-      }
-    )
+    const frame = JSON.stringify({
+      schemaVersion: 1,
+      type: 'resync_required',
+      cursor: 'd119f895-1ef8-4e73-8f08-f9754919682a',
+      scopes: ['gfs', 'authorization'],
+    })
+    controlApiClientMock.controlApiStreamRequest.mockResolvedValueOnce({
+      status: 200,
+      headers: new Headers({ 'content-type': 'application/x-ndjson; charset=utf-8' }),
+      body: makeNdjsonStream(frame),
+    })
 
-    const response = await request(app)
+    const response = await request(makeApp())
       .get('/entity-changes/stream?cursor=d119f895-1ef8-4e73-8f08-f9754919682a')
       .set('authorization', 'Bearer session-token')
-      .expect(410)
-    expect(response.body).toEqual({ error: 'resync_required' })
-    expect(response.headers['retry-after']).toBe('1')
+      .expect(200)
+    expect(response.text.trim()).toBe(frame)
+    expect(JSON.parse(response.text.trim())).toMatchObject({
+      type: 'resync_required',
+      scopes: ['gfs', 'authorization'],
+    })
   })
 
   it('preserves upstream server error status without exposing internal response details', async () => {
