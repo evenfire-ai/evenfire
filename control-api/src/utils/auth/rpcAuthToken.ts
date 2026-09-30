@@ -14,6 +14,8 @@ const ALLOWED_RPC_SCOPES = new Set<RpcScope>(RPC_SCOPES)
 const ALLOWED_TEAM_ROLES = new Set<TeamRole>(TEAM_ROLES)
 const TEAM_ONLY_RPC_SCOPES = new Set<RpcScope>(['desktop:view'])
 
+export const RPC_TOKEN_REVOKED_CODE = 'host_access_revoked'
+
 /**
  * Reserved synthetic host reference for sandbox UI RPC tokens.
  *
@@ -179,6 +181,23 @@ export function normalizeRequestedHostRefs(input: unknown): string[] {
     refs.push(ref)
   }
   return Array.from(new Set(refs))
+}
+
+/**
+ * The caller supplies canonical agent Host refs after request validation.
+ * Directory results only decide reachability; they never supply the returned refs.
+ */
+export function mintRevokedHostRefs(
+  agentHostRefs: readonly string[],
+  reachableAgentNames: ReadonlySet<string>
+): string[] | null {
+  if (
+    agentHostRefs.length === 0 ||
+    agentHostRefs.some(hostRef => reachableAgentNames.has(hostRef))
+  ) {
+    return null
+  }
+  return Array.from(new Set(agentHostRefs)).sort()
 }
 
 export function issueRpcAccessToken(
