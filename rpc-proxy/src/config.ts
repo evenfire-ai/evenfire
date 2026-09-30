@@ -1,3 +1,4 @@
+import { createHash, createPublicKey } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
@@ -177,16 +178,6 @@ export function parseWakeMaxHoldMs(raw: string): number {
   return MAX_REQUEST_HOLD_MS
 }
 
-const DEV_RPC_JWT_PUBLIC_KEY = normalizePem(`-----BEGIN PUBLIC KEY-----
-MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArCIYGHehMPpGKePxaKQa
-rDX5yrzifU5i4fzpI3EtkKSU6s5ug7EkKxc2DdMekoqXe9vr7qKyVwiilUIusXLX
-iW7KPMJlD/Fd5Bo7Qxt69wYiL5I4K37eDgCN6D3LduHySEnkhdI0GDpB4LM2ASOx
-QkEabepekZTMQyExmCIn/dHJ15B+4A9tiiephYOQNr3GcnW9eDomMt6NJLypikbr
-xJO6O7Ar0G+raTbflth8EQzWnGF+WgQW4iiM3wsFhpaE0mUlEbMGDGTMAZy1KfxA
-RRu+QZm3Lo+5AiCaHkijDCglHsXLhqsYi2AdRiavD1Gk9LKP/ztKw7q/D6fYFzmO
-QwIDAQAB
------END PUBLIC KEY-----`)
-
 function serviceRoot(): string {
   // Works in every supported runtime: CommonJS (dist and ts-node) resolves
   // __dirname to <service>/dist or <service>/src; Vitest's ESM transform falls
@@ -194,30 +185,59 @@ function serviceRoot(): string {
   return typeof __dirname === 'string' && __dirname ? dirname(__dirname) : process.cwd()
 }
 
+const HISTORICAL_DEV_JWT_PUBLIC_FINGERPRINTS: ReadonlySet<string> = new Set([
+  '4292d721765a93b0275f9f4ceb0a4667517fae00b5face8faa270513d610bb27',
+  'f7dc08c248bf2b7724dead80dd96f9a5eeb49cf9920ba6fb46cf457a788d503e',
+  '2d05f607d125e4bd3c157d5c6115bf63cb454c1e45cc5bcc8eed950771dcfd31',
+])
+
+function assertUsableJwtPublicKey(publicPem: string, envName: string): string {
+  let fingerprint: string
+  try {
+    const der = createPublicKey(publicPem).export({ type: 'spki', format: 'der' })
+    fingerprint = createHash('sha256').update(der).digest('hex')
+  } catch {
+    throw new Error(`${envName} must be a PEM-encoded RSA public key`)
+  }
+  if (HISTORICAL_DEV_JWT_PUBLIC_FINGERPRINTS.has(fingerprint)) {
+    throw new Error(`${envName} must not use a historically committed dev JWT key`)
+  }
+  return publicPem
+}
+
 /**
- * In explicit dev mode, verify with the public half control-api publishes next
- * to its generated RPC signing key, so a monorepo dev boot keeps one shared
- * key identity across the signer and this verifier. EVENFIRE_DEV_KEY_STORE can
- * relocate the store; RPC_PROXY_JWT_PUBLIC_KEY always takes precedence.
+ * Env var first; explicit dev mode loads the public half published next to the
+ * control-api signing key; every other mode fails closed. The resolved key is
+ * always fingerprint-checked so a historically committed public key is never
+ * accepted as a verifier.
  */
 function resolveRpcJwtPublicKey(): string {
-  const fromEnv = process.env.RPC_PROXY_JWT_PUBLIC_KEY
-  if (fromEnv) return fromEnv
+  const envName = 'RPC_PROXY_JWT_PUBLIC_KEY'
+  if (process.env.NODE_ENV === 'production' && process.env.CLERUM_DEV_MODE === 'true') {
+    throw new Error(
+      '[SECURITY] Startup rejected: CLERUM_DEV_MODE=true is not allowed with NODE_ENV=production.'
+    )
+  }
+  const fromEnv = process.env[envName]
+  if (fromEnv) return assertUsableJwtPublicKey(fromEnv, envName)
   if (process.env.CLERUM_DEV_MODE === 'true') {
     const storeDir =
       process.env.EVENFIRE_DEV_KEY_STORE ?? join(serviceRoot(), '..', 'control-api', '.dev-keys')
     const publicPath = join(storeDir, 'rpc.public.pem')
+    let fromStore: string
     try {
-      return readFileSync(publicPath, 'utf8')
+      fromStore = readFileSync(publicPath, 'utf8')
     } catch {
       throw new Error(
         `CLERUM_DEV_MODE=true requires the control-api dev key store at ${storeDir}. ` +
-          'Start control-api once with CLERUM_DEV_MODE=true, or set RPC_PROXY_JWT_PUBLIC_KEY.'
+          `Start control-api once with CLERUM_DEV_MODE=true, or set ${envName}.`
       )
     }
+    return assertUsableJwtPublicKey(fromStore, envName)
   }
-  return DEV_RPC_JWT_PUBLIC_KEY
+  return required(envName)
 }
+
 export const config: Config = {
   port: Number(process.env.RPC_PROXY_PORT || 8094),
   corsOrigin: parseCorsOrigin(

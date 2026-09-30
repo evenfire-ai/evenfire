@@ -1,9 +1,13 @@
 import { createPrivateKey, createPublicKey, generateKeyPairSync, randomBytes } from 'node:crypto'
 import {
   type Stats,
+  closeSync,
+  constants,
+  fstatSync,
   linkSync,
   lstatSync,
   mkdirSync,
+  openSync,
   readFileSync,
   unlinkSync,
   writeFileSync,
@@ -28,20 +32,75 @@ export function defaultDevSigningKeyStoreDir(): string {
   return DEFAULT_STORE_DIR
 }
 
-function assertOwnedRegularFile(filePath: string): void {
-  const stats = lstatSync(filePath, { throwIfNoEntry: false })
-  if (!stats) throw new Error(`Dev JWT key store file is missing after creation: ${filePath}`)
-  if (stats.isSymbolicLink() || !stats.isFile()) {
+type StoreFileVisibility = 'owner-only' | 'shared-read'
+
+function assertStoreFileStats(
+  filePath: string,
+  stats: Stats,
+  visibility: StoreFileVisibility
+): void {
+  if (!stats.isFile()) {
     throw new Error(`Dev JWT key store path is not a regular file: ${filePath}`)
   }
   if (process.geteuid && stats.uid !== process.geteuid()) {
     throw new Error(`Dev JWT key store file is not owned by the current user: ${filePath}`)
   }
-  if ((stats.mode & 0o077) !== 0) {
+  if (visibility === 'owner-only' && (stats.mode & 0o077) !== 0) {
     throw new Error(
       `Dev JWT key store file has group/other permissions; expected 0600: ${filePath}`
     )
   }
+  if (visibility === 'shared-read' && (stats.mode & 0o022) !== 0) {
+    throw new Error(`Dev JWT key store public file must not be group/other writable: ${filePath}`)
+  }
+}
+
+/**
+ * Opens an existing store file without following symlinks and validates the
+ * opened descriptor itself, eliminating check-then-read filesystem races.
+ * Returns undefined only for ENOENT; the caller owns and must close the fd.
+ */
+function openStoreFileNoFollow(
+  filePath: string,
+  visibility: StoreFileVisibility
+): number | undefined {
+  let fd: number | undefined
+  try {
+    fd = openSync(filePath, constants.O_RDONLY | constants.O_NOFOLLOW)
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code
+    if (code === 'ENOENT') return undefined
+    if (code === 'ELOOP') {
+      throw new Error(`Dev JWT key store path is a symbolic link: ${filePath}`)
+    }
+    throw err
+  }
+  try {
+    assertStoreFileStats(filePath, fstatSync(fd), visibility)
+  } catch (err) {
+    closeSync(fd)
+    throw err
+  }
+  return fd
+}
+
+function readStoreFileNoFollow(
+  filePath: string,
+  visibility: StoreFileVisibility
+): string | undefined {
+  const fd = openStoreFileNoFollow(filePath, visibility)
+  if (fd === undefined) return undefined
+  try {
+    return readFileSync(fd, 'utf8')
+  } finally {
+    closeSync(fd)
+  }
+}
+
+function assertOwnedRegularFile(filePath: string): void {
+  const fd = openStoreFileNoFollow(filePath, 'owner-only')
+  if (fd === undefined) throw new Error(`Dev JWT key store file is missing: ${filePath}`)
+  closeSync(fd)
 }
 
 function assertOwnedPrivateDirectory(dirPath: string, stats: Stats): void {
@@ -76,26 +135,14 @@ function ensureStoreDir(storeDir: string): void {
 }
 
 function readPersistedKey(filePath: string, slot: DevJwtSlot): string | undefined {
-  const stats = lstatSync(filePath, { throwIfNoEntry: false })
-  if (!stats) return undefined
-  if (stats.isSymbolicLink() || !stats.isFile()) {
-    throw new Error(`Dev JWT key store path is not a regular file: ${filePath}`)
-  }
-  if (process.geteuid && stats.uid !== process.geteuid()) {
-    throw new Error(`Dev JWT key store file is not owned by the current user: ${filePath}`)
-  }
-  if ((stats.mode & 0o077) !== 0) {
-    throw new Error(
-      `Dev JWT key store file has group/other permissions; expected 0600: ${filePath}`
-    )
-  }
-  let raw: string
+  let raw: string | undefined
   try {
-    raw = readFileSync(filePath, 'utf8')
+    raw = readStoreFileNoFollow(filePath, 'owner-only')
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return undefined
     throw err
   }
+  if (raw === undefined) return undefined
   try {
     return validateRsaPrivateKeyPem(raw.trim(), `${slot} dev signing key`)
   } catch (err) {
@@ -108,12 +155,7 @@ function readPersistedKey(filePath: string, slot: DevJwtSlot): string | undefine
 let warnedOnce = false
 
 function readStoredDerivedPublic(publicPath: string): string | undefined {
-  const stats = lstatSync(publicPath, { throwIfNoEntry: false })
-  if (!stats) return undefined
-  if (stats.isSymbolicLink() || !stats.isFile()) {
-    throw new Error(`Dev JWT key store public path is not a regular file: ${publicPath}`)
-  }
-  return readFileSync(publicPath, 'utf8').trim()
+  return readStoreFileNoFollow(publicPath, 'shared-read')?.trim()
 }
 
 /**
@@ -172,7 +214,6 @@ export function loadOrGenerateDevJwtPrivateKey(
   if (existing) {
     warnOnce()
     ensureDerivedPublicKey(slot, storeDir, existing)
-    warnOnce()
     return existing
   }
   const { privateKey } = generateKeyPairSync('rsa', {
@@ -198,17 +239,14 @@ export function loadOrGenerateDevJwtPrivateKey(
       if (winner) {
         warnOnce()
         ensureDerivedPublicKey(slot, storeDir, winner)
-        warnOnce()
         return winner
       }
     }
     throw err
   }
   assertOwnedRegularFile(filePath)
-  assertOwnedRegularFile(filePath)
   ensureDerivedPublicKey(slot, storeDir, privateKey)
   warnOnce()
-  return privateKey.trim()
   return privateKey.trim()
 }
 

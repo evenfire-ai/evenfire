@@ -88,7 +88,6 @@ describe('bannedDevSigningKeys', () => {
 
   it('rejects a banned verifier public key and mismatched overrides', () => {
     const fresh = makeFresh()
-    const offender = makeOffender()
     expect(() =>
       assertGuard(
         {

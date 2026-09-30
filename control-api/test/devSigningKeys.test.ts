@@ -144,7 +144,7 @@ describe('devSigningKeys persistence contract', () => {
     loadOrGenerateDevJwtPrivateKey('admin', realStore)
     mkdirSync(linkStore, { mode: 0o700 })
     symlinkSync(join(realStore, 'admin.pem'), join(linkStore, 'admin.pem'))
-    expect(() => loadOrGenerateDevJwtPrivateKey('admin', linkStore)).toThrow(/not a regular file/)
+    expect(() => loadOrGenerateDevJwtPrivateKey('admin', linkStore)).toThrow(/symbolic link/)
   })
 
   it('reuses the same identity across real separate processes', async () => {
