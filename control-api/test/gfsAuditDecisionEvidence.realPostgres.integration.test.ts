@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { randomBytes } from 'node:crypto'
 import { Pool, type PoolClient } from 'pg'
 import { CONTROL_API_MIGRATIONS, initDb } from '../src/db.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
@@ -49,7 +50,7 @@ describeRealPostgres('GFS typed audit decision evidence', () => {
   }, 60_000)
 
   afterAll(async () => {
-    await pool?.end()
+    await endPoolAndWaitForClients(pool)
     if (!adminPool) return
     await adminPool.query(
       `SELECT pg_terminate_backend(pid) FROM pg_stat_activity

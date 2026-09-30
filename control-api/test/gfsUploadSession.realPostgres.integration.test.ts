@@ -19,6 +19,7 @@ import {
   type UploadSessionServiceDeps,
 } from '../../gfs-controller/src/upload/uploadSession.js'
 import { initDb } from '../src/db.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
@@ -162,7 +163,7 @@ describeRealPostgres('GFS Upload v2 session engine on real PostgreSQL', () => {
     await pool
       ?.query('DELETE FROM gfs_upload_sessions WHERE drive = $1', [drive])
       .catch(() => undefined)
-    await pool?.end()
+    await endPoolAndWaitForClients(pool)
     await rm(tempRoot, { recursive: true, force: true }).catch(() => undefined)
     if (!adminPool) return
     await adminPool.query(

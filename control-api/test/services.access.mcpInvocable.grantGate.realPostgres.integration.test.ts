@@ -7,6 +7,7 @@ import { initDb } from '../src/db.js'
 import { deriveOAuthEncryptionKey } from '../src/oauth/encryption.js'
 import { bootstrapSharedOAuthGrant, upsertOAuthGrant } from '../src/oauth/store.js'
 import { resolveInvocableMcpServersForContexts } from '../src/services/access/mcpInvocable.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 import { MockGateway } from './mockGateway.js'
 
 // T1 — the rpc-proxy grant-presence gate exercised end-to-end against grant
@@ -44,7 +45,7 @@ describeRealPostgres('mcpInvocable grant-presence gate (real Postgres)', () => {
   })
 
   afterAll(async () => {
-    await dbPool?.end()
+    await endPoolAndWaitForClients(dbPool)
     if (adminPool) {
       await adminPool.query(
         `SELECT pg_terminate_backend(pid) FROM pg_stat_activity

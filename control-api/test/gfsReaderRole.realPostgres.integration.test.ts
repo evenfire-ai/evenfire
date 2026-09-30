@@ -3,6 +3,7 @@ import { randomBytes } from 'node:crypto'
 import { Pool } from 'pg'
 import { createPermissionStoreProbe } from '../../gfs-controller/src/authz/storeProbe.js'
 import { CONTROL_API_MIGRATIONS, initDb } from '../src/db.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
@@ -62,12 +63,12 @@ describeRealPostgres('GFS reader and writer login isolation', () => {
   }, 60_000)
 
   afterAll(async () => {
-    await readerPool?.end()
-    await writerPool?.end()
+    await endPoolAndWaitForClients(readerPool)
+    await endPoolAndWaitForClients(writerPool)
     await pool?.query('ALTER ROLE gfs_controller NOLOGIN NOINHERIT').catch(() => undefined)
     await pool?.query('ALTER ROLE gfs_controller_reader NOLOGIN NOINHERIT').catch(() => undefined)
     await pool?.query(`DROP ROLE IF EXISTS ${quoteIdent(inheritedRole)}`).catch(() => undefined)
-    await pool?.end()
+    await endPoolAndWaitForClients(pool)
     if (!adminPool) return
     await adminPool.query(
       `SELECT pg_terminate_backend(pid) FROM pg_stat_activity

@@ -11,6 +11,7 @@ import type { GfsMetrics } from '../../gfs-controller/src/metrics.js'
 import { BlobStore } from '../../gfs-controller/src/storage/blobStore.js'
 import { resolveBlobKeyPath, resolveBlobPath } from '../../gfs-controller/src/storage/paths.js'
 import { initDb } from '../src/db.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 // This suite closes the reconciler's HIGH coverage gap: reconcileExpiredBlobs is
 // the sole backstop for the write/copy paths' swallowed cleanup errors, yet its
@@ -101,7 +102,7 @@ describeRealPostgres('GFS blob reconciliation on real PostgreSQL + on-disk BlobS
   })
 
   afterAll(async () => {
-    await pool?.end()
+    await endPoolAndWaitForClients(pool)
     await rm(blobRoot, { recursive: true, force: true }).catch(() => undefined)
     if (!adminPool) return
     await adminPool.query(

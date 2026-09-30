@@ -36,6 +36,7 @@ import {
   type PilotFixture,
   makeDiscoveryTransport,
 } from './fixtures/remoteOAuthDiscovery.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 import { MockGateway } from './mockGateway.js'
 
 const VALIDATED_IP = '93.184.216.34'
@@ -121,7 +122,7 @@ describeRealPostgres('proactive refresh sweep — installation identity (real Po
   })
 
   afterAll(async () => {
-    await dbPool?.end()
+    await endPoolAndWaitForClients(dbPool)
     if (adminPool) {
       await adminPool.query(
         `SELECT pg_terminate_backend(pid) FROM pg_stat_activity

@@ -8,6 +8,7 @@ import {
   issueMcpSecretRollbackPermit,
   releaseMcpSecretRollbackPermitClaim,
 } from '../src/services/mcpSecretRollbackPermitService.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
@@ -43,14 +44,11 @@ describeRealPostgres('MCP Secret rollback permits on real PostgreSQL', () => {
   }, 60_000)
 
   afterAll(async () => {
-    if (pool) {
-      // A concurrent consume test opens several pg clients. pg@8 may emit a
-      // late idle-client error while their sockets finish closing, so retain a
-      // pool-level listener through teardown and wait for the backend rows to
-      // disappear before using the administrative fallback below.
-      pool.on('error', () => {})
-      await pool.end()
-    }
+    // A concurrent consume test opens several pg clients. Wait for every one
+    // of them to close before touching their backends (#946), then wait for
+    // the backend rows to disappear before using the administrative fallback
+    // below.
+    await endPoolAndWaitForClients(pool)
     if (!adminPool) return
     let activeConnections = 0
     for (let attempt = 0; attempt < 50; attempt += 1) {

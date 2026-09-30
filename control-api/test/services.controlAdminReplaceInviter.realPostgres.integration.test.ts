@@ -23,6 +23,7 @@ import {
   createSilentInvitationForTeams,
 } from '../src/services/directory/membership.js'
 import { retireDesktopUser } from '../src/services/directory/users.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 import './realPostgres.requirement.ts'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
@@ -181,7 +182,7 @@ describeRealPostgres('control admin replace-inviter invitations on real PostgreS
   afterAll(async () => {
     querySpy?.mockRestore()
     connectSpy?.mockRestore()
-    await testPool?.end()
+    await endPoolAndWaitForClients(testPool)
     if (!adminPool) return
     await adminPool.query(
       `SELECT pg_terminate_backend(pid) FROM pg_stat_activity

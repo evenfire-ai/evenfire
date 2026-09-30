@@ -11,6 +11,7 @@ import {
   upsertOAuthGrant,
 } from '../src/oauth/store.js'
 import { resolveBatchGrantExistence } from '../src/routes/mcpOauth.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 import { MockGateway } from './mockGateway.js'
 
 // T1 — the batch grant-existence resolver (mini-spec 13 §4.1) exercised against
@@ -51,7 +52,7 @@ describeRealPostgres('resolveBatchGrantExistence (real Postgres)', () => {
   })
 
   afterAll(async () => {
-    await dbPool?.end()
+    await endPoolAndWaitForClients(dbPool)
     if (adminPool) {
       await adminPool.query(
         `SELECT pg_terminate_backend(pid) FROM pg_stat_activity

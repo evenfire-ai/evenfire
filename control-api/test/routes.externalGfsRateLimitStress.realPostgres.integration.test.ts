@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs'
 import http from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { Pool } from 'pg'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 // Concurrent users at the external GFS rate limits, through the production
 // Express app against real PostgreSQL. Config, the core and limiter pools, both limiters,
@@ -226,8 +227,8 @@ describeRealPostgres('external GFS rate limits under concurrent load (real Postg
       if (value === undefined) delete process.env[key]
       else process.env[key] = value
     }
-    await corePool?.end().catch(() => {})
-    await limiterPool?.end().catch(() => {})
+    await endPoolAndWaitForClients(corePool).catch(() => {})
+    await endPoolAndWaitForClients(limiterPool).catch(() => {})
     if (!adminPool) return
     await adminPool.query(
       `SELECT pg_terminate_backend(pid) FROM pg_stat_activity

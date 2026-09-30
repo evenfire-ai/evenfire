@@ -12,6 +12,7 @@ import {
   type PromptBridgeFinalizationInput,
   finalizePromptBridgeInTransaction,
 } from '../src/services/pluginWorkloadSdkFinalization.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
@@ -70,7 +71,7 @@ describeRealPostgres('Plugin Workload SDK finalization on real PostgreSQL', () =
   })
 
   afterAll(async () => {
-    await dbPool?.end()
+    await endPoolAndWaitForClients(dbPool)
     if (adminPool) {
       await adminPool.query(
         `SELECT pg_terminate_backend(pid)

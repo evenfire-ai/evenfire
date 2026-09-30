@@ -3,6 +3,7 @@ import { createHash, randomBytes } from 'node:crypto'
 import { performance } from 'node:perf_hooks'
 import { Pool, type PoolClient } from 'pg'
 import request from 'supertest'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 // The limiter's upserts run on their own pool (db.ts `rateLimitPool`, max 6,
 // 5 s acquire), separate from the core pool (max 10, 2 s acquire).
@@ -138,8 +139,8 @@ describeRealPostgres('rate limiter under pool saturation', () => {
       if (value === undefined) delete process.env[key]
       else process.env[key] = value
     }
-    await corePool?.end().catch(() => {})
-    await limiterPool?.end().catch(() => {})
+    await endPoolAndWaitForClients(corePool).catch(() => {})
+    await endPoolAndWaitForClients(limiterPool).catch(() => {})
     if (!adminPool) return
     await adminPool.query(
       `SELECT pg_terminate_backend(pid) FROM pg_stat_activity

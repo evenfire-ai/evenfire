@@ -5,6 +5,7 @@ import { Pool } from 'pg'
 import request from 'supertest'
 import type { DbClient } from '../src/db.js'
 import type { K8sGateway } from '../src/k8s.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 import { MockGateway } from './mockGateway.js'
 
 /**
@@ -82,7 +83,7 @@ describeRealPostgres('generic McpServer uninstall — repair_required (real Post
 
   afterAll(async () => {
     dbHolder.target = null
-    await dbPool?.end()
+    await endPoolAndWaitForClients(dbPool)
     if (adminPool) {
       await adminPool.query(
         `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
