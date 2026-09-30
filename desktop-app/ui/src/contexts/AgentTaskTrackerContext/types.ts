@@ -57,7 +57,9 @@ export type TaskTerminalResult =
   | { kind: 'reply'; content: string; attachments?: ChatMessageAttachment[] }
   | {
       kind: 'error'
-      source: 'failed' | 'result_fetch' | 'stream'
+      source: 'failed' | 'result_fetch' | 'stream' | 'authority'
+      /** A final task-result read denial; no raw response body crosses this boundary. */
+      authority?: 'revoked' | 'uncertain'
       attachments?: ChatMessageAttachment[]
       message: string
       code?: string

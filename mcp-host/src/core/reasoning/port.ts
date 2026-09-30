@@ -205,6 +205,7 @@ export class DefaultReasoningPort implements ReasoningPort {
         type: 'tool_calls',
         calls: response.tool_calls,
         content: response.content ?? undefined,
+        reasoning_content: response.reasoning_content,
         usage: response.usage,
       }
     }

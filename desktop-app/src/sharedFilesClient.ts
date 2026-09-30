@@ -1,5 +1,6 @@
 import { config } from './config.js'
 import { ApiError, requestJson } from './httpClient.js'
+import { boundedErrorExcerpt } from './upstreamErrors.js'
 
 export type ContextSharedFilesystemSummary = {
   name: string
@@ -96,7 +97,7 @@ export class SharedFilesClient {
     if (!response.ok) {
       const body = await response.text()
       throw new ApiError(
-        `${response.status} ${response.statusText}: ${body}`,
+        `${response.status} ${response.statusText}: ${boundedErrorExcerpt(body)}`,
         response.status,
         body
       )
