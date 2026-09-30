@@ -271,6 +271,56 @@ describe('routes/entityChangeStream', () => {
     vi.useRealTimers()
   })
 
+  it('closes an established user stream when visibility authorization is revoked', async () => {
+    vi.useFakeTimers()
+    const req = new FakeRequest()
+    const res = new FakeResponse()
+    const isAuthorized = vi
+      .fn()
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false)
+
+    streamEntityChanges(
+      req as unknown as Request,
+      res as unknown as Response,
+      CURSOR,
+      isAuthorized,
+      'user',
+      'user-1'
+    )
+    await vi.advanceTimersByTimeAsync(0)
+    expect(res.frames.map(frame => JSON.parse(frame))).toEqual([
+      {
+        schemaVersion: 1,
+        type: 'resync_required',
+        cursor: '00000000-0000-0000-0000-000000000000',
+        scopes: ['gfs', 'authorization'],
+      },
+    ])
+
+    await vi.advanceTimersByTimeAsync(configMock.entityChangeUserVisibilityRefreshMs)
+
+    expect(res.frames.map(frame => JSON.parse(frame))).toEqual([
+      {
+        schemaVersion: 1,
+        type: 'resync_required',
+        cursor: '00000000-0000-0000-0000-000000000000',
+        scopes: ['gfs', 'authorization'],
+      },
+      {
+        schemaVersion: 1,
+        type: 'stream.closing',
+        cursor: '00000000-0000-0000-0000-000000000000',
+        reason: 'session_expired',
+      },
+    ])
+    expect(res.writableEnded).toBe(true)
+    expect(isAuthorized).toHaveBeenCalledTimes(3)
+    expect(serviceMock.readEntityChangeCheckpoint).not.toHaveBeenCalled()
+    vi.useRealTimers()
+  })
+
   it('rechecks authorization before delivering an established operator invalidation', async () => {
     vi.useFakeTimers()
     serviceMock.readEntityChangeCheckpoint.mockResolvedValue({
