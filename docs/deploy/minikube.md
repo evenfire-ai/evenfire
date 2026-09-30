@@ -194,6 +194,93 @@ unless `E2E_WAIT_FULL_STACK=true`.
 The software-creation suites require a special model and approval-policy
 profile; run them explicitly with `E2E_RUN_SOFTWARE_CREATION=1`.
 
+### Branch-profile guards (`branch-profile.sh`)
+
+`minikube -p <profile>` and `kubectl --context=<profile>` address a cluster by
+context name alone, so `scripts/minikube-profiles/branch-profile.sh` checks,
+before each action touches minikube, a cluster or Docker, that the context
+named after the profile is this machine's Minikube profile. Every guard fails
+closed with its own token; none has a fallback.
+
+**Guard matrix.** Rows are the actions `branch.mk` exposes. "Context" guards
+apply only when a kubeconfig context named after the profile exists: a missing
+context is allowed, because `minikube start` creates it and nothing can reach a
+cluster through it.
+
+| Action | Required commands (checked before dispatch) | Local endpoint | Profile known to minikube | Cluster identity | Other guards |
+|---|---|---|---|---|---|
+| `start` | minikube kubectl helm python3 node | yes | yes | after `minikube start` | Docker ready, ports free; an EXIT/INT/TERM trap around `minikube start` restores the global current-context if minikube moved it onto the profile, even when the start fails |
+| `status` | minikube kubectl python3 node | yes | no | when the cluster answers | |
+| `pf` | minikube kubectl python3 node curl | yes | no | required; an unreachable cluster is an error | port-forward ownership records |
+| `health` | minikube kubectl python3 node curl | yes | no | required; an unreachable cluster is an error | |
+| `pf-health` | minikube kubectl python3 node curl | as `pf`, then `health` | no | as `pf` | an EXIT trap stops the forwards it started |
+| `stop` | minikube kubectl python3 node | yes | yes | when the cluster answers | clears verified port-forward records before `minikube stop` |
+| `delete` | minikube kubectl python3 node | yes | yes | when the cluster answers | `CONFIRM_DELETE=<profile>`; clears verified records before `minikube delete` |
+| `setup` | minikube kubectl helm perl python3 node | yes | yes | no (hands the profile to `full-setup.sh`) | `CONFIRM_PROFILE=<profile>`, Docker ready |
+| `preflight` | its own check: git minikube kubectl helm shasum | no | no | no | Docker ready, ports free |
+| `prepare-shims` | its own check: git shasum perl | no | no | no | shim symlink and rewrite checks |
+| `stop-pf` | none beyond the common ones | no | no | no | port-forward ownership records |
+
+Every action also needs `git`, `awk` and `shasum` (profile resolution), and
+refuses a shared or protected profile name, a `HOST` other than `127.0.0.1`,
+and an unscoped or symlinked `CACHE_ROOT`. "Cluster identity" means a node
+labelled `minikube.k8s.io/name=<profile>` whose InternalIP is the address
+`minikube -p <profile> ip` reports. "When the cluster answers" means only when
+`kubectl --context=<profile> cluster-info` succeeds: a stopped profile cannot be
+asked who it is, so `stop` and `delete` still run for it.
+
+**Kubeconfig read.** The context guards read the kubeconfig only; they never
+contact a cluster.
+
+| Kubeconfig state | Result |
+|---|---|
+| `kubectl config get-contexts` fails | `BRANCH_PROFILE_KUBECONFIG_UNREADABLE` |
+| no context named after the profile | the context guards pass |
+| `kubectl config view --minify --context=<profile>` fails (the context names an undefined cluster or user) | `BRANCH_PROFILE_CONTEXT_DANGLING` |
+| the context's cluster has an empty server | `BRANCH_PROFILE_CONTEXT_DANGLING` |
+| the server is not local (a public address, or a DNS name other than `localhost` and `*.minikube`) | `BRANCH_PROFILE_REMOTE_CONTEXT` |
+| the server is loopback, `localhost`, `*.minikube`, or a private or link-local IP address | the next guard runs |
+
+**Profile-list decision table.** "Profile known to minikube" reads
+`minikube profile list -o json` through
+`minikube_profile_list_names` (`scripts/minikube/context-identity.sh`).
+
+| `minikube profile list -o json` | Parser status | Result |
+|---|---|---|
+| no context named after the profile | not called | proceed |
+| the command fails or times out | not called | `BRANCH_PROFILE_MINIKUBE_PROFILES_UNREADABLE` |
+| output is not `{"invalid": [...], "valid": [...]}` with a non-empty string `Name` in every entry | 2 | `BRANCH_PROFILE_MINIKUBE_PROFILES_UNREADABLE` |
+| the profile is listed as valid or invalid | 0 | proceed |
+| the profile is not listed | 1 | `BRANCH_PROFILE_UNKNOWN_MINIKUBE_PROFILE` |
+
+An unreadable list is a refusal, never an empty list.
+
+**Refusal tokens.**
+
+| Token or message | Meaning |
+|---|---|
+| `missing required command(s): <list>` | a command in the action's row above is not on `PATH`; every missing one is named |
+| `BRANCH_PROFILE_SHARED_CONTEXT` | the profile name is shared or protected |
+| `HOST must be 127.0.0.1` | branch-profile forwards bind only `127.0.0.1` |
+| `CACHE_ROOT ...` | the profile cache root is unscoped, a symlink, not a directory, or contains a control character |
+| `PROFILE_METADATA_MISSING` | `profile.env` of an existing profile is missing or unreadable; it is never regenerated |
+| `PROFILE_PORTS_MISSING`, `PROFILE_PORTS_INVALID` | `ports.env` is missing or disagrees with its port base and `HOST` |
+| `BRANCH_PROFILE_KUBECONFIG_UNREADABLE` | the kubeconfig contexts cannot be read |
+| `BRANCH_PROFILE_CONTEXT_DANGLING` | the profile's context has no resolvable cluster or no server |
+| `BRANCH_PROFILE_REMOTE_CONTEXT` | the profile's context points at a non-local API server |
+| `BRANCH_PROFILE_MINIKUBE_PROFILES_UNREADABLE` | `minikube profile list` failed or printed no readable lists |
+| `BRANCH_PROFILE_UNKNOWN_MINIKUBE_PROFILE` | a context named after the profile exists, but minikube lists no such profile |
+| `BRANCH_PROFILE_CONTEXT_IDENTITY` | the cluster behind the context does not identify the profile, or its identity could not be read |
+| `CONTEXT_IDENTITY_UNAVAILABLE`, `CONTEXT_IDENTITY_API_INVALID` | `scripts/minikube/context-identity.sh` is missing or lacks a predicate |
+| `PORT_FORWARD_OWNER_UNAVAILABLE`, `PORT_FORWARD_OWNER_API_INVALID`, `PORT_FORWARD_OWNER_BINDING_INVALID` | `scripts/minikube/port-forward-owner.sh` is missing or incomplete, or a record would bind another host |
+| `PORT_FORWARD_OWNERSHIP_ERROR` | a port-forward process does not match its record; it is never signalled |
+| `BRANCH_PROFILE_SHIM_SYMLINK`, `BRANCH_PROFILE_SHIM_REWRITE_FAILED`, `BRANCH_PROFILE_SHIM_REWRITE_NOOP` | a shim path is a symlink or escapes the cache, or a shim rewrite failed or matched nothing |
+| `refusing delete. Re-run with CONFIRM_DELETE=<profile>` | `delete` without its confirmation |
+| `refusing setup. Re-run with CONFIRM_PROFILE=<profile>` | `setup` without its confirmation |
+
+When a context guard refuses, the context it names may belong to another
+session or cluster: stop and ask before renaming or removing it.
+
 ### Options
 
 ```bash
