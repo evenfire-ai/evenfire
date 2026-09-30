@@ -380,7 +380,8 @@ describe('GfsBrowser authoritative revalidation integration', () => {
     const refresh = new Promise<Response>(resolve => {
       finishRefresh = resolve
     })
-    let folderPageReads = 0
+    let streamRefreshReads = 0
+    let streamRefreshStarted = false
     let streamController: ReadableStreamDefaultController<Uint8Array> | null = null
     vi.stubGlobal(
       'fetch',
@@ -406,9 +407,11 @@ describe('GfsBrowser authoritative revalidation integration', () => {
         if (url.pathname === folderPath) {
           const cursor = url.searchParams.get('cursor')
           if (cursor) return jsonResponse({ items: [second], nextCursor: null })
-          folderPageReads += 1
-          if (folderPageReads === 1) return jsonResponse({ items: [first], nextCursor: 'page-2' })
-          return refresh
+          if (streamRefreshStarted) {
+            streamRefreshReads += 1
+            return refresh
+          }
+          return jsonResponse({ items: [first], nextCursor: 'page-2' })
         }
         if (
           url.pathname.endsWith('/api/v1/gfs/resolve') ||
@@ -435,26 +438,17 @@ describe('GfsBrowser authoritative revalidation integration', () => {
     )
     await waitFor(() => expect(streamController).not.toBeNull())
     await screen.findByRole('button', { name: 'work' })
-    await waitFor(() => expect(folderPageReads).toBe(1))
-    await act(async () => new Promise(resolve => setTimeout(resolve, 0)))
     fireEvent.click(screen.getByRole('button', { name: 'work' }))
     await screen.findByRole('button', { name: 'first.txt' })
     fireEvent.click(await screen.findByRole('button', { name: 'Load more' }))
     await screen.findByRole('button', { name: 'second.txt' })
 
+    const producerFrame = await controlApiProducerFrame()
     await act(async () => {
-      streamController!.enqueue(
-        new TextEncoder().encode(
-          `${JSON.stringify({
-            schemaVersion: 1,
-            type: 'scope.invalidated',
-            cursor: 'd119f895-1ef8-4e73-8f08-f9754919682a',
-            scopes: ['gfs'],
-          })}\n`
-        )
-      )
+      streamRefreshStarted = true
+      streamController!.enqueue(new TextEncoder().encode(`${producerFrame}\n`))
     })
-    await waitFor(() => expect(folderPageReads).toBeGreaterThan(1))
+    await waitFor(() => expect(streamRefreshReads).toBeGreaterThan(0))
     expect(screen.getByRole('button', { name: 'first.txt' })).toBeVisible()
     expect(screen.getByRole('button', { name: 'second.txt' })).toBeVisible()
 
