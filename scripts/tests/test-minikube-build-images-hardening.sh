@@ -141,6 +141,7 @@ prepare_fixture() {
     "$FIXTURE/deploy/minikube" "$FIXTURE/control-api"
   cp \
     "$ROOT/scripts/minikube/build-images.sh" \
+    "$ROOT/scripts/minikube/context-identity.sh" \
     "$ROOT/scripts/minikube/docker-cli-env.sh" \
     "$ROOT/scripts/minikube/image-mode.sh" \
     "$ROOT/scripts/minikube/port-forward-owner.sh" \

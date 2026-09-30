@@ -17,6 +17,8 @@ if [ -z "$T2_SCRIPT_DIR" ]; then T2_SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SO
 . "$T2_SCRIPT_DIR/profile-readiness.sh"
 # shellcheck source=pre-gate-marker.sh
 . "$T2_SCRIPT_DIR/pre-gate-marker.sh"
+# shellcheck source=context-identity.sh
+. "$T2_SCRIPT_DIR/context-identity.sh"
 T2_PROJECT_DIR="$T2_PROJECT_DIR"
 if [ -z "$T2_PROJECT_DIR" ]; then T2_PROJECT_DIR="$(cd -- "$T2_SCRIPT_DIR/../.." && pwd -P)"; fi
 T2_PROFILE="$T2_PROFILE"
@@ -311,37 +313,15 @@ t2_context_check() {
     T2_NEXT_COMMAND='select the explicit Kubernetes context generated with the profile'
     t2_fail DEVELOPMENT_SCOPE_REQUIRED "Kubernetes context is unavailable: $T2_CONTEXT"
   fi
-  local endpoint host
+  local endpoint
   endpoint="$(t2_kc config view --raw --minify -o jsonpath='{.clusters[0].cluster.server}' 2>/dev/null || true)"
   if [ -z "$endpoint" ]; then
     T2_NEXT_COMMAND='select a Kubernetes context with a resolvable local cluster endpoint'
     t2_fail DEVELOPMENT_SCOPE_REQUIRED "Kubernetes context endpoint is unavailable: $T2_CONTEXT"
   fi
-  host="${endpoint#*://}"
-  host="${host%%/*}"
-  if [[ "$host" == \[*\]* ]]; then
-    host="${host#\[}"
-    host="${host%%\]*}"
-  else
-    host="${host%%:*}"
-  fi
-  host="$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')"
-  if [[ "$host" == 127.0.0.1 || "$host" == localhost || "$host" == ::1 || "$host" == *.minikube ]]; then
-    return 0
-  fi
-  if ! python3 - "$host" <<'PY'
-import ipaddress
-import sys
-
-try:
-    address = ipaddress.ip_address(sys.argv[1])
-except ValueError:
-    raise SystemExit(1)
-raise SystemExit(0 if (address.is_private or address.is_loopback or address.is_link_local) else 1)
-PY
-  then
+  if ! kube_endpoint_is_local "$endpoint"; then
     T2_NEXT_COMMAND='select the generated branch-owned Minikube context, not a remote cluster context'
-    t2_fail DEVELOPMENT_SCOPE_REQUIRED "Kubernetes context endpoint is not local: $host"
+    t2_fail DEVELOPMENT_SCOPE_REQUIRED "Kubernetes context endpoint is not local: $(kube_endpoint_host "$endpoint")"
     return 1
   fi
 }
@@ -362,24 +342,7 @@ t2_profile_context_identity_check() {
     return 1
   fi
   nodes_json="$(t2_kc get nodes -o json 2>/dev/null || true)"
-  if [ -z "$nodes_json" ] || ! python3 - "$nodes_json" "$T2_PROFILE" "$expected_ip" <<'PY'
-import json
-import sys
-
-payload = json.loads(sys.argv[1])
-profile = sys.argv[2]
-expected_ip = sys.argv[3]
-for node in payload.get("items", []):
-    metadata = node.get("metadata") or {}
-    labels = metadata.get("labels") or {}
-    if labels.get("minikube.k8s.io/name") != profile:
-        continue
-    for address in (node.get("status") or {}).get("addresses", []):
-        if address.get("type") == "InternalIP" and address.get("address") == expected_ip:
-            raise SystemExit(0)
-raise SystemExit(1)
-PY
-  then
+  if ! minikube_nodes_identify_profile "$nodes_json" "$T2_PROFILE" "$expected_ip"; then
     T2_NEXT_COMMAND='select the kube-context generated for this exact branch-owned Minikube profile'
     t2_fail DEVELOPMENT_SCOPE_REQUIRED "Kubernetes context does not identify Minikube profile $T2_PROFILE at $expected_ip"
     return 1
