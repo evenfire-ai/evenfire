@@ -174,6 +174,35 @@ describe('mergeCatalogPage', () => {
     )
   })
 
+  // Cursor pages report disjoint chats, so merging page A and then page B must
+  // equal one merge of both. Overlapping pages do not compose by design: a
+  // later report updates a chat's title but its `updatedAt` stays from the
+  // report that created the entry.
+  it('composes over disjoint pages: A then B equals one merge of A and B', () => {
+    fc.assert(
+      fc.property(
+        entriesArb,
+        sessionsArb,
+        fc.subarray([...CHAT_IDS]),
+        pendingArb,
+        (cached, sessions, pageAIds, pending) => {
+          const inPageA = new Set<string>(pageAIds)
+          const pageA = sessions.filter(session => inPageA.has(session.chatId))
+          const pageB = sessions.filter(session => !inPageA.has(session.chatId))
+
+          const sequential = merge(merge(cached, pageA, pending), pageB, pending)
+
+          // Witness: both pages reached the result, so a merge that ignores
+          // its sessions cannot satisfy the equality below.
+          expect(new Set(sequential.map(entry => entry.id))).toEqual(
+            new Set([...cached.map(entry => entry.id), ...sessions.map(s => s.chatId)])
+          )
+          expect(sequential).toEqual(merge(cached, [...pageA, ...pageB], pending))
+        }
+      )
+    )
+  })
+
   it('orders known dates newest first with an unparseable date as the epoch (fixed oracle)', () => {
     // The property test above checks order with the production comparator, so an
     // inverted comparator or a different fallback for NaN passes it. This case
