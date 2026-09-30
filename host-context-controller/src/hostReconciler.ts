@@ -5233,7 +5233,13 @@ export class HostReconciler {
             namespace: host.namespace,
             err: error instanceof Error ? error.message : String(error),
           })
-          this.enqueueControllerError(host, 'RuntimeCredentialRenewalFailed', error)
+          // Telemetry only: this pass still ends with the runtime deployed and
+          // Ready, so the administrative outcome it reports is `succeeded`. A
+          // `failed` outcome here would give one intent both outcomes.
+          this.enqueueHostTelemetry(host, 'controller_error', 'RuntimeCredentialRenewalFailed', {
+            status: 'failed',
+            error_class: error instanceof Error ? error.name : typeof error,
+          })
           this.setStatus(host.name, {
             deployed: true,
             ready: runtimeIsReady,

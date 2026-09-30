@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import * as k8s from '@kubernetes/client-node'
+import type { AdministrativeOutcomeReporter } from '../src/administrativeOutcomeReporter'
 import { config } from '../src/config'
 import { mintHostGfsToken } from '../src/gfsHostBinding'
 import {
@@ -169,6 +170,7 @@ function createReconciler(deps?: {
   isCommunicationChannelCacheSynced?: () => boolean
   resolveContextMounts?: (host: HostCRD) => Promise<ResolvedSfsMount[]>
   infrastructureTelemetryReporter?: InfrastructureTelemetryReporter
+  administrativeOutcomeReporter?: AdministrativeOutcomeReporter
 }) {
   const appsApi = createMockAppsApi()
   const coreApi = createMockCoreApi()
@@ -2602,13 +2604,26 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
   })
 
   it('keeps a Ready held runtime deployed when its GFS renewal fails, without retry backoff', async () => {
-    const host = makeStatelessHost({
-      status: { lifecycle: { state: 'active', wakeHandledGeneration: 1 } },
-    })
+    // An administrative intent on the Host: the pass that keeps the runtime
+    // Ready must report exactly one outcome for it.
+    const host: HostCRD = {
+      ...makeStatelessHost({
+        status: { lifecycle: { state: 'active', wakeHandledGeneration: 1 } },
+      }),
+      generation: 4,
+      annotations: {
+        'clerum.io/administrative-intent-id': '22222222-2222-4222-8222-222222222222',
+      },
+    }
     const infrastructureTelemetryReporter = createTelemetryReporterMock()
+    const administrativeOutcomeReporter = {
+      enqueueHostOutcome: vi.fn(),
+      stop: vi.fn(async () => undefined),
+    }
     const { reconciler, appsApi, coreApi, customApi } = createReconciler({
       isCommunicationChannelCacheSynced: () => false,
       infrastructureTelemetryReporter,
+      administrativeOutcomeReporter,
     })
     customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(host))
     reconciler.setHostFrontsOAuthServer(async () => false)
@@ -2658,6 +2673,16 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
         reason_code: 'RuntimeCredentialRenewalFailed',
         status: 'failed',
       })
+      // The renewal failure is telemetry; the intent's one outcome is the Ready
+      // runtime, never a `failed` next to a `succeeded` for the same generation.
+      expect(administrativeOutcomeReporter.enqueueHostOutcome).toHaveBeenCalledOnce()
+      expect(administrativeOutcomeReporter.enqueueHostOutcome).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sourceEventId:
+            'hcc-admin-outcome-v2:22222222-2222-4222-8222-222222222222:4:stateless-host-uid:succeeded',
+          outcome: 'succeeded',
+        })
+      )
       expect(live().spec!.replicas).toBe(1)
       expect(live().spec!.template).toEqual(applied.spec!.template)
       expect(vi.mocked(issueMcpHostRuntimeTokens)).not.toHaveBeenCalled()
