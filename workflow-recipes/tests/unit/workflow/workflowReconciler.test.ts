@@ -41,6 +41,7 @@ import {
   type WorkflowReconcilerDeps,
   buildNetworkPolicyConvergedCondition,
   buildNetworkPolicyOwnershipConditions,
+  hasLegacyNetworkPolicyDeletePendingMarker,
   networkPolicyConditionsChanged,
   networkPolicyMarkerConditions,
   networkPolicyMarkerFacts,
@@ -3034,7 +3035,9 @@ describe('WorkflowReconciler — reconcile loop', () => {
     })
   })
 
-  it('G3: does not skip the legacy internet NP after DELETE 403', async () => {
+  // R4-L4: a 403 does not mark the policy gone; the next DELETE waits for the
+  // end of its backoff window (60 s after the first failure).
+  it('G3: does not skip the legacy internet NP after DELETE 403, and retries it once its backoff window ends', async () => {
     const networkingApi = makeNetworkingApi() as ReturnType<typeof makeNetworkingApi>
     networkingApi.deleteNamespacedNetworkPolicy.mockImplementation(async ({ name, namespace }) => {
       if (name === 'test-wf-mcp-servers-egress-internet' && namespace === 'mcp-server') {
@@ -3047,25 +3050,115 @@ describe('WorkflowReconciler — reconcile loop', () => {
         networkingApi: networkingApi as never,
       })
     )
+    const legacyDeletes = () =>
+      networkingApi.deleteNamespacedNetworkPolicy.mock.calls.filter(
+        ([arg]) =>
+          arg.name === 'test-wf-mcp-servers-egress-internet' && arg.namespace === 'mcp-server'
+      )
+    const t0 = new Date('2026-09-23T10:00:00.000Z').getTime()
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      vi.setSystemTime(t0)
+      const first = await reconciler.reconcile(
+        'test-wf',
+        'uid-123',
+        'sandbox-recipes',
+        makeSpec({ mcpServers: ['redis-mcp'] })
+      )
+      expect(legacyDeletes()).toHaveLength(1)
+      expect(
+        (first.networkPolicyOwnershipConditions ?? []).filter(
+          c => c.type === 'WorkflowLegacyNetworkPolicyRemoved'
+        )
+      ).toMatchObject([{ status: 'False', reason: 'DeletePending' }])
 
-    await reconciler.reconcile(
-      'test-wf',
-      'uid-123',
-      'sandbox-recipes',
-      makeSpec({ mcpServers: ['redis-mcp'] })
-    )
-    await reconciler.reconcile(
-      'test-wf',
-      'uid-123',
-      'sandbox-recipes',
-      makeSpec({ mcpServers: ['redis-mcp'] })
-    )
+      vi.setSystemTime(t0 + 30_000)
+      const inside = await reconciler.reconcile(
+        'test-wf',
+        'uid-123',
+        'sandbox-recipes',
+        makeSpec({ mcpServers: ['redis-mcp'] })
+      )
+      // Liveness witness: the pass reached the prune (the legacy fact is
+      // published), and inside the window it sent no DELETE.
+      expect(
+        (inside.networkPolicyOwnershipConditions ?? []).filter(
+          c => c.type === 'WorkflowLegacyNetworkPolicyRemoved'
+        )
+      ).toMatchObject([{ status: 'False', reason: 'DeletePending' }])
+      expect(legacyDeletes()).toHaveLength(1)
+      expect(reconciler.legacyMcpServersInternetEgressRetryDelayMs('test-wf', 'uid-123')).toBe(
+        30_000
+      )
 
-    const legacyDeletes = networkingApi.deleteNamespacedNetworkPolicy.mock.calls.filter(
-      ([arg]) =>
-        arg.name === 'test-wf-mcp-servers-egress-internet' && arg.namespace === 'mcp-server'
+      vi.setSystemTime(t0 + 60_000)
+      await reconciler.reconcile(
+        'test-wf',
+        'uid-123',
+        'sandbox-recipes',
+        makeSpec({ mcpServers: ['redis-mcp'] })
+      )
+      expect(legacyDeletes()).toHaveLength(2)
+      // The second failure doubles the window.
+      expect(reconciler.legacyMcpServersInternetEgressRetryDelayMs('test-wf', 'uid-123')).toBe(
+        120_000
+      )
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('R4-L4: doubles the legacy DELETE backoff up to 1 h, and a 404 ends it', async () => {
+    const LEGACY = 'test-wf-mcp-servers-egress-internet'
+    const networkingApi = makeNetworkingApi() as ReturnType<typeof makeNetworkingApi>
+    let legacyAnswer = { code: 403 }
+    networkingApi.deleteNamespacedNetworkPolicy.mockImplementation(async ({ name, namespace }) => {
+      if (name === LEGACY && namespace === 'mcp-server') throw legacyAnswer
+      return {}
+    })
+    const reconciler = new WorkflowReconciler(
+      makeDeps({
+        networkingApi: networkingApi as never,
+      })
     )
-    expect(legacyDeletes).toHaveLength(2)
+    const legacyDeletes = () =>
+      networkingApi.deleteNamespacedNetworkPolicy.mock.calls.filter(
+        ([arg]) => arg.name === LEGACY && arg.namespace === 'mcp-server'
+      )
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      let now = new Date('2026-09-23T10:00:00.000Z').getTime()
+      const windows: number[] = []
+      for (let attempt = 0; attempt < 8; attempt++) {
+        vi.setSystemTime(now)
+        expect(
+          await reconciler.retryLegacyMcpServersInternetEgressDelete('test-wf', 'uid-123')
+        ).toBe('pending')
+        const delay = reconciler.legacyMcpServersInternetEgressRetryDelayMs('test-wf', 'uid-123')
+        windows.push(delay)
+        now += delay
+      }
+
+      expect(windows).toEqual([
+        60_000, 120_000, 240_000, 480_000, 960_000, 1_920_000, 3_600_000, 3_600_000,
+      ])
+      expect(legacyDeletes()).toHaveLength(8)
+
+      legacyAnswer = { code: 404 }
+      vi.setSystemTime(now)
+      expect(await reconciler.retryLegacyMcpServersInternetEgressDelete('test-wf', 'uid-123')).toBe(
+        'removed'
+      )
+      expect(reconciler.legacyMcpServersInternetEgressRetryDelayMs('test-wf', 'uid-123')).toBe(0)
+      expect(legacyDeletes()).toHaveLength(9)
+      // Observed gone: a later retry answers from the gone set, with no DELETE.
+      expect(await reconciler.retryLegacyMcpServersInternetEgressDelete('test-wf', 'uid-123')).toBe(
+        'removed'
+      )
+      expect(legacyDeletes()).toHaveLength(9)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('clears the legacy internet NP process set on recipe delete so a recreate can delete again', async () => {
@@ -5582,52 +5675,66 @@ describe('WorkflowReconciler — reconcile loop', () => {
         })
 
         // The legacy mcp-servers internet policy is deleted by name, apart
-        // from the catalog prune: only reconcile() deletes it. A failed delete
-        // is its own fact (R4-L3), DeletePending on its own condition, with no
-        // retry flag and the catalog prune converged, and the next reconcile()
-        // pass deletes it again.
+        // from the catalog prune: reconcile() deletes it, and the WRC's
+        // legacy-retry writer retries it (R4-L4). A failed delete is its own
+        // fact (R4-L3), DeletePending on its own condition, with no retry flag
+        // and the catalog prune converged, and the next reconcile() pass after
+        // the backoff window deletes it again.
         const LEGACY = 'test-wf-mcp-servers-egress-internet'
         const legacyDeletes = (apiserver: Converged) =>
           apiserver.api.deleteNamespacedNetworkPolicy.mock.calls.filter(
             ([arg]) => arg.name === LEGACY
           )
 
-        it('reports a failed legacy internet policy delete from reconcile() as DeletePending, and deletes it on the next reconcile()', async () => {
-          const apiserver = makeApiserverNetworkingApi()
-          const reconciler = new WorkflowReconciler(
-            makeDeps({ networkingApi: apiserver.api as never })
-          )
-          const liveDelete = apiserver.api.deleteNamespacedNetworkPolicy.getMockImplementation()!
-          apiserver.api.deleteNamespacedNetworkPolicy.mockImplementation(
-            async (arg: { name: string; namespace: string }) => {
-              if (arg.name === LEGACY && legacyDeletes(apiserver).length === 1) {
-                throw { code: 403, message: 'forbidden' }
+        it('reports a failed legacy internet policy delete from reconcile() as DeletePending, and deletes it on the next reconcile() after its backoff window', async () => {
+          const t0 = new Date('2026-09-23T10:00:00.000Z').getTime()
+          vi.useFakeTimers({ toFake: ['Date'] })
+          vi.setSystemTime(t0)
+          try {
+            const apiserver = makeApiserverNetworkingApi()
+            const reconciler = new WorkflowReconciler(
+              makeDeps({ networkingApi: apiserver.api as never })
+            )
+            const liveDelete = apiserver.api.deleteNamespacedNetworkPolicy.getMockImplementation()!
+            apiserver.api.deleteNamespacedNetworkPolicy.mockImplementation(
+              async (arg: { name: string; namespace: string }) => {
+                if (arg.name === LEGACY && legacyDeletes(apiserver).length === 1) {
+                  throw { code: 403, message: 'forbidden' }
+                }
+                return liveDelete(arg)
               }
-              return liveDelete(arg)
-            }
-          )
+            )
 
-          const failed = await reconciler.reconcile('test-wf', 'uid-123', 'sandbox-recipes', spec())
-          expect(legacyDeletes(apiserver)).toHaveLength(1)
-          expect(failed.networkPolicyRetryPending).toBeFalsy()
-          const published = failed.networkPolicyOwnershipConditions ?? []
-          expect(published.filter(c => c.type === 'WorkflowNetworkPoliciesConverged')).toEqual([])
-          expect(
-            published.filter(c => c.type === 'WorkflowLegacyNetworkPolicyRemoved')
-          ).toMatchObject([{ status: 'False', reason: 'DeletePending' }])
+            const failed = await reconciler.reconcile(
+              'test-wf',
+              'uid-123',
+              'sandbox-recipes',
+              spec()
+            )
+            expect(legacyDeletes(apiserver)).toHaveLength(1)
+            expect(failed.networkPolicyRetryPending).toBeFalsy()
+            const published = failed.networkPolicyOwnershipConditions ?? []
+            expect(published.filter(c => c.type === 'WorkflowNetworkPoliciesConverged')).toEqual([])
+            expect(
+              published.filter(c => c.type === 'WorkflowLegacyNetworkPolicyRemoved')
+            ).toMatchObject([{ status: 'False', reason: 'DeletePending' }])
 
-          const pruned = await reconciler.reconcile(
-            'test-wf',
-            'uid-123',
-            'sandbox-recipes',
-            spec(),
-            {
-              conditions: published,
-            }
-          )
-          expect(legacyDeletes(apiserver)).toHaveLength(2)
-          expect(pruned.networkPolicyRetryPending).toBeFalsy()
-          expect(pruned.networkPolicyOwnershipConditions).toEqual([])
+            vi.setSystemTime(t0 + 60_000)
+            const pruned = await reconciler.reconcile(
+              'test-wf',
+              'uid-123',
+              'sandbox-recipes',
+              spec(),
+              {
+                conditions: published,
+              }
+            )
+            expect(legacyDeletes(apiserver)).toHaveLength(2)
+            expect(pruned.networkPolicyRetryPending).toBeFalsy()
+            expect(pruned.networkPolicyOwnershipConditions).toEqual([])
+          } finally {
+            vi.useRealTimers()
+          }
         })
 
         it('sends no legacy internet policy DELETE from the retry, even one no pass has seen gone', async () => {
@@ -9448,6 +9555,57 @@ describe('networkPolicyMarkerConditions', () => {
       )
 
       expect(reasons(retried)).toEqual(['WorkflowNetworkPolicyOwnership/OwnershipConflict'])
+    })
+  })
+
+  describe('legacy-retry', () => {
+    it('R4-L4: clears the legacy fact once removed and carries the apply, the prune and the ownership condition', () => {
+      const existing = published({
+        conflicts: [conflict],
+        retryPending: true,
+        prune: 'unevaluated',
+        legacy: 'pending',
+      })
+      // Liveness witness: all three conditions were published.
+      expect(existing).toHaveLength(3)
+
+      const settled = networkPolicyMarkerConditions(
+        { kind: 'legacy-retry', legacy: 'removed' },
+        existing,
+        now
+      )
+
+      expect(reasons(settled)).toEqual([
+        'WorkflowNetworkPolicyOwnership/OwnershipConflict',
+        'WorkflowNetworkPoliciesConverged/RetryAndPruneUnevaluated',
+      ])
+      expect(settled.every(c => c.lastTransitionTime === earlier)).toBe(true)
+    })
+
+    it('R4-L4: keeps DeletePending and its transition time while the delete stays pending', () => {
+      const existing = published({ prune: 'pending', legacy: 'pending' })
+      expect(existing).toHaveLength(2)
+
+      expect(
+        networkPolicyMarkerConditions({ kind: 'legacy-retry', legacy: 'pending' }, existing, now)
+      ).toEqual(existing)
+    })
+
+    it('R4-L4: enters only for a published DeletePending', () => {
+      expect(hasLegacyNetworkPolicyDeletePendingMarker(published({ legacy: 'pending' }))).toBe(true)
+      expect(hasLegacyNetworkPolicyDeletePendingMarker(published({ prune: 'pending' }))).toBe(false)
+      expect(hasLegacyNetworkPolicyDeletePendingMarker(undefined)).toBe(false)
+      expect(
+        hasLegacyNetworkPolicyDeletePendingMarker([
+          {
+            type: 'WorkflowLegacyNetworkPolicyRemoved',
+            status: 'False',
+            reason: 'SomethingElse',
+            message: 'written by another head',
+            lastTransitionTime: earlier,
+          },
+        ])
+      ).toBe(false)
     })
   })
 

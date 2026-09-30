@@ -69,6 +69,7 @@ import {
   WORKFLOW_OUTPUT_CONDITION_TYPES,
   WorkflowReconciler,
   WorkflowReconcilerDeps,
+  hasLegacyNetworkPolicyDeletePendingMarker,
   hasNetworkPolicyRetryPendingMarker,
   networkPolicyConditionsChanged,
   networkPolicyMarkerConditions,
@@ -1526,6 +1527,54 @@ export class WorkflowRecipeReconciler {
   }
 
   /**
+   * R4-L4: the `legacy-retry` writer. Enters only while the published group
+   * says the legacy mcp-servers internet policy is pending a delete. The
+   * delete shares the reconcile() pass's per-recipe backoff, so inside the
+   * window it sends no request. `removed` clears the legacy fact with a
+   * conditions-only patch and carries the apply and prune facts; `pending`
+   * writes nothing, and the `reconcile()` wrapper requeues for the rest of
+   * the window.
+   */
+  private async retryPendingLegacyNetworkPolicyDelete(recipe: WorkflowRecipeCRD): Promise<void> {
+    if (
+      !this.workflowReconciler ||
+      !hasLegacyNetworkPolicyDeletePendingMarker(recipe.status?.conditions)
+    ) {
+      return
+    }
+    const legacy = await this.workflowReconciler.retryLegacyMcpServersInternetEgressDelete(
+      recipe.metadata.name,
+      recipe.metadata.uid ?? ''
+    )
+    if (legacy === 'pending') return
+    await this.publishNetworkPolicyMarkerWriter(recipe, { kind: 'legacy-retry', legacy })
+  }
+
+  /**
+   * R4-L4: a pass that leaves `DeletePending` published and asks for no other
+   * requeue is requeued at a fixed interval for the rest of the legacy
+   * delete's backoff window, at least 1 s. The group the pass publishes wins
+   * over the one it found; a pass that publishes no group keeps the found
+   * one, including a legacy-retry patch made during the pass.
+   */
+  private requeueForPendingLegacyNetworkPolicyDelete(
+    recipe: WorkflowRecipeCRD,
+    result: ReconcileResult
+  ): void {
+    if (!this.workflowReconciler || result.requeueAfterMs !== undefined) return
+    const conditions = result.networkPolicyOwnershipConditions ?? recipe.status?.conditions
+    if (!hasLegacyNetworkPolicyDeletePendingMarker(conditions)) return
+    result.requeueAfterMs = Math.max(
+      1_000,
+      this.workflowReconciler.legacyMcpServersInternetEgressRetryDelayMs(
+        recipe.metadata.name,
+        recipe.metadata.uid ?? ''
+      )
+    )
+    result.requeueFixedInterval = true
+  }
+
+  /**
    * Settles the marker once the run is terminal. The run no longer needs its
    * policies, so a pending apply is dropped: there is nothing left to retry.
    * A pending or unevaluated prune is kept: the terminal teardown deletes the
@@ -1755,6 +1804,7 @@ export class WorkflowRecipeReconciler {
     // (e.g. observeCurrentWorkloadStatus) leave the projection undefined, which
     // both consumers treat as "no SDK opinion this pass".
     const result = await this.reconcileInternal(recipe)
+    this.requeueForPendingLegacyNetworkPolicyDelete(recipe, result)
     result.pluginWorkloadSdkProjection = this.projectPluginWorkloadSdk(recipe, result)
     createLogger('wrc', recipe.metadata.name).info('recipe reconciliation completed', {
       recipe: recipe.metadata.name,
@@ -2000,6 +2050,11 @@ export class WorkflowRecipeReconciler {
       if (oauthBrokerTokenReapedEarly) {
         await this.ensureOAuthBrokerTokenSecret(recipe)
       }
+
+      // R4-L4: the short-circuits below never reach the inner reconcile(), so
+      // a legacy mcp-servers internet policy pending a delete is retried here,
+      // before all of them (the `legacy-retry` writer).
+      await this.retryPendingLegacyNetworkPolicyDelete(recipe)
 
       if (
         currentPhase === 'active' &&

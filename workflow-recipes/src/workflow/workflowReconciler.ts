@@ -433,6 +433,36 @@ export function hasNetworkPolicyRetryPendingMarker(
 }
 
 /**
+ * True while the published group says the legacy mcp-servers internet policy
+ * is pending a delete (`WorkflowLegacyNetworkPolicyRemoved=False/DeletePending`).
+ * Only this reason enters the `legacy-retry` writer; a reason this controller
+ * did not write is never interpreted.
+ */
+export function hasLegacyNetworkPolicyDeletePendingMarker(
+  conditions: StatusCondition[] | undefined
+): boolean {
+  const published = publishedMarker(
+    conditions,
+    LEGACY_NETWORK_POLICY_REMOVED_CONDITION_TYPE,
+    isLegacyNetworkPolicyReason
+  )
+  return (
+    published.kind === 'known' &&
+    LEGACY_NETWORK_POLICY_REASONS[published.condition.reason as LegacyNetworkPolicyReason].fact ===
+      'pending'
+  )
+}
+
+/**
+ * Backoff between two DELETEs of the legacy mcp-servers internet policy for
+ * one recipe after a DELETE that did not land: 60 s, doubling up to 1 h. A
+ * transient 403 does not leave a false DeletePending for hours, a sustained
+ * one costs one DELETE per hour per recipe, and a converged recipe costs none.
+ */
+export const LEGACY_NETWORK_POLICY_DELETE_BACKOFF_BASE_MS = 60_000
+export const LEGACY_NETWORK_POLICY_DELETE_BACKOFF_MAX_MS = 3_600_000
+
+/**
  * Reads the facts a published marker carries. This and
  * `buildNetworkPolicyConvergedCondition` are the only places that encode what
  * the marker means. A `False` marker with any other reason was not written by
@@ -554,6 +584,9 @@ function buildLegacyNetworkPolicyCondition(
  *   summary). Observes the apply, the prune and the legacy delete.
  * - `apply-retry`: the mid-run retry. Observes the apply; carries the prune
  *   and legacy facts.
+ * - `legacy-retry`: the legacy delete the WRC retries before its
+ *   short-circuits while `DeletePending` is published. Observes the legacy
+ *   fact; carries the apply and prune facts and the ownership condition.
  * - `terminal`: the run ended, so a pending apply is dropped; carries the
  *   prune and legacy facts and the ownership condition.
  * - `unmanaged`: the kill switch, the SDK-only lane without a runtime and
@@ -563,6 +596,7 @@ function buildLegacyNetworkPolicyCondition(
 export type NetworkPolicyMarkerWriter =
   | { kind: 'reconcile'; summary: NetworkPolicyPassSummary }
   | { kind: 'apply-retry'; summary: WorkflowNetworkPolicyApplySummary }
+  | { kind: 'legacy-retry'; legacy: NetworkPolicyLegacyFact }
   | { kind: 'terminal' }
   | { kind: 'unmanaged' }
 
@@ -685,6 +719,19 @@ export function networkPolicyMarkerConditions(
         carriedLegacyMarker(writer.kind, existingConditions),
       ])
     }
+    case 'legacy-retry':
+      return presentConditions([
+        ...(existingConditions ?? []).filter(
+          c => c.type === NETWORK_POLICY_OWNERSHIP_CONDITION_TYPE
+        ),
+        carriedConvergedMarker(
+          writer.kind,
+          networkPolicyMarkerFacts(existingConditions).apply,
+          existingConditions,
+          now
+        ),
+        buildLegacyNetworkPolicyCondition(writer.legacy, now, existingConditions),
+      ])
     case 'terminal':
       return presentConditions([
         ...(existingConditions ?? []).filter(
@@ -1471,6 +1518,14 @@ export class WorkflowReconciler {
   private readonly codexContexts = new Map<string, CodexReconcileContext>()
   /** B3(c): one process-lifetime DELETE of the leftover mcp-servers internet NP. Keyed by recipe uid. */
   private readonly prunedLegacyMcpServersInternetEgress = new Set<string>()
+  /**
+   * R4-L4: the backoff after a legacy DELETE that did not land, keyed like the
+   * gone set. `notBeforeMs` is the earliest time the next DELETE may be sent.
+   */
+  private readonly legacyMcpServersInternetEgressBackoff = new Map<
+    string,
+    { delayMs: number; notBeforeMs: number }
+  >()
 
   constructor(private readonly deps: WorkflowReconcilerDeps) {
     this.pluginWorkloadSdkProvisioner = new PluginWorkloadSdkProvisioner({
@@ -3346,6 +3401,7 @@ export class WorkflowReconciler {
    * | path                 | proxy required | proxy uncertain | proxy retired | other lane, not desired | legacy          |
    * | reconcile() pass     | applied        | kept if live    | pruned        | pruned                  | deleted         |
    * | mid-run retry (this) | applied        | kept if live    | kept          | kept                    | kept            |
+   * | legacy retry         | untouched      | untouched       | untouched     | untouched               | deleted, backoff |
    * | terminal teardown    | kept           | kept            | kept          | kept                    | kept            |
    * | finalizer            | deleted        | deleted         | deleted       | deleted                 | only if labeled |
    *
@@ -3370,9 +3426,20 @@ export class WorkflowReconciler {
    * | `reconcile` (run lane, eager, SDK with a summary)  | observed         | observed | observed | what converged    |
    * | SDK with a runtime and no summary                  | not written      | not written | not written | nothing     |
    * | `apply-retry` (this, in-progress and active)       | observed         | carried | carried | A only             |
+   * | `legacy-retry` (WRC, before the short-circuits)    | carried          | carried | observed, backoff | L only   |
    * | `terminal`                                         | forced converged | carried | carried | A                  |
    * | `unmanaged` (kill switch, SDK lane without a runtime, capability removal) | converged | converged | removed | everything |
    * | finalizer                                          | the object is deleted |    |         |                    |
+   *
+   * The legacy retry runs in the WRC after the early token reap and before
+   * every short-circuit, only while `DeletePending` is published. It and the
+   * reconcile() pass share one backoff per recipe: after a DELETE that did
+   * not land, the next one waits `min(prev * 2 || 60 s, 1 h)`, and inside
+   * that window the delete answers `pending` without a request. A `removed`
+   * answer clears L with a conditions-only patch; `pending` writes nothing.
+   * The WRC `reconcile()` wrapper requeues a pass that leaves L pending and
+   * asks for no other requeue after `max(1 s, the rest of the window)`, at a
+   * fixed interval.
    *
    * A carrying writer keeps a marker whose reason it did not write as it is
    * and warns; `reconcile` overwrites it. `unmanaged` is written only after
@@ -3626,7 +3693,37 @@ export class WorkflowReconciler {
 
   private forgetLegacyMcpServersInternetEgress(recipeName: string, recipeUid?: string): void {
     this.prunedLegacyMcpServersInternetEgress.delete(recipeName)
-    if (recipeUid) this.prunedLegacyMcpServersInternetEgress.delete(recipeUid)
+    this.legacyMcpServersInternetEgressBackoff.delete(recipeName)
+    if (recipeUid) {
+      this.prunedLegacyMcpServersInternetEgress.delete(recipeUid)
+      this.legacyMcpServersInternetEgressBackoff.delete(recipeUid)
+    }
+  }
+
+  /**
+   * R4-L4: the legacy delete the WRC retries before its short-circuits while
+   * `DeletePending` is published (the `legacy-retry` writer). The same delete
+   * and backoff as the reconcile() pass: inside the backoff window it answers
+   * `pending` without a request.
+   */
+  async retryLegacyMcpServersInternetEgressDelete(
+    recipeName: string,
+    recipeUid: string
+  ): Promise<NetworkPolicyLegacyFact> {
+    return this.pruneLegacyMcpServersInternetEgressPolicy(recipeName, recipeUid)
+  }
+
+  /**
+   * R4-L4: how long until the next legacy DELETE may be sent for this recipe;
+   * 0 when no backoff is running. The WRC requeues a pass that leaves
+   * `DeletePending` published after this delay.
+   */
+  legacyMcpServersInternetEgressRetryDelayMs(recipeName: string, recipeUid: string): number {
+    const backoff = this.legacyMcpServersInternetEgressBackoff.get(
+      this.legacyMcpServersInternetEgressKey(recipeName, recipeUid)
+    )
+    if (backoff === undefined) return 0
+    return Math.max(0, backoff.notBeforeMs - Date.now())
   }
 
   private async pruneLegacyMcpServersInternetEgressPolicy(
@@ -3640,6 +3737,14 @@ export class WorkflowReconciler {
       })
       return 'removed'
     }
+    const backoff = this.legacyMcpServersInternetEgressBackoff.get(key)
+    if (backoff !== undefined && Date.now() < backoff.notBeforeMs) {
+      this.log.debug('Skipping legacy mcp-servers internet NP delete; inside its backoff window', {
+        recipe: recipeName,
+        retryInMs: backoff.notBeforeMs - Date.now(),
+      })
+      return 'pending'
+    }
     const outcome = await observeNamespacedDelete(() =>
       this.deps.networkingApi.deleteNamespacedNetworkPolicy({
         name: `${recipeName}-mcp-servers-egress-internet`,
@@ -3647,13 +3752,23 @@ export class WorkflowReconciler {
       })
     )
     if (outcome.kind === 'failed') {
+      const delayMs = Math.min(
+        backoff === undefined ? LEGACY_NETWORK_POLICY_DELETE_BACKOFF_BASE_MS : backoff.delayMs * 2,
+        LEGACY_NETWORK_POLICY_DELETE_BACKOFF_MAX_MS
+      )
+      this.legacyMcpServersInternetEgressBackoff.set(key, {
+        delayMs,
+        notBeforeMs: Date.now() + delayMs,
+      })
       this.log.error('Legacy mcp-servers internet NP delete failed', {
         recipe: recipeName,
         ...deleteOutcomeFields(outcome),
+        retryInMs: delayMs,
         err: outcome.error,
       })
       return 'pending'
     }
+    this.legacyMcpServersInternetEgressBackoff.delete(key)
     this.log.info('Legacy mcp-servers internet NP delete', {
       recipe: recipeName,
       ...deleteOutcomeFields(outcome),

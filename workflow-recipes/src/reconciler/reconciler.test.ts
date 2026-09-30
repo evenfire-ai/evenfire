@@ -16653,6 +16653,43 @@ describe('WorkflowRecipeReconciler', () => {
       expect(legacyDeletes()).toBe(0)
       expect(result.requeueAfterMs).toBeUndefined()
     })
+
+    it('R4-L4: keeps the requeue a short-circuit already asked for while DeletePending stays published', async () => {
+      const inner = installRealInner()
+      stubShortCircuits(inner)
+      const retry = vi
+        .spyOn(inner, 'retryRunLaneNetworkPolicies')
+        .mockResolvedValue({ conflicts: [], retryPending: true })
+      legacyDeleteAnswers({ code: 403, message: 'forbidden' })
+      const conditions = networkPolicyMarkerConditions(
+        {
+          kind: 'reconcile',
+          summary: { conflicts: [], retryPending: true, prune: 'converged', legacy: 'pending' },
+        },
+        [],
+        '2026-09-23T09:00:00.000Z'
+      )
+      expect(ofType(conditions, MARKER_TYPE)).toMatchObject([{ reason: 'RetryPending' }])
+      expect(ofType(conditions, LEGACY_TYPE)).toMatchObject([{ reason: 'DeletePending' }])
+      const active = runScopedRecipe({
+        phase: 'active',
+        message: 'Workflow running',
+        workflowExecution: { phase: 'running' },
+        conditions,
+      })
+
+      const result = await reconciler.reconcile(active)
+
+      // Witnesses: the apply retry ran and the legacy DELETE was sent.
+      expect(retry).toHaveBeenCalledTimes(1)
+      expect(legacyDeletes()).toBe(1)
+      expect(ofType(active.status?.conditions, LEGACY_TYPE)).toMatchObject([
+        { reason: 'DeletePending' },
+      ])
+      // The apply retry's progress requeue wins over the 60 s legacy window.
+      expect(result.requeueAfterMs).toBe(WORKFLOW_PROGRESS_REQUEUE_BASE_MS)
+      expect(result.requeueFixedInterval).toBe(false)
+    })
   })
 
   // A reconcile() prune whose DELETE did not land publishes
