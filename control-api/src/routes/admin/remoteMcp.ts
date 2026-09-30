@@ -363,7 +363,10 @@ function previewRemoteCallback(discovery: DiscoveryResult): RemoteCallbackPrevie
   }
 }
 
-/** Hostnames of the AS endpoints an install would trust (shown before a per-server install). */
+/**
+ * Hosts (with any non-default port) of the AS endpoints an install would trust, shown
+ * before a per-server install so a different port is not hidden from the operator.
+ */
 function asEndpointHostsOf(discovery: DiscoveryResult): {
   authorization: string
   token: string
@@ -371,9 +374,9 @@ function asEndpointHostsOf(discovery: DiscoveryResult): {
 } {
   const { authorization, token, registration } = discovery.endpoints
   return {
-    authorization: new URL(authorization).hostname,
-    token: new URL(token).hostname,
-    ...(registration ? { registration: new URL(registration).hostname } : {}),
+    authorization: new URL(authorization).host,
+    token: new URL(token).host,
+    ...(registration ? { registration: new URL(registration).host } : {}),
   }
 }
 

@@ -19,7 +19,11 @@ import { vi } from 'vitest'
 import { config } from '../../src/config.js'
 import type { DbClient } from '../../src/db.js'
 import type { PinnedTransport } from '../../src/http/pinnedFetch.js'
-import { type McpServerOAuthSubject, handleOAuthCallback } from '../../src/oauth/callback.js'
+import {
+  type CallbackTarget,
+  type McpServerOAuthSubject,
+  handleOAuthCallback,
+} from '../../src/oauth/callback.js'
 import { type DiscoveryResult, discoverRemoteOAuth } from '../../src/oauth/discovery.js'
 import {
   type McpServerOAuthSpecInput,
@@ -164,9 +168,13 @@ function tokenResponse(tokens: ConsentTokens) {
   }
 }
 
-function consentInput(name: string, userId: string) {
+function consentInput(name: string, userId: string, target?: CallbackTarget) {
   return {
-    oauthClientId: OAUTH_ID,
+    target: target ?? {
+      kind: 'client' as const,
+      id: OAUTH_ID,
+      redirectUri: `https://control.example.com/api/v1/oauth-callback/${OAUTH_ID}`,
+    },
     code: `code-${name}-${userId}`,
     state: signOAuthState(STATE_SECRET, {
       subjectKind: 'mcp',
@@ -176,7 +184,6 @@ function consentInput(name: string, userId: string) {
       grantKind: 'user',
       background: false,
     }),
-    redirectUri: `https://control.example.com/api/v1/oauth-callback/${OAUTH_ID}`,
   }
 }
 
@@ -239,8 +246,15 @@ export async function currentConsent(
   /** RFC 9207 `iss` of the authorization response; the remote lane requires it. */
   iss?: string
 ): Promise<void> {
+  // Each lane's own callback URL, as its authorize URL registers it: a remote server
+  // always consents on a remote URI (the shared one here, as `iss` is supplied).
+  const cr = (await gateway.getResource('mcpservers', name, NS)) as ServerCR
+  const target: CallbackTarget | undefined =
+    (cr.spec as { oauth?: { source?: unknown } }).oauth?.source === 'remote'
+      ? { kind: 'remote-shared', origin: 'https://control.example.com' }
+      : undefined
   const result = await handleOAuthCallback(
-    { ...consentInput(name, userId), iss },
+    { ...consentInput(name, userId, target), iss },
     {
       db,
       recipeReader: { read: async () => null },

@@ -430,6 +430,31 @@ describe('routes refuse an incoherent remote server with 409 remote_oauth_spec_i
       expect(grantWrites).toHaveLength(0)
     })
 
+    // The per-server route reads the same subject: the incoherence is refused before any
+    // binding check or exchange, whichever remote callback the AS used.
+    it(`${c.label}: GET /oauth-callback/remote/srv → 409, nothing persisted`, async () => {
+      const oauth = c.oauth()
+      await seed('srv', oauth)
+      const state = signOAuthState(config.oauthStateHmacSecret, {
+        subjectKind: 'mcp',
+        mcpServerName: 'srv',
+        userId: 'user-1',
+        oauthClientId: oauth.id,
+        grantKind: 'user',
+        background: false,
+      } as Parameters<typeof signOAuthState>[1])
+      const res = await request(app)
+        .get('/api/v1/oauth-callback/remote/srv')
+        .query({ code: 'AUTH_CODE', state })
+      expect(res.status).toBe(409)
+      expect(res.body).toEqual({ error: 'remote_oauth_spec_incoherent', reason: c.reason })
+      const grantWrites = mockPoolQuery.mock.calls.filter(
+        ([sql]) =>
+          typeof sql === 'string' && /INSERT INTO oauth_grants|UPDATE oauth_grants/.test(sql)
+      )
+      expect(grantWrites).toHaveLength(0)
+    })
+
     it(`${c.label}: DELETE /internal/mcp-oauth/grant still revokes (204)`, async () => {
       await seed('srv', c.oauth())
       const res = await request(app)

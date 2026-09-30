@@ -50,9 +50,9 @@ describe('remote MCP `/discover` goldens carry the callback contract the wizard 
       }
       const { authorization, token, registration } = body.detected.endpoints
       expect(hosts).toEqual({
-        authorization: new URL(authorization).hostname,
-        token: new URL(token).hostname,
-        ...(registration ? { registration: new URL(registration).hostname } : {}),
+        authorization: new URL(authorization).host,
+        token: new URL(token).host,
+        ...(registration ? { registration: new URL(registration).host } : {}),
       })
     })
 

@@ -61,7 +61,7 @@ export function isValidInstallNonce(value: unknown): value is string {
 // A per-server URI is compared byte-for-byte by the AS and replayed on the token
 // exchange, so its origin must already be in canonical form: no path, trailing slash,
 // query, fragment or userinfo, and no spelling `new URL` would normalize differently.
-function isBareOrigin(origin: unknown): origin is string {
+export function isBareOrigin(origin: unknown): origin is string {
   if (typeof origin !== 'string' || origin.length === 0) return false
   try {
     return new URL(origin).origin === origin

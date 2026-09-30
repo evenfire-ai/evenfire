@@ -122,10 +122,9 @@ function remoteState() {
 
 function remoteInput(): CallbackInput {
   return {
-    oauthClientId: 'remote', // stable segment, not the client id
+    target: { kind: 'remote-shared', origin: 'https://control.example.com' },
     code: 'AUTH_CODE',
     state: remoteState(),
-    redirectUri: 'https://control.example.com/api/v1/oauth-callback/remote',
     // RFC 9207 issuer echoed by the authorization response; matches the pinned
     // `issForCallback` so the mix-up defence passes and the exchange proceeds.
     iss: 'https://mcp.sentry.dev',
@@ -226,7 +225,11 @@ describe('baked mcp exchange stays on fetchFn (byte-identical, T5c)', () => {
     }
 
     const input: CallbackInput = {
-      oauthClientId: 'google-drive',
+      target: {
+        kind: 'client',
+        id: 'google-drive',
+        redirectUri: 'https://control.example.com/api/v1/oauth-callback/google-drive',
+      },
       code: 'AUTH_CODE',
       state: signOAuthState(STATE_SECRET, {
         subjectKind: 'mcp',
@@ -236,7 +239,6 @@ describe('baked mcp exchange stays on fetchFn (byte-identical, T5c)', () => {
         grantKind: 'user',
         background: false,
       } as Parameters<typeof signOAuthState>[1]),
-      redirectUri: 'https://control.example.com/api/v1/oauth-callback/google-drive',
     }
 
     const result = await handleOAuthCallback(input, deps)

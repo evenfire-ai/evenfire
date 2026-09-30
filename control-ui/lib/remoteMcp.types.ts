@@ -37,7 +37,8 @@ export interface RemoteDetectedEndpoints {
 }
 
 /**
- * Hostnames of the AS endpoints an install would trust. Reported only for a
+ * Hosts (hostname plus any non-default port) of the AS endpoints an install
+ * would trust. Reported only for a
  * `per-server` callback (no RFC 9207 `iss`), where the same-site rule is all that
  * ties them to the issuer and cannot tell two hosts of one domain apart.
  */

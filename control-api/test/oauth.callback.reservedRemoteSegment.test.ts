@@ -258,10 +258,17 @@ async function deliverState(lane: Lane, serverName: string, segment: string) {
 
   const result = await handleOAuthCallback(
     {
-      oauthClientId: segment,
+      // The route maps the reserved segment to the shared remote callback.
+      target:
+        segment === REMOTE_CALLBACK_CLIENT_SEGMENT
+          ? { kind: 'remote-shared', origin: 'https://control.example.com' }
+          : {
+              kind: 'client',
+              id: segment,
+              redirectUri: `https://control.example.com/api/v1/oauth-callback/${segment}`,
+            },
       code: 'AUTH_CODE',
       state,
-      redirectUri: `https://control.example.com/api/v1/oauth-callback/${segment}`,
     },
     deps
   )
@@ -385,7 +392,11 @@ describe('handleOAuthCallback — recipe clients are outside the reservation (RP
     )
     const db = { query: vi.fn().mockResolvedValue({ rows: [], rowCount: 1 }) }
     const result = await handleOAuthCallback(
-      { oauthClientId: REMOTE_CALLBACK_CLIENT_SEGMENT, code: 'AUTH_CODE', state, redirectUri },
+      {
+        target: { kind: 'remote-shared', origin: 'https://control.example.com' },
+        code: 'AUTH_CODE',
+        state,
+      },
       {
         db: db as unknown as CallbackDeps['db'],
         recipeReader,
@@ -398,6 +409,9 @@ describe('handleOAuthCallback — recipe clients are outside the reservation (RP
 
     expect(result.kind).toBe('ok')
     expect(fetchFn).toHaveBeenCalledTimes(1)
+    // The recipe exchange replays the exact URI its authorize URL carried.
+    const tokenInit = (fetchFn.mock.calls[0] as unknown as [string, RequestInit])[1]
+    expect(new URLSearchParams(String(tokenInit.body)).get('redirect_uri')).toBe(redirectUri)
     expect(String(db.query.mock.calls[0]?.[0])).toContain('INSERT INTO oauth_grants')
   })
 })

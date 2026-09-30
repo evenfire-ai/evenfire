@@ -634,10 +634,10 @@ async function resolvePrm(
  * `hasPreRegisteredClient` reflects operator config (a pre-registered Secret),
  * defaulting to false.
  *
- * Mirror: control-ui hand-copies this projection (the `detected` shape the remoteMcp
- * route builds from this result) in test/fixtures/__tests__/remoteMcpDiscovery.contract.test.ts
- * (projectDetected), because control-api is not importable there. A shape change here
- * must be reflected in that copy or its fixtures certify a stale shape.
+ * Contract with control-ui: the `/discover` and install responses built from this
+ * result are pinned as wire goldens by test/routes.adminRemoteMcp.wireGoldens.test.ts,
+ * which control-ui's fixtures consume (control-api is not importable there). A shape
+ * change here must regenerate those goldens or control-ui certifies a stale shape.
  */
 export async function discoverRemoteOAuth(
   mcpUrl: string,
