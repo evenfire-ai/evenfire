@@ -431,6 +431,7 @@ bash -c '
   source "$1"
   parsed="$(t2_get_name control-plane/control-postgres)"
   test "$parsed" = "control-plane	control-postgres"
+  T2_ORIGIN_DEV=0123456789abcdef0123456789abcdef01234567
   t2_lock_acquire
   t2_lock_release
 ' bash "$COMMON"
@@ -449,6 +450,7 @@ T2_WORKTREE_ID=contract-worktree \
 bash -c '
   common="$1"
   source "$common"
+  T2_ORIGIN_DEV=0123456789abcdef0123456789abcdef01234567
   t2_lock_acquire
   token="$T2_LOCK_TOKEN"
   export T2_PROJECT_DIR T2_BRANCH T2_HEAD T2_ORIGIN_DEV T2_MERGE_BASE
@@ -482,7 +484,7 @@ EOF
 if T2_LOCK_ROOT="$tmp/locks" MINIKUBE_PROFILE=busy-profile T2_CONTEXT=busy-profile \
   T2_PROJECT_DIR="$ROOT" T2_BRANCH=test/minikube-contract T2_HEAD=0123456789abcdef \
   T2_ORIGIN_DEV=0123456789abcdef T2_MERGE_BASE=0123456789abcdef \
-  bash -c 'source "$1"; t2_lock_acquire' bash "$COMMON" 2>"$tmp/busy.err"; then
+  bash -c 'source "$1"; T2_ORIGIN_DEV=0123456789abcdef0123456789abcdef01234567; t2_lock_acquire' bash "$COMMON" 2>"$tmp/busy.err"; then
   echo 'FAIL: live profile owner was replaced' >&2
   exit 1
 fi
@@ -492,12 +494,26 @@ mkdir -p "$tmp/locks/empty-profile.lock"
 if T2_LOCK_ROOT="$tmp/locks" MINIKUBE_PROFILE=empty-profile T2_CONTEXT=empty-profile \
   T2_PROJECT_DIR="$ROOT" T2_BRANCH=test/minikube-contract T2_HEAD=0123456789abcdef \
   T2_ORIGIN_DEV=0123456789abcdef T2_MERGE_BASE=0123456789abcdef \
-  bash -c 'source "$1"; t2_lock_acquire' bash "$COMMON" 2>"$tmp/empty.err"; then
+  bash -c 'source "$1"; T2_ORIGIN_DEV=0123456789abcdef0123456789abcdef01234567; t2_lock_acquire' bash "$COMMON" 2>"$tmp/empty.err"; then
   echo 'FAIL: an ownerless profile lock was reclaimed' >&2
   exit 1
 fi
 grep -Fq 'PROFILE_BUSY' "$tmp/empty.err"
 grep -Fq 'orphaned' "$tmp/empty.err"
+
+# The lease owner pins origin/dev for its children, so it cannot take the
+# lease without one.
+if T2_LOCK_ROOT="$tmp/locks" MINIKUBE_PROFILE=clerum-unpinned T2_CONTEXT=clerum-unpinned \
+  T2_PROJECT_DIR="$ROOT" T2_BRANCH=test/minikube-contract T2_HEAD=0123456789abcdef \
+  bash -c 'source "$1"; t2_lock_acquire' bash "$COMMON" 2>"$tmp/unpinned.err"; then
+  echo 'FAIL: a lease owner without origin/dev acquired the lock' >&2
+  exit 1
+fi
+grep -Fq 'DEVELOPMENT_SCOPE_REQUIRED: the lease owner has no origin/dev to pin' "$tmp/unpinned.err"
+if [ -e "$tmp/locks/clerum-unpinned.lock" ]; then
+  echo 'FAIL: an unpinned lease owner left a lock behind' >&2
+  exit 1
+fi
 
 cert_root="$tmp/certifications"
 mkdir -p "$cert_root/prior" "$cert_root/current"

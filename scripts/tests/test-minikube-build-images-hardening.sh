@@ -175,6 +175,8 @@ prepare_lease() {
   lock_key="$(printf '%s\0%s\0%s\0%s\0%s' \
     "$FIXTURE" "$branch" "$head" "$PROFILE" "$PROFILE" | shasum | awk '{print $1}')"
   lock_dir="$LOCK_ROOT/$PROFILE.lock"
+  # The fixture has no origin/dev; the owner pins its only commit.
+  LEASE_ORIGIN_DEV="$head"
   mkdir -p "$lock_dir"
   {
     printf 'REPOSITORY=%s\n' "$FIXTURE"
@@ -184,6 +186,7 @@ prepare_lease() {
     printf 'CONTEXT=%s\n' "$PROFILE"
     printf 'WORKTREE_ID=%s\n' "$worktree_id"
     printf 'LOCK_KEY=%s\n' "$lock_key"
+    printf 'ORIGIN_DEV=%s\n' "$LEASE_ORIGIN_DEV"
     printf '%s=%s\n' TOKEN "$LEASE_VALUE"
     printf 'PID=%s\n' "$$"
     printf 'PROCESS_START=unavailable\n'
@@ -216,6 +219,7 @@ run_build() {
         "T2_PROJECT_DIR=$FIXTURE"
         "T2_PROFILE=$PROFILE"
         "T2_CONTEXT=$PROFILE"
+        "T2_PINNED_ORIGIN_DEV=$LEASE_ORIGIN_DEV"
         "${LEASE_ENV_KEY}=$LEASE_VALUE"
       )
       ;;
@@ -224,6 +228,7 @@ run_build() {
         "T2_PROJECT_DIR=$FIXTURE"
         "T2_PROFILE=$PROFILE"
         "T2_CONTEXT=$PROFILE"
+        "T2_PINNED_ORIGIN_DEV=$LEASE_ORIGIN_DEV"
         "${LEASE_ENV_KEY}=wrong-value"
       )
       ;;
@@ -232,6 +237,7 @@ run_build() {
         "T2_PROJECT_DIR=$FIXTURE"
         "T2_PROFILE=$PROFILE"
         T2_CONTEXT=foreign-context
+        "T2_PINNED_ORIGIN_DEV=$LEASE_ORIGIN_DEV"
         "${LEASE_ENV_KEY}=$LEASE_VALUE"
       )
       ;;

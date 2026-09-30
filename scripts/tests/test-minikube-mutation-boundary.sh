@@ -41,12 +41,15 @@ PROFILE=${PROFILE}
 CONTEXT=${PROFILE}
 WORKTREE_ID=${WORKTREE_ID}
 LOCK_KEY=${LOCK_KEY}
+ORIGIN_DEV=${MINIKUBE_TEST_ORIGIN_DEV}
 TOKEN=${TOKEN}
 PID=${owner_pid}
 PROCESS_START=unavailable
 EOF
 }
 write_owner
+# Lease children inherit the owner's pinned origin/dev.
+export T2_PINNED_ORIGIN_DEV="${MINIKUBE_TEST_ORIGIN_DEV}"
 
 # GNU Make may execute recipe lines containing $(MAKE) during a dry run. Force
 # the dry-run flag into the child environment so with-t2-mutation-lock.sh
