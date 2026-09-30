@@ -42,7 +42,11 @@ import {
   isSilentApiError,
 } from '@lib/api'
 import { createCoalescedRevalidation } from '@lib/coalescedRevalidation'
-import { entityChangeStreamUrl, parseEntityChangeFrame } from '@lib/entityChangeStream'
+import {
+  entityChangeStreamUrl,
+  parseEntityChangeFrame,
+  parseEntityChangeRetryAfterMs,
+} from '@lib/entityChangeStream'
 import { isGfsDocumentFile } from '@lib/gfsDocumentFile'
 import {
   GfsUploadCapabilityError,
@@ -1037,7 +1041,11 @@ export function GfsBrowser(): React.JSX.Element {
             return
           }
           if (!response.ok || !response.body) {
-            throw new Error(`Entity-change stream returned ${response.status}`)
+            const error = new Error(`Entity-change stream returned ${response.status}`) as Error & {
+              retryAfterMs?: number
+            }
+            error.retryAfterMs = parseEntityChangeRetryAfterMs(response.headers.get('retry-after'))
+            throw error
           }
           retryDelay = 500
           const reader = response.body.getReader()
@@ -1078,13 +1086,22 @@ export function GfsBrowser(): React.JSX.Element {
             reader.releaseLock()
           }
           if (!controller.signal.aborted) throw new Error('Entity-change stream ended')
-        } catch {
+        } catch (error) {
           if (!active || controller.signal.aborted) return
           // A transport failure is not evidence that authorization or resource
           // state changed. The feed cursor remains authoritative for recovery;
           // preserve visible state and reconnect with bounded backoff.
+          const retryAfterMs =
+            error &&
+            typeof error === 'object' &&
+            typeof (error as { retryAfterMs?: unknown }).retryAfterMs === 'number'
+              ? (error as { retryAfterMs: number }).retryAfterMs
+              : undefined
           await new Promise<void>(resolve => {
-            retryTimer = setTimeout(resolve, retryDelay + Math.random() * retryDelay)
+            retryTimer = setTimeout(
+              resolve,
+              Math.max(retryDelay + Math.random() * retryDelay, retryAfterMs ?? 0)
+            )
           })
           retryTimer = null
           retryDelay = Math.min(retryDelay * 2, 15_000)

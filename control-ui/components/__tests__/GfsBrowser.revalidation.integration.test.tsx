@@ -68,12 +68,16 @@ class ProducerResponse extends EventEmitter {
   destroyed = false
   writableEnded = false
   writableLength = 0
+  headers: Record<string, string> = {}
+  jsonBody: unknown
   frames: string[] = []
   status(code: number): this {
     this.statusCode = code
     return this
   }
-  setHeader(): void {}
+  setHeader(name: string, value: string): void {
+    this.headers[name.toLowerCase()] = value
+  }
   flushHeaders(): void {
     this.headersSent = true
   }
@@ -85,9 +89,28 @@ class ProducerResponse extends EventEmitter {
     this.writableEnded = true
     this.emit('close')
   }
-  json(): this {
+  json(value: unknown): this {
+    this.jsonBody = value
+    this.headersSent = true
     return this
   }
+}
+
+async function controlApiCapacityResponse(): Promise<Response> {
+  const previousLimit = controlApiProducerConfig.entityChangeStreamMaxConnections
+  controlApiProducerConfig.entityChangeStreamMaxConnections = 0
+  const req = new ProducerRequest()
+  const res = new ProducerResponse()
+  try {
+    streamEntityChanges(req as never, res as never, null, async () => true, 'operator')
+    await vi.waitFor(() => expect(res.statusCode).toBe(429))
+  } finally {
+    controlApiProducerConfig.entityChangeStreamMaxConnections = previousLimit
+  }
+  return new Response(JSON.stringify(res.jsonBody), {
+    status: res.statusCode,
+    headers: res.headers,
+  })
 }
 
 async function controlApiProducerFrame(): Promise<string> {
@@ -127,6 +150,53 @@ describe('GfsBrowser authoritative revalidation integration', () => {
     closeActiveEntityChangeStreams()
     vi.unstubAllGlobals()
     vi.restoreAllMocks()
+  })
+
+  it('honors the Control API Retry-After when an operator stream is rate limited', async () => {
+    const rateLimitedResponse = await controlApiCapacityResponse()
+    const scheduledTimers = vi.spyOn(window, 'setTimeout')
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    let streamAttempts = 0
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input), 'http://control-ui.test')
+        if (url.pathname.endsWith('/api/v1/gfs/entity-changes/stream')) {
+          streamAttempts += 1
+          if (streamAttempts === 1) return rateLimitedResponse
+          return new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                init?.signal?.addEventListener('abort', () => controller.close(), { once: true })
+              },
+            }),
+            { status: 200, headers: { 'content-type': 'application/x-ndjson' } }
+          )
+        }
+        if (url.pathname.endsWith('/api/v1/gfs/tree')) {
+          return jsonResponse({ rootResourceId: 'root-1', items: [], nextCursor: null })
+        }
+        if (url.pathname.endsWith('/api/v1/gfs/resources/root-1/children')) {
+          return jsonResponse({
+            items: [child('file-1', 'rid-file-1', 'kept.txt', 'file')],
+            nextCursor: null,
+          })
+        }
+        return jsonResponse({ items: [], nextCursor: null })
+      })
+    )
+
+    render(
+      <ToastProvider>
+        <GfsBrowser />
+      </ToastProvider>
+    )
+    await screen.findByRole('button', { name: 'kept.txt' })
+    await waitFor(() =>
+      expect(scheduledTimers.mock.calls.some(([, delay]) => delay === 5000)).toBe(true)
+    )
+    expect(streamAttempts).toBe(1)
+    expect(screen.getByRole('button', { name: 'kept.txt' })).toBeVisible()
   })
 
   it.each(['scope.invalidated', 'resync_required'] as const)(

@@ -17,6 +17,24 @@ export function entityChangeStreamUrl(cursor?: string): string {
   return controlApiUrl(`/api/v1/gfs/entity-changes/stream${query}`)
 }
 
+const ENTITY_CHANGE_RETRY_AFTER_CAP_MS = 5 * 60 * 1000
+
+/** Parse and bound a server Retry-After hint before it reaches a browser timer. */
+export function parseEntityChangeRetryAfterMs(
+  value: string | null,
+  nowMs = Date.now()
+): number | undefined {
+  const retryAfter = value?.trim()
+  if (!retryAfter) return undefined
+
+  const seconds = Number(retryAfter)
+  const retryAtMs =
+    Number.isFinite(seconds) && seconds >= 0 ? nowMs + seconds * 1000 : Date.parse(retryAfter)
+  if (!Number.isFinite(retryAtMs)) return undefined
+
+  return Math.min(ENTITY_CHANGE_RETRY_AFTER_CAP_MS, Math.max(0, retryAtMs - nowMs))
+}
+
 /** Parse one NDJSON frame. Safe v1 extensions are skipped; unsupported schemas are rejected. */
 export function parseEntityChangeFrame(line: string): EntityChangeFrame | null {
   if (!line.trim()) return null

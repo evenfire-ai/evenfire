@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { parseEntityChangeFrame } from '../entityChangeStream'
+import { parseEntityChangeFrame, parseEntityChangeRetryAfterMs } from '../entityChangeStream'
 
 const CURSOR = 'a20c37c5-d996-48b0-8f49-a8e2f5f41234'
 
@@ -65,5 +65,15 @@ describe('parseEntityChangeFrame', () => {
     expect(() =>
       parseEntityChangeFrame(JSON.stringify({ schemaVersion: 1, type: 'heartbeat', cursor: '1' }))
     ).toThrow('Invalid entity-change cursor')
+  })
+})
+
+describe('parseEntityChangeRetryAfterMs', () => {
+  it('supports seconds and HTTP dates while bounding untrusted delays', () => {
+    const now = Date.parse('2026-09-29T12:00:00.000Z')
+    expect(parseEntityChangeRetryAfterMs('5', now)).toBe(5_000)
+    expect(parseEntityChangeRetryAfterMs('Tue, 29 Sep 2026 12:00:10 GMT', now)).toBe(10_000)
+    expect(parseEntityChangeRetryAfterMs('3600', now)).toBe(5 * 60 * 1000)
+    expect(parseEntityChangeRetryAfterMs('not-a-date', now)).toBeUndefined()
   })
 })
