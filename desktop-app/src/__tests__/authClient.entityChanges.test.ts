@@ -37,7 +37,7 @@ describe('AuthClient.openEntityChangeStream', () => {
     const events: Array<Record<string, unknown>> = []
     await new AuthClient().openEntityChangeStream(
       'session-token',
-      null,
+      CURSOR,
       event => events.push(event as unknown as Record<string, unknown>),
       new AbortController().signal
     )
@@ -53,6 +53,8 @@ describe('AuthClient.openEntityChangeStream', () => {
         headers: expect.objectContaining({ authorization: 'Bearer session-token' }),
       })
     )
+    const requestedUrl = new URL(String(vi.mocked(fetch).mock.calls[0]?.[0]))
+    expect(requestedUrl.searchParams.has('cursor')).toBe(false)
   })
 
   it('rejects an unsupported schema without converting it into a destructive resync', async () => {

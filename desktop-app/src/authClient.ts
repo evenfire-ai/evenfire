@@ -564,12 +564,14 @@ export class AuthClient {
 
   async openEntityChangeStream(
     sessionToken: string,
-    cursor: string | null,
+    _cursor: string | null,
     onEvent: (event: EntityChangeStreamEvent) => void,
     signal: AbortSignal
   ): Promise<void> {
     const streamUrl = new URL(url('/api/v1/entity-changes/stream'))
-    if (cursor) streamUrl.searchParams.set('cursor', cursor)
+    // The user stream intentionally starts from a fixed coarse invalidation
+    // checkpoint. Sending the local cursor would disclose feed position while
+    // the server correctly ignores it to prevent hidden-change timing leaks.
     const response = await fetch(streamUrl, {
       method: 'GET',
       headers: {
