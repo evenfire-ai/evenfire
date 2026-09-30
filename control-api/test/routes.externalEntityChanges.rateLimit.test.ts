@@ -1,10 +1,11 @@
-import { describe, expect, it, vi } from 'vitest'
-import type { Router } from 'express'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import type { Request, Router } from 'express'
 
 type LimiterOptions = {
   bucketType: string
   maxPerMinute: number
   onBackendUnavailable: 'process-memory' | 'closed'
+  getBucketKey: (req: Request) => string | null
 }
 
 const captured = vi.hoisted(() => [] as LimiterOptions[])
@@ -46,6 +47,10 @@ type RouteLayer = {
 }
 
 describe('external entity-change stream rate-limit policy', () => {
+  beforeEach(() => {
+    captured.length = 0
+  })
+
   it('fails closed when the shared rate-limit backend cannot count the user request', () => {
     const router: Router = createExternalEntityChangesRouter()
     const route = (router.stack as RouteLayer[]).find(
@@ -59,5 +64,23 @@ describe('external entity-change stream rate-limit policy', () => {
       onBackendUnavailable: 'closed',
     })
     expect(route?.stack.some(layer => 'limiterOptions' in (layer.handle as object))).toBe(true)
+  })
+
+  it('isolates the external stream bucket by authenticated user principal', () => {
+    const router: Router = createExternalEntityChangesRouter()
+    const route = (router.stack as RouteLayer[]).find(
+      layer => layer.route?.path === '/external/entity-changes/stream'
+    )?.route
+    const bucketKey = captured[0]?.getBucketKey
+
+    expect(route).toBeDefined()
+    expect(bucketKey).toBeTypeOf('function')
+    expect(bucketKey?.({ externalAuth: { userId: 'user-a' } } as unknown as Request)).toBe(
+      'user:user-a:entity-changes'
+    )
+    expect(bucketKey?.({ externalAuth: { userId: 'user-b' } } as unknown as Request)).toBe(
+      'user:user-b:entity-changes'
+    )
+    expect(bucketKey?.({} as Request)).toBeNull()
   })
 })
