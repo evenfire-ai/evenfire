@@ -81,6 +81,43 @@ describe('useChatStore remote request cache', () => {
     expect(callsFor('host-b')).toBe(1)
   })
 
+  // A request issued before the invalidation that rejects afterwards must not
+  // evict the newer request cached under the same key.
+  it('keeps the newer cached request when an invalidated one rejects late', async () => {
+    let rejectStale: (error: Error) => void = () => {
+      throw new Error('the stale request was never issued')
+    }
+    const listSessions = vi
+      .fn()
+      .mockImplementationOnce(
+        () =>
+          new Promise((_resolve, reject) => {
+            rejectStale = reject
+          })
+      )
+      .mockImplementation(async () => ({ items: [] }))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { rpc: { listSessions } },
+    })
+    const { result } = renderHook(() => useChatStore())
+    result.current.setRemoteCacheScope('authenticated:user-race:team-race')
+    const query = { agent: 'host', limit: 50 }
+
+    const stale = result.current.listSessions('host', query)
+    result.current.invalidateSessionCatalog('host')
+    const fresh = result.current.listSessions('host', query)
+    await fresh
+    expect(listSessions).toHaveBeenCalledTimes(2)
+
+    rejectStale(new Error('host access revoked'))
+    await expect(stale).rejects.toThrow('host access revoked')
+
+    // Witness: the fresh request is still the cached one for this key.
+    await expect(result.current.listSessions('host', query)).resolves.toEqual({ items: [] })
+    expect(listSessions).toHaveBeenCalledTimes(2)
+  })
+
   // #654 M12 — the host-model catalog has exactly one cache, in
   // `hostModelSelectionStore`, which also owns revision ordering. A second TTL
   // layer here could only serve a response read BEFORE a write, which is the

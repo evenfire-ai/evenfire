@@ -164,16 +164,18 @@ export function useChatStore() {
       const cached = sessionCatalogRequests.get(key)
       if (!options.force && cached && cached.expiresAt > Date.now()) return cached.promise
 
-      const promise = source(hostRef, undefined, query).catch(error => {
-        sessionCatalogRequests.delete(key)
-        throw error
-      })
-      sessionCatalogRequests.set(key, {
+      const entry: CachedRequest<SessionsListResult> = {
         expiresAt: Date.now() + SESSION_CATALOG_TTL_MS,
         hostRef,
-        promise,
-      })
-      return promise
+        promise: source(hostRef, undefined, query).catch(error => {
+          // An invalidation may have replaced this entry with a newer request
+          // under the same key; only this request's own entry is evicted.
+          if (sessionCatalogRequests.get(key) === entry) sessionCatalogRequests.delete(key)
+          throw error
+        }),
+      }
+      sessionCatalogRequests.set(key, entry)
+      return entry.promise
     },
     []
   )
