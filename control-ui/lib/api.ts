@@ -144,6 +144,11 @@ function authHeaders(): HeadersInit {
   return {}
 }
 
+/** Build a Control API URL using the same configured base as API requests. */
+export function controlApiUrl(path: string): string {
+  return `${API_BASE}${path}`
+}
+
 async function parseJsonResponse(res: Response): Promise<unknown> {
   const text = await res.text()
   if (!text.trim()) return undefined
@@ -280,7 +285,7 @@ export async function apiGet(
   query: Record<string, string | undefined> = {},
   options: ApiRequestOptions = {}
 ) {
-  const url = `${API_BASE}${path}${qs(query)}`
+  const url = `${controlApiUrl(path)}${qs(query)}`
   const headers = { ...authHeaders() }
   const cacheKey = `${url}|${sessionEpoch}`
   const existing = options.signal ? undefined : inFlightGetRequests.get(cacheKey)

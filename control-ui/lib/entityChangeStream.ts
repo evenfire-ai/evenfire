@@ -1,3 +1,5 @@
+import { controlApiUrl } from './api'
+
 export const ENTITY_CHANGE_CURSOR_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -8,6 +10,11 @@ export type EntityChangeFrame = {
   scopes?: Array<'gfs' | 'authorization'>
   observedAt?: string
   reason?: 'max_lifetime' | 'session_expired' | 'server_shutdown' | 'slow_consumer'
+}
+
+export function entityChangeStreamUrl(cursor?: string): string {
+  const query = cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''
+  return controlApiUrl(`/api/v1/gfs/entity-changes/stream${query}`)
 }
 
 /** Parse one NDJSON frame. Unknown versions/types fail safe into full invalidation. */

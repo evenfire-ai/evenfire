@@ -42,7 +42,7 @@ import {
   isSilentApiError,
 } from '@lib/api'
 import { createCoalescedRevalidation } from '@lib/coalescedRevalidation'
-import { parseEntityChangeFrame } from '@lib/entityChangeStream'
+import { entityChangeStreamUrl, parseEntityChangeFrame } from '@lib/entityChangeStream'
 import { isGfsDocumentFile } from '@lib/gfsDocumentFile'
 import {
   GfsUploadCapabilityError,
@@ -1025,8 +1025,7 @@ export function GfsBrowser(): React.JSX.Element {
       while (active && !controller.signal.aborted) {
         try {
           const cursor = streamCursorRef.current
-          const query = cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''
-          const response = await fetch(`/control-api/api/v1/gfs/entity-changes/stream${query}`, {
+          const response = await fetch(entityChangeStreamUrl(cursor), {
             cache: 'no-store',
             credentials: 'include',
             headers: { accept: 'application/x-ndjson' },
