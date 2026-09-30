@@ -3446,6 +3446,56 @@ describe('FilesPage', () => {
     )
   })
 
+  it('tells the user an empty folder has nothing to zip instead of saving an empty archive', async () => {
+    vi.useFakeTimers()
+    const listChildren = vi.fn(async () => ({ items: [], nextCursor: null }))
+    const download = vi.fn(async () => ({ bytes: new ArrayBuffer(0) }))
+    const pushToast = vi.fn()
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { listChildren, download } },
+    })
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      accessibleResources: [
+        {
+          resourceId: 'folder-1',
+          rid: 'folder-1',
+          gfsUri: 'gfs://main/folder-1',
+          drive: 'main',
+          parentResourceId: null,
+          name: 'Empty',
+          kind: 'directory',
+          path: '/Empty',
+          version: 0,
+          bytes: 0,
+          sources: ['grant'],
+          permissions: ['read'],
+          coversDescendants: false,
+        },
+      ],
+    })
+
+    renderFilesPage(pushToast)
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Options for Empty' }))
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Download as zip' }))
+      await vi.advanceTimersByTimeAsync(5_000)
+    })
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(screen.queryByTestId('gfs-zip-progress')).toBeNull()
+
+    expect(listChildren).toHaveBeenCalledWith('folder-1', 'main', undefined)
+    expect(download).not.toHaveBeenCalled()
+    expect(click).not.toHaveBeenCalled()
+    expect(pushToast).toHaveBeenCalledWith('"Empty" has no downloadable files.', 'info')
+  })
+
   it('omits Download as zip for a folder the session cannot read', async () => {
     hookMock.useGfsBrowserController.mockReturnValue({
       ...baseController(),

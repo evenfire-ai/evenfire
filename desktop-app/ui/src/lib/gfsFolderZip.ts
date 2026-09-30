@@ -46,6 +46,16 @@ export interface GfsFolderZipResult {
 /** The walk exceeded a configured ceiling — a refusal, not a failure. */
 export class GfsFolderZipLimitError extends Error {}
 
+/** Nothing was archivable (an empty folder, or every entry was skipped). */
+export class GfsFolderZipEmptyError extends Error {
+  readonly skipped: GfsZipSkippedEntry[]
+  constructor(folderName: string, skipped: GfsZipSkippedEntry[]) {
+    super(`"${folderName}" has no downloadable files.`)
+    this.name = 'GfsFolderZipEmptyError'
+    this.skipped = skipped
+  }
+}
+
 export interface GfsReadThrottle {
   acquire(): Promise<void>
 }
@@ -83,7 +93,8 @@ export interface GfsZipChildItem {
   gfsUri: string
   name: string
   kind: 'file' | 'directory'
-  bytes: number
+  /** Absent on older servers — treated as 0 by the size guard, never as NaN. */
+  bytes?: number
   drive?: string
   readable?: boolean
 }
@@ -121,17 +132,28 @@ function isAccessDenied(message: string): boolean {
   return parseHttpStatus(message) === 403 || message.toLowerCase().includes('forbidden')
 }
 
-/** Zip-safe path segment: no separators, no NUL, no traversal prefix. */
+/**
+ * Zip-safe path segment. Separators, NUL and the characters Windows forbids
+ * (`: * ? " < > |`) map to `_`; trailing dots/spaces (also invalid on Windows)
+ * are stripped; only the EXACT `.`/`..` segments are dropped, so dotfiles like
+ * `.env` keep their name. Traversal is impossible regardless: separators are
+ * gone before the segment is used.
+ */
 function sanitizeZipSegment(name: string): string {
   const cleaned = name
-    .replace(/[/\\\u0000]/g, '_')
-    .replace(/^\.+/, '')
+    .replace(/[/\\:*?"<>|\u0000]/g, '_')
+    .replace(/[\s.]+$/, '')
     .trim()
-  return cleaned || 'unnamed'
+  if (!cleaned || cleaned === '.' || cleaned === '..') return 'unnamed'
+  return cleaned
 }
 
 function sanitizeFileName(name: string): string {
-  return name.replace(/[/\\\u0000]/g, '_').trim() || 'folder'
+  const cleaned = name
+    .replace(/[/\\:*?"<>|\u0000]/g, '_')
+    .replace(/[\s.]+$/, '')
+    .trim()
+  return cleaned || 'folder'
 }
 
 export async function createGfsFolderZip(
@@ -151,7 +173,13 @@ export async function createGfsFolderZip(
 
   const report = (progress: GfsFolderZipProgress) => options.onProgress?.(progress)
 
-  /** One 429 backs off by the server-provided hint and retries exactly once. */
+  /**
+   * One 429 backs off by the server-provided hint and retries exactly once.
+   * The backoff window is NOT a throttle slot: after it elapses the retry
+   * re-enters the budget through `throttle.acquire()`, so a
+   * `retryAfterSeconds=0` answer cannot fire the retry with zero spacing
+   * against the same per-minute budget that just refused the first attempt.
+   */
   const withRateLimitRetry = async <T>(operation: () => Promise<T>): Promise<T> => {
     try {
       return await operation()
@@ -159,6 +187,7 @@ export async function createGfsFolderZip(
       const message = toMessage(error)
       if (!isRateLimited(message)) throw error
       await sleep(Math.min((parseRetryAfterSeconds(message) ?? 15) * 1000, 120_000))
+      await throttle.acquire()
       return operation()
     }
   }
@@ -212,7 +241,10 @@ export async function createGfsFolderZip(
             `"${folder.name}" holds more than ${maxEntries} files, which exceeds the folder-zip limit. Download smaller subfolders individually.`
           )
         }
-        plannedBytes += child.bytes
+        // Older servers omit `bytes`; a missing value must read as 0, not
+        // NaN — NaN would poison `plannedBytes` and silently disable the
+        // size guard for the rest of the walk (M1).
+        plannedBytes += Number.isFinite(child.bytes) ? child.bytes : 0
         if (plannedBytes > maxTotalBytes) {
           throw new GfsFolderZipLimitError(
             `"${folder.name}" exceeds the ${formatZipBytes(maxTotalBytes)} folder-zip limit. Download smaller subfolders individually.`
@@ -229,6 +261,11 @@ export async function createGfsFolderZip(
       cursor = page.nextCursor ?? undefined
     } while (cursor)
   }
+
+  // An archive with zero entries is never useful: short-circuit instead of
+  // saving an empty zip (L8). Any skips are carried on the error so the caller
+  // can still explain why nothing was archivable.
+  if (files.length === 0) throw new GfsFolderZipEmptyError(folder.name, skipped)
 
   // ── Phase 2: throttled downloads, skipping per-resource denials. ──
   let addedBytes = 0

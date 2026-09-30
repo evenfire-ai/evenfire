@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   GFS_ZIP_MAX_ENTRIES,
   type GfsFolderZipDeps,
+  GfsFolderZipEmptyError,
   GfsFolderZipLimitError,
   type GfsFolderZipProgress,
   type GfsZipChildItem,
@@ -200,10 +201,14 @@ describe('createGfsFolderZip', () => {
     const result = await createGfsFolderZip(
       { resourceId: 'root', drive: 'main', name: 'Root' },
       { deps }
-    )
+    ).catch(error => error)
 
-    expect(result.fileCount).toBe(0)
-    expect(result.skipped).toEqual([{ path: 'Root/locked', reason: 'Permission denied' }])
+    // Nothing archivable: the walk short-circuits as empty (L8), carrying the
+    // skip so the caller can still explain why.
+    expect(result).toBeInstanceOf(GfsFolderZipEmptyError)
+    expect((result as GfsFolderZipEmptyError).skipped).toEqual([
+      { path: 'Root/locked', reason: 'Permission denied' },
+    ])
   })
 
   it('refuses over the declared byte ceiling with a clear message', async () => {
@@ -291,12 +296,11 @@ describe('createGfsFolderZip', () => {
       sleep: async () => undefined,
     }
 
-    const result = await createGfsFolderZip(
-      { resourceId: 'root', drive: 'main', name: 'Throttled' },
-      { deps }
-    )
+    // The retry succeeds but finds nothing archivable → empty short-circuit.
+    await expect(
+      createGfsFolderZip({ resourceId: 'root', drive: 'main', name: 'Throttled' }, { deps })
+    ).rejects.toThrow(/no downloadable files/)
     expect(attempts).toBe(2)
-    expect(result.fileCount).toBe(0)
   })
 
   it('aborts on a non-permission download failure instead of a holey archive', async () => {
@@ -322,21 +326,136 @@ describe('createGfsFolderZip', () => {
       root: [
         {
           items: [
+            // Traversal needs separators — only exact `.`/`..` segments drop,
+            // so a leading-dot filename keeps its name (L5).
             folder({ resourceId: 'n1', name: '../escape.txt' }),
             folder({ resourceId: 'n2', name: 'a/b.txt' }),
             folder({ resourceId: 'n3', name: '' }),
+            folder({ resourceId: 'n4', name: '.env' }),
+            // Windows-forbidden characters and trailing dots map away (L6).
+            folder({ resourceId: 'n5', name: 're:port*?"<>|.txt' }),
+            folder({ resourceId: 'n6', name: 'ends...' }),
+            folder({ resourceId: 'n7', name: '.' }),
+            folder({ resourceId: 'n8', name: '..' }),
           ],
           nextCursor: null,
         },
       ],
     })
     const result = await createGfsFolderZip(
-      { resourceId: 'root', drive: 'main', name: 'Weird/Name' },
+      { resourceId: 'root', drive: 'main', name: 'Weird/Name:' },
       { deps }
     )
     expect(zipEntryNames(result.bytes).sort()).toEqual(
-      ['Weird_Name/_escape.txt', 'Weird_Name/a_b.txt', 'Weird_Name/unnamed'].sort()
+      [
+        'Weird_Name_/.._escape.txt',
+        'Weird_Name_/a_b.txt',
+        'Weird_Name_/unnamed',
+        'Weird_Name_/.env',
+        'Weird_Name_/re_port______.txt',
+        'Weird_Name_/ends',
+        'Weird_Name_/unnamed (2)',
+        'Weird_Name_/unnamed (3)',
+      ].sort()
     )
+    expect(result.fileName).toBe('Weird_Name_.zip')
+  })
+
+  it('treats a missing byte count as zero instead of NaN-poisoning the size guard (M1)', async () => {
+    const deps = depsFor({
+      root: [
+        {
+          items: [
+            folder({
+              resourceId: 'unknown',
+              name: 'unknown.bin',
+              bytes: undefined as unknown as number,
+            }),
+            folder({ resourceId: 'small', name: 'small.bin', bytes: 512 }),
+          ],
+          nextCursor: null,
+        },
+      ],
+    })
+    const result = await createGfsFolderZip(
+      { resourceId: 'root', drive: 'main', name: 'Legacy' },
+      // 1 KiB ceiling: NaN accumulation would disable the guard; 0 + 512 must
+      // still leave room, and a real overage must still refuse.
+      { deps, limits: { maxTotalBytes: 1024 } }
+    )
+    expect(result.fileCount).toBe(2)
+
+    const overDeps = depsFor({
+      root: [
+        {
+          items: [
+            folder({
+              resourceId: 'unknown',
+              name: 'unknown.bin',
+              bytes: undefined as unknown as number,
+            }),
+            folder({ resourceId: 'big', name: 'big.bin', bytes: 2048 }),
+          ],
+          nextCursor: null,
+        },
+      ],
+    })
+    await expect(
+      createGfsFolderZip(
+        { resourceId: 'root', drive: 'main', name: 'Legacy' },
+        { deps: overDeps, limits: { maxTotalBytes: 1024 } }
+      )
+    ).rejects.toThrow(/exceeds the 1 KiB folder-zip limit/)
+  })
+
+  it('re-enters the throttle budget after a 429 backoff before retrying (L1)', async () => {
+    let attempts = 0
+    const acquire = vi.fn(async () => undefined)
+    const deps: GfsFolderZipDeps = {
+      listChildren: vi.fn(async () => {
+        attempts += 1
+        if (attempts === 1) throw new Error('429 httpStatus=429 retryAfterSeconds=0')
+        return { items: [], nextCursor: null }
+      }),
+      download: async () => ({ bytes: new ArrayBuffer(0) }),
+      throttle: { acquire },
+      sleep: async () => undefined,
+    }
+
+    // An empty retry answer short-circuits as "no downloadable files"; the
+    // witness here is the budget: initial acquire + one post-backoff acquire.
+    await expect(
+      createGfsFolderZip({ resourceId: 'root', drive: 'main', name: 'Throttled' }, { deps })
+    ).rejects.toThrow(/no downloadable files/)
+    expect(attempts).toBe(2)
+    expect(acquire).toHaveBeenCalledTimes(2)
+  })
+
+  it('refuses to save an empty archive and reports skips (L8)', async () => {
+    const emptyDeps = depsFor({ root: [{ items: [], nextCursor: null }] })
+    await expect(
+      createGfsFolderZip({ resourceId: 'root', drive: 'main', name: 'Empty' }, { deps: emptyDeps })
+    ).rejects.toMatchObject({
+      name: 'GfsFolderZipEmptyError',
+      message: '"Empty" has no downloadable files.',
+    })
+
+    const allSkipped = depsFor({
+      root: [
+        {
+          items: [folder({ resourceId: 'hidden', name: 'hidden.txt', readable: false })],
+          nextCursor: null,
+        },
+      ],
+    })
+    const failure = await createGfsFolderZip(
+      { resourceId: 'root', drive: 'main', name: 'Mixed' },
+      { deps: allSkipped }
+    ).catch(error => error)
+    expect(failure).toBeInstanceOf(GfsFolderZipEmptyError)
+    expect((failure as GfsFolderZipEmptyError).skipped).toEqual([
+      { path: 'Mixed/hidden.txt', reason: 'No access' },
+    ])
   })
 })
 

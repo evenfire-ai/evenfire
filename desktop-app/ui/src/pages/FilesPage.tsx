@@ -43,6 +43,7 @@ import { isEventFromNestedInteractive } from '@lib/clickableRowProps'
 import { saveBytesToDisk, saveGfsFileToDisk } from '@lib/gfsDownload'
 import { assertGfsFileUploadSize } from '@lib/gfsFileUpload'
 import {
+  GfsFolderZipEmptyError,
   GfsFolderZipLimitError,
   type GfsFolderZipProgress,
   createGfsFolderZip,
@@ -841,7 +842,12 @@ export function FilesPage({
         pushToast?.(describeZipSkips(result.skipped), 'warn', { durationMs: 10_000 })
       }
     } catch (zipError) {
-      if (!failClosedOnAuthorizationError(zipError)) {
+      if (zipError instanceof GfsFolderZipEmptyError) {
+        pushToast?.(zipError.message, 'info')
+        if (zipError.skipped.length) {
+          pushToast?.(describeZipSkips(zipError.skipped), 'warn', { durationMs: 10_000 })
+        }
+      } else if (!failClosedOnAuthorizationError(zipError)) {
         const message =
           zipError instanceof GfsFolderZipLimitError
             ? zipError.message
