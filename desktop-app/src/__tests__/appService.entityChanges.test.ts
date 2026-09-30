@@ -142,6 +142,37 @@ describe('AppService.startEntityChangeStream session expiry', () => {
     service.stopEntityChangeStream('stream-1', 7)
   })
 
+  it('honors Retry-After before reconnecting after a terminal stream response', async () => {
+    vi.useFakeTimers()
+    const service = new AppService() as any
+    setSyntheticSessionToken(service, 'session-token')
+    service.authClient = {
+      openEntityChangeStream: vi
+        .fn()
+        .mockRejectedValueOnce(new ApiError('Entity change stream failed (404)', 404, '', '30'))
+        .mockImplementation(
+          (_token, _cursor, _onEvent, signal) =>
+            new Promise<void>(resolve => {
+              signal.addEventListener('abort', () => resolve(), { once: true })
+            })
+        ),
+    }
+    try {
+      service.startEntityChangeStream('stream-1', 7, vi.fn())
+      await flushAsyncWork()
+      expect(service.authClient.openEntityChangeStream).toHaveBeenCalledTimes(1)
+
+      await vi.advanceTimersByTimeAsync(29_999)
+      expect(service.authClient.openEntityChangeStream).toHaveBeenCalledTimes(1)
+      await vi.advanceTimersByTimeAsync(1)
+      await flushAsyncWork()
+      expect(service.authClient.openEntityChangeStream).toHaveBeenCalledTimes(2)
+    } finally {
+      service.stopEntityChangeStream('stream-1', 7)
+      vi.useRealTimers()
+    }
+  })
+
   it('removes dead subscribers after the server announces session expiry', async () => {
     const service = new AppService() as any
     setSyntheticSessionToken(service, 'session-token')

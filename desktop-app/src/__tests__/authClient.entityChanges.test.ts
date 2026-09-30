@@ -98,4 +98,25 @@ describe('AuthClient.openEntityChangeStream', () => {
       )
     ).rejects.toThrow('invalid cursor')
   })
+
+  it('preserves Retry-After on a rejected stream connection', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response('stream not available yet', {
+          status: 404,
+          headers: { 'retry-after': '30' },
+        })
+      )
+    )
+
+    await expect(
+      new AuthClient().openEntityChangeStream(
+        'session-token',
+        null,
+        () => undefined,
+        new AbortController().signal
+      )
+    ).rejects.toMatchObject({ status: 404, retryAfter: '30' })
+  })
 })

@@ -582,7 +582,8 @@ export class AuthClient {
       throw new ApiError(
         `Entity change stream failed (${response.status}): ${body || response.statusText}`,
         response.status,
-        body
+        body,
+        response.headers.get('retry-after')
       )
     }
     if (!response.body) throw new Error('Entity change stream missing response body')

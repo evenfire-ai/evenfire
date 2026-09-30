@@ -92,10 +92,26 @@ import {
 // `diagnoseLoginBackend`. Kept short so a post-login-failure diagnosis never
 // makes the failure feel slower than it already did.
 const BACKEND_PROBE_TIMEOUT_MS = 1500
+const ENTITY_CHANGE_RETRY_AFTER_CAP_MS = 5 * 60 * 1000
 
 const HOST_WAKE_SCOPE: RpcScope = 'host:wake:write'
 const PROFILE_UI_BASE_URL_ORIGIN_ERROR =
   'PROFILE_UI_BASE_URL must be an origin URL with a root pathname and no search parameters'
+
+function parseEntityChangeRetryAfterMs(
+  value: string | undefined,
+  nowMs = Date.now()
+): number | undefined {
+  const retryAfter = value?.trim()
+  if (!retryAfter) return undefined
+
+  const seconds = Number(retryAfter)
+  const retryAtMs =
+    Number.isFinite(seconds) && seconds >= 0 ? nowMs + seconds * 1_000 : Date.parse(retryAfter)
+  if (!Number.isFinite(retryAtMs)) return undefined
+
+  return Math.min(ENTITY_CHANGE_RETRY_AFTER_CAP_MS, Math.max(0, retryAtMs - nowMs))
+}
 
 function normalizeExplicitProfileUiBaseUrl(rawValue: string): string | null {
   const value = rawValue.trim()
@@ -2846,6 +2862,7 @@ export class AppService {
     let abortController: AbortController | null = null
     let retryTimer: NodeJS.Timeout | null = null
     let backoffMs = 1000
+    let serverRetryAfterMs: number | undefined
     const clearRetry = () => {
       if (retryTimer) clearTimeout(retryTimer)
       retryTimer = null
@@ -2886,6 +2903,10 @@ export class AppService {
           if (error instanceof ApiError && error.status === 401) {
             this.handleEntityChangeSessionExpiry(connectionGeneration)
           } else {
+            serverRetryAfterMs =
+              error instanceof ApiError
+                ? parseEntityChangeRetryAfterMs(error.retryAfter)
+                : undefined
             this.emitEntityChangeEvent({
               type: 'error',
               message: 'Live updates disconnected; reconnecting.',
@@ -2895,7 +2916,9 @@ export class AppService {
       } finally {
         if (closed) return
         clearRetry()
-        const delay = backoffMs + Math.floor(Math.random() * Math.max(1, backoffMs * 0.2))
+        const localBackoffMs = backoffMs + Math.floor(Math.random() * Math.max(1, backoffMs * 0.2))
+        const delay = Math.max(localBackoffMs, serverRetryAfterMs ?? 0)
+        serverRetryAfterMs = undefined
         backoffMs = Math.min(backoffMs * 2, 15_000)
         retryTimer = setTimeout(() => void connect(), delay)
       }
