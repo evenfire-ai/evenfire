@@ -275,13 +275,13 @@ type ComposerFileAttachmentBase = {
 /**
  * A document picked for the current message (#678). It is read completely in
  * the renderer (`selected` → `reading`) before it can be sent; only a `ready`
- * file travels, as an inline `kind:'file'` attachment. `failed` keeps the
- * reason on screen until the user removes the chip.
+ * file travels, as an inline `kind:'file'` attachment. A file that is refused
+ * or cannot be read never stays in this list: it becomes a
+ * `ComposerFileRefusal` instead.
  */
 export type ComposerFileAttachment = ComposerFileAttachmentBase &
   (
     | { status: 'selected' | 'reading' }
-    | { status: 'failed'; error: string }
     | {
         status: 'ready'
         classification: FileClassification
@@ -292,6 +292,20 @@ export type ComposerFileAttachment = ComposerFileAttachmentBase &
 
 /** A document that is fully read and hashed: the only state that can be sent. */
 export type ReadyComposerFileAttachment = Extract<ComposerFileAttachment, { status: 'ready' }>
+
+/** The outcome of reading a picked document: ready to send, or the reason it cannot be. */
+export type ComposerFileReadResult =
+  | ReadyComposerFileAttachment
+  | (ComposerFileAttachmentBase & { status: 'failed'; error: string })
+
+/**
+ * Why a picked document was not attached (#678). Shown as a notice until the
+ * next attach, a send or an agent change.
+ */
+export type ComposerFileRefusal = {
+  id: string
+  text: string
+}
 
 export type ComposerPluginReference = {
   id: string

@@ -117,7 +117,6 @@ function getComposerReferenceIcon(attachment: ComposerReferenceAttachment) {
 
 /** Status line of a document chip: what the user needs to know before sending. */
 function getComposerFileMeta(file: ComposerFileAttachment): string {
-  if (file.status === 'failed') return 'Not attached'
   if (file.status !== 'ready') return 'Reading...'
   const size = formatFileSize(file.sizeBytes)
   if (file.classification.reader === 'none') return `${size} · No reader available`
@@ -126,7 +125,6 @@ function getComposerFileMeta(file: ComposerFileAttachment): string {
 
 /** Notice shown under the chips for a document that needs attention. */
 function getComposerFileNotice(file: ComposerFileAttachment): string | null {
-  if (file.status === 'failed') return file.error
   if (file.status !== 'ready') return null
   if (file.classification.mismatch) {
     return `${file.filename} looks like a ${file.classification.class} file, not what its name or type says. It is attached as it is.`
@@ -142,6 +140,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
   const {
     composerImageAttachments,
     composerFileAttachments,
+    composerFileRefusals,
     composerReferenceAttachments,
     agentSending,
     agentError,
@@ -558,11 +557,8 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
       }
       if (!imageCandidates.length) return
 
-      const attachedFileCount = composerFileAttachments.filter(
-        file => file.status !== 'failed'
-      ).length
       const availableSlots =
-        COMPOSER_MAX_ATTACHMENTS - composerImageAttachments.length - attachedFileCount
+        COMPOSER_MAX_ATTACHMENTS - composerImageAttachments.length - composerFileAttachments.length
       if (availableSlots <= 0) {
         setComposerAttachmentError(
           `A message can carry at most ${COMPOSER_MAX_ATTACHMENTS} attachments.`
@@ -839,13 +835,16 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
       (a, b) => a.order - b.order || a.fallbackIndex - b.fallbackIndex
     )
   }, [composerFileAttachments, composerImageAttachments, composerReferenceAttachments])
+  // Refusals come first: they name documents that were not attached at all.
   const composerFileNotices = useMemo(
-    () =>
-      composerFileAttachments.flatMap(file => {
+    () => [
+      ...composerFileRefusals.map(refusal => ({ ...refusal, refused: true })),
+      ...composerFileAttachments.flatMap(file => {
         const notice = getComposerFileNotice(file)
-        return notice ? [{ id: file.id, failed: file.status === 'failed', text: notice }] : []
+        return notice ? [{ id: file.id, refused: false, text: notice }] : []
       }),
-    [composerFileAttachments]
+    ],
+    [composerFileAttachments, composerFileRefusals]
   )
 
   const isDegraded = hostRuntimeStatus?.degraded?.reason === 'llm_key_missing'
@@ -1119,15 +1118,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
                         </span>
                         <span className="composer-attachment-chip-body">
                           <strong>{attachment.filename}</strong>
-                          <span
-                            className={`composer-attachment-chip-meta${
-                              attachment.status === 'failed'
-                                ? ' composer-attachment-chip-meta--failed'
-                                : ''
-                            }`}
-                          >
-                            {meta}
-                          </span>
+                          <span className="composer-attachment-chip-meta">{meta}</span>
                         </span>
                         <IconButton
                           className="composer-attachment-remove"
@@ -1238,8 +1229,10 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
           {composerFileNotices.map(notice => (
             <p
               key={notice.id}
-              className={notice.failed ? 'composer-attachment-error' : 'composer-attachment-notice'}
-              role={notice.failed ? 'alert' : 'status'}
+              className={
+                notice.refused ? 'composer-attachment-error' : 'composer-attachment-notice'
+              }
+              role={notice.refused ? 'alert' : 'status'}
             >
               {notice.text}
             </p>

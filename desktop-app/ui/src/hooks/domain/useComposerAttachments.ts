@@ -4,6 +4,7 @@ import { clearComposerDraft, clearComposerDraftAfterSend } from '@lib/composerDr
 import { composerFileAdmissionError, readComposerFile } from '@lib/composerFileAdmission'
 import type {
   ComposerFileAttachment,
+  ComposerFileRefusal,
   ComposerImageAttachment,
   ComposerReferenceAttachment,
 } from '../../uiTypes'
@@ -40,6 +41,7 @@ export function useComposerAttachments({
   const [composerFileAttachments, setComposerFileAttachments] = useState<ComposerFileAttachment[]>(
     []
   )
+  const [composerFileRefusals, setComposerFileRefusals] = useState<ComposerFileRefusal[]>([])
   const composerAttachmentOrderRef = useRef(0)
   const composerAttachmentRevisionRef = useRef(0)
   // Mirrors of the state above. Admission of a file and the completion of its
@@ -91,6 +93,7 @@ export function useComposerAttachments({
   const resetComposerAttachments = useCallback(() => {
     clearComposerImageAttachments()
     clearComposerFileAttachments()
+    setComposerFileRefusals([])
     setComposerReferenceAttachments([])
   }, [clearComposerFileAttachments, clearComposerImageAttachments])
 
@@ -116,14 +119,13 @@ export function useComposerAttachments({
     (attachments: ComposerImageAttachment[]) => {
       composerAttachmentRevisionRef.current += 1
       if (!attachments.length) return
+      // A new attach replaces the notice about documents refused earlier.
+      setComposerFileRefusals([])
       setComposerImageAttachments(previous => {
         const next = [...previous]
         for (const attachment of attachments) {
           // Images and files share one per-message count.
-          const attachedFiles = composerFilesRef.current.filter(
-            file => file.status !== 'failed'
-          ).length
-          if (next.length + attachedFiles >= COMPOSER_MAX_ATTACHMENTS) {
+          if (next.length + composerFilesRef.current.length >= COMPOSER_MAX_ATTACHMENTS) {
             revokeComposerPreviewUrls([attachment])
             continue
           }
@@ -189,20 +191,21 @@ export function useComposerAttachments({
   /**
    * Adds picked documents (#678). Each accepted file appears at once as
    * `reading` and becomes `ready` when its bytes are read and hashed. A file
-   * that breaks a limit appears as `failed` with the reason, so a refusal is
-   * never silent; the user removes it to continue.
+   * that breaks a limit, or cannot be read, gets no chip: its reason is shown
+   * as a refusal notice instead, so a refusal is never silent. Each attach
+   * replaces the refusals of the previous one.
    */
   const handleAddComposerFiles = useCallback(
     (files: File[], textBytes: number) => {
       composerAttachmentRevisionRef.current += 1
       if (!files.length) return
+      const refusals: ComposerFileRefusal[] = []
       for (const file of files) {
         const id = crypto.randomUUID()
         const current = composerFilesRef.current
-        const accepted = current.filter(item => item.status !== 'failed')
         const error = composerFileAdmissionError(file, {
-          attachedCount: composerImageCountRef.current + accepted.length,
-          files: accepted,
+          attachedCount: composerImageCountRef.current + current.length,
+          files: current,
           textBytes,
         })
         composerAttachmentOrderRef.current += 1
@@ -215,15 +218,21 @@ export function useComposerAttachments({
           declaredMediaType: file.type,
         }
         if (error) {
-          commitComposerFiles(previous => [...previous, { ...base, status: 'failed', error }])
+          refusals.push({ id, text: error })
           continue
         }
         commitComposerFiles(previous => [...previous, { ...base, status: 'reading' }])
         void readComposerFile(file, id).then(result => {
+          // A file removed while it was read (by the user, a send or an agent
+          // change) leaves neither a chip nor a notice.
+          if (!composerFilesRef.current.some(item => item.id === id)) return
+          if (result.status === 'failed') {
+            commitComposerFiles(previous => previous.filter(item => item.id !== id))
+            setComposerFileRefusals(previous => [...previous, { id, text: result.error }])
+            return
+          }
           commitComposerFiles(previous => {
-            if (!previous.some(item => item.id === id)) return previous
             if (
-              result.status === 'ready' &&
               previous.some(
                 item =>
                   item.id !== id &&
@@ -240,6 +249,7 @@ export function useComposerAttachments({
           })
         })
       }
+      setComposerFileRefusals(refusals)
       clearSendError()
     },
     [clearSendError, commitComposerFiles]
@@ -299,6 +309,7 @@ export function useComposerAttachments({
   return {
     composerImageAttachments,
     composerFileAttachments,
+    composerFileRefusals,
     composerAttachmentRevisionRef,
     composerReferenceAttachments,
     resetComposerAttachments,

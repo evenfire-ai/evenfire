@@ -1537,6 +1537,7 @@ export function useAppController() {
     olderMessagesLoading: chat.olderMessagesLoading,
     composerImageAttachments: chat.composerImageAttachments,
     composerFileAttachments: chat.composerFileAttachments,
+    composerFileRefusals: chat.composerFileRefusals,
     composerReferenceAttachments: chat.composerReferenceAttachments,
     agentSending: chat.agentSending,
     agentError: chat.agentError,

@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
 /**
  * Issue #678 — the composer's document state machine: a picked file is
- * `reading` at once, then `ready` (or `failed` with a reason); the user can
- * remove it at any point, and a removed file never comes back.
+ * `reading` at once, then `ready`; the user can remove it at any point, and a
+ * removed file never comes back. A refused or unreadable file leaves no chip,
+ * only a notice that the next attach, a send or an agent change clears.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, renderHook, waitFor } from '@testing-library/react'
@@ -106,7 +107,7 @@ describe('useComposerAttachments — documents (#678)', () => {
     await waitFor(() => expect(statuses(result)).toEqual(['ready', 'ready']))
   })
 
-  it('shows a file over the size limit as failed with the reason and never reads it', () => {
+  it('refuses a file over the size limit with a notice, adds no chip and never reads it', () => {
     const { result } = render()
     const huge = textFile('huge.bin', 'x')
     Object.defineProperty(huge, 'size', { configurable: true, value: COMPOSER_MAX_FILE_BYTES + 1 })
@@ -116,16 +117,16 @@ describe('useComposerAttachments — documents (#678)', () => {
       result.current.handleAddComposerFiles([huge], 0)
     })
 
-    const [failed] = result.current.composerFileAttachments
-    expect(failed?.status).toBe('failed')
-    expect(failed?.status === 'failed' && failed.error).toMatch(
+    // Witness for the two negative checks below: the refusal names this file.
+    expect(result.current.composerFileRefusals).toHaveLength(1)
+    expect(result.current.composerFileRefusals[0]?.text).toMatch(
       /^huge\.bin is .* at most 11\.0 MiB/
     )
-    // Witness for "never reads it": the chip exists, and the reader was not called.
+    expect(result.current.composerFileAttachments).toEqual([])
     expect(read).not.toHaveBeenCalled()
   })
 
-  it('shows the 21st attachment as failed and keeps the first 20', async () => {
+  it('refuses the 21st attachment with a notice and keeps the first 20', async () => {
     const { result } = render()
     const files = Array.from({ length: COMPOSER_MAX_ATTACHMENTS + 1 }, (_, index) =>
       textFile(`f${index}.txt`, `content ${index}`)
@@ -140,11 +141,13 @@ describe('useComposerAttachments — documents (#678)', () => {
         COMPOSER_MAX_ATTACHMENTS
       )
     )
-    const last = result.current.composerFileAttachments.at(-1)
-    expect(last?.status).toBe('failed')
-    expect(last?.status === 'failed' && last.error).toBe(
-      `A message can carry at most ${COMPOSER_MAX_ATTACHMENTS} attachments.`
+    expect(result.current.composerFileAttachments).toHaveLength(COMPOSER_MAX_ATTACHMENTS)
+    expect(result.current.composerFileAttachments.map(file => file.filename)).not.toContain(
+      `f${COMPOSER_MAX_ATTACHMENTS}.txt`
     )
+    expect(result.current.composerFileRefusals.map(refusal => refusal.text)).toEqual([
+      `A message can carry at most ${COMPOSER_MAX_ATTACHMENTS} attachments.`,
+    ])
   })
 
   it('does not bring back a file removed while it was being read', async () => {
@@ -176,21 +179,113 @@ describe('useComposerAttachments — documents (#678)', () => {
     expect(result.current.composerFileAttachments).toEqual([])
   })
 
-  it('removes a failed file so the composer can send again', () => {
+  it('replaces the previous refusal when the user attaches again', async () => {
     const { result } = render()
     const bad = textFile('bad/name.txt', 'x')
 
     act(() => {
       result.current.handleAddComposerFiles([bad], 0)
     })
-    expect(statuses(result)).toEqual(['failed'])
+    // Twin: the refusal is on screen before the next attach.
+    expect(result.current.composerFileRefusals).toHaveLength(1)
+    expect(result.current.composerFileAttachments).toEqual([])
 
     act(() => {
-      result.current.handleRemoveComposerFileAttachment(
-        result.current.composerFileAttachments[0]!.id
-      )
+      result.current.handleAddComposerFiles([textFile('good.txt', 'good')], 0)
     })
+    await waitFor(() => expect(statuses(result)).toEqual(['ready']))
+    expect(result.current.composerFileRefusals).toEqual([])
+  })
+
+  it('removes the chip of a file that cannot be read and shows why', async () => {
+    const { result } = render()
+    const file = textFile('locked.txt', 'locked')
+    let fail: (reason: Error) => void = () => {}
+    vi.spyOn(file, 'arrayBuffer').mockReturnValue(
+      new Promise<ArrayBuffer>((_, reject) => {
+        fail = reject
+      })
+    )
+    act(() => {
+      result.current.handleAddComposerFiles([file], 0)
+    })
+    // Witness: the chip existed while the file was being read.
+    expect(statuses(result)).toEqual(['reading'])
+
+    await act(async () => {
+      fail(new Error('permission denied'))
+    })
+
+    await waitFor(() => expect(result.current.composerFileAttachments).toEqual([]))
+    expect(result.current.composerFileRefusals.map(refusal => refusal.text)).toEqual([
+      'locked.txt could not be read: permission denied',
+    ])
+  })
+
+  it('shows no notice for a failed read whose chip was already removed', async () => {
+    const { result } = render()
+    const file = textFile('gone.txt', 'gone')
+    let fail: (reason: Error) => void = () => {}
+    vi.spyOn(file, 'arrayBuffer').mockReturnValue(
+      new Promise<ArrayBuffer>((_, reject) => {
+        fail = reject
+      })
+    )
+    act(() => {
+      result.current.handleAddComposerFiles([file], 0)
+    })
+    const [reading] = result.current.composerFileAttachments
+    // Witness: the file was reading when the user removed it.
+    expect(reading?.status).toBe('reading')
+    act(() => {
+      result.current.handleRemoveComposerFileAttachment(reading!.id)
+    })
+
+    await act(async () => {
+      fail(new Error('permission denied'))
+      await new Promise(resolve => setTimeout(resolve, 20))
+    })
+
     expect(result.current.composerFileAttachments).toEqual([])
+    expect(result.current.composerFileRefusals).toEqual([])
+  })
+
+  it.each([
+    [
+      'a send',
+      (hook: ReturnType<typeof render>) => hook.result.current.clearComposerAfterSend(null),
+    ],
+    [
+      'an agent change',
+      (hook: ReturnType<typeof render>) => hook.rerender({ agent: 'agent-other' }),
+    ],
+    [
+      'an image attach',
+      (hook: ReturnType<typeof render>) =>
+        hook.result.current.handleAddComposerImageAttachments([
+          {
+            id: 'img-1',
+            name: 'a.png',
+            mimeType: 'image/png',
+            dataBase64: 'aGVsbG8=',
+            sizeBytes: 5,
+            previewDataUrl: 'data:image/png;base64,aGVsbG8=',
+          },
+        ]),
+    ],
+  ])('clears the refusal on %s', (_label, clear) => {
+    const hook = render()
+    act(() => {
+      hook.result.current.handleAddComposerFiles([textFile('bad/name.txt', 'x')], 0)
+    })
+    // Twin: the refusal is on screen before the clearing action.
+    expect(hook.result.current.composerFileRefusals).toHaveLength(1)
+
+    act(() => {
+      clear(hook)
+    })
+
+    expect(hook.result.current.composerFileRefusals).toEqual([])
   })
 
   it('clears the documents when the selected agent changes', async () => {

@@ -714,6 +714,7 @@ export function useAgentChatController({
   const {
     composerImageAttachments,
     composerFileAttachments,
+    composerFileRefusals,
     composerAttachmentRevisionRef,
     composerReferenceAttachments,
     resetComposerAttachments,
@@ -3858,6 +3859,7 @@ export function useAgentChatController({
     progressByAgentMessage,
     composerImageAttachments,
     composerFileAttachments,
+    composerFileRefusals,
     composerReferenceAttachments,
     agentSending,
     // A fresh send-time error (a blocked image send, a new POST failure) wins;

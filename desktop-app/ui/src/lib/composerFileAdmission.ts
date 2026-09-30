@@ -7,7 +7,7 @@ import {
   COMPOSER_MAX_TOTAL_FILE_BASE64_BYTES,
   COMPOSER_REQUEST_ENVELOPE_BYTES,
 } from '@constants/attachments'
-import type { ComposerFileAttachment } from '../uiTypes'
+import type { ComposerFileAttachment, ComposerFileReadResult } from '../uiTypes'
 
 const FILE_NAME_MAX_CODE_POINTS = 255
 const BASE64_CHUNK_BYTES = 0x8000
@@ -146,7 +146,7 @@ async function sha256Hex(bytes: Uint8Array<ArrayBuffer>): Promise<string> {
  * with the reason. The bytes read must match the size the picker reported: a
  * file that changes on disk while it is read is not sent.
  */
-export async function readComposerFile(file: File, id: string): Promise<ComposerFileAttachment> {
+export async function readComposerFile(file: File, id: string): Promise<ComposerFileReadResult> {
   const base = {
     id,
     type: 'file' as const,

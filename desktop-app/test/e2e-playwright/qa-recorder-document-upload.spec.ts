@@ -400,12 +400,13 @@ test('document-upload fixture: an attached text file reaches the model through t
       await selectSupportedModel(page, IMAGE_CAPABILITY_FIXTURE_MODELS.supported)
     })
 
+    const oversized = {
+      fileName: `too-big-${randomBytes(3).toString('hex')}.txt`,
+      mimeType: 'text/plain',
+      buffer: Buffer.alloc(COMPOSER_FILE_LIMIT_BYTES + 1, 0x61),
+    }
+
     await test.step('a file one byte over the limit is refused with its reason and leaves no chip', async () => {
-      const oversized = {
-        fileName: `too-big-${randomBytes(3).toString('hex')}.txt`,
-        mimeType: 'text/plain',
-        buffer: Buffer.alloc(COMPOSER_FILE_LIMIT_BYTES + 1, 0x61),
-      }
       await attachDocument(page, oversized)
       // Liveness witness: the refusal the composer had to produce is on screen.
       const refusal = page.getByRole('alert').filter({ hasText: oversized.fileName })
@@ -424,6 +425,8 @@ test('document-upload fixture: an attached text file reaches the model through t
       const chip = fileChips(page).filter({ hasText: throwaway.fileName })
       await expect(chip).toHaveCount(1, { timeout: 20_000 })
       await expect(chip).toHaveAttribute('data-file-status', 'ready', { timeout: 20_000 })
+      // The next attach replaces the earlier refusal; the ready chip above is the witness.
+      await expect(page.getByRole('alert').filter({ hasText: oversized.fileName })).toHaveCount(0)
       await page.getByRole('button', { name: `Remove ${throwaway.fileName}` }).click()
       await expect(fileChips(page)).toHaveCount(0, { timeout: 15_000 })
     })

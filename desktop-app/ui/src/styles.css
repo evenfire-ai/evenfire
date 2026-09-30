@@ -8068,10 +8068,6 @@ h3 {
   text-overflow: ellipsis;
 }
 
-.composer-attachment-chip-meta--failed {
-  color: var(--danger);
-}
-
 .composer-attachment-remove {
   border: none;
   background: transparent;

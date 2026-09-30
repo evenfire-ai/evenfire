@@ -33,6 +33,7 @@ const composerStyles = readFileSync(resolve(__dirname, '../../../styles.css'), '
 const composerState: ChatComposerStateContextValue = {
   composerImageAttachments: [],
   composerFileAttachments: [],
+  composerFileRefusals: [],
   composerReferenceAttachments: [],
   agentSending: false,
   agentError: null,
@@ -181,6 +182,7 @@ afterEach(() => {
   Object.assign(composerState, {
     composerImageAttachments: [],
     composerFileAttachments: [],
+    composerFileRefusals: [],
     composerReferenceAttachments: [],
     agentSending: false,
     agentError: null,
@@ -1096,24 +1098,36 @@ describe('ComposerPanel document attachments (#678)', () => {
     expect(sendButton().disabled).toBe(true)
   })
 
-  it('keeps a failed document on screen with its reason and blocks the send until it is removed', () => {
-    composerState.composerFileAttachments = [
-      {
-        id: 'file-3',
-        type: 'file',
-        filename: 'broken.bin',
-        sizeBytes: 10,
-        declaredMediaType: '',
-        status: 'failed',
-        error: 'broken.bin could not be read.',
-      },
+  it('shows a refused document as an alert without a chip and does not block the send', () => {
+    composerState.composerFileRefusals = [
+      { id: 'refusal-1', text: 'broken.bin could not be read: permission denied' },
     ]
     draftState.value = 'hello'
     render(<ComposerPanel inline />)
 
-    expect(screen.getByTestId('composer-file-chip').getAttribute('data-file-status')).toBe('failed')
-    expect(screen.getByRole('alert').textContent).toBe('broken.bin could not be read.')
-    expect(sendButton().disabled).toBe(true)
+    // Witness for the two negative checks below: the refusal is on screen.
+    expect(screen.getByRole('alert').textContent).toBe(
+      'broken.bin could not be read: permission denied'
+    )
+    expect(screen.queryAllByTestId('composer-file-chip')).toHaveLength(0)
+    expect(sendButton().disabled).toBe(false)
+  })
+
+  it('lists refusals before the notices of ready documents', () => {
+    composerState.composerFileRefusals = [{ id: 'refusal-2', text: 'huge.bin is too large.' }]
+    composerState.composerFileAttachments = [
+      readyFile({
+        id: 'file-5',
+        filename: 'archive.zip',
+        classification: { ...readyClassification, class: 'binary_unsupported', reader: 'none' },
+      }),
+    ]
+    render(<ComposerPanel inline />)
+
+    const notices = screen.getByTestId('composer-file-notices')
+    const roles = Array.from(notices.children).map(child => child.getAttribute('role'))
+    expect(roles).toEqual(['alert', 'status'])
+    expect(screen.getByTestId('composer-file-chip').getAttribute('data-file-status')).toBe('ready')
   })
 
   it('says when the agent has no reader for an attached document', () => {
