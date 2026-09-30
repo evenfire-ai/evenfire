@@ -16,7 +16,7 @@ export function purgeDeniedGfsChildren(
   // A failed TanStack refetch retains its last successful data by design. For
   // a definitive denial, replace only cached child rows; later invalidation can
   // still refetch the same key if access is granted again.
-  queryClient.setQueryData<unknown>(queryKey, current => {
+  queryClient.setQueryData<unknown>(queryKey, (current: unknown) => {
     if (!current || typeof current !== 'object' || !('pages' in current)) return current
     const pages = (current as { pages?: unknown }).pages
     if (!Array.isArray(pages)) return current
