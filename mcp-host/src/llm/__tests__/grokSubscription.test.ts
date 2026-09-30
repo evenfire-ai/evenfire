@@ -1435,6 +1435,40 @@ describe('GrokSubscriptionProvider image input (#784)', () => {
     expect(wired.authorizer.authorize).toHaveBeenCalledTimes(1)
   })
 
+  // Review R3-L3: V2 text sits in content and in its text part. The host's
+  // canonical check counts it once, as the same text counts in V1.
+  it('R3-L3 dispatches a 4.5 MiB prompt beside an image and keeps refusing parts that do not repeat content', async () => {
+    const wired = deps()
+    const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
+    const text = 'x'.repeat(4.5 * 1024 * 1024)
+    const image = attachmentImage(GROK_PNG_2X2_BASE64, 'a')
+
+    await provider.completeSingleTurn([
+      { role: 'user', content: text, contentParts: [{ type: 'text', text }, image] },
+    ])
+    expect(wired.authorizer.authorize).toHaveBeenCalledTimes(1)
+    expect(wired.proxy.stream).toHaveBeenCalledTimes(1)
+    const body = wired.authorizer.authorize.mock.calls[0][0]
+    expect(body.request.schemaVersion).toBe('grok-completion-request.v2')
+    expect(body.request.messages[0].content).toBe(text)
+
+    // Parts that do not repeat content keep both copies on the budget.
+    const mismatched = await provider
+      .completeSingleTurn([
+        {
+          role: 'user',
+          content: `${text.slice(1)}y`,
+          contentParts: [{ type: 'text', text }, image],
+        },
+      ])
+      .catch((e: unknown) => e)
+    expect(mismatched).toMatchObject({
+      code: 'request_limit_exceeded',
+      message: 'request exceeds maxRequestBodyBytes outside image data',
+    })
+    expect(wired.authorizer.authorize).toHaveBeenCalledTimes(1)
+  }, 30_000)
+
   // #806 review M6, user decision: keep Codex parity. More than maxImages
   // images is `invalid_request`, not an attachment refusal, exactly as Codex
   // classifies it (codexSubscription.ts, "the maxImages count refusal stays

@@ -577,6 +577,40 @@ describe('authorizeLlmProviderAttempt grok-subscription', () => {
       expect(current.insertAttempt).toHaveBeenCalledTimes(1)
     })
 
+    // Review R3-L3: V2 text sits in content and in its text parts; the
+    // non-image budget counts it once, as the same text counts in V1.
+    it('R3-L3 authorizes a 4.5 MiB prompt beside an image and refuses parts that do not repeat content', async () => {
+      const current = deps()
+      const text = 'x'.repeat(4.5 * 1024 * 1024)
+      const withParts = (content: string, textPart: string) => ({
+        ...REQUEST,
+        schemaVersion: 'grok-completion-request.v2' as const,
+        messages: [
+          {
+            role: 'user' as const,
+            content,
+            contentParts: [{ type: 'text' as const, text: textPart }, fixturePngPart()],
+          },
+        ],
+      })
+      const request = withParts(text, text)
+      const result = await authorizeLlmProviderAttempt(claims(), body({ request }), current)
+      expect(result).toMatchObject({
+        executionTicket: 'grok-ticket.jwt',
+        requestHash: hashGrokCompletionRequest(request),
+      })
+      expect(current.insertAttempt).toHaveBeenCalledTimes(1)
+      // Parts that do not repeat content keep both copies on the budget.
+      await expect(
+        authorizeLlmProviderAttempt(
+          claims(),
+          body({ request: withParts(`${text.slice(1)}y`, text) }),
+          current
+        )
+      ).rejects.toMatchObject({ code: 'payload_too_large' })
+      expect(current.insertAttempt).toHaveBeenCalledTimes(1)
+    }, 30_000)
+
     it('checks the V2 proxy envelope inside the transaction, after signing and before commit', async () => {
       const transactionEvents: string[] = []
       const current = deps({

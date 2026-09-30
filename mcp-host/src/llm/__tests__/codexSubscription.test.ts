@@ -1535,6 +1535,41 @@ describe('CodexSubscriptionProvider', () => {
     expect(wired.authorize).not.toHaveBeenCalled()
   })
 
+  // Review R3-L3: V2 text sits in content and in its text part. The host's
+  // canonical check counts it once, as the same text counts in V1.
+  it('R3-L3 dispatches a 4.5 MiB prompt beside an image and keeps refusing parts that do not repeat content', async () => {
+    const wired = deps()
+    const provider = new CodexSubscriptionProvider('gpt-5.6-luna', wired as never)
+    const text = 'x'.repeat(4.5 * 1024 * 1024)
+    const image = imagePart(PNG_2X2_BASE64, 'a')
+
+    await provider.completeSingleTurn([
+      { role: 'user', content: text, contentParts: [{ type: 'text', text }, image] },
+    ])
+    expect(wired.authorize).toHaveBeenCalledTimes(1)
+    expect(wired.stream).toHaveBeenCalledTimes(1)
+    const body = wired.authorize.mock.calls[0][0]
+    expect(body.request.schemaVersion).toBe('codex-completion-request.v2')
+    expect(body.request.messages[0].content).toBe(text)
+
+    // Parts that do not repeat content keep both copies on the budget.
+    const mismatched = await provider
+      .completeSingleTurn([
+        {
+          role: 'user',
+          content: `${text.slice(1)}y`,
+          contentParts: [{ type: 'text', text }, image],
+        },
+      ])
+      .catch((e: unknown) => e)
+    expect(mismatched).toMatchObject({
+      code: 'request_limit_exceeded',
+      message:
+        'codex completion request rejected: request exceeds maxRequestBodyBytes outside image data',
+    })
+    expect(wired.authorize).toHaveBeenCalledTimes(1)
+  }, 30_000)
+
   it('T-R9-11d keeps conversation-volume refusals on a V2 request as context length', async () => {
     const wired = deps()
     const provider = new CodexSubscriptionProvider('gpt-5.6-luna', wired as never)

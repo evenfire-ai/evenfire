@@ -387,6 +387,61 @@ describe('grok-llm-proxy security surface', () => {
     expect(imageSized.body.error).toBe('ticket_invalid')
   }, 30_000)
 
+  // Review R3-L3: V2 text repeated in content and in its text parts counts
+  // once on the non-image budget, as the same text does in V1.
+  it('R3-L3 counts V2 text repeated in content and its text parts once', async () => {
+    const { runtimeApp } = createProxyApps(config({ maxBodyBytes: DEFAULT_MAX_BODY_BYTES }))
+    const completion = (content: string, textPart: string) => ({
+      executionTicket: 'invalid-ticket',
+      requestHash: 'a'.repeat(64),
+      request: {
+        schemaVersion: 'grok-completion-request.v2',
+        messages: [
+          {
+            role: 'user',
+            content,
+            contentParts: [
+              { type: 'text', text: textPart },
+              { type: 'image', mimeType: 'image/png', data: 'iVBORw0KGgo=' },
+            ],
+          },
+        ],
+      },
+    })
+    const post = (content: string, textPart: string) =>
+      request(runtimeApp)
+        .post('/internal/runtime/v1/grok/completions')
+        .set('Authorization', `Bearer ${platformToken()}`)
+        .send(completion(content, textPart))
+    // The share the proxy measures: no ticket, no image data, and the text
+    // part blanked because it repeats content.
+    const { executionTicket: _ticket, ...empty } = completion('', '')
+    empty.request.messages[0].contentParts[1] = { type: 'image', mimeType: 'image/png', data: '' }
+    const budget = LIMITS.maxRequestBodyBytes + ENVELOPE_ALLOWANCE_BYTES
+    const exact = budget - Buffer.byteLength(JSON.stringify(empty), 'utf8')
+
+    // A 4.5 MiB prompt beside an image passes the size checks and stops at the
+    // ticket gate.
+    const text = 'x'.repeat(4.5 * 1024 * 1024)
+    const repeated = await post(text, text)
+    expect(repeated.status).toBe(403)
+    expect(repeated.body).toEqual({ error: 'ticket_invalid' })
+
+    // Exact boundary: the largest text reaches the ticket gate, one more byte
+    // is refused 413.
+    const atLimit = await post('x'.repeat(exact), 'x'.repeat(exact))
+    expect(atLimit.status).toBe(403)
+    expect(atLimit.body).toEqual({ error: 'ticket_invalid' })
+    const overLimit = await post('x'.repeat(exact + 1), 'x'.repeat(exact + 1))
+    expect(overLimit.status).toBe(413)
+    expect(overLimit.body).toEqual({ error: 'payload_too_large' })
+
+    // Parts that do not repeat content keep both copies and are refused.
+    const mismatched = await post(`${text.slice(1)}y`, text)
+    expect(mismatched.status).toBe(413)
+    expect(mismatched.body).toEqual({ error: 'payload_too_large' })
+  }, 60_000)
+
   it('rejects a platform JWT whose hostRefs do not bind the ticket hostRef', async () => {
     const { runtimeApp } = createProxyApps(config())
     const foreign = sign(
