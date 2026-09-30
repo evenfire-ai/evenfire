@@ -3341,6 +3341,14 @@ describe('handleOAuthBrokerTokenAdded', () => {
     expect(enqueue).not.toHaveBeenCalled()
   })
 
+  it('only re-arms the ledger for a recipe not yet cached: its own queued event reaps', () => {
+    const { internal, invalidate, enqueue } = setup()
+    internal.handleOAuthBrokerTokenAdded(internal.config.sandboxNamespace, 'not-cached')
+    // Liveness witness: the handler ran and armed the ledger for that recipe.
+    expect(invalidate).toHaveBeenCalledWith('not-cached')
+    expect(enqueue).not.toHaveBeenCalled()
+  })
+
   it('startSecretWatch wires each namespace watcher to the handler with its own namespace', async () => {
     const { internal, invalidate, enqueue } = setup()
     secretLoops.length = 0

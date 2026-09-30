@@ -930,6 +930,15 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
    * issue the delete before the next CRD event. An opted-in recipe legitimately
    * owns its token and only invalidates, because a watch reconnect replays
    * ADDED for every broker token and must not force a reconcile storm.
+   *
+   * A recipe not yet in the cache is only re-armed, not enqueued. At startup
+   * `startWatch` returns once the watch is open, without waiting for the
+   * queued recipe ADDED events to run, and the Secret watch starts right
+   * after, so a token ADDED can land first. The recipe's own queued event then reconciles with
+   * the ledger armed. A pass that returns before the token reap leaves the
+   * token to the next one that reaches it: after a CRD event, a recipe watch
+   * restart replaying ADDED, or a Secret watch reconnect replaying the token
+   * ADDED once the recipe is cached.
    */
   private handleOAuthBrokerTokenAdded(namespace: string, recipeName: string): void {
     if (namespace !== this.config.sandboxNamespace) return
