@@ -5424,6 +5424,49 @@ describe('WorkflowReconciler — reconcile loop', () => {
           })
         }
 
+        // nit-3: the WRC suite stubs reconcile() with the real apply and the
+        // `reconcile` marker writer; this pins that the real reconcile()
+        // publishes exactly that writer's conditions for its own summary.
+        it('nit-3: publishes exactly the reconcile marker writer conditions for its own pass summary', async () => {
+          const { apiserver, reconciler } = await convergedRunLane()
+          seedLeftover(apiserver)
+          apiserver.api.deleteNamespacedNetworkPolicy.mockRejectedValueOnce({
+            code: 403,
+            message: 'forbidden',
+          })
+          const apply = vi.spyOn(
+            reconciler as unknown as {
+              applyWorkflowNetworkPolicies: (
+                ...args: unknown[]
+              ) => Promise<NetworkPolicyPassSummary>
+            },
+            'applyWorkflowNetworkPolicies'
+          )
+
+          const failed = await reconciler.reconcile('test-wf', 'uid-123', 'sandbox-recipes', spec())
+
+          // Liveness witness: the pass ran the run-lane apply once, and its
+          // prune could not delete the leftover.
+          expect(apply).toHaveBeenCalledTimes(1)
+          const summary = await apply.mock.results[0]!.value
+          expect(summary).toEqual({
+            conflicts: [],
+            retryPending: false,
+            prune: 'pending',
+            legacy: 'removed',
+          })
+          const published = failed.networkPolicyOwnershipConditions ?? []
+          expect(published).toHaveLength(1)
+          expect(published).toEqual(
+            networkPolicyMarkerConditions(
+              { kind: 'reconcile', summary },
+              undefined,
+              published[0]!.lastTransitionTime!
+            )
+          )
+          expect(failed.networkPolicyRetryPending).toBeUndefined()
+        })
+
         it('keeps it and its PrunePending marker through the retry, and prunes it on the next reconcile()', async () => {
           const { apiserver, reconciler } = await convergedRunLane()
           seedLeftover(apiserver)

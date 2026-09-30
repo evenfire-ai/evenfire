@@ -17,12 +17,12 @@ import {
 import { INHERITED_PARENT_RESOURCES_ANNOTATION } from '../workflow/childRecipeFactory'
 import type { CodexExecutionProjection } from '../workflow/codexExecutionProjection'
 import { buildCoordinatorGfsNetworkPolicy } from '../workflow/networkPolicyFactory'
-import type { WorkflowNetworkPolicyApplySummary } from '../workflow/pluginWorkloadSdkProvisioner'
+import type { NetworkPolicyPassSummary } from '../workflow/pluginWorkloadSdkProvisioner'
 import { deriveWorkflowRuntimePlan } from '../workflow/runtimePlan'
 import {
   WorkflowReconciler,
   buildNetworkPolicyConvergedCondition,
-  translateNetworkPolicyPassSummary,
+  networkPolicyMarkerConditions,
 } from '../workflow/workflowReconciler'
 import { captureLogger, captureLoggerLevels } from './__tests__/captureLogger'
 import { defaultFqdnLookup } from './fqdnResolver'
@@ -16506,8 +16506,10 @@ describe('WorkflowRecipeReconciler', () => {
     // The WRC first-deploy pass with the real inner apply and prune. The
     // leftover is live under the recipe's labels and its DELETE answers 403.
     // The inner reconcile() is reduced to the NetworkPolicy step: the real
-    // apply-and-prune, translated against the published conditions exactly as
-    // reconcile() does.
+    // apply-and-prune, published through the production `reconcile` marker
+    // writer. The inner suite pins that reconcile() publishes exactly that
+    // writer's conditions for its own pass summary (nit-3), so this stub
+    // cannot drift from the translation it stands in for.
     async function failedPrunePass(inner: WorkflowReconciler) {
       mockNetworkingApi.listNamespacedNetworkPolicy.mockResolvedValue({
         items: [{ metadata: { name: LEFTOVER, namespace: 'sandbox-recipes', labels: WRC_LABELS } }],
@@ -16520,9 +16522,7 @@ describe('WorkflowRecipeReconciler', () => {
       )
       const apply = (
         inner as unknown as {
-          applyWorkflowNetworkPolicies: (
-            ...args: unknown[]
-          ) => Promise<WorkflowNetworkPolicyApplySummary>
+          applyWorkflowNetworkPolicies: (...args: unknown[]) => Promise<NetworkPolicyPassSummary>
         }
       ).applyWorkflowNetworkPolicies.bind(inner)
       vi.spyOn(inner, 'reconcile').mockImplementation(
@@ -16546,12 +16546,14 @@ describe('WorkflowRecipeReconciler', () => {
               requiresGrokProxyEgress: false,
             }
           )
+          // No retry flag is owed: the pass has nothing pending but the prune.
+          expect(summary.retryPending).toBe(false)
           return {
             phase: 'active',
             message: 'Workflow running',
             workflowPhase: 'running',
-            ...translateNetworkPolicyPassSummary(
-              summary,
+            networkPolicyOwnershipConditions: networkPolicyMarkerConditions(
+              { kind: 'reconcile', summary },
               currentStatus?.conditions,
               new Date().toISOString()
             ),
