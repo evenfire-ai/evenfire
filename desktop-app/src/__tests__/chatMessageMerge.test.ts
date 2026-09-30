@@ -169,7 +169,7 @@ describe('mergeAuthoritativeServerMessages image byte gap-fill', () => {
     ])
   })
 
-  it('appends a local-only image with bytes when a settled echo collapses onto a server reference row', () => {
+  it('keeps an unproven local image on its own idle echo', () => {
     const serverPlugin: ChatMessageAttachment = {
       id: 'server-plugin',
       type: 'plugin',
@@ -211,9 +211,14 @@ describe('mergeAuthoritativeServerMessages image byte gap-fill', () => {
       { activeTaskIds: new Set() }
     )
 
-    expect(merged.map(message => message.id)).toEqual(['turn-1-user', 'turn-2-user'])
-    expect(merged[1]?.attachments).toEqual([serverPlugin, imageWithBytes])
-    expect(merged[1]?.task_id).toBeUndefined()
+    expect(merged.map(message => message.id)).toEqual([
+      'turn-1-user',
+      'optimistic-user',
+      'turn-2-user',
+    ])
+    expect(merged[1]?.attachments).toContainEqual(imageWithBytes)
+    expect(merged[2]?.attachments).toEqual([serverPlugin])
+    expect(merged[2]?.task_id).toBeUndefined()
   })
 })
 

@@ -248,14 +248,118 @@ describe('turnsToChatMessages', () => {
       incoming,
       { activeTaskIds: new Set() }
     )
-    expect(merged.map(message => message.id)).toEqual(['turn-1-user', 'turn-2-user'])
-    const serverUser = merged[1]!
-    expect(serverUser.attachments).toMatchObject([{ type: 'uploaded_file', dataBase64: 'AQ==' }])
+    expect(merged.map(message => message.id)).toEqual(['turn-1-user', 'idle-echo', 'turn-2-user'])
+    const serverUser = merged[2]!
+    expect(serverUser.attachments).toBeUndefined()
     const draft = buildComposerResendDraft(serverUser)
     expect(draft.content).toBe('repeat')
-    expect(draft.imageAttachments).toHaveLength(1)
+    expect(draft.imageAttachments).toHaveLength(0)
     expect(draft.referenceAttachments).toEqual([])
     expect(draft.unrestorable).toEqual([])
+    expect(buildComposerResendDraft(merged[1]!).imageAttachments[0]?.dataBase64).toBe('AQ==')
+  })
+
+  it('does not move either image across ambiguous same-text prompts, including on repeated reconciliation', () => {
+    const incoming = turnsToChatMessages([
+      {
+        number: 1,
+        user_input: 'repeat\n\n[Attached images]\n- first.png',
+        started_at: new Date(1).toISOString(),
+      },
+      {
+        number: 2,
+        user_input: 'repeat\n\n[Attached images]\n- second.png',
+        started_at: new Date(3).toISOString(),
+      },
+    ])
+    const localEcho: ChatMessage = {
+      id: 'second-local-echo',
+      role: 'user',
+      content: 'repeat',
+      timestamp: 2,
+      attachments: [
+        {
+          id: 'second-image',
+          type: 'uploaded_file',
+          label: 'second.png',
+          filename: 'second.png',
+          mimeType: 'image/png',
+          encoding: 'base64',
+          dataBase64: 'Ag==',
+          sizeBytes: 1,
+        },
+      ],
+    }
+    const firstLocal: ChatMessage = {
+      ...incoming[0]!,
+      attachments: [
+        {
+          id: 'first-image',
+          type: 'uploaded_file',
+          label: 'first.png',
+          filename: 'first.png',
+          mimeType: 'image/png',
+          encoding: 'base64',
+          dataBase64: 'AQ==',
+          sizeBytes: 1,
+        },
+      ],
+    }
+    const once = mergeAuthoritativeServerMessages([firstLocal, localEcho, incoming[1]!], incoming, {
+      activeTaskIds: new Set(),
+    })
+    const twice = mergeAuthoritativeServerMessages(once, incoming, { activeTaskIds: new Set() })
+    expect(twice).toEqual(once)
+    expect(once.map(message => message.id)).toEqual([
+      'turn-1-user',
+      'second-local-echo',
+      'turn-2-user',
+    ])
+    expect(
+      buildComposerResendDraft(once[0]!).imageAttachments.map(image => image.dataBase64)
+    ).toEqual(['AQ=='])
+    expect(buildComposerResendDraft(once[2]!).imageAttachments).toEqual([])
+    expect(buildComposerResendDraft(once[1]!).imageAttachments[0]?.dataBase64).toBe('Ag==')
+  })
+
+  it('recovers image bytes for a unique text echo with matching server image context', () => {
+    const incoming = turnsToChatMessages([
+      { number: 1, user_input: 'first', started_at: new Date(1).toISOString() },
+      {
+        number: 2,
+        user_input: 'repeat\n\n[Attached images]\n- second.png',
+        started_at: new Date(3).toISOString(),
+      },
+    ])
+    const localEcho: ChatMessage = {
+      id: 'second-local-echo',
+      role: 'user',
+      content: 'repeat',
+      timestamp: 2,
+      attachments: [
+        {
+          id: 'second-image',
+          type: 'uploaded_file',
+          label: 'second.png',
+          filename: 'second.png',
+          mimeType: 'image/png',
+          encoding: 'base64',
+          dataBase64: 'Ag==',
+          sizeBytes: 1,
+        },
+      ],
+    }
+    const merged = mergeAuthoritativeServerMessages(
+      [incoming[0]!, localEcho, incoming[1]!],
+      incoming,
+      { activeTaskIds: new Set() }
+    )
+    expect(merged.map(message => message.id)).toEqual(['turn-1-user', 'turn-2-user'])
+    expect(merged[1]?.attachments).toMatchObject([
+      { type: 'uploaded_file', label: 'second.png', dataBase64: 'Ag==' },
+    ])
+    expect(buildComposerResendDraft(merged[1]!).imageAttachments[0]?.dataBase64).toBe('Ag==')
+    expect(mergeAuthoritativeServerMessages(merged, incoming)).toEqual(merged)
   })
 
   it('preserves turn order for multi-turn transcripts', () => {
