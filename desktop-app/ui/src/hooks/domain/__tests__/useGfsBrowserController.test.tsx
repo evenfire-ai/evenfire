@@ -2148,9 +2148,7 @@ describe('useGfsBrowserController', () => {
     expect(screen.getByTestId('current').textContent).toBe('root')
     expect(screen.getByTestId('items-count').textContent).toBe('1')
 
-    await act(async () =>
-      denyRefresh(new Error('403 Forbidden: resource unavailable httpStatus=403'))
-    )
+    await act(async () => denyRefresh(new Error(await resolveDeniedMessage('gfs://main/root'))))
     await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('none'))
     expect(screen.getByTestId('items-count').textContent).toBe('0')
     expect(screen.getByTestId('open-error').textContent).toBe(
@@ -2179,7 +2177,7 @@ describe('useGfsBrowserController', () => {
     const listChildren = vi
       .fn()
       .mockResolvedValueOnce(await listChildrenPage([childView('leaf', 'leaf.md', 'file')]))
-      .mockRejectedValueOnce(new Error('403 Forbidden: resource unavailable httpStatus=403'))
+      .mockRejectedValueOnce(new Error(await resolveDeniedMessage('gfs://main/root')))
       .mockResolvedValue({ items: [], nextCursor: null })
     Object.defineProperty(window, 'clerum', {
       configurable: true,
