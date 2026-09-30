@@ -202,6 +202,7 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
         gfsUri: preview.gfsUri,
         fileKind: preview.kind,
         byteLength: preview.bytes,
+        ...(preview.version !== undefined ? { resourceVersion: preview.version } : {}),
         ...('mimeType' in preview ? { mimeType: preview.mimeType } : {}),
       })
     )
@@ -1234,6 +1235,10 @@ describe('App plugin previewable handoff — routes through resolveGfsPreview (R
         { uri: 'gfs://main/vid1', kind: 'video' },
       ]
     )
+    expect(previewTabs().map(t => t.preview?.resourceVersion)).toEqual([
+      mdPayload.version,
+      videoPayload.version,
+    ])
     // No leftover files tab seeded with a previewable URI — the R1-H3 loop.
     expect(filesTabs()).toHaveLength(0)
     expect(currentController.openFilesSection).not.toHaveBeenCalled()

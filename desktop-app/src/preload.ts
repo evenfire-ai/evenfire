@@ -749,11 +749,23 @@ const clerum = Object.freeze({
       return () => ipcRenderer.off('pluginSdk:consentCancelled', listener)
     },
     onOpenGfsResource: (
-      callback: (args: { gfsUri: string; name: string; kind: string; bytes: number | null }) => void
+      callback: (args: {
+        gfsUri: string
+        name: string
+        kind: string
+        bytes: number | null
+        version?: number
+      }) => void
     ) => {
       const listener = (
         _event: unknown,
-        args: { gfsUri: string; name: string; kind: string; bytes: number | null }
+        args: {
+          gfsUri: string
+          name: string
+          kind: string
+          bytes: number | null
+          version?: number
+        }
       ) => callback(args)
       ipcRenderer.on('pluginSdk:openGfsResource', listener)
       return () => ipcRenderer.off('pluginSdk:openGfsResource', listener)

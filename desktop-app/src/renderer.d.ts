@@ -800,6 +800,7 @@ declare global {
             name: string
             kind: string
             bytes: number | null
+            version?: number
           }) => void
         ) => () => void
         onNotificationClicked: (

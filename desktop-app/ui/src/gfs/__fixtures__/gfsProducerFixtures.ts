@@ -160,10 +160,10 @@ type OpenGfsResourcePayload = Parameters<
  * The `onOpenGfsResource` wire payload as `pluginSdkRuntime.openGfsResource`
  * emits it: it resolves the URI with the user's session (the real
  * `GfsClient.resolveUri` below — envelope unwrap, the same seam `download` uses)
- * and then projects four fields onto the wire. That runtime imports `electron`
+ * and then projects five fields onto the wire. That runtime imports `electron`
  * at module load, so it cannot be driven from a jsdom renderer test (the awkward
  * case T1 anticipates); the resolve half runs through this repo's REAL producer
- * and the runtime's four-field projection is mirrored here in ONE place —
+ * and the runtime's projection is mirrored here in ONE place —
  * `bytes` is coerced to `null` when the resolved resource omits it, exactly as
  * the runtime does — then structured-cloned to model the IPC boundary.
  */
@@ -177,6 +177,7 @@ export async function openGfsResourcePayload(
     name: resolved.name,
     kind: resolved.kind,
     bytes: typeof resolved.bytes === 'number' ? resolved.bytes : null,
+    version: resolved.version,
   })
 }
 

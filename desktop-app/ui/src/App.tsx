@@ -888,6 +888,7 @@ export function App() {
               gfsUri: resource.gfsUri,
               name: resource.name,
               bytes: resource.bytes ?? 0,
+              version: resource.version,
             })
           : null
       if (preview?.kind === 'image') {
