@@ -1315,6 +1315,75 @@ assert_log_lacks 'kubectl config unset' 'failed start does not clear the other s
   fail "failed start replaced the other session context with $(cat "${state}/current-context")"
 ok
 
+# === each action checks every command it needs before dispatch ===============
+# run_bounded runs through node, the context guards through kubectl, python3
+# and minikube, and pf/health through curl. A missing one used to surface as
+# `command not found` in the middle of an action, after other commands had
+# already run. Each action now names every missing command before it does
+# anything. The cases run with a PATH that holds the stubs, the real node and
+# python3, and a mirror of the host PATH without them, minus exactly one.
+host_node="$(command -v node)" || fail 'node is required to run this suite'
+host_python3="$(command -v python3)" || fail 'python3 is required to run this suite'
+mirror_bin="${tmp}/mirror-bin"
+mkdir -p "${mirror_bin}"
+IFS=: read -r -a host_path_dirs <<<"${PATH}"
+for host_dir in "${host_path_dirs[@]}"; do
+  [[ "${host_dir}" == /* && -d "${host_dir}" && "${host_dir}" != "${stub_bin}" ]] || continue
+  mirror_links=()
+  for candidate in "${host_dir}"/*; do
+    name="${candidate##*/}"
+    case "${name}" in node | python3 | kubectl | minikube | curl | helm | docker) continue ;; esac
+    [[ -f "${candidate}" && -x "${candidate}" && ! -e "${mirror_bin}/${name}" && ! -L "${mirror_bin}/${name}" ]] || continue
+    mirror_links+=("${candidate}")
+  done
+  (( ${#mirror_links[@]} == 0 )) || ln -s "${mirror_links[@]}" "${mirror_bin}/"
+done
+[[ -x "${mirror_bin}/bash" && -x "${mirror_bin}/git" && -x "${mirror_bin}/shasum" ]] ||
+  fail 'the host PATH mirror lacks bash, git or shasum'
+ok
+
+# path_without <bin>: prints a PATH with the stubs, the real node and python3
+# and the host mirror, without <bin>.
+path_without() {
+  local omit="$1" dir="${tmp}/path-without-$1" bin
+  rm -rf "${dir}"
+  mkdir -p "${dir}"
+  for bin in kubectl minikube curl helm docker; do
+    [[ "${bin}" == "${omit}" ]] || ln -s "${stub_bin}/${bin}" "${dir}/${bin}"
+  done
+  [[ "${omit}" == node ]] || ln -s "${host_node}" "${dir}/node"
+  [[ "${omit}" == python3 ]] || ln -s "${host_python3}" "${dir}/python3"
+  printf '%s:%s' "${dir}" "${mirror_bin}"
+}
+
+for action in pf pf-health health status start stop delete setup; do
+  case "${action}" in
+    pf | pf-health | health) needed='node minikube kubectl python3 curl' ;;
+    *) needed='node minikube kubectl python3' ;;
+  esac
+  for bin in ${needed}; do
+    reset_state
+    bp "missing-${bin}-${action}" "${action}" "PATH=$(path_without "${bin}")" \
+      "CONFIRM_DELETE=${profile}" "CONFIRM_PROFILE=${profile}"
+    assert_output_has "missing required command(s): ${bin}" "${action} without ${bin}"
+    assert_rc 1 "${action} without ${bin}"
+    assert_no_calls_to minikube "${action} without ${bin} must not call minikube"
+    assert_no_calls_to kubectl "${action} without ${bin} must not call kubectl"
+    assert_no_calls_to docker "${action} without ${bin} must not reach Docker"
+  done
+done
+
+# Witnesses that the table is per action: status and stop do not need curl,
+# and still run to completion without it.
+reset_state
+bp status-without-curl status "PATH=$(path_without curl)"
+assert_rc 0 'status without curl'
+assert_log_has "minikube -p ${profile} status" 'status without curl ran minikube status'
+reset_state
+bp stop-without-curl stop "PATH=$(path_without curl)"
+assert_rc 0 'stop without curl'
+assert_log_has "minikube -p ${profile} stop pidfiles=0" 'stop without curl ran minikube stop'
+
 # === prepare-shims: symlinks and the seed allowlist ===========================
 reset_state
 bp prepare-shims prepare-shims
