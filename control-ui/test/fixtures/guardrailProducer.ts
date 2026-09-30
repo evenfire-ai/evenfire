@@ -58,14 +58,31 @@ function registryHookProducer(): (name: string) => LlmHookResource {
     throw new Error('Registry LlmHook spec construction changed')
   }
 
+  const producerInputs = ['hasEgress', 'capabilities', 'wantsDeny', 'failMode', 'image'].map(
+    name => {
+      const matches = block.statements.filter(
+        statement =>
+          ts.isVariableStatement(statement) &&
+          statement.declarationList.declarations.some(
+            declaration => declaration.name.getText(source) === name
+          )
+      )
+      if (matches.length !== 1 || block.statements.indexOf(matches[0]) >= first) {
+        throw new Error(`Registry LlmHook ${name} decision changed; rederive the frontend fixture`)
+      }
+      return matches[0]
+    }
+  )
+  producerInputs.sort((a, b) => a.pos - b.pos)
+
   const specStatements = block.statements
     .slice(first, last + 1)
     .map(statement => statement.getText(source))
     .join('\n')
   const buildSpec = compile<(hookMeta: unknown, body: unknown) => Record<string, unknown>>(
     `function produce(hookMeta, body) {
-      const image = undefined, secretCreated = false, hasEgress = false, attachPullSecret = false;
-      const failMode = 'open', capabilities = [];
+      const secretCreated = false, attachPullSecret = false;
+      ${producerInputs.map(statement => statement.getText(source)).join('\n')}
       ${specStatements}
       return hookSpec;
     }`
@@ -88,12 +105,12 @@ function registryHookProducer(): (name: string) => LlmHookResource {
       path: '/check',
       lifecyclePoints: ['preCall'],
     }
-    const spec = buildSpec(hookMeta, { order: 100 })
+    const spec = buildSpec(hookMeta, {})
     const payload = buildPayload(name, {}, {}, spec)
     return {
       ...payload,
       metadata: { ...payload.metadata, namespace: 'llm-hooks', resourceVersion: 'rv-hook-read' },
-      status: hccReadyStatus(),
+      status: hccReadyStatus(spec.target as Record<string, unknown>, name),
     }
   }
 }
@@ -123,14 +140,22 @@ function hostHookReferenceProducer(): (hookId: string) => { id: string; digest?:
   return hookId => produce(hookId, undefined)
 }
 
-function hccReadyStatus(): LlmHookStatus {
+function hccReadyStatus(target: Record<string, unknown>, hookName: string): LlmHookStatus {
   const source = readProducer('host-context-controller/src/llmHookReconciler.ts')
   let conditionFactory: ts.FunctionDeclaration | undefined
+  let reconcileNonImage: ts.MethodDeclaration | undefined
+  let transitionTime: ts.Expression | undefined
   let mergedCondition: ts.Expression | undefined
 
   function visit(node: ts.Node): void {
     if (ts.isFunctionDeclaration(node) && node.name?.text === 'condition') {
       conditionFactory = node
+    }
+    if (ts.isMethodDeclaration(node) && node.name.getText(source) === 'reconcileNonImage') {
+      reconcileNonImage = node
+    }
+    if (ts.isVariableDeclaration(node) && node.name.getText(source) === 'lastTransitionTime') {
+      transitionTime = node.initializer
     }
     if (ts.isVariableDeclaration(node) && node.name.getText(source) === 'merged') {
       mergedCondition = node.initializer
@@ -138,30 +163,77 @@ function hccReadyStatus(): LlmHookStatus {
     ts.forEachChild(node, visit)
   }
   visit(source)
-  if (!conditionFactory || !mergedCondition || !ts.isObjectLiteralExpression(mergedCondition)) {
+  if (
+    !conditionFactory ||
+    !reconcileNonImage?.body ||
+    !transitionTime ||
+    !mergedCondition ||
+    !ts.isObjectLiteralExpression(mergedCondition)
+  ) {
     throw new Error('HCC LlmHook condition producer changed')
   }
-  const condition = compile<
+  // Execute the producer's branch and condition call. Removing await only makes
+  // the isolated network-policy/status stubs synchronous for this fixture.
+  const methodSource = ts.createSourceFile(
+    'reconcileNonImage.ts',
+    `function reconcile(hook, kind) ${reconcileNonImage.body.getText(source)}`,
+    ts.ScriptTarget.Latest,
+    true
+  )
+  const transformed = ts.transform(methodSource, [
+    context => {
+      const visit = (node: ts.Node): ts.Node =>
+        ts.isAwaitExpression(node)
+          ? ts.visitNode(node.expression, visit)
+          : ts.visitEachChild(node, visit, context)
+      return node => ts.visitNode(node, visit) as ts.SourceFile
+    },
+  ])
+  const reconcileBody = ts.createPrinter().printFile(transformed.transformed[0] as ts.SourceFile)
+  transformed.dispose()
+  const reconcile = compile<
     (
-      status: 'True',
-      reason: 'NoWorkload',
-      message: string
-    ) => Omit<LlmHookCondition, 'lastTransitionTime'>
-  >(`${conditionFactory.getText(source)}\nconst produce = condition;`)
+      hook: { name: string },
+      kind: 'service' | 'remote'
+    ) => {
+      condition: Omit<LlmHookCondition, 'lastTransitionTime'>
+      extras: Record<string, unknown>
+    }
+  >(
+    `${conditionFactory.getText(source)}
+    ${reconcileBody}
+    function produce(hook, kind) {
+      const emitted = [];
+      const runtime = {
+        ensureServiceTargetNetworkPolicy() {},
+        deleteServiceTargetNetworkPolicy() {},
+        writeStatus(_hook, condition, extras = {}) { emitted.push({ condition, extras }); },
+      };
+      reconcile.call(runtime, hook, kind);
+      if (emitted.length !== 1) throw new Error('HCC emitted no unique non-image status');
+      return emitted[0];
+    }`
+  )
   const merge = compile<
     (
       condition: Omit<LlmHookCondition, 'lastTransitionTime'>,
       now: string,
-      hook: { generation: number }
+      hook: { generation?: number }
     ) => LlmHookCondition
   >(
     `const produce = (condition, now, hook) => {
-      const lastTransitionTime = now;
+      const prior = undefined;
+      const lastTransitionTime = ${transitionTime.getText(source)};
       return (${mergedCondition.getText(source)});
     };`
   )
-  const ready = condition('True', 'NoWorkload', 'No workload deployed for service/remote target')
-  return { conditions: [merge(ready, '2026-01-01T00:00:00.000Z', { generation: 1 })] }
+  const kind = 'service' in target ? 'service' : 'remote' in target ? 'remote' : undefined
+  if (!kind) throw new Error('Guardrail fixture requires an HCC non-image target')
+  const { condition, extras } = reconcile({ name: hookName }, kind)
+  return {
+    ...extras,
+    conditions: [merge(condition, '2026-01-01T00:00:00.000Z', {})],
+  }
 }
 
 const buildHook = registryHookProducer()

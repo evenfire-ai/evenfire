@@ -24,9 +24,9 @@ describe('guardrail detail producer fixture', () => {
         reason: 'NoWorkload',
         message: 'No workload deployed for service/remote target',
         lastTransitionTime: '2026-01-01T00:00:00.000Z',
-        observedGeneration: 1,
       },
     ])
+    expect(hook.status?.lastReconciled).toEqual(expect.any(String))
     expect(hosts.items).toHaveLength(1)
     expect(hosts.items[0].metadata).toMatchObject({
       name: 'sample-agent',
