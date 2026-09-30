@@ -47,6 +47,7 @@ import {
   parseEntityChangeFrame,
   parseEntityChangeRetryAfterMs,
 } from '@lib/entityChangeStream'
+import { watchEntityChangeStreamLiveness } from '@lib/entityChangeStreamLiveness'
 import { isGfsDocumentFile } from '@lib/gfsDocumentFile'
 import {
   GfsUploadCapabilityError,
@@ -1049,6 +1050,9 @@ export function GfsBrowser(): React.JSX.Element {
           }
           retryDelay = 500
           const reader = response.body.getReader()
+          const liveness = watchEntityChangeStreamLiveness(() => {
+            void reader.cancel().catch(() => undefined)
+          })
           const decoder = new TextDecoder()
           let pending = ''
           try {
@@ -1063,6 +1067,7 @@ export function GfsBrowser(): React.JSX.Element {
                 const line = pending.slice(0, newline).replace(/\r$/, '')
                 pending = pending.slice(newline + 1)
                 const frame = parseEntityChangeFrame(line)
+                if (line.trim()) liveness.receivedFrame()
                 if (!frame) {
                   newline = pending.indexOf('\n')
                   continue
@@ -1083,6 +1088,7 @@ export function GfsBrowser(): React.JSX.Element {
               }
             }
           } finally {
+            liveness.dispose()
             reader.releaseLock()
           }
           if (!controller.signal.aborted) throw new Error('Entity-change stream ended')

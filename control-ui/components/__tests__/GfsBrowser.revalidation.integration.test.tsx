@@ -199,6 +199,62 @@ describe('GfsBrowser authoritative revalidation integration', () => {
     expect(screen.getByRole('button', { name: 'kept.txt' })).toBeVisible()
   })
 
+  it('reconnects a half-open operator stream without clearing the visible list', async () => {
+    const scheduledTimers = vi.spyOn(window, 'setTimeout')
+    let streamAttempts = 0
+    let streamCancellations = 0
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = new URL(String(input), 'http://control-ui.test')
+        if (url.pathname.endsWith('/api/v1/gfs/entity-changes/stream')) {
+          streamAttempts += 1
+          return new Response(
+            new ReadableStream<Uint8Array>({
+              cancel() {
+                streamCancellations += 1
+              },
+            }),
+            { status: 200, headers: { 'content-type': 'application/x-ndjson' } }
+          )
+        }
+        if (url.pathname.endsWith('/api/v1/gfs/tree')) {
+          return jsonResponse({ rootResourceId: 'root-1', items: [], nextCursor: null })
+        }
+        if (url.pathname.endsWith('/api/v1/gfs/resources/root-1/children')) {
+          return jsonResponse({
+            items: [child('file-1', 'rid-file-1', 'kept.txt', 'file')],
+            nextCursor: null,
+          })
+        }
+        return jsonResponse({ items: [], nextCursor: null })
+      })
+    )
+
+    render(
+      <ToastProvider>
+        <GfsBrowser />
+      </ToastProvider>
+    )
+    await screen.findByRole('button', { name: 'kept.txt' })
+    await waitFor(() =>
+      expect(scheduledTimers.mock.calls.some(([, delay]) => delay === 130_000)).toBe(true)
+    )
+    expect(streamAttempts).toBe(1)
+    expect(screen.getByRole('button', { name: 'kept.txt' })).toBeVisible()
+
+    const livenessTimer = scheduledTimers.mock.calls.find(([, delay]) => delay === 130_000)?.[0]
+    expect(livenessTimer).toBeDefined()
+    await act(async () => {
+      ;(livenessTimer as () => void)()
+      await Promise.resolve()
+    })
+
+    await waitFor(() => expect(streamCancellations).toBe(1))
+    await waitFor(() => expect(streamAttempts).toBe(2))
+    expect(screen.getByRole('button', { name: 'kept.txt' })).toBeVisible()
+  })
+
   it.each(['scope.invalidated', 'resync_required'] as const)(
     'does not publish a stale background page after %s',
     async frameType => {
