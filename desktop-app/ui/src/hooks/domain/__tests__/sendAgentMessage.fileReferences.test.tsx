@@ -170,7 +170,9 @@ function expectAcceptedAck(
     ])
     return
   }
-  expect(clerum.chat.appendMessages).toHaveBeenCalledWith(
+  // The async ack persists the user turn with its task_id through the
+  // idempotent upsert (the turn was already written once before the send).
+  expect(clerum.chat.upsertMessages).toHaveBeenCalledWith(
     'agent-x',
     expect.any(String),
     expect.arrayContaining([expect.objectContaining({ role: 'user', task_id: 'task-refs' })])

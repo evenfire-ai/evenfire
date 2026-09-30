@@ -42,6 +42,7 @@ import {
   AccessCatalog,
   AgentWithMcpServers,
   ApprovalDecisionResult,
+  ChatAuthorityScope,
   ContextBreakdownResult,
   DependencyHealth,
   DesktopAppInfo,
@@ -888,6 +889,12 @@ export class AppService {
   // token in sessionToken. Existing GFS jobs keep their captured token and
   // scope, but new GFS operations must not capture that temporary token.
   private gfsTransientTeamHopDepth = 0
+  // While a `runWithTeamContext` hop that will restore the original team is in
+  // flight, `me.teamId` holds the borrowed team. The chat store (and the delete
+  // fence derived from it) stays on the original team: rebinding it for the hop
+  // and back would expose the deliberate team's chats to the borrowed scope for
+  // the length of an RPC.
+  private chatStoreHomeTeamId: string | null = null
   // A finite RPC may temporarily borrow another team session. Keep the
   // deliberate user-owned GFS scope stable across that hop so in-flight jobs
   // are not invalidated by the transient `me` value.
@@ -916,6 +923,9 @@ export class AppService {
   private workflowTeamByKey = new Map<string, string>()
   private readonly prewarmAttemptAtByHostRef = new Map<string, number>()
   private readonly prewarmReemitLoopHostRefs = new Set<string>()
+  private readonly prewarmReemitAbortControllers = new Map<string, AbortController>()
+  private prewarmAuthEpoch = 0
+  private prewarmAuthTransitionCount = 0
   private hostStatusStreams = new Map<
     string,
     {
@@ -1031,10 +1041,33 @@ export class AppService {
     }
   }
 
+  /** The team the chat store and the delete fence are scoped to (see chatStoreHomeTeamId). */
+  private chatStoreTeamId(): string | null {
+    if (this.chatStoreHomeTeamId !== null) return this.chatStoreHomeTeamId
+    return this.me?.teamId ?? null
+  }
+
   private async bindCurrentChatStore(userId: string): Promise<void> {
     await bindChatStoreForUser(userId, getActiveEnvKey(), {
       legacyEnvKeys: getActiveLegacyEnvKeys(),
+      teamId: this.me?.id === userId ? this.chatStoreTeamId() : null,
     })
+  }
+
+  getChatDeletionFenceAuthority(): {
+    authorityScope: ChatAuthorityScope
+    sessionGeneration: number
+  } {
+    this.requireSessionToken()
+    if (!this.me) throw new Error('Not authenticated')
+    return {
+      authorityScope: {
+        environmentKey: getActiveEnvKey(),
+        userId: this.me.id,
+        teamId: String(this.chatStoreTeamId() || '').trim() || null,
+      },
+      sessionGeneration: this.sessionGeneration,
+    }
   }
 
   private async commitSessionToken(
@@ -1185,6 +1218,7 @@ export class AppService {
       const shouldRestore = Boolean(originalTeamId && shouldSwitch)
       let restoredOriginalTeam = false
       const releaseTransientHop = shouldSwitch ? this.enterGfsTransientTeamHop() : undefined
+      if (shouldRestore) this.chatStoreHomeTeamId = originalTeamId
 
       try {
         if (shouldSwitch) {
@@ -1215,6 +1249,25 @@ export class AppService {
           }
         }
       } finally {
+        if (shouldRestore) {
+          this.chatStoreHomeTeamId = null
+          // A failed switch back leaves the session on the hop team while the
+          // store is still bound to the pinned home team. Rebind so the store
+          // scope and the delete-fence authority (both derived from
+          // chatStoreTeamId) agree again. A rebind failure is logged and never
+          // replaces the error of the operation or of the failed restore.
+          const sessionUserId = this.me?.id
+          if (sessionUserId && this.me?.teamId !== originalTeamId) {
+            try {
+              await this.bindCurrentChatStore(sessionUserId)
+            } catch (rebindError) {
+              console.error(
+                '[AppService] Failed to rebind the chat store after a failed team restore:',
+                rebindError
+              )
+            }
+          }
+        }
         releaseTransientHop?.()
       }
     } finally {
@@ -1287,6 +1340,7 @@ export class AppService {
     this.gfsAuthEpoch += 1
     this.gfsDispatchBlocked = true
     this.gfsScopeIdentity = null
+    this.cancelPrewarmReemissions()
     this.stopAllStreams()
     this.sessionToken = null
     this.me = null
@@ -1303,6 +1357,26 @@ export class AppService {
     this.gfsAuthEpoch += 1
     this.gfsDispatchBlocked = false
     this.gfsScopeIdentity = identityOverride ?? (this.me ? desktopGfsUploadIdentity(this.me) : null)
+  }
+
+  private cancelPrewarmReemissions(): void {
+    this.prewarmAuthEpoch += 1
+    this.prewarmAttemptAtByHostRef.clear()
+    this.prewarmReemitLoopHostRefs.clear()
+    for (const controller of this.prewarmReemitAbortControllers.values()) controller.abort()
+    this.prewarmReemitAbortControllers.clear()
+  }
+
+  private beginPrewarmAuthTransition(): () => void {
+    this.prewarmAuthTransitionCount += 1
+    this.cancelPrewarmReemissions()
+    let released = false
+    return () => {
+      if (released) return
+      released = true
+      this.cancelPrewarmReemissions()
+      this.prewarmAuthTransitionCount -= 1
+    }
   }
 
   private currentDesktopGfsUploadScope(
@@ -1434,7 +1508,10 @@ export class AppService {
       if (this.sessionGeneration !== restoreGeneration || this.sessionToken !== token) {
         return { authenticated: Boolean(this.sessionToken && this.me), me: this.me }
       }
-      await bindChatStoreForUser(restoredMe.id, envKey, { legacyEnvKeys })
+      await bindChatStoreForUser(restoredMe.id, envKey, {
+        legacyEnvKeys,
+        teamId: restoredMe.teamId,
+      })
       if (this.sessionGeneration !== restoreGeneration || this.sessionToken !== token) {
         if (this.me) {
           await this.bindCurrentChatStore(this.me.id)
@@ -1503,46 +1580,51 @@ export class AppService {
     token: string
     me: SessionMe
   }): Promise<SessionState> {
-    const previousToken = this.sessionToken
-    const previousMe = this.me
-    const previousGeneration = this.sessionGeneration
-    const hadAuthenticatedScope = Boolean(previousToken && previousMe)
-    if (hadAuthenticatedScope) {
-      try {
-        await this.suspendDesktopGfsUploadsForAuthBoundary()
-      } catch (error) {
-        if (
-          this.sessionGeneration === previousGeneration &&
-          this.sessionToken === previousToken &&
-          this.me === previousMe
-        ) {
-          this.activateGfsAuthScope()
+    const releasePrewarm = this.beginPrewarmAuthTransition()
+    try {
+      const previousToken = this.sessionToken
+      const previousMe = this.me
+      const previousGeneration = this.sessionGeneration
+      const hadAuthenticatedScope = Boolean(previousToken && previousMe)
+      if (hadAuthenticatedScope) {
+        try {
+          await this.suspendDesktopGfsUploadsForAuthBoundary()
+        } catch (error) {
+          if (
+            this.sessionGeneration === previousGeneration &&
+            this.sessionToken === previousToken &&
+            this.me === previousMe
+          ) {
+            this.activateGfsAuthScope()
+          }
+          throw error
         }
-        throw error
+        if (
+          this.sessionGeneration !== previousGeneration ||
+          this.sessionToken !== previousToken ||
+          this.me !== previousMe
+        ) {
+          throw new Error('stale_auth_epoch: authenticated scope changed during login replacement')
+        }
       }
-      if (
-        this.sessionGeneration !== previousGeneration ||
-        this.sessionToken !== previousToken ||
-        this.me !== previousMe
-      ) {
-        throw new Error('stale_auth_epoch: authenticated scope changed during login replacement')
-      }
+      this.logoutInProgress = false
+      this.sessionGeneration += 1
+      this.sessionToken = result.token
+      this.me = result.me
+      this.updateEntityChangeSessionToken(result.token)
+      this.restartEntityChangeStreamForSessionReplacement()
+      await this.bindCurrentChatStore(result.me.id)
+      this.accessCatalog = null
+      this.teamDirectoryCache = null
+      this.workflowApprovalTeamById.clear()
+      this.workflowTeamByKey.clear()
+      this.rpcTokenManager.clear()
+      await this.tokenStore.setSessionToken(result.token, getActiveEnvKey())
+      this.activateGfsAuthScope()
+      return { authenticated: true, me: result.me }
+    } finally {
+      releasePrewarm()
     }
-    this.logoutInProgress = false
-    this.sessionGeneration += 1
-    this.sessionToken = result.token
-    this.me = result.me
-    this.updateEntityChangeSessionToken(result.token)
-    this.restartEntityChangeStreamForSessionReplacement()
-    await this.bindCurrentChatStore(result.me.id)
-    this.accessCatalog = null
-    this.teamDirectoryCache = null
-    this.workflowApprovalTeamById.clear()
-    this.workflowTeamByKey.clear()
-    this.rpcTokenManager.clear()
-    await this.tokenStore.setSessionToken(result.token, getActiveEnvKey())
-    this.activateGfsAuthScope()
-    return { authenticated: true, me: result.me }
   }
 
   private async completePasswordLogin(email: string, password: string): Promise<SessionState> {
@@ -1585,28 +1667,33 @@ export class AppService {
   }
 
   private async applyRuntimeEnvironmentChange(operation: () => Promise<void>): Promise<void> {
-    const oldEnvKey = getActiveEnvKey()
-    const oldBaseUrl = normalizeDesktopUploadBaseUrl(config.externalRestApiBaseUrl)
-    const oldLegacyEnvKeys = getActiveLegacyEnvKeys()
-    const hadAuthenticatedScope = Boolean(this.sessionToken && this.me)
-    // Invalidate a restore that may still be awaiting keychain/getMe before it
-    // can bind an old-environment token to the newly selected runtime.
-    this.sessionGeneration += 1
-    if (hadAuthenticatedScope) await this.suspendDesktopGfsUploadsForAuthBoundary()
+    const releasePrewarm = this.beginPrewarmAuthTransition()
     try {
-      await operation()
-    } catch (error) {
-      if (hadAuthenticatedScope && this.sessionToken && this.me) this.activateGfsAuthScope()
-      throw error
-    }
-    const boundaryChanged =
-      getActiveEnvKey() !== oldEnvKey ||
-      normalizeDesktopUploadBaseUrl(config.externalRestApiBaseUrl) !== oldBaseUrl
-    if (boundaryChanged) {
-      this.clearAuthenticatedSessionState()
-      await this.tokenStore.clearSessionToken(oldEnvKey, { legacyEnvKeys: oldLegacyEnvKeys })
-    } else if (hadAuthenticatedScope && this.sessionToken && this.me) {
-      this.activateGfsAuthScope()
+      const oldEnvKey = getActiveEnvKey()
+      const oldBaseUrl = normalizeDesktopUploadBaseUrl(config.externalRestApiBaseUrl)
+      const oldLegacyEnvKeys = getActiveLegacyEnvKeys()
+      const hadAuthenticatedScope = Boolean(this.sessionToken && this.me)
+      // Invalidate a restore that may still be awaiting keychain/getMe before it
+      // can bind an old-environment token to the newly selected runtime.
+      this.sessionGeneration += 1
+      if (hadAuthenticatedScope) await this.suspendDesktopGfsUploadsForAuthBoundary()
+      try {
+        await operation()
+      } catch (error) {
+        if (hadAuthenticatedScope && this.sessionToken && this.me) this.activateGfsAuthScope()
+        throw error
+      }
+      const boundaryChanged =
+        getActiveEnvKey() !== oldEnvKey ||
+        normalizeDesktopUploadBaseUrl(config.externalRestApiBaseUrl) !== oldBaseUrl
+      if (boundaryChanged) {
+        this.clearAuthenticatedSessionState()
+        await this.tokenStore.clearSessionToken(oldEnvKey, { legacyEnvKeys: oldLegacyEnvKeys })
+      } else if (hadAuthenticatedScope && this.sessionToken && this.me) {
+        this.activateGfsAuthScope()
+      }
+    } finally {
+      releasePrewarm()
     }
   }
 
@@ -1948,6 +2035,7 @@ export class AppService {
 
   async logout(): Promise<void> {
     this.logoutInProgress = true
+    const releasePrewarm = this.beginPrewarmAuthTransition()
     try {
       const envKey = getActiveEnvKey()
       const legacyEnvKeys = getActiveLegacyEnvKeys()
@@ -1958,6 +2046,7 @@ export class AppService {
       // result must not: the next user of this machine gets nothing of this one's.
       tryGetPluginSdkRuntime()?.notifySessionChanged(false)
     } finally {
+      releasePrewarm()
       this.logoutInProgress = false
     }
   }
@@ -3264,6 +3353,9 @@ export class AppService {
   async switchTeam(teamId: string): Promise<SessionState> {
     const targetTeamId = String(teamId || '').trim()
     if (!targetTeamId) throw new Error('teamId is required')
+    // Explicit team changes fence opportunistic wake immediately. A failed
+    // switch can safely leave prewarm canceled; the message path remains live.
+    const releasePrewarm = this.beginPrewarmAuthTransition()
     const previousIdentity =
       this.gfsScopeIdentity ?? (this.me ? desktopGfsUploadIdentity(this.me) : undefined)
     // Keep the new team token fenced until the old GFS jobs have been
@@ -3316,6 +3408,7 @@ export class AppService {
       tryGetPluginSdkRuntime()?.notifySessionChanged(true)
       return { authenticated: true, me: this.me }
     } finally {
+      releasePrewarm()
       releaseTransientHop()
     }
   }
@@ -3683,6 +3776,10 @@ export class AppService {
     if (!targetHostRef) {
       throw new Error('hostRef is required')
     }
+    if (this.prewarmAuthTransitionCount > 0) {
+      return { requested: false, skipped: 'auth-changed' }
+    }
+    const authEpoch = this.prewarmAuthEpoch
     const now = Date.now()
     const lastAttemptAt = this.prewarmAttemptAtByHostRef.get(targetHostRef)
     if (lastAttemptAt !== undefined && now - lastAttemptAt < PREWARM_COOLDOWN_MS) {
@@ -3708,14 +3805,23 @@ export class AppService {
         HOST_WAKEABLE_OPERATION_SCOPES,
         effectiveHostRefs
       )
+      if (this.prewarmAuthEpoch !== authEpoch || this.prewarmAuthTransitionCount > 0) {
+        return { requested: false, skipped: 'auth-changed' }
+      }
       const result = await this.rpcClient.prewarmHost(rpc.token, targetHostRef)
-      if (result.status === 'wake-requested') {
+      if (
+        result.status === 'wake-requested' &&
+        this.prewarmAuthEpoch === authEpoch &&
+        this.prewarmAuthTransitionCount === 0
+      ) {
         // HCC has not acted yet and its watch may have lost the event. Run
         // the bounded background re-emission tied to THIS catalog-driven
         // invocation — the renderer never awaits it, and the cooldown gate
         // (checked above, not refreshed by re-emits) keeps it single-flight.
         this.prewarmReemitLoopHostRefs.add(targetHostRef)
-        void this.runPrewarmReemissionLoop(targetHostRef, rpc.token)
+        const controller = new AbortController()
+        this.prewarmReemitAbortControllers.set(targetHostRef, controller)
+        void this.runPrewarmReemissionLoop(targetHostRef, rpc.token, authEpoch, controller.signal)
       }
       return { requested: true, status: result.status }
     } catch (error) {
@@ -3726,8 +3832,23 @@ export class AppService {
   }
 
   /** Injectable so tests stay deterministic; fake timers advance it. */
-  private prewarmReemitDelay = (ms: number): Promise<void> =>
-    new Promise(resolve => setTimeout(resolve, ms))
+  private prewarmReemitDelay = (ms: number, signal?: AbortSignal): Promise<void> =>
+    new Promise(resolve => {
+      if (signal?.aborted) {
+        resolve()
+        return
+      }
+      const timer = setTimeout(() => {
+        signal?.removeEventListener('abort', abort)
+        resolve()
+      }, ms)
+      const abort = () => {
+        clearTimeout(timer)
+        signal?.removeEventListener('abort', abort)
+        resolve()
+      }
+      signal?.addEventListener('abort', abort, { once: true })
+    })
 
   /**
    * Bounded background wake re-emission (see PREWARM_REEMIT_* constants).
@@ -3739,10 +3860,16 @@ export class AppService {
    * the cooldown window. Deliberately NOT reachable from the host status
    * stream lifecycle — the anti-flap invariant is unchanged.
    */
-  private async runPrewarmReemissionLoop(hostRef: string, rpcToken: string): Promise<void> {
+  private async runPrewarmReemissionLoop(
+    hostRef: string,
+    rpcToken: string,
+    authEpoch: number,
+    signal: AbortSignal
+  ): Promise<void> {
     try {
       for (let attempt = 1; attempt <= PREWARM_REEMIT_MAX_ATTEMPTS; attempt++) {
-        await this.prewarmReemitDelay(PREWARM_REEMIT_INTERVAL_MS)
+        await this.prewarmReemitDelay(PREWARM_REEMIT_INTERVAL_MS, signal)
+        if (signal.aborted || this.prewarmAuthEpoch !== authEpoch) return
         const result = await this.rpcClient.prewarmHost(rpcToken, hostRef)
         console.info(
           `[AppService] prewarmHost re-emit host=${hostRef} attempt=${attempt} status=${result.status}`
@@ -3758,7 +3885,10 @@ export class AppService {
       const message = error instanceof Error ? error.message : String(error)
       console.warn(`[AppService] prewarmHost re-emit failed host=${hostRef}: ${message}`)
     } finally {
-      this.prewarmReemitLoopHostRefs.delete(hostRef)
+      if (this.prewarmReemitAbortControllers.get(hostRef)?.signal === signal) {
+        this.prewarmReemitLoopHostRefs.delete(hostRef)
+        this.prewarmReemitAbortControllers.delete(hostRef)
+      }
     }
   }
 
@@ -4489,12 +4619,10 @@ export class AppService {
     try {
       return await this.rpcClient.listSessions(rpc.token, targetHostRef, query)
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      if (message.includes('401') && message.toLowerCase().includes('missing token')) {
-        console.warn(
-          '[AppService] Session catalog unavailable because the runtime rejected the session token.'
-        )
-        return { items: [] }
+      if (AppService.shouldRefreshRpcToken(error)) {
+        this.rpcTokenManager.clear()
+        const retried = await this.issueRpcTokenForHostRefs(HOST_SESSION_SCOPES, effectiveHostRefs)
+        return this.rpcClient.listSessions(retried.token, targetHostRef, query)
       }
       throw error
     }
@@ -4522,19 +4650,16 @@ export class AppService {
         query
       )
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      if (message.includes('401') && message.toLowerCase().includes('missing token')) {
-        console.warn(
-          '[AppService] Session messages unavailable because the runtime rejected the session token.'
-        )
-        return {
+      if (AppService.shouldRefreshRpcToken(error)) {
+        this.rpcTokenManager.clear()
+        const retried = await this.issueRpcTokenForHostRefs(HOST_SESSION_SCOPES, effectiveHostRefs)
+        return this.rpcClient.loadSessionMessages(
+          retried.token,
+          targetHostRef,
           agent,
           chatId,
-          turns: [],
-          totalTurns: 0,
-          hasMoreBefore: false,
-          hasMoreAfter: false,
-        }
+          query
+        )
       }
       throw error
     }

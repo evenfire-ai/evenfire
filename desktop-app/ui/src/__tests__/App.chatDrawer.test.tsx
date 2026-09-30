@@ -100,6 +100,8 @@ const appHeaderHarness = vi.hoisted(() => ({
   // Captured from context so tests can drive the "open conversation" gesture the
   // notification tray fires.
   openNotification: null as null | ((notification: AppNotification) => Promise<void>),
+  notifications: [] as AppNotification[],
+  unreadNotificationCount: 0,
 }))
 
 vi.mock('@hooks/useAppController', () => ({ useAppController: vi.fn() }))
@@ -107,7 +109,10 @@ vi.mock('@hooks/useAgentChatActionsValue', () => ({ useAgentChatActionsValue: ()
 vi.mock('@components/AppHeader', () => ({
   AppHeader: (props: NonNullable<typeof appHeaderHarness.props>) => {
     appHeaderHarness.props = props
-    appHeaderHarness.openNotification = useNotificationsContext().handleOpenNotification
+    const notificationsContext = useNotificationsContext()
+    appHeaderHarness.openNotification = notificationsContext.handleOpenNotification
+    appHeaderHarness.notifications = notificationsContext.notifications
+    appHeaderHarness.unreadNotificationCount = notificationsContext.unreadNotificationCount
     return null
   },
 }))
@@ -349,6 +354,7 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     authTransitioning: false,
     handleEnsureTeamContext: vi.fn(async () => false),
     getCurrentTeamId: vi.fn(() => 'team-a'),
+    isHostAccessBlocked: vi.fn(() => false),
     handleSelectChatAgent,
     handleOpenNotification,
     handleNavSelect,
@@ -413,6 +419,8 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
     sandboxUiPageHarness.props = null
     appHeaderHarness.props = null
     appHeaderHarness.openNotification = null
+    appHeaderHarness.notifications = []
+    appHeaderHarness.unreadNotificationCount = 0
     currentController = makeController()
     vi.mocked(useAppController).mockImplementation(() => useReactiveController(currentController))
     Object.defineProperty(window, 'clerum', {
@@ -483,6 +491,40 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
 
     // Reopen must preserve chat-2, not jump back to the chat-1 origin.
     expect(screen.getByRole('button', { name: 'Open chats' }).textContent).toContain('Second chat')
+  })
+
+  it('hides already-delivered notifications after a Host is revoked', () => {
+    const notification = {
+      id: 'approval-1',
+      kind: 'approval_required',
+      agentName: 'alpha',
+      text: 'Approval required',
+      timestamp: 1,
+      read: false,
+    } as AppNotification
+    let hostBlocked = false
+    let hostAuthorityRevision = 0
+    const isHostAccessBlocked = vi.fn(() => hostBlocked)
+    currentController = makeController({
+      notifications: [notification],
+      isHostAccessBlocked,
+      hostAuthorityRevision,
+    } as Partial<AppController>)
+
+    const { rerender } = render(<App />)
+
+    expect(appHeaderHarness.notifications).toEqual([notification])
+    expect(appHeaderHarness.unreadNotificationCount).toBe(1)
+
+    act(() => {
+      hostBlocked = true
+      hostAuthorityRevision += 1
+      currentController.hostAuthorityRevision = hostAuthorityRevision
+      rerender(<App />)
+    })
+
+    expect(appHeaderHarness.notifications).toEqual([])
+    expect(appHeaderHarness.unreadNotificationCount).toBe(0)
   })
 
   // The header's "Open chat in full screen" CTA must EJECT the drawer's ACTIVE

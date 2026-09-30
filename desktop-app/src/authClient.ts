@@ -26,6 +26,7 @@ import {
   WorkflowRunCompletedNotification,
   WorkflowRunsResult,
 } from './types.js'
+import { boundedErrorExcerpt } from './upstreamErrors.js'
 
 function url(path: string): string {
   return `${config.externalRestApiBaseUrl.replace(/\/+$/, '')}${path}`
@@ -517,7 +518,7 @@ export class AuthClient {
     if (!response.ok) {
       const body = await readErrorBody(response)
       throw new ApiError(
-        `Notification stream failed (${response.status}): ${body || response.statusText}`,
+        `Notification stream failed (${response.status}): ${boundedErrorExcerpt(body) || response.statusText}`,
         response.status,
         body
       )
@@ -580,7 +581,7 @@ export class AuthClient {
     if (!response.ok) {
       const body = await readErrorBody(response)
       throw new ApiError(
-        `Entity change stream failed (${response.status}): ${body || response.statusText}`,
+        `Entity change stream failed (${response.status}): ${boundedErrorExcerpt(body) || response.statusText}`,
         response.status,
         body,
         response.headers.get('retry-after')
@@ -731,7 +732,7 @@ export class AuthClient {
     if (!response.ok) {
       const body = await readErrorBody(response)
       throw new ApiError(
-        `Download workflow artifact failed (${response.status}): ${body || response.statusText}`,
+        `Download workflow artifact failed (${response.status}): ${boundedErrorExcerpt(body) || response.statusText}`,
         response.status,
         body
       )

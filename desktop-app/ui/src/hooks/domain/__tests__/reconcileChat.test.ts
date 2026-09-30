@@ -25,6 +25,8 @@ function liveResp(overrides: Partial<SessionMessagesResult> = {}): SessionMessag
 
 class NetErr extends Error {}
 class NotFound extends Error {}
+class Unavailable extends Error {}
+class Unauthorized extends Error {}
 
 function buildDeps(overrides: Partial<ReconcileChatDeps> = {}): ReconcileChatDeps {
   const fsm = createSessionFsmStore()
@@ -35,9 +37,13 @@ function buildDeps(overrides: Partial<ReconcileChatDeps> = {}): ReconcileChatDep
     // the view (so a rejoin can anchor to the rendered bubble, P1-A) before attach.
     attachLiveTask: vi.fn(async () => 'reconcile_rejoined' as const),
     settleIdle: vi.fn(async () => 'fell_through_to_resend' as const),
-    evictChat: vi.fn(async () => {}),
+    revokeAccess: vi.fn(),
+    holdAccess: vi.fn(),
     isNetworkError: (e): e is NetErr => e instanceof NetErr,
     isHttp404: (e): e is NotFound => e instanceof NotFound,
+    isAuthorizationError: (e): e is Unauthorized => e instanceof Unauthorized,
+    isConfirmedHostAccessRevoked: e =>
+      e instanceof Unauthorized && e.message === 'verified-host-403',
     telemetry: vi.fn(),
     networkRetryBackoffMs: [0, 0, 0],
     ...overrides,
@@ -78,22 +84,51 @@ describe('reconcileChat — precedence branches', () => {
     })
   })
 
-  it('404 evicts the chat, dispatches RESET, and does NOT re-finish', async () => {
+  it.each([
+    ['transient 404', new NotFound('not found during wake')],
+    ['503', new Unavailable('service unavailable')],
+    ['timeout', new NetErr('timeout')],
+  ])('%s retains the selected conversation and draft state', async (_name, error) => {
     const deps = buildDeps({
       loadSessionMessages: vi.fn(async () => {
-        throw new NotFound('gone')
+        throw error
       }),
     })
-    // Seed an entry so we can observe RESET removing it.
+    // The FSM entry represents the selected conversation. A destructive reset
+    // would also cause the controller to clear its conversation and composer.
     deps.fsm.dispatch(chatKey, { type: 'SEND_STARTED', taskId: 't1' })
     const reconcile = createReconcileChat(deps)
     await reconcile(chatKey, { reason: 'user_refresh' })
-    expect(deps.evictChat).toHaveBeenCalledWith(chatKey)
-    expect(deps.fsm.getState(chatKey)).toBeUndefined() // RESET removed it, FINISHED skipped
-    expect(deps.telemetry).toHaveBeenCalledWith('stream_recovery', {
-      reason: 'user_refresh',
-      outcome: '404',
+    expect(deps.revokeAccess).not.toHaveBeenCalled()
+    expect(deps.fsm.getState(chatKey)).toBeDefined()
+  })
+
+  it.each([401, 403])('%i holds protected data pending renewed authority', async status => {
+    const deps = buildDeps({
+      loadSessionMessages: vi.fn(async () => {
+        throw new Unauthorized(String(status))
+      }),
     })
+    deps.fsm.dispatch(chatKey, { type: 'SEND_STARTED', taskId: 't1' })
+    const reconcile = createReconcileChat(deps)
+    await expect(reconcile(chatKey, { reason: 'user_refresh' })).resolves.toBe(
+      'authority_unverified'
+    )
+    expect(deps.holdAccess).toHaveBeenCalledWith(chatKey)
+    expect(deps.revokeAccess).not.toHaveBeenCalled()
+    expect(deps.fsm.getState(chatKey)).toBeUndefined()
+  })
+
+  it('revokes immediately for a verified Host denial', async () => {
+    const deps = buildDeps({
+      loadSessionMessages: vi.fn(async () => {
+        throw new Unauthorized('verified-host-403')
+      }),
+    })
+    const reconcile = createReconcileChat(deps)
+    await expect(reconcile(chatKey, { reason: 'user_refresh' })).resolves.toBe('revoked')
+    expect(deps.revokeAccess).toHaveBeenCalledWith(chatKey)
+    expect(deps.holdAccess).not.toHaveBeenCalled()
   })
 
   it('exhausted network retries → WENT_OFFLINE + offline outcome', async () => {
@@ -234,7 +269,7 @@ describe('reconcileChat — single-flight', () => {
     )
   })
 
-  it('drops a late 404 after reset instead of evicting the next session cache', async () => {
+  it('drops a late 404 after reset without changing the next session cache', async () => {
     let rejectLoad: (reason: unknown) => void = () => {}
     const load = vi.fn(
       (_agentRef: string, _chatId: string, _query: unknown, stillRelevant?: () => boolean) => {
@@ -255,8 +290,51 @@ describe('reconcileChat — single-flight', () => {
     rejectLoad(new NotFound('late response'))
 
     await expect(pending).resolves.toBe('noop')
-    expect(deps.evictChat).not.toHaveBeenCalled()
+    expect(deps.revokeAccess).not.toHaveBeenCalled()
     expect(deps.fsm.getState(chatKey)).toBeUndefined()
+  })
+
+  it('holds a Host when an old chat read returns generic 403 after selection moves', async () => {
+    let rejectLoad: (reason: unknown) => void = () => {}
+    let firstChatSelected = true
+    const deps = buildDeps({
+      loadSessionMessages: vi.fn(
+        () =>
+          new Promise<SessionMessagesResult>((_resolve, reject) => {
+            rejectLoad = reject
+          })
+      ),
+    })
+    const reconcile = createReconcileChat(deps)
+    const pending = reconcile(chatKey, {
+      reason: 'switch_to_chat',
+      isRelevant: () => firstChatSelected,
+    })
+    firstChatSelected = false
+    rejectLoad(new Unauthorized('403 forbidden'))
+
+    await expect(pending).resolves.toBe('authority_unverified')
+    expect(deps.holdAccess).toHaveBeenCalledWith(chatKey)
+  })
+
+  it('ignores a late 403 after reset tears down the principal scope', async () => {
+    let rejectLoad: (reason: unknown) => void = () => {}
+    const deps = buildDeps({
+      loadSessionMessages: vi.fn(
+        () =>
+          new Promise<SessionMessagesResult>((_resolve, reject) => {
+            rejectLoad = reject
+          })
+      ),
+    })
+    const reconcile = createReconcileChat(deps)
+    const pending = reconcile(chatKey, { reason: 'old-principal' })
+    reconcile.reset()
+    deps.fsm.reset()
+    rejectLoad(new Unauthorized('403 forbidden'))
+
+    await expect(pending).resolves.toBe('stale_drop')
+    expect(deps.revokeAccess).not.toHaveBeenCalled()
   })
 
   it('a coalesced caller donates its taskIdHint to a hint-less in-flight run (M6)', async () => {

@@ -358,7 +358,7 @@ describe('HostReconciler wake fast-path — wake × state transition matrix', ()
       )
       expect(
         logSpy.mock.calls
-          .map(args => String(args[0]))
+          .map(args => JSON.parse(String(args[0])).msg as string)
           .some(line => line.includes('phase=replicas_patched'))
       ).toBe(true)
     } finally {
@@ -581,7 +581,7 @@ describe('HostReconciler wake fast-path — durability and restart behavior', ()
         String(args[0]).includes('Malformed clerum.io/wake-requested')
       )
       expect(malformedLogs).toHaveLength(1)
-      expect(String(malformedLogs[0][0])).toContain('"not-a-number"')
+      expect(JSON.parse(String(malformedLogs[0][0])).msg).toContain('"not-a-number"')
     } finally {
       errorSpy.mockRestore()
     }
@@ -599,7 +599,7 @@ describe('HostReconciler wake fast-path — structured wake timestamps (Stage 6,
       await reconciler.reconcile(makeWakeHost({ wakeRequested: '2', state: 'suspended' }))
 
       const wakeLines = logSpy.mock.calls
-        .map(args => String(args[0]))
+        .map(args => JSON.parse(String(args[0])).msg as string)
         .filter(line => line.startsWith('[StatelessWake]'))
       expect(wakeLines).toEqual([
         expect.stringMatching(
@@ -628,7 +628,7 @@ describe('HostReconciler wake fast-path — structured wake timestamps (Stage 6,
         makeWakeHost({ wakeRequested: '4', state: 'draining', wakeHandledGeneration: 1 })
       )
 
-      const lines = logSpy.mock.calls.map(args => String(args[0]))
+      const lines = logSpy.mock.calls.map(args => JSON.parse(String(args[0])).msg as string)
       const phases = lines
         .filter(line => line.startsWith('[StatelessWake]'))
         .map(line => /phase=(\w+)/.exec(line)?.[1])
@@ -683,7 +683,7 @@ describe('HostReconciler — scale-transition counter (Stage 6 metric)', () => {
       await reconciler.suspendHostFromHeartbeat(host, 'idle', 2)
 
       const metricLines = logSpy.mock.calls
-        .map(args => String(args[0]))
+        .map(args => JSON.parse(String(args[0])).msg as string)
         .filter(line => line.startsWith('[StatelessMetric]'))
       expect(metricLines).toEqual([
         '[StatelessMetric] scale_transition host=stateless-host direction=up total=1',
@@ -691,7 +691,7 @@ describe('HostReconciler — scale-transition counter (Stage 6 metric)', () => {
       ])
 
       const suspendLines = logSpy.mock.calls
-        .map(args => String(args[0]))
+        .map(args => JSON.parse(String(args[0])).msg as string)
         .filter(line => line.startsWith('[StatelessSuspend]'))
       expect(suspendLines).toEqual([
         expect.stringMatching(
@@ -720,7 +720,7 @@ describe('HostReconciler wake fast-path — AP-1 fresh re-decide at the commit p
 
       expect(customApi.patchNamespacedCustomObjectStatus).not.toHaveBeenCalled()
       expect(appsApi.patchNamespacedDeployment).not.toHaveBeenCalled()
-      const lines = logSpy.mock.calls.map(args => String(args[0]))
+      const lines = logSpy.mock.calls.map(args => JSON.parse(String(args[0])).msg as string)
       expect(lines.filter(line => line.startsWith('[StatelessWake]'))).toEqual([])
       expect(lines.filter(line => line.includes('Wake fast-path for'))).toEqual([])
     } finally {
@@ -786,7 +786,7 @@ describe('HostReconciler wake fast-path — AP-1 fresh re-decide at the commit p
       expect(writes[0].lifecycle).toEqual({ state: 'active', wakeHandledGeneration: 5 })
       expect(appsApi.patchNamespacedDeployment).toHaveBeenCalledTimes(1)
       const phases = logSpy.mock.calls
-        .map(args => String(args[0]))
+        .map(args => JSON.parse(String(args[0])).msg as string)
         .filter(line => line.startsWith('[StatelessWake]'))
         .map(line => /phase=(\w+)/.exec(line)?.[1])
       expect(phases).toEqual(['wake_observed', 'status_flipped', 'replicas_patched'])
@@ -814,7 +814,7 @@ describe('HostReconciler wake fast-path — AP-1 fresh re-decide at the commit p
       expect(writes.at(-1)?.lifecycle).toEqual({ state: 'active', wakeHandledGeneration: 2 })
       expect(appsApi.patchNamespacedDeployment).toHaveBeenCalledTimes(1)
       const flipped = logSpy.mock.calls
-        .map(args => String(args[0]))
+        .map(args => JSON.parse(String(args[0])).msg as string)
         .filter(line => line.includes('phase=status_flipped'))
       expect(flipped).toHaveLength(1)
     } finally {
@@ -839,7 +839,7 @@ describe('HostReconciler wake fast-path — AP-1 fresh re-decide at the commit p
       expect(customApi.patchNamespacedCustomObjectStatus).toHaveBeenCalledTimes(1)
       expect(appsApi.patchNamespacedDeployment).not.toHaveBeenCalled()
       const flipped = logSpy.mock.calls
-        .map(args => String(args[0]))
+        .map(args => JSON.parse(String(args[0])).msg as string)
         .filter(line => line.includes('phase=status_flipped'))
       expect(flipped).toEqual([])
     } finally {

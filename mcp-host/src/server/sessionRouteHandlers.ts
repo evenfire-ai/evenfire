@@ -91,6 +91,12 @@ export function createSessionRouteHandlers(deps: SessionRouteHandlerDeps) {
     const keyPrefix = agent ? `${userSub}:rpc:${agent}:` : `${userSub}:rpc:`
     const cursorScope = sessionsCursorScope(userSub, agent)
     const cursor = decodeSessionsCursor(query.cursor, cursorScope)
+    // A cursor that does not decode for this scope is a caller error. Treating
+    // it as "no cursor" would silently restart the listing at page 1. The HTTP
+    // route rejects it with 400 before reaching here; this guards other callers.
+    if (query.cursor !== undefined && cursor === null) {
+      throw new Error('Invalid sessions cursor')
+    }
     const entries = await convManager.listSessionSummariesForUserAsync(keyPrefix, {
       limit: query.limit === undefined ? undefined : query.limit + 1,
       cursor: cursor

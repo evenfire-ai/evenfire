@@ -1160,11 +1160,11 @@ export const config: Config = {
   ),
   // Default derived from the wake mechanism's worst case, not picked ad hoc.
   // rpc-proxy's wake-and-hold loop re-triggers POST /rpc/hosts/:hostRef/wake
-  // every wakeRetriggerMs=15000 for up to wakeMaxHoldMs=90000 (defaults in
+  // every wakeRetriggerMs=15000 for up to wakeMaxHoldMs=48000 (defaults in
   // rpc-proxy/src/config.ts), so one held request costs
-  // 1 + floor(90000/15000) = 7 calls per rpc-proxy instance; rpc-proxy runs
+  // 1 + floor(48000/15000) = 4 calls per rpc-proxy instance; rpc-proxy runs
   // replicas: 2 (deploy/base/rpc-proxy/rpc-proxy.yaml) with per-instance
-  // dedup, so the mechanism alone can emit 14 calls / 90s (~9.4/min) per
+  // dedup, so the mechanism alone can emit 8 calls / 48s (10.0/min) per
   // host. Desktop prewarm adds a burst of up to 3 calls per device.
   // Middleware order in routes/rpc-access/hosts.ts is limiter BEFORE
   // handler, and the hostWakeCoalesceWindowMs coalescer runs INSIDE the

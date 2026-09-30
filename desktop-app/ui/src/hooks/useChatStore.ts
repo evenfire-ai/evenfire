@@ -1,5 +1,7 @@
 import { useCallback } from 'react'
 import type {
+  ChatAuthorityScope,
+  ChatDeleteFence,
   ChatMessage,
   ReplaceChatMessagesOptions,
   SessionMessagesQuery,
@@ -38,6 +40,8 @@ const SESSION_CATALOG_TTL_MS = 5_000
 
 type CachedRequest<T> = {
   expiresAt: number
+  /** Host the request was issued against; the key's scope segment may contain ':'. */
+  hostRef: string
   promise: Promise<T>
 }
 
@@ -64,12 +68,19 @@ export function useChatStore() {
     []
   )
   const renameChat = useCallback(
-    (agentRef: string, chatId: string, title: string) =>
-      window.clerum.chat.rename(agentRef, chatId, title),
+    (agentRef: string, chatId: string, title: string, bindingGeneration: number) =>
+      window.clerum.chat.rename(agentRef, chatId, title, bindingGeneration),
+    []
+  )
+  const getBindingGeneration = useCallback(() => window.clerum.chat.getBindingGeneration(), [])
+  const captureDeleteFence = useCallback(
+    (expectedAuthorityScope: ChatAuthorityScope) =>
+      window.clerum.chat.captureDeleteFence(expectedAuthorityScope),
     []
   )
   const deleteChat = useCallback(
-    (agentRef: string, chatId: string) => window.clerum.chat.delete(agentRef, chatId),
+    (agentRef: string, chatId: string, fence: ChatDeleteFence) =>
+      window.clerum.chat.delete(agentRef, chatId, fence),
     []
   )
   const loadMessages = useCallback(
@@ -80,6 +91,11 @@ export function useChatStore() {
   const appendMessages = useCallback(
     (agentRef: string, chatId: string, messages: ChatMessage[]) =>
       window.clerum.chat.appendMessages(agentRef, chatId, messages),
+    []
+  )
+  const upsertMessages = useCallback(
+    (agentRef: string, chatId: string, messages: ChatMessage[]) =>
+      window.clerum.chat.upsertMessages(agentRef, chatId, messages),
     []
   )
   const backfillCounters = useCallback(
@@ -148,15 +164,18 @@ export function useChatStore() {
       const cached = sessionCatalogRequests.get(key)
       if (!options.force && cached && cached.expiresAt > Date.now()) return cached.promise
 
-      const promise = source(hostRef, undefined, query).catch(error => {
-        sessionCatalogRequests.delete(key)
-        throw error
-      })
-      sessionCatalogRequests.set(key, {
+      const entry: CachedRequest<SessionsListResult> = {
         expiresAt: Date.now() + SESSION_CATALOG_TTL_MS,
-        promise,
-      })
-      return promise
+        hostRef,
+        promise: source(hostRef, undefined, query).catch(error => {
+          // An invalidation may have replaced this entry with a newer request
+          // under the same key; only this request's own entry is evicted.
+          if (sessionCatalogRequests.get(key) === entry) sessionCatalogRequests.delete(key)
+          throw error
+        }),
+      }
+      sessionCatalogRequests.set(key, entry)
+      return entry.promise
     },
     []
   )
@@ -195,6 +214,14 @@ export function useChatStore() {
   const clearCachedRemoteData = useCallback(() => {
     sessionCatalogRequests.clear()
     sessionCatalogSource = null
+  }, [])
+  // F4: a catalog request issued before a Host hold carries the authority of
+  // that moment. Dropping it when the Host is held keeps a reader that starts
+  // after `verifyHostAccess` released the hold from sharing it.
+  const invalidateSessionCatalog = useCallback((hostRef: string) => {
+    for (const [key, cached] of sessionCatalogRequests) {
+      if (cached.hostRef === hostRef) sessionCatalogRequests.delete(key)
+    }
   }, [])
   const setRemoteCacheScope = useCallback((scope: string) => {
     if (remoteCacheScope === scope) return
@@ -244,9 +271,12 @@ export function useChatStore() {
     listChats,
     createChat,
     renameChat,
+    getBindingGeneration,
+    captureDeleteFence,
     deleteChat,
     loadMessages,
     appendMessages,
+    upsertMessages,
     replaceMessages,
     backfillCounters,
     markUnreadTerminal,
@@ -263,6 +293,7 @@ export function useChatStore() {
     setHostModel,
     renameSession,
     clearCachedRemoteData,
+    invalidateSessionCatalog,
     setRemoteCacheScope,
     setPendingModel,
     getPendingModel,
