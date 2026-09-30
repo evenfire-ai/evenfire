@@ -184,10 +184,11 @@ export function createMcpHostLlmProviderAttemptRoutes(gateway: K8sGateway): Rout
   // carry no body and go to the global handler, which logs no body. The log
   // carries only the fixed parser `type` and the status: `err.message` of a
   // JSON.parse error can quote a fragment of the body. It goes through the
-  // request-scoped logger when there is one, so it keeps the correlationId.
+  // request-scoped logger when there is one, so it keeps the correlationId;
+  // that logger lacks this route's module binding, so it is added back.
   router.use((err: unknown, req: Request, res: Response, next: NextFunction) => {
     const typed = err as { type?: string; status?: number }
-    const requestLog = req.log ?? log
+    const requestLog = req.log?.child({ module: 'mcp-host-llm-provider-attempts' }) ?? log
     const refuse = (status: number, error: string): void => {
       requestLog.warn({ event: 'llm_provider_attempt_body_refused', type: typed.type, status })
       res.status(status).json({ error })
