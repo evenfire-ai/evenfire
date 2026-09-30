@@ -14,7 +14,7 @@ import {
 } from './registryIdentityCache.js'
 
 /**
- * Thrown when no voucher signing key/kid is resolvable (route maps to 500
+ * Thrown when no accepted voucher signing key/kid is resolvable (route maps to 500
  * registry_voucher_unavailable). Authoritative home is here so
  * `resolveVoucherSigningMaterial` can throw it without importing
  * registryVoucher.ts (which would cycle). registryVoucher.ts re-exports it so
@@ -211,10 +211,7 @@ export async function resolveVoucherSigningMaterial(): Promise<{
     const row = await getRegistryConnection()
     if (!row || !row.privateKeyPem || !row.keyId) throw new VoucherUnavailableError()
     if (isBannedSigningKeyPem(row.privateKeyPem)) {
-      throw new Error(
-        '[SECURITY] registry_connection voucher signing key is a historically committed dev ' +
-          'JWT key; replace it through registry enrollment.'
-      )
+      throw new VoucherUnavailableError()
     }
     return { signingKey: row.privateKeyPem, kid: row.keyId }
   }

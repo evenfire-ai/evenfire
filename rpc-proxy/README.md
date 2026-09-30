@@ -40,16 +40,17 @@ External-facing user-scoped JSON-RPC proxy for MCP servers and MCP hosts.
 
 Host runtime routes in `rpc-proxy` are REST-oriented and scope-specific. The status stream is a read-only telemetry channel.
 
-| Endpoint | Method | Required Scope | Access Type | Transport |
-| --- | --- | --- | --- | --- |
-| `/api/v1/rpc/hosts/:hostRef/messages` | `POST` | `host:message:invoke` | Write | REST |
-| `/api/v1/rpc/hosts/:hostRef/activity` | `GET` | `host:activity:read` | Read | REST |
-| `/api/v1/rpc/hosts/:hostRef/activity/stream` | `GET` | `host:activity:read` | Read-only | SSE |
-| `/api/v1/rpc/hosts/:hostRef/status` | `GET` | `host:status:read` | Read | REST |
-| `/api/v1/rpc/hosts/:hostRef/health` | `GET` | `host:health:read` | Read | REST |
-| `/api/v1/rpc/hosts/:hostRef/status/stream` | `GET` | `host:status:read` | Read-only | SSE |
+| Endpoint                                     | Method | Required Scope        | Access Type | Transport |
+| -------------------------------------------- | ------ | --------------------- | ----------- | --------- |
+| `/api/v1/rpc/hosts/:hostRef/messages`        | `POST` | `host:message:invoke` | Write       | REST      |
+| `/api/v1/rpc/hosts/:hostRef/activity`        | `GET`  | `host:activity:read`  | Read        | REST      |
+| `/api/v1/rpc/hosts/:hostRef/activity/stream` | `GET`  | `host:activity:read`  | Read-only   | SSE       |
+| `/api/v1/rpc/hosts/:hostRef/status`          | `GET`  | `host:status:read`    | Read        | REST      |
+| `/api/v1/rpc/hosts/:hostRef/health`          | `GET`  | `host:health:read`    | Read        | REST      |
+| `/api/v1/rpc/hosts/:hostRef/status/stream`   | `GET`  | `host:status:read`    | Read-only   | SSE       |
 
 Notes:
+
 - `status/stream` does not accept request bodies and must not be used for message submission.
 - `activity/stream` is read-only telemetry and never accepts message submission payloads.
 - `activity` and `activity/stream` never include chain-of-thought/internal reasoning text.
@@ -126,17 +127,39 @@ Critical variables:
 - `RPC_PROXY_CONTROL_API_CACHE_TTL_MS`
 
 Required in production:
+
 - `RPC_PROXY_CONTROL_API_SERVICE_TOKEN`
 
 `RPC_PROXY_JWT_PUBLIC_KEY` must match the public key for `CONTROL_API_RPC_JWT_PRIVATE_KEY`.
 
 ## Local Run
 
+Use Node 24 or newer. Start `control-api` first with `CLERUM_DEV_MODE=true`
+so it creates the shared development signing keys, then start this service in
+a separate terminal:
+
 ```bash
 cd rpc-proxy
 npm install
-npm run dev
+CLERUM_DEV_MODE=true npm run dev
 ```
+
+`make dev` also opts into this local mode. It is rejected with
+`NODE_ENV=production`. Without this opt-in, set `RPC_PROXY_JWT_PUBLIC_KEY`
+explicitly.
+
+The shared store defaults to `control-api/.dev-keys` in the same checkout.
+Leave `EVENFIRE_DEV_KEY_STORE` unset or blank to use that default; a nonblank
+override must be an absolute path set consistently in all three services.
+`control-api` persists generated keys across restarts, and this service reads
+`rpc.public.pem` at startup.
+
+If `CONTROL_API_RPC_JWT_PRIVATE_KEY` is supplied through the environment, set
+`RPC_PROXY_JWT_PUBLIC_KEY` to its matching public key explicitly. The signer
+does not update the store for an environment-supplied key, so an older store
+may contain a different identity. After deleting or rotating stored keys, or
+switching to an environment-supplied key, reconfigure the verifier as needed
+and restart it. Running verifiers do not silently refresh their key identity.
 
 ## Kubernetes Deploy (Hardened Defaults)
 

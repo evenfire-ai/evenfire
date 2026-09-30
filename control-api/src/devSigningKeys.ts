@@ -12,7 +12,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { dirname, isAbsolute, join } from 'node:path'
 import { validateRsaPrivateKeyPem } from './bannedDevSigningKeys.js'
 
 export type DevJwtSlot = 'rpc' | 'session' | 'admin'
@@ -26,7 +26,8 @@ export type DevJwtSlot = 'rpc' | 'session' | 'admin'
  * falls back to the service working directory used by every test/npm script.
  */
 const SERVICE_ROOT = typeof __dirname === 'string' && __dirname ? dirname(__dirname) : process.cwd()
-const DEFAULT_STORE_DIR = process.env.EVENFIRE_DEV_KEY_STORE ?? join(SERVICE_ROOT, '.dev-keys')
+const DEFAULT_STORE_DIR =
+  process.env.EVENFIRE_DEV_KEY_STORE?.trim() || join(SERVICE_ROOT, '.dev-keys')
 
 export function defaultDevSigningKeyStoreDir(): string {
   return DEFAULT_STORE_DIR
@@ -158,6 +159,15 @@ function readStoredDerivedPublic(publicPath: string): string | undefined {
   return readStoreFileNoFollow(publicPath, 'shared-read')?.trim()
 }
 
+function assertMatchingDerivedPublic(publicPath: string, existing: string, derived: string): void {
+  if (existing !== derived) {
+    throw new Error(
+      `Dev JWT key store public file does not match its signing material: ${publicPath}. ` +
+        'Delete the store only if you accept losing local dev tokens.'
+    )
+  }
+}
+
 /**
  * Publish the verifying half derived from the signing material as
  * `<slot>.public.pem` (0644 inside the 0700 store). Sibling dev verifiers read
@@ -173,12 +183,7 @@ function ensureDerivedPublicKey(slot: DevJwtSlot, storeDir: string, signingPem: 
     .trim()
   const existing = readStoredDerivedPublic(publicPath)
   if (existing !== undefined) {
-    if (existing !== derived) {
-      throw new Error(
-        `Dev JWT key store public file does not match its signing material: ${publicPath}. ` +
-          'Delete the store only if you accept losing local dev tokens.'
-      )
-    }
+    assertMatchingDerivedPublic(publicPath, existing, derived)
     return
   }
   const tempPath = `${publicPath}.tmp-${process.pid.toString(36)}-${randomBytes(6).toString('hex')}`
@@ -189,7 +194,12 @@ function ensureDerivedPublicKey(slot: DevJwtSlot, storeDir: string, signingPem: 
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
       removeIfPresent(tempPath)
-      // Another process published first; its content is validated on the next read.
+      // Validate the winning opened file before returning a usable identity.
+      const winner = readStoredDerivedPublic(publicPath)
+      if (winner === undefined) {
+        throw new Error(`Dev JWT key store public file disappeared: ${publicPath}`)
+      }
+      assertMatchingDerivedPublic(publicPath, winner, derived)
       return
     }
     throw err
@@ -206,14 +216,30 @@ export function loadOrGenerateDevJwtPrivateKey(
   slot: DevJwtSlot,
   storeDir: string = DEFAULT_STORE_DIR
 ): string {
+  if (!isAbsolute(storeDir)) {
+    throw new Error('EVENFIRE_DEV_KEY_STORE must be an absolute path when dev JWT keys are needed.')
+  }
   const filePath = join(storeDir, `${slot}.pem`)
   // Validate the store boundary on every path, including pure reuse of an
   // already-persisted key.
   ensureStoreDir(storeDir)
-  const existing = readPersistedKey(filePath, slot)
+  let existing = readPersistedKey(filePath, slot)
+  const publicPath = join(storeDir, `${slot}.public.pem`)
+  if (!existing && readStoredDerivedPublic(publicPath) !== undefined) {
+    // A concurrent first start may have completed between the two reads.
+    // Adopt its private key; never publish a new identity over an orphan public key.
+    existing = readPersistedKey(filePath, slot)
+    if (!existing) {
+      throw new Error(
+        `Dev JWT key store has a public file without its signing material: ${publicPath}. ` +
+          `Restore the matching signing key at ${filePath}, or remove ${publicPath} ` +
+          'only if you accept invalidating local dev tokens.'
+      )
+    }
+  }
   if (existing) {
-    warnOnce()
     ensureDerivedPublicKey(slot, storeDir, existing)
+    warnOnce(storeDir)
     return existing
   }
   const { privateKey } = generateKeyPairSync('rsa', {
@@ -237,8 +263,8 @@ export function loadOrGenerateDevJwtPrivateKey(
       // Another local process published a complete key first; adopt it.
       const winner = readPersistedKey(filePath, slot)
       if (winner) {
-        warnOnce()
         ensureDerivedPublicKey(slot, storeDir, winner)
+        warnOnce(storeDir)
         return winner
       }
     }
@@ -246,16 +272,16 @@ export function loadOrGenerateDevJwtPrivateKey(
   }
   assertOwnedRegularFile(filePath)
   ensureDerivedPublicKey(slot, storeDir, privateKey)
-  warnOnce()
+  warnOnce(storeDir)
   return privateKey.trim()
 }
 
-function warnOnce(): void {
+function warnOnce(storeDir: string): void {
   if (warnedOnce) return
   warnedOnce = true
   console.warn(
     '[ControlAPI] Dev JWT signing keys are active (CLERUM_DEV_MODE). Keys are generated locally ' +
-      'and stored under control-api/.dev-keys; they are never valid for production deployments.'
+      `and stored under ${JSON.stringify(storeDir)}; they are never valid for production deployments.`
   )
 }
 

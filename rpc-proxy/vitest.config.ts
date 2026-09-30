@@ -2,7 +2,7 @@ import { defineConfig } from 'vitest/config'
 
 export default defineConfig({
   test: {
-    setupFiles: ['../scripts/testing/bind-loopback-in-tests.mjs', 'src/testJwtKey.setup.ts'],
+    setupFiles: ['../scripts/testing/bind-loopback-in-tests.mjs', 'test/testJwtKey.setup.ts'],
     include: ['src/**/*.test.ts', 'src/**/__tests__/**/*.ts', 'test/**/*.test.ts'],
     exclude: ['dist/**', 'node_modules/**'],
   },

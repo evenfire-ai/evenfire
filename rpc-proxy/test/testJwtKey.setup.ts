@@ -1,7 +1,7 @@
 import { generateKeyPairSync } from 'node:crypto'
 
 /**
- * Shared test fixture: a real, randomly generated RSA public key so config
+ * Test-only fixture: a real, randomly generated RSA public key so config
  * suites exercise the non-dev path without the removed historical default.
  * Suites that verify missing-key behavior delete this variable explicitly.
  */

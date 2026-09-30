@@ -1,6 +1,6 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { spawn, spawnSync } from 'node:child_process'
-import { createPublicKey } from 'node:crypto'
+import { createHash, createPublicKey } from 'node:crypto'
 import {
   chmodSync,
   closeSync,
@@ -9,6 +9,8 @@ import {
   mkdtempSync,
   openSync,
   readFileSync,
+  readdirSync,
+  realpathSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -16,7 +18,7 @@ import {
 } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import {
   defaultDevSigningKeyStoreDir,
   loadOrGenerateDevJwtPrivateKey,
@@ -41,8 +43,8 @@ beforeAll(() => {
     process.execPath,
     [
       tsc,
-      'src/devSigningKeys.ts',
-      'src/bannedDevSigningKeys.ts',
+      join(process.cwd(), 'src/devSigningKeys.ts'),
+      join(process.cwd(), 'src/bannedDevSigningKeys.ts'),
       '--outDir',
       compileDir,
       '--module',
@@ -65,9 +67,20 @@ afterAll(() => {
   for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true })
 })
 
-afterEach(() => {
-  // Stores created inside tests are also in tempDirs; nothing persistent remains.
-})
+function runProviderScript(
+  script: string,
+  storeDir: string,
+  override?: string
+): { status: number | null; stdout: string; stderr: string } {
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    DEVKEY_MODULE: compiledModulePath,
+    DEVKEY_STORE: storeDir,
+  }
+  delete env.EVENFIRE_DEV_KEY_STORE
+  if (override !== undefined) env.EVENFIRE_DEV_KEY_STORE = override
+  return spawnSync(process.execPath, ['-e', script], { cwd: storeDir, env, encoding: 'utf8' })
+}
 
 function runChild(slot: 'rpc' | 'session' | 'admin', storeDir: string): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -168,6 +181,37 @@ describe('devSigningKeys persistence contract', () => {
     expect(defaultDevSigningKeyStoreDir().endsWith(join('control-api', '.dev-keys'))).toBe(true)
   })
 
+  it.each(['', ' \t\n '])('treats a blank store override as unset (%j)', override => {
+    const result = runProviderScript(
+      `const provider = require(process.env.DEVKEY_MODULE)
+       console.log(JSON.stringify({ store: provider.defaultDevSigningKeyStoreDir() }))`,
+      tempStore(),
+      override
+    )
+    expect(result.status, result.stderr).toBe(0)
+    expect(JSON.parse(result.stdout).store).toBe(
+      join(dirname(dirname(realpathSync(compiledModulePath))), '.dev-keys')
+    )
+  })
+
+  it('rejects a relative override only when the store is used, before writing files', () => {
+    const store = tempStore()
+    const result = runProviderScript(
+      `const provider = require(process.env.DEVKEY_MODULE)
+       let error
+       try { provider.loadOrGenerateDevJwtPrivateKey('rpc') } catch (err) { error = err.message }
+       console.log(JSON.stringify({ store: provider.defaultDevSigningKeyStoreDir(), error }))`,
+      store,
+      'relative-dev-keys'
+    )
+    expect(result.status, result.stderr).toBe(0)
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      store: 'relative-dev-keys',
+      error: expect.stringMatching(/EVENFIRE_DEV_KEY_STORE.*absolute/),
+    })
+    expect(readdirSync(store)).toEqual([])
+  })
+
   it('warns once without emitting key material when dev keys activate', async () => {
     const { vi } = await import('vitest')
     vi.resetModules()
@@ -178,6 +222,7 @@ describe('devSigningKeys persistence contract', () => {
       provider.loadOrGenerateDevJwtPrivateKey('rpc', store)
       provider.loadOrGenerateDevJwtPrivateKey('session', store)
       expect(warn).toHaveBeenCalledTimes(1)
+      expect(String(warn.mock.calls.flat())).toContain(store)
       expect(String(warn.mock.calls.flat())).not.toContain('BEGIN')
     } finally {
       warn.mockRestore()
@@ -239,6 +284,109 @@ describe('devSigningKeys persistence contract', () => {
       { mode: 0o644 }
     )
     expect(() => loadOrGenerateDevJwtPrivateKey('admin', store)).toThrow(
+      /public file does not match its signing material/
+    )
+  })
+
+  it('rejects an orphan verifying half without publishing a new signing identity', () => {
+    const store = tempStore()
+    loadOrGenerateDevJwtPrivateKey('session', store)
+    const privatePath = join(store, 'session.pem')
+    const publicPath = join(store, 'session.public.pem')
+    const publicBefore = readFileSync(publicPath, 'utf8')
+    rmSync(privatePath)
+    expect(() => loadOrGenerateDevJwtPrivateKey('session', store)).toThrow(
+      /public file without its signing material/
+    )
+    expect(readdirSync(store)).toEqual(['session.public.pem'])
+    expect(readFileSync(publicPath, 'utf8')).toBe(publicBefore)
+    try {
+      loadOrGenerateDevJwtPrivateKey('session', store)
+    } catch (err) {
+      expect((err as Error).message).toContain(privatePath)
+      expect((err as Error).message).toContain(publicPath)
+      expect((err as Error).message).toContain('invalidating local dev tokens')
+    }
+  })
+
+  it('adopts a concurrent complete pair published after the initial missing-private read', () => {
+    const source = tempStore()
+    loadOrGenerateDevJwtPrivateKey('admin', source)
+    const store = tempStore()
+    const result = runProviderScript(
+      `const fs = require('node:fs')
+       const { join } = require('node:path')
+       const { createHash } = require('node:crypto')
+       const source = ${JSON.stringify(source)}
+       const privatePath = join(process.env.DEVKEY_STORE, 'admin.pem')
+       const publicPath = join(process.env.DEVKEY_STORE, 'admin.public.pem')
+       const originalOpen = fs.openSync
+       let firstPrivateRead = true
+       fs.openSync = function (path, ...args) {
+         if (path === privatePath && firstPrivateRead) {
+           firstPrivateRead = false
+           try { return originalOpen(path, ...args) } catch (err) {
+             if (err.code === 'ENOENT') {
+               fs.linkSync(join(source, 'admin.pem'), privatePath)
+               fs.linkSync(join(source, 'admin.public.pem'), publicPath)
+             }
+             throw err
+           }
+         }
+         return originalOpen(path, ...args)
+       }
+       const provider = require(process.env.DEVKEY_MODULE)
+       const resolved = provider.loadOrGenerateDevJwtPrivateKey('admin', process.env.DEVKEY_STORE)
+       console.log(JSON.stringify({ fingerprint: createHash('sha256').update(resolved).digest('hex') }))`,
+      store
+    )
+    expect(result.status, result.stderr).toBe(0)
+    expect(JSON.parse(result.stdout).fingerprint).toBe(
+      createHash('sha256')
+        .update(readFileSync(join(source, 'admin.pem'), 'utf8').trim())
+        .digest('hex')
+    )
+  })
+
+  it('validates the opened winning public file immediately after a publication race', () => {
+    const store = tempStore()
+    loadOrGenerateDevJwtPrivateKey('rpc', store)
+    const matchingPublic = join(store, 'matching-public.pem')
+    writeFileSync(matchingPublic, readFileSync(join(store, 'rpc.public.pem')), { mode: 0o644 })
+    rmSync(join(store, 'rpc.public.pem'))
+    const otherStore = tempStore()
+    loadOrGenerateDevJwtPrivateKey('rpc', otherStore)
+    const result = runProviderScript(
+      `const fs = require('node:fs')
+       const { join } = require('node:path')
+       const publicPath = join(process.env.DEVKEY_STORE, 'rpc.public.pem')
+       const originalLink = fs.linkSync
+       const originalOpen = fs.openSync
+       let raced = false
+       fs.linkSync = function (source, target) {
+         if (target === publicPath && !raced) {
+           raced = true
+           originalLink(${JSON.stringify(join(otherStore, 'rpc.public.pem'))}, publicPath)
+         }
+         return originalLink(source, target)
+       }
+       fs.openSync = function (path, ...args) {
+         const fd = originalOpen(path, ...args)
+         if (path === publicPath && raced) {
+           fs.unlinkSync(publicPath)
+           originalLink(${JSON.stringify(matchingPublic)}, publicPath)
+         }
+         return fd
+       }
+       const provider = require(process.env.DEVKEY_MODULE)
+       let error
+       try { provider.loadOrGenerateDevJwtPrivateKey('rpc', process.env.DEVKEY_STORE) }
+       catch (err) { error = err.message }
+       console.log(JSON.stringify({ error }))`,
+      store
+    )
+    expect(result.status, result.stderr).toBe(0)
+    expect(JSON.parse(result.stdout).error).toMatch(
       /public file does not match its signing material/
     )
   })

@@ -11,7 +11,7 @@ build: install
 	npm run build
 
 dev: install
-	npm run dev
+	CLERUM_DEV_MODE=true npm run dev
 
 docker-build:
 	docker build -t $(REGISTRY)/$(IMAGE_NAME):$(TAG) .

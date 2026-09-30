@@ -1,6 +1,6 @@
 import { createHash, createPublicKey } from 'node:crypto'
-import { readFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync } from 'node:fs'
+import { dirname, isAbsolute, join } from 'node:path'
 
 type Config = {
   port: number
@@ -104,7 +104,11 @@ function assertNotPlaceholder(label: string, value: string): void {
 }
 
 function normalizePem(value: string): string {
-  return value.replace(/\\n/g, '\n').trim()
+  return value
+    .replace(/\\r\\n/g, '\n')
+    .replace(/\\n/g, '\n')
+    .replace(/\r\n?/g, '\n')
+    .trim()
 }
 
 export function parseSandboxUiAllowedPorts(raw: string): ReadonlySet<number> {
@@ -192,17 +196,87 @@ const HISTORICAL_DEV_JWT_PUBLIC_FINGERPRINTS: ReadonlySet<string> = new Set([
 ])
 
 function assertUsableJwtPublicKey(publicPem: string, envName: string): string {
+  const normalized = normalizePem(publicPem)
   let fingerprint: string
+  let canonicalPublicPem: string
   try {
-    const der = createPublicKey(publicPem).export({ type: 'spki', format: 'der' })
+    // OpenSSL accepts the first key in a bundle and ignores trailing material.
+    // Require one public PEM block before parsing so the validated and used key agree.
+    if (
+      !/^-----BEGIN (PUBLIC KEY|RSA PUBLIC KEY)-----\n[A-Za-z0-9+/=\s]+\n-----END \1-----$/.test(
+        normalized
+      )
+    ) {
+      throw new Error('Expected one public key')
+    }
+    const key = createPublicKey(normalized)
+    if (key.asymmetricKeyType !== 'rsa') throw new Error('Expected RSA')
+    const der = key.export({ type: 'spki', format: 'der' })
     fingerprint = createHash('sha256').update(der).digest('hex')
+    canonicalPublicPem = key.export({ type: 'spki', format: 'pem' }).toString().trim()
   } catch {
-    throw new Error(`${envName} must be a PEM-encoded RSA public key`)
+    throw new Error(`${envName} must be a single PEM-encoded RSA public key`)
   }
   if (HISTORICAL_DEV_JWT_PUBLIC_FINGERPRINTS.has(fingerprint)) {
     throw new Error(`${envName} must not use a historically committed dev JWT key`)
   }
-  return publicPem
+  return canonicalPublicPem
+}
+
+function readDevJwtPublicKey(storeDir: string, fileName: string, envName: string): string {
+  const publicPath = join(storeDir, fileName)
+  const missingStore = () =>
+    new Error(
+      `CLERUM_DEV_MODE=true requires the control-api dev key store at ${storeDir}. ` +
+        `Start control-api once with CLERUM_DEV_MODE=true, or set ${envName}.`
+    )
+  let directoryStats
+  try {
+    directoryStats = lstatSync(storeDir)
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') throw missingStore()
+    throw err
+  }
+  if (!directoryStats.isDirectory() || directoryStats.isSymbolicLink()) {
+    throw new Error(`Dev JWT key store path is not a directory: ${storeDir}`)
+  }
+  if (process.geteuid && directoryStats.uid !== process.geteuid()) {
+    throw new Error(`Dev JWT key store directory is not owned by the current user: ${storeDir}`)
+  }
+  if ((directoryStats.mode & 0o077) !== 0) {
+    throw new Error(
+      `Dev JWT key store directory has group/other permissions; expected 0700: ${storeDir}`
+    )
+  }
+  let fd: number
+  try {
+    // NONBLOCK avoids hanging on a hostile FIFO; fstat rejects every special file.
+    fd = openSync(publicPath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code
+    if (code === 'ENOENT') throw missingStore()
+    if (code === 'ELOOP')
+      throw new Error(`Dev JWT key store path is a symbolic link: ${publicPath}`)
+    throw err
+  }
+  try {
+    const fileStats = fstatSync(fd)
+    if (!fileStats.isFile()) {
+      throw new Error(`Dev JWT key store path is not a regular file: ${publicPath}`)
+    }
+    if (process.geteuid && fileStats.uid !== process.geteuid()) {
+      throw new Error(`Dev JWT key store file is not owned by the current user: ${publicPath}`)
+    }
+    if ((fileStats.mode & 0o022) !== 0) {
+      throw new Error(
+        `Dev JWT key store public file must not be group/other writable: ${publicPath}`
+      )
+    }
+    // Read the descriptor whose identity and permissions were checked above.
+    return readFileSync(fd, 'utf8')
+  } finally {
+    closeSync(fd)
+  }
 }
 
 /**
@@ -221,18 +295,12 @@ function resolveRpcJwtPublicKey(): string {
   const fromEnv = process.env[envName]
   if (fromEnv) return assertUsableJwtPublicKey(fromEnv, envName)
   if (process.env.CLERUM_DEV_MODE === 'true') {
-    const storeDir =
-      process.env.EVENFIRE_DEV_KEY_STORE ?? join(serviceRoot(), '..', 'control-api', '.dev-keys')
-    const publicPath = join(storeDir, 'rpc.public.pem')
-    let fromStore: string
-    try {
-      fromStore = readFileSync(publicPath, 'utf8')
-    } catch {
-      throw new Error(
-        `CLERUM_DEV_MODE=true requires the control-api dev key store at ${storeDir}. ` +
-          `Start control-api once with CLERUM_DEV_MODE=true, or set ${envName}.`
-      )
+    const override = process.env.EVENFIRE_DEV_KEY_STORE?.trim()
+    if (override && !isAbsolute(override)) {
+      throw new Error('EVENFIRE_DEV_KEY_STORE must be an absolute path')
     }
+    const storeDir = override || join(serviceRoot(), '..', 'control-api', '.dev-keys')
+    const fromStore = readDevJwtPublicKey(storeDir, 'rpc.public.pem', envName)
     return assertUsableJwtPublicKey(fromStore, envName)
   }
   return required(envName)
@@ -243,7 +311,7 @@ export const config: Config = {
   corsOrigin: parseCorsOrigin(
     requiredOrDevDefault('RPC_PROXY_CORS_ORIGIN', 'http://localhost:3000')
   ),
-  jwtPublicKey: normalizePem(resolveRpcJwtPublicKey()),
+  jwtPublicKey: resolveRpcJwtPublicKey(),
   jwtIssuer: requiredOrDevDefault('RPC_PROXY_JWT_ISSUER', 'control-api'),
   jwtAudience: requiredOrDevDefault('RPC_PROXY_JWT_AUDIENCE', 'rpc-proxy'),
   upstreamTimeoutMs: parsePositiveIntMs(

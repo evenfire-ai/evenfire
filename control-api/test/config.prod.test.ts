@@ -1,50 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { generateKeyPairSync, randomBytes } from 'node:crypto'
-
-function generateNonDevPem(): string {
-  return generateKeyPairSync('rsa', {
-    modulusLength: 2048,
-    privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
-    publicKeyEncoding: { type: 'spki', format: 'pem' },
-  }).privateKey
-}
-
-/**
- * Populate every CONTROL_API env var that the prod path requires so that
- * config evaluation reaches the key guards rather than throwing earlier on a
- * missing required env. Mirrors `requiredOrDevDefault` callsites in
- */
-function applyProdEnv(env: Record<string, string | undefined>): void {
-  env.NODE_ENV = 'production'
-  // Non-dev RPC/session/admin JWT keys; the banned-key guard fingerprints the
-  // full public key, so ordinary RSA-2048 material is fine.
-  env.CONTROL_API_RPC_JWT_PRIVATE_KEY = generateNonDevPem()
-  env.CONTROL_API_SESSION_JWT_PRIVATE_KEY = generateNonDevPem()
-  env.CONTROL_API_ADMIN_JWT_PRIVATE_KEY = generateNonDevPem()
-  // Remaining `requiredOrDevDefault` callsites in src/config.ts. Defaults are
-  // dev-only — production must set these explicitly.
-  env.INTERNAL_CONTROL_JWT_WRC_HMAC_SECRET = randomBytes(32).toString('hex')
-  env.INTERNAL_CONTROL_JWT_HCC_HMAC_SECRET = randomBytes(32).toString('hex')
-  env.CONTROL_API_MEMBER_REGISTRATION_SERVICE_BASE_URL = 'https://registration.evenfire.ai/api/v1'
-  env.CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET = randomBytes(32).toString('hex')
-  env.CONTROL_API_MEMBER_REGISTRATION_HMAC_KID = 'clerum'
-  env.CONTROL_API_MEMBER_REGISTRATION_TENANT_ID = 'clerum'
-  env.CONTROL_API_JWT_ISSUER = 'control-api'
-  env.CONTROL_API_JWT_AUDIENCE = 'profile-ui'
-  env.CONTROL_API_RPC_JWT_ISSUER = 'control-api'
-  env.CONTROL_API_RPC_JWT_AUDIENCE = 'rpc-proxy'
-  env.CONTROL_API_GOOGLE_CLIENT_ID = 'prod-google-client-id'
-  env.CONTROL_API_ADMIN_JWT_ISSUER = 'control-api'
-  env.CONTROL_API_ADMIN_JWT_AUDIENCE = 'control-ui'
-  env.CONTROL_API_ADMIN_BOOTSTRAP_USERNAME = 'admin'
-  // bcrypt hash of 'prod-bootstrap-password' (any valid bcrypt-shaped string is fine here).
-  env.CONTROL_API_ADMIN_BOOTSTRAP_PASSWORD_HASH =
-    '$2b$12$4dm17x2DESCxETGi0MpNruC0KpCev5lbKwqgmUkVLxKsNUxoXXXXXX'
-  env.CONTROL_API_OAUTH_STATE_HMAC_SECRET = randomBytes(32).toString('hex')
-  env.CONTROL_API_OAUTH_ENCRYPTION_KEY = randomBytes(32).toString('hex')
-  env.CONTROL_API_INTERNAL_SERVICE_TOKENS =
-    'external-rest-api=prod-external-rest-api-token,rpc-proxy=prod-rpc-proxy-token,webhook-proxy=prod-webhook-proxy-token'
-}
+import { createPublicKey } from 'node:crypto'
+import { applyProdEnv, generateNonDevPem } from './fixtures/productionConfigEnv.js'
 
 describe('config: production voucher key guard', () => {
   const origEnv = { ...process.env }
@@ -83,6 +39,29 @@ describe('config: production voucher key guard', () => {
     process.env.CONTROL_API_REGISTRY_VOUCHER_PRIVATE_KEY = generateNonDevPem()
     process.env.CONTROL_API_REGISTRY_VOUCHER_KID = 'key-uuid'
     await expect(import('../src/config.js')).resolves.toBeDefined()
+  })
+
+  it('checks the voucher signing slot against the banned fingerprints in production', async () => {
+    const voucherKey = generateNonDevPem()
+    const guard = await import('../src/bannedDevSigningKeys.js')
+    const voucherFingerprint = guard.publicKeyPemFingerprint(
+      createPublicKey(voucherKey).export({ type: 'spki', format: 'pem' }).toString()
+    )
+    // Inject a generated identity into the real guard's ban set; historical
+    // private material must never become a tracked test fixture.
+    const fingerprints = new Set([
+      ...guard.BANNED_DEV_JWT_PUBLIC_KEY_FINGERPRINTS,
+      voucherFingerprint,
+    ])
+    const assertNoBannedJwtKeys = guard.assertNoBannedJwtKeys
+    vi.spyOn(guard, 'assertNoBannedJwtKeys').mockImplementation(input =>
+      assertNoBannedJwtKeys(input, fingerprints)
+    )
+    process.env.CONTROL_API_REGISTRY_VOUCHER_PRIVATE_KEY = voucherKey
+
+    await expect(() => import('../src/config.js')).rejects.toThrow(
+      /CONTROL_API_REGISTRY_VOUCHER_PRIVATE_KEY resolves to a historically committed dev JWT key/
+    )
   })
 
   it('rejects default dev internal service tokens in production', async () => {

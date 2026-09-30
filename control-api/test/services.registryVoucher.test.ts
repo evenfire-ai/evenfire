@@ -2,6 +2,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import jwt from 'jsonwebtoken'
 import { generateKeyPairSync } from 'node:crypto'
+import * as devKeyPolicy from '../src/bannedDevSigningKeys.js'
 import { __resetRegistryConnectionCacheForTests } from '../src/services/registryConnectionDb.js'
 import { VoucherUnavailableError, mintIdentityVoucher } from '../src/services/registryVoucher.js'
 
@@ -16,14 +17,6 @@ const { cfg } = vi.hoisted(() => ({
   } as Record<string, unknown>,
 }))
 vi.mock('../src/config.js', () => ({ config: cfg }))
-const bannedCheck = vi.hoisted(() => ({ value: false }))
-vi.mock('../src/bannedDevSigningKeys.js', async importOriginal => {
-  const original = await importOriginal<typeof import('../src/bannedDevSigningKeys.js')>()
-  return {
-    ...original,
-    isBannedSigningKeyPem: vi.fn(() => bannedCheck.value),
-  }
-})
 // self-hosted branch queries the DB — not exercised in the managed tests below.
 vi.mock('../src/db.js', () => ({
   pool: { query: vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }) },
@@ -97,12 +90,14 @@ describe('voucher v2 (self-hosted) persisted-key guard', () => {
     const { deriveOAuthEncryptionKey, encryptOAuthSecret } =
       await import('../src/oauth/encryption.js')
     const { pool } = await import('../src/db.js')
-    const { isBannedSigningKeyPem } = await import('../src/bannedDevSigningKeys.js')
     const encryptionKeyHex = 'ab'.repeat(32)
-    const persisted = keypair().privateKey
+    const pair = keypair()
+    const persisted = pair.privateKey
     cfg.registryConnectionMode = 'self-hosted'
     ;(cfg as Record<string, unknown>).oauthEncryptionKey = encryptionKeyHex
-    vi.mocked(isBannedSigningKeyPem).mockReturnValueOnce(true)
+    expect(devKeyPolicy.isBannedSigningKeyPem(persisted)).toBe(false)
+    const check = vi.spyOn(devKeyPolicy, 'isBannedSigningKeyPem')
+    const fingerprint = devKeyPolicy.publicKeyPemFingerprint(pair.publicKey)
     vi.mocked(pool.query).mockResolvedValueOnce({
       rows: [
         {
@@ -123,6 +118,19 @@ describe('voucher v2 (self-hosted) persisted-key guard', () => {
         },
       ],
     })
-    await expect(mintIdentityVoucher(admin)).rejects.toThrow(/historically committed dev/)
+    // Exercise the real crypto ban with generated material; no historical
+    // private key is stored in a fixture or bypassed by a mocked predicate.
+    const fingerprints = devKeyPolicy.BANNED_DEV_JWT_PUBLIC_KEY_FINGERPRINTS as Set<string>
+    fingerprints.add(fingerprint)
+    try {
+      const voucher = mintIdentityVoucher(admin)
+      await expect(voucher).rejects.toBeInstanceOf(VoucherUnavailableError)
+      await expect(voucher).rejects.toMatchObject({ message: 'registry_voucher_unavailable' })
+      expect(check.mock.calls.map(([pem]) => devKeyPolicy.publicKeyPemFingerprint(pem))).toEqual([
+        fingerprint,
+      ])
+    } finally {
+      fingerprints.delete(fingerprint)
+    }
   })
 })

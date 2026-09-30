@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPublicKey, generateKeyPairSync } from 'node:crypto'
-import { existsSync } from 'node:fs'
 import { BANNED_DEV_JWT_PUBLIC_KEYS as HISTORICAL } from './fixtures/bannedDevJwtPublicKeys.js'
+import { applyProdEnv } from './fixtures/productionConfigEnv.js'
 
 const ORIGINAL_ENV = { ...process.env }
 const SLOT_ENV_NAMES = [
@@ -84,6 +84,7 @@ describe('config JWT hardening', () => {
   })
 
   it('rejects CLERUM_DEV_MODE=true together with NODE_ENV=production before generation', async () => {
+    for (const name of SLOT_ENV_NAMES) delete process.env[name]
     process.env.NODE_ENV = 'production'
     process.env.CLERUM_DEV_MODE = 'true'
     await expect(() => import('../src/config.js')).rejects.toThrow(
@@ -124,6 +125,7 @@ describe('config JWT hardening', () => {
   })
 
   it('accepts fresh RSA-2048 keys whose bodies start with the historical prefixes', async () => {
+    applyProdEnv(process.env)
     process.env.CONTROL_API_RPC_JWT_PRIVATE_KEY = signingMaterialWithBodyPrefix('MIIEvA')
     process.env.CONTROL_API_SESSION_JWT_PRIVATE_KEY = signingMaterialWithBodyPrefix('MIIEvg')
     process.env.CONTROL_API_ADMIN_JWT_PRIVATE_KEY = signingMaterialWithBodyPrefix('MIIEvQ')
@@ -143,9 +145,13 @@ describe('config JWT hardening', () => {
   })
 
   it('performs no dev-key store I/O when every slot is configured', async () => {
-    const { defaultDevSigningKeyStoreDir } = await import('../src/devSigningKeys.js')
-    await import('../src/config.js')
-    expect(existsSync(defaultDevSigningKeyStoreDir())).toBe(false)
+    for (const devMode of [undefined, 'true']) {
+      vi.resetModules()
+      if (devMode) process.env.CLERUM_DEV_MODE = devMode
+      else delete process.env.CLERUM_DEV_MODE
+      await import('../src/config.js')
+      expect(devProviderMocks.load).not.toHaveBeenCalled()
+    }
   })
 
   it('rejects a historical verifier key even in explicit dev mode', async () => {
