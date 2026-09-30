@@ -39,6 +39,7 @@ import { useWindowFocusBridge } from '@hooks/useWindowFocusBridge'
 import type { ChatLocalMatch } from '@lib/chatLocalSearch'
 import { buildLoadedChatSemanticModels } from '@lib/chatMessageSemantics'
 import { EntityChangeRegistry } from '@lib/entityChangeRegistry'
+import { authoritativeGfsStatus } from '@lib/gfsEntityChangeState'
 import { resolveGfsPreview } from '@lib/gfsPreview'
 import { desktopQueryClient } from '@lib/queryClient'
 import {
@@ -167,14 +168,6 @@ function errorCode(error: unknown): string {
   if (!error || typeof error !== 'object') return ''
   const record = error as { code?: unknown; cause?: { code?: unknown } }
   return String(record.code || record.cause?.code || '').toUpperCase()
-}
-
-function resourceStatus(error: unknown): number | undefined {
-  if (!error || typeof error !== 'object') return undefined
-  const status = (error as { status?: unknown }).status
-  if (typeof status === 'number') return status
-  const match = errorMessage(error).match(/(?:^|\D)(403|404)(?:\D|$)/)
-  return match ? Number(match[1]) : undefined
 }
 
 function isTransientSandboxUiTeamContextError(error: unknown): boolean {
@@ -1020,7 +1013,7 @@ export function App() {
         previewRetryAttemptRef.current.delete(gfsUri)
       } catch (error) {
         if (previewRefreshGenerationRef.current.get(gfsUri) !== generation) return
-        const status = resourceStatus(error)
+        const status = authoritativeGfsStatus(error)
         if (status === 403 || status === 404) {
           setWorkspaceTabs(state =>
             refreshPreviewTab(state, gfsUri, {

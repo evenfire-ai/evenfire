@@ -1343,12 +1343,26 @@ describe('App live GFS preview revalidation', () => {
     })
     expect(initial()).toEqual(before)
 
-    resolve.mockRejectedValueOnce(Object.assign(new Error('403 Forbidden'), { status: 403 }))
+    resolve.mockRejectedValueOnce(
+      new Error('upstream dependency reported 404 while fetching httpStatus=500')
+    )
     act(() =>
       dispatchEntityChange?.({
         type: 'scope.invalidated',
         schemaVersion: 1,
         cursor: 'cursor-2',
+        scopes: ['authorization'],
+      })
+    )
+    await waitFor(() => expect(resolve).toHaveBeenCalledTimes(2))
+    expect(initial()).toEqual(before)
+
+    resolve.mockRejectedValueOnce(new Error('resource denied httpStatus=403'))
+    act(() =>
+      dispatchEntityChange?.({
+        type: 'scope.invalidated',
+        schemaVersion: 1,
+        cursor: 'cursor-3',
         scopes: ['authorization'],
       })
     )
