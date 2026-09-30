@@ -1032,9 +1032,14 @@ cmd_start() {
   check_docker_ready
   check_all_ports_free
   persist_state
-  # The global current-context is shared with every other session on this
-  # machine, so read it without --context and only fail when minikube itself
-  # moved it onto this profile.
+  # Every call this script makes names --context=${PROFILE} and verifies the
+  # cluster identity through it, so the global current-context never steers
+  # it. That context is shared with every other session on this machine,
+  # though, and minikube v1.38.1 moves it onto the profile on a restart despite
+  # --keep-context: UpdateEndpoint repairs the kubeconfig entry (the docker
+  # driver publishes the API server on a new host port) with KeepContext false.
+  # Put the previous context back so no other session is steered onto this
+  # cluster; a context another session chose meanwhile is left alone.
   local before_context after_context
   before_context="$(kubectl config current-context 2>/dev/null || true)"
   printf 'starting minikube profile: %s\n' "${PROFILE}"
@@ -1047,22 +1052,17 @@ cmd_start() {
     --driver="${MINIKUBE_DRIVER}"
   after_context="$(kubectl config current-context 2>/dev/null || true)"
   if [[ "${after_context}" == "${PROFILE}" && "${before_context}" != "${PROFILE}" ]]; then
-    printf 'ERROR: minikube switched the kubectl current-context from %s to %s despite --keep-context\n' \
+    printf 'WARN: minikube moved the kubectl current-context from %s to %s despite --keep-context (its kubeconfig endpoint repair ignores the flag); restoring it\n' \
       "${before_context:-<unset>}" "${after_context}" >&2
-    # The switch belongs to this command, so undo it before failing: another
-    # session may be relying on the context it had selected.
     if [[ -n "${before_context}" ]]; then
-      if kubectl config use-context "${before_context}" >/dev/null; then
-        printf 'restored the kubectl current-context to %s\n' "${before_context}" >&2
-      else
-        printf 'ERROR: could not restore the kubectl current-context to %s; it is still %s\n' \
-          "${before_context}" "${after_context}" >&2
-      fi
+      kubectl config use-context "${before_context}" >/dev/null ||
+        die "could not restore the kubectl current-context to ${before_context}; it is still ${after_context}"
+      printf 'restored the kubectl current-context to %s\n' "${before_context}" >&2
     else
-      printf 'ERROR: no current-context was set before the start, so none was restored; it is still %s\n' \
-        "${after_context}" >&2
+      kubectl config unset current-context >/dev/null ||
+        die "could not clear the kubectl current-context minikube set; it is still ${after_context}"
+      printf 'cleared the kubectl current-context minikube set; none was set before the start\n' >&2
     fi
-    exit 1
   fi
   run_bounded minikube-status "${MINIKUBE_STATUS_TIMEOUT_SECONDS}" \
     minikube -p "${PROFILE}" status
