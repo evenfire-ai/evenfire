@@ -424,13 +424,16 @@ describe('GfsBrowser authoritative revalidation integration', () => {
           <GfsBrowser />
         </ToastProvider>
       )
+      const browser = screen.getByRole('region', { name: 'EvenDrive browser' })
       await waitFor(() => expect(streamControllers).toHaveLength(1))
       await screen.findByRole('button', { name: 'work' })
+      await waitFor(() => expect(browser).not.toHaveAttribute('aria-busy', 'true'))
       fireEvent.click(screen.getByRole('button', { name: 'work' }))
       await screen.findByRole('button', { name: 'stale.txt' })
       const breadcrumb = screen.getByRole('navigation', { name: 'Breadcrumb' })
       fireEvent.click(breadcrumb.querySelector('button')!)
       await screen.findByRole('button', { name: 'work' })
+      await waitFor(() => expect(browser).not.toHaveAttribute('aria-busy', 'true'))
       folderOpened = true
       fireEvent.click(screen.getByRole('button', { name: 'work' }))
       await screen.findByRole('button', { name: 'stale.txt' })
