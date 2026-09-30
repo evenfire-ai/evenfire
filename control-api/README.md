@@ -169,6 +169,14 @@ Resource/namespace controls:
 Auth settings:
 
 - `CONTROL_API_SESSION_JWT_PRIVATE_KEY`: RSA private key used to sign external REST API session JWTs (`/external/auth/*`) with RS256.
+
+Local development: run with `CLERUM_DEV_MODE=true` and no signing-key env vars.
+Control API generates one RSA-2048 key per slot under the gitignored
+`control-api/.dev-keys/` directory (`0700` directory, `0600` files) on first
+use and reuses it across restarts. Outside dev mode the three env vars above
+are always required, and keys whose public halves were ever committed to this
+repository are rejected in every slot, including the RPC verifier public key.
+
 - `CONTROL_API_RPC_JWT_PRIVATE_KEY`: RSA private key used to sign RPC access JWTs for `rpc-proxy` (RS256).
 - `CONTROL_API_JWT_ISSUER`: expected `iss` for session token signing and verification.
 - `CONTROL_API_JWT_AUDIENCE`: expected `aud` for session token signing and verification.

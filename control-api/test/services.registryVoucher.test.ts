@@ -16,6 +16,14 @@ const { cfg } = vi.hoisted(() => ({
   } as Record<string, unknown>,
 }))
 vi.mock('../src/config.js', () => ({ config: cfg }))
+const bannedCheck = vi.hoisted(() => ({ value: false }))
+vi.mock('../src/bannedDevSigningKeys.js', async importOriginal => {
+  const original = await importOriginal<typeof import('../src/bannedDevSigningKeys.js')>()
+  return {
+    ...original,
+    isBannedSigningKeyPem: vi.fn(() => bannedCheck.value),
+  }
+})
 // self-hosted branch queries the DB — not exercised in the managed tests below.
 vi.mock('../src/db.js', () => ({
   pool: { query: vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }) },
@@ -81,5 +89,40 @@ describe('mintIdentityVoucher — voucher v2 (managed)', () => {
     cfg.registryVoucherPrivateKey = keypair().privateKey
     cfg.registryVoucherKid = ''
     await expect(mintIdentityVoucher(admin)).rejects.toBeInstanceOf(VoucherUnavailableError)
+  })
+})
+
+describe('voucher v2 (self-hosted) persisted-key guard', () => {
+  it('rejects a persisted signing key flagged as historically committed', async () => {
+    const { deriveOAuthEncryptionKey, encryptOAuthSecret } =
+      await import('../src/oauth/encryption.js')
+    const { pool } = await import('../src/db.js')
+    const { isBannedSigningKeyPem } = await import('../src/bannedDevSigningKeys.js')
+    const encryptionKeyHex = 'ab'.repeat(32)
+    const persisted = keypair().privateKey
+    cfg.registryConnectionMode = 'self-hosted'
+    ;(cfg as Record<string, unknown>).oauthEncryptionKey = encryptionKeyHex
+    vi.mocked(isBannedSigningKeyPem).mockReturnValueOnce(true)
+    vi.mocked(pool.query).mockResolvedValueOnce({
+      rows: [
+        {
+          deployment_id: 'deployment-1',
+          key_id: 'key-uuid-42',
+          public_key_pem: '',
+          private_key_encrypted: encryptOAuthSecret(
+            deriveOAuthEncryptionKey(encryptionKeyHex),
+            persisted
+          ),
+          client_id: '',
+          client_secret_encrypted: null,
+          org_name: null,
+          requested_org_name: null,
+          contact_email: null,
+          status: 'connected',
+          registry_url: '',
+        },
+      ],
+    })
+    await expect(mintIdentityVoucher(admin)).rejects.toThrow(/historically committed dev/)
   })
 })

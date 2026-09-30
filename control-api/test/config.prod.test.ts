@@ -2,12 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { generateKeyPairSync, randomBytes } from 'node:crypto'
 
 function generateNonDevPem(): string {
-  // 3072-bit RSA. 2048-bit keys produce a PKCS8 header that collides with the
-  // dev-key fingerprint check in src/config.ts (`MIIEvAIBADANBgkqhkiG9w0BAQEFAASC`
-  // / `MIIEvgIBADANBgkqhkiG9w0BAQEFAASC`). 3072 yields a `MIIG/Q…` prefix that
-  // doesn't match either fingerprint and is still RS256-compatible.
   return generateKeyPairSync('rsa', {
-    modulusLength: 3072,
+    modulusLength: 2048,
     privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
     publicKeyEncoding: { type: 'spki', format: 'pem' },
   }).privateKey
@@ -15,8 +11,8 @@ function generateNonDevPem(): string {
 
 /**
  * Populate every CONTROL_API env var that the prod path requires so that
- * config evaluation reaches the voucher-key guard rather than throwing earlier
- * on a missing required env. Mirrors `requiredOrDevDefault` callsites in
+  // Non-dev RPC/session/admin JWT keys; the banned-key guard fingerprints the
+  // full public key, so ordinary RSA-2048 material is fine.
  * `src/config.ts`.
  */
 function applyProdEnv(env: Record<string, string | undefined>): void {

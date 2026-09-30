@@ -1,3 +1,4 @@
+import { isBannedSigningKeyPem } from '../bannedDevSigningKeys.js'
 import { config } from '../config.js'
 import { pool, withTransaction } from '../db.js'
 import type { DbClient } from '../db.js'
@@ -209,6 +210,12 @@ export async function resolveVoucherSigningMaterial(): Promise<{
   if (config.registryConnectionMode === 'self-hosted') {
     const row = await getRegistryConnection()
     if (!row || !row.privateKeyPem || !row.keyId) throw new VoucherUnavailableError()
+    if (isBannedSigningKeyPem(row.privateKeyPem)) {
+      throw new Error(
+        '[SECURITY] registry_connection voucher signing key is a historically committed dev ' +
+          'JWT key; replace it through registry enrollment.'
+      )
+    }
     return { signingKey: row.privateKeyPem, kid: row.keyId }
   }
   // managed

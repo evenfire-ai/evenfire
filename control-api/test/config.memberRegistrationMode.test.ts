@@ -2,9 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { generateKeyPairSync, randomBytes } from 'node:crypto'
 
 function generateNonDevPem(): string {
-  // 3072-bit RSA — 2048 collides with the dev-key fingerprint check in src/config.ts.
   return generateKeyPairSync('rsa', {
-    modulusLength: 3072,
+    modulusLength: 2048,
     privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
     publicKeyEncoding: { type: 'spki', format: 'pem' },
   }).privateKey
