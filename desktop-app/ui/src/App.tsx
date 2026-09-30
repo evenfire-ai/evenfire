@@ -39,7 +39,7 @@ import { useWindowFocusBridge } from '@hooks/useWindowFocusBridge'
 import type { ChatLocalMatch } from '@lib/chatLocalSearch'
 import { buildLoadedChatSemanticModels } from '@lib/chatMessageSemantics'
 import { EntityChangeRegistry } from '@lib/entityChangeRegistry'
-import { authoritativeGfsStatus } from '@lib/gfsEntityChangeState'
+import { authoritativeGfsStatus, shouldRevalidateGfsQuery } from '@lib/gfsEntityChangeState'
 import { resolveGfsPreview } from '@lib/gfsPreview'
 import { desktopQueryClient } from '@lib/queryClient'
 import {
@@ -1060,6 +1060,7 @@ export function App() {
       // queries refetch; only an authoritative 403/404 purges a preview.
       void queryClient.invalidateQueries({
         queryKey: desktopQueryKeys.gfsRoot,
+        predicate: query => shouldRevalidateGfsQuery(query.queryKey),
         refetchType: 'active',
       })
       const resources = new Set(

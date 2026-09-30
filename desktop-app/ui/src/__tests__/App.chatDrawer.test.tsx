@@ -4,8 +4,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useNotificationsContext } from '@contexts/NotificationsContext'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { DESKTOP_ROUTES } from '@constants/navigation'
+import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { useAppController } from '@hooks/useAppController'
 import type { GfsPreviewResource } from '@lib/gfsPreview'
+import { desktopQueryClient } from '@lib/queryClient'
 import {
   activeWorkspaceTab,
   createWorkspaceTabsState,
@@ -1304,11 +1306,15 @@ describe('App live GFS preview revalidation', () => {
 
   afterEach(() => {
     cleanup()
+    vi.restoreAllMocks()
     delete (window as { clerum?: unknown }).clerum
   })
 
   it('preserves an unchanged preview during soft scope revalidation and purges only on 403', async () => {
     const resolve = vi.mocked(window.clerum.gfs.resolve)
+    const invalidateQueries = vi
+      .spyOn(desktopQueryClient, 'invalidateQueries')
+      .mockResolvedValue(undefined)
     let finishResolve!: (value: ReturnType<typeof resolvedFile>) => void
     resolve.mockImplementationOnce(
       () =>
@@ -1330,6 +1336,18 @@ describe('App live GFS preview revalidation', () => {
         scopes: ['authorization'],
       })
     )
+    const queryFilter = invalidateQueries.mock.calls.at(-1)?.[0]
+    expect(queryFilter?.queryKey).toEqual(desktopQueryKeys.gfsRoot)
+    expect(
+      queryFilter?.predicate?.({
+        queryKey: desktopQueryKeys.gfsAffordances('session', 'resource-id', 'main'),
+      } as never)
+    ).toBe(false)
+    expect(
+      queryFilter?.predicate?.({
+        queryKey: desktopQueryKeys.gfsChildren('session', 'resource-id', 'main'),
+      } as never)
+    ).toBe(true)
     expect(initial()).toEqual(before)
 
     await act(async () => {
