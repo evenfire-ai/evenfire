@@ -573,7 +573,7 @@ describe('public Host-ref validation', () => {
     expect(response.status).toBe(400)
     expect(response.body).toEqual({
       error: 'invalid_attachments',
-      message: 'Image attachments must be a list.',
+      message: 'Attachments must be a list.',
     })
     expect(hostMock.resolveHostConnectionForUser).not.toHaveBeenCalled()
   })
