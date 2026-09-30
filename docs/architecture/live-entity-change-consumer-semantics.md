@@ -32,7 +32,8 @@ may coalesce intermediate changes while disconnected or under load.
 - An unchanged authoritative preview retains its identity and bytes. A relevant version, content,
   or metadata change uses the same generic preview reload boundary for every preview type.
 - Transient failures never prove revocation. Only authoritative deletion or 403/404 purges the
-  affected resource; session-wide 401 follows the authentication-expiry path.
+  affected resource; an independently readable leaf remains open while denied ancestors are
+  removed from its breadcrumb. Session-wide 401 follows the authentication-expiry path.
 - Unknown or malformed frames are non-destructive and do not reset reconnect backoff.
 - User event delivery must not disclose unauthorized resource identity or change timing.
 

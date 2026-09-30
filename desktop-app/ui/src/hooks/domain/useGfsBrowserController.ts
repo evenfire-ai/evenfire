@@ -1021,6 +1021,14 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
             }
             parentResourceId = parent.parentResourceId
           } catch (error) {
+            const status = parseHttpStatus(toMessage(error))
+            if (status === 403 || status === 404) {
+              // The leaf already resolved authoritatively. A denied or deleted
+              // ancestor must disappear from its path without closing a leaf
+              // that remains directly readable; a later scope tick can restore
+              // the breadcrumb if visibility returns.
+              break
+            }
             if (background) {
               backgroundOpenErrorRef.current = true
               setOpenError(toPresentedMessage(error))
