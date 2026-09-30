@@ -1055,24 +1055,28 @@ test('v2 visual budgets are request-scoped across messages: twenty small images 
 })
 
 /**
- * The request with every image payload replaced by an empty string — the
- * non-image share the V2 budget is defined on. Used to find an exact boundary;
- * the assertions below always check the contract's verdict, not this helper.
+ * The request with every image payload replaced by an empty string, and the
+ * text parts blanked where they repeat `content` — the non-image share the V2
+ * budget is defined on. Used to find an exact boundary; the assertions below
+ * always check the contract's verdict, not this helper.
  */
 function nonImageBytes(request) {
   return Buffer.byteLength(
     JSON.stringify({
       ...request,
-      messages: request.messages.map(message =>
-        Array.isArray(message.contentParts)
-          ? {
-              ...message,
-              contentParts: message.contentParts.map(part =>
-                part.type === 'image' ? { ...part, data: '' } : part
-              ),
-            }
-          : message
-      ),
+      messages: request.messages.map(message => {
+        if (!Array.isArray(message.contentParts)) return message
+        const texts = message.contentParts.filter(part => part.type === 'text').map(part => part.text)
+        const repeatsContent = texts.join('\n') === message.content
+        return {
+          ...message,
+          contentParts: message.contentParts.map(part => {
+            if (part.type === 'image') return { ...part, data: '' }
+            if (repeatsContent && part.type === 'text') return { ...part, text: '' }
+            return part
+          }),
+        }
+      }),
     }),
     'utf8'
   )
@@ -1151,7 +1155,7 @@ test('v2 preserves the non-image budget: text and tools stay on the maxRequestBo
     v2WithParts([image, { type: 'text', text: 'z'.repeat(length) }], 'z'.repeat(length))
   const base = nonImageBytes(withImageAndText(0))
   const growth = (nonImageBytes(withImageAndText(10)) - base) / 10
-  assert.equal(growth, 2, 'content and its text part both carry the payload')
+  assert.equal(growth, 1, 'the text part repeats content and is counted once')
   const exactLength = Math.floor((maxRequestBodyBytes - base) / growth)
   const boundary = nonImageBytes(withImageAndText(exactLength))
   assert.ok(
@@ -1173,6 +1177,190 @@ test('v2 preserves the non-image budget: text and tools stay on the maxRequestBo
     nonImageBytes(withImageAndText(exactLength + 1)) > maxRequestBodyBytes,
     'the rejection is the non-image budget, not another gate'
   )
+})
+
+// Review R3-L3: a V2 user message carries its text twice, in `content` and in
+// its text parts, and the parser requires their '\n' join to equal `content`.
+// The non-image share counts that text once, as a V1 request would.
+function textAndImage(text) {
+  return v2WithParts([{ type: 'text', text }, imagePart(IMAGE_DATA.png)], text)
+}
+
+const AUTHORIZE_WRAPPER_BYTES =
+  Buffer.byteLength(JSON.stringify({ request: null }), 'utf8') - Buffer.byteLength('null', 'utf8')
+
+/** The non-image share of `request` as the contract measures it. */
+function nonImageShare(request) {
+  return contract.measureNonImageAuthorizeBytes({ request }) - AUTHORIZE_WRAPPER_BYTES
+}
+
+/**
+ * `request` serialized with image data blanked and, when `blankText`, the text
+ * of its text parts blanked too: the two measurements the share can take.
+ */
+function shadowBytes(request, blankText) {
+  return Buffer.byteLength(
+    JSON.stringify({
+      ...request,
+      messages: request.messages.map(message =>
+        Array.isArray(message.contentParts)
+          ? {
+              ...message,
+              contentParts: message.contentParts.map(part => {
+                if (part?.type === 'image') return { ...part, data: '' }
+                if (blankText && part?.type === 'text') return { ...part, text: '' }
+                return part
+              }),
+            }
+          : message
+      ),
+    }),
+    'utf8'
+  )
+}
+
+const TEXT_OVERFLOW = {
+  ok: false,
+  code: 'limit',
+  kind: 'size',
+  message: 'request exceeds maxRequestBodyBytes outside image data',
+}
+
+const PARTS_MISMATCH = index => ({
+  ok: false,
+  code: 'invalid',
+  message: `messages[${index}].content must equal the text parts joined by '\\n'`,
+})
+
+test('R3-L3 the non-image share counts text repeated in content and its parts once', () => {
+  const growth = (nonImageShare(textAndImage('z'.repeat(10))) - nonImageShare(textAndImage(''))) / 10
+  assert.equal(growth, 1)
+  const request = textAndImage('look')
+  assert.equal(nonImageShare(request), shadowBytes(request, true))
+  assert.ok(nonImageShare(request) < shadowBytes(request, false))
+})
+
+test('R3-L3 a 4.5 MiB prompt beside an image is accepted, as the same prompt is in V1', () => {
+  const { maxRequestBodyBytes } = contract.LIMITS
+  const text = 'x'.repeat(4.5 * MIB)
+  const v1 = { ...BASE, messages: [{ role: 'user', content: text }] }
+  const v1Parsed = contract.parseCodexCompletionRequest(v1)
+  assert.equal(v1Parsed.ok, true, v1Parsed.message)
+
+  const v2 = textAndImage(text)
+  assert.ok(shadowBytes(v2, false) > maxRequestBodyBytes, 'counted twice, the prompt is over the budget')
+  const parsed = contract.parseCodexCompletionRequest(v2)
+  assert.equal(parsed.ok, true, parsed.message)
+  assert.equal(parsed.value.messages[0].content, text)
+  assert.equal(parsed.value.messages[0].contentParts[0].text, text)
+
+  // The authorize and completion helpers take the same share.
+  assert.ok(
+    contract.measureNonImageAuthorizeBytes({ request: v2, invocationId: 'invocation-1' }) <=
+      maxRequestBodyBytes
+  )
+  assert.ok(
+    contract.measureNonImageCompletionBytes({
+      request: v2,
+      requestHash: 'a'.repeat(64),
+      executionTicket: `header.${'a'.repeat(2048)}.sig`,
+    }) <= maxRequestBodyBytes
+  )
+  // The measurement works on a detached copy.
+  assert.equal(v2.messages[0].contentParts[0].text, text)
+  assert.equal(v2.messages[0].contentParts[1].data, IMAGE_DATA.png)
+})
+
+test('R3-L3 exact boundary: the largest text beside an image is accepted and one byte more is refused', () => {
+  const { maxRequestBodyBytes } = contract.LIMITS
+  const length = maxRequestBodyBytes - shadowBytes(textAndImage(''), true)
+  const atLimit = textAndImage('x'.repeat(length))
+  assert.equal(nonImageShare(atLimit), maxRequestBodyBytes)
+  assert.ok(shadowBytes(atLimit, false) > maxRequestBodyBytes, 'counted twice, this body was refused')
+  const accepted = contract.parseCodexCompletionRequest(atLimit)
+  assert.equal(accepted.ok, true, accepted.message)
+  const over = textAndImage('x'.repeat(length + 1))
+  assert.equal(nonImageShare(over), maxRequestBodyBytes + 1)
+  assert.deepEqual(contract.parseCodexCompletionRequest(over), TEXT_OVERFLOW)
+})
+
+test('R3-L3 text parts that do not repeat content keep both copies in the share and are refused', () => {
+  const text = 'x'.repeat(4.5 * MIB)
+  // Same length, one character different: counted twice, over the budget.
+  assert.deepEqual(
+    contract.parseCodexCompletionRequest(v2WithParts([{ type: 'text', text }, imagePart(IMAGE_DATA.png)], `${text.slice(1)}y`)),
+    TEXT_OVERFLOW
+  )
+  const image = imagePart(IMAGE_DATA.png)
+  const mismatches = [
+    ['different text', [{ type: 'text', text: 'look' }, image], 'lock'],
+    ['swapped parts', [{ type: 'text', text: 'b' }, image, { type: 'text', text: 'a' }], 'a\nb'],
+    ['joined without the separator', [{ type: 'text', text: 'a' }, { type: 'text', text: 'b' }, image], 'ab'],
+    ['a trailing separator', [{ type: 'text', text: 'a' }, image], 'a\n'],
+    ['content without text parts', [image], 'look'],
+    ['text parts with empty content', [{ type: 'text', text: 'look' }, image], ''],
+  ]
+  for (const [label, parts, content] of mismatches) {
+    const request = v2WithParts(parts, content)
+    assert.equal(nonImageShare(request), shadowBytes(request, false), label)
+    assert.deepEqual(contract.parseCodexCompletionRequest(request), PARTS_MISMATCH(0), label)
+  }
+  // Malformed messages are measured as sent, never throw, and the parser
+  // refuses them.
+  const malformed = [
+    ['a non-string text part', [{ type: 'text', text: 7 }, image], '7'],
+    ['a non-object part beside a matching text part', ['junk', { type: 'text', text: 'look' }, image], 'look'],
+    ['a non-string content', [{ type: 'text', text: 'look' }, image], 7],
+  ]
+  for (const [label, parts, content] of malformed) {
+    const request = v2WithParts(parts, content)
+    assert.equal(nonImageShare(request), shadowBytes(request, false), label)
+    const parsed = contract.parseCodexCompletionRequest(request)
+    assert.equal(parsed.ok, false, label)
+    assert.equal(parsed.code, 'invalid', label)
+  }
+})
+
+test('R3-L3 multi-part and multi-message requests count each matching message once', () => {
+  const { maxRequestBodyBytes } = contract.LIMITS
+  const multiPart = v2WithParts(
+    [
+      { type: 'text', text: 'a' },
+      imagePart(IMAGE_DATA.png),
+      { type: 'text', text: 'b' },
+      imagePart(IMAGE_DATA.jpeg, 'image/jpeg'),
+      { type: 'text', text: '' },
+    ],
+    'a\nb\n'
+  )
+  assert.equal(nonImageShare(multiPart), shadowBytes(multiPart, true))
+  const multiPartParsed = contract.parseCodexCompletionRequest(multiPart)
+  assert.equal(multiPartParsed.ok, true, multiPartParsed.message)
+
+  const turn = content => ({
+    role: 'user',
+    content,
+    contentParts: [{ type: 'text', text: content }, imagePart(IMAGE_DATA.png)],
+  })
+  const text = 'x'.repeat(3 * MIB)
+  const twoTurns = v2WithMessages([turn(text), { role: 'assistant', content: 'ok' }, turn(text)])
+  assert.ok(shadowBytes(twoTurns, false) > maxRequestBodyBytes, 'counted twice, the history is over the budget')
+  assert.equal(nonImageShare(twoTurns), shadowBytes(twoTurns, true))
+  const twoTurnsParsed = contract.parseCodexCompletionRequest(twoTurns)
+  assert.equal(twoTurnsParsed.ok, true, twoTurnsParsed.message)
+
+  // Each message is judged on its own: the mismatched turn keeps its text.
+  const mismatched = { role: 'user', content: 'lock', contentParts: [{ type: 'text', text: 'look' }, imagePart(IMAGE_DATA.png)] }
+  const mixed = v2WithMessages([turn('look'), mismatched])
+  const expected = {
+    ...mixed,
+    messages: [
+      { ...turn('look'), contentParts: [{ type: 'text', text: '' }, imagePart('')] },
+      { ...mismatched, contentParts: [{ type: 'text', text: 'look' }, imagePart('')] },
+    ],
+  }
+  assert.equal(nonImageShare(mixed), Buffer.byteLength(JSON.stringify(expected), 'utf8'))
+  assert.deepEqual(contract.parseCodexCompletionRequest(mixed), PARTS_MISMATCH(1))
 })
 
 test('v2 total budget: the raw body is capped at 24 MiB and the three budgets stay consistent', () => {
