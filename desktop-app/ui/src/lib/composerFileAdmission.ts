@@ -113,6 +113,16 @@ export function composerRequestBodyBytes(
   )
 }
 
+/**
+ * The name a picked file is attached under. macOS reports some names
+ * decomposed (NFD); the Host accepts only NFC, so the name is composed at
+ * intake. `fileNameProblem` still refuses a non-NFC name, which can only come
+ * from a restored or hand-built attachment.
+ */
+export function composerFileName(file: { name: string }): string {
+  return file.name.normalize('NFC')
+}
+
 export function fileNameProblem(filename: string): string | null {
   if (filename.length === 0) return 'has no name'
   if (filename.normalize('NFC') !== filename) return 'has a name that is not NFC-normalized'
@@ -132,21 +142,22 @@ export function composerFileAdmissionError(
   file: { name: string; size: number },
   context: ComposerFileAdmissionContext
 ): string | null {
-  const nameProblem = fileNameProblem(file.name)
-  if (nameProblem) return `${file.name || 'The file'} ${nameProblem}.`
+  const name = composerFileName(file)
+  const nameProblem = fileNameProblem(name)
+  if (nameProblem) return `${name || 'The file'} ${nameProblem}.`
   if (file.size > COMPOSER_MAX_FILE_BYTES) {
-    return `${file.name} is ${formatFileSize(file.size)}; a file can be at most ${formatFileSize(COMPOSER_MAX_FILE_BYTES)}.`
+    return `${name} is ${formatFileSize(file.size)}; a file can be at most ${formatFileSize(COMPOSER_MAX_FILE_BYTES)}.`
   }
   if (context.attachedCount >= COMPOSER_MAX_ATTACHMENTS) {
     return `A message can carry at most ${COMPOSER_MAX_ATTACHMENTS} attachments.`
   }
-  const files = [...context.files, { filename: file.name, sizeBytes: file.size }]
+  const files = [...context.files, { filename: name, sizeBytes: file.size }]
   if (composerFileBase64Bytes(files) > COMPOSER_MAX_TOTAL_FILE_BASE64_BYTES) {
-    return `${file.name} does not fit: the files in a message can take at most ${formatFileSize(COMPOSER_MAX_TOTAL_FILE_BASE64_BYTES)} once encoded.`
+    return `${name} does not fit: the files in a message can take at most ${formatFileSize(COMPOSER_MAX_TOTAL_FILE_BASE64_BYTES)} once encoded.`
   }
   const bodyBytes = composerNonImageShareBytes({ ...context.request, files })
   if (bodyBytes > COMPOSER_MAX_NON_IMAGE_BODY_BYTES) {
-    return `${file.name} does not fit: the text and attachment details can take at most ${formatFileSize(COMPOSER_MAX_NON_IMAGE_BODY_BYTES)} per message once encoded.`
+    return `${name} does not fit: the text and attachment details can take at most ${formatFileSize(COMPOSER_MAX_NON_IMAGE_BODY_BYTES)} per message once encoded.`
   }
   return null
 }
@@ -170,10 +181,11 @@ async function sha256Hex(bytes: Uint8Array<ArrayBuffer>): Promise<string> {
  * file that changes on disk while it is read is not sent.
  */
 export async function readComposerFile(file: File, id: string): Promise<ComposerFileReadResult> {
+  const name = composerFileName(file)
   const base = {
     id,
     type: 'file' as const,
-    filename: file.name,
+    filename: name,
     sizeBytes: file.size,
     declaredMediaType: file.type,
   }
@@ -183,14 +195,14 @@ export async function readComposerFile(file: File, id: string): Promise<Composer
       return {
         ...base,
         status: 'failed',
-        error: `${file.name} changed while it was being read. Attach it again.`,
+        error: `${name} changed while it was being read. Attach it again.`,
       }
     }
     const classification = classifyBytes({
       bytes,
       totalByteLength: bytes.byteLength,
       declaredMediaType: file.type === '' ? null : file.type,
-      filename: file.name,
+      filename: name,
     })
     return {
       ...base,
@@ -201,6 +213,6 @@ export async function readComposerFile(file: File, id: string): Promise<Composer
     }
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error)
-    return { ...base, status: 'failed', error: `${file.name} could not be read: ${reason}` }
+    return { ...base, status: 'failed', error: `${name} could not be read: ${reason}` }
   }
 }

@@ -115,6 +115,21 @@ describe('useComposerAttachments — documents (#678)', () => {
     await waitFor(() => expect(statuses(result)).toEqual(['ready']))
   })
 
+  it('attaches a file whose name the OS reports decomposed under its NFC name', async () => {
+    const { result } = render()
+    const decomposed = 'café.txt'
+    // Twin: the name as picked is not NFC, which the Host refuses.
+    expect(decomposed.normalize('NFC')).not.toBe(decomposed)
+
+    act(() => {
+      result.current.handleAddComposerFiles([textFile(decomposed, 'menu')], '')
+    })
+
+    await waitFor(() => expect(statuses(result)).toEqual(['ready']))
+    expect(result.current.composerFileAttachments[0]?.filename).toBe('café.txt')
+    expect(result.current.composerFileRefusals).toEqual([])
+  })
+
   it('keeps two files that share a name but not their bytes', async () => {
     const { result } = render()
 

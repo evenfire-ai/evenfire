@@ -14,6 +14,7 @@ import {
   composerFileAdmissionError,
   composerFileBase64Bytes,
   composerFileDetailBytes,
+  composerFileName,
   composerNonImageShareBytes,
   composerRequestBodyBytes,
   fileNameProblem,
@@ -229,11 +230,18 @@ describe('composerFileAdmissionError (#678)', () => {
     ['a/b.pdf', 'has a name with "/" or control characters'],
     ['a\u0007.pdf', 'has a name with "/" or control characters'],
     ['..', 'has an invalid name'],
-    ['é.txt', 'has a name that is not NFC-normalized'],
     ['x'.repeat(256), 'has a name longer than 255 characters'],
   ])('rejects the name %j', (name, problem) => {
     expect(fileNameProblem(name)).toBe(problem)
     expect(composerFileAdmissionError({ name, size: 1 }, EMPTY_CONTEXT)).toContain(problem)
+  })
+
+  it('composes a decomposed name at intake and still refuses one that bypassed intake', () => {
+    const decomposed = 'e\u0301.txt'
+    expect(composerFileName({ name: decomposed })).toBe('\u00e9.txt')
+    expect(composerFileAdmissionError({ name: decomposed, size: 1 }, EMPTY_CONTEXT)).toBeNull()
+    // Twin: a restored attachment carries its name as stored, with no intake.
+    expect(fileNameProblem(decomposed)).toBe('has a name that is not NFC-normalized')
   })
 
   it('accepts a 255 code point name and a non-ASCII NFC name', () => {

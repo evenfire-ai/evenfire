@@ -1,7 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { COMPOSER_MAX_ATTACHMENTS } from '@constants/attachments'
 import { clearComposerDraft, clearComposerDraftAfterSend } from '@lib/composerDraftStore'
-import { composerFileAdmissionError, readComposerFile } from '@lib/composerFileAdmission'
+import {
+  composerFileAdmissionError,
+  composerFileName,
+  readComposerFile,
+} from '@lib/composerFileAdmission'
 import { buildComposerFileReferences } from '@lib/composerFileReferences'
 import { composerRequestBaseContent } from '@lib/composerHostRequest'
 import { buildComposerRequestContent } from '@lib/composerReferencesPrompt'
@@ -264,7 +268,7 @@ export function useComposerAttachments({
           id,
           addedOrder: composerAttachmentOrderRef.current,
           type: 'file' as const,
-          filename: file.name,
+          filename: composerFileName(file),
           sizeBytes: file.size,
           declaredMediaType: file.type,
         }
