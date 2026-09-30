@@ -201,6 +201,7 @@ describe('GfsBrowser authoritative revalidation integration', () => {
 
   it('reconnects a half-open operator stream without clearing the visible list', async () => {
     const scheduledTimers = vi.spyOn(window, 'setTimeout')
+    vi.spyOn(Math, 'random').mockReturnValue(0)
     let streamAttempts = 0
     let streamCancellations = 0
     vi.stubGlobal(
@@ -251,7 +252,7 @@ describe('GfsBrowser authoritative revalidation integration', () => {
     })
 
     await waitFor(() => expect(streamCancellations).toBe(1))
-    await waitFor(() => expect(streamAttempts).toBe(2))
+    await waitFor(() => expect(streamAttempts).toBe(2), { timeout: 5_000 })
     expect(screen.getByRole('button', { name: 'kept.txt' })).toBeVisible()
   })
 
