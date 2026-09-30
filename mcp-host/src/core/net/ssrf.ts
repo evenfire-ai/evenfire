@@ -134,10 +134,13 @@ function isPrivateIpv4Octets(octets: readonly number[]): boolean {
 }
 
 /**
- * Canonical non-public IPv4 prefixes. Mirrors the IPv4 exclusions in
- * deploy/base/public-egress-exceptions.yaml (rule-level egress exceptions) and
- * the IANA range list used by mcp-servers/web-search's fetch destination
- * validator; keep the lists aligned when one changes.
+ * Non-public IPv4 prefixes required by the SSRF hardening scope. This is the
+ * issue-required subset of the IPv4 exclusions in
+ * deploy/base/public-egress-exceptions.yaml and the IANA range list used by
+ * mcp-servers/web-search's fetch destination validator. Those policies also
+ * exclude 192.31.196/24, 192.52.193/24, 192.88.99/24, and 192.175.48/24,
+ * which are deliberately out of scope here; the three policies keep
+ * distinct ranges by design.
  */
 const NON_PUBLIC_IPV4_PREFIXES: readonly (readonly [address: string, prefix: number])[] = [
   ['0.0.0.0', 8], // "This network"

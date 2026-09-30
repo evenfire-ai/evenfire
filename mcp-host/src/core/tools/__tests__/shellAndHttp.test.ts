@@ -242,22 +242,32 @@ describe('HttpRequestTool', () => {
     expect(isPrivateIp('2002:808:808::')).toBe(true) // 6to4 form of 8.8.8.8
   })
 
-  it('should block new special-purpose IPv4 through mapped/compatible IPv6 forms', () => {
-    // IPv4-mapped, dotted quad.
-    expect(isPrivateIp('::ffff:100.64.0.1')).toBe(true)
-    expect(isPrivateIp('::ffff:198.18.0.1')).toBe(true)
-    expect(isPrivateIp('::ffff:224.0.0.1')).toBe(true)
-    expect(isPrivateIp('::ffff:240.0.0.1')).toBe(true)
-    expect(isPrivateIp('::ffff:192.0.2.1')).toBe(true)
-    expect(isPrivateIp('::ffff:203.0.113.1')).toBe(true)
-    // IPv4-mapped, hexadecimal.
-    expect(isPrivateIp('::ffff:6440:1')).toBe(true) // 100.64.0.1
-    expect(isPrivateIp('::ffff:c612:1')).toBe(true) // 198.18.0.1
-    expect(isPrivateIp('::ffff:808:808')).toBe(false) // Public 8.8.8.8
-    // IPv4-compatible, dotted quad.
-    expect(isPrivateIp('::100.64.0.1')).toBe(true)
-    expect(isPrivateIp('::198.18.0.1')).toBe(true)
-    expect(isPrivateIp('::8.8.8.8')).toBe(false) // Public control
+  const NEW_SPECIAL_PURPOSE_IPV4: readonly (readonly [string, string])[] = [
+    ['100.64.0.1', '6440:1'],
+    ['198.18.0.1', 'c612:1'],
+    ['224.0.0.1', 'e000:1'],
+    ['240.0.0.1', 'f000:1'],
+    ['192.0.0.1', 'c000:1'],
+    ['192.0.2.1', 'c000:201'],
+    ['198.51.100.1', 'c633:6401'],
+    ['203.0.113.1', 'cb00:7101'],
+  ]
+
+  it.each(NEW_SPECIAL_PURPOSE_IPV4)(
+    'should block %s (%s) through every IPv4-mapped/compatible representation',
+    (dotted: string, hex: string) => {
+      expect(isPrivateIp(`::ffff:${dotted}`)).toBe(true)
+      expect(isPrivateIp(`::ffff:${hex}`)).toBe(true)
+      expect(isPrivateIp(`::${dotted}`)).toBe(true)
+      expect(isPrivateIp(`::${hex}`)).toBe(true)
+    }
+  )
+
+  it('should keep public IPv4 public through mapped/compatible representations', () => {
+    expect(isPrivateIp('::ffff:8.8.8.8')).toBe(false)
+    expect(isPrivateIp('::ffff:808:808')).toBe(false)
+    expect(isPrivateIp('::8.8.8.8')).toBe(false)
+    expect(isPrivateIp('::808:808')).toBe(false)
   })
 
   it('should keep hostnames and non-IP strings outside the private classifier', () => {
