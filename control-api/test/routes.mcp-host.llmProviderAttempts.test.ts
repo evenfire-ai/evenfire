@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import { createServer } from 'node:http'
 import { gzipSync } from 'node:zlib'
+import pino from 'pino'
 import request from 'supertest'
 import {
   BODY_STRUCTURE_LIMITS as GROK_BODY_STRUCTURE_LIMITS,
@@ -747,12 +748,18 @@ describe('authorize raw-body scan before JSON.parse', () => {
 
   // Review R3 nit b: the refusal is logged through the request-scoped logger,
   // which carries the correlationId, as the global error handler does.
+  // Review R4-L8: that logger is a child of the root logger without the
+  // route's module binding, so the route adds it back.
   it('logs a body refusal through req.log when the request has one', async () => {
-    const requestWarn = vi.fn()
+    const lines: Array<Record<string, unknown>> = []
+    const requestLogger = pino(
+      { level: 'info' },
+      { write: (line: string) => void lines.push(JSON.parse(line) as Record<string, unknown>) }
+    ).child({ correlationId: 'c-806' })
     const app = express()
     app.use((req, _res, next) => {
       // `Request.log` is declared by middleware/correlationId.ts.
-      ;(req as { log?: unknown }).log = { warn: requestWarn }
+      ;(req as { log?: unknown }).log = requestLogger
       next()
     })
     const api = express.Router()
@@ -763,11 +770,17 @@ describe('authorize raw-body scan before JSON.parse', () => {
       .set(headers({ 'content-encoding': 'gzip' }))
       .send(Buffer.from(gzipSync('{}')))
     expect(res.status).toBe(415)
-    // Witness: the request logger received the refusal.
-    expect(requestWarn).toHaveBeenCalledExactlyOnceWith({
+    // Witness: the request logger wrote the refusal, with the correlationId
+    // it carries and the route's module binding.
+    const refusals = lines.filter(line => line.event === 'llm_provider_attempt_body_refused')
+    expect(refusals).toHaveLength(1)
+    expect(refusals[0]).toMatchObject({
+      level: 40,
       event: 'llm_provider_attempt_body_refused',
       type: 'encoding.unsupported',
       status: 415,
+      correlationId: 'c-806',
+      module: 'mcp-host-llm-provider-attempts',
     })
     const moduleRefusals = mockLogWarn.mock.calls.filter(
       ([fields]) => (fields as { event?: string })?.event === 'llm_provider_attempt_body_refused'
