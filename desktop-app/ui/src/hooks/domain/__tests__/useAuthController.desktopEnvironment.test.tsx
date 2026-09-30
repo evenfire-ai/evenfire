@@ -62,12 +62,12 @@ function Probe() {
   )
 }
 
-async function dispatchDesktopEnvironmentLink() {
+async function dispatchDesktopEnvironmentLink(payload = targetEnvironment) {
   if (!desktopEnvironmentSetupListener) {
     throw new Error('Desktop environment listener was not registered')
   }
   await act(async () => {
-    await desktopEnvironmentSetupListener?.(targetEnvironment)
+    await desktopEnvironmentSetupListener?.(payload)
   })
 }
 
@@ -181,22 +181,50 @@ describe('Desktop environment handoff', () => {
     )
   })
 
-  it('prompts to add the environment when its RPC proxy origin is not saved', async () => {
+  it('rejects a link that proposes a different RPC proxy for a saved REST environment', async () => {
     await runtimeConfigModule!.saveDesktopRuntimeConfig({
       ...targetEnvironment,
       externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/api/v1`,
-      rpcProxyBaseUrl: otherEnvironment.rpcProxyBaseUrl,
+      rpcProxyBaseUrl: `${targetEnvironment.rpcProxyBaseUrl}/rpc`,
     })
 
     render(<Probe />)
     await waitFor(() => expect(screen.getByTestId('configuration-loaded')).toHaveTextContent('yes'))
-    await dispatchDesktopEnvironmentLink()
+    await dispatchDesktopEnvironmentLink({
+      ...targetEnvironment,
+      rpcProxyBaseUrl: 'https://rpc.attacker.test',
+    })
 
     expect(mocks.selectRuntimeConfig).not.toHaveBeenCalled()
-    expect(screen.getByTestId('pending-environment')).toHaveTextContent(
-      targetEnvironment.externalRestApiBaseUrl
+    expect(screen.getByTestId('pending-environment')).toHaveTextContent('none')
+    expect(screen.getByTestId('pending-rpc')).toHaveTextContent('none')
+    expect(
+      (await runtimeConfigModule!.getDesktopRuntimeConfigState()).options.find(
+        option =>
+          option.externalRestApiBaseUrl === `${targetEnvironment.externalRestApiBaseUrl}/api/v1`
+      )?.rpcProxyBaseUrl
+    ).toBe(`${targetEnvironment.rpcProxyBaseUrl}/rpc`)
+    expect(mocks.setStatus).toHaveBeenCalledWith(
+      expect.stringMatching(/RPC proxy.*saved environment/i),
+      'error'
     )
-    expect(screen.getByTestId('pending-rpc')).toHaveTextContent(targetEnvironment.rpcProxyBaseUrl)
+  })
+
+  it('does not retain an RPC proxy supplied by a new environment link', async () => {
+    const linkedEnvironment = {
+      appName: 'New tenant',
+      externalRestApiBaseUrl: 'https://new-api.example.test',
+      rpcProxyBaseUrl: 'https://rpc.attacker.test',
+    }
+
+    render(<Probe />)
+    await waitFor(() => expect(screen.getByTestId('configuration-loaded')).toHaveTextContent('yes'))
+    await dispatchDesktopEnvironmentLink(linkedEnvironment)
+
+    expect(screen.getByTestId('pending-environment')).toHaveTextContent(
+      linkedEnvironment.externalRestApiBaseUrl
+    )
+    expect(screen.getByTestId('pending-rpc')).toHaveTextContent('none')
   })
 
   it('does not offer setup when the saved environment list cannot be verified', async () => {

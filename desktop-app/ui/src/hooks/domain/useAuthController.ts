@@ -10,6 +10,7 @@ import type {
   SessionMe,
 } from '../../../../src/types'
 import type { Tone } from '../../uiTypes'
+import { createDesktopEnvironmentSetupHandler } from './desktopEnvironmentHandoff'
 import type { SetStatusFn } from './types'
 
 interface UseAuthControllerParams {
@@ -35,30 +36,6 @@ function isUnauthorizedError(error: unknown) {
 
   const message = error instanceof Error ? error.message.toLowerCase() : String(error)
   return /\b401\s+unauthorized\b/.test(message) || /:\s*401\s/.test(message)
-}
-
-function environmentOrigin(value: string): string {
-  const url = new URL(value.trim())
-  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-    throw new Error('Only http(s) desktop environment URLs are supported')
-  }
-  return url.origin
-}
-
-function sameDesktopEnvironment(
-  left: Pick<DesktopRuntimeConfig, 'externalRestApiBaseUrl' | 'rpcProxyBaseUrl'>,
-  right: Pick<DesktopRuntimeConfig, 'externalRestApiBaseUrl' | 'rpcProxyBaseUrl'>
-): boolean {
-  try {
-    return (
-      environmentOrigin(left.externalRestApiBaseUrl) ===
-        environmentOrigin(right.externalRestApiBaseUrl) &&
-      (left.rpcProxyBaseUrl?.trim() ? environmentOrigin(left.rpcProxyBaseUrl) : '') ===
-        (right.rpcProxyBaseUrl?.trim() ? environmentOrigin(right.rpcProxyBaseUrl) : '')
-    )
-  } catch {
-    return false
-  }
 }
 
 export function useAuthController({ setStatus, onSessionNeedsLoad }: UseAuthControllerParams) {
@@ -361,64 +338,13 @@ export function useAuthController({ setStatus, onSessionNeedsLoad }: UseAuthCont
 
   useEffect(() => {
     return window.clerum.auth.onDesktopEnvironmentSetup(
-      async ({ externalRestApiBaseUrl, rpcProxyBaseUrl, appName }) => {
-        const normalizedExternalRestApiBaseUrl = externalRestApiBaseUrl.trim()
-        if (!normalizedExternalRestApiBaseUrl) return
-        const targetConfig: DesktopRuntimeConfig = {
-          externalRestApiBaseUrl: normalizedExternalRestApiBaseUrl,
-          rpcProxyBaseUrl: rpcProxyBaseUrl?.trim() || '',
-          appName: appName?.trim() || 'Evenfire',
-        }
-        try {
-          environmentOrigin(targetConfig.externalRestApiBaseUrl)
-          if (targetConfig.rpcProxyBaseUrl) environmentOrigin(targetConfig.rpcProxyBaseUrl)
-        } catch (error) {
-          setStatus(
-            `Desktop setup link rejected: ${error instanceof Error ? error.message : String(error)}`,
-            'error'
-          )
-          return
-        }
-
-        let configState: DesktopRuntimeConfigState
-        try {
-          configState = await refreshRuntimeConfigState()
-        } catch {
-          setStatus('Could not verify the desktop environment. Try opening it again.', 'error')
-          return
-        }
-
-        const activeEnvironmentMatches = Boolean(
-          configState.configured &&
-          configState.currentConfig &&
-          sameDesktopEnvironment(configState.currentConfig, targetConfig)
-        )
-        if (activeEnvironmentMatches) {
-          setPendingDesktopEnvironmentSetup(null)
-          setStatus(`Opening ${targetConfig.appName} in Evenfire Desktop.`, 'success')
-          return
-        }
-
-        const savedEnvironment = configState.options.find(option =>
-          sameDesktopEnvironment(option, targetConfig)
-        )
-        if (savedEnvironment) {
-          setPendingDesktopEnvironmentSetup(null)
-          const selectedState = await handleSelectRuntimeConfig(savedEnvironment.id)
-          if (!selectedState) return
-          try {
-            await onSessionNeedsLoad({ preserveNav: true })
-          } catch (error) {
-            setStatus(
-              `Could not load the selected desktop environment: ${error instanceof Error ? error.message : String(error)}`,
-              'error'
-            )
-          }
-          return
-        }
-
-        setPendingDesktopEnvironmentSetup(targetConfig)
-      }
+      createDesktopEnvironmentSetupHandler({
+        refreshRuntimeConfigState,
+        handleSelectRuntimeConfig,
+        onSessionNeedsLoad,
+        setPendingDesktopEnvironmentSetup,
+        setStatus,
+      })
     )
   }, [handleSelectRuntimeConfig, onSessionNeedsLoad, refreshRuntimeConfigState, setStatus])
 
