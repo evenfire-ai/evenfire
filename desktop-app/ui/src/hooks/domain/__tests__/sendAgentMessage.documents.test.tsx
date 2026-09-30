@@ -7,10 +7,21 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, waitFor } from '@testing-library/react'
 import { createHash } from 'node:crypto'
+import { loadHostModels, resetHostModelSelectionStore } from '@lib/hostModelSelectionStore'
+import type { HostModelsResult } from '../../../../../src/types'
 import { renderController } from './__fixtures__/controllerHarness'
 import { type MockClerum, installMockClerum, uninstallMockClerum } from './__fixtures__/mockClerum'
 
 let clerum: MockClerum
+
+const imageCatalog: HostModelsResult = {
+  provider: 'zai',
+  hostDefault: 'glm-5.3-flash',
+  sessionModel: null,
+  degraded: false,
+  modelSelectionRevision: 0,
+  models: [{ name: 'glm-5.3-flash', imageInput: { state: 'supported', reason: 'supported' } }],
+}
 let uuidCounter = 0
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -32,6 +43,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks()
+  resetHostModelSelectionStore()
   uninstallMockClerum()
 })
 
@@ -317,6 +329,51 @@ describe('sendAgentMessage — a Host without file attachments (#678 D13)', () =
     expect(rendered.spies.pushToast).toHaveBeenCalledWith(UNSUPPORTED, 'error')
     expect(rendered.result.current.failedAgentSend?.message).toBe(UNSUPPORTED)
     expect(rendered.result.current.failedAgentSend?.files.map(item => item.id)).toEqual([file.id])
+  })
+
+  it('titles a new chat from both the images and the documents of a send without text', async () => {
+    clerum.rpc.invokeHostMessage.mockResolvedValue({ response: 'done' })
+    const modelTransport = {
+      getHostModels: vi.fn(async () => imageCatalog),
+      setHostModel: vi.fn(),
+    }
+    Object.assign(clerum.rpc, modelTransport)
+    const rendered = renderController()
+    await settleMount()
+    // An image send needs a model with verified image input.
+    await act(async () => {
+      await loadHostModels(modelTransport, 'agent-x', null)
+    })
+    expect(rendered.result.current.activeChatId).toBeNull()
+    act(() => {
+      rendered.result.current.handleAddComposerImageAttachments([
+        {
+          id: 'image-1',
+          name: 'shot.png',
+          mimeType: 'image/png',
+          dataBase64: 'YWJj',
+          sizeBytes: 3,
+          previewDataUrl: 'data:image/png;base64,YWJj',
+        },
+      ])
+    })
+    await addReadyFile(rendered)
+
+    await act(async () => {
+      await rendered.result.current.handleSendAgentMessage('')
+    })
+
+    // Witness: the send auto-created the chat that gets the title.
+    const createdChatId = rendered.result.current.activeChatId
+    expect(createdChatId).not.toBeNull()
+    await waitFor(() =>
+      expect(clerum.chat.rename).toHaveBeenCalledWith(
+        'agent-x',
+        createdChatId,
+        'Images: shot.png; Files: notes.txt',
+        1
+      )
+    )
   })
 
   it('does not read an empty ack (an unreadable Host answer) as a dropped file', async () => {

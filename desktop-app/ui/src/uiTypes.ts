@@ -281,7 +281,7 @@ type ComposerFileAttachmentBase = {
  */
 export type ComposerFileAttachment = ComposerFileAttachmentBase &
   (
-    | { status: 'selected' | 'reading' }
+    | { status: 'reading' }
     | {
         status: 'ready'
         classification: FileClassification

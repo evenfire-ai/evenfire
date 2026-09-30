@@ -375,7 +375,6 @@ test('document-upload fixture: an attached text file reaches the model through t
 
   fs.mkdirSync(testInfo.outputPath(), { recursive: true })
   fs.writeFileSync(testInfo.outputPath(document.fileName), document.buffer)
-  fs.writeFileSync(testInfo.outputPath(largeDocument.fileName), largeDocument.buffer)
 
   let app: ElectronApplication | undefined
   let recordedPage: Page | undefined

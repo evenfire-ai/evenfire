@@ -3025,15 +3025,23 @@ export function useAgentChatController({
           chatList.find(c => c.id === sendChatId) ??
           (autoCreatedMeta && autoCreatedMeta.id === sendChatId ? autoCreatedMeta : undefined)
         if (chat && chat.title === 'New Chat') {
+          // Without text, the title names every kind of attachment the send
+          // carried: images and documents together, else the context references.
+          const attachmentTitleParts = [
+            effectiveAttachments.length > 0
+              ? `Images: ${effectiveAttachments.map(att => att.name).join(', ')}`
+              : '',
+            effectiveFiles.length > 0
+              ? `Files: ${effectiveFiles.map(file => file.filename).join(', ')}`
+              : '',
+          ].filter(Boolean)
           const autoTitleSeed =
             trimmedContent ||
-            (effectiveAttachments.length > 0
-              ? `Images: ${effectiveAttachments.map(att => att.name).join(', ')}`
-              : effectiveFiles.length > 0
-                ? `Files: ${effectiveFiles.map(file => file.filename).join(', ')}`
-                : effectiveReferences.length > 0
-                  ? `Context: ${effectiveReferences.map(ref => ref.label).join(', ')}`
-                  : '')
+            (attachmentTitleParts.length > 0
+              ? attachmentTitleParts.join('; ')
+              : effectiveReferences.length > 0
+                ? `Context: ${effectiveReferences.map(ref => ref.label).join(', ')}`
+                : '')
           const autoTitle = truncateTitle(autoTitleSeed)
           if (autoTitle) {
             // spec 15 §2.5/B19: the client-derived auto-title stays LOCAL only —
@@ -3529,8 +3537,8 @@ export function useAgentChatController({
 
   const handleSendAgentMessage = useCallback(
     async (text: string) => {
-      // A document still being read, or one that failed, is not part of the
-      // message: sending now would silently leave it out.
+      // A document still being read is not part of the message yet: sending
+      // now would silently leave it out.
       if (composerFilesBlockSend) return
       await sendAgentMessage(
         text,

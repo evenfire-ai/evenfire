@@ -12,6 +12,7 @@ import {
   COMPOSER_MAX_TOTAL_IMAGE_BASE64_BYTES,
 } from '@constants/attachments'
 import type { HostModelsResult } from '@hooks/useChatStore'
+import { readComposerFile } from '@lib/composerFileAdmission'
 import {
   type ImageInputDecision,
   imageInputBlockMessage,
@@ -1047,39 +1048,33 @@ describe('ComposerPanel failed-send recovery actions', () => {
 })
 
 describe('ComposerPanel document attachments (#678)', () => {
-  const readyClassification = {
-    class: 'text' as const,
-    detectedMediaType: 'text/plain',
-    detection: 'text_utf8' as const,
-    textReadable: true,
-    reader: 'text' as const,
-    modelImageInput: 'unsupported' as const,
-    mismatch: false,
+  /** A chip built by the same read the composer runs, never by hand. */
+  async function readyFile(
+    id: string,
+    name: string,
+    bytes: Uint8Array<ArrayBuffer>,
+    type: string
+  ): Promise<ComposerFileAttachment> {
+    const result = await readComposerFile(new File([bytes], name, { type }), id)
+    if (result.status !== 'ready') throw new Error(`fixture ${name} did not read: ${result.error}`)
+    return result
   }
 
-  function readyFile(
-    overrides: Partial<Extract<ComposerFileAttachment, { status: 'ready' }>> = {}
-  ) {
-    return {
-      id: 'file-1',
-      type: 'file' as const,
-      filename: 'notes.txt',
-      sizeBytes: 2048,
-      declaredMediaType: 'text/plain',
-      status: 'ready' as const,
-      classification: readyClassification,
-      dataBase64: 'aGVsbG8=',
-      digestHex: 'a'.repeat(64),
-      ...overrides,
-    }
+  const notesBytes = new TextEncoder().encode('n'.repeat(2048))
+  // A ZIP local-file header: bytes the agent has no reader for.
+  const zipBytes = new Uint8Array([0x50, 0x4b, 0x03, 0x04, ...new Array(60).fill(0)])
+  const pdfBytes = new TextEncoder().encode('%PDF-1.4\n1 0 obj\n<<>>\nendobj\n%%EOF\n')
+
+  function notesFile() {
+    return readyFile('file-1', 'notes.txt', notesBytes, 'text/plain')
   }
 
   function sendButton(): HTMLButtonElement {
     return screen.getByRole('button', { name: 'Send message' }) as HTMLButtonElement
   }
 
-  it('shows a ready document chip and lets a message with only that document be sent', () => {
-    composerState.composerFileAttachments = [readyFile()]
+  it('shows a ready document chip and lets a message with only that document be sent', async () => {
+    composerState.composerFileAttachments = [await notesFile()]
     render(<ComposerPanel inline />)
 
     const chip = screen.getByTestId('composer-file-chip')
@@ -1089,15 +1084,27 @@ describe('ComposerPanel document attachments (#678)', () => {
     expect(sendButton().disabled).toBe(false)
   })
 
-  it('removes a document through its chip button', () => {
-    composerState.composerFileAttachments = [readyFile()]
+  it('gives a document chip its own icon class, not the image one', async () => {
+    composerState.composerFileAttachments = [await notesFile()]
+    render(<ComposerPanel inline />)
+
+    const chip = screen.getByTestId('composer-file-chip')
+    // Witness: the chip renders its icon at all.
+    expect(chip.querySelector('.composer-reference-icon')).not.toBeNull()
+    expect(chip.querySelector('.composer-reference-icon--uploaded-file')).not.toBeNull()
+    expect(chip.querySelector('.composer-reference-icon--uploaded-image')).toBeNull()
+  })
+
+  it('removes a document through its chip button', async () => {
+    composerState.composerFileAttachments = [await notesFile()]
     render(<ComposerPanel inline />)
 
     fireEvent.click(screen.getByRole('button', { name: 'Remove notes.txt' }))
     expect(actionsMock.handleRemoveComposerFileAttachment).toHaveBeenCalledWith('file-1')
   })
 
-  it.each(['selected', 'reading'] as const)('blocks the send while a document is %s', status => {
+  it('blocks the send while a document is reading', () => {
+    // A reading chip has no read result yet, so it is the one built by hand.
     composerState.composerFileAttachments = [
       {
         id: 'file-2',
@@ -1105,7 +1112,7 @@ describe('ComposerPanel document attachments (#678)', () => {
         filename: 'big.pdf',
         sizeBytes: 1024,
         declaredMediaType: 'application/pdf',
-        status,
+        status: 'reading',
       },
     ]
     draftState.value = 'read this'
@@ -1131,14 +1138,10 @@ describe('ComposerPanel document attachments (#678)', () => {
     expect(sendButton().disabled).toBe(false)
   })
 
-  it('lists refusals before the notices of ready documents', () => {
+  it('lists refusals before the notices of ready documents', async () => {
     composerState.composerFileRefusals = [{ id: 'refusal-2', text: 'huge.bin is too large.' }]
     composerState.composerFileAttachments = [
-      readyFile({
-        id: 'file-5',
-        filename: 'archive.zip',
-        classification: { ...readyClassification, class: 'binary_unsupported', reader: 'none' },
-      }),
+      await readyFile('file-5', 'archive.zip', zipBytes, 'application/zip'),
     ]
     render(<ComposerPanel inline />)
 
@@ -1148,14 +1151,11 @@ describe('ComposerPanel document attachments (#678)', () => {
     expect(screen.getByTestId('composer-file-chip').getAttribute('data-file-status')).toBe('ready')
   })
 
-  it('says when the agent has no reader for an attached document', () => {
-    composerState.composerFileAttachments = [
-      readyFile({
-        id: 'file-4',
-        filename: 'archive.zip',
-        classification: { ...readyClassification, class: 'binary_unsupported', reader: 'none' },
-      }),
-    ]
+  it('says when the agent has no reader for an attached document', async () => {
+    const archive = await readyFile('file-4', 'archive.zip', zipBytes, 'application/zip')
+    // Precondition: the real read classifies these bytes as unreadable.
+    expect(archive.status === 'ready' && archive.classification.reader).toBe('none')
+    composerState.composerFileAttachments = [archive]
     render(<ComposerPanel inline />)
 
     expect(screen.getByTestId('composer-file-chip').textContent).toContain('No reader available')
@@ -1165,14 +1165,11 @@ describe('ComposerPanel document attachments (#678)', () => {
     expect(sendButton().disabled).toBe(false)
   })
 
-  it('warns when the bytes do not match the name or type', () => {
-    composerState.composerFileAttachments = [
-      readyFile({
-        id: 'file-5',
-        filename: 'report.txt',
-        classification: { ...readyClassification, class: 'pdf', mismatch: true },
-      }),
-    ]
+  it('warns when the bytes do not match the name or type', async () => {
+    const report = await readyFile('file-5', 'report.txt', pdfBytes, 'text/plain')
+    // Precondition: the real read sees PDF bytes behind a text name.
+    expect(report.status === 'ready' && report.classification.mismatch).toBe(true)
+    composerState.composerFileAttachments = [report]
     render(<ComposerPanel inline />)
 
     expect(screen.getByRole('status').textContent).toBe(

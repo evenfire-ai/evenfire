@@ -14058,6 +14058,17 @@ pre {
   border-color: rgba(var(--accent-rgb), 0.34);
 }
 
+.composer-reference-icon--uploaded-file {
+  background: rgba(var(--info-rgb), 0.14);
+  border-color: rgba(var(--info-rgb), 0.34);
+}
+
+.composer-reference-icon--uploaded-file svg {
+  width: 13px;
+  height: 13px;
+  stroke-width: 1.8;
+}
+
 /* Support the JS attachment type and the CSS-friendly alias used by modal rows. */
 .composer-reference-icon--agent_file,
 .composer-reference-icon--agent-file {

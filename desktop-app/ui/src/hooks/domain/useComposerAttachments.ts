@@ -286,22 +286,28 @@ export function useComposerAttachments({
             setComposerFileRefusals(previous => [...previous, { id, text: result.error }])
             return
           }
-          commitComposerFiles(previous => {
-            if (
-              previous.some(
-                item =>
-                  item.id !== id &&
-                  item.status === 'ready' &&
-                  item.filename === result.filename &&
-                  item.digestHex === result.digestHex
-              )
-            ) {
-              return previous.filter(item => item.id !== id)
-            }
-            return previous.map(item =>
+          // The same bytes under the same name are one document: the second copy
+          // leaves no chip, and the user is told why it did not appear.
+          const duplicate = composerFilesRef.current.some(
+            item =>
+              item.id !== id &&
+              item.status === 'ready' &&
+              item.filename === result.filename &&
+              item.digestHex === result.digestHex
+          )
+          if (duplicate) {
+            commitComposerFiles(previous => previous.filter(item => item.id !== id))
+            setComposerFileRefusals(previous => [
+              ...previous,
+              { id, text: `"${result.filename}" is already attached.` },
+            ])
+            return
+          }
+          commitComposerFiles(previous =>
+            previous.map(item =>
               item.id === id ? { ...result, addedOrder: item.addedOrder } : item
             )
-          })
+          )
         })
       }
       setComposerFileRefusals(refusals)

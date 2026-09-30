@@ -1567,7 +1567,6 @@ export function useAppController() {
     handleRemoveComposerImageAttachment: chat.handleRemoveComposerImageAttachment,
     handleAddComposerFiles: chat.handleAddComposerFiles,
     handleRemoveComposerFileAttachment: chat.handleRemoveComposerFileAttachment,
-    handleRestoreComposerFiles: chat.handleRestoreComposerFiles,
     handleAddComposerReferenceAttachments: chat.handleAddComposerReferenceAttachments,
     handleRemoveComposerReferenceAttachment: chat.handleRemoveComposerReferenceAttachment,
     cancelTask: chat.cancelTask,

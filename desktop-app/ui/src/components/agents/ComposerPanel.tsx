@@ -400,9 +400,9 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
     composerImageAttachments.length > 0 && hostModelSelection.visualSendBlocked
   // Per-instance id: the main panel and the chat drawer can both be mounted.
   const imageNoticeId = useId()
-  // #678 — a document that is still being read, or that failed, is not part of
-  // the message. Sending now would leave it out without saying so, so send
-  // stays disabled until each chip is ready or removed.
+  // #678 — a document that is still being read is not part of the message yet.
+  // Sending now would leave it out without saying so, so send stays disabled
+  // until each chip is ready or removed.
   const filesBlockedForSend = composerFileAttachments.some(file => file.status !== 'ready')
   const handleSend = useCallback(() => {
     if (imagesBlockedForSend || filesBlockedForSend) return
@@ -1111,7 +1111,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
                         data-file-status={attachment.status}
                       >
                         <span
-                          className="composer-reference-icon composer-reference-icon--uploaded-image"
+                          className="composer-reference-icon composer-reference-icon--uploaded-file"
                           aria-hidden="true"
                         >
                           <IconAttachFile />

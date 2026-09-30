@@ -1,10 +1,6 @@
 import type { ReactNode, RefObject } from 'react'
 import type { ChatDeleteFence } from '../../../../src/types'
-import type {
-  ComposerFileAttachment,
-  ComposerImageAttachment,
-  ComposerReferenceAttachment,
-} from '../../uiTypes'
+import type { ComposerImageAttachment, ComposerReferenceAttachment } from '../../uiTypes'
 
 export interface QueuedChatDelete {
   agentRef: string
@@ -37,7 +33,6 @@ export interface AgentChatActionsContextValue {
   handleRemoveComposerImageAttachment: (attachmentId: string) => void
   handleAddComposerFiles: (files: File[], draft: string) => void
   handleRemoveComposerFileAttachment: (attachmentId: string) => void
-  handleRestoreComposerFiles: (files: ComposerFileAttachment[]) => void
   handleAddComposerReferenceAttachments: (attachments: ComposerReferenceAttachment[]) => void
   handleRemoveComposerReferenceAttachment: (attachmentId: string) => void
   handleSendAgentMessage: (text: string) => Promise<void>

@@ -100,7 +100,7 @@ describe('useComposerAttachments — documents (#678)', () => {
     expect(orders[0]).toBeLessThan(orders[1]!)
   })
 
-  it('drops a second copy of the same file instead of attaching it twice', async () => {
+  it('drops a second copy of the same file and says it is already attached', async () => {
     const { result } = render()
 
     act(() => {
@@ -113,6 +113,7 @@ describe('useComposerAttachments — documents (#678)', () => {
     // Liveness witness: the second copy was admitted (reading) before it was dropped.
     expect(statuses(result)).toEqual(['ready', 'reading'])
     await waitFor(() => expect(statuses(result)).toEqual(['ready']))
+    expect(refusalTexts(result)).toEqual(['"same.txt" is already attached.'])
   })
 
   it('attaches a file whose name the OS reports decomposed under its NFC name', async () => {
