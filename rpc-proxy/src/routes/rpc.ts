@@ -198,6 +198,11 @@ export function respondControlApiHostAccessRejection(
  */
 function mutatingCallSignal(timeoutMs: number | undefined, res: ExpressResponse): AbortSignal {
   const clientGone = new AbortController()
+  // A client can leave while the host is still being resolved; its 'close'
+  // has already fired by now, so a listener alone would never see it.
+  if (res.closed && !res.writableFinished) {
+    clientGone.abort(new Error('client disconnected'))
+  }
   res.once('close', () => {
     if (!res.writableFinished) clientGone.abort(new Error('client disconnected'))
   })

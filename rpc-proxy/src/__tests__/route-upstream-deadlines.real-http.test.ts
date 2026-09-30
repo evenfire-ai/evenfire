@@ -817,6 +817,78 @@ describe.each(DISCONNECT_ROUTES)(
         await new Promise<void>(resolve => proxy.close(() => resolve()))
       }
     })
+
+    it('a client gone before the upstream call starts never sends it', async () => {
+      serviceMock.forwardCancelToHost.mockImplementation(
+        forwardCancelToHost as typeof serviceMock.forwardCancelToHost
+      )
+      await startUpstream(() => {
+        // never answered
+      })
+      const { port: upstreamPort } = server!.address() as AddressInfo
+      let releaseResolution: () => void = () => {
+        throw new Error('host resolution was never started')
+      }
+      serviceMock.resolveHostConnectionForUser.mockImplementation(async () => {
+        await new Promise<void>(resolve => {
+          releaseResolution = resolve
+        })
+        return { name: 'chatllm', url: `http://127.0.0.1:${upstreamPort}`, headers: {} }
+      })
+      const proxy = makeApp().listen(0, '127.0.0.1')
+      await new Promise<void>((resolve, reject) => {
+        proxy.once('listening', resolve)
+        proxy.once('error', reject)
+      })
+      const fetchSpy = vi.spyOn(globalThis, 'fetch')
+      try {
+        const { port } = proxy.address() as AddressInfo
+        const payload = JSON.stringify(route.body)
+        const clientErrors: string[] = []
+        const clientReq = httpRequest({
+          host: '127.0.0.1',
+          port,
+          method: 'POST',
+          path: route.path,
+          headers: {
+            authorization: 'Bearer tok',
+            'content-type': 'application/json',
+            'content-length': Buffer.byteLength(payload),
+          },
+        })
+        // Recorded, not ignored: destroying the request is the event under test.
+        clientReq.on('error', error => clientErrors.push(error.message))
+        clientReq.end(payload)
+
+        // The client leaves while the route is still resolving the host, so the
+        // response has already closed when the upstream call is prepared.
+        await vi.waitFor(
+          () => expect(serviceMock.resolveHostConnectionForUser).toHaveBeenCalledTimes(1),
+          { timeout: 2_000, interval: 10 }
+        )
+        clientReq.destroy()
+        await new Promise(resolve => setTimeout(resolve, 100))
+        releaseResolution()
+
+        // Liveness witness: the route got past the resolution and started the
+        // upstream call, on a signal that was already aborted.
+        const upstreamCall = () =>
+          fetchSpy.mock.calls.find(([input]) => String(input).endsWith(route.upstreamPath))
+        await vi.waitFor(() => expect(upstreamCall()).toBeDefined(), {
+          timeout: 2_000,
+          interval: 10,
+        })
+        expect(upstreamCall()![1]?.signal?.aborted).toBe(true)
+        await new Promise(resolve => setTimeout(resolve, 200))
+        expect(seen).toEqual([])
+        expect(clientErrors).toEqual(['socket hang up'])
+        expect(controlApiMock.requestHostWakeFromControlApi).not.toHaveBeenCalled()
+      } finally {
+        fetchSpy.mockRestore()
+        proxy.closeAllConnections()
+        await new Promise<void>(resolve => proxy.close(() => resolve()))
+      }
+    })
   }
 )
 
