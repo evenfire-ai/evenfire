@@ -2011,6 +2011,7 @@ describe('useGfsBrowserController', () => {
     const root = await resolveResource(
       resolvedDirectory('root', 'Root', { gfsUri: 'gfs://main/root' })
     )
+    const accessibleRoot = childView('other-root', 'Other folder', 'directory')
     const child = childView('private-child', 'private.md', 'file', { parentResourceId: 'root' })
     let denyRefresh!: (error: Error) => void
     const deniedRefresh = new Promise<never>((_resolve, reject) => {
@@ -2024,7 +2025,7 @@ describe('useGfsBrowserController', () => {
       configurable: true,
       value: {
         gfs: {
-          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          listAccessible: vi.fn(async () => ({ items: [accessibleRoot], nextCursor: null })),
           resolve: vi.fn(async () => root),
           listChildren,
           affordances: vi.fn(async () => ({
@@ -2053,6 +2054,11 @@ describe('useGfsBrowserController', () => {
     )
     await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('none'))
     expect(screen.getByTestId('items-count').textContent).toBe('0')
+    expect(screen.getByTestId('open-error').textContent).toBe(
+      'This folder or file is no longer available.'
+    )
+    expect(screen.getByTestId('access-state').textContent).toBe('active')
+    expect(screen.getByTestId('accessible-count').textContent).toBe('1')
     expect(lastHarnessQueryClient?.getQueryData(childrenKey)).toBeUndefined()
   })
 

@@ -579,6 +579,20 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     setOpenError(null)
     queryClient.removeQueries({ queryKey: desktopQueryKeys.gfsRoot })
   }, [queryClient])
+  const clearInaccessibleGfsLocation = useCallback(() => {
+    const resourceId = currentCrumbRef.current?.resourceId
+    if (resourceId && sessionScope) {
+      queryClient.removeQueries({
+        exact: true,
+        queryKey: desktopQueryKeys.gfsChildren(sessionScope, resourceId, DRIVE),
+      })
+    }
+    // A resource-scoped denial is not loss of the authenticated session.
+    // Keep accessible roots and other GFS scopes intact, and avoid the
+    // foreground navigation setter so a background denial cannot advance it.
+    setCrumbsState([])
+    setOpenError('This folder or file is no longer available.')
+  }, [queryClient, sessionScope])
   const revokeAccess = useCallback(() => {
     setAccessState('revoked')
     clearGfsState()
@@ -816,8 +830,8 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     // A soft scope invalidation preserves rows while the authoritative read is
     // pending. Once that read proves this open folder is denied or gone, none
     // of its cached descendants may remain visible in this browser session.
-    clearGfsState()
-  }, [clearGfsState, currentFolderUnavailable])
+    clearInaccessibleGfsLocation()
+  }, [clearInaccessibleGfsLocation, currentFolderUnavailable])
   const accessibleResources = useMemo<GfsAccessibleResource[]>(
     () =>
       authorityPending
@@ -986,9 +1000,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         if (!handleAuthorityFailure(message, 'operation')) {
           const status = parseHttpStatus(message)
           if (options?.clearIfUnavailable && (status === 403 || status === 404)) {
-            setCrumbsState([])
-            setOpenError(null)
-            void queryClient.removeQueries({ queryKey: desktopQueryKeys.gfsRoot })
+            clearInaccessibleGfsLocation()
           } else {
             setOpenError(toPresentedMessage(error))
           }
@@ -998,7 +1010,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         if (!background && openUriGenerationRef.current === generation) setResolving(false)
       }
     },
-    [handleAuthorityFailure, queryClient]
+    [clearInaccessibleGfsLocation, handleAuthorityFailure]
   )
 
   const refreshCurrentLocation = useCallback(
