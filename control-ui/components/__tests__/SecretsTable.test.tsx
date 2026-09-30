@@ -16,7 +16,7 @@ import {
   getRecipes,
 } from '../../lib/api'
 import {
-  buildMcpServerReference,
+  buildDirectCrdMcpServerReference,
   buildRegistryMcpServerReference,
 } from '../../test/fixtures/mcpServer'
 import { buildSecretSummary } from '../../test/fixtures/secretSummary'
@@ -313,14 +313,8 @@ describe('SecretsTable — connector marketplace source', () => {
   it('derives registryEntries from catalog-id/version ANNOTATIONS (org-scoped install)', async () => {
     const connector = buildRegistryMcpServerReference({
       name: 'newtenantwf-conn',
-      annotations: {
-        'clerum.io/catalog-id': '@newtenantwf/conn',
-        'clerum.io/catalog-version': '1.0.0',
-      },
-      labels: {
-        'clerum.io/managed-by': 'control-api',
-        'clerum.io/server-mode': 'local',
-      },
+      catalogId: '@newtenantwf/conn',
+      catalogVersion: '1.0.0',
     })
     expect(connector.spec?.envSecret?.keys).toEqual([{ secretKey: 'api-key', envVar: 'api-key' }])
     getMcpServersMock.mockResolvedValue({
@@ -339,8 +333,9 @@ describe('SecretsTable — connector marketplace source', () => {
   it('still derives registryEntries from LABELS for legacy (pre-annotation) installs', async () => {
     getMcpServersMock.mockResolvedValue({
       items: [
-        buildRegistryMcpServerReference({
+        buildDirectCrdMcpServerReference({
           name: 'legacy-conn',
+          secretName: 'legacy-conn-credentials',
           labels: {
             'clerum.io/catalog-id': 'mcp-filesystem',
             'clerum.io/catalog-version': '2.3.0',
@@ -360,8 +355,9 @@ describe('SecretsTable — connector marketplace source', () => {
   it('prefers ANNOTATIONS over LABELS when both are present', async () => {
     getMcpServersMock.mockResolvedValue({
       items: [
-        buildRegistryMcpServerReference({
+        buildDirectCrdMcpServerReference({
           name: 'both-conn',
+          secretName: 'both-conn-credentials',
           annotations: {
             'clerum.io/catalog-id': '@org/new',
             'clerum.io/catalog-version': '9.9.9',
@@ -617,7 +613,7 @@ describe('SecretsTable — connector row actions', () => {
   function mockConnectorRow() {
     getMcpServersMock.mockResolvedValue({
       items: [
-        buildMcpServerReference({
+        buildDirectCrdMcpServerReference({
           name: 'linear-conn',
           secretName: 'linear-credentials',
           annotations: {
@@ -674,8 +670,8 @@ describe('SecretsTable — connector row actions', () => {
   it('navigates Update without a server filter when several connectors share the secret', async () => {
     getMcpServersMock.mockResolvedValue({
       items: [
-        buildMcpServerReference({ name: 'conn-a', secretName: 'shared-credentials' }),
-        buildMcpServerReference({ name: 'conn-b', secretName: 'shared-credentials' }),
+        buildDirectCrdMcpServerReference({ name: 'conn-a', secretName: 'shared-credentials' }),
+        buildDirectCrdMcpServerReference({ name: 'conn-b', secretName: 'shared-credentials' }),
       ],
     })
     renderTable()
@@ -691,11 +687,11 @@ describe('SecretsTable — connector row actions', () => {
   it('keeps a non-canonical Secret reference distinct from its trimmed name', async () => {
     getMcpServersMock.mockResolvedValue({
       items: [
-        buildMcpServerReference({
+        buildDirectCrdMcpServerReference({
           name: 'canonical-conn',
           secretName: 'linear-credentials',
         }),
-        buildMcpServerReference({
+        buildDirectCrdMcpServerReference({
           name: 'stale-conn',
           secretName: '  linear-credentials  ',
         }),

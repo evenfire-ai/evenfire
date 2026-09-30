@@ -15,7 +15,7 @@ import {
   updateMcpSecret,
 } from '@lib/api'
 import type { EnvSecret, McpServerResource } from '@lib/api'
-import { buildMcpServerReference } from '../../test/fixtures/mcpServer'
+import { buildDirectCrdMcpServerReference } from '../../test/fixtures/mcpServer'
 
 vi.mock('@lib/api', () => ({
   getMcpServer: vi.fn(),
@@ -261,8 +261,8 @@ describe('UpdateConnectorCredentials — partial payload', () => {
   it('previews only connectors with the exact Secret reference', async () => {
     mockGetMcpServers.mockResolvedValue({
       items: [
-        buildMcpServerReference({ name: SERVER_NAME, secretName: ENV_SECRET.name }),
-        buildMcpServerReference({
+        buildDirectCrdMcpServerReference({ name: SERVER_NAME, secretName: ENV_SECRET.name }),
+        buildDirectCrdMcpServerReference({
           name: 'stale-connector',
           secretName: `  ${ENV_SECRET.name}  `,
         }),

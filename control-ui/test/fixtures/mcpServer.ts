@@ -1,36 +1,63 @@
 import { secretFound } from '../../components/__tests__/fixtures/secretResolvedConditions'
 import type { EnvSecret, McpServerResource } from '../../lib/api'
-import { registryEnvSecret, registrySecretName } from './registryMcpServerProducer'
+import {
+  registryEnvSecret,
+  registryMcpServerMetadata,
+  registrySecretName,
+} from './registryMcpServerProducer'
 
-/** Secret reference derived from the registry assignment, with an optional
- * direct-CRD env mapping used by the credential form's adversarial cases. */
-type ReferenceOptions = {
+const HCC_RECONCILED_AT = '2026-01-01T00:00:00.000Z'
+
+/** Registry install -> API list -> HCC reconcile. Callers supply registry
+ * inputs only; the producer owns the Secret reference, metadata, and status. */
+export function buildRegistryMcpServerReference(options: {
+  name: string
+  catalogId: string
+  catalogVersion: string
+  credentialKeyNames?: string[]
+}): McpServerResource {
+  const secretName = registrySecretName(options.name)
+  const spec = {
+    image: 'ghcr.io/acme/linear-mcp:1.4.0',
+    contextRef: 'default',
+    enabled: true,
+    managed: true,
+    transport: { type: 'streamableHttp', port: 3000 },
+    envSecret: registryEnvSecret(secretName, options.credentialKeyNames ?? ['api-key']),
+  }
+  return {
+    metadata: registryMcpServerMetadata({
+      serverName: options.name,
+      catalogId: options.catalogId,
+      catalogVersion: options.catalogVersion,
+      namespace: 'mcp-server',
+      spec,
+    }),
+    spec,
+    status: { conditions: [secretFound({ at: HCC_RECONCILED_AT })] },
+  }
+}
+
+/** Direct CRD API input, deliberately separate from registry install output.
+ * It covers shared Secret references, noncanonical names, and distinct key-to-
+ * environment mappings that the registry install producer does not emit. */
+export function buildDirectCrdMcpServerReference(options: {
   name: string
   secretName: string
   secretKey?: string
   envVar?: string
   annotations?: Record<string, string>
   labels?: Record<string, string>
-}
-
-export function buildMcpServerReference(options: ReferenceOptions): McpServerResource {
-  const envSecret = registryEnvSecret(options.secretName, [options.secretKey ?? 'api-key'])
-  if (options.envVar !== undefined) envSecret.keys[0].envVar = options.envVar
-  else envSecret.keys[0].envVar = 'LINEAR_API_KEY'
-
-  return buildReference(options, envSecret)
-}
-
-/** Unmodified output of the registry install producer, used by the table's
- * producer/consumer contract tests. */
-export function buildRegistryMcpServerReference(
-  options: Omit<ReferenceOptions, 'secretName' | 'secretKey' | 'envVar'>
-): McpServerResource {
-  const secretName = registrySecretName(options.name)
-  return buildReference({ ...options, secretName }, registryEnvSecret(secretName, ['api-key']))
-}
-
-function buildReference(options: ReferenceOptions, envSecret: EnvSecret): McpServerResource {
+}): McpServerResource {
+  const envSecret: EnvSecret = {
+    name: options.secretName,
+    keys: [
+      {
+        secretKey: options.secretKey ?? 'api-key',
+        envVar: options.envVar ?? 'LINEAR_API_KEY',
+      },
+    ],
+  }
   return {
     metadata: {
       name: options.name,
@@ -46,9 +73,11 @@ function buildReference(options: ReferenceOptions, envSecret: EnvSecret): McpSer
       transport: { type: 'streamableHttp', port: 3000 },
       envSecret,
     },
-    // An invalid Kubernetes Secret name cannot reach HCC's resolved state.
     ...(envSecret.name.trim() === envSecret.name
-      ? { status: { conditions: [secretFound({ at: '2026-01-01T00:00:00.000Z' })] } }
+      ? { status: { conditions: [secretFound({ at: HCC_RECONCILED_AT })] } }
       : {}),
   }
 }
+
+/** Existing edit-page test harness models direct CRD inputs. */
+export const buildMcpServerReference = buildDirectCrdMcpServerReference
