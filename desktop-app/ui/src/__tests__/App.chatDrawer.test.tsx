@@ -1388,6 +1388,42 @@ describe('App live GFS preview revalidation', () => {
       expect(initial()?.kind === 'preview' && initial()?.preview?.unavailable).toBe(true)
     )
   })
+
+  it('purges every open GFS preview when the authenticated session expires', async () => {
+    currentController.workspaceTabs = openPreviewTab(currentController.workspaceTabs, {
+      id: 'preview-image',
+      title: 'diagram.png',
+      gfsUri: 'gfs://main/diagram',
+      fileKind: 'image',
+      byteLength: 128,
+      mimeType: 'image/png',
+      resourceVersion: 7,
+    })
+    const resolve = vi.mocked(window.clerum.gfs.resolve)
+    resolve.mockImplementation(uri => {
+      if (uri === 'gfs://main/readme') {
+        return Promise.reject(new Error('session expired httpStatus=401')) as never
+      }
+      return new Promise(() => {}) as never
+    })
+    render(<App />)
+    await waitFor(() => expect(dispatchEntityChange).toBeTypeOf('function'))
+
+    act(() =>
+      dispatchEntityChange?.({
+        type: 'scope.invalidated',
+        schemaVersion: 1,
+        cursor: 'cursor-expired',
+        scopes: ['authorization'],
+      })
+    )
+
+    await waitFor(() => {
+      const previews = currentController.workspaceTabs.tabs.filter(tab => tab.kind === 'preview')
+      expect(previews).toHaveLength(2)
+      expect(previews.every(tab => tab.preview?.unavailable)).toBe(true)
+    })
+  })
 })
 
 // Mini-spec 05: below the minimum panel width the drawer is SUPPRESSED (hidden,

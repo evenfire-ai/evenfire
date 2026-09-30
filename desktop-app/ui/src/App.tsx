@@ -39,7 +39,11 @@ import { useWindowFocusBridge } from '@hooks/useWindowFocusBridge'
 import type { ChatLocalMatch } from '@lib/chatLocalSearch'
 import { buildLoadedChatSemanticModels } from '@lib/chatMessageSemantics'
 import { EntityChangeRegistry } from '@lib/entityChangeRegistry'
-import { authoritativeGfsStatus, shouldRevalidateGfsQuery } from '@lib/gfsEntityChangeState'
+import {
+  authoritativeGfsStatus,
+  expireGfsPreviewTabs,
+  shouldRevalidateGfsQuery,
+} from '@lib/gfsEntityChangeState'
 import { resolveGfsPreview } from '@lib/gfsPreview'
 import { desktopQueryClient } from '@lib/queryClient'
 import {
@@ -1014,6 +1018,28 @@ export function App() {
       } catch (error) {
         if (previewRefreshGenerationRef.current.get(gfsUri) !== generation) return
         const status = authoritativeGfsStatus(error)
+        if (status === 401) {
+          // A 401 is session-wide, unlike a resource-scoped 403/404. Purge
+          // every open GFS preview and its cache immediately; never keep
+          // displaying bytes fetched under a rejected session.
+          for (const [uri, timer] of previewRetryTimersRef.current) {
+            window.clearTimeout(timer)
+            previewRefreshGenerationRef.current.set(
+              uri,
+              (previewRefreshGenerationRef.current.get(uri) ?? 0) + 1
+            )
+          }
+          previewRetryTimersRef.current.clear()
+          previewRetryAttemptRef.current.clear()
+          setWorkspaceTabs(expireGfsPreviewTabs)
+          setPluginGfsPreview(current =>
+            current && !current.unavailable
+              ? { ...current, unavailable: true, reloadVersion: current.reloadVersion + 1 }
+              : current
+          )
+          void queryClient.removeQueries({ queryKey: desktopQueryKeys.gfsRoot })
+          return
+        }
         if (status === 403 || status === 404) {
           setWorkspaceTabs(state =>
             refreshPreviewTab(state, gfsUri, {
