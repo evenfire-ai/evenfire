@@ -1,6 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import express from 'express'
 import type { Request, Response } from 'express'
 import { EventEmitter } from 'node:events'
+import { get } from 'node:http'
+import type { AddressInfo } from 'node:net'
 import {
   closeActiveEntityChangeStreams,
   parseRequestedEntityChangeCursor,
@@ -398,5 +401,82 @@ describe('routes/entityChangeStream', () => {
     closeActiveEntityChangeStreams()
     await vi.advanceTimersByTimeAsync(0)
     vi.useRealTimers()
+  })
+
+  it('closes the HTTP response after a timed-out slow-consumer write', async () => {
+    configMock.entityChangeStreamMaxConnections = 1
+    configMock.entityChangeStreamMaxConnectionsPerPrincipal = 1
+    serviceMock.readEntityChangeCheckpoint.mockResolvedValue({
+      resyncRequired: false,
+      cursor: CURSOR,
+      scopes: ['gfs'],
+    })
+
+    const app = express()
+    app.get('/entity-changes', (req, res) => {
+      const write = res.write.bind(res)
+      let simulateBackpressure = true
+      res.write = ((...args: Parameters<typeof res.write>) => {
+        const accepted = write(...args)
+        if (simulateBackpressure) {
+          simulateBackpressure = false
+          return false
+        }
+        return accepted
+      }) as typeof res.write
+
+      streamEntityChanges(
+        req as unknown as Request,
+        res as unknown as Response,
+        CURSOR,
+        async () => true,
+        'operator',
+        'operator-socket'
+      )
+    })
+    const server = app.listen(0, '127.0.0.1')
+    await new Promise<void>(resolve => server.once('listening', resolve))
+    const address = server.address() as AddressInfo
+
+    try {
+      const completedResponse = new Promise<{
+        complete: boolean
+        lines: string[]
+        statusCode: number | undefined
+      }>((resolve, reject) => {
+        const request = get(
+          `http://127.0.0.1:${address.port}/entity-changes`,
+          (response: import('node:http').IncomingMessage) => {
+            response.setEncoding('utf8')
+            let body = ''
+            response.on('data', chunk => {
+              body += chunk
+            })
+            response.on('end', () => {
+              resolve({
+                complete: response.complete,
+                lines: body.trim().split('\n').filter(Boolean),
+                statusCode: response.statusCode,
+              })
+            })
+            response.on('error', reject)
+          }
+        )
+        request.on('error', reject)
+      })
+
+      const result = await completedResponse
+      expect(result.statusCode).toBe(200)
+      expect(result.complete).toBe(true)
+      expect(result.lines.map(line => JSON.parse(line))).toContainEqual({
+        schemaVersion: 1,
+        type: 'stream.closing',
+        cursor: CURSOR,
+        reason: 'slow_consumer',
+      })
+    } finally {
+      closeActiveEntityChangeStreams()
+      await new Promise<void>(resolve => server.close(() => resolve()))
+    }
   })
 })
