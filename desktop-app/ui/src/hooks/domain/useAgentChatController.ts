@@ -95,6 +95,7 @@ import {
 import { type ActiveChatVisibility, useChatNotifications } from './useChatNotifications'
 import { useChatScroll } from './useChatScroll'
 import { useComposerAttachments } from './useComposerAttachments'
+import type { PushToastOptions } from './useToastController'
 
 // Re-exported from `useChatListController` (§4.4) so external importers
 // (useWorkspaceController, useActivityController) keep their import site.
@@ -344,7 +345,7 @@ interface UseAgentChatControllerParams {
   isAuthenticated: boolean
   loadMenuData: boolean
   navItem: NavItem
-  pushToast: (msg: string, tone: Tone) => void
+  pushToast: (msg: string, tone: Tone, options?: PushToastOptions) => void
   pushNotification: (n: PushNotificationInput) => void
   /**
    * Human-visible name for an agent identifier (catalog `spec.host` display
@@ -552,6 +553,7 @@ export function useAgentChatController({
     releaseRetainedFailuresForChat,
     releaseSucceededRetainedSend,
     releaseSucceededRetainedSendsForTask,
+    getRetainedSendsForTask,
     markRetainedSendReason,
     failRetainedSend,
   } = retainedSends
@@ -3494,6 +3496,38 @@ export function useAgentChatController({
     handleDiscardFailedAgentSend,
   ])
 
+  /**
+   * STORY-38 — a cancel is terminal for DELIVERY (the snapshot below is still
+   * released), but the attachments of the canceled message return to the
+   * composer so the user can reuse them. In-memory only: the composer state,
+   * not GFS or any persisted store, owns the kept attachments.
+   */
+  const restoreComposerAttachmentsAfterCancel = useCallback(
+    (taskId: string) => {
+      const snapshots = getRetainedSendsForTask(taskId)
+      const images = snapshots.flatMap(snapshot => snapshot.attachments)
+      const references = snapshots.flatMap(snapshot => snapshot.references)
+      if (!images.length && !references.length) return
+      handleAddComposerImageAttachments(
+        images.map(attachment => ({
+          ...attachment,
+          previewDataUrl: `data:${attachment.mimeType};base64,${attachment.dataBase64}`,
+        }))
+      )
+      handleAddComposerReferenceAttachments(references)
+      pushToast('Attachments kept', 'info', {
+        action: { label: 'Discard all', onAction: resetComposerAttachments },
+      })
+    },
+    [
+      getRetainedSendsForTask,
+      handleAddComposerImageAttachments,
+      handleAddComposerReferenceAttachments,
+      pushToast,
+      resetComposerAttachments,
+    ]
+  )
+
   const cancelTask = useCallback(
     async (taskId: string) => {
       const hostRef = selectedAgent
@@ -3542,7 +3576,10 @@ export function useAgentChatController({
         await window.clerum.rpc.cancelTask(hostRef, taskId)
         markCancelled('Cancelled by user.')
         // #654 M6 — a cancel is terminal by intent: the user does not want this
-        // payload resent, so nothing will read the retained snapshot again.
+        // payload resent, so nothing will read the retained snapshot again. The
+        // attachments themselves return to the composer (STORY-38) before the
+        // snapshot that carried them is released.
+        restoreComposerAttachmentsAfterCancel(taskId)
         releaseRetainedSendsForTask(taskId)
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
@@ -3550,6 +3587,7 @@ export function useAgentChatController({
           markCancelled('Task already finished or is no longer active.')
           // The task is gone upstream, so it can no longer produce a terminal
           // event — same reasoning as the successful cancel above.
+          restoreComposerAttachmentsAfterCancel(taskId)
           releaseRetainedSendsForTask(taskId)
           pushToast('That task is no longer active.', 'info')
           return
@@ -3558,7 +3596,7 @@ export function useAgentChatController({
         pushToast(`Failed to cancel task: ${message}`, 'error')
       }
     },
-    [pushToast, selectedAgent, releaseRetainedSendsForTask]
+    [pushToast, selectedAgent, releaseRetainedSendsForTask, restoreComposerAttachmentsAfterCancel]
   )
 
   const setPendingChatSelection = useCallback(
@@ -3712,6 +3750,7 @@ export function useAgentChatController({
     handleRemoveComposerImageAttachment,
     handleAddComposerReferenceAttachments,
     handleRemoveComposerReferenceAttachment,
+    handleClearComposerAttachments: resetComposerAttachments,
     cancelTask,
   }
 }

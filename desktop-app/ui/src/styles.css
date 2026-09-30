@@ -7996,6 +7996,42 @@ h3 {
   scrollbar-width: thin;
 }
 
+.composer-attachments-count {
+  flex: 0 0 auto;
+  align-self: center;
+  color: var(--text-dim);
+  font-size: var(--font-size-xs);
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.composer-attachments-clear {
+  appearance: none;
+  flex: 0 0 auto;
+  align-self: center;
+  height: 24px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: var(--font-size-xs);
+  line-height: 1;
+  padding: 0 var(--space-1);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.composer-attachments-clear:hover {
+  color: var(--danger);
+  background: rgba(var(--danger-rgb), 0.08);
+}
+
+.composer-attachments-clear:focus-visible {
+  outline: 2px solid rgba(var(--focus-rgb), 0.56);
+  outline-offset: 1px;
+}
+
 .composer-attachment-chip {
   display: inline-flex;
   align-items: center;
@@ -10559,6 +10595,37 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
   border-radius: 999px;
   background: var(--status-dot-bg);
   margin-top: 1px;
+}
+
+.toast-body {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.toast-action {
+  appearance: none;
+  flex: 0 0 auto;
+  align-self: center;
+  border: 1px solid rgba(var(--edge-rgb), 0.3);
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: var(--font-size-xs);
+  line-height: 1;
+  padding: var(--space-1) var(--space-1-5);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.toast-action:hover {
+  border-color: rgba(var(--danger-rgb), 0.5);
+  color: var(--danger);
+}
+
+.toast-action:focus-visible {
+  outline: 2px solid rgba(var(--focus-rgb), 0.56);
+  outline-offset: 1px;
 }
 
 .toast.tone-success {
