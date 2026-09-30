@@ -311,6 +311,11 @@ describe('routes/entityChangeStream', () => {
     })
     const req = new FakeRequest()
     const res = new FakeResponse()
+    let wakeFeed: (() => void) | undefined
+    serviceMock.subscribeEntityChangeFeedWake.mockImplementation((wake: () => void) => {
+      wakeFeed = wake
+      return vi.fn()
+    })
     const isAuthorized = vi
       .fn()
       .mockResolvedValueOnce(true)
@@ -327,7 +332,15 @@ describe('routes/entityChangeStream', () => {
     await vi.advanceTimersByTimeAsync(0)
     expect(res.frames).toEqual([])
 
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      wakeFeed?.()
+      await vi.advanceTimersByTimeAsync(0)
+    }
+    expect(isAuthorized).toHaveBeenCalledTimes(2)
+    expect(res.frames).toEqual([])
+
     await vi.advanceTimersByTimeAsync(configMock.entityChangeStreamPollMs)
+    expect(isAuthorized).toHaveBeenCalledTimes(3)
     expect(res.frames.map(frame => JSON.parse(frame))).toContainEqual({
       schemaVersion: 1,
       type: 'scope.invalidated',

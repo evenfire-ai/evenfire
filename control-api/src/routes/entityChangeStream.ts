@@ -79,6 +79,7 @@ export function streamEntityChanges(
     let cursor = principalKind === 'user' ? ZERO_CURSOR : initialCursor
     let userInitialResyncPending = principalKind === 'user'
     let lastAuthorizationCheck = 0
+    let authorizationRetryAfter = 0
     let lastHeartbeat = Date.now()
     let pollTimer: NodeJS.Timeout | null = null
     let heartbeatTimer: NodeJS.Timeout | null = null
@@ -201,11 +202,24 @@ export function streamEntityChanges(
         const checkpoint = await readEntityChangeCheckpoint(cursor)
         const hasChange = checkpoint.resyncRequired || checkpoint.scopes.length > 0
         if (hasChange || Date.now() - lastAuthorizationCheck >= AUTHORIZATION_RECHECK_MS) {
-          if (!(await isAuthorized())) {
-            await closeForFailure('session_expired', checkpoint.cursor)
+          if (Date.now() < authorizationRetryAfter) return
+          try {
+            if (!(await isAuthorized())) {
+              await closeForFailure('session_expired', checkpoint.cursor)
+              return
+            }
+            lastAuthorizationCheck = Date.now()
+            authorizationRetryAfter = 0
+          } catch (err) {
+            // Feed wakes may arrive for every committed change while the auth
+            // service is unavailable. Keep the stream fail-closed and retry
+            // authorization at a bounded cadence instead of amplifying load.
+            authorizationRetryAfter = Date.now() + config.entityChangeStreamPollMs
+            throw err
+          }
+          if (closed) {
             return
           }
-          lastAuthorizationCheck = Date.now()
         }
         if (checkpoint.resyncRequired) {
           entityChangeStreamResyncRequiredTotal.inc({ principal_kind: principalKind })
