@@ -1,175 +1,216 @@
 import { describe, expect, it } from 'vitest'
 import fc from 'fast-check'
-import { OAuthBrokerDeleteLedger, type OAuthBrokerLedgerRecipe } from './oauthBrokerDeleteLedger'
+import {
+  OAUTH_BROKER_NP_TTL_MS,
+  OAuthBrokerDeleteLedger,
+  type OAuthBrokerLedgerRecipe,
+} from './oauthBrokerDeleteLedger'
 
-const NAMES = ['a', 'b'] as const
-const UIDS = ['uid-1', 'uid-2', 'uid-3'] as const
+/**
+ * Observable invariants of the ledger, checked over random event sequences.
+ * The harness does not rebuild the ledger's entries: it records only what a
+ * caller can see (which events happened, in which order) and asserts
+ * implications on the answers. Cases no invariant speaks about stay free.
+ *
+ * I1  No token ADDED since the process started or the recipe was deleted:
+ *     no Secret delete.
+ * I2  After an ADDED with no later recorded delete or provisioning, a pass
+ *     at or above the watermark (the highest generation recorded or
+ *     provisioned since the recipe was last deleted) deletes.
+ * I3  A pass below the highest generation that provisioned the token does
+ *     not delete it.
+ * I4  A delete whose DELETE was sent before an ADDED (or a recipe deletion)
+ *     records nothing; with neither in between it is recorded.
+ * I5  The NetworkPolicy side skips the recorded pass until the TTL expires,
+ *     and deletes for a different uid or a higher generation.
+ */
+
+const NAME = 'r'
+const UID = 'uid-1'
 const MAX_GENERATION = 6
 
 type Op =
-  | { kind: 'record'; recipe: OAuthBrokerLedgerRecipe }
-  | { kind: 'provision'; recipe: OAuthBrokerLedgerRecipe }
-  | { kind: 'invalidateSecret'; name: string }
-  | { kind: 'invalidate'; name: string }
+  | { kind: 'provision'; generation: number }
+  | { kind: 'pass'; generation: number }
+  | { kind: 'beginDelete'; generation: number }
+  | { kind: 'endDelete'; failed: boolean }
+  | { kind: 'invalidateSecret' }
+  | { kind: 'addedElsewhere' }
+  | { kind: 'invalidate' }
 
-/** What the ledger must remember per recipe name for the Secret side. */
-interface ModelEntry {
-  uid: string
-  watermark: number
-  /** An ADDED landed after the last delete recorded at the watermark. */
-  rearmed: boolean
-}
-
-const recipeArb = fc.record({
-  name: fc.constantFrom(...NAMES),
-  uid: fc.constantFrom(...UIDS),
-  generation: fc.integer({ min: 0, max: MAX_GENERATION }),
-})
+const generationArb = fc.integer({ min: 0, max: MAX_GENERATION })
 
 const opArb: fc.Arbitrary<Op> = fc.oneof(
-  recipeArb.map(recipe => ({ kind: 'record' as const, recipe })),
-  recipeArb.map(recipe => ({ kind: 'provision' as const, recipe })),
-  fc.constantFrom(...NAMES).map(name => ({ kind: 'invalidateSecret' as const, name })),
-  fc.constantFrom(...NAMES).map(name => ({ kind: 'invalidate' as const, name }))
+  generationArb.map(generation => ({ kind: 'provision' as const, generation })),
+  generationArb.map(generation => ({ kind: 'pass' as const, generation })),
+  generationArb.map(generation => ({ kind: 'beginDelete' as const, generation })),
+  fc.boolean().map(failed => ({ kind: 'endDelete' as const, failed })),
+  fc.constant({ kind: 'invalidateSecret' as const }),
+  fc.constant({ kind: 'addedElsewhere' as const }),
+  fc.constant({ kind: 'invalidate' as const })
 )
 
-function allQueries(): OAuthBrokerLedgerRecipe[] {
-  const queries: OAuthBrokerLedgerRecipe[] = []
-  for (const name of NAMES) {
-    for (const uid of UIDS) {
-      for (let generation = 0; generation <= MAX_GENERATION; generation++) {
-        queries.push({ name, uid, generation })
+function ref(generation: number, uid = UID): OAuthBrokerLedgerRecipe {
+  return { name: NAME, uid, generation }
+}
+
+/** What a caller observed; never the ledger's internal entry. */
+interface Observed {
+  tokenSeen: boolean
+  /** Highest generation recorded or provisioned since the last recipe deletion. */
+  watermark: number
+  /** Highest generation provisioned since the last recipe deletion. */
+  provisioned: number
+  /** An ADDED landed after the last recorded delete or provisioning. */
+  addedAfterLastWrite: boolean
+  inFlight?: { generation: number; epoch: number; raced: boolean }
+}
+
+function freshObserved(): Observed {
+  return { tokenSeen: false, watermark: -1, provisioned: -1, addedAfterLastWrite: false }
+}
+
+function allAnswers(ledger: OAuthBrokerDeleteLedger): boolean[] {
+  const answers: boolean[] = []
+  for (const uid of [UID, 'uid-2']) {
+    for (let generation = 0; generation <= MAX_GENERATION; generation++) {
+      answers.push(ledger.shouldDeleteSecret(ref(generation, uid)))
+    }
+  }
+  return answers
+}
+
+function checkPass(ledger: OAuthBrokerDeleteLedger, seen: Observed, generation: number): void {
+  const answer = ledger.shouldDeleteSecret(ref(generation))
+  const where = `gen${generation} observed=${JSON.stringify(seen)}`
+  if (!seen.tokenSeen) expect(answer, `I1 ${where}`).toBe(false)
+  if (generation < seen.provisioned) expect(answer, `I3 ${where}`).toBe(false)
+  if (seen.tokenSeen && seen.addedAfterLastWrite && generation >= seen.watermark) {
+    expect(answer, `I2 ${where}`).toBe(true)
+  }
+}
+
+function step(ledger: OAuthBrokerDeleteLedger, seen: Observed, op: Op): void {
+  switch (op.kind) {
+    case 'provision':
+      ledger.noteSecretProvisioned(ref(op.generation))
+      seen.provisioned = Math.max(seen.provisioned, op.generation)
+      seen.watermark = Math.max(seen.watermark, op.generation)
+      seen.addedAfterLastWrite = false
+      return
+    case 'pass':
+      checkPass(ledger, seen, op.generation)
+      return
+    case 'beginDelete':
+      // The WRC sends the DELETE only when the ledger allows it, and the
+      // per-recipe queue keeps one in flight.
+      if (seen.inFlight || !ledger.shouldDeleteSecret(ref(op.generation))) return
+      seen.inFlight = {
+        generation: op.generation,
+        epoch: ledger.secretEpoch(NAME),
+        raced: false,
       }
+      return
+    case 'endDelete': {
+      const inFlight = seen.inFlight
+      if (!inFlight) return
+      seen.inFlight = undefined
+      // A failed DELETE is never recorded.
+      if (op.failed) return
+      const before = allAnswers(ledger)
+      const recorded = ledger.recordSecretDelete(ref(inFlight.generation), inFlight.epoch)
+      if (inFlight.raced) {
+        expect(recorded, `I4 raced gen${inFlight.generation}`).toBe(false)
+        expect(allAnswers(ledger), `I4 records nothing gen${inFlight.generation}`).toEqual(before)
+        return
+      }
+      // Liveness witness for I4: an undisturbed delete is recorded.
+      expect(recorded, `I4 undisturbed gen${inFlight.generation}`).toBe(true)
+      seen.watermark = Math.max(seen.watermark, inFlight.generation)
+      seen.addedAfterLastWrite = false
+      return
     }
-  }
-  return queries
-}
-
-const QUERIES = allQueries()
-
-function answers(ledger: OAuthBrokerDeleteLedger): boolean[] {
-  return QUERIES.map(query => ledger.shouldDeleteSecret(query))
-}
-
-function record(ledger: OAuthBrokerDeleteLedger, recipe: OAuthBrokerLedgerRecipe): void {
-  // Sequential operations: no invalidation lands while the DELETE is in flight.
-  expect(ledger.recordSecretDelete(recipe, ledger.secretEpoch(recipe.name))).toBe(true)
-}
-
-function apply(ledger: OAuthBrokerDeleteLedger, op: Op): void {
-  if (op.kind === 'record') record(ledger, op.recipe)
-  else if (op.kind === 'provision') ledger.noteSecretProvisioned(op.recipe)
-  else if (op.kind === 'invalidateSecret') ledger.invalidateSecret(op.name)
-  else ledger.invalidate(op.name)
-}
-
-/** A recorded delete and a provisioned token raise the watermark the same way. */
-function applyToModel(model: Map<string, ModelEntry>, seen: Set<string>, op: Op): void {
-  if (op.kind === 'invalidate') {
-    model.delete(op.name)
-    seen.delete(op.name)
-    return
-  }
-  if (op.kind === 'invalidateSecret') {
-    seen.add(op.name)
-    const entry = model.get(op.name)
-    if (entry) entry.rearmed = true
-    return
-  }
-  const { name, uid, generation = 0 } = op.recipe
-  const entry = model.get(name)
-  if (!entry || entry.uid !== uid) {
-    model.set(name, { uid: uid as string, watermark: generation, rearmed: false })
-  } else if (generation >= entry.watermark) {
-    model.set(name, { uid: entry.uid, watermark: generation, rearmed: false })
-  }
-}
-
-function checkAgainstModel(
-  ledger: OAuthBrokerDeleteLedger,
-  model: Map<string, ModelEntry>,
-  seen: Set<string>
-): void {
-  for (const query of QUERIES) {
-    const entry = model.get(query.name)
-    const generation = query.generation ?? 0
-    const actual = ledger.shouldDeleteSecret(query)
-    const where = `${query.name}/${query.uid}/gen${generation} model=${JSON.stringify(entry)}`
-
-    // No token ADDED since the process started or the recipe was deleted:
-    // there is no token to reap.
-    if (!seen.has(query.name)) {
-      expect(actual, `no token seen must skip: ${where}`).toBe(false)
-      continue
-    }
-    // A recipe never recorded, or recreated under the same name, always deletes.
-    if (!entry || entry.uid !== query.uid) {
-      expect(actual, `uid change must delete: ${where}`).toBe(true)
-      continue
-    }
-    if (generation < entry.watermark) {
-      // Monotonic watermark: an older generation stays covered, including
-      // after an ADDED invalidation.
-      expect(actual, `below the watermark must skip: ${where}`).toBe(false)
-    } else if (generation > entry.watermark) {
-      expect(actual, `above the watermark must delete: ${where}`).toBe(true)
-    } else {
-      expect(actual, `at the watermark deletes only when re-armed: ${where}`).toBe(entry.rearmed)
+    case 'invalidateSecret':
+      ledger.invalidateSecret(NAME)
+      seen.tokenSeen = true
+      seen.addedAfterLastWrite = true
+      if (seen.inFlight) seen.inFlight.raced = true
+      return
+    case 'addedElsewhere':
+      ledger.invalidateSecret('other')
+      return
+    case 'invalidate': {
+      ledger.invalidate(NAME)
+      const inFlight = seen.inFlight
+      Object.assign(seen, freshObserved())
+      if (inFlight) seen.inFlight = { ...inFlight, raced: true }
+      return
     }
   }
 }
 
-describe('OAuthBrokerDeleteLedger Secret-side properties', () => {
-  it('matches the token-seen / uid / watermark / re-arm model over record, provision, invalidateSecret and invalidate', () => {
+describe('OAuthBrokerDeleteLedger observable properties', () => {
+  it('I1-I4 hold over provision, pass, beginDelete/endDelete, invalidateSecret and invalidate', () => {
     fc.assert(
-      fc.property(fc.array(opArb, { maxLength: 30 }), ops => {
+      fc.property(fc.array(opArb, { maxLength: 40 }), ops => {
         const ledger = new OAuthBrokerDeleteLedger()
-        const model = new Map<string, ModelEntry>()
-        const seen = new Set<string>()
+        const seen = freshObserved()
         for (const op of ops) {
-          apply(ledger, op)
-          applyToModel(model, seen, op)
-          checkAgainstModel(ledger, model, seen)
-        }
-      }),
-      { numRuns: 5000 }
-    )
-  })
-
-  it('record is idempotent', () => {
-    fc.assert(
-      fc.property(fc.array(opArb, { maxLength: 30 }), recipeArb, (ops, recipe) => {
-        const ledger = new OAuthBrokerDeleteLedger()
-        for (const op of ops) apply(ledger, op)
-        record(ledger, recipe)
-        const once = answers(ledger)
-        record(ledger, recipe)
-        expect(answers(ledger)).toEqual(once)
-        // Liveness witness: the recorded pass itself is now skipped.
-        expect(ledger.shouldDeleteSecret(recipe)).toBe(false)
-      }),
-      { numRuns: 5000 }
-    )
-  })
-
-  it('an invalidation re-arms only generations at or above the watermark', () => {
-    fc.assert(
-      fc.property(
-        fc.constantFrom(...UIDS),
-        fc.integer({ min: 1, max: MAX_GENERATION }),
-        (uid, watermark) => {
-          const ledger = new OAuthBrokerDeleteLedger()
-          ledger.invalidateSecret('a')
-          record(ledger, { name: 'a', uid, generation: watermark })
-          ledger.invalidateSecret('a')
+          step(ledger, seen, op)
           for (let generation = 0; generation <= MAX_GENERATION; generation++) {
-            expect(ledger.shouldDeleteSecret({ name: 'a', uid, generation })).toBe(
-              generation >= watermark
-            )
+            checkPass(ledger, seen, generation)
           }
         }
-      ),
+      }),
+      { numRuns: 5000 }
+    )
+  })
+
+  it('I2/I3 are reachable: an ADDED after provisioning arms the watermark and nothing below it', () => {
+    fc.assert(
+      fc.property(fc.integer({ min: 1, max: MAX_GENERATION }), provisioned => {
+        const ledger = new OAuthBrokerDeleteLedger()
+        ledger.noteSecretProvisioned(ref(provisioned))
+        ledger.invalidateSecret(NAME)
+        for (let generation = 0; generation <= MAX_GENERATION; generation++) {
+          expect(ledger.shouldDeleteSecret(ref(generation))).toBe(generation >= provisioned)
+        }
+      }),
       { numRuns: 500 }
+    )
+  })
+
+  it('I5 the NetworkPolicy side honours the TTL and a uid or generation change', () => {
+    fc.assert(
+      fc.property(
+        fc.record({
+          uid: fc.constantFrom(UID, 'uid-2'),
+          generation: generationArb,
+          recordedAt: fc.integer({ min: 0, max: 10 * OAUTH_BROKER_NP_TTL_MS }),
+        }),
+        fc.record({
+          uid: fc.constantFrom(UID, 'uid-2'),
+          generation: generationArb,
+          elapsed: fc.oneof(
+            fc.integer({ min: 0, max: OAUTH_BROKER_NP_TTL_MS - 1 }),
+            fc.integer({ min: OAUTH_BROKER_NP_TTL_MS, max: 2 * OAUTH_BROKER_NP_TTL_MS })
+          ),
+        }),
+        (recorded, query) => {
+          const ledger = new OAuthBrokerDeleteLedger()
+          ledger.recordPolicyDelete(ref(recorded.generation, recorded.uid), recorded.recordedAt)
+          const answer = ledger.shouldDeletePolicy(
+            ref(query.generation, query.uid),
+            recorded.recordedAt + query.elapsed
+          )
+          const covered =
+            query.uid === recorded.uid &&
+            query.generation <= recorded.generation &&
+            query.elapsed < OAUTH_BROKER_NP_TTL_MS
+          expect(answer, `I5 ${JSON.stringify({ recorded, query })}`).toBe(!covered)
+        }
+      ),
+      { numRuns: 5000 }
     )
   })
 })
