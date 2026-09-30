@@ -709,12 +709,7 @@ export function GfsBrowser(): React.JSX.Element {
     let recoveryDelay = 500
     let active = true
     let performVisibleStateRevalidation: (cursor?: string) => Promise<void> = async () => undefined
-    const revalidationScheduler = createCoalescedRevalidation<string>(
-      cursor => performVisibleStateRevalidation(cursor),
-      100
-    )
-    const invalidateVisibleState = (cursor?: string) => revalidationScheduler.request(cursor)
-    requestStreamRevalidationRef.current = invalidateVisibleState
+    let invalidateVisibleState: (cursor?: string) => void = () => undefined
     const scheduleRecovery = () => {
       if (!active || recoveryTimer) return
       const delay = recoveryDelay
@@ -724,6 +719,19 @@ export function GfsBrowser(): React.JSX.Element {
         invalidateVisibleState()
       }, delay)
     }
+    const revalidationScheduler = createCoalescedRevalidation<string>(
+      cursor => performVisibleStateRevalidation(cursor),
+      error => {
+        if (!active) return
+        if (!isSilentApiError(error)) {
+          setError(error instanceof Error ? error.message : 'Failed to refresh EvenDrive')
+        }
+        scheduleRecovery()
+      },
+      100
+    )
+    invalidateVisibleState = cursor => revalidationScheduler.request(cursor)
+    requestStreamRevalidationRef.current = invalidateVisibleState
     const revalidateActionTargets = async (signal: AbortSignal) => {
       const targets = new Map<string, GfsChild>()
       for (const target of [selectedRef.current, renameTargetRef.current, moveTargetRef.current]) {

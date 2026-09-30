@@ -6,6 +6,7 @@ export interface CoalescedRevalidation<T> {
 /** Serialize latest-state refreshes, coalescing bursts and preserving one trailing pass. */
 export function createCoalescedRevalidation<T>(
   run: (latest: T | undefined) => Promise<void>,
+  onError: (error: unknown) => void,
   delayMs = 100,
   maxWaitMs = 1000
 ): CoalescedRevalidation<T> {
@@ -27,7 +28,14 @@ export function createCoalescedRevalidation<T>(
     latest = undefined
     running = true
     void run(value)
-      .catch(() => undefined)
+      .catch(error => {
+        try {
+          onError(error)
+        } catch {
+          // Error reporting must not prevent the scheduler from releasing its
+          // single-flight state or draining a queued latest-state pass.
+        }
+      })
       .finally(() => {
         running = false
         schedule()
