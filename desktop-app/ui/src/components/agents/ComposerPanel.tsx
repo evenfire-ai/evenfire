@@ -680,7 +680,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
       }
       setComposerAttachmentError(null)
       if (documents.length > 0) {
-        onAddComposerFiles(documents, new TextEncoder().encode(draft).length)
+        onAddComposerFiles(documents, draft)
       }
       if (images.length > 0) void prepareComposerImageAttachments(images, source)
     },

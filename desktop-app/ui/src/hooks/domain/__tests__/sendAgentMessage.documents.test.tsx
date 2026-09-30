@@ -48,7 +48,7 @@ type Rendered = ReturnType<typeof renderController>
 /** Adds a file through the public action and waits until it is read and hashed. */
 async function addReadyFile(rendered: Rendered, file: File = notesFile()) {
   act(() => {
-    rendered.result.current.handleAddComposerFiles([file], 0)
+    rendered.result.current.handleAddComposerFiles([file], '')
   })
   await waitFor(() =>
     expect(rendered.result.current.composerFileAttachments.map(item => item.status)).toEqual([
@@ -116,7 +116,7 @@ describe('sendAgentMessage — document attachments (#678)', () => {
     const pending = new File([NOTES_BYTES], 'slow.txt', { type: 'text/plain' })
     vi.spyOn(pending, 'arrayBuffer').mockReturnValue(new Promise(() => {}))
     act(() => {
-      rendered.result.current.handleAddComposerFiles([pending], 0)
+      rendered.result.current.handleAddComposerFiles([pending], '')
     })
     // Liveness witness: the chip exists and is mid-read, so the send below is
     // refused because of it and not because the composer is empty.
@@ -250,7 +250,7 @@ describe('sendAgentMessage — a Host without file attachments (#678 D13)', () =
           new File([NOTES_BYTES], 'a.txt', { type: 'text/plain' }),
           new File([NOTES_BYTES], 'b.txt', { type: 'text/plain' }),
         ],
-        0
+        ''
       )
     })
     await waitFor(() =>

@@ -1,4 +1,4 @@
-import { classifyBytes } from '@clerum/gfs-interaction-policy'
+import { type FileReferenceV1, classifyBytes } from '@clerum/gfs-interaction-policy'
 import {
   COMPOSER_FILE_ENTRY_METADATA_BYTES,
   COMPOSER_MAX_ATTACHMENTS,
@@ -16,6 +16,21 @@ const CONTROL_OR_SEPARATOR = /[\u0000-\u001f\u007f/]/
 
 const textEncoder = new TextEncoder()
 
+/**
+ * The parts of a posted Host message request that neither the image quota nor
+ * the file quota credits: they are charged to the non-image share.
+ */
+export type ComposerNonImageShareRequest = {
+  /** The message text as it will be posted, references section included. */
+  content: string
+  /** The structured Global Files references posted next to the text. */
+  fileReferences: ReadonlyArray<FileReferenceV1>
+  /** The agent the message is posted to. */
+  hostRef: string
+  files: ReadonlyArray<{ filename: string }>
+  images: ReadonlyArray<{ name: string }>
+}
+
 export type ComposerFileAdmissionContext = {
   /** Images and files already attached to the message. */
   attachedCount: number
@@ -24,8 +39,8 @@ export type ComposerFileAdmissionContext = {
    * name and fixed fields count against the non-image share.
    */
   files: ReadonlyArray<Pick<ComposerFileAttachment, 'filename' | 'sizeBytes'>>
-  /** UTF-8 length of the message text as it will be sent. */
-  textBytes: number
+  /** The rest of the request the files would be posted with. */
+  request: Omit<ComposerNonImageShareRequest, 'files'>
 }
 
 export function formatFileSize(bytes: number): string {
@@ -60,14 +75,11 @@ export function composerFileBase64Bytes(files: ReadonlyArray<{ sizeBytes: number
  * image quota nor the file quota: the JSON envelope, the message text and the
  * non-base64 fields of every `kind:'file'`.
  */
-export function composerNonImageBodyBytes(input: {
-  files: ReadonlyArray<{ filename: string }>
-  textBytes: number
-}): number {
+export function composerNonImageShareBytes(request: ComposerNonImageShareRequest): number {
   return (
     COMPOSER_REQUEST_ENVELOPE_BYTES +
-    input.textBytes +
-    input.files.reduce((total, file) => total + composerFileDetailBytes(file), 0)
+    textEncoder.encode(request.content).length +
+    request.files.reduce((total, file) => total + composerFileDetailBytes(file), 0)
   )
 }
 
@@ -76,17 +88,17 @@ export function composerNonImageBodyBytes(input: {
  * files and of the images. An image entry is counted with the same fixed-field
  * allowance as a file entry, which is an upper bound.
  */
-export function composerRequestBodyBytes(input: {
-  files: ReadonlyArray<{ filename: string; sizeBytes: number }>
-  textBytes: number
+export function composerRequestBodyBytes(
+  request: ComposerNonImageShareRequest & {
+    files: ReadonlyArray<{ filename: string; sizeBytes: number }>
+  },
   imageBase64Bytes: number
-  imageCount: number
-}): number {
+): number {
   return (
-    composerNonImageBodyBytes(input) +
-    composerFileBase64Bytes(input.files) +
-    input.imageBase64Bytes +
-    input.imageCount * COMPOSER_FILE_ENTRY_METADATA_BYTES
+    composerNonImageShareBytes(request) +
+    composerFileBase64Bytes(request.files) +
+    imageBase64Bytes +
+    request.images.length * COMPOSER_FILE_ENTRY_METADATA_BYTES
   )
 }
 
@@ -121,7 +133,7 @@ export function composerFileAdmissionError(
   if (composerFileBase64Bytes(files) > COMPOSER_MAX_TOTAL_FILE_BASE64_BYTES) {
     return `${file.name} does not fit: the files in a message can take at most ${formatFileSize(COMPOSER_MAX_TOTAL_FILE_BASE64_BYTES)} once encoded.`
   }
-  const bodyBytes = composerNonImageBodyBytes({ files, textBytes: context.textBytes })
+  const bodyBytes = composerNonImageShareBytes({ ...context.request, files })
   if (bodyBytes > COMPOSER_MAX_NON_IMAGE_BODY_BYTES) {
     return `${file.name} does not fit: the text and file details can take at most ${formatFileSize(COMPOSER_MAX_NON_IMAGE_BODY_BYTES)} per message once encoded.`
   }

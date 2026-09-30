@@ -46,7 +46,7 @@ describe('useComposerAttachments — documents (#678)', () => {
     )
 
     act(() => {
-      result.current.handleAddComposerFiles([file], 0)
+      result.current.handleAddComposerFiles([file], '')
     })
     // The chip exists before any byte is read.
     expect(statuses(result)).toEqual(['reading'])
@@ -67,7 +67,7 @@ describe('useComposerAttachments — documents (#678)', () => {
     const { result } = render()
 
     act(() => {
-      result.current.handleAddComposerFiles([textFile('a.txt', 'a'), textFile('b.txt', 'b')], 0)
+      result.current.handleAddComposerFiles([textFile('a.txt', 'a'), textFile('b.txt', 'b')], '')
     })
     await waitFor(() => expect(statuses(result)).toEqual(['ready', 'ready']))
 
@@ -83,11 +83,11 @@ describe('useComposerAttachments — documents (#678)', () => {
     const { result } = render()
 
     act(() => {
-      result.current.handleAddComposerFiles([textFile('same.txt', 'same')], 0)
+      result.current.handleAddComposerFiles([textFile('same.txt', 'same')], '')
     })
     await waitFor(() => expect(statuses(result)).toEqual(['ready']))
     act(() => {
-      result.current.handleAddComposerFiles([textFile('same.txt', 'same')], 0)
+      result.current.handleAddComposerFiles([textFile('same.txt', 'same')], '')
     })
     // Liveness witness: the second copy was admitted (reading) before it was dropped.
     expect(statuses(result)).toEqual(['ready', 'reading'])
@@ -100,7 +100,7 @@ describe('useComposerAttachments — documents (#678)', () => {
     act(() => {
       result.current.handleAddComposerFiles(
         [textFile('same.txt', 'one'), textFile('same.txt', 'two')],
-        0
+        ''
       )
     })
 
@@ -114,7 +114,7 @@ describe('useComposerAttachments — documents (#678)', () => {
     const read = vi.spyOn(huge, 'arrayBuffer')
 
     act(() => {
-      result.current.handleAddComposerFiles([huge], 0)
+      result.current.handleAddComposerFiles([huge], '')
     })
 
     // Witness for the two negative checks below: the refusal names this file.
@@ -133,7 +133,7 @@ describe('useComposerAttachments — documents (#678)', () => {
     )
 
     act(() => {
-      result.current.handleAddComposerFiles(files, 0)
+      result.current.handleAddComposerFiles(files, '')
     })
 
     await waitFor(() =>
@@ -160,7 +160,7 @@ describe('useComposerAttachments — documents (#678)', () => {
       })
     )
     act(() => {
-      result.current.handleAddComposerFiles([file], 0)
+      result.current.handleAddComposerFiles([file], '')
     })
     const [reading] = result.current.composerFileAttachments
     expect(reading?.status).toBe('reading')
@@ -184,14 +184,14 @@ describe('useComposerAttachments — documents (#678)', () => {
     const bad = textFile('bad/name.txt', 'x')
 
     act(() => {
-      result.current.handleAddComposerFiles([bad], 0)
+      result.current.handleAddComposerFiles([bad], '')
     })
     // Twin: the refusal is on screen before the next attach.
     expect(result.current.composerFileRefusals).toHaveLength(1)
     expect(result.current.composerFileAttachments).toEqual([])
 
     act(() => {
-      result.current.handleAddComposerFiles([textFile('good.txt', 'good')], 0)
+      result.current.handleAddComposerFiles([textFile('good.txt', 'good')], '')
     })
     await waitFor(() => expect(statuses(result)).toEqual(['ready']))
     expect(result.current.composerFileRefusals).toEqual([])
@@ -207,7 +207,7 @@ describe('useComposerAttachments — documents (#678)', () => {
       })
     )
     act(() => {
-      result.current.handleAddComposerFiles([file], 0)
+      result.current.handleAddComposerFiles([file], '')
     })
     // Witness: the chip existed while the file was being read.
     expect(statuses(result)).toEqual(['reading'])
@@ -232,7 +232,7 @@ describe('useComposerAttachments — documents (#678)', () => {
       })
     )
     act(() => {
-      result.current.handleAddComposerFiles([file], 0)
+      result.current.handleAddComposerFiles([file], '')
     })
     const [reading] = result.current.composerFileAttachments
     // Witness: the file was reading when the user removed it.
@@ -276,7 +276,7 @@ describe('useComposerAttachments — documents (#678)', () => {
   ])('clears the refusal on %s', (_label, clear) => {
     const hook = render()
     act(() => {
-      hook.result.current.handleAddComposerFiles([textFile('bad/name.txt', 'x')], 0)
+      hook.result.current.handleAddComposerFiles([textFile('bad/name.txt', 'x')], '')
     })
     // Twin: the refusal is on screen before the clearing action.
     expect(hook.result.current.composerFileRefusals).toHaveLength(1)
@@ -291,7 +291,7 @@ describe('useComposerAttachments — documents (#678)', () => {
   it('clears the documents when the selected agent changes', async () => {
     const { result, rerender } = render('agent-x')
     act(() => {
-      result.current.handleAddComposerFiles([textFile('a.txt', 'a')], 0)
+      result.current.handleAddComposerFiles([textFile('a.txt', 'a')], '')
     })
     await waitFor(() => expect(statuses(result)).toEqual(['ready']))
 
@@ -303,7 +303,7 @@ describe('useComposerAttachments — documents (#678)', () => {
   it('puts back the files of a failed send exactly as they were', async () => {
     const { result } = render()
     act(() => {
-      result.current.handleAddComposerFiles([textFile('a.txt', 'a')], 0)
+      result.current.handleAddComposerFiles([textFile('a.txt', 'a')], '')
     })
     await waitFor(() => expect(statuses(result)).toEqual(['ready']))
     const kept = result.current.composerFileAttachments

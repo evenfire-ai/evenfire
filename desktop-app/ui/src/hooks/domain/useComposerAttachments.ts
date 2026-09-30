@@ -196,7 +196,7 @@ export function useComposerAttachments({
    * replaces the refusals of the previous one.
    */
   const handleAddComposerFiles = useCallback(
-    (files: File[], textBytes: number) => {
+    (files: File[], draft: string) => {
       composerAttachmentRevisionRef.current += 1
       if (!files.length) return
       const refusals: ComposerFileRefusal[] = []
@@ -206,7 +206,7 @@ export function useComposerAttachments({
         const error = composerFileAdmissionError(file, {
           attachedCount: composerImageCountRef.current + current.length,
           files: current,
-          textBytes,
+          request: { content: draft, fileReferences: [], hostRef: selectedAgent ?? '', images: [] },
         })
         composerAttachmentOrderRef.current += 1
         const base = {
@@ -252,7 +252,7 @@ export function useComposerAttachments({
       setComposerFileRefusals(refusals)
       clearSendError()
     },
-    [clearSendError, commitComposerFiles]
+    [clearSendError, commitComposerFiles, selectedAgent]
   )
 
   const handleRemoveComposerFileAttachment = useCallback(

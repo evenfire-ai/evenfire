@@ -13,13 +13,18 @@ import {
   composerFileAdmissionError,
   composerFileBase64Bytes,
   composerFileDetailBytes,
-  composerNonImageBodyBytes,
+  composerNonImageShareBytes,
   composerRequestBodyBytes,
   fileNameProblem,
   readComposerFile,
 } from '../composerFileAdmission'
 
-const EMPTY_CONTEXT = { attachedCount: 0, files: [], textBytes: 0 }
+/** The rest of a posted request whose message text is `content`. */
+function requestWithText(content = '') {
+  return { content, fileReferences: [], hostRef: 'agent-1', images: [] }
+}
+
+const EMPTY_CONTEXT = { attachedCount: 0, files: [], request: requestWithText() }
 
 function pdfBytes(): Uint8Array {
   return new TextEncoder().encode('%PDF-1.7\n1 0 obj\n<<>>\nendobj\n%%EOF\n')
@@ -148,7 +153,7 @@ describe('composerFileAdmissionError (#678)', () => {
     expect(
       composerFileAdmissionError(
         { name: 'second.bin', size: COMPOSER_MAX_FILE_BYTES },
-        { attachedCount: 1, files: [first], textBytes: 0 }
+        { attachedCount: 1, files: [first], request: requestWithText() }
       )
     ).toBe(
       'second.bin does not fit: the files in a message can take at most 16.0 MiB once encoded.'
@@ -157,7 +162,7 @@ describe('composerFileAdmissionError (#678)', () => {
 
   it('fills the 16 MiB file quota exactly and refuses one byte more (#678)', () => {
     const first = { filename: 'first.bin', sizeBytes: COMPOSER_MAX_FILE_BYTES }
-    const context = { attachedCount: 1, files: [first], textBytes: 0 }
+    const context = { attachedCount: 1, files: [first], request: requestWithText() }
     // 11 MiB encodes to 15_379_116 chars; 1_048_575 B adds 1_398_100 and
     // lands on 16_777_216; 1_048_576 B adds 1_398_104.
     expect(base64Length(COMPOSER_MAX_FILE_BYTES) + base64Length(1_048_575)).toBe(
@@ -175,7 +180,7 @@ describe('composerFileAdmissionError (#678)', () => {
     expect(
       composerFileAdmissionError(file, {
         ...EMPTY_CONTEXT,
-        textBytes: COMPOSER_MAX_NON_IMAGE_BODY_BYTES,
+        request: requestWithText('a'.repeat(COMPOSER_MAX_NON_IMAGE_BODY_BYTES)),
       })
     ).toBe(
       'a.bin does not fit: the text and file details can take at most 6.0 MiB per message once encoded.'
@@ -192,10 +197,16 @@ describe('composerFileAdmissionError (#678)', () => {
       JSON.stringify('big.bin').length -
       COMPOSER_FILE_ENTRY_METADATA_BYTES
     expect(
-      composerFileAdmissionError(file, { ...EMPTY_CONTEXT, textBytes: fullShareText })
+      composerFileAdmissionError(file, {
+        ...EMPTY_CONTEXT,
+        request: requestWithText('a'.repeat(fullShareText)),
+      })
     ).toBeNull()
     expect(
-      composerFileAdmissionError(file, { ...EMPTY_CONTEXT, textBytes: fullShareText + 1 })
+      composerFileAdmissionError(file, {
+        ...EMPTY_CONTEXT,
+        request: requestWithText('a'.repeat(fullShareText + 1)),
+      })
     ).toContain('the text and file details can take at most 6.0 MiB')
   })
 
@@ -220,7 +231,7 @@ describe('composerFileAdmissionError (#678)', () => {
 describe('composer request body accounting (#678)', () => {
   it('charges the envelope, the text and the file details, but not the file base64, to the share', () => {
     const file = { filename: 'a.pdf', sizeBytes: 1000 }
-    expect(composerNonImageBodyBytes({ files: [file], textBytes: 50 })).toBe(
+    expect(composerNonImageShareBytes({ ...requestWithText('a'.repeat(50)), files: [file] })).toBe(
       COMPOSER_REQUEST_ENVELOPE_BYTES +
         50 +
         JSON.stringify('a.pdf').length +
@@ -239,15 +250,13 @@ describe('composer request body accounting (#678)', () => {
 
   it('adds the share, the file base64 and the images to size the whole body', () => {
     const files = [{ filename: 'a.pdf', sizeBytes: 1000 }]
-    expect(
-      composerRequestBodyBytes({
-        files,
-        textBytes: 50,
-        imageBase64Bytes: 8_000,
-        imageCount: 2,
-      })
-    ).toBe(
-      composerNonImageBodyBytes({ files, textBytes: 50 }) +
+    const request = {
+      ...requestWithText('a'.repeat(50)),
+      files,
+      images: [{ name: 'one.png' }, { name: 'two.png' }],
+    }
+    expect(composerRequestBodyBytes(request, 8_000)).toBe(
+      composerNonImageShareBytes(request) +
         base64Length(1000) +
         8_000 +
         2 * COMPOSER_FILE_ENTRY_METADATA_BYTES

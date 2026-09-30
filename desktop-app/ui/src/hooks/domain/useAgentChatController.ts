@@ -26,11 +26,15 @@ import {
 } from '@lib/composerDraftStore'
 import {
   composerFileBase64Bytes,
-  composerNonImageBodyBytes,
+  composerNonImageShareBytes,
   composerRequestBodyBytes,
   formatFileSize,
 } from '@lib/composerFileAdmission'
 import { buildComposerFileReferences } from '@lib/composerFileReferences'
+import {
+  composerRequestBaseContent,
+  mapComposerAttachmentsToHostRequest,
+} from '@lib/composerHostRequest'
 import { buildComposerRequestContent } from '@lib/composerReferencesPrompt'
 import {
   confirmHostModelSelectionFromSend,
@@ -48,7 +52,6 @@ import type {
   ChatMessageAttachment,
   HostActivityEvent,
   HostActivityStreamEvent,
-  HostMessageAttachment,
   MessageToolStep,
   SessionMessagesQuery,
 } from '../../../../src/types'
@@ -1425,35 +1428,6 @@ export function useAgentChatController({
       cancelled = true
     }
   }, [cancelOlderMessagesLoad, currentTeamId, navItem, selectedAgent, isHostAccessBlocked])
-
-  const mapComposerAttachmentsToHostRequest = (
-    attachments: ComposerImageAttachment[],
-    files: ReadyComposerFileAttachment[]
-  ): HostMessageAttachment[] => [
-    ...attachments.map(
-      (att): HostMessageAttachment => ({
-        id: att.id,
-        kind: 'image',
-        mimeType: att.mimeType,
-        encoding: 'base64',
-        dataBase64: att.dataBase64,
-        filename: att.name,
-      })
-    ),
-    ...files.map(
-      (file): HostMessageAttachment => ({
-        id: file.id,
-        kind: 'file',
-        filename: file.filename,
-        mimeType: file.declaredMediaType,
-        detectedMediaType: file.classification.detectedMediaType,
-        encoding: 'base64',
-        dataBase64: file.dataBase64,
-        sizeBytes: file.sizeBytes,
-        digest: { algorithm: 'sha256', hex: file.digestHex },
-      })
-    ),
-  ]
 
   // ─── Activity / progress state updaters (hoisted from sendAgentMessage so the
   //     tracker subscription effect and tracker callbacks can share them) ───
@@ -2882,15 +2856,11 @@ export function useAgentChatController({
       // #678 — the content the Host receives is fixed before anything is created
       // or cleared, so the shared per-message limits are checked against the
       // exact request and a refusal leaves the composer as the user typed it.
-      const baseContentForRequest =
-        trimmedContent ||
-        (effectiveAttachments.length && effectiveFiles.length
-          ? 'Please analyze the attached image(s) and file(s).'
-          : effectiveFiles.length
-            ? 'Please analyze the attached file(s).'
-            : effectiveAttachments.length
-              ? 'Please analyze the attached image(s).'
-              : 'Please use the attached context.')
+      const baseContentForRequest = composerRequestBaseContent(
+        trimmedContent,
+        effectiveAttachments.length,
+        effectiveFiles.length
+      )
       const effectiveContentForRequest = buildComposerRequestContent(
         baseContentForRequest,
         effectiveReferences
@@ -2899,27 +2869,27 @@ export function useAgentChatController({
         // The limits rpc-proxy and mcp-host enforce, most specific first: the
         // count, the file quota, the share left for text and file details, then
         // the whole body (images included), so the reason names what to remove.
-        const textBytes = new TextEncoder().encode(effectiveContentForRequest).length
+        const requestForBudget = {
+          content: effectiveContentForRequest,
+          fileReferences: fileReferencesForSend,
+          hostRef: sendAgent,
+          files: effectiveFiles,
+          images: effectiveAttachments,
+        }
         let blocker: string | null = null
         if (effectiveAttachments.length + effectiveFiles.length > COMPOSER_MAX_ATTACHMENTS) {
           blocker = `A message can carry at most ${COMPOSER_MAX_ATTACHMENTS} attachments.`
         } else if (composerFileBase64Bytes(effectiveFiles) > COMPOSER_MAX_TOTAL_FILE_BASE64_BYTES) {
           blocker = `The attached files take more than ${formatFileSize(COMPOSER_MAX_TOTAL_FILE_BASE64_BYTES)} once encoded. Remove a file.`
         } else if (
-          composerNonImageBodyBytes({ files: effectiveFiles, textBytes }) >
-          COMPOSER_MAX_NON_IMAGE_BODY_BYTES
+          composerNonImageShareBytes(requestForBudget) > COMPOSER_MAX_NON_IMAGE_BODY_BYTES
         ) {
           blocker = `The message text and file details take more than ${formatFileSize(COMPOSER_MAX_NON_IMAGE_BODY_BYTES)} once encoded. Shorten the message or remove a file.`
         } else if (
-          composerRequestBodyBytes({
-            files: effectiveFiles,
-            textBytes,
-            imageBase64Bytes: effectiveAttachments.reduce(
-              (total, image) => total + image.dataBase64.length,
-              0
-            ),
-            imageCount: effectiveAttachments.length,
-          }) > COMPOSER_MAX_REQUEST_BODY_BYTES
+          composerRequestBodyBytes(
+            requestForBudget,
+            effectiveAttachments.reduce((total, image) => total + image.dataBase64.length, 0)
+          ) > COMPOSER_MAX_REQUEST_BODY_BYTES
         ) {
           blocker = `The attachments and text take more than ${formatFileSize(COMPOSER_MAX_REQUEST_BODY_BYTES)} once encoded. Remove an attachment or shorten the message.`
         }

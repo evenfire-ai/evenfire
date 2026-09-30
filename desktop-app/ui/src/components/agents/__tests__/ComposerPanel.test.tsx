@@ -666,14 +666,11 @@ describe('ComposerPanel with an image-capable model', () => {
 
     await waitFor(() => expect(actionsMock.handleAddComposerImageAttachments).toHaveBeenCalled())
     expect(expectSinglePreparedImage().name).toBe('good.png')
-    // Liveness witness: the document path ran, with the draft's byte length for the body budget.
+    // Liveness witness: the document path ran, with the draft for the body budget.
     expect(actionsMock.handleAddComposerFiles).toHaveBeenCalledTimes(1)
-    const [documents, textBytes] = actionsMock.handleAddComposerFiles.mock.calls[0] as [
-      File[],
-      number,
-    ]
+    const [documents, draft] = actionsMock.handleAddComposerFiles.mock.calls[0] as [File[], string]
     expect(documents.map(file => file.name)).toEqual(['animation.gif'])
-    expect(textBytes).toBe(3)
+    expect(draft).toBe('abc')
     expect(screen.queryByRole('alert')).toBeNull()
   })
 
@@ -822,7 +819,7 @@ describe('ComposerPanel with an image-capable model', () => {
     expect(batch?.map(attachment => attachment.name)).toEqual(['a.png', 'b.png'])
     // Liveness witness: the PDF reached the document path, not the image path.
     expect(actionsMock.handleAddComposerFiles).toHaveBeenCalledTimes(1)
-    const [documents] = actionsMock.handleAddComposerFiles.mock.calls[0] as [File[], number]
+    const [documents] = actionsMock.handleAddComposerFiles.mock.calls[0] as [File[], string]
     expect(documents.map(file => file.name)).toEqual(['doc.pdf'])
     // No image was counted as skipped, so nothing is reported.
     expect(screen.queryByRole('alert')).toBeNull()
