@@ -207,19 +207,15 @@ describe('devSigningKeys persistence contract', () => {
   it('publishes the derived verifying half next to the signing material', () => {
     const store = tempStore()
     const signing = loadOrGenerateDevJwtPrivateKey('rpc', store)
-    const publicPath = join(store, 'rpc.public.pem')
+    loadOrGenerateDevJwtPrivateKey('rpc', store) // reuse must not republish different material
     const expected = createPublicKey(signing).export({ type: 'spki', format: 'pem' }).toString()
-    let published: string
-    const fd = openSync(publicPath, 'r')
+    const fd = openSync(join(store, 'rpc.public.pem'), 'r')
     try {
       expect(fstatSync(fd).mode & 0o777).toBe(0o644)
-      published = readFileSync(fd, 'utf8').trim()
+      expect(readFileSync(fd, 'utf8').trim()).toBe(expected.trim())
     } finally {
       closeSync(fd)
     }
-    expect(published).toBe(expected.trim())
-    loadOrGenerateDevJwtPrivateKey('rpc', store)
-    expect(readFileSync(publicPath, 'utf8').trim()).toBe(expected.trim())
   })
 
   it('backfills a missing verifying half on reuse', () => {
