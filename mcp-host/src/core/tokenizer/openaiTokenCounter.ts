@@ -15,12 +15,17 @@ import { type Tiktoken, encoding_for_model, get_encoding } from 'tiktoken'
 import type { ChatMessage, ToolDefinition } from '../types'
 import { heuristicCount } from './heuristic'
 import { tokenizerFallbackTotal } from './metrics'
-import type { TokenCounter } from './tokenCounter'
+import {
+  type ObservedTokenUsage,
+  type TokenCounter,
+  observedDecisionHeuristic,
+} from './tokenCounter'
 
 export class OpenAITokenCounter implements TokenCounter {
   readonly providerName = 'openai' as const
   private encoder: Tiktoken | null = null
   private observed: number | null = null
+  private observedHeuristic: number | null = null
 
   constructor(public readonly modelName: string) {}
 
@@ -72,11 +77,16 @@ export class OpenAITokenCounter implements TokenCounter {
     return total
   }
 
-  recordObservedUsage(usage: { input_tokens: number; output_tokens: number }): void {
+  recordObservedUsage(usage: ObservedTokenUsage): void {
     this.observed = usage.input_tokens
+    this.observedHeuristic = observedDecisionHeuristic(usage)
   }
 
   lastObservedInputTokens(): number | null {
     return this.observed
+  }
+
+  lastObservedDecisionHeuristic(): number | null {
+    return this.observedHeuristic
   }
 }

@@ -3,7 +3,8 @@ import { SingleTurnProvider } from '../../../llm'
 import { ClaudeProvider } from '../../../llm/claude'
 import { OpenAIProvider } from '../../../llm/openai'
 import { LlmError, LlmErrorCode } from '../../errors'
-import { FinishReason } from '../../types'
+import { heuristicCount, heuristicCountTools } from '../../tokenizer/heuristic'
+import { FinishReason, type ToolDefinition } from '../../types'
 import { LlmPortAdapter } from '../llmPortAdapter'
 
 describe('LlmPortAdapter', () => {
@@ -571,8 +572,66 @@ describe('LlmPortAdapter token counter wiring (P.2)', () => {
     expect(recordObservedUsage.mock.calls[0][0]).toMatchObject({
       input_tokens: 314,
       output_tokens: 27,
+      decision_heuristic: heuristicCount([{ role: 'user', content: 'hi' }]),
     })
     expect(adapter.getTokenCounter()).toBe(counter)
+  })
+
+  it('stamps the decision heuristic of a cached tool request, including system parts and schemas', async () => {
+    const recordObservedUsage = vi.fn()
+    const counter = {
+      providerName: 'codex-subscription' as const,
+      modelName: 'gpt-5.6-sol',
+      count: vi.fn(async () => 0),
+      countSync: vi.fn(() => 0),
+      warmup: vi.fn(async () => {}),
+      recordObservedUsage,
+      lastObservedInputTokens: vi.fn(() => null),
+    }
+    const provider: SingleTurnProvider = {
+      completeSingleTurn: vi.fn(),
+      completeSingleTurnWithTools: vi.fn().mockResolvedValue({
+        content: 'ok',
+        tool_calls: [],
+        usage: { input_tokens: 80, output_tokens: 4, total_tokens: 84 },
+        finish_reason: FinishReason.Stop,
+      }),
+      getProviderType: () => 'codex-subscription' as const,
+      classifyError: vi.fn(),
+    }
+    const adapter = new LlmPortAdapter(
+      provider,
+      'gpt-5.6-sol',
+      'codex-subscription',
+      undefined,
+      undefined,
+      undefined,
+      counter
+    )
+    const messages = [{ role: 'user' as const, content: 'find prospects' }]
+    const tools: ToolDefinition[] = [
+      { name: 'search', description: 'Search the CRM', parameters: { type: 'object' } },
+    ]
+    await adapter.completeWithTools({
+      messages,
+      tools,
+      tool_choice: 'auto',
+      systemPromptParts: {
+        stable: 'STABLE',
+        context: 'CONTEXT',
+        stableHash: 's',
+        contextHash: 'c',
+      },
+    })
+
+    const system = 'STABLE\n\nCONTEXT'
+    expect(recordObservedUsage.mock.calls[0][0]).toMatchObject({
+      input_tokens: 80,
+      output_tokens: 4,
+      decision_heuristic:
+        heuristicCount([{ role: 'system', content: system }, ...messages]) +
+        heuristicCountTools(tools),
+    })
   })
 
   it('getTokenCounter() throws when no counter was injected', () => {

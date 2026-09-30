@@ -16,10 +16,16 @@
 import type { ChatMessage, ToolDefinition } from '../types'
 import { heuristicCount, heuristicCountTools } from './heuristic'
 import { tokenizerFallbackTotal } from './metrics'
-import type { TokenCounter, TokenCounterProvider } from './tokenCounter'
+import {
+  type ObservedTokenUsage,
+  type TokenCounter,
+  type TokenCounterProvider,
+  observedDecisionHeuristic,
+} from './tokenCounter'
 
 export class FallbackTokenCounter implements TokenCounter {
   private observed: number | null = null
+  private observedHeuristic: number | null = null
 
   constructor(
     // Any provider whose registry descriptor declares `tokenizer: 'fallback'`
@@ -44,11 +50,16 @@ export class FallbackTokenCounter implements TokenCounter {
     return Math.ceil(total * this.biasFactor)
   }
 
-  recordObservedUsage(usage: { input_tokens: number; output_tokens: number }): void {
+  recordObservedUsage(usage: ObservedTokenUsage): void {
     this.observed = usage.input_tokens
+    this.observedHeuristic = observedDecisionHeuristic(usage)
   }
 
   lastObservedInputTokens(): number | null {
     return this.observed
+  }
+
+  lastObservedDecisionHeuristic(): number | null {
+    return this.observedHeuristic
   }
 }

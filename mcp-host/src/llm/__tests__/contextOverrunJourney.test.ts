@@ -14,10 +14,14 @@
  * runs twice. Under the deployed configuration, pre-prune alone brings the
  * history under the threshold and no tier runs. With the kill switch
  * (`CLERUM_COMPACTION_PRE_PRUNE=false`), the truncate tier does the work.
- * J2 is the failure route: the history cannot shrink, the anti-thrash backoff
- * lets the turn proceed uncompacted, and the contract refuses it. The two
- * differ only in their fixture's shape, and the compaction counters are what
- * tell the two no-op-looking outcomes apart.
+ * J2 is the trailing-tool route: truncate keeps the payload, and the emergency
+ * cap then shrinks that one result under the token gate so the contract
+ * accepts the request.
+ * J3 is the failure route: the oversized bytes are prose. No tier can drop
+ * them, the tool-result cap has nothing to collapse, the anti-thrash backoff
+ * lets the turn proceed uncompacted, and the contract refuses it.
+ * The fixtures differ in where the bytes sit, and the compaction counters are
+ * what tell the outcomes apart.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { type Counter, register } from 'prom-client'
@@ -88,15 +92,16 @@ async function counterValue(
 }
 
 /**
- * The unshrinkable shape: a run of small exchanges followed by one MCP result
- * that is larger than the contract's whole budget.
+ * A run of small exchanges followed by one MCP result larger than the
+ * contract's whole budget.
  *
  * `truncate` keeps the last 3 non-system messages, so the cut removes the 34
- * small ones and keeps the payload that is the actual problem. The tier runs,
- * it does remove messages, and the ratio still lands above `ineffectiveRatio`
- * — which is what arms the anti-thrash backoff. A history of many equal-sized
- * turns (`mcpHeavyHistory`) cannot do this: truncating it is effective, which
- * is exactly why it is J1's fixture and not J2's.
+ * small ones and keeps the payload. That payload is a trailing tool result,
+ * which the emergency cap then shrinks under the token gate. The tier runs
+ * once, the ratio falls under `ineffectiveRatio`, and the next `manage` is a
+ * passthrough. Prose of the same size cannot take this path — see
+ * `unshrinkableProseHistory`. A history of many equal-sized turns
+ * (`mcpHeavyHistory`) is J1: truncating it is effective before the cap runs.
  */
 function unshrinkableHistory(finalResultBytes: number): ChatMessage[] {
   const msgs: ChatMessage[] = [{ role: 'system', content: 'You are a helpful assistant.' }]
@@ -118,6 +123,24 @@ function unshrinkableHistory(finalResultBytes: number): ChatMessage[] {
     tool_call_id: 'call_final',
     name: 'crm_search_contacts',
   })
+  return msgs
+}
+
+/**
+ * The same budget-busting size as `unshrinkableHistory`, sitting in a user
+ * message the keep-3 cut retains. There is no tool result, so the emergency
+ * cap is a no-op, the post/pre ratio stays above `ineffectiveRatio`, and the
+ * anti-thrash backoff arms.
+ */
+function unshrinkableProseHistory(payloadChars: number): ChatMessage[] {
+  const msgs: ChatMessage[] = [{ role: 'system', content: 'You are a helpful assistant.' }]
+  for (let i = 0; i < 17; i++) {
+    msgs.push({ role: 'user', content: `step ${i}` })
+    msgs.push({ role: 'assistant', content: 'ok' })
+  }
+  msgs.push({ role: 'user', content: 'x'.repeat(payloadChars) })
+  msgs.push({ role: 'assistant', content: 'ok' })
+  msgs.push({ role: 'user', content: 'Continue from the export above.' })
   return msgs
 }
 
@@ -267,7 +290,53 @@ describe('#731 context-overrun journey', () => {
     expect(hashCanonicalCodexRequest(req).ok).toBe(true)
   })
 
-  it('J2 a single long agentic turn reaches backoff and is refused as ContextLengthExceeded (#731)', async () => {
+  it('J2 a single long tool result is capped and the contract accepts the request (#731)', async () => {
+    const conversation = makeFakeConversation()
+    const manager = new PressureContextManager(100000, undefined, undefined, undefined, {
+      ineffectiveRatio: 0.9,
+      ineffectiveMaxRun: 2,
+      taskId: 'task-J2',
+    })
+    const wired = deps()
+    const provider = new CodexSubscriptionProvider('gpt-5.3-codex', wired as never)
+
+    // The final result alone passes the byte cap by 10%. Truncate keeps it;
+    // the emergency cap is what brings the request back under the contract.
+    const history = unshrinkableHistory(Math.ceil(LIMITS.maxRequestBodyBytes * 1.1))
+    expect(Buffer.byteLength(JSON.stringify(history), 'utf8')).toBeGreaterThan(
+      LIMITS.maxRequestBodyBytes
+    )
+
+    const first = await manager.manage(history, conversation)
+    const second = await manager.manage(first, conversation)
+
+    // Route: truncate ran once, the cap made that attempt effective, and the
+    // next call was a passthrough. Backoff stays disarmed — a shrinkable tool
+    // result must not be reported as a history that cannot be shrunk.
+    expect(await counterValue(clerumCompactionTotal, { tier: 'truncate', outcome: 'ok' })).toBe(1)
+    expect(
+      await counterValue(clerumCompactionTotal, { tier: 'truncate', outcome: 'thrashing' })
+    ).toBe(0)
+    expect(conversation.compactionState?.ineffectiveCount).toBe(0)
+    expect(second).toBe(first)
+
+    const tool = second.find(message => message.role === 'tool')
+    expect(tool?.tool_call_id).toBe('call_final')
+    expect(tool?.content).toContain('[truncated tool result,')
+    expect(tool!.content.length).toBeLessThan(2_000)
+    expect(() => validateToolLinkages(second)).not.toThrow()
+
+    await provider.completeSingleTurnWithTools(second, TOOLS)
+
+    expect(wired.authorize).toHaveBeenCalledTimes(1)
+    const req = wired.authorize.mock.calls[0][0].request
+    expect(Buffer.byteLength(JSON.stringify(req), 'utf8')).toBeLessThanOrEqual(
+      LIMITS.maxRequestBodyBytes
+    )
+    expect(hashCanonicalCodexRequest(req).ok).toBe(true)
+  })
+
+  it('J3 prose the tiers cannot drop reaches backoff and is refused as ContextLengthExceeded (#731)', async () => {
     const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {})
     const events = new SimpleEventEmitter()
     const captured: AgentEvent[] = []
@@ -279,14 +348,16 @@ describe('#731 context-overrun journey', () => {
       ineffectiveRatio: 0.9,
       ineffectiveMaxRun: 2,
       events,
-      taskId: 'task-J2',
+      taskId: 'task-J3',
     })
     const wired = deps()
     const provider = new CodexSubscriptionProvider('gpt-5.3-codex', wired as never)
 
-    // The final result alone passes the byte cap by 10%, whatever its value.
+    // The final user message alone passes the byte cap by 10%. It sits in the
+    // keep-3 tail, and it is not a tool result, so neither the tier nor the
+    // emergency cap can remove it.
     const first = await manager.manage(
-      unshrinkableHistory(Math.ceil(LIMITS.maxRequestBodyBytes * 1.1)),
+      unshrinkableProseHistory(Math.ceil(LIMITS.maxRequestBodyBytes * 1.1)),
       conversation
     )
     const second = await manager.manage(first, conversation)
@@ -300,20 +371,19 @@ describe('#731 context-overrun journey', () => {
       await counterValue(clerumCompactionTotal, { tier: 'truncate', outcome: 'thrashing' })
     ).toBe(1)
     expect(captured).toHaveLength(1)
-    expect(captured[0].data).toMatchObject({ taskId: 'task-J2', consecutiveCount: 2 })
+    expect(captured[0].data).toMatchObject({ taskId: 'task-J3', consecutiveCount: 2 })
     // The operator-facing half of the same transition: the event goes to the
     // bus, this goes to the pod log. The thrashing counter above is the
     // liveness witness that makes "exactly once" mean something here (#731).
     expect(warnSpy).toHaveBeenCalledTimes(1)
     expect(warnSpy).toHaveBeenCalledWith(
-      expect.objectContaining({ taskId: 'task-J2' }),
+      expect.objectContaining({ taskId: 'task-J3' }),
       'Compaction backoff: history cannot be shrunk; proceeding uncompacted'
     )
 
     // State: the backoff returns its input untouched. That unchanged array is
-    // the one legitimate no-op in this system, which is why J1 pins
-    // `thrashing` to 0 and this test pins it to 1 — the same shape, told apart
-    // by the counter rather than by inspection.
+    // the one legitimate no-op in this system. J1 pins `thrashing` to 0; this
+    // test pins it to 1.
     expect(third).toBe(second)
     expect(() => validateToolLinkages(third)).not.toThrow()
     // Precondition for the refusal below, asserted rather than assumed.

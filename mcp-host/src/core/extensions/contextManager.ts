@@ -25,11 +25,21 @@ import { parseStructuredSummary } from '../conversation/structuredSummaryParser'
 import { ContextManageOptions, ContextManager, LlmPort } from '../interfaces'
 import type { AgentEventEmitter } from '../interfaces'
 import { validateToolLinkages } from '../orchestration/toolUseLoop'
-import { heuristicCountTools } from '../tokenizer/heuristic'
+import {
+  decisionHeuristicTokens,
+  heuristicCount,
+  heuristicCountTools,
+} from '../tokenizer/heuristic'
 import { tokenizerDryrunDelta, tokenizerDryrunTierMismatchTotal } from '../tokenizer/metrics'
-import type { TokenCounter } from '../tokenizer/tokenCounter'
+import { type TokenCounter, projectObservedDecisionTokens } from '../tokenizer/tokenCounter'
 import { ChatMessage, CompactionState, Conversation, ToolDefinition } from '../types'
-import { type PrePruneOptions, clerumPrePruneSavingsTokensTotal, prePrune } from './prePrune'
+import {
+  DEFAULT_PRE_PRUNE_OPTIONS,
+  type PrePruneOptions,
+  clerumPrePruneSavingsTokensTotal,
+  oneLineSummaries,
+  prePrune,
+} from './prePrune'
 import { buildStructuredSummaryPrompt } from './structuredSummaryTemplate'
 
 // ─── T1.4 Prometheus instruments ────────────────────────────────────────────
@@ -70,10 +80,11 @@ export const clerumCompactionStructuredParseTotal = new Counter({
 
 export interface PressureContextManagerOptions {
   /**
-   * P.2 dry-run mode. When true (the default during the bake-week), the
-   * manager uses the legacy heuristic to decide the tier and ALSO computes
-   * the real counter value for observability. When false, the real counter
-   * drives the decision. See `.specs/mcp-hermes/implementation-plans/P2-tokenizer.md`.
+   * P.2 dry-run mode. When true (the default), the byte heuristic decides the
+   * tier and the real counter is recorded as a delta. When false, `count()`
+   * drives the tier. In both modes a billed `input_tokens` floor can raise
+   * the decision; the fallback counter's 1.3× bias must not. See
+   * `tierDecisionTokens`.
    */
   dryRun?: boolean
   /**
@@ -146,17 +157,24 @@ export interface PressureContextManagerOptions {
 export const COMPACTION_PRESSURE_THRESHOLD = 0.8
 
 /**
- * The token count behind `PressureContextManager`'s tier decision. Without a
- * counter, or in the dry run, the byte heuristic decides; otherwise the
- * counter does. `taskExecutor` measures the rehydrated history with this same
- * function, so a history the manager passes through is never compacted at
- * rehydration (#739).
+ * The token count behind `PressureContextManager`'s tier decision.
+ * `taskExecutor` measures rehydrated history with this same function, so a
+ * history the manager passes through is never compacted at rehydration (#739).
  *
- * The `lastObservedInputTokens` shortcut (Hermes `update_from_response`) is
- * intentionally NOT applied: the manager calls this once per loop iteration,
- * so the per-decision count is affordable, and skipping `count()` would risk
- * under-counting messages added since the last response. T2.2 (prompt cache)
- * revisits this with a per-iteration shape diff.
+ * The base is the byte heuristic when there is no counter or dry-run is on,
+ * and `tokenCounter.count()` otherwise. Dry-run stays the production default:
+ * `FallbackTokenCounter`'s 1.3× factor was measured against the old word-count
+ * heuristic, not against billed usage, so turning it off would compact prompts
+ * the provider never billed over the gate.
+ *
+ * Billed `input_tokens` is a floor, not a replacement:
+ * `projected = observed + currentHeuristic - baselineHeuristic`, and the
+ * decision is `max(base, projected)`. Replacing the live count with the last
+ * bill under-counts tool results appended since that response. The baseline
+ * is the byte heuristic of the billed request (`decision_heuristic` on
+ * `recordObservedUsage`), counted with `decisionHeuristicTokens` — the same
+ * function as `currentHeuristic`. No observation → the base. An observation
+ * without a baseline → that observation is the floor and growth is not added.
  */
 export async function tierDecisionTokens(
   messages: ChatMessage[],
@@ -164,8 +182,75 @@ export async function tierDecisionTokens(
   tokenCounter: TokenCounter | undefined,
   dryRun: boolean
 ): Promise<number> {
-  if (!tokenCounter || dryRun) return estimateTokens(messages) + heuristicCountTools(tools)
-  return tokenCounter.count(messages, tools)
+  const heuristic = decisionHeuristicTokens(messages, tools)
+  const base = !tokenCounter || dryRun ? heuristic : await tokenCounter.count(messages, tools)
+  if (!tokenCounter) return base
+  const projected = projectObservedDecisionTokens(tokenCounter, heuristic)
+  return projected == null ? base : Math.max(base, projected)
+}
+
+/** Keep-count for a tier. Shared by the preview cut and the tier that runs. */
+function keepRecentFor(tier: CompactionTier): number {
+  if (tier === 'truncate') return 3
+  if (tier === 'summarize') return 5
+  return 8
+}
+
+const TRAILING_TOOL_PREVIEW_CHARS = 500
+const TRUNCATED_TOOL_MARKER = '[truncated tool result,'
+
+/** Index of the trailing `role: 'tool'` run, or `messages.length` when the array does not end in one. */
+function trailingToolRunStart(messages: ChatMessage[]): number {
+  let index = messages.length
+  while (index > 0 && messages[index - 1].role === 'tool') index -= 1
+  return index
+}
+
+function cappedToolContent(content: string, gate: number): string {
+  const marked = (previewChars: number) =>
+    `${content.slice(0, previewChars)}\n… ${TRUNCATED_TOOL_MARKER} ${content.length} bytes]`
+  const fits = (previewChars: number) =>
+    heuristicCount([{ role: 'tool', content: marked(previewChars) }]) < gate
+  if (fits(TRAILING_TOOL_PREVIEW_CHARS)) return marked(TRAILING_TOOL_PREVIEW_CHARS)
+  let lo = 0
+  let hi = TRAILING_TOOL_PREVIEW_CHARS
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2)
+    if (fits(mid)) lo = mid
+    else hi = mid - 1
+  }
+  return marked(lo)
+}
+
+/**
+ * Shrink tool results a tier cut cannot drop. The protected tail holds the
+ * current turn, so pre-prune leaves those results intact and a keep-3 cut is
+ * a no-op once the history is already that short. One-line every tool message
+ * outside the trailing tool-result batch — that batch is the one the model
+ * has not consumed yet. When a trailing result alone is still over the gate,
+ * keep a prefix of it. `oneLineSummaries` refuses `protectedTailStart <= 0`,
+ * so an all-tool array is only capped, not summarized.
+ */
+function collapseStaleToolResults(
+  messages: ChatMessage[],
+  maxTokens: number,
+  summaryThresholdTokens: number
+): ChatMessage[] {
+  const trailingStart = trailingToolRunStart(messages)
+  const summarized =
+    trailingStart > 0 ? oneLineSummaries(messages, trailingStart, summaryThresholdTokens) : messages
+  if (trailingStart >= summarized.length) return summarized
+  const gate = COMPACTION_PRESSURE_THRESHOLD * maxTokens
+  let mutated: ChatMessage[] | null = null
+  for (let i = trailingStart; i < summarized.length; i++) {
+    const msg = summarized[i]
+    if (msg.role !== 'tool') continue
+    if (msg.content.includes(TRUNCATED_TOOL_MARKER)) continue
+    if (heuristicCount([msg]) < gate) continue
+    if (mutated === null) mutated = summarized.slice()
+    mutated[i] = { ...msg, content: cappedToolContent(msg.content, gate) }
+  }
+  return mutated ?? summarized
 }
 
 /**
@@ -428,22 +513,55 @@ export class PressureContextManager implements ContextManager {
     const systemMsgs = working.filter(m => m.role === 'system')
     const nonSystemMsgs = working.filter(m => m.role !== 'system')
 
+    // Pick the strictest tier whose kept tail is back under the token gate,
+    // then run that tier once. A keep-8 cut that archives nothing used to
+    // count as ineffective and, two attempts later, disable every stricter
+    // tier for the rest of the task. Escalation follows token pressure only:
+    // a message-count ratio that a cut already brought under 0.8 must not
+    // pull a workspace-band history down to summarize.
+    let tier = tierLabel(pressure)
+    let preview = this.truncate(systemMsgs, nonSystemMsgs, keepRecentFor(tier))
+    let stillOver = true
+    while (tier !== 'truncate') {
+      const postPressure = await this.computeTokenPressure(preview, tools, systemPrompt, false)
+      if (postPressure < COMPACTION_PRESSURE_THRESHOLD) {
+        stillOver = false
+        break
+      }
+      tier = tier === 'move_to_workspace' ? 'summarize' : 'truncate'
+      preview = this.truncate(systemMsgs, nonSystemMsgs, keepRecentFor(tier))
+    }
+    if (tier === 'truncate') {
+      const postPressure = await this.computeTokenPressure(preview, tools, systemPrompt, false)
+      stillOver = postPressure >= COMPACTION_PRESSURE_THRESHOLD
+    }
+
     let postMessages: ChatMessage[]
-    let tier: CompactionTier
-    if (pressure >= 0.95) {
-      tier = 'truncate'
-      postMessages = this.truncate(systemMsgs, nonSystemMsgs, 3)
-    } else if (pressure >= 0.85) {
-      tier = 'summarize'
+    if (tier === 'summarize') {
       // Auto-compaction never carries a focus; the field is only meaningful
       // for `forceTier: 'summarize'`. Explicitly pass `undefined` so that a
       // caller who hands `{ focus }` without `forceTier` cannot accidentally
       // bias the automatic summary (the `forceTier === 'summarize'` branch
       // above is the only legitimate consumer of `options?.focus`).
       postMessages = await this.summarize(systemMsgs, nonSystemMsgs, 5, undefined)
-    } else {
-      tier = 'move_to_workspace'
+    } else if (tier === 'move_to_workspace') {
       postMessages = await this.moveToWorkspace(systemMsgs, nonSystemMsgs, 8)
+    } else {
+      postMessages = preview
+    }
+
+    // Tool results inside the kept turn survive every tier. Collapse them
+    // when the request is still over the gate. A pure-prose tail has nothing
+    // to collapse, so the ineffective counter below still advances.
+    if (stillOver) {
+      const threshold =
+        this.prePruneOptions?.summaryThresholdTokens ??
+        DEFAULT_PRE_PRUNE_OPTIONS.summaryThresholdTokens
+      const collapsed = collapseStaleToolResults(postMessages, this.maxTokens, threshold)
+      if (collapsed !== postMessages) {
+        validateToolLinkages(collapsed)
+        postMessages = collapsed
+      }
     }
 
     // T1.4 — measure effectiveness on the heuristic so trigger and measurement
@@ -560,12 +678,17 @@ export class PressureContextManager implements ContextManager {
   private async computeTokenPressure(
     messages: ChatMessage[],
     tools: ToolDefinition[],
-    systemPrompt: string | undefined
+    systemPrompt: string | undefined,
+    observeDryRun = true
   ): Promise<number> {
     const counted = withSystemPrompt(messages, systemPrompt)
+    // The bake-week delta compares the counter with the byte heuristic, not
+    // with the billed floor. Post-tier checks pass `observeDryRun: false` so
+    // a single decision does not emit one sample per escalation step.
+    const heuristic = decisionHeuristicTokens(counted, tools)
     const decided = await tierDecisionTokens(counted, tools, this.tokenCounter, this.dryRun)
-    if (this.tokenCounter && this.dryRun) {
-      await this.observeDryrunDelta(this.tokenCounter, counted, tools, decided)
+    if (observeDryRun && this.tokenCounter && this.dryRun) {
+      await this.observeDryrunDelta(this.tokenCounter, counted, tools, heuristic)
     }
     return decided / this.maxTokens
   }

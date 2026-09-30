@@ -56,6 +56,18 @@ describe('OpenAITokenCounter', () => {
     expect(counter.lastObservedInputTokens()).toBe(42)
   })
 
+  it('remembers the decision heuristic stamped with observed usage', () => {
+    const counter = new OpenAITokenCounter('gpt-4o-mini')
+    counter.recordObservedUsage({
+      input_tokens: 42,
+      output_tokens: 3,
+      decision_heuristic: 40,
+    })
+    expect(counter.lastObservedDecisionHeuristic()).toBe(40)
+    counter.recordObservedUsage({ input_tokens: 7, output_tokens: 1 })
+    expect(counter.lastObservedDecisionHeuristic()).toBeNull()
+  })
+
   it('warmup falls back to cl100k_base for unknown models', async () => {
     const counter = new OpenAITokenCounter('totally-not-a-real-model-xyz')
     await counter.warmup()

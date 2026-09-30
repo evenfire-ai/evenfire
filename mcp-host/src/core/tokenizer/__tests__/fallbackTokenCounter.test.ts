@@ -49,6 +49,21 @@ describe('FallbackTokenCounter', () => {
     expect(counter.lastObservedInputTokens()).toBe(1234)
   })
 
+  it('remembers the decision heuristic stamped with observed usage', () => {
+    const counter = new FallbackTokenCounter('zai', 'glm-4-plus')
+    expect(counter.lastObservedDecisionHeuristic()).toBeNull()
+    counter.recordObservedUsage({
+      input_tokens: 210_000,
+      output_tokens: 20,
+      decision_heuristic: 160_000,
+    })
+    expect(counter.lastObservedInputTokens()).toBe(210_000)
+    expect(counter.lastObservedDecisionHeuristic()).toBe(160_000)
+    counter.recordObservedUsage({ input_tokens: 10, output_tokens: 1 })
+    expect(counter.lastObservedInputTokens()).toBe(10)
+    expect(counter.lastObservedDecisionHeuristic()).toBeNull()
+  })
+
   it('factors tool schemas into the count', async () => {
     const counter = new FallbackTokenCounter('zai', 'glm-4-plus', 1.3)
     const msgs: ChatMessage[] = [{ role: 'user', content: 'hello world' }]

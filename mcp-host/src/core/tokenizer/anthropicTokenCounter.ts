@@ -20,7 +20,11 @@ import {
   tokenizerCountDurationSeconds,
   tokenizerFallbackTotal,
 } from './metrics'
-import type { TokenCounter } from './tokenCounter'
+import {
+  type ObservedTokenUsage,
+  type TokenCounter,
+  observedDecisionHeuristic,
+} from './tokenCounter'
 
 export interface AnthropicTokenCounterOptions {
   /**
@@ -33,6 +37,7 @@ export interface AnthropicTokenCounterOptions {
 export class AnthropicTokenCounter implements TokenCounter {
   readonly providerName = 'claude' as const
   private observed: number | null = null
+  private observedHeuristic: number | null = null
   private readonly offline: boolean
 
   constructor(
@@ -105,12 +110,17 @@ export class AnthropicTokenCounter implements TokenCounter {
     return Math.ceil(total * 1.5)
   }
 
-  recordObservedUsage(usage: { input_tokens: number; output_tokens: number }): void {
+  recordObservedUsage(usage: ObservedTokenUsage): void {
     this.observed = usage.input_tokens
+    this.observedHeuristic = observedDecisionHeuristic(usage)
   }
 
   lastObservedInputTokens(): number | null {
     return this.observed
+  }
+
+  lastObservedDecisionHeuristic(): number | null {
+    return this.observedHeuristic
   }
 
   private incrementFallback(reason: TokenizerFallbackReason): void {
