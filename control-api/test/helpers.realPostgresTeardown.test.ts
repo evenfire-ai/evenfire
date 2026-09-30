@@ -60,7 +60,8 @@ describe('endPoolAndWaitForClients', () => {
   })
 
   it('ends a real pg Pool that never connected', async () => {
-    const pool = new Pool({ connectionString: 'postgresql://postgres@127.0.0.1:1/unused' })
+    // Never connects: nothing checks a client out before end().
+    const pool = new Pool({ host: '127.0.0.1', port: 1, user: 'unused', database: 'unused' })
     expect(pool.totalCount).toBe(0)
     await endPoolAndWaitForClients(pool)
     expect(pool.ended).toBe(true)
