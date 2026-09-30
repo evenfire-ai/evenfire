@@ -2570,4 +2570,57 @@ describe('GfsBrowser', () => {
 
     expect((await screen.findByText('escalation_rejected')).getAttribute('role')).toBe('alert')
   })
+
+  it('shows the loaded count and the truncation notice while a page cap holds more rows', async () => {
+    mockApiGet.mockResolvedValueOnce({
+      items: [child('a.md', 'file', 1), child('b.md', 'file', 2)],
+      nextCursor: 'cursor-1',
+    })
+    renderBrowser()
+
+    expect(await screen.findByText('Showing 2 of 2+ items.')).toBeTruthy()
+    expect(
+      screen.getByText(
+        'The listing is truncated at the page cap — Load more fetches the next page.'
+      )
+    ).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Load more' })).toBeTruthy()
+  })
+
+  it('announces the complete count and drops the notice after the last page loads', async () => {
+    mockApiGet.mockImplementation((_path: string, query?: Record<string, string>) => {
+      if (query?.cursor === 'cursor-1') {
+        return Promise.resolve({ items: [child('c.md', 'file', 3)], nextCursor: null })
+      }
+      return Promise.resolve({
+        items: [child('a.md', 'file', 1), child('b.md', 'file', 2)],
+        nextCursor: 'cursor-1',
+      })
+    })
+    renderBrowser()
+
+    expect(await screen.findByText('Showing 2 of 2+ items.')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Load more' }))
+
+    expect(await screen.findByText('Showing all 3 items.')).toBeTruthy()
+    expect(
+      screen.queryByText(
+        'The listing is truncated at the page cap — Load more fetches the next page.'
+      )
+    ).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Load more' })).toBeNull()
+    expect(mockApiGet).toHaveBeenCalledWith('/api/v1/gfs/tree', {
+      drive: 'main',
+      cursor: 'cursor-1',
+    })
+  })
+
+  it('states the complete count without a truncation notice on a short listing', async () => {
+    mockApiGet.mockResolvedValueOnce({ items: [child('a.md', 'file', 1)], nextCursor: null })
+    renderBrowser()
+
+    expect(await screen.findByText('Showing all 1 items.')).toBeTruthy()
+    expect(screen.queryByText(/truncated at the page cap/)).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Load more' })).toBeNull()
+  })
 })

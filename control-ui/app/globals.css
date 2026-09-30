@@ -12361,6 +12361,16 @@ button.cu-gfs-tree__button:focus-visible,
   opacity: 0.55;
 }
 
+.cu-gfs-list-count {
+  margin: var(--cu-space-2) 0 0;
+  color: var(--cu-text-soft);
+  font-size: var(--cu-font-size-xs);
+}
+
+.cu-gfs-list-count--truncated {
+  margin-top: var(--cu-space-05);
+}
+
 .cu-gfs__load-more {
   justify-self: start;
 }
