@@ -16156,7 +16156,7 @@ describe('WorkflowRecipeReconciler', () => {
       ).toBe(false)
     })
 
-    it('retryRunLaneNetworkPolicies does not prune reserved GFS', async () => {
+    it('retryRunLaneNetworkPolicies prunes nothing: no LIST and no DELETE, reserved GFS included', async () => {
       mockNetworkingApi.listNamespacedNetworkPolicy.mockResolvedValue({
         items: [
           {
@@ -16201,17 +16201,11 @@ describe('WorkflowRecipeReconciler', () => {
         )
       ).toBe(true)
       // The run's pods are live, so the retry revokes no lane: not the
-      // reserved GFS policy, not a sibling the spec no longer wants, and not
-      // a Codex/Grok proxy.
-      for (const name of [
-        GFS,
-        `${RECIPE}-snippet-runner-egress`,
-        `${RECIPE}-mcp-host-to-grok-proxy`,
-      ]) {
-        expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalledWith(
-          expect.objectContaining({ name })
-        )
-      }
+      // reserved GFS policy, not a sibling the spec no longer wants, not a
+      // Codex/Grok proxy, and not the legacy mcp-servers internet policy. It
+      // does not even LIST what a prune would find.
+      expect(mockNetworkingApi.listNamespacedNetworkPolicy).not.toHaveBeenCalled()
+      expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalled()
     })
   })
 

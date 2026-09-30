@@ -231,10 +231,13 @@ type RunLaneNetworkPolicyApplyResult =
       reason: 'terminating' | 'contended'
     }
   | { policy: string; action: 'conflict'; reason: NetworkPolicyConflictReason }
-/** Why a Codex/Grok proxy policy survives a prune that does not desire it. */
+/**
+ * Which Codex/Grok proxy policy survives a prune that does not desire it: a
+ * proxy whose verdict is uncertain. The skip log names it `reason: 'uncertain'`.
+ */
 interface RunLaneProxyKeepReasons {
-  codex?: 'uncertain'
-  grok?: 'uncertain'
+  codex: boolean
+  grok: boolean
 }
 // Read-then-write rounds per NetworkPolicy and pass. Three rounds is at most
 // three writes, the same as the create plus two replaces it replaced.
@@ -3067,12 +3070,14 @@ export class WorkflowReconciler {
    * active short-circuits return before reconcile(), so a policy a previous
    * pass left pending (terminating or contended) would otherwise stay as it is
    * until the run ends. Builds the desired set with a verdict computed now and
-   * applies it, but prunes no run-lane policy: the run's pods are live and may
-   * still use any lane the spec wanted when they were created, so a revoke here
-   * cuts their traffic. Only the legacy mcp-servers internet policy, which no
-   * spec wants, is still deleted. retryPending reflects the applies and that
-   * delete, so a marker a failed reconcile() prune set clears here and the
-   * leftover waits for the next reconcile() pass or the finalizer sweep.
+   * applies it, but deletes nothing: the run's pods are live and may still use
+   * any lane the spec wanted when they were created, so a revoke here cuts
+   * their traffic. That includes the legacy mcp-servers internet policy, which
+   * only a reconcile() pass deletes. retryPending reflects the applies alone
+   * and the summary carries no prune fact, so a pending prune a reconcile()
+   * pass published survives this path: a run-lane leftover waits for the next
+   * reconcile() pass or the finalizer's label sweep, the legacy policy for the
+   * next reconcile() pass.
    *
    * What each path may delete (verdict = Codex/Grok eligibility; it governs
    * only the proxy lanes, every other catalog lane follows the spec alone):
@@ -3119,10 +3124,7 @@ export class WorkflowReconciler {
       false,
       codexVerdict.grokProjection
     )
-    const summary = await this.applyNetworkPolicyList(policies)
-    const legacy = await this.pruneLegacyMcpServersInternetEgressPolicy(recipeName, recipeUid)
-    if (legacy.deletePending) summary.retryPending = true
-    return summary
+    return this.applyNetworkPolicyList(policies)
   }
 
   async ensureCoordinatorRuntimeCredentials(
@@ -3530,8 +3532,8 @@ export class WorkflowReconciler {
       grokProjection
     )
     return this.applyAndPruneRunLaneNetworkPolicies(recipeName, recipeUid, policies, catalog, {
-      codex: codexProjection.eligibility === 'uncertain' ? 'uncertain' : undefined,
-      grok: grokProjection?.eligibility === 'uncertain' ? 'uncertain' : undefined,
+      codex: codexProjection.eligibility === 'uncertain',
+      grok: grokProjection?.eligibility === 'uncertain',
     })
   }
 
@@ -3560,8 +3562,8 @@ export class WorkflowReconciler {
    * Two-term selector only (`managed-by=wrc`): a single-term recipe selector
    * would also return the recipes-lane policies in the same namespace.
    * Universe is the factory catalog (GFS never in it), not LIST \ desired.
-   * A Codex/Grok proxy with a keep reason (an uncertain verdict) survives even
-   * when it is absent from this pass's desired set. A listed policy with an
+   * A Codex/Grok proxy whose verdict is uncertain survives even when it is
+   * absent from this pass's desired set. A listed policy with an
    * ownerReference is skipped, matching the apply's ownership veto. Only
    * reconcile() prunes; the mid-run retry never calls this (see
    * retryRunLaneNetworkPolicies for the per-path table).
@@ -3593,17 +3595,17 @@ export class WorkflowReconciler {
     for (const policy of list.items ?? []) {
       const name = policy.metadata?.name
       if (!name || desiredNames.has(name)) continue
-      const keepReason =
+      const keep =
         name === codexProxyPolicyName
           ? keepProxies.codex
           : name === grokProxyPolicyName
             ? keepProxies.grok
-            : undefined
-      if (keepReason) {
+            : false
+      if (keep) {
         this.log.debug('Skipping run-lane NP prune', {
           recipe: recipeName,
           policy: name,
-          reason: keepReason,
+          reason: 'uncertain',
         })
         continue
       }
