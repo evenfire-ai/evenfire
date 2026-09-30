@@ -54,7 +54,7 @@ import {
   uploadGfsFileLegacy,
 } from '@lib/gfsFileUpload'
 import { gfsImagePreviewMimeType } from '@lib/gfsImagePreview'
-import { isCurrentGfsLoad } from '@lib/gfsLoadArbitration'
+import { GfsLoadArbiter } from '@lib/gfsLoadArbitration'
 import { isGfsMarkdownPreviewFile } from '@lib/gfsMarkdownPreview'
 import { isGfsVideoFile } from '@lib/gfsVideoFile'
 import { gfsVideoPreviewMimeType } from '@lib/gfsVideoPreview'
@@ -337,8 +337,7 @@ export function GfsBrowser(): React.JSX.Element {
   const [loading, setLoading] = useState(true)
   const [loadingMore, setLoadingMore] = useState(false)
   const [error, setError] = useState('')
-  const loadSeqRef = useRef(0)
-  const backgroundLoadSeqRef = useRef(0)
+  const loadArbiterRef = useRef(new GfsLoadArbiter())
   const entityChangeRefetchControllerRef = useRef<AbortController | null>(null)
   const loadedPageCountRef = useRef(1)
   const loadedLocationRef = useRef<string | null | undefined>(undefined)
@@ -472,24 +471,9 @@ export function GfsBrowser(): React.JSX.Element {
     ): Promise<void> => {
       const appending = Boolean(cursor)
       const background = Boolean(options?.background)
-      // Background revalidation has its own sequence: it can be superseded by
-      // user navigation, but never invalidates that navigation's request.
-      const navigationSeq = background ? loadSeqRef.current : ++loadSeqRef.current
-      const backgroundSeq = background ? ++backgroundLoadSeqRef.current : undefined
-      const loadToken = background
-        ? {
-            kind: 'background' as const,
-            navigationSequence: navigationSeq,
-            backgroundSequence: backgroundSeq!,
-          }
-        : {
-            kind: 'foreground' as const,
-            navigationSequence: navigationSeq,
-            backgroundSequenceAtStart: backgroundLoadSeqRef.current,
-          }
-      const isCurrent = () =>
-        !options?.signal?.aborted &&
-        isCurrentGfsLoad(loadToken, loadSeqRef.current, backgroundLoadSeqRef.current)
+      const loadArbiter = loadArbiterRef.current
+      const loadToken = background ? loadArbiter.beginBackground() : loadArbiter.beginForeground()
+      const isCurrent = () => !options?.signal?.aborted && loadArbiter.isCurrent(loadToken)
       if (!background && !cursor) loadedPageCountRef.current = 1
       if (appending) {
         setLoadingMore(true)
@@ -810,7 +794,7 @@ export function GfsBrowser(): React.JSX.Element {
     performVisibleStateRevalidation = async (cursor?: string) => {
       // Retire an older same-folder focus/cache refresh before publishing the
       // newer stream-authoritative listing. Its late response must not win.
-      backgroundLoadSeqRef.current += 1
+      loadArbiterRef.current.beginStreamRevalidation()
       // A committed remote change supersedes any local move/retry ancestry
       // reconstruction still in flight. Its older response must not replace
       // the hierarchy we are about to refetch from the authoritative API.
