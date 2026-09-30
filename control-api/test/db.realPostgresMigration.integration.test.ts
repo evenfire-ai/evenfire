@@ -1937,7 +1937,7 @@ describeRealPostgres('control-api real Postgres migrations', () => {
   })
 
   it('prevents temp-type shadowing in entity-change SECURITY DEFINER triggers', async () => {
-    const { CONTROL_API_MIGRATIONS, initDb } = await import('../src/db.js')
+    const { initDb } = await import('../src/db.js')
     await initDb({ connect: () => dbPool.connect() })
 
     const attackerRole = `entity_change_shadow_${randomBytes(5).toString('hex')}`
