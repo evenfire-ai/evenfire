@@ -52,8 +52,8 @@ encoded image budget (`4 × ceil(20971520 / 3)` = 27962028 bytes) plus the
 serialized V2 request and its HTTP envelope, signed ticket included, with no
 envelope allowance on top, as for Codex. V1 keeps `maxRequestBodyBytes` plus
 the 16 KiB `ENVELOPE_ALLOWANCE_BYTES`. Text, tools and other non-image fields
-of a V2 request stay bounded to `maxRequestBodyBytes`, measured with the image
-data blanked in a temporary projection.
+of a V2 request stay bounded to `maxRequestBodyBytes`, measured with image
+data and text parts that repeat `content` blanked in a temporary projection.
 
 The contract checks a V2 request in this order:
 
@@ -70,11 +70,17 @@ The contract checks a V2 request in this order:
    `request exceeds maxVisualRequestBodyBytes`;
 4. each image and the request's image totals, while the parts are parsed.
 
-A request over 35 MiB because of its text is therefore reported as text. With
-the non-image share within 8 MiB, a request over 35 MiB carries more than
-28311552 encoded image bytes, which is already over the 20 MiB image budget, so
-the Host reports the whole-body refusal as an image refusal
-(`attachment_too_large`, below).
+The non-image share does not count text parts that repeat `content`, so a V2
+body can carry up to about 16 MiB of text while 8 MiB is counted. Such a body
+can exceed 35 MiB with its images inside the 20 MiB budget: one 16 MiB image
+plus 7 MiB of text, or two 10 MiB images plus 4.5 MiB of text. It gets the
+whole-body refusal, and the Host reports every whole-body refusal as an image
+refusal (`attachment_too_large`, below), so the user is told to send fewer or
+smaller images although shorter text would also fit. The Host refuses it
+before authorize, so no attempt is spent. Codex behaves the same way. For the
+same reason a V2 request accepted close to 35 MiB can leave less room than the
+authorize wrapper and the signed ticket need; the Host's authorize-body check
+refuses it, also before any attempt.
 
 The value is a runtime limit, not a published fixture limit: the
 `grok-llm-proxy/test/contractFreeze.test.ts` fixture describes the measured
@@ -965,8 +971,10 @@ Grok annotations. A new control-api also republishes on boot.
    follows automatically through HCC and WRC.
 
 Image input (#784) on a deployment where the Grok flags are already on: roll
-out `grok-llm-proxy` first, then control-api together with the control-plane
-ConfigMap, then the four Host images, and wait until every pod of each runs
+out `grok-llm-proxy` first, together with `codex-llm-proxy` (#784 also changes
+the Codex non-image measurement; see the Codex transport contract, Rollout),
+then control-api together with the control-plane ConfigMap, then the four Host
+images, and wait until every pod of each runs
 the new image before starting the next. With the ConfigMap, restart
 `nginx-workflow-approval-gateway`: it mounts `nginx.conf` through `subPath`,
 so it keeps the old authorize `client_max_body_size` (25165824) until its pods

@@ -646,8 +646,9 @@ function parseTransportHints(raw) {
  * Two size gates run first, before any key, id or payload work:
  *   1. the whole body against this version's ceiling (24 MiB for V2, 8 MiB
  *      otherwise), then
- *   2. for V2 only, the body with every image payload blanked against the V1
- *      ceiling — the images, not the text, are what the larger budget buys.
+ *   2. for V2 only, the body with image data and text parts that repeat
+ *      `content` blanked against the V1 ceiling — the images, not the text,
+ *      are what the larger budget buys.
  * Both are pure measurements, so the projected value and its hash are
  * unaffected by them.
  */
@@ -880,9 +881,11 @@ function hashCodexCompletionRequest(request) {
  * A deployment that lowers that proxy limit below the contract limit is not
  * covered by this measurement.
  *
- * The request inside the envelope already passed the V2 non-image budget, so
- * the V2 headroom here can only be spent by the ticket and the digest the
- * authorizer produced; a caller cannot reach this ceiling with text.
+ * The request inside the envelope already passed the V2 non-image budget,
+ * which does not count text parts that repeat `content`. A request accepted
+ * close to the ceiling can leave less room than the authorize wrapper, the
+ * ticket and the digest need; the Host's authorize-body check or this check
+ * then refuses it.
  */
 function buildCodexProxyEnvelope(input) {
   if (!isPlainObject(input)) return fail('invalid', 'proxy envelope must be an object')

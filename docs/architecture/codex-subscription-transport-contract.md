@@ -56,9 +56,9 @@ HTTP envelope, including base64, history and the signed execution ticket, with
 no allowance on top: the authorize route's JSON parser, the gateway's
 `client_max_body_size` and `buildCodexProxyEnvelope` all hold the whole V2
 envelope to `maxVisualRequestBodyBytes`. The ticket is about 3.5 KB of it. V2 text, tools and other
-non-image fields remain bounded to `maxRequestBodyBytes`, measured with only
-image data blanked in a temporary size projection; the actual request and its
-hash are not modified. The two caps are not additive: a V2 request carrying a
+non-image fields remain bounded to `maxRequestBodyBytes`, measured with image
+data and text parts that repeat `content` blanked in a temporary size
+projection; the actual request and its hash are not modified. The two caps are not additive: a V2 request carrying a
 hard-ceiling image (16 MiB decoded, about 21.3 MiB encoded) has about 2.7 MiB
 left for non-image data before the 24 MiB envelope refuses it.
 The authorizer builds the exact V2 proxy envelope inside its transaction after
@@ -100,8 +100,13 @@ not keep a second model-vision allowlist. To stop all Codex traffic, use the
 existing kill switches (`MCP_HOST_CODEX_SUBSCRIPTION_ENABLED` and
 `CODEX_LLM_PROXY_EXECUTION_ENABLED`). Missing image provenance returns
 `image_source_invalid`. Limit errors, including HTTP 413 without a JSON body,
-remain non-retryable. Images are never silently stripped and do not trigger
-automatic fallback.
+remain non-retryable and do not fail over. Images are never silently stripped.
+Two 503s the proxy gives an image request before redeem are different:
+`visual_gate` (the visual gate is full) and `visual_host_share` (the
+principal's share of it is full) answer `provider_unavailable`, which the Host
+classifies as `LLM_MODEL_OVERLOADED`, retryable, and a Host with a fallback
+provider configured fails over on it. Whether that should stay retryable is
+tracked in #868.
 
 Residual risk. Tool screenshots reach the upstream in a user-role message,
 after the tool messages, behind the fixed text "These images are output of the
@@ -540,9 +545,16 @@ behavior changes:
   It rejects explicit disagreeing pairs with 422
   `subscriptionAnnotationsDisagree`. Broker changes that omit the annotations
   return 422 `providerChangeRequiresGrant`.
-- **Rollout.** Roll out control-api first, and wait until every pod runs the
-  new image. An older control-api rejects the entire workflow-control token
-  issue when HCC or WRC request the unknown `llm:grok:execute` scope.
+- **Rollout.** Roll out `codex-llm-proxy` before control-api and the Host
+  images. #784 stops counting V2 text parts that repeat `content` toward the
+  non-image budget; a proxy from before #784 still counts that text twice. A
+  V2 request with about 4 to 8 MiB of text passes the new Host and control-api
+  and is then refused by the old proxy with 413 `payload_too_large`, after the
+  attempt was authorized (measured: 5 MiB of text and one image measure
+  5.0 MiB on the new side and 10.0 MiB on the old proxy); the user sees
+  "Conversation Too Long". Then roll out control-api, and wait until every pod
+  runs the new image. An older control-api rejects the entire workflow-control
+  token issue when HCC or WRC request the unknown `llm:grok:execute` scope.
 - **Rollback.** Turn the Grok flags off and wait for HCC and WRC to drop
   `llm:grok:execute` before rolling back control-api. While an older
   control-api serves, a reassigned Codex recipe grant updates only

@@ -292,19 +292,20 @@ export declare function stableStringify(value: unknown): string
  * BEFORE parsing: 35 MiB for a document that declares
  * `grok-completion-request.v2`, `maxRequestBodyBytes` (8 MiB) for anything
  * else. Declaring V2 does not raise the budget for text or tool definitions —
- * the parser measures the body with every image payload blanked and keeps that
- * share on the `maxRequestBodyBytes` ceiling.
+ * the parser measures the body with image data and text parts that repeat
+ * `content` blanked, and keeps that share on the `maxRequestBodyBytes` ceiling.
  */
 export declare function requestBodyLimitBytes(request: unknown): number
 /**
- * Byte length of an authorize document after every image payload inside
- * `body.request` is blanked. Wrapper fields stay on the non-image budget
- * even when the nested request declares V2.
+ * Byte length of an authorize document with image data and text parts that
+ * repeat `content` blanked inside `body.request`. Wrapper fields stay on the
+ * non-image budget even when the nested request declares V2.
  */
 export declare function measureNonImageAuthorizeBytes(body: unknown): number
 /**
- * Byte length of a proxy completion document after image payloads inside
- * `body.request` are blanked and `executionTicket` is omitted. The ticket is
+ * Byte length of a proxy completion document with image data and text parts
+ * that repeat `content` blanked inside `body.request`, and `executionTicket`
+ * omitted. The ticket is
  * issued after authorize, so it must not consume the non-image budget
  * that authorize already applied to the pre-ticket wrapper.
  */

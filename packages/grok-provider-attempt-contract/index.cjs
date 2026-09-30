@@ -36,9 +36,12 @@ const LIMITS = Object.freeze({
   maxRequestBodyBytes: MAX_REQUEST_BODY_BYTES,
   // V2 request/envelope ceiling: the whole image budget encoded as base64
   // (27962028 bytes) plus the non-image share, rounded up to a whole MiB,
-  // which gives 36700160 (35 MiB). The rounding leaves more than
-  // ENVELOPE_ALLOWANCE_BYTES of headroom, so a V2 envelope is bounded by this
-  // value as a whole and gets no allowance on top, as in the Codex contract.
+  // which gives 36700160 (35 MiB). A V2 envelope is bounded by this value as
+  // a whole and gets no allowance on top, as in the Codex contract. The
+  // non-image share does not count text parts that repeat `content`, so a V2
+  // body carries up to twice that share in text and can reach this ceiling
+  // with its images inside their budget; the whole-body refusal then reports
+  // it, and no envelope headroom is guaranteed.
   maxVisualRequestBodyBytes:
     Math.ceil((MAX_ENCODED_TOTAL_IMAGE_BYTES + MAX_REQUEST_BODY_BYTES) / MIB) * MIB,
   maxMessages: 1024,
@@ -675,9 +678,11 @@ function parseGrokCompletionRequestRoot(input, schemaVersion, messageKeys) {
   } catch {
     return fail('invalid', 'request is not JSON-serializable')
   }
-  // The non-image check runs first, so a V2 request over the visual ceiling
-  // because of its text is reported as text; only image data can reach the
-  // whole-body message below.
+  // The non-image check runs first. It does not count text parts that repeat
+  // `content`, so a V2 request can pass it and still exceed the visual
+  // ceiling below because its text travels twice (one 16 MiB image plus
+  // 7 MiB of text); that request gets the whole-body message, which the Host
+  // reports as an attachment refusal.
   if (visualSchema && measureNonImageRequestBytes(input) > LIMITS.maxRequestBodyBytes) {
     return fail('limit', 'request exceeds maxRequestBodyBytes outside image data', 'size')
   }
@@ -884,9 +889,11 @@ function hashGrokCompletionRequest(request) {
  * A deployment that lowers that proxy limit below the contract limit is not
  * covered by this measurement.
  *
- * The request inside the envelope already passed the V2 non-image budget, so
- * the V2 headroom here can only be spent by the ticket and the digest the
- * authorizer produced; a caller cannot reach this ceiling with text.
+ * The request inside the envelope already passed the V2 non-image budget,
+ * which does not count text parts that repeat `content`. A request accepted
+ * close to the ceiling can leave less room than the authorize wrapper, the
+ * ticket and the digest need; the Host's authorize-body check or this check
+ * then refuses it.
  */
 function buildGrokProxyEnvelope(input) {
   if (!isPlainObject(input)) return fail('invalid', 'proxy envelope must be an object')

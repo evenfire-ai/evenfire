@@ -1059,6 +1059,31 @@ test('non-image share over maxRequestBodyBytes is refused outside image data', (
   )
 })
 
+// Review R4-L2, case A: text parts that repeat `content` are not counted in
+// the non-image share, so text travelling twice can take a V2 body over the
+// visual ceiling with its image inside the budget. The whole-body message
+// reports it (the Host shows it as an attachment refusal); this pins that
+// labeling, documented in the transport contract.
+test('a V2 body over the visual ceiling because of repeated text gets the whole-body refusal', () => {
+  const image = imagePart(declaredHeaderPngOfSize(16 * MIB).toString('base64'))
+  const request = text => v2WithParts([{ type: 'text', text }, image], text)
+  const over = request('x'.repeat(7 * MIB))
+  // The non-image check runs first, so this message also shows the 7 MiB of
+  // text passed it.
+  assert.ok(
+    Buffer.byteLength(JSON.stringify(over), 'utf8') > contract.LIMITS.maxVisualRequestBodyBytes
+  )
+  assert.deepEqual(contract.parseGrokCompletionRequest(over), {
+    ok: false,
+    code: 'limit',
+    kind: 'size',
+    message: 'request exceeds maxVisualRequestBodyBytes',
+  })
+  // Witness: the same image with less text is accepted.
+  const within = contract.parseGrokCompletionRequest(request('x'.repeat(3 * MIB)))
+  assert.equal(within.ok, true, within.message)
+})
+
 // The non-image check runs before the whole-body check, so text past the
 // visual ceiling is reported as text, not as an attachment over budget. The
 // whole-body message stays reachable only through image data.
