@@ -39,7 +39,7 @@ beforeAll(async () => {
 })
 
 describe('entityChanges:streamStart renderer lifecycle', () => {
-  it('releases subscribers on main-frame reload and permits the new renderer to resubscribe', async () => {
+  it('releases subscribers only after committed main-frame navigation', async () => {
     const sender = Object.assign(new EventEmitter(), { id: 71, send: vi.fn() })
     const event = { sender, senderFrame: { url: 'file:///app/index.html' } }
 
@@ -49,7 +49,13 @@ describe('entityChanges:streamStart renderer lifecycle', () => {
     sender.emit('did-start-navigation', {}, 'file:///app/child', false, false)
     expect(service.stopEntityChangeStreamsForOwner).not.toHaveBeenCalled()
 
-    sender.emit('did-start-navigation', {}, 'file:///app/index.html', false, true)
+    // A navigation may be prevented after it starts; an in-place navigation
+    // also retains the current document and its stream owner.
+    sender.emit('did-start-navigation', {}, 'file:///app/blocked', false, true)
+    sender.emit('did-start-navigation', {}, 'file:///app/index.html#tab', true, true)
+    expect(service.stopEntityChangeStreamsForOwner).not.toHaveBeenCalled()
+
+    sender.emit('did-navigate', {}, 'file:///app/index.html', 200, 'OK')
     expect(service.stopEntityChangeStreamsForOwner).toHaveBeenCalledTimes(1)
     expect(service.stopEntityChangeStreamsForOwner).toHaveBeenCalledWith(71)
 

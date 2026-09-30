@@ -897,20 +897,23 @@ export function registerIpcHandlers(service: AppService): void {
         cleanedUp = true
         service.stopEntityChangeStreamsForOwner(ownerId)
         entityChangeOwnerCleanupRegistered.delete(ownerId)
-        event.sender.removeListener('did-start-navigation', onMainFrameNavigation)
+        event.sender.removeListener('did-navigate', onMainFrameNavigation)
         event.sender.removeListener('render-process-gone', onRendererProcessGone)
         event.sender.removeListener('destroyed', cleanup)
       }
       const onMainFrameNavigation = (
         _navigationEvent: Electron.Event,
         _navigationUrl: string,
-        _isInPlace: boolean,
-        isMainFrame: boolean
+        _httpResponseCode: number,
+        _httpStatusText: string
       ) => {
-        if (isMainFrame) cleanup()
+        cleanup()
       }
       const onRendererProcessGone = (_event: Electron.Event) => cleanup()
-      event.sender.on('did-start-navigation', onMainFrameNavigation)
+      // `did-navigate` is emitted after a committed main-frame navigation.
+      // `did-start-navigation` also fires for cancelled and in-place changes,
+      // which do not replace this renderer's stream owner.
+      event.sender.on('did-navigate', onMainFrameNavigation)
       event.sender.on('render-process-gone', onRendererProcessGone)
       event.sender.once('destroyed', cleanup)
     }
