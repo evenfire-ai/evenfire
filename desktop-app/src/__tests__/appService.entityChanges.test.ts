@@ -29,7 +29,7 @@ function setSyntheticSessionToken(service: object, value: string): void {
 }
 
 describe('AppService entity-change fan-out', () => {
-  it('rebinds the stream through the public Google login session-install path', async () => {
+  it('rebinds a live subscriber after expiry through public Google login', async () => {
     const service = new AppService() as any
     setSyntheticSessionToken(service, 'old-committed-token')
     service.me = null
@@ -38,14 +38,19 @@ describe('AppService entity-change fan-out', () => {
     service.activateGfsAuthScope = vi.fn()
     service.tokenStore = { setSessionToken: vi.fn().mockResolvedValue(undefined) }
     service.rpcTokenManager = { clear: vi.fn() }
-    const opened: Array<{ token: string; cursor: string | null; signal: AbortSignal }> = []
+    const opened: Array<{
+      token: string
+      cursor: string | null
+      onEvent: (event: EntityChangeStreamEvent) => void
+      signal: AbortSignal
+    }> = []
     service.authClient = {
       googleLogin: vi.fn().mockResolvedValue({
         token: 'new-committed-token',
         me: { id: 'user-1', teamId: 'team-1' },
       }),
-      openEntityChangeStream: vi.fn((token, cursor, _onEvent, signal) => {
-        opened.push({ token, cursor, signal })
+      openEntityChangeStream: vi.fn((token, cursor, onEvent, signal) => {
+        opened.push({ token, cursor, onEvent, signal })
         return new Promise<void>(resolve => {
           signal.addEventListener('abort', () => resolve(), { once: true })
         })
@@ -55,6 +60,15 @@ describe('AppService entity-change fan-out', () => {
     service.startEntityChangeStream('stream-1', 7, vi.fn())
     await flushAsyncWork()
     expect(opened[0]?.token).toBe('old-committed-token')
+
+    opened[0]?.onEvent({
+      type: 'stream.closing',
+      schemaVersion: 1,
+      cursor: '00000000-0000-0000-0000-000000000001',
+      reason: 'session_expired',
+    })
+    await flushAsyncWork()
+    expect(service.entityChangeSubscribers.size).toBe(1)
 
     await service.googleLogin('id-token')
     await flushAsyncWork()
@@ -262,6 +276,7 @@ describe('AppService.startEntityChangeStream session expiry', () => {
     expect(events.map(event => event.type)).toEqual(['stream.closing'])
     expect(events[0]).toMatchObject({ reason: 'session_expired' })
     expect(service.authClient.openEntityChangeStream).toHaveBeenCalledOnce()
+    expect(service.entityChangeSubscribers.size).toBe(1)
     service.stopEntityChangeStream('stream-1', 7)
   })
 
@@ -296,7 +311,7 @@ describe('AppService.startEntityChangeStream session expiry', () => {
     }
   })
 
-  it('removes dead subscribers after the server announces session expiry', async () => {
+  it('keeps a dormant renderer owner after expiry until it rebinds or tears down', async () => {
     const service = new AppService() as any
     setSyntheticSessionToken(service, 'session-token')
     service.authClient = {
@@ -319,8 +334,9 @@ describe('AppService.startEntityChangeStream session expiry', () => {
 
     expect(events.map(event => event.type)).toEqual(['open', 'stream.closing'])
     expect(service.authClient.openEntityChangeStream).toHaveBeenCalledOnce()
-    expect(service.entityChangeSubscribers.size).toBe(0)
+    expect(service.entityChangeSubscribers.size).toBe(1)
     service.stopEntityChangeStream('stream-1', 7)
+    expect(service.entityChangeSubscribers.size).toBe(0)
   })
 
   it('rebinds a stale expired connection once to the newer committed session', async () => {
@@ -393,7 +409,8 @@ describe('AppService.startEntityChangeStream session expiry', () => {
     expect(service.entityChangeSubscribers.size).toBe(1)
     releaseTransientHop()
     expect(events.map(event => event.type)).toEqual(['stream.closing'])
-    expect(service.entityChangeSubscribers.size).toBe(0)
+    expect(service.entityChangeSubscribers.size).toBe(1)
+    service.stopEntityChangeStream('stream-1', 7)
   })
 })
 

@@ -2948,7 +2948,10 @@ export class AppService {
       cursor: this.entityChangeCursor ?? '00000000-0000-0000-0000-000000000000',
       reason: 'session_expired',
     })
-    this.entityChangeSubscribers.clear()
+    // Keep renderer-owned subscriptions dormant so a newly committed session
+    // can rebind the stream without requiring a renderer remount. The expired
+    // connection itself is already stopped; logout and renderer teardown remove
+    // these owners through stopAllStreams/stopEntityChangeStreamsForOwner.
   }
 
   private ensureEntityChangeConnection(): void {
