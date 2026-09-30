@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { buildAuthorizeUrl } from '../src/oauth/authorizeUrlHelper.js'
 import {
-  RecipeNotFoundError,
   type RecipeReader,
   type RecipeWithOAuthClients,
   SecretNotFoundError,
