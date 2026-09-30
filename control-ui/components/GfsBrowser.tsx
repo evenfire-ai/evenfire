@@ -53,6 +53,7 @@ import {
   createGfsUploadJob,
   uploadGfsFileLegacy,
 } from '@lib/gfsFileUpload'
+import { resolveGfsHierarchy } from '@lib/gfsHierarchyRevalidation'
 import { gfsImagePreviewMimeType } from '@lib/gfsImagePreview'
 import { GfsLoadArbiter } from '@lib/gfsLoadArbitration'
 import { isGfsMarkdownPreviewFile } from '@lib/gfsMarkdownPreview'
@@ -387,6 +388,7 @@ export function GfsBrowser(): React.JSX.Element {
   const [trailRecovery, setTrailRecovery] = useState<{
     resourceId: string
     gfsUri: string
+    reason: 'move' | 'hierarchy'
   } | null>(null)
   // Monotonic epoch for breadcrumb-reconstruction attempts (R7-M1 race). A
   // reconstruction (a move's rebuild or a Retry) captures the epoch at start
@@ -966,44 +968,21 @@ export function GfsBrowser(): React.JSX.Element {
       const trailEpoch = trailReconstructionEpochRef.current
       const hierarchyRefresh = (async () => {
         const rootCrumb = { ...(crumbsRef.current[0] ?? { id: null, rid: null, name: '/' }) }
-        let refreshed: Crumb[] = [rootCrumb]
-        let retryHierarchy = false
-        try {
-          const resolved = (await apiGet(
-            '/api/v1/gfs/resolve',
-            { uri: `gfs://${DRIVE}/${visibleCrumb.rid ?? ridOfResourceId(visibleResourceId)}` },
-            { signal }
-          )) as GfsResolvedLocation
-          if (resolved.kind !== 'directory' || !resolved.path?.startsWith('/')) {
-            throw new Error('Current GFS folder is no longer available')
-          }
-          let path = ''
-          for (const segment of resolved.path.split('/').filter(Boolean)) {
-            path += `/${segment}`
-            const ancestor = (await apiGet(
+        const hierarchy = await resolveGfsHierarchy({
+          readCurrent: () =>
+            apiGet(
+              '/api/v1/gfs/resolve',
+              { uri: `gfs://${DRIVE}/${visibleCrumb.rid ?? ridOfResourceId(visibleResourceId)}` },
+              { signal }
+            ) as Promise<GfsResolvedLocation>,
+          readAncestor: path =>
+            apiGet(
               '/api/v1/gfs/by-path',
               { drive: DRIVE, path },
               { signal }
-            )) as GfsResolvedLocation
-            if (ancestor.kind !== 'directory') {
-              throw new Error('GFS folder hierarchy changed during refresh')
-            }
-            refreshed.push(folderResourceToCrumb(ancestor))
-          }
-          if (refreshed[refreshed.length - 1]?.id !== resolved.resourceId) {
-            throw new Error('GFS folder hierarchy changed during refresh')
-          }
-        } catch (error) {
-          if (signal.aborted) return
-          // Do not keep presenting the stale hierarchy if the current folder
-          // was deleted, moved during resolution, or is no longer authorized.
-          if (isTransientEntityChangeRefetchError(error)) {
-            retryHierarchy = true
-            scheduleRecovery()
-          } else {
-            refreshed = [rootCrumb]
-          }
-        }
+            ) as Promise<GfsResolvedLocation>,
+          isTransient: isTransientEntityChangeRefetchError,
+        })
         if (
           generation !== hierarchyRefreshGenerationRef.current ||
           signal.aborted ||
@@ -1012,10 +991,31 @@ export function GfsBrowser(): React.JSX.Element {
         ) {
           return
         }
-        if (!retryHierarchy) {
-          if (!sameCrumbTrail(crumbsRef.current, refreshed)) setCrumbs(refreshed)
+        if (hierarchy.kind === 'missing') {
+          // Only denial of the stable-ID current-folder resolve is authority
+          // to leave this location. A failed ancestor lookup is not revocation.
+          setCrumbs([rootCrumb])
           setTrailRecovery(null)
+          return
         }
+        if (hierarchy.kind === 'retry' || hierarchy.kind === 'preserve') {
+          setTrailRecovery(previous =>
+            previous?.resourceId === visibleResourceId && previous.reason === 'hierarchy'
+              ? previous
+              : {
+                  resourceId: visibleResourceId,
+                  gfsUri:
+                    visibleCrumb.gfsUri ??
+                    `gfs://${DRIVE}/${visibleCrumb.rid ?? ridOfResourceId(visibleResourceId)}`,
+                  reason: 'hierarchy',
+                }
+          )
+          if (hierarchy.kind === 'retry') scheduleRecovery()
+          return
+        }
+        const refreshed = [rootCrumb, ...hierarchy.ancestors.map(folderResourceToCrumb)]
+        if (!sameCrumbTrail(crumbsRef.current, refreshed)) setCrumbs(refreshed)
+        setTrailRecovery(null)
       })()
       revalidationTasks.push(hierarchyRefresh)
       await Promise.all(revalidationTasks)
@@ -1350,7 +1350,7 @@ export function GfsBrowser(): React.JSX.Element {
           // reconstruction succeeds. ('applied' clears any older notice for
           // this resource inside the rebuild; 'superseded' leaves state to
           // the newer attempt that displaced this one.)
-          setTrailRecovery({ resourceId: source.resourceId, gfsUri: source.gfsUri })
+          setTrailRecovery({ resourceId: source.resourceId, gfsUri: source.gfsUri, reason: 'move' })
         }
         return
       }
@@ -2054,14 +2054,25 @@ export function GfsBrowser(): React.JSX.Element {
 
         {trailRecovery ? (
           <div className="cu-banner cu-banner--warning cu-banner--dismissible" role="alert">
-            <span>
-              &ldquo;
-              {crumbs.find(crumb => crumb.id === trailRecovery.resourceId)?.name ??
-                trailRecovery.resourceId}
-              &rdquo; moved, but its folder path could not be refreshed — the breadcrumb may not
-              show the real location.
-            </span>
-            <Button size="sm" onClick={() => void retryTrailRecovery()}>
+            {trailRecovery.reason === 'move' ? (
+              <span>
+                &ldquo;
+                {crumbs.find(crumb => crumb.id === trailRecovery.resourceId)?.name ??
+                  trailRecovery.resourceId}
+                &rdquo; moved, but its folder path could not be refreshed — the breadcrumb may not
+                show the real location.
+              </span>
+            ) : (
+              <span>
+                The current folder path could not be refreshed. Your current location is still
+                shown.
+              </span>
+            )}
+            <Button
+              size="sm"
+              onClick={() => void retryTrailRecovery()}
+              aria-label={trailRecovery.reason === 'hierarchy' ? 'Retry folder path' : undefined}
+            >
               Retry
             </Button>
           </div>

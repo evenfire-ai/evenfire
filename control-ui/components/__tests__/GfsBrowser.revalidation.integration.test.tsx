@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { EventEmitter } from 'node:events'
 import {
   closeActiveEntityChangeStreams,
@@ -390,6 +390,97 @@ describe('GfsBrowser authoritative revalidation integration', () => {
     expect(screen.getByRole('button', { name: 'existing.txt' })).toBeVisible()
     await screen.findByText('remote-folder', {}, { timeout: 2_000 })
     expect(rootChildReads).toBe(3)
+    expect(screen.getByRole('button', { name: 'existing.txt' })).toBeVisible()
+  })
+
+  it('preserves the complete folder trail when an ancestor lookup fails', async () => {
+    const work = child('folder-1', 'rid-folder-1', 'work', 'directory')
+    const existingFile = child('file-1', 'rid-file-1', 'existing.txt', 'file')
+    let byPathReads = 0
+    let streamController: ReadableStreamDefaultController<Uint8Array> | null = null
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input), 'http://control-ui.test')
+        if (url.pathname.endsWith('/api/v1/gfs/entity-changes/stream')) {
+          return new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                streamController = controller
+                init?.signal?.addEventListener('abort', () => controller.close(), { once: true })
+              },
+            }),
+            { status: 200, headers: { 'content-type': 'application/x-ndjson' } }
+          )
+        }
+        if (url.pathname.endsWith('/api/v1/gfs/tree')) {
+          return jsonResponse({ rootResourceId: 'root-1', items: [work], nextCursor: null })
+        }
+        if (url.pathname.endsWith('/api/v1/gfs/resources/root-1/children')) {
+          return jsonResponse({ items: [work], nextCursor: null })
+        }
+        if (url.pathname.endsWith('/api/v1/gfs/resources/folder-1/children')) {
+          return jsonResponse({ items: [existingFile], nextCursor: null })
+        }
+        if (url.pathname.endsWith('/api/v1/gfs/resolve')) {
+          return jsonResponse({
+            resourceId: work.resourceId,
+            rid: work.rid,
+            gfsUri: work.gfsUri,
+            name: work.name,
+            kind: 'directory',
+            path: '/work',
+            version: work.version,
+          })
+        }
+        if (url.pathname.endsWith('/api/v1/gfs/by-path')) {
+          byPathReads += 1
+          if (byPathReads === 1)
+            return new Response('ancestor temporarily unavailable', { status: 409 })
+          return jsonResponse({
+            resourceId: work.resourceId,
+            rid: work.rid,
+            gfsUri: work.gfsUri,
+            name: work.name,
+            kind: 'directory',
+            path: '/work',
+            version: work.version,
+          })
+        }
+        return jsonResponse({ items: [], nextCursor: null })
+      })
+    )
+
+    render(
+      <ToastProvider>
+        <GfsBrowser />
+      </ToastProvider>
+    )
+    await waitFor(() => expect(streamController).not.toBeNull())
+    await screen.findByRole('button', { name: 'work' })
+    fireEvent.click(screen.getByRole('button', { name: 'work' }))
+    await screen.findByRole('button', { name: 'existing.txt' })
+
+    await act(async () => {
+      streamController!.enqueue(new TextEncoder().encode(`${await controlApiProducerFrame()}\n`))
+    })
+
+    await waitFor(() => expect(byPathReads).toBe(1))
+    const breadcrumb = screen.getByRole('navigation', { name: 'Breadcrumb' })
+    await waitFor(() =>
+      expect(within(breadcrumb).getByRole('button', { name: 'work' })).toHaveAttribute(
+        'aria-current',
+        'page'
+      )
+    )
+    expect(screen.getByRole('button', { name: 'existing.txt' })).toBeVisible()
+    expect(screen.getByRole('alert')).toHaveTextContent('could not be refreshed')
+    fireEvent.click(screen.getByRole('button', { name: 'Retry folder path' }))
+    await waitFor(() => expect(screen.queryByRole('alert')).toBeNull())
+    expect(within(breadcrumb).getByRole('button', { name: 'work' })).toHaveAttribute(
+      'aria-current',
+      'page'
+    )
     expect(screen.getByRole('button', { name: 'existing.txt' })).toBeVisible()
   })
 })
