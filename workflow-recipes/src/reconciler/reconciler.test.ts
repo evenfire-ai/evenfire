@@ -17,8 +17,12 @@ import {
 import { INHERITED_PARENT_RESOURCES_ANNOTATION } from '../workflow/childRecipeFactory'
 import type { CodexExecutionProjection } from '../workflow/codexExecutionProjection'
 import { buildCoordinatorGfsNetworkPolicy } from '../workflow/networkPolicyFactory'
+import type { WorkflowNetworkPolicyApplySummary } from '../workflow/pluginWorkloadSdkProvisioner'
 import { deriveWorkflowRuntimePlan } from '../workflow/runtimePlan'
-import { WorkflowReconciler } from '../workflow/workflowReconciler'
+import {
+  WorkflowReconciler,
+  translateNetworkPolicyApplySummary,
+} from '../workflow/workflowReconciler'
 import { captureLogger } from './__tests__/captureLogger'
 import { defaultFqdnLookup } from './fqdnResolver'
 import { isRetryableInfraError } from './k8sErrors'
@@ -15964,56 +15968,58 @@ describe('WorkflowRecipeReconciler', () => {
     })
   })
 
+  function ineligibleProjection(): CodexExecutionProjection {
+    return {
+      targets: [],
+      eligibleTargets: [],
+      derivedScopes: [],
+      requiresCodexProxyEgress: false,
+      driftHashInput: '',
+      catalogContentHash: null,
+      catalogRevision: null,
+      connectionRevision: null,
+      eligibility: 'ineligible',
+      reason: 'static_only',
+    }
+  }
+
+  // Replaces the WRC's inner reconciler with a real WorkflowReconciler wired
+  // to the shared API mocks.
+  function installRealInner(): WorkflowReconciler {
+    const inner = new WorkflowReconciler({
+      coreApi: mockCoreApi,
+      customApi: mockCustomApi,
+      networkingApi: mockNetworkingApi,
+      config: {
+        coordinatorImage: 'coordinator:test',
+        mcpHostImage: 'mcp-host:test',
+        wrcEndpoint: 'http://wrc.example/api',
+        sandboxNamespace: 'sandbox-recipes',
+        mcpServerNamespace: 'mcp-server',
+        imagePullPolicy: 'IfNotPresent',
+        maxWorkflowSteps: 100,
+        runtimeTokenTtlSeconds: 3600,
+        runtimeTokenRefreshBeforeSeconds: 300,
+      },
+      tokenFactory: {
+        signWrcArtifactDeleteToken: vi.fn().mockResolvedValue('t'),
+        signCoordinatorToMcpHostToken: vi.fn().mockResolvedValue('t'),
+        signCustomCoordinatorToWrcToken: vi.fn().mockResolvedValue('t'),
+        signCoordinatorToWrcToken: vi.fn().mockResolvedValue('t'),
+      },
+      pluginWorkloadSdkRevocationClient: {
+        revoke: vi.fn().mockResolvedValue({ state: 'missing', revoked: 0, fencedInvocations: 0 }),
+        finalize: vi.fn(),
+      },
+    } as never)
+    ;(reconciler as unknown as { workflowReconciler: WorkflowReconciler }).workflowReconciler =
+      inner
+    return inner
+  }
+
   describe('G2 skipStatusPatch must not leave GFS deleted', () => {
     const RECIPE = 'g2-recipe'
     const GFS = `${RECIPE}-coordinator-to-gfs`
-
-    function ineligibleProjection(): CodexExecutionProjection {
-      return {
-        targets: [],
-        eligibleTargets: [],
-        derivedScopes: [],
-        requiresCodexProxyEgress: false,
-        driftHashInput: '',
-        catalogContentHash: null,
-        catalogRevision: null,
-        connectionRevision: null,
-        eligibility: 'ineligible',
-        reason: 'static_only',
-      }
-    }
-
-    function installRealInner(): WorkflowReconciler {
-      const inner = new WorkflowReconciler({
-        coreApi: mockCoreApi,
-        customApi: mockCustomApi,
-        networkingApi: mockNetworkingApi,
-        config: {
-          coordinatorImage: 'coordinator:test',
-          mcpHostImage: 'mcp-host:test',
-          wrcEndpoint: 'http://wrc.example/api',
-          sandboxNamespace: 'sandbox-recipes',
-          mcpServerNamespace: 'mcp-server',
-          imagePullPolicy: 'IfNotPresent',
-          maxWorkflowSteps: 100,
-          runtimeTokenTtlSeconds: 3600,
-          runtimeTokenRefreshBeforeSeconds: 300,
-        },
-        tokenFactory: {
-          signWrcArtifactDeleteToken: vi.fn().mockResolvedValue('t'),
-          signCoordinatorToMcpHostToken: vi.fn().mockResolvedValue('t'),
-          signCustomCoordinatorToWrcToken: vi.fn().mockResolvedValue('t'),
-          signCoordinatorToWrcToken: vi.fn().mockResolvedValue('t'),
-        },
-        pluginWorkloadSdkRevocationClient: {
-          revoke: vi.fn().mockResolvedValue({ state: 'missing', revoked: 0, fencedInvocations: 0 }),
-          finalize: vi.fn(),
-        },
-      } as never)
-      ;(reconciler as unknown as { workflowReconciler: WorkflowReconciler }).workflowReconciler =
-        inner
-      return inner
-    }
 
     it('inner apply does not delete reserved GFS and outer skips ensure on skipStatusPatch', async () => {
       mockNetworkingApi.listNamespacedNetworkPolicy.mockResolvedValue({
@@ -16149,6 +16155,220 @@ describe('WorkflowRecipeReconciler', () => {
           expect.objectContaining({ name })
         )
       }
+    })
+  })
+
+  // A reconcile() prune whose DELETE did not land publishes
+  // WorkflowNetworkPoliciesConverged=False/PrunePending. That fact is not a
+  // pending retry: the mid-run retry prunes nothing, so the short-circuits
+  // must not reapply for it, and the terminal branch must keep it, because
+  // the terminal teardown removes pods, not run-lane policies. The finalizer
+  // sweep by recipe label is what removes the leftover.
+  describe('run-lane NetworkPolicy prune-pending across a run-scoped run', () => {
+    const RECIPE = 'pp-recipe'
+    const RUN_ID = 'run-pp'
+    const GFS = `${RECIPE}-coordinator-to-gfs`
+    const LEFTOVER = `${RECIPE}-mcp-host-to-grok-proxy`
+    const WRC_LABELS = { 'clerum.io/recipe': RECIPE, 'clerum.io/managed-by': 'wrc' }
+    const MARKER_TYPE = 'WorkflowNetworkPoliciesConverged'
+
+    function runScopedRecipe(status: Record<string, unknown>): WorkflowRecipeCRD {
+      return makeRecipe({
+        metadata: {
+          name: RECIPE,
+          namespace: 'sandbox-recipes',
+          uid: 'uid-pp',
+          labels: { 'clerum.io/workflow-run-id': RUN_ID },
+        },
+        spec: {
+          agent: { provider: 'openai', model: 'gpt-4o' },
+          steps: [{ id: 'research', instruction: 'run' }],
+        },
+        status: status as WorkflowRecipeCRD['status'],
+      })
+    }
+
+    function markers(conditions: StatusCondition[] | undefined): StatusCondition[] {
+      return (conditions ?? []).filter(c => c.type === MARKER_TYPE)
+    }
+
+    function deletedPolicyNames(): string[] {
+      return mockNetworkingApi.deleteNamespacedNetworkPolicy.mock.calls.map(
+        ([arg]) => (arg as { name: string }).name
+      )
+    }
+
+    // The WRC first-deploy pass with the real inner apply and prune. The
+    // leftover is live under the recipe's labels and its DELETE answers 403.
+    // The inner reconcile() is reduced to the NetworkPolicy step: the real
+    // apply-and-prune, translated against the published conditions exactly as
+    // reconcile() does.
+    async function failedPrunePass(inner: WorkflowReconciler) {
+      mockNetworkingApi.listNamespacedNetworkPolicy.mockResolvedValue({
+        items: [{ metadata: { name: LEFTOVER, namespace: 'sandbox-recipes', labels: WRC_LABELS } }],
+      })
+      mockNetworkingApi.deleteNamespacedNetworkPolicy.mockImplementation(
+        async ({ name }: { name: string }) => {
+          if (name === LEFTOVER) throw { code: 403, message: 'forbidden' }
+          return {}
+        }
+      )
+      const apply = (
+        inner as unknown as {
+          applyWorkflowNetworkPolicies: (
+            ...args: unknown[]
+          ) => Promise<WorkflowNetworkPolicyApplySummary>
+        }
+      ).applyWorkflowNetworkPolicies.bind(inner)
+      vi.spyOn(inner, 'reconcile').mockImplementation(
+        async (recipeName, recipeUid, _ns, spec, currentStatus) => {
+          const runtime = deriveWorkflowRuntimePlan(spec as never, {
+            recipeName: String(recipeName),
+            runtimeScopeRecipeName: String(recipeName),
+            workflowRunId: RUN_ID,
+          })
+          const projection = ineligibleProjection()
+          const summary = await apply(
+            recipeName,
+            recipeUid,
+            spec,
+            runtime,
+            false,
+            projection,
+            false,
+            {
+              ...projection,
+              requiresGrokProxyEgress: false,
+            }
+          )
+          return {
+            phase: 'active',
+            message: 'Workflow running',
+            workflowPhase: 'running',
+            ...translateNetworkPolicyApplySummary(
+              summary,
+              currentStatus?.conditions,
+              new Date().toISOString()
+            ),
+          }
+        }
+      )
+
+      const result = await reconciler.reconcile(runScopedRecipe({ phase: 'pending' }))
+      // Liveness witness: the prune reached the leftover's DELETE.
+      expect(deletedPolicyNames()).toContain(LEFTOVER)
+      mockNetworkingApi.deleteNamespacedNetworkPolicy.mockClear()
+      mockNetworkingApi.deleteNamespacedNetworkPolicy.mockImplementation(async () => ({}))
+      return result
+    }
+
+    it('publishes PrunePending from a reconcile() prune that could not delete, with no requeue', async () => {
+      const inner = installRealInner()
+
+      const result = await failedPrunePass(inner)
+
+      expect(markers(result.networkPolicyOwnershipConditions)).toMatchObject([
+        { status: 'False', reason: 'PrunePending' },
+      ])
+      expect(result.requeueAfterMs).toBeUndefined()
+    })
+
+    it('does not reapply from the in-progress short-circuit for a pending prune', async () => {
+      const inner = installRealInner()
+      const published = (await failedPrunePass(inner)).networkPolicyOwnershipConditions
+      const ensureCredentials = vi
+        .spyOn(inner, 'ensureMcpHostRuntimeCredentials')
+        .mockResolvedValue(undefined)
+      vi.spyOn(inner, 'refreshRuntimeHttpEgressNetworkPolicies').mockResolvedValue({
+        conflicts: [],
+        retryPending: false,
+      })
+      const retry = vi.spyOn(inner, 'retryRunLaneNetworkPolicies')
+      mockCustomApi.patchNamespacedCustomObjectStatus.mockClear()
+      const recipe = runScopedRecipe({
+        phase: 'deploying',
+        message: 'Workflow running',
+        workflowExecution: { phase: 'running' },
+        conditions: published,
+      })
+
+      const result = await reconciler.reconcile(recipe)
+
+      // Witness: the in-progress short-circuit ran.
+      expect(ensureCredentials).toHaveBeenCalled()
+      expect(result.message).toBe('Workflow running')
+      expect(retry).not.toHaveBeenCalled()
+      expect(result.requeueAfterMs).toBeUndefined()
+      expect(markers(recipe.status?.conditions)).toMatchObject([
+        { status: 'False', reason: 'PrunePending' },
+      ])
+    })
+
+    it('keeps the PrunePending marker through the terminal teardown, which deletes no run-lane policy', async () => {
+      const inner = installRealInner()
+      const published = (await failedPrunePass(inner)).networkPolicyOwnershipConditions
+      vi.spyOn(inner, 'ensureMcpHostRuntimeCredentials').mockResolvedValue(undefined)
+      vi.spyOn(inner, 'refreshRuntimeHttpEgressNetworkPolicies').mockResolvedValue({
+        conflicts: [],
+        retryPending: false,
+      })
+      const teardown = vi.spyOn(inner, 'teardownComputePodsForTerminalRun').mockResolvedValue()
+      const retry = vi.spyOn(inner, 'retryRunLaneNetworkPolicies')
+      mockCustomApi.patchNamespacedCustomObjectStatus.mockClear()
+      const recipe = runScopedRecipe({
+        phase: 'active',
+        message: 'Workflow completed',
+        workflowExecution: { phase: 'completed' },
+        conditions: published,
+      })
+
+      await reconciler.reconcile(recipe)
+
+      // Witness: the terminal branch tore the run's compute down.
+      expect(teardown).toHaveBeenCalledWith(RECIPE)
+      expect(retry).not.toHaveBeenCalled()
+      expect(deletedPolicyNames().filter(name => name !== GFS)).toEqual([])
+      expect(markers(recipe.status?.conditions)).toMatchObject([
+        { status: 'False', reason: 'PrunePending' },
+      ])
+    })
+
+    it('removes the leftover from the finalizer sweep', async () => {
+      const inner = installRealInner()
+      await failedPrunePass(inner)
+      // Only the finalizer's own calls are asserted below.
+      mockNetworkingApi.listNamespacedNetworkPolicy.mockClear()
+      mockNetworkingApi.deleteNamespacedNetworkPolicy.mockClear()
+      mockNetworkingApi.listNamespacedNetworkPolicy.mockResolvedValue({
+        items: [{ metadata: { name: LEFTOVER, namespace: 'sandbox-recipes', labels: WRC_LABELS } }],
+      })
+
+      // The shared core mock has no single-Pod DELETE; the finalizer deletes
+      // the run's pods one by one before it answers.
+      const coreApi = mockCoreApi as unknown as Record<string, unknown>
+      const deletePod = vi.fn().mockResolvedValue({})
+      coreApi.deleteNamespacedPod = deletePod
+      try {
+        await reconciler.reconcileDelete(
+          runScopedRecipe({ phase: 'active', workflowExecution: { phase: 'completed' } })
+        )
+      } finally {
+        delete coreApi.deleteNamespacedPod
+      }
+
+      // Witness: the finalizer ran the workflow cleanup.
+      expect(deletePod).toHaveBeenCalledWith({
+        name: `${RECIPE}-coordinator`,
+        namespace: 'sandbox-recipes',
+      })
+      expect(mockNetworkingApi.listNamespacedNetworkPolicy).toHaveBeenCalledWith({
+        namespace: 'sandbox-recipes',
+        labelSelector: `clerum.io/recipe=${RECIPE},clerum.io/managed-by=wrc`,
+      })
+      expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith({
+        name: LEFTOVER,
+        namespace: 'sandbox-recipes',
+      })
     })
   })
 
