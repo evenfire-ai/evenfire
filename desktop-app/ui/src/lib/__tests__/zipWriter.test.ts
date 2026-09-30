@@ -111,4 +111,36 @@ describe('createZipWriter', () => {
     expect(archive.length).toBe(22)
     expect(readStoredZip(archive)).toEqual([])
   })
+
+  it('emits exactly the declared structure — no slack, no assembly copy (M2)', () => {
+    const writer = createZipWriter()
+    const a = textBytes('first-entry')
+    const b = textBytes('b')
+    writer.addFile('root/a.txt', a)
+    writer.addFile('root/nested/b.bin', b)
+
+    const archive = writer.build()
+    // 30+name+size local records, 46+name central records, 22-byte EOCD.
+    const expected =
+      30 +
+      'root/a.txt'.length +
+      a.length +
+      (30 + 'root/nested/b.bin'.length + b.length) +
+      (46 + 'root/a.txt'.length) +
+      (46 + 'root/nested/b.bin'.length) +
+      22
+    expect(archive.length).toBe(expected)
+  })
+
+  it('accepts a caller-provided capacity and keeps the same bytes', () => {
+    const payload = textBytes('pre-sized payload')
+    const writer = createZipWriter({ initialCapacityBytes: 1 })
+    writer.addFile('docs/plan.md', payload)
+
+    const archive = writer.build()
+    expect(archive.length).toBe(
+      30 + 'docs/plan.md'.length + payload.length + 46 + 'docs/plan.md'.length + 22
+    )
+    expect(readStoredZip(archive)).toEqual([{ name: 'docs/plan.md', bytes: payload }])
+  })
 })

@@ -192,7 +192,6 @@ export async function createGfsFolderZip(
     }
   }
 
-  const writer = createZipWriter()
   const skipped: GfsZipSkippedEntry[] = []
   const files: Array<{ uri: string; path: string }> = []
   const rootName = sanitizeZipSegment(folder.name)
@@ -201,7 +200,6 @@ export async function createGfsFolderZip(
   ]
   const visitedFolders = new Set<string>()
   let plannedBytes = 0
-
   // ── Phase 1: recursive listing (breadth-first, cursor-paginated). ──
   report({ phase: 'listing', filesFound: 0, filesAdded: 0, currentPath: rootName })
   while (queue.length) {
@@ -244,7 +242,9 @@ export async function createGfsFolderZip(
         // Older servers omit `bytes`; a missing value must read as 0, not
         // NaN — NaN would poison `plannedBytes` and silently disable the
         // size guard for the rest of the walk (M1).
-        plannedBytes += Number.isFinite(child.bytes) ? child.bytes : 0
+        const childBytes =
+          typeof child.bytes === 'number' && Number.isFinite(child.bytes) ? child.bytes : 0
+        plannedBytes += childBytes
         if (plannedBytes > maxTotalBytes) {
           throw new GfsFolderZipLimitError(
             `"${folder.name}" exceeds the ${formatZipBytes(maxTotalBytes)} folder-zip limit. Download smaller subfolders individually.`
@@ -266,6 +266,16 @@ export async function createGfsFolderZip(
   // saving an empty zip (L8). Any skips are carried on the error so the caller
   // can still explain why nothing was archivable.
   if (files.length === 0) throw new GfsFolderZipEmptyError(folder.name, skipped)
+
+  // Pre-size the single archive buffer (M2): local header (30) + payload +
+  // central record (46), each carrying the UTF-8 name, plus the 22-byte EOCD.
+  // With server-provided sizes this allocates once; without them the writer
+  // falls back to doubling.
+  const nameEncoder = new TextEncoder()
+  const estimatedArchiveBytes =
+    plannedBytes +
+    files.reduce((sum, file) => sum + 76 + 2 * nameEncoder.encode(file.path).length, 22)
+  const writer = createZipWriter({ initialCapacityBytes: estimatedArchiveBytes })
 
   // ── Phase 2: throttled downloads, skipping per-resource denials. ──
   let addedBytes = 0
