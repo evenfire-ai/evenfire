@@ -1936,6 +1936,10 @@ export class HostReconciler {
           (deployment.spec?.replicas ?? 1) === 0 &&
           HostReconciler.deploymentRuntimeTokenRevision(deployment) !== ''
         if (options.refreshGfsOnly) {
+          // This path renews only GFS material and deliberately does not observe
+          // OAuth. Narrowing OAuth needs a runtime mint and rollout during the
+          // hold, which would break Ready-runtime continuity. The authoritative
+          // runtime-token pass narrows the scope via contract_changed after CC recovery.
           const trustedDeployment =
             HostReconciler.deploymentBelongsToHost(deployment, host) &&
             (deployment?.spec?.replicas ?? 0) > 0
