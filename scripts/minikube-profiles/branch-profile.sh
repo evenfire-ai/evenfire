@@ -693,14 +693,18 @@ require_local_context_endpoint() {
     die "BRANCH_PROFILE_REMOTE_CONTEXT: kube context ${PROFILE} points at a non-local API server ($(kube_endpoint_host "${server}")); refusing to run minikube or kubectl against it. That context may belong to a cluster in use: stop and ask before renaming or removing it"
 }
 
-# stop and delete address a profile that may not answer, so the node identity
-# check below cannot run for them. A local endpoint alone admits another local
-# cluster, or one on a private address, whose context carries the profile's
-# name, and `minikube -p <p> delete` for a profile minikube does not know
-# removes that context. So when a context named after the profile exists,
-# minikube must list the profile (valid or invalid) before either runs. An
+# A local endpoint alone admits another local cluster, or one on a private
+# address, whose context carries the profile's name. For a profile minikube
+# does not know, `minikube -p <p> delete` removes that context and
+# `minikube start -p <p>` creates the profile and rewrites it. The node
+# identity check below cannot guard these: stop and delete address a profile
+# that may not answer, start only reaches it after minikube start, and setup
+# hands the profile to full-setup.sh. So when a context named after the
+# profile exists, minikube must list the profile (valid or invalid) before
+# start, setup, stop or delete touch Docker, the profile state or minikube. An
 # unreadable profile list is a refusal, never an empty one. A missing context
-# is allowed for the reason given above require_local_context_endpoint.
+# is allowed for the reason given above require_local_context_endpoint: a
+# brand-new profile has none, and start creates it.
 require_context_profile_known_to_minikube() {
   load_context_identity
   local server profiles status=0
@@ -1024,6 +1028,7 @@ ensure_shims() {
 cmd_start() {
   require_command git minikube kubectl helm shasum
   require_local_context_endpoint
+  require_context_profile_known_to_minikube
   check_docker_ready
   check_all_ports_free
   persist_state
@@ -1344,6 +1349,7 @@ cmd_setup() {
   require_existing_profile
   require_profile_confirmation setup
   require_local_context_endpoint
+  require_context_profile_known_to_minikube
   check_docker_ready
   persist_state
   ensure_shims
