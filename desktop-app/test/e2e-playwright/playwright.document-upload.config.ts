@@ -43,8 +43,9 @@ const recorderRoot = process.env.QA_RECORDER_ROOT
 export default defineConfig({
   testDir: '.',
   testMatch: /qa-recorder-document-upload\.spec\.ts/,
-  // One real Electron launch, one sign-in and one chat with two provider turns.
-  timeout: 300_000,
+  // One real Electron launch, one sign-in and two chats (a small document and a
+  // 6 MiB one), each with two provider turns.
+  timeout: 480_000,
   expect: { timeout: 30_000 },
   retries: 0,
   workers: 1,

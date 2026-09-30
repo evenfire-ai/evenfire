@@ -118,7 +118,9 @@ describe('useComposerAttachments — documents (#678)', () => {
 
     const [failed] = result.current.composerFileAttachments
     expect(failed?.status).toBe('failed')
-    expect(failed?.status === 'failed' && failed.error).toMatch(/^huge\.bin is .* at most 3\.0 MiB/)
+    expect(failed?.status === 'failed' && failed.error).toMatch(
+      /^huge\.bin is .* at most 11\.0 MiB/
+    )
     // Witness for "never reads it": the chip exists, and the reader was not called.
     expect(read).not.toHaveBeenCalled()
   })

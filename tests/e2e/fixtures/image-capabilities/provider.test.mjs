@@ -717,12 +717,15 @@ const readToolDefinition = {
   },
 }
 
-function documentUserMessage(text = 'Summarize the attached file.') {
+function documentUserMessage(
+  text = 'Summarize the attached file.',
+  { bytesField = 'bytes=34' } = {}
+) {
   return {
     role: 'user',
     content:
       '<turn-context>\ndate: 2026-09-29\n' +
-      `attached_file: id="${ATTACHMENT_ID}" name="notes.txt" class=text bytes=34 reader=text\n` +
+      `attached_file: id="${ATTACHMENT_ID}" name="notes.txt" class=text ${bytesField} reader=text\n` +
       "If the user's request refers to an attached file, read it with clerum__attachment_read before answering.\n" +
       `</turn-context>\n\n${text}`,
   }
@@ -784,8 +787,63 @@ test('document turn 1: asks for the text with a tool call and carries no file co
       imageSha256: null,
       responseKind: 'document-read-requested',
       documentSha256: null,
+      documentByteLength: Buffer.byteLength(DOCUMENT_TEXT),
     },
   ])
+})
+
+test('document turn 1: the read row records the byte length the Host listed, not a constant', async () => {
+  const lengths = []
+  for (const bytes of [34, 6_291_456]) {
+    const h = harness()
+    const response = await call(
+      h,
+      chatBody(VISUAL_MODEL, [documentUserMessage(undefined, { bytesField: `bytes=${bytes}` })], {
+        tools: [readToolDefinition],
+      })
+    )
+    assert.equal(response.status, 200)
+    const [row] = h.getEvidence().attempts
+    assert.equal(row.responseKind, 'document-read-requested')
+    lengths.push(row.documentByteLength)
+  }
+  assert.deepEqual(lengths, [34, 6_291_456])
+})
+
+test('document turn 1: an attached_file line without a usable bytes= is refused, not read', async () => {
+  // Liveness witness: the same message with a well-formed field is read.
+  const twin = harness()
+  const twinResponse = await call(
+    twin,
+    chatBody(VISUAL_MODEL, [documentUserMessage()], { tools: [readToolDefinition] })
+  )
+  assert.equal(twinResponse.status, 200)
+  assert.equal(twin.getEvidence().counters.documentReadRequests, 1)
+
+  for (const bytesField of [
+    'size=34',
+    'bytes=',
+    'bytes=abc',
+    'bytes=34x',
+    'bytes=1.5',
+    'bytes=-1',
+    'bytes=0',
+    'bytes=034',
+  ]) {
+    const h = harness()
+    const response = await call(
+      h,
+      chatBody(VISUAL_MODEL, [documentUserMessage(undefined, { bytesField })], {
+        tools: [readToolDefinition],
+      })
+    )
+    assert.equal(response.status, 400, bytesField)
+    const evidence = h.getEvidence()
+    assert.equal(evidence.counters.documentFailures, 1, bytesField)
+    assert.equal(evidence.counters.documentReadRequests, 0, bytesField)
+    assert.equal(evidence.attempts[0].responseKind, 'rejected', bytesField)
+    assert.equal((await response.json()).error.code, 'document-byte-length-malformed', bytesField)
+  }
 })
 
 test('document turn 2: the answer is a digest of the delivered text and the ledger records it', async () => {

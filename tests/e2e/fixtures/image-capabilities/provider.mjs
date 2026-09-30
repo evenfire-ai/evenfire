@@ -350,7 +350,17 @@ const DOCUMENT_ANSWER_PREFIX = 'DOCUMENT_FIXTURE_SHA256:'
 const DOCUMENT_ANSWER_DIGEST_CHARS = 16
 
 /** The `attached_file` line the Host writes into the turn-context block. */
-const ATTACHED_FILE_LINE = /^attached_file: id="([^"\n]+)"/m
+const ATTACHED_FILE_LINE = /^attached_file: id="([^"\n]+)"[^\n]*$/m
+
+/**
+ * The trailing fields of that line (`turnContext.ts`): the byte length the Host
+ * verified, then the reader. Anchored to the end of the line, so a file name
+ * that contains the same text cannot supply the value.
+ */
+const ATTACHED_FILE_BYTES = / bytes=(\S*) reader=\S+$/
+
+/** A positive decimal integer without leading zeros. */
+const POSITIVE_DECIMAL = /^[1-9][0-9]*$/
 
 /** The wrapper the Host puts around a tool result (`BasicSafety.wrapForLlm`). */
 const ATTACHMENT_TOOL_OUTPUT = new RegExp(
@@ -373,12 +383,25 @@ function lastUserIndex(messages) {
   return -1
 }
 
+/** The byte length the Host listed for the attached file; anything else is refused. */
+function attachedFileByteLength(line) {
+  const field = ATTACHED_FILE_BYTES.exec(line)
+  const value = field?.[1]
+  if (value === undefined || !POSITIVE_DECIMAL.test(value) || !Number.isSafeInteger(Number(value)))
+    throw new FixtureDocumentError(
+      'document-byte-length-malformed',
+      'the attached_file line does not carry a positive bytes= value'
+    )
+  return Number(value)
+}
+
 /**
  * Classifies the request as one of the two turns of an attachment read.
  *
  * - `null`: not a document turn (no `attached_file` line, or the read tool is not offered).
- * - `{ stage: 'read', attachmentId }`: the user message lists a readable file and no tool
- *   result follows it yet, so the model has to ask for the text.
+ * - `{ stage: 'read', attachmentId, byteLength }`: the user message lists a readable file
+ *   and no tool result follows it yet, so the model has to ask for the text. `byteLength`
+ *   is the size the Host listed for the file.
  * - `{ stage: 'answer', text }`: a `role:'tool'` message after the last user message carries
  *   the wrapped tool result, so the model can answer from what was delivered.
  *
@@ -399,7 +422,12 @@ function classifyDocumentTurn(body) {
   const toolMessages = body.messages
     .slice(userIndex + 1)
     .filter(message => message?.role === 'tool' && typeof message.content === 'string')
-  if (toolMessages.length === 0) return { stage: 'read', attachmentId: attached[1] }
+  if (toolMessages.length === 0)
+    return {
+      stage: 'read',
+      attachmentId: attached[1],
+      byteLength: attachedFileByteLength(attached[0]),
+    }
   if (toolMessages.length > 1)
     throw new FixtureDocumentError(
       'document-tool-result-count',
@@ -689,14 +717,14 @@ export function createImageFixtureFetch(
    * request was refused before its body was parsed, and `imageSha256` is null
    * whenever the attempt carried no usable image.
    */
-  const recordCall = (model, imageSha256, responseKind, documentSha256) => {
-    // Only document rows carry `documentSha256`, so the image rows keep the exact
-    // shape they always had.
-    state.attempts.push(
+  const recordCall = (model, imageSha256, responseKind, documentSha256, documentByteLength) => {
+    // Only document rows carry `documentSha256`, and only the read row carries
+    // `documentByteLength`, so the image rows keep the exact shape they always had.
+    const row =
       documentSha256 === undefined
         ? { model, imageSha256, responseKind }
         : { model, imageSha256, responseKind, documentSha256 }
-    )
+    state.attempts.push(documentByteLength === undefined ? row : { ...row, documentByteLength })
   }
   const refuse = (model, reason, { status = 400, code = reason, imageSha256 = null } = {}) => {
     state.counters.rejectedAttempts += 1
@@ -800,7 +828,7 @@ export function createImageFixtureFetch(
           state.counters.documentReadRequests += 1
           sequence += 1
           const completionId = `${COMPLETION_ID_PREFIX}${runId.slice(-12)}-${sequence}`
-          recordCall(model, null, 'document-read-requested', null)
+          recordCall(model, null, 'document-read-requested', null, documentTurn.byteLength)
           publish()
           return jsonResponse(
             toolCallCompletionBody(completionId, model, ATTACHMENT_READ_TOOL, {

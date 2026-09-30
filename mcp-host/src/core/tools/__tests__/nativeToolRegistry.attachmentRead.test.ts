@@ -19,8 +19,7 @@ const config: NativeToolConfig = {
   httpAllowlist: [],
   envAllowlist: ['PATH'],
   memoryMaxSize: 1048576,
-  attachmentTextReadMaxBytes: 262_144,
-  toolSpilloverThresholdBytes: 8192,
+  attachmentTextReadMaxBytes: 65_536,
 }
 
 function attachments(kind: 'file' | 'image'): Attachment[] {
@@ -85,7 +84,7 @@ describe('NativeToolRegistry — clerum__attachment_read (#666)', () => {
     )
     expect(toolNames(registry)).toContain('clerum__attachment_read')
     expect(registry.get('clerum__attachment_read')!.parametersSchema()).toMatchObject({
-      properties: { maxBytes: { maximum: 262_144 } },
+      properties: { maxBytes: { maximum: 65_536 } },
     })
   })
 
@@ -117,19 +116,7 @@ describe('NativeToolRegistry — clerum__attachment_read (#666)', () => {
     ).toThrow('NativeToolConfig.attachmentTextReadMaxBytes is required for file attachments')
   })
 
-  it('refuses to build without the spillover threshold when a file is attached', () => {
-    const { toolSpilloverThresholdBytes: _omitted, ...withoutThreshold } = config
-    // Control: the same config builds when no file is attached.
-    expect(
-      () => new NativeToolRegistry(withoutThreshold, 'conv-1', undefined, message())
-    ).not.toThrow()
-    expect(
-      () =>
-        new NativeToolRegistry(withoutThreshold, 'conv-1', undefined, message(attachments('file')))
-    ).toThrow('NativeToolConfig.toolSpilloverThresholdBytes is required for file attachments')
-  })
-
-  it('states the spillover threshold only when the turn has spillover storage', () => {
+  it('registers a spillover-exempt tool whether or not the turn has spillover storage', () => {
     const storage = new SpilloverStorage({
       workspacePath: '/tmp',
       thresholdBytes: 8192,
@@ -147,13 +134,18 @@ describe('NativeToolRegistry — clerum__attachment_read (#666)', () => {
       undefined,
       storage
     )
+    // Witness: this turn can spill (the read-back tool is present).
     expect(withSpillover.get('clerum__spillover_read')).not.toBeNull()
-    expect(withSpillover.get('clerum__attachment_read')!.description()).toContain(
-      'spillover threshold (8192 bytes)'
-    )
+    const spilling = withSpillover.get('clerum__attachment_read')!
+    expect(spilling.spilloverExempt?.()).toBe(true)
+    expect(spilling.description()).toContain('reader=text')
+    expect(spilling.description()).not.toContain('spillover')
+
     const inline = new NativeToolRegistry(config, 'conv-1', undefined, message(attachments('file')))
-    // Witness: the tool is registered and describes its text reader.
-    expect(inline.get('clerum__attachment_read')!.description()).toContain('reader=text')
-    expect(inline.get('clerum__attachment_read')!.description()).not.toContain('spillover')
+    expect(inline.get('clerum__spillover_read')).toBeNull()
+    const reader = inline.get('clerum__attachment_read')!
+    expect(reader.spilloverExempt?.()).toBe(true)
+    expect(reader.description()).toContain('reader=text')
+    expect(reader.description()).not.toContain('spillover')
   })
 })

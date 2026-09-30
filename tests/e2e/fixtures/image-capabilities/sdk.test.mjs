@@ -143,6 +143,7 @@ test('the production ZAI serializer and pinned SDK complete an attachment read a
       imageSha256: null,
       responseKind: 'document-read-requested',
       documentSha256: null,
+      documentByteLength: Buffer.byteLength(documentText),
     },
     {
       model: 'glm-5.3-flash',

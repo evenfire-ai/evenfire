@@ -6,7 +6,12 @@ import {
   parseTaskKey,
   useAgentTaskTracker,
 } from '@contexts/AgentTaskTrackerContext'
-import { COMPOSER_MAX_ATTACHMENTS, COMPOSER_MAX_NON_IMAGE_BODY_BYTES } from '@constants/attachments'
+import {
+  COMPOSER_MAX_ATTACHMENTS,
+  COMPOSER_MAX_NON_IMAGE_BODY_BYTES,
+  COMPOSER_MAX_REQUEST_BODY_BYTES,
+  COMPOSER_MAX_TOTAL_FILE_BASE64_BYTES,
+} from '@constants/attachments'
 import {
   buildChatMessageAttachments,
   buildResponseFileAttachments,
@@ -17,7 +22,12 @@ import {
   getComposerDraftRevision,
   setComposerDraft,
 } from '@lib/composerDraftStore'
-import { composerNonImageBodyBytes, formatFileSize } from '@lib/composerFileAdmission'
+import {
+  composerFileBase64Bytes,
+  composerNonImageBodyBytes,
+  composerRequestBodyBytes,
+  formatFileSize,
+} from '@lib/composerFileAdmission'
 import { buildComposerFileReferences } from '@lib/composerFileReferences'
 import { buildComposerRequestContent } from '@lib/composerReferencesPrompt'
 import {
@@ -2621,17 +2631,33 @@ export function useAgentChatController({
         effectiveReferences
       )
       if (effectiveFiles.length > 0) {
-        const attachmentCount = effectiveAttachments.length + effectiveFiles.length
-        const nonImageBodyBytes = composerNonImageBodyBytes({
-          files: effectiveFiles,
-          textBytes: new TextEncoder().encode(effectiveContentForRequest).length,
-        })
-        const blocker =
-          attachmentCount > COMPOSER_MAX_ATTACHMENTS
-            ? `A message can carry at most ${COMPOSER_MAX_ATTACHMENTS} attachments.`
-            : nonImageBodyBytes > COMPOSER_MAX_NON_IMAGE_BODY_BYTES
-              ? `The attached files and text take more than ${formatFileSize(COMPOSER_MAX_NON_IMAGE_BODY_BYTES)} once encoded. Remove a file or shorten the message.`
-              : null
+        // The limits rpc-proxy and mcp-host enforce, most specific first: the
+        // count, the file quota, the share left for text and file details, then
+        // the whole body (images included), so the reason names what to remove.
+        const textBytes = new TextEncoder().encode(effectiveContentForRequest).length
+        let blocker: string | null = null
+        if (effectiveAttachments.length + effectiveFiles.length > COMPOSER_MAX_ATTACHMENTS) {
+          blocker = `A message can carry at most ${COMPOSER_MAX_ATTACHMENTS} attachments.`
+        } else if (composerFileBase64Bytes(effectiveFiles) > COMPOSER_MAX_TOTAL_FILE_BASE64_BYTES) {
+          blocker = `The attached files take more than ${formatFileSize(COMPOSER_MAX_TOTAL_FILE_BASE64_BYTES)} once encoded. Remove a file.`
+        } else if (
+          composerNonImageBodyBytes({ files: effectiveFiles, textBytes }) >
+          COMPOSER_MAX_NON_IMAGE_BODY_BYTES
+        ) {
+          blocker = `The message text and file details take more than ${formatFileSize(COMPOSER_MAX_NON_IMAGE_BODY_BYTES)} once encoded. Shorten the message or remove a file.`
+        } else if (
+          composerRequestBodyBytes({
+            files: effectiveFiles,
+            textBytes,
+            imageBase64Bytes: effectiveAttachments.reduce(
+              (total, image) => total + image.dataBase64.length,
+              0
+            ),
+            imageCount: effectiveAttachments.length,
+          }) > COMPOSER_MAX_REQUEST_BODY_BYTES
+        ) {
+          blocker = `The attachments and text take more than ${formatFileSize(COMPOSER_MAX_REQUEST_BODY_BYTES)} once encoded. Remove an attachment or shorten the message.`
+        }
         if (blocker) {
           setAgentError(blocker)
           pushToast(blocker, 'error')

@@ -21,8 +21,7 @@ afterEach(() => {
   vi.mocked(decodeTextContent).mockClear()
 })
 
-const READ_LIMIT = 262_144
-const SPILLOVER_THRESHOLD = 8192
+const READ_LIMIT = 65_536
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
 
 function rawFile(id: string, filename: string, mimeType: string, bytes: Buffer) {
@@ -50,11 +49,7 @@ function admitted(raw: unknown[]): Attachment[] {
   return result.attachments!
 }
 
-function toolFor(
-  attachments: Attachment[],
-  limit = READ_LIMIT,
-  spilloverThresholdBytes: number | null = SPILLOVER_THRESHOLD
-): AttachmentReadTool {
+function toolFor(attachments: Attachment[], limit = READ_LIMIT): AttachmentReadTool {
   const message: IncomingMessage = {
     content: 'Analyze the attached file',
     channelType: 'rpc',
@@ -65,7 +60,7 @@ function toolFor(
     hostRef: 'host-1',
     attachments,
   }
-  return new AttachmentReadTool(message, limit, spilloverThresholdBytes)
+  return new AttachmentReadTool(message, limit)
 }
 
 async function read(tool: AttachmentReadTool, params: Record<string, unknown>) {
@@ -201,7 +196,10 @@ describe('clerum__attachment_read', () => {
       truncated = body.truncated as boolean
       calls += 1
     }
-    expect(calls).toBe(2)
+    // Pages cover the file; the boundary correction shortens a page by at most
+    // one byte, so the count is pinned between the two page-size bounds.
+    expect(calls).toBeGreaterThanOrEqual(Math.ceil(bytes.length / READ_LIMIT))
+    expect(calls).toBeLessThanOrEqual(Math.ceil(bytes.length / (READ_LIMIT - 1)))
     // Witness: text came back, and none of it is a replacement character.
     expect(pages[0]!.length).toBeGreaterThan(0)
     expect(pages.join('')).toBe(original)
@@ -255,18 +253,15 @@ describe('clerum__attachment_read', () => {
     ])
   })
 
-  it('states the spillover threshold in its description when results can spill', () => {
-    const description = toolFor([], READ_LIMIT, SPILLOVER_THRESHOLD).description()
-    expect(description).toContain(
-      `A page whose result reaches the tool-output spillover threshold (${SPILLOVER_THRESHOLD} bytes) is returned as a spillover summary.`
-    )
-    expect(description).toContain('clerum__spillover_read')
+  it('declares its output exempt from spillover: the caller bounds the page', () => {
+    expect(toolFor([]).spilloverExempt?.()).toBe(true)
   })
 
-  it('does not mention spillover when this execution has no spillover storage', () => {
-    const description = toolFor([], READ_LIMIT, null).description()
+  it('describes a page as returned whole and never mentions spillover', () => {
+    const description = toolFor([]).description()
     // Witness: the description is the tool's full text.
     expect(description).toContain('Files with reader=text return UTF-8 text')
+    expect(description).toContain('A page is returned whole')
     expect(description).not.toContain('spillover')
   })
 

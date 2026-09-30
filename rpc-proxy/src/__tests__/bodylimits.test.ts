@@ -5,6 +5,8 @@
  *  - `POST /api/v1/rpc/hosts/:hostRef/messages` carries the documented image
  *    payloads (a 10MiB image, a 5MiB JPEG, 10MiB + 5MiB, and three 5MiB images) to the auth
  *    boundary instead of being rejected as too large.
+ *  - Qualifying `kind:'file'` attachments have their own credited quota
+ *    (11MiB decoded per file, 16MiB of base64 in total, issue #678).
  *  - The larger ceiling is NOT a general text allowance: non-image bytes stay
  *    capped at 6MiB, and every other route keeps its 10mb parser.
  *  - The sandbox-ui view proxy stays parser-free. A finished application/json
@@ -364,35 +366,225 @@ describe('rpc-proxy chat message body budget', () => {
       expect(forwardedBody().attachments).toEqual(payload.attachments)
     })
 
-    it('rejects a file body 1KiB over the non-image budget with 413', async () => {
+    it('charges a file body without a digest to the non-image budget', async () => {
+      // A file without the composer's sha256 digest is never credited to the
+      // file quota, so its base64 counts against the 6MiB share.
+      const withoutDigest = (targetBytes: number) => {
+        const payload = fileMessageOfBodySize(targetBytes)
+        const { digest: _digest, ...attachment } = payload.attachments[0]!
+        return { ...payload, attachments: [attachment] }
+      }
       // Control: the same construction under the budget is forwarded.
-      expect((await postMessage(fileMessageOfBodySize(NON_IMAGE_BUDGET - KIB))).status).toBe(200)
+      expect((await postMessage(withoutDigest(NON_IMAGE_BUDGET - KIB))).status).toBe(200)
       expect(serviceMock.forwardHostMessageToHost).toHaveBeenCalledTimes(1)
       vi.clearAllMocks()
-      const response = await postMessage(fileMessageOfBodySize(NON_IMAGE_BUDGET + KIB))
+      const response = await postMessage(withoutDigest(NON_IMAGE_BUDGET + KIB))
+      expect(response.status).toBe(413)
+      expect(serviceMock.forwardHostMessageToHost).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('kind:file attachments have their own credited quota (issue #678)', () => {
+    const FILE_MAX_BYTES = 11 * MIB
+    const FILE_QUOTA_BASE64 = 16 * MIB
+    const NON_IMAGE_BUDGET = 6 * MIB
+    const KIB = 1024
+    const fileBase64Cache = new Map<number, string>()
+
+    /** Canonical base64 of `sizeBytes` bytes of ASCII text. */
+    function textFileBase64(sizeBytes: number): string {
+      return cachedBase64(fileBase64Cache, Buffer.alloc(sizeBytes, 0x61), sizeBytes)
+    }
+
+    function textFile(id: string, sizeBytes: number) {
+      return {
+        id,
+        kind: 'file',
+        mimeType: 'text/plain',
+        detectedMediaType: 'text/plain',
+        encoding: 'base64',
+        dataBase64: textFileBase64(sizeBytes),
+        filename: `${id}.txt`,
+        sizeBytes,
+        digest: { algorithm: 'sha256', hex: 'ab'.repeat(32) },
+      }
+    }
+
+    /**
+     * A message whose body minus the base64 of `attachments` is exactly
+     * `shareBytes`: the bytes the 6MiB share is charged when every file is
+     * credited.
+     */
+    function messageWithShare(attachments: Array<{ dataBase64: string }>, shareBytes: number) {
+      const base64Bytes = attachments.reduce((total, item) => total + item.dataBase64.length, 0)
+      const overhead = Buffer.byteLength(JSON.stringify({ content: '', attachments })) - base64Bytes
+      const payload = { content: 'x'.repeat(shareBytes - overhead), attachments }
+      expect(Buffer.byteLength(JSON.stringify(payload)) - base64Bytes).toBe(shareBytes)
+      return payload
+    }
+
+    function forwardedAttachmentIds(): unknown[] {
+      expect(serviceMock.forwardHostMessageToHost).toHaveBeenCalledTimes(1)
+      const body = serviceMock.forwardHostMessageToHost.mock.calls[0]![1] as {
+        attachments?: Array<{ id: unknown }>
+      }
+      return (body.attachments ?? []).map(item => item.id)
+    }
+
+    it('carries an 11MiB file beside a text share 1KiB under 6MiB', async () => {
+      const payload = messageWithShare([textFile('f1', FILE_MAX_BYTES)], NON_IMAGE_BUDGET - KIB)
+      // The whole body is far past the 6MiB share: only the file credit lets it through.
+      expect(Buffer.byteLength(JSON.stringify(payload))).toBeGreaterThan(20 * MIB)
+      const response = await postMessage(payload)
+      expect(response.status).toBe(200)
+      expect(forwardedAttachmentIds()).toEqual(['f1'])
+    })
+
+    it('rejects an 11MiB file when the text share is 1KiB over 6MiB', async () => {
+      const file = textFile('f1', FILE_MAX_BYTES)
+      expect((await postMessage(messageWithShare([file], NON_IMAGE_BUDGET - KIB))).status).toBe(200)
+      expect(serviceMock.forwardHostMessageToHost).toHaveBeenCalledTimes(1)
+      vi.clearAllMocks()
+      const response = await postMessage(messageWithShare([file], NON_IMAGE_BUDGET + KIB))
       expect(response.status).toBe(413)
       expect(serviceMock.forwardHostMessageToHost).not.toHaveBeenCalled()
     })
 
-    it('never credits PNG bytes sent as kind:file against the image budget', async () => {
-      const image = imageAttachment('a1', 7 * MIB)
-      const asImage = await postMessage({ content: 'look', attachments: [image] })
+    it('decides the 11MiB limit by decoded bytes, not by base64 length', async () => {
+      const atLimit = textFile('f1', FILE_MAX_BYTES)
+      const overLimit = textFile('f1', FILE_MAX_BYTES + 1)
+      // Both encode to the same number of characters; only the padding differs.
+      expect(overLimit.dataBase64.length).toBe(atLimit.dataBase64.length)
+      expect((await postMessage(messageWithShare([atLimit], KIB))).status).toBe(200)
+      expect(serviceMock.forwardHostMessageToHost).toHaveBeenCalledTimes(1)
+      vi.clearAllMocks()
+      const response = await postMessage(messageWithShare([overLimit], KIB))
+      expect(response.status).toBe(413)
+      expect(serviceMock.forwardHostMessageToHost).not.toHaveBeenCalled()
+    })
+
+    it('does not credit file base64 whose padding carries non-zero unused bits', async () => {
+      const canonical = textFile('f1', FILE_MAX_BYTES)
+      const nonCanonical = {
+        ...canonical,
+        dataBase64: withNonCanonicalTailBits(canonical.dataBase64),
+      }
+      expect((await postMessage(messageWithShare([canonical], KIB))).status).toBe(200)
+      expect(serviceMock.forwardHostMessageToHost).toHaveBeenCalledTimes(1)
+      vi.clearAllMocks()
+      const response = await postMessage(messageWithShare([nonCanonical], KIB))
+      expect(response.status).toBe(413)
+      expect(serviceMock.forwardHostMessageToHost).not.toHaveBeenCalled()
+    })
+
+    it.each([
+      { label: 'no digest', mutate: ({ digest: _d, ...rest }: Record<string, unknown>) => rest },
+      {
+        label: 'a sha1 digest',
+        mutate: (item: Record<string, unknown>) => ({
+          ...item,
+          digest: { algorithm: 'sha1', hex: 'ab'.repeat(32) },
+        }),
+      },
+      {
+        label: 'an uppercase digest',
+        mutate: (item: Record<string, unknown>) => ({
+          ...item,
+          digest: { algorithm: 'sha256', hex: 'AB'.repeat(32) },
+        }),
+      },
+      {
+        label: 'a raw encoding',
+        mutate: (item: Record<string, unknown>) => ({ ...item, encoding: 'raw' }),
+      },
+      {
+        label: 'an empty file name',
+        mutate: (item: Record<string, unknown>) => ({ ...item, filename: '' }),
+      },
+      {
+        label: 'no file name',
+        mutate: ({ filename: _f, ...rest }: Record<string, unknown>) => rest,
+      },
+    ])('charges a 5MiB file with $label to the non-image budget', async ({ mutate }) => {
+      // 5MiB encodes to about 6.7MiB: credited it fits, charged as text it does not.
+      const complete = textFile('f1', 5 * MIB)
+      expect((await postMessage(messageWithShare([complete], KIB))).status).toBe(200)
+      expect(serviceMock.forwardHostMessageToHost).toHaveBeenCalledTimes(1)
+      vi.clearAllMocks()
+      const response = await postMessage({ content: 'look', attachments: [mutate(complete)] })
+      expect(response.status).toBe(413)
+      expect(serviceMock.forwardHostMessageToHost).not.toHaveBeenCalled()
+    })
+
+    it('carries files that sit exactly on the 16MiB base64 quota and rejects one byte past it', async () => {
+      const large = textFile('f1', FILE_MAX_BYTES)
+      const fitting = textFile('f2', MIB - 1)
+      const overflowing = textFile('f2', MIB)
+      expect(large.dataBase64.length + fitting.dataBase64.length).toBe(FILE_QUOTA_BASE64)
+      expect(large.dataBase64.length + overflowing.dataBase64.length).toBeGreaterThan(
+        FILE_QUOTA_BASE64
+      )
+      const ok = await postMessage(messageWithShare([large, fitting], KIB))
+      expect(ok.status).toBe(200)
+      expect(forwardedAttachmentIds()).toEqual(['f1', 'f2'])
+      vi.clearAllMocks()
+      const response = await postMessage(messageWithShare([large, overflowing], KIB))
+      expect(response.status).toBe(413)
+      expect(serviceMock.forwardHostMessageToHost).not.toHaveBeenCalled()
+    })
+
+    it('credits PNG bytes sent as kind:file to the file quota, up to 11MiB', async () => {
+      const pngAsFile = (sizeBytes: number) => ({
+        ...textFile('f1', 1),
+        dataBase64: pngBase64(sizeBytes),
+        mimeType: 'image/png',
+        detectedMediaType: 'image/png',
+        filename: 'photo.png',
+        sizeBytes,
+      })
+      const small = await postMessage({ content: 'look', attachments: [pngAsFile(7 * MIB)] })
+      expect(small.status).toBe(200)
+      expect(forwardedAttachmentIds()).toEqual(['f1'])
+      vi.clearAllMocks()
+      // The same 12MiB bytes are credited as an image (16MiB limit)…
+      const asImage = await postMessage({
+        content: 'look',
+        attachments: [imageAttachment('a1', 12 * MIB)],
+      })
       expect(asImage.status).toBe(200)
       expect(serviceMock.forwardHostMessageToHost).toHaveBeenCalledTimes(1)
       vi.clearAllMocks()
-      // Same MIME type and bytes as the image: only `kind` differs.
-      const asFile = await postMessage({
-        content: 'look',
-        attachments: [
-          {
-            ...fileAttachment(image.dataBase64),
-            mimeType: 'image/png',
-            detectedMediaType: 'image/png',
-            filename: 'photo.png',
-          },
-        ],
-      })
+      // …but not as a file, whose limit is 11MiB.
+      const asFile = await postMessage({ content: 'look', attachments: [pngAsFile(12 * MIB)] })
       expect(asFile.status).toBe(413)
+      expect(serviceMock.forwardHostMessageToHost).not.toHaveBeenCalled()
+    })
+
+    it('carries an 11MiB file beside a 5MiB image and rejects the pair past 24MiB', async () => {
+      const file = textFile('f1', FILE_MAX_BYTES)
+      const fits = { content: 'look', attachments: [file, imageAttachment('a1', 5 * MIB)] }
+      expect(Buffer.byteLength(JSON.stringify(fits))).toBeLessThan(24 * MIB)
+      expect((await postMessage(fits)).status).toBe(200)
+      expect(forwardedAttachmentIds()).toEqual(['f1', 'a1'])
+      vi.clearAllMocks()
+      const tooBig = { content: 'look', attachments: [file, imageAttachment('a1', 8 * MIB)] }
+      expect(Buffer.byteLength(JSON.stringify(tooBig))).toBeGreaterThan(24 * MIB)
+      const response = await postMessage(tooBig)
+      expect(response.status).toBe(413)
+      expect(serviceMock.forwardHostMessageToHost).not.toHaveBeenCalled()
+    })
+
+    it('credits twenty files and rejects a twenty-first instead of charging it as text', async () => {
+      const files = (count: number) =>
+        Array.from({ length: count }, (_, index) => textFile(`f${index + 1}`, KIB))
+      const twenty = await postMessage({ content: 'look', attachments: files(20) })
+      expect(twenty.status).toBe(200)
+      expect(forwardedAttachmentIds()).toHaveLength(20)
+      vi.clearAllMocks()
+      const body = { content: 'look', attachments: files(21) }
+      expect(Buffer.byteLength(JSON.stringify(body))).toBeLessThan(NON_IMAGE_BUDGET)
+      const response = await postMessage(body)
+      expect(response.status).toBe(413)
       expect(serviceMock.forwardHostMessageToHost).not.toHaveBeenCalled()
     })
   })

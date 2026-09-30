@@ -29,8 +29,10 @@ tool result arrives, it replies `DOCUMENT_FIXTURE_SHA256:` plus the first 16 hex
 characters of the SHA-256 of the text in that result. The prompt alone can never
 produce that answer.
 
-The ledger records `document-read-requested` (no digest yet) and
-`document-answer` (with `documentSha256`, never the text). Malformed, non-text
+The ledger records `document-read-requested` (no digest yet, with
+`documentByteLength` taken from the `bytes=` field the Host wrote on the
+`attached_file` line) and `document-answer` (with `documentSha256`, never the
+text). An `attached_file` line without a positive `bytes=`, malformed, non-text
 or repeated tool results and streamed document turns are refused and counted in
 `documentFailures`. Image rows keep their previous shape.
 

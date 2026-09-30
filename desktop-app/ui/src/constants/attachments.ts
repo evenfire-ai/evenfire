@@ -6,14 +6,23 @@ export const COMPOSER_MAX_ATTACHMENTS = 20
 
 /**
  * Per-file ceiling for a document sent as `kind:'file'`. Must match the
- * `CLERUM_ATTACHMENT_FILE_MAX_BYTES` default of mcp-host (`attachmentFileMaxBytes`).
- */
-export const COMPOSER_MAX_FILE_BYTES = 3 * 1024 * 1024
-/**
- * Share of one chat request body that is not credited to the image quota: the
- * base64 of every `kind:'file'`, the text and the JSON envelope. Must match
- * `MAX_NON_IMAGE_BODY_BYTES` in `rpc-proxy/src/middleware/chatJsonBody.ts` and
+ * `CLERUM_ATTACHMENT_FILE_MAX_BYTES` default of mcp-host (`attachmentFileMaxBytes`)
+ * and `MAX_FILE_DECODED_BYTES` in `rpc-proxy/src/middleware/chatJsonBody.ts` and
  * in `mcp-host/src/server.ts`.
+ */
+export const COMPOSER_MAX_FILE_BYTES = 11 * 1024 * 1024
+/**
+ * Combined base64 size of the files in one message. Files have their own quota
+ * in rpc-proxy and mcp-host, like images. Must match
+ * `MAX_FILE_BASE64_BYTES_TOTAL` in `rpc-proxy/src/middleware/chatJsonBody.ts`
+ * and in `mcp-host/src/server.ts`.
+ */
+export const COMPOSER_MAX_TOTAL_FILE_BASE64_BYTES = 16 * 1024 * 1024
+/**
+ * Share of one chat request body that is credited to neither the image quota
+ * nor the file quota: the text, the JSON envelope and every field of a
+ * `kind:'file'` entry except its base64. Must match `MAX_NON_IMAGE_BODY_BYTES`
+ * in `rpc-proxy/src/middleware/chatJsonBody.ts` and in `mcp-host/src/server.ts`.
  */
 export const COMPOSER_MAX_NON_IMAGE_BODY_BYTES = 6 * 1024 * 1024
 /**

@@ -13,6 +13,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { makeTaskKey } from '@contexts/AgentTaskTrackerContext/types'
 import { act, waitFor } from '@testing-library/react'
+import { classifyBytes } from '@clerum/gfs-interaction-policy'
+import { base64Length } from '@lib/composerFileAdmission'
+import { loadHostModels, resetHostModelSelectionStore } from '@lib/hostModelSelectionStore'
+import type { HostModelsResult } from '../../../../../src/types'
+import type { ComposerImageAttachment, ReadyComposerFileAttachment } from '../../../uiTypes'
 import { renderController } from './__fixtures__/controllerHarness'
 import { type MockClerum, installMockClerum, uninstallMockClerum } from './__fixtures__/mockClerum'
 
@@ -1759,5 +1764,188 @@ describe('interrupted generated-file contract', () => {
         attachments: [expect.objectContaining({ type: 'response_file', label: 'report.md' })],
       }),
     ])
+  })
+})
+
+/**
+ * #678 — the send-time blockers for documents. Files enter through the public
+ * restore action (the path a retried send uses), which skips the picker's
+ * admission, so each blocker is reached exactly as the controller sees it at
+ * send time. Every refusal is paired, in the same test, with a twin one step
+ * inside the limit that reaches the Host once.
+ */
+describe('sendAgentMessage — per-message limits for documents (#678)', () => {
+  const MIB = 1024 * 1024
+  const TEXT_SHARE_BLOCKER =
+    'The message text and file details take more than 6.0 MiB once encoded. Shorten the message or remove a file.'
+  const FILE_QUOTA_BLOCKER =
+    'The attached files take more than 16.0 MiB once encoded. Remove a file.'
+  const REQUEST_BODY_BLOCKER =
+    'The attachments and text take more than 24.0 MiB once encoded. Remove an attachment or shorten the message.'
+  const COUNT_BLOCKER = 'A message can carry at most 20 attachments.'
+
+  const catalog: HostModelsResult = {
+    provider: 'zai',
+    hostDefault: 'glm-5.3-flash',
+    sessionModel: null,
+    degraded: false,
+    modelSelectionRevision: 0,
+    models: [{ name: 'glm-5.3-flash', imageInput: { state: 'supported', reason: 'supported' } }],
+  }
+  const modelTransport = {
+    getHostModels: vi.fn(async () => catalog),
+    setHostModel: vi.fn(),
+  }
+
+  afterEach(() => {
+    resetHostModelSelectionStore()
+  })
+
+  /** A read and hashed text document of `sizeBytes`, as `readComposerFile` returns it. */
+  function readyTextFile(
+    id: string,
+    filename: string,
+    sizeBytes: number
+  ): ReadyComposerFileAttachment {
+    return {
+      id,
+      type: 'file',
+      filename,
+      sizeBytes,
+      declaredMediaType: 'text/plain',
+      status: 'ready',
+      classification: classifyBytes({
+        // Built with this environment's Uint8Array, as readComposerFile does:
+        // TextEncoder and Buffer return one from another realm under jsdom.
+        bytes: new Uint8Array(Buffer.from('plain text')),
+        totalByteLength: sizeBytes,
+        declaredMediaType: 'text/plain',
+        filename,
+      }),
+      dataBase64: 'Y'.repeat(base64Length(sizeBytes)),
+      digestHex: 'ab'.repeat(32),
+    }
+  }
+
+  async function mountedWithFiles(files: ReadyComposerFileAttachment[]) {
+    clerum.rpc.invokeHostMessage.mockResolvedValue({ response: 'done' })
+    const rendered = renderController()
+    await settleMount()
+    act(() => rendered.result.current.handleRestoreComposerFiles(files))
+    return rendered
+  }
+
+  function sentAttachmentIds(): unknown[] {
+    const request = clerum.rpc.invokeHostMessage.mock.calls[0]?.[1] as {
+      attachments?: Array<{ id: unknown }>
+    }
+    expect(request).toBeDefined()
+    return (request.attachments ?? []).map(attachment => attachment.id)
+  }
+
+  function expectBlocked(rendered: ReturnType<typeof renderController>, blocker: string) {
+    expect(rendered.result.current.agentError).toBe(blocker)
+    expect(rendered.spies.pushToast).toHaveBeenCalledWith(blocker, 'error')
+    expect(clerum.chat.create).not.toHaveBeenCalled()
+    expect(clerum.rpc.invokeHostMessage).not.toHaveBeenCalled()
+  }
+
+  it('refuses text that overflows the 6 MiB share beside an 11 MiB file, and sends one byte less', async () => {
+    const big = readyTextFile('file-big', 'big.txt', 11 * MIB)
+    const rendered = await mountedWithFiles([big])
+    // Envelope (4096) + text + the file's JSON name and fixed fields; the file's
+    // base64 is credited to the file quota.
+    const fullShareText = 6 * MIB - 4096 - JSON.stringify('big.txt').length - 640
+
+    await act(async () => {
+      await rendered.result.current.handleSendAgentMessage('x'.repeat(fullShareText + 1))
+    })
+    expectBlocked(rendered, TEXT_SHARE_BLOCKER)
+    expect(rendered.result.current.composerFileAttachments).toHaveLength(1)
+
+    await act(async () => {
+      await rendered.result.current.handleSendAgentMessage('x'.repeat(fullShareText))
+    })
+    expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
+    expect(sentAttachmentIds()).toEqual(['file-big'])
+  })
+
+  it('refuses files one byte past the 16 MiB quota, and sends the pair that fills it exactly', async () => {
+    const big = readyTextFile('file-big', 'big.txt', 11 * MIB)
+    const rendered = await mountedWithFiles([
+      big,
+      readyTextFile('file-over', 'tail.txt', 1_048_576),
+    ])
+
+    await act(async () => {
+      await rendered.result.current.handleSendAgentMessage('read both')
+    })
+    expectBlocked(rendered, FILE_QUOTA_BLOCKER)
+
+    act(() =>
+      rendered.result.current.handleRestoreComposerFiles([
+        big,
+        readyTextFile('file-fits', 'tail.txt', 1_048_575),
+      ])
+    )
+    await act(async () => {
+      await rendered.result.current.handleSendAgentMessage('read both')
+    })
+    expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
+    expect(sentAttachmentIds()).toEqual(['file-big', 'file-fits'])
+  })
+
+  it('refuses images and files that together pass the 24 MiB body, and sends without one file', async () => {
+    const big = readyTextFile('file-big', 'big.txt', 11 * MIB)
+    const rendered = await mountedWithFiles([
+      big,
+      readyTextFile('file-tail', 'tail.txt', 1_048_575),
+    ])
+    await act(async () => {
+      await loadHostModels(modelTransport, 'agent-x', null)
+    })
+    const image: ComposerImageAttachment = {
+      id: 'image-8mib',
+      name: 'scan.png',
+      mimeType: 'image/png',
+      dataBase64: 'A'.repeat(8 * MIB),
+      sizeBytes: 6 * MIB,
+      previewDataUrl: 'data:image/png;base64,AAAA',
+    }
+    act(() => rendered.result.current.handleAddComposerImageAttachments([image]))
+    // Precondition: the files sit exactly on their quota and the text is short,
+    // so only the whole-body limit can refuse this send.
+    expect(base64Length(11 * MIB) + base64Length(1_048_575)).toBe(16 * MIB)
+
+    await act(async () => {
+      await rendered.result.current.handleSendAgentMessage('describe')
+    })
+    expectBlocked(rendered, REQUEST_BODY_BLOCKER)
+
+    act(() => rendered.result.current.handleRestoreComposerFiles([big]))
+    await act(async () => {
+      await rendered.result.current.handleSendAgentMessage('describe')
+    })
+    expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
+    expect(sentAttachmentIds()).toEqual(expect.arrayContaining(['file-big', 'image-8mib']))
+  })
+
+  it('refuses a twenty-first attachment and sends twenty', async () => {
+    const files = Array.from({ length: 21 }, (_, index) =>
+      readyTextFile(`file-${index}`, `part-${index}.txt`, 10)
+    )
+    const rendered = await mountedWithFiles(files)
+
+    await act(async () => {
+      await rendered.result.current.handleSendAgentMessage('read all')
+    })
+    expectBlocked(rendered, COUNT_BLOCKER)
+
+    act(() => rendered.result.current.handleRestoreComposerFiles(files.slice(0, 20)))
+    await act(async () => {
+      await rendered.result.current.handleSendAgentMessage('read all')
+    })
+    expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
+    expect(sentAttachmentIds()).toHaveLength(20)
   })
 })

@@ -4,6 +4,7 @@ import {
   COMPOSER_MAX_ATTACHMENTS,
   COMPOSER_MAX_FILE_BYTES,
   COMPOSER_MAX_NON_IMAGE_BODY_BYTES,
+  COMPOSER_MAX_TOTAL_FILE_BASE64_BYTES,
   COMPOSER_REQUEST_ENVELOPE_BYTES,
 } from '@constants/attachments'
 import type { ComposerFileAttachment } from '../uiTypes'
@@ -18,7 +19,10 @@ const textEncoder = new TextEncoder()
 export type ComposerFileAdmissionContext = {
   /** Images and files already attached to the message. */
   attachedCount: number
-  /** Files already attached; their base64 counts against the non-image share. */
+  /**
+   * Files already attached. Their base64 counts against the file quota; their
+   * name and fixed fields count against the non-image share.
+   */
   files: ReadonlyArray<Pick<ComposerFileAttachment, 'filename' | 'sizeBytes'>>
   /** UTF-8 length of the message text as it will be sent. */
   textBytes: number
@@ -35,27 +39,54 @@ export function base64Length(sizeBytes: number): number {
   return Math.ceil(sizeBytes / 3) * 4
 }
 
-/** Bytes one `kind:'file'` entry adds to the JSON request body. */
-export function composerFileEntryBytes(file: { filename: string; sizeBytes: number }): number {
+/**
+ * Bytes one `kind:'file'` entry adds to the JSON request body besides its
+ * base64: the file name and the fixed fields. rpc-proxy and mcp-host charge
+ * these to the non-image share; only the base64 is credited to the file quota.
+ */
+export function composerFileDetailBytes(file: { filename: string }): number {
   return (
-    base64Length(file.sizeBytes) +
-    textEncoder.encode(JSON.stringify(file.filename)).length +
-    COMPOSER_FILE_ENTRY_METADATA_BYTES
+    textEncoder.encode(JSON.stringify(file.filename)).length + COMPOSER_FILE_ENTRY_METADATA_BYTES
   )
 }
 
+/** Bytes of base64 the file quota is charged for these files. */
+export function composerFileBase64Bytes(files: ReadonlyArray<{ sizeBytes: number }>): number {
+  return files.reduce((total, file) => total + base64Length(file.sizeBytes), 0)
+}
+
 /**
- * Bytes of one request body that rpc-proxy and mcp-host do not credit to the
- * image quota: the JSON envelope, the message text and every `kind:'file'`.
+ * Bytes of one request body that rpc-proxy and mcp-host credit to neither the
+ * image quota nor the file quota: the JSON envelope, the message text and the
+ * non-base64 fields of every `kind:'file'`.
  */
 export function composerNonImageBodyBytes(input: {
-  files: ReadonlyArray<{ filename: string; sizeBytes: number }>
+  files: ReadonlyArray<{ filename: string }>
   textBytes: number
 }): number {
   return (
     COMPOSER_REQUEST_ENVELOPE_BYTES +
     input.textBytes +
-    input.files.reduce((total, file) => total + composerFileEntryBytes(file), 0)
+    input.files.reduce((total, file) => total + composerFileDetailBytes(file), 0)
+  )
+}
+
+/**
+ * Bytes of the whole request body: the non-image share plus the base64 of the
+ * files and of the images. An image entry is counted with the same fixed-field
+ * allowance as a file entry, which is an upper bound.
+ */
+export function composerRequestBodyBytes(input: {
+  files: ReadonlyArray<{ filename: string; sizeBytes: number }>
+  textBytes: number
+  imageBase64Bytes: number
+  imageCount: number
+}): number {
+  return (
+    composerNonImageBodyBytes(input) +
+    composerFileBase64Bytes(input.files) +
+    input.imageBase64Bytes +
+    input.imageCount * COMPOSER_FILE_ENTRY_METADATA_BYTES
   )
 }
 
@@ -86,12 +117,13 @@ export function composerFileAdmissionError(
   if (context.attachedCount >= COMPOSER_MAX_ATTACHMENTS) {
     return `A message can carry at most ${COMPOSER_MAX_ATTACHMENTS} attachments.`
   }
-  const bodyBytes = composerNonImageBodyBytes({
-    files: [...context.files, { filename: file.name, sizeBytes: file.size }],
-    textBytes: context.textBytes,
-  })
+  const files = [...context.files, { filename: file.name, sizeBytes: file.size }]
+  if (composerFileBase64Bytes(files) > COMPOSER_MAX_TOTAL_FILE_BASE64_BYTES) {
+    return `${file.name} does not fit: the files in a message can take at most ${formatFileSize(COMPOSER_MAX_TOTAL_FILE_BASE64_BYTES)} once encoded.`
+  }
+  const bodyBytes = composerNonImageBodyBytes({ files, textBytes: context.textBytes })
   if (bodyBytes > COMPOSER_MAX_NON_IMAGE_BODY_BYTES) {
-    return `${file.name} does not fit: files and text can take at most ${formatFileSize(COMPOSER_MAX_NON_IMAGE_BODY_BYTES)} per message once encoded.`
+    return `${file.name} does not fit: the text and file details can take at most ${formatFileSize(COMPOSER_MAX_NON_IMAGE_BODY_BYTES)} per message once encoded.`
   }
   return null
 }

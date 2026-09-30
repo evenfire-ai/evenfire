@@ -43,6 +43,13 @@ import {
  * answer on screen can only be produced if the exact bytes attached here crossed
  * the composer, IPC, the Host admission, the read tool and the provider wire.
  *
+ * A second chat sends a 6 MiB document. Its base64 exceeds the 6 MiB text share,
+ * so it reaches the Host only through the credited `kind:'file'` quota in
+ * rpc-proxy and mcp-host. Its pages exceed the Host spillover threshold, so the
+ * fixture (which refuses a spillover summary) answers only when the read tool's
+ * page travels inline. The answer carries the digest of the first page, and the
+ * ledger carries the byte length the Host verified for the whole file.
+ *
  * Only the external provider peer is simulated. The run is selected by the
  * fixture lane's own run id and never reaches a real provider.
  */
@@ -155,8 +162,26 @@ function sentMessageAttachments(page: Page) {
   return page.getByLabel('Message attachments')
 }
 
-/** Per-file ceiling the composer enforces; it mirrors the Host default (3 MiB). */
-const COMPOSER_FILE_LIMIT_BYTES = 3 * 1024 * 1024
+/**
+ * Per-file ceiling the composer enforces; it mirrors the Host default
+ * `CLERUM_ATTACHMENT_FILE_MAX_BYTES` (11 MiB).
+ */
+const COMPOSER_FILE_LIMIT_BYTES = 11 * 1024 * 1024
+
+/**
+ * A document whose base64 (8 MiB) exceeds the 6 MiB text share. It reaches the
+ * Host only because rpc-proxy and mcp-host credit `kind:'file'` base64 to its
+ * own quota; with the old limits rpc-proxy answers 413 and the Host refuses it.
+ */
+const LARGE_DOCUMENT_BYTES = 6 * 1024 * 1024
+
+/**
+ * Default page `clerum__attachment_read` returns
+ * (`CLERUM_ATTACHMENT_TEXT_READ_MAX_BYTES`). The fixture digests the text of
+ * the first page it receives, so a larger document is identified by the digest
+ * of its first page.
+ */
+const ATTACHMENT_READ_PAGE_BYTES = 65_536
 
 /** Start a blank chat and prove the thread is empty before anything is sent. */
 async function startBlankChat(page: Page) {
@@ -254,6 +279,62 @@ function documentAnswerRegex(documentSha: string): RegExp {
   return new RegExp(`${prefix}${documentSha.slice(0, FIXTURE_DOCUMENT_ANSWER_DIGEST_CHARS)}`, 'i')
 }
 
+/**
+ * Sends the composer's single ready document and proves the round trip: the
+ * sent bubble lists the file, the answer carries the digest of the text the
+ * read tool returned, and the fixture ledger shows one read request carrying
+ * the byte length the Host verified and one answer carrying that digest.
+ */
+async function sendDocumentAndVerifyAnswer(
+  page: Page,
+  env: ReturnType<typeof requireImageCapabilitiesFixtureEnv>,
+  assertBinding: () => Promise<void>,
+  document: { fileName: string; buffer: Buffer },
+  readTextSha: string
+) {
+  const before = readImageCapabilityEvidence(env)
+  await assertBinding()
+  await sendButton(page).click()
+  await expect(fileChips(page)).toHaveCount(0, { timeout: 30_000 })
+
+  await expect(page.getByTestId('message-list')).toBeVisible({ timeout: 20_000 })
+  await expect(page.locator('[data-chat-message-id]')).toHaveCount(2, { timeout: 120_000 })
+  // The sent bubble shows the attachment the user picked, not only the model's answer.
+  await expect(sentMessageAttachments(page)).toHaveCount(1, { timeout: 20_000 })
+  await expect(sentMessageAttachments(page)).toContainText(document.fileName)
+  const response = page.getByTestId('agent-response').locator('.message-block.markdown-content')
+  await expect(response).toHaveCount(1, { timeout: 120_000 })
+  await expect(response).toContainText(documentAnswerRegex(readTextSha), { timeout: 120_000 })
+  await observeCompletedTask(page, env.hostRef, documentAnswerRegex(readTextSha))
+
+  const after = readImageCapabilityEvidence(env)
+  const appended = appendedAttempts(before, after)
+  const readRows = appended.filter(
+    row => row.responseKind === FIXTURE_RESPONSE_KIND.documentReadRequested
+  )
+  const answerRows = appended.filter(
+    row => row.responseKind === FIXTURE_RESPONSE_KIND.documentAnswer
+  )
+
+  // Turn 1: the model asked for the read tool. The prompt alone produced no answer.
+  expect(readRows).toHaveLength(1)
+  expect(readRows[0]?.model).toBe(IMAGE_CAPABILITY_FIXTURE_MODELS.supported)
+  expect(readRows[0]?.documentSha256).toBeNull()
+  // The Host announced the whole file: the byte length it verified on admission.
+  expect(readRows[0]?.documentByteLength).toBe(document.buffer.length)
+  // Turn 2: the tool result reached the wire carrying exactly the attached bytes.
+  expect(answerRows).toHaveLength(1)
+  expect(answerRows[0]?.model).toBe(IMAGE_CAPABILITY_FIXTURE_MODELS.supported)
+  expect(answerRows[0]?.documentSha256).toBe(readTextSha)
+
+  // A document is never an image: no pixels moved, and the fixture refused nothing.
+  expect(appended.filter(row => row.imageSha256 !== null)).toHaveLength(0)
+  expect(after.counters.imageAttempts - before.counters.imageAttempts).toBe(0)
+  expect(after.counters.documentReadRequests - before.counters.documentReadRequests).toBe(1)
+  expect(after.counters.documentAnswers - before.counters.documentAnswers).toBe(1)
+  expect(after.counters.documentFailures - before.counters.documentFailures).toBe(0)
+}
+
 test('document-upload fixture: an attached text file reaches the model through the read tool', async ({}, testInfo) => {
   test.skip(
     MODE !== 'fixture',
@@ -279,8 +360,22 @@ test('document-upload fixture: an attached text file reaches the model through t
     buffer: Buffer.from(`document-upload ${randomBytes(6).toString('hex')}\nsecond line\n`, 'utf8'),
   }
   const documentSha = sha256Hex(document.buffer)
+
+  // Run-unique ASCII (hex of random bytes): its first page differs from every
+  // other run's, and in ASCII the byte cut and the text cut of a page coincide.
+  const largeDocument = {
+    fileName: `large-notes-${randomBytes(3).toString('hex')}.txt`,
+    mimeType: 'text/plain',
+    buffer: Buffer.from(randomBytes(LARGE_DOCUMENT_BYTES / 2).toString('hex'), 'ascii'),
+  }
+  expect(largeDocument.buffer.length).toBe(LARGE_DOCUMENT_BYTES)
+  const largeDocumentPageSha = sha256Hex(
+    largeDocument.buffer.subarray(0, ATTACHMENT_READ_PAGE_BYTES)
+  )
+
   fs.mkdirSync(testInfo.outputPath(), { recursive: true })
   fs.writeFileSync(testInfo.outputPath(document.fileName), document.buffer)
+  fs.writeFileSync(testInfo.outputPath(largeDocument.fileName), largeDocument.buffer)
 
   let app: ElectronApplication | undefined
   let recordedPage: Page | undefined
@@ -315,7 +410,7 @@ test('document-upload fixture: an attached text file reaches the model through t
       // Liveness witness: the refusal the composer had to produce is on screen.
       const refusal = page.getByRole('alert').filter({ hasText: oversized.fileName })
       await expect(refusal).toHaveCount(1, { timeout: 15_000 })
-      await expect(refusal).toContainText(/a file can be at most 3\.0 MiB/)
+      await expect(refusal).toContainText(/a file can be at most 11\.0 MiB/)
       await expect(fileChips(page)).toHaveCount(0)
     })
 
@@ -344,45 +439,47 @@ test('document-upload fixture: an attached text file reaches the model through t
     })
 
     await test.step('the answer carries the digest of the delivered text and the ledger shows both provider turns', async () => {
-      const before = readImageCapabilityEvidence(env)
-      await assertBinding()
-      await sendButton(page).click()
-      await expect(fileChips(page)).toHaveCount(0, { timeout: 30_000 })
+      await sendDocumentAndVerifyAnswer(page, env, assertBinding, document, documentSha)
+    })
 
-      await expect(page.getByTestId('message-list')).toBeVisible({ timeout: 20_000 })
-      await expect(page.locator('[data-chat-message-id]')).toHaveCount(2, { timeout: 120_000 })
-      // The sent bubble shows the attachment the user picked, not only the model's answer.
-      await expect(sentMessageAttachments(page)).toHaveCount(1, { timeout: 20_000 })
-      await expect(sentMessageAttachments(page)).toContainText(document.fileName)
-      const response = page.getByTestId('agent-response').locator('.message-block.markdown-content')
-      await expect(response).toHaveCount(1, { timeout: 120_000 })
-      await expect(response).toContainText(documentAnswerRegex(documentSha), { timeout: 120_000 })
-      await observeCompletedTask(page, env.hostRef, documentAnswerRegex(documentSha))
+    await test.step('a 6 MiB document above the old text share is admitted as a ready chip', async () => {
+      await startBlankChat(page)
+      await selectSupportedModel(page, IMAGE_CAPABILITY_FIXTURE_MODELS.supported)
+      await attachDocument(page, largeDocument)
+      const chip = fileChips(page).filter({ hasText: largeDocument.fileName })
+      await expect(chip).toHaveCount(1, { timeout: 30_000 })
+      await expect(chip).toHaveAttribute('data-file-status', 'ready', { timeout: 60_000 })
+      // The chip reports the whole file the composer read, not a truncated copy.
+      await expect(chip).toContainText('6.0 MiB')
+    })
 
-      const after = readImageCapabilityEvidence(env)
-      const appended = appendedAttempts(before, after)
-      const readRows = appended.filter(
-        row => row.responseKind === FIXTURE_RESPONSE_KIND.documentReadRequested
+    await test.step('a file that would overflow the 16 MiB file quota is refused and the ready chip stays', async () => {
+      const overQuota = {
+        fileName: `over-quota-${randomBytes(3).toString('hex')}.txt`,
+        mimeType: 'text/plain',
+        buffer: Buffer.alloc(COMPOSER_FILE_LIMIT_BYTES, 0x61),
+      }
+      await attachDocument(page, overQuota)
+      // Liveness witness: the quota refusal the composer had to produce is on screen.
+      const refusal = page.getByRole('alert').filter({ hasText: overQuota.fileName })
+      await expect(refusal).toHaveCount(1, { timeout: 15_000 })
+      await expect(refusal).toContainText(/files in a message can take at most 16\.0 MiB/)
+      await expect(fileChips(page)).toHaveCount(1)
+      const chip = fileChips(page).filter({ hasText: largeDocument.fileName })
+      await expect(chip).toHaveAttribute('data-file-status', 'ready')
+
+      await composer(page).fill(DOCUMENT_PROMPT)
+      await expect(sendButton(page)).toBeEnabled({ timeout: 20_000 })
+    })
+
+    await test.step('the 6 MiB document is sent, read inline and answered with the digest of its first page', async () => {
+      await sendDocumentAndVerifyAnswer(
+        page,
+        env,
+        assertBinding,
+        largeDocument,
+        largeDocumentPageSha
       )
-      const answerRows = appended.filter(
-        row => row.responseKind === FIXTURE_RESPONSE_KIND.documentAnswer
-      )
-
-      // Turn 1: the model asked for the read tool. The prompt alone produced no answer.
-      expect(readRows).toHaveLength(1)
-      expect(readRows[0]?.model).toBe(IMAGE_CAPABILITY_FIXTURE_MODELS.supported)
-      expect(readRows[0]?.documentSha256).toBeNull()
-      // Turn 2: the tool result reached the wire carrying exactly the attached bytes.
-      expect(answerRows).toHaveLength(1)
-      expect(answerRows[0]?.model).toBe(IMAGE_CAPABILITY_FIXTURE_MODELS.supported)
-      expect(answerRows[0]?.documentSha256).toBe(documentSha)
-
-      // A document is never an image: no pixels moved, and the fixture refused nothing.
-      expect(appended.filter(row => row.imageSha256 !== null)).toHaveLength(0)
-      expect(after.counters.imageAttempts - before.counters.imageAttempts).toBe(0)
-      expect(after.counters.documentReadRequests - before.counters.documentReadRequests).toBe(1)
-      expect(after.counters.documentAnswers - before.counters.documentAnswers).toBe(1)
-      expect(after.counters.documentFailures - before.counters.documentFailures).toBe(0)
     })
 
     await screenshotAndLog(page, testInfo, 'desktop-document-upload-fixture')

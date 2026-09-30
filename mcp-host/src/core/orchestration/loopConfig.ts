@@ -115,10 +115,11 @@ export interface LoopConfig {
 
   /**
    * T1.5 — Tool-result spillover. When set, `executeSingleTool` calls
-   * `spilloverStorage.maybePersist(...)` on every non-error output that is
-   * not produced by `clerum__spillover_read`. Outputs over the threshold are
-   * persisted out-of-band and the `tool` message ships a `SpilloverSummary`
-   * in `content` plus the URI on the lateral `spillover_ref` field.
+   * `spilloverStorage.maybePersist(...)` on every non-error output of a tool
+   * that does not declare `spilloverExempt()` (`clerum__spillover_read` and
+   * `clerum__attachment_read` do). Outputs over the threshold are persisted
+   * out-of-band and the `tool` message ships a `SpilloverSummary` in
+   * `content` plus the URI on the lateral `spillover_ref` field.
    *
    * When undefined, `executeSingleTool` returns inline content as before
    * (1:1 with the pre-T1.5 behavior).

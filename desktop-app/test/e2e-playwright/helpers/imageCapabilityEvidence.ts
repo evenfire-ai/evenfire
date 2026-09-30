@@ -270,6 +270,11 @@ export interface FixtureProviderAttempt {
    * `null` on the read-request row, which carries no document yet.
    */
   documentSha256?: string | null
+  /**
+   * Byte length the Host listed for the attached file (`attached_file … bytes=`).
+   * Present only on the read-request row.
+   */
+  documentByteLength?: number
 }
 
 export interface FixtureEvidenceCounters {
@@ -361,7 +366,28 @@ function requireAttemptRow(value: unknown, index: number, source: string): Fixtu
         `${source}: attempts[${index}].documentSha256 must be a sha256 hex digest or null`
       )
     }
+    // Present only on the read-request row.
+    if ('documentByteLength' in value) {
+      const documentByteLength = value.documentByteLength
+      if (
+        responseKind !== FIXTURE_RESPONSE_KIND.documentReadRequested ||
+        typeof documentByteLength !== 'number' ||
+        !Number.isSafeInteger(documentByteLength) ||
+        documentByteLength <= 0
+      ) {
+        throw new Error(
+          `${source}: attempts[${index}].documentByteLength must be a positive integer on a ` +
+            `${FIXTURE_RESPONSE_KIND.documentReadRequested} row`
+        )
+      }
+      return { model, imageSha256, responseKind, documentSha256, documentByteLength }
+    }
     return { model, imageSha256, responseKind, documentSha256 }
+  }
+  if ('documentByteLength' in value) {
+    throw new Error(
+      `${source}: attempts[${index}].documentByteLength is only valid on a document row`
+    )
   }
 
   return { model, imageSha256, responseKind }
@@ -508,7 +534,8 @@ export function appendedAttempts(
       current.model !== row.model ||
       current.imageSha256 !== row.imageSha256 ||
       current.responseKind !== row.responseKind ||
-      current.documentSha256 !== row.documentSha256
+      current.documentSha256 !== row.documentSha256 ||
+      current.documentByteLength !== row.documentByteLength
     ) {
       throw new Error(
         `[image-capabilities] ledger row ${index} changed between reads; the ledger must be append-only.`

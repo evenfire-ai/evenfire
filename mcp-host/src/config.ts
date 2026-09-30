@@ -240,7 +240,11 @@ export interface Config {
   enableResponseAttachments: boolean
   attachmentMaxCount: number
   attachmentMaxBytes: number
-  /** Decoded bytes per incoming `kind:'file'` attachment (issue #666). */
+  /**
+   * Decoded bytes per incoming `kind:'file'` attachment (issue #666). The
+   * default (11 MiB) matches the file quota of the chat body parser in
+   * `server.ts` and rpc-proxy (issue #678).
+   */
   attachmentFileMaxBytes: number
   /** Bytes one `clerum__attachment_read` call may return (issue #666). */
   attachmentTextReadMaxBytes: number
@@ -499,10 +503,13 @@ function buildDevHostConfig(provider?: LlmProvider, modelName?: string): HostSpe
 
 const devMode = getEnvBool('CLERUM_DEV_MODE', false)
 // Read once: the top-level field documents the limit, `nativeTool` carries it
-// to `clerum__attachment_read` (#666).
+// to `clerum__attachment_read` (#666). A page is shipped inline (the tool is
+// spillover-exempt), so the default is sized against the context budget: at
+// the tokenizer heuristic of 4 bytes per token, 65_536 bytes is ~16k tokens,
+// about a fifth of the default compaction budget (0.8 * contextMaxTokens).
 const attachmentTextReadMaxBytes = getExecutionLimit(
   'CLERUM_ATTACHMENT_TEXT_READ_MAX_BYTES',
-  262_144
+  65_536
 )
 const configuredWorkflowEnabled = getEnvBool('CLERUM_WORKFLOW_ENABLED', false)
 const configuredRuntimeKind = resolveMcpHostRuntimeKind({
@@ -1035,7 +1042,7 @@ export const config: Config = {
   enableResponseAttachments: getEnvBool('CLERUM_ENABLE_RESPONSE_ATTACHMENTS', true),
   attachmentMaxCount: parseInt(getEnv('CLERUM_ATTACHMENT_MAX_COUNT', '3')!, 10),
   attachmentMaxBytes: parseInt(getEnv('CLERUM_ATTACHMENT_MAX_BYTES', '52428800')!, 10),
-  attachmentFileMaxBytes: getExecutionLimit('CLERUM_ATTACHMENT_FILE_MAX_BYTES', 3_145_728),
+  attachmentFileMaxBytes: getExecutionLimit('CLERUM_ATTACHMENT_FILE_MAX_BYTES', 11_534_336),
   attachmentTextReadMaxBytes,
   fileReferenceMaxCount: FILE_REFERENCE_MAX_COUNT,
   activityBufferSize: parseInt(getEnv('MCP_HOST_ACTIVITY_BUFFER_SIZE', '1000')!, 10),
