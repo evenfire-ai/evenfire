@@ -73,6 +73,17 @@ async function mountedVisualController() {
   return rendered
 }
 
+// The terminal handler releases the chat's task only after the reply is written
+// to the store, and the real ChatStore writes it to disk. A second send issued
+// before that write lands is refused while the first task still holds the chat.
+async function waitForPersistedReply(chatId: string) {
+  await waitFor(async () =>
+    expect(
+      (await bridge.persistedMessages('agent-x', chatId)).map(message => message.role)
+    ).toEqual(['user', 'assistant'])
+  )
+}
+
 describe('#654 visual send and recovery', () => {
   it('blocks pending images after selecting a text-only model, before creating a chat', async () => {
     const { result } = await mountedVisualController()
@@ -229,6 +240,7 @@ describe('#654 visual send and recovery', () => {
       })
     })
     await waitFor(() => expect(bridge.rpc.getTaskResult).toHaveBeenCalled())
+    await waitForPersistedReply(chatId)
 
     // The chat now exists, so its own catalog read settles — carrying the server's
     // OWN revision 0, which is older than the ack and must not overwrite it.
@@ -288,6 +300,7 @@ describe('#654 visual send and recovery', () => {
       })
     })
     await waitFor(() => expect(bridge.rpc.getTaskResult).toHaveBeenCalled())
+    await waitForPersistedReply(chatId)
 
     await act(async () => {
       await loadHostModels(modelTransport, 'agent-x', chatId)
@@ -331,7 +344,9 @@ describe('#654 visual send and recovery', () => {
     })
     expect(result.current.failedAgentSend).toBeNull()
     expect(result.current.agentError).toBeNull()
+    // Witness: the outgoing turn was persisted once, before the POST. The real
+    // store keeps that write in `upsertMessages`; the failure path added none.
     expect(bridge.chat.upsertMessages).toHaveBeenCalledTimes(1)
-    expect(bridge.chat.appendMessages).toHaveBeenCalledTimes(1)
+    expect(bridge.chat.appendMessages).not.toHaveBeenCalled()
   })
 })

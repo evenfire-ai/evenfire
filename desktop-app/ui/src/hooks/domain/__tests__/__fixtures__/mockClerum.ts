@@ -1,4 +1,9 @@
-import { type Mock, vi } from 'vitest'
+import { type Mock, inject, vi } from 'vitest'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { join } from 'node:path'
+import { ChatStore } from '../../../../../../src/chatStore'
+import type { ChatDeleteFence, ChatMessage } from '../../../../../../src/types'
+import type {} from './mockClerumStoreRoot'
 
 /**
  * D.0 characterization fixture — installs a fake `window.clerum` bridge.
@@ -8,7 +13,18 @@ import { type Mock, vi } from 'vitest'
  * `useAppController.test.tsx`). `useChatStore` is a thin wrapper over
  * `window.clerum.chat.*` / `window.clerum.rpc.*`, so this exercises the real
  * hook code path and keeps the suite consistent with the rest of the repo.
+ *
+ * R1-M11: the transcript writes and reads (`create`, `delete`, `loadMessages`,
+ * `appendMessages`, `upsertMessages`) delegate to a real `ChatStore` on a
+ * per-install directory under the run's temporary root, so suites observe the
+ * merge, delete tombstone and paging behavior the IPC handlers run in
+ * production. They stay `vi.fn` wrappers, so call assertions and per-test
+ * overrides keep working. `uninstallMockClerum` removes the directory; the
+ * global setup in `mockClerumStoreRoot.ts` removes the root after the run,
+ * including any directory a late store write recreated.
  */
+
+const storeDirs = new Set<string>()
 
 type Handler = (event: unknown) => void
 // `ReturnType<typeof vi.fn>` resolves to `Mock<Procedure | Constructable>`, and
@@ -61,31 +77,26 @@ export interface MockClerum {
   hasProgressHandler: (taskId: string) => boolean
   /** True once an activity handler exists for `hostRef`. */
   hasActivityHandler: (hostRef: string) => boolean
-  /** What the fake store holds for one chat after append/upsert writes. */
-  persistedMessages: (agentRef: string, chatId: string) => Array<Record<string, unknown>>
+  /** What the real store holds for one chat, read straight from it. */
+  persistedMessages: (agentRef: string, chatId: string) => Promise<Array<Record<string, unknown>>>
 }
 
 export function installMockClerum(): MockClerum {
   const progressHandlers = new Map<string, Handler>()
   const activityHandlers = new Map<string, Handler>()
-  // What the fake store holds per chat, so `upsertMessages` can merge like the
-  // real `ChatStore.upsertMessages` instead of dropping a second write of an id.
-  const persistedByChat = new Map<string, Array<Record<string, unknown>>>()
-  const persistedKey = (agentRef: string, chatId: string) => `${agentRef}\u0000${chatId}`
-  const persistedIndexOf = (persisted: Array<Record<string, unknown>>, id: string) =>
-    persisted.findIndex(message => message.id === id)
-
-  const isoNow = () => new Date().toISOString()
+  const root = inject('mockClerumStoreRoot')
+  if (!root) {
+    throw new Error(
+      'mockClerum needs the mockClerumStoreRoot global setup; add it to the vitest globalSetup list'
+    )
+  }
+  const storeDir = mkdtempSync(join(root, 'store-'))
+  storeDirs.add(storeDir)
+  const store = new ChatStore(storeDir)
 
   const chat = {
     list: vi.fn(async () => []),
-    create: vi.fn(async (_agentRef: string, chatId: string) => ({
-      id: chatId,
-      title: 'New Chat',
-      createdAt: isoNow(),
-      updatedAt: isoNow(),
-      messageCount: 0,
-    })),
+    create: vi.fn((agentRef: string, chatId: string) => store.createChat(agentRef, chatId)),
     rename: vi.fn(async () => undefined),
     getBindingGeneration: vi.fn(async () => 1),
     captureDeleteFence: vi.fn(async (authorityScope: unknown) => ({
@@ -94,44 +105,21 @@ export function installMockClerum(): MockClerum {
       bindingGeneration: 1,
       sessionGeneration: 1,
     })),
-    delete: vi.fn(async () => ({ cleanupPending: false })),
-    loadMessages: vi.fn(async () => []),
-    appendMessages: vi.fn(async (agentRef: string, chatId: string, messages: unknown[]) => {
-      const key = persistedKey(agentRef, chatId)
-      persistedByChat.set(key, [
-        ...(persistedByChat.get(key) ?? []),
-        ...(messages as Array<Record<string, unknown>>),
-      ])
+    // `chat:delete` hands the fence's scope to the store once main has matched
+    // it against the current authority; the store holds that same scope.
+    delete: vi.fn((agentRef: string, chatId: string, fence: ChatDeleteFence) => {
+      store.setAuthorityScope(fence.authorityScope)
+      return store.deleteChat(agentRef, chatId, fence.authorityScope)
     }),
-    /**
-     * Mirrors `ChatStore.upsertMessages` (src/chatStore.ts, the id branch of
-     * `mergeReconciledMessages`): per chat, an id already persisted is replaced
-     * in place and keeps its existing `task_id`; a new id is appended. New ids
-     * still go through `appendMessages` so suites that count persisted turns
-     * keep observing them there.
-     */
-    upsertMessages: vi.fn(async (agentRef: string, chatId: string, messages: unknown[]) => {
-      const key = persistedKey(agentRef, chatId)
-      const persisted = persistedByChat.get(key) ?? []
-      const unseen: Array<Record<string, unknown>> = []
-      for (const message of messages as Array<Record<string, unknown>>) {
-        const id = message.id
-        if (typeof id !== 'string') {
-          throw new Error(`mockClerum.upsertMessages: message without a string id in ${chatId}`)
-        }
-        const index = persistedIndexOf(persisted, id)
-        if (index < 0) {
-          const pending = persistedIndexOf(unseen, id)
-          if (pending < 0) unseen.push(message)
-          else unseen[pending] = message
-          continue
-        }
-        const taskId = persisted[index]?.task_id ?? message.task_id
-        persisted[index] = { ...message, ...(taskId !== undefined ? { task_id: taskId } : {}) }
-      }
-      persistedByChat.set(key, persisted)
-      if (unseen.length) await chat.appendMessages(agentRef, chatId, unseen)
-    }),
+    loadMessages: vi.fn((agentRef: string, chatId: string, limit?: number, offset?: number) =>
+      store.loadMessages(agentRef, chatId, limit, offset)
+    ),
+    appendMessages: vi.fn((agentRef: string, chatId: string, messages: ChatMessage[]) =>
+      store.appendMessages(agentRef, chatId, messages)
+    ),
+    upsertMessages: vi.fn((agentRef: string, chatId: string, messages: ChatMessage[]) =>
+      store.upsertMessages(agentRef, chatId, messages)
+    ),
     replaceMessages: vi.fn(async () => undefined),
     markUnreadTerminal: vi.fn(async () => undefined),
     clearUnreadTerminal: vi.fn(async () => undefined),
@@ -191,9 +179,8 @@ export function installMockClerum(): MockClerum {
     },
     hasProgressHandler: (taskId: string) => progressHandlers.has(taskId),
     hasActivityHandler: (hostRef: string) => activityHandlers.has(hostRef),
-    persistedMessages: (agentRef: string, chatId: string) => [
-      ...(persistedByChat.get(persistedKey(agentRef, chatId)) ?? []),
-    ],
+    persistedMessages: async (agentRef: string, chatId: string) =>
+      (await store.loadMessages(agentRef, chatId)) as unknown as Array<Record<string, unknown>>,
   }
 
   Object.defineProperty(window, 'clerum', {
@@ -207,4 +194,6 @@ export function installMockClerum(): MockClerum {
 
 export function uninstallMockClerum(): void {
   delete (window as { clerum?: unknown }).clerum
+  for (const dir of storeDirs) rmSync(dir, { recursive: true, force: true })
+  storeDirs.clear()
 }

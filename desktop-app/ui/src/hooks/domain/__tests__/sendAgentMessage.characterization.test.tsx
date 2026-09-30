@@ -49,8 +49,16 @@ describe('sendAgentMessage — synchronous (non-async) response', () => {
 
     // No async task → no progress subscription was ever opened.
     expect(clerum.rpc.subscribeTaskProgress).not.toHaveBeenCalled()
-    // user message + assistant reply persisted.
-    expect(clerum.chat.appendMessages).toHaveBeenCalledTimes(2)
+    // user message (upserted before the POST) + assistant reply (appended) are
+    // both in the store.
+    const chatId = result.current.activeChatId!
+    expect(
+      (await clerum.persistedMessages('agent-x', chatId)).map(m => [m.role, m.content])
+    ).toEqual([
+      ['user', 'quick question'],
+      ['assistant', 'direct answer'],
+    ])
+    expect(clerum.chat.appendMessages).toHaveBeenCalledTimes(1)
     const assistant = clerum.chat.appendMessages.mock.calls.at(-1)?.[2] as
       | Array<{ role?: string; content?: string; isError?: boolean }>
       | undefined
@@ -96,7 +104,7 @@ describe('sendAgentMessage — POST failure', () => {
     expect(result.current.failedAgentSend?.kind).toBe('network')
     // Late persist: the POST threw before the single post-taskId persist, so the
     // user's typed input is still written to the store (best-effort durability).
-    expect(clerum.chat.appendMessages).toHaveBeenCalledWith(
+    expect(clerum.chat.upsertMessages).toHaveBeenCalledWith(
       'agent-x',
       expect.any(String),
       expect.arrayContaining([
@@ -252,9 +260,9 @@ describe('sendAgentMessage — outgoing user turn persistence', () => {
       task_id: 'task-77',
     })
 
-    const persistedUserTurns = clerum
-      .persistedMessages(agentRef, chatId)
-      .filter(message => message.role === 'user')
+    const persistedUserTurns = (await clerum.persistedMessages(agentRef, chatId)).filter(
+      message => message.role === 'user'
+    )
     expect(persistedUserTurns).toEqual([
       expect.objectContaining({ id: turnId, content: 'hello', task_id: 'task-77' }),
     ])
