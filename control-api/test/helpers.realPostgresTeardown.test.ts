@@ -6,14 +6,25 @@ import { Pool } from 'pg'
 import type { PoolClient } from 'pg'
 import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
-// pg-pool resolves end() while each client.end() is still in flight and emits
-// 'remove' from that client's end callback. The fake keeps that ordering: end()
-// resolves at once and the test decides when each client finishes closing.
-class FakePool extends EventEmitter {
-  readonly end = vi.fn(async () => {})
-  constructor(readonly totalCount: number) {
+// pg-pool resolves end() once its `_clients` list is empty, while each
+// client.end() it started is still in flight; a pg Client sets `_ended` and
+// emits 'end' when its connection has closed. The fakes keep that ordering:
+// end() resolves at once and the test decides when each client finishes
+// closing.
+class FakeClient extends EventEmitter {
+  constructor(public _ended = false) {
     super()
   }
+
+  finishClosing(): void {
+    this._ended = true
+    this.emit('end')
+  }
+}
+
+class FakePool {
+  readonly end = vi.fn(async () => {})
+  constructor(readonly _clients: unknown) {}
 }
 
 async function settledAfterMicrotasks(promise: Promise<void>): Promise<boolean> {
@@ -26,35 +37,51 @@ async function settledAfterMicrotasks(promise: Promise<void>): Promise<boolean> 
 }
 
 describe('endPoolAndWaitForClients', () => {
-  it('resolves only after every client open at end() has emitted remove', async () => {
-    const pool = new FakePool(2)
+  it('resolves only after every client held at end() has ended', async () => {
+    const alreadyEnded = new FakeClient(true)
+    const a = new FakeClient()
+    const b = new FakeClient()
+    const pool = new FakePool([alreadyEnded, a, b])
     const done = endPoolAndWaitForClients(pool as unknown as Pool)
 
     expect(await settledAfterMicrotasks(done)).toBe(false)
     expect(pool.end).toHaveBeenCalledTimes(1)
+    expect(a.listenerCount('end')).toBe(1)
+    expect(b.listenerCount('end')).toBe(1)
+    expect(alreadyEnded.listenerCount('end')).toBe(0)
 
-    pool.emit('remove', {})
+    a.finishClosing()
     expect(await settledAfterMicrotasks(done)).toBe(false)
 
-    pool.emit('remove', {})
+    b.finishClosing()
     await expect(done).resolves.toBeUndefined()
-    expect(pool.listenerCount('remove')).toBe(0)
+    expect(a.listenerCount('end')).toBe(0)
+    expect(b.listenerCount('end')).toBe(0)
   })
 
   it('resolves after end() when the pool holds no client', async () => {
-    const pool = new FakePool(0)
+    const pool = new FakePool([])
     await expect(endPoolAndWaitForClients(pool as unknown as Pool)).resolves.toBeUndefined()
     expect(pool.end).toHaveBeenCalledTimes(1)
-    expect(pool.listenerCount('remove')).toBe(0)
   })
 
   it('rejects when end() rejects', async () => {
-    const pool = new FakePool(1)
+    const client = new FakeClient()
+    const pool = new FakePool([client])
     pool.end.mockRejectedValueOnce(new Error('Called end on pool more than once'))
     await expect(endPoolAndWaitForClients(pool as unknown as Pool)).rejects.toThrow(
       'Called end on pool more than once'
     )
-    expect(pool.listenerCount('remove')).toBe(0)
+    expect(pool.end).toHaveBeenCalledTimes(1)
+    expect(client.listenerCount('end')).toBe(0)
+  })
+
+  it('throws before end() when pg-pool no longer keeps _clients as an array', async () => {
+    const pool = new FakePool(new Set([new FakeClient()]))
+    await expect(endPoolAndWaitForClients(pool as unknown as Pool)).rejects.toThrow(
+      'pg-pool internals changed: _clients is not an array'
+    )
+    expect(pool.end).not.toHaveBeenCalled()
   })
 
   it('does nothing for a pool that was never created', async () => {
