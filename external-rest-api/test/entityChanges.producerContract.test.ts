@@ -231,7 +231,7 @@ describe('Control API entity-change producer contract', () => {
     let checkpoint = {
       resyncRequired: true,
       cursor: CURSOR,
-      scopes: [] as Array<'gfs' | 'authorization'>,
+      scopes: ['gfs', 'authorization'] as Array<'gfs' | 'authorization'>,
     }
     producerMocks.readEntityChangeCheckpoint.mockImplementation(async () => checkpoint)
     let wakeFeed: (() => void) | undefined
