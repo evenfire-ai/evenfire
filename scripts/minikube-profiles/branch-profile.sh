@@ -29,6 +29,8 @@ STATE_TEMP_PORTS=""
 STATE_NEW_CACHE_DIR=false
 PORT_FORWARD_OWNER_LOADED=false
 CONTEXT_IDENTITY_LOADED=false
+START_BEFORE_CONTEXT=""
+START_CONTEXT_RESTORE_PENDING=false
 
 die() {
   printf 'ERROR: %s\n' "$*" >&2
@@ -1025,6 +1027,48 @@ ensure_shims() {
   fi
 }
 
+# restore_global_context: undoes a move of the global kubectl current-context
+# onto ${PROFILE} made by minikube start, back to START_BEFORE_CONTEXT (or
+# unset, when none was set). A context other than the profile was chosen by
+# another session meanwhile and is left alone. It runs at most once per start
+# (START_CONTEXT_RESTORE_PENDING), so the EXIT trap does not repeat a restore
+# the success path already made. A failed restore prints its error and returns
+# 1; the caller decides the exit status.
+restore_global_context() {
+  [[ "${START_CONTEXT_RESTORE_PENDING}" == true ]] || return 0
+  START_CONTEXT_RESTORE_PENDING=false
+  local after_context
+  after_context="$(kubectl config current-context 2>/dev/null || true)"
+  [[ "${after_context}" == "${PROFILE}" && "${START_BEFORE_CONTEXT}" != "${PROFILE}" ]] || return 0
+  printf 'WARN: minikube moved the kubectl current-context from %s to %s despite --keep-context (its kubeconfig endpoint repair ignores the flag); restoring it\n' \
+    "${START_BEFORE_CONTEXT:-<unset>}" "${after_context}" >&2
+  if [[ -n "${START_BEFORE_CONTEXT}" ]]; then
+    if ! kubectl config use-context "${START_BEFORE_CONTEXT}" >/dev/null; then
+      printf 'ERROR: could not restore the kubectl current-context to %s; it is still %s\n' \
+        "${START_BEFORE_CONTEXT}" "${after_context}" >&2
+      return 1
+    fi
+    printf 'restored the kubectl current-context to %s\n' "${START_BEFORE_CONTEXT}" >&2
+  else
+    if ! kubectl config unset current-context >/dev/null; then
+      printf 'ERROR: could not clear the kubectl current-context minikube set; it is still %s\n' \
+        "${after_context}" >&2
+      return 1
+    fi
+    printf 'cleared the kubectl current-context minikube set; none was set before the start\n' >&2
+  fi
+}
+
+# EXIT trap around minikube start. A failed restore turns an exit status of 0
+# into 1, and never replaces a non-zero status (the failed start's own code).
+restore_global_context_on_exit() {
+  local status=$?
+  if ! restore_global_context && (( status == 0 )); then
+    status=1
+  fi
+  exit "${status}"
+}
+
 cmd_start() {
   require_command git minikube kubectl helm shasum
   require_local_context_endpoint
@@ -1039,9 +1083,15 @@ cmd_start() {
   # --keep-context: UpdateEndpoint repairs the kubeconfig entry (the docker
   # driver publishes the API server on a new host port) with KeepContext false.
   # Put the previous context back so no other session is steered onto this
-  # cluster; a context another session chose meanwhile is left alone.
-  local before_context after_context
-  before_context="$(kubectl config current-context 2>/dev/null || true)"
+  # cluster; a context another session chose meanwhile is left alone. A start
+  # that fails or is interrupted may have moved it too, so the restore is armed
+  # in an EXIT trap for the duration of minikube start (INT and TERM exit
+  # through it) and disarmed once it has run.
+  START_BEFORE_CONTEXT="$(kubectl config current-context 2>/dev/null || true)"
+  START_CONTEXT_RESTORE_PENDING=true
+  trap restore_global_context_on_exit EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
   printf 'starting minikube profile: %s\n' "${PROFILE}"
   run_bounded minikube-start "${MINIKUBE_START_TIMEOUT_SECONDS}" minikube start \
     -p "${PROFILE}" \
@@ -1050,20 +1100,8 @@ cmd_start() {
     --cpus="${MINIKUBE_CPUS}" \
     --cni="${MINIKUBE_CNI}" \
     --driver="${MINIKUBE_DRIVER}"
-  after_context="$(kubectl config current-context 2>/dev/null || true)"
-  if [[ "${after_context}" == "${PROFILE}" && "${before_context}" != "${PROFILE}" ]]; then
-    printf 'WARN: minikube moved the kubectl current-context from %s to %s despite --keep-context (its kubeconfig endpoint repair ignores the flag); restoring it\n' \
-      "${before_context:-<unset>}" "${after_context}" >&2
-    if [[ -n "${before_context}" ]]; then
-      kubectl config use-context "${before_context}" >/dev/null ||
-        die "could not restore the kubectl current-context to ${before_context}; it is still ${after_context}"
-      printf 'restored the kubectl current-context to %s\n' "${before_context}" >&2
-    else
-      kubectl config unset current-context >/dev/null ||
-        die "could not clear the kubectl current-context minikube set; it is still ${after_context}"
-      printf 'cleared the kubectl current-context minikube set; none was set before the start\n' >&2
-    fi
-  fi
+  restore_global_context || exit 1
+  trap - EXIT INT TERM
   run_bounded minikube-status "${MINIKUBE_STATUS_TIMEOUT_SECONDS}" \
     minikube -p "${PROFILE}" status
   require_profile_cluster_identity
