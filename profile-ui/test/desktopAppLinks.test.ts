@@ -1,11 +1,36 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
+  buildDesktopEnvironmentLink,
   buildEvenfireDesktopAppContentSecurityPolicy,
   buildEvenfireDesktopAppLink,
   buildEvenfireDesktopAppRedirectDocument,
   navigateToDesktopApp,
 } from '../lib/desktopAppLinks'
+
+test('buildDesktopEnvironmentLink defaults the tenant name to Evenfire', () => {
+  const link = buildDesktopEnvironmentLink({
+    externalRestApiBaseUrl: 'https://api.example.com',
+    rpcProxyBaseUrl: '',
+    appName: '',
+  })
+
+  assert.ok(link)
+  const parsedLink = new URL(link)
+  assert.equal(parsedLink.searchParams.get('tenantName'), 'Evenfire')
+})
+
+test('buildDesktopEnvironmentLink omits an empty RPC proxy URL', () => {
+  const link = buildDesktopEnvironmentLink({
+    externalRestApiBaseUrl: 'https://api.example.com',
+    rpcProxyBaseUrl: '',
+    appName: 'Example tenant',
+  })
+
+  assert.ok(link)
+  const parsedLink = new URL(link)
+  assert.equal(parsedLink.searchParams.get('rpcProxyBaseUrl'), null)
+})
 
 test('navigateToDesktopApp assigns the protocol URL to the browser location', () => {
   const location = { href: 'https://profile.example.com/settings' }
