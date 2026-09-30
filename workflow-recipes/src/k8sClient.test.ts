@@ -3341,7 +3341,10 @@ describe('handleOAuthBrokerTokenAdded', () => {
     expect(enqueue).not.toHaveBeenCalled()
   })
 
-  it('only re-arms the ledger for a recipe not yet cached: its own queued event reaps', () => {
+  it('re-arms the ledger and enqueues nothing for a recipe not yet cached', () => {
+    // The recipe's own ADDED event is queued already; that its pass then
+    // reaps the re-armed token is pinned in reconciler.test.ts by the B3
+    // ledger test "deletes the Secret again after ADDED invalidation".
     const { internal, invalidate, enqueue } = setup()
     internal.handleOAuthBrokerTokenAdded(internal.config.sandboxNamespace, 'not-cached')
     // Liveness witness: the handler ran and armed the ledger for that recipe.
