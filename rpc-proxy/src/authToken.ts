@@ -29,6 +29,7 @@ export function verifyRpcToken(token: string): RpcAccessClaims | null {
 
     if (
       typeof payload?.sub !== 'string' ||
+      payload.sub.trim().length === 0 ||
       (payload?.typ !== 'user' && payload?.typ !== 'service') ||
       !Array.isArray(payload?.scopes) ||
       !Array.isArray(payload?.hostRefs) ||
