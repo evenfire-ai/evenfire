@@ -57,10 +57,13 @@ function sign(payload: Record<string, unknown>, audience: string): string {
   })
 }
 
-function platformToken(hostRefs: string[] = ['research-host']): string {
+function platformToken(
+  hostRefs: string[] = ['research-host'],
+  sub = 'default/research-host'
+): string {
   return sign(
     {
-      sub: 'default/research-host',
+      sub,
       hostRefs,
       workflowControlScopes: ['llm:codex:execute'],
       scope: 'workflow:approval:request',
@@ -625,6 +628,108 @@ describe('visual stream-gate handoff', () => {
       // Host A's share was released with its entries, so a fresh A request is
       // admitted again and reaches the ticket check.
       await expectNextVisualAdmitted(port, maxBodyBytes)
+    })
+
+    // Review R3-L8: the share key sorts hostRefs, so one principal cannot
+    // double its share by listing the same hosts in another order.
+    it('counts one principal once whatever order its hostRefs arrive in', async () => {
+      const maxBodyBytes =
+        Buffer.byteLength(completionPayload('codex-completion-request.v1').body) + 512
+      const hang = hangStream()
+      hangs.push(hang)
+      const warn = vi.spyOn(logger, 'warn')
+      const port = listen(
+        createProxyApps(config({ maxBodyBytes, maxVisualBodyBytes: 1024 * 1024 }), {
+          streamCompletion: hang.impl,
+        })
+      )
+      const forward = ['research-host', 'zeta-host']
+      const reversed = ['zeta-host', 'research-host']
+
+      // Two running entries, one per order, then two queued, one per order.
+      const first = postCompletion(
+        port,
+        'codex-completion-request.v2',
+        'x'.repeat(maxBodyBytes),
+        forward
+      )
+      const second = postCompletion(
+        port,
+        'codex-completion-request.v2',
+        'x'.repeat(maxBodyBytes),
+        reversed
+      )
+      await waitFor(
+        () => visualStreamGate.snapshot().running === 2,
+        'the two entries did not take both running visual slots'
+      )
+      const third = postBody(port, platformToken(forward), invalidTicketBody(maxBodyBytes))
+      const fourth = postBody(port, platformToken(reversed), invalidTicketBody(maxBodyBytes))
+      await waitFor(
+        () => visualStreamGate.snapshot().queued === 2,
+        'the two entries did not take two queued visual entries'
+      )
+
+      // Without the sort, each order is a key holding two entries, and this
+      // request would be admitted.
+      // Wait for an answer or a queue place, so an admission fails on the
+      // assertion below rather than hanging behind the held stream.
+      let refused: Response | undefined
+      const refusedRequest = postBody(
+        port,
+        platformToken(reversed),
+        invalidTicketBody(maxBodyBytes)
+      ).then(res => {
+        refused = res
+        return res
+      })
+      await waitFor(
+        () => refused !== undefined || visualStreamGate.snapshot().queued > 2,
+        'the request over the share neither answered nor took a queue place'
+      )
+      expect(
+        visualStreamGate.snapshot().queued,
+        'the reversed hostRefs order was admitted as another principal'
+      ).toBe(2)
+      const fifth = await refusedRequest
+      expect(fifth.status).toBe(503)
+      expect(await fifth.json()).toEqual({ error: 'provider_unavailable' })
+      expect(warn).toHaveBeenCalledWith(
+        {
+          event: 'codex_proxy_admission_refused',
+          reason: 'visual_host_share',
+          limit: VISUAL_PER_HOST_MAX_ADMITTED,
+          sub: 'default/research-host',
+          hostRefs: forward,
+        },
+        'admission refused'
+      )
+      expect(visualStreamGate.snapshot()).toEqual({ running: 2, queued: 2 })
+
+      // Witness: another sub with the same hosts in the same order is another
+      // principal, and is admitted while the first holds its full share.
+      const otherSub = postBody(
+        port,
+        platformToken(forward, 'default/other-host'),
+        invalidTicketBody(maxBodyBytes)
+      )
+      await waitFor(
+        () => visualStreamGate.snapshot().queued === 3,
+        'another sub was not admitted while the first principal held its full share'
+      )
+
+      hang.release()
+      await first
+      await second
+      for (const pending of [third, fourth, otherSub]) {
+        const res = await pending
+        expect(res.status).toBe(403)
+        expect(await res.json()).toEqual({ error: 'ticket_invalid' })
+      }
+      await waitFor(
+        () => visualStreamGate.snapshot().running === 0 && visualStreamGate.snapshot().queued === 0,
+        'the visual gate did not drain'
+      )
     })
   })
 

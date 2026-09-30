@@ -59,10 +59,13 @@ function sign(payload: Record<string, unknown>, audience: string): string {
   })
 }
 
-function platformToken(hostRefs: string[] = ['research-host']): string {
+function platformToken(
+  hostRefs: string[] = ['research-host'],
+  sub = 'default/research-host'
+): string {
   return sign(
     {
-      sub: 'default/research-host',
+      sub,
       hostRefs,
       workflowControlScopes: ['llm:grok:execute'],
       scope: 'workflow:approval:request',
@@ -609,6 +612,100 @@ describe('grok visual stream-gate handoff', () => {
       // Host A's share was released with its entries, so a fresh A request is
       // admitted again and reaches the ticket check.
       await expectNextVisualAdmitted(port, maxBodyBytes)
+    })
+
+    // Review R3-L8: the share key sorts hostRefs, so one principal cannot
+    // double its share by listing the same hosts in another order.
+    it('counts one principal once whatever order its hostRefs arrive in', async () => {
+      const maxBodyBytes =
+        Buffer.byteLength(completionPayload('grok-completion-request.v1').body) + 512
+      const hang = hangStream()
+      hangs.push(hang)
+      const warn = vi.spyOn(logger, 'warn')
+      const port = listen(
+        createProxyApps(config({ maxBodyBytes, maxVisualBodyBytes: 1024 * 1024 }), {
+          streamCompletion: hang.impl,
+        })
+      )
+      const forward = ['research-host', 'zeta-host']
+      const reversed = ['zeta-host', 'research-host']
+
+      const first = postCompletion(
+        port,
+        'grok-completion-request.v2',
+        'x'.repeat(maxBodyBytes),
+        forward
+      )
+      await waitFor(
+        () => visualStreamGate.snapshot().running === 1,
+        'the forward-order entry did not take the running visual slot'
+      )
+      const second = postBody(port, platformToken(reversed), invalidTicketBody(maxBodyBytes))
+      await waitFor(
+        () => visualStreamGate.snapshot().queued === 1,
+        'the reversed-order entry did not take a queued visual entry'
+      )
+
+      // Without the sort, the reversed order is a key holding one entry, and
+      // this request would be admitted.
+      // Wait for an answer or a queue place, so an admission fails on the
+      // assertion below rather than hanging behind the held stream.
+      let refused: Response | undefined
+      const refusedRequest = postBody(
+        port,
+        platformToken(reversed),
+        invalidTicketBody(maxBodyBytes)
+      ).then(res => {
+        refused = res
+        return res
+      })
+      await waitFor(
+        () => refused !== undefined || visualStreamGate.snapshot().queued > 1,
+        'the request over the share neither answered nor took a queue place'
+      )
+      expect(
+        visualStreamGate.snapshot().queued,
+        'the reversed hostRefs order was admitted as another principal'
+      ).toBe(1)
+      const third = await refusedRequest
+      expect(third.status).toBe(503)
+      expect(await third.json()).toEqual({ error: 'provider_unavailable' })
+      expect(warn).toHaveBeenCalledWith(
+        {
+          event: 'grok_proxy_admission_refused',
+          reason: 'visual_host_share',
+          limit: VISUAL_PER_HOST_MAX_ADMITTED,
+          sub: 'default/research-host',
+          hostRefs: forward,
+        },
+        'admission refused'
+      )
+      expect(visualStreamGate.snapshot()).toEqual({ running: 1, queued: 1 })
+
+      // Witness: another sub with the same hosts in the same order is another
+      // principal, and is admitted while the first holds its full share.
+      const otherSub = postBody(
+        port,
+        platformToken(forward, 'default/other-host'),
+        invalidTicketBody(maxBodyBytes)
+      )
+      await waitFor(
+        () => visualStreamGate.snapshot().queued === 2,
+        'another sub was not admitted while the first principal held its full share'
+      )
+
+      hang.release()
+      await first
+      const secondRes = await second
+      expect(secondRes.status).toBe(403)
+      expect(await secondRes.json()).toEqual({ error: 'ticket_invalid' })
+      const otherRes = await otherSub
+      expect(otherRes.status).toBe(403)
+      expect(await otherRes.json()).toEqual({ error: 'ticket_invalid' })
+      await waitFor(
+        () => visualStreamGate.snapshot().running === 0 && visualStreamGate.snapshot().queued === 0,
+        'the visual gate did not drain'
+      )
     })
   })
 
