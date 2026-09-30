@@ -26,6 +26,15 @@ describe('BasicSafety', () => {
     expect(result.errors.join(' ')).toMatch(/kubernetes|cluster/i)
   })
 
+  it('blocks special-purpose non-public http_request targets before execution', () => {
+    const result = safety.validateToolParams('http_request', {
+      url: 'http://100.64.0.1/',
+    })
+
+    expect(result.is_valid).toBe(false)
+    expect(result.errors).toContain('Non-public target "100.64.0.1" is blocked')
+  })
+
   it('blocks shell_exec attempts to read service account tokens', () => {
     const result = safety.validateToolParams('shell_exec', {
       command: 'cat /var/run/secrets/kubernetes.io/serviceaccount/token',
@@ -122,10 +131,7 @@ describe('BasicSafety', () => {
       const s = new BasicSafety(() => [
         { name: 'OPENAI_API_KEY', value: 'totally-not-a-pattern-match-12345' },
       ])
-      const result = s.sanitizeOutput(
-        'shell_exec',
-        'echoed key totally-not-a-pattern-match-12345'
-      )
+      const result = s.sanitizeOutput('shell_exec', 'echoed key totally-not-a-pattern-match-12345')
 
       expect(result.content).toContain('[REDACTED:OPENAI_API_KEY]')
       expect(result.content).not.toContain('totally-not-a-pattern-match-12345')
@@ -162,9 +168,7 @@ describe('BasicSafety', () => {
     })
 
     it('reads from the provider on every call (hot reload)', () => {
-      let entries: Array<{ name: string; value: string }> = [
-        { name: 'TOK', value: 'rev-1-secret' },
-      ]
+      let entries: Array<{ name: string; value: string }> = [{ name: 'TOK', value: 'rev-1-secret' }]
       const s = new BasicSafety(() => entries)
 
       const r1 = s.sanitizeOutput('shell_exec', 'echo rev-1-secret here')
