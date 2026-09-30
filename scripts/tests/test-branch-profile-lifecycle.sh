@@ -253,6 +253,18 @@ fi
 # was called, which pins the clear-records-before-stop ordering.
 printf 'minikube %s pidfiles=%s\n' "$*" "${pidfiles}" >>"${state}/calls.log"
 case " $* " in
+  # minikube-profile-list holds the JSON `minikube profile list -o json` prints.
+  *" profile list "*)
+    [[ "$*" == 'profile list -o json' ]] || {
+      printf 'minikube stub: unsupported profile call: %s\n' "$*" >&2
+      exit 64
+    }
+    [[ ! -e "${state}/minikube-profile-list-fails" ]] || {
+      printf 'stub: minikube profile list failed\n' >&2
+      exit 5
+    }
+    cat "${state}/minikube-profile-list"
+    ;;
   *" start "*)
     if [[ -e "${state}/start-switches-context" ]]; then
       printf '%s\n' "${profile}" >"${state}/current-context"
@@ -317,11 +329,25 @@ reset_state() {
   : >"${state}/reachable"
   rm -f "${state}/fail-get-deploy" "${state}/curl-fail" "${state}/start-switches-context" \
     "${state}/pf-ignores-term" "${state}/minikube-stop-fails" "${state}/minikube-delete-fails" \
-    "${state}/node-label"
-  # By default the branch profile's context is this local Minikube and its node
-  # carries the profile label at the address `minikube ip` reports.
+    "${state}/node-label" "${state}/minikube-profile-list-fails"
+  # By default the branch profile's context is this local Minikube, minikube
+  # lists the profile, and its node carries the profile label at the address
+  # `minikube ip` reports.
   write_kube_contexts "${profile:-}" https://127.0.0.1:32771
+  write_minikube_profiles "${profile:-}"
   printf '192.168.49.2\n' >"${state}/minikube-ip"
+}
+
+# write_minikube_profiles [<name>...]: `minikube profile list -o json` lists
+# each non-empty <name> as a running, valid profile.
+write_minikube_profiles() {
+  local name items="" separator=""
+  for name in "$@"; do
+    [[ -n "${name}" ]] || continue
+    items+="${separator}{\"Name\":\"${name}\",\"Status\":\"Running\"}"
+    separator=,
+  done
+  printf '{"invalid":[],"valid":[%s]}\n' "${items}" >"${state}/minikube-profile-list"
 }
 
 # write_kube_contexts <context> <server>: the kubeconfig holds another
@@ -759,6 +785,99 @@ assert_output_has "refusing symlinked port-forward PID directory: ${pids_dir}" '
 assert_log_has "minikube -p ${profile} stop" 'a die in stop-pf must not prevent minikube stop'
 rm -f "${pids_dir}"
 mv "${tmp}/pids-aside" "${pids_dir}"
+
+# === stop / delete: the context must name a profile minikube knows ============
+# A local endpoint does not prove that the context named after the profile is
+# this profile's: another local cluster, or one on a private address, passes
+# the endpoint check, and `minikube -p <p> delete` on a profile minikube does
+# not know removes the kubeconfig context of that name. A stopped profile
+# cannot be asked who it is, so stop and delete ask minikube which profiles it
+# has and refuse a context whose profile it does not list, before clearing any
+# port-forward record. The witness is the profile list read that decided.
+for action in stop delete; do
+  reset_state
+  bp "unknown-profile-${action}-pf" pf
+  assert_rc 0 "pf before ${action} of a profile minikube does not know"
+  write_minikube_profiles clerum-another-local-profile
+  : >"${state}/calls.log"
+  bp "unknown-profile-${action}" "${action}" "CONFIRM_DELETE=${profile}"
+  assert_rc 1 "${action} of a profile minikube does not know"
+  assert_output_has "BRANCH_PROFILE_UNKNOWN_MINIKUBE_PROFILE: minikube lists no profile ${profile}" \
+    "${action} of a profile minikube does not know"
+  assert_log_has 'minikube profile list -o json' "${action} read minikube's profiles"
+  assert_log_lacks "minikube -p ${profile}" "${action} of a profile minikube does not know must not run minikube -p"
+  assert_log_lacks 'kubectl --context=' "${action} of a profile minikube does not know must not address the cluster"
+  assert_file "${pids_dir}/control-ui.pid" "${action} of a profile minikube does not know keeps the port-forward records"
+  bp "unknown-profile-${action}-stop-pf" stop-pf
+  assert_rc 0 "stop-pf after the refused ${action}"
+done
+
+# A profile list that cannot be read is a refusal, not an empty list.
+for action in stop delete; do
+  reset_state
+  : >"${state}/minikube-profile-list-fails"
+  bp "profile-list-fails-${action}" "${action}" "CONFIRM_DELETE=${profile}"
+  assert_rc 1 "${action} when minikube profile list fails"
+  assert_output_has 'BRANCH_PROFILE_MINIKUBE_PROFILES_UNREADABLE: minikube profile list failed' \
+    "${action} when minikube profile list fails"
+  assert_log_has 'minikube profile list -o json' "${action} tried to read minikube's profiles"
+  assert_log_lacks "minikube -p ${profile}" "${action} when minikube profile list fails must not run minikube -p"
+done
+
+# Output that is not the {"invalid": [...], "valid": [...]} shape, with a
+# string Name on every entry, is refused too, even when it mentions the
+# profile: an error body, a missing list, an entry without a name.
+unreadable_lists=(
+  'not json'
+  '{"error":{"Advice":"x"}}'
+  '[]'
+  "{\"valid\":[{\"Name\":\"${profile}\"}]}"
+  "{\"invalid\":null,\"valid\":[{\"Name\":\"${profile}\"}]}"
+  "{\"invalid\":[],\"valid\":[{\"Name\":\"${profile}\"},{\"Status\":\"Running\"}]}"
+  "{\"invalid\":[],\"valid\":[{\"Name\":\"${profile}\"},\"${profile}\"]}"
+)
+for index in "${!unreadable_lists[@]}"; do
+  reset_state
+  printf '%s\n' "${unreadable_lists[${index}]}" >"${state}/minikube-profile-list"
+  bp "profile-list-unreadable-${index}" delete "CONFIRM_DELETE=${profile}"
+  assert_rc 1 "delete with unreadable profile list #${index}"
+  assert_output_has 'BRANCH_PROFILE_MINIKUBE_PROFILES_UNREADABLE: minikube profile list printed no readable profile lists' \
+    "delete with unreadable profile list #${index}"
+  assert_log_has 'minikube profile list -o json' "delete with unreadable profile list #${index} read minikube's profiles"
+  assert_log_lacks "minikube -p ${profile}" "delete with unreadable profile list #${index} must not run minikube -p"
+done
+
+# A known profile that is stopped (its cluster does not answer) is still
+# stopped and deleted; so is one minikube lists as invalid.
+for action in stop delete; do
+  reset_state
+  rm -f "${state}/reachable"
+  printf '{"invalid":[],"valid":[{"Name":"%s","Status":"Stopped"}]}\n' "${profile}" \
+    >"${state}/minikube-profile-list"
+  bp "stopped-known-${action}" "${action}" "CONFIRM_DELETE=${profile}"
+  assert_rc 0 "${action} of a stopped profile minikube knows"
+  assert_log_has 'minikube profile list -o json' "${action} of a stopped profile read minikube's profiles"
+  assert_log_has "minikube -p ${profile} ${action} pidfiles=0" "${action} of a stopped profile minikube knows ran"
+done
+reset_state
+printf '{"invalid":[{"Name":"%s","Status":"Unknown"}],"valid":[]}\n' "${profile}" \
+  >"${state}/minikube-profile-list"
+bp invalid-known-delete delete "CONFIRM_DELETE=${profile}"
+assert_rc 0 'delete of a profile minikube lists as invalid'
+assert_log_has 'minikube profile list -o json' "delete of an invalid profile read minikube's profiles"
+assert_log_has "minikube -p ${profile} delete pidfiles=0" 'delete of a profile minikube lists as invalid ran'
+
+# Without a context named after the profile there is nothing of another
+# cluster's to remove, so minikube is not asked and delete runs.
+reset_state
+write_kube_contexts '' ''
+write_minikube_profiles
+bp no-context-delete delete "CONFIRM_DELETE=${profile}"
+assert_rc 0 'delete of a profile without a kube context'
+# Witness: the kubeconfig read that found no context.
+assert_log_has 'kubectl config get-contexts -o name' 'delete without a kube context read the kubeconfig'
+assert_log_lacks 'minikube profile list' 'delete without a kube context must not need minikube profile list'
+assert_log_has "minikube -p ${profile} delete pidfiles=0" 'delete of a profile without a kube context ran'
 
 # === stop-pf attempts every record ============================================
 # record_pf_pids <name...>: PF_PIDS gets the recorded PID of each named forward.
