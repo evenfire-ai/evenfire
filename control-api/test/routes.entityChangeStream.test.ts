@@ -38,6 +38,7 @@ class FakeResponse extends EventEmitter {
   destroyed = false
   writableEnded = false
   writableLength = 0
+  writeReturns = true
   frames: string[] = []
   status(code: number): this {
     this.statusCode = code
@@ -51,7 +52,7 @@ class FakeResponse extends EventEmitter {
   }
   write(frame: string): boolean {
     this.frames.push(frame)
-    return true
+    return this.writeReturns
   }
   end(): void {
     this.writableEnded = true
@@ -333,6 +334,54 @@ describe('routes/entityChangeStream', () => {
       cursor: CURSOR,
       scopes: ['gfs'],
     })
+    closeActiveEntityChangeStreams()
+    await vi.advanceTimersByTimeAsync(0)
+    vi.useRealTimers()
+  })
+
+  it('times out a slow consumer and releases its principal connection slot', async () => {
+    vi.useFakeTimers()
+    configMock.entityChangeStreamMaxConnections = 1
+    configMock.entityChangeStreamMaxConnectionsPerPrincipal = 1
+    serviceMock.readEntityChangeCheckpoint.mockResolvedValue({
+      resyncRequired: false,
+      cursor: CURSOR,
+      scopes: ['gfs'],
+    })
+    const start = (writeReturns: boolean) => {
+      const req = new FakeRequest()
+      const res = new FakeResponse()
+      res.writeReturns = writeReturns
+      streamEntityChanges(
+        req as unknown as Request,
+        res as unknown as Response,
+        CURSOR,
+        async () => true,
+        'operator',
+        'operator-1'
+      )
+      return { req, res }
+    }
+
+    const slow = start(false)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(slow.res.frames).toHaveLength(1)
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(slow.res.frames).toHaveLength(2)
+    const stillOccupied = start(true)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(stillOccupied.res.statusCode).toBe(429)
+
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(slow.res.writableEnded).toBe(true)
+    serviceMock.readEntityChangeCheckpoint.mockResolvedValue({
+      resyncRequired: false,
+      cursor: CURSOR,
+      scopes: [],
+    })
+    const afterRelease = start(true)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(afterRelease.res.headersSent).toBe(true)
     closeActiveEntityChangeStreams()
     await vi.advanceTimersByTimeAsync(0)
     vi.useRealTimers()
