@@ -21,6 +21,7 @@ import {
   issueMcpHostWorkflowControlToken,
 } from '../../../src/workflow/mcpHostRuntimeTokenIssuerClient'
 import { buildWorkflowNetworkPolicies } from '../../../src/workflow/networkPolicyFactory'
+import type { NetworkPolicyPassSummary } from '../../../src/workflow/pluginWorkloadSdkProvisioner'
 import {
   buildArtifactReaderHeadlessService,
   buildMcpHostHeadlessService,
@@ -41,8 +42,9 @@ import {
   buildNetworkPolicyConvergedCondition,
   buildNetworkPolicyOwnershipConditions,
   networkPolicyConditionsChanged,
+  networkPolicyMarkerConditions,
   networkPolicyMarkerFacts,
-  translateNetworkPolicyApplySummary,
+  translateNetworkPolicyPassSummary,
 } from '../../../src/workflow/workflowReconciler'
 import { asApiserverNetworkPolicy } from './asApiserverNetworkPolicy'
 
@@ -3657,7 +3659,7 @@ describe('WorkflowReconciler — reconcile loop', () => {
       }
     })
 
-    it('marks the prune pending, not a retry, when the legacy internet NP DELETE fails', async () => {
+    it('marks the legacy policy pending, apart from the prune, when the legacy internet NP DELETE fails', async () => {
       const apiserver = makeApiserverNetworkingApi()
       apiserver.api.deleteNamespacedNetworkPolicy.mockImplementation(
         async ({ name, namespace }: { name: string; namespace: string }) => {
@@ -3677,7 +3679,9 @@ describe('WorkflowReconciler — reconcile loop', () => {
           ([arg]: [{ name: string }]) => arg.name === `${RECIPE}-mcp-servers-egress-internet`
         )
       ).toHaveLength(1)
-      expect(summary.prune).toBe('pending')
+      // R4-L3: the legacy delete is its own fact; the catalog prune converged.
+      expect(summary.legacy).toBe('pending')
+      expect(summary.prune).toBe('converged')
       expect(summary.retryPending).toBe(false)
     })
 
@@ -5534,16 +5538,18 @@ describe('WorkflowReconciler — reconcile loop', () => {
           ).toMatchObject([{ status: 'False', reason: 'PrunePending' }])
         })
 
-        // The legacy mcp-servers internet policy is a prune like any other:
-        // only reconcile() deletes it. A failed delete is PrunePending, with
-        // no retry flag, and the next reconcile() pass deletes it again.
+        // The legacy mcp-servers internet policy is deleted by name, apart
+        // from the catalog prune: only reconcile() deletes it. A failed delete
+        // is its own fact (R4-L3), DeletePending on its own condition, with no
+        // retry flag and the catalog prune converged, and the next reconcile()
+        // pass deletes it again.
         const LEGACY = 'test-wf-mcp-servers-egress-internet'
         const legacyDeletes = (apiserver: Converged) =>
           apiserver.api.deleteNamespacedNetworkPolicy.mock.calls.filter(
             ([arg]) => arg.name === LEGACY
           )
 
-        it('reports a failed legacy internet policy delete from reconcile() as PrunePending, and deletes it on the next reconcile()', async () => {
+        it('reports a failed legacy internet policy delete from reconcile() as DeletePending, and deletes it on the next reconcile()', async () => {
           const apiserver = makeApiserverNetworkingApi()
           const reconciler = new WorkflowReconciler(
             makeDeps({ networkingApi: apiserver.api as never })
@@ -5562,9 +5568,10 @@ describe('WorkflowReconciler — reconcile loop', () => {
           expect(legacyDeletes(apiserver)).toHaveLength(1)
           expect(failed.networkPolicyRetryPending).toBeFalsy()
           const published = failed.networkPolicyOwnershipConditions ?? []
+          expect(published.filter(c => c.type === 'WorkflowNetworkPoliciesConverged')).toEqual([])
           expect(
-            published.filter(c => c.type === 'WorkflowNetworkPoliciesConverged')
-          ).toMatchObject([{ status: 'False', reason: 'PrunePending' }])
+            published.filter(c => c.type === 'WorkflowLegacyNetworkPolicyRemoved')
+          ).toMatchObject([{ status: 'False', reason: 'DeletePending' }])
 
           const pruned = await reconciler.reconcile(
             'test-wf',
@@ -5577,12 +5584,7 @@ describe('WorkflowReconciler — reconcile loop', () => {
           )
           expect(legacyDeletes(apiserver)).toHaveLength(2)
           expect(pruned.networkPolicyRetryPending).toBeFalsy()
-          expect(pruned.networkPolicyOwnershipConditions).toBeDefined()
-          expect(
-            (pruned.networkPolicyOwnershipConditions ?? []).filter(
-              c => c.type === 'WorkflowNetworkPoliciesConverged'
-            )
-          ).toEqual([])
+          expect(pruned.networkPolicyOwnershipConditions).toEqual([])
         })
 
         it('sends no legacy internet policy DELETE from the retry, even one no pass has seen gone', async () => {
@@ -9074,17 +9076,24 @@ describe('buildNetworkPolicyOwnershipConditions', () => {
   })
 })
 
-// The one translation of an apply summary into status fields, shared by the
-// run lane and the SDK-only lane. `toStrictEqual` pins which keys are present:
-// an absent ownership key keeps the published condition, so it must not be
-// emitted as an explicit `undefined`.
-describe('translateNetworkPolicyApplySummary', () => {
+// The one translation of a full pass summary into status fields, shared by
+// the run lane, the eager lane and the SDK-only lane (the `reconcile` writer
+// of Table A). `toStrictEqual` pins which keys are present: an absent
+// ownership key keeps the published condition, so it must not be emitted as
+// an explicit `undefined`.
+describe('translateNetworkPolicyPassSummary', () => {
   const now = '2026-09-23T12:00:00.000Z'
   const earlier = '2026-09-20T08:00:00.000Z'
-  const conflictSummary = {
-    conflicts: [{ policy: 'test-wf-coord-to-wrc', reason: 'owner-reference-mismatch' as const }],
+  const pass = (overrides: Partial<NetworkPolicyPassSummary> = {}): NetworkPolicyPassSummary => ({
+    conflicts: [],
     retryPending: false,
-  }
+    prune: 'converged',
+    legacy: 'removed',
+    ...overrides,
+  })
+  const conflictSummary = pass({
+    conflicts: [{ policy: 'test-wf-coord-to-wrc', reason: 'owner-reference-mismatch' as const }],
+  })
   const publishedConflict = {
     type: 'WorkflowNetworkPolicyOwnership',
     status: 'False' as const,
@@ -9101,23 +9110,19 @@ describe('translateNetworkPolicyApplySummary', () => {
   }
 
   it('emits neither field when the pass produced no summary, so the published condition is kept', () => {
-    const result = translateNetworkPolicyApplySummary(undefined, [publishedConflict], now)
+    const result = translateNetworkPolicyPassSummary(undefined, [publishedConflict], now)
 
     expect(result).toStrictEqual({})
     // Witness: the same existing conditions with a summary do produce the
     // field, so the empty result above is caused by the missing summary.
     expect(
-      translateNetworkPolicyApplySummary(conflictSummary, [publishedConflict], now)
+      translateNetworkPolicyPassSummary(conflictSummary, [publishedConflict], now)
         .networkPolicyOwnershipConditions
     ).toEqual([publishedConflict])
   })
 
   it('clears the condition with [] and sets no retry flag when nothing conflicts or is pending', () => {
-    const result = translateNetworkPolicyApplySummary(
-      { conflicts: [], retryPending: false },
-      [publishedConflict],
-      now
-    )
+    const result = translateNetworkPolicyPassSummary(pass(), [publishedConflict], now)
 
     expect(result.networkPolicyOwnershipConditions).toEqual([])
     expect(result).not.toHaveProperty('networkPolicyRetryPending')
@@ -9125,8 +9130,8 @@ describe('translateNetworkPolicyApplySummary', () => {
   })
 
   it('replaces the conflict with the retry marker and sets the retry flag when a retry is pending without a conflict', () => {
-    const result = translateNetworkPolicyApplySummary(
-      { conflicts: [], retryPending: true },
+    const result = translateNetworkPolicyPassSummary(
+      pass({ retryPending: true }),
       [publishedConflict],
       now
     )
@@ -9138,8 +9143,8 @@ describe('translateNetworkPolicyApplySummary', () => {
   })
 
   it('keeps the lastTransitionTime of a published retry marker while the retry stays pending', () => {
-    const result = translateNetworkPolicyApplySummary(
-      { conflicts: [], retryPending: true },
+    const result = translateNetworkPolicyPassSummary(
+      pass({ retryPending: true }),
       [publishedRetryMarker],
       now
     )
@@ -9151,24 +9156,19 @@ describe('translateNetworkPolicyApplySummary', () => {
   })
 
   it('clears a published retry marker with [] once no retry is pending', () => {
-    const result = translateNetworkPolicyApplySummary(
-      { conflicts: [], retryPending: false },
-      [publishedRetryMarker],
-      now
-    )
+    const result = translateNetworkPolicyPassSummary(pass(), [publishedRetryMarker], now)
 
     expect(result).toStrictEqual({ networkPolicyOwnershipConditions: [] })
   })
 
   it('replaces the condition with one False condition naming every conflicting policy', () => {
-    const result = translateNetworkPolicyApplySummary(
-      {
+    const result = translateNetworkPolicyPassSummary(
+      pass({
         conflicts: [
           { policy: 'test-wf-wrc-to-artifact-reader', reason: 'identity-label-mismatch' },
           { policy: 'test-wf-coord-to-wrc', reason: 'owner-reference-mismatch' },
         ],
-        retryPending: false,
-      },
+      }),
       undefined,
       now
     )
@@ -9187,14 +9187,14 @@ describe('translateNetworkPolicyApplySummary', () => {
   })
 
   it('keeps the lastTransitionTime of an identical published condition', () => {
-    const result = translateNetworkPolicyApplySummary(conflictSummary, [publishedConflict], now)
+    const result = translateNetworkPolicyPassSummary(conflictSummary, [publishedConflict], now)
 
     expect(result).toStrictEqual({ networkPolicyOwnershipConditions: [publishedConflict] })
     expect(result.networkPolicyOwnershipConditions?.[0]?.lastTransitionTime).toBe(earlier)
   })
 
   it('reports a conflict and a pending retry from the same pass together', () => {
-    const result = translateNetworkPolicyApplySummary(
+    const result = translateNetworkPolicyPassSummary(
       { ...conflictSummary, retryPending: true },
       undefined,
       now
@@ -9209,8 +9209,8 @@ describe('translateNetworkPolicyApplySummary', () => {
     })
   })
 
-  // R3-L3: a prune that could not delete (a non-404 DELETE or a failed legacy
-  // delete) is its own fact; a failed LIST is `unevaluated` (R4-L6). It is published as PrunePending
+  // R3-L3: a prune that could not delete (a non-404 DELETE) is its own fact;
+  // a failed LIST is `unevaluated` (R4-L6). It is published as PrunePending
   // and never sets the retry flag: nothing in the run's short-circuits can
   // prune, so a requeue would only repeat the failed DELETE.
   describe('prune-pending', () => {
@@ -9224,8 +9224,8 @@ describe('translateNetworkPolicyApplySummary', () => {
     }
 
     it('publishes PrunePending without the retry flag when only the prune is pending', () => {
-      const result = translateNetworkPolicyApplySummary(
-        { conflicts: [], retryPending: false, prune: 'pending' },
+      const result = translateNetworkPolicyPassSummary(
+        pass({ prune: 'pending' }),
         [publishedConflict],
         now
       )
@@ -9235,35 +9235,15 @@ describe('translateNetworkPolicyApplySummary', () => {
       })
     })
 
-    it('keeps a published PrunePending marker when a summary without a prune fact converges', () => {
-      // The mid-run retry prunes nothing, so its summary says nothing about the
-      // prune and must not clear the fact a reconcile() pass published.
-      const result = translateNetworkPolicyApplySummary(
-        { conflicts: [], retryPending: false },
-        [publishedPruneMarker],
-        now
-      )
+    it('clears a published PrunePending marker once a pass pruned', () => {
+      const result = translateNetworkPolicyPassSummary(pass(), [publishedPruneMarker], now)
 
-      expect(result).toStrictEqual({ networkPolicyOwnershipConditions: [publishedPruneMarker] })
-      expect(
-        networkPolicyConditionsChanged(
-          [publishedPruneMarker],
-          result.networkPolicyOwnershipConditions!
-        )
-      ).toBe(false)
-      // Witness: a summary that did prune is authoritative and clears it.
-      expect(
-        translateNetworkPolicyApplySummary(
-          { conflicts: [], retryPending: false, prune: 'converged' },
-          [publishedPruneMarker],
-          now
-        )
-      ).toStrictEqual({ networkPolicyOwnershipConditions: [] })
+      expect(result).toStrictEqual({ networkPolicyOwnershipConditions: [] })
     })
 
-    it('reports a pending retry and a carried prune in one RetryAndPrunePending marker', () => {
-      const result = translateNetworkPolicyApplySummary(
-        { conflicts: [], retryPending: true },
+    it('reports a pending retry and a pending prune in one RetryAndPrunePending marker', () => {
+      const result = translateNetworkPolicyPassSummary(
+        pass({ retryPending: true, prune: 'pending' }),
         [publishedPruneMarker],
         now
       )
@@ -9285,17 +9265,17 @@ describe('translateNetworkPolicyApplySummary', () => {
   })
 
   // R4-L6: a failed prune LIST evaluated nothing, so the prune fact is
-  // `unevaluated`, never `pending`. It has its own reasons, carries over like
-  // `pending`, and sets no retry flag of its own.
+  // `unevaluated`, never `pending`. It has its own reasons and sets no retry
+  // flag of its own.
   describe('prune-unevaluated', () => {
-    const convergedMarkers = (result: ReturnType<typeof translateNetworkPolicyApplySummary>) =>
+    const convergedMarkers = (result: ReturnType<typeof translateNetworkPolicyPassSummary>) =>
       (result.networkPolicyOwnershipConditions ?? []).filter(
         c => c.type === 'WorkflowNetworkPoliciesConverged'
       )
 
     it('R4-L6: publishes PruneUnevaluated without the retry flag when the prune LIST failed', () => {
-      const result = translateNetworkPolicyApplySummary(
-        { conflicts: [], retryPending: false, prune: 'unevaluated' },
+      const result = translateNetworkPolicyPassSummary(
+        pass({ prune: 'unevaluated' }),
         [publishedConflict],
         now
       )
@@ -9307,8 +9287,8 @@ describe('translateNetworkPolicyApplySummary', () => {
     })
 
     it('R4-L6: publishes RetryAndPruneUnevaluated for a pending retry and an unevaluated prune', () => {
-      const result = translateNetworkPolicyApplySummary(
-        { conflicts: [], retryPending: true, prune: 'unevaluated' },
+      const result = translateNetworkPolicyPassSummary(
+        pass({ retryPending: true, prune: 'unevaluated' }),
         [],
         now
       )
@@ -9318,33 +9298,217 @@ describe('translateNetworkPolicyApplySummary', () => {
       ])
       expect(result.networkPolicyRetryPending).toBe(true)
     })
+  })
 
-    it('R4-L6: carries a published PruneUnevaluated marker through a summary without a prune fact', () => {
-      const published = translateNetworkPolicyApplySummary(
-        { conflicts: [], retryPending: false, prune: 'unevaluated' },
+  // R4-L3: the legacy policy is its own fact, on its own condition.
+  describe('legacy', () => {
+    const legacyMarkers = (result: ReturnType<typeof translateNetworkPolicyPassSummary>) =>
+      (result.networkPolicyOwnershipConditions ?? []).filter(
+        c => c.type === 'WorkflowLegacyNetworkPolicyRemoved'
+      )
+
+    it('R4-L3: publishes DeletePending on its own condition, apart from the prune marker', () => {
+      const result = translateNetworkPolicyPassSummary(pass({ legacy: 'pending' }), [], now)
+
+      expect(result).toStrictEqual({
+        networkPolicyOwnershipConditions: [
+          {
+            type: 'WorkflowLegacyNetworkPolicyRemoved',
+            status: 'False',
+            reason: 'DeletePending',
+            message:
+              'The legacy mcp-servers internet egress NetworkPolicy is pending a delete; a later pass or the finalizer removes it',
+            lastTransitionTime: now,
+          },
+        ],
+      })
+    })
+
+    it('R4-L3: keeps the first transition time while the delete stays pending, and clears it once removed', () => {
+      const published = translateNetworkPolicyPassSummary(
+        pass({ legacy: 'pending' }),
         [],
         earlier
       ).networkPolicyOwnershipConditions!
-      // Liveness witness: the pass that failed its LIST published the marker.
-      expect(convergedMarkers({ networkPolicyOwnershipConditions: published })).toMatchObject([
-        { reason: 'PruneUnevaluated' },
+      // Liveness witness: the failing pass published the marker.
+      expect(legacyMarkers({ networkPolicyOwnershipConditions: published })).toHaveLength(1)
+
+      const still = translateNetworkPolicyPassSummary(pass({ legacy: 'pending' }), published, now)
+      expect(legacyMarkers(still)).toMatchObject([{ lastTransitionTime: earlier }])
+
+      expect(translateNetworkPolicyPassSummary(pass(), published, now)).toStrictEqual({
+        networkPolicyOwnershipConditions: [],
+      })
+    })
+  })
+})
+
+// R4-L3: every writer goes through `networkPolicyMarkerConditions`, and each
+// fact is observed, carried or cleared as Table A says.
+describe('networkPolicyMarkerConditions', () => {
+  const now = '2026-09-23T12:00:00.000Z'
+  const earlier = '2026-09-20T08:00:00.000Z'
+  const pass = (overrides: Partial<NetworkPolicyPassSummary> = {}): NetworkPolicyPassSummary => ({
+    conflicts: [],
+    retryPending: false,
+    prune: 'converged',
+    legacy: 'removed',
+    ...overrides,
+  })
+  const conflict = { policy: 'test-wf-coord-to-wrc', reason: 'owner-reference-mismatch' as const }
+  const published = (overrides: Partial<NetworkPolicyPassSummary>) =>
+    networkPolicyMarkerConditions({ kind: 'reconcile', summary: pass(overrides) }, [], earlier)
+  const reasons = (conditions: { type: string; reason?: string }[]) =>
+    conditions.map(c => `${c.type}/${c.reason}`)
+
+  describe('apply-retry', () => {
+    it('R4-L3: observes the apply and carries the prune and legacy facts', () => {
+      const existing = published({ retryPending: true, prune: 'pending', legacy: 'pending' })
+      // Liveness witness: all three facts were published.
+      expect(reasons(existing)).toEqual([
+        'WorkflowNetworkPoliciesConverged/RetryAndPrunePending',
+        'WorkflowLegacyNetworkPolicyRemoved/DeletePending',
       ])
 
-      const carried = translateNetworkPolicyApplySummary(
-        { conflicts: [], retryPending: false },
-        published,
+      const settled = networkPolicyMarkerConditions(
+        { kind: 'apply-retry', summary: { conflicts: [], retryPending: false } },
+        existing,
         now
       )
-      expect(carried).toStrictEqual({ networkPolicyOwnershipConditions: published })
 
-      const retried = translateNetworkPolicyApplySummary(
-        { conflicts: [], retryPending: true },
-        published,
+      expect(reasons(settled)).toEqual([
+        'WorkflowNetworkPoliciesConverged/PrunePending',
+        'WorkflowLegacyNetworkPolicyRemoved/DeletePending',
+      ])
+      expect(settled.every(c => c.lastTransitionTime === earlier)).toBe(true)
+    })
+
+    it('R4-L3: carries an unevaluated prune through a pending retry', () => {
+      const existing = published({ prune: 'unevaluated' })
+
+      const retried = networkPolicyMarkerConditions(
+        { kind: 'apply-retry', summary: { conflicts: [], retryPending: true } },
+        existing,
         now
       )
-      expect(convergedMarkers(retried)).toMatchObject([
-        { reason: 'RetryAndPruneUnevaluated', lastTransitionTime: earlier },
+
+      expect(reasons(retried)).toEqual([
+        'WorkflowNetworkPoliciesConverged/RetryAndPruneUnevaluated',
       ])
+    })
+
+    it('R4-L3: publishes the conflicts the retry observed', () => {
+      const retried = networkPolicyMarkerConditions(
+        { kind: 'apply-retry', summary: { conflicts: [conflict], retryPending: false } },
+        [],
+        now
+      )
+
+      expect(reasons(retried)).toEqual(['WorkflowNetworkPolicyOwnership/OwnershipConflict'])
+    })
+  })
+
+  describe('terminal', () => {
+    it('R4-L3: drops a pending apply and carries the prune, the legacy fact and the ownership condition', () => {
+      const existing = published({
+        conflicts: [conflict],
+        retryPending: true,
+        prune: 'pending',
+        legacy: 'pending',
+      })
+      // Liveness witness: all three conditions were published.
+      expect(existing).toHaveLength(3)
+
+      const settled = networkPolicyMarkerConditions({ kind: 'terminal' }, existing, now)
+
+      expect(reasons(settled)).toEqual([
+        'WorkflowNetworkPolicyOwnership/OwnershipConflict',
+        'WorkflowNetworkPoliciesConverged/PrunePending',
+        'WorkflowLegacyNetworkPolicyRemoved/DeletePending',
+      ])
+    })
+
+    it('R4-L3: removes a marker that only named a pending apply', () => {
+      const existing = published({ retryPending: true })
+      expect(reasons(existing)).toEqual(['WorkflowNetworkPoliciesConverged/RetryPending'])
+
+      expect(networkPolicyMarkerConditions({ kind: 'terminal' }, existing, now)).toEqual([])
+    })
+  })
+
+  describe('unmanaged', () => {
+    it('R4-L3: clears every fact after a full SDK teardown', () => {
+      const existing = published({
+        conflicts: [conflict],
+        retryPending: true,
+        prune: 'unevaluated',
+        legacy: 'pending',
+      })
+      // Liveness witness: the group was published.
+      expect(existing).toHaveLength(3)
+
+      expect(networkPolicyMarkerConditions({ kind: 'unmanaged' }, existing, now)).toEqual([])
+    })
+  })
+
+  describe('a reason this controller did not write', () => {
+    const foreignMarker = {
+      type: 'WorkflowNetworkPoliciesConverged',
+      status: 'False' as const,
+      reason: 'SomethingElse',
+      message: 'written by another head',
+      lastTransitionTime: earlier,
+    }
+    const foreignLegacy = {
+      type: 'WorkflowLegacyNetworkPolicyRemoved',
+      status: 'False' as const,
+      reason: 'SomethingElse',
+      message: 'written by another head',
+      lastTransitionTime: earlier,
+    }
+
+    it('R4-L3: is kept as it is by a carrying writer, which warns', () => {
+      const warnLog = captureLogger('warn')
+      try {
+        const carried = networkPolicyMarkerConditions(
+          { kind: 'terminal' },
+          [foreignMarker, foreignLegacy],
+          now
+        )
+
+        expect(carried).toEqual([foreignMarker, foreignLegacy])
+        expect(warnLog).toHaveBeenCalledTimes(2)
+        expect(warnLog).toHaveBeenCalledWith(
+          'Keeping a NetworkPolicy marker with a reason this controller did not write',
+          {
+            writer: 'terminal',
+            type: 'WorkflowNetworkPoliciesConverged',
+            status: 'False',
+            reason: 'SomethingElse',
+          }
+        )
+      } finally {
+        warnLog.mockRestore()
+      }
+    })
+
+    it('R4-L3: is overwritten by reconcile()', () => {
+      const warnLog = captureLogger('warn')
+      try {
+        const overwritten = networkPolicyMarkerConditions(
+          { kind: 'reconcile', summary: pass({ prune: 'pending' }) },
+          [foreignMarker, foreignLegacy],
+          now
+        )
+
+        expect(reasons(overwritten)).toEqual(['WorkflowNetworkPoliciesConverged/PrunePending'])
+        expect(warnLog).not.toHaveBeenCalled()
+        // Liveness witness: the same input through a carrying writer warns.
+        networkPolicyMarkerConditions({ kind: 'terminal' }, [foreignMarker], now)
+        expect(warnLog).toHaveBeenCalledTimes(1)
+      } finally {
+        warnLog.mockRestore()
+      }
     })
   })
 })

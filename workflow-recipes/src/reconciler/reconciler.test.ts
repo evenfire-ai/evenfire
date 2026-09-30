@@ -22,7 +22,7 @@ import { deriveWorkflowRuntimePlan } from '../workflow/runtimePlan'
 import {
   WorkflowReconciler,
   buildNetworkPolicyConvergedCondition,
-  translateNetworkPolicyApplySummary,
+  translateNetworkPolicyPassSummary,
 } from '../workflow/workflowReconciler'
 import { captureLogger, captureLoggerLevels } from './__tests__/captureLogger'
 import { defaultFqdnLookup } from './fqdnResolver'
@@ -1326,7 +1326,12 @@ describe('WorkflowRecipeReconciler', () => {
         policyReady: true,
         verifiedAt: '2026-08-04T00:00:00.000Z',
       },
-      networkPolicies: { conflicts: [], retryPending: false },
+      networkPolicies: {
+        conflicts: [],
+        retryPending: false,
+        prune: 'converged',
+        legacy: 'removed',
+      },
     })
     const workflowReconcile = vi.fn()
     const setCodexReconcileContext = vi.fn()
@@ -1385,7 +1390,12 @@ describe('WorkflowRecipeReconciler', () => {
     const reconcilePluginWorkloadSdkOnly = vi.fn().mockResolvedValue({
       phase: 'active',
       message: 'Plugin Workload SDK mcp-host registered',
-      networkPolicies: { conflicts: [], retryPending: false },
+      networkPolicies: {
+        conflicts: [],
+        retryPending: false,
+        prune: 'converged',
+        legacy: 'removed',
+      },
     })
     ;(
       reconciler as unknown as {
@@ -1425,7 +1435,12 @@ describe('WorkflowRecipeReconciler', () => {
     const reconcilePluginWorkloadSdkOnly = vi.fn().mockResolvedValue({
       phase: 'deploying',
       message: 'Plugin Workload SDK mcp-host starting',
-      networkPolicies: { conflicts: [], retryPending: false },
+      networkPolicies: {
+        conflicts: [],
+        retryPending: false,
+        prune: 'converged',
+        legacy: 'removed',
+      },
     })
     ;(
       reconciler as unknown as {
@@ -1516,6 +1531,8 @@ describe('WorkflowRecipeReconciler', () => {
             },
           ],
           retryPending: false,
+          prune: 'converged',
+          legacy: 'removed',
         },
       })
 
@@ -1540,7 +1557,12 @@ describe('WorkflowRecipeReconciler', () => {
         phase: 'active',
         message: 'Plugin Workload SDK mcp-host registered',
         pluginWorkloadSdkBootstrapProof: bootstrapProof,
-        networkPolicies: { conflicts: [], retryPending: false },
+        networkPolicies: {
+          conflicts: [],
+          retryPending: false,
+          prune: 'converged',
+          legacy: 'removed',
+        },
       })
 
       const result = await reconciler.reconcile(sdkOnlyRecipe([ownershipCondition]))
@@ -1581,6 +1603,8 @@ describe('WorkflowRecipeReconciler', () => {
             },
           ],
           retryPending: false,
+          prune: 'converged',
+          legacy: 'removed',
         },
       })
 
@@ -1602,7 +1626,12 @@ describe('WorkflowRecipeReconciler', () => {
       const converged = stubSdkOnly({
         phase: 'failed',
         message: 'Plugin Workload SDK mcp-host could not start',
-        networkPolicies: { conflicts: [], retryPending: false },
+        networkPolicies: {
+          conflicts: [],
+          retryPending: false,
+          prune: 'converged',
+          legacy: 'removed',
+        },
       })
 
       const failedConverged = await reconciler.reconcile(sdkOnlyRecipe([ownershipCondition]))
@@ -1620,7 +1649,12 @@ describe('WorkflowRecipeReconciler', () => {
         phase: 'active',
         message: 'Plugin Workload SDK mcp-host registered',
         pluginWorkloadSdkBootstrapProof: bootstrapProof,
-        networkPolicies: { conflicts: [], retryPending: true },
+        networkPolicies: {
+          conflicts: [],
+          retryPending: true,
+          prune: 'converged',
+          legacy: 'removed',
+        },
       })
 
       const retrying = await reconciler.reconcile(sdkOnlyRecipe())
@@ -1643,7 +1677,12 @@ describe('WorkflowRecipeReconciler', () => {
         phase: 'active',
         message: 'Plugin Workload SDK mcp-host registered',
         pluginWorkloadSdkBootstrapProof: bootstrapProof,
-        networkPolicies: { conflicts: [], retryPending: false },
+        networkPolicies: {
+          conflicts: [],
+          retryPending: false,
+          prune: 'converged',
+          legacy: 'removed',
+        },
       })
 
       const steady = await reconciler.reconcile(sdkOnlyRecipe())
@@ -1663,7 +1702,12 @@ describe('WorkflowRecipeReconciler', () => {
       const pending = stubSdkOnly({
         phase: 'failed',
         message: 'Plugin Workload SDK mcp-host could not start',
-        networkPolicies: { conflicts: [], retryPending: true },
+        networkPolicies: {
+          conflicts: [],
+          retryPending: true,
+          prune: 'converged',
+          legacy: 'removed',
+        },
       })
 
       const retrying = await reconciler.reconcile(sdkOnlyRecipe())
@@ -1684,7 +1728,12 @@ describe('WorkflowRecipeReconciler', () => {
       const settled = stubSdkOnly({
         phase: 'failed',
         message: 'Plugin Workload SDK mcp-host could not start',
-        networkPolicies: { conflicts: [], retryPending: false },
+        networkPolicies: {
+          conflicts: [],
+          retryPending: false,
+          prune: 'converged',
+          legacy: 'removed',
+        },
       })
 
       const terminal = await reconciler.reconcile(sdkOnlyRecipe())
@@ -1821,7 +1870,12 @@ describe('WorkflowRecipeReconciler', () => {
       const reconcilePluginWorkloadSdkOnly = vi.fn().mockResolvedValue({
         phase: 'awaiting_policy',
         message: 'operator policy pending (policy_not_ready)',
-        networkPolicies: { conflicts: [], retryPending: false },
+        networkPolicies: {
+          conflicts: [],
+          retryPending: false,
+          prune: 'converged',
+          legacy: 'removed',
+        },
       })
       ;(
         reconciler as unknown as {
@@ -16496,7 +16550,7 @@ describe('WorkflowRecipeReconciler', () => {
             phase: 'active',
             message: 'Workflow running',
             workflowPhase: 'running',
-            ...translateNetworkPolicyApplySummary(
+            ...translateNetworkPolicyPassSummary(
               summary,
               currentStatus?.conditions,
               new Date().toISOString()
@@ -17437,7 +17491,12 @@ describe('WorkflowRecipeReconciler', () => {
           policyReady: true,
           verifiedAt: '2026-08-04T00:00:00.000Z',
         },
-        networkPolicies: { conflicts: [], retryPending: false },
+        networkPolicies: {
+          conflicts: [],
+          retryPending: false,
+          prune: 'converged',
+          legacy: 'removed',
+        },
       })
       ;(
         reconciler as unknown as { config: { pluginWorkloadSdkEnabled: boolean } }
@@ -17482,7 +17541,12 @@ describe('WorkflowRecipeReconciler', () => {
           policyReady: true,
           verifiedAt: new Date().toISOString(),
         },
-        networkPolicies: { conflicts: [], retryPending: false },
+        networkPolicies: {
+          conflicts: [],
+          retryPending: false,
+          prune: 'converged',
+          legacy: 'removed',
+        },
       })
       ;(
         reconciler as unknown as { config: { pluginWorkloadSdkEnabled: boolean } }

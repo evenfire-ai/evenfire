@@ -107,6 +107,8 @@ import {
   type McpHostRuntimeTokenRefreshReason,
   type McpHostRuntimeTokenRefreshResult,
   NO_MCP_HOST_RUNTIME_TOKEN_REFRESH,
+  type NetworkPolicyLegacyFact,
+  type NetworkPolicyPassSummary,
   type NetworkPolicyPruneFact,
   PluginWorkloadSdkProvisioner,
   type WorkflowNetworkPolicyApplySummary,
@@ -285,8 +287,9 @@ export const NETWORK_POLICY_OWNERSHIP_CONDITION_TYPE = 'WorkflowNetworkPolicyOwn
  * - prune (`converged | pending | unevaluated`, see `NetworkPolicyPruneFact`):
  *   `pending` when a DELETE the prune owed did not land, `unevaluated` when
  *   its LIST failed. No requeue for either, since nothing but `reconcile()`
- *   prunes. Only a later `reconcile()` prune that lands, or the finalizer,
- *   clears it; every other path carries it over.
+ *   prunes. Only a later `reconcile()` prune that lands, the `unmanaged`
+ *   writer after a full SDK teardown, or the finalizer clears it; every other
+ *   path carries it over (see `networkPolicyMarkerConditions`).
  *
  * Each combination with a fact that is not converged has its own reason
  * (`RetryPending`, `PrunePending`, `PruneUnevaluated`, `RetryAndPrunePending`,
@@ -365,6 +368,30 @@ function networkPolicyMarkerReason(
 }
 
 /**
+ * Published only as `False`/`DeletePending` while the legacy
+ * `<recipe>-mcp-servers-egress-internet` policy is pending a delete (see
+ * `NetworkPolicyLegacyFact`), and removed once it is gone. The fact is read
+ * back from the reason alone.
+ */
+export const LEGACY_NETWORK_POLICY_REMOVED_CONDITION_TYPE = 'WorkflowLegacyNetworkPolicyRemoved'
+
+const LEGACY_NETWORK_POLICY_REASONS = {
+  DeletePending: {
+    fact: 'pending',
+    message:
+      'The legacy mcp-servers internet egress NetworkPolicy is pending a delete; a later pass or the finalizer removes it',
+  },
+} as const satisfies Record<string, { fact: NetworkPolicyLegacyFact; message: string }>
+
+type LegacyNetworkPolicyReason = keyof typeof LEGACY_NETWORK_POLICY_REASONS
+
+function isLegacyNetworkPolicyReason(
+  reason: string | undefined
+): reason is LegacyNetworkPolicyReason {
+  return reason !== undefined && Object.hasOwn(LEGACY_NETWORK_POLICY_REASONS, reason)
+}
+
+/**
  * Merged by its own group in `patchStatus`, apart from the workflow-output
  * group: a pass that never reached the policy apply leaves the field
  * undefined, and the published conditions must survive that pass's patch.
@@ -372,6 +399,7 @@ function networkPolicyMarkerReason(
 export const NETWORK_POLICY_OWNERSHIP_CONDITION_TYPES = new Set([
   NETWORK_POLICY_OWNERSHIP_CONDITION_TYPE,
   NETWORK_POLICIES_CONVERGED_CONDITION_TYPE,
+  LEGACY_NETWORK_POLICY_REMOVED_CONDITION_TYPE,
 ])
 
 /**
@@ -488,33 +516,212 @@ export function buildNetworkPolicyOwnershipConditions(
 }
 
 /**
- * The status fields one policy apply pass contributes, shared by the run lane
- * and the SDK-only lane so both translate a summary the same way. No summary
- * (the pass returned before the apply) yields neither field, which keeps the
- * published conditions. A summary always yields the group's conditions, `[]`
- * included: the ownership condition when a policy conflicts, and the
- * converged marker while a policy is pending a retry, or the prune is pending
- * or unevaluated. Only a pending retry sets the retry flag (and with it a
- * requeue). A summary without a prune fact (a path that did not prune) carries
- * the published prune fact over, so only a pass that pruned can clear it.
+ * The legacy marker for `fact`, or `undefined` once the policy is removed.
+ * `lastTransitionTime` is kept while the marker stays `False`.
  */
-export function translateNetworkPolicyApplySummary(
-  summary: WorkflowNetworkPolicyApplySummary | undefined,
+function buildLegacyNetworkPolicyCondition(
+  fact: NetworkPolicyLegacyFact,
+  now: string,
+  existingConditions?: StatusCondition[]
+): StatusCondition | undefined {
+  switch (fact) {
+    case 'removed':
+      return undefined
+    case 'pending': {
+      const existing = existingConditions?.find(
+        c => c.type === LEGACY_NETWORK_POLICY_REMOVED_CONDITION_TYPE && c.status === 'False'
+      )
+      return {
+        type: LEGACY_NETWORK_POLICY_REMOVED_CONDITION_TYPE,
+        status: 'False',
+        reason: 'DeletePending',
+        message: LEGACY_NETWORK_POLICY_REASONS.DeletePending.message,
+        lastTransitionTime: existing?.lastTransitionTime ?? now,
+      }
+    }
+    default: {
+      const unreachable: never = fact
+      throw new Error(`Unknown legacy NetworkPolicy fact: ${String(unreachable)}`)
+    }
+  }
+}
+
+/**
+ * Who writes the NetworkPolicy condition group, and so which facts it
+ * observed (Table A on `retryRunLaneNetworkPolicies`):
+ *
+ * - `reconcile`: a full pass (run lane, eager lane, SDK-only lane with a
+ *   summary). Observes the apply, the prune and the legacy delete.
+ * - `apply-retry`: the mid-run retry. Observes the apply; carries the prune
+ *   and legacy facts.
+ * - `terminal`: the run ended, so a pending apply is dropped; carries the
+ *   prune and legacy facts and the ownership condition.
+ * - `unmanaged`: the kill switch, the SDK-only lane without a runtime and
+ *   the capability removal. Written only after a teardown that deleted every
+ *   SDK policy, the legacy one by name included, so it clears the group.
+ */
+export type NetworkPolicyMarkerWriter =
+  | { kind: 'reconcile'; summary: NetworkPolicyPassSummary }
+  | { kind: 'apply-retry'; summary: WorkflowNetworkPolicyApplySummary }
+  | { kind: 'terminal' }
+  | { kind: 'unmanaged' }
+
+/**
+ * A marker a carrying writer found published. `unknown` is a condition of a
+ * marker type whose status or reason this controller did not write: it is
+ * never interpreted, only kept as it is.
+ */
+type PublishedMarker =
+  | { kind: 'absent' }
+  | { kind: 'known'; condition: StatusCondition }
+  | { kind: 'unknown'; condition: StatusCondition }
+
+function publishedMarker(
+  existingConditions: StatusCondition[] | undefined,
+  type: string,
+  isKnownReason: (reason: string | undefined) => boolean
+): PublishedMarker {
+  const condition = (existingConditions ?? []).find(c => c.type === type)
+  if (condition === undefined) return { kind: 'absent' }
+  if (condition.status === 'False' && isKnownReason(condition.reason)) {
+    return { kind: 'known', condition }
+  }
+  return { kind: 'unknown', condition }
+}
+
+function warnUnknownNetworkPolicyMarker(
+  writer: NetworkPolicyMarkerWriter['kind'],
+  condition: StatusCondition
+): void {
+  createLogger('wrc', 'network-policy-marker').warn(
+    'Keeping a NetworkPolicy marker with a reason this controller did not write',
+    { writer, type: condition.type, status: condition.status, reason: condition.reason }
+  )
+}
+
+/** The converged marker a carrying writer publishes for its observed apply. */
+function carriedConvergedMarker(
+  writer: NetworkPolicyMarkerWriter['kind'],
+  apply: NetworkPolicyMarkerFacts['apply'],
+  existingConditions: StatusCondition[] | undefined,
+  now: string
+): StatusCondition | undefined {
+  const published = publishedMarker(
+    existingConditions,
+    NETWORK_POLICIES_CONVERGED_CONDITION_TYPE,
+    isNetworkPolicyMarkerReason
+  )
+  if (published.kind === 'unknown') {
+    warnUnknownNetworkPolicyMarker(writer, published.condition)
+    return published.condition
+  }
+  const { prune } = networkPolicyMarkerFacts(existingConditions)
+  return buildNetworkPolicyConvergedCondition({ apply, prune }, now, existingConditions)
+}
+
+/** The legacy marker a carrying writer publishes: the published one, as is. */
+function carriedLegacyMarker(
+  writer: NetworkPolicyMarkerWriter['kind'],
+  existingConditions: StatusCondition[] | undefined
+): StatusCondition | undefined {
+  const published = publishedMarker(
+    existingConditions,
+    LEGACY_NETWORK_POLICY_REMOVED_CONDITION_TYPE,
+    isLegacyNetworkPolicyReason
+  )
+  switch (published.kind) {
+    case 'absent':
+      return undefined
+    case 'known':
+      return published.condition
+    case 'unknown':
+      warnUnknownNetworkPolicyMarker(writer, published.condition)
+      return published.condition
+    default: {
+      const unreachable: never = published
+      throw new Error(`Unknown published marker: ${String(unreachable)}`)
+    }
+  }
+}
+
+function presentConditions(conditions: (StatusCondition | undefined)[]): StatusCondition[] {
+  return conditions.filter((c): c is StatusCondition => c !== undefined)
+}
+
+/**
+ * The whole NetworkPolicy condition group `writer` publishes: the ownership
+ * condition, the converged marker and the legacy marker, each only while it
+ * is `False`. `[]` removes the group. Every writer goes through here, so each
+ * fact is observed, carried or cleared exactly as Table A says.
+ */
+export function networkPolicyMarkerConditions(
+  writer: NetworkPolicyMarkerWriter,
+  existingConditions: StatusCondition[] | undefined,
+  now: string
+): StatusCondition[] {
+  switch (writer.kind) {
+    case 'reconcile': {
+      const { summary } = writer
+      return presentConditions([
+        ...buildNetworkPolicyOwnershipConditions(summary, now, existingConditions),
+        buildNetworkPolicyConvergedCondition(
+          { apply: summary.retryPending ? 'pending' : 'converged', prune: summary.prune },
+          now,
+          existingConditions
+        ),
+        buildLegacyNetworkPolicyCondition(summary.legacy, now, existingConditions),
+      ])
+    }
+    case 'apply-retry': {
+      const { summary } = writer
+      return presentConditions([
+        ...buildNetworkPolicyOwnershipConditions(summary, now, existingConditions),
+        carriedConvergedMarker(
+          writer.kind,
+          summary.retryPending ? 'pending' : 'converged',
+          existingConditions,
+          now
+        ),
+        carriedLegacyMarker(writer.kind, existingConditions),
+      ])
+    }
+    case 'terminal':
+      return presentConditions([
+        ...(existingConditions ?? []).filter(
+          c => c.type === NETWORK_POLICY_OWNERSHIP_CONDITION_TYPE
+        ),
+        carriedConvergedMarker(writer.kind, 'converged', existingConditions, now),
+        carriedLegacyMarker(writer.kind, existingConditions),
+      ])
+    case 'unmanaged':
+      return []
+    default: {
+      const unreachable: never = writer
+      throw new Error(`Unknown NetworkPolicy marker writer: ${String(unreachable)}`)
+    }
+  }
+}
+
+/**
+ * The status fields one full pass contributes, shared by the run lane, the
+ * eager lane and the SDK-only lane so all three translate a summary the same
+ * way (the `reconcile` writer). No summary (the pass returned before the
+ * apply) yields neither field, which keeps the published conditions. A
+ * summary always yields the whole group, `[]` included. Only a pending retry
+ * sets the retry flag (and with it a requeue).
+ */
+export function translateNetworkPolicyPassSummary(
+  summary: NetworkPolicyPassSummary | undefined,
   existingConditions: StatusCondition[] | undefined,
   now: string
 ): Pick<WorkflowReconcileResult, 'networkPolicyOwnershipConditions' | 'networkPolicyRetryPending'> {
   if (summary === undefined) return {}
-  const prune = summary.prune ?? networkPolicyMarkerFacts(existingConditions).prune
-  const marker = buildNetworkPolicyConvergedCondition(
-    { apply: summary.retryPending ? 'pending' : 'converged', prune },
-    now,
-    existingConditions
-  )
   return {
-    networkPolicyOwnershipConditions: [
-      ...buildNetworkPolicyOwnershipConditions(summary, now, existingConditions),
-      ...(marker ? [marker] : []),
-    ],
+    networkPolicyOwnershipConditions: networkPolicyMarkerConditions(
+      { kind: 'reconcile', summary },
+      existingConditions,
+      now
+    ),
     ...(summary.retryPending ? { networkPolicyRetryPending: true } : {}),
   }
 }
@@ -1037,10 +1244,11 @@ export interface WorkflowReconcileResult {
   clearWorkflowExecution?: boolean
   workflowConditions?: StatusCondition[]
   /**
-   * The `WorkflowNetworkPolicyOwnership` condition from this pass's policy
-   * apply. Undefined when the pass returned before the apply, which keeps the
-   * published condition; `[]` when no policy is owned by another controller (a
-   * pending retry does not count as a conflict), which removes it.
+   * The NetworkPolicy condition group this pass's policy apply produced
+   * (`networkPolicyMarkerConditions`): the ownership condition and the
+   * converged and legacy markers. Undefined when the pass returned before the
+   * apply, which keeps the published group; `[]` when every fact converged
+   * and no policy is owned by another controller, which removes it.
    */
   networkPolicyOwnershipConditions?: StatusCondition[]
   /**
@@ -1500,7 +1708,7 @@ export class WorkflowReconciler {
     message: string
     pluginWorkloadSdkBootstrapProof?: EagerSdkBootstrapProof
     /** Undefined when the eager host returned before applying the policies. */
-    networkPolicies?: WorkflowNetworkPolicyApplySummary
+    networkPolicies?: NetworkPolicyPassSummary
   }> {
     if (!this.deps.config.pluginWorkloadSdkEnabled || !spec.pluginWorkloadSdk) {
       // Nothing is applied here, so no summary: an empty one would read as
@@ -1681,6 +1889,16 @@ export class WorkflowReconciler {
                 this.deps.config.mcpServerNamespace,
                 `clerum.io/recipe=${recipeName},clerum.io/managed-by=wrc`
               )
+            ),
+            // The legacy internet policy may carry no labels, so the sweep
+            // above cannot be trusted to remove it. Deleting it by name is
+            // what lets the caller publish the unmanaged marker writer after
+            // this teardown: any non-404 failure rejects the teardown.
+            this.teardownDelete(() =>
+              this.deps.networkingApi.deleteNamespacedNetworkPolicy({
+                name: `${recipeName}-mcp-servers-egress-internet`,
+                namespace: this.deps.config.mcpServerNamespace,
+              })
             ),
           ]),
     ])
@@ -1898,7 +2116,7 @@ export class WorkflowReconciler {
     // Empty until this pass applies the policies, then what the apply found.
     // A return before the apply leaves it empty, and patchStatus keeps the
     // published condition.
-    let networkPolicyStatus: ReturnType<typeof translateNetworkPolicyApplySummary> = {}
+    let networkPolicyStatus: ReturnType<typeof translateNetworkPolicyPassSummary> = {}
     const withWorkflowConditions = (result: WorkflowReconcileResult): WorkflowReconcileResult => ({
       ...result,
       workflowConditions,
@@ -2063,7 +2281,7 @@ export class WorkflowReconciler {
           // No summary means the host returned before the apply, so the pass
           // cannot say whether a conflict is gone. A `failed` pod after the
           // apply still carries a real summary and publishes it.
-          networkPolicyStatus = translateNetworkPolicyApplySummary(
+          networkPolicyStatus = translateNetworkPolicyPassSummary(
             eagerNetworkPolicies,
             currentStatus?.conditions,
             new Date().toISOString()
@@ -2528,7 +2746,7 @@ export class WorkflowReconciler {
         false,
         codexVerdict.grokProjection
       )
-      networkPolicyStatus = translateNetworkPolicyApplySummary(
+      networkPolicyStatus = translateNetworkPolicyPassSummary(
         runLaneNetworkPolicies,
         currentStatus?.conditions,
         new Date().toISOString()
@@ -3117,11 +3335,9 @@ export class WorkflowReconciler {
    * applies it, but deletes nothing: the run's pods are live and may still use
    * any lane the spec wanted when they were created, so a revoke here cuts
    * their traffic. That includes the legacy mcp-servers internet policy, which
-   * only a reconcile() pass deletes. retryPending reflects the applies alone
-   * and the summary carries no prune fact, so a pending prune a reconcile()
-   * pass published survives this path: a run-lane leftover waits for the next
-   * reconcile() pass or the finalizer's label sweep, the legacy policy for the
-   * next reconcile() pass.
+   * only a reconcile() pass deletes. The summary is apply-only, so this path
+   * is the `apply-retry` writer of Table A below: it observes the apply and
+   * carries the published prune and legacy facts.
    *
    * What each path does to a run-lane policy (verdict = Codex/Grok
    * eligibility; it governs only the proxy lanes, every other catalog lane
@@ -3133,13 +3349,40 @@ export class WorkflowReconciler {
    * | terminal teardown    | kept           | kept            | kept          | kept                    | kept            |
    * | finalizer            | deleted        | deleted         | deleted       | deleted                 | only if labeled |
    *
-   * What a failed write leaves behind, per path:
+   * Table A, what each writer publishes (`networkPolicyMarkerConditions`).
+   * The facts are A (apply: `converged | pending`), P (prune: `converged |
+   * pending | unevaluated`, `unevaluated` being a failed LIST) and L (legacy:
+   * `removed | pending`), read back from the condition reasons alone:
    *
-   * | path                 | on failure                                                                                  |
-   * | reconcile() pass     | apply terminating/contended: `RetryPending`, requeue. Non-404 DELETE (prune or legacy) or a failed LIST: `PrunePending`, no requeue |
-   * | mid-run retry (this) | apply still pending: marker kept, progress requeue. Apply threw: marker kept, transient requeue. A pending prune is carried over |
-   * | terminal teardown    | a pending apply is dropped; a pending prune is kept (`PrunePending`)                         |
-   * | finalizer            | a non-404 DELETE is logged by `safeDelete` and not rethrown, so the finalizer completes     |
+   * | A         | P           | `WorkflowNetworkPoliciesConverged` | requeue            |
+   * | converged | converged   | absent                             | none               |
+   * | pending   | converged   | False/`RetryPending`               | the retry's        |
+   * | converged | pending     | False/`PrunePending`               | none               |
+   * | converged | unevaluated | False/`PruneUnevaluated`           | none               |
+   * | pending   | pending     | False/`RetryAndPrunePending`       | as RetryPending    |
+   * | pending   | unevaluated | False/`RetryAndPruneUnevaluated`   | as RetryPending    |
+   *
+   * | L       | `WorkflowLegacyNetworkPolicyRemoved` |
+   * | removed | absent                               |
+   * | pending | False/`DeletePending`                |
+   *
+   * | writer                                             | A                | P       | L       | clears             |
+   * | `reconcile` (run lane, eager, SDK with a summary)  | observed         | observed | observed | what converged    |
+   * | SDK with a runtime and no summary                  | not written      | not written | not written | nothing     |
+   * | `apply-retry` (this, in-progress and active)       | observed         | carried | carried | A only             |
+   * | `terminal`                                         | forced converged | carried | carried | A                  |
+   * | `unmanaged` (kill switch, SDK lane without a runtime, capability removal) | converged | converged | removed | everything |
+   * | finalizer                                          | the object is deleted |    |         |                    |
+   *
+   * A carrying writer keeps a marker whose reason it did not write as it is
+   * and warns; `reconcile` overwrites it. `unmanaged` is written only after
+   * `cleanupPluginWorkloadSdk` without `preserveWorkflowRuntime` succeeded:
+   * it sweeps the recipe labels and deletes the legacy policy by name, and a
+   * failure there fails the pass before the writer runs. A pending or
+   * unevaluated prune is not retried outside reconcile(): only reconcile()
+   * can compute the desired set, and the finalizer's label sweep removes
+   * every run-lane leftover. On the finalizer, a non-404 DELETE is logged by
+   * `safeDelete` and not rethrown, so the finalizer completes.
    *
    * A desired lane is applied on both apply paths; an uncertain verdict never
    * creates a proxy. Terminal teardown deletes a run-scoped run's compute pods
@@ -3389,13 +3632,13 @@ export class WorkflowReconciler {
   private async pruneLegacyMcpServersInternetEgressPolicy(
     recipeName: string,
     recipeUid?: string
-  ): Promise<{ deletePending: boolean }> {
+  ): Promise<NetworkPolicyLegacyFact> {
     const key = this.legacyMcpServersInternetEgressKey(recipeName, recipeUid)
     if (this.prunedLegacyMcpServersInternetEgress.has(key)) {
       this.log.debug('Skipping legacy mcp-servers internet NP delete; already observed gone', {
         recipe: recipeName,
       })
-      return { deletePending: false }
+      return 'removed'
     }
     const outcome = await observeNamespacedDelete(() =>
       this.deps.networkingApi.deleteNamespacedNetworkPolicy({
@@ -3409,7 +3652,7 @@ export class WorkflowReconciler {
         ...deleteOutcomeFields(outcome),
         err: outcome.error,
       })
-      return { deletePending: true }
+      return 'pending'
     }
     this.log.info('Legacy mcp-servers internet NP delete', {
       recipe: recipeName,
@@ -3418,7 +3661,7 @@ export class WorkflowReconciler {
     if (shouldRecordDelete(outcome)) {
       this.prunedLegacyMcpServersInternetEgress.add(key)
     }
-    return { deletePending: false }
+    return 'removed'
   }
 
   private needsRuntimeHttpEgressRefresh(spec: WorkflowRecipeSpec): boolean {
@@ -3584,7 +3827,7 @@ export class WorkflowReconciler {
     codexProjection: CodexExecutionProjection,
     eagerSdkMcpHost = false,
     grokProjection?: CodexExecutionProjection & { requiresGrokProxyEgress?: boolean }
-  ): Promise<WorkflowNetworkPolicyApplySummary> {
+  ): Promise<NetworkPolicyPassSummary> {
     const { policies, catalog } = await this.buildWorkflowNetworkPoliciesForSpec(
       recipeName,
       recipeUid,
@@ -3607,8 +3850,8 @@ export class WorkflowReconciler {
     policies: k8s.V1NetworkPolicy[],
     catalog: Set<string>,
     keepProxies: RunLaneProxyKeepReasons
-  ): Promise<WorkflowNetworkPolicyApplySummary> {
-    const summary = await this.applyNetworkPolicyList(policies)
+  ): Promise<NetworkPolicyPassSummary> {
+    const applied = await this.applyNetworkPolicyList(policies)
     const policyNames = new Set(policies.map(policy => policy.metadata?.name))
     const prune = await this.pruneUndesiredRunLaneNetworkPolicies(
       recipeName,
@@ -3617,10 +3860,7 @@ export class WorkflowReconciler {
       keepProxies
     )
     const legacy = await this.pruneLegacyMcpServersInternetEgressPolicy(recipeName, recipeUid)
-    // An unevaluated prune does not know which policies it owed a DELETE, so
-    // it outranks a legacy DELETE that did not land.
-    summary.prune = prune === 'converged' && legacy.deletePending ? 'pending' : prune
-    return summary
+    return { ...applied, prune, legacy }
   }
 
   /**

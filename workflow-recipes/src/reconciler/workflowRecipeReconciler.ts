@@ -57,22 +57,22 @@ import { ModelConfigHandler } from '../workflow/modelConfigHandler'
 import { buildCoordinatorGfsNetworkPolicy } from '../workflow/networkPolicyFactory'
 import type {
   EagerSdkBootstrapProof,
+  NetworkPolicyPassSummary,
   WorkflowNetworkPolicyApplySummary,
 } from '../workflow/pluginWorkloadSdkProvisioner'
 import { HttpPluginWorkloadSdkRevocationClient } from '../workflow/pluginWorkloadSdkRevocationClient'
 import { deriveWorkflowRuntimePlan } from '../workflow/runtimePlan'
 import { validateWorkflowRecipeLimits } from '../workflow/workflowLimits'
 import {
-  NETWORK_POLICIES_CONVERGED_CONDITION_TYPE,
   NETWORK_POLICY_OWNERSHIP_CONDITION_TYPES,
+  type NetworkPolicyMarkerWriter,
   WORKFLOW_OUTPUT_CONDITION_TYPES,
   WorkflowReconciler,
   WorkflowReconcilerDeps,
-  buildNetworkPolicyConvergedCondition,
   hasNetworkPolicyRetryPendingMarker,
   networkPolicyConditionsChanged,
-  networkPolicyMarkerFacts,
-  translateNetworkPolicyApplySummary,
+  networkPolicyMarkerConditions,
+  translateNetworkPolicyPassSummary,
 } from '../workflow/workflowReconciler'
 import { evaluateComputedValues } from './computedValuesEvaluator'
 import { CRD_GROUP, CRD_VERSION, WORKFLOWRECIPE_PLURAL } from './crdConstants'
@@ -1521,20 +1521,8 @@ export class WorkflowRecipeReconciler {
       )
       return TRANSIENT_REQUEUE_BASE_MS
     }
-    const existing = recipe.status?.conditions
-    const translated = translateNetworkPolicyApplySummary(
-      summary,
-      existing,
-      new Date().toISOString()
-    )
-    const fresh = translated.networkPolicyOwnershipConditions ?? []
-    if (networkPolicyConditionsChanged(existing, fresh)) {
-      await this.publishNetworkPolicyConditions(
-        recipe,
-        mergeOwnedConditions(existing, fresh, NETWORK_POLICY_OWNERSHIP_CONDITION_TYPES) ?? []
-      )
-    }
-    return translated.networkPolicyRetryPending ? WORKFLOW_PROGRESS_REQUEUE_BASE_MS : undefined
+    await this.publishNetworkPolicyMarkerWriter(recipe, { kind: 'apply-retry', summary })
+    return summary.retryPending ? WORKFLOW_PROGRESS_REQUEUE_BASE_MS : undefined
   }
 
   /**
@@ -1547,19 +1535,25 @@ export class WorkflowRecipeReconciler {
    * changes.
    */
   private async settleNetworkPolicyMarkerForTerminalRun(recipe: WorkflowRecipeCRD): Promise<void> {
+    await this.publishNetworkPolicyMarkerWriter(recipe, { kind: 'terminal' })
+  }
+
+  /**
+   * Publishes the NetworkPolicy condition group `writer` produces, outside
+   * `patchStatus`, for the paths that return before it. Opens a patch only
+   * when the group changes; every other condition is kept.
+   */
+  private async publishNetworkPolicyMarkerWriter(
+    recipe: WorkflowRecipeCRD,
+    writer: NetworkPolicyMarkerWriter
+  ): Promise<void> {
     const existing = recipe.status?.conditions
-    const { prune } = networkPolicyMarkerFacts(existing)
-    const marker = buildNetworkPolicyConvergedCondition(
-      { apply: 'converged', prune },
-      new Date().toISOString(),
-      existing
+    const fresh = networkPolicyMarkerConditions(writer, existing, new Date().toISOString())
+    if (!networkPolicyConditionsChanged(existing, fresh)) return
+    await this.publishNetworkPolicyConditions(
+      recipe,
+      mergeOwnedConditions(existing, fresh, NETWORK_POLICY_OWNERSHIP_CONDITION_TYPES) ?? []
     )
-    const settled = [
-      ...(existing ?? []).filter(c => c.type !== NETWORK_POLICIES_CONVERGED_CONDITION_TYPE),
-      ...(marker ? [marker] : []),
-    ]
-    if (!networkPolicyConditionsChanged(existing, settled)) return
-    await this.publishNetworkPolicyConditions(recipe, settled)
   }
 
   /**
@@ -1825,9 +1819,13 @@ export class WorkflowRecipeReconciler {
         phase: currentPhase,
         message: 'Plugin Workload SDK disabled after confirmed teardown',
         workloadStatuses: [],
-        // The SDK runtime is gone and this return skips the SDK-only lane, so
-        // no policy is managed and a published ownership conflict is stale.
-        networkPolicyOwnershipConditions: [],
+        // The confirmed teardown deleted every SDK policy (the legacy one by
+        // name included), so no policy is managed: the unmanaged writer.
+        networkPolicyOwnershipConditions: networkPolicyMarkerConditions(
+          { kind: 'unmanaged' },
+          recipe.status?.conditions,
+          new Date().toISOString()
+        ),
         pluginWorkloadSdkTeardownConfirmed: true,
       }
     }
@@ -1855,6 +1853,13 @@ export class WorkflowRecipeReconciler {
           skipStatusPatch: true,
           requeueAfterMs: TRANSIENT_REQUEUE_BASE_MS,
         }
+      }
+      // A stepless recipe managed policies only through the SDK, and the
+      // teardown above deleted them all, so the group is cleared here: the
+      // terminal and validation returns below never reach the SDK-only lane.
+      // A workflow recipe keeps its run lane, which still manages policies.
+      if (!isWorkflow) {
+        await this.publishNetworkPolicyMarkerWriter(recipe, { kind: 'unmanaged' })
       }
     }
 
@@ -3084,19 +3089,29 @@ export class WorkflowRecipeReconciler {
         sdkOnlyRuntime?.phase === 'active' &&
         recipe.spec.pluginWorkloadSdk !== undefined &&
         sdkOnlyRuntime.pluginWorkloadSdkBootstrapProof?.ready !== true
-      // Without an SDK runtime this lane manages no policies: nothing conflicts
-      // and nothing is pending, so a condition published by an earlier pass is
-      // stale and `[]` removes it. A runtime without a summary did not evaluate
-      // the policies (the host returned before the apply), so the ownership
-      // field stays absent and patchStatus keeps what was published.
+      // Without an SDK runtime this lane reaches no policy: the spec has no
+      // SDK block, and the capability-removal teardown deleted every SDK
+      // policy, the legacy one by name included. That is the unmanaged
+      // writer, which clears the whole group. A runtime without a summary did
+      // not evaluate the policies (the host returned before the apply), so
+      // the field stays absent and patchStatus keeps what was published.
+      const now = new Date().toISOString()
       const {
         networkPolicyRetryPending: sdkOnlyNetworkPolicyRetryPending,
         ...sdkOnlyNetworkPolicyOwnership
-      } = translateNetworkPolicyApplySummary(
-        sdkOnlyRuntime ? sdkOnlyRuntime.networkPolicies : { conflicts: [], retryPending: false },
-        recipe.status?.conditions,
-        new Date().toISOString()
-      )
+      } = sdkOnlyRuntime
+        ? translateNetworkPolicyPassSummary(
+            sdkOnlyRuntime.networkPolicies,
+            recipe.status?.conditions,
+            now
+          )
+        : {
+            networkPolicyOwnershipConditions: networkPolicyMarkerConditions(
+              { kind: 'unmanaged' },
+              recipe.status?.conditions,
+              now
+            ),
+          }
       if (sdkOnlyRuntime?.phase === 'failed') {
         return {
           phase: 'failed',
@@ -3279,7 +3294,7 @@ export class WorkflowRecipeReconciler {
     message: string
     pluginWorkloadSdkBootstrapProof?: EagerSdkBootstrapProof
     /** Undefined when the pass returned before applying the policies. */
-    networkPolicies?: WorkflowNetworkPolicyApplySummary
+    networkPolicies?: NetworkPolicyPassSummary
   }> {
     if (!this.workflowReconciler) {
       return {

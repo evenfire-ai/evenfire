@@ -50,29 +50,42 @@ export type EagerSdkMcpHostStatus =
   | 'provider_unavailable'
 
 /**
- * What one `applyWorkflowNetworkPolicies` pass could not converge. A conflict
- * names a live policy another controller owns; WRC leaves it untouched. A
- * pending retry means a policy was left unwritten for a later pass: it was
- * terminating, or still contended after the bounded apply rounds.
- *
- * `prune` is set only by a pass that pruned (see `NetworkPolicyPruneFact`).
- * A pass that did not prune leaves it undefined, and the published prune
- * fact is carried over unchanged.
+ * What one policy apply could not converge. A conflict names a live policy
+ * another controller owns; WRC leaves it untouched. A pending retry means a
+ * policy was left unwritten for a later pass: it was terminating, or still
+ * contended after the bounded apply rounds. An apply prunes nothing, so it
+ * says nothing about the prune or the legacy policy.
  */
 export type WorkflowNetworkPolicyApplySummary = {
   conflicts: { policy: string; reason: NetworkPolicyConflictReason }[]
   retryPending: boolean
-  prune?: NetworkPolicyPruneFact
 }
 
 /**
  * What a prune pass established about the run-lane policies the spec no
  * longer wants: `converged` when every DELETE it owed landed (2xx or 404),
- * `pending` when one did not (a non-404 prune or legacy DELETE), and
- * `unevaluated` when its LIST failed, so it could not tell which policies
- * were owed a DELETE at all.
+ * `pending` when one did not (a non-404 DELETE), and `unevaluated` when its
+ * LIST failed, so it could not tell which policies were owed a DELETE at all.
  */
 export type NetworkPolicyPruneFact = 'converged' | 'pending' | 'unevaluated'
+
+/**
+ * What a pass established about the legacy
+ * `<recipe>-mcp-servers-egress-internet` policy, deleted by name because it
+ * may carry no labels: `removed` when its DELETE landed (2xx or 404) or an
+ * earlier DELETE already did, `pending` when it did not.
+ */
+export type NetworkPolicyLegacyFact = 'removed' | 'pending'
+
+/**
+ * What one full `applyWorkflowNetworkPolicies` pass (apply, prune and legacy
+ * delete) established. Every field is required: an absent fact is never
+ * read as "carry the published one".
+ */
+export type NetworkPolicyPassSummary = WorkflowNetworkPolicyApplySummary & {
+  prune: NetworkPolicyPruneFact
+  legacy: NetworkPolicyLegacyFact
+}
 
 export type EagerSdkMcpHostResult = {
   status: EagerSdkMcpHostStatus
@@ -80,7 +93,7 @@ export type EagerSdkMcpHostResult = {
    * Undefined when the pass returned before applying the policies. An empty
    * summary would claim every policy converged and clear a published conflict.
    */
-  networkPolicies?: WorkflowNetworkPolicyApplySummary
+  networkPolicies?: NetworkPolicyPassSummary
 }
 
 /** Why the mcp-host runtime JWT Secret was reminted. */
@@ -174,7 +187,7 @@ export type PluginWorkloadSdkProvisionerDeps = {
     codexProjection: CodexRecipeVerdict['projection'],
     eagerSdkMcpHost: boolean,
     grokProjection?: CodexRecipeVerdict['grokProjection']
-  ) => Promise<WorkflowNetworkPolicyApplySummary>
+  ) => Promise<NetworkPolicyPassSummary>
   ensureMcpHostHeadlessService: (recipeName: string) => Promise<void>
   createIfNotExists: (createFn: () => Promise<unknown>, label: string) => Promise<boolean>
   safeDelete: (deleteFn: () => Promise<unknown>) => Promise<void>

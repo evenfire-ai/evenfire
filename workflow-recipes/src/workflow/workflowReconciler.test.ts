@@ -1430,6 +1430,9 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
     mockCoreApi.readNamespacedEndpoints.mockRejectedValue({ code: 404 })
     mockNetworkingApi.readNamespacedNetworkPolicy.mockRejectedValue({ code: 404 })
     mockNetworkingApi.listNamespacedNetworkPolicy.mockResolvedValue({ items: [] })
+    // clearAllMocks keeps implementations, so a DELETE failure one test
+    // injects must not leak into the next teardown.
+    mockNetworkingApi.deleteNamespacedNetworkPolicy.mockResolvedValue({})
     mockModelConfigHandler.configurePluginWorkloadSdkBootstrap.mockResolvedValue({
       status: 202,
       body: sdkBootstrapProof(),
@@ -1727,11 +1730,12 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
       // The conflict did not stop the rest of the pass.
       expect(createdNames()).toContain('sdk-only-workload-to-mcp-host-sdk-egress')
       expect(result.phase).toBe('active')
-      // The eager apply prunes too, so its summary carries the prune fact.
+      // The eager apply prunes too, so its summary carries the prune and legacy facts.
       expect(result.networkPolicies).toEqual({
         conflicts: [{ policy: foreignName, reason: 'owner-reference-mismatch' }],
         retryPending: false,
         prune: 'converged',
+        legacy: 'removed',
       })
       expect(writesTo(foreignName)).toHaveLength(0)
     })
@@ -1761,6 +1765,8 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
           networkPolicies: {
             conflicts: [{ policy: foreignName, reason: 'owner-reference-mismatch' }],
             retryPending: true,
+            prune: 'converged',
+            legacy: 'removed',
           },
         })
 
@@ -1777,6 +1783,8 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
         expect(result.networkPolicies).toEqual({
           conflicts: [{ policy: foreignName, reason: 'owner-reference-mismatch' }],
           retryPending: true,
+          prune: 'converged',
+          legacy: 'removed',
         })
       }
     )
@@ -1890,6 +1898,8 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
         networkPolicies: {
           conflicts: [{ policy: foreignName, reason: 'owner-reference-mismatch' }],
           retryPending: false,
+          prune: 'converged',
+          legacy: 'removed',
         },
       })
 
@@ -1927,7 +1937,12 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
       ).pluginWorkloadSdkProvisioner
       const ensure = vi.spyOn(provisioner, 'ensureEagerSdkMcpHost').mockResolvedValue({
         status: 'failed',
-        networkPolicies: { conflicts: [], retryPending: true },
+        networkPolicies: {
+          conflicts: [],
+          retryPending: true,
+          prune: 'converged',
+          legacy: 'removed',
+        },
       })
 
       const result = await reconciler.reconcile(
@@ -1968,6 +1983,8 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
         networkPolicies: {
           conflicts: [{ policy: foreignName, reason: 'owner-reference-mismatch' }],
           retryPending: true,
+          prune: 'converged',
+          legacy: 'removed',
         },
       })
 
@@ -2021,6 +2038,8 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
         networkPolicies: {
           conflicts: [{ policy: foreignName, reason: 'owner-reference-mismatch' }],
           retryPending: false,
+          prune: 'converged',
+          legacy: 'removed',
         },
       })
 
@@ -2216,9 +2235,12 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
     expect(legacyDeletes()).toHaveLength(1)
 
     await reconciler.cleanupPluginWorkloadSdk('sdk-only', { recipeUid: 'uid-sdk-only' })
+    // The teardown deletes the legacy policy by name (R4-L3).
+    expect(legacyDeletes()).toHaveLength(2)
     await reconcileSdkOnly()
 
-    expect(legacyDeletes()).toHaveLength(2)
+    // The ledger entry was forgotten, so the next pass deletes it again.
+    expect(legacyDeletes()).toHaveLength(3)
   })
 
   it('defers absence reads until pod deletion completes so 404s cannot become unhandled rejections', async () => {
