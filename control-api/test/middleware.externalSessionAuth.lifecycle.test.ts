@@ -18,7 +18,10 @@ vi.mock('../src/db.js', () => ({
   },
 }))
 vi.mock('../src/observability/logger.js', () => ({
-  rootLogger: { warn: (...args: unknown[]) => loggerWarn(...args) },
+  rootLogger: {
+    warn: (...args: unknown[]) => loggerWarn(...args),
+    child: () => ({ debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }),
+  },
 }))
 vi.mock('../src/utils/auth/externalSessionAuthToken.js', () => ({
   verifyExternalSessionToken: (...args: unknown[]) => verifyToken(...args),

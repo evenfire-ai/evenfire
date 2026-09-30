@@ -7,7 +7,7 @@ import { MockGateway } from './mockGateway.js'
 
 const effects = vi.hoisted(() => ({
   deleteOAuthGrant: vi.fn(),
-  getAccessToken: vi.fn(),
+  getAccessTokenReactive: vi.fn(),
 }))
 const limiter = vi.hoisted(() => ({
   checkAndIncrement: vi.fn(),
@@ -18,9 +18,9 @@ vi.mock('../src/oauth/store.js', async importOriginal => ({
   ...(await importOriginal<typeof import('../src/oauth/store.js')>()),
   deleteOAuthGrant: effects.deleteOAuthGrant,
 }))
-vi.mock('../src/oauth/tokenHelper.js', async importOriginal => ({
-  ...(await importOriginal<typeof import('../src/oauth/tokenHelper.js')>()),
-  getAccessToken: effects.getAccessToken,
+vi.mock('../src/oauth/reactiveTokenHelper.js', async importOriginal => ({
+  ...(await importOriginal<typeof import('../src/oauth/reactiveTokenHelper.js')>()),
+  getAccessTokenReactive: effects.getAccessTokenReactive,
 }))
 vi.mock('../src/services/rateLimiterService.js', async importOriginal => ({
   ...(await importOriginal<typeof import('../src/services/rateLimiterService.js')>()),
@@ -141,8 +141,8 @@ describe('Sandbox OAuth distributed admission', () => {
   beforeEach(() => {
     effects.deleteOAuthGrant.mockReset()
     effects.deleteOAuthGrant.mockResolvedValue(undefined)
-    effects.getAccessToken.mockReset()
-    effects.getAccessToken.mockResolvedValue({
+    effects.getAccessTokenReactive.mockReset()
+    effects.getAccessTokenReactive.mockResolvedValue({
       kind: 'ok',
       accessToken: 'provider-access-token',
       expiresAt: null,
@@ -174,14 +174,14 @@ describe('Sandbox OAuth distributed admission', () => {
       .send(body('user-a'))
       .expect(429)
     expectCanonicalRateLimitHeaders(denied)
-    expect(effects.getAccessToken).toHaveBeenCalledTimes(10)
+    expect(effects.getAccessTokenReactive).toHaveBeenCalledTimes(10)
     expect(limiter.checkAndIncrement).toHaveBeenLastCalledWith(
       'sandbox-oauth-token-vend:user-a',
       10
     )
 
     await internal(request(instance).post(TOKEN_URL)).send(body('user-b')).expect(200)
-    expect(effects.getAccessToken).toHaveBeenCalledTimes(11)
+    expect(effects.getAccessTokenReactive).toHaveBeenCalledTimes(11)
   })
 
   it('denies authorize-url request 11 before recipe and Secret work with a trusted user bucket', async () => {
@@ -277,7 +277,7 @@ describe('Sandbox OAuth distributed admission', () => {
       .expect(400)
 
     expect(limiter.checkAndIncrement).not.toHaveBeenCalled()
-    expect(effects.getAccessToken).not.toHaveBeenCalled()
+    expect(effects.getAccessTokenReactive).not.toHaveBeenCalled()
   })
 
   it('keeps authorize-url authentication, body, and exact v2 binding ahead of admission', async () => {

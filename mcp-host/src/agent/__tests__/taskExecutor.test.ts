@@ -672,9 +672,14 @@ describe('TaskExecutor', () => {
     )
     expect(persistSuspend).toHaveBeenCalledWith(
       expect.anything(),
-      expect.objectContaining({ request_id: 'req-1' }),
-      expect.objectContaining({ authorityV2: task.sourceMessage!.authorityV2 })
+      expect.objectContaining({
+        request_id: 'req-1',
+        sourceMessage: expect.objectContaining({
+          authorityV2: task.sourceMessage!.authorityV2,
+        }),
+      })
     )
+    expect(persistSuspend.mock.calls[0]).toHaveLength(2)
   })
 
   it('should expose pendingApproval when awaiting', async () => {
