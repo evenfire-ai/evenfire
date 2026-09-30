@@ -1103,24 +1103,51 @@ export function App() {
     if (typeof entityChangeBridge?.subscribe !== 'function') return
     let active = true
     let stopSubscription: (() => Promise<void>) | null = null
-    const unsubscribeGfs = entityChangeRegistry.subscribe(['gfs', 'authorization'], () => {
+    let gfsRevalidationInFlight = false
+    let gfsRevalidationPending = false
+    const gfsQueryFilter = {
+      queryKey: desktopQueryKeys.gfsRoot,
+      predicate: (query: { queryKey: readonly unknown[] }) =>
+        shouldRevalidateGfsQuery(query.queryKey),
+    }
+    const revalidateGfs = () => {
+      if (!active) return
+      if (gfsRevalidationInFlight) {
+        gfsRevalidationPending = true
+        return
+      }
+      gfsRevalidationInFlight = true
+      const foregroundReadWasActive = queryClient.isFetching(gfsQueryFilter) > 0
       setRemoteGfsChangeEpoch(epoch => epoch + 1)
+      void queryClient
+        .invalidateQueries({ ...gfsQueryFilter, refetchType: 'active' }, { cancelRefetch: false })
+        .then(async () => {
+          const resources = new Set(
+            workspaceTabsRef.current.tabs
+              .filter(tab => tab.kind === 'preview' && tab.preview)
+              .map(tab => tab.preview!.gfsUri)
+          )
+          const pluginPreview = pluginGfsPreviewRef.current
+          if (pluginPreview) resources.add(pluginPreview.gfsUri)
+          await Promise.all(Array.from(resources, uri => refreshOpenPreview(uri)))
+        })
+        .finally(() => {
+          gfsRevalidationInFlight = false
+          if (!active) return
+          if (gfsRevalidationPending || foregroundReadWasActive) {
+            gfsRevalidationPending = false
+            revalidateGfs()
+          }
+        })
+    }
+    const unsubscribeGfs = entityChangeRegistry.subscribe(['gfs', 'authorization'], () => {
       // Scope invalidations are soft convergence hints, not proof that cached
       // data is no longer authorized. Keep visible/paginated rows while active
       // queries refetch; only an authoritative 403/404 purges a preview.
-      void queryClient.invalidateQueries({
-        queryKey: desktopQueryKeys.gfsRoot,
-        predicate: query => shouldRevalidateGfsQuery(query.queryKey),
-        refetchType: 'active',
-      })
-      const resources = new Set(
-        workspaceTabsRef.current.tabs
-          .filter(tab => tab.kind === 'preview' && tab.preview)
-          .map(tab => tab.preview!.gfsUri)
-      )
-      const pluginPreview = pluginGfsPreviewRef.current
-      if (pluginPreview) resources.add(pluginPreview.gfsUri)
-      for (const gfsUri of resources) void refreshOpenPreview(gfsUri)
+      // TanStack's default refetch cancels an active request. Serialize these
+      // soft passes and retain one trailing pass so a second frame cannot abort
+      // a foreground navigation/page chain or lose a mutation during that read.
+      revalidateGfs()
     })
     void entityChangeBridge
       .subscribe(event => entityChangeRegistry.dispatch(event))

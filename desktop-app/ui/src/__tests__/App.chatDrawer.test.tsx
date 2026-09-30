@@ -1447,6 +1447,78 @@ describe('App live GFS preview revalidation', () => {
     expect(measuredReads).toBeLessThanOrEqual(32)
   })
 
+  it('queues a second invalidation instead of canceling a multi-page refresh', async () => {
+    let finishFirstPage!: (page: {
+      items: Array<{ name: string }>
+      nextCursor: string | null
+    }) => void
+    let readSequence = 0
+    const listChildren = vi.fn((_id: string, _drive?: string, cursor?: string) => {
+      readSequence += 1
+      if (readSequence === 1) {
+        return new Promise(resolve => {
+          finishFirstPage = resolve
+        })
+      }
+      return Promise.resolve({
+        items: [{ name: `${cursor ? 'second' : 'first'}-latest` }],
+        nextCursor: cursor ? null : 'page-2',
+      })
+    })
+    Object.assign(window.clerum.gfs, { listChildren })
+    const queryKey = desktopQueryKeys.gfsChildren('session', 'folder', 'main')
+    desktopQueryClient.setQueryData(queryKey, {
+      pages: [
+        { items: [{ name: 'first-old' }], nextCursor: 'page-2' },
+        { items: [{ name: 'second-old' }], nextCursor: null },
+      ],
+      pageParams: [undefined, 'page-2'],
+    })
+
+    function FolderRows() {
+      const query = useInfiniteQuery({
+        queryKey,
+        queryFn: ({ pageParam }) => window.clerum.gfs.listChildren('folder', 'main', pageParam),
+        initialPageParam: undefined as string | undefined,
+        getNextPageParam: page => page.nextCursor ?? undefined,
+      })
+      return (
+        <output data-testid="folder-rows">
+          {(query.data?.pages ?? [])
+            .flatMap(page => page.items)
+            .map(row => row.name)
+            .join(',')}
+        </output>
+      )
+    }
+
+    render(
+      <QueryClientProvider client={desktopQueryClient}>
+        <FolderRows />
+        <App />
+      </QueryClientProvider>
+    )
+    await waitFor(() => expect(dispatchEntityChange).toBeTypeOf('function'))
+
+    act(() => dispatchEntityChange?.({ ...USER_SCOPE_INVALIDATED }))
+    await waitFor(() => expect(listChildren).toHaveBeenCalledTimes(1))
+    act(() => dispatchEntityChange?.({ ...USER_SCOPE_INVALIDATED }))
+
+    // The event may mark this read stale, but it cannot cancel/restart the user's
+    // active page-chain read while the authoritative response is still pending.
+    expect(listChildren).toHaveBeenCalledTimes(1)
+    expect(screen.getByTestId('folder-rows').textContent).toBe('first-old,second-old')
+
+    await act(async () => {
+      finishFirstPage({ items: [{ name: 'first-latest' }], nextCursor: 'page-2' })
+      await Promise.resolve()
+    })
+    await waitFor(() =>
+      expect(screen.getByTestId('folder-rows').textContent).toBe('first-latest,second-latest')
+    )
+    expect(listChildren).toHaveBeenCalledTimes(4)
+  })
+
   it('preserves an unchanged preview during soft scope revalidation and purges only on 403', async () => {
     const resolve = vi.mocked(window.clerum.gfs.resolve)
     const invalidateQueries = vi
