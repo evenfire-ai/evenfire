@@ -887,6 +887,35 @@ describe('workspaceTabs — preview multi-instance by gfsUri (spec 18 §3.B.1)',
       'unavailable'
     )
   })
+
+  it('restores a deleted-and-recreated resource whose authoritative version restarted lower', () => {
+    let state = createEmptyWorkspaceTabsState()
+    state = openPreviewTab(state, {
+      id: 'preview-stable',
+      gfsUri: 'gfs://main/recreated',
+      fileKind: 'markdown',
+      byteLength: 40,
+      resourceVersion: 8,
+    })
+    const unavailable = refreshPreviewTab(state, 'gfs://main/recreated', {
+      status: 'unavailable',
+      shellTitle: 'File unavailable',
+    })
+
+    const restored = refreshPreviewTab(unavailable, 'gfs://main/recreated', {
+      status: 'available',
+      title: 'recreated.md',
+      fileKind: 'markdown',
+      byteLength: 12,
+      resourceVersion: 1,
+    })
+
+    expect(restored.activeTabId).toBe(unavailable.activeTabId)
+    const tab = restored.tabs.find(tab => tab.id === 'preview-stable')
+    expect(tab?.title).toBe('recreated.md')
+    expect(tab?.preview).toMatchObject({ resourceVersion: 1, reloadVersion: 2 })
+    expect(tab?.preview).not.toHaveProperty('unavailable')
+  })
 })
 
 describe('workspaceTabs — new chat (blank) with kind guard', () => {

@@ -395,6 +395,7 @@ export function refreshPreviewTab(
       }
     }
     if (
+      !previous.unavailable &&
       refresh.resourceVersion !== undefined &&
       previous.resourceVersion !== undefined &&
       refresh.resourceVersion < previous.resourceVersion
