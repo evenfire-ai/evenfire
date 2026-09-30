@@ -190,7 +190,7 @@ export class BasicSafety implements Safety {
     }
 
     if (hostname && isPrivateIp(hostname)) {
-      errors.push(`Private or link-local target "${hostname}" is blocked`)
+      errors.push(`Non-public target "${hostname}" is blocked`)
     }
 
     for (const rule of BasicSafety.HTTP_BLOCKED_HOST_PATTERNS) {
