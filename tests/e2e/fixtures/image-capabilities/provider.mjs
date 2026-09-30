@@ -354,10 +354,13 @@ const ATTACHED_FILE_LINE = /^attached_file: id="([^"\n]+)"[^\n]*$/m
 
 /**
  * The trailing fields of that line (`turnContext.ts`): the byte length the Host
- * verified, then the reader. Anchored to the end of the line, so a file name
- * that contains the same text cannot supply the value.
+ * verified, then the reader, then the optional media-type mismatch tail. The
+ * declared type in that tail is written with `quotePromptValue`, a JSON string
+ * literal that may contain spaces and escaped quotes. Anchored to the end of the
+ * line, so a file name that contains the same text cannot supply the value.
  */
-const ATTACHED_FILE_BYTES = / bytes=(\S*) reader=\S+$/
+const ATTACHED_FILE_BYTES =
+  / bytes=(\S*) reader=\S+(?: mismatch=true(?: declared="(?:[^"\\]|\\.)*")? detected=\S+)?$/
 
 /** A positive decimal integer without leading zeros. */
 const POSITIVE_DECIMAL = /^[1-9][0-9]*$/

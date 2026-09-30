@@ -153,3 +153,72 @@ test('the production ZAI serializer and pinned SDK complete an attachment read a
     },
   ])
 })
+
+// The Host appends ` mismatch=true[ declared=<quoted>] detected=<type>` to the
+// attached_file line when the declared and detected media types disagree
+// (turnContext.ts). The declared value is client-supplied, so it is quoted and
+// may carry spaces and escaped quotes.
+for (const declaredMediaType of ['text/plain', 'text/plain; charset="utf-8"']) {
+  test(`the fixture asks to read a mismatched attachment declared as ${declaredMediaType}`, async () => {
+    const before = fixture.getEvidence().attempts.length
+    const { OpenAICompatibleProvider } = require('./dist/llm/openaiCompatible.js')
+    const { buildTurnContextBlock } = require('./dist/core/orchestration/turnContext.js')
+    const provider = new OpenAICompatibleProvider(
+      {
+        id: 'zai',
+        baseURL: 'https://api.z.ai/api/coding/paas/v4',
+        defaultModel: 'glm-5.3-flash',
+      },
+      IMAGE_CAPABILITIES_CREDENTIAL,
+      'glm-5.3-flash'
+    )
+
+    const attachmentId = 'att-66666666-7777-4888-9999-000000000000'
+    const byteLength = 4321
+    const block = buildTurnContextBlock({
+      date: new Date('2026-09-29T00:00:00.000Z'),
+      channel: { type: 'desktop' },
+      attachedFiles: [
+        {
+          attachmentId,
+          name: 'report.txt',
+          class: 'pdf',
+          byteLength,
+          reader: 'pdf',
+          mismatch: true,
+          declaredMediaType,
+          detectedMediaType: 'application/pdf',
+        },
+      ],
+    })
+    // The Host really wrote the tail this case is about.
+    assert.match(block, / mismatch=true declared="[^\n]*" detected=application\/pdf\n/)
+    const tools = [
+      {
+        name: 'clerum__attachment_read',
+        description: 'Read an attached file.',
+        parameters: { type: 'object', properties: { attachmentId: { type: 'string' } } },
+      },
+    ]
+    const user = { role: 'user', content: `${block}\n\nSummarize the attached file.` }
+
+    const settled = await provider.completeSingleTurnWithTools([user], tools).then(
+      value => ({ value }),
+      error => ({ error })
+    )
+
+    assert.equal(settled.error?.message, undefined)
+    assert.deepEqual(appendedRows(before), [
+      {
+        model: 'glm-5.3-flash',
+        imageSha256: null,
+        responseKind: 'document-read-requested',
+        documentSha256: null,
+        documentByteLength: byteLength,
+      },
+    ])
+    assert.equal(settled.value.finish_reason, 'tool_use')
+    assert.equal(settled.value.tool_calls?.length, 1)
+    assert.deepEqual(settled.value.tool_calls[0].arguments, { attachmentId })
+  })
+}
