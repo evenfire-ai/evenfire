@@ -18,6 +18,7 @@ const mocks = vi.hoisted(() => ({
   isSilentApiError: vi.fn(),
   listWorkflowApprovalMediums: vi.fn(),
   logout: vi.fn(),
+  navigateToDesktopApp: vi.fn(),
   refreshApprovalTargets: vi.fn(),
   refreshReleaseIdentity: vi.fn(),
   routerPush: vi.fn(),
@@ -108,6 +109,7 @@ vi.mock('@lib/approvalChannels', () => ({
 
 vi.mock('@lib/desktopAppLinks', () => ({
   buildDesktopEnvironmentLink: mocks.buildDesktopEnvironmentLink,
+  navigateToDesktopApp: mocks.navigateToDesktopApp,
 }))
 
 vi.mock('@lib/releaseIdentity', () => ({
@@ -129,6 +131,10 @@ afterEach(cleanup)
 
 describe('Settings desktop setup handoff', () => {
   it('uses the shared desktop environment link builder', async () => {
+    const desktopHref =
+      'evenfire://desktop-environment?externalRestApiBaseUrl=https%3A%2F%2Fapi.example.com&tenantName=Example+Tenant'
+    mocks.buildDesktopEnvironmentLink.mockReturnValue(desktopHref)
+
     render(<SettingsContent activeSettingsTab="profile" activeSocialTab="telegram" />)
 
     const setupButton = await screen.findByRole('button', { name: 'Setup desktop app' })
@@ -143,5 +149,6 @@ describe('Settings desktop setup handoff', () => {
     fireEvent.click(openButton)
 
     expect(mocks.buildDesktopEnvironmentLink).toHaveBeenCalledWith(desktopEnvironment)
+    expect(mocks.navigateToDesktopApp).toHaveBeenCalledWith(desktopHref)
   })
 })

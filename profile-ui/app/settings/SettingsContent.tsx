@@ -28,7 +28,7 @@ import {
   disconnectWorkflowApprovalMedium,
   listWorkflowApprovalMediums,
 } from '@lib/approvalChannels'
-import { buildDesktopEnvironmentLink } from '@lib/desktopAppLinks'
+import { buildDesktopEnvironmentLink, navigateToDesktopApp } from '@lib/desktopAppLinks'
 import {
   EMPTY_PROFILE_CHANNELS,
   addDraftRow,
@@ -336,7 +336,7 @@ export function SettingsContent({
   function openDesktopAppSetup() {
     const desktopEnvironmentLink = buildDesktopEnvironmentLink(desktopEnvironment)
     if (!desktopEnvironmentLink) return
-    window.location.href = desktopEnvironmentLink
+    navigateToDesktopApp(desktopEnvironmentLink)
   }
 
   return (

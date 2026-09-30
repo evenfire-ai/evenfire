@@ -4,7 +4,18 @@ import {
   buildEvenfireDesktopAppContentSecurityPolicy,
   buildEvenfireDesktopAppLink,
   buildEvenfireDesktopAppRedirectDocument,
+  navigateToDesktopApp,
 } from '../lib/desktopAppLinks'
+
+test('navigateToDesktopApp assigns the protocol URL to the browser location', () => {
+  const location = { href: 'https://profile.example.com/settings' }
+  const desktopHref =
+    'evenfire://desktop-environment?externalRestApiBaseUrl=https%3A%2F%2Fapi.example.com&tenantName=Example+Tenant'
+
+  navigateToDesktopApp(desktopHref, location)
+
+  assert.equal(location.href, desktopHref)
+})
 
 test('buildEvenfireDesktopAppLink preserves a nested app pathname and team', () => {
   assert.equal(

@@ -18,6 +18,13 @@ export function buildDesktopEnvironmentLink(
   return `evenfire://desktop-environment?${params.toString()}`
 }
 
+export function navigateToDesktopApp(
+  href: string,
+  location: Pick<Location, 'href'> = window.location
+): void {
+  location.href = href
+}
+
 export function buildEvenfireDesktopAppLink(parts: {
   recipeNs: string
   recipeName: string
