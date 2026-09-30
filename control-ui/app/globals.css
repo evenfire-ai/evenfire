@@ -326,6 +326,11 @@ body.cu-body {
   max-width: min(28rem, 100%);
 }
 
+/* A grid container overrides the UA `hidden` display; keep hidden steps hidden. */
+.cu-form-stack[hidden] {
+  display: none;
+}
+
 /* Detail-page forms that need more room for their selects and embedded cards
    (agent Models & creds). */
 .cu-form-stack--wide {
