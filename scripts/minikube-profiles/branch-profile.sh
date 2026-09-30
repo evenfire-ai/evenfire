@@ -1075,7 +1075,6 @@ restore_global_context_on_exit() {
 }
 
 cmd_start() {
-  require_command git minikube kubectl helm shasum
   require_local_context_endpoint
   require_context_profile_known_to_minikube
   check_docker_ready
@@ -1140,7 +1139,6 @@ cmd_status() {
 }
 
 cmd_pf() {
-  require_command git kubectl curl shasum
   require_existing_profile
   load_port_forward_owner
   require_local_context_endpoint
@@ -1388,7 +1386,6 @@ cmd_stop() {
 }
 
 cmd_setup() {
-  require_command git minikube kubectl helm shasum perl
   require_existing_profile
   require_profile_confirmation setup
   require_local_context_endpoint
@@ -1466,6 +1463,28 @@ cmd_sync_plan() {
   printf 'Incremental pre-gate sync remains disabled until minikube-deploy-all is shimmed end-to-end.\n'
 }
 
+# require_action_commands: the one table of the commands each action runs,
+# checked before init_profile and dispatch so a missing command is named up
+# front instead of surfacing as `command not found` after other commands have
+# run. run_bounded runs every bounded call through node; the context guards use
+# minikube, kubectl and python3; pf and health probe through curl; start and
+# setup install charts with helm, and setup rewrites the shims with perl. Every
+# action also runs init_profile's git, awk and shasum. Actions outside the
+# table keep their own checks (preflight, prepare-shims) or run none of these.
+require_action_commands() {
+  local -a needed
+  case "${ACTION}" in
+    start) needed=(minikube kubectl helm python3 node) ;;
+    status) needed=(minikube kubectl python3 node) ;;
+    pf | pf-health | health) needed=(minikube kubectl python3 node curl) ;;
+    stop | delete) needed=(minikube kubectl python3 node) ;;
+    setup) needed=(minikube kubectl helm perl python3 node) ;;
+    *) return 0 ;;
+  esac
+  require_command git awk shasum "${needed[@]}"
+}
+
+require_action_commands
 init_profile
 
 case "${ACTION}" in
