@@ -2561,7 +2561,8 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
       // A renewed GFS credential differs from the one the pod booted with, so
       // the record's revision moves away from the deployed one.
       vi.mocked(mintHostGfsToken).mockImplementationOnce(async ({ name, namespace }) => ({
-        ['to' + 'ken']: 'gfs-renewed-value',
+        // The literal key type keeps the mock assignable to GfsHostToken.
+        [('to' + 'ken') as 'token']: 'gfs-renewed-value',
         expiresInSeconds: 600,
         subject: `host:1st:${namespace}/${name}`,
       }))
