@@ -564,6 +564,21 @@ bp delete-minikube-fails delete "CONFIRM_DELETE=${profile}"
 assert_rc 11 'delete returns the exit code of a failed minikube delete'
 assert_log_has "minikube -p ${profile} delete pidfiles=0" 'delete ran the failing minikube delete with no records left'
 
+# A die inside cmd_stop_pf (here: a symlinked pids directory) is contained by
+# the subshell in stop_pf_before_minikube: minikube stop still runs and the
+# command fails.
+reset_state
+mv "${pids_dir}" "${tmp}/pids-aside"
+mkdir -p "${tmp}/pids-target"
+ln -s "${tmp}/pids-target" "${pids_dir}"
+bp stop-pf-dies stop
+assert_rc_nonzero 'stop must fail when clearing the port-forward records dies'
+# Witness: the die that the subshell contained.
+assert_output_has "refusing symlinked port-forward PID directory: ${pids_dir}" 'stop reached the dying stop-pf'
+assert_log_has "minikube -p ${profile} stop" 'a die in stop-pf must not prevent minikube stop'
+rm -f "${pids_dir}"
+mv "${tmp}/pids-aside" "${pids_dir}"
+
 # === stop-pf attempts every record ============================================
 # record_pf_pids <name...>: PF_PIDS gets the recorded PID of each named forward.
 record_pf_pids() {
