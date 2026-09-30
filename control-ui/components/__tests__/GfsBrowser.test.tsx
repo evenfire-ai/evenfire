@@ -2734,6 +2734,43 @@ describe('GfsBrowser', () => {
     expect(screen.queryByRole('dialog', { name: 'Open EvenDrive link' })).toBeNull()
   })
 
+  it('keeps the current list visible when an EvenDrive link resolves to the same folder', async () => {
+    const folder = listedFolder('11111111-1111-1111-1111-111111111111', 'org', '/org', 4)
+    const childFile = child('nested.txt', 'file', 2)
+    mockApiGet.mockImplementation(async (path: string) => {
+      if (path === '/api/v1/gfs/tree') return { items: [folder], nextCursor: null }
+      if (path === `/api/v1/gfs/resources/${folder.resourceId}/children`) {
+        return { items: [childFile], nextCursor: null }
+      }
+      if (path === '/api/v1/gfs/resolve') {
+        return resolvedFolderView(folder.resourceId, folder.name, folder.path!, folder.version)
+      }
+      return { items: [], nextCursor: null }
+    })
+
+    renderBrowser()
+    fireEvent.click(await screen.findByRole('button', { name: 'org' }))
+    await screen.findByText('nested.txt')
+    const breadcrumb = screen.getByRole('navigation', { name: 'Breadcrumb' })
+    fireEvent.click(within(breadcrumb).getByRole('button', { name: 'Actions for org' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Open EvenDrive link' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Open EvenDrive link' })
+    fireEvent.change(within(dialog).getByLabelText('EvenDrive link'), {
+      target: { value: folder.gfsUri },
+    })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Open' }))
+
+    await waitFor(() =>
+      expect(
+        mockApiGet.mock.calls.filter(
+          ([path]) => path === `/api/v1/gfs/resources/${folder.resourceId}/children`
+        ).length
+      ).toBeGreaterThan(1)
+    )
+    await waitFor(() => expect(screen.getByText('nested.txt')).toBeVisible())
+    expect(screen.queryByRole('status', { name: 'Loading files' })).toBeNull()
+  })
+
   // R5-M1: moving the folder the breadcrumb is INSIDE changes its ancestry, so
   // patching the moved crumb in place would leave the trail pointing at the
   // old location. The trail must be rebuilt from the folder's new location.

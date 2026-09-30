@@ -1873,7 +1873,6 @@ export function GfsBrowser(): React.JSX.Element {
       // trail this link-open just replaced.
       trailReconstructionEpochRef.current += 1
       setCrumbs([{ id: null, rid: null, name: '/' }, folderResourceToCrumb(view)])
-      setLoading(true)
       setOpenLinkOpen(false)
     } catch (err) {
       setOpenLinkError(err instanceof Error ? err.message : 'Could not open the EvenDrive link.')
