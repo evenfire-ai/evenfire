@@ -101,6 +101,22 @@ for identity_file in "$COMMON" "$ROOT/scripts/minikube/sync-auth-key.sh" "$ROOT/
   grep -Fq 't2_worktree_id' "$identity_file"
 done
 grep -Fq 'bash "$T2_PROJECT_DIR/scripts/tests/test-minikube-t2-contract.sh"' "$T2"
+# run_t0 runs under the lease owner but does not hold the lease, so its children
+# must not inherit the pinned origin/dev: t2_resolve_origin_dev refuses a pin
+# without T2_SKIP_LOCK=true. Every child starts through t2_run_outside_lease;
+# T0 receives origin/dev explicitly as T0_ORIGIN_DEV.
+# Continuation lines are joined so a wrapped command is checked as one line.
+run_t0_body="$(awk '/^run_t0\(\) \{/{f=1} !f{next} sub(/\\$/, ""){buf=buf $0; next} {print buf $0; buf=""} /^\}/{exit}' "$T2")"
+[ -n "$run_t0_body" ] || { printf 'FAIL: run_t0 not found in t2.sh\n' >&2; exit 1; }
+unwrapped_t0_children="$(printf '%s\n' "$run_t0_body" | grep -E '^[[:space:]]*(bash |T0_PROJECT_DIR=)' | grep -Ev '^[[:space:]]*bash -n ' || true)"
+[ -z "$unwrapped_t0_children" ] || {
+  printf 'FAIL: run_t0 starts a child without t2_run_outside_lease:\n%s\n' "$unwrapped_t0_children" >&2
+  exit 1
+}
+[ "$(printf '%s\n' "$run_t0_body" | grep -Ec '^[[:space:]]*t2_run_outside_lease ')" -eq 4 ] || {
+  printf 'FAIL: run_t0 must start t0.sh, T2_T0_COMMAND, the contract test and the setup-handoff test through t2_run_outside_lease\n' >&2
+  exit 1
+}
 
 required_codes="DEVELOPMENT_SCOPE_REQUIRED PROFILE_OWNERSHIP_MISMATCH PROFILE_BUSY PROFILE_LOCK_REQUIRED HEAD_MARKER_MISMATCH IMAGE_MANIFEST_MISMATCH BOOTSTRAP_REQUIRED CERTIFICATION_REQUIRED SECRET_MISSING CONFIGMAP_MISSING POSTGRES_NOT_READY REAL_PG_REQUIRED_BUT_UNAVAILABLE REAL_PG_SUITE_FAILED REAL_PG_REPORT_INCOMPLETE UNSUPPORTED_T1_CONCURRENCY ZERO_TESTS_EXECUTED PORT_FORWARD_CONFLICT NP08_HCC_AUTHORIZATION_FAILED PLAYWRIGHT_FAILED"
 for code in $required_codes; do

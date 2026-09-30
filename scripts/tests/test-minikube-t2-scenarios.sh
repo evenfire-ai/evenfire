@@ -606,12 +606,24 @@ grep -Fq 'origin/dev moved' "$tmp/pin-current.out" && fail 'a pin equal to the l
 # The children are require-t2-mutation-lock.sh, the boundary that validates a
 # lease without resolving repository metadata again.
 "${pin_env[@]}" T2_LOCK_ROOT="$tmp/pin-locks" bash -c '
-  common="$1" base="$2" other="$3" out="$4" child="$5"
+  common="$1" base="$2" other="$3" out="$4" child="$5" print="$6"
   source "$common"
   t2_repo_metadata
   t2_lock_acquire
   grep -Fqx "ORIGIN_DEV=$base" "$T2_LOCK_DIR/owner.env" || { echo "owner.env does not record the pinned origin/dev" >&2; exit 11; }
   [ "$(bash -c '\''printf %s "$T2_PINNED_ORIGIN_DEV"'\'')" = "$base" ] || { echo "the lease owner does not export the pinned origin/dev" >&2; exit 12; }
+  # T0 runs under the owner without holding the lease (no T2_SKIP_LOCK): a child
+  # that inherits the pin is refused, which is how the first lane on 6ca44cbeb
+  # died inside T0. t2_run_outside_lease starts such a child without the pin.
+  if bash -c "$print" bash "$common" >"$out/unleased-leak.out" 2>&1; then
+    echo "an unleased child that inherits the pin was accepted" >&2; exit 20
+  fi
+  grep -Fq "T2_PINNED_ORIGIN_DEV is only honored under an inherited T2 lease" "$out/unleased-leak.out" || { cat "$out/unleased-leak.out" >&2; exit 21; }
+  t2_run_outside_lease bash -c "$print" bash "$common" >"$out/unleased.out" 2>&1 ||
+    { cat "$out/unleased.out" >&2; echo "a child started through t2_run_outside_lease was refused" >&2; exit 22; }
+  grep -Fqx "ORIGIN_DEV=$base" "$out/unleased.out" || { cat "$out/unleased.out" >&2; exit 23; }
+  [ "$(t2_run_outside_lease bash -c '\''printf %s "${T2_PINNED_ORIGIN_DEV-unset}"'\'')" = unset ] ||
+    { echo "t2_run_outside_lease passed the pin to its child" >&2; exit 24; }
   T2_LOCK_TOKEN="$T2_LOCK_TOKEN" bash "$child" ||
     { echo "an inherited lease carrying the owner pin was refused" >&2; exit 13; }
   if T2_LOCK_TOKEN="$T2_LOCK_TOKEN" T2_PINNED_ORIGIN_DEV="$other" bash "$child" 2>"$out/pin-mismatch.err"; then
@@ -630,8 +642,8 @@ grep -Fq 'origin/dev moved' "$tmp/pin-current.out" && fail 'a pin equal to the l
   fi
   grep -Fq "PROFILE_OWNERSHIP_MISMATCH: profile lock owner does not match ORIGIN_DEV" "$out/pin-unrecorded.err" || { cat "$out/pin-unrecorded.err" >&2; exit 19; }
   t2_lock_release 0
-' bash "$COMMON" "$base_sha" "$dev_next" "$tmp" "$ROOT/scripts/minikube/require-t2-mutation-lock.sh" ||
-  fail 'the lease owner must record and export the pinned origin/dev, and its children must match it'
+' bash "$COMMON" "$base_sha" "$dev_next" "$tmp" "$ROOT/scripts/minikube/require-t2-mutation-lock.sh" "$print_origin_dev" ||
+  fail 'the lease owner must record and export the pinned origin/dev, its lease children must match it, and unleased children must not inherit it'
 [ ! -e "$tmp/pin-locks/$profile.lock" ] || fail 'the pinned lease was not released'
 
 # branch-profile.sh lifecycle (preflight, start, status, pf, health, pf-health,
