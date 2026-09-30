@@ -36,6 +36,7 @@ import { desktopQueryKeys } from './queryKeys'
  */
 
 const DRIVE = 'main'
+export const GFS_UNAVAILABLE_LOCATION_MESSAGE = 'This folder or file is no longer available.'
 
 type GfsAccessState = 'active' | 'revoked'
 
@@ -593,7 +594,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     // Keep accessible roots and other GFS scopes intact, and avoid the
     // foreground navigation setter so a background denial cannot advance it.
     setCrumbsState([])
-    setOpenError('This folder or file is no longer available.')
+    setOpenError(GFS_UNAVAILABLE_LOCATION_MESSAGE)
   }, [])
   useEffect(() => {
     const resourceId = pendingDeniedResourceIdRef.current

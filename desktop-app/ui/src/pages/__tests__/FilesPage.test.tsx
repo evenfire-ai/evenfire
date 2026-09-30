@@ -13,7 +13,10 @@ const hookMock = vi.hoisted(() => ({
   useGfsBrowserController: vi.fn(),
 }))
 
-vi.mock('@hooks/domain/useGfsBrowserController', () => hookMock)
+vi.mock('@hooks/domain/useGfsBrowserController', () => ({
+  ...hookMock,
+  GFS_UNAVAILABLE_LOCATION_MESSAGE: 'This folder or file is no longer available.',
+}))
 
 function baseController() {
   return {
@@ -170,6 +173,17 @@ describe('FilesPage', () => {
     ).toBeTruthy()
     expect(screen.queryByText(/Automatic EvenDrive discovery is not available/i)).toBeNull()
     expect(screen.queryByText(/Error invoking remote method/i)).toBeNull()
+  })
+
+  it('shows the non-sensitive unavailable state after the open folder is denied', () => {
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      openError: 'This folder or file is no longer available.',
+    })
+
+    renderFilesPage()
+
+    expect(screen.getByText('This folder or file is no longer available.')).toBeTruthy()
   })
 
   it.each([
