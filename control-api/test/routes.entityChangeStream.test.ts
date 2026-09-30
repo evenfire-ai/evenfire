@@ -266,4 +266,75 @@ describe('routes/entityChangeStream', () => {
     await vi.advanceTimersByTimeAsync(0)
     vi.useRealTimers()
   })
+
+  it('rechecks authorization before delivering an established operator invalidation', async () => {
+    vi.useFakeTimers()
+    serviceMock.readEntityChangeCheckpoint.mockResolvedValue({
+      resyncRequired: false,
+      cursor: CURSOR,
+      scopes: ['gfs'],
+    })
+    const req = new FakeRequest()
+    const res = new FakeResponse()
+    const isAuthorized = vi.fn().mockResolvedValueOnce(true).mockResolvedValueOnce(false)
+
+    streamEntityChanges(
+      req as unknown as Request,
+      res as unknown as Response,
+      CURSOR,
+      isAuthorized,
+      'operator'
+    )
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(res.frames.map(frame => JSON.parse(frame))).toEqual([
+      {
+        schemaVersion: 1,
+        type: 'stream.closing',
+        cursor: CURSOR,
+        reason: 'session_expired',
+      },
+    ])
+    expect(res.writableEnded).toBe(true)
+    expect(res.frames.join('')).not.toContain('scope.invalidated')
+    expect(serviceMock.subscribeEntityChangeFeedWake).toHaveBeenCalledOnce()
+    vi.useRealTimers()
+  })
+
+  it('does not deliver a checkpoint when authorization throws and retries after recovery', async () => {
+    vi.useFakeTimers()
+    serviceMock.readEntityChangeCheckpoint.mockResolvedValue({
+      resyncRequired: false,
+      cursor: CURSOR,
+      scopes: ['gfs'],
+    })
+    const req = new FakeRequest()
+    const res = new FakeResponse()
+    const isAuthorized = vi
+      .fn()
+      .mockResolvedValueOnce(true)
+      .mockRejectedValueOnce(new Error('authorization backend unavailable'))
+      .mockResolvedValue(true)
+
+    streamEntityChanges(
+      req as unknown as Request,
+      res as unknown as Response,
+      CURSOR,
+      isAuthorized,
+      'operator'
+    )
+    await vi.advanceTimersByTimeAsync(0)
+    expect(res.frames).toEqual([])
+
+    await vi.advanceTimersByTimeAsync(configMock.entityChangeStreamPollMs)
+    expect(res.frames.map(frame => JSON.parse(frame))).toContainEqual({
+      schemaVersion: 1,
+      type: 'scope.invalidated',
+      cursor: CURSOR,
+      scopes: ['gfs'],
+    })
+    closeActiveEntityChangeStreams()
+    await vi.advanceTimersByTimeAsync(0)
+    vi.useRealTimers()
+  })
 })
