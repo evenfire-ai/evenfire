@@ -16848,7 +16848,9 @@ describe('WorkflowRecipeReconciler', () => {
         conflicts: [],
         retryPending: false,
       })
-      const teardown = vi.spyOn(inner, 'teardownComputePodsForTerminalRun').mockResolvedValue()
+      // The real teardown runs: the "no run-lane DELETE" assertion below is
+      // only meaningful if the code that could send one executes.
+      const teardown = vi.spyOn(inner, 'teardownComputePodsForTerminalRun')
       const retry = vi.spyOn(inner, 'retryRunLaneNetworkPolicies')
       mockCustomApi.patchNamespacedCustomObjectStatus.mockClear()
       const recipe = runScopedRecipe({
@@ -16858,10 +16860,24 @@ describe('WorkflowRecipeReconciler', () => {
         conditions: published,
       })
 
-      await reconciler.reconcile(recipe)
+      // The shared core mock has no single-Pod DELETE; the teardown deletes
+      // the run's compute pods one by one.
+      const coreApi = mockCoreApi as unknown as Record<string, unknown>
+      const deletePod = vi.fn().mockResolvedValue({})
+      coreApi.deleteNamespacedPod = deletePod
+      try {
+        await reconciler.reconcile(recipe)
+      } finally {
+        delete coreApi.deleteNamespacedPod
+      }
 
-      // Witness: the terminal branch tore the run's compute down.
+      // Witnesses: the terminal branch ran the real teardown, which deleted
+      // the run's coordinator pod.
       expect(teardown).toHaveBeenCalledWith(RECIPE)
+      expect(deletePod).toHaveBeenCalledWith({
+        name: `${RECIPE}-coordinator`,
+        namespace: 'sandbox-recipes',
+      })
       expect(retry).not.toHaveBeenCalled()
       expect(deletedPolicyNames().filter(name => name !== GFS)).toEqual([])
       expect(markers(recipe.status?.conditions)).toMatchObject([
