@@ -1583,6 +1583,7 @@ describe('App live GFS preview revalidation', () => {
     const before = initial()
     expect(before?.kind).toBe('preview')
     act(() => dispatchEntityChange?.({ ...USER_SCOPE_INVALIDATED }))
+    await waitFor(() => expect(resolve).toHaveBeenCalledTimes(1))
     const queryFilter = invalidateQueries.mock.calls.at(-1)?.[0]
     expect(queryFilter?.queryKey).toEqual(desktopQueryKeys.gfsRoot)
     expect(
@@ -1648,6 +1649,34 @@ describe('App live GFS preview revalidation', () => {
       if (uri === 'gfs://main/readme') {
         return Promise.reject(new Error(expiredSessionMessage)) as never
       }
+      return new Promise(() => {}) as never
+    })
+    render(<App />)
+    await waitFor(() => expect(dispatchEntityChange).toBeTypeOf('function'))
+
+    act(() => dispatchEntityChange?.({ ...USER_SCOPE_INVALIDATED }))
+
+    await waitFor(() => {
+      const previews = currentController.workspaceTabs.tabs.filter(tab => tab.kind === 'preview')
+      expect(previews).toHaveLength(2)
+      expect(previews.every(tab => tab.preview?.unavailable)).toBe(true)
+    })
+  })
+
+  it('purges every open GFS preview for a status-free session authority failure', async () => {
+    currentController.workspaceTabs = openPreviewTab(currentController.workspaceTabs, {
+      id: 'preview-image',
+      title: 'diagram.png',
+      gfsUri: 'gfs://main/diagram',
+      fileKind: 'image',
+      byteLength: 128,
+      mimeType: 'image/png',
+      resourceVersion: 7,
+    })
+    const resolve = vi.mocked(window.clerum.gfs.resolve)
+    resolve.mockImplementation(uri => {
+      if (uri === 'gfs://main/readme')
+        return Promise.reject(new Error('Not authenticated')) as never
       return new Promise(() => {}) as never
     })
     render(<App />)

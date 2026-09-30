@@ -28,6 +28,7 @@ import { WorkspaceTabStrip } from '@components/WorkspaceTabStrip'
 import { DESKTOP_ROUTES, SIDEBAR_COLLAPSED_KEY } from '@constants/navigation'
 import { THEME_STORAGE_KEY } from '@constants/theme'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
+import { isGfsSessionAuthorityFailure } from '@hooks/domain/useGfsBrowserController'
 import { useAgentChatActionsValue } from '@hooks/useAgentChatActionsValue'
 import { useAppController } from '@hooks/useAppController'
 import {
@@ -1046,10 +1047,12 @@ export function App() {
       } catch (error) {
         if (previewRefreshGenerationRef.current.get(gfsUri) !== generation) return
         const status = authoritativeGfsStatus(error)
-        if (status === 401) {
+        const message = error instanceof Error ? error.message : String(error ?? '')
+        if (status === 401 || isGfsSessionAuthorityFailure(message, 'operation')) {
           // A 401 is session-wide, unlike a resource-scoped 403/404. Purge
-          // every open GFS preview and its cache immediately; never keep
-          // displaying bytes fetched under a rejected session.
+          // and typed session-authority failures are session-wide. Purge every
+          // open GFS preview immediately; never keep displaying bytes fetched
+          // under a rejected session.
           for (const [uri, timer] of previewRetryTimersRef.current) {
             window.clearTimeout(timer)
             previewRefreshGenerationRef.current.set(
