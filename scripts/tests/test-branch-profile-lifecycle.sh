@@ -414,8 +414,9 @@ mv "${tmp}/branch-profile-aside" "${profile_dir}"
 rm -rf "${cache_root:?}/${adopted}"
 
 # Shared contexts are refused by name in every subcommand, before the resolver
-# runs and before any kubectl or minikube call, even with owned metadata.
-for shared in clerum-dev gke_sample-project_us-central1-a_shared-cluster; do
+# runs and before any kubectl or minikube call, even with owned metadata. The
+# match is case-insensitive (CLERUM-DEV).
+for shared in clerum-dev CLERUM-DEV gke_sample-project_us-central1-a_shared-cluster; do
   write_owned_profile_copy "${shared}"
   for action in resolve info preflight prepare-shims start status pf pf-health health \
     stop-pf stop setup delete e2e-plan sync-plan; do
