@@ -171,7 +171,6 @@ describe('routes/profile', () => {
       remaining: 9,
       resetMs: Date.now() + 60_000,
       windowStartMs: Date.now(),
-      backendAvailable: true,
       count: 1,
     })
     dbMock.query.mockImplementation(async (sql: string) => {

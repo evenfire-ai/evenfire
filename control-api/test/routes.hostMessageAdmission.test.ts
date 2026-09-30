@@ -203,4 +203,45 @@ describe('R44-H1 legacy Host-message admission', () => {
       .expect({ error: 'host_message_admission_unavailable' })
     expect(gateway.listResource).not.toHaveBeenCalled()
   })
+
+  it('denies unbound user and Host selectors before admission or protected work', async () => {
+    const subjectCase = app()
+    const subjectMismatch = await send(
+      subjectCase.server,
+      USER_B,
+      'host-a',
+      {},
+      token(USER_A, ['host-a'])
+    ).expect(403)
+    expect(subjectMismatch.headers['x-host-access-denial-reason']).toBe('subject_mismatch')
+    expect(limiter.checkAndIncrement).not.toHaveBeenCalled()
+    expect(subjectCase.gateway.listResource).not.toHaveBeenCalled()
+
+    const hostCase = app()
+    const hostMismatch = await send(
+      hostCase.server,
+      USER_A,
+      'host-b',
+      {},
+      token(USER_A, ['host-a'])
+    ).expect(403)
+    expect(hostMismatch.headers['x-host-access-denial-reason']).toBe('host_claim_missing')
+    expect(limiter.checkAndIncrement).not.toHaveBeenCalled()
+    expect(hostCase.gateway.listResource).not.toHaveBeenCalled()
+  })
+
+  it('keeps deterministic body rejection ahead of the token-bound selectors', async () => {
+    const { server, gateway } = app()
+    const response = await send(
+      server,
+      USER_B,
+      'host-b',
+      { invalid: true },
+      token(USER_A, ['host-a'])
+    ).expect(400)
+    expect(response.body).toEqual({ error: 'invalid_direct_run_binding' })
+    expect(response.headers['x-host-access-denial-reason']).toBeUndefined()
+    expect(limiter.checkAndIncrement).not.toHaveBeenCalled()
+    expect(gateway.listResource).not.toHaveBeenCalled()
+  })
 })

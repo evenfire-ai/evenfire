@@ -1,5 +1,5 @@
 import express, { Router } from 'express'
-import type { Request, Response } from 'express'
+import type { NextFunction, Request, Response } from 'express'
 import { config } from '../../config.js'
 import { pool } from '../../db.js'
 import { K8sGateway } from '../../k8s.js'
@@ -58,6 +58,9 @@ type RpcAuthedRequest = Request & { rpcAuth?: RpcAccessClaims }
 type ArtifactReadRequest = RpcAuthedRequest & {
   artifactReadConnection?: AuthorizedRpcHostAccess
 }
+type HostMessageResolutionRequest = RpcAuthedRequest & {
+  messageResolutionBinding?: ParsedDirectRunBindingRequest | null
+}
 
 /**
  * Response header that tells rpc-proxy why control-api denied Host access. The
@@ -78,6 +81,26 @@ function denyHostAccess(
   )
   res.setHeader(HOST_ACCESS_DENIAL_REASON_HEADER, reason)
   res.status(403).json({ error: 'Forbidden' })
+}
+
+function validateMessageResolutionBody(
+  req: HostMessageResolutionRequest,
+  res: Response,
+  next: NextFunction
+): void {
+  const body = req.body
+  const ordinary =
+    body !== null &&
+    typeof body === 'object' &&
+    !Array.isArray(body) &&
+    Object.keys(body).length === 0
+  const binding = ordinary ? null : parseDirectRunBindingRequest(body)
+  if (!ordinary && !binding) {
+    res.status(400).json({ error: 'invalid_direct_run_binding' })
+    return
+  }
+  req.messageResolutionBinding = binding
+  next()
 }
 
 async function resolveAuthorizedHostConnection(
@@ -383,32 +406,14 @@ export function createRpcAccessUsersRouter(
     `${hostAccessPath}/message-resolution`,
     requireValidRpcAccessToken('host:message:invoke'),
     express.json({ limit: '2kb', strict: true }),
-    async (req: RpcAuthedRequest, res, next) => {
+    validateMessageResolutionBody,
+    requireRpcTokenUserMatch('userId', (req, res, reason) => denyHostAccess(req, res, reason)),
+    requireRpcTokenHostMatch('hostRef', (req, res, reason) => denyHostAccess(req, res, reason)),
+    async (req: HostMessageResolutionRequest, res, next) => {
       try {
         const claims = req.rpcAuth
-        const body = req.body
-        const ordinary =
-          body !== null &&
-          typeof body === 'object' &&
-          !Array.isArray(body) &&
-          Object.keys(body).length === 0
-        const binding = ordinary ? null : parseDirectRunBindingRequest(body)
-        if (!ordinary && !binding) {
-          res.status(400).json({ error: 'invalid_direct_run_binding' })
-          return
-        }
-        const userId = String(req.params.userId || '').trim()
-        const hostRef = String(req.params.hostRef || '').trim()
-        if (!claims || claims.sub !== userId || !hostRef || !claims.hostRefs.includes(hostRef)) {
-          denyHostAccess(
-            req,
-            res,
-            !claims
-              ? 'claims_missing'
-              : claims.sub !== userId
-                ? 'subject_mismatch'
-                : 'host_claim_missing'
-          )
+        if (!claims) {
+          denyHostAccess(req, res, 'claims_missing')
           return
         }
         const admission = await admitHostMessage(claims.sub)
@@ -423,7 +428,7 @@ export function createRpcAccessUsersRouter(
           directory,
           bindingService,
           bindingBudgetMs,
-          binding
+          req.messageResolutionBinding ?? null
         )
       } catch (error) {
         next(error)
