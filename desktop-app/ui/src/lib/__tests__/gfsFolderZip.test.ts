@@ -139,6 +139,10 @@ describe('createGfsFolderZip', () => {
     expect(names.sort()).toEqual(['Docs/a.txt', 'Docs/b.png', 'Docs/sub/c.md'].sort())
     expect(progress.map(value => value.phase)).toContain('downloading')
     expect(progress.at(-1)?.phase).toBe('assembling')
+    // The "downloading N of M" copy is 1-based: file 1 reports filesAdded 1.
+    expect(
+      progress.filter(value => value.phase === 'downloading').map(value => value.filesAdded)
+    ).toEqual([1, 2, 3])
   })
 
   it('skips unreadable rows and 403 downloads with visible reasons', async () => {
@@ -301,6 +305,48 @@ describe('createGfsFolderZip', () => {
       createGfsFolderZip({ resourceId: 'root', drive: 'main', name: 'Throttled' }, { deps })
     ).rejects.toThrow(/no downloadable files/)
     expect(attempts).toBe(2)
+  })
+
+  it('stops before the first request when the signal is aborted mid-wait (M3)', async () => {
+    const listChildren = vi.fn(async () => ({ items: [], nextCursor: null }))
+    const controller = new AbortController()
+    const deps: GfsFolderZipDeps = {
+      listChildren,
+      download: async () => ({ bytes: new ArrayBuffer(0) }),
+      // The first slot never frees: the walk parks here until the stop lands.
+      throttle: { acquire: () => new Promise<void>(() => undefined) },
+      sleep: async () => undefined,
+    }
+
+    const walk = createGfsFolderZip(
+      { resourceId: 'root', drive: 'main', name: 'Stopped' },
+      { deps, signal: controller.signal }
+    )
+    const expectation = expect(walk).rejects.toMatchObject({ name: 'AbortError' })
+    controller.abort()
+    await expectation
+    expect(listChildren).not.toHaveBeenCalled()
+  })
+
+  it('stops during a hung download instead of waiting out the request (M3)', async () => {
+    const controller = new AbortController()
+    const deps: GfsFolderZipDeps = {
+      listChildren: vi.fn(async () => ({
+        items: [folder({ resourceId: 'hung', name: 'hung.txt' })],
+        nextCursor: null,
+      })),
+      download: () => new Promise<{ bytes: ArrayBuffer }>(() => undefined),
+      throttle: { acquire: async () => undefined },
+      sleep: async () => undefined,
+    }
+
+    const walk = createGfsFolderZip(
+      { resourceId: 'root', drive: 'main', name: 'Stopped' },
+      { deps, signal: controller.signal }
+    )
+    const expectation = expect(walk).rejects.toMatchObject({ name: 'AbortError' })
+    controller.abort()
+    await expectation
   })
 
   it('aborts on a non-permission download failure instead of a holey archive', async () => {

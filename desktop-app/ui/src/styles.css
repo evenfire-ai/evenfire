@@ -15289,10 +15289,37 @@ pre {
 }
 
 .da-gfs-zip-progress__label {
+  flex: 1 1 auto;
   min-width: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.da-gfs-zip-progress__stop {
+  appearance: none;
+  flex: 0 0 auto;
+  align-self: center;
+  border: 1px solid rgba(var(--edge-rgb), 0.3);
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: var(--font-size-xs);
+  line-height: 1;
+  padding: var(--space-1) var(--space-1-5);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.da-gfs-zip-progress__stop:hover {
+  border-color: rgba(var(--danger-rgb), 0.5);
+  color: var(--danger);
+}
+
+.da-gfs-zip-progress__stop:focus-visible {
+  outline: 2px solid rgba(var(--focus-rgb), 0.56);
+  outline-offset: 1px;
 }
 
 .da-gfs-zip-progress__label::before {

@@ -115,6 +115,13 @@ export interface CreateGfsFolderZipOptions {
   onProgress?: (progress: GfsFolderZipProgress) => void
   limits?: { maxTotalBytes?: number; maxEntries?: number }
   deps?: Partial<GfsFolderZipDeps>
+  /**
+   * Cooperative stop for a walk that can legally run for many minutes: every
+   * wait (throttle slot, 429 backoff, in-flight request) races the signal, and
+   * each loop turn re-checks it. Aborting rejects with a DOMException named
+   * `AbortError` (`isFolderZipAbortError`).
+   */
+  signal?: AbortSignal
 }
 
 export interface GfsZipFolderSource {
@@ -125,6 +132,15 @@ export interface GfsZipFolderSource {
 
 function toMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+/** The user stopped the walk — not a failure, and never a save. */
+export function isFolderZipAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === 'AbortError'
+}
+
+function folderZipAbortedError(): DOMException {
+  return new DOMException('Folder-zip walk was stopped.', 'AbortError')
 }
 
 /** A per-resource denial for THIS entry (403/forbidden), not a session failure. */
@@ -173,6 +189,29 @@ export async function createGfsFolderZip(
 
   const report = (progress: GfsFolderZipProgress) => options.onProgress?.(progress)
 
+  const signal = options.signal
+  const throwIfAborted = () => {
+    if (signal?.aborted) throw folderZipAbortedError()
+  }
+  // Rejects when the caller aborts; raced against every wait so a stop lands
+  // immediately instead of after the current throttle slot or backoff. The
+  // no-op catch keeps a late abort from becoming an unhandled rejection after
+  // the walk already finished.
+  const abortRejection = signal
+    ? new Promise<never>((_, reject) => {
+        signal.addEventListener(
+          'abort',
+          () => {
+            reject(folderZipAbortedError())
+          },
+          { once: true }
+        )
+      })
+    : null
+  if (abortRejection) abortRejection.catch(() => undefined)
+  const withAbort = <T>(promise: Promise<T>): Promise<T> =>
+    abortRejection ? Promise.race([promise, abortRejection]) : promise
+
   /**
    * One 429 backs off by the server-provided hint and retries exactly once.
    * The backoff window is NOT a throttle slot: after it elapses the retry
@@ -182,12 +221,13 @@ export async function createGfsFolderZip(
    */
   const withRateLimitRetry = async <T>(operation: () => Promise<T>): Promise<T> => {
     try {
-      return await operation()
+      return await withAbort(operation())
     } catch (error) {
+      if (isFolderZipAbortError(error)) throw error
       const message = toMessage(error)
       if (!isRateLimited(message)) throw error
-      await sleep(Math.min((parseRetryAfterSeconds(message) ?? 15) * 1000, 120_000))
-      await throttle.acquire()
+      await withAbort(sleep(Math.min((parseRetryAfterSeconds(message) ?? 15) * 1000, 120_000)))
+      await withAbort(throttle.acquire())
       return operation()
     }
   }
@@ -203,12 +243,14 @@ export async function createGfsFolderZip(
   // ── Phase 1: recursive listing (breadth-first, cursor-paginated). ──
   report({ phase: 'listing', filesFound: 0, filesAdded: 0, currentPath: rootName })
   while (queue.length) {
+    throwIfAborted()
     const next = queue.shift()!
     if (visitedFolders.has(next.resourceId)) continue
     visitedFolders.add(next.resourceId)
     let cursor: string | undefined
     do {
-      await throttle.acquire()
+      throwIfAborted()
+      await withAbort(throttle.acquire())
       let page: GfsZipChildrenPage
       try {
         page = await withRateLimitRetry(() => listChildren(next.resourceId, folder.drive, cursor))
@@ -280,17 +322,20 @@ export async function createGfsFolderZip(
   // ── Phase 2: throttled downloads, skipping per-resource denials. ──
   let addedBytes = 0
   for (const [index, file] of files.entries()) {
+    throwIfAborted()
+    // 1-based: the copy says "downloading N of M" while file N is fetched.
     report({
       phase: 'downloading',
       filesFound: files.length,
-      filesAdded: index,
+      filesAdded: index + 1,
       currentPath: file.path,
     })
-    await throttle.acquire()
+    await withAbort(throttle.acquire())
     let bytes: ArrayBuffer
     try {
-      bytes = (await withRateLimitRetry(() => download(file.uri))).bytes
+      bytes = (await withRateLimitRetry(() => withAbort(download(file.uri)))).bytes
     } catch (error) {
+      if (isFolderZipAbortError(error)) throw error
       const message = toMessage(error)
       if (isAccessDenied(message)) {
         skipped.push({ path: file.path, reason: 'Permission denied' })
