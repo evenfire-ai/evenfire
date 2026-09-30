@@ -128,19 +128,16 @@ function formatIpv6Bytes(bytes: Uint8Array): string {
   return groups.join(':')
 }
 
-function isPrivateIpv4Octets(octets: readonly number[]): boolean {
-  if (octets.length !== 4) return false
-  return nonPublicAddresses.check(`${octets[0]}.${octets[1]}.${octets[2]}.${octets[3]}`, 'ipv4')
-}
-
 /**
- * Non-public IPv4 prefixes required by the SSRF hardening scope. This is the
- * issue-required subset of the IPv4 exclusions in
- * deploy/base/public-egress-exceptions.yaml and the IANA range list used by
- * mcp-servers/web-search's fetch destination validator. Those policies also
- * exclude 192.31.196/24, 192.52.193/24, 192.88.99/24, and 192.175.48/24,
- * which are deliberately out of scope here; the three policies keep
- * distinct ranges by design.
+ * Non-public IPv4 prefixes in scope for the outbound HTTP guard: the legacy
+ * private/loopback/link-local ranges plus special-purpose ranges that must
+ * not be treated as public SSRF destinations. This is a deliberate subset
+ * of the IPv4 exclusions in deploy/base/public-egress-exceptions.yaml and
+ * the IANA range list used by mcp-servers/web-search's fetch destination
+ * validator. Those policies also exclude 192.31.196/24, 192.52.193/24,
+ * 192.88.99/24, and 192.175.48/24, which stay public here by design: they
+ * are relay/service blocks handled by egress policy rather than ranges this
+ * model-facing guard needs to classify as non-public.
  */
 const NON_PUBLIC_IPV4_PREFIXES: readonly (readonly [address: string, prefix: number])[] = [
   ['0.0.0.0', 8], // "This network"
@@ -160,8 +157,11 @@ const NON_PUBLIC_IPV4_PREFIXES: readonly (readonly [address: string, prefix: num
 ]
 
 /**
- * Canonical non-public IPv6 prefixes. ::/128 and ::1/128 are covered by the
- * IPv4-compatible delegation (their tails fall inside 0.0.0.0/8).
+ * Non-public IPv6 prefixes in scope for this change; this is not a complete
+ * IANA special-purpose list. Notably still public: 100::/64 (discard-only),
+ * 2001:1::/128, 2001:2::/48, 3fff::/20 (documentation), 5f00::/16, and
+ * ISATAP embeddings inside global prefixes. ::/128 and ::1/128 are covered
+ * by the IPv4-compatible delegation (their tails fall inside 0.0.0.0/8).
  */
 const NON_PUBLIC_IPV6_PREFIXES: readonly (readonly [address: string, prefix: number])[] = [
   ['64:ff9b::', 96], // NAT64 (RFC 6052)
@@ -181,6 +181,11 @@ for (const [address, prefix] of NON_PUBLIC_IPV4_PREFIXES) {
 }
 for (const [address, prefix] of NON_PUBLIC_IPV6_PREFIXES) {
   nonPublicAddresses.addSubnet(address, prefix, 'ipv6')
+}
+
+function isPrivateIpv4Octets(octets: readonly number[]): boolean {
+  if (octets.length !== 4) return false
+  return nonPublicAddresses.check(`${octets[0]}.${octets[1]}.${octets[2]}.${octets[3]}`, 'ipv4')
 }
 
 /**

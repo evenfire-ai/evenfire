@@ -23,6 +23,10 @@ function literalUrl(ip: string): URL {
   return ip.includes(':') ? new URL(`http://[${ip}]/`) : new URL(`http://${ip}/`)
 }
 
+function normalizedLiteralHost(ip: string): string {
+  return literalUrl(ip).hostname.replace(/^\[|\]$/g, '')
+}
+
 const BLOCKED_SPECIAL_PURPOSE_ADDRESSES: readonly (readonly [string, string])[] = [
   ['100.64.0.1', 'CGNAT (RFC 6598)'],
   ['198.18.0.1', 'benchmarking (RFC 2544)'],
@@ -94,7 +98,7 @@ describe('resolvePinnedPublicIp', () => {
     async (ip: string) => {
       const outcome = resolvePinnedPublicIp(literalUrl(ip))
       await expect(outcome).rejects.toBeInstanceOf(SsrfBlockedError)
-      await expect(outcome).rejects.toThrow(`Target is a private IP (${ip})`)
+      await expect(outcome).rejects.toThrow(`Target is a private IP (${normalizedLiteralHost(ip)})`)
       expect(resolve4).not.toHaveBeenCalled()
       expect(resolve6).not.toHaveBeenCalled()
     }
@@ -120,7 +124,7 @@ describe('resolvePinnedPublicIp', () => {
     async (ip: string) => {
       const outcome = resolvePinnedPublicIp(literalUrl(ip))
       await expect(outcome).rejects.toBeInstanceOf(SsrfBlockedError)
-      await expect(outcome).rejects.toThrow(`Target is a private IP (${ip})`)
+      await expect(outcome).rejects.toThrow(`Target is a private IP (${normalizedLiteralHost(ip)})`)
       expect(resolve4).not.toHaveBeenCalled()
       expect(resolve6).not.toHaveBeenCalled()
     }

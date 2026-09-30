@@ -242,6 +242,57 @@ describe('HttpRequestTool', () => {
     expect(isPrivateIp('2002:808:808::')).toBe(true) // 6to4 form of 8.8.8.8
   })
 
+  it('should pin exact prefix boundaries against over-blocking regressions', () => {
+    // Each group asserts an in-range boundary and the adjacent public
+    // neighbor for one prefix table entry. Widening a prefix or dropping a
+    // row must fail here, not merely survive review.
+    // fc00::/7
+    expect(isPrivateIp('fbff:ffff:ffff:ffff:ffff:ffff:ffff:ffff')).toBe(false)
+    expect(isPrivateIp('fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff')).toBe(true)
+    // fe80::/10
+    expect(isPrivateIp('fe7f:ffff:ffff:ffff:ffff:ffff:ffff:ffff')).toBe(false)
+    expect(isPrivateIp('febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff')).toBe(true)
+    // fec0::/10
+    expect(isPrivateIp('fe00::1')).toBe(false)
+    expect(isPrivateIp('fec0::1')).toBe(true)
+    expect(isPrivateIp('feff:ffff:ffff:ffff:ffff:ffff:ffff:ffff')).toBe(true)
+    // 2001::/32 (Teredo)
+    expect(isPrivateIp('2001:0:ffff:ffff:ffff:ffff:ffff:ffff')).toBe(true)
+    expect(isPrivateIp('2001:1::1')).toBe(false)
+    expect(isPrivateIp('2001:4860:4860::8888')).toBe(false)
+    // 2001:db8::/32 (documentation)
+    expect(isPrivateIp('2001:db7:ffff::1')).toBe(false)
+    expect(isPrivateIp('2001:db9::1')).toBe(false)
+    // 2002::/16 (6to4)
+    expect(isPrivateIp('2002:ffff:ffff:ffff:ffff:ffff:ffff:ffff')).toBe(true)
+    expect(isPrivateIp('2003::1')).toBe(false)
+    expect(isPrivateIp('2001:ffff::1')).toBe(false)
+    // 64:ff9b::/96 and 64:ff9b:1::/48 (NAT64 and local-use NAT64)
+    expect(isPrivateIp('64:ff9a:ffff::1')).toBe(false)
+    expect(isPrivateIp('64:ff9b:0:1::1')).toBe(false)
+    expect(isPrivateIp('64:ff9b:2::1')).toBe(false)
+    expect(isPrivateIp('64:ff9b:1:ffff:ffff:ffff:ffff:ffff')).toBe(true)
+    // ff00::/8
+    expect(isPrivateIp('ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff')).toBe(true)
+    // IANA /24 boundaries and public neighbors.
+    expect(isPrivateIp('192.0.0.255')).toBe(true)
+    expect(isPrivateIp('192.0.1.1')).toBe(false)
+    expect(isPrivateIp('192.0.2.255')).toBe(true)
+    expect(isPrivateIp('192.0.3.1')).toBe(false)
+    expect(isPrivateIp('198.51.100.255')).toBe(true)
+    expect(isPrivateIp('198.51.101.1')).toBe(false)
+    expect(isPrivateIp('203.0.113.255')).toBe(true)
+    expect(isPrivateIp('203.0.114.1')).toBe(false)
+    expect(isPrivateIp('223.255.255.255')).toBe(false)
+    // Relay/service /24s deliberately remain public in this classifier;
+    // egress policy owns their handling. Pin that contract so any future
+    // divergence has to be an explicit decision.
+    expect(isPrivateIp('192.31.196.1')).toBe(false)
+    expect(isPrivateIp('192.52.193.1')).toBe(false)
+    expect(isPrivateIp('192.88.99.1')).toBe(false)
+    expect(isPrivateIp('192.175.48.1')).toBe(false)
+  })
+
   const NEW_SPECIAL_PURPOSE_IPV4: readonly (readonly [string, string])[] = [
     ['100.64.0.1', '6440:1'],
     ['198.18.0.1', 'c612:1'],
@@ -274,5 +325,7 @@ describe('HttpRequestTool', () => {
     expect(isPrivateIp('example.com')).toBe(false)
     expect(isPrivateIp('sub.domain.example.com')).toBe(false)
     expect(isPrivateIp('not-an-ip')).toBe(false)
+    expect(isPrivateIp('')).toBe(false)
+    expect(isPrivateIp(undefined as unknown as string)).toBe(false)
   })
 })
