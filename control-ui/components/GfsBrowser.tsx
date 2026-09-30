@@ -41,6 +41,7 @@ import {
   handleControlUIUnauthorized,
   isSilentApiError,
 } from '@lib/api'
+import { createCoalescedRevalidation } from '@lib/coalescedRevalidation'
 import { parseEntityChangeFrame } from '@lib/entityChangeStream'
 import { isGfsDocumentFile } from '@lib/gfsDocumentFile'
 import {
@@ -471,10 +472,6 @@ export function GfsBrowser(): React.JSX.Element {
     ): Promise<void> => {
       const appending = Boolean(cursor)
       const background = Boolean(options?.background)
-      if (!background) {
-        entityChangeRefetchControllerRef.current?.abort()
-        entityChangeRefetchControllerRef.current = null
-      }
       // Background revalidation has its own sequence: it can be superseded by
       // user navigation, but never invalidates that navigation's request.
       const navigationSeq = background ? loadSeqRef.current : ++loadSeqRef.current
@@ -694,7 +691,12 @@ export function GfsBrowser(): React.JSX.Element {
     let retryDelay = 500
     let recoveryDelay = 500
     let active = true
-    let invalidateVisibleState: (cursor?: string) => void = () => undefined
+    let performVisibleStateRevalidation: (cursor?: string) => Promise<void> = async () => undefined
+    const revalidationScheduler = createCoalescedRevalidation<string>(
+      cursor => performVisibleStateRevalidation(cursor),
+      100
+    )
+    const invalidateVisibleState = (cursor?: string) => revalidationScheduler.request(cursor)
     const scheduleRecovery = () => {
       if (!active || recoveryTimer) return
       const delay = recoveryDelay
@@ -805,7 +807,7 @@ export function GfsBrowser(): React.JSX.Element {
       }
     }
 
-    invalidateVisibleState = (cursor?: string) => {
+    performVisibleStateRevalidation = async (cursor?: string) => {
       // A committed remote change supersedes any local move/retry ancestry
       // reconstruction still in flight. Its older response must not replace
       // the hierarchy we are about to refetch from the authoritative API.
@@ -816,13 +818,12 @@ export function GfsBrowser(): React.JSX.Element {
         recoveryTimer = null
         recoveryDelay = 500
       }
-      entityChangeRefetchControllerRef.current?.abort()
       const revalidationController = new AbortController()
       entityChangeRefetchControllerRef.current = revalidationController
       const signal = revalidationController.signal
       childCacheRef.current.clear()
       revalidateNextLoadRef.current = false
-      void revalidateActionTargets(signal)
+      const revalidationTasks: Promise<void>[] = [revalidateActionTargets(signal)]
       const previews = openPreviewsRef.current
       if (previews.length > 0) {
         const generation = ++previewRefreshGenerationRef.current
@@ -843,128 +844,140 @@ export function GfsBrowser(): React.JSX.Element {
               : current
           )
         }
-        void Promise.all<ResolvedPreviewUpdate | null>(
-          previews.map(async preview => {
-            try {
-              const resolved = (await apiGet(
-                '/api/v1/gfs/resolve',
-                { uri: preview.gfsUri },
-                { signal }
-              )) as {
-                kind: string
-                name: string
-                bytes: number
-                version: number
-                rid: string
-                resourceId: string
-                gfsUri: string
-              }
-              if (signal.aborted || generation !== previewRefreshGenerationRef.current) return null
-              if (resolved.kind !== 'file') {
-                markUnavailable(preview)
+        revalidationTasks.push(
+          Promise.all<ResolvedPreviewUpdate | null>(
+            previews.map(async preview => {
+              try {
+                const resolved = (await apiGet(
+                  '/api/v1/gfs/resolve',
+                  { uri: preview.gfsUri },
+                  { signal }
+                )) as {
+                  kind: string
+                  name: string
+                  bytes: number
+                  version: number
+                  rid: string
+                  resourceId: string
+                  gfsUri: string
+                }
+                if (signal.aborted || generation !== previewRefreshGenerationRef.current)
+                  return null
+                if (resolved.kind !== 'file') {
+                  markUnavailable(preview)
+                  return null
+                }
+                const imageMimeType = gfsImagePreviewMimeType(resolved.name)
+                const videoMimeType = gfsVideoPreviewMimeType(resolved.name)
+                let candidate: ResolvedPreviewUpdate | null = null
+                if (preview.kind === 'image') {
+                  candidate = imageMimeType
+                    ? {
+                        kind: 'image',
+                        gfsUri: resolved.gfsUri,
+                        byteLength: resolved.bytes,
+                        fileName: resolved.name,
+                        rid: resolved.rid,
+                        version: resolved.version,
+                        mimeType: imageMimeType,
+                        reloadVersion: preview.reloadVersion + 1,
+                        unavailable: false,
+                      }
+                    : null
+                } else if (preview.kind === 'video') {
+                  candidate = videoMimeType
+                    ? {
+                        kind: 'video',
+                        gfsUri: resolved.gfsUri,
+                        byteLength: resolved.bytes,
+                        fileName: resolved.name,
+                        rid: resolved.rid,
+                        version: resolved.version,
+                        mimeType: videoMimeType,
+                        reloadVersion: preview.reloadVersion + 1,
+                        unavailable: false,
+                      }
+                    : null
+                } else {
+                  candidate = isGfsMarkdownPreviewFile(resolved.name)
+                    ? {
+                        kind: 'markdown',
+                        gfsUri: resolved.gfsUri,
+                        byteLength: resolved.bytes,
+                        fileName: resolved.name,
+                        rid: resolved.rid,
+                        version: resolved.version,
+                        reloadVersion: preview.reloadVersion + 1,
+                        unavailable: false,
+                      }
+                    : null
+                }
+                if (!candidate) {
+                  markUnavailable(preview)
+                  return null
+                }
+                if (candidate.version < preview.version) return null
+                const candidateMimeType = 'mimeType' in candidate ? candidate.mimeType : undefined
+                const currentMimeType = 'mimeType' in preview ? preview.mimeType : undefined
+                const unchanged =
+                  !preview.unavailable &&
+                  candidate.kind === preview.kind &&
+                  candidate.gfsUri === preview.gfsUri &&
+                  candidate.rid === preview.rid &&
+                  candidate.fileName === preview.fileName &&
+                  candidate.byteLength === preview.byteLength &&
+                  candidate.version === preview.version &&
+                  candidateMimeType === currentMimeType
+                return unchanged ? null : candidate
+              } catch (error) {
+                if (signal.aborted || generation !== previewRefreshGenerationRef.current)
+                  return null
+                const status = entityChangeErrorStatus(error)
+                if (status === 403 || status === 404) markUnavailable(preview)
+                if (isTransientEntityChangeRefetchError(error)) scheduleRecovery()
                 return null
               }
-              const imageMimeType = gfsImagePreviewMimeType(resolved.name)
-              const videoMimeType = gfsVideoPreviewMimeType(resolved.name)
-              let candidate: ResolvedPreviewUpdate | null = null
-              if (preview.kind === 'image') {
-                candidate = imageMimeType
-                  ? {
-                      kind: 'image',
-                      gfsUri: resolved.gfsUri,
-                      byteLength: resolved.bytes,
-                      fileName: resolved.name,
-                      rid: resolved.rid,
-                      version: resolved.version,
-                      mimeType: imageMimeType,
-                      reloadVersion: preview.reloadVersion + 1,
-                      unavailable: false,
-                    }
-                  : null
-              } else if (preview.kind === 'video') {
-                candidate = videoMimeType
-                  ? {
-                      kind: 'video',
-                      gfsUri: resolved.gfsUri,
-                      byteLength: resolved.bytes,
-                      fileName: resolved.name,
-                      rid: resolved.rid,
-                      version: resolved.version,
-                      mimeType: videoMimeType,
-                      reloadVersion: preview.reloadVersion + 1,
-                      unavailable: false,
-                    }
-                  : null
+            })
+          ).then(updates => {
+            if (signal.aborted || generation !== previewRefreshGenerationRef.current) return
+            for (const update of updates) {
+              if (!update) continue
+              if (update.kind === 'image') {
+                setImagePreview(current => (current?.gfsUri === update.gfsUri ? update : current))
+                setMarkdownPreview(current => (current?.gfsUri === update.gfsUri ? null : current))
+                setVideoPreview(current => (current?.gfsUri === update.gfsUri ? null : current))
+              } else if (update.kind === 'video') {
+                setVideoPreview(current => (current?.gfsUri === update.gfsUri ? update : current))
+                setImagePreview(current => (current?.gfsUri === update.gfsUri ? null : current))
+                setMarkdownPreview(current => (current?.gfsUri === update.gfsUri ? null : current))
               } else {
-                candidate = isGfsMarkdownPreviewFile(resolved.name)
-                  ? {
-                      kind: 'markdown',
-                      gfsUri: resolved.gfsUri,
-                      byteLength: resolved.bytes,
-                      fileName: resolved.name,
-                      rid: resolved.rid,
-                      version: resolved.version,
-                      reloadVersion: preview.reloadVersion + 1,
-                      unavailable: false,
-                    }
-                  : null
+                setMarkdownPreview(current =>
+                  current?.gfsUri === update.gfsUri ? update : current
+                )
+                setImagePreview(current => (current?.gfsUri === update.gfsUri ? null : current))
+                setVideoPreview(current => (current?.gfsUri === update.gfsUri ? null : current))
               }
-              if (!candidate) {
-                markUnavailable(preview)
-                return null
-              }
-              if (candidate.version < preview.version) return null
-              const candidateMimeType = 'mimeType' in candidate ? candidate.mimeType : undefined
-              const currentMimeType = 'mimeType' in preview ? preview.mimeType : undefined
-              const unchanged =
-                !preview.unavailable &&
-                candidate.kind === preview.kind &&
-                candidate.gfsUri === preview.gfsUri &&
-                candidate.rid === preview.rid &&
-                candidate.fileName === preview.fileName &&
-                candidate.byteLength === preview.byteLength &&
-                candidate.version === preview.version &&
-                candidateMimeType === currentMimeType
-              return unchanged ? null : candidate
-            } catch (error) {
-              if (signal.aborted || generation !== previewRefreshGenerationRef.current) return null
-              const status = entityChangeErrorStatus(error)
-              if (status === 403 || status === 404) markUnavailable(preview)
-              if (isTransientEntityChangeRefetchError(error)) scheduleRecovery()
-              return null
             }
           })
-        ).then(updates => {
-          if (signal.aborted || generation !== previewRefreshGenerationRef.current) return
-          for (const update of updates) {
-            if (!update) continue
-            if (update.kind === 'image') {
-              setImagePreview(current => (current?.gfsUri === update.gfsUri ? update : current))
-              setMarkdownPreview(current => (current?.gfsUri === update.gfsUri ? null : current))
-              setVideoPreview(current => (current?.gfsUri === update.gfsUri ? null : current))
-            } else if (update.kind === 'video') {
-              setVideoPreview(current => (current?.gfsUri === update.gfsUri ? update : current))
-              setImagePreview(current => (current?.gfsUri === update.gfsUri ? null : current))
-              setMarkdownPreview(current => (current?.gfsUri === update.gfsUri ? null : current))
-            } else {
-              setMarkdownPreview(current => (current?.gfsUri === update.gfsUri ? update : current))
-              setImagePreview(current => (current?.gfsUri === update.gfsUri ? null : current))
-              setVideoPreview(current => (current?.gfsUri === update.gfsUri ? null : current))
-            }
-          }
-        })
+        )
       }
       const visibleCrumb = currentCrumbRef.current
-      if (!visibleCrumb) return
+      if (!visibleCrumb) {
+        await Promise.all(revalidationTasks)
+        return
+      }
       // Stream-triggered reads have their own non-destructive path. They never
       // enter the navigation/paging loader or clear its rows, dialogs, or error.
-      void refreshVisibleDirectory(visibleCrumb, signal)
-      if (visibleCrumb.id === null) return
+      revalidationTasks.push(refreshVisibleDirectory(visibleCrumb, signal))
+      if (visibleCrumb.id === null) {
+        await Promise.all(revalidationTasks)
+        return
+      }
 
       const visibleResourceId = visibleCrumb.id
       const generation = ++hierarchyRefreshGenerationRef.current
       const trailEpoch = trailReconstructionEpochRef.current
-      void (async () => {
+      const hierarchyRefresh = (async () => {
         const rootCrumb = { ...(crumbsRef.current[0] ?? { id: null, rid: null, name: '/' }) }
         let refreshed: Crumb[] = [rootCrumb]
         let retryHierarchy = false
@@ -1017,6 +1030,8 @@ export function GfsBrowser(): React.JSX.Element {
           setTrailRecovery(null)
         }
       })()
+      revalidationTasks.push(hierarchyRefresh)
+      await Promise.all(revalidationTasks)
     }
 
     async function consume(): Promise<void> {
@@ -1095,6 +1110,7 @@ export function GfsBrowser(): React.JSX.Element {
     return () => {
       active = false
       controller.abort()
+      revalidationScheduler.dispose()
       entityChangeRefetchControllerRef.current?.abort()
       entityChangeRefetchControllerRef.current = null
       if (retryTimer) clearTimeout(retryTimer)

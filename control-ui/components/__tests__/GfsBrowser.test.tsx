@@ -1023,6 +1023,73 @@ describe('GfsBrowser', () => {
     expect(screen.queryByRole('alert')).toBeNull()
   })
 
+  it('coalesces a stream burst without aborting the active refresh and applies the trailing state', async () => {
+    const streamControllers: ReadableStreamDefaultController<Uint8Array>[] = []
+    const report = child('report.md', 'file', 1, 2)
+    const remote = child('remote.txt', 'file', 2, 3)
+    let treeReads = 0
+    let refreshSignal: AbortSignal | undefined
+    let finishFirstRefresh!: (page: { items: (typeof report)[]; nextCursor: null }) => void
+    mockApiGet.mockImplementation(
+      async (
+        path: string,
+        _query?: Record<string, string>,
+        options?: {
+          signal?: AbortSignal
+        }
+      ) => {
+        if (path === '/api/v1/gfs/tree') {
+          treeReads += 1
+          if (treeReads === 1) return { items: [report], nextCursor: null }
+          if (treeReads === 2) {
+            refreshSignal = options?.signal
+            return new Promise(resolve => {
+              finishFirstRefresh = resolve
+            })
+          }
+          return { items: [report, remote], nextCursor: null }
+        }
+        return { items: [], nextCursor: null }
+      }
+    )
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            streamControllers.push(controller)
+            init?.signal?.addEventListener('abort', () => controller.close(), { once: true })
+          },
+        })
+        return new Response(body, {
+          status: 200,
+          headers: { 'content-type': 'application/x-ndjson' },
+        })
+      })
+    )
+
+    renderBrowser()
+    await waitFor(() => expect(streamControllers).toHaveLength(1))
+    await screen.findByRole('button', { name: 'report.md' })
+    const firstFrame = await controlApiProducerFrame()
+    await act(async () => {
+      streamControllers[0]!.enqueue(new TextEncoder().encode(`${firstFrame}\n`))
+    })
+    await waitFor(() => expect(treeReads).toBe(2))
+    const secondFrame = await controlApiProducerFrame()
+    await act(async () => {
+      streamControllers[0]!.enqueue(new TextEncoder().encode(`${secondFrame}\n`))
+    })
+
+    await new Promise(resolve => setTimeout(resolve, 150))
+    expect(treeReads).toBe(2)
+    expect(refreshSignal?.aborted).toBe(false)
+
+    await act(async () => finishFirstRefresh({ items: [report], nextCursor: null }))
+    await waitFor(() => expect(treeReads).toBe(3), { timeout: 1500 })
+    expect(await screen.findByRole('button', { name: 'remote.txt' })).toBeVisible()
+  })
+
   it.each(['avatar.PNG', 'notes.md', 'demo.mp4'])(
     'does not reload an unchanged open %s preview after a scope invalidation',
     async fileName => {
