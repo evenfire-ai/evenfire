@@ -39,6 +39,25 @@ const serviceMock = vi.hoisted(() => ({
 }))
 
 const controlApiMock = vi.hoisted(() => ({
+  ControlApiHostAccessRejectedError: class extends Error {
+    constructor(
+      readonly status: number,
+      readonly denialCode: string | null = null
+    ) {
+      super(`Control API rejected host access (${status})`)
+      this.name = 'ControlApiHostAccessRejectedError'
+    }
+  },
+  ControlApiHostRpcAdmissionError: class extends Error {
+    constructor(
+      readonly status: 429 | 503,
+      readonly body: { error: string; retryAfterSeconds?: number },
+      readonly headers: Record<string, string>
+    ) {
+      super(`Control API Host-RPC admission returned ${status}`)
+      this.name = 'ControlApiHostRpcAdmissionError'
+    }
+  },
   fetchUserAllowedServersFromControlApi: vi.fn(),
   fetchHostConnectionFromControlApi: vi.fn(),
   // Stage 5 wake-and-hold consults the control-api wake endpoint whenever an
@@ -657,7 +676,7 @@ describe('POST /rpc/hosts/:hostRef/tasks/:taskId/cancel', () => {
     await request(app).post('/rpc/hosts/chatllm/tasks/abc/cancel').expect(401)
   })
 
-  it('returns 404 when host is not accessible', async () => {
+  it('returns the typed Host authorization denial after live resolution', async () => {
     authTokenMock.verifyRpcToken.mockReturnValue({
       ...VALID_CLAIMS,
       scopes: ['host:message:invoke'],
@@ -671,7 +690,10 @@ describe('POST /rpc/hosts/:hostRef/tasks/:taskId/cancel', () => {
     await request(app)
       .post('/rpc/hosts/chatllm/tasks/abc/cancel')
       .set('authorization', 'Bearer token')
-      .expect(404)
+      .expect(403, {
+        error: 'Forbidden: user cannot access this host',
+        code: 'host_access_denied',
+      })
   })
 
   it('returns 502 when upstream fetch rejects and the host is not stateless', async () => {
