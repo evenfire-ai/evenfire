@@ -535,6 +535,7 @@ describe('GET /rpc/access/users/:userId/mcp-hosts/:hostRef/artifact-read', () =>
   })
 
   it('does not charge admission for user or signed-Host mismatch', async () => {
+    authState.claims = { sub: 'user-a', hostRefs: ['host-a', 'host-b'] }
     rateLimiterMock.checkAndIncrement.mockResolvedValue({
       allowed: true,
       remaining: 29,
