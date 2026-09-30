@@ -1,7 +1,7 @@
 import React from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import '@testing-library/jest-dom/vitest'
-import { cleanup, render, screen } from '@testing-library/react'
+import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import { buildDesktopEnvironmentLink } from '@lib/desktopAppLinks'
 import type { DesktopEnvironmentResponse } from '@/app/types/api'
 import desktopEnvironmentFixture from '@/test/fixtures/desktop-environment-response.json'
@@ -74,7 +74,12 @@ describe('Profile Portal home desktop app link', () => {
 
     render(<Page />)
 
-    const unavailableStatus = await screen.findByRole('status')
+    await waitFor(() =>
+      expect(screen.getByRole('status')).toHaveTextContent(
+        'Desktop app setup is unavailable right now.'
+      )
+    )
+    const unavailableStatus = screen.getByRole('status')
 
     expect(unavailableStatus).toHaveTextContent('Desktop app setup is unavailable right now.')
     expect(screen.getByRole('link', { name: 'Settings' })).toHaveAttribute(
@@ -92,7 +97,12 @@ describe('Profile Portal home desktop app link', () => {
 
     render(<Page />)
 
-    const unavailableStatus = await screen.findByRole('status')
+    await waitFor(() =>
+      expect(screen.getByRole('status')).toHaveTextContent(
+        'Desktop app setup is unavailable right now.'
+      )
+    )
+    const unavailableStatus = screen.getByRole('status')
 
     expect(unavailableStatus).toHaveTextContent('Desktop app setup is unavailable right now.')
     expect(screen.getByRole('link', { name: 'Settings' })).toHaveAttribute(
