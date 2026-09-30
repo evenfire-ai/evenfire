@@ -121,6 +121,39 @@ describe('AppService entity-change fan-out', () => {
 })
 
 describe('AppService.startEntityChangeStream session expiry', () => {
+  it('does not reset reconnect backoff on synthetic transport-open callbacks', async () => {
+    vi.useFakeTimers()
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    const service = new AppService() as any
+    setSyntheticSessionToken(service, 'session-token')
+    service.authClient = {
+      openEntityChangeStream: vi.fn(async (_token, _cursor, onEvent) => {
+        onEvent({ type: 'open' })
+        throw new Error('network disconnected before a valid frame')
+      }),
+    }
+
+    try {
+      service.startEntityChangeStream('stream-1', 7, vi.fn())
+      await flushAsyncWork()
+      expect(service.authClient.openEntityChangeStream).toHaveBeenCalledTimes(1)
+
+      await vi.advanceTimersByTimeAsync(1_000)
+      await flushAsyncWork()
+      expect(service.authClient.openEntityChangeStream).toHaveBeenCalledTimes(2)
+
+      await vi.advanceTimersByTimeAsync(1_999)
+      expect(service.authClient.openEntityChangeStream).toHaveBeenCalledTimes(2)
+      await vi.advanceTimersByTimeAsync(1)
+      await flushAsyncWork()
+      expect(service.authClient.openEntityChangeStream).toHaveBeenCalledTimes(3)
+    } finally {
+      service.stopEntityChangeStream('stream-1', 7)
+      vi.useRealTimers()
+      vi.restoreAllMocks()
+    }
+  })
+
   it('turns an initial 401 into a terminal session-expired frame without reconnecting', async () => {
     const service = new AppService() as any
     setSyntheticSessionToken(service, 'session-token')

@@ -2978,7 +2978,17 @@ export class AppService {
           this.entityChangeCursor,
           event => {
             if (closed) return
-            if (event.type === 'open') backoffMs = 1000
+            if (
+              event.type === 'heartbeat' ||
+              event.type === 'scope.invalidated' ||
+              event.type === 'resync_required' ||
+              event.type === 'stream.closing'
+            ) {
+              // Transport-open is synthetic: it proves only that fetch
+              // returned headers. Reset retry pressure only after the server
+              // produces a validated schema-v1 frame.
+              backoffMs = 1000
+            }
             if (event.type === 'stream.closing' && event.reason === 'session_expired') {
               this.handleEntityChangeSessionExpiry(connectionGeneration)
               return
