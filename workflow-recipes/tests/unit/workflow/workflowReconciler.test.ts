@@ -3161,6 +3161,29 @@ describe('WorkflowReconciler — reconcile loop', () => {
     }
   })
 
+  it('R4-L4: the finalizer deletes the unlabelled legacy internet policy by name in the mcp-server namespace', async () => {
+    const networkingApi = makeNetworkingApi() as ReturnType<typeof makeNetworkingApi>
+    // The label sweep finds nothing: the legacy policy predates the labels.
+    networkingApi.listNamespacedNetworkPolicy.mockResolvedValue({ items: [] })
+    const reconciler = new WorkflowReconciler(
+      makeDeps({
+        networkingApi: networkingApi as never,
+      })
+    )
+
+    await reconciler.reconcileDelete('test-wf', 'sandbox-recipes', makeSpec(), 'uid-123')
+
+    // Liveness witness: the fixed run-lane list was deleted by name.
+    expect(networkingApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith({
+      name: 'test-wf-mcp-host-to-servers',
+      namespace: 'sandbox-recipes',
+    })
+    expect(networkingApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith({
+      name: 'test-wf-mcp-servers-egress-internet',
+      namespace: 'mcp-server',
+    })
+  })
+
   it('clears the legacy internet NP process set on recipe delete so a recreate can delete again', async () => {
     const networkingApi = makeNetworkingApi() as ReturnType<typeof makeNetworkingApi>
     const reconciler = new WorkflowReconciler(
