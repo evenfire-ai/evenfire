@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { GfsImagePreview } from './index'
 
 describe('GfsImagePreview layout', () => {
@@ -113,5 +113,27 @@ describe('GfsImagePreview layout', () => {
     const title = screen.getByRole('heading', { name: 'diagram.png' })
     expect(dialog.getAttribute('aria-labelledby')).toBe(title.id)
     expect(screen.getByRole('button', { name: 'Close image preview' })).toBeTruthy()
+  })
+
+  it('keeps the authoritative unavailable shell named and closable without fetching bytes', () => {
+    const onClose = vi.fn()
+    const downloadPreview = vi.mocked(window.clerum.gfs.downloadPreview)
+    render(
+      <GfsImagePreview
+        byteLength={3}
+        fileName="diagram.png"
+        gfsUri="gfs://main/image-1"
+        mimeType="image/png"
+        onClose={onClose}
+        unavailable
+      />
+    )
+
+    const dialog = screen.getByRole('dialog', { name: 'File unavailable' })
+    const title = within(dialog).getByRole('heading', { name: 'File unavailable', level: 3 })
+    expect(dialog.getAttribute('aria-labelledby')).toBe(title.id)
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Close image preview' }))
+    expect(onClose).toHaveBeenCalledOnce()
+    expect(downloadPreview).not.toHaveBeenCalled()
   })
 })

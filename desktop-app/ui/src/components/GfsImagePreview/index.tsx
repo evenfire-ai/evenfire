@@ -1,7 +1,6 @@
 import { useEffect, useId, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { Button } from '@components/Common'
-import { EmptyState } from '@components/Common'
 import { IconClose } from '@components/SidebarNav/icons'
 import { useWorkspaceModalStyle } from '@hooks/useWorkspaceModalStyle'
 import { GfsImagePreviewBody } from './Body'
@@ -36,6 +35,20 @@ export function GfsImagePreview({
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [onClose])
 
+  const closeButton = (
+    <Button
+      className="da-gfs-image-preview-dialog__close"
+      data-preview-close
+      ref={closeButtonRef}
+      aria-label="Close image preview"
+      color="neutral"
+      onClick={onClose}
+      variant="ghost"
+    >
+      <IconClose width={18} height={18} />
+    </Button>
+  )
+
   return createPortal(
     <div
       className="da-gfs-image-preview-modal"
@@ -52,7 +65,17 @@ export function GfsImagePreview({
         aria-labelledby={titleId}
       >
         {unavailable ? (
-          <EmptyState title="File unavailable" body="This item is no longer available." />
+          <>
+            <header className="da-gfs-image-preview-dialog__header">
+              <h3 id={titleId}>File unavailable</h3>
+              {closeButton}
+            </header>
+            <div className="da-gfs-image-preview-dialog__body">
+              <div className="empty-state">
+                <p className="muted">This item is no longer available.</p>
+              </div>
+            </div>
+          </>
         ) : (
           <GfsImagePreviewBody
             key={`${gfsUri}:${reloadVersion ?? 0}`}
@@ -62,19 +85,7 @@ export function GfsImagePreview({
             mimeType={mimeType}
             onDownloadError={onDownloadError}
             titleId={titleId}
-            headerActions={
-              <Button
-                className="da-gfs-image-preview-dialog__close"
-                data-preview-close
-                ref={closeButtonRef}
-                aria-label="Close image preview"
-                color="neutral"
-                onClick={onClose}
-                variant="ghost"
-              >
-                <IconClose width={18} height={18} />
-              </Button>
-            }
+            headerActions={closeButton}
           />
         )}
       </section>
