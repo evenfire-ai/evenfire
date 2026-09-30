@@ -53,7 +53,7 @@ vi.mock('@modelcontextprotocol/sdk/client/sse.js', async () => {
 // The SDK is mocked, so no real transport fetch runs; keep the SSRF guard off DNS.
 vi.mock('../../core/net/ssrf', () => ({
   SsrfBlockedError: class SsrfBlockedError extends Error {},
-  resolvePinnedPublicIp: vi.fn(async () => '203.0.113.10'),
+  resolvePinnedPublicIp: vi.fn(async () => '93.184.216.34'),
 }))
 
 function remoteOauthUserServer(name = 'calendar'): McpServerInfo {

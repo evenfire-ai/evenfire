@@ -48,7 +48,7 @@ vi.mock('@modelcontextprotocol/sdk/client/sse.js', async () => {
 // never touch DNS (the SDK is mocked, so its returned fetch is never invoked).
 vi.mock('../../core/net/ssrf', () => ({
   SsrfBlockedError: class SsrfBlockedError extends Error {},
-  resolvePinnedPublicIp: vi.fn(async () => '203.0.113.10'),
+  resolvePinnedPublicIp: vi.fn(async () => '93.184.216.34'),
 }))
 
 function remoteOauthContextServer(name = 'remote-ctx'): McpServerInfo {
