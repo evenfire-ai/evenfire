@@ -38,8 +38,10 @@ import {
   type WorkflowRecipeSpec,
   WorkflowReconciler,
   type WorkflowReconcilerDeps,
+  buildNetworkPolicyConvergedCondition,
   buildNetworkPolicyOwnershipConditions,
   networkPolicyConditionsChanged,
+  networkPolicyMarkerFacts,
   translateNetworkPolicyApplySummary,
 } from '../../../src/workflow/workflowReconciler'
 import { asApiserverNetworkPolicy } from './asApiserverNetworkPolicy'
@@ -9205,7 +9207,7 @@ describe('translateNetworkPolicyApplySummary', () => {
       ).toStrictEqual({ networkPolicyOwnershipConditions: [] })
     })
 
-    it('reports a pending retry and a carried prune in one RetryPending marker', () => {
+    it('reports a pending retry and a carried prune in one RetryAndPrunePending marker', () => {
       const result = translateNetworkPolicyApplySummary(
         { conflicts: [], retryPending: true },
         [publishedPruneMarker],
@@ -9217,7 +9219,7 @@ describe('translateNetworkPolicyApplySummary', () => {
           {
             type: 'WorkflowNetworkPoliciesConverged',
             status: 'False',
-            reason: 'RetryPending',
+            reason: 'RetryAndPrunePending',
             message:
               'One or more run-lane NetworkPolicies are pending a retry (terminating or contended), and one or more the spec no longer wants are pending a delete',
             lastTransitionTime: earlier,
@@ -9226,6 +9228,44 @@ describe('translateNetworkPolicyApplySummary', () => {
         networkPolicyRetryPending: true,
       })
     })
+  })
+})
+
+// R4-L5: each combination of facts has its own reason, and the facts are read
+// back from the reason alone. A reworded message must not change what a
+// published marker means.
+describe('networkPolicyMarkerFacts', () => {
+  const now = '2026-09-23T12:00:00.000Z'
+  const combinations = [
+    { applyPending: true, prunePending: false },
+    { applyPending: false, prunePending: true },
+    { applyPending: true, prunePending: true },
+  ]
+
+  it('R4-L5: a pending apply and a pending prune publish their own reason', () => {
+    const marker = buildNetworkPolicyConvergedCondition(
+      { applyPending: true, prunePending: true },
+      now
+    )
+    expect(marker?.reason).toBe('RetryAndPrunePending')
+  })
+
+  it.each(combinations)(
+    'R4-L5: reads %o back from the reason alone, whatever the message says',
+    facts => {
+      const marker = buildNetworkPolicyConvergedCondition(facts, now)
+      // Liveness witness: the builder published a marker for these facts.
+      expect(marker).toMatchObject({ type: 'WorkflowNetworkPoliciesConverged', status: 'False' })
+      expect(networkPolicyMarkerFacts([marker!])).toStrictEqual(facts)
+      expect(networkPolicyMarkerFacts([{ ...marker!, message: 'reworded' }])).toStrictEqual(facts)
+    }
+  )
+
+  it('R4-L5: the three reasons are distinct', () => {
+    const reasons = combinations.map(
+      facts => buildNetworkPolicyConvergedCondition(facts, now)?.reason
+    )
+    expect(new Set(reasons).size).toBe(3)
   })
 })
 

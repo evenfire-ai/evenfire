@@ -21,6 +21,7 @@ import type { WorkflowNetworkPolicyApplySummary } from '../workflow/pluginWorklo
 import { deriveWorkflowRuntimePlan } from '../workflow/runtimePlan'
 import {
   WorkflowReconciler,
+  buildNetworkPolicyConvergedCondition,
   translateNetworkPolicyApplySummary,
 } from '../workflow/workflowReconciler'
 import { captureLogger, captureLoggerLevels } from './__tests__/captureLogger'
@@ -9982,12 +9983,16 @@ describe('WorkflowRecipeReconciler', () => {
     })
 
     // A marker naming both facts: the retry still owes an apply, and a
-    // reconcile() prune still owes a DELETE.
-    const retryAndPruneMarker = {
-      ...retryMarker,
-      message:
-        'One or more run-lane NetworkPolicies are pending a retry (terminating or contended), and one or more the spec no longer wants are pending a delete',
-    }
+    // reconcile() prune still owes a DELETE. Built by the production builder,
+    // so the fixture cannot drift from what a pass publishes.
+    const retryAndPruneMarker = buildNetworkPolicyConvergedCondition(
+      { applyPending: true, prunePending: true },
+      retryMarker.lastTransitionTime
+    )!
+
+    it('R4-L5: the marker naming both facts carries its own reason', () => {
+      expect(retryAndPruneMarker.reason).toBe('RetryAndPrunePending')
+    })
 
     it('reapplies from the active short-circuit for a marker that names both facts, and keeps the prune fact', async () => {
       const retry = vi.fn().mockResolvedValue({ conflicts: [], retryPending: false })
