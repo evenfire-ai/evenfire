@@ -49,6 +49,10 @@ function sameDesktopEnvironment(
   }
 }
 
+function isAuthenticationOperationInProgress(state: DesktopEnvironmentHandoffState): boolean {
+  return state.booting || state.busy || state.authTransitioning
+}
+
 export function createDesktopEnvironmentSetupHandler({
   getAuthState,
   refreshRuntimeConfigState,
@@ -57,7 +61,9 @@ export function createDesktopEnvironmentSetupHandler({
   setPendingDesktopEnvironmentSetup,
   setStatus,
 }: DesktopEnvironmentSetupHandlerOptions) {
-  return async ({
+  let linkInProgress = false
+
+  const processLink = async ({
     externalRestApiBaseUrl,
     rpcProxyBaseUrl,
     appName,
@@ -85,6 +91,14 @@ export function createDesktopEnvironmentSetupHandler({
       configState = await refreshRuntimeConfigState()
     } catch {
       setStatus('Could not verify the desktop environment. Try opening it again.', 'error')
+      return
+    }
+
+    if (isAuthenticationOperationInProgress(getAuthState())) {
+      setStatus(
+        'Finish the current authentication action before opening another desktop environment.',
+        'info'
+      )
       return
     }
 
@@ -161,5 +175,26 @@ export function createDesktopEnvironmentSetupHandler({
     // The RPC URL in an external link is untrusted. Desktop discovers it from
     // the selected REST endpoint after confirmation.
     setPendingDesktopEnvironmentSetup({ ...linkedConfig, rpcProxyBaseUrl: '' })
+  }
+
+  return async (payload: DesktopEnvironmentSetupPayload) => {
+    if (linkInProgress) {
+      setStatus('Another desktop environment link is already being processed.', 'info')
+      return
+    }
+    if (isAuthenticationOperationInProgress(getAuthState())) {
+      setStatus(
+        'Finish the current authentication action before opening another desktop environment.',
+        'info'
+      )
+      return
+    }
+
+    linkInProgress = true
+    try {
+      await processLink(payload)
+    } finally {
+      linkInProgress = false
+    }
   }
 }
