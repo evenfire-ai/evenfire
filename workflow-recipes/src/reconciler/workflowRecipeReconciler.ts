@@ -3976,7 +3976,7 @@ export class WorkflowRecipeReconciler {
 
     createLogger('wrc', recipe.metadata.name).info('Deleting recipe resources', { name })
     this.secretReverseIndex?.delete(name)
-    this.oauthBrokerDeleteLedger.invalidate(name)
+    this.oauthBrokerDeleteLedger.forgetRecipe(name)
 
     // ─── Workflow Delete (Stage 1) ────────────────────────────────────
     const isWorkflow = recipe.spec.steps !== undefined && recipe.spec.steps.length > 0
@@ -4246,16 +4246,9 @@ export class WorkflowRecipeReconciler {
     }
 
     // The OAuth broker token Secret + its egress NetworkPolicy (Path B) carry
-    // no ownerReference, so they are reaped explicitly here. safeDelete
-    // swallows 404 when the recipe never used background OAuth.
-    await this.safeDelete(
-      () =>
-        this.coreApi.deleteNamespacedSecret({
-          name: rb.oauthBrokerTokenSecretName(recipe.metadata.name),
-          namespace: this.config.sandboxNamespace,
-        }),
-      `Secret "${rb.oauthBrokerTokenSecretName(recipe.metadata.name)}" in ${this.config.sandboxNamespace}`
-    )
+    // no ownerReference, so they are reaped explicitly here. A 404 is logged
+    // as already gone when the recipe never used background OAuth.
+    await this.deleteOAuthBrokerTokenOnFinalize(recipe.metadata.name)
     await this.safeDelete(
       () =>
         this.networkingApi.deleteNamespacedNetworkPolicy({
@@ -4677,6 +4670,45 @@ export class WorkflowRecipeReconciler {
       namespace,
       patchKind,
     })
+  }
+
+  /**
+   * Finalizer reap of the oauth-broker token Secret. Logs exactly as
+   * `safeDelete` does and swallows a failure the same way (#949), but hands
+   * the observed outcome to the ledger: only a 2xx/404 with no token ADDED
+   * while the DELETE was in flight clears the token-seen epoch. A failed
+   * DELETE keeps it, so a recipe recreated under the same name still reaps
+   * the leftover token.
+   */
+  private async deleteOAuthBrokerTokenOnFinalize(recipeName: string): Promise<void> {
+    const secretName = rb.oauthBrokerTokenSecretName(recipeName)
+    const namespace = this.config.sandboxNamespace
+    const label = `Secret "${secretName}" in ${namespace}`
+    const epochBeforeDelete = this.oauthBrokerDeleteLedger.secretEpoch(recipeName)
+    const outcome = await observeNamespacedDelete(() =>
+      this.coreApi.deleteNamespacedSecret({ name: secretName, namespace })
+    )
+    const log = createLogger('wrc', 'workflow-recipes')
+    switch (outcome.kind) {
+      case 'deleted':
+        log.info('Deleted resource', { label })
+        break
+      case 'gone':
+        log.info('Resource already gone', { label })
+        break
+      case 'failed':
+        log.error('Failed to delete resource', { label, err: outcome.error })
+        return
+      default: {
+        const _exhaustive: never = outcome
+        return _exhaustive
+      }
+    }
+    if (!this.oauthBrokerDeleteLedger.noteSecretGone(recipeName, epochBeforeDelete)) {
+      log.info('oauth-broker-token Secret re-added during finalizer delete; keeping it seen', {
+        recipe: recipeName,
+      })
+    }
   }
 
   private async safeDelete(deleteFn: () => Promise<unknown>, label: string): Promise<void> {

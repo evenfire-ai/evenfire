@@ -180,7 +180,7 @@ describe('OAuthBrokerDeleteLedger', () => {
     expect(ledger.shouldDeleteSecret(ref('r2', 4))).toBe(false)
   })
 
-  it('invalidate drops both sides for the named recipe and no other', () => {
+  it('forgetRecipe drops both entries for the named recipe and no other, and keeps the token seen', () => {
     const ledger = new OAuthBrokerDeleteLedger()
     tokenSeen(ledger, 'r')
     tokenSeen(ledger, 'r2')
@@ -189,29 +189,69 @@ describe('OAuthBrokerDeleteLedger', () => {
     recordSecret(ledger, ref('r2', 4))
     ledger.recordPolicyDelete(ref('r2', 4), 0)
 
-    ledger.invalidate('r')
-    // The recipe is gone with its token: nothing to delete until a new ADDED.
-    expect(ledger.shouldDeleteSecret(ref('r', 5))).toBe(false)
+    ledger.forgetRecipe('r')
+    // Deleting the recipe does not delete its token: the watermark went, the
+    // epoch stayed, so a generation below the old watermark deletes.
+    expect(ledger.shouldDeleteSecret(ref('r', 3))).toBe(true)
+    expect(ledger.shouldDeleteSecret(ref('r', 1, 'uid-recreated'))).toBe(true)
     expect(ledger.shouldDeletePolicy(ref('r', 4), 1)).toBe(true)
+    // The other recipe keeps both entries.
     expect(ledger.shouldDeleteSecret(ref('r2', 4))).toBe(false)
     expect(ledger.shouldDeletePolicy(ref('r2', 4), 1)).toBe(false)
-
-    // The watermark went too: after the next ADDED a generation below the
-    // old one deletes.
-    tokenSeen(ledger, 'r')
-    expect(ledger.shouldDeleteSecret(ref('r', 3))).toBe(true)
   })
 
-  it('a DELETE in flight across a recipe deletion that followed an ADDED is not recorded', () => {
+  it('Table B: noteSecretGone with the epoch unchanged clears the token-seen bit until the next ADDED', () => {
+    const ledger = new OAuthBrokerDeleteLedger()
+    tokenSeen(ledger, 'r')
+    tokenSeen(ledger, 'r2')
+    ledger.forgetRecipe('r')
+    const epochBeforeDelete = ledger.secretEpoch('r')
+    expect(epochBeforeDelete).toBeGreaterThan(0)
+    expect(ledger.noteSecretGone('r', epochBeforeDelete)).toBe(true)
+
+    expect(ledger.secretEpoch('r')).toBe(0)
+    expect(ledger.shouldDeleteSecret(ref('r', 1, 'uid-recreated'))).toBe(false)
+    // Liveness witness: another recipe is untouched, and the next ADDED re-arms.
+    expect(ledger.shouldDeleteSecret(ref('r2', 1))).toBe(true)
+    tokenSeen(ledger, 'r')
+    expect(ledger.shouldDeleteSecret(ref('r', 1, 'uid-recreated'))).toBe(true)
+  })
+
+  it('Table B: noteSecretGone after an ADDED raced the finalizer DELETE clears nothing', () => {
+    const ledger = new OAuthBrokerDeleteLedger()
+    tokenSeen(ledger, 'r')
+    ledger.forgetRecipe('r')
+    const epochBeforeDelete = ledger.secretEpoch('r')
+    // The recreated recipe's token ADDED lands while the DELETE is in flight.
+    ledger.invalidateSecret('r')
+    expect(ledger.noteSecretGone('r', epochBeforeDelete)).toBe(false)
+    expect(ledger.secretEpoch('r')).toBeGreaterThan(epochBeforeDelete)
+    expect(ledger.shouldDeleteSecret(ref('r', 1, 'uid-recreated'))).toBe(true)
+  })
+
+  it('Table B: a finalizer DELETE that failed or was never sent keeps the token seen', () => {
+    const ledger = new OAuthBrokerDeleteLedger()
+    tokenSeen(ledger, 'r')
+    recordSecret(ledger, ref('r', 4, 'uid-old'))
+    const epochBeforeForget = ledger.secretEpoch('r')
+    // Finalizer start; the DELETE then fails (or is never sent), so
+    // noteSecretGone is not called.
+    ledger.forgetRecipe('r')
+    expect(ledger.secretEpoch('r')).toBe(epochBeforeForget)
+    expect(ledger.shouldDeleteSecret(ref('r', 1, 'uid-recreated'))).toBe(true)
+  })
+
+  it('a DELETE in flight across a finalizer start that followed an ADDED is recorded against the old uid only', () => {
     const ledger = new OAuthBrokerDeleteLedger()
     ledger.invalidateSecret('r')
     const epochBeforeDelete = ledger.secretEpoch('r')
-    ledger.invalidate('r')
-    expect(ledger.recordSecretDelete(ref('r', 4), epochBeforeDelete)).toBe(false)
+    ledger.forgetRecipe('r')
+    // The epoch did not move, so the in-flight DELETE of the old recipe is
+    // recorded for its own uid.
+    expect(ledger.recordSecretDelete(ref('r', 4, 'uid-old'), epochBeforeDelete)).toBe(true)
+    expect(ledger.shouldDeleteSecret(ref('r', 4, 'uid-old'))).toBe(false)
 
-    // Nothing was recorded: after the next ADDED a lower generation deletes,
-    // which a watermark at 4 would have skipped.
-    tokenSeen(ledger, 'r')
-    expect(ledger.shouldDeleteSecret(ref('r', 3))).toBe(true)
+    // A recipe recreated under the same name (new uid) still deletes.
+    expect(ledger.shouldDeleteSecret(ref('r', 1, 'uid-new'))).toBe(true)
   })
 })

@@ -14,7 +14,9 @@
  * missed.
  *
  * The Secret side deletes only after the Secret watch observed the recipe's
- * token (a non-zero epoch): a recipe that never had one gets no DELETE.
+ * token (a non-zero epoch): a recipe that never had one gets no DELETE. The
+ * epoch survives recipe deletion and returns to 0 only when the finalizer's
+ * own token DELETE is observed 2xx/404 with no ADDED in between.
  *
  * The Secret watermark rises on a recorded delete and on
  * `noteSecretProvisioned`, which the backgroundAccess branch calls for the
@@ -80,9 +82,10 @@ export class OAuthBrokerDeleteLedger {
   private epochClock = 0
 
   shouldDeleteSecret(recipe: OAuthBrokerLedgerRecipe): boolean {
-    // No token ADDED since this process started or the recipe was deleted:
-    // the Secret watch's initial list replays ADDED for every token that
-    // exists, so there is no token to reap and a DELETE would only 404.
+    // Epoch 0: no token ADDED since this process started, or the finalizer
+    // observed the token gone (2xx/404) with no ADDED since. The Secret
+    // watch's initial list replays ADDED for every token that exists, so
+    // there is no token to reap and a DELETE would only 404.
     if (this.secretEpoch(recipe.name) === 0) return false
     const entry = this.secrets.get(recipe.name)
     if (entry === undefined || entry.uid !== recipe.uid) return true
@@ -149,12 +152,25 @@ export class OAuthBrokerDeleteLedger {
   }
 
   /**
-   * Recipe deletion drops both sides. The epoch entry goes too; the clock is
-   * global, so a DELETE in flight that read a non-zero epoch still mismatches.
+   * Finalizer start: drops the Secret and NetworkPolicy entries and keeps the
+   * epoch. Deleting a recipe does not delete its token; only the finalizer's
+   * own DELETE, observed through `noteSecretGone`, may clear the epoch. A
+   * DELETE that fails, is never sent, or races an ADDED leaves the token
+   * seen, so a recipe recreated under the same name still reaps it.
    */
-  invalidate(recipeName: string): void {
+  forgetRecipe(recipeName: string): void {
     this.secrets.delete(recipeName)
     this.policies.delete(recipeName)
+  }
+
+  /**
+   * The finalizer's token DELETE returned 2xx or 404. Clears the epoch only
+   * when it is unchanged since `epochBeforeDelete` was read; returns false,
+   * clearing nothing, when an ADDED landed while the DELETE was in flight.
+   */
+  noteSecretGone(recipeName: string, epochBeforeDelete: number): boolean {
+    if (this.secretEpoch(recipeName) !== epochBeforeDelete) return false
     this.secretEpochs.delete(recipeName)
+    return true
   }
 }

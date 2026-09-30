@@ -12,15 +12,16 @@ import {
  * caller can see (which events happened, in which order) and asserts
  * implications on the answers. Cases no invariant speaks about stay free.
  *
- * I1  No token ADDED since the process started or the recipe was deleted:
- *     no Secret delete.
+ * I1  No token ADDED since the process started: no Secret delete. A
+ *     finalizer start (`forgetRecipe`) does not clear the token-seen bit.
  * I2  After an ADDED with no later recorded delete or provisioning, a pass
  *     at or above the watermark (the highest generation recorded or
- *     provisioned since the recipe was last deleted) deletes.
+ *     provisioned since the last finalizer start) deletes. A finalizer
+ *     start with the token seen arms every generation.
  * I3  A pass below the highest generation that provisioned the token does
  *     not delete it.
- * I4  A delete whose DELETE was sent before an ADDED (or a recipe deletion)
- *     records nothing; with neither in between it is recorded.
+ * I4  A delete whose DELETE was sent before an ADDED records nothing; with
+ *     no ADDED in between it is recorded, across a finalizer start too.
  * I5  The NetworkPolicy side skips the recorded pass until the TTL expires,
  *     and deletes for a different uid or a higher generation.
  */
@@ -36,7 +37,7 @@ type Op =
   | { kind: 'endDelete'; failed: boolean }
   | { kind: 'invalidateSecret' }
   | { kind: 'addedElsewhere' }
-  | { kind: 'invalidate' }
+  | { kind: 'forgetRecipe' }
 
 const generationArb = fc.integer({ min: 0, max: MAX_GENERATION })
 
@@ -47,7 +48,7 @@ const opArb: fc.Arbitrary<Op> = fc.oneof(
   fc.boolean().map(failed => ({ kind: 'endDelete' as const, failed })),
   fc.constant({ kind: 'invalidateSecret' as const }),
   fc.constant({ kind: 'addedElsewhere' as const }),
-  fc.constant({ kind: 'invalidate' as const })
+  fc.constant({ kind: 'forgetRecipe' as const })
 )
 
 function ref(generation: number, uid = UID): OAuthBrokerLedgerRecipe {
@@ -57,9 +58,9 @@ function ref(generation: number, uid = UID): OAuthBrokerLedgerRecipe {
 /** What a caller observed; never the ledger's internal entry. */
 interface Observed {
   tokenSeen: boolean
-  /** Highest generation recorded or provisioned since the last recipe deletion. */
+  /** Highest generation recorded or provisioned since the last finalizer start. */
   watermark: number
-  /** Highest generation provisioned since the last recipe deletion. */
+  /** Highest generation provisioned since the last finalizer start. */
   provisioned: number
   /** An ADDED landed after the last recorded delete or provisioning. */
   addedAfterLastWrite: boolean
@@ -139,18 +140,23 @@ function step(ledger: OAuthBrokerDeleteLedger, seen: Observed, op: Op): void {
     case 'addedElsewhere':
       ledger.invalidateSecret('other')
       return
-    case 'invalidate': {
-      ledger.invalidate(NAME)
-      const inFlight = seen.inFlight
+    case 'forgetRecipe': {
+      // The finalizer starts: both entries go, the token-seen bit stays, and
+      // an in-flight DELETE is not raced (the epoch did not move).
+      ledger.forgetRecipe(NAME)
+      const { tokenSeen, inFlight } = seen
       Object.assign(seen, freshObserved())
-      if (inFlight) seen.inFlight = { ...inFlight, raced: true }
+      seen.tokenSeen = tokenSeen
+      // With no entry left, every generation deletes while the token is seen.
+      seen.addedAfterLastWrite = tokenSeen
+      seen.inFlight = inFlight
       return
     }
   }
 }
 
 describe('OAuthBrokerDeleteLedger observable properties', () => {
-  it('I1-I4 hold over provision, pass, beginDelete/endDelete, invalidateSecret and invalidate', () => {
+  it('I1-I4 hold over provision, pass, beginDelete/endDelete, invalidateSecret and forgetRecipe', () => {
     fc.assert(
       fc.property(fc.array(opArb, { maxLength: 40 }), ops => {
         const ledger = new OAuthBrokerDeleteLedger()
