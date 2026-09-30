@@ -3,8 +3,11 @@ import { spawn, spawnSync } from 'node:child_process'
 import { createPublicKey } from 'node:crypto'
 import {
   chmodSync,
+  closeSync,
+  fstatSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
   rmSync,
   statSync,
@@ -205,13 +208,18 @@ describe('devSigningKeys persistence contract', () => {
     const store = tempStore()
     const signing = loadOrGenerateDevJwtPrivateKey('rpc', store)
     const publicPath = join(store, 'rpc.public.pem')
-    const published = readFileSync(publicPath, 'utf8').trim()
-    expect(published).toBe(
-      createPublicKey(signing).export({ type: 'spki', format: 'pem' }).toString().trim()
-    )
-    expect(statSync(publicPath).mode & 0o777).toBe(0o644)
+    const expected = createPublicKey(signing).export({ type: 'spki', format: 'pem' }).toString()
+    let published: string
+    const fd = openSync(publicPath, 'r')
+    try {
+      expect(fstatSync(fd).mode & 0o777).toBe(0o644)
+      published = readFileSync(fd, 'utf8').trim()
+    } finally {
+      closeSync(fd)
+    }
+    expect(published).toBe(expected.trim())
     loadOrGenerateDevJwtPrivateKey('rpc', store)
-    expect(readFileSync(publicPath, 'utf8').trim()).toBe(published)
+    expect(readFileSync(publicPath, 'utf8').trim()).toBe(expected.trim())
   })
 
   it('backfills a missing verifying half on reuse', () => {
