@@ -16463,6 +16463,198 @@ describe('WorkflowRecipeReconciler', () => {
     })
   })
 
+  // R4-L4: a legacy mcp-servers internet policy DELETE that did not land is
+  // published as WorkflowLegacyNetworkPolicyRemoved=False/DeletePending. The
+  // in-progress, active and terminal short-circuits never reach reconcile(),
+  // so the legacy-retry writer runs before them: one DELETE per backoff window
+  // (60 s, doubling up to 1 h), a fixed requeue for the rest of the window,
+  // and the marker cleared once the policy is gone.
+  describe('R4-L4: legacy internet policy DELETE retried before the short-circuits', () => {
+    const RECIPE = 'lg-recipe'
+    const RUN_ID = 'run-lg'
+    const LEGACY = `${RECIPE}-mcp-servers-egress-internet`
+    const LEGACY_TYPE = 'WorkflowLegacyNetworkPolicyRemoved'
+    const MARKER_TYPE = 'WorkflowNetworkPoliciesConverged'
+    const T0 = new Date('2026-09-23T10:00:00.000Z').getTime()
+
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ['Date'] })
+      vi.setSystemTime(T0)
+    })
+
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+
+    function runScopedRecipe(status: Record<string, unknown>): WorkflowRecipeCRD {
+      return makeRecipe({
+        metadata: {
+          name: RECIPE,
+          namespace: 'sandbox-recipes',
+          uid: 'uid-lg',
+          labels: { 'clerum.io/workflow-run-id': RUN_ID },
+        },
+        spec: {
+          agent: { provider: 'openai', model: 'gpt-4o' },
+          steps: [{ id: 'research', instruction: 'run' }],
+        },
+        status: status as WorkflowRecipeCRD['status'],
+      })
+    }
+
+    function publishedFacts(prune: 'converged' | 'pending'): StatusCondition[] {
+      return networkPolicyMarkerConditions(
+        {
+          kind: 'reconcile',
+          summary: { conflicts: [], retryPending: false, prune, legacy: 'pending' },
+        },
+        [],
+        '2026-09-23T09:00:00.000Z'
+      )
+    }
+
+    function ofType(conditions: StatusCondition[] | undefined, type: string): StatusCondition[] {
+      return (conditions ?? []).filter(c => c.type === type)
+    }
+
+    function legacyDeletes(): number {
+      return mockNetworkingApi.deleteNamespacedNetworkPolicy.mock.calls.filter(
+        ([arg]) => (arg as { name: string }).name === LEGACY
+      ).length
+    }
+
+    function legacyDeleteAnswers(error: { code: number; message: string }) {
+      mockNetworkingApi.deleteNamespacedNetworkPolicy.mockImplementation(
+        async ({ name }: { name: string }) => {
+          if (name === LEGACY) throw error
+          return {}
+        }
+      )
+    }
+
+    function stubShortCircuits(inner: WorkflowReconciler) {
+      const ensureCredentials = vi
+        .spyOn(inner, 'ensureMcpHostRuntimeCredentials')
+        .mockResolvedValue(undefined)
+      vi.spyOn(inner, 'refreshRuntimeHttpEgressNetworkPolicies').mockResolvedValue({
+        conflicts: [],
+        retryPending: false,
+      })
+      const teardown = vi.spyOn(inner, 'teardownComputePodsForTerminalRun').mockResolvedValue()
+      const innerReconcile = vi.spyOn(inner, 'reconcile')
+      return { ensureCredentials, teardown, innerReconcile }
+    }
+
+    it('R4-L4: sends one legacy DELETE per backoff window from the in-progress, active and terminal short-circuits', async () => {
+      const inner = installRealInner()
+      const { ensureCredentials, teardown, innerReconcile } = stubShortCircuits(inner)
+      legacyDeleteAnswers({ code: 403, message: 'forbidden' })
+      const conditions = publishedFacts('converged')
+      // Liveness witness: the fixture publishes the legacy fact alone.
+      expect(conditions).toMatchObject([
+        { type: LEGACY_TYPE, status: 'False', reason: 'DeletePending' },
+      ])
+
+      const inProgress = runScopedRecipe({
+        phase: 'deploying',
+        message: 'Workflow running',
+        workflowExecution: { phase: 'running' },
+        conditions,
+      })
+      const first = await reconciler.reconcile(inProgress)
+
+      // Witness: the in-progress short-circuit ran.
+      expect(ensureCredentials).toHaveBeenCalled()
+      expect(legacyDeletes()).toBe(1)
+      expect(first.requeueAfterMs).toBe(60_000)
+      expect(first.requeueFixedInterval).toBe(true)
+      expect(ofType(inProgress.status?.conditions, LEGACY_TYPE)).toMatchObject([
+        { status: 'False', reason: 'DeletePending' },
+      ])
+
+      vi.setSystemTime(T0 + 20_000)
+      const active = runScopedRecipe({
+        phase: 'active',
+        message: 'Workflow running',
+        workflowExecution: { phase: 'running' },
+        conditions,
+      })
+      const second = await reconciler.reconcile(active)
+
+      // Inside the window: no DELETE, and a requeue for the 40 s left.
+      expect(legacyDeletes()).toBe(1)
+      expect(second.requeueAfterMs).toBe(40_000)
+      expect(second.requeueFixedInterval).toBe(true)
+
+      vi.setSystemTime(T0 + 61_000)
+      const terminal = runScopedRecipe({
+        phase: 'active',
+        message: 'Workflow completed',
+        workflowExecution: { phase: 'completed' },
+        conditions,
+      })
+      const third = await reconciler.reconcile(terminal)
+
+      // Witness: the terminal branch tore the run's compute down.
+      expect(teardown).toHaveBeenCalledWith(RECIPE)
+      // Past the window: one more DELETE, and the window doubles.
+      expect(legacyDeletes()).toBe(2)
+      expect(third.requeueAfterMs).toBe(120_000)
+      expect(third.requeueFixedInterval).toBe(true)
+      expect(ofType(terminal.status?.conditions, LEGACY_TYPE)).toMatchObject([
+        { status: 'False', reason: 'DeletePending' },
+      ])
+      expect(innerReconcile).not.toHaveBeenCalled()
+    })
+
+    it('R4-L4: clears DeletePending from the active short-circuit once the legacy DELETE answers 404, and carries the prune fact', async () => {
+      const inner = installRealInner()
+      const { ensureCredentials } = stubShortCircuits(inner)
+      legacyDeleteAnswers({ code: 404, message: 'not found' })
+      const conditions = publishedFacts('pending')
+      expect(ofType(conditions, MARKER_TYPE)).toMatchObject([{ reason: 'PrunePending' }])
+      mockCustomApi.patchNamespacedCustomObjectStatus.mockClear()
+      const active = runScopedRecipe({
+        phase: 'active',
+        message: 'Workflow running',
+        workflowExecution: { phase: 'running' },
+        conditions,
+      })
+
+      const result = await reconciler.reconcile(active)
+
+      // Witness: the active short-circuit ran and sent the DELETE.
+      expect(ensureCredentials).toHaveBeenCalled()
+      expect(legacyDeletes()).toBe(1)
+      expect(ofType(active.status?.conditions, LEGACY_TYPE)).toEqual([])
+      expect(ofType(active.status?.conditions, MARKER_TYPE)).toEqual(
+        ofType(conditions, MARKER_TYPE)
+      )
+      expect(mockCustomApi.patchNamespacedCustomObjectStatus).toHaveBeenCalledTimes(1)
+      expect(result.requeueAfterMs).toBeUndefined()
+    })
+
+    it('R4-L4: sends no legacy DELETE from a short-circuit when no DeletePending marker is published', async () => {
+      const inner = installRealInner()
+      const { ensureCredentials } = stubShortCircuits(inner)
+      legacyDeleteAnswers({ code: 403, message: 'forbidden' })
+      const active = runScopedRecipe({
+        phase: 'active',
+        message: 'Workflow running',
+        workflowExecution: { phase: 'running' },
+        conditions: [],
+      })
+
+      const result = await reconciler.reconcile(active)
+
+      // Witness: the active short-circuit ran.
+      expect(ensureCredentials).toHaveBeenCalled()
+      expect(result.message).toBe('Workflow running')
+      expect(legacyDeletes()).toBe(0)
+      expect(result.requeueAfterMs).toBeUndefined()
+    })
+  })
+
   // A reconcile() prune whose DELETE did not land publishes
   // WorkflowNetworkPoliciesConverged=False/PrunePending. That fact is not a
   // pending retry: the mid-run retry prunes nothing, so the short-circuits
