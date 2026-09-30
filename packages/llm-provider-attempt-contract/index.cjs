@@ -268,38 +268,73 @@ function requestBodyLimitBytes(request) {
 }
 
 /**
- * Copy of `messages` with the `data` of every image part replaced by an empty
- * string. Only the touched objects are copied (shallow); the input is not
- * modified.
+ * Copy of `messages` holding only what the non-image budget counts. Every image
+ * part's `data` is blanked. A message's text parts are blanked too when their
+ * '\n' join equals `content`: V2 carries that text twice, in `content` and in
+ * its parts, and V1 counts it once. Text parts that do not repeat `content` are
+ * kept, so a mismatched message is measured with both copies (fail closed); the
+ * parser refuses it anyway. Only the touched objects are copied (shallow); the
+ * input is not modified.
  */
-function blankImagePayloadsInMessages(messages) {
+function nonImageShadowMessages(messages) {
   if (!Array.isArray(messages)) return messages
   return messages.map(message => {
     const parts = isPlainObject(message) ? message.contentParts : undefined
     if (!Array.isArray(parts)) return message
+    const blankText = textPartsRepeatContent(message.content, parts)
     return {
       ...message,
-      contentParts: parts.map(part =>
-        isPlainObject(part) && part.type === 'image' ? { ...part, data: '' } : part
-      ),
+      contentParts: parts.map(part => {
+        if (!isPlainObject(part)) return part
+        if (part.type === 'image') return { ...part, data: '' }
+        if (blankText && part.type === 'text') return { ...part, text: '' }
+        return part
+      }),
     }
   })
 }
 
 /**
- * UTF-8 length of a request with every image payload replaced by an empty
- * string: the caller-controlled text/tool share of the body.
+ * True when the text parts of `parts`, joined with '\n', equal `content`, the
+ * rule the parser enforces. Compared in place, without building the joined
+ * string. A part that is not a plain object, a text part whose `text` is not a
+ * string, or a `content` that is not a string makes it false, so a malformed
+ * message keeps its text on the budget.
+ */
+function textPartsRepeatContent(content, parts) {
+  if (typeof content !== 'string') return false
+  let offset = 0
+  let first = true
+  for (const part of parts) {
+    if (!isPlainObject(part)) return false
+    if (part.type !== 'text') continue
+    if (typeof part.text !== 'string') return false
+    if (!first) {
+      if (content.charCodeAt(offset) !== 10) return false
+      offset += 1
+    }
+    if (!content.startsWith(part.text, offset)) return false
+    offset += part.text.length
+    first = false
+  }
+  return offset === content.length
+}
+
+/**
+ * UTF-8 length of a request's non-image shadow (`nonImageShadowMessages`): the
+ * caller-controlled text/tool share of the body, with repeated V2 text counted
+ * once.
  *
  * V2's larger ceiling exists for image data only, so this share stays on the V1
  * budget and declaring V2 never buys 24 MiB of text or tool definitions. The
  * measurement builds a detached shadow — the input's key order, shallow copies,
- * only image `data` blanked — measures it and discards it. The original
- * request, its hash and its projection are never touched, so this cannot change
- * what is authorized or signed.
+ * image `data` and repeated text parts blanked — measures it and discards it.
+ * The original request, its hash and its projection are never touched, so this
+ * cannot change what is authorized or signed.
  */
 function measureNonImageRequestBytes(input) {
   return Buffer.byteLength(
-    JSON.stringify({ ...input, messages: blankImagePayloadsInMessages(input.messages) }),
+    JSON.stringify({ ...input, messages: nonImageShadowMessages(input.messages) }),
     'utf8'
   )
 }
@@ -308,7 +343,7 @@ function measureNonImageRequestBytes(input) {
  * Authorize JSON is a different document from a Codex request or proxy
  * envelope. `requestBodyLimitBytes(body.request)` still gates the whole
  * wrapper (24 MiB only when the nested request declares V2). This helper
- * blanks image payloads inside `body.request` so wrapper fields — ids,
+ * measures the non-image shadow of `body.request` so wrapper fields — ids,
  * hashes, ticket links — stay on the `maxRequestBodyBytes` non-image budget.
  */
 function measureNonImageAuthorizeBytes(body) {
@@ -322,7 +357,7 @@ function measureNonImageAuthorizeBytes(body) {
   return Buffer.byteLength(
     JSON.stringify({
       ...body,
-      request: { ...request, messages: blankImagePayloadsInMessages(request.messages) },
+      request: { ...request, messages: nonImageShadowMessages(request.messages) },
     }),
     'utf8'
   )
@@ -330,8 +365,9 @@ function measureNonImageAuthorizeBytes(body) {
 
 /**
  * Proxy completion JSON includes `executionTicket`, which authorize never
- * measured. Blank images and drop the ticket so a body that sat under the
- * `maxRequestBodyBytes` authorize budget is not 413'd on redeem by ~1 KB of JWT.
+ * measured. Measure the non-image shadow and drop the ticket so a body that sat
+ * under the `maxRequestBodyBytes` authorize budget is not 413'd on redeem by
+ * ~1 KB of JWT.
  */
 function measureNonImageCompletionBytes(body) {
   if (!isPlainObject(body)) {

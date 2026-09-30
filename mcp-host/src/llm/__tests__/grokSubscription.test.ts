@@ -1437,7 +1437,7 @@ describe('GrokSubscriptionProvider image input (#784)', () => {
 
   // Review R3-L3: V2 text sits in content and in its text part. The host's
   // canonical check counts it once, as the same text counts in V1.
-  it('R3-L3 dispatches a 4.5 MiB prompt beside an image and keeps refusing parts that do not repeat content', async () => {
+  it('R3-L3 dispatches a 4.5 MiB prompt beside an image and still refuses text over the cap', async () => {
     const wired = deps()
     const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
     const text = 'x'.repeat(4.5 * 1024 * 1024)
@@ -1452,21 +1452,27 @@ describe('GrokSubscriptionProvider image input (#784)', () => {
     expect(body.request.schemaVersion).toBe('grok-completion-request.v2')
     expect(body.request.messages[0].content).toBe(text)
 
-    // Parts that do not repeat content keep both copies on the budget.
-    const mismatched = await provider
+    // The host derives content from the text parts (projectMessage), so every
+    // V2 turn it sends repeats its text; a caller's disagreeing content never
+    // reaches the wire.
+    await provider.completeSingleTurn([
+      { role: 'user', content: 'other', contentParts: [{ type: 'text', text }, image] },
+    ])
+    expect(wired.authorizer.authorize).toHaveBeenCalledTimes(2)
+    expect(wired.authorizer.authorize.mock.calls[1][0].request.messages[0].content).toBe(text)
+
+    // Counted once is still counted: text over the non-image cap is refused.
+    const over = 'x'.repeat(LIMITS.maxRequestBodyBytes)
+    const refused = await provider
       .completeSingleTurn([
-        {
-          role: 'user',
-          content: `${text.slice(1)}y`,
-          contentParts: [{ type: 'text', text }, image],
-        },
+        { role: 'user', content: over, contentParts: [{ type: 'text', text: over }, image] },
       ])
       .catch((e: unknown) => e)
-    expect(mismatched).toMatchObject({
+    expect(refused).toMatchObject({
       code: 'request_limit_exceeded',
       message: 'request exceeds maxRequestBodyBytes outside image data',
     })
-    expect(wired.authorizer.authorize).toHaveBeenCalledTimes(1)
+    expect(wired.authorizer.authorize).toHaveBeenCalledTimes(2)
   }, 30_000)
 
   // #806 review M6, user decision: keep Codex parity. More than maxImages
