@@ -394,15 +394,11 @@ describe('useGfsBrowserController', () => {
     const deferredUserNavigation = new Promise<typeof folderB>(resolve => {
       finishUserNavigation = resolve
     })
-    let finishBackgroundRefresh!: (resource: typeof folderA) => void
-    const deferredBackgroundRefresh = new Promise<typeof folderA>(resolve => {
-      finishBackgroundRefresh = resolve
-    })
     const resolve = vi
       .fn()
       .mockResolvedValueOnce(folderA)
       .mockImplementationOnce(() => deferredUserNavigation)
-      .mockImplementationOnce(() => deferredBackgroundRefresh)
+      .mockImplementationOnce(() => new Promise<typeof folderA>(() => {}))
 
     Object.defineProperty(window, 'clerum', {
       configurable: true,
@@ -429,14 +425,14 @@ describe('useGfsBrowserController', () => {
     await act(async () => {
       screen.getByRole('button', { name: 'background refresh current location' }).click()
     })
-    await waitFor(() => expect(resolve).toHaveBeenCalledTimes(3))
-    await act(async () => finishUserNavigation(folderB))
-
-    await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('folder-b'))
-    await act(async () => finishBackgroundRefresh(folderA))
     await waitFor(() =>
       expect(screen.getByTestId('background-refresh-outcome').textContent).toBe('superseded')
     )
+    expect(resolve).toHaveBeenCalledTimes(2)
+    await act(async () => finishUserNavigation(folderB))
+
+    await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('folder-b'))
+    expect(screen.getByTestId('current-name').textContent).toBe('Folder B')
   })
 
   it('exposes the presented verdict for a failed affordances read, not the IPC wrapper', async () => {

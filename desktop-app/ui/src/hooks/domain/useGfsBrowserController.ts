@@ -304,6 +304,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   const [openError, setOpenError] = useState<string | null>(null)
   const [resolving, setResolving] = useState(false)
   const openUriGenerationRef = useRef(0)
+  const foregroundOpenUriPendingRef = useRef<number | null>(null)
   const backgroundOpenUriGenerationRef = useRef(0)
   // Any browser-location update supersedes an in-flight URI resolution. This
   // includes navigation through the tree/crumbs as well as metadata updates,
@@ -311,6 +312,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   // location or clear its state.
   const setCrumbs = useCallback<Dispatch<SetStateAction<GfsCrumb[]>>>(next => {
     openUriGenerationRef.current += 1
+    foregroundOpenUriPendingRef.current = null
     setResolving(false)
     setCrumbsState(next)
   }, [])
@@ -931,6 +933,10 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   const openUri = useCallback(
     async (uri: string, options?: { clearIfUnavailable?: boolean; background?: boolean }) => {
       const background = options?.background === true
+      // User navigation owns the location until its authoritative resolution
+      // settles. A background refresh that starts before React commits that
+      // navigation must not read/commit the old location in the meantime.
+      if (background && foregroundOpenUriPendingRef.current !== null) return false
       const generation = background ? openUriGenerationRef.current : ++openUriGenerationRef.current
       const backgroundGeneration = background ? ++backgroundOpenUriGenerationRef.current : undefined
       const isCurrent = () =>
@@ -939,6 +945,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
           (backgroundOpenUriGenerationRef.current === backgroundGeneration &&
             currentCrumbRef.current?.gfsUri === uri))
       if (!background) {
+        foregroundOpenUriPendingRef.current = generation
         setOpenError(null)
         setResolving(true)
       }
@@ -1007,7 +1014,10 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         }
         return false
       } finally {
-        if (!background && openUriGenerationRef.current === generation) setResolving(false)
+        if (!background && foregroundOpenUriPendingRef.current === generation) {
+          foregroundOpenUriPendingRef.current = null
+          if (openUriGenerationRef.current === generation) setResolving(false)
+        }
       }
     },
     [clearInaccessibleGfsLocation, handleAuthorityFailure]
