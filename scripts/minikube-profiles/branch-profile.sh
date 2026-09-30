@@ -668,16 +668,21 @@ load_context_identity() {
 
 # kube_context_server <context>: prints the API server of the kubeconfig
 # context named <context>, or nothing when there is no such context. It reads
-# the kubeconfig only and never contacts a cluster.
+# the kubeconfig only and never contacts a cluster. Each refusal names its own
+# cause: an unreadable kubeconfig is BRANCH_PROFILE_KUBECONFIG_UNREADABLE, and
+# a context whose cluster kubectl cannot resolve (`view --minify` fails when
+# the context names a cluster or user the kubeconfig does not define) or whose
+# cluster has no server is BRANCH_PROFILE_CONTEXT_DANGLING. Neither is a
+# remote endpoint; BRANCH_PROFILE_REMOTE_CONTEXT is left to the endpoint check.
 kube_context_server() {
   local context="$1" contexts server
   contexts="$(kubectl config get-contexts -o name)" ||
-    die 'BRANCH_PROFILE_REMOTE_CONTEXT: unable to read the kubeconfig contexts'
+    die 'BRANCH_PROFILE_KUBECONFIG_UNREADABLE: unable to read the kubeconfig contexts; refusing to run minikube or kubectl until kubectl can read the kubeconfig'
   grep -Fqx -- "${context}" <<<"${contexts}" || return 0
   server="$(kubectl config view --raw --minify "--context=${context}" -o 'jsonpath={.clusters[0].cluster.server}')" ||
-    die "BRANCH_PROFILE_REMOTE_CONTEXT: unable to read the API server of kube context ${context}"
+    die "BRANCH_PROFILE_CONTEXT_DANGLING: kube context ${context} is in the kubeconfig, but kubectl could not resolve its cluster (the cluster or user it names is not defined); refusing to run minikube or kubectl against it. It may belong to another session: stop and ask before renaming or removing it"
   [[ -n "${server}" ]] ||
-    die "BRANCH_PROFILE_REMOTE_CONTEXT: kube context ${context} has no API server"
+    die "BRANCH_PROFILE_CONTEXT_DANGLING: kube context ${context} has no API server in the kubeconfig; refusing to run minikube or kubectl against it. It may belong to another session: stop and ask before renaming or removing it"
   printf '%s' "${server}"
 }
 
