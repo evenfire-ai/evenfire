@@ -77,7 +77,7 @@ const REMOTE_CLIENT_ID = remoteServerCr().spec.oauth.id
 function remoteReader(): McpServerOAuthReader {
   return {
     read: vi.fn(async () => {
-      const resolved = resolveServerOAuthSubject(remoteServerCr())
+      const resolved = resolveServerOAuthSubject(remoteServerCr(), 'consent')
       if (!resolved) return null
       return { namespace: MCP_NS, ...resolved } as McpServerOAuthSubject
     }),
@@ -196,7 +196,7 @@ describe('baked mcp exchange stays on fetchFn (byte-identical, T5c)', () => {
         },
       },
     }
-    const resolved = resolveServerOAuthSubject(bakedServer)
+    const resolved = resolveServerOAuthSubject(bakedServer, 'consent')
     if (!resolved) throw new Error('fixture: baked resolve returned null')
     const subject = { namespace: MCP_NS, ...resolved } as McpServerOAuthSubject
 

@@ -417,6 +417,16 @@ export function makeDcrTransport(opts: {
   responseJson: string
   status?: number
   managementUri?: string
+  /**
+   * How the AS reports `redirect_uris` in the registration response:
+   *   - `'requested'`: echo the `redirect_uris` of the request actually POSTed, as an
+   *     RFC 7591 §3.2.1 AS does. Needed wherever the requested URI is only known at
+   *     install time (the per-server DCR URI carries a fresh install nonce).
+   *   - `'omit'`: drop the field.
+   *   - a string array: report these instead (an AS that registered something else).
+   * Unset: `responseJson` verbatim.
+   */
+  redirectUris?: 'requested' | 'omit' | string[]
 }): { transport: PinnedTransport; calls: RecordedDcrCall[] } {
   const registrationEndpoint = opts.registrationEndpoint ?? DCR_REGISTRATION_ENDPOINT
   const status = opts.status ?? 201
@@ -424,10 +434,21 @@ export function makeDcrTransport(opts: {
   const transport: PinnedTransport = async ({ url, method, headers, body }) => {
     calls.push({ url, method, headers, body })
     if (url === registrationEndpoint && method === 'POST') {
+      let bodyText = opts.responseJson
+      if (opts.redirectUris !== undefined) {
+        const response = JSON.parse(opts.responseJson) as Record<string, unknown>
+        if (opts.redirectUris === 'omit') delete response.redirect_uris
+        else if (opts.redirectUris === 'requested')
+          response.redirect_uris = (
+            JSON.parse(body ?? '{}') as { redirect_uris?: unknown }
+          ).redirect_uris
+        else response.redirect_uris = opts.redirectUris
+        bodyText = JSON.stringify(response)
+      }
       return {
         status,
         headers: { 'content-type': 'application/json' },
-        bodyText: opts.responseJson,
+        bodyText,
       }
     }
     if (method === 'DELETE') {
@@ -621,6 +642,17 @@ export function makeInMemoryDynamicClientsDb(): {
           return { rows: [], rowCount: 1 }
         }
         return { rows: [], rowCount: 0 }
+      }
+      if (text.includes('FROM dynamic_clients') && text.includes('client_id = $3')) {
+        // Existence by client_id within a namespace (pre-registered uniqueness).
+        const [owner_kind, server_namespace, client_id] = values
+        const hit = [...rows.values()].some(
+          row =>
+            row.owner_kind === owner_kind &&
+            row.server_namespace === server_namespace &&
+            row.client_id === client_id
+        )
+        return hit ? { rows: [{ '?column?': 1 }], rowCount: 1 } : { rows: [], rowCount: 0 }
       }
       if (text.includes('FROM dynamic_clients')) {
         const [owner_kind, server_namespace, server_name] = values

@@ -196,7 +196,7 @@ describeRealPostgres(
           const cr = (await gateway.getResource('mcpservers', name, NS)) as Parameters<
             typeof resolveServerOAuthSubject
           >[0]
-          const resolved = resolveServerOAuthSubject(cr)
+          const resolved = resolveServerOAuthSubject(cr, 'consent')
           return resolved ? { namespace: NS, ...resolved } : null
         },
       }

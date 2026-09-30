@@ -1,6 +1,7 @@
 import { type PinnedFetchError, type PinnedTransport, pinnedFetch } from '../http/pinnedFetch.js'
 import type { DnsResolver, ValidationError } from '../http/validateMcpServerSpec.js'
 import { type Logger, rootLogger } from '../observability/logger.js'
+import { MAX_CLIENT_ID_LENGTH } from './cimdIdentity.js'
 import type { DiscoveryResult } from './discovery.js'
 import type { RemoteCallbackVariant } from './remoteCallback.js'
 
@@ -78,6 +79,11 @@ export interface DcrRegistrationResponse {
  * In-memory only — used solely for the cleanup DELETE, never persisted or logged.
  */
 export interface DcrMintHandle {
+  /**
+   * Set when a client WAS minted at the AS, with or without a management handle, so
+   * the caller can tell "cleaned up" from "left behind" when the handle is missing.
+   */
+  minted?: true
   registrationClientUri?: string
   registrationAccessToken?: string
 }
@@ -265,6 +271,22 @@ export async function registerDynamicClient(
 
   const assigned = parsed as DcrRegistrationResponse
 
+  // An oversized client_id is refused before anything compares, stores or logs it. A
+  // client WAS minted, so the RFC 7592 handle goes back for cleanup.
+  if (Buffer.byteLength(assigned.client_id, 'utf8') > MAX_CLIENT_ID_LENGTH) {
+    return {
+      ok: false,
+      error: {
+        kind: 'invalid_response',
+        url: endpoint,
+        detail: `registration response client_id exceeds ${MAX_CLIENT_ID_LENGTH} bytes`,
+        minted: true,
+        registrationClientUri: stringOrUndefined(assigned.registration_client_uri),
+        registrationAccessToken: stringOrUndefined(assigned.registration_access_token),
+      },
+    }
+  }
+
   // Fail-closed on an auth method we cannot present. The AS's assignment wins over
   // what we requested; a bare absence (undefined/null) means it honored our request.
   // The AS response is untrusted, so we reject anything that is NOT a presentable
@@ -288,6 +310,7 @@ export async function registerDynamicClient(
         detail: `authorization server assigned token_endpoint_auth_method "${effectiveAuthMethod}", which control-api cannot present`,
         // A client WAS minted (2xx + client_id) but is unusable — expose the RFC 7592
         // handle so the caller can clean it up.
+        minted: true,
         registrationClientUri: assigned.registration_client_uri,
         registrationAccessToken: assigned.registration_access_token,
       },
@@ -314,6 +337,7 @@ export async function registerDynamicClient(
         detail: 'confidential registration returned no client_secret',
         // A client WAS minted (2xx + client_id) but is unusable — expose the RFC 7592
         // handle so the caller can clean it up.
+        minted: true,
         registrationClientUri: assigned.registration_client_uri,
         registrationAccessToken: assigned.registration_access_token,
       },
@@ -326,6 +350,10 @@ export async function registerDynamicClient(
     effectiveAuthMethod: presentedAuthMethod,
     effectiveClientMode,
   }
+}
+
+function stringOrUndefined(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined
 }
 
 export type DcrRedirectUrisCheck =

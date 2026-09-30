@@ -70,7 +70,7 @@ function gdriveSubject(
       },
     },
   }
-  const resolved = resolveServerOAuthSubject(rawServer)
+  const resolved = resolveServerOAuthSubject(rawServer, 'consent')
   if (!resolved) throw new Error('fixture: resolveServerOAuthSubject returned null')
   return { namespace: MCP_NS, ...resolved }
 }

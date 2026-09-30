@@ -63,6 +63,11 @@ export interface RemoteClientRouting {
   supportsRefresh: boolean
   /** RFC 9207 issuer to validate the callback `iss` against, when advertised. */
   issForCallback?: string
+  /**
+   * The pinned AS issuer. Without RFC 9207 an AS may still send `iss`; when it does,
+   * it must match this value rather than being ignored.
+   */
+  issuer?: string
 }
 
 /**

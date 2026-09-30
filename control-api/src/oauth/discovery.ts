@@ -111,6 +111,24 @@ export function selectRegistrationMode(input: SelectRegistrationModeInput): Regi
 }
 
 /**
+ * The metadata-derived inputs of {@link selectRegistrationMode}, in one place so a
+ * caller asking "what would this AS resolve to" reads the metadata exactly as
+ * discovery does.
+ */
+export function registrationModeInputs(
+  as: AuthorizationServerMetadata,
+  opts: { hasPreRegisteredClient: boolean }
+): SelectRegistrationModeInput {
+  return {
+    hasPreRegisteredClient: opts.hasPreRegisteredClient,
+    cimdSupported: as.client_id_metadata_document_supported === true,
+    tokenEndpointAuthMethods: as.token_endpoint_auth_methods_supported ?? [],
+    hasRegistrationEndpoint: typeof as.registration_endpoint === 'string',
+    issBindingSupported: advertisesIssBinding(as),
+  }
+}
+
+/**
  * RFC 9207: the AS advertises that it returns `iss` on the authorization response.
  * The ONE expression behind both `issForCallback` and the registration-mode choice, so
  * the callback variant and the offered modes cannot disagree about the same AS.
@@ -758,13 +776,11 @@ export async function discoverRemoteOAuth(
     }
   }
 
-  const registrationMode = selectRegistrationMode({
-    hasPreRegisteredClient: opts.hasPreRegisteredClient ?? false,
-    cimdSupported: as.client_id_metadata_document_supported === true,
-    tokenEndpointAuthMethods: as.token_endpoint_auth_methods_supported ?? [],
-    hasRegistrationEndpoint: typeof as.registration_endpoint === 'string',
-    issBindingSupported,
-  })
+  const registrationMode = selectRegistrationMode(
+    registrationModeInputs(as, {
+      hasPreRegisteredClient: opts.hasPreRegisteredClient ?? false,
+    })
+  )
 
   return {
     ok: true,

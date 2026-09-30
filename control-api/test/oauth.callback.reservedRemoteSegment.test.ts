@@ -200,7 +200,7 @@ const TOKEN_RESPONSE = JSON.stringify({
  */
 async function deliverState(lane: Lane, serverName: string, segment: string) {
   const { gw, cr } = await installServer(lane, serverName)
-  const resolved = resolveServerOAuthSubject(cr)
+  const resolved = resolveServerOAuthSubject(cr, 'consent')
   if (!resolved) throw new Error('installed CR must resolve to an OAuth subject')
   const mcpServerReader: McpServerOAuthReader = {
     read: vi.fn(async () => ({ namespace: MCP_NS, ...resolved }) as McpServerOAuthSubject),

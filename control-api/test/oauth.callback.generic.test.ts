@@ -63,7 +63,7 @@ function genericCr(confidential: boolean) {
 function genericReader(confidential: boolean): McpServerOAuthReader {
   return {
     read: vi.fn(async () => {
-      const resolved = resolveServerOAuthSubject(genericCr(confidential))
+      const resolved = resolveServerOAuthSubject(genericCr(confidential), 'consent')
       if (!resolved) return null
       return { namespace: MCP_NS, ...resolved } as McpServerOAuthSubject
     }),

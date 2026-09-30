@@ -211,7 +211,7 @@ export async function legacyConsent(
       async read(serverName): Promise<McpServerOAuthSubject | null> {
         const cr = (await gateway.getResource('mcpservers', serverName, NS)) as ServerCR
         const { uid: _preIdentityPodNeverReadIt, ...metadata } = cr.metadata
-        const resolved = resolveServerOAuthSubject({ ...cr, metadata })
+        const resolved = resolveServerOAuthSubject({ ...cr, metadata }, 'consent')
         return resolved ? { namespace: NS, ...resolved } : null
       },
     },
@@ -248,7 +248,7 @@ export async function currentConsent(
       mcpServerReader: {
         async read(serverName): Promise<McpServerOAuthSubject | null> {
           const cr = (await gateway.getResource('mcpservers', serverName, NS)) as ServerCR
-          const resolved = resolveServerOAuthSubject(cr)
+          const resolved = resolveServerOAuthSubject(cr, 'consent')
           return resolved ? { namespace: NS, ...resolved } : null
         },
       },

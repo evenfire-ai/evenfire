@@ -134,7 +134,7 @@ export function createInternalOAuthRouter(gateway: K8sGateway): Router {
         if (err instanceof K8sNotFoundError) return null
         throw err
       }
-      const resolved = resolveServerOAuthSubject(server)
+      const resolved = resolveServerOAuthSubject(server, 'consent')
       if (!resolved) return null
       return { namespace: config.mcpServersNamespace, ...resolved }
     },
@@ -194,7 +194,7 @@ export function createInternalOAuthRouter(gateway: K8sGateway): Router {
         let subject: ReturnType<typeof resolveServerOAuthSubject> = null
         let incoherent: RemoteOAuthSpecIncoherentError | undefined
         try {
-          subject = resolveServerOAuthSubject(server)
+          subject = resolveServerOAuthSubject(server, 'consent')
         } catch (err) {
           if (!(err instanceof RemoteOAuthSpecIncoherentError)) throw err
           incoherent = err

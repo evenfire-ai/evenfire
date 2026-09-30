@@ -247,6 +247,25 @@ export async function getDynamicClient(
 }
 
 /**
+ * Whether any dynamic client in this server namespace carries `clientId`, pending,
+ * bound or legacy alike: every row stands for a client that may still be live at its
+ * AS (teardown deletes the row). Reads no encrypted column.
+ */
+export async function isDynamicClientIdRegistered(
+  db: DbClient,
+  input: { serverNamespace: string; clientId: string; ownerKind?: 'mcpserver' }
+): Promise<boolean> {
+  const result = await db.query(
+    `SELECT 1
+       FROM dynamic_clients
+      WHERE owner_kind = $1 AND server_namespace = $2 AND client_id = $3
+      LIMIT 1`,
+    [resolveOwnerKind(input), input.serverNamespace, input.clientId]
+  )
+  return result.rows.length > 0
+}
+
+/**
  * Metadata-only view of a `dynamic_clients` row whose confidential secret is at
  * or near expiry — enough for the DCR lifecycle decision (§5) without touching
  * any encrypted material.

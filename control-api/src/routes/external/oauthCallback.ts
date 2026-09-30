@@ -88,7 +88,7 @@ export function createOAuthCallbackRouter(gateway: K8sGateway): Router {
         if (err instanceof K8sNotFoundError) return null
         throw err
       }
-      const resolved = resolveServerOAuthSubject(server)
+      const resolved = resolveServerOAuthSubject(server, 'consent')
       if (!resolved) return null
       // `resolved.crUid` seals grants written by this consent to the CR's identity:
       // the uid is the apiserver's, unique per object, so a same-name reinstall's

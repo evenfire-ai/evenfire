@@ -2,6 +2,7 @@ import { Router } from 'express'
 import { config } from '../config.js'
 import { type Logger, rootLogger } from '../observability/logger.js'
 import { normalizeConfiguredOrigin } from '../routes/external/oauthCallback.js'
+import { CIMD_PUBLIC_PATH, CIMD_ROUTE_PATH } from './cimdIdentity.js'
 import { REMOTE_CALLBACK_PATH, buildRemoteRedirectUri } from './remoteCallback.js'
 
 /**
@@ -35,11 +36,7 @@ export interface CimdDocument {
   application_type: 'web'
 }
 
-/** Path the CIMD document is served at, relative to the `/api/v1` mount in app.ts. */
-export const CIMD_ROUTE_PATH = '/.well-known/evenfire-mcp-client'
-
-/** Full public path of the served document (what `client_id` must equal, minus origin). */
-const CIMD_PUBLIC_PATH = `/api/v1${CIMD_ROUTE_PATH}`
+export { CIMD_ROUTE_PATH }
 
 // The shared remote callback path, defined by the single redirect-URI builder
 // (`remoteCallback.ts`). Re-exported for the existing importers of this module.
@@ -48,8 +45,8 @@ export { REMOTE_CALLBACK_PATH }
 /**
  * Build the frozen CIMD document for a given public `origin` (scheme://host, no
  * trailing slash — as produced by `normalizeConfiguredOrigin`). `client_id` is the
- * document's own URL (SEP-991); `redirect_uris` carries the stable remote callback
- * segment. The result is `Object.freeze`d so no caller can mutate the served
+ * document's own URL (SEP-991); `redirect_uris` carries only the shared remote
+ * callback, never a per-server URI (see {@link CimdDocument.redirect_uris}). The result is `Object.freeze`d so no caller can mutate the served
  * identity in place (S-6).
  */
 export function buildCimdDocument(origin: string): Readonly<CimdDocument> {
