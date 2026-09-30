@@ -58,7 +58,19 @@ export async function assertResolvedUpstream(
   url: URL,
   lookup: OriginPolicyOptions['lookup'] = defaultAddressLookup
 ): Promise<void> {
-  const records = await lookup(url.hostname)
+  let records: Array<{ address: string; family: number }>
+  try {
+    records = await lookup(url.hostname)
+  } catch (err) {
+    // A failed lookup carries its system code (ENOTFOUND, EAI_AGAIN) on the
+    // error itself and names the host in its message. Only a code-shaped code
+    // is kept, as the cause the transport maps to provider_unavailable.
+    const code: unknown = (err as { code?: unknown } | null)?.code
+    if (typeof code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(code)) {
+      throw new Error('upstream address lookup failed', { cause: { code } })
+    }
+    throw err
+  }
   if (!records.length) throw new OriginDeniedError('origin_denied')
   for (const record of records) {
     if (isBlockedAddress(record.address)) throw new OriginDeniedError('origin_denied')
