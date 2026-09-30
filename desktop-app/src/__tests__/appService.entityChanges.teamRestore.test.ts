@@ -22,8 +22,8 @@ async function flushAsyncWork(): Promise<void> {
 describe('AppService entity stream after failed team restore', () => {
   it('rebinds to the actual committed session token when restoring the original team fails', async () => {
     const service = new AppService() as any
-    service.sessionToken = 'committed-team-a-token'
-    service.entityChangeSessionToken = 'committed-team-a-token'
+    Reflect.set(service, 'sessionToken', 'committed-team-a-token')
+    Reflect.set(service, 'entityChangeSessionToken', 'committed-team-a-token')
     service.me = { id: 'user-1', teamId: 'team-a' }
     service.bindCurrentChatStore = vi.fn().mockResolvedValue(undefined)
     service.tokenStore = { setSessionToken: vi.fn().mockResolvedValue(undefined) }
@@ -39,7 +39,7 @@ describe('AppService entity stream after failed team restore', () => {
       }),
       switchTeam: vi.fn(async (_token: string, teamId: string) => {
         if (teamId === 'team-a') throw new Error('team restore failed')
-        return { token: 'committed-team-b-token' }
+        return { token: 'synthetic-committed-team-b-token' }
       }),
       getMe: vi.fn(async () => ({ id: 'user-1', teamId: 'team-b' })),
     }
@@ -60,11 +60,11 @@ describe('AppService entity stream after failed team restore', () => {
       ).rejects.toThrow('operation failed')
       await flushAsyncWork()
 
-      expect(service.sessionToken).toBe('committed-team-b-token')
+      expect(service.sessionToken).toBe('synthetic-committed-team-b-token')
       expect(opened[0]?.signal.aborted).toBe(true)
       expect(opened.map(entry => entry.token)).toEqual([
         'committed-team-a-token',
-        'committed-team-b-token',
+        'synthetic-committed-team-b-token',
       ])
     } finally {
       service.stopEntityChangeStream('stream-1', 7)

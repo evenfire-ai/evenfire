@@ -39,6 +39,12 @@ function setSyntheticSessionToken(service: object, value: string): void {
   state.entityChangeSessionToken = value
 }
 
+function setSyntheticEntityChangeSession(service: object, value: string, generation: number): void {
+  const state = mutableServiceState(service)
+  state.entityChangeSessionToken = value
+  state.entityChangeSessionGeneration = generation
+}
+
 describe('AppService entity-change fan-out', () => {
   it('rebinds a live subscriber after expiry through public Google login', async () => {
     const service = new AppService() as any
@@ -57,7 +63,7 @@ describe('AppService entity-change fan-out', () => {
     }> = []
     service.authClient = {
       googleLogin: vi.fn().mockResolvedValue({
-        token: 'new-committed-token',
+        token: 'synthetic-new-committed-token',
         me: { id: 'user-1', teamId: 'team-1' },
       }),
       openEntityChangeStream: vi.fn((token, cursor, onEvent, signal) => {
@@ -85,7 +91,7 @@ describe('AppService entity-change fan-out', () => {
     await flushAsyncWork()
 
     expect(opened[0]?.signal.aborted).toBe(true)
-    expect(opened[1]).toMatchObject({ token: 'new-committed-token', cursor: null })
+    expect(opened[1]).toMatchObject({ token: 'synthetic-new-committed-token', cursor: null })
     expect(service.entityChangeSubscribers.size).toBe(1)
     service.stopEntityChangeStream('stream-1', 7)
   })
@@ -191,9 +197,8 @@ describe('AppService.startEntityChangeStream session expiry', () => {
     const environmentB = 'https://environment-b.example'
     config.externalRestApiBaseUrl = environmentA
     const service = new AppService() as any
-    service.sessionToken = 'environment-a-committed-token'
+    setSyntheticSessionToken(service, 'synthetic-environment-a-committed-token')
     service.me = { id: 'user-1', teamId: 'team-1' }
-    setSyntheticSessionToken(service, 'environment-a-committed-token')
     service.beginPrewarmAuthTransition = () => () => undefined
     service.suspendDesktopGfsUploadsForAuthBoundary = vi.fn().mockResolvedValue(undefined)
     service.activateGfsAuthScope = vi.fn()
@@ -211,7 +216,9 @@ describe('AppService.startEntityChangeStream session expiry', () => {
     try {
       service.startEntityChangeStream('stream-1', 7, vi.fn())
       await flushAsyncWork()
-      expect(opened).toEqual([{ token: 'environment-a-committed-token', baseUrl: environmentA }])
+      expect(opened).toEqual([
+        { token: 'synthetic-environment-a-committed-token', baseUrl: environmentA },
+      ])
 
       const switching = service.applyRuntimeEnvironmentChange(async () => {
         config.externalRestApiBaseUrl = environmentB
@@ -427,9 +434,7 @@ describe('AppService.startEntityChangeStream session expiry', () => {
     }
     service.startEntityChangeStream('stream-1', 7, vi.fn())
     await flushAsyncWork()
-    const state = mutableServiceState(service)
-    state.entityChangeSessionToken = 'new-committed-session-token'
-    state.entityChangeSessionGeneration = 1
+    setSyntheticEntityChangeSession(service, 'new-committed-session-token', 1)
 
     opens[0]?.onEvent({
       type: 'stream.closing',
