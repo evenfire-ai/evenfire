@@ -132,7 +132,7 @@ describe('HttpRequestTool', () => {
     expect(isPrivateIp('fe80::1')).toBe(true) // Link-local
     expect(isPrivateIp('::ffff:10.0.0.1')).toBe(true) // IPv4-mapped private
     expect(isPrivateIp('::ffff:192.168.1.1')).toBe(true) // IPv4-mapped private
-    expect(isPrivateIp('2001:db8::1')).toBe(false) // Documentation (public-ish)
+    expect(isPrivateIp('2001:db8::1')).toBe(true) // Documentation (non-public)
     expect(isPrivateIp('2607:f8b0::1')).toBe(false) // Google public
   })
 
@@ -183,5 +183,86 @@ describe('HttpRequestTool', () => {
     // Public IPv4-compatible — returns false (valid, non-SSRF target).
     expect(isPrivateIp('::8.8.8.8')).toBe(false)
     expect(isPrivateIp('::1.1.1.1')).toBe(false)
+  })
+
+  it('should classify special-purpose IPv4 ranges as private', () => {
+    // CGNAT (RFC 6598) with range boundaries and public neighbors.
+    expect(isPrivateIp('100.64.0.0')).toBe(true)
+    expect(isPrivateIp('100.64.0.1')).toBe(true)
+    expect(isPrivateIp('100.127.255.255')).toBe(true)
+    expect(isPrivateIp('100.63.255.255')).toBe(false) // Public neighbor
+    expect(isPrivateIp('100.128.0.0')).toBe(false) // Public neighbor
+    // Benchmarking (RFC 2544) with range boundaries and public neighbors.
+    expect(isPrivateIp('198.18.0.0')).toBe(true)
+    expect(isPrivateIp('198.18.0.1')).toBe(true)
+    expect(isPrivateIp('198.19.255.255')).toBe(true)
+    expect(isPrivateIp('198.17.255.255')).toBe(false) // Public neighbor
+    expect(isPrivateIp('198.20.0.0')).toBe(false) // Public neighbor
+    // Multicast and reserved, including the broadcast address.
+    expect(isPrivateIp('224.0.0.1')).toBe(true)
+    expect(isPrivateIp('239.255.255.255')).toBe(true)
+    expect(isPrivateIp('240.0.0.1')).toBe(true)
+    expect(isPrivateIp('255.255.255.255')).toBe(true)
+    // IANA special-purpose /24 blocks.
+    expect(isPrivateIp('192.0.0.1')).toBe(true)
+    expect(isPrivateIp('192.0.2.1')).toBe(true)
+    expect(isPrivateIp('198.51.100.1')).toBe(true)
+    expect(isPrivateIp('203.0.113.1')).toBe(true)
+    // Public controls.
+    expect(isPrivateIp('8.8.8.8')).toBe(false)
+    expect(isPrivateIp('1.1.1.1')).toBe(false)
+  })
+
+  it('should classify special-purpose IPv6 ranges as private', () => {
+    // NAT64 (RFC 6052) and local-use (RFC 8215).
+    expect(isPrivateIp('64:ff9b::a9fe:a9fe')).toBe(true)
+    expect(isPrivateIp('64:ff9b:1::1')).toBe(true)
+    // 6to4 (RFC 3056).
+    expect(isPrivateIp('2002:a00:1::')).toBe(true)
+    expect(isPrivateIp('2002::1')).toBe(true)
+    // Multicast.
+    expect(isPrivateIp('ff02::1')).toBe(true)
+    expect(isPrivateIp('ff0e::1')).toBe(true)
+    // Teredo.
+    expect(isPrivateIp('2001::1')).toBe(true)
+    // Documentation (RFC 3849).
+    expect(isPrivateIp('2001:db8::1')).toBe(true)
+    expect(isPrivateIp('2001:db8:ffff:ffff:ffff:ffff:ffff:ffff')).toBe(true)
+    // Public controls.
+    expect(isPrivateIp('2607:f8b0::1')).toBe(false)
+    expect(isPrivateIp('2606:4700:4700::1111')).toBe(false)
+  })
+
+  it('should block NAT64/6to4 prefixes outright, even with public IPv4 payloads', () => {
+    // Policy choice: block the prefix rather than extract the embedded IPv4.
+    // Translation depends on the local gateway, and RFC 8215 local-use embeds
+    // are not universally IPv4 tails. A public A record plus a NAT64 AAAA is
+    // therefore rejected too (DNS64 environments may be affected).
+    expect(isPrivateIp('64:ff9b::808:808')).toBe(true) // NAT64 form of 8.8.8.8
+    expect(isPrivateIp('2002:808:808::')).toBe(true) // 6to4 form of 8.8.8.8
+  })
+
+  it('should block new special-purpose IPv4 through mapped/compatible IPv6 forms', () => {
+    // IPv4-mapped, dotted quad.
+    expect(isPrivateIp('::ffff:100.64.0.1')).toBe(true)
+    expect(isPrivateIp('::ffff:198.18.0.1')).toBe(true)
+    expect(isPrivateIp('::ffff:224.0.0.1')).toBe(true)
+    expect(isPrivateIp('::ffff:240.0.0.1')).toBe(true)
+    expect(isPrivateIp('::ffff:192.0.2.1')).toBe(true)
+    expect(isPrivateIp('::ffff:203.0.113.1')).toBe(true)
+    // IPv4-mapped, hexadecimal.
+    expect(isPrivateIp('::ffff:6440:1')).toBe(true) // 100.64.0.1
+    expect(isPrivateIp('::ffff:c612:1')).toBe(true) // 198.18.0.1
+    expect(isPrivateIp('::ffff:808:808')).toBe(false) // Public 8.8.8.8
+    // IPv4-compatible, dotted quad.
+    expect(isPrivateIp('::100.64.0.1')).toBe(true)
+    expect(isPrivateIp('::198.18.0.1')).toBe(true)
+    expect(isPrivateIp('::8.8.8.8')).toBe(false) // Public control
+  })
+
+  it('should keep hostnames and non-IP strings outside the private classifier', () => {
+    expect(isPrivateIp('example.com')).toBe(false)
+    expect(isPrivateIp('sub.domain.example.com')).toBe(false)
+    expect(isPrivateIp('not-an-ip')).toBe(false)
   })
 })
