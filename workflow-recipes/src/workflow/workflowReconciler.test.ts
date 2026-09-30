@@ -2125,6 +2125,68 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
     expect(mockCoreApi.createNamespacedPod).not.toHaveBeenCalled()
   })
 
+  // R4-L3: the SDK-only teardown is what makes the `unmanaged` marker writer
+  // true. The legacy mcp-servers internet policy may carry no labels, so the
+  // label sweep cannot be trusted to remove it; the teardown deletes it by name.
+  it('R4-L3: deletes the legacy internet policy by name in the SDK-only teardown, next to the label sweep', async () => {
+    const reconciler = new WorkflowReconciler(makeDeps())
+
+    await expect(reconciler.cleanupPluginWorkloadSdk('sdk-only')).resolves.toBeUndefined()
+
+    // Liveness witness: the label sweep ran in both namespaces.
+    expect(mockNetworkingApi.listNamespacedNetworkPolicy).toHaveBeenCalledWith({
+      namespace: sandboxNamespace,
+      labelSelector: 'clerum.io/recipe=sdk-only,clerum.io/managed-by=wrc',
+    })
+    expect(mockNetworkingApi.listNamespacedNetworkPolicy).toHaveBeenCalledWith({
+      namespace: mcpServerNamespace,
+      labelSelector: 'clerum.io/recipe=sdk-only,clerum.io/managed-by=wrc',
+    })
+    expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith({
+      name: 'sdk-only-mcp-servers-egress-internet',
+      namespace: mcpServerNamespace,
+    })
+  })
+
+  it('R4-L3: fails the SDK-only teardown when the legacy internet policy DELETE fails', async () => {
+    mockNetworkingApi.deleteNamespacedNetworkPolicy.mockImplementation(
+      async ({ name }: { name: string }) => {
+        if (name === 'sdk-only-mcp-servers-egress-internet') {
+          throw { code: 403, message: 'forbidden' }
+        }
+        return {}
+      }
+    )
+    const reconciler = new WorkflowReconciler(makeDeps())
+
+    await expect(reconciler.cleanupPluginWorkloadSdk('sdk-only')).rejects.toMatchObject({
+      code: 403,
+    })
+    // Liveness witness: the failure is the legacy DELETE's, not an earlier one.
+    expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith({
+      name: 'sdk-only-mcp-servers-egress-internet',
+      namespace: mcpServerNamespace,
+    })
+  })
+
+  it('R4-L3: keeps the legacy internet policy in a hybrid teardown, which preserves the workflow runtime', async () => {
+    const reconciler = new WorkflowReconciler(makeDeps())
+
+    await expect(
+      reconciler.cleanupPluginWorkloadSdk('hybrid', { preserveWorkflowRuntime: true })
+    ).resolves.toBeUndefined()
+
+    // Liveness witness: the SDK-owned policies were deleted.
+    expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith({
+      name: 'hybrid-workload-to-mcp-host-sdk-ingress',
+      namespace: sandboxNamespace,
+    })
+    expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalledWith({
+      name: 'hybrid-mcp-servers-egress-internet',
+      namespace: mcpServerNamespace,
+    })
+  })
+
   it('forgets the legacy internet policy ledger entry when an SDK-only recipe is cleaned up', async () => {
     const reconciler = new WorkflowReconciler(makeDeps())
     const legacyDeletes = () =>

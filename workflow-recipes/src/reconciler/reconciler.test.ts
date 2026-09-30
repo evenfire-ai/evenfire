@@ -1746,6 +1746,70 @@ describe('WorkflowRecipeReconciler', () => {
         'WorkflowNetworkPolicyOwnership'
       )
     })
+
+    // R4-L3: the teardown removed every SDK-owned policy, including the
+    // legacy one by name, so the lane without an SDK runtime is `unmanaged`:
+    // a prune it can no longer finish is not carried as PrunePending.
+    const prunePendingMarker = () =>
+      buildNetworkPolicyConvergedCondition(
+        { apply: 'converged', prune: 'pending' },
+        '2026-09-23T10:00:00.000Z',
+        undefined
+      )!
+    const capabilityRemovedRecipe = (phase: string, conditions: unknown[]) =>
+      makeRecipe({
+        spec: {
+          workloads: [{ id: 'app', type: 'deployment', image: 'nginx:1.30.1-alpine', port: 8080 }],
+        },
+        status: {
+          phase,
+          pluginWorkloadSdk: { state: 'validated', promptBridge: true, clientNotifications: false },
+          conditions,
+        },
+      } as Partial<WorkflowRecipeCRD>)
+    const stubCapabilityRemovalTeardown = () => {
+      stubSdkOnly({})
+      const cleanupPluginWorkloadSdk = vi.fn().mockResolvedValue(undefined)
+      ;(
+        reconciler as unknown as {
+          workflowReconciler: { cleanupPluginWorkloadSdk: typeof cleanupPluginWorkloadSdk }
+        }
+      ).workflowReconciler.cleanupPluginWorkloadSdk = cleanupPluginWorkloadSdk
+      return cleanupPluginWorkloadSdk
+    }
+
+    it('R4-L3: clears a published PrunePending marker once the SDK capability is removed from the spec', async () => {
+      const cleanupPluginWorkloadSdk = stubCapabilityRemovalTeardown()
+      const recipe = capabilityRemovedRecipe('active', [ownershipCondition, prunePendingMarker()])
+
+      const result = await reconciler.reconcile(recipe)
+
+      // Liveness witness: the capability-removal teardown ran.
+      expect(cleanupPluginWorkloadSdk).toHaveBeenCalledWith('test-recipe', {
+        preserveWorkflowRuntime: false,
+      })
+      expect(result.phase).not.toBe('failed')
+      expect(result.networkPolicyOwnershipConditions).toEqual([])
+    })
+
+    it('R4-L3: clears a published PrunePending marker when the SDK capability is removed from a failed recipe', async () => {
+      const cleanupPluginWorkloadSdk = stubCapabilityRemovalTeardown()
+      const recipe = capabilityRemovedRecipe('failed', [ownershipCondition, prunePendingMarker()])
+
+      await reconciler.reconcile(recipe)
+
+      // Liveness witness: the capability-removal teardown ran.
+      expect(cleanupPluginWorkloadSdk).toHaveBeenCalledWith('test-recipe', {
+        preserveWorkflowRuntime: false,
+      })
+      const conditionPatches = mockCustomApi.patchNamespacedCustomObjectStatus.mock.calls
+        .map(call => call[0].body.status)
+        .filter(status => Object.keys(status).length === 1 && 'conditions' in status)
+      expect(conditionPatches).toHaveLength(1)
+      const types = (conditionPatches[0].conditions as Array<{ type: string }>).map(c => c.type)
+      expect(types).not.toContain('WorkflowNetworkPoliciesConverged')
+      expect(types).not.toContain('WorkflowNetworkPolicyOwnership')
+    })
   })
 
   // awaiting_policy waits for an operator grant. The grant arrives by event
