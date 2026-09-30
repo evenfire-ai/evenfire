@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import * as k8s from '@kubernetes/client-node'
 import type { AdministrativeOutcomeReporter } from '../src/administrativeOutcomeReporter'
 import { config } from '../src/config'
@@ -12,6 +12,7 @@ import {
 import type { InfrastructureTelemetryReporter } from '../src/infrastructureTelemetryReporter'
 import { HostContextLogger } from '../src/logger'
 import { issueMcpHostRuntimeTokens } from '../src/mcpHostRuntimeTokenIssuerClient'
+import { heldWakeTemplateRefreshTotal } from '../src/metrics'
 import {
   MCP_HOST_GFS_TOKEN_SECRET_KEY,
   MCP_HOST_RUNTIME_TOKEN_SECRET_ACCESS_KEY,
@@ -501,6 +502,13 @@ function hostDeploymentBody(appsApi: MockAppsApi, name: string): k8s.V1Deploymen
     throw new Error(`No Deployment create/replace call found for "${name}"`)
   }
   return (call[0] as { body: k8s.V1Deployment }).body
+}
+
+/** Every replace the reconciler sent for the Host's own mcp-host Deployment. */
+function hostDeploymentReplacements(appsApi: MockAppsApi, name: string) {
+  return appsApi.replaceNamespacedDeployment.mock.calls.filter(
+    ([request]) => (request.body as k8s.V1Deployment | undefined)?.metadata?.name === name
+  )
 }
 
 function containerEnv(dep: k8s.V1Deployment): k8s.V1EnvVar[] {
@@ -2841,87 +2849,146 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     }
   })
 
-  it('does not roll a held wake bootstrap when the watch recovers before Ready', async () => {
+  /**
+   * #942 inverts the intent this test used to fix. A held wake whose bootstrap
+   * is bound to the applied Deployment keeps that template only until the first
+   * authoritative pass that observes the woken pod Ready: moving the Deployment
+   * onto the same material a running pod already rotated hands the next pod a
+   * revoked refresh token, so the post-recovery pass re-mints once and rolls.
+   */
+  it('T2: rolls a held wake bootstrap once through the first authoritative post-recovery pass', async () => {
+    vi.useFakeTimers()
+    const startedAt = Date.now()
     let cacheSynced = false
     const host = makeStatelessHost({
       status: { lifecycle: { state: 'active', wakeHandledGeneration: 1 } },
     })
     const { reconciler, appsApi, coreApi, customApi } = createReconciler({
       isCommunicationChannelCacheSynced: () => cacheSynced,
+      countCommunicationChannels: () => 0,
     })
     customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(host))
-    let runtimeRecord = runtimeCredentialRecord(host)
-    coreApi.readNamespacedSecret.mockImplementation(({ name }) =>
-      name?.includes('runtime-tokens')
-        ? Promise.resolve(runtimeRecord)
-        : Promise.resolve({ metadata: { resourceVersion: '1' }, data: {} } as any)
-    )
-    const applied = reconciler.buildDeployment(host)
-    applied.spec!.replicas = 0
-    applied.spec!.template!.metadata!.annotations = {
-      ...applied.spec!.template!.metadata!.annotations,
-      'clerum.io/runtime-token-revision': 'applied-runtime-revision',
+    reconciler.setHostFrontsOAuthServer(async () => false)
+    const log = vi.spyOn(HostContextLogger.prototype, 'info')
+    try {
+      const issueRuntimeMaterial = vi.mocked(issueMcpHostRuntimeTokens)
+      // Two distinct, decodable issuances from the producer fixture, so the
+      // refreshed bytes and their revision really differ from the bootstrap the
+      // woken pod consumed.
+      await mintedRuntimeCredentialRecord(host, { bootstrap: 'fresh' })
+      const wakeMaterial = await issueRuntimeMaterial.mock.results.at(-1)!.value
+      vi.setSystemTime(startedAt + 1000)
+      await mintedRuntimeCredentialRecord(host, { bootstrap: 'fresh' })
+      const refreshMaterial = await issueRuntimeMaterial.mock.results.at(-1)!.value
+
+      const applied = reconciler.buildDeployment(host)
+      applied.spec!.replicas = 0
+      applied.spec!.template!.metadata!.annotations = {
+        ...applied.spec!.template!.metadata!.annotations,
+        'clerum.io/runtime-token-revision': 'applied-runtime-revision',
+      }
+      markPersistedRuntimeTrusted(applied, host, 0)
+      const liveDeployment = persistHostDeployment(appsApi, host, applied)
+      // The trusted retained scope observation (a running pod's own record) is
+      // the precondition that lets the hold mint while the cache is down.
+      const liveRecord = persistRuntimeCredential(coreApi, runtimeCredentialRecord(host))
+      issueRuntimeMaterial.mockClear()
+      coreApi.replaceNamespacedSecret.mockClear()
+      issueRuntimeMaterial.mockResolvedValueOnce(wakeMaterial)
+
+      // Hold phase: the wake re-mints a bootstrap bound to the zero-replica
+      // Deployment and scales it to one replica without rewriting the template.
+      await reconciler.reconcile(host)
+
+      expect(issueRuntimeMaterial).toHaveBeenCalledOnce()
+      expect(liveDeployment().spec!.replicas).toBe(1)
+      expect(
+        liveDeployment().spec!.template!.metadata!.annotations?.['clerum.io/runtime-token-revision']
+      ).toBe('applied-runtime-revision')
+      const wakeWrite = coreApi.replaceNamespacedSecret.mock.calls.find(([request]) =>
+        request.name?.includes('runtime-tokens')
+      )?.[0].body as k8s.V1Secret
+      expect(wakeWrite.metadata?.annotations).toMatchObject({
+        'clerum.io/runtime-token-bootstrap-state': 'fresh',
+        'clerum.io/runtime-token-rollout-required': 'false',
+        'clerum.io/runtime-token-bootstrap-deployment-uid': 'deployment-uid',
+        'clerum.io/runtime-token-bootstrap-applied-revision': 'applied-runtime-revision',
+      })
+      const wakeRevision =
+        wakeWrite.metadata!.annotations!['clerum.io/runtime-token-secret-revision']
+      expect(liveRecord().metadata!.annotations).toMatchObject({
+        'clerum.io/runtime-token-bootstrap-state': 'fresh',
+        'clerum.io/runtime-token-secret-revision': wakeRevision,
+      })
+      issueRuntimeMaterial.mockClear()
+      coreApi.readNamespacedSecret.mockClear()
+      appsApi.replaceNamespacedDeployment.mockClear()
+
+      // First authoritative pass, still not Ready: the bound template stays.
+      cacheSynced = true
+      await reconciler.reconcile(host)
+
+      expect(coreApi.readNamespacedSecret).toHaveBeenCalled()
+      expect(issueRuntimeMaterial).not.toHaveBeenCalled()
+      expect(hostDeploymentReplacements(appsApi, host.name)).toHaveLength(0)
+      expect(liveRecord().metadata!.annotations).toMatchObject({
+        'clerum.io/runtime-token-bootstrap-deployment-uid': 'deployment-uid',
+      })
+
+      // Ready appears: exactly one fresh mint and one rollout, and the new
+      // Secret carries no binding annotations (the mint clears the mark).
+      liveDeployment().status = { readyReplicas: 1 }
+      log.mockClear()
+      issueRuntimeMaterial.mockClear()
+      coreApi.replaceNamespacedSecret.mockClear()
+      issueRuntimeMaterial.mockResolvedValueOnce(refreshMaterial)
+      await reconciler.reconcile(host)
+
+      expect(issueRuntimeMaterial).toHaveBeenCalledOnce()
+      expect(log).toHaveBeenCalledWith(
+        'held wake template refresh',
+        expect.objectContaining({ host: host.name, reason: 'held_wake_template_refresh' })
+      )
+      expect(log).toHaveBeenCalledWith(
+        'rotated mcp-host-runtime-token Secret',
+        expect.objectContaining({ reason: 'held_wake_template_refresh', rolloutRequired: true })
+      )
+      const replacements = hostDeploymentReplacements(appsApi, host.name)
+      expect(replacements).toHaveLength(1)
+      const refreshedRecord = coreApi.replaceNamespacedSecret.mock.calls.find(([request]) =>
+        request.name?.includes('runtime-tokens')
+      )?.[0].body as k8s.V1Secret
+      expect(refreshedRecord.metadata?.annotations).not.toHaveProperty(
+        'clerum.io/runtime-token-bootstrap-deployment-uid'
+      )
+      const refreshedRevision =
+        refreshedRecord.metadata!.annotations!['clerum.io/runtime-token-secret-revision']
+      expect(refreshedRevision).not.toBe(wakeRevision)
+      expect(
+        replacements[0]![0].body.spec!.template!.metadata!.annotations?.[
+          'clerum.io/runtime-token-revision'
+        ]
+      ).toBe(refreshedRevision)
+
+      // Third authoritative pass: the mark is gone, so the pass reuses.
+      log.mockClear()
+      coreApi.readNamespacedSecret.mockClear()
+      issueRuntimeMaterial.mockClear()
+      await reconciler.reconcile(host)
+
+      expect(coreApi.readNamespacedSecret).toHaveBeenCalledWith({
+        name: wakeWrite.metadata!.name,
+        namespace: host.namespace,
+      })
+      expect(log).toHaveBeenCalledWith(
+        'reusing mcp-host-runtime-token Secret',
+        expect.objectContaining({ host: host.name })
+      )
+      expect(issueRuntimeMaterial).not.toHaveBeenCalled()
+    } finally {
+      log.mockRestore()
+      vi.useRealTimers()
     }
-    markPersistedRuntimeTrusted(applied, host, 0)
-    const live = persistHostDeployment(appsApi, host, applied)
-    const issueRuntimeMaterial = vi.mocked(issueMcpHostRuntimeTokens)
-    issueRuntimeMaterial.mockClear()
-
-    await reconciler.reconcile(host)
-
-    expect(issueRuntimeMaterial).toHaveBeenCalledOnce()
-    expect(live().spec!.replicas).toBe(1)
-    expect(live().spec!.template!.metadata!.annotations?.['clerum.io/runtime-token-revision']).toBe(
-      'applied-runtime-revision'
-    )
-    const wakeWrite = coreApi.replaceNamespacedSecret.mock.calls.find(([request]) =>
-      request.name?.includes('runtime-tokens')
-    )?.[0].body as k8s.V1Secret
-    expect(wakeWrite.metadata?.annotations).toMatchObject({
-      'clerum.io/runtime-token-bootstrap-state': 'fresh',
-      'clerum.io/runtime-token-rollout-required': 'false',
-      'clerum.io/runtime-token-bootstrap-deployment-uid': 'deployment-uid',
-      'clerum.io/runtime-token-bootstrap-applied-revision': 'applied-runtime-revision',
-    })
-    runtimeRecord = withReadableRuntimeRefreshMaterial(wakeWrite)
-    issueRuntimeMaterial.mockClear()
-    appsApi.createNamespacedDeployment.mockClear()
-    appsApi.replaceNamespacedDeployment.mockClear()
-    cacheSynced = true
-    await reconciler.reconcile(host)
-
-    expect(issueRuntimeMaterial).not.toHaveBeenCalled()
-    expect(
-      appsApi.replaceNamespacedDeployment.mock.calls.filter(
-        ([request]) => request.body?.metadata?.name === host.name
-      )
-    ).toHaveLength(0)
-
-    live().status = { readyReplicas: 1 }
-    coreApi.replaceNamespacedSecret.mockClear()
-    await reconciler.reconcile(host)
-
-    expect(issueRuntimeMaterial).not.toHaveBeenCalled()
-    expect(
-      appsApi.replaceNamespacedDeployment.mock.calls.filter(
-        ([request]) => request.body?.metadata?.name === host.name
-      )
-    ).toHaveLength(0)
-    const consumedWrite = coreApi.replaceNamespacedSecret.mock.calls.find(([request]) =>
-      request.name?.includes('runtime-tokens')
-    )?.[0].body as k8s.V1Secret
-    expect(consumedWrite.metadata?.annotations?.['clerum.io/runtime-token-bootstrap-state']).toBe(
-      'consumed'
-    )
-    runtimeRecord = consumedWrite
-
-    live().spec!.replicas = 0
-    live().status = { readyReplicas: 0 }
-    issueRuntimeMaterial.mockClear()
-    await reconciler.reconcile(host)
-
-    expect(issueRuntimeMaterial).toHaveBeenCalledOnce()
-    expect(live().spec!.replicas).toBe(1)
   })
 
   it('marks a newly created preserved wake bootstrap for scale-only delivery', async () => {
@@ -4543,5 +4610,511 @@ describe('HostReconciler stateless lifecycle — guarded image pull policy (Stag
     const { container, init } = podContainers(reconciler.buildDeployment(makeHost()))
     expect(container.imagePullPolicy).toBe('Always')
     expect(init).toBeUndefined()
+  })
+
+  describe('held wake template refresh after channel authority returns', () => {
+    let restoreIssuer = () => {}
+    beforeEach(() => {
+      const issue = vi.mocked(issueMcpHostRuntimeTokens)
+      const original = issue.getMockImplementation()!
+      let emission = 0
+      // Generate synthetic expiry material before HCC hashes or persists it.
+      // Each tested issuance is decodable and distinct, including retry paths.
+      issue.mockImplementation(async (...args) => {
+        emission += 1
+        const material = await original(...args)
+        return Object.fromEntries(
+          Object.entries(material).map(([key, value]) => [
+            key,
+            key === 'refreshToken'
+              ? encodedRuntimeRefreshMaterial(Date.now() + 3_600_000 + emission * 1000)
+              : value,
+          ])
+        ) as Awaited<ReturnType<typeof issueMcpHostRuntimeTokens>>
+      })
+      restoreIssuer = () => issue.mockReset().mockImplementation(original)
+    })
+    afterEach(() => restoreIssuer())
+
+    async function wakeRefreshCount(result: 'minted' | 'deferred_oauth_unobserved') {
+      return (
+        (await heldWakeTemplateRefreshTotal.get()).values.find(
+          value => value.labels.result === result
+        )?.value ?? 0
+      )
+    }
+
+    const BOOTSTRAP_UID_ANNOTATION = 'clerum.io/runtime-token-bootstrap-deployment-uid'
+    const BOOTSTRAP_APPLIED_REVISION_ANNOTATION =
+      'clerum.io/runtime-token-bootstrap-applied-revision'
+    const RUNTIME_TOKEN_REVISION_ANNOTATION = 'clerum.io/runtime-token-revision'
+    const APPLIED_RUNTIME_REVISION = 'applied-runtime-revision'
+    const RUNTIME_SECRET_MARKER = 'runtime-tokens'
+
+    /** The annotations a wake mint stamps when it preserves the applied template. */
+    function wakeBootstrapBinding(deploymentUid: string): Record<string, string> {
+      return {
+        [BOOTSTRAP_UID_ANNOTATION]: deploymentUid,
+        [BOOTSTRAP_APPLIED_REVISION_ANNOTATION]: APPLIED_RUNTIME_REVISION,
+        'clerum.io/runtime-token-bootstrap-state': 'fresh',
+        'clerum.io/runtime-token-rollout-required': 'false',
+      }
+    }
+
+    /**
+     * A woken runtime: the record the pod booted from, bound to the applied
+     * Deployment and persisted the way the apiserver returns it. The Deployment
+     * is Ready by default, so the wake is eligible for the forced post-recovery
+     * refresh unless the case says otherwise.
+     */
+    async function boundWakeRuntime(
+      options: {
+        replicas?: number
+        readyReplicas?: number
+        retainedChannelIngress?: boolean
+        retainedFrontsOAuth?: boolean
+        cacheSynced?: () => boolean
+        driftAppliedTemplate?: (deployment: k8s.V1Deployment) => void
+      } = {}
+    ) {
+      const host = makeStatelessHost({
+        status: { lifecycle: { state: 'active', wakeHandledGeneration: 1 } },
+      })
+      const { reconciler, appsApi, coreApi, customApi, networkingApi } = createReconciler({
+        isCommunicationChannelCacheSynced: options.cacheSynced ?? (() => true),
+        countCommunicationChannels: () => 0,
+      })
+      customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(host))
+      reconciler.setHostFrontsOAuthServer(async () => options.retainedFrontsOAuth ?? false)
+      const applied = trustedRuntimeDeployment(reconciler, host, {
+        replicas: options.replicas ?? 1,
+        readyReplicas: options.readyReplicas ?? 1,
+      })
+      applied.spec!.template!.metadata!.annotations = {
+        ...applied.spec!.template!.metadata!.annotations,
+        [RUNTIME_TOKEN_REVISION_ANNOTATION]: APPLIED_RUNTIME_REVISION,
+      }
+      options.driftAppliedTemplate?.(applied)
+      const record = await mintedRuntimeCredentialRecord(host, {
+        bootstrap: 'fresh',
+        hasChannelIngress: options.retainedChannelIngress,
+        frontsOAuthServer: options.retainedFrontsOAuth,
+        annotations: wakeBootstrapBinding(applied.metadata!.uid!),
+      })
+      const liveDeployment = persistHostDeployment(appsApi, host, applied)
+      const liveRecord = persistRuntimeCredential(coreApi, record)
+      return {
+        host,
+        reconciler,
+        appsApi,
+        coreApi,
+        networkingApi,
+        liveDeployment,
+        liveRecord,
+        applied,
+      }
+    }
+
+    function runtimeTokenSecretWrites(coreApi: ReturnType<typeof createMockCoreApi>) {
+      return coreApi.replaceNamespacedSecret.mock.calls
+        .map(([request]) => request.body as k8s.V1Secret | undefined)
+        .filter(
+          (body): body is k8s.V1Secret => !!body?.metadata?.name?.includes(RUNTIME_SECRET_MARKER)
+        )
+    }
+
+    it('T4: keeps one contract_changed mint and rollout when a wake binding is pending too', async () => {
+      const { host, reconciler, appsApi, coreApi } = await boundWakeRuntime({
+        retainedChannelIngress: true,
+      })
+      const issue = vi.mocked(issueMcpHostRuntimeTokens)
+      const log = vi.spyOn(HostContextLogger.prototype, 'info')
+      issue.mockClear()
+      appsApi.replaceNamespacedDeployment.mockClear()
+      coreApi.replaceNamespacedSecret.mockClear()
+      const mintedBefore = await wakeRefreshCount('minted')
+      try {
+        await reconciler.reconcile(host)
+
+        // Liveness witness: the retained grant was narrowed by exactly one mint,
+        // and the eligible wake did not overwrite an already-required rollout.
+        expect(issue).toHaveBeenCalledOnce()
+        expect(log).toHaveBeenCalledWith(
+          'rotated mcp-host-runtime-token Secret',
+          expect.objectContaining({ reason: 'contract_changed', rolloutRequired: true })
+        )
+        // The eligible wake must not overwrite an already-required rollout's reason.
+        expect(log).toHaveBeenCalledWith(
+          'held wake template refresh',
+          expect.objectContaining({ host: host.name, reason: 'contract_changed' })
+        )
+        expect(log).not.toHaveBeenCalledWith(
+          'rotated mcp-host-runtime-token Secret',
+          expect.objectContaining({ reason: 'held_wake_template_refresh' })
+        )
+        const replacements = hostDeploymentReplacements(appsApi, host.name)
+        expect(replacements).toHaveLength(1)
+        expect(
+          replacements[0]![0].body.spec!.template!.metadata!.annotations?.[
+            RUNTIME_TOKEN_REVISION_ANNOTATION
+          ]
+        ).not.toBe(APPLIED_RUNTIME_REVISION)
+        expect(runtimeTokenSecretWrites(coreApi)).toHaveLength(1)
+        expect(await wakeRefreshCount('minted')).toBe(mintedBefore + 1)
+      } finally {
+        log.mockRestore()
+      }
+    })
+
+    it('T5: holds when the channel watch drops mid-pass, then refreshes once the woken pod is Ready', async () => {
+      let cacheSynced = true
+      const { host, reconciler, appsApi, coreApi, networkingApi, liveDeployment, liveRecord } =
+        await boundWakeRuntime({ readyReplicas: 0, cacheSynced: () => cacheSynced })
+      const issue = vi.mocked(issueMcpHostRuntimeTokens)
+      // The watch drops during this pass, after it had already read the channel
+      // inventory once; later passes keep the recovered authority.
+      let watchDropsOnNextScopeRead = true
+      const readPolicy = networkingApi.readNamespacedNetworkPolicy.getMockImplementation()!
+      networkingApi.readNamespacedNetworkPolicy.mockImplementation(async request => {
+        if (watchDropsOnNextScopeRead) {
+          watchDropsOnNextScopeRead = false
+          cacheSynced = false
+        }
+        return readPolicy(request)
+      })
+      issue.mockClear()
+      appsApi.replaceNamespacedDeployment.mockClear()
+
+      await reconciler.reconcile(host)
+
+      // Liveness witness: this pass ran the hold for a not-Ready runtime, so no
+      // mint could fire and the bound bootstrap is still pending.
+      expect(networkingApi.readNamespacedNetworkPolicy).toHaveBeenCalled()
+      expect(reconciler.getStatus(host.name).message).toContain(
+        'CommunicationChannel inventory unavailable'
+      )
+      expect(issue).not.toHaveBeenCalled()
+      expect(hostDeploymentReplacements(appsApi, host.name)).toHaveLength(0)
+      expect(liveRecord().metadata!.annotations).toMatchObject({
+        [BOOTSTRAP_UID_ANNOTATION]: liveDeployment().metadata!.uid,
+        [BOOTSTRAP_APPLIED_REVISION_ANNOTATION]: APPLIED_RUNTIME_REVISION,
+        'clerum.io/runtime-token-bootstrap-state': 'fresh',
+      })
+
+      // Authority returns while the pod is still not Ready and the applied
+      // template has really drifted: the bound bootstrap is preserved.
+      cacheSynced = true
+      liveDeployment().status = { readyReplicas: 0 }
+      liveDeployment().spec!.template!.spec!.containers![0]!.env = [
+        ...(liveDeployment().spec!.template!.spec!.containers![0]!.env ?? []),
+        { name: 'DRIFTED_TEMPLATE_MARKER', value: 'yes' },
+      ]
+      issue.mockClear()
+      coreApi.readNamespacedSecret.mockClear()
+      appsApi.replaceNamespacedDeployment.mockClear()
+
+      await reconciler.reconcile(host)
+
+      expect(coreApi.readNamespacedSecret).toHaveBeenCalled()
+      expect(issue).not.toHaveBeenCalled()
+      expect(hostDeploymentReplacements(appsApi, host.name)).toHaveLength(0)
+      expect(containerEnv(liveDeployment()).map(entry => entry.name)).toContain(
+        'DRIFTED_TEMPLATE_MARKER'
+      )
+
+      // Ready now: exactly one refresh and one rollout.
+      liveDeployment().status = { readyReplicas: 1 }
+      const log = vi.spyOn(HostContextLogger.prototype, 'info')
+      issue.mockClear()
+      appsApi.replaceNamespacedDeployment.mockClear()
+      try {
+        await reconciler.reconcile(host)
+        expect(issue).toHaveBeenCalledOnce()
+        expect(log).toHaveBeenCalledWith(
+          'held wake template refresh',
+          expect.objectContaining({ host: host.name, reason: 'held_wake_template_refresh' })
+        )
+        expect(hostDeploymentReplacements(appsApi, host.name)).toHaveLength(1)
+      } finally {
+        log.mockRestore()
+      }
+    })
+
+    it('T5a: a directed provisioning pass during channel cache loss never forces the wake refresh', async () => {
+      let cacheSynced = false
+      const host = makeStatelessHost({
+        status: { lifecycle: { state: 'active', wakeHandledGeneration: 1 } },
+      })
+      const { reconciler, appsApi, coreApi } = createReconciler({
+        isCommunicationChannelCacheSynced: () => cacheSynced,
+        countCommunicationChannels: () => 0,
+      })
+      const oauth = vi.fn(async () => false)
+      reconciler.setHostFrontsOAuthServer(oauth)
+      const applied = trustedRuntimeDeployment(reconciler, host, {
+        replicas: 1,
+        readyReplicas: 1,
+      })
+      applied.spec!.template!.metadata!.annotations = {
+        ...applied.spec!.template!.metadata!.annotations,
+        [RUNTIME_TOKEN_REVISION_ANNOTATION]: APPLIED_RUNTIME_REVISION,
+      }
+      const record = await mintedRuntimeCredentialRecord(host, {
+        bootstrap: 'fresh',
+        annotations: wakeBootstrapBinding(applied.metadata!.uid!),
+      })
+      appsApi.readNamespacedDeployment.mockImplementation(async () => structuredClone(applied))
+      coreApi.readNamespacedSecret.mockResolvedValue(record)
+      const issue = vi.mocked(issueMcpHostRuntimeTokens)
+      issue.mockClear()
+      coreApi.replaceNamespacedSecret.mockClear()
+
+      const duringOutage = await (reconciler as any).ensureMcpHostRuntimeTokenSecret(host, {
+        targetSuspended: false,
+      })
+
+      // Witness: the pass read the record and the live OAuth scope, then reused
+      // the applied revision the bound bootstrap belongs to.
+      expect(coreApi.readNamespacedSecret).toHaveBeenCalledWith({
+        name: record.metadata!.name,
+        namespace: host.namespace,
+      })
+      expect(oauth).toHaveBeenCalled()
+      expect(duringOutage?.revision).toBe(APPLIED_RUNTIME_REVISION)
+      expect(issue).not.toHaveBeenCalled()
+      // Any write this pass made is the annotation-only consumed marker, never
+      // fresh credential material: the wake refresh did not fire during the outage.
+      for (const write of runtimeTokenSecretWrites(coreApi)) {
+        expect(write.stringData).toBeUndefined()
+      }
+
+      // The same fixture with authoritative channel authority does refresh, so
+      // the negative above is not vacuous.
+      cacheSynced = true
+      issue.mockClear()
+      await (reconciler as any).ensureMcpHostRuntimeTokenSecret(host, {
+        targetSuspended: false,
+      })
+      expect(issue).toHaveBeenCalledOnce()
+    })
+
+    it('T6: defers a held wake refresh when OAuth cannot be observed with the cache synced', async () => {
+      const host = makeStatelessHost({
+        status: { lifecycle: { state: 'active', wakeHandledGeneration: 1 } },
+      })
+      const { reconciler, appsApi, coreApi } = createReconciler({
+        isCommunicationChannelCacheSynced: () => true,
+        countCommunicationChannels: () => 0,
+      })
+      const oauth = vi.fn(async (): Promise<boolean> => {
+        throw new Error('McpServer read unavailable')
+      })
+      reconciler.setHostFrontsOAuthServer(oauth)
+      const applied = trustedRuntimeDeployment(reconciler, host, {
+        replicas: 1,
+        readyReplicas: 1,
+      })
+      applied.spec!.template!.metadata!.annotations = {
+        ...applied.spec!.template!.metadata!.annotations,
+        [RUNTIME_TOKEN_REVISION_ANNOTATION]: APPLIED_RUNTIME_REVISION,
+      }
+      // A retained grant plus the wake binding: the pass must defer, not narrow.
+      const record = await mintedRuntimeCredentialRecord(host, {
+        bootstrap: 'fresh',
+        frontsOAuthServer: true,
+        annotations: wakeBootstrapBinding(applied.metadata!.uid!),
+      })
+      appsApi.readNamespacedDeployment.mockImplementation(async () => structuredClone(applied))
+      coreApi.readNamespacedSecret.mockResolvedValue(record)
+      const issue = vi.mocked(issueMcpHostRuntimeTokens)
+      const warn = vi.spyOn(HostContextLogger.prototype, 'warn').mockImplementation(() => undefined)
+      issue.mockClear()
+      const deferredBefore = await wakeRefreshCount('deferred_oauth_unobserved')
+      try {
+        const provision = await (reconciler as any).ensureMcpHostRuntimeTokenSecret(host, {
+          targetSuspended: false,
+        })
+
+        expect(provision).toBeNull()
+        expect(issue).not.toHaveBeenCalled()
+        expect(coreApi.replaceNamespacedSecret).not.toHaveBeenCalled()
+        // Witness: every bounded OAuth attempt ran before the deferral.
+        expect(oauth).toHaveBeenCalledTimes(3)
+        expect(await wakeRefreshCount('deferred_oauth_unobserved')).toBe(deferredBefore + 1)
+        expect(warn).toHaveBeenCalledWith(
+          expect.stringContaining('deferring runtime token decision'),
+          expect.objectContaining({
+            host: host.name,
+            observation: 'frontsOAuthServer',
+            attempts: 3,
+          })
+        )
+      } finally {
+        warn.mockRestore()
+      }
+    })
+
+    it('T7: does not force a wake refresh for a suspended target after authority returns', async () => {
+      const host = makeStatelessHost({ status: suspendedStatus() })
+      const { reconciler, appsApi, coreApi, customApi } = createReconciler({
+        isCommunicationChannelCacheSynced: () => true,
+        countCommunicationChannels: () => 0,
+      })
+      customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(host))
+      reconciler.setHostFrontsOAuthServer(async () => false)
+      const applied = trustedRuntimeDeployment(reconciler, host, {
+        replicas: 1,
+        readyReplicas: 1,
+      })
+      applied.spec!.template!.metadata!.annotations = {
+        ...applied.spec!.template!.metadata!.annotations,
+        [RUNTIME_TOKEN_REVISION_ANNOTATION]: APPLIED_RUNTIME_REVISION,
+      }
+      const record = await mintedRuntimeCredentialRecord(host, {
+        bootstrap: 'fresh',
+        annotations: wakeBootstrapBinding(applied.metadata!.uid!),
+      })
+      const liveDeployment = persistHostDeployment(appsApi, host, applied)
+      persistRuntimeCredential(coreApi, record)
+      const issue = vi.mocked(issueMcpHostRuntimeTokens)
+      const log = vi.spyOn(HostContextLogger.prototype, 'info')
+      issue.mockClear()
+      try {
+        await reconciler.reconcile(host)
+
+        // Witness: the suspension route ran and brought the Ready runtime to zero.
+        expect(coreApi.readNamespacedSecret).toHaveBeenCalled()
+        const replacements = hostDeploymentReplacements(appsApi, host.name)
+        expect(replacements).toHaveLength(1)
+        expect(liveDeployment().spec!.replicas).toBe(0)
+        expect(reconciler.getStatus(host.name)).toMatchObject({
+          deployed: true,
+          ready: false,
+          message: 'Suspended (stateless lifecycle, replicas=0)',
+        })
+        // The eligible wake must not refresh a target that is being suspended.
+        expect(issue).not.toHaveBeenCalled()
+        expect(log).not.toHaveBeenCalledWith('held wake template refresh', expect.anything())
+      } finally {
+        log.mockRestore()
+      }
+    })
+
+    it('T8: preserves a drifting pre-Ready wake template and binding without a forced refresh', async () => {
+      const { host, reconciler, appsApi, coreApi, liveDeployment, liveRecord } =
+        await boundWakeRuntime({
+          readyReplicas: 0,
+          driftAppliedTemplate: deployment => {
+            const container = deployment.spec!.template!.spec!.containers![0]!
+            container.image = 'clerum/mcp-host:drifted'
+            container.env = [...(container.env ?? []), { name: 'DRIFTED_ENV', value: 'yes' }]
+          },
+        })
+      const issue = vi.mocked(issueMcpHostRuntimeTokens)
+      issue.mockClear()
+      appsApi.replaceNamespacedDeployment.mockClear()
+      appsApi.createNamespacedDeployment.mockClear()
+      coreApi.replaceNamespacedSecret.mockClear()
+
+      await reconciler.reconcile(host)
+
+      // Witness: the pass read both the record and the not-Ready Deployment it
+      // refused to rewrite, and the real drift is still on the live object.
+      expect(coreApi.readNamespacedSecret).toHaveBeenCalled()
+      expect(appsApi.readNamespacedDeployment).toHaveBeenCalled()
+      expect(liveDeployment().status!.readyReplicas).toBe(0)
+      expect(issue).not.toHaveBeenCalled()
+      expect(hostDeploymentReplacements(appsApi, host.name)).toHaveLength(0)
+      expect(appsApi.createNamespacedDeployment).not.toHaveBeenCalled()
+      expect(liveDeployment().spec!.template!.spec!.containers![0]!.image).toBe(
+        'clerum/mcp-host:drifted'
+      )
+      expect(containerEnv(liveDeployment()).map(entry => entry.name)).toContain('DRIFTED_ENV')
+      expect(liveRecord().metadata!.annotations).toMatchObject(
+        wakeBootstrapBinding(liveDeployment().metadata!.uid!)
+      )
+      expect(coreApi.replaceNamespacedSecret).not.toHaveBeenCalled()
+
+      // Ready now: the same fixture refreshes once and rolls onto fresh material.
+      liveDeployment().status = { readyReplicas: 1 }
+      issue.mockClear()
+      appsApi.replaceNamespacedDeployment.mockClear()
+      await reconciler.reconcile(host)
+
+      expect(issue).toHaveBeenCalledOnce()
+      expect(hostDeploymentReplacements(appsApi, host.name)).toHaveLength(1)
+    })
+
+    it('T8b: rejects a wake binding whose Deployment identity changed before preserving', async () => {
+      const { host, reconciler, appsApi, coreApi, liveDeployment } = await boundWakeRuntime({
+        readyReplicas: 0,
+      })
+      const issue = vi.mocked(issueMcpHostRuntimeTokens)
+      issue.mockClear()
+      const captured = await (reconciler as any).ensureMcpHostRuntimeTokenSecret(host)
+      expect(captured.heldWakeTemplateBinding).toEqual({
+        deploymentUid: liveDeployment().metadata!.uid,
+        appliedRevision: APPLIED_RUNTIME_REVISION,
+      })
+      expect(coreApi.readNamespacedSecret).toHaveBeenCalled()
+      liveDeployment().metadata!.uid = 'deployment-replaced-uid'
+      const lifecycle = reconciler.getEffectiveLifecycle(host)
+
+      await expect(
+        (reconciler as any).ensureDeployment(host, [], captured.revision, undefined, async () => ({
+          lifecycle,
+          runtimeTokenRevision: captured.revision,
+          heldWakeTemplateBinding: captured.heldWakeTemplateBinding,
+        }))
+      ).rejects.toThrow('Wake bootstrap binding changed before preserving Host')
+
+      // Witness: provisioning read the original binding, then mutation read the
+      // replacement identity and refused before writing or minting again.
+      expect(appsApi.readNamespacedDeployment).toHaveBeenCalledTimes(2)
+      expect(issue).not.toHaveBeenCalled()
+      expect(appsApi.replaceNamespacedDeployment).not.toHaveBeenCalled()
+      expect(appsApi.createNamespacedDeployment).not.toHaveBeenCalled()
+    })
+
+    it('T8b: rejects a wake binding whose applied revision changed on the conflict reread', async () => {
+      const { host, reconciler, appsApi, coreApi, liveDeployment } = await boundWakeRuntime({
+        readyReplicas: 0,
+      })
+      const issue = vi.mocked(issueMcpHostRuntimeTokens)
+      issue.mockClear()
+      const captured = await (reconciler as any).ensureMcpHostRuntimeTokenSecret(host)
+      expect(captured.heldWakeTemplateBinding).toEqual({
+        deploymentUid: liveDeployment().metadata!.uid,
+        appliedRevision: APPLIED_RUNTIME_REVISION,
+      })
+      expect(coreApi.readNamespacedSecret).toHaveBeenCalled()
+      liveDeployment().spec!.replicas = 0
+      const replace = appsApi.replaceNamespacedDeployment.getMockImplementation()!
+      appsApi.replaceNamespacedDeployment.mockImplementation(async request => {
+        if (request.name !== host.name) return replace(request)
+        // A real conflict, then a reread whose applied revision moved: the
+        // captured binding no longer describes the object being preserved.
+        liveDeployment().spec!.template!.metadata!.annotations = {
+          ...liveDeployment().spec!.template!.metadata!.annotations,
+          [RUNTIME_TOKEN_REVISION_ANNOTATION]: 'other-applied-revision',
+        }
+        throw { code: 409 }
+      })
+      const lifecycle = reconciler.getEffectiveLifecycle(host)
+
+      await expect(
+        (reconciler as any).ensureDeployment(host, [], captured.revision, undefined, async () => ({
+          lifecycle,
+          runtimeTokenRevision: captured.revision,
+          heldWakeTemplateBinding: captured.heldWakeTemplateBinding,
+        }))
+      ).rejects.toThrow('Wake bootstrap binding changed before preserving Host')
+
+      // Witness: one real replace attempt hit the conflict, and the reread that
+      // followed is the object the binding check refused.
+      expect(appsApi.replaceNamespacedDeployment).toHaveBeenCalledTimes(1)
+      expect(appsApi.readNamespacedDeployment).toHaveBeenCalledTimes(3)
+      expect(issue).not.toHaveBeenCalled()
+    })
   })
 })
