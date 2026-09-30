@@ -140,20 +140,50 @@ if [[ "${1:-}" == config ]]; then
       printf '%s\n' "${3:?use-context needs a name}" >"${state}/current-context"
       exit 0
       ;;
+    # kube-contexts holds one "<context> <server>" line per kubeconfig context.
+    get-contexts)
+      [[ "$*" == 'config get-contexts -o name' ]] || {
+        printf 'kubectl stub: unsupported config call: %s\n' "$*" >&2
+        exit 64
+      }
+      awk '{ print $1 }' "${state}/kube-contexts"
+      exit 0
+      ;;
+    view)
+      wanted=""
+      for arg in "$@"; do
+        case "${arg}" in --context=*) wanted="${arg#--context=}" ;; esac
+      done
+      # Only the local, minified server read that t2_context_check also makes.
+      [[ "$*" == "config view --raw --minify --context=${wanted} -o jsonpath={.clusters[0].cluster.server}" ]] || {
+        printf 'kubectl stub: unsupported config call: %s\n' "$*" >&2
+        exit 64
+      }
+      server="$(awk -v wanted="${wanted}" '$1 == wanted { print $2; exit }' "${state}/kube-contexts")"
+      [[ -n "${server}" ]] || {
+        printf 'error: context was not found for specified context: %s\n' "${wanted}" >&2
+        exit 1
+      }
+      printf '%s' "${server}"
+      exit 0
+      ;;
   esac
   printf 'kubectl stub: unsupported config call: %s\n' "$*" >&2
   exit 64
 fi
 original="$*"
+context=""
 namespace=""
+output=""
 verb=""
 kind=""
 name=""
 while (( $# > 0 )); do
   case "$1" in
-    --context=* | --request-timeout=* | --address=* | --ignore-not-found | -A) shift ;;
+    --context=*) context="${1#--context=}"; shift ;;
+    --request-timeout=* | --address=* | --ignore-not-found | -A) shift ;;
     -n) namespace="$2"; shift 2 ;;
-    -o) shift 2 ;;
+    -o) output="$2"; shift 2 ;;
     *)
       if [[ -z "${verb}" ]]; then verb="$1"
       elif [[ -z "${kind}" ]]; then kind="$1"
@@ -175,7 +205,19 @@ case "${verb}" in
           printf 'service/%s\n' "${name}"
         fi
         ;;
-      nodes | deploy | sts)
+      nodes)
+        if [[ "${output}" == json ]]; then
+          # The node carries the minikube.k8s.io/name label of the context it
+          # was asked through, unless node-label names another cluster.
+          label="${context}"
+          [[ ! -s "${state}/node-label" ]] || label="$(cat "${state}/node-label")"
+          printf '{"items":[{"metadata":{"labels":{"minikube.k8s.io/name":"%s"}},"status":{"addresses":[{"type":"InternalIP","address":"%s"}]}}]}\n' \
+            "${label}" "$(cat "${state}/minikube-ip")"
+        else
+          printf 'stub nodes\n'
+        fi
+        ;;
+      deploy | sts)
         [[ ! -e "${state}/fail-get-${kind}" ]] || { printf 'stub: get %s failed\n' "${kind}" >&2; exit 1; }
         printf 'stub %s\n' "${kind}"
         ;;
@@ -217,6 +259,7 @@ case " $* " in
     fi
     ;;
   *" status "*) exit "$(cat "${state}/minikube-status-rc")" ;;
+  *" ip "*) cat "${state}/minikube-ip" ;;
   *" stop "*) [[ ! -e "${state}/minikube-stop-fails" ]] || exit 9 ;;
   *" delete "*) [[ ! -e "${state}/minikube-delete-fails" ]] || exit 11 ;;
 esac
@@ -273,7 +316,28 @@ reset_state() {
     profiles/external-rest-api rpc-proxy/rpc-proxy >"${state}/services"
   : >"${state}/reachable"
   rm -f "${state}/fail-get-deploy" "${state}/curl-fail" "${state}/start-switches-context" \
-    "${state}/pf-ignores-term" "${state}/minikube-stop-fails" "${state}/minikube-delete-fails"
+    "${state}/pf-ignores-term" "${state}/minikube-stop-fails" "${state}/minikube-delete-fails" \
+    "${state}/node-label"
+  # By default the branch profile's context is this local Minikube and its node
+  # carries the profile label at the address `minikube ip` reports.
+  write_kube_contexts "${profile:-}" https://127.0.0.1:32771
+  printf '192.168.49.2\n' >"${state}/minikube-ip"
+}
+
+# write_kube_contexts <context> <server>: the kubeconfig holds another
+# session's local context and, when <context> is set, <context> -> <server>.
+write_kube_contexts() {
+  {
+    printf 'other-session-context https://127.0.0.1:40001\n'
+    [[ -z "$1" ]] || printf '%s %s\n' "$1" "$2"
+  } >"${state}/kube-contexts"
+}
+
+# assert_no_calls_to <bin> <label>: the stub log has no call to <bin> at all.
+assert_no_calls_to() {
+  local bin="$1" label="$2"
+  if grep -q "^${bin} " "${state}/calls.log"; then fail "${label}: stub log unexpectedly has a ${bin} call"; fi
+  ok
 }
 
 # bp <label> <action> [NAME=value ...]
@@ -463,6 +527,91 @@ for shared in clerum-dev CLERUM-DEV gke_sample-project_us-central1-a_shared-clus
   done
   rm -rf "${cache_root:?}/${shared}"
 done
+
+# === the context named after the profile must be this local Minikube ==========
+# minikube -p and kubectl --context address a cluster by context name alone,
+# and `minikube -p <p> delete` for a profile minikube does not know removes the
+# kubeconfig context of that name. A context with the profile's name whose API
+# server is not local is refused before any minikube or kubectl --context call.
+# The witness is the local kubeconfig read that decided it. The remote server
+# is a public address: Python's ipaddress counts the documentation ranges
+# (TEST-NET-1/2/3) as private, so the shared predicate admits them as local.
+remote_server=https://8.8.8.8:6443
+for action in start status pf pf-health health stop setup delete; do
+  reset_state
+  write_kube_contexts "${profile}" "${remote_server}"
+  bp "remote-context-${action}" "${action}" "CONFIRM_DELETE=${profile}" "CONFIRM_PROFILE=${profile}"
+  assert_rc 1 "${action} of a profile whose context is remote"
+  assert_output_has "BRANCH_PROFILE_REMOTE_CONTEXT: kube context ${profile} points at a non-local API server (8.8.8.8)" \
+    "${action} of a profile whose context is remote"
+  assert_log_has "kubectl config view --raw --minify --context=${profile}" \
+    "${action} read the context's server from the local kubeconfig"
+  assert_no_calls_to minikube "${action} of a profile whose context is remote must not call minikube"
+  assert_log_lacks 'kubectl --context=' "${action} of a profile whose context is remote must not address the cluster"
+  assert_no_calls_to docker "${action} of a profile whose context is remote must not reach Docker"
+done
+
+# A DNS name other than localhost and *.minikube is the predicate's other
+# remote branch. The name is reserved by RFC 2606 and never resolves.
+for action in start delete; do
+  reset_state
+  write_kube_contexts "${profile}" https://API.Remote-Cluster.example:6443
+  bp "remote-dns-context-${action}" "${action}" "CONFIRM_DELETE=${profile}"
+  assert_rc 1 "${action} of a profile whose context is a remote DNS name"
+  assert_output_has "BRANCH_PROFILE_REMOTE_CONTEXT: kube context ${profile} points at a non-local API server (api.remote-cluster.example)" \
+    "${action} of a profile whose context is a remote DNS name"
+  assert_log_has "kubectl config view --raw --minify --context=${profile}" \
+    "${action} read the DNS-named context's server from the local kubeconfig"
+  assert_no_calls_to minikube "${action} of a profile whose context is a remote DNS name must not call minikube"
+  assert_log_lacks 'kubectl --context=' "${action} of a profile whose context is a remote DNS name must not address the cluster"
+done
+
+# The reported shape: an adopted clerum-* profile named like a remote cluster's
+# context. delete must refuse without running `minikube -p clerum-prd delete`.
+write_owned_profile_copy clerum-prd
+reset_state
+write_kube_contexts clerum-prd "${remote_server}"
+bp adopted-remote-delete delete MINIKUBE_PROFILE=clerum-prd CONFIRM_DELETE=clerum-prd
+assert_rc 1 'delete of an adopted profile whose context is remote'
+assert_output_has 'BRANCH_PROFILE_REMOTE_CONTEXT: kube context clerum-prd points at a non-local API server' \
+  'delete of an adopted profile whose context is remote'
+assert_log_has 'kubectl config view --raw --minify --context=clerum-prd' \
+  'delete of an adopted profile read its context from the local kubeconfig'
+assert_no_calls_to minikube 'delete of an adopted profile whose context is remote must not call minikube'
+rm -rf "${cache_root:?}/clerum-prd"
+
+# A private address passes the endpoint check (Minikube's own network is
+# private), so a cluster that answers must also identify itself as this
+# profile: a node labelled minikube.k8s.io/name=<profile> at `minikube ip`.
+for action in start status pf health; do
+  reset_state
+  write_kube_contexts "${profile}" https://192.168.1.50:8443
+  printf 'lan-cluster\n' >"${state}/node-label"
+  bp "foreign-identity-${action}" "${action}"
+  assert_rc 1 "${action} of a profile whose context is another cluster"
+  assert_output_has "BRANCH_PROFILE_CONTEXT_IDENTITY: kube context ${profile} does not identify Minikube profile ${profile} at 192.168.49.2" \
+    "${action} of a profile whose context is another cluster"
+  # Witness: the identity was read from the cluster and from minikube.
+  assert_log_has "minikube -p ${profile} ip" "${action} asked minikube for the profile's IP"
+  assert_log_has "kubectl --context=${profile} --request-timeout=10s get nodes -o json" \
+    "${action} read the node identity"
+  assert_log_lacks 'port-forward' "${action} of a profile whose context is another cluster must not forward"
+  assert_log_lacks 'get deploy' "${action} of a profile whose context is another cluster must not list workloads"
+  assert_no_calls_to curl "${action} of a profile whose context is another cluster must not probe services"
+  if [[ "${action}" == start ]]; then
+    assert_log_has "minikube start -p ${profile}" 'start started the profile before checking its identity'
+    assert_log_lacks 'cluster-info' 'start of a profile whose context is another cluster stops before cluster-info'
+  fi
+done
+
+# The default fixture context is local and identifies the profile: the checks
+# ran and admitted it.
+reset_state
+bp local-identity-status status
+assert_rc 0 'status of a profile whose context is this local Minikube'
+assert_log_has "kubectl config view --raw --minify --context=${profile}" 'status read the context from the local kubeconfig'
+assert_log_has "kubectl --context=${profile} --request-timeout=10s get nodes -o json" 'status verified the node identity'
+assert_log_has "kubectl --context=${profile} --request-timeout=10s get deploy -A" 'status went on to list workloads'
 
 # === status ===================================================================
 reset_state
