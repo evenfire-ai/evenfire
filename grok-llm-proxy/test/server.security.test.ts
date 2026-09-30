@@ -1352,6 +1352,146 @@ describe('grok-llm-proxy attempt telemetry', () => {
     expect('err' in (lines[0] ?? {})).toBe(false)
   })
 
+  async function closedLoopbackPort(): Promise<number> {
+    const closed = createServer()
+    await new Promise<void>(resolve => closed.listen(0, '127.0.0.1', () => resolve()))
+    const { port } = closed.address() as AddressInfo
+    await new Promise<void>(resolve => closed.close(() => resolve()))
+    return port
+  }
+
+  // Real undici fetch against a loopback port nothing listens on, so the
+  // failure is undici's own TypeError, whose cause message names the address.
+  function closedPortFetch(port: number, calls: { count: number }): typeof fetch {
+    return (async (_input: unknown, init?: RequestInit) => {
+      calls.count += 1
+      return fetch(`http://127.0.0.1:${port}/`, {
+        method: init?.method ?? 'GET',
+        signal: init?.signal ?? null,
+      })
+    }) as typeof fetch
+  }
+
+  // Serializes Error values with their message and cause, as the logger's err
+  // serializer does, so an error hidden in a log line cannot pass as clean.
+  function serializeWithErrors(value: unknown): string {
+    return JSON.stringify(value, (_key, nested: unknown) =>
+      nested instanceof Error
+        ? { name: nested.name, message: nested.message, cause: nested.cause }
+        : nested
+    )
+  }
+
+  // Review R3-L1: a completion fetch nothing accepted reaches the handler as a
+  // mapped transport error, so the attempt line keeps the cause code and drops
+  // the err entry whose cause message names the upstream address.
+  it('(r3-l1a) logs an upstream connection refusal by cause code, without err or address', async () => {
+    const port = await closedLoopbackPort()
+    const calls = { count: 0 }
+    const { res, lines } = await run({
+      providerAttemptId: 'att-upstream-refused',
+      fetchFn: closedPortFetch(port, calls),
+    })
+    expect(res.status).toBe(503)
+    expect(res.body).toEqual({ error: 'provider_unavailable' })
+    // Witnesses: the real fetch ran against the closed port, and the failure
+    // produced its attempt line.
+    expect(calls.count).toBe(1)
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toMatchObject({
+      providerAttemptId: 'att-upstream-refused',
+      outcome: 'failed',
+      code: 'provider_unavailable',
+      reason: 'upstream fetch failed',
+      causeCode: 'ECONNREFUSED',
+      deliveredAs: 'http_status',
+      httpStatus: 503,
+    })
+    expect('err' in lines[0]!).toBe(false)
+    expect(serializeWithErrors(lines[0])).not.toContain(`127.0.0.1:${port}`)
+    expectNoForbiddenKeys(lines[0]!)
+  })
+
+  // Review R3-L9: the admin route's refusal line carries only the code, so the
+  // catalog logs the cause code of a failed fetch before the 503.
+  it('(r3-l9a) logs a catalog connection refusal by cause code on both admin routes', async () => {
+    const port = await closedLoopbackPort()
+    for (const [route, operation] of [
+      ['/internal/admin/v1/grok/models', 'catalog_list'],
+      ['/internal/admin/v1/grok/test', 'connection_test'],
+    ] as const) {
+      const calls = { count: 0 }
+      const warn = vi.spyOn(logger, 'warn')
+      const info = vi.spyOn(logger, 'info')
+      try {
+        const { adminApp } = createProxyApps(
+          config({ executionEnabled: true, maxBodyBytes: 65_536 }),
+          { fetchFn: closedPortFetch(port, calls), lookup }
+        )
+        const res = await request(adminApp)
+          .post(route)
+          .set(
+            'Authorization',
+            `Bearer ${sign({ sub: 'admin-1', typ: 'grok-admin-permit', operation }, 'grok-llm-proxy-admin')}`
+          )
+          .send({ accessToken: 'tok' })
+        expect(res.status).toBe(503)
+        expect(res.body).toEqual({ error: 'provider_unavailable' })
+        // Witness: the real fetch ran against the closed port.
+        expect(calls.count).toBe(1)
+        const logged = [...warn.mock.calls, ...info.mock.calls].map(
+          call => call[0] as unknown as Record<string, unknown>
+        )
+        expect(logged.filter(entry => entry?.event === 'grok_catalog_upstream')).toEqual([
+          { event: 'grok_catalog_upstream', causeCode: 'ECONNREFUSED' },
+        ])
+        expect(logged.filter(entry => entry?.event === 'grok_proxy_denied')).toEqual([
+          { event: 'grok_proxy_denied', code: 'provider_unavailable' },
+        ])
+        expect(serializeWithErrors(logged)).not.toContain(`127.0.0.1:${port}`)
+      } finally {
+        warn.mockRestore()
+        info.mockRestore()
+      }
+    }
+  })
+
+  it('(r3-l9b) answers a catalog body that is not JSON with a mapped 503 and its own log line', async () => {
+    let calls = 0
+    const warn = vi.spyOn(logger, 'warn')
+    try {
+      const { adminApp } = createProxyApps(
+        config({ executionEnabled: true, maxBodyBytes: 65_536 }),
+        {
+          fetchFn: (async () => {
+            calls += 1
+            return new Response('<html>maintenance</html>', {
+              status: 200,
+              headers: { 'content-type': 'text/html' },
+            })
+          }) as typeof fetch,
+          lookup,
+        }
+      )
+      const res = await request(adminApp)
+        .post('/internal/admin/v1/grok/models')
+        .set('Authorization', `Bearer ${adminPermit()}`)
+        .send({ accessToken: 'tok' })
+      expect(res.status).toBe(503)
+      expect(res.body).toEqual({ error: 'provider_unavailable' })
+      expect(calls).toBe(1)
+      const logged = warn.mock.calls.map(call => call[0] as unknown as Record<string, unknown>)
+      expect(logged.filter(entry => entry?.event === 'grok_catalog_upstream')).toEqual([
+        { event: 'grok_catalog_upstream', reason: 'invalid_json' },
+      ])
+      expect(logged.filter(entry => entry?.event === 'grok_proxy_denied')).toEqual([
+        { event: 'grok_proxy_denied', code: 'provider_unavailable' },
+      ])
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
   it('logs a mapped control-api failure without an err entry', async () => {
     const { res, lines } = await run({
       providerAttemptId: 'att-mapped-control-api-error',
