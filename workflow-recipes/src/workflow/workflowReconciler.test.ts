@@ -1727,9 +1727,11 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
       // The conflict did not stop the rest of the pass.
       expect(createdNames()).toContain('sdk-only-workload-to-mcp-host-sdk-egress')
       expect(result.phase).toBe('active')
+      // The eager apply prunes too, so its summary carries the prune fact.
       expect(result.networkPolicies).toEqual({
         conflicts: [{ policy: foreignName, reason: 'owner-reference-mismatch' }],
         retryPending: false,
+        prune: 'converged',
       })
       expect(writesTo(foreignName)).toHaveLength(0)
     })

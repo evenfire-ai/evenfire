@@ -3559,7 +3559,9 @@ describe('WorkflowReconciler — reconcile loop', () => {
       expect(sandboxDeletes(apiserver.api).map(d => d.name)).toContain(GROK_PROXY)
     })
 
-    it('marks retryPending when a leftover prune DELETE fails', async () => {
+    // A prune DELETE that did not land is prune-pending, not a pending retry:
+    // it publishes PrunePending and does not requeue (R3-L3).
+    it('marks the prune pending, not a retry, when a leftover prune DELETE fails', async () => {
       const apiserver = makeApiserverNetworkingApi()
       seedLivePolicy(apiserver, GROK_PROXY, WRC_LABELS)
       apiserver.api.deleteNamespacedNetworkPolicy.mockImplementation(
@@ -3572,37 +3574,34 @@ describe('WorkflowReconciler — reconcile loop', () => {
       const reconciler = new WorkflowReconciler(makeDeps({ networkingApi: apiserver.api as never }))
 
       const summary = await applyPolicies(reconciler)
-      expect(summary.retryPending).toBe(true)
+      expect(summary.prune).toBe('pending')
+      expect(summary.retryPending).toBe(false)
       expect(apiserver.live.has(apiserver.key(SANDBOX, GROK_PROXY))).toBe(true)
     })
 
     it.each([
-      { code: 404, retryPending: false },
-      { code: 409, retryPending: true },
-      { code: 500, retryPending: true },
-    ])(
-      'prune DELETE answering $code sets retryPending=$retryPending',
-      async ({ code, retryPending }) => {
-        const apiserver = makeApiserverNetworkingApi()
-        seedLivePolicy(apiserver, GROK_PROXY, WRC_LABELS)
-        apiserver.api.deleteNamespacedNetworkPolicy.mockImplementation(
-          async ({ name, namespace }: { name: string; namespace: string }) => {
-            if (name === GROK_PROXY) throw { code }
-            if (!apiserver.live.delete(apiserver.key(namespace, name))) throw { code: 404 }
-            return {}
-          }
-        )
-        const reconciler = new WorkflowReconciler(
-          makeDeps({ networkingApi: apiserver.api as never })
-        )
+      { code: 404, prune: 'converged' },
+      { code: 409, prune: 'pending' },
+      { code: 500, prune: 'pending' },
+    ])('prune DELETE answering $code leaves the prune $prune', async ({ code, prune }) => {
+      const apiserver = makeApiserverNetworkingApi()
+      seedLivePolicy(apiserver, GROK_PROXY, WRC_LABELS)
+      apiserver.api.deleteNamespacedNetworkPolicy.mockImplementation(
+        async ({ name, namespace }: { name: string; namespace: string }) => {
+          if (name === GROK_PROXY) throw { code }
+          if (!apiserver.live.delete(apiserver.key(namespace, name))) throw { code: 404 }
+          return {}
+        }
+      )
+      const reconciler = new WorkflowReconciler(makeDeps({ networkingApi: apiserver.api as never }))
 
-        const summary = await applyPolicies(reconciler)
+      const summary = await applyPolicies(reconciler)
 
-        // Liveness witness: the prune reached the DELETE for the leftover.
-        expect(sandboxDeletes(apiserver.api).map(d => d.name)).toContain(GROK_PROXY)
-        expect(summary.retryPending).toBe(retryPending)
-      }
-    )
+      // Liveness witness: the prune reached the DELETE for the leftover.
+      expect(sandboxDeletes(apiserver.api).map(d => d.name)).toContain(GROK_PROXY)
+      expect(summary.prune).toBe(prune)
+      expect(summary.retryPending).toBe(false)
+    })
 
     it('logs prune failures as an error object, never as a pre-flattened message string', async () => {
       const errorLog = captureLogger('error')
@@ -3646,7 +3645,7 @@ describe('WorkflowReconciler — reconcile loop', () => {
       }
     })
 
-    it('marks retryPending when the legacy internet NP DELETE fails', async () => {
+    it('marks the prune pending, not a retry, when the legacy internet NP DELETE fails', async () => {
       const apiserver = makeApiserverNetworkingApi()
       apiserver.api.deleteNamespacedNetworkPolicy.mockImplementation(
         async ({ name, namespace }: { name: string; namespace: string }) => {
@@ -3660,7 +3659,14 @@ describe('WorkflowReconciler — reconcile loop', () => {
       const reconciler = new WorkflowReconciler(makeDeps({ networkingApi: apiserver.api as never }))
 
       const summary = await applyPolicies(reconciler)
-      expect(summary.retryPending).toBe(true)
+      // Liveness witness: the legacy delete was attempted.
+      expect(
+        apiserver.api.deleteNamespacedNetworkPolicy.mock.calls.filter(
+          ([arg]: [{ name: string }]) => arg.name === `${RECIPE}-mcp-servers-egress-internet`
+        )
+      ).toHaveLength(1)
+      expect(summary.prune).toBe('pending')
+      expect(summary.retryPending).toBe(false)
     })
 
     it('keeps the apply outcome when the prune LIST fails', async () => {
@@ -3670,7 +3676,8 @@ describe('WorkflowReconciler — reconcile loop', () => {
       const reconciler = new WorkflowReconciler(makeDeps({ networkingApi: apiserver.api as never }))
 
       const summary = await applyPolicies(reconciler)
-      expect(summary.retryPending).toBe(true)
+      expect(summary.prune).toBe('pending')
+      expect(summary.retryPending).toBe(false)
       expect(sandboxDeletes(apiserver.api)).toEqual([])
       expect(apiserver.live.has(apiserver.key(SANDBOX, GROK_PROXY))).toBe(true)
       // The apply outcome survives: the legacy internet policy prune that runs
@@ -5375,9 +5382,9 @@ describe('WorkflowReconciler — reconcile loop', () => {
         })
       })
 
-      // A reconcile() prune that failed sets the retry marker. The retry
-      // does not prune, so it clears the marker once its applies converge,
-      // and the leftover waits for the next reconcile() pass.
+      // A reconcile() prune that failed publishes PrunePending with no retry
+      // flag. The retry does not prune and carries no prune fact, so the
+      // marker stays until the next reconcile() pass prunes the leftover.
       describe('when a prune left a leftover behind', () => {
         // A catalog member the snippet lane does not want and that no
         // eligibility verdict governs.
@@ -5399,7 +5406,7 @@ describe('WorkflowReconciler — reconcile loop', () => {
           })
         }
 
-        it('keeps it through the retry, which clears the marker, and prunes it on the next reconcile()', async () => {
+        it('keeps it and its PrunePending marker through the retry, and prunes it on the next reconcile()', async () => {
           const { apiserver, reconciler } = await convergedRunLane()
           seedLeftover(apiserver)
           apiserver.api.deleteNamespacedNetworkPolicy.mockRejectedValueOnce({
@@ -5408,7 +5415,11 @@ describe('WorkflowReconciler — reconcile loop', () => {
           })
 
           const failed = await reconciler.reconcile('test-wf', 'uid-123', 'sandbox-recipes', spec())
-          expect(failed.networkPolicyRetryPending).toBe(true)
+          expect(failed.networkPolicyRetryPending).toBeFalsy()
+          const published = failed.networkPolicyOwnershipConditions ?? []
+          expect(
+            published.filter(c => c.type === 'WorkflowNetworkPoliciesConverged')
+          ).toMatchObject([{ status: 'False', reason: 'PrunePending' }])
           expect(apiserver.live.has(apiserver.key('sandbox-recipes', LEFTOVER))).toBe(true)
 
           apiserver.api.listNamespacedNetworkPolicy.mockClear()
@@ -5429,8 +5440,24 @@ describe('WorkflowReconciler — reconcile loop', () => {
           expect(apiserver.api.deleteNamespacedNetworkPolicy).toHaveBeenCalledTimes(0)
           expect(apiserver.live.has(apiserver.key('sandbox-recipes', LEFTOVER))).toBe(true)
 
-          const pruned = await reconciler.reconcile('test-wf', 'uid-123', 'sandbox-recipes', spec())
+          const pruned = await reconciler.reconcile(
+            'test-wf',
+            'uid-123',
+            'sandbox-recipes',
+            spec(),
+            {
+              conditions: published,
+            }
+          )
           expect(pruned.networkPolicyRetryPending).toBeFalsy()
+          // The prune that landed clears the marker: the pass publishes its
+          // conditions and none of them is of that type any more.
+          expect(pruned.networkPolicyOwnershipConditions).toBeDefined()
+          expect(
+            (pruned.networkPolicyOwnershipConditions ?? []).filter(
+              c => c.type === 'WorkflowNetworkPoliciesConverged'
+            )
+          ).toEqual([])
           expect(apiserver.api.listNamespacedNetworkPolicy).toHaveBeenCalledWith({
             namespace: 'sandbox-recipes',
             labelSelector: TWO_TERM_SELECTOR,
