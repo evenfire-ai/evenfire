@@ -35,8 +35,8 @@ function HomeContent() {
   }, [])
 
   return (
-    <section className="cu-page-stack">
-      <div className="cu-card">
+    <section className="profile-page">
+      <div className="cu-card cu-home-welcome-card">
         <div className="cu-card__body">
           <p className="eyebrow">Evenfire Profile</p>
           <h2 className="page-title page-title--large">Welcome, {displayName}</h2>

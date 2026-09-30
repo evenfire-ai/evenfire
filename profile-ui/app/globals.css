@@ -151,11 +151,8 @@ code {
   padding: 1rem 0.75rem 3rem 1.5rem;
 }
 
-.cu-page-stack {
-  display: grid;
-  gap: 0.85rem;
-  max-width: 1120px;
-  margin-inline: auto;
+.cu-home-welcome-card .cu-card__body {
+  padding-inline-start: 0;
 }
 
 .cu-card {

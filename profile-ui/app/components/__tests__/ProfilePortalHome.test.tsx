@@ -56,7 +56,10 @@ describe('Profile Portal home desktop app link', () => {
 
     const view = render(<Page />)
 
-    expect(view.container.querySelectorAll('.cu-page-stack > .cu-card')).toHaveLength(3)
+    expect(view.container.querySelectorAll('.profile-page > .cu-card')).toHaveLength(3)
+    expect(
+      screen.getByRole('heading', { name: 'Welcome, Josue' }).closest('.cu-home-welcome-card')
+    ).not.toBeNull()
     expect(screen.getByText('Profile Portal', { selector: 'strong' })).toBeInTheDocument()
   })
 
