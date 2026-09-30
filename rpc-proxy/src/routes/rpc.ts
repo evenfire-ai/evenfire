@@ -58,6 +58,7 @@ const MESSAGES_LIMIT_CAP = 200
 const HOST_ARTIFACT_READ_LIMIT_PER_MIN = 30
 
 type ArtifactReadRequest = AuthedRequest & {
+  artifactReadWakeDeadlineMs?: number
   artifactReadHost?: Extract<
     Awaited<ReturnType<typeof resolveArtifactReadHostConnectionForUser>>,
     { url: string }
@@ -326,6 +327,7 @@ export function createRpcRouter(): Router {
         res.status(400).json({ error: 'Invalid host reference' })
         return
       }
+      req.artifactReadWakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
       const artifactReadHost = await resolveArtifactReadHostConnectionForUser(
         auth.sub,
         hostRef,
@@ -1556,7 +1558,7 @@ export function createRpcRouter(): Router {
         const rpcAccessToken = extractAuthToken(req)
         const hostRef = String(req.params.hostRef || '').trim()
         const host = (req as ArtifactReadRequest).artifactReadHost!
-        const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
+        const wakeDeadlineMs = (req as ArtifactReadRequest).artifactReadWakeDeadlineMs!
         const baseUrl = host.url.replace(/\/+$/, '')
         // Wake-eligible finite operation (§11.4): scope stays host:task:read.
         // Unlike approve/deny/model this is a read-only list of small JSON: a
@@ -1624,7 +1626,7 @@ export function createRpcRouter(): Router {
         const hostRef = String(req.params.hostRef || '').trim()
         const filename = String(req.params.filename || '').trim()
         const host = (req as ArtifactReadRequest).artifactReadHost!
-        const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
+        const wakeDeadlineMs = (req as ArtifactReadRequest).artifactReadWakeDeadlineMs!
         const baseUrl = host.url.replace(/\/+$/, '')
         // Wake-eligible finite operation (§11.4): scope stays host:task:read.
         // The success path only commits (`res.send`) at the very end, so a
