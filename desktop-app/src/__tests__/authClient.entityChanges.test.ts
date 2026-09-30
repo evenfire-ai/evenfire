@@ -119,4 +119,26 @@ describe('AuthClient.openEntityChangeStream', () => {
       )
     ).rejects.toMatchObject({ status: 404, retryAfter: '30' })
   })
+
+  it('bounds and defuses upstream error text before embedding it in the stream error', async () => {
+    const body = `host_access_revoked ${'x'.repeat(600)}`
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(body, { status: 503 })))
+
+    let error: unknown
+    try {
+      await new AuthClient().openEntityChangeStream(
+        'session-token',
+        null,
+        () => undefined,
+        new AbortController().signal
+      )
+    } catch (caught) {
+      error = caught
+    }
+
+    expect(error).toMatchObject({ status: 503 })
+    expect((error as Error).message).toContain('host-access-revoked')
+    expect((error as Error).message).not.toContain('host_access_revoked')
+    expect((error as Error).message.length).toBeLessThan(560)
+  })
 })
