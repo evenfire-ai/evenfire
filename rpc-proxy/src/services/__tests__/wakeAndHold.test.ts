@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Response as ExpressResponse } from 'express'
+import { config } from '../../config.js'
 import type { ResolvedServerConnection, RpcAccessClaims, RpcScope } from '../../types.js'
 import type { HostWakeApiResponse } from '../controlApiRestService.js'
+import { UpstreamBodyReadError } from '../upstreamBody.js'
 import {
   WakeAndHoldCoordinator,
   type WakeCoordinatorDeps,
@@ -425,6 +427,20 @@ describe('host error classification', () => {
     })
     expect(isHostDownNetworkError(upstream)).toBe(false)
   })
+
+  // ADV-HCC-1: the wrapper's message embeds the body failure's text, which can
+  // itself read like a down host ("read ECONNRESET", "socket hang up"). The
+  // headers arrived, so it is still never a down-host signal.
+  it('never classifies a body failure after the headers as a down host', () => {
+    const bodyFailure = new Error('read ECONNRESET')
+    // Witness: the same failure raised before fetch() resolved IS a down host.
+    expect(isHostDownNetworkError(bodyFailure)).toBe(true)
+
+    expect(isHostDownNetworkError(new UpstreamBodyReadError(bodyFailure))).toBe(false)
+    expect(isHostDownNetworkError(new UpstreamBodyReadError(new Error('socket hang up')))).toBe(
+      false
+    )
+  })
 })
 
 describe('post-resolution re-forward hardening (respondWithWakeAndHold)', () => {
@@ -474,11 +490,12 @@ describe('post-resolution re-forward hardening (respondWithWakeAndHold)', () => 
   function respondOptions(
     coordinator: WakeAndHoldCoordinator,
     res: FakeRes,
-    attemptUpstream: () => Promise<void>,
+    attemptUpstream: (timeoutMs: number, deadlineMs: number) => Promise<void>,
     overrides?: {
       hostRef?: string
       host?: ResolvedServerConnection
       respondLegacy?: (error: unknown) => void
+      retryUntilDeadline?: boolean
     }
   ) {
     const hostRef = overrides?.hostRef ?? 'chatllm'
@@ -489,6 +506,7 @@ describe('post-resolution re-forward hardening (respondWithWakeAndHold)', () => 
       claims: holdClaims(hostRef, Date.now() + 3_600_000),
       rpcAccessToken: 'rpc-token',
       attemptUpstream,
+      retryUntilDeadline: overrides?.retryUntilDeadline,
       respondLegacy:
         overrides?.respondLegacy ??
         ((_error: unknown) => {
@@ -559,7 +577,7 @@ describe('post-resolution re-forward hardening (respondWithWakeAndHold)', () => 
     expect(requestWake.mock.calls.length).toBe(wakeCalls)
   })
 
-  it('(c) an unresolved proceed still walks the short retry schedule exactly as today', async () => {
+  it('(c) an unresolved proceed retries availability until admission succeeds', async () => {
     const { coordinator, requestWake } = makeCoordinator()
     requestWake.mockResolvedValue({ kind: 'active', wakeGeneration: null })
 
@@ -571,13 +589,191 @@ describe('post-resolution re-forward hardening (respondWithWakeAndHold)', () => 
       .mockImplementationOnce(async () => {
         res.status(200).json({ success: true, taskId: 't-3' })
       })
-    const pending = respondWithWakeAndHold(respondOptions(coordinator, res, attemptUpstream))
+    const pending = respondWithWakeAndHold(
+      respondOptions(coordinator, res, attemptUpstream, { retryUntilDeadline: true })
+    )
 
-    await vi.advanceTimersByTimeAsync(1_250) // 0ms + 250ms + 1000ms schedule
+    await vi.advanceTimersByTimeAsync(750) // 0ms + 250ms + 750ms attempts
     await pending
     expect(attemptUpstream).toHaveBeenCalledTimes(3) // pre-resolution retries are the feature
     expect(res.statusCode).toBe(200)
     expect(coordinator.trackedCoordinationCount()).toBe(0)
+  })
+
+  it('active wake response keeps trying until late upstream admission succeeds within the hold', async () => {
+    const { coordinator, requestWake, probeReady } = makeCoordinator()
+    requestWake.mockResolvedValue({ kind: 'active', wakeGeneration: null })
+
+    const res = makeRes()
+    let upstreamAdmits = false
+    const attemptUpstream = vi.fn(async () => {
+      if (!upstreamAdmits) throw upstreamDrainingError()
+      res.status(200).json({ success: true, taskId: 't-late-admission' })
+    })
+    const pending = respondWithWakeAndHold(
+      respondOptions(coordinator, res, attemptUpstream, { retryUntilDeadline: true })
+    )
+
+    await vi.advanceTimersByTimeAsync(1_250)
+    expect(attemptUpstream).toHaveBeenCalledTimes(3)
+    expect(res.headersSent).toBe(false)
+    expect(probeReady).not.toHaveBeenCalled()
+    expect(coordinator.trackedCoordinationCount()).toBe(0)
+
+    upstreamAdmits = true
+    await vi.advanceTimersByTimeAsync(500)
+    await pending
+    expect(attemptUpstream).toHaveBeenCalledTimes(4)
+    expect(res.statusCode).toBe(200)
+    await vi.advanceTimersByTimeAsync(MAX_HOLD_MS * 3)
+    expect(attemptUpstream).toHaveBeenCalledTimes(4)
+  })
+
+  it('returns host_waking at the absolute deadline without a later admission attempt', async () => {
+    const { coordinator, requestWake } = makeCoordinator()
+    requestWake.mockResolvedValue({ kind: 'active', wakeGeneration: null })
+    const res = makeRes()
+    const attemptUpstream = vi.fn().mockRejectedValue(upstreamDrainingError())
+    const pending = respondWithWakeAndHold({
+      ...respondOptions(coordinator, res, attemptUpstream, { retryUntilDeadline: true }),
+      deadlineMs: Date.now() + 2_500,
+    })
+
+    // Attempts at 0, 250 and 750 ms; at 1750 ms only 750 ms remain, below the
+    // admission floor, so no fourth attempt is made.
+    await vi.advanceTimersByTimeAsync(2_500)
+    await pending
+    expect(attemptUpstream).toHaveBeenCalledTimes(3)
+    expect(res.statusCode).toBe(503)
+    expect(res.body).toMatchObject({ code: 'host_waking', hostRef: 'chatllm' })
+    await vi.advanceTimersByTimeAsync(MAX_HOLD_MS)
+    expect(attemptUpstream).toHaveBeenCalledTimes(3)
+  })
+
+  it('passes each admission retry only the remaining hold budget', async () => {
+    const { coordinator, requestWake } = makeCoordinator()
+    requestWake.mockResolvedValue({ kind: 'active', wakeGeneration: null })
+    const res = makeRes()
+    const attemptUpstream = vi.fn(async (_timeoutMs: number) => {
+      throw upstreamDrainingError()
+    })
+    const pending = respondWithWakeAndHold({
+      ...respondOptions(coordinator, res, attemptUpstream, { retryUntilDeadline: true }),
+      deadlineMs: Date.now() + 1_500,
+    })
+
+    await vi.advanceTimersByTimeAsync(1_500)
+    await pending
+
+    expect(attemptUpstream.mock.calls.map(([timeoutMs]) => timeoutMs)).toEqual([1_500, 1_250])
+    expect(res.statusCode).toBe(503)
+  })
+
+  it('caps an admission retry timeout at the configured upstream timeout', async () => {
+    const { coordinator, requestWake } = makeCoordinator()
+    requestWake.mockResolvedValue({ kind: 'active', wakeGeneration: null })
+    const res = makeRes()
+    const attemptUpstream = vi.fn(async (_timeoutMs: number) => {
+      res.status(200).json({ success: true, taskId: 't-capped' })
+    })
+    const deadlineMs = Date.now() + config.upstreamTimeoutMs + 5_000
+    const pending = respondWithWakeAndHold({
+      ...respondOptions(coordinator, res, attemptUpstream),
+      deadlineMs,
+    })
+
+    await pending
+
+    expect(attemptUpstream).toHaveBeenCalledWith(config.upstreamTimeoutMs, deadlineMs)
+    expect(res.statusCode).toBe(200)
+  })
+
+  // R1-M13: the retry floor sat at 100 ms, below the upstream's admission
+  // latency, so a retry with a sliver of budget timed out AFTER the upstream
+  // applied the request (applied-once + 504). Below the floor the caller gets a
+  // retryable 503 instead.
+  it('skips an admission retry when less than the 1 s floor remains', async () => {
+    const { coordinator, requestWake } = makeCoordinator()
+    requestWake.mockResolvedValue({ kind: 'active', wakeGeneration: null })
+    const res = makeRes()
+    const attemptUpstream = vi.fn(async (_timeoutMs: number) => {})
+    const pending = respondWithWakeAndHold({
+      ...respondOptions(coordinator, res, attemptUpstream),
+      deadlineMs: Date.now() + 999,
+    })
+
+    await pending
+
+    expect(attemptUpstream).not.toHaveBeenCalled()
+    expect(res.statusCode).toBe(503)
+    expect(res.body).toMatchObject({ code: 'host_waking' })
+  })
+
+  it('lets a deliberately short upstream timeout retry below the 1 s floor', async () => {
+    const { coordinator, requestWake } = makeCoordinator()
+    requestWake.mockResolvedValue({ kind: 'active', wakeGeneration: null })
+    const res = makeRes()
+    const attemptUpstream = vi.fn(async (_timeoutMs: number) => {
+      res.status(200).json({ ok: true })
+    })
+    const previous = config.upstreamTimeoutMs
+    config.upstreamTimeoutMs = 300
+    try {
+      const pending = respondWithWakeAndHold({
+        ...respondOptions(coordinator, res, attemptUpstream),
+        deadlineMs: Date.now() + 400,
+      })
+      await pending
+    } finally {
+      config.upstreamTimeoutMs = previous
+    }
+
+    expect(attemptUpstream).toHaveBeenCalledTimes(1)
+    expect(attemptUpstream.mock.calls[0]![0]).toBe(300)
+    expect(res.statusCode).toBe(200)
+  })
+
+  // R1-M12: without an idempotency key every extra POST is a duplicate side
+  // effect, so a route that does not opt in gets ONE retry after the wake.
+  it('re-issues a non-idempotent request at most once, then answers host_waking', async () => {
+    const { coordinator, requestWake } = makeCoordinator()
+    requestWake.mockResolvedValue({ kind: 'active', wakeGeneration: null })
+    const res = makeRes()
+    const attemptUpstream = vi.fn(async (_timeoutMs: number) => {
+      throw upstreamDrainingError()
+    })
+    const pending = respondWithWakeAndHold(respondOptions(coordinator, res, attemptUpstream))
+
+    await vi.advanceTimersByTimeAsync(MAX_HOLD_MS)
+    await pending
+
+    expect(attemptUpstream).toHaveBeenCalledTimes(1)
+    expect(res.statusCode).toBe(503)
+    expect(res.body).toMatchObject({ code: 'host_waking', hostRef: 'chatllm' })
+    await vi.advanceTimersByTimeAsync(MAX_HOLD_MS * 3)
+    expect(attemptUpstream).toHaveBeenCalledTimes(1)
+  })
+
+  it('opting in with retryUntilDeadline keeps re-issuing until the host admits the request', async () => {
+    const { coordinator, requestWake } = makeCoordinator()
+    requestWake.mockResolvedValue({ kind: 'active', wakeGeneration: null })
+    const res = makeRes()
+    const attemptUpstream = vi
+      .fn()
+      .mockRejectedValueOnce(upstreamDrainingError())
+      .mockRejectedValueOnce(upstreamDrainingError())
+      .mockImplementationOnce(async () => {
+        res.status(200).json({ ok: true })
+      })
+    const pending = respondWithWakeAndHold(
+      respondOptions(coordinator, res, attemptUpstream, { retryUntilDeadline: true })
+    )
+
+    await vi.advanceTimersByTimeAsync(750)
+    await pending
+
+    expect(attemptUpstream).toHaveBeenCalledTimes(3)
+    expect(res.statusCode).toBe(200)
   })
 
   it('(d) two concurrent holds for different hosts do not cross-cancel each other', async () => {
@@ -671,6 +867,31 @@ describe('post-resolution re-forward hardening (respondWithWakeAndHold)', () => 
     expect(warnSpy).toHaveBeenCalledWith(
       expect.stringContaining('wake-hold refused: response already committed')
     )
+    expect(coordinator.trackedCoordinationCount()).toBe(0)
+  })
+
+  it('suppresses a hold outcome after another path commits the response', async () => {
+    const { coordinator, requestWake } = makeCoordinator()
+    let finishWake!: (value: HostWakeApiResponse) => void
+    requestWake.mockImplementation(
+      () =>
+        new Promise(resolve => {
+          finishWake = resolve
+        })
+    )
+    const res = makeRes()
+    const attemptUpstream = vi.fn(async () => {})
+    const respondLegacy = vi.fn()
+    const pending = respondWithWakeAndHold(
+      respondOptions(coordinator, res, attemptUpstream, { respondLegacy })
+    )
+
+    res.status(200).json({ success: true })
+    finishWake({ kind: 'active', wakeGeneration: null })
+    await pending
+    expect(attemptUpstream).not.toHaveBeenCalled()
+    expect(respondLegacy).not.toHaveBeenCalled()
+    expect(res.statusCode).toBe(200)
     expect(coordinator.trackedCoordinationCount()).toBe(0)
   })
 

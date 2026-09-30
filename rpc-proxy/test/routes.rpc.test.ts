@@ -21,7 +21,10 @@ const serviceMock = vi.hoisted(() => ({
 
 const controlApiMock = vi.hoisted(() => ({
   ControlApiHostAccessRejectedError: class ControlApiHostAccessRejectedError extends Error {
-    constructor(public readonly status: number) {
+    constructor(
+      public readonly status: number,
+      public readonly denialCode: string | null = null
+    ) {
       super(`Control API rejected host access (${status})`)
       this.name = 'ControlApiHostAccessRejectedError'
     }
@@ -305,12 +308,21 @@ describe('routes/rpc', () => {
   })
 
   it.each([
-    [401, { error: 'Unauthorized' }],
-    [403, { error: 'Forbidden: user cannot access this host' }],
-    [409, { error: 'Direct run attribution conflict' }],
+    [401, null, { error: 'Unauthorized' }],
+    [
+      403,
+      'host_access_revoked',
+      { error: 'Forbidden: user cannot access this host', code: 'host_access_revoked' },
+    ],
+    [
+      403,
+      'host_access_denied',
+      { error: 'Forbidden: user cannot access this host', code: 'host_access_denied' },
+    ],
+    [409, null, { error: 'Direct run attribution conflict' }],
   ] as const)(
-    'preserves a Control API %s from atomic host resolution and never forwards',
-    async (status, expectedBody) => {
+    'preserves a Control API %s (%s) from atomic host resolution and never forwards',
+    async (status, denialCode, expectedBody) => {
       authTokenMock.verifyRpcToken.mockReturnValue({
         sub: 'user-1',
         typ: 'user',
@@ -323,7 +335,7 @@ describe('routes/rpc', () => {
         exp: 9999999999,
       })
       serviceMock.resolveHostConnectionForUser.mockRejectedValue(
-        new controlApiMock.ControlApiHostAccessRejectedError(status)
+        new controlApiMock.ControlApiHostAccessRejectedError(status, denialCode)
       )
 
       await request(makeApp())
@@ -662,7 +674,10 @@ describe('routes/rpc', () => {
       iat: 1,
       exp: 9999999999,
     })
-    serviceMock.resolveHostConnectionForUser.mockResolvedValue(null)
+    serviceMock.resolveHostConnectionForUser.mockResolvedValue({
+      denied: true,
+      code: 'host_access_denied',
+    })
     const app = makeApp()
     await request(app)
       .get('/rpc/hosts/not-allowed/status')
@@ -682,7 +697,10 @@ describe('routes/rpc', () => {
       iat: 1,
       exp: 9999999999,
     })
-    serviceMock.resolveHostConnectionForUser.mockResolvedValue(null)
+    serviceMock.resolveHostConnectionForUser.mockResolvedValue({
+      denied: true,
+      code: 'host_access_denied',
+    })
     const app = makeApp()
     await request(app)
       .get('/rpc/hosts/not-allowed/health')
@@ -702,7 +720,10 @@ describe('routes/rpc', () => {
       iat: 1,
       exp: 9999999999,
     })
-    serviceMock.resolveHostConnectionForUser.mockResolvedValue(null)
+    serviceMock.resolveHostConnectionForUser.mockResolvedValue({
+      denied: true,
+      code: 'host_access_denied',
+    })
     const app = makeApp()
     await request(app)
       .post('/rpc/hosts/not-allowed/messages')

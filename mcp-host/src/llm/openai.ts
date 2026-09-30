@@ -47,6 +47,15 @@ export class OpenAIProvider implements SingleTurnProvider {
     return /^(?:gpt-5(?:[.-]|$)|o[1-9](?:[.-]|$))/i.test(this.defaultModel)
   }
 
+  /**
+   * ZAI requires reasoning to remain on assistant tool-call messages across a
+   * tool turn. Native OpenAI and Azure keep the standard message shape, so a
+   * provider-specific field from prior ZAI history must not leak during failover.
+   */
+  protected supportsReasoningContent(): boolean {
+    return false
+  }
+
   private tokenLimitOptions(maxTokens: number | undefined): {
     max_tokens?: number
     max_completion_tokens?: number
@@ -149,6 +158,7 @@ export class OpenAIProvider implements SingleTurnProvider {
         name: tc.function.name,
         arguments: this.parseArguments(tc.function.arguments),
       })) ?? null
+    const reasoningContent = (message as { reasoning_content?: unknown }).reasoning_content
 
     const usageReported =
       response.usage != null &&
@@ -159,6 +169,7 @@ export class OpenAIProvider implements SingleTurnProvider {
     return {
       content: message.content,
       tool_calls: toolCalls && toolCalls.length > 0 ? toolCalls : null,
+      reasoning_content: typeof reasoningContent === 'string' ? reasoningContent : null,
       usage: {
         input_tokens: response.usage?.prompt_tokens ?? 0,
         output_tokens: response.usage?.completion_tokens ?? 0,
@@ -197,7 +208,7 @@ export class OpenAIProvider implements SingleTurnProvider {
       }
       if (m.role === 'assistant') {
         if (m.tool_calls) {
-          return {
+          const assistantMessage = {
             role: 'assistant' as const,
             content: m.content || null,
             tool_calls: m.tool_calls.map(tc => ({
@@ -208,7 +219,11 @@ export class OpenAIProvider implements SingleTurnProvider {
                 arguments: JSON.stringify(tc.arguments),
               },
             })),
+          } as Record<string, unknown>
+          if (m.reasoning_content && this.supportsReasoningContent()) {
+            assistantMessage.reasoning_content = m.reasoning_content
           }
+          return assistantMessage as unknown as OpenAI.ChatCompletionAssistantMessageParam
         }
         return { role: 'assistant' as const, content: m.content }
       }

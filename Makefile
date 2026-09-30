@@ -137,6 +137,10 @@ test-unit-all: test-service-matrix ## Run unit tests across all services
 test-service-matrix: ## Check local test coverage against the CI service matrix
 	@node scripts/dev/check-test-services.cjs $(TEST_SERVICES)
 
+.PHONY: autoresearch-checks
+autoresearch-checks: ## Run the local checks used by AutoResearch hard gates
+	@bash scripts/dev/autoresearch-checks.sh
+
 .PHONY: test-codex-subscription-t0
 test-codex-subscription-t0: ## Run the Codex subscription T0 aggregator (counts, no skips)
 	@bash scripts/tests/test-codex-subscription-t0.sh
@@ -784,6 +788,19 @@ minikube-t2-hcc-watch-recovery: ## Certify PR A recovery omission, runtime repai
 	@bash scripts/tests/test-hcc-watch-pr-a.sh
 	@E2E_HCC_PR_A=1 $(MAKE) minikube-t2-hcc-networkpolicy-lifecycle
 
+.PHONY: minikube-t2-hcc-stateless-cache-containment
+minikube-t2-hcc-stateless-cache-containment: ## Opt-in branch-owned T2 cache-containment journey; requires matching profile/context and refreshed user-facing forwards
+	@bash scripts/tests/test-hcc-stateless-cache-containment.sh
+	@context='$(CONTROL_API_REAL_PG_CONTEXT)'; \
+		[ -n "$$context" ] || { echo 'Set CONTROL_API_REAL_PG_CONTEXT to the verified branch-owned context' >&2; exit 1; }; \
+		[ "$(MINIKUBE_PROFILE)" = "$$context" ] || { echo 'MINIKUBE_PROFILE and CONTROL_API_REAL_PG_CONTEXT must select the same branch-owned profile/context' >&2; exit 1; }; \
+		printf '%s\n' "$$context" | grep -Eq '^clerum-[a-z0-9][a-z0-9-]*-[0-9a-f]{8}$$' || { echo 'The selected context must be generated and branch-scoped' >&2; exit 1; }
+	@E2E_HCC_WATCH_FAULT_INJECTION=1 \
+		T2_GATE_ID=minikube-t2 \
+		T2_HEALTHCHECK_COMMAND='KUBECONTEXT="$$T2_CONTEXT" MINIKUBE_PROFILE="$$T2_PROFILE" E2E_BRANCH_PROFILE_ENV="$$T2_PROFILE_ENV" E2E_PROFILE_PORTS_ENV="$$T2_PORTS_ENV" E2E_EXPECTED_PRE_GATE_GATE=minikube-t2 bash scripts/e2e/e2e-hcc-stateless-cache-containment.sh' \
+		T2_HEALTHCHECK_TIMEOUT_SECONDS=900 T2_HEALTHCHECK_KILL_GRACE_SECONDS=300 \
+		$(MAKE) minikube-t2
+
 .PHONY: minikube-t2-runtime
 minikube-t2-runtime: ## Exact-head T2 after T0 and T1 already passed on this HEAD and profile
 	@T2_RUN_T0=false T2_RUN_T1=false \
@@ -1373,12 +1390,12 @@ test-e2e-stateless-durability: ## Run stateless host durability E2E gate (Phase 
 .PHONY: test-e2e-stateless-suspend-wake
 test-e2e-stateless-suspend-wake: ## Run stateless suspend/wake E2E gate (Phase 1 API + Phase 2 Desktop Playwright; needs port-forwards + seeded chatllm-stateless)
 	@echo "Running stateless suspend/wake E2E gate..."
-	KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-stateless-suspend-wake.sh
+	E2E_ALLOW_STATELESS_CADENCE_ACCELERATION=1 KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-stateless-suspend-wake.sh
 
 .PHONY: test-e2e-stateless-wake-recovery
 test-e2e-stateless-wake-recovery: ## Run stateless wake-recovery latency gate (R1 warm draining / R2 cold suspended / R3 drained-window p95 budgets; needs port-forwards + seeded chatllm-stateless)
 	@echo "Running stateless wake-recovery latency gate..."
-	KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-stateless-wake-recovery.sh
+	E2E_ALLOW_STATELESS_CADENCE_ACCELERATION=1 KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-stateless-wake-recovery.sh
 
 .PHONY: test-e2e-hcc-communicationchannel-watch-recovery
 test-e2e-hcc-communicationchannel-watch-recovery: ## Run isolated minikube HCC watch-recovery fault-injection gate
