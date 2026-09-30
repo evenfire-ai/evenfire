@@ -93,6 +93,17 @@ assert_log_lacks() {
   if grep -Fq -- "${needle}" "${state}/calls.log"; then fail "${label}: stub log unexpectedly has '${needle}'"; fi
   ok
 }
+# assert_log_order <first> <second> <label>: both appear in the stub log and
+# the first occurrence of <first> precedes the first occurrence of <second>.
+assert_log_order() {
+  local first="$1" second="$2" label="$3" first_line second_line
+  first_line="$(grep -Fn -m1 -- "${first}" "${state}/calls.log" | cut -d: -f1 || true)"
+  second_line="$(grep -Fn -m1 -- "${second}" "${state}/calls.log" | cut -d: -f1 || true)"
+  [[ -n "${first_line}" ]] || fail "${label}: stub log lacks '${first}'"
+  [[ -n "${second_line}" ]] || fail "${label}: stub log lacks '${second}'"
+  (( first_line < second_line )) || fail "${label}: '${first}' (line ${first_line}) is not before '${second}' (line ${second_line})"
+  ok
+}
 assert_log_count() {
   local needle="$1" expected="$2" label="$3" actual
   actual="$(grep -Fc -- "${needle}" "${state}/calls.log" || true)"
@@ -282,7 +293,7 @@ cat >"${stub_bin}/docker" <<'EOF_DOCKER'
 set -euo pipefail
 printf 'docker %s\n' "$*" >>"${BRANCH_PROFILE_STUB_STATE:?}/calls.log"
 case "$*" in
-  info) ;;
+  info) [[ ! -e "${BRANCH_PROFILE_STUB_STATE}/docker-info-fails" ]] || exit 1 ;;
   # docker-cli-env.sh verifies the pinned endpoint through the isolated config.
   'context inspect --format {{.Endpoints.docker.Host}} default') printf '%s\n' "${DOCKER_HOST:?}" ;;
   *) printf 'docker stub: unsupported call: %s\n' "$*" >&2; exit 64 ;;
@@ -329,7 +340,7 @@ reset_state() {
   : >"${state}/reachable"
   rm -f "${state}/fail-get-deploy" "${state}/curl-fail" "${state}/start-switches-context" \
     "${state}/pf-ignores-term" "${state}/minikube-stop-fails" "${state}/minikube-delete-fails" \
-    "${state}/node-label" "${state}/minikube-profile-list-fails"
+    "${state}/node-label" "${state}/minikube-profile-list-fails" "${state}/docker-info-fails"
   # By default the branch profile's context is this local Minikube, minikube
   # lists the profile, and its node carries the profile label at the address
   # `minikube ip` reports.
@@ -878,6 +889,90 @@ assert_rc 0 'delete of a profile without a kube context'
 assert_log_has 'kubectl config get-contexts -o name' 'delete without a kube context read the kubeconfig'
 assert_log_lacks 'minikube profile list' 'delete without a kube context must not need minikube profile list'
 assert_log_has "minikube -p ${profile} delete pidfiles=0" 'delete of a profile without a kube context ran'
+
+# === start / setup: the same check before minikube creates or deploys ========
+# `minikube start -p <p>` for a profile minikube does not know creates that
+# profile and writes the kubeconfig context of its name, and setup hands the
+# profile to full-setup.sh, which starts and deploys it. start checks the node
+# identity only after minikube start has run, and setup never does, so a
+# local context named after an unknown profile is refused before either:
+# after setup's CONFIRM_PROFILE refusal and the endpoint check, and before the
+# Docker probe, any state or shim write, minikube and full-setup.sh.
+for action in start setup; do
+  reset_state
+  write_minikube_profiles clerum-another-local-profile
+  bp "unknown-profile-${action}" "${action}" "CONFIRM_PROFILE=${profile}"
+  assert_rc 1 "${action} of a profile minikube does not know"
+  assert_output_has "BRANCH_PROFILE_UNKNOWN_MINIKUBE_PROFILE: minikube lists no profile ${profile}" \
+    "${action} of a profile minikube does not know"
+  assert_log_has 'minikube profile list -o json' "${action} read minikube's profiles"
+  assert_log_lacks 'minikube start' "${action} of a profile minikube does not know must not run minikube start"
+  assert_log_lacks "minikube -p ${profile}" "${action} of a profile minikube does not know must not run minikube -p"
+  assert_log_lacks 'kubectl --context=' "${action} of a profile minikube does not know must not address the cluster"
+  assert_no_calls_to docker "${action} of a profile minikube does not know must not reach Docker"
+  assert_output_lacks 'running isolated setup' "${action} of a profile minikube does not know must not run full-setup.sh"
+
+  reset_state
+  : >"${state}/minikube-profile-list-fails"
+  bp "profile-list-fails-${action}" "${action}" "CONFIRM_PROFILE=${profile}"
+  assert_rc 1 "${action} when minikube profile list fails"
+  assert_output_has 'BRANCH_PROFILE_MINIKUBE_PROFILES_UNREADABLE: minikube profile list failed' \
+    "${action} when minikube profile list fails"
+  assert_log_has 'minikube profile list -o json' "${action} tried to read minikube's profiles"
+  assert_log_lacks 'minikube start' "${action} when minikube profile list fails must not run minikube start"
+  assert_no_calls_to docker "${action} when minikube profile list fails must not reach Docker"
+done
+
+reset_state
+printf '{"error":{"Advice":"x"}}\n' >"${state}/minikube-profile-list"
+bp profile-list-unreadable-start start
+assert_rc 1 'start with an unreadable profile list'
+assert_output_has 'BRANCH_PROFILE_MINIKUBE_PROFILES_UNREADABLE: minikube profile list printed no readable profile lists' \
+  'start with an unreadable profile list'
+assert_log_has 'minikube profile list -o json' "start with an unreadable profile list read minikube's profiles"
+assert_log_lacks 'minikube start' 'start with an unreadable profile list must not run minikube start'
+
+# A brand-new profile has neither a minikube profile nor a kube context:
+# minikube is not asked and start creates it.
+reset_state
+write_kube_contexts '' ''
+write_minikube_profiles
+bp new-profile-start start
+assert_rc 0 'start of a brand-new profile'
+# Witness: the kubeconfig read that found no context.
+assert_log_has 'kubectl config get-contexts -o name' 'start of a brand-new profile read the kubeconfig'
+assert_log_lacks 'minikube profile list' 'start of a brand-new profile must not need minikube profile list'
+assert_log_has "minikube start -p ${profile} --keep-context" 'start of a brand-new profile ran minikube start'
+
+# A stopped profile minikube knows is started, after the profile list read.
+reset_state
+printf '{"invalid":[],"valid":[{"Name":"%s","Status":"Stopped"}]}\n' "${profile}" \
+  >"${state}/minikube-profile-list"
+bp stopped-known-start start
+assert_rc 0 'start of a stopped profile minikube knows'
+assert_log_order 'minikube profile list -o json' "minikube start -p ${profile}" \
+  'start of a stopped profile minikube knows read the profile list before minikube start'
+
+# setup of a profile minikube knows gets past the check: the Docker probe it
+# runs next is made to fail, so full-setup.sh is not reached.
+reset_state
+: >"${state}/docker-info-fails"
+bp known-profile-setup setup "CONFIRM_PROFILE=${profile}"
+assert_rc 1 'setup of a profile minikube knows, with Docker unreachable'
+# Witness: the refusal that comes after the check.
+assert_output_has 'Docker daemon is not reachable through the isolated bounded probe' \
+  'setup of a profile minikube knows reached the Docker probe'
+assert_log_order 'minikube profile list -o json' 'docker info' \
+  'setup of a profile minikube knows read the profile list before the Docker probe'
+assert_output_lacks 'BRANCH_PROFILE_UNKNOWN_MINIKUBE_PROFILE' 'setup of a profile minikube knows is not refused as unknown'
+assert_output_lacks 'running isolated setup' 'setup with Docker unreachable must not run full-setup.sh'
+
+# An unconfirmed setup is refused before minikube is asked.
+reset_state
+bp setup-unconfirmed setup
+assert_rc 1 'setup without confirmation'
+assert_output_has "Re-run with CONFIRM_PROFILE=${profile}" 'setup without confirmation names the confirmation'
+assert_no_calls_to minikube 'setup without confirmation must not call minikube'
 
 # === stop-pf attempts every record ============================================
 # record_pf_pids <name...>: PF_PIDS gets the recorded PID of each named forward.
