@@ -28,6 +28,42 @@ function setSyntheticSessionToken(service: object, value: string): void {
 }
 
 describe('AppService entity-change fan-out', () => {
+  it('rebinds the stream through the public Google login session-install path', async () => {
+    const service = new AppService() as any
+    setSyntheticSessionToken(service, 'old-committed-token')
+    service.me = null
+    service.beginPrewarmAuthTransition = () => () => undefined
+    service.bindCurrentChatStore = vi.fn().mockResolvedValue(undefined)
+    service.activateGfsAuthScope = vi.fn()
+    service.tokenStore = { setSessionToken: vi.fn().mockResolvedValue(undefined) }
+    service.rpcTokenManager = { clear: vi.fn() }
+    const opened: Array<{ token: string; cursor: string | null; signal: AbortSignal }> = []
+    service.authClient = {
+      googleLogin: vi.fn().mockResolvedValue({
+        token: 'new-committed-token',
+        me: { id: 'user-1', teamId: 'team-1' },
+      }),
+      openEntityChangeStream: vi.fn((token, cursor, _onEvent, signal) => {
+        opened.push({ token, cursor, signal })
+        return new Promise<void>(resolve => {
+          signal.addEventListener('abort', () => resolve(), { once: true })
+        })
+      }),
+    }
+
+    service.startEntityChangeStream('stream-1', 7, vi.fn())
+    await flushAsyncWork()
+    expect(opened[0]?.token).toBe('old-committed-token')
+
+    await service.googleLogin('id-token')
+    await flushAsyncWork()
+
+    expect(opened[0]?.signal.aborted).toBe(true)
+    expect(opened[1]).toMatchObject({ token: 'new-committed-token', cursor: null })
+    expect(service.entityChangeSubscribers.size).toBe(1)
+    service.stopEntityChangeStream('stream-1', 7)
+  })
+
   it('owns one session stream and fans validated invalidations to two renderers', async () => {
     const service = new AppService() as any
     setSyntheticSessionToken(service, ['session', 'token'].join('-'))
