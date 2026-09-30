@@ -182,7 +182,7 @@ describe('GfsBrowser authoritative revalidation integration', () => {
             nextCursor: null,
           })
         }
-        return jsonResponse({ items: [], nextCursor: null })
+        throw new Error(`Unexpected GFS request: ${url.pathname}`)
       })
     )
 
@@ -227,7 +227,7 @@ describe('GfsBrowser authoritative revalidation integration', () => {
             nextCursor: null,
           })
         }
-        return jsonResponse({ items: [], nextCursor: null })
+        throw new Error(`Unexpected GFS request: ${url.pathname}`)
       })
     )
 
@@ -303,7 +303,7 @@ describe('GfsBrowser authoritative revalidation integration', () => {
             nextCursor: null,
           })
         }
-        return jsonResponse({ items: [], nextCursor: null })
+        throw new Error(`Unexpected GFS request: ${url.pathname}`)
       })
     )
 
@@ -415,7 +415,7 @@ describe('GfsBrowser authoritative revalidation integration', () => {
               version: 1,
             })
           }
-          return jsonResponse({ items: [], nextCursor: null })
+          throw new Error(`Unexpected GFS request: ${url.pathname}`)
         })
       )
 
@@ -513,7 +513,7 @@ describe('GfsBrowser authoritative revalidation integration', () => {
             version: 1,
           })
         }
-        return jsonResponse({ items: [], nextCursor: null })
+        throw new Error(`Unexpected GFS request: ${url.pathname}`)
       })
     )
 
@@ -619,7 +619,7 @@ describe('GfsBrowser authoritative revalidation integration', () => {
             version: 1,
           })
         }
-        return jsonResponse({ items: [], nextCursor: null })
+        throw new Error(`Unexpected GFS request: ${url.pathname}`)
       })
     )
 
@@ -707,7 +707,7 @@ describe('GfsBrowser authoritative revalidation integration', () => {
             version: 1,
           })
         }
-        return jsonResponse({ items: [], nextCursor: null })
+        throw new Error(`Unexpected GFS request: ${url.pathname}`)
       })
     )
 
@@ -769,7 +769,7 @@ describe('GfsBrowser authoritative revalidation integration', () => {
             nextCursor: null,
           })
         }
-        return jsonResponse({ items: [], nextCursor: null })
+        throw new Error(`Unexpected GFS request: ${url.pathname}`)
       })
     )
 
@@ -789,6 +789,233 @@ describe('GfsBrowser authoritative revalidation integration', () => {
     await screen.findByText('remote-folder', {}, { timeout: 2_000 })
     expect(rootChildReads).toBe(3)
     expect(screen.getByRole('button', { name: 'existing.txt' })).toBeVisible()
+  })
+
+  it('retries a transient preview metadata read and renders the latest file content', async () => {
+    const previewFile = { ...child('file-1', 'rid-file-1', 'notes.md', 'file'), bytes: 32 }
+    let resolveReads = 0
+    let contentReads = 0
+    let streamController: ReadableStreamDefaultController<Uint8Array> | null = null
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input), 'http://control-ui.test')
+        if (url.pathname.endsWith('/api/v1/gfs/entity-changes/stream')) {
+          return new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                streamController = controller
+                init?.signal?.addEventListener('abort', () => controller.close(), { once: true })
+              },
+            }),
+            { status: 200, headers: { 'content-type': 'application/x-ndjson' } }
+          )
+        }
+        if (url.pathname.endsWith('/api/v1/gfs/tree')) {
+          return jsonResponse({ rootResourceId: 'root-1', items: [previewFile], nextCursor: null })
+        }
+        if (url.pathname.endsWith('/api/v1/gfs/resources/root-1/children')) {
+          return jsonResponse({ items: [previewFile], nextCursor: null })
+        }
+        if (
+          url.pathname.endsWith('/api/v1/gfs/resolve') &&
+          url.searchParams.get('uri') === previewFile.gfsUri
+        ) {
+          resolveReads += 1
+          if (resolveReads === 1) return new Response('temporary failure', { status: 503 })
+          return jsonResponse({
+            resourceId: previewFile.resourceId,
+            rid: previewFile.rid,
+            gfsUri: previewFile.gfsUri,
+            name: previewFile.name,
+            kind: previewFile.kind,
+            bytes: previewFile.bytes,
+            version: 2,
+          })
+        }
+        if (url.pathname.endsWith('/api/v1/gfs/proxy/v1/resources/rid-file-1/content')) {
+          contentReads += 1
+          return new Response(contentReads === 1 ? '# Before update' : '# After update', {
+            status: 200,
+            headers: { 'content-type': 'text/markdown' },
+          })
+        }
+        throw new Error(`Unexpected GFS request: ${url.pathname}`)
+      })
+    )
+
+    render(
+      <ToastProvider>
+        <GfsBrowser />
+      </ToastProvider>
+    )
+    await waitFor(() => expect(streamController).not.toBeNull())
+    fireEvent.click(await screen.findByRole('button', { name: 'notes.md' }))
+    await screen.findByText('Before update')
+
+    await act(async () => {
+      streamController!.enqueue(new TextEncoder().encode(`${await controlApiProducerFrame()}\n`))
+    })
+    await waitFor(() => expect(resolveReads).toBe(1))
+    expect(screen.getByText('Before update')).toBeVisible()
+
+    await screen.findByText('After update', {}, { timeout: 2_000 })
+    expect(resolveReads).toBe(2)
+    expect(contentReads).toBe(2)
+    expect(screen.queryByText('Before update')).toBeNull()
+  })
+
+  it('retries a transient action-target resolve and closes only after authoritative deletion', async () => {
+    const report = child('file-1', 'rid-file-1', 'report.md', 'file')
+    let childReads = 0
+    let revalidationStarted = false
+    let resolveReads = 0
+    let streamController: ReadableStreamDefaultController<Uint8Array> | null = null
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input), 'http://control-ui.test')
+        if (url.pathname.endsWith('/api/v1/gfs/entity-changes/stream')) {
+          return new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                streamController = controller
+                init?.signal?.addEventListener('abort', () => controller.close(), { once: true })
+              },
+            }),
+            { status: 200, headers: { 'content-type': 'application/x-ndjson' } }
+          )
+        }
+        if (url.pathname.endsWith('/api/v1/gfs/tree')) {
+          return jsonResponse({ rootResourceId: 'root-1', items: [report], nextCursor: null })
+        }
+        if (url.pathname.endsWith('/api/v1/gfs/resources/root-1/children')) {
+          if (revalidationStarted) childReads += 1
+          return jsonResponse({
+            items: childReads < 2 ? [report] : [],
+            nextCursor: null,
+          })
+        }
+        if (
+          url.pathname.endsWith('/api/v1/gfs/resolve') &&
+          url.searchParams.get('uri') === report.gfsUri
+        ) {
+          resolveReads += 1
+          if (resolveReads === 1) return new Response('temporary failure', { status: 503 })
+          return new Response('not found', { status: 404 })
+        }
+        throw new Error(`Unexpected GFS request: ${url.pathname}`)
+      })
+    )
+
+    render(
+      <ToastProvider>
+        <GfsBrowser />
+      </ToastProvider>
+    )
+    await waitFor(() => expect(streamController).not.toBeNull())
+    await screen.findByRole('button', { name: 'report.md' })
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for report.md' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Rename' }))
+    await screen.findByRole('dialog', { name: 'Rename file' })
+
+    revalidationStarted = true
+    await act(async () => {
+      streamController!.enqueue(new TextEncoder().encode(`${await controlApiProducerFrame()}\n`))
+    })
+    await waitFor(() => expect(resolveReads).toBe(1))
+    expect(screen.getByRole('dialog', { name: 'Rename file' })).toBeVisible()
+    expect(screen.getByRole('button', { name: 'report.md' })).toBeVisible()
+
+    await waitFor(() => expect(resolveReads).toBe(2), { timeout: 2_000 })
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Rename file' })).toBeNull())
+    expect(screen.queryByRole('button', { name: 'report.md' })).toBeNull()
+  })
+
+  it('retries transient ancestor resolution without losing the visible folder or file', async () => {
+    const work = child('folder-1', 'rid-folder-1', 'work', 'directory')
+    const file = child('file-1', 'rid-file-1', 'notes.txt', 'file')
+    let byPathReads = 0
+    let streamController: ReadableStreamDefaultController<Uint8Array> | null = null
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input), 'http://control-ui.test')
+        if (url.pathname.endsWith('/api/v1/gfs/entity-changes/stream')) {
+          return new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                streamController = controller
+                init?.signal?.addEventListener('abort', () => controller.close(), { once: true })
+              },
+            }),
+            { status: 200, headers: { 'content-type': 'application/x-ndjson' } }
+          )
+        }
+        if (url.pathname.endsWith('/api/v1/gfs/tree')) {
+          return jsonResponse({ rootResourceId: 'root-1', items: [work], nextCursor: null })
+        }
+        if (url.pathname.endsWith('/api/v1/gfs/resources/root-1/children')) {
+          return jsonResponse({ items: [work], nextCursor: null })
+        }
+        if (url.pathname.endsWith('/api/v1/gfs/resources/folder-1/children')) {
+          return jsonResponse({ items: [file], nextCursor: null })
+        }
+        if (url.pathname.endsWith('/api/v1/gfs/resolve')) {
+          return jsonResponse({
+            resourceId: work.resourceId,
+            rid: work.rid,
+            gfsUri: work.gfsUri,
+            name: work.name,
+            kind: 'directory',
+            path: '/work',
+            version: work.version,
+          })
+        }
+        if (url.pathname.endsWith('/api/v1/gfs/by-path')) {
+          byPathReads += 1
+          if (byPathReads === 1) return new Response('temporary failure', { status: 503 })
+          return jsonResponse({
+            resourceId: work.resourceId,
+            rid: work.rid,
+            gfsUri: work.gfsUri,
+            name: work.name,
+            kind: 'directory',
+            path: '/work',
+            version: work.version,
+          })
+        }
+        throw new Error(`Unexpected GFS request: ${url.pathname}`)
+      })
+    )
+
+    render(
+      <ToastProvider>
+        <GfsBrowser />
+      </ToastProvider>
+    )
+    await waitFor(() => expect(streamController).not.toBeNull())
+    fireEvent.click(await screen.findByRole('button', { name: 'work' }))
+    await screen.findByRole('button', { name: 'notes.txt' })
+
+    await act(async () => {
+      streamController!.enqueue(new TextEncoder().encode(`${await controlApiProducerFrame()}\n`))
+    })
+    await waitFor(() => expect(byPathReads).toBe(1))
+    expect(screen.getByRole('button', { name: 'notes.txt' })).toBeVisible()
+    const breadcrumb = screen.getByRole('navigation', { name: 'Breadcrumb' })
+    expect(within(breadcrumb).getByRole('button', { name: 'work' })).toHaveAttribute(
+      'aria-current',
+      'page'
+    )
+
+    await waitFor(() => expect(byPathReads).toBe(2), { timeout: 2_000 })
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(screen.getByRole('button', { name: 'notes.txt' })).toBeVisible()
+    expect(within(breadcrumb).getByRole('button', { name: 'work' })).toHaveAttribute(
+      'aria-current',
+      'page'
+    )
   })
 
   it('preserves the complete folder trail when an ancestor lookup fails', async () => {
@@ -845,7 +1072,7 @@ describe('GfsBrowser authoritative revalidation integration', () => {
             version: work.version,
           })
         }
-        return jsonResponse({ items: [], nextCursor: null })
+        throw new Error(`Unexpected GFS request: ${url.pathname}`)
       })
     )
 
