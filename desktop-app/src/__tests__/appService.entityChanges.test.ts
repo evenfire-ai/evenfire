@@ -311,6 +311,7 @@ describe('AppService.startEntityChangeStream session expiry', () => {
   })
 
   it('turns an initial 401 into a terminal session-expired frame without reconnecting', async () => {
+    vi.useFakeTimers()
     const service = new AppService() as any
     setSyntheticSessionToken(service, 'session-token')
     service.authClient = {
@@ -320,16 +321,21 @@ describe('AppService.startEntityChangeStream session expiry', () => {
     }
     const events: EntityChangeStreamEvent[] = []
 
-    service.startEntityChangeStream('stream-1', 7, (event: EntityChangeStreamEvent) => {
-      events.push(event)
-    })
-    await flushAsyncWork()
+    try {
+      service.startEntityChangeStream('stream-1', 7, (event: EntityChangeStreamEvent) => {
+        events.push(event)
+      })
+      await flushAsyncWork()
 
-    expect(events.map(event => event.type)).toEqual(['stream.closing'])
-    expect(events[0]).toMatchObject({ reason: 'session_expired' })
-    expect(service.authClient.openEntityChangeStream).toHaveBeenCalledOnce()
-    expect(service.entityChangeSubscribers.size).toBe(1)
-    service.stopEntityChangeStream('stream-1', 7)
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(service.authClient.openEntityChangeStream).toHaveBeenCalledOnce()
+      expect(events.map(event => event.type)).toEqual(['stream.closing'])
+      expect(events[0]).toMatchObject({ reason: 'session_expired' })
+      expect(service.entityChangeSubscribers.size).toBe(1)
+    } finally {
+      service.stopEntityChangeStream('stream-1', 7)
+      vi.useRealTimers()
+    }
   })
 
   it('honors Retry-After before reconnecting after a terminal stream response', async () => {
