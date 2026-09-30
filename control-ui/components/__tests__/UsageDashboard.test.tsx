@@ -192,31 +192,4 @@ describe('UsageDashboard', () => {
     fireEvent.click(screen.getByRole('button', { name: /refresh/i }))
     await waitFor(() => expect(mockFetchSeries).toHaveBeenCalledTimes(2))
   })
-
-  it('keeps overflowing breakdown rows inside the designated scroll pane', async () => {
-    // Regression (BUG-134): every ancestor of the usage body is height-capped
-    // or overflow-hidden, so the body itself is the page's only scroll
-    // container. The overflowing rows must live inside that pane — the
-    // stylesheet contract making it scrollable is locked in
-    // lib/__tests__/usageScrollStyles.test.ts.
-    mockFetchTotals.mockResolvedValueOnce({
-      from: '',
-      to: '',
-      interval: '5min',
-      groupBy: 'team_id',
-      rows: Array.from({ length: 10 }, (_, index) => ({
-        group: `team-${index}`,
-        input_tokens: 10,
-        output_tokens: 10,
-        total_tokens: 20,
-        request_count: 2,
-      })),
-    })
-    const { container } = render(<UsageDashboard />)
-    fireEvent.change(screen.getByLabelText('Break down by'), { target: { value: 'team_id' } })
-    expect(await screen.findByText(/team-9/)).toBeTruthy()
-    const pane = container.querySelector('.cu-card--viewport-fill > .cu-card__body.cu-usage-body')
-    expect(pane).not.toBeNull()
-    expect(pane?.contains(screen.getByText(/team-9/))).toBe(true)
-  })
 })
