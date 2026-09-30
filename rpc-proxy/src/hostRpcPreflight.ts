@@ -97,7 +97,7 @@ function parseRoute(req: AuthedRequest): ParseResult {
     if (message.attachments != null && !Array.isArray(message.attachments)) {
       return failBody({
         error: 'invalid_attachments',
-        message: 'Image attachments must be a list.',
+        message: 'Attachments must be a list.',
       })
     }
     return { value: { ...base, body: message } }
