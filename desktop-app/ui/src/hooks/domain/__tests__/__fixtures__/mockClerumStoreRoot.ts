@@ -22,6 +22,6 @@ export default function setup(project: TestProject): () => void {
   const root = mkdtempSync(join(tmpdir(), 'mockclerum-'))
   project.provide('mockClerumStoreRoot', root)
   return () => {
-    rmSync(root, { recursive: true, force: true })
+    rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
   }
 }
