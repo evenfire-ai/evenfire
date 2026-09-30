@@ -640,10 +640,8 @@ describe('GfsBrowser', () => {
     let created = false
     mockApiGet.mockImplementation(async (path: string) => {
       if (path === '/api/v1/gfs/tree') {
-        return { rootResourceId: rootId, items: [], nextCursor: null }
-      }
-      if (path.endsWith('/children')) {
         return {
+          rootResourceId: rootId,
           items: created ? [child('remote-folder', 'directory', 9)] : [],
           nextCursor: null,
         }
@@ -746,20 +744,21 @@ describe('GfsBrowser', () => {
       updatedAt: '2026-09-28T00:00:00.000Z',
     })
     const streamControllers: ReadableStreamDefaultController<Uint8Array>[] = []
-    let releaseRefresh!: (page: { items: Array<typeof report>; nextCursor: null }) => void
-    let childrenReads = 0
+    let releaseRefresh!: (page: {
+      rootResourceId: string
+      items: Array<typeof report>
+      nextCursor: null
+    }) => void
+    let treeReads = 0
     mockApiGet.mockImplementation(async (path: string, query?: Record<string, string>) => {
       if (path === '/api/v1/gfs/tree') {
-        return { rootResourceId: rootId, items: [report], nextCursor: null }
-      }
-      if (path === `/api/v1/gfs/resources/${rootId}/children`) {
-        childrenReads += 1
-        if (childrenReads === 2) {
+        treeReads += 1
+        if (treeReads === 2) {
           return new Promise(resolve => {
             releaseRefresh = resolve
           })
         }
-        return { items: [report], nextCursor: null }
+        return { rootResourceId: rootId, items: [report], nextCursor: null }
       }
       if (path === '/api/v1/gfs/resolve' && query?.uri === report.gfsUri) return resolvedReport
       if (path === '/api/v1/gfs/resolve') {
@@ -799,12 +798,12 @@ describe('GfsBrowser', () => {
       streamControllers[0]!.enqueue(new TextEncoder().encode(`${frame}\n`))
     })
 
-    await waitFor(() => expect(childrenReads).toBe(2))
+    await waitFor(() => expect(treeReads).toBe(2))
     expect(screen.getByRole('button', { name: 'report.md' })).toBeVisible()
     expect(screen.getByRole('dialog', { name: 'Rename file' })).toBe(dialog)
 
     await act(async () => {
-      releaseRefresh({ items: [report], nextCursor: null })
+      releaseRefresh({ rootResourceId: rootId, items: [report], nextCursor: null })
     })
     expect(await screen.findByRole('button', { name: 'report.md' })).toBeVisible()
     expect(screen.getByRole('dialog', { name: 'Rename file' })).toBe(dialog)
@@ -846,19 +845,16 @@ describe('GfsBrowser', () => {
     })
     const streamControllers: ReadableStreamDefaultController<Uint8Array>[] = []
     let rejectRefresh!: (error: Error) => void
-    let childrenReads = 0
+    let treeReads = 0
     mockApiGet.mockImplementation(async (path: string, query?: Record<string, string>) => {
       if (path === '/api/v1/gfs/tree') {
-        return { rootResourceId: rootId, items: [report], nextCursor: null }
-      }
-      if (path === `/api/v1/gfs/resources/${rootId}/children`) {
-        childrenReads += 1
-        if (childrenReads === 2) {
+        treeReads += 1
+        if (treeReads === 2) {
           return new Promise((_resolve, reject) => {
             rejectRefresh = reject
           })
         }
-        return { items: [report], nextCursor: null }
+        return { rootResourceId: rootId, items: [report], nextCursor: null }
       }
       if (path === '/api/v1/gfs/resolve' && query?.uri === report.gfsUri) {
         return resolvedReport
@@ -895,7 +891,7 @@ describe('GfsBrowser', () => {
     await act(async () => {
       streamControllers[0]!.enqueue(new TextEncoder().encode(`${frame}\n`))
     })
-    await waitFor(() => expect(childrenReads).toBe(2))
+    await waitFor(() => expect(treeReads).toBe(2))
     expect(screen.getByRole('button', { name: 'report.md' })).toBeVisible()
     expect(screen.getByRole('dialog', { name: 'Rename file' })).toBeVisible()
 

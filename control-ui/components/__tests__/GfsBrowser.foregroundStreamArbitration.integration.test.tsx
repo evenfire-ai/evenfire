@@ -2,6 +2,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { EventEmitter } from 'node:events'
+import { listChildrenPaged } from '../../../control-api/src/gfs/tree.js'
 import {
   closeActiveEntityChangeStreams,
   streamEntityChanges,
@@ -93,7 +94,7 @@ describe('GfsBrowser foreground/stream arbitration integration', () => {
     let streamController: ReadableStreamDefaultController<Uint8Array> | null = null
     let wakeFeed: (() => void) | null = null
     let producerResponse: ProducerResponse | null = null
-    let childReads = 0
+    let treeReads = 0
     let staleReadSignal: AbortSignal | null = null
     const existingFile = {
       resourceId: '22222222-2222-2222-2222-222222222222',
@@ -145,11 +146,8 @@ describe('GfsBrowser foreground/stream arbitration integration', () => {
           )
         }
         if (url.pathname.endsWith('/api/v1/gfs/tree')) {
-          return jsonResponse({ rootResourceId: ROOT_ID, items: [], nextCursor: null })
-        }
-        if (url.pathname.endsWith(`/api/v1/gfs/resources/${ROOT_ID}/children`)) {
-          childReads += 1
-          if (childReads === 2) {
+          treeReads += 1
+          if (treeReads === 2) {
             staleReadSignal = init?.signal ?? null
             return new Promise<Response>((_resolve, reject) => {
               const rejectAborted = () => reject(new DOMException('Aborted', 'AbortError'))
@@ -160,10 +158,11 @@ describe('GfsBrowser foreground/stream arbitration integration', () => {
               }
             })
           }
-          if (childReads >= 3) {
-            return jsonResponse({ items: [existingFile, createdFolder], nextCursor: null })
-          }
-          return jsonResponse({ items: [existingFile], nextCursor: null })
+          return jsonResponse({
+            rootResourceId: ROOT_ID,
+            items: treeReads >= 3 ? [existingFile, createdFolder] : [existingFile],
+            nextCursor: null,
+          })
         }
         if (
           url.pathname.endsWith(
@@ -224,7 +223,7 @@ describe('GfsBrowser foreground/stream arbitration integration', () => {
     await act(async () => {
       streamController!.enqueue(new TextEncoder().encode(changeFrame!))
     })
-    await waitFor(() => expect(childReads).toBe(2))
+    await waitFor(() => expect(treeReads).toBe(2))
     expect(staleReadSignal).not.toBeNull()
 
     fireEvent.click(screen.getByRole('button', { name: /new folder/i }))
@@ -237,5 +236,168 @@ describe('GfsBrowser foreground/stream arbitration integration', () => {
 
     await waitFor(() => expect(staleReadSignal?.aborted).toBe(true))
     expect(screen.getByRole('button', { name: 'created-after-refresh' })).toBeVisible()
+  })
+
+  it('keeps the resolved drive root on one location and applies its fresh stream page', async () => {
+    let streamController: ReadableStreamDefaultController<Uint8Array> | null = null
+    let wakeFeed: (() => void) | null = null
+    let producerResponse: ProducerResponse | null = null
+    let treeReads = 0
+    let rootChildReads = 0
+    let releaseInitialTree: ((response: Response) => void) | null = null
+    const apiRequests: Array<{ path: string; signal: AbortSignal | undefined }> = []
+    const initialFile = {
+      resourceId: '22222222-2222-2222-2222-222222222222',
+      rid: '22222222222222222222222222222222',
+      gfsUri: 'gfs://main/22222222222222222222222222222222',
+      name: 'initial-root.txt',
+      kind: 'file',
+      path: '/initial-root.txt',
+      bytes: 0,
+      version: 1,
+    }
+    const latestFile = {
+      resourceId: '33333333-3333-3333-3333-333333333333',
+      rid: '33333333333333333333333333333333',
+      gfsUri: 'gfs://main/33333333333333333333333333333333',
+      name: 'latest-root.txt',
+      kind: 'file',
+      path: '/latest-root.txt',
+      bytes: 0,
+      version: 1,
+    }
+    const makeTreeResponse = async (children: (typeof initialFile)[]) => {
+      const page = await listChildrenPaged(
+        {
+          listChildren: async () =>
+            children.map(item => ({
+              resourceId: item.resourceId,
+              name: item.name,
+              kind: item.kind,
+              pathCache: item.path,
+              bytes: item.bytes,
+              version: item.version,
+              updatedAt: '2026-09-30T00:00:00.000Z',
+            })),
+        },
+        'main',
+        ROOT_ID,
+        {}
+      )
+      return jsonResponse({ ...page, rootResourceId: ROOT_ID })
+    }
+
+    controlApiProducer.isEntityChangeCursor.mockImplementation((value: string) =>
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)
+    )
+    controlApiProducer.readEntityChangeCheckpoint.mockResolvedValue({
+      resyncRequired: false,
+      cursor: CURSOR,
+      scopes: [],
+    })
+    controlApiProducer.subscribeEntityChangeFeedWake.mockImplementation((wake: () => void) => {
+      wakeFeed = wake
+      return vi.fn()
+    })
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input), 'http://control-ui.test')
+        if (url.pathname.endsWith('/api/v1/gfs/entity-changes/stream')) {
+          return new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                streamController = controller
+                init?.signal?.addEventListener('abort', () => controller.close(), { once: true })
+              },
+            }),
+            { status: 200, headers: { 'content-type': 'application/x-ndjson' } }
+          )
+        }
+
+        apiRequests.push({ path: url.pathname, signal: init?.signal ?? undefined })
+        if (url.pathname === '/control-api/api/v1/gfs/tree') {
+          treeReads += 1
+          if (treeReads === 1) {
+            return new Promise<Response>(resolve => {
+              releaseInitialTree = resolve
+            })
+          }
+          return makeTreeResponse([latestFile])
+        }
+        if (url.pathname === `/control-api/api/v1/gfs/resources/${ROOT_ID}/children`) {
+          rootChildReads += 1
+          return jsonResponse({
+            items: rootChildReads === 1 ? [initialFile] : [latestFile],
+            nextCursor: null,
+          })
+        }
+        if (url.pathname.endsWith('/api/v1/gfs/resolve')) {
+          return jsonResponse({
+            resourceId: ROOT_ID,
+            rid: ROOT_RID,
+            gfsUri: `gfs://main/${ROOT_RID}`,
+            name: '/',
+            kind: 'directory',
+            path: '/',
+            version: 1,
+          })
+        }
+        return jsonResponse({ items: [], nextCursor: null })
+      })
+    )
+
+    render(
+      <ToastProvider>
+        <GfsBrowser />
+      </ToastProvider>
+    )
+    await waitFor(() => expect(treeReads).toBe(1))
+    await waitFor(() => expect(streamController).not.toBeNull())
+
+    const req = new ProducerRequest()
+    producerResponse = new ProducerResponse()
+    streamEntityChanges(
+      req as never,
+      producerResponse as never,
+      CURSOR,
+      async () => true,
+      'operator',
+      'control-ui-root-identity'
+    )
+    await waitFor(() => expect(producerResponse?.headersSent).toBe(true))
+    controlApiProducer.readEntityChangeCheckpoint.mockResolvedValue({
+      resyncRequired: false,
+      cursor: CURSOR,
+      scopes: ['gfs'],
+    })
+    wakeFeed?.()
+    await waitFor(() =>
+      expect(
+        producerResponse?.frames.some(frame => frame.includes('"type":"scope.invalidated"'))
+      ).toBe(true)
+    )
+    const changeFrame = producerResponse!.frames.find(frame =>
+      frame.includes('"type":"scope.invalidated"')
+    )
+    expect(changeFrame).toBeDefined()
+    await act(async () => {
+      streamController!.enqueue(new TextEncoder().encode(changeFrame!))
+    })
+
+    await act(async () => {
+      releaseInitialTree!(await makeTreeResponse([initialFile]))
+    })
+    await screen.findByRole('button', { name: 'latest-root.txt' })
+    expect(screen.getByRole('button', { name: /new folder/i })).toBeEnabled()
+    await waitFor(() => expect(treeReads + rootChildReads).toBeGreaterThanOrEqual(2))
+    expect(screen.queryByRole('button', { name: 'initial-root.txt' })).not.toBeInTheDocument()
+    expect(rootChildReads).toBe(0)
+    expect(treeReads).toBe(2)
+    expect(screen.getByRole('button', { name: /new folder/i })).toBeEnabled()
+    expect(
+      apiRequests.filter(request => request.path === '/control-api/api/v1/gfs/tree')[1]?.signal
+    ).toBeInstanceOf(AbortSignal)
   })
 })

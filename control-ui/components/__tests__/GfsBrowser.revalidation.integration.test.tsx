@@ -174,10 +174,8 @@ describe('GfsBrowser authoritative revalidation integration', () => {
           )
         }
         if (url.pathname.endsWith('/api/v1/gfs/tree')) {
-          return jsonResponse({ rootResourceId: 'root-1', items: [], nextCursor: null })
-        }
-        if (url.pathname.endsWith('/api/v1/gfs/resources/root-1/children')) {
           return jsonResponse({
+            rootResourceId: 'root-1',
             items: [child('file-1', 'rid-file-1', 'kept.txt', 'file')],
             nextCursor: null,
           })
@@ -220,10 +218,8 @@ describe('GfsBrowser authoritative revalidation integration', () => {
           )
         }
         if (url.pathname.endsWith('/api/v1/gfs/tree')) {
-          return jsonResponse({ rootResourceId: 'root-1', items: [], nextCursor: null })
-        }
-        if (url.pathname.endsWith('/api/v1/gfs/resources/root-1/children')) {
           return jsonResponse({
+            rootResourceId: 'root-1',
             items: [child('file-1', 'rid-file-1', 'kept.txt', 'file')],
             nextCursor: null,
           })
@@ -296,10 +292,8 @@ describe('GfsBrowser authoritative revalidation integration', () => {
           )
         }
         if (url.pathname.endsWith('/api/v1/gfs/tree')) {
-          return jsonResponse({ rootResourceId: 'root-1', items: [], nextCursor: null })
-        }
-        if (url.pathname.endsWith('/api/v1/gfs/resources/root-1/children')) {
           return jsonResponse({
+            rootResourceId: 'root-1',
             items: [child('file-1', 'rid-file-1', 'kept.txt', 'file')],
             nextCursor: null,
           })
@@ -742,7 +736,7 @@ describe('GfsBrowser authoritative revalidation integration', () => {
   it('recovers the rendered list after a real API-client stream refresh fails once', async () => {
     const existingFile = child('file-1', 'rid-file-1', 'existing.txt', 'file')
     const remoteFolder = child('folder-2', 'rid-folder-2', 'remote-folder', 'directory')
-    let rootChildReads = 0
+    let treeReads = 0
     let streamController: ReadableStreamDefaultController<Uint8Array> | null = null
     vi.stubGlobal(
       'fetch',
@@ -760,15 +754,17 @@ describe('GfsBrowser authoritative revalidation integration', () => {
           )
         }
         if (url.pathname.endsWith('/api/v1/gfs/tree')) {
-          return jsonResponse({ rootResourceId: 'root-1', items: [], nextCursor: null })
-        }
-        if (url.pathname.endsWith('/api/v1/gfs/resources/root-1/children')) {
-          rootChildReads += 1
-          if (rootChildReads === 1) {
-            return jsonResponse({ items: [existingFile], nextCursor: null })
+          treeReads += 1
+          if (treeReads === 1) {
+            return jsonResponse({
+              rootResourceId: 'root-1',
+              items: [existingFile],
+              nextCursor: null,
+            })
           }
-          if (rootChildReads === 2) return new Response('temporary failure', { status: 503 })
+          if (treeReads === 2) return new Response('temporary failure', { status: 503 })
           return jsonResponse({
+            rootResourceId: 'root-1',
             items: [existingFile, remoteFolder],
             nextCursor: null,
           })
@@ -788,10 +784,10 @@ describe('GfsBrowser authoritative revalidation integration', () => {
       streamController!.enqueue(new TextEncoder().encode(`${await controlApiProducerFrame()}\n`))
     })
 
-    await waitFor(() => expect(rootChildReads).toBe(2))
+    await waitFor(() => expect(treeReads).toBe(2))
     expect(screen.getByRole('button', { name: 'existing.txt' })).toBeVisible()
     await screen.findByText('remote-folder', {}, { timeout: 2_000 })
-    expect(rootChildReads).toBe(3)
+    expect(treeReads).toBe(3)
     expect(screen.getByRole('button', { name: 'existing.txt' })).toBeVisible()
   })
 
@@ -871,8 +867,7 @@ describe('GfsBrowser authoritative revalidation integration', () => {
 
   it('retries a transient action-target resolve and closes only after authoritative deletion', async () => {
     const report = child('file-1', 'rid-file-1', 'report.md', 'file')
-    let childReads = 0
-    let revalidationStarted = false
+    let treeReads = 0
     let resolveReads = 0
     let streamController: ReadableStreamDefaultController<Uint8Array> | null = null
     vi.stubGlobal(
@@ -891,12 +886,10 @@ describe('GfsBrowser authoritative revalidation integration', () => {
           )
         }
         if (url.pathname.endsWith('/api/v1/gfs/tree')) {
-          return jsonResponse({ rootResourceId: 'root-1', items: [report], nextCursor: null })
-        }
-        if (url.pathname.endsWith('/api/v1/gfs/resources/root-1/children')) {
-          if (revalidationStarted) childReads += 1
+          treeReads += 1
           return jsonResponse({
-            items: childReads < 2 ? [report] : [],
+            rootResourceId: 'root-1',
+            items: treeReads < 3 ? [report] : [],
             nextCursor: null,
           })
         }
@@ -923,7 +916,6 @@ describe('GfsBrowser authoritative revalidation integration', () => {
     fireEvent.click(screen.getByRole('menuitem', { name: 'Rename' }))
     await screen.findByRole('dialog', { name: 'Rename file' })
 
-    revalidationStarted = true
     await act(async () => {
       streamController!.enqueue(new TextEncoder().encode(`${await controlApiProducerFrame()}\n`))
     })

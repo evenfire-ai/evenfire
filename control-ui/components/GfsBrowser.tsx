@@ -129,7 +129,9 @@ type ResolvedPreviewUpdate =
   | Extract<OpenPreviewState, { kind: 'video' }>
 
 interface Crumb {
-  /** null = the synthetic drive root (listed via /gfs/tree). */
+  /** True when this is the stable drive-root location, independent of its resource ID. */
+  isDriveRoot?: boolean
+  /** Null only until /gfs/tree resolves the drive root's resource ID. */
   id: string | null
   rid: string | null
   name: string
@@ -138,6 +140,21 @@ interface Crumb {
   kind?: 'directory'
   gfsUri?: string
   version?: number
+}
+
+function isDriveRootCrumb(crumb: Crumb | undefined): boolean {
+  return crumb?.isDriveRoot === true || crumb?.id === null
+}
+
+function sameCrumbLocation(left: Crumb | undefined, right: Crumb): boolean {
+  if (isDriveRootCrumb(left) || isDriveRootCrumb(right)) {
+    return isDriveRootCrumb(left) && isDriveRootCrumb(right)
+  }
+  return left?.id === right.id
+}
+
+function createDriveRootCrumb(): Crumb {
+  return { id: null, rid: null, name: '/', isDriveRoot: true }
 }
 
 interface GfsResolvedLocation {
@@ -175,6 +192,7 @@ function sameCrumbTrail(left: Crumb[], right: Crumb[]): boolean {
       const other = right[index]
       return (
         crumb.id === other?.id &&
+        isDriveRootCrumb(crumb) === isDriveRootCrumb(other) &&
         crumb.rid === other.rid &&
         crumb.gfsUri === other.gfsUri &&
         crumb.name === other.name &&
@@ -338,7 +356,7 @@ function entityChangeErrorStatus(error: unknown): number | undefined {
 
 export function GfsBrowser(): React.JSX.Element {
   const { showToast } = useToast()
-  const [crumbs, setCrumbs] = useState<Crumb[]>([{ id: null, rid: null, name: '/' }])
+  const [crumbs, setCrumbs] = useState<Crumb[]>([createDriveRootCrumb()])
   const [items, setItems] = useState<GfsChild[]>([])
   const [nextCursor, setNextCursor] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
@@ -499,7 +517,7 @@ export function GfsBrowser(): React.JSX.Element {
       const isCurrent = () =>
         !options?.signal?.aborted &&
         loadArbiter.isCurrent(loadToken) &&
-        currentCrumbRef.current?.id === crumb.id
+        sameCrumbLocation(currentCrumbRef.current, crumb)
       if (!background && !cursor) loadedPageCountRef.current = 1
       if (appending) {
         setLoadingMore(true)
@@ -510,10 +528,9 @@ export function GfsBrowser(): React.JSX.Element {
       }
       if (!background) setError('')
       try {
-        const path =
-          crumb.id === null
-            ? '/api/v1/gfs/tree'
-            : `/api/v1/gfs/resources/${encodeURIComponent(crumb.id)}/children`
+        const path = isDriveRootCrumb(crumb)
+          ? '/api/v1/gfs/tree'
+          : `/api/v1/gfs/resources/${encodeURIComponent(crumb.id!)}/children`
         const query: Record<string, string> = { drive: DRIVE }
         if (cursor) query.cursor = cursor
         const fetchPage = (pageQuery: Record<string, string>) =>
@@ -535,19 +552,14 @@ export function GfsBrowser(): React.JSX.Element {
           }
         }
         if (!isCurrent()) return
-        if (crumb.id === null && page.rootResourceId) {
-          setCrumbs(prev =>
-            prev[0]?.id === null
-              ? [
-                  {
-                    ...prev[0],
-                    id: page.rootResourceId,
-                    rid: ridOfResourceId(page.rootResourceId),
-                  },
-                  ...prev.slice(1),
-                ]
-              : prev
-          )
+        if (isDriveRootCrumb(crumb) && page.rootResourceId) {
+          const rootRid = ridOfResourceId(page.rootResourceId)
+          setCrumbs(prev => {
+            const root = prev[0]
+            if (!isDriveRootCrumb(root)) return prev
+            if (root.id === page.rootResourceId && root.rid === rootRid) return prev
+            return [{ ...root, id: page.rootResourceId, rid: rootRid }, ...prev.slice(1)]
+          })
         }
         const sortedItems = sortChildrenWithDirectoriesFirst(allItems)
         setItems(prev => (cursor ? [...prev, ...sortedItems] : sortedItems))
@@ -677,21 +689,23 @@ export function GfsBrowser(): React.JSX.Element {
     }
   }, [items])
 
+  const currentLocationKey = isDriveRootCrumb(current) ? '$root' : (current.id ?? '$root')
   useEffect(() => {
-    const locationKey = current.id ?? '$root'
-    const sameLocation = loadedLocationRef.current === locationKey
-    loadedLocationRef.current = locationKey
+    const locationCrumb = currentCrumbRef.current
+    if (!locationCrumb) return
+    const sameLocation = loadedLocationRef.current === currentLocationKey
+    loadedLocationRef.current = currentLocationKey
     if (!sameLocation) setLoadingMore(false)
     if (revalidateNextLoadRef.current) {
       revalidateNextLoadRef.current = false
       // Stale-while-revalidate: cached rows stay on screen (no spinner) while
       // the server state re-syncs; divergence overwrites the rows in place.
-      void load(current, undefined, { background: true })
+      void load(locationCrumb, undefined, { background: true })
       return
     }
-    void load(current, undefined, sameLocation ? { background: true } : undefined)
+    void load(locationCrumb, undefined, sameLocation ? { background: true } : undefined)
     // Reload whenever the current folder changes (navigation).
-  }, [current, load])
+  }, [currentLocationKey, load])
 
   // Navigating away from the moved folder retires the recovery notice: the
   // stale trail it labels is no longer on screen.
@@ -766,10 +780,9 @@ export function GfsBrowser(): React.JSX.Element {
     }
 
     const refreshVisibleDirectory = async (crumb: Crumb, signal: AbortSignal): Promise<void> => {
-      const path =
-        crumb.id === null
-          ? '/api/v1/gfs/tree'
-          : `/api/v1/gfs/resources/${encodeURIComponent(crumb.id)}/children`
+      const path = isDriveRootCrumb(crumb)
+        ? '/api/v1/gfs/tree'
+        : `/api/v1/gfs/resources/${encodeURIComponent(crumb.id!)}/children`
       const targetPageCount = Math.max(1, loadedPageCountRef.current)
       try {
         let page = (await apiGet(path, { drive: DRIVE }, { signal })) as TreePage
@@ -788,20 +801,15 @@ export function GfsBrowser(): React.JSX.Element {
           fetchedPageCount += 1
           if (signal.aborted) return
         }
-        if (signal.aborted || currentCrumbRef.current?.id !== crumb.id) return
-        if (crumb.id === null && rootResourceId) {
-          setCrumbs(previous =>
-            previous[0]?.id === null
-              ? [
-                  {
-                    ...previous[0],
-                    id: rootResourceId,
-                    rid: ridOfResourceId(rootResourceId),
-                  },
-                  ...previous.slice(1),
-                ]
-              : previous
-          )
+        if (signal.aborted || !sameCrumbLocation(currentCrumbRef.current, crumb)) return
+        if (isDriveRootCrumb(crumb) && rootResourceId) {
+          const rootRid = ridOfResourceId(rootResourceId)
+          setCrumbs(previous => {
+            const root = previous[0]
+            if (!isDriveRootCrumb(root)) return previous
+            if (root.id === rootResourceId && root.rid === rootRid) return previous
+            return [{ ...root, id: rootResourceId, rid: rootRid }, ...previous.slice(1)]
+          })
         }
         setItems(sortChildrenWithDirectoriesFirst(refreshedItems))
         setNextCursor(nextPageCursor)
@@ -815,7 +823,7 @@ export function GfsBrowser(): React.JSX.Element {
         }
         setError('')
       } catch (error) {
-        if (signal.aborted || currentCrumbRef.current?.id !== crumb.id) return
+        if (signal.aborted || !sameCrumbLocation(currentCrumbRef.current, crumb)) return
         if (!isSilentApiError(error)) {
           setError(error instanceof Error ? error.message : 'Failed to refresh EvenDrive')
         }
@@ -1007,7 +1015,7 @@ export function GfsBrowser(): React.JSX.Element {
       // Stream-triggered reads have their own non-destructive path. They never
       // enter the navigation/paging loader or clear its rows, dialogs, or error.
       revalidationTasks.push(refreshVisibleDirectory(visibleCrumb, signal))
-      if (visibleCrumb.id === null) {
+      if (isDriveRootCrumb(visibleCrumb)) {
         await Promise.all(revalidationTasks)
         return
       }
@@ -1016,7 +1024,11 @@ export function GfsBrowser(): React.JSX.Element {
       const generation = ++hierarchyRefreshGenerationRef.current
       const trailEpoch = trailReconstructionEpochRef.current
       const hierarchyRefresh = (async () => {
-        const rootCrumb = { ...(crumbsRef.current[0] ?? { id: null, rid: null, name: '/' }) }
+        const rootCrumb = {
+          ...(isDriveRootCrumb(crumbsRef.current[0])
+            ? crumbsRef.current[0]!
+            : createDriveRootCrumb()),
+        }
         const hierarchy = await resolveGfsHierarchy({
           readCurrent: () =>
             apiGet(
@@ -1501,7 +1513,7 @@ export function GfsBrowser(): React.JSX.Element {
       // clobber the trail they navigated to.
       if (index < 0) return prev
       return [
-        { id: null, rid: null, name: '/' },
+        isDriveRootCrumb(prev[0]) ? prev[0]! : createDriveRootCrumb(),
         ...ancestors,
         // Live crumb state (name/version included) — see the doc note above.
         ...prev.slice(index),
@@ -1907,7 +1919,10 @@ export function GfsBrowser(): React.JSX.Element {
       // reconstruction (R7-M1): its late response must not re-anchor the
       // trail this link-open just replaced.
       trailReconstructionEpochRef.current += 1
-      setCrumbs([{ id: null, rid: null, name: '/' }, folderResourceToCrumb(view)])
+      setCrumbs(prev => [
+        isDriveRootCrumb(prev[0]) ? prev[0]! : createDriveRootCrumb(),
+        folderResourceToCrumb(view),
+      ])
       setOpenLinkOpen(false)
     } catch (err) {
       setOpenLinkError(err instanceof Error ? err.message : 'Could not open the EvenDrive link.')
@@ -2159,7 +2174,10 @@ export function GfsBrowser(): React.JSX.Element {
                 // The synthetic drive root and ancestor crumbs stay plain.
                 const activeFolder = index === crumbs.length - 1 ? crumbToChild(crumb) : null
                 return (
-                  <span className="cu-gfs-breadcrumb__item" key={`${crumb.id ?? 'root'}-${index}`}>
+                  <span
+                    className="cu-gfs-breadcrumb__item"
+                    key={`${isDriveRootCrumb(crumb) ? 'root' : crumb.id}-${index}`}
+                  >
                     {index > 0 ? <IconChevronRight width={14} height={14} /> : null}
                     <button
                       className={`cu-gfs-breadcrumb__button${
