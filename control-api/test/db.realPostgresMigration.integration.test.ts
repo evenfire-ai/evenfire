@@ -1985,7 +1985,7 @@ describeRealPostgres('control-api real Postgres migrations', () => {
         attacker.release()
       }
 
-      const migrationVersions = await adminPool.query<{ version: string }>(
+      const migrationVersions = await dbPool.query<{ version: string }>(
         `SELECT version FROM schema_migrations WHERE version = $1`,
         ['0124_entity_change_definer_search_path']
       )
