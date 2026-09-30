@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { randomBytes } from 'node:crypto'
 import { Pool } from 'pg'
 import request from 'supertest'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 // R1-H3 fase 1 (host↔model) — regression test for the TOCTOU race the advisory
 // lock closes (mini-spec §7 / T3 / T4). It drives the race through the REAL route
@@ -173,8 +174,8 @@ describeRealPostgres('llm-model reductor ↔ host referencer serialization (R1-H
     if (previousPgEnv === undefined) delete process.env.CONTROL_API_PG_CONNECTION_STRING
     else process.env.CONTROL_API_PG_CONNECTION_STRING = previousPgEnv
     // Drain the module pool's connections first so DROP DATABASE has no live users.
-    await corePool?.end().catch(() => {})
-    await limiterPool?.end().catch(() => {})
+    await endPoolAndWaitForClients(corePool).catch(() => {})
+    await endPoolAndWaitForClients(limiterPool).catch(() => {})
     if (!adminPool) return
     await adminPool.query(
       `SELECT pg_terminate_backend(pid) FROM pg_stat_activity

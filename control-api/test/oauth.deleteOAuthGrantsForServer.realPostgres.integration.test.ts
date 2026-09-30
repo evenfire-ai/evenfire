@@ -11,6 +11,7 @@ import {
   oauthGrantExists,
   upsertOAuthGrant,
 } from '../src/oauth/store.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 /**
  * R1-L3 (T4) — the server-teardown purge (DEC-R2) observed as SURVIVING ROWS, not
@@ -54,7 +55,7 @@ describeRealPostgres('deleteOAuthGrantsForServer — full server-scoped wipe (re
   })
 
   afterAll(async () => {
-    await dbPool?.end()
+    await endPoolAndWaitForClients(dbPool)
     if (adminPool) {
       await adminPool.query(
         `SELECT pg_terminate_backend(pid) FROM pg_stat_activity

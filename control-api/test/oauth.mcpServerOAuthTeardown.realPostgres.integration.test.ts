@@ -19,6 +19,7 @@ import {
 } from '../src/oauth/store.js'
 import { rootLogger } from '../src/observability/logger.js'
 import { makeDcrTransport } from './fixtures/remoteOAuthDiscovery.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 /**
  * R3-H5 (T1/T3/T4) — the uninstall OAuth teardown fenced by the CR uid, observed as
@@ -59,7 +60,7 @@ describeRealPostgres('teardownMcpServerOAuthState — fenced by cr_uid (real Pos
   })
 
   afterAll(async () => {
-    await dbPool?.end()
+    await endPoolAndWaitForClients(dbPool)
     if (adminPool) {
       await adminPool.query(
         `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
@@ -274,7 +275,7 @@ describeRealPostgres('grant cr_uid sealing (D-T3, real Postgres)', () => {
   })
 
   afterAll(async () => {
-    await dbPool?.end()
+    await endPoolAndWaitForClients(dbPool)
     if (adminPool) {
       await adminPool.query(
         `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
