@@ -1,5 +1,5 @@
 export type GfsLoadToken =
-  | { kind: 'foreground'; navigationSequence: number; backgroundSequenceAtStart: number }
+  | { kind: 'foreground'; navigationSequence: number }
   | { kind: 'background'; navigationSequence: number; backgroundSequence: number }
 
 /** Own the sequence rules for foreground navigation and soft stream refreshes. */
@@ -12,7 +12,6 @@ export class GfsLoadArbiter {
     return {
       kind: 'foreground',
       navigationSequence: this.navigationSequence,
-      backgroundSequenceAtStart: this.backgroundSequence,
     }
   }
 

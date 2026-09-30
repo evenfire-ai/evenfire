@@ -21,7 +21,6 @@ describe('GFS list-load arbitration', () => {
     const foreground = {
       kind: 'foreground' as const,
       navigationSequence: 8,
-      backgroundSequenceAtStart: 3,
     }
 
     expect(isCurrentGfsLoad(foreground, 8, 4)).toBe(true)
