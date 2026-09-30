@@ -7560,6 +7560,43 @@ describe('McpServerWatcher.start ordering (#281 R6-bis)', () => {
 })
 
 describe('McpServerWatcher CommunicationChannel cache recovery', () => {
+  it('T1a: runs the real recovery scheduler once with current Hosts after channel authority returns', async () => {
+    vi.clearAllMocks()
+    mocks.watch.mockReset().mockResolvedValue({ abort: vi.fn() })
+    mocks.listNamespacedCustomObject.mockImplementation(async () => ({
+      metadata: { resourceVersion: '942' },
+      items: [],
+    }))
+    const watcher = new McpServerWatcher()
+    markHostInventoryAuthoritative(watcher)
+    const hosts: HostCRD[] = ['host-a', 'host-b'].map(name => ({
+      name,
+      namespace: 'mcp-host',
+      uid: `${name}-uid`,
+      spec: { host: name, contextRef: 'context-a', secretRef: 'host-secret' },
+    }))
+    for (const host of hosts) (watcher as any).hosts.set(host.name, host)
+    ;(watcher as any).ccCacheSynced = false
+    const request = vi.spyOn(watcher as any, 'requestHostFleetReconcile')
+    mocks.hostReconcileHosts.mockImplementationOnce(async current => {
+      expect(watcher.isCommunicationChannelCacheSynced()).toBe(true)
+      expect(current).toEqual(hosts)
+    })
+    try {
+      await expect((watcher as any).recoverCommunicationChannelCache()).resolves.toBe(true)
+      await request.mock.results[0]?.value
+      expect(mocks.hostReconcileHosts).toHaveBeenCalledExactlyOnceWith(hosts)
+      expect(request).toHaveBeenCalledExactlyOnceWith(
+        'CommunicationChannel recovery',
+        expect.any(Number)
+      )
+      expect(mocks.hostFullReconcile).not.toHaveBeenCalled()
+    } finally {
+      watcher.stop()
+      request.mockRestore()
+    }
+  })
+
   async function flushMicrotasks(): Promise<void> {
     for (let i = 0; i < 8; i += 1) await Promise.resolve()
   }

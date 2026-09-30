@@ -451,6 +451,43 @@ function persistHostDeployment(appsApi: MockAppsApi, host: HostCRD, initial: k8s
   return () => live
 }
 
+/** Persist exactly the emitted bytes, converting stringData as Kubernetes does. */
+function persistRuntimeCredential(
+  coreApi: ReturnType<typeof createMockCoreApi>,
+  initial: k8s.V1Secret
+) {
+  let live = structuredClone(initial)
+  const read = coreApi.readNamespacedSecret.getMockImplementation()!
+  coreApi.readNamespacedSecret.mockImplementation(request =>
+    request.name === live.metadata!.name ? Promise.resolve(structuredClone(live)) : read(request)
+  )
+  const replace = coreApi.replaceNamespacedSecret.getMockImplementation()!
+  coreApi.replaceNamespacedSecret.mockImplementation(async request => {
+    if (request.name !== live.metadata!.name) return replace(request)
+    const body = request.body as k8s.V1Secret
+    expect(body.metadata?.resourceVersion).toBe(live.metadata!.resourceVersion)
+    live = structuredClone({
+      ...body,
+      metadata: {
+        ...body.metadata,
+        resourceVersion: String(Number(live.metadata!.resourceVersion) + 1),
+      },
+      data: {
+        ...(body.data ?? {}),
+        ...Object.fromEntries(
+          Object.entries(body.stringData ?? {}).map(([key, value]) => [
+            key,
+            Buffer.from(value).toString('base64'),
+          ])
+        ),
+      },
+    })
+    delete live.stringData
+    return structuredClone(live)
+  })
+  return () => live
+}
+
 /** The mcp-host Deployment body sent to the K8s API (excludes channel-reader). */
 function hostDeploymentBody(appsApi: MockAppsApi, name: string): k8s.V1Deployment {
   const calls = [
@@ -2730,6 +2767,77 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
       // Scale the held Deployment back to zero so the next pass recovers it again.
       live().spec!.replicas = 0
       live().status = { readyReplicas: 0 }
+    }
+  })
+
+  it('T1b: narrows retained channel ingress once through the first authoritative recovery pass', async () => {
+    vi.useFakeTimers()
+    const startedAt = Date.now()
+    let cacheSynced = false
+    const host = makeStatelessHost({
+      status: { lifecycle: { state: 'active', wakeHandledGeneration: 1 } },
+    })
+    const { reconciler, appsApi, coreApi, customApi } = createReconciler({
+      isCommunicationChannelCacheSynced: () => cacheSynced,
+      countCommunicationChannels: () => 0,
+    })
+    customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(host))
+    const oauth = vi.fn(async () => false)
+    reconciler.setHostFrontsOAuthServer(oauth)
+    const log = vi.spyOn(HostContextLogger.prototype, 'info')
+    try {
+      const issue = vi.mocked(issueMcpHostRuntimeTokens)
+      const record = await mintedRuntimeCredentialRecord(host, { hasChannelIngress: true })
+      const previousScopes = issue.mock.calls.at(-1)![2]!
+      // Reuse the real producer fixture for the next distinct, decodable issuance.
+      vi.setSystemTime(startedAt + 1000)
+      await mintedRuntimeCredentialRecord(host, { bootstrap: 'fresh' })
+      const freshMaterial = await issue.mock.results.at(-1)!.value
+      const applied = trustedRuntimeDeployment(reconciler, host)
+      applied.spec!.template!.metadata!.annotations = {
+        ...applied.spec!.template!.metadata!.annotations,
+        'clerum.io/runtime-token-revision':
+          record.metadata!.annotations!['clerum.io/runtime-token-secret-revision'],
+      }
+      persistHostDeployment(appsApi, host, applied)
+      const live = persistRuntimeCredential(coreApi, record)
+      issue.mockClear()
+      await reconciler.reconcile(host)
+      expect(coreApi.readNamespacedSecret).toHaveBeenCalled()
+      expect(issue).not.toHaveBeenCalled()
+      cacheSynced = true
+      issue.mockResolvedValueOnce(freshMaterial)
+      await reconciler.reconcile(host)
+      expect(issue).toHaveBeenCalledOnce()
+      const scopes = issue.mock.calls[0]![2]!
+      const channelScopes = previousScopes.filter(scope => scope.startsWith('workflow:'))
+      expect(channelScopes.length).toBeGreaterThan(0)
+      for (const scope of channelScopes) expect(scopes).not.toContain(scope)
+      expect(live().metadata!.annotations!['clerum.io/runtime-token-has-channel-ingress']).toBe(
+        'false'
+      )
+      expect(log).toHaveBeenCalledWith(
+        'rotated mcp-host-runtime-token Secret',
+        expect.objectContaining({ reason: 'contract_changed', rolloutRequired: true })
+      )
+      issue.mockClear()
+      coreApi.readNamespacedSecret.mockClear()
+      oauth.mockClear()
+      log.mockClear()
+      await reconciler.reconcile(host)
+      expect(coreApi.readNamespacedSecret).toHaveBeenCalledWith({
+        name: record.metadata!.name,
+        namespace: host.namespace,
+      })
+      expect(oauth).toHaveBeenCalled()
+      expect(log).toHaveBeenCalledWith(
+        'reusing mcp-host-runtime-token Secret',
+        expect.objectContaining({ host: host.name })
+      )
+      expect(issue).not.toHaveBeenCalled()
+    } finally {
+      log.mockRestore()
+      vi.useRealTimers()
     }
   })
 
