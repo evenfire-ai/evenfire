@@ -306,6 +306,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   const openUriGenerationRef = useRef(0)
   const foregroundOpenUriPendingRef = useRef<number | null>(null)
   const backgroundOpenUriGenerationRef = useRef(0)
+  const pendingDeniedResourceIdRef = useRef<string | null>(null)
   // Any browser-location update supersedes an in-flight URI resolution. This
   // includes navigation through the tree/crumbs as well as metadata updates,
   // so an older refresh (including a late 403/404) cannot overwrite a newer
@@ -583,18 +584,25 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   }, [queryClient])
   const clearInaccessibleGfsLocation = useCallback(() => {
     const resourceId = currentCrumbRef.current?.resourceId
-    if (resourceId && sessionScope) {
-      queryClient.removeQueries({
-        exact: true,
-        queryKey: desktopQueryKeys.gfsChildren(sessionScope, resourceId, DRIVE),
-      })
-    }
+    pendingDeniedResourceIdRef.current = resourceId ?? null
     // A resource-scoped denial is not loss of the authenticated session.
     // Keep accessible roots and other GFS scopes intact, and avoid the
     // foreground navigation setter so a background denial cannot advance it.
     setCrumbsState([])
     setOpenError('This folder or file is no longer available.')
-  }, [queryClient, sessionScope])
+  }, [])
+  useEffect(() => {
+    const resourceId = pendingDeniedResourceIdRef.current
+    if (!resourceId || current?.resourceId === resourceId) return
+    pendingDeniedResourceIdRef.current = null
+    if (!sessionScope) return
+    // Remove the denied query after its observer has left the current folder;
+    // removing an active infinite query can transiently expose an empty page.
+    queryClient.removeQueries({
+      exact: true,
+      queryKey: desktopQueryKeys.gfsChildren(sessionScope, resourceId, DRIVE),
+    })
+  }, [current?.resourceId, queryClient, sessionScope])
   const revokeAccess = useCallback(() => {
     setAccessState('revoked')
     clearGfsState()
@@ -993,6 +1001,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         }
 
         if (!isCurrent()) return false
+        if (!background) setOpenError(null)
         setCrumbsState([...ancestors.reverse(), crumb])
         return crumb
       } catch (error) {

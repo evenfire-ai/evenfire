@@ -2058,6 +2058,62 @@ describe('useGfsBrowserController', () => {
     expect(lastHarnessQueryClient?.getQueryData(childrenKey)).toBeUndefined()
   })
 
+  it('does not let an old folder denial cancel a pending destination navigation', async () => {
+    const root = await resolveResource(
+      resolvedDirectory('root', 'Root', { gfsUri: 'gfs://main/root' })
+    )
+    const folderB = await resolveResource(
+      resolvedDirectory('folder-b', 'Folder B', { gfsUri: 'gfs://main/folder-b' })
+    )
+    let finishNavigation!: (resource: typeof folderB) => void
+    const pendingNavigation = new Promise<typeof folderB>(resolve => {
+      finishNavigation = resolve
+    })
+    const resolve = vi
+      .fn()
+      .mockResolvedValueOnce(root)
+      .mockImplementationOnce(() => pendingNavigation)
+    const listChildren = vi
+      .fn()
+      .mockResolvedValueOnce(await listChildrenPage([childView('leaf', 'leaf.md', 'file')]))
+      .mockRejectedValueOnce(new Error('403 Forbidden: resource unavailable httpStatus=403'))
+      .mockResolvedValue({ items: [], nextCursor: null })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve,
+          listChildren,
+          affordances: vi.fn(async () => ({
+            held: ['read'],
+            canDelegate: false,
+            grantableBits: [],
+            canCreateShare: false,
+          })),
+        },
+      },
+    })
+
+    render(<Probe />, { wrapper: ProductionHarness })
+    await act(async () => screen.getByRole('button', { name: 'open' }).click())
+    await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('root'))
+    await waitFor(() => expect(listChildren).toHaveBeenCalledTimes(1))
+    screen.getByRole('button', { name: 'open user destination' }).click()
+    await waitFor(() => expect(resolve).toHaveBeenCalledTimes(2))
+
+    void lastHarnessQueryClient?.invalidateQueries({
+      exact: true,
+      queryKey: desktopQueryKeys.gfsChildren(':user-a:team-a', 'root', 'main'),
+    })
+    await waitFor(() => expect(listChildren).toHaveBeenCalledTimes(2))
+    await act(async () => finishNavigation(folderB))
+
+    await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('folder-b'))
+    expect(screen.getByTestId('current-name').textContent).toBe('Folder B')
+    expect(screen.getByTestId('open-error').textContent).toBe('none')
+  })
+
   it('revalidates accessible resources on remount even under production cache defaults', async () => {
     const listAccessible = vi.fn(async () => ({ items: [], nextCursor: null }))
     Object.defineProperty(window, 'clerum', {
