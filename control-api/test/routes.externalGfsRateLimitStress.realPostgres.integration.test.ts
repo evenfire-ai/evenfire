@@ -227,8 +227,8 @@ describeRealPostgres('external GFS rate limits under concurrent load (real Postg
       if (value === undefined) delete process.env[key]
       else process.env[key] = value
     }
-    await endPoolAndWaitForClients(corePool).catch(() => {})
-    await endPoolAndWaitForClients(limiterPool).catch(() => {})
+    await endPoolAndWaitForClients(corePool)
+    await endPoolAndWaitForClients(limiterPool)
     if (!adminPool) return
     await adminPool.query(
       `SELECT pg_terminate_backend(pid) FROM pg_stat_activity

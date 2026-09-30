@@ -169,9 +169,9 @@ describeRealPostgres('llm-model reductor ↔ grant upsert serialization (R1-H3 f
   afterAll(async () => {
     if (previousPgEnv === undefined) delete process.env.CONTROL_API_PG_CONNECTION_STRING
     else process.env.CONTROL_API_PG_CONNECTION_STRING = previousPgEnv
-    await endPoolAndWaitForClients(racePool).catch(() => {})
-    await endPoolAndWaitForClients(corePool).catch(() => {})
-    await endPoolAndWaitForClients(limiterPool).catch(() => {})
+    await endPoolAndWaitForClients(racePool)
+    await endPoolAndWaitForClients(corePool)
+    await endPoolAndWaitForClients(limiterPool)
     if (!adminPool) return
     await adminPool.query(
       `SELECT pg_terminate_backend(pid) FROM pg_stat_activity

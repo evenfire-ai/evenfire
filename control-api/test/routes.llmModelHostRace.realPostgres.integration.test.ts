@@ -174,8 +174,8 @@ describeRealPostgres('llm-model reductor ↔ host referencer serialization (R1-H
     if (previousPgEnv === undefined) delete process.env.CONTROL_API_PG_CONNECTION_STRING
     else process.env.CONTROL_API_PG_CONNECTION_STRING = previousPgEnv
     // Drain the module pool's connections first so DROP DATABASE has no live users.
-    await endPoolAndWaitForClients(corePool).catch(() => {})
-    await endPoolAndWaitForClients(limiterPool).catch(() => {})
+    await endPoolAndWaitForClients(corePool)
+    await endPoolAndWaitForClients(limiterPool)
     if (!adminPool) return
     await adminPool.query(
       `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
