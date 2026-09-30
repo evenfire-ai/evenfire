@@ -307,6 +307,9 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   const foregroundOpenUriPendingRef = useRef<number | null>(null)
   const backgroundOpenUriGenerationRef = useRef(0)
   const pendingDeniedResourceIdRef = useRef<string | null>(null)
+  const backgroundLocationRetryRef = useRef<(uri: string) => void>(() => undefined)
+  const backgroundLocationRetryTimerRef = useRef<number | null>(null)
+  const backgroundLocationRetryAttemptRef = useRef(0)
   // Any browser-location update supersedes an in-flight URI resolution. This
   // includes navigation through the tree/crumbs as well as metadata updates,
   // so an older refresh (including a late 403/404) cannot overwrite a newer
@@ -623,6 +626,22 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     },
     [revokeAccess]
   )
+  const scheduleBackgroundLocationRetry = useCallback((uri: string, error: unknown) => {
+    const message = toMessage(error)
+    const status = parseHttpStatus(message)
+    if (status !== null && status !== 429 && status < 500) return
+    if (backgroundLocationRetryTimerRef.current !== null) return
+    const attempt = backgroundLocationRetryAttemptRef.current + 1
+    backgroundLocationRetryAttemptRef.current = attempt
+    const retryAfterSeconds = parseRetryAfterSeconds(message)
+    const delayMs = retryAfterSeconds
+      ? Math.min(retryAfterSeconds * 1000, 60_000)
+      : Math.min(500 * 2 ** Math.min(attempt - 1, 4), 8_000)
+    backgroundLocationRetryTimerRef.current = window.setTimeout(() => {
+      backgroundLocationRetryTimerRef.current = null
+      backgroundLocationRetryRef.current(uri)
+    }, delayMs)
+  }, [])
   // All GFS mutations share the central fail-closed boundary: an authority
   // rejection (401 / typed lifecycle code) revokes the session even when the
   // caller would only have toasted. Policy verdicts (403/412) stay local.
@@ -953,6 +972,11 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
           (backgroundOpenUriGenerationRef.current === backgroundGeneration &&
             currentCrumbRef.current?.gfsUri === uri))
       if (!background) {
+        if (backgroundLocationRetryTimerRef.current !== null) {
+          window.clearTimeout(backgroundLocationRetryTimerRef.current)
+          backgroundLocationRetryTimerRef.current = null
+        }
+        backgroundLocationRetryAttemptRef.current = 0
         foregroundOpenUriPendingRef.current = generation
         setOpenError(null)
         setResolving(true)
@@ -993,7 +1017,12 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
               })
             }
             parentResourceId = parent.parentResourceId
-          } catch {
+          } catch (error) {
+            if (background) {
+              setOpenError(toPresentedMessage(error))
+              scheduleBackgroundLocationRetry(uri, error)
+              return false
+            }
             // A direct file grant can be readable while its parent is not. Keep
             // the file open and show only the ancestors the caller may resolve.
             break
@@ -1001,7 +1030,14 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         }
 
         if (!isCurrent()) return false
-        if (!background) setOpenError(null)
+        setOpenError(null)
+        if (background) {
+          if (backgroundLocationRetryTimerRef.current !== null) {
+            window.clearTimeout(backgroundLocationRetryTimerRef.current)
+            backgroundLocationRetryTimerRef.current = null
+          }
+          backgroundLocationRetryAttemptRef.current = 0
+        }
         setCrumbsState([...ancestors.reverse(), crumb])
         return crumb
       } catch (error) {
@@ -1019,6 +1055,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
             clearInaccessibleGfsLocation()
           } else {
             setOpenError(toPresentedMessage(error))
+            if (background) scheduleBackgroundLocationRetry(uri, error)
           }
         }
         return false
@@ -1029,8 +1066,20 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         }
       }
     },
-    [clearInaccessibleGfsLocation, handleAuthorityFailure]
+    [clearInaccessibleGfsLocation, handleAuthorityFailure, scheduleBackgroundLocationRetry]
   )
+  useEffect(() => {
+    backgroundLocationRetryRef.current = uri => {
+      void openUri(uri, { background: true, clearIfUnavailable: true })
+    }
+    return () => {
+      backgroundLocationRetryRef.current = () => undefined
+      if (backgroundLocationRetryTimerRef.current !== null) {
+        window.clearTimeout(backgroundLocationRetryTimerRef.current)
+        backgroundLocationRetryTimerRef.current = null
+      }
+    }
+  }, [openUri, sessionScope])
 
   const refreshCurrentLocation = useCallback(
     async (options?: { background?: boolean }) => {

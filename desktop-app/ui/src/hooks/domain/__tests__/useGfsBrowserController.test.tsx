@@ -2114,6 +2114,55 @@ describe('useGfsBrowserController', () => {
     expect(screen.getByTestId('open-error').textContent).toBe('none')
   })
 
+  it('keeps the complete breadcrumb trail and retries a transient ancestor failure', async () => {
+    const parent = await resolveResource(
+      resolvedDirectory('parent', 'Parent', { gfsUri: 'gfs://main/parent', path: '/Parent' })
+    )
+    const leaf = await resolveResource(
+      resolvedDirectory('leaf', 'Leaf', {
+        gfsUri: 'gfs://main/root',
+        path: '/Parent/Leaf',
+        parentResourceId: 'parent',
+      })
+    )
+    const resolve = vi
+      .fn()
+      .mockResolvedValueOnce(leaf)
+      .mockResolvedValueOnce(parent)
+      .mockResolvedValueOnce(leaf)
+      .mockRejectedValueOnce(new Error('503 Service Unavailable'))
+      .mockResolvedValueOnce(leaf)
+      .mockResolvedValueOnce(parent)
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          resolve,
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+          affordances: vi.fn(async () => ({
+            held: [],
+            canDelegate: false,
+            grantableBits: [],
+            canCreateShare: false,
+          })),
+        },
+      },
+    })
+
+    render(<Probe />, { wrapper: Harness })
+    await act(async () => screen.getByRole('button', { name: 'open' }).click())
+    await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('leaf'))
+    expect(screen.getByTestId('crumbs').textContent).toBe('Parent / Leaf')
+
+    await act(async () => {
+      screen.getByRole('button', { name: 'background refresh current location' }).click()
+    })
+    await waitFor(() => expect(resolve).toHaveBeenCalledTimes(4))
+    expect(screen.getByTestId('crumbs').textContent).toBe('Parent / Leaf')
+    await waitFor(() => expect(resolve).toHaveBeenCalledTimes(6), { timeout: 2000 })
+    expect(screen.getByTestId('crumbs').textContent).toBe('Parent / Leaf')
+  })
+
   it('revalidates accessible resources on remount even under production cache defaults', async () => {
     const listAccessible = vi.fn(async () => ({ items: [], nextCursor: null }))
     Object.defineProperty(window, 'clerum', {
