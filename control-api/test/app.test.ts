@@ -24,6 +24,7 @@ describe('app router wiring', () => {
   beforeEach(() => {
     rateLimiter.checkAndIncrement.mockResolvedValue({
       allowed: true,
+      backendAvailable: true,
       remaining: 9,
       resetMs: Date.now() + 60_000,
       windowStartMs: Date.now(),
@@ -260,6 +261,8 @@ describe('app router wiring', () => {
     })
     vi.spyOn(pool, 'connect').mockResolvedValue({
       query: transactionQuery,
+      on: vi.fn(),
+      removeListener: vi.fn(),
       release: vi.fn(),
     } as never)
 
@@ -269,7 +272,9 @@ describe('app router wiring', () => {
       .set('x-service-token', 'external-rest-api')
       .set('x-user-session-token', currentToken)
       .send(payload)
-      .expect(200)
+      .expect(response => {
+        expect(response.status, JSON.stringify(response.body)).toBe(200)
+      })
     expect(res.body.token).toBeTruthy()
     expect(transactionQuery.mock.calls.map(([sql]) => String(sql))).toEqual([
       'BEGIN',
