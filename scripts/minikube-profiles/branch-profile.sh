@@ -1366,6 +1366,12 @@ cmd_stop() {
   require_existing_profile
   require_local_context_endpoint
   require_context_profile_known_to_minikube
+  # minikube listing the profile does not prove the context reaches its
+  # cluster. A cluster that answers must identify the profile before any
+  # record is cleared or minikube -p runs; a stopped one cannot be asked.
+  if cluster_reachable; then
+    require_profile_cluster_identity
+  fi
   # Clear the verified port-forward records first: a stopped cluster leaves
   # records naming dead kubectl processes, and the next T2 preflight refuses
   # them with PORT_FORWARD_CONFLICT. A record that cannot be verified is kept
@@ -1413,6 +1419,10 @@ cmd_delete() {
   fi
   require_local_context_endpoint
   require_context_profile_known_to_minikube
+  # As in cmd_stop: a cluster that answers must identify the profile.
+  if cluster_reachable; then
+    require_profile_cluster_identity
+  fi
   # The registry (pids/*.pid) outlives the cluster; clear the port-forward
   # records so the deleted profile does not leave PORT_FORWARD_CONFLICT behind.
   # As in cmd_stop, a kept record is reported and fails the command, but does
