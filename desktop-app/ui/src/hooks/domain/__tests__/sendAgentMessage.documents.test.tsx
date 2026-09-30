@@ -275,6 +275,50 @@ describe('sendAgentMessage — a Host without file attachments (#678 D13)', () =
     expect(rendered.result.current.failedAgentSend?.files).toHaveLength(2)
   })
 
+  it('async task accepted without listing the file: keeps the snapshot after the task succeeds', async () => {
+    clerum.rpc.getTaskResult.mockResolvedValue({ status: 'completed', response: 'all done' })
+    const rendered = renderController()
+    await settleMount()
+    const file = await addReadyFile(rendered)
+    clerum.rpc.invokeHostMessage.mockResolvedValueOnce({
+      taskId: 'task-doc',
+      acceptedAttachmentIds: [],
+    })
+
+    const send = act(async () => {
+      await rendered.result.current.handleSendAgentMessage('Summarize this')
+    })
+    await waitFor(() => expect(clerum.hasProgressHandler('task-doc')).toBe(true))
+    await send
+
+    // The sent bubble lists the document by name.
+    const sent = rendered.result.current.chatMessages.find(message => message.role === 'user')
+    expect(sent?.attachments).toEqual([
+      expect.objectContaining({ id: file.id, type: 'uploaded_file', label: 'notes.txt' }),
+    ])
+
+    await act(async () => {
+      clerum.emitTaskProgress('task-doc', {
+        type: 'terminal',
+        data: { taskId: 'task-doc', status: 'completed' },
+      })
+    })
+
+    // Witness that the success branch ran: the durable reply was persisted.
+    await waitFor(() =>
+      expect(clerum.chat.appendMessages).toHaveBeenCalledWith(
+        'agent-x',
+        expect.any(String),
+        expect.arrayContaining([
+          expect.objectContaining({ role: 'assistant', content: 'all done' }),
+        ])
+      )
+    )
+    expect(rendered.spies.pushToast).toHaveBeenCalledWith(UNSUPPORTED, 'error')
+    expect(rendered.result.current.failedAgentSend?.message).toBe(UNSUPPORTED)
+    expect(rendered.result.current.failedAgentSend?.files.map(item => item.id)).toEqual([file.id])
+  })
+
   it('does not read an empty ack (an unreadable Host answer) as a dropped file', async () => {
     const rendered = renderController()
     await settleMount()

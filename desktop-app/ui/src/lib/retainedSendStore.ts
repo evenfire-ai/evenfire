@@ -11,7 +11,8 @@
  * and released only on an explicit terminal outcome: its own successful reply
  * or cancel, a user-initiated discard (which also drops the older failures of
  * that chat), or a newer send for the same chat that reaches a successful
- * terminal, which supersedes every failure recorded before it. A snapshot still
+ * terminal, which supersedes every failure recorded before it except one whose
+ * documents the Host never received (#678 D13). A snapshot still
  * awaiting its own terminal is never released by another send. Receiving a
  * `taskId` is NOT a terminal acknowledgement — a started task can still fail —
  * so it never releases the snapshot by itself.
@@ -129,17 +130,22 @@ export function createRetainedSendStore(changed: () => void) {
    * Releases the failed snapshots of one chat recorded at or before
    * `upToTimestamp`. Snapshots without a failure are still awaiting their own
    * terminal and stay held: that send can still fail, and then its snapshot is
-   * the only copy of the payload.
+   * the only copy of the payload. A later success passes
+   * `keepUndeliveredFiles`: it supersedes an older failure, but not documents
+   * the Host never received, which exist nowhere else. A user discard releases
+   * those too.
    */
   function releaseRetainedFailuresForChat(
     agentRef: string,
     chatId: string | null,
-    upToTimestamp: number
+    upToTimestamp: number,
+    options: { keepUndeliveredFiles?: boolean } = {}
   ): void {
     let released = false
     for (const [key, snapshot] of snapshots) {
       if (snapshot.agentRef !== agentRef || snapshot.chatId !== chatId) continue
       if (!snapshot.failure || snapshot.timestamp > upToTimestamp) continue
+      if (options.keepUndeliveredFiles && snapshot.reason === 'host_files_unsupported') continue
       snapshots.delete(key)
       released = true
     }
@@ -158,7 +164,9 @@ export function createRetainedSendStore(changed: () => void) {
   ): void {
     const succeeded = snapshots.get(keyFor(agentRef, chatId, userMessageId))
     if (succeeded) {
-      releaseRetainedFailuresForChat(succeeded.agentRef, succeeded.chatId, succeeded.timestamp)
+      releaseRetainedFailuresForChat(succeeded.agentRef, succeeded.chatId, succeeded.timestamp, {
+        keepUndeliveredFiles: true,
+      })
     }
     releaseRetainedSend(agentRef, chatId, userMessageId)
   }
@@ -173,9 +181,23 @@ export function createRetainedSendStore(changed: () => void) {
       snapshot => snapshot.taskId === taskId && snapshot.reason !== 'host_files_unsupported'
     )
     for (const snapshot of succeeded) {
-      releaseRetainedFailuresForChat(snapshot.agentRef, snapshot.chatId, snapshot.timestamp)
+      releaseRetainedFailuresForChat(snapshot.agentRef, snapshot.chatId, snapshot.timestamp, {
+        keepUndeliveredFiles: true,
+      })
       releaseRetainedSend(snapshot.agentRef, snapshot.chatId, snapshot.userMessageId)
     }
+  }
+
+  /**
+   * A snapshot whose documents the Host never received keeps that reason when a
+   * later failure is recorded: the reason is what stops a later success from
+   * releasing files that exist nowhere else. Only the shown failure changes.
+   */
+  function nextReason(
+    snapshot: RetainedSendSnapshot,
+    reason: RetainedSendReason
+  ): RetainedSendReason {
+    return snapshot.reason === 'host_files_unsupported' ? snapshot.reason : reason
   }
 
   /**
@@ -190,7 +212,11 @@ export function createRetainedSendStore(changed: () => void) {
   ): void {
     for (const [key, snapshot] of snapshots) {
       if (snapshot.taskId !== taskId) continue
-      snapshots.set(key, { ...snapshot, reason, failure: { message, kind } })
+      snapshots.set(key, {
+        ...snapshot,
+        reason: nextReason(snapshot, reason),
+        failure: { message, kind },
+      })
       changed()
     }
   }
@@ -212,7 +238,11 @@ export function createRetainedSendStore(changed: () => void) {
     const key = keyFor(agentRef, chatId, userMessageId)
     const existing = snapshots.get(key)
     if (!existing) return
-    snapshots.set(key, { ...existing, reason, failure: { message, kind } })
+    snapshots.set(key, {
+      ...existing,
+      reason: nextReason(existing, reason),
+      failure: { message, kind },
+    })
     changed()
   }
   return {
