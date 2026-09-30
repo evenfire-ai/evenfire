@@ -156,6 +156,8 @@ export async function admitLegacySessionCreation(
   if (reset !== null) headers['X-RateLimit-Reset'] = reset
 
   return { allowed: false, status: 429, retryAfterSeconds, headers }
+}
+
 export class ControlApiHostRpcAdmissionError extends Error {
   constructor(
     readonly status: 429 | 503,
