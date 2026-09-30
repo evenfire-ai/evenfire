@@ -150,6 +150,9 @@ function Probe() {
       <button type="button" onClick={() => swallow(ctrl.openUri('gfs://main/root'))}>
         open
       </button>
+      <button type="button" onClick={() => swallow(ctrl.openUri('gfs://main/denied-link'))}>
+        open denied link
+      </button>
       <button type="button" onClick={() => swallow(ctrl.refreshCurrentLocation())}>
         refresh current location
       </button>
@@ -422,6 +425,50 @@ describe('useGfsBrowserController', () => {
 
     await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('none'))
     expect(lastHarnessQueryClient?.getQueryData(grantsKey)).toBeUndefined()
+  })
+
+  it('preserves a failed link error when a background refresh resolves the current folder', async () => {
+    const root = await resolveResource(
+      resolvedDirectory('root', 'Root', { gfsUri: 'gfs://main/root' })
+    )
+    const resolve = vi
+      .fn()
+      .mockResolvedValueOnce(root)
+      .mockRejectedValueOnce(new Error(await resolveDeniedMessage('gfs://main/denied-link')))
+      .mockResolvedValue(root)
+
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve,
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+          affordances: vi.fn(async () => ({
+            held: [],
+            canDelegate: false,
+            grantableBits: [],
+            canCreateShare: false,
+          })),
+        },
+      },
+    })
+
+    render(<Probe />, { wrapper: Harness })
+    await act(async () => screen.getByRole('button', { name: 'open' }).click())
+    await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('root'))
+
+    await act(async () => screen.getByRole('button', { name: 'open denied link' }).click())
+    await waitFor(() => expect(screen.getByTestId('open-error').textContent).not.toBe('none'))
+    const linkError = screen.getByTestId('open-error').textContent
+
+    await act(async () =>
+      screen.getByRole('button', { name: 'background refresh current location' }).click()
+    )
+
+    await waitFor(() => expect(resolve).toHaveBeenCalledTimes(3))
+    expect(screen.getByTestId('current').textContent).toBe('root')
+    expect(screen.getByTestId('open-error').textContent).toBe(linkError)
   })
 
   it.each(['success', 'denial'] as const)(

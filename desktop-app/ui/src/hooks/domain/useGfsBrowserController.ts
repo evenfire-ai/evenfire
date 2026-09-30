@@ -306,6 +306,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   const openUriGenerationRef = useRef(0)
   const foregroundOpenUriPendingRef = useRef<number | null>(null)
   const backgroundOpenUriGenerationRef = useRef(0)
+  const backgroundOpenErrorRef = useRef(false)
   const pendingDeniedResourceIdRef = useRef<string | null>(null)
   const backgroundLocationRetryRef = useRef<(uri: string) => void>(() => undefined)
   const backgroundLocationRetryTimerRef = useRef<number | null>(null)
@@ -978,6 +979,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         }
         backgroundLocationRetryAttemptRef.current = 0
         foregroundOpenUriPendingRef.current = generation
+        backgroundOpenErrorRef.current = false
         setOpenError(null)
         setResolving(true)
       }
@@ -1019,6 +1021,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
             parentResourceId = parent.parentResourceId
           } catch (error) {
             if (background) {
+              backgroundOpenErrorRef.current = true
               setOpenError(toPresentedMessage(error))
               scheduleBackgroundLocationRetry(uri, error)
               return false
@@ -1030,7 +1033,13 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         }
 
         if (!isCurrent()) return false
-        setOpenError(null)
+        // A background resolve may recover its own transient error, but it
+        // must not erase a foreground link/navigation error being shown for a
+        // separate user action.
+        if (!background || backgroundOpenErrorRef.current) {
+          backgroundOpenErrorRef.current = false
+          setOpenError(null)
+        }
         if (background) {
           if (backgroundLocationRetryTimerRef.current !== null) {
             window.clearTimeout(backgroundLocationRetryTimerRef.current)
@@ -1054,6 +1063,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
           if (options?.clearIfUnavailable && (status === 403 || status === 404)) {
             clearInaccessibleGfsLocation()
           } else {
+            if (background) backgroundOpenErrorRef.current = true
             setOpenError(toPresentedMessage(error))
             if (background) scheduleBackgroundLocationRetry(uri, error)
           }
