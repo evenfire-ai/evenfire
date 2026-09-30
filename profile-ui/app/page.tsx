@@ -48,23 +48,24 @@ function HomeContent() {
           <p className="body-copy">
             You are signed in to the Evenfire <strong>Profile Portal</strong>.
           </p>
-          {desktopAppLink.state === 'loading' ? (
-            <p className="body-copy" role="status" aria-live="polite">
-              Checking desktop app setup…
-            </p>
-          ) : desktopAppLink.state === 'unavailable' ? (
-            <p className="body-copy" role="status" aria-live="polite">
-              Desktop app setup is unavailable right now. Visit{' '}
-              <Link href={PROFILE_ROUTES.settings.profile}>Settings</Link> to review setup options.
-            </p>
-          ) : (
-            <p className="body-copy">
-              <a className="cu-home-desktop-link" href={desktopAppLink.href}>
-                Open Desktop App <IconExternalLink />
-              </a>{' '}
-              instead.
-            </p>
-          )}
+          <p className="body-copy" role="status" aria-live="polite" aria-atomic="true">
+            {desktopAppLink.state === 'loading' ? (
+              'Checking desktop app setup…'
+            ) : desktopAppLink.state === 'unavailable' ? (
+              <>
+                Desktop app setup is unavailable right now. Visit{' '}
+                <Link href={PROFILE_ROUTES.settings.profile}>Settings</Link> to review setup
+                options.
+              </>
+            ) : (
+              <>
+                <a className="cu-home-desktop-link" href={desktopAppLink.href}>
+                  Open Desktop App <IconExternalLink />
+                </a>{' '}
+                instead.
+              </>
+            )}
+          </p>
         </div>
       </div>
 

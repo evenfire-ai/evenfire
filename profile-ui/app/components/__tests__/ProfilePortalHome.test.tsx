@@ -69,6 +69,28 @@ describe('Profile Portal home desktop app link', () => {
     expect(screen.queryByRole('link', { name: 'Open Desktop App' })).not.toBeInTheDocument()
   })
 
+  it('keeps one polite live region as desktop setup changes from loading to ready', async () => {
+    let resolveEnvironment!: (environment: DesktopEnvironmentResponse) => void
+    api.getDesktopEnvironment.mockReturnValue(
+      new Promise<DesktopEnvironmentResponse>(resolve => {
+        resolveEnvironment = resolve
+      })
+    )
+
+    render(<Page />)
+
+    const status = screen.getByRole('status')
+    expect(status).toHaveTextContent('Checking desktop app setup…')
+    expect(status).toHaveAttribute('aria-live', 'polite')
+    expect(status).toHaveAttribute('aria-atomic', 'true')
+
+    resolveEnvironment(desktopEnvironment)
+
+    await screen.findByRole('link', { name: 'Open Desktop App' })
+    expect(screen.getByRole('status')).toBe(status)
+    expect(status).toHaveTextContent('Open Desktop App instead.')
+  })
+
   it('explains unavailable setup and links to Settings when discovery fails', async () => {
     api.getDesktopEnvironment.mockRejectedValue(new Error('Service unavailable'))
 
