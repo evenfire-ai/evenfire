@@ -155,6 +155,7 @@ code {
   display: grid;
   gap: 0.85rem;
   max-width: 720px;
+  margin-inline: auto;
 }
 
 .cu-card {
