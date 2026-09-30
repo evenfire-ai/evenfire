@@ -183,3 +183,20 @@ const CONTEXT_LENGTH_REFUSALS = [
 export function isContextLengthRefusal(code: string, message: string): boolean {
   return code === 'limit' && CONTEXT_LENGTH_REFUSALS.some(pattern => pattern.test(message))
 }
+
+/**
+ * The code for a contract refusal that is not an attachment refusal, shared by
+ * both providers' pre-dispatch checks and the Grok proxy envelope: a
+ * conversation-volume limit is a context-length failure, any other `size`
+ * refusal is `payload_too_large`, and everything else (`count` included) is an
+ * invalid request.
+ */
+export function canonicalRefusalCode(refusal: {
+  code: string
+  message: string
+  kind?: string
+}): string {
+  if (isContextLengthRefusal(refusal.code, refusal.message)) return 'request_limit_exceeded'
+  if (refusal.kind === 'size') return 'payload_too_large'
+  return 'invalid_request'
+}

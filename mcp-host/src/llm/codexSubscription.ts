@@ -20,7 +20,7 @@ import {
 } from './attachmentBudgetRefusal'
 import { CodexLlmProxyClient, CodexProxyError } from './codexLlmProxyClient'
 import { classifyUnknown } from './errorClassification'
-import { IMAGE_SOURCE_INVALID, isContextLengthRefusal, projectMessage } from './imageSource'
+import { IMAGE_SOURCE_INVALID, canonicalRefusalCode, projectMessage } from './imageSource'
 import { CodexAuthorizeError, ProviderAttemptAuthorizer } from './providerAttemptAuthorizer'
 import { rateLimitRetryDelayMs, waitBeforeRetry } from './rateLimitRetry'
 import { type LlmProvider, descriptorFor } from './registryCore'
@@ -468,11 +468,7 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
         throw new CodexAuthorizeError(CODEX_ATTACHMENT_TOO_LARGE, attachmentRefusal)
       }
       throw new CodexAuthorizeError(
-        isContextLengthRefusal(canonical.code, canonical.message)
-          ? 'request_limit_exceeded'
-          : canonical.kind === 'size'
-            ? 'payload_too_large'
-            : CODEX_REQUEST_INVALID,
+        canonicalRefusalCode(canonical),
         `codex completion request rejected: ${canonical.message}`
       )
     }

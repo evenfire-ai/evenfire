@@ -21,7 +21,7 @@ import {
 } from './attachmentBudgetRefusal'
 import { classifyUnknown } from './errorClassification'
 import { GrokLlmProxyClient, GrokProxyError } from './grokLlmProxyClient'
-import { IMAGE_SOURCE_INVALID, isContextLengthRefusal, projectMessage } from './imageSource'
+import { IMAGE_SOURCE_INVALID, canonicalRefusalCode, projectMessage } from './imageSource'
 import { CodexAuthorizeError, ProviderAttemptAuthorizer } from './providerAttemptAuthorizer'
 import { rateLimitRetryDelayMs, waitBeforeRetry } from './rateLimitRetry'
 import { type LlmProvider, descriptorFor } from './registryCore'
@@ -59,17 +59,6 @@ const ATTACHMENT_BUDGET_REFUSALS = buildAttachmentBudgetRefusals({
 const GROK_REQUEST_INVALID = 'invalid_request'
 /** A local image budget refusal (`ATTACHMENT_BUDGET_REFUSALS`). */
 const GROK_ATTACHMENT_TOO_LARGE = 'attachment_too_large'
-
-/**
- * The code for a canonical-request refusal that is not an attachment refusal:
- * a conversation-volume limit is a context-length failure, any other `size`
- * refusal is `payload_too_large`, and everything else is an invalid request.
- */
-function canonicalRefusalCode(refusal: { code: string; message: string; kind?: string }): string {
-  if (isContextLengthRefusal(refusal.code, refusal.message)) return 'request_limit_exceeded'
-  if (refusal.kind === 'size') return 'payload_too_large'
-  return GROK_REQUEST_INVALID
-}
 
 function mapGrokUsage(usage?: { inputTokens: number; outputTokens: number }): {
   usage: { input_tokens: number; output_tokens: number; total_tokens: number }

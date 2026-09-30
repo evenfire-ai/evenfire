@@ -183,11 +183,13 @@ export function createMcpHostLlmProviderAttemptRoutes(gateway: K8sGateway): Rout
   // parser errors (`request.aborted`, `request.size.invalid`, `stream.*`)
   // carry no body and go to the global handler, which logs no body. The log
   // carries only the fixed parser `type` and the status: `err.message` of a
-  // JSON.parse error can quote a fragment of the body.
-  router.use((err: unknown, _req: Request, res: Response, next: NextFunction) => {
+  // JSON.parse error can quote a fragment of the body. It goes through the
+  // request-scoped logger when there is one, so it keeps the correlationId.
+  router.use((err: unknown, req: Request, res: Response, next: NextFunction) => {
     const typed = err as { type?: string; status?: number }
+    const requestLog = req.log ?? log
     const refuse = (status: number, error: string): void => {
-      log.warn({ event: 'llm_provider_attempt_body_refused', type: typed.type, status })
+      requestLog.warn({ event: 'llm_provider_attempt_body_refused', type: typed.type, status })
       res.status(status).json({ error })
     }
     if (typed.type === 'entity.too.large' || typed.status === 413) {

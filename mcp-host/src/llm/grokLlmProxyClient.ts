@@ -4,6 +4,7 @@ import {
   buildGrokProxyEnvelope,
 } from '@clerum/grok-provider-attempt-contract'
 import { fetchCauseCode, isConnectPhaseFailure } from './controlPlaneReachability'
+import { canonicalRefusalCode } from './imageSource'
 import { rateLimitedCode, retryAfterMs } from './retryAfter'
 import { upstreamRejectedStatus } from './upstreamRejected'
 
@@ -31,14 +32,14 @@ export function grokProxyErrorMessage(code: string, status?: number): string {
 }
 
 /**
- * The code for an envelope the contract refused. Every `limit` failure maps to
- * `payload_too_large` here, including the count, nesting and range kinds; the
- * authorize and transport callers map only `kind: 'size'` that way.
+ * The code for an envelope the contract refused: a hash mismatch keeps its own
+ * code, and every other refusal takes the providers' canonical mapping, so a
+ * `count` refusal is an invalid request and only `kind: 'size'` is
+ * `payload_too_large`.
  */
-function envelopeRefusalCode(contractCode: string): string {
-  if (contractCode === 'limit') return 'payload_too_large'
-  if (contractCode === 'request_hash_mismatch') return 'request_hash_mismatch'
-  return 'invalid_request'
+function envelopeRefusalCode(refusal: { code: string; message: string; kind?: string }): string {
+  if (refusal.code === 'request_hash_mismatch') return 'request_hash_mismatch'
+  return canonicalRefusalCode(refusal)
 }
 
 export type GrokProxyErrorOptions = {
@@ -146,7 +147,7 @@ export class GrokLlmProxyClient {
         request: input.request as GrokCompletionRequest,
       })
       if (!envelope.ok) {
-        throw new GrokProxyError(envelopeRefusalCode(envelope.code), envelope.message, {
+        throw new GrokProxyError(envelopeRefusalCode(envelope), envelope.message, {
           dispatched: false,
         })
       }
