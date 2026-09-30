@@ -1250,6 +1250,17 @@ export class AppService {
           if (restoredOriginalTeam && this.sessionToken) {
             this.updateEntityChangeSessionToken(this.sessionToken)
             this.restartEntityChangeStreamForSessionReplacement()
+          } else if (
+            shouldRestore &&
+            this.sessionToken &&
+            this.me &&
+            this.me.teamId !== originalTeamId
+          ) {
+            // A failed restore leaves the hop team as the actual committed
+            // session. Rebind now that the restore attempt is over; the stream
+            // must not remain attached to the replaced pre-hop token.
+            this.updateEntityChangeSessionToken(this.sessionToken)
+            this.restartEntityChangeStreamForSessionReplacement()
           }
         }
       } finally {
