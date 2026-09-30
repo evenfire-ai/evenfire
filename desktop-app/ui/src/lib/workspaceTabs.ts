@@ -316,6 +316,15 @@ export function openPreviewTab(
     ...(input.mimeType !== undefined ? { mimeType: input.mimeType } : {}),
   }
   if (existing) {
+    const currentPreview = existing.preview
+    if (
+      !currentPreview?.unavailable &&
+      input.resourceVersion !== undefined &&
+      currentPreview?.resourceVersion !== undefined &&
+      input.resourceVersion < currentPreview.resourceVersion
+    ) {
+      return { tabs: state.tabs, activeTabId: existing.id }
+    }
     // Focus AND refresh the whole payload: unlike the other open* dedupe
     // branches, a preview tab's payload carries non-key fields (fileKind /
     // byteLength / mimeType) beyond its `gfsUri` key. If the resource at the URI

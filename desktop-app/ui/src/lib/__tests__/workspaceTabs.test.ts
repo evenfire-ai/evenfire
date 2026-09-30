@@ -916,6 +916,36 @@ describe('workspaceTabs — preview multi-instance by gfsUri (spec 18 §3.B.1)',
     expect(tab?.preview).toMatchObject({ resourceVersion: 1, reloadVersion: 2 })
     expect(tab?.preview).not.toHaveProperty('unavailable')
   })
+
+  it('focuses a preview from a stale row without replacing its newer metadata', () => {
+    let state = openFilesTab(createEmptyWorkspaceTabsState(), { id: 'files' })
+    state = openPreviewTab(state, {
+      id: 'preview-current',
+      gfsUri: 'gfs://main/versioned',
+      title: 'current.md',
+      fileKind: 'markdown',
+      byteLength: 80,
+      resourceVersion: 8,
+    })
+    const current = state
+    state = openFilesTab(state, { id: 'files-again' })
+
+    const focused = openPreviewTab(state, {
+      id: 'preview-stale',
+      gfsUri: 'gfs://main/versioned',
+      title: 'stale.md',
+      fileKind: 'markdown',
+      byteLength: 12,
+      resourceVersion: 3,
+    })
+
+    expect(focused.activeTabId).toBe('preview-current')
+    expect(focused.tabs).toBe(current.tabs)
+    expect(focused.tabs.find(tab => tab.id === 'preview-current')).toMatchObject({
+      title: 'current.md',
+      preview: { byteLength: 80, resourceVersion: 8 },
+    })
+  })
 })
 
 describe('workspaceTabs — new chat (blank) with kind guard', () => {
