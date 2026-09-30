@@ -288,6 +288,7 @@ case " $* " in
   # start-switches-context makes start leave the global current-context on the
   # profile (minikube v1.38.1 UpdateEndpoint repair ignores --keep-context), or
   # on the context the file names (another session switching it meanwhile).
+  # minikube-start-fails makes start exit 7 after that switch.
   *" start "*)
     if [[ -e "${state}/start-switches-context" ]]; then
       if [[ -s "${state}/start-switches-context" ]]; then
@@ -296,6 +297,7 @@ case " $* " in
         printf '%s\n' "${profile}" >"${state}/current-context"
       fi
     fi
+    [[ ! -e "${state}/minikube-start-fails" ]] || exit 7
     ;;
   *" status "*) exit "$(cat "${state}/minikube-status-rc")" ;;
   *" ip "*) cat "${state}/minikube-ip" ;;
@@ -355,7 +357,7 @@ reset_state() {
     profiles/external-rest-api rpc-proxy/rpc-proxy >"${state}/services"
   : >"${state}/reachable"
   rm -f "${state}/fail-get-deploy" "${state}/curl-fail" "${state}/start-switches-context" \
-    "${state}/use-context-fails" \
+    "${state}/use-context-fails" "${state}/minikube-start-fails" \
     "${state}/pf-ignores-term" "${state}/minikube-stop-fails" "${state}/minikube-delete-fails" \
     "${state}/node-label" "${state}/minikube-profile-list-fails" "${state}/docker-info-fails"
   # By default the branch profile's context is this local Minikube, minikube
@@ -1194,6 +1196,63 @@ assert_log_lacks 'kubectl config use-context' 'start does not overwrite the othe
 assert_log_lacks 'kubectl config unset' 'start does not clear the other session context'
 [[ "$(cat "${state}/current-context")" == third-session-context ]] ||
   fail "start replaced the other session context with $(cat "${state}/current-context")"
+ok
+
+# A minikube start that fails after moving the global context is still undone
+# (R4-L7): the restore runs from an EXIT trap installed around minikube start,
+# and the failed start's own exit code is the command's.
+reset_state
+: >"${state}/start-switches-context"
+: >"${state}/minikube-start-fails"
+bp start-fails-switched start
+# Witness: the failing minikube start ran and its exit code came back.
+assert_rc 7 'start returns the exit code of a failed minikube start'
+assert_log_has "minikube start -p ${profile} --keep-context" 'the failing start ran minikube start'
+[[ "$(cat "${state}/current-context")" == other-session-context ]] ||
+  fail "failed start left the global context on $(cat "${state}/current-context")"
+ok
+assert_log_has 'kubectl config use-context other-session-context' 'failed start restores the previous global context'
+assert_output_has "WARN: minikube moved the kubectl current-context from other-session-context to ${profile}" \
+  'failed start reports the switch it undid'
+assert_log_lacks "minikube -p ${profile} status" 'a failed start does not go on to minikube status'
+
+# The same with no previous context: the one minikube set is cleared.
+reset_state
+: >"${state}/current-context"
+: >"${state}/start-switches-context"
+: >"${state}/minikube-start-fails"
+bp start-fails-switched-unset start
+assert_rc 7 'start returns the exit code of a failed minikube start when no context was set'
+assert_log_has "minikube start -p ${profile} --keep-context" 'the failing start ran minikube start with no context set'
+[[ ! -s "${state}/current-context" ]] ||
+  fail "failed start left the global context on $(cat "${state}/current-context")"
+ok
+assert_log_has 'kubectl config unset current-context' 'failed start clears the context minikube set'
+
+# A restore that fails in the trap is reported, but the failed start's exit
+# code is not replaced by it.
+reset_state
+: >"${state}/start-switches-context"
+: >"${state}/minikube-start-fails"
+: >"${state}/use-context-fails"
+bp start-fails-restore-fails start
+assert_rc 7 'a failed restore does not mask the exit code of a failed minikube start'
+assert_log_has 'kubectl config use-context other-session-context' 'failed start attempted the restore'
+assert_output_has "ERROR: could not restore the kubectl current-context to other-session-context; it is still ${profile}" \
+  'failed start reports the failed restore'
+
+# A context another session chose while the failing start ran is left alone.
+reset_state
+printf 'third-session-context\n' >"${state}/start-switches-context"
+: >"${state}/minikube-start-fails"
+bp start-fails-other-session-switch start
+assert_rc 7 'failed start while another session switched the global context'
+# Witness: the trap read the global context after the failed start.
+assert_log_count 'kubectl config current-context' 2 'failed start read the global context before and after minikube start'
+assert_log_lacks 'kubectl config use-context' 'failed start does not overwrite the other session context'
+assert_log_lacks 'kubectl config unset' 'failed start does not clear the other session context'
+[[ "$(cat "${state}/current-context")" == third-session-context ]] ||
+  fail "failed start replaced the other session context with $(cat "${state}/current-context")"
 ok
 
 # === prepare-shims: symlinks and the seed allowlist ===========================
