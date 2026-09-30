@@ -1205,6 +1205,7 @@ describe('codex-llm-proxy attempt telemetry', () => {
       configOverrides?: Partial<CodexLlmProxyConfig>
       controlApiClient?: ControlApiClient
       terminal?: string[]
+      lookup?: (hostname: string) => Promise<Array<{ address: string; family: number }>>
     } = {}
   ) {
     const info = vi.spyOn(logger, 'info')
@@ -1213,7 +1214,7 @@ describe('codex-llm-proxy attempt telemetry', () => {
     const apps = createProxyApps(config({ maxBodyBytes: 65_536, ...options.configOverrides }), {
       controlApiClient: options.controlApiClient ?? (deniedCode ? denyingClient(deniedCode) : client),
       fetchFn: options.fetchFn ?? upstream(textDeltas, calls, options.terminal),
-      lookup,
+      lookup: options.lookup ?? lookup,
     })
     try {
       const res = await request(apps.runtimeApp)
@@ -1577,6 +1578,101 @@ describe('codex-llm-proxy attempt telemetry', () => {
       ])
     } finally {
       warn.mockRestore()
+    }
+  })
+
+  // Review R4-L1: a DNS failure carries its code on the lookup error itself,
+  // not in `cause`, and its message names the upstream host. The attempt line
+  // and both admin routes log it by cause code, with no err entry and no host.
+  const INVALID_UPSTREAM_HOST = 'codex-r4-l1.invalid'
+
+  function invalidHostLookup(calls: { count: number }) {
+    return async () => {
+      calls.count += 1
+      const { lookup: dnsLookup } = await import('node:dns/promises')
+      const records = await dnsLookup(INVALID_UPSTREAM_HOST, { all: true })
+      return records.map(record => ({ address: record.address, family: record.family }))
+    }
+  }
+
+  function countingFetch(calls: { count: number }): typeof fetch {
+    return (async () => {
+      calls.count += 1
+      throw new Error('fetch must not run after a failed lookup')
+    }) as typeof fetch
+  }
+
+  it('(r4-l1a) logs a DNS lookup failure by cause code, without err or host', async () => {
+    const lookups = { count: 0 }
+    const fetches = { count: 0 }
+    const { res, lines } = await run('att-upstream-dns', 0, 0, undefined, undefined, {
+      fetchFn: countingFetch(fetches),
+      lookup: invalidHostLookup(lookups),
+    })
+    expect(res.status).toBe(503)
+    expect(res.body).toEqual({ error: 'provider_unavailable' })
+    // Witnesses: the real lookup ran once, failed before any fetch, and the
+    // failure produced its attempt line.
+    expect(lookups.count).toBe(1)
+    expect(fetches.count).toBe(0)
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toMatchObject({
+      providerAttemptId: 'att-upstream-dns',
+      outcome: 'failed',
+      code: 'provider_unavailable',
+      reason: 'upstream fetch failed',
+      deliveredAs: 'http_status',
+      httpStatus: 503,
+    })
+    expect(String(lines[0]!.causeCode)).toMatch(/^(ENOTFOUND|EAI_AGAIN)$/)
+    expect('err' in lines[0]!).toBe(false)
+    expect(serializeWithErrors(lines[0])).not.toContain(INVALID_UPSTREAM_HOST)
+    expectNoForbiddenKeys(lines[0]!)
+  })
+
+  it('(r4-l1b) logs a catalog DNS lookup failure by cause code on both admin routes', async () => {
+    for (const [route, operation] of [
+      ['/internal/admin/v1/codex/models', 'catalog_list'],
+      ['/internal/admin/v1/codex/test', 'connection_test'],
+    ] as const) {
+      const lookups = { count: 0 }
+      const fetches = { count: 0 }
+      const warn = vi.spyOn(logger, 'warn')
+      const info = vi.spyOn(logger, 'info')
+      const error = vi.spyOn(logger, 'error')
+      try {
+        const { adminApp } = createProxyApps(
+          config({ executionEnabled: true, maxBodyBytes: 65_536 }),
+          { fetchFn: countingFetch(fetches), lookup: invalidHostLookup(lookups) }
+        )
+        const res = await request(adminApp)
+          .post(route)
+          .set(
+            'Authorization',
+            `Bearer ${sign({ sub: 'admin-1', typ: 'codex-admin-permit', operation }, 'codex-llm-proxy-admin')}`
+          )
+          .send({ accessToken: 'tok' })
+        expect(res.status).toBe(503)
+        expect(res.body).toEqual({ error: 'provider_unavailable' })
+        // Witnesses: the real lookup ran once and failed before any fetch.
+        expect(lookups.count).toBe(1)
+        expect(fetches.count).toBe(0)
+        const logged = [...warn.mock.calls, ...info.mock.calls, ...error.mock.calls].map(
+          call => call[0] as unknown as Record<string, unknown>
+        )
+        const upstream = logged.filter(entry => entry?.event === 'codex_catalog_upstream')
+        expect(upstream).toHaveLength(1)
+        expect(Object.keys(upstream[0]!).sort()).toEqual(['causeCode', 'event'])
+        expect(String(upstream[0]!.causeCode)).toMatch(/^(ENOTFOUND|EAI_AGAIN)$/)
+        expect(logged.filter(entry => entry?.event === 'codex_proxy_denied')).toEqual([
+          { event: 'codex_proxy_denied', code: 'provider_unavailable' },
+        ])
+        expect(serializeWithErrors(logged)).not.toContain(INVALID_UPSTREAM_HOST)
+      } finally {
+        warn.mockRestore()
+        info.mockRestore()
+        error.mockRestore()
+      }
     }
   })
 
