@@ -1858,6 +1858,84 @@ describeRealPostgres('control-api real Postgres migrations', () => {
     }
   })
 
+  it('applies checkpoint convergence after a legacy feed-only migration record', async () => {
+    const { CONTROL_API_MIGRATIONS, initDb } = await import('../src/db.js')
+    const connector = { connect: () => dbPool.connect() }
+    await initDb(connector)
+
+    const feedMigration = CONTROL_API_MIGRATIONS.find(
+      migration => migration.version === '0122_durable_entity_change_feed'
+    )
+    const checkpointMigration = CONTROL_API_MIGRATIONS.find(
+      migration => migration.version === '0123_entity_change_checkpoint_cursor_convergence'
+    )
+    expect(feedMigration?.legacyVersions).toContain('0116_durable_entity_change_feed')
+    expect(checkpointMigration?.legacyVersions).toEqual([
+      '0120_entity_change_checkpoint_cursor_convergence',
+    ])
+    if (!feedMigration || !checkpointMigration) return
+
+    const oldVersions = [
+      feedMigration.version,
+      ...(feedMigration.legacyVersions ?? []),
+      checkpointMigration.version,
+      ...(checkpointMigration.legacyVersions ?? []),
+    ]
+    try {
+      await dbPool.query('DELETE FROM schema_migrations WHERE version = ANY($1::text[])', [
+        oldVersions,
+      ])
+      await dbPool.query('INSERT INTO schema_migrations(version) VALUES ($1)', [
+        '0116_durable_entity_change_feed',
+      ])
+      await dbPool.query(`
+        CREATE OR REPLACE FUNCTION entity_change_read_checkpoint(
+          requested_cursor UUID,
+          maximum_recovery_events INTEGER
+        ) RETURNS TABLE (
+          needs_resync BOOLEAN,
+          current_cursor UUID,
+          current_sequence BIGINT,
+          invalidated_scopes TEXT[]
+        ) LANGUAGE plpgsql AS $$
+        BEGIN
+          RAISE EXCEPTION 'checkpoint convergence migration was not applied';
+        END;
+        $$
+      `)
+
+      await initDb(connector)
+
+      const recordedVersions = await dbPool.query<{ version: string }>(
+        `SELECT version FROM schema_migrations WHERE version = ANY($1::text[]) ORDER BY version`,
+        [oldVersions]
+      )
+      expect(recordedVersions.rows.map(row => row.version)).toEqual([
+        '0116_durable_entity_change_feed',
+        feedMigration.version,
+        checkpointMigration.version,
+      ])
+      const checkpoint = await dbPool.query(
+        `SELECT * FROM entity_change_read_checkpoint(
+           '00000000-0000-0000-0000-000000000000'::uuid, 100
+         )`
+      )
+      expect(checkpoint.rows).toHaveLength(1)
+      expect(typeof checkpoint.rows[0]?.needs_resync).toBe('boolean')
+      expect(checkpoint.rows[0]?.current_cursor).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+      )
+    } finally {
+      await dbPool.query('DELETE FROM schema_migrations WHERE version = ANY($1::text[])', [
+        oldVersions,
+      ])
+      await dbPool.query('INSERT INTO schema_migrations(version) VALUES ($1), ($2)', [
+        feedMigration.version,
+        checkpointMigration.version,
+      ])
+    }
+  })
+
   it('prevents temp-type shadowing in entity-change SECURITY DEFINER triggers', async () => {
     const { CONTROL_API_MIGRATIONS, initDb } = await import('../src/db.js')
     await initDb({ connect: () => dbPool.connect() })
