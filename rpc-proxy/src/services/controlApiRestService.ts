@@ -1,5 +1,11 @@
 import { config } from '../config.js'
 import { ResolvedServerConnection } from '../types.js'
+import {
+  type HostAccessDenial,
+  type HostAccessDenialCode,
+  hostAccessDenialCodeForReason,
+  hostAccessDenied,
+} from './hostAccessDenial.js'
 
 export type UserAllowedServers = {
   userId: string
@@ -42,9 +48,19 @@ export type DirectRunBindingRequest = {
 }
 
 export class ControlApiHostAccessRejectedError extends Error {
-  constructor(readonly status: number) {
+  /**
+   * Set for a 403 only: whether control-api's denial reason proves the access
+   * was removed from the user. Absent for 401/409, which are not authorization
+   * denials of the Host.
+   */
+  readonly denialCode: HostAccessDenialCode | null
+  constructor(
+    readonly status: number,
+    denialCode: HostAccessDenialCode | null = null
+  ) {
     super(`Control API rejected host access (${status})`)
     this.name = 'ControlApiHostAccessRejectedError'
+    this.denialCode = denialCode
   }
 }
 
@@ -207,7 +223,7 @@ export async function fetchHostConnectionFromControlApi(
     directRunBinding?: DirectRunBindingRequest
     fetchImpl?: typeof fetch
   } = {}
-): Promise<ResolvedServerConnection | null> {
+): Promise<ResolvedServerConnection | HostAccessDenial> {
   const directRunBinding = options.directRunBinding
   const response = await (options.fetchImpl ?? fetch)(
     `${controlApiBaseUrl()}/rpc/access/users/${encodeURIComponent(userId)}/mcp-hosts/${encodeURIComponent(hostRef)}`,
@@ -222,10 +238,17 @@ export async function fetchHostConnectionFromControlApi(
     }
   )
 
-  if (!directRunBinding && (response.status === 403 || response.status === 404)) {
-    return null
+  if (!directRunBinding && response.status === 403) {
+    return hostAccessDenied(await readHostAccessDenialCode(response))
   }
-  if (response.status === 401 || response.status === 403 || response.status === 409) {
+  if (!directRunBinding && response.status === 404) {
+    await drainBody(response)
+    return hostAccessDenied('host_access_denied')
+  }
+  if (response.status === 403) {
+    throw new ControlApiHostAccessRejectedError(403, await readHostAccessDenialCode(response))
+  }
+  if (response.status === 401 || response.status === 409) {
     await drainBody(response)
     throw new ControlApiHostAccessRejectedError(response.status)
   }
@@ -236,12 +259,12 @@ export async function fetchHostConnectionFromControlApi(
 
   const parsed = (await response.json()) as Partial<UserAllowedHost>
   if (parsed.userId !== userId) {
-    return null
+    return hostAccessDenied('host_access_denied')
   }
   const url = typeof parsed.url === 'string' ? parsed.url.trim() : ''
   const resolvedHostRef = typeof parsed.hostRef === 'string' ? parsed.hostRef.trim() : ''
   if (!url || !resolvedHostRef || resolvedHostRef !== hostRef) {
-    return null
+    return hostAccessDenied('host_access_denied')
   }
   const attributionBindingStatus = directRunBinding ? parsed.bindingStatus : undefined
   if (
@@ -276,6 +299,18 @@ export type HostWakeApiResponse =
   | { kind: 'unknown' }
   | { kind: 'rate-limited'; retryAfterSeconds: number }
   | { kind: 'auth'; status: number }
+
+/**
+ * control-api reports the denial reason in the `x-host-access-denial-reason`
+ * response header; its 403 body is the fixed `{"error":"Forbidden"}` and is never
+ * parsed. An absent or unknown header yields the non-revoking code: an
+ * unreadable reason can never prove the access was removed.
+ */
+async function readHostAccessDenialCode(response: Response): Promise<HostAccessDenialCode> {
+  const reason = response.headers.get('x-host-access-denial-reason')
+  await drainBody(response)
+  return hostAccessDenialCodeForReason(reason)
+}
 
 async function drainBody(response: Response): Promise<void> {
   try {

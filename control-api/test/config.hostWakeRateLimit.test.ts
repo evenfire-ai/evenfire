@@ -30,15 +30,15 @@ import { readFileSync } from 'node:fs'
 
 // Hard-coded mirrors (source files named above).
 const WAKE_RETRIGGER_MS = 15_000
-const WAKE_MAX_HOLD_MS = 90_000
+const WAKE_MAX_HOLD_MS = 48_000
 const RPC_PROXY_REPLICAS = 2
 const PREWARM_CALLS_PER_DEVICE = 3 // 1 initial + PREWARM_REEMIT_MAX_ATTEMPTS
 const PREWARM_CONCURRENT_DEVICES_BUDGET = 4
 
 // Worst case of the wake-and-hold mechanism alone, in raw calls:
-//   per instance: 1 initial + floor(maxHold / retrigger) retriggers = 7
-//   fleet-wide:   x replicas (per-instance dedup, no cross-instance dedup)
-//   per minute:   14 calls / 90s = ~9.33/min
+//   per instance: 1 initial + floor(maxHold / retrigger) retriggers = 4
+//   fleet-wide:   x replicas (per-instance dedup, no cross-instance dedup) = 8
+//   per minute:   8 calls / 48s = 10.0/min
 const HOLD_CALLS_PER_INSTANCE = 1 + Math.floor(WAKE_MAX_HOLD_MS / WAKE_RETRIGGER_MS)
 const HOLD_CALLS_FLEET = HOLD_CALLS_PER_INSTANCE * RPC_PROXY_REPLICAS
 const MECHANISM_CALLS_PER_MIN = HOLD_CALLS_FLEET * (60_000 / WAKE_MAX_HOLD_MS)
@@ -122,9 +122,9 @@ describe('host-wake rate limit budget (cross-service derivation guard)', () => {
     const config = await loadConfigWith({})
 
     // Sanity-pin the derivation arithmetic itself.
-    expect(HOLD_CALLS_PER_INSTANCE).toBe(7)
-    expect(HOLD_CALLS_FLEET).toBe(14)
-    expect(MECHANISM_CALLS_PER_MIN).toBeCloseTo(9.333, 3)
+    expect(HOLD_CALLS_PER_INSTANCE).toBe(4)
+    expect(HOLD_CALLS_FLEET).toBe(8)
+    expect(MECHANISM_CALLS_PER_MIN).toBeCloseTo(10.0, 3)
 
     // Invariant 1: >=3x the single-hold mechanism volume, so the backstop
     // alone can never come close to exhausting the bucket.

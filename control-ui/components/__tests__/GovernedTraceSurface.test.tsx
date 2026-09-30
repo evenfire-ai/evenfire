@@ -701,7 +701,8 @@ describe('GovernedTraceSurface', () => {
     expect(screen.getByText('30-day projection')).toBeInTheDocument()
     expect(screen.getByText(/This extrapolates persisted daily patterns/)).toBeInTheDocument()
     expect(screen.getByText('Variance rate')).toBeInTheDocument()
-    expect(screen.getByText(/33\.33%/)).toBeInTheDocument()
+    // Locale-independent: accept both decimal separators (33.33% and 33,33%).
+    expect(screen.getByText(/33[.,]33%/)).toBeInTheDocument()
     expect(screen.getByText('1h')).toBeInTheDocument()
     expect(screen.getByText('kube:unallocated')).toBeInTheDocument()
     expect(screen.getByText('pricing-export:2026-07-10:cpu')).toBeInTheDocument()

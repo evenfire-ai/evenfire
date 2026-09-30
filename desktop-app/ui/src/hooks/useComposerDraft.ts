@@ -11,13 +11,17 @@ import {
  * not. Returns a `[draft, setDraft]` pair scoped to `chatId`.
  */
 export function useComposerDraft(
-  chatId: string | null
+  chatId: string | null,
+  agentRef?: string
 ): readonly [string, (value: string) => void] {
   const subscribe = useCallback(
-    (listener: () => void) => subscribeComposerDraft(chatId, listener),
-    [chatId]
+    (listener: () => void) => subscribeComposerDraft(chatId, listener, agentRef),
+    [agentRef, chatId]
   )
-  const draft = useSyncExternalStore(subscribe, () => getComposerDraft(chatId))
-  const setDraft = useCallback((value: string) => setComposerDraft(chatId, value), [chatId])
+  const draft = useSyncExternalStore(subscribe, () => getComposerDraft(chatId, agentRef))
+  const setDraft = useCallback(
+    (value: string) => setComposerDraft(chatId, value, agentRef),
+    [agentRef, chatId]
+  )
   return [draft, setDraft] as const
 }

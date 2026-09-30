@@ -26,6 +26,9 @@ const actionsValue = {
   chatEndRef: { current: null },
   handleSelectChat: vi.fn(),
   handleRenameChat: vi.fn(),
+  captureChatDeleteFence: vi.fn(async () => {
+    throw new Error('no delete target')
+  }),
   handleDeleteChat: vi.fn(),
 }
 const mcpRuntimeValue = { cancelTask: vi.fn() }
