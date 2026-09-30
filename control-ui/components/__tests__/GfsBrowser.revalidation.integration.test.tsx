@@ -255,7 +255,7 @@ describe('GfsBrowser authoritative revalidation integration', () => {
     expect(screen.getByRole('button', { name: 'kept.txt' })).toBeVisible()
   })
 
-  it('cancels a rejected stream reader before reconnecting after an unsupported schema', async () => {
+  it('rejects an oversized valid frame before reconnecting', async () => {
     vi.spyOn(Math, 'random').mockReturnValue(0)
     let streamAttempts = 0
     let streamCancellations = 0
@@ -318,7 +318,12 @@ describe('GfsBrowser authoritative revalidation integration', () => {
     await act(async () => {
       streamControllers[0]!.enqueue(
         new TextEncoder().encode(
-          '{"schemaVersion":2,"type":"future.frame","cursor":"d119f895-1ef8-4e73-8f08-f9754919682a"}\n'
+          `${JSON.stringify({
+            schemaVersion: 1,
+            type: 'heartbeat',
+            cursor: 'd119f895-1ef8-4e73-8f08-f9754919682a',
+            observedAt: 'x'.repeat(17 * 1024),
+          })}\n`
         )
       )
     })

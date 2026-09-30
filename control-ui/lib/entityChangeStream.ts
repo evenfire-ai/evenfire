@@ -2,6 +2,7 @@ import { controlApiUrl } from './api'
 
 export const ENTITY_CHANGE_CURSOR_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+export const ENTITY_CHANGE_MAX_FRAME_CHARS = 16 * 1024
 
 export type EntityChangeFrame = {
   schemaVersion: 1
@@ -37,6 +38,9 @@ export function parseEntityChangeRetryAfterMs(
 
 /** Parse one NDJSON frame. Safe v1 extensions are skipped; unsupported schemas are rejected. */
 export function parseEntityChangeFrame(line: string): EntityChangeFrame | null {
+  if (line.length > ENTITY_CHANGE_MAX_FRAME_CHARS) {
+    throw new Error('Entity-change frame exceeded its limit')
+  }
   if (!line.trim()) return null
   let value: unknown
   try {

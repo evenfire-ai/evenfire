@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import { parseEntityChangeFrame, parseEntityChangeRetryAfterMs } from '../entityChangeStream'
+import {
+  ENTITY_CHANGE_MAX_FRAME_CHARS,
+  parseEntityChangeFrame,
+  parseEntityChangeRetryAfterMs,
+} from '../entityChangeStream'
 
 const CURSOR = 'a20c37c5-d996-48b0-8f49-a8e2f5f41234'
 
@@ -65,6 +69,17 @@ describe('parseEntityChangeFrame', () => {
     expect(() =>
       parseEntityChangeFrame(JSON.stringify({ schemaVersion: 1, type: 'heartbeat', cursor: '1' }))
     ).toThrow('Invalid entity-change cursor')
+  })
+
+  it('rejects frames above the shared Desktop and Control UI limit', () => {
+    const oversized = JSON.stringify({
+      schemaVersion: 1,
+      type: 'heartbeat',
+      cursor: CURSOR,
+      observedAt: 'x'.repeat(ENTITY_CHANGE_MAX_FRAME_CHARS),
+    })
+    expect(oversized.length).toBeGreaterThan(ENTITY_CHANGE_MAX_FRAME_CHARS)
+    expect(() => parseEntityChangeFrame(oversized)).toThrow('frame exceeded its limit')
   })
 })
 

@@ -43,6 +43,7 @@ import {
 } from '@lib/api'
 import { createCoalescedRevalidation } from '@lib/coalescedRevalidation'
 import {
+  ENTITY_CHANGE_MAX_FRAME_CHARS,
   entityChangeStreamUrl,
   parseEntityChangeFrame,
   parseEntityChangeRetryAfterMs,
@@ -1103,8 +1104,6 @@ export function GfsBrowser(): React.JSX.Element {
               const { done, value } = await reader.read()
               if (done) break
               pending += decoder.decode(value, { stream: true })
-              if (pending.length > 32 * 1024)
-                throw new Error('Entity-change frame exceeded its limit')
               let newline = pending.indexOf('\n')
               while (newline >= 0) {
                 const line = pending.slice(0, newline).replace(/\r$/, '')
@@ -1128,6 +1127,9 @@ export function GfsBrowser(): React.JSX.Element {
                   break
                 }
                 newline = pending.indexOf('\n')
+              }
+              if (pending.length > ENTITY_CHANGE_MAX_FRAME_CHARS) {
+                throw new Error('Entity-change frame exceeded its limit')
               }
             }
           } finally {
