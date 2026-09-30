@@ -1096,6 +1096,10 @@ export function GfsBrowser(): React.JSX.Element {
             }
           } finally {
             liveness.dispose()
+            // A malformed or unsupported frame exits through the outer retry
+            // path. Releasing the lock alone leaves the HTTP response alive,
+            // consuming a server stream slot while the next connection opens.
+            await reader.cancel().catch(() => undefined)
             reader.releaseLock()
           }
           if (!controller.signal.aborted) throw new Error('Entity-change stream ended')

@@ -255,6 +255,87 @@ describe('GfsBrowser authoritative revalidation integration', () => {
     expect(screen.getByRole('button', { name: 'kept.txt' })).toBeVisible()
   })
 
+  it('cancels a rejected stream reader before reconnecting after an unsupported schema', async () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    let streamAttempts = 0
+    let streamCancellations = 0
+    let finishStreamCancellation!: () => void
+    const streamCancellation = new Promise<void>(resolve => {
+      finishStreamCancellation = resolve
+    })
+    const streamControllers: ReadableStreamDefaultController<Uint8Array>[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input), 'http://control-ui.test')
+        if (url.pathname.endsWith('/api/v1/gfs/entity-changes/stream')) {
+          streamAttempts += 1
+          return new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                streamControllers.push(controller)
+                init?.signal?.addEventListener(
+                  'abort',
+                  () => {
+                    try {
+                      controller.close()
+                    } catch {
+                      // The stream may already have been canceled by the reader.
+                    }
+                  },
+                  { once: true }
+                )
+              },
+              cancel() {
+                streamCancellations += 1
+                return streamCancellation
+              },
+            }),
+            { status: 200, headers: { 'content-type': 'application/x-ndjson' } }
+          )
+        }
+        if (url.pathname.endsWith('/api/v1/gfs/tree')) {
+          return jsonResponse({ rootResourceId: 'root-1', items: [], nextCursor: null })
+        }
+        if (url.pathname.endsWith('/api/v1/gfs/resources/root-1/children')) {
+          return jsonResponse({
+            items: [child('file-1', 'rid-file-1', 'kept.txt', 'file')],
+            nextCursor: null,
+          })
+        }
+        return jsonResponse({ items: [], nextCursor: null })
+      })
+    )
+
+    render(
+      <ToastProvider>
+        <GfsBrowser />
+      </ToastProvider>
+    )
+    await screen.findByRole('button', { name: 'kept.txt' })
+    await waitFor(() => expect(streamControllers).toHaveLength(1))
+
+    await act(async () => {
+      streamControllers[0]!.enqueue(
+        new TextEncoder().encode(
+          '{"schemaVersion":2,"type":"future.frame","cursor":"d119f895-1ef8-4e73-8f08-f9754919682a"}\n'
+        )
+      )
+    })
+
+    let attemptsBeforeCancellationCompletes = 0
+    try {
+      await waitFor(() => expect(streamCancellations).toBe(1))
+      await new Promise(resolve => setTimeout(resolve, 750))
+      attemptsBeforeCancellationCompletes = streamAttempts
+    } finally {
+      finishStreamCancellation()
+    }
+    expect(attemptsBeforeCancellationCompletes).toBe(1)
+    await waitFor(() => expect(streamAttempts).toBe(2), { timeout: 2_000 })
+    expect(screen.getByRole('button', { name: 'kept.txt' })).toBeVisible()
+  })
+
   it.each(['scope.invalidated', 'resync_required'] as const)(
     'does not publish a stale background page after %s',
     async frameType => {
