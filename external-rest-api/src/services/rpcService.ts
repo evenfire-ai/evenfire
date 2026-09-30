@@ -11,7 +11,15 @@ type IssuedRpcToken = {
   droppedScopes?: RpcScope[]
 }
 
-export type RpcAccessTokenResult = IssuedRpcToken | { error: string }
+export const RPC_TOKEN_REVOKED_CODE = 'host_access_revoked'
+
+export type RpcAccessTokenDenial = {
+  error: string
+  code?: typeof RPC_TOKEN_REVOKED_CODE
+  revokedHostRefs?: string[]
+}
+
+export type RpcAccessTokenResult = IssuedRpcToken | RpcAccessTokenDenial
 
 export async function issueRpcAccessToken(
   sessionToken: string,
@@ -35,6 +43,20 @@ export async function issueRpcAccessToken(
         error.body && typeof error.body === 'object' && 'error' in error.body
           ? String((error.body as { error: unknown }).error)
           : 'forbidden'
+      if (error.body && typeof error.body === 'object') {
+        const body = error.body as Record<string, unknown>
+        const revokedHostRefs = body.revokedHostRefs
+        if (
+          body.code === RPC_TOKEN_REVOKED_CODE &&
+          Array.isArray(revokedHostRefs) &&
+          revokedHostRefs.length > 0 &&
+          revokedHostRefs.every(
+            (hostRef): hostRef is string => typeof hostRef === 'string' && hostRef.length > 0
+          )
+        ) {
+          return { error: reason, code: RPC_TOKEN_REVOKED_CODE, revokedHostRefs }
+        }
+      }
       return { error: reason }
     }
     throw error
