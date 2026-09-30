@@ -167,7 +167,6 @@ describe('Desktop environment origin matching', () => {
         externalRestApiBaseUrl: 'http://api.example.test',
       },
     ],
-    ['a missing RPC endpoint', { ...targetEnvironment, rpcProxyBaseUrl: '' }],
   ])('does not switch to a saved environment with %s', async (_case, linkedEnvironment) => {
     const { handler, selectRuntimeConfig, setPendingDesktopEnvironmentSetup } = createHandler(
       () => ({ booting: false, busy: false, authTransitioning: false, isAuthenticated: false })
@@ -180,5 +179,46 @@ describe('Desktop environment origin matching', () => {
       ...linkedEnvironment,
       rpcProxyBaseUrl: '',
     })
+  })
+
+  it('selects the unique saved REST profile when the link omits RPC', async () => {
+    const state = await runtimeConfigModule!.getDesktopRuntimeConfigState()
+    const savedTarget = state.options.find(
+      option =>
+        option.externalRestApiBaseUrl === `${targetEnvironment.externalRestApiBaseUrl}/api/v1`
+    )
+    if (!savedTarget) throw new Error('The config producer did not return the saved REST profile')
+    const { handler, selectRuntimeConfig, setPendingDesktopEnvironmentSetup } = createHandler(
+      () => ({ booting: false, busy: false, authTransitioning: false, isAuthenticated: false })
+    )
+
+    await handler({ ...targetEnvironment, rpcProxyBaseUrl: '' })
+
+    expect(selectRuntimeConfig).toHaveBeenCalledWith(savedTarget.id)
+    expect(setPendingDesktopEnvironmentSetup).toHaveBeenCalledWith(null)
+  })
+
+  it('rejects an omitted RPC when multiple saved profiles share the REST origin', async () => {
+    await runtimeConfigModule!.saveDesktopRuntimeConfig({
+      appName: 'Second API profile',
+      externalRestApiBaseUrl: targetEnvironment.externalRestApiBaseUrl,
+      rpcProxyBaseUrl: 'https://second-rpc.example.test',
+    })
+    const { handler, selectRuntimeConfig, setPendingDesktopEnvironmentSetup, setStatus } =
+      createHandler(() => ({
+        booting: false,
+        busy: false,
+        authTransitioning: false,
+        isAuthenticated: false,
+      }))
+
+    await handler({ ...targetEnvironment, rpcProxyBaseUrl: '' })
+
+    expect(selectRuntimeConfig).not.toHaveBeenCalled()
+    expect(setPendingDesktopEnvironmentSetup).toHaveBeenCalledWith(null)
+    expect(setStatus).toHaveBeenCalledWith(
+      expect.stringMatching(/multiple saved environments use this REST host/i),
+      'error'
+    )
   })
 })

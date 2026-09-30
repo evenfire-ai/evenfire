@@ -49,6 +49,73 @@ function sameDesktopEnvironment(
   }
 }
 
+function savedEnvironmentsForRestOrigin(
+  options: DesktopRuntimeConfigState['options'],
+  restOrigin: string
+) {
+  return options.filter(option => {
+    if (option.source === 'localhost' || option.id === LOCALHOST_OPTION_ID) return false
+    try {
+      return environmentOrigin(option.externalRestApiBaseUrl) === restOrigin
+    } catch {
+      return false
+    }
+  })
+}
+
+function isLocalhostOption(option: DesktopRuntimeConfigState['options'][number]): boolean {
+  return option.source === 'localhost' || option.id === LOCALHOST_OPTION_ID
+}
+
+export function getDesktopEnvironmentRestOriginMatches(
+  configState: DesktopRuntimeConfigState,
+  externalRestApiBaseUrl: string
+) {
+  const restOrigin = environmentOrigin(externalRestApiBaseUrl)
+  return {
+    localhost: configState.options.find(option => {
+      if (!isLocalhostOption(option)) return false
+      try {
+        return environmentOrigin(option.externalRestApiBaseUrl) === restOrigin
+      } catch {
+        return false
+      }
+    }),
+    saved: savedEnvironmentsForRestOrigin(configState.options, restOrigin),
+  }
+}
+
+type SavedEnvironmentDecision =
+  | { kind: 'select'; option: DesktopRuntimeConfigState['options'][number] }
+  | { kind: 'setup' }
+  | { kind: 'reject'; reason: 'ambiguous' | 'rpc-conflict' }
+
+function decideSavedEnvironment(
+  sameRestOrigin: DesktopRuntimeConfigState['options'],
+  linkedConfig: DesktopRuntimeConfig
+): SavedEnvironmentDecision {
+  const linkedRpcOrigin = linkedConfig.rpcProxyBaseUrl?.trim()
+    ? environmentOrigin(linkedConfig.rpcProxyBaseUrl)
+    : ''
+
+  if (!linkedRpcOrigin) {
+    if (sameRestOrigin.length > 1) return { kind: 'reject', reason: 'ambiguous' }
+    if (sameRestOrigin.length === 1) return { kind: 'select', option: sameRestOrigin[0] }
+    return { kind: 'setup' }
+  }
+
+  const exactMatch = sameRestOrigin.find(option => {
+    try {
+      return environmentOrigin(option.rpcProxyBaseUrl) === linkedRpcOrigin
+    } catch {
+      return false
+    }
+  })
+  if (exactMatch) return { kind: 'select', option: exactMatch }
+  if (sameRestOrigin.length) return { kind: 'reject', reason: 'rpc-conflict' }
+  return { kind: 'setup' }
+}
+
 function isAuthenticationOperationInProgress(state: DesktopEnvironmentHandoffState): boolean {
   return state.booting || state.busy || state.authTransitioning
 }
@@ -102,8 +169,11 @@ export function createDesktopEnvironmentSetupHandler({
       return
     }
 
-    const localhostOption = configState.options.find(option => option.id === LOCALHOST_OPTION_ID)
-    if (localhostOption && sameDesktopEnvironment(localhostOption, linkedConfig)) {
+    const restOriginMatches = getDesktopEnvironmentRestOriginMatches(
+      configState,
+      linkedConfig.externalRestApiBaseUrl
+    )
+    if (restOriginMatches.localhost) {
       setPendingDesktopEnvironmentSetup(null)
       setStatus(
         'Desktop setup link rejected: the Localhost environment cannot be opened from a link.',
@@ -112,10 +182,12 @@ export function createDesktopEnvironmentSetupHandler({
       return
     }
 
+    const savedDecision = decideSavedEnvironment(restOriginMatches.saved, linkedConfig)
     const activeEnvironmentMatches = Boolean(
       configState.configured &&
       configState.currentConfig &&
-      sameDesktopEnvironment(configState.currentConfig, linkedConfig)
+      (sameDesktopEnvironment(configState.currentConfig, linkedConfig) ||
+        (savedDecision.kind === 'select' && savedDecision.option.id === configState.activeOptionId))
     )
     if (activeEnvironmentMatches) {
       setPendingDesktopEnvironmentSetup(null)
@@ -129,12 +201,9 @@ export function createDesktopEnvironmentSetupHandler({
       return
     }
 
-    const savedEnvironment = configState.options.find(option =>
-      sameDesktopEnvironment(option, linkedConfig)
-    )
-    if (savedEnvironment) {
+    if (savedDecision.kind === 'select') {
       setPendingDesktopEnvironmentSetup(null)
-      const selectedState = await handleSelectRuntimeConfig(savedEnvironment.id)
+      const selectedState = await handleSelectRuntimeConfig(savedDecision.option.id)
       if (!selectedState) return
       try {
         await onSessionNeedsLoad({ preserveNav: true })
@@ -147,26 +216,12 @@ export function createDesktopEnvironmentSetupHandler({
       return
     }
 
-    const linkedRestOrigin = environmentOrigin(linkedConfig.externalRestApiBaseUrl)
-    const linkedRpcOrigin = linkedConfig.rpcProxyBaseUrl
-      ? environmentOrigin(linkedConfig.rpcProxyBaseUrl)
-      : ''
-    const conflictingSavedEnvironment = configState.options.find(option => {
-      if (!option.rpcProxyBaseUrl.trim()) return false
-      try {
-        return (
-          environmentOrigin(option.externalRestApiBaseUrl) === linkedRestOrigin &&
-          Boolean(linkedRpcOrigin) &&
-          environmentOrigin(option.rpcProxyBaseUrl) !== linkedRpcOrigin
-        )
-      } catch {
-        return false
-      }
-    })
-    if (conflictingSavedEnvironment) {
+    if (savedDecision.kind === 'reject') {
       setPendingDesktopEnvironmentSetup(null)
       setStatus(
-        'Desktop setup link rejected because its RPC proxy does not match the saved environment.',
+        savedDecision.reason === 'ambiguous'
+          ? 'Desktop setup link rejected because multiple saved environments use this REST host.'
+          : 'Desktop setup link rejected because its RPC proxy does not match the saved environment.',
         'error'
       )
       return

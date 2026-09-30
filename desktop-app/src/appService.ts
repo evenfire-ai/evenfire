@@ -97,6 +97,15 @@ const HOST_WAKE_SCOPE: RpcScope = 'host:wake:write'
 const PROFILE_UI_BASE_URL_ORIGIN_ERROR =
   'PROFILE_UI_BASE_URL must be an origin URL with a root pathname and no search parameters'
 
+function requireHttpOrigin(rawValue: string): string {
+  const value = rawValue.trim()
+  const url = new URL(value)
+  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) {
+    throw new Error('Desktop environment URLs must use http(s) without credentials')
+  }
+  return url.origin
+}
+
 function normalizeExplicitProfileUiBaseUrl(rawValue: string): string | null {
   const value = rawValue.trim()
   if (!value) return null
@@ -1943,9 +1952,19 @@ export class AppService {
     hydrateDesktopRuntimeConfig()
     if (!isDesktopRuntimeConfigured()) return
     if (config.rpcProxyBaseUrl?.trim()) return
+    const externalRestApiBaseUrl = config.externalRestApiBaseUrl
+    const externalRestApiOrigin = requireHttpOrigin(externalRestApiBaseUrl)
     const discovered = await this.authClient.getDesktopEnvironment()
+    if (
+      discovered.externalRestApiBaseUrl?.trim() &&
+      requireHttpOrigin(discovered.externalRestApiBaseUrl) !== externalRestApiOrigin
+    ) {
+      throw new Error('Desktop environment discovery returned a different REST host')
+    }
     await saveDesktopRuntimeConfig({
-      externalRestApiBaseUrl: discovered.externalRestApiBaseUrl || config.externalRestApiBaseUrl,
+      // Discovery is scoped to the configured REST endpoint; it may provide
+      // RPC details but must never switch or overwrite another REST profile.
+      externalRestApiBaseUrl,
       rpcProxyBaseUrl: discovered.rpcProxyBaseUrl,
       appName: discovered.appName || config.appName,
     })

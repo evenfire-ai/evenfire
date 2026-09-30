@@ -10,7 +10,10 @@ import type {
   SessionMe,
 } from '../../../../src/types'
 import type { Tone } from '../../uiTypes'
-import { createDesktopEnvironmentSetupHandler } from './desktopEnvironmentHandoff'
+import {
+  createDesktopEnvironmentSetupHandler,
+  getDesktopEnvironmentRestOriginMatches,
+} from './desktopEnvironmentHandoff'
 import type { SetStatusFn } from './types'
 
 interface UseAuthControllerParams {
@@ -419,8 +422,67 @@ export function useAuthController({ setStatus, onSessionNeedsLoad }: UseAuthCont
     if (!nextConfig) return
     setAuthTransitioning(true)
     try {
+      let currentConfigState: DesktopRuntimeConfigState
+      try {
+        currentConfigState = await refreshRuntimeConfigState()
+      } catch {
+        setStatus('Could not verify the desktop environment. Try opening it again.', 'error')
+        return
+      }
+
+      const restOriginMatches = getDesktopEnvironmentRestOriginMatches(
+        currentConfigState,
+        nextConfig.externalRestApiBaseUrl
+      )
+
+      if (restOriginMatches.localhost) {
+        setPendingDesktopEnvironmentSetup(null)
+        setStatus(
+          'Desktop setup link rejected: the Localhost environment cannot be opened from a link.',
+          'error'
+        )
+        return
+      }
+
+      if (restOriginMatches.saved.length > 0) {
+        if (restOriginMatches.saved.length > 1) {
+          setPendingDesktopEnvironmentSetup(null)
+          setStatus(
+            'Desktop setup link rejected because multiple saved environments use this REST host.',
+            'error'
+          )
+          return
+        }
+
+        const selectedState = await handleSelectRuntimeConfig(restOriginMatches.saved[0].id)
+        if (!selectedState) return
+        setPendingDesktopEnvironmentSetup(null)
+        try {
+          await onSessionNeedsLoad({ preserveNav: true })
+        } catch (error) {
+          setStatus(
+            `Could not load the selected desktop environment: ${error instanceof Error ? error.message : String(error)}`,
+            'error'
+          )
+        }
+        return
+      }
+
       const state = await handleSaveRuntimeConfig(nextConfig)
       if (!state) return
+      const selectedOption = state.options.find(option => option.id === state.activeOptionId)
+      const selectedRestOriginMatches = getDesktopEnvironmentRestOriginMatches(
+        state,
+        nextConfig.externalRestApiBaseUrl
+      ).saved.some(option => option.id === state.activeOptionId)
+      if (!selectedOption || !selectedRestOriginMatches || !selectedOption.rpcProxyBaseUrl.trim()) {
+        setPendingDesktopEnvironmentSetup(null)
+        setStatus(
+          'Desktop environment setup could not verify the confirmed REST and RPC endpoints.',
+          'error'
+        )
+        return
+      }
       setPendingDesktopEnvironmentSetup(null)
       setDesktopEnvironmentSetupComplete(true)
       setStatus('Desktop environment saved.', 'success')
