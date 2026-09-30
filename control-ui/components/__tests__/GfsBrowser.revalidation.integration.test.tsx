@@ -648,6 +648,88 @@ describe('GfsBrowser authoritative revalidation integration', () => {
     expect(screen.getByRole('button', { name: 'second.txt' })).toBeVisible()
   })
 
+  it('does not let a pre-invalidation foreground read overwrite stream state', async () => {
+    const work = child('folder-1', 'rid-folder-1', 'work', 'directory')
+    const stale = child('file-1', 'rid-file-1', 'stale.txt', 'file')
+    const current = child('file-2', 'rid-file-2', 'current.txt', 'file')
+    const folderPath = '/control-api/api/v1/gfs/resources/folder-1/children'
+    let finishForeground!: (response: Response) => void
+    const pendingForeground = new Promise<Response>(resolve => {
+      finishForeground = resolve
+    })
+    let streamController: ReadableStreamDefaultController<Uint8Array> | null = null
+    let folderOpened = false
+    let foregroundReads = 0
+    let streamReads = 0
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input), 'http://control-ui.test')
+        if (url.pathname.endsWith('/api/v1/gfs/entity-changes/stream')) {
+          return new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                streamController = controller
+                init?.signal?.addEventListener('abort', () => controller.close(), { once: true })
+              },
+            }),
+            { status: 200, headers: { 'content-type': 'application/x-ndjson' } }
+          )
+        }
+        if (url.pathname.endsWith('/api/v1/gfs/tree')) {
+          return jsonResponse({ rootResourceId: 'root-1', items: [work], nextCursor: null })
+        }
+        if (url.pathname === '/control-api/api/v1/gfs/resources/root-1/children') {
+          return jsonResponse({ items: [work], nextCursor: null })
+        }
+        if (url.pathname === folderPath) {
+          if (!folderOpened) throw new TypeError('prefetch is intentionally unavailable')
+          if (foregroundReads++ === 0) return pendingForeground
+          streamReads += 1
+          return jsonResponse({ items: [current], nextCursor: null })
+        }
+        if (
+          url.pathname.endsWith('/api/v1/gfs/resolve') ||
+          url.pathname.endsWith('/api/v1/gfs/by-path')
+        ) {
+          return jsonResponse({
+            resourceId: 'folder-1',
+            rid: 'rid-folder-1',
+            gfsUri: 'gfs://main/rid-folder-1',
+            name: 'work',
+            kind: 'directory',
+            path: '/work',
+            version: 1,
+          })
+        }
+        return jsonResponse({ items: [], nextCursor: null })
+      })
+    )
+
+    render(
+      <ToastProvider>
+        <GfsBrowser />
+      </ToastProvider>
+    )
+    await waitFor(() => expect(streamController).not.toBeNull())
+    await screen.findByRole('button', { name: 'work' })
+    folderOpened = true
+    fireEvent.click(screen.getByRole('button', { name: 'work' }))
+    await waitFor(() => expect(foregroundReads).toBe(1))
+
+    const producerFrame = await controlApiProducerFrame()
+    await act(async () => {
+      streamController!.enqueue(new TextEncoder().encode(`${producerFrame}\n`))
+      await new Promise(resolve => setTimeout(resolve, 150))
+    })
+    expect(streamReads).toBe(0)
+
+    await act(async () => finishForeground(jsonResponse({ items: [stale], nextCursor: null })))
+    await screen.findByRole('button', { name: 'current.txt' })
+    expect(streamReads).toBe(1)
+    expect(screen.queryByRole('button', { name: 'stale.txt' })).toBeNull()
+  })
+
   it('recovers the rendered list after a real API-client stream refresh fails once', async () => {
     const existingFile = child('file-1', 'rid-file-1', 'existing.txt', 'file')
     const remoteFolder = child('folder-2', 'rid-folder-2', 'remote-folder', 'directory')
