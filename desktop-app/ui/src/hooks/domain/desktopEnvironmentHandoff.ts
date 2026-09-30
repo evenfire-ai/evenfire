@@ -1,6 +1,15 @@
 import type { DesktopRuntimeConfig, DesktopRuntimeConfigState } from '../../../../src/types'
 import type { SetStatusFn } from './types'
 
+const LOCALHOST_OPTION_ID = '__localhost__'
+
+type DesktopEnvironmentHandoffState = {
+  booting: boolean
+  busy: boolean
+  authTransitioning: boolean
+  isAuthenticated: boolean
+}
+
 type DesktopEnvironmentSetupPayload = {
   externalRestApiBaseUrl: string
   rpcProxyBaseUrl?: string
@@ -8,6 +17,7 @@ type DesktopEnvironmentSetupPayload = {
 }
 
 type DesktopEnvironmentSetupHandlerOptions = {
+  getAuthState: () => DesktopEnvironmentHandoffState
   refreshRuntimeConfigState: () => Promise<DesktopRuntimeConfigState>
   handleSelectRuntimeConfig: (optionId: string) => Promise<DesktopRuntimeConfigState | null>
   onSessionNeedsLoad: (options?: { preserveNav?: boolean }) => Promise<void>
@@ -40,6 +50,7 @@ function sameDesktopEnvironment(
 }
 
 export function createDesktopEnvironmentSetupHandler({
+  getAuthState,
   refreshRuntimeConfigState,
   handleSelectRuntimeConfig,
   onSessionNeedsLoad,
@@ -77,6 +88,16 @@ export function createDesktopEnvironmentSetupHandler({
       return
     }
 
+    const localhostOption = configState.options.find(option => option.id === LOCALHOST_OPTION_ID)
+    if (localhostOption && sameDesktopEnvironment(localhostOption, linkedConfig)) {
+      setPendingDesktopEnvironmentSetup(null)
+      setStatus(
+        'Desktop setup link rejected: the Localhost environment cannot be opened from a link.',
+        'error'
+      )
+      return
+    }
+
     const activeEnvironmentMatches = Boolean(
       configState.configured &&
       configState.currentConfig &&
@@ -85,6 +106,12 @@ export function createDesktopEnvironmentSetupHandler({
     if (activeEnvironmentMatches) {
       setPendingDesktopEnvironmentSetup(null)
       setStatus(`Opening ${linkedConfig.appName} in Evenfire Desktop.`, 'success')
+      return
+    }
+
+    if (getAuthState().isAuthenticated) {
+      setPendingDesktopEnvironmentSetup(null)
+      setStatus('Sign out before opening another desktop environment.', 'info')
       return
     }
 

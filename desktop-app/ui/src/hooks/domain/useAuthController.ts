@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { DEFAULT_TOAST_DURATION_MS } from '@constants/toasts'
 import { desktopQueryClient } from '@lib/queryClient'
 import type {
@@ -39,11 +39,26 @@ function isUnauthorizedError(error: unknown) {
 }
 
 export function useAuthController({ setStatus, onSessionNeedsLoad }: UseAuthControllerParams) {
-  const [booting, setBooting] = useState(true)
-  const [busy, setBusy] = useState(false)
+  const [booting, setBootingState] = useState(true)
+  const bootingRef = useRef(true)
+  const setBooting = useCallback((next: boolean) => {
+    bootingRef.current = next
+    setBootingState(next)
+  }, [])
+  const [busy, setBusyState] = useState(false)
+  const busyRef = useRef(false)
+  const setBusy = useCallback((next: boolean) => {
+    busyRef.current = next
+    setBusyState(next)
+  }, [])
   const [statusText, setStatusText] = useState('Ready.')
   const [statusTone, setStatusTone] = useState<Tone>('info')
-  const [isAuthenticated, setIsAuthenticated] = useState(false)
+  const [isAuthenticated, setIsAuthenticatedState] = useState(false)
+  const isAuthenticatedRef = useRef(false)
+  const setIsAuthenticated = useCallback((next: boolean) => {
+    isAuthenticatedRef.current = next
+    setIsAuthenticatedState(next)
+  }, [])
   const [me, setMe] = useState<SessionMe | null>(null)
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
@@ -53,7 +68,12 @@ export function useAuthController({ setStatus, onSessionNeedsLoad }: UseAuthCont
   const [runtimeConfigSetupExternalRestApiBaseUrl, setRuntimeConfigSetupExternalRestApiBaseUrl] =
     useState('')
   const [runtimeConfigSetupRpcProxyBaseUrl, setRuntimeConfigSetupRpcProxyBaseUrl] = useState('')
-  const [authTransitioning, setAuthTransitioning] = useState(false)
+  const [authTransitioning, setAuthTransitioningState] = useState(false)
+  const authTransitioningRef = useRef(false)
+  const setAuthTransitioning = useCallback((next: boolean) => {
+    authTransitioningRef.current = next
+    setAuthTransitioningState(next)
+  }, [])
   const [runtimeConfigState, setRuntimeConfigState] = useState<DesktopRuntimeConfigState | null>(
     null
   )
@@ -76,6 +96,16 @@ export function useAuthController({ setStatus, onSessionNeedsLoad }: UseAuthCont
     isAuthenticated &&
     dependencyHealth &&
     (!dependencyHealth.externalRestApi.ok || !dependencyHealth.rpcProxy.ok)
+  )
+
+  const getDesktopEnvironmentHandoffAuthState = useCallback(
+    () => ({
+      booting: bootingRef.current,
+      busy: busyRef.current,
+      authTransitioning: authTransitioningRef.current,
+      isAuthenticated: isAuthenticatedRef.current,
+    }),
+    []
   )
 
   const refreshRuntimeConfigState = useCallback(async () => {
@@ -339,6 +369,7 @@ export function useAuthController({ setStatus, onSessionNeedsLoad }: UseAuthCont
   useEffect(() => {
     return window.clerum.auth.onDesktopEnvironmentSetup(
       createDesktopEnvironmentSetupHandler({
+        getAuthState: getDesktopEnvironmentHandoffAuthState,
         refreshRuntimeConfigState,
         handleSelectRuntimeConfig,
         onSessionNeedsLoad,
@@ -346,7 +377,13 @@ export function useAuthController({ setStatus, onSessionNeedsLoad }: UseAuthCont
         setStatus,
       })
     )
-  }, [handleSelectRuntimeConfig, onSessionNeedsLoad, refreshRuntimeConfigState, setStatus])
+  }, [
+    getDesktopEnvironmentHandoffAuthState,
+    handleSelectRuntimeConfig,
+    onSessionNeedsLoad,
+    refreshRuntimeConfigState,
+    setStatus,
+  ])
 
   const handleClearRuntimeConfigSelection = async (): Promise<DesktopRuntimeConfigState | null> => {
     try {

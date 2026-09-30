@@ -39,6 +39,8 @@ type DesktopEnvironmentSetupPayload = typeof targetEnvironment
 let desktopEnvironmentSetupListener:
   | ((payload: DesktopEnvironmentSetupPayload) => void | Promise<void>)
   | null = null
+let setBootingForTest: ((value: boolean) => void) | null = null
+let setAuthenticatedForTest: ((value: boolean) => void) | null = null
 let runtimeConfigModule: typeof import('../../../../../src/config') | null = null
 let runtimeConfigDirectory = ''
 const originalOnboardingPreview = process.env.EVENFIRE_ONBOARDING_PREVIEW
@@ -48,6 +50,8 @@ function Probe() {
     setStatus: mocks.setStatus,
     onSessionNeedsLoad: mocks.loadSession,
   })
+  setBootingForTest = auth.setBooting
+  setAuthenticatedForTest = auth.setIsAuthenticated
 
   return (
     <>
@@ -85,6 +89,8 @@ async function savedTargetOptionId(): Promise<string> {
 beforeEach(async () => {
   vi.clearAllMocks()
   desktopEnvironmentSetupListener = null
+  setBootingForTest = null
+  setAuthenticatedForTest = null
   runtimeConfigModule = null
   delete process.env.EVENFIRE_ONBOARDING_PREVIEW
   runtimeConfigDirectory = await fsp.mkdtemp(path.join(os.tmpdir(), 'evenfire-desktop-env-test-'))
@@ -113,7 +119,7 @@ beforeEach(async () => {
     await runtimeConfigModule!.selectDesktopRuntimeConfigOption(optionId)
     return runtimeConfigModule!.getDesktopRuntimeConfigState()
   })
-  mocks.loadSession.mockResolvedValue(undefined)
+  mocks.loadSession.mockImplementation(async () => setBootingForTest?.(false))
   mocks.onDesktopSetupToken.mockReturnValue(() => undefined)
   mocks.onExternalLogout.mockReturnValue(() => undefined)
   mocks.onDesktopEnvironmentSetup.mockImplementation(
@@ -225,6 +231,51 @@ describe('Desktop environment handoff', () => {
       linkedEnvironment.externalRestApiBaseUrl
     )
     expect(screen.getByTestId('pending-rpc')).toHaveTextContent('none')
+  })
+
+  it('does not switch away from another saved environment while signed in', async () => {
+    const state = await runtimeConfigModule!.getDesktopRuntimeConfigState()
+    const otherOption = state.options.find(
+      option => option.externalRestApiBaseUrl === otherEnvironment.externalRestApiBaseUrl
+    )
+    if (!otherOption) throw new Error('The runtime config producer did not return the other target')
+    await runtimeConfigModule!.selectDesktopRuntimeConfigOption(otherOption.id)
+
+    render(<Probe />)
+    await waitFor(() => expect(screen.getByTestId('configuration-loaded')).toHaveTextContent('yes'))
+    await act(async () => setAuthenticatedForTest?.(true))
+    mocks.selectRuntimeConfig.mockClear()
+    mocks.setStatus.mockClear()
+
+    await dispatchDesktopEnvironmentLink()
+
+    expect(mocks.selectRuntimeConfig).not.toHaveBeenCalled()
+    expect(screen.getByTestId('pending-environment')).toHaveTextContent('none')
+    expect(mocks.setStatus).toHaveBeenCalledWith(
+      expect.stringMatching(/sign out.*before opening another/i),
+      'info'
+    )
+  })
+
+  it('does not let a desktop link select the built-in Localhost environment', async () => {
+    const state = await runtimeConfigModule!.getDesktopRuntimeConfigState()
+    const localhostOption = state.options.find(option => option.id === '__localhost__')
+    if (!localhostOption) throw new Error('The runtime config producer did not return Localhost')
+
+    render(<Probe />)
+    await waitFor(() => expect(screen.getByTestId('configuration-loaded')).toHaveTextContent('yes'))
+    await dispatchDesktopEnvironmentLink({
+      appName: localhostOption.appName,
+      externalRestApiBaseUrl: localhostOption.externalRestApiBaseUrl,
+      rpcProxyBaseUrl: localhostOption.rpcProxyBaseUrl,
+    })
+
+    expect(mocks.selectRuntimeConfig).not.toHaveBeenCalled()
+    expect(screen.getByTestId('pending-environment')).toHaveTextContent('none')
+    expect(mocks.setStatus).toHaveBeenCalledWith(
+      expect.stringMatching(/Localhost.*cannot be opened from a link/i),
+      'error'
+    )
   })
 
   it('does not offer setup when the saved environment list cannot be verified', async () => {
