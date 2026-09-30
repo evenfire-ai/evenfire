@@ -5508,6 +5508,30 @@ describe('WorkflowReconciler — reconcile loop', () => {
               c => c.type === 'WorkflowNetworkPoliciesConverged'
             )
           ).toMatchObject([{ status: 'False', reason: 'PruneUnevaluated' }])
+
+          // Witness: once the LIST answers, a DELETE that does not land is
+          // still PrunePending, and it replaces the unevaluated marker.
+          apiserver.api.listNamespacedNetworkPolicy.mockImplementation(liveList)
+          apiserver.api.deleteNamespacedNetworkPolicy.mockClear()
+          apiserver.api.deleteNamespacedNetworkPolicy.mockRejectedValueOnce({
+            code: 403,
+            message: 'forbidden',
+          })
+          const pending = await reconciler.reconcile(
+            'test-wf',
+            'uid-123',
+            'sandbox-recipes',
+            spec(),
+            { conditions: failed.networkPolicyOwnershipConditions ?? [] }
+          )
+          expect(apiserver.api.deleteNamespacedNetworkPolicy.mock.calls[0]?.[0].name).toBe(LEFTOVER)
+          expect(apiserver.live.has(apiserver.key('sandbox-recipes', LEFTOVER))).toBe(true)
+          expect(pending.networkPolicyRetryPending).toBeFalsy()
+          expect(
+            (pending.networkPolicyOwnershipConditions ?? []).filter(
+              c => c.type === 'WorkflowNetworkPoliciesConverged'
+            )
+          ).toMatchObject([{ status: 'False', reason: 'PrunePending' }])
         })
 
         // The legacy mcp-servers internet policy is a prune like any other:
@@ -9185,8 +9209,8 @@ describe('translateNetworkPolicyApplySummary', () => {
     })
   })
 
-  // R3-L3: a prune that could not delete (a non-404 DELETE, a failed LIST, or
-  // a failed legacy delete) is its own fact. It is published as PrunePending
+  // R3-L3: a prune that could not delete (a non-404 DELETE or a failed legacy
+  // delete) is its own fact; a failed LIST is `unevaluated` (R4-L6). It is published as PrunePending
   // and never sets the retry flag: nothing in the run's short-circuits can
   // prune, so a requeue would only repeat the failed DELETE.
   describe('prune-pending', () => {

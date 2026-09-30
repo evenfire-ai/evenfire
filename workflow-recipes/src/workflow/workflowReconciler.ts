@@ -107,6 +107,7 @@ import {
   type McpHostRuntimeTokenRefreshReason,
   type McpHostRuntimeTokenRefreshResult,
   NO_MCP_HOST_RUNTIME_TOKEN_REFRESH,
+  type NetworkPolicyPruneFact,
   PluginWorkloadSdkProvisioner,
   type WorkflowNetworkPolicyApplySummary,
 } from './pluginWorkloadSdkProvisioner'
@@ -277,26 +278,33 @@ export const NETWORK_POLICY_OWNERSHIP_CONDITION_TYPE = 'WorkflowNetworkPolicyOwn
  * and removed once they have. It carries two independent facts (see
  * `networkPolicyMarkerFacts`):
  *
- * - apply-pending: a desired policy was left unwritten (terminating or
- *   contended). Reason `RetryPending`; the pass requeues, and the WRC
+ * - apply (`converged | pending`): `pending` when a desired policy was left
+ *   unwritten (terminating or contended). The pass requeues, and the WRC
  *   short-circuits of a running workflow, which never reach `reconcile()`,
  *   apply the policies again while it is set.
- * - prune-pending: a DELETE the prune owed did not land (a non-404 prune or
- *   legacy DELETE, or a failed LIST). Reason `PrunePending` when it is the
- *   only fact; no requeue, since nothing but `reconcile()` prunes. Only a
- *   later `reconcile()` prune that lands, or the finalizer, clears it; every
- *   other path carries it over.
+ * - prune (`converged | pending | unevaluated`, see `NetworkPolicyPruneFact`):
+ *   `pending` when a DELETE the prune owed did not land, `unevaluated` when
+ *   its LIST failed. No requeue for either, since nothing but `reconcile()`
+ *   prunes. Only a later `reconcile()` prune that lands, or the finalizer,
+ *   clears it; every other path carries it over.
  *
- * Both facts together are one `RetryAndPrunePending` marker. Each combination
- * has its own reason and the facts are read back from the reason alone.
+ * Each combination with a fact that is not converged has its own reason
+ * (`RetryPending`, `PrunePending`, `PruneUnevaluated`, `RetryAndPrunePending`,
+ * `RetryAndPruneUnevaluated`), and the facts are read back from the reason
+ * alone.
  */
 export const NETWORK_POLICIES_CONVERGED_CONDITION_TYPE = 'WorkflowNetworkPoliciesConverged'
 
 /** The two facts the WorkflowNetworkPoliciesConverged marker carries. */
 export interface NetworkPolicyMarkerFacts {
-  applyPending: boolean
-  prunePending: boolean
+  apply: 'converged' | 'pending'
+  prune: NetworkPolicyPruneFact
 }
+
+const CONVERGED_NETWORK_POLICY_MARKER_FACTS = {
+  apply: 'converged',
+  prune: 'converged',
+} as const satisfies NetworkPolicyMarkerFacts
 
 /**
  * One reason per combination of facts. The facts are read back from the
@@ -304,18 +312,28 @@ export interface NetworkPolicyMarkerFacts {
  */
 const NETWORK_POLICY_MARKER_REASONS = {
   RetryPending: {
-    facts: { applyPending: true, prunePending: false },
+    facts: { apply: 'pending', prune: 'converged' },
     message: 'One or more run-lane NetworkPolicies are pending a retry (terminating or contended)',
   },
   PrunePending: {
-    facts: { applyPending: false, prunePending: true },
+    facts: { apply: 'converged', prune: 'pending' },
     message:
       'One or more run-lane NetworkPolicies the spec no longer wants are pending a delete; the next reconcile() pass or the finalizer removes them',
   },
+  PruneUnevaluated: {
+    facts: { apply: 'converged', prune: 'unevaluated' },
+    message:
+      'The run-lane NetworkPolicies the spec no longer wants could not be listed, so none was pruned; the next reconcile() pass or the finalizer removes them',
+  },
   RetryAndPrunePending: {
-    facts: { applyPending: true, prunePending: true },
+    facts: { apply: 'pending', prune: 'pending' },
     message:
       'One or more run-lane NetworkPolicies are pending a retry (terminating or contended), and one or more the spec no longer wants are pending a delete',
+  },
+  RetryAndPruneUnevaluated: {
+    facts: { apply: 'pending', prune: 'unevaluated' },
+    message:
+      'One or more run-lane NetworkPolicies are pending a retry (terminating or contended), and the ones the spec no longer wants could not be listed for a prune',
   },
 } as const satisfies Record<string, { facts: NetworkPolicyMarkerFacts; message: string }>
 
@@ -327,9 +345,23 @@ function isNetworkPolicyMarkerReason(
   return reason !== undefined && Object.hasOwn(NETWORK_POLICY_MARKER_REASONS, reason)
 }
 
-function networkPolicyMarkerReason(facts: NetworkPolicyMarkerFacts): NetworkPolicyMarkerReason {
-  if (facts.applyPending) return facts.prunePending ? 'RetryAndPrunePending' : 'RetryPending'
-  return 'PrunePending'
+/** The reason for `facts`, or `undefined` when both are converged. */
+function networkPolicyMarkerReason(
+  facts: NetworkPolicyMarkerFacts
+): NetworkPolicyMarkerReason | undefined {
+  const retry = facts.apply === 'pending'
+  switch (facts.prune) {
+    case 'converged':
+      return retry ? 'RetryPending' : undefined
+    case 'pending':
+      return retry ? 'RetryAndPrunePending' : 'PrunePending'
+    case 'unevaluated':
+      return retry ? 'RetryAndPruneUnevaluated' : 'PruneUnevaluated'
+    default: {
+      const unreachable: never = facts.prune
+      throw new Error(`Unknown NetworkPolicy prune fact: ${String(unreachable)}`)
+    }
+  }
 }
 
 /**
@@ -369,14 +401,14 @@ export function networkPolicyConditionsChanged(
 export function hasNetworkPolicyRetryPendingMarker(
   conditions: StatusCondition[] | undefined
 ): boolean {
-  return networkPolicyMarkerFacts(conditions).applyPending
+  return networkPolicyMarkerFacts(conditions).apply === 'pending'
 }
 
 /**
  * Reads the facts a published marker carries. This and
  * `buildNetworkPolicyConvergedCondition` are the only places that encode what
  * the marker means. A `False` marker with any other reason was not written by
- * this controller and carries neither fact.
+ * this controller and reads as converged facts.
  */
 export function networkPolicyMarkerFacts(
   conditions: StatusCondition[] | undefined
@@ -385,14 +417,14 @@ export function networkPolicyMarkerFacts(
     c => c.type === NETWORK_POLICIES_CONVERGED_CONDITION_TYPE && c.status === 'False'
   )
   if (!isNetworkPolicyMarkerReason(marker?.reason)) {
-    return { applyPending: false, prunePending: false }
+    return { ...CONVERGED_NETWORK_POLICY_MARKER_FACTS }
   }
   return { ...NETWORK_POLICY_MARKER_REASONS[marker.reason].facts }
 }
 
 /**
- * The marker for `facts`, or `undefined` when both are clear (the marker is
- * then removed). `lastTransitionTime` follows `status`: a marker that stays
+ * The marker for `facts`, or `undefined` when both are converged (the marker
+ * is then removed). `lastTransitionTime` follows `status`: a marker that stays
  * `False` keeps the time it was first published, whichever fact it now names.
  */
 export function buildNetworkPolicyConvergedCondition(
@@ -400,11 +432,11 @@ export function buildNetworkPolicyConvergedCondition(
   now: string,
   existingConditions?: StatusCondition[]
 ): StatusCondition | undefined {
-  if (!facts.applyPending && !facts.prunePending) return undefined
+  const reason = networkPolicyMarkerReason(facts)
+  if (reason === undefined) return undefined
   const existing = existingConditions?.find(
     c => c.type === NETWORK_POLICIES_CONVERGED_CONDITION_TYPE && c.status === 'False'
   )
-  const reason = networkPolicyMarkerReason(facts)
   return {
     type: NETWORK_POLICIES_CONVERGED_CONDITION_TYPE,
     status: 'False',
@@ -461,10 +493,10 @@ export function buildNetworkPolicyOwnershipConditions(
  * (the pass returned before the apply) yields neither field, which keeps the
  * published conditions. A summary always yields the group's conditions, `[]`
  * included: the ownership condition when a policy conflicts, and the
- * converged marker while a policy is pending a retry or a delete. Only a
- * pending retry sets the retry flag (and with it a requeue). A summary without
- * a prune fact (a path that did not prune) carries the published prune fact
- * over, so only a pass that pruned can clear it.
+ * converged marker while a policy is pending a retry, or the prune is pending
+ * or unevaluated. Only a pending retry sets the retry flag (and with it a
+ * requeue). A summary without a prune fact (a path that did not prune) carries
+ * the published prune fact over, so only a pass that pruned can clear it.
  */
 export function translateNetworkPolicyApplySummary(
   summary: WorkflowNetworkPolicyApplySummary | undefined,
@@ -472,12 +504,9 @@ export function translateNetworkPolicyApplySummary(
   now: string
 ): Pick<WorkflowReconcileResult, 'networkPolicyOwnershipConditions' | 'networkPolicyRetryPending'> {
   if (summary === undefined) return {}
-  const prunePending =
-    summary.prune === undefined
-      ? networkPolicyMarkerFacts(existingConditions).prunePending
-      : summary.prune === 'pending'
+  const prune = summary.prune ?? networkPolicyMarkerFacts(existingConditions).prune
   const marker = buildNetworkPolicyConvergedCondition(
-    { applyPending: summary.retryPending, prunePending },
+    { apply: summary.retryPending ? 'pending' : 'converged', prune },
     now,
     existingConditions
   )
@@ -3588,7 +3617,9 @@ export class WorkflowReconciler {
       keepProxies
     )
     const legacy = await this.pruneLegacyMcpServersInternetEgressPolicy(recipeName, recipeUid)
-    summary.prune = prune.deletePending || legacy.deletePending ? 'pending' : 'converged'
+    // An unevaluated prune does not know which policies it owed a DELETE, so
+    // it outranks a legacy DELETE that did not land.
+    summary.prune = prune === 'converged' && legacy.deletePending ? 'pending' : prune
     return summary
   }
 
@@ -3601,14 +3632,16 @@ export class WorkflowReconciler {
    * absent from this pass's desired set. A listed policy with an
    * ownerReference is skipped, matching the apply's ownership veto. Only
    * reconcile() prunes; the mid-run retry never calls this (see
-   * retryRunLaneNetworkPolicies for the per-path table).
+   * retryRunLaneNetworkPolicies for the per-path table). A failed LIST
+   * evaluated nothing and answers `unevaluated`; a DELETE that did not land
+   * answers `pending`.
    */
   private async pruneUndesiredRunLaneNetworkPolicies(
     recipeName: string,
     desiredNames: Set<string | undefined>,
     catalog: Set<string>,
     keepProxies: RunLaneProxyKeepReasons
-  ): Promise<{ deletePending: boolean }> {
+  ): Promise<NetworkPolicyPruneFact> {
     const namespace = this.deps.config.sandboxNamespace
     const labelSelector = `clerum.io/recipe=${recipeName},clerum.io/managed-by=wrc`
     let list: { items?: k8s.V1NetworkPolicy[] }
@@ -3622,7 +3655,7 @@ export class WorkflowReconciler {
         recipe: recipeName,
         err: error,
       })
-      return { deletePending: true }
+      return 'unevaluated'
     }
     const codexProxyPolicyName = `${recipeName}-mcp-host-to-codex-proxy`
     const grokProxyPolicyName = `${recipeName}-mcp-host-to-grok-proxy`
@@ -3677,7 +3710,7 @@ export class WorkflowReconciler {
         deletePending = true
       }
     }
-    return { deletePending }
+    return deletePending ? 'pending' : 'converged'
   }
 
   /**

@@ -1540,16 +1540,17 @@ export class WorkflowRecipeReconciler {
   /**
    * Settles the marker once the run is terminal. The run no longer needs its
    * policies, so a pending apply is dropped: there is nothing left to retry.
-   * A pending prune is kept: the terminal teardown deletes the run's pods, not
-   * its run-lane policies, so the leftover is still live and only a later
-   * reconcile() prune or the finalizer removes it. The ownership condition, if
-   * any, stays published. Opens a patch only when the marker changes.
+   * A pending or unevaluated prune is kept: the terminal teardown deletes the
+   * run's pods, not its run-lane policies, so a leftover may still be live and
+   * only a later reconcile() prune or the finalizer removes it. The ownership
+   * condition, if any, stays published. Opens a patch only when the marker
+   * changes.
    */
   private async settleNetworkPolicyMarkerForTerminalRun(recipe: WorkflowRecipeCRD): Promise<void> {
     const existing = recipe.status?.conditions
-    const { prunePending } = networkPolicyMarkerFacts(existing)
+    const { prune } = networkPolicyMarkerFacts(existing)
     const marker = buildNetworkPolicyConvergedCondition(
-      { applyPending: false, prunePending },
+      { apply: 'converged', prune },
       new Date().toISOString(),
       existing
     )

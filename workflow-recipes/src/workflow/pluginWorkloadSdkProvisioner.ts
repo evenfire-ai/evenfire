@@ -55,16 +55,24 @@ export type EagerSdkMcpHostStatus =
  * pending retry means a policy was left unwritten for a later pass: it was
  * terminating, or still contended after the bounded apply rounds.
  *
- * `prune` is set only by a pass that pruned: `pending` when a DELETE the
- * pass owed did not land (a non-404 prune or legacy DELETE, or a failed
- * LIST), `converged` otherwise. A pass that did not prune leaves it
- * undefined, and the published prune fact is carried over unchanged.
+ * `prune` is set only by a pass that pruned (see `NetworkPolicyPruneFact`).
+ * A pass that did not prune leaves it undefined, and the published prune
+ * fact is carried over unchanged.
  */
 export type WorkflowNetworkPolicyApplySummary = {
   conflicts: { policy: string; reason: NetworkPolicyConflictReason }[]
   retryPending: boolean
-  prune?: 'converged' | 'pending'
+  prune?: NetworkPolicyPruneFact
 }
+
+/**
+ * What a prune pass established about the run-lane policies the spec no
+ * longer wants: `converged` when every DELETE it owed landed (2xx or 404),
+ * `pending` when one did not (a non-404 prune or legacy DELETE), and
+ * `unevaluated` when its LIST failed, so it could not tell which policies
+ * were owed a DELETE at all.
+ */
+export type NetworkPolicyPruneFact = 'converged' | 'pending' | 'unevaluated'
 
 export type EagerSdkMcpHostResult = {
   status: EagerSdkMcpHostStatus
