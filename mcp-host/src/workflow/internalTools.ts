@@ -1047,17 +1047,15 @@ const DASH_TABLE_SCHEMA = {
       // one example key. additionalProperties, which Gemini's SDK drops, keeps
       // the other keys valid and marks the object as a map.
       properties: {
-        '0': {
-          type: 'string',
-          enum: ['plain', 'severity', 'priority', 'status'],
-          description: 'Column 0.',
-        },
+        '0': { type: 'string', description: 'Column 0: plain, severity, priority or status.' },
       },
-      additionalProperties: { type: 'string', enum: ['plain', 'severity', 'priority', 'status'] },
+      // A plain string, not an enum: an unknown type shows the column as plain
+      // text with a note, the same on every path, as it did before types were listed.
+      additionalProperties: { type: 'string' },
       description:
-        'Badge columns: header or 0-based index to a type, e.g. {"Status": "severity"}. ' +
-        'Values such as critical, high, medium, low, info, p0-p2, healthy, degraded, down ' +
-        'then show as colored badges.',
+        'Badge columns: header or 0-based index to plain, severity, priority or status, e.g. ' +
+        '{"Status": "severity"}. Values such as critical, high, medium, low, info, p0-p2, ' +
+        'healthy, degraded, down then show as colored badges.',
     },
   },
 }

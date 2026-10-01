@@ -394,3 +394,46 @@ describe('dashboard schema survives Gemini', () => {
     expect(empty).toEqual([])
   })
 })
+
+describe('dashboard table column types', () => {
+  const args = {
+    filename: 'types.html',
+    data: {
+      title: 'T',
+      tables: [
+        {
+          headers: ['Item', 'Amount', 'Severity'],
+          rows: [['a', '$5', 'high']],
+          columnTypes: { Amount: 'currency', Severity: 'severity' },
+        },
+      ],
+    },
+  }
+
+  it('shows a column of an unknown type as plain text, with a note, on the chat path', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'clerum-coltypes-'))
+    try {
+      const tool = INTERNAL_TOOLS.find(t => t.name === 'clerum__generate_dashboard')!
+      const result = await tool.execute(args, dir)
+      expect(result.success, result.error).toBe(true)
+      expect(result.content).toContain('columnTypes["Amount"] "currency" is not a column type')
+      const html = fs.readFileSync(result.artifact!.path, 'utf8')
+      expect(html).toContain('severity-badge')
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('accepts the same call on the workflow path, where the schema is enforced', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'clerum-coltypes-'))
+    try {
+      const { result } = await workflowRouter(dir).callTool(
+        'clerum__generate_dashboard',
+        structuredClone(args)
+      )
+      expect(result.isError, JSON.stringify(result.content)).toBeFalsy()
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})

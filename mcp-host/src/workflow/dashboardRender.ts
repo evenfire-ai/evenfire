@@ -992,6 +992,7 @@ function renderChartCards(charts: unknown, where: string, ctx: DashRender, title
 }
 
 const BADGE_COLUMN_TYPES = new Set(['severity', 'priority', 'status'])
+const COLUMN_TYPES = new Set(['plain', ...BADGE_COLUMN_TYPES])
 
 function dashSeverityClass(value: unknown): string {
   const v = String(value ?? '')
@@ -1023,6 +1024,14 @@ function renderTableHtml(t: unknown, where: string, ctx: DashRender, title?: str
     throw new Error(`${where}.headers must be a non-empty array of column names.`)
   }
   const colTypes = isDashRecord(table.columnTypes) ? table.columnTypes : {}
+  for (const [column, type] of Object.entries(colTypes)) {
+    if (!COLUMN_TYPES.has(String(type))) {
+      ctx.warnings.push(
+        `${where}.columnTypes[${JSON.stringify(column)}] ${JSON.stringify(type)} is not a column ` +
+          'type (plain, severity, priority, status), so that column shows as plain text.'
+      )
+    }
+  }
   const headerNames = headers.map(headerText)
   const headerHtml = headerNames.map(h => `<th>${softBreaks(escapeHtml(h))}</th>`).join('')
   const rows = fitRowsToHeaders(
@@ -1036,7 +1045,7 @@ function renderTableHtml(t: unknown, where: string, ctx: DashRender, title?: str
     .map(row => {
       const cells = row
         .map((cell, c) => {
-          const colType = colTypes[c] ?? colTypes[headerNames[c]]
+          const colType = own(colTypes, String(c)) ?? own(colTypes, headerNames[c])
           if (cell !== null && typeof cell === 'object') structured++
           const text = tableCellText(cell)
           const cls = BADGE_COLUMN_TYPES.has(String(colType)) ? dashSeverityClass(text) : ''
