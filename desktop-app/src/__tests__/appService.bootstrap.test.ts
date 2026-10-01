@@ -53,7 +53,7 @@ describe('AppService invitation configuration lookup', () => {
     tempDirs.clear()
   })
 
-  it('persists runtime config when desktop setup is completed', async () => {
+  it('accepts terminal-dot discovery when the canonical REST endpoint matches', async () => {
     const configPath = await createTempConfigPath('clerum-desktop-config')
     process.env.CLERUM_DESKTOP_CONFIG_PATH = configPath
     delete process.env.EXTERNAL_REST_API_BASE_URL
@@ -83,14 +83,14 @@ describe('AppService invitation configuration lookup', () => {
       completeDesktopSetup: vi.fn().mockResolvedValue({
         valid: true,
         email: 'user@example.com',
-        externalRestApiBaseUrl: 'https://api.example.com.',
+        externalRestApiBaseUrl: 'https://api.example.com',
         rpcProxyBaseUrl: 'https://rpc.example.com',
         appName: 'Evenfire',
       }),
     } as never
     service.authClient = {
       getDesktopEnvironment: vi.fn().mockResolvedValue({
-        externalRestApiBaseUrl: 'https://api.example.com',
+        externalRestApiBaseUrl: 'https://api.example.com.',
         rpcProxyBaseUrl: 'https://rpc.example.com',
         appName: 'Evenfire',
       }),
@@ -149,6 +149,59 @@ describe('AppService invitation configuration lookup', () => {
     expect(persisted).toEqual({
       externalRestApiBaseUrl: 'https://api.example.com',
       rpcProxyBaseUrl: 'https://rpc.example.com',
+      appName: 'Evenfire',
+    })
+  })
+
+  it('does not save RPC when dotted discovery names a different REST endpoint', async () => {
+    const configPath = await createTempConfigPath('clerum-desktop-config-mismatched-discovery')
+    process.env.CLERUM_DESKTOP_CONFIG_PATH = configPath
+    delete process.env.EXTERNAL_REST_API_BASE_URL
+    delete process.env.RPC_PROXY_BASE_URL
+    delete process.env.PROFILE_UI_BASE_URL
+    vi.resetModules()
+
+    const [{ AppService }, { config }] = await Promise.all([
+      import('../appService.js'),
+      import('../config.js'),
+    ])
+    const service = new AppService() as unknown as {
+      authClient: { getDesktopEnvironment: ReturnType<typeof vi.fn> }
+      memberRegistrationServiceClient: { completeDesktopSetup: ReturnType<typeof vi.fn> }
+      completeDesktopSetup: (email: string, authorizationToken: string) => Promise<unknown>
+    }
+
+    service.memberRegistrationServiceClient = {
+      completeDesktopSetup: vi.fn().mockResolvedValue({
+        valid: true,
+        email: 'user@example.com',
+        externalRestApiBaseUrl: 'https://api.example.com/confirmed',
+        rpcProxyBaseUrl: '',
+        appName: 'Evenfire',
+      }),
+    } as never
+    service.authClient = {
+      getDesktopEnvironment: vi.fn().mockResolvedValue({
+        externalRestApiBaseUrl: 'https://api.example.com./different',
+        rpcProxyBaseUrl: 'https://rpc.example.com',
+        appName: 'Discovered',
+      }),
+    } as never
+
+    await service.completeDesktopSetup('user@example.com', 'setup-token')
+
+    expect(service.authClient.getDesktopEnvironment).toHaveBeenCalledOnce()
+    expect(config.externalRestApiBaseUrl).toBe('https://api.example.com/confirmed')
+    expect(config.rpcProxyBaseUrl).toBe('')
+
+    const persisted = JSON.parse(await fs.readFile(configPath, 'utf8')) as {
+      externalRestApiBaseUrl: string
+      rpcProxyBaseUrl: string
+      appName: string
+    }
+    expect(persisted).toEqual({
+      externalRestApiBaseUrl: 'https://api.example.com/confirmed',
+      rpcProxyBaseUrl: '',
       appName: 'Evenfire',
     })
   })

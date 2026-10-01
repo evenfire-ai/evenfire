@@ -18,7 +18,7 @@ import {
 } from './config.js'
 import {
   canonicalizeDesktopRestEndpoint,
-  desktopRestEndpointOrigin,
+  sameDesktopRestEndpoint,
 } from './desktopEnvironmentUrl.js'
 import { fetchBoundedBytes } from './gfs/boundedDownload.js'
 import { type DelegationAffordances, delegationAffordances } from './gfs/delegation.js'
@@ -1948,13 +1948,9 @@ export class AppService {
     if (!isDesktopRuntimeConfigured()) return
     if (config.rpcProxyBaseUrl?.trim()) return
     const externalRestApiBaseUrl = canonicalizeDesktopRestEndpoint(config.externalRestApiBaseUrl)
-    const externalRestApiOrigin = desktopRestEndpointOrigin(externalRestApiBaseUrl)
     const discovered = await this.authClient.getDesktopEnvironment()
-    if (
-      discovered.externalRestApiBaseUrl?.trim() &&
-      desktopRestEndpointOrigin(discovered.externalRestApiBaseUrl) !== externalRestApiOrigin
-    ) {
-      throw new Error('Desktop environment discovery returned a different REST host')
+    if (!sameDesktopRestEndpoint(discovered.externalRestApiBaseUrl, externalRestApiBaseUrl)) {
+      throw new Error('Desktop environment discovery returned a different REST endpoint')
     }
     await saveDesktopRuntimeConfig({
       // Discovery is scoped to the configured REST endpoint; it may provide
