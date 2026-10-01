@@ -19,7 +19,7 @@ import {
 } from './docxStyle'
 import { CHART_FONT_FAMILY, ensureFontsReady } from './fonts'
 import { inlineSpans } from './inlineMarkup'
-import { headerText } from './tableRows'
+import { columnNames, headerText } from './tableRows'
 
 export type DocxTableLayout = 'striped' | 'minimal' | 'grid'
 
@@ -171,14 +171,6 @@ function fitTable(cols: ColumnExtent[]): DocxTableFit {
     if (fit.broken.length === 0) return fit
   }
   return plan(ATTEMPTS[ATTEMPTS.length - 1])
-}
-
-/** Header names for a warning: the first three, then how many more. */
-function columnNames(headers: string[], columns: number[]): string {
-  const names = columns.map(c => `'${headers[c]?.trim() || `column ${c + 1}`}'`)
-  if (names.length === 1) return names[0]
-  if (names.length <= 3) return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`
-  return `${names.slice(0, 3).join(', ')} and ${names.length - 3} more column(s)`
 }
 
 const LANDSCAPE_TABLES = new WeakSet<Table>()

@@ -157,6 +157,31 @@ describe('PPTX table columns', () => {
     const { columnWidths } = layoutTable(table, { w: 9.2, h: 5 }, true, 'slides[0]', [])
     for (const w of columnWidths) expect(w).toBeCloseTo(9.2 / 20, 4)
   })
+
+  it('says when columns are too narrow for their words, as the DOCX tool does', () => {
+    const headers = Array.from({ length: 40 }, (_, i) => `Region${i}`)
+    const warnings: string[] = []
+    layoutTable({ headers, rows: [headers] }, { w: 9.2, h: 5 }, true, 'slides[0].table', warnings)
+    expect(warnings).toContainEqual(
+      expect.stringContaining(
+        "slides[0].table: words in 'Region0', 'Region1', 'Region2' and 37 more column(s) are " +
+          'wider than those columns on a slide with 40 columns'
+      )
+    )
+  })
+
+  it('says nothing when every word fits, nor about a URL left to break', () => {
+    const warnings: string[] = []
+    const url = `https://example.com/${'a'.repeat(200)}`
+    layoutTable(
+      { headers: ['Name', 'Link'], rows: [['Docs', url]] },
+      { w: 9.2, h: 5 },
+      true,
+      'slides[0].table',
+      warnings
+    )
+    expect(warnings).toEqual([])
+  })
 })
 
 describe('clerum__generate_pptx — text stays inside its box', () => {

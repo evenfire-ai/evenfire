@@ -8,6 +8,7 @@
  */
 import type { PptxTable } from './pptxInput'
 import { lineHeightIn, textWidth, truncateToLines, wrapLines } from './pptxText'
+import { columnNames } from './tableRows'
 
 /** pptxgenjs's default cell margins, top+bottom and left+right, in inches. */
 const CELL_PAD_Y = 0.1
@@ -42,12 +43,17 @@ export function tableFontSize(columns: number, wide: boolean): number {
 /**
  * Widths proportional to how much text each column holds. A column's single
  * longest word sets its floor, so words break inside a cell only when the
- * table cannot be made to fit otherwise.
+ * table cannot be made to fit otherwise. `words` holds each floor's word width.
  */
-function columnWidths(table: PptxTable, width: number, size: number): number[] {
+function columnWidths(
+  table: PptxTable,
+  width: number,
+  size: number
+): { widths: number[]; words: number[] } {
   const n = table.headers.length
   const natural: number[] = []
   const floor: number[] = []
+  const words: number[] = []
   for (let c = 0; c < n; c++) {
     const cells = [table.headers[c], ...table.rows.map(r => r[c])]
     let longestLine = 0
@@ -60,15 +66,21 @@ function columnWidths(table: PptxTable, width: number, size: number): number[] {
       }
     })
     natural.push(Math.min(longestLine, width * 0.6) + CELL_PAD_X)
-    floor.push(Math.max(Math.min(longestWord, width * 0.3) + CELL_PAD_X, MIN_COLUMN))
+    // A word longer than this is a URL or a hash, and is left to break.
+    const word = Math.min(longestWord, width * 0.3)
+    floor.push(Math.max(word + CELL_PAD_X, MIN_COLUMN))
+    words.push(word)
   }
   const naturalSum = natural.reduce((a, b) => a + b, 0)
-  if (naturalSum <= width) return scaledTo(natural, width)
+  if (naturalSum <= width) return { widths: scaledTo(natural, width), words }
   const floorSum = floor.reduce((a, b) => a + b, 0)
-  if (floorSum >= width) return scaledTo(floor, width)
+  if (floorSum >= width) return { widths: scaledTo(floor, width), words }
   const slack = natural.map((w, c) => Math.max(w - floor[c], 0))
   const slackSum = slack.reduce((a, b) => a + b, 0)
-  return floor.map((w, c) => w + (slack[c] * (width - floorSum)) / (slackSum || 1))
+  return {
+    widths: floor.map((w, c) => w + (slack[c] * (width - floorSum)) / (slackSum || 1)),
+    words,
+  }
 }
 
 /**
@@ -118,7 +130,17 @@ export function layoutTable(
 ): TableLayout {
   const fontSize = tableFontSize(table.headers.length, wide)
   // Measured at the width that will be written, so rounding to EMU cannot add a line.
-  const widths = columnWidths(table, box.w, fontSize).map(w => Math.floor(w * EMU) / EMU)
+  const measured = columnWidths(table, box.w, fontSize)
+  const widths = measured.widths.map(w => Math.floor(w * EMU) / EMU)
+  const broken = widths.flatMap((w, c) => (measured.words[c] > w - CELL_PAD_X + 1e-5 ? [c] : []))
+  if (broken.length > 0) {
+    const many = broken.length > 1
+    warnings.push(
+      `${where}: words in ${columnNames(table.headers, broken)} are wider than ` +
+        `${many ? 'those columns' : 'that column'} on a slide with ${table.headers.length} ` +
+        'columns, so they break across lines; split the table or leave out columns.'
+    )
+  }
   const headerHeight = ceilEmu(rowHeight(table.headers, widths, fontSize, true))
   const room = box.h - headerHeight
   let cut = 0

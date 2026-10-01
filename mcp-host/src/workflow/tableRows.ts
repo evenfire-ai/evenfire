@@ -12,6 +12,14 @@ export function headerText(header: unknown): string {
   return header === null || header === undefined ? '' : String(header)
 }
 
+/** Header names for a warning: the first three, then how many more. */
+export function columnNames(headers: string[], columns: number[]): string {
+  const names = columns.map(c => `'${headers[c]?.trim() || `column ${c + 1}`}'`)
+  if (names.length === 1) return names[0]
+  if (names.length <= 3) return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`
+  return `${names.slice(0, 3).join(', ')} and ${names.length - 3} more column(s)`
+}
+
 /**
  * `rows` as arrays of cells. A record is read by header name, exactly or
  * ignoring case and surrounding space; without headers its values are taken in
