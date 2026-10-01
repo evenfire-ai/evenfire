@@ -9264,23 +9264,10 @@ td.cu-registry-description {
   }
 }
 
-.cu-access-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.75rem;
-  padding: 0.55rem 0;
-  border-bottom: 1px solid var(--cu-border-subtle);
-}
-
-.cu-access-row:last-child {
-  border-bottom: none;
-}
-
-/* Review R1-H1: agent rows in the member/team Agents tabs lead with the
- * display name (spec.host) and stack the immutable slug underneath whenever
- * the two differ — display names are not unique, the slug is the stable
- * identity for navigation, grants, and revoke. */
+/* Review R1-H1: member Agents rows lead with the display name (spec.host) and
+ * stack the immutable slug underneath whenever the two differ — display names
+ * are not unique, the slug is the stable identity for navigation, grants, and
+ * revoke. Team Agents use a separately labelled Agent ID table column. */
 .cu-access-agent-copy {
   display: grid;
   gap: var(--cu-space-0);
