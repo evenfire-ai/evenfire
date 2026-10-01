@@ -120,6 +120,45 @@ describe('tracing pool isolation', () => {
     expect(fakePools).toHaveLength(2)
   })
 
+  it('closes both lazily-created request pools once during API shutdown', async () => {
+    const { closeTracingPools, getTracingPools } = await import('../src/services/tracing/pools.js')
+    const first = getTracingPools()
+
+    await Promise.all([closeTracingPools(), closeTracingPools()])
+
+    expect(first.traceIngestPool.end).toHaveBeenCalledOnce()
+    expect(first.traceReadPool.end).toHaveBeenCalledOnce()
+    expect(getTracingPools()).not.toBe(first)
+    expect(fakePools).toHaveLength(4)
+  })
+
+  it('does not recreate a request pool when an in-flight trace transaction finishes during shutdown', async () => {
+    const { closeTracingPools, getTracingPools, withTraceIngestTransaction } =
+      await import('../src/services/tracing/pools.js')
+    const { traceIngestPool } = getTracingPools()
+    const client: FakeClient = { query: vi.fn().mockResolvedValue({}), release: vi.fn() }
+    vi.mocked(traceIngestPool.connect).mockResolvedValue(client as never)
+    let finishWork!: () => void
+    let enteredWork!: () => void
+    const entered = new Promise<void>(resolve => (enteredWork = resolve))
+    const transaction = withTraceIngestTransaction(
+      () =>
+        new Promise<void>(resolve => {
+          finishWork = resolve
+          enteredWork()
+        })
+    )
+
+    await entered
+    await closeTracingPools()
+    finishWork()
+    await transaction
+
+    expect(traceIngestPool.end).toHaveBeenCalledOnce()
+    expect(client.release).toHaveBeenCalledOnce()
+    expect(fakePools).toHaveLength(2)
+  })
+
   it('requires an explicit maintenance connection string', async () => {
     const { createTraceMaintenancePool, getTraceMaintenancePool } =
       await import('../src/services/tracing/pools.js')
