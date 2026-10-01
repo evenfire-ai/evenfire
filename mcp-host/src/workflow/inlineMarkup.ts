@@ -341,10 +341,13 @@ function htmlSegmentToPlainText(text: string): string {
 }
 
 function mapOutsideCode(text: string, convert: (segment: string) => string): string {
-  return text
-    .split(/(`[^`\n]+`)/)
-    .map((part, i) => (i % 2 === 1 ? part : convert(part)))
-    .join('')
+  let out = ''
+  let at = 0
+  for (const span of codeSpans(text)) {
+    out += convert(text.slice(at, span.start)) + text.slice(span.start, span.end)
+    at = span.end
+  }
+  return out + convert(text.slice(at))
 }
 
 /**
@@ -428,15 +431,64 @@ export function quoteParagraphs(lines: string[]): string[] {
   return paragraphs.length > 0 ? paragraphs : ['']
 }
 
-// Links, images, code spans and escapes, which emphasis does not reach into.
-// No part may run into the next opening bracket or parenthesis: otherwise an
-// unclosed image or link is rescanned to the end of the line from every
-// opening, which takes minutes on a long line.
+/** A code span: where it starts and ends in the text, and the code it shows. */
+interface CodeSpan {
+  start: number
+  end: number
+  code: string
+}
+
+/**
+ * The code spans of `text` as CommonMark reads them: a run of backticks opens
+ * one and the next run of exactly as many closes it, so ``a`b`` shows a`b; an
+ * opening run nothing closes prints as written. A backslash before a run keeps
+ * its first backtick from opening, but escapes nothing inside a span. Each
+ * run length keeps its own cursor, so the runs are read once.
+ */
+function codeSpans(text: string): CodeSpan[] {
+  if (!text.includes('`')) return []
+  const runs = [...text.matchAll(/`+/g)].map(m => ({ at: m.index, length: m[0].length }))
+  const byLength = new Map<number, number[]>()
+  runs.forEach((run, i) => {
+    const list = byLength.get(run.length)
+    if (list) list.push(i)
+    else byLength.set(run.length, [i])
+  })
+  const cursor = new Map<number, number>()
+  const spans: CodeSpan[] = []
+  for (let i = 0; i < runs.length; i++) {
+    let { at, length } = runs[i]
+    let slashes = 0
+    for (let k = at - 1; k >= 0 && text[k] === '\\'; k--) slashes++
+    if (slashes % 2 === 1) {
+      at++
+      length--
+    }
+    const list = length > 0 ? byLength.get(length) : undefined
+    if (!list) continue
+    let c = cursor.get(length) ?? 0
+    while (c < list.length && list[c] <= i) c++
+    cursor.set(length, c)
+    if (c === list.length) continue
+    const close = runs[list[c]]
+    let code = text.slice(at + length, close.at).replace(/\r\n|\r|\n/g, ' ')
+    if (code.length > 1 && code.startsWith(' ') && code.endsWith(' ') && code.trim() !== '') {
+      code = code.slice(1, -1)
+    }
+    spans.push({ start: at, end: close.at + close.length, code })
+    i = list[c]
+  }
+  return spans
+}
+
+// Links, images and escapes, which emphasis does not reach into; code spans
+// are found apart, by codeSpans. No part may run into the next opening bracket
+// or parenthesis: otherwise an unclosed image or link is rescanned to the end
+// of the line from every opening, which takes minutes on a long line.
 const ATOM = new RegExp(
   [
     /!\[[^[\]\n]*\]\((?:[^()\n]|\([^()\n]*\))*\)/.source,
     /\[(?:[^[\]\n\\]|\\.)+\]\((?:https?:\/\/|mailto:)(?:[^\s()]|\([^\s()]*\))+\)/.source,
-    /`[^`]+`/.source,
     ESCAPE.source,
   ].join('|'),
   'g'
@@ -696,7 +748,6 @@ function atomSpan(token: string): InlineSpan {
       link: decodeEntities(token.slice(split + 2, -1)),
     }
   }
-  if (token.startsWith('`')) return { text: withoutMarks(token.slice(1, -1)), code: true }
   return { text: token.slice(1) }
 }
 
@@ -708,11 +759,30 @@ function atomSpan(token: string): InlineSpan {
 export function markdownSpans(markdown: string): InlineSpan[] {
   const pieces: Piece[] = []
   const atoms = new RegExp(ATOM)
+  const code = codeSpans(markdown)
+  let next = 0
   let at = 0
-  for (let m = atoms.exec(markdown); m; m = atoms.exec(markdown)) {
-    scanText(markdown, at, m.index, pieces)
-    pieces.push({ span: atomSpan(m[0]) })
-    at = atoms.lastIndex
+  // Whichever starts first, a code span or another atom, is read; a match the
+  // reading has passed is looked for again from there, so each scan moves on.
+  let m = atoms.exec(markdown)
+  for (;;) {
+    while (next < code.length && code[next].start < at) next++
+    while (m && m.index < at) {
+      atoms.lastIndex = at
+      m = atoms.exec(markdown)
+    }
+    const span = code[next]
+    if (span && (!m || span.start < m.index)) {
+      scanText(markdown, at, span.start, pieces)
+      pieces.push({ span: { text: withoutMarks(span.code), code: true } })
+      at = span.end
+    } else if (m) {
+      scanText(markdown, at, m.index, pieces)
+      pieces.push({ span: atomSpan(m[0]) })
+      at = atoms.lastIndex
+    } else {
+      break
+    }
   }
   scanText(markdown, at, markdown.length, pieces)
 

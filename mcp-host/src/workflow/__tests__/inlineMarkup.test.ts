@@ -270,6 +270,35 @@ describe('inline markdown', () => {
   })
 })
 
+describe('code spans', () => {
+  it('closes a code span with a run of as many backticks as opened it', () => {
+    expect(inlineSpans('``a`b``')).toEqual([{ text: 'a`b', code: true }])
+    expect(inlineSpans('`a``b`')).toEqual([{ text: 'a``b', code: true }])
+    expect(inlineSpans('x ```a``b``` y')).toEqual([
+      { text: 'x ' },
+      { text: 'a``b', code: true },
+      { text: ' y' },
+    ])
+  })
+
+  it('drops one space on each side, so a span can show a backtick at its edge', () => {
+    expect(inlineSpans('`` `x` ``')).toEqual([{ text: '`x`', code: true }])
+    expect(inlineSpans('`  `')).toEqual([{ text: '  ', code: true }])
+  })
+
+  it('prints a run nothing closes, and an escaped backtick, as written', () => {
+    expect(inlineSpans('``a`')).toEqual([{ text: '``a`' }])
+    expect(inlineSpans('\\`a`')).toEqual([{ text: '`a`' }])
+    expect(inlineSpans('```')).toEqual([{ text: '```' }])
+  })
+
+  it('reads no markup inside a code span', () => {
+    expect(inlineSpans('``**a** `b` <b>c</b>``')).toEqual([
+      { text: '**a** `b` <b>c</b>', code: true },
+    ])
+  })
+})
+
 describe('ATX headings', () => {
   it('drops a closing run of hashes only when a space precedes it', () => {
     expect(withoutClosingHashes('Section title ##')).toBe('Section title')
@@ -403,6 +432,10 @@ describe('hostile input', () => {
     atomsThenMarker: `${'`a` '.repeat(50000)}*`,
     tagMarks: '<b><i>x'.repeat(28000),
     code: '`a '.repeat(66667),
+    codeDouble: '``a '.repeat(50000),
+    codeMixed: '`a`` '.repeat(40000),
+    backticks: '`'.repeat(200000),
+    codeThenLink: `${'`a` '.repeat(50000)}[x](http://x)`,
     escape: '\\*'.repeat(100000),
     entity: '&#x1'.repeat(50000),
   }
