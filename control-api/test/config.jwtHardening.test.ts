@@ -62,6 +62,7 @@ const signingCases = [
     reason: undefined,
   },
   {
+    // codeql[js/insufficient-key-size] Intentional negative fixture: the policy must reject this key size.
     name: 'rsa1024',
     material: generateKeyPairSync('rsa', { modulusLength: 1024 })
       .privateKey.export({ type: 'pkcs8', format: 'pem' })

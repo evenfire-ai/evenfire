@@ -1,4 +1,3 @@
-import { createPublicKey } from 'node:crypto'
 import { DEFAULT_ALLOWED_PLUGIN_IMAGE_PREFIXES } from '@clerum/image-policy'
 import {
   type SigningMaterial,
@@ -592,10 +591,6 @@ const JWT_SIGNING_KEY_ENV_NAMES: Record<DevJwtSlot, string> = {
   rpc: 'CONTROL_API_RPC_JWT_PRIVATE_KEY',
   session: 'CONTROL_API_SESSION_JWT_PRIVATE_KEY',
   admin: 'CONTROL_API_ADMIN_JWT_PRIVATE_KEY',
-}
-
-function publicKeyFromPrivateKey(privateKey: string): string {
-  return createPublicKey(privateKey).export({ type: 'spki', format: 'pem' }).toString()
 }
 
 const DEV_ADMIN_PASSWORD_HASH = '$2b$12$9QdfGGp5KYg8osGa1n0.DuwQiB1RopCWIDJhmsuK4ygjTmIT8pvgy'
