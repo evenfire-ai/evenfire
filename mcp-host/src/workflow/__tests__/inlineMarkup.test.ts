@@ -50,6 +50,25 @@ describe('inline HTML', () => {
     expect(inlineSpans('<b >a</b >')).toEqual([{ text: 'a', bold: true }])
   })
 
+  it('keeps a bare element name that nothing closes as a placeholder', () => {
+    expect(htmlToPlainText('kubectl logs --since=<time>')).toBe('kubectl logs --since=<time>')
+    expect(htmlToPlainText('Replace <label> with your name')).toBe('Replace <label> with your name')
+    expect(htmlToPlainText('Options <a> and <b> are shown')).toBe('Options <a> and <b> are shown')
+    const spans = inlineSpans('Options <a> and <b> are shown')
+    expect(spans.map(s => s.text).join('')).toBe('Options <a> and <b> are shown')
+    expect(spans.some(s => s.bold)).toBe(false)
+  })
+
+  it('still reads a closed element, and one HTML lets stand unclosed, as markup', () => {
+    expect(inlineSpans('a <b>bold</b> word')).toContainEqual({
+      text: 'bold',
+      bold: true,
+    })
+    expect(htmlToPlainText('<p>one<p>two')).toBe('one two')
+    expect(htmlToPlainText('<ul><li>a<li>b</ul>')).toMatch(/a.*b/)
+    expect(htmlToPlainText('line<hr>next')).not.toContain('<hr>')
+  })
+
   it('keeps a placeholder such as <table name> that no closing tag makes a tag', () => {
     const sql = 'SELECT * FROM <table name> WHERE <column name> = 1 at <time of day>'
     expect(inlineSpans(sql)).toEqual([{ text: sql }])

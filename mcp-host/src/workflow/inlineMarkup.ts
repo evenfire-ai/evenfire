@@ -260,25 +260,39 @@ const CLOSING_TAG = /<\/([a-z][a-z0-9]*)\s*>/gi
 const STRICT_ONLY = new RegExp(`^${STRICT_ATTRIBUTES}/?$`)
 /** Elements that never close, so no closing tag vouches for them. */
 const VOID_ELEMENTS = new Set(['hr', 'img', 'br', 'col', 'wbr'])
+/** Elements HTML lets a writer leave unclosed, so a bare one is markup even then. */
+const OPTIONAL_CLOSE = new Set(['p', 'li', 'dt', 'dd', 'tr', 'td', 'th', 'thead', 'tbody', 'tfoot'])
+const BARE_OPEN_TAG = /<([a-z][a-z0-9]*)\s*>/gi
+const ELEMENT_NAME = new RegExp(
+  `^(?:${[...ELEMENTS, 'b', 'strong', 'i', 'em', 'code', 'kbd', 'tt', 'del', 's', 'strike'].join('|')})$`,
+  'i'
+)
 
 /**
- * `text` with a would-be tag of a longer element name kept as text when its
- * attributes are not all values or boolean ones and nothing closes its
- * element: "SELECT * FROM <table name>" is a placeholder, while
- * "<table border>…</table>" is a table. Its "<" is written as a reference,
- * which prints as itself once the spans are read.
+ * `text` with a would-be tag kept as text when nothing closes its element and
+ * it reads as a placeholder: a longer element name whose attributes are not
+ * all values or boolean ones ("SELECT * FROM <table name>"), or any element
+ * name on its own ("--since=<time>", "Replace <label>", "options <a> and <b>").
+ * "<table border>…</table>" is still a table, and an element HTML lets stand
+ * unclosed, such as <p> or <li>, is still markup. The kept "<" is written as a
+ * reference, which prints as itself once the spans are read.
  */
 function withPlaceholdersKept(text: string): string {
   if (!text.includes('<')) return text
   const closed = new Set<string>()
   for (const m of text.matchAll(CLOSING_TAG)) closed.add(m[1].toLowerCase())
-  return text.replace(LONG_OPEN_TAG, (tag: string, name: string, attributes: string) => {
-    const element = name.toLowerCase()
-    if (closed.has(element) || VOID_ELEMENTS.has(element) || STRICT_ONLY.test(attributes)) {
-      return tag
-    }
-    return `&lt;${tag.slice(1)}`
-  })
+  const markup = (element: string) => closed.has(element) || VOID_ELEMENTS.has(element)
+  return text
+    .replace(LONG_OPEN_TAG, (tag: string, name: string, attributes: string) => {
+      const element = name.toLowerCase()
+      return markup(element) || STRICT_ONLY.test(attributes) ? tag : `&lt;${tag.slice(1)}`
+    })
+    .replace(BARE_OPEN_TAG, (tag: string, name: string) => {
+      const element = name.toLowerCase()
+      return !ELEMENT_NAME.test(element) || markup(element) || OPTIONAL_CLOSE.has(element)
+        ? tag
+        : `&lt;${tag.slice(1)}`
+    })
 }
 
 /**
