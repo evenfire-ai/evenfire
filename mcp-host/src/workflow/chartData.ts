@@ -10,6 +10,7 @@
  * field and the fix. Warnings travel back in the tool result so the agent can
  * correct itself on the next call.
  */
+import { own } from './ownEntry'
 import { currencyPrefix, currencySuffix } from './xlsxCells'
 
 /** Types whose points are {x,y} pairs rather than a value per label. */
@@ -76,6 +77,9 @@ function readNumeral(text: string): Readings | undefined {
   return out.dot === undefined && out.comma === undefined ? undefined : out
 }
 
+/** The radius a bubble takes when its own is missing or not positive. */
+const BUBBLE_RADIUS = 6
+
 /** Scale words, directly after the number or after one space. A lowercase "m" is refused. */
 const SCALES: Record<string, number> = {
   k: 3,
@@ -109,6 +113,13 @@ function parseText(value: string): ParsedText {
   if (parens) {
     negative = true
     s = parens[1].trim()
+    if (/^[-+\u2212]/.test(s)) {
+      return {
+        problem:
+          `is ${quoted}: parentheses already mark a negative number, so a sign inside them ` +
+          'leaves the value unclear. Send a JSON number.',
+      }
+    }
   }
   const sign = () => {
     if (/^[-+]/.test(s)) {
@@ -136,14 +147,15 @@ function parseText(value: string): ParsedText {
           `Send a JSON number, or write 'M' for million (e.g. '${scaled[1]}M').`,
       }
     }
-    if (SCALES[word] === undefined) {
+    const scale = own(SCALES, word)
+    if (scale === undefined) {
       return {
         problem:
           `is ${quoted}, which carries the unit '${word}'. Send the number alone ` +
           '(as JSON) and put the unit in the axis title or the series label.',
       }
     }
-    exponent = SCALES[word]
+    exponent = scale
     s = scaled[1]
   }
   const readings = readNumeral(s)
@@ -210,6 +222,9 @@ class NumberReader {
       )
     }
     const scaled = parsed.exponent ? Number((n * 10 ** parsed.exponent).toPrecision(15)) : n
+    if (!Number.isFinite(scaled)) {
+      fail(`${where} is ${quoted}, which is too large for a chart. Send a JSON number.`)
+    }
     return parsed.negative ? -scaled : scaled
   }
 }
@@ -291,8 +306,7 @@ function readXYPoint(
   const y = reader.read(obj.y, `${where}.y`)
   if (x === undefined || y === undefined) return undefined
   if (!wantsRadius) return { x, y }
-  const r = reader.read(obj.r ?? obj.radius ?? obj.size, `${where}.r`)
-  return { x, y, r: r !== undefined && r > 0 ? r : 6 }
+  return { x, y, r: reader.read(obj.r ?? obj.radius ?? obj.size, `${where}.r`) }
 }
 
 interface SeriesResult {
@@ -446,6 +460,13 @@ function normalizeXYSeries(
   const warnings: string[] = []
   const numeric: number[] = []
   const points: NormalizedPoint[] = []
+  const flat: string[] = []
+  // A bubble needs a positive radius; one that is missing, zero or negative takes the default.
+  const radius = (r: number | undefined, at: string): number => {
+    if (r !== undefined && r > 0) return r
+    if (r !== undefined) flat.push(at)
+    return BUBBLE_RADIUS
+  }
   const shape = wantsRadius ? '`{x, y, r}` objects or [x, y, r]' : '`{x, y}` objects or [x, y]'
 
   for (const [i, entry] of raw.entries()) {
@@ -459,7 +480,7 @@ function normalizeXYSeries(
             `; received ${JSON.stringify(entry).slice(0, 80)}.`
         )
       }
-      points.push(p)
+      points.push(wantsRadius ? { ...p, r: radius(p.r, at) } : p)
       continue
     }
     if (Array.isArray(entry) && entry.length >= 2) {
@@ -469,7 +490,7 @@ function normalizeXYSeries(
         fail(`${at} is a pair with non-numeric members; send ${shape}.`)
       }
       const r = wantsRadius ? reader.read(entry[2], `${at}[2]`) : undefined
-      points.push(wantsRadius ? { x, y, r: r && r > 0 ? r : 6 } : { x, y })
+      points.push(wantsRadius ? { x, y, r: radius(r, at) } : { x, y })
       continue
     }
     const n = reader.read(entry, at)
@@ -489,11 +510,17 @@ function normalizeXYSeries(
         'Send `{x, y}` points to control both axes.'
     )
     return {
-      data: numeric.map((y, i) => (wantsRadius ? { x: i, y, r: 6 } : { x: i, y })),
+      data: numeric.map((y, i) => (wantsRadius ? { x: i, y, r: BUBBLE_RADIUS } : { x: i, y })),
       warnings,
     }
   }
 
+  if (flat.length > 0) {
+    warnings.push(
+      `${where}: ${flat.length} bubble radius value(s) were zero or negative ` +
+        `(${flat.slice(0, 3).join(', ')}); those bubbles use the default size ${BUBBLE_RADIUS}.`
+    )
+  }
   return { data: points, warnings }
 }
 

@@ -533,3 +533,51 @@ describe('single-series charts', () => {
     expect(r.labels).toEqual(['Start', 'Sales', 'Costs'])
   })
 })
+
+describe('values written as text that no chart can hold', () => {
+  it.each([
+    ['1e400', /too large for a chart/],
+    ['5 constructor', /carries the unit 'constructor'/],
+    ['5 toString', /carries the unit 'toString'/],
+    ['(-5)', /parentheses already mark a negative number/],
+  ])('rejects %s, naming the field', (text, message) => {
+    const err = expectRejected(() =>
+      normalizeChartData({ labels: ['a', 'b'], datasets: [{ data: [1, text] }] }, bar)
+    )
+    expect(err).toContain('datasets[0].data[1]')
+    expect(err).toMatch(message)
+  })
+
+  it('still reads accounting parentheses and scale words', () => {
+    const r = normalizeChartData(
+      { labels: ['a', 'b', 'c'], datasets: [{ data: ['(1,200)', '2.5k', '-3M'] }] },
+      bar
+    )
+    expect(r.datasets[0].data).toEqual([-1200, 2500, -3000000])
+  })
+})
+
+describe('bubble radii', () => {
+  it('draws a zero or negative radius at the default size, and says so once', () => {
+    const r = normalizeChartData(
+      {
+        datasets: [
+          {
+            data: [
+              { x: 1, y: 1, r: 0 },
+              { x: 2, y: 2, r: -4 },
+              [3, 3, -1],
+              { x: 4, y: 4, r: 9 },
+              { x: 5, y: 5 },
+            ],
+          },
+        ],
+      },
+      { chartType: 'bubble' }
+    )
+    expect(r.datasets[0].data.map(p => (p as { r?: number }).r)).toEqual([6, 6, 6, 9, 6])
+    const notes = r.warnings.filter(w => w.includes('bubble radius'))
+    expect(notes).toHaveLength(1)
+    expect(notes[0]).toContain('3 bubble radius value(s) were zero or negative')
+  })
+})
