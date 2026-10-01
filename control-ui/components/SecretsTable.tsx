@@ -49,10 +49,7 @@ type McpSecretRow = {
 }
 type RecipeSecretStatus = 'provisioned' | 'missing'
 type RecipeSecretRowOwnership =
-  | { kind: 'shared' }
-  | { kind: 'owner-recipe'; recipeName: string }
-  | { kind: 'unlabeled' }
-  | null // missing rows: not yet provisioned, ownership chosen at create time.
+  { kind: 'shared' } | { kind: 'owner-recipe'; recipeName: string } | { kind: 'unlabeled' } | null // missing rows: not yet provisioned, ownership chosen at create time.
 type RecipeSecretRow = {
   name: string
   namespace: string
@@ -231,7 +228,7 @@ export function SecretsTable({
         const serverName = typeof metadata.name === 'string' ? metadata.name.trim() : ''
         const spec = (item.spec ?? {}) as Record<string, unknown>
         const envSecret = (spec.envSecret ?? {}) as Record<string, unknown>
-        const secretName = typeof envSecret.name === 'string' ? String(envSecret.name).trim() : ''
+        const secretName = typeof envSecret.name === 'string' ? envSecret.name : ''
         if (!secretName) continue
 
         const row = addSecret(secretName)
@@ -672,7 +669,13 @@ export function SecretsTable({
                 ) : (
                   mcpSort.sortedRows.map(row => (
                     <tr key={row.name}>
-                      <td>{row.name}</td>
+                      <td>
+                        {row.name === row.name.trim() ? (
+                          row.name
+                        ) : (
+                          <code>{JSON.stringify(row.name)}</code>
+                        )}
+                      </td>
                       <td style={{ color: 'var(--cu-text-soft)', fontSize: '0.8125rem' }}>
                         {row.servers.length > 0
                           ? `${row.servers.length} server(s): ${row.servers.join(', ')}`
@@ -684,25 +687,60 @@ export function SecretsTable({
                           : 'Created manually or source unknown.'}
                       </td>
                       <td className="cu-table__cell-actions">
-                        <button
-                          type="button"
-                          className="cu-btn cu-btn--primary cu-btn--sm"
-                          onClick={() => {
-                            const source =
-                              row.registrySources.length === 1 ? row.registrySources[0] : undefined
-                            router.push(
-                              CONTROL_ROUTES.secrets.new({
-                                scope: 'mcp',
-                                name: row.name,
-                                registryEntry: source?.name,
-                                registryVersion: source?.version,
-                              })
-                            )
-                          }}
-                          aria-label={`Add connector secret ${row.name}`}
-                        >
-                          Add
-                        </button>
+                        <RowActionsMenu
+                          ariaLabel={`Actions for connector secret ${row.name}`}
+                          horizontalTrigger
+                          actions={[
+                            {
+                              key: 'add',
+                              label: 'Add',
+                              disabled: row.name !== row.name.trim(),
+                              disabledReason: 'The connector stores a non-canonical Secret name.',
+                              onClick: () => {
+                                const source =
+                                  row.registrySources.length === 1
+                                    ? row.registrySources[0]
+                                    : undefined
+                                router.push(
+                                  CONTROL_ROUTES.secrets.new({
+                                    scope: 'mcp',
+                                    name: row.name,
+                                    registryEntry: source?.name,
+                                    registryVersion: source?.version,
+                                  })
+                                )
+                              },
+                            },
+                            {
+                              key: 'update',
+                              label: 'Update',
+                              onClick: () => {
+                                router.push(
+                                  CONTROL_ROUTES.secrets.editConnector(
+                                    row.name,
+                                    row.servers.length === 1
+                                      ? { server: row.servers[0] }
+                                      : undefined
+                                  )
+                                )
+                              },
+                            },
+                            {
+                              key: 'delete',
+                              label: 'Delete',
+                              danger: true,
+                              // deleteMcpSecret requires the Secret's live
+                              // uid/resourceVersion as its CAS precondition.
+                              // Connector rows are derived from McpServer
+                              // references and no list API returns that
+                              // identity, so delete stays inert rather than
+                              // issuing an unfenced delete.
+                              disabled: true,
+                              disabledReason: 'Delete is not available for this secret.',
+                              onClick: () => {},
+                            },
+                          ]}
+                        />
                       </td>
                     </tr>
                   ))
@@ -866,20 +904,10 @@ export function SecretsTable({
           </TableViewport>
         )}
 
-        {scope === 'mcp' ? (
-          <div className="cu-card__body cu-card__body--auto cu-secrets-message-strip">
-            <div className="cu-banner cu-banner--info">
-              Connector secret lifecycle in UI currently supports creation. Editing, deleting, and
-              listing all secrets in the <code>mcp-server</code> namespace requires backend API
-              support.
-            </div>
-          </div>
-        ) : null}
-
         {scope === 'recipe' && recipeRows.some(row => row.status === 'missing') ? (
           <div className="cu-card__body cu-card__body--auto cu-secrets-message-strip">
             <div className="cu-banner cu-banner--info">
-              Some recipes reference secrets that don&apos;t exist yet. Click <strong>Add</strong>
+              Some recipes reference secrets that don&apos;t exist yet. Click <strong>Add</strong>{' '}
               on a Missing row to provision the Secret in the namespace shown on that row.
             </div>
           </div>

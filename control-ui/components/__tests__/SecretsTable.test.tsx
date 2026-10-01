@@ -15,6 +15,10 @@ import {
   getRecipeSecrets,
   getRecipes,
 } from '../../lib/api'
+import {
+  buildDirectCrdMcpServerReference,
+  buildRegistryMcpServerReference,
+} from '../../test/fixtures/mcpServer'
 import { buildSecretSummary } from '../../test/fixtures/secretSummary'
 import { SecretsTable } from '../SecretsTable'
 import { ToastProvider } from '../Toast'
@@ -307,23 +311,14 @@ describe('SecretsTable — connector marketplace source', () => {
   })
 
   it('derives registryEntries from catalog-id/version ANNOTATIONS (org-scoped install)', async () => {
+    const connector = buildRegistryMcpServerReference({
+      name: 'newtenantwf-conn',
+      catalogId: '@newtenantwf/conn',
+      catalogVersion: '1.0.0',
+    })
+    expect(connector.spec?.envSecret?.keys).toEqual([{ secretKey: 'api-key', envVar: 'api-key' }])
     getMcpServersMock.mockResolvedValue({
-      items: [
-        {
-          metadata: {
-            name: 'newtenantwf-conn',
-            annotations: {
-              'clerum.io/catalog-id': '@newtenantwf/conn',
-              'clerum.io/catalog-version': '1.0.0',
-            },
-            labels: {
-              'clerum.io/managed-by': 'control-api',
-              'clerum.io/server-mode': 'local',
-            },
-          },
-          spec: { envSecret: { name: 'newtenantwf-conn-credentials' } },
-        },
-      ],
+      items: [connector],
     })
 
     renderTable()
@@ -331,22 +326,22 @@ describe('SecretsTable — connector marketplace source', () => {
     await waitFor(() => {
       expect(screen.getByText(/@newtenantwf\/conn@1\.0\.0/)).toBeTruthy()
     })
+    const row = screen.getByText('newtenantwf-conn-credentials').closest('tr')!
+    expect(within(row).getByText('1 server(s): newtenantwf-conn')).toBeInTheDocument()
   })
 
   it('still derives registryEntries from LABELS for legacy (pre-annotation) installs', async () => {
     getMcpServersMock.mockResolvedValue({
       items: [
-        {
-          metadata: {
-            name: 'legacy-conn',
-            labels: {
-              'clerum.io/catalog-id': 'mcp-filesystem',
-              'clerum.io/catalog-version': '2.3.0',
-              'clerum.io/managed-by': 'control-api',
-            },
+        buildDirectCrdMcpServerReference({
+          name: 'legacy-conn',
+          secretName: 'legacy-conn-credentials',
+          labels: {
+            'clerum.io/catalog-id': 'mcp-filesystem',
+            'clerum.io/catalog-version': '2.3.0',
+            'clerum.io/managed-by': 'control-api',
           },
-          spec: { envSecret: { name: 'legacy-conn-credentials' } },
-        },
+        }),
       ],
     })
 
@@ -360,21 +355,19 @@ describe('SecretsTable — connector marketplace source', () => {
   it('prefers ANNOTATIONS over LABELS when both are present', async () => {
     getMcpServersMock.mockResolvedValue({
       items: [
-        {
-          metadata: {
-            name: 'both-conn',
-            annotations: {
-              'clerum.io/catalog-id': '@org/new',
-              'clerum.io/catalog-version': '9.9.9',
-            },
-            labels: {
-              'clerum.io/catalog-id': 'stale',
-              'clerum.io/catalog-version': '0.0.1',
-              'clerum.io/managed-by': 'control-api',
-            },
+        buildDirectCrdMcpServerReference({
+          name: 'both-conn',
+          secretName: 'both-conn-credentials',
+          annotations: {
+            'clerum.io/catalog-id': '@org/new',
+            'clerum.io/catalog-version': '9.9.9',
           },
-          spec: { envSecret: { name: 'both-conn-credentials' } },
-        },
+          labels: {
+            'clerum.io/catalog-id': 'stale',
+            'clerum.io/catalog-version': '0.0.1',
+            'clerum.io/managed-by': 'control-api',
+          },
+        }),
       ],
     })
 
@@ -601,6 +594,200 @@ describe('SecretsTable — recipe pending refs', () => {
     fireEvent.click(screen.getByRole('menuitem', { name: 'Update' }))
 
     expect(mockPush).toHaveBeenCalledWith('/secrets/recipe/ui-creds/edit?namespace=sandbox-ui')
+  })
+})
+
+describe('SecretsTable — connector row actions', () => {
+  beforeEach(() => {
+    getMcpServersMock.mockReset()
+    getRecipeSecretsMock.mockReset()
+    getRecipesMock.mockReset()
+    mockReplace.mockClear()
+    mockPush.mockClear()
+  })
+
+  afterEach(() => {
+    cleanup()
+  })
+
+  function mockConnectorRow() {
+    getMcpServersMock.mockResolvedValue({
+      items: [
+        buildDirectCrdMcpServerReference({
+          name: 'linear-conn',
+          secretName: 'linear-credentials',
+          annotations: {
+            'clerum.io/catalog-id': 'mcp-linear',
+            'clerum.io/catalog-version': '1.4.0',
+          },
+        }),
+      ],
+    })
+  }
+
+  async function openRowMenu() {
+    const trigger = await screen.findByRole('button', {
+      name: 'Actions for connector secret linear-credentials',
+    })
+    fireEvent.click(trigger)
+  }
+
+  it('offers Update and a disabled Delete alongside Add on every connector row', async () => {
+    mockConnectorRow()
+    renderTable()
+    await openRowMenu()
+
+    expect(screen.getByRole('menuitem', { name: 'Add' })).toBeEnabled()
+    expect(screen.getByRole('menuitem', { name: 'Update' })).toBeEnabled()
+    const deleteAction = screen.getByRole('menuitem', { name: /^Delete/ })
+    expect(deleteAction).toHaveAttribute('aria-disabled', 'true')
+    expect(screen.getByText('Delete is not available for this secret.')).toBeInTheDocument()
+  })
+
+  it('keeps the disabled Delete inert instead of confirming or calling the API', async () => {
+    mockConnectorRow()
+    renderTable()
+    await openRowMenu()
+
+    fireEvent.click(screen.getByRole('menuitem', { name: /^Delete/ }))
+
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+    expect(apiSendMock).not.toHaveBeenCalled()
+  })
+
+  it('navigates Update to the connector secret edit page for its attached connector', async () => {
+    mockConnectorRow()
+    renderTable()
+    await openRowMenu()
+
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Update' }))
+
+    expect(mockPush).toHaveBeenCalledWith(
+      '/secrets/connector/linear-credentials/edit?server=linear-conn'
+    )
+  })
+
+  it('navigates Update without a server filter when several connectors share the secret', async () => {
+    getMcpServersMock.mockResolvedValue({
+      items: [
+        buildDirectCrdMcpServerReference({ name: 'conn-a', secretName: 'shared-credentials' }),
+        buildDirectCrdMcpServerReference({ name: 'conn-b', secretName: 'shared-credentials' }),
+      ],
+    })
+    renderTable()
+
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'Actions for connector secret shared-credentials' })
+    )
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Update' }))
+
+    expect(mockPush).toHaveBeenCalledWith('/secrets/connector/shared-credentials/edit')
+  })
+
+  it('keeps a non-canonical Secret reference distinct from its trimmed name', async () => {
+    getMcpServersMock.mockResolvedValue({
+      items: [
+        buildDirectCrdMcpServerReference({
+          name: 'canonical-conn',
+          secretName: 'linear-credentials',
+        }),
+        buildDirectCrdMcpServerReference({
+          name: 'stale-conn',
+          secretName: '  linear-credentials  ',
+        }),
+      ],
+    })
+    renderTable()
+
+    const malformedIdentity = await screen.findByText(
+      (_, element) =>
+        element?.tagName === 'CODE' && element.textContent === '"  linear-credentials  "'
+    )
+    const malformedRow = malformedIdentity.closest('tr')!
+    const canonicalRow = screen.getByText('linear-credentials').closest('tr')!
+    expect(within(malformedRow).getByText('1 server(s): stale-conn')).toBeInTheDocument()
+    expect(within(canonicalRow).getByText('1 server(s): canonical-conn')).toBeInTheDocument()
+    expect(within(canonicalRow).queryByText(/stale-conn/)).not.toBeInTheDocument()
+
+    fireEvent.click(within(malformedRow).getByRole('button'))
+    expect(screen.getByRole('menuitem', { name: /^Add/ })).toHaveAttribute('aria-disabled', 'true')
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Update' }))
+    expect(mockPush).toHaveBeenCalledWith(
+      '/secrets/connector/%20%20linear-credentials%20%20/edit?server=stale-conn'
+    )
+    expect(apiSendMock).not.toHaveBeenCalled()
+  })
+
+  it('still prefills the create flow from the row Add action', async () => {
+    mockConnectorRow()
+    renderTable()
+    await openRowMenu()
+
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Add' }))
+
+    expect(mockPush).toHaveBeenCalledWith(
+      '/secrets/new?scope=mcp&name=linear-credentials&registryEntry=mcp-linear&registryVersion=1.4.0'
+    )
+  })
+
+  it('does not leak the internal connector lifecycle note', async () => {
+    getMcpServersMock.mockResolvedValue({ items: [] })
+    renderTable()
+
+    await screen.findByText('No connector secrets found.')
+    expect(screen.queryByText(/Connector secret lifecycle/i)).toBeNull()
+    expect(screen.queryByText(/requires backend API support/i)).toBeNull()
+  })
+})
+
+describe('SecretsTable — recipe missing-secret hint copy', () => {
+  beforeEach(() => {
+    getMcpServersMock.mockReset()
+    getRecipeSecretsMock.mockReset()
+    getRecipesMock.mockReset()
+    mockReplace.mockClear()
+    mockPush.mockClear()
+  })
+
+  afterEach(() => {
+    cleanup()
+  })
+
+  it('separates "Add" and "on" in the missing-secret hint (BUG-26)', async () => {
+    getRecipeSecretsMock.mockResolvedValue({ items: [] })
+    getRecipesMock.mockResolvedValue({
+      items: [
+        {
+          metadata: { name: 'hint-recipe' },
+          spec: {
+            steps: [
+              {
+                id: 'snippet',
+                run: {
+                  type: 'snippet',
+                  capabilities: {
+                    secrets: [{ secretRef: { name: 'hint-creds', key: 'apiKey' } }],
+                  },
+                },
+              },
+            ],
+          },
+        },
+      ],
+    })
+
+    renderTable('recipe')
+
+    const hint = await waitFor(() => {
+      const match = screen
+        .getAllByText((_, element) => element?.classList.contains('cu-banner') ?? false)
+        .find(element =>
+          (element.textContent ?? '').replace(/\s+/g, ' ').includes('Click Add on a Missing row')
+        )
+      if (!match) throw new Error('missing-secret hint banner not rendered yet')
+      return match
+    })
+    expect(hint.textContent?.replace(/\s+/g, ' ')).not.toMatch(/Addon/)
   })
 })
 
