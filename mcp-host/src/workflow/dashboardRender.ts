@@ -19,6 +19,7 @@ import {
   type DashboardThemeColors,
   type ThemeName,
 } from './dashboardThemes'
+import { inlineSpans } from './inlineMarkup'
 import { choose, own } from './ownEntry'
 import { headerText, normalizeTableRows } from './tableRows'
 import type { InternalToolResult } from './types'
@@ -732,11 +733,25 @@ interface DashRender {
   failures: string[]
 }
 
+/**
+ * Inline markdown as HTML, read by the reader the PDF and DOCX text uses, so
+ * the page shows what the secret check before attaching it reads. Every text
+ * is escaped, and a link keeps only an http(s) or mailto target.
+ */
 function renderInlineMd(s: string): string {
-  return escapeHtml(s)
-    .replace(/\*\*([\s\S]+?)\*\*(?!\*)/g, '<strong>$1</strong>')
-    .replace(/(?<!\*)\*([^*]+)\*(?!\*)/g, '<em>$1</em>')
-    .replace(/`([^`]+)`/g, '<code>$1</code>')
+  return inlineSpans(s)
+    .map(span => {
+      let html = escapeHtml(span.text)
+      if (span.code) html = `<code>${html}</code>`
+      if (span.strike) html = `<s>${html}</s>`
+      if (span.italics) html = `<em>${html}</em>`
+      if (span.bold) html = `<strong>${html}</strong>`
+      if (span.link !== undefined) {
+        html = `<a href="${escapeHtml(span.link)}" rel="noopener noreferrer">${html}</a>`
+      }
+      return html
+    })
+    .join('')
 }
 
 function isDashRecord(value: unknown): value is Record<string, unknown> {

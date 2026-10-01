@@ -10,6 +10,7 @@ import {
   readKpis,
   readStringList,
   readTable,
+  readText,
 } from '../pptxInput'
 
 const context = (): ReadContext => ({ outputDir: '/nonexistent', warnings: [] })
@@ -62,6 +63,33 @@ describe('readStringList', () => {
 
   it('refuses a value that is not a list', () => {
     expect(() => list({ a: 1 })).toThrow(PptxInputError)
+  })
+})
+
+describe('readText', () => {
+  const noted = (text: string): boolean => {
+    const ctx = context()
+    readText(text, 'title', 200, ctx)
+    return ctx.warnings.some(w => w.includes('holds markdown or HTML'))
+  }
+
+  it('notes text the document tools would print otherwise', () => {
+    for (const text of [
+      '**Revenue**',
+      '`npm ci`',
+      '~~old~~',
+      '&amp; co',
+      '<b>x</b>',
+      '[d](https://x.test)',
+    ]) {
+      expect(noted(text), text).toBe(true)
+    }
+  })
+
+  it('leaves ordinary text, single asterisks included, alone', () => {
+    for (const text of ['2*3*4 = 24', '*approx*', 'snake_case', 'AT&T', 'a < b > c', 'C:\\dir']) {
+      expect(noted(text), text).toBe(false)
+    }
   })
 })
 

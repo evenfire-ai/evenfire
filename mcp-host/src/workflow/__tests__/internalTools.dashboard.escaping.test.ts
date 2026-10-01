@@ -136,6 +136,46 @@ describe('dashboard text outside the data', () => {
   })
 })
 
+describe('dashboard inline markdown', () => {
+  const narrative = async (content: string): Promise<string> => {
+    const result = await dashboard.execute(
+      {
+        filename: 'n.html',
+        data: { title: 'T', sections: [{ title: 'S', type: 'narrative', content }] },
+      },
+      dir
+    )
+    expect(result.success, result.error).toBe(true)
+    const html = fs.readFileSync(result.artifact!.path, 'utf8')
+    return html.slice(html.indexOf('class="narrative"'))
+  }
+
+  it('reads the markdown the PDF and DOCX text reads', async () => {
+    const html = await narrative('**Bold** *it* `code` ~~old~~ [docs](https://x.test/a)')
+    expect(html).toContain('<strong>Bold</strong>')
+    expect(html).toContain('<em>it</em>')
+    expect(html).toContain('<code>code</code>')
+    expect(html).toContain('<s>old</s>')
+    expect(html).toContain(
+      '<a href="https:&#x2F;&#x2F;x.test&#x2F;a" rel="noopener noreferrer">docs</a>'
+    )
+  })
+
+  it('prints an escaped mark as the mark, as the documents do', async () => {
+    const html = await narrative('Use \\*args\\* here')
+    expect(html).toContain('Use *args* here')
+  })
+
+  it('links only to web and mail targets, with the target escaped', async () => {
+    const html = await narrative(
+      '<a href="javascript:alert(1)">x</a> [y](https://x.test/"onmouseover=alert(1))'
+    )
+    expect(html).not.toMatch(/javascript:/i)
+    expect(html).not.toMatch(/"onmouseover/i)
+    expect(html).toContain('&quot;onmouseover')
+  })
+})
+
 describe('escapeHtml', () => {
   it('escapes every character that can open markup or end an attribute', () => {
     expect(escapeHtml(`<a href="x" title='y'>&</a>`)).toBe(

@@ -8,6 +8,7 @@
  * shortened to its length limit) are made here and reported as warnings.
  */
 import { type EmbeddableImage, loadEmbeddableImage } from './embeddedImages'
+import { inlineSpans } from './inlineMarkup'
 import { ChartSpecError, type NativeChart, readNativeChart } from './pptxCharts'
 import { SLIDE_LAYOUTS, STATUSES } from './pptxVocabulary'
 import { headerText, normalizeTableRows } from './tableRows'
@@ -114,12 +115,18 @@ export interface ReadContext {
 }
 
 /**
- * Markdown and HTML a model writes into text that a slide prints as it is:
- * **bold**, `code`, [label](url) and <b>, <i>, <strong>, <em> or <br>. A single
- * asterisk is left alone, since 2*3*4 is ordinary text.
+ * Whether `text` holds markdown or HTML a slide would print as written: the
+ * PDF and DOCX tools, which read it, would print something else. A single
+ * asterisk is left out, since 2*3*4 is ordinary text on a slide.
  */
-const MARKUP =
-  /\*\*[^*\s][^*]*\*\*|`[^`\n]+`|\[[^[\]\n]+\]\((?:https?:|mailto:)[^)\s]+\)|<\/?(?:b|i|strong|em|br)\b[^<>]*>/i
+function holdsMarkup(text: string): boolean {
+  const t = text.replace(/(?<!\*)\*(?!\*)/g, '\u2217')
+  return (
+    inlineSpans(t)
+      .map(span => span.text)
+      .join('') !== t
+  )
+}
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -155,7 +162,7 @@ export function readText(
   }
   const text = raw.trim()
   if (!text) return undefined
-  if (!ctx.markupNoted && MARKUP.test(text)) {
+  if (!ctx.markupNoted && holdsMarkup(text)) {
     ctx.markupNoted = true
     ctx.warnings.push(
       `${where} holds markdown or HTML, which slides print as written; PPTX text is plain, ` +
