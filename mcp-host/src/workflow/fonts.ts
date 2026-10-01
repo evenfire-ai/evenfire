@@ -15,6 +15,7 @@
 import { GlobalFonts, type SKRSContext2D, createCanvas } from '@napi-rs/canvas'
 import * as fs from 'fs'
 import * as path from 'path'
+import { logger } from '../logger'
 
 /** Family the bundled Roboto is registered under. */
 export const CHART_FONT_FAMILY = 'Clerum Sans'
@@ -101,8 +102,9 @@ function registerSystemFonts(): void {
     for (const file of files) {
       try {
         GlobalFonts.registerFromPath(file)
-      } catch {
-        // A face the renderer cannot parse is simply not available.
+      } catch (err) {
+        // A face the renderer cannot parse is not available; the image's package may be damaged.
+        logger.warn({ file, err: errorText(err) }, 'Font face could not be registered')
       }
     }
   }
@@ -115,10 +117,19 @@ function registerSystemFonts(): void {
 export function ensureFontsReady(): void {
   if (ready) return
   ready = true
-  const f = loadRobotoFaces()
-  GlobalFonts.register(f.normal, CHART_FONT_FAMILY)
-  GlobalFonts.register(f.bold, `${CHART_FONT_FAMILY} Bold`)
+  try {
+    const f = loadRobotoFaces()
+    GlobalFonts.register(f.normal, CHART_FONT_FAMILY)
+    GlobalFonts.register(f.bold, `${CHART_FONT_FAMILY} Bold`)
+  } catch (err) {
+    // The system faces still register, so charts draw in them rather than in nothing.
+    logger.error({ err: errorText(err) }, 'Bundled Roboto faces could not be loaded')
+  }
   registerSystemFonts()
+}
+
+function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
 }
 
 /**
@@ -651,8 +662,12 @@ function resolvePdfFaces(): PdfFaces {
       if (typeof file === 'string') GlobalFonts.registerFromPath(file, PDF_FONT_FAMILY)
       pdfFaces = chosen
       return pdfFaces
-    } catch {
-      // Unparseable face: fall through to the bundled one.
+    } catch (err) {
+      // Unparseable face: fall through to the bundled one, which covers less.
+      logger.warn(
+        { file, err: errorText(err) },
+        'PDF body face could not be registered; the bundled Roboto face is used'
+      )
     }
   }
   const roboto = loadRobotoFaces()
@@ -960,8 +975,12 @@ class GlyphSource implements PdfGlyphSource {
       try {
         if (Buffer.isBuffer(face)) GlobalFonts.register(face, alias)
         else GlobalFonts.registerFromPath(faceFile(face)!, alias)
-      } catch {
+      } catch (err) {
         // Measured with the canvas default instead; only line breaking is approximate.
+        logger.warn(
+          { alias, err: errorText(err) },
+          'Font face could not be registered for measuring'
+        )
       }
     }
     // Words repeat, and a width never changes for a face, size and text.
@@ -1057,8 +1076,10 @@ export function canRender(ch: string): boolean {
     ensureFontsReady()
     missingSignature ??= renderSignature(MISSING_PROBE, CHART_FONT_STACK)
     ok = renderSignature(ch, CHART_FONT_STACK) !== missingSignature
-  } catch {
-    ok = false
+  } catch (err) {
+    // Not remembered: a failed render says nothing about the character.
+    logger.warn({ codePoint: cp, err: errorText(err) }, 'Glyph coverage could not be checked')
+    return false
   }
   coverage.set(cp, ok)
   return ok

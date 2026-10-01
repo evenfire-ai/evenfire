@@ -106,6 +106,15 @@ describe('sanitizeForFont', () => {
     expect(out === 'cost A → B' || out === 'cost A -> B').toBe(true)
   })
 
+  it('tells a character no face draws from one the bundled face draws', () => {
+    // U+0378 is unassigned, so no face on any image maps it; Roboto, which
+    // ships with the package, draws é. Neither depends on canRender's answer.
+    expect(canRender('\u0378')).toBe(false)
+    expect(canRender('é')).toBe(true)
+    expect(sanitizeForFont('x\u0378y')).toBe('xy')
+    expect(sanitizeForFont('café\u0378')).toBe('café')
+  })
+
   it('drops zero-width characters that would confuse measurement', () => {
     expect(sanitizeForFont('a\u200Bb\uFEFFc')).toBe('abc')
   })
@@ -176,8 +185,11 @@ describe('per-character fallback for PDFs', () => {
     const family = glyphs.familyFor(0x76f4, PDF_FONT_FAMILY)
     const faces = family ? glyphs.descriptors([family])[family] : undefined
     const face = faces?.normal
-    // Only an image with the Noto CJK collection can run this.
-    if (!Array.isArray(face) || !/CJKsc-/.test(face[1])) return
+    // Only an image with the Noto CJK collection can run this; CI installs it.
+    if (!Array.isArray(face) || !/CJKsc-/.test(face[1])) {
+      expect(process.env.CI, 'CI installs the Noto CJK collection').not.toBe('true')
+      return
+    }
     expect((glyphs.descriptors([family!], 'ja')[family!].normal as string[])[1]).toMatch(/CJKjp-/)
     expect((glyphs.descriptors([family!], 'ko')[family!].normal as string[])[1]).toMatch(/CJKkr-/)
 
@@ -208,7 +220,9 @@ describe('per-character fallback for PDFs', () => {
 })
 
 // Only images that ship Arabic and Hebrew faces can run this; elsewhere the
-// typesetter tests cover the ordering with made-up faces.
+// typesetter tests cover the ordering with made-up faces. CI installs the
+// image's font packages, so there a missing face fails instead of skipping.
+const IN_CI = process.env.CI === 'true'
 const hasRtlFaces =
   pdfGlyphSource().familyFor(0x0645, PDF_FONT_FAMILY) !== undefined &&
   pdfGlyphSource().familyFor(0x05e9, PDF_FONT_FAMILY) !== undefined
@@ -238,8 +252,9 @@ async function embeddedFaces(family: string, sample: string, dir: string): Promi
   return [...new Set(pages[0].fragments.map(f => untagged(f.font)))]
 }
 
-describe.skipIf(!hasRtlFaces)('Arabic and Hebrew in a PDF', () => {
+describe.skipIf(!hasRtlFaces && !IN_CI)('Arabic and Hebrew in a PDF', () => {
   it('sets each script in the face chosen for it, in display order, leaving nothing out', async () => {
+    expect(hasRtlFaces, 'CI installs faces for Arabic and Hebrew').toBe(true)
     // Which faces those are depends on the image: script faces where Noto is
     // installed, a broad face such as DejaVu Sans or the body face elsewhere.
     const outputDir = fs.mkdtempSync(path.join(os.tmpdir(), 'clerum-rtl-'))
