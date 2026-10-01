@@ -11,7 +11,19 @@
  * supported.
  */
 
-export type BidiClass = 'L' | 'R' | 'AL' | 'EN' | 'AN' | 'ES' | 'ET' | 'CS' | 'NSM' | 'WS' | 'ON'
+export type BidiClass =
+  | 'L'
+  | 'R'
+  | 'AL'
+  | 'EN'
+  | 'AN'
+  | 'ES'
+  | 'ET'
+  | 'CS'
+  | 'NSM'
+  | 'BN'
+  | 'WS'
+  | 'ON'
 
 const MARK = /[\p{Mn}\p{Me}]/u
 const LETTER = /[\p{L}\p{Mc}\p{Nd}\p{Nl}]/u
@@ -63,7 +75,21 @@ const TERMINATORS: ReadonlyArray<readonly [number, number]> = [
   [0x066a, 0x066a],
   [0x2030, 0x2034],
   [0x20a0, 0x20cf],
-  [0x2212, 0x2213],
+  [0x2213, 0x2213],
+]
+
+/** Plus and minus signs, U+2212 MINUS SIGN among them. */
+const NUMBER_SIGNS = new Set([
+  0x2b, 0x2d, 0x207a, 0x207b, 0x208a, 0x208b, 0x2212, 0xfb29, 0xfe62, 0xfe63, 0xff0b, 0xff0d,
+])
+
+/** Zero-width joiners and other characters the rules pass over (X9). */
+const BOUNDARY_NEUTRALS: ReadonlyArray<readonly [number, number]> = [
+  [0xad, 0xad],
+  [0x180e, 0x180e],
+  [0x200b, 0x200d],
+  [0x2060, 0x2064],
+  [0xfeff, 0xfeff],
 ]
 
 const SEPARATORS = new Set([0x2c, 0x2e, 0x2f, 0x3a, 0xa0, 0x060c, 0x202f, 0x2044, 0xfe50, 0xfe52])
@@ -75,9 +101,10 @@ export function bidiClass(cp: number): BidiClass {
   if (inRanges(cp, ARABIC_DIGITS)) return 'AN'
   if (inRanges(cp, TERMINATORS)) return 'ET'
   if (SEPARATORS.has(cp)) return 'CS'
+  if (NUMBER_SIGNS.has(cp)) return 'ES'
+  if (inRanges(cp, BOUNDARY_NEUTRALS)) return 'BN'
   if (inRanges(cp, STRONG_AL)) return 'AL'
   if (inRanges(cp, STRONG_R)) return 'R'
-  if (cp === 0x2b || cp === 0x2d) return 'ES'
   if (cp === 0x20 || cp === 0x09 || cp === 0x0c || (cp >= 0x2000 && cp <= 0x200a) || cp === 0x3000)
     return 'WS'
   if (cp === 0x200e || LETTER.test(ch)) return 'L'
@@ -137,9 +164,32 @@ function bracketPairs(codePoints: number[], t: BidiClass[]): Array<[number, numb
   return pairs.sort((a, b) => a[0] - b[0])
 }
 
-/** Resolve the embedding level of each code point of one paragraph. */
+/**
+ * Resolve the embedding level of each code point of one paragraph. A boundary
+ * neutral such as a zero-width joiner takes no part in the rules (X9); it gets
+ * the level of the character before it, so it stays inside its word.
+ */
 export function resolveParagraph(codePoints: number[]): BidiParagraph {
   const classes = codePoints.map(bidiClass)
+  const kept = classes.flatMap((cls, i) => (cls === 'BN' ? [] : [i]))
+  const resolved = resolveLevels(
+    kept.map(i => codePoints[i]),
+    kept.map(i => classes[i])
+  )
+  const levels: number[] = new Array<number>(classes.length)
+  kept.forEach((i, k) => (levels[i] = resolved.levels[k]))
+  let previous = kept.length > 0 ? levels[kept[0]] : resolved.base
+  for (let i = 0; i < levels.length; i++) {
+    if (classes[i] === 'BN') levels[i] = previous
+    else previous = levels[i]
+  }
+  return { base: resolved.base, levels, classes }
+}
+
+function resolveLevels(
+  codePoints: number[],
+  classes: BidiClass[]
+): { base: 0 | 1; levels: number[] } {
   const n = classes.length
   const firstStrong = classes.map(strongDirection).find(Boolean)
   const base: 0 | 1 = firstStrong === 'R' ? 1 : 0
@@ -222,7 +272,7 @@ export function resolveParagraph(codePoints: number[]): BidiParagraph {
     if (base === 0) return cls === 'R' ? 1 : cls === 'AN' || cls === 'EN' ? 2 : 0
     return cls === 'L' || cls === 'EN' || cls === 'AN' ? 2 : 1
   })
-  return { base, levels, classes }
+  return { base, levels }
 }
 
 /**
