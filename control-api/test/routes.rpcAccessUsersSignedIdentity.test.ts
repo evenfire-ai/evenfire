@@ -75,7 +75,13 @@ function buildApp() {
     updateResource: vi.fn(),
     deleteResource: vi.fn(),
   }
-  const bindingService = { bind: vi.fn(async () => undefined) }
+  const bindingService = {
+    bind: vi.fn(async (input: { runId: string }) => ({
+      runId: input.runId.toLowerCase(),
+      status: 'created' as const,
+      createdAt: new Date().toISOString(),
+    })),
+  }
   const app = express()
   app.use(createRpcAccessUsersRouter(gateway as unknown as K8sGateway, { bindingService }))
   return { app, gateway, bindingService }
