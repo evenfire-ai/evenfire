@@ -67,6 +67,7 @@ const invalidSubjects = [
   { label: 'null', sub: null },
   { label: 'number', sub: 42 },
 ]
+const invalidSessionIds = invalidSubjects.map(({ label, sub }) => ({ label, jti: sub }))
 const scopes = [
   { label: 'team', accessScope: 'team', teamId: 'diagnostic-team' },
   { label: 'user', accessScope: 'user', teamId: null },
@@ -143,6 +144,36 @@ describe('signed RPC service subject validation', () => {
   })
   it.each(invalidSubjects)('rejects $label service subject', ({ sub }) => {
     expect(verifyRpcToken(fixture.sign({ ...serviceClaims, sub }))).toBeNull()
+  })
+})
+
+describe.each([
+  { label: 'user', claims: {} },
+  { label: 'service', claims: serviceClaims },
+])('$label RPC session identifier validation', ({ claims }) => {
+  it.each(invalidSessionIds)('rejects $label session identifier', ({ jti }) => {
+    expect(verifyRpcToken(fixture.sign({ ...claims, jti }))).toBeNull()
+  })
+  it('preserves a non-blank session identifier verbatim', () => {
+    expect(verifyRpcToken(fixture.sign({ ...claims, jti: ' diagnostic-session ' }))?.jti).toBe(
+      ' diagnostic-session '
+    )
+  })
+  describe.each(['approve', 'deny'])('%s session identifier authentication', action => {
+    it.each(invalidSessionIds)(
+      'rejects $label session identifier before any Host side effect',
+      async ({ jti }) => {
+        const response = await request(makeApp())
+          .post(`/rpc/hosts/diagnostic-host/approvals/${action}`)
+          .set('authorization', `Bearer ${fixture.sign({ ...claims, jti })}`)
+          .send({ toolCallId: 'diagnostic-approval' })
+        expect(response.status).toBe(401)
+        expect(response.body).toEqual({ error: 'Unauthorized' })
+        expect(edges.resolveHostConnectionForUser.mock.calls.length).toBe(0)
+        expect(upstream.mock.calls.length).toBe(0)
+        expect(edges.requestHostWakeFromControlApi.mock.calls.length).toBe(0)
+      }
+    )
   })
 })
 

@@ -34,6 +34,7 @@ export function verifyRpcToken(token: string): RpcAccessClaims | null {
       !Array.isArray(payload?.scopes) ||
       !Array.isArray(payload?.hostRefs) ||
       typeof payload?.jti !== 'string' ||
+      payload.jti.trim().length === 0 ||
       typeof payload?.iat !== 'number' ||
       typeof payload?.exp !== 'number'
     ) {
