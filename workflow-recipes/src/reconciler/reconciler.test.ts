@@ -16700,6 +16700,42 @@ describe('WorkflowRecipeReconciler', () => {
       expect(result.requeueAfterMs).toBe(WORKFLOW_PROGRESS_REQUEUE_BASE_MS)
       expect(result.requeueFixedInterval).toBe(false)
     })
+
+    it('R5-J1: retries the legacy DELETE before a validation return, so DeletePending never requeues at 1 s', async () => {
+      const inner = installRealInner()
+      const { innerReconcile } = stubShortCircuits(inner)
+      legacyDeleteAnswers({ code: 403, message: 'forbidden' })
+      const conditions = publishedFacts('converged')
+      const overLimit = makeRecipe({
+        metadata: {
+          name: RECIPE,
+          namespace: 'sandbox-recipes',
+          uid: 'uid-lg',
+          labels: { 'clerum.io/workflow-run-id': RUN_ID },
+        },
+        spec: {
+          agent: { provider: 'openai', model: 'gpt-4o' },
+          steps: Array.from({ length: 101 }, (_, i) => ({ id: `s${i}`, instruction: 'run' })),
+        },
+        status: {
+          phase: 'active',
+          message: 'Workflow running',
+          workflowExecution: { phase: 'running' },
+          conditions,
+        } as WorkflowRecipeCRD['status'],
+      })
+
+      const result = await reconciler.reconcile(overLimit)
+
+      // Witness: the pass took the spec-limit return, before reconcile().
+      expect(result.phase).toBe('failed')
+      expect(result.message).toBe('spec.steps must contain at most 100 items')
+      expect(innerReconcile).not.toHaveBeenCalled()
+      // The DELETE was sent, so the requeue is the 60 s backoff, not the 1 s floor.
+      expect(legacyDeletes()).toBe(1)
+      expect(result.requeueAfterMs).toBe(60_000)
+      expect(result.requeueFixedInterval).toBe(true)
+    })
   })
 
   // A reconcile() prune whose DELETE did not land publishes
