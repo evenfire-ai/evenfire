@@ -12,6 +12,11 @@ const navigationState = vi.hoisted(() => ({
   replace: vi.fn(),
 }))
 
+const api = vi.hoisted(() => ({
+  getDesktopEnvironment: vi.fn(),
+  getDesktopRelease: vi.fn(),
+}))
+
 const authState = vi.hoisted(
   (): AuthState => ({
     isLoggedIn: true,
@@ -44,6 +49,11 @@ vi.mock('next/navigation', () => ({
   useSearchParams: () => new URLSearchParams(navigationState.search),
 }))
 
+vi.mock('@lib/api', () => ({
+  getDesktopEnvironment: api.getDesktopEnvironment,
+  getDesktopRelease: api.getDesktopRelease,
+}))
+
 vi.mock('next/image', () => ({
   default: ({ alt = '', ...props }: React.ImgHTMLAttributes<HTMLImageElement>) => (
     // eslint-disable-next-line @next/next/no-img-element
@@ -72,6 +82,21 @@ vi.mock('@components/AuthContext', () => ({
   }),
 }))
 
+vi.mock('@components/ProfileAccessContext', () => ({
+  ProfileAccessProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
+  useProfileAccess: () => ({
+    approvalTargets: [],
+    approvalTargetsError: false,
+    approvalTargetsLoading: false,
+    canManageMembers: false,
+    manageableTeams: [],
+    manageableTeamsError: false,
+    manageableTeamsLoading: false,
+    refreshApprovalTargets: vi.fn(),
+    refreshManageableTeams: vi.fn(),
+  }),
+}))
+
 vi.mock('@components/LoginPanel', () => ({
   LoginPanel: () => <div data-testid="profile-login-panel">login-panel</div>,
 }))
@@ -85,6 +110,8 @@ function renderRootPage() {
 }
 
 beforeEach(() => {
+  api.getDesktopEnvironment.mockReset().mockReturnValue(new Promise(() => {}))
+  api.getDesktopRelease.mockReset().mockReturnValue(new Promise(() => {}))
   navigationState.pathname = '/'
   navigationState.search = ''
   navigationState.replace.mockClear()
