@@ -57,8 +57,8 @@ function typesOf(node: Node): string[] {
 }
 
 /**
- * Visit every schema node, including the branches of an `anyOf`, and report
- * those that break `check`.
+ * Visit every schema node, including the branches of an `anyOf` and the
+ * schema of `additionalProperties`, and report those that break `check`.
  */
 function scan(check: (node: Node) => string | undefined): Violation[] {
   const out: Violation[] = []
@@ -72,6 +72,7 @@ function scan(check: (node: Node) => string | undefined): Violation[] {
       }
       if (node.items !== undefined) visit(node.items, `${path}[]`)
       if (Array.isArray(node.anyOf)) node.anyOf.forEach((b, i) => visit(b, `${path}|${i}`))
+      if (isNode(node.additionalProperties)) visit(node.additionalProperties, `${path}{*}`)
     }
     visit(tool.parameters, '')
   }
@@ -86,6 +87,11 @@ describe('artifact tool schemas stay portable across providers', () => {
   it('registers the generators this suite is meant to cover', () => {
     // Guards against the suite silently covering nothing if naming changes.
     expect(ARTIFACT_TOOLS.length).toBeGreaterThanOrEqual(6)
+  })
+
+  it('reaches the schemas under additionalProperties', () => {
+    const visited = scan(() => 'visited').filter(v => v.path.endsWith('{*}'))
+    expect(visited.length).toBeGreaterThanOrEqual(9)
   })
 
   it('never uses a keyword the Gemini conversion passes through untranslated', () => {
