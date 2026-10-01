@@ -83,7 +83,7 @@ describe('AppService invitation configuration lookup', () => {
       completeDesktopSetup: vi.fn().mockResolvedValue({
         valid: true,
         email: 'user@example.com',
-        externalRestApiBaseUrl: 'https://api.example.com',
+        externalRestApiBaseUrl: 'https://api.example.com.',
         rpcProxyBaseUrl: 'https://rpc.example.com',
         appName: 'Evenfire',
       }),
@@ -115,6 +115,9 @@ describe('AppService invitation configuration lookup', () => {
     } as never
 
     await service.completeDesktopSetup('user@example.com', 'setup-token')
+
+    expect(config.externalRestApiBaseUrl).toBe('https://api.example.com')
+    expect(config.rpcProxyBaseUrl).toBe('https://rpc.example.com')
 
     expect(service.memberRegistrationServiceClient.completeDesktopSetup).toHaveBeenCalledWith(
       'user@example.com',

@@ -198,6 +198,54 @@ describe('Desktop environment origin matching', () => {
     expect(setPendingDesktopEnvironmentSetup).toHaveBeenCalledWith(null)
   })
 
+  it('selects the saved REST profile when the link host has a terminal DNS dot', async () => {
+    const state = await runtimeConfigModule!.getDesktopRuntimeConfigState()
+    const savedTarget = state.options.find(
+      option =>
+        option.externalRestApiBaseUrl === `${targetEnvironment.externalRestApiBaseUrl}/api/v1`
+    )
+    if (!savedTarget) throw new Error('The config producer did not return the saved REST profile')
+    const { handler, selectRuntimeConfig, setPendingDesktopEnvironmentSetup } = createHandler(
+      () => ({ booting: false, busy: false, authTransitioning: false, isAuthenticated: false })
+    )
+
+    await handler({
+      ...targetEnvironment,
+      externalRestApiBaseUrl: 'https://api.example.test./api/v1',
+      rpcProxyBaseUrl: '',
+    })
+
+    const finalState = await runtimeConfigModule!.getDesktopRuntimeConfigState()
+    expect(selectRuntimeConfig).toHaveBeenCalledWith(savedTarget.id)
+    expect(setPendingDesktopEnvironmentSetup).toHaveBeenCalledWith(null)
+    expect(finalState.options).toHaveLength(state.options.length)
+    expect(finalState.currentConfig?.externalRestApiBaseUrl).toBe(
+      `${targetEnvironment.externalRestApiBaseUrl}/api/v1`
+    )
+  })
+
+  it('updates a saved profile when saving its terminal-dot REST spelling', async () => {
+    const state = await runtimeConfigModule!.getDesktopRuntimeConfigState()
+    const savedTarget = state.options.find(
+      option =>
+        option.externalRestApiBaseUrl === `${targetEnvironment.externalRestApiBaseUrl}/api/v1`
+    )
+    if (!savedTarget) throw new Error('The config producer did not return the saved REST profile')
+
+    await runtimeConfigModule!.saveDesktopRuntimeConfig({
+      ...targetEnvironment,
+      externalRestApiBaseUrl: 'https://api.example.test./api/v1',
+      rpcProxyBaseUrl: `${targetEnvironment.rpcProxyBaseUrl}/rpc`,
+    })
+
+    const finalState = await runtimeConfigModule!.getDesktopRuntimeConfigState()
+    expect(finalState.options).toHaveLength(state.options.length)
+    expect(finalState.activeOptionId).toBe(savedTarget.id)
+    expect(finalState.currentConfig?.externalRestApiBaseUrl).toBe(
+      `${targetEnvironment.externalRestApiBaseUrl}/api/v1`
+    )
+  })
+
   it('rejects an omitted RPC when multiple saved profiles share the REST origin', async () => {
     await runtimeConfigModule!.saveDesktopRuntimeConfig({
       appName: 'Second API profile',

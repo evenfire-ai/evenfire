@@ -16,6 +16,10 @@ import {
   saveDesktopRuntimeConfig,
   selectDesktopRuntimeConfigOption,
 } from './config.js'
+import {
+  canonicalizeDesktopRestEndpoint,
+  desktopRestEndpointOrigin,
+} from './desktopEnvironmentUrl.js'
 import { fetchBoundedBytes } from './gfs/boundedDownload.js'
 import { type DelegationAffordances, delegationAffordances } from './gfs/delegation.js'
 import {
@@ -96,15 +100,6 @@ const BACKEND_PROBE_TIMEOUT_MS = 1500
 const HOST_WAKE_SCOPE: RpcScope = 'host:wake:write'
 const PROFILE_UI_BASE_URL_ORIGIN_ERROR =
   'PROFILE_UI_BASE_URL must be an origin URL with a root pathname and no search parameters'
-
-function requireHttpOrigin(rawValue: string): string {
-  const value = rawValue.trim()
-  const url = new URL(value)
-  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) {
-    throw new Error('Desktop environment URLs must use http(s) without credentials')
-  }
-  return url.origin
-}
 
 function normalizeExplicitProfileUiBaseUrl(rawValue: string): string | null {
   const value = rawValue.trim()
@@ -1952,12 +1947,12 @@ export class AppService {
     hydrateDesktopRuntimeConfig()
     if (!isDesktopRuntimeConfigured()) return
     if (config.rpcProxyBaseUrl?.trim()) return
-    const externalRestApiBaseUrl = config.externalRestApiBaseUrl
-    const externalRestApiOrigin = requireHttpOrigin(externalRestApiBaseUrl)
+    const externalRestApiBaseUrl = canonicalizeDesktopRestEndpoint(config.externalRestApiBaseUrl)
+    const externalRestApiOrigin = desktopRestEndpointOrigin(externalRestApiBaseUrl)
     const discovered = await this.authClient.getDesktopEnvironment()
     if (
       discovered.externalRestApiBaseUrl?.trim() &&
-      requireHttpOrigin(discovered.externalRestApiBaseUrl) !== externalRestApiOrigin
+      desktopRestEndpointOrigin(discovered.externalRestApiBaseUrl) !== externalRestApiOrigin
     ) {
       throw new Error('Desktop environment discovery returned a different REST host')
     }

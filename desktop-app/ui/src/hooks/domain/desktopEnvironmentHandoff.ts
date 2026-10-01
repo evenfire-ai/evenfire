@@ -1,3 +1,7 @@
+import {
+  canonicalizeDesktopRestEndpoint,
+  desktopRestEndpointOrigin,
+} from '../../../../src/desktopEnvironmentUrl'
 import type { DesktopRuntimeConfig, DesktopRuntimeConfigState } from '../../../../src/types'
 import type { SetStatusFn } from './types'
 
@@ -39,8 +43,8 @@ function sameDesktopEnvironment(
 ): boolean {
   try {
     return (
-      environmentOrigin(left.externalRestApiBaseUrl) ===
-        environmentOrigin(right.externalRestApiBaseUrl) &&
+      desktopRestEndpointOrigin(left.externalRestApiBaseUrl) ===
+        desktopRestEndpointOrigin(right.externalRestApiBaseUrl) &&
       (left.rpcProxyBaseUrl?.trim() ? environmentOrigin(left.rpcProxyBaseUrl) : '') ===
         (right.rpcProxyBaseUrl?.trim() ? environmentOrigin(right.rpcProxyBaseUrl) : '')
     )
@@ -56,7 +60,7 @@ function savedEnvironmentsForRestOrigin(
   return options.filter(option => {
     if (option.source === 'localhost' || option.id === LOCALHOST_OPTION_ID) return false
     try {
-      return environmentOrigin(option.externalRestApiBaseUrl) === restOrigin
+      return desktopRestEndpointOrigin(option.externalRestApiBaseUrl) === restOrigin
     } catch {
       return false
     }
@@ -71,12 +75,12 @@ export function getDesktopEnvironmentRestOriginMatches(
   configState: DesktopRuntimeConfigState,
   externalRestApiBaseUrl: string
 ) {
-  const restOrigin = environmentOrigin(externalRestApiBaseUrl)
+  const restOrigin = desktopRestEndpointOrigin(externalRestApiBaseUrl)
   return {
     localhost: configState.options.find(option => {
       if (!isLocalhostOption(option)) return false
       try {
-        return environmentOrigin(option.externalRestApiBaseUrl) === restOrigin
+        return desktopRestEndpointOrigin(option.externalRestApiBaseUrl) === restOrigin
       } catch {
         return false
       }
@@ -143,7 +147,9 @@ export function createDesktopEnvironmentSetupHandler({
       appName: appName?.trim() || 'Evenfire',
     }
     try {
-      environmentOrigin(linkedConfig.externalRestApiBaseUrl)
+      linkedConfig.externalRestApiBaseUrl = canonicalizeDesktopRestEndpoint(
+        linkedConfig.externalRestApiBaseUrl
+      )
       if (linkedConfig.rpcProxyBaseUrl) environmentOrigin(linkedConfig.rpcProxyBaseUrl)
     } catch (error) {
       setStatus(
