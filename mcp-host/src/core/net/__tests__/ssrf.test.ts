@@ -19,22 +19,54 @@ const resolve6 = vi.mocked(dns.resolve6)
 
 afterEach(() => vi.clearAllMocks())
 
+function literalUrl(ip: string): URL {
+  return ip.includes(':') ? new URL(`http://[${ip}]/`) : new URL(`http://${ip}/`)
+}
+
+function normalizedLiteralHost(ip: string): string {
+  return literalUrl(ip).hostname.replace(/^\[|\]$/g, '')
+}
+
+const BLOCKED_SPECIAL_PURPOSE_ADDRESSES: readonly (readonly [string, string])[] = [
+  ['100.64.0.1', 'CGNAT (RFC 6598)'],
+  ['198.18.0.1', 'benchmarking (RFC 2544)'],
+  ['224.0.0.1', 'IPv4 multicast'],
+  ['240.0.0.1', 'IPv4 reserved'],
+  ['255.255.255.255', 'IPv4 broadcast'],
+  ['64:ff9b::a9fe:a9fe', 'NAT64-wrapped cloud metadata'],
+  ['2002:a00:1::', '6to4-wrapped private IPv4'],
+  ['ff02::1', 'IPv6 multicast'],
+]
+
 describe('resolvePinnedPublicIp', () => {
   it('returns a public IP literal unchanged (no DNS)', async () => {
     await expect(resolvePinnedPublicIp(new URL('https://8.8.8.8/x'))).resolves.toBe('8.8.8.8')
     expect(resolve4).not.toHaveBeenCalled()
+    expect(resolve6).not.toHaveBeenCalled()
   })
 
   it('rejects a private IP literal', async () => {
     await expect(resolvePinnedPublicIp(new URL('http://10.0.0.5/'))).rejects.toBeInstanceOf(
       SsrfBlockedError
     )
+    expect(resolve4).not.toHaveBeenCalled()
+    expect(resolve6).not.toHaveBeenCalled()
   })
 
   it('rejects the cloud-metadata IP literal', async () => {
     await expect(
       resolvePinnedPublicIp(new URL('http://169.254.169.254/latest/meta-data/'))
     ).rejects.toThrow(/private IP/)
+    expect(resolve4).not.toHaveBeenCalled()
+    expect(resolve6).not.toHaveBeenCalled()
+  })
+
+  it('returns a public IPv6 literal unchanged (no DNS)', async () => {
+    await expect(resolvePinnedPublicIp(new URL('https://[2606:4700:4700::1111]/'))).resolves.toBe(
+      '2606:4700:4700::1111'
+    )
+    expect(resolve4).not.toHaveBeenCalled()
+    expect(resolve6).not.toHaveBeenCalled()
   })
 
   it('resolves a hostname to a public IP and pins it', async () => {
@@ -59,6 +91,51 @@ describe('resolvePinnedPublicIp', () => {
     await expect(resolvePinnedPublicIp(new URL('https://nope.invalid/'))).rejects.toThrow(
       /DNS resolution failed/
     )
+  })
+
+  it.each(BLOCKED_SPECIAL_PURPOSE_ADDRESSES)(
+    'rejects the %s IP literal (%s)',
+    async (ip: string) => {
+      const outcome = resolvePinnedPublicIp(literalUrl(ip))
+      await expect(outcome).rejects.toBeInstanceOf(SsrfBlockedError)
+      await expect(outcome).rejects.toThrow(`Target is a private IP (${normalizedLiteralHost(ip)})`)
+      expect(resolve4).not.toHaveBeenCalled()
+      expect(resolve6).not.toHaveBeenCalled()
+    }
+  )
+
+  it.each(BLOCKED_SPECIAL_PURPOSE_ADDRESSES)(
+    'rejects a hostname resolving to %s (%s)',
+    async (ip: string) => {
+      const isV6 = ip.includes(':')
+      resolve4.mockResolvedValue(isV6 ? [] : [ip])
+      resolve6.mockResolvedValue(isV6 ? [ip] : [])
+      const outcome = resolvePinnedPublicIp(new URL('https://blocked.example.com/'))
+      await expect(outcome).rejects.toBeInstanceOf(SsrfBlockedError)
+      await expect(outcome).rejects.toThrow(`Domain resolves to private IP (${ip})`)
+    }
+  )
+
+  it.each([
+    ['64:ff9b::808:808', 'NAT64 form of public 8.8.8.8'],
+    ['2002:808:808::', '6to4 form of public 8.8.8.8'],
+  ])(
+    'rejects the %s literal outright (%s): prefix policy without embedded-IPv4 extraction',
+    async (ip: string) => {
+      const outcome = resolvePinnedPublicIp(literalUrl(ip))
+      await expect(outcome).rejects.toBeInstanceOf(SsrfBlockedError)
+      await expect(outcome).rejects.toThrow(`Target is a private IP (${normalizedLiteralHost(ip)})`)
+      expect(resolve4).not.toHaveBeenCalled()
+      expect(resolve6).not.toHaveBeenCalled()
+    }
+  )
+
+  it('rejects a hostname with a public A record and a NAT64 AAAA record (DNS64 policy)', async () => {
+    resolve4.mockResolvedValue(['93.184.216.34'])
+    resolve6.mockResolvedValue(['64:ff9b::808:808'])
+    const outcome = resolvePinnedPublicIp(new URL('https://dns64.example.com/'))
+    await expect(outcome).rejects.toBeInstanceOf(SsrfBlockedError)
+    await expect(outcome).rejects.toThrow('Domain resolves to private IP (64:ff9b::808:808)')
   })
 })
 
