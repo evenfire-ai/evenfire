@@ -112,7 +112,7 @@ export function formatSpec(value: unknown): FormatSpec | undefined {
 }
 
 /** Header words, lowercased and without accents: "Tasa de conversión" → tasa, de, conversion. */
-export function headerTokens(header: unknown): string[] {
+function headerTokens(header: unknown): string[] {
   return String(header ?? '')
     .replace(/([a-z])([A-Z])/g, '$1 $2')
     .normalize('NFD')

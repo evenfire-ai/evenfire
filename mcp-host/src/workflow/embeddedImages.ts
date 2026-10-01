@@ -200,7 +200,7 @@ export function fitImageBox(
 }
 
 /** The path an image argument names: a filename, or an object carrying `path`. */
-export function imageRefPath(ref: unknown): string | undefined {
+function imageRefPath(ref: unknown): string | undefined {
   if (typeof ref === 'string') return ref.trim() || undefined
   if (ref && typeof ref === 'object') {
     const p = (ref as { path?: unknown }).path
@@ -218,7 +218,7 @@ export function imageRefPath(ref: unknown): string | undefined {
  * failing the whole document for it helped nobody. Returns undefined, with a
  * warning, when the file is missing.
  */
-export function resolveImagePath(
+function resolveImagePath(
   requested: string,
   outputDir: string,
   warnings: string[]

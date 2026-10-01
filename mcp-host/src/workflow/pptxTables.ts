@@ -35,7 +35,7 @@ export interface TableLayout {
 }
 
 /** Body text size for a table of `columns` columns on a slide of this width class. */
-export function tableFontSize(columns: number, wide: boolean): number {
+function tableFontSize(columns: number, wide: boolean): number {
   const base = wide ? 12 : 10
   return Math.max(base - (columns >= 7 ? 2 : columns >= 5 ? 1 : 0), 8)
 }

@@ -410,7 +410,7 @@ export interface PreparedChart {
 }
 
 /** Validate one chart spec found at `where` in the arguments. */
-export function prepareDashboardChart(raw: unknown, where: string): PreparedChart {
+function prepareDashboardChart(raw: unknown, where: string): PreparedChart {
   if (!isRecord(raw)) {
     return {
       warnings: [],

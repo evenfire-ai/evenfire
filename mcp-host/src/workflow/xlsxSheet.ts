@@ -200,7 +200,7 @@ const NAMED_COLORS: Record<string, string> = {
  * Excel ARGB ("FF1E3A8A"), rgb(), or a basic CSS name. Alpha is dropped:
  * Excel fills and fonts are opaque.
  */
-export function parseColor(input: unknown): string | undefined {
+function parseColor(input: unknown): string | undefined {
   const text = String(input ?? '').trim()
   const css = text.startsWith('#')
   const hex = css ? text.slice(1) : text
