@@ -233,6 +233,66 @@ describe('sendAgentMessage — auto-title on send (B10)', () => {
   })
 })
 
+describe('sendAgentMessage — new chat target', () => {
+  it('does not reuse the prior chat when a send races the New chat selection commit', async () => {
+    const priorChatId = 'prior-chat'
+    await clerum.chat.create('agent-x', priorChatId)
+    await clerum.chat.upsertMessages('agent-x', priorChatId, [
+      {
+        id: 'prior-message',
+        role: 'user',
+        content: 'keep this in the previous chat',
+        timestamp: Date.now(),
+      },
+    ])
+
+    clerum.rpc.invokeHostMessage.mockResolvedValue({ response: 'fresh reply' })
+    const { result, rerender, unmount } = renderController({ navItem: 'agents' })
+    await settleMount()
+    await act(async () => {
+      result.current.setPendingChatSelection('agent-x', priorChatId)
+    })
+    expect(result.current.activeChatId).toBe(priorChatId)
+
+    // A composer event queued from the current conversation can run while the
+    // new chat's list request is still unresolved. Model useAppController's
+    // blank selection and route transition, then hold that selection load.
+    const sendImmediately = result.current.handleSendAgentMessage
+    clerum.chat.getIndex.mockClear()
+    clerum.chat.getIndex.mockReturnValue(new Promise(() => undefined))
+    await act(async () => {
+      result.current.setPendingChatSelection('agent-x', null, { suppressAutoSelect: true })
+      result.current.clearActiveChat()
+      rerender({ navItem: 'chat' })
+    })
+    await waitFor(() => expect(clerum.chat.getIndex).toHaveBeenCalledTimes(1))
+    expect(result.current.activeChatId).toBeNull()
+    expect(result.current.chatMessages).toEqual([])
+
+    await act(async () => {
+      await sendImmediately('start the next conversation')
+    })
+
+    const request = clerum.rpc.invokeHostMessage.mock.calls.at(-1)?.[1] as
+      | { threadId?: string }
+      | undefined
+    expect(request?.threadId).not.toBe(priorChatId)
+
+    const priorMessages = await clerum.persistedMessages('agent-x', priorChatId)
+    expect(priorMessages).toEqual([
+      expect.objectContaining({ id: 'prior-message', content: 'keep this in the previous chat' }),
+    ])
+    const newChatId = request?.threadId
+    expect(newChatId).toBeTruthy()
+    expect(await clerum.persistedMessages('agent-x', newChatId!)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ role: 'user', content: 'start the next conversation' }),
+      ])
+    )
+    unmount()
+  })
+})
+
 // R1-M11: the fake store must merge a second write of the same turn the way
 // `ChatStore.upsertMessages` does. The send path persists the user turn before
 // the POST and again with its task_id once the Host accepts it; a fake that

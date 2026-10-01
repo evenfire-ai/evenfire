@@ -2823,7 +2823,10 @@ export function useAgentChatController({
         releaseSendSetup()
         return
       }
-      let sendChatId = currentChatId ?? activeChatId
+      // This ref is the synchronous authority for the send target. Do not fall
+      // back to `activeChatId`: a New chat clear can precede React's next render,
+      // leaving that state value captured from the previous conversation.
+      let sendChatId = currentChatId
       const sendStillAuthorized = () =>
         sendScope === sendScopeGeneration.current &&
         sendScopeIdentity === currentAuthScopeRef.current &&
@@ -3371,7 +3374,6 @@ export function useAgentChatController({
       isChatDeleted,
       revokeHostAccess,
       holdHostAccess,
-      activeChatId,
       composerImageAttachments,
       composerReferenceAttachments,
       chatList,
