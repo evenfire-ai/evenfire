@@ -132,7 +132,7 @@ describe('AppService invitation configuration lookup', () => {
     expect(bindChatStoreForUser).toHaveBeenCalledWith(
       'user-1',
       resolveEnvKey('https://api.example.com', 'https://rpc.example.com'),
-      { legacyEnvKeys: [getActiveLegacyRestOnlyEnvKey()] }
+      { legacyEnvKeys: [getActiveLegacyRestOnlyEnvKey()], teamId: 'team-1' }
     )
     expect(config.externalRestApiBaseUrl).toBe('https://api.example.com')
     expect(config.rpcProxyBaseUrl).toBe('https://rpc.example.com')

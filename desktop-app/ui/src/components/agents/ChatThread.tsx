@@ -7,7 +7,10 @@ import {
   useRef,
   useState,
 } from 'react'
-import { useAgentChatActionsContext } from '@contexts/AgentChatActionsContext'
+import {
+  type QueuedChatDelete,
+  useAgentChatActionsContext,
+} from '@contexts/AgentChatActionsContext'
 import { useChatListContext } from '@contexts/ChatListContext'
 import { useChatThreadStateContext } from '@contexts/ChatThreadStateContext'
 import { useMcpRuntimeContext } from '@contexts/McpRuntimeContext'
@@ -239,6 +242,7 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
     chatEndRef,
     handleSelectChat: onSelectChat,
     handleRenameChat: onRenameChat,
+    captureChatDeleteFence,
     handleDeleteChat: onDeleteChat,
   } = useAgentChatActionsContext()
   const { cancelTask: onCancelTask } = useMcpRuntimeContext()
@@ -249,8 +253,10 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
   const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null)
   const [sessionRenameValue, setSessionRenameValue] = useState('')
   const [pendingDeleteSession, setPendingDeleteSession] = useState<{
+    agentRef: string
     id: string
     title: string
+    deletion: QueuedChatDelete
   } | null>(null)
   const dedicatedSessionsRef = useRef<HTMLDivElement | null>(null)
   const sessionRenameInputRef = useRef<HTMLInputElement | null>(null)
@@ -406,16 +412,29 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
     cancelSessionRename()
   }, [cancelSessionRename, onRenameChat, renamingSessionId, sessionRenameValue])
 
-  const deleteSession = useCallback((chatId: string, chatTitle: string) => {
-    setSessionMenuChatId(null)
-    setPendingDeleteSession({ id: chatId, title: chatTitle })
-  }, [])
+  const deleteSession = useCallback(
+    async (chatId: string, chatTitle: string) => {
+      setSessionMenuChatId(null)
+      if (!selectedAgent) return
+      try {
+        const deletion = await captureChatDeleteFence(selectedAgent)
+        setPendingDeleteSession({ agentRef: selectedAgent, id: chatId, title: chatTitle, deletion })
+      } catch {
+        // Capture reports the scope/authority failure through the normal chat toast path.
+      }
+    },
+    [captureChatDeleteFence, selectedAgent]
+  )
 
   const confirmDeleteSession = useCallback(() => {
     if (!pendingDeleteSession) return
-    void onDeleteChat(pendingDeleteSession.id)
+    if (selectedAgent !== pendingDeleteSession.agentRef) {
+      setPendingDeleteSession(null)
+      return
+    }
+    void onDeleteChat(pendingDeleteSession.id, pendingDeleteSession.deletion)
     setPendingDeleteSession(null)
-  }, [onDeleteChat, pendingDeleteSession])
+  }, [onDeleteChat, pendingDeleteSession, selectedAgent])
 
   const handleCopyMessage = useCallback(async (messageKey: string, content: string) => {
     try {

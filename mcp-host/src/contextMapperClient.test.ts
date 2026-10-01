@@ -350,13 +350,11 @@ describe('ContextMapperClient Host-scoped v2 inventory', () => {
   it('rejects a present-but-non-boolean remote flag (decoder strictness)', async () => {
     vi.stubGlobal(
       'fetch',
-      vi
-        .fn()
-        .mockResolvedValue(
-          new Response(JSON.stringify(inventory([authorizedServer({ remote: 'yes' })])), {
-            status: 200,
-          })
-        )
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify(inventory([authorizedServer({ remote: 'yes' })])), {
+          status: 200,
+        })
+      )
     )
     const client = new ContextMapperClient('http://context-mapper.test', {
       authentication: authentication(),

@@ -266,6 +266,8 @@ sanitize_file() {
   [ -f "$file" ] || return 0
   T1_REDACT_PASSWORD="${T1_REDACT_PASSWORD:-${PG_PASSWORD:-}}" python3 - "$file" <<'PY'
 from pathlib import Path
+from urllib.parse import quote
+import json
 import os
 import re
 import sys
@@ -273,9 +275,44 @@ path = Path(sys.argv[1])
 text = path.read_text(errors="replace")
 password = os.environ.get("T1_REDACT_PASSWORD", "")
 if password:
-    text = text.replace(password, "<password-redacted>")
-text = re.sub(r"postgres(?:ql)?://[^\s\"'<>]+", "<minikube-postgres-dsn-redacted>", text)
-text = re.sub(r"(?i)(authorization:\s*bearer\s+)[^\s]+", r"\1<token-redacted>", text)
+    # Every spelling the password can take in a log or in the Vitest JSON
+    # reporter: verbatim, JSON-escaped once (a reporter message) and twice (a
+    # JSON document quoted inside a message) in both ensure_ascii spellings
+    # (JavaScript's JSON.stringify keeps non-ASCII literal; Python's default
+    # writes \uXXXX), percent-encoded by Python's quote() and by JavaScript's
+    # encodeURIComponent, which keeps !~*'() literal.
+    escaped = []
+    for ensure_ascii in (True, False):
+        once = json.dumps(password, ensure_ascii=ensure_ascii)[1:-1]
+        escaped += [once, json.dumps(once, ensure_ascii=ensure_ascii)[1:-1]]
+    spellings = (
+        password,
+        *escaped,
+        quote(password, safe=""),
+        quote(password, safe="-_.!~*'()"),
+    )
+    # Longest first so a spelling that contains another is replaced whole.
+    for spelling in sorted(set(spellings), key=len, reverse=True):
+        text = text.replace(spelling, "<password-redacted>")
+# A DSN loses its scheme-to-host span, credentials included, whatever the
+# password is. The scheme is case-insensitive and the userinfo runs to the first
+# "@", including the JSON escapes (\" and \\) a reporter message adds inside a
+# password. The host part stops at a backslash: inside the JSON reporter a DSN
+# is followed by the escape that closes its string (\"), and consuming it leaves
+# invalid JSON.
+text = re.sub(
+    r"(?i)postgres(?:ql)?://(?:(?:[^\s\"\\@]|\\[\"\\])*@)?[^\s\"'<>\\]+",
+    "<minikube-postgres-dsn-redacted>",
+    text,
+)
+# libpq conninfo (password=...), quoted or bare. A bare value stops at a quote
+# or a backslash so it cannot swallow the end of a JSON string.
+text = re.sub(
+    r"(?i)(password\s*=\s*)(?:'(?:\\.|[^'\\])*'|[^\s\"'\\]+)",
+    r"\1<password-redacted>",
+    text,
+)
+text = re.sub(r"(?i)(authorization:\s*bearer\s+)[^\s\"'\\]+", r"\1<token-redacted>", text)
 path.write_text(text)
 PY
 }
@@ -357,6 +394,49 @@ import sys
 port = sys.stdin.read().strip()
 print("postgresql://postgres@127.0.0.1:" + port + "/postgres", end="")
 ')"
+}
+
+# Print the reporter counters and every non-passing file and test. The file must
+# already have gone through sanitize_file. A suite that fails before any test
+# runs (beforeAll, import error) has no assertionResults: its only diagnosis is
+# the file-level `message`, so it is printed right after the FAILED FILE line.
+print_reporter_failure_details() {
+  python3 - "$1" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+result = json.loads(Path(sys.argv[1]).read_text())
+print(
+    "T1 reporter counters:",
+    {
+        key: result.get(key)
+        for key in (
+            "success",
+            "numTotalTestSuites",
+            "numPassedTestSuites",
+            "numFailedTestSuites",
+            "numPendingTestSuites",
+            "numTotalTests",
+            "numPassedTests",
+            "numFailedTests",
+            "numPendingTests",
+        )
+    },
+)
+for test_result in result.get("testResults", []):
+    if test_result.get("status") == "passed":
+        continue
+    print(f"FAILED FILE: {test_result.get('name')}")
+    if test_result.get("message"):
+        print(test_result["message"])
+    for assertion in test_result.get("assertionResults", []):
+        if assertion.get("status") == "passed":
+            continue
+        print(f"FAILED TEST: {assertion.get('fullName') or assertion.get('title')}")
+        for message in assertion.get("failureMessages", []):
+            print(message)
+PY
 }
 
 run_suite() {
@@ -473,6 +553,8 @@ PY
   if [ "$success" -ne 1 ] || [ "$total_suites" -le 0 ] || \
      [ "$passed_suites" -ne "$total_suites" ] || [ "$failed_suites" -ne 0 ] || \
      [ "$failed_tests" -ne 0 ]; then
+    cat "$log_file" >&2 || true
+    print_reporter_failure_details "$json_file" >&2 || true
     T1_NEXT_COMMAND='repair the failed or incomplete Real PostgreSQL lane, then re-run T1'
     die_t1 REAL_PG_SUITE_FAILED "Real PostgreSQL reporter did not pass every suite in $package ($lane)"
   fi
@@ -521,6 +603,8 @@ main() {
     T1_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-setup-local"
     die_t1 POSTGRES_NOT_READY 'control-postgres did not become Ready'
   fi
+  # Close the phase t2_evidence_init opened before the suites start.
+  t2_evidence_write preflight PASS 'marker, process and control-postgres readiness checks passed'
 
   T1_TMP_DIR="$(mktemp -d "$T1_TMP_ROOT/evenfire-t1.XXXXXX")"
   PG_USER="$(secret_field POSTGRES_USER)"

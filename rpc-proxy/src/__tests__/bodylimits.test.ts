@@ -306,6 +306,97 @@ describe('rpc-proxy chat message body budget', () => {
     expect(response.status).toBe(413)
   })
 
+  describe('kind:file attachments (issue #666)', () => {
+    const NON_IMAGE_BUDGET = 6 * MIB
+    const KIB = 1024
+
+    function fileAttachment(dataBase64: string) {
+      return {
+        id: 'f1',
+        kind: 'file',
+        mimeType: 'text/plain',
+        detectedMediaType: 'text/plain',
+        encoding: 'base64',
+        dataBase64,
+        filename: 'notes.txt',
+        sizeBytes: 0,
+        digest: { algorithm: 'sha256', hex: '0'.repeat(64) },
+      }
+    }
+
+    /** A message whose serialized body is exactly `targetBytes`, almost all of it file base64. */
+    function fileMessageOfBodySize(targetBytes: number) {
+      const overhead = Buffer.byteLength(
+        JSON.stringify({ content: 'look', attachments: [fileAttachment('')] })
+      )
+      const fill = targetBytes - overhead
+      const payload = {
+        content: `look${'x'.repeat(fill % 4)}`,
+        attachments: [fileAttachment('A'.repeat(fill - (fill % 4)))],
+      }
+      expect(Buffer.byteLength(JSON.stringify(payload))).toBe(targetBytes)
+      return payload
+    }
+
+    function forwardedBody(): { attachments?: unknown[] } {
+      expect(serviceMock.forwardHostMessageToHost).toHaveBeenCalledTimes(1)
+      return serviceMock.forwardHostMessageToHost.mock.calls[0]![1] as { attachments?: unknown[] }
+    }
+
+    it('forwards a complete kind:file attachment without dropping a field', async () => {
+      const attachment = {
+        ...fileAttachment(Buffer.from('# notes\n').toString('base64')),
+        mimeType: 'text/markdown',
+        detectedMediaType: 'text/markdown',
+        filename: 'notes.md',
+        sizeBytes: 8,
+        digest: { algorithm: 'sha256', hex: 'ab'.repeat(32) },
+      }
+      const response = await postMessage({ content: 'look', attachments: [attachment] })
+      expect(response.status).toBe(200)
+      expect(forwardedBody().attachments).toEqual([attachment])
+    })
+
+    it('carries a file body 1KiB under the non-image budget', async () => {
+      const payload = fileMessageOfBodySize(NON_IMAGE_BUDGET - KIB)
+      const response = await postMessage(payload)
+      expect(response.status).toBe(200)
+      expect(forwardedBody().attachments).toEqual(payload.attachments)
+    })
+
+    it('rejects a file body 1KiB over the non-image budget with 413', async () => {
+      // Control: the same construction under the budget is forwarded.
+      expect((await postMessage(fileMessageOfBodySize(NON_IMAGE_BUDGET - KIB))).status).toBe(200)
+      expect(serviceMock.forwardHostMessageToHost).toHaveBeenCalledTimes(1)
+      vi.clearAllMocks()
+      const response = await postMessage(fileMessageOfBodySize(NON_IMAGE_BUDGET + KIB))
+      expect(response.status).toBe(413)
+      expect(serviceMock.forwardHostMessageToHost).not.toHaveBeenCalled()
+    })
+
+    it('never credits PNG bytes sent as kind:file against the image budget', async () => {
+      const image = imageAttachment('a1', 7 * MIB)
+      const asImage = await postMessage({ content: 'look', attachments: [image] })
+      expect(asImage.status).toBe(200)
+      expect(serviceMock.forwardHostMessageToHost).toHaveBeenCalledTimes(1)
+      vi.clearAllMocks()
+      // Same MIME type and bytes as the image: only `kind` differs.
+      const asFile = await postMessage({
+        content: 'look',
+        attachments: [
+          {
+            ...fileAttachment(image.dataBase64),
+            mimeType: 'image/png',
+            detectedMediaType: 'image/png',
+            filename: 'photo.png',
+          },
+        ],
+      })
+      expect(asFile.status).toBe(413)
+      expect(serviceMock.forwardHostMessageToHost).not.toHaveBeenCalled()
+    })
+  })
+
   it('rejects a body past the 24MiB ceiling', async () => {
     const response = await postMessage({ content: 'x'.repeat(25 * MIB), attachments: [] })
     expect(response.status).toBe(413)

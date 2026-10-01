@@ -127,12 +127,16 @@ describe('pendingChatSelection effect', () => {
     })
 
     await waitFor(() => expect(result.current.activeChatId).toBe('c-latest'))
-    expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledWith(
-      'agent-x',
-      'agent-x',
-      'c-latest',
-      undefined,
-      { limit: 40 }
+    // The remote load follows the local store read, which crosses IPC (here, the
+    // real ChatStore's disk read), so it lands after the selection flips.
+    await waitFor(() =>
+      expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledWith(
+        'agent-x',
+        'agent-x',
+        'c-latest',
+        undefined,
+        { limit: 40 }
+      )
     )
   })
 
@@ -161,12 +165,14 @@ describe('pendingChatSelection effect', () => {
     })
 
     await waitFor(() => expect(result.current.activeChatId).toBe('c-newest'))
-    expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledWith(
-      'agent-x',
-      'agent-x',
-      'c-newest',
-      undefined,
-      { limit: 40 }
+    await waitFor(() =>
+      expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledWith(
+        'agent-x',
+        'agent-x',
+        'c-newest',
+        undefined,
+        { limit: 40 }
+      )
     )
   })
 

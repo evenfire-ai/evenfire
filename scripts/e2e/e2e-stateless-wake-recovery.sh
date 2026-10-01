@@ -81,6 +81,11 @@
 #               measured_total_ms, infra_overhead_ms}]}}
 # R4 additionally emits prewarm_to_ready_ms:[ms] -- the per-cycle overlap
 # series (informational, no budget).
+# R2 additionally emits cold_resume_baseline:[{cycle, first_post_status,
+# admission_attempts, first_200_ms, status_flipped_to_replicas_patched_ms}]
+# -- characterization-only admission/scale data for later before/after
+# comparison. It is informational, has no budget, and never replaces the
+# existing ms gate metric.
 # Each measured turn (baseline, R1, R2, R4) is attributed with the serving
 # pod's [TurnTiming] phase line (queue_wait/session_load/prompt_assembly/
 # llm_wall/llm_calls/tool_loop/tools_called/input_chars_approx) and
@@ -119,6 +124,9 @@
 #     CONTEXT_MAPPER_STATELESS_IDLE_MINUTES       = 1
 #     CONTEXT_MAPPER_STATELESS_DRAIN_GRACE_MS     = 20000
 #     CONTEXT_MAPPER_HEARTBEAT_POLL_MS            = 5000
+#   Acceleration is opt-in with E2E_ALLOW_STATELESS_CADENCE_ACCELERATION=1.
+#   Cleanup fails loud if kubectl set env, rollout, or exact readback fails;
+#   a nominal test result can never hide a leaked one-minute profile policy.
 #   Reaching state=draining after a served turn therefore needs idle
 #   floor (60s) + one emitter tick (30s) + one HCC poll (5s) + slack =>
 #   DRAINING_WAIT default 150s. Full suspend adds drain grace (20s) =>
@@ -134,7 +142,8 @@
 #   - state.db row observable resolvable (exactly-once assertion in R3)
 #
 # Usage:
-#   KUBECONTEXT=clerum-test bash scripts/e2e/e2e-stateless-wake-recovery.sh
+#   E2E_ALLOW_STATELESS_CADENCE_ACCELERATION=1 \
+#     KUBECONTEXT=clerum-test bash scripts/e2e/e2e-stateless-wake-recovery.sh
 #   RECOVERY_CYCLES=5 WARM_RECOVERY_BUDGET_MS=3000 ...
 # ======================================================================
 set -euo pipefail
@@ -142,6 +151,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/e2e/e2e-lib.sh
 source "${SCRIPT_DIR}/e2e-lib.sh"
+# Resolve the canonical seeded credential in-process before any cluster
+# mutation. An explicit E2E_USER_PASSWORD remains the journey override.
+# shellcheck source=scripts/e2e/load-dotenv.sh
+source "${SCRIPT_DIR}/load-dotenv.sh"
+dotenv_load_canonical_root "${SCRIPT_DIR}/.."
+# shellcheck source=scripts/e2e/admin-credentials.sh
+source "${SCRIPT_DIR}/admin-credentials.sh"
 require_safe_kube_context
 
 HOST_REF="${E2E_STATELESS_HOST_REF:-chatllm-stateless}"
@@ -150,7 +166,15 @@ RPC_BASE="${RPC_PROXY_BASE_URL:-http://127.0.0.1:8094}"
 CONTROL_BASE="${CONTROL_API_BASE_URL:-http://127.0.0.1:8090}"
 WAKE_BASE="${RPC_GATEWAY_BASE_URL:-${CONTROL_BASE}}"
 DEV_EMAIL="${E2E_DEV_LOGIN_EMAIL:-test@clerum.io}"
-DEV_PASSWORD="${E2E_USER_PASSWORD:-${ADMIN_PASSWORD:-changeme123!}}"
+if [[ -z "${E2E_USER_PASSWORD:-}" ]]; then
+  DEV_PASSWORD="$(e2e_resolve_admin_password "${SCRIPT_DIR}/.." "" || true)"
+  if [[ -z "${DEV_PASSWORD}" ]]; then
+    echo "FAIL: canonical E2E credential is unavailable; set E2E_USER_PASSWORD explicitly" >&2
+    exit 2
+  fi
+else
+  DEV_PASSWORD="${E2E_USER_PASSWORD}"
+fi
 
 E2E_TURN_TIMEOUT="${E2E_TURN_TIMEOUT:-120}"
 POD_READY_TIMEOUT="${POD_READY_TIMEOUT:-180}"
@@ -165,6 +189,7 @@ WARM_RECOVERY_BUDGET_MS="${WARM_RECOVERY_BUDGET_MS:-5000}"
 R4_WARM_INFRA_BUDGET_MS="${R4_WARM_INFRA_BUDGET_MS:-1500}" # warm-class infra ceiling for the R4 prewarm claim (warm ~100-250ms, in-band cold ~17000ms)
 COLD_RECOVERY_BUDGET_MS="${COLD_RECOVERY_BUDGET_MS:-120000}"
 RECOVERY_ARTIFACT="${RECOVERY_ARTIFACT:-/tmp/stateless-wake-recovery-$(date +%s).json}"
+mkdir -p -- "$(dirname -- "$RECOVERY_ARTIFACT")"
 TURN_TIMING_WAIT="${TURN_TIMING_WAIT:-15}"       # bounded wait for the serving pod's [TurnTiming] line after a 200
 LLM_EMPTY_MAX_RETRIES="${LLM_EMPTY_MAX_RETRIES:-3}" # bounded re-sends of a turn that 200s with an empty-LLM body (glm-4.7 provider flake, orthogonal to wake)
 
@@ -185,24 +210,38 @@ HCC_ENV_SAVED=""
 
 restore_hcc_env() {
   [ -n "$HCC_ENV_SAVED" ] || return 0
-  local args=() key val
+  local args=() key val actual
   while IFS='=' read -r key val; do
     [ -n "$key" ] || continue
     if [ -n "$val" ]; then args+=("${key}=${val}"); else args+=("${key}-"); fi
   done <<< "$HCC_ENV_SAVED"
   [ ${#args[@]} -gt 0 ] || return 0
   log "Restoring HCC cadence env on deployment/${HCC_DEPLOY}"
-  kctl set env "deployment/${HCC_DEPLOY}" -n "$HCC_NS" "${args[@]}" >/dev/null 2>&1 || \
-    warn "failed to restore HCC env (manual check advised)"
-  kctl rollout status "deployment/${HCC_DEPLOY}" -n "$HCC_NS" --timeout=180s >/dev/null 2>&1 || \
+  if ! kctl set env "deployment/${HCC_DEPLOY}" -n "$HCC_NS" "${args[@]}" >/dev/null 2>&1; then
+    warn "failed to restore HCC env (manual check required)"
+    return 1
+  fi
+  if ! kctl rollout status "deployment/${HCC_DEPLOY}" -n "$HCC_NS" --timeout=180s >/dev/null 2>&1; then
     warn "HCC rollout did not settle after env restore"
+    return 1
+  fi
+  while IFS='=' read -r key val; do
+    [ -n "$key" ] || continue
+    actual="$(kctl get "deployment/${HCC_DEPLOY}" -n "$HCC_NS" \
+      -o jsonpath="{.spec.template.spec.containers[0].env[?(@.name=='${key}')].value}" 2>/dev/null || true)"
+    if [ "$actual" != "$val" ]; then
+      warn "HCC restore readback mismatch for ${key}: expected '${val}', got '${actual}'"
+      return 1
+    fi
+  done <<< "$HCC_ENV_SAVED"
+  HCC_ENV_SAVED=""
 }
 
 cleanup_on_exit() {
   local status=$?
   set +e
   rm -f "$CYCLES_FILE" >/dev/null 2>&1
-  restore_hcc_env
+  restore_hcc_env || status=1
   exit "$status"
 }
 trap cleanup_on_exit EXIT
@@ -234,7 +273,7 @@ wait_for_ready_pod() {
 # --- Row observable (exactly-once marker): mirrors the durability exemplar
 DB_PATH=""
 ROW_TOOL=""
-NODE_COUNT_SNIPPET='const D=require("/app/node_modules/better-sqlite3");const db=new D(process.env.DB,{readonly:true});db.pragma("busy_timeout=5000");const row=db.prepare(process.env.SQL).get();console.log(row?Object.values(row)[0]:0);'
+NODE_COUNT_SNIPPET='const D=require("better-sqlite3");const db=new D(process.env.DB,{readonly:true});db.pragma("busy_timeout=5000");const row=db.prepare(process.env.SQL).get();console.log(row?Object.values(row)[0]:0);'
 
 resolve_row_tool() {
   local pod dbdir
@@ -244,7 +283,7 @@ resolve_row_tool() {
   DB_PATH="${dbdir%/}/state.db"
   if kctl exec "$pod" -n "$MCP_HOST_NS" -- sh -c 'command -v sqlite3' >/dev/null 2>&1; then
     ROW_TOOL="sqlite3-cli"
-  elif kctl exec "$pod" -n "$MCP_HOST_NS" -- sh -c 'test -d /app/node_modules/better-sqlite3' >/dev/null 2>&1; then
+  elif kctl exec "$pod" -n "$MCP_HOST_NS" -- node -e 'require("better-sqlite3")' >/dev/null 2>&1; then
     ROW_TOOL="node-better-sqlite3"
   else
     echo "no row-count reader in pod (${pod}): neither sqlite3 CLI nor better-sqlite3" >&2; return 1
@@ -319,9 +358,13 @@ send_turn_raw() {
 # hard failure at the caller — an unreachable assertion never passes.
 RECOVERY_MS=""
 TURN_T0_RFC3339=""
+ADMISSION_FIRST_STATUS=""
+ADMISSION_ATTEMPTS=""
 measure_recovery_turn() {
   local content=$1 t0 t1 deadline attempt=0
   RECOVERY_MS=""
+  ADMISSION_FIRST_STATUS=""
+  ADMISSION_ATTEMPTS=""
   mint_rpc_token || { echo "could not mint RPC token before t0" >&2; return 1; }
   TURN_T0_RFC3339="$(now_rfc3339)"
   t0="$(now_ms)"
@@ -329,9 +372,11 @@ measure_recovery_turn() {
   while [ "$SECONDS" -lt "$deadline" ]; do
     attempt=$((attempt + 1))
     send_turn_raw "$content" || return 1
+    if [ "$attempt" -eq 1 ]; then ADMISSION_FIRST_STATUS="$TURN_STATUS"; fi
     if [ "$TURN_STATUS" = "200" ]; then
       t1="$(now_ms)"
       RECOVERY_MS=$((t1 - t0))
+      ADMISSION_ATTEMPTS="$attempt"
       return 0
     fi
     if [ "$TURN_STATUS" = "503" ] && echo "$TURN_BODY" | grep -qE 'host_waking|host_draining'; then
@@ -490,6 +535,10 @@ force_idle_and_suspend() {
 }
 
 save_and_set_hcc_cadences() {
+  if [ "${E2E_ALLOW_STATELESS_CADENCE_ACCELERATION:-0}" != 1 ]; then
+    fail "refusing to accelerate stateless lifecycle cadences; set E2E_ALLOW_STATELESS_CADENCE_ACCELERATION=1 on an owned profile"
+    return 1
+  fi
   header "PRECONDITION (labeled setup) -- HCC test cadences (idle=1min, drain=${TEST_DRAIN_GRACE_MS}ms, poll=${TEST_POLL_MS}ms)"
   local keys=(CONTEXT_MAPPER_STATELESS_IDLE_MINUTES CONTEXT_MAPPER_STATELESS_IDLE_FLOOR_MINUTES \
     CONTEXT_MAPPER_STATELESS_DRAIN_GRACE_MS CONTEXT_MAPPER_HEARTBEAT_POLL_MS)
@@ -535,11 +584,11 @@ drain_window_signal() {
 }
 
 record_cycle() {
-  local scenario=$1 cycle=$2 ms=$3 resolution=$4 wake_lines=$5 timing_json=${6:-null} prewarm_ms=${7:-null}
+  local scenario=$1 cycle=$2 ms=$3 resolution=$4 wake_lines=$5 timing_json=${6:-null} prewarm_ms=${7:-null} baseline_json=${8:-null} prewarm_first_ms=${9:-null}
   jq -cn --arg s "$scenario" --argjson c "$cycle" --argjson ms "$ms" \
     --arg r "$resolution" --arg wl "$wake_lines" --argjson tt "$timing_json" \
-    --argjson pw "$prewarm_ms" \
-    '{scenario:$s, cycle:$c, ms:$ms, resolution:$r, wake_phases:($wl | split("\n") | map(select(length>0))), turn_timing:$tt, prewarm_to_ready_ms:$pw}' \
+    --argjson pw "$prewarm_ms" --argjson ab "$baseline_json" --argjson pf "$prewarm_first_ms" \
+    '{scenario:$s, cycle:$c, ms:$ms, resolution:$r, wake_phases:($wl | split("\n") | map(select(length>0))), turn_timing:$tt, prewarm_to_ready_ms:$pw, prewarm_first_post_to_ready_ms:$pf, admission_baseline:$ab}' \
     >> "$CYCLES_FILE"
 }
 
@@ -851,6 +900,16 @@ while [ "$cycle" -le "$RECOVERY_CYCLES" ]; do
     fail "R2 cycle ${cycle}: turn to suspended host did not reach a definitive 200"
     pod_diagnostics; print_results; exit 1
   fi
+  # Characterization baseline for a later, separately approved proxy
+  # admission change: first POST HTTP status, POST count through the first
+  # 200, and the first-200 send->200 latency. first_200_ms is deliberately
+  # the same first-200 measurement as RECOVERY_MS (LLM-empty re-sends never
+  # touch it); it is repeated here so the baseline record is self-contained.
+  r2_baseline_json="$(jq -cn \
+    --arg first_status "$ADMISSION_FIRST_STATUS" \
+    --argjson attempts "$ADMISSION_ATTEMPTS" \
+    --argjson first_200_ms "$RECOVERY_MS" \
+    '{first_post_status:$first_status, admission_attempts:$attempts, first_200_ms:$first_200_ms}')"
   assert_success_response "R2 cycle ${cycle} turn" "Reply with exactly: ${r2_marker}" || { print_results; exit 1; }
   if wait_for_state "active" "$ACTIVE_WAIT"; then
     ok "R2 cycle ${cycle}: state=active after wake"
@@ -866,6 +925,24 @@ while [ "$cycle" -le "$RECOVERY_CYCLES" ]; do
   else
     fail "R2 cycle ${cycle}: expected a NEW pod after suspend, got uid '${r2_uid_after:-<empty>}' (before ${r2_uid_before})"
     pod_diagnostics; print_results; exit 1
+  fi
+  # Kubernetes-clock timeline for the NEW pod: creation, scheduling,
+  # initialization, container start, and Ready publication. Deltas are
+  # computed server-side only below; send-aligned cross-clock subtraction is
+  # deliberately avoided because client and apiserver clocks are not proven
+  # synchronized.
+  r2_pod_timeline="$(kctl get pod "$r2_pod_after" -n "$MCP_HOST_NS" -o json | jq -c '{
+    pod_uid: .metadata.uid,
+    created_at: .metadata.creationTimestamp,
+    scheduled_at: (.status.conditions[]? | select(.type == "PodScheduled") | .lastTransitionTime),
+    initialized_at: (.status.conditions[]? | select(.type == "Initialized") | .lastTransitionTime),
+    ready_at: (.status.conditions[]? | select(.type == "Ready") | .lastTransitionTime),
+    container_started_at: (.status.containerStatuses[]? | select(.name == "mcp-host") | .state.running.startedAt)
+  }' 2>/dev/null || true)"
+  if [ -n "$r2_pod_timeline" ]; then
+    r2_baseline_json="$(jq -cn --argjson b "$r2_baseline_json" --argjson t "$r2_pod_timeline" '$b + {pod_timeline:$t}')"
+  else
+    r2_baseline_json="$(jq -cn --argjson b "$r2_baseline_json" '$b + {pod_timeline_unavailable_reason:"pod timeline read failed"}')"
   fi
   # ATTRIBUTION -- the NEW pod served the resume; its log stream carries the
   # [TurnTiming] line for the measured turn.
@@ -888,7 +965,7 @@ while [ "$cycle" -le "$RECOVERY_CYCLES" ]; do
     fail "R2 cycle ${cycle}: no [StatelessWake] phase=wake_observed line since ${r2_since} -- the wake path is unproven for this cycle"
     pod_diagnostics; print_results; exit 1
   fi
-  record_cycle "R2_cold_resume_from_suspended" "$cycle" "$RECOVERY_MS" "cold" "$r2_wake_lines" "$r2_attr"
+  record_cycle "R2_cold_resume_from_suspended" "$cycle" "$RECOVERY_MS" "cold" "$r2_wake_lines" "$r2_attr" null "$r2_baseline_json"
   cycle=$((cycle + 1))
 done
 
@@ -1000,11 +1077,23 @@ while [ "$cycle" -le "$RECOVERY_CYCLES" ]; do
   # so the suite's check count stays deterministic.
   r4_prewarm_attempt=1
   r4_prewarm_acked=""
+  r4_first_ready_file="$(mktemp "${TMPDIR:-/tmp}/r4-first-ready.XXXXXX")"
+  r4_prewarm_observer_started=""
   while :; do
     post_prewarm || { fail "R4 cycle ${cycle}: prewarm POST failed at ${RPC_BASE} (transport-level)"; pod_diagnostics; print_results; exit 1; }
     case "$PREWARM_STATUS" in
       202)
         if [ "$r4_prewarm_attempt" -eq 1 ]; then
+          # Observe readiness from the FIRST accepted wake POST, concurrently
+          # with the bounded re-emission loop below. The legacy
+          # prewarm_to_ready_ms remains comparable but is censored by any
+          # mandatory 10s re-emission wait; this observer is not.
+          (
+            r4_observed_pod="$(wait_for_ready_pod "$POD_READY_TIMEOUT")" && \
+              printf '%s\t%s\n' "$(now_ms)" "$r4_observed_pod" > "$r4_first_ready_file"
+          ) &
+          r4_prewarm_observer=$!
+          r4_prewarm_observer_started=1
           ok "R4 cycle ${cycle}: prewarm accepted (HTTP 202 wake-requested)"
         else
           log "R4 cycle ${cycle}: prewarm re-emission ${r4_prewarm_attempt}/3 still 202 -- HCC has not acted (possible lost watch event); annotation re-projected"
@@ -1031,13 +1120,30 @@ while [ "$cycle" -le "$RECOVERY_CYCLES" ]; do
     sleep 10
     r4_prewarm_attempt=$((r4_prewarm_attempt + 1))
   done
+  if [ -n "$r4_prewarm_observer_started" ]; then
+    wait "$r4_prewarm_observer" || {
+      fail "R4 cycle ${cycle}: concurrent prewarm observer did not produce a Ready pod within ${POD_READY_TIMEOUT}s"; pod_diagnostics; print_results; exit 1; }
+    IFS=$'\t' read -r r4_first_ready_at r4_pod_warm < "$r4_first_ready_file"
+  else
+    # First attempt already returned active (wake race): no uncensored cold
+    # start exists in this cycle, so record it as unavailable rather than
+    # inventing one.
+    r4_pod_warm=$(wait_for_ready_pod "$POD_READY_TIMEOUT") || {
+      fail "R4 cycle ${cycle}: prewarm did not produce a Ready pod within ${POD_READY_TIMEOUT}s"; pod_diagnostics; print_results; exit 1; }
+    r4_first_ready_at=""
+  fi
+  rm -f "$r4_first_ready_file"
   # READINESS (OVERLAP time -- models the user reading history / typing
   # after opening the agent view; NOT the user-perceived wait): the cold
-  # infra start runs while no message is pending. Recorded per cycle as
-  # prewarm_to_ready_ms -- informational, no budget.
-  r4_pod_warm=$(wait_for_ready_pod "$POD_READY_TIMEOUT") || {
-    fail "R4 cycle ${cycle}: prewarm did not produce a Ready pod within ${POD_READY_TIMEOUT}s"; pod_diagnostics; print_results; exit 1; }
+  # infra start runs while no message is pending. prewarm_to_ready_ms is the
+  # legacy censored series; prewarm_first_post_to_ready_ms is the uncensored
+  # first-POST-to-Ready measurement. Both are informational, no budget.
   r4_prewarm_ms=$(( $(now_ms) - r4_prewarm_t0 ))
+  if [ -n "$r4_first_ready_at" ]; then
+    r4_prewarm_first_ms=$(( r4_first_ready_at - r4_prewarm_t0 ))
+  else
+    r4_prewarm_first_ms=""
+  fi
   ok "R4 cycle ${cycle}: prewarmed pod Ready in ${r4_prewarm_ms}ms (overlap time hidden from the user -- informational, no budget)"
   r4_uid_warm="$(pod_uid "$r4_pod_warm")"
   [ -n "$r4_uid_warm" ] || { fail "R4 cycle ${cycle}: could not read podUid for prewarmed pod ${r4_pod_warm}"; print_results; exit 1; }
@@ -1092,7 +1198,7 @@ while [ "$cycle" -le "$RECOVERY_CYCLES" ]; do
     fail "R4 cycle ${cycle}: infra overhead ${r4_infra_ms}ms > R4_WARM_INFRA_BUDGET_MS=${R4_WARM_INFRA_BUDGET_MS}ms -- an in-band cold start leaked into the measured turn"
     pod_diagnostics; print_results; exit 1
   fi
-  record_cycle "R4_prewarm_first_message" "$cycle" "$RECOVERY_MS" "warm" "" "$TURN_ATTRIBUTION_JSON" "$r4_prewarm_ms"
+  record_cycle "R4_prewarm_first_message" "$cycle" "$RECOVERY_MS" "warm" "" "$TURN_ATTRIBUTION_JSON" "$r4_prewarm_ms" null "${r4_prewarm_first_ms:-null}"
   cycle=$((cycle + 1))
 done
 
@@ -1181,12 +1287,106 @@ for name, budget in budgets.items():
             continue
         attribution.append({"cycle": r["cycle"], **tt})
     breakdown = []
+    baseline = []
     for r in recs:
         parsed = []
         for line in r.get("wake_phases", []):
             m = wake_re.search(line)
             if m:
                 parsed.append({"generation": m.group(1), "phase": m.group(2), "ts_ms": int(m.group(3))})
+        if name == "R2_cold_resume_from_suspended":
+            raw = r.get("admission_baseline") or {}
+            for key in ("first_post_status", "admission_attempts", "first_200_ms"):
+                if key not in raw:
+                    print(
+                        f"scenario {name} cycle {r['cycle']}: admission baseline field '{key}' is missing -- refusing to emit partial baseline data",
+                        file=sys.stderr,
+                    )
+                    raise SystemExit(1)
+            # Pair the two HCC phases by wake generation. A missing phase or
+            # multiple candidate generations stays null with a reason: the
+            # baseline must characterize the observed signal, never invent it.
+            generations = {}
+            for phase in parsed:
+                generations.setdefault(phase["generation"], {})[phase["phase"]] = phase["ts_ms"]
+            paired = [
+                phases["replicas_patched"] - phases["status_flipped"]
+                for phases in generations.values()
+                if "status_flipped" in phases and "replicas_patched" in phases
+            ]
+            baseline_entry = {
+                "cycle": r["cycle"],
+                "first_post_status": raw["first_post_status"],
+                "admission_attempts": raw["admission_attempts"],
+                "first_200_ms": raw["first_200_ms"],
+                "status_flipped_to_replicas_patched_ms": None,
+            }
+            timeline = raw.get("pod_timeline") or {}
+            if timeline:
+                baseline_entry["pod_timeline"] = timeline
+
+                def _rfc3339_ms(value):
+                    from datetime import datetime
+
+                    return int(
+                        datetime.fromisoformat(
+                            value.replace("Z", "+00:00")
+                        ).timestamp()
+                        * 1000
+                    )
+
+                marks = {
+                    key: _rfc3339_ms(timeline[key])
+                    for key in (
+                        "created_at",
+                        "scheduled_at",
+                        "initialized_at",
+                        "container_started_at",
+                        "ready_at",
+                    )
+                    if timeline.get(key)
+                }
+                ordered = [
+                    ("created_to_scheduled_ms", "created_at", "scheduled_at"),
+                    ("scheduled_to_initialized_ms", "scheduled_at", "initialized_at"),
+                    (
+                        "initialized_to_container_started_ms",
+                        "initialized_at",
+                        "container_started_at",
+                    ),
+                    ("container_started_to_ready_ms", "container_started_at", "ready_at"),
+                ]
+                deltas = {}
+                for label, start_key, end_key in ordered:
+                    if start_key in marks and end_key in marks:
+                        deltas[label] = marks[end_key] - marks[start_key]
+                if deltas:
+                    baseline_entry["pod_timeline_deltas_ms"] = deltas
+                else:
+                    baseline_entry["pod_timeline_deltas_unavailable_reason"] = (
+                        "pod timeline lacked a complete server-side phase pair"
+                    )
+            else:
+                baseline_entry["pod_timeline_deltas_unavailable_reason"] = raw.get(
+                    "pod_timeline_unavailable_reason",
+                    "pod timeline was not captured",
+                )
+            if len(paired) == 1:
+                if paired[0] >= 0:
+                    baseline_entry["status_flipped_to_replicas_patched_ms"] = paired[0]
+                else:
+                    baseline_entry["status_flipped_to_replicas_patched_unavailable_reason"] = (
+                        f"negative timestamp delta ({paired[0]}ms) in [StatelessWake] lines"
+                    )
+            elif len(paired) == 0:
+                baseline_entry["status_flipped_to_replicas_patched_unavailable_reason"] = (
+                    "no [StatelessWake] generation in this cycle has both phase=status_flipped and phase=replicas_patched"
+                )
+            else:
+                baseline_entry["status_flipped_to_replicas_patched_unavailable_reason"] = (
+                    f"{len(paired)} [StatelessWake] generations have both phases -- attribution is ambiguous"
+                )
+            baseline.append(baseline_entry)
         if parsed:
             breakdown.append({"cycle": r["cycle"], "wake_phases": parsed})
     # R4 overlap series (prewarm POST -> pod Ready). Informational, no
@@ -1197,6 +1397,17 @@ for name, budget in budgets.items():
     if name == "R4_prewarm_first_message" and len(prewarm) != expected:
         print(
             f"scenario {name}: expected {expected} prewarm_to_ready_ms values, got {len(prewarm)} -- refusing to emit a partial prewarm overlap series",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    prewarm_first = [
+        r["prewarm_first_post_to_ready_ms"]
+        for r in recs
+        if r.get("prewarm_first_post_to_ready_ms") is not None
+    ]
+    if name == "R4_prewarm_first_message" and len(prewarm_first) != expected:
+        print(
+            f"scenario {name}: expected {expected} uncensored prewarm_first_post_to_ready_ms values, got {len(prewarm_first)} -- refusing to emit a partial series",
             file=sys.stderr,
         )
         raise SystemExit(1)
@@ -1235,6 +1446,12 @@ for name, budget in budgets.items():
         entry["turn_attribution"] = attribution
     if prewarm:
         entry["prewarm_to_ready_ms"] = prewarm
+    if prewarm_first:
+        entry["prewarm_first_post_to_ready_ms"] = prewarm_first
+    if baseline:
+        # Informational characterization only: no budget and no effect on
+        # the existing R2 recovery verdict.
+        entry["cold_resume_baseline"] = baseline
     scenarios[name] = entry
 
 artifact = {

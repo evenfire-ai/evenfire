@@ -12,6 +12,7 @@ type Config = {
   controlApiServiceName: string
   controlApiCacheTtlMs: number
   artifactDownloadMaxBytes: number
+  artifactDownloadTimeoutMs: number
   streamMaxLifetimeMs: number
   streamIntervalMs: number
   streamKeepaliveMs: number
@@ -28,7 +29,8 @@ type Config = {
   /**
    * Stateless wake-and-hold (Stage 5): a request hitting a down/draining
    * stateless host is parked while control-api wakes the pod, bounded by
-   * `wakeMaxHoldMs`. Readiness is re-checked every `wakePollMs` and the wake
+   * `wakeMaxHoldMs` (values above MAX_REQUEST_HOLD_MS are clamped at load).
+   * Readiness is re-checked every `wakePollMs` and the wake
    * is re-triggered every `wakeRetriggerMs` (covers a dropped HCC watch
    * event). See src/services/wakeAndHold.ts.
    */
@@ -135,13 +137,41 @@ export function parseArtifactDownloadMaxBytes(rawMb: string): number {
   return bytes
 }
 
+/** Largest delay setTimeout/AbortSignal.timeout accept; above it they fire immediately. */
+export const MAX_TIMER_DELAY_MS = 2_147_483_647
+
 export function parsePositiveIntMs(name: string, raw: string): number {
   const trimmed = raw.trim()
   const n = Number(trimmed)
   if (!Number.isInteger(n) || n < 1) {
     throw new Error(`${name} contains invalid value "${trimmed}" (must be a positive integer)`)
   }
+  if (n > MAX_TIMER_DELAY_MS) {
+    throw new Error(
+      `${name} contains invalid value "${trimmed}" (must be at most ${MAX_TIMER_DELAY_MS} ms)`
+    )
+  }
   return n
+}
+
+/**
+ * Upper bound of one held request: it leaves room for a final upstream attempt
+ * before Desktop's own 60s deadline. The hold budget is capped here, at config
+ * load, so the configured value is the effective one.
+ */
+export const MAX_REQUEST_HOLD_MS = 48_000
+
+/**
+ * An operator-set value above the cap is clamped and warned about at boot.
+ * The built-in default equals the cap, so it never reaches the warning.
+ */
+export function parseWakeMaxHoldMs(raw: string): number {
+  const configuredMs = parsePositiveIntMs('RPC_PROXY_WAKE_MAX_HOLD_MS', raw)
+  if (configuredMs <= MAX_REQUEST_HOLD_MS) return configuredMs
+  console.warn(
+    `[RPC_PROXY] RPC_PROXY_WAKE_MAX_HOLD_MS=${configuredMs} exceeds the request hold cap; clamped to ${MAX_REQUEST_HOLD_MS}`
+  )
+  return MAX_REQUEST_HOLD_MS
 }
 
 const DEV_RPC_JWT_PUBLIC_KEY = normalizePem(`-----BEGIN PUBLIC KEY-----
@@ -164,7 +194,10 @@ export const config: Config = {
   ),
   jwtIssuer: requiredOrDevDefault('RPC_PROXY_JWT_ISSUER', 'control-api'),
   jwtAudience: requiredOrDevDefault('RPC_PROXY_JWT_AUDIENCE', 'rpc-proxy'),
-  upstreamTimeoutMs: Number(process.env.RPC_PROXY_UPSTREAM_TIMEOUT_MS || 8000),
+  upstreamTimeoutMs: parsePositiveIntMs(
+    'RPC_PROXY_UPSTREAM_TIMEOUT_MS',
+    process.env.RPC_PROXY_UPSTREAM_TIMEOUT_MS || '8000'
+  ),
   maxTokenLength: Number(process.env.RPC_PROXY_MAX_TOKEN_LENGTH || 4096),
   allowedMethodPattern: new RegExp(
     process.env.RPC_PROXY_ALLOWED_METHOD_PATTERN || '^[a-zA-Z0-9_./:-]{1,120}$'
@@ -182,6 +215,10 @@ export const config: Config = {
   controlApiCacheTtlMs: Number(process.env.RPC_PROXY_CONTROL_API_CACHE_TTL_MS || 30000),
   artifactDownloadMaxBytes: parseArtifactDownloadMaxBytes(
     process.env.RPC_PROXY_ARTIFACT_DOWNLOAD_MAX_MB || '50'
+  ),
+  artifactDownloadTimeoutMs: parsePositiveIntMs(
+    'RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS',
+    process.env.RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS || '60000'
   ),
   streamMaxLifetimeMs: Number(process.env.RPC_PROXY_STREAM_MAX_LIFETIME_MS || 600000),
   streamIntervalMs: Number(process.env.RPC_PROXY_STREAM_INTERVAL_MS || 3000),
@@ -202,10 +239,7 @@ export const config: Config = {
   activityStreamMaxPerUserHost: Number(
     process.env.RPC_PROXY_ACTIVITY_STREAM_MAX_PER_USER_HOST || 1
   ),
-  wakeMaxHoldMs: parsePositiveIntMs(
-    'RPC_PROXY_WAKE_MAX_HOLD_MS',
-    process.env.RPC_PROXY_WAKE_MAX_HOLD_MS || '90000'
-  ),
+  wakeMaxHoldMs: parseWakeMaxHoldMs(process.env.RPC_PROXY_WAKE_MAX_HOLD_MS || '48000'),
   wakePollMs: parsePositiveIntMs(
     'RPC_PROXY_WAKE_POLL_MS',
     process.env.RPC_PROXY_WAKE_POLL_MS || '2000'

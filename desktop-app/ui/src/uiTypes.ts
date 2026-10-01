@@ -295,6 +295,9 @@ export type ComposerGlobalFileReference = {
   drive: string
   gfsUri: string
   label: string
+  /** Version and size the picker listed; they become the structured FileReference (#666). */
+  version: number
+  bytes: number
 }
 
 export type ComposerReferenceAttachment =
