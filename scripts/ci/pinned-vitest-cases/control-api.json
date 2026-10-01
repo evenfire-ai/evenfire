@@ -1,0 +1,10 @@
+[
+  {
+    "suite": "helpers.realPostgresTeardown.test.ts",
+    "fullName": "endPoolAndWaitForClients ends a real pg Pool whose in-flight connect is refused"
+  },
+  {
+    "suite": "routes.mcp-host.llmProviderAttempts.test.ts",
+    "fullName": "authorize raw-body scan before JSON.parse preserves the module logger binding and request correlation on body refusals"
+  }
+]

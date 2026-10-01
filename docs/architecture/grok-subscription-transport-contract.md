@@ -77,10 +77,24 @@ plus 7 MiB of text, or two 10 MiB images plus 4.5 MiB of text. It gets the
 whole-body refusal, and the Host reports every whole-body refusal as an image
 refusal (`attachment_too_large`, below), so the user is told to send fewer or
 smaller images although shorter text would also fit. The Host refuses it
-before authorize, so no attempt is spent. Codex behaves the same way. For the
-same reason a V2 request accepted close to 35 MiB can leave less room than the
-authorize wrapper and the signed ticket need; the Host's authorize-body check
-refuses it, also before any attempt.
+before authorize, so no attempt is spent.
+
+Grok measures the non-image share before the whole request. A real 1 KiB PNG
+with 12.5 MiB of repeated text therefore reaches the whole-body band in Codex
+but not here: Grok refuses it as `request exceeds maxRequestBodyBytes outside
+image data`, which the Host maps to `request_limit_exceeded` and
+`ContextLengthExceeded`; Codex refuses the complete body first with
+`request exceeds maxVisualRequestBodyBytes`, which the Host maps to
+`attachment_too_large` and `InvalidAttachment`.
+
+| Grok/V2 check | Result | Host classification | Attempt effect |
+|---|---|---|---|
+| Local non-image share is over 8 MiB | Contract `limit`/`size`, `outside image data` | `request_limit_exceeded`, `ContextLengthExceeded` | No HTTP request, no authorize call, and no attempt |
+| Local non-image share passes, whole request is over 35 MiB | Contract `maxVisualRequestBodyBytes` | `attachment_too_large`, `InvalidAttachment` | No authorize call and no attempt |
+| Host authorize wrapper is over 35 MiB | Local `payload_too_large` | `ContextLengthExceeded` | The fetch is never emitted |
+| control-api raw or service-wrapper size is over 35 MiB | HTTP 413 `payload_too_large` | `ContextLengthExceeded` | Refused before the transaction |
+| Request plus wrapper fits, but exact proxy envelope with ticket and hash is over 35 MiB | HTTP 413 `payload_too_large` from `buildGrokProxyEnvelope` inside the transaction | `ContextLengthExceeded` | Signing happens first, then the new attempt, ticket, and new reservation roll back; none of those new records is persisted, while an existing Host-provided reservation remains |
+| Host post-authorize proxy-envelope defense refuses | Local `payload_too_large`, `dispatched: false` | `ContextLengthExceeded` | This is after authorize, so it must not be described as zero recorded attempts; the same-contract control-api check normally refuses first |
 
 The value is a runtime limit, not a published fixture limit: the
 `grok-llm-proxy/test/contractFreeze.test.ts` fixture describes the measured
@@ -892,9 +906,10 @@ that code. The retry is a new provider attempt with a new authorize, so a
 redeemed ticket is never reused.
 
 The client logs `grok_proxy_control_api_unreachable` with `path` only. The
-`grok_proxy_attempt_finished` line carries `causeCode` whenever the failure
-is a rejected `fetch`: the undici cause code, such as `ECONNREFUSED`, and
-nothing else from the error. When both finalize tries fail, the `err` of
+`grok_proxy_attempt_finished` line carries `causeCode` when a rejected undici
+`fetch` (for example `ECONNREFUSED`) or a failed `dns.lookup` wrapped by origin
+policy (for example `ENOTFOUND` or `EAI_AGAIN`) carries a code-shaped cause,
+and nothing else from the error. When both finalize tries fail, the `err` of
 `grok_proxy_finalize_failed` carries it instead; the hop line never does.
 
 ## Feature flags

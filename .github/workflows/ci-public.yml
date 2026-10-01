@@ -75,6 +75,21 @@ jobs:
           - packages/codex-catalog-projection
           - codex-llm-proxy
           - grok-llm-proxy
+        include:
+          - service: gfs-controller
+            pinned_suites: serve.agentRateLimit.test.ts
+          - service: mcp-host
+            pinned_suites: gfsClient.retry429.test.ts logPayloadKeys.test.ts taskExecutor.test.ts
+          - service: control-api
+            pinned_suites:
+              helpers.realPostgresTeardown.test.ts routes.mcp-host.llmProviderAttempts.test.ts
+            pinned_cases: ../scripts/ci/pinned-vitest-cases/control-api.json
+          - service: codex-llm-proxy
+            pinned_suites: originPolicy.test.ts server.security.test.ts
+            pinned_cases: ../scripts/ci/pinned-vitest-cases/codex-llm-proxy.json
+          - service: grok-llm-proxy
+            pinned_suites: originPolicy.test.ts server.security.test.ts
+            pinned_cases: ../scripts/ci/pinned-vitest-cases/grok-llm-proxy.json
 
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -131,13 +146,15 @@ jobs:
         if: matrix.service == 'gfs-controller'
         run: node scripts/tests/run-node-test-files.mjs scripts/ci/assert-pinned-vitest-suites.test.mjs
 
-      # PINNED_SUITES lists test files that must run and pass. The check reads
-      # Vitest's JSON report, not the console output: a file whose tests are all
-      # skipped is still printed by name, so a grep would accept it.
+      # PINNED_SUITES lists test files that must run and pass. PINNED_CASES
+      # optionally lists exact fullName witnesses that must survive merges. Both
+      # checks read Vitest's JSON report, not console output: a file whose tests
+      # are all skipped is still printed by name, so a grep would accept it.
       - name: Test
         working-directory: ${{ matrix.service }}
         env:
-          PINNED_SUITES: ${{ matrix.service == 'gfs-controller' && 'serve.agentRateLimit.test.ts' || matrix.service == 'mcp-host' && 'gfsClient.retry429.test.ts logPayloadKeys.test.ts taskExecutor.test.ts' || '' }}
+          PINNED_SUITES: ${{ matrix.pinned_suites || '' }}
+          PINNED_CASES: ${{ matrix.pinned_cases || '' }}
         run: |
           set -euo pipefail
           if [ -z "$PINNED_SUITES" ]; then
@@ -149,6 +166,9 @@ jobs:
           npm test -- --reporter=default --reporter=json --outputFile="$report"
           # PINNED_SUITES is unquoted on purpose: one argument per file name.
           node ../scripts/ci/assert-pinned-vitest-suites.mjs "$report" $PINNED_SUITES
+          if [ -n "$PINNED_CASES" ]; then
+            node ../scripts/ci/assert-pinned-vitest-suites.mjs --cases "$report" "$PINNED_CASES"
+          fi
 
       - name: Test web-search image with isolated DNS TLS and MCP
         if: matrix.service == 'mcp-servers/web-search'

@@ -27,7 +27,8 @@ import {
 } from '../../services/subscriptionGrantIdentity.js'
 import { llmProviderAttemptAuthorizeRateLimits } from '../workflows/shared/rateLimit.js'
 
-const log = rootLogger.child({ module: 'mcp-host-llm-provider-attempts' })
+const LOG_MODULE = 'mcp-host-llm-provider-attempts'
+const log = rootLogger.child({ module: LOG_MODULE })
 
 // JSON.parse allocates one heap object per container, so a body under
 // the byte limit can exhaust the heap before either authorizer runs. The
@@ -188,7 +189,7 @@ export function createMcpHostLlmProviderAttemptRoutes(gateway: K8sGateway): Rout
   // that logger lacks this route's module binding, so it is added back.
   router.use((err: unknown, req: Request, res: Response, next: NextFunction) => {
     const typed = err as { type?: string; status?: number }
-    const requestLog = req.log?.child({ module: 'mcp-host-llm-provider-attempts' }) ?? log
+    const requestLog = req.log?.child({ module: LOG_MODULE }) ?? log
     const refuse = (status: number, error: string): void => {
       requestLog.warn({ event: 'llm_provider_attempt_body_refused', type: typed.type, status })
       res.status(status).json({ error })

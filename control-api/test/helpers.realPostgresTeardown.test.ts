@@ -98,7 +98,6 @@ describe('endPoolAndWaitForClients', () => {
       'endPoolAndWaitForClients: pg-pool no longer exposes _clients'
     )
     expect(pool.end).not.toHaveBeenCalled()
-    // Witness that the helper ran: the refusal above names the missing list.
   })
 
   it('resolves after end() when the pool holds no client', async () => {
@@ -140,9 +139,13 @@ describe('endPoolAndWaitForClients', () => {
       (err: NodeJS.ErrnoException) => err.code
     )
     expect(pool.totalCount).toBe(1)
+    const [client] = (pool as unknown as { _clients: Array<{ _ended: boolean }> })._clients
+    expect(client).toBeDefined()
+    expect(client._ended).toBe(false)
 
     await endPoolAndWaitForClients(pool)
 
+    expect(client._ended).toBe(true)
     expect(pool.ended).toBe(true)
     expect(await queryOutcome).toBe('ECONNREFUSED')
   })

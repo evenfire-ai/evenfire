@@ -83,11 +83,11 @@ export class GrokTransportError extends Error {
 }
 
 /**
- * Review R3-L1: a fetch that failed on the network is undici's TypeError, whose
- * cause message names the upstream address. It becomes a mapped transport error
- * that keeps only the cause code, so the attempt line logs `causeCode` and never
- * the error itself. An error with no code-shaped cause is returned undefined and
- * stays unmapped, which logs it as a handler defect.
+ * Review R3-L1/R4-L1: a rejected undici fetch and a failed dns.lookup wrapped
+ * by origin policy both carry a code-shaped cause. It becomes a mapped
+ * transport error that keeps only the cause code, so the attempt line logs
+ * `causeCode` and never the error itself. An error with no code-shaped cause
+ * is returned undefined and stays unmapped, which logs it as a handler defect.
  */
 function upstreamFetchFailure(err: unknown): GrokTransportError | undefined {
   const code = fetchCauseCode(err)

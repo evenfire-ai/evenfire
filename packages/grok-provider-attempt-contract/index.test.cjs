@@ -1084,9 +1084,10 @@ test('a V2 body over the visual ceiling because of repeated text gets the whole-
   assert.equal(within.ok, true, within.message)
 })
 
-// The non-image check runs before the whole-body check, so text past the
-// visual ceiling is reported as text, not as an attachment over budget. The
-// whole-body message stays reachable only through image data.
+// Grok checks the non-image share before the whole body. Text past the
+// non-image ceiling beside a small image is reported as text; repeated text
+// that stays within that shadow can still reach the whole-body message, as the
+// preceding test pins.
 test('text past the visual ceiling beside one small image is refused outside image data', () => {
   const text = 'x'.repeat(contract.LIMITS.maxVisualRequestBodyBytes)
   const request = v2WithParts([imagePart(IMAGE_DATA.png), { type: 'text', text }], text)
@@ -1101,6 +1102,69 @@ test('text past the visual ceiling beside one small image is refused outside ima
     contract.parseGrokCompletionRequest(v2WithParts([imagePart('A'.repeat(contract.LIMITS.maxVisualRequestBodyBytes))])),
     { ok: false, code: 'limit', kind: 'size', message: 'request exceeds maxVisualRequestBodyBytes' }
   )
+})
+
+test('Grok reports sub-cap repeated text before the whole body while Codex reports the whole body', () => {
+  const png = realPngOfSize(1024, 16, 16, 3).toString('base64')
+  const text = 'x'.repeat(Math.floor(12.5 * MIB))
+  const request = v2WithParts([{ type: 'text', text }, imagePart(png)], text)
+
+  assert.deepEqual(contract.parseGrokCompletionRequest(request), {
+    ok: false,
+    code: 'limit',
+    kind: 'size',
+    message: 'request exceeds maxRequestBodyBytes outside image data',
+  })
+  assert.deepEqual(codexContract.parseCodexCompletionRequest(asCodex(request)), {
+    ok: false,
+    code: 'limit',
+    kind: 'size',
+    message: 'request exceeds maxVisualRequestBodyBytes',
+  })
+})
+
+test('the authorize wrapper can fit when the exact proxy envelope does not', () => {
+  const limit = contract.LIMITS.maxVisualRequestBodyBytes
+  const image = imagePart(declaredHeaderPngOfSize(16 * MIB).toString('base64'))
+  const requestFor = text => v2WithParts([{ type: 'text', text }, image], text)
+  const jsonBytes = value => Buffer.byteLength(JSON.stringify(value), 'utf8')
+  const authorizeWrapperFor = (request, requestHash = 'b'.repeat(64)) => ({
+    request,
+    invocationId: 'invocation-806-geometry',
+    attemptGeneration: 1,
+    providerAttemptIndex: 1,
+    policyRevision: 1,
+    policyHash: 'a'.repeat(64),
+    requestHash,
+    hostRef: 'research-host',
+  })
+  const wrapperOverhead = jsonBytes(authorizeWrapperFor(null)) - jsonBytes(null)
+  const emptyRequestBytes = jsonBytes(requestFor(''))
+  const textLength = Math.floor((limit - wrapperOverhead - 32 - emptyRequestBytes) / 2)
+  const request = requestFor('x'.repeat(textLength))
+  const parsed = contract.parseGrokCompletionRequest(request)
+  assert.equal(parsed.ok, true, parsed.message)
+  const requestHash = contract.hashGrokCompletionRequest(parsed.value)
+  const executionTicket = `header.${'a'.repeat(2048)}.sig`
+  const authorizeWrapper = authorizeWrapperFor(request, requestHash)
+  const exactEnvelope = {
+    executionTicket,
+    requestHash,
+    request: parsed.value,
+  }
+
+  assert.ok(jsonBytes(authorizeWrapper) <= limit - 32)
+  assert.ok(jsonBytes(exactEnvelope) > limit)
+  assert.deepEqual(contract.buildGrokProxyEnvelope(exactEnvelope), {
+    ok: false,
+    code: 'limit',
+    kind: 'size',
+    message: 'proxy envelope exceeds maxVisualRequestBodyBytes',
+  })
+  // This is contract geometry with the required AuthorizeAttemptBody fields and
+  // a deterministic representative ticket. The fixed 64-byte digest above only
+  // sizes the wrapper; the final wrapper uses the computed request hash. This
+  // does not claim real ticket issuance or prove PostgreSQL rollback itself.
 })
 
 // Review R3-L3: a V2 user message carries its text twice, in `content` and in

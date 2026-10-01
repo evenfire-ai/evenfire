@@ -68,9 +68,10 @@ export async function assertResolvedUpstream(
   } catch (err) {
     // A failed lookup carries its system code (ENOTFOUND, EAI_AGAIN) on the
     // error itself and names the host in its message. Only a code-shaped code
-    // is kept, as the cause the transport maps to provider_unavailable.
+    // is kept, excluding Node programmer ERR_* codes, as the cause the
+    // transport maps to provider_unavailable.
     const code: unknown = (err as { code?: unknown } | null)?.code
-    if (typeof code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(code)) {
+    if (typeof code === 'string' && /^(?!ERR_)[A-Z][A-Z0-9_]{0,63}$/.test(code)) {
       throw new Error('upstream address lookup failed', { cause: { code } })
     }
     throw err

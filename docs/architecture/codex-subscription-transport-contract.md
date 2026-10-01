@@ -61,6 +61,12 @@ data and text parts that repeat `content` blanked in a temporary size
 projection; the actual request and its hash are not modified. The two caps are not additive: a V2 request carrying a
 hard-ceiling image (16 MiB decoded, about 21.3 MiB encoded) has about 2.7 MiB
 left for non-image data before the 24 MiB envelope refuses it.
+Codex checks the complete V2 request against 24 MiB before measuring its
+non-image share. A real 1 KiB PNG with 12.5 MiB of repeated text is therefore
+refused locally as `maxVisualRequestBodyBytes`, which the Host maps to
+`attachment_too_large` and `InvalidAttachment`; Grok refuses the same shape as
+text with `request exceeds maxRequestBodyBytes outside image data`, because
+Grok checks the non-image share first.
 The authorizer builds the exact V2 proxy envelope inside its transaction after
 signing but before commit. Exceeding the bound rolls back the new attempt,
 ticket and new reservation; it does not call the receipt finalizer before redeem.
@@ -510,9 +516,10 @@ behavior changes:
     `deliveredAs: 'sse_done'` and `usage` when present. On a thrown failure,
     `outcome` is `failed` and the event adds `code`, the transport `reason`,
     `details` (for example `{limit, observed}` on
-    `tool_call_limit_exceeded`), `causeCode` when the failure is a rejected
-    `fetch` (the undici cause code, such as `ECONNREFUSED`, and nothing else
-    from the error) and `deliveredAs`: `http_status` with
+    `tool_call_limit_exceeded`), `causeCode` when a rejected undici `fetch`
+    (for example `ECONNREFUSED`) or a failed `dns.lookup` wrapped by origin
+    policy (for example `ENOTFOUND` or `EAI_AGAIN`) carries a code-shaped cause
+    (only that code is logged), and `deliveredAs`: `http_status` with
     `httpStatus` when no SSE byte had been sent, or `sse_error` when the
     failure went out as an SSE error frame.
   - Once the redeem succeeds, the proxy writes a `: keepalive` SSE comment

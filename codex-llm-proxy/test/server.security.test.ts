@@ -1584,6 +1584,7 @@ describe('codex-llm-proxy attempt telemetry', () => {
   // Review R4-L1: a DNS failure carries its code on the lookup error itself,
   // not in `cause`, and its message names the upstream host. The attempt line
   // and both admin routes log it by cause code, with no err entry and no host.
+  // These real .invalid lookups depend on the resolver honoring NXDOMAIN.
   const INVALID_UPSTREAM_HOST = 'codex-r4-l1.invalid'
 
   function invalidHostLookup(calls: { count: number }) {
@@ -1628,7 +1629,7 @@ describe('codex-llm-proxy attempt telemetry', () => {
     expect('err' in lines[0]!).toBe(false)
     expect(serializeWithErrors(lines[0])).not.toContain(INVALID_UPSTREAM_HOST)
     expectNoForbiddenKeys(lines[0]!)
-  })
+  }, 15_000)
 
   it('(r4-l1b) logs a catalog DNS lookup failure by cause code on both admin routes', async () => {
     for (const [route, operation] of [
@@ -1674,7 +1675,7 @@ describe('codex-llm-proxy attempt telemetry', () => {
         error.mockRestore()
       }
     }
-  })
+  }, 15_000)
 
   it('logs a mapped control-api failure without an err entry', async () => {
     const { res, lines } = await run(

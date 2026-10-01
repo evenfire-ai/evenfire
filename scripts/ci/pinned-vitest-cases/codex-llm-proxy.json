@@ -1,0 +1,50 @@
+[
+  {
+    "suite": "originPolicy.test.ts",
+    "fullName": "originPolicy wraps operational lookup codes without the host name"
+  },
+  {
+    "suite": "originPolicy.test.ts",
+    "fullName": "originPolicy rethrows a Node ERR_* lookup error as the same reference"
+  },
+  {
+    "suite": "originPolicy.test.ts",
+    "fullName": "originPolicy maps a failed lookup to its code without the host name"
+  },
+  {
+    "suite": "server.security.test.ts",
+    "fullName": "codex-llm-proxy attempt telemetry (g1-1a) answers 429 rate_limited and forwards a valid upstream Retry-After"
+  },
+  {
+    "suite": "server.security.test.ts",
+    "fullName": "codex-llm-proxy attempt telemetry (g1-1b) answers 429 with no Retry-After header when the upstream value is invalid"
+  },
+  {
+    "suite": "server.security.test.ts",
+    "fullName": "codex-llm-proxy attempt telemetry (g1-3a) answers 422 upstream_rejected with the upstream status"
+  },
+  {
+    "suite": "server.security.test.ts",
+    "fullName": "codex-llm-proxy attempt telemetry (g1-3c) carries the upstream status on the SSE error frame after a keepalive"
+  },
+  {
+    "suite": "server.security.test.ts",
+    "fullName": "codex-llm-proxy attempt telemetry (g1-1d) delivers an upstream 429 after a keepalive as an SSE rate_limited frame"
+  },
+  {
+    "suite": "server.security.test.ts",
+    "fullName": "codex-llm-proxy attempt telemetry (g1-4a) answers 503 control_plane_unavailable when redeem cannot connect"
+  },
+  {
+    "suite": "server.security.test.ts",
+    "fullName": "codex-llm-proxy attempt telemetry (g1-5) passes a control_plane_unavailable redeem denial through as 503 with its own label"
+  },
+  {
+    "suite": "server.security.test.ts",
+    "fullName": "codex-llm-proxy attempt telemetry (r4-l1a) logs a DNS lookup failure by cause code, without err or host"
+  },
+  {
+    "suite": "server.security.test.ts",
+    "fullName": "codex-llm-proxy attempt telemetry (r4-l1b) logs a catalog DNS lookup failure by cause code on both admin routes"
+  }
+]

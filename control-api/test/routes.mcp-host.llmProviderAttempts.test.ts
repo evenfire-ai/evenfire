@@ -23,17 +23,28 @@ import { LlmProviderAttemptAuthorizeError } from '../src/services/llmProviderAtt
 import * as authorizer from '../src/services/llmProviderAttemptAuthorizer.js'
 import * as mcpHostJwt from '../src/utils/auth/mcpHostJwtToken.js'
 
-// Capture structured logs so the refusal event can be asserted without pino
+// Capture structured logs and their effective child bindings without pino
 // transports. Every other logger method is a no-op.
-const { mockLogWarn } = vi.hoisted(() => ({ mockLogWarn: vi.fn() }))
+const { mockLogWarn, mockLogWarnBindings } = vi.hoisted(() => ({
+  mockLogWarn: vi.fn(),
+  mockLogWarnBindings: vi.fn(),
+}))
 vi.mock('../src/observability/logger.js', () => {
-  const makeLogger = (): unknown =>
+  const makeLogger = (bindings: Record<string, unknown> = {}): unknown =>
     new Proxy(
       {},
       {
         get(_t, prop) {
-          if (prop === 'warn') return mockLogWarn
-          if (prop === 'child') return () => makeLogger()
+          if (prop === 'warn') {
+            return (...args: unknown[]) => {
+              mockLogWarn(...args)
+              mockLogWarnBindings(bindings)
+            }
+          }
+          if (prop === 'child') {
+            return (childBindings: Record<string, unknown>) =>
+              makeLogger({ ...bindings, ...childBindings })
+          }
           return () => {}
         },
       }
@@ -384,6 +395,7 @@ describe('authorize raw-body scan before JSON.parse', () => {
   beforeEach(() => {
     vi.mocked(authorizer.authorizeLlmProviderAttempt).mockReset()
     mockLogWarn.mockReset()
+    mockLogWarnBindings.mockReset()
   })
 
   async function withRoute(run: (url: string) => Promise<void>): Promise<void> {
@@ -750,7 +762,19 @@ describe('authorize raw-body scan before JSON.parse', () => {
   // which carries the correlationId, as the global error handler does.
   // Review R4-L8: that logger is a child of the root logger without the
   // route's module binding, so the route adds it back.
-  it('logs a body refusal through req.log when the request has one', async () => {
+  it('preserves the module logger binding and request correlation on body refusals', async () => {
+    const moduleResponse = await request(buildApp())
+      .post('/api/v1/mcp-host/llm/provider-attempts/authorize')
+      .set(headers({ 'content-encoding': 'gzip' }))
+      .send(Buffer.from(gzipSync('{}')))
+    expect(moduleResponse.status).toBe(415)
+    expect(mockLogWarnBindings).toHaveBeenCalledTimes(1)
+    const moduleBinding = mockLogWarnBindings.mock.calls[0][0].module
+    expect(moduleBinding).toBeTypeOf('string')
+    expect(moduleBinding).not.toBe('')
+    mockLogWarn.mockClear()
+    mockLogWarnBindings.mockClear()
+
     const lines: Array<Record<string, unknown>> = []
     const requestLogger = pino(
       { level: 'info' },
@@ -780,7 +804,7 @@ describe('authorize raw-body scan before JSON.parse', () => {
       type: 'encoding.unsupported',
       status: 415,
       correlationId: 'c-806',
-      module: 'mcp-host-llm-provider-attempts',
+      module: moduleBinding,
     })
     const moduleRefusals = mockLogWarn.mock.calls.filter(
       ([fields]) => (fields as { event?: string })?.event === 'llm_provider_attempt_body_refused'
