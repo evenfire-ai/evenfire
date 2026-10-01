@@ -5,6 +5,7 @@
  * Roboto faces fonts.ts registers, within a few percent of Arial, the deck font.
  */
 import { type SKRSContext2D, createCanvas } from '@napi-rs/canvas'
+import { isRtlText } from './docxScript'
 import { CHART_FONT_FAMILY, ensureFontsReady } from './fonts'
 
 /** The one family the deck uses, for slides and charts alike. */
@@ -230,8 +231,6 @@ export interface ScriptOptions {
   rtlMode?: boolean
 }
 
-const RTL_SCRIPT = /[\p{Script=Arabic}\p{Script=Hebrew}]/u
-
 /**
  * Language and direction for `text`. Untagged runs are en-US, and PowerPoint
  * then mixes CJK glyphs from several fallback fonts; without `rtl` an Arabic
@@ -246,10 +245,8 @@ export function scriptOptions(text: string, hanLang = 'zh-CN'): ScriptOptions {
   else if (/\p{Script=Han}/u.test(text)) lang = hanLang
   else if (/\p{Script=Arabic}/u.test(text)) lang = 'ar-SA'
   else if (/\p{Script=Hebrew}/u.test(text)) lang = 'he-IL'
-  const firstLetter = /\p{L}/u.exec(text)?.[0]
-  const rtl = firstLetter !== undefined && RTL_SCRIPT.test(firstLetter)
   const out: ScriptOptions = {}
   if (lang) out.lang = lang
-  if (rtl) out.rtlMode = true
+  if (isRtlText(text)) out.rtlMode = true
   return out
 }

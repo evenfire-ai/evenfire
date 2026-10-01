@@ -37,6 +37,11 @@ function span(letter: RegExp): string {
 }
 const RTL_SPAN = new RegExp(`${span(HEBREW_LETTER)}|${span(ARABIC_LETTER)}`, 'gu')
 
+/** Whether `text` holds a letter of a right-to-left script anywhere. */
+export function hasRtlLetter(text: string): boolean {
+  return RTL_LETTER.test(text)
+}
+
 /** Whether `text` reads right to left: its first letter, as the bidi algorithm decides, is RTL. */
 export function isRtlText(text: string): boolean {
   const first = /\p{L}/u.exec(text)?.[0]

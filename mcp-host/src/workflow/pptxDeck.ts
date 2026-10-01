@@ -7,7 +7,13 @@
  * values shrink to fit their boxes, and pictures keep their proportions.
  */
 import JSZip from 'jszip'
-import { bidiLanguage, documentEastAsianScript, isRtlText, scriptSegments } from './docxScript'
+import {
+  bidiLanguage,
+  documentEastAsianScript,
+  hasRtlLetter,
+  isRtlText,
+  scriptSegments,
+} from './docxScript'
 import { fitImageSize } from './embeddedImages'
 import { own } from './ownEntry'
 import { nativeChartArgs } from './pptxCharts'
@@ -341,7 +347,6 @@ function runOptions(slide: Slide, text: string, align?: unknown): Record<string,
  * eyebrow leaves it unspaced.
  */
 const ARABIC_SCRIPT = /\p{Script=Arabic}/u
-const RTL_LETTER = /[\p{Script=Arabic}\p{Script=Hebrew}]/u
 
 type TextRun = { text: string; options: Record<string, unknown> }
 
@@ -366,7 +371,7 @@ function paragraphOptions(slide: Slide, text: string, align?: unknown): Record<s
 
 function addText(slide: Slide, text: string, box: Box, options: Record<string, unknown>): void {
   const upright = ARABIC_SCRIPT.test(text) ? { italic: false } : {}
-  if (!RTL_LETTER.test(text)) {
+  if (!hasRtlLetter(text)) {
     slide.addText(text, {
       ...box,
       ...options,
@@ -388,7 +393,7 @@ function bulletRuns(slide: Slide, items: string[]): TextRun[] {
   // into one paragraph whenever an alignment is set, as it is for RTL items.
   return items.flatMap(text => {
     const runs = text.split('\n').flatMap((line, i) => {
-      const lineRuns = RTL_LETTER.test(text)
+      const lineRuns = hasRtlLetter(text)
         ? directionRuns(line, paragraphOptions(slide, text))
         : [{ text: line, options: runOptions(slide, text) }]
       if (i > 0) lineRuns[0].options.softBreakBefore = true
@@ -785,9 +790,7 @@ function drawTable(slide: Slide, planned: PlannedSlide, ctx: DrawContext): void 
   const p = ctx.palette
   const data = rows.map((row, r) =>
     row.map(text => ({
-      text: RTL_LETTER.test(text)
-        ? directionRuns(text, paragraphOptions(slide, text, 'left'))
-        : text,
+      text: hasRtlLetter(text) ? directionRuns(text, paragraphOptions(slide, text, 'left')) : text,
       options: {
         ...(r === 0
           ? { bold: true, color: 'FFFFFF', fill: { color: hex(p.primary) } }
