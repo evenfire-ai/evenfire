@@ -117,23 +117,46 @@ function registryHookProducer(): (name: string) => LlmHookResource {
 
 function hostHookReferenceProducer(): (hookId: string) => { id: string; digest?: string } {
   const source = readProducer('control-api/src/services/hostGuardrailRefs.ts')
-  let reference: ts.Expression | undefined
+  const installFunctions = source.statements.filter(
+    (statement): statement is ts.FunctionDeclaration =>
+      ts.isFunctionDeclaration(statement) &&
+      statement.name?.text === 'addHookRefToHost' &&
+      statement.modifiers?.some(modifier => modifier.kind === ts.SyntaxKind.ExportKeyword) === true
+  )
+  const install = installFunctions[0]
+  const expectedParameters = [
+    'gateway',
+    'hostName',
+    'hookId',
+    'lifecyclePoints',
+    'digest',
+    'hostsNamespace',
+  ]
+  if (
+    installFunctions.length !== 1 ||
+    !install?.body ||
+    install.parameters.map(parameter => parameter.name.getText(source)).join(',') !==
+      expectedParameters.join(',')
+  ) {
+    throw new Error('Control API Host guardrail install producer changed')
+  }
+
+  const pushes: ts.CallExpression[] = []
 
   function visit(node: ts.Node): void {
-    if (
-      ts.isCallExpression(node) &&
-      node.expression.getText(source) === 'arr.push' &&
-      node.arguments.length === 1 &&
-      ts.isObjectLiteralExpression(node.arguments[0])
-    ) {
-      reference = node.arguments[0]
-    }
+    if (ts.isCallExpression(node) && node.expression.getText(source) === 'arr.push')
+      pushes.push(node)
     ts.forEachChild(node, visit)
   }
-  visit(source)
-  if (!reference) {
-    throw new Error('Control API Host guardrail reference producer changed')
+  visit(install.body)
+  if (
+    pushes.length !== 1 ||
+    pushes[0].arguments.length !== 1 ||
+    !ts.isObjectLiteralExpression(pushes[0].arguments[0])
+  ) {
+    throw new Error('Control API Host guardrail install reference is missing or ambiguous')
   }
+  const reference = pushes[0].arguments[0]
   const produce = compile<(hookId: string, digest: undefined) => { id: string; digest?: string }>(
     `const produce = (hookId, digest) => (${reference.getText(source)});`
   )
