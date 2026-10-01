@@ -267,6 +267,13 @@ minikube-build-images-body:
 		bash scripts/minikube/require-t2-mutation-lock.sh
 	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" scripts/minikube/build-images.sh $(MINIKUBE_BUILD_IMAGE_ARGS)
 
+.PHONY: minikube-verify-conversation-store-images
+minikube-verify-conversation-store-images: ## Verify immutable local image IDs and UID1001 SQLite/floor/canonical capabilities under the owned profile lease
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(CONTROL_API_REAL_PG_CONTEXT)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- \
+		bash scripts/conversation-store/verify-images.sh
+
 .PHONY: minikube-build-custom-coordinator-fixture minikube-build-custom-coordinator-fixture-body
 minikube-build-custom-coordinator-fixture: ## Build only the custom coordinator E2E fixture image in minikube
 	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
@@ -799,6 +806,20 @@ minikube-t2-hcc-stateless-cache-containment: ## Opt-in branch-owned T2 cache-con
 		T2_GATE_ID=minikube-t2 \
 		T2_HEALTHCHECK_COMMAND='KUBECONTEXT="$$T2_CONTEXT" MINIKUBE_PROFILE="$$T2_PROFILE" E2E_BRANCH_PROFILE_ENV="$$T2_PROFILE_ENV" E2E_PROFILE_PORTS_ENV="$$T2_PORTS_ENV" E2E_EXPECTED_PRE_GATE_GATE=minikube-t2 bash scripts/e2e/e2e-hcc-stateless-cache-containment.sh' \
 		T2_HEALTHCHECK_TIMEOUT_SECONDS=900 T2_HEALTHCHECK_KILL_GRACE_SECONDS=300 \
+		$(MAKE) minikube-t2
+
+.PHONY: minikube-t2-hcc-canonical-store-lifecycle
+minikube-t2-hcc-canonical-store-lifecycle: ## Certify canonical-store API and visible Desktop journeys on two dedicated branch-owned Hosts
+	@bash scripts/tests/test-hcc-canonical-store-lifecycle.sh
+	@context='$(CONTROL_API_REAL_PG_CONTEXT)'; \
+		[ -n "$$context" ] || { echo 'Set CONTROL_API_REAL_PG_CONTEXT to the verified branch-owned context' >&2; exit 1; }; \
+		[ "$(MINIKUBE_PROFILE)" = "$$context" ] || { echo 'MINIKUBE_PROFILE and CONTROL_API_REAL_PG_CONTEXT must select the same branch-owned profile/context' >&2; exit 1; }; \
+		printf '%s\n' "$$context" | grep -Eq '^clerum-[a-z0-9][a-z0-9-]*-[0-9a-f]{8}$$' || { echo 'The selected context must be generated and branch-scoped' >&2; exit 1; }
+	@E2E_HCC_WATCH_FAULT_INJECTION=1 E2E_CANONICAL_WRITER_FAULT=1 \
+		T2_GATE_ID=minikube-t2 T2_REQUIRE_PLAYWRIGHT=true \
+		T2_HEALTHCHECK_COMMAND='KUBECONTEXT="$$T2_CONTEXT" MINIKUBE_PROFILE="$$T2_PROFILE" E2E_BRANCH_PROFILE_ENV="$$T2_PROFILE_ENV" E2E_PROFILE_PORTS_ENV="$$T2_PORTS_ENV" E2E_EXPECTED_PRE_GATE_GATE=minikube-t2 bash scripts/e2e/e2e-hcc-canonical-store-lifecycle.sh' \
+		T2_PLAYWRIGHT_COMMAND='KUBECONTEXT="$$T2_CONTEXT" MINIKUBE_PROFILE="$$T2_PROFILE" E2E_BRANCH_PROFILE_ENV="$$T2_PROFILE_ENV" E2E_PROFILE_PORTS_ENV="$$T2_PORTS_ENV" E2E_EXPECTED_PRE_GATE_GATE=minikube-t2 bash scripts/e2e/e2e-hcc-canonical-store-lifecycle.sh --playwright' \
+		T2_HEALTHCHECK_TIMEOUT_SECONDS=1800 T2_HEALTHCHECK_KILL_GRACE_SECONDS=300 \
 		$(MAKE) minikube-t2
 
 .PHONY: minikube-t2-runtime
