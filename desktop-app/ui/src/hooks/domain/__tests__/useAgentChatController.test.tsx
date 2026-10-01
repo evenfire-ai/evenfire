@@ -12,12 +12,13 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { makeTaskKey } from '@contexts/AgentTaskTrackerContext/types'
-import { act, cleanup, waitFor } from '@testing-library/react'
+import { act, cleanup, waitFor as rtlWaitFor } from '@testing-library/react'
 import { renderController } from './__fixtures__/controllerHarness'
 import { type MockClerum, installMockClerum, uninstallMockClerum } from './__fixtures__/mockClerum'
 
 let clerum: MockClerum
 let uuidCounter = 0
+const ASYNC_WAIT_TIMEOUT_MS = 5_000
 
 // React 18/19 needs this flag for act() to flush effects in the test env.
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -42,6 +43,11 @@ afterEach(() => {
 /** Wait until the controller's mount effect (loadChatList) has settled. */
 async function settleMount() {
   await waitFor(() => expect(clerum.chat.getIndex).toHaveBeenCalled())
+}
+
+/** Real ChatStore-backed effects can exceed Testing Library's 1s default on CI runners. */
+function waitFor<T>(callback: () => T | Promise<T>) {
+  return rtlWaitFor(callback, { timeout: ASYNC_WAIT_TIMEOUT_MS })
 }
 
 function deferred<T>() {
@@ -583,7 +589,9 @@ describe('useAgentChatController — characterization (D.0)', () => {
       // send persists the user turn to the real ChatStore first, which is disk
       // I/O that fake timers do not advance: poll for the subscription instead.
       await act(async () => {
-        await vi.waitFor(() => expect(clerum.hasProgressHandler('task-abc')).toBe(true))
+        await vi.waitFor(() => expect(clerum.hasProgressHandler('task-abc')).toBe(true), {
+          timeout: ASYNC_WAIT_TIMEOUT_MS,
+        })
       })
 
       await act(async () => {
@@ -601,8 +609,13 @@ describe('useAgentChatController — characterization (D.0)', () => {
 
       // The failure toast follows the store write of the error reply.
       await act(async () => {
-        await vi.waitFor(() =>
-          expect(spies.pushToast).toHaveBeenCalledWith(expect.stringContaining('failed'), 'error')
+        await vi.waitFor(
+          () =>
+            expect(spies.pushToast).toHaveBeenCalledWith(
+              expect.stringContaining('failed'),
+              'error'
+            ),
+          { timeout: ASYNC_WAIT_TIMEOUT_MS }
         )
       })
       expect(result.current.agentSending).toBe(false)
@@ -659,7 +672,9 @@ describe('useAgentChatController — characterization (D.0)', () => {
       // The user turn is persisted to the real ChatStore (disk I/O fake timers do
       // not advance) before the subscription is wired: poll for it.
       await act(async () => {
-        await vi.waitFor(() => expect(clerum.hasProgressHandler('task-abc')).toBe(true))
+        await vi.waitFor(() => expect(clerum.hasProgressHandler('task-abc')).toBe(true), {
+          timeout: ASYNC_WAIT_TIMEOUT_MS,
+        })
       })
 
       await act(async () => {
@@ -671,11 +686,14 @@ describe('useAgentChatController — characterization (D.0)', () => {
       // The timeout's recovery reads the store (disk I/O) before it settles the
       // entry as an error: poll for the settled state.
       await act(async () => {
-        await vi.waitFor(() => {
-          const progress = result.current.progressByAgentMessage['agent-x']
-          const entry = progress && Object.values(progress)[0]
-          expect(entry?.status).toBe('error')
-        })
+        await vi.waitFor(
+          () => {
+            const progress = result.current.progressByAgentMessage['agent-x']
+            const entry = progress && Object.values(progress)[0]
+            expect(entry?.status).toBe('error')
+          },
+          { timeout: ASYNC_WAIT_TIMEOUT_MS }
+        )
       })
     })
 
