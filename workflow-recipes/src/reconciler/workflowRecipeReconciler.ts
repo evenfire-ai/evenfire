@@ -1913,6 +1913,14 @@ export class WorkflowRecipeReconciler {
       }
     }
 
+    // R4-L4 / R5-J1: the validation, policy and step-limit returns and the
+    // workflow short-circuits below never reach the inner reconcile(), so a
+    // legacy mcp-servers internet policy pending a delete is retried here,
+    // before all of them (the `legacy-retry` writer). Every pass that leaves
+    // DeletePending published has then either sent the DELETE or is inside
+    // its backoff window, and the wrapper's requeue is that window.
+    await this.retryPendingLegacyNetworkPolicyDelete(recipe)
+
     const limitError = validateWorkflowRecipeLimits(recipe.spec, this.config)
     if (limitError) {
       if (isWorkflow) await this.revokeCoordinatorGfsNetworkPolicy(recipe)
@@ -2050,11 +2058,6 @@ export class WorkflowRecipeReconciler {
       if (oauthBrokerTokenReapedEarly) {
         await this.ensureOAuthBrokerTokenSecret(recipe)
       }
-
-      // R4-L4: the short-circuits below never reach the inner reconcile(), so
-      // a legacy mcp-servers internet policy pending a delete is retried here,
-      // before all of them (the `legacy-retry` writer).
-      await this.retryPendingLegacyNetworkPolicyDelete(recipe)
 
       if (
         currentPhase === 'active' &&
