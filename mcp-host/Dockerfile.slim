@@ -60,6 +60,8 @@ RUN npm ci --only=production
 
 # Copy built code
 COPY --from=builder /app/mcp-host/dist ./dist
+# Operator/image programs remain root-owned and immutable to UID1001.
+COPY scripts/conversation-store ./ops
 
 # Run as non-root user
 RUN groupadd -g 1001 nodejs && useradd -u 1001 -g nodejs -m nodejs

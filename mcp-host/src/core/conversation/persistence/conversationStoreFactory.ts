@@ -10,6 +10,13 @@
  */
 import * as path from 'node:path'
 import { Worker } from 'node:worker_threads'
+import {
+  type CanonicalStoreRuntimeOptions,
+  assertCanonicalRuntimeConfig,
+  assertUncoordinatedStoreBootAllowed,
+  requiresExistingStore,
+} from '../../../canonicalStoreBootGuard'
+import { logger } from '../../../logger'
 import { type ConversationStore, InMemoryConversationStore } from '../conversationStore'
 import { DualConversationStore } from './dualConversationStore'
 import { PersistQueue, type WorkerLike } from './persistQueue'
@@ -31,6 +38,9 @@ export interface ConversationStoreFactoryOptions {
    * Set when the stateless lifecycle is enabled or `CLERUM_DB_BARRIER_MODE=full`.
    */
   barrierMode?: boolean
+  canonicalStore?: CanonicalStoreRuntimeOptions
+  /** Fatal transport or fence loss closes runtime admission; it is never silently reopened. */
+  onFatalWorkerError?: (err: Error) => void
   /** TTL for persisted pending-approval rows. Defaults to 7d inside the store. */
   pendingApprovalTtlMs?: number
   /** Optional override for the compiled worker script path (used by tests). */
@@ -42,6 +52,8 @@ export interface ConversationStoreHandle {
   mode: SessionStoreMode
   /** Graceful shutdown — drains pending writes, terminates the worker. */
   shutdown(): Promise<void>
+  /** Resolves only after the worker has acquired its fence and validated the existing store. */
+  ready: Promise<void>
   /** Returns the underlying worker for tests / diagnostics. May be undefined
    *  for `memory` mode. */
   worker?: Worker
@@ -66,7 +78,10 @@ function spawnWorker(opts: ConversationStoreFactoryOptions): Worker {
       dbPath: opts.dbPath,
       checkpointEveryWrites: opts.checkpointEveryWrites,
       heartbeatMs: opts.heartbeatMs,
-      barrierMode: opts.barrierMode === true,
+      barrierMode:
+        opts.barrierMode === true ||
+        (opts.canonicalStore ? requiresExistingStore(opts.canonicalStore) : false),
+      canonicalStore: opts.canonicalStore,
     },
   })
 }
@@ -74,11 +89,14 @@ function spawnWorker(opts: ConversationStoreFactoryOptions): Worker {
 export function createConversationStore(
   opts: ConversationStoreFactoryOptions
 ): ConversationStoreHandle {
+  if (opts.canonicalStore) assertCanonicalRuntimeConfig(opts.mode, opts.dbPath, opts.canonicalStore)
   if (opts.mode === 'memory') {
+    if (!opts.canonicalStore && opts.dbPath) assertUncoordinatedStoreBootAllowed(opts.dbPath)
     const store = new InMemoryConversationStore()
     return {
       store,
       mode: 'memory',
+      ready: Promise.resolve(),
       async shutdown() {
         /* nothing to drain */
       },
@@ -90,12 +108,18 @@ export function createConversationStore(
     syncTimeoutMs: opts.syncTimeoutMs,
     asyncTimeoutMs: opts.asyncTimeoutMs,
     onTransportError: err => {
-      console.error('[ConversationStore] worker transport error:', err)
+      logger.error({ err }, '[ConversationStore] worker transport failed')
+      opts.onFatalWorkerError?.(err)
     },
     onExit: code => {
-      console.warn(`[ConversationStore] worker exited (code=${code})`)
+      logger.info({ code }, '[ConversationStore] worker exited')
+      if (code !== 0) opts.onFatalWorkerError?.(new Error('ConversationStoreWorkerExited'))
     },
   })
+
+  const ready = persistQueue.enqueueSync({ kind: 'ping' }).then(() => undefined)
+  // A caller can await readiness after wiring its handle without an unhandled rejection gap.
+  void ready.catch(() => undefined)
 
   const sqliteStore = new SqliteConversationStore(persistQueue, {
     cacheSize: opts.cacheSize,
@@ -106,6 +130,7 @@ export function createConversationStore(
     return {
       store: sqliteStore,
       mode: 'sqlite',
+      ready,
       worker: worker as Worker,
       persistQueue,
       async shutdown() {
@@ -120,6 +145,7 @@ export function createConversationStore(
   return {
     store: dual,
     mode: 'dual',
+    ready,
     worker: worker as Worker,
     persistQueue,
     async shutdown() {

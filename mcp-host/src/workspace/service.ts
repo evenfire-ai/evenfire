@@ -10,7 +10,21 @@ import * as path from 'path'
 import type { PersonalizationConfig } from '../types'
 import { scanWriteContent } from './scanner'
 import { searchWorkspace } from './search'
+import {
+  StateDbPathError,
+  assertStateDbPathAllowed,
+  isStateDbPath,
+  isStateDbPathAllowed,
+} from './stateProtection'
 import { SearchConfig, SearchResult, WorkspaceEntry } from './types'
+
+export {
+  PROTECTED_STATE_DB_FILES,
+  PROTECTED_STATE_DIR,
+  StateDbPathError,
+  isStateDbPath,
+  stateDbProtectedMessage,
+} from './stateProtection'
 
 function todayDate(): string {
   return new Date().toISOString().slice(0, 10)
@@ -54,47 +68,6 @@ export function isLockedPath(relativePath: string): boolean {
   if (normalized.startsWith('/')) normalized = normalized.slice(1)
   if (normalized.endsWith('/')) normalized = normalized.slice(0, -1)
   return LOCKED_IDENTITY_FILES.has(normalized)
-}
-
-// D3 (stateless-agents) §1.2 — the session database and its WAL laterals are
-// platform state, never agent-writable. The db may live at the workspace root
-// (workspace PVC) or under CLERUM_SESSION_DB_DIR; the guard rejects the
-// basenames at ANY depth (defense in depth — same trust model as the identity
-// files: POSIX perms are the OS backstop, this is the loud tool-level gate).
-export const PROTECTED_STATE_DB_FILES: ReadonlySet<string> = new Set([
-  'state.db',
-  'state.db-wal',
-  'state.db-shm',
-])
-
-/** Reserved directory for stateless-lifecycle runtime state. */
-export const PROTECTED_STATE_DIR = '.clerum-state'
-
-export function stateDbProtectedMessage(filename: string): string {
-  return `${filename} is part of the session state database and cannot be accessed by the agent.`
-}
-
-export class StateDbPathError extends Error {
-  constructor(filename: string) {
-    super(stateDbProtectedMessage(filename))
-    this.name = 'StateDbPathError'
-  }
-}
-
-/**
- * True when — after normalization — any path segment is `.clerum-state` or
- * the basename is one of the protected state-db files, at any depth.
- *
- * Returns true for: "state.db", "./state.db", "state.db-wal", "a/state.db",
- * ".clerum-state/x". Returns false for: "state.db.bak", "notes/state.database".
- */
-export function isStateDbPath(relativePath: string): boolean {
-  if (typeof relativePath !== 'string' || relativePath.length === 0) return false
-  const normalized = path.posix.normalize(relativePath)
-  const segments = normalized.split('/').filter(s => s.length > 0 && s !== '.')
-  if (segments.includes(PROTECTED_STATE_DIR)) return true
-  const base = segments[segments.length - 1]
-  return base !== undefined && PROTECTED_STATE_DB_FILES.has(base)
 }
 
 /**
@@ -167,6 +140,7 @@ export class WorkspaceService implements Workspace {
     if (rel.startsWith('..') || path.isAbsolute(rel)) {
       throw new Error('Path resolves outside workspace')
     }
+    assertStateDbPathAllowed(relativePath, this.workspacePath)
     return resolved
   }
 
@@ -301,6 +275,7 @@ export class WorkspaceService implements Workspace {
       // At the root, skip excluded top-level dirs (e.g. `users/` on collective).
       if (!directory && this.options?.excludeDirs?.includes(entry.name)) continue
       const entryPath = path.join(directory, entry.name).replace(/^\//, '')
+      if (!isStateDbPathAllowed(entryPath, this.workspacePath)) continue
       const absPath = path.join(resolved, entry.name)
       let size: number | undefined
       let modifiedAt: string | undefined

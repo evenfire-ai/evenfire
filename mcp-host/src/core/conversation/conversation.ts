@@ -626,16 +626,31 @@ export class ConversationManager {
    */
   async clearPendingApproval(sessionKey: string): Promise<void> {
     const conv = this.store.get(sessionKey)
-    if (!conv) return
-    const requestId = conv.pending_approval?.request_id
+    const pending = conv?.pending_approval
+    if (!conv || !pending) return
+    const version = conv.updated_at
+    const desired = {
+      ...conv,
+      pending_approval: undefined,
+      state: ConversationState.Idle,
+      activeTaskId: undefined,
+      traceContext: null,
+      updated_at: new Date(),
+    }
+    // Keep the exact pending request available for retry until the worker's
+    // atomic delete/state transition acknowledges durability.
+    await this.store.persistApprovalResolved(desired, pending.request_id, 'cancel')
+    if (
+      this.store.get(sessionKey) !== conv ||
+      conv.pending_approval !== pending ||
+      conv.updated_at !== version
+    )
+      return
     conv.pending_approval = undefined
-    conv.state = ConversationState.Idle // release the turn lock (BUG-8)
+    conv.state = desired.state
     conv.activeTaskId = undefined
     conv.traceContext = null
-    conv.updated_at = new Date()
-    if (requestId) {
-      await this.store.persistApprovalResolved(conv, requestId, 'cancel')
-    }
+    conv.updated_at = desired.updated_at
   }
 
   /**

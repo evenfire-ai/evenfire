@@ -79,6 +79,9 @@ export interface SessionDbPathInputs {
   workspacePath: string
   /** The ephemeral fallback for legacy (non-stateless) dev/test boots. */
   tmpFallbackPath: string
+  canonicalStoreRequired?: boolean
+  storageContract?: 'legacy-floor' | 'canonical'
+  canonicalStateDir?: string
 }
 
 /**
@@ -90,6 +93,22 @@ export interface SessionDbPathInputs {
  * lifecycle (throws `StatelessBootError` instead — never /tmp).
  */
 export function resolveSessionDbPathFrom(inputs: SessionDbPathInputs): string {
+  if (
+    inputs.canonicalStoreRequired ||
+    inputs.storageContract === 'legacy-floor' ||
+    inputs.storageContract === 'canonical'
+  ) {
+    const directory = inputs.canonicalStateDir ?? ''
+    if (
+      !path.isAbsolute(directory) ||
+      path.resolve(directory) !== directory ||
+      inputs.sessionDbDir !== directory ||
+      (inputs.sessionDbPath !== '' && inputs.sessionDbPath !== path.join(directory, 'state.db'))
+    ) {
+      throw new StatelessBootError('CanonicalStoreDbPathMismatch')
+    }
+    return path.join(directory, 'state.db')
+  }
   if (inputs.sessionDbDir.trim().length > 0) {
     return path.join(inputs.sessionDbDir, 'state.db')
   }

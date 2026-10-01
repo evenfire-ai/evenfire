@@ -299,6 +299,13 @@ export type WorkerOp =
       markAwaitingApproval?: boolean
     }
   | { kind: 'delete_pending_approval'; requestId: string }
+  | {
+      kind: 'resolve_pending_approval'
+      sessionId: string
+      requestId: string
+      decision: 'approve' | 'deny' | 'cancel'
+      endedAt?: number
+    }
   | { kind: 'load_active_session'; sessionKey: string }
   | {
       kind: 'load_session_message_page'
@@ -385,6 +392,7 @@ export function isWriteOp(op: WorkerOp): boolean {
     case 'replace_messages':
     case 'insert_pending_approval':
     case 'delete_pending_approval':
+    case 'resolve_pending_approval':
     case 'reap_processing_sessions':
     case 'reap_awaiting_approval_sessions':
     case 'sweep_expired':

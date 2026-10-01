@@ -1091,18 +1091,13 @@ export class SqliteConversationStore implements ConversationStore {
   ): Promise<void> {
     const sessionKey = this.sessionKeyById.get(conv.id)
     if (sessionKey) this.reconcilePinning(sessionKey, conv)
-    await this.persistQueue.enqueueSync({ kind: 'delete_pending_approval', requestId }, sessionKey)
     await this.persistQueue.enqueueSync(
       {
-        kind: 'update_session_state',
+        kind: 'resolve_pending_approval',
         sessionId: conv.id,
-        state: conv.state,
-        endedAt: decision === 'cancel' ? Date.now() / 1000 : undefined,
-        endReason: decision === 'cancel' ? 'cancelled' : undefined,
-        // D.1 — approve resumes the SAME task (→ Processing): preserve.
-        // deny/cancel are terminal (→ Idle): clear the in-flight task.
-        activeTaskId: decision === 'approve' ? undefined : null,
-        activeTraceContext: decision === 'approve' ? undefined : null,
+        requestId,
+        decision,
+        ...(decision === 'cancel' ? { endedAt: Date.now() / 1000 } : {}),
       },
       sessionKey
     )

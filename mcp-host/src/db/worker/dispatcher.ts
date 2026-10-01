@@ -23,10 +23,12 @@ import type {
 export interface DispatcherDeps {
   db: Database
   statements: PreparedStatements
+  assertWriterHeld?: () => void
 }
 
-export function createDispatcher(db: Database): DispatcherDeps {
-  return { db, statements: prepareStatements(db) }
+export function createDispatcher(db: Database, assertWriterHeld?: () => void): DispatcherDeps {
+  assertWriterHeld?.()
+  return { db, statements: prepareStatements(db), assertWriterHeld }
 }
 
 function updateSessionSummaryAfterInsert(
@@ -93,13 +95,21 @@ export function parseIsoSinceOrThrow(raw: unknown): number | null {
  * `PersistQueue.enqueueAsync` keeps ordering correct cross-message.
  */
 export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unknown> {
+  deps.assertWriterHeld?.()
   const { db, statements: s } = deps
+  // Recheck inside every retry: SQLITE_BUSY yields to the event loop, during which
+  // the dedicated coordination connection may be lost. Reads can also expire rows.
+  const guardedRetry = <T>(fn: () => T): Promise<T> =>
+    withBusyRetry(() => {
+      deps.assertWriterHeld?.()
+      return fn()
+    })
   switch (op.kind) {
     case 'ping':
       return { pong: true }
 
     case 'insert_session':
-      return withBusyRetry(() => {
+      return guardedRetry(() => {
         const tx = db.transaction((row: SessionRow) => {
           s.insertSession.run({
             id: row.id,
@@ -137,7 +147,7 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
       })
 
     case 'update_session_state':
-      return withBusyRetry(() => {
+      return guardedRetry(() => {
         const tx = db.transaction(() => {
           // active_task_id: a string sets it; null/undefined pass NULL to the
           // COALESCE (keeps current). The explicit clear below handles null.
@@ -175,7 +185,7 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
       const nowMs = op.nowEpoch
       const reaped: ReapedSession[] = []
       for (;;) {
-        const chunkReaped = await withBusyRetry(() => {
+        const chunkReaped = await guardedRetry(() => {
           const tx = db.transaction(() => {
             const sessions = s.selectProcessingSessions.all({ limit: chunkSize }) as Array<{
               id: string
@@ -288,7 +298,7 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
         : 'APPROVAL_EXPIRED_DURING_DOWNTIME'
       const reaped: ReapedSession[] = []
       for (;;) {
-        const chunkReaped = await withBusyRetry(() => {
+        const chunkReaped = await guardedRetry(() => {
           const tx = db.transaction(() => {
             // The inverse orphan case is a pending row whose parent session is
             // no longer awaiting the same task (for example, cancellation made
@@ -385,7 +395,7 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
     }
 
     case 'update_session_counters':
-      return withBusyRetry(() => {
+      return guardedRetry(() => {
         const tx = db.transaction(() => {
           s.updateSessionCounters.run({
             id: op.sessionId,
@@ -403,7 +413,7 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
       })
 
     case 'update_session_prompt_stable_hash':
-      return withBusyRetry(() => {
+      return guardedRetry(() => {
         const tx = db.transaction(() => {
           s.updateSessionPromptStableHash.run({
             id: op.sessionId,
@@ -415,7 +425,7 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
       })
 
     case 'update_session_model_selections':
-      return withBusyRetry(() => {
+      return guardedRetry(() => {
         // #654 — compare-and-swap on `model_selection_revision`.
         //
         // Read-then-write inside ONE IMMEDIATE transaction. The worker is a
@@ -484,7 +494,7 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
 
     case 'update_session_title':
       // Spec 15 Fase B — unconditional overwrite (rename wins over the auto-title).
-      return withBusyRetry(() => {
+      return guardedRetry(() => {
         const tx = db.transaction(() => {
           s.updateSessionTitle.run({ id: op.sessionId, title: op.title })
         })
@@ -493,7 +503,7 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
       })
 
     case 'insert_message':
-      return withBusyRetry(() => {
+      return guardedRetry(() => {
         const tx = db.transaction(() => {
           s.insertMessage.run({
             session_id: op.payload.session_id,
@@ -538,7 +548,7 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
       // transaction. Mirrors the exact row/counter shape of `insert_message`
       // plus the state semantics of `update_session_state` so a crash between
       // the two writes is impossible by construction.
-      return withBusyRetry(() => {
+      return guardedRetry(() => {
         const tx = db.transaction(() => {
           s.insertMessage.run({
             session_id: op.message.session_id,
@@ -597,7 +607,7 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
       })
 
     case 'replace_messages':
-      return withBusyRetry(() => {
+      return guardedRetry(() => {
         const tx = db.transaction(() => {
           s.deleteMessagesBySession.run(op.sessionId)
           for (const m of op.messages) {
@@ -629,7 +639,7 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
       })
 
     case 'insert_pending_approval':
-      return withBusyRetry(() => {
+      return guardedRetry(() => {
         const tx = db.transaction((row: PendingApprovalRow) => {
           let sourceMessage = row.source_message
           if (op.replaceRequestId) {
@@ -664,8 +674,40 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
         return { ok: true }
       })
 
+    case 'resolve_pending_approval':
+      return guardedRetry(() => {
+        const tx = db.transaction(() => {
+          const approval = db
+            .prepare('SELECT session_id, task_id FROM pending_approvals WHERE request_id = ?')
+            .get(op.requestId) as { session_id: string; task_id: string } | undefined
+          if (!approval) return { ok: true, changed: false }
+          if (approval.session_id !== op.sessionId)
+            throw new Error('Approval resolution binding mismatch')
+          // The persisted row identifies the old task. A delayed resolution
+          // may remove that row, but must never reset a newer accepted turn.
+          const state = op.decision === 'approve' ? 'processing' : 'idle'
+          db.prepare(
+            `UPDATE sessions SET state = @state,
+            ended_at = COALESCE(@endedAt, ended_at),
+            end_reason = CASE WHEN @decision = 'cancel' THEN 'cancelled' ELSE end_reason END,
+            active_task_id = CASE WHEN @decision = 'approve' THEN active_task_id ELSE NULL END,
+            active_trace_context = CASE WHEN @decision = 'approve' THEN active_trace_context ELSE NULL END
+            WHERE id = @sessionId AND state = 'awaiting_approval' AND active_task_id = @taskId`
+          ).run({
+            state,
+            endedAt: op.endedAt ?? null,
+            decision: op.decision,
+            sessionId: op.sessionId,
+            taskId: approval.task_id,
+          })
+          s.deletePendingApproval.run(op.requestId)
+          return { ok: true, changed: true }
+        })
+        return tx.immediate()
+      })
+
     case 'delete_pending_approval':
-      return withBusyRetry(() => {
+      return guardedRetry(() => {
         const tx = db.transaction(() => {
           s.deletePendingApproval.run(op.requestId)
         })
@@ -844,7 +886,7 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
     }
 
     case 'sweep_expired':
-      return withBusyRetry(() => {
+      return guardedRetry(() => {
         const tx = db.transaction(() => {
           const expiredApprovals = s.sweepExpiredApprovals.run(op.nowEpoch)
           const expiredSessions = s.sweepEndedSessions.run(op.nowEpoch - op.ttlSeconds)
@@ -884,7 +926,7 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
     }
 
     case 'sweep_closed_sessions':
-      return withBusyRetry(() => {
+      return guardedRetry(() => {
         const tx = db.transaction(() => {
           const result = s.sweepClosedSessions.run({ cutoff: op.cutoffEpoch })
           return { deleted_sessions: result.changes }

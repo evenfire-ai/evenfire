@@ -49,6 +49,7 @@ const PRIORITY_WEIGHTS: Record<TaskPriority, number> = {
  * MessageQueue — factory + event-forwarding shim.
  */
 export class MessageQueue extends EventEmitter {
+  private conversationStoreAdmissionFenced = false
   /** Ordering queue for the legacy non-SessionProcessor dispatch path. */
   private pendingQueue: Task[] = []
   private maxQueueSize: number
@@ -234,7 +235,13 @@ export class MessageQueue extends EventEmitter {
    * Fail-loud: every suppression is logged with the task id, delivery key and
    * prior state — duplicates are never silently swallowed and never re-run.
    */
+  /** One-way for this queue instance; operator release creates a fresh runtime queue. */
+  fenceConversationStoreAdmission(): void {
+    this.conversationStoreAdmissionFenced = true
+  }
+
   admit(task: Task): AdmissionOutcome {
+    if (this.conversationStoreAdmissionFenced) throw new Error('ConversationStoreMaintenance')
     const deliveryKey = MessageQueue.deliveryKeyOf(task.sourceMessage)
 
     if (this.lifecycle) {

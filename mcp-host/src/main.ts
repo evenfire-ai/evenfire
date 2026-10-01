@@ -28,6 +28,13 @@ import {
 } from './agent/sessionModelSelection'
 import { applySessionTitle as applySessionTitleCore } from './agent/sessionTitle'
 import { BudgetClient } from './budget/budgetClient'
+import {
+  type CanonicalStoreRuntimeOptions,
+  assertCanonicalRuntimeConfig,
+  assertUncoordinatedStoreBootAllowed,
+  parseStorageContract,
+  requiresExistingStore,
+} from './canonicalStoreBootGuard'
 // Structured JSON logging — must be first import
 import { config } from './config'
 import type { AllowlistView } from './config/allowlistCheck'
@@ -57,6 +64,7 @@ import { WorkflowResultTool } from './core/tools/workflow'
 import { WorkflowBrokerRequestError } from './core/tools/workflowBrokerClient.js'
 import type { Attachment } from './core/types'
 import { ConversationState } from './core/types'
+import { assertNoIncompleteCanonicalMigration } from './db/canonicalStore/bootGuard'
 import { wireActivityEvents } from './eventWiring'
 import {
   resolveGuardrailHookDescriptors,
@@ -126,6 +134,7 @@ import { sanitizeError } from './progress/intentExtraction'
 import { progressReporterRegistry } from './progress/sseProgressReporter'
 import { MessageQueue, Task } from './queue'
 import { ResultStore } from './resultStore'
+import { CanonicalStoreMaintenance } from './runtime/canonicalStoreMaintenance'
 import { markFileAttachmentsDelivered } from './runtime/fileAttachmentDelivery'
 import { isUndeliveredResult, markResultDelivered } from './runtime/resultDelivery'
 import { dispatchMcpHostRuntime } from './runtimeDispatch'
@@ -234,6 +243,19 @@ let activityHub: HostActivityHub | null = null
 let workspaceProvider: ScopedWorkspaceProvider | null = null
 let spilloverStorage: SpilloverStorage | null = null
 let conversationStoreHandle: ConversationStoreHandle | null = null
+let canonicalStoreMaintenance: CanonicalStoreMaintenance | null = null
+const runtimeWorkspaceWrites = new Set<Promise<unknown>>()
+function trackRuntimeWorkspaceWrite<T>(write: Promise<T>): Promise<T> {
+  runtimeWorkspaceWrites.add(write)
+  void write.then(
+    () => runtimeWorkspaceWrites.delete(write),
+    () => runtimeWorkspaceWrites.delete(write)
+  )
+  return write
+}
+async function drainRuntimeWorkspaceWrites(): Promise<void> {
+  while (runtimeWorkspaceWrites.size) await Promise.all(Array.from(runtimeWorkspaceWrites))
+}
 let promptCache: PromptCache | null = null
 let sessionSearchService: SessionSearchService | null = null
 
@@ -1373,6 +1395,24 @@ async function applyResolvedGuardrails(): Promise<void> {
 }
 
 async function onHostChange(host: HostCRD): Promise<void> {
+  if (canonicalStoreMaintenance) {
+    const previouslyFenced = canonicalStoreMaintenance.isFenced()
+    try {
+      canonicalStoreMaintenance.latch(host)
+    } catch (error) {
+      fenceConversationStoreProducers()
+      await canonicalStoreMaintenance.observe(host) // Retain the latch on a replaced/invalid binding.
+      throw error
+    }
+    if (canonicalStoreMaintenance.isFenced() || previouslyFenced) {
+      fenceConversationStoreProducers()
+      if (currentHost?.spec.contextRef !== host.spec.contextRef)
+        revokeMcpAuthority('context_changed', false)
+      currentHost = host
+      await canonicalStoreMaintenance.observe(host)
+      return
+    }
+  }
   logger.info({ name: host.name }, '[Main] Host configuration changed:')
 
   const contextChanged =
@@ -1450,7 +1490,9 @@ async function onHostChange(host: HostCRD): Promise<void> {
   // Host watch so CRD edits propagate without a pod restart.
   if (workspaceProvider && host.spec.personalization?.enabled) {
     try {
-      await workspaceProvider.collectiveWorkspace.applyAdminIdentityFiles(host.spec.personalization)
+      await trackRuntimeWorkspaceWrite(
+        workspaceProvider.collectiveWorkspace.applyAdminIdentityFiles(host.spec.personalization)
+      )
       // T2.2 §5.7 — identity files just got rewritten; drop every cached
       // `parts` so the next turn rebuilds the `stable` tier from the new
       // identity content. The cache is constructed during initializeAgent()
@@ -1572,6 +1614,12 @@ function resolveSessionDbPath(): string {
   const wp = memoryCfg?.workspacePath ?? config.memory.workspacePath
   return resolveSessionDbPathFrom({
     statelessLifecycle: config.statelessLifecycle,
+    canonicalStoreRequired: config.canonicalStoreRequired,
+    storageContract: parseStorageContract(
+      config.canonicalStoreContract,
+      config.canonicalStoreRequired
+    ),
+    canonicalStateDir: config.canonicalStateDir,
     sessionDbDir: config.sessionDbDir,
     sessionDbPath: config.sessionDbPath,
     workspaceMemoryEnabled: memoryCfg?.enabled === true,
@@ -1586,7 +1634,142 @@ function resolveSessionDbPath(): string {
  * `memory` mode — main.ts keeps the default in-memory store inside the
  * agent's ConversationManager.
  */
+function resolveCanonicalRuntimeContract(): CanonicalStoreRuntimeOptions | undefined {
+  const storageContract = parseStorageContract(
+    config.canonicalStoreContract,
+    config.canonicalStoreRequired
+  )
+  const committed = currentHost?.status?.conversationStore
+  if (
+    (committed?.layout && storageContract !== 'canonical') ||
+    (committed?.compatibility?.storageContract && !storageContract)
+  ) {
+    throw new Error('CanonicalStoreRuntimeContractMissing')
+  }
+  if (!storageContract) {
+    if (config.canonicalStateDir) throw new Error('CanonicalStoreRuntimeContractMissing')
+    assertUncoordinatedStoreBootAllowed(resolveSessionDbPath())
+    return undefined // Unadmitted development callers retain their explicit legacy contract.
+  }
+  if (!config.canonicalStateDir) throw new Error('CanonicalStoreStateDirMissing')
+  const runtime = {
+    stateDir: config.canonicalStateDir,
+    storageContract,
+    binding: { hostUid: config.canonicalHostUid, pvcUid: config.canonicalPvcUid },
+    required: config.canonicalStoreRequired,
+  }
+  if (currentHost?.uid && currentHost.uid !== runtime.binding.hostUid) {
+    throw new Error('CanonicalStoreHostUidMismatch')
+  }
+  assertCanonicalRuntimeConfig(
+    config.sessionStoreMode,
+    config.sessionStoreMode === 'memory' ? undefined : resolveSessionDbPath(),
+    runtime
+  )
+  assertNoIncompleteCanonicalMigration({ stateDir: runtime.stateDir })
+  // The worker validates committed metadata while holding the actual PVC writer fence.
+  return runtime
+}
+
+function fenceConversationStoreProducers(): void {
+  messageQueue?.fenceConversationStoreAdmission()
+  cronScheduler?.stop()
+  spilloverStorage?.stopGc()
+  agent?.beginConversationStoreMaintenance()
+}
+
+function initializeCanonicalMaintenance(): void {
+  const runtime = resolveCanonicalRuntimeContract()
+  if (!runtime || canonicalStoreMaintenance) return
+  canonicalStoreMaintenance = new CanonicalStoreMaintenance({
+    binding: runtime.binding,
+    podUid: config.canonicalPodUid,
+    stateDir: runtime.stateDir,
+    quiesce: async () => {
+      fenceConversationStoreProducers()
+      const handle = conversationStoreHandle
+      if (!handle || handle.mode === 'memory') throw new Error('CanonicalMaintenanceSourceUnknown')
+      await rpcServer?.drainConversationStoreBusiness()
+      await sessionProcessor?.drainForConversationStoreMaintenance()
+      await agent?.quiesceForConversationStoreMaintenance()
+      await spilloverStorage?.drainGc()
+      await drainRuntimeWorkspaceWrites()
+      await handle.shutdown()
+      usageReporter?.stop()
+      await usageReporter?.drain()
+      governedRunReporter?.stop()
+      await governedRunReporter?.drain()
+      return { mode: handle.mode, dbPath: resolveSessionDbPath() }
+    },
+    resume: async () => {
+      // Rebuild from durable rows; never reactivate an executor or queue whose worker closed.
+      // initializeAgent replaces these handles only after the new worker is ready;
+      // retain the closed previous handles while that preparation is in flight.
+      if (currentHost) {
+        refreshFailoverPolicy(currentHost)
+        await ensureConfigStore(currentHost)
+        await initializeProvider(currentHost, apiKeysFromConfigStore(configStore!))
+      }
+      await initializeAgent({ maintenanceRelease: true, deferProducerStart: true })
+      const preparedAgent = agent
+      const preparedCron = cronScheduler
+      const preparedQueue = messageQueue
+      const preparedSessions = sessionProcessor
+      const preparedStore = conversationStoreHandle
+      const preparedSpillover = spilloverStorage
+      const preparedWorkspace = workspaceProvider
+      const preparedPersonalization = currentHost?.spec.personalization || config.personalization
+      const preparedSearch = sessionSearchService
+      const preparedUsageReporter = usageReporter
+      const preparedGovernedReporter = governedRunReporter
+      return {
+        activate: () => {
+          preparedAgent?.activateAfterConversationStoreMaintenance()
+          preparedCron?.start()
+          preparedSpillover?.startGc()
+          if (preparedPersonalization?.enabled && preparedWorkspace) {
+            trackRuntimeWorkspaceWrite(
+              preparedWorkspace.collectiveWorkspace.applyAdminIdentityFiles(preparedPersonalization)
+            ).catch(err =>
+              logger.error({ err }, '[Main] Identity reconciliation after maintenance failed')
+            )
+          }
+          if (preparedSearch) {
+            void preparedSearch
+              .sweepRetention(config.searchRetentionDays)
+              .catch(err =>
+                logger.error({ err }, '[Main] Retention sweep after maintenance failed')
+              )
+          }
+          startMcpInitializationInBackground({
+            initialize: () => initializeMcpServers(),
+            afterInitialAttempt: () => ensureContextMapperPolling(),
+          })
+        },
+        discard: async () => {
+          preparedQueue?.fenceConversationStoreAdmission()
+          preparedCron?.stop()
+          preparedAgent?.beginConversationStoreMaintenance()
+          preparedSpillover?.stopGc()
+          await preparedSessions?.drainForConversationStoreMaintenance()
+          await preparedAgent?.quiesceForConversationStoreMaintenance()
+          await preparedSpillover?.drainGc()
+          await drainRuntimeWorkspaceWrites()
+          await preparedStore?.shutdown()
+          preparedUsageReporter?.stop()
+          await preparedUsageReporter?.drain()
+          preparedGovernedReporter?.stop()
+          await preparedGovernedReporter?.drain()
+        },
+      }
+    },
+    onError: err => logger.error({ err }, '[Main] Conversation store maintenance remains fenced'),
+  })
+  if (currentHost) canonicalStoreMaintenance.latch(currentHost)
+}
+
 async function initializeConversationStore(): Promise<ConversationStoreHandle | null> {
+  const canonicalStore = resolveCanonicalRuntimeContract()
   if (!agent) return null
   if (config.sessionStoreMode === 'memory') {
     logger.info({}, '[Main] Conversation store: memory (legacy fallback)')
@@ -1595,7 +1778,7 @@ async function initializeConversationStore(): Promise<ConversationStoreHandle | 
 
   const dbPath = resolveSessionDbPath()
   const memoryCfg = currentHost?.spec.memory || config.memory
-  if (!memoryCfg?.enabled) {
+  if (!memoryCfg?.enabled && !config.sessionDbDir && !config.canonicalStoreRequired) {
     logger.warn(
       { dbPath: dbPath },
       '[Main] SQLite state will be ephemeral — workspace memory is disabled. dbPath='
@@ -1604,7 +1787,10 @@ async function initializeConversationStore(): Promise<ConversationStoreHandle | 
 
   // D3 §1.1 — durability barrier (PRAGMA synchronous = FULL): always on under
   // the stateless lifecycle; always-on Hosts opt in via CLERUM_DB_BARRIER_MODE=full.
-  const barrierMode = config.statelessLifecycle || config.dbBarrierModeFull
+  const barrierMode =
+    (canonicalStore ? requiresExistingStore(canonicalStore) : false) ||
+    config.statelessLifecycle ||
+    config.dbBarrierModeFull
   const handle = createConversationStore({
     mode: config.sessionStoreMode,
     dbPath,
@@ -1615,8 +1801,15 @@ async function initializeConversationStore(): Promise<ConversationStoreHandle | 
     heartbeatMs: config.dbWorkerHeartbeatMs,
     pendingApprovalTtlMs: config.pendingApprovalTtlMs,
     barrierMode,
+    canonicalStore,
+    onFatalWorkerError: err => {
+      fenceConversationStoreProducers()
+      logger.error({ err }, '[Main] Conversation store worker stopped; runtime admission closed')
+      void shutdown('CONVERSATION_STORE_WORKER_FAILED', 1)
+    },
   })
 
+  await handle.ready
   agent.setConversationStore(handle.store)
   logger.info(
     {
@@ -1649,7 +1842,10 @@ async function initializeConversationStore(): Promise<ConversationStoreHandle | 
 /**
  * Initialize the message queue and agent.
  */
-async function initializeAgent(): Promise<void> {
+async function initializeAgent(
+  options: { maintenanceRelease?: boolean; deferProducerStart?: boolean } = {}
+): Promise<void> {
+  initializeCanonicalMaintenance()
   logger.info({}, '[Main] Initializing message queue and agent')
 
   // Create message queue
@@ -1664,7 +1860,7 @@ async function initializeAgent(): Promise<void> {
   agent = new AgentStateMachine(messageQueue, taskLifecycle, {
     maxTaskDuration: config.agentMaxTaskDuration,
     maxToolCallsPerTask: config.agentMaxToolCallsPerTask,
-    autoStart: true,
+    autoStart: options.deferProducerStart !== true,
     taskDelay: config.agentTaskDelay,
     approvalTimeout: config.agentApprovalTimeout,
   })
@@ -1684,6 +1880,7 @@ async function initializeAgent(): Promise<void> {
   // (currentHost + configStore) so it always reads the live keys/allowlist; a
   // key rotation or allowlist reload is picked up on the next task with no
   // re-wiring. Set once here (the agent is created once).
+  if (options.deferProducerStart) agent.beginConversationStoreMaintenance()
   agent.setTaskModelResolver(resolveTaskModel)
   agent.setImageInputResolver(resolveImageInput)
 
@@ -1734,9 +1931,14 @@ async function initializeAgent(): Promise<void> {
     // Dev mode has no Host CRD watch, so apply env-sourced personalization here.
     // In production, the Host watch also applies this path on every CRD update.
     const personalizationCfg = currentHost?.spec.personalization || config.personalization
-    if (personalizationCfg?.enabled) {
-      workspaceProvider.collectiveWorkspace
-        .applyAdminIdentityFiles(personalizationCfg)
+    if (
+      personalizationCfg?.enabled &&
+      !options.deferProducerStart &&
+      (!canonicalStoreMaintenance?.isFenced() || options.maintenanceRelease)
+    ) {
+      trackRuntimeWorkspaceWrite(
+        workspaceProvider.collectiveWorkspace.applyAdminIdentityFiles(personalizationCfg)
+      )
         .then(() => {
           // T2.2 §5.7 — boot-time apply runs BEFORE the PromptCache is
           // constructed (further down in initializeAgent), so this `?.` is
@@ -1762,10 +1964,19 @@ async function initializeAgent(): Promise<void> {
         gcIntervalMs: config.spilloverGcIntervalMs,
       })
       // Lazy boot sweep (best-effort; failures are logged inside).
-      spilloverStorage.sweep().catch(err => {
-        logger.error({ err: err }, '[Main] Spillover boot sweep failed (non-fatal):')
-      })
-      spilloverStorage.startGc()
+      if (
+        !options.deferProducerStart &&
+        (!canonicalStoreMaintenance?.isFenced() || options.maintenanceRelease)
+      )
+        spilloverStorage.sweep().catch(err => {
+          logger.error({ err: err }, '[Main] Spillover boot sweep failed (non-fatal):')
+        })
+      if (
+        !options.deferProducerStart &&
+        (!canonicalStoreMaintenance?.isFenced() || options.maintenanceRelease)
+      )
+        spilloverStorage.startGc()
+      else spilloverStorage.stopGc()
       agent.setSpilloverStorage(spilloverStorage)
       logger.info(
         {
@@ -1850,27 +2061,32 @@ async function initializeAgent(): Promise<void> {
   // there) AND the feature flag. In `memory` mode there is no `persistQueue`
   // so the tool/endpoint simply stay unregistered.
   const persistQueue = conversationStoreHandle?.persistQueue
-  if (config.sessionSearchEnabled && persistQueue) {
+  if (
+    config.sessionSearchEnabled &&
+    persistQueue &&
+    (!canonicalStoreMaintenance?.isFenced() || options.maintenanceRelease)
+  ) {
     sessionSearchService = new SessionSearchService({ persistQueue })
     agent.setSessionSearchService(sessionSearchService)
 
     // Boot-only retention sweep (T3.1 §8). Failures are non-fatal so a
     // corrupt DB does not block traffic — the metric / log surfaces the issue.
-    sessionSearchService.sweepRetention(config.searchRetentionDays).then(
-      deleted => {
-        logger.info(
-          {
-            event: 'search_retention_sweep',
-            deleted_sessions: deleted,
-            retention_days: config.searchRetentionDays,
-          },
-          'Host runtime event'
-        )
-      },
-      err => {
-        logger.error({ err: err }, '[Main] Session search retention sweep failed (non-fatal):')
-      }
-    )
+    if (!options.deferProducerStart)
+      sessionSearchService.sweepRetention(config.searchRetentionDays).then(
+        deleted => {
+          logger.info(
+            {
+              event: 'search_retention_sweep',
+              deleted_sessions: deleted,
+              retention_days: config.searchRetentionDays,
+            },
+            'Host runtime event'
+          )
+        },
+        err => {
+          logger.error({ err: err }, '[Main] Session search retention sweep failed (non-fatal):')
+        }
+      )
     logger.info(
       { searchRetentionDays: config.searchRetentionDays },
       '[Main] Session search enabled (retentionDays=)'
@@ -1904,8 +2120,15 @@ async function initializeAgent(): Promise<void> {
   //
   // Fail closed: accepting traffic with durable approvals present but no
   // reconstructed executor would strand decisions and break trace continuity.
+  if (canonicalStoreMaintenance?.isFenced() && !options.maintenanceRelease) {
+    fenceConversationStoreProducers()
+    if (currentHost) await canonicalStoreMaintenance.observe(currentHost)
+    return
+  }
   await agent.bootstrap()
 
+  // A prepared resume cannot run producers before its observation epoch is committed.
+  if (options.deferProducerStart) return
   // Start the agent
   agent.start()
   cronScheduler.start()
@@ -2588,6 +2811,9 @@ function subscribeActivity(onEvent: (event: HostActivityEvent) => void): {
 async function startRPCServer(): Promise<void> {
   const port = config.serverPort
   rpcServer = new RPCServer(port)
+  rpcServer.setConversationStoreMaintenanceGate(
+    () => canonicalStoreMaintenance?.isFenced() === true
+  )
   // agent is guaranteed non-null here: initializeAgent() runs before startRPCServer()
   // in both startDevMode and startProductionMode.
   // Use the durable (async) variants so sessions evicted from the in-memory
@@ -2979,7 +3205,7 @@ function startStatelessHeartbeat(): void {
 /**
  * Graceful shutdown handler.
  */
-async function shutdown(signal: string): Promise<void> {
+async function shutdown(signal: string, exitCode = 0): Promise<void> {
   if (isShuttingDown) {
     logger.info({}, '[Main] Shutdown already in progress...')
     return
@@ -3013,7 +3239,7 @@ async function shutdown(signal: string): Promise<void> {
     guardrailResolveTimer = null
   }
 
-  if (agent) {
+  if (agent && !canonicalStoreMaintenance?.isFenced()) {
     await agent.stop()
   }
 
@@ -3050,11 +3276,12 @@ async function shutdown(signal: string): Promise<void> {
     try {
       await conversationStoreHandle.shutdown()
     } catch (err) {
-      logger.warn({ err: err }, '[Main] ConversationStore shutdown raised:')
+      exitCode = 1
+      logger.error({ err }, '[Main] ConversationStore shutdown failed to drain')
     }
   }
 
-  process.exit(0)
+  process.exit(exitCode)
 }
 
 /**

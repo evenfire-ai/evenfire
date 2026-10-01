@@ -48,6 +48,8 @@ COPY mcp-host/package*.json ./mcp-host/
 WORKDIR /app/mcp-host
 COPY --from=builder /app/mcp-host/node_modules ./node_modules
 COPY --from=builder /app/mcp-host/dist ./dist
+# Operator/image programs remain root-owned and immutable to UID1001.
+COPY scripts/conversation-store ./ops
 
 # Run as non-root user
 RUN addgroup -g 1001 -S nodejs && \

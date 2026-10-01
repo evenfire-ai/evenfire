@@ -5,6 +5,7 @@
  */
 import * as k8s from '@kubernetes/client-node'
 import { config } from './config'
+import { logger } from './logger'
 import { HostCRD, HostSpec } from './types'
 
 const kc = new k8s.KubeConfig()
@@ -68,7 +69,7 @@ export async function getLlmHook(name: string): Promise<LlmHookCR | null> {
     return response as LlmHookCR
   } catch (error) {
     if ((error as { response?: { statusCode?: number } }).response?.statusCode === 404) {
-      console.warn(`[K8s] LlmHook not found: ${name} (ns=${config.llmHooksNamespace})`)
+      logger.warn({ name, namespace: config.llmHooksNamespace }, '[K8s] LlmHook not found')
       return null
     }
     throw error
@@ -80,7 +81,7 @@ export async function getLlmHook(name: string): Promise<LlmHookCR | null> {
  */
 export async function getHost(name: string): Promise<HostCRD | null> {
   try {
-    console.log(`[K8s] Getting Host CRD: ${name} in namespace ${config.namespace}`)
+    logger.debug({ name, namespace: config.namespace }, '[K8s] Reading Host')
 
     const response = await customObjectsApi.getNamespacedCustomObject({
       group: GROUP,
@@ -91,18 +92,22 @@ export async function getHost(name: string): Promise<HostCRD | null> {
     })
 
     const obj = response as {
-      metadata: { name: string; namespace?: string }
+      metadata: { name: string; namespace?: string; uid?: string; resourceVersion?: string }
+      status?: HostCRD['status']
       spec: HostSpec
     }
 
     return {
       name: obj.metadata.name,
+      uid: obj.metadata.uid,
+      resourceVersion: obj.metadata.resourceVersion,
+      status: obj.status,
       namespace: obj.metadata.namespace || config.namespace,
       spec: obj.spec,
     }
   } catch (error) {
     if ((error as { response?: { statusCode?: number } }).response?.statusCode === 404) {
-      console.log(`[K8s] Host CRD not found: ${name}`)
+      logger.info({ name }, '[K8s] Host not found')
       return null
     }
     throw error
@@ -157,12 +162,12 @@ export class WatchReconnector {
     if (this.stopped || this.timer) return
     const delayMs = Math.min(WATCH_RECONNECT_MAX_MS, WATCH_RECONNECT_MIN_MS * 2 ** this.attempt)
     this.attempt += 1
-    console.log(`[K8s] ${label}; reconnecting in ${delayMs}ms`)
+    logger.info({ label, delayMs }, '[K8s] Reconnecting watch')
     this.timer = setTimeout(() => {
       this.timer = null
       if (this.stopped) return
       restart().catch(err => {
-        console.error(`[K8s] ${label}: reconnect failed:`, err)
+        logger.error({ label, err }, '[K8s] Watch reconnect failed')
         this.schedule(label, restart)
       })
     }, delayMs)
@@ -188,28 +193,40 @@ export class HostWatcher {
    * @param onChange Called when the Host CRD changes
    * @param onDelete Called when the Host CRD is deleted
    */
-  async start(onChange: (host: HostCRD) => void, onDelete: () => void): Promise<void> {
+  async start(
+    onChange: (host: HostCRD) => void | Promise<void>,
+    onDelete: () => void
+  ): Promise<void> {
     const path = `/apis/${GROUP}/${VERSION}/namespaces/${config.namespace}/${HOSTS_PLURAL}`
 
-    console.log(`[K8s] Starting watch on Host: ${this.name}`)
+    logger.info({ name: this.name }, '[K8s] Starting Host watch')
     this.reconnector.begin()
 
     const watchCallback = (
       type: string,
-      apiObj: { metadata: { name: string; namespace?: string }; spec: HostSpec }
+      apiObj: {
+        metadata: { name: string; namespace?: string; uid?: string; resourceVersion?: string }
+        status?: HostCRD['status']
+        spec: HostSpec
+      }
     ) => {
       if (apiObj.metadata.name !== this.name) {
         return
       }
 
-      console.log(`[K8s] Watch event: ${type} for Host ${this.name}`)
+      logger.debug({ type, name: this.name }, '[K8s] Host watch event')
 
       if (type === 'ADDED' || type === 'MODIFIED') {
-        onChange({
-          name: apiObj.metadata.name,
-          namespace: apiObj.metadata.namespace || config.namespace,
-          spec: apiObj.spec,
-        })
+        void Promise.resolve(
+          onChange({
+            name: apiObj.metadata.name,
+            uid: apiObj.metadata.uid,
+            resourceVersion: apiObj.metadata.resourceVersion,
+            status: apiObj.status,
+            namespace: apiObj.metadata.namespace || config.namespace,
+            spec: apiObj.spec,
+          })
+        ).catch(err => logger.error({ err }, '[K8s] Host change failed closed'))
       } else if (type === 'DELETED') {
         onDelete()
       }
@@ -221,16 +238,27 @@ export class HostWatcher {
     // every Host-driven update (guardrails, model, secretRef, personalization,
     // approval, failover) until the pod was rolled.
     const doneCallback = (err: Error | null) => {
-      if (err) console.error('[K8s] Watch error:', err)
+      if (err) logger.error({ err }, '[K8s] Watch failed')
       this.watchRequest = null
       this.reconnector.schedule(err ? 'Host watch errored' : 'Host watch closed', () =>
         this.start(onChange, onDelete)
       )
     }
 
+    // Refresh current controller maintenance before reopening the watch. Replaying
+    // from that exact RV closes the GET->watch gap, including same-generation status edits.
+    const fresh = await getHost(this.name)
+    if (!fresh) {
+      onDelete()
+      return
+    }
+    await onChange(fresh)
     this.watchRequest = await this.watch.watch(
       path,
-      { fieldSelector: `metadata.name=${this.name}` },
+      {
+        fieldSelector: `metadata.name=${this.name}`,
+        ...(fresh.resourceVersion ? { resourceVersion: fresh.resourceVersion } : {}),
+      },
       watchCallback,
       doneCallback
     )
@@ -243,7 +271,7 @@ export class HostWatcher {
   stop(): void {
     this.reconnector.cancel()
     if (this.watchRequest) {
-      console.log('[K8s] Stopping Host watch')
+      logger.info({}, '[K8s] Stopping Host watch')
       this.watchRequest.abort()
       this.watchRequest = null
     }
@@ -266,14 +294,14 @@ export class LlmHookWatcher {
 
   async start(onChange: (name: string) => void): Promise<void> {
     const path = `/apis/${GROUP}/${VERSION}/namespaces/${config.llmHooksNamespace}/${LLMHOOKS_PLURAL}`
-    console.log(`[K8s] Starting watch on LlmHooks (namespace ${config.llmHooksNamespace})`)
+    logger.info({ namespace: config.llmHooksNamespace }, '[K8s] Starting LlmHook watch')
     this.reconnector.begin()
 
     const watchCallback = (type: string, apiObj: { metadata?: { name?: string } }) => {
       const name = apiObj?.metadata?.name
       if (!name) return
       if (type === 'ADDED' || type === 'MODIFIED' || type === 'DELETED') {
-        console.log(`[K8s] LlmHook watch event: ${type} for ${name}`)
+        logger.debug({ type, name }, '[K8s] LlmHook watch event')
         onChange(name)
       }
     }
@@ -283,7 +311,7 @@ export class LlmHookWatcher {
     // this for hook-CR edits, but only because it polls — the watch itself was
     // gone for the life of the pod.
     const doneCallback = (err: Error | null) => {
-      if (err) console.error('[K8s] LlmHook watch error:', err)
+      if (err) logger.error({ err }, '[K8s] LlmHook watch failed')
       this.watchRequest = null
       this.reconnector.schedule(err ? 'LlmHook watch errored' : 'LlmHook watch closed', () =>
         this.start(onChange)
@@ -297,7 +325,7 @@ export class LlmHookWatcher {
   stop(): void {
     this.reconnector.cancel()
     if (this.watchRequest) {
-      console.log('[K8s] Stopping LlmHook watch')
+      logger.info({}, '[K8s] Stopping LlmHook watch')
       this.watchRequest.abort()
       this.watchRequest = null
     }

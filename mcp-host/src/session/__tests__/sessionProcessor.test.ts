@@ -243,3 +243,82 @@ describe('SessionProcessor dispatch spacing', () => {
     expect(vi.getTimerCount()).toBe(0)
   })
 })
+
+describe('SessionProcessor conversation-store maintenance', () => {
+  it('finishes both accepted tasks and rejects any new admission without cancellation', async () => {
+    const lifecycle = new TaskLifecycle()
+    let finishFirst!: (value: boolean) => void
+    const first = new Promise<boolean>(resolve => {
+      finishFirst = resolve
+    })
+    const executions: string[] = []
+    const processor = new SessionProcessor({
+      maxConcurrent: 1,
+      lifecycle,
+      executor: async task => {
+        executions.push(task.id)
+        return task.id === 'before-1' ? first : false
+      },
+    })
+    const one = createTask('before-1'),
+      two = createTask('before-2')
+    lifecycle.register(one)
+    lifecycle.register(two)
+    processor.enqueue('s1', one)
+    processor.enqueue('s1', two)
+    const closing = processor.drainForConversationStoreMaintenance(1000)
+    expect(() => processor.enqueue('s2', createTask('after'))).toThrow(
+      'ConversationStoreMaintenance'
+    )
+    expect(executions).toEqual(['before-1'])
+    finishFirst(false)
+    await closing
+    expect(executions).toEqual(['before-1', 'before-2'])
+    expect(lifecycle.get('before-1')?.status).not.toBe('cancelled')
+    expect(lifecycle.get('before-2')?.status).not.toBe('cancelled')
+  })
+
+  it('preserves a waiting approval and refuses to lose the accepted task queued behind it', async () => {
+    const lifecycle = new TaskLifecycle()
+    let suspended!: () => void
+    const suspendedSignal = new Promise<void>(resolve => {
+      suspended = resolve
+    })
+    const processor = new SessionProcessor({
+      maxConcurrent: 1,
+      lifecycle,
+      executor: async () => true,
+    })
+    processor.on('task:suspended', suspended)
+    const one = createTask('approval-1'),
+      two = createTask('behind-approval')
+    lifecycle.register(one)
+    lifecycle.register(two)
+    processor.enqueue('s1', one)
+    processor.enqueue('s1', two)
+    await suspendedSignal
+    await expect(processor.drainForConversationStoreMaintenance(1000)).rejects.toThrow(
+      'ApprovalQueuePending'
+    )
+    expect(lifecycle.get('approval-1')?.status).not.toBe('cancelled')
+    expect(lifecycle.get('behind-approval')?.status).toBe('pending')
+  })
+
+  it('never reports an executor timeout as completed quiescence', async () => {
+    const lifecycle = new TaskLifecycle()
+    let finish!: (value: boolean) => void
+    const active = new Promise<boolean>(resolve => {
+      finish = resolve
+    })
+    const processor = new SessionProcessor({ maxConcurrent: 1, lifecycle, executor: () => active })
+    const task = createTask('slow-before')
+    lifecycle.register(task)
+    processor.enqueue('s1', task)
+    await expect(processor.drainForConversationStoreMaintenance(20)).rejects.toThrow(
+      'TasksStillRunning'
+    )
+    expect(processor.activeCount).toBe(1)
+    expect(lifecycle.get(task.id)?.status).toBe('processing')
+    finish(false)
+  })
+})

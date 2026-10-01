@@ -12,6 +12,7 @@
  */
 import * as fs from 'fs/promises'
 import * as path from 'path'
+import { assertStateDbPathAllowed, isStateDbPathAllowed } from './stateProtection'
 import { SearchConfig, SearchResult } from './types'
 
 const RECENCY_BOOST_FILES = /^daily\//
@@ -43,6 +44,7 @@ async function collectMarkdownFiles(
     if (dir === base && excludeTopLevel?.has(entry.name)) continue
     const full = path.join(dir, entry.name)
     const rel = path.relative(base, full)
+    if (!isStateDbPathAllowed(rel, base)) continue
     if (entry.isDirectory()) {
       const sub = await collectMarkdownFiles(full, base, excludeTopLevel)
       files.push(...sub)
@@ -76,6 +78,7 @@ export async function searchWorkspace(
     const absPath = path.join(workspacePath, relPath)
     let fileContent: string
     try {
+      assertStateDbPathAllowed(relPath, workspacePath)
       fileContent = await fs.readFile(absPath, 'utf-8')
     } catch {
       continue

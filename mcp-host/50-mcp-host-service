@@ -1,20 +1,16 @@
 #!/bin/bash
-# Start mcp-host as a background daemon alongside the desktop session.
-# Runs as abc user (PUID/PGID set by LinuxServer s6-overlay).
-# DISPLAY=:1 gives agent access to the X11 display for desktop tools.
-
-echo "[s6-init] Starting mcp-host service..."
-
-# /config/workspace is the PVC mount point — created by K8s.
-# Ensure it's owned by abc (UID 1001) so both the agent and XFCE user can access it.
-chown -R abc:abc /config/workspace /app 2>/dev/null || true
-
+# s6 runs this once. The single UID1001 child has no automatic relaunch path.
+set -euo pipefail
+if [[ "$(id -u)" != 1001 || "$(id -g)" != 1001 ]]; then
+  printf '%s\n' '{"event":"mcp-host-start-blocked","reason":"RuntimeUidMismatch"}' >&2
+  exit 1
+fi
+if [[ ! -d /config/workspace || -L /config/workspace ]]; then
+  printf '%s\n' '{"event":"mcp-host-start-blocked","reason":"LayoutUnsafe"}' >&2
+  exit 1
+fi
+# Never chown /app or retained source files. Code stays root-owned; volume
+# permissions come from the fsGroup/init contract, not a startup fallback.
 export DISPLAY=:1
-# CLERUM_WORKSPACE_PATH is set by the K8s Deployment env; no need to export here.
-
-# Start mcp-host in background as abc user
-# (app lives under /app/mcp-host so the file: dep on ../packages/* resolves)
-s6-setuidgid abc nohup node /app/mcp-host/dist/main.js \
-  > /config/.mcp-host.log 2>&1 &
-
-echo "[s6-init] mcp-host started (PID: $!)"
+node /app/mcp-host/ops/desktop-supervisor.mjs </dev/null &
+printf '%s\n' '{"event":"mcp-host-supervisor-launched"}'

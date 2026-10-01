@@ -58,10 +58,12 @@ COPY --from=builder /app/mcp-host/package*.json ./mcp-host/
 WORKDIR /app/mcp-host
 RUN npm ci --omit=dev
 COPY --from=builder /app/mcp-host/dist ./dist
+# Operator/image programs remain root-owned and immutable to UID1001.
+COPY scripts/conversation-store ./ops
 
 # s6 init script
 COPY mcp-host/50-mcp-host-service /custom-cont-init.d/
 RUN chmod +x /custom-cont-init.d/50-mcp-host-service
 
 # Workspace directory
-RUN mkdir -p /config/workspace && chown -R 1000:1000 /config/workspace
+RUN mkdir -p /config/workspace && chown -R 1001:1001 /config/workspace

@@ -1,18 +1,4 @@
-/**
- * `PersistQueue` — main-thread façade in front of the SQLite worker thread.
- *
- * - `enqueueSync(op)` resolves when the worker ACKs (or rejects on error /
- *   timeout). Used for IronClaw-critical writes: suspendForApproval, approve,
- *   deny, completeTurn with billed usage.
- * - `enqueueAsync(sessionKey, op)` is fire-and-forget but preserves the
- *   `sessionKey`-scoped ordering chain (per `SessionProcessor`'s FIFO
- *   invariant). Errors are logged.
- *
- * The implementation is transport-agnostic: callers inject a `WorkerLike`
- * (typically a `node:worker_threads.Worker`, but tests inject an in-process
- * dispatcher). This keeps the unit-test surface tractable without spinning
- * up real worker threads.
- */
+/** Main-thread transport with ordered writes and acknowledged, bounded shutdown. */
 import { randomUUID } from 'node:crypto'
 import type {
   HeartbeatPayload,
@@ -21,6 +7,7 @@ import type {
   WorkerReply,
 } from '../../../db/worker/protocol'
 import { HEARTBEAT_ID } from '../../../db/worker/protocol'
+import { logger } from '../../../logger'
 
 export interface WorkerLike {
   postMessage(msg: WorkerMessage): void
@@ -29,18 +16,13 @@ export interface WorkerLike {
   on(event: 'exit', listener: (code: number) => void): void
   terminate(): Promise<number> | void
 }
-
 export interface PersistQueueOptions {
   syncTimeoutMs: number
   asyncTimeoutMs: number
-  /** Called whenever a heartbeat reply is observed (id === HEARTBEAT_ID). */
   onHeartbeat?: (payload: HeartbeatPayload) => void
-  /** Called on transport-level errors (worker crashed, message channel broke). */
   onTransportError?: (err: Error) => void
-  /** Called when the worker exits. Drives reconnect/degraded handling in main. */
   onExit?: (code: number) => void
 }
-
 interface PendingEntry {
   resolve: (v: unknown) => void
   reject: (e: Error) => void
@@ -51,19 +33,28 @@ interface PendingEntry {
 export class PersistQueue {
   private readonly pending = new Map<string, PendingEntry>()
   private readonly writeChain = new Map<string, Promise<void>>()
+  private readonly accepted = new Set<Promise<unknown>>()
   private closed = false
+  private closing = false
+  private exited = false
+  private failure: Error | undefined
+  private asyncWriteFailure: Error | undefined
+  private closePromise: Promise<void> | undefined
+  private readonly exitPromise: Promise<void>
 
   constructor(
     private readonly worker: WorkerLike,
     private readonly opts: PersistQueueOptions
   ) {
-    this.worker.on('message', reply => this.handleReply(reply))
-    this.worker.on('error', err => {
-      if (this.opts.onTransportError) this.opts.onTransportError(err)
+    let resolveExit!: () => void
+    this.exitPromise = new Promise<void>(resolve => {
+      resolveExit = resolve
     })
+    this.worker.on('message', reply => this.handleReply(reply))
+    this.worker.on('error', err => this.failTransport(err))
     this.worker.on('exit', code => {
+      this.exited = true
       this.closed = true
-      // Flush pending with an explicit error so callers don't hang.
       for (const entry of this.pending.values()) {
         clearTimeout(entry.timeoutHandle)
         entry.reject(
@@ -71,184 +62,199 @@ export class PersistQueue {
         )
       }
       this.pending.clear()
-      if (this.opts.onExit) this.opts.onExit(code)
+      if (code !== 0) this.failure ??= new Error('ConversationStoreWorkerExited')
+      resolveExit()
+      this.opts.onExit?.(code)
     })
   }
 
-  /**
-   * Fire-and-forget write. Errors are logged. Ordering is preserved per
-   * `sessionKey` so a `startTurn` precedes its `completeTurn` on disk
-   * regardless of scheduling jitter. Returns immediately.
-   */
   enqueueAsync(sessionKey: string, op: WorkerOp): void {
-    if (this.closed) return
-    const prev = this.writeChain.get(sessionKey) ?? Promise.resolve()
-    const next = prev
-      .then(() => this.send(op, this.opts.asyncTimeoutMs))
-      .then(() => {
-        /* discard the result — async path */
-      })
-      .catch(err => {
-        console.error(`[PersistQueue] async write failed (sessionKey=${sessionKey}):`, err)
+    this.assertAdmissionOpen()
+    const previous = this.writeChain.get(sessionKey) ?? Promise.resolve()
+    const write = previous.then(() => this.send(op, this.opts.asyncTimeoutMs))
+    const next = write
+      .then(() => undefined)
+      .catch(error => {
+        this.asyncWriteFailure ??=
+          error instanceof Error ? error : new Error('ConversationStoreWriteFailed')
+        logger.error(
+          { err: error, operation: op.kind },
+          '[PersistQueue] accepted async write failed'
+        )
       })
       .finally(() => {
-        // Drop the chain reference once it settles so we don't keep arbitrarily
-        // long histories per session.
-        if (this.writeChain.get(sessionKey) === next) {
-          this.writeChain.delete(sessionKey)
-        }
+        if (this.writeChain.get(sessionKey) === next) this.writeChain.delete(sessionKey)
       })
+    this.track(next)
     this.writeChain.set(sessionKey, next)
   }
 
-  /**
-   * Sync write. Resolves with the worker's `result` field. Rejects on:
-   * - worker-reported error (`reply.ok === false`)
-   * - timeout (`syncTimeoutMs` elapsed)
-   * - transport disconnect (worker exit)
-   *
-   * When `sessionKey` is provided, the sync write happens AFTER all
-   * preceding async writes for that key. This preserves the durable
-   * write order — e.g. `persistTurnStart` (async) lands in SQLite before
-   * `persistSuspend` (sync). Without the chain the sync write could
-   * race the async one and the snapshot reads inconsistent state.
-   */
   enqueueSync<T = unknown>(op: WorkerOp, sessionKey?: string): Promise<T> {
-    if (this.closed) {
-      return Promise.reject(new Error('PersistQueue is closed'))
+    try {
+      this.assertAdmissionOpen()
+    } catch (error) {
+      return Promise.reject(error)
     }
-    if (sessionKey) {
-      const prev = this.writeChain.get(sessionKey) ?? Promise.resolve()
-      const next = prev
-        .then(() => this.send<T>(op, this.opts.syncTimeoutMs))
-        .finally(() => {
-          if (this.writeChain.get(sessionKey) === (next as Promise<unknown>)) {
-            this.writeChain.delete(sessionKey)
-          }
-        })
-      // The chain derivative must never surface the rejection itself — the
-      // caller gets it via the returned `next` (loud there). Without the
-      // rejection handler a failed sync write would ALSO raise a process-level
-      // unhandledRejection from this internal bookkeeping copy (D3).
-      this.writeChain.set(
-        sessionKey,
-        next.then(
-          () => undefined,
-          () => undefined
-        )
+    if (!sessionKey) return this.track(this.send<T>(op, this.opts.syncTimeoutMs))
+    const previous = this.writeChain.get(sessionKey) ?? Promise.resolve()
+    const next = this.track(previous.then(() => this.send<T>(op, this.opts.syncTimeoutMs)))
+    const ordered = next
+      .then(
+        () => undefined,
+        () => undefined
       )
-      return next
-    }
-    return this.send<T>(op, this.opts.syncTimeoutMs)
+      .finally(() => {
+        if (this.writeChain.get(sessionKey) === ordered) this.writeChain.delete(sessionKey)
+      })
+    this.writeChain.set(sessionKey, ordered)
+    return next
   }
 
-  /**
-   * Wait until every pending async write for `sessionKey` settles. Used by
-   * `SqliteConversationStore` before sync write-through operations that
-   * read other rows (e.g. load_active_session after persistTurnStart).
-   */
   async drainSessionKey(sessionKey: string): Promise<void> {
-    const chain = this.writeChain.get(sessionKey)
-    if (!chain) return
-    try {
-      await chain
-    } catch {
-      /* errors are reported by the chained .catch in enqueueAsync */
-    }
+    await this.writeChain.get(sessionKey)
+    if (this.asyncWriteFailure) throw this.asyncWriteFailure
   }
 
-  /**
-   * Wait until every pending async write whose `sessionKey` STARTS WITH
-   * `prefix` settles. The prefix analogue of `drainSessionKey`: used by
-   * `SqliteConversationStore.prefetchUserSessions` before its bulk
-   * `list_sessions_by_prefix` read, so a just-completed session still in the
-   * per-key write chain isn't reconstructed from stale rows (sqlite-stores-3).
-   */
   async drainPrefix(prefix: string): Promise<void> {
-    const chains: Array<Promise<void>> = []
-    for (const [key, chain] of this.writeChain) {
-      if (key.startsWith(prefix)) chains.push(chain)
-    }
-    if (chains.length === 0) return
-    await Promise.allSettled(chains)
+    await Promise.all(
+      Array.from(this.writeChain)
+        .filter(([key]) => key.startsWith(prefix))
+        .map(([, chain]) => chain)
+    )
+    if (this.asyncWriteFailure) throw this.asyncWriteFailure
   }
 
-  /**
-   * Wait until every pending async write settles. Intended for graceful
-   * shutdown so SIGTERM doesn't truncate the durable trail.
-   */
+  /** Includes unkeyed synchronous calls and operations still waiting in ordering chains. */
   async drain(): Promise<void> {
-    const chains = Array.from(this.writeChain.values())
-    if (chains.length === 0) return
-    await Promise.allSettled(chains)
+    while (this.accepted.size) await Promise.allSettled(Array.from(this.accepted))
+    if (this.failure) throw this.failure
+    // A logged async failure cannot become a successful maintenance/drained receipt.
+    if (this.asyncWriteFailure) throw this.asyncWriteFailure
   }
 
-  async close(): Promise<void> {
-    if (this.closed) return
-    this.closed = true
-    await this.drain()
+  close(): Promise<void> {
+    if (this.closePromise) return this.closePromise
+    this.closing = true
+    this.closePromise = this.finishClose()
+    return this.closePromise
+  }
+
+  private async finishClose(): Promise<void> {
+    let drainError: unknown
     try {
-      this.worker.postMessage({ id: randomUUID(), op: { kind: 'shutdown' } })
-    } catch {
-      /* ignore — worker may already be gone */
+      await this.drain()
+    } catch (error) {
+      drainError = error
     }
     try {
-      const terminated = this.worker.terminate()
-      if (terminated && typeof (terminated as Promise<number>).then === 'function') {
-        await terminated
+      if (this.failure) throw this.failure
+      if (!this.closed) await this.send({ kind: 'shutdown' }, this.opts.syncTimeoutMs)
+      await this.waitForExit()
+    } catch (error) {
+      // A forced termination is containment, never a successful drain proof.
+      try {
+        if (!this.exited) await this.worker.terminate()
+      } catch (err) {
+        logger.warn({ err }, '[PersistQueue] worker termination failed')
       }
-    } catch (err) {
-      console.warn('[PersistQueue] terminate() raised:', err)
+      this.closed = true
+      for (const entry of this.pending.values()) {
+        clearTimeout(entry.timeoutHandle)
+        entry.reject(new Error('PersistQueue closed without a durable acknowledgment'))
+      }
+      this.pending.clear()
+      throw error
     }
-    for (const entry of this.pending.values()) {
-      clearTimeout(entry.timeoutHandle)
-      entry.reject(new Error('PersistQueue closed'))
+    if (drainError) throw drainError
+  }
+
+  private async waitForExit(): Promise<void> {
+    if (this.exited) return
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      await Promise.race([
+        this.exitPromise,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error('ConversationStoreShutdownTimeout')),
+            this.opts.syncTimeoutMs
+          )
+        }),
+      ])
+    } finally {
+      if (timer) clearTimeout(timer)
     }
-    this.pending.clear()
+    if (this.failure) throw this.failure
+  }
+
+  private assertAdmissionOpen(): void {
+    if (this.closed || this.closing) throw new Error('PersistQueue is closed')
+  }
+
+  private track<T>(operation: Promise<T>): Promise<T> {
+    this.accepted.add(operation)
+    void operation.then(
+      () => this.accepted.delete(operation),
+      () => this.accepted.delete(operation)
+    )
+    return operation
   }
 
   private send<T>(op: WorkerOp, timeoutMs: number): Promise<T> {
+    if (this.closed) return Promise.reject(this.failure ?? new Error('PersistQueue is closed'))
     const id = randomUUID()
     return new Promise<T>((resolve, reject) => {
       const timeoutHandle = setTimeout(() => {
-        if (this.pending.delete(id)) {
+        if (this.pending.delete(id))
           reject(new Error(`db worker timeout (${timeoutMs}ms) for op=${op.kind}`))
-        }
       }, timeoutMs)
-      const entry: PendingEntry = {
+      this.pending.set(id, {
         resolve: resolve as PendingEntry['resolve'],
         reject,
         timeoutHandle,
         op,
-      }
-      this.pending.set(id, entry)
+      })
       try {
         this.worker.postMessage({ id, op })
-      } catch (err) {
+      } catch (error) {
         this.pending.delete(id)
         clearTimeout(timeoutHandle)
-        reject(err as Error)
+        reject(error)
       }
     })
   }
 
+  private failTransport(error: Error): void {
+    this.failure ??= error
+    this.closed = true
+    for (const entry of this.pending.values()) {
+      clearTimeout(entry.timeoutHandle)
+      entry.reject(error)
+    }
+    this.pending.clear()
+    this.opts.onTransportError?.(error)
+  }
+
   private handleReply(reply: WorkerReply): void {
+    if (reply.id === '__fatal__') {
+      const error = new Error(reply.error?.message ?? 'ConversationStoreWorkerFatal')
+      ;(error as Error & { code?: string }).code = reply.error?.code
+      this.failTransport(error)
+      return
+    }
     if (reply.id === HEARTBEAT_ID) {
-      if (this.opts.onHeartbeat) {
-        this.opts.onHeartbeat(reply.result as HeartbeatPayload)
-      }
+      this.opts.onHeartbeat?.(reply.result as HeartbeatPayload)
       return
     }
     const entry = this.pending.get(reply.id)
     if (!entry) return
     clearTimeout(entry.timeoutHandle)
     this.pending.delete(reply.id)
-    if (reply.ok) {
-      entry.resolve(reply.result)
-    } else {
-      const err = new Error(reply.error?.message ?? 'unknown worker error')
-      ;(err as Error & { code?: string }).code = reply.error?.code
-      entry.reject(err)
+    if (reply.ok) entry.resolve(reply.result)
+    else {
+      const error = new Error(reply.error?.message ?? 'unknown worker error')
+      ;(error as Error & { code?: string }).code = reply.error?.code
+      entry.reject(error)
     }
   }
 }
