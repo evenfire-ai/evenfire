@@ -276,6 +276,13 @@ describe('generate_docx code blocks', () => {
     expect(printed.slice(0, 4)).toEqual(['markdown', '```js', 'x', '```'])
     expect(printed).toContain('After')
   })
+
+  it('keeps a fence line with a language inside the block, as code', async () => {
+    const printed = texts(
+      await documentXml({ body: '```\nExample:\n```js\nlet a = 1\n```\nAfter' })
+    )
+    expect(printed).toEqual(expect.arrayContaining(['```js', 'let a = 1', 'After']))
+  })
 })
 
 describe('generate_docx headings', () => {
@@ -295,15 +302,15 @@ describe('generate_docx headings', () => {
   })
 })
 
-describe('generate_docx code blocks', () => {
-  it('keeps a fence line with a language inside the block, as code', async () => {
-    const xml = await documentXml({
-      body: '```\nExample:\n```js\nlet a = 1\n```\nAfter',
-    })
-    const text = paragraphs(xml).map(p =>
-      [...p.matchAll(/<w:t[^>]*>([^<]*)</g)].map(m => m[1]).join('')
-    )
-    expect(text).toEqual(expect.arrayContaining(['```js', 'let a = 1', 'After']))
+describe('generate_docx links', () => {
+  it('keeps the style written inside a link label', async () => {
+    const xml = await documentXml({ body: 'See [**the** `npm ci` docs](https://x.test).' })
+    const link = /<w:hyperlink [^>]*>([\s\S]*?)<\/w:hyperlink>/g
+    const runs = [...xml.matchAll(link)].map(m => m[1]).join('')
+    expect(runs).toMatch(/<w:b\/>[\s\S]*?<w:t[^>]*>the</)
+    expect(runs).toMatch(/w:ascii="Consolas"[\s\S]*?<w:t[^>]*>npm ci</)
+    expect(runs).not.toContain('**')
+    expect(runs).not.toContain('`')
   })
 })
 

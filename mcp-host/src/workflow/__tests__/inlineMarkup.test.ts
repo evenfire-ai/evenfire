@@ -219,11 +219,9 @@ describe('inline markdown', () => {
       'x\\<b>\\</b>',
     ]
     for (const label of labels) {
-      const outside = inlineSpans(label)
-        .map(s => s.text)
-        .join('')
+      const outside = inlineSpans(label).map(s => ({ ...s, link: 'https://x.com/a' }))
       expect(inlineSpans(`<a href="https://x.com/a">${label}</a> end`), label).toEqual([
-        { text: outside, link: 'https://x.com/a' },
+        ...outside,
         { text: ' end' },
       ])
     }
@@ -251,6 +249,34 @@ describe('inline markdown', () => {
     expect(inlineSpans('<a href="https://x.com/a">![i](p.png) \\[1\\]</a>')).toEqual([
       { text: '![i](p.png) [1]', link: 'https://x.com/a' },
     ])
+  })
+
+  it('reads the label of a link as inline markdown, as CommonMark does', () => {
+    const link = 'https://x.test'
+    expect(inlineSpans(`[**Docs**](${link})`)).toEqual([{ text: 'Docs', bold: true, link }])
+    expect(inlineSpans(`[a *b* \`c\`](${link})`)).toEqual([
+      { text: 'a ', link },
+      { text: 'b', italics: true, link },
+      { text: ' ', link },
+      { text: 'c', code: true, link },
+    ])
+    expect(inlineSpans(`<a href="${link}"><b>Docs</b> page</a>`)).toEqual([
+      { text: 'Docs', bold: true, link },
+      { text: ' page', link },
+    ])
+  })
+
+  it('reads emphasis in a link label with the brackets beside it, as CommonMark does', () => {
+    const link = 'https://x.test'
+    // The closing * is followed by "]", so the rule of three keeps it apart from "**".
+    expect(inlineSpans(`[**\`b*](${link})`)).toEqual([{ text: '**`b*', link }])
+    // Emphasis does not cross the edge of a link.
+    expect(inlineSpans(`[**a](${link})**`)).toEqual([{ text: '**a', link }, { text: '**' }])
+    expect(inlineSpans(`**[a](${link})**`)).toEqual([{ text: 'a', bold: true, link }])
+  })
+
+  it('prints an escaped bracket in a link label as the bracket, as CommonMark does', () => {
+    expect(inlineSpans('[a\\]](https://x.test)')).toEqual([{ text: 'a]', link: 'https://x.test' }])
   })
 
   it('keeps balanced parentheses in a link target', () => {

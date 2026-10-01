@@ -73,6 +73,10 @@ interface RunContext {
   codeSize: number
 }
 
+function codeStyle(ctx: RunContext): RunOptions {
+  return { font: { ascii: 'Consolas', hAnsi: 'Consolas' }, size: ctx.codeSize }
+}
+
 function appendRuns(markdown: string, base: RunOptions, ctx: RunContext, out: DocxInline[]): void {
   for (const span of markdownSpans(markdown)) {
     const style: RunOptions = {
@@ -93,21 +97,14 @@ function appendRuns(markdown: string, base: RunOptions, ctx: RunContext, out: Do
           link: span.link,
           children: textRuns(
             span.text,
-            { ...style, color: '1D4ED8', underline: {} },
+            { ...style, ...(span.code ? codeStyle(ctx) : {}), color: '1D4ED8', underline: {} },
             ctx.eastAsia,
             ctx.rtl
           ),
         })
       )
     } else if (span.code) {
-      out.push(
-        ...textRuns(
-          span.text,
-          { ...style, font: { ascii: 'Consolas', hAnsi: 'Consolas' }, size: ctx.codeSize },
-          ctx.eastAsia,
-          ctx.rtl
-        )
-      )
+      out.push(...textRuns(span.text, { ...style, ...codeStyle(ctx) }, ctx.eastAsia, ctx.rtl))
     } else {
       out.push(...textRuns(span.text, style, ctx.eastAsia, ctx.rtl))
     }

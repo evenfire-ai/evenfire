@@ -737,23 +737,33 @@ function linkLabelEnd(token: string): number {
   return at
 }
 
-/** The atom `token` as a span, before the emphasis around it is applied. */
-function atomSpan(token: string): InlineSpan {
+/**
+ * The atom `token` as spans, before the emphasis around it is applied. A link
+ * label is read as inline markdown of its own, so [**Docs**](url) is a bold
+ * link; it holds no unescaped bracket, so no link or image nests inside it.
+ * It is read with its brackets, which then come off: a * beside them opens or
+ * closes as CommonMark decides with them there.
+ */
+function atomSpans(token: string): InlineSpan[] {
   if (token.startsWith('![')) {
     const split = token.indexOf('](')
-    return {
-      text: decodeEntities(unescapeMarkdown(withoutMarks(token.slice(2, split)))),
-      image: imageTarget(token.slice(split + 2, -1)),
-    }
+    return [
+      {
+        text: decodeEntities(unescapeMarkdown(withoutMarks(token.slice(2, split)))),
+        image: imageTarget(token.slice(split + 2, -1)),
+      },
+    ]
   }
   if (token.startsWith('[')) {
     const split = linkLabelEnd(token)
-    return {
-      text: decodeEntities(unescapeMarkdown(withoutMarks(token.slice(1, split)))),
-      link: decodeEntities(token.slice(split + 2, -1)),
-    }
+    const link = decodeEntities(token.slice(split + 2, -1))
+    const label = markdownSpans(token.slice(0, split + 1))
+    label[0].text = label[0].text.slice(1)
+    label[label.length - 1].text = label[label.length - 1].text.slice(0, -1)
+    const spans = label.filter(span => span.text).map(span => ({ ...span, link }))
+    return spans.length > 0 ? spans : [{ text: '', link }]
   }
-  return { text: token.slice(1) }
+  return [{ text: token.slice(1) }]
 }
 
 /**
@@ -783,7 +793,7 @@ export function markdownSpans(markdown: string): InlineSpan[] {
       at = span.end
     } else if (m) {
       scanText(markdown, at, m.index, pieces)
-      pieces.push({ span: atomSpan(m[0]) })
+      for (const span of atomSpans(m[0])) pieces.push({ span })
       at = atoms.lastIndex
     } else {
       break
