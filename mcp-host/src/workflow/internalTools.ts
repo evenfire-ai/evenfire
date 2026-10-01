@@ -1459,20 +1459,17 @@ const PPTX_CHART_SCHEMA = {
 }
 
 /**
- * A template chart: slides[].chart without its nested `data` form. The runtime
- * still reads that form; readNativeChart checks its labels and series names,
- * and the chart normalizer its datasets and values.
+ * A template chart. Its fields are those of slides[].chart, which the schema
+ * spells out once: every model request carries the schema, and the deck
+ * builder checks a template chart as it checks a slide's (readNativeChart, then
+ * the chart normalizer), naming the field it cannot use.
  */
 function pptxTemplateChart(description: string): Record<string, unknown> {
   return {
     type: 'object',
-    description: `${description} As slides[].chart.`,
+    description: `${description} Same fields as slides[].chart.`,
     properties: {
-      path: { type: 'string', description: PPTX_PATH_SHORT },
       type: { type: 'string', enum: [...NATIVE_CHART_TYPES], description: 'Chart type.' },
-      title: { type: 'string', description: 'Slide title.' },
-      ...pptxChartSeries(PPTX_SERIES_SHORT),
-      caption: { type: 'string', description: 'Note.' },
     },
   }
 }
