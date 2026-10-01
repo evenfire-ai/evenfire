@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createEvenfireDeepLinkRouter } from '../evenfireDeepLinkRouter.js'
 
+const electronDialog = vi.hoisted(() => ({ showErrorBox: vi.fn() }))
+vi.mock('electron', () => ({ dialog: electronDialog }))
+
 type SentMessage = {
   channel: string
   payload?: unknown
@@ -116,6 +119,23 @@ describe('evenfire deep-link router', () => {
     expect(harness.focusWindow).toHaveBeenCalledTimes(3)
     expect(harness.logout).toHaveBeenCalledOnce()
     expect(harness.requestMainWindow).not.toHaveBeenCalled()
+  })
+
+  it('does not report a successful external logout when logout rejects', async () => {
+    const harness = createHarness()
+    harness.setRendererReady(true)
+    harness.logout.mockRejectedValue(new Error('synthetic logout cleanup failure'))
+    electronDialog.showErrorBox.mockClear()
+
+    harness.router.handle('evenfire://logout')
+    await vi.waitFor(() => expect(electronDialog.showErrorBox).toHaveBeenCalledOnce())
+
+    expect(harness.sent).toEqual([])
+    expect(harness.focusWindow).not.toHaveBeenCalled()
+    expect(electronDialog.showErrorBox).toHaveBeenCalledWith(
+      'Evenfire',
+      'Logout failed. Please try again.'
+    )
   })
 
   it('enqueues setup and environment links until the renderer is ready, then drains in order once', () => {
