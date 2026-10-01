@@ -1,11 +1,13 @@
 // @vitest-environment jsdom
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AuthContext, type AuthContextValue } from '@contexts/AuthContext'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { QueryClient, QueryClientProvider, useQueryClient } from '@tanstack/react-query'
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
+import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { createEmptyWorkspaceTabsState, openFilesTab, setFilesTabPath } from '@lib/workspaceTabs'
 import type { WorkspaceTabsState } from '@lib/workspaceTabs.types'
+import { resolveDeniedMessage } from '@/gfs/__fixtures__/gfsProducerFixtures'
 import { FilesPage } from '../FilesPage'
 
 // This suite mounts the REAL FilesPage on the REAL useGfsBrowserController (T1:
@@ -81,7 +83,8 @@ function authValue(): AuthContextValue {
 const SEED_URI = 'gfs://main/aaa'
 
 /** App's files render seam, reduced to the tab-persistence contract under test. */
-function FilesTabHarness() {
+function FilesTabHarness({ remoteGfsChangeEpoch = 0 }: { remoteGfsChangeEpoch?: number }) {
+  const queryClient = useQueryClient()
   const [state, setState] = useState<WorkspaceTabsState>(() => {
     let next = createEmptyWorkspaceTabsState()
     // A non-root files tab, already persisted at a live gfsUri (as if reopened
@@ -97,6 +100,14 @@ function FilesTabHarness() {
 
   // Seed captured once per active tab id (App uses a ref; here the id is stable).
   const seedPath = activeFilesTab?.files?.path ?? null
+
+  useEffect(() => {
+    if (remoteGfsChangeEpoch === 0) return
+    void queryClient.invalidateQueries({
+      queryKey: desktopQueryKeys.gfsRoot,
+      refetchType: 'active',
+    })
+  }, [queryClient, remoteGfsChangeEpoch])
 
   const handleLocationChange = (gfsUri: string | null, name: string | null) => {
     const id = activeIdRef.current
@@ -116,6 +127,7 @@ function FilesTabHarness() {
           key={activeFilesTab.id}
           pendingGfsUri={seedPath}
           onLocationChange={handleLocationChange}
+          {...({ remoteGfsChangeEpoch } as Record<string, number>)}
         />
       )}
     </>
@@ -124,13 +136,16 @@ function FilesTabHarness() {
 
 function renderHarness() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-  return render(
-    <AuthContext.Provider value={authValue()}>
-      <QueryClientProvider client={client}>
-        <FilesTabHarness />
-      </QueryClientProvider>
-    </AuthContext.Provider>
-  )
+  return {
+    client,
+    ...render(
+      <AuthContext.Provider value={authValue()}>
+        <QueryClientProvider client={client}>
+          <FilesTabHarness />
+        </QueryClientProvider>
+      </AuthContext.Provider>
+    ),
+  }
 }
 
 describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', () => {
@@ -192,5 +207,175 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
     })
 
     await waitFor(() => expect(tab()).toBe(`${SEED_URI}|Q4 Reports`))
+  })
+
+  it('refreshes an open folder path and its child list after a remote move and create', async () => {
+    let moved = false
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve: vi.fn(async (uri: string) => {
+            if (uri === SEED_URI) {
+              return {
+                resourceId: 'folder-current',
+                gfsUri: SEED_URI,
+                drive: 'main',
+                name: 'Reports',
+                kind: 'directory',
+                parentResourceId: moved ? 'parent-new' : 'parent-old',
+                version: moved ? 2 : 1,
+              }
+            }
+            if (uri === 'gfs://main/parentold') {
+              return {
+                resourceId: 'parent-old',
+                gfsUri: uri,
+                name: 'Old location',
+                kind: 'directory',
+                parentResourceId: null,
+                version: 1,
+              }
+            }
+            if (uri === 'gfs://main/parentnew') {
+              return {
+                resourceId: 'parent-new',
+                gfsUri: uri,
+                name: 'New location',
+                kind: 'directory',
+                parentResourceId: null,
+                version: 1,
+              }
+            }
+            throw new Error(`Unexpected GFS resolve URI: ${uri}`)
+          }),
+          listChildren: vi.fn(async (resourceId: string) => ({
+            items:
+              moved && resourceId === 'folder-current'
+                ? [
+                    {
+                      resourceId: 'new-file',
+                      rid: 'new-file',
+                      gfsUri: 'gfs://main/new-file',
+                      drive: 'main',
+                      parentResourceId: 'folder-current',
+                      name: 'new-note.md',
+                      kind: 'file',
+                      path: '/new-location/Reports/new-note.md',
+                      version: 1,
+                      bytes: 12,
+                    },
+                  ]
+                : [],
+            nextCursor: null,
+          })),
+          affordances: vi.fn(async () => ({
+            held: [],
+            canDelegate: false,
+            grantableBits: [],
+            canCreateShare: false,
+          })),
+        },
+      },
+    })
+
+    const { client, rerender } = renderHarness()
+    const location = () => screen.getByRole('navigation', { name: 'File location' }).textContent
+    await waitFor(() => expect(location()).toContain('Old location'))
+    expect(location()).toContain('Reports')
+    expect(await screen.findByText('This folder is empty')).toBeTruthy()
+
+    moved = true
+    await act(async () => {
+      rerender(
+        <AuthContext.Provider value={authValue()}>
+          <QueryClientProvider client={client}>
+            <FilesTabHarness remoteGfsChangeEpoch={1} />
+          </QueryClientProvider>
+        </AuthContext.Provider>
+      )
+    })
+
+    expect(await screen.findByText('new-note.md')).toBeTruthy()
+    await waitFor(() => expect(location()).toContain('New location'))
+    expect(location()).toContain('Reports')
+    expect(location()).not.toContain('Old location')
+  })
+
+  it('clears an open folder and cached rows when remote authorization is revoked', async () => {
+    const denial = await resolveDeniedMessage(SEED_URI)
+    let revoked = false
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve: vi.fn(async (uri: string) => {
+            if (revoked) throw new Error(denial)
+            if (uri !== SEED_URI) throw new Error(`Unexpected GFS resolve URI: ${uri}`)
+            return {
+              resourceId: 'folder-current',
+              gfsUri: SEED_URI,
+              drive: 'main',
+              name: 'Private folder',
+              kind: 'directory',
+              parentResourceId: null,
+              version: 1,
+            }
+          }),
+          listChildren: vi.fn(async () => {
+            if (revoked) throw new Error(denial)
+            return {
+              items: [
+                {
+                  resourceId: 'private-file',
+                  rid: 'private-file',
+                  gfsUri: 'gfs://main/private-file',
+                  drive: 'main',
+                  parentResourceId: 'folder-current',
+                  name: 'private-notes.md',
+                  kind: 'file',
+                  path: '/Private folder/private-notes.md',
+                  version: 1,
+                  bytes: 30,
+                },
+              ],
+              nextCursor: null,
+            }
+          }),
+          affordances: vi.fn(async () => ({
+            held: [],
+            canDelegate: false,
+            grantableBits: [],
+            canCreateShare: false,
+          })),
+        },
+      },
+    })
+
+    const { client, rerender } = renderHarness()
+    await screen.findByText('private-notes.md')
+    expect(screen.getByRole('navigation', { name: 'File location' }).textContent).toContain(
+      'Private folder'
+    )
+
+    revoked = true
+    await act(async () => {
+      rerender(
+        <AuthContext.Provider value={authValue()}>
+          <QueryClientProvider client={client}>
+            <FilesTabHarness remoteGfsChangeEpoch={1} />
+          </QueryClientProvider>
+        </AuthContext.Provider>
+      )
+    })
+
+    await waitFor(() => {
+      expect(screen.getByRole('navigation', { name: 'File location' }).textContent).toBe(
+        'Shared with me'
+      )
+      expect(screen.queryByText('private-notes.md')).toBeNull()
+    })
   })
 })

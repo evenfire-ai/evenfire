@@ -2,10 +2,13 @@
 import { useReducer } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useNotificationsContext } from '@contexts/NotificationsContext'
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { QueryClientProvider, useInfiniteQuery, useQueries, useQuery } from '@tanstack/react-query'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { DESKTOP_ROUTES } from '@constants/navigation'
+import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { useAppController } from '@hooks/useAppController'
 import type { GfsPreviewResource } from '@lib/gfsPreview'
+import { desktopQueryClient } from '@lib/queryClient'
 import {
   activeWorkspaceTab,
   createWorkspaceTabsState,
@@ -17,7 +20,12 @@ import {
 } from '@lib/workspaceTabs'
 import { mapKindToRoute, settingsSectionForRoute } from '@lib/workspaceTabsRoute'
 import { App } from '@/App'
-import { openGfsResourcePayload, resolvedFile } from '@/gfs/__fixtures__/gfsProducerFixtures'
+import { USER_SCOPE_INVALIDATED } from '@/gfs/__fixtures__/entityChangeFixtures'
+import {
+  openGfsResourcePayload,
+  resolveDeniedMessage,
+  resolvedFile,
+} from '@/gfs/__fixtures__/gfsProducerFixtures'
 import type { AppNotification } from '@/uiTypes'
 
 // The universal tab store now lives inside the controller (single writer;
@@ -205,6 +213,7 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
         gfsUri: preview.gfsUri,
         fileKind: preview.kind,
         byteLength: preview.bytes,
+        ...(preview.version !== undefined ? { resourceVersion: preview.version } : {}),
         ...('mimeType' in preview ? { mimeType: preview.mimeType } : {}),
       })
     )
@@ -1274,6 +1283,10 @@ describe('App plugin previewable handoff — routes through resolveGfsPreview (R
         { uri: 'gfs://main/vid1', kind: 'video' },
       ]
     )
+    expect(previewTabs().map(t => t.preview?.resourceVersion)).toEqual([
+      mdPayload.version,
+      videoPayload.version,
+    ])
     // No leftover files tab seeded with a previewable URI — the R1-H3 loop.
     expect(filesTabs()).toHaveLength(0)
     expect(currentController.openFilesSection).not.toHaveBeenCalled()
@@ -1298,6 +1311,423 @@ describe('App plugin previewable handoff — routes through resolveGfsPreview (R
     expect(previewTabs()).toHaveLength(0)
     expect(currentController.openPreviewSection).not.toHaveBeenCalled()
     expect(currentController.navItem).toBe(DESKTOP_ROUTES.files)
+  })
+})
+
+describe('App live GFS preview revalidation', () => {
+  let currentController: AppController
+  let dispatchEntityChange: ((event: unknown) => void) | null
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    dispatchEntityChange = null
+    const workspaceTabs = openPreviewTab(createWorkspaceTabsState('chat-tab-1'), {
+      id: 'preview-md',
+      title: 'README.md',
+      gfsUri: 'gfs://main/readme',
+      fileKind: 'markdown',
+      byteLength: 14,
+      resourceVersion: 3,
+    })
+    currentController = makeController({ workspaceTabs } as Partial<AppController>)
+    vi.mocked(useAppController).mockImplementation(() => useReactiveController(currentController))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        shortcuts: { onCommand: vi.fn(() => vi.fn()) },
+        app: { rendererReady: vi.fn().mockResolvedValue(undefined) },
+        entityChanges: {
+          subscribe: vi.fn((handler: (event: unknown) => void) => {
+            dispatchEntityChange = handler
+            return Promise.resolve(vi.fn())
+          }),
+        },
+        gfs: { resolve: vi.fn() },
+        sandboxUi: {
+          listApps: vi.fn().mockResolvedValue({ apps: [] }),
+          listPendingDeepLinks: vi.fn().mockResolvedValue({ links: [] }),
+          clearPendingDeepLinks: vi.fn().mockResolvedValue(undefined),
+          onDeepLink: vi.fn(() => vi.fn()),
+          setVisible: vi.fn().mockResolvedValue(undefined),
+          setBounds: vi.fn().mockResolvedValue(undefined),
+          focusActive: vi.fn().mockResolvedValue(true),
+          close: vi.fn().mockResolvedValue(undefined),
+        },
+      } as unknown as Window['clerum'],
+    })
+  })
+
+  afterEach(() => {
+    cleanup()
+    desktopQueryClient.removeQueries({ queryKey: desktopQueryKeys.gfsRoot })
+    vi.restoreAllMocks()
+    delete (window as { clerum?: unknown }).clerum
+  })
+
+  it('keeps the 30-row, two-page, one-preview refresh under the 32-read budget', async () => {
+    const rows = Array.from({ length: 30 }, (_, index) => ({
+      resourceId: `resource-${index}`,
+      rid: `rid-${index}`,
+      gfsUri: `gfs://main/resource-${index}`,
+      drive: 'main',
+      parentResourceId: 'folder',
+      name: `row-${index}.md`,
+      kind: 'file' as const,
+      path: null,
+      version: 1,
+      bytes: 1,
+    }))
+    const firstPage = { items: rows.slice(0, 15), nextCursor: 'page-2' }
+    const secondPage = { items: rows.slice(15), nextCursor: null }
+    const listChildren = vi.fn(async (_id: string, _drive?: string, cursor?: string) =>
+      cursor === 'page-2' ? secondPage : firstPage
+    )
+    const listAccessible = vi.fn(async () => ({ items: [], nextCursor: null }))
+    const affordances = vi.fn(async () => ({ held: [] }))
+    const resolve = vi.mocked(window.clerum.gfs.resolve).mockResolvedValue(
+      resolvedFile('readme', 'README.md', {
+        gfsUri: 'gfs://main/readme',
+        bytes: 14,
+        version: 3,
+      }) as never
+    )
+    Object.assign(window.clerum.gfs, { listChildren, listAccessible, affordances })
+
+    const childrenKey = desktopQueryKeys.gfsChildren('session', 'folder', 'main')
+    const accessibleKey = desktopQueryKeys.gfsAccessible('session', 'main')
+    desktopQueryClient.setQueryData(childrenKey, {
+      pages: [firstPage, secondPage],
+      pageParams: [undefined, 'page-2'],
+    })
+    desktopQueryClient.setQueryData(accessibleKey, { items: [], nextCursor: null })
+    rows.forEach(row => {
+      desktopQueryClient.setQueryData(
+        desktopQueryKeys.gfsAffordances('session', row.resourceId, 'main'),
+        { held: [] }
+      )
+    })
+
+    function ReadBudgetObservers() {
+      useQuery({ queryKey: accessibleKey, queryFn: () => window.clerum.gfs.listAccessible('main') })
+      useInfiniteQuery({
+        queryKey: childrenKey,
+        queryFn: ({ pageParam }) => window.clerum.gfs.listChildren('folder', 'main', pageParam),
+        initialPageParam: undefined as string | undefined,
+        getNextPageParam: page => page.nextCursor ?? undefined,
+      })
+      useQueries({
+        queries: rows.map(row => ({
+          queryKey: desktopQueryKeys.gfsAffordances('session', row.resourceId, 'main'),
+          queryFn: () => window.clerum.gfs.affordances(row.resourceId, 'main'),
+        })),
+      })
+      return null
+    }
+
+    render(
+      <QueryClientProvider client={desktopQueryClient}>
+        <ReadBudgetObservers />
+        <App />
+      </QueryClientProvider>
+    )
+    await waitFor(() => expect(dispatchEntityChange).toBeTypeOf('function'))
+    listChildren.mockClear()
+    listAccessible.mockClear()
+    affordances.mockClear()
+
+    act(() => dispatchEntityChange?.({ ...USER_SCOPE_INVALIDATED }))
+    await waitFor(() => expect(resolve).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(listChildren).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(listAccessible).toHaveBeenCalledTimes(1))
+
+    const measuredReads =
+      resolve.mock.calls.length + listChildren.mock.calls.length + listAccessible.mock.calls.length
+    expect(affordances).not.toHaveBeenCalled()
+    expect(measuredReads).toBe(4)
+    expect(measuredReads).toBeLessThanOrEqual(32)
+  })
+
+  it('queues a second invalidation instead of canceling a multi-page refresh', async () => {
+    let finishFirstPage!: (page: {
+      items: Array<{ name: string }>
+      nextCursor: string | null
+    }) => void
+    let readSequence = 0
+    const listChildren = vi.fn((_id: string, _drive?: string, cursor?: string) => {
+      readSequence += 1
+      if (readSequence === 1) {
+        return new Promise(resolve => {
+          finishFirstPage = resolve
+        })
+      }
+      return Promise.resolve({
+        items: [{ name: `${cursor ? 'second' : 'first'}-latest` }],
+        nextCursor: cursor ? null : 'page-2',
+      })
+    })
+    Object.assign(window.clerum.gfs, { listChildren })
+    const queryKey = desktopQueryKeys.gfsChildren('session', 'folder', 'main')
+    desktopQueryClient.setQueryData(queryKey, {
+      pages: [
+        { items: [{ name: 'first-old' }], nextCursor: 'page-2' },
+        { items: [{ name: 'second-old' }], nextCursor: null },
+      ],
+      pageParams: [undefined, 'page-2'],
+    })
+
+    function FolderRows() {
+      const query = useInfiniteQuery({
+        queryKey,
+        queryFn: ({ pageParam }) => window.clerum.gfs.listChildren('folder', 'main', pageParam),
+        initialPageParam: undefined as string | undefined,
+        getNextPageParam: page => page.nextCursor ?? undefined,
+      })
+      return (
+        <output data-testid="folder-rows">
+          {(query.data?.pages ?? [])
+            .flatMap(page => page.items)
+            .map(row => row.name)
+            .join(',')}
+        </output>
+      )
+    }
+
+    render(
+      <QueryClientProvider client={desktopQueryClient}>
+        <FolderRows />
+        <App />
+      </QueryClientProvider>
+    )
+    await waitFor(() => expect(dispatchEntityChange).toBeTypeOf('function'))
+
+    act(() => dispatchEntityChange?.({ ...USER_SCOPE_INVALIDATED }))
+    await waitFor(() => expect(listChildren).toHaveBeenCalledTimes(1))
+    act(() => dispatchEntityChange?.({ ...USER_SCOPE_INVALIDATED }))
+
+    // The event may mark this read stale, but it cannot cancel/restart the user's
+    // active page-chain read while the authoritative response is still pending.
+    expect(listChildren).toHaveBeenCalledTimes(1)
+    expect(screen.getByTestId('folder-rows').textContent).toBe('first-old,second-old')
+
+    await act(async () => {
+      finishFirstPage({ items: [{ name: 'first-latest' }], nextCursor: 'page-2' })
+      await Promise.resolve()
+    })
+    await waitFor(() =>
+      expect(screen.getByTestId('folder-rows').textContent).toBe('first-latest,second-latest')
+    )
+    expect(listChildren).toHaveBeenCalledTimes(4)
+  })
+
+  it('hard-resyncs active permission affordances as well as open previews', async () => {
+    const affordanceKey = desktopQueryKeys.gfsAffordances('session', 'folder', 'main')
+    const affordances = vi.fn(async () => ({ held: ['read'] }))
+    Object.assign(window.clerum.gfs, { affordances })
+    desktopQueryClient.setQueryData(affordanceKey, { held: [] })
+    const resolve = vi.mocked(window.clerum.gfs.resolve).mockResolvedValue(
+      resolvedFile('readme', 'README.md', {
+        gfsUri: 'gfs://main/readme',
+        bytes: 14,
+        version: 4,
+      }) as never
+    )
+
+    function CurrentFolderAffordances() {
+      useQuery({
+        queryKey: affordanceKey,
+        queryFn: () => window.clerum.gfs.affordances('folder', 'main'),
+      })
+      return null
+    }
+
+    render(
+      <QueryClientProvider client={desktopQueryClient}>
+        <CurrentFolderAffordances />
+        <App />
+      </QueryClientProvider>
+    )
+    await waitFor(() => expect(dispatchEntityChange).toBeTypeOf('function'))
+    act(() =>
+      dispatchEntityChange?.({
+        schemaVersion: 1,
+        type: 'resync_required',
+        cursor: '00000000-0000-0000-0000-000000000000',
+        scopes: ['gfs', 'authorization'],
+      })
+    )
+
+    await waitFor(() => expect(affordances).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(resolve).toHaveBeenCalledTimes(1))
+    expect(desktopQueryClient.getQueryData(affordanceKey)).toEqual({ held: ['read'] })
+    expect(
+      currentController.workspaceTabs.tabs.find(tab => tab.id === 'preview-md')?.preview
+    ).toMatchObject({ resourceVersion: 4 })
+  })
+
+  it('preserves an unchanged preview during soft scope revalidation and purges only on 403', async () => {
+    const resolve = vi.mocked(window.clerum.gfs.resolve)
+    const invalidateQueries = vi
+      .spyOn(desktopQueryClient, 'invalidateQueries')
+      .mockResolvedValue(undefined)
+    let finishResolve!: (value: ReturnType<typeof resolvedFile>) => void
+    resolve.mockImplementationOnce(
+      () =>
+        new Promise(resolvePromise => {
+          finishResolve = resolvePromise
+        }) as never
+    )
+    render(<App />)
+    await waitFor(() => expect(dispatchEntityChange).toBeTypeOf('function'))
+
+    const initial = () => currentController.workspaceTabs.tabs.find(tab => tab.id === 'preview-md')
+    const before = initial()
+    expect(before?.kind).toBe('preview')
+    act(() => dispatchEntityChange?.({ ...USER_SCOPE_INVALIDATED }))
+    await waitFor(() => expect(resolve).toHaveBeenCalledTimes(1))
+    const queryFilter = invalidateQueries.mock.calls.at(-1)?.[0]
+    expect(queryFilter?.queryKey).toEqual(desktopQueryKeys.gfsRoot)
+    expect(
+      queryFilter?.predicate?.({
+        queryKey: desktopQueryKeys.gfsAffordances('session', 'resource-id', 'main'),
+      } as never)
+    ).toBe(false)
+    expect(
+      queryFilter?.predicate?.({
+        queryKey: desktopQueryKeys.gfsChildren('session', 'resource-id', 'main'),
+      } as never)
+    ).toBe(true)
+    expect(initial()).toEqual(before)
+
+    await act(async () => {
+      finishResolve(
+        resolvedFile('readme', 'README.md', {
+          gfsUri: 'gfs://main/readme',
+          bytes: 14,
+          version: 3,
+        })
+      )
+    })
+    expect(initial()).toEqual(before)
+
+    resolve.mockRejectedValueOnce(
+      new Error(
+        await resolveDeniedMessage(
+          'gfs://main/readme',
+          { code: 'upstream', message: 'dependency reported 404 while fetching' },
+          500
+        )
+      )
+    )
+    act(() => dispatchEntityChange?.({ ...USER_SCOPE_INVALIDATED }))
+    await waitFor(() => expect(resolve).toHaveBeenCalledTimes(2))
+    expect(initial()).toEqual(before)
+
+    resolve.mockRejectedValueOnce(new Error(await resolveDeniedMessage('gfs://main/readme')))
+    act(() => dispatchEntityChange?.({ ...USER_SCOPE_INVALIDATED }))
+    await waitFor(() =>
+      expect(initial()?.kind === 'preview' && initial()?.preview?.unavailable).toBe(true)
+    )
+  })
+
+  it('purges every open GFS preview when the authenticated session expires', async () => {
+    currentController.workspaceTabs = openPreviewTab(currentController.workspaceTabs, {
+      id: 'preview-image',
+      title: 'diagram.png',
+      gfsUri: 'gfs://main/diagram',
+      fileKind: 'image',
+      byteLength: 128,
+      mimeType: 'image/png',
+      resourceVersion: 7,
+    })
+    const resolve = vi.mocked(window.clerum.gfs.resolve)
+    const expiredSessionMessage = await resolveDeniedMessage(
+      'gfs://main/readme',
+      { code: 'session_expired', message: 'session expired' },
+      401
+    )
+    resolve.mockImplementation(uri => {
+      if (uri === 'gfs://main/readme') {
+        return Promise.reject(new Error(expiredSessionMessage)) as never
+      }
+      return new Promise(() => {}) as never
+    })
+    render(<App />)
+    await waitFor(() => expect(dispatchEntityChange).toBeTypeOf('function'))
+
+    act(() =>
+      dispatchEntityChange?.({
+        schemaVersion: 1,
+        type: 'stream.closing',
+        cursor: '00000000-0000-0000-0000-000000000000',
+        reason: 'session_expired',
+      })
+    )
+
+    await waitFor(() => {
+      const previews = currentController.workspaceTabs.tabs.filter(tab => tab.kind === 'preview')
+      expect(previews).toHaveLength(2)
+      expect(previews.every(tab => tab.preview?.unavailable)).toBe(true)
+    })
+  })
+
+  it('purges every open GFS preview for a status-free session authority failure', async () => {
+    currentController.workspaceTabs = openPreviewTab(currentController.workspaceTabs, {
+      id: 'preview-image',
+      title: 'diagram.png',
+      gfsUri: 'gfs://main/diagram',
+      fileKind: 'image',
+      byteLength: 128,
+      mimeType: 'image/png',
+      resourceVersion: 7,
+    })
+    const resolve = vi.mocked(window.clerum.gfs.resolve)
+    resolve.mockImplementation(uri => {
+      if (uri === 'gfs://main/readme')
+        return Promise.reject(new Error('Not authenticated')) as never
+      return new Promise(() => {}) as never
+    })
+    render(<App />)
+    await waitFor(() => expect(dispatchEntityChange).toBeTypeOf('function'))
+
+    act(() => dispatchEntityChange?.({ ...USER_SCOPE_INVALIDATED }))
+
+    await waitFor(() => {
+      const previews = currentController.workspaceTabs.tabs.filter(tab => tab.kind === 'preview')
+      expect(previews).toHaveLength(2)
+      expect(previews.every(tab => tab.preview?.unavailable)).toBe(true)
+    })
+  })
+
+  it('does not retry a preview after its last tab owner closes', async () => {
+    const unavailableMessage = await resolveDeniedMessage(
+      'gfs://main/readme',
+      { code: 'upstream', message: 'upstream unavailable' },
+      503
+    )
+    vi.useFakeTimers()
+    const resolve = vi.mocked(window.clerum.gfs.resolve)
+    resolve.mockRejectedValue(new Error(unavailableMessage))
+    render(<App />)
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(dispatchEntityChange).toBeTypeOf('function')
+
+    await act(async () => {
+      dispatchEntityChange?.({ ...USER_SCOPE_INVALIDATED })
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(resolve).toHaveBeenCalledTimes(1)
+
+    act(() => currentController.setWorkspaceTabs({ tabs: [], activeTabId: null }))
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000)
+    })
+
+    expect(resolve).toHaveBeenCalledTimes(1)
+    vi.useRealTimers()
   })
 })
 
