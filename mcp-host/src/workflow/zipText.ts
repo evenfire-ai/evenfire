@@ -11,7 +11,9 @@ let whole = false
  * written as two U+FFFD. ExcelJS and pptxgenjs hand it their XML as strings.
  * From the first call on, a text string is handed over as its UTF-8 bytes,
  * which are what JSZip writes for it when nothing is split. Set when a package
- * is written, so importing this module changes nothing.
+ * is written, so importing this module changes nothing. The change reaches
+ * every JSZip user in the process, the DOCX writer included, on purpose: it
+ * writes the same bytes they would, less the split (see zipText.test.ts).
  */
 export function keepZipTextWhole(): void {
   if (whole) return
