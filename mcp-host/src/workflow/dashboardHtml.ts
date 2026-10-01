@@ -4,7 +4,7 @@
  * opened straight from disk in the user's browser.
  */
 
-/** Escape text for an element body or a quoted attribute. */
+/** Escape text for an element body or an attribute, single or double quoted. */
 export function escapeHtml(s: unknown): string {
   return String(s ?? '')
     .replace(/&/g, '&amp;')
@@ -36,16 +36,5 @@ export function safeJsonForScript(v: unknown): string {
     .replace(/\u2029/g, '\\u2029')
 }
 
-/**
- * Escape a value for use inside an HTML attribute (single OR double
- * quoted). Defends against attribute-breakout XSS like
- * `data-foo='${val}'` where `val` contains `'`.
- */
-export function escapeHtmlAttr(s: unknown): string {
-  return String(s ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-}
+/** escapeHtml under the name callers of an attribute value use. */
+export const escapeHtmlAttr = escapeHtml
