@@ -60,7 +60,8 @@ function createHandler(
     authTransitioning: boolean
     isAuthenticated: boolean
   },
-  refreshRuntimeConfigState = async () => runtimeConfigModule!.getDesktopRuntimeConfigState()
+  refreshRuntimeConfigState = async () => runtimeConfigModule!.getDesktopRuntimeConfigState(),
+  logoutForEnvironmentMismatch = vi.fn(async () => undefined)
 ) {
   const selectRuntimeConfig = vi.fn(async (optionId: string) => {
     await runtimeConfigModule!.selectDesktopRuntimeConfigOption(optionId)
@@ -73,7 +74,7 @@ function createHandler(
     refreshRuntimeConfigState,
     handleSelectRuntimeConfig: selectRuntimeConfig,
     onSessionNeedsLoad: vi.fn(async () => undefined),
-    logoutForEnvironmentMismatch: vi.fn(async () => undefined),
+    logoutForEnvironmentMismatch,
     setPendingDesktopEnvironmentSetup,
     setStatus,
   })
@@ -119,6 +120,76 @@ describe('Desktop environment handoff concurrency', () => {
 
     expect(selectRuntimeConfig).not.toHaveBeenCalled()
     expect(setPendingDesktopEnvironmentSetup).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    {
+      outcome: 'selects the linked saved environment',
+      externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/api/v1`,
+      action: 'select',
+    },
+    {
+      outcome: 'prompts to add the linked environment',
+      externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/other`,
+      action: 'prompt',
+    },
+  ])('waits for logout to finish, then $outcome', async ({ externalRestApiBaseUrl, action }) => {
+    const state = await runtimeConfigModule!.getDesktopRuntimeConfigState()
+    const savedTarget = state.options.find(
+      option =>
+        option.externalRestApiBaseUrl === `${targetEnvironment.externalRestApiBaseUrl}/api/v1`
+    )
+    if (!savedTarget) throw new Error('The config producer did not return the saved REST profile')
+
+    let busy = false
+    let isAuthenticated = true
+    let finishLogout = () => undefined
+    let reportLogoutStarted = () => undefined
+    const logoutStarted = new Promise<void>(resolve => {
+      reportLogoutStarted = resolve
+    })
+    const logoutFinished = new Promise<void>(resolve => {
+      finishLogout = resolve
+    })
+    const logout = vi.fn(async () => {
+      busy = true
+      reportLogoutStarted()
+      await logoutFinished
+      isAuthenticated = false
+      busy = false
+    })
+    const { handler, selectRuntimeConfig, setPendingDesktopEnvironmentSetup } = createHandler(
+      () => ({ booting: false, busy, authTransitioning: false, isAuthenticated }),
+      undefined,
+      logout
+    )
+
+    const handling = handler({
+      ...targetEnvironment,
+      externalRestApiBaseUrl,
+    })
+    await logoutStarted
+
+    expect(busy).toBe(true)
+    expect(selectRuntimeConfig).not.toHaveBeenCalled()
+    expect(setPendingDesktopEnvironmentSetup).toHaveBeenCalledWith(null)
+
+    finishLogout()
+    await handling
+
+    expect(busy).toBe(false)
+    expect(logout).toHaveBeenCalledOnce()
+    if (action === 'select') {
+      expect(selectRuntimeConfig).toHaveBeenCalledWith(savedTarget.id)
+      expect(setPendingDesktopEnvironmentSetup).toHaveBeenLastCalledWith(null)
+    } else {
+      expect(selectRuntimeConfig).not.toHaveBeenCalled()
+      expect(setPendingDesktopEnvironmentSetup).toHaveBeenLastCalledWith({
+        ...targetEnvironment,
+        externalRestApiBaseUrl,
+        rpcProxyBaseUrl: '',
+      })
+    }
   })
 
   it('keeps the first environment link when another arrives during verification', async () => {
