@@ -792,6 +792,9 @@ export class McpServerWatcher implements McpServerProvider {
   private llmHookWatchRequest: { abort: () => void } | null = null
   private servers: Map<string, McpServerCRD> = new Map()
   private hosts: Map<string, HostCRD> = new Map()
+  // Recovery and periodic resync share one outstanding retry per Host; the
+  // existing per-Host serializer still owns mutations and observation ACKs.
+  private readonly oauthReobservationInFlight = new Set<string>()
   private contexts: Map<string, ContextCRD> = new Map()
   private sharedFileSystems: Map<string, SharedFileSystemCRD> = new Map()
   private globalFileSystems: Map<string, GlobalFileSystemCRD> = new Map()
@@ -1563,7 +1566,7 @@ export class McpServerWatcher implements McpServerProvider {
         this.mcpServerWatchRecoveryFailures = 0
         this.mcpServerWatchRecoveryRetryAfterMs = undefined
         this.changeCallback?.()
-        await this.reconcileHostsAwaitingOAuthObservation('mcpserver_recovery')
+        this.reconcileHostsAwaitingOAuthObservation('mcpserver_recovery')
         if (this.shouldRequestNetworkPolicyRecovery('McpServer', before)) {
           void this.runInitialNetworkPolicyConvergence({ cause: 'mcp-recovery' })
         }
@@ -1581,15 +1584,18 @@ export class McpServerWatcher implements McpServerProvider {
     void recovery.finally(() => {
       if (this.mcpServerCacheRecoveryInFlight === recovery) {
         this.mcpServerCacheRecoveryInFlight = null
+        if (!this.stopped && !this.mcpServerCacheSynced) {
+          this.scheduleMcpServerCacheRecovery()
+        }
       }
     })
     return recovery
   }
 
-  private async reconcileHostsAwaitingOAuthObservation(
-    trigger: OauthReobservationTrigger
-  ): Promise<void> {
+  private reconcileHostsAwaitingOAuthObservation(trigger: OauthReobservationTrigger): void {
+    if (this.stopped) return
     const names = this.hostReconciler.takeHostsAwaitingOAuthObservation()
+    const admittedHosts: HostCRD[] = []
     for (const name of names) {
       hccLogger.info('re-observing OAuth scope after McpServer recovery', {
         trigger,
@@ -1608,20 +1614,35 @@ export class McpServerWatcher implements McpServerProvider {
 
       const host = this.hosts.get(name)
       if (!host) continue
+      admittedHosts.push(host)
+    }
 
-      this.hostReconciler.requeueHostsAwaitingOAuthObservation([name])
-      try {
-        await this.hostReconciler.reconcile(host, 'retry')
-        oauthReobservationTotal.inc({ trigger, result: 'reconciled' })
-      } catch (error) {
-        this.hostReconciler.requeueHostsAwaitingOAuthObservation([name])
-        oauthReobservationTotal.inc({ trigger, result: 'failed' })
-        hccLogger.warn('[K8s] requeued Hosts awaiting OAuth observation', {
-          trigger,
-          host: name,
-          err: error,
-        })
-      }
+    // Keep the whole admitted snapshot visible before any Host I/O. Watch
+    // recovery and resync must settle independently of a slow Host, and later
+    // triggers must not enqueue another job while that Host is unresolved.
+    if (admittedHosts.length === 0) return
+    this.hostReconciler.requeueHostsAwaitingOAuthObservation(admittedHosts.map(host => host.name))
+    for (const host of admittedHosts) {
+      if (this.stopped) break
+      const name = host.name
+      if (this.oauthReobservationInFlight.has(name)) continue
+      this.oauthReobservationInFlight.add(name)
+      void (async () => {
+        try {
+          await this.hostReconciler.reconcile(host, 'retry')
+          oauthReobservationTotal.inc({ trigger, result: 'reconciled' })
+        } catch (error) {
+          this.hostReconciler.requeueHostsAwaitingOAuthObservation([name])
+          oauthReobservationTotal.inc({ trigger, result: 'failed' })
+          hccLogger.warn('[K8s] requeued Hosts awaiting OAuth observation', {
+            trigger,
+            host: name,
+            err: error,
+          })
+        } finally {
+          this.oauthReobservationInFlight.delete(name)
+        }
+      })()
     }
   }
 
@@ -4074,7 +4095,7 @@ export class McpServerWatcher implements McpServerProvider {
     if (!this.ccCacheSynced) {
       await this.recoverCommunicationChannelCache()
       if (!this.ccCacheSynced && this.mcpServerCacheSynced) {
-        await this.reconcileHostsAwaitingOAuthObservation('periodic_retry')
+        this.reconcileHostsAwaitingOAuthObservation('periodic_retry')
       }
       return
     }

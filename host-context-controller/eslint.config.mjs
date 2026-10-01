@@ -1,9 +1,8 @@
 // @ts-check
 import { createRequire } from 'node:module'
 
-// The required repository install already provides the Node-service ESLint
-// toolchain in mcp-host. Reuse that pinned parser/plugin instead of depending
-// on a global executable or introducing a second dependency set for HCC.
+// The documented development/CI prerequisite installs the toolchain pinned
+// by mcp-host/package-lock.json. Reuse it without adding HCC dependencies.
 const requireToolchain = createRequire(new URL('../mcp-host/package.json', import.meta.url))
 const tsParser = requireToolchain('@typescript-eslint/parser')
 const tsPlugin = requireToolchain('@typescript-eslint/eslint-plugin')
@@ -14,5 +13,20 @@ export default [
     files: ['src/**/*.ts'],
     languageOptions: { parser: tsParser },
     plugins: { '@typescript-eslint': tsPlugin },
+    rules: {
+      '@typescript-eslint/no-unused-vars': [
+        'error',
+        {
+          argsIgnorePattern: '^_',
+          varsIgnorePattern: '^_',
+          caughtErrors: 'all',
+          caughtErrorsIgnorePattern: '^_',
+        },
+      ],
+    },
+  },
+  {
+    files: ['src/k8sClient.ts', 'src/server.ts'],
+    rules: { 'no-console': 'error' },
   },
 ]

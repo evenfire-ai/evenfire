@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
 import type * as k8s from '@kubernetes/client-node'
 import {
   type MockNetworkingApi,

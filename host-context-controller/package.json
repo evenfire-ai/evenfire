@@ -1,6 +1,6 @@
 {
   "name": "clerum-host-context-controller",
-  "version": "0.1.379",
+  "version": "0.1.380",
   "description": "Host Context Controller - provides McpServer CRDs to mcp-host via REST API",
   "main": "dist/main.js",
   "engines": {
@@ -12,7 +12,7 @@
     "dev": "ts-node src/main.ts",
     "test": "vitest run",
     "test:watch": "vitest",
-    "lint": "node ../mcp-host/node_modules/eslint/bin/eslint.js src --ext .ts"
+    "lint": "node ../mcp-host/node_modules/eslint/bin/eslint.js src --ext .ts --max-warnings=0"
   },
   "keywords": [
     "kubernetes",

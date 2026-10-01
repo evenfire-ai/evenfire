@@ -109,9 +109,22 @@ jobs:
         working-directory: packages/frontend-components
         run: npm ci
 
+      # HCC reuses the parser/plugin/ESLint versions locked by mcp-host. This
+      # install is for lint only; native and runtime lifecycle scripts are not
+      # needed. Service installs (including Electron) retain their scripts.
+      - name: Install shared HCC lint toolchain
+        if: matrix.service == 'host-context-controller'
+        working-directory: mcp-host
+        run: npm ci --ignore-scripts
+
       - name: Install dependencies
         working-directory: ${{ matrix.service }}
         run: npm ci
+
+      - name: Lint HCC
+        if: matrix.service == 'host-context-controller'
+        working-directory: host-context-controller
+        run: npm run lint
 
       - name: Verify Electron runtime
         if: matrix.service == 'desktop-app'

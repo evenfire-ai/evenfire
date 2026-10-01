@@ -5162,5 +5162,99 @@ describe('HostReconciler stateless lifecycle — guarded image pull policy (Stag
       expect(appsApi.readNamespacedDeployment).toHaveBeenCalledTimes(3)
       expect(issue).not.toHaveBeenCalled()
     })
+
+    it('T8c: rejects a wake binding whose Deployment UID changed on the conflict reread', async () => {
+      const { host, reconciler, appsApi, coreApi, liveDeployment } = await boundWakeRuntime({
+        readyReplicas: 0,
+      })
+      const issue = vi.mocked(issueMcpHostRuntimeTokens)
+      issue.mockClear()
+      const captured = await (reconciler as any).ensureMcpHostRuntimeTokenSecret(host)
+      expect(captured.heldWakeTemplateBinding).toEqual({
+        deploymentUid: liveDeployment().metadata!.uid,
+        appliedRevision: APPLIED_RUNTIME_REVISION,
+      })
+      expect(coreApi.readNamespacedSecret).toHaveBeenCalled()
+      liveDeployment().spec!.replicas = 0
+      const replace = appsApi.replaceNamespacedDeployment.getMockImplementation()!
+      appsApi.replaceNamespacedDeployment.mockImplementation(async request => {
+        if (request.name !== host.name) return replace(request)
+        liveDeployment().metadata!.uid = 'deployment-replaced-uid'
+        throw { code: 409 }
+      })
+      const lifecycle = reconciler.getEffectiveLifecycle(host)
+
+      await expect(
+        (reconciler as any).ensureDeployment(host, [], captured.revision, undefined, async () => ({
+          lifecycle,
+          runtimeTokenRevision: captured.revision,
+          heldWakeTemplateBinding: captured.heldWakeTemplateBinding,
+        }))
+      ).rejects.toThrow('Wake bootstrap binding changed before preserving Host')
+
+      expect(appsApi.replaceNamespacedDeployment).toHaveBeenCalledTimes(1)
+      expect(appsApi.readNamespacedDeployment).toHaveBeenCalledTimes(3)
+      expect(issue).not.toHaveBeenCalled()
+      expect(appsApi.createNamespacedDeployment).not.toHaveBeenCalled()
+    })
+
+    it('T10: reuses a persisted held-wake refresh after the rollout write fails', async () => {
+      const { host, reconciler, appsApi, coreApi, liveDeployment } = await boundWakeRuntime()
+      const issue = vi.mocked(issueMcpHostRuntimeTokens)
+      const failure = Object.assign(new Error('probe Deployment rollout unavailable'), {
+        code: 503,
+      })
+      let failRollout = true
+      const persistedReplace = appsApi.replaceNamespacedDeployment.getMockImplementation()!
+
+      issue.mockClear()
+      coreApi.readNamespacedSecret.mockClear()
+      coreApi.replaceNamespacedSecret.mockClear()
+      appsApi.replaceNamespacedDeployment.mockClear()
+      appsApi.replaceNamespacedDeployment.mockImplementation(async request => {
+        if (request.name !== host.name) return persistedReplace(request)
+        if (failRollout) throw failure
+        return persistedReplace(request)
+      })
+
+      await expect(reconciler.reconcile(host)).rejects.toThrow(failure)
+
+      expect(coreApi.readNamespacedSecret).toHaveBeenCalled()
+      expect(issue).toHaveBeenCalledOnce()
+      const firstPassWrites = runtimeTokenSecretWrites(coreApi)
+      expect(firstPassWrites).toHaveLength(1)
+      const persistedRevision =
+        firstPassWrites[0]!.metadata?.annotations?.['clerum.io/runtime-token-secret-revision']
+      expect(persistedRevision).toBeTruthy()
+      expect(firstPassWrites[0]!.metadata?.annotations).toMatchObject({
+        'clerum.io/runtime-token-bootstrap-state': 'fresh',
+        'clerum.io/runtime-token-rollout-required': 'true',
+      })
+      expect(firstPassWrites[0]!.metadata?.annotations).not.toHaveProperty(BOOTSTRAP_UID_ANNOTATION)
+      expect(
+        liveDeployment().spec?.template?.metadata?.annotations?.[RUNTIME_TOKEN_REVISION_ANNOTATION]
+      ).toBe(APPLIED_RUNTIME_REVISION)
+
+      failRollout = false
+      issue.mockClear()
+      coreApi.readNamespacedSecret.mockClear()
+      coreApi.replaceNamespacedSecret.mockClear()
+      appsApi.replaceNamespacedDeployment.mockClear()
+      await reconciler.reconcile(host)
+
+      expect(coreApi.readNamespacedSecret).toHaveBeenCalled()
+      expect(issue).not.toHaveBeenCalled()
+      expect(runtimeTokenSecretWrites(coreApi)).toHaveLength(0)
+      const rolloutWrites = hostDeploymentReplacements(appsApi, host.name)
+      expect(rolloutWrites).toHaveLength(1)
+      expect(
+        rolloutWrites[0]![0].body.spec?.template?.metadata?.annotations?.[
+          RUNTIME_TOKEN_REVISION_ANNOTATION
+        ]
+      ).toBe(persistedRevision)
+      expect(
+        liveDeployment().spec?.template?.metadata?.annotations?.[RUNTIME_TOKEN_REVISION_ANNOTATION]
+      ).toBe(persistedRevision)
+    })
   })
 })
