@@ -35,6 +35,7 @@ import {
 import { shouldAcceptSandboxUiProtocolLink } from './sandboxUiProtocolWindowPolicy.js'
 import { wireHostDesktopShortcutRouting } from './shortcutRouter.js'
 import { installAdaptiveSystemIcon, resolveSystemIconPath } from './systemIcon.js'
+import { bindTokenStoreIsolation, requireTokenStoreIsolation } from './tokenStore.js'
 
 const EVENFIRE_APP_NAME = 'Evenfire'
 const EVENFIRE_APP_ID = 'ai.evenfire.desktop'
@@ -53,6 +54,8 @@ if (devIsolation.mode === 'refused') {
 const devIsolationPlan: DevIsolationPlan | null =
   devIsolation.mode === 'isolated' ? devIsolation.plan : null
 const devIsolationPolicy = devIsolationRuntimePolicy(devIsolationPlan)
+// Fail closed even if startup fails before the verified storage binding.
+if (devIsolationPlan) requireTokenStoreIsolation()
 
 process.title = devIsolationPolicy.appName ?? EVENFIRE_APP_NAME
 app.setName(devIsolationPolicy.appName ?? EVENFIRE_APP_NAME)
@@ -438,6 +441,13 @@ function verifyDevIsolationBeforeServices(plan: DevIsolationPlan): boolean {
   }
   const verdict = verifyDevIsolationRuntime(expected, observed)
   if (verdict.ok) {
+    try {
+      bindTokenStoreIsolation(observed.userDataDir)
+    } catch {
+      console.error('[Desktop] Dev isolation refused: authentication storage binding failed')
+      app.exit(1)
+      return false
+    }
     console.log(formatDevIsolationLogLine(publicDevIsolationRecord(expected, observed)))
     return true
   }
@@ -579,6 +589,11 @@ if (gotSingleInstanceLock) {
       }
     })
     .catch(error => {
+      if (devIsolationPlan) {
+        console.error('[Desktop] Dev isolation refused: startup failed before services were ready')
+        app.exit(1)
+        return
+      }
       mainWindowLifecycleReady = app.isReady()
       console.error('[Desktop] Startup failed before the main window was ready:', error)
       requestMainWindow()
