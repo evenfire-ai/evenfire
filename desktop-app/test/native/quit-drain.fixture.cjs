@@ -1,4 +1,3 @@
-const assert = require('node:assert/strict')
 const { app, BrowserWindow } = require('electron')
 const { registerQuitDrain } = require('../../dist/mainWindowCoordinator.js')
 
