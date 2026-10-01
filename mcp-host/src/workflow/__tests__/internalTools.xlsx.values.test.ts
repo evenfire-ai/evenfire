@@ -460,6 +460,31 @@ describe('signs, identifiers and text left as sent', () => {
     )
   })
 
+  it('keeps a year in parentheses as text, and reads a grouped quantity as negative', async () => {
+    const { ws } = await oneSheet([
+      ['Value', 'Amount'],
+      ['(2024)', '(1,500)'],
+      ['(1850)', '(2,024)'],
+    ])
+    expect(ws.getCell('A2').value).toBe('(2024)')
+    expect(ws.getCell('A3').value).toBe('(1850)')
+    expect(ws.getCell('B2').value).toBe(-1500)
+    expect(ws.getCell('B3').value).toBe(-2024)
+  })
+
+  it('applies a time zone before the 1900 check, and refuses an offset no zone has', async () => {
+    const { ws } = await oneSheet([
+      ['When'],
+      ['1900-03-01T01:00+05:00'],
+      ['2026-05-01T10:00+99:99'],
+      ['2026-05-01T10:00+14:00'],
+    ])
+    // 1900-02-28T20:00 UTC: Excel would show a day that never existed.
+    expect(ws.getCell('A2').value).toBe('1900-03-01T01:00+05:00')
+    expect(ws.getCell('A3').value).toBe('2026-05-01T10:00+99:99')
+    expect((ws.getCell('A4').value as Date).toISOString()).toBe('2026-04-30T20:00:00.000Z')
+  })
+
   it('writes identifier columns without thousands separators', async () => {
     const headers = [
       'Invoice No.',

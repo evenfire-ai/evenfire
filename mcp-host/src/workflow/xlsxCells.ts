@@ -118,7 +118,10 @@ function parseNumberText(text: string): ParsedNumber | 'ambiguous' | undefined {
     const inner = parseNumberText(accounting[1].trim())
     if (inner === undefined || inner === 'ambiguous') return inner
     const digits = accounting[1].replace(/\D/g, '').length
-    if (!inner.currency && !inner.percent && !/[.,]/.test(accounting[1]) && digits < 3) {
+    const bare = !inner.currency && !inner.percent && !/[.,]/.test(accounting[1])
+    // A short count is a note marker, and a bare year such as "(2024)" a date
+    // in text; accounting writes a quantity of thousands with its grouping.
+    if (bare && (digits < 3 || (digits === 4 && inner.value >= 1800 && inner.value < 2200))) {
       return undefined
     }
     return { ...inner, value: -inner.value, written: -inner.written }
@@ -178,9 +181,6 @@ function parseDateText(text: string): ParsedDate | undefined {
   const [year, month, day] = [Number(m[1]), Number(m[2]), Number(m[3])]
   const [hour, minute, second] = [Number(m[4] ?? 0), Number(m[5] ?? 0), Number(m[6] ?? 0)]
   if (month < 1 || month > 12 || hour > 23 || minute > 59 || second > 59) return undefined
-  // Excel counts a 29 February 1900 that never existed, so the serial of any
-  // earlier date shows one day late; those dates stay text.
-  if (year < 1900 || (year === 1900 && month < 3)) return undefined
   const ms = m[7] ? Math.round(Number(`0.${m[7]}`) * 1000) : 0
   let time = Date.UTC(year, month - 1, day, hour, minute, second, ms)
   const check = new Date(time)
@@ -188,10 +188,17 @@ function parseDateText(text: string): ParsedDate | undefined {
   let offsetMinutes = 0
   if (m[8] && m[8] !== 'Z') {
     const digits = m[8].replace(':', '')
-    offsetMinutes = Number(digits.slice(1, 3)) * 60 + Number(digits.slice(3, 5) || 0)
+    const [hours, minutes] = [Number(digits.slice(1, 3)), Number(digits.slice(3, 5) || 0)]
+    // UTC offsets run from -12:00 to +14:00; anything else is not a time zone.
+    if (hours > 14 || minutes > 59) return undefined
+    offsetMinutes = hours * 60 + minutes
     if (digits[0] === '-') offsetMinutes = -offsetMinutes
     time -= offsetMinutes * 60_000
   }
+  // Excel counts a 29 February 1900 that never existed, so the serial of any
+  // earlier moment shows one day late; those dates stay text. Checked once the
+  // offset is applied, since that is the moment the cell holds.
+  if (time < Date.UTC(1900, 2, 1)) return undefined
   return {
     date: new Date(time),
     time: m[4] !== undefined,
