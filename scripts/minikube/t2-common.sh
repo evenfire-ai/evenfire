@@ -230,6 +230,15 @@ t2_canonical_path() {
 # lease validates against the pin. The pin is honored only under an inherited
 # lease: an exported pin cannot certify a branch against an older dev, and a
 # lease child that lost the pin fails instead of re-reading the moved ref.
+#
+# A child the lease owner starts without handing it the lease (T0 in t2.sh
+# run_t0) must not inherit the pin either, or it is refused as an unleased pin.
+# t2_run_outside_lease starts it without T2_PINNED_ORIGIN_DEV; the arguments
+# are those of env(1), so NAME=VALUE assignments may precede the command.
+t2_run_outside_lease() {
+  env -u T2_PINNED_ORIGIN_DEV "$@"
+}
+
 t2_resolve_origin_dev() {
   local pin="${T2_PINNED_ORIGIN_DEV:-}" current
   current="$(git -C "$T2_PROJECT_DIR" rev-parse --verify origin/dev 2>/dev/null || true)"
