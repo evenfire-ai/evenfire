@@ -1599,6 +1599,7 @@ describe('grok-llm-proxy attempt telemetry', () => {
     expectNoForbiddenKeys(lines[0]!)
   }, 15_000)
 
+  // Both admin routes look up serially: 30 s bounds two 15 s lookup budgets.
   it('(r4-l1b) logs a catalog DNS lookup failure by cause code on both admin routes', async () => {
     for (const [route, operation] of [
       ['/internal/admin/v1/grok/models', 'catalog_list'],
@@ -1643,7 +1644,7 @@ describe('grok-llm-proxy attempt telemetry', () => {
         error.mockRestore()
       }
     }
-  }, 15_000)
+  }, 30_000)
 
   it('logs a mapped control-api failure without an err entry', async () => {
     const { res, lines } = await run({
