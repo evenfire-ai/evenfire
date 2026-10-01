@@ -32,15 +32,42 @@ function digest(value) {
   return crypto.createHash('sha256').update(value).digest('hex')
 }
 
+function snapshotFile(file) {
+  let fd
+  try {
+    fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK)
+  } catch (error) {
+    if (error.code !== 'ELOOP') throw error
+    const stats = fs.lstatSync(file)
+    return { mode: stats.mode & 0o7777, type: stats.isSymbolicLink() ? 'symlink' : 'other', hash: null }
+  }
+  try {
+    const stats = fs.fstatSync(fd)
+    const result = { mode: stats.mode & 0o7777, type: stats.isFile() ? 'file' : 'other', hash: null }
+    if (!stats.isFile()) return result
+    // Fault fixtures intentionally exceed the production 64 KiB bound. Hash
+    // their actual bytes through the opened descriptor, never reopen a path.
+    const hash = crypto.createHash('sha256')
+    const buffer = Buffer.allocUnsafe(8192)
+    let total = 0
+    for (;;) {
+      const read = fs.readSync(fd, buffer, 0, buffer.length, null)
+      if (read === 0) break
+      total += read
+      assert.ok(total <= 1024 * 1024, 'Snapshot fixture exceeds its 1 MiB bound')
+      hash.update(buffer.subarray(0, read))
+    }
+    result.hash = hash.digest('hex')
+    return result
+  } finally {
+    fs.closeSync(fd)
+  }
+}
+
 function snapshot(directory) {
   return Object.fromEntries(fs.readdirSync(directory).sort().map(name => {
     const file = path.join(directory, name)
-    const stats = fs.lstatSync(file)
-    return [name, {
-      mode: stats.mode & 0o7777,
-      type: stats.isFile() ? 'file' : stats.isSymbolicLink() ? 'symlink' : 'other',
-      hash: stats.isFile() ? digest(fs.readFileSync(file)) : null,
-    }]
+    return [name, snapshotFile(file)]
   }))
 }
 

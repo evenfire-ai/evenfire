@@ -1,5 +1,11 @@
 import { type MockInstance, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createHash, createPublicKey, generateKeyPairSync, randomUUID } from 'node:crypto'
+import {
+  createHash,
+  createPrivateKey,
+  createPublicKey,
+  generateKeyPairSync,
+  randomUUID,
+} from 'node:crypto'
 import type { KeyObject } from 'node:crypto'
 import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs'
 import { createRequire } from 'node:module'
@@ -368,7 +374,11 @@ describe('config JWT hardening', () => {
             createPublicKey(config[field]).export({ type: 'spki', format: 'pem' }).toString()
           )
           expect(actual).toBe(expected)
-          expect(config[field].startsWith('-----BEGIN PRIVATE KEY-----')).toBe(true)
+          const accepted = createPrivateKey(config[field])
+          expect(accepted.type).toBe('private')
+          expect(
+            accepted.export({ type: 'pkcs8', format: 'pem' }).toString().trim() === config[field]
+          ).toBe(true)
         }
         expect(providerLoad).not.toHaveBeenCalled()
         expect(existsSync(fixtureStore)).toBe(false)

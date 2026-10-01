@@ -34,10 +34,10 @@ const failureCode: 'ERR_JWT_KEY_INVALID' | 'ERR_JWT_KEY_BANNED' = failure.code
 // @ts-expect-error The default policy is immutable to callers.
 HISTORICAL_PUBLIC_KEY_FINGERPRINTS.push(identity)
 // @ts-expect-error A public verifier result cannot expose private material.
-verifier.privatePem
+const forbiddenPrivate: string = verifier.privatePem
 // @ts-expect-error Only the two defined origins are permitted.
 parseVerifierMaterial(configuredPem, sourceLabel, { origin: 'unknown' })
 // @ts-expect-error Error metadata is read-only to typed consumers.
 failure.code = 'ERR_JWT_KEY_INVALID'
 
-void [canonicalPrivate, canonicalPublic, identity, normalized, signingDenied, verifierDenied, maximum, failureCode]
+void [canonicalPrivate, canonicalPublic, identity, normalized, signingDenied, verifierDenied, maximum, failureCode, forbiddenPrivate]
