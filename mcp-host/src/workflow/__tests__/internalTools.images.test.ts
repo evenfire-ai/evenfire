@@ -90,6 +90,27 @@ describe('imageDisplaySize', () => {
   })
 })
 
+describe('DOCX images', () => {
+  it('gives every drawing its own id, as Office Open XML requires', async () => {
+    await makeChart('c.png', 400, 200)
+    const r = await findTool('clerum__generate_docx').execute(
+      {
+        filename: 'd.docx',
+        body: 'One\n\n![a](c.png)\n\nTwo',
+        images: ['c.png', 'missing.png', 'c.png'],
+        branding: { logoPath: 'c.png' },
+      },
+      outputDir
+    )
+    expect(r.success, r.error).toBe(true)
+    const ids = [
+      ...zipEntryText(r.artifact!.path, 'word/document.xml').matchAll(/<wp:docPr id="(\d+)"/g),
+    ].map(m => m[1])
+    expect(ids).toHaveLength(4)
+    expect(new Set(ids).size).toBe(4)
+  })
+})
+
 describe('fitImageBox', () => {
   it('keeps the aspect ratio when neither side is given', async () => {
     const file = await makeChart('wide.png', 800, 400)

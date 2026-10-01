@@ -105,7 +105,9 @@ export async function runGenerateDocx(
       box: { width: number; height: number },
       placement: DocxImagePlacement
     ): Paragraph | undefined => {
-      const paragraph = docxImageParagraph(ref, outputDir, box, placement, warnings, label)
+      // Word needs each drawing's id unique in the document; the next one is unused.
+      const id = embedded + 1
+      const paragraph = docxImageParagraph(ref, outputDir, box, placement, warnings, label, id)
       if (paragraph) embedded++
       else imageLeftOut = true
       return paragraph

@@ -22,7 +22,8 @@ function alignmentOf(value: unknown) {
  * it cannot be embedded; the reason is added to `warnings`, prefixed with the
  * argument `label` so the logo and an image of the same name can be told apart.
  * A path that leaves the output folder still fails the call, with an error
- * naming the argument and the fix.
+ * naming the argument and the fix. `id` must be unique among the document's
+ * images, as Office Open XML requires; the docx library numbers every one 1.
  */
 export function docxImageParagraph(
   ref: unknown,
@@ -30,7 +31,8 @@ export function docxImageParagraph(
   box: ImageSize,
   placement: DocxImagePlacement,
   warnings: string[],
-  label: string
+  label: string,
+  id: number
 ): Paragraph | undefined {
   const notes: string[] = []
   let image: ReturnType<typeof loadEmbeddableImage>
@@ -57,6 +59,7 @@ export function docxImageParagraph(
         data: image.data,
         transformation: size,
         altText: {
+          id: String(id),
           name: path.basename(image.path),
           ...(placement.altText ? { description: placement.altText } : {}),
         },
