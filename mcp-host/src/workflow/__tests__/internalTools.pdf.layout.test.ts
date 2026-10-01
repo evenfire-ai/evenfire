@@ -567,6 +567,24 @@ describe('PDF images', () => {
     }
   })
 
+  it('fills the page with an image as wide as the schema says the page is', async () => {
+    const images = (tool.parameters as { properties: Record<string, any> }).properties.images
+    const said = /the page is (\d+) wide/.exec(images.items.anyOf[1].properties.width.description)
+    const page = Number(said![1])
+    writePng('wide.png', 3000, 300)
+    const { pages } = await render({
+      filename: 'i.pdf',
+      body: 'x',
+      images: [
+        { path: 'wide.png', width: page },
+        { path: 'wide.png', width: page * 2 },
+      ],
+    })
+    const widths = pages.flatMap(p => p.images).map(box => box.x1 - box.x0)
+    expect(widths).toHaveLength(2)
+    for (const width of widths) expect(width).toBeCloseTo(page, 0)
+  })
+
   it('keeps a sized image above a footer of several lines', async () => {
     writePng('tall.png', 200, 3000)
     const footerText = Array.from({ length: 6 }, (_, i) => `FOOTLINE${i}`).join('\n')

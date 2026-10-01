@@ -7,6 +7,7 @@
  * cell instead, and the type size or the page orientation gives way before a
  * table has to do that to ordinary words.
  */
+import { PDF_PORTRAIT_WIDTH } from './documentSchema'
 
 /** Width of `text` at 1pt in the body face; widths scale linearly with size. */
 export type UnitMeasure = (text: string, bold: boolean) => number
@@ -43,7 +44,7 @@ export interface TableLayout {
 }
 
 /** A4 content boxes with the documents' 40pt side and 60pt top margins and the smallest bottom one. */
-export const PORTRAIT: PageBox = { width: 515, height: 722 }
+export const PORTRAIT: PageBox = { width: PDF_PORTRAIT_WIDTH, height: 722 }
 export const LANDSCAPE: PageBox = { width: 762, height: 475 }
 export const MIN_BOTTOM_MARGIN = 60
 

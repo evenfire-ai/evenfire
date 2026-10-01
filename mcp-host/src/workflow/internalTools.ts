@@ -45,6 +45,7 @@ import {
   DOCX_IMAGE_FILE_DESCRIPTION,
   IMAGE_FILE_DESCRIPTION,
   PDF_MAX_FOOTER_LINES,
+  PDF_PORTRAIT_WIDTH,
 } from './documentSchema'
 import {
   NATIVE_CHART_TYPES,
@@ -438,7 +439,7 @@ const generatePdf: InternalToolDefinition = {
                 path: { type: 'string', description: IMAGE_FILE_DESCRIPTION },
                 width: {
                   type: 'number',
-                  description: 'Width in points (the page is 515 wide); the height follows.',
+                  description: `Width in points (the page is ${PDF_PORTRAIT_WIDTH} wide); the height follows.`,
                 },
                 height: {
                   type: 'number',
