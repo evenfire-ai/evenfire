@@ -9297,7 +9297,6 @@ describe('cleanupPluginWorkloadSdk legacy internet policy ownership', () => {
 
   it('keeps live cleanup on the shared backoff while finalizer cleanup gets one last chance', async () => {
     vi.useFakeTimers({ toFake: ['Date'] })
-    const startedAt = Date.now()
     try {
       const networkingApi = makeNetworkingApi() as ReturnType<typeof makeNetworkingApi>
       let legacyDeleteFails = true
