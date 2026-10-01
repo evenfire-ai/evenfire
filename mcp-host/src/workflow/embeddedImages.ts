@@ -2,6 +2,7 @@
  * Reading, sizing and preparing the images the document generators embed.
  */
 import { createCanvas, loadImage } from '@napi-rs/canvas'
+import { spawn } from 'child_process'
 import * as fs from 'fs'
 import * as path from 'path'
 import { imageTarget } from './inlineMarkup'
@@ -386,6 +387,108 @@ function isSvg(buf: Buffer): boolean {
   return /^(?:<!DOCTYPE[^>]*>\s*)?<svg\b/i.test(head)
 }
 
+/**
+ * Elements whose rendering cost does not follow the image's size: filters
+ * blur and morph whole regions, <use>, <pattern> and <mask> repeat or layer
+ * other content, and <image> and <foreignObject> pull in more to decode. A few
+ * hundred bytes of them keep the renderer busy for minutes, so an SVG holding
+ * any is not converted.
+ */
+const COSTLY_SVG_ELEMENT =
+  /<\s*(?:[a-z][\w.-]*:)?(?:filter|fe[a-z]+|use|pattern|mask|image|foreignObject)\b/i
+/** A filter written as an attribute or a style property, such as filter="blur(500)". */
+const COSTLY_SVG_PROPERTY = /\bfilter\s*[:=]/i
+/** Elements an SVG may hold, and how deep they may nest (each group can be a layer). */
+const MAX_SVG_ELEMENTS = 5000
+const MAX_SVG_DEPTH = 32
+
+/** Why an SVG is not converted, or undefined when its content is within budget. */
+function svgRefusal(svg: string): string | undefined {
+  if (COSTLY_SVG_ELEMENT.test(svg) || COSTLY_SVG_PROPERTY.test(svg)) {
+    return 'uses SVG features this tool does not convert (filters, <use>, patterns, masks or embedded images)'
+  }
+  let elements = 0
+  let depth = 0
+  for (const tag of svg.matchAll(/<(\/?)[a-z][^<>]*?(\/?)>/gi)) {
+    if (tag[1]) {
+      depth--
+      continue
+    }
+    if (++elements > MAX_SVG_ELEMENTS) return `holds more than ${MAX_SVG_ELEMENTS} elements`
+    if (!tag[2] && ++depth > MAX_SVG_DEPTH) return `nests elements more than ${MAX_SVG_DEPTH} deep`
+  }
+  return undefined
+}
+
+/** Longest an SVG may take to render before it is given up. */
+const SVG_RENDER_MS = 5000
+
+// Renders the SVG on standard input to PNG on standard output, in a process of
+// its own: the renderer runs native code a timer cannot interrupt, so a slow
+// drawing is killed with its process instead of stalling the host.
+const SVG_RENDER_SCRIPT = `
+const { createCanvas, loadImage } = require(process.argv[1])
+const chunks = []
+process.stdin.on('data', chunk => chunks.push(chunk))
+process.stdin.on('end', async () => {
+  try {
+    const image = await loadImage(Buffer.concat(chunks))
+    if (!image.width || !image.height || image.width * image.height > Number(process.argv[2])) process.exit(2)
+    const canvas = createCanvas(image.width, image.height)
+    canvas.getContext('2d').drawImage(image, 0, 0)
+    process.stdout.end(canvas.toBuffer('image/png'))
+  } catch {
+    process.exit(1)
+  }
+})
+`
+
+let svgQueue: Promise<unknown> = Promise.resolve()
+
+/** PNG bytes of `svg`, rendered in a child process, one at a time; undefined when it fails or runs too long. */
+function renderSvg(svg: Buffer): Promise<Buffer | undefined> {
+  const run = svgQueue.then(
+    () =>
+      new Promise<Buffer | undefined>(resolve => {
+        let child: ReturnType<typeof spawn>
+        try {
+          child = spawn(
+            process.execPath,
+            [
+              '-e',
+              SVG_RENDER_SCRIPT,
+              require.resolve('@napi-rs/canvas'),
+              String(MAX_DECODE_PIXELS),
+            ],
+            // No environment: the renderer needs none, and it holds no secret.
+            { stdio: ['pipe', 'pipe', 'ignore'], env: {} }
+          )
+        } catch {
+          resolve(undefined)
+          return
+        }
+        const chunks: Buffer[] = []
+        let size = 0
+        const timer = setTimeout(() => child.kill('SIGKILL'), SVG_RENDER_MS)
+        child.stdout!.on('data', (chunk: Buffer) => {
+          size += chunk.length
+          if (size > MAX_DECODE_PIXELS * 4) child.kill('SIGKILL')
+          else chunks.push(chunk)
+        })
+        child.on('error', () => undefined)
+        child.on('close', code => {
+          clearTimeout(timer)
+          const png = Buffer.concat(chunks)
+          resolve(code === 0 && isPng(png) ? png : undefined)
+        })
+        child.stdin!.on('error', () => undefined)
+        child.stdin!.end(svg)
+      })
+  )
+  svgQueue = run.catch(() => undefined)
+  return run
+}
+
 /** Bytes safe to hand to the decoder, or undefined for a format or size this tool does not convert. */
 function decodable(raw: Buffer): Buffer | undefined {
   if (isSvg(raw)) return boundedSvg(raw)
@@ -401,7 +504,14 @@ function decodable(raw: Buffer): Buffer | undefined {
  * synchronously deep inside their layout code, so the decoding happens first.
  */
 const decoded = new Map<string, Buffer>()
+/** Why an image named in the arguments was not converted, by file and version. */
+const refused = new Map<string, string>()
 const MAX_DECODED = 32
+
+function remember<T>(map: Map<string, T>, key: string, value: T): void {
+  map.set(key, value)
+  while (map.size > MAX_DECODED) map.delete(map.keys().next().value as string)
+}
 
 function decodedKey(file: string): string | undefined {
   try {
@@ -422,8 +532,14 @@ function collectImageNames(value: unknown, into: Set<string>, depth = 0): void {
   if (typeof value === 'string') {
     const text = value.trim()
     if (IMAGE_NAME.test(text) && text.length < 1024) into.add(text)
-    if (text.includes('!['))
-      for (const m of text.matchAll(MARKDOWN_IMAGE)) into.add(imageTarget(m[1]))
+    // Only a name with an image extension is read ahead; any other file a body
+    // names, such as a .md note, is left for the generator to refuse.
+    if (text.includes('![')) {
+      for (const m of text.matchAll(MARKDOWN_IMAGE)) {
+        const target = imageTarget(m[1])
+        if (IMAGE_NAME.test(target)) into.add(target)
+      }
+    }
   } else if (Array.isArray(value)) {
     for (const item of value) collectImageNames(item, into, depth + 1)
   } else if (value && typeof value === 'object') {
@@ -454,17 +570,33 @@ export async function predecodeImages(args: unknown, outputDir: string): Promise
       if (isPng(raw) || (isJpeg(raw) && jpegOrientation(raw) <= 1)) continue
       const input = decodable(raw)
       if (!input) continue
+      if (isSvg(raw)) {
+        const refusal = svgRefusal(input.toString('utf8'))
+        if (refusal) {
+          remember(refused, key, refusal)
+          continue
+        }
+        const png = await renderSvg(input)
+        if (png) remember(decoded, key, png)
+        else
+          remember(
+            refused,
+            key,
+            `took longer than ${SVG_RENDER_MS / 1000} s to draw, or could not be drawn`
+          )
+        continue
+      }
       const image = await loadImage(input)
       if (!image.width || !image.height || image.width * image.height > MAX_DECODE_PIXELS) continue
       const canvas = createCanvas(image.width, image.height)
       canvas.getContext('2d').drawImage(image, 0, 0)
       // The decoder applies the EXIF rotation; re-encoding drops it, so every
       // format shows the photo the same way up.
-      decoded.set(
+      remember(
+        decoded,
         key,
         isJpeg(raw) ? canvas.toBuffer('image/jpeg', 92) : canvas.toBuffer('image/png')
       )
-      while (decoded.size > MAX_DECODED) decoded.delete(decoded.keys().next().value as string)
     } catch {
       // Left for loadEmbeddableImage to report against the argument that named it.
     }
@@ -507,7 +639,12 @@ export function loadEmbeddableImage(
   const size = data ? displaySize(data) : undefined
   const pixels = data ? headerSize(data) : undefined
   if (!data || !size || !pixels) {
-    warnings.push(`'${requested}' is not an image this tool can read and was left out.`)
+    const reason = key ? refused.get(key) : undefined
+    warnings.push(
+      reason
+        ? `'${requested}' ${reason}, so it was left out.`
+        : `'${requested}' is not an image this tool can read and was left out.`
+    )
     return undefined
   }
   return { path: file, data, format: isPng(data) ? 'png' : 'jpeg', ...size, pixels }
