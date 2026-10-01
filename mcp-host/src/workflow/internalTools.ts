@@ -1,15 +1,16 @@
 /**
- * Internal output tools for workflow step execution.
+ * Internal output tools for workflow steps and chat.
  *
  * Available to all workflows — no MCP server required. Each tool produces
  * a document artifact (markdown, PDF, DOCX, XLSX, PPTX, PNG chart, HTML
- * dashboard) and writes it to the output directory (/output when mounted
- * from a PVC, /tmp/clerum-output otherwise).
+ * dashboard) and writes it to the output directory (getOutputDir).
  *
- * All libraries are pure-JS (no native deps, no headless browser):
- *   pdfmake (PDF), docx (DOCX), exceljs (XLSX), pptxgenjs (PPTX),
- *   chart.js + @napi-rs/canvas (PNG charts), built-in string write
- *   for markdown and the dashboard HTML wrapper.
+ * This file holds the schemas. Each generator is its own module, loaded with
+ * its library on first use: pdfmake (PDF), docx (DOCX), exceljs (XLSX),
+ * pptxgenjs (PPTX), chart.js (PNG charts); markdown and the dashboard HTML are
+ * written as strings. No headless browser is involved, but @napi-rs/canvas is
+ * native, and charts, PDFs and the measuring of DOCX tables and slide text read
+ * the fonts the image installs (fonts.ts).
  */
 import * as fs from 'fs'
 import * as path from 'path'
