@@ -9264,6 +9264,20 @@ td.cu-registry-description {
   }
 }
 
+/* HostApprovalSection keeps approval values aligned beside their tool names. */
+.cu-access-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--cu-space-3);
+  padding: var(--cu-space-2) 0;
+  border-bottom: 1px solid var(--cu-border-subtle);
+}
+
+.cu-access-row:last-child {
+  border-bottom: none;
+}
+
 /* Review R1-H1: member Agents rows lead with the display name (spec.host) and
  * stack the immutable slug underneath whenever the two differ — display names
  * are not unique, the slug is the stable identity for navigation, grants, and
