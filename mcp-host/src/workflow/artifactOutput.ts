@@ -160,3 +160,72 @@ export function artifactResult(
     content: parts.join('\n'),
   }
 }
+
+export function ensureDir(dir: string): void {
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true })
+  }
+}
+
+// A dashboard with charts inlines the Chart.js UMD bundle (~210 KB) so the
+// HTML works offline: about 250 of them fit in the default quota.
+const DEFAULT_QUOTA_MB = 50
+
+/**
+ * Recursively sum the size of all regular files under `dir`.
+ * Returns 0 if the directory does not exist.
+ */
+export function getDirectorySize(dir: string): number {
+  if (!fs.existsSync(dir)) return 0
+  let total = 0
+  const entries = fs.readdirSync(dir, { withFileTypes: true })
+  for (const entry of entries) {
+    const full = path.join(dir, entry.name)
+    if (entry.isDirectory()) {
+      total += getDirectorySize(full)
+    } else if (entry.isFile()) {
+      try {
+        total += fs.statSync(full).size
+      } catch {
+        // file may have been removed between readdir and stat — ignore
+      }
+    }
+  }
+  return total
+}
+
+/**
+ * Enforce the per-recipe output quota before a file is written.
+ *
+ * Reads the ceiling from `CLERUM_WORKFLOW_OUTPUT_QUOTA_MB` (default: 50 MB).
+ * Throws if the current directory usage + `incomingBytes` would exceed the cap.
+ * `replacingBytes` is the size of a file the write overwrites, which stops
+ * counting once it is replaced.
+ *
+ * Known limitation (race condition): When the LLM issues multiple tool calls
+ * concurrently (e.g., generate_pdf + generate_xlsx in the same turn), both
+ * calls read the directory size before either has written its file. Both see
+ * the same "current" size and both pass the quota check, even though the
+ * combined output would exceed the 50 MB cap. This is a best-effort soft
+ * quota; the 1Gi PVC hard cap enforced by kubelet is the primary defense.
+ */
+export function enforceQuota(outputDir: string, incomingBytes: number, replacingBytes = 0): void {
+  const raw = process.env.CLERUM_WORKFLOW_OUTPUT_QUOTA_MB
+  const parsed = raw ? parseInt(raw, 10) : NaN
+  const quotaMB = Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_QUOTA_MB
+  const quotaBytes = quotaMB * 1024 * 1024
+
+  const current = getDirectorySize(outputDir) - replacingBytes
+  const projected = current + incomingBytes
+  if (projected > quotaBytes) {
+    const mb = (bytes: number) => (bytes / (1024 * 1024)).toFixed(1)
+    throw new Error(
+      `Output quota exceeded: the output folder holds ${mb(current)} MB and this file needs ` +
+        `${mb(incomingBytes)} MB, over the ${quotaMB} MB limit. Make the file smaller, or ask ` +
+        'the user to remove earlier generated files or an operator to raise ' +
+        'CLERUM_WORKFLOW_OUTPUT_QUOTA_MB.'
+    )
+  }
+}
+
+// ─── generate_chart ──────────────────────────────────────────────────
