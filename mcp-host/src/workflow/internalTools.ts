@@ -1772,18 +1772,24 @@ function prepared(tool: InternalToolDefinition): InternalToolDefinition {
     ...tool,
     execute: async (args, outputDir) => {
       let clean: Record<string, unknown>
+      let release: () => void
       try {
         clean = withoutUnsetNulls(tool.parameters, cleanToolArgs(args ?? {})) as Record<
           string,
           unknown
         >
         const { predecodeImages } = await import('./embeddedImages')
-        await predecodeImages(clean, outputDir)
+        release = await predecodeImages(clean, outputDir)
       } catch (err) {
         return { success: false, error: err instanceof Error ? err.message : String(err) }
       }
       const unknown = watchUnknownArguments(tool.parameters, clean)
-      const result = await tool.execute(clean, outputDir)
+      let result: InternalToolResult
+      try {
+        result = await tool.execute(clean, outputDir)
+      } finally {
+        release()
+      }
       const ignored = unknown.ignored()
       if (!result.success || ignored.length === 0) return result
       const listed = ignored.slice(0, 10).map(name => `'${name}'`)

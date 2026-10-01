@@ -344,3 +344,33 @@ describe('loadEmbeddableImage', () => {
     )
   })
 })
+
+describe('images decoded for a call', () => {
+  /** A WebP of noise, whose decoded PNG is a few megabytes. */
+  async function writeNoise(name: string, seed: number) {
+    const canvas = createCanvas(1000, 1000)
+    const ctx = canvas.getContext('2d')
+    const image = ctx.createImageData(1000, 1000)
+    let s = seed
+    for (let i = 0; i < image.data.length; i++) {
+      s = (s * 1103515245 + 12345) % 2147483648
+      image.data[i] = i % 4 === 3 ? 255 : s & 255
+    }
+    ctx.putImageData(image, 0, 0)
+    fs.writeFileSync(path.join(outputDir, name), await canvas.encode('webp', 100))
+  }
+
+  it('stay readable while another call decodes more than the cache holds', async () => {
+    await writeImage('held.webp', 'webp')
+    const releaseHeld = await predecodeImages(['held.webp'], outputDir)
+    const others = Array.from({ length: 34 }, (_, i) => `noise-${i}.webp`)
+    for (const [i, name] of others.entries()) await writeNoise(name, i + 1)
+    const releaseOthers = await predecodeImages(others, outputDir)
+    releaseOthers()
+
+    const warnings: string[] = []
+    expect(loadEmbeddableImage('held.webp', outputDir, warnings)).toBeDefined()
+    expect(warnings).toEqual([])
+    releaseHeld()
+  }, 60_000)
+})

@@ -507,11 +507,30 @@ function decodable(raw: Buffer): Buffer | undefined {
 const decoded = new Map<string, Buffer>()
 /** Why an image named in the arguments was not converted, by file and version. */
 const refused = new Map<string, string>()
-const MAX_DECODED = 32
+const MAX_REFUSALS = 32
+/** Decoded bytes kept between calls; an image a call still runs on is never dropped. */
+const MAX_DECODED_BYTES = 64 * 1024 * 1024
+/** How many running calls use each decoded image. */
+const inUse = new Map<string, number>()
+let decodedBytes = 0
 
-function remember<T>(map: Map<string, T>, key: string, value: T): void {
-  map.set(key, value)
-  while (map.size > MAX_DECODED) map.delete(map.keys().next().value as string)
+function refuse(key: string, reason: string): void {
+  refused.set(key, reason)
+  while (refused.size > MAX_REFUSALS) refused.delete(refused.keys().next().value as string)
+}
+
+/** Keep `bytes` for `key`, dropping the oldest images no running call uses past the budget. */
+function keepDecoded(key: string, bytes: Buffer): void {
+  decodedBytes -= decoded.get(key)?.length ?? 0
+  decoded.delete(key)
+  decoded.set(key, bytes)
+  decodedBytes += bytes.length
+  for (const [k, v] of decoded) {
+    if (decodedBytes <= MAX_DECODED_BYTES) break
+    if (inUse.has(k)) continue
+    decoded.delete(k)
+    decodedBytes -= v.length
+  }
 }
 
 function decodedKey(file: string): string | undefined {
@@ -553,10 +572,17 @@ function collectImageNames(value: unknown, into: Set<string>, depth = 0): void {
  * loadEmbeddableImage can convert it. Never throws: whatever cannot be decoded
  * here is reported by loadEmbeddableImage when a generator asks for it.
  */
-export async function predecodeImages(args: unknown, outputDir: string): Promise<void> {
+export async function predecodeImages(args: unknown, outputDir: string): Promise<() => void> {
   const names = new Set<string>()
   collectImageNames(args, names)
   const root = path.resolve(outputDir)
+  // Every image this call decodes or finds decoded stays until it releases them,
+  // so a call running beside it cannot push them out before the generator reads them.
+  const held: string[] = []
+  const hold = (key: string) => {
+    held.push(key)
+    inUse.set(key, (inUse.get(key) ?? 0) + 1)
+  }
   for (const name of names) {
     try {
       const resolved = path.resolve(root, name)
@@ -566,7 +592,11 @@ export async function predecodeImages(args: unknown, outputDir: string): Promise
           ? path.join(root, path.basename(name))
           : undefined
       const key = file && decodedKey(file)
-      if (!file || !key || decoded.has(key) || !insideRealFolder(file, root)) continue
+      if (!file || !key || !insideRealFolder(file, root)) continue
+      if (decoded.has(key)) {
+        hold(key)
+        continue
+      }
       const raw = fs.readFileSync(file)
       if (isPng(raw) || (isJpeg(raw) && jpegOrientation(raw) <= 1)) continue
       const input = decodable(raw)
@@ -574,17 +604,16 @@ export async function predecodeImages(args: unknown, outputDir: string): Promise
       if (isSvg(raw)) {
         const refusal = svgRefusal(input.toString('utf8'))
         if (refusal) {
-          remember(refused, key, refusal)
+          refuse(key, refusal)
           continue
         }
         const png = await renderSvg(input)
-        if (png) remember(decoded, key, png)
-        else
-          remember(
-            refused,
-            key,
-            `took longer than ${SVG_RENDER_MS / 1000} s to draw, or could not be drawn`
-          )
+        if (png) {
+          hold(key)
+          keepDecoded(key, png)
+        } else {
+          refuse(key, `took longer than ${SVG_RENDER_MS / 1000} s to draw, or could not be drawn`)
+        }
         continue
       }
       const image = await loadImage(input)
@@ -593,13 +622,23 @@ export async function predecodeImages(args: unknown, outputDir: string): Promise
       canvas.getContext('2d').drawImage(image, 0, 0)
       // The decoder applies the EXIF rotation; re-encoding drops it, so every
       // format shows the photo the same way up.
-      remember(
-        decoded,
+      hold(key)
+      keepDecoded(
         key,
         isJpeg(raw) ? canvas.toBuffer('image/jpeg', 92) : canvas.toBuffer('image/png')
       )
     } catch {
       // Left for loadEmbeddableImage to report against the argument that named it.
+    }
+  }
+  let released = false
+  return () => {
+    if (released) return
+    released = true
+    for (const key of held) {
+      const count = (inUse.get(key) ?? 1) - 1
+      if (count > 0) inUse.set(key, count)
+      else inUse.delete(key)
     }
   }
 }
