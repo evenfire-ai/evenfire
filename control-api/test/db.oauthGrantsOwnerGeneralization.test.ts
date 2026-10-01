@@ -46,6 +46,10 @@ describe('0101 oauth_grants owner generalization migration', () => {
     expect(versions.indexOf('0119_dynamic_clients_table')).toBeLessThan(
       versions.indexOf('0120_dynamic_clients_runtime_access')
     )
+    expect(versions).toContain('0122_durable_entity_change_feed')
+    expect(versions.indexOf('0116_mcp_secret_rollback_permits')).toBeLessThan(
+      versions.indexOf('0122_durable_entity_change_feed')
+    )
     expect(versions.indexOf('0100_seed_minimax_allowed_model')).toBeLessThan(
       versions.indexOf('0106_oauth_grants_owner_generalization')
     )
