@@ -307,8 +307,7 @@ describe('useAgentChatController — characterization (D.0)', () => {
       await settleMount()
 
       let sendResolved = false
-      const sendPromise = act(async () => {
-        await result.current.handleSendAgentMessage('hola')
+      const sendPromise = result.current.handleSendAgentMessage('hola').then(() => {
         sendResolved = true
       })
 
@@ -324,7 +323,9 @@ describe('useAgentChatController — characterization (D.0)', () => {
           data: { taskId: 'task-abc', status: 'completed' },
         })
       })
-      await sendPromise
+      await act(async () => {
+        await sendPromise
+      })
 
       expect(sendResolved).toBe(true)
       // The user message is upserted before the POST and the assistant reply is
@@ -350,9 +351,7 @@ describe('useAgentChatController — characterization (D.0)', () => {
       await settleMount()
       expect(result.current.activeChatId).toBeNull()
 
-      const sendPromise = act(async () => {
-        await result.current.handleSendAgentMessage('first message')
-      })
+      const sendPromise = result.current.handleSendAgentMessage('first message')
       await waitFor(() => expect(clerum.hasProgressHandler('task-abc')).toBe(true))
       await act(async () => {
         clerum.emitTaskProgress('task-abc', {
@@ -360,7 +359,9 @@ describe('useAgentChatController — characterization (D.0)', () => {
           data: { taskId: 'task-abc', status: 'completed' },
         })
       })
-      await sendPromise
+      await act(async () => {
+        await sendPromise
+      })
 
       expect(clerum.chat.create).toHaveBeenCalled()
       const createOrder = clerum.chat.create.mock.invocationCallOrder[0]!
@@ -393,9 +394,7 @@ describe('useAgentChatController — characterization (D.0)', () => {
       await settleMount()
 
       // First send — leave it in flight (no terminal emitted yet).
-      const firstSend = act(async () => {
-        await result.current.handleSendAgentMessage('m1')
-      })
+      const firstSend = result.current.handleSendAgentMessage('m1')
       await waitFor(() => expect(clerum.hasProgressHandler('task-abc')).toBe(true))
 
       // Second send while first is in flight — should be silently rejected.
@@ -411,7 +410,9 @@ describe('useAgentChatController — characterization (D.0)', () => {
           data: { taskId: 'task-abc', status: 'completed' },
         })
       })
-      await firstSend
+      await act(async () => {
+        await firstSend
+      })
     })
 
     it('4.5 surfaces a failed terminal as an error assistant message', async () => {
@@ -419,9 +420,7 @@ describe('useAgentChatController — characterization (D.0)', () => {
       const { result, spies } = renderController()
       await settleMount()
 
-      const sendPromise = act(async () => {
-        await result.current.handleSendAgentMessage('hola')
-      })
+      const sendPromise = result.current.handleSendAgentMessage('hola')
       await waitFor(() => expect(clerum.hasProgressHandler('task-abc')).toBe(true))
       await act(async () => {
         clerum.emitTaskProgress('task-abc', {
@@ -433,7 +432,9 @@ describe('useAgentChatController — characterization (D.0)', () => {
           },
         })
       })
-      await sendPromise
+      await act(async () => {
+        await sendPromise
+      })
 
       // The failure toast follows the store write of the error reply.
       await waitFor(() =>
@@ -495,9 +496,7 @@ describe('useAgentChatController — characterization (D.0)', () => {
       const { result } = renderController()
       await settleMount()
 
-      const sendPromise = act(async () => {
-        await result.current.handleSendAgentMessage('hola')
-      })
+      const sendPromise = result.current.handleSendAgentMessage('hola')
       await waitFor(() => expect(clerum.hasProgressHandler('task-abc')).toBe(true))
       await act(async () => {
         clerum.emitTaskProgress('task-abc', {
@@ -505,7 +504,9 @@ describe('useAgentChatController — characterization (D.0)', () => {
           data: { taskId: 'task-abc', status: 'cancelled', reason: 'user_cancelled' },
         })
       })
-      await sendPromise
+      await act(async () => {
+        await sendPromise
+      })
 
       expect(clerum.rpc.getTaskResult).not.toHaveBeenCalled()
       const progress = result.current.progressByAgentMessage['agent-x']
@@ -1786,9 +1787,7 @@ describe('useAgentChatController — characterization (D.0)', () => {
       const { result } = renderController()
       await settleMount()
 
-      const sendPromise = act(async () => {
-        await result.current.handleSendAgentMessage('persist me')
-      })
+      const sendPromise = result.current.handleSendAgentMessage('persist me')
       await waitFor(() => expect(clerum.hasProgressHandler('task-ga')).toBe(true))
       await act(async () => {
         clerum.emitTaskProgress('task-ga', { type: 'open', taskId: 'task-ga', hostRef: 'agent-x' })
@@ -1797,7 +1796,9 @@ describe('useAgentChatController — characterization (D.0)', () => {
           data: { taskId: 'task-ga', status: 'completed' },
         })
       })
-      await sendPromise
+      await act(async () => {
+        await sendPromise
+      })
 
       // The user message was persisted (a chat was auto-created and the typed
       // input written to it) — the input is durable across reload.
@@ -1834,9 +1835,7 @@ describe('interrupted generated-file contract', () => {
     })
     const { result } = renderController()
     await settleMount()
-    const send = act(async () => {
-      await result.current.handleSendAgentMessage('Create a report')
-    })
+    const send = result.current.handleSendAgentMessage('Create a report')
     await waitFor(() => expect(clerum.hasProgressHandler('task-file')).toBe(true))
     await act(async () => {
       clerum.emitTaskProgress('task-file', {
@@ -1848,7 +1847,9 @@ describe('interrupted generated-file contract', () => {
         },
       })
     })
-    await send
+    await act(async () => {
+      await send
+    })
     const saved = clerum.chat.appendMessages.mock.calls.at(-1)?.[2]
     expect(saved).toEqual([
       expect.objectContaining({
