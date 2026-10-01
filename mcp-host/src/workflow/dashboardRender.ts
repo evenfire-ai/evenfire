@@ -19,7 +19,7 @@ import {
   type DashboardThemeColors,
   type ThemeName,
 } from './dashboardThemes'
-import { own } from './ownEntry'
+import { choose, own } from './ownEntry'
 import { headerText, normalizeTableRows } from './tableRows'
 import type { InternalToolResult } from './types'
 
@@ -1736,16 +1736,39 @@ export async function runGenerateDashboard(
           'e.g. {"title": "Weekly review", "kpis": [...]}.',
       }
     }
-    const template = oneOf(args.template, DASHBOARD_TEMPLATE_NAMES, 'executive-brief')
+    const notes: string[] = []
+    const template = choose(
+      args.template,
+      DASHBOARD_TEMPLATE_NAMES,
+      'executive-brief',
+      'template',
+      notes
+    )
+    const theme = choose(
+      args.theme,
+      ['default', 'corporate', 'warm', 'alert'] as const,
+      'default',
+      'theme',
+      notes
+    )
+    // Unset, the page follows the viewer's setting, so an unknown mode does too.
+    let defaultThemeMode: 'light' | 'dark' | undefined
+    if (args.defaultThemeMode !== undefined && args.defaultThemeMode !== null) {
+      const mode = String(args.defaultThemeMode).trim().toLowerCase()
+      if (mode === 'light' || mode === 'dark') defaultThemeMode = mode
+      else {
+        notes.push(
+          `defaultThemeMode ${JSON.stringify(args.defaultThemeMode)} is not light or dark, so ` +
+            "the page follows the viewer's setting."
+        )
+      }
+    }
     const inlineChartJs = args.inlineChartJs !== false
     const { html, ctx } = renderDashboard({
       template,
       data,
-      theme: oneOf(args.theme, ['default', 'corporate', 'warm', 'alert'] as const, 'default'),
-      defaultThemeMode:
-        args.defaultThemeMode === 'light' || args.defaultThemeMode === 'dark'
-          ? args.defaultThemeMode
-          : undefined,
+      theme,
+      defaultThemeMode,
       inlineChartJs,
       branding: isDashRecord(args.branding) ? args.branding : {},
     })
@@ -1758,6 +1781,7 @@ export async function runGenerateDashboard(
       }
     }
     const warnings = [
+      ...notes,
       ...ctx.failures.map(f => `${f} A notice shows in its place.`),
       ...ignoredDashboardFields(template, data),
       ...ctx.warnings,

@@ -40,7 +40,7 @@ import {
 } from './chartThemes'
 import { PNG_BASE_PPM } from './embeddedImages'
 import { CHART_FONT_STACK, ensureFontsReady, sanitizeForFont } from './fonts'
-import { own } from './ownEntry'
+import { choose } from './ownEntry'
 import type { InternalToolResult } from './types'
 
 // Register Chart.js controllers/scales/elements/plugins once. Chart.js v4 ships
@@ -657,8 +657,8 @@ export async function runGenerateChart(
           `${(MAX_CANVAS_PIXELS / 1e6).toFixed(1)} megapixel limit. Reduce width or height.`,
       }
     }
-    const themeName = String(args.theme ?? 'light')
-    const theme = own(CHART_THEMES, themeName) ?? CHART_THEMES.light
+    const theme =
+      CHART_THEMES[choose(args.theme, Object.keys(CHART_THEMES), 'light', 'theme', warnings)]
 
     const title = args.title ? sanitizeForFont(String(args.title)) : undefined
     const yAxisLabel = args.yAxisLabel ? sanitizeForFont(String(args.yAxisLabel)) : undefined

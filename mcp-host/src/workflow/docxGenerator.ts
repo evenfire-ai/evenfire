@@ -43,7 +43,7 @@ import {
 } from './docxStyle'
 import { buildDocxTable, docxSections } from './docxTable'
 import { htmlToPlainText } from './inlineMarkup'
-import { own } from './ownEntry'
+import { choose } from './ownEntry'
 import { normalizeTableRows } from './tableRows'
 import type { InternalToolResult } from './types'
 
@@ -87,11 +87,14 @@ export async function runGenerateDocx(
     const title = args.title ? htmlToPlainText(String(args.title)) : undefined
     const headline = args.headline ? htmlToPlainText(String(args.headline)) : undefined
     const body = String(args.body ?? '')
-    const palette = own(DOCX_PALETTES, String(args.palette ?? 'default')) ?? DOCX_PALETTES.default
     const branding: DocxBranding = printedBranding(args.branding)
     const images: unknown[] = Array.isArray(args.images) ? args.images : []
     const tables: unknown[] = Array.isArray(args.tables) ? args.tables : []
     const warnings: string[] = []
+    const palette =
+      DOCX_PALETTES[
+        choose(args.palette, Object.keys(DOCX_PALETTES), 'default', 'palette', warnings)
+      ]
     const numbering = new DocxListNumbering()
     const imageBox = { width: DOCX_MAX_IMAGE_WIDTH, height: DOCX_MAX_IMAGE_HEIGHT }
     let embedded = 0

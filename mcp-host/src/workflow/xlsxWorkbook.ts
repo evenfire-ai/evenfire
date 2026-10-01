@@ -10,7 +10,7 @@ import {
   fitImageSize,
   loadEmbeddableImage,
 } from './embeddedImages'
-import { own } from './ownEntry'
+import { choose } from './ownEntry'
 import { headerText } from './tableRows'
 import {
   type SheetCell,
@@ -898,7 +898,8 @@ export async function buildXlsxWorkbook(
       'images belongs inside each sheet (sheets[i].images); the top-level images were placed on the first sheet.'
     )
   }
-  const palette = own(XLSX_PALETTES, String(args.palette ?? 'default')) ?? XLSX_PALETTES.default
+  const palette =
+    XLSX_PALETTES[choose(args.palette, Object.keys(XLSX_PALETTES), 'default', 'palette', warnings)]
   const branding = isRecord(args.branding) ? args.branding : {}
   const company = typeof branding.companyName === 'string' ? branding.companyName : ''
 
