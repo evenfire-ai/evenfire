@@ -182,11 +182,17 @@ export function useAppController() {
   const onSessionNeedsLoad = useCallback(async (options?: { preserveNav?: boolean }) => {
     return loadSessionRef.current(options)
   }, [])
+  const logoutForEnvironmentMismatchRef = useRef<() => Promise<void>>(async () => undefined)
+  const logoutForEnvironmentMismatch = useCallback(
+    () => logoutForEnvironmentMismatchRef.current(),
+    []
+  )
 
   // ─── Auth ───
   const auth = useAuthController({
     setStatus: fullSetStatus,
     onSessionNeedsLoad,
+    logoutForEnvironmentMismatch,
   })
 
   // ─── First-run onboarding ───
@@ -940,6 +946,7 @@ export function useAppController() {
     resetWorkflowsData,
     teamsData.reset,
   ])
+  logoutForEnvironmentMismatchRef.current = handleLogout
 
   // ─── Cross-domain: handleOpenAgentWorkspace ───
   const openAgentWorkspace = useCallback(

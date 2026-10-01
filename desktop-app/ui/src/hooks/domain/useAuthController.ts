@@ -12,13 +12,14 @@ import type {
 import type { Tone } from '../../uiTypes'
 import {
   createDesktopEnvironmentSetupHandler,
-  getDesktopEnvironmentRestOriginMatches,
+  getDesktopEnvironmentRestMatches,
 } from './desktopEnvironmentHandoff'
 import type { SetStatusFn } from './types'
 
 interface UseAuthControllerParams {
   setStatus: SetStatusFn
   onSessionNeedsLoad: (options?: { preserveNav?: boolean }) => Promise<void>
+  logoutForEnvironmentMismatch: () => Promise<void>
 }
 
 function isInvitationExpiredError(error: unknown) {
@@ -41,7 +42,11 @@ function isUnauthorizedError(error: unknown) {
   return /\b401\s+unauthorized\b/.test(message) || /:\s*401\s/.test(message)
 }
 
-export function useAuthController({ setStatus, onSessionNeedsLoad }: UseAuthControllerParams) {
+export function useAuthController({
+  setStatus,
+  onSessionNeedsLoad,
+  logoutForEnvironmentMismatch,
+}: UseAuthControllerParams) {
   const [booting, setBootingState] = useState(true)
   const bootingRef = useRef(true)
   const setBooting = useCallback((next: boolean) => {
@@ -376,6 +381,7 @@ export function useAuthController({ setStatus, onSessionNeedsLoad }: UseAuthCont
         refreshRuntimeConfigState,
         handleSelectRuntimeConfig,
         onSessionNeedsLoad,
+        logoutForEnvironmentMismatch,
         setPendingDesktopEnvironmentSetup,
         setStatus,
       })
@@ -383,6 +389,7 @@ export function useAuthController({ setStatus, onSessionNeedsLoad }: UseAuthCont
   }, [
     getDesktopEnvironmentHandoffAuthState,
     handleSelectRuntimeConfig,
+    logoutForEnvironmentMismatch,
     onSessionNeedsLoad,
     refreshRuntimeConfigState,
     setStatus,
@@ -430,12 +437,12 @@ export function useAuthController({ setStatus, onSessionNeedsLoad }: UseAuthCont
         return
       }
 
-      const restOriginMatches = getDesktopEnvironmentRestOriginMatches(
+      const restMatches = getDesktopEnvironmentRestMatches(
         currentConfigState,
         nextConfig.externalRestApiBaseUrl
       )
 
-      if (restOriginMatches.localhost) {
+      if (restMatches.localhost) {
         setPendingDesktopEnvironmentSetup(null)
         setStatus(
           'Desktop setup link rejected: the Localhost environment cannot be opened from a link.',
@@ -444,17 +451,17 @@ export function useAuthController({ setStatus, onSessionNeedsLoad }: UseAuthCont
         return
       }
 
-      if (restOriginMatches.saved.length > 0) {
-        if (restOriginMatches.saved.length > 1) {
+      if (restMatches.saved.length > 0) {
+        if (restMatches.saved.length > 1) {
           setPendingDesktopEnvironmentSetup(null)
           setStatus(
-            'Desktop setup link rejected because multiple saved environments use this REST host.',
+            'Desktop setup link rejected because multiple saved environments use this REST API.',
             'error'
           )
           return
         }
 
-        const selectedState = await handleSelectRuntimeConfig(restOriginMatches.saved[0].id)
+        const selectedState = await handleSelectRuntimeConfig(restMatches.saved[0].id)
         if (!selectedState) return
         setPendingDesktopEnvironmentSetup(null)
         try {
@@ -471,11 +478,11 @@ export function useAuthController({ setStatus, onSessionNeedsLoad }: UseAuthCont
       const state = await handleSaveRuntimeConfig(nextConfig)
       if (!state) return
       const selectedOption = state.options.find(option => option.id === state.activeOptionId)
-      const selectedRestOriginMatches = getDesktopEnvironmentRestOriginMatches(
+      const selectedRestMatches = getDesktopEnvironmentRestMatches(
         state,
         nextConfig.externalRestApiBaseUrl
       ).saved.some(option => option.id === state.activeOptionId)
-      if (!selectedOption || !selectedRestOriginMatches || !selectedOption.rpcProxyBaseUrl.trim()) {
+      if (!selectedOption || !selectedRestMatches || !selectedOption.rpcProxyBaseUrl.trim()) {
         setPendingDesktopEnvironmentSetup(null)
         setStatus(
           'Desktop environment setup could not verify the confirmed REST and RPC endpoints.',

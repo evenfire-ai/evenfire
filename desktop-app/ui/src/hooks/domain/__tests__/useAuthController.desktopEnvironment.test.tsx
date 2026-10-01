@@ -10,6 +10,7 @@ import { useAuthController } from '../useAuthController'
 const mocks = vi.hoisted(() => ({
   clearQueryCache: vi.fn(),
   getRuntimeConfigState: vi.fn(),
+  logoutForEnvironmentMismatch: vi.fn(),
   onDesktopEnvironmentSetup: vi.fn(),
   onDesktopSetupToken: vi.fn(),
   onExternalLogout: vi.fn(),
@@ -35,7 +36,10 @@ const otherEnvironment = {
   rpcProxyBaseUrl: 'https://other-rpc.example.test',
 }
 
-type DesktopEnvironmentSetupPayload = typeof targetEnvironment
+type DesktopEnvironmentSetupPayload = {
+  externalRestApiBaseUrl: string
+  appName?: string
+}
 
 let desktopEnvironmentSetupListener:
   | ((payload: DesktopEnvironmentSetupPayload) => void | Promise<void>)
@@ -51,6 +55,7 @@ function Probe() {
   const auth = useAuthController({
     setStatus: mocks.setStatus,
     onSessionNeedsLoad: mocks.loadSession,
+    logoutForEnvironmentMismatch: mocks.logoutForEnvironmentMismatch,
   })
   setBootingForTest = auth.setBooting
   setAuthenticatedForTest = auth.setIsAuthenticated
@@ -125,6 +130,9 @@ beforeEach(async () => {
     return runtimeConfigModule!.getDesktopRuntimeConfigState()
   })
   mocks.loadSession.mockImplementation(async () => setBootingForTest?.(false))
+  mocks.logoutForEnvironmentMismatch.mockImplementation(async () => {
+    setAuthenticatedForTest?.(false)
+  })
   mocks.onDesktopSetupToken.mockReturnValue(() => undefined)
   mocks.onExternalLogout.mockReturnValue(() => undefined)
   mocks.onDesktopEnvironmentSetup.mockImplementation(
@@ -157,13 +165,16 @@ afterEach(async () => {
 })
 
 describe('Desktop environment handoff', () => {
-  it('switches to a saved environment matching both service origins', async () => {
+  it('switches to a saved environment matching its REST endpoint', async () => {
     render(<Probe />)
     await waitFor(() => expect(screen.getByTestId('configuration-loaded')).toHaveTextContent('yes'))
     const targetOptionId = await savedTargetOptionId()
     mocks.loadSession.mockClear()
 
-    await dispatchDesktopEnvironmentLink()
+    await dispatchDesktopEnvironmentLink({
+      ...targetEnvironment,
+      externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/api/v1`,
+    })
 
     expect(mocks.selectRuntimeConfig).toHaveBeenCalledWith(targetOptionId)
     expect(mocks.clearQueryCache).toHaveBeenCalledOnce()
@@ -183,7 +194,10 @@ describe('Desktop environment handoff', () => {
 
     render(<Probe />)
     await waitFor(() => expect(screen.getByTestId('configuration-loaded')).toHaveTextContent('yes'))
-    await dispatchDesktopEnvironmentLink()
+    await dispatchDesktopEnvironmentLink({
+      ...targetEnvironment,
+      externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/api/v1`,
+    })
 
     expect(mocks.selectRuntimeConfig).not.toHaveBeenCalled()
     expect(screen.getByTestId('pending-environment')).toHaveTextContent('none')
@@ -193,7 +207,7 @@ describe('Desktop environment handoff', () => {
     )
   })
 
-  it('rejects a link that proposes a different RPC proxy for a saved REST environment', async () => {
+  it('selects a saved REST environment without trusting the linked RPC proxy', async () => {
     await runtimeConfigModule!.saveDesktopRuntimeConfig({
       ...targetEnvironment,
       externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/api/v1`,
@@ -204,10 +218,11 @@ describe('Desktop environment handoff', () => {
     await waitFor(() => expect(screen.getByTestId('configuration-loaded')).toHaveTextContent('yes'))
     await dispatchDesktopEnvironmentLink({
       ...targetEnvironment,
+      externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/api/v1`,
       rpcProxyBaseUrl: 'https://rpc.attacker.test',
     })
 
-    expect(mocks.selectRuntimeConfig).not.toHaveBeenCalled()
+    expect(mocks.selectRuntimeConfig).toHaveBeenCalledWith(await savedTargetOptionId())
     expect(screen.getByTestId('pending-environment')).toHaveTextContent('none')
     expect(screen.getByTestId('pending-rpc')).toHaveTextContent('none')
     expect(
@@ -216,10 +231,6 @@ describe('Desktop environment handoff', () => {
           option.externalRestApiBaseUrl === `${targetEnvironment.externalRestApiBaseUrl}/api/v1`
       )?.rpcProxyBaseUrl
     ).toBe(`${targetEnvironment.rpcProxyBaseUrl}/rpc`)
-    expect(mocks.setStatus).toHaveBeenCalledWith(
-      expect.stringMatching(/RPC proxy.*saved environment/i),
-      'error'
-    )
   })
 
   it('selects a saved REST profile without saving or rediscovering its RPC when the link omits RPC', async () => {
@@ -264,7 +275,7 @@ describe('Desktop environment handoff', () => {
 
     render(<Probe />)
     await waitFor(() => expect(screen.getByTestId('configuration-loaded')).toHaveTextContent('yes'))
-    await dispatchDesktopEnvironmentLink({ ...targetEnvironment, rpcProxyBaseUrl: '' })
+    await dispatchDesktopEnvironmentLink(targetEnvironment)
 
     await act(async () => {
       await confirmDesktopEnvironmentSetupForTest?.()
@@ -431,7 +442,7 @@ describe('Desktop environment handoff', () => {
     expect(screen.getByTestId('pending-rpc')).toHaveTextContent('none')
   })
 
-  it('does not switch away from another saved environment while signed in', async () => {
+  it('logs out and selects the linked saved environment when REST endpoints differ', async () => {
     const state = await runtimeConfigModule!.getDesktopRuntimeConfigState()
     const otherOption = state.options.find(
       option => option.externalRestApiBaseUrl === otherEnvironment.externalRestApiBaseUrl
@@ -445,14 +456,14 @@ describe('Desktop environment handoff', () => {
     mocks.selectRuntimeConfig.mockClear()
     mocks.setStatus.mockClear()
 
-    await dispatchDesktopEnvironmentLink()
+    await dispatchDesktopEnvironmentLink({
+      ...targetEnvironment,
+      externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/api/v1`,
+    })
 
-    expect(mocks.selectRuntimeConfig).not.toHaveBeenCalled()
+    expect(mocks.logoutForEnvironmentMismatch).toHaveBeenCalledOnce()
+    expect(mocks.selectRuntimeConfig).toHaveBeenCalledWith(await savedTargetOptionId())
     expect(screen.getByTestId('pending-environment')).toHaveTextContent('none')
-    expect(mocks.setStatus).toHaveBeenCalledWith(
-      expect.stringMatching(/sign out.*before opening another/i),
-      'info'
-    )
   })
 
   it('does not let a desktop link select the built-in Localhost environment', async () => {
@@ -492,5 +503,54 @@ describe('Desktop environment handoff', () => {
       'Could not verify the desktop environment. Try opening it again.',
       'error'
     )
+  })
+
+  it('adds a REST API path when only another path on the same host is saved', async () => {
+    const linkedEnvironment = {
+      appName: 'API v2 tenant',
+      externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/api/v2`,
+      rpcProxyBaseUrl: '',
+    }
+    const { AppService } = await import('../../../../../src/appService')
+    const service = new AppService()
+    const serviceInternals = service as unknown as {
+      authClient: { getDesktopEnvironment: ReturnType<typeof vi.fn> }
+      applyRuntimeEnvironmentChange: (operation: () => Promise<void>) => Promise<void>
+      saveRuntimeConfig: typeof service.saveRuntimeConfig
+    }
+    serviceInternals.authClient = {
+      getDesktopEnvironment: vi.fn().mockResolvedValue({
+        ...linkedEnvironment,
+        rpcProxyBaseUrl: 'https://rpc.example.test/api-v2',
+      }),
+    }
+    serviceInternals.applyRuntimeEnvironmentChange = operation => operation()
+    mocks.saveRuntimeConfig.mockImplementation(serviceInternals.saveRuntimeConfig.bind(service))
+
+    render(<Probe />)
+    await waitFor(() => expect(screen.getByTestId('configuration-loaded')).toHaveTextContent('yes'))
+    await dispatchDesktopEnvironmentLink(linkedEnvironment)
+    expect(screen.getByTestId('pending-environment')).toHaveTextContent(
+      linkedEnvironment.externalRestApiBaseUrl
+    )
+
+    await act(async () => {
+      await confirmDesktopEnvironmentSetupForTest?.()
+    })
+
+    const finalState = await runtimeConfigModule!.getDesktopRuntimeConfigState()
+    const savedTarget = finalState.options.find(
+      option => option.externalRestApiBaseUrl === linkedEnvironment.externalRestApiBaseUrl
+    )
+    const originalTarget = finalState.options.find(
+      option =>
+        option.externalRestApiBaseUrl === `${targetEnvironment.externalRestApiBaseUrl}/api/v1`
+    )
+    expect(serviceInternals.authClient.getDesktopEnvironment).toHaveBeenCalledOnce()
+    expect(savedTarget?.rpcProxyBaseUrl).toBe('https://rpc.example.test/api-v2')
+    expect(originalTarget).toBeDefined()
+    expect(finalState.activeOptionId).toBe(savedTarget?.id)
+    expect(screen.getByTestId('setup-complete')).toHaveTextContent('yes')
+    expect(screen.getByTestId('pending-environment')).toHaveTextContent('none')
   })
 })

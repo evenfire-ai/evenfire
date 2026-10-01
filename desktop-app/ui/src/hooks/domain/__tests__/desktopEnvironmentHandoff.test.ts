@@ -73,6 +73,7 @@ function createHandler(
     refreshRuntimeConfigState,
     handleSelectRuntimeConfig: selectRuntimeConfig,
     onSessionNeedsLoad: vi.fn(async () => undefined),
+    logoutForEnvironmentMismatch: vi.fn(async () => undefined),
     setPendingDesktopEnvironmentSetup,
     setStatus,
   })
@@ -132,7 +133,10 @@ describe('Desktop environment handoff concurrency', () => {
       refreshRuntimeConfigState
     )
 
-    const first = handler(targetEnvironment)
+    const first = handler({
+      ...targetEnvironment,
+      externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/api/v1`,
+    })
     const second = handler(otherEnvironment)
     finishRefreshes.forEach(finishRefresh => finishRefresh())
     await Promise.all([first, second])
@@ -144,7 +148,7 @@ describe('Desktop environment handoff concurrency', () => {
   })
 })
 
-describe('Desktop environment origin matching', () => {
+describe('Desktop environment REST endpoint matching', () => {
   it.each([
     [
       'a REST host suffix',
@@ -181,7 +185,7 @@ describe('Desktop environment origin matching', () => {
     })
   })
 
-  it('selects the unique saved REST profile when the link omits RPC', async () => {
+  it('selects the exact saved REST profile when the link omits RPC', async () => {
     const state = await runtimeConfigModule!.getDesktopRuntimeConfigState()
     const savedTarget = state.options.find(
       option =>
@@ -192,7 +196,10 @@ describe('Desktop environment origin matching', () => {
       () => ({ booting: false, busy: false, authTransitioning: false, isAuthenticated: false })
     )
 
-    await handler({ ...targetEnvironment, rpcProxyBaseUrl: '' })
+    await handler({
+      ...targetEnvironment,
+      externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/api/v1`,
+    })
 
     expect(selectRuntimeConfig).toHaveBeenCalledWith(savedTarget.id)
     expect(setPendingDesktopEnvironmentSetup).toHaveBeenCalledWith(null)
@@ -212,7 +219,6 @@ describe('Desktop environment origin matching', () => {
     await handler({
       ...targetEnvironment,
       externalRestApiBaseUrl: 'https://api.example.test./api/v1',
-      rpcProxyBaseUrl: '',
     })
 
     const finalState = await runtimeConfigModule!.getDesktopRuntimeConfigState()
@@ -246,27 +252,39 @@ describe('Desktop environment origin matching', () => {
     )
   })
 
-  it('rejects an omitted RPC when multiple saved profiles share the REST origin', async () => {
-    await runtimeConfigModule!.saveDesktopRuntimeConfig({
-      appName: 'Second API profile',
-      externalRestApiBaseUrl: targetEnvironment.externalRestApiBaseUrl,
-      rpcProxyBaseUrl: 'https://second-rpc.example.test',
-    })
-    const { handler, selectRuntimeConfig, setPendingDesktopEnvironmentSetup, setStatus } =
-      createHandler(() => ({
-        booting: false,
-        busy: false,
-        authTransitioning: false,
-        isAuthenticated: false,
-      }))
+  it.each(['one saved profile', 'multiple saved profiles'])(
+    'offers to add an unmatched REST path with %s on the same origin',
+    async profileCount => {
+      if (profileCount === 'multiple saved profiles') {
+        await runtimeConfigModule!.saveDesktopRuntimeConfig({
+          appName: 'Second API profile',
+          externalRestApiBaseUrl: targetEnvironment.externalRestApiBaseUrl,
+          rpcProxyBaseUrl: 'https://second-rpc.example.test',
+        })
+      }
+      const { handler, selectRuntimeConfig, setPendingDesktopEnvironmentSetup, setStatus } =
+        createHandler(() => ({
+          booting: false,
+          busy: false,
+          authTransitioning: false,
+          isAuthenticated: false,
+        }))
 
-    await handler({ ...targetEnvironment, rpcProxyBaseUrl: '' })
+      await handler({
+        ...targetEnvironment,
+        externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/other`,
+      })
 
-    expect(selectRuntimeConfig).not.toHaveBeenCalled()
-    expect(setPendingDesktopEnvironmentSetup).toHaveBeenCalledWith(null)
-    expect(setStatus).toHaveBeenCalledWith(
-      expect.stringMatching(/multiple saved environments use this REST host/i),
-      'error'
-    )
-  })
+      expect(selectRuntimeConfig).not.toHaveBeenCalled()
+      expect(setPendingDesktopEnvironmentSetup).toHaveBeenCalledWith({
+        ...targetEnvironment,
+        externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/other`,
+        rpcProxyBaseUrl: '',
+      })
+      expect(setStatus).not.toHaveBeenCalledWith(
+        expect.stringMatching(/multiple saved environments/i),
+        'error'
+      )
+    }
+  )
 })
