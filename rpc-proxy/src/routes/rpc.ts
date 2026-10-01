@@ -33,13 +33,13 @@ import {
   fetchUserConnectorsFromControlApi,
   requestHostWakeFromControlApi,
 } from '../services/controlApiRestService.js'
-import { admitLegacyHostRpcRequest } from '../services/hostRpcAdmission.js'
 import {
   type HostAccessDenialCode,
   isHostAccessDenied,
   respondHostAccessDenied,
   withoutReservedHostAccessCode,
 } from '../services/hostAccessDenial.js'
+import { admitLegacyHostRpcRequest } from '../services/hostRpcAdmission.js'
 import {
   type HostRuntimeMessageRequest,
   forwardCancelToHost,
@@ -74,16 +74,6 @@ type ArtifactReadRequest = AuthedRequest & {
     Awaited<ReturnType<typeof resolveArtifactReadHostConnectionForUser>>,
     { url: string }
   >
-}
-
-function isSafeUpstreamPathSegment(value: string): boolean {
-  return (
-    value.length > 0 &&
-    value !== '.' &&
-    value !== '..' &&
-    value.length <= 500 &&
-    !/[/\\\u0000-\u001f\u007f]/.test(value)
-  )
 }
 
 // Keep legacy denial precedence (scope before body parsing), while v2 route
@@ -1365,9 +1355,7 @@ export function createRpcRouter(): Router {
         }
         const baseUrl = host.url.replace(/\/+$/, '')
         // Strip line breaks from the user-derived path segments before logging.
-        // They are already control-char-free (isSafeUpstreamPathSegment rejects
-        // the C0 range, CR/LF included, above) so this is defense in depth: a
-        // logged value can never forge an extra log line. Never log the raw title
+        // This prevents a value from forging an extra log line. Never log the raw title
         // (spec 15 §5): titles are user content.
         const logHost = hostRef.replace(/[\r\n]/g, '')
         const logAgent = agent!.replace(/[\r\n]/g, '')

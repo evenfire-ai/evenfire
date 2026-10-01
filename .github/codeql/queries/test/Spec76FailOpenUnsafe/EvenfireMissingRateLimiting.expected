@@ -1,0 +1,10 @@
+| mcp-host/src/server.ts:35:7:35:55 | runtime ... lect']) | This route handler performs $@, but is not rate-limited. | mcp-host/src/server/edgeRuntimeAuth.ts:32:44:32:76 | rpcProx ... ed(req) | authorization |
+| mcp-host/src/server.ts:36:7:36:77 | (req: a ... Deps()) | This route handler performs $@, but is not rate-limited. | mcp-host/src/server/routes.ts:28:3:28:52 | fs.writ ... ected') | a file system access |
+| rpc-proxy/src/routes/desktopProxy.ts:28:3:28:16 | requireRpcAuth | This route handler performs $@, but is not rate-limited. | rpc-proxy/src/middleware/auth.ts:4:3:4:44 | jwt.ver ... e-key') | authorization |
+| rpc-proxy/src/routes/desktopProxy.ts:31:3:33:3 | async ( ... ue)\\n  } | This route handler performs $@, but is not rate-limited. | rpc-proxy/src/routes/desktopProxy.ts:15:56:15:76 | extract ... en(req) | authorization |
+| rpc-proxy/src/routes/desktopProxy.ts:31:3:33:3 | async ( ... ue)\\n  } | This route handler performs $@, but is not rate-limited. | rpc-proxy/src/routes/desktopProxy.ts:22:3:22:67 | fs.writ ... ected') | a file system access |
+| rpc-proxy/src/routes/rpc.ts:17:3:17:16 | requireRpcAuth | This route handler performs $@, but is not rate-limited. | rpc-proxy/src/middleware/auth.ts:4:3:4:44 | jwt.ver ... e-key') | authorization |
+| rpc-proxy/src/routes/rpc.ts:20:3:26:3 | async ( ... ())\\n  } | This route handler performs $@, but is not rate-limited. | rpc-proxy/src/services/hostRpcAdmission.ts:17:54:17:74 | extract ... en(req) | authorization |
+| rpc-proxy/src/routes/sandboxUi.ts:15:3:15:16 | requireRpcAuth | This route handler performs $@, but is not rate-limited. | rpc-proxy/src/middleware/auth.ts:4:3:4:44 | jwt.ver ... e-key') | authorization |
+| rpc-proxy/src/routes/sandboxUi.ts:18:3:32:3 | async ( ...  })\\n  } | This route handler performs $@, but is not rate-limited. | rpc-proxy/src/routes/sandboxUi.ts:24:56:24:76 | extract ... en(req) | authorization |
+| rpc-proxy/src/routes/sandboxUi.ts:18:3:32:3 | async ( ...  })\\n  } | This route handler performs $@, but is not rate-limited. | rpc-proxy/src/routes/sandboxUi.ts:30:5:30:69 | fs.writ ... ected') | a file system access |
