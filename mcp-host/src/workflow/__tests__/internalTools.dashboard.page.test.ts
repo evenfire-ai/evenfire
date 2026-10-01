@@ -244,6 +244,7 @@ describe('page script', () => {
   it('draws without animation so a print or PDF capture shows finished charts', async () => {
     const html = await page(TWO_CHARTS_AND_A_SPARKLINE)
     const run = runPageScript(html, { vars: LIGHT })
+    expect(run.charts.size).toBe(3)
     for (const chart of run.charts.values()) expect(chart.config.options.animation).toBe(false)
   })
 
