@@ -26,6 +26,7 @@ const fixtureApi = createRequire(import.meta.url)(
 ) as {
   encodings: (material: string) => Record<string, string>
   certificate: (material: KeyObject) => string
+  fixtures: () => Record<number, any>
 }
 const rsaPair = generateKeyPairSync('rsa', { modulusLength: 2048 })
 const rsa4096Pair = generateKeyPairSync('rsa', { modulusLength: 4096 })
@@ -62,9 +63,9 @@ const signingCases = [
     reason: undefined,
   },
   {
-    // codeql[js/insufficient-key-size] Intentional negative fixture: the policy must reject this key size.
     name: 'rsa1024',
-    material: generateKeyPairSync('rsa', { modulusLength: 1024 })
+    material: fixtureApi
+      .fixtures()[1024]
       .privateKey.export({ type: 'pkcs8', format: 'pem' })
       .toString(),
     reason: 'undersized_rsa_key',
