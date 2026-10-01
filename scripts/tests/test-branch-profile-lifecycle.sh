@@ -1490,5 +1490,32 @@ assert_output_has 'BRANCH_PROFILE_SHIM_SYMLINK' 'prepare-shims names the symlink
 assert_file "${outside}/minikube/keep.txt" 'prepare-shims must not delete through a symlinked scripts directory'
 rm -f "${profile_dir}/scripts"
 
+# === setup: always runs the current scripts and manifests (J3) ================
+# Shims prepared on one tree must not be reused by a setup on a newer tree:
+# setup deploys with the copies it runs, while the images come from REPO_DIR.
+# The fixture's full-setup.sh is replaced by a stub that names its tree and
+# prints the deploy file it was handed, for tree A and then tree B.
+write_fixture_tree() {
+  cat >"${repo}/scripts/minikube/full-setup.sh" <<EOF_SETUP
+#!/usr/bin/env bash
+printf 'fixture full-setup tree=%s deploy=%s\n' '$1' "\$(cat "\${BRANCH_PROFILE_DEPLOY_DIR:?}/minikube/fixture.txt")"
+EOF_SETUP
+  printf 'fixture deploy file %s\n' "$1" >"${repo}/deploy/minikube/fixture.txt"
+}
+reset_state
+write_fixture_tree A
+bp shims-tree-a prepare-shims
+assert_rc 0 'prepare-shims on tree A'
+write_fixture_tree B
+bp setup-tree-b setup "CONFIRM_PROFILE=${profile}"
+assert_rc 0 'setup on tree B after prepare-shims on tree A'
+# Witness: setup reached the script it runs.
+assert_output_has 'running isolated setup' 'setup on tree B ran full-setup.sh'
+assert_output_has 'fixture full-setup tree=B deploy=fixture deploy file B' \
+  'setup on tree B runs tree B script and manifests'
+assert_output_lacks 'tree=A' 'setup on tree B must not run the tree A copy'
+cp "${ROOT}/scripts/minikube/full-setup.sh" "${repo}/scripts/minikube/full-setup.sh"
+printf 'fixture deploy file\n' >"${repo}/deploy/minikube/fixture.txt"
+
 (( ASSERTIONS >= 100 )) || fail "expected at least 100 assertions, ran ${ASSERTIONS}"
 printf 'PASS: branch-profile lifecycle scenarios (%s assertions)\n' "${ASSERTIONS}"
