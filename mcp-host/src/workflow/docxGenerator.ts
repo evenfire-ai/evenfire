@@ -14,7 +14,6 @@ import {
   TextRun,
 } from 'docx'
 import * as fs from 'fs'
-import { config } from '../config'
 import {
   artifactResult,
   claimOutputFile,
@@ -23,7 +22,7 @@ import {
   outputFilename,
   replacedBytes,
 } from './artifactOutput'
-import { EMPTY_DOCUMENT_NOTE, footerLines, printedBranding } from './documentChrome'
+import { EMPTY_DOCUMENT_NOTE, printedBranding } from './documentChrome'
 import { type DocxImagePlacement, docxImageParagraph } from './docxImages'
 import { textRuns } from './docxInline'
 import { bodyHasText, bodyToDocxChildren } from './docxMarkdown'
