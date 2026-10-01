@@ -2,6 +2,7 @@
  * The shape of an XLSX sheet request: its rows, its name, the columns other
  * arguments point at, and the colors it names.
  */
+import { own } from './ownEntry'
 import { headerText, normalizeTableRows } from './tableRows'
 import { cellProblem } from './xlsxCells'
 
@@ -210,7 +211,7 @@ export function parseColor(input: unknown): string | undefined {
       .map(v => Number(v).toString(16).padStart(2, '0'))
       .join('')}`.toUpperCase()
   }
-  const named = NAMED_COLORS[text.toLowerCase().replace(/[\s_-]+/g, '')]
+  const named = own(NAMED_COLORS, text.toLowerCase().replace(/[\s_-]+/g, ''))
   return named ? `FF${named}` : undefined
 }
 

@@ -6,6 +6,7 @@ import { spawn } from 'child_process'
 import * as fs from 'fs'
 import * as path from 'path'
 import { imageTarget } from './inlineMarkup'
+import { own } from './ownEntry'
 
 export interface ImageSize {
   width: number
@@ -327,7 +328,7 @@ function svgLength(tag: string, name: string): number | null | undefined {
   if (!attr) return undefined
   const m = new RegExp(`^\\s*(${SVG_NUMBER})\\s*([a-z%]*)\\s*$`, 'i').exec(attr[1])
   if (m?.[2] === '%') return undefined
-  const factor = m ? SVG_UNIT_PX[m[2].toLowerCase()] : undefined
+  const factor = m ? own(SVG_UNIT_PX, m[2].toLowerCase()) : undefined
   return m && factor ? Number(m[1]) * factor : null
 }
 

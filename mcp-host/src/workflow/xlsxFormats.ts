@@ -2,6 +2,7 @@
  * Number formats for XLSX columns: the keywords a caller may ask for, and the
  * format a column gets from its header and values when nobody asked.
  */
+import { own } from './ownEntry'
 import { CURRENCY_SYMBOLS } from './xlsxCells'
 
 export const NUMBER_FORMATS = {
@@ -98,7 +99,8 @@ export function formatSpec(value: unknown): FormatSpec | undefined {
     .trim()
     .toLowerCase()
     .replace(/[\s_-]+/g, '')
-  if (KEYWORDS[key]) return KEYWORDS[key]
+  const keyword = own(KEYWORDS, key)
+  if (keyword) return keyword
   const code = /^(?:currency|money)[:(]?([a-z]{3})\)?$/.exec(key)?.[1] ?? key
   if (/^[a-z]{3}$/.test(code)) {
     const upper = code.toUpperCase()

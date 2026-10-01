@@ -39,6 +39,7 @@ import {
   startsTable,
   stripListMarker,
 } from './markdownBlocks'
+import { own } from './ownEntry'
 import {
   BODY_FONT_SIZE,
   MIN_BOTTOM_MARGIN,
@@ -850,7 +851,7 @@ export async function runGeneratePdf(
     const title = args.title ? htmlToPlainText(String(args.title)) || undefined : undefined
     const body = String(args.body ?? '')
     const paletteName = String(args.palette ?? 'default')
-    const palette = PDF_PALETTES[paletteName] ?? PDF_PALETTES.default
+    const palette = own(PDF_PALETTES, paletteName) ?? PDF_PALETTES.default
     const branding: PdfBranding = printedBranding(args.branding)
     const imageRefs = Array.isArray(args.images) ? args.images : []
     const tables = (Array.isArray(args.tables) ? args.tables : []) as PdfTableSpec[]

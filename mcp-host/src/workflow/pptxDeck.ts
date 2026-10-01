@@ -9,6 +9,7 @@
 import JSZip from 'jszip'
 import { bidiLanguage, documentEastAsianScript, isRtlText, scriptSegments } from './docxScript'
 import { fitImageSize } from './embeddedImages'
+import { own } from './ownEntry'
 import { nativeChartArgs } from './pptxCharts'
 import {
   type PptxColumn,
@@ -1231,7 +1232,8 @@ function pick<T>(
   warnings: string[]
 ): T {
   if (value === undefined || value === null || value === '') return table[fallback]
-  if (typeof value === 'string' && table[value]) return table[value]
+  const entry = typeof value === 'string' ? own(table, value) : undefined
+  if (entry) return entry
   warnings.push(
     `${field} ${JSON.stringify(value)} is not one of ${Object.keys(table).join(', ')}; ` +
       `"${fallback}" was used.`

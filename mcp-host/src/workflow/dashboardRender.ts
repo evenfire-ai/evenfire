@@ -19,6 +19,7 @@ import {
   type DashboardThemeColors,
   type ThemeName,
 } from './dashboardThemes'
+import { own } from './ownEntry'
 import { headerText, normalizeTableRows } from './tableRows'
 import type { InternalToolResult } from './types'
 
@@ -1175,8 +1176,7 @@ const SERVICE_STATUSES = ['healthy', 'degraded', 'down', 'maintenance'] as const
 /** Status words models use, by the card color they mean. */
 /** The entry `words` has for `text`, ignoring case; never one inherited from Object. */
 function ownWord<T>(words: Partial<Record<string, T>>, text: string): T | undefined {
-  const key = text.toLowerCase()
-  return Object.hasOwn(words, key) ? words[key] : undefined
+  return own(words, text.toLowerCase())
 }
 
 const SERVICE_STATUS_WORDS: Partial<Record<string, (typeof SERVICE_STATUSES)[number]>> = {
@@ -1543,7 +1543,7 @@ const BLOCK_LISTS: Record<string, { field: 'items' | 'services'; alias: string; 
 
 /** Whether `block` gives its list under the other name only. */
 function listUnderAlias(block: Record<string, unknown>): boolean {
-  const list = BLOCK_LISTS[String(block.type)]
+  const list = own(BLOCK_LISTS, String(block.type))
   return !!list && isEmptyList(block[list.field]) && !isEmptyList(block[list.alias])
 }
 
@@ -1557,7 +1557,7 @@ function blockList(
   where: string,
   ctx: DashRender
 ): { value: unknown; at: string } {
-  const { field, alias, noun } = BLOCK_LISTS[String(block.type)]
+  const { field, alias, noun } = own(BLOCK_LISTS, String(block.type))!
   if (listUnderAlias(block)) {
     ctx.warnings.push(`${where}: the list was read from ${alias}; name it ${field}.`)
     return { value: block[alias], at: `${where}.${alias}` }
