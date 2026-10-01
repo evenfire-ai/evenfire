@@ -585,8 +585,8 @@ describe('regex rules', () => {
     expect(Date.now() - started).toBeLessThan(15_000)
     expect(result.success, result.error).toBe(true)
     expect(result.content).toContain('regex took too long to test')
-    // A rule after the budget ran out is not blamed on its own pattern.
-    expect(result.content).toMatch(/regex was skipped: the regex rules before it used the 500 ms/)
+    // A rule after the one that ran out of time is not blamed on its own pattern.
+    expect(result.content).toMatch(/regex was skipped: a regex rule before it took too long/)
     const ws = await sheetOf(result)
     expect(fillOf(ws.getCell('A2'))).not.toBe('FFFEE2E2')
   }, 30_000)

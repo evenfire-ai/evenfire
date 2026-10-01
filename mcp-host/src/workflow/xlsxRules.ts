@@ -30,47 +30,89 @@ export interface PreparedRule {
 
 // Pattern and input are both model-supplied, and a backtracking engine takes
 // exponential time on patterns such as ^(a|a)*$ that no static check catches,
-// so the matching runs in a vm context under a deadline.
+// so each match runs in a vm context under a deadline. The work all rules may
+// do is counted in characters rather than timed, so a busy host applies the
+// same rules as an idle one.
 const MAX_REGEX_PATTERN_LENGTH = 256
 const MAX_REGEX_INPUT_LENGTH = 4096
-/** Time the regex rules of one workbook may take together. */
-const REGEX_BUDGET_MS = 500
+/** Characters the regex rules of one workbook may test together. */
+const REGEX_CHARACTER_BUDGET = 10_000_000
+/** Longest one rule's match may run; an ordinary pattern takes microseconds. */
+const REGEX_CALL_TIMEOUT_MS = 250
 
 // Wrapped in a function so the script can run again in the same context.
 const MATCH_ALL = new vm.Script(
   '(() => { const re = new RegExp(pattern); const out = []; for (const t of texts) out.push(re.test(t)); return out })()'
 )
 
+/** Why a regex rule was not applied. */
+export type RegexSkip =
+  | { reason: 'budget'; characters: number }
+  | { reason: 'timeout'; ms: number }
+  | { reason: 'after-timeout' }
+  | { reason: 'error'; message: string }
+
 /**
- * Time left for the regex rules of one workbook. One context serves them all,
- * so the budget pays for matching, not for setting up a context per rule.
+ * The regex matching of one workbook. One context serves every rule, so the
+ * cost is the matching, not setting up a context per rule. After one rule
+ * runs out of time the rest are not tried, which bounds how long a workbook
+ * of hostile patterns can hold the host.
  */
 export class RegexBudget {
-  private remaining = REGEX_BUDGET_MS
+  private remaining: number
+  private timedOut = false
   private context?: vm.Context
 
-  /** Whether the rules before this one used up the time. */
-  get exhausted(): boolean {
-    return this.remaining <= 0
+  constructor(
+    private readonly characters = REGEX_CHARACTER_BUDGET,
+    private readonly callTimeoutMs = REGEX_CALL_TIMEOUT_MS
+  ) {
+    this.remaining = characters
   }
 
-  /** Which of `texts` match `pattern`, or undefined when the time ran out. */
-  run(pattern: string, texts: string[]): boolean[] | undefined {
-    if (this.exhausted) return undefined
+  /** Which of `texts` match `pattern`, or why they were not tested. */
+  run(pattern: string, texts: string[]): boolean[] | RegexSkip {
+    if (this.timedOut) return { reason: 'after-timeout' }
+    const cost = texts.reduce((sum, t) => sum + t.length + 1, 0)
+    if (cost > this.remaining) return { reason: 'budget', characters: this.characters }
+    this.remaining -= cost
     this.context ??= vm.createContext({})
     this.context.pattern = pattern
     this.context.texts = texts
-    const started = Date.now()
     try {
-      const out = MATCH_ALL.runInContext(this.context, {
-        timeout: Math.max(1, Math.round(this.remaining)),
-      }) as boolean[]
+      const out = MATCH_ALL.runInContext(this.context, { timeout: this.callTimeoutMs }) as boolean[]
       return Array.from(out)
-    } catch {
-      return undefined
-    } finally {
-      this.remaining -= Date.now() - started
+    } catch (err) {
+      if ((err as { code?: string }).code === 'ERR_SCRIPT_EXECUTION_TIMEOUT') {
+        this.timedOut = true
+        return { reason: 'timeout', ms: this.callTimeoutMs }
+      }
+      return { reason: 'error', message: err instanceof Error ? err.message : String(err) }
     }
+  }
+}
+
+/** The warning for a regex rule `field` that was not applied. */
+function skipNote(field: string, skip: RegexSkip): string {
+  switch (skip.reason) {
+    case 'budget':
+      return (
+        `${field}.regex was skipped: the regex rules of a workbook may test ` +
+        `${skip.characters.toLocaleString('en-US')} characters together, and this one would ` +
+        'pass that; use contains where a plain match will do.'
+      )
+    case 'timeout':
+      return (
+        `${field}.regex took too long to test (over ${skip.ms} ms), so the rule was skipped; ` +
+        'use contains, or a pattern without repeated alternatives such as (a|a)*.'
+      )
+    case 'after-timeout':
+      return (
+        `${field}.regex was skipped: a regex rule before it took too long, so the workbook's ` +
+        'remaining regex rules were not tested.'
+      )
+    case 'error':
+      return `${field}.regex could not be tested (${skip.message}), so the rule was skipped.`
   }
 }
 
@@ -169,17 +211,9 @@ export function prepareRules(
       const regex = compileRegex(rule.regex, `${field}.regex`, warnings)
       if (!regex) return
       const inputs = [...new Set(texts.map(t => t.slice(0, MAX_REGEX_INPUT_LENGTH)))]
-      const spent = budget.exhausted
       const hits = budget.run(regex.source, inputs)
-      if (!hits) {
-        warnings.push(
-          spent
-            ? `${field}.regex was skipped: the regex rules before it used the ${REGEX_BUDGET_MS} ms ` +
-                'all regex rules of a workbook may take; use contains where a plain match will do.'
-            : `${field}.regex took too long to test (over ${REGEX_BUDGET_MS} ms for all regex ` +
-                'rules), so the rule was skipped; use contains, or a pattern without repeated ' +
-                'alternatives such as (a|a)*.'
-        )
+      if (!Array.isArray(hits)) {
+        warnings.push(skipNote(field, hits))
         return
       }
       regexHits = new Map(inputs.map((t, j) => [t, hits[j]]))
