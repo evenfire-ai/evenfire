@@ -452,8 +452,8 @@ incremental_build_images() {
     log "Building all images because the change cannot be safely targeted"
     (
       cd "${PROJECT_DIR}"
-      make minikube-build-images
-      make minikube-verify-images
+      T2_SKIP_LOCK=true T2_LOCK_TOKEN="${T2_LOCK_TOKEN}" make minikube-build-images
+      T2_SKIP_LOCK=true T2_LOCK_TOKEN="${T2_LOCK_TOKEN}" make minikube-verify-images
     )
     return 0
   fi
@@ -486,8 +486,8 @@ incremental_build_images_ghcr() {
     log "Re-pulling the release image set (${IMAGE_TAG}) before shadowing the changed images"
     (
       cd "${PROJECT_DIR}"
-      make minikube-pull-images
-      make minikube-verify-images
+      T2_SKIP_LOCK=true T2_LOCK_TOKEN="${T2_LOCK_TOKEN}" make minikube-pull-images
+      T2_SKIP_LOCK=true T2_LOCK_TOKEN="${T2_LOCK_TOKEN}" make minikube-verify-images
     )
   fi
 

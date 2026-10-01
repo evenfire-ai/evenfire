@@ -108,6 +108,8 @@ export interface AppControllerClerumOptions {
   desktopReleaseStatus?: typeof DEFAULT_DESKTOP_RELEASE_STATUS
   /** Payload for `team.directory` / `team.initialDirectory` / `team.list`. */
   teamDirectory?: { items: unknown[]; currentTeamId: string }
+  /** Overrides on the authenticated `me` the session state reports. */
+  me?: Partial<typeof HARNESS_ME>
 }
 
 export interface AppControllerClerumHandle {
@@ -146,7 +148,7 @@ export function extendMockClerumForAppController(
   const bridge = clerum as unknown as Record<string, unknown>
 
   let authenticated = options.startAuthenticated ?? true
-  let sessionMe = { ...HARNESS_ME }
+  let sessionMe = { ...HARNESS_ME, ...options.me }
   const teamDirectoryPayload = options.teamDirectory ?? {
     items: [],
     currentTeamId: HARNESS_ME.teamId,
