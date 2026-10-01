@@ -56,6 +56,73 @@ describe('ApprovalController', () => {
     expect(spy).not.toHaveBeenCalled()
   })
 
+  it('requires a fresh delegate decision for live-approval tools despite wildcard approval', () => {
+    const conv = makeConversation({
+      auto_approved_tools: new Set(['*', 'shell_exec']),
+    })
+    const pendingApproval: PendingApproval = {
+      request_id: 'req-live',
+      tool_name: 'other_tool',
+      parameters: {},
+      description: 'Other tool',
+      tool_call_id: 'tc_other',
+      context_snapshot: [],
+    }
+    const customDelegate = {
+      ...new DefaultLoopController(),
+      beforeTool: vi.fn().mockReturnValue({ type: 'suspend', approval: pendingApproval }),
+      shouldAccept: delegate.shouldAccept.bind(delegate),
+      onTextRejected: delegate.onTextRejected.bind(delegate),
+      onExhaustion: delegate.onExhaustion.bind(delegate),
+      refreshTools: delegate.refreshTools.bind(delegate),
+    }
+    const controller = new ApprovalController(conv, customDelegate, new Set(['shell_exec']))
+
+    const result = controller.beforeTool('shell_exec', { command: 'process-file' })
+    expect(result).toEqual({ type: 'suspend', approval: pendingApproval })
+    expect(customDelegate.beforeTool).toHaveBeenCalledWith('shell_exec', {
+      command: 'process-file',
+    })
+  })
+
+  it('consumes only the matching live one-shot approval and ignores persistent state', () => {
+    const pendingApproval: PendingApproval = {
+      request_id: 'req-live',
+      tool_name: 'shell_exec',
+      parameters: { command: 'process-file' },
+      description: 'Governed shell command',
+      tool_call_id: 'tc_shell',
+      context_snapshot: [],
+    }
+    const conv = makeConversation({
+      auto_approved_tools: new Set(['*']),
+      pending_approval: pendingApproval,
+    })
+    const customDelegate = {
+      ...new DefaultLoopController(),
+      beforeTool: vi.fn(),
+      shouldAccept: delegate.shouldAccept.bind(delegate),
+      onTextRejected: delegate.onTextRejected.bind(delegate),
+      onExhaustion: delegate.onExhaustion.bind(delegate),
+      refreshTools: delegate.refreshTools.bind(delegate),
+    }
+    const controller = new ApprovalController(conv, customDelegate, new Set(['shell_exec']))
+
+    expect(controller.beforeTool('shell_exec', pendingApproval.parameters)).toBe('proceed')
+    expect(conv.pending_approval).toBeUndefined()
+    expect(customDelegate.beforeTool).not.toHaveBeenCalled()
+
+    const secondApproval = { ...pendingApproval, request_id: 'req-live-2' }
+    customDelegate.beforeTool = vi.fn().mockReturnValue({
+      type: 'suspend',
+      approval: secondApproval,
+    })
+    expect(controller.beforeTool('shell_exec', pendingApproval.parameters)).toEqual({
+      type: 'suspend',
+      approval: secondApproval,
+    })
+  })
+
   it("should propagate 'skip' from delegate", () => {
     const conv = makeConversation()
     const customDelegate = {

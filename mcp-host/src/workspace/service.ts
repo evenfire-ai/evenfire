@@ -8,6 +8,11 @@ import { Mutex } from 'async-mutex'
 import * as fs from 'fs/promises'
 import * as path from 'path'
 import type { PersonalizationConfig } from '../types'
+import {
+  isProtectedRealPath,
+  isProtectedWorkspacePath,
+  protectedWorkspacePathError,
+} from './protectedPaths'
 import { scanWriteContent } from './scanner'
 import { searchWorkspace } from './search'
 import { SearchConfig, SearchResult, WorkspaceEntry } from './types'
@@ -56,46 +61,13 @@ export function isLockedPath(relativePath: string): boolean {
   return LOCKED_IDENTITY_FILES.has(normalized)
 }
 
-// D3 (stateless-agents) §1.2 — the session database and its WAL laterals are
-// platform state, never agent-writable. The db may live at the workspace root
-// (workspace PVC) or under CLERUM_SESSION_DB_DIR; the guard rejects the
-// basenames at ANY depth (defense in depth — same trust model as the identity
-// files: POSIX perms are the OS backstop, this is the loud tool-level gate).
-export const PROTECTED_STATE_DB_FILES: ReadonlySet<string> = new Set([
-  'state.db',
-  'state.db-wal',
-  'state.db-shm',
-])
-
-/** Reserved directory for stateless-lifecycle runtime state. */
-export const PROTECTED_STATE_DIR = '.clerum-state'
-
-export function stateDbProtectedMessage(filename: string): string {
-  return `${filename} is part of the session state database and cannot be accessed by the agent.`
-}
-
-export class StateDbPathError extends Error {
-  constructor(filename: string) {
-    super(stateDbProtectedMessage(filename))
-    this.name = 'StateDbPathError'
-  }
-}
-
-/**
- * True when — after normalization — any path segment is `.clerum-state` or
- * the basename is one of the protected state-db files, at any depth.
- *
- * Returns true for: "state.db", "./state.db", "state.db-wal", "a/state.db",
- * ".clerum-state/x". Returns false for: "state.db.bak", "notes/state.database".
- */
-export function isStateDbPath(relativePath: string): boolean {
-  if (typeof relativePath !== 'string' || relativePath.length === 0) return false
-  const normalized = path.posix.normalize(relativePath)
-  const segments = normalized.split('/').filter(s => s.length > 0 && s !== '.')
-  if (segments.includes(PROTECTED_STATE_DIR)) return true
-  const base = segments[segments.length - 1]
-  return base !== undefined && PROTECTED_STATE_DB_FILES.has(base)
-}
+export {
+  GfsDownloadPathError,
+  PROTECTED_STATE_DB_FILES,
+  StateDbPathError,
+  isStateDbPath,
+  stateDbProtectedMessage,
+} from './protectedPaths'
 
 /**
  * Agent-facing workspace surface, implemented by both {@link WorkspaceService}
@@ -170,6 +142,38 @@ export class WorkspaceService implements Workspace {
     return resolved
   }
 
+  /**
+   * Resolve an agent-requested path and reject aliases into platform-owned
+   * storage. The lexical guard blocks direct names; realpath checks block a
+   * symlink or missing file whose nearest existing ancestor points into the
+   * protected namespace or outside the workspace.
+   */
+  private async resolveAccessiblePath(relativePath: string): Promise<string> {
+    if (isProtectedWorkspacePath(relativePath)) {
+      throw protectedWorkspacePathError(relativePath)
+    }
+    const resolved = this.resolvePath(relativePath)
+    const realWorkspaceRoot = await fs.realpath(this.workspacePath)
+    let current = resolved
+    while (current !== path.dirname(current)) {
+      try {
+        const realPath = await fs.realpath(current)
+        const relative = path.relative(realWorkspaceRoot, realPath)
+        if (relative.startsWith('..') || path.isAbsolute(relative)) {
+          throw new Error('Path resolves outside workspace')
+        }
+        if (isProtectedRealPath(realPath, realWorkspaceRoot)) {
+          throw protectedWorkspacePathError(path.relative(realWorkspaceRoot, realPath))
+        }
+        break
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
+        current = path.dirname(current)
+      }
+    }
+    return resolved
+  }
+
   private mutexFor(absolutePath: string): Mutex {
     let m = this.fileMutexes.get(absolutePath)
     if (!m) {
@@ -182,7 +186,7 @@ export class WorkspaceService implements Workspace {
   // ── Document CRUD ──────────────────────────────────────────────────────────
 
   async read(relativePath: string): Promise<string | null> {
-    const resolved = this.resolvePath(relativePath) // throws on invalid paths
+    const resolved = await this.resolveAccessiblePath(relativePath)
     try {
       return await fs.readFile(resolved, 'utf-8')
     } catch {
@@ -194,10 +198,7 @@ export class WorkspaceService implements Workspace {
     if (isLockedPath(relativePath)) {
       throw new LockedFileError(relativePath)
     }
-    if (isStateDbPath(relativePath)) {
-      throw new StateDbPathError(relativePath)
-    }
-    const resolved = this.resolvePath(relativePath)
+    const resolved = await this.resolveAccessiblePath(relativePath)
     scanWriteContent(relativePath, content, Buffer.byteLength(content, 'utf-8'))
     await this.mutexFor(resolved).runExclusive(async () => {
       await this._atomicWrite(resolved, content)
@@ -217,10 +218,7 @@ export class WorkspaceService implements Workspace {
     if (isLockedPath(relativePath)) {
       throw new LockedFileError(relativePath)
     }
-    if (isStateDbPath(relativePath)) {
-      throw new StateDbPathError(relativePath)
-    }
-    const resolved = this.resolvePath(relativePath)
+    const resolved = await this.resolveAccessiblePath(relativePath)
     await this.mutexFor(resolved).runExclusive(async () => {
       let existing: string | null
       try {
@@ -241,10 +239,7 @@ export class WorkspaceService implements Workspace {
     if (isLockedPath(relativePath)) {
       throw new LockedFileError(relativePath)
     }
-    if (isStateDbPath(relativePath)) {
-      throw new StateDbPathError(relativePath)
-    }
-    await fs.unlink(this.resolvePath(relativePath))
+    await fs.unlink(await this.resolveAccessiblePath(relativePath))
   }
 
   /**
@@ -278,7 +273,7 @@ export class WorkspaceService implements Workspace {
 
   async exists(relativePath: string): Promise<boolean> {
     try {
-      await fs.access(this.resolvePath(relativePath))
+      await fs.access(await this.resolveAccessiblePath(relativePath))
       return true
     } catch {
       return false
@@ -288,7 +283,7 @@ export class WorkspaceService implements Workspace {
   // ── Directory listing ──────────────────────────────────────────────────────
 
   async list(directory: string = ''): Promise<WorkspaceEntry[]> {
-    const resolved = directory ? this.resolvePath(directory) : this.workspacePath
+    const resolved = directory ? await this.resolveAccessiblePath(directory) : this.workspacePath
     let entries: { name: string; isDirectory(): boolean }[]
     try {
       entries = await fs.readdir(resolved, { withFileTypes: true })
@@ -298,6 +293,7 @@ export class WorkspaceService implements Workspace {
 
     const results: WorkspaceEntry[] = []
     for (const entry of entries) {
+      if (isProtectedWorkspacePath(entry.name)) continue
       // At the root, skip excluded top-level dirs (e.g. `users/` on collective).
       if (!directory && this.options?.excludeDirs?.includes(entry.name)) continue
       const entryPath = path.join(directory, entry.name).replace(/^\//, '')

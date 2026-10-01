@@ -58,6 +58,15 @@ export const DESKTOP_ENVIRONMENT_HINT =
   "Take screenshots to see what's on screen, then use click/type/key to interact."
 
 /**
+ * Governed GFS workspace-file contract. Emitted whenever the explicit download
+ * tool is registered; the per-result `usage` object remains authoritative.
+ */
+export const GFS_WORKSPACE_FILE_GUIDANCE_TEXT =
+  'GFS WORKSPACE FILES: When a GFS result says `delivery:"workspace_file"`, its `path` is relative to the caller workspace and the file is already present locally. ' +
+  'Do not print, `file_read`, or paste the whole source. If analysis or conversion is needed, use an approved `shell_exec` command or script with that relative path, write outputs outside `.gfs-downloads`, and return only bounded counts, aggregates, errors, or small samples. ' +
+  'Ask for shell approval with the exact command/script to execute. Do not treat expiry, checksum, version, transfer, or destination selection as model-controlled choices.'
+
+/**
  * Workflow-recipe behavioral contract. Emitted whenever any `workflow_*` tool
  * is registered. Governs the `workflow_trigger`/`workflow_status`/`workflow_result`
  * protocol AND the non-leakage rules (never reveal namespaces, run IDs, target
@@ -164,6 +173,10 @@ export class DefaultPromptBuilder implements PromptBuilder {
 
     if (tools.some(t => t.name.startsWith('workflow_'))) {
       sections.push(WORKFLOW_RECIPES_TEXT)
+    }
+
+    if (tools.some(t => t.name === 'clerum__gfs_download')) {
+      sections.push(GFS_WORKSPACE_FILE_GUIDANCE_TEXT)
     }
 
     // NOTE: this is intentionally still true when the bridge is active — the
@@ -292,6 +305,7 @@ export class DefaultPromptBuilder implements PromptBuilder {
     if (input.workflowGuidance.trim()) parts.push(input.workflowGuidance.trim())
     if (input.mcpServerGuidance.trim()) parts.push(input.mcpServerGuidance.trim())
     if (input.toolDiscoveryGuidance.trim()) parts.push(input.toolDiscoveryGuidance.trim())
+    if (input.gfsWorkspaceGuidance?.trim()) parts.push(input.gfsWorkspaceGuidance.trim())
     if (input.memoryGuidance.trim()) parts.push(input.memoryGuidance.trim())
     return parts.join('\n\n')
   }

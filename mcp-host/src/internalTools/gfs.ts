@@ -1,3 +1,8 @@
+import { createHash } from 'node:crypto'
+import { constants as fsConstants } from 'node:fs'
+import * as fs from 'node:fs/promises'
+import * as path from 'node:path'
+import type { FileReferenceV1 } from '@clerum/gfs-interaction-policy'
 import type { FileReferenceResolution } from '../agent/fileReferenceResolver'
 import { inspectImage, validateImage } from '../visualInput/imageValidation'
 import { VisualInputError } from '../visualInput/policy'
@@ -8,7 +13,17 @@ import type {
   InternalToolResult,
 } from '../workflow/types'
 import { GfscHttpError } from './gfsClient'
-import { normalizeRid } from './gfsContentRead'
+import { GfsDownloadError } from './gfsContentDownload'
+import type { GfsDownloadOptions, GfsDownloadResult } from './gfsContentDownload'
+import { type GfsMetadataSnapshot, normalizeRid } from './gfsContentRead'
+import {
+  enterGfsDownloadTransfer,
+  exitGfsDownloadTransfer,
+  recordGfsDownloadAdmission,
+  recordGfsDownloadTransfer,
+} from './gfsDownloadMetrics'
+import { GfsDownloadStore, GfsDownloadStoreError } from './gfsDownloadStore'
+import { GFS_FILE_LIMITS } from './gfsFilePolicy'
 import type { GfsFileContent, GfsReadOptions } from './gfsReadTypes'
 import { decodeTextContent } from './textContent'
 
@@ -41,6 +56,19 @@ export interface GfscReadClient {
     args: { drive: string; resourceId: string },
     options?: GfsReadOptions
   ): Promise<GfsFileContent>
+  readMetadata?(
+    args: { drive: string; resourceId: string },
+    options: {
+      signal?: AbortSignal
+      timeoutMs?: number
+      deadlineMs?: number
+      expectedVersion?: number
+    }
+  ): Promise<GfsMetadataSnapshot>
+  download?(
+    args: { drive: string; resourceId: string },
+    options: GfsDownloadOptions
+  ): Promise<GfsDownloadResult>
   stat(args: { drive: string; resourceId: string }, call?: GfscCallOptions): Promise<unknown>
   resolve(args: { uri: string }, call?: GfscCallOptions): Promise<unknown>
 }
@@ -61,7 +89,16 @@ function ok(content: unknown): InternalToolResult {
 // never the response body, which could carry paths or server internals.
 function fail(error: unknown): InternalToolResult {
   if (error instanceof VisualInputError) return { success: false, error: error.message }
+  if (error instanceof GfsDownloadError || error instanceof GfsDownloadStoreError)
+    return { success: false, error: error.message }
   return redactedFail('GFS read failed', error)
+}
+
+function versionConflict(error: unknown): boolean {
+  return (
+    (error instanceof VisualInputError && error.code === 'version_conflict') ||
+    (error instanceof GfsDownloadError && error.code === 'version_conflict')
+  )
 }
 
 function fileReference(file: GfsFileContent, reason: string): InternalToolResult {
@@ -95,6 +132,147 @@ function invalidArgs(message: string): InternalToolResult {
   return { success: false, error: message }
 }
 
+function workspaceFileUsage(visualDelivery: 'included' | 'not_included', visualReason?: string) {
+  return {
+    pathSemantics: 'relative-to-caller-workspace',
+    nextTool: 'shell_exec_when_local_processing_is_needed',
+    visualDelivery,
+    ...(visualReason === undefined ? {} : { visualReason }),
+    approval: 'user-approval-required',
+    writeOutputsTo: 'outputs/',
+    processLocally: true,
+    boundedOutputOnly: true,
+    wholeFileToContextAllowed: false,
+  }
+}
+
+async function resolveManagedImagePath(receipt: GfsDownloadResult, callerWorkspacePath: string) {
+  const realRoot = await fs.realpath(callerWorkspacePath)
+  const target = path.resolve(callerWorkspacePath, receipt.path)
+  const realTarget = await fs.realpath(target)
+  const managedRoot = path.join(realRoot, '.gfs-downloads')
+  const relativeToManagedRoot = path.relative(managedRoot, realTarget)
+  if (
+    relativeToManagedRoot.startsWith('..') ||
+    path.isAbsolute(relativeToManagedRoot) ||
+    !receipt.path.startsWith('.gfs-downloads/')
+  )
+    throw new VisualInputError('identity_mismatch')
+  return target
+}
+
+async function readManagedImageBytes(
+  receipt: GfsDownloadResult,
+  callerWorkspacePath: string
+): Promise<Buffer> {
+  const target = await resolveManagedImagePath(receipt, callerWorkspacePath)
+
+  const handle = await fs.open(target, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW)
+  try {
+    const stat = await handle.stat()
+    if (
+      !stat.isFile() ||
+      stat.size !== receipt.sizeBytes ||
+      (stat.mode & 0o777) !== 0o600 ||
+      stat.nlink !== 1
+    )
+      throw new VisualInputError('identity_mismatch')
+    const bytes = await handle.readFile()
+    if (createHash('sha256').update(bytes).digest('hex') !== receipt.sha256)
+      throw new VisualInputError('identity_mismatch')
+    return bytes
+  } finally {
+    await handle.close()
+  }
+}
+
+async function readManagedImagePrefix(
+  receipt: GfsDownloadResult,
+  callerWorkspacePath: string
+): Promise<Buffer> {
+  const target = await resolveManagedImagePath(receipt, callerWorkspacePath)
+  const handle = await fs.open(target, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW)
+  try {
+    const prefix = Buffer.alloc(16)
+    const { bytesRead } = await handle.read(prefix, 0, prefix.length, 0)
+    return prefix.subarray(0, bytesRead)
+  } finally {
+    await handle.close()
+  }
+}
+
+async function projectManagedImage(
+  receipt: GfsDownloadResult,
+  callerWorkspacePath: string,
+  options: InternalToolExecutionOptions | undefined,
+  knownBytes?: Buffer
+): Promise<InternalToolResult> {
+  let visualReason = 'not_image'
+  try {
+    let bytes = knownBytes
+    if (bytes === undefined) {
+      const prefix = await readManagedImagePrefix(receipt, callerWorkspacePath)
+      const hasImageMagic =
+        prefix.length >= 3 &&
+        ((prefix[0] === 0x89 && prefix[1] === 0x50 && prefix[2] === 0x4e) ||
+          (prefix[0] === 0xff && prefix[1] === 0xd8 && prefix[2] === 0xff))
+      if (!hasImageMagic)
+        return {
+          success: true,
+          content: JSON.stringify({
+            delivery: 'workspace_file',
+            ...receipt,
+            visualDelivery: 'not_included',
+            visualReason,
+            usage: workspaceFileUsage('not_included', visualReason),
+          }),
+        }
+      bytes = await readManagedImageBytes(receipt, callerWorkspacePath)
+    }
+    const image = inspectImage(bytes)
+    if (image) {
+      const visualInput = options?.visualInput
+      if (!visualInput) visualReason = 'image_input_unavailable_in_this_execution'
+      else {
+        const capability = await visualInput.resolveCapability(options?.signal)
+        if (options?.signal?.aborted) throw new VisualInputError('cancelled')
+        if (capability.status !== 'supported')
+          visualReason = `model_image_input_${capability.status}`
+        else {
+          await validateImage(bytes, image, { signal: options?.signal, budget: visualInput.budget })
+          if (options?.signal?.aborted) throw new VisualInputError('cancelled')
+          const dataBase64 = visualInput.budget.encodeImage(bytes)
+          return {
+            success: true,
+            content: JSON.stringify({
+              delivery: 'workspace_file',
+              ...receipt,
+              visualDelivery: 'included',
+              usage: workspaceFileUsage('included'),
+            }),
+            images: [
+              { ...image, source: receipt.source, sizeBytes: receipt.sizeBytes, dataBase64 },
+            ],
+          }
+        }
+      }
+    }
+  } catch (error) {
+    if (error instanceof VisualInputError && error.code !== 'cancelled') visualReason = error.code
+    else throw error
+  }
+  return {
+    success: true,
+    content: JSON.stringify({
+      delivery: 'workspace_file',
+      ...receipt,
+      visualDelivery: 'not_included',
+      visualReason,
+      usage: workspaceFileUsage('not_included', visualReason),
+    }),
+  }
+}
+
 const driveResourceParams = {
   type: 'object',
   required: ['drive', 'resourceId'],
@@ -111,6 +289,12 @@ const driveResourceParams = {
 export interface ReferencedFilePin {
   version: number
   currentVersion?: number
+  /** Producer-classified payload size; retained without filename inference. */
+  byteLength?: FileReferenceV1['byteLength']
+  /** Producer byte classification: text, image, or binary. */
+  reader?: FileReferenceV1['reader']
+  /** Producer-declared visual candidacy, not a provider-capability claim. */
+  modelImageInput?: FileReferenceV1['modelImageInput']
 }
 
 /** Pins keyed by `${drive}/${rid}`, with the rid normalized as gfsc names it. */
@@ -133,6 +317,9 @@ export function referencedFilePins(
     if (!key) throw new Error('A resolved GFS file reference must carry a 32-hex resourceId')
     pins.set(key, {
       version: source.version,
+      byteLength: reference.byteLength,
+      reader: reference.reader,
+      modelImageInput: reference.modelImageInput,
       ...(availability === 'stale' && resolvedVersion !== undefined
         ? { currentVersion: resolvedVersion }
         : {}),
@@ -158,14 +345,62 @@ const LIVE_RESOURCE_NOTE =
 export interface GfsReadToolOptions {
   /** Files the turn's message referenced; an empty map when there is no message. */
   referencedFiles: ReferencedFilePins
+  /** Host-owned durable store; task registries receive a caller-bound handle. */
+  downloadStore?: GfsDownloadStore
+  /** Trusted identity derived by the Host, never tool arguments. */
+  callerIdentity?: string
+  /** Caller workspace root derived by the Host, never tool arguments. */
+  callerWorkspacePath?: string
 }
 
 /** The five read tools, bound to a gfsc client. */
 export function buildGfsReadTools(
   client: GfscReadClient,
-  { referencedFiles }: GfsReadToolOptions
+  { referencedFiles, downloadStore, callerIdentity, callerWorkspacePath }: GfsReadToolOptions
 ): InternalToolDefinition[] {
-  return [
+  const canDownload = Boolean(
+    downloadStore && client.download && callerIdentity && callerWorkspacePath
+  )
+  const transferToWorkspace = async (
+    target: { drive: string; resourceId: string },
+    expectedVersion: number | undefined,
+    context?: InternalToolExecutionOptions
+  ): Promise<GfsDownloadResult> => {
+    if (!downloadStore || !client.download || !callerIdentity || !callerWorkspacePath)
+      throw new GfsDownloadStoreError('workspace_unavailable')
+    const transferStartedAt = Date.now()
+    enterGfsDownloadTransfer()
+    try {
+      const receipt = await client.download(target, {
+        store: downloadStore,
+        callerIdentity,
+        callerWorkspacePath,
+        ...callOptions(context),
+        timeoutMs: context?.timeoutMs,
+        ...(expectedVersion === undefined ? {} : { expectedVersion }),
+      })
+      recordGfsDownloadTransfer('success', (Date.now() - transferStartedAt) / 1000)
+      return receipt
+    } catch (error) {
+      recordGfsDownloadTransfer('failure', (Date.now() - transferStartedAt) / 1000)
+      throw error
+    } finally {
+      exitGfsDownloadTransfer()
+    }
+  }
+  const downloadToWorkspace = async (
+    target: { drive: string; resourceId: string },
+    expectedVersion: number | undefined,
+    context?: InternalToolExecutionOptions
+  ): Promise<InternalToolResult> => {
+    const receipt = await transferToWorkspace(target, expectedVersion, context)
+    return ok({
+      delivery: 'workspace_file',
+      ...receipt,
+      usage: workspaceFileUsage('not_included'),
+    })
+  }
+  const tools: InternalToolDefinition[] = [
     {
       name: 'clerum__gfs_accessible',
       description:
@@ -226,7 +461,7 @@ export function buildGfsReadTools(
     {
       name: 'clerum__gfs_read',
       description:
-        'Read a GFS file by drive + resourceId. Returns UTF-8 text, or a bounded JPEG/PNG image when the active model supports image input. Other binary formats return a reference; malformed or unsupported JPEG/PNG returns an error. ' +
+        'Read a GFS file by drive + resourceId. Returns bounded UTF-8 text inline; larger admitted sources are delivered as governed workspace files, and a valid JPEG/PNG may additionally become visual input after its workspace receipt is preserved. ' +
         'The Host reads a referenced_file from the turn context at the version the reference names; pass expectedVersion only to read the current_version of a stale reference. If the file changed since it was referenced, the result has availability "stale" and no content.',
       parameters: {
         ...driveResourceParams,
@@ -259,16 +494,63 @@ export function buildGfsReadTools(
             return invalidArgs(pinnedVersionMessage(pin))
         }
         let file: GfsFileContent | undefined
+        let snapshot: GfsMetadataSnapshot | undefined
         try {
+          if (client.readMetadata) {
+            const metadata = await client.readMetadata(
+              target as { drive: string; resourceId: string },
+              {
+                ...callOptions(options),
+                timeoutMs: options?.timeoutMs,
+                ...(expectedVersion === undefined ? {} : { expectedVersion }),
+              }
+            )
+            snapshot = metadata
+            if (metadata.size > GFS_FILE_LIMITS.inlineTextBytes) {
+              if (canDownload) {
+                recordGfsDownloadAdmission('workspace_attempt')
+                const receipt = await transferToWorkspace(
+                  target as { drive: string; resourceId: string },
+                  metadata.source.version,
+                  options
+                )
+                return await projectManagedImage(receipt, callerWorkspacePath!, options)
+              } else {
+                recordGfsDownloadAdmission('workspace_unavailable')
+                expectedVersion ??= metadata.source.version
+                return ok({
+                  availability: 'workspace_delivery_unavailable',
+                  resource: metadata.source,
+                  sizeBytes: metadata.size,
+                  inlineTextBytes: GFS_FILE_LIMITS.inlineTextBytes,
+                  reason: 'workspace_delivery_is_required_for_this_file_size',
+                })
+              }
+              recordGfsDownloadAdmission('inline_attempt')
+              if (expectedVersion === undefined) expectedVersion = metadata.source.version
+            }
+          }
           file = await client.read(target as { drive: string; resourceId: string }, {
             ...callOptions(options),
             timeoutMs: options?.timeoutMs,
             budget: options?.readBudget ?? options?.visualInput?.budget,
-            ...(expectedVersion === undefined ? {} : { expectedVersion }),
+            ...(snapshot === undefined ? {} : { metadataSnapshot: snapshot }),
+            ...((snapshot?.source.version ?? expectedVersion) === undefined
+              ? {}
+              : { expectedVersion: snapshot?.source.version ?? expectedVersion }),
           })
           if (options?.signal?.aborted) throw new VisualInputError('cancelled')
           const image = inspectImage(file.bytes)
           if (image) {
+            if (canDownload) {
+              recordGfsDownloadAdmission('workspace_attempt')
+              const receipt = await transferToWorkspace(
+                target as { drive: string; resourceId: string },
+                file.source.version,
+                options
+              )
+              return await projectManagedImage(receipt, callerWorkspacePath!, options, file.bytes)
+            }
             const visualInput = options?.visualInput
             if (!visualInput)
               return fileReference(file, 'image_input_unavailable_in_this_execution')
@@ -297,21 +579,22 @@ export function buildGfsReadTools(
               ],
             }
           }
-          if (/\.(?:png|jpe?g)$/i.test(file.source.name))
-            throw new VisualInputError('invalid_image')
-          // Same fileBytes cap as images (G0); same text rule as clerum__attachment_read.
+          // Inline text is bounded by the generic GFS policy; larger sources were
+          // routed to the workspace before this in-memory read.
           const text = decodeTextContent(file.bytes)
           if (text === null) return fileReference(file, 'unsupported_binary_format')
           if (isSvgText(text)) return fileReference(file, 'svg_visual_input_not_supported')
           return ok(text)
         } catch (err) {
+          if (
+            snapshot === undefined &&
+            err instanceof VisualInputError &&
+            err.code === 'limit_exceeded'
+          )
+            recordGfsDownloadAdmission('limit_exceeded')
           // #666 — with an expected version, a version conflict is an answer about
           // the reference, not a read failure.
-          if (
-            expectedVersion !== undefined &&
-            err instanceof VisualInputError &&
-            err.code === 'version_conflict'
-          )
+          if (expectedVersion !== undefined && versionConflict(err))
             return ok({
               availability: 'stale',
               drive: target.drive,
@@ -363,6 +646,49 @@ export function buildGfsReadTools(
       },
     },
   ]
+  if (canDownload) {
+    tools.push({
+      name: 'clerum__gfs_download',
+      description:
+        'Download a GFS file to this caller workspace without putting its contents in model context. Returns source metadata, SHA-256, exact size, version, expiry, and a relative workspace path for approved local processing.',
+      parameters: {
+        ...driveResourceParams,
+        properties: {
+          ...driveResourceParams.properties,
+          expectedVersion: {
+            type: 'integer',
+            minimum: 0,
+            description: 'Download only this version of the file.',
+          },
+        },
+      },
+      execute: async (args, _outputDir, options): Promise<InternalToolResult> => {
+        const { expectedVersion: requestedVersion, ...target } = args
+        if (requestedVersion !== undefined && !isValidIfMatch(requestedVersion))
+          return invalidArgs('expectedVersion must be a non-negative integer.')
+        const key = referencedFileKey(target.drive, target.resourceId)
+        const pin = key === null ? undefined : referencedFiles.get(key)
+        let expectedVersion = requestedVersion
+        if (pin) {
+          if (requestedVersion === undefined) expectedVersion = pin.version
+          else if (requestedVersion !== pin.version && requestedVersion !== pin.currentVersion)
+            return invalidArgs(pinnedVersionMessage(pin))
+        }
+        try {
+          return await downloadToWorkspace(
+            target as { drive: string; resourceId: string },
+            expectedVersion as number | undefined,
+            options
+          )
+        } catch (error) {
+          if (expectedVersion !== undefined && versionConflict(error))
+            return ok({ availability: 'stale', ...target, expectedVersion })
+          return fail(error)
+        }
+      },
+    })
+  }
+  return tools
 }
 
 /** The gfsc write surface (P4) — read + write. */

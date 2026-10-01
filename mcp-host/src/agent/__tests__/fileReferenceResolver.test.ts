@@ -14,6 +14,7 @@ import {
   classifyBytes,
 } from '@clerum/gfs-interaction-policy'
 import { type GfsRuntimeEnv, GfscHttpError, createGfscClient } from '../../internalTools/gfsClient'
+import { GFS_FILE_LIMITS } from '../../internalTools/gfsFilePolicy'
 import { logger } from '../../logger'
 import { VISUAL_INPUT_LIMITS } from '../../visualInput/policy'
 import {
@@ -225,7 +226,7 @@ describe('resolveFileReferences (#666)', () => {
   })
 
   it('reports too_large above the per-file ceiling, and available at it', async () => {
-    const limit = VISUAL_INPUT_LIMITS.fileBytes
+    const limit = GFS_FILE_LIMITS.maxFileBytes
     const atLimit = await resolveFileReferences(
       [gfsReference({ byteLength: limit })],
       client(() => view({ bytes: limit }))

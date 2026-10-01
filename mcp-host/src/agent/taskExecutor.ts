@@ -60,6 +60,7 @@ import {
   CAPABILITY_CONTRACT_TEXT,
   DESKTOP_ENVIRONMENT_HINT,
   DefaultPromptBuilder,
+  GFS_WORKSPACE_FILE_GUIDANCE_TEXT,
   MCP_SERVER_SELECTION_TEXT,
   MEMORY_GUIDANCE_TEXT,
   TOOL_DISCOVERY_TEXT,
@@ -94,6 +95,8 @@ import type {
 import { ApprovalExpiredError } from '../core/types'
 import { prependTextToParts, textContentFromParts } from '../core/types'
 import type { UsageContext } from '../core/types'
+import type { GfsDownloadStore } from '../internalTools/gfsDownloadStore'
+import type { GfsProcessingLeaseProvider } from '../internalTools/gfsProcessingLease'
 import type { TaskLifecycle } from '../lifecycle/taskLifecycle'
 import type { SingleTurnProvider } from '../llm'
 import type { ImageInputResolver } from '../llm/imageInput'
@@ -115,6 +118,7 @@ import { resolveProviderWorkflowCallerContext } from '../workflow/providerWorkfl
 import type { Workspace } from '../workspace/service'
 import type { CronScheduler } from './cronScheduler'
 import { referencedFilesForTurnContext } from './fileReferenceResolver'
+import { gfsWorkspaceExecutionEnabled } from './gfsExecutionCapability'
 import {
   type ProviderWorkflowAccessDenialReason,
   isProviderWorkflowChannel,
@@ -172,6 +176,12 @@ export interface TaskExecutorDeps {
   llmProvider: SingleTurnProvider
   mcpManager: McpManager | null
   workspaceService: Workspace | undefined
+  /** Host-owned store shared across tasks; task registries receive caller-bound handles. */
+  gfsDownloadStore?: GfsDownloadStore
+  /** Trusted caller workspace root, separate from memory-tool availability. */
+  gfsCallerWorkspacePath?: string
+  /** Required fail-closed lease boundary for approved local processing. */
+  gfsProcessingLeaseProvider?: GfsProcessingLeaseProvider
   config: AgentConfig
   modelName: string
   /**
@@ -1902,6 +1912,7 @@ export class TaskExecutor {
       tools.some(t => t.name === 'clerum__get_capabilities'),
       tools.some(t => t.name.startsWith('desktop_') || t.name.startsWith('browser_')),
       tools.some(t => t.name.startsWith('workflow_')),
+      tools.some(t => t.name === 'clerum__gfs_download'),
       tools.some(t => t.name.includes('__')),
       tools.some(t => t.name === 'clerum__tool_search'),
     ])
@@ -1930,6 +1941,7 @@ export class TaskExecutor {
     // (not a strict MCP-server check) matches the legacy MCP-selection gate,
     // which also fires for `clerum__get_capabilities`.
     const hasWorkflowTools = tools.some(t => t.name.startsWith('workflow_'))
+    const hasGfsDownloadTool = tools.some(t => t.name === 'clerum__gfs_download')
     // NOTE: this is intentionally still true when the bridge is active — the
     // `clerum__tool_search/describe/call` native/bridge tools also contain `__`,
     // so `MCP_SERVER_SELECTION_TEXT` still emits. That is fine: `TOOL_DISCOVERY_TEXT`
@@ -1954,6 +1966,7 @@ export class TaskExecutor {
       platformHints,
       capabilities,
       workflowGuidance: hasWorkflowTools ? WORKFLOW_RECIPES_TEXT : '',
+      gfsWorkspaceGuidance: hasGfsDownloadTool ? GFS_WORKSPACE_FILE_GUIDANCE_TEXT : '',
       mcpServerGuidance: hasMcpTools ? MCP_SERVER_SELECTION_TEXT : '',
       toolDiscoveryGuidance: hasToolDiscovery ? TOOL_DISCOVERY_TEXT : '',
       memoryGuidance: hasMemoryTools ? MEMORY_GUIDANCE_TEXT : '',
@@ -2053,6 +2066,23 @@ export class TaskExecutor {
       appConfig,
       this.deps.failover?.policy.fallbacks
     )
+    const gfsCallerIdentity = this.task.sourceMessage?.sender
+    const gfsDownload = gfsWorkspaceExecutionEnabled({
+      approvalEnabled: appConfig.enableApproval,
+      source: this.task.source,
+      callerIdentity: gfsCallerIdentity,
+      store: this.deps.gfsDownloadStore,
+      callerWorkspacePath: this.deps.gfsCallerWorkspacePath,
+      processingLeaseProvider: this.deps.gfsProcessingLeaseProvider,
+      approvalConfig: this.deps.approvalConfig,
+    })
+      ? {
+          store: this.deps.gfsDownloadStore!,
+          callerIdentity: gfsCallerIdentity!,
+          callerWorkspacePath: this.deps.gfsCallerWorkspacePath!,
+          processingLeaseProvider: this.deps.gfsProcessingLeaseProvider!,
+        }
+      : undefined
     const nativeRegistry = new NativeToolRegistry(
       // The spillover threshold is a top-level setting; clerum__attachment_read
       // states it in its description (#666).
@@ -2079,7 +2109,8 @@ export class TaskExecutor {
       presentation.bridgeEnabled,
       // §13 (stateless agents): the active provider's credential slot is the
       // only one that survives into shell_exec's child env.
-      this.deps.llmProvider.getProviderType()
+      this.deps.llmProvider.getProviderType(),
+      gfsDownload
     )
     await registerDesktopTools(nativeRegistry)
     // Eagerly open this caller's remote OAuth partitions before the catalog is
@@ -2139,7 +2170,11 @@ export class TaskExecutor {
         )
       : new DefaultLoopController()
     const innerController = approvalApplies
-      ? new ApprovalController(this.conversation!, baseController)
+      ? new ApprovalController(
+          this.conversation!,
+          baseController,
+          gfsDownload ? new Set(['shell_exec']) : undefined
+        )
       : baseController
 
     const mcpManager = this.deps.mcpManager

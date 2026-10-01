@@ -17,6 +17,7 @@ import {
 } from '../../llm/promptCacheMetrics'
 import { logger } from '../../logger'
 import { LlmUsageEvent, UsageReporter, newRequestId } from '../../usage/usageReporter.js'
+import { resolveVisualDeliveryLimits } from '../../visualInput/deliveryLimits'
 import { gfsImageParts, projectGfsMessages } from '../../visualInput/messageProjection'
 import { type ImageInputCapability, VisualInputError } from '../../visualInput/policy'
 import { assertVisualRequestFits, hasGfsImageInput } from '../../visualInput/requestPolicy'
@@ -30,6 +31,7 @@ import {
   ChatMessage,
   CompletionRequest,
   CompletionResponse,
+  MessageContentPart,
   MessageRole,
   ToolCompletionRequest,
   ToolCompletionResponse,
@@ -289,27 +291,72 @@ export class LlmPortAdapter implements LlmPort {
   ): ChatMessage[] {
     let messages = providerMessages
     const candidates = gfsImageParts(messages)
+    if (candidates.length === 0) return messages
+
+    const limits = resolveVisualDeliveryLimits(this.providerName)
+    const allImages = (current: ChatMessage[]) =>
+      current.flatMap(message =>
+        (message.contentParts ?? []).filter(
+          (part): part is Extract<MessageContentPart, { type: 'image' }> =>
+            part.type === 'image' && !part.sourceIdentityOnly
+        )
+      )
+    const imageBytes = (part: Extract<MessageContentPart, { type: 'image' }>): number =>
+      Buffer.from(part.data, 'base64').byteLength
+    if (!limits) {
+      for (;;) {
+        try {
+          assertVisualRequestFits(messages, { ...request, messages })
+          return messages
+        } catch (error) {
+          if (
+            !(error instanceof VisualInputError) ||
+            error.code !== 'limit_exceeded' ||
+            candidates.length === 0
+          )
+            throw error
+          const selected = candidates.pop()!
+          messages = projectGfsMessages(messages, new Set([selected]), 'image_input_limit_exceeded')
+        }
+      }
+    }
+    const exceeds = (current: ChatMessage[]): boolean => {
+      const images = allImages(current)
+      const totalImageBytes = images.reduce((total, part) => total + imageBytes(part), 0)
+      const requestBytes = current.reduce(
+        (total, message) => total + Buffer.byteLength(JSON.stringify(message), 'utf8'),
+        'tools' in request ? Buffer.byteLength(JSON.stringify(request.tools ?? []), 'utf8') : 0
+      )
+      return (
+        images.length > limits.maxImages ||
+        totalImageBytes > limits.maxTotalImageBytes ||
+        images.some(part => imageBytes(part) > limits.maxImageBytes) ||
+        images.some(
+          part =>
+            part.width !== undefined &&
+            part.height !== undefined &&
+            ((limits.maxDimension !== undefined &&
+              (part.width > limits.maxDimension || part.height > limits.maxDimension)) ||
+              (limits.maxPixels !== undefined && part.width * part.height > limits.maxPixels))
+        ) ||
+        requestBytes > limits.maxVisualRequestBytes
+      )
+    }
+
     let demoted = 0
     for (;;) {
-      try {
-        assertVisualRequestFits(messages, { ...request, messages })
+      if (!exceeds(messages)) {
         if (demoted > 0)
           logger.info(
             { provider: this.providerName, model: this.model, demotedImages: demoted },
             'GFS images projected to references for this provider attempt'
           )
         return messages
-      } catch (error) {
-        if (
-          !(error instanceof VisualInputError) ||
-          error.code !== 'limit_exceeded' ||
-          candidates.length === 0
-        )
-          throw error
-        const selected = candidates.pop()!
-        messages = projectGfsMessages(messages, new Set([selected]), 'image_input_limit_exceeded')
-        demoted++
       }
+      const selected = candidates.pop()
+      if (!selected) throw new VisualInputError('limit_exceeded')
+      messages = projectGfsMessages(messages, new Set([selected]), 'image_input_limit_exceeded')
+      demoted++
     }
   }
 

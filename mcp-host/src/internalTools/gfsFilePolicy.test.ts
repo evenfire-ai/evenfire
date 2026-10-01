@@ -79,6 +79,12 @@ describe('GFS file policy', () => {
       'must not exceed the Host aggregate retained-storage budget'
     )
 
+    vi.stubEnv('MCP_HOST_GFS_CALLER_DOWNLOAD_STORAGE_BYTES', String(512 * 1024 * 1024 + 1))
+    vi.resetModules()
+    await expect(import('./gfsFilePolicy')).rejects.toThrow(
+      'must leave aggregate storage for another caller'
+    )
+
     vi.stubEnv('MCP_HOST_GFS_CALLER_DOWNLOAD_STORAGE_BYTES', undefined)
     vi.stubEnv('MCP_HOST_GFS_CALLER_DOWNLOAD_MAX_FILES', '65')
     vi.resetModules()

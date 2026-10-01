@@ -1,3 +1,4 @@
+import { withAbort } from '../core/adapters/abortableLlmPort'
 import {
   type GfsImageSource,
   type MemoryReservation,
@@ -5,6 +6,7 @@ import {
   VisualInputBudget,
   VisualInputError,
 } from '../visualInput/policy'
+import { GFS_FILE_LIMITS } from './gfsFilePolicy'
 import type { GfsFileContent, GfsReadOptions } from './gfsReadTypes'
 
 export type GfsContentRequest = (
@@ -18,7 +20,7 @@ function cancelBody(body: ReadableStream<Uint8Array> | null): void {
 }
 
 /** Bounded consumption also observes cancellation for injected/local streams. */
-async function collect(
+export async function collect(
   response: Response,
   maximum: number,
   signal: AbortSignal,
@@ -68,7 +70,7 @@ export async function boundedGfsErrorDetail(
   }
 }
 
-async function requireOk(response: Response, signal: AbortSignal): Promise<void> {
+export async function requireOk(response: Response, signal: AbortSignal): Promise<void> {
   if (response.redirected) {
     cancelBody(response.body)
     throw new VisualInputError('invalid_response')
@@ -89,11 +91,17 @@ export function normalizeRid(value: unknown): string | null {
   return /^[a-f0-9]{32}$/.test(normalized) ? normalized : null
 }
 
-function metadataSnapshot(
+export interface GfsMetadataSnapshot {
+  source: GfsImageSource
+  size: number
+}
+
+export function metadataSnapshot(
   bytes: Buffer,
   args: { drive: string; resourceId: string },
-  expectedVersion?: number
-): { source: GfsImageSource; size: number } {
+  expectedVersion?: number,
+  maxBytes = GFS_FILE_LIMITS.maxFileBytes
+): GfsMetadataSnapshot {
   let envelope: { ok?: unknown; data?: unknown }
   try {
     envelope = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes))
@@ -125,8 +133,7 @@ function metadataSnapshot(
   if (expectedVersion !== undefined && data.version !== expectedVersion)
     throw new VisualInputError('version_conflict')
   if (data.kind !== 'file') throw new VisualInputError('unsupported_format')
-  if ((data.bytes as number) > VISUAL_INPUT_LIMITS.fileBytes)
-    throw new VisualInputError('limit_exceeded')
+  if ((data.bytes as number) > maxBytes) throw new VisualInputError('limit_exceeded')
   return {
     source: {
       kind: 'gfs',
@@ -140,7 +147,11 @@ function metadataSnapshot(
   }
 }
 
-function assertContentHeaders(response: Response, source: GfsImageSource, size: number): void {
+export function assertContentHeaders(
+  response: Response,
+  source: GfsImageSource,
+  size: number
+): void {
   // Content for another resource is not a newer version of this one.
   if (response.headers.get('x-gfs-uri') !== source.gfsUri)
     throw new VisualInputError('identity_mismatch')
@@ -196,18 +207,29 @@ export async function readGfsContent(
     headers: { 'accept-encoding': 'identity' },
   }
   try {
-    const metadataReservation = budget.reserve(2 * VISUAL_INPUT_LIMITS.metadataBytes)
     let snapshot: ReturnType<typeof metadataSnapshot>
-    try {
-      const metadata = await request(`${path}${query}`, init, deadlineMs)
-      await requireOk(metadata, signal)
-      snapshot = metadataSnapshot(
-        await collect(metadata, VISUAL_INPUT_LIMITS.metadataBytes, signal),
-        args,
-        options.expectedVersion
+    if (options.metadataSnapshot) {
+      snapshot = options.metadataSnapshot
+      if (
+        options.expectedVersion !== undefined &&
+        snapshot.source.version !== options.expectedVersion
       )
-    } finally {
-      metadataReservation.release()
+        throw new VisualInputError('version_conflict')
+      if (snapshot.size > GFS_FILE_LIMITS.maxFileBytes) throw new VisualInputError('limit_exceeded')
+    } else {
+      const metadataReservation = budget.reserve(2 * VISUAL_INPUT_LIMITS.metadataBytes)
+      try {
+        const metadata = await request(`${path}${query}`, init, deadlineMs)
+        await requireOk(metadata, signal)
+        snapshot = metadataSnapshot(
+          await collect(metadata, VISUAL_INPUT_LIMITS.metadataBytes, signal),
+          args,
+          options.expectedVersion,
+          GFS_FILE_LIMITS.maxFileBytes
+        )
+      } finally {
+        metadataReservation.release()
+      }
     }
     if (signal.aborted) throw new VisualInputError('cancelled')
     if (snapshot.size > budget.remainingReadBytes) throw new VisualInputError('limit_exceeded')
@@ -234,5 +256,58 @@ export async function readGfsContent(
     clearTimeout(timer)
     options.signal?.removeEventListener('abort', abort)
     if (!handedOff) reservation?.release()
+  }
+}
+
+export async function readGfsMetadata(
+  request: GfsContentRequest,
+  args: { drive: string; resourceId: string },
+  options: {
+    signal?: AbortSignal
+    timeoutMs?: number
+    deadlineMs?: number
+    expectedVersion?: number
+    maxBytes?: number
+  }
+): Promise<GfsMetadataSnapshot> {
+  if (options.signal?.aborted) throw new VisualInputError('cancelled')
+  const timeoutMs = Math.min(
+    options.timeoutMs ?? VISUAL_INPUT_LIMITS.readTimeoutMs,
+    VISUAL_INPUT_LIMITS.readTimeoutMs,
+    options.deadlineMs === undefined ? Number.POSITIVE_INFINITY : options.deadlineMs - Date.now()
+  )
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) throw new VisualInputError('timeout')
+  const controller = new AbortController()
+  let expired = false
+  const abort = () => controller.abort()
+  options.signal?.addEventListener('abort', abort, { once: true })
+  const timer = setTimeout(() => {
+    expired = true
+    controller.abort()
+  }, timeoutMs)
+  const signal = controller.signal
+  try {
+    const metadata = await withAbort(
+      () =>
+        request(
+          `/v1/resources/${encodeURIComponent(args.resourceId)}?drive=${encodeURIComponent(args.drive)}`,
+          { signal, redirect: 'error', headers: { 'accept-encoding': 'identity' } },
+          Date.now() + timeoutMs
+        ),
+      signal
+    )
+    await requireOk(metadata, signal)
+    return metadataSnapshot(
+      await collect(metadata, GFS_FILE_LIMITS.metadataBytes, signal),
+      args,
+      options.expectedVersion,
+      options.maxBytes
+    )
+  } catch (error) {
+    if (signal.aborted) throw new VisualInputError(expired ? 'timeout' : 'cancelled')
+    throw error
+  } finally {
+    clearTimeout(timer)
+    options.signal?.removeEventListener('abort', abort)
   }
 }

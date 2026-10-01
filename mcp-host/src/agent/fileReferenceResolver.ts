@@ -12,6 +12,7 @@ import { type FileReferenceV1, parseFileReferenceV1 } from '@clerum/gfs-interact
 import { FileReferenceErrorCode } from '../core/errors'
 import type { TurnContextReferencedFile } from '../core/orchestration/turnContext'
 import { GfscHttpError } from '../internalTools/gfsClient'
+import { GFS_FILE_LIMITS } from '../internalTools/gfsFilePolicy'
 import { logger } from '../logger'
 import { VISUAL_INPUT_LIMITS } from '../visualInput/policy'
 
@@ -286,7 +287,7 @@ async function resolveOne(
   // Same version, so the same bytes: a different size is a reference that
   // misstates the file, not a change to it.
   if (view.bytes !== reference.byteLength) throw new ResolutionFailure('invalid', 'SizeMismatch')
-  if (view.bytes > VISUAL_INPUT_LIMITS.fileBytes) return { availability: 'too_large', reference }
+  if (view.bytes > GFS_FILE_LIMITS.maxFileBytes) return { availability: 'too_large', reference }
   return { availability: 'available', reference }
 }
 

@@ -73,3 +73,8 @@ if (GFS_FILE_LIMITS.callerStorageBytes > GFS_FILE_LIMITS.storageBytes)
   throw new Error(
     'MCP_HOST_GFS_CALLER_DOWNLOAD_STORAGE_BYTES must not exceed the Host aggregate retained-storage budget'
   )
+
+if (GFS_FILE_LIMITS.callerStorageBytes * 2 > GFS_FILE_LIMITS.storageBytes)
+  throw new Error(
+    'MCP_HOST_GFS_CALLER_DOWNLOAD_STORAGE_BYTES must leave aggregate storage for another caller'
+  )

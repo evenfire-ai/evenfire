@@ -37,6 +37,7 @@ import type {
   PendingApproval,
 } from '../core/types'
 import type { ReapedSession } from '../db/worker/protocol'
+import type { GfsDownloadStore } from '../internalTools/gfsDownloadStore'
 import type { TaskLifecycle } from '../lifecycle/taskLifecycle'
 import { isTerminal } from '../lifecycle/types'
 import { SingleTurnProvider } from '../llm'
@@ -245,6 +246,8 @@ export class AgentStateMachine extends EventEmitter {
 
   // Phase 7–8: Workspace memory & personalization
   private workspaceProvider: ScopedWorkspaceProvider | undefined
+  private gfsWorkspaceProvider: ScopedWorkspaceProvider | undefined
+  private gfsDownloadStore: GfsDownloadStore | undefined
 
   // T1.5 — Tool-result spillover store. Undefined when the feature flag is
   // off; populated from main.ts and propagated into each TaskExecutor.
@@ -435,6 +438,14 @@ export class AgentStateMachine extends EventEmitter {
   setWorkspaceProvider(provider: ScopedWorkspaceProvider): void {
     this.workspaceProvider = provider
     logger.info({ component: 'Agent' }, 'Workspace provider set')
+  }
+
+  setGfsWorkspaceProvider(provider: ScopedWorkspaceProvider | undefined): void {
+    this.gfsWorkspaceProvider = provider
+  }
+
+  setGfsDownloadStore(store: GfsDownloadStore | undefined): void {
+    this.gfsDownloadStore = store
   }
 
   /**
@@ -1508,6 +1519,9 @@ export class AgentStateMachine extends EventEmitter {
       llmProvider: effective?.provider ?? this.llmProvider,
       mcpManager: this.mcpManager,
       workspaceService: this.workspaceProvider?.forSource(task.sourceMessage),
+      gfsDownloadStore: this.gfsDownloadStore,
+      gfsCallerWorkspacePath: this.gfsWorkspaceProvider?.forSource(task.sourceMessage)
+        ?.userRootPath,
       config: this.config,
       modelName: effective?.model ?? this.modelName,
       contextWindowTokens: effective?.contextWindowTokens,
