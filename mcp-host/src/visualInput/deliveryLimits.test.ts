@@ -8,6 +8,7 @@ describe('effective visual delivery limits', () => {
       maxTotalImageBytes: 16 * 1024 * 1024,
       maxImages: 20,
       maxVisualRequestBytes: 24 * 1024 * 1024,
+      maxNonImageRequestBytes: 8 * 1024 * 1024,
       maxDimension: 2048,
       maxPixels: 4_194_304,
     })

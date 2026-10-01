@@ -34,6 +34,9 @@ export type MessageContentPart =
       data: string
       /** Extra source copy, omitted from the legacy view while another current frame represents it. */
       sourceIdentityOnly?: true
+      /** Producer-measured image shape; used by provider-attempt policy without redecoding. */
+      width?: number
+      height?: number
       /**
        * Optional so pre-#650 producers and provider translators keep compiling;
        * `codexSubscription` rejects an image part without a usable source

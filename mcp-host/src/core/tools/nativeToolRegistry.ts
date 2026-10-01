@@ -12,6 +12,8 @@ import {
   referencedFilePins,
 } from '../../internalTools/gfs'
 import { createGfscClient, getGfsToolScopes } from '../../internalTools/gfsClient'
+import type { GfsDownloadStore } from '../../internalTools/gfsDownloadStore'
+import type { GfsProcessingLeaseProvider } from '../../internalTools/gfsProcessingLease'
 import type { LlmProvider } from '../../llm/registryCore'
 import type { McpManager } from '../../mcp/manager'
 import type { IncomingMessage } from '../../server'
@@ -183,15 +185,21 @@ export class NativeToolRegistry implements ToolRegistry {
     // credential-slot stripping — only the active provider's credential env
     // var survives into the child env. Appended as a trailing optional so
     // existing positional call sites stay valid; only taskExecutor passes it.
-    activeLlmProvider?: LlmProvider
+    activeLlmProvider?: LlmProvider,
+    gfsDownload?: {
+      store: GfsDownloadStore
+      callerIdentity: string
+      callerWorkspacePath: string
+      processingLeaseProvider?: GfsProcessingLeaseProvider
+    }
   ) {
     // file_read/file_write are scoped to the per-user root when a ScopedWorkspace
     // is wired (F1c) — they operate on a raw path string, not the Workspace
     // interface, so we read the per-user root off it explicitly. Falls back to
     // the shared root when there is no user context (e.g. the tool-name listing
-    // registry in main.ts). ShellTool stays on the shared root: scoping its cwd
-    // does not contain absolute-path access — shell isolation is a documented
-    // residual (bundled with OS-level sandboxing).
+    // registry in main.ts). ShellTool uses the caller root when governed local
+    // processing is enabled. Its cwd/HOME boundary does not contain absolute-path
+    // access — shell isolation remains a documented residual.
     const fileToolsRoot =
       workspace instanceof ScopedWorkspace ? workspace.userRootPath : config.workspacePath
     this.register(new FileReadTool(fileToolsRoot))
@@ -206,11 +214,12 @@ export class NativeToolRegistry implements ToolRegistry {
     this.register(new FileWriteTool(fileToolsRoot))
     this.register(
       new ShellTool(
-        config.workspacePath,
+        gfsDownload?.callerWorkspacePath ?? config.workspacePath,
         config.shellTimeout,
         config.envAllowlist,
         dynamicEnvProvider,
-        activeLlmProvider
+        activeLlmProvider,
+        gfsDownload?.processingLeaseProvider
       )
     )
     this.register(new HttpRequestTool(config.httpAllowlist))
@@ -241,6 +250,9 @@ export class NativeToolRegistry implements ToolRegistry {
         ...(gfsScopes.has('gfs.read')
           ? buildGfsReadTools(gfsClient, {
               referencedFiles: referencedFilePins(sourceMessage?.fileReferenceResolutions),
+              downloadStore: gfsDownload?.store,
+              callerIdentity: gfsDownload?.callerIdentity,
+              callerWorkspacePath: gfsDownload?.callerWorkspacePath,
             })
           : []),
         ...(gfsScopes.has('gfs.write') ? buildGfsWriteTools(gfsClient) : []),

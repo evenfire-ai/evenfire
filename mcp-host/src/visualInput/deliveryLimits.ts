@@ -19,13 +19,16 @@ export interface VisualDeliveryLimits {
  * metadata admission.
  */
 export function resolveVisualDeliveryLimits(providerType: string): VisualDeliveryLimits | null {
-  if (providerType !== 'codex-subscription') return null
-  return {
-    maxImageBytes: CODEX_VISUAL_LIMITS.maxImageBytes,
-    maxTotalImageBytes: CODEX_VISUAL_LIMITS.maxTotalImageBytes,
-    maxImages: CODEX_VISUAL_LIMITS.maxImages,
-    maxVisualRequestBytes: CODEX_LIMITS.maxVisualRequestBodyBytes,
-    maxDimension: CODEX_VISUAL_LIMITS.maxImageDimension,
-    maxPixels: CODEX_VISUAL_LIMITS.maxImagePixels,
-  }
+  if (providerType === 'codex-subscription')
+    return {
+      maxImageBytes: CODEX_VISUAL_LIMITS.maxImageBytes,
+      maxTotalImageBytes: CODEX_VISUAL_LIMITS.maxTotalImageBytes,
+      maxImages: CODEX_VISUAL_LIMITS.maxImages,
+      maxVisualRequestBytes: CODEX_LIMITS.maxVisualRequestBodyBytes,
+      maxNonImageRequestBytes: CODEX_LIMITS.maxRequestBodyBytes,
+      maxDimension: CODEX_VISUAL_LIMITS.maxImageDimension,
+      maxPixels: CODEX_VISUAL_LIMITS.maxImagePixels,
+    }
+
+  return null
 }

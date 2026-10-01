@@ -5,6 +5,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { VISUAL_INPUT_LIMITS, VisualInputBudget } from '../visualInput/policy'
 import { readGfsContent } from './gfsContentRead'
+import { GFS_FILE_LIMITS } from './gfsFilePolicy'
 
 const FILE_ID = '1234567890abcdef1234567890abcdef'
 const FILE_URI = `gfs://main/${FILE_ID}`

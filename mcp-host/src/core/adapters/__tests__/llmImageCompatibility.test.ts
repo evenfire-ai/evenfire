@@ -512,10 +512,10 @@ describe('image source identity compatibility (#650)', () => {
       messages,
       tools: TOOLS,
     })
-    expect(imagePartsOf(binding.completeWithTools[0].messages)).toHaveLength(3)
+    expect(imagePartsOf(binding.completeWithTools[0].messages)).toHaveLength(4)
     expect(
       imagePartsOf(binding.completeWithTools[0].messages).every(
-        part => part.source?.kind === 'tool'
+        part => part.source?.kind === 'tool' || part.source?.kind === 'attachment'
       )
     ).toBe(true)
     expect(messages).toEqual(snapshot)
@@ -928,7 +928,7 @@ describe('Codex V2 transport wiring (#650)', () => {
     const codexImages = codexRequest.messages
       .flatMap(message => message.contentParts ?? [])
       .filter((part): part is CodexMessagePartImageV2 => part.type === 'image')
-    expect(codexImages).toHaveLength(3)
+    expect(codexImages).toHaveLength(4)
     expect(codexImages.every(part => part.source.kind === 'tool')).toBe(true)
     const openaiImages = imagePartsOf(fallback.completeWithTools[0].messages)
     expect(openaiImages).toHaveLength(2)

@@ -1,4 +1,10 @@
 import { spawn } from 'child_process'
+import { setTimeout as sleep } from 'node:timers/promises'
+import { recordGfsShellOutputLimit } from '../../internalTools/gfsDownloadMetrics'
+import type {
+  GfsProcessingLease,
+  GfsProcessingLeaseProvider,
+} from '../../internalTools/gfsProcessingLease'
 import { ALL_PROVIDERS, LlmProvider, PROVIDERS } from '../../llm/registryCore'
 import { ToolError, ToolErrorCode } from '../errors'
 import { ExecutionContext, Tool } from '../interfaces'
@@ -13,6 +19,38 @@ import { ToolOutput } from '../types'
 // sandbox: POSIX permissions / a read-only mount remain the OS backstop.
 const STATE_DB_COMMAND_PATTERN =
   /(^|[^A-Za-z0-9_.-])state\.db(-wal|-shm)?([^A-Za-z0-9_]|$)|\.clerum-state(\/|[^A-Za-z0-9_.-]|$)/
+
+function truncateUtf8Bytes(value: string, maximumBytes: number): string {
+  if (maximumBytes <= 0) return ''
+  const bytes = Buffer.from(value, 'utf8')
+  if (bytes.length <= maximumBytes) return value
+  return bytes
+    .subarray(0, maximumBytes)
+    .toString('utf8')
+    .replace(/\uFFFD$/u, '')
+}
+
+function processGroupExists(processGroupId: number): boolean {
+  try {
+    process.kill(-processGroupId, 0)
+    return true
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM'
+  }
+}
+
+async function ensureProcessGroupTerminated(processGroupId: number): Promise<boolean> {
+  try {
+    process.kill(-processGroupId, 'SIGKILL')
+  } catch {
+    /* The group can exit between leader close and this signal. */
+  }
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (!processGroupExists(processGroupId)) return true
+    await sleep(10)
+  }
+  return !processGroupExists(processGroupId)
+}
 
 /**
  * ShellTool — runs an arbitrary shell command in the agent's workspace.
@@ -30,7 +68,10 @@ const STATE_DB_COMMAND_PATTERN =
  */
 export class ShellTool implements Tool {
   private static readonly MAX_TOTAL_BYTES = 1024 * 1024 // 1 MB — preserved from pre-spawn behavior
-  private static readonly SIGKILL_GRACE_MS = 5000
+  /** Leaves room for status text, XML wrapping, and message serialization. */
+  private static readonly MAX_RESULT_BYTES = ShellTool.MAX_TOTAL_BYTES - 2048
+  private static readonly MAX_PROGRESS_BYTES = 64 * 1024
+  static readonly SIGKILL_GRACE_MS = 5000
 
   /**
    * `dynamicEnvProvider` returns operator-managed env vars from the
@@ -47,7 +88,9 @@ export class ShellTool implements Tool {
     // stripping: only this provider's credential env var survives into the
     // child env; every other provider slot is deleted. Undefined (tool-name
     // listing registry, legacy tests) strips ALL slots — the secure default.
-    private readonly activeLlmProvider?: LlmProvider
+    private readonly activeLlmProvider?: LlmProvider,
+    /** Caller-bound cleanup protection for retained GFS downloads. */
+    private readonly processingLeases?: GfsProcessingLeaseProvider
   ) {}
 
   name() {
@@ -127,6 +170,9 @@ export class ShellTool implements Tool {
     for (const [k, v] of Object.entries(dynamicEnv)) {
       if (typeof v === 'string') safeEnv[k] = v
     }
+    // Set HOME after operator/dynamic environment merging. A supplied HOME must
+    // never relocate the approved shell outside the caller's workspace root.
+    safeEnv.HOME = this.workspacePath
 
     // §13 (stateless agents) — credential-slot stripping. The child env
     // carries ONLY the ACTIVE provider's credential slots; every OTHER
@@ -145,6 +191,21 @@ export class ShellTool implements Tool {
       }
     }
 
+    let processingLease: GfsProcessingLease | undefined
+    if (this.processingLeases) {
+      try {
+        processingLease = await this.processingLeases.acquireProcessingLease({
+          durationMs: timeout + ShellTool.SIGKILL_GRACE_MS + 1_000,
+        })
+      } catch (err) {
+        return {
+          content: `Processing lease failed before command start: ${(err as Error).message}`,
+          duration_ms: Date.now() - startTime,
+          is_error: true,
+        }
+      }
+    }
+
     return new Promise<ToolOutput>(resolve => {
       // detached: true makes the child a process group leader so we can kill
       // the whole group (shell + grandchildren like `sleep`) with -pid signal.
@@ -155,9 +216,10 @@ export class ShellTool implements Tool {
         detached: true,
       })
 
-      const stdoutBuf: string[] = []
-      const stderrBuf: string[] = []
+      const stdoutBuf: Buffer[] = []
+      const stderrBuf: Buffer[] = []
       let totalBytes = 0
+      let progressBytes = 0
       let killed: 'timeout' | 'maxbuffer' | 'cancelled' | null = null
       let resolved = false
       let killTimer: ReturnType<typeof setTimeout> | undefined
@@ -166,6 +228,25 @@ export class ShellTool implements Tool {
         if (resolved) return
         resolved = true
         resolve(out)
+      }
+
+      const complete = async (
+        out: ToolOutput,
+        options: { releaseLease?: boolean } = {}
+      ): Promise<void> => {
+        if (processingLease && this.processingLeases && options.releaseLease !== false) {
+          try {
+            await this.processingLeases.releaseProcessingLease(processingLease)
+          } catch {
+            const status = '\n\n[processing_lease_release_failed]'
+            out.is_error = true
+            out.content = `${truncateUtf8Bytes(
+              out.content,
+              ShellTool.MAX_RESULT_BYTES - Buffer.byteLength(status, 'utf8')
+            )}${status}`
+          }
+        }
+        resolveOnce(out)
       }
 
       const forceKill = () => {
@@ -200,16 +281,39 @@ export class ShellTool implements Tool {
       }
 
       const onChunk = (chunk: Buffer, which: 'stdout' | 'stderr') => {
-        const s = chunk.toString('utf8')
-        const buf = which === 'stdout' ? stdoutBuf : stderrBuf
-        buf.push(s)
-        totalBytes += Buffer.byteLength(s, 'utf8')
-        // Stream to watcher (if any). Interleaved stdout+stderr is fine for the preview.
-        context?.onOutput(s)
+        // Bound both destinations before accepting the chunk. Bytes beyond the
+        // admission bound are counted only for the truthful limit decision and
+        // never enter retained output.
+        if (totalBytes >= ShellTool.MAX_TOTAL_BYTES) {
+          if (!killed) {
+            killed = 'maxbuffer'
+            recordGfsShellOutputLimit('output_limit_exceeded')
+            forceKill()
+          }
+          return
+        }
+        const retained = Math.min(chunk.length, ShellTool.MAX_TOTAL_BYTES - totalBytes)
+        if (retained > 0) stdoutOrStderr(which).push(chunk.subarray(0, retained))
+        totalBytes += chunk.length
+
+        // Progress is a live preview, not a second output channel. Stop it at
+        // its own fixed bound even while the final result is allowed to reach
+        // its larger admission bound.
+        const progressRemaining = ShellTool.MAX_PROGRESS_BYTES - progressBytes
+        if (progressRemaining > 0) {
+          const preview = chunk.subarray(0, progressRemaining)
+          progressBytes += preview.length
+          context?.onOutput(preview.toString('utf8'))
+        }
         if (totalBytes > ShellTool.MAX_TOTAL_BYTES && !killed) {
           killed = 'maxbuffer'
+          recordGfsShellOutputLimit('output_limit_exceeded')
           forceKill()
         }
+      }
+
+      function stdoutOrStderr(which: 'stdout' | 'stderr'): Buffer[] {
+        return which === 'stdout' ? stdoutBuf : stderrBuf
       }
 
       child.stdout?.on('data', c => onChunk(c, 'stdout'))
@@ -239,67 +343,79 @@ export class ShellTool implements Tool {
         clearTimeout(killTimer)
         context?.signal?.removeEventListener('abort', onAbort)
       }
-      child.on('close', exitCode => {
-        // Leader/stdio close does not prove descendants exited. Complete group
-        // termination now before dropping escalation, rather than leaving a
-        // delayed signal that could target a reused process-group identifier.
-        if (killed && typeof child.pid === 'number' && child.pid > 0) {
-          try {
-            process.kill(-child.pid, 'SIGKILL')
-          } catch {
-            /* Group already gone. */
-          }
-        }
+      const handleClose = async (exitCode: number | null): Promise<void> => {
+        // Leader/stdio close does not prove descendants exited. Always complete
+        // group termination before releasing a processing lease or resolving.
+        const processGroupId = child.pid
+        const groupTerminated =
+          typeof processGroupId === 'number' && processGroupId > 0
+            ? await ensureProcessGroupTerminated(processGroupId)
+            : true
         cleanup()
-        const stdout = stdoutBuf.join('')
-        const stderr = stderrBuf.join('')
+        const stdout = Buffer.concat(stdoutBuf).toString('utf8')
+        const stderr = Buffer.concat(stderrBuf).toString('utf8')
         const body =
           [stdout ? `stdout:\n${stdout}` : '', stderr ? `stderr:\n${stderr}` : '']
             .filter(Boolean)
             .join('\n\n') || '(no output)'
+        const format = (status: string) => {
+          return `${truncateUtf8Bytes(
+            body,
+            ShellTool.MAX_RESULT_BYTES - Buffer.byteLength(status, 'utf8')
+          )}${status}`
+        }
 
+        let out: ToolOutput
         if (killed === 'timeout') {
-          resolveOnce({
-            content: `${body}\n\n[Command killed after ${timeout}ms timeout — partial output above]`,
+          const status = `\n\n[Command killed after ${timeout}ms timeout — partial output above]`
+          out = { content: format(status), duration_ms: Date.now() - startTime, is_error: true }
+        } else if (killed === 'cancelled') {
+          const status = '\n\n[Command cancelled — partial output above]'
+          out = { content: format(status), duration_ms: Date.now() - startTime, is_error: true }
+        } else if (killed === 'maxbuffer') {
+          const status = `\n\n[output_limit_exceeded: command killed after more than ${ShellTool.MAX_TOTAL_BYTES} output bytes — bounded partial output above]`
+          out = { content: format(status), duration_ms: Date.now() - startTime, is_error: true }
+        } else if (exitCode !== 0 && exitCode !== null) {
+          const status = `Command failed (exit code ${exitCode}):\n`
+          out = {
+            content: `${status}${truncateUtf8Bytes(
+              body,
+              ShellTool.MAX_RESULT_BYTES - Buffer.byteLength(status, 'utf8')
+            )}`,
             duration_ms: Date.now() - startTime,
             is_error: true,
-          })
-          return
+          }
+        } else {
+          out = {
+            content: truncateUtf8Bytes(body, ShellTool.MAX_RESULT_BYTES),
+            duration_ms: Date.now() - startTime,
+            is_error: false,
+          }
         }
-        if (killed === 'cancelled') {
-          resolveOnce({
-            content: `${body}\n\n[Command cancelled — partial output above]`,
+
+        if (!groupTerminated) {
+          const status = '\n\n[process_group_termination_failed]'
+          out = {
+            content: `${truncateUtf8Bytes(
+              out.content,
+              ShellTool.MAX_RESULT_BYTES - Buffer.byteLength(status, 'utf8')
+            )}${status}`,
             duration_ms: Date.now() - startTime,
             is_error: true,
-          })
+          }
+          await complete(out, { releaseLease: false })
           return
         }
-        if (killed === 'maxbuffer') {
-          resolveOnce({
-            content: `${body}\n\n[Command killed: output exceeded ${ShellTool.MAX_TOTAL_BYTES} bytes — partial output above]`,
-            duration_ms: Date.now() - startTime,
-            is_error: true,
-          })
-          return
-        }
-        if (exitCode !== 0 && exitCode !== null) {
-          resolveOnce({
-            content: `Command failed (exit code ${exitCode}):\n${body}`,
-            duration_ms: Date.now() - startTime,
-            is_error: true,
-          })
-          return
-        }
-        resolveOnce({
-          content: body,
-          duration_ms: Date.now() - startTime,
-          is_error: false,
-        })
+        await complete(out)
+      }
+
+      child.on('close', exitCode => {
+        void handleClose(exitCode)
       })
 
       child.on('error', err => {
         cleanup()
-        resolveOnce({
+        void complete({
           content: `Command failed to start: ${err.message}`,
           duration_ms: Date.now() - startTime,
           is_error: true,
