@@ -12,6 +12,8 @@ import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 // end() resolves at once and the test decides when each client finishes
 // closing.
 class FakeClient extends EventEmitter {
+  onClosed?: () => void
+
   constructor(public _ended = false) {
     super()
   }
@@ -19,19 +21,38 @@ class FakeClient extends EventEmitter {
   finishClosing(): void {
     this._ended = true
     this.emit('end')
+    this.onClosed?.()
   }
 }
 
-class FakePool {
-  readonly end = vi.fn(async () => {})
-  constructor(readonly _clients: unknown) {}
+class FakePool extends EventEmitter {
+  readonly end = vi.fn(async () => {
+    if (!Array.isArray(this._clients)) return
+    for (const client of this._clients.splice(0) as FakeClient[]) {
+      if (client._ended) this.emit('remove', client)
+      else client.onClosed = () => void this.emit('remove', client)
+    }
+  })
+
+  get totalCount(): number {
+    return Array.isArray(this._clients) ? this._clients.length : 0
+  }
+
+  constructor(readonly _clients: unknown) {
+    super()
+  }
 }
 
 async function settledAfterMicrotasks(promise: Promise<void>): Promise<boolean> {
   let settled = false
-  void promise.then(() => {
-    settled = true
-  })
+  void promise.then(
+    () => {
+      settled = true
+    },
+    () => {
+      settled = true
+    }
+  )
   for (let i = 0; i < 10; i += 1) await Promise.resolve()
   return settled
 }
@@ -76,6 +97,61 @@ describe('endPoolAndWaitForClients', () => {
     expect(client.listenerCount('end')).toBe(0)
   })
 
+  it.each(['client closure', 'pool.end()'] as const)(
+    'rejects within five seconds when %s never settles and removes its listeners and timer',
+    async phase => {
+      vi.useFakeTimers()
+      try {
+        const client = new FakeClient()
+        const pool = new FakePool([client])
+        if (phase === 'pool.end()') {
+          pool.end.mockImplementationOnce(() => new Promise<void>(() => {}))
+        }
+        const done = endPoolAndWaitForClients(pool as unknown as Pool)
+        const errorListeners = pool.listeners('error')
+        expect(errorListeners).toHaveLength(1)
+        const outcome = done.then(
+          () => undefined,
+          (error: unknown) => error
+        )
+
+        await vi.advanceTimersByTimeAsync(4_999)
+        expect(await settledAfterMicrotasks(done)).toBe(false)
+        expect(client.listenerCount('end')).toBe(1)
+
+        await vi.advanceTimersByTimeAsync(1)
+        expect(await settledAfterMicrotasks(done)).toBe(true)
+        expect(await outcome).toMatchObject({
+          message: 'Timed out after 5000ms waiting for pg pool clients to close',
+        })
+        expect(pool.end).toHaveBeenCalledTimes(1)
+        expect(client.listenerCount('end')).toBe(0)
+        expect(pool.listeners('error')).toEqual(errorListeners)
+        expect(vi.getTimerCount()).toBe(0)
+        client.finishClosing()
+      } finally {
+        vi.useRealTimers()
+      }
+    }
+  )
+
+  it('clears the deadline after a successful close or an end() rejection', async () => {
+    vi.useFakeTimers()
+    try {
+      const pool = new FakePool([])
+      await endPoolAndWaitForClients(pool as unknown as Pool)
+      expect(vi.getTimerCount()).toBe(0)
+
+      pool.end.mockRejectedValueOnce(new Error('pool end failed'))
+      await expect(endPoolAndWaitForClients(pool as unknown as Pool)).rejects.toThrow(
+        'pool end failed'
+      )
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('throws before end() when pg-pool no longer keeps _clients as an array', async () => {
     const pool = new FakePool(new Set([new FakeClient()]))
     await expect(endPoolAndWaitForClients(pool as unknown as Pool)).rejects.toThrow(
@@ -87,6 +163,46 @@ describe('endPoolAndWaitForClients', () => {
   it('does nothing for a pool that was never created', async () => {
     await expect(endPoolAndWaitForClients(undefined)).resolves.toBeUndefined()
     await expect(endPoolAndWaitForClients(null)).resolves.toBeUndefined()
+  })
+
+  it('rejects an unexpected pool error during end and preserves the earlier observer', async () => {
+    const pool = new FakePool([])
+    const earlierObserver = vi.fn()
+    const error = Object.assign(new Error('unexpected pool failure'), { code: 'XX000' })
+    pool.on('error', earlierObserver)
+    pool.end.mockImplementationOnce(async () => {
+      pool.emit('error', error)
+    })
+
+    await expect(endPoolAndWaitForClients(pool as unknown as Pool)).rejects.toBe(error)
+    expect(earlierObserver).toHaveBeenCalledWith(error)
+    expect(pool.listeners('error')).toHaveLength(2)
+    expect(pool.listeners('error')[0]).toBe(earlierObserver)
+  })
+
+  it('keeps prior real-pool listeners, exposes unexpected errors, and adds no observer on a repeated end', async () => {
+    const pool = new Pool({ host: '127.0.0.1', port: 1, user: 'unused', database: 'unused' })
+    const earlierObserver = vi.fn()
+    pool.on('error', earlierObserver)
+    await endPoolAndWaitForClients(pool)
+    const listeners = pool.listeners('error')
+    expect(listeners).toHaveLength(2)
+    expect(listeners[0]).toBe(earlierObserver)
+
+    await expect(endPoolAndWaitForClients(pool)).rejects.toThrow(
+      'Called end on pool more than once'
+    )
+    expect(pool.listeners('error')).toEqual(listeners)
+
+    const expected = Object.assign(new Error('backend terminated during teardown'), {
+      code: '57P01',
+    })
+    expect(() => pool.emit('error', expected)).not.toThrow()
+    expect(earlierObserver).toHaveBeenLastCalledWith(expected)
+    const unexpected = Object.assign(new Error('unexpected pool failure'), { code: 'XX000' })
+    expect(() => pool.emit('error', unexpected)).toThrow(unexpected)
+    expect(earlierObserver).toHaveBeenLastCalledWith(unexpected)
+    expect(pool.listeners('error')).toEqual(listeners)
   })
 
   it('ends a real pg Pool that never connected', async () => {
@@ -117,11 +233,14 @@ const READY_FOR_QUERY_IDLE = Buffer.from([0x5a, 0, 0, 0, 5, 0x49])
 const TERMINATE = 0x58
 
 async function startPgWireStub(
-  options: { closeDelayMsByConnection: readonly number[] } | { dropEveryConnection: true }
+  options: { closeDelayMsByConnection: readonly (number | null)[] } | { dropEveryConnection: true }
 ): Promise<PgWireStub> {
   let accepted = 0
   let terminates = 0
+  const sockets = new Set<Socket>()
   const server = net.createServer({ allowHalfOpen: true }, (socket: Socket) => {
+    sockets.add(socket)
+    socket.once('close', () => sockets.delete(socket))
     const index = accepted
     accepted += 1
     if ('dropEveryConnection' in options) {
@@ -156,7 +275,9 @@ async function startPgWireStub(
         pending = pending.subarray(1 + length)
         if (type === TERMINATE) {
           terminates += 1
-          setTimeout(() => socket.end(), closeDelayMs)
+          // null deliberately holds this connection until fixture cleanup so
+          // a test can forward a late client error after the helper returns.
+          if (closeDelayMs !== null) setTimeout(() => socket.end(), closeDelayMs)
         }
       }
     })
@@ -166,8 +287,12 @@ async function startPgWireStub(
   return {
     port,
     terminates: () => terminates,
-    close: () =>
-      new Promise<void>((resolve, reject) => server.close(err => (err ? reject(err) : resolve()))),
+    close: () => {
+      for (const socket of sockets) socket.destroy()
+      return new Promise<void>((resolve, reject) =>
+        server.close(err => (err ? reject(err) : resolve()))
+      )
+    },
   }
 }
 
@@ -205,7 +330,48 @@ async function settleWithin(promise: Promise<void>, ms: number): Promise<'resolv
 }
 
 describe('endPoolAndWaitForClients against a real pg Pool and a PG wire stub', () => {
-  it('resolves when a client still connecting at end() fails to connect (R4-M1)', async () => {
+  it.each(['57P01', 'XX000'])(
+    'handles a removed client forwarding %s after the helper returns',
+    async code => {
+      const stub = await startPgWireStub({ closeDelayMsByConnection: [null, 0] })
+      const pool = stubPool(stub.port)
+      const emit = vi.spyOn(pool, 'emit')
+      try {
+        const removed = await pool.connect()
+        const held = await pool.connect()
+        held.release()
+        removed.release(true)
+        expect(pool.totalCount).toBe(1)
+
+        await endPoolAndWaitForClients(pool)
+
+        expect(pool.ended).toBe(true)
+        expect(pool.totalCount).toBe(0)
+        expect(socketOf(held).destroyed).toBe(true)
+        expect(socketOf(removed).destroyed).toBe(false)
+        emit.mockClear()
+        const error = Object.assign(new Error('late PostgreSQL client error'), { code })
+        // This is the real client's existing pg-pool idleListener. The emit
+        // spy passes through and adds no pool error listener that could hide
+        // missing helper protection. Unexpected errors must still escape.
+        const forward = (): void => {
+          removed.emit('error', error)
+        }
+        if (code === '57P01') expect(forward).not.toThrow()
+        else expect(forward).toThrow(error)
+
+        const forwarded = emit.mock.calls.filter(([event]) => event === 'error')
+        expect(forwarded).toHaveLength(1)
+        expect(forwarded[0]?.[1]).toBe(error)
+        expect(forwarded[0]?.[2]).toBe(removed)
+      } finally {
+        emit.mockRestore()
+        await stub.close()
+      }
+    }
+  )
+
+  it('resolves when a client still connecting at end() fails to connect', async () => {
     const stub = await startPgWireStub({ dropEveryConnection: true })
     try {
       const pool = stubPool(stub.port)
@@ -230,7 +396,7 @@ describe('endPoolAndWaitForClients against a real pg Pool and a PG wire stub', (
     }
   })
 
-  it('resolves only after every idle client has closed its socket (R4-M3)', async () => {
+  it('resolves only after every idle client has closed its socket', async () => {
     const stub = await startPgWireStub({ closeDelayMsByConnection: [40, 120] })
     try {
       const pool = stubPool(stub.port)
@@ -255,7 +421,7 @@ describe('endPoolAndWaitForClients against a real pg Pool and a PG wire stub', (
     }
   })
 
-  it('waits for the client it holds, not for one the pool removed before end() (R4-L12)', async () => {
+  it('waits for the client it holds, not for one the pool removed before end()', async () => {
     const stub = await startPgWireStub({ closeDelayMsByConnection: [20, 300] })
     try {
       const pool = stubPool(stub.port)

@@ -45,7 +45,7 @@ describeRealPostgres('MCP Secret rollback permits on real PostgreSQL', () => {
 
   afterAll(async () => {
     // A concurrent consume test opens several pg clients. Wait for every one
-    // of them to close before touching their backends (#946), then wait for
+    // of them to close before touching their backends, then wait for
     // the backend rows to disappear before using the administrative fallback
     // below.
     await endPoolAndWaitForClients(pool)
