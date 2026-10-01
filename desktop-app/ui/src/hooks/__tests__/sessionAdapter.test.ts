@@ -2,6 +2,10 @@ import { describe, expect, it } from 'vitest'
 import { mergeAuthoritativeServerMessages } from '../../../../src/chatMessageMerge'
 import type { ChatMessage } from '../../../../src/types'
 import {
+  buildChatMessageAttachments,
+  buildResponseFileAttachments,
+} from '../../lib/chatMessageAttachments'
+import {
   buildComposerReferencesPromptSection,
   buildComposerRequestContent,
 } from '../../lib/composerReferencesPrompt'
@@ -322,44 +326,144 @@ describe('turnsToChatMessages', () => {
     expect(buildComposerResendDraft(once[1]!).imageAttachments[0]?.dataBase64).toBe('Ag==')
   })
 
-  it('recovers image bytes for a unique text echo with matching server image context', () => {
+  it('keeps same-name bytes on their own prompt when only a content match exists', () => {
     const incoming = turnsToChatMessages([
-      { number: 1, user_input: 'first', started_at: new Date(1).toISOString() },
       {
         number: 2,
-        user_input: 'repeat\n\n[Attached images]\n- second.png',
+        user_input: 'repeat\n\n[Attached images]\n- shared.png',
         started_at: new Date(3).toISOString(),
       },
     ])
+    const firstImage = buildChatMessageAttachments(
+      [
+        {
+          id: 'first-image',
+          name: 'shared.png',
+          mimeType: 'image/png',
+          dataBase64: 'AQ==',
+          sizeBytes: 1,
+          previewDataUrl: 'data:image/png;base64,AQ==',
+        },
+      ],
+      []
+    )[0]!
+    const secondImage = buildChatMessageAttachments(
+      [
+        {
+          id: 'second-image',
+          name: 'shared.png',
+          mimeType: 'image/png',
+          dataBase64: 'Ag==',
+          sizeBytes: 1,
+          previewDataUrl: 'data:image/png;base64,Ag==',
+        },
+      ],
+      []
+    )[0]!
+    expect(firstImage.dataBase64).not.toBe(secondImage.dataBase64)
+    const firstTurn: ChatMessage = {
+      id: 'turn-1-user',
+      role: 'user',
+      content: 'repeat',
+      timestamp: 1,
+      serverTurnNumber: 1,
+      attachments: [firstImage],
+    }
     const localEcho: ChatMessage = {
-      id: 'second-local-echo',
+      id: 'first-prompt-idle-echo',
       role: 'user',
       content: 'repeat',
       timestamp: 2,
+      attachments: [firstImage],
+    }
+    const existing = [firstTurn, localEcho, incoming[0]!]
+    const once = mergeAuthoritativeServerMessages(existing, incoming, {
+      activeTaskIds: new Set(),
+    })
+    const twice = mergeAuthoritativeServerMessages(once, incoming, {
+      activeTaskIds: new Set(),
+    })
+    expect(twice).toEqual(once)
+    expect(once.map(message => message.id)).toEqual([
+      'turn-1-user',
+      'first-prompt-idle-echo',
+      'turn-2-user',
+    ])
+    expect(buildComposerResendDraft(once[0]!).imageAttachments[0]?.dataBase64).toBe('AQ==')
+    expect(buildComposerResendDraft(once[1]!).imageAttachments[0]?.dataBase64).toBe('AQ==')
+    expect(buildComposerResendDraft(once[2]!).imageAttachments).toEqual([])
+    expect(once[2]?.attachments).toMatchObject([{ type: 'uploaded_file', label: 'shared.png' }])
+  })
+
+  it('recovers image bytes when the local and server message have the same turn identity', () => {
+    const incoming = turnsToChatMessages([
+      {
+        number: 2,
+        user_input: 'repeat\n\n[Attached images]\n- shared.png',
+        started_at: new Date(3).toISOString(),
+      },
+    ])
+    const local: ChatMessage = {
+      ...incoming[0]!,
+      attachments: buildChatMessageAttachments(
+        [
+          {
+            id: 'same-turn-image',
+            name: 'shared.png',
+            mimeType: 'image/png',
+            dataBase64: 'Ag==',
+            sizeBytes: 1,
+            previewDataUrl: 'data:image/png;base64,Ag==',
+          },
+        ],
+        []
+      ),
+    }
+    const merged = mergeAuthoritativeServerMessages([local], incoming)
+    expect(merged.map(message => message.id)).toEqual(['turn-2-user'])
+    expect(merged[0]?.attachments).toMatchObject([
+      { type: 'uploaded_file', label: 'shared.png', dataBase64: 'Ag==' },
+    ])
+    expect(buildComposerResendDraft(merged[0]!).imageAttachments[0]?.dataBase64).toBe('Ag==')
+    expect(mergeAuthoritativeServerMessages(merged, incoming)).toEqual(merged)
+  })
+
+  it('collapses a settled assistant echo with producer-built response file bytes', () => {
+    const incoming = turnsToChatMessages([
+      { number: 1, user_input: 'first', response: 'one', started_at: new Date(1).toISOString() },
+      { number: 2, user_input: 'second', response: 'done', started_at: new Date(3).toISOString() },
+    ])
+    const responseFile = buildResponseFileAttachments({
       attachments: [
         {
-          id: 'second-image',
-          type: 'uploaded_file',
-          label: 'second.png',
-          filename: 'second.png',
-          mimeType: 'image/png',
+          id: 'result',
+          kind: 'file',
+          filename: 'result.txt',
+          mimeType: 'text/plain',
           encoding: 'base64',
-          dataBase64: 'Ag==',
-          sizeBytes: 1,
+          dataBase64: 'b2s=',
+          sizeBytes: 2,
         },
       ],
+    })[0]!
+    const localEcho: ChatMessage = {
+      id: 'settled-assistant-echo',
+      role: 'assistant',
+      content: 'done',
+      timestamp: 2,
+      attachments: [responseFile],
     }
-    const merged = mergeAuthoritativeServerMessages(
-      [incoming[0]!, localEcho, incoming[1]!],
+    const once = mergeAuthoritativeServerMessages(
+      [incoming[1]!, localEcho, incoming[3]!],
       incoming,
       { activeTaskIds: new Set() }
     )
-    expect(merged.map(message => message.id)).toEqual(['turn-1-user', 'turn-2-user'])
-    expect(merged[1]?.attachments).toMatchObject([
-      { type: 'uploaded_file', label: 'second.png', dataBase64: 'Ag==' },
+    expect(once.filter(message => message.role === 'assistant')).toHaveLength(2)
+    expect(once.some(message => message.id === 'settled-assistant-echo')).toBe(false)
+    expect(once.find(message => message.id === 'turn-2-assistant')?.attachments).toEqual([
+      responseFile,
     ])
-    expect(buildComposerResendDraft(merged[1]!).imageAttachments[0]?.dataBase64).toBe('Ag==')
-    expect(mergeAuthoritativeServerMessages(merged, incoming)).toEqual(merged)
+    expect(mergeAuthoritativeServerMessages(once, incoming)).toEqual(once)
   })
 
   it('preserves turn order for multi-turn transcripts', () => {

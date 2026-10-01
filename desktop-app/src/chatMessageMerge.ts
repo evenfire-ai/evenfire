@@ -93,51 +93,17 @@ function collapseSafeAttachments(
   )
 }
 
-function hasProvenCollapsedImageContext(
-  server: ChatMessage,
-  local: ChatMessage,
-  authoritative: ChatMessage[],
-  existing: ChatMessage[]
-): boolean {
-  const byteAttachments =
-    local.attachments?.filter(attachment => Boolean(attachment.dataBase64)) ?? []
-  if (!byteAttachments.length) return true
-  if (byteAttachments.some(attachment => attachment.type !== 'uploaded_file')) return false
-
-  // Content is only an identity hint when neither side has another claimant.
-  if (
-    authoritative.filter(row => row.role === local.role && row.content === local.content).length !==
-      1 ||
-    existing.filter(
-      row =>
-        messageServerTurnNumber(row) === undefined &&
-        row.role === local.role &&
-        row.content === local.content &&
-        !row.isError &&
-        !row.preserveLocal
-    ).length !== 1
-  ) {
-    return false
-  }
-
-  // The server must explicitly name every image. Pair repeated names by
-  // occurrence, as mergeAttachmentChips does; a missing or extra chip is not
-  // evidence that these local bytes belong to this server turn.
-  const serverImages =
-    server.attachments?.filter(attachment => attachment.type === 'uploaded_file') ?? []
-  if (serverImages.length !== byteAttachments.length) return false
-  const unpaired = [...serverImages]
-  for (const localImage of byteAttachments) {
-    const index = unpaired.findIndex(
-      serverImage =>
-        serverImage.id === localImage.id ||
-        (attachmentName(serverImage) !== '' &&
-          attachmentName(serverImage) === attachmentName(localImage))
+function hasByteBearingUploadedImage(message: ChatMessage): boolean {
+  // Parsed server image chips expose only filename and list position. Those
+  // fields cannot distinguish different bytes in same-name prompts. A
+  // content-only collapse has no stronger turn identity, so the local image
+  // must remain on its own bubble. Response files are assistant output
+  // artifacts and retain their established collapse behavior.
+  return Boolean(
+    message.attachments?.some(
+      attachment => attachment.type === 'uploaded_file' && Boolean(attachment.dataBase64)
     )
-    if (index < 0) return false
-    unpaired.splice(index, 1)
-  }
-  return true
+  )
 }
 
 function preferredServerMessage(
@@ -455,7 +421,7 @@ export function mergeAuthoritativeServerMessages(
           : matchesAuthoritative(previousAuthoritative)
             ? previousAuthoritative
             : undefined
-        if (echoRow && hasProvenCollapsedImageContext(echoRow, message, authoritative, existing)) {
+        if (echoRow && !hasByteBearingUploadedImage(message)) {
           dropLocalEcho(message, echoRow)
         }
       }
@@ -479,8 +445,8 @@ export function mergeAuthoritativeServerMessages(
     // slot row (§6.2, R2-M1). A same-text collapse does not prove that a local
     // plugin/file reference belonged to this server turn; Resend must not turn
     // that unverified reference into a new prompt attachment. Byte-bearing
-    // images reach this path only after unique text and server image context
-    // prove their association. Keep non-reference artifacts and toolSteps. It
+    // uploaded images never reach this path on a content-only collapse;
+    // response-file output artifacts and toolSteps can still be kept. It
     // deliberately
     // does NOT use preferredServerMessage/copyLocalMetadata here: that path also
     // copies `task_id` (echo identity), which is correct for D-1 replacement (the
