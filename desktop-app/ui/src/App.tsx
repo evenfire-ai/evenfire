@@ -2703,14 +2703,19 @@ export function App() {
       body={
         <>
           <p>
-            Profile UI is asking this desktop app to use{' '}
-            <strong>{vm.pendingDesktopEnvironmentSetup.appName || 'Evenfire'}</strong>.
+            Review the service URLs for{' '}
+            <strong>{vm.pendingDesktopEnvironmentSetup.appName || 'Evenfire'}</strong>. Continue
+            only if you trust them.
           </p>
-          <p>Only continue if you trust this External REST API host:</p>
           <p className="auth-environment-confirm-url">
             {vm.pendingDesktopEnvironmentSetup.externalRestApiBaseUrl}
           </p>
           {pendingEnvironmentHost ? <p className="muted">Host: {pendingEnvironmentHost}</p> : null}
+          {vm.pendingDesktopEnvironmentSetup.rpcProxyBaseUrl ? (
+            <p className="auth-environment-confirm-url">
+              RPC proxy: {vm.pendingDesktopEnvironmentSetup.rpcProxyBaseUrl}
+            </p>
+          ) : null}
         </>
       }
       cancelLabel="Cancel"

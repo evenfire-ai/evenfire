@@ -19,7 +19,11 @@ export function Sidebar({ currentRoute, isOpen = false, onNavigate, onLogout }: 
     Object.entries(PROFILE_SIDEBAR_ITEMS) as Array<[ProfileRouteKey, ProfileSidebarItem]>
   )
     .filter(([routeKey]) => routeKey !== 'settings')
-    .sort(([, first], [, second]) => first.label.localeCompare(second.label))
+    .sort(
+      ([firstRouteKey, first], [secondRouteKey, second]) =>
+        Number(secondRouteKey === 'home') - Number(firstRouteKey === 'home') ||
+        first.label.localeCompare(second.label)
+    )
   const settings = PROFILE_SIDEBAR_ITEMS.settings
 
   return (

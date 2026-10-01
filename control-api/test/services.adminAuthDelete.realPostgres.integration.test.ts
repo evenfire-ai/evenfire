@@ -5,6 +5,7 @@ import { initDb, pool } from '../src/db.js'
 import { deleteControlAdmin } from '../src/services/adminAuthService.js'
 import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 import './realPostgres.requirement.ts'
+import { waitForDatabaseConnectionsToClose } from './realPostgresCleanup.ts'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
@@ -75,15 +76,14 @@ describeRealPostgres('deleteControlAdmin on real PostgreSQL', () => {
   afterAll(async () => {
     querySpy?.mockRestore()
     connectSpy?.mockRestore()
-    await endPoolAndWaitForClients(testPool)
     if (!adminPool) return
-    await adminPool.query(
-      `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
-        WHERE datname = $1 AND pid <> pg_backend_pid()`,
-      [database]
-    )
-    await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdent(database)}`)
-    await adminPool.end()
+    try {
+      await endPoolAndWaitForClients(testPool)
+      await waitForDatabaseConnectionsToClose(adminPool, database)
+      await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdent(database)}`)
+    } finally {
+      await adminPool.end()
+    }
   })
 
   // Regression for the plain DELETE /admin/control-admins/:id path (replaceInviter

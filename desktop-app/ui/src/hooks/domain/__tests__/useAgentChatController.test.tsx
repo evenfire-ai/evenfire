@@ -89,6 +89,10 @@ async function waitForProgressHandlerUnderFakeTimers(taskId: string) {
   expect(clerum.hasProgressHandler(taskId)).toBe(true)
 }
 
+function waitForWithFakeTimers<T>(assertion: () => T | Promise<T>) {
+  return vi.waitFor(assertion, { timeout: WIRING_TIMEOUT_MS })
+}
+
 describe('useAgentChatController — characterization (D.0)', () => {
   describe('switchToChat', () => {
     // ⚠️ Rewritten for D.4 (plan §5.3): the pre-D.4 `isRemote` dual-path was
@@ -637,13 +641,8 @@ describe('useAgentChatController — characterization (D.0)', () => {
 
       // The failure toast follows the store write of the error reply.
       await act(async () => {
-        await vi.waitFor(
-          () =>
-            expect(spies.pushToast).toHaveBeenCalledWith(
-              expect.stringContaining('failed'),
-              'error'
-            ),
-          { timeout: ASYNC_WAIT_TIMEOUT_MS }
+        await waitForWithFakeTimers(() =>
+          expect(spies.pushToast).toHaveBeenCalledWith(expect.stringContaining('failed'), 'error')
         )
       })
       expect(result.current.agentSending).toBe(false)
@@ -712,14 +711,11 @@ describe('useAgentChatController — characterization (D.0)', () => {
       // The timeout's recovery reads the store (disk I/O) before it settles the
       // entry as an error: poll for the settled state.
       await act(async () => {
-        await vi.waitFor(
-          () => {
-            const progress = result.current.progressByAgentMessage['agent-x']
-            const entry = progress && Object.values(progress)[0]
-            expect(entry?.status).toBe('error')
-          },
-          { timeout: ASYNC_WAIT_TIMEOUT_MS }
-        )
+        await waitForWithFakeTimers(() => {
+          const progress = result.current.progressByAgentMessage['agent-x']
+          const entry = progress && Object.values(progress)[0]
+          expect(entry?.status).toBe('error')
+        })
       })
     })
 
