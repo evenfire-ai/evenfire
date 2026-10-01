@@ -12,7 +12,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { makeTaskKey } from '@contexts/AgentTaskTrackerContext/types'
-import { act, waitFor } from '@testing-library/react'
+import { act, cleanup, waitFor } from '@testing-library/react'
 import { renderController } from './__fixtures__/controllerHarness'
 import { type MockClerum, installMockClerum, uninstallMockClerum } from './__fixtures__/mockClerum'
 
@@ -32,9 +32,11 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  cleanup()
   vi.restoreAllMocks()
   vi.useRealTimers()
   uninstallMockClerum()
+  expect(document.body.childElementCount).toBe(0)
 })
 
 /** Wait until the controller's mount effect (loadChatList) has settled. */
