@@ -74,13 +74,23 @@ describe('a body with a long run of spaces after a pipe row', () => {
   })
 
   for (const name of ['clerum__generate_pdf', 'clerum__generate_docx']) {
-    it(`renders in linear time with ${name}`, async () => {
+    it(`renders it as fast as the same body without the pipe with ${name}`, async () => {
       const tool = INTERNAL_TOOLS.find(t => t.name === name)!
-      const body = `a | b\n${' '.repeat(100000)}x`
-      const started = performance.now()
-      const result = await tool.execute({ filename: 'spaces', body }, outputDir)
-      expect(result.success, result.error).toBe(true)
-      expect(performance.now() - started).toBeLessThan(5000)
-    })
+      const timed = async (body: string): Promise<number> => {
+        const started = performance.now()
+        const result = await tool.execute({ filename: 'spaces', body }, outputDir)
+        expect(result.success, result.error).toBe(true)
+        return performance.now() - started
+      }
+      // Loaded first, so neither time below holds the library's loading.
+      await timed('a | b\nx')
+      const spaces = ' '.repeat(50_000)
+      // Laying out the spaces takes the same time in both; the quadratic scan
+      // of the pipe row took minutes. Compared, not timed alone, so a loaded
+      // machine slows both.
+      const plain = await timed(`a b\n${spaces}x`)
+      const piped = await timed(`a | b\n${spaces}x`)
+      expect(piped).toBeLessThan(plain * 3 + 500)
+    }, 60_000)
   }
 })
