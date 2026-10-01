@@ -225,8 +225,9 @@ export class StepMcpRouter {
     // Check internal tools first
     const internalTool = this.internalToolMap.get(toolName)
     if (internalTool) {
-      // A null sent for an optional argument counts as unset, as it does on
-      // the chat path: many models send null for every argument they leave out.
+      // A null sent for an optional argument counts as unset, as the tool
+      // itself reads it on the chat path, here before validation so it passes.
+      // The record keeps what the model sent.
       const input = withoutUnsetNulls(internalTool.parameters, args) as Record<string, unknown>
       // Validate args against the tool's JSON Schema before dispatch.
       // Failures come back as recoverable tool-error results (not thrown)
@@ -241,7 +242,7 @@ export class StepMcpRouter {
         const record: ToolCallRecord = {
           serverName: 'clerum',
           toolName: toolName.replace('clerum__', ''),
-          args: input,
+          args,
           result: errorResult,
           durationMs: 0,
         }
@@ -262,7 +263,7 @@ export class StepMcpRouter {
       const record: ToolCallRecord = {
         serverName: 'clerum',
         toolName: toolName.replace('clerum__', ''),
-        args: input,
+        args,
         result: internalResult,
         durationMs,
       }

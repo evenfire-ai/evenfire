@@ -1792,6 +1792,22 @@ function prepared(tool: InternalToolDefinition): InternalToolDefinition {
   }
 }
 
+/**
+ * A tool that reads a null sent for an optional argument as unset, as the
+ * generators do, so a call means the same from chat and from a workflow step.
+ */
+function nullsUnset(tool: InternalToolDefinition): InternalToolDefinition {
+  return {
+    ...tool,
+    execute: (args, outputDir, options) =>
+      tool.execute(
+        withoutUnsetNulls(tool.parameters, args ?? {}) as Record<string, unknown>,
+        outputDir,
+        options
+      ),
+  }
+}
+
 /** All internal tools available to workflow steps. */
 export const INTERNAL_TOOLS: InternalToolDefinition[] = [
   ...[
@@ -1803,10 +1819,7 @@ export const INTERNAL_TOOLS: InternalToolDefinition[] = [
     generateChart,
     generateDashboardTool,
   ].map(prepared),
-  listWorkflows,
-  readWorkflow,
-  triggerWorkflow,
-  ...CONTEXT_FILES_TOOLS,
+  ...[listWorkflows, readWorkflow, triggerWorkflow, ...CONTEXT_FILES_TOOLS].map(nullsUnset),
 ]
 
 /** Prefix used for all internal tools. */
