@@ -3,6 +3,7 @@ import { ApiError, requestJson } from './httpClient.js'
 import {
   DesktopEnvironmentDiscovery,
   DesktopReleasePolicy,
+  EntityChangeStreamEvent,
   ExternalChannelAccount,
   ExternalChannelTarget,
   LoginResult,
@@ -33,6 +34,59 @@ function url(path: string): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value))
+}
+
+function parseEntityChangeStreamFrame(value: unknown): EntityChangeStreamEvent | null {
+  if (!isRecord(value)) throw new Error('Entity change stream contained a malformed frame')
+  const cursor = typeof value.cursor === 'string' ? value.cursor : ''
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(cursor)) {
+    throw new Error('Entity change stream contained an invalid cursor')
+  }
+  if (value.schemaVersion !== 1 || typeof value.type !== 'string') {
+    throw new Error('Entity change stream contained an unsupported schema version')
+  }
+  if (value.type === 'resync_required' || value.type === 'scope.invalidated') {
+    if (!Array.isArray(value.scopes) || value.scopes.length === 0)
+      throw new Error('Entity change stream contained invalid scopes')
+    const scopes = value.scopes.filter(
+      (scope): scope is 'gfs' | 'authorization' => scope === 'gfs' || scope === 'authorization'
+    )
+    if (scopes.length === 0) return null
+    return {
+      type: value.type,
+      schemaVersion: 1,
+      cursor,
+      scopes,
+    }
+  }
+  if (value.type === 'heartbeat') {
+    if (typeof value.observedAt !== 'string') {
+      throw new Error('Entity change stream contained an invalid heartbeat')
+    }
+    return {
+      type: 'heartbeat',
+      schemaVersion: 1,
+      cursor,
+      observedAt: value.observedAt,
+    }
+  }
+  if (value.type === 'stream.closing') {
+    const reasons = ['max_lifetime', 'session_expired', 'server_shutdown', 'slow_consumer']
+    if (typeof value.reason !== 'string' || !reasons.includes(value.reason)) {
+      return null
+    }
+    return {
+      type: 'stream.closing',
+      schemaVersion: 1,
+      cursor,
+      reason: value.reason as Extract<
+        EntityChangeStreamEvent,
+        { type: 'stream.closing' }
+      >['reason'],
+    }
+  }
+  // Schema v1 extensions are defined to be safely ignorable by older clients.
+  return null
 }
 
 function parsePendingWorkflowApproval(value: unknown): PendingWorkflowApproval | null {
@@ -506,6 +560,83 @@ export class AuthClient {
     }
     const trailing = decoder.decode()
     if (trailing) processChunk(trailing)
+  }
+
+  async openEntityChangeStream(
+    sessionToken: string,
+    _cursor: string | null,
+    onEvent: (event: EntityChangeStreamEvent) => void,
+    signal: AbortSignal
+  ): Promise<void> {
+    const streamUrl = new URL(url('/api/v1/entity-changes/stream'))
+    // The user stream intentionally starts from a fixed coarse invalidation
+    // checkpoint. Sending the local cursor would disclose feed position while
+    // the server correctly ignores it to prevent hidden-change timing leaks.
+    const response = await fetch(streamUrl, {
+      method: 'GET',
+      headers: {
+        accept: 'application/x-ndjson',
+        authorization: `Bearer ${sessionToken}`,
+      },
+      signal,
+    })
+    if (!response.ok) {
+      const body = await readErrorBody(response)
+      throw new ApiError(
+        `Entity change stream failed (${response.status}): ${boundedErrorExcerpt(body) || response.statusText}`,
+        response.status,
+        body,
+        response.headers.get('retry-after')
+      )
+    }
+    if (!response.body) throw new Error('Entity change stream missing response body')
+
+    onEvent({ type: 'open' })
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    const processFrame = (rawLine: string) => {
+      if (!rawLine.trim()) return
+      let decoded: unknown
+      try {
+        decoded = JSON.parse(rawLine) as unknown
+      } catch {
+        throw new Error('Entity change stream contained invalid JSON')
+      }
+      const frame = parseEntityChangeStreamFrame(decoded)
+      if (!frame) return
+      onEvent(frame)
+    }
+    const processChunk = (chunk: string) => {
+      buffer += chunk
+      if (buffer.length > 16 * 1024 && !buffer.includes('\n')) {
+        throw new Error('Entity change stream frame exceeded the size limit')
+      }
+      while (true) {
+        const newline = buffer.indexOf('\n')
+        if (newline === -1) break
+        const line = buffer.slice(0, newline)
+        buffer = buffer.slice(newline + 1)
+        if (line.length > 16 * 1024)
+          throw new Error('Entity change stream frame exceeded the size limit')
+        processFrame(line)
+      }
+    }
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        processChunk(decoder.decode(value, { stream: true }))
+      }
+      processChunk(decoder.decode())
+      if (buffer.trim()) processFrame(buffer)
+    } catch (error) {
+      await reader.cancel().catch(() => undefined)
+      throw error
+    } finally {
+      reader.releaseLock()
+    }
   }
 
   async listWorkflows(sessionToken: string): Promise<WorkflowRecipeListResult> {
