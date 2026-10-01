@@ -33,6 +33,15 @@ function lineOf(source: string, index: number): number {
   return source.slice(0, index).split('\n').length
 }
 
+function scanSource(file: string, source: string): ScannedSuite {
+  const terminators = [...new Set([...source.matchAll(TERMINATE_QUERY)].map(match => match[1]))]
+  const plainEnds = [...source.matchAll(PLAIN_END)]
+  const violations = plainEnds
+    .filter(match => !terminators.includes(match[1]))
+    .map(match => `${file}:${lineOf(source, match.index)} ${match[0]}`)
+  return { file, terminators, plainEnds: plainEnds.length, violations }
+}
+
 function scanSuites(): ScannedSuite[] {
   return readdirSync(testDir)
     .filter(file => REAL_POSTGRES_SUITE.test(file))
@@ -40,12 +49,7 @@ function scanSuites(): ScannedSuite[] {
     .flatMap(file => {
       const source = readFileSync(join(testDir, file), 'utf8')
       if (!source.includes('pg_terminate_backend')) return []
-      const terminators = [...new Set([...source.matchAll(TERMINATE_QUERY)].map(match => match[1]))]
-      const plainEnds = [...source.matchAll(PLAIN_END)]
-      const violations = plainEnds
-        .filter(match => !terminators.includes(match[1]))
-        .map(match => `${file}:${lineOf(source, match.index)} ${match[0]}`)
-      return [{ file, terminators, plainEnds: plainEnds.length, violations }]
+      return [scanSource(file, source)]
     })
 }
 
@@ -64,5 +68,28 @@ describe('real-Postgres teardown guard (R4-L11)', () => {
     expect(suites.reduce((sum, suite) => sum + suite.plainEnds, 0)).toBeGreaterThan(0)
 
     expect(suites.flatMap(suite => suite.violations)).toEqual([])
+  })
+
+  it('reports optional-chained, cast and chained ends, and allows the terminating pool (J2)', () => {
+    const source = [
+      'await adminPool.query(`SELECT pg_terminate_backend(pid) FROM pg_stat_activity`)',
+      'await dbPool.end()',
+      'await pool?.end()',
+      'await (dbPool as Pool).end()',
+      'await corePool?.end().catch(() => undefined)',
+      'await adminPool?.end()',
+      'await adminPool.end()',
+    ].join('\n')
+
+    const suite = scanSource('fixture.realPostgres.test.ts', source)
+
+    // Witness: the terminate query named the pool that is allowed a plain end.
+    expect(suite.terminators).toEqual(['adminPool'])
+    expect(suite.violations).toEqual([
+      'fixture.realPostgres.test.ts:2 dbPool.end(',
+      'fixture.realPostgres.test.ts:3 pool?.end(',
+      'fixture.realPostgres.test.ts:4 Pool).end(',
+      'fixture.realPostgres.test.ts:5 corePool?.end(',
+    ])
   })
 })
