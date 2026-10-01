@@ -117,11 +117,12 @@ const CELL_TYPES = ['string', 'number', 'boolean', 'null']
 /**
  * A row sent as a {header: cell} record, which every runtime reads by header
  * name. Gemini rejects an object schema with no properties, so it declares one
- * example key; additionalProperties keeps the others valid.
+ * example key; additionalProperties keeps the others valid. The example is a
+ * column index, which the runtime reads as that column.
  */
 const RECORD_ROW_SCHEMA = {
   type: 'object',
-  properties: { '0': { type: CELL_TYPES, description: 'Cell.' } },
+  properties: { '0': { type: CELL_TYPES, description: 'Column 0, or a header.' } },
   additionalProperties: { type: CELL_TYPES },
 }
 

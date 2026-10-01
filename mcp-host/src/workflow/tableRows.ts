@@ -20,11 +20,17 @@ export function columnNames(headers: string[], columns: number[]): string {
   return `${names.slice(0, 3).join(', ')} and ${names.length - 3} more column(s)`
 }
 
+/** A record key as it is matched against a header: case and surrounding space aside. */
+export function headerKey(key: unknown): string {
+  return headerText(key).trim().toLowerCase()
+}
+
 /**
  * `rows` as arrays of cells. A record is read by header name, exactly or
- * ignoring case and surrounding space; without headers its values are taken in
- * key order. Anything else is dropped. Each kind of repair is reported once in
- * `warnings`, prefixed with `label`.
+ * ignoring case and surrounding space; a key that names no header but is a
+ * 0-based column index, such as "0", fills that column. Without headers its
+ * values are taken in key order. Anything else is dropped. Each kind of repair
+ * is reported once in `warnings`, prefixed with `label`.
  */
 export function normalizeTableRows(
   rows: unknown,
@@ -37,7 +43,11 @@ export function normalizeTableRows(
     warnings.push(`${label}: rows must be an array of rows; they were left out.`)
     return []
   }
-  const names = (headers ?? []).map(h => headerText(h).trim().toLowerCase())
+  const names = (headers ?? []).map(headerKey)
+  const columnAt = (key: string): number | undefined => {
+    const t = key.trim()
+    return /^\d{1,9}$/.test(t) && Number(t) < names.length ? Number(t) : undefined
+  }
   let fromRecords = 0
   let dropped = 0
   const unmatched = new Set<string>()
@@ -51,15 +61,21 @@ export function normalizeTableRows(
         out.push(Object.values(row))
         continue
       }
-      const byName = new Map(Object.entries(row).map(([k, v]) => [k.trim().toLowerCase(), v]))
-      for (const key of Object.keys(row)) {
-        if (!names.includes(key.trim().toLowerCase())) unmatched.add(key)
+      const byName = new Map(Object.entries(row).map(([k, v]) => [headerKey(k), v]))
+      const byIndex = new Map<number, unknown>()
+      for (const [key, value] of Object.entries(row)) {
+        if (names.includes(headerKey(key))) continue
+        const column = columnAt(key)
+        if (column === undefined) unmatched.add(key)
+        else byIndex.set(column, value)
       }
       out.push(
         (headers ?? []).map((h, i) =>
           Object.prototype.hasOwnProperty.call(row, headerText(h))
             ? row[headerText(h)]
-            : byName.get(names[i])
+            : byName.has(names[i])
+              ? byName.get(names[i])
+              : byIndex.get(i)
         )
       )
     } else {
@@ -68,7 +84,8 @@ export function normalizeTableRows(
   }
   if (fromRecords > 0) {
     warnings.push(
-      `${label}: ${fromRecords} row(s) were objects and were read by header name; send each row as an array of cells in header order.`
+      `${label}: ${fromRecords} row(s) were objects and were read by header name; send each ` +
+        'row as an array of cells in header order.'
     )
   }
   if (unmatched.size > 0) {

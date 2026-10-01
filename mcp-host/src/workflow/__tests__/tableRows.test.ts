@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { headerText, normalizeTableRows } from '../tableRows'
+import { sheetTable } from '../xlsxSheet'
 
 describe('normalizeTableRows', () => {
   it('passes array rows through untouched', () => {
@@ -31,6 +32,29 @@ describe('normalizeTableRows', () => {
     ])
   })
 
+  it('reads a key that names no header but a 0-based column, as the schema example does', () => {
+    const warnings: string[] = []
+    const rows = normalizeTableRows(
+      [{ '0': 'Ana', '1': 1200 }, { Name: 'Luis', '0': 'ignored', ' 1 ': 900 }, { '2': 'x' }],
+      ['Name', 'Amount'],
+      'tables[0]',
+      warnings
+    )
+    expect(rows).toEqual([
+      ['Ana', 1200],
+      ['Luis', 900],
+      [undefined, undefined],
+    ])
+    expect(warnings[1]).toBe(
+      "tables[0]: the key(s) '2' match no header, so those values were left out."
+    )
+  })
+
+  it('reads a key that is a header before reading it as a column index', () => {
+    const rows = normalizeTableRows([{ '1': 'by name', '0': 'first' }], ['Q', '1'], 't', [])
+    expect(rows).toEqual([['first', 'by name']])
+  })
+
   it('takes record values in order when there are no headers', () => {
     expect(normalizeTableRows([{ a: 1, b: 2 }], undefined, 's', [])).toEqual([[1, 2]])
   })
@@ -54,5 +78,26 @@ describe('headerText', () => {
     expect(headerText(2026)).toBe('2026')
     expect(headerText(null)).toBe('')
     expect(headerText('Q1')).toBe('Q1')
+  })
+})
+
+describe('sheetTable', () => {
+  it('makes one column of record keys that differ only in case or surrounding space', () => {
+    const warnings: string[] = []
+    const table = sheetTable(
+      {
+        rows: [
+          { Name: 'Ana', Amount: 1 },
+          { 'name ': 'Luis', amount: 2 },
+        ],
+      },
+      'sheets[0]',
+      warnings
+    )
+    expect(table.header).toEqual(['Name', 'Amount'])
+    expect(table.rows).toEqual([
+      ['Ana', 1],
+      ['Luis', 2],
+    ])
   })
 })

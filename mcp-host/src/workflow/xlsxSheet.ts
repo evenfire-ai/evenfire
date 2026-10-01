@@ -3,7 +3,7 @@
  * arguments point at, and the colors it names.
  */
 import { own } from './ownEntry'
-import { headerText, normalizeTableRows } from './tableRows'
+import { headerKey, headerText, normalizeTableRows } from './tableRows'
 import { cellProblem } from './xlsxCells'
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -68,9 +68,14 @@ export function sheetTable(
     const rest = rows.filter((_, i) => i !== first)
     return { header, rows: normalizeTableRows(rest, header, label, warnings) }
   }
-  const keys = new Set<string>()
-  for (const row of rows) if (isRecord(row)) for (const k of Object.keys(row)) keys.add(k)
-  const header = [...keys]
+  // Keys that differ only in case or surrounding space name one column, which
+  // takes the first spelling; rows read every spelling into it.
+  const keys = new Map<string, string>()
+  for (const row of rows) {
+    if (!isRecord(row)) continue
+    for (const k of Object.keys(row)) if (!keys.has(headerKey(k))) keys.set(headerKey(k), k)
+  }
+  const header = [...keys.values()]
   return { header, rows: normalizeTableRows(rows, header, label, warnings) }
 }
 
