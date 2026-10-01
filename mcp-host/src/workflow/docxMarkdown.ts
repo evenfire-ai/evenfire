@@ -13,6 +13,14 @@ import {
   quoteParagraphs,
   withoutClosingHashes,
 } from './inlineMarkup'
+import {
+  BULLET_RE,
+  ORDERED_RE,
+  indentOf,
+  isListLine,
+  splitTableRow,
+  startsTable,
+} from './markdownBlocks'
 
 export interface DocxBodyContext {
   palette: DocxPalette
@@ -22,54 +30,9 @@ export interface DocxBodyContext {
   image(file: string, alt: string): Paragraph | undefined
 }
 
-const BULLET_RE = /^[-*+]\s+/
-const ORDERED_RE = /^(\d{1,9})[.)]\s+/
 const HEADING_RE = /^(#{1,6})\s+(.*)$/
 const QUOTE_RE = /^>\s?/
 const IMAGE_LINE_RE = /^!\[([^\]\n]*)\]\(((?:[^()\n]|\([^()\n]*\))*)\)$/
-const SEPARATOR_CELL_RE = /^:?-+:?$/
-
-function indentOf(line: string): number {
-  const m = /^[ \t]*/.exec(line)
-  return m ? m[0].replace(/\t/g, '  ').length : 0
-}
-
-function isListLine(line: string): boolean {
-  const t = line.trimStart()
-  return BULLET_RE.test(t) || ORDERED_RE.test(t)
-}
-
-/** Cells of a pipe-table row. `\|` is a literal pipe inside a cell. */
-function splitTableRow(line: string): string[] {
-  let t = line.trim()
-  if (t.startsWith('|')) t = t.slice(1)
-  if (t.endsWith('|') && !t.endsWith('\\|')) t = t.slice(0, -1)
-  return t.split(/(?<!\\)\|/).map(c => c.trim().replace(/\\\|/g, '|'))
-}
-
-/**
- * A delimiter row such as `|---|:--:|`. Checked cell by cell: the one-regex
- * form backtracks quadratically over a long run of spaces.
- */
-function isTableSeparator(line: string): boolean {
-  if (!line.includes('-') || !line.includes('|')) return false
-  const cells = splitTableRow(line)
-  return cells.every(cell => SEPARATOR_CELL_RE.test(cell))
-}
-
-/**
- * A GFM table starts at a row followed by a separator. Without outer pipes the
- * header must have as many cells as the separator, which is what tells a table
- * apart from a sentence that happens to contain a pipe.
- */
-function startsTable(lines: string[], i: number): boolean {
-  const line = lines[i]
-  const next = lines[i + 1]
-  if (next === undefined || !line.includes('|') || !isTableSeparator(next)) return false
-  return (
-    line.trimStart().startsWith('|') || splitTableRow(line).length === splitTableRow(next).length
-  )
-}
 
 function blankParagraph(): Paragraph {
   return new Paragraph({ children: [new TextRun({ text: '' })] })

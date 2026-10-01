@@ -30,6 +30,16 @@ import {
   withoutClosingHashes,
 } from './inlineMarkup'
 import {
+  type ColumnAlignment,
+  ORDERED_RE,
+  indentOf,
+  isListLine,
+  parseColumnAlignments,
+  splitTableRow,
+  startsTable,
+  stripListMarker,
+} from './markdownBlocks'
+import {
   BODY_FONT_SIZE,
   MIN_BOTTOM_MARGIN,
   PORTRAIT,
@@ -277,38 +287,6 @@ function plainText(parsed: ContentText): string {
     .join('')
 }
 
-/** A GFM delimiter row. One column needs its outer pipes, or it is only a rule. */
-function isTableSeparator(line: string): boolean {
-  return (
-    /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)+\|?\s*$/.test(line) ||
-    /^\s*\|\s*:?-+:?\s*\|\s*$/.test(line)
-  )
-}
-
-/** Cells of a pipe-table row. `\|` is a literal pipe inside a cell. */
-function splitTableRow(line: string): string[] {
-  let trimmed = line.trim()
-  if (trimmed.startsWith('|')) trimmed = trimmed.slice(1)
-  if (trimmed.endsWith('|') && !trimmed.endsWith('\\|')) trimmed = trimmed.slice(0, -1)
-  return trimmed.split(/(?<!\\)\|/).map(c => c.trim().replace(/\\\|/g, '|'))
-}
-
-/**
- * Whether a GFM table starts at line `i`. GFM makes the outer pipes optional
- * and some models leave them out, so a header without them counts when it has
- * as many cells as the separator under it.
- */
-function isPipeTableStart(lines: string[], i: number): boolean {
-  const line = lines[i]
-  const next = lines[i + 1]
-  if (next === undefined || !line.includes('|') || !isTableSeparator(next)) return false
-  return (
-    line.trimStart().startsWith('|') || splitTableRow(line).length === splitTableRow(next).length
-  )
-}
-
-type ColumnAlignment = 'left' | 'center' | 'right'
-
 interface PdfTableRequest {
   headers: string[]
   rows: string[][]
@@ -425,39 +403,6 @@ function pdfTableLayout(name: 'striped' | 'minimal' | 'grid', palette: PdfPalett
     fillColor: (rowIndex: number) =>
       rowIndex === 0 ? null : rowIndex % 2 === 0 ? palette.alternateRowFill : null,
   }
-}
-
-/** Read the alignments a GFM separator row declares (`:---`, `---:`, `:---:`). */
-function parseColumnAlignments(separator: string): ColumnAlignment[] {
-  return splitTableRow(separator).map(cell => {
-    const c = cell.trim()
-    const left = c.startsWith(':')
-    const right = c.endsWith(':')
-    if (left && right) return 'center'
-    if (right) return 'right'
-    return 'left'
-  })
-}
-
-/** Indent width of a list line, used to decide its nesting depth. */
-function indentOf(line: string): number {
-  const m = /^[ \t]*/.exec(line)
-  if (!m) return 0
-  // A tab counts as one level, matching how models write nested lists.
-  return m[0].replace(/\t/g, '  ').length
-}
-
-const BULLET_RE = /^[-*+]\s+/
-const ORDERED_RE = /^\d+[.)]\s+/
-
-function isListLine(line: string): boolean {
-  const t = line.trimStart()
-  return BULLET_RE.test(t) || ORDERED_RE.test(t)
-}
-
-function stripListMarker(line: string): string {
-  const t = line.trimStart()
-  return t.replace(BULLET_RE, '').replace(ORDERED_RE, '')
 }
 
 /**
@@ -594,7 +539,7 @@ function bodyToContent(body: string, palette: PdfPalette, env: PdfBodyEnv): Cont
 
     // GFM pipe table: header line, then separator, then the rows up to the
     // first line without a pipe.
-    if (isPipeTableStart(lines, i)) {
+    if (startsTable(lines, i)) {
       const headers = splitTableRow(line)
       const alignments = parseColumnAlignments(lines[i + 1])
       const rows: string[][] = []
