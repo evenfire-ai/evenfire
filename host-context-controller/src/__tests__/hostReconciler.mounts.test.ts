@@ -1,6 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import * as k8s from '@kubernetes/client-node'
 import { createHash } from 'crypto'
+import {
+  canonicalFixturePvcUid,
+  canonicalRuntimeHost,
+  createCanonicalFixtureHostApi,
+} from '../../test/__fixtures__/canonicalRuntime'
 import { makeStubKc } from '../../test/__fixtures__/testMocks'
 import { config as hccConfig } from '../config'
 import { HostReconciler, type ResolvedSfsMount } from '../hostReconciler'
@@ -1259,9 +1264,16 @@ describe('HostReconciler.reconcile — uses resolveContextMounts', () => {
     const stubKc = makeStubKc()
     const reconciler = new HostReconciler(stubKc, {
       resolveContextMounts,
+      customApi: createCanonicalFixtureHostApi(() =>
+        canonicalRuntimeHost(makeHost())
+      ) as unknown as k8s.CustomObjectsApi,
       isCommunicationChannelCacheSynced: () => true,
       // Stub APIs to capture the Deployment body and ack everything.
       coreApi: {
+        readNamespacedConfigMap: vi.fn(async ({ name, namespace }) => ({
+          metadata: { name, namespace, uid: 'runtime-configmap-uid', resourceVersion: '1' },
+          data: {},
+        })),
         readNamespacedSecret: readSecretWithChannelReaderRuntimeAuthLabels(),
         createNamespacedServiceAccount: vi.fn(),
         readNamespacedServiceAccount: vi.fn(async ({ name, namespace }) => ({
@@ -1299,7 +1311,7 @@ describe('HostReconciler.reconcile — uses resolveContextMounts', () => {
           metadata: {
             name,
             namespace,
-            uid: `uid-${name}`,
+            uid: canonicalFixturePvcUid(makeHost()),
             resourceVersion: '1',
             labels: {
               'clerum.io/host': 'team-mission',
@@ -1380,7 +1392,7 @@ describe('HostReconciler.reconcile — uses resolveContextMounts', () => {
         })),
       } as unknown as k8s.AppsV1Api,
     })
-    await reconciler.reconcile(makeHost())
+    await reconciler.reconcile(canonicalRuntimeHost(makeHost()))
     expect(resolveContextMounts).toHaveBeenCalledTimes(1)
     expect(captured.body).toBeDefined()
     expect(

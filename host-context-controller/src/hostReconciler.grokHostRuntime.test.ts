@@ -1,6 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import * as k8s from '@kubernetes/client-node'
 import {
+  canonicalRuntimeHost,
+  createCanonicalFixtureHostApi,
+  installCanonicalPvcApi,
+  installCanonicalRuntimeConfigApi,
+} from '../test/__fixtures__/canonicalRuntime'
+import {
   asAppsApi,
   asCoreApi,
   asNetworkingApi,
@@ -133,13 +139,13 @@ const liveGrokConnections: Record<string, Connection> = {
 }
 
 function makeHost(name: string, model: NonNullable<HostCRD['spec']['model']>): HostCRD {
-  return {
+  return canonicalRuntimeHost({
     name,
     namespace: 'mcp-host',
     uid: `${name}-uid`,
     generation: 1,
     spec: { host: name, contextRef: 'context-a', channels: ['channel-a'], model },
-  }
+  })
 }
 
 const grokHost = () =>
@@ -158,19 +164,23 @@ const codexHost = () =>
 
 const staticHost = () => makeHost('static-host', { provider: 'openai', name: 'gpt-5.4-mini' })
 
-function createReconciler() {
+function createReconciler(resolveHost: () => HostCRD = () => grokHost()) {
   const appsApi = createMockAppsApi()
+  const customApi = createCanonicalFixtureHostApi(resolveHost)
   const coreApi = createMockCoreApi()
+  installCanonicalPvcApi(coreApi)
+  installCanonicalRuntimeConfigApi(coreApi)
   const networkingApi = createMockNetworkingApi()
   const rbacApi = createMockRbacApi()
   const reconciler = new HostReconciler({} as k8s.KubeConfig, {
     appsApi: asAppsApi(appsApi),
+    customApi: customApi as unknown as k8s.CustomObjectsApi,
     coreApi: asCoreApi(coreApi),
     networkingApi: asNetworkingApi(networkingApi),
     rbacApi: asRbacApi(rbacApi),
     isCommunicationChannelCacheSynced: () => true,
   })
-  return { reconciler, appsApi, coreApi, networkingApi, rbacApi }
+  return { reconciler, appsApi, coreApi, networkingApi, rbacApi, customApi }
 }
 
 function wireAllowlist(
@@ -312,13 +322,13 @@ describe('HostReconciler Grok Host runtime gating', () => {
   ] as const)(
     'keeps the %s Host pod template byte-identical whether or not a live Grok grant exists',
     async (_label, hostFactory) => {
-      const withoutGrok = createReconciler()
+      const withoutGrok = createReconciler(hostFactory)
       wireAllowlist(withoutGrok.coreApi, allowlistConfigMap())
       const host = hostFactory()
       await withoutGrok.reconciler.reconcile(host)
       const baseline = lastDeployment(withoutGrok.appsApi, host.name)
 
-      const withGrok = createReconciler()
+      const withGrok = createReconciler(hostFactory)
       wireAllowlist(
         withGrok.coreApi,
         allowlistConfigMap({ grokEnabled: true, grokConnections: liveGrokConnections })
@@ -338,6 +348,15 @@ describe('HostReconciler Grok Host runtime gating', () => {
         'MCP_HOST_WORKFLOW_CONTROL_TOKEN_FILE',
         'MCP_HOST_RUNTIME_AUTH_STATE_DIR',
         'MCP_HOST_GATEWAY_URL',
+        'CLERUM_CANONICAL_STATE_DIR',
+        'CLERUM_CANONICAL_POD_UID',
+        'CLERUM_HOST_UID',
+        'CLERUM_PVC_UID',
+        'CLERUM_SESSION_STORE',
+        'CLERUM_SESSION_DB_DIR',
+        'CLERUM_CANONICAL_STORE_REQUIRED',
+        'CLERUM_CANONICAL_STORE_CONTRACT',
+        'CLERUM_DB_BARRIER_FULL',
       ])
     }
   )

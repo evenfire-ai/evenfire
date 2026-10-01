@@ -5,7 +5,16 @@
  */
 import * as k8s from '@kubernetes/client-node'
 import { config } from './config'
-import { HostCondition } from './types'
+import { type ConversationStoreStorageContract, HostCondition } from './types'
+
+/** Tenant-facing opt-in annotation requesting canonical activation (#825 5.6). */
+export const CANONICAL_STORE_OPT_IN_ANNOTATION = 'clerum.io/canonical-store'
+/** Deployment marker accompanying the durable Host status layout commitment. */
+export const CANONICAL_STORE_LAYOUT_ANNOTATION = 'clerum.io/canonical-store-layout'
+/** Canonical durable state mount, identical across stateful/stateless/Desktop. */
+export const CANONICAL_STORE_STATE_MOUNT_PATH = '/var/lib/clerum/state'
+/** CLI shipped in the mcp-host image floor (#825); absent images block rollout. */
+export const CANONICAL_STORE_CLI_PATH = '/app/mcp-host/dist/db/canonicalStore/cli.js'
 
 /**
  * Condition surfacing a refused CONTEXT_MAPPER_STATELESS_IMAGE_PULL_POLICY
@@ -16,7 +25,7 @@ export const STATELESS_PULL_POLICY_REJECTED_CONDITION_TYPE = 'StatelessPullPolic
 /** Immutable CI image tag shape (sha-<gitsha>), as pushed by deploy-dev. */
 const IMMUTABLE_IMAGE_TAG_PATTERN = /^sha-[0-9a-f]{7,}$/
 /** Where the workspace-layout initContainer mounts the workspace PVC ROOT. */
-const WORKSPACE_PVC_ROOT_MOUNT_PATH = '/mnt/workspace-root'
+export const WORKSPACE_PVC_ROOT_MOUNT_PATH = '/mnt/workspace-root'
 
 function shellSingleQuote(value: string): string {
   return `'${value.replace(/'/g, `'"'"'`)}'`
@@ -332,6 +341,81 @@ export function buildWorkspaceLayoutInitContainer(
     resources: {
       requests: { memory: '32Mi', cpu: '10m' },
       limits: { memory: '64Mi', cpu: '200m' },
+    },
+    securityContext: {
+      allowPrivilegeEscalation: false,
+      runAsNonRoot: true,
+      runAsUser: 1001,
+      runAsGroup: 1001,
+      capabilities: { drop: ['ALL'] },
+      seccompProfile: { type: 'RuntimeDefault' },
+    },
+  }
+}
+
+/**
+ * Canonical conversation-store init container (#825 plan section 5.1).
+ *
+ * Mounts the workspace PVC at its ROOT and validates the already committed
+ * store through the shared `boot-check` CLI. Authenticated controller Jobs do
+ * every creation, migration and adoption before maintenance is released.
+ * The normal init has no business-mutation capability and uses the exact
+ * HostUID/PVCUID binding. The identities are passed to the INIT env as
+ * well as the main container env (containers do not inherit each other's env).
+ * `CLERUM_STATELESS_LIFECYCLE`/`CLERUM_POD_UID` remain stateless-only and are
+ * deliberately absent here. The init never accepts a new-store provenance
+ * claim or resumes an incomplete migration.
+ *
+ * terminationMessagePolicy File keeps the CLI's single-line JSON outcome on
+ * the termination log so HCC can verify exit/reason/outcome coherence.
+ */
+export function buildCanonicalStoreInitContainer(input: {
+  image: string
+  imagePullPolicy: 'Always' | 'IfNotPresent' | 'Never'
+  hostUid: string
+  pvcUid: string
+  nodePath?: '/usr/local/bin/node' | '/usr/bin/node'
+  storageContract?: ConversationStoreStorageContract
+}): k8s.V1Container {
+  const storageContract = input.storageContract ?? 'canonical'
+  const args = [
+    CANONICAL_STORE_CLI_PATH,
+    'boot-check',
+    '--root',
+    WORKSPACE_PVC_ROOT_MOUNT_PATH,
+    '--host-uid',
+    input.hostUid,
+    '--pvc-uid',
+    input.pvcUid,
+    '--storage-contract',
+    storageContract,
+  ]
+  if (!input.hostUid || !input.pvcUid) throw new Error('Canonical store binding is required')
+  // These absolute paths are the verified Node ABI of the base and Desktop
+  // images. Container env is explicit; no tenant PATH or preload is inherited.
+  const nodePath = input.nodePath ?? '/usr/local/bin/node'
+  const script = `if [ ! -r "$1" ] || [ ! -x ${nodePath} ]; then printf '%s\n' '{"outcome":"blocked","reason":"ImageFloorMissing"}' > /dev/termination-log; exit 4; fi; exec ${nodePath} "$@" > /dev/termination-log`
+  return {
+    name: 'canonical-store-init',
+    image: input.image,
+    imagePullPolicy: input.imagePullPolicy,
+    command: ['/bin/sh', '-ec', script],
+    args: ['canonical-store', ...args],
+    env: [
+      { name: 'CLERUM_SESSION_STORE', value: 'sqlite' },
+      { name: 'CLERUM_SESSION_DB_DIR', value: CANONICAL_STORE_STATE_MOUNT_PATH },
+      { name: 'CLERUM_HOST_UID', value: input.hostUid },
+      { name: 'CLERUM_PVC_UID', value: input.pvcUid },
+      { name: 'CLERUM_CANONICAL_STORE_REQUIRED', value: String(storageContract === 'canonical') },
+      { name: 'CLERUM_CANONICAL_STORE_CONTRACT', value: storageContract },
+      { name: 'CLERUM_CANONICAL_STATE_DIR', value: CANONICAL_STORE_STATE_MOUNT_PATH },
+    ],
+    terminationMessagePolicy: 'File',
+    terminationMessagePath: '/dev/termination-log',
+    volumeMounts: [{ name: 'workspace', mountPath: WORKSPACE_PVC_ROOT_MOUNT_PATH }],
+    resources: {
+      requests: { memory: '32Mi', cpu: '10m' },
+      limits: { memory: '128Mi', cpu: '500m' },
     },
     securityContext: {
       allowPrivilegeEscalation: false,

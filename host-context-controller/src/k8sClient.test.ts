@@ -10237,7 +10237,9 @@ describe('McpServerWatcher Host watch generation', () => {
       [{ name: 'x', namespace: 'mcp-host', uid: 'uid-B', generation: 1, spec: { host: 'x' } }],
       new Set(['x']),
       new Map([['x', 1]]),
-      new Map([['x', 'uid-A']])
+      new Map([['x', 'uid-A']]),
+      new Map([['x', {}]]),
+      new Map([['x', '']])
     )
     // The snapshot still contains "x" by name, so the recovery-delete diff never
     // treats it as a disappearance.
@@ -10315,7 +10317,9 @@ describe('McpServerWatcher Host watch generation', () => {
       ],
       new Set(['waker']), // NOT new
       new Map([['waker', 4]]), // NOT changed (same generation)
-      new Map([['waker', 'u1']]) // NOT recreated (same uid)
+      new Map([['waker', 'u1']]), // NOT recreated (same uid)
+      new Map([['waker', {}]]),
+      new Map([['waker', '']])
     )
     await vi.waitFor(() =>
       expect(reconcile).toHaveBeenCalledWith(expect.objectContaining({ name: 'waker' }), 'urgent')
@@ -10351,7 +10355,9 @@ describe('McpServerWatcher Host watch generation', () => {
       ],
       new Set(['steady']),
       new Map([['steady', 4]]),
-      new Map([['steady', 'u1']])
+      new Map([['steady', 'u1']]),
+      new Map([['steady', {}]]),
+      new Map([['steady', '']])
     )
     // Let any erroneously-scheduled async dispatch run before asserting absence.
     await Promise.resolve()

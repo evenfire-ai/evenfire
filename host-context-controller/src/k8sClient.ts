@@ -14,6 +14,7 @@ import {
 } from './administrativeOutcomeReporter'
 import { BindingDef, BindingPolicyReconciler } from './bindingPolicyReconciler'
 import { config } from './config'
+import { conversationStoreDispatchKey } from './conversationStoreObservation'
 import {
   ExternalEgressConvergenceCoordinator,
   type ExternalEgressRetryHandle,
@@ -778,6 +779,18 @@ export async function getContext(contextId: string): Promise<ContextCRD | null> 
  * triggers the reconciler to manage Deployments + Services.
  */
 export class McpServerWatcher implements McpServerProvider {
+  /**
+   * Exact annotation keys that are load-bearing for a Host mutation (#825
+   * plan section 5.6). The canonical-store opt-in and the adoption request id
+   * change desired behavior without necessarily bumping metadata.generation;
+   * every other annotation/label remains outside the diff. Values are compared
+   * as exact string/undefined pairs with no normalization.
+   */
+  private static readonly HOST_MUTATION_ANNOTATIONS = [
+    'clerum.io/canonical-store',
+    'clerum.io/canonical-store-adoption-request',
+  ] as const
+
   private watch: k8s.Watch
   private mcpWatchRequest: { abort: () => void } | null = null
   private ctxWatchRequest: { abort: () => void } | null = null
@@ -1808,15 +1821,22 @@ export class McpServerWatcher implements McpServerProvider {
   // Host content identity for the diffing installer and the watch-event bump.
   // Kubernetes bumps metadata.generation only on a spec change (not on the
   // status writes HCC itself makes), and the uid distinguishes a delete+recreate
-  // of the same name. Same (uid, generation) = same desired Host state.
-  // SCOPE: unlike the McpServer/Context comparators (which hash spec+labels+
-  // annotations), this is blind to Host annotations/labels — correct today
-  // because no Host annotation/label is load-bearing for a mutation (the wake
-  // annotation drives dispatch, not template content). If a Host annotation or
-  // label ever becomes mutation-relevant, extend this to hash it, or a
-  // reconnect that re-LISTs an unchanged (uid, generation) would skip the bump.
+  // of the same name. Same (uid, generation) plus unchanged allowlisted
+  // mutation annotations = same desired Host state (#825 section 5.6).
+  // SCOPE: only HOST_MUTATION_ANNOTATIONS participate; the wake annotation
+  // drives dispatch separately and every other annotation/label stays outside
+  // so unrelated metadata churn cannot trigger a fleet pass.
   private sameHostDesiredRevision(previous: HostCRD, current: HostCRD): boolean {
-    return previous.uid === current.uid && previous.generation === current.generation
+    if (previous.uid !== current.uid || previous.generation !== current.generation) {
+      return false
+    }
+    for (const key of McpServerWatcher.HOST_MUTATION_ANNOTATIONS) {
+      if (previous.annotations?.[key] !== current.annotations?.[key]) return false
+    }
+    return (
+      conversationStoreDispatchKey(previous.status?.conversationStore) ===
+      conversationStoreDispatchKey(current.status?.conversationStore)
+    )
   }
 
   private hostSnapshotChangesDesiredState(snapshot: HostSnapshot): boolean {
@@ -1898,6 +1918,26 @@ export class McpServerWatcher implements McpServerProvider {
     const previousUids = new Map<string, string | undefined>(
       [...this.hosts.values()].map(host => [host.name, host.uid])
     )
+    // #825: capture only the allowlisted mutation annotations so a reconnect
+    // that re-LISTs the same (uid, generation) with a canonical-store opt-in
+    // or adoption-request change still enqueues that Host as urgent.
+    const previousMutationAnnotations = new Map<
+      string,
+      Partial<Record<(typeof McpServerWatcher.HOST_MUTATION_ANNOTATIONS)[number], string>>
+    >(
+      [...this.hosts.values()].map(host => [
+        host.name,
+        Object.fromEntries(
+          McpServerWatcher.HOST_MUTATION_ANNOTATIONS.map(key => [key, host.annotations?.[key]])
+        ),
+      ])
+    )
+    const previousConversationStoreKeys = new Map(
+      [...this.hosts.values()].map(host => [
+        host.name,
+        conversationStoreDispatchKey(host.status?.conversationStore),
+      ])
+    )
     this.retireHostWatch()
     try {
       const listStartedAt = Date.now()
@@ -1950,7 +1990,9 @@ export class McpServerWatcher implements McpServerProvider {
           snapshot.hosts,
           previousNames,
           previousGenerations,
-          previousUids
+          previousUids,
+          previousMutationAnnotations,
+          previousConversationStoreKeys
         )
         // Addendum 4 (#827): a Host present before recovery and absent from the
         // fresh authoritative snapshot genuinely disappeared. Enqueue an immediate
@@ -2015,7 +2057,12 @@ export class McpServerWatcher implements McpServerProvider {
     hosts: HostCRD[],
     previousNames: Set<string>,
     previousGenerations: Map<string, number | undefined>,
-    previousUids: Map<string, string | undefined>
+    previousUids: Map<string, string | undefined>,
+    previousMutationAnnotations: Map<
+      string,
+      Partial<Record<(typeof McpServerWatcher.HOST_MUTATION_ANNOTATIONS)[number], string>>
+    >,
+    previousConversationStoreKeys: Map<string, string> = new Map()
   ): void {
     for (const host of hosts) {
       const isNew = !previousNames.has(host.name)
@@ -2030,8 +2077,29 @@ export class McpServerWatcher implements McpServerProvider {
       const previousUid = previousUids.get(host.name)
       const recreated =
         previousUid !== undefined && host.uid !== undefined && host.uid !== previousUid
+      // #825: an allowlisted mutation annotation changed with the same
+      // (uid, generation) — the recovery LIST must enqueue it exactly like a
+      // live MODIFIED event would.
+      const previousAnnotations = previousMutationAnnotations.get(host.name)
+      const annotationsChanged =
+        previousAnnotations !== undefined &&
+        McpServerWatcher.HOST_MUTATION_ANNOTATIONS.some(
+          key => previousAnnotations[key] !== host.annotations?.[key]
+        )
+      const operationChanged =
+        previousConversationStoreKeys.has(host.name) &&
+        previousConversationStoreKeys.get(host.name) !==
+          conversationStoreDispatchKey(host.status?.conversationStore)
       const wakePending = host.annotations?.[WAKE_REQUESTED_ANNOTATION] !== undefined
-      if (!isNew && !changed && !recreated && !wakePending) continue
+      if (
+        !isNew &&
+        !changed &&
+        !recreated &&
+        !annotationsChanged &&
+        !operationChanged &&
+        !wakePending
+      )
+        continue
       void this.dispatchUrgentHostReconcile(host.name)
     }
   }
@@ -2044,7 +2112,7 @@ export class McpServerWatcher implements McpServerProvider {
     try {
       await this.hostReconciler.reconcile(host, 'urgent')
     } catch (error) {
-      console.error(`[K8s] Urgent Host reconcile failed for "${name}":`, error)
+      hccLogger.error('Urgent Host reconcile failed', { host: name, err: error })
     }
   }
 
@@ -4856,6 +4924,7 @@ export class McpServerWatcher implements McpServerProvider {
           uid?: string
           generation?: number
           resourceVersion?: string
+          creationTimestamp?: string
           annotations?: Record<string, string>
         }
         spec: HostSpec
@@ -4863,7 +4932,7 @@ export class McpServerWatcher implements McpServerProvider {
       }
     ) => {
       if (watchEnded || this.stopped || watchGeneration !== this.hostWatchGeneration) return
-      const host: HostCRD = {
+      let host: HostCRD = {
         name: apiObj.metadata.name,
         namespace: apiObj.metadata.namespace || config.hostNamespace,
         uid: apiObj.metadata.uid,
@@ -4885,6 +4954,42 @@ export class McpServerWatcher implements McpServerProvider {
       // content identity the mutation-authority fence reads), separate from the
       // per-event hostWatchRevision counter above.
       const previousHost = this.hosts.get(host.name)
+      if (
+        eventType === 'ADDED' &&
+        this.hostCacheSynced &&
+        host.uid &&
+        previousHost?.uid !== host.uid &&
+        apiObj.metadata.creationTimestamp &&
+        apiObj.metadata.resourceVersion
+      ) {
+        try {
+          host = await this.hostReconciler.recordConversationStoreProvisioningIntent(
+            host,
+            {
+              schemaVersion: 1,
+              hostUid: host.uid,
+              hostCreatedAt: apiObj.metadata.creationTimestamp,
+              source: 'watch-added',
+              observedResourceVersion: apiObj.metadata.resourceVersion,
+              watchResourceVersion: resourceVersion,
+            },
+            () => {
+              if (
+                watchEnded ||
+                this.stopped ||
+                !this.hostCacheSynced ||
+                watchGeneration !== this.hostWatchGeneration
+              )
+                throw new Error('HostBirthWatchAuthorityUnavailable')
+            }
+          )
+        } catch (error) {
+          hccLogger.warn(
+            'Host birth could not be positively recorded; new-store creation remains blocked',
+            { host: host.name, err: error }
+          )
+        }
+      }
       let hostDesiredStateChanged = false
       // Same pre-event snapshot, aliased for the Host→LlmHook reverse index: a
       // removed reference must re-reconcile the (now smaller) NetworkPolicy

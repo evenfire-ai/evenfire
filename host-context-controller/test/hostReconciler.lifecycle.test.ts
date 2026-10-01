@@ -20,6 +20,14 @@ import {
 } from '../src/secretFactory'
 import { HostCRD, HostCrdStatus } from '../src/types'
 import {
+  appliedCanonicalDeployment,
+  canonicalFixtureHostApiObject,
+  canonicalFixturePvcUid,
+  canonicalRuntimeHost,
+  installCanonicalPvcApi,
+  installCanonicalRuntimeConfigApi,
+} from './__fixtures__/canonicalRuntime'
+import {
   type MockAppsApi,
   type MockCustomApi,
   asAppsApi,
@@ -107,7 +115,7 @@ vi.mock('../src/gfsHostBinding', () => ({
 }))
 
 function makeHost(overrides?: Partial<HostCRD>): HostCRD {
-  return {
+  return canonicalRuntimeHost({
     name: 'alpha-host',
     namespace: 'mcp-host',
     uid: 'alpha-host-uid',
@@ -117,14 +125,14 @@ function makeHost(overrides?: Partial<HostCRD>): HostCRD {
       secretRef: 'host-secret',
     },
     ...overrides,
-  }
+  })
 }
 
 function makeStatelessHost(
   overrides: { name?: string; spec?: Partial<HostCRD['spec']>; status?: HostCrdStatus } = {}
 ): HostCRD {
   const name = overrides.name ?? 'stateless-host'
-  return {
+  return canonicalRuntimeHost({
     name,
     namespace: 'mcp-host',
     uid: `${name}-uid`,
@@ -136,7 +144,7 @@ function makeStatelessHost(
       ...overrides.spec,
     },
     ...(overrides.status ? { status: overrides.status } : {}),
-  }
+  })
 }
 
 function suspendedStatus(wakeHandledGeneration = 0): HostCrdStatus {
@@ -171,12 +179,23 @@ function createReconciler(deps?: {
   resolveContextMounts?: (host: HostCRD) => Promise<ResolvedSfsMount[]>
   infrastructureTelemetryReporter?: InfrastructureTelemetryReporter
   administrativeOutcomeReporter?: AdministrativeOutcomeReporter
+  resolveHost?: (name: string) => HostCRD
 }) {
   const appsApi = createMockAppsApi()
   const coreApi = createMockCoreApi()
+  installCanonicalPvcApi(coreApi)
+  installCanonicalRuntimeConfigApi(coreApi)
   const networkingApi = createMockNetworkingApi()
   const rbacApi = createMockRbacApi()
   const customApi = createMockCustomApi()
+  customApi.getNamespacedCustomObject.mockImplementation(async ({ name }) =>
+    canonicalFixtureHostApiObject(
+      deps?.resolveHost?.(name) ??
+        (name === 'stateless-host'
+          ? makeStatelessHost({ status: suspendedStatus() })
+          : makeHost({ name }))
+    )
+  )
 
   const reconciler = new HostReconciler({} as k8s.KubeConfig, {
     appsApi: asAppsApi(appsApi),
@@ -263,7 +282,7 @@ function trustedRuntimeDeployment(
   host: HostCRD,
   options: { readyReplicas?: number; replicas?: number } = {}
 ) {
-  const deployment = reconciler.buildDeployment(host)
+  const deployment = appliedCanonicalDeployment(reconciler, host)
   deployment.metadata = {
     ...deployment.metadata,
     uid: `deployment-${host.name}`,
@@ -493,26 +512,44 @@ function envValue(dep: k8s.V1Deployment, name: string): string {
  * into a single HostCrdStatus so assertions stay shape-agnostic.
  */
 function lifecycleStatusWrites(customApi: MockCustomApi): HostCrdStatus[] {
-  return customApi.patchNamespacedCustomObjectStatus.mock.calls.map(([arg]) => {
-    const body = (arg as { body: Array<{ op: string; path: string; value: unknown }> }).body
-    if (!Array.isArray(body)) {
-      throw new Error(`Unexpected status patch body: ${JSON.stringify(body)}`)
-    }
-    const ops = body.filter(op => op.path !== '/metadata/resourceVersion')
-    let status: HostCrdStatus = {}
-    for (const op of ops) {
-      if (op.path === '/status') {
-        status = op.value as HostCrdStatus
-      } else if (op.path === '/status/lifecycle') {
-        status = { ...status, lifecycle: op.value as HostCrdStatus['lifecycle'] }
-      } else if (op.path === '/status/conditions') {
-        status = { ...status, conditions: op.value as HostCrdStatus['conditions'] }
-      } else {
-        throw new Error(`Unexpected status patch op path: ${JSON.stringify(op)}`)
-      }
-    }
-    return status
-  })
+  return (
+    customApi.patchNamespacedCustomObjectStatus.mock.calls
+      // Operator target diagnostics are a separate controller status writer. A
+      // lifecycle witness must count lifecycle paths, never an unrelated CAS.
+      .filter(
+        ([arg]) =>
+          Array.isArray(arg.body) &&
+          arg.body.some(
+            (op: { path: string; value?: HostCrdStatus }) =>
+              op.path === '/status/lifecycle' ||
+              op.path === '/status/conditions' ||
+              (op.path === '/status' &&
+                (op.value?.lifecycle !== undefined || op.value?.conditions !== undefined))
+          )
+      )
+      .map(([arg]) => {
+        const body = (arg as { body: Array<{ op: string; path: string; value: unknown }> }).body
+        if (!Array.isArray(body)) {
+          throw new Error(`Unexpected status patch body: ${JSON.stringify(body)}`)
+        }
+        const ops = body.filter(
+          op => op.path !== '/metadata/resourceVersion' && op.path !== '/metadata/uid'
+        )
+        let status: HostCrdStatus = {}
+        for (const op of ops) {
+          if (op.path === '/status') {
+            status = op.value as HostCrdStatus
+          } else if (op.path === '/status/lifecycle') {
+            status = { ...status, lifecycle: op.value as HostCrdStatus['lifecycle'] }
+          } else if (op.path === '/status/conditions') {
+            status = { ...status, conditions: op.value as HostCrdStatus['conditions'] }
+          } else {
+            throw new Error(`Unexpected status patch op path: ${JSON.stringify(op)}`)
+          }
+        }
+        return status
+      })
+  )
 }
 
 function rejectedCondition(status: HostCrdStatus) {
@@ -602,7 +639,7 @@ describe('HostReconciler ensureDeployment — idempotent replacement', () => {
     lifecycle?: EffectiveHostLifecycle
   ): k8s.V1Deployment {
     const deployment = structuredClone(
-      reconciler.buildDeployment(host, [], runtimeTokenRevision, lifecycle)
+      appliedCanonicalDeployment(reconciler, host, [], runtimeTokenRevision, lifecycle)
     )
     const deploymentSpec = deployment.spec
     if (!deploymentSpec) throw new Error('expected Host Deployment spec')
@@ -669,14 +706,22 @@ describe('HostReconciler ensureDeployment — idempotent replacement', () => {
   }
 
   it('does not replace a converged stateful Deployment when Kubernetes only adds defaults', async () => {
-    const { reconciler, appsApi } = createReconciler()
+    const { reconciler, appsApi } = createReconciler({ resolveHost: () => host })
     const host = makeHost({ name: 'chatllm' })
     appsApi.createNamespacedDeployment.mockRejectedValue({ code: 409 })
     appsApi.readNamespacedDeployment.mockResolvedValue(
       existingDeployment(reconciler, host, 'revision-a')
     )
 
-    await (reconciler as any).ensureDeployment(host, [], 'revision-a')
+    await (reconciler as any).ensureDeployment(
+      host,
+      [],
+      'revision-a',
+      undefined,
+      undefined,
+      undefined,
+      canonicalFixturePvcUid(host)
+    )
 
     expect(appsApi.createNamespacedDeployment).not.toHaveBeenCalled()
     expect(appsApi.readNamespacedDeployment).toHaveBeenCalledOnce()
@@ -688,7 +733,7 @@ describe('HostReconciler ensureDeployment — idempotent replacement', () => {
   })
 
   it('does not replace a converged stateless Deployment when Kubernetes omits zero probe delays', async () => {
-    const { reconciler, appsApi } = createReconciler()
+    const { reconciler, appsApi } = createReconciler({ resolveHost: () => host })
     const host = makeStatelessHost()
     const active: EffectiveHostLifecycle = { stateless: true, state: 'active' }
     appsApi.createNamespacedDeployment.mockRejectedValue({ code: 409 })
@@ -696,13 +741,21 @@ describe('HostReconciler ensureDeployment — idempotent replacement', () => {
       existingDeployment(reconciler, host, 'revision-a', active)
     )
 
-    await (reconciler as any).ensureDeployment(host, [], 'revision-a', active)
+    await (reconciler as any).ensureDeployment(
+      host,
+      [],
+      'revision-a',
+      active,
+      undefined,
+      undefined,
+      canonicalFixturePvcUid(host)
+    )
 
     expect(appsApi.replaceNamespacedDeployment).not.toHaveBeenCalled()
   })
 
   it('replaces an existing Deployment when an HCC-owned nested field is stale', async () => {
-    const { reconciler, appsApi } = createReconciler()
+    const { reconciler, appsApi } = createReconciler({ resolveHost: () => host })
     const host = makeHost({ name: 'chatllm' })
     const existing = existingDeployment(reconciler, host, 'revision-a')
     const container = existing.spec?.template.spec?.containers?.[0]
@@ -714,39 +767,63 @@ describe('HostReconciler ensureDeployment — idempotent replacement', () => {
     appsApi.createNamespacedDeployment.mockRejectedValue({ code: 409 })
     appsApi.readNamespacedDeployment.mockResolvedValue(existing)
 
-    await (reconciler as any).ensureDeployment(host, [], 'revision-a')
+    await (reconciler as any).ensureDeployment(
+      host,
+      [],
+      'revision-a',
+      undefined,
+      undefined,
+      undefined,
+      canonicalFixturePvcUid(host)
+    )
 
     expect(appsApi.replaceNamespacedDeployment).toHaveBeenCalledOnce()
   })
 
   it('replaces an existing Deployment when a defaultable Deployment field is non-default', async () => {
-    const { reconciler, appsApi } = createReconciler()
+    const { reconciler, appsApi } = createReconciler({ resolveHost: () => host })
     const host = makeHost({ name: 'chatllm' })
     const existing = existingDeployment(reconciler, host, 'revision-a')
     existing.spec!.progressDeadlineSeconds = 30
     appsApi.createNamespacedDeployment.mockRejectedValue({ code: 409 })
     appsApi.readNamespacedDeployment.mockResolvedValue(existing)
 
-    await (reconciler as any).ensureDeployment(host, [], 'revision-a')
+    await (reconciler as any).ensureDeployment(
+      host,
+      [],
+      'revision-a',
+      undefined,
+      undefined,
+      undefined,
+      canonicalFixturePvcUid(host)
+    )
 
     expect(appsApi.replaceNamespacedDeployment).toHaveBeenCalledOnce()
   })
 
   it('replaces an existing Deployment when a defaultable Pod field is non-default', async () => {
-    const { reconciler, appsApi } = createReconciler()
+    const { reconciler, appsApi } = createReconciler({ resolveHost: () => host })
     const host = makeHost({ name: 'chatllm' })
     const existing = existingDeployment(reconciler, host, 'revision-a')
     existing.spec!.template.spec!.terminationGracePeriodSeconds = 120
     appsApi.createNamespacedDeployment.mockRejectedValue({ code: 409 })
     appsApi.readNamespacedDeployment.mockResolvedValue(existing)
 
-    await (reconciler as any).ensureDeployment(host, [], 'revision-a')
+    await (reconciler as any).ensureDeployment(
+      host,
+      [],
+      'revision-a',
+      undefined,
+      undefined,
+      undefined,
+      canonicalFixturePvcUid(host)
+    )
 
     expect(appsApi.replaceNamespacedDeployment).toHaveBeenCalledOnce()
   })
 
   it('treats an unrecognized admission mutation as drift', async () => {
-    const { reconciler, appsApi } = createReconciler()
+    const { reconciler, appsApi } = createReconciler({ resolveHost: () => host })
     const host = makeHost({ name: 'chatllm' })
     const existing = existingDeployment(reconciler, host, 'revision-a')
     existing.spec!.template.spec!.tolerations = [
@@ -755,7 +832,15 @@ describe('HostReconciler ensureDeployment — idempotent replacement', () => {
     appsApi.createNamespacedDeployment.mockRejectedValue({ code: 409 })
     appsApi.readNamespacedDeployment.mockResolvedValue(existing)
 
-    await (reconciler as any).ensureDeployment(host, [], 'revision-a')
+    await (reconciler as any).ensureDeployment(
+      host,
+      [],
+      'revision-a',
+      undefined,
+      undefined,
+      undefined,
+      canonicalFixturePvcUid(host)
+    )
 
     expect(appsApi.replaceNamespacedDeployment).toHaveBeenCalledOnce()
   })
@@ -808,13 +893,21 @@ describe('HostReconciler ensureDeployment — idempotent replacement', () => {
     appsApi.createNamespacedDeployment.mockRejectedValue({ code: 409 })
     appsApi.readNamespacedDeployment.mockResolvedValue(existing)
 
-    await (reconciler as any).ensureDeployment(host, [], 'revision-a')
+    await (reconciler as any).ensureDeployment(
+      host,
+      [],
+      'revision-a',
+      undefined,
+      undefined,
+      undefined,
+      canonicalFixturePvcUid(host)
+    )
 
     expect(appsApi.replaceNamespacedDeployment).toHaveBeenCalledOnce()
   })
 
   it('stops retrying when a fresh read converges after a replace conflict', async () => {
-    const { reconciler, appsApi } = createReconciler()
+    const { reconciler, appsApi } = createReconciler({ resolveHost: () => host })
     const host = makeHost({ name: 'chatllm' })
     const stale = existingDeployment(reconciler, host, 'revision-a')
     const container = stale.spec?.template.spec?.containers?.[0]
@@ -829,21 +922,37 @@ describe('HostReconciler ensureDeployment — idempotent replacement', () => {
       .mockResolvedValueOnce(existingDeployment(reconciler, host, 'revision-a'))
     appsApi.replaceNamespacedDeployment.mockRejectedValueOnce({ code: 409 })
 
-    await (reconciler as any).ensureDeployment(host, [], 'revision-a')
+    await (reconciler as any).ensureDeployment(
+      host,
+      [],
+      'revision-a',
+      undefined,
+      undefined,
+      undefined,
+      canonicalFixturePvcUid(host)
+    )
 
     expect(appsApi.readNamespacedDeployment).toHaveBeenCalledTimes(2)
     expect(appsApi.replaceNamespacedDeployment).toHaveBeenCalledOnce()
   })
 
   it('replaces an existing Deployment when the runtime token revision changes', async () => {
-    const { reconciler, appsApi } = createReconciler()
+    const { reconciler, appsApi } = createReconciler({ resolveHost: () => host })
     const host = makeHost({ name: 'chatllm' })
     appsApi.createNamespacedDeployment.mockRejectedValue({ code: 409 })
     appsApi.readNamespacedDeployment.mockResolvedValue(
       existingDeployment(reconciler, host, 'revision-a')
     )
 
-    await (reconciler as any).ensureDeployment(host, [], 'revision-b')
+    await (reconciler as any).ensureDeployment(
+      host,
+      [],
+      'revision-b',
+      undefined,
+      undefined,
+      undefined,
+      canonicalFixturePvcUid(host)
+    )
 
     expect(appsApi.replaceNamespacedDeployment).toHaveBeenCalledOnce()
     const replacement = appsApi.replaceNamespacedDeployment.mock.calls[0][0]
@@ -855,7 +964,7 @@ describe('HostReconciler ensureDeployment — idempotent replacement', () => {
   })
 
   it('replaces an existing Deployment when the stateless lifecycle target changes', async () => {
-    const { reconciler, appsApi } = createReconciler()
+    const { reconciler, appsApi } = createReconciler({ resolveHost: () => host })
     const host = makeStatelessHost()
     const active: EffectiveHostLifecycle = { stateless: true, state: 'active' }
     const suspended: EffectiveHostLifecycle = { stateless: true, state: 'suspended' }
@@ -864,7 +973,15 @@ describe('HostReconciler ensureDeployment — idempotent replacement', () => {
       existingDeployment(reconciler, host, 'revision-a', active)
     )
 
-    await (reconciler as any).ensureDeployment(host, [], 'revision-a', suspended)
+    await (reconciler as any).ensureDeployment(
+      host,
+      [],
+      'revision-a',
+      suspended,
+      undefined,
+      undefined,
+      canonicalFixturePvcUid(host)
+    )
 
     expect(appsApi.replaceNamespacedDeployment).toHaveBeenCalledOnce()
     const replacement = appsApi.replaceNamespacedDeployment.mock.calls[0][0]
@@ -895,12 +1012,12 @@ describe('HostReconciler ensureDeployment — idempotent replacement', () => {
       request.name === stateful.name ? Promise.resolve(runningStateful) : readDeployment(request)
     )
 
-    const stateless = makeStatelessHost({ name: 'transition-host' })
-    customApi.getNamespacedCustomObject.mockResolvedValue({
-      metadata: { name: stateless.name, namespace: stateless.namespace, uid: stateless.uid },
-      spec: stateless.spec,
-      status: { lifecycle: { state: 'active', wakeHandledGeneration: 0 } },
+    const stateless = canonicalRuntimeHost({
+      ...stateful,
+      spec: { ...stateful.spec, lifecycle: { stateless: true } },
+      status: { ...stateful.status, lifecycle: { state: 'active', wakeHandledGeneration: 0 } },
     })
+    customApi.getNamespacedCustomObject.mockResolvedValue(canonicalFixtureHostApiObject(stateless))
 
     await reconciler.reconcile(stateless)
 
@@ -913,7 +1030,7 @@ describe('HostReconciler ensureDeployment — idempotent replacement', () => {
     expect(replacement.spec?.template.spec?.priorityClassName).toBe('clerum-interactive-host')
     expect(
       replacement.spec?.template.spec?.initContainers?.map(container => container.name)
-    ).toContain('workspace-layout-init')
+    ).toContain('canonical-store-init')
     expect(envValue(replacement, 'CLERUM_STATELESS_LIFECYCLE')).toBe('true')
     expect(replacement.spec?.template.spec?.containers?.[0]?.volumeMounts).toContainEqual({
       name: 'workspace',
@@ -929,14 +1046,15 @@ describe('HostReconciler ensureDeployment — idempotent replacement', () => {
 })
 
 describe('HostReconciler stateless lifecycle — env injection', () => {
-  it('creates the stateless template directly for a new Host', async () => {
+  it('creates the stateless template for a canonical Host with a missing Deployment', async () => {
     const { reconciler, appsApi, customApi } = createReconciler()
     const stateless = makeStatelessHost({ name: 'new-stateless-host' })
-    customApi.getNamespacedCustomObject.mockResolvedValue({
-      metadata: { name: stateless.name, namespace: stateless.namespace, uid: stateless.uid },
-      spec: stateless.spec,
-      status: { lifecycle: { state: 'active', wakeHandledGeneration: 0 } },
-    })
+    customApi.getNamespacedCustomObject.mockResolvedValue(
+      canonicalFixtureHostApiObject({
+        ...stateless,
+        status: { ...stateless.status, lifecycle: { state: 'active', wakeHandledGeneration: 0 } },
+      })
+    )
 
     // Model a genuinely new principal Deployment, then expose its created state.
     let principalCreated = false
@@ -963,7 +1081,7 @@ describe('HostReconciler stateless lifecycle — env injection', () => {
     expect(created.spec?.replicas).toBe(1)
     expect(created.spec?.template.spec?.priorityClassName).toBe('clerum-interactive-host')
     expect(created.spec?.template.spec?.initContainers?.map(container => container.name)).toContain(
-      'workspace-layout-init'
+      'canonical-store-init'
     )
     expect(envValue(created, 'CLERUM_STATELESS_LIFECYCLE')).toBe('true')
     expect(created.spec?.template.spec?.containers?.[0]?.volumeMounts).toContainEqual({
@@ -998,7 +1116,10 @@ describe('HostReconciler stateless lifecycle — env injection', () => {
 describe('HostReconciler stateless lifecycle — rejection matrix', () => {
   it('preserves a rejected stateful runtime across cold channel LIST failure and recovery', async () => {
     const host = makeStatelessHost()
-    const previous = createReconciler({ countCommunicationChannels: () => 1 })
+    const previous = createReconciler({
+      resolveHost: () => host,
+      countCommunicationChannels: () => 1,
+    })
     previous.customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(host))
     vi.spyOn(previous.reconciler as any, 'provisionRuntimeTokenRevision').mockResolvedValue(
       runtimeTokenProvision(host, true)
@@ -1015,6 +1136,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     let synced = false
     let channels = 0
     const { reconciler, appsApi, customApi } = createReconciler({
+      resolveHost: () => host,
       countCommunicationChannels: () => channels,
       isCommunicationChannelCacheSynced: () => synced,
     })
@@ -1042,6 +1164,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
   it('does not use a stale positive channel cache to change an applied stateless template', async () => {
     const host = makeStatelessHost()
     const { reconciler, appsApi, customApi } = createReconciler({
+      resolveHost: () => host,
       countCommunicationChannels: () => 1,
       isCommunicationChannelCacheSynced: () => false,
     })
@@ -1064,6 +1187,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     let synced = false
     const host = makeStatelessHost()
     const { reconciler, appsApi, customApi } = createReconciler({
+      resolveHost: () => host,
       isCommunicationChannelCacheSynced: () => synced,
     })
     customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(host))
@@ -1092,6 +1216,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
   it('preserves the applied suspended replica count during cache loss', async () => {
     const host = makeStatelessHost({ status: suspendedStatus() })
     const { reconciler, appsApi, customApi } = createReconciler({
+      resolveHost: () => host,
       isCommunicationChannelCacheSynced: () => false,
     })
     customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(host))
@@ -1141,6 +1266,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
   it('never scales an unannotated legacy Deployment with an existing UID and resourceVersion', async () => {
     const host = makeStatelessHost({ status: suspendedStatus() })
     const { reconciler, appsApi } = createReconciler({
+      resolveHost: () => host,
       isCommunicationChannelCacheSynced: () => false,
     })
     const legacy = reconciler.buildDeployment(host)
@@ -1161,10 +1287,18 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     })
 
     await expect(
-      (reconciler as any).ensureDeployment(host, [], undefined, {
-        ...heldLifecycle,
-        allowScaleUpDuringHold: true,
-      })
+      (reconciler as any).ensureDeployment(
+        host,
+        [],
+        undefined,
+        {
+          ...heldLifecycle,
+          allowScaleUpDuringHold: true,
+        },
+        undefined,
+        undefined,
+        canonicalFixturePvcUid(host)
+      )
     ).rejects.toThrow('unverified Deployment')
     expect(appsApi.readNamespacedDeployment).toHaveBeenCalledWith({
       namespace: host.namespace,
@@ -1178,6 +1312,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     const host = makeStatelessHost({ status: suspendedStatus() })
     host.annotations = { 'clerum.io/wake-requested': '1' }
     const { reconciler, appsApi, coreApi, customApi } = createReconciler({
+      resolveHost: () => host,
       isCommunicationChannelCacheSynced: () => false,
     })
     customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(host))
@@ -1230,6 +1365,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     const host = makeStatelessHost({ status: suspendedStatus() })
     host.annotations = { 'clerum.io/wake-requested': '1' }
     const { reconciler, appsApi, coreApi, customApi } = createReconciler({
+      resolveHost: () => host,
       isCommunicationChannelCacheSynced: () => false,
     })
     customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(host))
@@ -1283,6 +1419,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     const host = makeStatelessHost({ status: suspendedStatus() })
     host.annotations = { 'clerum.io/wake-requested': '1' }
     const { reconciler, appsApi, customApi } = createReconciler({
+      resolveHost: () => host,
       isCommunicationChannelCacheSynced: () => false,
     })
     customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(host))
@@ -1326,6 +1463,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
       status: { lifecycle: { state: 'active', wakeHandledGeneration: 1 } },
     })
     const { reconciler, appsApi, customApi } = createReconciler({
+      resolveHost: () => host,
       isCommunicationChannelCacheSynced: () => false,
     })
     customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(host))
@@ -1375,6 +1513,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     const host = makeStatelessHost({ status: suspendedStatus() })
     host.annotations = { 'clerum.io/wake-requested': '1' }
     const { reconciler, appsApi, customApi } = createReconciler({
+      resolveHost: () => host,
       isCommunicationChannelCacheSynced: () => false,
     })
     customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(host))
@@ -1461,15 +1600,23 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
 
   it('does not report a Deployment applied when create conflict is followed by a missing read', async () => {
     const host = makeStatelessHost()
-    const { reconciler, appsApi } = createReconciler()
+    const { reconciler, appsApi } = createReconciler({ resolveHost: () => host })
     appsApi.readNamespacedDeployment
       .mockRejectedValueOnce({ code: 404 })
       .mockRejectedValueOnce({ code: 404 })
     appsApi.createNamespacedDeployment.mockRejectedValueOnce({ code: 409 })
 
-    await expect((reconciler as any).ensureDeployment(host, [], 'runtime-revision')).resolves.toBe(
-      false
-    )
+    await expect(
+      (reconciler as any).ensureDeployment(
+        host,
+        [],
+        'runtime-revision',
+        undefined,
+        undefined,
+        undefined,
+        canonicalFixturePvcUid(host)
+      )
+    ).resolves.toBe(false)
     expect(appsApi.replaceNamespacedDeployment).not.toHaveBeenCalled()
   })
 
@@ -1478,6 +1625,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
       status: { lifecycle: { state: 'active', wakeHandledGeneration: 1 } },
     })
     const { reconciler, appsApi, customApi } = createReconciler({
+      resolveHost: () => host,
       isCommunicationChannelCacheSynced: () => false,
     })
     customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(host))
@@ -1506,6 +1654,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
       status: { lifecycle: { state: 'active', wakeHandledGeneration: 1 } },
     })
     const { reconciler, appsApi, coreApi, customApi } = createReconciler({
+      resolveHost: () => host,
       isCommunicationChannelCacheSynced: () => false,
     })
     customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(host))
@@ -1547,6 +1696,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
   it('keeps a suspended Host at zero replicas during cache loss without a pending wake', async () => {
     const host = makeStatelessHost({ status: suspendedStatus(3) })
     const { reconciler, appsApi, customApi } = createReconciler({
+      resolveHost: () => host,
       isCommunicationChannelCacheSynced: () => false,
     })
     customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(host))
@@ -1575,6 +1725,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     // bootstrap credentials and scaling it up.
     const host = makeStatelessHost({ status: suspendedStatus() })
     const { reconciler, appsApi, customApi } = createReconciler({
+      resolveHost: () => host,
       isCommunicationChannelCacheSynced: () => false,
     })
     customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(host))
@@ -1626,6 +1777,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
       status: { lifecycle: { state: 'active', wakeHandledGeneration: 1 } },
     })
     const { reconciler, appsApi, customApi } = createReconciler({
+      resolveHost: () => host,
       isCommunicationChannelCacheSynced: () => false,
     })
     customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(host))
@@ -1672,6 +1824,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     const host = makeStatelessHost({ status: suspendedStatus() })
     host.annotations = { 'clerum.io/wake-requested': '1' }
     const { reconciler, appsApi, customApi } = createReconciler({
+      resolveHost: () => host,
       isCommunicationChannelCacheSynced: () => false,
     })
     customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(host))
@@ -1705,6 +1858,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     let synced = true
     const host = makeStatelessHost()
     const { reconciler, appsApi, customApi, networkingApi } = createReconciler({
+      resolveHost: () => host,
       countCommunicationChannels: () => 1,
       isCommunicationChannelCacheSynced: () => synced,
     })
@@ -1728,6 +1882,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     let lookup = 0
     const host = makeStatelessHost()
     const { reconciler, appsApi, customApi } = createReconciler({
+      resolveHost: () => host,
       isCommunicationChannelCacheSynced: () => synced,
     })
     customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(host))
@@ -1757,6 +1912,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
   it('preserves an independently confirmed desktop rejection while the channel cache is unknown', async () => {
     const host = makeStatelessHost({ spec: { desktop: { browser: true } } })
     const { reconciler, appsApi, coreApi, customApi } = createReconciler({
+      resolveHost: () => host,
       countCommunicationChannels: () => 1,
       isCommunicationChannelCacheSynced: () => false,
     })
@@ -1790,6 +1946,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
   it('defers a confirmed desktop rejection when no trusted scope observation exists', async () => {
     const host = makeStatelessHost({ spec: { desktop: { browser: true } } })
     const { reconciler, appsApi, customApi } = createReconciler({
+      resolveHost: () => host,
       countCommunicationChannels: () => 1,
       isCommunicationChannelCacheSynced: () => false,
     })
@@ -1818,6 +1975,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
   it('does not let a failed live probe narrow a retained OAuth grant before its renewal window', async () => {
     const host = makeStatelessHost()
     const { reconciler, coreApi } = createReconciler({
+      resolveHost: () => host,
       isCommunicationChannelCacheSynced: () => true,
     })
     coreApi.readNamespacedSecret.mockResolvedValue(
@@ -1844,6 +2002,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     const host = makeStatelessHost()
     const countChannels = vi.fn(() => 0)
     const { reconciler, coreApi } = createReconciler({
+      resolveHost: () => host,
       countCommunicationChannels: countChannels,
       isCommunicationChannelCacheSynced: () => false,
     })
@@ -2173,6 +2332,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
   it('does not renew held-runtime GFS before its refresh window', async () => {
     const host = makeStatelessHost()
     const { reconciler, appsApi, coreApi } = createReconciler({
+      resolveHost: () => host,
       isCommunicationChannelCacheSynced: () => false,
     })
     coreApi.readNamespacedSecret.mockResolvedValue(runtimeCredentialRecord(host))
@@ -2191,6 +2351,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
   it('renews only held-runtime GFS at the refresh boundary', async () => {
     const host = makeStatelessHost()
     const { reconciler, appsApi, coreApi } = createReconciler({
+      resolveHost: () => host,
       isCommunicationChannelCacheSynced: () => false,
     })
     const record = runtimeCredentialRecord(host, {
@@ -2229,6 +2390,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
   it('never falls back to full issuance from a closed held-runtime GFS renewal', async () => {
     const host = makeStatelessHost()
     const { reconciler, appsApi, coreApi } = createReconciler({
+      resolveHost: () => host,
       isCommunicationChannelCacheSynced: () => false,
     })
     coreApi.readNamespacedSecret.mockRejectedValue({ code: 404 })
@@ -2248,6 +2410,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
   it('does not treat a requested but unready held runtime as ready for GFS renewal', async () => {
     const host = makeStatelessHost()
     const { reconciler, appsApi, coreApi } = createReconciler({
+      resolveHost: () => host,
       isCommunicationChannelCacheSynced: () => false,
     })
     coreApi.readNamespacedSecret.mockResolvedValue(
@@ -2269,6 +2432,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
   it('does not reassign a prior Host UID during held-runtime GFS renewal', async () => {
     const host = makeStatelessHost()
     const { reconciler, appsApi, coreApi } = createReconciler({
+      resolveHost: () => host,
       isCommunicationChannelCacheSynced: () => false,
     })
     coreApi.readNamespacedSecret.mockResolvedValue(
@@ -2621,6 +2785,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
       stop: vi.fn(async () => undefined),
     }
     const { reconciler, appsApi, coreApi, customApi } = createReconciler({
+      resolveHost: () => host,
       isCommunicationChannelCacheSynced: () => false,
       infrastructureTelemetryReporter,
       administrativeOutcomeReporter,
@@ -2696,6 +2861,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
       status: { lifecycle: { state: 'active', wakeHandledGeneration: 1 } },
     })
     const { reconciler, appsApi, customApi } = createReconciler({
+      resolveHost: () => host,
       isCommunicationChannelCacheSynced: () => false,
     })
     customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(host))
@@ -2739,6 +2905,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
       status: { lifecycle: { state: 'active', wakeHandledGeneration: 1 } },
     })
     const { reconciler, appsApi, coreApi, customApi } = createReconciler({
+      resolveHost: () => host,
       isCommunicationChannelCacheSynced: () => cacheSynced,
     })
     customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(host))
@@ -2748,7 +2915,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
         ? Promise.resolve(runtimeRecord)
         : Promise.resolve({ metadata: { resourceVersion: '1' }, data: {} } as any)
     )
-    const applied = reconciler.buildDeployment(host)
+    const applied = appliedCanonicalDeployment(reconciler, host)
     applied.spec!.replicas = 0
     applied.spec!.template!.metadata!.annotations = {
       ...applied.spec!.template!.metadata!.annotations,
@@ -2772,7 +2939,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     expect(wakeWrite.metadata?.annotations).toMatchObject({
       'clerum.io/runtime-token-bootstrap-state': 'fresh',
       'clerum.io/runtime-token-rollout-required': 'false',
-      'clerum.io/runtime-token-bootstrap-deployment-uid': 'deployment-uid',
+      'clerum.io/runtime-token-bootstrap-deployment-uid': applied.metadata!.uid,
       'clerum.io/runtime-token-bootstrap-applied-revision': 'applied-runtime-revision',
     })
     runtimeRecord = withReadableRuntimeRefreshMaterial(wakeWrite)
@@ -2818,7 +2985,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
 
   it('marks a newly created preserved wake bootstrap for scale-only delivery', async () => {
     const host = makeStatelessHost()
-    const { reconciler, appsApi, coreApi } = createReconciler()
+    const { reconciler, appsApi, coreApi } = createReconciler({ resolveHost: () => host })
     const deployment = trustedRuntimeDeployment(reconciler, host, {
       replicas: 0,
       readyReplicas: 0,
@@ -3011,6 +3178,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
       status: { lifecycle: { state: 'active', wakeHandledGeneration: 1 } },
     })
     const { reconciler, appsApi, customApi } = createReconciler({
+      resolveHost: () => host,
       isCommunicationChannelCacheSynced: () => false,
     })
     customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(host))
@@ -3051,6 +3219,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     })
     let serverHost = host
     const { reconciler, appsApi, customApi } = createReconciler({
+      resolveHost: () => host,
       isCommunicationChannelCacheSynced: () => cacheSynced,
     })
     customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(serverHost))
@@ -3093,6 +3262,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
 
   it('preserves a suspended Host while the CommunicationChannel cache is unsynced', async () => {
     const { reconciler, appsApi, customApi } = createReconciler({
+      resolveHost: () => host,
       isCommunicationChannelCacheSynced: () => false,
     })
     const host = makeStatelessHost({ status: suspendedStatus() })
@@ -3116,6 +3286,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
   it('preserves the stateless template when the channel cache becomes unsynced during reconciliation', async () => {
     let cacheSynced = true
     const { reconciler, appsApi, customApi, networkingApi } = createReconciler({
+      resolveHost: () => host,
       isCommunicationChannelCacheSynced: () => cacheSynced,
     })
     const host = makeStatelessHost({ status: suspendedStatus(4) })
@@ -3155,6 +3326,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
   it('fails closed when a channel starts referencing the Host during reconciliation', async () => {
     let channelCount = 0
     const { reconciler, appsApi, customApi, networkingApi } = createReconciler({
+      resolveHost: () => host,
       countCommunicationChannels: () => channelCount,
     })
     const host = makeStatelessHost({ status: suspendedStatus(5) })
@@ -3190,6 +3362,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
   it('issues bootstrap material once with final scopes for an already-active late channel', async () => {
     let channelCount = 0
     const { reconciler, appsApi, customApi, networkingApi } = createReconciler({
+      resolveHost: () => host,
       countCommunicationChannels: () => channelCount,
     })
     const host = makeStatelessHost({
@@ -3233,6 +3406,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
   it('reissues channel-aware bootstrap material when a channel appears during provisioning', async () => {
     let channelCount = 0
     const { reconciler, appsApi, customApi } = createReconciler({
+      resolveHost: () => host,
       countCommunicationChannels: () => channelCount,
     })
     const host = makeStatelessHost({ status: suspendedStatus(6) })
@@ -3270,6 +3444,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
   it('reissues channel-aware bootstrap material for a stateful Host when a channel appears during provisioning', async () => {
     let channelCount = 0
     const { reconciler, appsApi } = createReconciler({
+      resolveHost: () => host,
       countCommunicationChannels: () => channelCount,
     })
     const host = makeHost()
@@ -3336,6 +3511,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     let channelCount = 0
     let hostDeploymentReads = 0
     const { reconciler, appsApi, customApi } = createReconciler({
+      resolveHost: () => host,
       countCommunicationChannels: () => channelCount,
     })
     const host = makeStatelessHost({ status: suspendedStatus(7) })
@@ -3390,6 +3566,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
   it('does not repeat bootstrap provisioning when channel ingress already existed in spec', async () => {
     let channelCount = 0
     const { reconciler, customApi, networkingApi } = createReconciler({
+      resolveHost: () => host,
       countCommunicationChannels: () => channelCount,
     })
     const host = makeStatelessHost({
@@ -3415,6 +3592,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
   it('refreshes only the GFS token during active cache loss without changing replicas', async () => {
     let cacheSynced = true
     const { reconciler, appsApi, customApi, networkingApi } = createReconciler({
+      resolveHost: () => host,
       isCommunicationChannelCacheSynced: () => cacheSynced,
     })
     const host = makeStatelessHost({
@@ -3504,6 +3682,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
       status: { lifecycle: { state: 'active', wakeHandledGeneration: 2 } },
     })
     const { reconciler, appsApi, customApi } = createReconciler({
+      resolveHost: () => host,
       countCommunicationChannels: () => 0,
     })
     customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(host))
@@ -3586,6 +3765,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
       status: { lifecycle: { state: 'active', wakeHandledGeneration: 2 } },
     })
     const { reconciler, appsApi, customApi } = createReconciler({
+      resolveHost: () => host,
       countCommunicationChannels: () => 1,
     })
     customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(host))
@@ -3656,9 +3836,14 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
   })
 
   it('rejects when spec.desktop is present (and never suspends)', async () => {
-    const { reconciler, appsApi, customApi } = createReconciler()
+    let serverHost = makeStatelessHost()
+
+    const { reconciler, appsApi, customApi } = createReconciler({ resolveHost: () => serverHost })
     await reconciler.reconcile(
-      makeStatelessHost({ spec: { desktop: { x11: true } }, status: suspendedStatus() })
+      (serverHost = makeStatelessHost({
+        spec: { desktop: { x11: true } },
+        status: suspendedStatus(),
+      }))
     )
 
     expect(hostDeploymentBody(appsApi, 'stateless-host').spec?.replicas).toBe(1)
@@ -3721,6 +3906,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     // channel must hard-reject from the very first stateless-requesting
     // reconcile; stateless must never be transiently enabled.
     const { reconciler, appsApi, customApi } = createReconciler({
+      resolveHost: () => host,
       countCommunicationChannels: () => 1,
     })
     // Prior stateful projection: the Host ran active with the channel and is
@@ -3807,9 +3993,14 @@ describe('HostReconciler stateless lifecycle — kill-switches', () => {
   })
 
   it('kill-switch: stateless:false returns a suspended host to active + replicas 1', async () => {
-    const { reconciler, appsApi, customApi } = createReconciler()
+    let serverHost = makeStatelessHost()
+
+    const { reconciler, appsApi, customApi } = createReconciler({ resolveHost: () => serverHost })
     await reconciler.reconcile(
-      makeStatelessHost({ spec: { lifecycle: { stateless: false } }, status: suspendedStatus(5) })
+      (serverHost = makeStatelessHost({
+        spec: { lifecycle: { stateless: false } },
+        status: suspendedStatus(5),
+      }))
     )
 
     expect(hostDeploymentBody(appsApi, 'stateless-host').spec?.replicas).toBe(1)
@@ -3822,7 +4013,7 @@ describe('HostReconciler stateless lifecycle — kill-switches', () => {
   })
 
   it('kill-switch: removing spec.lifecycle returns a suspended host to active', async () => {
-    const { reconciler, appsApi, customApi } = createReconciler()
+    const { reconciler, appsApi, customApi } = createReconciler({ resolveHost: () => host })
     const host = makeHost({ name: 'stateless-host', status: suspendedStatus(2) })
     customApi.getNamespacedCustomObject.mockResolvedValue({
       metadata: {
@@ -3846,7 +4037,10 @@ describe('HostReconciler stateless lifecycle — kill-switches', () => {
 describe('HostReconciler stateless lifecycle — status write idempotence', () => {
   it('writes status once for an unchanged assessment across reconciles', async () => {
     const infrastructureTelemetryReporter = createTelemetryReporterMock()
-    const { reconciler, customApi } = createReconciler({ infrastructureTelemetryReporter })
+    const { reconciler, customApi } = createReconciler({
+      resolveHost: () => host,
+      infrastructureTelemetryReporter,
+    })
     const host = makeStatelessHost()
     await reconciler.reconcile(host)
     expect(customApi.patchNamespacedCustomObjectStatus).toHaveBeenCalledTimes(1)
@@ -3863,6 +4057,12 @@ describe('HostReconciler stateless lifecycle — status write idempotence', () =
   it('binds the committed health transition to the Host uid (#691)', async () => {
     const infrastructureTelemetryReporter = createTelemetryReporterMock()
     const { reconciler, customApi } = createReconciler({ infrastructureTelemetryReporter })
+    customApi.getNamespacedCustomObject.mockResolvedValue(
+      canonicalFixtureHostApiObject({
+        ...makeStatelessHost({ status: suspendedStatus() }),
+        generation: 3,
+      })
+    )
     await reconciler.reconcile({ ...makeStatelessHost(), generation: 3 })
 
     expect(customApi.patchNamespacedCustomObjectStatus).toHaveBeenCalledTimes(1)
@@ -3883,6 +4083,12 @@ describe('HostReconciler stateless lifecycle — status write idempotence', () =
   it('never commits a lifecycle status for a Host snapshot without a uid (#693)', async () => {
     const infrastructureTelemetryReporter = createTelemetryReporterMock()
     const { reconciler, customApi } = createReconciler({ infrastructureTelemetryReporter })
+    customApi.getNamespacedCustomObject.mockResolvedValue(
+      canonicalFixtureHostApiObject({
+        ...makeStatelessHost({ status: suspendedStatus() }),
+        generation: 3,
+      })
+    )
     const withUid: HostCRD = { ...makeStatelessHost(), generation: 3 }
     const withoutUid: HostCRD = { ...makeStatelessHost(), generation: 3 }
     delete (withoutUid as { uid?: string }).uid
@@ -3906,7 +4112,10 @@ describe('HostReconciler stateless lifecycle — status write idempotence', () =
 
   it('skips the write when the observed status already matches', async () => {
     const infrastructureTelemetryReporter = createTelemetryReporterMock()
-    const { reconciler, customApi } = createReconciler({ infrastructureTelemetryReporter })
+    const { reconciler, customApi } = createReconciler({
+      resolveHost: () => host,
+      infrastructureTelemetryReporter,
+    })
     const host = makeStatelessHost({
       status: {
         lifecycle: { state: 'active', wakeHandledGeneration: 0 },
@@ -3930,16 +4139,7 @@ describe('HostReconciler stateless lifecycle — status write idempotence', () =
     })
     // FIX 1 replicas guard: state the server-side truth explicitly — the
     // fresh read must agree with the observed (converged) active status.
-    customApi.getNamespacedCustomObject.mockResolvedValue({
-      metadata: { name: 'stateless-host', namespace: 'mcp-host', uid: 'stateless-host-uid' },
-      spec: {
-        host: 'stateless-host',
-        contextRef: 'context-a',
-        secretRef: 'host-secret',
-        lifecycle: { stateless: true },
-      },
-      status: { lifecycle: { state: 'active', wakeHandledGeneration: 0 } },
-    })
+    customApi.getNamespacedCustomObject.mockResolvedValue(canonicalFixtureHostApiObject(host))
     await reconciler.reconcile(host)
     expect(customApi.patchNamespacedCustomObjectStatus).not.toHaveBeenCalled()
     expect(infrastructureTelemetryReporter.enqueue).not.toHaveBeenCalledWith(
@@ -3976,25 +4176,11 @@ describe('HostReconciler stateless lifecycle — AP-1 fresh-read status writer',
     wakeHandledGeneration: number
     reason?: string
   }) {
-    return {
-      metadata: {
-        name: 'stateless-host',
-        namespace: 'mcp-host',
-        uid: 'stateless-host-uid',
-        resourceVersion: '42',
-      },
-      spec: {
-        host: 'stateless-host',
-        contextRef: 'context-a',
-        secretRef: 'host-secret',
-        lifecycle: { stateless: true },
-      },
-      status: { lifecycle },
-    }
+    return canonicalFixtureHostApiObject(makeStatelessHost({ status: { lifecycle } }))
   }
 
   it('preserves a fresher heartbeat suspend over a stale accepted assessment (the 8th costume)', async () => {
-    const { reconciler, customApi } = createReconciler()
+    const { reconciler, customApi } = createReconciler({ resolveHost: () => host })
     // Cached watch-cache snapshot: the reconcile assessment is derived from
     // THIS (draining, gen 1) and has no conditions[], so the accepted-path
     // status writer fires on the conditions transition.
@@ -4020,7 +4206,7 @@ describe('HostReconciler stateless lifecycle — AP-1 fresh-read status writer',
   })
 
   it('never regresses wakeHandledGeneration below the fresh value on an accepted echo', async () => {
-    const { reconciler, customApi } = createReconciler()
+    const { reconciler, customApi } = createReconciler({ resolveHost: () => host })
     // Cached snapshot active/gen 2 (no conditions → writer fires); fresh is
     // active but at a higher generation a concurrent wake already handled.
     const host = makeStatelessHost({
@@ -4037,7 +4223,7 @@ describe('HostReconciler stateless lifecycle — AP-1 fresh-read status writer',
   })
 
   it('kill-switch STILL forces active over a suspended fresh read (no over-correction)', async () => {
-    const { reconciler, customApi } = createReconciler()
+    const { reconciler, customApi } = createReconciler({ resolveHost: () => host })
     // Kill-switch: stateless disabled on a currently-suspended Host. The
     // assessment INTENDS state=active as an operator-visible kill-switch; that
     // override must win even though the fresh read is still suspended.
@@ -4046,7 +4232,10 @@ describe('HostReconciler stateless lifecycle — AP-1 fresh-read status writer',
       status: { lifecycle: { state: 'suspended', wakeHandledGeneration: 4 } },
     })
     customApi.getNamespacedCustomObject.mockResolvedValue(
-      freshHostRead({ state: 'suspended', wakeHandledGeneration: 4 })
+      canonicalFixtureHostApiObject({
+        ...host,
+        status: { ...host.status, lifecycle: { state: 'suspended', wakeHandledGeneration: 4 } },
+      })
     )
 
     await reconciler.reconcile(host)
@@ -4057,6 +4246,7 @@ describe('HostReconciler stateless lifecycle — AP-1 fresh-read status writer',
 
   it('rejection STILL forces active + message over a suspended fresh read (no over-correction)', async () => {
     const { reconciler, customApi } = createReconciler({
+      resolveHost: () => host,
       countCommunicationChannels: () => 1,
     })
     // Rejection (an active CommunicationChannel references the Host) on a
@@ -4082,6 +4272,7 @@ describe('HostReconciler stateless lifecycle — AP-1 fresh-read status writer',
 
   it('reject-while-active carries the rejection message onto the fresh active state (not dropped)', async () => {
     const { reconciler, customApi } = createReconciler({
+      resolveHost: () => host,
       countCommunicationChannels: () => 1,
     })
     // A rejection fires while the Host is ALREADY active: assessment.state
@@ -4111,6 +4302,7 @@ describe('HostReconciler stateless lifecycle — AP-1 fresh-read status writer',
 
   it('confirmed incompatibility restores active state after a concurrent suspend', async () => {
     const { reconciler, customApi } = createReconciler({
+      resolveHost: () => host,
       countCommunicationChannels: () => 1,
     })
     // A confirmed channel conflict has the existing always-on policy. If a
@@ -4134,7 +4326,7 @@ describe('HostReconciler stateless lifecycle — AP-1 fresh-read status writer',
   })
 
   it('pure accepted-path echo (no rejection) still preserves ONLY heartbeat-managed reasons', async () => {
-    const { reconciler, customApi } = createReconciler()
+    const { reconciler, customApi } = createReconciler({ resolveHost: () => host })
     // Accepted (no rejection): condition.status='False'. The echo branch must
     // keep the pre-FIX behaviour — state from fresh, and reason preserved only
     // when heartbeat-managed. A non-heartbeat-managed fresh reason is dropped.
@@ -4218,7 +4410,7 @@ describe('HostReconciler stateless lifecycle — initContainer and mounts', () =
 
 describe('HostReconciler stateless lifecycle — suspension durability', () => {
   it('keeps a suspended host at replicas=0 across full reconciles (no resurrection)', async () => {
-    const { reconciler, appsApi, customApi } = createReconciler()
+    const { reconciler, appsApi, customApi } = createReconciler({ resolveHost: () => host })
     const host = makeStatelessHost({ status: suspendedStatus(7) })
 
     await reconciler.reconcile(host)

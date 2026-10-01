@@ -3,6 +3,12 @@ import * as k8s from '@kubernetes/client-node'
 import { HostReconciler } from '../src/hostReconciler'
 import { HostCRD, HostCrdStatus } from '../src/types'
 import {
+  canonicalFixtureHostApiObject,
+  canonicalRuntimeHost,
+  installCanonicalPvcApi,
+  installCanonicalRuntimeConfigApi,
+} from './__fixtures__/canonicalRuntime'
+import {
   type MockAppsApi,
   type MockCustomApi,
   asAppsApi,
@@ -98,9 +104,10 @@ function makeStatelessHost(
   } = {}
 ): HostCRD {
   const name = overrides.name ?? 'stateless-host'
-  return {
+  return canonicalRuntimeHost({
     name,
     namespace: 'mcp-host',
+    uid: `${name}-uid`,
     ...(overrides.annotations ? { annotations: overrides.annotations } : {}),
     spec: {
       host: name,
@@ -110,25 +117,20 @@ function makeStatelessHost(
       ...overrides.spec,
     },
     ...(overrides.status ? { status: overrides.status } : {}),
-  }
+  })
 }
 
 function createReconciler(options: { isCommunicationChannelCacheSynced?: () => boolean } = {}) {
   const appsApi = createMockAppsApi()
   const coreApi = createMockCoreApi()
+  installCanonicalPvcApi(coreApi)
+  installCanonicalRuntimeConfigApi(coreApi)
   const networkingApi = createMockNetworkingApi()
   const rbacApi = createMockRbacApi()
   const customApi = createMockCustomApi()
-  customApi.getNamespacedCustomObject.mockResolvedValue({
-    metadata: { name: 'stateless-host', namespace: 'mcp-host' },
-    spec: {
-      host: 'stateless-host',
-      contextRef: 'context-a',
-      secretRef: 'host-secret',
-      lifecycle: { stateless: true },
-    },
-    status: { lifecycle: { state: 'suspended', wakeHandledGeneration: 0 } },
-  })
+  customApi.getNamespacedCustomObject.mockResolvedValue(
+    freshHostRead({ state: 'suspended', wakeHandledGeneration: 0 })
+  )
 
   const reconciler = new HostReconciler({} as k8s.KubeConfig, {
     appsApi: asAppsApi(appsApi),
@@ -186,26 +188,44 @@ function hostDeploymentBody(appsApi: MockAppsApi, name: string): k8s.V1Deploymen
  * into a single HostCrdStatus so assertions stay shape-agnostic.
  */
 function lifecycleStatusWrites(customApi: MockCustomApi): HostCrdStatus[] {
-  return customApi.patchNamespacedCustomObjectStatus.mock.calls.map(([arg]) => {
-    const body = (arg as { body: Array<{ op: string; path: string; value: unknown }> }).body
-    if (!Array.isArray(body)) {
-      throw new Error(`Unexpected status patch body: ${JSON.stringify(body)}`)
-    }
-    const ops = body.filter(op => op.path !== '/metadata/resourceVersion')
-    let status: HostCrdStatus = {}
-    for (const op of ops) {
-      if (op.path === '/status') {
-        status = op.value as HostCrdStatus
-      } else if (op.path === '/status/lifecycle') {
-        status = { ...status, lifecycle: op.value as HostCrdStatus['lifecycle'] }
-      } else if (op.path === '/status/conditions') {
-        status = { ...status, conditions: op.value as HostCrdStatus['conditions'] }
-      } else {
-        throw new Error(`Unexpected status patch op path: ${JSON.stringify(op)}`)
-      }
-    }
-    return status
-  })
+  return (
+    customApi.patchNamespacedCustomObjectStatus.mock.calls
+      // Operator target diagnostics are a separate controller status writer. A
+      // lifecycle witness must count lifecycle paths, never an unrelated CAS.
+      .filter(
+        ([arg]) =>
+          Array.isArray(arg.body) &&
+          arg.body.some(
+            (op: { path: string; value?: HostCrdStatus }) =>
+              op.path === '/status/lifecycle' ||
+              op.path === '/status/conditions' ||
+              (op.path === '/status' &&
+                (op.value?.lifecycle !== undefined || op.value?.conditions !== undefined))
+          )
+      )
+      .map(([arg]) => {
+        const body = (arg as { body: Array<{ op: string; path: string; value: unknown }> }).body
+        if (!Array.isArray(body)) {
+          throw new Error(`Unexpected status patch body: ${JSON.stringify(body)}`)
+        }
+        const ops = body.filter(
+          op => op.path !== '/metadata/resourceVersion' && op.path !== '/metadata/uid'
+        )
+        let status: HostCrdStatus = {}
+        for (const op of ops) {
+          if (op.path === '/status') {
+            status = op.value as HostCrdStatus
+          } else if (op.path === '/status/lifecycle') {
+            status = { ...status, lifecycle: op.value as HostCrdStatus['lifecycle'] }
+          } else if (op.path === '/status/conditions') {
+            status = { ...status, conditions: op.value as HostCrdStatus['conditions'] }
+          } else {
+            throw new Error(`Unexpected status patch op path: ${JSON.stringify(op)}`)
+          }
+        }
+        return status
+      })
+  )
 }
 
 /**
@@ -219,16 +239,9 @@ function freshHostRead(lifecycle?: {
   wakeHandledGeneration: number
   reason?: string
 }) {
-  return {
-    metadata: { name: 'stateless-host', namespace: 'mcp-host' },
-    spec: {
-      host: 'stateless-host',
-      contextRef: 'context-a',
-      secretRef: 'host-secret',
-      lifecycle: { stateless: true },
-    },
-    ...(lifecycle ? { status: { lifecycle } } : {}),
-  }
+  return canonicalFixtureHostApiObject(
+    makeStatelessHost({ ...(lifecycle ? { status: { lifecycle } } : {}) })
+  )
 }
 
 describe('HostReconciler heartbeat mutation admission', () => {
@@ -1040,6 +1053,9 @@ describe('HostReconciler.suspendHostFromHeartbeat', () => {
       .mockResolvedValue({
         ...freshHostRead({ state: 'suspended', wakeHandledGeneration: 2 }),
         metadata: {
+          uid: 'stateless-host-uid',
+          generation: 1,
+          resourceVersion: '42',
           name: 'stateless-host',
           namespace: 'mcp-host',
           annotations: { 'clerum.io/wake-requested': '7' },
@@ -1098,6 +1114,9 @@ describe('HostReconciler.suspendHostFromHeartbeat', () => {
       // Fresh carries a not-yet-handled wake annotation: requested 3 > handled 2.
       customApi.getNamespacedCustomObject.mockResolvedValue({
         metadata: {
+          uid: 'stateless-host-uid',
+          generation: 1,
+          resourceVersion: '42',
           name: 'stateless-host',
           namespace: 'mcp-host',
           annotations: { 'clerum.io/wake-requested': '3' },
@@ -1726,16 +1745,10 @@ function freshHostReadWithRv(
     reason?: string
   }
 ) {
-  return {
-    metadata: { name: 'stateless-host', namespace: 'mcp-host', resourceVersion },
-    spec: {
-      host: 'stateless-host',
-      contextRef: 'context-a',
-      secretRef: 'host-secret',
-      lifecycle: { stateless: true },
-    },
-    status: { lifecycle },
-  }
+  return canonicalFixtureHostApiObject({
+    ...makeStatelessHost({ status: { lifecycle } }),
+    resourceVersion,
+  })
 }
 
 /** A K8s 409 Conflict error as getErrorCode reads it (.code). */
@@ -1851,7 +1864,13 @@ describe('HostReconciler.writeLifecycleStatusToCluster — D2 targeted patch doe
     // it performs carries an unrelated condition (written by another writer)
     // plus a resourceVersion. The targeted patch must keep that condition.
     customApi.getNamespacedCustomObject.mockResolvedValue({
-      metadata: { name: 'stateless-host', namespace: 'mcp-host', resourceVersion: 'rv-77' },
+      metadata: {
+        uid: 'stateless-host-uid',
+        generation: 1,
+        name: 'stateless-host',
+        namespace: 'mcp-host',
+        resourceVersion: 'rv-77',
+      },
       spec: {
         host: 'stateless-host',
         contextRef: 'context-a',
@@ -1869,7 +1888,8 @@ describe('HostReconciler.writeLifecycleStatusToCluster — D2 targeted patch doe
       status: { lifecycle: { state: 'active', wakeHandledGeneration: 0 } },
     })
 
-    await reconciler.reconcile(host)
+    const assessment = await (reconciler as any).lifecycle.assessLifecycle(host, [])
+    await (reconciler as any).lifecycle.writeLifecycleStatusToCluster(host, assessment)
 
     const call = customApi.patchNamespacedCustomObjectStatus.mock.calls.at(-1)
     expect(call).toBeDefined()
@@ -1892,7 +1912,13 @@ describe('HostReconciler.writeLifecycleStatusToCluster — D2 targeted patch doe
     const { reconciler, customApi } = createReconciler()
     // Fresh Host with NO status subresource at all.
     customApi.getNamespacedCustomObject.mockResolvedValue({
-      metadata: { name: 'stateless-host', namespace: 'mcp-host', resourceVersion: 'rv-1' },
+      metadata: {
+        uid: 'stateless-host-uid',
+        generation: 1,
+        name: 'stateless-host',
+        namespace: 'mcp-host',
+        resourceVersion: 'rv-1',
+      },
       spec: {
         host: 'stateless-host',
         contextRef: 'context-a',
@@ -1903,7 +1929,8 @@ describe('HostReconciler.writeLifecycleStatusToCluster — D2 targeted patch doe
     const host = makeStatelessHost()
     // Force a status write by giving the cached host a spec.lifecycle (opt-in gate).
 
-    await reconciler.reconcile(host)
+    const assessment = await (reconciler as any).lifecycle.assessLifecycle(host, [])
+    await (reconciler as any).lifecycle.writeLifecycleStatusToCluster(host, assessment)
 
     const call = customApi.patchNamespacedCustomObjectStatus.mock.calls.at(-1)
     expect(call).toBeDefined()
@@ -1956,6 +1983,9 @@ describe('HostReconciler.markHostDrainingFromHeartbeat — AP-1 entry-epoch guar
       })
       customApi.getNamespacedCustomObject.mockResolvedValue({
         metadata: {
+          uid: 'stateless-host-uid',
+          generation: 1,
+          resourceVersion: '42',
           name: 'stateless-host',
           namespace: 'mcp-host',
           annotations: { 'clerum.io/wake-requested': '3' },

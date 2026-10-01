@@ -301,6 +301,7 @@ export const hostFleetLifecycleCatchTotal = counter({
 // Outcomes partition completed creates; sum created, conflict, and error for
 // completed attempts. The bounded kind inventory includes the read-first Secret.
 export const CREATE_KINDS = [
+  'Job',
   'NetworkPolicy',
   'Service',
   'Deployment',
@@ -382,4 +383,23 @@ export const hostDeleteCleanupTotal = counter({
 export const externalEgressRetriesAtCap = gauge({
   name: 'clerum_hcc_external_egress_retries_at_cap',
   help: 'McpServers whose external-egress DNS retry is pinned at the capped (maximum) backoff, i.e. repeatedly failing to converge.',
+})
+
+// #825 section 5.4.1: canonical conversation-store init outcomes. `reason`
+// is the CLI's closed reason map (canonicalStore/types.ts REASON_EXITS keys
+// plus HCC's InitOutcomeMismatch/InitFailedUnclassified classifications) —
+// never a free-form message — and `outcome` is ok/blocked, keeping label
+// cardinality bounded regardless of fleet size.
+export const conversationStoreInitOutcomesTotal = counter({
+  name: 'clerum_hcc_conversation_store_init_outcomes_total',
+  help: 'Canonical conversation-store init outcomes by closed reason and outcome (#825).',
+  labelNames: ['outcome', 'reason'] as const,
+})
+
+// #825 section 5.6: FIRST rollout gate decisions per Host reconcile. Fixed
+// decision set (proceed/preserve_applied/fail_closed); never a Host name.
+export const conversationStoreRolloutGateDecisionsTotal = counter({
+  name: 'clerum_hcc_conversation_store_rollout_gate_decisions_total',
+  help: 'Canonical conversation-store FIRST rollout gate decisions (#825).',
+  labelNames: ['decision'] as const,
 })

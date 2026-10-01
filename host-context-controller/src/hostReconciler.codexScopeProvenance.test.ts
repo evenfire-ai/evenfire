@@ -1,6 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import * as k8s from '@kubernetes/client-node'
 import {
+  canonicalRuntimeHost,
+  createCanonicalFixtureHostApi,
+  installCanonicalPvcApi,
+  installCanonicalRuntimeConfigApi,
+} from '../test/__fixtures__/canonicalRuntime'
+import {
   asAppsApi,
   asCoreApi,
   asNetworkingApi,
@@ -121,7 +127,7 @@ function eligibleCodexConfigMap(stale = false) {
 }
 
 function makeCodexHost(overrides?: Partial<HostCRD['spec']>): HostCRD {
-  return {
+  return canonicalRuntimeHost({
     name: 'codex-host',
     namespace: 'mcp-host',
     uid: 'codex-host-uid',
@@ -136,22 +142,26 @@ function makeCodexHost(overrides?: Partial<HostCRD['spec']>): HostCRD {
       },
       ...overrides,
     },
-  }
+  })
 }
 
-function createReconciler() {
+function createReconciler(resolveHost: () => HostCRD = () => makeCodexHost()) {
   const appsApi = createMockAppsApi()
+  const customApi = createCanonicalFixtureHostApi(resolveHost)
   const coreApi = createMockCoreApi()
+  installCanonicalPvcApi(coreApi)
+  installCanonicalRuntimeConfigApi(coreApi)
   const networkingApi = createMockNetworkingApi()
   const rbacApi = createMockRbacApi()
   const reconciler = new HostReconciler({} as k8s.KubeConfig, {
     appsApi: asAppsApi(appsApi),
+    customApi: customApi as unknown as k8s.CustomObjectsApi,
     coreApi: asCoreApi(coreApi),
     networkingApi: asNetworkingApi(networkingApi),
     rbacApi: asRbacApi(rbacApi),
     isCommunicationChannelCacheSynced: () => true,
   })
-  return { reconciler, appsApi, coreApi, networkingApi, rbacApi }
+  return { reconciler, appsApi, coreApi, networkingApi, rbacApi, customApi }
 }
 
 function wireAllowlist(
@@ -221,19 +231,22 @@ describe('HostReconciler Codex scope provenance', () => {
   })
 
   it('reissues the token, changes the drift hash, and withdraws egress when the target becomes static', async () => {
-    const { reconciler, coreApi, networkingApi } = createReconciler()
+    // This test owns the current native Host response across its declared changes.
+    let serverHost = makeCodexHost()
+
+    const { reconciler, coreApi, networkingApi } = createReconciler(() => serverHost)
     wireAllowlist(coreApi, eligibleCodexConfigMap())
 
-    await reconciler.reconcile(makeCodexHost())
+    await reconciler.reconcile((serverHost = makeCodexHost()))
     const eligibleHash = scopeHashFromSecretWrites(coreApi).at(-1)
     expect(eligibleHash).toBeTruthy()
     expect(issuedScopes()).toContain('llm:codex:execute')
 
     vi.mocked(issueMcpHostRuntimeTokens).mockClear()
     await reconciler.reconcile(
-      makeCodexHost({
+      (serverHost = makeCodexHost({
         model: { provider: 'openai', name: 'gpt-5.4-mini' },
-      })
+      }))
     )
 
     expect(issueMcpHostRuntimeTokens).toHaveBeenCalled()
@@ -298,43 +311,49 @@ describe('HostReconciler Codex scope provenance', () => {
   })
 
   it('keeps a Host on a live grant eligible when another assigned grant is revoked', async () => {
-    const { reconciler, coreApi, networkingApi } = createReconciler()
+    // This test owns the current native Host response across its declared changes.
+    let serverHost = makeCodexHost()
+
+    const { reconciler, coreApi, networkingApi } = createReconciler(() => serverHost)
     wireAllowlist(coreApi, eligibleCodexConfigMap())
 
     await reconciler.reconcile(
-      makeCodexHost({
+      (serverHost = makeCodexHost({
         model: {
           provider: 'codex-subscription',
           name: 'gpt-5.3-codex',
           connectionRef: 'personal-pro',
         },
-      })
+      }))
     )
     expect(issuedScopes()).toContain('llm:codex:execute')
     expect(proxyPolicyBodies(networkingApi)).toHaveLength(1)
 
     vi.mocked(issueMcpHostRuntimeTokens).mockClear()
     await reconciler.reconcile(
-      makeCodexHost({
+      (serverHost = makeCodexHost({
         host: 'revoked-host',
         model: {
           provider: 'codex-subscription',
           name: 'gpt-5.3-codex',
           connectionRef: 'team-plus',
         },
-      })
+      }))
     )
     expect(issuedScopes()).not.toContain('llm:codex:execute')
   })
 
   it('does not mint Codex scope or egress when connectionRef is missing', async () => {
-    const { reconciler, coreApi, networkingApi } = createReconciler()
+    // This test owns the current native Host response across its declared changes.
+    let serverHost = makeCodexHost()
+
+    const { reconciler, coreApi, networkingApi } = createReconciler(() => serverHost)
     wireAllowlist(coreApi, eligibleCodexConfigMap())
 
     await reconciler.reconcile(
-      makeCodexHost({
+      (serverHost = makeCodexHost({
         model: { provider: 'codex-subscription', name: 'gpt-5.3-codex' },
-      })
+      }))
     )
 
     expect(issueMcpHostRuntimeTokens).toHaveBeenCalled()

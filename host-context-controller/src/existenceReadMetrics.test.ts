@@ -28,6 +28,77 @@ it('initializes the real read registry before any test seeding', async () => {
 // Review each exclusion when its enclosing operation changes. Counts describe
 // expressions, not executions; a newly added direct read must be classified.
 const readExclusions: Record<string, readonly [number, string]> = {
+  'hostReconciler.ts::persistConversationStoreOperatorProposal::readNamespacedPersistentVolumeClaim':
+    [1, 'Fresh binding of readonly proposal before UID/RV CAS; it never grants operator authority'],
+  'hostReconciler.ts::readConversationStoreSourceEnvironment::readNamespacedConfigMap': [
+    1,
+    'Freeze admitted source keys from current native ConfigMap identity; values remain referenced',
+  ],
+  'conversationStoreOperatorKubernetes.ts::readPvcUid::readNamespacedPersistentVolumeClaim': [
+    1,
+    'Fresh immutable PVC binding; absence rejects operator authority',
+  ],
+  'conversationStoreOperatorKubernetes.ts::readDeployment::readNamespacedDeployment': [
+    1,
+    'Exact Host source identity and controller binding',
+  ],
+  'conversationStoreOperatorKubernetes.ts::verifyStoppedWriter::readNamespacedPod': [
+    1,
+    'Fresh source UID, imageID and restart-count proof after kernel inspection',
+  ],
+  'conversationStoreOperatorKubernetes.ts::stopLegacyDeployment::readNamespacedDeployment': [
+    1,
+    'Fresh source identity for bounded replica-only conflict retry',
+  ],
+  'conversationStoreOperatorKubernetes.ts::ensureIdentity::readNamespacedServiceAccount': [
+    1,
+    'Read-first dedicated request identity; explicit local 404 handling',
+  ],
+  'conversationStoreOperatorKubernetes.ts::ensureIdentity::readNamespacedRole': [
+    1,
+    'Read-first exact named helper grants; explicit local 404 handling',
+  ],
+  'conversationStoreOperatorKubernetes.ts::ensureIdentity::readNamespacedRoleBinding': [
+    1,
+    'Read-first exact native helper subject; explicit local 404 handling',
+  ],
+  'conversationStoreOperatorKubernetes.ts::requireNoLegacyWriter::readNamespacedJob': [
+    1,
+    'Native owner chain of every other PVC participant',
+  ],
+  'conversationStoreOperatorKubernetes.ts::execute::readNamespacedJob': [
+    2,
+    'Initial native execution identity and final same-UID fresh evidence',
+  ],
+  'conversationStoreOperatorKubernetes.ts::execute::readNamespacedPod': [
+    1,
+    'Final same-UID current terminated attempt; 404 is not success',
+  ],
+  'hostReconciler.ts::persistConversationStoreLayoutCommitment::readNamespacedPersistentVolumeClaim':
+    [1, 'Current PVC binding before UID/RV status CAS'],
+  'hostReconciler.ts::persistConversationStoreLayoutReady::readNamespacedPersistentVolumeClaim': [
+    1,
+    'Current PVC binding before UID/RV status CAS',
+  ],
+  'hostReconciler.ts::recordConversationStoreProvisioningIntent::readNamespacedDeployment': [
+    1,
+    'Prove source absence for native WATCH birth only',
+  ],
+  'hostReconciler.ts::recordConversationStoreProvisioningIntent::readNamespacedPersistentVolumeClaim':
+    [1, 'Retained PVC is never new Host provenance'],
+  'hostReconciler.ts::persistConversationStoreProvisioning::readNamespacedPersistentVolumeClaim': [
+    1,
+    'Match actual native create UID and creation time',
+  ],
+  'hostReconciler.ts::persistConversationStoreFields::readNamespacedPersistentVolumeClaim': [
+    1,
+    'Current PVC binding before exact request status CAS',
+  ],
+  'hostReconciler.ts::reconcileCore::readNamespacedPersistentVolumeClaim': [
+    1,
+    'Observed physical PVC UID for an explicit operator request',
+  ],
+
   'hostReconciler.ts::readHostDeploymentOrNull::readNamespacedDeployment': [
     1,
     'Input to runtime binding and refresh decisions',
@@ -186,7 +257,7 @@ function readProductionSources(): Record<string, string> {
 function assertReadInventory(sources: Record<string, string>): void {
   const expectedWrapped: Record<string, number> = {
     'utils.ts': 1,
-    'hostReconciler.ts': 9,
+    'hostReconciler.ts': 10,
     'reconciler.ts': 3,
     'llmHookReconciler.ts': 3,
     'sharedFileSystemReconciler.ts': 3,
@@ -254,8 +325,8 @@ function assertReadInventory(sources: Record<string, string>): void {
     expect(reason.length, id).toBeGreaterThan(0)
     expect(excluded[id], `Stale or changed read exclusion: ${id}`).toBe(count)
   }
-  expect(Object.values(wrapped).reduce((sum, count) => sum + count, 0)).toBe(26)
-  expect(Object.values(excluded).reduce((sum, count) => sum + count, 0)).toBe(44)
+  expect(Object.values(wrapped).reduce((sum, count) => sum + count, 0)).toBe(27)
+  expect(Object.values(excluded).reduce((sum, count) => sum + count, 0)).toBe(64)
 }
 
 it('classifies every direct dot-property production SDK read as observed or explicitly excluded', () => {
