@@ -401,9 +401,9 @@ describe('AppService invitation configuration lookup', () => {
       role: 'member',
     }
     const getMe = vi.fn().mockResolvedValue(me)
-    const getSessionToken = vi.fn().mockResolvedValue('saved-token')
+    const getSessionToken = vi.fn().mockResolvedValue('test-token')
     service.authClient = {
-      passwordLogin: vi.fn().mockResolvedValue({ token: 'saved-token', me }),
+      passwordLogin: vi.fn().mockResolvedValue({ token: 'test-token', me }),
       getMe,
     } as never
     service.tokenStore = {
@@ -414,7 +414,7 @@ describe('AppService invitation configuration lookup', () => {
     service.rpcTokenManager = { clear: vi.fn() } as never
     service.updateDesktopGfsUploadState = vi.fn().mockResolvedValue(undefined)
 
-    await service.passwordLogin('user@example.com', 'password123')
+    await service.passwordLogin('user@example.com', 'fake-password')
     expect(service.getCachedUserId()).toBe('user-1')
 
     await expect(service.logout()).rejects.toThrow(/keychain unavailable/)
