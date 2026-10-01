@@ -627,9 +627,79 @@ describe('MCP authorization store Kubernetes 404 normalization', () => {
       description: 'Server A',
       transport: { type: 'streamableHttp', url: 'http://server-a/mcp', port: 8080 },
       auth: { type: 'bearer', secretRef: 'server-a-auth', secretKey: 'token' },
+      // Non-remote fixture → remote-ness projects as false (mirrors reconciler isRemote).
+      remote: false,
+      // No spec.oauth → bearer-in-body quirk projects as false (mini-spec 19 §D-8).
+      bearerInBody: false,
       enabled: true,
       status: { deployed: true, ready: true, authoritative: true },
     })
+  })
+
+  it('projects remote:true against the real producer when spec.remote.baseUrl is set', async () => {
+    const objects: Record<string, unknown> = {
+      'mcpservers/server-remote': {
+        metadata: {
+          name: 'server-remote',
+          namespace: 'mcp-server',
+          uid: 'server-uid-remote',
+          resourceVersion: '20',
+        },
+        spec: {
+          description: 'Remote Server',
+          transport: {
+            type: 'streamableHttp',
+            url: 'http://server-remote.mcp-server.svc.cluster.local:8080/mcp',
+            port: 8080,
+          },
+          auth: { type: 'oauth' },
+          remote: { baseUrl: 'https://mcp.example.com/mcp' },
+          enabled: true,
+        },
+      },
+    }
+    mocks.getNamespacedCustomObject.mockImplementation(
+      async ({ plural, name }: { plural: string; name: string }) => objects[`${plural}/${name}`]
+    )
+
+    const store = createMcpAuthorizationStore(provider)
+    const server = await store.readMcpServer('server-remote')
+    expect(server).not.toBeNull()
+    expect(server!.remote).toBe(true)
+  })
+
+  it('projects bearerInBody:true against the real producer when spec.oauth.bearerInBody is set', async () => {
+    const objects: Record<string, unknown> = {
+      'mcpservers/server-body': {
+        metadata: {
+          name: 'server-body',
+          namespace: 'mcp-server',
+          uid: 'server-uid-body',
+          resourceVersion: '21',
+        },
+        spec: {
+          description: 'Body-bearer Server',
+          transport: {
+            type: 'streamableHttp',
+            url: 'http://server-body.mcp-server.svc.cluster.local:8080/mcp',
+            port: 8080,
+          },
+          auth: { type: 'oauth' },
+          oauth: { source: 'remote', grantScope: 'user', bearerInBody: true },
+          remote: { baseUrl: 'https://mcp.semrush.example/mcp' },
+          enabled: true,
+        },
+      },
+    }
+    mocks.getNamespacedCustomObject.mockImplementation(
+      async ({ plural, name }: { plural: string; name: string }) => objects[`${plural}/${name}`]
+    )
+
+    const store = createMcpAuthorizationStore(provider)
+    const server = await store.readMcpServer('server-body')
+    expect(server).not.toBeNull()
+    expect(server!.bearerInBody).toBe(true)
+    expect(server!.remote).toBe(true)
   })
 })
 
@@ -7480,7 +7550,7 @@ describe('McpServerWatcher.start ordering (#281 R6-bis)', () => {
     expect(watcher.isCommunicationChannelCacheSynced()).toBe(false)
     expect(errorSpy).toHaveBeenCalledWith(
       '[K8s] CommunicationChannel initial load failed; ccCacheSynced remains false ' +
-        '(B2 preserves channel-reader replicas and holds stateless lifecycle active):',
+        '(B2 preserves channel-reader replicas, preserving durable Host lifecycle state):',
       expect.any(Error)
     )
 
@@ -10769,8 +10839,10 @@ describe('McpServerWatcher.hostFrontsOAuthServer (oauth:user-token scope probe)'
   })
 
   /** Drive the REAL getServerInfosByContext: populate the server cache and answer
-   *  the Context read the producer makes with an allow-list of those servers. */
+   *  the Context read the producer makes with an allow-list of those servers.
+   *  The cache is an observation only while its LIST -> WATCH pair is live. */
   const withServers = (watcher: McpServerWatcher, servers: any[]): void => {
+    markMcpServerInventoryAuthoritative(watcher)
     for (const s of servers) (watcher as any).servers.set(s.name, s)
     mocks.getNamespacedCustomObject.mockImplementation(async ({ plural }: { plural: string }) =>
       plural === 'contexts'
@@ -10813,6 +10885,60 @@ describe('McpServerWatcher.hostFrontsOAuthServer (oauth:user-token scope probe)'
     const watcher = new McpServerWatcher()
     withServers(watcher, [])
     await expect((watcher as any).hostFrontsOAuthServer(hostFor('ctx'))).resolves.toBe(false)
+    watcher.stop()
+  })
+
+  /** The resolver McpServerWatcher wires into HostReconciler at construction. */
+  const wiredResolver = (watcher: McpServerWatcher): ((host: HostCRD) => Promise<boolean>) => {
+    const calls = (watcher.getHostReconciler() as any).setHostFrontsOAuthServer.mock.calls
+    expect(calls).toHaveLength(1)
+    return calls[0][0]
+  }
+
+  it('does not serve a retired McpServer cache that would grant the OAuth scope', async () => {
+    const watcher = new McpServerWatcher()
+    withServers(watcher, [serverCRD({ name: 'notion', auth: { type: 'oauth' }, enabled: true })])
+    const resolve = wiredResolver(watcher)
+    // Liveness witness: while the inventory is authoritative, this same cache
+    // and wired resolver grant the scope.
+    await expect(resolve(hostFor('ctx'))).resolves.toBe(true)
+
+    // A McpServer watch outage retires the inventory but keeps its last cache,
+    // which still holds the enabled OAuth server an admin may have disabled.
+    expect((watcher as any).retireMcpServerWatch()).toBe(true)
+    expect((watcher as any).servers.get('notion')?.spec.enabled).toBe(true)
+
+    await expect(resolve(hostFor('ctx'))).rejects.toThrow(
+      'McpServer inventory is not authoritative; OAuth scope is unobserved'
+    )
+    watcher.stop()
+  })
+
+  it('does not serve a McpServer cache that lost authority during the Context read', async () => {
+    const watcher = new McpServerWatcher()
+    withServers(watcher, [serverCRD({ name: 'notion', auth: { type: 'oauth' }, enabled: true })])
+    const contextRead = deferred<unknown>()
+    const contextReads: string[] = []
+    mocks.getNamespacedCustomObject.mockImplementation(
+      async ({ plural, name }: { plural: string; name: string }) => {
+        contextReads.push(`${plural}/${name}`)
+        return contextRead.promise
+      }
+    )
+
+    const pending = wiredResolver(watcher)(hostFor('ctx'))
+    await flushMicrotasks()
+    // Liveness witness: the observation reached the live Context read.
+    expect(contextReads).toEqual(['contexts/ctx'])
+    expect((watcher as any).retireMcpServerWatch()).toBe(true)
+    contextRead.resolve({
+      metadata: { name: 'ctx', namespace: 'mcp-server' },
+      spec: { contextId: 'ctx', mcpServers: ['notion'] },
+    })
+
+    await expect(pending).rejects.toThrow(
+      'McpServer inventory lost authority during the OAuth scope read'
+    )
     watcher.stop()
   })
 })

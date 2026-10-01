@@ -172,6 +172,26 @@ T2 with `make minikube-t2-runtime` (`T2_RUN_T0=false T2_RUN_T1=false`). That
 path is valid only when the pre-gate marker already matches HEAD
 (`already-synced`). Do not set those flags to skip an uncertified lane.
 
+Before repeating an already completed full T0/T1/T2 certification, propose
+the repeat with its reason and expected cost, then ask the user whether to run
+it. A recommendation alone does not authorize a repeat. This choice does not
+turn an earlier HEAD's evidence into certification for a newer HEAD: if the
+user declines, report the newer HEAD as uncertified. A same-HEAD
+`minikube-t2-runtime` retry to finish an authorized run is the supported
+recovery path, not a new full recertification.
+
+For branch-owned user-facing E2E health journeys, resolve the seeded test
+credential locally before patching HCC or creates fault-injection fixtures.
+Use `scripts/e2e/load-dotenv.sh` with `dotenv_load_canonical_root` and
+`scripts/e2e/admin-credentials.sh` with `e2e_resolve_admin_password`; an
+explicit `E2E_USER_PASSWORD` may override that journey's credential. Keep the
+resolved value in process memory. Never inspect, print, log, or persist `.env`
+contents, even to test whether a key exists. Missing credentials must fail
+preflight before mutating the owned profile. Use the profile's persisted
+ports and the exact `T2_PORT_FORWARD_COMMAND` hold when `pre-gate-sync` can
+restart a service; `targeted-sync` also requires a bounded
+`T2_HEALTHCHECK_COMMAND`.
+
 The active profile mutation lock is `$T2_LOCK_ROOT/<profile>.lock`; stale-lock
 reclaim coordination uses the sibling directory
 `$T2_LOCK_ROOT/<profile>.reclaim`. A killed reclaimer may leave that sibling

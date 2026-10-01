@@ -15,15 +15,21 @@ import { deriveOAuthEncryptionKey } from '../oauth/encryption.js'
 import { integrationNotConfigured, isSecretNotFound } from '../oauth/integrationNotConfigured.js'
 import {
   type McpServerOAuthDecl,
+  RemoteOAuthSpecIncoherentError,
+  assertRemoteOAuthSpecCoherent,
   buildMcpServerGrantKey,
+  readCrUid,
+  readOAuthLane,
   resolveServerOAuth,
+  resolveServerOAuthSubject,
 } from '../oauth/mcpServerOAuthSpec.js'
+import { getAccessTokenReactive } from '../oauth/reactiveTokenHelper.js'
 import { type OAuthGrantKey, oauthGrantExists } from '../oauth/store.js'
-import { getAccessToken } from '../oauth/tokenHelper.js'
 import { type Logger, rootLogger } from '../observability/logger.js'
 import { K8sNotFoundError } from '../services/resourceService.js'
 import {
   type McpHostControlClaims,
+  mcpHostRateLimitBucketKey,
   verifyMcpHostControlJwt,
 } from '../utils/auth/mcpHostJwtToken.js'
 import { extractBearerToken } from '../utils/extractBearerToken.js'
@@ -58,8 +64,8 @@ import { extractBearerToken } from '../utils/extractBearerToken.js'
  * Both branches ship in v1; the `context` branch is governed/exercised by U6.
  */
 
-interface McpServerResource {
-  metadata?: { name?: string; namespace?: string }
+export interface McpServerResource {
+  metadata?: { name?: string; namespace?: string; uid?: string }
   spec?: {
     auth?: { type?: unknown }
     oauth?: McpServerOAuthDecl
@@ -71,35 +77,75 @@ interface McpServerResource {
 }
 
 /**
+ * The owner metadata the refresh engine reads. `uid` is the installation identity
+ * a grant was sealed with; it is kept only when it is a non-empty string, so a
+ * malformed value can never equal a sealed grant's uid.
+ */
+function ownerMetadata(server: McpServerResource): RecipeWithOAuthClients['metadata'] {
+  const md = server.metadata
+  if (!md) return undefined
+  const uid = readCrUid(server)
+  return { name: md.name, namespace: md.namespace, ...(uid ? { uid } : {}) }
+}
+
+/**
  * Normalize a McpServer's single `spec.oauth` object into the
  * `{ spec: { oauthClients: [decl] } }` shape the owner-agnostic broker +
  * refresh path (`getAccessToken`) already consume. Returns null when the server
  * is not an OAuth server (no `spec.oauth`), so callers fail closed.
  */
-function normalizeMcpServerOwnerDecl(server: McpServerResource): RecipeWithOAuthClients | null {
+export function normalizeMcpServerOwnerDecl(
+  server: McpServerResource
+): RecipeWithOAuthClients | null {
   const oauth = server.spec?.oauth
-  if (!oauth || typeof oauth.id !== 'string' || typeof oauth.provider !== 'string') return null
+  if (!oauth) return null
+  const lane = readOAuthLane(oauth)
+  // Remote lane (`source:'remote'`): delegate to the SHARED subject resolver so the
+  // refresh reader reads the remote client (public / DCR / pre-registered)
+  // IDENTICALLY to the mint + callback (D4 — no drift). The remote decl carries the
+  // pinned routing + secretSource that `getAccessToken` branches on.
+  if (lane === 'remote') {
+    const resolved = resolveServerOAuthSubject(server)
+    if (!resolved) return null
+    return { metadata: ownerMetadata(server), spec: { oauthClients: [resolved.decl] } }
+  }
+  // Generic self-hosted lane (`source:'generic'`, DEC-28): delegate to the SAME
+  // subject resolver (D4 — no drift with mint + callback) so the refresh reader
+  // gets the pinned `generic` routing + secretSource that `getAccessToken`
+  // branches on.
+  if (lane === 'generic') {
+    const resolved = resolveServerOAuthSubject(server)
+    if (!resolved) return null
+    return { metadata: ownerMetadata(server), spec: { oauthClients: [resolved.decl] } }
+  }
+  // Baked lane (unchanged; a public baked client is tolerated per E-19.2).
+  if (typeof oauth.id !== 'string' || typeof oauth.provider !== 'string') return null
   const clientIdRef = oauth.clientIdRef
-  const clientSecretRef = oauth.clientSecretRef
-  if (
-    !clientIdRef ||
-    typeof clientIdRef.name !== 'string' ||
-    typeof clientIdRef.key !== 'string' ||
-    !clientSecretRef ||
-    typeof clientSecretRef.name !== 'string' ||
-    typeof clientSecretRef.key !== 'string'
-  ) {
+  if (!clientIdRef || typeof clientIdRef.name !== 'string' || typeof clientIdRef.key !== 'string') {
     return null
   }
+  // clientSecretRef is optional (E-19.2, public client): ABSENT (null/undefined)
+  // ⇒ public client (decl carries `clientSecretRef: undefined`); PRESENT-but-
+  // malformed stays fail-closed (null) — a half-declared secret ref is a config
+  // error, not a public client. `!= null` (not `!== undefined`) so a JSON-null
+  // ref from the untrusted CR is treated as absent, never dereferenced.
+  const clientSecretRef = oauth.clientSecretRef
+  let normalizedSecretRef: { name: string; key: string } | undefined
+  if (clientSecretRef != null) {
+    if (typeof clientSecretRef.name !== 'string' || typeof clientSecretRef.key !== 'string') {
+      return null
+    }
+    normalizedSecretRef = { name: clientSecretRef.name, key: clientSecretRef.key }
+  }
   return {
-    metadata: server.metadata,
+    metadata: ownerMetadata(server),
     spec: {
       oauthClients: [
         {
           id: oauth.id,
           provider: oauth.provider,
           clientIdRef: { name: clientIdRef.name, key: clientIdRef.key },
-          clientSecretRef: { name: clientSecretRef.name, key: clientSecretRef.key },
+          clientSecretRef: normalizedSecretRef,
           scopes: Array.isArray(oauth.scopes)
             ? oauth.scopes.filter((s): s is string => typeof s === 'string')
             : undefined,
@@ -376,7 +422,13 @@ export function createMcpOauthRouter(gateway: K8sGateway): Router {
       maxPerMinute: config.oauthBrokerRlPerMin,
       getBucketKey: req => {
         const claims = req.res?.locals?.mcpHostControl as McpHostControlClaims | undefined
-        return claims ? `mcp-oauth:${claims.sub}` : 'mcp-oauth:unknown'
+        // Standalone 1st-party hosts all share sub=<hostsNamespace>/standalone,
+        // so keying by sub would collapse every standalone host into one bucket.
+        // The verified principal keys standalone hosts by hostRefs[0] instead,
+        // keeping each host isolated.
+        return (
+          mcpHostRateLimitBucketKey('mcp-oauth', claims, 'mcp-oauth:unknown') ?? 'mcp-oauth:unknown'
+        )
       },
       onBackendUnavailable: 'process-memory',
     }),
@@ -421,6 +473,9 @@ export function createMcpOauthRouter(gateway: K8sGateway): Router {
         if (authType !== 'oauth' || !resolved) {
           return res.status(400).json({ error: 'not_oauth_server' })
         }
+        // Checked up front, not only through the refresh reader: a still-fresh
+        // access token is served without ever reading the owner declaration.
+        assertRemoteOAuthSpecCoherent(server)
 
         // Bifurcate by grantScope read from the server. The KEY comes from the
         // shared derivation (`buildMcpServerGrantKey`, D4) so the mint, the
@@ -461,7 +516,7 @@ export function createMcpOauthRouter(gateway: K8sGateway): Router {
 
         // Interactive live-session path — a human session is present, so
         // background consent is NOT required here (requireBackground: false).
-        const result = await getAccessToken(
+        const result = await getAccessTokenReactive(
           { ...key, requireBackground: false },
           {
             db: { query: (text, values) => pool.query(text, values) },
@@ -517,6 +572,9 @@ export function createMcpOauthRouter(gateway: K8sGateway): Router {
               .json({ error: 'refresh_failed', status: result.status, detail: result.detail })
         }
       } catch (err) {
+        if (err instanceof RemoteOAuthSpecIncoherentError) {
+          return res.status(409).json({ error: err.code, reason: err.reason })
+        }
         next(err)
       }
     }
@@ -541,7 +599,13 @@ export function createMcpOauthRouter(gateway: K8sGateway): Router {
       maxPerMinute: config.oauthBrokerRlPerMin,
       getBucketKey: req => {
         const claims = req.res?.locals?.mcpHostControl as McpHostControlClaims | undefined
-        return claims ? `mcp-oauth:${claims.sub}` : 'mcp-oauth:unknown'
+        // Standalone 1st-party hosts all share sub=<hostsNamespace>/standalone,
+        // so keying by sub would collapse every standalone host into one bucket.
+        // The verified principal keys standalone hosts by hostRefs[0] instead,
+        // keeping each host isolated.
+        return (
+          mcpHostRateLimitBucketKey('mcp-oauth', claims, 'mcp-oauth:unknown') ?? 'mcp-oauth:unknown'
+        )
       },
       onBackendUnavailable: 'process-memory',
     }),

@@ -67,10 +67,6 @@ import {
 } from './constants'
 import type { CreatedResource, HostWizardProps, HostWizardValidationState } from './types'
 
-// Stateless lifecycle support remains intact in the API and existing-agent UI;
-// only creation through this wizard is temporarily unavailable.
-const SHOW_STATELESS_AGENT_SELECTOR = false
-
 // Asymmetric save gate (spec Topic 1b): the PRIMARY provider must be usable —
 // its required credential slot(s) filled — before create is allowed. Fallbacks
 // are optional and only warn, so they never enter this gate.
@@ -977,50 +973,48 @@ export function HostWizard({
               </span>
             </div>
             <div className="cu-agent-namespace">Namespace: {HOST_NAMESPACE}</div>
-            {SHOW_STATELESS_AGENT_SELECTOR ? (
-              <div className="cu-agent-access-section">
-                <strong id="agent-type-label">Agent type</strong>
-                <span className="cu-muted cu-agent-access-hint">
-                  Stateless agents suspend after the idle window and wake on demand. Communication
-                  channels keep stateless agents always-on unless the cluster explicitly enables
-                  wake-on-interaction; desktop still requires a stateful agent.
-                </span>
-                <div
-                  className="cu-agent-radio-group"
-                  role="radiogroup"
-                  aria-labelledby="agent-type-label"
-                >
-                  <label className="cu-agent-radio cu-agent-radio--card">
-                    <input
-                      type="radio"
-                      name="agent-type"
-                      checked={!stateless}
-                      onChange={() => setStateless(false)}
-                    />
-                    <span className="cu-agent-radio__copy">
-                      <span className="cu-agent-radio__title">Stateful (always on)</span>
-                      <span className="cu-agent-radio__description">
-                        The agent keeps running continuously and responds immediately.
-                      </span>
+            <div className="cu-agent-access-section">
+              <strong id="agent-type-label">Agent type</strong>
+              <span className="cu-muted cu-agent-access-hint">
+                Stateless agents suspend after the idle window and wake on demand. Communication
+                channels currently keep an agent always-on, and desktop agents still require a
+                stateful agent.
+              </span>
+              <div
+                className="cu-agent-radio-group"
+                role="radiogroup"
+                aria-labelledby="agent-type-label"
+              >
+                <label className="cu-agent-radio cu-agent-radio--card">
+                  <input
+                    type="radio"
+                    name="agent-type"
+                    checked={!stateless}
+                    onChange={() => setStateless(false)}
+                  />
+                  <span className="cu-agent-radio__copy">
+                    <span className="cu-agent-radio__title">Stateful (always on)</span>
+                    <span className="cu-agent-radio__description">
+                      The agent keeps running continuously and responds immediately.
                     </span>
-                  </label>
-                  <label className="cu-agent-radio cu-agent-radio--card">
-                    <input
-                      type="radio"
-                      name="agent-type"
-                      checked={stateless}
-                      onChange={() => setStateless(true)}
-                    />
-                    <span className="cu-agent-radio__copy">
-                      <span className="cu-agent-radio__title">Stateless (suspends when idle)</span>
-                      <span className="cu-agent-radio__description">
-                        The platform suspends the agent when idle and wakes it on demand.
-                      </span>
+                  </span>
+                </label>
+                <label className="cu-agent-radio cu-agent-radio--card">
+                  <input
+                    type="radio"
+                    name="agent-type"
+                    checked={stateless}
+                    onChange={() => setStateless(true)}
+                  />
+                  <span className="cu-agent-radio__copy">
+                    <span className="cu-agent-radio__title">Stateless (suspends when idle)</span>
+                    <span className="cu-agent-radio__description">
+                      The platform suspends the agent when idle and wakes it on demand.
                     </span>
-                  </label>
-                </div>
+                  </span>
+                </label>
               </div>
-            ) : null}
+            </div>
           </div>
         )}
 

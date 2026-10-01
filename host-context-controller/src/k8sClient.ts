@@ -1759,9 +1759,9 @@ export class McpServerWatcher implements McpServerProvider {
         void this.requestHostFleetReconcile('CommunicationChannel recovery', lifecycleGeneration)
         return true
       } catch (error) {
-        console.error(
-          '[K8s] CommunicationChannel cache recovery failed; stateless lifecycle remains held active:',
-          error
+        hccLogger.error(
+          '[K8s] CommunicationChannel cache recovery failed; preserving durable Host lifecycle state:',
+          { err: error }
         )
         return false
       }
@@ -2519,9 +2519,22 @@ export class McpServerWatcher implements McpServerProvider {
    * already filters to enabled + allowed servers) that mcp-host discovery uses,
    * so HCC does not need a second cross-CRD read path. HostReconciler wraps this
    * call in a fail-closed guard, so a thrown read there yields no oauth scope.
+   *
+   * A retired McpServer watch keeps its last `servers` cache, so an answer read
+   * from it is only an observation while the same LIST -> WATCH generation stays
+   * authoritative across the whole read. Otherwise this throws: a server an
+   * admin disabled during the outage must not re-grant the scope from the stale
+   * cache, and HostReconciler treats the throw as an unobserved read.
    */
   private async hostFrontsOAuthServer(host: HostCRD): Promise<boolean> {
+    const watchGeneration = this.mcpWatchGeneration
+    if (!this.hasMcpServerInventoryAuthority(watchGeneration)) {
+      throw new Error('McpServer inventory is not authoritative; OAuth scope is unobserved')
+    }
     const servers = await this.getServerInfosByContext(host.spec.contextRef)
+    if (!this.hasMcpServerInventoryAuthority(watchGeneration)) {
+      throw new Error('McpServer inventory lost authority during the OAuth scope read')
+    }
     return servers.some(server => server.enabled && server.auth?.type === 'oauth')
   }
 
@@ -2828,7 +2841,7 @@ export class McpServerWatcher implements McpServerProvider {
     } catch (error) {
       console.error(
         '[K8s] CommunicationChannel initial load failed; ccCacheSynced remains false ' +
-          '(B2 preserves channel-reader replicas and holds stateless lifecycle active):',
+          '(B2 preserves channel-reader replicas, preserving durable Host lifecycle state):',
         error
       )
     }
@@ -3957,8 +3970,8 @@ export class McpServerWatcher implements McpServerProvider {
       if (err) {
         console.error('[K8s] CommunicationChannel watch error:', err)
       }
-      console.log(
-        '[K8s] CommunicationChannel watch ended; holding stateless lifecycle active until snapshot recovery'
+      hccLogger.info(
+        '[K8s] CommunicationChannel watch ended; preserving durable Host lifecycle state until snapshot recovery'
       )
       void this.requestHostFleetReconcile(
         'CommunicationChannel watch interruption',
@@ -5344,6 +5357,12 @@ export function createMcpAuthorizationStore(provider: McpServerProvider): McpAut
           auth: object.spec.auth ? { ...object.spec.auth } : undefined,
           // grantScope drives the inventory authKind derivation (mini-spec 10 §3.1).
           oauth: object.spec.oauth ? { ...object.spec.oauth } : undefined,
+          // Single source of truth for remote-ness, mirrors the reconciler's isRemote.
+          remote: !!object.spec.remote?.baseUrl,
+          // Transport quirk derived alongside remote (mini-spec 19 §D-8): the
+          // resource advertised bearer_methods_supported:["body"]. Non-secret;
+          // projected omit-when-false to the inventory in listServers.
+          bearerInBody: !!object.spec.oauth?.bearerInBody,
           enabled: object.spec.enabled !== false,
           status,
         }

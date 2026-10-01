@@ -51,7 +51,10 @@ import {
   collectToolAttachments,
   mergeCollectedAttachments,
 } from '../core/orchestration/toolUseLoopMessages'
-import { buildTurnContextBlock } from '../core/orchestration/turnContext'
+import {
+  attachedFilesForTurnContext,
+  buildTurnContextBlock,
+} from '../core/orchestration/turnContext'
 import { DefaultReasoningFactory } from '../core/reasoning'
 import {
   CAPABILITY_CONTRACT_TEXT,
@@ -111,6 +114,7 @@ import { GovernedRunReporter, UsageReporter } from '../usage/usageReporter.js'
 import { resolveProviderWorkflowCallerContext } from '../workflow/providerWorkflowCallerContextClient'
 import type { Workspace } from '../workspace/service'
 import type { CronScheduler } from './cronScheduler'
+import { referencedFilesForTurnContext } from './fileReferenceResolver'
 import {
   type ProviderWorkflowAccessDenialReason,
   isProviderWorkflowChannel,
@@ -119,6 +123,7 @@ import {
   looksLikeWorkflowTriggerSuccess,
   workflowAccessDeniedResponseForMessage,
 } from './providerWorkflowAccessGate'
+import { sourceMessageForResume } from './sourceMessageForResume'
 import { TaskExecutionBudget, TaskLimitError } from './taskExecutionBudget'
 import { TurnTimingRecorder } from './turnTiming'
 import type { AgentConfig, ExecutorFailoverSupport } from './types'
@@ -1093,7 +1098,14 @@ export class TaskExecutor {
     // prompt and into a `<turn-context>` block prepended to the LAST user
     // message of the turn. Only the first user message of the turn gets it;
     // `tool` messages keep their content untouched.
-    if (appConfig.promptCacheEnabled) {
+    // #666 — the block is also the only carrier of the `attached_file` and
+    // `referenced_file` lines, so a message with file attachments or resolved
+    // file references gets it with the cache off too; the attachment
+    // condition also registers `clerum__attachment_read`.
+    const hasFileAttachments =
+      this.task.sourceMessage?.attachments?.some(attachment => attachment.kind === 'file') === true
+    const hasFileReferences = (this.task.sourceMessage?.fileReferenceResolutions?.length ?? 0) > 0
+    if (appConfig.promptCacheEnabled || hasFileAttachments || hasFileReferences) {
       this.prependTurnContextBlock(messages)
     }
     const promptAssemblyStart = Date.now()
@@ -1134,6 +1146,10 @@ export class TaskExecutor {
               scheduledFor: new Date().toISOString(),
             }
           : undefined,
+        attachedFiles: attachedFilesForTurnContext(this.task.sourceMessage?.attachments),
+        referencedFiles: referencedFilesForTurnContext(
+          this.task.sourceMessage?.fileReferenceResolutions
+        ),
       })
       const isCron = this.task.cronJobId !== undefined
       if (m.contentParts && m.contentParts.length > 0) {
@@ -1219,6 +1235,10 @@ export class TaskExecutor {
 
       case 'need_approval': {
         result.approval.task_budget = this.executionBudget.pause()
+        // #666 R4-M2 — persist the sanitized source message so a cold restart
+        // rebuilds the file-reference pins and attachment metadata. The inline
+        // bytes (dataBase64) never persist.
+        result.approval.sourceMessage = sourceMessageForResume(this.task.sourceMessage)
         // Durable write FIRST: under sqlite/dual the suspend can reject. We
         // must not tell the client "suspended" (SSE) or register the approval
         // before the durable state lands — otherwise a rejected write leaves a
@@ -1970,6 +1990,36 @@ export class TaskExecutor {
     return modelLine
   }
 
+  /**
+   * Best-effort per-turn catalog bootstrap. Opens the caller's grant-backed
+   * remote OAuth partitions (per-user and SHARED oauth-context) so their tools
+   * are in the catalog this turn builds — a failure only forfeits that head start
+   * and falls back to lazy admission, so it NEVER throws. It runs once per task
+   * (createToolRegistry is cached by toolRegistryPromise), and the abort only cuts
+   * this turn's wait: the admissions belong to the manager, are coalesced there,
+   * and outlive the turn.
+   */
+  private async bootstrapMcpCatalog(): Promise<void> {
+    const manager = this.deps.mcpManager
+    const userId = this.task.sourceMessage?.sender
+    if (!manager || !userId) return
+    const started = Date.now()
+    try {
+      const summary = await withAbort(
+        () => manager.bootstrapUserCatalog(userId, { signal: this.abortController.signal }),
+        this.abortController.signal
+      )
+      if (summary.candidates > 0) {
+        logger.info({ taskId: this.taskId, ...summary }, 'MCP catalog bootstrap')
+      }
+    } catch (err) {
+      logger.warn(
+        { taskId: this.taskId, err, elapsedMs: Date.now() - started },
+        'MCP catalog bootstrap failed; continuing with lazy admission'
+      )
+    }
+  }
+
   private async buildToolRegistry(): Promise<{
     registry: ToolRegistry
     loopController: LoopController
@@ -2004,7 +2054,12 @@ export class TaskExecutor {
       this.deps.failover?.policy.fallbacks
     )
     const nativeRegistry = new NativeToolRegistry(
-      appConfig.nativeTool,
+      // The spillover threshold is a top-level setting; clerum__attachment_read
+      // states it in its description (#666).
+      {
+        ...appConfig.nativeTool,
+        toolSpilloverThresholdBytes: appConfig.toolSpilloverThresholdBytes,
+      },
       this.conversation!.id,
       this.deps.cronScheduler ?? undefined,
       this.task.sourceMessage,
@@ -2027,6 +2082,11 @@ export class TaskExecutor {
       this.deps.llmProvider.getProviderType()
     )
     await registerDesktopTools(nativeRegistry)
+    // Eagerly open this caller's remote OAuth partitions before the catalog is
+    // read, so grant-backed tools exist in the very first turn instead of after a
+    // failed lazy call. Best-effort: a failure here must never invalidate the
+    // registry promise or the task.
+    await this.bootstrapMcpCatalog()
     const mcpRegistry = this.deps.mcpManager
       ? // Thread the authenticated caller identity so oauth grantScope='user'
         // tools dispatch to the caller's per-user partition (fail-closed when

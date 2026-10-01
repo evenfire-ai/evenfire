@@ -36,8 +36,13 @@ const GFS_GRANT_ERROR_MESSAGES: Record<string, string> = {
  * is an implementation detail of our own main/renderer split; the server
  * verdict that follows it is the part a user can act on. This strips exactly
  * the wrapper and leaves the verdict intact.
+ *
+ * The quoted channel is mandatory: Electron's renderer always formats the
+ * rejection as `Error invoking remote method '${channel}': ${error}`, so a
+ * prefix without it is not an IPC wrapper and must stay visible to the
+ * classifiers rather than be treated as one.
  */
-const IPC_WRAPPER_PREFIX = /^Error invoking remote method '[^']*':\s*(?:[A-Za-z]*Error:\s*)?/
+const IPC_WRAPPER_PREFIX = /^Error invoking remote method '[^']*':\s*(?:[A-Za-z]*Error:\s*)?/i
 
 export function stripIpcWrapper(message: string): string {
   return message.replace(IPC_WRAPPER_PREFIX, '')

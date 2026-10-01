@@ -5,6 +5,12 @@ export interface GfsReadOptions {
   timeoutMs?: number
   deadlineMs?: number
   budget?: VisualInputBudget
+  /**
+   * #666 — the version a structured file reference was taken at. A metadata
+   * snapshot at any other version fails with `version_conflict` before the
+   * content is requested.
+   */
+  expectedVersion?: number
 }
 
 /** A validated metadata/content snapshot. This object is never a tool result. */

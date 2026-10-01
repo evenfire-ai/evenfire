@@ -40,11 +40,14 @@ vi.mock('../../config', () => ({
     devModelName: 'test-model',
     devModelProvider: 'openai',
     contextMaxTokens: 100000,
+    toolSpilloverThresholdBytes: 1_048_576,
     nativeTool: {
       workspacePath: '/tmp',
       shellTimeout: 5000,
       maxOutputLength: 10000,
       enableShell: false,
+      // Registering clerum__attachment_read for a file attachment needs it.
+      attachmentTextReadMaxBytes: 262_144,
     },
   },
 }))
@@ -105,7 +108,19 @@ function createDeps(overrides?: Partial<TaskExecutorDeps>): TaskExecutorDeps {
       completeSingleTurnWithTools: vi.fn(),
       getProviderType: () => 'openai' as const,
     } as any,
-    mcpManager: { getAllTools: () => [], callTool: vi.fn() } as any,
+    mcpManager: {
+      getAllTools: () => [],
+      callTool: vi.fn(),
+      bootstrapUserCatalog: vi.fn(async () => ({
+        candidates: 0,
+        probed: 0,
+        admitted: 0,
+        pending: 0,
+        skipped: {},
+        waitedMs: 0,
+        timedOut: false,
+      })),
+    } as any,
     workspaceService: undefined,
     config: {
       maxTaskDuration: 300000,
@@ -2007,6 +2022,70 @@ describe('TaskExecutor effective limits', () => {
       task,
       expect.objectContaining({ code: 'TASK_ITERATION_LIMIT' })
     )
+  })
+  it('persists the sanitized source message on the approval it suspends', async () => {
+    const task = createTask('read the notes'),
+      deps = createDeps()
+    const bytes = Buffer.from('SENTINEL-666-executor-bytes').toString('base64')
+    task.sourceMessage!.attachments = [
+      {
+        id: 'file-1',
+        kind: 'file',
+        mimeType: 'text/plain',
+        encoding: 'base64',
+        dataBase64: bytes,
+        filename: 'notes.txt',
+        sizeBytes: 27,
+      },
+    ]
+    task.sourceMessage!.fileReferenceResolutions = [
+      {
+        availability: 'available',
+        reference: {
+          schemaVersion: 1,
+          id: 'gfs:main:123@v3',
+          source: {
+            kind: 'gfs',
+            drive: 'main',
+            resourceId: '123',
+            gfsUri: 'gfs://main/123',
+            version: 3,
+          },
+          name: 'notes.txt',
+          declaredMediaType: null,
+          detectedMediaType: 'text/plain',
+          class: 'text',
+          detection: 'text_utf8',
+          mismatch: false,
+          byteLength: 4,
+          textReadable: true,
+          reader: 'text',
+          modelImageInput: 'unsupported',
+        },
+      },
+    ]
+    vi.mocked(runToolUseLoop).mockResolvedValue({
+      type: 'need_approval',
+      approval: {
+        request_id: 'r-source',
+        tool_name: 'test',
+        tool_call_id: 'tc',
+        parameters: {},
+        description: 'confirm',
+        context_snapshot: [{ role: 'user', content: 'read the notes' }],
+      },
+    })
+    // Liveness witness: the live message does carry the inline bytes, so the
+    // absence checked below is the sanitizer's doing and not an empty fixture.
+    expect(task.sourceMessage!.attachments![0].dataBase64).toBe(bytes)
+    const executor = new TaskExecutor(task, deps)
+    await executor.run()
+    expect(deps.onFail).not.toHaveBeenCalled()
+    const persisted = executor.pendingApproval!.sourceMessage!
+    expect(persisted.fileReferenceResolutions).toEqual(task.sourceMessage!.fileReferenceResolutions)
+    expect(persisted.attachments).toHaveLength(1)
+    expect(persisted.attachments![0]).toMatchObject({ id: 'file-1', filename: 'notes.txt' })
+    expect(JSON.stringify(persisted)).not.toContain(bytes)
   })
   it('renews a legacy approval on the same task before executing anything', async () => {
     const task = createTask(),

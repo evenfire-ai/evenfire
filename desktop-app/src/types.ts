@@ -1,3 +1,4 @@
+import type { FileReferenceV1 } from '@clerum/gfs-interaction-policy'
 import type { ImageInputDecision } from './imageInputDecision'
 
 export type Role = 'admin' | 'inviter' | 'member'
@@ -538,6 +539,11 @@ export type HostMessageRequest = {
   model?: string
   /** CAS base captured with a visual message's explicit model choice. */
   modelSelectionRevision?: number
+  /**
+   * Issue #666 — Global Files selected in the composer, as structured
+   * references. mcp-host re-authorizes each one before the task exists.
+   */
+  fileReferences?: FileReferenceV1[]
   [key: string]: unknown
 }
 
@@ -578,6 +584,17 @@ export type HostMessageResponse = {
    * ignored the selection.
    */
   modelSelectionRevision?: number
+  /**
+   * #666 — the attachment ids the Host admitted with this message. Absent when
+   * the Host predates the field or the send carried no attachments.
+   */
+  acceptedAttachmentIds?: readonly string[]
+  /**
+   * #666 — the FileReference ids the Host admitted with this message. A sent
+   * reference whose id is missing here did not reach the Host; the message was
+   * delivered without it.
+   */
+  acceptedFileReferenceIds?: readonly string[]
   approval?: {
     taskId: string
     requestId: string
@@ -755,15 +772,16 @@ export type HostRuntimeHealth = {
  * 409 `not-stateless`). `skipped: 'cooldown'` means a recent attempt for the
  * same hostRef suppressed the HTTP call entirely; `skipped: 'in-flight'`
  * means that attempt's bounded re-emission loop is still running (structural
- * single-loop-per-host guarantee). `error` carries the failure
- * message for any other outcome — the caller treats prewarm as
+ * single-loop-per-host guarantee). `skipped: 'auth-changed'` means the
+ * authenticated owner changed or is changing before a wake can be issued.
+ * `error` carries the failure message for any other outcome — the caller treats prewarm as
  * fire-and-forget, so failures surface here (and in main-process logs), never
  * as a thrown error.
  */
 export type PrewarmHostResult = {
   requested: boolean
   status?: string
-  skipped?: 'cooldown' | 'in-flight'
+  skipped?: 'cooldown' | 'in-flight' | 'auth-changed'
   error?: string
 }
 
@@ -908,12 +926,41 @@ export interface ChatMetadata {
   lastTerminalAt?: string
 }
 
+/** The authority identity that owns a local chat deletion. */
+export interface ChatAuthorityScope {
+  environmentKey: string
+  userId: string
+  teamId: string | null
+}
+
+/** Main-issued fence captured when a delete is queued and rechecked on confirm. */
+export interface ChatDeleteFence {
+  version: 1
+  authorityScope: ChatAuthorityScope
+  bindingGeneration: number
+  sessionGeneration: number
+}
+
+/** Durable tombstone and cleanup identity for one scoped local deletion. */
+export interface ChatDeleteTombstone {
+  chatId: string
+  authorityScope: ChatAuthorityScope
+}
+
 export interface ChatIndex {
   /** v2 remains readable by pre-paging builds; v3 is accepted and normalized for compatibility. */
   version: 1 | 2 | 3
   lastActiveChatId: string | null
   onboardingDismissed: boolean
   chats: ChatMetadata[]
+  /** New deletions are isolated to their complete authority identity. */
+  deletedChatTombstones?: ChatDeleteTombstone[]
+  /** Durable artifact-cleanup work, retried only in the owning authority scope. */
+  pendingChatCleanup?: ChatDeleteTombstone[]
+}
+
+export interface ChatDeleteResult {
+  cleanupPending: boolean
 }
 
 /** Server-reported session lifecycle (D.1). `idle` once no task is in flight. */
