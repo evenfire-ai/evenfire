@@ -310,6 +310,21 @@ describe('generate_docx lists', () => {
     expect(levels(two)).toEqual([0, 1, 2, 3, 4])
   })
 
+  it('sets items past the ninth level at the ninth, and says so once', async () => {
+    const body = Array.from({ length: 11 }, (_, i) => `${'  '.repeat(i)}- L${i + 1}`).join('\n')
+    const r = await generate({ body: `${body}\n\n${body}` })
+    expect(r.success, r.error).toBe(true)
+    const xml = zipEntryText(r.artifact!.path, 'word/document.xml')
+    expect(levels(xml).slice(0, 11)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 8, 8])
+    expect(r.content!.match(/nested more than 9 levels deep/g)).toHaveLength(1)
+  })
+
+  it('says nothing about depth for a list within nine levels', async () => {
+    const body = Array.from({ length: 9 }, (_, i) => `${'  '.repeat(i)}- L${i + 1}`).join('\n')
+    const r = await generate({ body })
+    expect(r.content ?? '').not.toContain('levels deep')
+  })
+
   it('defines nine levels for both list kinds', async () => {
     const r = await generate({ body: '- a\n\n1. b' })
     const numbering = zipEntryText(r.artifact!.path, 'word/numbering.xml')

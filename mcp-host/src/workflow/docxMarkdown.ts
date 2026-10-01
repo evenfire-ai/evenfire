@@ -38,6 +38,10 @@ function blankParagraph(): Paragraph {
   return new Paragraph({ children: [new TextRun({ text: '' })] })
 }
 
+const TOO_DEEP =
+  `A list nested more than ${DOCX_LIST_LEVELS} levels deep was set at level ` +
+  `${DOCX_LIST_LEVELS} from there down; Word lists have ${DOCX_LIST_LEVELS} levels.`
+
 interface ListFrame {
   indent: number
   ordered: boolean
@@ -89,6 +93,8 @@ function parseList(lines: string[], start: number, ctx: DocxBodyContext, out: Pa
     if (!frame || (frame.indent < indent && stack.length < DOCX_LIST_LEVELS)) {
       frame = { indent, ordered, ...ctx.numbering.begin(ordered, number ?? 1) }
       stack.push(frame)
+    } else if (frame.indent < indent && !ctx.warnings.includes(TOO_DEEP)) {
+      ctx.warnings.push(TOO_DEEP)
     }
     frame.last = number
 
