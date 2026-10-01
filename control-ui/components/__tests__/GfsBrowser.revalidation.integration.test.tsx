@@ -1,0 +1,1107 @@
+// @vitest-environment jsdom
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { EventEmitter } from 'node:events'
+import {
+  closeActiveEntityChangeStreams,
+  streamEntityChanges,
+} from '../../../control-api/src/routes/entityChangeStream.js'
+import { GfsBrowser } from '../GfsBrowser'
+import { ToastProvider } from '../Toast'
+
+const controlApiProducer = vi.hoisted(() => ({
+  isEntityChangeCursor: vi.fn(),
+  readEntityChangeCheckpoint: vi.fn(),
+  subscribeEntityChangeFeedWake: vi.fn(),
+}))
+const controlApiProducerConfig = vi.hoisted(() => ({
+  entityChangeStreamHeartbeatMs: 20_000,
+  entityChangeStreamMaxLifetimeMs: 600_000,
+  entityChangeStreamPollMs: 250,
+  entityChangeUserVisibilityRefreshMs: 4_000,
+  entityChangeStreamMaxConnections: 256,
+  entityChangeStreamMaxConnectionsPerPrincipal: 32,
+}))
+const controlApiProducerMetrics = vi.hoisted(() => ({
+  entityChangeStreamConnectionsActive: { inc: vi.fn(), dec: vi.fn() },
+  entityChangeStreamDisconnectsTotal: { inc: vi.fn(), dec: vi.fn() },
+  entityChangeStreamFramesSentTotal: { inc: vi.fn(), dec: vi.fn() },
+  entityChangeStreamResyncRequiredTotal: { inc: vi.fn(), dec: vi.fn() },
+}))
+
+vi.mock('../../../control-api/src/config.js', () => ({ config: controlApiProducerConfig }))
+vi.mock('../../../control-api/src/db.js', () => ({ pool: {} }))
+vi.mock('../../../control-api/src/services/entityChangeService.js', () => controlApiProducer)
+vi.mock('../../../control-api/src/observability/logger.js', () => ({
+  rootLogger: { child: () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn() }) },
+}))
+vi.mock('../../../control-api/src/observability/metrics.js', () => controlApiProducerMetrics)
+
+function jsonResponse(value: unknown): Response {
+  return new Response(JSON.stringify(value), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  })
+}
+
+function child(resourceId: string, rid: string, name: string, kind: string) {
+  return {
+    resourceId,
+    rid,
+    gfsUri: `gfs://main/${rid}`,
+    name,
+    kind,
+    path: `/${name}`,
+    bytes: 0,
+    version: 1,
+  }
+}
+
+class ProducerRequest extends EventEmitter {
+  query: Record<string, unknown> = {}
+  setTimeout = vi.fn()
+}
+
+class ProducerResponse extends EventEmitter {
+  statusCode = 200
+  headersSent = false
+  destroyed = false
+  writableEnded = false
+  writableLength = 0
+  headers: Record<string, string> = {}
+  jsonBody: unknown
+  frames: string[] = []
+  status(code: number): this {
+    this.statusCode = code
+    return this
+  }
+  setHeader(name: string, value: string): void {
+    this.headers[name.toLowerCase()] = value
+  }
+  flushHeaders(): void {
+    this.headersSent = true
+  }
+  write(frame: string): boolean {
+    this.frames.push(frame)
+    return true
+  }
+  end(): void {
+    this.writableEnded = true
+    this.emit('close')
+  }
+  json(value: unknown): this {
+    this.jsonBody = value
+    this.headersSent = true
+    return this
+  }
+}
+
+async function controlApiCapacityResponse(): Promise<Response> {
+  const previousLimit = controlApiProducerConfig.entityChangeStreamMaxConnections
+  controlApiProducerConfig.entityChangeStreamMaxConnections = 0
+  const req = new ProducerRequest()
+  const res = new ProducerResponse()
+  try {
+    streamEntityChanges(req as never, res as never, null, async () => true, 'operator')
+    await vi.waitFor(() => expect(res.statusCode).toBe(429))
+  } finally {
+    controlApiProducerConfig.entityChangeStreamMaxConnections = previousLimit
+  }
+  return new Response(JSON.stringify(res.jsonBody), {
+    status: res.statusCode,
+    headers: res.headers,
+  })
+}
+
+async function controlApiProducerFrame(): Promise<string> {
+  const cursor = 'd119f895-1ef8-4e73-8f08-f9754919682a'
+  controlApiProducer.isEntityChangeCursor.mockImplementation((value: string) =>
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)
+  )
+  controlApiProducer.readEntityChangeCheckpoint.mockResolvedValue({
+    resyncRequired: false,
+    cursor,
+    scopes: ['gfs'],
+  })
+  controlApiProducer.subscribeEntityChangeFeedWake.mockReturnValue(vi.fn())
+  const req = new ProducerRequest()
+  const res = new ProducerResponse()
+  streamEntityChanges(
+    req as never,
+    res as never,
+    null,
+    async () => true,
+    'operator',
+    'control-ui-integration'
+  )
+  await vi.waitFor(() => expect(res.frames.length).toBeGreaterThan(0))
+  const frame = res.frames
+    .map(value => value.trim())
+    .find(value => (JSON.parse(value) as { type?: string }).type === 'scope.invalidated')
+  closeActiveEntityChangeStreams()
+  await vi.waitFor(() => expect(res.writableEnded).toBe(true))
+  if (!frame) throw new Error('Control API producer did not emit a scope invalidation')
+  return frame
+}
+
+describe('GfsBrowser authoritative revalidation integration', () => {
+  afterEach(() => {
+    cleanup()
+    closeActiveEntityChangeStreams()
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+  })
+
+  it('honors the Control API Retry-After when an operator stream is rate limited', async () => {
+    const rateLimitedResponse = await controlApiCapacityResponse()
+    const scheduledTimers = vi.spyOn(window, 'setTimeout')
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    let streamAttempts = 0
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input), 'http://control-ui.test')
+        if (url.pathname.endsWith('/api/v1/gfs/entity-changes/stream')) {
+          streamAttempts += 1
+          if (streamAttempts === 1) return rateLimitedResponse
+          return new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                init?.signal?.addEventListener('abort', () => controller.close(), { once: true })
+              },
+            }),
+            { status: 200, headers: { 'content-type': 'application/x-ndjson' } }
+          )
+        }
+        if (url.pathname.endsWith('/api/v1/gfs/tree')) {
+          return jsonResponse({
+            rootResourceId: 'root-1',
+            items: [child('file-1', 'rid-file-1', 'kept.txt', 'file')],
+            nextCursor: null,
+          })
+        }
+        throw new Error(`Unexpected GFS request: ${url.pathname}`)
+      })
+    )
+
+    render(
+      <ToastProvider>
+        <GfsBrowser />
+      </ToastProvider>
+    )
+    await screen.findByRole('button', { name: 'kept.txt' })
+    await waitFor(() =>
+      expect(scheduledTimers.mock.calls.some(([, delay]) => delay === 5000)).toBe(true)
+    )
+    expect(streamAttempts).toBe(1)
+    expect(screen.getByRole('button', { name: 'kept.txt' })).toBeVisible()
+  })
+
+  it('reconnects a half-open operator stream without clearing the visible list', async () => {
+    const scheduledTimers = vi.spyOn(window, 'setTimeout')
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    let streamAttempts = 0
+    let streamCancellations = 0
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = new URL(String(input), 'http://control-ui.test')
+        if (url.pathname.endsWith('/api/v1/gfs/entity-changes/stream')) {
+          streamAttempts += 1
+          return new Response(
+            new ReadableStream<Uint8Array>({
+              cancel() {
+                streamCancellations += 1
+              },
+            }),
+            { status: 200, headers: { 'content-type': 'application/x-ndjson' } }
+          )
+        }
+        if (url.pathname.endsWith('/api/v1/gfs/tree')) {
+          return jsonResponse({
+            rootResourceId: 'root-1',
+            items: [child('file-1', 'rid-file-1', 'kept.txt', 'file')],
+            nextCursor: null,
+          })
+        }
+        throw new Error(`Unexpected GFS request: ${url.pathname}`)
+      })
+    )
+
+    render(
+      <ToastProvider>
+        <GfsBrowser />
+      </ToastProvider>
+    )
+    await screen.findByRole('button', { name: 'kept.txt' })
+    await waitFor(() =>
+      expect(scheduledTimers.mock.calls.some(([, delay]) => delay === 130_000)).toBe(true)
+    )
+    expect(streamAttempts).toBe(1)
+    expect(screen.getByRole('button', { name: 'kept.txt' })).toBeVisible()
+
+    const livenessTimer = scheduledTimers.mock.calls.find(([, delay]) => delay === 130_000)?.[0]
+    expect(livenessTimer).toBeDefined()
+    await act(async () => {
+      ;(livenessTimer as () => void)()
+      await Promise.resolve()
+    })
+
+    await waitFor(() => expect(streamCancellations).toBe(1))
+    await waitFor(() => expect(streamAttempts).toBe(2), { timeout: 5_000 })
+    expect(screen.getByRole('button', { name: 'kept.txt' })).toBeVisible()
+  })
+
+  it('rejects an oversized valid frame before reconnecting', async () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    let streamAttempts = 0
+    let streamCancellations = 0
+    let finishStreamCancellation!: () => void
+    const streamCancellation = new Promise<void>(resolve => {
+      finishStreamCancellation = resolve
+    })
+    const streamControllers: ReadableStreamDefaultController<Uint8Array>[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input), 'http://control-ui.test')
+        if (url.pathname.endsWith('/api/v1/gfs/entity-changes/stream')) {
+          streamAttempts += 1
+          return new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                streamControllers.push(controller)
+                init?.signal?.addEventListener(
+                  'abort',
+                  () => {
+                    try {
+                      controller.close()
+                    } catch {
+                      // The stream may already have been canceled by the reader.
+                    }
+                  },
+                  { once: true }
+                )
+              },
+              cancel() {
+                streamCancellations += 1
+                return streamCancellation
+              },
+            }),
+            { status: 200, headers: { 'content-type': 'application/x-ndjson' } }
+          )
+        }
+        if (url.pathname.endsWith('/api/v1/gfs/tree')) {
+          return jsonResponse({
+            rootResourceId: 'root-1',
+            items: [child('file-1', 'rid-file-1', 'kept.txt', 'file')],
+            nextCursor: null,
+          })
+        }
+        throw new Error(`Unexpected GFS request: ${url.pathname}`)
+      })
+    )
+
+    render(
+      <ToastProvider>
+        <GfsBrowser />
+      </ToastProvider>
+    )
+    await screen.findByRole('button', { name: 'kept.txt' })
+    await waitFor(() => expect(streamControllers).toHaveLength(1))
+
+    await act(async () => {
+      streamControllers[0]!.enqueue(
+        new TextEncoder().encode(
+          `${JSON.stringify({
+            schemaVersion: 1,
+            type: 'heartbeat',
+            cursor: 'd119f895-1ef8-4e73-8f08-f9754919682a',
+            observedAt: 'x'.repeat(17 * 1024),
+          })}\n`
+        )
+      )
+    })
+
+    let attemptsBeforeCancellationCompletes = 0
+    try {
+      await waitFor(() => expect(streamCancellations).toBe(1))
+      await new Promise(resolve => setTimeout(resolve, 750))
+      attemptsBeforeCancellationCompletes = streamAttempts
+    } finally {
+      finishStreamCancellation()
+    }
+    expect(attemptsBeforeCancellationCompletes).toBe(1)
+    await waitFor(() => expect(streamAttempts).toBe(2), { timeout: 2_000 })
+    expect(screen.getByRole('button', { name: 'kept.txt' })).toBeVisible()
+  })
+
+  it.each(['scope.invalidated', 'resync_required'] as const)(
+    'does not publish a stale background page after %s',
+    async frameType => {
+      const work = child('folder-1', 'rid-folder-1', 'work', 'directory')
+      const staleRow = child('stale-file', 'rid-stale', 'stale.txt', 'file')
+      const currentRow = child('current-file', 'rid-current', 'current.txt', 'file')
+      const folderPath = '/control-api/api/v1/gfs/resources/folder-1/children'
+      const stalePage = { items: [staleRow], nextCursor: null }
+      const currentPage = { items: [currentRow], nextCursor: null }
+      let finishStaleRead!: (response: Response) => void
+      const staleRead = new Promise<Response>(resolve => {
+        finishStaleRead = resolve
+      })
+      let childReads = 0
+      let folderOpened = false
+      let staleBackgroundStarted = false
+      const streamControllers: ReadableStreamDefaultController<Uint8Array>[] = []
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+          const url = new URL(String(input), 'http://control-ui.test')
+          if (url.pathname.endsWith('/api/v1/gfs/entity-changes/stream')) {
+            const body = new ReadableStream<Uint8Array>({
+              start(controller) {
+                streamControllers.push(controller)
+                init?.signal?.addEventListener('abort', () => controller.close(), { once: true })
+              },
+            })
+            return new Response(body, {
+              status: 200,
+              headers: { 'content-type': 'application/x-ndjson' },
+            })
+          }
+          if (url.pathname.endsWith('/api/v1/gfs/tree')) {
+            return jsonResponse({
+              rootResourceId: 'root-1',
+              items: [work],
+              nextCursor: null,
+            })
+          }
+          if (url.pathname === '/control-api/api/v1/gfs/resources/root-1/children') {
+            return jsonResponse({ items: [work], nextCursor: null })
+          }
+          if (url.pathname === folderPath) {
+            childReads += 1
+            if (!folderOpened) return jsonResponse(stalePage)
+            if (!staleBackgroundStarted) {
+              staleBackgroundStarted = true
+              return staleRead
+            }
+            return jsonResponse(currentPage)
+          }
+          if (url.pathname.endsWith('/api/v1/gfs/resolve')) {
+            return jsonResponse({
+              resourceId: 'folder-1',
+              rid: 'rid-folder-1',
+              gfsUri: 'gfs://main/rid-folder-1',
+              name: 'work',
+              kind: 'directory',
+              path: '/work',
+              version: 1,
+            })
+          }
+          if (url.pathname.endsWith('/api/v1/gfs/by-path')) {
+            return jsonResponse({
+              resourceId: 'folder-1',
+              rid: 'rid-folder-1',
+              gfsUri: 'gfs://main/rid-folder-1',
+              name: 'work',
+              kind: 'directory',
+              path: '/work',
+              version: 1,
+            })
+          }
+          throw new Error(`Unexpected GFS request: ${url.pathname}`)
+        })
+      )
+
+      render(
+        <ToastProvider>
+          <GfsBrowser />
+        </ToastProvider>
+      )
+      const browser = screen.getByRole('region', { name: 'EvenDrive browser' })
+      await waitFor(() => expect(streamControllers).toHaveLength(1))
+      await screen.findByRole('button', { name: 'work' })
+      await waitFor(() => expect(browser).not.toHaveAttribute('aria-busy', 'true'))
+      fireEvent.click(screen.getByRole('button', { name: 'work' }))
+      await screen.findByRole('button', { name: 'stale.txt' })
+      const breadcrumb = screen.getByRole('navigation', { name: 'Breadcrumb' })
+      fireEvent.click(breadcrumb.querySelector('button')!)
+      await screen.findByRole('button', { name: 'work' })
+      await waitFor(() => expect(browser).not.toHaveAttribute('aria-busy', 'true'))
+      folderOpened = true
+      fireEvent.click(screen.getByRole('button', { name: 'work' }))
+      await screen.findByRole('button', { name: 'stale.txt' })
+      await waitFor(() => expect(staleBackgroundStarted).toBe(true))
+
+      await act(async () => {
+        streamControllers[0]!.enqueue(
+          new TextEncoder().encode(
+            `${JSON.stringify({
+              schemaVersion: 1,
+              type: frameType,
+              cursor: 'd119f895-1ef8-4e73-8f08-f9754919682a',
+              scopes: ['gfs'],
+            })}\n`
+          )
+        )
+      })
+      await screen.findByRole('button', { name: 'current.txt' })
+      await waitFor(() => expect(childReads).toBeGreaterThan(2))
+
+      await act(async () => finishStaleRead(jsonResponse(stalePage)))
+      await waitFor(() => expect(screen.getByRole('button', { name: 'current.txt' })).toBeVisible())
+      expect(screen.queryByRole('button', { name: 'stale.txt' })).toBeNull()
+    }
+  )
+
+  it('keeps all loaded pages visible while a scope invalidation revalidates them', async () => {
+    const work = child('folder-1', 'rid-folder-1', 'work', 'directory')
+    const first = child('file-1', 'rid-file-1', 'first.txt', 'file')
+    const second = child('file-2', 'rid-file-2', 'second.txt', 'file')
+    const folderPath = '/control-api/api/v1/gfs/resources/folder-1/children'
+    let finishRefresh!: (response: Response) => void
+    const refresh = new Promise<Response>(resolve => {
+      finishRefresh = resolve
+    })
+    let streamRefreshReads = 0
+    let streamRefreshStarted = false
+    let streamController: ReadableStreamDefaultController<Uint8Array> | null = null
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input), 'http://control-ui.test')
+        if (url.pathname.endsWith('/api/v1/gfs/entity-changes/stream')) {
+          return new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                streamController = controller
+                init?.signal?.addEventListener('abort', () => controller.close(), { once: true })
+              },
+            }),
+            { status: 200, headers: { 'content-type': 'application/x-ndjson' } }
+          )
+        }
+        if (url.pathname.endsWith('/api/v1/gfs/tree')) {
+          return jsonResponse({ rootResourceId: 'root-1', items: [work], nextCursor: null })
+        }
+        if (url.pathname === '/control-api/api/v1/gfs/resources/root-1/children') {
+          return jsonResponse({ items: [work], nextCursor: null })
+        }
+        if (url.pathname === folderPath) {
+          const cursor = url.searchParams.get('cursor')
+          if (cursor) return jsonResponse({ items: [second], nextCursor: null })
+          if (streamRefreshStarted) {
+            streamRefreshReads += 1
+            return refresh
+          }
+          return jsonResponse({ items: [first], nextCursor: 'page-2' })
+        }
+        if (
+          url.pathname.endsWith('/api/v1/gfs/resolve') ||
+          url.pathname.endsWith('/api/v1/gfs/by-path')
+        ) {
+          return jsonResponse({
+            resourceId: 'folder-1',
+            rid: 'rid-folder-1',
+            gfsUri: 'gfs://main/rid-folder-1',
+            name: 'work',
+            kind: 'directory',
+            path: '/work',
+            version: 1,
+          })
+        }
+        throw new Error(`Unexpected GFS request: ${url.pathname}`)
+      })
+    )
+
+    render(
+      <ToastProvider>
+        <GfsBrowser />
+      </ToastProvider>
+    )
+    await waitFor(() => expect(streamController).not.toBeNull())
+    await screen.findByRole('button', { name: 'work' })
+    fireEvent.click(screen.getByRole('button', { name: 'work' }))
+    await screen.findByRole('button', { name: 'first.txt' })
+    fireEvent.click(await screen.findByRole('button', { name: 'Load more' }))
+    await screen.findByRole('button', { name: 'second.txt' })
+
+    const producerFrame = await controlApiProducerFrame()
+    await act(async () => {
+      streamRefreshStarted = true
+      streamController!.enqueue(new TextEncoder().encode(`${producerFrame}\n`))
+    })
+    await waitFor(() => expect(streamRefreshReads).toBeGreaterThan(0))
+    expect(screen.getByRole('button', { name: 'first.txt' })).toBeVisible()
+    expect(screen.getByRole('button', { name: 'second.txt' })).toBeVisible()
+
+    await act(async () => finishRefresh(jsonResponse({ items: [first], nextCursor: 'page-2' })))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'second.txt' })).toBeVisible())
+    expect(screen.getByRole('button', { name: 'first.txt' })).toBeVisible()
+  })
+
+  it('replays an invalidation canceled by Load more after pagination settles', async () => {
+    const work = child('folder-1', 'rid-folder-1', 'work', 'directory')
+    const first = child('file-1', 'rid-file-1', 'first.txt', 'file')
+    const second = child('file-2', 'rid-file-2', 'second.txt', 'file')
+    const remote = child('file-3', 'rid-file-3', 'remote.txt', 'file')
+    const folderPath = '/control-api/api/v1/gfs/resources/folder-1/children'
+    let finishPage!: (response: Response) => void
+    const pendingPage = new Promise<Response>(resolve => {
+      finishPage = resolve
+    })
+    let streamController: ReadableStreamDefaultController<Uint8Array> | null = null
+    let initialReads = 0
+    let streamRefreshReads = 0
+    let cursorReads = 0
+    let pageStarted = false
+    let folderOpened = false
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input), 'http://control-ui.test')
+        if (url.pathname.endsWith('/api/v1/gfs/entity-changes/stream')) {
+          return new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                streamController = controller
+                init?.signal?.addEventListener('abort', () => controller.close(), { once: true })
+              },
+            }),
+            { status: 200, headers: { 'content-type': 'application/x-ndjson' } }
+          )
+        }
+        if (url.pathname.endsWith('/api/v1/gfs/tree')) {
+          return jsonResponse({ rootResourceId: 'root-1', items: [work], nextCursor: null })
+        }
+        if (url.pathname === '/control-api/api/v1/gfs/resources/root-1/children') {
+          return jsonResponse({ items: [work], nextCursor: null })
+        }
+        if (url.pathname === folderPath) {
+          const cursor = url.searchParams.get('cursor')
+          if (cursor) {
+            cursorReads += 1
+            if (cursorReads === 1) {
+              pageStarted = true
+              return pendingPage
+            }
+            return jsonResponse({ items: [second], nextCursor: null })
+          }
+          if (!folderOpened || initialReads++ === 0) {
+            return jsonResponse({ items: [first], nextCursor: 'page-2' })
+          }
+          streamRefreshReads += 1
+          if (streamRefreshReads === 1) {
+            return new Promise<Response>((_resolve, reject) => {
+              init?.signal?.addEventListener(
+                'abort',
+                () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })),
+                { once: true }
+              )
+            })
+          }
+          return jsonResponse({ items: [first, remote], nextCursor: 'page-2' })
+        }
+        if (
+          url.pathname.endsWith('/api/v1/gfs/resolve') ||
+          url.pathname.endsWith('/api/v1/gfs/by-path')
+        ) {
+          return jsonResponse({
+            resourceId: 'folder-1',
+            rid: 'rid-folder-1',
+            gfsUri: 'gfs://main/rid-folder-1',
+            name: 'work',
+            kind: 'directory',
+            path: '/work',
+            version: 1,
+          })
+        }
+        throw new Error(`Unexpected GFS request: ${url.pathname}`)
+      })
+    )
+
+    render(
+      <ToastProvider>
+        <GfsBrowser />
+      </ToastProvider>
+    )
+    await waitFor(() => expect(streamController).not.toBeNull())
+    await screen.findByRole('button', { name: 'work' })
+    folderOpened = true
+    fireEvent.click(screen.getByRole('button', { name: 'work' }))
+    await screen.findByRole('button', { name: 'first.txt' })
+    await waitFor(() => expect(initialReads).toBeGreaterThan(0))
+
+    const producerFrame = await controlApiProducerFrame()
+    await act(async () => {
+      streamController!.enqueue(new TextEncoder().encode(`${producerFrame}\n`))
+    })
+    await waitFor(() => expect(streamRefreshReads).toBe(1))
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Load more' }))
+    await waitFor(() => expect(pageStarted).toBe(true))
+    expect(screen.getByRole('button', { name: 'first.txt' })).toBeVisible()
+    await act(async () => finishPage(jsonResponse({ items: [second], nextCursor: null })))
+    await screen.findByRole('button', { name: 'second.txt' })
+
+    await screen.findByRole('button', { name: 'remote.txt' }, { timeout: 2_000 })
+    expect(streamRefreshReads).toBe(2)
+    expect(screen.getByRole('button', { name: 'first.txt' })).toBeVisible()
+    expect(screen.getByRole('button', { name: 'second.txt' })).toBeVisible()
+  })
+
+  it('does not let a pre-invalidation foreground read overwrite stream state', async () => {
+    const work = child('folder-1', 'rid-folder-1', 'work', 'directory')
+    const stale = child('file-1', 'rid-file-1', 'stale.txt', 'file')
+    const current = child('file-2', 'rid-file-2', 'current.txt', 'file')
+    const folderPath = '/control-api/api/v1/gfs/resources/folder-1/children'
+    let finishForeground!: (response: Response) => void
+    const pendingForeground = new Promise<Response>(resolve => {
+      finishForeground = resolve
+    })
+    let streamController: ReadableStreamDefaultController<Uint8Array> | null = null
+    let folderOpened = false
+    let foregroundReads = 0
+    let streamReads = 0
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input), 'http://control-ui.test')
+        if (url.pathname.endsWith('/api/v1/gfs/entity-changes/stream')) {
+          return new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                streamController = controller
+                init?.signal?.addEventListener('abort', () => controller.close(), { once: true })
+              },
+            }),
+            { status: 200, headers: { 'content-type': 'application/x-ndjson' } }
+          )
+        }
+        if (url.pathname.endsWith('/api/v1/gfs/tree')) {
+          return jsonResponse({ rootResourceId: 'root-1', items: [work], nextCursor: null })
+        }
+        if (url.pathname === '/control-api/api/v1/gfs/resources/root-1/children') {
+          return jsonResponse({ items: [work], nextCursor: null })
+        }
+        if (url.pathname === folderPath) {
+          if (!folderOpened) throw new TypeError('prefetch is intentionally unavailable')
+          if (foregroundReads++ === 0) return pendingForeground
+          streamReads += 1
+          return jsonResponse({ items: [current], nextCursor: null })
+        }
+        if (
+          url.pathname.endsWith('/api/v1/gfs/resolve') ||
+          url.pathname.endsWith('/api/v1/gfs/by-path')
+        ) {
+          return jsonResponse({
+            resourceId: 'folder-1',
+            rid: 'rid-folder-1',
+            gfsUri: 'gfs://main/rid-folder-1',
+            name: 'work',
+            kind: 'directory',
+            path: '/work',
+            version: 1,
+          })
+        }
+        throw new Error(`Unexpected GFS request: ${url.pathname}`)
+      })
+    )
+
+    render(
+      <ToastProvider>
+        <GfsBrowser />
+      </ToastProvider>
+    )
+    await waitFor(() => expect(streamController).not.toBeNull())
+    await screen.findByRole('button', { name: 'work' })
+    folderOpened = true
+    fireEvent.click(screen.getByRole('button', { name: 'work' }))
+    await waitFor(() => expect(foregroundReads).toBe(1))
+
+    const producerFrame = await controlApiProducerFrame()
+    await act(async () => {
+      streamController!.enqueue(new TextEncoder().encode(`${producerFrame}\n`))
+      await new Promise(resolve => setTimeout(resolve, 150))
+    })
+    expect(streamReads).toBe(0)
+
+    await act(async () => finishForeground(jsonResponse({ items: [stale], nextCursor: null })))
+    await screen.findByRole('button', { name: 'current.txt' })
+    expect(streamReads).toBe(1)
+    expect(screen.queryByRole('button', { name: 'stale.txt' })).toBeNull()
+  })
+
+  it('recovers the rendered list after a real API-client stream refresh fails once', async () => {
+    const existingFile = child('file-1', 'rid-file-1', 'existing.txt', 'file')
+    const remoteFolder = child('folder-2', 'rid-folder-2', 'remote-folder', 'directory')
+    let treeReads = 0
+    let streamController: ReadableStreamDefaultController<Uint8Array> | null = null
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input), 'http://control-ui.test')
+        if (url.pathname.endsWith('/api/v1/gfs/entity-changes/stream')) {
+          return new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                streamController = controller
+                init?.signal?.addEventListener('abort', () => controller.close(), { once: true })
+              },
+            }),
+            { status: 200, headers: { 'content-type': 'application/x-ndjson' } }
+          )
+        }
+        if (url.pathname.endsWith('/api/v1/gfs/tree')) {
+          treeReads += 1
+          if (treeReads === 1) {
+            return jsonResponse({
+              rootResourceId: 'root-1',
+              items: [existingFile],
+              nextCursor: null,
+            })
+          }
+          if (treeReads === 2) return new Response('temporary failure', { status: 503 })
+          return jsonResponse({
+            rootResourceId: 'root-1',
+            items: [existingFile, remoteFolder],
+            nextCursor: null,
+          })
+        }
+        throw new Error(`Unexpected GFS request: ${url.pathname}`)
+      })
+    )
+
+    render(
+      <ToastProvider>
+        <GfsBrowser />
+      </ToastProvider>
+    )
+    await waitFor(() => expect(streamController).not.toBeNull())
+    await screen.findByRole('button', { name: 'existing.txt' })
+    await act(async () => {
+      streamController!.enqueue(new TextEncoder().encode(`${await controlApiProducerFrame()}\n`))
+    })
+
+    await waitFor(() => expect(treeReads).toBe(2))
+    expect(screen.getByRole('button', { name: 'existing.txt' })).toBeVisible()
+    await screen.findByText('remote-folder', {}, { timeout: 2_000 })
+    expect(treeReads).toBe(3)
+    expect(screen.getByRole('button', { name: 'existing.txt' })).toBeVisible()
+  })
+
+  it('retries a transient preview metadata read and renders the latest file content', async () => {
+    const previewFile = { ...child('file-1', 'rid-file-1', 'notes.md', 'file'), bytes: 32 }
+    let resolveReads = 0
+    let contentReads = 0
+    let streamController: ReadableStreamDefaultController<Uint8Array> | null = null
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input), 'http://control-ui.test')
+        if (url.pathname.endsWith('/api/v1/gfs/entity-changes/stream')) {
+          return new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                streamController = controller
+                init?.signal?.addEventListener('abort', () => controller.close(), { once: true })
+              },
+            }),
+            { status: 200, headers: { 'content-type': 'application/x-ndjson' } }
+          )
+        }
+        if (url.pathname.endsWith('/api/v1/gfs/tree')) {
+          return jsonResponse({ rootResourceId: 'root-1', items: [previewFile], nextCursor: null })
+        }
+        if (url.pathname.endsWith('/api/v1/gfs/resources/root-1/children')) {
+          return jsonResponse({ items: [previewFile], nextCursor: null })
+        }
+        if (
+          url.pathname.endsWith('/api/v1/gfs/resolve') &&
+          url.searchParams.get('uri') === previewFile.gfsUri
+        ) {
+          resolveReads += 1
+          if (resolveReads === 1) return new Response('temporary failure', { status: 503 })
+          return jsonResponse({
+            resourceId: previewFile.resourceId,
+            rid: previewFile.rid,
+            gfsUri: previewFile.gfsUri,
+            name: previewFile.name,
+            kind: previewFile.kind,
+            bytes: previewFile.bytes,
+            version: 2,
+          })
+        }
+        if (url.pathname.endsWith('/api/v1/gfs/proxy/v1/resources/rid-file-1/content')) {
+          contentReads += 1
+          return new Response(contentReads === 1 ? '# Before update' : '# After update', {
+            status: 200,
+            headers: { 'content-type': 'text/markdown' },
+          })
+        }
+        throw new Error(`Unexpected GFS request: ${url.pathname}`)
+      })
+    )
+
+    render(
+      <ToastProvider>
+        <GfsBrowser />
+      </ToastProvider>
+    )
+    await waitFor(() => expect(streamController).not.toBeNull())
+    fireEvent.click(await screen.findByRole('button', { name: 'notes.md' }))
+    await screen.findByText('Before update')
+
+    await act(async () => {
+      streamController!.enqueue(new TextEncoder().encode(`${await controlApiProducerFrame()}\n`))
+    })
+    await waitFor(() => expect(resolveReads).toBe(1))
+    expect(screen.getByText('Before update')).toBeVisible()
+
+    await screen.findByText('After update', {}, { timeout: 2_000 })
+    expect(resolveReads).toBe(2)
+    expect(contentReads).toBe(2)
+    expect(screen.queryByText('Before update')).toBeNull()
+  })
+
+  it('retries a transient action-target resolve and closes only after authoritative deletion', async () => {
+    const report = child('file-1', 'rid-file-1', 'report.md', 'file')
+    let treeReads = 0
+    let resolveReads = 0
+    let streamController: ReadableStreamDefaultController<Uint8Array> | null = null
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input), 'http://control-ui.test')
+        if (url.pathname.endsWith('/api/v1/gfs/entity-changes/stream')) {
+          return new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                streamController = controller
+                init?.signal?.addEventListener('abort', () => controller.close(), { once: true })
+              },
+            }),
+            { status: 200, headers: { 'content-type': 'application/x-ndjson' } }
+          )
+        }
+        if (url.pathname.endsWith('/api/v1/gfs/tree')) {
+          treeReads += 1
+          return jsonResponse({
+            rootResourceId: 'root-1',
+            items: treeReads < 3 ? [report] : [],
+            nextCursor: null,
+          })
+        }
+        if (
+          url.pathname.endsWith('/api/v1/gfs/resolve') &&
+          url.searchParams.get('uri') === report.gfsUri
+        ) {
+          resolveReads += 1
+          if (resolveReads === 1) return new Response('temporary failure', { status: 503 })
+          return new Response('not found', { status: 404 })
+        }
+        throw new Error(`Unexpected GFS request: ${url.pathname}`)
+      })
+    )
+
+    render(
+      <ToastProvider>
+        <GfsBrowser />
+      </ToastProvider>
+    )
+    await waitFor(() => expect(streamController).not.toBeNull())
+    await screen.findByRole('button', { name: 'report.md' })
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for report.md' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Rename' }))
+    await screen.findByRole('dialog', { name: 'Rename file' })
+
+    await act(async () => {
+      streamController!.enqueue(new TextEncoder().encode(`${await controlApiProducerFrame()}\n`))
+    })
+    await waitFor(() => expect(resolveReads).toBe(1))
+    expect(screen.getByRole('dialog', { name: 'Rename file' })).toBeVisible()
+    expect(screen.getByRole('button', { name: 'report.md' })).toBeVisible()
+
+    await waitFor(() => expect(resolveReads).toBe(2), { timeout: 2_000 })
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Rename file' })).toBeNull())
+    expect(screen.queryByRole('button', { name: 'report.md' })).toBeNull()
+  })
+
+  it('retries transient ancestor resolution without losing the visible folder or file', async () => {
+    const work = child('folder-1', 'rid-folder-1', 'work', 'directory')
+    const file = child('file-1', 'rid-file-1', 'notes.txt', 'file')
+    let byPathReads = 0
+    let streamController: ReadableStreamDefaultController<Uint8Array> | null = null
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input), 'http://control-ui.test')
+        if (url.pathname.endsWith('/api/v1/gfs/entity-changes/stream')) {
+          return new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                streamController = controller
+                init?.signal?.addEventListener('abort', () => controller.close(), { once: true })
+              },
+            }),
+            { status: 200, headers: { 'content-type': 'application/x-ndjson' } }
+          )
+        }
+        if (url.pathname.endsWith('/api/v1/gfs/tree')) {
+          return jsonResponse({ rootResourceId: 'root-1', items: [work], nextCursor: null })
+        }
+        if (url.pathname.endsWith('/api/v1/gfs/resources/root-1/children')) {
+          return jsonResponse({ items: [work], nextCursor: null })
+        }
+        if (url.pathname.endsWith('/api/v1/gfs/resources/folder-1/children')) {
+          return jsonResponse({ items: [file], nextCursor: null })
+        }
+        if (url.pathname.endsWith('/api/v1/gfs/resolve')) {
+          return jsonResponse({
+            resourceId: work.resourceId,
+            rid: work.rid,
+            gfsUri: work.gfsUri,
+            name: work.name,
+            kind: 'directory',
+            path: '/work',
+            version: work.version,
+          })
+        }
+        if (url.pathname.endsWith('/api/v1/gfs/by-path')) {
+          byPathReads += 1
+          if (byPathReads === 1) return new Response('temporary failure', { status: 503 })
+          return jsonResponse({
+            resourceId: work.resourceId,
+            rid: work.rid,
+            gfsUri: work.gfsUri,
+            name: work.name,
+            kind: 'directory',
+            path: '/work',
+            version: work.version,
+          })
+        }
+        throw new Error(`Unexpected GFS request: ${url.pathname}`)
+      })
+    )
+
+    render(
+      <ToastProvider>
+        <GfsBrowser />
+      </ToastProvider>
+    )
+    await waitFor(() => expect(streamController).not.toBeNull())
+    fireEvent.click(await screen.findByRole('button', { name: 'work' }))
+    await screen.findByRole('button', { name: 'notes.txt' })
+
+    await act(async () => {
+      streamController!.enqueue(new TextEncoder().encode(`${await controlApiProducerFrame()}\n`))
+    })
+    await waitFor(() => expect(byPathReads).toBe(1))
+    expect(screen.getByRole('button', { name: 'notes.txt' })).toBeVisible()
+    const breadcrumb = screen.getByRole('navigation', { name: 'Breadcrumb' })
+    expect(within(breadcrumb).getByRole('button', { name: 'work' })).toHaveAttribute(
+      'aria-current',
+      'page'
+    )
+
+    await waitFor(() => expect(byPathReads).toBe(2), { timeout: 2_000 })
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(screen.getByRole('button', { name: 'notes.txt' })).toBeVisible()
+    expect(within(breadcrumb).getByRole('button', { name: 'work' })).toHaveAttribute(
+      'aria-current',
+      'page'
+    )
+  })
+
+  it('preserves the complete folder trail when an ancestor lookup fails', async () => {
+    const work = child('folder-1', 'rid-folder-1', 'work', 'directory')
+    const existingFile = child('file-1', 'rid-file-1', 'existing.txt', 'file')
+    let byPathReads = 0
+    let streamController: ReadableStreamDefaultController<Uint8Array> | null = null
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input), 'http://control-ui.test')
+        if (url.pathname.endsWith('/api/v1/gfs/entity-changes/stream')) {
+          return new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                streamController = controller
+                init?.signal?.addEventListener('abort', () => controller.close(), { once: true })
+              },
+            }),
+            { status: 200, headers: { 'content-type': 'application/x-ndjson' } }
+          )
+        }
+        if (url.pathname.endsWith('/api/v1/gfs/tree')) {
+          return jsonResponse({ rootResourceId: 'root-1', items: [work], nextCursor: null })
+        }
+        if (url.pathname.endsWith('/api/v1/gfs/resources/root-1/children')) {
+          return jsonResponse({ items: [work], nextCursor: null })
+        }
+        if (url.pathname.endsWith('/api/v1/gfs/resources/folder-1/children')) {
+          return jsonResponse({ items: [existingFile], nextCursor: null })
+        }
+        if (url.pathname.endsWith('/api/v1/gfs/resolve')) {
+          return jsonResponse({
+            resourceId: work.resourceId,
+            rid: work.rid,
+            gfsUri: work.gfsUri,
+            name: work.name,
+            kind: 'directory',
+            path: '/work',
+            version: work.version,
+          })
+        }
+        if (url.pathname.endsWith('/api/v1/gfs/by-path')) {
+          byPathReads += 1
+          if (byPathReads === 1)
+            return new Response('ancestor temporarily unavailable', { status: 409 })
+          return jsonResponse({
+            resourceId: work.resourceId,
+            rid: work.rid,
+            gfsUri: work.gfsUri,
+            name: work.name,
+            kind: 'directory',
+            path: '/work',
+            version: work.version,
+          })
+        }
+        throw new Error(`Unexpected GFS request: ${url.pathname}`)
+      })
+    )
+
+    render(
+      <ToastProvider>
+        <GfsBrowser />
+      </ToastProvider>
+    )
+    await waitFor(() => expect(streamController).not.toBeNull())
+    await screen.findByRole('button', { name: 'work' })
+    fireEvent.click(screen.getByRole('button', { name: 'work' }))
+    await screen.findByRole('button', { name: 'existing.txt' })
+
+    await act(async () => {
+      streamController!.enqueue(new TextEncoder().encode(`${await controlApiProducerFrame()}\n`))
+    })
+
+    await waitFor(() => expect(byPathReads).toBe(1))
+    const breadcrumb = screen.getByRole('navigation', { name: 'Breadcrumb' })
+    await waitFor(() =>
+      expect(within(breadcrumb).getByRole('button', { name: 'work' })).toHaveAttribute(
+        'aria-current',
+        'page'
+      )
+    )
+    expect(screen.getByRole('button', { name: 'existing.txt' })).toBeVisible()
+    expect(screen.getByRole('alert')).toHaveTextContent('could not be refreshed')
+    fireEvent.click(screen.getByRole('button', { name: 'Retry folder path' }))
+    await waitFor(() => expect(screen.queryByRole('alert')).toBeNull())
+    expect(within(breadcrumb).getByRole('button', { name: 'work' })).toHaveAttribute(
+      'aria-current',
+      'page'
+    )
+    expect(screen.getByRole('button', { name: 'existing.txt' })).toBeVisible()
+  })
+})

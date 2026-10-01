@@ -275,12 +275,14 @@ describeRealPostgres('external GFS rate limiter backend (real PostgreSQL)', () =
     await corePool.query('DELETE FROM rate_limit_buckets')
 
     let grants: request.Response
+    let entityChanges: request.Response
     let ack: request.Response
     await injectLimiterFault()
     try {
       grants = await external(
         request(app).get(`/api/v1/external/gfs/grants?drive=main&resourceId=${randomUUID()}`)
       )
+      entityChanges = await external(request(app).get('/api/v1/external/entity-changes/stream'))
       ack = await external(request(app).post(`/api/v1/external/notifications/${randomUUID()}/ack`))
     } finally {
       await removeLimiterFault()
@@ -292,6 +294,12 @@ describeRealPostgres('external GFS rate limiter backend (real PostgreSQL)', () =
     expect(grants.body).toEqual({ error: 'rate_limit_unavailable', retryAfterSeconds: 2 })
     expect(grants.headers['retry-after']).toBe('2')
     expect(grants.headers['cache-control']).toBe('no-store')
+    // The entity-change stream uses the same shared rate-limit middleware but
+    // chooses fail-closed because its principal budget must remain distributed.
+    expect(entityChanges.status).toBe(503)
+    expect(entityChanges.body).toEqual({ error: 'rate_limit_unavailable', retryAfterSeconds: 2 })
+    expect(entityChanges.headers['retry-after']).toBe('2')
+    expect(entityChanges.headers['cache-control']).toBe('no-store')
     // Witness for the process-memory policy under the same fault: the ack
     // route's Postgres limiter could not count either, its in-memory counter
     // admitted the first request, and its handler answered.
