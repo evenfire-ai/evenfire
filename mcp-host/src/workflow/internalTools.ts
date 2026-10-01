@@ -106,18 +106,6 @@ export function validateOutputPath(p: string, outputDir: string): string {
   return resolved
 }
 
-/**
- * Excel/CSV formula-injection guard. If a cell value is a string that
- * starts with a formula-trigger character (`=`, `+`, `-`, `@`, tab, CR),
- * prefix with a single quote so the spreadsheet renders it as text
- * instead of evaluating it. Non-string values pass through.
- */
-const FORMULA_LEAD = /^[=+\-@\t\r]/
-export function safeCell(v: unknown): unknown {
-  if (typeof v !== 'string') return v
-  return FORMULA_LEAD.test(v) ? `'${v}` : v
-}
-
 // ─── Helpers ─────────────────────────────────────────────────────────
 
 /**

@@ -7,7 +7,6 @@ import { imageDisplaySize } from '../embeddedImages'
 import {
   INTERNAL_TOOLS,
   escapeHtmlAttr,
-  safeCell,
   safeJsonForScript,
   validateOutputPath,
 } from '../internalTools'
@@ -239,26 +238,28 @@ describe('stepRouter AJV validation before tool execute', () => {
 // ─── Formula injection in XLSX cells ────────────────────────────────
 
 describe('XLSX formula injection', () => {
-  it('safeCell prefixes formula-leading strings with apostrophe', () => {
-    expect(safeCell('=cmd|"/c calc"!A1')).toBe(`'=cmd|"/c calc"!A1`)
-    expect(safeCell('+1+1')).toBe(`'+1+1`)
-    expect(safeCell('-2*5')).toBe(`'-2*5`)
-    expect(safeCell('@SUM(A1:A10)')).toBe(`'@SUM(A1:A10)`)
-    expect(safeCell('\tinjected')).toBe(`'\tinjected`)
-    expect(safeCell('\rinjected')).toBe(`'\rinjected`)
-  })
-
-  it('safeCell leaves benign strings alone', () => {
-    expect(safeCell('hello world')).toBe('hello world')
-    expect(safeCell('123abc')).toBe('123abc')
-    expect(safeCell('')).toBe('')
-  })
-
-  it('safeCell passes non-strings through untouched', () => {
-    expect(safeCell(42)).toBe(42)
-    expect(safeCell(null)).toBe(null)
-    expect(safeCell(undefined)).toBe(undefined)
-    expect(safeCell(true)).toBe(true)
+  it('stores every formula lead as inert text, whatever character opens it', async () => {
+    const tool = findTool('clerum__generate_xlsx')
+    const inert = ['+1+1', '-2*5', '\rinjected', '\uFF1D1+1', '=DDE("cmd";"/c calc";"x")', '@cmd|x']
+    const result = await tool.execute(
+      {
+        filename: 'leads.xlsx',
+        sheets: [{ name: 'D', rows: [['Value'], ...inert.map(v => [v])] }],
+      },
+      testOutputDir
+    )
+    expect(result.success, result.error).toBe(true)
+    const file = path.join(testOutputDir, 'leads.xlsx')
+    const sheetXml = zipEntryText(file, 'xl/worksheets/sheet1.xml')
+    expect(sheetXml).not.toMatch(/<f[ >]/)
+    const wb = new ExcelJS.Workbook()
+    await wb.xlsx.readFile(file)
+    inert.forEach((value, i) => {
+      const cell = wb.worksheets[0].getCell(`A${i + 2}`)
+      expect(cell.type, value).toBe(ExcelJS.ValueType.String)
+      // Line endings are normalized to \n, as in every text cell.
+      expect(cell.value, value).toBe(value.replace(/\r/g, '\n'))
+    })
   })
 
   it('XLSX output stores formula-leading values as inert text, not formulas', async () => {
