@@ -1,3 +1,5 @@
+import type { App } from 'electron'
+
 type MainWindowHandle = {
   isDestroyed: () => boolean
 }
@@ -52,4 +54,27 @@ export function createRetryableInitializer(initialize: () => Promise<unknown>) {
   }
 
   return { ensureInitialized }
+}
+
+export function registerQuitDrain(
+  app: Pick<App, 'on' | 'quit'>,
+  prepareForQuit: () => Promise<void>
+): void {
+  let quitDrainStarted = false
+  let quitDrainComplete = false
+  app.on('before-quit', event => {
+    if (quitDrainComplete) return
+
+    event.preventDefault()
+    if (quitDrainStarted) return
+
+    quitDrainStarted = true
+    const resumeQuit = () => {
+      setImmediate(() => {
+        quitDrainComplete = true
+        app.quit()
+      })
+    }
+    void prepareForQuit().then(resumeQuit, resumeQuit)
+  })
 }

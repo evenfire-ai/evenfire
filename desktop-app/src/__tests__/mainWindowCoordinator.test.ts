@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   createMainWindowCoordinator,
   createRetryableInitializer,
+  registerQuitDrain,
 } from '../mainWindowCoordinator.js'
 
 type TestWindow = {
@@ -106,5 +107,29 @@ describe('retryable initializer', () => {
     await expect(initializer.ensureInitialized()).resolves.toBeUndefined()
     await expect(initializer.ensureInitialized()).resolves.toBeUndefined()
     expect(initialize).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('quit drain registration', () => {
+  it('retries quit after the before-quit event has returned', async () => {
+    let beforeQuitListener: ((event: { preventDefault: () => void }) => void) | null = null
+    const quitEvent = { preventDefault: vi.fn() }
+    const app = {
+      on: vi.fn((_event: 'before-quit', listener: typeof beforeQuitListener) => {
+        beforeQuitListener = listener
+      }),
+      quit: vi.fn(() => beforeQuitListener?.({ preventDefault: vi.fn() })),
+    }
+    const prepareForQuit = vi.fn(async () => undefined)
+    registerQuitDrain(app as unknown as Parameters<typeof registerQuitDrain>[0], prepareForQuit)
+
+    beforeQuitListener?.(quitEvent)
+    expect(quitEvent.preventDefault).toHaveBeenCalledOnce()
+    await Promise.resolve()
+    expect(app.quit).not.toHaveBeenCalled()
+
+    await new Promise<void>(resolve => setImmediate(resolve))
+    expect(app.quit).toHaveBeenCalledOnce()
+    expect(prepareForQuit).toHaveBeenCalledOnce()
   })
 })
