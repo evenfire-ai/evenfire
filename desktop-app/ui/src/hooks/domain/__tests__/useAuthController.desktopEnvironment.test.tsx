@@ -213,6 +213,12 @@ describe('Desktop environment handoff', () => {
       externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/api/v1`,
       rpcProxyBaseUrl: `${targetEnvironment.rpcProxyBaseUrl}/rpc`,
     })
+    const state = await runtimeConfigModule!.getDesktopRuntimeConfigState()
+    const otherOption = state.options.find(
+      option => option.externalRestApiBaseUrl === otherEnvironment.externalRestApiBaseUrl
+    )
+    if (!otherOption) throw new Error('The runtime config producer did not return the other target')
+    await runtimeConfigModule!.selectDesktopRuntimeConfigOption(otherOption.id)
 
     render(<Probe />)
     await waitFor(() => expect(screen.getByTestId('configuration-loaded')).toHaveTextContent('yes'))

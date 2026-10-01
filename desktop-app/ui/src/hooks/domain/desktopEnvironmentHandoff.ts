@@ -177,6 +177,12 @@ export function createDesktopEnvironmentSetupHandler({
       return
     }
 
+    if (activeRestEndpointMatches) {
+      setPendingDesktopEnvironmentSetup(null)
+      setStatus(`Opening ${linkedConfig.appName} in Evenfire Desktop.`, 'success')
+      return
+    }
+
     if (restMatches.saved.length === 1) {
       setPendingDesktopEnvironmentSetup(null)
       const selectedState = await handleSelectRuntimeConfig(restMatches.saved[0].id)
