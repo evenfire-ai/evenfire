@@ -745,7 +745,8 @@ export async function runGenerateChart(
     const labelValues = shouldLabelValues(chartTypeRaw, args.showValues)
     const plugins: Plugin[] = [backgroundPlugin(theme.backgroundColor)]
     const unlabelled = { count: 0 }
-    if (labelValues) plugins.push(valueLabelsPlugin({ ...valueOptions, unlabelled }))
+    const failed: string[] = []
+    if (labelValues) plugins.push(valueLabelsPlugin({ ...valueOptions, unlabelled, failed }))
     if (chartTypeRaw === 'gauge') {
       plugins.push(
         gaugeCenterPlugin({
@@ -754,6 +755,7 @@ export async function runGenerateChart(
           textColor: theme.textColor,
           mutedColor: theme.mutedTextColor,
           format: valueOptions,
+          failed,
         })
       )
     }
@@ -907,6 +909,9 @@ export async function runGenerateChart(
           `${n === 1 ? 'its label' : 'the labels'} would cover another bar or label, or the ` +
           'series is too dense; a larger chart or fewer series leaves room.'
       )
+    }
+    for (const what of new Set(failed)) {
+      warnings.push(`The chart was drawn without ${what}.`)
     }
     // The plot area in requested pixels; the layout may run at a smaller scale.
     const plotWidth = Math.max(0, Math.round(chart.chartArea.width * layoutScale))

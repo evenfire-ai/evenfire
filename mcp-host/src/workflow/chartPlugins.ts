@@ -9,6 +9,7 @@
  * plugin package, so nothing is added to the dependency tree.
  */
 import type { Chart, ChartType, Plugin } from 'chart.js'
+import { logger } from '../logger'
 import { CHART_FONT_STACK } from './fonts'
 
 export type ValueFormat = 'auto' | 'plain' | 'compact' | 'currency' | 'percent'
@@ -26,6 +27,8 @@ export interface ValueLabelOptions {
   fontScale?: number
   /** Set on each draw to how many values got no label. */
   unlabelled?: { count: number }
+  /** Receives what could not be drawn, so the result can say it is missing. */
+  failed?: string[]
 }
 
 /** Below this, money is grouped in full rather than abbreviated. */
@@ -273,8 +276,9 @@ export function valueLabelsPlugin(options: ValueLabelOptions): Plugin {
     afterDraw(chart: Chart) {
       try {
         drawValueLabels(chart, options)
-      } catch {
-        // A label is an enhancement; never let it cost the whole render.
+      } catch (err) {
+        // A label is an enhancement; it never costs the whole render, but it is reported.
+        decorationFailed(options.failed, 'value labels', err)
       }
     },
   }
@@ -512,6 +516,15 @@ export interface GaugeCenterOptions {
   textColor: string
   mutedColor: string
   format: ValueLabelOptions
+  /** Receives what could not be drawn, so the result can say it is missing. */
+  failed?: string[]
+}
+
+/** Record a decoration that could not be drawn: in the result, and in the log. */
+function decorationFailed(failed: string[] | undefined, what: string, err: unknown): void {
+  const message = err instanceof Error ? err.message : String(err)
+  failed?.push(`${what} (${message})`)
+  logger.warn({ decoration: what, err: message }, 'Chart decoration could not be drawn')
 }
 
 /**
@@ -541,8 +554,8 @@ export function gaugeCenterPlugin(o: GaugeCenterOptions): Plugin {
         // may be in any language, and this sits inside the same picture.
         ctx.fillText(`/ ${formatValue(o.max, o.format)}`, cx, cy + size * 0.62)
         ctx.restore()
-      } catch {
-        // Enhancement only.
+      } catch (err) {
+        decorationFailed(o.failed, 'the gauge reading', err)
       }
     },
   }
