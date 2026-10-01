@@ -26,22 +26,13 @@ import {
   loadEmbeddableImage,
 } from './embeddedImages'
 import { PDF_FONT_FAMILY, PDF_MONO_FAMILY, pdfGlyphSource } from './fonts'
-import {
-  closesFence,
-  htmlToPlainText,
-  inlineSpans,
-  openingFence,
-  quoteParagraphs,
-  withoutClosingHashes,
-} from './inlineMarkup'
+import { htmlToPlainText, inlineSpans } from './inlineMarkup'
 import {
   type ColumnAlignment,
   ORDERED_RE,
   indentOf,
   isListLine,
-  parseColumnAlignments,
-  splitTableRow,
-  startsTable,
+  readBlock,
   stripListMarker,
 } from './markdownBlocks'
 import { choose } from './ownEntry'
@@ -485,127 +476,89 @@ function bodyToContent(body: string, palette: PdfPalette, env: PdfBodyEnv): Cont
     )
   let i = 0
   while (i < lines.length) {
-    const line = lines[i]
-    const trimmed = line.trimStart()
-
-    // Fenced code block. Everything up to the closing fence is verbatim, so a
-    // shell snippet or a config sample keeps its spacing instead of being
-    // reflowed into paragraphs.
-    const fence = openingFence(trimmed)
-    if (fence) {
-      const { marker, language } = fence
-      const code: string[] = []
-      i++
-      while (i < lines.length && !closesFence(lines[i], marker)) {
-        code.push(lines[i])
-        i++
+    const block = readBlock(lines, i)
+    switch (block.kind) {
+      case 'code':
+        // Verbatim, so a shell snippet or a config sample keeps its spacing
+        // instead of being reflowed into paragraphs.
+        out.push(buildCodeBlock(block.code.join('\n'), block.language, palette))
+        break
+      case 'heading': {
+        // The deeper levels share h3's style rather than falling through as
+        // literal hashes. headlineLevel marks them for the page-break check
+        // that keeps a heading off the foot of a page.
+        const level = block.level
+        const style = level === 1 ? 'h1' : level === 2 ? 'h2' : 'h3'
+        const top = level === 1 ? 16 : level === 2 ? 12 : 8
+        out.push({
+          ...asPieces(parseInlineMarkdown(block.text, stray)),
+          style,
+          headlineLevel: 1,
+          margin: [0, top, 0, level === 1 ? 6 : 4],
+        } as Content)
+        break
       }
-      i++ // closing fence
-      out.push(buildCodeBlock(code.join('\n'), language, palette))
-      continue
-    }
-
-    // Heading levels. The deeper ones share h3's style rather than falling
-    // through as literal hashes. headlineLevel marks them for the page-break
-    // check that keeps a heading off the foot of a page.
-    const heading = /^(#{1,6})\s+(.*)$/.exec(trimmed)
-    if (heading) {
-      const level = heading[1].length
-      const style = level === 1 ? 'h1' : level === 2 ? 'h2' : 'h3'
-      const top = level === 1 ? 16 : level === 2 ? 12 : 8
-      out.push({
-        ...asPieces(parseInlineMarkdown(withoutClosingHashes(heading[2]), stray)),
-        style,
-        headlineLevel: 1,
-        margin: [0, top, 0, level === 1 ? 6 : 4],
-      } as Content)
-      i++
-      continue
-    }
-
-    // Horizontal rule in any of the three markdown spellings.
-    if (/^(-{3,}|\*{3,}|_{3,})$/.test(trimmed.replace(/\s+/g, ''))) {
-      out.push({
-        canvas: [
-          {
-            type: 'line',
-            x1: 0,
-            y1: 0,
-            x2: PDF_CONTENT_WIDTH,
-            y2: 0,
-            lineWidth: 0.5,
-            lineColor: palette.border,
-          },
-        ],
-        margin: [0, 8, 0, 8],
-      })
-      i++
-      continue
-    }
-
-    // GFM pipe table: header line, then separator, then the rows up to the
-    // first line without a pipe.
-    if (startsTable(lines, i)) {
-      const headers = splitTableRow(line)
-      const alignments = parseColumnAlignments(lines[i + 1])
-      const rows: string[][] = []
-      i += 2
-      while (i < lines.length && lines[i].trim() !== '' && lines[i].includes('|')) {
-        rows.push(splitTableRow(lines[i]))
-        i++
-      }
-      const label = `The body's table ${++env.tableCount}`
-      out.push(
-        buildTableNode(
-          { headers, rows, alignments, label, rowLabel: index => `${label}, row ${index + 1}` },
-          palette,
-          env,
-          stray
+      case 'rule':
+        out.push({
+          canvas: [
+            {
+              type: 'line',
+              x1: 0,
+              y1: 0,
+              x2: PDF_CONTENT_WIDTH,
+              y2: 0,
+              lineWidth: 0.5,
+              lineColor: palette.border,
+            },
+          ],
+          margin: [0, 8, 0, 8],
+        })
+        break
+      case 'table': {
+        const label = `The body's table ${++env.tableCount}`
+        const { headers, rows, alignments } = block
+        out.push(
+          buildTableNode(
+            { headers, rows, alignments, label, rowLabel: index => `${label}, row ${index + 1}` },
+            palette,
+            env,
+            stray
+          )
         )
-      )
-      continue
-    }
-
-    // Blockquote: consecutive `>` lines become one ruled, indented block.
-    if (/^>\s?/.test(trimmed)) {
-      const quoted: string[] = []
-      while (i < lines.length && /^>\s?/.test(lines[i].trimStart())) {
-        quoted.push(lines[i].trimStart().replace(/^>\s?/, ''))
-        i++
+        break
       }
-      out.push(buildBlockquote(quoteParagraphs(quoted), palette, stray))
-      continue
+      case 'quote':
+        out.push(buildBlockquote(block.paragraphs, palette, stray))
+        break
+      case 'list': {
+        // Anything nested under the first item belongs to the list.
+        const built = buildList(lines, i, indentOf(lines[i]), stray)
+        out.push(built.node)
+        i = built.next
+        continue
+      }
+      case 'blank':
+        // Small vertical breathing room.
+        out.push({ text: '', margin: [0, 2, 0, 2] })
+        break
+      case 'text': {
+        // A paragraph of inline markdown, then any images it references.
+        const images: MarkdownImage[] = []
+        const paragraph = parseInlineMarkdown(block.line, image => images.push(image))
+        if (plainText(paragraph).trim() !== '') {
+          const pieces = inPieces(paragraph)
+          pieces.forEach((piece, p) =>
+            out.push({ ...piece, margin: [0, 0, 0, p === pieces.length - 1 ? 4 : 0] })
+          )
+        }
+        for (const image of images) {
+          const placed = env.image(image.src)
+          if (placed) out.push(placed)
+        }
+        break
+      }
     }
-
-    // Bullet or numbered list, including anything nested under it.
-    if (isListLine(line)) {
-      const built = buildList(lines, i, indentOf(line), stray)
-      out.push(built.node)
-      i = built.next
-      continue
-    }
-
-    // Blank line: small vertical breathing room.
-    if (trimmed === '') {
-      out.push({ text: '', margin: [0, 2, 0, 2] })
-      i++
-      continue
-    }
-
-    // Default: paragraph with inline markdown, then any images it references.
-    const images: MarkdownImage[] = []
-    const paragraph = parseInlineMarkdown(line, image => images.push(image))
-    if (plainText(paragraph).trim() !== '') {
-      const pieces = inPieces(paragraph)
-      pieces.forEach((piece, p) =>
-        out.push({ ...piece, margin: [0, 0, 0, p === pieces.length - 1 ? 4 : 0] })
-      )
-    }
-    for (const image of images) {
-      const block = env.image(image.src)
-      if (block) out.push(block)
-    }
-    i++
+    i = block.next
   }
   return out
 }

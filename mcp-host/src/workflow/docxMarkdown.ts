@@ -6,20 +6,14 @@ import { inlineRuns, textRuns } from './docxInline'
 import { docxDirection, isRtlText } from './docxScript'
 import { DOCX_LIST_LEVELS, type DocxListNumbering, type DocxPalette, docxHex } from './docxStyle'
 import { buildDocxTable } from './docxTable'
-import {
-  closesFence,
-  imageTarget,
-  openingFence,
-  quoteParagraphs,
-  withoutClosingHashes,
-} from './inlineMarkup'
+import { imageTarget } from './inlineMarkup'
 import {
   BULLET_RE,
+  IMAGE_LINE_RE,
   ORDERED_RE,
   indentOf,
   isListLine,
-  splitTableRow,
-  startsTable,
+  readBlock,
 } from './markdownBlocks'
 
 export interface DocxBodyContext {
@@ -29,10 +23,6 @@ export interface DocxBodyContext {
   /** The paragraph holding an image named in the body, or undefined when it cannot be embedded. */
   image(file: string, alt: string): Paragraph | undefined
 }
-
-const HEADING_RE = /^(#{1,6})\s+(.*)$/
-const QUOTE_RE = /^>\s?/
-const IMAGE_LINE_RE = /^!\[([^\]\n]*)\]\(((?:[^()\n]|\([^()\n]*\))*)\)$/
 
 function blankParagraph(): Paragraph {
   return new Paragraph({ children: [new TextRun({ text: '' })] })
@@ -115,22 +105,9 @@ function parseList(lines: string[], start: number, ctx: DocxBodyContext, out: Pa
   return i
 }
 
-/** Whether `line` opens a block other than a table row, which ends a table. */
-function startsOtherBlock(line: string): boolean {
-  const t = line.trim()
-  if (t.startsWith('|')) return false
-  return (
-    HEADING_RE.test(t) ||
-    openingFence(t) !== undefined ||
-    QUOTE_RE.test(t) ||
-    IMAGE_LINE_RE.test(t) ||
-    isListLine(line)
-  )
-}
-
-function headingParagraph(level: number, text: string, ctx: DocxBodyContext): Paragraph {
+/** A heading; `content` is its text without the closing hashes. */
+function headingParagraph(level: number, content: string, ctx: DocxBodyContext): Paragraph {
   const { palette, warnings } = ctx
-  const content = withoutClosingHashes(text)
   const style =
     level === 1
       ? { heading: HeadingLevel.HEADING_1, before: 360, after: 160, size: 36, bold: true }
@@ -163,148 +140,121 @@ export function bodyToDocxChildren(body: string, ctx: DocxBodyContext): (Paragra
   let i = 0
 
   while (i < lines.length) {
-    const line = lines[i]
-    const trimmed = line.trim()
-
-    const fence = openingFence(trimmed)
-    if (fence) {
-      // The language after the opening fence is noted above the block, as in the PDF.
-      const { marker, language } = fence
-      const code: string[] = []
-      i++
-      while (i < lines.length && !closesFence(lines[i], marker)) {
-        code.push(lines[i])
-        i++
-      }
-      i++
-      if (language) {
+    const block = readBlock(lines, i)
+    switch (block.kind) {
+      case 'code':
+        // The language after the opening fence is noted above the block, as in the PDF.
+        if (block.language) {
+          out.push(
+            new Paragraph({
+              spacing: { before: 60, after: 0 },
+              children: textRuns(block.language, { size: 16, color: docxHex(palette.muted) }),
+            })
+          )
+        }
+        for (const codeLine of block.code) {
+          out.push(
+            new Paragraph({
+              spacing: { before: 0, after: 0 },
+              shading: { type: ShadingType.CLEAR, fill: docxHex(palette.surface) },
+              children: [
+                new TextRun({
+                  text: codeLine === '' ? ' ' : codeLine,
+                  font: { ascii: 'Courier New', hAnsi: 'Courier New' },
+                  size: 18,
+                  color: docxHex(palette.text),
+                }),
+              ],
+            })
+          )
+        }
+        out.push(new Paragraph({ children: [new TextRun({ text: '' })], spacing: { after: 80 } }))
+        break
+      case 'heading':
+        out.push(headingParagraph(block.level, block.text, ctx))
+        break
+      case 'table':
+        out.push(
+          buildDocxTable(
+            block.headers,
+            block.rows,
+            palette,
+            'striped',
+            warnings,
+            `The body's table ${++tables}`
+          )
+        )
+        out.push(new Paragraph({ children: [new TextRun({ text: '' })], spacing: { before: 60 } }))
+        break
+      case 'rule':
         out.push(
           new Paragraph({
-            spacing: { before: 60, after: 0 },
-            children: textRuns(language, { size: 16, color: docxHex(palette.muted) }),
-          })
-        )
-      }
-      for (const codeLine of code) {
-        out.push(
-          new Paragraph({
-            spacing: { before: 0, after: 0 },
-            shading: { type: ShadingType.CLEAR, fill: docxHex(palette.surface) },
-            children: [
-              new TextRun({
-                text: codeLine === '' ? ' ' : codeLine,
-                font: { ascii: 'Courier New', hAnsi: 'Courier New' },
-                size: 18,
-                color: docxHex(palette.text),
-              }),
-            ],
-          })
-        )
-      }
-      out.push(new Paragraph({ children: [new TextRun({ text: '' })], spacing: { after: 80 } }))
-      continue
-    }
-
-    const heading = HEADING_RE.exec(trimmed)
-    if (heading) {
-      out.push(headingParagraph(heading[1].length, heading[2], ctx))
-      i++
-      continue
-    }
-
-    const image = IMAGE_LINE_RE.exec(trimmed)
-    if (image) {
-      const paragraph = ctx.image(imageTarget(image[2]), image[1])
-      if (paragraph) out.push(paragraph)
-      i++
-      continue
-    }
-
-    if (startsTable(lines, i)) {
-      const headers = splitTableRow(line)
-      const rows: string[][] = []
-      i += 2
-      while (
-        i < lines.length &&
-        lines[i].trim() !== '' &&
-        lines[i].includes('|') &&
-        !startsOtherBlock(lines[i])
-      ) {
-        rows.push(splitTableRow(lines[i]))
-        i++
-      }
-      out.push(
-        buildDocxTable(headers, rows, palette, 'striped', warnings, `The body's table ${++tables}`)
-      )
-      out.push(new Paragraph({ children: [new TextRun({ text: '' })], spacing: { before: 60 } }))
-      continue
-    }
-
-    // A rule wins over a list: "- - -" and "* * *" are rules in markdown.
-    if (/^(-{3,}|\*{3,}|_{3,})$/.test(trimmed.replace(/\s+/g, ''))) {
-      out.push(
-        new Paragraph({
-          spacing: { before: 120, after: 120 },
-          border: {
-            bottom: {
-              style: BorderStyle.SINGLE,
-              color: docxHex(palette.border),
-              size: 6,
-              space: 1,
+            spacing: { before: 120, after: 120 },
+            border: {
+              bottom: {
+                style: BorderStyle.SINGLE,
+                color: docxHex(palette.border),
+                size: 6,
+                space: 1,
+              },
             },
-          },
-          children: [new TextRun({ text: '' })],
-        })
-      )
-      i++
-      continue
-    }
-
-    if (isListLine(line)) {
-      const items: Paragraph[] = []
-      i = parseList(lines, i, ctx, items)
-      out.push(...items)
-      continue
-    }
-
-    if (QUOTE_RE.test(trimmed)) {
-      const quoted: string[] = []
-      while (i < lines.length && QUOTE_RE.test(lines[i].trimStart())) {
-        quoted.push(lines[i].trimStart().replace(QUOTE_RE, ''))
-        i++
-      }
-      const paragraphs = quoteParagraphs(quoted)
-      const bar = { style: BorderStyle.SINGLE, color: docxHex(palette.primary), size: 12, space: 8 }
-      // In a right-to-left paragraph Word reads the indent from the right but
-      // draws borders where they are named, so the bar moves to the right.
-      paragraphs.forEach((quote, n) =>
-        out.push(
-          new Paragraph({
-            ...docxDirection(quote),
-            spacing: { before: n === 0 ? 120 : 0, after: n === paragraphs.length - 1 ? 120 : 80 },
-            indent: { left: 360 },
-            border: isRtlText(quote) ? { right: bar } : { left: bar },
-            children: inlineRuns(quote, { color: docxHex(palette.muted) }, warnings),
+            children: [new TextRun({ text: '' })],
           })
         )
-      )
-      continue
+        break
+      case 'list': {
+        const items: Paragraph[] = []
+        i = parseList(lines, i, ctx, items)
+        out.push(...items)
+        continue
+      }
+      case 'quote': {
+        const bar = {
+          style: BorderStyle.SINGLE,
+          color: docxHex(palette.primary),
+          size: 12,
+          space: 8,
+        }
+        const paragraphs = block.paragraphs
+        // In a right-to-left paragraph Word reads the indent from the right but
+        // draws borders where they are named, so the bar moves to the right.
+        paragraphs.forEach((quote, n) =>
+          out.push(
+            new Paragraph({
+              ...docxDirection(quote),
+              spacing: {
+                before: n === 0 ? 120 : 0,
+                after: n === paragraphs.length - 1 ? 120 : 80,
+              },
+              indent: { left: 360 },
+              border: isRtlText(quote) ? { right: bar } : { left: bar },
+              children: inlineRuns(quote, { color: docxHex(palette.muted) }, warnings),
+            })
+          )
+        )
+        break
+      }
+      case 'blank':
+        out.push(blankParagraph())
+        break
+      case 'text': {
+        const image = IMAGE_LINE_RE.exec(block.line.trim())
+        if (image) {
+          const paragraph = ctx.image(imageTarget(image[2]), image[1])
+          if (paragraph) out.push(paragraph)
+        } else {
+          out.push(
+            new Paragraph({
+              ...docxDirection(block.line),
+              spacing: { after: 80 },
+              children: inlineRuns(block.line, { color: docxHex(palette.text) }, warnings),
+            })
+          )
+        }
+        break
+      }
     }
-
-    if (trimmed === '') {
-      out.push(blankParagraph())
-      i++
-      continue
-    }
-
-    out.push(
-      new Paragraph({
-        ...docxDirection(line),
-        spacing: { after: 80 },
-        children: inlineRuns(line, { color: docxHex(palette.text) }, warnings),
-      })
-    )
-    i++
+    i = block.next
   }
 
   return out
