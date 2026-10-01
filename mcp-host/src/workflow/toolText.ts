@@ -6,7 +6,7 @@
  * boxes, and the markdown parsers split on '\n' only. Cleaning the arguments
  * once, before a generator reads them, covers every string that can reach a file.
  */
-import { htmlToPlainText } from './inlineMarkup'
+import { htmlToPlainText, inlineSpans } from './inlineMarkup'
 
 /**
  * CSI and terminated OSC sequences, then any other escape with its
@@ -75,8 +75,9 @@ const MARKDOWN_ESCAPE = /\\([!-/:-@[-`{-~])/g
  * The text of every string in `args` in the forms a document generator may
  * print it: as sent, cleaned as cleanToolArgs cleans it, with HTML tags,
  * character references, backslash escapes and invisible characters taken out,
- * and with markdown markers taken out too. Text split by any of these prints
- * whole, so a check for leaked secrets that reads every form sees it whole.
+ * with markdown markers taken out too, and read as inline markdown, where a
+ * link prints its label. Text split by any of these prints whole, so a check
+ * for leaked secrets that reads every form sees it whole.
  */
 export function printedForms(args: unknown): string[] {
   const sent: string[] = []
@@ -92,5 +93,13 @@ export function printedForms(args: unknown): string[] {
     htmlToPlainText(text).replace(MARKDOWN_ESCAPE, '$1').replace(INVISIBLE, '')
   )
   const bare = printed.map(text => text.replace(/[*_~`]/g, ''))
-  return [...sent, ...cleaned, ...printed, ...bare]
+  // As the PDF and DOCX generators read inline text, where a link or an image
+  // prints only its label, so text one splits is seen whole.
+  const spoken = cleaned.map(text =>
+    inlineSpans(text)
+      .map(span => span.text)
+      .join('')
+      .replace(INVISIBLE, '')
+  )
+  return [...sent, ...cleaned, ...printed, ...bare, ...spoken]
 }
