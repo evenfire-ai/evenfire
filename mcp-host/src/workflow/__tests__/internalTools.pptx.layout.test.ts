@@ -678,6 +678,20 @@ describe('clerum__generate_pptx — scripts other than Latin', () => {
     expect(xml).toMatch(/lang="ko-KR"[^>]*>[\s\S]*?<a:t>한국어/)
   })
 
+  it('tags a Traditional Chinese deck as Traditional', async () => {
+    const result = await generatePptx(
+      {
+        filename: 't.pptx',
+        slides: [{ layout: 'title-bullets', title: '季度報告', bullets: ['這個季度的營收增長'] }],
+      },
+      outputDir
+    )
+    expect(result.success, result.error).toBe(true)
+    const xml = slideXml(path.join(outputDir, 't.pptx'), 1)
+    expect(xml).toMatch(/lang="zh-TW"[^>]*>[\s\S]*?<a:t>季度報告<\/a:t>/)
+    expect(xml).not.toContain('zh-CN')
+  })
+
   it('gives Han characters alone the language of the deck', async () => {
     const result = await generatePptx(
       {

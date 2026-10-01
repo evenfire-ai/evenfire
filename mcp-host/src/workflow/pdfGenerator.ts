@@ -1176,7 +1176,7 @@ export async function runGeneratePdf(
         .filter(text => text !== undefined && text !== null)
         .map(String)
         .join('\n')
-    )?.lang.slice(0, 2)
+    )?.lang
     const printer = new PdfPrinter(glyphs.descriptors(typesetter.families, language))
     const pdfDoc = printer.createPdfKitDocument(docDef)
 

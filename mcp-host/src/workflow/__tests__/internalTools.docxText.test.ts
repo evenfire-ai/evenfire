@@ -303,6 +303,22 @@ describe('generate_docx CJK text', () => {
     expect(documentEastAsianScript('Plain English')).toBeUndefined()
   })
 
+  it('tells Traditional Chinese, and Hong Kong text, from Simplified', () => {
+    expect(documentEastAsianScript('這個季度的營收增長\n市場份額繼續擴大')?.lang).toBe('zh-TW')
+    expect(documentEastAsianScript('呢個季度嘅營收增長咗')?.lang).toBe('zh-HK')
+    expect(documentEastAsianScript('这个季度的营收增长')?.lang).toBe('zh-CN')
+    // Characters both write the same way say nothing, so Simplified stays.
+    expect(documentEastAsianScript('中文名字')?.lang).toBe('zh-CN')
+    // Cantonese in Simplified text is not Hong Kong's.
+    expect(documentEastAsianScript('这个季度嘅营收')?.lang).toBe('zh-CN')
+  })
+
+  it('sets a Traditional Chinese document in the Traditional face and language', async () => {
+    const defaults = await docDefaults('# 季度報告\n\n這個季度的營收增長，市場份額繼續擴大。')
+    expect(defaults).toMatch(/<w:rFonts [^>]*w:eastAsia="Microsoft JhengHei"/)
+    expect(defaults).toMatch(/<w:lang [^>]*w:eastAsia="zh-TW"/)
+  })
+
   it('gives Han characters alone the language of a Japanese document', async () => {
     const body =
       '# 売上概要\n\n今期の売上は前年比で増加しました。\n\n| 都市 | 売上 |\n|---|---|\n| 東京 | 120 |'

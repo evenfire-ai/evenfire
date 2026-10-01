@@ -190,8 +190,14 @@ describe('per-character fallback for PDFs', () => {
       expect(process.env.CI, 'CI installs the Noto CJK collection').not.toBe('true')
       return
     }
-    expect((glyphs.descriptors([family!], 'ja')[family!].normal as string[])[1]).toMatch(/CJKjp-/)
-    expect((glyphs.descriptors([family!], 'ko')[family!].normal as string[])[1]).toMatch(/CJKkr-/)
+    const variant = (language: string) =>
+      (glyphs.descriptors([family!], language)[family!].normal as string[])[1]
+    expect(variant('ja-JP')).toMatch(/CJKjp-/)
+    expect(variant('ko-KR')).toMatch(/CJKkr-/)
+    expect(variant('zh-TW')).toMatch(/CJKtc-/)
+    expect(variant('zh-HK')).toMatch(/CJKhk-/)
+    expect(variant('zh-CN')).toMatch(/CJKsc-/)
+    expect(variant('toString')).toMatch(/CJKsc-/)
 
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'clerum-cjk-'))
     try {
@@ -201,6 +207,12 @@ describe('per-character fallback for PDFs', () => {
       const raw = fs.readFileSync(r.artifact!.path).toString('latin1')
       expect(raw).toMatch(/NotoSansCJKjp-/)
       expect(raw).not.toMatch(/NotoSansCJKsc-/)
+
+      const tc = await pdf.execute({ filename: 'tc.pdf', body: '這個季度的營收增長。' }, dir)
+      expect(tc.success, tc.error).toBe(true)
+      const tcRaw = fs.readFileSync(tc.artifact!.path).toString('latin1')
+      expect(tcRaw).toMatch(/NotoSansCJKtc-/)
+      expect(tcRaw).not.toMatch(/NotoSansCJKsc-/)
     } finally {
       fs.rmSync(dir, { recursive: true, force: true })
     }

@@ -16,6 +16,7 @@ import { GlobalFonts, type SKRSContext2D, createCanvas } from '@napi-rs/canvas'
 import * as fs from 'fs'
 import * as path from 'path'
 import { logger } from '../logger'
+import { own } from './ownEntry'
 
 /** Family the bundled Roboto is registered under. */
 export const CHART_FONT_FAMILY = 'Clerum Sans'
@@ -565,6 +566,14 @@ function facesFromCollection(file: string, boldFile?: string): PdfFaces | undefi
   return { normal, bold, italics: normal, bolditalics: bold }
 }
 
+/** The CJK collection variant whose glyph forms the readers of a language expect. */
+const CJK_VARIANTS: Record<string, string> = {
+  'ja-JP': 'jp',
+  'ko-KR': 'kr',
+  'zh-TW': 'tc',
+  'zh-HK': 'hk',
+}
+
 /**
  * `faces` with each face addressed inside a CJK collection swapped for the
  * collection's `variant` face of the same weight ("CJKsc-Bold" for
@@ -812,8 +821,9 @@ export interface PdfGlyphSource {
   metrics(family: string): FaceMetrics | undefined
   /**
    * pdfmake descriptors for `families`, always including the body and mono
-   * ones. With `language` 'ja' or 'ko', a face from a CJK collection is taken
-   * in that language's variant, whose glyph forms its readers expect.
+   * ones. With `language` 'ja-JP', 'ko-KR', 'zh-TW' or 'zh-HK', a face from a
+   * CJK collection is taken in that language's variant, whose glyph forms its
+   * readers expect; Simplified Chinese is the collections' first variant.
    */
   descriptors(families: Iterable<string>, language?: string): Record<string, PdfFaces>
 }
@@ -1012,7 +1022,7 @@ class GlyphSource implements PdfGlyphSource {
       const faces = this.facesOf(family)
       if (faces) out[family] = faces
     }
-    const variant = language === 'ja' ? 'jp' : language === 'ko' ? 'kr' : undefined
+    const variant = language ? own(CJK_VARIANTS, language) : undefined
     if (variant) {
       for (const [family, faces] of Object.entries(out)) out[family] = inVariant(faces, variant)
     }
