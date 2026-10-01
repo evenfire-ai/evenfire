@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
+import desktopEnvironmentFixture from '../../profile-ui/test/fixtures/desktop-environment-response.json'
 
 const authTokenMock = vi.hoisted(() => ({ verifyToken: vi.fn() }))
 vi.mock('../src/authToken.js', () => authTokenMock)
@@ -54,11 +55,17 @@ describe('routes/desktop', () => {
       .get('/api/v1/desktop/environment')
       .expect(200)
 
-    expect(res.body).toEqual({
-      appName: 'Example Tenant',
-      externalRestApiBaseUrl: 'https://api.example.com',
-      rpcProxyBaseUrl: 'https://rpc.example.com',
-    })
+    expect(res.body).toEqual(desktopEnvironmentFixture)
+  })
+
+  it('defaults the desktop discovery app name when it is not configured', async () => {
+    delete process.env.EXTERNAL_REST_API_DESKTOP_APP_NAME
+
+    const res = await request(await buildApp())
+      .get('/api/v1/desktop/environment')
+      .expect(200)
+
+    expect(res.body).toEqual({ ...desktopEnvironmentFixture, appName: 'Evenfire' })
   })
 
   it('requires auth before returning desktop release policy', async () => {

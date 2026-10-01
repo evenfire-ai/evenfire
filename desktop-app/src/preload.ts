@@ -106,11 +106,19 @@ const clerum = Object.freeze({
       return () => ipcRenderer.off('auth:desktopSetupToken', listener)
     },
     onDesktopEnvironmentSetup: (
-      callback: (payload: { externalRestApiBaseUrl: string; appName?: string }) => void
+      callback: (payload: {
+        externalRestApiBaseUrl: string
+        rpcProxyBaseUrl: string
+        appName?: string
+      }) => void
     ) => {
       const listener = (
         _event: Electron.IpcRendererEvent,
-        payload: { externalRestApiBaseUrl: string; appName?: string }
+        payload: {
+          externalRestApiBaseUrl: string
+          rpcProxyBaseUrl: string
+          appName?: string
+        }
       ) => callback(payload)
       ipcRenderer.on('auth:desktopEnvironmentSetup', listener)
       return () => ipcRenderer.off('auth:desktopEnvironmentSetup', listener)
