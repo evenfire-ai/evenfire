@@ -433,7 +433,11 @@ describe('XLSX conditional-formatting regex bounds', () => {
     )
     const elapsed = Date.now() - start
     expect(result.success).toBe(true)
-    // A loose budget, so a slow machine passes; a true ReDoS would hang for minutes.
+    // The witness: safe-regex turned the pattern away, so it never ran.
+    expect(result.content).toContain(
+      'conditionalFormatting[0].rules[0].regex has nested repetition that can hang the match'
+    )
+    // A loose bound, so a loaded machine passes; a pattern that ran would hang for minutes.
     expect(elapsed).toBeLessThan(20_000)
   }, 60_000)
 })
