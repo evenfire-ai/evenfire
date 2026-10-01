@@ -1,5 +1,5 @@
 import { type Mock, inject, vi } from 'vitest'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync } from 'node:fs'
 import { join } from 'node:path'
 import { ChatStore } from '../../../../../../src/chatStore'
 import type { ChatDeleteFence, ChatMessage } from '../../../../../../src/types'
@@ -19,12 +19,10 @@ import type {} from './mockClerumStoreRoot'
  * per-install directory under the run's temporary root, so suites observe the
  * merge, delete tombstone and paging behavior the IPC handlers run in
  * production. They stay `vi.fn` wrappers, so call assertions and per-test
- * overrides keep working. `uninstallMockClerum` removes the directory; the
- * global setup in `mockClerumStoreRoot.ts` removes the root after the run,
- * including any directory a late store write recreated.
+ * overrides keep working. `uninstallMockClerum` removes the bridge; the global
+ * setup in `mockClerumStoreRoot.ts` removes the store directories after the
+ * run, allowing in-flight writes to finish before cleanup.
  */
-
-const storeDirs = new Set<string>()
 
 type Handler = (event: unknown) => void
 // `ReturnType<typeof vi.fn>` resolves to `Mock<Procedure | Constructable>`, and
@@ -91,7 +89,6 @@ export function installMockClerum(): MockClerum {
     )
   }
   const storeDir = mkdtempSync(join(root, 'store-'))
-  storeDirs.add(storeDir)
   const store = new ChatStore(storeDir)
 
   const chat = {
@@ -194,6 +191,4 @@ export function installMockClerum(): MockClerum {
 
 export function uninstallMockClerum(): void {
   delete (window as { clerum?: unknown }).clerum
-  for (const dir of storeDirs) rmSync(dir, { recursive: true, force: true })
-  storeDirs.clear()
 }

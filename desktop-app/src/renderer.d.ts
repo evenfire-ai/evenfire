@@ -97,7 +97,11 @@ declare global {
           callback: (payload: { email: string; authorizationToken: string }) => void
         ) => () => void
         onDesktopEnvironmentSetup: (
-          callback: (payload: { externalRestApiBaseUrl: string; appName?: string }) => void
+          callback: (payload: {
+            externalRestApiBaseUrl: string
+            rpcProxyBaseUrl: string
+            appName?: string
+          }) => void
         ) => () => void
         getDesktopReleaseStatus: () => Promise<DesktopReleaseStatus>
         getDesktopAppInfo: () => Promise<DesktopAppInfo>

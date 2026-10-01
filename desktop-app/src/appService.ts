@@ -16,6 +16,10 @@ import {
   saveDesktopRuntimeConfig,
   selectDesktopRuntimeConfigOption,
 } from './config.js'
+import {
+  canonicalizeDesktopRestEndpoint,
+  sameDesktopRestEndpoint,
+} from './desktopEnvironmentUrl.js'
 import { fetchBoundedBytes } from './gfs/boundedDownload.js'
 import { type DelegationAffordances, delegationAffordances } from './gfs/delegation.js'
 import {
@@ -2016,9 +2020,15 @@ export class AppService {
     hydrateDesktopRuntimeConfig()
     if (!isDesktopRuntimeConfigured()) return
     if (config.rpcProxyBaseUrl?.trim()) return
+    const externalRestApiBaseUrl = canonicalizeDesktopRestEndpoint(config.externalRestApiBaseUrl)
     const discovered = await this.authClient.getDesktopEnvironment()
+    if (!sameDesktopRestEndpoint(discovered.externalRestApiBaseUrl, externalRestApiBaseUrl)) {
+      throw new Error('Desktop environment discovery returned a different REST endpoint')
+    }
     await saveDesktopRuntimeConfig({
-      externalRestApiBaseUrl: discovered.externalRestApiBaseUrl || config.externalRestApiBaseUrl,
+      // Discovery is scoped to the configured REST endpoint; it may provide
+      // RPC details but must never switch or overwrite another REST profile.
+      externalRestApiBaseUrl,
       rpcProxyBaseUrl: discovered.rpcProxyBaseUrl,
       appName: discovered.appName || config.appName,
     })
