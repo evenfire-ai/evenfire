@@ -1,6 +1,11 @@
 import * as k8s from '@kubernetes/client-node'
 import { config } from './config.js'
 import { rootLogger } from './observability/logger.js'
+import {
+  type ConversationStoreHostSnapshot,
+  type ConversationStoreRequest,
+  buildConversationStoreRequestPatch,
+} from './services/hostConversationStoreService.js'
 import { HostEnvService } from './services/hostEnvService.js'
 import { HostOverviewService } from './services/hostOverviewService.js'
 import {
@@ -326,6 +331,25 @@ export class K8sGateway {
     namespace?: string
   ): Promise<unknown> {
     return this.resources.patchResourceStatus(plural, name, statusPatch, namespace)
+  }
+
+  /** Operator-only request projection; admission reserves all other fields to HCC. */
+  async patchHostConversationStoreRequest(
+    name: string,
+    request: ConversationStoreRequest,
+    snapshot: ConversationStoreHostSnapshot
+  ): Promise<unknown> {
+    return this.customApi.patchNamespacedCustomObjectStatus(
+      {
+        group: 'clerum.io',
+        version: 'v1alpha1',
+        namespace: config.hostsNamespace,
+        plural: 'hosts',
+        name,
+        body: buildConversationStoreRequestPatch(snapshot, request),
+      },
+      { middleware: [k8s.setHeaderMiddleware('Content-Type', 'application/json-patch+json')] }
+    )
   }
 
   /**

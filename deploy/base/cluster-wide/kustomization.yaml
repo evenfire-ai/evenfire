@@ -5,3 +5,4 @@ resources:
   - clusterrolebindings.yaml
   - priorityclasses.yaml
   - workflowrecipe-admission.yaml
+  - host-conversation-store-admission.yaml
