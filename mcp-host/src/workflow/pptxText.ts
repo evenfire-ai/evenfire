@@ -50,6 +50,9 @@ function canvasContext(): SKRSContext2D {
 }
 
 const widthCache = new Map<string, number>()
+/** Longest text whose width is kept, and how many widths are kept at once. */
+const CACHED_TEXT_LENGTH = 64
+const CACHED_WIDTHS = 20_000
 
 /** Width of `text` in ems of the deck font. */
 function widthEm(text: string, bold: boolean): number {
@@ -66,8 +69,11 @@ function widthEm(text: string, bold: boolean): number {
   }
   const measured = narrow ? ctx.measureText(narrow).width / 100 : 0
   const em = measured * (bold ? BOLD_WIDTH_FACTOR : REGULAR_WIDTH_FACTOR) + wide
-  if (widthCache.size > 20_000) widthCache.clear()
-  widthCache.set(key, em)
+  // Only short texts repeat (words, labels); a whole cell is measured once.
+  if (text.length <= CACHED_TEXT_LENGTH) {
+    if (widthCache.size >= CACHED_WIDTHS) widthCache.clear()
+    widthCache.set(key, em)
+  }
   return em
 }
 

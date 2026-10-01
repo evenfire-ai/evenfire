@@ -869,6 +869,8 @@ function discoverFallbacks(exclude: Set<string>): FallbackFamily[] {
 /** Longest text whose measured width is kept, and how many widths are kept at once. */
 const MEASURED_TEXT_CACHED = 64
 const MEASURED_WIDTHS_KEPT = 50_000
+/** Face choices kept at once, by family and code point. */
+const CHOSEN_KEPT = 50_000
 
 class GlyphSource implements PdfGlyphSource {
   private readonly info = new Map<string, FaceInfo | undefined>()
@@ -949,6 +951,9 @@ class GlyphSource implements PdfGlyphSource {
     else {
       hit = this.fallbackList().find(f => this.covers(f.family, cp) && this.usable(f))?.family
     }
+    // One entry per family and code point a document uses; a text of many
+    // distinct ones (a dictionary of Han characters) starts it over.
+    if (this.chosen.size >= CHOSEN_KEPT) this.chosen.clear()
     this.chosen.set(key, hit)
     return hit
   }
