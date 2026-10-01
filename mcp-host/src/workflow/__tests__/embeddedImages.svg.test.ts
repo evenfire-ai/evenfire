@@ -102,3 +102,29 @@ describe('SVG images', () => {
     expect(longestGap).toBeLessThan(1000)
   }, 30000)
 })
+
+describe('raster images a PDF would decode', () => {
+  it('leaves an image over the pixel limit out of a PDF, saying so, and still embeds it in a DOCX', async () => {
+    const { createCanvas } = await import('@napi-rs/canvas')
+    // 16.4 million pixels in a small file: pdfkit would inflate all of them.
+    fs.writeFileSync(
+      path.join(outputDir, 'huge.png'),
+      createCanvas(4100, 4000).toBuffer('image/png')
+    )
+    const result = await pdf.execute(
+      { filename: 'r.pdf', body: 'Chart:\n\n![c](huge.png)' },
+      outputDir
+    )
+    expect(result.success, result.error).toBe(true)
+    expect(result.content).toMatch(/'huge\.png' is 4100 x 4000 pixels, more than the 16 million/)
+    const bytes = fs.readFileSync(path.join(outputDir, result.artifact!.name)).toString('latin1')
+    expect(bytes).not.toMatch(/\/Subtype\s*\/Image/)
+    const docx = INTERNAL_TOOLS.find(t => t.name === 'clerum__generate_docx')!
+    const doc = await docx.execute(
+      { filename: 'r.docx', body: 'Chart:', images: ['huge.png'] },
+      outputDir
+    )
+    expect(doc.success, doc.error).toBe(true)
+    expect(doc.content ?? '').not.toMatch(/huge\.png/)
+  }, 30000)
+})

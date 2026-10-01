@@ -273,7 +273,7 @@ export interface EmbeddableImage {
  * bitmap, so every size is checked before decoding: a raster's from its file
  * header, an SVG's from its root element, which is refused when unreadable.
  */
-const MAX_DECODE_PIXELS = 16_000_000
+export const MAX_DECODE_PIXELS = 16_000_000
 const MAX_SVG_SIDE = 2048
 
 /** Width and height from a GIF, WebP or BMP header, read before the image is decoded. */

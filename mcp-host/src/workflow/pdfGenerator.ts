@@ -19,7 +19,12 @@ import {
   printedBranding,
 } from './documentChrome'
 import { documentEastAsianScript } from './docxScript'
-import { fitImageSize, imageDataUrl, loadEmbeddableImage } from './embeddedImages'
+import {
+  MAX_DECODE_PIXELS,
+  fitImageSize,
+  imageDataUrl,
+  loadEmbeddableImage,
+} from './embeddedImages'
 import { PDF_FONT_FAMILY, PDF_MONO_FAMILY, pdfGlyphSource } from './fonts'
 import {
   closesFence,
@@ -862,7 +867,18 @@ export async function runGeneratePdf(
     // A path outside the output folder still fails the call, but says what to pass instead.
     const loadImage = (ref: unknown, label: string) => {
       try {
-        return loadEmbeddableImage(ref, outputDir, warnings, label)
+        const image = loadEmbeddableImage(ref, outputDir, warnings, label)
+        // pdfkit decodes every pixel of a PNG to embed it, so a small file of a
+        // huge image takes gigabytes; the other formats embed the bytes as they are.
+        if (image && image.pixels.width * image.pixels.height > MAX_DECODE_PIXELS) {
+          warnings.push(
+            `${label} '${path.basename(image.path)}' is ${image.pixels.width} x ${image.pixels.height} ` +
+              `pixels, more than the ${MAX_DECODE_PIXELS / 1e6} million a PDF image may have, so it ` +
+              'was left out. Scale it down first.'
+          )
+          return undefined
+        }
+        return image
       } catch (err) {
         const reason = err instanceof Error ? err.message : String(err)
         throw new Error(
