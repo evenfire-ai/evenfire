@@ -134,6 +134,28 @@ function errorText(err: unknown): string {
 }
 
 /**
+ * CJK characters, which every CJK face sets one em wide. Text measures count
+ * them so rather than measure them, since the image may have no CJK face.
+ */
+export const CJK_WIDE_CHAR =
+  /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\u3000-\u303F\uFF01-\uFF60\uFFE0-\uFFE6]/u
+
+let measuring: SKRSContext2D | undefined
+
+/**
+ * Width of `text` in ems of the bundled body face (CHART_FONT_FAMILY), as the
+ * canvas sets it. Each document format scales it to the face it is shown in.
+ */
+export function bodyFaceEm(text: string, bold: boolean): number {
+  if (!measuring) {
+    ensureFontsReady()
+    measuring = createCanvas(4, 4).getContext('2d')
+  }
+  measuring.font = `100px "${bold ? `${CHART_FONT_FAMILY} Bold` : CHART_FONT_FAMILY}"`
+  return measuring.measureText(text).width / 100
+}
+
+/**
  * Families a PDF can be built from, widest coverage first.
  *
  * The body family is the widest one present, since every run starts in it:

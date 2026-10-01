@@ -4,9 +4,8 @@
  * another slide, so the generator lays text out itself. It measures with the
  * Roboto faces fonts.ts registers, within a few percent of Arial, the deck font.
  */
-import { type SKRSContext2D, createCanvas } from '@napi-rs/canvas'
 import { isRtlText } from './docxScript'
-import { CHART_FONT_FAMILY, ensureFontsReady } from './fonts'
+import { CJK_WIDE_CHAR, bodyFaceEm } from './fonts'
 
 /** The one family the deck uses, for slides and charts alike. */
 export const PPTX_FONT_FACE = 'Arial'
@@ -27,28 +26,11 @@ const WIDE_LINE_HEIGHT = 1.35
 export const TEXT_INSET_X = 0.2
 export const TEXT_INSET_Y = 0.1
 
-/**
- * CJK characters, counted one em wide: every CJK face sets them so, and the
- * runtime image may have no CJK face to measure them with.
- */
-const WIDE_CHAR =
-  /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\u3000-\u303F\uFF01-\uFF60\uFFE0-\uFFE6]/u
-
 /** Runs of spaces, single CJK characters, and words: the points where a line may break. */
 const BREAK_TOKENS = new RegExp(
-  `\\s+|${WIDE_CHAR.source}|[^\\s]+?(?=\\s|${WIDE_CHAR.source}|$)`,
+  `\\s+|${CJK_WIDE_CHAR.source}|[^\\s]+?(?=\\s|${CJK_WIDE_CHAR.source}|$)`,
   'gu'
 )
-
-let context: SKRSContext2D | undefined
-
-function canvasContext(): SKRSContext2D {
-  if (!context) {
-    ensureFontsReady()
-    context = createCanvas(4, 4).getContext('2d')
-  }
-  return context
-}
 
 const widthCache = new Map<string, number>()
 /** Longest text whose width is kept, and how many widths are kept at once. */
@@ -60,15 +42,13 @@ function widthEm(text: string, bold: boolean): number {
   const key = `${bold ? 'b' : 'r'}${text}`
   const cached = widthCache.get(key)
   if (cached !== undefined) return cached
-  const ctx = canvasContext()
-  ctx.font = `100px "${bold ? `${CHART_FONT_FAMILY} Bold` : CHART_FONT_FAMILY}"`
   let wide = 0
   let narrow = ''
   for (const ch of text) {
-    if (WIDE_CHAR.test(ch)) wide++
+    if (CJK_WIDE_CHAR.test(ch)) wide++
     else narrow += ch
   }
-  const measured = narrow ? ctx.measureText(narrow).width / 100 : 0
+  const measured = narrow ? bodyFaceEm(narrow, bold) : 0
   const em = measured * (bold ? BOLD_WIDTH_FACTOR : REGULAR_WIDTH_FACTOR) + wide
   // Only short texts repeat (words, labels); a whole cell is measured once.
   if (text.length <= CACHED_TEXT_LENGTH) {
@@ -143,7 +123,7 @@ export function wrapLines(text: string, sizePt: number, widthIn: number, bold = 
 }
 
 export function lineHeightIn(sizePt: number, text: string): number {
-  return ((WIDE_CHAR.test(text) ? WIDE_LINE_HEIGHT : LINE_HEIGHT) * sizePt) / 72
+  return ((CJK_WIDE_CHAR.test(text) ? WIDE_LINE_HEIGHT : LINE_HEIGHT) * sizePt) / 72
 }
 
 /** Height, in inches, of `paragraphs` set in a box `widthIn` wide, without the box insets. */

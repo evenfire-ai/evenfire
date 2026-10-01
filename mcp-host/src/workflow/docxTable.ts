@@ -1,4 +1,3 @@
-import { type SKRSContext2D, createCanvas } from '@napi-rs/canvas'
 import {
   BorderStyle,
   Paragraph,
@@ -17,7 +16,7 @@ import {
   type DocxPalette,
   docxHex,
 } from './docxStyle'
-import { CHART_FONT_FAMILY, ensureFontsReady } from './fonts'
+import { CJK_WIDE_CHAR, bodyFaceEm } from './fonts'
 import { inlineSpans } from './inlineMarkup'
 import { columnNames, headerText } from './tableRows'
 
@@ -50,34 +49,24 @@ const LONG_TOKEN_TWIPS = 2800
 /** Added to every column: Word wraps a word that fills its cell exactly. */
 const SLACK_TWIPS = 40
 
-/**
- * CJK characters, counted one em wide as every CJK face sets them, and the
- * characters Roboto has no glyph for, counted at a generous 0.6 em, so neither
- * depends on the faces the runtime image happens to ship.
- */
-const WIDE_CHAR =
-  /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\u3000-\u303F\uFF01-\uFF60\uFFE0-\uFFE6]/u
+/** Characters Roboto has a glyph for; any other is counted, not measured. */
 const MEASURED_CHAR = /[\u0000-\u052F\u1E00-\u206F\u20A0-\u20BF]/u
 
-let context: SKRSContext2D | undefined
 const advances = [new Map<string, number>(), new Map<string, number>()]
 
 /**
  * Advance of one character at 1pt in ems. Characters in MEASURED_CHAR are
  * measured once each in Roboto, which runs about 7-10% wider than Calibri
  * (Medium against Bold included), so a sum of advances errs toward fitting.
+ * CJK counts one em and the rest a generous 0.6, so neither depends on the
+ * faces the runtime image happens to ship.
  */
 function advanceEm(ch: string, bold: boolean): number {
-  if (!MEASURED_CHAR.test(ch)) return WIDE_CHAR.test(ch) ? 1 : 0.6
+  if (!MEASURED_CHAR.test(ch)) return CJK_WIDE_CHAR.test(ch) ? 1 : 0.6
   const cache = advances[bold ? 1 : 0]
   const known = cache.get(ch)
   if (known !== undefined) return known
-  if (!context) {
-    ensureFontsReady()
-    context = createCanvas(4, 4).getContext('2d')
-  }
-  context.font = `100px "${bold ? `${CHART_FONT_FAMILY} Bold` : CHART_FONT_FAMILY}"`
-  const em = context.measureText(ch).width / 100
+  const em = bodyFaceEm(ch, bold)
   cache.set(ch, em)
   return em
 }
