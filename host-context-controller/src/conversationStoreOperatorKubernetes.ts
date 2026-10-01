@@ -728,21 +728,54 @@ export class ConversationStoreKubernetesOperatorPort implements ConversationStor
         throw new Error('OperatorIdentityConflict')
     }
   }
+  private podContainersTerminated(pod: k8s.V1Pod): boolean {
+    if (!['Succeeded', 'Failed'].includes(pod.status?.phase ?? '') || !pod.spec?.containers?.length)
+      return false
+    return [
+      { containers: pod.spec.containers, statuses: pod.status?.containerStatuses ?? [] },
+      {
+        containers: pod.spec.initContainers ?? [],
+        statuses: pod.status?.initContainerStatuses ?? [],
+      },
+      {
+        containers: pod.spec.ephemeralContainers ?? [],
+        statuses: pod.status?.ephemeralContainerStatuses ?? [],
+      },
+    ].every(({ containers, statuses }) => {
+      if (!containers || !statuses || containers.length !== statuses.length) return false
+      const names = containers.map(container => container.name)
+      if (
+        new Set(names).size !== names.length ||
+        new Set(statuses.map(status => status.name)).size !== names.length
+      )
+        return false
+      return statuses.every(
+        status =>
+          names.includes(status.name) &&
+          !!status.state?.terminated &&
+          Object.keys(status.state).length === 1
+      )
+    })
+  }
   private async requireNoLegacyWriter(
     context: ConversationStoreOperatorContext,
     proof?: ConversationStoreWriterProof
-  ): Promise<void> {
+  ): Promise<boolean> {
     const deployment = await this.readDeployment(context)
     if (deployment && (deployment.spec?.replicas ?? 1) !== 0)
       throw new Error('LegacyWriterNotFenced')
     const pods = await this.deps.coreApi.listNamespacedPod({ namespace: context.host.namespace })
+    let sourcePending = false
     for (const pod of pods.items) {
       if (
         !pod.spec?.volumes?.some(
           volume => volume.persistentVolumeClaim?.claimName === context.pvcName
         )
-      )
+      ) {
+        if (proof && pod.metadata?.uid === proof.sourcePodUid)
+          throw new Error('SourceWriterChanged')
         continue
+      }
       const owner = pod.metadata?.ownerReferences?.find(
         value => value.controller && value.kind === 'Job'
       )
@@ -763,9 +796,7 @@ export class ConversationStoreKubernetesOperatorPort implements ConversationStor
         const pvc = pod.spec.volumes?.find(
           value => value.persistentVolumeClaim?.claimName === context.pvcName
         )?.persistentVolumeClaim
-        const ended =
-          pod.status?.containerStatuses?.length === pod.spec.containers?.length &&
-          pod.status?.containerStatuses?.every(value => !!value.state?.terminated)
+        const ended = this.podContainersTerminated(pod)
         const ownExecution =
           context.host.status?.conversationStore?.execution?.jobUid === helper.metadata.uid
         if (pvc?.readOnly || ended || ownExecution) continue
@@ -774,14 +805,21 @@ export class ConversationStoreKubernetesOperatorPort implements ConversationStor
       if (
         proof &&
         pod.metadata?.uid === proof.sourcePodUid &&
+        !!pod.metadata.resourceVersion &&
+        pod.spec?.nodeName === proof.nodeName &&
         pod.status?.containerStatuses?.find(value => value.name === 'mcp-host')?.imageID ===
           proof.sourceImageId &&
         pod.status?.containerStatuses?.find(value => value.name === 'mcp-host')?.restartCount ===
           proof.sourceRestartCount
-      )
+      ) {
+        // The closure report and a zero replica count precede source deletion.
+        // Only native terminal states or absence stop the old process from reopening SQLite.
+        if (!this.podContainersTerminated(pod)) sourcePending = true
         continue
+      }
       throw new Error('UnverifiedPvcWriterPresent')
     }
+    return !sourcePending
   }
   async execute(
     context: ConversationStoreOperatorContext,
@@ -790,7 +828,8 @@ export class ConversationStoreKubernetesOperatorPort implements ConversationStor
     writerProof?: ConversationStoreWriterProof
   ): Promise<ConversationStoreExecution> {
     await this.requireCurrent(context, request)
-    if (phase !== 'preparation') await this.requireNoLegacyWriter(context, writerProof)
+    if (phase !== 'preparation' && !(await this.requireNoLegacyWriter(context, writerProof)))
+      return { state: 'pending' }
     const desired = this.job(context, request, phase, writerProof)
     const name = desired.metadata!.name!,
       namespace = context.host.namespace
@@ -803,6 +842,10 @@ export class ConversationStoreKubernetesOperatorPort implements ConversationStor
     }
     if (!job) {
       await this.requireCurrent(context, request)
+      // Identity provisioning and Job lookup may await API calls. Reobserve source closure
+      // immediately before admitting a new writable helper.
+      if (phase !== 'preparation' && !(await this.requireNoLegacyWriter(context, writerProof)))
+        return { state: 'pending' }
       job = await observeCreate('Job', () =>
         this.deps.batchApi().createNamespacedJob({ namespace, body: desired })
       )

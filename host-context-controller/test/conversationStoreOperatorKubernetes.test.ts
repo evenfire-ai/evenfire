@@ -492,3 +492,158 @@ it('retains a different OCI config CRI identity without confusing it with the re
     requestHash: computeConversationStoreRequestHash(f.request),
   })
 })
+
+it('waits for physical source termination after scale-to-zero before creating a writable Job', async () => {
+  const f = fixture()
+  f.sourcePod()
+  f.deployment.spec!.replicas = 1
+  vi.mocked(f.apps.replaceNamespacedDeployment).mockImplementation(async ({ body }) => {
+    Object.assign(f.deployment, clone(body))
+    return clone(body)
+  })
+  const stopped = await f.port.verifyStoppedWriter(f.context, f.request)
+  expect(stopped.verified).toBe(true)
+  if (!stopped.verified) throw new Error('Expected verified unit transport proof')
+  await f.port.stopLegacyDeployment(f.context, f.request, stopped.proof)
+  expect(f.deployment.spec!.replicas).toBe(0)
+  expect(await f.port.execute(f.context, f.request, 'migrate', stopped.proof)).toEqual({
+    state: 'pending',
+  })
+  expect(f.batch.createNamespacedJob).not.toHaveBeenCalled()
+  expect(f.core.createNamespacedServiceAccount).not.toHaveBeenCalled()
+})
+
+it.each(['migrate', 'layout-precheck', 'adopt'] as const)(
+  'keeps %s pending during slow source Pod deletion',
+  async phase => {
+    const f = fixture()
+    const source = f.sourcePod()
+    const stopped = await f.port.verifyStoppedWriter(f.context, f.request)
+    if (!stopped.verified) throw new Error('Expected verified unit transport proof')
+    source.metadata!.deletionTimestamp = new Date(NOW)
+    expect(await f.port.execute(f.context, f.request, phase, stopped.proof)).toEqual({
+      state: 'pending',
+    })
+    expect(f.batch.createNamespacedJob).not.toHaveBeenCalled()
+  }
+)
+
+it.each(['missing-status', 'phase-only', 'restartable', 'live-init', 'live-ephemeral'] as const)(
+  'does not treat %s as native source termination',
+  async fault => {
+    const f = fixture()
+    const source = f.sourcePod()
+    const stopped = await f.port.verifyStoppedWriter(f.context, f.request)
+    if (!stopped.verified) throw new Error('Expected verified unit transport proof')
+    if (fault === 'missing-status') source.status!.containerStatuses = []
+    else if (fault === 'phase-only') source.status!.phase = 'Succeeded'
+    else {
+      source.status!.containerStatuses![0].state = { terminated: { exitCode: 0 } }
+      if (fault !== 'restartable') source.status!.phase = 'Failed'
+      if (fault === 'live-init') {
+        source.spec!.initContainers = [{ name: 'writer-init', image: IMAGE }]
+        source.status!.initContainerStatuses = [
+          {
+            ...clone(source.status!.containerStatuses![0]),
+            name: 'writer-init',
+            state: { running: {} },
+          },
+        ]
+      }
+      if (fault === 'live-ephemeral') {
+        source.spec!.ephemeralContainers = [{ name: 'writer-debug', image: IMAGE }]
+        source.status!.ephemeralContainerStatuses = [
+          {
+            ...clone(source.status!.containerStatuses![0]),
+            name: 'writer-debug',
+            state: { running: {} },
+          },
+        ]
+      }
+    }
+    if (fault === 'missing-status')
+      await expect(f.port.execute(f.context, f.request, 'migrate', stopped.proof)).rejects.toThrow(
+        'UnverifiedPvcWriterPresent'
+      )
+    else
+      expect(await f.port.execute(f.context, f.request, 'migrate', stopped.proof)).toEqual({
+        state: 'pending',
+      })
+    expect(f.batch.createNamespacedJob).not.toHaveBeenCalled()
+  }
+)
+
+it.each(['restart', 'replacement', 'node'] as const)(
+  'rejects changed source %s identity before creating a writable Job',
+  async fault => {
+    const f = fixture()
+    const source = f.sourcePod()
+    const stopped = await f.port.verifyStoppedWriter(f.context, f.request)
+    if (!stopped.verified) throw new Error('Expected verified unit transport proof')
+    source.status!.phase = 'Failed'
+    source.status!.containerStatuses![0].state = { terminated: { exitCode: 0 } }
+    if (fault === 'restart') source.status!.containerStatuses![0].restartCount++
+    if (fault === 'replacement') source.metadata!.uid = 'replacement-source'
+    if (fault === 'node') source.spec!.nodeName = 'different-node'
+    await expect(f.port.execute(f.context, f.request, 'migrate', stopped.proof)).rejects.toThrow(
+      'UnverifiedPvcWriterPresent'
+    )
+    expect(f.batch.createNamespacedJob).not.toHaveBeenCalled()
+  }
+)
+
+it('resumes writable Job creation only after the originally verified source is absent', async () => {
+  const f = fixture()
+  const source = f.sourcePod()
+  const stopped = await f.port.verifyStoppedWriter(f.context, f.request)
+  if (!stopped.verified) throw new Error('Expected verified unit transport proof')
+  expect(await f.port.execute(f.context, f.request, 'migrate', stopped.proof)).toEqual({
+    state: 'pending',
+  })
+  expect(f.batch.createNamespacedJob).not.toHaveBeenCalled()
+  f.pods.delete(source.metadata!.name!)
+  expect(await f.port.execute(f.context, f.request, 'migrate', stopped.proof)).toEqual({
+    state: 'pending',
+  })
+  expect(f.batch.createNamespacedJob).toHaveBeenCalledOnce()
+})
+
+it('admits the original source at a newer native RV when all regular, init and ephemeral containers are terminal', async () => {
+  const f = fixture()
+  const source = f.sourcePod()
+  const stopped = await f.port.verifyStoppedWriter(f.context, f.request)
+  if (!stopped.verified) throw new Error('Expected verified unit transport proof')
+  source.status!.phase = 'Failed'
+  source.status!.containerStatuses![0].state = { terminated: { exitCode: 0 } }
+  // Native status/deletion updates advance RV; the original proof does not freeze it.
+  source.metadata!.resourceVersion = '2'
+  source.spec!.initContainers = [{ name: 'writer-init', image: IMAGE }]
+  source.spec!.ephemeralContainers = [{ name: 'writer-debug', image: IMAGE }]
+  source.status!.initContainerStatuses = [
+    { ...clone(source.status!.containerStatuses![0]), name: 'writer-init' },
+  ]
+  source.status!.ephemeralContainerStatuses = [
+    { ...clone(source.status!.containerStatuses![0]), name: 'writer-debug' },
+  ]
+  expect(await f.port.execute(f.context, f.request, 'migrate', stopped.proof)).toEqual({
+    state: 'pending',
+  })
+  expect(f.batch.createNamespacedJob).toHaveBeenCalledOnce()
+})
+
+it('reobserves source disappearance after identity provisioning and before Job creation', async () => {
+  const f = fixture()
+  const source = f.sourcePod()
+  const stopped = await f.port.verifyStoppedWriter(f.context, f.request)
+  if (!stopped.verified) throw new Error('Expected verified unit transport proof')
+  f.pods.delete(source.metadata!.name!)
+  const create = vi.mocked(f.core.createNamespacedServiceAccount).getMockImplementation()!
+  vi.mocked(f.core.createNamespacedServiceAccount).mockImplementationOnce(async args => {
+    f.sourcePod()
+    return create(args)
+  })
+  expect(await f.port.execute(f.context, f.request, 'migrate', stopped.proof)).toEqual({
+    state: 'pending',
+  })
+  expect(f.batch.createNamespacedJob).not.toHaveBeenCalled()
+})
