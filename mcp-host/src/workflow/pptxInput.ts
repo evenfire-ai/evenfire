@@ -171,8 +171,17 @@ export function readText(
 
 /** A Markdown list marker, which the slide's own bullet would print twice. */
 const LIST_MARKER = /^[-*+•]\s+/
+/** A numbered list marker; the slide's bullet replaces it and the order stays. */
+const ORDERED_MARKER = /^\d{1,9}[.)]\s+/
+/** A list item set in from the left: a bullet nested under the one above. */
+const NESTED_ITEM = /^[ \t]+(?:[-*+•]|\d{1,9}[.)])\s/
 
-/** A list of text items. One string is read as one item per line. */
+/**
+ * A list of text items. One string is read as one item per line. Slides show
+ * one level of bullets, so a nested item joins the first level, and the result
+ * says so. Numbers are taken off only when every item is a list item: a lone
+ * "2024. A record year" keeps its year.
+ */
 export function readStringList(
   value: unknown,
   where: string,
@@ -180,15 +189,36 @@ export function readStringList(
   ctx: ReadContext
 ): string[] | undefined {
   if (value === undefined || value === null) return undefined
-  let items: Array<string | undefined>
+  let raw: unknown[]
+  let at: (i: number) => string
   if (typeof value === 'string') {
-    items = value.split('\n').map((line, i) => readText(line, `${where} line ${i + 1}`, max, ctx))
+    raw = value.split('\n')
+    at = i => `${where} line ${i + 1}`
   } else if (Array.isArray(value)) {
-    items = value.map((item, i) => readText(item, `${where}[${i}]`, max, ctx))
+    raw = value
+    at = i => `${where}[${i}]`
   } else {
     throw new PptxInputError(`${where} must be a list of text items; received ${describe(value)}.`)
   }
-  return items.map(item => item?.replace(LIST_MARKER, '')).filter((item): item is string => !!item)
+  const nested = raw.map(item => typeof item === 'string' && NESTED_ITEM.test(item))
+  const items = raw
+    .map((item, i) => ({ text: readText(item, at(i), max, ctx), nested: nested[i] }))
+    .filter((item): item is { text: string; nested: boolean } => !!item.text)
+  const marked = (text: string) => LIST_MARKER.test(text) || ORDERED_MARKER.test(text)
+  const numbered = items.length > 1 && items.every(item => marked(item.text))
+  const first = nested.indexOf(true)
+  if (first >= 0) {
+    ctx.warnings.push(
+      `${at(first)} is a nested bullet; slides show one level of bullets, so it was set at the ` +
+        'first level with the others. Put the detail on its own slide or in the item it belongs to.'
+    )
+  }
+  return items
+    .map(({ text, nested }) => {
+      const bare = text.replace(LIST_MARKER, '')
+      return numbered || nested ? bare.replace(ORDERED_MARKER, '') : bare
+    })
+    .filter(Boolean)
 }
 
 export function readEnum<T extends string>(
