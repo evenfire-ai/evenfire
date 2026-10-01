@@ -1014,7 +1014,7 @@ function dashSeverityClass(value: unknown): string {
     operational: 'severity-low',
     incident: 'severity-high',
   }
-  return map[v] ?? ''
+  return own(map, v) ?? ''
 }
 
 function renderTableHtml(t: unknown, where: string, ctx: DashRender, title?: string): string {
