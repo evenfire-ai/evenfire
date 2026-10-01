@@ -12,12 +12,13 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { makeTaskKey } from '@contexts/AgentTaskTrackerContext/types'
-import { act, waitFor } from '@testing-library/react'
+import { act, cleanup, waitFor as rtlWaitFor } from '@testing-library/react'
 import { renderController } from './__fixtures__/controllerHarness'
 import { type MockClerum, installMockClerum, uninstallMockClerum } from './__fixtures__/mockClerum'
 
 let clerum: MockClerum
 let uuidCounter = 0
+const ASYNC_WAIT_TIMEOUT_MS = 5_000
 
 // React 18/19 needs this flag for act() to flush effects in the test env.
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -32,9 +33,11 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  cleanup()
   vi.restoreAllMocks()
   vi.useRealTimers()
   uninstallMockClerum()
+  expect(document.body.childElementCount).toBe(0)
 })
 
 /** Wait until the controller's mount effect (loadChatList) has settled. */
@@ -48,13 +51,19 @@ async function settleMount() {
 const CHAT_STORE_IO_TIMEOUT_MS = 10_000
 
 async function waitForProgressHandler(taskId: string) {
-  await waitFor(() => expect(clerum.hasProgressHandler(taskId)).toBe(true), {
-    timeout: CHAT_STORE_IO_TIMEOUT_MS,
-  })
+  await waitFor(
+    () => expect(clerum.hasProgressHandler(taskId)).toBe(true),
+    CHAT_STORE_IO_TIMEOUT_MS
+  )
 }
 
 function waitForWithFakeTimers<T>(assertion: () => T | Promise<T>) {
   return vi.waitFor(assertion, { timeout: CHAT_STORE_IO_TIMEOUT_MS })
+}
+
+/** Real ChatStore-backed effects can exceed Testing Library's 1s default on CI runners. */
+function waitFor<T>(callback: () => T | Promise<T>, timeout = ASYNC_WAIT_TIMEOUT_MS) {
+  return rtlWaitFor(callback, { timeout })
 }
 
 function deferred<T>() {
