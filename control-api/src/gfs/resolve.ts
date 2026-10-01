@@ -66,6 +66,8 @@ export interface ResolvedResource {
   name: string
   kind: string
   pathCache: string | null
+  bytes: number
+  version: number
   updatedAt: string
 }
 
@@ -99,7 +101,7 @@ export interface ResolveDb {
   query(text: string, values?: unknown[]): Promise<{ rows: unknown[] }>
 }
 
-const SELECT_COLS = 'resource_id, drive, name, kind, path_cache, updated_at'
+const SELECT_COLS = 'resource_id, drive, name, kind, path_cache, bytes, version, updated_at'
 
 function toIsoTimestamp(value: unknown): string {
   if (value instanceof Date) return value.toISOString()
@@ -117,6 +119,8 @@ function rowToResource(row: unknown): ResolvedResource {
     name: unknown
     kind: unknown
     path_cache: unknown
+    bytes: unknown
+    version: unknown
     updated_at: unknown
   }
   return {
@@ -125,6 +129,8 @@ function rowToResource(row: unknown): ResolvedResource {
     name: String(r.name),
     kind: String(r.kind),
     pathCache: r.path_cache == null ? null : String(r.path_cache),
+    bytes: Number(r.bytes),
+    version: Number(r.version),
     updatedAt: toIsoTimestamp(r.updated_at),
   }
 }
