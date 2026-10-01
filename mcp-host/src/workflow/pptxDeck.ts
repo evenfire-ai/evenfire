@@ -819,6 +819,8 @@ interface CardType {
   /** Room above the value, the same on every card so the values line up. */
   labelHeight: number
   valueSize: number
+  /** The value sizes, largest first; a value that wraps may take a smaller one than valueSize. */
+  valueSizes: number[]
 }
 
 const LABEL_SIZES = [11, 10, 9]
@@ -861,7 +863,7 @@ function cardType(cards: PptxKpi[], cardW: number, columns: number, people: bool
     (oneLine.length > 0 &&
       valueSizes.find(size => oneLine.every(c => textWidth(c.value, size, true) <= inner))) ||
     smallest
-  return { labelSize, labelHeight, valueSize }
+  return { labelSize, labelHeight, valueSize, valueSizes }
 }
 
 function drawCard(
@@ -932,11 +934,12 @@ function drawCard(
     )
     y += h
   } else {
-    // A value that wraps keeps the size of the other cards' values and stops above the delta.
+    // A value that wraps keeps the size of the other cards' values when it fits
+    // above the delta there, and takes a smaller one before it is shortened.
     const value = fitOrShorten(
       card.value,
       { w, h: bottom - y },
-      [size],
+      type.valueSizes.filter(s => s <= size),
       `${card.where}.value`,
       ctx.warnings,
       { bold: true }
@@ -945,7 +948,7 @@ function drawCard(
       slide,
       value.text,
       { x, y, w, h: value.height },
-      { fontSize: size, bold: true, color: hex(p.primary) }
+      { fontSize: value.size, bold: true, color: hex(p.primary) }
     )
     y += value.height
   }

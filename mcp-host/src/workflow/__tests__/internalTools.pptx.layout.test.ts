@@ -262,6 +262,33 @@ describe('clerum__generate_pptx — text stays inside its box', () => {
     expect(need).toBeLessThanOrEqual((value.sizes[0] * 1.2) / 72 + 1e-3)
   })
 
+  it('sets a long KPI value smaller rather than cutting it when a smaller size fits', async () => {
+    // Under the 80-character limit on a KPI value, too long for the shared size.
+    const status = 'On track in every region after the migration, last two markets in May'
+    const result = await generatePptx(
+      {
+        filename: 'kwrap.pptx',
+        slides: [
+          {
+            layout: 'kpis',
+            title: 'KPIs',
+            kpis: [
+              { label: 'Revenue', value: '$1.2M' },
+              { label: 'Status', value: status },
+            ],
+          },
+        ],
+      },
+      outputDir
+    )
+    expect(result.success, result.error).toBe(true)
+    expect(result.content ?? '').not.toMatch(/kpis\[1\]\.value is too long/)
+    const xml = slideXml(path.join(outputDir, 'kwrap.pptx'), 1)
+    const shown = shapeWithText(xml, 'On track')
+    expect(shown.paragraphs.join(' ').replace(/\s+/g, ' ')).toBe(status)
+    expect(shown.sizes[0]).toBeLessThan(shapeWithText(xml, '$1.2M').sizes[0])
+  })
+
   it('sets every KPI value on a slide at one size and centres a short last row', async () => {
     const values = ['1%', '2%', '$1,234,567.89', '4%', '5%']
     const result = await generatePptx(
