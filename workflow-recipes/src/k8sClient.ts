@@ -701,7 +701,11 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
   // result or DELETE.
   private transientRetries = new Map<
     string,
-    { timer: ReturnType<typeof setTimeout>; attempts: number }
+    {
+      timer: ReturnType<typeof setTimeout>
+      attempts: number
+      recipeUid?: string
+    }
   >()
   private static readonly TRANSIENT_RETRY_MAX_MS = 60_000
 
@@ -1055,8 +1059,13 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
     options: { forceReconcile?: boolean } = {}
   ): Promise<void> {
     if (type === 'ADDED' || type === 'MODIFIED') {
+      const scheduledUid = this.transientRetries.get(recipe.metadata.name)?.recipeUid
+      if (scheduledUid && scheduledUid !== recipe.metadata.uid) {
+        this.clearTransientRetry(recipe.metadata.name)
+      }
       let dbSyncAttempted = false
       if (recipe.metadata.deletionTimestamp) {
+        this.clearTransientRetry(recipe.metadata.name)
         // Resource is being deleted — cleanup cross-namespace resources, then remove finalizer.
         createLogger('wrc', recipe.metadata.name).info('Cleaning up recipe finalizer', {
           name: recipe.metadata.name,
@@ -1181,7 +1190,8 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
           this.scheduleTransientRetry(
             recipe.metadata.name,
             result.requeueAfterMs,
-            result.requeueFixedInterval ?? false
+            result.requeueFixedInterval ?? false,
+            result.requeueOperation
           )
         } else {
           this.clearTransientRetry(recipe.metadata.name)
@@ -1266,17 +1276,38 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
    *
    * Exposed for tests via the watcher's event path.
    */
-  private scheduleTransientRetry(name: string, baseMs: number, fixedInterval = false): void {
+  private scheduleTransientRetry(
+    name: string,
+    baseMs: number,
+    fixedInterval = false,
+    operation?: ReconcileResult['requeueOperation']
+  ): void {
     const existing = this.transientRetries.get(name)
     // Fixed-interval (progress) requeues reset the backoff counter; transient
     // (error) requeues grow it.
     const attempts = fixedInterval ? 0 : (existing?.attempts ?? 0)
     if (existing) clearTimeout(existing.timer)
+    const owner = operation ? this.recipes.get(name) : undefined
+    if (operation && (!owner?.metadata.uid || owner.metadata.deletionTimestamp)) {
+      this.transientRetries.delete(name)
+      return
+    }
     const delay = fixedInterval
       ? baseMs
       : Math.min(baseMs * 2 ** attempts, WorkflowRecipeWatcher.TRANSIENT_RETRY_MAX_MS)
     const timer = setTimeout(() => {
       if (this.stopped) return
+      if (operation && owner) {
+        void this.eventQueue.enqueue(name, () =>
+          this.retryPendingLegacyNetworkPolicyDelete(
+            name,
+            owner.metadata.namespace,
+            owner.metadata.uid!,
+            timer
+          )
+        )
+        return
+      }
       const cached = this.recipes.get(name)
       if (!cached) {
         this.transientRetries.delete(name)
@@ -1301,7 +1332,81 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
     // reconcile advances past the waiting state once the awaited Pod succeeds,
     // and the 240s readiness deadline / dbRunProcessor max-duration paths
     // terminate any run permanently stuck in deploying, so this is bounded.
-    this.transientRetries.set(name, { timer, attempts: fixedInterval ? 0 : attempts + 1 })
+    this.transientRetries.set(name, {
+      timer,
+      attempts: fixedInterval ? 0 : attempts + 1,
+      ...(operation ? { recipeUid: owner!.metadata.uid } : {}),
+    })
+  }
+
+  /**
+   * Runs after the recipe's queue wait. The API read is authoritative for UID,
+   * deletion and policy markers; this callback never invokes the full recipe
+   * pipeline, token reap or terminal runtime teardown.
+   */
+  private async retryPendingLegacyNetworkPolicyDelete(
+    name: string,
+    namespace: string,
+    uid: string,
+    timer: ReturnType<typeof setTimeout>
+  ): Promise<void> {
+    const current = () => !this.stopped && this.transientRetries.get(name)?.timer === timer
+    if (!current()) return
+    try {
+      const apiObject = (await this.customApi.getNamespacedCustomObject({
+        group: CRD_GROUP,
+        version: CRD_VERSION,
+        namespace,
+        plural: WORKFLOWRECIPE_PLURAL,
+        name,
+      })) as WorkflowRecipeWatchObject
+      if (!current()) return
+      if (
+        apiObject.metadata.name !== name ||
+        apiObject.metadata.namespace !== namespace ||
+        apiObject.metadata.uid !== uid ||
+        apiObject.metadata.deletionTimestamp
+      ) {
+        this.clearTransientRetry(name)
+        return
+      }
+      const latest = workflowRecipeFromWatchObject(apiObject, namespace)
+      const result = await this.reconciler.retryPendingLegacyNetworkPolicyDeleteOnly(latest)
+      if (!current()) return
+      const cached = this.recipes.get(name)
+      if (!cached || cached.metadata.uid !== uid || cached.metadata.deletionTimestamp) {
+        this.clearTransientRetry(name)
+        return
+      }
+      if (result.requeueAfterMs) {
+        this.scheduleTransientRetry(
+          name,
+          result.requeueAfterMs,
+          true,
+          'legacy-network-policy-delete'
+        )
+      } else {
+        this.clearTransientRetry(name)
+      }
+    } catch (error) {
+      if (!current()) return
+      if (getErrorCode(error) === 404) {
+        this.clearTransientRetry(name)
+        return
+      }
+      createLogger('wrc', name).error('Legacy NetworkPolicy delete retry failed', {
+        name,
+        err: error,
+      })
+      // A status conflict or transient API failure keeps this same narrow
+      // operation on the existing bounded error backoff; it cannot replay runtime cleanup.
+      this.scheduleTransientRetry(
+        name,
+        TRANSIENT_REQUEUE_BASE_MS,
+        false,
+        'legacy-network-policy-delete'
+      )
+    }
   }
 
   private clearTransientRetry(name: string): void {

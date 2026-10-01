@@ -64,6 +64,7 @@ import { HttpPluginWorkloadSdkRevocationClient } from '../workflow/pluginWorkloa
 import { deriveWorkflowRuntimePlan } from '../workflow/runtimePlan'
 import { validateWorkflowRecipeLimits } from '../workflow/workflowLimits'
 import {
+  LegacyNetworkPolicyDeletePendingError,
   NETWORK_POLICY_OWNERSHIP_CONDITION_TYPES,
   type NetworkPolicyMarkerWriter,
   WORKFLOW_OUTPUT_CONDITION_TYPES,
@@ -689,7 +690,17 @@ export interface ReconcileResult {
    * false/undefined so genuine flakiness still backs off.
    */
   requeueFixedInterval?: boolean
+  /** A legacy-only timer must not repeat the recipe's runtime lifecycle. */
+  requeueOperation?: 'legacy-network-policy-delete'
 }
+
+type LegacyNetworkPolicyDeleteRetryResult = Pick<
+  ReconcileResult,
+  | 'requeueAfterMs'
+  | 'requeueFixedInterval'
+  | 'requeueOperation'
+  | 'networkPolicyOwnershipConditions'
+>
 
 /**
  * Base requeue delay for a transient (skipStatusPatch) reconcile result. The
@@ -1097,7 +1108,7 @@ export class WorkflowRecipeReconciler {
    */
   private async cleanupPluginWorkloadSdkOrThrow(
     recipeName: string,
-    options: { preserveWorkflowRuntime?: boolean; recipeUid?: string } = {}
+    options: { preserveWorkflowRuntime?: boolean; recipeUid?: string; recipeDeleted?: boolean } = {}
   ): Promise<void> {
     if (!this.workflowReconciler) {
       throw new Error('workflow subsystem is not initialized; SDK cleanup cannot be confirmed')
@@ -1551,6 +1562,90 @@ export class WorkflowRecipeReconciler {
   }
 
   /**
+   * The timer's only operation: retry the shared legacy DELETE and publish its
+   * condition group. Reread after the asynchronous DELETE so a replacement CR,
+   * deletion or newer policy facts cannot receive this snapshot's status.
+   * Resource-version conflicts retry through the watcher's bounded timer; the
+   * shared gone ledger prevents another DELETE while that patch converges.
+   */
+  async retryPendingLegacyNetworkPolicyDeleteOnly(
+    recipe: WorkflowRecipeCRD
+  ): Promise<LegacyNetworkPolicyDeleteRetryResult> {
+    if (
+      !this.workflowReconciler ||
+      !recipe.metadata.uid ||
+      recipe.metadata.namespace !== this.config.sandboxNamespace ||
+      recipe.metadata.deletionTimestamp ||
+      !hasLegacyNetworkPolicyDeletePendingMarker(recipe.status?.conditions)
+    )
+      return {}
+
+    const legacy = await this.workflowReconciler.retryLegacyMcpServersInternetEgressDelete(
+      recipe.metadata.name,
+      recipe.metadata.uid
+    )
+    let live: WorkflowRecipeCRD
+    try {
+      live = (await this.customApi.getNamespacedCustomObject({
+        group: CRD_GROUP,
+        version: CRD_VERSION,
+        namespace: recipe.metadata.namespace,
+        plural: WORKFLOWRECIPE_PLURAL,
+        name: recipe.metadata.name,
+      })) as WorkflowRecipeCRD
+    } catch (error) {
+      if (getErrorCode(error) === 404) return {}
+      throw error
+    }
+    if (
+      live.metadata.uid !== recipe.metadata.uid ||
+      live.metadata.name !== recipe.metadata.name ||
+      live.metadata.namespace !== recipe.metadata.namespace ||
+      live.metadata.deletionTimestamp ||
+      !hasLegacyNetworkPolicyDeletePendingMarker(live.status?.conditions)
+    )
+      return {}
+
+    if (legacy === 'pending') {
+      const result: LegacyNetworkPolicyDeleteRetryResult = {}
+      this.requeueForPendingLegacyNetworkPolicyDelete(live, result)
+      return result
+    }
+    const fresh = networkPolicyMarkerConditions(
+      { kind: 'legacy-retry', legacy },
+      live.status?.conditions,
+      new Date().toISOString()
+    )
+    const conditions =
+      mergeOwnedConditions(
+        live.status?.conditions,
+        fresh,
+        NETWORK_POLICY_OWNERSHIP_CONDITION_TYPES
+      ) ?? []
+    if (!live.metadata.resourceVersion) {
+      throw new RetryableReconcileError(
+        'Cannot publish legacy policy retry without recipe resourceVersion'
+      )
+    }
+    await this.customApi.patchNamespacedCustomObjectStatus(
+      {
+        group: CRD_GROUP,
+        version: CRD_VERSION,
+        namespace: live.metadata.namespace,
+        plural: WORKFLOWRECIPE_PLURAL,
+        name: live.metadata.name,
+        body: {
+          metadata: { uid: live.metadata.uid, resourceVersion: live.metadata.resourceVersion },
+          status: { conditions },
+        },
+      },
+      { middleware: [k8s.setHeaderMiddleware('Content-Type', 'application/merge-patch+json')] }
+    )
+    if (recipe.status) recipe.status.conditions = conditions
+    return {}
+  }
+
+  /**
    * R4-L4: a pass that leaves `DeletePending` published and asks for no other
    * requeue is requeued at a fixed interval for the rest of the legacy
    * delete's backoff window, at least 1 s. The group the pass publishes wins
@@ -1559,9 +1654,15 @@ export class WorkflowRecipeReconciler {
    */
   private requeueForPendingLegacyNetworkPolicyDelete(
     recipe: WorkflowRecipeCRD,
-    result: ReconcileResult
+    result: LegacyNetworkPolicyDeleteRetryResult
   ): void {
-    if (!this.workflowReconciler || result.requeueAfterMs !== undefined) return
+    if (
+      !this.workflowReconciler ||
+      recipe.metadata.namespace !== this.config.sandboxNamespace ||
+      recipe.metadata.deletionTimestamp ||
+      result.requeueAfterMs !== undefined
+    )
+      return
     const conditions = result.networkPolicyOwnershipConditions ?? recipe.status?.conditions
     if (!hasLegacyNetworkPolicyDeletePendingMarker(conditions)) return
     result.requeueAfterMs = Math.max(
@@ -1572,6 +1673,7 @@ export class WorkflowRecipeReconciler {
       )
     )
     result.requeueFixedInterval = true
+    result.requeueOperation = 'legacy-network-policy-delete'
   }
 
   /**
@@ -1822,6 +1924,7 @@ export class WorkflowRecipeReconciler {
     const ns = recipe.metadata.namespace
     const currentPhase = recipe.status?.phase ?? 'candidate'
     let sdkOnlyProviderUnavailable = false
+    let sdkOnlyCapabilityRemovalTeardownConfirmed = false
 
     // Defense-in-depth: the VAP + admin-API already enforce this invariant,
     // but a manually-applied CRD in another namespace must not be reconciled.
@@ -1855,6 +1958,7 @@ export class WorkflowRecipeReconciler {
       try {
         await this.cleanupPluginWorkloadSdkOrThrow(name, {
           preserveWorkflowRuntime: isWorkflow,
+          recipeUid: recipe.metadata.uid,
         })
       } catch (error) {
         return {
@@ -1862,7 +1966,11 @@ export class WorkflowRecipeReconciler {
           message: `Plugin Workload SDK teardown failed while the feature flag is disabled: ${String(error)}`,
           workloadStatuses: [],
           skipStatusPatch: true,
-          requeueAfterMs: TRANSIENT_REQUEUE_BASE_MS,
+          requeueAfterMs:
+            error instanceof LegacyNetworkPolicyDeletePendingError
+              ? error.retryAfterMs
+              : TRANSIENT_REQUEUE_BASE_MS,
+          requeueFixedInterval: error instanceof LegacyNetworkPolicyDeletePendingError,
         }
       }
       return {
@@ -1894,6 +2002,7 @@ export class WorkflowRecipeReconciler {
       try {
         await this.cleanupPluginWorkloadSdkOrThrow(name, {
           preserveWorkflowRuntime: isWorkflow,
+          recipeUid: recipe.metadata.uid,
         })
       } catch (error) {
         return {
@@ -1901,7 +2010,11 @@ export class WorkflowRecipeReconciler {
           message: `Plugin Workload SDK teardown failed after capability removal: ${String(error)}`,
           workloadStatuses: [],
           skipStatusPatch: true,
-          requeueAfterMs: TRANSIENT_REQUEUE_BASE_MS,
+          requeueAfterMs:
+            error instanceof LegacyNetworkPolicyDeletePendingError
+              ? error.retryAfterMs
+              : TRANSIENT_REQUEUE_BASE_MS,
+          requeueFixedInterval: error instanceof LegacyNetworkPolicyDeletePendingError,
         }
       }
       // A stepless recipe managed policies only through the SDK, and the
@@ -1909,6 +2022,7 @@ export class WorkflowRecipeReconciler {
       // terminal and validation returns below never reach the SDK-only lane.
       // A workflow recipe keeps its run lane, which still manages policies.
       if (!isWorkflow) {
+        sdkOnlyCapabilityRemovalTeardownConfirmed = true
         await this.publishNetworkPolicyMarkerWriter(recipe, { kind: 'unmanaged' })
       }
     }
@@ -3147,12 +3261,9 @@ export class WorkflowRecipeReconciler {
         sdkOnlyRuntime?.phase === 'active' &&
         recipe.spec.pluginWorkloadSdk !== undefined &&
         sdkOnlyRuntime.pluginWorkloadSdkBootstrapProof?.ready !== true
-      // Without an SDK runtime this lane reaches no policy: the spec has no
-      // SDK block, and the capability-removal teardown deleted every SDK
-      // policy, the legacy one by name included. That is the unmanaged
-      // writer, which clears the whole group. A runtime without a summary did
-      // not evaluate the policies (the host returned before the apply), so
-      // the field stays absent and patchStatus keeps what was published.
+      // Only a completed capability-removal teardown proves this lane manages
+      // no policy. A missing runtime alone evaluated nothing and must preserve
+      // the published apply, prune, ownership and legacy-delete facts.
       const now = new Date().toISOString()
       const {
         networkPolicyRetryPending: sdkOnlyNetworkPolicyRetryPending,
@@ -3163,13 +3274,15 @@ export class WorkflowRecipeReconciler {
             recipe.status?.conditions,
             now
           )
-        : {
-            networkPolicyOwnershipConditions: networkPolicyMarkerConditions(
-              { kind: 'unmanaged' },
-              recipe.status?.conditions,
-              now
-            ),
-          }
+        : sdkOnlyCapabilityRemovalTeardownConfirmed
+          ? {
+              networkPolicyOwnershipConditions: networkPolicyMarkerConditions(
+                { kind: 'unmanaged' },
+                recipe.status?.conditions,
+                now
+              ),
+            }
+          : {}
       if (sdkOnlyRuntime?.phase === 'failed') {
         return {
           phase: 'failed',
@@ -4059,7 +4172,11 @@ export class WorkflowRecipeReconciler {
       // the shared mcp-host/token resources. Hybrid recipes must not bypass
       // broker revocation merely because they also have coordinator state.
       if (recipe.spec.pluginWorkloadSdk || recipe.status?.pluginWorkloadSdk) {
-        await this.cleanupPluginWorkloadSdkOrThrow(name, { preserveWorkflowRuntime: true })
+        await this.cleanupPluginWorkloadSdkOrThrow(name, {
+          preserveWorkflowRuntime: true,
+          recipeUid: recipe.metadata.uid,
+          recipeDeleted: true,
+        })
       }
       await this.workflowReconciler.reconcileDelete(
         name,
@@ -4076,7 +4193,10 @@ export class WorkflowRecipeReconciler {
     // a capability may have been removed in an update before Kubernetes emits
     // the final delete event, and cleanup must still revoke its host tokens.
     if (recipe.spec.pluginWorkloadSdk || recipe.status?.pluginWorkloadSdk) {
-      await this.cleanupPluginWorkloadSdkOrThrow(name, { recipeUid: recipe.metadata.uid })
+      await this.cleanupPluginWorkloadSdkOrThrow(name, {
+        recipeUid: recipe.metadata.uid,
+        recipeDeleted: true,
+      })
     }
 
     await this.cleanupDelegationIfNeeded(recipe)

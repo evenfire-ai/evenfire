@@ -36,6 +36,8 @@ import {
 } from '../../../src/workflow/resourceNames'
 import { deriveWorkflowRuntimePlan } from '../../../src/workflow/runtimePlan'
 import {
+  LEGACY_NETWORK_POLICY_DELETE_BACKOFF_BASE_MS,
+  LegacyNetworkPolicyDeletePendingError,
   type WorkflowRecipeSpec,
   WorkflowReconciler,
   type WorkflowReconcilerDeps,
@@ -9223,6 +9225,152 @@ describe('WorkflowReconciler — reconcile loop', () => {
   })
 })
 
+describe('cleanupPluginWorkloadSdk legacy internet policy ownership', () => {
+  const RECIPE = 'sdk-only'
+  const RECIPE_UID = 'uid-sdk-only'
+  const LEGACY = `${RECIPE}-mcp-servers-egress-internet`
+
+  function legacyDeletes(networkingApi: ReturnType<typeof makeNetworkingApi>): number {
+    return networkingApi.deleteNamespacedNetworkPolicy.mock.calls.filter(
+      ([arg]) => arg.name === LEGACY
+    ).length
+  }
+
+  function makeCleanupCoreApi(): ReturnType<typeof makeCoreApi> {
+    const coreApi = makeCoreApi() as ReturnType<typeof makeCoreApi>
+    coreApi.readNamespacedEndpoints = vi.fn().mockRejectedValue({ code: 404 })
+    return coreApi
+  }
+
+  it('routes a labeled legacy policy through the shared live ledger instead of the label sweep', async () => {
+    const networkingApi = makeNetworkingApi() as ReturnType<typeof makeNetworkingApi>
+    let legacyPresent = true
+    networkingApi.listNamespacedNetworkPolicy.mockImplementation(
+      async ({ namespace }: { namespace: string }) => ({
+        items:
+          namespace === 'mcp-server'
+            ? legacyPresent
+              ? [
+                  {
+                    metadata: {
+                      name: LEGACY,
+                      namespace,
+                      labels: { 'clerum.io/recipe': RECIPE, 'clerum.io/managed-by': 'wrc' },
+                    },
+                  },
+                ]
+              : []
+            : [],
+      })
+    )
+    networkingApi.deleteNamespacedNetworkPolicy.mockImplementation(async ({ name }) => {
+      if (name === LEGACY) legacyPresent = false
+      return {}
+    })
+    const coreApi = makeCoreApi() as ReturnType<typeof makeCoreApi>
+    coreApi.readNamespacedEndpoints = vi.fn().mockRejectedValue({ code: 404 })
+    const reconciler = new WorkflowReconciler(
+      makeDeps({
+        coreApi: coreApi as never,
+        networkingApi: networkingApi as never,
+        pluginWorkloadSdkRevocationClient: {
+          revoke: vi.fn().mockResolvedValue({ state: 'disabled' }),
+        } as never,
+      })
+    )
+
+    await reconciler.cleanupPluginWorkloadSdk(RECIPE, { recipeUid: RECIPE_UID })
+
+    // Liveness witness: both label-sweep namespaces were evaluated, and the
+    // shared by-name path sent the sole legacy DELETE.
+    expect(networkingApi.listNamespacedNetworkPolicy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        namespace: 'mcp-server',
+        labelSelector: `clerum.io/recipe=${RECIPE},clerum.io/managed-by=wrc`,
+      })
+    )
+    expect(legacyDeletes(networkingApi)).toBe(1)
+
+    await reconciler.retryLegacyMcpServersInternetEgressDelete(RECIPE, RECIPE_UID)
+    expect(legacyDeletes(networkingApi)).toBe(1)
+  })
+
+  it('keeps live cleanup on the shared backoff while finalizer cleanup gets one last chance', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    const startedAt = Date.now()
+    try {
+      const networkingApi = makeNetworkingApi() as ReturnType<typeof makeNetworkingApi>
+      let legacyDeleteFails = true
+      networkingApi.deleteNamespacedNetworkPolicy.mockImplementation(async ({ name }) => {
+        if (name === LEGACY && legacyDeleteFails) throw { code: 403, message: 'forbidden' }
+        return {}
+      })
+      const reconciler = new WorkflowReconciler(
+        makeDeps({
+          coreApi: makeCleanupCoreApi() as never,
+          networkingApi: networkingApi as never,
+          pluginWorkloadSdkRevocationClient: {
+            revoke: vi.fn().mockResolvedValue({ state: 'disabled' }),
+          } as never,
+        })
+      )
+
+      await expect(
+        reconciler.retryLegacyMcpServersInternetEgressDelete(RECIPE, RECIPE_UID)
+      ).resolves.toBe('pending')
+      expect(legacyDeletes(networkingApi)).toBe(1)
+
+      const pending = await reconciler
+        .cleanupPluginWorkloadSdk(RECIPE, {
+          recipeUid: RECIPE_UID,
+        })
+        .catch(error => error)
+      expect(pending).toBeInstanceOf(LegacyNetworkPolicyDeletePendingError)
+      expect((pending as LegacyNetworkPolicyDeletePendingError).retryAfterMs).toBe(
+        LEGACY_NETWORK_POLICY_DELETE_BACKOFF_BASE_MS
+      )
+      expect(legacyDeletes(networkingApi)).toBe(1)
+
+      legacyDeleteFails = false
+      await reconciler.cleanupPluginWorkloadSdk(RECIPE, {
+        recipeUid: RECIPE_UID,
+        recipeDeleted: true,
+      })
+      expect(legacyDeletes(networkingApi)).toBe(2)
+
+      await reconciler.retryLegacyMcpServersInternetEgressDelete(RECIPE, RECIPE_UID)
+      expect(legacyDeletes(networkingApi)).toBe(3)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('keeps the legacy policy live when cleanup preserves the workflow runtime', async () => {
+    const networkingApi = makeNetworkingApi() as ReturnType<typeof makeNetworkingApi>
+    const reconciler = new WorkflowReconciler(
+      makeDeps({
+        coreApi: makeCleanupCoreApi() as never,
+        networkingApi: networkingApi as never,
+        pluginWorkloadSdkRevocationClient: {
+          revoke: vi.fn().mockResolvedValue({ state: 'disabled' }),
+        } as never,
+      })
+    )
+
+    await reconciler.cleanupPluginWorkloadSdk('hybrid', {
+      recipeUid: 'uid-hybrid',
+      preserveWorkflowRuntime: true,
+    })
+
+    expect(
+      networkingApi.deleteNamespacedNetworkPolicy.mock.calls.filter(
+        ([arg]) => arg.name === 'hybrid-mcp-servers-egress-internet'
+      )
+    ).toHaveLength(0)
+    expect(networkingApi.listNamespacedNetworkPolicy).not.toHaveBeenCalled()
+  })
+})
+
 describe('buildNetworkPolicyOwnershipConditions', () => {
   it('names the conflicting policies in sorted order, whatever order the apply produced them in', () => {
     const conditions = buildNetworkPolicyOwnershipConditions(
@@ -9790,6 +9938,41 @@ describe('networkPolicyMarkerFacts', () => {
       facts => buildNetworkPolicyConvergedCondition(facts, now)?.reason
     )
     expect(new Set(reasons).size).toBe(combinations.length)
+  })
+
+  it('reads the one historical RetryPending message that encoded a pending prune', () => {
+    const historical = {
+      type: 'WorkflowNetworkPoliciesConverged',
+      status: 'False' as const,
+      reason: 'RetryPending',
+      message:
+        'One or more run-lane NetworkPolicies are pending a retry (terminating or contended), and one or more the spec no longer wants are pending a delete',
+      lastTransitionTime: now,
+    }
+
+    expect(networkPolicyMarkerFacts([historical])).toStrictEqual({
+      apply: 'pending',
+      prune: 'pending',
+    })
+    expect(
+      networkPolicyMarkerFacts([{ ...historical, message: `${historical.message} ` }])
+    ).toStrictEqual({
+      apply: 'pending',
+      prune: 'converged',
+    })
+
+    const settled = networkPolicyMarkerConditions(
+      { kind: 'apply-retry', summary: { conflicts: [], retryPending: false } },
+      [historical],
+      now
+    )
+    expect(settled).toMatchObject([
+      {
+        type: 'WorkflowNetworkPoliciesConverged',
+        status: 'False',
+        reason: 'PrunePending',
+      },
+    ])
   })
 })
 

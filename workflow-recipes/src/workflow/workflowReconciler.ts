@@ -266,11 +266,30 @@ export interface PluginWorkloadSdkCleanupOptions {
    */
   preserveWorkflowRuntime?: boolean
   /**
-   * Set when the recipe itself is being deleted. An SDK-only recipe never
-   * reaches `reconcileDelete`, so this is the only place its legacy internet
-   * policy ledger entry can be forgotten.
+   * Identity for the live legacy-delete ledger. It shares the gone-set and
+   * backoff with `reconcile()` and the WRC retry; it never erases either.
    */
   recipeUid?: string
+  /**
+   * True only while the recipe itself is being deleted. A completed cleanup
+   * may then drop the process-local legacy ledger entry; a pending cleanup
+   * must retain it so the finalizer retry resumes from the same window.
+   */
+  recipeDeleted?: boolean
+}
+
+export class LegacyNetworkPolicyDeletePendingError extends Error {
+  constructor(
+    recipeName: string,
+    readonly retryAfterMs: number
+  ) {
+    super(`Legacy mcp-servers internet egress NetworkPolicy delete is pending for ${recipeName}`)
+    this.name = 'LegacyNetworkPolicyDeletePendingError'
+  }
+}
+
+function buildLegacyMcpServersInternetEgressPolicyName(recipeName: string): string {
+  return `${recipeName}-mcp-servers-egress-internet`
 }
 
 export const NETWORK_POLICY_OWNERSHIP_CONDITION_TYPE = 'WorkflowNetworkPolicyOwnership'
@@ -293,8 +312,8 @@ export const NETWORK_POLICY_OWNERSHIP_CONDITION_TYPE = 'WorkflowNetworkPolicyOwn
  *
  * Each combination with a fact that is not converged has its own reason
  * (`RetryPending`, `PrunePending`, `PruneUnevaluated`, `RetryAndPrunePending`,
- * `RetryAndPruneUnevaluated`), and the facts are read back from the reason
- * alone.
+ * `RetryAndPruneUnevaluated`), and current facts are read back from the reason.
+ * The frozen historical combined marker is normalized by the decoder below.
  */
 export const NETWORK_POLICIES_CONVERGED_CONDITION_TYPE = 'WorkflowNetworkPoliciesConverged'
 
@@ -310,8 +329,9 @@ const CONVERGED_NETWORK_POLICY_MARKER_FACTS = {
 } as const satisfies NetworkPolicyMarkerFacts
 
 /**
- * One reason per combination of facts. The facts are read back from the
- * reason alone; `message` is prose for operators and is never compared.
+ * One current reason per combination of facts. Current messages are prose for
+ * operators. The decoder separately recognizes the exact historical combined
+ * marker emitted before those facts had distinct reasons.
  */
 const NETWORK_POLICY_MARKER_REASONS = {
   RetryPending: {
@@ -339,6 +359,15 @@ const NETWORK_POLICY_MARKER_REASONS = {
       'One or more run-lane NetworkPolicies are pending a retry (terminating or contended), and the ones the spec no longer wants could not be listed for a prune',
   },
 } as const satisfies Record<string, { facts: NetworkPolicyMarkerFacts; message: string }>
+
+/**
+ * The only historical message this controller interprets. Before every fact
+ * had its own reason, `af0152924` encoded apply-plus-prune as `RetryPending`
+ * with exactly this prose. Equality is deliberate: substring or reworded
+ * messages do not gain a prune fact.
+ */
+const HISTORICAL_RETRY_AND_PRUNE_PENDING_MESSAGE =
+  'One or more run-lane NetworkPolicies are pending a retry (terminating or contended), and one or more the spec no longer wants are pending a delete'
 
 type NetworkPolicyMarkerReason = keyof typeof NETWORK_POLICY_MARKER_REASONS
 
@@ -476,6 +505,12 @@ export function networkPolicyMarkerFacts(
   )
   if (!isNetworkPolicyMarkerReason(marker?.reason)) {
     return { ...CONVERGED_NETWORK_POLICY_MARKER_FACTS }
+  }
+  if (
+    marker.reason === 'RetryPending' &&
+    marker.message === HISTORICAL_RETRY_AND_PRUNE_PENDING_MESSAGE
+  ) {
+    return { apply: 'pending', prune: 'pending' }
   }
   return { ...NETWORK_POLICY_MARKER_REASONS[marker.reason].facts }
 }
@@ -1858,9 +1893,6 @@ export class WorkflowReconciler {
     const ns = this.deps.config.sandboxNamespace
     const preserveWorkflowRuntime = options.preserveWorkflowRuntime === true
     this.pluginWorkloadSdkProvisioner.clearRecipeState(recipeName)
-    if (options.recipeUid) {
-      this.forgetLegacyMcpServersInternetEgress(recipeName, options.recipeUid)
-    }
     const sdkNetworkPolicyNames = [
       `${recipeName}-workload-to-mcp-host-sdk-ingress`,
       `${recipeName}-workload-to-mcp-host-sdk-egress`,
@@ -1936,24 +1968,24 @@ export class WorkflowReconciler {
             this.teardownDelete(() =>
               this.deleteNetworkPoliciesByLabelSelector(
                 ns,
-                `clerum.io/recipe=${recipeName},clerum.io/managed-by=wrc`
+                `clerum.io/recipe=${recipeName},clerum.io/managed-by=wrc`,
+                buildLegacyMcpServersInternetEgressPolicyName(recipeName)
               )
             ),
             this.teardownDelete(() =>
               this.deleteNetworkPoliciesByLabelSelector(
                 this.deps.config.mcpServerNamespace,
-                `clerum.io/recipe=${recipeName},clerum.io/managed-by=wrc`
+                `clerum.io/recipe=${recipeName},clerum.io/managed-by=wrc`,
+                buildLegacyMcpServersInternetEgressPolicyName(recipeName)
               )
             ),
-            // The legacy internet policy may carry no labels, so the sweep
-            // above cannot be trusted to remove it. Deleting it by name is
-            // what lets the caller publish the unmanaged marker writer after
-            // this teardown: any non-404 failure rejects the teardown.
-            this.teardownDelete(() =>
-              this.deps.networkingApi.deleteNamespacedNetworkPolicy({
-                name: `${recipeName}-mcp-servers-egress-internet`,
-                namespace: this.deps.config.mcpServerNamespace,
-              })
+            // The legacy internet policy may carry no labels, while a labeled
+            // copy is excluded from the sweeps above. Both forms go through
+            // the one live ledger so a completed cleanup can prove `unmanaged`.
+            this.cleanupLegacyMcpServersInternetEgress(
+              recipeName,
+              options.recipeUid,
+              options.recipeDeleted === true
             ),
           ]),
     ])
@@ -2008,6 +2040,9 @@ export class WorkflowReconciler {
           `Plugin Workload SDK revocation for ${recipeName} was not confirmed disabled or absent`
         )
       }
+    }
+    if (options.recipeDeleted === true) {
+      this.forgetLegacyMcpServersInternetEgress(recipeName, options.recipeUid)
     }
   }
 
@@ -3390,7 +3425,7 @@ export class WorkflowReconciler {
    * applies it, but deletes nothing: the run's pods are live and may still use
    * any lane the spec wanted when they were created, so a revoke here cuts
    * their traffic. That includes the legacy mcp-servers internet policy, which
-   * only a reconcile() pass deletes. The summary is apply-only, so this path
+   * this path keeps. The summary is apply-only, so this path
    * is the `apply-retry` writer of Table A below: it observes the apply and
    * carries the published prune and legacy facts.
    *
@@ -3431,25 +3466,36 @@ export class WorkflowReconciler {
    * | `unmanaged` (kill switch, SDK lane without a runtime, capability removal) | converged | converged | removed | everything |
    * | finalizer                                          | the object is deleted |    |         |                    |
    *
-   * The legacy retry runs in the WRC after the early token reap and before
-   * every short-circuit, only while `DeletePending` is published. It and the
-   * reconcile() pass share one backoff per recipe: after a DELETE that did
+   * The legacy retry runs in the WRC before limit validation, every
+   * short-circuit and the early token reap, only while `DeletePending` is
+   * published. It, the reconcile() pass and a full SDK cleanup share one
+   * backoff per recipe: after a DELETE that did
    * not land, the next one waits `min(prev * 2 || 60 s, 1 h)`, and inside
    * that window the delete answers `pending` without a request. A `removed`
    * answer clears L with a conditions-only patch; `pending` writes nothing.
-   * The WRC `reconcile()` wrapper requeues a pass that leaves L pending and
-   * asks for no other requeue after `max(1 s, the rest of the window)`, at a
-   * fixed interval.
+   * The watcher's legacy-only callback requeues after the rest of the window;
+   * it does not force a full reconcile. A cleanup that must remove the legacy
+   * policy but observes `pending` fails before `unmanaged` and requeues the
+   * full cleanup at the same window. Finalizer cleanup is the last chance:
+   * it sends through the same ledger even inside a window, then records and
+   * forgets state only after the complete cleanup succeeds.
    *
    * A carrying writer keeps a marker whose reason it did not write as it is
    * and warns; `reconcile` overwrites it. `unmanaged` is written only after
    * `cleanupPluginWorkloadSdk` without `preserveWorkflowRuntime` succeeded:
-   * it sweeps the recipe labels and deletes the legacy policy by name, and a
-   * failure there fails the pass before the writer runs. A pending or
+   * its label sweeps exclude the legacy name, and the shared live ledger
+   * deletes that name once; a failure or backoff fails the pass before the
+   * writer runs. A pending or
    * unevaluated prune is not retried outside reconcile(): only reconcile()
    * can compute the desired set, and the finalizer's label sweep removes
    * every run-lane leftover. On the finalizer, a non-404 DELETE is logged by
    * `safeDelete` and not rethrown, so the finalizer completes.
+   *
+   * Historical `af0152924` markers are read only from their reason, except
+   * the one exact `RetryPending` combined message defined beside the decoder.
+   * Its ambiguous `PrunePending` cannot be safely promoted to L: current
+   * ordinary prune failures use the same reason, so they require a real
+   * reconcile() observation before the legacy retry can run.
    *
    * A desired lane is applied on both apply paths; an uncertain verdict never
    * creates a proxy. Terminal teardown deletes a run-scoped run's compute pods
@@ -3700,6 +3746,24 @@ export class WorkflowReconciler {
     }
   }
 
+  private async cleanupLegacyMcpServersInternetEgress(
+    recipeName: string,
+    recipeUid?: string,
+    lastChance = false
+  ): Promise<void> {
+    const fact = await this.pruneLegacyMcpServersInternetEgressPolicy(
+      recipeName,
+      recipeUid,
+      lastChance
+    )
+    if (fact === 'pending') {
+      throw new LegacyNetworkPolicyDeletePendingError(
+        recipeName,
+        Math.max(1, this.legacyMcpServersInternetEgressRetryDelayMs(recipeName, recipeUid ?? ''))
+      )
+    }
+  }
+
   /**
    * R4-L4: the legacy delete the WRC retries before its short-circuits while
    * `DeletePending` is published (the `legacy-retry` writer). The same delete
@@ -3728,7 +3792,8 @@ export class WorkflowReconciler {
 
   private async pruneLegacyMcpServersInternetEgressPolicy(
     recipeName: string,
-    recipeUid?: string
+    recipeUid?: string,
+    lastChance = false
   ): Promise<NetworkPolicyLegacyFact> {
     const key = this.legacyMcpServersInternetEgressKey(recipeName, recipeUid)
     if (this.prunedLegacyMcpServersInternetEgress.has(key)) {
@@ -3738,7 +3803,7 @@ export class WorkflowReconciler {
       return 'removed'
     }
     const backoff = this.legacyMcpServersInternetEgressBackoff.get(key)
-    if (backoff !== undefined && Date.now() < backoff.notBeforeMs) {
+    if (backoff !== undefined && !lastChance && Date.now() < backoff.notBeforeMs) {
       this.log.debug('Skipping legacy mcp-servers internet NP delete; inside its backoff window', {
         recipe: recipeName,
         retryInMs: backoff.notBeforeMs - Date.now(),
@@ -3747,7 +3812,7 @@ export class WorkflowReconciler {
     }
     const outcome = await observeNamespacedDelete(() =>
       this.deps.networkingApi.deleteNamespacedNetworkPolicy({
-        name: `${recipeName}-mcp-servers-egress-internet`,
+        name: buildLegacyMcpServersInternetEgressPolicyName(recipeName),
         namespace: this.deps.config.mcpServerNamespace,
       })
     )
@@ -4453,7 +4518,7 @@ export class WorkflowReconciler {
     // List-by-label is the cleanest cleanup — all managed NPs have recipe label.
     // Per-mcp-server NPs are deleted via label selector below. The legacy
     // internet policy predates those labels, so it is deleted by name (R4-L4).
-    const mcpServerNpNames: string[] = [`${recipeName}-mcp-servers-egress-internet`]
+    const mcpServerNpNames: string[] = [buildLegacyMcpServersInternetEgressPolicyName(recipeName)]
     const mcpNs = this.deps.config.mcpServerNamespace
 
     const cleanupTasks: Array<{ label: string; run: () => Promise<void> }> = [
@@ -4672,7 +4737,8 @@ export class WorkflowReconciler {
 
   private async deleteNetworkPoliciesByLabelSelector(
     namespace: string,
-    labelSelector: string
+    labelSelector: string,
+    excludeName?: string
   ): Promise<void> {
     const list = await this.deps.networkingApi.listNamespacedNetworkPolicy({
       namespace,
@@ -4682,6 +4748,7 @@ export class WorkflowReconciler {
       (list.items ?? [])
         .map(policy => policy.metadata?.name)
         .filter((name): name is string => Boolean(name))
+        .filter(name => name !== excludeName)
         .map(async name => {
           try {
             await this.deps.networkingApi.deleteNamespacedNetworkPolicy({ name, namespace })

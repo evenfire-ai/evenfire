@@ -1553,10 +1553,12 @@ describe('workload status refresh loop helpers', () => {
     type InternalWatcher = {
       recipes: Map<string, WorkflowRecipeCRD>
       reconciler: { reconcile: typeof reconcile }
+      transientRetries: Map<string, { timer: ReturnType<typeof setTimeout>; attempts: number }>
       handleRecipeEvent: (type: string, recipe: WorkflowRecipeCRD) => Promise<void>
     }
     const internal = Object.create(WorkflowRecipeWatcher.prototype) as InternalWatcher
     internal.recipes = new Map([[cached.metadata.name, cached]])
+    internal.transientRetries = new Map()
     internal.reconciler = { reconcile }
 
     await internal.handleRecipeEvent('MODIFIED', statusOnly)
