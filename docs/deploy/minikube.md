@@ -229,6 +229,22 @@ labelled `minikube.k8s.io/name=<profile>` whose InternalIP is the address
 `kubectl --context=<profile> cluster-info` succeeds: a stopped profile cannot be
 asked who it is, so `stop` and `delete` still run for it.
 
+For `stop` and `delete`, the guard row above means that the identity check runs
+only when the API answers, and a refusal requires a readable contradicting node
+identity. `start`, `status`, `pf`, and `health` require a complete identity
+whenever their strict check runs. A failed or timed-out IP/node observation is
+unknown, not a foreign match, so the recovery action may continue.
+
+**Recovery identity decision table.**
+
+| API reachability | Minikube IP | Node identity | Result |
+|---|---|---|---|
+| unreachable | not called | not called | continue profile stop or teardown |
+| reachable | fails or times out | not called | warn that identity is unobservable and continue |
+| reachable | readable | fails or times out | warn that identity is unobservable and continue |
+| reachable | readable | matches this profile | continue |
+| reachable | readable | names another profile | `BRANCH_PROFILE_CONTEXT_IDENTITY`; no records are cleared and the profile command does not run |
+
 **Kubeconfig read.** The context guards read the kubeconfig only; they never
 contact a cluster.
 
@@ -270,7 +286,7 @@ An unreadable list is a refusal, never an empty list.
 | `BRANCH_PROFILE_REMOTE_CONTEXT` | the profile's context points at a non-local API server |
 | `BRANCH_PROFILE_MINIKUBE_PROFILES_UNREADABLE` | `minikube profile list` failed or printed no readable lists |
 | `BRANCH_PROFILE_UNKNOWN_MINIKUBE_PROFILE` | a context named after the profile exists, but minikube lists no such profile |
-| `BRANCH_PROFILE_CONTEXT_IDENTITY` | the cluster behind the context does not identify the profile, or its identity could not be read |
+| `BRANCH_PROFILE_CONTEXT_IDENTITY` | strict actions refuse an unreadable identity or one that names another profile; recovery actions refuse only a readable identity that names another profile |
 | `CONTEXT_IDENTITY_UNAVAILABLE`, `CONTEXT_IDENTITY_API_INVALID` | `scripts/minikube/context-identity.sh` is missing or lacks a predicate |
 | `PORT_FORWARD_OWNER_UNAVAILABLE`, `PORT_FORWARD_OWNER_API_INVALID`, `PORT_FORWARD_OWNER_BINDING_INVALID` | `scripts/minikube/port-forward-owner.sh` is missing or incomplete, or a record would bind another host |
 | `PORT_FORWARD_OWNERSHIP_ERROR` | a port-forward process does not match its record; it is never signalled |

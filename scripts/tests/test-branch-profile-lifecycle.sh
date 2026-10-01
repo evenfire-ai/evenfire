@@ -244,6 +244,10 @@ case "${verb}" in
         ;;
       nodes)
         if [[ "${output}" == json ]]; then
+          [[ ! -e "${state}/fail-get-nodes" ]] || {
+            printf 'stub: get nodes failed\n' >&2
+            exit 1
+          }
           # The node carries the minikube.k8s.io/name label of the context it
           # was asked through, unless node-label names another cluster.
           label="${context}"
@@ -317,7 +321,16 @@ case " $* " in
     [[ ! -e "${state}/minikube-start-fails" ]] || exit 7
     ;;
   *" status "*) exit "$(cat "${state}/minikube-status-rc")" ;;
-  *" ip "*) cat "${state}/minikube-ip" ;;
+  *" ip "*)
+    [[ ! -e "${state}/minikube-ip-fails" ]] || {
+      printf 'stub: minikube ip failed\n' >&2
+      exit 6
+    }
+    if [[ -e "${state}/minikube-ip-hang-seconds" ]]; then
+      sleep "$(cat "${state}/minikube-ip-hang-seconds")"
+    fi
+    cat "${state}/minikube-ip"
+    ;;
   *" stop "*) [[ ! -e "${state}/minikube-stop-fails" ]] || exit 9 ;;
   *" delete "*) [[ ! -e "${state}/minikube-delete-fails" ]] || exit 11 ;;
 esac
@@ -376,7 +389,8 @@ reset_state() {
   rm -f "${state}/fail-get-deploy" "${state}/curl-fail" "${state}/start-switches-context" \
     "${state}/use-context-fails" "${state}/minikube-start-fails" "${state}/get-contexts-fails" \
     "${state}/pf-ignores-term" "${state}/minikube-stop-fails" "${state}/minikube-delete-fails" \
-    "${state}/node-label" "${state}/minikube-profile-list-fails" "${state}/docker-info-fails"
+    "${state}/node-label" "${state}/minikube-profile-list-fails" "${state}/docker-info-fails" \
+    "${state}/fail-get-nodes" "${state}/minikube-ip-fails" "${state}/minikube-ip-hang-seconds"
   # By default the branch profile's context is this local Minikube, minikube
   # lists the profile, and its node carries the profile label at the address
   # `minikube ip` reports.
@@ -967,10 +981,13 @@ done
 reset_state
 printf '{"invalid":[{"Name":"%s","Status":"Unknown"}],"valid":[]}\n' "${profile}" \
   >"${state}/minikube-profile-list"
-bp invalid-known-delete delete "CONFIRM_DELETE=${profile}"
-assert_rc 0 'delete of a profile minikube lists as invalid'
-assert_log_has 'minikube profile list -o json' "delete of an invalid profile read minikube's profiles"
-assert_log_has "minikube -p ${profile} delete pidfiles=0" 'delete of a profile minikube lists as invalid ran'
+for action in stop delete; do
+  : >"${state}/calls.log"
+  bp "invalid-known-${action}" "${action}" "CONFIRM_DELETE=${profile}"
+  assert_rc 0 "${action} of a profile minikube lists as invalid"
+  assert_log_has 'minikube profile list -o json' "${action} of an invalid profile read minikube's profiles"
+  assert_log_has "minikube -p ${profile} ${action} pidfiles=0" "${action} of a profile minikube lists as invalid ran"
+done
 
 # Without a context named after the profile there is nothing of another
 # cluster's to remove, so minikube is not asked and delete runs.
@@ -996,6 +1013,7 @@ for action in stop delete; do
   bp "foreign-identity-${action}-pf" pf
   assert_rc 0 "pf before ${action} of a profile whose reachable cluster is another"
   printf 'lan-cluster\n' >"${state}/node-label"
+  foreign_pid_record_before="$(shasum -a 256 "${pids_dir}/control-ui.pid" | awk '{print $1}')"
   : >"${state}/calls.log"
   bp "foreign-identity-${action}" "${action}" "CONFIRM_DELETE=${profile}"
   assert_output_has 'BRANCH_PROFILE_CONTEXT_IDENTITY' "${action} of a profile whose reachable cluster is another"
@@ -1013,9 +1031,73 @@ for action in stop delete; do
     "${action} of a profile whose reachable cluster is another must not run minikube ${action}"
   assert_file "${pids_dir}/control-ui.pid" \
     "${action} of a profile whose reachable cluster is another keeps the port-forward records"
+  [[ "$(shasum -a 256 "${pids_dir}/control-ui.pid" | awk '{print $1}')" == "${foreign_pid_record_before}" ]] ||
+    fail "${action} of a foreign cluster changed the port-forward record"
+  ok
+  assert_log_lacks 'port-forward' \
+    "${action} of a profile whose reachable cluster is another must not stop a forward through the API"
   rm -f "${state}/node-label"
   bp "foreign-identity-${action}-stop-pf" stop-pf
   assert_rc 0 "stop-pf after the refused ${action}"
+done
+
+# An invalid profile can still have a reachable API context. If minikube
+# cannot report its IP, the identity is unobservable rather than foreign:
+# recovery continues to the confirmed stop/delete after a bounded attempt.
+for action in stop delete; do
+  reset_state
+  printf '{"invalid":[{"Name":"%s","Status":"Unknown"}],"valid":[]}\n' "${profile}" \
+    >"${state}/minikube-profile-list"
+  : >"${state}/minikube-ip-fails"
+  bp "invalid-ip-fails-${action}" "${action}" "CONFIRM_DELETE=${profile}"
+  assert_rc 0 "${action} of an invalid profile whose IP cannot be read"
+  assert_output_has "cluster identity is unobservable for profile ${profile}" \
+    "${action} reports that unreadable identity is not a foreign-cluster refusal"
+  assert_log_has "kubectl --context=${profile} --request-timeout=10s cluster-info" \
+    "${action} proved the API was reachable before treating identity as unobservable"
+  assert_log_has "minikube -p ${profile} ip" "${action} attempted to read the invalid profile's IP"
+  assert_log_lacks 'get nodes -o json' "${action} must not invent a readable node identity without an IP"
+  assert_log_has "minikube -p ${profile} ${action} pidfiles=0" \
+    "${action} recovered an invalid profile whose IP cannot be read"
+done
+
+# A failed node inspection is also unobservable. It must not be collapsed into
+# a foreign-cluster mismatch: no readable node evidence contradicts the profile.
+for action in stop delete; do
+  reset_state
+  : >"${state}/fail-get-nodes"
+  bp "identity-nodes-fail-${action}" "${action}" "CONFIRM_DELETE=${profile}"
+  assert_rc 0 "${action} when the node identity inspection fails"
+  assert_output_has 'cluster identity is unobservable' \
+    "${action} reports the failed inspection without calling it foreign"
+  assert_output_lacks 'does not identify Minikube profile' \
+    "${action} does not hide a failed inspection as a foreign mismatch"
+  assert_log_has "minikube -p ${profile} ip" "${action} read the expected profile IP"
+  assert_log_has "kubectl --context=${profile} --request-timeout=10s get nodes -o json" \
+    "${action} attempted the node inspection"
+  assert_log_has "minikube -p ${profile} ${action} pidfiles=0" \
+    "${action} recovers when the node inspection fails"
+done
+
+# The identity attempt itself is finite: a hanging `minikube ip` is cut off by
+# the bounded runner, then recovery reaches stop/delete instead of stranding
+# the invalid profile until an unbounded child exits.
+for action in stop delete; do
+  reset_state
+  printf '{"invalid":[{"Name":"%s","Status":"Unknown"}],"valid":[]}\n' "${profile}" \
+    >"${state}/minikube-profile-list"
+  printf '30\n' >"${state}/minikube-ip-hang-seconds"
+  timeout_started="${SECONDS}"
+  bp "invalid-ip-timeout-${action}" "${action}" "CONFIRM_DELETE=${profile}" \
+    "BRANCH_PROFILE_MINIKUBE_STATUS_TIMEOUT_SECONDS=1"
+  timeout_elapsed=$((SECONDS - timeout_started))
+  assert_rc 0 "${action} after a finite minikube-ip timeout"
+  (( timeout_elapsed <= 8 )) ||
+    fail "${action} took ${timeout_elapsed}s to bound a 30s minikube-ip hang"
+  ok
+  assert_log_has "minikube -p ${profile} ip" "${action} entered the hanging IP read"
+  assert_log_has "minikube -p ${profile} ${action} pidfiles=0" \
+    "${action} recovered after the bounded IP timeout"
 done
 
 for action in stop delete; do
@@ -1517,5 +1599,8 @@ assert_output_lacks 'tree=A' 'setup on tree B must not run the tree A copy'
 cp "${ROOT}/scripts/minikube/full-setup.sh" "${repo}/scripts/minikube/full-setup.sh"
 printf 'fixture deploy file\n' >"${repo}/deploy/minikube/fixture.txt"
 
+minikube_test_assert_host_unchanged ||
+  fail 'the lifecycle fixture changed the host checkout HEAD, branch, or working tree'
+ok
 (( ASSERTIONS >= 100 )) || fail "expected at least 100 assertions, ran ${ASSERTIONS}"
 printf 'PASS: branch-profile lifecycle scenarios (%s assertions)\n' "${ASSERTIONS}"

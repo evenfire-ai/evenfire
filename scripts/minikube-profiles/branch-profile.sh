@@ -732,15 +732,40 @@ require_context_profile_known_to_minikube() {
 # another local Minikube profile, or a LAN cluster on a private address. The
 # cluster must have a node labelled minikube.k8s.io/name=<profile> at the IP
 # `minikube -p <profile> ip` reports.
-require_profile_cluster_identity() {
+profile_cluster_identity() {
+  local allow_unobservable="${1:-false}" expected_ip nodes_json
   load_context_identity
-  local expected_ip nodes_json
-  expected_ip="$(run_bounded minikube-ip "${MINIKUBE_STATUS_TIMEOUT_SECONDS}" minikube -p "${PROFILE}" ip)" ||
+  if ! expected_ip="$(run_bounded minikube-ip "${MINIKUBE_STATUS_TIMEOUT_SECONDS}" minikube -p "${PROFILE}" ip)"; then
+    if [[ "${allow_unobservable}" == true ]]; then
+      printf 'WARN: cluster identity is unobservable for profile %s: minikube did not report an IP; continuing recovery\n' \
+        "${PROFILE}" >&2
+      return 2
+    fi
     die "BRANCH_PROFILE_CONTEXT_IDENTITY: minikube did not report an IP for profile ${PROFILE}"
-  nodes_json="$(kubectl "--context=${PROFILE}" "--request-timeout=${KUBECTL_REQUEST_TIMEOUT}" get nodes -o json)" ||
+  fi
+  if ! nodes_json="$(kubectl "--context=${PROFILE}" "--request-timeout=${KUBECTL_REQUEST_TIMEOUT}" get nodes -o json)"; then
+    if [[ "${allow_unobservable}" == true ]]; then
+      printf 'WARN: cluster identity is unobservable for profile %s: unable to read its nodes; continuing recovery\n' \
+        "${PROFILE}" >&2
+      return 2
+    fi
     die "BRANCH_PROFILE_CONTEXT_IDENTITY: unable to read the nodes of kube context ${PROFILE}"
+  fi
   minikube_nodes_identify_profile "${nodes_json}" "${PROFILE}" "${expected_ip}" ||
     die "BRANCH_PROFILE_CONTEXT_IDENTITY: kube context ${PROFILE} does not identify Minikube profile ${PROFILE} at ${expected_ip:-<no IP>}; refusing to use it"
+}
+
+require_profile_cluster_identity() {
+  profile_cluster_identity false
+}
+
+# Stop and delete are recovery actions for a profile minikube already lists.
+# A readable node identity that names another profile still refuses, but an
+# IP or node observation that fails within its deadline is unknown, not foreign.
+refuse_readable_foreign_profile_cluster_identity() {
+  local status=0
+  profile_cluster_identity true || status=$?
+  (( status == 2 )) || return "${status}"
 }
 
 probe_service() {
@@ -1361,10 +1386,12 @@ cmd_stop() {
   require_local_context_endpoint
   require_context_profile_known_to_minikube
   # minikube listing the profile does not prove the context reaches its
-  # cluster. A cluster that answers must identify the profile before any
-  # record is cleared or minikube -p runs; a stopped one cannot be asked.
+  # cluster. A cluster that answers with another readable identity refuses
+  # before any record is cleared or minikube -p runs. A stopped profile, or
+  # one whose identity cannot be observed within its deadline, can still be
+  # recovered because minikube already proved it owns that profile name.
   if cluster_reachable; then
-    require_profile_cluster_identity
+    refuse_readable_foreign_profile_cluster_identity
   fi
   # Clear the verified port-forward records first: a stopped cluster leaves
   # records naming dead kubectl processes, and the next T2 preflight refuses
@@ -1415,9 +1442,11 @@ cmd_delete() {
   fi
   require_local_context_endpoint
   require_context_profile_known_to_minikube
-  # As in cmd_stop: a cluster that answers must identify the profile.
+  # As in cmd_stop: only a readable contradicting identity refuses. An
+  # unobservable identity is recovery evidence for an invalid profile, not a
+  # foreign-cluster match.
   if cluster_reachable; then
-    require_profile_cluster_identity
+    refuse_readable_foreign_profile_cluster_identity
   fi
   # The registry (pids/*.pid) outlives the cluster; clear the port-forward
   # records so the deleted profile does not leave PORT_FORWARD_CONFLICT behind.
