@@ -216,7 +216,7 @@ cluster through it.
 | `pf-health` | minikube kubectl python3 node curl | as `pf`, then `health` | no | as `pf` | an EXIT trap stops the forwards it started |
 | `stop` | minikube kubectl python3 node | yes | yes | when the cluster answers | clears verified port-forward records before `minikube stop` |
 | `delete` | minikube kubectl python3 node | yes | yes | when the cluster answers | `CONFIRM_DELETE=<profile>`; clears verified records before `minikube delete` |
-| `setup` | minikube kubectl helm perl python3 node | yes | yes | no (hands the profile to `full-setup.sh`) | `CONFIRM_PROFILE=<profile>`, Docker ready |
+| `setup` | minikube kubectl helm perl python3 node | yes | yes | no (hands the profile to `full-setup.sh`) | `CONFIRM_PROFILE=<profile>`, Docker ready; re-copies the script and deploy shims from the current tree on every run |
 | `preflight` | its own check: git minikube kubectl helm shasum | no | no | no | Docker ready, ports free |
 | `prepare-shims` | its own check: git shasum perl | no | no | no | shim symlink and rewrite checks |
 | `stop-pf` | none beyond the common ones | no | no | no | port-forward ownership records |

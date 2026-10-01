@@ -1026,12 +1026,6 @@ EOF_SHIMS
   printf 'env: %s\n' "${SHIM_ENV}"
 }
 
-ensure_shims() {
-  if [[ ! -x "${SHIMS_DIR}/full-setup.sh" || ! -x "${SHIMS_DIR}/build-images.sh" || ! -x "${SHIMS_DIR}/generate-keys.sh" ]]; then
-    cmd_prepare_shims
-  fi
-}
-
 # restore_global_context: undoes a move of the global kubectl current-context
 # onto ${PROFILE} made by minikube start, back to START_BEFORE_CONTEXT (or
 # unset, when none was set). A context other than the profile was chosen by
@@ -1398,7 +1392,9 @@ cmd_setup() {
   require_context_profile_known_to_minikube
   check_docker_ready
   persist_state
-  ensure_shims
+  # Re-copied on every setup: copies left by an earlier tree would deploy its
+  # manifests with its guard logic next to images built from this tree.
+  cmd_prepare_shims
   local -a setup_args=()
   if [[ -n "${ARGS}" ]]; then
     read -r -a setup_args <<<"${ARGS}"
