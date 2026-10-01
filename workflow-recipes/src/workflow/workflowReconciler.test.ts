@@ -2303,6 +2303,53 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
     }
   })
 
+  it('does not forget the finalizer ledger entry when a later cleanup phase fails', async () => {
+    const lateError = new Error('late finalize failed')
+    const revocationId = 'late-finalize-revocation'
+    const deps = makeDeps() as unknown as {
+      pluginWorkloadSdkRevocationClient?: unknown
+    }
+    const revocationClient = {
+      revoke: vi.fn().mockResolvedValue({
+        state: 'revoking',
+        revocationId,
+        revoked: 1,
+        fencedInvocations: 1,
+      }),
+      finalize: vi.fn().mockRejectedValue(lateError),
+    }
+    deps.pluginWorkloadSdkRevocationClient = revocationClient
+    const reconciler = new WorkflowReconciler(deps as WorkflowReconcilerDeps)
+    const legacyDeletes = () =>
+      mockNetworkingApi.deleteNamespacedNetworkPolicy.mock.calls.filter(
+        ([arg]) => arg.name === 'sdk-only-mcp-servers-egress-internet'
+      )
+
+    await expect(
+      reconciler.cleanupPluginWorkloadSdk('sdk-only', {
+        recipeUid: 'uid-sdk-only',
+        recipeDeleted: true,
+      })
+    ).rejects.toBe(lateError)
+
+    // Positive witnesses: the central legacy DELETE succeeded, and the later
+    // revocation-finalization phase—not an earlier network failure—rejected.
+    expect(legacyDeletes()).toHaveLength(1)
+    expect(revocationClient.finalize).toHaveBeenCalledWith(
+      sandboxNamespace,
+      'sdk-only',
+      revocationId
+    )
+
+    // The old-UID retry is a direct process-local ledger probe, not a
+    // Kubernetes recreation. It must hit the recorded gone-set, not send a
+    // second DELETE after only partial cleanup completion.
+    await expect(
+      reconciler.retryLegacyMcpServersInternetEgressDelete('sdk-only', 'uid-sdk-only')
+    ).resolves.toBe('removed')
+    expect(legacyDeletes()).toHaveLength(1)
+  })
+
   it('defers absence reads until pod deletion completes so 404s cannot become unhandled rejections', async () => {
     const events: string[] = []
     crashRecoveryMocks.waitForPodDeletion.mockImplementationOnce(async () => {

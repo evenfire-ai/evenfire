@@ -183,13 +183,13 @@ describeRealPostgres('control admin replace-inviter invitations on real PostgreS
   afterAll(async () => {
     querySpy?.mockRestore()
     connectSpy?.mockRestore()
-    await endPoolAndWaitForClients(testPool)
-    if (!adminPool) return
     try {
+      await endPoolAndWaitForClients(testPool)
+      if (!adminPool) return
       await waitForDatabaseConnectionsToClose(adminPool, database)
       await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdent(database)}`)
     } finally {
-      await adminPool.end()
+      await adminPool?.end()
     }
   })
 
