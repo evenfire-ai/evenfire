@@ -2,6 +2,7 @@ import { secretFound } from '../../components/__tests__/fixtures/secretResolvedC
 import type { McpServerResource } from '../../lib/api'
 import {
   registryEnvSecret,
+  registryMcpServerManaged,
   registryMcpServerMetadata,
   registrySecretName,
 } from './registryMcpServerProducer'
@@ -21,7 +22,7 @@ export function buildRegistryMcpServerReference(options: {
     image: 'ghcr.io/acme/linear-mcp:1.4.0',
     contextRef: 'default',
     enabled: true,
-    managed: true,
+    managed: registryMcpServerManaged(),
     transport: { type: 'streamableHttp', port: 3000 },
     envSecret: registryEnvSecret(secretName, options.credentialKeyNames ?? ['api-key']),
   }

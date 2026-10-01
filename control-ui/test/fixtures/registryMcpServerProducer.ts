@@ -22,6 +22,7 @@ const GATEWAY_PATH = path.resolve(
 function registrySecretFactory(): {
   name: (serverName: string) => string
   envSecret: (secretName: string, keyNames: string[]) => EnvSecret
+  managed: () => boolean
   metadata: (input: RegistryMetadataInput) => NonNullable<McpServerResource['metadata']>
 } {
   const source = ts.createSourceFile(
@@ -32,6 +33,8 @@ function registrySecretFactory(): {
   )
   const assignments: ts.Expression[] = []
   const secretNames: ts.Expression[] = []
+  const managedExpressions: ts.Expression[] = []
+  const managedReassignments: ts.BinaryExpression[] = []
   const registryLabels: ts.Expression[] = []
   const registryAnnotations: ts.Expression[] = []
   const registryResourceMetadata: ts.Expression[] = []
@@ -50,6 +53,15 @@ function registrySecretFactory(): {
     }
     if (ts.isVariableDeclaration(node) && node.initializer) {
       const variableName = node.name.getText(source)
+      if (variableName === 'mcpServerSpec' && ts.isObjectLiteralExpression(node.initializer)) {
+        const managed = node.initializer.properties.find(
+          property =>
+            ts.isPropertyAssignment(property) && property.name.getText(source) === 'managed'
+        )
+        if (managed && ts.isPropertyAssignment(managed)) {
+          managedExpressions.push(managed.initializer)
+        }
+      }
       if (variableName === 'registryLabels' && node.pos > 0) {
         registryLabels.push(node.initializer)
       }
@@ -74,6 +86,9 @@ function registrySecretFactory(): {
       ) {
         assignments.push(node.right)
       }
+    }
+    if (ts.isBinaryExpression(node) && node.left.getText(source) === 'mcpServerSpec.managed') {
+      managedReassignments.push(node)
     }
     if (
       ts.isCallExpression(node) &&
@@ -101,6 +116,8 @@ function registrySecretFactory(): {
     assignments.length !== 1 ||
     !ts.isObjectLiteralExpression(assignments[0]) ||
     secretNames.length !== 1 ||
+    managedExpressions.length !== 1 ||
+    managedReassignments.length !== 0 ||
     registryAnnotations.length !== 1 ||
     registryResourceMetadata.length !== 1 ||
     !catalogAnnotations
@@ -110,6 +127,7 @@ function registrySecretFactory(): {
 
   const expression = assignments[0].getText(source)
   const nameExpression = secretNames[0].getText(source)
+  const managedExpression = managedExpressions[0].getText(source)
   const labels = registryLabels
     .filter(candidate => candidate.pos < registryAnnotations[0].pos)
     .at(-1)
@@ -149,6 +167,7 @@ function registrySecretFactory(): {
   const compiled = ts.transpileModule(
     `const produce = (secretName, credSchema) => (${expression});
      const produceName = (serverName) => (${nameExpression});
+     const produceManaged = () => (${managedExpression});
      ${catalogAnnotations.getText(source).replace(/^export /, '')}
      const produceMetadata = (body, serverName, targetNs, isLocal, mcpServerSpec, resourceOperationId) => {
        const registryLabels = ${labels.getText(source)};
@@ -161,10 +180,11 @@ function registrySecretFactory(): {
     'REGISTRY_OPERATION_ID_ANNOTATION',
     'REGISTRY_SPEC_DIGEST_ANNOTATION',
     'registrySpecDigest',
-    `${compiled}\nreturn { produce, produceName, produceMetadata };`
+    `${compiled}\nreturn { produce, produceName, produceManaged, produceMetadata };`
   )(REGISTRY_OPERATION_ID_ANNOTATION, REGISTRY_SPEC_DIGEST_ANNOTATION, registrySpecDigest) as {
     produce: (secretName: string, credSchema: { keys: { name: string }[] }) => EnvSecret
     produceName: (serverName: string) => string
+    produceManaged: () => boolean
     produceMetadata: (
       body: { registryEntryName: string; registryEntryVersion: string },
       serverName: string,
@@ -193,6 +213,7 @@ function registrySecretFactory(): {
     name: producers.produceName,
     envSecret: (secretName, keyNames) =>
       producers.produce(secretName, { keys: keyNames.map(name => ({ name })) }),
+    managed: producers.produceManaged,
     metadata: input => {
       const metadata = producers.produceMetadata(
         { registryEntryName: input.catalogId, registryEntryVersion: input.catalogVersion },
@@ -228,6 +249,10 @@ export function registryEnvSecret(secretName: string, keyNames: string[]): EnvSe
 
 export function registrySecretName(serverName: string): string {
   return registrySecret.name(serverName)
+}
+
+export function registryMcpServerManaged(): boolean {
+  return registrySecret.managed()
 }
 
 export function registryMcpServerMetadata(

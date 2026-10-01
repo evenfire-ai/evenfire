@@ -37,6 +37,9 @@ beforeEach(() => {
     catalogVersion: '1.4.0',
     credentialKeyNames: ['api-key'],
   })
+  // A registry ownership change must reach the credential page and fail this
+  // contract rather than being hidden by a fixture-owned `managed: true`.
+  expect(connector.spec?.managed).toBe(true)
   vi.mocked(getMcpServers).mockResolvedValue({ items: [connector] })
   vi.mocked(getMcpServer).mockResolvedValue(connector)
   vi.mocked(getRegistryCredentialSchema).mockResolvedValue({

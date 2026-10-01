@@ -316,6 +316,7 @@ describe('SecretsTable — connector marketplace source', () => {
       catalogId: '@newtenantwf/conn',
       catalogVersion: '1.0.0',
     })
+    expect(connector.spec?.managed).toBe(true)
     expect(connector.spec?.envSecret?.keys).toEqual([{ secretKey: 'api-key', envVar: 'api-key' }])
     getMcpServersMock.mockResolvedValue({
       items: [connector],
