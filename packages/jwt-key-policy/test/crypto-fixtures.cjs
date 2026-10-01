@@ -1,7 +1,6 @@
 'use strict'
 
-const { spawn, spawnSync } = require('node:child_process')
-const { generateKeyPairSync } = require('node:crypto')
+const { createPublicKey, generateKeyPairSync, sign } = require('node:crypto')
 
 const PUBLIC_KEYS = Object.freeze({
   rpc: `-----BEGIN PUBLIC KEY-----
@@ -40,7 +39,9 @@ function pem(key, type) {
 let shared
 function fixtures() {
   if (!shared) {
-    shared = Object.fromEntries([2048, 4096, 1024].map(bits => [bits, generateKeyPairSync('rsa', { modulusLength: bits })]))
+    shared = Object.fromEntries(
+      [2048, 4096, 1024].map(bits => [bits, generateKeyPairSync('rsa', { modulusLength: bits })])
+    )
     shared.decoy = generateKeyPairSync('rsa', { modulusLength: 2048 })
   }
   return shared
@@ -58,38 +59,87 @@ function encodings(value) {
     outsideWhitespace: '\t\n ' + value + ' \n\t',
     beginWhitespace: value.replace(/^(-----BEGIN [^-]+-----)/, '$1 \t'),
     endWhitespace: value.replace(/(-----END [^-]+-----)$/, '$1 \t'),
-    bodyWhitespace: value.split('\n').map(line => line.startsWith('-----') ? line : line + ' \t').join('\n'),
+    bodyWhitespace: value
+      .split('\n')
+      .map(line => (line.startsWith('-----') ? line : line + ' \t'))
+      .join('\n'),
     wrapped: 'Key material for the local contract fixture\n' + value + '\nEnd of contract fixture',
   }
 }
 
-function certificate(key) {
-  const result = spawnSync('openssl', [
-    'req', '-new', '-x509', '-key', '/dev/stdin', '-subj', '/CN=jwt-key-policy-contract',
-    '-days', '1', '-batch', '-quiet', '-config', '/dev/null',
-  ], { input: pem(key, 'pkcs8'), encoding: 'utf8', timeout: 10000, maxBuffer: 65536 })
-  if (result.status !== 0) throw new Error('Generated certificate fixture failed')
-  return result.stdout.trim()
+function der(tag, ...values) {
+  const content = Buffer.concat(values)
+  const length = content.length
+  let encodedLength
+  if (length < 0x80) {
+    encodedLength = Buffer.from([length])
+  } else {
+    const bytes = []
+    for (let value = length; value > 0; value >>= 8) bytes.unshift(value & 0xff)
+    encodedLength = Buffer.from([0x80 | bytes.length, ...bytes])
+  }
+  return Buffer.concat([Buffer.from([tag]), encodedLength, content])
 }
 
-function certificateWithPublic(publicPem) {
+function algorithmIdentifier() {
+  return Buffer.from('300d06092a864886f70d01010b0500', 'hex')
+}
+
+function distinguishedName() {
+  const commonName = Buffer.from('jwt-key-policy-contract')
+  return der(0x30, der(0x31, der(0x30, Buffer.from('0603550403', 'hex'), der(0x0c, commonName))))
+}
+
+function utcTime(date) {
+  const twoDigits = value => String(value).padStart(2, '0')
+  return Buffer.from(
+    twoDigits(date.getUTCFullYear() % 100) +
+      twoDigits(date.getUTCMonth() + 1) +
+      twoDigits(date.getUTCDate()) +
+      twoDigits(date.getUTCHours()) +
+      twoDigits(date.getUTCMinutes()) +
+      twoDigits(date.getUTCSeconds()) +
+      'Z'
+  )
+}
+
+function certificate(signingKey, carriedPublicKey = createPublicKey(signingKey)) {
+  const now = Date.now()
+  const name = distinguishedName()
+  const validity = der(
+    0x30,
+    der(0x17, utcTime(new Date(now - 60 * 1000))),
+    der(0x17, utcTime(new Date(now + 24 * 60 * 60 * 1000)))
+  )
+  const subjectPublicKeyInfo = carriedPublicKey.export({ type: 'spki', format: 'der' })
+  const algorithm = algorithmIdentifier()
+  const tbsCertificate = der(
+    0x30,
+    der(0x02, Buffer.from([1])),
+    algorithm,
+    name,
+    validity,
+    name,
+    subjectPublicKeyInfo
+  )
+  const signature = sign('sha256', tbsCertificate, signingKey)
+  const certificateDer = der(
+    0x30,
+    tbsCertificate,
+    algorithm,
+    der(0x03, Buffer.from([0]), signature)
+  )
+  const body = certificateDer
+    .toString('base64')
+    .match(/.{1,64}/g)
+    .join('\n')
+  return `-----BEGIN CERTIFICATE-----\n${body}\n-----END CERTIFICATE-----`
+}
+
+async function certificateWithPublic(publicPem) {
   // A certificate is a configured public-key carrier, not a CA/trust assertion.
-  // All private bytes travel through an anonymous pipe and are never persisted.
-  return new Promise((resolve, reject) => {
-    const child = spawn('openssl', [
-      'x509', '-new', '-force_pubkey', '/dev/stdin', '-signkey', '/dev/fd/3',
-      '-subj', '/CN=jwt-key-policy-public-contract', '-days', '1',
-    ], { stdio: ['pipe', 'pipe', 'ignore', 'pipe'], timeout: 10000 })
-    let output = ''
-    child.stdout.setEncoding('utf8')
-    child.stdout.on('data', chunk => { output += chunk })
-    child.on('error', () => reject(new Error('Generated public certificate fixture failed')))
-    child.on('close', code => code === 0 ? resolve(output.trim()) : reject(new Error('Generated public certificate fixture failed')))
-    child.stdin.on('error', () => {})
-    child.stdio[3].on('error', () => {})
-    child.stdin.end(publicPem)
-    child.stdio[3].end(pem(fixtures()[2048].privateKey, 'pkcs8'))
-  })
+  // The historical public key is carried by a fresh fixture signature.
+  return certificate(fixtures()[2048].privateKey, createPublicKey(publicPem))
 }
 
 module.exports = { PUBLIC_KEYS, pem, fixtures, encodings, certificate, certificateWithPublic }
