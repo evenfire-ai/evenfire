@@ -1953,7 +1953,6 @@ export function useAgentChatController({
           setAgentSending(false)
         }
         if (view.selectedAgent === agentRef) {
-          chatStore.clearCachedRemoteData()
           clearList()
           resetComposerAttachments()
           activeChatVisibilityRef.current = { ...view, selectedAgent: null, activeChatId: null }
@@ -1971,7 +1970,6 @@ export function useAgentChatController({
       tracker,
       fsm,
       hideAgent,
-      chatStore.clearCachedRemoteData,
       clearList,
       resetComposerAttachments,
       cancelOlderMessagesLoad,
