@@ -139,6 +139,20 @@ Admin sessions are signed as RS256 JWTs with audience `control-ui`. UI-facing ro
 
 `/external/rpc/token` requires a `sessionToken` and verifies it server-side in `control-api`; user identity claims are derived from the verified JWT instead of trusting forwarded identity fields.
 
+A Host-access mint denial adds `code: "host_access_revoked"` and `revokedHostRefs` only when every requested agent Host is denied by the existing grant decision and none is reachable through a direct grant or any active team membership. One granted or reachable requested Host keeps the exact error-only 403. The error remains `host_access_denied` for a team session or `direct_host_access_required` for a teamless session.
+
+```json
+{
+  "error": "host_access_denied",
+  "code": "host_access_revoked",
+  "revokedHostRefs": ["host-a", "host-b"]
+}
+```
+
+`revokedHostRefs` is exactly the sorted, deduplicated, trimmed requested agent-Host set; it never includes directory-only names or `sandbox-ui`. Invalid references, sandbox guards, scope denials and successful issuance do not receive these fields. A reachability-query failure propagates as an ordinary server failure.
+
+The existing mint grant and scope decisions are unchanged. Global reachability considers any active team membership, while RPC-proxy still authorizes through direct grants or the token's team. With both server hops updated, published legacy and new Desktop classifiers agree on correct mint denials; the new Desktop additionally verifies requested-set coverage and preserves other Hosts' catalog caches. An older REST relay strips the extra fields, leaving the mint denial uncertain.
+
 ### Admin
 
 - `POST /api/v1/admin/auth/login`
