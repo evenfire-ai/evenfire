@@ -162,7 +162,7 @@ describe('turnsToChatMessages', () => {
     expect(draft.unrestorable).toEqual([])
   })
 
-  it('retains agent and global file identity from a real server input through Resend', () => {
+  it('retains agent file identity and flags a server global-file label without a URI', () => {
     const references: ComposerReferenceAttachment[] = [
       {
         id: 'agent-file',
@@ -180,6 +180,8 @@ describe('turnsToChatMessages', () => {
         resourceId: 'res-9',
         gfsUri: 'gfs://drive-7/res-9',
         label: 'Report',
+        version: 3,
+        bytes: 4096,
       },
     ]
     const [serverUser] = turnsToChatMessages([
@@ -195,16 +197,14 @@ describe('turnsToChatMessages', () => {
       {
         type: 'global_file',
         label: 'Report',
-        drive: 'drive-7',
-        resourceId: 'res-9',
-        gfsUri: 'gfs://drive-7/res-9',
       },
     ])
     const draft = buildComposerResendDraft(serverUser!)
-    expect(draft.unrestorable).toEqual([])
-    expect(buildComposerReferencesPromptSection(draft.referenceAttachments)).toBe(
-      buildComposerReferencesPromptSection(references)
-    )
+    expect(draft.referenceAttachments).toMatchObject([
+      { type: 'agent_file', filesystemName: 'shared-fs', path: 'notes/todo.md' },
+    ])
+    expect(draft.referenceAttachments).toHaveLength(1)
+    expect(draft.unrestorable).toEqual([{ type: 'global_file', label: 'Report' }])
   })
 
   it('does not resend references from a same-text idle echo onto a context-free server turn', () => {

@@ -177,6 +177,8 @@ export function buildChatMessageAttachments(
             gfsUri: attachment.gfsUri,
             drive: attachment.drive,
             resourceId: attachment.resourceId,
+            version: attachment.version,
+            bytes: attachment.bytes,
           }
         : {}),
     }

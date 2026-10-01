@@ -7,13 +7,12 @@
  * references.
  *
  * Fidelity ladder (a message can carry its inputs in two places):
- *  1. Persisted attachment chips carry uploaded image bytes and, for current
- *     messages, structured agent/global file identity from the composer or
- *     server-turn parser.
- *  2. A legacy raw `USER-ATTACHED CONTEXT:` block can supply missing identity
- *     (plugin `ns/name`, agent-file `filesystem/path`, global-file URI).
- *     Bare labels without enough identity are reported as unrestorable so the
- *     composer never shows a chip that send will omit.
+ *  1. Persisted attachment chips carry uploaded image bytes and structured
+ *     references. A global file also needs its listed version and byte size
+ *     for the current structured send contract.
+ *  2. A legacy raw `USER-ATTACHED CONTEXT:` block can supply missing plugin
+ *     and agent-file identity. A global-file URI without version and size is
+ *     unrestorable, so the composer never shows a chip that send will omit.
  *
  * `response_file` attachments are never re-applied: they are artifacts the
  * previous reply generated, not inputs of the resent prompt.
@@ -229,17 +228,20 @@ function buildAgentFileReference(
 }
 
 function buildGlobalFileReference(
-  chip: ChatMessageAttachment,
-  structured: StructuredGlobalFile[]
+  chip: ChatMessageAttachment
 ): Extract<ComposerReferenceAttachment, { type: 'global_file' }> | null {
   const label = chip.label
-  const embedded = chip.gfsUri ? parseGlobalFileFromUri(label, chip.gfsUri) : null
-  const match =
-    (embedded?.drive && embedded.resourceId ? embedded : null) ??
-    structured.find(entry => entry.gfsUri && entry.label === label) ??
-    structured.find(entry => entry.gfsUri && pathBasename(entry.gfsUri) === label) ??
-    null
-  if (match) {
+  const match = chip.gfsUri ? parseGlobalFileFromUri(label, chip.gfsUri) : null
+  // URI, version, and size must come from the same persisted chip. Combining
+  // a local version with a URI parsed from prompt text could name another file.
+  if (
+    match?.drive &&
+    match.resourceId &&
+    Number.isSafeInteger(chip.version) &&
+    chip.version! >= 0 &&
+    Number.isSafeInteger(chip.bytes) &&
+    chip.bytes! >= 0
+  ) {
     return {
       id: `global-file:resend:${match.gfsUri}`,
       type: 'global_file',
@@ -247,6 +249,8 @@ function buildGlobalFileReference(
       drive: match.drive,
       gfsUri: match.gfsUri,
       label: match.label || pathBasename(match.gfsUri),
+      version: chip.version!,
+      bytes: chip.bytes!,
     }
   }
   return null
@@ -296,7 +300,7 @@ export function buildComposerResendDraft(
       continue
     }
     if (chip.type === 'global_file') {
-      const reference = buildGlobalFileReference(chip, structured.globalFile)
+      const reference = buildGlobalFileReference(chip)
       if (reference) referenceAttachments.push(reference)
       else unrestorable.push({ type: chip.type, label: chip.label })
     }

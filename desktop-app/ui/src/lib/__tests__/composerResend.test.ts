@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { ChatMessageAttachment } from '../../../../src/types'
+import { buildChatMessageAttachments } from '../chatMessageAttachments'
 import {
   buildComposerResendDraft,
   findNearestPrecedingUserMessage,
@@ -108,15 +109,48 @@ describe('buildComposerResendDraft', () => {
         kind: 'file',
         label: 'todo.md',
       },
-      {
-        id: 'global-file:resend:gfs://drive-7/res-9',
-        type: 'global_file',
-        resourceId: 'res-9',
-        drive: 'drive-7',
-        gfsUri: 'gfs://drive-7/res-9',
-        label: 'Report',
-      },
     ])
+    expect(draft.unrestorable).toEqual([{ type: 'global_file', label: 'Report' }])
+  })
+
+  it('restores a local global-file chip only with its versioned send identity', () => {
+    const draft = buildComposerResendDraft({
+      content: 'Read the report',
+      attachments: buildChatMessageAttachments(
+        [],
+        [
+          {
+            id: 'global-local',
+            type: 'global_file',
+            label: 'Report',
+            drive: 'drive-7',
+            resourceId: 'res-9',
+            gfsUri: 'gfs://drive-7/res-9',
+            version: 3,
+            bytes: 4096,
+          },
+        ]
+      ),
+    })
+    expect(draft.referenceAttachments).toMatchObject([
+      { type: 'global_file', gfsUri: 'gfs://drive-7/res-9', version: 3, bytes: 4096 },
+    ])
+    expect(draft.unrestorable).toEqual([])
+  })
+
+  it('does not combine a chip version with a URI found only in prompt text', () => {
+    const draft = buildComposerResendDraft({
+      content: [
+        'Read the report',
+        'USER-ATTACHED CONTEXT: The user selected these capabilities/files for this message.',
+        'Global Files: Report (gfs://drive-7/res-9). Resolve each gfs:// URI.',
+      ].join('\n'),
+      attachments: [
+        { id: 'global-local', type: 'global_file', label: 'Report', version: 3, bytes: 4096 },
+      ],
+    })
+    expect(draft.referenceAttachments).toEqual([])
+    expect(draft.unrestorable).toEqual([{ type: 'global_file', label: 'Report' }])
   })
 
   it('keeps the structured plugin identity when the message also carries label chips', () => {

@@ -1306,6 +1306,9 @@ export interface ChatMessageAttachment {
   drive?: string
   resourceId?: string
   gfsUri?: string
+  /** Listed GFS identity required to resend a structured global-file reference. */
+  version?: number
+  bytes?: number
 }
 
 export interface ChatFile {
