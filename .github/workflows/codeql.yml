@@ -37,7 +37,7 @@ jobs:
   analyze:
     name: Analyze (javascript-typescript)
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 30
 
     # Code scanning is FREE on public repositories but requires paid GitHub
     # Advanced Security on private ones. This repo is still private pending the
