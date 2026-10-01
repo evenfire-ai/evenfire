@@ -150,7 +150,22 @@ export function createDesktopEnvironmentSetupHandler({
         return
       }
       authState = getAuthState()
-      if (authState.isAuthenticated) return
+      if (authState.isAuthenticated) {
+        try {
+          await onSessionNeedsLoad({ preserveNav: true })
+        } catch {
+          authState = getAuthState()
+          if (authState.isAuthenticated) {
+            setStatus(
+              'Could not verify your sign-in state before switching desktop environments.',
+              'error'
+            )
+            return
+          }
+        }
+        authState = getAuthState()
+        if (authState.isAuthenticated) return
+      }
       try {
         configState = await refreshRuntimeConfigState()
       } catch {

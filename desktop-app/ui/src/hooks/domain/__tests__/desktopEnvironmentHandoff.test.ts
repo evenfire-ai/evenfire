@@ -61,7 +61,8 @@ function createHandler(
     isAuthenticated: boolean
   },
   refreshRuntimeConfigState = async () => runtimeConfigModule!.getDesktopRuntimeConfigState(),
-  logoutForEnvironmentMismatch = vi.fn(async () => undefined)
+  logoutForEnvironmentMismatch = vi.fn(async () => undefined),
+  onSessionNeedsLoad = vi.fn(async () => undefined)
 ) {
   const selectRuntimeConfig = vi.fn(async (optionId: string) => {
     await runtimeConfigModule!.selectDesktopRuntimeConfigOption(optionId)
@@ -73,12 +74,18 @@ function createHandler(
     getAuthState,
     refreshRuntimeConfigState,
     handleSelectRuntimeConfig: selectRuntimeConfig,
-    onSessionNeedsLoad: vi.fn(async () => undefined),
+    onSessionNeedsLoad,
     logoutForEnvironmentMismatch,
     setPendingDesktopEnvironmentSetup,
     setStatus,
   })
-  return { handler, selectRuntimeConfig, setPendingDesktopEnvironmentSetup, setStatus }
+  return {
+    handler,
+    onSessionNeedsLoad,
+    selectRuntimeConfig,
+    setPendingDesktopEnvironmentSetup,
+    setStatus,
+  }
 }
 
 describe('Desktop environment handoff concurrency', () => {
@@ -190,6 +197,110 @@ describe('Desktop environment handoff concurrency', () => {
         rpcProxyBaseUrl: '',
       })
     }
+  })
+
+  it.each([
+    {
+      outcome: 'selects the linked saved environment',
+      externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/api/v1`,
+      action: 'select',
+    },
+    {
+      outcome: 'prompts to add the linked environment',
+      externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/other`,
+      action: 'prompt',
+    },
+  ])(
+    'refreshes live auth after logout swallows a token-clear failure, then $outcome',
+    async ({ externalRestApiBaseUrl, action }) => {
+      const state = await runtimeConfigModule!.getDesktopRuntimeConfigState()
+      const savedTarget = state.options.find(
+        option =>
+          option.externalRestApiBaseUrl === `${targetEnvironment.externalRestApiBaseUrl}/api/v1`
+      )
+      if (!savedTarget) throw new Error('The config producer did not return the saved REST profile')
+
+      let liveSessionAuthenticated = true
+      let rendererAuthenticated = true
+      const clearSessionToken = vi.fn(async () => {
+        throw new Error('secure storage unavailable')
+      })
+      const logoutForEnvironmentMismatch = vi.fn(async () => {
+        liveSessionAuthenticated = false
+        try {
+          await clearSessionToken()
+        } catch {
+          // Mirrors handleLogout: report the error and resolve without refreshing auth state.
+        }
+      })
+      const onSessionNeedsLoad = vi.fn(async () => {
+        rendererAuthenticated = liveSessionAuthenticated
+      })
+      const { handler, selectRuntimeConfig, setPendingDesktopEnvironmentSetup } = createHandler(
+        () => ({
+          booting: false,
+          busy: false,
+          authTransitioning: false,
+          isAuthenticated: rendererAuthenticated,
+        }),
+        undefined,
+        logoutForEnvironmentMismatch,
+        onSessionNeedsLoad
+      )
+
+      await handler({ ...targetEnvironment, externalRestApiBaseUrl })
+
+      expect(clearSessionToken).toHaveBeenCalledOnce()
+      expect(onSessionNeedsLoad).toHaveBeenCalledWith({ preserveNav: true })
+      expect(rendererAuthenticated).toBe(false)
+      if (action === 'select') {
+        expect(selectRuntimeConfig).toHaveBeenCalledWith(savedTarget.id)
+        expect(setPendingDesktopEnvironmentSetup).toHaveBeenLastCalledWith(null)
+      } else {
+        expect(selectRuntimeConfig).not.toHaveBeenCalled()
+        expect(setPendingDesktopEnvironmentSetup).toHaveBeenLastCalledWith({
+          ...targetEnvironment,
+          externalRestApiBaseUrl,
+          rpcProxyBaseUrl: '',
+        })
+      }
+    }
+  )
+
+  it('keeps the current environment when a failed logout leaves the live session active', async () => {
+    let rendererAuthenticated = true
+    const logoutForEnvironmentMismatch = vi.fn(async () => {
+      // handleLogout reports a failed logout and resolves; the live session remains active.
+    })
+    const onSessionNeedsLoad = vi.fn(async () => {
+      rendererAuthenticated = true
+    })
+    const {
+      handler,
+      onSessionNeedsLoad: onSessionNeedsLoadSpy,
+      selectRuntimeConfig,
+      setPendingDesktopEnvironmentSetup,
+    } = createHandler(
+      () => ({
+        booting: false,
+        busy: false,
+        authTransitioning: false,
+        isAuthenticated: rendererAuthenticated,
+      }),
+      undefined,
+      logoutForEnvironmentMismatch,
+      onSessionNeedsLoad
+    )
+
+    await handler({
+      ...targetEnvironment,
+      externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/api/v1`,
+    })
+
+    expect(onSessionNeedsLoadSpy).toHaveBeenCalledWith({ preserveNav: true })
+    expect(rendererAuthenticated).toBe(true)
+    expect(selectRuntimeConfig).not.toHaveBeenCalled()
+    expect(setPendingDesktopEnvironmentSetup).toHaveBeenCalledWith(null)
   })
 
   it('keeps the first environment link when another arrives during verification', async () => {
