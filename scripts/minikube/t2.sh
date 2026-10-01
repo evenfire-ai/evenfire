@@ -137,6 +137,9 @@ PY
   printf '[minikube-t2] transition=%s reason=%s\n' "$T2_PLAN_STATE" "$T2_PLAN_REASON"
   t2_evidence_write planner PASS \
     "state=$T2_PLAN_STATE duration=$((SECONDS - phase_started_seconds))s"
+  # Close the phase t2_evidence_init opened: local-preflight and the planner
+  # have both passed, so this run's preflight is complete.
+  t2_evidence_write preflight PASS "local-preflight and planner passed; transition=$T2_PLAN_STATE"
 }
 
 run_pvc_reset_if_authorized() {

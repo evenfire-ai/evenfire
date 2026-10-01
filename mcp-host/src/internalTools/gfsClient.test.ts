@@ -4,10 +4,13 @@ import { VISUAL_INPUT_LIMITS, VisualInputBudget } from '../visualInput/policy'
 import type { GfscCallOptions, GfscWriteClient } from './gfs'
 import {
   DEFAULT_GFS_ACCESS_FILE,
+  type GfsRuntimeEnv,
+  type GfsToolScopeInspection,
   GfscHttpError,
   createGfscClient,
   getGfsToolScopes,
   hasGfsRuntimeAccess,
+  inspectGfsToolScopes,
 } from './gfsClient'
 
 function encodedClaims(scopes: unknown): string {
@@ -56,6 +59,78 @@ describe('gfs runtime gfsc client', () => {
     expect(getGfsToolScopes({ get: () => encodedClaims([]) })).toBeNull()
     expect(getGfsToolScopes({ get: () => encodedClaims('gfs.read') })).toBeNull()
     expect(getGfsToolScopes({ get: () => 'malformed' })).toBeNull()
+  })
+
+  describe('inspectGfsToolScopes (#666)', () => {
+    const enoent = () =>
+      Object.assign(new Error('ENOENT: no such file or directory'), {
+        code: 'ENOENT',
+        syscall: 'open',
+      })
+    const fileEnv = (configuredPath: string | undefined, read: (path: string) => string) => ({
+      get: (key: string) => (key === 'MCP_HOST_GFS_TOKEN_FILE' ? configuredPath : undefined),
+      readFileSync: read,
+    })
+
+    it('reports each token state, and getGfsToolScopes keeps its answer for each', () => {
+      const cases: [GfsRuntimeEnv, GfsToolScopeInspection, string[] | null][] = [
+        [
+          { get: () => encodedClaims(['gfs.read', 'gfs.write']) },
+          { status: 'ok', scopes: new Set(['gfs.read', 'gfs.write']) },
+          ['gfs.read', 'gfs.write'],
+        ],
+        [{ get: () => encodedClaims([]) }, { status: 'ok', scopes: new Set() }, null],
+        [
+          { get: () => encodedClaims(['gfs.read', 'gfs.share']) },
+          { status: 'scope_outside_allowlist' },
+          null,
+        ],
+        [{ get: () => 'malformed' }, { status: 'token_undecodable' }, null],
+        [{ get: () => encodedClaims('gfs.read') }, { status: 'token_undecodable' }, null],
+        [
+          fileEnv(undefined, () => {
+            throw enoent()
+          }),
+          { status: 'not_configured' },
+          null,
+        ],
+        [
+          fileEnv('/mounted/token', () => {
+            throw enoent()
+          }),
+          { status: 'token_unreadable' },
+          null,
+        ],
+        [
+          fileEnv(undefined, () => {
+            throw Object.assign(new Error('EACCES'), { code: 'EACCES', syscall: 'open' })
+          }),
+          { status: 'token_unreadable' },
+          null,
+        ],
+        [fileEnv(undefined, () => ' \n'), { status: 'token_unreadable' }, null],
+        [
+          fileEnv('/mounted/token', () => `${encodedClaims(['gfs.read'])}\n`),
+          { status: 'ok', scopes: new Set(['gfs.read']) },
+          ['gfs.read'],
+        ],
+      ]
+      for (const [env, inspection, scopes] of cases) {
+        expect(inspectGfsToolScopes(env)).toEqual(inspection)
+        const legacy = getGfsToolScopes(env)
+        expect(legacy === null ? null : [...legacy]).toEqual(scopes)
+      }
+    })
+
+    it('reads the configured token file, or the default path when none is configured', () => {
+      const read = vi.fn((_path: string) => encodedClaims(['gfs.read']))
+      inspectGfsToolScopes(fileEnv('/mounted/token', read))
+      inspectGfsToolScopes(fileEnv(undefined, read))
+      expect(read.mock.calls.map(call => call[0])).toEqual([
+        '/mounted/token',
+        DEFAULT_GFS_ACCESS_FILE,
+      ])
+    })
   })
 
   it('calls gfsc accessible with runtime bearer auth', async () => {
@@ -450,7 +525,7 @@ describe('GFS binary content snapshots', () => {
 
   it.each([
     [{ 'x-gfs-version': '4' }, 'version_conflict'],
-    [{ 'x-gfs-uri': 'gfs://main/wrong' }, 'version_conflict'],
+    [{ 'x-gfs-uri': 'gfs://main/wrong' }, 'identity_mismatch'],
     [{ 'content-length': '2' }, 'incomplete_response'],
     [{ 'content-length': 'not-a-size' }, 'incomplete_response'],
     [{ 'content-encoding': 'gzip' }, 'invalid_response'],

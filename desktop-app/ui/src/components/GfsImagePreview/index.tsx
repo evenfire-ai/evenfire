@@ -19,6 +19,8 @@ export function GfsImagePreview({
   dataBase64,
   mimeType,
   onClose,
+  reloadVersion,
+  unavailable = false,
   onDownloadError,
 }: GfsImagePreviewProps) {
   const titleId = useId()
@@ -33,6 +35,20 @@ export function GfsImagePreview({
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [onClose])
+
+  const closeButton = (
+    <Button
+      className="da-gfs-image-preview-dialog__close"
+      data-preview-close
+      ref={closeButtonRef}
+      aria-label="Close image preview"
+      color="neutral"
+      onClick={onClose}
+      variant="ghost"
+    >
+      <IconClose width={18} height={18} />
+    </Button>
+  )
 
   return createPortal(
     <div
@@ -49,28 +65,31 @@ export function GfsImagePreview({
         aria-modal="true"
         aria-labelledby={titleId}
       >
-        <GfsImagePreviewBody
-          byteLength={byteLength}
-          fileName={fileName}
-          gfsUri={gfsUri}
-          dataBase64={dataBase64}
-          mimeType={mimeType}
-          onDownloadError={onDownloadError}
-          titleId={titleId}
-          headerActions={
-            <Button
-              className="da-gfs-image-preview-dialog__close"
-              data-preview-close
-              ref={closeButtonRef}
-              aria-label="Close image preview"
-              color="neutral"
-              onClick={onClose}
-              variant="ghost"
-            >
-              <IconClose width={18} height={18} />
-            </Button>
-          }
-        />
+        {unavailable ? (
+          <>
+            <header className="da-gfs-image-preview-dialog__header">
+              <h3 id={titleId}>File unavailable</h3>
+              {closeButton}
+            </header>
+            <div className="da-gfs-image-preview-dialog__body">
+              <div className="empty-state">
+                <p className="muted">This item is no longer available.</p>
+              </div>
+            </div>
+          </>
+        ) : (
+          <GfsImagePreviewBody
+            key={`${gfsUri}:${reloadVersion ?? 0}`}
+            byteLength={byteLength}
+            fileName={fileName}
+            gfsUri={gfsUri}
+            dataBase64={dataBase64}
+            mimeType={mimeType}
+            onDownloadError={onDownloadError}
+            titleId={titleId}
+            headerActions={closeButton}
+          />
+        )}
       </section>
     </div>,
     document.body

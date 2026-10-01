@@ -89,7 +89,7 @@ vi.mock('@modelcontextprotocol/sdk/client/sse.js', () => ({
 // only keeps import-time resolution offline.
 vi.mock('../../core/net/ssrf', () => ({
   SsrfBlockedError: class SsrfBlockedError extends Error {},
-  resolvePinnedPublicIp: vi.fn(async () => '203.0.113.10'),
+  resolvePinnedPublicIp: vi.fn(async () => '93.184.216.34'),
 }))
 
 function httpError(status: number): () => Promise<never> {

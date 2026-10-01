@@ -20,6 +20,8 @@ export type GfsImagePreviewProps = {
   fileName: string
   mimeType: string
   onClose: () => void
+  reloadVersion?: number
+  unavailable?: boolean
   onDownloadError?: (error: unknown) => void
 } & GfsImagePreviewSource
 

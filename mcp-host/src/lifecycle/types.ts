@@ -72,6 +72,13 @@ export interface TaskRecord {
   submittedBy: string | null
   submittedChannelType: string | null
   submittedChannelId: string | null
+  /**
+   * Ids of the incoming attachments admitted with this task (#666). A replayed
+   * delivery answers with them, exactly like the first response did.
+   */
+  acceptedAttachmentIds: readonly string[]
+  /** Ids of the structured file references resolved for this task (#666). */
+  acceptedFileReferenceIds: readonly string[]
   traceContext: TraceContextV1 | null
   createdAt: Date
   dispatchedAt?: Date

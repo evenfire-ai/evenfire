@@ -61,7 +61,8 @@ incremental_add_target() {
   target="${selector}|${namespace}|${deployment}"
 
   local existing
-  for existing in "${INCREMENTAL_TARGETS[@]}"; do
+  # The `+` expansion keeps an empty array valid under `set -u` on bash 3.2.
+  for existing in ${INCREMENTAL_TARGETS[@]+"${INCREMENTAL_TARGETS[@]}"}; do
     [[ "${existing}" == "${target}" ]] && return 0
   done
   INCREMENTAL_TARGETS+=("${target}")
@@ -193,7 +194,13 @@ incremental_classify_path() {
     channel-reader/*) incremental_add_target channel-reader channels channel-reader-chatllm ;;
     mcp-proxy/*) incremental_add_target mcp-proxy mcp-server mcp-proxy ;;
     control-ui/*) incremental_add_target control-ui control-plane control-ui ;;
-    packages/gfs-interaction-policy/*) incremental_add_target control-ui control-plane control-ui ;;
+    packages/gfs-interaction-policy/*)
+      # Control UI imports the GFS naming policy and mcp-host imports the
+      # FileReference v1 contract and byte classifier; both Dockerfiles COPY
+      # the package, so a change here changes exactly those two image outputs.
+      incremental_add_target control-ui control-plane control-ui
+      incremental_add_target mcp-host mcp-host chatllm
+      ;;
     packages/display-field/*)
       # display-field is consumed ONLY by the control-api and control-ui images
       # (their Dockerfiles COPY it and their field validation runs off it), so a
@@ -445,8 +452,8 @@ incremental_build_images() {
     log "Building all images because the change cannot be safely targeted"
     (
       cd "${PROJECT_DIR}"
-      make minikube-build-images
-      make minikube-verify-images
+      T2_SKIP_LOCK=true T2_LOCK_TOKEN="${T2_LOCK_TOKEN}" make minikube-build-images
+      T2_SKIP_LOCK=true T2_LOCK_TOKEN="${T2_LOCK_TOKEN}" make minikube-verify-images
     )
     return 0
   fi
@@ -479,8 +486,8 @@ incremental_build_images_ghcr() {
     log "Re-pulling the release image set (${IMAGE_TAG}) before shadowing the changed images"
     (
       cd "${PROJECT_DIR}"
-      make minikube-pull-images
-      make minikube-verify-images
+      T2_SKIP_LOCK=true T2_LOCK_TOKEN="${T2_LOCK_TOKEN}" make minikube-pull-images
+      T2_SKIP_LOCK=true T2_LOCK_TOKEN="${T2_LOCK_TOKEN}" make minikube-verify-images
     )
   fi
 

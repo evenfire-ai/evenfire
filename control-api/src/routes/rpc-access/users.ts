@@ -1,5 +1,5 @@
 import express, { Router } from 'express'
-import type { Request } from 'express'
+import type { Request, Response } from 'express'
 import { config } from '../../config.js'
 import { pool } from '../../db.js'
 import { K8sGateway } from '../../k8s.js'
@@ -48,14 +48,25 @@ const HOST_ACCESS_SCOPES = [
 
 type RpcAuthedRequest = Request & { rpcAuth?: RpcAccessClaims }
 
-function logHostAccessDenial(
+/**
+ * Response header that tells rpc-proxy why control-api denied Host access. The
+ * 403 body stays exactly `{"error":"Forbidden"}` (a pinned 21-byte contract);
+ * the reason travels out of band so rpc-proxy can tell removed access from
+ * other denials. Scope denials from the auth middleware carry no such header.
+ */
+export const HOST_ACCESS_DENIAL_REASON_HEADER = 'x-host-access-denial-reason'
+
+function denyHostAccess(
   req: RpcAuthedRequest,
+  res: Response,
   reason: RpcHostAccessDenialReason | 'claims_missing'
 ): void {
   req.log?.warn(
     { event: 'rpc_host_access_denied', reason },
     'rpc host access denied by control-plane authority'
   )
+  res.setHeader(HOST_ACCESS_DENIAL_REASON_HEADER, reason)
+  res.status(403).json({ error: 'Forbidden' })
 }
 
 async function bindDirectRunWithinBudget(
@@ -187,8 +198,7 @@ export function createRpcAccessUsersRouter(
         const hostRef = String(req.params.hostRef || '').trim()
         const claims = req.rpcAuth
         if (!claims) {
-          logHostAccessDenial(req, 'claims_missing')
-          res.status(403).json({ error: 'Forbidden' })
+          denyHostAccess(req, res, 'claims_missing')
           return
         }
         const authorization = await authorizeRpcHostAccess(
@@ -199,8 +209,7 @@ export function createRpcAccessUsersRouter(
           directory
         )
         if (!authorization.authorized) {
-          logHostAccessDenial(req, authorization.reason)
-          res.status(403).json({ error: 'Forbidden' })
+          denyHostAccess(req, res, authorization.reason)
           return
         }
         res.status(200).json(authorization.connection)
@@ -221,8 +230,7 @@ export function createRpcAccessUsersRouter(
         const claims = req.rpcAuth
         const binding = parseDirectRunBindingRequest(req.body)
         if (!claims) {
-          logHostAccessDenial(req, 'claims_missing')
-          res.status(403).json({ error: 'Forbidden' })
+          denyHostAccess(req, res, 'claims_missing')
           return
         }
         if (!binding) {
@@ -238,8 +246,7 @@ export function createRpcAccessUsersRouter(
           directory
         )
         if (!authorization.authorized) {
-          logHostAccessDenial(req, authorization.reason)
-          res.status(403).json({ error: 'Forbidden' })
+          denyHostAccess(req, res, authorization.reason)
           return
         }
 

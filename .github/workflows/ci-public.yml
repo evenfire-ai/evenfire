@@ -122,6 +122,10 @@ jobs:
         working-directory: ${{ matrix.service }}
         run: npm run build
 
+      - name: Build Profile UI image builder stage
+        if: matrix.service == 'profile-ui'
+        run: timeout 900s docker build --target builder -f profile-ui/Dockerfile .
+
       - name: Install Playwright Chromium
         if: matrix.service == 'desktop-app'
         working-directory: desktop-app
@@ -328,7 +332,9 @@ jobs:
             routes.externalGfsRateLimitStress.realPostgres.integration.test.ts \
             routes.externalGfsRateLimitFailClosed.realPostgres.integration.test.ts \
             routes.rateLimitProcessMemory.realPostgres.integration.test.ts \
-            services.rateLimiterPoolSaturation.realPostgres.integration.test.ts
+            services.rateLimiterPoolSaturation.realPostgres.integration.test.ts \
+            entityChangeFeed.realPostgres.integration.test.ts \
+            db.realPostgresMigration.integration.test.ts
 
       - name: Install gfs-controller dependencies
         working-directory: gfs-controller
@@ -534,6 +540,9 @@ jobs:
       - name: Test HCC watch-recovery gate coordination
         run: bash scripts/tests/test-hcc-watch-recovery-gate.sh
 
+      - name: Test autoresearch gate wrappers
+        run: bash scripts/tests/test-autoresearch-gates.sh
+
       - name: Test HCC watch recovery TLS proxy and configuration restoration
         run: |
           bash scripts/tests/test-hcc-watch-api-proxy.sh
@@ -541,6 +550,9 @@ jobs:
 
       - name: Test HCC watch-churn readiness gate contract
         run: bash scripts/tests/test-hcc-watch-churn-readiness-gate.sh
+
+      - name: Test HCC stateless cache-containment gate contract
+        run: bash scripts/tests/test-hcc-stateless-cache-containment.sh
 
       - name: HCC policy lifecycle and restoration contracts
         run: |
