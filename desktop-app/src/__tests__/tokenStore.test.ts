@@ -77,7 +77,7 @@ describe('TokenStore per-environment slots (spec §5.2)', () => {
     const drain = (prepareForQuit ? prepareForQuit.call(store) : Promise.resolve()).then(() => {
       drainFinished = true
     })
-    await Promise.resolve()
+    await new Promise<void>(resolve => setImmediate(resolve))
     expect(drainFinished).toBe(false)
 
     finishWrite()
