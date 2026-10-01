@@ -283,6 +283,31 @@ describe('image targets', () => {
     const [span] = inlineSpans('![Sales](image (1).png)')
     expect(span).toEqual({ text: 'Sales', image: 'image (1).png' })
   })
+
+  it('reads a title as the one-pattern reader it replaced did, without its backtracking', () => {
+    const titled = /^(.*?)\s+(?:"[^"\n]*"|'[^'\n]*'|\([^()\n]*\))$/
+    const angled = /^<([^<>\n]*)>/
+    // No backslash or ampersand, so unescaping and entity decoding leave the name as read.
+    const alphabet = ['a', 'b', '.', ' ', '\t', '\n', '\r', '\u2028', '"', "'", '(', ')', '<', '>']
+    let seed = 1
+    const next = () => (seed = (seed * 1103515245 + 12345) % 2147483648)
+    for (let i = 0; i < 20000; i++) {
+      let input = ''
+      for (let n = next() % 12; n > 0; n--) input += alphabet[next() % alphabet.length]
+      const t = input.trim()
+      const expected = angled.exec(t)?.[1] ?? titled.exec(t)?.[1] ?? t
+      expect(imageTarget(input), JSON.stringify(input)).toBe(expected)
+    }
+  })
+
+  it('reads a target with a long run of spaces in linear time', () => {
+    const spaces = ' '.repeat(100000)
+    for (const inside of [`a${spaces}b`, `a${spaces}"title"`, `a${spaces}(b`, `${spaces}x`]) {
+      const started = performance.now()
+      imageTarget(inside)
+      expect(performance.now() - started).toBeLessThan(200)
+    }
+  })
 })
 
 describe('block quotes', () => {
@@ -342,6 +367,8 @@ describe('hostile input', () => {
     imageOpen: '![a]('.repeat(40000),
     imageGroups: `![a](${'(x)'.repeat(60000)}`,
     imageGroupsRepeated: `![a](${'(x)'.repeat(5)}`.repeat(10000),
+    imageTargetSpaces: `![a](a${' '.repeat(100000)}b)`,
+    imageTitleSpaces: `![a](a${' '.repeat(100000)}"t")`,
     link: '[a](http://x'.repeat(16000),
     linkEscapes: `[${'\\]'.repeat(100000)}`,
     bracket: '['.repeat(200000),

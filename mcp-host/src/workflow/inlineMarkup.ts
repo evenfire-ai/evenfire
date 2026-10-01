@@ -446,8 +446,30 @@ function unescapeMarkdown(text: string): string {
 export function imageTarget(inside: string): string {
   const t = inside.trim()
   const angle = /^<([^<>\n]*)>/.exec(t)
-  const titled = /^(.*?)\s+(?:"[^"\n]*"|'[^'\n]*'|\([^()\n]*\))$/.exec(t)
-  return decodeEntities(unescapeMarkdown(angle ? angle[1] : titled ? titled[1] : t))
+  const titled = angle ? undefined : beforeTitle(t)
+  return decodeEntities(unescapeMarkdown(angle ? angle[1] : (titled ?? t)))
+}
+
+const CLOSES_TITLE: Record<string, string> = { '"': '"', "'": "'", ')': '(' }
+const LINE_TERMINATOR = /[\n\r\u2028\u2029]/
+
+/**
+ * `t` without a trailing title (`"…"`, `'…'` or `(…)` after whitespace), or
+ * undefined when it has none. Read from the right, so a long run of spaces
+ * costs one pass; a target that spans a line has no title, as before.
+ */
+function beforeTitle(t: string): string | undefined {
+  const open = CLOSES_TITLE[t[t.length - 1]]
+  if (open === undefined || t.length < 2) return undefined
+  const start = t.lastIndexOf(open, t.length - 2)
+  if (start <= 0) return undefined
+  const title = t.slice(start + 1, -1)
+  if (title.includes('\n') || (open === '(' && title.includes(')'))) return undefined
+  let end = start
+  while (end > 0 && /\s/.test(t[end - 1])) end--
+  if (end === start) return undefined
+  const target = t.slice(0, end)
+  return LINE_TERMINATOR.test(target) ? undefined : target
 }
 
 /** One stretch of inline text and the formatting it carries. */
