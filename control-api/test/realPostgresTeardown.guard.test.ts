@@ -13,14 +13,16 @@ import { fileURLToPath } from 'node:url'
 // by `pid <> pg_backend_pid()` and nothing terminates it afterwards.
 //
 // The rule is lexical and deliberately narrow: in each test/*.realPostgres*
-// suite that contains pg_terminate_backend, every `<identifier>.end()` whose
-// receiver is not the identifier that issues the terminate query is a
-// violation, wherever it sits in the file (beforeAll, a test body, afterAll).
+// suite that contains pg_terminate_backend, every argument-less `.end()` —
+// plain, optional-chained (`?.end()`) or on a parenthesised or indexed
+// receiver — whose receiver is not the identifier that issues the terminate
+// query is a violation, wherever it sits in the file (beforeAll, a test body,
+// afterAll). `.end(<arg>)` is an http request or stream, not a pg pool.
 
 const testDir = dirname(fileURLToPath(import.meta.url))
 const REAL_POSTGRES_SUITE = /\.realPostgres.*\.test\.ts$/
 const TERMINATE_QUERY = /\b(\w+)\.query(?:<[^>]*>)?\(\s*`[^`]*pg_terminate_backend/g
-const PLAIN_END = /\b(\w+)\.end\(\)/g
+const PLAIN_END = /([\w)\]]+)\??\.end\(\)/g
 
 interface ScannedSuite {
   file: string
@@ -86,10 +88,10 @@ describe('real-Postgres teardown guard (R4-L11)', () => {
     // Witness: the terminate query named the pool that is allowed a plain end.
     expect(suite.terminators).toEqual(['adminPool'])
     expect(suite.violations).toEqual([
-      'fixture.realPostgres.test.ts:2 dbPool.end(',
-      'fixture.realPostgres.test.ts:3 pool?.end(',
-      'fixture.realPostgres.test.ts:4 Pool).end(',
-      'fixture.realPostgres.test.ts:5 corePool?.end(',
+      'fixture.realPostgres.test.ts:2 dbPool.end()',
+      'fixture.realPostgres.test.ts:3 pool?.end()',
+      'fixture.realPostgres.test.ts:4 Pool).end()',
+      'fixture.realPostgres.test.ts:5 corePool?.end()',
     ])
   })
 })
