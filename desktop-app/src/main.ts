@@ -64,6 +64,21 @@ process.stderr?.on?.('error', () => {})
 
 let mainWindow: BrowserWindow | null = null
 const appService = new AppService()
+let quitDrainStarted = false
+let quitDrainComplete = false
+app.on('before-quit', event => {
+  if (quitDrainComplete) return
+
+  event.preventDefault()
+  if (quitDrainStarted) return
+
+  quitDrainStarted = true
+  const resumeQuit = () => {
+    quitDrainComplete = true
+    app.quit()
+  }
+  void appService.prepareForQuit().then(resumeQuit, resumeQuit)
+})
 const sandboxUiDeepLinkQueue = new SandboxUiDeepLinkQueue()
 // U5: deliver mcp-oauth completions to the renderer, or queue them when the
 // renderer is not yet ready (cold start), draining after `app:rendererReady`.

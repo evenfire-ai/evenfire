@@ -142,6 +142,25 @@ async function removeTokenFileDurably(filePath: string): Promise<void> {
 }
 
 export class TokenStore {
+  private readonly pendingOperations = new Set<Promise<unknown>>()
+
+  private trackOperation<T>(operation: () => Promise<T>): Promise<T> {
+    const pending = Promise.resolve().then(operation)
+    this.pendingOperations.add(pending)
+    void pending.then(
+      () => this.pendingOperations.delete(pending),
+      () => this.pendingOperations.delete(pending)
+    )
+    return pending
+  }
+
+  /** Wait for active Keytar work and any storage fallback it triggers. */
+  async prepareForQuit(): Promise<void> {
+    while (this.pendingOperations.size > 0) {
+      await Promise.allSettled([...this.pendingOperations])
+    }
+  }
+
   /**
    * Read the session token for `envKey`. Falls back keytar → safeStorage file,
    * optional older env-key aliases, then does a one-time best-effort migration
@@ -155,6 +174,13 @@ export class TokenStore {
   async getSessionToken(
     envKey: string,
     options: { legacyEnvKeys?: readonly string[] } = {}
+  ): Promise<string | null> {
+    return this.trackOperation(() => this.getSessionTokenOnce(envKey, options))
+  }
+
+  private async getSessionTokenOnce(
+    envKey: string,
+    options: { legacyEnvKeys?: readonly string[] }
   ): Promise<string | null> {
     assertEnvKey(envKey)
     const account = accountFor(envKey)
@@ -321,6 +347,10 @@ export class TokenStore {
   }
 
   async setSessionToken(token: string, envKey: string): Promise<void> {
+    return this.trackOperation(() => this.setSessionTokenOnce(token, envKey))
+  }
+
+  private async setSessionTokenOnce(token: string, envKey: string): Promise<void> {
     assertEnvKey(envKey)
     const account = accountFor(envKey)
     const keytar = await loadKeytar()
@@ -346,6 +376,13 @@ export class TokenStore {
   async clearSessionToken(
     envKey: string,
     options: { legacyEnvKeys?: readonly string[] } = {}
+  ): Promise<void> {
+    return this.trackOperation(() => this.clearSessionTokenOnce(envKey, options))
+  }
+
+  private async clearSessionTokenOnce(
+    envKey: string,
+    options: { legacyEnvKeys?: readonly string[] }
   ): Promise<void> {
     assertEnvKey(envKey)
     const legacyEnvKeys = Array.from(

@@ -1575,6 +1575,10 @@ export class AppService {
     return this.restoreSavedSession({ runLaunchMaintenance: true })
   }
 
+  async prepareForQuit(): Promise<void> {
+    await this.tokenStore.prepareForQuit()
+  }
+
   private async runSandboxUiPartitionGcSafely(): Promise<void> {
     try {
       const { app } = await import('electron')

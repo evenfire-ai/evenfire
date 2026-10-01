@@ -37,6 +37,7 @@ let TokenStore: typeof import('../tokenStore.js').TokenStore
 
 beforeEach(async () => {
   keychain.clear()
+  vi.clearAllMocks()
   TokenStore = (await import('../tokenStore.js')).TokenStore
 })
 
@@ -48,6 +49,41 @@ describe('TokenStore per-environment slots (spec §5.2)', () => {
     // Physically stored under the namespaced account, never the global one.
     expect(keychain.get(keyOf(SERVICE, `${LEGACY_ACCOUNT}::${ENV_A}`))).toBe('tok-a')
     expect(keychain.has(keyOf(SERVICE, LEGACY_ACCOUNT))).toBe(false)
+  })
+
+  it('waits for active native credential operations before quitting', async () => {
+    const keytar = await import('keytar')
+    let finishWrite!: () => void
+    vi.mocked(keytar.setPassword).mockImplementationOnce(
+      () =>
+        new Promise<void>(resolve => {
+          finishWrite = resolve
+        })
+    )
+    const store = new TokenStore()
+    const write = store.setSessionToken('tok-a', ENV_A)
+
+    await vi.waitFor(() => {
+      expect(keytar.setPassword).toHaveBeenCalledWith(
+        SERVICE,
+        `${LEGACY_ACCOUNT}::${ENV_A}`,
+        'tok-a'
+      )
+    })
+
+    let drainFinished = false
+    const prepareForQuit = (store as TokenStore & { prepareForQuit?: () => Promise<void> })
+      .prepareForQuit
+    const drain = (prepareForQuit ? prepareForQuit.call(store) : Promise.resolve()).then(() => {
+      drainFinished = true
+    })
+    await Promise.resolve()
+    expect(drainFinished).toBe(false)
+
+    finishWrite()
+    await expect(write).resolves.toBeUndefined()
+    await expect(drain).resolves.toBeUndefined()
+    expect(drainFinished).toBe(true)
   })
 
   it('does not leak env A token into env B', async () => {
