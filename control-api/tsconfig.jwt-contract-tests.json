@@ -14,6 +14,8 @@
     "test/config.jwtHardening.test.ts",
     "test/config.prod.test.ts",
     "test/config.registryConnectionMode.test.ts",
+    "test/config.approvalRateLimit.test.ts",
+    "test/config.memberRegistrationMode.test.ts",
     "test/bannedDevSigningKeys.test.ts",
     "test/devSigningKeys.test.ts",
     "test/services.registryConnectionDb.test.ts",

@@ -36,6 +36,9 @@ COPY control-api/src ./src
 
 RUN npm run build
 RUN npm prune --production
+# Its compiled dist and file-linked llm-providers are runtime inputs; the
+# TypeScript/Vitest toolchain was needed only until both package/service builds.
+RUN npm --prefix /app/packages/workflow-runtime-core prune --omit=dev
 
 FROM node:24-alpine
 RUN addgroup -S app && adduser -S app -G app

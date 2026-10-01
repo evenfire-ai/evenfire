@@ -205,6 +205,30 @@ for service in control-api rpc-proxy external-rest-api; do
   assert_jwt_policy_runtime_context "$service"
 done
 
+assert_control_api_runtime_prune_after_builds() {
+  local file="$REPO_ROOT/control-api/Dockerfile" final_build prune runtime
+  final_build="$(line_of_last "$file" 'RUN npm run build')"
+  prune="$(line_of_first "$file" 'RUN npm --prefix /app/packages/workflow-runtime-core prune --omit=dev')"
+  runtime="$(awk '/^FROM / { count++; if (count == 2) { print NR; exit } }' "$file")"
+  if [[ -z "$final_build" || -z "$prune" || -z "$runtime" || \
+        "$prune" -le "$final_build" || "$prune" -ge "$runtime" ]]; then
+    fail 'Control API must prune workflow-runtime-core dev dependencies after all builds, before runtime COPY'
+  fi
+}
+
+assert_control_api_make_root_context() {
+  local from_root from_service expected
+  expected="docker build -f \"$REPO_ROOT/control-api/Dockerfile\" -t example.invalid/evenfire/control-api:fixture \"$REPO_ROOT\""
+  from_root="$(cd "$REPO_ROOT" && make -n -f control-api/Makefile docker-build REGISTRY=example.invalid/evenfire TAG=fixture)"
+  from_service="$(cd "$REPO_ROOT/control-api" && make -n docker-build REGISTRY=example.invalid/evenfire TAG=fixture)"
+  if [[ "$from_root" != "$expected" || "$from_service" != "$expected" ]]; then
+    fail 'Control API Make docker-build must use its explicit Dockerfile and root context from either supported cwd'
+  fi
+}
+
+assert_control_api_runtime_prune_after_builds
+assert_control_api_make_root_context
+
 # Direct consumers.  The first four are Node services; profile-ui and
 # control-ui are Next.js consumers and therefore also require materialization.
 assert_copy_before_every_ci control-api/Dockerfile \
