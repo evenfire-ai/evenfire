@@ -363,7 +363,7 @@ describe('AppService invitation configuration lookup', () => {
     expect(getMe).not.toHaveBeenCalled()
   })
 
-  it('releases the logout guard when clearing the saved token fails', async () => {
+  it('preserves the session when clearing the saved token fails', async () => {
     process.env.EXTERNAL_REST_API_BASE_URL = 'https://api.example.com'
     process.env.RPC_PROXY_BASE_URL = 'https://rpc.example.com'
     vi.resetModules()
@@ -373,21 +373,61 @@ describe('AppService invitation configuration lookup', () => {
       import('../config.js'),
     ])
     const service = new AppService() as unknown as {
-      tokenStore: { clearSessionToken: ReturnType<typeof vi.fn> }
+      authClient: {
+        getMe: ReturnType<typeof vi.fn>
+        passwordLogin: ReturnType<typeof vi.fn>
+      }
+      tokenStore: {
+        clearSessionToken: ReturnType<typeof vi.fn>
+        getSessionToken: ReturnType<typeof vi.fn>
+        setSessionToken: ReturnType<typeof vi.fn>
+      }
       rpcTokenManager: { clear: ReturnType<typeof vi.fn> }
+      updateDesktopGfsUploadState: ReturnType<typeof vi.fn>
       logoutInProgress: boolean
+      passwordLogin: (email: string, password: string) => Promise<unknown>
       logout: () => Promise<void>
+      getSessionState: () => Promise<unknown>
+      getCachedUserId: () => string | null
+      gfsDispatchBlocked: boolean
     }
+    const me = {
+      id: 'user-1',
+      email: 'user@example.com',
+      name: null,
+      picture: null,
+      teamId: 'team-1',
+      teamName: 'Marketing',
+      role: 'member',
+    }
+    const getMe = vi.fn().mockResolvedValue(me)
+    const getSessionToken = vi.fn().mockResolvedValue('saved-token')
+    service.authClient = {
+      passwordLogin: vi.fn().mockResolvedValue({ token: 'saved-token', me }),
+      getMe,
+    } as never
     service.tokenStore = {
+      getSessionToken,
+      setSessionToken: vi.fn().mockResolvedValue(undefined),
       clearSessionToken: vi.fn().mockRejectedValue(new Error('keychain unavailable')),
     } as never
     service.rpcTokenManager = { clear: vi.fn() } as never
+    service.updateDesktopGfsUploadState = vi.fn().mockResolvedValue(undefined)
+
+    await service.passwordLogin('user@example.com', 'password123')
+    expect(service.getCachedUserId()).toBe('user-1')
 
     await expect(service.logout()).rejects.toThrow(/keychain unavailable/)
     expect(service.tokenStore.clearSessionToken).toHaveBeenCalledWith(getActiveEnvKey(), {
       legacyEnvKeys: [getActiveLegacyRestOnlyEnvKey()],
     })
     expect(service.logoutInProgress).toBe(false)
+
+    await expect(service.getSessionState()).resolves.toEqual({ authenticated: true, me })
+    expect(service.getCachedUserId()).toBe('user-1')
+    expect(getSessionToken).not.toHaveBeenCalled()
+    expect(getMe).not.toHaveBeenCalled()
+    expect(service.gfsDispatchBlocked).toBe(false)
   })
 
   it('shares one saved-session restore across concurrent session-state requests', async () => {

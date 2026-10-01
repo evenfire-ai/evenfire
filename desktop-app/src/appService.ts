@@ -2078,8 +2078,13 @@ export class AppService {
       const envKey = getActiveEnvKey()
       const legacyEnvKeys = getActiveLegacyEnvKeys()
       await this.suspendDesktopGfsUploadsForAuthBoundary()
+      try {
+        await this.tokenStore.clearSessionToken(envKey, { legacyEnvKeys })
+      } catch (error) {
+        if (this.sessionToken && this.me) this.activateGfsAuthScope()
+        throw error
+      }
       this.clearAuthenticatedSessionState()
-      await this.tokenStore.clearSessionToken(envKey, { legacyEnvKeys })
       // Grants survive logout (they are keyed by userId), but every cached SDK
       // result must not: the next user of this machine gets nothing of this one's.
       tryGetPluginSdkRuntime()?.notifySessionChanged(false)
