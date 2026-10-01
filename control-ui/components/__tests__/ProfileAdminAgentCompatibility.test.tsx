@@ -322,13 +322,15 @@ describe('profile-admin agent compatibility access', () => {
     expect(screen.getByRole('dialog', { name: 'Add agent access' })).toBeInTheDocument()
   })
 
-  it('renders team agent loading skeleton rows as listitems', () => {
+  it('renders team agent loading skeleton rows in the shared table', () => {
     vi.mocked(api.getAdminTeamAgents).mockReturnValue(new Promise(() => {}))
 
     renderTeamDetails()
 
-    const list = screen.getByRole('list')
-    expect(within(list).getAllByRole('listitem')).toHaveLength(3)
+    const table = screen.getByRole('table')
+    expect(within(table).getByRole('columnheader', { name: 'Agent' })).toBeInTheDocument()
+    expect(within(table).getByRole('columnheader', { name: 'Agent ID' })).toBeInTheDocument()
+    expect(within(table).getAllByRole('row')).toHaveLength(4)
   })
 
   // TASK-234: the member Agents tab must show the agent's display name
