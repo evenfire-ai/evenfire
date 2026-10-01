@@ -455,8 +455,42 @@ describe('grok visual stream-gate handoff', () => {
       () => streamGate.snapshot().running === 1 && visualStreamGate.snapshot().running === 0,
       'padded small V2 kept the visual slot instead of the ordinary stream gate'
     )
+
+    // #871 / r11-M2: demotion must release the principal share too. While
+    // the demoted body is still resident, two more entries from this
+    // principal fill Grok's share of two; the third must answer
+    // visual_host_share.
+    const warn = vi.spyOn(logger, 'warn')
+    const largeContent = 'x'.repeat(maxBodyBytes)
+    const queuedFirst = postCompletion(port, 'grok-completion-request.v2', largeContent)
+    const queuedSecond = postCompletion(port, 'grok-completion-request.v2', largeContent)
+    await waitFor(
+      () => visualStreamGate.snapshot().running === 1 && visualStreamGate.snapshot().queued === 1,
+      'a leaked demotion share stopped the same principal from filling its quota'
+    )
+    const third = await postCompletion(port, 'grok-completion-request.v2', largeContent)
+    expect(third.status).toBe(503)
+    expect(await third.json()).toEqual({ error: 'provider_unavailable' })
+    expect(warn).toHaveBeenCalledWith(
+      {
+        event: 'grok_proxy_admission_refused',
+        reason: 'visual_host_share',
+        limit: VISUAL_PER_HOST_MAX_ADMITTED,
+        sub: 'default/research-host',
+        hostRefs: ['research-host'],
+      },
+      'admission refused'
+    )
+
     hang.release()
     await response
+    await queuedFirst
+    await queuedSecond
+    await waitFor(
+      () => visualStreamGate.snapshot().running === 0 && visualStreamGate.snapshot().queued === 0,
+      'the visual gate did not drain after demotion'
+    )
+    await expectNextVisualAdmitted(port, maxBodyBytes)
   })
 
   describe('visual per-host share', () => {
@@ -614,6 +648,62 @@ describe('grok visual stream-gate handoff', () => {
       await expectNextVisualAdmitted(port, maxBodyBytes)
     })
 
+
+    it('releases the principal share when the visual queue is full before grant', async () => {
+      const maxBodyBytes =
+        Buffer.byteLength(completionPayload('grok-completion-request.v1').body) + 512
+      const acquire = vi.spyOn(visualStreamGate, 'acquire')
+      const warn = vi.spyOn(logger, 'warn')
+      const held: Array<() => void> = []
+      const port = listen(
+        createProxyApps(config({ maxBodyBytes, maxVisualBodyBytes: 1024 * 1024 }))
+      )
+      const fillers: Array<Promise<Response>> = []
+      try {
+        held.push(await visualStreamGate.acquire())
+        for (let i = 0; i < VISUAL_STREAM_LIMITS.maxQueuedRequests; i += 1) {
+          fillers.push(
+            postBody(
+              port,
+              platformToken(['research-host'], `default/visual-queue-full-${i}`),
+              invalidTicketBody(maxBodyBytes)
+            )
+          )
+        }
+        await waitFor(
+          () =>
+            visualStreamGate.snapshot().running === 1 &&
+            visualStreamGate.snapshot().queued === VISUAL_STREAM_LIMITS.maxQueuedRequests,
+          'the visual queue did not fill with distinct principals'
+        )
+
+        // Three same-principal refusals back to back: every pre-grant
+        // visual_gate refusal must release that request's share, or the third
+        // would be refused visual_host_share instead.
+        const targetCount = VISUAL_PER_HOST_MAX_ADMITTED + 1
+        for (let i = 0; i < targetCount; i += 1) {
+          const res = await postBody(port, platformToken(), invalidTicketBody(maxBodyBytes))
+          expect(res.status).toBe(503)
+          expect(await res.json()).toEqual({ error: 'provider_unavailable' })
+        }
+        expect(acquire).toHaveBeenCalledTimes(
+          1 + VISUAL_STREAM_LIMITS.maxQueuedRequests + targetCount
+        )
+        const reasons = warn.mock.calls
+          .map(call => call[0] as unknown as Record<string, unknown>)
+          .filter(entry => entry?.event === 'grok_proxy_admission_refused')
+          .map(entry => entry.reason)
+        expect(reasons).toEqual(Array.from({ length: targetCount }, () => 'visual_gate'))
+      } finally {
+        for (const release of held.splice(0)) release()
+        for (const filler of fillers) await filler
+      }
+      await waitFor(
+        () => visualStreamGate.snapshot().running === 0 && visualStreamGate.snapshot().queued === 0,
+        'the visual gate did not drain after queue-full refusals'
+      )
+      await expectNextVisualAdmitted(port, maxBodyBytes)
+    })
     // Review R3-L8: the share key sorts hostRefs, so one principal cannot
     // double its share by listing the same hosts in another order.
     it('counts one principal once whatever order its hostRefs arrive in', async () => {
@@ -929,8 +1019,27 @@ describe('grok visual stream-gate handoff', () => {
         'admission refused'
       )
 
+      // #871 / r11-M3: the aborted waiter's principal share must be released
+      // before any slot frees. The holder still runs, so a fresh request from
+      // the same principal must reach the visual gate and queue.
+      const reprobeBody = JSON.stringify({
+        executionTicket: 'invalid-ticket',
+        requestHash: 'a'.repeat(64),
+        request: completionRequest('grok-completion-request.v2', 'x'.repeat(maxBodyBytes)),
+      })
+      expect(Buffer.byteLength(reprobeBody)).toBeGreaterThan(maxBodyBytes)
+      const reprobe = postBody(port, platformToken(), reprobeBody)
+      await waitFor(
+        () => visualStreamGate.snapshot().queued === 1,
+        'the aborted waiter leaked its principal share'
+      )
+      expect(acquire).toHaveBeenCalledTimes(3)
+
       hang.release()
       await holder
+      const reprobeRes = await reprobe
+      expect(reprobeRes.status).toBe(403)
+      expect(await reprobeRes.json()).toEqual({ error: 'ticket_invalid' })
       await expectGateEmpty()
       await expectNextVisualAdmitted(port, maxBodyBytes)
     })
@@ -981,12 +1090,19 @@ describe('grok visual stream-gate handoff', () => {
       await closed
       expect(waiter.destroyed).toBe(true)
 
-      await new Promise(resolve => setTimeout(resolve, 300))
+      // r11-L15: with the unread body paused there is no pre-grant server
+      // observable for this close. The snapshot records the state at the
+      // observed client close only; it is not a server-disconnect witness.
+      const waiterAcquire = acquire.mock.results[1]?.value as Promise<() => void>
       expect(visualStreamGate.snapshot()).toEqual({ running: 1, queued: 1 })
       expect(acquire).toHaveBeenCalledTimes(2)
 
       hang.release()
       await holder
+      // The positive proof is the grant itself: a premature abort or removal
+      // rejects or strands this acquire. After grant, resumed body processing
+      // releases the slot through an aborted read or a completed handler.
+      await waiterAcquire
       await expectGateEmpty()
       await expectNextVisualAdmitted(port, maxBodyBytes)
     })

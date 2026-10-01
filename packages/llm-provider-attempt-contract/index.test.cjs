@@ -2089,6 +2089,7 @@ test("a request over maxRequestElements is refused with kind:'size'", () => {
   const limit = contract.LIMITS.maxRequestElements
   const at = requestWithElements(limit)
   assert.equal(contract.parseCodexCompletionRequest(at).ok, true)
+  assert.equal(contract.hashCanonicalCodexRequest(at).ok, true)
   const over = requestWithElements(limit + 1)
   assert.ok(Buffer.byteLength(JSON.stringify(over), 'utf8') < contract.LIMITS.maxRequestBodyBytes)
   const expected = {

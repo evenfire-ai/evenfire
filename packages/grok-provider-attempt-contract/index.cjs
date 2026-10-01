@@ -430,9 +430,9 @@ function rejectUnknown(obj, allowed, label) {
 /**
  * Iterative structural pre-check, safe on arbitrarily deep or cyclic input.
  * Returns a failure when containers nest deeper than `maxDepth`, when the
- * value holds more than maxRequestElements JSON values or more than
- * maxRequestContainers objects and arrays. Shared references are counted per
- * occurrence, as JSON would serialize them.
+ * value holds more than maxRequestElements JSON values, maxRequestContainers
+ * objects and arrays, or maxRequestMembers object members. Shared references
+ * are counted per occurrence, as JSON would serialize them.
  */
 function checkStructure(value, maxDepth) {
   if (value === null || typeof value !== 'object') return null

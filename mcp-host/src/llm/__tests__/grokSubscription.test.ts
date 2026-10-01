@@ -639,12 +639,11 @@ describe('GrokSubscriptionProvider', () => {
         .mockRejectedValue(new GrokProxyError('payload_too_large', 'proxy refused the envelope')),
     })
     const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
-    // The Grok twin of T-C3c. The proxy's raw-body scan refuses a body over
-    // `BODY_STRUCTURE_LIMITS.maxMembers` with HTTP 413
-    // `body.structure.too.many.members`, which reaches mcp-host as
-    // `payload_too_large`. A small turn passes every local guard, so the
-    // refusal can only come from the proxy's member scan: the classify call
-    // sees the same `payload_too_large` code the real 413 carries.
+    // A member-bound proxy refusal reaches the Host as `payload_too_large`.
+    // The mock checks this generic code's classification after a small turn
+    // passes the local guards; it does not execute the proxy's member scanner
+    // or establish which bound produced the 413. T-C3d-grok below uses the
+    // real local contract member bound and an accepted-body witness.
     const rejected = provider.completeSingleTurn([{ role: 'user', content: 'hi' }])
     await expect(rejected).rejects.toBeInstanceOf(GrokProxyError)
     await expect(rejected).rejects.toMatchObject({

@@ -263,15 +263,18 @@ describe('codex-llm-proxy security surface', () => {
     // A V2 body pushed past the ordinary cap by its ticket and one small image
     // takes the visual gate, is refused at the schema, and frees its slot.
     const acquire = vi.spyOn(visualStreamGate, 'acquire')
-    const visual = await send('x'.repeat(8_000_000), {
-      schemaVersion: 'codex-completion-request.v2',
-      messages: [{ role: 'user', contentParts: [{ type: 'image', data: 'A'.repeat(1024 * 1024) }] }],
-    })
-    expect(visual.status).toBe(400)
-    expect(visual.body.error).toBe('invalid_request')
-    expect(acquire).toHaveBeenCalledTimes(1)
-    expect(visualStreamGate.snapshot()).toEqual({ running: 0, queued: 0 })
-    acquire.mockRestore()
+    try {
+      const visual = await send('x'.repeat(8_000_000), {
+        schemaVersion: 'codex-completion-request.v2',
+        messages: [{ role: 'user', contentParts: [{ type: 'image', data: 'A'.repeat(1024 * 1024) }] }],
+      })
+      expect(visual.status).toBe(400)
+      expect(visual.body.error).toBe('invalid_request')
+      expect(acquire).toHaveBeenCalledTimes(1)
+      expect(visualStreamGate.snapshot()).toEqual({ running: 0, queued: 0 })
+    } finally {
+      acquire.mockRestore()
+    }
   }, 30_000)
 
   it('answers a transport payload_too_large with HTTP 413 before any SSE byte', async () => {
@@ -2452,6 +2455,58 @@ describe('codex-llm-proxy ticket-aware stream-gate wait (#739 D1-bis)', () => {
     } finally {
       for (const release of held.splice(0)) release()
       vi.useRealTimers()
+      warn.mockRestore()
+    }
+  }, 30_000)
+
+  // r11-L13: Codex had the negative aborted-waiter witness, but no positive
+  // overflow witness naming gate saturation. Grok already pins this twin; the
+  // queue is filled directly so the refusal under test is the global visual
+  // gate, not the per-principal share.
+  it('visual admission overflow answers 503 provider_unavailable and logs visual_gate', async () => {
+    const warn = vi.spyOn(logger, 'warn')
+    const held: Array<() => void> = []
+    const waiting: Array<Promise<() => void>> = []
+    try {
+      for (let i = 0; i < VISUAL_STREAM_LIMITS.maxConcurrentStreams; i += 1) {
+        held.push(await visualStreamGate.acquire())
+      }
+      for (let i = 0; i < VISUAL_STREAM_LIMITS.maxQueuedRequests; i += 1) {
+        const acquired = visualStreamGate.acquire()
+        acquired.catch(() => {})
+        waiting.push(acquired)
+      }
+      const control = countingClient('granted')
+      const apps = createProxyApps(config({ maxBodyBytes: 65_536 }), {
+        controlApiClient: control.client,
+        fetchFn: upstream,
+        lookup,
+      })
+      const res = await request(apps.runtimeApp)
+        .post(COMPLETIONS)
+        .set('Authorization', `Bearer ${platformToken({ sub: 'default/visual-gate-full' })}`)
+        .send(visualEnvelope('att-visual-gate-full', 60_000))
+      expect(res.status).toBe(503)
+      expect(res.body).toEqual({ error: 'provider_unavailable' })
+      expect(warn).toHaveBeenCalledWith(
+        expect.objectContaining({
+          event: 'codex_proxy_admission_refused',
+          reason: 'visual_gate',
+          code: 'provider_unavailable',
+        }),
+        'admission refused'
+      )
+      expect(control.redeems()).toBe(0)
+      expect(visualStreamGate.snapshot()).toEqual({
+        running: VISUAL_STREAM_LIMITS.maxConcurrentStreams,
+        queued: VISUAL_STREAM_LIMITS.maxQueuedRequests,
+      })
+    } finally {
+      for (const release of held.splice(0)) release()
+      for (const acquired of waiting) {
+        const release = await acquired.catch(() => undefined)
+        release?.()
+      }
       warn.mockRestore()
     }
   }, 30_000)

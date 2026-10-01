@@ -50,5 +50,21 @@
   {
     "suite": "server.security.test.ts",
     "fullName": "grok-llm-proxy attempt telemetry (r4-l1b) logs a catalog DNS lookup failure by cause code on both admin routes"
+  },
+  {
+    "suite": "streamGate.handoff.test.ts",
+    "fullName": "grok visual stream-gate handoff releases the visual slot for a whitespace-padded small V2"
+  },
+  {
+    "suite": "streamGate.handoff.test.ts",
+    "fullName": "grok visual stream-gate handoff visual per-host share releases the principal share when the visual queue is full before grant"
+  },
+  {
+    "suite": "streamGate.handoff.test.ts",
+    "fullName": "grok visual stream-gate handoff visual slot lifetime frees the queue place of a visual request aborted while it waited"
+  },
+  {
+    "suite": "streamGate.handoff.test.ts",
+    "fullName": "grok visual stream-gate handoff visual slot lifetime holds the queue place of a disconnected large-body waiter until its grant"
   }
 ]
