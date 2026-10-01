@@ -44,13 +44,13 @@ function checkServices(workflow, localServices) {
     }
     if (services.length < 1) throw new Error('Expected one literal CI service matrix')
     const metadata = lines.slice(cursor)
-    if (metadata.some((line) => /^ {8}exclude:/.test(line))) {
-      throw new Error('Unsupported CI matrix metadata: exclude removes required service coverage')
+    const siblingHeaders = metadata.filter((line) => /^ {8}\S/.test(line))
+    const unsupportedSibling = siblingHeaders.find((line) => line !== '        include:')
+    if (unsupportedSibling) {
+      throw new Error(`Unsupported CI matrix metadata: ${unsupportedSibling.trim()}`)
     }
-    const includeKeys = metadata.filter((line) => /^ {8}include:/.test(line))
-    if (includeKeys.length > 1 || (includeKeys.length === 1 && includeKeys[0] !== '        include:')) {
-      throw new Error('Unsupported CI matrix metadata')
-    }
+    const includeKeys = siblingHeaders.filter((line) => line === '        include:')
+    if (includeKeys.length > 1) throw new Error('Unsupported CI matrix metadata: duplicate include')
     if (includeKeys.length === 1) {
       const includeIndex = metadata.indexOf(includeKeys[0])
       const includeEntries = []

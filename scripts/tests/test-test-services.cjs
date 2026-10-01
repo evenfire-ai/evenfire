@@ -45,6 +45,22 @@ const workflowWithExclude = workflow.replace(
   '\n    steps:',
   '\n        exclude:\n          - service: packages/two\n    steps:'
 )
+const workflowWithQuotedExclude = workflow.replace(
+  '\n    steps:',
+  '\n        "exclude":\n          - service: packages/two\n    steps:'
+)
+const workflowWithSpacedExclude = workflow.replace(
+  '\n    steps:',
+  '\n        exclude :\n          - service: packages/two\n    steps:'
+)
+const workflowWithQuotedInclude = workflow.replace(
+  '\n    steps:',
+  '\n        "include":\n          - service: fixture-only\n    steps:'
+)
+const workflowWithUnknownSibling = workflow.replace(
+  '\n    steps:',
+  '\n        unknown:\n          - service: fixture-only\n    steps:'
+)
 
 test('matrix parity is independent of order', () => {
   assert.equal(checkServices(workflow, ['packages/two', 'one']), 2)
@@ -90,6 +106,16 @@ test('include services must be static members of the service axis', () => {
 })
 test('matrix exclude that removes required coverage fails closed', () => {
   assert.throws(() => checkServices(workflowWithExclude, ['one', 'packages/two']), /Unsupported CI matrix metadata/)
+})
+test('unrecognized matrix sibling variants fail closed instead of producing partial parity', () => {
+  for (const unsupported of [
+    workflowWithQuotedExclude,
+    workflowWithSpacedExclude,
+    workflowWithQuotedInclude,
+    workflowWithUnknownSibling,
+  ]) {
+    assert.throws(() => checkServices(unsupported, ['one', 'packages/two']), /Unsupported CI matrix metadata/)
+  }
 })
 test('duplicate service axes in one matrix fail closed', () => {
   assert.throws(
