@@ -4,6 +4,8 @@ import { createHash, createPublicKey } from 'node:crypto'
 import {
   chmodSync,
   closeSync,
+  copyFileSync,
+  cpSync,
   fstatSync,
   mkdirSync,
   mkdtempSync,
@@ -29,6 +31,12 @@ const require = createRequire(import.meta.url)
 let compiledModulePath = ''
 const tempDirs: string[] = []
 
+function publicIdentityFingerprint(material: string): string {
+  return createHash('sha256')
+    .update(createPublicKey(material).export({ type: 'spki', format: 'der' }))
+    .digest('hex')
+}
+
 function tempStore(): string {
   const dir = mkdtempSync(join(tmpdir(), 'evenfire-dev-keys-'))
   tempDirs.push(dir)
@@ -46,21 +54,27 @@ beforeAll(() => {
       join(process.cwd(), 'src/devSigningKeys.ts'),
       join(process.cwd(), 'src/bannedDevSigningKeys.ts'),
       '--outDir',
-      compileDir,
+      join(compileDir, 'dist'),
+      '--rootDir',
+      join(process.cwd(), 'src'),
       '--module',
-      'commonjs',
+      'NodeNext',
       '--target',
       'es2022',
       '--moduleResolution',
-      'node',
+      'NodeNext',
       '--skipLibCheck',
+      '--esModuleInterop',
     ],
     { cwd: process.cwd(), encoding: 'utf8' }
   )
   if (result.status !== 0) {
     throw new Error(result.stderr || result.stdout || 'provider compilation failed')
   }
-  compiledModulePath = join(compileDir, 'devSigningKeys.js')
+  // This closure build exercises the actual wrapper in another process; full
+  // service/production-only layout validation is a separate build gate.
+  symlinkSync(join(process.cwd(), 'node_modules'), join(compileDir, 'node_modules'), 'dir')
+  compiledModulePath = join(compileDir, 'dist/devSigningKeys.js')
 })
 
 afterAll(() => {
@@ -79,7 +93,67 @@ function runProviderScript(
   }
   delete env.EVENFIRE_DEV_KEY_STORE
   if (override !== undefined) env.EVENFIRE_DEV_KEY_STORE = override
-  return spawnSync(process.execPath, ['-e', script], { cwd: storeDir, env, encoding: 'utf8' })
+  return spawnSync(process.execPath, ['-e', script], {
+    cwd: storeDir,
+    env,
+    encoding: 'utf8',
+    timeout: 15_000,
+  })
+}
+
+function runWrapperRuntime(runtime: 'src' | 'dist', override: string | undefined) {
+  const layout = realpathSync(tempStore())
+  const service = join(layout, 'control-api')
+  const moduleDir = join(service, runtime)
+  mkdirSync(moduleDir, { recursive: true })
+  symlinkSync(join(process.cwd(), 'node_modules'), join(service, 'node_modules'), 'dir')
+  if (runtime === 'src') {
+    for (const relative of [
+      'devSigningKeys.ts',
+      'observability/logger.ts',
+      'utils/log/redact.ts',
+    ]) {
+      const destination = join(moduleDir, relative)
+      mkdirSync(dirname(destination), { recursive: true })
+      copyFileSync(join(process.cwd(), 'src', relative), destination)
+    }
+  } else {
+    cpSync(dirname(compiledModulePath), moduleDir, { recursive: true })
+  }
+  const modulePath = join(moduleDir, `devSigningKeys.${runtime === 'src' ? 'ts' : 'js'}`)
+  // Control API declares ts-node (not tsx). Its documented resolver maps the
+  // production .js import specifiers to these actual copied TypeScript files.
+  const sourceLoader =
+    runtime === 'src'
+      ? `require(${JSON.stringify(require.resolve('ts-node'))}).register({
+        project: ${JSON.stringify(join(process.cwd(), 'tsconfig.json'))}, experimentalResolver: true,
+        compilerOptions: { rootDir: ${JSON.stringify(service)} }
+      });`
+      : ''
+  const runner = `
+    ${sourceLoader}
+    const provider = require(${JSON.stringify(modulePath)});
+    const { createHash, createPublicKey } = require('node:crypto');
+    const material = provider.loadOrGenerateDevJwtPrivateKey('rpc');
+    process.stdout.write(JSON.stringify({ storeDir: provider.defaultDevSigningKeyStoreDir(),
+      fingerprint: createHash('sha256').update(createPublicKey(material).export({ type: 'spki', format: 'der' })).digest('hex') }));
+  `
+  const env: NodeJS.ProcessEnv = { ...process.env, LOG_LEVEL: 'silent' }
+  delete env.EVENFIRE_DEV_KEY_STORE
+  if (override !== undefined) env.EVENFIRE_DEV_KEY_STORE = override
+  const args = ['-e', runner]
+  const execute = () => {
+    const result = spawnSync(process.execPath, args, {
+      cwd: layout,
+      env,
+      encoding: 'utf8',
+      timeout: 15_000,
+    })
+    if (result.status !== 0)
+      throw new Error(`Wrapper runtime failed with process exit ${result.status}`)
+    return JSON.parse(result.stdout) as { storeDir: string; fingerprint: string }
+  }
+  return { first: execute(), second: execute(), serviceRoot: service }
 }
 
 function runChild(slot: 'rpc' | 'session' | 'admin', storeDir: string): Promise<string> {
@@ -89,12 +163,12 @@ function runChild(slot: 'rpc' | 'session' | 'admin', storeDir: string): Promise<
       [
         '-e',
         `const provider = require(process.env.DEVKEY_MODULE)
-       const { createHash } = require('node:crypto')
+       const { createHash, createPublicKey } = require('node:crypto')
        const resolved = provider.loadOrGenerateDevJwtPrivateKey(
          process.env.DEVKEY_SLOT,
          process.env.DEVKEY_STORE
        )
-       console.log(JSON.stringify({ fingerprint: createHash('sha256').update(resolved).digest('hex') }))`,
+       console.log(JSON.stringify({ fingerprint: createHash('sha256').update(createPublicKey(resolved).export({ type: 'spki', format: 'der' })).digest('hex') }))`,
       ],
       {
         env: {
@@ -103,6 +177,7 @@ function runChild(slot: 'rpc' | 'session' | 'admin', storeDir: string): Promise<
           DEVKEY_SLOT: slot,
           DEVKEY_STORE: storeDir,
         },
+        timeout: 15_000,
       }
     )
     let stdout = ''
@@ -118,20 +193,37 @@ function runChild(slot: 'rpc' | 'session' | 'admin', storeDir: string): Promise<
 }
 
 describe('devSigningKeys persistence contract', () => {
+  for (const runtime of ['src', 'dist'] as const) {
+    for (const override of [undefined, '', ' \t ']) {
+      it(`${runtime} creates and preserves its default identity with ${JSON.stringify(override)} override from another cwd`, () => {
+        const result = runWrapperRuntime(runtime, override)
+        expect(result.first.storeDir).toBe(join(result.serviceRoot, '.dev-keys'))
+        expect(result.second.fingerprint).toBe(result.first.fingerprint)
+      })
+    }
+    it(`${runtime} creates and preserves identity in an absolute store from another cwd`, () => {
+      const store = realpathSync(tempStore())
+      const result = runWrapperRuntime(runtime, store)
+      expect(result.first.storeDir).toBe(store)
+      expect(result.second.fingerprint).toBe(result.first.fingerprint)
+    })
+  }
+
   it('generates a 0600 file in a 0700 store and reuses it across calls', () => {
     const store = tempStore()
     const first = loadOrGenerateDevJwtPrivateKey('rpc', store)
     const second = loadOrGenerateDevJwtPrivateKey('rpc', store)
-    expect(second).toBe(first)
+    expect(second === first).toBe(true)
     expect(statSync(join(store, 'rpc.pem')).mode & 0o777).toBe(0o600)
     expect(statSync(store).mode & 0o777).toBe(0o700)
   })
 
   it('keeps slots independent', () => {
     const store = tempStore()
-    expect(loadOrGenerateDevJwtPrivateKey('rpc', store)).not.toBe(
-      loadOrGenerateDevJwtPrivateKey('session', store)
-    )
+    expect(
+      loadOrGenerateDevJwtPrivateKey('rpc', store) ===
+        loadOrGenerateDevJwtPrivateKey('session', store)
+    ).toBe(false)
   })
 
   it('fails loudly on corruption instead of regenerating', () => {
@@ -139,7 +231,9 @@ describe('devSigningKeys persistence contract', () => {
     const file = join(store, 'rpc.pem')
     loadOrGenerateDevJwtPrivateKey('rpc', store)
     writeFileSync(file, 'corrupted store entry')
-    expect(() => loadOrGenerateDevJwtPrivateKey('rpc', store)).toThrow(/corrupt or not an RSA/)
+    expect(() => loadOrGenerateDevJwtPrivateKey('rpc', store)).toThrow(
+      expect.objectContaining({ code: 'ERR_JWT_KEY_INVALID' })
+    )
     expect(readFileSync(file, 'utf8')).toBe('corrupted store entry')
   })
 
@@ -199,15 +293,14 @@ describe('devSigningKeys persistence contract', () => {
     const result = runProviderScript(
       `const provider = require(process.env.DEVKEY_MODULE)
        let error
-       try { provider.loadOrGenerateDevJwtPrivateKey('rpc') } catch (err) { error = err.message }
-       console.log(JSON.stringify({ store: provider.defaultDevSigningKeyStoreDir(), error }))`,
+       try { provider.loadOrGenerateDevJwtPrivateKey('rpc') } catch (err) { error = { code: err.code, reason: err.reason } }
+       console.log(JSON.stringify({ error }))`,
       store,
       'relative-dev-keys'
     )
     expect(result.status, result.stderr).toBe(0)
     expect(JSON.parse(result.stdout)).toMatchObject({
-      store: 'relative-dev-keys',
-      error: expect.stringMatching(/EVENFIRE_DEV_KEY_STORE.*absolute/),
+      error: { code: 'ERR_JWT_DEV_STORE', reason: 'relative_store_path' },
     })
     expect(readdirSync(store)).toEqual([])
   })
@@ -216,13 +309,17 @@ describe('devSigningKeys persistence contract', () => {
     const { vi } = await import('vitest')
     vi.resetModules()
     const provider = await import('../src/devSigningKeys.js')
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const { rootLogger } = await import('../src/observability/logger.js')
+    const warn = vi.spyOn(rootLogger, 'warn').mockImplementation(() => {})
     try {
       const store = tempStore()
       provider.loadOrGenerateDevJwtPrivateKey('rpc', store)
       provider.loadOrGenerateDevJwtPrivateKey('session', store)
       expect(warn).toHaveBeenCalledTimes(1)
-      expect(String(warn.mock.calls.flat())).toContain(store)
+      expect(warn.mock.calls[0]?.[0]).toMatchObject({
+        event: 'dev_jwt_signing_keys_active',
+        storeDir: store,
+      })
       expect(String(warn.mock.calls.flat())).not.toContain('BEGIN')
     } finally {
       warn.mockRestore()
@@ -245,7 +342,7 @@ describe('devSigningKeys persistence contract', () => {
     loadOrGenerateDevJwtPrivateKey('session', realStore)
     symlinkSync(realStore, linkStore)
     expect(() => loadOrGenerateDevJwtPrivateKey('session', linkStore)).toThrow(
-      /Dev JWT key store path is not a directory/
+      expect.objectContaining({ code: 'ERR_JWT_DEV_STORE', reason: 'symbolic_link' })
     )
   })
 
@@ -303,9 +400,11 @@ describe('devSigningKeys persistence contract', () => {
     try {
       loadOrGenerateDevJwtPrivateKey('session', store)
     } catch (err) {
-      expect((err as Error).message).toContain(privatePath)
-      expect((err as Error).message).toContain(publicPath)
-      expect((err as Error).message).toContain('invalidating local dev tokens')
+      expect(err).toMatchObject({
+        code: 'ERR_JWT_DEV_STORE',
+        reason: 'orphan_public',
+        source: publicPath,
+      })
     }
   })
 
@@ -316,7 +415,7 @@ describe('devSigningKeys persistence contract', () => {
     const result = runProviderScript(
       `const fs = require('node:fs')
        const { join } = require('node:path')
-       const { createHash } = require('node:crypto')
+       const { createHash, createPublicKey } = require('node:crypto')
        const source = ${JSON.stringify(source)}
        const privatePath = join(process.env.DEVKEY_STORE, 'admin.pem')
        const publicPath = join(process.env.DEVKEY_STORE, 'admin.public.pem')
@@ -337,14 +436,12 @@ describe('devSigningKeys persistence contract', () => {
        }
        const provider = require(process.env.DEVKEY_MODULE)
        const resolved = provider.loadOrGenerateDevJwtPrivateKey('admin', process.env.DEVKEY_STORE)
-       console.log(JSON.stringify({ fingerprint: createHash('sha256').update(resolved).digest('hex') }))`,
+       console.log(JSON.stringify({ fingerprint: createHash('sha256').update(createPublicKey(resolved).export({ type: 'spki', format: 'der' })).digest('hex') }))`,
       store
     )
     expect(result.status, result.stderr).toBe(0)
     expect(JSON.parse(result.stdout).fingerprint).toBe(
-      createHash('sha256')
-        .update(readFileSync(join(source, 'admin.pem'), 'utf8').trim())
-        .digest('hex')
+      publicIdentityFingerprint(readFileSync(join(source, 'admin.pem'), 'utf8'))
     )
   })
 

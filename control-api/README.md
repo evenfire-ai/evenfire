@@ -205,6 +205,38 @@ Outside dev mode, `CONTROL_API_RPC_JWT_PRIVATE_KEY`,
 are always required. Keys whose public halves were ever committed to this
 repository are rejected in every slot, including the RPC verifier public key.
 
+All three services use `@clerum/jwt-key-policy` to select one complete PEM
+object and canonicalize its identity before signing or verification. Signing
+inputs accept unencrypted RSA PKCS#8/PKCS#1 private keys. Verifier environment
+variables accept RSA SPKI/PKCS#1 public keys and X509 public-key carriers;
+private PEMs remain accepted there for legacy compatibility, but configuring
+only the public half is recommended. X509 is a key carrier here: CA trust,
+hostname and certificate expiry are not validated. A public store file must
+never contain private material. Bundles, encrypted private keys, non-RSA keys
+and historically committed identities are rejected.
+
+RSA keys must have at least 2048 bits for every RS256 signing and verification
+role, including registry vouchers and proof-of-possession. This deliberately
+rejects weak verifier keys previously accepted; see
+[RFC 7518 section 3.3](https://www.rfc-editor.org/rfc/rfc7518.html#section-3.3).
+Material and descriptor reads are limited to 64 KiB. Invalid explicit input
+fails instead of generating a replacement or changing its source.
+
+The local store requires POSIX no-follow, nonblocking and exclusive-file
+guarantees. Keep its ancestors trusted and run cooperating services with the
+same effective UID; users or containers with another UID should configure
+their keys explicitly. The store does not defend against hostile ancestors or
+processes with the same UID. On a platform without these guarantees, configure
+all signing and verifying keys through the environment; explicit keys do not
+access the store. Stored-key corruption, or a rejected persisted registry key,
+requires explicit operator repair or re-enrollment. Startup never rotates,
+rewrites or deletes those identities automatically.
+
+Build the service image from the repository root with
+`docker build -f control-api/Dockerfile .`. Its context and runtime contain
+only the shared policy's production files and declarations, not its tests or
+local key data.
+
 - `CONTROL_API_RPC_JWT_PRIVATE_KEY`: RSA private key used to sign RPC access JWTs for `rpc-proxy` (RS256).
 - `CONTROL_API_JWT_ISSUER`: expected `iss` for session token signing and verification.
 - `CONTROL_API_JWT_AUDIENCE`: expected `aud` for session token signing and verification.

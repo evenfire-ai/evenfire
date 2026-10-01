@@ -48,6 +48,14 @@ describe('bannedDevSigningKeys', () => {
     expect(DEFAULT_BANNED_FINGERPRINTS.size).toBe(3)
   })
 
+  it('exposes an immutable compatibility view rather than a mutable default Set', () => {
+    expect(Object.isFrozen(DEFAULT_BANNED_FINGERPRINTS)).toBe(true)
+    expect('add' in DEFAULT_BANNED_FINGERPRINTS).toBe(false)
+    expect('delete' in DEFAULT_BANNED_FINGERPRINTS).toBe(false)
+    expect('clear' in DEFAULT_BANNED_FINGERPRINTS).toBe(false)
+    expect([...DEFAULT_BANNED_FINGERPRINTS]).toHaveLength(3)
+  })
+
   it('validates fresh RSA-2048 signing material', () => {
     expect(() => validateSigningPem(makeFresh().signing, 'TEST_ENV')).not.toThrow()
   })
@@ -60,9 +68,11 @@ describe('bannedDevSigningKeys', () => {
       publicKeyEncoding: { type: 'spki', format: 'pem' },
     })
     expect(() => validateSigningPem(ec.publicKey, 'TEST_ENV')).toThrow(
-      /must contain exactly one PEM private key/
+      expect.objectContaining({ code: 'ERR_JWT_KEY_INVALID', reason: 'wrong_key_role' })
     )
-    expect(() => validateSigningPem(ec.privateKey, 'TEST_ENV')).toThrow(/must be an RSA key/)
+    expect(() => validateSigningPem(ec.privateKey, 'TEST_ENV')).toThrow(
+      expect.objectContaining({ code: 'ERR_JWT_KEY_INVALID', reason: 'non_rsa_key' })
+    )
   })
 
   it('rejects a banned fingerprint in every signing slot', () => {
@@ -140,7 +150,7 @@ describe('bannedDevSigningKeys', () => {
       `${target.signing}\n${decoy.public}`,
     ]) {
       expect(() => validateSigningPem(combined, 'TEST_ENV')).toThrow(
-        /must contain exactly one PEM private key/
+        expect.objectContaining({ code: 'ERR_JWT_KEY_INVALID', reason: 'multiple_pem_objects' })
       )
       expect(() =>
         assertGuard(
@@ -153,7 +163,9 @@ describe('bannedDevSigningKeys', () => {
           },
           fingerprints
         )
-      ).toThrow(/historically committed dev JWT key/)
+      ).toThrow(
+        expect.objectContaining({ code: 'ERR_JWT_KEY_INVALID', reason: 'multiple_pem_objects' })
+      )
     }
   })
 

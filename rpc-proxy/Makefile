@@ -14,10 +14,10 @@ dev: install
 	CLERUM_DEV_MODE=true npm run dev
 
 docker-build:
-	docker build -t $(REGISTRY)/$(IMAGE_NAME):$(TAG) .
+	docker build -f Dockerfile -t $(REGISTRY)/$(IMAGE_NAME):$(TAG) ..
 
 docker-push: docker-build
 	docker push $(REGISTRY)/$(IMAGE_NAME):$(TAG)
 
 docker-push-cross:
-	docker buildx build --platform linux/amd64 -t $(REGISTRY)/$(IMAGE_NAME):$(TAG) --push .
+	docker buildx build --platform linux/amd64 -f Dockerfile -t $(REGISTRY)/$(IMAGE_NAME):$(TAG) --push ..

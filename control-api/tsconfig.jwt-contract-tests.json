@@ -1,0 +1,26 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "..",
+    "noEmit": true,
+    "module": "ESNext",
+    "moduleResolution": "Bundler"
+  },
+  "include": [
+    "src/config.ts",
+    "src/bannedDevSigningKeys.ts",
+    "src/devSigningKeys.ts",
+    "src/middleware/correlationId.ts",
+    "test/config.jwtHardening.test.ts",
+    "test/config.prod.test.ts",
+    "test/config.registryConnectionMode.test.ts",
+    "test/bannedDevSigningKeys.test.ts",
+    "test/devSigningKeys.test.ts",
+    "test/services.registryConnectionDb.test.ts",
+    "test/services.registryVoucher.test.ts",
+    "test/services.registryPopSigner.keyPolicy.test.ts",
+    "test/routes.registryConnect.keyPolicy.test.ts",
+    "../scripts/testing/devJwtVerifierContract.ts"
+  ],
+  "exclude": []
+}

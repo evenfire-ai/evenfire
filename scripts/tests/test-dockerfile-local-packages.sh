@@ -180,6 +180,31 @@ assert_dockerignore_mutations_rejected() {
   rm -rf -- "$fixture_dir"
 }
 
+assert_jwt_policy_runtime_context() {
+  local service="$1" ignore="$REPO_ROOT/$1/Dockerfile.dockerignore"
+  local actual expected
+  expected="$(printf '%s\n' \
+    '!packages/jwt-key-policy/' \
+    '!packages/jwt-key-policy/package.json' \
+    '!packages/jwt-key-policy/index.cjs' \
+    '!packages/jwt-key-policy/index.d.ts' \
+    '!packages/jwt-key-policy/dev-store.cjs' \
+    '!packages/jwt-key-policy/dev-store.d.ts')"
+  actual="$(awk 'index($0, "!packages/jwt-key-policy/") == 1 { print }' "$ignore")"
+  if [[ "$actual" != "$expected" ]]; then
+    fail "$service context must allow only the policy runtime files and types"
+  fi
+  assert_copy_before_first_ci "$service/Dockerfile" jwt-key-policy
+  if ! grep -Fq '/app/packages' "$REPO_ROOT/$service/Dockerfile" || \
+     ! grep -Fq "WORKDIR /app/$service" "$REPO_ROOT/$service/Dockerfile"; then
+    fail "$service must preserve the runtime package/service file-link layout"
+  fi
+}
+
+for service in control-api rpc-proxy external-rest-api; do
+  assert_jwt_policy_runtime_context "$service"
+done
+
 # Direct consumers.  The first four are Node services; profile-ui and
 # control-ui are Next.js consumers and therefore also require materialization.
 assert_copy_before_every_ci control-api/Dockerfile \

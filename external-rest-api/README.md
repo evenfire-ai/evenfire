@@ -123,6 +123,32 @@ keys, or switching to an environment-supplied key, reconfigure the verifier as
 needed and restart it. Running verifiers do not silently refresh their key
 identity.
 
+JWT material is checked by the shared `@clerum/jwt-key-policy`. Configure an
+RSA public key as SPKI or PKCS#1 PEM. An X509 certificate may carry the public
+identity, without CA, hostname or expiry validation. Private PEM environment
+values remain accepted for legacy compatibility and are converted to public
+SPKI; prefer supplying only the public half. Store public files reject private
+material. Exactly one complete PEM object is required; bundles, encrypted
+private material, non-RSA keys and historical committed identities fail.
+
+Every RS256 key must be RSA-2048 or stronger, including verifiers. This
+deliberately rejects previously accepted weak verifier keys under
+[RFC 7518 section 3.3](https://www.rfc-editor.org/rfc/rfc7518.html#section-3.3).
+The material/read limit is 64 KiB. Invalid explicit input never selects a
+different source or regenerates an identity.
+
+The dev store requires POSIX no-follow/nonblocking/exclusive-file guarantees,
+trusted ancestor directories and cooperating services with the same effective
+UID. It does not defend against hostile ancestors or same-UID processes.
+Use explicit signing/verifying environment keys for different users or
+unsupported platforms; this verifier then performs no store access. Corrupt
+or rejected keys require operator repair; they are not rotated automatically.
+
+`make docker-build` uses the repository root context. The equivalent command
+from that root is `docker build -f external-rest-api/Dockerfile .`. The image
+preserves the service/package layout and excludes package tests and local key
+data.
+
 ## Kubernetes Deploy
 
 ```bash

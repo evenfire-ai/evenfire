@@ -43,25 +43,23 @@ describe('config: production voucher key guard', () => {
 
   it('checks the voucher signing slot against the banned fingerprints in production', async () => {
     const voucherKey = generateNonDevPem()
-    const guard = await import('../src/bannedDevSigningKeys.js')
+    const guard = await import('@clerum/jwt-key-policy')
     const voucherFingerprint = guard.publicKeyPemFingerprint(
       createPublicKey(voucherKey).export({ type: 'spki', format: 'pem' }).toString()
     )
-    // Inject a generated identity into the real guard's ban set; historical
-    // private material must never become a tracked test fixture.
-    const fingerprints = new Set([
-      ...guard.BANNED_DEV_JWT_PUBLIC_KEY_FINGERPRINTS,
-      voucherFingerprint,
-    ])
-    const assertNoBannedJwtKeys = guard.assertNoBannedJwtKeys
-    vi.spyOn(guard, 'assertNoBannedJwtKeys').mockImplementation(input =>
-      assertNoBannedJwtKeys(input, fingerprints)
+    // Scope the additional denied identity to this real parsing decision.
+    // The package's immutable historical policy remains active.
+    const parseSigningMaterial = guard.parseSigningMaterial
+    vi.spyOn(guard, 'parseSigningMaterial').mockImplementation((raw, source, options) =>
+      parseSigningMaterial(raw, source, { ...options, fingerprints: [voucherFingerprint] })
     )
     process.env.CONTROL_API_REGISTRY_VOUCHER_PRIVATE_KEY = voucherKey
 
-    await expect(() => import('../src/config.js')).rejects.toThrow(
-      /CONTROL_API_REGISTRY_VOUCHER_PRIVATE_KEY resolves to a historically committed dev JWT key/
-    )
+    await expect(() => import('../src/config.js')).rejects.toMatchObject({
+      code: 'ERR_JWT_KEY_BANNED',
+      reason: 'banned_identity',
+      source: 'CONTROL_API_REGISTRY_VOUCHER_PRIVATE_KEY',
+    })
   })
 
   it('rejects default dev internal service tokens in production', async () => {

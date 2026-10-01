@@ -1,8 +1,13 @@
 import { createPublicKey } from 'node:crypto'
 import { DEFAULT_ALLOWED_PLUGIN_IMAGE_PREFIXES } from '@clerum/image-policy'
-import { assertNoBannedJwtKeys, validateRsaPrivateKeyPem } from './bannedDevSigningKeys.js'
-import { type DevJwtSlot, loadOrGenerateDevJwtPrivateKey } from './devSigningKeys.js'
+import {
+  type SigningMaterial,
+  parseSigningMaterial,
+  parseVerifierMaterial,
+} from '@clerum/jwt-key-policy'
+import { type DevJwtSlot, loadOrCreateDevJwtSigningMaterial } from './devSigningKeys.js'
 import { REACTIVE_REFRESH_BUFFER_MS } from './oauth/tokenHelper.js'
+import { rootLogger } from './observability/logger.js'
 
 type Config = {
   port: number
@@ -53,8 +58,8 @@ type Config = {
   adminJwtTtlSeconds: number
   /**
    * Optional RS256 private key used exclusively to sign registry identity
-   * vouchers (POST /api/v1/registry/identity-voucher). When unset, falls back
-   * to adminJwtPrivateKey.
+   * vouchers (POST /api/v1/registry/identity-voucher). Managed mode requires
+   * this dedicated material; self-hosted mode resolves its enrolled identity.
    *
    * Rationale: a captured admin session JWT (aud=control-ui, 1h TTL) signed by
    * the SAME key as a voucher (aud=registry-api, 60s TTL) becomes a usable
@@ -502,10 +507,6 @@ const EXTERNAL_GFS_OPERATION_RL_PER_MIN_CEILING = 180
 // 100 requests per second from one source on one public admin route.
 const ADMIN_PUBLIC_TOKEN_IP_RL_PER_MIN_CEILING = 6_000
 
-function normalizePem(value: string): string {
-  return value.replace(/\\n/g, '\n').trim()
-}
-
 function parseRegistryConnectionMode(): 'managed' | 'self-hosted' {
   const raw = process.env.REGISTRY_CONNECTION_MODE
   if (raw === undefined || raw === '') return 'managed' // default; requiredness enforced in the guard below
@@ -540,12 +541,13 @@ const externalRateLimitConfig = (() => {
     operation.value <= session.value && session.value < clientIp.value
 
   if (!followsRecommendedTopology) {
-    console.warn(
-      '[ControlAPI] External rate-limit configuration crosses the recommended operation <= session < clientIp topology; preserving exact configured values',
+    rootLogger.warn(
       {
+        event: 'external_rate_limit_topology_advisory',
         resolved: { operation, session, clientIp },
         recommendedTopology: 'operation <= session < clientIp',
-      }
+      },
+      'External rate limits cross the recommended topology; preserving configured values'
     )
   }
 
@@ -577,24 +579,52 @@ const JWT_SIGNING_KEY_ENV_NAMES: Record<DevJwtSlot, string> = {
   admin: 'CONTROL_API_ADMIN_JWT_PRIVATE_KEY',
 }
 
-function resolveControlApiJwtPrivateKey(slot: DevJwtSlot): string {
-  const envName = JWT_SIGNING_KEY_ENV_NAMES[slot]
-  const fromEnv = process.env[envName]
-  if (fromEnv) return validateRsaPrivateKeyPem(normalizePem(fromEnv), envName)
-  if (CLERUM_DEV_MODE_ENABLED) return loadOrGenerateDevJwtPrivateKey(slot)
-  return required(envName)
-}
-
 function publicKeyFromPrivateKey(privateKey: string): string {
   return createPublicKey(privateKey).export({ type: 'spki', format: 'pem' }).toString()
 }
 
 const DEV_ADMIN_PASSWORD_HASH = '$2b$12$9QdfGGp5KYg8osGa1n0.DuwQiB1RopCWIDJhmsuK4ygjTmIT8pvgy'
 
-const RPC_JWT_PRIVATE_KEY = resolveControlApiJwtPrivateKey('rpc')
-const RPC_JWT_PUBLIC_KEY = normalizePem(
-  process.env.CONTROL_API_RPC_JWT_PUBLIC_KEY || publicKeyFromPrivateKey(RPC_JWT_PRIVATE_KEY)
-)
+// Validate every explicit input before dev-store access. A malformed configured
+// slot must not cause another slot to generate a new local identity.
+const explicitJwtSigningMaterial: Partial<Record<DevJwtSlot, SigningMaterial>> = {}
+for (const slot of ['rpc', 'session', 'admin'] as const) {
+  const envName = JWT_SIGNING_KEY_ENV_NAMES[slot]
+  const raw = process.env[envName]
+  if (raw) explicitJwtSigningMaterial[slot] = parseSigningMaterial(raw, envName)
+}
+const voucherRaw = process.env.CONTROL_API_REGISTRY_VOUCHER_PRIVATE_KEY
+const voucherMaterial = voucherRaw
+  ? parseSigningMaterial(voucherRaw, 'CONTROL_API_REGISTRY_VOUCHER_PRIVATE_KEY')
+  : undefined
+const rpcVerifierRaw = process.env.CONTROL_API_RPC_JWT_PUBLIC_KEY
+const explicitRpcVerifier = rpcVerifierRaw
+  ? parseVerifierMaterial(
+      rpcVerifierRaw,
+      'effective RPC JWT verifier public key (CONTROL_API_RPC_JWT_PUBLIC_KEY)'
+    )
+  : undefined
+
+function assertRpcIdentity(signing: SigningMaterial): void {
+  if (explicitRpcVerifier && explicitRpcVerifier.fingerprint !== signing.fingerprint) {
+    throw new Error(
+      'CONTROL_API_RPC_JWT_PUBLIC_KEY must correspond to CONTROL_API_RPC_JWT_PRIVATE_KEY'
+    )
+  }
+}
+if (explicitJwtSigningMaterial.rpc) assertRpcIdentity(explicitJwtSigningMaterial.rpc)
+if (!CLERUM_DEV_MODE_ENABLED) {
+  for (const slot of ['rpc', 'session', 'admin'] as const) {
+    if (!explicitJwtSigningMaterial[slot]) required(JWT_SIGNING_KEY_ENV_NAMES[slot])
+  }
+}
+const jwtSigningMaterial = Object.fromEntries(
+  (['rpc', 'session', 'admin'] as const).map(slot => [
+    slot,
+    explicitJwtSigningMaterial[slot] ?? loadOrCreateDevJwtSigningMaterial(slot),
+  ])
+) as Record<DevJwtSlot, SigningMaterial>
+assertRpcIdentity(jwtSigningMaterial.rpc)
 
 const memberRegistrationMode: 'remote' | 'hosted' = (() => {
   const raw = (process.env.CONTROL_API_MEMBER_REGISTRATION_MODE || 'remote').trim()
@@ -627,8 +657,9 @@ if (memberRegistrationMode === 'hosted') {
     )
   }
   if (memberRegistrationEnvPresent('CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET')) {
-    console.warn(
-      '[ControlAPI] CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET is set but IGNORED in hosted member-registration mode (deploy-injected legacy value; credentials are self-enrolled and stored in Postgres)'
+    rootLogger.warn(
+      { event: 'hosted_member_registration_env_secret_ignored' },
+      'Hosted member-registration uses its enrolled credentials'
     )
   }
 }
@@ -755,11 +786,11 @@ export const config: Config = {
   ),
   controlUiBaseUrl: process.env.CONTROL_API_CONTROL_UI_BASE_URL || 'http://127.0.0.1:3000',
   controlUiAppName: process.env.CONTROL_API_CONTROL_UI_APP_NAME || 'Evenfire',
-  sessionJwtPrivateKey: resolveControlApiJwtPrivateKey('session'),
+  sessionJwtPrivateKey: jwtSigningMaterial.session.privatePem,
   jwtIssuer: requiredOrDevDefault('CONTROL_API_JWT_ISSUER', 'control-api'),
   jwtAudience: requiredOrDevDefault('CONTROL_API_JWT_AUDIENCE', 'profile-ui'),
-  rpcJwtPrivateKey: RPC_JWT_PRIVATE_KEY,
-  rpcJwtPublicKey: RPC_JWT_PUBLIC_KEY,
+  rpcJwtPrivateKey: jwtSigningMaterial.rpc.privatePem,
+  rpcJwtPublicKey: explicitRpcVerifier?.publicPem ?? jwtSigningMaterial.rpc.publicPem,
   rpcJwtIssuer: requiredOrDevDefault('CONTROL_API_RPC_JWT_ISSUER', 'control-api'),
   rpcJwtAudience: requiredOrDevDefault('CONTROL_API_RPC_JWT_AUDIENCE', 'rpc-proxy'),
   rpcTokenTtlSeconds: Number(process.env.CONTROL_API_RPC_TOKEN_TTL_SECONDS || 300),
@@ -767,15 +798,12 @@ export const config: Config = {
   hostSecretLabelValue: process.env.CONTROL_API_HOST_SECRET_LABEL_VALUE || 'true',
   policyAuthAudience: process.env.CONTROL_API_POLICY_AUTH_AUDIENCE || 'control-api',
   googleClientId: requiredOrDevDefault('CONTROL_API_GOOGLE_CLIENT_ID', 'dev-google-client-id'),
-  adminJwtPrivateKey: resolveControlApiJwtPrivateKey('admin'),
+  adminJwtPrivateKey: jwtSigningMaterial.admin.privatePem,
   adminJwtIssuer: requiredOrDevDefault('CONTROL_API_ADMIN_JWT_ISSUER', 'control-api'),
   adminJwtAudience: requiredOrDevDefault('CONTROL_API_ADMIN_JWT_AUDIENCE', 'control-ui'),
   adminJwtTtlSeconds: Number(process.env.CONTROL_API_ADMIN_JWT_TTL_SECONDS || 60 * 60),
-  // Optional — empty string means "fall back to adminJwtPrivateKey" (see
-  // registry.ts). Production should set this to a dedicated RS256 key.
-  registryVoucherPrivateKey: normalizePem(
-    process.env.CONTROL_API_REGISTRY_VOUCHER_PRIVATE_KEY ?? ''
-  ),
+  // No implicit admin identity substitution; managed mode requires this key.
+  registryVoucherPrivateKey: voucherMaterial?.privatePem ?? '',
   registryVoucherKid: process.env.CONTROL_API_REGISTRY_VOUCHER_KID ?? '',
   registryUrl: process.env.CLERUM_REGISTRY_URL ?? '',
   registryClientId: process.env.CLERUM_REGISTRY_CLIENT_ID ?? '',
@@ -1403,7 +1431,10 @@ if (config.registryAuthEnabled) {
       'REGISTRY_CONNECTION_MODE is required (managed|self-hosted) when CLERUM_REGISTRY_AUTH_ENABLED=true'
     )
   }
-  console.log(`[ControlAPI] Registry connection mode: ${config.registryConnectionMode}`)
+  rootLogger.info(
+    { event: 'registry_connection_mode', mode: config.registryConnectionMode },
+    'Registry connection mode'
+  )
 
   if (config.registryConnectionMode === 'managed') {
     // Managed machine creds live in env (unchanged).
@@ -1432,18 +1463,6 @@ if (config.registryAuthEnabled) {
   // registry_connection row. The "no row" fail-fast is an async guard in main.ts
   // AFTER initDb (config.ts is sync and cannot query Postgres). See Task 8.
 }
-
-// Security check: reject historically committed dev JWT keys in any signing or
-// verifying slot on every startup. Generated dev keys are fresh, so explicit
-// dev mode changes nothing for legitimate local use.
-assertNoBannedJwtKeys({
-  rpcPrivateKey: config.rpcJwtPrivateKey,
-  sessionPrivateKey: config.sessionJwtPrivateKey,
-  adminPrivateKey: config.adminJwtPrivateKey,
-  voucherPrivateKey: config.registryVoucherPrivateKey || undefined,
-  rpcPublicKey: config.rpcJwtPublicKey,
-  rpcPublicKeyEnvSet: Boolean(process.env.CONTROL_API_RPC_JWT_PUBLIC_KEY),
-})
 
 if (process.env.NODE_ENV === 'production') {
   // NOTE: the old voucher-key fallback WARN (dedicated key unset → sign with the

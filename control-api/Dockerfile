@@ -1,6 +1,8 @@
 FROM node:24-alpine AS builder
 WORKDIR /app
 
+# Prebuilt policy and POSIX store: copy only the production exports and types.
+COPY packages/jwt-key-policy/package.json packages/jwt-key-policy/index.cjs packages/jwt-key-policy/index.d.ts packages/jwt-key-policy/dev-store.cjs packages/jwt-key-policy/dev-store.d.ts ./packages/jwt-key-policy/
 COPY packages/workflow-recipe-capability-policy ./packages/workflow-recipe-capability-policy
 COPY packages/image-policy ./packages/image-policy
 # Shared prebuilt data-only providers package (no build step). Copied before
