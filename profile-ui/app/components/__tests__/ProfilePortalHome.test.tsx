@@ -149,7 +149,7 @@ describe('Profile Portal home desktop app link', () => {
     expect(handoffCopy).toHaveTextContent('Open Desktop App instead.')
     expect(href.searchParams.get('externalRestApiBaseUrl')).toBe(environment.externalRestApiBaseUrl)
     expect(href.searchParams.get('tenantName')).toBe(environment.appName)
-    expect(href.searchParams.get('rpcProxyBaseUrl')).toBe(environment.rpcProxyBaseUrl)
+    expect(href.searchParams.get('rpcProxyBaseUrl')).toBeNull()
   })
 
   it('builds the desktop app link from the production discovery response', () => {
@@ -164,6 +164,6 @@ describe('Profile Portal home desktop app link', () => {
       environment.externalRestApiBaseUrl
     )
     expect(parsedLink.searchParams.get('tenantName')).toBe(environment.appName)
-    expect(parsedLink.searchParams.get('rpcProxyBaseUrl')).toBe(environment.rpcProxyBaseUrl)
+    expect(parsedLink.searchParams.get('rpcProxyBaseUrl')).toBeNull()
   })
 })

@@ -20,10 +20,10 @@ test('buildDesktopEnvironmentLink defaults the tenant name to Evenfire', () => {
   assert.equal(parsedLink.searchParams.get('tenantName'), 'Evenfire')
 })
 
-test('buildDesktopEnvironmentLink omits an empty RPC proxy URL', () => {
+test('buildDesktopEnvironmentLink does not include the RPC proxy URL', () => {
   const link = buildDesktopEnvironmentLink({
     externalRestApiBaseUrl: 'https://api.example.com',
-    rpcProxyBaseUrl: '',
+    rpcProxyBaseUrl: 'https://rpc.example.com',
     appName: 'Example tenant',
   })
 
