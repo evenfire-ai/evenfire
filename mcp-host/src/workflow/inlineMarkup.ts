@@ -397,10 +397,15 @@ export function openingFence(line: string): { marker: string; language: string }
   return run >= 3 ? { marker: t.slice(0, run), language: t.slice(run).trim() } : undefined
 }
 
-/** Whether `line` closes the block `marker` opened: a run of its character at least as long. */
+/**
+ * Whether `line` closes the block `marker` opened: a run of its character at
+ * least as long, and nothing else. A line such as ```js inside the block is
+ * code, as CommonMark reads it.
+ */
 export function closesFence(line: string, marker: string): boolean {
-  const t = line.trimStart()
-  return t[0] === marker[0] && fenceRun(t) >= marker.length
+  const t = line.trim()
+  const run = fenceRun(t)
+  return t[0] === marker[0] && run >= marker.length && run === t.length
 }
 
 /** Length of the run of backticks or tildes that starts `text`. */

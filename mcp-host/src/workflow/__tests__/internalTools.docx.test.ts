@@ -295,6 +295,18 @@ describe('generate_docx headings', () => {
   })
 })
 
+describe('generate_docx code blocks', () => {
+  it('keeps a fence line with a language inside the block, as code', async () => {
+    const xml = await documentXml({
+      body: '```\nExample:\n```js\nlet a = 1\n```\nAfter',
+    })
+    const text = paragraphs(xml).map(p =>
+      [...p.matchAll(/<w:t[^>]*>([^<]*)</g)].map(m => m[1]).join('')
+    )
+    expect(text).toEqual(expect.arrayContaining(['```js', 'let a = 1', 'After']))
+  })
+})
+
 describe('generate_docx lists', () => {
   function levels(xml: string): number[] {
     return [...xml.matchAll(/<w:ilvl w:val="(\d+)"\/>/g)].map(m => Number(m[1]))

@@ -381,6 +381,13 @@ describe('code fences', () => {
     expect(closesFence('  `````', '````')).toBe(true)
   })
 
+  it('keeps a fence open on a line that adds text after the run, as CommonMark does', () => {
+    expect(closesFence('```js', '```')).toBe(false)
+    expect(closesFence('``` x', '```')).toBe(false)
+    expect(closesFence('```  \t', '```')).toBe(true)
+    expect(closesFence('```\r', '```')).toBe(true)
+  })
+
   it('reads a long run of backticks in linear time', () => {
     const line = `${'`'.repeat(200000)}\r`
     const started = performance.now()
