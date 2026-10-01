@@ -1,4 +1,5 @@
 /** Branding, footer lines and the empty-document note shared by the PDF and DOCX generators. */
+import { PDF_MAX_FOOTER_LINES } from './documentSchema'
 import { htmlToPlainLines, htmlToPlainText } from './inlineMarkup'
 import type { UnitMeasure } from './pdfTables'
 import { LINE_FILL } from './pdfText'
@@ -32,9 +33,6 @@ export function printedBranding(raw: unknown): {
 export const EMPTY_DOCUMENT_NOTE =
   'The document is empty: body has no text, and no title, table or image was given. ' +
   'Pass the text to write as body.'
-
-/** Footer lines that fit once the bottom margin has grown to hold them. */
-export const PDF_MAX_FOOTER_LINES = 6
 
 export const PDF_FOOTER_SIZE = 9
 

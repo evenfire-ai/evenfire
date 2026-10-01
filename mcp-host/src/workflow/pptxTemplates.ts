@@ -9,7 +9,6 @@ import {
   type PptxKpi,
   type PptxSlide,
   type ReadContext,
-  STATUSES,
   TEXT_LIMITS,
   isRecord,
   readChart,
@@ -19,13 +18,7 @@ import {
   readTable,
   readText,
 } from './pptxInput'
-
-export const PPTX_TEMPLATES = [
-  'executive-brief',
-  'quarterly-review',
-  'incident-review',
-  'pitch-deck',
-] as const
+import { PPTX_TEMPLATES, SEVERITIES, STATUSES } from './pptxVocabulary'
 
 export type PptxTemplate = (typeof PPTX_TEMPLATES)[number]
 
@@ -59,8 +52,6 @@ export const PPTX_TEMPLATE_FIELDS: Record<
     optional: ['marketSize', 'tractionChart', 'team', 'ask'],
   },
 }
-
-export const SEVERITIES = ['low', 'medium', 'high', 'critical'] as const
 
 function fieldList(template: PptxTemplate): string {
   const { required, optional } = PPTX_TEMPLATE_FIELDS[template]

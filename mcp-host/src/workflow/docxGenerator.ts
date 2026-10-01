@@ -59,10 +59,6 @@ const DOCX_LOGO_BOX = { width: 160, height: 60 }
 /** Footer lines kept, as in the PDF. */
 const DOCX_MAX_FOOTER_LINES = 6
 
-export const DOCX_IMAGE_FILE_DESCRIPTION =
-  "File name in the output folder, as returned by clerum__generate_chart (e.g. 'sales.png'). " +
-  'PNG, JPEG, GIF, WebP or SVG.'
-
 interface DocxBranding {
   companyName?: string
   logoPath?: string

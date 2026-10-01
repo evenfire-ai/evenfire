@@ -3,10 +3,10 @@ import ExcelJS from 'exceljs'
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
+import { imageDisplaySize } from '../embeddedImages'
 import {
   INTERNAL_TOOLS,
   escapeHtmlAttr,
-  imageDisplaySize,
   safeCell,
   safeJsonForScript,
   validateOutputPath,

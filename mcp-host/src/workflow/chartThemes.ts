@@ -1,4 +1,4 @@
-/** Chart colour themes shared by the chart tool, the dashboard and the tool schemas. */
+/** Chart colour themes and size limits shared by the chart tool, the dashboard and the tool schemas. */
 
 export interface ChartTheme {
   backgroundColor: string
@@ -59,3 +59,8 @@ export const CHART_THEMES: Record<string, ChartTheme> = {
     negative: '#fb7185',
   },
 }
+
+export const DEFAULT_CHART_WIDTH = 800
+export const DEFAULT_CHART_HEIGHT = 400
+export const MAX_CHART_DIMENSION = 4000
+export const MIN_CHART_DIMENSION = 100

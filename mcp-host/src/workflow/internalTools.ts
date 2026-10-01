@@ -29,8 +29,7 @@ import {
   DEFAULT_CHART_WIDTH,
   MAX_CHART_DIMENSION,
   MIN_CHART_DIMENSION,
-  runGenerateChart,
-} from './chartGenerator'
+} from './chartThemes'
 import { CONTEXT_FILES_TOOLS, loadContextFilesMounts } from './contextFiles'
 import { DASHBOARD_CHART_TYPES } from './dashboardCharts'
 import {
@@ -41,21 +40,25 @@ import {
   SECTION_TYPES,
   runGenerateDashboard,
 } from './dashboardRender'
-import { PDF_MAX_FOOTER_LINES } from './documentChrome'
-import { DOCX_IMAGE_FILE_DESCRIPTION, runGenerateDocx } from './docxGenerator'
-import { predecodeImages } from './embeddedImages'
-import { IMAGE_FILE_DESCRIPTION, runGeneratePdf } from './pdfGenerator'
-import { NATIVE_CHART_TYPES } from './pptxCharts'
-import { PPTX_ASPECT_RATIOS, PPTX_PALETTES, buildPptxDeck } from './pptxDeck'
-import { SLIDE_LAYOUTS, STATUSES } from './pptxInput'
-import { PPTX_TEMPLATES, SEVERITIES } from './pptxTemplates'
+import {
+  DOCX_IMAGE_FILE_DESCRIPTION,
+  IMAGE_FILE_DESCRIPTION,
+  PDF_MAX_FOOTER_LINES,
+} from './documentSchema'
+import {
+  NATIVE_CHART_TYPES,
+  PPTX_ASPECT_RATIOS,
+  PPTX_PALETTES,
+  PPTX_TEMPLATES,
+  SEVERITIES,
+  SLIDE_LAYOUTS,
+  STATUSES,
+} from './pptxVocabulary'
 import { watchUnknownArguments, withoutUnsetNulls } from './schemaArguments'
 import { cleanToolArgs } from './toolText'
 import type { InternalToolDefinition, InternalToolResult } from './types'
-import { buildXlsxWorkbook } from './xlsxWorkbook'
 
 export { enforceQuota, getDirectorySize } from './artifactOutput'
-export { fitImageBox, imageDisplaySize, imageIntrinsicSize } from './embeddedImages'
 export { CHART_THEMES } from './chartThemes'
 export type { ChartTheme } from './chartThemes'
 export { escapeHtmlAttr, safeJsonForScript } from './dashboardHtml'
@@ -169,6 +172,24 @@ const CHART_POINT_SCHEMA = {
     },
   ],
   description: 'A number, null for a gap, or {x, y} / {x, y, r} or [x, y] for scatter / bubble.',
+}
+
+/**
+ * Runs a generator from its own module, loaded on first use so that starting
+ * the host loads no document library. A module that fails to load fails the
+ * call the way a generator error does.
+ */
+async function fromModule<M>(
+  load: () => Promise<M>,
+  run: (loaded: M) => Promise<InternalToolResult>
+): Promise<InternalToolResult> {
+  let loaded: M
+  try {
+    loaded = await load()
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : String(err) }
+  }
+  return run(loaded)
 }
 
 const generateChart: InternalToolDefinition = {
@@ -304,7 +325,10 @@ const generateChart: InternalToolDefinition = {
     required: ['filename', 'type', 'data'],
   },
   execute(args: Record<string, unknown>, outputDir: string): Promise<InternalToolResult> {
-    return runGenerateChart(args, outputDir)
+    return fromModule(
+      () => import('./chartGenerator'),
+      m => m.runGenerateChart(args, outputDir)
+    )
   },
 }
 
@@ -495,7 +519,10 @@ const generatePdf: InternalToolDefinition = {
     required: ['filename', 'body'],
   },
   execute(args: Record<string, unknown>, outputDir: string): Promise<InternalToolResult> {
-    return runGeneratePdf(args, outputDir)
+    return fromModule(
+      () => import('./pdfGenerator'),
+      m => m.runGeneratePdf(args, outputDir)
+    )
   },
 }
 
@@ -609,7 +636,10 @@ const generateDocx: InternalToolDefinition = {
     required: ['filename', 'body'],
   },
   execute(args: Record<string, unknown>, outputDir: string): Promise<InternalToolResult> {
-    return runGenerateDocx(args, outputDir)
+    return fromModule(
+      () => import('./docxGenerator'),
+      m => m.runGenerateDocx(args, outputDir)
+    )
   },
 }
 
@@ -819,6 +849,7 @@ const generateXlsx: InternalToolDefinition = {
     try {
       const filename = outputFilename(args.filename, 'xlsx', 'output')
       const warnings: string[] = []
+      const { buildXlsxWorkbook } = await import('./xlsxWorkbook')
       const built = await buildXlsxWorkbook(
         args,
         outputDir,
@@ -1671,6 +1702,7 @@ const generatePptxTool: InternalToolDefinition = {
     try {
       const filename = outputFilename(args.filename, 'pptx', 'deck')
       const warnings: string[] = []
+      const { buildPptxDeck } = await import('./pptxDeck')
       const { buffer, slides } = await buildPptxDeck(args, outputDir, warnings)
       // Buffer first, quota check, then write — atomic, no partial files.
       ensureDir(outputDir)
@@ -1750,10 +1782,11 @@ function prepared(tool: InternalToolDefinition): InternalToolDefinition {
           string,
           unknown
         >
+        const { predecodeImages } = await import('./embeddedImages')
+        await predecodeImages(clean, outputDir)
       } catch (err) {
         return { success: false, error: err instanceof Error ? err.message : String(err) }
       }
-      await predecodeImages(clean, outputDir)
       const unknown = watchUnknownArguments(tool.parameters, clean)
       const result = await tool.execute(clean, outputDir)
       const ignored = unknown.ignored()

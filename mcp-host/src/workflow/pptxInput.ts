@@ -9,26 +9,14 @@
  */
 import { type EmbeddableImage, loadEmbeddableImage } from './embeddedImages'
 import { ChartSpecError, type NativeChart, readNativeChart } from './pptxCharts'
+import { SLIDE_LAYOUTS, STATUSES } from './pptxVocabulary'
 import { headerText, normalizeTableRows } from './tableRows'
 
 /** An argument the deck cannot be built from; the message names the field. */
 export class PptxInputError extends Error {}
 
-export const SLIDE_LAYOUTS = [
-  'cover',
-  'section',
-  'title-bullets',
-  'title-chart',
-  'title-table',
-  'kpis',
-  'two-column',
-  'image',
-  'quote',
-] as const
-
 export type SlideLayout = (typeof SLIDE_LAYOUTS)[number]
 
-export const STATUSES = ['green', 'yellow', 'red'] as const
 export type Status = (typeof STATUSES)[number]
 
 const DELTA_DIRECTIONS = ['up', 'down', 'neutral'] as const

@@ -6,18 +6,7 @@
  */
 import { ChartDataError, normalizeChartData } from './chartData'
 import { PPTX_FONT_FACE } from './pptxText'
-
-/** Types drawn as native charts; the stacked ones are bar and area charts with stacked grouping. */
-export const NATIVE_CHART_TYPES = [
-  'line',
-  'bar',
-  'horizontalBar',
-  'pie',
-  'doughnut',
-  'area',
-  'stackedBar',
-  'stackedArea',
-] as const
+import { NATIVE_CHART_TYPES } from './pptxVocabulary'
 
 export type NativeChartType = (typeof NATIVE_CHART_TYPES)[number]
 

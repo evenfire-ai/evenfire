@@ -753,10 +753,6 @@ function statusColorFromPalette(palette: PdfPalette, status?: string): string | 
 
 const IMAGE_ALIGNMENTS = new Set(['left', 'center', 'right'])
 
-/** Where images come from, for the schema: the name clerum__generate_chart reports. */
-export const IMAGE_FILE_DESCRIPTION =
-  "File name of a PNG or JPEG (GIF, WebP and SVG are converted) in the output folder, as returned by clerum__generate_chart, e.g. 'sales.png'."
-
 /**
  * pdfmake 0.2 calls this with the nodes that follow on the same page as its
  * second argument (the bundled typings describe 0.3's query object instead).

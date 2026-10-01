@@ -30,7 +30,14 @@ import {
   sliceColors,
   valueLabelsPlugin,
 } from './chartPlugins'
-import { CHART_THEMES, ChartTheme } from './chartThemes'
+import {
+  CHART_THEMES,
+  type ChartTheme,
+  DEFAULT_CHART_HEIGHT,
+  DEFAULT_CHART_WIDTH,
+  MAX_CHART_DIMENSION,
+  MIN_CHART_DIMENSION,
+} from './chartThemes'
 import { PNG_BASE_PPM } from './embeddedImages'
 import { CHART_FONT_STACK, ensureFontsReady, sanitizeForFont } from './fonts'
 import type { InternalToolResult } from './types'
@@ -57,10 +64,6 @@ const TRANSLUCENT_FILL_TYPES = new Set(['line', 'area', 'radar'])
 /** Widest a single bar may be drawn, in nominal pixels. */
 const MAX_BAR_THICKNESS = 120
 
-export const DEFAULT_CHART_WIDTH = 800
-export const DEFAULT_CHART_HEIGHT = 400
-export const MAX_CHART_DIMENSION = 4000
-export const MIN_CHART_DIMENSION = 100
 /** A plot area narrower or shorter than this, in px, shows too little of the data to read. */
 const MIN_PLOT_SIDE = 40
 
