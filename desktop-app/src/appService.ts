@@ -879,6 +879,8 @@ export class AppService {
     fetchBytes: (url, token, opts) => fetchBoundedBytes(url, token, opts),
   })
   private readonly tokenStore = new TokenStore()
+  private readonly pendingCredentialProducers = new Set<Promise<unknown>>()
+  private quitPreparationStarted = false
   private readonly rpcTokenManager = new RpcTokenManager(this.authClient)
   private sessionToken: string | null = null
   private me: SessionMe | null = null
@@ -1004,6 +1006,30 @@ export class AppService {
       error instanceof ApiError &&
       (error.status === 401 || error.status === 403 || error.status === 410)
     )
+  }
+
+  private runCredentialProducer<T>(operation: () => Promise<T>): Promise<T> {
+    if (this.quitPreparationStarted) {
+      return Promise.reject(new Error('Application is shutting down'))
+    }
+
+    let resolveProducer!: (value: T | PromiseLike<T>) => void
+    let rejectProducer!: (error: unknown) => void
+    const producer = new Promise<T>((resolve, reject) => {
+      resolveProducer = resolve
+      rejectProducer = reject
+    })
+    this.pendingCredentialProducers.add(producer)
+    void producer.then(
+      () => this.pendingCredentialProducers.delete(producer),
+      () => this.pendingCredentialProducers.delete(producer)
+    )
+    try {
+      Promise.resolve(operation()).then(resolveProducer, rejectProducer)
+    } catch (error) {
+      rejectProducer(error)
+    }
+    return producer
   }
 
   /**
@@ -1194,7 +1220,14 @@ export class AppService {
     }
   }
 
-  private async runWithTeamContext<T>(
+  private runWithTeamContext<T>(
+    teamId: string | null | undefined,
+    operation: (sessionToken: string) => Promise<T>
+  ): Promise<T> {
+    return this.runCredentialProducer(() => this.runWithTeamContextOnce(teamId, operation))
+  }
+
+  private async runWithTeamContextOnce<T>(
     teamId: string | null | undefined,
     operation: (sessionToken: string) => Promise<T>
   ): Promise<T> {
@@ -1481,7 +1514,7 @@ export class AppService {
     if (this.restoreSavedSessionInFlight) {
       return await this.restoreSavedSessionInFlight
     }
-    const restore = this.restoreSavedSessionOnce(options)
+    const restore = this.runCredentialProducer(() => this.restoreSavedSessionOnce(options))
     this.restoreSavedSessionInFlight = restore
     try {
       return await restore
@@ -1576,6 +1609,10 @@ export class AppService {
   }
 
   async prepareForQuit(): Promise<void> {
+    this.quitPreparationStarted = true
+    while (this.pendingCredentialProducers.size > 0) {
+      await Promise.allSettled([...this.pendingCredentialProducers])
+    }
     await this.tokenStore.prepareForQuit()
   }
 
@@ -1599,7 +1636,14 @@ export class AppService {
     }
   }
 
-  private async installAuthenticatedLogin(result: {
+  private installAuthenticatedLogin(result: {
+    token: string
+    me: SessionMe
+  }): Promise<SessionState> {
+    return this.runCredentialProducer(() => this.installAuthenticatedLoginOnce(result))
+  }
+
+  private async installAuthenticatedLoginOnce(result: {
     token: string
     me: SessionMe
   }): Promise<SessionState> {
@@ -1689,7 +1733,11 @@ export class AppService {
     return getDesktopRuntimeConfigState()
   }
 
-  private async applyRuntimeEnvironmentChange(operation: () => Promise<void>): Promise<void> {
+  private applyRuntimeEnvironmentChange(operation: () => Promise<void>): Promise<void> {
+    return this.runCredentialProducer(() => this.applyRuntimeEnvironmentChangeOnce(operation))
+  }
+
+  private async applyRuntimeEnvironmentChangeOnce(operation: () => Promise<void>): Promise<void> {
     const oldEnvKey = getActiveEnvKey()
     const oldBaseUrl = normalizeDesktopUploadBaseUrl(config.externalRestApiBaseUrl)
     const oldLegacyEnvKeys = getActiveLegacyEnvKeys()
@@ -2075,7 +2123,11 @@ export class AppService {
     return { opened: true }
   }
 
-  async logout(): Promise<void> {
+  logout(): Promise<void> {
+    return this.runCredentialProducer(() => this.logoutOnce())
+  }
+
+  private async logoutOnce(): Promise<void> {
     this.logoutInProgress = true
     const releasePrewarm = this.beginPrewarmAuthTransition()
     try {
@@ -3423,7 +3475,11 @@ export class AppService {
     return this.getInitialTeamsDirectory()
   }
 
-  async switchTeam(teamId: string): Promise<SessionState> {
+  switchTeam(teamId: string): Promise<SessionState> {
+    return this.runCredentialProducer(() => this.switchTeamOnce(teamId))
+  }
+
+  private async switchTeamOnce(teamId: string): Promise<SessionState> {
     const targetTeamId = String(teamId || '').trim()
     if (!targetTeamId) throw new Error('teamId is required')
     // Explicit team changes fence opportunistic wake immediately. A failed
