@@ -13,6 +13,7 @@ import {
   deleteDynamicClientOwnedByInstall,
   getDynamicClient,
   insertDynamicClientPending,
+  isDynamicClientIdRegistered,
   reclaimOrphanDynamicClient,
   upsertDynamicClient,
 } from '../src/oauth/dynamicClientStore.js'
@@ -194,6 +195,42 @@ describeRealPostgres('dynamicClientStore install identity (real Postgres)', () =
     expect(after?.clientSecret).toBe('secret-original')
     expect(after?.registrationAccessToken).toBe(`rat-${name}`)
     expect(after?.registrationClientUri).toBe(`https://as.example.com/reg/${name}`)
+  })
+
+  it('isDynamicClientIdRegistered finds a client_id in pending, bound and legacy rows of the namespace only', async () => {
+    const tag = randomUUID().slice(0, 8)
+    const pending = `srv-idp-${tag}`
+    const bound = `srv-idb-${tag}`
+    const legacy = `srv-idl-${tag}`
+    await insertDynamicClientPending(db, KEY, {
+      ...baseCreds(pending, { clientId: `cid-p-${tag}` }),
+      installId: randomUUID(),
+    })
+    const boundInstall = randomUUID()
+    await insertDynamicClientPending(db, KEY, {
+      ...baseCreds(bound, { clientId: `cid-b-${tag}` }),
+      installId: boundInstall,
+    })
+    await bindDynamicClientToResource(
+      db,
+      { serverNamespace: NS, serverName: bound },
+      boundInstall,
+      `uid-${tag}`
+    )
+    await upsertDynamicClient(db, KEY, baseCreds(legacy, { clientId: `cid-l-${tag}` }))
+
+    for (const clientId of [`cid-p-${tag}`, `cid-b-${tag}`, `cid-l-${tag}`]) {
+      expect(await isDynamicClientIdRegistered(db, { serverNamespace: NS, clientId })).toBe(true)
+    }
+    expect(
+      await isDynamicClientIdRegistered(db, { serverNamespace: NS, clientId: `cid-none-${tag}` })
+    ).toBe(false)
+    expect(
+      await isDynamicClientIdRegistered(db, {
+        serverNamespace: `${NS}-other`,
+        clientId: `cid-b-${tag}`,
+      })
+    ).toBe(false)
   })
 
   const keyOf = (serverName: string) => ({ serverNamespace: NS, serverName })

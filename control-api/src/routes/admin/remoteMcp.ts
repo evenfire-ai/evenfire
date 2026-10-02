@@ -10,15 +10,23 @@ import { RFC1123_RE } from '../../http/rfc1123.js'
 import { validateOAuthEndpointUrl } from '../../http/validateMcpServerSpec.js'
 import { K8sGateway } from '../../k8s.js'
 import { type UiAuthedRequest } from '../../middleware/controlUIAuth.js'
-import { REMOTE_CALLBACK_PATH, buildCimdDocument } from '../../oauth/cimd.js'
+import { buildCimdDocument } from '../../oauth/cimd.js'
+import { MAX_CLIENT_ID_LENGTH, isCimdClientId } from '../../oauth/cimdIdentity.js'
 import {
   type DcrDeps,
   type DcrMintHandle,
   buildDcrRequest,
   registerDynamicClient,
+  verifyDcrRedirectUris,
 } from '../../oauth/dcr.js'
 import { bestEffortRfc7592Delete } from '../../oauth/dcrCleanup.js'
-import { type DiscoveryResult, discoverRemoteOAuth } from '../../oauth/discovery.js'
+import {
+  type DiscoveryResult,
+  advertisesIssBinding,
+  discoverRemoteOAuth,
+  registrationModeInputs,
+  selectRegistrationMode,
+} from '../../oauth/discovery.js'
 import { discoveryHttpStatus } from '../../oauth/discoveryHttpStatus.js'
 import {
   type DynamicClientKey,
@@ -29,10 +37,18 @@ import {
   deleteDynamicClientOwnedByInstall,
   getDynamicClient,
   insertDynamicClientPending,
+  isDynamicClientIdRegistered,
   reclaimOrphanDynamicClient,
 } from '../../oauth/dynamicClientStore.js'
 import { deriveOAuthEncryptionKey } from '../../oauth/encryption.js'
 import { probeMcpTransport } from '../../oauth/mcpTransportProbe.js'
+import {
+  InvalidRemoteRedirectUriInputError,
+  type RemoteCallbackVariant,
+  buildRemoteRedirectUri,
+  isValidRemoteServerNameSegment,
+  remoteCallbackVariant,
+} from '../../oauth/remoteCallback.js'
 import { rootLogger } from '../../observability/logger.js'
 import { attachServerToContext } from '../../services/contextAllowlist.js'
 import { K8sNotFoundError } from '../../services/resourceService.js'
@@ -73,6 +89,18 @@ const BASE = '/admin/mcp-servers/remote'
 
 const log = rootLogger.child({ module: 'admin-remote-mcp' })
 
+/**
+ * A minted DCR client is being abandoned without an RFC 7592 handle: it stays
+ * registered at the AS. Logged the same way on every abandon path, so an abandoned
+ * install is never mistaken for a cleaned-up one.
+ */
+function logDcrRevokeLocalOnly(serverName: string, hasRegistrationClientUri: boolean): void {
+  log.info(
+    { event: 'remote_oauth_dcr_revoke_local_only', serverName, hasRegistrationClientUri },
+    'dcr revoke skipped: no RFC 7592 management handle, the minted client remains at the AS'
+  )
+}
+
 // `discoveryHttpStatus` moved to `oauth/discoveryHttpStatus.js` (H-5) so the remote
 // and generic discover endpoints share one mapping. Re-exported here so existing
 // importers (and the mapping's own test) keep resolving it from this module.
@@ -89,16 +117,12 @@ const installBodySchema = z.object({
   contextRef: z.string().min(1),
   baseUrl: z.string().min(1),
   mode: z.enum(['cimd', 'pre-registered', 'dcr']),
-  clientId: z.string().min(1).optional(),
+  clientId: z.string().min(1).max(MAX_CLIENT_ID_LENGTH).optional(),
   clientSecret: z.string().min(1).optional(),
   grantScope: z.enum(['user', 'context']).optional(),
 })
 
 type InstallBody = z.infer<typeof installBodySchema>
-
-function isValidK8sName(name: string): boolean {
-  return RFC1123_RE.test(name) && name.length <= 253
-}
 
 /**
  * Fenced-delete preconditions from a just-created object, or undefined when the
@@ -248,6 +272,144 @@ function deriveDcrClientMode(result: DiscoveryResult): 'public' | 'confidential'
   return Array.isArray(methods) && methods.includes('none') ? 'public' : 'confidential'
 }
 
+/**
+ * The callback variant an install from this discovery result writes. Derived from the
+ * `spec.oauth` block the install builds — not from the discovery fields directly — so
+ * the install and the runtime (which reads the block back from the CR) share one
+ * derivation. The builder options do not influence the variant.
+ */
+function callbackVariantOf(discovery: DiscoveryResult): RemoteCallbackVariant {
+  return remoteCallbackVariant(
+    buildRemoteOAuthSpec(discovery, { clientMode: 'public', grantScope: 'user' })
+  )
+}
+
+/**
+ * The AS offers CIMD to a public client and would resolve to it, but for the missing
+ * RFC 9207 advertisement. Evaluated through the real mode selector so the answer can
+ * never disagree with discovery.
+ */
+function cimdBlockedOnlyByMissingIssBinding(discovery: DiscoveryResult): boolean {
+  if (advertisesIssBinding(discovery.as)) return false
+  const withIssBinding = {
+    ...registrationModeInputs(discovery.as, { hasPreRegisteredClient: false }),
+    issBindingSupported: true,
+  }
+  return selectRegistrationMode(withIssBinding) === 'cimd'
+}
+
+// Stand-ins handed to the redirect-URI builder to render a template; they are replaced
+// by placeholders, so the prefix the operator copies still comes from the one builder.
+const TEMPLATE_SERVER_NAME = 'server-name'
+const TEMPLATE_INSTALL_NONCE = '00000000-0000-0000-0000-000000000000'
+
+export interface RemoteCallbackPreview {
+  /**
+   * Whether a public callback base URL is configured (for `per-server`, one that is a
+   * bare origin). `false` blocks only a `per-server` install (503); a `shared` install
+   * still proceeds, falling back to the request Host at consent, and simply has no URI
+   * to show here.
+   */
+  configured: boolean
+  variant: RemoteCallbackVariant
+  /**
+   * The redirect URI an install would register. Per-server URIs carry the literal
+   * placeholders `{serverName}` and, for DCR, `{installId}` (minted at install time).
+   */
+  redirectUriTemplate?: string
+}
+
+/** The `/discover` view of the callback an install from this result would use. */
+function previewRemoteCallback(discovery: DiscoveryResult): RemoteCallbackPreview {
+  const variant = callbackVariantOf(discovery)
+  const origin = normalizeConfiguredOrigin(config.oauthCallbackBaseUrl)
+  if (origin === null) return { configured: false, variant }
+  if (variant === 'shared') {
+    return {
+      configured: true,
+      variant,
+      redirectUriTemplate: buildRemoteRedirectUri({ origin, variant: 'shared' }),
+    }
+  }
+  const dcr = discovery.registrationMode === 'dcr'
+  const suffix = dcr
+    ? `/${TEMPLATE_SERVER_NAME}/${TEMPLATE_INSTALL_NONCE}`
+    : `/${TEMPLATE_SERVER_NAME}`
+  let uri: string
+  try {
+    uri = dcr
+      ? buildRemoteRedirectUri({
+          origin,
+          variant,
+          mode: 'dcr',
+          serverName: TEMPLATE_SERVER_NAME,
+          installNonce: TEMPLATE_INSTALL_NONCE,
+        })
+      : buildRemoteRedirectUri({
+          origin,
+          variant,
+          mode: 'pre-registered',
+          serverName: TEMPLATE_SERVER_NAME,
+        })
+  } catch (err) {
+    // A configured base URL that is not a bare origin cannot anchor a per-server URI.
+    if (err instanceof InvalidRemoteRedirectUriInputError) return { configured: false, variant }
+    throw err
+  }
+  return {
+    configured: true,
+    variant,
+    redirectUriTemplate: `${uri.slice(0, -suffix.length)}${dcr ? '/{serverName}/{installId}' : '/{serverName}'}`,
+  }
+}
+
+/**
+ * Hosts (with any non-default port) of the AS endpoints an install would trust, shown
+ * before a per-server install so a different port is not hidden from the operator.
+ */
+function asEndpointHostsOf(discovery: DiscoveryResult): {
+  authorization: string
+  token: string
+  registration?: string
+} {
+  const { authorization, token, registration } = discovery.endpoints
+  return {
+    authorization: new URL(authorization).host,
+    token: new URL(token).host,
+    ...(registration ? { registration: new URL(registration).host } : {}),
+  }
+}
+
+export type PreRegisteredClientIdConflict = 'cimd_client' | 'remote_server' | 'dynamic_client'
+
+/**
+ * Why a pre-registered client_id cannot back a per-server install, or null. A
+ * per-server client must belong to exactly one server: its one registered redirect URI
+ * is what binds its codes to that server, and a client shared with another server (or
+ * one of our DCR clients, or the platform CIMD identity, which lists the shared
+ * callback) would let the AS deliver a code for one server to another. Check-then-create
+ * without a fence: an admin-only action on a confidential client, where a lost race
+ * still leaves each server with its own redirect URI.
+ */
+async function preRegisteredClientIdConflict(
+  gateway: K8sGateway,
+  db: DbClient,
+  namespace: string,
+  clientId: string
+): Promise<PreRegisteredClientIdConflict | null> {
+  if (isCimdClientId(clientId)) return 'cimd_client'
+  const servers = (await gateway.listResource('mcpservers', namespace)) as Array<{
+    spec?: { oauth?: { source?: unknown; id?: unknown } }
+  }>
+  if (servers.some(s => s?.spec?.oauth?.source === 'remote' && s.spec.oauth.id === clientId)) {
+    return 'remote_server'
+  }
+  if (await isDynamicClientIdRegistered(db, { serverNamespace: namespace, clientId })) {
+    return 'dynamic_client'
+  }
+  return null
+}
+
 const REMOTE_MCP_EGRESS_PROXY_IMAGE =
   process.env.CONTROL_API_REMOTE_MCP_EGRESS_PROXY_IMAGE || 'clerum/nginx-egress-proxy:0.1.0'
 const REMOTE_MCP_PROXY_PORT = 3000
@@ -372,8 +534,10 @@ export function createAdminRemoteMcpRouter(
         )
       }
 
+      const callback = previewRemoteCallback(r)
       res.status(200).json({
         transport,
+        callback,
         detected: {
           registrationMode: r.registrationMode,
           // DCR is available in C2. Echo the resolved client mode (derived from the
@@ -392,6 +556,10 @@ export function createAdminRemoteMcpRouter(
           resource: r.resource,
           issuer: r.issuer,
           ...(r.issForCallback ? { issForCallback: r.issForCallback } : {}),
+          // Without `iss` the same-site rule is all that ties these hosts to the
+          // issuer, and it cannot tell two hosts of one registrable domain apart; the
+          // operator sees them before trusting them.
+          ...(callback.variant === 'per-server' ? { asEndpointHosts: asEndpointHostsOf(r) } : {}),
           scopes: derivedScopes(r),
           quirks: r.quirks,
         },
@@ -412,13 +580,15 @@ export function createAdminRemoteMcpRouter(
       }
       const body: InstallBody = parsed.data
 
-      if (!isValidK8sName(body.serverName)) {
+      // The server name becomes a segment of its per-server redirect URI, so it is held
+      // to the same rule the callback route applies to that segment.
+      if (!isValidRemoteServerNameSegment(body.serverName)) {
         res.status(400).json({
-          error: 'invalid serverName: must be a valid K8s name (RFC 1123 label, max 253 chars)',
+          error: 'invalid serverName: must be a valid K8s name (RFC 1123 label, max 63 chars)',
         })
         return
       }
-      if (!isValidK8sName(body.contextRef)) {
+      if (!RFC1123_RE.test(body.contextRef)) {
         res.status(400).json({ error: 'invalid contextRef' })
         return
       }
@@ -497,6 +667,14 @@ export function createAdminRemoteMcpRouter(
       // (D-4: discovery is authoritative). CIMD ⇒ AS must offer CIMD; DCR ⇒ AS must
       // offer a registration endpoint (registrationMode 'dcr').
       if (body.mode === 'cimd' && discovery.registrationMode !== 'cimd') {
+        if (cimdBlockedOnlyByMissingIssBinding(discovery)) {
+          const fallbackMode = discovery.registrationMode === 'dcr' ? 'dcr' : 'pre-registered'
+          res.status(400).json({
+            error: 'mode_unsupported',
+            message: `this authorization server supports CIMD but not RFC 9207; install with mode "${fallbackMode}"`,
+          })
+          return
+        }
         if (discovery.registrationMode === 'dcr') {
           res.status(400).json({
             error: 'mode_unsupported',
@@ -558,27 +736,92 @@ export function createAdminRemoteMcpRouter(
         )
       }
 
-      // RFC 9207 issuer binding is MANDATORY on the remote lane. Every remote mode
-      // (dcr/cimd/pre-registered) lands on the SHARED remote callback
-      // (`/oauth-callback/remote`), whose mix-up defence fails closed when no issuer is
-      // pinned (`issuer_binding_required`, R3-H2). `discovery.issForCallback` is set iff
-      // the AS advertised `authorization_response_iss_parameter_supported`. Reject at
-      // install — BEFORE any AS registration (DCR saga step 0) or K8s/store write — so
-      // the operator learns now instead of the user hitting a 400 at consent against a
-      // server that can never complete OAuth (the regression this closes, R3F-H1).
-      // Ordered AFTER the bearerInBody/mode-match/transport admission checks so their
-      // more specific rejections keep precedence; still before any write.
-      if (!discovery.issForCallback) {
+      // Callback variant, fixed before any AS registration or write: the shared callback
+      // when the AS returns `iss` (RFC 9207), otherwise a redirect URI of this server's
+      // own, which is then the only mix-up defence.
+      const callbackVariant = callbackVariantOf(discovery)
+
+      // Defensive: mode selection never resolves CIMD without RFC 9207, and the mode
+      // check above rejects a CIMD request against such an AS. Kept so a regression
+      // there can never install the platform CIMD identity — which lists only the
+      // shared callback — onto a server with no issuer binding.
+      if (body.mode === 'cimd' && callbackVariant !== 'shared') {
         log.warn(
           { event: 'remote_oauth_issuer_binding_unsupported', serverName: body.serverName },
-          'remote install rejected: authorization server does not advertise RFC 9207 (authorization_response_iss_parameter_supported)'
+          'remote install rejected: cimd requires an authorization server that advertises RFC 9207'
         )
         res.status(422).json({
           error: 'issuer_binding_required',
           message:
-            'the authorization server does not advertise RFC 9207 (authorization_response_iss_parameter_supported); a remote OAuth install requires it',
+            'the authorization server does not advertise RFC 9207 (authorization_response_iss_parameter_supported); a CIMD install requires it',
         })
         return
+      }
+
+      // Minted before anything else that needs it: a DCR client registers a redirect
+      // URI carrying this nonce, and every saga compensation deletes only the row that
+      // carries it, so a concurrent install/reinstall of the same name that reclaimed
+      // the row is never destroyed (R3-H1).
+      const installId = randomUUID()
+
+      // The effective redirect URI. Per-server fails closed without a configured public
+      // origin: falling back to the request Host (as the shared callback still does)
+      // would register a URI the AS compares byte-for-byte against whatever Host the
+      // admin happened to use. Shared keeps its historical handling: DCR and CIMD
+      // require the origin below, pre-registered resolves it at consent.
+      const callbackOrigin = normalizeConfiguredOrigin(config.oauthCallbackBaseUrl)
+      let redirectUri: string | undefined
+      if (callbackVariant === 'per-server') {
+        try {
+          if (callbackOrigin === null) throw new InvalidRemoteRedirectUriInputError('no origin')
+          redirectUri =
+            body.mode === 'dcr'
+              ? buildRemoteRedirectUri({
+                  origin: callbackOrigin,
+                  variant: 'per-server',
+                  mode: 'dcr',
+                  serverName: body.serverName,
+                  installNonce: installId,
+                })
+              : buildRemoteRedirectUri({
+                  origin: callbackOrigin,
+                  variant: 'per-server',
+                  mode: 'pre-registered',
+                  serverName: body.serverName,
+                })
+        } catch (err) {
+          if (!(err instanceof InvalidRemoteRedirectUriInputError)) throw err
+          log.error(
+            { event: 'remote_oauth_per_server_callback_unconfigured', serverName: body.serverName },
+            'per-server remote install requires a configured public callback base URL (bare origin)'
+          )
+          res.status(503).json({ error: 'callback_base_url_unconfigured' })
+          return
+        }
+      } else if (callbackOrigin !== null) {
+        redirectUri = buildRemoteRedirectUri({ origin: callbackOrigin, variant: 'shared' })
+      }
+
+      if (body.mode === 'pre-registered' && callbackVariant === 'per-server') {
+        const conflict = await preRegisteredClientIdConflict(
+          gateway,
+          db,
+          config.mcpServersNamespace,
+          body.clientId as string
+        )
+        if (conflict !== null) {
+          log.warn(
+            { event: 'remote_install_client_id_in_use', serverName: body.serverName, conflict },
+            'remote pre-registered install rejected: client_id already backs another client'
+          )
+          res.status(409).json({
+            error: 'oauth_client_id_in_use',
+            conflict,
+            message:
+              'this client_id already backs another client; register a separate OAuth client for this server',
+          })
+          return
+        }
       }
 
       // Client mode: pre-registered/CIMD are fixed by the mode; DCR derives it from
@@ -616,10 +859,6 @@ export function createAdminRemoteMcpRouter(
         serverNamespace: targetNs,
         serverName,
       }
-      // Install-ownership token minted at the start of DCR step 0. Every compensation
-      // deletes ONLY the row carrying this install_id, so a concurrent install/reinstall
-      // of the same name that reclaimed the row is never destroyed (R3-H1).
-      const installId = randomUUID()
       let dcrRegistered = false
       let dcrClientId: string | undefined
       let dcrRegistrationClientUri: string | undefined
@@ -639,10 +878,7 @@ export function createAdminRemoteMcpRouter(
           )
         } else {
           // AS returned no RFC 7592 management endpoint — local delete is all we can do.
-          log.info(
-            { event: 'remote_oauth_dcr_rollback_local_only', serverName, namespace: targetNs },
-            'dcr rollback: no RFC 7592 registration_client_uri, local store delete only'
-          )
+          logDcrRevokeLocalOnly(serverName, Boolean(dcrRegistrationClientUri))
         }
       }
 
@@ -670,10 +906,9 @@ export function createAdminRemoteMcpRouter(
           return
         }
 
-        // redirect_uris single source of truth: the CIMD remote callback (never a
-        // re-hardcoded path). Fail closed if no public callback origin is configured.
-        const origin = normalizeConfiguredOrigin(config.oauthCallbackBaseUrl)
-        if (origin === null) {
+        // The client registers exactly the redirect URI built above; a DCR client also
+        // needs it on the shared callback, so fail closed if no origin is configured.
+        if (redirectUri === undefined) {
           log.error(
             { event: 'remote_oauth_dcr_callback_unconfigured', serverName },
             'dcr install requires a configured public callback base URL'
@@ -684,7 +919,7 @@ export function createAdminRemoteMcpRouter(
 
         const dcrRequest = buildDcrRequest(discovery, {
           clientMode,
-          redirectUris: [`${origin}${REMOTE_CALLBACK_PATH}`],
+          redirectUris: [redirectUri],
           scopes: derivedScopes(discovery),
         })
         const dcrOutcome = await registerDynamicClient(dcrDeps, registrationEndpoint, dcrRequest)
@@ -696,14 +931,17 @@ export function createAdminRemoteMcpRouter(
           // these variants carry the handle; non-2xx errors mint nothing.
           if (
             (dcrError.kind === 'auth_method_unsupported' || dcrError.kind === 'invalid_response') &&
-            dcrError.registrationClientUri &&
-            dcrError.registrationAccessToken
+            dcrError.minted
           ) {
-            await bestEffortRfc7592Delete(
-              dcrDeps,
-              dcrError.registrationClientUri,
-              dcrError.registrationAccessToken
-            )
+            if (dcrError.registrationClientUri && dcrError.registrationAccessToken) {
+              await bestEffortRfc7592Delete(
+                dcrDeps,
+                dcrError.registrationClientUri,
+                dcrError.registrationAccessToken
+              )
+            } else {
+              logDcrRevokeLocalOnly(serverName, Boolean(dcrError.registrationClientUri))
+            }
           }
           if (dcrError.kind === 'auth_method_unsupported') {
             log.warn(
@@ -722,6 +960,7 @@ export function createAdminRemoteMcpRouter(
           const {
             registrationAccessToken: _t,
             registrationClientUri: _u,
+            minted: _m,
             ...safeDetail
           } = dcrError as typeof dcrError & Partial<DcrMintHandle>
           res.status(400).json({ error: 'dcr_registration_failed', detail: safeDetail })
@@ -748,8 +987,40 @@ export function createAdminRemoteMcpRouter(
               mintedRegistrationClientUri,
               mintedRegistrationAccessToken
             )
+            return
           }
+          logDcrRevokeLocalOnly(serverName, Boolean(mintedRegistrationClientUri))
         }
+        // Refuse a client we cannot trust to redirect only to this installation, before
+        // anything is persisted. Per-server: the registered URI is the mix-up defence, so
+        // the AS must report exactly the one we asked for. Any variant: a client_id equal
+        // to the platform CIMD identity would be indistinguishable from that shared
+        // client downstream.
+        const redirectCheck = verifyDcrRedirectUris({
+          variant: callbackVariant,
+          requested: dcrRequest.redirect_uris,
+          response: registration,
+        })
+        const rejection = !redirectCheck.ok
+          ? redirectCheck.reason
+          : isCimdClientId(registration.client_id)
+            ? 'client_id_is_cimd_identity'
+            : null
+        if (rejection !== null) {
+          await revokeMintedClient()
+          log.warn(
+            {
+              event: 'remote_oauth_dcr_registration_rejected',
+              serverName,
+              variant: callbackVariant,
+              reason: rejection,
+            },
+            'dcr registration response rejected; revoked the minted client'
+          )
+          res.status(400).json({ error: 'dcr_registration_failed', detail: { kind: rejection } })
+          return
+        }
+
         // A public client carries no secret; never persist one the AS may have echoed
         // alongside a `none` downgrade.
         const dcrCredentials: UpsertDynamicClientInput = {
@@ -1179,6 +1450,11 @@ export function createAdminRemoteMcpRouter(
         contextUpdated: true,
         clientMode: effectiveClientMode,
         registrationMode: discovery.registrationMode,
+        callbackVariant,
+        // What the AS must hold for consent to work — the operator registers it for a
+        // pre-registered client. Absent only for a shared pre-registered install with no
+        // configured origin, whose URI is resolved from the request at consent.
+        ...(redirectUri ? { redirectUri } : {}),
         ...(clientSecretName ? { clientSecretName } : {}),
       })
     })

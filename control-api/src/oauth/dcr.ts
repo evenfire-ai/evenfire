@@ -1,7 +1,9 @@
 import { type PinnedFetchError, type PinnedTransport, pinnedFetch } from '../http/pinnedFetch.js'
 import type { DnsResolver, ValidationError } from '../http/validateMcpServerSpec.js'
 import { type Logger, rootLogger } from '../observability/logger.js'
+import { MAX_CLIENT_ID_LENGTH } from './cimdIdentity.js'
 import type { DiscoveryResult } from './discovery.js'
+import type { RemoteCallbackVariant } from './remoteCallback.js'
 
 /**
  * Dynamic Client Registration client (RFC 7591), spec 02 C2 / D-5 / DEC-18.
@@ -59,6 +61,11 @@ export interface DcrRegistrationResponse {
   /** RFC 7592 management endpoint. */
   registration_client_uri?: string
   token_endpoint_auth_method?: string
+  /**
+   * RFC 7591 §3.2.1: the AS echoes the registered metadata, including the redirect
+   * URIs it actually accepted. Untrusted — check it with {@link verifyDcrRedirectUris}.
+   */
+  redirect_uris?: unknown
   [k: string]: unknown
 }
 
@@ -72,6 +79,11 @@ export interface DcrRegistrationResponse {
  * In-memory only — used solely for the cleanup DELETE, never persisted or logged.
  */
 export interface DcrMintHandle {
+  /**
+   * Set when a client WAS minted at the AS, with or without a management handle, so
+   * the caller can tell "cleaned up" from "left behind" when the handle is missing.
+   */
+  minted?: true
   registrationClientUri?: string
   registrationAccessToken?: string
 }
@@ -259,6 +271,22 @@ export async function registerDynamicClient(
 
   const assigned = parsed as DcrRegistrationResponse
 
+  // An oversized client_id is refused before anything compares, stores or logs it. A
+  // client WAS minted, so the RFC 7592 handle goes back for cleanup.
+  if (Buffer.byteLength(assigned.client_id, 'utf8') > MAX_CLIENT_ID_LENGTH) {
+    return {
+      ok: false,
+      error: {
+        kind: 'invalid_response',
+        url: endpoint,
+        detail: `registration response client_id exceeds ${MAX_CLIENT_ID_LENGTH} bytes`,
+        minted: true,
+        registrationClientUri: stringOrUndefined(assigned.registration_client_uri),
+        registrationAccessToken: stringOrUndefined(assigned.registration_access_token),
+      },
+    }
+  }
+
   // Fail-closed on an auth method we cannot present. The AS's assignment wins over
   // what we requested; a bare absence (undefined/null) means it honored our request.
   // The AS response is untrusted, so we reject anything that is NOT a presentable
@@ -282,6 +310,7 @@ export async function registerDynamicClient(
         detail: `authorization server assigned token_endpoint_auth_method "${effectiveAuthMethod}", which control-api cannot present`,
         // A client WAS minted (2xx + client_id) but is unusable — expose the RFC 7592
         // handle so the caller can clean it up.
+        minted: true,
         registrationClientUri: assigned.registration_client_uri,
         registrationAccessToken: assigned.registration_access_token,
       },
@@ -308,6 +337,7 @@ export async function registerDynamicClient(
         detail: 'confidential registration returned no client_secret',
         // A client WAS minted (2xx + client_id) but is unusable — expose the RFC 7592
         // handle so the caller can clean it up.
+        minted: true,
         registrationClientUri: assigned.registration_client_uri,
         registrationAccessToken: assigned.registration_access_token,
       },
@@ -320,4 +350,49 @@ export async function registerDynamicClient(
     effectiveAuthMethod: presentedAuthMethod,
     effectiveClientMode,
   }
+}
+
+function stringOrUndefined(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined
+}
+
+export type DcrRedirectUrisCheck =
+  | { ok: true }
+  | { ok: false; reason: 'redirect_uris_missing' | 'redirect_uris_mismatch' }
+
+/**
+ * Check the `redirect_uris` a registration response reports against the ones we sent.
+ *
+ *   per-server: REQUIRED and exactly equal (same strings, no normalization). The
+ *               per-server redirect URI is the only mix-up defence there, so a client
+ *               the AS registered with a different or unreported URI cannot be trusted
+ *               to redirect only to this installation.
+ *   shared:     the response `iss` is the defence, so an ABSENT (or `null`) field is
+ *               tolerated (ASes that omit the echo keep working); a PRESENT one that
+ *               differs still fails.
+ *
+ * Comparison is set equality over exact strings (RFC 7591 gives the array no order).
+ * Pure; the caller turns a failure into an install failure with RFC 7592 cleanup.
+ */
+export function verifyDcrRedirectUris(input: {
+  variant: RemoteCallbackVariant
+  requested: readonly string[]
+  response: Pick<DcrRegistrationResponse, 'redirect_uris'>
+}): DcrRedirectUrisCheck {
+  const reported = input.response.redirect_uris
+  // JSON `null` is how some serializers spell an omitted field, so it counts as absent.
+  if (reported === undefined || reported === null) {
+    return input.variant === 'shared'
+      ? { ok: true }
+      : { ok: false, reason: 'redirect_uris_missing' }
+  }
+  if (
+    !Array.isArray(reported) ||
+    reported.length !== input.requested.length ||
+    !reported.every(uri => typeof uri === 'string' && input.requested.includes(uri)) ||
+    !input.requested.every(uri => reported.includes(uri))
+  ) {
+    return { ok: false, reason: 'redirect_uris_mismatch' }
+  }
+  return { ok: true }
 }

@@ -105,6 +105,10 @@ describe('discoveryHttpStatus — DiscoveryError → HTTP status decision table'
       status: 400,
     },
     { error: { kind: 'issuer_mismatch', detail: 'issuer != base' }, status: 400 },
+    {
+      error: { kind: 'as_endpoints_cross_site', field: 'token', detail: 'token on another site' },
+      status: 400,
+    },
   ]
 
   for (const { error, status } of cases) {
