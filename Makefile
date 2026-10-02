@@ -1553,3 +1553,23 @@ minikube-build-627-github: ## Build the reviewed GitHub MCP locally for the owne
 	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
 		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
 		bash scripts/minikube/with-t2-mutation-lock.sh -- bash scripts/e2e/build-627-github.sh
+
+# Experimental Control API calibration owns temporary NODE_OPTIONS and restores it
+# under the same branch-profile mutation lease. It produces no T2 verdict.
+export CONTROL_API_MEMORY_CONFIG CONTROL_API_MEMORY_READ_ONLY
+.PHONY: minikube-control-api-authorize-memory minikube-control-api-authorize-memory-body
+minikube-control-api-authorize-memory:
+	@test -n "$${CONTROL_API_MEMORY_CONFIG:-}" || { echo "CONTROL_API_MEMORY_CONFIG required"; exit 1; }
+	@if [ "$${CONTROL_API_MEMORY_READ_ONLY:-false}" = "true" ]; then \
+		node scripts/tests/measure-control-api-authorize-memory.mjs --config "$$CONTROL_API_MEMORY_CONFIG" --inspect-plan; \
+	else \
+		T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(CONTROL_API_REAL_PG_CONTEXT)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- \
+		$(MAKE) --no-print-directory minikube-control-api-authorize-memory-body; \
+	fi
+minikube-control-api-authorize-memory-body:
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(CONTROL_API_REAL_PG_CONTEXT)" \
+		T2_SKIP_LOCK=true T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		bash scripts/minikube/require-t2-mutation-lock.sh
+	@T2_SKIP_LOCK=true node scripts/tests/measure-control-api-authorize-memory.mjs --config "$$CONTROL_API_MEMORY_CONFIG"

@@ -31,6 +31,21 @@ export class InspectorClient {
     if (!Number.isSafeInteger(data.pid) || !Number.isSafeInteger(data.at) || !/^24\./.test(data.nodeVersion)) throw new Error('Actual server process identity is invalid')
     return data
   }
+  async owners() {
+    const group = 'qa-admission-owner-observation'
+    try {
+      // Inspect the already-loaded production class and its retained singleton.
+      // A separate import in the auxiliary process would observe a false zero.
+      const prototype = await this.call('Runtime.evaluate', { expression: "process.mainModule.require('./middleware/llmProviderAttemptBodyAdmission.js').AuthorizeBodyAdmission.prototype", objectGroup: group })
+      if (prototype?.exceptionDetails || !prototype?.result?.objectId) throw new Error('Actual admission prototype unavailable')
+      const objects = await this.call('Runtime.queryObjects', { prototypeObjectId: prototype.result.objectId, objectGroup: group })
+      if (!objects?.objects?.objectId) throw new Error('Actual admission instances unavailable')
+      const read = await this.call('Runtime.callFunctionOn', { objectId: objects.objects.objectId, functionDeclaration: 'function(){return {pid:process.pid,at:Date.now(),instanceCount:this.length,inFlight:this.length===1?this[0].snapshot().inFlight:null}}', returnByValue: true })
+      const value = read?.result?.value
+      if (read?.exceptionDetails || value?.instanceCount !== 1 || !Number.isSafeInteger(value.pid) || !Number.isSafeInteger(value.at) || !Number.isSafeInteger(value.inFlight) || value.inFlight < 0) throw new Error('Actual singleton admission ownership is unknown')
+      return { kind: 'native-inspector-AuthorizeBodyAdmission.snapshot', ...value }
+    } finally { await this.call('Runtime.releaseObjectGroup', { objectGroup: group }) }
+  }
   async forceGc() {
     const before = await this.snapshot()
     await this.call('HeapProfiler.enable')

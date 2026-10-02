@@ -1,4 +1,4 @@
-/** Test-only in-pod driver. Production signing, HTTP, PostgreSQL and terminal lifecycle remain real. */
+/** Test-only in-pod driver. Signing, HTTP, PostgreSQL and issued-ticket expiry remain real. */
 import fs from 'node:fs'
 import path from 'node:path'
 import http from 'node:http'
@@ -7,6 +7,30 @@ import { createRequire } from 'node:module'
 import { once } from 'node:events'
 import { connectInspector, parseCgroup } from './control-api-authorize-memory-inspector.mjs'
 
+type CleanupRow = { id: string; invocation_id: string; host_ref: string; request_hash: string; connection_id: string; status: string; ticket_status: string; ticket_expired: boolean; reservation_id: string | null; reservation_host_ref: string | null; budget_id: string | null }
+type ConfirmedAttempt = { invocationId: string; hostRef: string; requestHash: string }
+
+/** An issued ticket cannot be receipt-finalized. Only known, never-dispatched
+ * authorizations with observed ticket expiry may release their own ephemeral reservation through the real
+ * Host endpoint; the issued ticket and authorized audit row remain untouched.
+ */
+export function ownedIssuedCleanupPlan(rows: CleanupRow[], bindings: any[], confirmed: Map<string, ConfirmedAttempt>) {
+  const attempts = new Set<string>(), reservations = new Map<string, { reservationId: string; hostRef: string }>()
+  for (const row of rows) {
+    const binding = bindings.find(value => value.hostRef === row.host_ref)
+    const witness = confirmed.get(row.id)
+    if (!binding || binding.connectionId !== row.connection_id || !witness || witness.invocationId !== row.invocation_id || witness.hostRef !== row.host_ref || witness.requestHash !== row.request_hash) throw new Error('unconfirmed or changed attempt ownership')
+    if (row.status !== 'authorized' || row.ticket_status !== 'issued' || row.ticket_expired !== true) throw new Error('issued benchmark lifecycle changed')
+    attempts.add(row.id)
+    if (row.reservation_id !== null) {
+      if (row.reservation_host_ref !== row.host_ref || row.budget_id !== binding.budgetId) throw new Error('reservation ownership changed')
+      reservations.set(row.reservation_id, { reservationId: row.reservation_id, hostRef: row.host_ref })
+    }
+  }
+  if (attempts.size !== confirmed.size) throw new Error('confirmed authorization audit is incomplete')
+  return { retainedAuthorizedAuditRows: attempts.size, reservations: [...reservations.values()] }
+}
+
 type Frame = { callId: string; kind: string; requestId?: string; length?: number; options?: Record<string, unknown> }
 export async function runCompanion(): Promise<void> {
   const output = process.stdout.write.bind(process.stdout)
@@ -14,17 +38,28 @@ export async function runCompanion(): Promise<void> {
   // and secret-bearing response bodies cannot reach the controller.
   process.stdout.write = () => true; process.stderr.write = () => true
   const emit = (value: unknown) => output(JSON.stringify(value) + '\n')
-  const sockets = new Map<string, any>(), created = new Map<string, any>()
+  const sockets = new Map<string, any>(), created = new Map<string, any>(), confirmed = new Map<string, ConfirmedAttempt>()
+  let releasedReservationRows = 0
   const cookieName = 'control_ui_admin_session'
   const knownErrors = new Set(['authorize_capacity_exceeded', 'payload_too_large', 'invalid_request', 'request_timeout', 'authorize_timeout', 'unauthorized', 'Unauthorized', 'disabled', 'insufficient_scope', 'no_grant', 'model_not_allowed', 'unassigned_connection', 'connection_unavailable', 'budget_denied', 'host_binding_mismatch', 'provider_unavailable', 'stale_generation', 'idempotency_conflict'])
   let options: any, inspector: any, prod: any, lockClient: any
   const require = createRequire(path.join(process.cwd(), 'package.json'))
   const hash = (value: Uint8Array) => createHash('sha256').update(value).digest('hex')
+  const processCounts = (serverPid: number) => {
+    const ids = fs.readdirSync('/proc').filter(name => /^\d+$/.test(name)); let applications = 0, nodes = 0
+    for (const id of ids) {
+      let args: string[]; try { args = fs.readFileSync(`/proc/${id}/cmdline`, 'utf8').split('\0') } catch (error: any) { if (error.code === 'ENOENT') continue; throw error }
+      if (path.basename(args[0] || '') !== 'node') continue
+      nodes++; if (args.includes('dist/main.js') || args.includes(path.join(process.cwd(), 'dist/main.js'))) { if (Number(id) !== serverPid) throw new Error('another application process is measured'); applications++ }
+    }
+    if (applications !== 1) throw new Error('application process count is unknown')
+    return { applicationProcesses: applications, nodeProcessesIncludingAuxiliary: nodes }
+  }
   const cgroup = () => parseCgroup({ current: fs.readFileSync('/sys/fs/cgroup/memory.current', 'utf8'), peak: fs.readFileSync('/sys/fs/cgroup/memory.peak', 'utf8'), limit: fs.readFileSync('/sys/fs/cgroup/memory.max', 'utf8'), events: fs.readFileSync('/sys/fs/cgroup/memory.events', 'utf8') })
-  function ordinary(method: string, route: string, body?: unknown, cookie = options.cookie): Promise<any> {
+  function ordinary(method: string, route: string, body?: unknown, cookie = options.cookie, extraHeaders: Record<string, string> = {}): Promise<any> {
     return new Promise((resolve, reject) => {
       const request = http.request({ hostname: '127.0.0.1', port: prod.config.port, method, path: route,
-        headers: { 'content-type': 'application/json', ...(cookie ? { cookie: `${cookieName}=${cookie}` } : {}) } }, response => {
+        headers: { 'content-type': 'application/json', ...(cookie ? { cookie: `${cookieName}=${cookie}` } : {}), ...extraHeaders } }, response => {
         const chunks: Buffer[] = []; let bytes = 0
         response.on('data', chunk => { bytes += chunk.length; if (bytes > 65536) request.destroy(new Error('bounded response exceeded')); else chunks.push(chunk) })
         response.on('end', () => { try { resolve({ status: response.statusCode, headers: response.headers, body: bytes ? JSON.parse(Buffer.concat(chunks).toString()) : null }) } catch { reject(new Error('invalid bounded response')) } })
@@ -33,16 +68,32 @@ export async function runCompanion(): Promise<void> {
       if (body) request.write(JSON.stringify(body)); request.end()
     })
   }
+  const reservationJoin = `r.host_ref = a.host_ref AND (r.id::text = a.budget_reservation_id OR r.task_ref = a.invocation_id || ':' || a.attempt_generation::text || ':' || a.provider_attempt_index::text)`
   async function counts() {
     const rows = await prod.db.pool.query(`SELECT COUNT(DISTINCT a.id)::int AS total,
-      COUNT(DISTINCT a.id) FILTER (WHERE a.status <> 'finalized')::int AS active,
-      COUNT(DISTINCT t.jti) FILTER (WHERE t.status <> 'finalized' AND t.expires_at > NOW())::int AS active_tickets,
-      COUNT(DISTINCT r.id)::int AS reservations FROM llm_provider_attempts a
-      LEFT JOIN llm_provider_attempt_tickets t ON t.provider_attempt_id = a.id
-      LEFT JOIN budget_pending_reservations r ON r.id::text = a.budget_reservation_id OR r.task_ref = a.budget_reservation_id
+      COUNT(DISTINCT a.id) FILTER (WHERE a.status = 'authorized')::int AS authorized_audit_rows,
+      COUNT(DISTINCT a.id) FILTER (WHERE a.status = 'redeemed')::int AS redeemed_audit_rows,
+      COUNT(DISTINCT a.id) FILTER (WHERE a.status = 'finalized')::int AS finalized_audit_rows,
+      COUNT(DISTINCT t.jti)::int AS tickets,
+      COUNT(DISTINCT t.jti) FILTER (WHERE t.status = 'issued' AND t.expires_at > NOW())::int AS live_issued_tickets,
+      COUNT(DISTINCT t.jti) FILTER (WHERE t.status = 'issued' AND t.expires_at <= NOW())::int AS expired_issued_tickets,
+      COUNT(DISTINCT t.jti) FILTER (WHERE t.status = 'redeemed')::int AS redeemed_tickets,
+      COUNT(DISTINCT t.jti) FILTER (WHERE t.status = 'finalized')::int AS finalized_tickets,
+      COUNT(DISTINCT r.id)::int AS reservation_rows,
+      COUNT(DISTINCT r.id) FILTER (WHERE r.expires_at > NOW())::int AS active_reservations,
+      COALESCE(GREATEST(0, CEIL(EXTRACT(EPOCH FROM (MAX(t.expires_at) FILTER (WHERE t.status = 'issued') - NOW())) * 1000)), 0)::int AS expiry_remaining_ms,
+      NOW() AS observed_at
+      FROM llm_provider_attempts a LEFT JOIN llm_provider_attempt_tickets t ON t.provider_attempt_id = a.id
+      LEFT JOIN budget_pending_reservations r ON ${reservationJoin}
       WHERE a.invocation_id LIKE $1 AND a.host_ref = ANY($2::text[]) AND a.provider = 'grok-subscription'`, [`${options.runId}-%`, options.bindings.map((binding: any) => binding.hostRef)])
     const value = rows.rows[0]
-    return { total: value.total, active: value.active, activeTickets: value.active_tickets, reservations: value.reservations }
+    return { total: value.total, retainedAuthorizedAuditRows: value.authorized_audit_rows, redeemedAuditRows: value.redeemed_audit_rows, finalizedAuditRows: value.finalized_audit_rows,
+      tickets: value.tickets, liveIssuedTickets: value.live_issued_tickets, expiredIssuedTickets: value.expired_issued_tickets, redeemedTickets: value.redeemed_tickets, finalizedTickets: value.finalized_tickets,
+      reservationRows: value.reservation_rows, activeReservations: value.active_reservations, executionTicketExpiryRemainingMs: value.expiry_remaining_ms, observedAt: value.observed_at.toISOString() }
+  }
+  function hostHeaders(binding: any) {
+    const issued = prod.jwt.issueMcpHostAccessJwt(prod.config.hostsNamespace, 'standalone', [binding.hostRef], { workflowControlScopes: ['llm:grok:execute', 'llm:codex:execute'], hccCredential: { hostUid: binding.hostUid } })
+    return { authorization: `Bearer ${issued.token}` }
   }
   async function hello(input: any) {
     options = input
@@ -51,17 +102,24 @@ export async function runCompanion(): Promise<void> {
     prod = { config: require('./dist/config.js').config, db: require('./dist/db.js'), jwt: require('./dist/utils/auth/mcpHostJwtToken.js'),
       connections: require('./dist/services/grokSubscriptionConnection.js'),
       policy: require('./dist/middleware/llmProviderAttemptAdmissionLimits.js').LLM_PROVIDER_ATTEMPT_ADMISSION_POLICY,
-      grok: require('@clerum/grok-provider-attempt-contract'), finalize: require('./dist/services/grokProviderAttemptFinalization.js').finalizeGrokProviderAttempt,
-      opaque: require('./dist/services/llmProviderAttemptRedemption.js').opaqueAttemptReceipt }
-    if (!prod.config.grokSubscriptionEnabled || !prod.config.codexSubscriptionEnabled) throw new Error('both actual provider validators must be enabled')
+      grok: require('@clerum/grok-provider-attempt-contract') }
+    if (options.hostNamespace !== prod.config.hostsNamespace || !prod.config.grokSubscriptionEnabled || !prod.config.codexSubscriptionEnabled) throw new Error('both actual provider validators must be enabled')
+    if (prod.config.subscriptionCatalogSyncCronEnabled !== false || prod.config.llmCatalogSyncCronEnabled !== false) throw new Error('actual vendor crons must be disabled')
     inspector = await connectInspector(options.inspectorPort)
     const server = await inspector.snapshot()
     const flags = [...server.execArgv, ...server.nodeOptions.split(/\s+/).filter(Boolean)]
-    if (server.cwd !== process.cwd() || !server.argv[1]?.endsWith('/dist/main.js') ||
-        !flags.includes(`--max-old-space-size=${options.candidate.heapSizeMiB}`) || !flags.includes(`--inspect=127.0.0.1:${options.inspectorPort}`) ||
+    if (server.cwd !== process.cwd() || server.argv.length !== 2 || !server.argv[1]?.endsWith('/dist/main.js') ||
+        flags.filter(flag => flag.startsWith('--max-old-space-size=')).length !== 1 || !flags.includes(`--max-old-space-size=${options.candidate.heapSizeMiB}`) || flags.filter(flag => flag.startsWith('--inspect=')).length !== 1 || !flags.includes(`--inspect=127.0.0.1:${options.inspectorPort}`) ||
         flags.some(flag => !/^--(?:max-old-space-size=\d+|inspect=127\.0\.0\.1:\d+|enable-source-maps)$/.test(flag))) throw new Error('actual server source/argv mismatch')
     const expected = { maxInFlight: options.candidate.concurrency, readDeadlineMs: options.candidate.readDeadlineMs, workDeadlineMs: options.candidate.workDeadlineMs, closeGraceMs: options.candidate.closeGraceMs }
-    if (JSON.stringify(prod.policy) !== JSON.stringify(expected)) throw new Error('actual compiled admission policy differs from candidate')
+    if (!Object.keys(expected).every(key => prod.policy[key] === expected[key]) || Object.keys(prod.policy).length !== 4) throw new Error('actual compiled admission policy differs from candidate')
+    if (options.pressureOnly === true) {
+      if (options.bindings.some((binding: any) => !/^[a-z0-9][a-z0-9-]{0,62}$/.test(binding.hostRef) || !/^[a-f0-9-]{36}$/.test(binding.hostUid))) throw new Error('pressure Host identity invalid')
+      if ((await counts()).total !== 0) throw new Error('pressure run is not fresh')
+      const owner = await inspector.owners()
+      if (owner.pid !== server.pid || owner.inFlight !== 0) throw new Error('pressure baseline is not quiescent')
+      return { pressureOnly: true, bindings: options.bindings.map((binding: any) => ({ hostRef: binding.hostRef, hostUid: binding.hostUid })), policy: prod.policy, serverPid: server.pid, owner, compiledPolicySha256: hash(fs.readFileSync('./dist/middleware/llmProviderAttemptAdmissionLimits.js')) }
+    }
     if (!options.cookie) {
       if (!options.operatorPassword || !options.operatorUser) throw new Error('operator material unavailable')
       const login = await ordinary('POST', '/api/v1/admin/auth/login', { username: options.operatorUser, password: options.operatorPassword }, '')
@@ -84,12 +142,12 @@ export async function runCompanion(): Promise<void> {
       const budget = await prod.db.pool.query('SELECT name FROM token_budgets WHERE id = $1', [binding.budgetId])
       if (budget.rows.length !== 1 || !budget.rows[0].name.includes(options.fixtureRunId)) throw new Error('budget not fixture-owned')
       const policyHash = prod.grok.computeGrokPolicyHash({ model: 'grok-4.6', catalogRevision: connection.catalogRevision, credentialRevision: connection.credentialRevision, connectionKey: binding.connectionKey })
-      bindings.push({ ...binding, connectionId: connection.id, policyRevision: connection.catalogRevision, policyHash })
+      bindings.push({ hostRef: binding.hostRef, hostUid: binding.hostUid, connectionKey: binding.connectionKey, budgetId: binding.budgetId, connectionId: connection.id, policyRevision: connection.catalogRevision, policyHash })
     }
     options.bindings = bindings
     if ((await counts()).total !== 0) throw new Error('run id is not fresh')
-    return { bindings, policy: prod.policy, compiledPolicySha256: hash(fs.readFileSync('./dist/middleware/llmProviderAttemptAdmissionLimits.js')),
-      server: { ...server, nodeOptions: undefined }, cgroup: cgroup(), operatorSessionValidated: true, gfsParentResourceId: options.gfsParentResourceId,
+    return { bindings, policy: prod.policy, executionTicketTtlMs: prod.grok.LIMITS.executionTicketTtlMs, compiledPolicySha256: hash(fs.readFileSync('./dist/middleware/llmProviderAttemptAdmissionLimits.js')),
+      server: { ...server, nodeOptions: undefined, ...processCounts(server.pid) }, cgroup: cgroup(), operatorSessionValidated: true, gfsParentResourceId: options.gfsParentResourceId,
       auxiliary: { pid: process.pid, memory: process.memoryUsage(), inputHighWaterMark: process.stdin.readableHighWaterMark } }
   }
   async function unlock() {
@@ -98,12 +156,12 @@ export async function runCompanion(): Promise<void> {
   }
   function open(input: any) {
     if (sockets.size >= 8 || sockets.has(input.requestId) || !Number.isSafeInteger(input.length) || input.length < 1 || input.length > 36 * 1024 * 1024) throw new Error('invalid bounded request')
+    if (options.pressureOnly === true && (input.route !== 'authorize' || input.length !== 35 * 1024 * 1024 - 4096 || !input.requestId?.startsWith(`${options.runId}-pressure-`) || sockets.size >= prod.policy.maxInFlight)) throw new Error('pressure must remain an owned incomplete authorize body')
     let route: string; const headers: Record<string, string> = { 'content-type': 'application/json', 'content-length': String(input.length) }
     if (input.route === 'authorize') {
       const binding = options.bindings.find((value: any) => value.hostRef === input.hostRef)
       if (!binding) throw new Error('Host not owned')
-      const issued = prod.jwt.issueMcpHostAccessJwt(prod.config.hostsNamespace, 'standalone', [binding.hostRef], { workflowControlScopes: ['llm:grok:execute', 'llm:codex:execute'], hccCredential: { hostUid: binding.hostUid } })
-      headers.authorization = `Bearer ${issued.token}`; route = '/api/v1/mcp-host/llm/provider-attempts/authorize'
+      Object.assign(headers, hostHeaders(binding)); route = '/api/v1/mcp-host/llm/provider-attempts/authorize'
     } else if (input.route === 'gfs') {
       if (!input.name?.startsWith(`${options.runId}-`)) throw new Error('GFS filename not owned')
       headers.cookie = `${cookieName}=${options.cookie}`; route = `/api/v1/gfs/proxy/v1/resources/${options.gfsParentRid}/children`
@@ -112,11 +170,18 @@ export async function runCompanion(): Promise<void> {
     const request = http.request({ hostname: '127.0.0.1', port: prod.config.port, method: 'POST', path: route, headers }, response => {
       const chunks: Buffer[] = []; let bytes = 0
       response.on('data', chunk => { bytes += chunk.length; if (bytes > 65536) request.destroy(new Error('response bound')); else chunks.push(chunk) })
-      response.on('end', () => {
+      response.on('end', async () => {
         try {
           const body = bytes ? JSON.parse(Buffer.concat(chunks).toString()) : null
           let data: any = { status: response.statusCode, acceptedWriteBytes: state.acceptedWriteBytes, maxWritableBytes: state.maxWritableBytes, closedByClient: state.closedByClient, error: knownErrors.has(body?.error) ? body.error : undefined }
-          if (input.route === 'authorize' && response.statusCode === 200) data = { ...data, providerAttemptId: body.providerAttemptId, requestHash: body.requestHash }
+          if (input.route === 'authorize' && response.statusCode === 200) {
+            const rows = await prod.db.pool.query(`SELECT a.id, a.invocation_id, a.host_ref, a.request_hash, a.status, r.id::text AS reservation_id, r.budget_id::text, r.host_ref AS reservation_host_ref, r.est_amount, r.expires_at > NOW() AS reservation_active, t.status AS ticket_status, t.expires_at FROM llm_provider_attempts a LEFT JOIN budget_pending_reservations r ON r.id::text = a.budget_reservation_id LEFT JOIN llm_provider_attempt_tickets t ON t.provider_attempt_id = a.id WHERE a.id = $1`, [body.providerAttemptId])
+            if (rows.rows.length !== 1 || rows.rows[0].invocation_id !== input.requestId || rows.rows[0].host_ref !== input.hostRef || rows.rows[0].request_hash !== body.requestHash || rows.rows[0].status !== 'authorized') throw new Error('real durable authorize witness missing')
+            const binding = options.bindings.find((value: any) => value.hostRef === input.hostRef), witness = rows.rows[0]
+            if (!binding || witness.budget_id !== binding.budgetId || witness.reservation_host_ref !== input.hostRef || Number(witness.est_amount) !== 200 || witness.reservation_active !== true || witness.ticket_status !== 'issued') throw new Error('real danger-zone reservation witness missing')
+            confirmed.set(body.providerAttemptId, { invocationId: input.requestId, hostRef: input.hostRef, requestHash: body.requestHash })
+            data = { ...data, providerAttemptId: body.providerAttemptId, requestHash: body.requestHash, durableRowVerified: true, reservationVerified: true, reservationAmount: Number(witness.est_amount), ticketExpiresAt: witness.expires_at.toISOString() }
+          }
           if (input.route === 'gfs' && response.statusCode === 201 && body?.ok === true) {
             const value = body.data
             if (value.name !== input.name || value.parentResourceId !== options.gfsParentResourceId || value.bytes !== input.decodedBytes || value.kind !== 'file') throw new Error('GFS receipt mismatch')
@@ -145,11 +210,19 @@ export async function runCompanion(): Promise<void> {
   async function cleanup() {
     for (const state of sockets.values()) { state.closedByClient = true; state.request.destroy() }
     await unlock()
-    const rows = await prod.db.pool.query(`SELECT a.id, a.request_hash, a.connection_id, t.jti::text FROM llm_provider_attempts a JOIN llm_provider_attempt_tickets t ON t.provider_attempt_id = a.id WHERE a.invocation_id LIKE $1 AND a.host_ref = ANY($2::text[]) AND a.provider = 'grok-subscription'`, [`${options.runId}-%`, options.bindings.map((value: any) => value.hostRef)])
-    for (const row of rows.rows) {
-      if (!options.bindings.some((value: any) => value.connectionId === row.connection_id)) throw new Error('attempt owner changed')
-      const opaque = prod.opaque({ jti: row.jti, providerAttemptId: row.id, requestHash: row.request_hash })
-      await prod.finalize({ attemptReceipt: opaque, receipt: { schemaVersion: 'grok-attempt-receipt.v1', providerAttemptId: row.id, requestHash: row.request_hash, outcome: 'canceled' } })
+    const rows = await prod.db.pool.query(`SELECT a.id::text, a.invocation_id, a.host_ref, a.request_hash, a.connection_id::text, a.status, t.status AS ticket_status, t.expires_at <= NOW() AS ticket_expired,
+      r.id::text AS reservation_id, r.host_ref AS reservation_host_ref, r.budget_id::text
+      FROM llm_provider_attempts a LEFT JOIN llm_provider_attempt_tickets t ON t.provider_attempt_id = a.id
+      LEFT JOIN budget_pending_reservations r ON ${reservationJoin}
+      WHERE a.invocation_id LIKE $1 AND a.host_ref = ANY($2::text[]) AND a.provider = 'grok-subscription'`, [`${options.runId}-%`, options.bindings.map((value: any) => value.hostRef)])
+    const plan = ownedIssuedCleanupPlan(rows.rows, options.bindings, confirmed)
+    // This existing Host endpoint releases only ephemeral reservations. It does
+    // not manufacture a receipt, redeem a ticket, or rewrite the audit ledger.
+    for (const reservation of plan.reservations) {
+      const binding = options.bindings.find((value: any) => value.hostRef === reservation.hostRef)
+      const response = await ordinary('POST', '/api/v1/internal/budgets/release', { host_ref: reservation.hostRef, reservationId: reservation.reservationId }, '', hostHeaders(binding))
+      if (response.status !== 200 || !Number.isInteger(response.body?.released) || response.body.released < 0 || response.body.released > 1) throw new Error('owned reservation release refused')
+      releasedReservationRows += response.body.released
     }
     for (const [rid, expected] of created) {
       const current = await ordinary('GET', `/api/v1/gfs/proxy/v1/resources/${rid}`)
@@ -159,16 +232,23 @@ export async function runCompanion(): Promise<void> {
       created.delete(rid)
     }
     const after = await counts()
-    if (after.active || after.activeTickets || after.reservations) throw new Error('terminal lifetime incomplete')
-    return { ...after, ownedGfsRemaining: created.size, retainedFinalizedAuditRows: rows.rows.length }
+    if (after.reservationRows || after.activeReservations || after.redeemedTickets || after.finalizedTickets || after.retainedAuthorizedAuditRows !== confirmed.size || after.tickets !== confirmed.size) throw new Error('issued cleanup incomplete')
+    return { ...after, lifecycle: 'pg-issued-expiry-before-host-release', ownedGfsRemaining: created.size, releaseEndpoint: '/api/v1/internal/budgets/release', releasedReservationRows }
   }
   async function command(input: any): Promise<unknown> {
-    if (input.kind === 'hello') return hello(input.options)
+    if (input.kind === 'hello') { if (prod) throw new Error('private runtime binding cannot be replaced'); return hello(input.options) }
     if (!prod) throw new Error('runtime admission required')
+    if (options.pressureOnly === true && !['open', 'close', 'owners', 'counts', 'health'].includes(input.kind)) throw new Error('pressure mode cannot advance business work')
     if (input.kind === 'open') return open(input)
     if (input.kind === 'end') { sockets.get(input.requestId)?.request.end(); return { ended: true } }
     if (input.kind === 'close') { const state = sockets.get(input.requestId); if (state) { state.closedByClient = true; state.request.destroy() }; return { clientClosed: true } }
     if (input.kind === 'counts') return counts()
+    if (input.kind === 'owners') {
+      const owner = await inspector.owners()
+      const incomplete = [...sockets.values()].map(state => ({ requestId: state.input.requestId, acceptedWriteBytes: state.acceptedWriteBytes, declaredBytes: state.input.length, closedByClient: state.closedByClient }))
+      if (incomplete.some(value => value.acceptedWriteBytes >= value.declaredBytes)) throw new Error('pressure body is not incomplete')
+      return { ...owner, incompleteFixtureBodies: incomplete }
+    }
     if (input.kind === 'lock') {
       if (lockClient) throw new Error('lock already held')
       lockClient = await prod.db.pool.connect(); await lockClient.query('BEGIN'); await lockClient.query('SET LOCAL statement_timeout = 60000')
@@ -181,7 +261,7 @@ export async function runCompanion(): Promise<void> {
       const pid = (await lockClient.query('SELECT pg_backend_pid() AS pid')).rows[0].pid
       return (await prod.db.pool.query("SELECT COUNT(*)::int AS count FROM pg_stat_activity WHERE $1::int = ANY(pg_blocking_pids(pid)) AND wait_event_type = 'Lock' AND usename = current_user", [pid])).rows[0]
     }
-    if (input.kind === 'sample') return { server: await inspector.snapshot(), cgroup: cgroup() }
+    if (input.kind === 'sample') { const server = await inspector.snapshot(); return { server: { ...server, nodeOptions: undefined, ...processCounts(server.pid) }, cgroup: cgroup() } }
     if (input.kind === 'gc') return { gc: await inspector.forceGc(), cgroup: cgroup() }
     if (input.kind === 'coverage-start') { await inspector.startCoverage(); return { started: true } }
     if (input.kind === 'coverage') return inspector.coverage()
@@ -199,7 +279,8 @@ export async function runCompanion(): Promise<void> {
         if (remaining) {
           const length = Math.min(remaining, chunk.length - offset), state = sockets.get(frame.requestId!)
           if (!state) throw new Error('request closed before streaming completed')
-          state.acceptedWriteBytes += length
+          if (options.pressureOnly === true && (state.acceptedWriteBytes + length > 65536 || state.acceptedWriteBytes + length >= state.input.length)) throw new Error('pressure body cannot complete')
+            state.acceptedWriteBytes += length
           const writable = state.request.write(chunk.subarray(offset, offset + length))
           state.maxWritableBytes = Math.max(state.maxWritableBytes, state.request.writableLength)
           if (!writable) await once(state.request, 'drain')
@@ -221,5 +302,5 @@ export async function runCompanion(): Promise<void> {
     }
     if (remaining || header.length) throw new Error('incomplete frame')
   } catch { emit({ fatal: true, code: 'COMPANION_PROTOCOL_FAILED' }); process.exitCode = 1 }
-  finally { for (const state of sockets.values()) state.request.destroy(); await unlock().catch(() => {}); inspector?.close(); if (prod) await prod.db.pool.end().catch(() => {}) }
+  finally { for (const state of sockets.values()) state.request.destroy(); await unlock().catch(() => {}); inspector?.close(); if (prod) await prod.db.pool.end().catch(() => {}); http.globalAgent.destroy() }
 }

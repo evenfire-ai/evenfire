@@ -41,10 +41,11 @@ const authorizeBodyAdmission = new AuthorizeBodyAdmission(LLM_PROVIDER_ATTEMPT_A
 
 // JSON.parse allocates one heap object per container, so a body under
 // the byte limit can exhaust the heap before either authorizer runs. The
-// parser scans the raw bytes first. Every bound below is derived key-by-key
-// from both contracts at the larger of the two values, so the scan refuses no
-// body an authorizer accepts and a bound either contract adds is never
-// silently dropped here.
+// parser scans the raw bytes first. The five supported scan bounds below are
+// merged key-by-key at the larger contract value, so the scan refuses no body
+// either authorizer accepts. Adding a contract bound also requires updating
+// the raw scanners and their supported-key guard; merging a value alone does
+// not implement its enforcement.
 type MergedBodyStructureLimits = Readonly<
   Record<keyof typeof BODY_STRUCTURE_LIMITS | keyof typeof GROK_BODY_STRUCTURE_LIMITS, number>
 >

@@ -13,14 +13,25 @@ import {
   _electron as electron,
   expect,
 } from '@playwright/test'
-import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import fs from 'node:fs'
-import os from 'node:os'
 import path from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
+import {
+  MAIN_RECEIPT_FILES,
+  observeLinuxRunner,
+  observePrivateIsolation,
+  readMainRecord as readMainAdmission,
+  refusePlaintextSessionFiles,
+  verifyEncryptedKeyringFiles,
+  verifyMainAdmission,
+  verifyMountIsolation,
+  verifyNativePrivateKeychain,
+  verifySourceManifest,
+} from '../../../scripts/tests/lib/subscription-image-runner-contract.mjs'
 import { requirePixelRenderer } from './subscriptionImageChallenge.js'
 import {
+  type PrivateIsolationObservation,
   type ProviderBinding,
   type RunnerObservation,
   type SubscriptionImageRun,
@@ -44,7 +55,7 @@ function readPrivateJson(filename: string, maxBytes: number): unknown {
       !stat.isFile() ||
       stat.nlink !== 1 ||
       stat.uid !== process.getuid?.() ||
-      (stat.mode & 0o077) !== 0 ||
+      (stat.mode & 0o777) !== 0o600 ||
       stat.size > maxBytes
     ) {
       throw new Error('Runner evidence must be bounded, private and owned')
@@ -55,18 +66,7 @@ function readPrivateJson(filename: string, maxBytes: number): unknown {
   }
 }
 function observeRunner(): RunnerObservation {
-  if (process.platform !== 'linux' || !process.getuid || !process.getgid)
-    throw new Error('Inspected non-root Linux runner required before Electron')
-  return {
-    platform: process.platform,
-    uid: process.getuid(),
-    gid: process.getgid(),
-    home: fs.realpathSync(os.userInfo().homedir),
-    mountNamespace: fs.readlinkSync('/proc/self/ns/mnt'),
-    pidNamespace: fs.readlinkSync('/proc/self/ns/pid'),
-    userNamespace: fs.readlinkSync('/proc/self/ns/user'),
-    mountInfoSha256: sha256(fs.readFileSync('/proc/self/mountinfo')),
-  }
+  return observeLinuxRunner().observation
 }
 export function verifyPhysicalRunner(run: SubscriptionImageRun): void {
   const observed = observeRunner()
@@ -75,32 +75,97 @@ export function verifyPhysicalRunner(run: SubscriptionImageRun): void {
     runId?: string
     repoRoot?: string
     gitHead?: string
+    gitTree?: string
+    inputManifestSha256?: string
     profile?: string
     context?: string
     restUrl?: string
     rpcUrl?: string
     bindings?: ProviderBinding[]
     observation?: RunnerObservation
+    isolation?: PrivateIsolationObservation
+    mainAdmissionFile?: string
+    mainAdmissionSha256?: string
+    sourceManifestSha256?: string
+    admittedAt?: string
   }
-  const gitHead = execFileSync('git', ['-C', repoRoot, 'rev-parse', 'HEAD'], {
-    encoding: 'utf8',
-    timeout: 5_000,
-  }).trim()
+  const sourceBytes = fs.readFileSync(path.join(repoRoot, 'subscription-image-source.json'))
+  const source = JSON.parse(sourceBytes.toString('utf8'))
+  verifySourceManifest(source, repoRoot)
   if (
-    receipt.kind !== 'evenfire-subscription-image-runner-v1' ||
+    receipt.kind !== 'evenfire-subscription-image-runner-v2' ||
     receipt.runId !== run.runId ||
     receipt.repoRoot !== fs.realpathSync(repoRoot) ||
-    receipt.gitHead !== gitHead ||
+    receipt.gitHead !== source.gitHead ||
+    receipt.gitTree !== source.gitTree ||
+    receipt.inputManifestSha256 !== source.inputManifestSha256 ||
     receipt.profile !== run.profile ||
     receipt.context !== run.context ||
     receipt.restUrl !== run.restUrl ||
     receipt.rpcUrl !== run.rpcUrl ||
     !isDeepStrictEqual(receipt.bindings, run.bindings) ||
-    !receipt.observation
+    !receipt.observation ||
+    !receipt.isolation ||
+    !receipt.mainAdmissionFile ||
+    !receipt.sourceManifestSha256 ||
+    path.dirname(receipt.mainAdmissionFile) !== '/runner-admission'
   ) {
     throw new Error('Physical runner receipt does not bind this run/source/stack/targets')
   }
-  verifyRunnerObservation(receipt.observation, observed, process.env)
+  const physical = observeLinuxRunner()
+  const mountIds = verifyMountIsolation(
+    physical.mounts,
+    observed.home,
+    '/run/evenfire-e2e',
+    '/runner-admission'
+  )
+  const actualIsolation = observePrivateIsolation(
+    receipt.isolation,
+    observed,
+    process.env,
+    run.runRoot,
+    mountIds
+  )
+  verifyRunnerObservation(
+    receipt.observation,
+    observed,
+    process.env,
+    receipt.isolation,
+    actualIsolation
+  )
+  const mainRecord = readMainAdmission(receipt.mainAdmissionFile)
+  const receipts = {
+    inspect: readMainAdmission(`/runner-admission/${MAIN_RECEIPT_FILES.inspect}`),
+    stack: readMainAdmission(`/runner-admission/${MAIN_RECEIPT_FILES.stack}`),
+    portForwards: readMainAdmission(`/runner-admission/${MAIN_RECEIPT_FILES.portForwards}`),
+  }
+  if (
+    receipt.sourceManifestSha256 !== sha256(sourceBytes) ||
+    receipt.mainAdmissionSha256 !== mainRecord.sha256
+  )
+    throw new Error('Sealed source/main admission changed')
+  const mainAdmission = mainRecord.value
+  if (
+    !receipt.admittedAt ||
+    !Number.isFinite(Date.parse(receipt.admittedAt)) ||
+    Date.parse(receipt.admittedAt) < Date.parse(mainAdmission.runtime.createdAt) ||
+    Date.parse(receipt.admittedAt) - Date.parse(mainAdmission.runtime.createdAt) > 600_000
+  )
+    throw new Error('Runner was not admitted from a fresh container')
+  verifyMainAdmission(
+    mainAdmission,
+    physical,
+    {
+      gitHead: source.gitHead,
+      gitTree: source.gitTree,
+      inputManifestSha256: source.inputManifestSha256,
+      manifestSha256: receipt.sourceManifestSha256,
+    },
+    repoRoot,
+    process.env,
+    'verify',
+    receipts
+  )
   const root = fs.lstatSync(run.runRoot)
   if (
     !root.isDirectory() ||
@@ -126,6 +191,7 @@ export function verifyPhysicalRunner(run: SubscriptionImageRun): void {
     throw new Error('Node24 and actual built Desktop are prerequisites')
   requirePixelRenderer()
 }
+
 export type VendorAttempt = {
   sequence: number
   provider: string
@@ -187,6 +253,7 @@ export const test = base.extend<Fixtures>({
   },
   electronApp: async ({ subscriptionRun: run }, use, testInfo) => {
     verifyPhysicalRunner(run)
+    verifyNativePrivateKeychain(repoRoot, process.env)
     const launchRoot = fs.mkdtempSync(path.join(run.runRoot, 'desktop-'))
     fs.chmodSync(launchRoot, 0o700)
     const userData = path.join(launchRoot, 'user-data')
@@ -201,6 +268,7 @@ export const test = base.extend<Fixtures>({
       'LANG',
       'LC_ALL',
       'DISPLAY',
+      'DBUS_SESSION_BUS_ADDRESS',
       'XDG_RUNTIME_DIR',
       'XAUTHORITY',
       'XDG_CONFIG_HOME',
@@ -226,7 +294,10 @@ export const test = base.extend<Fixtures>({
       args: [`--user-data-dir=${userData}`, mainEntry],
       env: launchEnv,
       timeout: 30_000,
-      recordVideo: { dir: testInfo.outputPath('video'), size: { width: 1280, height: 720 } },
+      recordVideo: {
+        dir: testInfo.outputPath('video'),
+        size: { width: 1280, height: 720 },
+      },
     })
     try {
       const actual = await app.evaluate(({ app: desktopApp }) => ({
@@ -270,17 +341,30 @@ export const test = base.extend<Fixtures>({
     await page.locator('#password-input').fill(process.env.E2E_SUBSCRIPTION_IMAGE_LOGIN_PASSWORD!)
     await page.getByRole('button', { name: 'Sign in', exact: true }).click()
     await expect(loginEmail).toHaveCount(0)
-    await expect(page.getByTestId('nav-settings-menu')).toBeVisible({ timeout: 30_000 })
+    await expect(page.getByTestId('nav-settings-menu')).toBeVisible({
+      timeout: 30_000,
+    })
+    verifyPhysicalRunner(run)
+    verifyEncryptedKeyringFiles(process.env, process.getuid!())
+    refusePlaintextSessionFiles([actualUserData, path.join(process.env.HOME!, '.evenfire')])
     try {
       await use(page)
     } finally {
-      // End only the owned test session through UI; no shared session reset.
-      if (!page.isClosed()) {
-        const settings = page.getByTestId('nav-settings-menu')
-        if ((await settings.getAttribute('aria-expanded')) !== 'true') await settings.click()
-        await expect(settings).toHaveAttribute('aria-expanded', 'true')
-        await page.getByTestId('logout-btn').click()
-        await expect(page.locator('#email-input')).toBeVisible({ timeout: 20_000 })
+      try {
+        verifyPhysicalRunner(run)
+        verifyEncryptedKeyringFiles(process.env, process.getuid!())
+        refusePlaintextSessionFiles([actualUserData, path.join(process.env.HOME!, '.evenfire')])
+      } finally {
+        // End only the owned test session through UI; no shared session reset.
+        if (!page.isClosed()) {
+          const settings = page.getByTestId('nav-settings-menu')
+          if ((await settings.getAttribute('aria-expanded')) !== 'true') await settings.click()
+          await expect(settings).toHaveAttribute('aria-expanded', 'true')
+          await page.getByTestId('logout-btn').click()
+          await expect(page.locator('#email-input')).toBeVisible({
+            timeout: 20_000,
+          })
+        }
       }
     }
   },

@@ -1,0 +1,33 @@
+# PR806 subscription-image runner: fragment for the repository Makefile owner.
+# Do not merge this file into the tree; append the target below the existing
+# minikube image targets so it inherits the branch-owned mutation lease.
+#
+# Required operator inputs (all explicit, no defaults invented here):
+#   MINIKUBE_PROFILE, CONTROL_API_REAL_PG_CONTEXT (equal to the profile)
+#   SUBSCRIPTION_IMAGE_SUITE        subscription-image-input | tool-screenshot | gfs-image | admission-recovery
+#   SUBSCRIPTION_IMAGE_MODE         fixture | real
+#   SUBSCRIPTION_IMAGE_SCRATCH      absolute scratch dir outside the repository
+#   SUBSCRIPTION_IMAGE_FRAMES       absolute 0600 frames file (operator supplied)
+#   SUBSCRIPTION_IMAGE_BINDINGS     absolute 0600 bindings JSON (owned Host/model ids)
+#   SUBSCRIPTION_IMAGE_RED_DETECTOR absolute path to the installed RED detector
+.PHONY: minikube-subscription-image-journeys
+minikube-subscription-image-journeys:
+	@test -n "$${MINIKUBE_PROFILE:-}" || { echo "MINIKUBE_PROFILE required"; exit 1; }
+	@test -n "$${CONTROL_API_REAL_PG_CONTEXT:-}" || { echo "CONTROL_API_REAL_PG_CONTEXT required"; exit 1; }
+	@test -n "$${SUBSCRIPTION_IMAGE_SUITE:-}" || { echo "SUBSCRIPTION_IMAGE_SUITE required"; exit 1; }
+	@test -n "$${SUBSCRIPTION_IMAGE_MODE:-}" || { echo "SUBSCRIPTION_IMAGE_MODE required"; exit 1; }
+	@test -n "$${SUBSCRIPTION_IMAGE_SCRATCH:-}" || { echo "SUBSCRIPTION_IMAGE_SCRATCH required"; exit 1; }
+	@test -n "$${SUBSCRIPTION_IMAGE_FRAMES:-}" || { echo "SUBSCRIPTION_IMAGE_FRAMES required"; exit 1; }
+	@test -n "$${SUBSCRIPTION_IMAGE_BINDINGS:-}" || { echo "SUBSCRIPTION_IMAGE_BINDINGS required"; exit 1; }
+	@test -n "$${SUBSCRIPTION_IMAGE_RED_DETECTOR:-}" || { echo "SUBSCRIPTION_IMAGE_RED_DETECTOR required"; exit 1; }
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(CONTROL_API_REAL_PG_CONTEXT)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- \
+		node scripts/e2e/prepare-subscription-image-admission.mjs \
+			--suite "$$SUBSCRIPTION_IMAGE_SUITE" \
+			--mode "$$SUBSCRIPTION_IMAGE_MODE" \
+			--profile "$$MINIKUBE_PROFILE" \
+			--scratch "$$SUBSCRIPTION_IMAGE_SCRATCH" \
+			--frames "$$SUBSCRIPTION_IMAGE_FRAMES" \
+			--bindings "$$SUBSCRIPTION_IMAGE_BINDINGS" \
+			--red-detector "$$SUBSCRIPTION_IMAGE_RED_DETECTOR"

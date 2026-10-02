@@ -53,14 +53,20 @@ describe('subscription image load admission', () => {
   })
 
   it('requires both real-provider authorizations without downgrading malformed mode', () => {
-    const input: NodeJS.ProcessEnv = { ...env(), E2E_SUBSCRIPTION_IMAGE_MODE: 'real' }
+    const input: NodeJS.ProcessEnv = {
+      ...env(),
+      E2E_SUBSCRIPTION_IMAGE_MODE: 'real',
+    }
     expect(() => requireSubscriptionImageRun(input)).toThrow(/GROK_REAL_UPSTREAM_CONFIRM/)
     input.GROK_REAL_UPSTREAM_CONFIRM = '1'
     expect(() => requireSubscriptionImageRun(input)).toThrow(/CODEX_REAL_UPSTREAM_CONFIRM/)
     input.CODEX_REAL_UPSTREAM_CONFIRM = '1'
     expect(requireSubscriptionImageRun(input).mode).toBe('real')
     expect(() =>
-      requireSubscriptionImageRun({ ...env(), E2E_SUBSCRIPTION_IMAGE_MODE: 'invalid' })
+      requireSubscriptionImageRun({
+        ...env(),
+        E2E_SUBSCRIPTION_IMAGE_MODE: 'invalid',
+      })
     ).toThrow(/MODE/)
   })
 
@@ -101,7 +107,10 @@ describe('subscription image load admission', () => {
       expect(() =>
         verifyRunnerObservation(
           observed,
-          { ...observed, [field]: typeof observed[field] === 'number' ? 1001 : 'different' },
+          {
+            ...observed,
+            [field]: typeof observed[field] === 'number' ? 1001 : 'different',
+          },
           { HOME: observed.home }
         )
       ).toThrow(/runner|isolation/i)
@@ -113,7 +122,10 @@ describe('subscription image load admission', () => {
       verifyRunnerObservation(
         observed,
         { ...observed },
-        { HOME: observed.home, DBUS_SESSION_BUS_ADDRESS: 'unix:path=/outside/bus' }
+        {
+          HOME: observed.home,
+          DBUS_SESSION_BUS_ADDRESS: 'unix:path=/outside/bus',
+        }
       )
     ).toThrow(/socket/i)
     expect(() => verifyRunnerObservation(observed, { ...observed }, { HOME: '/outside' })).toThrow(
@@ -133,5 +145,91 @@ describe('subscription image load admission', () => {
     expect(dedicated).toContain('requireSubscriptionImageRun')
     expect(dedicated).not.toMatch(/global-setup|from ['"].*playwright\.config|\.env/)
     expect(dedicated).toContain('subscription-image-input.spec.ts')
+  })
+
+  it('permits only a sealed private bus with matching process, socket and namespace observations', () => {
+    // Metadata-only unit fixtures cannot launch Electron or stand in for the
+    // actual /proc, mount, live FD and encrypted-keyring admission checks.
+    const observed = {
+      platform: 'linux',
+      uid: 1000,
+      gid: 1000,
+      home: '/home/runner',
+      mountNamespace: 'mnt:[123]',
+      pidNamespace: 'pid:[234]',
+      userNamespace: 'user:[345]',
+      mountInfoSha256: 'a'.repeat(64),
+    }
+    const process = (pid: number, executable: string) => ({
+      pid,
+      uid: 1000,
+      startTime: '234',
+      executable,
+      executablePath: `/usr/bin/${executable}`,
+      argvSha256: 'b'.repeat(64),
+      mountNamespace: observed.mountNamespace,
+      pidNamespace: observed.pidNamespace,
+      userNamespace: observed.userNamespace,
+    })
+    const isolation = {
+      homeMountId: '1',
+      runMountId: '2',
+      tmpMountId: '3',
+      admissionMountId: '4',
+      sessionBus: {
+        ...process(101, 'dbus-daemon'),
+        address: 'unix:path=/home/runner/runtime/bus',
+        socketPath: '/home/runner/runtime/bus',
+        socketInode: '700',
+      },
+      display: {
+        ...process(102, 'Xvfb'),
+        value: ':17',
+        socketPath: '/tmp/.X11-unix/X17',
+        socketInode: '701',
+        xauthorityPath: '/home/runner/.Xauthority',
+      },
+      keyring: process(103, 'gnome-keyring-daemon'),
+    }
+    const input = {
+      HOME: observed.home,
+      DISPLAY: isolation.display.value,
+      XAUTHORITY: isolation.display.xauthorityPath,
+      DBUS_SESSION_BUS_ADDRESS: isolation.sessionBus.address,
+      SUBSCRIPTION_IMAGE_RUN_ROOT: '/tmp/unit-root',
+    }
+    expect(() =>
+      verifyRunnerObservation(observed, observed, input, isolation, structuredClone(isolation))
+    ).not.toThrow()
+    expect(() => verifyRunnerObservation(observed, observed, input)).toThrow(/Inherited/)
+    for (const patch of [
+      { pid: 104 },
+      { startTime: 'changed' },
+      { uid: 1001 },
+      { socketInode: 'changed' },
+      { userNamespace: 'user:[different]' },
+    ]) {
+      const changed = structuredClone(isolation)
+      Object.assign(changed.sessionBus, patch)
+      expect(() => verifyRunnerObservation(observed, observed, input, isolation, changed)).toThrow()
+    }
+    expect(() =>
+      verifyRunnerObservation(
+        observed,
+        observed,
+        { ...input, DBUS_SESSION_BUS_ADDRESS: 'unix:path=/outside/bus' },
+        isolation,
+        isolation
+      )
+    ).toThrow()
+    expect(() =>
+      verifyRunnerObservation(
+        observed,
+        observed,
+        { ...input, SSH_AUTH_SOCK: '/outside/agent' },
+        isolation,
+        isolation
+      )
+    ).toThrow()
   })
 })

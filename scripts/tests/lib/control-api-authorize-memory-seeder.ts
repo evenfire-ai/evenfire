@@ -1,0 +1,167 @@
+/** Test-only QA preparation. The caller must prove an exclusive owned profile/DB,
+ * current image/source marker and mutation lease before running this companion.
+ * Opaque QA connection state is not real G8 evidence. No vendor is contacted.
+ */
+import fs from 'node:fs'
+import path from 'node:path'
+import http from 'node:http'
+import { createRequire } from 'node:module'
+import { randomBytes, createHash } from 'node:crypto'
+
+type SeedOptions = { runId: string; hostNamespace: string; operatorUser: string; operatorPassword?: string; cookie?: string }
+const seedAssert = (condition: unknown, code: string) => { if (!condition) throw new Error(code) }
+export function assertQaBudget(budget: any, hostRef: string, name: string): void {
+  const scope = budget.scope
+  seedAssert(budget.name === name && budget.enabled === true && budget.unit === 'tokens' && budget.currency === null && budget.enforcement === 'block' &&
+    Number(budget.limit_amount) === 100 && Number(budget.max_task_amount) === 200 && Number(budget.min_start_amount) === 1 && budget.period === 'daily' && budget.timezone === 'UTC' &&
+    scope && Object.keys(scope).length === 3 && scope.host_ref?.length === 1 && scope.host_ref[0] === hostRef && scope.provider?.length === 1 && scope.provider[0] === 'grok-subscription' && scope.model?.length === 1 && scope.model[0] === 'grok-4.6', 'QA_DANGER_ZONE_BUDGET_MISMATCH')
+}
+export async function runSeedCompanion(): Promise<void> {
+  const output = process.stdout.write.bind(process.stdout)
+  process.stdout.write = () => true; process.stderr.write = () => true
+  process.env.LOG_LEVEL = 'silent'
+  const emit = (value: unknown) => output(JSON.stringify(value) + '\n')
+  const require = createRequire(path.join(process.cwd(), 'package.json'))
+  let prod: any, options: SeedOptions, phase = 'private-input', input = Buffer.alloc(0)
+  const cookieName = 'control_ui_admin_session'
+  async function request(method: string, route: string, body?: unknown, cookie = options.cookie): Promise<any> {
+    return new Promise((resolve, reject) => {
+      const req = http.request({ hostname: '127.0.0.1', port: prod.config.port, method, path: route,
+        headers: { 'content-type': 'application/json', ...(cookie ? { cookie: `${cookieName}=${cookie}` } : {}) } }, res => {
+        const chunks: Buffer[] = []; let bytes = 0
+        res.on('data', chunk => { bytes += chunk.length; if (bytes > 65536) req.destroy(new Error('SEED_RESPONSE_BOUND')); else chunks.push(chunk) })
+        res.on('end', () => { try { resolve({ status: res.statusCode, headers: res.headers, body: bytes ? JSON.parse(Buffer.concat(chunks).toString()) : null }) } catch { reject(new Error('SEED_RESPONSE_INVALID')) } })
+      })
+      req.on('error', () => reject(new Error('SEED_HTTP_FAILED')))
+      req.setTimeout(30000, () => req.destroy(new Error('SEED_HTTP_DEADLINE')))
+      if (body) req.write(JSON.stringify(body)); req.end()
+    })
+  }
+  function takeSession(response: any) {
+    const value = (response.headers['set-cookie'] ?? []).find((item: string) => item.startsWith(`${cookieName}=`))
+    seedAssert(response.status === 200 && value, 'SEED_LOGIN_OR_SETUP_REFUSED')
+    options.cookie = value.split(';')[0].slice(cookieName.length + 1)
+  }
+  async function prepare() {
+    seedAssert(/^pr806-memory-[a-f0-9]{12}$/.test(options.runId), 'SEED_RUN_ID_INVALID')
+    prod = { config: require('./dist/config.js').config, db: require('./dist/db.js'),
+      connection: require('./dist/services/grokSubscriptionConnection.js'), encryption: require('./dist/oauth/encryption.js'),
+      gateway: new (require('./dist/k8s.js').K8sGateway)() }
+    seedAssert(prod.config.hostsNamespace === options.hostNamespace && prod.config.grokSubscriptionEnabled && prod.config.codexSubscriptionEnabled, 'SEED_PROVIDER_OR_NAMESPACE_MISMATCH')
+    seedAssert(prod.config.subscriptionCatalogSyncCronEnabled === false && prod.config.llmCatalogSyncCronEnabled === false, 'SEED_VENDOR_CRON_MUST_BE_DISABLED')
+    phase = 'operator-session'
+    let setupPerformed = false
+    if (!options.cookie) {
+      seedAssert(typeof options.operatorPassword === 'string' && options.operatorPassword.length >= 8, 'SEED_PRIVATE_OPERATOR_MATERIAL_REQUIRED')
+      const bootstrap = await prod.db.pool.query(`SELECT id::text, username, status, last_login_at FROM control_admin_users WHERE username = $1`, [prod.config.adminBootstrapUsername])
+      const active = await prod.db.pool.query("SELECT COUNT(*)::int AS count FROM control_admin_users WHERE status = 'active'")
+      const eligible = bootstrap.rows.length === 1 && bootstrap.rows[0].status === 'active' && bootstrap.rows[0].last_login_at === null && active.rows[0].count === 1
+      if (eligible) {
+        seedAssert(options.operatorUser === `${options.runId}-operator`, 'SEED_FIRST_RUN_OPERATOR_MUST_BE_OWNED')
+        takeSession(await request('POST', '/api/v1/admin/auth/setup', { username: options.operatorUser, email: `${options.runId}@example.invalid`, password: options.operatorPassword, seedDesktopPassword: false }, ''))
+        setupPerformed = true
+      } else {
+        // Only explicit canonical harness material authenticates an initialized
+        // account. No reset, alternate secret store or bootstrap retry occurs.
+        takeSession(await request('POST', '/api/v1/admin/auth/login', { username: options.operatorUser, password: options.operatorPassword }, ''))
+      }
+    }
+    const me = await request('GET', '/api/v1/admin/auth/me')
+    seedAssert(me.status === 200 && me.body?.me?.username === options.operatorUser && me.body.me.role === 'admin', 'SEED_OPERATOR_IDENTITY_MISMATCH')
+    phase = 'context-binding'
+    const context = await request('GET', '/api/v1/admin/contexts/context1')
+    seedAssert(context.status === 200 && context.body?.metadata?.name === 'context1' && context.body.metadata.namespace === prod.config.contextsNamespace && /^[a-f0-9-]{36}$/.test(context.body.metadata.uid) &&
+      !context.body.metadata.deletionTimestamp && typeof context.body.metadata.resourceVersion === 'string' && context.body.spec?.contextId === 'context1', 'SEED_CONTEXT1_UNPROVED')
+    // A new Host boots MCP inventory. Empty actual inventory prevents that boot
+    // from connecting external services; stateless/suspend is not a shortcut.
+    seedAssert(Array.isArray(context.body.spec?.mcpServers) && context.body.spec.mcpServers.length === 0, 'SEED_CONTEXT1_VENDOR_FREE_INVENTORY_UNPROVED')
+    const bindings = []
+    for (const [index, hostRef] of ['pr806-memory-grok-host', 'pr806-memory-grok-host-2'].entries()) {
+      const connectionKey = `${options.runId}-grok-${index + 1}`, fingerprint = `qa-memory-${options.runId}-${index + 1}`
+      phase = `connection-${index + 1}`
+      await prod.db.withTransaction(async (tx: any) => {
+        const existing = await tx.query('SELECT id::text, account_fingerprint, credential_revision, catalog_revision, status, catalog_status, revoked_at FROM grok_subscription_connections WHERE connection_key = $1', [connectionKey])
+        if (existing.rows.length) {
+          const row = existing.rows[0]
+          seedAssert(existing.rows.length === 1 && row.account_fingerprint === fingerprint && row.credential_revision === 1 && row.catalog_revision === 1 && row.status === 'connected' && row.catalog_status === 'ready' && row.revoked_at === null, 'SEED_EXISTING_CONNECTION_CHANGED')
+        } else {
+          const created = await prod.connection.insertInitialGrokSubscriptionConnection(tx, prod.encryption.deriveOAuthEncryptionKey(prod.config.oauthEncryptionKey),
+            { refreshToken: randomBytes(32).toString('base64url'), accountFingerprint: fingerprint, status: 'connected' }, connectionKey)
+          const ready = await prod.connection.recordGrokCatalogOutcome(tx, { connectionKey, catalogStatus: 'ready', connectionStatus: 'connected', expectedCredentialRevision: 1, expectedCatalogRevision: 0 })
+          seedAssert(ready?.id === created.id && ready.catalogRevision === 1, 'SEED_CATALOG_REVISION_GUARD_FAILED')
+          await tx.query(`INSERT INTO grok_catalog_models (connection_id, model, enabled, source, discovered_at, last_seen_at, stale)
+            VALUES ($1, 'grok-4.6', true, 'discovery', NOW(), NOW(), false)`, [created.id])
+        }
+      })
+      const connection = await prod.connection.getSafeGrokSubscriptionConnection(prod.db.pool, connectionKey)
+      const catalog = await prod.db.pool.query("SELECT enabled, stale FROM grok_catalog_models WHERE connection_id = $1 AND model = 'grok-4.6'", [connection.id])
+      seedAssert(connection.status === 'connected' && connection.catalogStatus === 'ready' && catalog.rows.length === 1 && catalog.rows[0].enabled === true && catalog.rows[0].stale === false, 'SEED_CATALOG_WITNESS_MISSING')
+      // HCC consumes the production per-connection ConfigMap projection. Ready
+      // PostgreSQL state alone does not publish that runtime contract.
+      await prod.gateway.llmAllowedModelsConfigMap().materialize()
+      phase = `budget-${index + 1}`
+      const budgetName = `${options.runId}-${hostRef}-budget`
+      const found = await prod.db.pool.query('SELECT id::text, name, enabled, scope, unit, currency, enforcement, limit_amount, max_task_amount, min_start_amount, period, timezone FROM token_budgets WHERE name = $1', [budgetName])
+      let budget
+      if (found.rows.length) {
+        seedAssert(found.rows.length === 1, 'SEED_BUDGET_NAME_AMBIGUOUS'); budget = found.rows[0]
+      } else {
+        const created = await request('POST', '/api/v1/admin/budgets', { name: budgetName, enabled: true, scope: { host_ref: [hostRef], provider: ['grok-subscription'], model: ['grok-4.6'] },
+          unit: 'tokens', currency: null, limit_amount: 100, max_task_amount: 200, min_start_amount: 1, period: 'daily', timezone: 'UTC', enforcement: 'block' })
+        seedAssert(created.status === 201, 'SEED_BUDGET_API_REFUSED'); budget = created.body
+      }
+      assertQaBudget(budget, hostRef, budgetName)
+      const storedBudget = await request('GET', `/api/v1/admin/budgets/${budget.id}`)
+      seedAssert(storedBudget.status === 200, 'SEED_BUDGET_NOT_DURABLE'); assertQaBudget(storedBudget.body, hostRef, budgetName)
+      phase = `host-${index + 1}`
+      const contextNow = await request('GET', '/api/v1/admin/contexts/context1')
+      seedAssert(contextNow.status === 200 && contextNow.body?.metadata?.uid === context.body.metadata.uid && contextNow.body.metadata.resourceVersion === context.body.metadata.resourceVersion &&
+        !contextNow.body.metadata.deletionTimestamp && Array.isArray(contextNow.body.spec?.mcpServers) && contextNow.body.spec.mcpServers.length === 0, 'SEED_CONTEXT_CHANGED_BEFORE_HOST_CREATE')
+      let host = await request('GET', `/api/v1/admin/hosts/${hostRef}`), createdHost = false
+      if (host.status === 404) {
+        host = await request('POST', '/api/v1/admin/hosts', { metadata: { name: hostRef, labels: { 'evenfire.io/qa-memory-run': options.runId } },
+          spec: { host: hostRef, contextRef: 'context1', model: { provider: 'grok-subscription', name: 'grok-4.6', connectionRef: connectionKey }, allowedModels: [{ provider: 'grok-subscription', model: 'grok-4.6' }] } })
+        seedAssert(host.status === 201, 'SEED_HOST_API_REFUSED'); createdHost = true
+      }
+      const value = host.body
+      seedAssert((host.status === 200 || host.status === 201) && value?.metadata?.name === hostRef && value.metadata.namespace === options.hostNamespace && /^[a-f0-9-]{36}$/.test(value.metadata.uid) &&
+        value.metadata.labels?.['evenfire.io/qa-memory-run'] === options.runId && value.spec?.host === hostRef && value.spec.contextRef === 'context1' && value.spec.model?.provider === 'grok-subscription' && value.spec.model.name === 'grok-4.6' && value.spec.model.connectionRef === connectionKey &&
+        value.spec.allowedModels?.length === 1 && value.spec.allowedModels[0].provider === 'grok-subscription' && value.spec.allowedModels[0].model === 'grok-4.6', 'SEED_EXISTING_HOST_OWNER_OR_SPEC_CHANGED')
+      bindings.push({ hostRef, hostUid: value.metadata.uid, connectionKey, connectionId: connection.id, credentialRevision: connection.credentialRevision, catalogRevision: connection.catalogRevision, budgetId: budget.id, budgetName, reservationAmount: 200, hostCreateStatus: createdHost ? 201 : 200, catalogProjectionPublished: true })
+    }
+    phase = 'gfs-owned-directory'
+    const root = await request('GET', '/api/v1/gfs/by-path?drive=main&path=%2F')
+    seedAssert(root.status === 200 && root.body?.drive === 'main' && root.body.kind === 'directory' && root.body.path === '/' && /^[a-f0-9]{32}$/.test(root.body.rid), 'SEED_GFS_ROOT_UNPROVED')
+    const statRoot = await request('GET', `/api/v1/gfs/proxy/v1/resources/${root.body.rid}`)
+    seedAssert(statRoot.status === 200 && statRoot.body?.data?.resourceId === root.body.resourceId && statRoot.body.data.parentResourceId === null && statRoot.body.data.drive === 'main', 'SEED_GFS_ROOT_NOT_CANONICAL')
+    const existingDirectory = await request('GET', `/api/v1/gfs/by-path?drive=main&path=${encodeURIComponent('/' + options.runId)}`)
+    seedAssert(existingDirectory.status === 404, 'SEED_GFS_DIRECTORY_ALREADY_EXISTS_NO_OVERWRITE')
+    const directory = await request('POST', `/api/v1/gfs/proxy/v1/resources/${root.body.rid}/children`, { name: options.runId, kind: 'directory' })
+    seedAssert(directory.status === 201 && directory.body?.ok === true && directory.body.data.name === options.runId && directory.body.data.kind === 'directory' && directory.body.data.parentResourceId === root.body.resourceId && directory.body.data.drive === 'main', 'SEED_GFS_DIRECTORY_CREATE_FAILED')
+    const parent = await request('GET', `/api/v1/gfs/proxy/v1/resources/${directory.body.data.rid}`)
+    seedAssert(parent.status === 200 && parent.body?.data?.resourceId === directory.body.data.resourceId && parent.body.data.name === options.runId && parent.body.data.parentResourceId === root.body.resourceId, 'SEED_GFS_DIRECTORY_NOT_DURABLE')
+    phase = 'complete'
+    return { fixtureCredentialState: 'opaque-qa-not-real-G8', upstreamDispatch: 'NOT_RUN', operatorUsername: me.body.me.username, operatorId: me.body.me.id, setupPerformed,
+      context: { name: 'context1', namespace: context.body.metadata.namespace, uid: context.body.metadata.uid, resourceVersion: context.body.metadata.resourceVersion, mcpServers: [] }, bindings,
+      gfs: { drive: 'main', rootRid: root.body.rid, rootResourceId: root.body.resourceId, parentRid: directory.body.data.rid, parentResourceId: directory.body.data.resourceId, name: options.runId, createStatus: 201, durableReadStatus: 200 },
+      budgetCache: { definitionsTtlMs: 5000, strategy: 'benchmark-requires-new-actual-api-pod-before-first-authorize', resetHelperCalled: false },
+      vendorCronsDisabled: true, compiledPolicySha256: createHash('sha256').update(fs.readFileSync('./dist/middleware/llmProviderAttemptAdmissionLimits.js')).digest('hex') }
+  }
+  let handled = false
+  try {
+    for await (const chunk of process.stdin) {
+      input = Buffer.concat([input, chunk]); seedAssert(input.length <= 32768, 'SEED_PRIVATE_INPUT_BOUND')
+      const end = input.indexOf(10); if (end < 0) continue
+      seedAssert(end === input.length - 1, 'SEED_ONE_PRIVATE_COMMAND_REQUIRED')
+      const frame = JSON.parse(input.toString()); input = Buffer.alloc(0)
+      seedAssert(frame.kind === 'prepare' && typeof frame.callId === 'string', 'SEED_PRIVATE_COMMAND_INVALID')
+      options = frame.options
+      handled = true
+      try { emit({ callId: frame.callId, data: await prepare() }) }
+      catch (error: any) { emit({ callId: frame.callId, failed: true, code: /^[A-Z0-9_]+$/.test(error.message) ? error.message : 'SEED_REAL_RUNTIME_FAILED', phase }); process.exitCode = 1 }
+      break
+    }
+    seedAssert(handled, 'SEED_PRIVATE_INPUT_MISSING')
+  } catch { emit({ fatal: true, code: 'SEED_PRIVATE_PROTOCOL_FAILED', phase }); process.exitCode = 1 }
+  finally { if (prod) await prod.db.pool.end().catch(() => {}); http.globalAgent.destroy() }
+}

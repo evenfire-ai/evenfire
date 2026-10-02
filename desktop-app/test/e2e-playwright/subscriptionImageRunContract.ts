@@ -1,5 +1,6 @@
 // E2E_GUARDIAN_IPC_FLOW: pure run admission; no environment files, login, launch, or network at module load.
 import path from 'node:path'
+import { verifyPrivateIsolation } from '../../../scripts/tests/lib/subscription-image-runner-contract.mjs'
 
 export type SubscriptionImageProvider = 'grok-subscription' | 'codex-subscription'
 export type ProviderBinding = {
@@ -147,11 +148,38 @@ export type RunnerObservation = {
   mountInfoSha256: string
 }
 
+export type PrivateProcessObservation = {
+  pid: number
+  uid: number
+  startTime: string
+  executable: string
+  executablePath: string
+  argvSha256: string
+  mountNamespace: string
+  pidNamespace: string
+  userNamespace: string
+}
+export type PrivateSocketObservation = PrivateProcessObservation & {
+  socketPath: string
+  socketInode: string
+}
+export type PrivateIsolationObservation = {
+  homeMountId: string
+  runMountId: string
+  tmpMountId: string
+  admissionMountId: string
+  sessionBus: PrivateSocketObservation & { address: string }
+  display: PrivateSocketObservation & { value: string; xauthorityPath: string }
+  keyring: PrivateProcessObservation
+}
+
 /** The main runner inspects physical mounts/namespaces first and seals these observations in its receipt. */
 export function verifyRunnerObservation(
   expected: RunnerObservation,
   actual: RunnerObservation,
-  env: NodeJS.ProcessEnv
+  env: NodeJS.ProcessEnv,
+  expectedIsolation?: PrivateIsolationObservation,
+  actualIsolation?: PrivateIsolationObservation
 ): void {
   if (
     actual.platform !== 'linux' ||
@@ -185,6 +213,19 @@ export function verifyRunnerObservation(
   }
   if (!path.isAbsolute(actual.home) || env.HOME !== actual.home)
     throw new Error('Runner HOME does not match the OS account')
-  if (env.DBUS_SESSION_BUS_ADDRESS || env.SSH_AUTH_SOCK)
+  if (
+    env.SSH_AUTH_SOCK ||
+    (env.DBUS_SESSION_BUS_ADDRESS && (!expectedIsolation || !actualIsolation))
+  )
     throw new Error('Inherited DBus/SSH socket is forbidden in the isolated runner')
+  if (expectedIsolation || actualIsolation) {
+    if (!env.SUBSCRIPTION_IMAGE_RUN_ROOT) throw new Error('Private runtime root is required')
+    verifyPrivateIsolation(
+      expectedIsolation,
+      actualIsolation,
+      actual,
+      env,
+      env.SUBSCRIPTION_IMAGE_RUN_ROOT
+    )
+  }
 }
