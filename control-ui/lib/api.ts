@@ -89,10 +89,14 @@ export function isSilentApiError(error: unknown): boolean {
   return Boolean(error && typeof error === 'object' && (error as { silent?: unknown }).silent)
 }
 
-function handleUnauthorized(): never {
+/** Route non-JSON authenticated transports through the same session-expiry handler as API calls. */
+export function handleControlUIUnauthorized(): void {
   clearAdminAuthToken()
-  const handler = getGlobalAuthErrorHandler()
-  handler?.()
+  getGlobalAuthErrorHandler()?.()
+}
+
+function handleUnauthorized(): never {
+  handleControlUIUnauthorized()
   throw new AuthExpiredError()
 }
 
@@ -138,6 +142,11 @@ function qs(params: Record<string, string | undefined>) {
 
 function authHeaders(): HeadersInit {
   return {}
+}
+
+/** Build a Control API URL using the same configured base as API requests. */
+export function controlApiUrl(path: string): string {
+  return `${API_BASE}${path}`
 }
 
 async function parseJsonResponse(res: Response): Promise<unknown> {
@@ -276,7 +285,7 @@ export async function apiGet(
   query: Record<string, string | undefined> = {},
   options: ApiRequestOptions = {}
 ) {
-  const url = `${API_BASE}${path}${qs(query)}`
+  const url = `${controlApiUrl(path)}${qs(query)}`
   const headers = { ...authHeaders() }
   const cacheKey = `${url}|${sessionEpoch}`
   const existing = options.signal ? undefined : inFlightGetRequests.get(cacheKey)
@@ -548,6 +557,8 @@ export type GfsResourceByPathView = {
   name: string
   kind: string
   path: string | null
+  /** Authoritative GFS version used as the mutation `ifMatch` precondition. */
+  version: number
   updatedAt: string
 }
 
@@ -4277,7 +4288,8 @@ export async function listOrgImages(): Promise<{ org: string; images: OrgImage[]
 // already_connected, recovery_in_progress, not_pending, not_recoverable,
 // org_name_taken, registration_capacity, rate_limited, invalid_contact_email,
 // org_blocklisted, claim_expired, claim_rejected, already_claimed,
-// deployment_suspended, client_unavailable, connection_superseded.
+// deployment_suspended, client_unavailable, connection_superseded,
+// registry_signing_material_unavailable.
 
 export type RegistryConnectionState =
   | 'disconnected'

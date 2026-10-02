@@ -35,6 +35,7 @@ import {
 import { GFS_DRIVE_MAIN } from '@constants/gfsBrowser'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import {
+  GFS_UNAVAILABLE_LOCATION_MESSAGE,
   type GfsCrumb,
   type GfsDiscoveryFailure,
   useGfsBrowserController,
@@ -248,6 +249,7 @@ export function FilesPage({
   pushToast,
   pendingGfsUri,
   onPendingGfsUriHandled,
+  remoteGfsChangeEpoch,
   onLocationChange,
   onOpenPreview,
 }: FilesPageProps) {
@@ -336,6 +338,14 @@ export function FilesPage({
     resolving,
     refreshAffordances,
   } = ctrl
+
+  const lastRemoteGfsChangeEpochRef = useRef(remoteGfsChangeEpoch)
+  useEffect(() => {
+    if (remoteGfsChangeEpoch === undefined) return
+    if (lastRemoteGfsChangeEpochRef.current === remoteGfsChangeEpoch) return
+    lastRemoteGfsChangeEpochRef.current = remoteGfsChangeEpoch
+    void ctrl.refreshCurrentLocation({ background: true })
+  }, [ctrl.refreshCurrentLocation, remoteGfsChangeEpoch])
 
   // Warm the cache for directory rows in the current view so clicking into a
   // folder is instant. TanStack Query's staleTime:Infinity (set in
@@ -544,7 +554,7 @@ export function FilesPage({
   // old modal-era contract. When no `onOpenPreview` is wired, it reports
   // "not previewable" so the caller downloads instead of silently doing nothing.
   const openFilePreview = (
-    resource: Pick<GfsDriveResource, 'bytes' | 'gfsUri' | 'name'>
+    resource: Pick<GfsDriveResource, 'bytes' | 'gfsUri' | 'name' | 'version'>
   ): boolean => {
     const preview = resolveGfsPreview(resource)
     if (!preview || !onOpenPreview) return false
@@ -1423,6 +1433,7 @@ export function FilesPage({
     (ctrl.authorityPending && !ctrl.discoveryFailure) ||
     (currentIsFolder ? loading : !current ? loadingAccessible : false)
   const visibleError = currentIsFolder ? error : !current ? accessibleError : null
+  const unavailableLocation = !current && openError === GFS_UNAVAILABLE_LOCATION_MESSAGE
   // Scoped to the root view on purpose: `accessibleError` only reaches
   // `visibleError` when there is no `current`, so the card replaces exactly the
   // banner it suppresses and never hides a folder-listing error behind it.
@@ -1665,6 +1676,9 @@ export function FilesPage({
           ) : null}
 
           {accessibleNotice ? <StatusBanner tone="info" text={accessibleNotice} /> : null}
+          {unavailableLocation ? (
+            <StatusBanner tone="error" text={GFS_UNAVAILABLE_LOCATION_MESSAGE} />
+          ) : null}
           {visibleError && !accessRevoked && !blockingFailure ? (
             // Presented, not raw. The banner is the non-blocking half of the
             // same read-plane failure the card shows, so it must not be the one

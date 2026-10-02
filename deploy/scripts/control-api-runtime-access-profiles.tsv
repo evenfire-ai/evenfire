@@ -1,6 +1,9 @@
 # public relation<TAB>control_api_runtime access profile
 administrative_events	append
 agent_run_events	append
+entity_change_feed	none
+entity_change_outbox	none
+entity_change_watermark	none
 budget_pending_reservations	legacy_dml
 codex_subscription_connections	upsert
 codex_subscription_oauth_states	upsert

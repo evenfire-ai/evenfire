@@ -320,6 +320,7 @@ export class PluginSdkRuntime {
       name: resource.name,
       kind: resource.kind,
       bytes: typeof resource.bytes === 'number' ? resource.bytes : null,
+      version: resource.version,
     })
     return { opened: true }
   }

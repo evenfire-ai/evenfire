@@ -15,6 +15,11 @@ import {
 } from './services/codexSubscriptionConnection.js'
 import { applyCodexSubscriptionOAuthStateSchema } from './services/codexSubscriptionOAuthState.js'
 import {
+  applyEntityChangeCheckpointSchema,
+  applyEntityChangeDefinerSearchPathSchema,
+  applyEntityChangeSchema,
+} from './services/entityChangeSchema.js'
+import {
   applyGfsUploadCleanupSchema,
   applyGfsUploadFinalizingSchema,
   applyGfsUploadSessionSchema,
@@ -6292,6 +6297,32 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     version: '0121_oauth_install_identity',
     legacyVersions: ['0119_oauth_install_identity'],
     apply: applyOAuthInstallIdentity,
+  },
+  {
+    version: '0122_durable_entity_change_feed',
+    // This feature was deployed both before the two replace-inviter migrations
+    // and at its original 0117 slot; it also shipped at 0119 before current dev
+    // claimed that numeric slot for dynamic clients. Preserve all identities so
+    // an upgrade records 0122 without rerunning entity-change DDL.
+    legacyVersions: [
+      '0116_durable_entity_change_feed',
+      '0117_durable_entity_change_feed',
+      '0119_durable_entity_change_feed',
+    ],
+    apply: applyEntityChangeSchema,
+  },
+  {
+    version: '0123_entity_change_checkpoint_cursor_convergence',
+    // The checkpoint fix shipped at 0120 before current dev assigned that slot
+    // to dynamic-client runtime grants. This migration only replaces the
+    // checkpoint function; retain the old identity so deployed databases skip
+    // duplicate DDL while recording the new monotonic version.
+    legacyVersions: ['0120_entity_change_checkpoint_cursor_convergence'],
+    apply: applyEntityChangeCheckpointSchema,
+  },
+  {
+    version: '0124_entity_change_definer_search_path',
+    apply: applyEntityChangeDefinerSearchPathSchema,
   },
 ]
 
