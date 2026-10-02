@@ -294,6 +294,10 @@ export function registerIpcHandlers(service: AppService): void {
     assertTrustedSender(event)
     return service.getSessionState()
   })
+  ipcMain.handle('auth:getSessionGeneration', async event => {
+    assertTrustedSender(event)
+    return service.getSessionGeneration()
+  })
   ipcMain.handle('auth:getDependenciesHealth', async event => {
     assertTrustedSender(event)
     return service.getDependenciesHealth()
@@ -306,6 +310,24 @@ export function registerIpcHandlers(service: AppService): void {
     assertTrustedSender(event)
     return service.selectRuntimeConfig(sanitizeString(payload?.optionId))
   })
+  ipcMain.handle(
+    'auth:selectRuntimeConfigForHandoff',
+    async (event, payload: { optionId: string; expectedSessionGeneration: unknown }) => {
+      assertTrustedSender(event)
+      const expectedSessionGeneration = payload?.expectedSessionGeneration
+      if (
+        typeof expectedSessionGeneration !== 'number' ||
+        !Number.isSafeInteger(expectedSessionGeneration) ||
+        expectedSessionGeneration < 0
+      ) {
+        throw new Error('Invalid session generation')
+      }
+      return service.selectRuntimeConfigForHandoff(
+        sanitizeString(payload?.optionId),
+        expectedSessionGeneration
+      )
+    }
+  )
   ipcMain.handle('auth:clearRuntimeConfigSelection', async event => {
     assertTrustedSender(event)
     return service.clearRuntimeConfigSelection()
@@ -400,8 +422,8 @@ export function registerIpcHandlers(service: AppService): void {
   })
   ipcMain.handle('auth:logout', async event => {
     assertTrustedSender(event)
-    await service.logout()
-    return { ok: true }
+    const sessionGeneration = await service.logout()
+    return { ok: true, sessionGeneration }
   })
 
   ipcMain.handle('notifications:isSupported', async event => {

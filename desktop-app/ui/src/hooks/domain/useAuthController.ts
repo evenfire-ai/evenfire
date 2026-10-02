@@ -5,6 +5,7 @@ import type {
   DependencyHealth,
   DesktopReleaseStatus,
   DesktopRuntimeConfig,
+  DesktopRuntimeConfigHandoffSelection,
   DesktopRuntimeConfigState,
   LoginBackendHint,
   SessionMe,
@@ -19,7 +20,7 @@ import type { SetStatusFn } from './types'
 interface UseAuthControllerParams {
   setStatus: SetStatusFn
   onSessionNeedsLoad: (options?: { preserveNav?: boolean }) => Promise<void>
-  logoutForEnvironmentMismatch: () => Promise<void>
+  logoutForEnvironmentMismatch: () => Promise<number | null>
 }
 
 function isInvitationExpiredError(error: unknown) {
@@ -121,6 +122,8 @@ export function useAuthController({
     setRuntimeConfigState(state)
     return state
   }, [])
+
+  const getSessionGeneration = useCallback(() => window.clerum.auth.getSessionGeneration(), [])
 
   const completeDesktopSetupWith = useCallback(
     async (nextEmail: string, nextAuthorizationToken: string) => {
@@ -340,26 +343,33 @@ export function useAuthController({
     }
   }
 
+  const applySelectedRuntimeConfigState = useCallback(
+    (state: DesktopRuntimeConfigState) => {
+      // Switching environment (pre-login) must not carry another env's cached
+      // queries forward (spec §5.2 P1). The env is bound to login (D4: no switch
+      // without logout), so a full clear is sufficient — no per-env query keys.
+      desktopQueryClient.clear()
+      setRuntimeConfigState(state)
+      setDesktopSetupAuthorizationToken('')
+      setDesktopSetupStarted(false)
+      const selected = state.options.find(option => option.id === state.activeOptionId)
+      setStatus(
+        selected ? `Environment selected: ${selected.label}.` : 'Environment selected.',
+        'success',
+        undefined,
+        { global: false, toast: true }
+      )
+    },
+    [setStatus]
+  )
+
   const handleSelectRuntimeConfig = useCallback(
     async (optionId: string): Promise<DesktopRuntimeConfigState | null> => {
       try {
         setBusy(true)
         setBackendSwitchHint(null)
         const state = await window.clerum.auth.selectRuntimeConfig(optionId)
-        // Switching environment (pre-login) must not carry another env's cached
-        // queries forward (spec §5.2 P1). The env is bound to login (D4: no switch
-        // without logout), so a full clear is sufficient — no per-env query keys.
-        desktopQueryClient.clear()
-        setRuntimeConfigState(state)
-        setDesktopSetupAuthorizationToken('')
-        setDesktopSetupStarted(false)
-        const selected = state.options.find(option => option.id === state.activeOptionId)
-        setStatus(
-          selected ? `Environment selected: ${selected.label}.` : 'Environment selected.',
-          'success',
-          undefined,
-          { global: false, toast: true }
-        )
+        applySelectedRuntimeConfigState(state)
         return state
       } catch (error) {
         setStatus(
@@ -371,15 +381,46 @@ export function useAuthController({
         setBusy(false)
       }
     },
-    [setStatus]
+    [applySelectedRuntimeConfigState, setStatus]
+  )
+
+  const handleSelectRuntimeConfigForHandoff = useCallback(
+    async (
+      optionId: string,
+      expectedSessionGeneration: number
+    ): Promise<DesktopRuntimeConfigHandoffSelection | null> => {
+      try {
+        setBusy(true)
+        setBackendSwitchHint(null)
+        const selection = await window.clerum.auth.selectRuntimeConfigForHandoff(
+          optionId,
+          expectedSessionGeneration
+        )
+        applySelectedRuntimeConfigState(selection.runtimeConfigState)
+        return selection
+      } catch (error) {
+        if (error instanceof Error && error.message.includes('stale_session_generation')) {
+          return null
+        }
+        setStatus(
+          `Failed to switch environment: ${error instanceof Error ? error.message : String(error)}`,
+          'error'
+        )
+        return null
+      } finally {
+        setBusy(false)
+      }
+    },
+    [applySelectedRuntimeConfigState, setStatus]
   )
 
   useEffect(() => {
     return window.clerum.auth.onDesktopEnvironmentSetup(
       createDesktopEnvironmentSetupHandler({
         getAuthState: getDesktopEnvironmentHandoffAuthState,
+        getSessionGeneration,
         refreshRuntimeConfigState,
-        handleSelectRuntimeConfig,
+        handleSelectRuntimeConfig: handleSelectRuntimeConfigForHandoff,
         onSessionNeedsLoad,
         logoutForEnvironmentMismatch,
         setPendingDesktopEnvironmentSetup,
@@ -388,7 +429,9 @@ export function useAuthController({
     )
   }, [
     getDesktopEnvironmentHandoffAuthState,
+    getSessionGeneration,
     handleSelectRuntimeConfig,
+    handleSelectRuntimeConfigForHandoff,
     logoutForEnvironmentMismatch,
     onSessionNeedsLoad,
     refreshRuntimeConfigState,

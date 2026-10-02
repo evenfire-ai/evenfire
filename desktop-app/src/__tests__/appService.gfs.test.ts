@@ -927,7 +927,11 @@ describe('AppService GFS upload security scope', () => {
         let loginSettled = false
         const login = (
           loginKind === 'password'
-            ? service.completePasswordLogin('b@example.test', 'password')
+            ? service.completePasswordLogin(
+                'b@example.test',
+                'password',
+                service.getSessionGeneration()
+              )
             : service.googleLogin('google-id-token')
         ).then(result => {
           loginSettled = true
