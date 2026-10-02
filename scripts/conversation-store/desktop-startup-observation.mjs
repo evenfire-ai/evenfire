@@ -14,6 +14,18 @@ function categoriesFrom(text) {
   return categories;
 }
 
+function launchCategoryFrom(text) {
+  for (const [category, pattern] of [
+    ["DockerLoggingFailed", /failed to initialize logging driver|unknown log opt|invalid log opt/i],
+    ["DockerMountFailed", /invalid mount config|error (?:while )?mounting|failed to mount/i],
+    ["DockerPolicyRejected", /invalid security (?:option|opt)|invalid capability|(?:no-new-privileges|seccomp|apparmor)[^\n]*(?:invalid|denied|failed|not supported)/i],
+    ["OciCreateFailed", /OCI runtime (?:create|start) failed|failed to create (?:shim )?task|runc (?:create|start) failed/i],
+    ["DockerLaunchConfigurationFailed", /invalid argument|invalid (?:size|value|reference format)|unknown (?:shorthand )?flag/i],
+    ["DockerDaemonUnavailable", /cannot connect to[^\n]*docker daemon|error during connect/i],
+  ]) if (pattern.test(text)) return category;
+  return "UnknownLaunchFailure";
+}
+
 function readLimited(file, maximum = 65536) {
   const descriptor = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
   try {
@@ -142,10 +154,15 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       case "--remote-source":
         process.stdout.write(`import * as fs from "node:fs";\n${[categoriesFrom, readLimited, processFacts, factsValid, policyMatches, snapshot, observe].map((fn) => fn.toString()).join("\n")}\nawait observe();\n`);
         break;
-      case "--logs": {
+      case "--logs":
+      case "--launch-output": {
         let tail = "";
         for await (const chunk of process.stdin) tail = (tail + chunk.toString("utf8")).slice(-65536);
-        process.stdout.write(`${JSON.stringify(categoriesFrom(tail))}\n`);
+        if (process.argv[2] === "--launch-output") {
+          const ids = [...new Set(tail.split(/\r?\n/).filter((line) => /^[0-9a-f]{64}$/.test(line)))];
+          // Only a full container ID and one fixed category leave this stream.
+          process.stdout.write(`${ids.length === 1 ? ids[0] : "unknown"}\n${launchCategoryFrom(tail)}\n`);
+        } else process.stdout.write(`${JSON.stringify(categoriesFrom(tail))}\n`);
         break;
       }
       case "--summarize": summarize(process.argv.slice(3)); break;

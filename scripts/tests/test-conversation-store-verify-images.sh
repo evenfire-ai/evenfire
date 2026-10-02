@@ -159,6 +159,24 @@ docker() {
           printf '%s' "${arg#clerum.io/conversation-store-probe=}" >"${TEST_LOG_FILE%/*}/stub-probe-id"
         fi
       done
+      case "${TEST_STARTUP_MODE:-live}" in
+        launch-log)
+          # Remote stderr arrives on stdout through the Minikube SSH PTY.
+          printf 'Error response from daemon: failed to initialize logging driver: unknown log opt\r\nPRIVATE_LAUNCH_SENTINEL_SHOULD_NOT_BE_EMITTED\r\n'
+          return 125 ;;
+        launch-oci|launch-oci-zero)
+          # A valid ID must not hide a create failure on the other stream.
+          printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\r\n'
+          printf 'OCI runtime create failed: PRIVATE_LAUNCH_SENTINEL_SHOULD_NOT_BE_EMITTED\n' >&2
+          [[ "$TEST_STARTUP_MODE" == launch-oci-zero ]] && return 0
+          return 126 ;;
+        launch-mount) printf 'invalid mount config: PRIVATE_LAUNCH_SENTINEL_SHOULD_NOT_BE_EMITTED\r\n'; return 125 ;;
+        launch-policy) printf 'invalid security option: PRIVATE_LAUNCH_SENTINEL_SHOULD_NOT_BE_EMITTED\r\n'; return 125 ;;
+        launch-config) printf 'unknown flag: PRIVATE_LAUNCH_SENTINEL_SHOULD_NOT_BE_EMITTED\r\n'; return 125 ;;
+        launch-daemon) printf 'Cannot connect to the Docker daemon: PRIVATE_LAUNCH_SENTINEL_SHOULD_NOT_BE_EMITTED\r\n'; return 125 ;;
+        launch-unknown) printf 'PRIVATE_LAUNCH_SENTINEL_SHOULD_NOT_BE_EMITTED\r\n'; return 73 ;;
+        launch-timeout) return 124 ;;
+      esac
       printf 'running' >"${TEST_LOG_FILE%/*}/stub-startup-state"
       printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\r\n'
       ;;
@@ -364,6 +382,8 @@ run_startup_case() {
      grep -Fq "${expected_category}" "$out" && \
      ! grep -Fq 'PRIVATE_LOG_SENTINEL' "$out" && \
      ! grep -Fq 'PRIVATE_LOG_SENTINEL' "$err" && \
+     ! grep -Fq 'PRIVATE_LAUNCH_SENTINEL' "$out" && \
+     ! grep -Fq 'PRIVATE_LAUNCH_SENTINEL' "$err" && \
      ! grep -Fq 'CONVERSATION_STORE_IMAGES_PASS' "$out"; then
     pass "Desktop entrypoint subprobe handles $scenario truthfully"
   else
@@ -399,6 +419,18 @@ done
 run_startup_case transport 1 '"transportExit":77'
 run_startup_case timeout 1 '"transportTimedOut":true'
 run_startup_case cleanup 1 'status=Failed category=CleanupFailed'
+
+# Launch diagnostics stay failed, preserve the original transport status, and
+# do not race a background reader or persist/emit either raw launch stream.
+run_startup_case launch-log 125 'category=DockerLoggingFailed launchExit=125'
+run_startup_case launch-oci 126 'category=OciCreateFailed launchExit=126'
+run_startup_case launch-oci-zero 1 'category=OciCreateFailed launchExit=0'
+run_startup_case launch-mount 125 'category=DockerMountFailed launchExit=125'
+run_startup_case launch-policy 125 'category=DockerPolicyRejected launchExit=125'
+run_startup_case launch-config 125 'category=DockerLaunchConfigurationFailed launchExit=125'
+run_startup_case launch-daemon 125 'category=DockerDaemonUnavailable launchExit=125'
+run_startup_case launch-unknown 73 'category=UnknownLaunchFailure launchExit=73'
+run_startup_case launch-timeout 124 'category=LaunchTransportTimeout launchExit=124 transportTimedOut=true'
 
 lock_result=0
 : >"$TMP_ROOT/startup-lock.log"

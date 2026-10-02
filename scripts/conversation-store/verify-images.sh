@@ -124,22 +124,36 @@ if [[ "$mode" == desktop-startup ]]; then
   image_id="$(owned_docker 20 docker image inspect --format '{{.Id}}' "$image" 2>/dev/null)" || exit 1
   [[ "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 1
   printf 'IMAGE_ID %s %s\n' "$image" "$image_id"
-  desktop_terminal='status=Failed category=ContainerStartTransportFailed'
+  desktop_terminal='status=Failed category=UnknownLaunchFailure'
+  helper="$ROOT/scripts/conversation-store/desktop-startup-observation.mjs"
+  launch_pipeline_status=(0 0)
   # No /run mount or entrypoint/command override: preserve the baseline s6
   # failure if the HCC UID1001/drop-ALL/NoNewPrivileges policy cannot start it.
-  container_id="$(owned_docker 20 docker run --detach --pull=never --network=none --user 1001:1001 \
+  owned_docker 20 docker run --detach --pull=never --network=none --user 1001:1001 \
     --cap-drop=ALL --security-opt=no-new-privileges:true --memory=1g --memory-swap=1g --cpus=1 --pids-limit=256 \
     --stop-timeout=5 --log-driver=local --log-opt=max-size=256k --log-opt=max-file=1 \
     --label "clerum.io/conversation-store-probe=$probe_id" \
     --tmpfs /tmp:rw,size=64m,uid=1001,gid=1001,mode=1777 \
     --tmpfs /config/workspace:rw,size=64m,uid=1001,gid=1001,mode=0700 \
-    "$image_id" 2>/dev/null)" || exit 1
-  [[ "$container_id" =~ ^[0-9a-f]{64}$ ]] || exit 1
+    "$image_id" 2>&1 | node "$helper" --launch-output \
+    >"$task/launch-report" 2>/dev/null || launch_pipeline_status=("${PIPESTATUS[@]}")
+  launch_status="${launch_pipeline_status[0]}"
+  # minikube's PTY can merge remote stderr into stdout. Classify both streams
+  # synchronously: the pipeline is reaped before reading its sanitized report.
+  # launchExit is the owned Docker/SSH status, separate from container exit.
+  desktop_terminal="status=Failed category=LaunchDiagnosticUnavailable launchExit=$launch_status transportTimedOut=false"
+  [[ "${launch_pipeline_status[1]}" -eq 0 ]] || exit 1
+  { IFS= read -r container_id; IFS= read -r launch_category; } <"$task/launch-report"
+  desktop_terminal="status=Failed category=$launch_category launchExit=$launch_status transportTimedOut=false"
+  if [[ "$launch_status" -eq 124 ]]; then
+    desktop_terminal="status=Failed category=LaunchTransportTimeout launchExit=124 transportTimedOut=true"
+  fi
+  if [[ "$launch_status" -ne 0 ]]; then exit "$launch_status"; fi
+  [[ "$launch_category" == UnknownLaunchFailure && "$container_id" =~ ^[0-9a-f]{64}$ ]] || exit 1
   desktop_terminal='status=Failed category=ContainerOwnershipUnknown'
   label="$(owned_docker 10 docker container inspect \
     --format '{{index .Config.Labels "clerum.io/conversation-store-probe"}}' "$container_id" 2>/dev/null)" || exit 1
   [[ "$label" == "$probe_id" ]] || exit 1
-  helper="$ROOT/scripts/conversation-store/desktop-startup-observation.mjs"
   snapshot_source="$(node "$helper" --remote-source)"
   observation_status=0
   # The in-container observer uses a 30s monotonic deadline. The inherited
@@ -168,6 +182,7 @@ if [[ "$mode" == desktop-startup ]]; then
   desktop_terminal="$(node "$helper" --summarize "$task/startup-proof.json" \
     "$task/observed-state" "$task/final-state" "$task/categories.json" \
     "$observation_status" "$termination")" || result_status=$?
+  desktop_terminal+=" launchExit=$launch_status"
   exit "$result_status"
 fi
 owned_docker 20 docker version --format '{{.Server.Version}}'
