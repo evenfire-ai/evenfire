@@ -111,7 +111,7 @@ export async function runCompanion(): Promise<void> {
     if (server.cwd !== process.cwd() || server.argv.length !== 2 || !server.argv[1]?.endsWith('/dist/main.js') ||
         flags.filter(flag => flag.startsWith('--max-old-space-size=')).length !== 1 || !flags.includes(`--max-old-space-size=${options.candidate.heapSizeMiB}`) || flags.filter(flag => flag.startsWith('--inspect=')).length !== 1 || !flags.includes(`--inspect=127.0.0.1:${options.inspectorPort}`) ||
         flags.some(flag => !/^--(?:max-old-space-size=\d+|inspect=127\.0\.0\.1:\d+|enable-source-maps)$/.test(flag))) throw new Error('actual server source/argv mismatch')
-    const expected = { maxInFlight: options.candidate.concurrency, readDeadlineMs: options.candidate.readDeadlineMs, workDeadlineMs: options.candidate.workDeadlineMs, closeGraceMs: options.candidate.closeGraceMs }
+    const expected: Record<string, number> = { maxInFlight: options.candidate.concurrency, readDeadlineMs: options.candidate.readDeadlineMs, workDeadlineMs: options.candidate.workDeadlineMs, closeGraceMs: options.candidate.closeGraceMs }
     if (!Object.keys(expected).every(key => prod.policy[key] === expected[key]) || Object.keys(prod.policy).length !== 4) throw new Error('actual compiled admission policy differs from candidate')
     if (options.pressureOnly === true) {
       if (options.bindings.some((binding: any) => !/^[a-z0-9][a-z0-9-]{0,62}$/.test(binding.hostRef) || !/^[a-f0-9-]{36}$/.test(binding.hostUid))) throw new Error('pressure Host identity invalid')
@@ -139,8 +139,9 @@ export async function runCompanion(): Promise<void> {
       if (!connection || connection.status !== 'connected' || connection.catalogStatus !== 'ready') throw new Error('actual connection unavailable')
       const model = await prod.db.pool.query('SELECT enabled, stale FROM grok_catalog_models WHERE connection_id = $1 AND model = $2', [connection.id, 'grok-4.6'])
       if (model.rows.length !== 1 || !model.rows[0].enabled || model.rows[0].stale) throw new Error('actual model not admitted')
-      const budget = await prod.db.pool.query('SELECT name FROM token_budgets WHERE id = $1', [binding.budgetId])
-      if (budget.rows.length !== 1 || !budget.rows[0].name.includes(options.fixtureRunId)) throw new Error('budget not fixture-owned')
+      const budget = await prod.db.pool.query('SELECT name, enabled, scope, unit, currency, enforcement, limit_amount, max_task_amount, min_start_amount, period, timezone FROM token_budgets WHERE id = $1', [binding.budgetId])
+      const rule = budget.rows[0], scope = rule?.scope
+      if (budget.rows.length !== 1 || !rule.name.includes(options.fixtureRunId) || rule.enabled !== true || rule.unit !== 'tokens' || rule.currency !== null || rule.enforcement !== 'block' || Number(rule.limit_amount) !== 100 || Number(rule.max_task_amount) !== 200 || Number(rule.min_start_amount) !== 1 || rule.period !== 'daily' || rule.timezone !== 'UTC' || !scope || Object.keys(scope).length !== 3 || scope.host_ref?.length !== 1 || scope.host_ref[0] !== binding.hostRef || scope.provider?.length !== 1 || scope.provider[0] !== 'grok-subscription' || scope.model?.length !== 1 || scope.model[0] !== 'grok-4.6') throw new Error('actual owned danger-zone budget mismatch')
       const policyHash = prod.grok.computeGrokPolicyHash({ model: 'grok-4.6', catalogRevision: connection.catalogRevision, credentialRevision: connection.credentialRevision, connectionKey: binding.connectionKey })
       bindings.push({ hostRef: binding.hostRef, hostUid: binding.hostUid, connectionKey: binding.connectionKey, budgetId: binding.budgetId, connectionId: connection.id, policyRevision: connection.catalogRevision, policyHash })
     }
@@ -166,8 +167,9 @@ export async function runCompanion(): Promise<void> {
       if (!input.name?.startsWith(`${options.runId}-`)) throw new Error('GFS filename not owned')
       headers.cookie = `${cookieName}=${options.cookie}`; route = `/api/v1/gfs/proxy/v1/resources/${options.gfsParentRid}/children`
     } else throw new Error('invalid route')
+    if (options.pressureOnly === true) { headers['x-evenfire-qa-pressure-id'] = input.requestId; headers.connection = 'close' }
     const state: any = { input, acceptedWriteBytes: 0, maxWritableBytes: 0, closedByClient: false }
-    const request = http.request({ hostname: '127.0.0.1', port: prod.config.port, method: 'POST', path: route, headers }, response => {
+    const request = http.request({ hostname: '127.0.0.1', port: prod.config.port, method: 'POST', path: route, headers, ...(options.pressureOnly === true ? { agent: false } : {}) }, response => {
       const chunks: Buffer[] = []; let bytes = 0
       response.on('data', chunk => { bytes += chunk.length; if (bytes > 65536) request.destroy(new Error('response bound')); else chunks.push(chunk) })
       response.on('end', async () => {
@@ -194,7 +196,13 @@ export async function runCompanion(): Promise<void> {
     state.request = request; sockets.set(input.requestId, state)
     request.on('error', () => { sockets.delete(input.requestId); emit({ event: 'response', requestId: input.requestId, data: { transportClosed: true, acceptedWriteBytes: state.acceptedWriteBytes, closedByClient: state.closedByClient } }) })
     request.setTimeout(options.candidate.workDeadlineMs + options.candidate.readDeadlineMs + 5000, () => request.destroy(new Error('HTTP deadline')))
-    request.flushHeaders(); return { opened: true }
+    request.flushHeaders()
+    if (options.pressureOnly === true) {
+      const wireHeader = (request as unknown as { _header?: string })._header
+      if (typeof wireHeader !== 'string') throw new Error('actual pressure header unavailable')
+      state.headerBytes = Buffer.byteLength(wireHeader, 'latin1')
+    }
+    return { opened: true }
   }
   async function download(rid: string) {
     const owned = created.get(rid); if (!owned) throw new Error('download not owned')
@@ -247,7 +255,9 @@ export async function runCompanion(): Promise<void> {
       const owner = await inspector.owners()
       const incomplete = [...sockets.values()].map(state => ({ requestId: state.input.requestId, acceptedWriteBytes: state.acceptedWriteBytes, declaredBytes: state.input.length, closedByClient: state.closedByClient }))
       if (incomplete.some(value => value.acceptedWriteBytes >= value.declaredBytes)) throw new Error('pressure body is not incomplete')
-      return { ...owner, incompleteFixtureBodies: incomplete }
+      const serverReads = options.pressureOnly === true ? await inspector.pressureReads([...sockets.values()].map(state => ({ requestId: state.input.requestId, headerBytes: state.headerBytes }))) : undefined
+      if (serverReads && serverReads.pid !== owner.pid) throw new Error('pressure ownership/read observations changed process')
+      return { ...owner, incompleteFixtureBodies: incomplete, serverReads }
     }
     if (input.kind === 'lock') {
       if (lockClient) throw new Error('lock already held')
@@ -271,12 +281,13 @@ export async function runCompanion(): Promise<void> {
     if (input.kind === 'cleanup') return cleanup()
     throw new Error('unknown command')
   }
-  let header = Buffer.alloc(0), frame: Frame, remaining = 0
+  let header = Buffer.alloc(0), frame: Frame | undefined, remaining = 0
   try {
     for await (const chunk of process.stdin) {
       let offset = 0
       while (offset < chunk.length) {
         if (remaining) {
+          if (!frame) throw new Error('body frame was not initialized')
           const length = Math.min(remaining, chunk.length - offset), state = sockets.get(frame.requestId!)
           if (!state) throw new Error('request closed before streaming completed')
           if (options.pressureOnly === true && (state.acceptedWriteBytes + length > 65536 || state.acceptedWriteBytes + length >= state.input.length)) throw new Error('pressure body cannot complete')
@@ -292,11 +303,11 @@ export async function runCompanion(): Promise<void> {
           if (header.length > 32768) throw new Error('header bound exceeded')
           offset = newline < 0 ? end : end + 1
           if (newline < 0) continue
-          frame = JSON.parse(header.toString()); header = Buffer.alloc(0)
-          if (frame.kind === 'write') {
-            if (!Number.isSafeInteger(frame.length) || frame.length! < 1 || frame.length! > 65536) throw new Error('body frame bound exceeded')
-            remaining = frame.length!
-          } else { try { emit({ callId: frame.callId, data: await command(frame) }) } catch { emit({ callId: frame.callId, failed: true, code: 'REAL_RUNTIME_COMMAND_FAILED' }) } }
+          const parsed: Frame = JSON.parse(header.toString()); frame = parsed; header = Buffer.alloc(0)
+          if (parsed.kind === 'write') {
+            if (!Number.isSafeInteger(parsed.length) || parsed.length! < 1 || parsed.length! > 65536) throw new Error('body frame bound exceeded')
+            remaining = parsed.length!
+          } else { try { emit({ callId: parsed.callId, data: await command(parsed) }) } catch { emit({ callId: parsed.callId, failed: true, code: 'REAL_RUNTIME_COMMAND_FAILED' }) } }
         }
       }
     }

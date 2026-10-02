@@ -10,38 +10,85 @@ import { randomBytes, createHash } from 'node:crypto'
 
 type SeedOptions = { runId: string; hostNamespace: string; operatorUser: string; operatorPassword?: string; cookie?: string }
 const seedAssert = (condition: unknown, code: string) => { if (!condition) throw new Error(code) }
-export function assertQaBudget(budget: any, hostRef: string, name: string): void {
-  const scope = budget.scope
-  seedAssert(budget.name === name && budget.enabled === true && budget.unit === 'tokens' && budget.currency === null && budget.enforcement === 'block' &&
-    Number(budget.limit_amount) === 100 && Number(budget.max_task_amount) === 200 && Number(budget.min_start_amount) === 1 && budget.period === 'daily' && budget.timezone === 'UTC' &&
-    scope && Object.keys(scope).length === 3 && scope.host_ref?.length === 1 && scope.host_ref[0] === hostRef && scope.provider?.length === 1 && scope.provider[0] === 'grok-subscription' && scope.model?.length === 1 && scope.model[0] === 'grok-4.6', 'QA_DANGER_ZONE_BUDGET_MISMATCH')
+export function validateDesktopOperatorLink(controlAdminId: string, link: any) {
+  const uuid = (value: unknown) => typeof value === 'string' && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(value)
+  seedAssert(uuid(controlAdminId) && link?.controlAdminId === controlAdminId && uuid(link.desktopUserId) && link.desktopUserId !== controlAdminId && link.gfsOperatorLinkStatus === 'active', 'SEED_DESKTOP_OPERATOR_LINK_UNPROVED')
+  return { desktopUserId: link.desktopUserId, gfsOperatorLinkStatus: link.gfsOperatorLinkStatus, generation: link.generation, rowVersion: link.rowVersion }
 }
-export async function runSeedCompanion(): Promise<void> {
-  const output = process.stdout.write.bind(process.stdout)
-  process.stdout.write = () => true; process.stderr.write = () => true
-  process.env.LOG_LEVEL = 'silent'
-  const emit = (value: unknown) => output(JSON.stringify(value) + '\n')
-  const require = createRequire(path.join(process.cwd(), 'package.json'))
-  let prod: any, options: SeedOptions, phase = 'private-input', input = Buffer.alloc(0)
-  const cookieName = 'control_ui_admin_session'
-  async function request(method: string, route: string, body?: unknown, cookie = options.cookie): Promise<any> {
+/** Credentials remain private fields in the in-pod process. The public request
+ * interface returns neither session headers nor the underlying cookie value.
+ */
+export class PrivateCookieSession {
+  #port: number; #db: any; #bootstrap: string; #runId: string; #operator: string
+  #password?: string; #cookie?: string
+  constructor(config: any, db: any, options: SeedOptions) {
+    this.#port = config.port; this.#db = db; this.#bootstrap = config.adminBootstrapUsername
+    this.#runId = options.runId; this.#operator = options.operatorUser
+    this.#password = options.operatorPassword; this.#cookie = options.cookie
+  }
+  async #raw(method: string, route: string, body?: unknown, binary = false, anonymous = false): Promise<any> {
+    seedAssert(['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].includes(method) && (route.startsWith('/api/v1/admin/') || route.startsWith('/api/v1/gfs/')), 'SEED_REQUEST_OUTSIDE_API_BOUNDARY')
     return new Promise((resolve, reject) => {
-      const req = http.request({ hostname: '127.0.0.1', port: prod.config.port, method, path: route,
-        headers: { 'content-type': 'application/json', ...(cookie ? { cookie: `${cookieName}=${cookie}` } : {}) } }, res => {
+      const req = http.request({ hostname: '127.0.0.1', port: this.#port, method, path: route,
+        headers: { 'content-type': 'application/json', ...(!anonymous && this.#cookie ? { cookie: `control_ui_admin_session=${this.#cookie}` } : {}) } }, res => {
         const chunks: Buffer[] = []; let bytes = 0
-        res.on('data', chunk => { bytes += chunk.length; if (bytes > 65536) req.destroy(new Error('SEED_RESPONSE_BOUND')); else chunks.push(chunk) })
-        res.on('end', () => { try { resolve({ status: res.statusCode, headers: res.headers, body: bytes ? JSON.parse(Buffer.concat(chunks).toString()) : null }) } catch { reject(new Error('SEED_RESPONSE_INVALID')) } })
+        res.on('data', chunk => { bytes += chunk.length; if (bytes > (binary ? 8 * 1024 * 1024 : 65536)) req.destroy(new Error('SEED_RESPONSE_BOUND')); else chunks.push(chunk) })
+        res.on('end', () => { try { const data = Buffer.concat(chunks); resolve({ status: res.statusCode, headers: res.headers, ...(binary ? { bytes: data } : { json: bytes ? JSON.parse(data.toString()) : null }) }) } catch { reject(new Error('SEED_RESPONSE_INVALID')) } })
       })
       req.on('error', () => reject(new Error('SEED_HTTP_FAILED')))
       req.setTimeout(30000, () => req.destroy(new Error('SEED_HTTP_DEADLINE')))
       if (body) req.write(JSON.stringify(body)); req.end()
     })
   }
-  function takeSession(response: any) {
-    const value = (response.headers['set-cookie'] ?? []).find((item: string) => item.startsWith(`${cookieName}=`))
+  #takeSession(response: any) {
+    const value = (response.headers['set-cookie'] ?? []).find((item: string) => item.startsWith('control_ui_admin_session='))
     seedAssert(response.status === 200 && value, 'SEED_LOGIN_OR_SETUP_REFUSED')
-    options.cookie = value.split(';')[0].slice(cookieName.length + 1)
+    this.#cookie = value.split(';')[0].slice('control_ui_admin_session'.length + 1)
   }
+  async authenticate() {
+    let setupPerformed = false
+    if (!this.#cookie) {
+      seedAssert(typeof this.#password === 'string' && this.#password.length >= 8, 'SEED_PRIVATE_OPERATOR_MATERIAL_REQUIRED')
+      const bootstrap = await this.#db.pool.query(`SELECT id::text, username, status, last_login_at FROM control_admin_users WHERE username = $1`, [this.#bootstrap])
+      const active = await this.#db.pool.query("SELECT COUNT(*)::int AS count FROM control_admin_users WHERE status = 'active'")
+      const eligible = bootstrap.rows.length === 1 && bootstrap.rows[0].status === 'active' && bootstrap.rows[0].last_login_at === null && active.rows[0].count === 1
+      if (eligible) {
+        seedAssert(this.#operator === `${this.#runId}-operator`, 'SEED_FIRST_RUN_OPERATOR_MUST_BE_OWNED')
+        const collision = await this.#db.pool.query('SELECT COUNT(*)::int AS count FROM control_admin_users WHERE username = $1 OR lower(email) = lower($2)', [this.#operator, `${this.#runId}@example.invalid`])
+        seedAssert(collision.rows[0].count === 0, 'SEED_INITIAL_OPERATOR_IDENTITY_COLLISION')
+        this.#takeSession(await this.#raw('POST', '/api/v1/admin/auth/setup', { username: this.#operator, email: `${this.#runId}@example.invalid`, password: this.#password, seedDesktopPassword: true }, false, true))
+        setupPerformed = true
+      } else {
+        this.#takeSession(await this.#raw('POST', '/api/v1/admin/auth/login', { username: this.#operator, password: this.#password }, false, true))
+      }
+      this.#password = undefined
+    }
+    const me = await this.#raw('GET', '/api/v1/admin/auth/me')
+    seedAssert(me.status === 200 && me.json?.me?.username === this.#operator && me.json.me.role === 'admin', 'SEED_OPERATOR_IDENTITY_MISMATCH')
+    const link = await this.#raw('GET', `/api/v1/admin/control-admins/${me.json.me.id}/gfs-operator-link`)
+    seedAssert(link.status === 200, 'SEED_DESKTOP_OPERATOR_LINK_UNAVAILABLE')
+    return { id: me.json.me.id, username: me.json.me.username, setupPerformed, ...validateDesktopOperatorLink(me.json.me.id, link.json) }
+  }
+  async request(input: { method: string; path: string; body?: unknown; binary?: boolean }) {
+    const value = await this.#raw(input.method, input.path, input.body, input.binary === true)
+    return input.binary === true ? { status: value.status, bytes: value.bytes } : { status: value.status, json: value.json }
+  }
+}
+export function assertQaBudget(budget: any, hostRef: string, name: string): void {
+  const scope = budget.scope
+  seedAssert(budget.name === name && budget.enabled === true && budget.unit === 'tokens' && budget.currency === null && budget.enforcement === 'block' &&
+    Number(budget.limit_amount) === 100 && Number(budget.max_task_amount) === 200 && Number(budget.min_start_amount) === 1 && budget.period === 'daily' && budget.timezone === 'UTC' &&
+    scope && Object.keys(scope).length === 3 && scope.host_ref?.length === 1 && scope.host_ref[0] === hostRef && scope.provider?.length === 1 && scope.provider[0] === 'grok-subscription' && scope.model?.length === 1 && scope.model[0] === 'grok-4.6', 'QA_DANGER_ZONE_BUDGET_MISMATCH')
+}
+export async function runSeedCompanion(actions: { prepareGfsImages?: (input: any) => Promise<unknown> } = {}): Promise<void> {
+  const output = process.stdout.write.bind(process.stdout)
+  process.stdout.write = () => true; process.stderr.write = () => true
+  process.env.LOG_LEVEL = 'silent'
+  const emit = (value: unknown) => output(JSON.stringify(value) + '\n')
+  const require = createRequire(path.join(process.cwd(), 'package.json'))
+  let prod: any, options: SeedOptions, phase = 'private-input', input = Buffer.alloc(0)
+  let session: PrivateCookieSession
+  async function request(method: string, route: string, body?: unknown): Promise<any> { const value = await session.request({ method, path: route, body }); return { status: value.status, body: value.json } }
   async function prepare() {
     seedAssert(/^pr806-memory-[a-f0-9]{12}$/.test(options.runId), 'SEED_RUN_ID_INVALID')
     prod = { config: require('./dist/config.js').config, db: require('./dist/db.js'),
@@ -50,24 +97,9 @@ export async function runSeedCompanion(): Promise<void> {
     seedAssert(prod.config.hostsNamespace === options.hostNamespace && prod.config.grokSubscriptionEnabled && prod.config.codexSubscriptionEnabled, 'SEED_PROVIDER_OR_NAMESPACE_MISMATCH')
     seedAssert(prod.config.subscriptionCatalogSyncCronEnabled === false && prod.config.llmCatalogSyncCronEnabled === false, 'SEED_VENDOR_CRON_MUST_BE_DISABLED')
     phase = 'operator-session'
-    let setupPerformed = false
-    if (!options.cookie) {
-      seedAssert(typeof options.operatorPassword === 'string' && options.operatorPassword.length >= 8, 'SEED_PRIVATE_OPERATOR_MATERIAL_REQUIRED')
-      const bootstrap = await prod.db.pool.query(`SELECT id::text, username, status, last_login_at FROM control_admin_users WHERE username = $1`, [prod.config.adminBootstrapUsername])
-      const active = await prod.db.pool.query("SELECT COUNT(*)::int AS count FROM control_admin_users WHERE status = 'active'")
-      const eligible = bootstrap.rows.length === 1 && bootstrap.rows[0].status === 'active' && bootstrap.rows[0].last_login_at === null && active.rows[0].count === 1
-      if (eligible) {
-        seedAssert(options.operatorUser === `${options.runId}-operator`, 'SEED_FIRST_RUN_OPERATOR_MUST_BE_OWNED')
-        takeSession(await request('POST', '/api/v1/admin/auth/setup', { username: options.operatorUser, email: `${options.runId}@example.invalid`, password: options.operatorPassword, seedDesktopPassword: false }, ''))
-        setupPerformed = true
-      } else {
-        // Only explicit canonical harness material authenticates an initialized
-        // account. No reset, alternate secret store or bootstrap retry occurs.
-        takeSession(await request('POST', '/api/v1/admin/auth/login', { username: options.operatorUser, password: options.operatorPassword }, ''))
-      }
-    }
-    const me = await request('GET', '/api/v1/admin/auth/me')
-    seedAssert(me.status === 200 && me.body?.me?.username === options.operatorUser && me.body.me.role === 'admin', 'SEED_OPERATOR_IDENTITY_MISMATCH')
+    session = new PrivateCookieSession(prod.config, prod.db, options)
+    const operator = await session.authenticate()
+    options.operatorPassword = undefined; options.cookie = undefined
     phase = 'context-binding'
     const context = await request('GET', '/api/v1/admin/contexts/context1')
     seedAssert(context.status === 200 && context.body?.metadata?.name === 'context1' && context.body.metadata.namespace === prod.config.contextsNamespace && /^[a-f0-9-]{36}$/.test(context.body.metadata.uid) &&
@@ -120,13 +152,13 @@ export async function runSeedCompanion(): Promise<void> {
       let host = await request('GET', `/api/v1/admin/hosts/${hostRef}`), createdHost = false
       if (host.status === 404) {
         host = await request('POST', '/api/v1/admin/hosts', { metadata: { name: hostRef, labels: { 'evenfire.io/qa-memory-run': options.runId } },
-          spec: { host: hostRef, contextRef: 'context1', model: { provider: 'grok-subscription', name: 'grok-4.6', connectionRef: connectionKey }, allowedModels: [{ provider: 'grok-subscription', model: 'grok-4.6' }] } })
+          spec: { host: hostRef, contextRef: 'context1', desktop: { x11: true, browser: false }, model: { provider: 'grok-subscription', name: 'grok-4.6', connectionRef: connectionKey }, allowedModels: [{ provider: 'grok-subscription', model: 'grok-4.6' }] } })
         seedAssert(host.status === 201, 'SEED_HOST_API_REFUSED'); createdHost = true
       }
       const value = host.body
       seedAssert((host.status === 200 || host.status === 201) && value?.metadata?.name === hostRef && value.metadata.namespace === options.hostNamespace && /^[a-f0-9-]{36}$/.test(value.metadata.uid) &&
         value.metadata.labels?.['evenfire.io/qa-memory-run'] === options.runId && value.spec?.host === hostRef && value.spec.contextRef === 'context1' && value.spec.model?.provider === 'grok-subscription' && value.spec.model.name === 'grok-4.6' && value.spec.model.connectionRef === connectionKey &&
-        value.spec.allowedModels?.length === 1 && value.spec.allowedModels[0].provider === 'grok-subscription' && value.spec.allowedModels[0].model === 'grok-4.6', 'SEED_EXISTING_HOST_OWNER_OR_SPEC_CHANGED')
+        value.spec.desktop?.x11 === true && value.spec.desktop.browser === false && value.spec.allowedModels?.length === 1 && value.spec.allowedModels[0].provider === 'grok-subscription' && value.spec.allowedModels[0].model === 'grok-4.6', 'SEED_EXISTING_HOST_OWNER_OR_SPEC_CHANGED')
       bindings.push({ hostRef, hostUid: value.metadata.uid, connectionKey, connectionId: connection.id, credentialRevision: connection.credentialRevision, catalogRevision: connection.catalogRevision, budgetId: budget.id, budgetName, reservationAmount: 200, hostCreateStatus: createdHost ? 201 : 200, catalogProjectionPublished: true })
     }
     phase = 'gfs-owned-directory'
@@ -141,7 +173,8 @@ export async function runSeedCompanion(): Promise<void> {
     const parent = await request('GET', `/api/v1/gfs/proxy/v1/resources/${directory.body.data.rid}`)
     seedAssert(parent.status === 200 && parent.body?.data?.resourceId === directory.body.data.resourceId && parent.body.data.name === options.runId && parent.body.data.parentResourceId === root.body.resourceId, 'SEED_GFS_DIRECTORY_NOT_DURABLE')
     phase = 'complete'
-    return { fixtureCredentialState: 'opaque-qa-not-real-G8', upstreamDispatch: 'NOT_RUN', operatorUsername: me.body.me.username, operatorId: me.body.me.id, setupPerformed,
+    return { fixtureCredentialState: 'opaque-qa-not-real-G8', upstreamDispatch: 'NOT_RUN', operatorUsername: operator.username, operatorId: operator.id, operatorDesktopUserId: operator.desktopUserId,
+      operatorLink: { status: operator.gfsOperatorLinkStatus, generation: operator.generation, rowVersion: operator.rowVersion }, setupPerformed: operator.setupPerformed,
       context: { name: 'context1', namespace: context.body.metadata.namespace, uid: context.body.metadata.uid, resourceVersion: context.body.metadata.resourceVersion, mcpServers: [] }, bindings,
       gfs: { drive: 'main', rootRid: root.body.rid, rootResourceId: root.body.resourceId, parentRid: directory.body.data.rid, parentResourceId: directory.body.data.resourceId, name: options.runId, createStatus: 201, durableReadStatus: 200 },
       budgetCache: { definitionsTtlMs: 5000, strategy: 'benchmark-requires-new-actual-api-pod-before-first-authorize', resetHelperCalled: false },
@@ -150,14 +183,23 @@ export async function runSeedCompanion(): Promise<void> {
   let handled = false
   try {
     for await (const chunk of process.stdin) {
-      input = Buffer.concat([input, chunk]); seedAssert(input.length <= 32768, 'SEED_PRIVATE_INPUT_BOUND')
+      input = Buffer.concat([input, chunk]); seedAssert(input.length <= 4 * 1024 * 1024, 'SEED_PRIVATE_INPUT_BOUND')
       const end = input.indexOf(10); if (end < 0) continue
       seedAssert(end === input.length - 1, 'SEED_ONE_PRIVATE_COMMAND_REQUIRED')
       const frame = JSON.parse(input.toString()); input = Buffer.alloc(0)
-      seedAssert(frame.kind === 'prepare' && typeof frame.callId === 'string', 'SEED_PRIVATE_COMMAND_INVALID')
+      seedAssert(['prepare', 'prepare-gfs-images'].includes(frame.kind) && typeof frame.callId === 'string', 'SEED_PRIVATE_COMMAND_INVALID')
       options = frame.options
       handled = true
-      try { emit({ callId: frame.callId, data: await prepare() }) }
+      try {
+        if (frame.kind === 'prepare') emit({ callId: frame.callId, data: await prepare() })
+        else {
+          seedAssert(actions.prepareGfsImages, 'GFS_FIXTURE_ACTION_NOT_INSTALLED')
+          prod = { config: require('./dist/config.js').config, db: require('./dist/db.js') }
+          seedAssert(/^pr806-memory-[a-f0-9]{12}$/.test(options.runId) && options.hostNamespace === prod.config.hostsNamespace, 'GFS_FIXTURE_BINDING_INVALID')
+          session = new PrivateCookieSession(prod.config, prod.db, options); await session.authenticate()
+          emit({ callId: frame.callId, data: await actions.prepareGfsImages!({ ...frame.input, session }) })
+        }
+      }
       catch (error: any) { emit({ callId: frame.callId, failed: true, code: /^[A-Z0-9_]+$/.test(error.message) ? error.message : 'SEED_REAL_RUNTIME_FAILED', phase }); process.exitCode = 1 }
       break
     }

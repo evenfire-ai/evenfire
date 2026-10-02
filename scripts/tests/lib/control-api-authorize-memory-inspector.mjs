@@ -46,6 +46,38 @@ export class InspectorClient {
       return { kind: 'native-inspector-AuthorizeBodyAdmission.snapshot', ...value }
     } finally { await this.call('Runtime.releaseObjectGroup', { objectGroup: group }) }
   }
+  async pressureReads(expected) {
+    if (!Array.isArray(expected) || expected.some(item => !/^[a-z0-9-]{1,96}$/.test(item.requestId) || !Number.isSafeInteger(item.headerBytes) || item.headerBytes < 1)) throw new Error('Invalid pressure read projection')
+    const group = 'qa-pressure-read-observation'
+    try {
+      const prototype = await this.call('Runtime.evaluate', { expression: "process.mainModule.require('node:http').IncomingMessage.prototype", objectGroup: group })
+      if (prototype?.exceptionDetails || !prototype?.result?.objectId) throw new Error('Actual server incoming-message prototype unavailable')
+      const objects = await this.call('Runtime.queryObjects', { prototypeObjectId: prototype.result.objectId, objectGroup: group })
+      if (!objects?.objects?.objectId) throw new Error('Actual server request objects unavailable')
+      // Only lengths leave the server. Headers (including authorization), the
+      // socket and request body never enter an inspection result. Each pressure
+      // request uses a fresh non-persistent socket, so bytesRead has no history.
+      const declaration = `function(expected){
+        const rows=[];
+        for(const req of this){
+          const id=req.headers?.['x-evenfire-qa-pressure-id'];
+          const wanted=expected.find(item=>item.requestId===id);
+          if(!wanted||req.method!=='POST'||req.url!=='/api/v1/mcp-host/llm/provider-attempts/authorize'||req.aborted||req.destroyed||req.complete)continue;
+          let header=req.method+' '+req.url+' HTTP/'+req.httpVersion+'\\r\\n';
+          for(let i=0;i<req.rawHeaders.length;i+=2)header+=req.rawHeaders[i]+': '+req.rawHeaders[i+1]+'\\r\\n';
+          header+='\\r\\n';
+          const headerBytes=Buffer.byteLength(header,'latin1'), socketBytesRead=req.socket?.bytesRead;
+          rows.push({requestId:id,headerBytes,expectedHeaderBytes:wanted.headerBytes,socketBytesRead,receivedBodyBytes:Number.isSafeInteger(socketBytesRead)?socketBytesRead-headerBytes:null,declaredBytes:Number(req.headers['content-length']),complete:req.complete,aborted:req.aborted});
+        }
+        return {pid:process.pid,at:Date.now(),reads:rows};
+      }`
+      const reply = await this.call('Runtime.callFunctionOn', { objectId: objects.objects.objectId, functionDeclaration: declaration, arguments: [{ value: expected }], returnByValue: true })
+      const value = reply?.result?.value
+      if (reply?.exceptionDetails || !Number.isSafeInteger(value?.pid) || !Number.isSafeInteger(value.at) || !Array.isArray(value.reads)) throw new Error('Actual server body reception is unavailable')
+      if (new Set(value.reads.map(item => item.requestId)).size !== value.reads.length || value.reads.some(item => item.headerBytes !== item.expectedHeaderBytes || !Number.isSafeInteger(item.receivedBodyBytes) || item.receivedBodyBytes < 0 || item.declaredBytes !== 35 * 1024 * 1024 - 4096 || item.receivedBodyBytes >= item.declaredBytes || item.complete !== false || item.aborted !== false)) throw new Error('Actual pressure connection framing is unknown')
+      return { kind: 'native-inspector-IncomingMessage-fresh-socket-bytes', ...value }
+    } finally { await this.call('Runtime.releaseObjectGroup', { objectGroup: group }) }
+  }
   async forceGc() {
     const before = await this.snapshot()
     await this.call('HeapProfiler.enable')

@@ -12,15 +12,40 @@ const NAMESPACE = 'control-plane', DEPLOYMENT = 'control-api', CONTAINER = 'cont
 const sleepPoll = ms => new Promise(resolve => setTimeout(resolve, ms))
 const assert = (condition, code) => { if (!condition) throw new Error(code) }
 const uuid = value => /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(value)
+function readOwnedJson(file, maxBytes = 65536) {
+  const stat = fs.lstatSync(file)
+  assert(stat.isFile() && !stat.isSymbolicLink() && stat.uid === process.getuid() && !(stat.mode & 0o077) && stat.size > 0 && stat.size <= maxBytes, 'OWNED_PRIVATE_JSON_REQUIRED')
+  return JSON.parse(fs.readFileSync(file, 'utf8'))
+}
+export function validateFixtureReceipt(record, binding) {
+  const value = record.fixtures
+  assert(record.kind === 'control-api-authorize-memory-fixtures.v1' && record.status === 'complete' && record.producer?.code === 0 && !record.producer.signal &&
+    record.options?.profile === binding.profile && record.options.context === binding.context && record.options.runId === binding.runId && record.options.hostNamespace === binding.hostNamespace &&
+    /^[a-f0-9]{40}$/.test(record.source?.head ?? '') && /^[a-f0-9]{40}$/.test(record.source.worktreeId ?? '') && typeof record.source.clusterFingerprint === 'string' && record.source.clusterFingerprint.length > 0 &&
+    Number.isFinite(Date.parse(record.startedAt)) && Date.parse(record.finishedAt) >= Date.parse(record.startedAt), 'COMPLETE_OWNED_FIXTURE_RECEIPT_REQUIRED')
+  assert(value?.fixtureCredentialState === 'opaque-qa-not-real-G8' && value.upstreamDispatch === 'NOT_RUN' && value.vendorCronsDisabled === true &&
+    value.context?.name === 'context1' && uuid(value.context.uid) && Array.isArray(value.context.mcpServers) && value.context.mcpServers.length === 0 && value.bindings?.length === 2 &&
+    value.gfs?.drive === 'main' && value.gfs.name === binding.runId && value.gfs.createStatus === 201 && value.gfs.durableReadStatus === 200 && /^[a-f0-9]{32}$/.test(value.gfs.parentRid ?? '') && uuid(value.gfs.parentResourceId), 'REAL_QA_FIXTURE_STATE_REQUIRED')
+  const refs = ['pr806-memory-grok-host', 'pr806-memory-grok-host-2']
+  const hosts = value.bindings.map((item, index) => {
+    assert(item.hostRef === refs[index] && uuid(item.hostUid) && uuid(item.budgetId) && uuid(item.connectionId) && item.connectionKey === `${binding.runId}-grok-${index + 1}` &&
+      item.credentialRevision === 1 && item.catalogRevision === 1 && item.reservationAmount === 200 && item.catalogProjectionPublished === true, 'FIXTURE_HOST_BINDING_INVALID')
+    return { hostRef: item.hostRef, hostUid: item.hostUid, budgetId: item.budgetId, connectionKey: item.connectionKey, connectionId: item.connectionId }
+  })
+  assert(new Set(hosts.map(item => item.budgetId)).size === 2 && typeof value.operatorUsername === 'string' && /^[A-Za-z0-9_.-]{3,64}$/.test(value.operatorUsername), 'FIXTURE_OPERATOR_OR_BUDGET_INVALID')
+  if (value.operatorDesktopUserId !== undefined) assert(uuid(value.operatorDesktopUserId) && value.operatorDesktopUserId !== value.operatorId && value.operatorLink?.status === 'active', 'FIXTURE_DESKTOP_OPERATOR_ID_INVALID')
+  return { worktreeId: record.source.worktreeId, clusterFingerprint: record.source.clusterFingerprint, hosts, parentRid: value.gfs.parentRid,
+    parentResourceId: value.gfs.parentResourceId, operatorUser: value.operatorUsername, operatorDesktopUserId: value.operatorDesktopUserId, contextUid: value.context.uid, seedPodUid: record.podUid }
+}
 export function parseOptions(args, env = process.env) {
-  const fields = {}, flags = new Set(['inspect-plan', 'include-legacy-gfs'])
+  const fields = {}, flags = new Set(['inspect-plan', 'include-legacy-gfs', 'prepare-fixtures'])
   for (let index = 0; index < args.length; index++) {
     const key = args[index]; assert(/^--[a-z-]+$/.test(key), 'INVALID_ARGUMENT')
     const name = key.slice(2); assert(!(name in fields), 'DUPLICATE_ARGUMENT')
     if (flags.has(name)) fields[name] = true
     else { assert(args[index + 1] && !args[index + 1].startsWith('--'), 'MISSING_ARGUMENT_VALUE'); fields[name] = args[++index] }
   }
-  const allowed = ['config', 'profile', 'context', 'run-id', 'host-namespace', 'budget-ids', 'gfs-parent-rid', 'operator-user', 'heap-size-mib', 'concurrency', 'read-deadline-ms', 'work-deadline-ms', 'close-grace-ms', 'runs', 'cgroup-limit-mib', 'shape', 'report', 'prepare', 'inspector-port', ...flags]
+  const allowed = ['config', 'profile', 'context', 'run-id', 'host-namespace', 'budget-ids', 'gfs-parent-rid', 'fixtures-receipt', 'operator-user', 'heap-size-mib', 'concurrency', 'read-deadline-ms', 'work-deadline-ms', 'close-grace-ms', 'runs', 'cgroup-limit-mib', 'shape', 'report', 'prepare', 'inspector-port', ...flags]
   for (const key of Object.keys(fields)) assert(allowed.includes(key), 'UNKNOWN_ARGUMENT')
   if (fields.config) {
     assert(Object.keys(fields).every(key => key === 'config' || flags.has(key)), 'CONFIG_ARGUMENT_CONFLICT')
@@ -29,7 +54,7 @@ export function parseOptions(args, env = process.env) {
     assert(input.kind === 'control-api-authorize-memory-config.v1', 'CONFIG_KIND_INVALID')
     const converted = []
     for (const [key, value] of Object.entries(input.arguments)) { assert(allowed.includes(key) && key !== 'config', 'CONFIG_FIELD_INVALID'); converted.push(`--${key}`); if (!flags.has(key)) converted.push(String(value)); else assert(value === true, 'CONFIG_FLAG_INVALID') }
-    if (fields['inspect-plan'] && !converted.includes('--inspect-plan')) converted.push('--inspect-plan')
+    for (const flag of flags) if (fields[flag] && !converted.includes(`--${flag}`)) converted.push(`--${flag}`)
     return parseOptions(converted, env)
   }
   const string = (key, value = fields[key]) => { assert(typeof value === 'string' && value.trim() === value && value.length > 0, `REQUIRED_${key.toUpperCase().replaceAll('-', '_')}`); return value }
@@ -38,14 +63,21 @@ export function parseOptions(args, env = process.env) {
   assert(profile === context && /^[a-z0-9][a-z0-9-]{0,62}$/.test(profile) && profile !== 'clerum-test' && !/(^|[-_])(prod|production)([-_]|$)/i.test(profile), 'OWNED_DEVELOPMENT_CONTEXT_REQUIRED')
   const runId = string('run-id'); assert(/^pr806-memory-[a-f0-9]{12}$/.test(runId), 'RUN_ID_INVALID')
   const hostNamespace = string('host-namespace'); assert(/^[a-z0-9][a-z0-9-]{0,62}$/.test(hostNamespace), 'HOST_NAMESPACE_INVALID')
-  const budgets = string('budget-ids').split(','); assert(budgets.length === 2 && budgets.every(uuid), 'TWO_OWNED_BUDGET_IDS_REQUIRED')
-  const parentRid = string('gfs-parent-rid'); assert(/^[a-f0-9]{32}$/.test(parentRid) || uuid(parentRid), 'GFS_PARENT_RID_INVALID')
+  const prepareFixtures = fields['prepare-fixtures'] === true
+  assert(!prepareFixtures || (!fields['budget-ids'] && !fields['gfs-parent-rid'] && !fields['fixtures-receipt']), 'PREPARATION_CANNOT_REUSE_FIXTURE_DATA')
+  const fixture = fields['fixtures-receipt'] ? validateFixtureReceipt(readOwnedJson(fields['fixtures-receipt']), { profile, context, runId, hostNamespace }) : undefined
+  assert(!fixture || (!fields['budget-ids'] && !fields['gfs-parent-rid'] && !fields['operator-user']), 'FIXTURE_RECEIPT_ARGUMENT_CONFLICT')
+  const budgets = prepareFixtures ? [] : fixture?.hosts.map(item => item.budgetId) ?? string('budget-ids').split(',')
+  assert(prepareFixtures || (budgets.length === 2 && budgets.every(uuid) && new Set(budgets).size === 2), 'TWO_OWNED_BUDGET_IDS_REQUIRED')
+  const parentRid = prepareFixtures ? undefined : fixture?.parentRid ?? string('gfs-parent-rid')
+  assert(prepareFixtures || /^[a-f0-9]{32}$/.test(parentRid) || uuid(parentRid), 'GFS_PARENT_RID_INVALID')
   const shapes = string('shape').split(','); assert(new Set(shapes).size === shapes.length && shapes.every(value => SHAPES.includes(value)) && ['visual-35mib', 'worst-structure', 'wide-strings'].every(value => shapes.includes(value)), 'REPRESENTATIVE_SHAPES_REQUIRED')
   const report = string('report'); assert(path.isAbsolute(report) && path.extname(report) === '.json', 'ABSOLUTE_JSON_REPORT_REQUIRED')
   const prepare = string('prepare'); assert(['restart', 'build'].includes(prepare), 'PREPARE_MODE_INVALID')
   assert(fields['include-legacy-gfs'] === true, 'LEGACY_GFS_REQUIRED')
   const options = { profile, context, runId, hostNamespace, budgets, parentRid, shapes, report: path.resolve(report), prepare,
-    operatorUser: string('operator-user'), inspectorPort: integer('inspector-port', 1024, 65535), runs: integer('runs', 3, 3), cgroupLimitMiB: integer('cgroup-limit-mib', 768, 768), inspectPlan: fields['inspect-plan'] === true,
+    operatorUser: prepareFixtures ? string('operator-user', fields['operator-user'] ?? `${runId}-operator`) : fixture?.operatorUser ?? string('operator-user'), prepareFixtures, fixtureBinding: fixture,
+    inspectorPort: integer('inspector-port', 1024, 65535), runs: integer('runs', 3, 3), cgroupLimitMiB: integer('cgroup-limit-mib', 768, 768), inspectPlan: fields['inspect-plan'] === true,
     candidate: { heapSizeMiB: integer('heap-size-mib', 64, 512), concurrency: integer('concurrency', 1, 4), readDeadlineMs: integer('read-deadline-ms', 100, 60000), workDeadlineMs: integer('work-deadline-ms', 100, 120000), closeGraceMs: integer('close-grace-ms', 1, 10000) }, publicArguments: fields }
   assert(options.candidate.closeGraceMs < options.candidate.readDeadlineMs, 'CLOCK_ARGUMENT_RELATION_INVALID')
   return options
@@ -60,6 +92,12 @@ async function command(binary, args, { env = process.env, timeoutMs = 180000, ma
     child.once('error', () => { clearTimeout(timer); reject(new Error('COMMAND_START_FAILED')) })
     child.once('close', (code, signal) => { clearTimeout(timer); if (code !== 0 || timedOut || size > maxBytes) reject(new Error(`COMMAND_FAILED_${binary.toUpperCase()}_${code ?? 'SIGNAL'}`)); else resolve(Buffer.concat(chunks).toString()) })
   })
+}
+export function buildAuthorizeMemorySeederBundle(prepareGfsImages) {
+  const source = fs.readFileSync(path.join(ROOT, 'scripts/tests/lib/control-api-authorize-memory-seeder.ts'), 'utf8')
+  const action = prepareGfsImages ? `const gfsFixtureAction = ${prepareGfsImages.toString()};\n` : ''
+  assert(!prepareGfsImages || typeof prepareGfsImages === 'function', 'GFS_FIXTURE_ACTION_SOURCE_REQUIRED')
+  return stripTypeScriptTypes(source).replace(/^export /gm, '') + '\n' + action + (prepareGfsImages ? 'await runSeedCompanion({prepareGfsImages:gfsFixtureAction})\n' : 'await runSeedCompanion()\n')
 }
 export function buildAuthorizeMemoryCompanionBundle() {
   const dir = path.join(ROOT, 'scripts/tests/lib')
@@ -101,6 +139,43 @@ export class Channel {
   async stop() { this.child.stdin.end(); const timer = setTimeout(() => { this.child.kill('SIGTERM'); setTimeout(() => this.child.kill('SIGKILL'), 1000).unref() }, 10000); const exit = await this.closed; clearTimeout(timer); assert(exit.code === 0 && !exit.signal, 'COMPANION_EXIT_NOT_ZERO'); return exit }
 }
 async function waitFor(check, predicate, timeoutMs, code) { const deadline = Date.now() + timeoutMs; while (Date.now() < deadline) { const value = await check(); if (predicate(value)) return value; await sleepPoll(25) }; throw new Error(code) }
+/** Source for the private Unix relay. The caller owns its verified kubectl exec
+ * Channel, real Host bindings and loopback inspector lease; no material leaves
+ * the in-pod signer. This fixture can only keep incomplete authorize requests.
+ */
+export async function openAuthorizeAdmissionPressure(channel, privateOptions) {
+  const baseline = await channel.call({ kind: 'hello', options: { ...privateOptions, pressureOnly: true } })
+  assert(baseline.pressureOnly === true && baseline.owner.inFlight === 0 && baseline.policy.maxInFlight === privateOptions.candidate.concurrency, 'PRESSURE_BASELINE_UNPROVED')
+  const handles = []
+  const zeroBusiness = async () => {
+    const counts = await channel.call({ kind: 'counts' })
+    assert(counts.total === 0 && counts.tickets === 0 && counts.reservationRows === 0, 'PRESSURE_REACHED_BUSINESS_WORK')
+    return counts
+  }
+  const owners = async () => {
+    const value = await channel.call({ kind: 'owners' })
+    assert(value.pid === baseline.serverPid && value.instanceCount === 1 && value.serverReads?.pid === baseline.serverPid, 'PRESSURE_PROCESS_OR_READ_OBSERVATION_UNKNOWN')
+    return { ...value, counts: await zeroBusiness() }
+  }
+  const release = async () => {
+    for (const handle of handles) await channel.call({ kind: 'close', requestId: handle.requestId })
+    await Promise.all(handles.map(handle => handle.result))
+    const value = await waitFor(owners, value => value.inFlight === 0 && value.serverReads.reads.length === 0, baseline.policy.workDeadlineMs + baseline.policy.closeGraceMs + 5000, 'PRESSURE_RELEASE_NOT_QUIESCENT')
+    handles.length = 0
+    return value
+  }
+  return {
+    async hold() {
+      assert(handles.length === 0, 'PRESSURE_ALREADY_HELD')
+      for (let index = 0; index < baseline.policy.maxInFlight; index++) {
+        const handle = await channel.open({ requestId: `${privateOptions.runId}-pressure-${index + 1}`, route: 'authorize', hostRef: privateOptions.bindings[index % privateOptions.bindings.length].hostRef, length: 35 * MIB - 4096 })
+        handles.push(handle); await channel.call({ kind: 'write', requestId: handle.requestId, length: 1 }, Buffer.from('{'))
+      }
+      return waitFor(owners, value => value.inFlight === baseline.policy.maxInFlight && value.serverReads.reads.length === handles.length && value.serverReads.reads.every(read => handles.some(handle => handle.requestId === read.requestId) && read.receivedBodyBytes > 0 && read.complete === false), baseline.policy.readDeadlineMs, 'AUTHENTICATED_SERVER_BODY_HOLD_UNOBSERVED')
+    }, owners, release,
+    async close() { if (handles.length) await release(); return channel.stop() },
+  }
+}
 export function validateReceipt(report) {
   assert(/^[a-f0-9]{40}$/.test(report.source?.head ?? '') && /^[a-f0-9]{64}$/.test(report.source?.policySha256 ?? '') && Number.isFinite(Date.parse(report.startedAt)) && Date.parse(report.finishedAt) >= Date.parse(report.startedAt), 'SOURCE_OR_REPORT_WINDOW_MISSING')
   assert(report.status === 'complete' && report.runs.length === 3 && report.restoration?.verified === true && report.restoration.healthStatus === 200, 'INCOMPLETE_REPORT')
@@ -117,11 +192,19 @@ export function validateReceipt(report) {
     assert(run.causality?.excess?.status === 503 && run.causality.excess.acceptedWriteBytes === 0 && run.causality.coverage.parser === 0 && run.causality.coverage.authorizer === 0, 'PRE_PARSE_PROOF_MISSING')
     assert(run.samples.length >= 2 && run.baseline.cgroup.events.oom === 0 && run.baseline.cgroup.events.oom_kill === 0 && run.samples.every(sample => sample.server.applicationProcesses === 1 && sample.server.nodeProcessesIncludingAuxiliary === 2 && sample.cgroup.limit === 768 * MIB && sample.cgroup.peak * 1.25 <= sample.cgroup.limit && sample.cgroup.events.oom === run.baseline.cgroup.events.oom && sample.cgroup.events.oom_kill === run.baseline.cgroup.events.oom_kill), 'CGROUP_MARGIN_OR_OOM_FAILED')
     assert(run.combined.length === report.options.shapes.length * 2 && run.combined.every(phase => phase.authorizes.length === report.options.candidate.concurrency && phase.authorizes.every(row => row.status === 200 && row.durableRowVerified === true && row.reservationVerified === true && row.reservationAmount === 200) && phase.gfs.length === phase.gfsConcurrency && phase.gfs.every(row => row.status === 201 && row.verifiedDigest === row.expectedDigest)), 'COMBINED_WORKLOAD_INCOMPLETE')
-    assert(run.rejected.length === 2 && run.rejected.every(row => row.status === 413) && run.recovery?.status === 200 && run.health?.status === 200 && run.stalled?.status === 408 && run.closedTransaction?.physicallyQuiesced === true, 'LIFECYCLE_CONTROL_INCOMPLETE')
+    assert(run.rejected.length === 2 && run.rejected.every(row => row.status === 413) && run.recovery?.status === 200 && run.recovery.durableRowVerified === true && run.recovery.reservationVerified === true && run.recovery.reservationAmount === 200 && run.health?.status === 200 && run.stalled?.status === 408 && run.closedTransaction?.physicallyHeldBeforeClose === true && run.closedTransaction.physicallyQuiesced === true, 'LIFECYCLE_CONTROL_INCOMPLETE')
   }
   return true
 }
-async function run(options) {
+export async function run(options, privateSeedOptions) {
+  assert(privateSeedOptions === undefined || (privateSeedOptions && typeof privateSeedOptions === 'object' && !Array.isArray(privateSeedOptions) && Object.keys(privateSeedOptions).every(key => ['cookie', 'operatorPassword'].includes(key))), 'PRIVATE_SEED_ARGUMENT_INVALID')
+  for (const field of ['cookie', 'operatorPassword', 'password', 'privateSeedOptions', 'dsn', 'privateKey']) assert(!(field in options) && !(field in (options.publicArguments ?? {})), 'PRIVATE_MATERIAL_CANNOT_ENTER_PUBLIC_OPTIONS')
+  // The long-lived caller retains its original object in RAM across preparation,
+  // visible Linux login and later measurement calls. Only these private values
+  // cross the child stdin; the report/config/options never receive this object.
+  const privateMaterial = privateSeedOptions === undefined
+    ? { cookie: process.env.E2E_ADMIN_TOKEN, operatorPassword: process.env.CONTROL_API_MEMORY_OPERATOR_PASSWORD }
+    : { cookie: privateSeedOptions.cookie, operatorPassword: privateSeedOptions.operatorPassword }
   const env = { ...process.env, MINIKUBE_PROFILE: options.profile, CONTROL_API_REAL_PG_CONTEXT: options.context }
   const kc = args => command('kubectl', ['--context', options.context, ...args], { env, timeoutMs: args.includes('rollout') ? 150000 : 15000 })
   const json = async args => JSON.parse(await kc(args))
@@ -141,12 +224,36 @@ async function run(options) {
   const allowedReports = path.join(canonical, '.local-notes/infra/runs')
   assert(options.report.startsWith(allowedReports + path.sep) && !fs.existsSync(options.report), 'FRESH_CANONICAL_REPORT_REQUIRED')
   fs.mkdirSync(path.dirname(options.report), { recursive: true, mode: 0o700 }); assert(fs.realpathSync(path.dirname(options.report)) === path.dirname(options.report), 'REPORT_PARENT_SYMLINK')
-  const report = { kind: 'control-api-authorize-memory.v1', status: 'running', startedAt: new Date().toISOString(), source: { head, worktreeId, policySha256: sha256(fs.readFileSync(path.join(ROOT, 'control-api/src/middleware/llmProviderAttemptAdmissionLimits.ts'))), driverSha256: sha256(fs.readFileSync(fileURLToPath(import.meta.url))), companionBundleSha256: sha256(buildAuthorizeMemoryCompanionBundle()), clusterFingerprint: marker.clusterFingerprint, imagesGeneratedAt: manifest.generated }, options, runs: [], restoration: { verified: false } }
+  if (options.fixtureBinding) assert(options.fixtureBinding.worktreeId === worktreeId && options.fixtureBinding.clusterFingerprint === marker.clusterFingerprint, 'FIXTURE_PROFILE_IDENTITY_CHANGED')
+  const report = { kind: options.prepareFixtures ? 'control-api-authorize-memory-fixtures.v1' : 'control-api-authorize-memory.v1', status: 'running', startedAt: new Date().toISOString(), source: { head, worktreeId, policySha256: sha256(fs.readFileSync(path.join(ROOT, 'control-api/src/middleware/llmProviderAttemptAdmissionLimits.ts'))), driverSha256: sha256(fs.readFileSync(fileURLToPath(import.meta.url))), companionBundleSha256: sha256(buildAuthorizeMemoryCompanionBundle()), clusterFingerprint: marker.clusterFingerprint, imagesGeneratedAt: manifest.generated }, options, runs: [], restoration: { verified: false } }
   const save = () => { const temporary = options.report + '.next'; fs.writeFileSync(temporary, JSON.stringify(report, null, 2), { flag: 'wx', mode: 0o600 }); fs.renameSync(temporary, options.report) }
   const deployment = await json(['-n', NAMESPACE, 'get', 'deployment', DEPLOYMENT, '-o', 'json'])
   assert(deployment.spec.replicas === 1, 'SINGLE_APP_REPLICA_REQUIRED')
   const ci = deployment.spec.template.spec.containers.findIndex(container => container.name === CONTAINER)
   assert(ci >= 0 && !deployment.spec.template.spec.hostNetwork, 'OWNED_CONTAINER_REQUIRED')
+  if (options.prepareFixtures) {
+    const ready = (await json(['-n', NAMESPACE, 'get', 'pods', '-l', 'app=control-api', '-o', 'json'])).items.filter(pod => !pod.metadata.deletionTimestamp && pod.status.phase === 'Running' && pod.status.containerStatuses?.some(item => item.name === CONTAINER && item.ready))
+    assert(ready.length === 1, 'SEED_READY_API_POD_AMBIGUOUS')
+    const pod = ready[0], status = pod.status.containerStatuses.find(item => item.name === CONTAINER), spec = pod.spec.containers.find(item => item.name === CONTAINER)
+    const replica = pod.metadata.ownerReferences?.find(item => item.kind === 'ReplicaSet' && item.controller === true)
+    assert(replica && !pod.spec.hostNetwork && status.restartCount === 0, 'SEED_POD_IDENTITY_INVALID')
+    const rs = await json(['-n', NAMESPACE, 'get', 'replicaset', replica.name, '-o', 'json'])
+    assert(rs.metadata.ownerReferences?.some(item => item.kind === 'Deployment' && item.uid === deployment.metadata.uid && item.controller === true), 'SEED_DEPLOYMENT_OWNER_CHANGED')
+    const imageId = status.imageID.match(/sha256:[a-f0-9]{64}$/)?.[0]
+    assert(imageId && imageId === (manifest.images[spec.image] ?? manifest.images[`docker.io/${spec.image}`]) && manifest.sourceRevisions?.[spec.image] === head, 'SEED_IMAGE_SOURCE_MISMATCH')
+    report.podUid = pod.metadata.uid; report.imageId = imageId; report.containerId = status.containerID
+    report.source.seederBundleSha256 = sha256(buildAuthorizeMemorySeederBundle()); report.phase = 'real-fixture-preparation'; save()
+    const child = spawn('kubectl', ['--context', options.context, '-n', NAMESPACE, 'exec', '-i', pod.metadata.name, '-c', CONTAINER, '--', 'env', '-u', 'NODE_OPTIONS', 'node', '--max-old-space-size=256', '--input-type=module', '-e', buildAuthorizeMemorySeederBundle()], { cwd: ROOT, env, stdio: ['pipe', 'pipe', 'pipe'] })
+    const channel = new Channel(child, 120000)
+    try {
+      report.fixtures = await channel.call({ kind: 'prepare', options: { runId: options.runId, hostNamespace: options.hostNamespace, operatorUser: options.operatorUser, ...privateMaterial } })
+      report.producer = await channel.stop(); report.finishedAt = new Date().toISOString(); report.status = 'complete'; report.phase = 'complete'
+      validateFixtureReceipt(report, options); save(); return report
+    } catch {
+      report.status = 'failed'; report.failure = 'REAL_FIXTURE_PREPARATION_FAILED'; report.finishedAt = new Date().toISOString()
+      await channel.stop().catch(() => {}); report.producer = channel.exit ?? { code: null, signal: 'unknown' }; save(); throw new Error('SEED_FAILED_REPORT_SAVED')
+    }
+  }
   const original = deployment.spec.template.spec.containers[ci].env?.find(item => item.name === 'NODE_OPTIONS')
   assert(!original?.valueFrom && (!original || /^--max-old-space-size=\d+$/.test(original.value)), 'ORIGINAL_NODE_OPTIONS_UNSUPPORTED')
   const candidateValue = `--max-old-space-size=${options.candidate.heapSizeMiB} --inspect=127.0.0.1:${options.inspectorPort}`
@@ -180,6 +287,7 @@ async function run(options) {
       for (const [hi, hostRef] of ['pr806-memory-grok-host', 'pr806-memory-grok-host-2'].entries()) {
         const host = await json(['-n', options.hostNamespace, 'get', 'host', hostRef, '-o', 'json'])
         assert(host.spec.model?.provider === 'grok-subscription' && host.spec.model.connectionRef?.includes(options.runId), 'HOST_ASSIGNMENT_NOT_OWNED')
+        if (options.fixtureBinding) assert(options.fixtureBinding.hosts[hi].hostUid === host.metadata.uid && options.fixtureBinding.hosts[hi].connectionKey === host.spec.model.connectionRef, 'FIXTURE_HOST_INCARCERATION_CHANGED')
         bindings.push({ hostRef, hostUid: host.metadata.uid, connectionKey: host.spec.model.connectionRef, budgetId: options.budgets[hi] })
       }
       const child = spawn('kubectl', ['--context', options.context, '-n', NAMESPACE, 'exec', '-i', pod.metadata.name, '-c', CONTAINER, '--', 'env', '-u', 'NODE_OPTIONS', 'node', '--max-old-space-size=64', '--input-type=module', '-e', buildAuthorizeMemoryCompanionBundle()], { cwd: ROOT, env, stdio: ['pipe', 'pipe', 'pipe'] })
@@ -201,8 +309,7 @@ async function run(options) {
       }
       const sample = async () => { const value = await channel.call({ kind: 'sample' }); row.samples.push(value); assert(value.cgroup.peak * 1.25 <= value.cgroup.limit && value.cgroup.events.oom === row.baseline.cgroup.events.oom && value.cgroup.events.oom_kill === row.baseline.cgroup.events.oom_kill, 'MEMORY_MARGIN_OR_OOM_FAILED'); return value }
       try {
-        const credentials = { cookie: process.env.E2E_ADMIN_TOKEN, operatorPassword: process.env.CONTROL_API_MEMORY_OPERATOR_PASSWORD }
-        row.baseline = await channel.call({ kind: 'hello', options: { candidate: options.candidate, inspectorPort: options.inspectorPort, runId: trialId, hostNamespace: options.hostNamespace, fixtureRunId: options.runId, bindings, operatorUser: options.operatorUser, ...credentials, gfsParentRid: options.parentRid } })
+        row.baseline = await channel.call({ kind: 'hello', options: { candidate: options.candidate, inspectorPort: options.inspectorPort, runId: trialId, hostNamespace: options.hostNamespace, fixtureRunId: options.runId, bindings, operatorUser: options.operatorUser, ...privateMaterial, gfsParentRid: options.parentRid } })
         row.bindings = row.baseline.bindings
         assert(row.baseline.server.applicationProcesses === 1 && row.baseline.server.nodeProcessesIncludingAuxiliary === 2 && row.baseline.cgroup.events.oom === 0 && row.baseline.cgroup.events.oom_kill === 0 && row.baseline.auxiliary.inputHighWaterMark <= 65536, 'CLIENT_RETAINER_BOUND_INVALID')
         row.warmup = await execute(requestFixture('visual-35mib', row.bindings[0], true), row.bindings[0])
@@ -219,7 +326,9 @@ async function run(options) {
         row.causality = { excess, coverage }
         assert((await channel.call({ kind: 'counts' })).total === 1, 'EXCESS_OR_HELD_REQUEST_AUTHORIZED')
         for (const handle of held) await channel.call({ kind: 'close', requestId: handle.requestId })
-        await channel.call({ kind: 'coverage-stop' }); await sleepPoll(100)
+        await Promise.all(held.map(handle => handle.result))
+        await waitFor(() => channel.call({ kind: 'owners' }), value => value.inFlight === 0, options.candidate.closeGraceMs + 5000, 'READ_OWNER_CALLBACK_DID_NOT_UNWIND')
+        await channel.call({ kind: 'coverage-stop' })
         row.gc = await channel.call({ kind: 'gc' }); await sample()
         for (const shape of options.shapes) for (const gfsConcurrency of [1, 2]) {
           await channel.call({ kind: 'lock' })
@@ -266,10 +375,10 @@ async function run(options) {
 }
 async function main() {
   const options = parseOptions(process.argv.slice(2))
-  if (options.inspectPlan) { process.stdout.write(JSON.stringify({ mode: 'read-only-plan', profile: options.profile, context: options.context, candidate: options.candidate, shapes: options.shapes, runs: 3, gfsConcurrency: [1, 2], physicalExecution: 'NOT_RUN' }) + '\n'); return }
+  if (options.inspectPlan) { process.stdout.write(JSON.stringify({ mode: options.prepareFixtures ? 'read-only-fixtures-plan' : 'read-only-plan', profile: options.profile, context: options.context, candidate: options.candidate, shapes: options.shapes, runs: 3, gfsConcurrency: [1, 2], physicalExecution: 'NOT_RUN' }) + '\n'); return }
   if (process.env.T2_SKIP_LOCK !== 'true' || !process.env.T2_LOCK_TOKEN) {
     const common = (await command('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'])).trim(), dir = path.join(path.dirname(common), '.local-notes/infra/runs', options.runId)
-    fs.mkdirSync(dir, { recursive: true, mode: 0o700 }); const config = path.join(dir, 'memory-configuration.json')
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 }); const config = path.join(dir, options.prepareFixtures ? 'memory-fixtures-configuration.json' : 'memory-benchmark-configuration.json')
     fs.writeFileSync(config, JSON.stringify({ kind: 'control-api-authorize-memory-config.v1', arguments: options.publicArguments }), { flag: 'wx', mode: 0o600 })
     await command('make', ['--no-print-directory', 'minikube-control-api-authorize-memory'], { env: { ...process.env, MINIKUBE_PROFILE: options.profile, CONTROL_API_REAL_PG_CONTEXT: options.context, CONTROL_API_MEMORY_CONFIG: config }, timeoutMs: 3 * (options.shapes.length * 2 + 2) * (120000 + options.candidate.readDeadlineMs + options.candidate.workDeadlineMs + 30000) + 600000, maxBytes: MIB })
     process.stdout.write('CONTROL_API_AUTHORIZE_MEMORY_COMPLETE\n'); return
