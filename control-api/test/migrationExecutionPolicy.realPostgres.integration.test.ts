@@ -127,7 +127,7 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
   it('repairs an equivalent interrupted index and enforces the online bound', async () => {
     const name = `d34_interrupted_${randomBytes(4).toString('hex')}`
     const entry: OnlineIndexDefinition = {
-      migrationVersion: '0109_user_access_foundation',
+      migrationVersion: '0125_user_access_foundation',
       name,
       table: 'd34_interrupted_index',
       unique: true,
@@ -176,7 +176,7 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
     const functionName = `d34_slow_index_value_${suffix}`
     const name = `d34_slow_index_${suffix}_idx`
     const entry: OnlineIndexDefinition = {
-      migrationVersion: '0109_user_access_foundation',
+      migrationVersion: '0125_user_access_foundation',
       name,
       table,
       createSql: `CREATE INDEX CONCURRENTLY ${name} ON ${table} (${functionName}(value))`,
@@ -292,7 +292,7 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
     const locker = await databasePool.connect()
     await databasePool.query(
       `DELETE FROM schema_migrations
-        WHERE version IN ('010c_composable_catalog_revisions', '010d_gfs_catalog_revision_components')`
+        WHERE version IN ('0128_composable_catalog_revisions', '0129_gfs_catalog_revision_components')`
     )
     await locker.query('BEGIN')
     await locker.query('LOCK TABLE team_members IN ACCESS EXCLUSIVE MODE')
@@ -308,8 +308,8 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
     expect(Date.now() - started).toBeGreaterThanOrEqual(9_000)
     expect(Date.now() - started).toBeLessThan(15_000)
     const failedVersions = await versions(databasePool)
-    expect(failedVersions).not.toContain('010c_composable_catalog_revisions')
-    expect(failedVersions).not.toContain('010d_gfs_catalog_revision_components')
+    expect(failedVersions).not.toContain('0128_composable_catalog_revisions')
+    expect(failedVersions).not.toContain('0129_gfs_catalog_revision_components')
     await initDb({ connect: () => databasePool.connect() })
   }, 20_000)
 
@@ -329,7 +329,7 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
       ...PR1_MIGRATION_VERSIONS.map(version => ({
         version,
         apply: async (db: DbClient) => {
-          if (version === '010c_composable_catalog_revisions') {
+          if (version === '0128_composable_catalog_revisions') {
             await db.query('SELECT pg_sleep(20)')
           }
         },
@@ -353,7 +353,7 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
         `SELECT version FROM ${recordTable} ORDER BY version`
       )
       expect(recorded.rows).toEqual([])
-      expect(appliedVersions).not.toContain('010d_gfs_catalog_revision_components')
+      expect(appliedVersions).not.toContain('0129_gfs_catalog_revision_components')
     } finally {
       client.release(true)
     }
@@ -387,28 +387,44 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
   it('converges every synchronized PR2 legacy identity through the canonical runner', async () => {
     const legacyIdentities: Array<{ canonical: string; aliases: readonly string[] }> = [
       {
-        canonical: '0115_workflow_authority_bindings',
-        aliases: ['010f_workflow_authority_bindings'],
+        canonical: '0131_workflow_authority_bindings',
+        aliases: ['0115_workflow_authority_bindings', '010f_workflow_authority_bindings'],
       },
       {
-        canonical: '0116_gfs_upload_authority_bindings',
-        aliases: ['0110_gfs_upload_authority_bindings'],
+        canonical: '0132_gfs_upload_authority_bindings',
+        aliases: ['0116_gfs_upload_authority_bindings', '0110_gfs_upload_authority_bindings'],
       },
       {
-        canonical: '0119_pr2_readiness_evidence',
-        aliases: ['0117_pr2_readiness_evidence', '0111_pr2_readiness_evidence'],
+        canonical: '0133_pr2_readiness_evidence',
+        aliases: [
+          '0119_pr2_readiness_evidence',
+          '0117_pr2_readiness_evidence',
+          '0111_pr2_readiness_evidence',
+        ],
       },
       {
-        canonical: '011a_pr2_runtime_privileges',
-        aliases: ['0118_pr2_runtime_privileges', '0112_pr2_runtime_privileges'],
+        canonical: '0134_pr2_runtime_privileges',
+        aliases: [
+          '011a_pr2_runtime_privileges',
+          '0118_pr2_runtime_privileges',
+          '0112_pr2_runtime_privileges',
+        ],
       },
       {
-        canonical: '011b_workflow_recipe_authority_entity',
-        aliases: ['0119_workflow_recipe_authority_entity', '0113_workflow_recipe_authority_entity'],
+        canonical: '0135_workflow_recipe_authority_entity',
+        aliases: [
+          '011b_workflow_recipe_authority_entity',
+          '0119_workflow_recipe_authority_entity',
+          '0113_workflow_recipe_authority_entity',
+        ],
       },
       {
-        canonical: '011c_workflow_run_failure_reason',
-        aliases: ['011a_workflow_run_failure_reason', '0114_workflow_run_failure_reason'],
+        canonical: '0136_workflow_run_failure_reason',
+        aliases: [
+          '011c_workflow_run_failure_reason',
+          '011a_workflow_run_failure_reason',
+          '0114_workflow_run_failure_reason',
+        ],
       },
       {
         canonical: '0115_llm_allowed_models_image_input',

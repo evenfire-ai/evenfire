@@ -4,6 +4,7 @@ import { createExternalAccessRouter } from './access.js'
 import { createExternalAuthRouter } from './auth.js'
 import { createExternalUserApprovalDecisionsRouter } from './decisions.routes.js'
 import { createExternalDirectoryRouter } from './directory.js'
+import { createExternalEntityChangesRouter } from './entityChanges.routes.js'
 import { createExternalGfsRouter } from './gfs.js'
 import { createExternalInvitationsRouter } from './invitations.js'
 import { createExternalMembersRouter } from './members.js'
@@ -28,6 +29,7 @@ export function createExternalRouter(gateway: K8sGateway): Router {
   router.use(createExternalDirectoryRouter())
   router.use(createExternalSharedFilesystemsRouter(gateway))
   router.use(createExternalGfsRouter(gateway))
+  router.use(createExternalEntityChangesRouter())
   router.use(createExternalNotificationsRouter())
   router.use(createExternalUserApprovalDecisionsRouter(gateway))
   router.use(createExternalWorkflowApprovalMediumsRouter(gateway))

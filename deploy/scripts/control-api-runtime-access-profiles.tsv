@@ -5,6 +5,9 @@ authorization_catalog_writer_components	read
 authorization_resource_revisions	upsert
 authorization_team_revisions	upsert
 authorization_user_revisions	upsert
+entity_change_feed	none
+entity_change_outbox	none
+entity_change_watermark	none
 budget_pending_reservations	legacy_dml
 codex_subscription_connections	upsert
 codex_subscription_oauth_states	upsert

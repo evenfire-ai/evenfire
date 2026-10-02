@@ -3,12 +3,12 @@ import { migrationSessionBoundsSql } from './migrationExecutionPolicy.js'
 import { hasPostSchemaOnlineIndexes, preparePr1Migration } from './pr1OnlineIndexPlan.js'
 
 export const PR1_MIGRATION_VERSIONS = Object.freeze([
-  '0109_user_access_foundation',
-  '010a_invitation_delivery_commands',
-  '010b_catalog_utf8_ordering',
-  '010c_composable_catalog_revisions',
-  '010d_gfs_catalog_revision_components',
-  '010e_legacy_password_security_epoch_backfill',
+  '0125_user_access_foundation',
+  '0126_invitation_delivery_commands',
+  '0127_catalog_utf8_ordering',
+  '0128_composable_catalog_revisions',
+  '0129_gfs_catalog_revision_components',
+  '0130_legacy_password_security_epoch_backfill',
 ] as const)
 
 export const DEV_POST_0106_MIGRATION_VERSIONS = Object.freeze([
@@ -27,16 +27,19 @@ export const DEV_POST_0106_MIGRATION_VERSIONS = Object.freeze([
   '0119_dynamic_clients_table',
   '0120_dynamic_clients_runtime_access',
   '0121_oauth_install_identity',
+  '0122_durable_entity_change_feed',
+  '0123_entity_change_checkpoint_cursor_convergence',
+  '0124_entity_change_definer_search_path',
 ] as const)
 
 export const PR2_MIGRATION_VERSIONS = Object.freeze([
-  '0115_workflow_authority_bindings',
-  '0116_gfs_upload_authority_bindings',
-  '0119_pr2_readiness_evidence',
-  '011a_pr2_runtime_privileges',
-  '011b_workflow_recipe_authority_entity',
-  '011c_workflow_run_failure_reason',
-  '0120_r31_runtime_behavior_sources',
+  '0131_workflow_authority_bindings',
+  '0132_gfs_upload_authority_bindings',
+  '0133_pr2_readiness_evidence',
+  '0134_pr2_runtime_privileges',
+  '0135_workflow_recipe_authority_entity',
+  '0136_workflow_run_failure_reason',
+  '0137_r31_runtime_behavior_sources',
 ])
 
 const NON_PR1_POST_0106_MIGRATION_VERSIONS = new Set<string>(DEV_POST_0106_MIGRATION_VERSIONS)

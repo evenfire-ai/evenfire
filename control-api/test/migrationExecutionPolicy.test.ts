@@ -32,14 +32,14 @@ const FRESH_TABLE_INDEXES = Object.freeze([
 ])
 
 describe('D34 migration execution policy', () => {
-  it('classifies inherited control-admin migrations as parent-dev migrations', () => {
+  it('classifies inherited parent migrations before the re-slotted PR1 migrations', () => {
     expect(DEV_POST_0106_MIGRATION_VERSIONS.slice(-6)).toEqual([
-      '0116_mcp_secret_rollback_permits',
-      '0117_control_admin_invitation_replace_inviter',
-      '0118_control_admin_replace_inviter_accept_guard',
       '0119_dynamic_clients_table',
       '0120_dynamic_clients_runtime_access',
       '0121_oauth_install_identity',
+      '0122_durable_entity_change_feed',
+      '0123_entity_change_checkpoint_cursor_convergence',
+      '0124_entity_change_definer_search_path',
     ])
     expect(PR1_MIGRATION_VERSIONS).not.toContain('0117_control_admin_invitation_replace_inviter')
     expect(PR1_MIGRATION_VERSIONS).not.toContain('0118_control_admin_replace_inviter_accept_guard')
@@ -74,9 +74,9 @@ describe('D34 migration execution policy', () => {
         ])
     )
     expect(countByMigrationVersion).toEqual({
-      '0109_user_access_foundation': 18,
-      '010b_catalog_utf8_ordering': 7,
-      '0115_workflow_authority_bindings': 1,
+      '0125_user_access_foundation': 18,
+      '0127_catalog_utf8_ordering': 7,
+      '0131_workflow_authority_bindings': 1,
     })
     expect(
       PR1_ONLINE_INDEX_PLAN.some(index => index.name.startsWith('external_user_sessions_'))
@@ -127,7 +127,7 @@ describe('D34 migration execution policy', () => {
     )
     const classified = [
       ...PR1_ONLINE_INDEX_PLAN.filter(
-        index => index.migrationVersion !== '0115_workflow_authority_bindings'
+        index => index.migrationVersion !== '0131_workflow_authority_bindings'
       ).map(index => index.name),
       ...FRESH_TABLE_INDEXES,
     ].sort()
@@ -143,7 +143,7 @@ describe('D34 migration execution policy', () => {
         .replace(/\s*([(),])\s*/g, '$1')
         .trim()
     for (const index of PR1_ONLINE_INDEX_PLAN) {
-      if (index.migrationVersion === '0115_workflow_authority_bindings') continue
+      if (index.migrationVersion === '0131_workflow_authority_bindings') continue
       expect(canonical(index.createSql), index.name).toBe(
         canonical(historicalDefinitions.get(index.name) ?? '')
       )
@@ -282,8 +282,8 @@ describe('D34 PR1 migration runner', () => {
       ...PR1_MIGRATION_VERSIONS,
       ...PR2_MIGRATION_VERSIONS,
     ])
-    expect(queries.filter(({ sql }) => sql === 'BEGIN')).toHaveLength(30)
-    expect(queries.filter(({ sql }) => sql === 'COMMIT')).toHaveLength(30)
+    expect(queries.filter(({ sql }) => sql === 'BEGIN')).toHaveLength(33)
+    expect(queries.filter(({ sql }) => sql === 'COMMIT')).toHaveLength(33)
     expect(queries.filter(({ sql }) => sql === 'ROLLBACK')).toHaveLength(0)
   })
 
@@ -314,7 +314,7 @@ describe('D34 PR1 migration runner', () => {
         return { rows: [], rowCount: 0 }
       }),
     }
-    const pendingVersion = '0115_workflow_authority_bindings'
+    const pendingVersion = '0131_workflow_authority_bindings'
     const appliedVersions = new Set<string>([
       ...DEV_POST_0106_MIGRATION_VERSIONS,
       ...PR1_MIGRATION_VERSIONS,
@@ -349,7 +349,7 @@ describe('D34 PR1 migration runner', () => {
       if (sql.startsWith('CREATE INDEX CONCURRENTLY')) throw new Error('online index failed')
       return { rows: [], rowCount: 0 }
     })
-    const pendingVersion = '0115_workflow_authority_bindings'
+    const pendingVersion = '0131_workflow_authority_bindings'
     const appliedVersions = new Set<string>([
       ...DEV_POST_0106_MIGRATION_VERSIONS,
       ...PR1_MIGRATION_VERSIONS,

@@ -4,17 +4,17 @@ vi.mock('../src/config.js', () => ({
   config: { databaseUrl: 'postgresql://test' },
 }))
 
-describe('010d GFS catalog revision components migration', () => {
-  it('fixes forward after a database has already recorded migration 010c', async () => {
+describe('0129 GFS catalog revision components migration', () => {
+  it('fixes forward after a database has already recorded the prior composable revision', async () => {
     const { CONTROL_API_MIGRATIONS, initDb } = await import('../src/db.js')
     const migration = CONTROL_API_MIGRATIONS.find(
-      candidate => candidate.version === '010d_gfs_catalog_revision_components'
+      candidate => candidate.version === '0129_gfs_catalog_revision_components'
     )
     const composableIndex = CONTROL_API_MIGRATIONS.findIndex(
-      candidate => candidate.version === '010c_composable_catalog_revisions'
+      candidate => candidate.version === '0128_composable_catalog_revisions'
     )
     const gfsIndex = CONTROL_API_MIGRATIONS.findIndex(
-      candidate => candidate.version === '010d_gfs_catalog_revision_components'
+      candidate => candidate.version === '0129_gfs_catalog_revision_components'
     )
     expect(migration).toBeDefined()
     expect(gfsIndex).toBe(composableIndex + 1)
@@ -39,7 +39,7 @@ describe('010d GFS catalog revision components migration', () => {
     expect(appliedSql).toContain('INSERT INTO authorization_resource_revisions')
     expect(clientQuery).toHaveBeenCalledWith(
       expect.stringContaining('INSERT INTO schema_migrations'),
-      ['010d_gfs_catalog_revision_components']
+      ['0129_gfs_catalog_revision_components']
     )
   })
 })

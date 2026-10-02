@@ -141,6 +141,10 @@ jobs:
         working-directory: ${{ matrix.service }}
         run: npm run build
 
+      - name: Build Profile UI image builder stage
+        if: matrix.service == 'profile-ui'
+        run: timeout 900s docker build --target builder -f profile-ui/Dockerfile .
+
       - name: Install Playwright Chromium
         if: matrix.service == 'desktop-app'
         working-directory: desktop-app
@@ -397,7 +401,9 @@ jobs:
             routes.externalGfsRateLimitStress.realPostgres.integration.test.ts \
             routes.externalGfsRateLimitFailClosed.realPostgres.integration.test.ts \
             routes.rateLimitProcessMemory.realPostgres.integration.test.ts \
-            services.rateLimiterPoolSaturation.realPostgres.integration.test.ts
+            services.rateLimiterPoolSaturation.realPostgres.integration.test.ts \
+            entityChangeFeed.realPostgres.integration.test.ts \
+            db.realPostgresMigration.integration.test.ts
 
       - name: Install gfs-controller dependencies
         working-directory: gfs-controller
