@@ -154,15 +154,18 @@ describeRealPostgres('GFS Phase 0 real PostgreSQL integrity', () => {
   }, 60_000)
 
   afterAll(async () => {
-    await endPoolAndWaitForClients(pool)
-    if (!adminPool) return
-    await adminPool.query(
-      `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+    try {
+      await endPoolAndWaitForClients(pool)
+      if (!adminPool) return
+      await adminPool.query(
+        `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
         WHERE datname = $1 AND pid <> pg_backend_pid()`,
-      [database]
-    )
-    await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdent(database)}`)
-    await adminPool.end()
+        [database]
+      )
+      await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdent(database)}`)
+    } finally {
+      await adminPool?.end()
+    }
   })
 
   it('serializes create/delete and makes delete observe the committed child', async () => {
@@ -392,7 +395,6 @@ describeRealPostgres('GFS Phase 0 real PostgreSQL integrity', () => {
     )
 
     const replaceClient = await pool.connect()
-    let replacedAt: string
     try {
       const published = await writer(replaceClient).replace({
         drive: tree.drive,
@@ -402,13 +404,17 @@ describeRealPostgres('GFS Phase 0 real PostgreSQL integrity', () => {
       })
       expect(published.updatedAt).toMatch(/^\d{4}-\d{2}-\d{2}T.*Z$/)
       expect(new Date(published.updatedAt).getTime()).toBeGreaterThan(new Date(seed).getTime())
-      replacedAt = published.updatedAt
     } finally {
       replaceClient.release()
     }
 
-    const afterReplace = await pool.query<{ id: string; updated_at: Date }>(
-      `SELECT resource_id::text AS id, updated_at FROM gfs_resources WHERE drive = $1`,
+    const afterReplace = await pool.query<{
+      id: string
+      updated_at: Date
+      updated_at_text: string
+    }>(
+      `SELECT resource_id::text AS id, updated_at, updated_at::text AS updated_at_text
+       FROM gfs_resources WHERE drive = $1`,
       [tree.drive]
     )
     const byId = Object.fromEntries(
@@ -416,6 +422,10 @@ describeRealPostgres('GFS Phase 0 real PostgreSQL integrity', () => {
     )
     expect(new Date(byId[tree.child] ?? 0).getTime()).toBeGreaterThan(new Date(seed).getTime())
     expect(byId[tree.source]).toBe(new Date(seed).toISOString())
+    const beforeMoveTimestamp = afterReplace.rows.find(
+      row => row.id === tree.child
+    )?.updated_at_text
+    expect(beforeMoveTimestamp).toBeDefined()
 
     const moveClient = await pool.connect()
     try {
@@ -426,13 +436,17 @@ describeRealPostgres('GFS Phase 0 real PostgreSQL integrity', () => {
       moveClient.release()
     }
 
-    const afterMove = await pool.query<{ child_at: Date; parent_at: Date }>(
+    const afterMove = await pool.query<{ child_advanced: boolean; parent_at: Date }>(
       `SELECT
-         (SELECT updated_at FROM gfs_resources WHERE resource_id = $1) AS child_at,
+         (SELECT updated_at > $3::timestamptz FROM gfs_resources WHERE resource_id = $1)
+           AS child_advanced,
          (SELECT updated_at FROM gfs_resources WHERE resource_id = $2) AS parent_at`,
-      [tree.child, tree.source]
+      [tree.child, tree.source, beforeMoveTimestamp]
     )
-    expect(afterMove.rows[0]?.child_at.getTime()).toBeGreaterThan(new Date(replacedAt).getTime())
+    // PostgreSQL keeps microseconds; JS Date/ISO output keeps only milliseconds.
+    // Compare at storage precision so two real updates in one millisecond still
+    // prove advancement, while an unchanged timestamp continues to fail.
+    expect(afterMove.rows[0]?.child_advanced).toBe(true)
     expect(afterMove.rows[0]?.parent_at.toISOString()).toBe(new Date(seed).toISOString())
   }, 20_000)
 })

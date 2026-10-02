@@ -133,3 +133,102 @@ describe.each(suites)('%s teardown contract', file => {
     expect(wait).not.toHaveBeenCalled()
   })
 })
+
+describe('gfsStructuralIntegrity.realPostgres.integration.test.ts teardown contract', () => {
+  const file = 'gfsStructuralIntegrity.realPostgres.integration.test.ts'
+
+  it('closes the admin pool after helper rejection without terminating or dropping', async () => {
+    const pool = {}
+    const error = new Error('GFS client-close helper failed')
+    const helper = vi.fn().mockRejectedValueOnce(error)
+    const adminPool = { end: vi.fn().mockResolvedValue(undefined), query: vi.fn() }
+    const hook = afterAllCallback(file, { pool, adminPool, endPoolAndWaitForClients: helper })
+
+    await expect(hook()).rejects.toBe(error)
+
+    expect(helper).toHaveBeenCalledExactlyOnceWith(pool)
+    expect(adminPool.end).toHaveBeenCalledExactlyOnceWith()
+    expect(adminPool.query).not.toHaveBeenCalled()
+  })
+
+  it('closes clients before termination and DROP, then closes the admin pool', async () => {
+    const events: string[] = []
+    const pool = {}
+    const helper = vi.fn(async () => {
+      events.push('clients-closed')
+    })
+    const adminPool = {
+      query: vi
+        .fn()
+        .mockImplementationOnce(async () => {
+          events.push('terminate')
+        })
+        .mockImplementationOnce(async () => {
+          events.push('drop')
+        }),
+      end: vi.fn(async () => {
+        events.push('admin-closed')
+      }),
+    }
+    const hook = afterAllCallback(file, { pool, adminPool, endPoolAndWaitForClients: helper })
+
+    await expect(hook()).resolves.toBeUndefined()
+
+    expect(helper).toHaveBeenCalledExactlyOnceWith(pool)
+    expect(adminPool.query).toHaveBeenCalledTimes(2)
+    expect(adminPool.query).toHaveBeenNthCalledWith(
+      1,
+      expect.stringContaining('SELECT pg_terminate_backend(pid)'),
+      ['teardown_contract']
+    )
+    expect(adminPool.query.mock.calls[0]?.[0]).toContain('pid <> pg_backend_pid()')
+    expect(adminPool.query).toHaveBeenNthCalledWith(
+      2,
+      'DROP DATABASE IF EXISTS "teardown_contract"'
+    )
+    expect(adminPool.end).toHaveBeenCalledExactlyOnceWith()
+    expect(events).toEqual(['clients-closed', 'terminate', 'drop', 'admin-closed'])
+  })
+
+  it('still closes the GFS pool when no administrative pool was created', async () => {
+    const pool = {}
+    const helper = vi.fn().mockResolvedValue(undefined)
+    const hook = afterAllCallback(file, {
+      pool,
+      adminPool: undefined,
+      endPoolAndWaitForClients: helper,
+    })
+
+    await expect(hook()).resolves.toBeUndefined()
+
+    expect(helper).toHaveBeenCalledExactlyOnceWith(pool)
+  })
+
+  it.each(['termination', 'DROP'] as const)(
+    'closes the admin pool when %s SQL fails',
+    async phase => {
+      const pool = {}
+      const error = new Error(`GFS ${phase} SQL failed`)
+      const helper = vi.fn().mockResolvedValue(undefined)
+      const query = vi.fn()
+      if (phase === 'DROP') query.mockResolvedValueOnce(undefined)
+      query.mockRejectedValueOnce(error)
+      const adminPool = { end: vi.fn().mockResolvedValue(undefined), query }
+      const hook = afterAllCallback(file, { pool, adminPool, endPoolAndWaitForClients: helper })
+
+      await expect(hook()).rejects.toBe(error)
+
+      expect(helper).toHaveBeenCalledExactlyOnceWith(pool)
+      expect(query).toHaveBeenCalledTimes(phase === 'termination' ? 1 : 2)
+      expect(query).toHaveBeenNthCalledWith(
+        1,
+        expect.stringContaining('SELECT pg_terminate_backend(pid)'),
+        ['teardown_contract']
+      )
+      if (phase === 'DROP') {
+        expect(query).toHaveBeenNthCalledWith(2, 'DROP DATABASE IF EXISTS "teardown_contract"')
+      }
+      expect(adminPool.end).toHaveBeenCalledExactlyOnceWith()
+    }
+  )
+})
