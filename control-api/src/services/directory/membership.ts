@@ -21,6 +21,7 @@ import { DesktopUserRetirementError, retireDesktopUser } from './users.js'
 export const INVITATION_TTL_HOURS = 48
 const DRAFT_INVITATION_CLEANUP_HOURS = 24
 const DRAFT_INVITATION_CLEANUP_INTERVAL_MS = 60 * 60 * 1000
+const USER_LOCK_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 let draftInvitationCleanupTimer: ReturnType<typeof setInterval> | null = null
 
 type InvitationRow = {
@@ -2228,6 +2229,22 @@ export async function deleteManagedUserForUser(
 
   try {
     return await withTransaction(async db => {
+      // Reciprocal retirements must not each lock their own actor before the
+      // other request's target. Lock the existing principal pair in the same
+      // database UUID order before revalidating authority or locking teams.
+      // Filter malformed ids before the UUID cast so the indexed lookup does
+      // not change their existing later validation/error path.
+      const principalIds = [...new Set([normalizedManagerUserId, normalizedTargetUserId])]
+        .filter(id => USER_LOCK_UUID_PATTERN.test(id))
+        .map(id => id.toLowerCase())
+      await db.query(
+        `SELECT id
+           FROM users
+          WHERE id = ANY($1::uuid[])
+          ORDER BY id
+          FOR UPDATE`,
+        [principalIds]
+      )
       if (!(await hasValidManagedMutationAuthority(db, normalizedManagerUserId, authority))) {
         return { error: 'forbidden' as const }
       }
