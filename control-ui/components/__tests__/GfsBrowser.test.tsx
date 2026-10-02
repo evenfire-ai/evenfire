@@ -2622,8 +2622,16 @@ describe('GfsBrowser', () => {
     mockApiGet.mockResolvedValueOnce({ items: [child('a.md', 'file', 1)], nextCursor: null })
     renderBrowser()
 
-    expect(await screen.findByText('Showing all 1 items.')).toBeTruthy()
+    expect(await screen.findByText('Showing all 1 item.')).toBeTruthy()
     expect(screen.queryByText(/truncated at the page cap/)).toBeNull()
     expect(screen.queryByRole('button', { name: 'Load more' })).toBeNull()
+  })
+
+  it('uses the singular item wording for a one-row truncated page', async () => {
+    mockApiGet.mockResolvedValueOnce({ items: [child('a.md', 'file', 1)], nextCursor: 'cursor-1' })
+    renderBrowser()
+
+    expect(await screen.findByText('Showing the first 1 item.')).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Load more' })).toBeTruthy()
   })
 })

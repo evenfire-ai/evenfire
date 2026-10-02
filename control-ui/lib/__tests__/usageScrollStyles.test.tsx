@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { fetchUsageSeries, fetchUsageTotals } from '@lib/api'
 import { ToastProvider } from '@/components/Toast'
 import { UsageDashboard } from '@/components/UsageDashboard'
 

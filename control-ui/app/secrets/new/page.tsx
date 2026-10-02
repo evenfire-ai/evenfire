@@ -123,7 +123,7 @@ function CreateSecretPageContent() {
   const prefillOwnerRecipe =
     scope === 'recipe' ? (searchParams.get('ownerRecipe') ?? '').trim() : ''
   const [recipeOwnershipKind, setRecipeOwnershipKind] = useState<'owner-recipe' | 'shared'>(
-    prefillOwnerRecipe ? 'owner-recipe' : 'owner-recipe'
+    'owner-recipe'
   )
   const [recipeOwnerName, setRecipeOwnerName] = useState(prefillOwnerRecipe)
   const [availableRecipes, setAvailableRecipes] = useState<string[]>([])
