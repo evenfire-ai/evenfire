@@ -342,7 +342,8 @@ test.describe('Plugin Workload SDK — operator journey (installed plugin → gr
       expect(['awaiting_policy', 'validated']).toContain(identityState)
 
       // 3. Enter the Plugin Workload SDK panel through the visible shell.
-      await page.getByRole('button', { name: 'Plugins SDK' }).click()
+      await page.getByRole('button', { name: 'Plugin actions' }).click()
+      await page.getByRole('menuitem', { name: 'Plugin SDK', exact: true }).click()
       await expect(page.getByRole('button', { name: 'New grant' })).toBeVisible({
         timeout: 15_000,
       })
