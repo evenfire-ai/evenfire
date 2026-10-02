@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
-import { useEffect, useReducer } from 'react'
+import { type ReactNode, useEffect, useReducer } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, render, waitFor } from '@testing-library/react'
+import { renderToStaticMarkup } from 'react-dom/server'
 import { DESKTOP_ROUTES, SIDEBAR_COLLAPSED_KEY } from '@constants/navigation'
 import { useAppController } from '@hooks/useAppController'
 import {
@@ -46,6 +47,7 @@ const confirmDialogHarness = vi.hoisted(() => ({
   mountedCount: 0,
   props: null as null | {
     title: string
+    body?: ReactNode
     onCancel: () => void
     onConfirm: () => void
   },
@@ -142,7 +144,12 @@ vi.mock('@components/CommandPalette', () => ({
 vi.mock('@components/BootSplash', () => ({ BootSplash: () => null }))
 vi.mock('@components/Common', () => ({ Button: () => null, ToastStack: () => null }))
 vi.mock('@components/ConfirmDialog', () => ({
-  ConfirmDialog: (props: { title: string; onCancel: () => void; onConfirm: () => void }) => {
+  ConfirmDialog: (props: {
+    title: string
+    body?: ReactNode
+    onCancel: () => void
+    onConfirm: () => void
+  }) => {
     confirmDialogHarness.rendered(props)
     confirmDialogHarness.props = props
     useEffect(() => {
@@ -320,6 +327,7 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     authTransitioning: false,
     handleEnsureTeamContext: ensureTeamContext,
     getCurrentTeamId: vi.fn(() => liveTeamId),
+    isHostAccessBlocked: vi.fn(() => false),
     handleSelectChatAgent,
     handleNavSelect,
     handleLogout: vi.fn(),
@@ -370,6 +378,26 @@ describe('App deep-link orchestration', () => {
   // (null) so unrelated launch/deactivation tests behave exactly as before;
   // the persistence tests override the resolved value per case.
   const getSandboxUiLocation = vi.fn().mockResolvedValue(null)
+
+  it('prompts to add an environment when a Profile Portal handoff has no saved match', () => {
+    currentController = makeController({
+      initialExperienceLoading: false,
+      pendingDesktopEnvironmentSetup: {
+        appName: 'Example tenant',
+        externalRestApiBaseUrl: 'https://api.example.test',
+        rpcProxyBaseUrl: 'https://rpc.example.test',
+      },
+    } as Partial<AppController>)
+
+    render(<App />)
+
+    expect(confirmDialogHarness.props?.title).toBe('Add desktop environment?')
+    const dialogBody = renderToStaticMarkup(<>{confirmDialogHarness.props?.body}</>)
+    expect(dialogBody).toContain(
+      'Review the service URLs for <strong>Example tenant</strong>. Continue only if you trust them.'
+    )
+    expect(dialogBody).toContain('https://rpc.example.test')
+  })
 
   beforeEach(() => {
     vi.clearAllMocks()

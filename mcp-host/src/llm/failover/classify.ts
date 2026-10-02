@@ -26,13 +26,16 @@ export const ALL_FAILOVER_CLASSES: readonly FailoverClass[] = [
  *   - `AuthenticationFailed` → auth               (401 and 403 collapse)
  *   - `RateLimited`          → rate_limited        (429)
  *   - `ModelOverloaded`      → provider_unavailable (5xx / 529)
+ *   - `ControlPlaneUnavailable` → provider_unavailable (a control-plane hop no
+ *     live process answered, #720)
  *   - `ApiCallFailed ∧ retryable` → provider_unavailable (timeout / network;
  *     also `classifyUnknown`'s default bucket — restrict `triggerOn` to avoid
  *     firing on unrecognised errors)
  *   - `ApiCallFailed ∧ !retryable` → null (400 / validation / content-policy —
  *     never trigger; masking these would hide bugs)
  *   - everything else (InvalidResponse, ContextLengthExceeded, ContentFiltered,
- *     ModelNotAvailable, ToolCallLimitExceeded, StreamDurationExceeded) → null
+ *     ModelNotAvailable, ToolCallLimitExceeded, StreamDurationExceeded,
+ *     UpstreamRejected) → null
  */
 export function classifyFailoverClass(
   code: LlmErrorCode,
@@ -46,6 +49,7 @@ export function classifyFailoverClass(
     case LlmErrorCode.RateLimited:
       return 'rate_limited'
     case LlmErrorCode.ModelOverloaded:
+    case LlmErrorCode.ControlPlaneUnavailable:
       return 'provider_unavailable'
     case LlmErrorCode.ApiCallFailed:
       return retryable ? 'provider_unavailable' : null

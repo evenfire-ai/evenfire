@@ -4,6 +4,11 @@ import https from 'node:https'
 import { createSecureContext } from 'node:tls'
 import { createBookmarkObservation } from './hcc-watch-bookmarks.mjs'
 
+// Individual fixture commands remain one-minute bounded; a single continuous
+// cache-loss observation has a two-minute ceiling even when renewed.
+const MAX_CHANNEL_HOLD_WINDOW_MS = 60_000
+const MAX_CHANNEL_HOLD_BUDGET_MS = 120_000
+
 export function proxyUpstreamErrorRecord(error) {
   const codes = [
     'ECONNREFUSED',
@@ -46,7 +51,15 @@ export function validateCommand(command, allowedPaths) {
   } else if (command.action === 'release') {
     if (typeof command.pauseId !== 'string' || !/^[a-zA-Z0-9-]{1,80}$/.test(command.pauseId))
       throw new Error('invalid_pause_id')
-  } else if (command.action !== 'observe-bookmarks') throw new Error('invalid_control_action')
+  } else if (command.action === 'hold-channel') {
+    if (
+      !Number.isInteger(command.durationMs) ||
+      command.durationMs < 1000 ||
+      command.durationMs > MAX_CHANNEL_HOLD_WINDOW_MS
+    )
+      throw new Error('invalid_channel_hold_duration')
+  } else if (command.action !== 'release-channel' && command.action !== 'observe-bookmarks')
+    throw new Error('invalid_control_action')
   return command
 }
 
@@ -60,12 +73,15 @@ export function createProxy({
   controlDir,
   periodMs,
   minAgeMs,
+  channelPath,
+  churnEnabled = true,
 }) {
   // CA bytes configure TLS trust only; they never enter the request or destination.
   const upstreamSecureContext = createSecureContext({ ca: upstreamCa })
   const streams = new Set()
   const bookmarks = createBookmarkObservation()
   let pause = null
+  let channelHold = null
   let commandId = null
   let commandContent = null
   const writeRecord = (name, fields) => {
@@ -83,6 +99,20 @@ export function createProxy({
     old.resume?.()
     acknowledge({ id: old.id, state: reason })
   }
+  const finishChannelHold = reason => {
+    if (!channelHold) return
+    const held = channelHold
+    channelHold = null
+    clearTimeout(held.timer)
+    writeRecord('channel-hold', {
+      id: held.id,
+      state: reason,
+      cut: held.cut,
+      rejected: held.rejected,
+      renewals: held.renewals,
+      deadlineAtMs: held.deadlineAtMs,
+    })
+  }
   const server = https.createServer({ key, cert }, (request, response) => {
     const url = new URL(request.url, 'https://fixture.invalid')
     if (!request.url.startsWith('/') || request.url.startsWith('//')) {
@@ -90,6 +120,12 @@ export function createProxy({
       return
     }
     const watch = url.searchParams.get('watch') === 'true'
+    if (channelHold && request.method === 'GET' && url.pathname === channelPath) {
+      channelHold.rejected++
+      response.writeHead(503, { 'content-type': 'application/json' })
+      response.end(JSON.stringify({ kind: 'Status', apiVersion: 'v1', status: 'Failure', reason: 'ServiceUnavailable', code: 503 }))
+      return
+    }
     const kind = url.pathname.endsWith('/mcpservers')
       ? 'McpServer'
       : url.pathname.endsWith('/contexts')
@@ -188,6 +224,72 @@ export function createProxy({
           throw new Error('pause_not_held')
         finishPause('released')
         acknowledge({ id: command.id, state: 'released' })
+      } else if (command.action === 'hold-channel') {
+        if (!channelPath) throw new Error('channel_hold_unavailable')
+        if (channelHold) {
+          const now = Date.now()
+          const budgetDeadlineMs = channelHold.startedAtMs + MAX_CHANNEL_HOLD_BUDGET_MS
+          const deadlineAtMs = Math.min(now + command.durationMs, budgetDeadlineMs)
+          if (deadlineAtMs <= now) throw new Error('channel_hold_budget_exhausted')
+          clearTimeout(channelHold.timer)
+          channelHold.id = command.id
+          channelHold.deadlineAtMs = deadlineAtMs
+          channelHold.renewals++
+          channelHold.timer = setTimeout(
+            () => finishChannelHold('expired'),
+            deadlineAtMs - now,
+          )
+          writeRecord('channel-hold', {
+            id: channelHold.id,
+            state: 'held',
+            cut: channelHold.cut,
+            rejected: channelHold.rejected,
+            renewals: channelHold.renewals,
+            deadlineAtMs,
+          })
+          acknowledge({
+            id: command.id,
+            state: 'held',
+            count: channelHold.cut,
+            renewed: true,
+            renewals: channelHold.renewals,
+            deadlineAtMs,
+          })
+        } else {
+          let count = 0
+          const now = Date.now()
+          const deadlineAtMs = now + command.durationMs
+          channelHold = {
+            id: command.id,
+            startedAtMs: now,
+            deadlineAtMs,
+            cut: 0,
+            rejected: 0,
+            renewals: 0,
+            timer: setTimeout(() => finishChannelHold('expired'), command.durationMs),
+          }
+          for (const stream of streams) {
+            if (stream.watch && stream.request.method === 'GET' &&
+                new URL(stream.request.url, 'https://fixture.invalid').pathname === channelPath) {
+              stream.close()
+              count++
+            }
+          }
+          channelHold.cut = count
+          writeRecord('channel-hold', {
+            id: command.id,
+            state: 'held',
+            cut: count,
+            rejected: 0,
+            renewals: 0,
+            deadlineAtMs,
+          })
+          acknowledge({ id: command.id, state: 'held', count, renewals: 0, deadlineAtMs })
+        }
+      } else if (command.action === 'release-channel') {
+        if (!channelHold) throw new Error('channel_hold_not_active')
+        finishChannelHold('released')
+        acknowledge({ id: command.id, state: 'released' })
       } else if (command.action === 'observe-bookmarks') {
         writeRecord('bookmarks', bookmarks.finish())
         acknowledge({ id: command.id, state: 'observed' })
@@ -210,15 +312,16 @@ export function createProxy({
       acknowledge({ id: observedId, state: 'rejected' })
     }
   }, 100)
-  const churn = setInterval(() => {
+  const churn = churnEnabled ? setInterval(() => {
     if (fs.existsSync(`${controlDir}/paused`)) return
     for (const stream of streams)
       if (stream.watch && Date.now() - stream.born >= minAgeMs) stream.close()
-  }, periodMs)
+  }, periodMs) : null
   const close = () => {
     clearInterval(poll)
-    clearInterval(churn)
+    if (churn) clearInterval(churn)
     finishPause('shutdown')
+    finishChannelHold('shutdown')
     for (const stream of streams) stream.close()
     server.close()
   }
@@ -235,6 +338,8 @@ if (import.meta.main) {
     controlDir: '/churn-ctl',
     periodMs: Number(process.env.CHURN_PERIOD_MS),
     minAgeMs: Number(process.env.CHURN_MIN_AGE_MS),
+    channelPath: process.env.CHANNEL_PATH,
+    churnEnabled: process.env.CHURN_DISABLED !== '1',
   })
   proxy.server.listen(8443, '0.0.0.0')
   process.on('SIGTERM', proxy.close)

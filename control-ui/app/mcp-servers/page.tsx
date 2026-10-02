@@ -15,7 +15,8 @@ import type {
 } from '../../components/McpServerTable.types'
 import { useToast } from '../../components/Toast'
 import {
-  apiSend,
+  McpServerUninstallIncompleteError,
+  deleteMcpServer,
   getAgentTeams,
   getAgentUsers,
   getContexts,
@@ -183,7 +184,8 @@ export default function McpServersPage() {
   const [updatingAgentAccessKey, setUpdatingAgentAccessKey] = useState<string | null>(null)
   const { confirm, confirmDialog } = useConfirmDialog()
 
-  async function loadAll() {
+  /** Resolves to the load error it displayed, or '' when the reload succeeded. */
+  async function loadAll(): Promise<string> {
     setLoading(true)
     setError('')
     setAccessWarning('')
@@ -263,9 +265,12 @@ export default function McpServersPage() {
       setAgentTargets(nextAgentTargets)
       setBindingsByConnectorName(nextBindings)
       setAccessByConnectorKey(nextAccessByConnectorKey)
+      return ''
     } catch (e) {
-      if (isSilentApiError(e)) return
-      setError(e instanceof Error ? e.message : 'Failed to load connectors')
+      if (isSilentApiError(e)) return ''
+      const message = e instanceof Error ? e.message : 'Failed to load connectors'
+      setError(message)
+      return message
     } finally {
       setLoading(false)
     }
@@ -283,11 +288,25 @@ export default function McpServersPage() {
     setDeletingKey(key)
     setError('')
     try {
-      await apiSend('DELETE', `/api/v1/admin/mcp-servers/${encodeURIComponent(server.name)}`)
+      await deleteMcpServer(server.name)
       await loadAll()
       showToast(`Connector ${key} deleted.`, { tone: 'success' })
     } catch (e) {
       if (isSilentApiError(e)) return
+      if (e instanceof McpServerUninstallIncompleteError) {
+        // Part of the cleanup already ran (e.g. agent access removed) while the
+        // connector stays listed; reload so the row reflects that before retrying.
+        const refreshError = await loadAll()
+        setError(
+          [
+            `${key}: ${e.message}`,
+            refreshError && `The list could not be refreshed: ${refreshError}`,
+          ]
+            .filter(Boolean)
+            .join(' ')
+        )
+        return
+      }
       setError(e instanceof Error ? e.message : `Failed to delete ${key}`)
     } finally {
       setDeletingKey(null)
@@ -297,19 +316,19 @@ export default function McpServersPage() {
   async function addConnectorToAgents(
     server: { name: string; namespace: string },
     agents: Array<{ name: string; contextRef: string }>
-  ) {
+  ): Promise<boolean> {
     const key = `${server.namespace}/${server.name}`
     const contextRefs = [...new Set(agents.map(agent => agent.contextRef))]
     const connector = mcpServers.find(item => connectorKey(item) === key)
     const oauthScopeError = connectorContextAssignmentError(connector?.spec, contextRefs)
     if (oauthScopeError) {
       setError(oauthScopeError)
-      return
+      return false
     }
     const resolvedTargets = contextRefs.map(contextRef => contextForAlias(contexts, contextRef))
     if (resolvedTargets.some(target => !target)) {
       setError('One or more selected agents could not be resolved. Please refresh and try again.')
-      return
+      return false
     }
     const targets = Array.from(
       new Map(
@@ -340,9 +359,11 @@ export default function McpServersPage() {
           : `Connector ${server.name} added to ${agents.length} agents.`,
         { tone: 'success' }
       )
+      return true
     } catch (e) {
-      if (isSilentApiError(e)) return
+      if (isSilentApiError(e)) return false
       setError(connectorAccessMutationError(e, `Failed to give agents access to ${server.name}`))
+      return false
     } finally {
       setUpdatingAgentAccessKey(null)
     }
@@ -414,10 +435,11 @@ export default function McpServersPage() {
         onRemoveFromAgents={removeConnectorFromAgents}
         updatingAgentAccessKey={updatingAgentAccessKey}
         onDelete={handleDelete}
-        onEdit={server => router.push(CONTROL_ROUTES.connectors.edit(server.name))}
+        onOpen={server => router.push(CONTROL_ROUTES.connectors.detail(server.name))}
         deletingKey={deletingKey}
         onRefresh={loadAll}
         onCreate={() => router.push(CONTROL_ROUTES.connectors.new)}
+        onAddRemote={() => router.push(CONTROL_ROUTES.connectors.remoteNew)}
         onInstallFromRegistry={() => router.push(CONTROL_ROUTES.marketplace.root)}
         refreshing={loading}
         loading={loading && mcpServers.length === 0}

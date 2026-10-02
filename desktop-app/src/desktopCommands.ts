@@ -352,8 +352,8 @@ const definitions = [
   },
   {
     id: 'navigate.files',
-    label: 'Go to Global File System',
-    description: 'Open the Global File System browser.',
+    label: 'Go to EvenDrive',
+    description: 'Open the EvenDrive browser.',
     group: 'Navigation',
     order: 220,
     defaultBinding: null,

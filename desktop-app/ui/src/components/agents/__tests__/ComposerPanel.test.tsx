@@ -16,6 +16,7 @@ import {
   type ImageInputDecision,
   imageInputBlockMessage,
 } from '../../../../../src/imageInputDecision'
+import type { WorkflowRecipeListResult } from '../../../../../src/types'
 import type { ComposerImageAttachment, FailedAgentSend } from '../../../uiTypes'
 import { ComposerPanel } from '../ComposerPanel'
 
@@ -120,7 +121,23 @@ vi.mock('@hooks/useHostModels', () => ({
   useHostModels: () => composerModelState,
 }))
 vi.mock('../ComposerAgentFilesModal', () => ({ ComposerAgentFilesModal: () => null }))
-vi.mock('../ComposerGlobalFilesModal', () => ({ ComposerGlobalFilesModal: () => null }))
+const globalFilesMock = vi.hoisted(() => ({
+  showComposerItem: false,
+  modalProps: undefined as { attachedIds: readonly string[] } | undefined,
+}))
+
+vi.mock('@constants/agentFeatures', async importOriginal => ({
+  ...(await importOriginal<typeof import('@constants/agentFeatures')>()),
+  get SHOW_GLOBAL_FILE_SYSTEM_COMPOSER_ITEM() {
+    return globalFilesMock.showComposerItem
+  },
+}))
+vi.mock('../ComposerGlobalFilesModal', () => ({
+  ComposerGlobalFilesModal: (props: { attachedIds: readonly string[] }) => {
+    globalFilesMock.modalProps = props
+    return null
+  },
+}))
 const annotationCanvasMock = vi.hoisted(() => ({
   onSave: undefined as ((updated: ComposerImageAttachment) => void) | undefined,
 }))
@@ -139,13 +156,19 @@ function setScrollHeight(textarea: HTMLTextAreaElement, value: number) {
 beforeEach(() => {
   Object.defineProperty(window, 'clerum', {
     configurable: true,
-    value: { workflows: { list: vi.fn(async () => ({ items: [] })) } },
+    value: {
+      workflows: {
+        list: vi.fn(async (): Promise<WorkflowRecipeListResult> => ({ items: [], count: 0 })),
+      },
+    },
   })
 })
 
 afterEach(() => {
   cleanup()
   annotationCanvasMock.onSave = undefined
+  globalFilesMock.showComposerItem = false
+  globalFilesMock.modalProps = undefined
   draftState.value = ''
   draftState.set.mockReset()
   Object.assign(composerState, {
@@ -228,7 +251,9 @@ describe.each([
     fireEvent.click(screen.getByRole('button', { name: /Model — Haiku 4.5/ }))
 
     const contextMenu = container.querySelector('.composer-reference-menu-panel')
-    const submenu = container.querySelector('.composer-reference-submenu')
+    // The submenu is portaled to document.body, so it lives outside the
+    // component subtree entirely — query the whole document for it.
+    const submenu = document.querySelector('.composer-reference-submenu')
     const modelMenu = container.querySelector('.model-selector-popover')
 
     expect(contextMenu).toBeTruthy()
@@ -238,7 +263,9 @@ describe.each([
     expect(viewport?.contains(submenu)).toBe(false)
     expect(viewport?.contains(modelMenu)).toBe(false)
     expect(shell?.contains(contextMenu)).toBe(true)
-    expect(shell?.contains(submenu)).toBe(true)
+    // Portaled: no longer a descendant of the composer shell (or the container).
+    expect(shell?.contains(submenu)).toBe(false)
+    expect(container.contains(submenu)).toBe(false)
     expect(shell?.contains(modelMenu)).toBe(true)
     expect(cssRule('\\.composer-input-shell')).not.toMatch(/overflow\s*:/)
     expect(cssRule('\\.composer-textarea-viewport')).toMatch(/overflow\s*:\s*hidden/)
@@ -263,6 +290,98 @@ describe.each([
     expect(textarea.selectionStart).toBe(4)
     expect(textarea.selectionEnd).toBe(8)
     otherInput.remove()
+  })
+})
+
+describe('ComposerPanel EvenDrive picker', () => {
+  it('hands the picker the ids of the global files already in the composer, and only those', () => {
+    globalFilesMock.showComposerItem = true
+    Object.assign(composerState, {
+      composerReferenceAttachments: [
+        {
+          id: 'global-file:main:aaaa',
+          type: 'global_file',
+          resourceId: 'aaaa',
+          drive: 'main',
+          gfsUri: 'gfs://main/aaaa',
+          label: 'a.md',
+          version: 1,
+          bytes: 1,
+        },
+        {
+          id: 'agent-file:ctx:/b.md',
+          type: 'agent_file',
+          contextId: 'ctx',
+          filesystemName: 'ctx',
+          path: '/b.md',
+          kind: 'file',
+          label: 'b.md',
+        },
+      ],
+    })
+    render(<ComposerPanel inline={false} />)
+    // Liveness witness: the modal is not mounted until EvenDrive is chosen.
+    expect(globalFilesMock.modalProps).toBeUndefined()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add context' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: /EvenDrive/ }))
+
+    expect(globalFilesMock.modalProps?.attachedIds).toEqual(['global-file:main:aaaa'])
+  })
+})
+
+describe('ComposerPanel reference submenu portaling', () => {
+  it('portals the submenu out of the drawer overflow-clipping ancestors', () => {
+    // Reproduce the narrow-drawer DOM: the composer sits inside ancestors that
+    // clip overflow. In-flow, the submenu was cropped by them; portaled, it is
+    // no longer their descendant.
+    const { container } = render(
+      <div className="chat-drawer">
+        <div className="chat-drawer__surface">
+          <div className="agent-workspace-body-slot">
+            <ComposerPanel inline={false} />
+          </div>
+        </div>
+      </div>
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add context' }))
+    fireEvent.mouseEnter(screen.getByRole('menuitem', { name: /Plugins/ }))
+
+    const submenu = document.querySelector('.composer-reference-submenu')
+    expect(submenu).toBeTruthy()
+    // Not a descendant of the overflow-clipping ancestor, the drawer, or the
+    // rendered component subtree — it hangs off document.body.
+    expect(container.querySelector('.agent-workspace-body-slot')?.contains(submenu)).toBe(false)
+    expect(container.querySelector('.chat-drawer')?.contains(submenu)).toBe(false)
+    expect(container.contains(submenu)).toBe(false)
+    expect(submenu?.parentElement).toBe(document.body)
+  })
+
+  it('keeps the menu mounted through a mousedown on a portaled submenu item so its click fires', async () => {
+    // A clickable plugin so the submenu holds a real menuitem, not an empty state.
+    window.clerum.workflows.list = vi.fn(
+      async (): Promise<WorkflowRecipeListResult> => ({
+        items: [{ metadata: { namespace: 'ns', name: 'plug-a' } }],
+        count: 1,
+      })
+    )
+    render(<ComposerPanel inline={false} />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add context' }))
+    fireEvent.mouseEnter(screen.getByRole('menuitem', { name: /Plugins/ }))
+    const item = await screen.findByRole('menuitem', { name: 'plug-a' })
+
+    // The real pointer sequence is mousedown then click. The click-outside guard
+    // listens on mousedown; with a single-ref guard the portaled item would read
+    // as "outside", close the menu, and unmount the item before the click.
+    fireEvent.mouseDown(item)
+    expect(screen.queryByRole('menuitem', { name: 'plug-a' })).not.toBeNull()
+
+    fireEvent.click(item)
+    expect(actionsMock.handleAddComposerReferenceAttachments).toHaveBeenCalledWith([
+      expect.objectContaining({ type: 'plugin', name: 'plug-a', namespace: 'ns' }),
+    ])
   })
 })
 

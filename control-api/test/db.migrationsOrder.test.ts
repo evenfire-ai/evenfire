@@ -48,6 +48,14 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
     expect(duplicates, `duplicate version-string(s):\n${duplicates.join('\n')}`).toEqual([])
   })
 
+  it('assigns each migration a unique numeric slot', async () => {
+    const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
+    const slots = CONTROL_API_MIGRATIONS.map(migration => migration.version.slice(0, 4))
+    const duplicates = slots.filter((slot, index) => slots.indexOf(slot) !== index)
+
+    expect(duplicates, `duplicate migration slot(s):\n${duplicates.join('\n')}`).toEqual([])
+  })
+
   it('keeps legacy aliases unique and distinct from current versions', async () => {
     const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
     const current = new Set(CONTROL_API_MIGRATIONS.map(migration => migration.version))
@@ -57,5 +65,157 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
 
     expect(duplicates).toEqual([])
     expect(currentCollisions).toEqual([])
+  })
+
+  it('recognizes all previously deployed feed migration versions without reapplying DDL', async () => {
+    const { CONTROL_API_MIGRATIONS, initDb } = await import('../src/db.js')
+    const migration = CONTROL_API_MIGRATIONS.find(
+      candidate => candidate.version === '0122_durable_entity_change_feed'
+    )
+    expect(migration?.legacyVersions).toEqual([
+      '0116_durable_entity_change_feed',
+      '0117_durable_entity_change_feed',
+      '0119_durable_entity_change_feed',
+    ])
+
+    for (const legacyVersion of migration?.legacyVersions ?? []) {
+      const appliedVersions = CONTROL_API_MIGRATIONS.filter(
+        candidate => candidate.version !== migration?.version
+      ).map(candidate => ({ version: candidate.version }))
+      appliedVersions.push({ version: legacyVersion })
+      const query = vi.fn(async (sql: string) =>
+        sql.includes('SELECT version FROM schema_migrations')
+          ? { rows: appliedVersions, rowCount: appliedVersions.length }
+          : { rows: [], rowCount: 0 }
+      )
+      const release = vi.fn()
+
+      await initDb({ connect: vi.fn().mockResolvedValue({ query, release }) } as never)
+
+      const statements = query.mock.calls.map(([sql]) => sql)
+      expect(statements).not.toContainEqual(
+        expect.stringContaining('CREATE TABLE IF NOT EXISTS entity_change_feed')
+      )
+      expect(query).toHaveBeenCalledWith(
+        expect.stringContaining('INSERT INTO schema_migrations(version)'),
+        ['0122_durable_entity_change_feed']
+      )
+      expect(release).toHaveBeenCalledOnce()
+    }
+  })
+
+  it('recognizes the deployed checkpoint version without reapplying its function DDL', async () => {
+    const { CONTROL_API_MIGRATIONS, initDb } = await import('../src/db.js')
+    const migration = CONTROL_API_MIGRATIONS.find(
+      candidate => candidate.version === '0123_entity_change_checkpoint_cursor_convergence'
+    )
+    expect(migration?.legacyVersions).toEqual(['0120_entity_change_checkpoint_cursor_convergence'])
+
+    const appliedVersions = CONTROL_API_MIGRATIONS.filter(
+      candidate => candidate.version !== migration?.version
+    ).map(candidate => ({ version: candidate.version }))
+    appliedVersions.push({ version: '0120_entity_change_checkpoint_cursor_convergence' })
+    const query = vi.fn(async (sql: string) =>
+      sql.includes('SELECT version FROM schema_migrations')
+        ? { rows: appliedVersions, rowCount: appliedVersions.length }
+        : { rows: [], rowCount: 0 }
+    )
+    const release = vi.fn()
+
+    await initDb({ connect: vi.fn().mockResolvedValue({ query, release }) } as never)
+
+    const statements = query.mock.calls.map(([sql]) => String(sql))
+    expect(statements).not.toContainEqual(
+      expect.stringContaining('CREATE OR REPLACE FUNCTION entity_change_read_checkpoint')
+    )
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO schema_migrations(version)'),
+      ['0123_entity_change_checkpoint_cursor_convergence']
+    )
+    expect(release).toHaveBeenCalledOnce()
+  })
+
+  it('registers an additive migration for expired entity-change cursor convergence', async () => {
+    const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
+    const migration = CONTROL_API_MIGRATIONS.find(
+      candidate => candidate.version === '0123_entity_change_checkpoint_cursor_convergence'
+    )
+    expect(migration).toBeDefined()
+    if (!migration) return
+
+    const query = vi.fn().mockResolvedValue({ rows: [], rowCount: 0 })
+    await migration.apply({ query } as never)
+
+    const sql = query.mock.calls.map(([statement]) => String(statement)).join('\n')
+    expect(sql).toMatch(/IF requested_cursor = current_cursor THEN/i)
+    expect(sql).not.toMatch(/current_watermark > pruned_watermark/i)
+  })
+
+  it('registers an additive temp-schema repair for entity-change definer functions', async () => {
+    const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
+    const migration = CONTROL_API_MIGRATIONS.find(
+      candidate => candidate.version === '0124_entity_change_definer_search_path'
+    )
+    expect(migration).toBeDefined()
+    if (!migration) return
+
+    const query = vi.fn().mockResolvedValue({ rows: [], rowCount: 0 })
+    await migration.apply({ query } as never)
+
+    const sql = query.mock.calls.map(([statement]) => String(statement)).join('\n')
+    for (const functionName of [
+      'entity_change_capture_resource',
+      'entity_change_capture_scope',
+      'entity_change_dispatch_batch',
+      'entity_change_read_checkpoint',
+    ]) {
+      expect(sql).toMatch(
+        new RegExp(
+          `ALTER FUNCTION ${functionName}[\\s\\S]+?SET search_path = pg_catalog, public, pg_temp`,
+          'i'
+        )
+      )
+    }
+  })
+
+  it('requires 0116_mcp_secret_rollback_permits to persist expiring rollback permits', async () => {
+    const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
+    // Renumbered twice while syncing onto dev: 0101 -> 0109 -> 0116. The earlier
+    // names survive only in this migration's legacyVersions, and the test above
+    // forbids an alias from colliding with a current version, so looking one up
+    // here by its old name can only ever find nothing.
+    const migration = CONTROL_API_MIGRATIONS.find(
+      candidate => candidate.version === '0116_mcp_secret_rollback_permits'
+    )
+
+    expect(migration).toBeDefined()
+    if (!migration) return
+
+    const query = vi.fn().mockResolvedValue({ rows: [], rowCount: 0 })
+    await migration.apply({ query } as never)
+
+    const sql = query.mock.calls.map(([statement]) => String(statement)).join('\n')
+    expect(sql).toMatch(/CREATE TABLE IF NOT EXISTS mcp_secret_rollback_permits/i)
+    for (const column of [
+      'session_hash',
+      'namespace',
+      'name',
+      'uid',
+      'resource_version',
+      'expires_at',
+      'claim_token',
+      'claim_expires_at',
+    ]) {
+      expect(sql).toMatch(new RegExp(`\\b${column}\\b`, 'i'))
+    }
+    expect(sql).toMatch(/session_hash\s+BYTEA/i)
+    expect(sql).toMatch(/octet_length\s*\(\s*session_hash\s*\)\s*=\s*32/i)
+    expect(sql).toMatch(/expires_at\s*<=\s*created_at\s*\+\s*INTERVAL\s*'120 seconds'/i)
+    expect(sql).toMatch(/claim_token\s+UUID/i)
+    expect(sql).toMatch(/claim_expires_at\s+TIMESTAMPTZ/i)
+    expect(sql).toMatch(/claim_token IS NULL[\s\S]+claim_expires_at IS NULL/i)
+    expect(sql).toMatch(
+      /CREATE INDEX IF NOT EXISTS[\s\S]+?ON mcp_secret_rollback_permits\s*\(\s*expires_at\s*\)/i
+    )
   })
 })

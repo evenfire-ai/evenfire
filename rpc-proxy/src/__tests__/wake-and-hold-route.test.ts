@@ -1,7 +1,12 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
+import { createServer } from 'node:http'
+import type { AddressInfo } from 'node:net'
 import request from 'supertest'
+import { config } from '../config.js'
+import { apiErrorHandler } from '../errorHandler.js'
 import { createRpcRouter } from '../routes/rpc.js'
+import { forwardHostMessageToHost } from '../services/mcpHostRestService.js'
 
 const authTokenMock = vi.hoisted(() => ({
   verifyRpcToken: vi.fn(),
@@ -62,16 +67,14 @@ const HOST_CONNECTION = {
   url: 'http://chatllm.mcp-host.svc.cluster.local:8080',
   headers: {},
 }
+const originalUpstreamTimeoutMs = config.upstreamTimeoutMs
+const originalFetch = globalThis.fetch
 
 function makeApp() {
   const app = express()
   app.use(express.json())
   app.use(createRpcRouter())
-  app.use(
-    (err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
-      res.status(500).json({ error: err instanceof Error ? err.message : 'Internal error' })
-    }
-  )
+  app.use(apiErrorHandler)
   return app
 }
 
@@ -96,6 +99,12 @@ beforeEach(() => {
   serviceMock.resolveHostConnectionForUser.mockResolvedValue({ ...HOST_CONNECTION })
 })
 
+afterEach(() => {
+  vi.useRealTimers()
+  config.upstreamTimeoutMs = originalUpstreamTimeoutMs
+  globalThis.fetch = originalFetch
+})
+
 describe('POST /rpc/hosts/:hostRef/messages wake-and-hold triggers', () => {
   it('host-down network error triggers a wake; 200 active leads to one immediate upstream retry', async () => {
     serviceMock.forwardHostMessageToHost
@@ -112,6 +121,29 @@ describe('POST /rpc/hosts/:hostRef/messages wake-and-hold triggers', () => {
     expect(controlApiMock.requestHostWakeFromControlApi).toHaveBeenCalledTimes(1)
     expect(controlApiMock.requestHostWakeFromControlApi).toHaveBeenCalledWith('chatllm', 'token')
     expect(serviceMock.forwardHostMessageToHost).toHaveBeenCalledTimes(2)
+    expect(serviceMock.forwardHostMessageToHost.mock.calls[0][2]).toEqual({ async: false })
+  })
+
+  it('uses the normal POST timeout before wake-hold retries until the suspended Host admits', async () => {
+    serviceMock.forwardHostMessageToHost
+      .mockRejectedValueOnce(hostDownError()) // Initial POST fails quickly on the suspended Host.
+      .mockRejectedValueOnce(hostDownError()) // Wake was accepted, but admission is not ready yet.
+      .mockResolvedValueOnce({ success: true, taskId: 't-delayed' })
+    controlApiMock.requestHostWakeFromControlApi.mockResolvedValue({
+      kind: 'active',
+      wakeGeneration: null,
+    })
+
+    const response = await postMessage(makeApp()).expect(200)
+
+    expect(response.body).toEqual({ success: true, taskId: 't-delayed' })
+    expect(serviceMock.forwardHostMessageToHost).toHaveBeenCalledTimes(3)
+    // The first POST omits timeoutMs so the service applies its normal full upstream timeout.
+    expect(serviceMock.forwardHostMessageToHost.mock.calls[0][2]).toEqual({ async: false })
+    expect(controlApiMock.requestHostWakeFromControlApi).toHaveBeenCalledTimes(1)
+    expect(serviceMock.forwardHostMessageToHost.mock.calls[0][1]).toBe(
+      serviceMock.forwardHostMessageToHost.mock.calls.at(-1)![1]
+    )
   })
 
   it('the wake retry re-forwards the SAME stable messageId as the first forward (idempotency identity)', async () => {
@@ -220,6 +252,7 @@ describe('POST /rpc/hosts/:hostRef/messages wake-and-hold triggers', () => {
 
     expect(response.body).toEqual({ success: true, taskId: 't-2' })
     expect(controlApiMock.requestHostWakeFromControlApi).toHaveBeenCalledTimes(1)
+    expect(serviceMock.forwardHostMessageToHost.mock.calls[0][2]).toEqual({ async: false })
   })
 
   it('drain-cancel bounce resolves within the short retry schedule (250ms then 1s)', async () => {
@@ -238,13 +271,15 @@ describe('POST /rpc/hosts/:hostRef/messages wake-and-hold triggers', () => {
     expect(serviceMock.forwardHostMessageToHost).toHaveBeenCalledTimes(3)
   })
 
-  it('409 not-stateless keeps today behavior exactly: 502 Upstream host unavailable', async () => {
+  it('409 not-stateless keeps the full upstream timeout and legacy 502 behavior', async () => {
     serviceMock.forwardHostMessageToHost.mockRejectedValue(hostDownError())
     controlApiMock.requestHostWakeFromControlApi.mockResolvedValue({ kind: 'not-stateless' })
 
     const response = await postMessage(makeApp()).expect(502)
 
     expect(response.body).toEqual({ error: 'Upstream host unavailable' })
+    expect(serviceMock.forwardHostMessageToHost.mock.calls[0][2]).toEqual({ async: false })
+    expect(controlApiMock.requestHostWakeFromControlApi).toHaveBeenCalledTimes(1)
   })
 
   it('404 unknown host maps to a 404 for the caller', async () => {
@@ -277,20 +312,29 @@ describe('POST /rpc/hosts/:hostRef/messages wake-and-hold triggers', () => {
   })
 
   it('host still unreachable after a wake reports active resolves to host_waking, never a hang', async () => {
+    let wakeStarted!: () => void
+    const wakeCalled = new Promise<void>(resolve => {
+      wakeStarted = resolve
+    })
     serviceMock.forwardHostMessageToHost.mockRejectedValue(hostDownError())
-    controlApiMock.requestHostWakeFromControlApi.mockResolvedValue({
-      kind: 'active',
-      wakeGeneration: null,
+    controlApiMock.requestHostWakeFromControlApi.mockImplementation(async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+      wakeStarted()
+      return { kind: 'active', wakeGeneration: null }
     })
 
-    const response = await postMessage(makeApp()).expect(503)
+    const responsePromise = postMessage(makeApp())
+      .expect(503)
+      .then(response => response)
+    await wakeCalled
+    await vi.advanceTimersByTimeAsync(48_000)
+    const response = await responsePromise
 
     expect(response.body).toMatchObject({ code: 'host_waking', hostRef: 'chatllm' })
-    // Trigger + the full short retry schedule were attempted.
-    expect(serviceMock.forwardHostMessageToHost).toHaveBeenCalledTimes(4)
+    expect(serviceMock.forwardHostMessageToHost.mock.calls.length).toBeGreaterThan(4)
   })
 
-  it('a non-availability upstream failure (mcp-host 500) never triggers a wake', async () => {
+  it('a non-availability upstream failure (mcp-host 500) never enters the wake hold', async () => {
     serviceMock.forwardHostMessageToHost.mockRejectedValue(
       new serviceMock.UpstreamHostError(500, '{"error":"boom"}')
     )
@@ -301,7 +345,7 @@ describe('POST /rpc/hosts/:hostRef/messages wake-and-hold triggers', () => {
     expect(controlApiMock.requestHostWakeFromControlApi).not.toHaveBeenCalled()
   })
 
-  it('an upstream AbortError keeps the 504 path and never triggers a wake', async () => {
+  it('an upstream AbortError keeps the 504 path without entering the wake hold', async () => {
     const abort = new Error('aborted')
     abort.name = 'AbortError'
     serviceMock.forwardHostMessageToHost.mockRejectedValue(abort)
@@ -309,6 +353,111 @@ describe('POST /rpc/hosts/:hostRef/messages wake-and-hold triggers', () => {
     const response = await postMessage(makeApp()).expect(504)
 
     expect(response.body).toEqual({ error: 'Gateway Timeout' })
+    expect(controlApiMock.requestHostWakeFromControlApi).not.toHaveBeenCalled()
+  })
+
+  it('returns 504 when the real host REST service times out a hanging HTTP request', async () => {
+    config.upstreamTimeoutMs = 25
+    const server = createServer(() => {
+      // Leave the request unanswered so the service timeout must abort it.
+    })
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject)
+      server.listen(0, '127.0.0.1', resolve)
+    })
+    const { port } = server.address() as AddressInfo
+    serviceMock.resolveHostConnectionForUser.mockResolvedValue({
+      ...HOST_CONNECTION,
+      url: `http://127.0.0.1:${port}`,
+    })
+    serviceMock.forwardHostMessageToHost.mockImplementation(
+      forwardHostMessageToHost as typeof serviceMock.forwardHostMessageToHost
+    )
+
+    try {
+      await postMessage(makeApp()).expect(504, { error: 'Gateway Timeout' })
+      expect(serviceMock.forwardHostMessageToHost).toHaveBeenCalledTimes(1)
+      expect(controlApiMock.requestHostWakeFromControlApi).not.toHaveBeenCalled()
+    } finally {
+      server.closeAllConnections()
+      await new Promise<void>(resolve => server.close(() => resolve()))
+    }
+  })
+
+  it('a wake retry that times out returns 504 instead of 502', async () => {
+    const timeout = new Error('aborted')
+    timeout.name = 'AbortError'
+    serviceMock.forwardHostMessageToHost
+      .mockRejectedValueOnce(hostDownError())
+      .mockRejectedValueOnce(timeout)
+    controlApiMock.requestHostWakeFromControlApi.mockResolvedValue({
+      kind: 'active',
+      wakeGeneration: null,
+    })
+
+    const response = await postMessage(makeApp()).expect(504)
+
+    expect(response.body).toEqual({ error: 'Gateway Timeout' })
+    expect(serviceMock.forwardHostMessageToHost).toHaveBeenCalledTimes(2)
+    expect(serviceMock.forwardHostMessageToHost.mock.calls[1][2]).toEqual({
+      async: false,
+      timeoutMs: expect.any(Number),
+    })
+  })
+
+  it('the real REST forwarder aborts a hanging wake retry and returns 504', async () => {
+    config.upstreamTimeoutMs = 30
+    let retrySignal: AbortSignal | undefined
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValueOnce(hostDownError())
+      .mockImplementationOnce((_url: string, init: RequestInit) => {
+        retrySignal = init.signal as AbortSignal
+        return new Promise((_resolve, reject) => {
+          retrySignal!.addEventListener('abort', () => reject(retrySignal!.reason), {
+            once: true,
+          })
+        })
+      })
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+    serviceMock.forwardHostMessageToHost.mockImplementation(
+      forwardHostMessageToHost as typeof serviceMock.forwardHostMessageToHost
+    )
+    controlApiMock.requestHostWakeFromControlApi.mockResolvedValue({
+      kind: 'active',
+      wakeGeneration: null,
+    })
+
+    const response = await postMessage(makeApp()).expect(504)
+
+    expect(response.body).toEqual({ error: 'Gateway Timeout' })
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(retrySignal?.aborted).toBe(true)
+    expect(controlApiMock.requestHostWakeFromControlApi).toHaveBeenCalledTimes(1)
+  })
+
+  it('a token without wake scope keeps the original full upstream timeout', async () => {
+    authTokenMock.verifyRpcToken.mockReturnValue({
+      ...VALID_CLAIMS,
+      scopes: ['host:message:invoke'],
+    })
+    const abort = new Error('aborted')
+    abort.name = 'AbortError'
+    serviceMock.forwardHostMessageToHost.mockRejectedValue(abort)
+
+    await postMessage(makeApp()).expect(504)
+
+    expect(serviceMock.forwardHostMessageToHost).toHaveBeenCalledTimes(1)
+    expect(serviceMock.forwardHostMessageToHost.mock.calls[0][2]).toEqual({ async: false })
+    expect(controlApiMock.requestHostWakeFromControlApi).not.toHaveBeenCalled()
+  })
+
+  it('uses the normal upstream timeout for a healthy POST without requesting a wake', async () => {
+    serviceMock.forwardHostMessageToHost.mockResolvedValue({ success: true, taskId: 't-stateful' })
+
+    await postMessage(makeApp()).expect(200)
+
+    expect(serviceMock.forwardHostMessageToHost.mock.calls[0][2]).toEqual({ async: false })
     expect(controlApiMock.requestHostWakeFromControlApi).not.toHaveBeenCalled()
   })
 })

@@ -7,12 +7,14 @@
 // QA_RECORDER_CONFIRM_MUTATIONS; the connector and both contexts are deleted
 // via the Control API in a finally.
 import { type Page, expect, test } from '@playwright/test'
+import { type SecretIdentity, requireSecretIdentity } from '../test-utils/secretIdentity'
 import {
   CONTROL_API_URL,
   CONTROL_UI_URL,
   adminCredentials,
   api,
   assertAllowedTarget,
+  directApi,
   loginThroughUi,
   requireRecorderConfirm,
   screenshotAndLog,
@@ -25,11 +27,14 @@ import {
 // or non-existent image would never converge, only time out.
 const MOCK_MCP_IMAGE = process.env.TEST_MOCK_MCP_IMAGE ?? 'clerum/mock-mcp-server:test'
 
-// The connector-form selects are not label-associated (no htmlFor/id), so scope
-// to the wrapping `.cu-field` by its visible label text and drive its <select>.
+// The connector-form's Transport Type and Managed selects are not label-associated,
+// so use their visible field label as the stable local scope for those controls.
 async function fieldSelect(page: Page, fieldLabelText: string, value: string): Promise<void> {
-  const field = page.locator('.cu-field', { hasText: fieldLabelText }).first()
-  await field.locator('select').selectOption(value)
+  await page
+    .getByText(fieldLabelText, { exact: true })
+    .locator('..')
+    .getByRole('combobox')
+    .selectOption(value)
 }
 
 // The /contexts UI is gone; stage the context out-of-band through the Control
@@ -88,6 +93,14 @@ async function createDiscoveryConnector(page: Page, connectorName: string): Prom
   await expect(page).toHaveURL(/\/connectors$/, { timeout: 20_000 })
 }
 
+async function openConnectorEditor(page: Page, connectorName: string): Promise<void> {
+  await page.getByRole('button', { name: `Expand connector ${connectorName}` }).click()
+  await page
+    .getByRole('button', { name: `Actions for connector ${connectorName}`, exact: true })
+    .click()
+  await page.getByRole('menuitem', { name: 'Edit', exact: true }).click()
+}
+
 test.describe('optional QA recorder: Control UI connector edit', () => {
   test('records editing a discovery connector to add external CIDR egress', async ({
     page,
@@ -123,7 +136,7 @@ test.describe('optional QA recorder: Control UI connector edit', () => {
       )
       expect(connectorContextName).toMatch(new RegExp(`^${connectorName}-[0-9]{5}$`))
 
-      await page.goto(`${CONTROL_UI_URL}/connectors/${encodeURIComponent(connectorName)}/edit`)
+      await openConnectorEditor(page, connectorName)
       await expect(
         page.getByRole('heading', { name: `Edit Connector: ${connectorName}`, exact: true })
       ).toBeVisible({ timeout: 20_000 })
@@ -164,28 +177,38 @@ test.describe('optional QA recorder: Control UI connector edit', () => {
       // The private scope slug must NOT surface anywhere on this page.
       await expect(meta.getByText(connectorContextName)).toHaveCount(0)
 
+      // The connector starts closed, so the following persistence check proves a
+      // real edit rather than re-reading setup data.
+      await expect(page.getByLabel('Egress mode')).toHaveValue('none')
+
       // External Egress: switch to exact-CIDR mode and add one public CIDR + port.
       // 8.8.8.8/32 is a valid public target; the model rejects private/doc ranges.
-      await fieldSelect(page, 'Egress mode', 'exact-cidr')
-      await page
-        .locator('.cu-field', { hasText: 'Allowed CIDRs/IPs' })
-        .first()
-        .locator('textarea')
-        .fill('8.8.8.8/32')
-      await page
-        .locator('.cu-field', { hasText: 'Allowed ports' })
-        .first()
-        .locator('input')
-        .fill('443')
+      await page.getByLabel('Egress mode').selectOption('exact-cidr')
+      await page.getByLabel('Allowed CIDRs/IPs').fill('8.8.8.8/32')
+      await page.getByLabel('Allowed ports').fill('443')
 
       await page.getByRole('button', { name: 'Save egress', exact: true }).click()
       await expect(
         page.getByText(`Connector ${connectorName} updated.`, { exact: true })
       ).toBeVisible({ timeout: 20_000 })
 
+      await test.step('reopen the connector and read its persisted egress through the UI', async () => {
+        await expect(page).toHaveURL(/\/connectors$/, { timeout: 20_000 })
+        await expect(
+          page.getByRole('button', { name: `Expand connector ${connectorName}` })
+        ).toBeVisible({ timeout: 20_000 })
+        await openConnectorEditor(page, connectorName)
+        await expect(
+          page.getByRole('heading', { name: `Edit Connector: ${connectorName}`, exact: true })
+        ).toBeVisible({ timeout: 20_000 })
+        await expect(page.getByLabel('Egress mode')).toHaveValue('exact-cidr')
+        await expect(page.getByLabel('Allowed CIDRs/IPs')).toHaveValue('8.8.8.8/32')
+        await expect(page.getByLabel('Allowed ports')).toHaveValue('443')
+      })
+
       await screenshotAndLog(page, testInfo, 'control-ui-connector-edit')
     } finally {
-      await api(
+      await directApi(
         page.request,
         'DELETE',
         `/api/v1/admin/mcp-servers/${encodeURIComponent(connectorName)}`
@@ -203,11 +226,11 @@ test.describe('optional QA recorder: Control UI connector edit', () => {
 
   // Issue #223: rotates a connector's credential through the "Update
   // credentials" section and rides the polling out to a terminal state.
-  // Precondition-only navigation (page.goto to the edit screen) is fine, but
+  // Precondition setup stays outside the interaction under test, but
   // the rotation itself — filling the new value, confirming the restart
   // warning, saving, watching the status settle — is driven exclusively by
   // real user actions against the live control-api/HCC, never a direct PUT,
-  // never a mocked backend, never `waitForTimeout`.
+  // never a mocked backend, never a fixed delay.
   test('records rotating a connector credential and reaching a terminal rollout state', async ({
     page,
   }, testInfo) => {
@@ -224,6 +247,14 @@ test.describe('optional QA recorder: Control UI connector edit', () => {
     const secretName = uniqueE2EName('qa-recorder-secret')
     const secretKey = 'api-key'
     const envVar = 'QA_RECORDER_API_KEY'
+    let cleanupIdentity: SecretIdentity | null = null
+    // Cleanup deletes only what this run actually created. Each flag flips
+    // right after the create succeeded, so a body that fails before a step
+    // never triggers a delete (and a spurious 404 assertion) for that object.
+    let secretCreated = false
+    let contextCreated = false
+    let connectorCreated = false
+    let primaryFailure: unknown = null
 
     try {
       await loginThroughUi(page, credentials)
@@ -240,6 +271,9 @@ test.describe('optional QA recorder: Control UI connector edit', () => {
         data: { [secretKey]: 'initial-value-123' },
       })
       expect(secretRes.status, `create Secret: ${JSON.stringify(secretRes.data)}`).toBeLessThan(300)
+      secretCreated = true
+
+      cleanupIdentity = requireSecretIdentity(secretRes.data, 'stage cleanup identity')
 
       const ctxRes = await api(page.request, 'POST', '/api/v1/admin/contexts', {
         metadata: { name: contextName },
@@ -250,6 +284,7 @@ test.describe('optional QA recorder: Control UI connector edit', () => {
         },
       })
       expect(ctxRes.status, `create context: ${JSON.stringify(ctxRes.data)}`).toBeLessThan(300)
+      contextCreated = true
 
       const srvRes = await api(page.request, 'POST', '/api/v1/admin/mcp-servers', {
         metadata: { name: connectorName },
@@ -268,19 +303,27 @@ test.describe('optional QA recorder: Control UI connector edit', () => {
         },
       })
       expect(srvRes.status, `create connector: ${JSON.stringify(srvRes.data)}`).toBeLessThan(300)
+      connectorCreated = true
 
-      await page.goto(`${CONTROL_UI_URL}/connectors/${encodeURIComponent(connectorName)}/edit`)
+      await page.getByRole('link', { name: 'Installed Connectors', exact: true }).click()
+      await expect(page).toHaveURL(/\/connectors$/, { timeout: 20_000 })
+      await openConnectorEditor(page, connectorName)
       await expect(
         page.getByRole('heading', { name: `Edit Connector: ${connectorName}`, exact: true })
       ).toBeVisible({ timeout: 20_000 })
 
       // The connector edit screen is split into tabs; the rotation flow lives
-      // on the Credentials tab — navigate there via the tab link.
+      // on the Credentials tab — navigate there via the visible tab.
       await page.getByRole('tab', { name: 'Credentials', exact: true }).click()
       await expect(page).toHaveURL(
         new RegExp(`/connectors/${encodeURIComponent(connectorName)}/edit(/credentials)?$`),
         { timeout: 20_000 }
       )
+      await expect(
+        page.getByRole('heading', { name: 'Update credentials', exact: true })
+      ).toBeVisible({
+        timeout: 20_000,
+      })
 
       // The section names the Secret and the key -> env var mapping — names
       // only, never the stored value.
@@ -304,41 +347,97 @@ test.describe('optional QA recorder: Control UI connector edit', () => {
       // Explicit confirmation gate before anything is sent to the server.
       const confirmDialog = page.getByRole('alertdialog', { name: 'Rotate credentials' })
       await expect(confirmDialog).toBeVisible({ timeout: 20_000 })
+      const rotateResponse = page.waitForResponse(
+        response =>
+          response.request().method() === 'PUT' &&
+          response.url().includes(encodeURIComponent(secretName)),
+        { timeout: 30_000 }
+      )
       await confirmDialog.getByRole('button', { name: 'Rotate & restart', exact: true }).click()
+      const rotated = await rotateResponse
+      expect(rotated.status()).toBe(200)
+      cleanupIdentity = requireSecretIdentity(await rotated.json(), 'rotate cleanup identity')
 
       // The PUT landing shows "rotating", never a verdict by itself — the
       // verdict only comes from the CRD poll below.
       await expect(page.getByText(/Rotating credentials/)).toBeVisible({ timeout: 20_000 })
 
       // This rotates to a VALID credential, so the connector must come back
-      // healthy: the terminal state is SUCCESS. A bounded "did not finish
-      // within" is tolerated as cluster slowness. But "Rotation failed:" is NOT
-      // an acceptable outcome here — it would mean the UI reported the normal
-      // transitory DeploymentReady=False/WaitingForReplicas as a failure (the
-      // B1 defect). Accepting it (as this spec used to) let the bug pass in
-      // green; asserting its absence makes the test catch a regression.
+      // healthy: the only acceptable terminal state is SUCCESS. A timeout or
+      // failure is diagnostic evidence, not a passing outcome.
       // Must exceed the UI's own POLL_TIMEOUT_MS (180s): the "did not finish
       // within" terminal message is only emitted at 180s, so a 150s assertion
       // timeout would expire in the dead window (150s–180s) and fail spuriously
       // on a slow-but-valid rollout. 185s clears it.
-      await expect(
-        page.getByText(/Credentials rotated\./).or(page.getByText(/did not finish within/))
-      ).toBeVisible({ timeout: 185_000 })
+      await expect(page.getByText(/Credentials rotated\./)).toBeVisible({ timeout: 185_000 })
+      await expect(page.getByText(/did not finish within/)).toHaveCount(0)
       await expect(page.getByText(/Rotation failed:/)).toHaveCount(0)
 
       await screenshotAndLog(page, testInfo, 'control-ui-connector-credential-rotation')
+    } catch (err) {
+      primaryFailure = err
+      throw err
     } finally {
-      await api(
-        page.request,
-        'DELETE',
-        `/api/v1/admin/mcp-servers/${encodeURIComponent(connectorName)}`
-      )
-      await api(
-        page.request,
-        'DELETE',
-        `/api/v1/admin/mcp-secrets/${encodeURIComponent(secretName)}`
-      )
-      await api(page.request, 'DELETE', `/api/v1/admin/contexts/${encodeURIComponent(contextName)}`)
+      // A `throw` or a failed `expect` inside `finally` REPLACES the exception
+      // the body raised, so a run that died at "create Secret" used to be
+      // reported as "cleanup connector: expected 200, received 404". Collect
+      // every cleanup problem instead, and let it fail the test only when the
+      // body itself passed; otherwise log it next to the real failure.
+      const cleanupFailures: string[] = []
+      // Order matters: the connector references the Secret, and the MCP
+      // Secret DELETE refuses a Secret a live connector still uses.
+      if (connectorCreated) {
+        const deleteConnector = await directApi(
+          page.request,
+          'DELETE',
+          `/api/v1/admin/mcp-servers/${encodeURIComponent(connectorName)}`
+        )
+        if (deleteConnector.status !== 200) {
+          cleanupFailures.push(`connector ${connectorName}: HTTP ${deleteConnector.status}`)
+        }
+      }
+      if (secretCreated) {
+        if (!cleanupIdentity) {
+          // The Secret exists but no CAS identity was captured: a bodyless
+          // delete is exactly the unfenced path these journeys exist to
+          // retire, so leave the object for a manual, identity-checked delete.
+          cleanupFailures.push(
+            `Secret ${secretName}: created without a CAS identity; delete it by hand`
+          )
+        } else {
+          const deleteSecret = await directApi(
+            page.request,
+            'DELETE',
+            `/api/v1/admin/mcp-secrets/${encodeURIComponent(secretName)}`,
+            cleanupIdentity
+          )
+          if (deleteSecret.status !== 200) {
+            cleanupFailures.push(`Secret ${secretName}: HTTP ${deleteSecret.status}`)
+          }
+        }
+      }
+      if (contextCreated) {
+        const deleteContext = await directApi(
+          page.request,
+          'DELETE',
+          `/api/v1/admin/contexts/${encodeURIComponent(contextName)}`
+        )
+        if (deleteContext.status !== 200) {
+          cleanupFailures.push(`context ${contextName}: HTTP ${deleteContext.status}`)
+        }
+      }
+      if (cleanupFailures.length > 0) {
+        const message = `cleanup failed: ${cleanupFailures.join('; ')}`
+        if (primaryFailure) {
+          console.error(
+            `${message} (after test failure: ${
+              primaryFailure instanceof Error ? primaryFailure.message : String(primaryFailure)
+            })`
+          )
+        } else {
+          throw new Error(message)
+        }
+      }
     }
   })
 })

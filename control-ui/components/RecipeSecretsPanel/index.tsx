@@ -6,6 +6,7 @@ import { DataTable, TableViewport } from '@clerum/frontend-components'
 import { CONTROL_ROUTES } from '@constants/routes'
 import {
   type RecipeSecretItem,
+  type SecretIdentity,
   deleteRecipeSecret,
   getRecipe,
   getRecipeSecrets,
@@ -32,6 +33,8 @@ type Row = {
   keys: string[]
   status: RecipeSecretStatus
   ownership: RowOwnership
+  uid?: string
+  resourceVersion?: string
 }
 
 const DEFAULT_RECIPE_SECRET_NAMESPACE = 'sandbox-recipes'
@@ -91,6 +94,8 @@ export function RecipeSecretsPanel({
             keys: Array.isArray(provisioned.keys) ? provisioned.keys : [],
             status: 'provisioned',
             ownership: provisioned.ownership ?? { kind: 'unlabeled' },
+            uid: provisioned.uid,
+            resourceVersion: provisioned.resourceVersion,
           })
         } else {
           next.push({
@@ -139,7 +144,12 @@ export function RecipeSecretsPanel({
     router.push(CONTROL_ROUTES.secrets.new({ scope: 'recipe' }))
   }
 
-  async function deleteRow(name: string, namespace: string) {
+  async function deleteRow(row: Row) {
+    const { name, namespace, uid, resourceVersion } = row
+    if (!uid || !resourceVersion) {
+      setError(`Secret ${name} has no current identity; refresh before deleting it.`)
+      return
+    }
     const shouldDelete = await confirm({
       title: 'Delete Recipe Secret',
       message: `Delete recipe secret ${name} from ${namespace}?`,
@@ -152,7 +162,7 @@ export function RecipeSecretsPanel({
     setDeletingName(deleteKey)
     setError('')
     try {
-      await deleteRecipeSecret(name, namespace)
+      await deleteRecipeSecret(name, namespace, { uid, resourceVersion } satisfies SecretIdentity)
       showToast(`Secret ${name} deleted.`, { tone: 'success' })
       await load()
     } catch (e) {
@@ -303,8 +313,11 @@ export function RecipeSecretsPanel({
                                 ? 'Deleting…'
                                 : 'Delete',
                             danger: true,
-                            disabled: deletingName === `${row.namespace}/${row.name}`,
-                            onClick: () => void deleteRow(row.name, row.namespace),
+                            disabled:
+                              !row.uid ||
+                              !row.resourceVersion ||
+                              deletingName === `${row.namespace}/${row.name}`,
+                            onClick: () => void deleteRow(row),
                           },
                         ]}
                       />

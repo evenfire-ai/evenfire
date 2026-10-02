@@ -10,8 +10,13 @@ import {
 import { randomUUID } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
+import { parseFileReferenceV1 } from '@clerum/gfs-interaction-policy'
 import { AppService } from './appService.js'
-import { requireChatStore } from './chatStoreBinding.js'
+import {
+  getChatStoreBindingGeneration,
+  requireChatStore,
+  requireChatStoreForBindingGeneration,
+} from './chatStoreBinding.js'
 import { GFS_PREVIEW_MAX_BYTES } from './gfs/previewLimits.js'
 import { assertSafeRouteSegment } from './pathSafety.js'
 import {
@@ -22,7 +27,10 @@ import {
   PLUGIN_SDK_REQUEST_CHANNEL,
 } from './pluginSdkProtocol.js'
 import {
+  type ChatAuthorityScope,
+  type ChatDeleteFence,
   DesktopRuntimeConfig,
+  EntityChangeStreamEvent,
   HostActivityStreamEvent,
   HostMessageRequest,
   HostStatusStreamEvent,
@@ -32,6 +40,54 @@ import {
 
 function sanitizeString(input: unknown): string {
   return String(input || '').trim()
+}
+
+function sanitizeChatAuthorityScope(input: unknown): ChatAuthorityScope {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw new Error('Invalid chat deletion authority scope')
+  }
+  const value = input as Record<string, unknown>
+  const environmentKey = sanitizeString(value.environmentKey)
+  const userId = sanitizeString(value.userId)
+  const teamId = value.teamId === null ? null : sanitizeString(value.teamId)
+  if (!environmentKey || !userId || (value.teamId !== null && !teamId)) {
+    throw new Error('Invalid chat deletion authority scope')
+  }
+  return { environmentKey, userId, teamId }
+}
+
+function sameChatAuthorityScope(left: ChatAuthorityScope, right: ChatAuthorityScope): boolean {
+  return (
+    left.environmentKey === right.environmentKey &&
+    left.userId === right.userId &&
+    left.teamId === right.teamId
+  )
+}
+
+function sanitizeChatDeleteFence(input: unknown): ChatDeleteFence {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw new Error('Scoped chat deletion is required')
+  }
+  const value = input as Record<string, unknown>
+  const bindingGeneration = value.bindingGeneration
+  const sessionGeneration = value.sessionGeneration
+  if (
+    value.version !== 1 ||
+    typeof bindingGeneration !== 'number' ||
+    !Number.isSafeInteger(bindingGeneration) ||
+    bindingGeneration < 1 ||
+    typeof sessionGeneration !== 'number' ||
+    !Number.isSafeInteger(sessionGeneration) ||
+    sessionGeneration < 0
+  ) {
+    throw new Error('Invalid chat deletion fence')
+  }
+  return {
+    version: 1,
+    authorityScope: sanitizeChatAuthorityScope(value.authorityScope),
+    bindingGeneration,
+    sessionGeneration,
+  }
 }
 
 /**
@@ -170,6 +226,22 @@ function parseHostMessageRequest(raw: unknown): HostMessageRequest {
   ) {
     throw new Error('Invalid host message request: modelSelectionRevision')
   }
+  if (parsed.fileReferences !== undefined) {
+    // Checks shape only; mcp-host enforces the count limit and resolves each reference.
+    if (!Array.isArray(parsed.fileReferences)) {
+      throw new Error('Invalid host message request: fileReferences')
+    }
+    const fileReferences = parsed.fileReferences.map((entry, index) => {
+      const result = parseFileReferenceV1(entry)
+      if (!result.ok) {
+        throw new Error(
+          `Invalid host message request: fileReferences[${index}] ${result.code}: ${result.message}`
+        )
+      }
+      return result.value
+    })
+    return { ...parsed, fileReferences }
+  }
   return parsed
 }
 
@@ -215,6 +287,7 @@ function sanitizeDesktopNotificationActions(
 
 export function registerIpcHandlers(service: AppService): void {
   const streamOwnerCleanupRegistered = new Set<number>()
+  const entityChangeOwnerCleanupRegistered = new Set<number>()
   const activeDesktopNotifications = new Map<string, Notification>()
 
   ipcMain.handle('auth:getSessionState', async event => {
@@ -803,6 +876,57 @@ export function registerIpcHandlers(service: AppService): void {
     }
 
     return { streamId }
+  })
+
+  ipcMain.handle('entityChanges:streamStart', async event => {
+    assertTrustedSender(event)
+    const streamId = randomUUID()
+    const ownerId = event.sender.id
+    service.startEntityChangeStream(streamId, ownerId, (streamEvent: EntityChangeStreamEvent) => {
+      try {
+        event.sender.send('entityChanges:streamEvent', { streamId, event: streamEvent })
+      } catch {
+        /* sender destroyed */
+      }
+    })
+    if (!entityChangeOwnerCleanupRegistered.has(ownerId)) {
+      entityChangeOwnerCleanupRegistered.add(ownerId)
+      let cleanedUp = false
+      const cleanup = () => {
+        if (cleanedUp) return
+        cleanedUp = true
+        service.stopEntityChangeStreamsForOwner(ownerId)
+        entityChangeOwnerCleanupRegistered.delete(ownerId)
+        event.sender.removeListener('did-navigate', onMainFrameNavigation)
+        event.sender.removeListener('render-process-gone', onRendererProcessGone)
+        event.sender.removeListener('destroyed', cleanup)
+      }
+      const onMainFrameNavigation = (
+        _navigationEvent: Electron.Event,
+        _navigationUrl: string,
+        _httpResponseCode: number,
+        _httpStatusText: string
+      ) => {
+        cleanup()
+      }
+      const onRendererProcessGone = (_event: Electron.Event) => cleanup()
+      // `did-navigate` is emitted after a committed main-frame navigation.
+      // `did-start-navigation` also fires for cancelled and in-place changes,
+      // which do not replace this renderer's stream owner.
+      event.sender.on('did-navigate', onMainFrameNavigation)
+      event.sender.on('render-process-gone', onRendererProcessGone)
+      event.sender.once('destroyed', cleanup)
+    }
+    return { streamId }
+  })
+
+  ipcMain.handle('entityChanges:streamStop', async (event, payload: { streamId: string }) => {
+    assertTrustedSender(event)
+    const streamId = sanitizeString(payload?.streamId)
+    if (!streamId) return { ok: true }
+    const stopped = service.stopEntityChangeStream(streamId, event.sender.id)
+    if (!stopped) throw new Error('Forbidden: cannot stop entity-change subscription')
+    return { ok: true }
   })
 
   ipcMain.handle('notifications:streamStop', async (event, payload: { streamId: string }) => {
@@ -1412,24 +1536,84 @@ export function registerIpcHandlers(service: AppService): void {
 
   ipcMain.handle(
     'chat:rename',
-    async (event, payload: { agentRef: string; chatId: string; title: string }) => {
+    async (
+      event,
+      payload: {
+        agentRef: string
+        chatId: string
+        title: string
+        bindingGeneration: number
+      }
+    ) => {
       assertTrustedSender(event)
       const agentRef = sanitizeString(payload?.agentRef)
       const chatId = sanitizeString(payload?.chatId)
       const title = sanitizeString(payload?.title)
       if (!agentRef || !chatId || !title)
         throw new Error('agentRef, chatId, and title are required')
-      await requireChatStore().renameChat(agentRef, chatId, title)
+      const bindingGeneration = payload?.bindingGeneration
+      if (typeof bindingGeneration !== 'number' || !Number.isSafeInteger(bindingGeneration)) {
+        throw new Error('A valid chat store binding generation is required')
+      }
+      await requireChatStoreForBindingGeneration(bindingGeneration).renameChat(
+        agentRef,
+        chatId,
+        title
+      )
     }
   )
 
-  ipcMain.handle('chat:delete', async (event, payload: { agentRef: string; chatId: string }) => {
+  ipcMain.handle('chat:bindingGeneration', event => {
     assertTrustedSender(event)
-    const agentRef = sanitizeString(payload?.agentRef)
-    const chatId = sanitizeString(payload?.chatId)
-    if (!agentRef || !chatId) throw new Error('agentRef and chatId are required')
-    await requireChatStore().deleteChat(agentRef, chatId)
+    return getChatStoreBindingGeneration()
   })
+
+  ipcMain.handle(
+    'chat:captureDeleteFence',
+    (event, payload: { expectedAuthorityScope?: unknown }) => {
+      assertTrustedSender(event)
+      const expectedAuthorityScope = sanitizeChatAuthorityScope(payload?.expectedAuthorityScope)
+      const authority = service.getChatDeletionFenceAuthority()
+      if (!sameChatAuthorityScope(expectedAuthorityScope, authority.authorityScope)) {
+        throw new Error('Chat deletion authority scope changed before confirmation')
+      }
+      return {
+        version: 1,
+        authorityScope: authority.authorityScope,
+        bindingGeneration: getChatStoreBindingGeneration(),
+        sessionGeneration: authority.sessionGeneration,
+      } satisfies ChatDeleteFence
+    }
+  )
+
+  ipcMain.handle(
+    'chat:delete',
+    async (
+      event,
+      payload: {
+        version?: number
+        fence?: unknown
+        agentRef: string
+        chatId: string
+      }
+    ) => {
+      assertTrustedSender(event)
+      const agentRef = sanitizeString(payload?.agentRef)
+      const chatId = sanitizeString(payload?.chatId)
+      if (!agentRef || !chatId) throw new Error('agentRef and chatId are required')
+      if (payload?.version !== 3) throw new Error('Scoped chat deletion is required')
+      const fence = sanitizeChatDeleteFence(payload.fence)
+      const authority = service.getChatDeletionFenceAuthority()
+      if (
+        !sameChatAuthorityScope(fence.authorityScope, authority.authorityScope) ||
+        fence.sessionGeneration !== authority.sessionGeneration
+      ) {
+        throw new Error('Chat deletion authority changed before confirmation')
+      }
+      const store = requireChatStoreForBindingGeneration(fence.bindingGeneration)
+      return await store.deleteChat(agentRef, chatId, fence.authorityScope)
+    }
+  )
 
   ipcMain.handle(
     'chat:loadMessages',
@@ -1455,6 +1639,22 @@ export function registerIpcHandlers(service: AppService): void {
       if (!agentRef || !chatId) throw new Error('agentRef and chatId are required')
       const messages = Array.isArray(payload?.messages) ? payload.messages : []
       await requireChatStore().appendMessages(
+        agentRef,
+        chatId,
+        messages as import('./types.js').ChatMessage[]
+      )
+    }
+  )
+
+  ipcMain.handle(
+    'chat:upsertMessages',
+    async (event, payload: { agentRef: string; chatId: string; messages: unknown[] }) => {
+      assertTrustedSender(event)
+      const agentRef = sanitizeString(payload?.agentRef)
+      const chatId = sanitizeString(payload?.chatId)
+      if (!agentRef || !chatId) throw new Error('agentRef and chatId are required')
+      const messages = Array.isArray(payload?.messages) ? payload.messages : []
+      await requireChatStore().upsertMessages(
         agentRef,
         chatId,
         messages as import('./types.js').ChatMessage[]
@@ -1579,7 +1779,25 @@ export function registerIpcHandlers(service: AppService): void {
     assertTrustedSender(event)
     const agentRef = sanitizeString(payload?.agentRef)
     if (!agentRef) throw new Error('agentRef is required')
-    return requireChatStore().getIndex(agentRef)
+    const store = requireChatStore()
+    // The catalog read must never depend on the deleted-chat artifact cleanup:
+    // a cleanup failure (scope changed mid-flight, no session, an unreadable
+    // chats directory) would otherwise reject the read and leave the renderer
+    // without the tombstones it filters deleted chats with. The failure is
+    // reported with its code and the cleanup stays queued for the next read.
+    // Only this agent's queue is retried (the renderer reads every agent in a
+    // fan-out); the store walks every agent once per bind on its own.
+    try {
+      const authority = service.getChatDeletionFenceAuthority()
+      await store.retryPendingDeleteCleanups(authority.authorityScope, agentRef)
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException | undefined)?.code
+      console.warn(
+        `[chat:getIndex] Deleted-chat cleanup retry failed for agent "${agentRef}"${code ? ` (${code})` : ''}; returning the index with its tombstones`,
+        error
+      )
+    }
+    return store.getIndex(agentRef)
   })
 
   ipcMain.handle('chat:dismissOnboarding', async (event, payload: { agentRef: string }) => {

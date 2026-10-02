@@ -8,14 +8,13 @@ import {
   LlmAllowedModelsConfigMapWriter,
 } from './services/llmAllowedModelsConfigMap.js'
 import { ResourceService, mergeAnnotationsForReplace } from './services/resourceService.js'
-import {
-  type DeleteSecretSummary,
-  SecretService,
-  type SecretSummary,
-} from './services/secretService.js'
+import type { SecretConstraintOptions } from './services/secretConstraints.js'
+import type { SecretSnapshot } from './services/secretRepository.js'
+import { type DeleteSecretSummary, SecretService } from './services/secretService.js'
 import {
   ClerumResourceType,
   HostOverview,
+  ResourcePreconditions,
   SecretPreconditions,
   SecretUpsertRequest,
 } from './types.js'
@@ -264,6 +263,7 @@ export class K8sGateway {
       metadata?: {
         labels?: Record<string, string>
         annotations?: Record<string, string>
+        uid?: string
         resourceVersion?: string
       }
       spec: Record<string, unknown>
@@ -390,9 +390,10 @@ export class K8sGateway {
   async deleteResource(
     plural: ClerumResourceType,
     name: string,
-    namespace?: string
+    namespace?: string,
+    precondition?: ResourcePreconditions
   ): Promise<unknown> {
-    return this.resources.deleteResource(plural, name, namespace)
+    return this.resources.deleteResource(plural, name, namespace, precondition)
   }
 
   async listSecrets(namespace = this.secretsNamespace): Promise<unknown[]> {
@@ -408,31 +409,42 @@ export class K8sGateway {
     return this.secrets.getSecret(name, namespace)
   }
 
-  // Write ops return a names-only summary (never the k8s Secret's `.data`), so no
-  // route can leak secret values by echoing the return — and reading `.data` off
-  // the returned summary is now a compile error. Reads (getSecret) stay full-fat.
-  async createSecret(req: SecretUpsertRequest): Promise<SecretSummary> {
-    return this.secrets.createSecret(req)
+  // SecretService's public write methods are names-only. Registry and rollback
+  // need an internal snapshot for UID/RV CAS and restoration; those snapshots
+  // are never serialized by an HTTP route.
+  async createSecret(
+    req: SecretUpsertRequest,
+    opts?: SecretConstraintOptions
+  ): Promise<SecretSnapshot> {
+    return this.secrets.createSecretSnapshot(req, opts)
   }
 
   /** `precondition` makes the replace ownership-bound; see `SecretPreconditions`. */
   async updateSecret(
     req: SecretUpsertRequest,
+    precondition?: SecretPreconditions,
+    opts?: SecretConstraintOptions
+  ): Promise<SecretSnapshot> {
+    return this.secrets.updateSecretSnapshot(req, precondition, opts)
+  }
+
+  async mergeSecret(
+    req: SecretUpsertRequest,
+    opts?: SecretConstraintOptions,
     precondition?: SecretPreconditions
-  ): Promise<SecretSummary> {
-    return this.secrets.updateSecret(req, precondition)
+  ): Promise<SecretSnapshot> {
+    return this.secrets.mergeSecretSnapshot(req, opts, precondition)
   }
 
-  async mergeSecret(req: SecretUpsertRequest): Promise<SecretSummary> {
-    return this.secrets.mergeSecret(req)
-  }
-
-  async removeSecretKey(req: {
-    name: string
-    namespace?: string
-    key: string
-  }): Promise<SecretSummary> {
-    return this.secrets.removeSecretKey(req)
+  async removeSecretKey(
+    req: {
+      name: string
+      namespace?: string
+      key: string
+    },
+    precondition?: SecretPreconditions
+  ): Promise<SecretSnapshot> {
+    return this.secrets.removeSecretKeySnapshot(req, precondition)
   }
 
   /** `precondition` binds the delete to a specific object; see `SecretPreconditions`. */
@@ -713,6 +725,9 @@ export function extractHttpStatus(err: unknown): number | null {
   if (typeof maybe.statusCode === 'number') return maybe.statusCode
   if (typeof maybe.code === 'number') return maybe.code
   if (typeof maybe.code === 'string' && /^\d+$/.test(maybe.code)) return Number(maybe.code)
+  if (typeof (maybe as { status?: unknown }).status === 'number') {
+    return (maybe as { status: number }).status
+  }
   // `.httpStatus` mirrors extractK8sError's chain (http/k8sError.ts): the
   // service-layer K8sNotFoundError/K8sConflictError expose their status only
   // there, so read it after code/statusCode or their 404/409 collapses to null.

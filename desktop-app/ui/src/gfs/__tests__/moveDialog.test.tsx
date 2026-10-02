@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import type { GfsBrowserChild, GfsCrumb } from '@hooks/domain/useGfsBrowserController'
 import { GfsMoveDialog } from '../moveDialog'
 
@@ -62,7 +63,7 @@ function renderDialog(
       },
     },
   })
-  return render(
+  const rendered = render(
     <QueryClientProvider client={queryClient}>
       <GfsMoveDialog
         target={target}
@@ -73,9 +74,40 @@ function renderDialog(
       />
     </QueryClientProvider>
   )
+  return { ...rendered, queryClient }
 }
 
 describe('GfsMoveDialog pagination', () => {
+  it('purges cached destination rows after an expanded folder is denied', async () => {
+    let childReads = 0
+    const listAccessible = vi.fn(async () => ({
+      items: [folder('folder-1', 'Product')],
+      nextCursor: null,
+    }))
+    const listChildren = vi.fn(async () => {
+      childReads += 1
+      if (childReads === 1) return { items: [folder('folder-2', 'Assets')], nextCursor: null }
+      throw new Error('403 Forbidden: httpStatus=403')
+    })
+    const { queryClient } = renderDialog({ listAccessible, listChildren })
+
+    const dialog = await screen.findByRole('dialog', { name: 'Move file notes.txt' })
+    const tree = within(dialog).getByRole('tree', { name: 'EvenDrive destination folders' })
+    expect(await within(tree).findByRole('button', { name: 'Product' })).toBeTruthy()
+    await fireEvent.click(within(tree).getByRole('button', { name: 'Expand Product' }))
+    expect(await within(tree).findByRole('button', { name: 'Assets' })).toBeTruthy()
+
+    await act(async () => {
+      await queryClient.invalidateQueries({
+        queryKey: desktopQueryKeys.gfsChildren('anonymous', 'folder-1', 'main'),
+      })
+    })
+
+    expect(listChildren).toHaveBeenCalledTimes(2)
+    await waitFor(() => expect(within(tree).queryByRole('button', { name: 'Assets' })).toBeNull())
+    expect(within(tree).getByRole('button', { name: 'Product' })).toBeTruthy()
+  })
+
   it('loads page two of the root destinations and commits a move to a page-two folder', async () => {
     const onMove = vi.fn(async () => undefined)
     let call = 0
@@ -129,7 +161,7 @@ describe('GfsMoveDialog pagination', () => {
     renderDialog({ listAccessible, listChildren }, { onMove })
 
     const dialog = await screen.findByRole('dialog', { name: 'Move file notes.txt' })
-    const tree = within(dialog).getByRole('tree', { name: 'GFS destination folders' })
+    const tree = within(dialog).getByRole('tree', { name: 'EvenDrive destination folders' })
     expect(await within(tree).findByRole('button', { name: 'Product' })).toBeTruthy()
 
     await fireEvent.click(within(tree).getByRole('button', { name: 'Expand Product' }))

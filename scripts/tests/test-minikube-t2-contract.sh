@@ -51,6 +51,7 @@ for file in "$MINIKUBE_DIR/profile-readiness.sh" "$ROOT/scripts/tests/test-minik
   "$ROOT/scripts/tests/test-minikube-pre-gate-shadow.sh" \
   "$ROOT/scripts/tests/test-minikube-fenced-recovery-render.sh" \
   "$ROOT/scripts/tests/test-minikube-t2-process-owner.sh" \
+  "$ROOT/scripts/tests/test-minikube-t1-reporter-report.sh" \
   "$ROOT/scripts/tests/test-minikube-explicit-context.sh" \
   "$ROOT/scripts/tests/test-minikube-t2-evidence.sh" \
   "$ROOT/scripts/tests/test-minikube-targeted-health.sh" \
@@ -59,6 +60,7 @@ for file in "$MINIKUBE_DIR/profile-readiness.sh" "$ROOT/scripts/tests/test-minik
 done
 "$ROOT/scripts/tests/test-minikube-t1-port-forward-owner.sh"
 "$ROOT/scripts/tests/test-minikube-t2-process-owner.sh"
+"$ROOT/scripts/tests/test-minikube-t1-reporter-report.sh"
 "$ROOT/scripts/tests/test-minikube-explicit-context.sh"
 "$ROOT/scripts/tests/test-minikube-t2-evidence.sh"
 "$ROOT/scripts/tests/test-minikube-targeted-health.sh"
@@ -362,6 +364,24 @@ if [ -z "$post_runtime_process_check_line" ] || [ -z "$complete_pass_line" ] ||
   echo 'FAIL: T2 does not revalidate port-forward ownership before complete PASS' >&2
   exit 1
 fi
+# t2_evidence_init opens every evidence file with `preflight RUNNING`. The
+# planner closes it; each certification writer must close it too, or a PASS
+# attestation keeps a phase whose latest status reads as still running.
+preflight_plan_body="$(awk '/^run_preflight_plan\(\) \{$/,/^\}$/' "$T2")"
+if [ -z "$preflight_plan_body" ] ||
+   ! grep -Fq 't2_evidence_write preflight PASS' <<<"$preflight_plan_body"; then
+  echo 'FAIL: T2 certification evidence never closes the preflight phase opened by t2_evidence_init' >&2
+  exit 1
+fi
+# awk prints an empty line number when nothing matches, so the explicit FAIL
+# below reports the gap instead of pipefail ending the script silently.
+t1_evidence_init_line="$(awk '$0 == "  t2_evidence_init" { line = NR } END { print line }' "$T1")"
+t1_preflight_pass_line="$(awk 'index($0, "t2_evidence_write preflight PASS") { line = NR } END { print line }' "$T1")"
+if [ -z "$t1_evidence_init_line" ] || [ -z "$t1_preflight_pass_line" ] ||
+   [ "$t1_preflight_pass_line" -le "$t1_evidence_init_line" ]; then
+  echo 'FAIL: T1 certification evidence never closes the preflight phase opened by t2_evidence_init' >&2
+  exit 1
+fi
 if ! grep -Fq 'instead of already-synced' "$T2"; then
   echo 'FAIL: final T2 preflight does not require already-synced' >&2
   exit 1
@@ -649,6 +669,49 @@ if T2_PUBLIC_ROOT="$public_repo" T2_PUBLIC_BASE_REF="$public_base" \
   echo 'FAIL: public boundary ignored a secret in an untracked file' >&2
   exit 1
 fi
+
+# A logger test asserts the redaction marker under a secret-named key; that is
+# not a credential. A real value, or one that merely contains the marker, is.
+marker_repo="$tmp/public-marker-repo"
+mkdir -p "$marker_repo"
+git init -q -b dev "$marker_repo"
+git -C "$marker_repo" config user.email test@example.invalid
+git -C "$marker_repo" config user.name boundary-test
+printf 'base\n' >"$marker_repo/README.md"
+git -C "$marker_repo" add README.md
+git -C "$marker_repo" commit -q -m base
+marker_base="$(git -C "$marker_repo" rev-parse HEAD)"
+printf "expect(line).toMatchObject({ apiKey: '[Redacted]' })\n" >"$marker_repo/logger.test.ts"
+if ! T2_PUBLIC_ROOT="$marker_repo" T2_PUBLIC_BASE_REF="$marker_base" \
+  bash "$ROOT/scripts/tests/test-minikube-t2-public-boundary.sh" >"$tmp/marker-boundary.out"; then
+  echo 'FAIL: public boundary rejected the [Redacted] marker as a credential' >&2
+  exit 1
+fi
+if ! grep -Fxq 'PUBLIC_BOUNDARY_PASS' "$tmp/marker-boundary.out"; then
+  echo 'FAIL: public boundary accepted the [Redacted] marker without reporting PUBLIC_BOUNDARY_PASS' >&2
+  exit 1
+fi
+# The rejected values are composed at runtime, as in the cases above, so this
+# script's own source does not carry a credential assignment. An exempt value
+# earlier on the line must not hide a real one after it.
+marker_value='sk-live-4f9a2c7e1b'
+for leaked in \
+  "apiKey|$marker_value" \
+  "apiKey|[Redacted]$marker_value" \
+  "apiKey: '[Redacted]', password|$marker_value" \
+  "apiKey: 'fixture-api-key', password|$marker_value"; do
+  printf "const client = { %s: '%s' }\n" "${leaked%%|*}" "${leaked#*|}" >"$marker_repo/client.ts"
+  if T2_PUBLIC_ROOT="$marker_repo" T2_PUBLIC_BASE_REF="$marker_base" \
+    bash "$ROOT/scripts/tests/test-minikube-t2-public-boundary.sh" 2>"$tmp/marker-boundary.err"; then
+    echo "FAIL: public boundary accepted a credential assignment ($leaked)" >&2
+    exit 1
+  fi
+  if ! grep -Fq -- '- client.ts: credential assignment' "$tmp/marker-boundary.err"; then
+    echo "FAIL: public boundary rejected ($leaked) for another reason" >&2
+    cat "$tmp/marker-boundary.err" >&2
+    exit 1
+  fi
+done
 bash "$ROOT/scripts/tests/test-minikube-t2-scenarios.sh"
 bash "$ROOT/scripts/tests/test-minikube-t2-proxy-runtime.sh"
 bash "$ROOT/scripts/tests/test-minikube-t2-control-api-runtime.sh"

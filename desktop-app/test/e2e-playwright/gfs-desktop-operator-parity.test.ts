@@ -225,7 +225,7 @@ test.describe.serial('GFS Desktop linked-operator parity', () => {
     await ensureOperatorRoot(desktopPage)
     await expect(desktopPage.getByTestId('gfs-view-operator')).toBeVisible()
     const root = desktopPage.getByTestId('gfs-root-operator')
-    await expect(root).toHaveText('Global File System')
+    await expect(root).toHaveText('EvenDrive')
     await expect(root).toHaveAttribute('data-resource-id', rootResourceId)
     await expect(desktopPage.getByTestId('gfs-manage-access-action')).toBeVisible()
   })
@@ -623,11 +623,11 @@ test.describe.serial('GFS Desktop linked-operator parity', () => {
     // After revocation the session remains valid for ordinary-user GFS access,
     // so the operator-root URI is a resource-scoped generic 403 and must stay
     // local to the dialog rather than revoking the whole Desktop session.
-    await page.getByRole('button', { name: 'Open GFS link' }).click()
-    const linkDialog = page.getByRole('dialog', { name: 'Open GFS link' })
+    await page.getByRole('button', { name: 'Open EvenDrive link' }).click()
+    const linkDialog = page.getByRole('dialog', { name: 'Open EvenDrive link' })
     await expect(linkDialog).toBeVisible()
     await linkDialog
-      .getByLabel('gfs URI')
+      .getByLabel('EvenDrive link')
       .fill(`gfs://main/${operatorJourney.rootResourceId!.replace(/-/g, '')}`)
     await linkDialog.getByRole('button', { name: 'Open', exact: true }).click()
 
@@ -635,7 +635,7 @@ test.describe.serial('GFS Desktop linked-operator parity', () => {
     await expect(page.getByTestId('gfs-error-unauthorized')).toHaveCount(0)
     await expect(page.getByTestId('gfs-create-folder-action')).toBeVisible()
     await expect(page.getByTestId('gfs-upload-action')).toBeVisible()
-    await linkDialog.getByRole('button', { name: 'Close GFS link dialog' }).click()
+    await linkDialog.getByRole('button', { name: 'Close EvenDrive link dialog' }).click()
     await expect(linkDialog).toHaveCount(0)
     await expect
       .poll(() =>
@@ -713,10 +713,10 @@ test.describe.serial('GFS Desktop linked-operator parity', () => {
     // Re-open the link through the visible Desktop action. The session remains
     // ordinary-user authenticated after revoke, so there is no session-level
     // retry banner; the reactivated server link must return the operator root.
-    await page.getByRole('button', { name: 'Open GFS link' }).click()
-    const reactivatedLinkDialog = page.getByRole('dialog', { name: 'Open GFS link' })
+    await page.getByRole('button', { name: 'Open EvenDrive link' }).click()
+    const reactivatedLinkDialog = page.getByRole('dialog', { name: 'Open EvenDrive link' })
     await reactivatedLinkDialog
-      .getByLabel('gfs URI')
+      .getByLabel('EvenDrive link')
       .fill(`gfs://main/${operatorJourney.rootResourceId!.replace(/-/g, '')}`)
     await reactivatedLinkDialog.getByRole('button', { name: 'Open', exact: true }).click()
     await expect(page.getByTestId('gfs-view-operator')).toBeVisible({ timeout: 30_000 })

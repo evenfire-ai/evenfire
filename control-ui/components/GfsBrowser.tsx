@@ -1,6 +1,7 @@
 'use client'
 
 import React, { useCallback, useEffect, useRef, useState } from 'react'
+import { SingleValueEditDialog } from '@clerum/frontend-components'
 import {
   GFS_UPLOAD_NAME_EXHAUSTED_MESSAGE,
   GFS_UPLOAD_NAME_RETRY_LIMIT,
@@ -14,6 +15,7 @@ import { FileUploadModal } from '@components/FileUploadModal'
 import { GfsImagePreview } from '@components/GfsImagePreview'
 import { GfsMarkdownPreview } from '@components/GfsMarkdownPreview'
 import { GfsMoveDialog } from '@components/GfsMoveDialog'
+import { GfsOpenLinkModal } from '@components/GfsOpenLinkModal'
 import { GfsVideoPreview } from '@components/GfsVideoPreview'
 import {
   IconDocumentText,
@@ -25,15 +27,28 @@ import {
 import { useToast } from '@components/Toast'
 import {
   IconChevronRight,
-  IconDownload,
+  IconHardDrive,
   IconPaperclip,
-  IconPencil,
-  IconShare,
   IconUpload,
   IconX,
 } from '@components/icons'
-import { Button } from '@components/ui'
-import { apiGet, apiSend, gfsDownload, isSilentApiError } from '@lib/api'
+import { Button, Field, TextInput } from '@components/ui'
+import {
+  apiGet,
+  apiSend,
+  getGfsResourceByPath,
+  gfsDownload,
+  handleControlUIUnauthorized,
+  isSilentApiError,
+} from '@lib/api'
+import { createCoalescedRevalidation } from '@lib/coalescedRevalidation'
+import {
+  ENTITY_CHANGE_MAX_FRAME_CHARS,
+  entityChangeStreamUrl,
+  parseEntityChangeFrame,
+  parseEntityChangeRetryAfterMs,
+} from '@lib/entityChangeStream'
+import { watchEntityChangeStreamLiveness } from '@lib/entityChangeStreamLiveness'
 import { isGfsDocumentFile } from '@lib/gfsDocumentFile'
 import {
   GfsUploadCapabilityError,
@@ -44,12 +59,13 @@ import {
   createGfsUploadJob,
   uploadGfsFileLegacy,
 } from '@lib/gfsFileUpload'
+import { resolveGfsHierarchy } from '@lib/gfsHierarchyRevalidation'
 import { gfsImagePreviewMimeType } from '@lib/gfsImagePreview'
+import { GfsLoadArbiter } from '@lib/gfsLoadArbitration'
 import { isGfsMarkdownPreviewFile } from '@lib/gfsMarkdownPreview'
 import { isGfsVideoFile } from '@lib/gfsVideoFile'
 import { gfsVideoPreviewMimeType } from '@lib/gfsVideoPreview'
 import { GfsGrantPanel } from './GfsGrantPanel'
-import { GfsInlineRename } from './GfsInlineRename'
 import { GfsResourceMenu } from './GfsResourceMenu'
 import { NewFolderModal } from './NewFolderModal'
 import { TablePanelHeader } from './TablePanelHeader'
@@ -70,14 +86,128 @@ interface TreePage {
   items: GfsChild[]
   nextCursor: string | null
   rootResourceId?: string
+  loadedPageCount?: number
 }
 
+type OpenPreviewState =
+  | {
+      kind: 'image'
+      gfsUri: string
+      byteLength: number
+      fileName: string
+      mimeType: string
+      rid: string
+      version: number
+      reloadVersion: number
+      unavailable: boolean
+    }
+  | {
+      kind: 'markdown'
+      gfsUri: string
+      byteLength: number
+      fileName: string
+      rid: string
+      version: number
+      reloadVersion: number
+      unavailable: boolean
+    }
+  | {
+      kind: 'video'
+      gfsUri: string
+      byteLength: number
+      fileName: string
+      mimeType: string
+      rid: string
+      version: number
+      reloadVersion: number
+      unavailable: boolean
+    }
+
+type ResolvedPreviewUpdate =
+  | Extract<OpenPreviewState, { kind: 'image' }>
+  | Extract<OpenPreviewState, { kind: 'markdown' }>
+  | Extract<OpenPreviewState, { kind: 'video' }>
+
 interface Crumb {
-  /** null = the synthetic drive root (listed via /gfs/tree). */
+  /** True when this is the stable drive-root location, independent of its resource ID. */
+  isDriveRoot?: boolean
+  /** Null only until /gfs/tree resolves the drive root's resource ID. */
   id: string | null
   rid: string | null
   name: string
+  /** Folder crumbs carry the identity their ⋯ menu actions need; the
+   *  synthetic root has none and gets no menu. */
+  kind?: 'directory'
+  gfsUri?: string
+  version?: number
 }
+
+function isDriveRootCrumb(crumb: Crumb | undefined): boolean {
+  return crumb?.isDriveRoot === true || crumb?.id === null
+}
+
+function sameCrumbLocation(left: Crumb | undefined, right: Crumb): boolean {
+  if (isDriveRootCrumb(left) || isDriveRootCrumb(right)) {
+    return isDriveRootCrumb(left) && isDriveRootCrumb(right)
+  }
+  return left?.id === right.id
+}
+
+function createDriveRootCrumb(): Crumb {
+  return { id: null, rid: null, name: '/', isDriveRoot: true }
+}
+
+interface GfsResolvedLocation {
+  resourceId: string
+  rid: string
+  gfsUri: string
+  name: string
+  kind: string
+  path: string | null
+  version: number
+}
+
+/** Project every response-backed folder source through one version-preserving
+ * breadcrumb adapter. An incomplete runtime payload remains browseable but
+ * never gains a fabricated mutation precondition. */
+function folderResourceToCrumb(
+  resource: Pick<GfsChild, 'resourceId' | 'rid' | 'gfsUri' | 'name' | 'kind'> & {
+    version?: number
+  }
+): Crumb {
+  return {
+    id: resource.resourceId,
+    rid: resource.rid,
+    name: resource.name,
+    kind: 'directory',
+    gfsUri: resource.gfsUri,
+    ...(Number.isSafeInteger(resource.version) ? { version: resource.version } : {}),
+  }
+}
+
+function sameCrumbTrail(left: Crumb[], right: Crumb[]): boolean {
+  return (
+    left.length === right.length &&
+    left.every((crumb, index) => {
+      const other = right[index]
+      return (
+        crumb.id === other?.id &&
+        isDriveRootCrumb(crumb) === isDriveRootCrumb(other) &&
+        crumb.rid === other.rid &&
+        crumb.gfsUri === other.gfsUri &&
+        crumb.name === other.name &&
+        crumb.version === other.version
+      )
+    })
+  )
+}
+
+/** Verdict of a breadcrumb ancestry reconstruction attempt (R7-M1 race).
+ *  'superseded' means a newer Move, reconstruction, rename, or navigation
+ *  invalidated this attempt while its requests were in flight — callers must
+ *  leave the breadcrumb trail AND the recovery notice untouched so the
+ *  newer operation's state survives. */
+type TrailReconstructionOutcome = 'applied' | 'failed' | 'superseded'
 
 const DRIVE = 'main'
 const PENDING_GFS_UPLOAD_KEY = 'evenfire:gfs-upload-v2:pending'
@@ -205,21 +335,57 @@ function isEventFromNestedInteractive(
   )
 }
 
+function isTransientEntityChangeRefetchError(error: unknown): boolean {
+  const status =
+    error && typeof error === 'object' ? (error as { status?: unknown }).status : undefined
+  if (typeof status === 'number') {
+    return status === 408 || status === 425 || status === 429 || status >= 500
+  }
+  if (error instanceof TypeError) return true
+  return (
+    error instanceof Error &&
+    /network|fetch|timeout|timed out|socket|connection/i.test(error.message)
+  )
+}
+
+function entityChangeErrorStatus(error: unknown): number | undefined {
+  if (!error || typeof error !== 'object') return undefined
+  const status = (error as { status?: unknown }).status
+  return typeof status === 'number' ? status : undefined
+}
+
 export function GfsBrowser(): React.JSX.Element {
   const { showToast } = useToast()
-  const [crumbs, setCrumbs] = useState<Crumb[]>([{ id: null, rid: null, name: '/' }])
+  const [crumbs, setCrumbs] = useState<Crumb[]>([createDriveRootCrumb()])
   const [items, setItems] = useState<GfsChild[]>([])
   const [nextCursor, setNextCursor] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [loadingMore, setLoadingMore] = useState(false)
   const [error, setError] = useState('')
+  const loadArbiterRef = useRef(new GfsLoadArbiter())
+  const entityChangeRefetchControllerRef = useRef<AbortController | null>(null)
+  const loadedPageCountRef = useRef(1)
+  const foregroundLoadsInFlightRef = useRef(0)
+  const pendingStreamRevalidationRef = useRef(false)
+  const requestStreamRevalidationRef = useRef<(cursor?: string) => void>(() => undefined)
+  const loadedLocationRef = useRef<string | null | undefined>(undefined)
   // Operator selects a resource to delegate access on (grant panel).
   const [selected, setSelected] = useState<GfsChild | null>(null)
+  const selectedRef = useRef(selected)
+  selectedRef.current = selected
   const [renameTarget, setRenameTarget] = useState<GfsChild | null>(null)
-  const [renameOpen, setRenameOpen] = useState(false)
-  const [renameName, setRenameName] = useState('')
+  const renameTargetRef = useRef(renameTarget)
+  renameTargetRef.current = renameTarget
   const [renaming, setRenaming] = useState(false)
+  const [renameError, setRenameError] = useState('')
+  const [renameValid, setRenameValid] = useState(true)
   const [deleteOpen, setDeleteOpen] = useState(false)
+  const deleteOpenRef = useRef(deleteOpen)
+  deleteOpenRef.current = deleteOpen
+  // "Open EvenDrive link" dialog launched from the folder ⋯ menus.
+  const [openLinkOpen, setOpenLinkOpen] = useState(false)
+  const [openLinkResolving, setOpenLinkResolving] = useState(false)
+  const [openLinkError, setOpenLinkError] = useState<string | null>(null)
   // New-folder dialog (replaces the native window.prompt flow).
   const [newFolderOpen, setNewFolderOpen] = useState(false)
   const [creatingFolder, setCreatingFolder] = useState(false)
@@ -236,25 +402,50 @@ export function GfsBrowser(): React.JSX.Element {
   const [dragOverFolderId, setDragOverFolderId] = useState<string | null>(null)
   const [movingResourceId, setMovingResourceId] = useState<string | null>(null)
   const [moveTarget, setMoveTarget] = useState<GfsChild | null>(null)
+  const moveTargetRef = useRef(moveTarget)
+  moveTargetRef.current = moveTarget
+  // R5-M1 recovery: the Move PATCH succeeded but the breadcrumb trail could
+  // not be reconstructed from the folder's new location. The trail stays
+  // as-was — explicitly stale, never shortened and presented as
+  // authoritative — with this notice until a retry rebuilds it or the
+  // operator navigates away from the moved folder. The snapshot carries
+  // IMMUTABLE identity only (R7-M1): name and version are deliberately NOT
+  // captured, so a retry can never replay move-time metadata over a crumb
+  // that a later rename/mutation has since advanced.
+  const [trailRecovery, setTrailRecovery] = useState<{
+    resourceId: string
+    gfsUri: string
+    reason: 'move' | 'hierarchy'
+  } | null>(null)
+  // Monotonic epoch for breadcrumb-reconstruction attempts (R7-M1 race). A
+  // reconstruction (a move's rebuild or a Retry) captures the epoch at start
+  // and may apply its result only while it is still the LATEST attempt. Any
+  // newer reconstruction, a later Move's rebuild, a rename, or a navigation
+  // that replaces/leaves the trail bumps the epoch, so a superseded in-flight
+  // response is discarded instead of overwriting the newer ancestry or
+  // clearing the newer operation's recovery notice. Appending a DESCENDANT
+  // (openDirectory) does not bump: it never invalidates the retry target's
+  // ancestors and the functional apply carries the live tail along.
+  const trailReconstructionEpochRef = useRef(0)
   const draggingResourceRef = useRef<GfsChild | null>(null)
   const movingResourceRef = useRef<string | null>(null)
-  const [imagePreview, setImagePreview] = useState<{
-    byteLength: number
-    fileName: string
-    mimeType: string
-    rid: string
-  } | null>(null)
-  const [markdownPreview, setMarkdownPreview] = useState<{
-    byteLength: number
-    fileName: string
-    rid: string
-  } | null>(null)
-  const [videoPreview, setVideoPreview] = useState<{
-    byteLength: number
-    fileName: string
-    mimeType: string
-    rid: string
-  } | null>(null)
+  const [imagePreview, setImagePreview] = useState<Extract<
+    OpenPreviewState,
+    { kind: 'image' }
+  > | null>(null)
+  const [markdownPreview, setMarkdownPreview] = useState<Extract<
+    OpenPreviewState,
+    { kind: 'markdown' }
+  > | null>(null)
+  const [videoPreview, setVideoPreview] = useState<Extract<
+    OpenPreviewState,
+    { kind: 'video' }
+  > | null>(null)
+  const previewRefreshGenerationRef = useRef(0)
+  const openPreviewsRef = useRef<OpenPreviewState[]>([])
+  openPreviewsRef.current = [imagePreview, markdownPreview, videoPreview].filter(
+    (preview): preview is OpenPreviewState => preview !== null
+  )
   // Resource IDs currently streaming a download (disables that row's button).
   const [downloadingIds, setDownloadingIds] = useState<ReadonlySet<string>>(() => new Set())
 
@@ -295,15 +486,39 @@ export function GfsBrowser(): React.JSX.Element {
   }, [])
 
   const current = crumbs[crumbs.length - 1]
+  const currentCrumbRef = useRef(current)
+  currentCrumbRef.current = current
+  const crumbsRef = useRef(crumbs)
+  crumbsRef.current = crumbs
   const currentLabel = current?.name === '/' ? DRIVE : current?.name || DRIVE
 
   const load = useCallback(
-    async (crumb: Crumb, cursor?: string, options?: { background?: boolean }): Promise<void> => {
+    async (
+      crumb: Crumb,
+      cursor?: string,
+      options?: { background?: boolean; signal?: AbortSignal }
+    ): Promise<void> => {
       const appending = Boolean(cursor)
       const background = Boolean(options?.background)
-      // Only the newest load may apply results; a superseded navigation's
-      // response (including a background revalidation) must be dropped.
-      const seq = ++loadSeqRef.current
+      if (!background) {
+        foregroundLoadsInFlightRef.current += 1
+        // User navigation or a foreground mutation refresh owns the next
+        // visible result. Cancel stream-triggered reads so an older response
+        // for the same folder cannot overwrite it.
+        const activeStreamRefetch = entityChangeRefetchControllerRef.current
+        if (activeStreamRefetch) {
+          activeStreamRefetch.abort()
+          pendingStreamRevalidationRef.current = true
+        }
+        entityChangeRefetchControllerRef.current = null
+      }
+      const loadArbiter = loadArbiterRef.current
+      const loadToken = background ? loadArbiter.beginBackground() : loadArbiter.beginForeground()
+      const isCurrent = () =>
+        !options?.signal?.aborted &&
+        loadArbiter.isCurrent(loadToken) &&
+        sameCrumbLocation(currentCrumbRef.current, crumb)
+      if (!background && !cursor) loadedPageCountRef.current = 1
       if (appending) {
         setLoadingMore(true)
       } else if (!background) {
@@ -313,50 +528,73 @@ export function GfsBrowser(): React.JSX.Element {
       }
       if (!background) setError('')
       try {
-        const path =
-          crumb.id === null
-            ? '/api/v1/gfs/tree'
-            : `/api/v1/gfs/resources/${encodeURIComponent(crumb.id)}/children`
+        const path = isDriveRootCrumb(crumb)
+          ? '/api/v1/gfs/tree'
+          : `/api/v1/gfs/resources/${encodeURIComponent(crumb.id!)}/children`
         const query: Record<string, string> = { drive: DRIVE }
         if (cursor) query.cursor = cursor
-        const page = (await apiGet(path, query)) as TreePage
-        if (seq !== loadSeqRef.current) return
-        if (crumb.id === null && page.rootResourceId) {
-          setCrumbs(prev =>
-            prev[0]?.id === null
-              ? [
-                  {
-                    ...prev[0],
-                    id: page.rootResourceId,
-                    rid: ridOfResourceId(page.rootResourceId),
-                  },
-                  ...prev.slice(1),
-                ]
-              : prev
-          )
+        const fetchPage = (pageQuery: Record<string, string>) =>
+          options?.signal
+            ? apiGet(path, pageQuery, { signal: options.signal })
+            : apiGet(path, pageQuery)
+        let page = (await fetchPage(query)) as TreePage
+        let allItems = [...page.items]
+        let finalCursor = page.nextCursor
+        let fetchedPageCount = 1
+        if (background) {
+          const targetPageCount = loadedPageCountRef.current
+          for (let index = 1; index < targetPageCount && finalCursor; index += 1) {
+            page = (await fetchPage({ drive: DRIVE, cursor: finalCursor })) as TreePage
+            allItems.push(...page.items)
+            finalCursor = page.nextCursor
+            fetchedPageCount += 1
+            if (!isCurrent()) return
+          }
         }
-        const sortedItems = sortChildrenWithDirectoriesFirst(page.items)
+        if (!isCurrent()) return
+        if (isDriveRootCrumb(crumb) && page.rootResourceId) {
+          const rootRid = ridOfResourceId(page.rootResourceId)
+          setCrumbs(prev => {
+            const root = prev[0]
+            if (!isDriveRootCrumb(root)) return prev
+            if (root.id === page.rootResourceId && root.rid === rootRid) return prev
+            return [{ ...root, id: page.rootResourceId, rid: rootRid }, ...prev.slice(1)]
+          })
+        }
+        const sortedItems = sortChildrenWithDirectoriesFirst(allItems)
         setItems(prev => (cursor ? [...prev, ...sortedItems] : sortedItems))
-        setNextCursor(page.nextCursor)
+        setNextCursor(finalCursor)
+        if (background) loadedPageCountRef.current = fetchedPageCount
+        else if (cursor) loadedPageCountRef.current += 1
         // Keep the folder cache coherent with what the server just returned:
         // navigation, refresh-after-mutation, and pagination all land here, so
         // a later openDirectory() can never serve rows older than this load.
         if (crumb.id !== null) {
           const existing = childCacheRef.current.get(crumb.id)
           childCacheRef.current.set(crumb.id, {
-            items: cursor ? [...(existing?.items ?? []), ...page.items] : page.items,
-            nextCursor: page.nextCursor,
+            items: cursor ? [...(existing?.items ?? []), ...allItems] : allItems,
+            nextCursor: finalCursor,
+            loadedPageCount: cursor
+              ? (existing?.loadedPageCount ?? 1) + 1
+              : background
+                ? fetchedPageCount
+                : 1,
           })
         }
       } catch (err) {
-        if (seq !== loadSeqRef.current) return
+        if (!isCurrent()) return
         if (!isSilentApiError(err)) {
-          // Background revalidation keeps the (stale) rows visible but still
-          // surfaces the failure instead of silently ignoring it.
-          setError(err instanceof Error ? err.message : 'Failed to load the Global File System')
+          setError(err instanceof Error ? err.message : 'Failed to load EvenDrive')
         }
       } finally {
-        if (seq === loadSeqRef.current) {
+        if (!background) {
+          foregroundLoadsInFlightRef.current = Math.max(0, foregroundLoadsInFlightRef.current - 1)
+          if (foregroundLoadsInFlightRef.current === 0 && pendingStreamRevalidationRef.current) {
+            pendingStreamRevalidationRef.current = false
+            requestStreamRevalidationRef.current()
+          }
+        }
+        if (isCurrent()) {
           if (appending) setLoadingMore(false)
           else if (!background) setLoading(false)
         }
@@ -411,11 +649,12 @@ export function GfsBrowser(): React.JSX.Element {
   const childCacheRef = useRef<Map<string, TreePage>>(new Map())
   // Monotonic load sequence: only the newest load() may apply its results,
   // so a slow response cannot clobber the folder the user navigated to next.
-  const loadSeqRef = useRef(0)
   // True after openDirectory() served cached data; the next useEffect pass
   // runs a BACKGROUND revalidation instead of a clearing reload, so the user
   // keeps the cached rows (no spinner) while the server state re-syncs.
   const revalidateNextLoadRef = useRef(false)
+  const streamCursorRef = useRef<string | null>(null)
+  const hierarchyRefreshGenerationRef = useRef(0)
 
   // Warm the cache for every folder row visible in the current view.
   // Re-runs whenever the listing changes (folder navigation, refresh,
@@ -450,24 +689,511 @@ export function GfsBrowser(): React.JSX.Element {
     }
   }, [items])
 
+  const currentLocationKey = isDriveRootCrumb(current) ? '$root' : (current.id ?? '$root')
   useEffect(() => {
+    const locationCrumb = currentCrumbRef.current
+    if (!locationCrumb) return
+    const sameLocation = loadedLocationRef.current === currentLocationKey
+    loadedLocationRef.current = currentLocationKey
+    if (!sameLocation) setLoadingMore(false)
     if (revalidateNextLoadRef.current) {
       revalidateNextLoadRef.current = false
       // Stale-while-revalidate: cached rows stay on screen (no spinner) while
       // the server state re-syncs; divergence overwrites the rows in place.
-      void load(current, undefined, { background: true })
+      void load(locationCrumb, undefined, { background: true })
       return
     }
-    void load(current)
+    void load(locationCrumb, undefined, sameLocation ? { background: true } : undefined)
     // Reload whenever the current folder changes (navigation).
-  }, [current, load])
+  }, [currentLocationKey, load])
+
+  // Navigating away from the moved folder retires the recovery notice: the
+  // stale trail it labels is no longer on screen.
+  useEffect(() => {
+    if (!trailRecovery) return
+    if (!crumbs.some(crumb => crumb.id === trailRecovery.resourceId)) {
+      setTrailRecovery(null)
+    }
+  }, [crumbs, trailRecovery])
+
+  useEffect(() => {
+    const controller = new AbortController()
+    let retryTimer: ReturnType<typeof setTimeout> | null = null
+    let recoveryTimer: ReturnType<typeof setTimeout> | null = null
+    let retryDelay = 500
+    let recoveryDelay = 500
+    let active = true
+    let performVisibleStateRevalidation: (cursor?: string) => Promise<void> = async () => undefined
+    let invalidateVisibleState: (cursor?: string) => void = () => undefined
+    const scheduleRecovery = () => {
+      if (!active || recoveryTimer) return
+      const delay = recoveryDelay
+      recoveryDelay = Math.min(recoveryDelay * 2, 5000)
+      recoveryTimer = setTimeout(() => {
+        recoveryTimer = null
+        invalidateVisibleState()
+      }, delay)
+    }
+    const revalidationScheduler = createCoalescedRevalidation<string>(
+      cursor => performVisibleStateRevalidation(cursor),
+      error => {
+        if (!active) return
+        if (!isSilentApiError(error)) {
+          setError(error instanceof Error ? error.message : 'Failed to refresh EvenDrive')
+        }
+        scheduleRecovery()
+      },
+      100
+    )
+    invalidateVisibleState = cursor => revalidationScheduler.request(cursor)
+    requestStreamRevalidationRef.current = invalidateVisibleState
+    const revalidateActionTargets = async (signal: AbortSignal) => {
+      const targets = new Map<string, GfsChild>()
+      for (const target of [selectedRef.current, renameTargetRef.current, moveTargetRef.current]) {
+        if (target) targets.set(target.resourceId, target)
+      }
+      await Promise.all(
+        Array.from(targets.values(), async target => {
+          try {
+            await apiGet('/api/v1/gfs/resolve', { uri: target.gfsUri }, { signal })
+            if (signal.aborted) return
+            // This read confirms the dialog's target is still visible; it must
+            // not silently advance the version the operator is confirming.
+            // Keep the original target snapshot so the existing ifMatch CAS can
+            // report a stale write rather than applying to unconfirmed state.
+          } catch (error) {
+            if (signal.aborted) return
+            const status = entityChangeErrorStatus(error)
+            if (status === 403 || status === 404) {
+              setSelected(value => (value?.resourceId === target.resourceId ? null : value))
+              setRenameTarget(value => (value?.resourceId === target.resourceId ? null : value))
+              setMoveTarget(value => (value?.resourceId === target.resourceId ? null : value))
+              if (selectedRef.current?.resourceId === target.resourceId && deleteOpenRef.current) {
+                setDeleteOpen(false)
+              }
+            } else if (isTransientEntityChangeRefetchError(error)) {
+              scheduleRecovery()
+            }
+          }
+        })
+      )
+    }
+
+    const refreshVisibleDirectory = async (crumb: Crumb, signal: AbortSignal): Promise<void> => {
+      const path = isDriveRootCrumb(crumb)
+        ? '/api/v1/gfs/tree'
+        : `/api/v1/gfs/resources/${encodeURIComponent(crumb.id!)}/children`
+      const targetPageCount = Math.max(1, loadedPageCountRef.current)
+      try {
+        let page = (await apiGet(path, { drive: DRIVE }, { signal })) as TreePage
+        const rootResourceId = page.rootResourceId
+        const refreshedItems = [...page.items]
+        let nextPageCursor = page.nextCursor
+        let fetchedPageCount = 1
+        for (let index = 1; index < targetPageCount && nextPageCursor; index += 1) {
+          page = (await apiGet(
+            path,
+            { drive: DRIVE, cursor: nextPageCursor },
+            { signal }
+          )) as TreePage
+          refreshedItems.push(...page.items)
+          nextPageCursor = page.nextCursor
+          fetchedPageCount += 1
+          if (signal.aborted) return
+        }
+        if (signal.aborted || !sameCrumbLocation(currentCrumbRef.current, crumb)) return
+        if (isDriveRootCrumb(crumb) && rootResourceId) {
+          const rootRid = ridOfResourceId(rootResourceId)
+          setCrumbs(previous => {
+            const root = previous[0]
+            if (!isDriveRootCrumb(root)) return previous
+            if (root.id === rootResourceId && root.rid === rootRid) return previous
+            return [{ ...root, id: rootResourceId, rid: rootRid }, ...previous.slice(1)]
+          })
+        }
+        setItems(sortChildrenWithDirectoriesFirst(refreshedItems))
+        setNextCursor(nextPageCursor)
+        loadedPageCountRef.current = fetchedPageCount
+        if (crumb.id !== null) {
+          childCacheRef.current.set(crumb.id, {
+            items: refreshedItems,
+            nextCursor: nextPageCursor,
+            loadedPageCount: fetchedPageCount,
+          })
+        }
+        setError('')
+      } catch (error) {
+        if (signal.aborted || !sameCrumbLocation(currentCrumbRef.current, crumb)) return
+        if (!isSilentApiError(error)) {
+          setError(error instanceof Error ? error.message : 'Failed to refresh EvenDrive')
+        }
+        const status = entityChangeErrorStatus(error)
+        if (status === 403 || status === 404) {
+          // A soft invalidation preserves rows until the authoritative read
+          // resolves. Once that read proves this folder cannot be listed, its
+          // old rows are no longer safe to display or reuse on navigation.
+          setItems([])
+          setNextCursor(null)
+          loadedPageCountRef.current = 1
+          if (crumb.id !== null) childCacheRef.current.delete(crumb.id)
+        } else if (isTransientEntityChangeRefetchError(error)) {
+          scheduleRecovery()
+        }
+      }
+    }
+
+    performVisibleStateRevalidation = async (cursor?: string) => {
+      // Foreground navigation and pagination own their results. If a stream
+      // invalidation arrives while either is in flight, run one authoritative
+      // refresh after the user operation settles rather than superseding it or
+      // losing the invalidation.
+      if (foregroundLoadsInFlightRef.current > 0) {
+        pendingStreamRevalidationRef.current = true
+        return
+      }
+      // Retire an older same-folder focus/cache refresh before publishing the
+      // newer stream-authoritative listing. Its late response must not win.
+      loadArbiterRef.current.beginStreamRevalidation()
+      // A committed remote change supersedes any local move/retry ancestry
+      // reconstruction still in flight. Its older response must not replace
+      // the hierarchy we are about to refetch from the authoritative API.
+      trailReconstructionEpochRef.current += 1
+      if (cursor) {
+        streamCursorRef.current = cursor
+        if (recoveryTimer) clearTimeout(recoveryTimer)
+        recoveryTimer = null
+        recoveryDelay = 500
+      }
+      const revalidationController = new AbortController()
+      entityChangeRefetchControllerRef.current = revalidationController
+      const signal = revalidationController.signal
+      childCacheRef.current.clear()
+      revalidateNextLoadRef.current = false
+      const revalidationTasks: Promise<void>[] = [revalidateActionTargets(signal)]
+      const previews = openPreviewsRef.current
+      if (previews.length > 0) {
+        const generation = ++previewRefreshGenerationRef.current
+        const markUnavailable = (preview: OpenPreviewState) => {
+          setImagePreview(current =>
+            current?.gfsUri === preview.gfsUri && !current.unavailable
+              ? { ...current, unavailable: true, reloadVersion: current.reloadVersion + 1 }
+              : current
+          )
+          setMarkdownPreview(current =>
+            current?.gfsUri === preview.gfsUri && !current.unavailable
+              ? { ...current, unavailable: true, reloadVersion: current.reloadVersion + 1 }
+              : current
+          )
+          setVideoPreview(current =>
+            current?.gfsUri === preview.gfsUri && !current.unavailable
+              ? { ...current, unavailable: true, reloadVersion: current.reloadVersion + 1 }
+              : current
+          )
+        }
+        revalidationTasks.push(
+          Promise.all<ResolvedPreviewUpdate | null>(
+            previews.map(async preview => {
+              try {
+                const resolved = (await apiGet(
+                  '/api/v1/gfs/resolve',
+                  { uri: preview.gfsUri },
+                  { signal }
+                )) as {
+                  kind: string
+                  name: string
+                  bytes: number
+                  version: number
+                  rid: string
+                  resourceId: string
+                  gfsUri: string
+                }
+                if (signal.aborted || generation !== previewRefreshGenerationRef.current)
+                  return null
+                if (resolved.kind !== 'file') {
+                  markUnavailable(preview)
+                  return null
+                }
+                const imageMimeType = gfsImagePreviewMimeType(resolved.name)
+                const videoMimeType = gfsVideoPreviewMimeType(resolved.name)
+                let candidate: ResolvedPreviewUpdate | null = null
+                if (preview.kind === 'image') {
+                  candidate = imageMimeType
+                    ? {
+                        kind: 'image',
+                        gfsUri: resolved.gfsUri,
+                        byteLength: resolved.bytes,
+                        fileName: resolved.name,
+                        rid: resolved.rid,
+                        version: resolved.version,
+                        mimeType: imageMimeType,
+                        reloadVersion: preview.reloadVersion + 1,
+                        unavailable: false,
+                      }
+                    : null
+                } else if (preview.kind === 'video') {
+                  candidate = videoMimeType
+                    ? {
+                        kind: 'video',
+                        gfsUri: resolved.gfsUri,
+                        byteLength: resolved.bytes,
+                        fileName: resolved.name,
+                        rid: resolved.rid,
+                        version: resolved.version,
+                        mimeType: videoMimeType,
+                        reloadVersion: preview.reloadVersion + 1,
+                        unavailable: false,
+                      }
+                    : null
+                } else {
+                  candidate = isGfsMarkdownPreviewFile(resolved.name)
+                    ? {
+                        kind: 'markdown',
+                        gfsUri: resolved.gfsUri,
+                        byteLength: resolved.bytes,
+                        fileName: resolved.name,
+                        rid: resolved.rid,
+                        version: resolved.version,
+                        reloadVersion: preview.reloadVersion + 1,
+                        unavailable: false,
+                      }
+                    : null
+                }
+                if (!candidate) {
+                  markUnavailable(preview)
+                  return null
+                }
+                if (candidate.version < preview.version) return null
+                const candidateMimeType = 'mimeType' in candidate ? candidate.mimeType : undefined
+                const currentMimeType = 'mimeType' in preview ? preview.mimeType : undefined
+                const unchanged =
+                  !preview.unavailable &&
+                  candidate.kind === preview.kind &&
+                  candidate.gfsUri === preview.gfsUri &&
+                  candidate.rid === preview.rid &&
+                  candidate.fileName === preview.fileName &&
+                  candidate.byteLength === preview.byteLength &&
+                  candidate.version === preview.version &&
+                  candidateMimeType === currentMimeType
+                return unchanged ? null : candidate
+              } catch (error) {
+                if (signal.aborted || generation !== previewRefreshGenerationRef.current)
+                  return null
+                const status = entityChangeErrorStatus(error)
+                if (status === 403 || status === 404) markUnavailable(preview)
+                if (isTransientEntityChangeRefetchError(error)) scheduleRecovery()
+                return null
+              }
+            })
+          ).then(updates => {
+            if (signal.aborted || generation !== previewRefreshGenerationRef.current) return
+            for (const update of updates) {
+              if (!update) continue
+              if (update.kind === 'image') {
+                setImagePreview(current => (current?.gfsUri === update.gfsUri ? update : current))
+                setMarkdownPreview(current => (current?.gfsUri === update.gfsUri ? null : current))
+                setVideoPreview(current => (current?.gfsUri === update.gfsUri ? null : current))
+              } else if (update.kind === 'video') {
+                setVideoPreview(current => (current?.gfsUri === update.gfsUri ? update : current))
+                setImagePreview(current => (current?.gfsUri === update.gfsUri ? null : current))
+                setMarkdownPreview(current => (current?.gfsUri === update.gfsUri ? null : current))
+              } else {
+                setMarkdownPreview(current =>
+                  current?.gfsUri === update.gfsUri ? update : current
+                )
+                setImagePreview(current => (current?.gfsUri === update.gfsUri ? null : current))
+                setVideoPreview(current => (current?.gfsUri === update.gfsUri ? null : current))
+              }
+            }
+          })
+        )
+      }
+      const visibleCrumb = currentCrumbRef.current
+      if (!visibleCrumb) {
+        await Promise.all(revalidationTasks)
+        return
+      }
+      // Stream-triggered reads have their own non-destructive path. They never
+      // enter the navigation/paging loader or clear its rows, dialogs, or error.
+      revalidationTasks.push(refreshVisibleDirectory(visibleCrumb, signal))
+      if (isDriveRootCrumb(visibleCrumb)) {
+        await Promise.all(revalidationTasks)
+        return
+      }
+
+      const visibleResourceId = visibleCrumb.id
+      const generation = ++hierarchyRefreshGenerationRef.current
+      const trailEpoch = trailReconstructionEpochRef.current
+      const hierarchyRefresh = (async () => {
+        const rootCrumb = {
+          ...(isDriveRootCrumb(crumbsRef.current[0])
+            ? crumbsRef.current[0]!
+            : createDriveRootCrumb()),
+        }
+        const hierarchy = await resolveGfsHierarchy({
+          readCurrent: () =>
+            apiGet(
+              '/api/v1/gfs/resolve',
+              { uri: `gfs://${DRIVE}/${visibleCrumb.rid ?? ridOfResourceId(visibleResourceId)}` },
+              { signal }
+            ) as Promise<GfsResolvedLocation>,
+          readAncestor: path =>
+            apiGet(
+              '/api/v1/gfs/by-path',
+              { drive: DRIVE, path },
+              { signal }
+            ) as Promise<GfsResolvedLocation>,
+          isTransient: isTransientEntityChangeRefetchError,
+        })
+        if (
+          generation !== hierarchyRefreshGenerationRef.current ||
+          signal.aborted ||
+          trailEpoch !== trailReconstructionEpochRef.current ||
+          currentCrumbRef.current?.id !== visibleResourceId
+        ) {
+          return
+        }
+        if (hierarchy.kind === 'missing') {
+          // Only denial of the stable-ID current-folder resolve is authority
+          // to leave this location. A failed ancestor lookup is not revocation.
+          setCrumbs([rootCrumb])
+          setTrailRecovery(null)
+          return
+        }
+        if (hierarchy.kind === 'retry' || hierarchy.kind === 'preserve') {
+          setTrailRecovery(previous =>
+            previous?.resourceId === visibleResourceId && previous.reason === 'hierarchy'
+              ? previous
+              : {
+                  resourceId: visibleResourceId,
+                  gfsUri:
+                    visibleCrumb.gfsUri ??
+                    `gfs://${DRIVE}/${visibleCrumb.rid ?? ridOfResourceId(visibleResourceId)}`,
+                  reason: 'hierarchy',
+                }
+          )
+          if (hierarchy.kind === 'retry') scheduleRecovery()
+          return
+        }
+        const refreshed = [rootCrumb, ...hierarchy.ancestors.map(folderResourceToCrumb)]
+        if (!sameCrumbTrail(crumbsRef.current, refreshed)) setCrumbs(refreshed)
+        setTrailRecovery(null)
+      })()
+      revalidationTasks.push(hierarchyRefresh)
+      await Promise.all(revalidationTasks)
+    }
+
+    async function consume(): Promise<void> {
+      while (active && !controller.signal.aborted) {
+        try {
+          const cursor = streamCursorRef.current
+          const response = await fetch(entityChangeStreamUrl(cursor), {
+            cache: 'no-store',
+            credentials: 'include',
+            headers: { accept: 'application/x-ndjson' },
+            signal: controller.signal,
+          })
+          if (response.status === 401) {
+            active = false
+            handleControlUIUnauthorized()
+            return
+          }
+          if (!response.ok || !response.body) {
+            const error = new Error(`Entity-change stream returned ${response.status}`) as Error & {
+              retryAfterMs?: number
+            }
+            error.retryAfterMs = parseEntityChangeRetryAfterMs(response.headers.get('retry-after'))
+            throw error
+          }
+          retryDelay = 500
+          const reader = response.body.getReader()
+          const liveness = watchEntityChangeStreamLiveness(() => {
+            void reader.cancel().catch(() => undefined)
+          })
+          const decoder = new TextDecoder()
+          let pending = ''
+          try {
+            for (;;) {
+              const { done, value } = await reader.read()
+              if (done) break
+              pending += decoder.decode(value, { stream: true })
+              let newline = pending.indexOf('\n')
+              while (newline >= 0) {
+                const line = pending.slice(0, newline).replace(/\r$/, '')
+                pending = pending.slice(newline + 1)
+                const frame = parseEntityChangeFrame(line)
+                if (line.trim()) liveness.receivedFrame()
+                if (!frame) {
+                  newline = pending.indexOf('\n')
+                  continue
+                }
+                streamCursorRef.current = frame.cursor
+                if (frame.type === 'resync_required' || frame.type === 'scope.invalidated') {
+                  invalidateVisibleState(frame.cursor)
+                } else if (frame.type === 'stream.closing') {
+                  await reader.cancel()
+                  if (frame.reason === 'session_expired') {
+                    active = false
+                    handleControlUIUnauthorized()
+                    return
+                  }
+                  break
+                }
+                newline = pending.indexOf('\n')
+              }
+              if (pending.length > ENTITY_CHANGE_MAX_FRAME_CHARS) {
+                throw new Error('Entity-change frame exceeded its limit')
+              }
+            }
+          } finally {
+            liveness.dispose()
+            // A malformed or unsupported frame exits through the outer retry
+            // path. Releasing the lock alone leaves the HTTP response alive,
+            // consuming a server stream slot while the next connection opens.
+            await reader.cancel().catch(() => undefined)
+            reader.releaseLock()
+          }
+          if (!controller.signal.aborted) throw new Error('Entity-change stream ended')
+        } catch (error) {
+          if (!active || controller.signal.aborted) return
+          // A transport failure is not evidence that authorization or resource
+          // state changed. The feed cursor remains authoritative for recovery;
+          // preserve visible state and reconnect with bounded backoff.
+          const retryAfterMs =
+            error &&
+            typeof error === 'object' &&
+            typeof (error as { retryAfterMs?: unknown }).retryAfterMs === 'number'
+              ? (error as { retryAfterMs: number }).retryAfterMs
+              : undefined
+          await new Promise<void>(resolve => {
+            retryTimer = setTimeout(
+              resolve,
+              Math.max(retryDelay + Math.random() * retryDelay, retryAfterMs ?? 0)
+            )
+          })
+          retryTimer = null
+          retryDelay = Math.min(retryDelay * 2, 15_000)
+        }
+      }
+    }
+
+    void consume()
+    return () => {
+      active = false
+      controller.abort()
+      revalidationScheduler.dispose()
+      entityChangeRefetchControllerRef.current?.abort()
+      entityChangeRefetchControllerRef.current = null
+      requestStreamRevalidationRef.current = () => undefined
+      if (retryTimer) clearTimeout(retryTimer)
+      if (recoveryTimer) clearTimeout(recoveryTimer)
+    }
+  }, [load])
 
   useEffect(() => {
     if ((!selected && !renameTarget) || imagePreview || markdownPreview || videoPreview) return
     function handleKeyDown(event: KeyboardEvent) {
       if (event.key !== 'Escape') return
       setSelected(null)
-      setRenameOpen(false)
       setRenameTarget(null)
     }
     window.addEventListener('keydown', handleKeyDown)
@@ -477,7 +1203,7 @@ export function GfsBrowser(): React.JSX.Element {
   function openDirectory(child: GfsChild): void {
     if (child.kind !== 'directory') return
     setRenameTarget(null)
-    setCrumbs(prev => [...prev, { id: child.resourceId, rid: child.rid, name: child.name }])
+    setCrumbs(prev => [...prev, folderResourceToCrumb(child)])
     const cached = childCacheRef.current.get(child.resourceId)
     if (cached) {
       // Render the cached listing instantly; the effect-driven background
@@ -485,6 +1211,7 @@ export function GfsBrowser(): React.JSX.Element {
       // user gets fresh data without a loading spinner (decision table above).
       setItems(sortChildrenWithDirectoriesFirst(cached.items))
       setNextCursor(cached.nextCursor)
+      loadedPageCountRef.current = cached.loadedPageCount ?? 1
       setError('')
       setLoading(false)
       revalidateNextLoadRef.current = true
@@ -498,24 +1225,43 @@ export function GfsBrowser(): React.JSX.Element {
     const mimeType = gfsImagePreviewMimeType(child.name)
     if (mimeType) {
       setImagePreview({
+        kind: 'image',
+        gfsUri: child.gfsUri,
         byteLength: child.bytes,
         fileName: child.name,
         mimeType,
         rid: child.rid,
+        version: child.version,
+        reloadVersion: 0,
+        unavailable: false,
       })
       return true
     }
     if (isGfsMarkdownPreviewFile(child.name)) {
-      setMarkdownPreview({ byteLength: child.bytes, fileName: child.name, rid: child.rid })
+      setMarkdownPreview({
+        kind: 'markdown',
+        gfsUri: child.gfsUri,
+        byteLength: child.bytes,
+        fileName: child.name,
+        rid: child.rid,
+        version: child.version,
+        reloadVersion: 0,
+        unavailable: false,
+      })
       return true
     }
     const videoMimeType = gfsVideoPreviewMimeType(child.name)
     if (videoMimeType) {
       setVideoPreview({
+        kind: 'video',
+        gfsUri: child.gfsUri,
         byteLength: child.bytes,
         fileName: child.name,
         mimeType: videoMimeType,
         rid: child.rid,
+        version: child.version,
+        reloadVersion: 0,
+        unavailable: false,
       })
       return true
     }
@@ -524,6 +1270,10 @@ export function GfsBrowser(): React.JSX.Element {
 
   function goToCrumb(index: number): void {
     if (index === crumbs.length - 1) return
+    // A navigation that leaves the current trail supersedes any in-flight
+    // breadcrumb reconstruction (R7-M1): its late response must not re-anchor
+    // a trail the operator just navigated away from.
+    trailReconstructionEpochRef.current += 1
     setRenameTarget(null)
     setLoading(true)
     setCrumbs(crumbs.slice(0, index + 1))
@@ -532,9 +1282,9 @@ export function GfsBrowser(): React.JSX.Element {
   async function copyGfsUri(uri: string): Promise<void> {
     try {
       await navigator.clipboard.writeText(uri)
-      showToast('GFS link copied.', { tone: 'success' })
+      showToast('EvenDrive link copied.', { tone: 'success' })
     } catch {
-      showToast('Could not copy the GFS link.', { tone: 'error' })
+      showToast('Could not copy the EvenDrive link.', { tone: 'error' })
     }
   }
 
@@ -603,9 +1353,10 @@ export function GfsBrowser(): React.JSX.Element {
       const occupiedNames = new Set<string>()
       let moveName = source.name
       let moved = false
+      let moveResult: unknown
       for (let attempt = 0; attempt < GFS_UPLOAD_NAME_RETRY_LIMIT; attempt += 1) {
         try {
-          await apiSend(
+          moveResult = await apiSend(
             'PATCH',
             `/api/v1/gfs/resources/${encodeURIComponent(source.resourceId)}`,
             {
@@ -628,6 +1379,13 @@ export function GfsBrowser(): React.JSX.Element {
         }
       }
       if (!moved) throw new Error(GFS_MOVE_NAME_EXHAUSTED_MESSAGE)
+      const movedResource = (
+        moveResult as { data?: { resourceId?: string; version?: number } } | undefined
+      )?.data
+      const nextVersion =
+        movedResource?.resourceId && movedResource.resourceId !== source.resourceId
+          ? undefined
+          : movedResource?.version
       // The destination may have been prefetched while it was visible. Its
       // cached listing is stale after a move and must be revalidated before it
       // is opened.
@@ -638,6 +1396,49 @@ export function GfsBrowser(): React.JSX.Element {
           : `Moved "${source.name}" to "${destination.name}" as "${moveName}".`,
         { tone: 'success' }
       )
+      // A move changes the moved folder's ANCESTRY. When the moved resource
+      // is part of the open breadcrumb trail, patching only its own crumb
+      // would leave every crumb above it describing the OLD location (R5-M1):
+      // with /org open and /org moved under /archive, the trail must become
+      // main / archive / org — not stay main / org.
+      const movedCrumbIndex = crumbs.findIndex(crumb => crumb.id === source.resourceId)
+      if (movedCrumbIndex >= 0) {
+        // The listing the moved folder left behind (its old parent, an
+        // ancestor of the old trail) still contains its row; drop it so a
+        // later navigation revalidates instead of serving the stale page.
+        const oldParent = crumbs[movedCrumbIndex - 1]
+        if (oldParent?.id) childCacheRef.current.delete(oldParent.id)
+        // The crumb adopts the receipt metadata FIRST — this is the
+        // resource's truthful post-move state. The ancestry rebuild below
+        // (and any later retry of it) preserves this metadata from LIVE
+        // crumb state, never from a move-time snapshot (R7-M1), so a rename
+        // that lands while recovery is pending is never rolled back.
+        setCrumbs(prev =>
+          prev.map(crumb =>
+            crumb.id === source.resourceId
+              ? {
+                  ...crumb,
+                  name: moveName,
+                  ...(nextVersion === undefined
+                    ? { version: undefined }
+                    : { version: nextVersion }),
+                }
+              : crumb
+          )
+        )
+        const outcome = await rebuildTrailFromNewLocation(source.resourceId, source.gfsUri)
+        if (outcome === 'failed') {
+          // The MOVE succeeded but the trail could not be reconstructed from
+          // the new location. Keep the trail the operator was looking at
+          // (explicitly stale — never a shortened path presented as
+          // authoritative) and surface a recovery notice with a retry until
+          // reconstruction succeeds. ('applied' clears any older notice for
+          // this resource inside the rebuild; 'superseded' leaves state to
+          // the newer attempt that displaced this one.)
+          setTrailRecovery({ resourceId: source.resourceId, gfsUri: source.gfsUri, reason: 'move' })
+        }
+        return
+      }
       await refreshCurrent()
     } catch (err) {
       if (bubbleError) throw err
@@ -648,6 +1449,93 @@ export function GfsBrowser(): React.JSX.Element {
       movingResourceRef.current = null
       setMovingResourceId(null)
     }
+  }
+
+  /** Rebuild the breadcrumb trail ANCESTRY for a moved trail-folder. The
+   *  resolve contract answers with the folder's new `path`; every ancestor
+   *  prefix is then resolved by-path so the trail reflects the new ancestor
+   *  chain rather than the old one.
+   *
+   *  This touches ancestry ONLY: the moved crumb and every crumb below it
+   *  are carried over from the LIVE trail (R7-M1), so a rename or other
+   *  mutation that landed while recovery was pending keeps its newer
+   *  name/version — no move-time snapshot is ever replayed.
+   *
+   *  Each attempt is EPOCH-VERSIONED (R7-M1 race): it may apply its result
+   *  only while it is still the latest reconstruction attempt. A newer Move,
+   *  reconstruction, rename, or trail-replacing navigation that lands while
+   *  this attempt's requests are in flight bumps the epoch, and the stale
+   *  response is then discarded whole — it can neither overwrite the newer
+   *  ancestry nor clear the newer operation's recovery notice.
+   *
+   *  Reconstruction is ALL-OR-NOTHING: a failed leaf resolve, a null `path`,
+   *  or any failed ancestor by-path lookup leaves the current trail
+   *  UNTOUCHED (never a partial ancestry presented as authoritative) so the
+   *  caller can surface recovery state instead. */
+  async function rebuildTrailFromNewLocation(
+    resourceId: string,
+    gfsUri: string
+  ): Promise<TrailReconstructionOutcome> {
+    const epoch = ++trailReconstructionEpochRef.current
+    // A displaced attempt is 'superseded' no matter how its own requests
+    // settle — its verdict must never reach breadcrumb or recovery state.
+    const verdict = (outcome: TrailReconstructionOutcome): TrailReconstructionOutcome =>
+      epoch === trailReconstructionEpochRef.current ? outcome : 'superseded'
+    let view: { path?: string | null }
+    try {
+      view = (await apiGet('/api/v1/gfs/resolve', { uri: gfsUri })) as {
+        path?: string | null
+      }
+    } catch {
+      return verdict('failed')
+    }
+    // A null path means the server could not name the new location — that is
+    // a failed reconstruction, not a root-level folder ('/org' is).
+    if (typeof view.path !== 'string' || view.path.length <= 1) {
+      return verdict('failed')
+    }
+    const segments = view.path.split('/').filter(segment => segment.length > 0)
+    const ancestors: Crumb[] = []
+    for (let depth = 1; depth < segments.length; depth += 1) {
+      let ancestor: Awaited<ReturnType<typeof getGfsResourceByPath>>
+      try {
+        ancestor = await getGfsResourceByPath(DRIVE, '/' + segments.slice(0, depth).join('/'))
+      } catch {
+        return verdict('failed')
+      }
+      ancestors.push(folderResourceToCrumb(ancestor))
+    }
+    if (epoch !== trailReconstructionEpochRef.current) return 'superseded'
+    setCrumbs(prev => {
+      if (epoch !== trailReconstructionEpochRef.current) return prev
+      const index = prev.findIndex(crumb => crumb.id === resourceId)
+      // The user navigated while the resolve walk was in flight — never
+      // clobber the trail they navigated to.
+      if (index < 0) return prev
+      return [
+        isDriveRootCrumb(prev[0]) ? prev[0]! : createDriveRootCrumb(),
+        ...ancestors,
+        // Live crumb state (name/version included) — see the doc note above.
+        ...prev.slice(index),
+      ]
+    })
+    // The trail is canonical for this resource as of the LATEST attempt —
+    // any older recovery notice for it is obsolete.
+    setTrailRecovery(null)
+    return 'applied'
+  }
+
+  /** Retry a failed post-move trail ancestry reconstruction. Runs from the
+   *  recovery snapshot's IMMUTABLE identity plus the live trail — never a
+   *  captured name/version — so the rebuilt crumb reflects every mutation
+   *  that landed since the move. The rebuild owns the notice entirely: an
+   *  'applied' retry clears it (the trail is canonical again), a 'failed'
+   *  retry keeps it, and a 'superseded' retry touches NOTHING — a newer
+   *  Move/reconstruction owns the breadcrumb and its recovery state now. */
+  async function retryTrailRecovery(): Promise<void> {
+    const recovery = trailRecovery
+    if (!recovery) return
+    await rebuildTrailFromNewLocation(recovery.resourceId, recovery.gfsUri)
   }
 
   async function handleFolderDrop(
@@ -723,7 +1611,7 @@ export function GfsBrowser(): React.JSX.Element {
       if (!(error instanceof GfsUploadCapabilityError) || !error.allowLegacyFallback) throw error
       if (input.resumeUploadId) {
         throw new GfsUploadCapabilityError(
-          'The persisted resumable session cannot be resumed while GFS Upload v2 is unavailable.',
+          'The persisted resumable session cannot be resumed while EvenDrive Upload v2 is unavailable.',
           { cause: error }
         )
       }
@@ -834,7 +1722,7 @@ export function GfsBrowser(): React.JSX.Element {
               if (!(err instanceof GfsUploadCapabilityError) || !err.allowLegacyFallback) throw err
               if (resumeUploadIdForAttempt) {
                 throw new GfsUploadCapabilityError(
-                  'The persisted resumable session cannot be resumed while GFS Upload v2 is unavailable.',
+                  'The persisted resumable session cannot be resumed while EvenDrive Upload v2 is unavailable.',
                   { cause: err }
                 )
               }
@@ -962,8 +1850,6 @@ export function GfsBrowser(): React.JSX.Element {
   function openManage(child: GfsChild, mode?: 'delete'): void {
     setRenameTarget(null)
     setSelected(child)
-    setRenameName(child.name)
-    setRenameOpen(false)
     setDeleteOpen(mode === 'delete')
   }
 
@@ -975,37 +1861,115 @@ export function GfsBrowser(): React.JSX.Element {
 
   function openRowRename(child: GfsChild): void {
     setSelected(null)
-    setRenameOpen(false)
     setDeleteOpen(false)
+    setRenameError('')
+    setRenameValid(true)
     setRenameTarget(child)
-    setRenameName(child.name)
+  }
+
+  /** Adapt a folder crumb for the row-action handlers (share, rename, move,
+   *  delete) so a breadcrumb menu acts on exactly the same shape a
+   *  parent-view row does. Returns null for the synthetic root. */
+  function crumbToChild(crumb: Crumb): GfsChild | null {
+    if (!crumb.id || !crumb.rid || crumb.kind !== 'directory' || crumb.version === undefined)
+      return null
+    return {
+      resourceId: crumb.id,
+      rid: crumb.rid,
+      gfsUri: crumb.gfsUri ?? `gfs://${DRIVE}/${crumb.rid}`,
+      name: crumb.name,
+      kind: crumb.kind,
+      path: null,
+      bytes: 0,
+      version: crumb.version,
+    }
+  }
+
+  /** Single construction path for a FOLDER's ⋯ menu. Parent-view rows and
+   *  breadcrumb crumb menus both build their props here, so their option
+   *  lists cannot drift apart. File-only actions stay on the file rows. */
+  function folderMenuProps(folder: GfsChild) {
+    return {
+      resourceName: folder.name,
+      resourceUri: folder.gfsUri,
+      onManage: () => openManage(folder),
+      onCopyLink: () => void copyGfsUri(folder.gfsUri),
+      onOpenLink: () => setOpenLinkOpen(true),
+      onRename: () => openRowRename(folder),
+      onMove: () => openMove(folder),
+      onDelete: () => openManage(folder, 'delete'),
+    }
+  }
+
+  /** "Open EvenDrive link": resolve a pasted gfs:// URI through control-api
+   * and navigate the breadcrumb straight to that folder, mirroring Desktop. */
+  async function openEvenDriveLink(uri: string): Promise<void> {
+    setOpenLinkError(null)
+    setOpenLinkResolving(true)
+    try {
+      const view = (await apiGet('/api/v1/gfs/resolve', { uri })) as GfsResolvedLocation
+      if (view.kind !== 'directory') {
+        setOpenLinkError('Only folder links can be opened here.')
+        return
+      }
+      setRenameTarget(null)
+      setSelected(null)
+      setDeleteOpen(false)
+      // Replacing the whole trail supersedes any in-flight breadcrumb
+      // reconstruction (R7-M1): its late response must not re-anchor the
+      // trail this link-open just replaced.
+      trailReconstructionEpochRef.current += 1
+      setCrumbs(prev => [
+        isDriveRootCrumb(prev[0]) ? prev[0]! : createDriveRootCrumb(),
+        folderResourceToCrumb(view),
+      ])
+      setOpenLinkOpen(false)
+    } catch (err) {
+      setOpenLinkError(err instanceof Error ? err.message : 'Could not open the EvenDrive link.')
+    } finally {
+      setOpenLinkResolving(false)
+    }
   }
 
   async function renameResource(child: GfsChild, requestedName: string): Promise<void> {
     if (!requestedName.trim() || renaming) return
     setRenaming(true)
+    setRenameError('')
     try {
       const name = await normalizeGfsResourceName(requestedName.trim())
       if (name === child.name) {
-        setRenameOpen(false)
         setRenameTarget(null)
         return
       }
-      await apiSend(
+      const patchResult = await apiSend(
         'PATCH',
-        `/api/v1/gfs/resources/${encodeURIComponent(child.resourceId)}`,
+        '/api/v1/gfs/resources/' + encodeURIComponent(child.resourceId),
         { drive: DRIVE, newName: name, ifMatch: child.version },
         { drive: DRIVE }
       )
+      const nextVersion = (
+        patchResult as { data?: { resourceId?: string; version?: number } } | undefined
+      )?.data?.version
       showToast('Resource renamed.', { tone: 'success' })
-      setRenameOpen(false)
+      // A crumb rename must retitle the breadcrumb segment too, not just the
+      // listing rows refreshed below. It also supersedes any in-flight
+      // breadcrumb reconstruction (R7-M1): a stale retry response must not
+      // land over a trail the rename just advanced.
+      trailReconstructionEpochRef.current += 1
+      setCrumbs(prev =>
+        prev.map(crumb =>
+          crumb.id === child.resourceId
+            ? { ...crumb, name, ...(nextVersion === undefined ? {} : { version: nextVersion }) }
+            : crumb
+        )
+      )
       setRenameTarget(null)
       setSelected(null)
       await refreshCurrent()
     } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Could not rename resource.', {
-        tone: 'error',
-      })
+      // The rename dialog stays open with the draft and the failure reason —
+      // a toast alone gave the operator no retry path.
+      setRenameError(err instanceof Error ? err.message : 'Could not rename resource.')
     } finally {
       setRenaming(false)
     }
@@ -1113,6 +2077,13 @@ export function GfsBrowser(): React.JSX.Element {
       if (child.kind === 'directory') childCacheRef.current.delete(child.resourceId)
       showToast('Resource deleted.', { tone: 'success' })
       setSelected(null)
+      // Deleting a breadcrumb folder removes the open location with it —
+      // navigate up to its parent instead of refreshing a dead trail.
+      const crumbIndex = crumbs.findIndex(crumb => crumb.id === child.resourceId)
+      if (crumbIndex >= 0) {
+        goToCrumb(crumbIndex - 1)
+        return
+      }
       await refreshCurrent()
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Could not delete resource.', {
@@ -1121,10 +2092,19 @@ export function GfsBrowser(): React.JSX.Element {
     }
   }
 
+  /** Move-dialog navigation context. Rows keep the full trail; a crumb target
+   *  ends the trail at ITS parent so the dialog's current-location pill and
+   *  no-op guard match the parent-view row semantics. */
+  const moveTargetCrumbIndex = moveTarget
+    ? crumbs.findIndex(crumb => crumb.id === moveTarget.resourceId)
+    : -1
+  const moveDialogCrumbs =
+    moveTargetCrumbIndex >= 0 ? crumbs.slice(0, moveTargetCrumbIndex) : crumbs
+
   return (
     <section
       className="cu-gfs"
-      aria-label="Global File System browser"
+      aria-label="EvenDrive browser"
       aria-busy={loading || droppedUploadCount > 0 || movingResourceId !== null}
     >
       <div
@@ -1137,7 +2117,7 @@ export function GfsBrowser(): React.JSX.Element {
         <TablePanelHeader
           title={
             <>
-              <IconPaperclip /> Global File System
+              <IconHardDrive /> EvenDrive
             </>
           }
           subtitle="Browse and manage drive resources and access grants from the admin plane."
@@ -1159,33 +2139,69 @@ export function GfsBrowser(): React.JSX.Element {
           </div>
         ) : null}
 
+        {trailRecovery ? (
+          <div className="cu-banner cu-banner--warning cu-banner--dismissible" role="alert">
+            {trailRecovery.reason === 'move' ? (
+              <span>
+                &ldquo;
+                {crumbs.find(crumb => crumb.id === trailRecovery.resourceId)?.name ??
+                  trailRecovery.resourceId}
+                &rdquo; moved, but its folder path could not be refreshed — the breadcrumb may not
+                show the real location.
+              </span>
+            ) : (
+              <span>
+                The current folder path could not be refreshed. Your current location is still
+                shown.
+              </span>
+            )}
+            <Button
+              size="sm"
+              onClick={() => void retryTrailRecovery()}
+              aria-label={trailRecovery.reason === 'hierarchy' ? 'Retry folder path' : undefined}
+            >
+              Retry
+            </Button>
+          </div>
+        ) : null}
+
         <div className="cu-gfs-panel">
           <div className="cu-gfs-panel__toolbar">
             <nav aria-label="Breadcrumb" className="cu-gfs-breadcrumb">
-              {crumbs.map((crumb, index) => (
-                <span className="cu-gfs-breadcrumb__item" key={`${crumb.id ?? 'root'}-${index}`}>
-                  {index > 0 ? <IconChevronRight width={14} height={14} /> : null}
-                  <button
-                    className={`cu-gfs-breadcrumb__button${
-                      crumb.name === '/' ? ' cu-gfs-breadcrumb__button--root' : ''
-                    }`}
-                    type="button"
-                    onClick={() => goToCrumb(index)}
-                    aria-current={index === crumbs.length - 1 ? 'page' : undefined}
+              {crumbs.map((crumb, index) => {
+                // Only the ACTIVE folder segment carries a ⋯ menu — mounted to
+                // the right of its name, mirroring the Desktop Files pattern.
+                // The synthetic drive root and ancestor crumbs stay plain.
+                const activeFolder = index === crumbs.length - 1 ? crumbToChild(crumb) : null
+                return (
+                  <span
+                    className="cu-gfs-breadcrumb__item"
+                    key={`${isDriveRootCrumb(crumb) ? 'root' : crumb.id}-${index}`}
                   >
-                    {crumb.name === '/' ? (
-                      <>
-                        <span className="cu-gfs-breadcrumb__drive-icon" aria-hidden="true">
-                          <IconFolder />
-                        </span>
-                        <span>{DRIVE}</span>
-                      </>
-                    ) : (
-                      crumb.name
-                    )}
-                  </button>
-                </span>
-              ))}
+                    {index > 0 ? <IconChevronRight width={14} height={14} /> : null}
+                    <button
+                      className={`cu-gfs-breadcrumb__button${
+                        crumb.name === '/' ? ' cu-gfs-breadcrumb__button--root' : ''
+                      }`}
+                      type="button"
+                      onClick={() => goToCrumb(index)}
+                      aria-current={index === crumbs.length - 1 ? 'page' : undefined}
+                    >
+                      {crumb.name === '/' ? (
+                        <>
+                          <span className="cu-gfs-breadcrumb__drive-icon" aria-hidden="true">
+                            <IconFolder />
+                          </span>
+                          <span>{DRIVE}</span>
+                        </>
+                      ) : (
+                        crumb.name
+                      )}
+                    </button>
+                    {activeFolder ? <GfsResourceMenu {...folderMenuProps(activeFolder)} /> : null}
+                  </span>
+                )
+              })}
             </nav>
             <div className="cu-gfs-panel__actions">
               <Button
@@ -1238,7 +2254,6 @@ export function GfsBrowser(): React.JSX.Element {
               <ul className="cu-gfs-list" aria-label="Current folder resources">
                 {items.map(child => {
                   const rowOpenable = child.kind === 'directory' || isGfsPreviewFile(child.name)
-                  const isRenaming = renameTarget?.resourceId === child.resourceId
                   const isDragging = draggingResourceId === child.resourceId
                   const isDropTarget = dragOverFolderId === child.resourceId
                   const canDragResource = child.kind !== 'directory' && movingResourceId === null
@@ -1313,15 +2328,7 @@ export function GfsBrowser(): React.JSX.Element {
                       </span>
                       <span className="cu-gfs-list__identity">
                         <span className="cu-gfs-list__name">
-                          {isRenaming ? (
-                            <GfsInlineRename
-                              onCancel={() => setRenameTarget(null)}
-                              onChange={setRenameName}
-                              onSubmit={() => void renameResource(child, renameName)}
-                              value={renameName}
-                              busy={renaming}
-                            />
-                          ) : child.kind === 'directory' ? (
+                          {child.kind === 'directory' ? (
                             <button
                               className="cu-gfs-list__name-button"
                               type="button"
@@ -1349,43 +2356,23 @@ export function GfsBrowser(): React.JSX.Element {
                       <span className="cu-gfs-list__value">
                         {child.kind === 'directory' ? '—' : formatBytes(child.bytes)}
                       </span>
-                      <span className="cu-gfs-list__actions">
-                        <Button
-                          className="cu-gfs-list__row-action"
-                          icon
-                          size="sm"
-                          variant="ghost"
-                          title={`Share ${child.name}`}
-                          aria-label={`Share ${child.name}`}
-                          onClick={() => openManage(child)}
-                        >
-                          <IconShare width={16} height={16} />
-                        </Button>
-                        {child.kind !== 'directory' ? (
-                          <Button
-                            className="cu-gfs-list__download cu-gfs-list__row-action"
-                            icon
-                            size="sm"
-                            variant="ghost"
-                            title={`Download ${child.name}`}
-                            aria-label={`Download ${child.name}`}
-                            disabled={downloadingIds.has(child.resourceId)}
-                            onClick={() => void downloadFile(child)}
-                          >
-                            <IconDownload width={18} height={18} />
-                          </Button>
-                        ) : null}
-                        <Button
-                          className="cu-gfs-list__row-action"
-                          icon
-                          size="sm"
-                          variant="ghost"
-                          title={`Rename ${child.name}`}
-                          aria-label={`Rename ${child.name}`}
-                          onClick={() => openRowRename(child)}
-                        >
-                          <IconPencil width={16} height={16} />
-                        </Button>
+                      <span
+                        className="cu-gfs-list__actions"
+                        onClick={event => {
+                          const target = event.target
+                          if (target instanceof Element) {
+                            const interactive = target.closest(
+                              'button, a, input, select, textarea, [tabindex]'
+                            )
+                            if (interactive && event.currentTarget.contains(interactive)) return
+                          }
+                          event.preventDefault()
+                          event.stopPropagation()
+                          event.currentTarget
+                            .querySelector<HTMLButtonElement>('button[aria-haspopup="menu"]')
+                            ?.click()
+                        }}
+                      >
                         <GfsResourceMenu
                           resourceName={child.name}
                           resourceUri={child.gfsUri}
@@ -1403,6 +2390,11 @@ export function GfsBrowser(): React.JSX.Element {
                               : undefined
                           }
                           onCopyLink={() => void copyGfsUri(child.gfsUri)}
+                          // Folders keep the EvenDrive link flow reachable from
+                          // their row menu, matching the breadcrumb crumb menu.
+                          onOpenLink={
+                            child.kind === 'directory' ? () => setOpenLinkOpen(true) : undefined
+                          }
                           onRename={() => openRowRename(child)}
                           onMove={() => openMove(child)}
                           onDelete={() => openManage(child, 'delete')}
@@ -1466,17 +2458,7 @@ export function GfsBrowser(): React.JSX.Element {
                 )}
               </span>
               <span className="cu-gfs-manage-dialog__heading">
-                {renameOpen ? (
-                  <GfsInlineRename
-                    onCancel={() => setRenameOpen(false)}
-                    onChange={setRenameName}
-                    onSubmit={() => void renameResource(selected, renameName)}
-                    value={renameName}
-                    busy={renaming}
-                  />
-                ) : (
-                  <h3>Share “{selected.name}”</h3>
-                )}
+                <h3>Share “{selected.name}”</h3>
               </span>
               <span className="cu-gfs-manage-dialog__top-actions">
                 <Button
@@ -1502,12 +2484,49 @@ export function GfsBrowser(): React.JSX.Element {
                     name: selected.name,
                     gfsUri: selected.gfsUri,
                     kind: selected.kind,
+                    path: selected.path,
                   }}
                 />
               </section>
             </div>
           </section>
         </div>
+      ) : null}
+
+      {renameTarget ? (
+        <SingleValueEditDialog
+          open
+          initialValue={renameTarget.name}
+          title={`Rename ${renameTarget.kind === 'directory' ? 'folder' : 'file'}`}
+          description={`Change the name without moving this ${
+            renameTarget.kind === 'directory' ? 'folder' : 'file'
+          } to another folder.`}
+          pending={renaming}
+          error={renameError || undefined}
+          isValid={renameValid}
+          discardLabel="Cancel"
+          saveLabel="Rename"
+          onDismiss={() => {
+            setRenameError('')
+            setRenameTarget(null)
+          }}
+          onSave={value => void renameResource(renameTarget, value)}
+          renderEditor={({ value, onChange, disabled }) => (
+            <Field label="New name" htmlFor="gfs-resource-name" required>
+              <TextInput
+                id="gfs-resource-name"
+                aria-label="New name"
+                value={value}
+                disabled={disabled}
+                onChange={event => {
+                  const next = event.target.value
+                  setRenameValid(next.trim().length > 0)
+                  onChange(next)
+                }}
+              />
+            </Field>
+          )}
+        />
       ) : null}
 
       {selected && deleteOpen ? (
@@ -1557,10 +2576,22 @@ export function GfsBrowser(): React.JSX.Element {
         />
       ) : null}
 
+      {openLinkOpen ? (
+        <GfsOpenLinkModal
+          pending={openLinkResolving}
+          error={openLinkError}
+          onOpen={uri => void openEvenDriveLink(uri)}
+          onCancel={() => {
+            setOpenLinkOpen(false)
+            setOpenLinkError(null)
+          }}
+        />
+      ) : null}
+
       {moveTarget ? (
         <GfsMoveDialog
           busy={movingResourceId === moveTarget.resourceId}
-          initialCrumbs={crumbs}
+          initialCrumbs={moveDialogCrumbs}
           onClose={() => setMoveTarget(null)}
           onMove={async (destinationId, destinationName) => {
             await moveResource(
@@ -1601,29 +2632,35 @@ export function GfsBrowser(): React.JSX.Element {
 
       {imagePreview ? (
         <GfsImagePreview
+          key={`${imagePreview.gfsUri}:${imagePreview.reloadVersion}`}
           byteLength={imagePreview.byteLength}
           fileName={imagePreview.fileName}
           mimeType={imagePreview.mimeType}
           rid={imagePreview.rid}
+          unavailable={imagePreview.unavailable}
           onClose={() => setImagePreview(null)}
         />
       ) : null}
 
       {markdownPreview ? (
         <GfsMarkdownPreview
+          key={`${markdownPreview.gfsUri}:${markdownPreview.reloadVersion}`}
           byteLength={markdownPreview.byteLength}
           fileName={markdownPreview.fileName}
           rid={markdownPreview.rid}
+          unavailable={markdownPreview.unavailable}
           onClose={() => setMarkdownPreview(null)}
         />
       ) : null}
 
       {videoPreview ? (
         <GfsVideoPreview
+          key={`${videoPreview.gfsUri}:${videoPreview.reloadVersion}`}
           byteLength={videoPreview.byteLength}
           fileName={videoPreview.fileName}
           mimeType={videoPreview.mimeType}
           rid={videoPreview.rid}
+          unavailable={videoPreview.unavailable}
           onClose={() => setVideoPreview(null)}
         />
       ) : null}

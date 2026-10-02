@@ -298,7 +298,7 @@ export function GfsResourceMenu({
       ),
       onManage ? null : menuAction('copy-link', 'Copy link', <IconCopy />, onCopyLink),
       menuAction('open-folder', 'Open folder', <IconContexts />, onOpen),
-      menuAction('open-gfs-link', 'Open GFS link', <IconConnectors />, onOpenGfsLink),
+      menuAction('open-gfs-link', 'Open EvenDrive link', <IconConnectors />, onOpenGfsLink),
       menuAction('preview', 'Preview', <IconEye />, onPreview),
     ].filter(isMenuAction),
     [

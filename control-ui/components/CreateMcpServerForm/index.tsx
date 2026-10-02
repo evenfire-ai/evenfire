@@ -9,6 +9,7 @@ import { IconX } from '@/components/icons'
 import { Button, Field, FormSection, SelectInput, TextInput } from '@/components/ui'
 import { getAgentDisplayName } from '@/lib/agentName'
 import {
+  McpServerUninstallIncompleteError,
   createMcpSecret,
   createMcpServer,
   deleteMcpSecret,
@@ -17,10 +18,18 @@ import {
   getAgentUsers,
   getContext,
   getHosts,
+  getMcpSecretRollbackRepairIdentity,
   listOrgImages,
   updateContext,
 } from '@/lib/api'
-import type { EgressBinding, EnvSecretKeyMapping, EnvVar, HostResource, OrgImage } from '@/lib/api'
+import type {
+  EgressBinding,
+  EnvSecretKeyMapping,
+  EnvVar,
+  HostResource,
+  OrgImage,
+  SecretIdentity,
+} from '@/lib/api'
 import { connectorContextAssignmentError } from '@/lib/connectorOAuthAccess'
 import { buildContextUpdatePayload } from '@/lib/contextMutation'
 import type { EgressEditorStatus } from '@/lib/egressModel'
@@ -571,11 +580,16 @@ export function CreateMcpServerForm({
     const willCreateSecret =
       useEnvSecret && envSecretName.trim().length > 0 && Object.keys(secretData).length > 0
 
-    let secretCreated = false
+    let createdSecretName: string | null = null
+    let createdSecretIdentity: SecretIdentity | undefined
     try {
       if (willCreateSecret) {
-        await createMcpSecret(envSecretName.trim(), secretData)
-        secretCreated = true
+        const secretName = envSecretName.trim()
+        const created = await createMcpSecret(secretName, secretData)
+        createdSecretName = secretName
+        if (created.uid && created.resourceVersion) {
+          createdSecretIdentity = { uid: created.uid, resourceVersion: created.resourceVersion }
+        }
       }
 
       const createdServer = await createMcpServer({
@@ -589,26 +603,34 @@ export function CreateMcpServerForm({
       )
       if (oauthScopeError) {
         const rollbackFailures: string[] = []
+        let incompleteUninstall: McpServerUninstallIncompleteError | null = null
         try {
           await deleteMcpServer(name)
-        } catch {
-          rollbackFailures.push('connector')
+        } catch (rollbackError) {
+          if (rollbackError instanceof McpServerUninstallIncompleteError) {
+            incompleteUninstall = rollbackError
+          } else {
+            rollbackFailures.push('connector')
+          }
         }
-        if (secretCreated) {
+        if (createdSecretName) {
           try {
-            await deleteMcpSecret(envSecretName.trim())
-            secretCreated = false
+            await deleteMcpSecret(createdSecretName, createdSecretIdentity)
+            createdSecretName = null
+            createdSecretIdentity = undefined
           } catch {
             rollbackFailures.push('Secret')
           }
         }
-        setError(
-          rollbackFailures.length === 0
-            ? oauthScopeError
-            : `${oauthScopeError} Automatic cleanup failed for the ${rollbackFailures.join(
-                ' and '
-              )}; remove it before retrying.`
-        )
+        const rollbackNotes = [
+          incompleteUninstall
+            ? `Automatic cleanup of connector "${name}" is incomplete${incompleteUninstall.pendingSummary}; it ${incompleteUninstall.installState}. Delete it from the Installed Connectors list to finish.`
+            : '',
+          rollbackFailures.length > 0
+            ? `Automatic cleanup failed for the ${rollbackFailures.join(' and ')}; remove it before retrying.`
+            : '',
+        ].filter(Boolean)
+        setError([oauthScopeError, ...rollbackNotes].join(' '))
         return
       }
 
@@ -656,17 +678,42 @@ export function CreateMcpServerForm({
         onCreated()
       }, 600)
     } catch (submitError) {
-      // Rollback: if we created the Secret but the CRD (or anything after)
-      // failed, the Secret is orphan — best-effort delete.
-      if (secretCreated) {
-        try {
-          await deleteMcpSecret(envSecretName.trim())
-        } catch {
-          // best-effort rollback; swallow — the operator already sees the
-          // primary error below.
+      // Roll back only a Secret this submission created. A successful legacy
+      // create may use the bounded bodyless-delete compatibility path. A
+      // rejected create is eligible only when its exact repair response gives
+      // us a complete CAS identity; incomplete repair data never falls back to
+      // a bodyless delete.
+      let cleanupError: unknown
+      let cleanupSecretName = createdSecretName
+      let cleanupSecretIdentity = createdSecretIdentity
+      if (!cleanupSecretName) {
+        const repairIdentity = getMcpSecretRollbackRepairIdentity(submitError, envSecretName.trim())
+        if (repairIdentity) {
+          cleanupSecretName = repairIdentity.name
+          cleanupSecretIdentity = {
+            uid: repairIdentity.uid,
+            resourceVersion: repairIdentity.resourceVersion,
+          }
         }
       }
-      setError(formatCreateError(submitError))
+      if (cleanupSecretName) {
+        try {
+          await deleteMcpSecret(cleanupSecretName, cleanupSecretIdentity)
+        } catch (error) {
+          cleanupError = error
+        }
+      }
+      const primaryError = formatCreateError(submitError)
+      // The message names the object it refers to. Telling an operator to
+      // review the leftover Secret is only actionable once they know which one
+      // was left behind.
+      setError(
+        cleanupError
+          ? `${primaryError} Cleanup of the created Secret "${cleanupSecretName}" also failed: ${formatCreateError(
+              cleanupError
+            )}. Refresh the page and review the Secret before taking further action.`
+          : primaryError
+      )
     } finally {
       setSubmitting(false)
     }

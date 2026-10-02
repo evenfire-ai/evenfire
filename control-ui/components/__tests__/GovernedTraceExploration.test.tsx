@@ -191,7 +191,7 @@ describe('GovernedEventExplorer', () => {
 
     await screen.findByText('Permission grant')
     fireEvent.click(screen.getByRole('button', { name: 'Filter Operator' }))
-    fireEvent.click(await screen.findByRole('option', { name: 'admin' }))
+    fireEvent.click(await screen.findByRole('option', { name: 'admin, control-admin-1' }))
 
     await waitFor(() =>
       expect(navigation.replace).toHaveBeenCalledWith(

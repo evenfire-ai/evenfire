@@ -326,15 +326,15 @@ describe('McpServerTable — connector access summaries', () => {
   })
 
   it('keeps connector endpoints searchable after removing the visible endpoint column', () => {
-    const onEdit = vi.fn()
-    render(<McpServerTable items={[makeItem({ name: 'airtable-server' })]} onEdit={onEdit} />)
+    const onOpen = vi.fn()
+    render(<McpServerTable items={[makeItem({ name: 'airtable-server' })]} onOpen={onOpen} />)
 
     expect(screen.queryByRole('columnheader', { name: /Endpoint/i })).toBeNull()
     fireEvent.change(screen.getByLabelText('Search connectors'), {
       target: { value: 'brave-search.mcp-server' },
     })
     expect(screen.getByText('airtable-server')).toBeInTheDocument()
-    expect(onEdit).not.toHaveBeenCalled()
+    expect(onOpen).not.toHaveBeenCalled()
   })
 
   it('renders an empty access state when no principals are mapped', () => {
@@ -431,7 +431,7 @@ describe('McpServerTable — agent membership', () => {
             makeAgentBinding('research', [{ id: 'agent-alpha', label: 'Agent Alpha' }]),
           ],
         }}
-        onAddToAgents={vi.fn().mockResolvedValue(undefined)}
+        onAddToAgents={vi.fn().mockResolvedValue(true)}
         onRemoveFromAgents={onRemoveFromAgents}
       />
     )
@@ -446,7 +446,7 @@ describe('McpServerTable — agent membership', () => {
   })
 
   it('uses the agent selection modal to add the connector to more agents', async () => {
-    const onAddToAgents = vi.fn().mockResolvedValue(undefined)
+    const onAddToAgents = vi.fn().mockResolvedValue(true)
     const items = [makeItem({ name: 'airtable-server' })]
     render(
       <McpServerTable
@@ -471,11 +471,11 @@ describe('McpServerTable — agent membership', () => {
     const dialog = screen.getByRole('dialog', { name: 'Give agents access to this connector' })
     expect(dialog).toBeInTheDocument()
     expect(dialog).toHaveAttribute('aria-modal', 'true')
-    expect(dialog.parentElement).toHaveClass('cu-modal-backdrop')
-    expect(screen.getByLabelText('Agents')).toBeInTheDocument()
+    expect(dialog.parentElement).toHaveClass('eft-dialog-backdrop')
+    expect(screen.getByRole('searchbox', { name: 'Search agents' })).toBeInTheDocument()
     expect(screen.queryByText('No other agents available.')).not.toBeInTheDocument()
 
-    fireEvent.click(screen.getByRole('option', { name: 'Sales' }))
+    fireEvent.click(screen.getByRole('checkbox', { name: /Sales/ }))
     fireEvent.click(screen.getByRole('button', { name: 'Add to agent' }))
 
     await waitFor(() =>
@@ -485,6 +485,30 @@ describe('McpServerTable — agent membership', () => {
       )
     )
   })
+
+  it('retains the selected agent and dialog error when connector access fails', async () => {
+    const onAddToAgents = vi.fn().mockResolvedValue(false)
+    render(
+      <McpServerTable
+        items={[makeItem({ name: 'airtable-server' })]}
+        agentTargets={[{ name: 'sales', label: 'Sales', contextRef: 'sales-context' }]}
+        onAddToAgents={onAddToAgents}
+      />
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for connector airtable-server' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Add to agents' }))
+    const dialog = screen.getByRole('dialog', { name: 'Give agents access to this connector' })
+    const sales = within(dialog).getByRole('checkbox', { name: /Sales/ })
+    fireEvent.click(sales)
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Add to agent' }))
+
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent(
+      'Connector access could not be updated'
+    )
+    expect(sales).toBeChecked()
+    expect(dialog).toBeInTheDocument()
+  })
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -492,11 +516,11 @@ describe('McpServerTable — agent membership', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 describe('McpServerTable — row actions kebab', () => {
   it('exposes Edit and Remove via a single kebab menu per row and routes the click to the matching handler', async () => {
-    const onEdit = vi.fn()
+    const onOpen = vi.fn()
     const onDelete = vi.fn().mockResolvedValue(undefined)
     const items = [makeItem({ name: 'airtable-server' })]
 
-    render(<McpServerTable items={items} onEdit={onEdit} onDelete={onDelete} />)
+    render(<McpServerTable items={items} onOpen={onOpen} onDelete={onDelete} />)
 
     const trigger = screen.getByRole('button', { name: 'Actions for connector airtable-server' })
     fireEvent.click(trigger)
@@ -506,7 +530,7 @@ describe('McpServerTable — row actions kebab', () => {
     expect(deleteItem).toHaveClass('eft-row-actions__item--danger')
 
     fireEvent.click(editItem)
-    expect(onEdit).toHaveBeenCalledWith({ namespace: 'mcp-server', name: 'airtable-server' })
+    expect(onOpen).toHaveBeenCalledWith({ namespace: 'mcp-server', name: 'airtable-server' })
     expect(onDelete).not.toHaveBeenCalled()
 
     fireEvent.click(trigger)
@@ -522,7 +546,7 @@ describe('McpServerTable — row actions kebab', () => {
     render(
       <McpServerTable
         items={items}
-        onEdit={vi.fn()}
+        onOpen={vi.fn()}
         onDelete={onDelete}
         deletingKey="mcp-server/airtable-server"
       />

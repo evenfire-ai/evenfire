@@ -1,10 +1,16 @@
 import { describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
+import { clerumErrorHandler } from '../src/http/errorHandler.js'
 import { createAdminSecretsRouter } from '../src/routes/admin/secrets.js'
 
 interface MockSecret {
-  metadata?: { name?: string; labels?: Record<string, string> }
+  metadata?: {
+    name?: string
+    uid?: string
+    resourceVersion?: string
+    labels?: Record<string, string>
+  }
   keys?: string[]
   data?: Record<string, string>
 }
@@ -30,15 +36,36 @@ function writeSummary(body: MockWrite) {
 function createGateway(opts: { recipes?: string[]; secrets?: MockSecret[] } = {}) {
   const recipes = opts.recipes ?? []
   const secrets = new Map<string, MockSecret>(
-    (opts.secrets ?? []).map(s => [String(s.metadata?.name ?? ''), s])
+    (opts.secrets ?? []).map(s => {
+      const name = String(s.metadata?.name ?? '')
+      return [
+        name,
+        {
+          ...s,
+          metadata: {
+            ...s.metadata,
+            uid: s.metadata?.uid ?? `uid-${name}`,
+            resourceVersion: s.metadata?.resourceVersion ?? '1',
+          },
+        },
+      ]
+    })
   )
   return {
     listResource: vi.fn(async () => recipes.map(name => ({ metadata: { name } }))),
     listSecrets: vi.fn(async () => [...secrets.values()]),
     getSecret: vi.fn(async (name: string) => secrets.get(name) ?? null),
     createSecret: vi.fn(async (body: MockWrite) => {
-      secrets.set(body.name, { metadata: { name: body.name, labels: body.labels ?? {} } })
-      return writeSummary(body)
+      const created = {
+        metadata: {
+          name: body.name,
+          labels: body.labels ?? {},
+          uid: `uid-${body.name}`,
+          resourceVersion: '1',
+        },
+      }
+      secrets.set(body.name, created)
+      return { ...writeSummary(body), uid: created.metadata.uid, resourceVersion: '1' }
     }),
     updateSecret: vi.fn(async (body: MockWrite) => {
       const existing = secrets.get(body.name)
@@ -59,11 +86,11 @@ function makeApp(gateway: ReturnType<typeof createGateway>) {
   const app = express()
   app.use(express.json())
   app.use(createAdminSecretsRouter(gateway as never))
-  app.use(
-    (err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
-      res.status(500).json({ error: err instanceof Error ? err.message : 'unknown' })
-    }
-  )
+  // The production handler, not a local stand-in. A hand-written handler here
+  // would let a test assert a response shape the real app never emits, so the
+  // 500-propagation test below would be verifying this file instead of
+  // src/http/errorHandler.ts.
+  app.use(clerumErrorHandler)
   return app
 }
 
@@ -106,6 +133,21 @@ describe('POST /admin/recipe-secrets — ownership', () => {
       })
       .expect(400)
     expect(res.body.error).toMatch(/does not match any WorkflowRecipe/)
+  })
+
+  it('propagates a 500 when the recipe-existence check fails (fail-closed, never assumes the recipe exists)', async () => {
+    const gateway = createGateway({ recipes: ['recipe-a'] })
+    gateway.listResource.mockRejectedValueOnce(new Error('apiserver unavailable'))
+    const res = await request(app(gateway))
+      .post('/admin/recipe-secrets')
+      .send({
+        name: 'k',
+        data: { a: 'b' },
+        ownership: { kind: 'owner-recipe', recipeName: 'recipe-a' },
+      })
+      .expect(500)
+    expect(res.body.message).toContain('apiserver unavailable')
+    expect(gateway.createSecret).not.toHaveBeenCalled()
   })
 
   it('stores shared=true label when kind=shared', async () => {

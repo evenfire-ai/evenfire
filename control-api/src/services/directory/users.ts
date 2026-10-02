@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { pool, withTransaction } from '../../db.js'
+import { type DbClient, pool, withTransaction } from '../../db.js'
 import {
   type GfsDesktopOperatorLifecycleActor,
   GfsDesktopOperatorLinkError,
@@ -336,6 +336,29 @@ export async function updateAdminUserContext(
 }
 
 /**
+ * Approval canApprove reads an enabled medium account and ignores lifecycle
+ * state, so both the hard-delete and the tombstone paths have to disable it.
+ */
+async function disableWorkflowApprovalMedium(db: DbClient, userId: string): Promise<void> {
+  await db.query(
+    `UPDATE workflow_approval_medium_accounts
+        SET disabled_at = COALESCE(disabled_at, NOW()),
+            updated_at = NOW()
+      WHERE user_id = $1::uuid
+        AND disabled_at IS NULL`,
+    [userId]
+  )
+  await db.query(
+    `UPDATE workflow_approval_medium_challenges
+        SET consumed_at = COALESCE(consumed_at, NOW()),
+            expires_at = LEAST(expires_at, NOW())
+      WHERE user_id = $1::uuid
+        AND consumed_at IS NULL`,
+    [userId]
+  )
+}
+
+/**
  * Retire a Desktop user under one caller-owned transaction.
  *
  * A user with operator-link history is retained as a lifecycle tombstone. The
@@ -349,7 +372,8 @@ export async function retireDesktopUser(
   userIdInput: string,
   reasonInput: string,
   idempotencyKeyInput: string,
-  requestIdInput: string | null | undefined
+  requestIdInput: string | null | undefined,
+  options: { db?: DbClient; retainWithoutLinkHistory?: boolean } = {}
 ): Promise<RetireDesktopUserResult> {
   const actor = normalizeRetirementActor(actorInput)
   const targetUserId = requireUuid(userIdInput, 'userId')
@@ -370,7 +394,7 @@ export async function retireDesktopUser(
   const actorColumn =
     actor.kind === 'control_admin' ? 'actor_control_admin_id' : 'actor_desktop_user_id'
 
-  return withTransaction(async db => {
+  const run = async (db: DbClient): Promise<RetireDesktopUserResult> => {
     const claim = await db.query(
       `INSERT INTO desktop_user_retirement_operations(
          operation,
@@ -479,23 +503,8 @@ export async function retireDesktopUser(
     const hasLinkHistory =
       (history.rows[0] as { has_link_history?: unknown } | undefined)?.has_link_history === true
 
-    if (!hasLinkHistory) {
-      await db.query(
-        `UPDATE workflow_approval_medium_accounts
-            SET disabled_at = COALESCE(disabled_at, NOW()),
-                updated_at = NOW()
-          WHERE user_id = $1::uuid
-            AND disabled_at IS NULL`,
-        [targetUserId]
-      )
-      await db.query(
-        `UPDATE workflow_approval_medium_challenges
-            SET consumed_at = COALESCE(consumed_at, NOW()),
-                expires_at = LEAST(expires_at, NOW())
-          WHERE user_id = $1::uuid
-            AND consumed_at IS NULL`,
-        [targetUserId]
-      )
+    if (!hasLinkHistory && options.retainWithoutLinkHistory !== true) {
+      await disableWorkflowApprovalMedium(db, targetUserId)
       const deleted = await db.query(
         `DELETE FROM users
           WHERE id = $1::uuid
@@ -553,12 +562,14 @@ export async function retireDesktopUser(
       }
       throw error
     }
-    if (!revoked) {
+    if (hasLinkHistory && !revoked) {
       throw new DesktopUserRetirementError(
         'retirement_conflict',
         'operator-link history has no active generation to retire'
       )
     }
+
+    await disableWorkflowApprovalMedium(db, targetUserId)
 
     const transitioned = await db.query(
       `UPDATE users
@@ -620,7 +631,37 @@ export async function retireDesktopUser(
       lifecycleVersion: nextLifecycleVersion,
       replayed: false,
     }
-  })
+  }
+  return options.db ? run(options.db) : withTransaction(run)
+}
+
+export type RetireDesktopUserInTransactionInput = {
+  actor: DesktopUserRetirementActor
+  userId: string
+  reason: string
+  idempotencyKey: string
+  requestId: string | null
+  /**
+   * Always leave a `retired` tombstone, even without operator-link history
+   * (where retireDesktopUser hard-deletes). A hand-over needs the tombstone and
+   * must not fail on FKs that a hard delete could hit.
+   */
+  retainWithoutLinkHistory?: boolean
+}
+
+/** Same lifecycle as retireDesktopUser, inside the caller's transaction. */
+export async function retireDesktopUserInTransaction(
+  db: DbClient,
+  input: RetireDesktopUserInTransactionInput
+): Promise<RetireDesktopUserResult> {
+  return retireDesktopUser(
+    input.actor,
+    input.userId,
+    input.reason,
+    input.idempotencyKey,
+    input.requestId,
+    { db, retainWithoutLinkHistory: input.retainWithoutLinkHistory === true }
+  )
 }
 
 /**

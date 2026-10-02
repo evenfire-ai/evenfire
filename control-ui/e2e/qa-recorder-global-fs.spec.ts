@@ -73,7 +73,7 @@ test.describe('optional QA recorder: Control UI Global File System', () => {
   test('Global file system — folder + upload + rename', async ({ page }, testInfo) => {
     requireRecorderConfirm(
       'QA_RECORDER_CONFIRM_MUTATIONS',
-      'This journey creates a folder, uploads a file, and renames it in the Global File System.'
+      'This journey creates a folder, uploads a file, and renames it in EvenDrive.'
     )
     assertAllowedTarget('CONTROL_UI_URL', CONTROL_UI_URL)
     assertAllowedTarget('CONTROL_API_URL', CONTROL_API_URL)

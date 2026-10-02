@@ -35,6 +35,10 @@ data:
   RPC_PROXY_UPSTREAM_TIMEOUT_MS: "60000"
   RPC_PROXY_MAX_TOKEN_LENGTH: "4096"
   RPC_PROXY_ARTIFACT_DOWNLOAD_MAX_MB: "250"
+  # Body-transfer budget of one artifact download (the header wait is bounded by
+  # RPC_PROXY_UPSTREAM_TIMEOUT_MS). 300 s moves the 250 MB cap above at a
+  # sustained 0.84 MB/s; the unset default (60 s) would need 4.2 MB/s.
+  RPC_PROXY_ARTIFACT_DOWNLOAD_TIMEOUT_MS: "300000"
   RPC_PROXY_ALLOWED_METHOD_PATTERN: "^[a-zA-Z0-9_./:-]{1,120}$"
   RPC_PROXY_STREAM_MAX_LIFETIME_MS: "600000"
   RPC_PROXY_STREAM_INTERVAL_MS: "3000"

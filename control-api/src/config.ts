@@ -1,5 +1,11 @@
 import { createPublicKey } from 'node:crypto'
 import { DEFAULT_ALLOWED_PLUGIN_IMAGE_PREFIXES } from '@clerum/image-policy'
+import { REACTIVE_REFRESH_BUFFER_MS } from './oauth/tokenHelper.js'
+
+function boundedIntegerEnv(name: string, fallback: number, min: number, max: number): number {
+  const parsed = Number(process.env[name])
+  return Number.isSafeInteger(parsed) && parsed >= min && parsed <= max ? parsed : fallback
+}
 
 type Config = {
   port: number
@@ -159,6 +165,18 @@ type Config = {
   // also guards implausibly-low provider counts.
   llmCatalogSyncProviderMinLive: number
   registryPullSecretReconcileIntervalMs: number
+  // OAuth proactive-refresh cron (mini-spec L). Default OFF until e2e; renews
+  // remote access tokens inside the proactive window so a background grant's
+  // rotating refresh token is exercised before it lapses, and sweeps DCR
+  // client-secret expiry (avisar/degradar only).
+  oauthProactiveRefreshCronEnabled: boolean
+  oauthProactiveRefreshIntervalMs: number
+  // Bp — proactive buffer. A grant is a candidate while its access token expires
+  // within this window. MUST be > REACTIVE_REFRESH_BUFFER_MS (Br); validated at
+  // boot (mini-spec §3 invariant `Bp > Br`).
+  oauthProactiveRefreshBufferMs: number
+  // Wc — warn window for a DCR confidential client_secret nearing expiry.
+  oauthDcrSecretWarnMs: number
   budgetReservationTtlSeconds: number
   approvalRetentionDays: number
   userApprovalRequestArchiveCronEnabled: boolean
@@ -235,6 +253,16 @@ type Config = {
   notificationStreamHeartbeatMs: number
   notificationStreamMaxLifetimeMs: number
   notificationStreamSnapshotLimit: number
+  entityChangeDispatchIntervalMs: number
+  entityChangeRetentionSeconds: number
+  entityChangeDispatchBatchSize: number
+  entityChangeMaxRecoveryEvents: number
+  entityChangeStreamPollMs: number
+  entityChangeUserVisibilityRefreshMs: number
+  entityChangeStreamHeartbeatMs: number
+  entityChangeStreamMaxLifetimeMs: number
+  entityChangeStreamMaxConnections: number
+  entityChangeStreamMaxConnectionsPerPrincipal: number
   notificationsDesktopFirstEnabled: boolean
   notificationDesktopGraceSeconds: number
   // Stricter than the normal refresh limiter: a client reaching reissue has
@@ -716,6 +744,23 @@ if (
   )
 }
 
+// Bp (proactive buffer). Computed as a local so the `Bp > Br` invariant
+// (mini-spec L §3) is validated BEFORE the config object is built — a proactive
+// window that does not clear the reactive buffer would let the two paths compete
+// for the same row on the happy path, defeating the idempotency argument. Br is
+// the reactive buffer's single source of truth (`tokenHelper.ts`), never a
+// re-typed literal. Fail-fast (throw) rather than clamp, like every other
+// invalid config value here.
+const oauthProactiveRefreshBufferMs = positiveIntegerFromEnv(
+  'OAUTH_PROACTIVE_REFRESH_BUFFER_MS',
+  300_000
+)
+if (oauthProactiveRefreshBufferMs <= REACTIVE_REFRESH_BUFFER_MS) {
+  throw new Error(
+    `OAUTH_PROACTIVE_REFRESH_BUFFER_MS (${oauthProactiveRefreshBufferMs}) must be greater than the reactive refresh buffer (${REACTIVE_REFRESH_BUFFER_MS}ms)`
+  )
+}
+
 export const config: Config = {
   port: Number(process.env.CONTROL_API_PORT || 8090),
   jsonBodyLimit: process.env.CONTROL_API_JSON_BODY_LIMIT || '150mb',
@@ -926,6 +971,18 @@ export const config: Config = {
     600_000,
     REGISTRY_PULL_SECRET_RECONCILE_MIN_INTERVAL_MS
   ),
+  // OAuth proactive-refresh cron (mini-spec L). Default OFF: `=== 'true'`, so the
+  // sweep stays dark until an operator opts in after e2e.
+  oauthProactiveRefreshCronEnabled: process.env.OAUTH_PROACTIVE_REFRESH_CRON_ENABLED === 'true',
+  oauthProactiveRefreshIntervalMs: positiveIntegerFromEnv(
+    'OAUTH_PROACTIVE_REFRESH_INTERVAL_MS',
+    60_000
+  ),
+  // Computed + validated above the literal (Bp > Br must hold before the object
+  // is built): see `oauthProactiveRefreshBufferMs` local.
+  oauthProactiveRefreshBufferMs,
+  // Wc — default 7 days.
+  oauthDcrSecretWarnMs: positiveIntegerFromEnv('OAUTH_DCR_SECRET_WARN_MS', 604_800_000),
   // Danger-zone reservation TTL (§9.8a: ~2-3× the rollup lag, ~5 min). Short
   // enough that a hung reservation auto-frees; long enough that real spend has
   // reached the rollups before it expires (no double-count on the next check).
@@ -1103,11 +1160,11 @@ export const config: Config = {
   ),
   // Default derived from the wake mechanism's worst case, not picked ad hoc.
   // rpc-proxy's wake-and-hold loop re-triggers POST /rpc/hosts/:hostRef/wake
-  // every wakeRetriggerMs=15000 for up to wakeMaxHoldMs=90000 (defaults in
+  // every wakeRetriggerMs=15000 for up to wakeMaxHoldMs=48000 (defaults in
   // rpc-proxy/src/config.ts), so one held request costs
-  // 1 + floor(90000/15000) = 7 calls per rpc-proxy instance; rpc-proxy runs
+  // 1 + floor(48000/15000) = 4 calls per rpc-proxy instance; rpc-proxy runs
   // replicas: 2 (deploy/base/rpc-proxy/rpc-proxy.yaml) with per-instance
-  // dedup, so the mechanism alone can emit 14 calls / 90s (~9.4/min) per
+  // dedup, so the mechanism alone can emit 8 calls / 48s (10.0/min) per
   // host. Desktop prewarm adds a burst of up to 3 calls per device.
   // Middleware order in routes/rpc-access/hosts.ts is limiter BEFORE
   // handler, and the hostWakeCoalesceWindowMs coalescer runs INSIDE the
@@ -1149,6 +1206,61 @@ export const config: Config = {
     process.env.NOTIFICATION_STREAM_MAX_LIFETIME_MS || 10 * 60 * 1000
   ),
   notificationStreamSnapshotLimit: Number(process.env.NOTIFICATION_STREAM_SNAPSHOT_LIMIT || 50),
+  entityChangeDispatchIntervalMs: boundedIntegerEnv(
+    'ENTITY_CHANGE_DISPATCH_INTERVAL_MS',
+    500,
+    100,
+    5000
+  ),
+  entityChangeRetentionSeconds: boundedIntegerEnv(
+    'ENTITY_CHANGE_RETENTION_SECONDS',
+    24 * 60 * 60,
+    60 * 60,
+    30 * 24 * 60 * 60
+  ),
+  entityChangeDispatchBatchSize: boundedIntegerEnv(
+    'ENTITY_CHANGE_DISPATCH_BATCH_SIZE',
+    1000,
+    1,
+    10000
+  ),
+  entityChangeMaxRecoveryEvents: boundedIntegerEnv(
+    'ENTITY_CHANGE_MAX_RECOVERY_EVENTS',
+    10000,
+    1,
+    100000
+  ),
+  entityChangeStreamPollMs: boundedIntegerEnv('ENTITY_CHANGE_STREAM_POLL_MS', 1000, 250, 5000),
+  entityChangeUserVisibilityRefreshMs: boundedIntegerEnv(
+    'ENTITY_CHANGE_USER_VISIBILITY_REFRESH_MS',
+    4000,
+    1000,
+    5000
+  ),
+  entityChangeStreamHeartbeatMs: boundedIntegerEnv(
+    'ENTITY_CHANGE_STREAM_HEARTBEAT_MS',
+    20 * 1000,
+    1000,
+    60 * 1000
+  ),
+  entityChangeStreamMaxLifetimeMs: boundedIntegerEnv(
+    'ENTITY_CHANGE_STREAM_MAX_LIFETIME_MS',
+    10 * 60 * 1000,
+    30 * 1000,
+    60 * 60 * 1000
+  ),
+  entityChangeStreamMaxConnections: boundedIntegerEnv(
+    'ENTITY_CHANGE_STREAM_MAX_CONNECTIONS',
+    256,
+    1,
+    10000
+  ),
+  entityChangeStreamMaxConnectionsPerPrincipal: boundedIntegerEnv(
+    'ENTITY_CHANGE_STREAM_MAX_CONNECTIONS_PER_PRINCIPAL',
+    8,
+    1,
+    1000
+  ),
   notificationsDesktopFirstEnabled:
     (process.env.NOTIFICATIONS_DESKTOP_FIRST_ENABLED ?? 'true') !== 'false',
   // Parse safely: a non-empty non-numeric env (e.g. "disabled") yields NaN,

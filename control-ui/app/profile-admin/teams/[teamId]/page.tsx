@@ -4,9 +4,9 @@ import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import {
   DataTable,
-  RecordList,
-  RecordListRow,
+  DialogShell,
   RowActionMenu,
+  SingleValueEditDialog,
   TableViewport,
 } from '@clerum/frontend-components'
 import { useConfirmDialog } from '@components/ConfirmDialog'
@@ -24,7 +24,7 @@ import {
 import { getAgentDisplayName } from '@lib/agentName'
 import { InviteMemberDialog } from '../../../../components/InviteMemberDialog'
 import { IconUsers } from '../../../../components/Sidebar/icons'
-import { IconCheck, IconMoreHorizontal, IconX } from '../../../../components/icons'
+import { IconMoreHorizontal, IconX } from '../../../../components/icons'
 import {
   AdminTeamPendingInvitation,
   ContextResource,
@@ -156,8 +156,9 @@ export default function TeamDetailsPage() {
   const [deleteTeamDialogError, setDeleteTeamDialogError] = useState('')
 
   const [teamName, setTeamName] = useState('')
-  const [editingName, setEditingName] = useState(false)
-  const [nameBuffer, setNameBuffer] = useState('')
+  const [renameOpen, setRenameOpen] = useState(false)
+  const [renameError, setRenameError] = useState('')
+  const [renameValid, setRenameValid] = useState(false)
   const [members, setMembers] = useState<TeamMember[]>([])
   const [pendingInvitations, setPendingInvitations] = useState<AdminTeamPendingInvitation[]>([])
   const [resendingInvitationId, setResendingInvitationId] = useState<string | null>(null)
@@ -186,6 +187,8 @@ export default function TeamDetailsPage() {
   const [addMemberError, setAddMemberError] = useState('')
 
   const [showAddAgent, setShowAddAgent] = useState(false)
+  const [agentAccessDialogError, setAgentAccessDialogError] = useState('')
+  const [agentSearchQuery, setAgentSearchQuery] = useState('')
 
   const [availableContextIds, setAvailableContextIds] = useState<string[]>([])
   const [contextResources, setContextResources] = useState<ContextResource[]>([])
@@ -325,22 +328,36 @@ export default function TeamDetailsPage() {
   }
 
   function startEditingName() {
-    setNameBuffer(teamName)
-    setEditingName(true)
+    setRenameError('')
+    setRenameValid(Boolean(teamName.trim()))
+    setRenameOpen(true)
   }
 
-  async function saveTeamName() {
-    const trimmed = nameBuffer.trim()
+  async function saveTeamName(value: string) {
+    const trimmed = value.trim()
     if (!trimmed || isNew) return
     setBusy(true)
-    setError('')
+    setRenameError('')
     try {
       await renameAdminTeam(teamId, trimmed)
       setTeamName(trimmed)
-      setEditingName(false)
+      try {
+        const authoritative = await getAdminTeam(teamId)
+        setTeamName(authoritative.name || trimmed)
+      } catch (refreshError) {
+        const message =
+          refreshError instanceof Error
+            ? `Team renamed, but the latest team could not be reloaded: ${refreshError.message}`
+            : 'Team renamed, but the latest team could not be reloaded.'
+        setRenameOpen(false)
+        setError(message)
+        showToast(message, { tone: 'error' })
+        return
+      }
+      setRenameOpen(false)
       showToast('Team renamed.', { tone: 'success' })
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to rename team')
+      setRenameError(e instanceof Error ? e.message : 'Failed to rename team')
     } finally {
       setBusy(false)
     }
@@ -397,6 +414,16 @@ export default function TeamDetailsPage() {
       showToast(message, { tone: 'error' })
     } finally {
       setAddingMember(false)
+    }
+  }
+
+  function dismissAddMemberDialog() {
+    setShowAddMember(false)
+    if (addMemberMode === 'invite') {
+      setInviteName('')
+      setInviteEmail('')
+      setInviteRole('member')
+      setAddMemberError('')
     }
   }
 
@@ -486,10 +513,11 @@ export default function TeamDetailsPage() {
     }
   }
 
-  async function saveAgents(next: string[], message: string) {
-    if (isNew) return
+  async function saveAgents(next: string[], message: string): Promise<boolean> {
+    if (isNew) return false
     setBusy(true)
     setError('')
+    setAgentAccessDialogError('')
     try {
       const normalized = Array.from(new Set(next.map(v => v.trim()).filter(Boolean)))
       const [updatedAgents, updatedContexts] = await applyAgentAccessCompatibilityUpdate({
@@ -522,8 +550,12 @@ export default function TeamDetailsPage() {
       setDeletedContextIds(contextPartition.deleted)
       setSelectedAgentNamesToAdd([])
       showToast(message, { tone: 'success' })
+      return true
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to update team agents')
+      const message = e instanceof Error ? e.message : 'Failed to update team agents'
+      setError(message)
+      setAgentAccessDialogError(message)
+      return false
     } finally {
       setBusy(false)
     }
@@ -568,8 +600,7 @@ export default function TeamDetailsPage() {
         .map(user => ({
           value: user.id,
           label: user.displayName || user.name || user.email || user.id,
-          description: user.email || user.id,
-          badge: user.activeTeamCount === 1 ? '1 team' : `${user.activeTeamCount} teams`,
+          badge: user.email || user.id,
         })),
     [existingMemberIds, users]
   )
@@ -580,7 +611,7 @@ export default function TeamDetailsPage() {
         .map(agentName => ({
           value: agentName,
           label: getAgentDisplayName(agentName, hosts),
-          description: agentName,
+          badge: agentName,
         })),
     [effectiveAgentNames, hostNameOptions, hosts]
   )
@@ -615,7 +646,12 @@ export default function TeamDetailsPage() {
       <button
         type="button"
         className="cu-btn cu-btn--primary cu-btn--sm"
-        onClick={() => setShowAddAgent(true)}
+        onClick={() => {
+          setAgentAccessDialogError('')
+          setSelectedAgentNamesToAdd([])
+          setAgentSearchQuery('')
+          setShowAddAgent(true)
+        }}
         disabled={busy}
       >
         Add agent
@@ -626,40 +662,7 @@ export default function TeamDetailsPage() {
     <DetailPageShell<TeamTab>
       activeTab={activeTab}
       actions={
-        isNew ? null : editingName ? (
-          <div className="cu-inline-edit cu-inline-edit--header">
-            <input
-              className="cu-inline-edit__input"
-              value={nameBuffer}
-              onChange={e => setNameBuffer(e.target.value)}
-              onKeyDown={e => {
-                if (e.key === 'Enter') void saveTeamName()
-                if (e.key === 'Escape') setEditingName(false)
-              }}
-              disabled={busy}
-              aria-label="Team name"
-              autoFocus
-            />
-            <button
-              type="button"
-              className="cu-btn cu-btn--icon cu-btn--toolbar cu-inline-edit__save"
-              onClick={() => void saveTeamName()}
-              disabled={busy || !nameBuffer.trim()}
-              aria-label="Save name"
-            >
-              <IconCheck width={18} height={18} />
-            </button>
-            <button
-              type="button"
-              className="cu-btn cu-btn--icon cu-btn--ghost"
-              onClick={() => setEditingName(false)}
-              disabled={busy}
-              aria-label="Cancel editing"
-            >
-              <IconX width={16} height={16} />
-            </button>
-          </div>
-        ) : (
+        isNew ? null : (
           <>
             <TeamActionsMenu
               busy={busy}
@@ -674,6 +677,7 @@ export default function TeamDetailsPage() {
         )
       }
       backLabel="Back to teams"
+      contentClassName={isNew ? undefined : 'cu-detail-content-stack--panel-continuation'}
       error={error}
       icon={<IconUsers />}
       onBack={() => router.push(CONTROL_ROUTES.usersAndTeams.teams)}
@@ -964,77 +968,96 @@ export default function TeamDetailsPage() {
             {activeTab === 'agents' && (
               <>
                 <p className="cu-muted cu-detail-section-copy">Agents this team may use.</p>
-                {initialLoading ? (
-                  <div role="list">
-                    {[1, 2, 3].map(i => (
-                      <div key={i} className="cu-skeleton--row" role="listitem">
-                        <div
-                          className="cu-skeleton cu-skeleton--cell"
-                          style={{ width: '10rem' }}
-                        ></div>
-                        <div
-                          className="cu-skeleton cu-skeleton--cell"
-                          style={{ width: '4rem' }}
-                        ></div>
-                      </div>
-                    ))}
-                  </div>
-                ) : effectiveAgentNames.length === 0 ? (
-                  <div className="cu-empty" style={{ padding: '0.5rem 0' }}>
-                    No agent access yet.
-                  </div>
-                ) : (
-                  <RecordList>
-                    {effectiveAgentNames.map(agentName => {
-                      // Rename propagation: display name (spec.host) — same
-                      // resolution as the add-agent picker on this page. Links
-                      // and actions stay keyed by the immutable slug.
-                      // Review R1-H1: display names are not unique, so the slug
-                      // stays visible as secondary identity whenever it differs,
-                      // and the action label carries it to keep duplicates
-                      // distinguishable and correctly targeted.
-                      const agentDisplayName = getAgentDisplayName(agentName, hosts)
-                      const agentRowLabel =
-                        agentDisplayName === agentName
-                          ? agentDisplayName
-                          : `${agentDisplayName} (${agentName})`
-                      return (
-                        <RecordListRow key={agentName} className="cu-access-row">
-                          <div className="cu-access-agent-copy">
-                            <button
-                              type="button"
-                              className="cu-link"
-                              onClick={() => router.push(CONTROL_ROUTES.agents.detail(agentName))}
-                            >
-                              {agentDisplayName}
-                            </button>
-                            {agentDisplayName !== agentName ? (
-                              <span className="cu-access-agent-id">{agentName}</span>
-                            ) : null}
-                          </div>
-                          <RowActionMenu
-                            ariaLabel={`Actions for agent ${agentRowLabel}`}
-                            actions={[
-                              {
-                                key: 'view',
-                                label: 'View agent details',
-                                onSelect: () =>
-                                  router.push(CONTROL_ROUTES.agents.detail(agentName)),
-                              },
-                              {
-                                key: 'revoke',
-                                label: 'Revoke agent access',
-                                danger: true,
-                                disabled: busy,
-                                onSelect: () => void revokeAgentAccess(agentName),
-                              },
-                            ]}
-                          />
-                        </RecordListRow>
-                      )
-                    })}
-                  </RecordList>
-                )}
+                <TableViewport className="cu-table-wrap">
+                  <DataTable className="eft-table cu-table">
+                    <thead>
+                      <tr>
+                        <th>Agent</th>
+                        <th>Agent ID</th>
+                        <th></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {initialLoading ? (
+                        [1, 2, 3].map(i => (
+                          <tr key={i}>
+                            <td>
+                              <div
+                                className="cu-skeleton cu-skeleton--cell"
+                                style={{ width: '10rem' }}
+                              ></div>
+                            </td>
+                            <td>
+                              <div
+                                className="cu-skeleton cu-skeleton--cell"
+                                style={{ width: '8rem' }}
+                              ></div>
+                            </td>
+                            <td></td>
+                          </tr>
+                        ))
+                      ) : effectiveAgentNames.length === 0 ? (
+                        <tr>
+                          <td colSpan={3}>
+                            <div className="cu-empty cu-empty--compact">No agent access yet.</div>
+                          </td>
+                        </tr>
+                      ) : (
+                        effectiveAgentNames.map(agentName => {
+                          // Rename propagation: display name (spec.host) — same
+                          // resolution as the add-agent picker on this page. Links
+                          // and actions stay keyed by the immutable slug.
+                          // Review R1-H1: display names are not unique, so keep
+                          // the slug visible as the stable identity and include
+                          // it in the action label to target duplicates safely.
+                          const agentDisplayName = getAgentDisplayName(agentName, hosts)
+                          const agentRowLabel =
+                            agentDisplayName === agentName
+                              ? agentDisplayName
+                              : `${agentDisplayName} (${agentName})`
+                          return (
+                            <tr key={agentName}>
+                              <td>
+                                <button
+                                  type="button"
+                                  className="cu-link"
+                                  onClick={() =>
+                                    router.push(CONTROL_ROUTES.agents.detail(agentName))
+                                  }
+                                >
+                                  {agentDisplayName}
+                                </button>
+                              </td>
+                              <td>
+                                <span className="cu-access-agent-id">{agentName}</span>
+                              </td>
+                              <td className="cu-table__cell-actions">
+                                <RowActionMenu
+                                  ariaLabel={`Actions for agent ${agentRowLabel}`}
+                                  actions={[
+                                    {
+                                      key: 'view',
+                                      label: 'View agent details',
+                                      onSelect: () =>
+                                        router.push(CONTROL_ROUTES.agents.detail(agentName)),
+                                    },
+                                    {
+                                      key: 'revoke',
+                                      label: 'Revoke agent access',
+                                      danger: true,
+                                      disabled: busy,
+                                      onSelect: () => void revokeAgentAccess(agentName),
+                                    },
+                                  ]}
+                                />
+                              </td>
+                            </tr>
+                          )
+                        })
+                      )}
+                    </tbody>
+                  </DataTable>
+                </TableViewport>
               </>
             )}
           </>
@@ -1104,244 +1127,182 @@ export default function TeamDetailsPage() {
         </div>
       ) : null}
 
-      {showAddMember && (
-        <div
-          style={{
-            position: 'fixed',
-            inset: 0,
-            background: 'rgba(0, 0, 0, 0.6)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            zIndex: 1000,
-            padding: '1rem',
-          }}
-          role="presentation"
-          onClick={e => {
-            if (e.target === e.currentTarget && !addingMember) setShowAddMember(false)
-          }}
-        >
-          <div
-            className="cu-modal-panel cu-modal-panel--selection"
-            role="dialog"
-            aria-labelledby="add-member-title"
-            onClick={e => e.stopPropagation()}
-          >
-            <div className="cu-modal-panel__head">
-              <strong id="add-member-title" style={{ fontSize: '1rem', lineHeight: 1.35 }}>
-                Add member
-              </strong>
-              <button
-                type="button"
-                className="cu-btn cu-btn--icon cu-btn--ghost"
-                onClick={() => setShowAddMember(false)}
-                disabled={addingMember}
-                aria-label="Close"
-              >
-                <IconX width={18} height={18} />
-              </button>
-            </div>
+      <DialogShell
+        busy={addingMember}
+        error={addMemberError || undefined}
+        footer={
+          <>
+            <button
+              className="eft-dialog__button eft-dialog__button--secondary"
+              disabled={addingMember}
+              onClick={dismissAddMemberDialog}
+              type="button"
+            >
+              Cancel
+            </button>
+            <button
+              className="eft-dialog__button eft-dialog__button--primary"
+              disabled={
+                addingMember ||
+                (addMemberMode === 'existing'
+                  ? selectedUserIdsToAdd.length === 0
+                  : !inviteName.trim() || !inviteEmail.trim())
+              }
+              onClick={() => void (addMemberMode === 'existing' ? addMember() : inviteMember())}
+              type="button"
+            >
+              {addingMember
+                ? addMemberMode === 'existing'
+                  ? 'Adding…'
+                  : 'Sending…'
+                : addMemberMode === 'existing'
+                  ? selectedUserIdsToAdd.length > 1
+                    ? 'Add members'
+                    : 'Add member'
+                  : 'Send invite'}
+            </button>
+          </>
+        }
+        onDismiss={dismissAddMemberDialog}
+        open={showAddMember}
+        size="large"
+        title="Add member"
+      >
+        <TabBar<'existing' | 'invite'>
+          ariaLabel="Member creation mode"
+          activeValue={addMemberMode}
+          className="cu-tabs--flush"
+          onChange={setAddMemberMode}
+          options={[
+            { value: 'existing', label: 'Existing member', disabled: addingMember },
+            { value: 'invite', label: 'Invite by email', disabled: addingMember },
+          ]}
+        />
 
-            <TabBar<'existing' | 'invite'>
-              ariaLabel="Member creation mode"
-              activeValue={addMemberMode}
-              className="cu-tabs--flush"
-              onChange={setAddMemberMode}
-              options={[
-                {
-                  value: 'existing',
-                  label: 'Existing member',
-                  disabled: addingMember,
-                },
-                {
-                  value: 'invite',
-                  label: 'Invite by email',
-                  disabled: addingMember,
-                },
-              ]}
-            />
-
-            {addMemberMode === 'existing' ? (
-              <>
-                <div className="cu-field" style={{ marginBottom: 0 }}>
-                  <label htmlFor="team-member-picker">Members</label>
-                  <SelectionDropdown
-                    id="team-member-picker"
-                    inline
-                    value={selectedUserIdsToAdd}
-                    onChange={setSelectedUserIdsToAdd}
-                    options={availableMemberOptions}
-                    placeholder="Select members"
-                    searchPlaceholder="Search members..."
-                    selectionLabel="Selected members"
-                    emptyLabel="No available members."
-                    disabled={addingMember}
-                  />
-                </div>
-                <div className="cu-field" style={{ marginBottom: 0 }}>
-                  <label>Role</label>
-                  <select
-                    value={selectedRoleToAdd}
-                    onChange={e => setSelectedRoleToAdd(e.target.value as Role)}
-                    disabled={addingMember}
-                  >
-                    <option value="member">Participant</option>
-                    <option value="inviter">Inviter</option>
-                    <option value="admin">Leader</option>
-                  </select>
-                </div>
-              </>
-            ) : (
-              <InviteMemberDialog
-                isOpen
-                embedded
-                busy={addingMember}
-                error={addMemberError}
-                name={inviteName}
-                email={inviteEmail}
-                role={inviteRole}
-                teamId={teamId}
-                teams={[{ id: teamId, name: teamName || teamId }]}
-                lockedTeamId={teamId}
-                title="Invite member by email"
-                submitLabel="Send invite"
-                onClose={() => {
-                  setShowAddMember(false)
-                  setInviteName('')
-                  setInviteEmail('')
-                  setInviteRole('member')
-                  setAddMemberError('')
-                }}
-                onNameChange={setInviteName}
-                onEmailChange={setInviteEmail}
-                onRoleChange={setInviteRole}
-                onTeamChange={() => undefined}
-                onSubmit={() => void inviteMember()}
-              />
-            )}
-
-            {addMemberMode === 'existing' && addMemberError ? (
-              <div className="cu-banner cu-banner--error">{addMemberError}</div>
-            ) : null}
-
-            {addMemberMode === 'existing' ? (
-              <div className="cu-modal-panel__foot">
-                <button
-                  type="button"
-                  className="cu-btn cu-btn--ghost cu-btn--sm"
-                  onClick={() => setShowAddMember(false)}
-                  disabled={addingMember}
-                >
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  className="cu-btn cu-btn--primary"
-                  onClick={() => void (addMemberMode === 'existing' ? addMember() : inviteMember())}
-                  disabled={
-                    addingMember ||
-                    (addMemberMode === 'existing'
-                      ? selectedUserIdsToAdd.length === 0
-                      : !inviteName.trim() || !inviteEmail.trim())
-                  }
-                >
-                  {addingMember
-                    ? 'Adding…'
-                    : addMemberMode === 'existing'
-                      ? selectedUserIdsToAdd.length > 1
-                        ? 'Add members'
-                        : 'Add member'
-                      : 'Send invite'}
-                </button>
-              </div>
-            ) : null}
-          </div>
-        </div>
-      )}
-
-      {showAddAgent && (
-        <div
-          style={{
-            position: 'fixed',
-            inset: 0,
-            background: 'rgba(0, 0, 0, 0.6)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            zIndex: 1000,
-            padding: '1rem',
-          }}
-          role="presentation"
-          onClick={e => {
-            if (e.target === e.currentTarget && !busy) setShowAddAgent(false)
-          }}
-        >
-          <div
-            className="cu-modal-panel cu-modal-panel--selection"
-            role="dialog"
-            aria-labelledby="add-agent-title"
-            onClick={e => e.stopPropagation()}
-          >
-            <div className="cu-modal-panel__head">
-              <strong id="add-agent-title" style={{ fontSize: '1rem', lineHeight: 1.35 }}>
-                Add agent
-              </strong>
-              <button
-                type="button"
-                className="cu-btn cu-btn--icon cu-btn--ghost"
-                onClick={() => setShowAddAgent(false)}
-                disabled={busy}
-                aria-label="Close"
-              >
-                <IconX width={18} height={18} />
-              </button>
-            </div>
-
+        {addMemberMode === 'existing' ? (
+          <>
             <div className="cu-field">
-              <label htmlFor="team-agent-picker">Agents</label>
+              <label htmlFor="team-member-picker">Members</label>
               <SelectionDropdown
-                id="team-agent-picker"
+                id="team-member-picker"
                 inline
-                value={selectedAgentNamesToAdd}
-                onChange={setSelectedAgentNamesToAdd}
-                options={availableAgentOptions}
-                placeholder="Select agents"
-                searchPlaceholder="Search agents..."
-                selectionLabel="Selected agents"
-                emptyLabel="No available agents."
-                disabled={busy}
+                value={selectedUserIdsToAdd}
+                onChange={setSelectedUserIdsToAdd}
+                options={availableMemberOptions}
+                placeholder="Select members"
+                searchPlaceholder="Search members..."
+                selectionLabel="Selected members"
+                emptyLabel="No available members."
+                disabled={addingMember}
               />
             </div>
-
-            <div className="cu-modal-panel__foot">
-              <button
-                type="button"
-                className="cu-btn cu-btn--ghost cu-btn--sm"
-                onClick={() => setShowAddAgent(false)}
-                disabled={busy}
+            <div className="cu-field">
+              <label htmlFor="team-member-role">Role</label>
+              <select
+                id="team-member-role"
+                value={selectedRoleToAdd}
+                onChange={e => setSelectedRoleToAdd(e.target.value as Role)}
+                disabled={addingMember}
               >
-                Cancel
-              </button>
-              <button
-                type="button"
-                className="cu-btn cu-btn--primary"
-                onClick={() => {
-                  void saveAgents(
-                    [...effectiveAgentNames, ...selectedAgentNamesToAdd],
-                    selectedAgentNamesToAdd.length === 1
-                      ? 'Team agent access updated.'
-                      : 'Team agents access updated.'
-                  )
-                  setShowAddAgent(false)
-                }}
-                disabled={busy || selectedAgentNamesToAdd.length === 0}
-              >
-                {selectedAgentNamesToAdd.length > 1 ? 'Add agents' : 'Add agent'}
-              </button>
+                <option value="member">Participant</option>
+                <option value="inviter">Inviter</option>
+                <option value="admin">Leader</option>
+              </select>
             </div>
-          </div>
+          </>
+        ) : (
+          <InviteMemberDialog
+            isOpen
+            embedded
+            showFooter={false}
+            busy={addingMember}
+            name={inviteName}
+            email={inviteEmail}
+            role={inviteRole}
+            teamId={teamId}
+            teams={[{ id: teamId, name: teamName || teamId }]}
+            lockedTeamId={teamId}
+            title="Invite member by email"
+            submitLabel="Send invite"
+            onClose={dismissAddMemberDialog}
+            onNameChange={setInviteName}
+            onEmailChange={setInviteEmail}
+            onRoleChange={setInviteRole}
+            onTeamChange={() => undefined}
+            onSubmit={() => void inviteMember()}
+          />
+        )}
+      </DialogShell>
+
+      <DialogShell
+        busy={busy}
+        error={agentAccessDialogError || undefined}
+        footer={
+          <>
+            <button
+              className="eft-dialog__button eft-dialog__button--secondary"
+              disabled={busy}
+              onClick={() => {
+                if (busy) return
+                setShowAddAgent(false)
+                setSelectedAgentNamesToAdd([])
+                setAgentAccessDialogError('')
+                setAgentSearchQuery('')
+              }}
+              type="button"
+            >
+              Cancel
+            </button>
+            <button
+              className="eft-dialog__button eft-dialog__button--primary"
+              disabled={busy || selectedAgentNamesToAdd.length === 0}
+              onClick={async () => {
+                const saved = await saveAgents(
+                  [...effectiveAgentNames, ...selectedAgentNamesToAdd],
+                  selectedAgentNamesToAdd.length === 1
+                    ? 'Team agent access updated.'
+                    : 'Team agents access updated.'
+                )
+                if (saved) {
+                  setShowAddAgent(false)
+                  setAgentSearchQuery('')
+                }
+              }}
+              type="button"
+            >
+              {busy ? 'Adding…' : selectedAgentNamesToAdd.length > 1 ? 'Add agents' : 'Add agent'}
+            </button>
+          </>
+        }
+        onDismiss={() => {
+          if (busy) return
+          setShowAddAgent(false)
+          setSelectedAgentNamesToAdd([])
+          setAgentAccessDialogError('')
+          setAgentSearchQuery('')
+        }}
+        open={showAddAgent}
+        size="large"
+        title="Add agent access"
+      >
+        <div className="cu-field">
+          <label htmlFor="team-agent-picker">Agents</label>
+          <SelectionDropdown
+            className="cu-agent-grant-picker"
+            disabled={busy}
+            emptyLabel={agentSearchQuery.trim() ? 'No matching agents.' : 'No available agents.'}
+            id="team-agent-picker"
+            inline
+            onChange={setSelectedAgentNamesToAdd}
+            onSearchQueryChange={setAgentSearchQuery}
+            options={availableAgentOptions}
+            placeholder="Select agents"
+            searchPlaceholder="Search agents..."
+            selectionLabel="Selected agents"
+            value={selectedAgentNamesToAdd}
+          />
         </div>
-      )}
+      </DialogShell>
 
       {showDeleteTeamConfirm && (
         <div
@@ -1411,6 +1372,38 @@ export default function TeamDetailsPage() {
           </div>
         </div>
       )}
+
+      <SingleValueEditDialog
+        discardLabel="Cancel"
+        error={renameError || undefined}
+        initialValue={teamName}
+        isValid={renameValid}
+        onDismiss={() => {
+          if (busy) return
+          setRenameOpen(false)
+          setRenameError('')
+        }}
+        onSave={value => void saveTeamName(value)}
+        open={renameOpen}
+        pending={busy}
+        renderEditor={({ value, onChange, disabled }) => (
+          <div className="cu-field">
+            <label htmlFor="rename-team-name">Team name</label>
+            <input
+              aria-label="Team name"
+              disabled={disabled}
+              id="rename-team-name"
+              onChange={event => {
+                setRenameValid(Boolean(event.target.value.trim()))
+                onChange(event.target.value)
+              }}
+              value={value}
+            />
+          </div>
+        )}
+        saveLabel="Rename team"
+        title="Rename team"
+      />
 
       {confirmDialog}
     </DetailPageShell>

@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useEffect, useMemo, useRef, useState } from 'react'
+import React, { useEffect, useId, useMemo, useRef, useState } from 'react'
 import {
   MAX_EGRESS_BINDINGS,
   buildMcpEgressStatus,
@@ -33,6 +33,10 @@ export function EgressEditor({
   const [mode, setMode] = useState<EgressMode>(initial.mode)
   const [domainInput, setDomainInput] = useState(initial.domainInput)
   const [portInput, setPortInput] = useState(initial.portInput)
+  const egressEditorId = useId().replace(/:/g, '-')
+  const egressModeId = `egress-mode-${egressEditorId}`
+  const egressTargetId = `egress-target-${egressEditorId}`
+  const egressPortId = `egress-port-${egressEditorId}`
   const skippedInitialEmitRef = useRef(false)
   const onChangeRef = useRef(onChange)
 
@@ -67,11 +71,11 @@ export function EgressEditor({
     <FormSection description={description} title={title}>
       <Field
         description="Default is closed. Choose exact-host for known APIs or public-web only when hosts are not deterministic."
-        htmlFor="egress-mode"
+        htmlFor={egressModeId}
         label="Egress mode"
       >
         <SelectInput
-          id="egress-mode"
+          id={egressModeId}
           onChange={event => setMode(event.target.value as EgressMode)}
           value={mode}
         >
@@ -97,11 +101,13 @@ export function EgressEditor({
         <>
           <Field
             description="Comma- or newline-separated public DNS hostnames. Do not enter URLs, wildcards, IPs, or cluster-local names."
+            htmlFor={egressTargetId}
             label="Allowed domains"
             required
           >
             <textarea
               className="cu-input cu-input--monospace"
+              id={egressTargetId}
               onChange={event => setDomainInput(event.target.value)}
               placeholder="api.example.com, auth.example.com"
               rows={3}
@@ -110,10 +116,12 @@ export function EgressEditor({
           </Field>
           <Field
             description="Comma- or newline-separated TCP ports."
+            htmlFor={egressPortId}
             label="Allowed ports"
             required
           >
             <TextInput
+              id={egressPortId}
               monospace
               onChange={event => setPortInput(event.target.value)}
               placeholder="443"
@@ -127,11 +135,13 @@ export function EgressEditor({
         <>
           <Field
             description="Comma- or newline-separated public IPv4 CIDRs or IPs. Private, metadata, link-local, documentation, multicast, and reserved ranges are blocked."
+            htmlFor={egressTargetId}
             label="Allowed CIDRs/IPs"
             required
           >
             <textarea
               className="cu-input cu-input--monospace"
+              id={egressTargetId}
               onChange={event => setDomainInput(event.target.value)}
               placeholder="203.0.114.10/32, 8.8.8.8"
               rows={3}
@@ -140,10 +150,12 @@ export function EgressEditor({
           </Field>
           <Field
             description="Comma- or newline-separated TCP ports."
+            htmlFor={egressPortId}
             label="Allowed ports"
             required
           >
             <TextInput
+              id={egressPortId}
               monospace
               onChange={event => setPortInput(event.target.value)}
               placeholder="443"

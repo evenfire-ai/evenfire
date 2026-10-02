@@ -242,12 +242,12 @@ describe('services/mcpProxyService', () => {
     })
   })
 
-  it('returns null on forbidden host resolution', async () => {
+  it('resolves a forbidden host to a non-revoking denial when control-api gives no reason', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
       mkResponse(403, JSON.stringify({ error: 'Forbidden' }))
     )
     const host = await resolveHostConnectionForUser('user-1', 'agent2', 'rpc-token')
-    expect(host).toBeNull()
+    expect(host).toEqual({ denied: true, code: 'host_access_denied' })
   })
 
   it('forwards host message and returns REST response body', async () => {

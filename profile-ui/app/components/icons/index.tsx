@@ -96,3 +96,18 @@ export function IconCopy({ height = 16, width = 16 }: IconProps) {
     </svg>
   )
 }
+
+export function IconExternalLink({ height = 16, width = 16 }: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" width={width} height={height} aria-hidden="true">
+      <path
+        d="M14 3h7v7m0-7-11 11m8-2v7a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1h7"
+        fill="none"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="2"
+      />
+    </svg>
+  )
+}

@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { DesktopCommandId, DesktopCommandSource } from './desktopCommands.js'
 import type { PluginConsentRequest } from './pluginSdkProtocol.js'
 import type {
+  EntityChangeStreamEvent,
   HostMessageRequest,
   ProfileSettingsOpenOptions,
   SandboxUiDeepLinkEnvelope,
@@ -105,11 +106,19 @@ const clerum = Object.freeze({
       return () => ipcRenderer.off('auth:desktopSetupToken', listener)
     },
     onDesktopEnvironmentSetup: (
-      callback: (payload: { externalRestApiBaseUrl: string; appName?: string }) => void
+      callback: (payload: {
+        externalRestApiBaseUrl: string
+        rpcProxyBaseUrl: string
+        appName?: string
+      }) => void
     ) => {
       const listener = (
         _event: Electron.IpcRendererEvent,
-        payload: { externalRestApiBaseUrl: string; appName?: string }
+        payload: {
+          externalRestApiBaseUrl: string
+          rpcProxyBaseUrl: string
+          appName?: string
+        }
       ) => callback(payload)
       ipcRenderer.on('auth:desktopEnvironmentSetup', listener)
       return () => ipcRenderer.off('auth:desktopEnvironmentSetup', listener)
@@ -289,6 +298,41 @@ const clerum = Object.freeze({
         ok: boolean
         status: string
       }>,
+  },
+  entityChanges: {
+    subscribe: async (onEvent: (event: EntityChangeStreamEvent) => void) => {
+      let streamId = ''
+      const pending: unknown[] = []
+      const listener = (_event: unknown, payload: unknown) => {
+        const parsed = payload as { streamId?: string; event?: EntityChangeStreamEvent }
+        if (!streamId) {
+          if (pending.length < 100) pending.push(payload)
+          return
+        }
+        if (parsed?.streamId === streamId && parsed.event) onEvent(parsed.event)
+      }
+      ipcRenderer.on('entityChanges:streamEvent', listener)
+      try {
+        const started = (await ipcRenderer.invoke('entityChanges:streamStart')) as {
+          streamId: string
+        }
+        streamId = String(started?.streamId || '').trim()
+        if (!streamId) throw new Error('Failed to start entity-change stream')
+        for (const item of pending) {
+          const parsed = item as { streamId?: string; event?: EntityChangeStreamEvent }
+          if (parsed?.streamId === streamId && parsed.event) onEvent(parsed.event)
+        }
+        pending.length = 0
+      } catch (error) {
+        ipcRenderer.removeListener('entityChanges:streamEvent', listener)
+        throw error
+      }
+
+      return async () => {
+        ipcRenderer.removeListener('entityChanges:streamEvent', listener)
+        await ipcRenderer.invoke('entityChanges:streamStop', { streamId })
+      }
+    },
   },
   notificationPreferences: {
     get: () => ipcRenderer.invoke('notificationPreferences:get'),
@@ -578,14 +622,19 @@ const clerum = Object.freeze({
     list: (agentRef: string) => ipcRenderer.invoke('chat:list', { agentRef }),
     create: (agentRef: string, chatId: string) =>
       ipcRenderer.invoke('chat:create', { agentRef, chatId }),
-    rename: (agentRef: string, chatId: string, title: string) =>
-      ipcRenderer.invoke('chat:rename', { agentRef, chatId, title }),
-    delete: (agentRef: string, chatId: string) =>
-      ipcRenderer.invoke('chat:delete', { agentRef, chatId }),
+    rename: (agentRef: string, chatId: string, title: string, bindingGeneration: number) =>
+      ipcRenderer.invoke('chat:rename', { agentRef, chatId, title, bindingGeneration }),
+    getBindingGeneration: () => ipcRenderer.invoke('chat:bindingGeneration'),
+    captureDeleteFence: (expectedAuthorityScope: import('./types.js').ChatAuthorityScope) =>
+      ipcRenderer.invoke('chat:captureDeleteFence', { expectedAuthorityScope }),
+    delete: (agentRef: string, chatId: string, fence: import('./types.js').ChatDeleteFence) =>
+      ipcRenderer.invoke('chat:delete', { version: 3, agentRef, chatId, fence }),
     loadMessages: (agentRef: string, chatId: string, limit?: number, offset?: number) =>
       ipcRenderer.invoke('chat:loadMessages', { agentRef, chatId, limit, offset }),
     appendMessages: (agentRef: string, chatId: string, messages: unknown[]) =>
       ipcRenderer.invoke('chat:appendMessages', { agentRef, chatId, messages }),
+    upsertMessages: (agentRef: string, chatId: string, messages: unknown[]) =>
+      ipcRenderer.invoke('chat:upsertMessages', { agentRef, chatId, messages }),
     replaceMessages: (
       agentRef: string,
       chatId: string,
@@ -713,11 +762,23 @@ const clerum = Object.freeze({
       return () => ipcRenderer.off('pluginSdk:consentCancelled', listener)
     },
     onOpenGfsResource: (
-      callback: (args: { gfsUri: string; name: string; kind: string; bytes: number | null }) => void
+      callback: (args: {
+        gfsUri: string
+        name: string
+        kind: string
+        bytes: number | null
+        version?: number
+      }) => void
     ) => {
       const listener = (
         _event: unknown,
-        args: { gfsUri: string; name: string; kind: string; bytes: number | null }
+        args: {
+          gfsUri: string
+          name: string
+          kind: string
+          bytes: number | null
+          version?: number
+        }
       ) => callback(args)
       ipcRenderer.on('pluginSdk:openGfsResource', listener)
       return () => ipcRenderer.off('pluginSdk:openGfsResource', listener)

@@ -2,6 +2,13 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   name: workflowrecipepolicies.clerum.io
+  annotations:
+    clerum.io/secret-reference-contract: |-
+      {
+        "version": 1,
+        "plural": "workflowrecipepolicies",
+        "fields": []
+      }
   labels:
     app.kubernetes.io/name: workflowrecipepolicy
     app.kubernetes.io/part-of: clerum

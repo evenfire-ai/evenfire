@@ -27,7 +27,7 @@ function fullSecret(
   return {
     apiVersion: 'v1',
     kind: 'Secret',
-    metadata: { name, namespace, resourceVersion: '7', labels },
+    metadata: { name, namespace, resourceVersion: '7', uid: `uid-${name}`, labels },
     type: 'Opaque',
     data,
   }
@@ -135,9 +135,12 @@ describe('SECURITY (integration): admin secret-write responses are names-only', 
   })
 
   it('DELETE /admin/secrets/:name returns a names-only summary, not a Secret body', async () => {
-    const { app } = makeApp({
-      written: fullSecret('svc-token', 'mcp-host', { token: b64(LEAK) }),
-    })
+    // Delete reads the live object first to refuse controller-owned types, so
+    // the Secret must exist. That read returns a FULL V1Secret with base64
+    // `.data` — which is precisely what makes this a real leak test: the only
+    // reason the response below is names-only is the SecretService trim.
+    const live = fullSecret('svc-token', 'mcp-host', { token: b64(LEAK) })
+    const { app } = makeApp({ existing: live, written: live })
     const res = await request(app).delete('/admin/secrets/svc-token').expect(200)
     expect(res.body).toMatchObject({ name: 'svc-token', deleted: true })
     expectNoSecretValues(res.body)

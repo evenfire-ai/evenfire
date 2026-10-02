@@ -15,6 +15,7 @@ import {
   ProviderAttemptAuthorizer,
   resolveCodexAuthorizeUrl,
 } from '../providerAttemptAuthorizer'
+import { closedPortUrl, fetchFailure, silentServer } from './connectFailureFixtures'
 
 const validAuthorize = {
   providerAttemptId: 'attempt-1',
@@ -295,6 +296,103 @@ describe('ProviderAttemptAuthorizer', () => {
     })
   })
 
+  // G1-6 (#720): a limiter in front of control-api can answer 429 with no JSON
+  // code. It is a rate limit, not a provider outage.
+  it('G1-6d reads an HTML 429 from the gateway as rate_limited', async () => {
+    const { err, fetchFn } = await authorizeFailure(nginx(429, 'Too Many Requests'))
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(err).toBeInstanceOf(CodexAuthorizeError)
+    expect(err).toMatchObject({ code: 'rate_limited', message: 'authorize failed with 429' })
+  })
+
+  it('G1-6d keeps the JSON code a 429 carries', async () => {
+    const { err, fetchFn } = await authorizeFailure(
+      Response.json({ error: 'budget_denied' }, { status: 429 })
+    )
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(err).toMatchObject({ code: 'budget_denied' })
+  })
+
+  // G1-11 (#720, review R1-B1): control-api's authorize limiters
+  // (`workflowGrantEdgeRateLimitHandler`, `rateLimitMiddleware`) answer 429
+  // with a reason phrase and `Retry-After`. On a 429 only a machine code wins.
+  it('G1-11d reads the control-api limiter 429 as rate_limited with its Retry-After', async () => {
+    const { err, fetchFn } = await authorizeFailure(
+      Response.json(
+        { error: 'Too Many Requests', retryAfterSeconds: 9 },
+        { status: 429, headers: { 'retry-after': '9' } }
+      )
+    )
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(err).toBeInstanceOf(CodexAuthorizeError)
+    expect(err).toMatchObject({
+      code: 'rate_limited',
+      retryAfterMs: 9000,
+      message: 'authorize failed with 429',
+    })
+  })
+
+  it('G1-11d carries the Retry-After of an HTML 429 and of a JSON code', async () => {
+    const html = await authorizeFailure(
+      new Response('<html><body>Too Many Requests</body></html>', {
+        status: 429,
+        headers: { 'content-type': 'text/html', 'retry-after': '3' },
+      })
+    )
+    const coded = await authorizeFailure(
+      Response.json({ error: 'budget_denied' }, { status: 429, headers: { 'retry-after': '3' } })
+    )
+    expect(html.fetchFn).toHaveBeenCalledTimes(1)
+    expect(coded.fetchFn).toHaveBeenCalledTimes(1)
+    expect(html.err).toMatchObject({ code: 'rate_limited', retryAfterMs: 3000 })
+    expect(coded.err).toMatchObject({ code: 'budget_denied', retryAfterMs: 3000 })
+  })
+
+  // Review round 2 L7: the authorize 429 applies the same Retry-After rule as
+  // the proxy clients, both ends of 1..3600 included.
+  it.each(['0', '3601', 'soon', '1.5', 'Wed, 21 Oct 2026 07:28:00 GMT', ''])(
+    'G1-11d drops the authorize 429 Retry-After value %j instead of guessing',
+    async value => {
+      const { err, fetchFn } = await authorizeFailure(
+        Response.json(
+          { error: 'Too Many Requests' },
+          { status: 429, headers: { 'retry-after': value } }
+        )
+      )
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+      // Witness: the 429 rule ran for this value.
+      expect(err).toMatchObject({ code: 'rate_limited' })
+      expect((err as CodexAuthorizeError).retryAfterMs).toBeUndefined()
+    }
+  )
+
+  it.each([
+    ['1', 1000],
+    ['3600', 3_600_000],
+  ])('G1-11d carries an authorize 429 Retry-After of exactly %s', async (value, ms) => {
+    const { err, fetchFn } = await authorizeFailure(
+      Response.json(
+        { error: 'Too Many Requests' },
+        { status: 429, headers: { 'retry-after': value } }
+      )
+    )
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(err).toMatchObject({ code: 'rate_limited', retryAfterMs: ms })
+  })
+
+  // Review round 2 M7: this pins only that the 429 rule does not fire. Which
+  // code a non-429 JSON error should get is a separate question.
+  it('G1-11d does not apply the 429 rule to a non-429 JSON error', async () => {
+    const { err, fetchFn } = await authorizeFailure(
+      Response.json({ error: 'Unauthorized' }, { status: 401, headers: { 'retry-after': '3' } })
+    )
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    // Witness: the non-ok branch ran and threw the authorize error.
+    expect(err).toBeInstanceOf(CodexAuthorizeError)
+    expect((err as CodexAuthorizeError).code).not.toBe('rate_limited')
+    expect((err as CodexAuthorizeError).retryAfterMs).toBeUndefined()
+  })
+
   it('T-R7-1c reads a 413 as payload_too_large whatever JSON code it carries', async () => {
     const { err, fetchFn } = await authorizeFailure(
       new Response(JSON.stringify({ error: 'invalid_request' }), {
@@ -426,5 +524,97 @@ describe('ProviderAttemptAuthorizer', () => {
     ).rejects.toThrow(/aborted/i)
     expect(fetchFn).toHaveBeenCalledTimes(1)
     expect(refreshOnUnauthorized).not.toHaveBeenCalled()
+  })
+})
+
+// G1-7 (#720): an authorize that no live gateway process answered is
+// control_plane_unavailable; a failure that may have reached one is not.
+describe('ProviderAttemptAuthorizer control-plane reachability', () => {
+  const BODY: AuthorizeAttemptBody = {
+    request: {},
+    invocationId: 'inv-1',
+    attemptGeneration: 1,
+    providerAttemptIndex: 1,
+    policyRevision: 1,
+    policyHash: 'b'.repeat(64),
+  }
+
+  function authorizerAt(gatewayBase: string, fetchFn?: typeof fetch): ProviderAttemptAuthorizer {
+    return new ProviderAttemptAuthorizer({
+      authorizeUrl: resolveCodexAuthorizeUrl(gatewayBase),
+      readPlatformJwt: () => 'platform-jwt',
+      ...(fetchFn ? { fetchFn } : {}),
+    })
+  }
+
+  it('G1-7a reads a refused connection as control_plane_unavailable', async () => {
+    const url = await closedPortUrl()
+    // Witness: the platform fetch fails this way against the closed port.
+    const raw = await fetch(`${url}/probe`).catch((caught: unknown) => caught)
+    expect(raw).toBeInstanceOf(TypeError)
+    expect((raw as { cause?: { code?: unknown } }).cause?.code).toBe('ECONNREFUSED')
+    const err = await authorizerAt(url)
+      .authorize(BODY)
+      .catch((caught: unknown) => caught)
+    expect(err).toBeInstanceOf(CodexAuthorizeError)
+    expect(err).toMatchObject({ code: 'control_plane_unavailable' })
+    expect((err as Error).message).toContain('ECONNREFUSED')
+  })
+
+  it.each(['ENOTFOUND', 'EAI_AGAIN', 'EHOSTUNREACH', 'ENETUNREACH', 'UND_ERR_CONNECT_TIMEOUT'])(
+    'G1-7b reads a %s fetch failure as control_plane_unavailable',
+    async code => {
+      const fetchFn = vi.fn<typeof fetch>(async () => {
+        throw fetchFailure(code)
+      })
+      await expect(
+        authorizerAt('http://gateway.invalid', fetchFn).authorize(BODY)
+      ).rejects.toMatchObject({
+        name: 'CodexAuthorizeError',
+        code: 'control_plane_unavailable',
+      })
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+    }
+  )
+
+  it('G1-7c rethrows a reset connection unchanged', async () => {
+    const failure = fetchFailure('ECONNRESET')
+    const fetchFn = vi.fn<typeof fetch>(async () => {
+      throw failure
+    })
+    await expect(authorizerAt('http://gateway.invalid', fetchFn).authorize(BODY)).rejects.toBe(
+      failure
+    )
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+  })
+
+  it('G1-7d rejects with the abort reason when the caller aborts a request in flight', async () => {
+    const server = await silentServer()
+    try {
+      const controller = new AbortController()
+      const reason = new Error('caller gave up')
+      const pending = authorizerAt(server.url)
+        .authorize(BODY, { signal: controller.signal })
+        .catch((caught: unknown) => caught)
+      // Witness: the request reached a live process before the abort.
+      await server.received
+      controller.abort(reason)
+      expect(await pending).toBe(reason)
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('G1-7d rethrows a connect-phase code unchanged once the caller aborted', async () => {
+    const controller = new AbortController()
+    const failure = fetchFailure('ECONNREFUSED')
+    const fetchFn = vi.fn<typeof fetch>(async () => {
+      controller.abort(new Error('caller gave up'))
+      throw failure
+    })
+    await expect(
+      authorizerAt('http://gateway.invalid', fetchFn).authorize(BODY, { signal: controller.signal })
+    ).rejects.toBe(failure)
+    expect(fetchFn).toHaveBeenCalledTimes(1)
   })
 })

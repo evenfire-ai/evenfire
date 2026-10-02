@@ -4,6 +4,7 @@ import { Pool } from 'pg'
 import { initDb, pool } from '../src/db.js'
 import { retireDesktopUser } from '../src/services/directory/users.js'
 import { gfsDesktopOperatorLinkService } from '../src/services/gfsDesktopOperatorLinkService.js'
+import { waitForDatabaseConnectionsToClose } from './realPostgresCleanup.ts'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
@@ -56,15 +57,14 @@ describeRealPostgres('retireDesktopUser on real PostgreSQL', () => {
 
   afterAll(async () => {
     corePoolConnectSpy?.mockRestore()
-    await testPool?.end()
     if (!adminPool) return
-    await adminPool.query(
-      `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
-        WHERE datname = $1 AND pid <> pg_backend_pid()`,
-      [database]
-    )
-    await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdent(database)}`)
-    await adminPool.end()
+    try {
+      await testPool?.end()
+      await waitForDatabaseConnectionsToClose(adminPool, database)
+      await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdent(database)}`)
+    } finally {
+      await adminPool.end()
+    }
   })
 
   it('persists the legacy deleted outcome and returns it on an identical replay', async () => {
@@ -110,6 +110,18 @@ describeRealPostgres('retireDesktopUser on real PostgreSQL', () => {
        VALUES (gen_random_uuid(), gen_random_uuid(), 1, $1::uuid, $2::uuid,
                'active', 'initial_setup', $2::uuid, 1)`,
       [userId, actorId]
+    )
+    await testPool.query(
+      `INSERT INTO workflow_approval_medium_accounts
+         (user_id, medium, provider_user_id, communication_channel_ref, verified_at)
+       VALUES ($1::uuid, 'telegram', $2, 'linked-approval-channel', NOW())`,
+      [userId, `tg-${userId}`]
+    )
+    await testPool.query(
+      `INSERT INTO workflow_approval_medium_challenges
+         (user_id, medium, provider_user_id, code_hash, expires_at)
+       VALUES ($1::uuid, 'telegram', $2, 'example-code-hash', NOW() + INTERVAL '10 minutes')`,
+      [userId, `tg-${userId}`]
     )
 
     const result = await retireDesktopUser(
@@ -174,6 +186,18 @@ describeRealPostgres('retireDesktopUser on real PostgreSQL', () => {
         lifecycle_operation_id: result.operationId,
       },
     ])
+    const approval = await testPool.query(
+      `SELECT disabled_at IS NOT NULL AS disabled
+         FROM workflow_approval_medium_accounts WHERE user_id = $1::uuid`,
+      [userId]
+    )
+    expect(approval.rows).toEqual([{ disabled: true }])
+    const challenge = await testPool.query(
+      `SELECT consumed_at IS NOT NULL AS consumed
+         FROM workflow_approval_medium_challenges WHERE user_id = $1::uuid`,
+      [userId]
+    )
+    expect(challenge.rows).toEqual([{ consumed: true }])
   })
 
   it('retires a user after the Control UI already revoked the link without changing the tombstone', async () => {

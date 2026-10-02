@@ -41,6 +41,7 @@ export function projectGfsApproval(approval: PendingApproval): PendingApproval {
       ? { completed_results: approval.completed_results.map(projectResult) }
       : {}),
     attachments: approval.attachments?.filter(a => a.visualSource?.kind !== 'gfs'),
+    ...(approval.sourceMessage ? { sourceMessage: approval.sourceMessage } : {}),
     ...(approval.task_budget ? { task_budget: approval.task_budget } : {}),
     ...(approval.legacy_budget ? { legacy_budget: approval.legacy_budget } : {}),
     ...(approval.replaces_request_id ? { replaces_request_id: approval.replaces_request_id } : {}),

@@ -31,6 +31,25 @@ export enum LlmErrorCode {
   RateLimited = 'LLM_RATE_LIMITED',
   AuthenticationFailed = 'LLM_AUTHENTICATION_FAILED',
   ModelOverloaded = 'LLM_MODEL_OVERLOADED',
+  /**
+   * Issue #720 — no control-plane process answered one hop of a subscription
+   * turn. mcp-host sets it from the JSON code `control_plane_unavailable`,
+   * never from an HTTP status. That code comes from a connect-phase failure
+   * (refused, unresolvable or timed-out connect) to the authorize gateway or a
+   * subscription proxy, from a proxy that could not reach control-api on
+   * redeem, or from the 503 JSON body the authorize and rpc gateways answer in
+   * place of their own 502. Retryable, with the failover class
+   * `provider_unavailable`; only the label differs from
+   * {@link LlmErrorCode.ModelOverloaded}.
+   */
+  ControlPlaneUnavailable = 'LLM_CONTROL_PLANE_UNAVAILABLE',
+  /**
+   * Issue #720 — a subscription proxy reported `upstream_rejected`: the
+   * provider answered a 4xx the proxy has no specific code for (Grok 402/403
+   * entitlement, 404, 409, 422). The same request gets the same answer, so it
+   * is not retryable and never fails over.
+   */
+  UpstreamRejected = 'LLM_UPSTREAM_REJECTED',
   /** One model response asked for more tool calls than the provider contract allows. */
   ToolCallLimitExceeded = 'LLM_TOOL_CALL_LIMIT_EXCEEDED',
   /**
@@ -68,6 +87,48 @@ export enum LlmErrorCode {
    * succeed, the user must choose another model.
    */
   ModelNotAllowed = 'LLM_MODEL_NOT_ALLOWED',
+}
+
+/**
+ * Issue #666 — rejections of an inline `kind:'file'` attachment at admission.
+ * All terminal: resending the same bytes cannot succeed. No code rejects a file
+ * for its type; an unreadable class is admitted and reported as `reader:'none'`.
+ */
+export enum FileAttachmentErrorCode {
+  /** Shape, encoding, declared size or file name is invalid. */
+  Invalid = 'FILE_ATTACHMENT_INVALID',
+  /** The decoded file exceeds `CLERUM_ATTACHMENT_FILE_MAX_BYTES`. */
+  TooLarge = 'FILE_ATTACHMENT_TOO_LARGE',
+  /** The recomputed sha256 differs from the declared digest. */
+  DigestMismatch = 'FILE_ATTACHMENT_DIGEST_MISMATCH',
+}
+
+/**
+ * Issue #666 — structured file references on an incoming message.
+ * `SchemaVersionUnsupported` and `Invalid` reject the message (terminal).
+ * `CheckFailed` rejects it because the Host could not ask gfsc about the
+ * references. The remaining codes name an availability the Host resolved; the
+ * message is still admitted and the reference is listed with that availability
+ * in the turn.
+ */
+export enum FileReferenceErrorCode {
+  /** The reference declares a `schemaVersion` this Host does not implement. */
+  SchemaVersionUnsupported = 'FILE_REFERENCE_SCHEMA_VERSION_UNSUPPORTED',
+  /** Shape, count or GFS identity of the reference is invalid. */
+  Invalid = 'FILE_REFERENCE_INVALID',
+  NotFound = 'FILE_REFERENCE_NOT_FOUND',
+  Denied = 'FILE_REFERENCE_DENIED',
+  /** The file changed since the reference was taken. */
+  Stale = 'FILE_REFERENCE_STALE',
+  NotAFile = 'FILE_REFERENCE_NOT_A_FILE',
+  TooLarge = 'FILE_REFERENCE_TOO_LARGE',
+  /** The Host cannot serve this reference (no `gfs.read` scope, or not a GFS source). */
+  Unsupported = 'FILE_REFERENCE_UNSUPPORTED',
+  /**
+   * gfsc could not be asked, or its answer could not be used: retryable only
+   * when the failure was transient (timeout, network, 429, 5xx).
+   */
+  CheckFailed = 'FILE_REFERENCE_CHECK_FAILED',
 }
 
 export class LlmError extends AgentError {

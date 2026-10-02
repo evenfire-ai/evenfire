@@ -171,6 +171,7 @@ function createReconciler(
     coreApi: asCoreApi(coreApi),
     networkingApi: asNetworkingApi(networkingApi),
     rbacApi: asRbacApi(rbacApi),
+    isCommunicationChannelCacheSynced: () => true,
     infrastructureTelemetryReporter: options.infrastructureTelemetryReporter,
     administrativeOutcomeReporter: options.administrativeOutcomeReporter,
     newTelemetryOccurrenceId: options.newTelemetryOccurrenceId,
@@ -2630,15 +2631,24 @@ describe('HostReconciler oauth:user-token runtime scope provisioning', () => {
 
   it('fails closed (no oauth:user-token) when the oauth-server probe throws', async () => {
     vi.mocked(issueMcpHostRuntimeTokens).mockClear()
-    const { reconciler } = createReconciler()
-    reconciler.setHostFrontsOAuthServer(async () => {
-      throw new Error('context read failed')
-    })
+    const warnSpy = vi.spyOn(HostContextLogger.prototype, 'warn')
+    try {
+      const { reconciler } = createReconciler()
+      reconciler.setHostFrontsOAuthServer(async () => {
+        throw new Error('context read failed')
+      })
 
-    await reconciler.reconcile(makeHost())
+      await reconciler.reconcile(makeHost())
 
-    expect(lastIssuedScopes()).toEqual([...DEFAULT_FIRST_PARTY_WORKFLOW_CONTROL_SCOPES].sort())
-    expect(lastIssuedScopes()).not.toContain('oauth:user-token')
+      expect(lastIssuedScopes()).toEqual([...DEFAULT_FIRST_PARTY_WORKFLOW_CONTROL_SCOPES].sort())
+      expect(lastIssuedScopes()).not.toContain('oauth:user-token')
+      // A new Host has no retained grant to preserve, so the unknown answer
+      // fails closed at issuance, and says so.
+      const retryWarn = warnSpy.mock.calls.find(([msg]) => String(msg).includes('after retries'))
+      expect(retryWarn?.[1]).toMatchObject({ attempts: 3, err: 'context read failed' })
+    } finally {
+      warnSpy.mockRestore()
+    }
   })
 
   it('toggling oauth-server presence changes the runtime-token scope hash (drift re-issues)', () => {
@@ -2670,27 +2680,38 @@ describe('HostReconciler oauth:user-token runtime scope provisioning', () => {
   })
 })
 
-describe('HostReconciler.frontsOAuthServer transient-blip retry (R4-M9)', () => {
+describe('HostReconciler.observeFrontsOAuthServer transient-blip retry (R4-M9)', () => {
   // The oauth-server probe is exercised through the REAL reconciler built by
   // createReconciler() and the REAL setHostFrontsOAuthServer setter — no
-  // hand-minted value. We assert on the private method directly (rather than the
-  // full reconcile) on purpose: the deployment drift guard
-  // (ensureCurrentRuntimeTokenScope) re-mints the token when the scope hash
-  // changes mid-reconcile, so a probe that throws once and then returns `true`
-  // would be MASKED at the public issuance observable — the guard would re-mint
-  // with the recovered `true` value, hiding the collapse. The boolean returned by
-  // frontsOAuthServer IS the observable whose flip drives the churn this fixes.
-  const callFronts = (reconciler: HostReconciler, host: HostCRD): Promise<boolean> =>
+  // hand-minted value. We assert on the private observation directly (rather
+  // than the full reconcile) on purpose: the deployment drift guard
+  // (ensureCurrentRuntimeTokenScope) re-reads the observation mid-reconcile, so
+  // a probe that throws once and then returns `true` would be MASKED at the
+  // public issuance observable. The observation IS the value whose flip drives
+  // the churn this fixes; what an unobserved answer means is decided by its
+  // callers and covered at the reconcile level.
+  const observeFronts = (
+    reconciler: HostReconciler,
+    host: HostCRD
+  ): Promise<
+    | { observed: true; frontsOAuthServer: boolean }
+    | { observed: false; attempts: number; error: unknown }
+  > =>
     (
       reconciler as unknown as {
-        frontsOAuthServer(host: HostCRD): Promise<boolean>
+        observeFrontsOAuthServer(
+          host: HostCRD
+        ): Promise<
+          | { observed: true; frontsOAuthServer: boolean }
+          | { observed: false; attempts: number; error: unknown }
+        >
       }
-    ).frontsOAuthServer(host)
+    ).observeFrontsOAuthServer(host)
 
   it('absorbs a transient throw: probe throws once then returns true → true (blip smoothed)', async () => {
-    // Regression case (T3): against the pre-fix head the throw collapses to
-    // `false` and this assertion fails. With the bounded retry the second
-    // attempt returns the authoritative `true`.
+    // Regression case (T3): without the bounded retry the throw is reported as
+    // unobserved and this assertion fails. With the retry the second attempt
+    // returns the authoritative `true`.
     const { reconciler } = createReconciler()
     let calls = 0
     reconciler.setHostFrontsOAuthServer(async () => {
@@ -2699,7 +2720,10 @@ describe('HostReconciler.frontsOAuthServer transient-blip retry (R4-M9)', () => 
       return true
     })
 
-    await expect(callFronts(reconciler, makeHost())).resolves.toBe(true)
+    await expect(observeFronts(reconciler, makeHost())).resolves.toEqual({
+      observed: true,
+      frontsOAuthServer: true,
+    })
     expect(calls).toBe(2)
   })
 
@@ -2713,29 +2737,28 @@ describe('HostReconciler.frontsOAuthServer transient-blip retry (R4-M9)', () => 
       return false
     })
 
-    await expect(callFronts(reconciler, makeHost())).resolves.toBe(false)
+    await expect(observeFronts(reconciler, makeHost())).resolves.toEqual({
+      observed: true,
+      frontsOAuthServer: false,
+    })
     expect(calls).toBe(1)
   })
 
-  it('fails closed after exhausting retries: probe always throws → false, N attempts, warn logged', async () => {
-    const warnSpy = vi.spyOn(HostContextLogger.prototype, 'warn')
-    try {
-      const { reconciler } = createReconciler()
-      let calls = 0
-      reconciler.setHostFrontsOAuthServer(async () => {
-        calls += 1
-        throw new Error('sustained apiserver outage')
-      })
+  it('reports an unobserved answer after exhausting retries instead of collapsing it to false', async () => {
+    const { reconciler } = createReconciler()
+    let calls = 0
+    const outage = new Error('sustained apiserver outage')
+    reconciler.setHostFrontsOAuthServer(async () => {
+      calls += 1
+      throw outage
+    })
 
-      await expect(callFronts(reconciler, makeHost())).resolves.toBe(false)
-      // Retried up to the bounded ceiling (fix uses 3 total attempts); pre-fix
-      // head would call the probe exactly once.
-      expect(calls).toBe(3)
-      const retryWarn = warnSpy.mock.calls.find(([msg]) => String(msg).includes('after retries'))
-      expect(retryWarn).toBeDefined()
-      expect(retryWarn?.[1]).toMatchObject({ attempts: 3 })
-    } finally {
-      warnSpy.mockRestore()
-    }
+    await expect(observeFronts(reconciler, makeHost())).resolves.toEqual({
+      observed: false,
+      attempts: 3,
+      error: outage,
+    })
+    // Retried up to the bounded ceiling (3 total attempts).
+    expect(calls).toBe(3)
   })
 })
