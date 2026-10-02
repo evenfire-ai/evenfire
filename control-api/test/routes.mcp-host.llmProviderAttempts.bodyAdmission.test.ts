@@ -112,10 +112,13 @@ async function withApps(
       }
       observations.push(observed)
       const end = res.end
-      res.end = function (...args: Parameters<typeof res.end>) {
+      vi.spyOn(res, 'end').mockImplementation(function (
+        this: typeof res,
+        ...args: Parameters<typeof res.end>
+      ) {
         if (this.destroyed) observed.responseWritesAfterClose += 1
         return end.apply(this, args)
-      } as typeof res.end
+      })
       // Observe read calls and listener installation without adding a data
       // listener or switching the IncomingMessage into flowing mode.
       const read = req.read
@@ -128,12 +131,15 @@ async function withApps(
         return value
       }
       const on = req.on
-      req.on = function (event: string, listener: (...args: any[]) => void) {
+      vi.spyOn(req, 'on').mockImplementation(function (
+        this: typeof req,
+        ...[event, listener]: Parameters<typeof req.on>
+      ) {
         if (event === 'data') {
           observed.bodyDataSubscriptions += 1
         }
         return on.call(this, event, listener)
-      } as typeof req.on
+      })
       app(req, res)
     }).listen(0)
     const address = listener.address()
@@ -391,12 +397,13 @@ describe('createApp retained authorize-body ownership', () => {
     // policy remains unchanged; this test makes no numeric safety claim.
     const clock = vi
       .spyOn(globalThis, 'setTimeout')
-      .mockImplementation(((fn, ms, ...args) =>
+      .mockImplementation((fn, ms, ...args) =>
         nativeSetTimeout(
           fn,
           ms === LLM_PROVIDER_ATTEMPT_ADMISSION_POLICY.workDeadlineMs ? 40 : ms,
           ...args
-        )) as typeof setTimeout)
+        )
+      )
     vi.mocked(authorizer.authorizeLlmProviderAttempt).mockImplementationOnce(
       async (_claims, _body, deps) => {
         const signal = deps?.signal
@@ -443,7 +450,7 @@ describe('createApp retained authorize-body ownership', () => {
     // Contracted clocks are explicit HTTP fixture timing, not runtime policy.
     const clock = vi
       .spyOn(globalThis, 'setTimeout')
-      .mockImplementation(((fn, ms, ...args) =>
+      .mockImplementation((fn, ms, ...args) =>
         nativeSetTimeout(
           fn,
           ms === LLM_PROVIDER_ATTEMPT_ADMISSION_POLICY.readDeadlineMs
@@ -452,7 +459,8 @@ describe('createApp retained authorize-body ownership', () => {
               ? 10
               : ms,
           ...args
-        )) as typeof setTimeout)
+        )
+      )
     try {
       await withApps(1, async ([app]) => {
         const sent = send(app.url, {

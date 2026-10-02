@@ -188,14 +188,14 @@ describe('AuthorizeBodyAdmission policy and idempotence', () => {
     })
     const req = fakeRequest()
     const res = fakeResponse()
-    const parser = vi.fn((_req: unknown, _res: unknown, next: (err?: unknown) => void) => {
+    const parser = vi.fn<RequestHandler>((_req, _res, next) => {
       _req.body = { retained: true }
       next()
       next(new Error('duplicate callback'))
     })
     const work = vi.fn(async () => undefined)
 
-    await gate.run(req as never, res as never, parser as RequestHandler, work)
+    await gate.run(req as never, res as never, parser, work)
 
     expect(work).toHaveBeenCalledOnce()
     expect(req.body).toBeUndefined()
@@ -277,12 +277,12 @@ describe('AuthorizeBodyAdmission parser lifecycle', () => {
     const requestLogger = fakeRequestLogger()
     req.log = requestLogger.logger
     const res = fakeResponse()
-    const parser = vi.fn((request: FakeRequest, _response: FakeResponse, next: () => void) => {
+    const parser = vi.fn<RequestHandler>((request, _response, next) => {
       request.once('close', next)
     })
     const work = vi.fn(async () => undefined)
 
-    const running = gate.run(req as never, res as never, parser as RequestHandler, work)
+    const running = gate.run(req as never, res as never, parser, work)
     await vi.waitFor(() => expect(res.body).toEqual({ error: 'request_timeout' }))
     await running
 
@@ -358,13 +358,13 @@ describe('AuthorizeBodyAdmission parser lifecycle', () => {
     })
     const req = fakeRequest()
     const res = fakeResponse()
-    const parser = vi.fn((request: FakeRequest, _response: FakeResponse, next: () => void) => {
+    const parser = vi.fn<RequestHandler>((request, _response, next) => {
       request.once('close', next)
     })
     const work = vi.fn(async () => undefined)
 
     await Promise.all([
-      gate.run(req as never, res as never, parser as RequestHandler, work),
+      gate.run(req as never, res as never, parser, work),
       Promise.resolve().then(() => res.emit('close')),
     ])
 
@@ -461,7 +461,7 @@ describe('AuthorizeBodyAdmission HTTP fixture', () => {
       closeGraceMs: 10,
     })
     const parser = express.json({ limit: '1kb', inflate: false })
-    const work = vi.fn(async (req: express.Request, res: Response) => {
+    const work = vi.fn(async (req: express.Request, res: Response, _signal: AbortSignal) => {
       res.status(200).json({ body: req.body })
     })
     const app = express()
@@ -594,7 +594,7 @@ describe('AuthorizeBodyAdmission HTTP fixture', () => {
       parserStarted.resolve()
       parser(req, res, next)
     }
-    const work = vi.fn(async (_req: express.Request, res: Response) => {
+    const work = vi.fn(async (_req: express.Request, res: Response, _signal: AbortSignal) => {
       res.status(200).json({ ok: true })
     })
     const app = express()

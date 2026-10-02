@@ -178,11 +178,12 @@ describe('createApp authorize parser boundary', () => {
           await withApp(path, async url => {
             const parse = vi.spyOn(JSON, 'parse')
             try {
-              for (const input of [
+              const inputs: Array<{ body: BodyInit; encoding: Record<string, string> }> = [
                 { body: malformed, encoding: {} },
                 { body: deep, encoding: {} },
                 { body: new Uint8Array(gzipSync(plain)), encoding: { 'content-encoding': 'gzip' } },
-              ]) {
+              ]
+              for (const input of inputs) {
                 const response = await fetch(url, {
                   method: 'POST',
                   headers: { 'content-type': 'application/json', ...input.encoding },
