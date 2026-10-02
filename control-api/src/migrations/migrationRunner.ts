@@ -8,6 +8,7 @@ export const PR1_MIGRATION_VERSIONS = Object.freeze([
   '0127_catalog_utf8_ordering',
   '0128_composable_catalog_revisions',
   '0129_gfs_catalog_revision_components',
+  '012a_user_access_foundation_definer_temp_shadow_hardening',
   '0130_legacy_password_security_epoch_backfill',
 ] as const)
 
