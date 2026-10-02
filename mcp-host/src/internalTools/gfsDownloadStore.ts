@@ -8,6 +8,11 @@ import {
   GFS_HOST_ACTIVE_DOWNLOADS,
   GFS_HOST_RETAINED_FILES,
 } from './gfsFilePolicy'
+import type {
+  GfsProcessingLease,
+  GfsProcessingLeaseAcquisition,
+  GfsProcessingLeaseProvider,
+} from './gfsProcessingLease'
 
 export type GfsDownloadStoreErrorCode =
   | 'caller_mismatch'
@@ -65,6 +70,15 @@ export interface GfsDownloadReceipt {
 interface StoreLedger {
   schemaVersion: 1
   records: Record<string, GfsDownloadRecord>
+  processingLeases?: Record<string, GfsProcessingLeaseRecord>
+}
+
+interface GfsProcessingLeaseRecord {
+  leaseId: string
+  callerIdentity: string
+  recordIds: string[]
+  acquiredAt: string
+  expiresAt: string
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -87,7 +101,7 @@ function parseLedger(raw: string): StoreLedger {
     throw new GfsDownloadStoreError('corrupt_store_ledger')
 
   const records = (parsed as { records: Record<string, unknown> }).records
-  const result: StoreLedger = { schemaVersion: 1, records: {} }
+  const result: StoreLedger = { schemaVersion: 1, records: {}, processingLeases: {} }
   for (const [id, value] of Object.entries(records)) {
     if (!UUID_RE.test(id) || typeof value !== 'object' || value === null)
       throw new GfsDownloadStoreError('corrupt_store_ledger')
@@ -130,6 +144,31 @@ function parseLedger(raw: string): StoreLedger {
       throw new GfsDownloadStoreError('corrupt_store_ledger')
     result.records[id] = record
   }
+  const rawProcessingLeases = (parsed as { processingLeases?: unknown }).processingLeases
+  if (rawProcessingLeases !== undefined) {
+    if (typeof rawProcessingLeases !== 'object' || rawProcessingLeases === null)
+      throw new GfsDownloadStoreError('corrupt_store_ledger')
+    for (const [id, value] of Object.entries(rawProcessingLeases)) {
+      const lease = value as GfsProcessingLeaseRecord
+      if (
+        !UUID_RE.test(id) ||
+        typeof value !== 'object' ||
+        value === null ||
+        lease.leaseId !== id ||
+        typeof lease.callerIdentity !== 'string' ||
+        lease.callerIdentity.length === 0 ||
+        !Array.isArray(lease.recordIds) ||
+        lease.recordIds.some(recordId => !UUID_RE.test(recordId)) ||
+        new Set(lease.recordIds).size !== lease.recordIds.length ||
+        lease.recordIds.some(recordId => result.records[recordId] === undefined) ||
+        !Number.isFinite(Date.parse(lease.acquiredAt)) ||
+        !Number.isFinite(Date.parse(lease.expiresAt)) ||
+        Date.parse(lease.expiresAt) <= Date.parse(lease.acquiredAt)
+      )
+        throw new GfsDownloadStoreError('corrupt_store_ledger')
+      result.processingLeases![id] = lease
+    }
+  }
   return result
 }
 
@@ -166,25 +205,29 @@ async function syncDirectory(directory: string): Promise<void> {
   }
 }
 
-async function sha256File(path: string): Promise<string> {
+async function sha256FileHandle(handle: fs.FileHandle): Promise<string> {
   const digest = createHash('sha256')
+  const chunk = Buffer.alloc(64 * 1024)
+  let position = 0
+  for (;;) {
+    const { bytesRead } = await handle.read(chunk, 0, chunk.byteLength, position)
+    if (bytesRead === 0) break
+    digest.update(chunk.subarray(0, bytesRead))
+    position += bytesRead
+  }
+  return digest.digest('hex')
+}
+
+async function sha256File(path: string): Promise<string> {
   const handle = await fs.open(
     path,
     constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK
   )
   try {
-    const chunk = Buffer.alloc(64 * 1024)
-    let position = 0
-    for (;;) {
-      const { bytesRead } = await handle.read(chunk, 0, chunk.byteLength, position)
-      if (bytesRead === 0) break
-      digest.update(chunk.subarray(0, bytesRead))
-      position += bytesRead
-    }
+    return await sha256FileHandle(handle)
   } finally {
     await handle.close()
   }
-  return digest.digest('hex')
 }
 
 /** One Host/PVC-owned durable store; task registries receive bound handles. */
@@ -194,9 +237,10 @@ export class GfsDownloadStore {
   private ledgerPath: string
   private lockPath: string
   private writerLeaseId?: string
-  private ledger: StoreLedger = { schemaVersion: 1, records: {} }
+  private ledger: StoreLedger = { schemaVersion: 1, records: {}, processingLeases: {} }
   private readonly activeByCaller = new Map<string, number>()
   private readonly activeIds = new Set<string>()
+  private readonly liveProcessingLeases = new Set<string>()
   private active = 0
   private mutationTail = Promise.resolve()
   private initialized = false
@@ -365,12 +409,23 @@ export class GfsDownloadStore {
         throw new GfsDownloadStoreError('download_expired')
       const partial = path.join(this.hostRoot, `${record.hostPath}.partial`)
       const source = path.join(this.hostRoot, record.hostPath)
-      const info = await fs.lstat(partial).catch(() => undefined)
-      if (!info?.isFile() || info.isSymbolicLink() || info.size !== record.sizeBytes)
-        throw new GfsDownloadStoreError('download_missing')
-      if ((await sha256File(partial)) !== sha256)
-        throw new GfsDownloadStoreError('corrupt_store_ledger')
-      await fs.rename(partial, source)
+      const partialHandle = await fs
+        .open(
+          partial,
+          constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_EXCL | constants.O_NONBLOCK
+        )
+        .catch(() => undefined)
+      if (!partialHandle) throw new GfsDownloadStoreError('download_missing')
+      try {
+        const info = await partialHandle.stat()
+        if (!info.isFile() || info.isSymbolicLink() || info.size !== record.sizeBytes)
+          throw new GfsDownloadStoreError('download_missing')
+        if ((await sha256FileHandle(partialHandle)) !== sha256)
+          throw new GfsDownloadStoreError('corrupt_store_ledger')
+        await fs.rename(partial, source)
+      } finally {
+        await partialHandle.close()
+      }
       await syncDirectory(path.dirname(source))
       record.state = 'completed'
       record.sha256 = sha256
@@ -463,6 +518,91 @@ export class GfsDownloadStore {
     }
   }
 
+  processingLeaseProvider(callerIdentity: string): GfsProcessingLeaseProvider {
+    return {
+      acquireProcessingLease: (options?: GfsProcessingLeaseAcquisition) =>
+        this.acquireProcessingLease(callerIdentity, options),
+      releaseProcessingLease: (lease: GfsProcessingLease) =>
+        this.releaseProcessingLease(callerIdentity, lease),
+    }
+  }
+
+  private async acquireProcessingLease(
+    callerIdentity: string,
+    options?: GfsProcessingLeaseAcquisition
+  ): Promise<GfsProcessingLease> {
+    this.assertInitialized()
+    if (this.closing) throw new GfsDownloadStoreError('download_busy')
+    if (typeof callerIdentity !== 'string' || callerIdentity.length === 0)
+      throw new GfsDownloadStoreError('caller_mismatch')
+    const requestedMs = options?.durationMs ?? 60_000
+    if (!Number.isSafeInteger(requestedMs) || requestedMs <= 0 || requestedMs > 3_600_000)
+      throw new GfsDownloadStoreError('download_busy')
+
+    const now = Date.now()
+    const candidates = Object.values(this.ledger.records).filter(
+      record =>
+        record.callerIdentity === callerIdentity &&
+        record.state === 'completed' &&
+        record.sha256 !== undefined &&
+        Date.parse(record.expiresAt) > now
+    )
+    if (candidates.length === 0) {
+      return {
+        leaseId: randomUUID(),
+        expiresAt: new Date(now + requestedMs).toISOString(),
+      }
+    }
+
+    return this.serialize(async () => {
+      for (const record of candidates) await this.inspect(record.path, callerIdentity)
+      const leaseId = randomUUID()
+      const expiresAt = new Date(now + requestedMs).toISOString()
+      const lease: GfsProcessingLeaseRecord = {
+        leaseId,
+        callerIdentity,
+        recordIds: candidates.map(record => record.id),
+        acquiredAt: new Date(now).toISOString(),
+        expiresAt,
+      }
+      this.ledger.processingLeases ??= {}
+      this.ledger.processingLeases[leaseId] = lease
+      try {
+        await this.persist()
+      } catch (error) {
+        delete this.ledger.processingLeases[leaseId]
+        throw error
+      }
+      this.liveProcessingLeases.add(leaseId)
+      return { leaseId, expiresAt }
+    })
+  }
+
+  private async releaseProcessingLease(
+    callerIdentity: string,
+    lease: GfsProcessingLease
+  ): Promise<void> {
+    this.assertInitialized()
+    await this.serialize(async () => {
+      const record = this.ledger.processingLeases?.[lease.leaseId]
+      if (!record) {
+        this.liveProcessingLeases.delete(lease.leaseId)
+        return
+      }
+      if (record.callerIdentity !== callerIdentity || record.expiresAt !== lease.expiresAt)
+        throw new GfsDownloadStoreError('caller_mismatch')
+      delete this.ledger.processingLeases![lease.leaseId]
+      try {
+        await this.persist()
+      } catch (error) {
+        this.ledger.processingLeases![lease.leaseId] = record
+        this.liveProcessingLeases.add(lease.leaseId)
+        throw error
+      }
+      this.liveProcessingLeases.delete(lease.leaseId)
+    })
+  }
+
   debugRecord(id: string): GfsDownloadRecord | undefined {
     return this.ledger.records[id]
   }
@@ -479,10 +619,13 @@ export class GfsDownloadStore {
     if (!this.initialized) return
     this.closing = true
     const deadline = Date.now() + drainTimeoutMs
-    while (this.activeIds.size > 0 && Date.now() < deadline) {
+    while (
+      (this.activeIds.size > 0 || this.liveProcessingLeases.size > 0) &&
+      Date.now() < deadline
+    ) {
       await new Promise(resolve => setTimeout(resolve, 25))
     }
-    if (this.activeIds.size > 0) {
+    if (this.activeIds.size > 0 || this.liveProcessingLeases.size > 0) {
       this.closing = false
       throw new GfsDownloadStoreError('download_busy')
     }
@@ -503,9 +646,17 @@ export class GfsDownloadStore {
     await this.serialize(async () => {
       const removed: string[] = []
       let stateChanged = false
+      for (const [leaseId, lease] of Object.entries(this.ledger.processingLeases ?? {})) {
+        if (Date.parse(lease.expiresAt) <= now) {
+          delete this.ledger.processingLeases![leaseId]
+          this.liveProcessingLeases.delete(leaseId)
+          stateChanged = true
+        }
+      }
       for (const record of Object.values(this.ledger.records)) {
         if (Date.parse(record.expiresAt) > now) continue
         if (this.activeIds.has(record.id)) continue
+        if (this.hasProcessingLease(record.id, now)) continue
         const directory = path.join(this.hostRoot, record.directory)
         try {
           const info = await fs.lstat(directory)
@@ -638,6 +789,12 @@ export class GfsDownloadStore {
     const record = this.ledger.records[id]
     if (!record) throw new GfsDownloadStoreError('download_missing')
     return record
+  }
+
+  private hasProcessingLease(recordId: string, now: number): boolean {
+    return Object.values(this.ledger.processingLeases ?? {}).some(
+      lease => Date.parse(lease.expiresAt) > now && lease.recordIds.includes(recordId)
+    )
   }
 
   private releaseActive(record: GfsDownloadRecord): void {

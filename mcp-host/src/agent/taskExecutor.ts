@@ -2067,20 +2067,25 @@ export class TaskExecutor {
       this.deps.failover?.policy.fallbacks
     )
     const gfsCallerIdentity = this.task.sourceMessage?.sender
+    const gfsProcessingLeaseProvider =
+      this.deps.gfsProcessingLeaseProvider ??
+      (this.deps.gfsDownloadStore && gfsCallerIdentity
+        ? this.deps.gfsDownloadStore.processingLeaseProvider(gfsCallerIdentity)
+        : undefined)
     const gfsDownload = gfsWorkspaceExecutionEnabled({
       approvalEnabled: appConfig.enableApproval,
       source: this.task.source,
       callerIdentity: gfsCallerIdentity,
       store: this.deps.gfsDownloadStore,
       callerWorkspacePath: this.deps.gfsCallerWorkspacePath,
-      processingLeaseProvider: this.deps.gfsProcessingLeaseProvider,
+      processingLeaseProvider: gfsProcessingLeaseProvider,
       approvalConfig: this.deps.approvalConfig,
     })
       ? {
           store: this.deps.gfsDownloadStore!,
           callerIdentity: gfsCallerIdentity!,
           callerWorkspacePath: this.deps.gfsCallerWorkspacePath!,
-          processingLeaseProvider: this.deps.gfsProcessingLeaseProvider!,
+          processingLeaseProvider: gfsProcessingLeaseProvider!,
         }
       : undefined
     const nativeRegistry = new NativeToolRegistry(

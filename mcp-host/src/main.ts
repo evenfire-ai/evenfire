@@ -233,6 +233,7 @@ let contextMapperClient: ContextMapperClient | null = null
 let mcpAuthorityLastSuccessAt = 0
 let activityHub: HostActivityHub | null = null
 let workspaceProvider: ScopedWorkspaceProvider | null = null
+let gfsWorkspaceProvider: ScopedWorkspaceProvider | null = null
 let gfsDownloadStore: GfsDownloadStore | null = null
 let gfsDownloadCleanupTimer: NodeJS.Timeout | null = null
 let spilloverStorage: SpilloverStorage | null = null
@@ -1726,7 +1727,7 @@ async function initializeAgent(): Promise<void> {
   agent.setDynamicEnvProvider(() => agentToolEnvProvider(configStore))
   agent.setSecretEntriesProvider(() => configStore?.listSecretEntries() ?? [])
 
-  const gfsWorkspaceProvider = new ScopedWorkspaceProvider(config.nativeTool.workspacePath)
+  gfsWorkspaceProvider = new ScopedWorkspaceProvider(config.nativeTool.workspacePath)
   gfsDownloadStore = new GfsDownloadStore(config.nativeTool.workspacePath)
   await gfsDownloadStore.initialize()
   agent.setGfsWorkspaceProvider(gfsWorkspaceProvider)
@@ -2055,6 +2056,24 @@ const prepareIncomingMessage = createIncomingAdmission({
   applySessionModelSelection,
   dispatch: dispatchIncomingMessage,
   fileReferenceGfs: fileReferenceGfsGate,
+  gfsSurfaceRuntimeCapability: message => {
+    const callerWorkspacePath = gfsWorkspaceProvider?.forSource(message)?.userRootPath
+    const shellApprovalEnabled =
+      (currentHost?.spec.approval || config.approvalConfig)?.tools?.shell_exec !== false
+    const workspaceFile = Boolean(
+      config.enableApproval &&
+      message.sender &&
+      gfsDownloadStore &&
+      callerWorkspacePath &&
+      shellApprovalEnabled
+    )
+    return {
+      workspaceFile,
+      localExecutor: workspaceFile,
+      // Visual support is decided per physical provider attempt, never here.
+      visual: false,
+    }
+  },
   logger,
 })
 
