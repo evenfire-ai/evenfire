@@ -44,6 +44,7 @@ describe('DefaultPromptBuilder — governed GFS workspace files', () => {
     const builder = new DefaultPromptBuilder()
     const msg = builder.buildSystemPrompt([tool('clerum__gfs_download')])
     expect(msg.content).toContain(GFS_WORKSPACE_FILE_GUIDANCE_TEXT)
+    expect(msg.content).toContain('never invent a resourceId')
     expect(msg.content).toContain('write outputs outside `.gfs-downloads`')
   })
 
