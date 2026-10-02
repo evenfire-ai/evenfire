@@ -1,4 +1,6 @@
 FROM node:24-alpine AS builder
+ARG PROFILE_DESKTOP_HANDOFF_ENABLED=false
+ENV NEXT_PUBLIC_PROFILE_DESKTOP_HANDOFF_ENABLED=${PROFILE_DESKTOP_HANDOFF_ENABLED}
 WORKDIR /app
 
 COPY packages/desktop-app-links ./packages/desktop-app-links
