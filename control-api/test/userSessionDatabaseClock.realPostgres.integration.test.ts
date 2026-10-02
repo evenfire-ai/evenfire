@@ -4,6 +4,7 @@ import { Pool, type PoolClient } from 'pg'
 import { initDb } from '../src/db.js'
 import {
   createUserSession,
+  renewUserSession,
   validateUserSessionClaims,
 } from '../src/services/auth/userSessionService.js'
 import { verifyUserSessionV2Token } from '../src/utils/auth/userSessionV2Token.js'
@@ -167,5 +168,124 @@ describeRealPostgres('user-session database clock authority on real PostgreSQL',
       blocker.release()
       validator.release()
     }
+  })
+
+  it('coalesces chained renewal without displacing or extending the predecessor overlap', async () => {
+    const inTransaction = async <T>(work: (client: PoolClient) => Promise<T>): Promise<T> => {
+      const client = await databasePool.connect()
+      try {
+        await client.query('BEGIN')
+        const result = await work(client)
+        await client.query('COMMIT')
+        return result
+      } catch (error) {
+        await client.query('ROLLBACK').catch(() => undefined)
+        throw error
+      } finally {
+        client.release()
+      }
+    }
+    const issued = await inTransaction(client =>
+      createUserSession(
+        { userId, email: `${userId}@example.test`, authenticationMethods: ['password'] },
+        { db: client }
+      )
+    )
+    const original = verifyUserSessionV2Token(issued.token)
+    if (!original) throw new Error('session producer did not issue a valid V2 representation')
+
+    const firstRenewal = await inTransaction(client => renewUserSession(original, { db: client }))
+    if (!('token' in firstRenewal)) throw new Error('expected first renewal to issue a successor')
+    const successor = verifyUserSessionV2Token(firstRenewal.token)
+    if (!successor) throw new Error('first renewal did not issue a valid successor')
+    const initialState = await databasePool.query<{
+      current_jti: string
+      prior_jti: string
+      prior_jti_expires_at: Date
+    }>(
+      `SELECT current_jti::text, prior_jti::text, prior_jti_expires_at
+         FROM external_user_sessions
+        WHERE sid = $1`,
+      [original.sid]
+    )
+    const originalOverlapExpiry = initialState.rows[0]!.prior_jti_expires_at.getTime()
+    expect(initialState.rows[0]).toMatchObject({
+      current_jti: successor.jti,
+      prior_jti: original.jti,
+    })
+
+    const coalesced = await inTransaction(client => renewUserSession(successor, { db: client }))
+    if (!('token' in coalesced)) throw new Error('expected immediate successor renewal to coalesce')
+    expect(coalesced.token).toBe(firstRenewal.token)
+    const afterCoalescing = await databasePool.query<{
+      current_jti: string
+      prior_jti: string
+      prior_jti_expires_at: Date
+      idle_expires_at: Date
+    }>(
+      `SELECT current_jti::text, prior_jti::text, prior_jti_expires_at, idle_expires_at
+         FROM external_user_sessions
+        WHERE sid = $1`,
+      [original.sid]
+    )
+    expect(afterCoalescing.rows[0]).toMatchObject({
+      current_jti: successor.jti,
+      prior_jti: original.jti,
+    })
+    expect(afterCoalescing.rows[0]!.prior_jti_expires_at.getTime()).toBe(originalOverlapExpiry)
+
+    const delayedOriginal = await inTransaction(client =>
+      renewUserSession(original, { db: client })
+    )
+    expect(delayedOriginal).toMatchObject({ token: firstRenewal.token })
+
+    await databasePool.query(
+      `UPDATE external_user_sessions
+          SET prior_jti_expires_at = clock_timestamp() - interval '1 second'
+        WHERE sid = $1`,
+      [original.sid]
+    )
+    const outsideOverlap = await inTransaction(client => renewUserSession(original, { db: client }))
+    expect(outsideOverlap).toMatchObject({ status: 'revoked', reason: 'representation_reuse' })
+    const revoked = await databasePool.query<{ revoked: boolean }>(
+      `SELECT revoked_at IS NOT NULL AS revoked
+         FROM external_user_sessions
+        WHERE sid = $1`,
+      [original.sid]
+    )
+    expect(revoked.rows).toEqual([{ revoked: true }])
+
+    const concurrentIssued = await inTransaction(client =>
+      createUserSession(
+        { userId, email: `${userId}@example.test`, authenticationMethods: ['password'] },
+        { db: client }
+      )
+    )
+    const concurrentOriginal = verifyUserSessionV2Token(concurrentIssued.token)
+    if (!concurrentOriginal)
+      throw new Error('concurrent session producer returned an invalid token')
+    const concurrentRenewals = await Promise.all([
+      inTransaction(client => renewUserSession(concurrentOriginal, { db: client })),
+      inTransaction(client => renewUserSession(concurrentOriginal, { db: client })),
+    ])
+    const [firstConcurrent, secondConcurrent] = concurrentRenewals
+    if (!('token' in firstConcurrent) || !('token' in secondConcurrent)) {
+      throw new Error('expected concurrent renewals to return the same successor')
+    }
+    expect(secondConcurrent.token).toBe(firstConcurrent.token)
+    const concurrentSuccessor = verifyUserSessionV2Token(firstConcurrent.token)
+    if (!concurrentSuccessor) throw new Error('concurrent renewal returned an invalid token')
+    const concurrentState = await databasePool.query<{
+      current_jti: string
+      prior_jti: string
+    }>(
+      `SELECT current_jti::text, prior_jti::text
+         FROM external_user_sessions
+        WHERE sid = $1`,
+      [concurrentOriginal.sid]
+    )
+    expect(concurrentState.rows).toEqual([
+      { current_jti: concurrentSuccessor.jti, prior_jti: concurrentOriginal.jti },
+    ])
   })
 })

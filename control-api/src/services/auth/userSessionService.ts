@@ -349,6 +349,24 @@ export async function renewUserSession(
       }
     }
 
+    const successorRenewalDuringOverlap =
+      claims.jti === row.current_jti && priorExpiry !== null && now <= priorExpiry
+    if (successorRenewalDuringOverlap) {
+      await db.query(
+        `UPDATE external_user_sessions
+            SET last_used_at = $2,
+                idle_expires_at = LEAST(absolute_expires_at, $3)
+          WHERE sid = $1
+            AND revoked_at IS NULL`,
+        [row.sid, now, plusSeconds(now, USER_SESSION_IDLE_LIFETIME_SECONDS)]
+      )
+      return {
+        token: tokenFromRow(row),
+        expiresInSeconds: USER_SESSION_V2_TTL_SECONDS,
+        identity: identityFromRow(row),
+      }
+    }
+
     const nextJti = randomUUID()
     const idleExpiresAt = new Date(
       Math.min(

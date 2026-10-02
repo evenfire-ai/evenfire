@@ -5,6 +5,7 @@ import {
   USER_SESSION_ABSOLUTE_LIFETIME_SECONDS,
   USER_SESSION_IDLE_LIFETIME_SECONDS,
   USER_SESSION_MAX_ACTIVE_PER_USER,
+  USER_SESSION_RENEWAL_OVERLAP_SECONDS,
   createUserSession,
   renewUserSession,
   revokeAllUserSessions,
@@ -132,6 +133,58 @@ describe('user session state machine', () => {
     expect(
       query.mock.calls.filter(([sql]) => String(sql).includes('SET prior_jti = current_jti'))
     ).toHaveLength(1)
+  })
+
+  it('coalesces an immediate successor renewal without evicting its live predecessor', async () => {
+    const original = row()
+    let current = original
+    let rotations = 0
+    const query = vi.fn(async (sql: string, values?: unknown[]) => {
+      if (sql.includes('SELECT s.sid')) return { rows: [current], rowCount: 1 }
+      if (sql.includes('clock_timestamp()')) return { rows: [{ db_now: now }], rowCount: 1 }
+      if (sql.includes('SET prior_jti = current_jti')) {
+        rotations += 1
+        current = row({
+          ...current,
+          prior_jti: current.current_jti,
+          prior_jti_expires_at: values?.[1],
+          current_jti: values?.[2],
+          current_issued_at: values?.[3],
+          last_used_at: values?.[3],
+          idle_expires_at: values?.[4],
+        })
+        return { rows: [current], rowCount: 1 }
+      }
+      if (sql.includes('SET last_used_at = $2')) {
+        current = row({
+          ...current,
+          last_used_at: values?.[1],
+          idle_expires_at: values?.[2],
+        })
+        return { rows: [], rowCount: 1 }
+      }
+      return { rows: [], rowCount: 0 }
+    })
+
+    const first = await renewUserSession(claimsFor(original), { db: { query } })
+    expect('token' in first).toBe(true)
+    if (!('token' in first)) throw new Error('expected the first renewal to issue a successor')
+    const successor = verifyUserSessionV2Token(first.token)
+    expect(successor).not.toBeNull()
+
+    const second = await renewUserSession(claimsFor(current, String(current.current_jti)), {
+      db: { query },
+    })
+    expect('token' in second).toBe(true)
+    if (!('token' in second))
+      throw new Error('expected the coalesced renewal to return its successor')
+    expect(second.token).toBe(first.token)
+    expect(rotations).toBe(1)
+    expect(current.current_jti).toBe(successor!.jti)
+    expect(current.prior_jti).toBe(original.current_jti)
+    expect(current.prior_jti_expires_at).toEqual(
+      new Date(now.getTime() + USER_SESSION_RENEWAL_OVERLAP_SECONDS * 1000)
+    )
   })
 
   it('revokes reuse outside overlap and never extends expired state', async () => {
