@@ -2825,7 +2825,7 @@ export function App() {
                                     onToggleChatDrawer={toggleChatDrawer}
                                   />
                                 </TitlebarActionsPortal>
-                                <ToastStack items={vm.toasts} />
+                                <ToastStack items={vm.toasts} onDismiss={vm.dismissToast} />
                                 {/* Single global strip: driven by the universal
                                     store, visible on every route above the
                                     per-kind seam so any tab is reachable from any
@@ -3047,7 +3047,7 @@ export function App() {
               )}
               {environmentSetupConfirmationDialog}
               {environmentSetupSuccessDialog}
-              <ToastStack items={vm.toasts} />
+              <ToastStack items={vm.toasts} onDismiss={vm.dismissToast} />
             </>
           )}
         </div>

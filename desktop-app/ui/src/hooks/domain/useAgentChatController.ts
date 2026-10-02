@@ -6,6 +6,7 @@ import {
   parseTaskKey,
   useAgentTaskTracker,
 } from '@contexts/AgentTaskTrackerContext'
+import { COMPOSER_MAX_IMAGE_ATTACHMENTS } from '@constants/attachments'
 import {
   buildChatMessageAttachments,
   buildResponseFileAttachments,
@@ -94,7 +95,8 @@ import {
 } from './useChatListController'
 import { type ActiveChatVisibility, useChatNotifications } from './useChatNotifications'
 import { useChatScroll } from './useChatScroll'
-import { useComposerAttachments } from './useComposerAttachments'
+import { predictComposerImageMerge, useComposerAttachments } from './useComposerAttachments'
+import type { PushToastOptions } from './useToastController'
 
 // Re-exported from `useChatListController` (§4.4) so external importers
 // (useWorkspaceController, useActivityController) keep their import site.
@@ -344,7 +346,7 @@ interface UseAgentChatControllerParams {
   isAuthenticated: boolean
   loadMenuData: boolean
   navItem: NavItem
-  pushToast: (msg: string, tone: Tone) => void
+  pushToast: (msg: string, tone: Tone, options?: PushToastOptions) => void
   pushNotification: (n: PushNotificationInput) => void
   /**
    * Human-visible name for an agent identifier (catalog `spec.host` display
@@ -552,6 +554,7 @@ export function useAgentChatController({
     releaseRetainedFailuresForChat,
     releaseSucceededRetainedSend,
     releaseSucceededRetainedSendsForTask,
+    getRetainedSendsForTask,
     markRetainedSendReason,
     failRetainedSend,
   } = retainedSends
@@ -3494,6 +3497,63 @@ export function useAgentChatController({
     handleDiscardFailedAgentSend,
   ])
 
+  /**
+   * STORY-38 — a cancel is terminal for DELIVERY (the snapshot below is still
+   * released), but the attachments of the canceled message return to the
+   * composer so the user can reuse them. In-memory only: the composer state,
+   * not GFS or any persisted store, owns the kept attachments.
+   *
+   * The toast reports what actually survived the composer's image cap, and its
+   * Discard-all action is bound to the agent that was canceled: the toast can
+   * outlive an agent switch, and clearing the composer of a DIFFERENT agent
+   * would destroy that agent's own pending attachments.
+   */
+  const restoreComposerAttachmentsAfterCancel = useCallback(
+    (taskId: string, agentRef: string) => {
+      // The awaited cancel RPC can straddle an agent switch: the attachments
+      // belong to the agent that was canceled, so they must never land in the
+      // composer of whatever agent is selected by the time the answer arrives
+      // (mirrors the Discard-all guard below).
+      if (activeChatVisibilityRef.current.selectedAgent !== agentRef) return
+      const snapshots = getRetainedSendsForTask(taskId)
+      const images = snapshots.flatMap(snapshot => snapshot.attachments)
+      const references = snapshots.flatMap(snapshot => snapshot.references)
+      if (!images.length && !references.length) return
+      const { dropped } = predictComposerImageMerge(composerImageAttachments, images)
+      handleAddComposerImageAttachments(
+        images.map(attachment => ({
+          ...attachment,
+          previewDataUrl: `data:${attachment.mimeType};base64,${attachment.dataBase64}`,
+        }))
+      )
+      handleAddComposerReferenceAttachments(references)
+      const message =
+        dropped > 0
+          ? `Attachments kept — ${dropped} of ${images.length} ${dropped === 1 ? 'image exceeds' : 'images exceed'} the ${COMPOSER_MAX_IMAGE_ATTACHMENTS}-image limit and ${dropped === 1 ? 'was' : 'were'} dropped.`
+          : 'Attachments kept'
+      pushToast(message, 'info', {
+        action: {
+          label: 'Discard all',
+          onAction: () => {
+            // Attachments are per-agent; chat switches do not change who owns
+            // them, but an agent switch does — no-op instead of clearing
+            // another agent's composer.
+            if (activeChatVisibilityRef.current.selectedAgent !== agentRef) return
+            resetComposerAttachments()
+          },
+        },
+      })
+    },
+    [
+      getRetainedSendsForTask,
+      composerImageAttachments,
+      handleAddComposerImageAttachments,
+      handleAddComposerReferenceAttachments,
+      pushToast,
+      resetComposerAttachments,
+    ]
+  )
+
   const cancelTask = useCallback(
     async (taskId: string) => {
       const hostRef = selectedAgent
@@ -3542,7 +3602,10 @@ export function useAgentChatController({
         await window.clerum.rpc.cancelTask(hostRef, taskId)
         markCancelled('Cancelled by user.')
         // #654 M6 — a cancel is terminal by intent: the user does not want this
-        // payload resent, so nothing will read the retained snapshot again.
+        // payload resent, so nothing will read the retained snapshot again. The
+        // attachments themselves return to the composer (STORY-38) before the
+        // snapshot that carried them is released.
+        restoreComposerAttachmentsAfterCancel(taskId, hostRef)
         releaseRetainedSendsForTask(taskId)
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
@@ -3550,6 +3613,7 @@ export function useAgentChatController({
           markCancelled('Task already finished or is no longer active.')
           // The task is gone upstream, so it can no longer produce a terminal
           // event — same reasoning as the successful cancel above.
+          restoreComposerAttachmentsAfterCancel(taskId, hostRef)
           releaseRetainedSendsForTask(taskId)
           pushToast('That task is no longer active.', 'info')
           return
@@ -3558,7 +3622,7 @@ export function useAgentChatController({
         pushToast(`Failed to cancel task: ${message}`, 'error')
       }
     },
-    [pushToast, selectedAgent, releaseRetainedSendsForTask]
+    [pushToast, selectedAgent, releaseRetainedSendsForTask, restoreComposerAttachmentsAfterCancel]
   )
 
   const setPendingChatSelection = useCallback(
@@ -3712,6 +3776,7 @@ export function useAgentChatController({
     handleRemoveComposerImageAttachment,
     handleAddComposerReferenceAttachments,
     handleRemoveComposerReferenceAttachment,
+    handleClearComposerAttachments: resetComposerAttachments,
     cancelTask,
   }
 }

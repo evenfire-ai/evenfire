@@ -83,6 +83,11 @@ export function createRetainedSendStore(changed: () => void) {
     return latest
   }
 
+  /** All snapshots currently held for a task (copy; caller decides what next). */
+  function getRetainedSendsForTask(taskId: string): RetainedSendSnapshot[] {
+    return [...snapshots.values()].filter(snapshot => snapshot.taskId === taskId)
+  }
+
   /** Attaches the task id once the async task is accepted (still retained). */
   function attachTaskIdToRetainedSend(
     agentRef: string,
@@ -204,6 +209,7 @@ export function createRetainedSendStore(changed: () => void) {
     retainSendSnapshot,
     getRetainedSendSnapshot,
     getLatestRetainedSendSnapshotForChat,
+    getRetainedSendsForTask,
     attachTaskIdToRetainedSend,
     releaseRetainedSend,
     releaseRetainedSendsForTask,

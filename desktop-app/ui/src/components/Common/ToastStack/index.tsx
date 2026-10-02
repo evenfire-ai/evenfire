@@ -5,7 +5,7 @@ import type { ToastStackProps } from './types'
 // (polite for status, assertive for alert), so we do NOT set aria-live on
 // the container -- duplicating it caused double-announcements on screen
 // readers for error toasts.
-export function ToastStack({ items }: ToastStackProps) {
+export function ToastStack({ items, onDismiss }: ToastStackProps) {
   if (!items.length) return null
 
   return (
@@ -17,9 +17,27 @@ export function ToastStack({ items }: ToastStackProps) {
           className={`toast tone-${item.tone}`}
         >
           <span aria-hidden className="toast-icon">
-            {item.tone === 'success' ? '●' : item.tone === 'error' ? '!' : 'i'}
+            {item.tone === 'success'
+              ? '●'
+              : item.tone === 'error'
+                ? '!'
+                : item.tone === 'warn'
+                  ? '▲'
+                  : 'i'}
           </span>
-          <span>{item.text}</span>
+          <span className="toast-body">{item.text}</span>
+          {item.action ? (
+            <button
+              type="button"
+              className="toast-action"
+              onClick={() => {
+                item.action?.onAction()
+                onDismiss?.(item.id)
+              }}
+            >
+              {item.action.label}
+            </button>
+          ) : null}
         </div>
       ))}
     </aside>
