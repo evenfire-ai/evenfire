@@ -1,11 +1,15 @@
 import { describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import type { NextFunction, Request, Response } from 'express'
+import { ApiException } from '@kubernetes/client-node'
 import { lookup } from 'node:dns/promises'
 import request from 'supertest'
 import { config } from '../src/config.js'
+import { clerumErrorHandler } from '../src/http/errorHandler.js'
+import { rootLogger } from '../src/observability/logger.js'
 import { createAdminResourcesRouter } from '../src/routes/admin/resources.js'
 import { K8sConflictError, ResourceService } from '../src/services/resourceService.js'
+import { controlApiForbiddenRead, expectRejectedSecretRead } from './helpers/secretReadFailure.js'
 import { MockGateway } from './mockGateway.js'
 
 function decodeKubernetesData(snapshot: { data?: Record<string, string> }): Record<string, string> {
@@ -1293,6 +1297,122 @@ describe('routes/resources', () => {
       config.mcpServersNamespace = prevMcpServersNs
     }
   })
+
+  // #807: a credentials Secret read that fails for any reason other than 404
+  // fails the DELETE before the CR is removed. Skipping the cascade instead
+  // would return 200 and leave a live credential behind.
+  function makeDeleteGateway(getSecretError: unknown) {
+    return {
+      getResource: vi
+        .fn()
+        .mockResolvedValue({ spec: { credentialsSecretRef: { name: 'cc-a-credentials' } } }),
+      getSecret: vi.fn().mockRejectedValue(getSecretError),
+      deleteResource: vi.fn().mockResolvedValue({ deleted: true }),
+      deleteSecret: vi.fn().mockResolvedValue({ deleted: true }),
+      listResource: vi.fn().mockResolvedValue([]),
+      updateResource: vi.fn().mockResolvedValue({}),
+    }
+  }
+
+  function makeDeleteApp(gateway: ReturnType<typeof makeDeleteGateway>) {
+    const app = express()
+    app.use(express.json())
+    app.use(createAdminResourcesRouter(gateway as never))
+    app.use(clerumErrorHandler)
+    return app
+  }
+
+  // The McpServer DELETE runs through the shared uninstall orchestrator, which
+  // snapshots both dependent Secrets before any mutation. A snapshot read that
+  // fails for any reason other than 404 stops the run at the `secrets` stage.
+  function makeMcpDeleteGateway(getSecretError: unknown) {
+    return {
+      ...makeDeleteGateway(getSecretError),
+      getResource: vi.fn().mockResolvedValue({ metadata: { uid: 'cr-uid-a' }, spec: {} }),
+    }
+  }
+
+  it('answers 503 and deletes nothing when the McpServer credentials Secret read is rejected', async () => {
+    const prevMcpServersNs = config.mcpServersNamespace
+    config.mcpServersNamespace = 'mcpservers-ns'
+    const gateway = makeMcpDeleteGateway(
+      controlApiForbiddenRead('mcp-a-credentials', 'mcpservers-ns')
+    )
+    vi.spyOn(rootLogger, 'warn').mockImplementation(() => {})
+    vi.spyOn(rootLogger, 'error').mockImplementation(() => {})
+    try {
+      const res = await request(makeDeleteApp(gateway)).delete('/admin/mcp-servers/mcp-a')
+
+      // Liveness witness: both dependent Secrets were snapshotted, so the stop
+      // came from the read, not from an earlier exit.
+      expect(gateway.getSecret).toHaveBeenCalledWith('mcp-a-credentials', 'mcpservers-ns')
+      expect(gateway.getSecret).toHaveBeenCalledWith('mcp-a-oauth-client', 'mcpservers-ns')
+      expect(res.status).toBe(503)
+      expect(res.body).toMatchObject({
+        error: 'mcp_server_uninstall_incomplete',
+        outcome: 'repair_required',
+        pending: ['secrets'],
+        deleted: [],
+      })
+      expect(JSON.stringify(res.body)).not.toContain('system:serviceaccount')
+      expect(JSON.stringify(res.body)).not.toContain('audit-id')
+      expect(gateway.deleteResource).not.toHaveBeenCalled()
+      expect(gateway.deleteSecret).not.toHaveBeenCalled()
+      expect(gateway.updateResource).not.toHaveBeenCalled()
+    } finally {
+      config.mcpServersNamespace = prevMcpServersNs
+      vi.restoreAllMocks()
+    }
+  })
+
+  it('returns 502 and deletes nothing when the CommunicationChannel credentials Secret read is rejected', async () => {
+    const prevCcNs = config.communicationChannelsNamespace
+    config.communicationChannelsNamespace = 'cc-ns'
+    const gateway = makeDeleteGateway(controlApiForbiddenRead('cc-a-credentials', 'cc-ns'))
+    vi.spyOn(rootLogger, 'warn').mockImplementation(() => {})
+    try {
+      const res = await request(makeDeleteApp(gateway)).delete('/admin/communication-channels/cc-a')
+
+      expect(gateway.getResource).toHaveBeenCalledWith('communicationchannels', 'cc-a', 'cc-ns')
+      expect(gateway.getSecret).toHaveBeenCalledTimes(1)
+      expect(gateway.getSecret).toHaveBeenCalledWith('cc-a-credentials', 'cc-ns')
+      expectRejectedSecretRead(res, 'cc-a-credentials', 'cc-ns')
+      expect(gateway.deleteResource).not.toHaveBeenCalled()
+      expect(gateway.deleteSecret).not.toHaveBeenCalled()
+    } finally {
+      config.communicationChannelsNamespace = prevCcNs
+      vi.restoreAllMocks()
+    }
+  })
+
+  it('answers 503 and deletes nothing when the McpServer credentials Secret read gets an upstream 500', async () => {
+    const prevMcpServersNs = config.mcpServersNamespace
+    config.mcpServersNamespace = 'mcpservers-ns'
+    const gateway = makeMcpDeleteGateway(
+      new ApiException(500, 'Internal Server Error', '{"kind":"Status","code":500}', {
+        'audit-id': '5f0c7a4e-secret-read',
+      })
+    )
+    vi.spyOn(rootLogger, 'warn').mockImplementation(() => {})
+    vi.spyOn(rootLogger, 'error').mockImplementation(() => {})
+    try {
+      const res = await request(makeDeleteApp(gateway)).delete('/admin/mcp-servers/mcp-a')
+
+      expect(gateway.getSecret).toHaveBeenCalledWith('mcp-a-credentials', 'mcpservers-ns')
+      expect(res.status).toBe(503)
+      expect(res.body).toMatchObject({
+        error: 'mcp_server_uninstall_incomplete',
+        pending: ['secrets'],
+        deleted: [],
+      })
+      expect(JSON.stringify(res.body)).not.toContain('5f0c7a4e-secret-read')
+      expect(gateway.deleteResource).not.toHaveBeenCalled()
+      expect(gateway.deleteSecret).not.toHaveBeenCalled()
+    } finally {
+      config.mcpServersNamespace = prevMcpServersNs
+      vi.restoreAllMocks()
+    }
+  })
 })
 
 // Topic 1b Task 3 — anti-spoofing guard on Host spec.secretRef. A Host may only
@@ -1351,13 +1471,43 @@ describe('routes/resources — Host secretRef anti-spoofing', () => {
 
   it("accepts a Host whose secretRef does not exist yet (secretMode:'new', soft) (201)", async () => {
     const gateway = new MockGateway('mcp-host')
-    await request(makeApp(gateway))
+    const getSecret = vi.spyOn(gateway, 'getSecret')
+    try {
+      await request(makeApp(gateway))
+        .post('/admin/hosts')
+        .send({
+          metadata: { name: 'host-a' },
+          spec: { contextRef: 'ctx-a', secretRef: 'not-yet-provisioned' },
+        })
+        .expect(201)
+      expect(getSecret).toHaveBeenCalledWith('not-yet-provisioned', config.secretsNamespace)
+    } finally {
+      vi.restoreAllMocks()
+    }
+  })
+
+  it('accepts a missing secretRef on Host UPDATE too (soft 404) (200)', async () => {
+    const gateway = new MockGateway('mcp-host')
+    const app = makeApp(gateway)
+    await request(app)
       .post('/admin/hosts')
-      .send({
-        metadata: { name: 'host-a' },
-        spec: { contextRef: 'ctx-a', secretRef: 'not-yet-provisioned' },
-      })
+      .send({ metadata: { name: 'host-a' }, spec: { contextRef: 'ctx-a' } })
       .expect(201)
+    const getSecret = vi.spyOn(gateway, 'getSecret')
+    const updateResource = vi.spyOn(gateway, 'updateResource')
+    try {
+      await request(app)
+        .put('/admin/hosts/host-a')
+        .send({
+          metadata: { name: 'host-a' },
+          spec: { contextRef: 'ctx-a', secretRef: 'not-yet-provisioned' },
+        })
+        .expect(200)
+      expect(getSecret).toHaveBeenCalledWith('not-yet-provisioned', config.secretsNamespace)
+      expect(updateResource).toHaveBeenCalledOnce()
+    } finally {
+      vi.restoreAllMocks()
+    }
   })
 
   it('rejects a non-LLM secretRef on Host UPDATE too (422)', async () => {
@@ -1371,6 +1521,65 @@ describe('routes/resources — Host secretRef anti-spoofing', () => {
       })
       .expect(422)
     expect(res.body.errors[0].field).toBe('spec.secretRef')
+  })
+
+  // Soft ONLY on 404: a 403 on control-api's own secretRef read must fail
+  // loud (502 via the real handler), never silently skip the anti-spoofing
+  // check, and never reach the operator as a forwarded 403.
+  function makeAppWithSecretReadError(gateway: MockGateway, secretName: string) {
+    vi.spyOn(gateway, 'getSecret').mockRejectedValue(
+      controlApiForbiddenRead(secretName, config.secretsNamespace)
+    )
+    const app = makeApp(gateway)
+    app.use(clerumErrorHandler)
+    return app
+  }
+
+  it('returns 502 on a 403 secretRef read on Host CREATE and creates nothing', async () => {
+    const gateway = new MockGateway('mcp-host')
+    const createResource = vi.spyOn(gateway, 'createResource')
+    vi.spyOn(rootLogger, 'warn').mockImplementation(() => {})
+    try {
+      const res = await request(makeAppWithSecretReadError(gateway, 'mcp-host-runtime-auth'))
+        .post('/admin/hosts')
+        .send({
+          metadata: { name: 'host-a' },
+          spec: { contextRef: 'ctx-a', secretRef: 'mcp-host-runtime-auth' },
+        })
+      expect(gateway.getSecret).toHaveBeenCalledWith(
+        'mcp-host-runtime-auth',
+        config.secretsNamespace
+      )
+      expectRejectedSecretRead(res, 'mcp-host-runtime-auth', config.secretsNamespace)
+      expect(createResource).not.toHaveBeenCalled()
+    } finally {
+      vi.restoreAllMocks()
+    }
+  })
+
+  it('returns 502 on a 403 secretRef read on Host UPDATE and updates nothing', async () => {
+    const gateway = new MockGateway('mcp-host')
+    // The Host exists, so the PUT is a real UPDATE rather than a missing-Host
+    // path. Created without secretRef, so this does not read a Secret.
+    await request(makeApp(gateway))
+      .post('/admin/hosts')
+      .send({ metadata: { name: 'host-a' }, spec: { contextRef: 'ctx-a' } })
+      .expect(201)
+    const updateResource = vi.spyOn(gateway, 'updateResource')
+    vi.spyOn(rootLogger, 'warn').mockImplementation(() => {})
+    try {
+      const res = await request(makeAppWithSecretReadError(gateway, 'coordinator-token'))
+        .put('/admin/hosts/host-a')
+        .send({
+          metadata: { name: 'host-a' },
+          spec: { contextRef: 'ctx-a', secretRef: 'coordinator-token' },
+        })
+      expect(gateway.getSecret).toHaveBeenCalledWith('coordinator-token', config.secretsNamespace)
+      expectRejectedSecretRead(res, 'coordinator-token', config.secretsNamespace)
+      expect(updateResource).not.toHaveBeenCalled()
+    } finally {
+      vi.restoreAllMocks()
+    }
   })
 })
 
