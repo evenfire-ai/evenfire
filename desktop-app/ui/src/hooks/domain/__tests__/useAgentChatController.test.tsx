@@ -12,12 +12,13 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { makeTaskKey } from '@contexts/AgentTaskTrackerContext/types'
-import { act, waitFor } from '@testing-library/react'
+import { act, cleanup, waitFor as rtlWaitFor } from '@testing-library/react'
 import { renderController } from './__fixtures__/controllerHarness'
 import { type MockClerum, installMockClerum, uninstallMockClerum } from './__fixtures__/mockClerum'
 
 let clerum: MockClerum
 let uuidCounter = 0
+const ASYNC_WAIT_TIMEOUT_MS = 5_000
 
 // React 18/19 needs this flag for act() to flush effects in the test env.
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -32,14 +33,37 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  cleanup()
   vi.restoreAllMocks()
   vi.useRealTimers()
   uninstallMockClerum()
+  expect(document.body.childElementCount).toBe(0)
 })
 
 /** Wait until the controller's mount effect (loadChatList) has settled. */
 async function settleMount() {
   await waitFor(() => expect(clerum.chat.getIndex).toHaveBeenCalled())
+}
+
+// Sending now persists the optimistic turn through the filesystem-backed
+// ChatStore before subscribing. Under the full parallel Desktop suite, that
+// disk work can exceed Testing Library's one-second default timeout.
+const CHAT_STORE_IO_TIMEOUT_MS = 10_000
+
+async function waitForProgressHandler(taskId: string) {
+  await waitFor(
+    () => expect(clerum.hasProgressHandler(taskId)).toBe(true),
+    CHAT_STORE_IO_TIMEOUT_MS
+  )
+}
+
+function waitForWithFakeTimers<T>(assertion: () => T | Promise<T>) {
+  return vi.waitFor(assertion, { timeout: CHAT_STORE_IO_TIMEOUT_MS })
+}
+
+/** Real ChatStore-backed effects can exceed Testing Library's 1s default on CI runners. */
+function waitFor<T>(callback: () => T | Promise<T>, timeout = ASYNC_WAIT_TIMEOUT_MS) {
+  return rtlWaitFor(callback, { timeout })
 }
 
 function deferred<T>() {
@@ -312,7 +336,7 @@ describe('useAgentChatController — characterization (D.0)', () => {
         sendResolved = true
       })
 
-      await waitFor(() => expect(clerum.hasProgressHandler('task-abc')).toBe(true))
+      await waitForProgressHandler('task-abc')
       await act(async () => {
         clerum.emitTaskProgress('task-abc', {
           type: 'open',
@@ -353,7 +377,7 @@ describe('useAgentChatController — characterization (D.0)', () => {
       const sendPromise = act(async () => {
         await result.current.handleSendAgentMessage('first message')
       })
-      await waitFor(() => expect(clerum.hasProgressHandler('task-abc')).toBe(true))
+      await waitForProgressHandler('task-abc')
       await act(async () => {
         clerum.emitTaskProgress('task-abc', {
           type: 'terminal',
@@ -396,7 +420,7 @@ describe('useAgentChatController — characterization (D.0)', () => {
       const firstSend = act(async () => {
         await result.current.handleSendAgentMessage('m1')
       })
-      await waitFor(() => expect(clerum.hasProgressHandler('task-abc')).toBe(true))
+      await waitForProgressHandler('task-abc')
 
       // Second send while first is in flight — should be silently rejected.
       await act(async () => {
@@ -422,7 +446,7 @@ describe('useAgentChatController — characterization (D.0)', () => {
       const sendPromise = act(async () => {
         await result.current.handleSendAgentMessage('hola')
       })
-      await waitFor(() => expect(clerum.hasProgressHandler('task-abc')).toBe(true))
+      await waitForProgressHandler('task-abc')
       await act(async () => {
         clerum.emitTaskProgress('task-abc', {
           type: 'terminal',
@@ -459,7 +483,7 @@ describe('useAgentChatController — characterization (D.0)', () => {
       await act(async () => {
         await controller.result.current.handleSendAgentMessage('question')
       })
-      await waitFor(() => expect(clerum.hasProgressHandler('task-old-team')).toBe(true))
+      await waitForProgressHandler('task-old-team')
 
       clerum.emitTaskProgress('task-old-team', {
         type: 'terminal',
@@ -498,7 +522,7 @@ describe('useAgentChatController — characterization (D.0)', () => {
       const sendPromise = act(async () => {
         await result.current.handleSendAgentMessage('hola')
       })
-      await waitFor(() => expect(clerum.hasProgressHandler('task-abc')).toBe(true))
+      await waitForProgressHandler('task-abc')
       await act(async () => {
         clerum.emitTaskProgress('task-abc', {
           type: 'terminal',
@@ -521,7 +545,7 @@ describe('useAgentChatController — characterization (D.0)', () => {
       // Start the send bare (it stays in flight until terminal); read state
       // after the suspended event flushes, before resolving.
       const sendPromise = result.current.handleSendAgentMessage('hola').catch(() => undefined)
-      await waitFor(() => expect(clerum.hasProgressHandler('task-abc')).toBe(true))
+      await waitForProgressHandler('task-abc')
       await act(async () => {
         clerum.emitTaskProgress('task-abc', {
           type: 'open',
@@ -581,7 +605,7 @@ describe('useAgentChatController — characterization (D.0)', () => {
       // send persists the user turn to the real ChatStore first, which is disk
       // I/O that fake timers do not advance: poll for the subscription instead.
       await act(async () => {
-        await vi.waitFor(() => expect(clerum.hasProgressHandler('task-abc')).toBe(true))
+        await waitForWithFakeTimers(() => expect(clerum.hasProgressHandler('task-abc')).toBe(true))
       })
 
       await act(async () => {
@@ -599,7 +623,7 @@ describe('useAgentChatController — characterization (D.0)', () => {
 
       // The failure toast follows the store write of the error reply.
       await act(async () => {
-        await vi.waitFor(() =>
+        await waitForWithFakeTimers(() =>
           expect(spies.pushToast).toHaveBeenCalledWith(expect.stringContaining('failed'), 'error')
         )
       })
@@ -614,7 +638,7 @@ describe('useAgentChatController — characterization (D.0)', () => {
       await settleMount()
 
       const sendPromise = result.current.handleSendAgentMessage('hola').catch(() => undefined)
-      await waitFor(() => expect(clerum.hasProgressHandler('task-abc')).toBe(true))
+      await waitForProgressHandler('task-abc')
       await act(async () => {
         clerum.emitTaskProgress('task-abc', {
           type: 'open',
@@ -657,7 +681,7 @@ describe('useAgentChatController — characterization (D.0)', () => {
       // The user turn is persisted to the real ChatStore (disk I/O fake timers do
       // not advance) before the subscription is wired: poll for it.
       await act(async () => {
-        await vi.waitFor(() => expect(clerum.hasProgressHandler('task-abc')).toBe(true))
+        await waitForWithFakeTimers(() => expect(clerum.hasProgressHandler('task-abc')).toBe(true))
       })
 
       await act(async () => {
@@ -669,7 +693,7 @@ describe('useAgentChatController — characterization (D.0)', () => {
       // The timeout's recovery reads the store (disk I/O) before it settles the
       // entry as an error: poll for the settled state.
       await act(async () => {
-        await vi.waitFor(() => {
+        await waitForWithFakeTimers(() => {
           const progress = result.current.progressByAgentMessage['agent-x']
           const entry = progress && Object.values(progress)[0]
           expect(entry?.status).toBe('error')
@@ -692,7 +716,7 @@ describe('useAgentChatController — characterization (D.0)', () => {
       await settleMount()
 
       const sendPromise = result.current.handleSendAgentMessage('hola').catch(() => undefined)
-      await waitFor(() => expect(clerum.hasProgressHandler('task-abc')).toBe(true))
+      await waitForProgressHandler('task-abc')
       await act(async () => {
         clerum.emitTaskProgress('task-abc', {
           type: 'open',
@@ -739,7 +763,7 @@ describe('useAgentChatController — characterization (D.0)', () => {
       await settleMount()
 
       const sendPromise = result.current.handleSendAgentMessage('hola').catch(() => undefined)
-      await waitFor(() => expect(clerum.hasProgressHandler('task-abc')).toBe(true))
+      await waitForProgressHandler('task-abc')
       await act(async () => {
         clerum.emitTaskProgress('task-abc', {
           type: 'open',
@@ -783,7 +807,7 @@ describe('useAgentChatController — characterization (D.0)', () => {
       await settleMount()
 
       const sendPromise = result.current.handleSendAgentMessage('hola').catch(() => undefined)
-      await waitFor(() => expect(clerum.hasProgressHandler('task-abc')).toBe(true))
+      await waitForProgressHandler('task-abc')
       const chatId = result.current.activeChatId!
       const key = makeTaskKey('agent-x', chatId)
       await act(async () => {
@@ -829,7 +853,7 @@ describe('useAgentChatController — characterization (D.0)', () => {
       await settleMount()
 
       const sendPromise = result.current.handleSendAgentMessage('hola').catch(() => undefined)
-      await waitFor(() => expect(clerum.hasProgressHandler('task-abc')).toBe(true))
+      await waitForProgressHandler('task-abc')
       await act(async () => {
         clerum.emitTaskProgress('task-abc', {
           type: 'open',
@@ -858,7 +882,7 @@ describe('useAgentChatController — characterization (D.0)', () => {
       await settleMount()
 
       const sendPromise = result.current.handleSendAgentMessage('hola').catch(() => undefined)
-      await waitFor(() => expect(clerum.hasProgressHandler('task-abc')).toBe(true))
+      await waitForProgressHandler('task-abc')
       await act(async () => {
         clerum.emitTaskProgress('task-abc', {
           type: 'open',
@@ -924,7 +948,7 @@ describe('useAgentChatController — characterization (D.0)', () => {
       await settleMount()
 
       const sendPromise = result.current.handleSendAgentMessage('q1').catch(() => undefined)
-      await waitFor(() => expect(clerum.hasProgressHandler('task-abc')).toBe(true))
+      await waitForProgressHandler('task-abc')
 
       // First stream loss → reconcile → rejoin (re-subscribes the SSE).
       await act(async () => {
@@ -1015,7 +1039,7 @@ describe('useAgentChatController — characterization (D.0)', () => {
       await settleMount()
 
       const sendPromise = result.current.handleSendAgentMessage('hola').catch(() => undefined)
-      await waitFor(() => expect(clerum.hasProgressHandler('task-abc')).toBe(true))
+      await waitForProgressHandler('task-abc')
       await act(async () => {
         clerum.emitTaskProgress('task-abc', {
           type: 'open',
@@ -1083,7 +1107,7 @@ describe('useAgentChatController — characterization (D.0)', () => {
       await settleMount()
 
       const sendPromise = result.current.handleSendAgentMessage('hola').catch(() => undefined)
-      await waitFor(() => expect(clerum.hasProgressHandler('task-abc')).toBe(true))
+      await waitForProgressHandler('task-abc')
       await act(async () => {
         clerum.emitTaskProgress('task-abc', {
           type: 'open',
@@ -1141,7 +1165,7 @@ describe('useAgentChatController — characterization (D.0)', () => {
       expect(currentEntry()?.status).toBe('streaming')
 
       // activity event is appended to the message's event list
-      await waitFor(() => expect(clerum.hasProgressHandler('task-abc')).toBe(true))
+      await waitForProgressHandler('task-abc')
       await act(async () => {
         clerum.emitActivity('agent-x', {
           type: 'activity',
@@ -1789,7 +1813,7 @@ describe('useAgentChatController — characterization (D.0)', () => {
       const sendPromise = act(async () => {
         await result.current.handleSendAgentMessage('persist me')
       })
-      await waitFor(() => expect(clerum.hasProgressHandler('task-ga')).toBe(true))
+      await waitForProgressHandler('task-ga')
       await act(async () => {
         clerum.emitTaskProgress('task-ga', { type: 'open', taskId: 'task-ga', hostRef: 'agent-x' })
         clerum.emitTaskProgress('task-ga', {
@@ -1837,7 +1861,7 @@ describe('interrupted generated-file contract', () => {
     const send = act(async () => {
       await result.current.handleSendAgentMessage('Create a report')
     })
-    await waitFor(() => expect(clerum.hasProgressHandler('task-file')).toBe(true))
+    await waitForProgressHandler('task-file')
     await act(async () => {
       clerum.emitTaskProgress('task-file', {
         type: 'terminal',

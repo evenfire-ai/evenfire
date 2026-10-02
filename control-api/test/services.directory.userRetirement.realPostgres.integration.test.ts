@@ -4,6 +4,7 @@ import { Pool } from 'pg'
 import { initDb, pool } from '../src/db.js'
 import { retireDesktopUser } from '../src/services/directory/users.js'
 import { gfsDesktopOperatorLinkService } from '../src/services/gfsDesktopOperatorLinkService.js'
+import { waitForDatabaseConnectionsToClose } from './realPostgresCleanup.ts'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
@@ -56,15 +57,14 @@ describeRealPostgres('retireDesktopUser on real PostgreSQL', () => {
 
   afterAll(async () => {
     corePoolConnectSpy?.mockRestore()
-    await testPool?.end()
     if (!adminPool) return
-    await adminPool.query(
-      `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
-        WHERE datname = $1 AND pid <> pg_backend_pid()`,
-      [database]
-    )
-    await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdent(database)}`)
-    await adminPool.end()
+    try {
+      await testPool?.end()
+      await waitForDatabaseConnectionsToClose(adminPool, database)
+      await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdent(database)}`)
+    } finally {
+      await adminPool.end()
+    }
   })
 
   it('persists the legacy deleted outcome and returns it on an identical replay', async () => {
