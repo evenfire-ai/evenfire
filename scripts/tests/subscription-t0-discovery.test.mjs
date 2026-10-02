@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
@@ -65,7 +65,7 @@ test('admits the three formerly omitted roots through their physical file entrie
   assert.deepEqual(result.violations, [])
   const lanes = new Map(result.candidates.map(entry => [entry.file, entry.lane]))
   for (const file of [desktop, host, e2e, scripts]) assert.equal(lanes.get(file), 'T0')
-  for (const root of ['desktop-app', 'tests/e2e', 'scripts/e2e']) {
+  for (const root of ['desktop-app', 'tests/e2e', 'scripts/e2e', 'scripts/tests']) {
     assert.ok(result.roots.includes(root))
   }
 })
@@ -307,5 +307,113 @@ export default defineConfig({
   )
   assert.ok(
     result.violations.includes(`runtime suite cannot be registered as a T0 unit ${spec}`),
+  )
+})
+
+test('visible remaining journeys use delegated collection and explicit opt-in gates', t => {
+  const fixture = makeFixture(t)
+  createFile(
+    fixture.root,
+    'desktop-app/test/e2e-playwright/subscriptionRemainingJourneyConfig.ts',
+    `import { defineConfig } from '@playwright/test'
+export function remainingJourneyConfig(suite, specFile) {
+  const run = requireSubscriptionImageRun()
+  requireRemainingJourney(suite, run)
+  return defineConfig({ testMatch: \`**/\${specFile}\` })
+}
+`,
+  )
+  const suites = [
+    ['tool-screenshot', 'subscription-tool-screenshot.spec.ts'],
+    ['gfs-image', 'subscription-gfs-image.spec.ts'],
+    ['admission-recovery', 'subscription-admission-recovery.spec.ts'],
+  ]
+  for (const [suite, specName] of suites) {
+    const spec = `desktop-app/test/e2e-playwright/${specName}`
+    const config = `desktop-app/test/e2e-playwright/playwright.subscription-${suite}.config.ts`
+    createFile(fixture.root, spec)
+    createFile(
+      fixture.root,
+      config,
+      `import { remainingJourneyConfig } from './subscriptionRemainingJourneyConfig.js'
+export default remainingJourneyConfig('${suite}', '${specName}')
+`,
+    )
+  }
+
+  const result = auditSubscriptionDiscovery('codex', fixture.root, fixture.registered)
+  assert.deepEqual(result.violations, [])
+  const entries = new Map(result.candidates.map(entry => [entry.file, entry]))
+  for (const [, specName] of suites) {
+    const file = `desktop-app/test/e2e-playwright/${specName}`
+    assert.equal(entries.get(file)?.lane, 'runtime-opt-in')
+    assert.match(String(entries.get(file)?.consumer), /collection-verified registry entry/)
+  }
+
+  const admissionConfig = 'desktop-app/test/e2e-playwright/playwright.subscription-admission-recovery.config.ts'
+  const admissionSource = readFileSync(path.join(fixture.root, admissionConfig), 'utf8')
+  const ungated = admissionSource.replace(/\bremainingJourneyConfig\s*\(/, 'void(')
+  writeFileSync(path.join(fixture.root, admissionConfig), ungated)
+  assert.equal(
+    verifyRuntimeConsumer(
+      fixture.root,
+      'desktop-app/test/e2e-playwright/subscription-admission-recovery.spec.ts',
+      admissionConfig,
+    ),
+    undefined,
+  )
+  const negative = auditSubscriptionDiscovery('codex', fixture.root, fixture.registered)
+  assert.ok(
+    negative.violations.includes(
+      'runtime consumer does not collect desktop-app/test/e2e-playwright/subscription-admission-recovery.spec.ts',
+    ),
+  )
+
+  const helperPath = path.join(fixture.root, 'desktop-app/test/e2e-playwright/subscriptionRemainingJourneyConfig.ts')
+  const ungatedHelper = readFileSync(helperPath, 'utf8')
+    .replace(/=\s*requireSubscriptionImageRun\s*\(/, '= void(')
+  writeFileSync(helperPath, ungatedHelper)
+  writeFileSync(path.join(fixture.root, admissionConfig), admissionSource)
+  assert.deepEqual(
+    auditSubscriptionDiscovery('codex', fixture.root, fixture.registered).violations,
+    [
+      'runtime consumer does not collect desktop-app/test/e2e-playwright/subscription-admission-recovery.spec.ts',
+      'runtime consumer does not collect desktop-app/test/e2e-playwright/subscription-gfs-image.spec.ts',
+      'runtime consumer does not collect desktop-app/test/e2e-playwright/subscription-tool-screenshot.spec.ts',
+    ],
+  )
+
+  const wrongSelector = readFileSync(helperPath, 'utf8')
+    .replace(/=\s*void\(/, '= requireSubscriptionImageRun(')
+    .replace('testMatch: `**/${specFile}`', 'testMatch: `**/*.spec.ts`')
+  writeFileSync(helperPath, wrongSelector)
+  assert.ok(
+    auditSubscriptionDiscovery('codex', fixture.root, fixture.registered).violations.includes(
+      'runtime consumer does not collect desktop-app/test/e2e-playwright/subscription-gfs-image.spec.ts',
+    ),
+  )
+})
+
+test('memory calibration owns a dedicated lane and cannot enter T0', t => {
+  const fixture = makeFixture(t)
+  const testFile = 'scripts/tests/measure-control-api-authorize-memory.test.mjs'
+  const driver = 'scripts/tests/measure-control-api-authorize-memory.mjs'
+  createFile(fixture.root, testFile)
+  createFile(fixture.root, driver)
+  createFile(fixture.root, 'Makefile', 'minikube-control-api-authorize-memory:\n\t@true\n')
+
+  const result = auditSubscriptionDiscovery('codex', fixture.root, fixture.registered)
+  assert.deepEqual(result.violations, [])
+  const entry = result.candidates.find(candidate => candidate.file === testFile)
+  assert.equal(entry?.lane, 'calibration:control-api-memory')
+  assert.match(String(entry?.consumer), /physical calibration only/)
+
+  const registered = auditSubscriptionDiscovery(
+    'codex',
+    fixture.root,
+    [...fixture.registered, testFile],
+  )
+  assert.ok(
+    registered.violations.includes(`calibration suite cannot be registered as a T0 unit ${testFile}`),
   )
 })

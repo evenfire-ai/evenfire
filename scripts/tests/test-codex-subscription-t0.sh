@@ -239,6 +239,7 @@ run_group "codex-upstream-contract-freeze" "tests/e2e" "integration/codex-subscr
 
 run_node_group "approved-tools-fixtures-and-runner" \
   "scripts/tests/subscription-t0-discovery.test.mjs" \
+  "scripts/tests/subscription-image-runner.test.mjs" \
   "scripts/e2e/fixtures/subscription-image-provider.test.mjs" \
   "scripts/tests/run-node-test-files.test.mjs" \
   "tests/e2e/fixtures/codex-subscription/approved-tools/server.test.mjs" \
@@ -422,6 +423,8 @@ else
       "test/subscriptionImageChallenge.test.ts" \
       "test/subscriptionImageRunContract.test.ts" \
       "test/subscriptionAdmissionGuard.test.ts" \
+      "test/subscriptionRemainingJourneyData.test.ts" \
+      "test/subscriptionRemainingJourneysContract.test.ts" \
       "test/codexImageChallenge.test.ts" \
       "ui/src/constants/__tests__/attachments.test.ts" \
       "ui/src/hooks/__tests__/useHostModels.test.tsx" \

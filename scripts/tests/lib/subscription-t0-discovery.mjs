@@ -4,7 +4,7 @@ import { pathToFileURL } from 'node:url'
 
 export const namedRoots = [
   'control-api', 'mcp-host', 'workflow-recipes', 'host-context-controller',
-  'control-ui', 'desktop-app', 'tests/e2e', 'scripts/e2e',
+  'control-ui', 'desktop-app', 'tests/e2e', 'scripts/e2e', 'scripts/tests',
 ]
 const excludedDirectories = new Set([
   'node_modules', 'dist', '.next', 'coverage', '.git', 'test-results',
@@ -19,6 +19,7 @@ function realPgLane(file) {
 }
 
 export function isSubscriptionCandidate(file, provider) {
+  if (calibrationSuites.has(file)) return true
   const name = path.posix.basename(file).toLowerCase()
   const other = provider === 'codex' ? 'grok' : 'codex'
   return name.includes(provider) ||
@@ -55,10 +56,16 @@ const otherLaneSuites = new Map([
   ['mcp-host/src/core/tools/__tests__/attachmentRead.test.ts', 'general-ci:mcp-host'],
   ['desktop-app/ui/src/lib/__tests__/chatMessageAttachments.test.ts', 'general-ci:desktop-app'],
 ])
+const calibrationSuites = new Map([
+  ['scripts/tests/measure-control-api-authorize-memory.test.mjs', 'calibration:control-api-memory'],
+])
 const runtimeSuites = new Map([
   ['desktop-app/test/e2e-playwright/subscription-image-input.spec.ts', 'desktop-app/test/e2e-playwright/playwright.subscription-image.config.ts'],
   ['desktop-app/test/e2e-playwright/codex-image-input.spec.ts', 'desktop-app/test/e2e-playwright/playwright.codex-image.config.ts'],
   ['desktop-app/test/e2e-playwright/plugin-workload-sdk-codex-fallback.spec.ts', 'desktop-app/test/e2e-playwright/playwright.config.ts'],
+  ['desktop-app/test/e2e-playwright/subscription-tool-screenshot.spec.ts', 'desktop-app/test/e2e-playwright/playwright.subscription-tool-screenshot.config.ts'],
+  ['desktop-app/test/e2e-playwright/subscription-gfs-image.spec.ts', 'desktop-app/test/e2e-playwright/playwright.subscription-gfs-image.config.ts'],
+  ['desktop-app/test/e2e-playwright/subscription-admission-recovery.spec.ts', 'desktop-app/test/e2e-playwright/playwright.subscription-admission-recovery.config.ts'],
   ['tests/e2e/playwright/control-ui/codex-subscription-admission.spec.ts', 'tests/e2e/playwright/playwright.subscription-admission.config.ts'],
   ['tests/e2e/playwright/control-ui/codex-subscription-host-workflow.spec.ts', 'tests/e2e/playwright/playwright.codex-subscription.config.ts'],
   ['tests/e2e/playwright/control-ui/codex-subscription-workflow-recipe.spec.ts', 'tests/e2e/playwright/playwright.codex-subscription.config.ts'],
@@ -157,6 +164,16 @@ function projectBlocks(source) {
 }
 
 function playwrightCollectsFile(source, configDirectory, file) {
+  if (source.includes('subscriptionRemainingJourneyConfig')) {
+    const delegatedRemainingConfig = /remainingJourneyConfig\(\s*['"]([^'"]+)['"]\s*,\s*['"]([^'"]+)['"]\s*\)/.exec(source)
+    if (!delegatedRemainingConfig) return false
+    const helper = readFileSync(path.join(configDirectory, 'subscriptionRemainingJourneyConfig.ts'), 'utf8')
+    return path.posix.basename(file) === delegatedRemainingConfig[2] &&
+      /return\s+defineConfig\s*\(/.test(helper) &&
+      helper.includes('testMatch: `**/${specFile}`') &&
+      /=\s*requireSubscriptionImageRun\s*\(/.test(helper) &&
+      /(?:^|\n)\s*requireRemainingJourney\s*\(/.test(helper)
+  }
   if (!source.includes('defineConfig')) return false
   const relative = path.posix.relative(configDirectory, file)
   const testDirectory = /(?:^|[{,\n]\s*)testDir:\s*['"](.+)['"]/.exec(source)?.[1]
@@ -201,7 +218,8 @@ export function verifyRuntimeConsumer(root, file, consumer) {
   }
 
   const source = readFileSync(path.join(root, consumer), 'utf8')
-  if (!playwrightCollectsFile(source, path.posix.dirname(consumer), file)) return undefined
+  const configDirectory = path.join(root, path.posix.dirname(consumer))
+  if (!playwrightCollectsFile(source, configDirectory, path.join(root, file))) return undefined
   return `${consumer} (collection-verified registry entry)`
 }
 
@@ -227,6 +245,17 @@ function verifyOtherConsumer(root, file, lane) {
   }
   if (!new RegExp(`^\\s*- ${service}\\s*$`, 'm').test(ci) || !ci.includes('npm test')) return undefined
   return `${ciPath}#test (${service}); ${configPath}`
+}
+
+function verifyCalibrationConsumer(root, file, lane) {
+  if (lane !== 'calibration:control-api-memory') return undefined
+  const driver = 'scripts/tests/measure-control-api-authorize-memory.mjs'
+  if (!regularFile(root, file) || !regularFile(root, driver)) return undefined
+  const makefile = regularFile(root, 'Makefile')
+    ? readFileSync(path.join(root, 'Makefile'), 'utf8')
+    : ''
+  if (!makefile.includes('minikube-control-api-authorize-memory:')) return undefined
+  return `Makefile#minikube-control-api-authorize-memory (physical calibration only); ${driver}`
 }
 
 export function auditSubscriptionDiscovery(provider, root, registered) {
@@ -258,6 +287,8 @@ export function auditSubscriptionDiscovery(provider, root, registered) {
       const pgLane = realPgLane(file)
       const pgRegistered = Boolean(pgLane) &&
         registeredSet.has(file) && otherLaneSuites.get(file) === pgLane
+      const calibrationLane = calibrationSuites.get(file)
+      const calibrationRegistered = registeredSet.has(file) && calibrationLane !== undefined
       if (runtimeSuites.has(file)) {
         lane = 'runtime-opt-in'
         if (registeredSet.has(file)) {
@@ -271,12 +302,21 @@ export function auditSubscriptionDiscovery(provider, root, registered) {
         consumer = verifyOtherConsumer(root, file, pgLane)
         if (!consumer) violations.push(`unverified ${pgLane} consumer for ${file}`)
         else violations.push(`real-PG suite cannot be registered as a T0 unit ${file}`)
+      } else if (calibrationRegistered) {
+        lane = calibrationLane
+        consumer = verifyCalibrationConsumer(root, file, calibrationLane)
+        if (!consumer) violations.push(`unverified ${calibrationLane} consumer for ${file}`)
+        else violations.push(`calibration suite cannot be registered as a T0 unit ${file}`)
       } else if (registeredSet.has(file)) {
         lane = 'T0'
         consumer = 'physical T0 group; separate producer/reporter required'
       } else if (pgLane && otherLaneSuites.get(file) === pgLane) {
         lane = pgLane
         consumer = verifyOtherConsumer(root, file, lane)
+        if (!consumer) violations.push(`unverified ${lane} consumer for ${file}`)
+      } else if (calibrationLane !== undefined) {
+        lane = calibrationLane
+        consumer = verifyCalibrationConsumer(root, file, lane)
         if (!consumer) violations.push(`unverified ${lane} consumer for ${file}`)
       } else if (otherLaneSuites.has(file)) {
         lane = otherLaneSuites.get(file)

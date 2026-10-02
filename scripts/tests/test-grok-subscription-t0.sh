@@ -237,6 +237,7 @@ echo "Grok subscription T0 aggregator"
 
 run_node_group "subscription-discovery-and-offline-image-provider" \
   "scripts/tests/subscription-t0-discovery.test.mjs" \
+  "scripts/tests/subscription-image-runner.test.mjs" \
   "scripts/e2e/fixtures/subscription-image-provider.test.mjs"
 
 require_ci_matrix_entry "grok-llm-proxy"
@@ -412,6 +413,8 @@ else
       "test/subscriptionImageChallenge.test.ts" \
       "test/subscriptionImageRunContract.test.ts" \
       "test/subscriptionAdmissionGuard.test.ts" \
+      "test/subscriptionRemainingJourneyData.test.ts" \
+      "test/subscriptionRemainingJourneysContract.test.ts" \
       "ui/src/constants/__tests__/attachments.test.ts" \
       "ui/src/components/agents/__tests__/ComposerPanel.test.tsx"
   fi
