@@ -19,6 +19,7 @@ import {
   DesktopReleaseStatus,
   DesktopRuntimeConfig,
   DesktopRuntimeConfigState,
+  EntityChangeStreamEvent,
   ExternalChannelsSummary,
   HostActivitySnapshot,
   HostActivityStreamEvent,
@@ -96,7 +97,11 @@ declare global {
           callback: (payload: { email: string; authorizationToken: string }) => void
         ) => () => void
         onDesktopEnvironmentSetup: (
-          callback: (payload: { externalRestApiBaseUrl: string; appName?: string }) => void
+          callback: (payload: {
+            externalRestApiBaseUrl: string
+            rpcProxyBaseUrl: string
+            appName?: string
+          }) => void
         ) => () => void
         getDesktopReleaseStatus: () => Promise<DesktopReleaseStatus>
         getDesktopAppInfo: () => Promise<DesktopAppInfo>
@@ -454,6 +459,11 @@ declare global {
         onFailed: (callback: (payload: { id: string; error: string }) => void) => () => void
         ack: (notificationId: string) => Promise<{ ok: boolean; status: string }>
       }
+      entityChanges: {
+        subscribe: (
+          onEvent: (event: EntityChangeStreamEvent) => void
+        ) => Promise<() => Promise<void>>
+      }
       notificationPreferences: {
         get: () => Promise<import('./types').UserNotificationPreferences>
         update: (payload: {
@@ -809,6 +819,7 @@ declare global {
             name: string
             kind: string
             bytes: number | null
+            version?: number
           }) => void
         ) => () => void
         onNotificationClicked: (

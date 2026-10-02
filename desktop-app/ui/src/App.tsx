@@ -27,6 +27,8 @@ import { TitlebarActionsPortal, WindowTitleBar } from '@components/WindowTitleBa
 import { WorkspaceTabStrip } from '@components/WorkspaceTabStrip'
 import { DESKTOP_ROUTES, SIDEBAR_COLLAPSED_KEY } from '@constants/navigation'
 import { THEME_STORAGE_KEY } from '@constants/theme'
+import { desktopQueryKeys } from '@hooks/domain/queryKeys'
+import { isGfsSessionAuthorityFailure } from '@hooks/domain/useGfsBrowserController'
 import { useAgentChatActionsValue } from '@hooks/useAgentChatActionsValue'
 import { useAppController } from '@hooks/useAppController'
 import {
@@ -37,7 +39,16 @@ import {
 import { useWindowFocusBridge } from '@hooks/useWindowFocusBridge'
 import type { ChatLocalMatch } from '@lib/chatLocalSearch'
 import { buildLoadedChatSemanticModels } from '@lib/chatMessageSemantics'
+import { EntityChangeRegistry } from '@lib/entityChangeRegistry'
+import {
+  authoritativeGfsStatus,
+  expireGfsPreviewTabs,
+  markPluginGfsPreviewUnavailable,
+  shouldRevalidateGfsQuery,
+} from '@lib/gfsEntityChangeState'
 import { resolveGfsPreview } from '@lib/gfsPreview'
+import { retireClosedGfsPreviewOwners } from '@lib/gfsPreviewRetryOwnership'
+import { desktopQueryClient } from '@lib/queryClient'
 import {
   canProcessSandboxUiDeepLinks,
   resolveSandboxUiDeepLinkApp,
@@ -68,6 +79,7 @@ import {
   newChatTab,
   openAppTab,
   reconcileWorkspaceChatTab,
+  refreshPreviewTab,
   reorderWorkspaceTab,
   selectLastWorkspaceTab,
   selectWorkspaceTab,
@@ -278,10 +290,13 @@ function DesktopUpdateRequiredDialog({
 
 export function App() {
   const vm = useAppController()
+  const queryClient = desktopQueryClient
+  const entityChangeRegistry = React.useMemo(() => new EntityChangeRegistry(), [])
   // Electron never fires `visibilitychange` on OS-window switching; bridge
   // DOM focus/blur so focus-aware query revalidation actually runs.
   useWindowFocusBridge()
   const [themeMode, setThemeMode] = React.useState<ThemeMode>(getInitialThemeMode)
+  const [remoteGfsChangeEpoch, setRemoteGfsChangeEpoch] = React.useState(0)
   const [sidebarCollapsed, setSidebarCollapsed] = React.useState<boolean>(
     getInitialSidebarCollapsed
   )
@@ -845,7 +860,33 @@ export function App() {
     name: string
     bytes: number
     mimeType: string
+    version?: number
+    reloadVersion: number
+    unavailable?: boolean
   } | null>(null)
+  const pluginGfsPreviewRef = React.useRef(pluginGfsPreview)
+  pluginGfsPreviewRef.current = pluginGfsPreview
+  const previewRefreshGenerationRef = React.useRef(new Map<string, number>())
+  const previewRetryTimersRef = React.useRef(new Map<string, number>())
+  const previewRetryAttemptRef = React.useRef(new Map<string, number>())
+  const previewOwnersRef = React.useRef(new Set<string>())
+
+  React.useEffect(() => {
+    const currentOwners = new Set(
+      workspaceTabs.tabs
+        .filter(tab => tab.kind === 'preview' && tab.preview)
+        .map(tab => tab.preview!.gfsUri)
+    )
+    if (pluginGfsPreview) currentOwners.add(pluginGfsPreview.gfsUri)
+    retireClosedGfsPreviewOwners(
+      previewOwnersRef.current,
+      currentOwners,
+      previewRetryTimersRef.current,
+      previewRetryAttemptRef.current,
+      previewRefreshGenerationRef.current,
+      timer => window.clearTimeout(timer)
+    )
+  }, [pluginGfsPreview?.gfsUri, workspaceTabs.tabs])
 
   React.useEffect(() => {
     const off = window.clerum.pluginSdk?.onOpenGfsResource?.(resource => {
@@ -858,6 +899,7 @@ export function App() {
               gfsUri: resource.gfsUri,
               name: resource.name,
               bytes: resource.bytes ?? 0,
+              version: resource.version,
             })
           : null
       if (preview?.kind === 'image') {
@@ -871,6 +913,8 @@ export function App() {
           name: preview.name,
           bytes: preview.bytes,
           mimeType: preview.mimeType,
+          ...(preview.version !== undefined ? { version: preview.version } : {}),
+          reloadVersion: 0,
         })
         return
       }
@@ -919,6 +963,235 @@ export function App() {
     },
     [setWorkspaceTabs]
   )
+
+  const refreshOpenPreview = React.useCallback(
+    async (gfsUri: string, fromRetry = false) => {
+      if (!fromRetry) {
+        const existingTimer = previewRetryTimersRef.current.get(gfsUri)
+        if (existingTimer !== undefined) window.clearTimeout(existingTimer)
+        previewRetryTimersRef.current.delete(gfsUri)
+        previewRetryAttemptRef.current.delete(gfsUri)
+      }
+      const generation = (previewRefreshGenerationRef.current.get(gfsUri) ?? 0) + 1
+      previewRefreshGenerationRef.current.set(gfsUri, generation)
+      const isCurrentGeneration = () =>
+        previewRefreshGenerationRef.current.get(gfsUri) === generation
+      try {
+        const resource = await window.clerum.gfs.resolve(gfsUri)
+        if (previewRefreshGenerationRef.current.get(gfsUri) !== generation) return
+        const preview =
+          resource.kind === 'file'
+            ? resolveGfsPreview({
+                gfsUri: resource.gfsUri,
+                name: resource.name,
+                bytes: resource.bytes ?? 0,
+                version: resource.version,
+              })
+            : null
+        if (!preview) {
+          setWorkspaceTabs(state =>
+            refreshPreviewTab(state, gfsUri, {
+              status: 'unavailable',
+              shellTitle: 'Preview unavailable',
+              isCurrentGeneration,
+            })
+          )
+          setPluginGfsPreview(current =>
+            isCurrentGeneration() ? markPluginGfsPreviewUnavailable(current, gfsUri) : current
+          )
+          return
+        }
+        const refreshed = {
+          status: 'available' as const,
+          title: preview.name,
+          fileKind: preview.kind,
+          byteLength: preview.bytes,
+          resourceVersion: resource.version,
+          isCurrentGeneration,
+          ...('mimeType' in preview ? { mimeType: preview.mimeType } : {}),
+        }
+        setWorkspaceTabs(state => refreshPreviewTab(state, gfsUri, refreshed))
+        setPluginGfsPreview(current => {
+          if (!isCurrentGeneration()) return current
+          if (current?.gfsUri !== gfsUri) return current
+          if (
+            preview.version !== undefined &&
+            current.version !== undefined &&
+            preview.version < current.version
+          )
+            return current
+          if (preview.kind !== 'image') {
+            return markPluginGfsPreviewUnavailable(current, gfsUri)
+          }
+          if (
+            !current.unavailable &&
+            current.name === preview.name &&
+            current.bytes === preview.bytes &&
+            current.mimeType === preview.mimeType &&
+            current.version === preview.version
+          )
+            return current
+          return {
+            gfsUri,
+            name: preview.name,
+            bytes: preview.bytes,
+            mimeType: preview.mimeType,
+            ...(preview.version !== undefined ? { version: preview.version } : {}),
+            reloadVersion: current.reloadVersion + 1,
+          }
+        })
+        const retryTimer = previewRetryTimersRef.current.get(gfsUri)
+        if (retryTimer !== undefined) window.clearTimeout(retryTimer)
+        previewRetryTimersRef.current.delete(gfsUri)
+        previewRetryAttemptRef.current.delete(gfsUri)
+      } catch (error) {
+        if (previewRefreshGenerationRef.current.get(gfsUri) !== generation) return
+        const status = authoritativeGfsStatus(error)
+        const message = error instanceof Error ? error.message : String(error ?? '')
+        if (status === 401 || isGfsSessionAuthorityFailure(message, 'operation')) {
+          // A 401 is session-wide, unlike a resource-scoped 403/404. Purge
+          // and typed session-authority failures are session-wide. Purge every
+          // open GFS preview immediately; never keep displaying bytes fetched
+          // under a rejected session.
+          for (const [uri, timer] of previewRetryTimersRef.current) {
+            window.clearTimeout(timer)
+            previewRefreshGenerationRef.current.set(
+              uri,
+              (previewRefreshGenerationRef.current.get(uri) ?? 0) + 1
+            )
+          }
+          previewRetryTimersRef.current.clear()
+          previewRetryAttemptRef.current.clear()
+          setWorkspaceTabs(expireGfsPreviewTabs)
+          setPluginGfsPreview(current =>
+            markPluginGfsPreviewUnavailable(current, current?.gfsUri ?? '')
+          )
+          void queryClient.removeQueries({ queryKey: desktopQueryKeys.gfsRoot })
+          return
+        }
+        if (status === 403 || status === 404) {
+          setWorkspaceTabs(state =>
+            refreshPreviewTab(state, gfsUri, {
+              status: 'unavailable',
+              shellTitle: 'File unavailable',
+              isCurrentGeneration,
+            })
+          )
+          setPluginGfsPreview(current =>
+            isCurrentGeneration() ? markPluginGfsPreviewUnavailable(current, gfsUri) : current
+          )
+          void queryClient.invalidateQueries({
+            queryKey: desktopQueryKeys.gfsRoot,
+            refetchType: 'active',
+          })
+        }
+        if (status === undefined || status === 429 || status >= 500) {
+          const attempt = (previewRetryAttemptRef.current.get(gfsUri) ?? 0) + 1
+          previewRetryAttemptRef.current.set(gfsUri, attempt)
+          const delayMs = Math.min(5000 * 2 ** Math.min(attempt - 1, 4), 60_000)
+          const retryTimer = window.setTimeout(() => {
+            previewRetryTimersRef.current.delete(gfsUri)
+            void refreshOpenPreview(gfsUri, true)
+          }, delayMs)
+          previewRetryTimersRef.current.set(gfsUri, retryTimer)
+        }
+      }
+    },
+    [queryClient, setWorkspaceTabs]
+  )
+
+  React.useEffect(() => {
+    if (!vm.isAuthenticated) return
+    const entityChangeBridge = window.clerum?.entityChanges
+    if (typeof entityChangeBridge?.subscribe !== 'function') return
+    let active = true
+    let stopSubscription: (() => Promise<void>) | null = null
+    let gfsRevalidationInFlight = false
+    let gfsRevalidationPending = false
+    let gfsHardRecoveryPending = false
+    const gfsQueryFilter = {
+      queryKey: desktopQueryKeys.gfsRoot,
+      predicate: (query: { queryKey: readonly unknown[] }) =>
+        shouldRevalidateGfsQuery(query.queryKey),
+    }
+    const revalidateGfs = (hardRecovery = false) => {
+      if (!active) return
+      if (gfsRevalidationInFlight) {
+        gfsRevalidationPending = true
+        gfsHardRecoveryPending ||= hardRecovery
+        return
+      }
+      gfsRevalidationInFlight = true
+      const queryFilter = hardRecovery ? { queryKey: desktopQueryKeys.gfsRoot } : gfsQueryFilter
+      const foregroundReadWasActive = queryClient.isFetching(queryFilter) > 0
+      setRemoteGfsChangeEpoch(epoch => epoch + 1)
+      void queryClient
+        .invalidateQueries({ ...queryFilter, refetchType: 'active' }, { cancelRefetch: false })
+        .then(async () => {
+          const resources = new Set(
+            workspaceTabsRef.current.tabs
+              .filter(tab => tab.kind === 'preview' && tab.preview)
+              .map(tab => tab.preview!.gfsUri)
+          )
+          const pluginPreview = pluginGfsPreviewRef.current
+          if (pluginPreview) resources.add(pluginPreview.gfsUri)
+          await Promise.all(Array.from(resources, uri => refreshOpenPreview(uri)))
+        })
+        .finally(() => {
+          gfsRevalidationInFlight = false
+          if (!active) return
+          if (gfsRevalidationPending || foregroundReadWasActive) {
+            const nextIsHardRecovery =
+              gfsHardRecoveryPending || (hardRecovery && foregroundReadWasActive)
+            gfsRevalidationPending = false
+            gfsHardRecoveryPending = false
+            revalidateGfs(nextIsHardRecovery)
+          }
+        })
+    }
+    const unsubscribeGfs = entityChangeRegistry.subscribe(['gfs', 'authorization'], event => {
+      // Scope invalidations are soft convergence hints, not proof that cached
+      // data is no longer authorized. Keep visible/paginated rows while active
+      // queries refetch; only an authoritative 403/404 purges a preview.
+      // TanStack's default refetch cancels an active request. Serialize these
+      // soft passes and retain one trailing pass so a second frame cannot abort
+      // a foreground navigation/page chain or lose a mutation during that read.
+      // Resync also refreshes cached permission affordances; inactive caches stay
+      // invalidated and re-read when they are next mounted.
+      revalidateGfs(event.type === 'resync_required')
+    })
+    void entityChangeBridge
+      .subscribe(event => entityChangeRegistry.dispatch(event))
+      .then(stop => {
+        if (active) stopSubscription = stop
+        else void stop()
+      })
+      .catch(() => undefined)
+    return () => {
+      active = false
+      unsubscribeGfs()
+      if (stopSubscription) void stopSubscription()
+      for (const timer of previewRetryTimersRef.current.values()) {
+        window.clearTimeout(timer)
+      }
+      for (const uri of previewRefreshGenerationRef.current.keys()) {
+        previewRefreshGenerationRef.current.set(
+          uri,
+          (previewRefreshGenerationRef.current.get(uri) ?? 0) + 1
+        )
+      }
+      previewRetryTimersRef.current.clear()
+      previewRetryAttemptRef.current.clear()
+    }
+  }, [
+    entityChangeRegistry,
+    queryClient,
+    refreshOpenPreview,
+    vm.authenticatedPrincipalIdentity,
+    vm.currentTeamId,
+    vm.isAuthenticated,
+    vm.runtimeConfigState?.envKey,
+  ])
 
   // Preview tab render seam (spec 18 §3.B.1). Only the ACTIVE preview tab mounts
   // a FilePreviewPage, keyed by that tab's id so switching preview tabs remounts
@@ -2434,14 +2707,19 @@ export function App() {
       body={
         <>
           <p>
-            Profile UI is asking this desktop app to use{' '}
-            <strong>{vm.pendingDesktopEnvironmentSetup.appName || 'Evenfire'}</strong>.
+            Review the service URLs for{' '}
+            <strong>{vm.pendingDesktopEnvironmentSetup.appName || 'Evenfire'}</strong>. Continue
+            only if you trust them.
           </p>
-          <p>Only continue if you trust this External REST API host:</p>
           <p className="auth-environment-confirm-url">
             {vm.pendingDesktopEnvironmentSetup.externalRestApiBaseUrl}
           </p>
           {pendingEnvironmentHost ? <p className="muted">Host: {pendingEnvironmentHost}</p> : null}
+          {vm.pendingDesktopEnvironmentSetup.rpcProxyBaseUrl ? (
+            <p className="auth-environment-confirm-url">
+              RPC proxy: {vm.pendingDesktopEnvironmentSetup.rpcProxyBaseUrl}
+            </p>
+          ) : null}
         </>
       }
       cancelLabel="Cancel"
@@ -2611,6 +2889,7 @@ export function App() {
                                     key={activeFilesTabId ?? 'files'}
                                     pushToast={vm.pushToast}
                                     pendingGfsUri={filesSeedPath}
+                                    remoteGfsChangeEpoch={remoteGfsChangeEpoch}
                                     onLocationChange={handleFilesLocationChange}
                                     onOpenPreview={vm.openPreviewSection}
                                   />
@@ -2623,6 +2902,8 @@ export function App() {
                                     fileKind={activePreviewPayload.fileKind}
                                     mimeType={activePreviewPayload.mimeType}
                                     byteLength={activePreviewPayload.byteLength}
+                                    reloadVersion={activePreviewPayload.reloadVersion}
+                                    unavailable={activePreviewPayload.unavailable}
                                   />
                                 )}
                                 {vm.navItem === DESKTOP_ROUTES.connectors && <McpServersPage />}
@@ -2743,10 +3024,12 @@ export function App() {
                           ) : null}
                           {pluginGfsPreview ? (
                             <GfsImagePreview
+                              key={`${pluginGfsPreview.gfsUri}:${pluginGfsPreview.reloadVersion}`}
                               byteLength={pluginGfsPreview.bytes}
                               fileName={pluginGfsPreview.name}
                               gfsUri={pluginGfsPreview.gfsUri}
                               mimeType={pluginGfsPreview.mimeType}
+                              unavailable={pluginGfsPreview.unavailable}
                               onClose={closePluginGfsPreview}
                             />
                           ) : null}

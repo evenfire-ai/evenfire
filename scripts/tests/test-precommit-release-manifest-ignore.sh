@@ -539,4 +539,10 @@ assert_a_self_concealing_manifest_edit_cannot_suppress_the_resync
 assert_a_corrupted_committed_package_json_is_refused_not_crashed
 assert_a_deletion_only_change_still_bumps_the_counter
 
+if bash "$REPO_ROOT/scripts/tests/test-jwt-policy-version-consumers.sh"; then
+  pass "shared JWT policy changes bump declared consumers through the normal hook"
+else
+  fail "shared JWT policy consumer version contract failed"
+fi
+
 exit $FAIL

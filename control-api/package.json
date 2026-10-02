@@ -1,6 +1,6 @@
 {
   "name": "clerum-control-api",
-  "version": "0.1.685",
+  "version": "0.1.706",
   "description": "Internal Clerum control plane REST API + UI for managing CRDs and secrets",
   "main": "dist/main.js",
   "engines": {
@@ -13,12 +13,14 @@
     "start:trace-maintenance": "node dist/traceMaintenance.js",
     "dev": "ts-node src/main.ts",
     "test": "vitest run --no-file-parallelism",
-    "test:run": "vitest run --no-file-parallelism"
+    "test:run": "vitest run --no-file-parallelism",
+    "typecheck:jwt-contract": "tsc -p tsconfig.jwt-contract-tests.json --noEmit && tsc -p tsconfig.jwt-package-types.json --noEmit"
   },
   "dependencies": {
     "@clerum/display-field": "file:../packages/display-field",
     "@clerum/grok-provider-attempt-contract": "file:../packages/grok-provider-attempt-contract",
     "@clerum/image-policy": "file:../packages/image-policy",
+    "@clerum/jwt-key-policy": "file:../packages/jwt-key-policy",
     "@clerum/llm-provider-attempt-contract": "file:../packages/llm-provider-attempt-contract",
     "@clerum/llm-providers": "file:../packages/llm-providers",
     "@clerum/workflow-recipe-capability-policy": "file:../packages/workflow-recipe-capability-policy",

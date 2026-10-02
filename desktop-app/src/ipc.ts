@@ -30,6 +30,7 @@ import {
   type ChatAuthorityScope,
   type ChatDeleteFence,
   DesktopRuntimeConfig,
+  EntityChangeStreamEvent,
   HostActivityStreamEvent,
   HostMessageAttachment,
   HostMessageRequest,
@@ -338,6 +339,7 @@ function sanitizeDesktopNotificationActions(
 
 export function registerIpcHandlers(service: AppService): void {
   const streamOwnerCleanupRegistered = new Set<number>()
+  const entityChangeOwnerCleanupRegistered = new Set<number>()
   const activeDesktopNotifications = new Map<string, Notification>()
 
   ipcMain.handle('auth:getSessionState', async event => {
@@ -926,6 +928,57 @@ export function registerIpcHandlers(service: AppService): void {
     }
 
     return { streamId }
+  })
+
+  ipcMain.handle('entityChanges:streamStart', async event => {
+    assertTrustedSender(event)
+    const streamId = randomUUID()
+    const ownerId = event.sender.id
+    service.startEntityChangeStream(streamId, ownerId, (streamEvent: EntityChangeStreamEvent) => {
+      try {
+        event.sender.send('entityChanges:streamEvent', { streamId, event: streamEvent })
+      } catch {
+        /* sender destroyed */
+      }
+    })
+    if (!entityChangeOwnerCleanupRegistered.has(ownerId)) {
+      entityChangeOwnerCleanupRegistered.add(ownerId)
+      let cleanedUp = false
+      const cleanup = () => {
+        if (cleanedUp) return
+        cleanedUp = true
+        service.stopEntityChangeStreamsForOwner(ownerId)
+        entityChangeOwnerCleanupRegistered.delete(ownerId)
+        event.sender.removeListener('did-navigate', onMainFrameNavigation)
+        event.sender.removeListener('render-process-gone', onRendererProcessGone)
+        event.sender.removeListener('destroyed', cleanup)
+      }
+      const onMainFrameNavigation = (
+        _navigationEvent: Electron.Event,
+        _navigationUrl: string,
+        _httpResponseCode: number,
+        _httpStatusText: string
+      ) => {
+        cleanup()
+      }
+      const onRendererProcessGone = (_event: Electron.Event) => cleanup()
+      // `did-navigate` is emitted after a committed main-frame navigation.
+      // `did-start-navigation` also fires for cancelled and in-place changes,
+      // which do not replace this renderer's stream owner.
+      event.sender.on('did-navigate', onMainFrameNavigation)
+      event.sender.on('render-process-gone', onRendererProcessGone)
+      event.sender.once('destroyed', cleanup)
+    }
+    return { streamId }
+  })
+
+  ipcMain.handle('entityChanges:streamStop', async (event, payload: { streamId: string }) => {
+    assertTrustedSender(event)
+    const streamId = sanitizeString(payload?.streamId)
+    if (!streamId) return { ok: true }
+    const stopped = service.stopEntityChangeStream(streamId, event.sender.id)
+    if (!stopped) throw new Error('Forbidden: cannot stop entity-change subscription')
+    return { ok: true }
   })
 
   ipcMain.handle('notifications:streamStop', async (event, payload: { streamId: string }) => {
