@@ -61,7 +61,8 @@ import {
 } from './services/tracing/wrcInfrastructureBindingResolver.js'
 
 const TRACING_INTERNAL_PATH_PREFIX = '/api/v1/internal/tracing/'
-const RPC_HOST_ACCESS_PATH = /^\/api\/v1\/rpc\/access\/users\/[^/]+\/mcp-hosts\/[^/]+\/?$/i
+const RPC_HOST_ACCESS_OWN_BODY_PARSER_PATH =
+  /^\/api\/v1\/rpc\/access\/users\/[^/]+\/mcp-hosts\/[^/]+(?:\/message-resolution)?\/?$/i
 // Upload v2 part bodies are raw octet streams. They must reach the streaming
 // proxy untouched; parsing them as JSON would either reject the first binary
 // byte or buffer the whole part in the control plane.
@@ -84,7 +85,7 @@ export function createApp(gateway: K8sGateway) {
       tracingInFlightLimiter(req, res, next)
       return
     }
-    if (req.method === 'POST' && RPC_HOST_ACCESS_PATH.test(req.path)) {
+    if (req.method === 'POST' && RPC_HOST_ACCESS_OWN_BODY_PARSER_PATH.test(req.path)) {
       next()
       return
     }

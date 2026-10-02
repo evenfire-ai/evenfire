@@ -150,6 +150,27 @@ describe('app router wiring', () => {
       .expect(413)
   })
 
+  it('uses the dedicated 2 KiB parser for Host message-resolution requests', async () => {
+    const app = createApp(new MockGateway('mcp-server') as never)
+    const rpcToken = signRpcAccessToken({
+      sub: 'user-1',
+      typ: 'user',
+      teamId: 'team-1',
+      role: 'member',
+      scopes: ['host:message:invoke'],
+      hostRefs: ['host-a'],
+      jti: 'app-message-resolution-body-limit',
+    })
+
+    await request(app)
+      .post('/api/v1/rpc/access/users/user-1/mcp-hosts/host-a/message-resolution')
+      .set('authorization', 'Bearer dev-rpc-proxy-token')
+      .set('x-service-token', 'rpc-proxy')
+      .set('x-rpc-access-token', rpcToken)
+      .send({ sessionId: 'x'.repeat(3_000) })
+      .expect(413)
+  })
+
   it('rejects an HCC health transition when no server-verifiable Host binding source exists', async () => {
     const app = createApp(new MockGateway('mcp-server') as never)
 
