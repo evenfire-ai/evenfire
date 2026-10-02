@@ -197,7 +197,8 @@ same `CLERUM_DEV_MODE=true` opt-in. This mode is rejected with
 
 Control API generates one RSA-2048 key per slot under the gitignored
 `control-api/.dev-keys/` directory (`0700` directory, `0600` signing files,
-`0644` derived public files) on first use, reuses it across restarts, and
+`0644` requested mode for derived public files, restricted by the process
+umask) on first use, reuses it across restarts, and
 publishes each derived public half as `<slot>.public.pem`. When
 `rpc-proxy` and `external-rest-api` also run with `CLERUM_DEV_MODE=true`, they
 load `rpc.public.pem` and `session.public.pem` from that store, so a monorepo

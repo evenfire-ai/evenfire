@@ -348,12 +348,13 @@ describe('devSigningKeys persistence contract', () => {
 
   it('publishes the derived verifying half next to the signing material', () => {
     const store = tempStore()
+    const expectedPublicMode = 0o644 & ~process.umask()
     const signing = loadOrGenerateDevJwtPrivateKey('rpc', store)
     loadOrGenerateDevJwtPrivateKey('rpc', store) // reuse must not republish different material
     const expected = createPublicKey(signing).export({ type: 'spki', format: 'pem' }).toString()
     const fd = openSync(join(store, 'rpc.public.pem'), 'r')
     try {
-      expect(fstatSync(fd).mode & 0o777).toBe(0o644)
+      expect(fstatSync(fd).mode & 0o777).toBe(expectedPublicMode)
       expect(readFileSync(fd, 'utf8').trim()).toBe(expected.trim())
     } finally {
       closeSync(fd)
