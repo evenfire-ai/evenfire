@@ -1,11 +1,13 @@
 FROM node:24-alpine AS builder
 WORKDIR /app
 
-COPY package*.json ./
+COPY packages/jwt-key-policy/package.json packages/jwt-key-policy/index.cjs packages/jwt-key-policy/index.d.ts packages/jwt-key-policy/dev-store.cjs packages/jwt-key-policy/dev-store.d.ts ./packages/jwt-key-policy/
+COPY rpc-proxy/package*.json ./rpc-proxy/
+WORKDIR /app/rpc-proxy
 RUN npm ci
 
-COPY tsconfig.json ./
-COPY src ./src
+COPY rpc-proxy/tsconfig.json ./
+COPY rpc-proxy/src ./src
 RUN npm run build
 RUN npm prune --production
 
@@ -16,10 +18,12 @@ WORKDIR /app
 ENV NODE_ENV=production
 ENV RPC_PROXY_PORT=8094
 
-COPY --from=builder --chown=app:app /app/package*.json ./
-COPY --from=builder --chown=app:app /app/dist ./dist
-COPY --from=builder --chown=app:app /app/node_modules ./node_modules
+COPY --from=builder --chown=app:app /app/packages/jwt-key-policy ./packages/jwt-key-policy
+COPY --from=builder --chown=app:app /app/rpc-proxy/package*.json ./rpc-proxy/
+COPY --from=builder --chown=app:app /app/rpc-proxy/dist ./rpc-proxy/dist
+COPY --from=builder --chown=app:app /app/rpc-proxy/node_modules ./rpc-proxy/node_modules
 
 USER app
 EXPOSE 8094
+WORKDIR /app/rpc-proxy
 CMD ["node", "dist/main.js"]
