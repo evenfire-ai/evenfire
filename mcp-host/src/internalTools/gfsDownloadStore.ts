@@ -218,18 +218,6 @@ async function sha256FileHandle(handle: fs.FileHandle): Promise<string> {
   return digest.digest('hex')
 }
 
-async function sha256File(path: string): Promise<string> {
-  const handle = await fs.open(
-    path,
-    constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK
-  )
-  try {
-    return await sha256FileHandle(handle)
-  } finally {
-    await handle.close()
-  }
-}
-
 /** One Host/PVC-owned durable store; task registries receive bound handles. */
 export class GfsDownloadStore {
   private hostRoot: string
@@ -482,20 +470,24 @@ export class GfsDownloadStore {
     if (record.state !== 'completed' || !record.sha256)
       throw new GfsDownloadStoreError('download_missing')
     const source = path.join(this.hostRoot, record.hostPath)
-    const info = await fs.lstat(source).catch(() => undefined)
-    if (
-      !info?.isFile() ||
-      info.isSymbolicLink() ||
-      info.size !== record.sizeBytes ||
-      (info.mode & 0o777) !== 0o600
-    )
-      throw new GfsDownloadStoreError('download_missing')
-    const digest = createHash('sha256')
-    const handle = await fs.open(
-      source,
-      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK
-    )
+    const handle = await fs
+      .open(
+        source,
+        constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_EXCL | constants.O_NONBLOCK
+      )
+      .catch(() => undefined)
+    if (!handle) throw new GfsDownloadStoreError('download_missing')
+    let digestValid = false
     try {
+      const info = await handle.stat()
+      if (
+        !info.isFile() ||
+        info.isSymbolicLink() ||
+        info.size !== record.sizeBytes ||
+        (info.mode & 0o777) !== 0o600
+      )
+        throw new GfsDownloadStoreError('download_missing')
+      const digest = createHash('sha256')
       const chunk = Buffer.alloc(64 * 1024)
       let position = 0
       for (;;) {
@@ -504,10 +496,11 @@ export class GfsDownloadStore {
         digest.update(chunk.subarray(0, bytesRead))
         position += bytesRead
       }
+      digestValid = digest.digest('hex') === record.sha256
     } finally {
       await handle.close()
     }
-    if (digest.digest('hex') !== record.sha256) throw new GfsDownloadStoreError('download_missing')
+    if (!digestValid) throw new GfsDownloadStoreError('download_missing')
     return {
       id: record.id,
       source: record.source,
@@ -515,6 +508,86 @@ export class GfsDownloadStore {
       sizeBytes: record.sizeBytes,
       sha256: record.sha256,
       expiresAt: record.expiresAt,
+    }
+  }
+
+  async readManagedFile(callerRelativePath: string, callerIdentity: string): Promise<Buffer> {
+    this.assertInitialized()
+    const record = Object.values(this.ledger.records).find(
+      item => item.callerIdentity === callerIdentity && item.path === callerRelativePath
+    )
+    if (!record) throw new GfsDownloadStoreError('caller_mismatch')
+    if (Date.parse(record.expiresAt) <= Date.now())
+      throw new GfsDownloadStoreError('download_expired')
+    if (record.state !== 'completed' || !record.sha256)
+      throw new GfsDownloadStoreError('download_missing')
+
+    const source = path.join(this.hostRoot, record.hostPath)
+    const handle = await fs
+      .open(
+        source,
+        constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_EXCL | constants.O_NONBLOCK
+      )
+      .catch(() => undefined)
+    if (!handle) throw new GfsDownloadStoreError('download_missing')
+    let bytes: Buffer
+    try {
+      const info = await handle.stat()
+      if (
+        !info.isFile() ||
+        info.isSymbolicLink() ||
+        info.size !== record.sizeBytes ||
+        (info.mode & 0o777) !== 0o600
+      )
+        throw new GfsDownloadStoreError('download_missing')
+      bytes = await handle.readFile()
+    } finally {
+      await handle.close()
+    }
+    if (createHash('sha256').update(bytes).digest('hex') !== record.sha256)
+      throw new GfsDownloadStoreError('download_missing')
+    return bytes
+  }
+
+  async readManagedFilePrefix(
+    callerRelativePath: string,
+    callerIdentity: string,
+    prefixBytes = 16
+  ): Promise<Buffer> {
+    this.assertInitialized()
+    if (!Number.isSafeInteger(prefixBytes) || prefixBytes <= 0 || prefixBytes > 4096)
+      throw new GfsDownloadStoreError('corrupt_store_ledger')
+    const record = Object.values(this.ledger.records).find(
+      item => item.callerIdentity === callerIdentity && item.path === callerRelativePath
+    )
+    if (!record) throw new GfsDownloadStoreError('caller_mismatch')
+    if (Date.parse(record.expiresAt) <= Date.now())
+      throw new GfsDownloadStoreError('download_expired')
+    if (record.state !== 'completed' || !record.sha256)
+      throw new GfsDownloadStoreError('download_missing')
+
+    const source = path.join(this.hostRoot, record.hostPath)
+    const handle = await fs
+      .open(
+        source,
+        constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_EXCL | constants.O_NONBLOCK
+      )
+      .catch(() => undefined)
+    if (!handle) throw new GfsDownloadStoreError('download_missing')
+    try {
+      const info = await handle.stat()
+      if (
+        !info.isFile() ||
+        info.isSymbolicLink() ||
+        info.size !== record.sizeBytes ||
+        (info.mode & 0o777) !== 0o600
+      )
+        throw new GfsDownloadStoreError('download_missing')
+      const prefix = Buffer.alloc(prefixBytes)
+      const { bytesRead } = await handle.read(prefix, 0, prefix.byteLength, 0)
+      return prefix.subarray(0, bytesRead)
+    } finally {
+      await handle.close()
     }
   }
 

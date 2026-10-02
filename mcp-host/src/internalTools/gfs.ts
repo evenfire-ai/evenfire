@@ -1,7 +1,3 @@
-import { createHash } from 'node:crypto'
-import { constants as fsConstants } from 'node:fs'
-import * as fs from 'node:fs/promises'
-import * as path from 'node:path'
 import type { FileReferenceV1 } from '@clerum/gfs-interaction-policy'
 import type { FileReferenceResolution } from '../agent/fileReferenceResolver'
 import { inspectImage, validateImage } from '../visualInput/imageValidation'
@@ -146,70 +142,10 @@ function workspaceFileUsage(visualDelivery: 'included' | 'not_included', visualR
   }
 }
 
-async function resolveManagedImagePath(receipt: GfsDownloadResult, callerWorkspacePath: string) {
-  const realRoot = await fs.realpath(callerWorkspacePath)
-  const target = path.resolve(callerWorkspacePath, receipt.path)
-  const realTarget = await fs.realpath(target)
-  const managedRoot = path.join(realRoot, '.gfs-downloads')
-  const relativeToManagedRoot = path.relative(managedRoot, realTarget)
-  if (
-    relativeToManagedRoot.startsWith('..') ||
-    path.isAbsolute(relativeToManagedRoot) ||
-    !receipt.path.startsWith('.gfs-downloads/')
-  )
-    throw new VisualInputError('identity_mismatch')
-  return target
-}
-
-async function readManagedImageBytes(
-  receipt: GfsDownloadResult,
-  callerWorkspacePath: string
-): Promise<Buffer> {
-  const target = await resolveManagedImagePath(receipt, callerWorkspacePath)
-
-  const handle = await fs.open(
-    target,
-    fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_EXCL
-  )
-  try {
-    const stat = await handle.stat()
-    if (
-      !stat.isFile() ||
-      stat.size !== receipt.sizeBytes ||
-      (stat.mode & 0o777) !== 0o600 ||
-      stat.nlink !== 1
-    )
-      throw new VisualInputError('identity_mismatch')
-    const bytes = await handle.readFile()
-    if (createHash('sha256').update(bytes).digest('hex') !== receipt.sha256)
-      throw new VisualInputError('identity_mismatch')
-    return bytes
-  } finally {
-    await handle.close()
-  }
-}
-
-async function readManagedImagePrefix(
-  receipt: GfsDownloadResult,
-  callerWorkspacePath: string
-): Promise<Buffer> {
-  const target = await resolveManagedImagePath(receipt, callerWorkspacePath)
-  const handle = await fs.open(
-    target,
-    fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_EXCL
-  )
-  try {
-    const prefix = Buffer.alloc(16)
-    const { bytesRead } = await handle.read(prefix, 0, prefix.length, 0)
-    return prefix.subarray(0, bytesRead)
-  } finally {
-    await handle.close()
-  }
-}
-
 async function projectManagedImage(
   receipt: GfsDownloadResult,
-  callerWorkspacePath: string,
+  downloadStore: GfsDownloadStore,
+  callerIdentity: string,
   options: InternalToolExecutionOptions | undefined,
   knownBytes?: Buffer
 ): Promise<InternalToolResult> {
@@ -217,7 +153,7 @@ async function projectManagedImage(
   try {
     let bytes = knownBytes
     if (bytes === undefined) {
-      const prefix = await readManagedImagePrefix(receipt, callerWorkspacePath)
+      const prefix = await downloadStore.readManagedFilePrefix(receipt.path, callerIdentity)
       const hasImageMagic =
         prefix.length >= 3 &&
         ((prefix[0] === 0x89 && prefix[1] === 0x50 && prefix[2] === 0x4e) ||
@@ -233,7 +169,7 @@ async function projectManagedImage(
             usage: workspaceFileUsage('not_included', visualReason),
           }),
         }
-      bytes = await readManagedImageBytes(receipt, callerWorkspacePath)
+      bytes = await downloadStore.readManagedFile(receipt.path, callerIdentity)
     }
     const image = inspectImage(bytes)
     if (image) {
@@ -520,7 +456,7 @@ export function buildGfsReadTools(
                   metadata.source.version,
                   options
                 )
-                return await projectManagedImage(receipt, callerWorkspacePath!, options)
+                return await projectManagedImage(receipt, downloadStore!, callerIdentity!, options)
               } else {
                 recordGfsDownloadAdmission('workspace_unavailable')
                 expectedVersion ??= metadata.source.version
@@ -556,7 +492,13 @@ export function buildGfsReadTools(
                 file.source.version,
                 options
               )
-              return await projectManagedImage(receipt, callerWorkspacePath!, options, file.bytes)
+              return await projectManagedImage(
+                receipt,
+                downloadStore!,
+                callerIdentity!,
+                options,
+                file.bytes
+              )
             }
             const visualInput = options?.visualInput
             if (!visualInput)

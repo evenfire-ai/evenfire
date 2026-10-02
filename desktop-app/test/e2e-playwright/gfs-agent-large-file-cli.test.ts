@@ -1,0 +1,225 @@
+/**
+ * E2E_GUARDIAN_IPC_FLOW — Electron delegates the chat/tool journey to its main
+ * process, so there is no renderer HTTP request to alias.
+ *
+ * E2E contract (e2e-test-guardian):
+ *  - Real user journey: login → Files → visible upload of an exact 3,836,961-byte
+ *    CSV → exact managed agent chat → governed download → user-visible
+ *    `shell_exec` approval → completed tool stepper and bounded response.
+ *  - Business signals: the download step reports a workspace file; the approved
+ *    Node command reports the independently generated CSV record count and a
+ *    sentinel located beyond the former 3 MiB boundary.
+ *  - Setup shortcuts: managed agent/folder fixture seeding and the local CSV
+ *    buffer are named preconditions. No provider-route mock, storage mutation,
+ *    direct API trigger, or broad network mock is used.
+ */
+import { type Locator, type Page, expect, test } from '@playwright/test'
+import { randomUUID } from 'node:crypto'
+import { exactNameFilter } from './helpers/agentLocators'
+import { type ManagedGfsAgent, getManagedAgentDisplayName } from './helpers/gfsAgentDiscovery'
+import {
+  type AgentGfsFixtures,
+  assertGfsInfraHealthy,
+  seedAgentGfsFixtures,
+} from './helpers/gfsFixtures'
+import {
+  GFS_LARGE_CSV_SIZE,
+  GFS_OLD_VISUAL_LIMIT,
+  type GfsLargeCsvFixture,
+  resolveGfsLargeCsvFixture,
+} from './helpers/gfsLargeFileCsvFixture'
+import { openAgentsPage, openResourcesNavItem } from './navigationHelpers'
+import { launchAndLogin } from './workflowUi'
+
+const OWNER_EMAIL = 'test@clerum.io'
+const RESPONSE_TIMEOUT_MS = 420_000
+const PROGRESS_TIMEOUT_MS = 45_000
+const runToken = `GFS-LARGE-CLI-${randomUUID()}`
+
+async function enterAgentChat(page: Page, agentName: string): Promise<void> {
+  await openAgentsPage(page)
+  const exactAgent = page.getByLabel(`Open agent ${agentName}`, { exact: true })
+  await expect(exactAgent).toBeVisible({ timeout: 30_000 })
+  await exactAgent.click()
+  await page.getByTestId('nav-chat').click()
+  const chatInput = page.getByTestId('chat-input')
+  await expect(chatInput).toBeVisible({ timeout: 45_000 })
+
+  const selectedAgentInNewChat = page
+    .getByRole('button', { name: 'Switch chat agent' })
+    .filter(exactNameFilter(agentName))
+  const selectedAgentInThread = page
+    .getByRole('navigation', { name: 'Chat breadcrumb' })
+    .getByText(agentName, { exact: true })
+  if (
+    !(await selectedAgentInNewChat.isVisible().catch(() => false)) &&
+    !(await selectedAgentInThread.isVisible().catch(() => false))
+  ) {
+    await page.getByRole('button', { name: 'Switch chat agent' }).click()
+    await page.getByRole('menuitem', { name: agentName, exact: true }).click()
+  }
+  await expect(selectedAgentInNewChat.or(selectedAgentInThread)).toBeVisible({
+    timeout: 15_000,
+  })
+}
+
+async function sendTaskAndApproveShell(
+  page: Page,
+  prompt: string
+): Promise<{ response: Locator; expandButton: Locator }> {
+  const responseCountBefore = await page.getByTestId('agent-response').count()
+  const approvalCountBefore = await page.getByTestId('approval-approve-btn').count()
+  const progressCountBefore = await page.getByTestId('progress-expand-btn').count()
+  const response = page.getByTestId('agent-response').filter({ hasText: runToken })
+  let approvedShell = false
+
+  await page.getByTestId('chat-input').fill(prompt)
+  await page.getByTestId('send-button').click()
+
+  const deadline = Date.now() + RESPONSE_TIMEOUT_MS
+  for (;;) {
+    const remaining = deadline - Date.now()
+    if (remaining <= 0) throw new Error('Timed out waiting for approval or final response')
+    const approvalButtons = await page.getByTestId('approval-approve-btn').all()
+    const nextApproval = approvalButtons[approvalCountBefore]
+    if (!nextApproval) throw new Error('new shell approval was not created')
+    const first = await Promise.race([
+      nextApproval
+        .waitFor({ state: 'visible', timeout: remaining })
+        .then(() => 'approval' as const),
+      response.waitFor({ state: 'visible', timeout: remaining }).then(() => 'response' as const),
+    ]).catch(error => {
+      throw error
+    })
+    void nextApproval.waitFor({ state: 'hidden', timeout: 1 }).catch(() => undefined)
+
+    if (first === 'response') break
+    const stepper = page.getByTestId('progress-stepper').filter({ has: nextApproval })
+    await expect(stepper).toBeVisible({ timeout: 10_000 })
+    const approvalText = await stepper.innerText()
+    if (/shell_exec/i.test(approvalText)) {
+      approvedShell = true
+      expect(approvalText).toContain('node')
+      if (csv.source === 'synthetic') expect(approvalText).toContain(csv.sentinel!)
+      else expect(approvalText).toContain('createHash')
+    }
+    await nextApproval.click()
+  }
+
+  expect(approvedShell, 'the journey must approve an actual shell_exec command').toBe(true)
+  await expect(response).toContainText(/ROWS=/, { timeout: RESPONSE_TIMEOUT_MS })
+  await expect(response).toContainText(/PROOF=[0-9a-f]{16}/, {
+    timeout: RESPONSE_TIMEOUT_MS,
+  })
+  const progressButtons = await page.getByTestId('progress-expand-btn').all()
+  const expandButton = progressButtons[progressCountBefore]
+  if (!expandButton) throw new Error('new tool-progress stepper was not created')
+  await expect(expandButton).toBeVisible({ timeout: PROGRESS_TIMEOUT_MS })
+  return { response, expandButton }
+}
+
+function toolStepRow(page: Page, toolName: string): Locator {
+  return page.getByTestId(/^step-row-/).filter({ hasText: toolName })
+}
+
+async function stepOutput(row: Locator): Promise<Locator> {
+  await row.click()
+  const output = row
+    .locator('xpath=following-sibling::*[@data-testid="step-output-panel"][1]')
+    .locator('.stepper-step-output-code')
+  await expect(output).toBeVisible({ timeout: 10_000 })
+  return output
+}
+
+test.describe('GFS agent large-file CLI journey', () => {
+  test.describe.configure({ mode: 'serial' })
+
+  let fixtures: AgentGfsFixtures
+  let agentLabel: string
+  let csv: GfsLargeCsvFixture
+
+  test.beforeAll(() => {
+    assertGfsInfraHealthy()
+    fixtures = seedAgentGfsFixtures(OWNER_EMAIL)
+    agentLabel = getManagedAgentDisplayName(fixtures.agent)
+    csv = resolveGfsLargeCsvFixture()
+    expect(csv.buffer.byteLength).toBe(GFS_LARGE_CSV_SIZE)
+    if (csv.source === 'synthetic')
+      expect(csv.buffer.indexOf(csv.sentinel!, 'utf8')).toBeGreaterThan(GFS_OLD_VISUAL_LIMIT)
+  })
+
+  test.afterAll(() => {
+    fixtures?.cleanup()
+  })
+
+  test('user uploads a 3.8 MiB CSV and approves local processing', async () => {
+    const { app, page } = await launchAndLogin(OWNER_EMAIL)
+    try {
+      await test.step('user uploads the exact CSV through Files', async () => {
+        await openResourcesNavItem(page, 'nav-files')
+        await expect(page.getByRole('heading', { name: 'Files', exact: true })).toBeVisible()
+        const shared = page.getByRole('region', { name: 'GFS resources shared with you' })
+        await expect(shared).toContainText(fixtures.granted.name, { timeout: 30_000 })
+        await shared.getByRole('button', { name: fixtures.granted.name, exact: true }).click()
+        const browser = page.getByRole('region', { name: 'EvenDrive browser' })
+        await expect(browser).toBeVisible({ timeout: 30_000 })
+        await browser.getByLabel('Upload file').setInputFiles({
+          name: csv.fileName,
+          mimeType: 'text/csv',
+          buffer: csv.buffer,
+        })
+        await expect(page.getByText(`Uploaded ${csv.fileName}`)).toBeVisible({
+          timeout: 30_000,
+        })
+        await expect(browser.getByRole('button', { name: csv.fileName, exact: true })).toBeVisible({
+          timeout: 30_000,
+        })
+      })
+
+      let expandButton: Locator
+      let response: Locator
+      await test.step('exact agent downloads and processes the file after approval', async () => {
+        await enterAgentChat(page, agentLabel)
+        const prompt =
+          `Download "/${fixtures.granted.name}/${csv.fileName}" from GFS drive main with clerum__gfs_download. ` +
+          'Do not print or file_read the whole file. After the workspace_file receipt returns, use exactly one approved shell_exec ' +
+          'Node.js command with the receipt path as an argument. Parse complete CSV records with quote-state tracking (never count raw newlines), ' +
+          'compute the SHA-256 of the final 4096 bytes and print its first 16 lowercase hex characters. ' +
+          `Print only bounded output in this exact shape: RUN=${runToken} ROWS=<record count> PROOF=<16 hex characters>.`
+        const result = await sendTaskAndApproveShell(page, prompt)
+        expandButton = result.expandButton
+        response = result.response
+      })
+
+      await test.step('tool stepper proves governed transfer and local execution', async () => {
+        await expandButton.click()
+        const downloadRow = toolStepRow(page, 'gfs_download')
+        await expect(downloadRow).toBeVisible({ timeout: 15_000 })
+        await expect(downloadRow.locator('.stepper-step-duration.state-error')).toHaveCount(0)
+        await expect(await stepOutput(downloadRow)).toContainText('workspace_file')
+
+        const shellRow = toolStepRow(page, 'shell_exec')
+        await expect(shellRow).toBeVisible({ timeout: 15_000 })
+        await expect(shellRow.locator('.stepper-step-duration.state-error')).toHaveCount(0)
+        await expect(await stepOutput(shellRow)).toContainText(`ROWS=${csv.recordCount}`)
+        await expect(await stepOutput(shellRow)).toContainText(`PROOF=${csv.tailProof}`)
+
+        await expect(response).toContainText(`ROWS=${csv.recordCount}`)
+        await expect(response).toContainText(`PROOF=${csv.tailProof}`)
+        await expect(response).not.toContain('zzzzzzzzzz')
+      })
+
+      await test.step('source remains visible after read-only processing', async () => {
+        await openResourcesNavItem(page, 'nav-files')
+        const shared = page.getByRole('region', { name: 'GFS resources shared with you' })
+        await shared.getByRole('button', { name: fixtures.granted.name, exact: true }).click()
+        const browser = page.getByRole('region', { name: 'EvenDrive browser' })
+        await expect(browser.getByRole('button', { name: csv.fileName })).toBeVisible({
+          timeout: 30_000,
+        })
+      })
+    } finally {
+      await app.close()
+    }
+  })
+})

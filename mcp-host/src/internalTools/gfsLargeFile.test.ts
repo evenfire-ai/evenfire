@@ -58,6 +58,12 @@ function result(tool: InternalToolDefinition, args: Record<string, unknown>) {
   }))
 }
 
+function fakeDownloadStore(): GfsDownloadStore {
+  return {
+    readManagedFilePrefix: async () => Buffer.from('not-an-image'),
+  } as unknown as GfsDownloadStore
+}
+
 describe('GFS large-file tool routing', () => {
   it('does not expose generic workspace delivery without a store', () => {
     expect(
@@ -80,7 +86,7 @@ describe('GFS large-file tool routing', () => {
     const managedFile = path.join(callerWorkspace, '.gfs-downloads/input-download-1/source')
     fs.mkdirSync(path.dirname(managedFile), { recursive: true })
     fs.writeFileSync(managedFile, 'not-an-image-prefix', 'utf8')
-    const store = {} as GfsDownloadStore
+    const store = fakeDownloadStore()
     const tool = buildGfsReadTools(gfs, {
       referencedFiles: new Map(),
       downloadStore: store,
@@ -128,7 +134,7 @@ describe('GFS large-file tool routing', () => {
     const managedFile = path.join(callerWorkspace, '.gfs-downloads/input-download-2/source')
     fs.mkdirSync(path.dirname(managedFile), { recursive: true })
     fs.writeFileSync(managedFile, 'not-an-image-prefix', 'utf8')
-    const store = {} as GfsDownloadStore
+    const store = fakeDownloadStore()
     const tool = buildGfsReadTools(gfs, {
       referencedFiles: new Map(),
       downloadStore: store,
@@ -162,7 +168,7 @@ describe('GFS large-file tool routing', () => {
       sha256: 'c'.repeat(64),
       expiresAt: '2026-10-08T00:00:00.000Z',
     }))
-    const store = {} as GfsDownloadStore
+    const store = fakeDownloadStore()
     const tool = buildGfsReadTools(client({ download }), {
       referencedFiles: new Map(),
       downloadStore: store,
@@ -193,7 +199,7 @@ describe('GFS large-file tool routing', () => {
     }))
     const gfs = client({ read: vi.fn(async () => content(png)), download })
     gfs.readMetadata = vi.fn(async () => snapshot(png.byteLength))
-    const store = {} as GfsDownloadStore
+    const store = fakeDownloadStore()
     const tool = buildGfsReadTools(gfs, {
       referencedFiles: new Map(),
       downloadStore: store,
@@ -219,7 +225,7 @@ describe('GFS large-file tool routing', () => {
     const download = vi.fn(async () => {
       throw new GfsDownloadError('version_conflict')
     })
-    const store = {} as GfsDownloadStore
+    const store = fakeDownloadStore()
     const tool = buildGfsReadTools(client({ download }), {
       referencedFiles: new Map(),
       downloadStore: store,
