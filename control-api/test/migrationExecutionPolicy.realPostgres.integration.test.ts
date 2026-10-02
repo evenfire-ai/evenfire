@@ -127,7 +127,7 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
   it('repairs an equivalent interrupted index and enforces the online bound', async () => {
     const name = `d34_interrupted_${randomBytes(4).toString('hex')}`
     const entry: OnlineIndexDefinition = {
-      migrationVersion: '0109_user_access_foundation',
+      migrationVersion: '0125_user_access_foundation',
       name,
       table: 'd34_interrupted_index',
       unique: true,
@@ -176,7 +176,7 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
     const functionName = `d34_slow_index_value_${suffix}`
     const name = `d34_slow_index_${suffix}_idx`
     const entry: OnlineIndexDefinition = {
-      migrationVersion: '0109_user_access_foundation',
+      migrationVersion: '0125_user_access_foundation',
       name,
       table,
       createSql: `CREATE INDEX CONCURRENTLY ${name} ON ${table} (${functionName}(value))`,
@@ -292,7 +292,7 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
     const locker = await databasePool.connect()
     await databasePool.query(
       `DELETE FROM schema_migrations
-        WHERE version IN ('010c_composable_catalog_revisions', '010d_gfs_catalog_revision_components')`
+        WHERE version IN ('0128_composable_catalog_revisions', '0129_gfs_catalog_revision_components')`
     )
     await locker.query('BEGIN')
     await locker.query('LOCK TABLE team_members IN ACCESS EXCLUSIVE MODE')
@@ -308,8 +308,8 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
     expect(Date.now() - started).toBeGreaterThanOrEqual(9_000)
     expect(Date.now() - started).toBeLessThan(15_000)
     const failedVersions = await versions(databasePool)
-    expect(failedVersions).not.toContain('010c_composable_catalog_revisions')
-    expect(failedVersions).not.toContain('010d_gfs_catalog_revision_components')
+    expect(failedVersions).not.toContain('0128_composable_catalog_revisions')
+    expect(failedVersions).not.toContain('0129_gfs_catalog_revision_components')
     await initDb({ connect: () => databasePool.connect() })
   }, 20_000)
 
@@ -329,7 +329,7 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
       ...PR1_MIGRATION_VERSIONS.map(version => ({
         version,
         apply: async (db: DbClient) => {
-          if (version === '010c_composable_catalog_revisions') {
+          if (version === '0128_composable_catalog_revisions') {
             await db.query('SELECT pg_sleep(20)')
           }
         },
@@ -353,7 +353,7 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
         `SELECT version FROM ${recordTable} ORDER BY version`
       )
       expect(recorded.rows).toEqual([])
-      expect(appliedVersions).not.toContain('010d_gfs_catalog_revision_components')
+      expect(appliedVersions).not.toContain('0129_gfs_catalog_revision_components')
     } finally {
       client.release(true)
     }

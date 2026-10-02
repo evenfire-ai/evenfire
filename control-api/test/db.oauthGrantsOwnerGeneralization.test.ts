@@ -50,6 +50,10 @@ describe('0101 oauth_grants owner generalization migration', () => {
     expect(versions.indexOf('0119_dynamic_clients_table')).toBeLessThan(
       versions.indexOf('0120_dynamic_clients_runtime_access')
     )
+    expect(versions).toContain('0122_durable_entity_change_feed')
+    expect(versions.indexOf('0116_mcp_secret_rollback_permits')).toBeLessThan(
+      versions.indexOf('0122_durable_entity_change_feed')
+    )
     expect(versions.indexOf('0100_seed_minimax_allowed_model')).toBeLessThan(
       versions.indexOf('0106_oauth_grants_owner_generalization')
     )
@@ -59,8 +63,8 @@ describe('0101 oauth_grants owner generalization migration', () => {
     expect(versions.indexOf('0107_llm_provider_attempts_sdk_link')).toBeLessThan(
       versions.indexOf('0108_llm_provider_attempts_sdk_link_on_delete_set_null')
     )
-    expect(versions.indexOf('0108_llm_provider_attempts_sdk_link_on_delete_set_null')).toBeLessThan(
-      versions.indexOf('0109_user_access_foundation')
+    expect(versions.indexOf('0124_entity_change_definer_search_path')).toBeLessThan(
+      versions.indexOf('0125_user_access_foundation')
     )
     expect(versions).toContain('0099_gfs_upload_finalizing_recovery')
   })

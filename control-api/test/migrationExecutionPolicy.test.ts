@@ -31,14 +31,14 @@ const FRESH_TABLE_INDEXES = Object.freeze([
 ])
 
 describe('D34 migration execution policy', () => {
-  it('classifies inherited control-admin migrations as parent-dev migrations', () => {
+  it('classifies inherited parent migrations before the re-slotted PR1 migrations', () => {
     expect(DEV_POST_0106_MIGRATION_VERSIONS.slice(-6)).toEqual([
-      '0116_mcp_secret_rollback_permits',
-      '0117_control_admin_invitation_replace_inviter',
-      '0118_control_admin_replace_inviter_accept_guard',
       '0119_dynamic_clients_table',
       '0120_dynamic_clients_runtime_access',
       '0121_oauth_install_identity',
+      '0122_durable_entity_change_feed',
+      '0123_entity_change_checkpoint_cursor_convergence',
+      '0124_entity_change_definer_search_path',
     ])
     expect(PR1_MIGRATION_VERSIONS).not.toContain('0117_control_admin_invitation_replace_inviter')
     expect(PR1_MIGRATION_VERSIONS).not.toContain('0118_control_admin_replace_inviter_accept_guard')
@@ -62,10 +62,10 @@ describe('D34 migration execution policy', () => {
     expect(PR1_ONLINE_INDEX_PLAN).toHaveLength(25)
     expect(new Set(PR1_ONLINE_INDEX_PLAN.map(index => index.name))).toHaveLength(25)
     expect(
-      PR1_ONLINE_INDEX_PLAN.filter(index => index.migrationVersion.startsWith('0109'))
+      PR1_ONLINE_INDEX_PLAN.filter(index => index.migrationVersion.startsWith('0125'))
     ).toHaveLength(18)
     expect(
-      PR1_ONLINE_INDEX_PLAN.filter(index => index.migrationVersion.startsWith('010b'))
+      PR1_ONLINE_INDEX_PLAN.filter(index => index.migrationVersion.startsWith('0127'))
     ).toHaveLength(7)
     expect(
       PR1_ONLINE_INDEX_PLAN.some(index => index.name.startsWith('external_user_sessions_'))
@@ -260,8 +260,8 @@ describe('D34 PR1 migration runner', () => {
     })
 
     expect(applied).toEqual([...DEV_POST_0106_MIGRATION_VERSIONS, ...PR1_MIGRATION_VERSIONS])
-    expect(queries.filter(({ sql }) => sql === 'BEGIN')).toHaveLength(22)
-    expect(queries.filter(({ sql }) => sql === 'COMMIT')).toHaveLength(22)
+    expect(queries.filter(({ sql }) => sql === 'BEGIN')).toHaveLength(25)
+    expect(queries.filter(({ sql }) => sql === 'COMMIT')).toHaveLength(25)
     expect(queries.filter(({ sql }) => sql === 'ROLLBACK')).toHaveLength(0)
   })
 

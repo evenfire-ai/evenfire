@@ -10,7 +10,7 @@ vi.mock('../src/config.js', () => ({
 async function migrationSql(): Promise<string> {
   const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
   const migration = CONTROL_API_MIGRATIONS.find(
-    candidate => candidate.version === '0109_user_access_foundation'
+    candidate => candidate.version === '0125_user_access_foundation'
   )
   expect(migration).toBeDefined()
 
@@ -22,7 +22,7 @@ async function migrationSql(): Promise<string> {
 async function legacyEpochBackfillSql(): Promise<string> {
   const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
   const migration = CONTROL_API_MIGRATIONS.find(
-    candidate => candidate.version === '010e_legacy_password_security_epoch_backfill'
+    candidate => candidate.version === '0130_legacy_password_security_epoch_backfill'
   )
   expect(migration).toBeDefined()
 
@@ -32,29 +32,49 @@ async function legacyEpochBackfillSql(): Promise<string> {
 }
 
 describe('user-access foundation migration', () => {
-  it('carries the pre-sync PR1 migration identities as legacy aliases', async () => {
+  it('carries all prior PR1 migration identities as legacy aliases', async () => {
     const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
     const expectedAliases = new Map([
       [
-        '0109_user_access_foundation',
-        ['0107_user_access_foundation', '0101_user_access_foundation'],
-      ],
-      [
-        '010a_invitation_delivery_commands',
-        ['0108_invitation_delivery_commands', '0102_invitation_delivery_commands'],
-      ],
-      ['010b_catalog_utf8_ordering', ['0109_catalog_utf8_ordering', '0103_catalog_utf8_ordering']],
-      [
-        '010c_composable_catalog_revisions',
-        ['010a_composable_catalog_revisions', '0104_composable_catalog_revisions'],
-      ],
-      [
-        '010d_gfs_catalog_revision_components',
-        ['010b_gfs_catalog_revision_components', '0105_gfs_catalog_revision_components'],
-      ],
-      [
-        '010e_legacy_password_security_epoch_backfill',
+        '0125_user_access_foundation',
         [
+          '0109_user_access_foundation',
+          '0107_user_access_foundation',
+          '0101_user_access_foundation',
+        ],
+      ],
+      [
+        '0126_invitation_delivery_commands',
+        [
+          '010a_invitation_delivery_commands',
+          '0108_invitation_delivery_commands',
+          '0102_invitation_delivery_commands',
+        ],
+      ],
+      [
+        '0127_catalog_utf8_ordering',
+        ['010b_catalog_utf8_ordering', '0109_catalog_utf8_ordering', '0103_catalog_utf8_ordering'],
+      ],
+      [
+        '0128_composable_catalog_revisions',
+        [
+          '010c_composable_catalog_revisions',
+          '010a_composable_catalog_revisions',
+          '0104_composable_catalog_revisions',
+        ],
+      ],
+      [
+        '0129_gfs_catalog_revision_components',
+        [
+          '010d_gfs_catalog_revision_components',
+          '010b_gfs_catalog_revision_components',
+          '0105_gfs_catalog_revision_components',
+        ],
+      ],
+      [
+        '0130_legacy_password_security_epoch_backfill',
+        [
+          '010e_legacy_password_security_epoch_backfill',
           '010c_legacy_password_security_epoch_backfill',
           '0106_legacy_password_security_epoch_backfill',
         ],
@@ -186,14 +206,14 @@ describe('user-access foundation migration', () => {
   it('dispatches the historical epoch fix-forward after already-recorded access migrations', async () => {
     const { CONTROL_API_MIGRATIONS, initDb } = await import('../src/db.js')
     const migration = CONTROL_API_MIGRATIONS.find(
-      candidate => candidate.version === '010e_legacy_password_security_epoch_backfill'
+      candidate => candidate.version === '0130_legacy_password_security_epoch_backfill'
     )
     expect(migration).toBeDefined()
     const gfsIndex = CONTROL_API_MIGRATIONS.findIndex(
-      candidate => candidate.version === '010d_gfs_catalog_revision_components'
+      candidate => candidate.version === '0129_gfs_catalog_revision_components'
     )
     const epochIndex = CONTROL_API_MIGRATIONS.findIndex(
-      candidate => candidate.version === '010e_legacy_password_security_epoch_backfill'
+      candidate => candidate.version === '0130_legacy_password_security_epoch_backfill'
     )
     expect(epochIndex).toBe(gfsIndex + 1)
 
@@ -214,7 +234,7 @@ describe('user-access foundation migration', () => {
     expect(appliedSql).toContain('historical_password_event')
     expect(clientQuery).toHaveBeenCalledWith(
       expect.stringContaining('INSERT INTO schema_migrations'),
-      ['010e_legacy_password_security_epoch_backfill']
+      ['0130_legacy_password_security_epoch_backfill']
     )
   })
 })

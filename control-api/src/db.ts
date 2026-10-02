@@ -25,6 +25,11 @@ import {
 import { applyCodexSubscriptionOAuthStateSchema } from './services/codexSubscriptionOAuthState.js'
 import { applyInvitationDeliveryCommandFoundation } from './services/directory/invitationDeliverySchema.js'
 import {
+  applyEntityChangeCheckpointSchema,
+  applyEntityChangeDefinerSearchPathSchema,
+  applyEntityChangeSchema,
+} from './services/entityChangeSchema.js'
+import {
   applyGfsUploadCleanupSchema,
   applyGfsUploadFinalizingSchema,
   applyGfsUploadSessionSchema,
@@ -6172,44 +6177,6 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     apply: applyGrokSubscriptionConnectionSchema,
   },
   {
-    version: '0109_user_access_foundation',
-    legacyVersions: ['0107_user_access_foundation', '0101_user_access_foundation'],
-    apply: applyUserAccessFoundationSchema,
-  },
-  {
-    version: '010a_invitation_delivery_commands',
-    legacyVersions: ['0108_invitation_delivery_commands', '0102_invitation_delivery_commands'],
-    apply: applyInvitationDeliveryCommandFoundation,
-  },
-  {
-    version: '010b_catalog_utf8_ordering',
-    legacyVersions: ['0109_catalog_utf8_ordering', '0103_catalog_utf8_ordering'],
-    apply: applyCatalogUtf8OrderingSchema,
-  },
-  {
-    version: '010c_composable_catalog_revisions',
-    legacyVersions: ['010a_composable_catalog_revisions', '0104_composable_catalog_revisions'],
-    apply: applyComposableCatalogRevisionSchema,
-  },
-  {
-    // Fix-forward for databases that recorded the first composable-catalog
-    // body before the GFS resource-component mapping was completed.
-    version: '010d_gfs_catalog_revision_components',
-    legacyVersions: [
-      '010b_gfs_catalog_revision_components',
-      '0105_gfs_catalog_revision_components',
-    ],
-    apply: applyComposableCatalogRevisionSchema,
-  },
-  {
-    version: '010e_legacy_password_security_epoch_backfill',
-    legacyVersions: [
-      '010c_legacy_password_security_epoch_backfill',
-      '0106_legacy_password_security_epoch_backfill',
-    ],
-    apply: backfillLegacyPasswordSecurityEpochs,
-  },
-  {
     version: '0110_grok_subscription_oauth_states',
     apply: applyGrokSubscriptionOAuthStateSchema,
   },
@@ -6341,6 +6308,91 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     version: '0121_oauth_install_identity',
     legacyVersions: ['0119_oauth_install_identity'],
     apply: applyOAuthInstallIdentity,
+  },
+  {
+    version: '0122_durable_entity_change_feed',
+    // This feature was deployed both before the two replace-inviter migrations
+    // and at its original 0117 slot; it also shipped at 0119 before current dev
+    // claimed that numeric slot for dynamic clients. Preserve all identities so
+    // an upgrade records 0122 without rerunning entity-change DDL.
+    legacyVersions: [
+      '0116_durable_entity_change_feed',
+      '0117_durable_entity_change_feed',
+      '0119_durable_entity_change_feed',
+    ],
+    apply: applyEntityChangeSchema,
+  },
+  {
+    version: '0123_entity_change_checkpoint_cursor_convergence',
+    // The checkpoint fix shipped at 0120 before current dev assigned that slot
+    // to dynamic-client runtime grants. This migration only replaces the
+    // checkpoint function; retain the old identity so deployed databases skip
+    // duplicate DDL while recording the new monotonic version.
+    legacyVersions: ['0120_entity_change_checkpoint_cursor_convergence'],
+    apply: applyEntityChangeCheckpointSchema,
+  },
+  {
+    version: '0124_entity_change_definer_search_path',
+    apply: applyEntityChangeDefinerSearchPathSchema,
+  },
+  {
+    // The frozen dev parent now owns every slot through 0124. Preserve each
+    // previously deployed identity as an alias so re-slotting only records a
+    // canonical version and never replays an already-applied migration body.
+    version: '0125_user_access_foundation',
+    legacyVersions: [
+      '0109_user_access_foundation',
+      '0107_user_access_foundation',
+      '0101_user_access_foundation',
+    ],
+    apply: applyUserAccessFoundationSchema,
+  },
+  {
+    version: '0126_invitation_delivery_commands',
+    legacyVersions: [
+      '010a_invitation_delivery_commands',
+      '0108_invitation_delivery_commands',
+      '0102_invitation_delivery_commands',
+    ],
+    apply: applyInvitationDeliveryCommandFoundation,
+  },
+  {
+    version: '0127_catalog_utf8_ordering',
+    legacyVersions: [
+      '010b_catalog_utf8_ordering',
+      '0109_catalog_utf8_ordering',
+      '0103_catalog_utf8_ordering',
+    ],
+    apply: applyCatalogUtf8OrderingSchema,
+  },
+  {
+    version: '0128_composable_catalog_revisions',
+    legacyVersions: [
+      '010c_composable_catalog_revisions',
+      '010a_composable_catalog_revisions',
+      '0104_composable_catalog_revisions',
+    ],
+    apply: applyComposableCatalogRevisionSchema,
+  },
+  {
+    // Fix-forward for databases that recorded the first composable-catalog
+    // body before the GFS resource-component mapping was completed.
+    version: '0129_gfs_catalog_revision_components',
+    legacyVersions: [
+      '010d_gfs_catalog_revision_components',
+      '010b_gfs_catalog_revision_components',
+      '0105_gfs_catalog_revision_components',
+    ],
+    apply: applyComposableCatalogRevisionSchema,
+  },
+  {
+    version: '0130_legacy_password_security_epoch_backfill',
+    legacyVersions: [
+      '010e_legacy_password_security_epoch_backfill',
+      '010c_legacy_password_security_epoch_backfill',
+      '0106_legacy_password_security_epoch_backfill',
+    ],
+    apply: backfillLegacyPasswordSecurityEpochs,
   },
 ]
 
@@ -6738,9 +6790,7 @@ export async function assertDbReady(db: DbClient = pool): Promise<void> {
 
 export async function withTransaction<T>(
   work: (db: DbTransactionClient) => Promise<T>,
-  txPoolOrOptions:
-    | Pool
-    | { onDatabaseFailure?: (error: unknown) => unknown } = pool
+  txPoolOrOptions: Pool | { onDatabaseFailure?: (error: unknown) => unknown } = pool
 ): Promise<T> {
   // Tests may inject a Pool to exercise client lifecycle behavior. Session
   // persistence callers may instead provide a failure mapper so database
