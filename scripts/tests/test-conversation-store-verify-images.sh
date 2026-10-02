@@ -146,6 +146,7 @@ docker() {
       for required in \
         '--cap-drop=ALL' '--security-opt=no-new-privileges:true' '--memory=1g' '--memory-swap=1g' \
         '--cpus=1' '--pids-limit=256' '--stop-timeout=5' \
+        '--log-driver=json-file' '--log-opt=max-size=256k' '--log-opt=max-file=1' \
         '--tmpfs /tmp:rw,size=64m,uid=1001,gid=1001,mode=1777' \
         '--tmpfs /config/workspace:rw,size=64m,uid=1001,gid=1001,mode=0700'; do
         [[ "$*" == *"$required"* ]] || return 95

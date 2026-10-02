@@ -129,9 +129,12 @@ if [[ "$mode" == desktop-startup ]]; then
   launch_pipeline_status=(0 0)
   # No /run mount or entrypoint/command override: preserve the baseline s6
   # failure if the HCC UID1001/drop-ALL/NoNewPrivileges policy cannot start it.
+  # Match the owned development daemon's verified default json-file logger.
+  # The local-driver fixture failed during logging setup before entrypoint
+  # evidence; its exact cause remains unknown. Keep this explicit choice bounded.
   owned_docker 20 docker run --detach --pull=never --network=none --user 1001:1001 \
     --cap-drop=ALL --security-opt=no-new-privileges:true --memory=1g --memory-swap=1g --cpus=1 --pids-limit=256 \
-    --stop-timeout=5 --log-driver=local --log-opt=max-size=256k --log-opt=max-file=1 \
+    --stop-timeout=5 --log-driver=json-file --log-opt=max-size=256k --log-opt=max-file=1 \
     --label "clerum.io/conversation-store-probe=$probe_id" \
     --tmpfs /tmp:rw,size=64m,uid=1001,gid=1001,mode=1777 \
     --tmpfs /config/workspace:rw,size=64m,uid=1001,gid=1001,mode=0700 \
