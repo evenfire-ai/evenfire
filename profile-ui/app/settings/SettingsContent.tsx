@@ -28,6 +28,7 @@ import {
   disconnectWorkflowApprovalMedium,
   listWorkflowApprovalMediums,
 } from '@lib/approvalChannels'
+import { buildDesktopEnvironmentLink, navigateToDesktopApp } from '@lib/desktopAppLinks'
 import {
   EMPTY_PROFILE_CHANNELS,
   addDraftRow,
@@ -333,11 +334,9 @@ export function SettingsContent({
   }
 
   function openDesktopAppSetup() {
-    if (!desktopEnvironment?.externalRestApiBaseUrl) return
-    const params = new URLSearchParams()
-    params.set('externalRestApiBaseUrl', desktopEnvironment.externalRestApiBaseUrl)
-    params.set('tenantName', desktopEnvironment.appName || 'Evenfire')
-    window.location.href = `evenfire://desktop-environment?${params.toString()}`
+    const desktopEnvironmentLink = buildDesktopEnvironmentLink(desktopEnvironment)
+    if (!desktopEnvironmentLink) return
+    navigateToDesktopApp(desktopEnvironmentLink)
   }
 
   return (

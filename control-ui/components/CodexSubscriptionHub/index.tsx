@@ -601,6 +601,16 @@ export function CodexSubscriptionHub() {
           ? await syncGrokSubscriptionCatalog(row.connectionKey)
           : await syncCodexSubscriptionCatalog(row.connectionKey)
       } catch (err) {
+        // A rejected saved credential changes the persisted grant before the
+        // sync endpoint responds. Reflect that transition in the open dialog
+        // immediately so its connected indicator becomes a Reconnect action.
+        if (err && typeof err === 'object' && 'code' in err && err.code === 'reauth_required') {
+          setEditing(current =>
+            current && hubRowId(current) === hubRowId(row)
+              ? { ...current, status: 'reauth_required', catalogStatus: 'auth-rejected' }
+              : current
+          )
+        }
         setError(catalogSyncErrorMessage(err, brand))
         return
       }
@@ -674,6 +684,13 @@ export function CodexSubscriptionHub() {
   const offeredDefaults = editModels.filter(row => row.enabled && !row.stale).map(row => row.model)
   const initialLoad = loading && connections.length === 0
   const uiStatus = editing ? mapConnectionStatus(editing.status) : 'disconnected'
+  // The sign-in action and the status badge above it share this one status
+  // source, so they can never disagree: a connected grant shows the signed-in
+  // indicator instead of the sign-in button, and only a grant that expired
+  // (reauth-required) surfaces the explicit reconnect action. This includes
+  // first-time setup once its device sign-in completes.
+  const connectedGrant = editing !== null && uiStatus === 'connected'
+  const needsReconnect = editing !== null && !setupNew && uiStatus === 'reauth-required'
   const dialogBroker: HubBroker = editing?.broker ?? createBroker
   const dialogCopy = HUB_PROVIDER_COPY[dialogBroker]
   // Table-level copy stays ChatGPT-specific while Grok is off (unchanged Codex
@@ -946,27 +963,40 @@ export function CodexSubscriptionHub() {
                           // where the deployment turns it on.
                           'Agents authorize through this subscription’s ChatGPT grant. Reconnect if the grant expired. The catalog is read at sign-in — use Sync catalog to pick up models published since, or periodic reconciliation where this deployment enables it.'}
                   </p>
-                  <div className="cu-form-inline">
-                    <span
-                      title={editing || editName.trim() ? undefined : 'Type a name to get started'}
-                      className="cu-hover-hint"
+                  {connectedGrant ? (
+                    <p
+                      className="cu-field__hint cu-field__hint--flush"
+                      data-testid="codex-signin-connected"
                     >
-                      <button
-                        type="button"
-                        className="cu-btn cu-btn--ghost cu-btn--sm"
-                        onClick={() => {
-                          // Before the grant exists this creates it (with the
-                          // typed name) and chains straight into sign-in, so
-                          // the button never sits there dead.
-                          if (editing) void handleConnect(editing)
-                          else void handleCreate()
-                        }}
-                        disabled={Boolean(busyKey)}
+                      {`Signed in with ${dialogCopy.brand} — agents authorize through this grant.`}
+                    </p>
+                  ) : (
+                    <div className="cu-form-inline">
+                      <span
+                        title={
+                          editing || editName.trim() ? undefined : 'Type a name to get started'
+                        }
+                        className="cu-hover-hint"
                       >
-                        {`Sign in with ${dialogCopy.brand}`}
-                      </button>
-                    </span>
-                  </div>
+                        <button
+                          type="button"
+                          className="cu-btn cu-btn--ghost cu-btn--sm"
+                          onClick={() => {
+                            // Before the grant exists this creates it (with the
+                            // typed name) and chains straight into sign-in, so
+                            // the button never sits there dead.
+                            if (editing) void handleConnect(editing)
+                            else void handleCreate()
+                          }}
+                          disabled={Boolean(busyKey)}
+                        >
+                          {needsReconnect
+                            ? `Reconnect ${dialogCopy.brand}`
+                            : `Sign in with ${dialogCopy.brand}`}
+                        </button>
+                      </span>
+                    </div>
+                  )}
                   {userCode ? (
                     <div className="cu-device-setup" data-testid="codex-device-code">
                       <p className="cu-device-setup__step">
