@@ -376,9 +376,11 @@ require_isolated_control_api_files() {
   local path
   for path in \
     "$PROJECT_DIR/control-api/test/db.realPostgresMigration.integration.test.ts" \
-    "$PROJECT_DIR/control-api/test/gfsReaderRole.realPostgres.integration.test.ts"; do
+    "$PROJECT_DIR/control-api/test/gfsReaderRole.realPostgres.integration.test.ts" \
+    "$PROJECT_DIR/control-api/test/services.llmProviderAttemptAuthorization.realPostgres.integration.test.ts" \
+    "$PROJECT_DIR/control-api/test/llmProviderAttemptAuthorizer.cancellation.realPostgres.integration.test.ts"; do
     [ -f "$path" ] || {
-      T1_NEXT_COMMAND='restore the role-reset Real PostgreSQL suite files, then re-run T1'
+      T1_NEXT_COMMAND='restore the required isolated Real PostgreSQL suite files, then re-run T1'
       die_t1 ZERO_TESTS_EXECUTED "required isolated control-api suite is missing: $path"
     }
   done

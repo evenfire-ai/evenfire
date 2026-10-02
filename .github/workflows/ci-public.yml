@@ -80,6 +80,7 @@ jobs:
             pinned_suites: serve.agentRateLimit.test.ts
           - service: mcp-host
             pinned_suites: gfsClient.retry429.test.ts logPayloadKeys.test.ts taskExecutor.test.ts
+            pinned_cases: ../scripts/ci/pinned-vitest-cases/mcp-host.json
           - service: control-api
             pinned_suites:
               helpers.realPostgresTeardown.test.ts routes.mcp-host.llmProviderAttempts.test.ts
@@ -126,6 +127,18 @@ jobs:
 
       - name: Install dependencies
         working-directory: ${{ matrix.service }}
+        run: npm ci
+
+      # Host's native HTTP admission test imports each proxy server. Install the
+      # existing locked proxy dependencies on this otherwise isolated matrix job.
+      - name: Install Codex proxy dependencies for Host integration
+        if: matrix.service == 'mcp-host'
+        working-directory: codex-llm-proxy
+        run: npm ci
+
+      - name: Install Grok proxy dependencies for Host integration
+        if: matrix.service == 'mcp-host'
+        working-directory: grok-llm-proxy
         run: npm ci
 
       - name: Verify Electron runtime
@@ -335,6 +348,7 @@ jobs:
             services.codexSubscriptionOAuth.realPostgres.integration.test.ts \
             services.codexSubscriptionCatalog.realPostgres.integration.test.ts \
             services.llmProviderAttemptAuthorization.realPostgres.integration.test.ts \
+            llmProviderAttemptAuthorizer.cancellation.realPostgres.integration.test.ts \
             services.llmProviderAttemptStore.realPostgres.integration.test.ts \
             services.llmProviderAttemptRedemption.realPostgres.integration.test.ts \
             services.llmProviderAttemptFinalization.realPostgres.integration.test.ts \
