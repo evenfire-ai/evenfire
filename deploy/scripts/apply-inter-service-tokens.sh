@@ -32,6 +32,8 @@ set -euo pipefail
 #   CONTEXT                              kubectl context (unset = current)
 #   CONTROL_API_INTERNAL_TOKEN_EXT_REST  override token X (default: preserve-or-generate)
 #   CONTROL_API_INTERNAL_TOKEN_RPC       override token Y (default: preserve-or-generate)
+#   RPC_PROXY_MCP_HOST_EDGE_TOKEN         dedicated rpc-proxy → mcp-host identity
+#                                        (default: preserve-or-generate)
 #   CONTROL_API_INTERNAL_TOKEN_WA_READER override workflow-approval-request-reader → control-api
 #                                       consulta token (Figure D cross-bot fix PR1;
 #                                       default: preserve-or-generate)
@@ -168,7 +170,7 @@ log "Resolving inter-service tokens (context: ${CONTEXT:-<current>})"
 # avoid YAML quoting surprises with commas/equals in the token strings.
 command -v jq >/dev/null 2>&1 || die "jq is required (apt-get install jq)"
 
-for ns in control-plane profiles rpc-proxy channels webhook-ingress; do
+for ns in control-plane profiles rpc-proxy channels webhook-ingress gfs mcp-host; do
   ensure_namespace "$ns"
 done
 # Resolve each token from the side that already holds it (if any). We read
@@ -179,12 +181,21 @@ TOKEN_EXT_REST="$(resolve_token CONTROL_API_INTERNAL_TOKEN_EXT_REST \
   profiles external-rest-api-secrets EXTERNAL_REST_API_CONTROL_API_SERVICE_TOKEN)"
 TOKEN_RPC="$(resolve_token CONTROL_API_INTERNAL_TOKEN_RPC \
   rpc-proxy rpc-proxy-secrets RPC_PROXY_CONTROL_API_SERVICE_TOKEN)"
+TOKEN_RPC_MCP_HOST_EDGE="$(resolve_token RPC_PROXY_MCP_HOST_EDGE_TOKEN \
+  rpc-proxy rpc-proxy-secrets RPC_PROXY_MCP_HOST_EDGE_TOKEN)"
 TOKEN_WEBHOOK_PROXY="$(resolve_token CONTROL_API_INTERNAL_TOKEN_WEBHOOK_PROXY \
   webhook-ingress webhook-proxy-secrets WEBHOOK_PROXY_CONTROL_API_SERVICE_TOKEN)"
 TOKEN_WA_READER="$(resolve_token CONTROL_API_INTERNAL_TOKEN_WA_READER \
   channels workflow-approval-request-reader-credentials control-api-token)"
 TOKEN_CODEX_LLM_PROXY="$(resolve_token CONTROL_API_INTERNAL_TOKEN_CODEX_LLM_PROXY \
   control-plane codex-llm-proxy-secrets CODEX_LLM_PROXY_CONTROL_API_TOKEN)"
+TOKEN_GFSC="$(resolve_token CONTROL_API_INTERNAL_TOKEN_GFSC \
+  gfs gfs-controller-service-token token)"
+TOKEN_WFC="$(resolve_token CONTROL_API_INTERNAL_TOKEN_WFC \
+  mcp-host workspace-files-controller-service-token token)"
+if [[ "$TOKEN_GFSC" == "$TOKEN_WFC" || "$TOKEN_GFSC" == "$TOKEN_RPC" || "$TOKEN_WFC" == "$TOKEN_RPC" ]]; then
+  die "filesystem controller service tokens must be distinct from each other and rpc-proxy"
+fi
 TOKEN_GROK_LLM_PROXY="$(resolve_token CONTROL_API_INTERNAL_TOKEN_GROK_LLM_PROXY \
   control-plane grok-llm-proxy-secrets GROK_LLM_PROXY_CONTROL_API_TOKEN)"
 READER_HANDOFF_TOKEN_VALUE="$(resolve_token CHANNEL_READER_HANDOFF_TOKEN \
@@ -195,12 +206,26 @@ INTERNAL_CONTROL_HCC_HMAC="$(resolve_token INTERNAL_CONTROL_JWT_HCC_HMAC_SECRET 
   control-plane internal-control-jwt-secrets INTERNAL_CONTROL_JWT_HCC_HMAC_SECRET)"
 MEMBER_REGISTRATION_HMAC="$(resolve_member_registration_hmac)"
 
+for other_token in "$TOKEN_EXT_REST" "$TOKEN_RPC" "$TOKEN_WEBHOOK_PROXY" \
+  "$TOKEN_WA_READER" "$TOKEN_CODEX_LLM_PROXY" "$TOKEN_GFSC" "$TOKEN_WFC" \
+  "$TOKEN_GROK_LLM_PROXY" "$READER_HANDOFF_TOKEN_VALUE"; do
+  if [[ "$TOKEN_RPC_MCP_HOST_EDGE" == "$other_token" ]]; then
+    die "rpc-proxy to mcp-host edge token must be a distinct service credential"
+  fi
+done
+if [[ ${#TOKEN_RPC_MCP_HOST_EDGE} -lt 16 || ${#TOKEN_RPC_MCP_HOST_EDGE} -gt 4096 ]]; then
+  die "rpc-proxy to mcp-host edge token must contain 16 to 4096 characters"
+fi
+
 for pair in \
   "EXT_REST:$TOKEN_EXT_REST" \
   "RPC:$TOKEN_RPC" \
+  "RPC_MCP_HOST_EDGE:$TOKEN_RPC_MCP_HOST_EDGE" \
   "WEBHOOK_PROXY:$TOKEN_WEBHOOK_PROXY" \
   "WA_READER:$TOKEN_WA_READER" \
   "CODEX_LLM_PROXY:$TOKEN_CODEX_LLM_PROXY" \
+  "GFSC:$TOKEN_GFSC" \
+  "WFC:$TOKEN_WFC" \
   "GROK_LLM_PROXY:$TOKEN_GROK_LLM_PROXY" \
   "CHANNEL_READER_HANDOFF:$READER_HANDOFF_TOKEN_VALUE" \
   "INTERNAL_CONTROL_WRC_HMAC:$INTERNAL_CONTROL_WRC_HMAC" \
@@ -214,8 +239,8 @@ done
 if [ "$TOKEN_CODEX_LLM_PROXY" = "$TOKEN_GROK_LLM_PROXY" ]; then
   die "codex-llm-proxy and grok-llm-proxy tokens must be distinct"
 fi
-SERVICE_TOKENS_MAP="external-rest-api=${TOKEN_EXT_REST},rpc-proxy=${TOKEN_RPC},webhook-proxy=${TOKEN_WEBHOOK_PROXY},workflow-approval-reader=${TOKEN_WA_READER},codex-llm-proxy=${TOKEN_CODEX_LLM_PROXY},grok-llm-proxy=${TOKEN_GROK_LLM_PROXY}"
-INTERNAL_TOKENS_LIST="${TOKEN_EXT_REST},${TOKEN_RPC},${TOKEN_WEBHOOK_PROXY},${TOKEN_WA_READER},${TOKEN_CODEX_LLM_PROXY},${TOKEN_GROK_LLM_PROXY}"
+SERVICE_TOKENS_MAP="external-rest-api=${TOKEN_EXT_REST},rpc-proxy=${TOKEN_RPC},webhook-proxy=${TOKEN_WEBHOOK_PROXY},workflow-approval-reader=${TOKEN_WA_READER},codex-llm-proxy=${TOKEN_CODEX_LLM_PROXY},grok-llm-proxy=${TOKEN_GROK_LLM_PROXY},gfs-controller=${TOKEN_GFSC},workspace-files-controller=${TOKEN_WFC}"
+INTERNAL_TOKENS_LIST="${TOKEN_EXT_REST},${TOKEN_RPC},${TOKEN_WEBHOOK_PROXY},${TOKEN_WA_READER},${TOKEN_CODEX_LLM_PROXY},${TOKEN_GROK_LLM_PROXY},${TOKEN_GFSC},${TOKEN_WFC}"
 
 # --- 1. control-api-internal-tokens (control-plane) ---
 log "Patching Secret control-api-internal-tokens (control-plane)"
@@ -244,12 +269,20 @@ kctl -n channels patch secret workflow-approval-request-reader-credentials \
 # so a whole-Secret resourceVersion (or parsing `patched (no change)`) would
 # Recreate HCC on a WRC-only rotation. Values stay in shell locals — never logged.
 HCC_HMAC_BEFORE="$(read_secret_key control-plane internal-control-jwt-secrets INTERNAL_CONTROL_JWT_HCC_HMAC_SECRET)"
+RPC_MCP_HOST_EDGE_BEFORE="$(read_secret_key rpc-proxy rpc-proxy-secrets RPC_PROXY_MCP_HOST_EDGE_TOKEN)"
+MCP_HOST_EDGE_BEFORE="$(read_secret_key mcp-host rpc-proxy-edge-credentials RPC_PROXY_MCP_HOST_EDGE_TOKEN)"
 if [ "${FORCE_CONSUMER_RESTART:-}" = "true" ] || \
    [ -z "$HCC_HMAC_BEFORE" ] || \
    [ "$HCC_HMAC_BEFORE" != "$INTERNAL_CONTROL_HCC_HMAC" ]; then
   HCC_SECRET_CHANGED=true
 else
   HCC_SECRET_CHANGED=false
+fi
+if [ "$RPC_MCP_HOST_EDGE_BEFORE" != "$TOKEN_RPC_MCP_HOST_EDGE" ] || \
+   [ "$MCP_HOST_EDGE_BEFORE" != "$TOKEN_RPC_MCP_HOST_EDGE" ]; then
+  RPC_MCP_HOST_EDGE_CHANGED=true
+else
+  RPC_MCP_HOST_EDGE_CHANGED=false
 fi
 log "Patching Secret internal-control-jwt-secrets (control-plane)"
 ensure_secret control-plane internal-control-jwt-secrets
@@ -287,9 +320,28 @@ kctl -n profiles patch secret external-rest-api-secrets --type=merge -p "$EXT_PA
 # and desktop tokens written by gen-jwt-keys.sh.
 log "Patching Secret rpc-proxy-secrets (rpc-proxy)"
 ensure_secret rpc-proxy rpc-proxy-secrets
-RPC_PATCH="$(jq -cn --arg t "$TOKEN_RPC" \
-  '{stringData: {RPC_PROXY_CONTROL_API_SERVICE_TOKEN: $t}}')"
+RPC_PATCH="$(jq -cn --arg t "$TOKEN_RPC" --arg edge "$TOKEN_RPC_MCP_HOST_EDGE" \
+  '{stringData: {
+    RPC_PROXY_CONTROL_API_SERVICE_TOKEN: $t,
+    RPC_PROXY_MCP_HOST_EDGE_TOKEN: $edge
+  }}')"
 kctl -n rpc-proxy patch secret rpc-proxy-secrets --type=merge -p "$RPC_PATCH"
+
+# --- 4a. Dedicated rpc-proxy → mcp-host caller identity ---
+log "Patching Secret rpc-proxy-edge-credentials (mcp-host)"
+ensure_secret mcp-host rpc-proxy-edge-credentials
+MCP_HOST_EDGE_PATCH="$(jq -cn --arg edge "$TOKEN_RPC_MCP_HOST_EDGE" \
+  '{stringData: {RPC_PROXY_MCP_HOST_EDGE_TOKEN: $edge}}')"
+kctl -n mcp-host patch secret rpc-proxy-edge-credentials --type=merge -p "$MCP_HOST_EDGE_PATCH"
+
+# --- 4a. filesystem controller checkpoint identities ---
+log "Patching distinct filesystem controller service tokens"
+ensure_secret gfs gfs-controller-service-token
+GFSC_PATCH="$(jq -cn --arg t "$TOKEN_GFSC" '{stringData: {token: $t}}')"
+kctl -n gfs patch secret gfs-controller-service-token --type=merge -p "$GFSC_PATCH"
+ensure_secret mcp-host workspace-files-controller-service-token
+WFC_PATCH="$(jq -cn --arg t "$TOKEN_WFC" '{stringData: {token: $t}}')"
+kctl -n mcp-host patch secret workspace-files-controller-service-token --type=merge -p "$WFC_PATCH"
 
 # --- 4b. webhook-proxy-secrets (webhook-ingress) ---
 # Adds/updates WEBHOOK_PROXY_CONTROL_API_SERVICE_TOKEN. webhook-proxy uses
@@ -362,6 +414,19 @@ for pair in "control-plane:control-api" \
     kctl -n "$ns" rollout restart deploy "$dep" >/dev/null
   fi
 done
+
+# MCP Host consumes the edge token as an environment variable. Restart only
+# HCC-managed Host deployments when either Secret projection changes so every
+# pod reloads the same preserved credential used by RPC Proxy.
+if [ "$RPC_MCP_HOST_EDGE_CHANGED" = "true" ]; then
+  HOST_DEPLOYMENTS="$(kctl -n mcp-host get deployments \
+    -l clerum.io/managed-by=host-context-controller -o name)"
+  if [ -n "$HOST_DEPLOYMENTS" ]; then
+    log "Rolling HCC-managed MCP Host deployments to pick up the RPC Proxy edge token"
+    kctl -n mcp-host rollout restart deployments \
+      -l clerum.io/managed-by=host-context-controller >/dev/null
+  fi
+fi
 
 if kctl -n channels get deploy -l app=channel-reader >/dev/null 2>&1; then
   log "Rolling channel-reader deployments to pick up fresh Secret values"

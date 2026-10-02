@@ -1,12 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
+import { encodeSessionsCursor, sessionsCursorScope } from '@clerum/action-context-contracts'
 import { createApp } from '../app.js'
 import { createRpcRouter } from '../routes/rpc.js'
 
 const authTokenMock = vi.hoisted(() => ({ verifyRpcToken: vi.fn() }))
 const serviceMock = vi.hoisted(() => ({
   resolveHostConnectionForUser: vi.fn(),
+}))
+vi.mock('../services/hostRpcAdmission.js', () => ({
+  admitLegacyHostRpcRequest: async () => true,
 }))
 
 vi.mock('../authToken.js', () => authTokenMock)
@@ -85,6 +89,11 @@ describe('GET /rpc/hosts/:hostRef/sessions — passthrough to mcp-host', () => {
   })
 
   it('forwards only supported session pagination query parameters', async () => {
+    const cursor = encodeSessionsCursor(
+      '2026-04-22T00:00:00.000Z',
+      'session-a',
+      sessionsCursorScope(VALID_CLAIMS.sub)
+    )
     const fetchMock = vi.fn().mockResolvedValue({
       status: 200,
       headers: new Headers({ 'content-type': 'application/json' }),
@@ -93,12 +102,14 @@ describe('GET /rpc/hosts/:hostRef/sessions — passthrough to mcp-host', () => {
     globalThis.fetch = fetchMock as unknown as typeof fetch
 
     await request(makeApp())
-      .get('/rpc/hosts/chatllm/sessions?limit=25&cursor=current&userId=other')
+      .get(`/rpc/hosts/chatllm/sessions?limit=25&cursor=${encodeURIComponent(cursor)}&userId=other`)
       .set('authorization', 'Bearer user-token')
       .expect(200)
 
     const [url] = fetchMock.mock.calls[0]
-    expect(String(url)).toBe('http://chatllm:8080/v1/runtime/sessions?limit=25&cursor=current')
+    expect(String(url)).toBe(
+      `http://chatllm:8080/v1/runtime/sessions?limit=25&cursor=${encodeURIComponent(cursor)}`
+    )
   })
 
   it('bounds and scopes session pagination before forwarding upstream', async () => {

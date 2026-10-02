@@ -7,10 +7,15 @@ import {
 } from '../controlApiClient.js'
 import { publicCorrelationId, sanitizeControlApiPublicError } from '../http/publicApiError.js'
 import { type AuthedRequest, extractAuthToken, requireAuth } from '../middleware/auth.js'
+import {
+  sendWorkflowActionDelegationTransportError,
+  workflowActionDelegationHeaders,
+} from '../workflowActionDelegation.js'
 
 const PROPAGATED_STATUSES = new Set([400, 403, 404, 409, 410, 422])
 
 function forwardControlApiError(error: unknown, res: Response, next: NextFunction): void {
+  if (sendWorkflowActionDelegationTransportError(error, res)) return
   const sanitized = sanitizeControlApiPublicError(
     error,
     PROPAGATED_STATUSES,
@@ -25,6 +30,11 @@ function forwardControlApiError(error: unknown, res: Response, next: NextFunctio
 
 export function createExternalWorkflowsRouter(): Router {
   const router = Router()
+
+  const delegationOptions = (req: AuthedRequest) => {
+    const extraHeaders = workflowActionDelegationHeaders(req)
+    return Object.keys(extraHeaders).length > 0 ? { extraHeaders } : {}
+  }
 
   router.get(
     '/workflows',
@@ -59,6 +69,7 @@ export function createExternalWorkflowsRouter(): Router {
           `/external/workflows/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
           {
             userSessionToken: sessionToken,
+            ...delegationOptions(req),
           }
         )
         res.status(200).json(result)
@@ -85,6 +96,7 @@ export function createExternalWorkflowsRouter(): Router {
           `/external/workflows/${encodeURIComponent(ns)}/${encodeURIComponent(name)}/health`,
           {
             userSessionToken: sessionToken,
+            ...delegationOptions(req),
           }
         )
         res.status(200).json(result)
@@ -117,7 +129,10 @@ export function createExternalWorkflowsRouter(): Router {
           {
             userSessionToken: sessionToken,
             body: req.body,
-            extraHeaders: { 'idempotency-key': idempotencyKey },
+            extraHeaders: {
+              'idempotency-key': idempotencyKey,
+              ...workflowActionDelegationHeaders(req),
+            },
           }
         )
         res.status(status).json(data)
@@ -147,6 +162,7 @@ export function createExternalWorkflowsRouter(): Router {
           {
             userSessionToken: sessionToken,
             query: { limit: String(limit) },
+            ...delegationOptions(req),
           }
         )
         res.status(200).json(result)
@@ -174,6 +190,7 @@ export function createExternalWorkflowsRouter(): Router {
           `/external/workflows/${encodeURIComponent(ns)}/${encodeURIComponent(name)}/runs/${encodeURIComponent(runId)}/artifacts`,
           {
             userSessionToken: sessionToken,
+            ...delegationOptions(req),
           }
         )
         res.status(200).json(result)
@@ -202,6 +219,7 @@ export function createExternalWorkflowsRouter(): Router {
           `/external/workflows/${encodeURIComponent(ns)}/${encodeURIComponent(name)}/runs/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(artifactName)}/download`,
           {
             userSessionToken: sessionToken,
+            ...delegationOptions(req),
           }
         )
         res.status(result.status)

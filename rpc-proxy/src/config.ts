@@ -10,6 +10,7 @@ type Config = {
   controlApiBaseUrl: string
   controlApiServiceToken: string
   controlApiServiceName: string
+  mcpHostEdgeToken: string
   controlApiCacheTtlMs: number
   artifactDownloadMaxBytes: number
   artifactDownloadTimeoutMs: number
@@ -39,6 +40,7 @@ type Config = {
   wakeRetriggerMs: number
   hccBaseUrl: string
   hostNamespace: string
+  mcpServerNamespace: string
   desktopCookieName: string
   desktopCookieMaxAgeMs: number
   desktopCookieSecret: string
@@ -97,6 +99,21 @@ function assertNotPlaceholder(label: string, value: string): void {
       `${label} has placeholder value "${value}". Run deploy/scripts/apply-inter-service-tokens.sh before deploying.`
     )
   }
+}
+
+export function parseRpcProxyMcpHostEdgeToken(
+  raw: string | undefined,
+  production: boolean
+): string {
+  const supplied = raw?.trim() ?? ''
+  const value = supplied || (production ? '' : 'dev-rpc-proxy-mcp-host-edge-token')
+  if (!value)
+    throw new Error('Missing required environment variable: RPC_PROXY_MCP_HOST_EDGE_TOKEN')
+  assertNotPlaceholder('RPC_PROXY_MCP_HOST_EDGE_TOKEN', value)
+  if (value.length < 16 || value.length > 4096) {
+    throw new Error('RPC_PROXY_MCP_HOST_EDGE_TOKEN must contain 16 to 4096 characters')
+  }
+  return value
 }
 
 function normalizePem(value: string): string {
@@ -212,6 +229,10 @@ export const config: Config = {
     return v
   })(),
   controlApiServiceName: process.env.RPC_PROXY_CONTROL_API_SERVICE_NAME || 'rpc-proxy',
+  mcpHostEdgeToken: parseRpcProxyMcpHostEdgeToken(
+    process.env.RPC_PROXY_MCP_HOST_EDGE_TOKEN,
+    process.env.NODE_ENV === 'production'
+  ),
   controlApiCacheTtlMs: Number(process.env.RPC_PROXY_CONTROL_API_CACHE_TTL_MS || 30000),
   artifactDownloadMaxBytes: parseArtifactDownloadMaxBytes(
     process.env.RPC_PROXY_ARTIFACT_DOWNLOAD_MAX_MB || '50'
@@ -258,6 +279,7 @@ export const config: Config = {
     'http://host-context-controller-api-gateway.control-plane.svc.cluster.local:8081'
   ),
   hostNamespace: requiredOrDevDefault('RPC_PROXY_HOST_NAMESPACE', 'mcp-host'),
+  mcpServerNamespace: requiredOrDevDefault('RPC_PROXY_MCP_SERVER_NAMESPACE', 'mcp-server'),
   desktopCookieName: process.env.RPC_PROXY_DESKTOP_COOKIE_NAME || 'clerum_desktop_session',
   desktopCookieMaxAgeMs: Number(process.env.RPC_PROXY_DESKTOP_COOKIE_MAX_AGE_MS || 3_600_000),
   desktopCookieSecret: requiredOrDevDefault(

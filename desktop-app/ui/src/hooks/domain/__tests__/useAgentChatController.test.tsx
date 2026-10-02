@@ -947,7 +947,9 @@ describe('useAgentChatController — characterization (D.0)', () => {
       const { result, spies } = renderController()
       await settleMount()
 
-      const sendPromise = result.current.handleSendAgentMessage('q1').catch(() => undefined)
+      await act(async () => {
+        await result.current.handleSendAgentMessage('q1')
+      })
       await waitForProgressHandler('task-abc')
 
       // First stream loss → reconcile → rejoin (re-subscribes the SSE).
@@ -1009,7 +1011,6 @@ describe('useAgentChatController — characterization (D.0)', () => {
       )
       expect(spies.pushToast).not.toHaveBeenCalledWith(expect.stringContaining('failed'), 'error')
       expect(result.current.failedAgentSend).toBeNull()
-      await sendPromise
     })
 
     it('SR-7 renders the durable failed task result (budget deny) on stream loss with no session turn', async () => {
@@ -1038,7 +1039,9 @@ describe('useAgentChatController — characterization (D.0)', () => {
       const { result, spies } = renderController()
       await settleMount()
 
-      const sendPromise = result.current.handleSendAgentMessage('hola').catch(() => undefined)
+      await act(async () => {
+        await result.current.handleSendAgentMessage('hola')
+      })
       await waitForProgressHandler('task-abc')
       await act(async () => {
         clerum.emitTaskProgress('task-abc', {
@@ -1084,7 +1087,6 @@ describe('useAgentChatController — characterization (D.0)', () => {
       expect(
         Object.values(result.current.sessionStateByChatKey).some(s => s.state === 'processing')
       ).toBe(false)
-      await sendPromise
     })
 
     it('SR-8 renders a durable success reply with no session turn on stream loss', async () => {

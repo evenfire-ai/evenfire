@@ -16,6 +16,7 @@
     "test:run": "vitest run --no-file-parallelism"
   },
   "dependencies": {
+    "@clerum/action-context-contracts": "file:../packages/action-context-contracts",
     "@clerum/display-field": "file:../packages/display-field",
     "@clerum/grok-provider-attempt-contract": "file:../packages/grok-provider-attempt-contract",
     "@clerum/image-policy": "file:../packages/image-policy",

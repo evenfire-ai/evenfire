@@ -18,14 +18,26 @@ import {
   normalizeAccessCapabilities,
 } from './capabilityRegistry.js'
 import type { ValidatedOperationTarget } from './operationTarget.js'
-import type { OperationalResourceGraphResult } from './operationalAccessReader.js'
+import type { OperationalBehaviorSources } from './operationalAccessProjection.js'
+import type {
+  OperationalIndexedResource,
+  OperationalResourceGraphResult,
+} from './operationalAccessReader.js'
+import { selectOperationalPathGraph } from './operationalAccessReader.js'
 import type { CanonicalResourceIdentity } from './resourceIdentity.js'
+import {
+  assembleOperationalBehaviorDimensions,
+  budgetContextRefsForGraph,
+  loadRuntimeBehaviorPolicySnapshot,
+} from './runtimeBehaviorSource.js'
 import { workflowTriggerGrantIdentitySql } from './workflowTriggerGrantIdentity.js'
 
 export type OperationalPathBinding = Readonly<{
   resourceType: 'host' | 'context' | 'mcp_server' | 'workflow_recipe' | 'shared_filesystem'
   logicalId: string
   providerUid: string
+  providerResourceVersion: string
+  behaviorSources?: OperationalBehaviorSources
   relationships: readonly Readonly<{
     instanceId: string
     behaviorAttributes: Readonly<Record<string, string | number | boolean>>
@@ -44,6 +56,18 @@ export type PrincipalAuthoritySnapshot = Readonly<{
   resourceRevision: string
   memberships: readonly AuthorizationMembershipRevision[]
 }>
+
+export type LogicalSessionCheckpointAuthority = Readonly<{
+  contract: 'v2'
+  authorityMode: 'logical_session_checkpoint'
+  userId: string
+  sid: string
+  sessionVersion: number
+}>
+
+export type AccessAuthoritySession =
+  | ExternalSessionAuthorityContext
+  | LogicalSessionCheckpointAuthority
 
 export type ResourceAuthorityResult = Readonly<{
   exists: boolean
@@ -87,7 +111,7 @@ export function parseAuthorizationMemberships(value: unknown): AuthorizationMemb
 export async function loadPrincipalAuthoritySnapshot(input: {
   db: Pick<DbClient, 'query'>
   budget: AccessExecutionBudget
-  session: ExternalSessionAuthorityContext
+  session: AccessAuthoritySession
   resource: CanonicalResourceIdentity
 }): Promise<PrincipalAuthoritySnapshot | null> {
   const result = await query(
@@ -116,7 +140,8 @@ export async function loadPrincipalAuthoritySnapshot(input: {
                    AND s.idle_expires_at > NOW()
                    AND s.absolute_expires_at > NOW()
                    AND (
-                     s.current_jti::text = $4
+                     $12::boolean
+                     OR s.current_jti::text = $4
                      OR (
                        s.prior_jti::text = $4
                        AND s.prior_jti_expires_at >= NOW()
@@ -180,7 +205,9 @@ export async function loadPrincipalAuthoritySnapshot(input: {
       input.session.userId,
       input.session.contract,
       input.session.contract === 'v2' ? input.session.sid : null,
-      input.session.contract === 'v2' ? input.session.jti : null,
+      input.session.contract === 'v2' && !('authorityMode' in input.session)
+        ? input.session.jti
+        : null,
       input.session.contract === 'v2' ? input.session.sessionVersion : null,
       input.session.contract === 'v1' ? input.session.tokenHash : null,
       input.session.contract === 'v1' ? input.session.issuedAt : null,
@@ -188,6 +215,8 @@ export async function loadPrincipalAuthoritySnapshot(input: {
       input.resource.environmentId,
       input.resource.type,
       input.resource.logicalId,
+      'authorityMode' in input.session &&
+        input.session.authorityMode === 'logical_session_checkpoint',
     ]
   )
   const row = result.rows[0] as Record<string, unknown> | undefined
@@ -212,6 +241,7 @@ function behavior(input: {
   runtimeRef?: string | null
   providerModelRef?: string | null
   approvalRef?: string | null
+  behaviorDimensions?: Partial<Omit<AccessPathBehavior, 'capabilities' | 'audit'>>
 }): AccessPathBehavior {
   const runtimeSensitive = input.runtimeSensitive === true
   return Object.freeze({
@@ -241,6 +271,7 @@ function behavior(input: {
           ? unknownBehavior()
           : knownBehavior(null),
     audit: knownBehavior(input.kind === 'team' ? `team:${input.teamId}` : `user:${input.userId}`),
+    ...input.behaviorDimensions,
   })
 }
 
@@ -256,6 +287,7 @@ export function authorityCandidate(input: {
   runtimeRef?: string | null
   providerModelRef?: string | null
   approvalRef?: string | null
+  behaviorDimensions?: Partial<Omit<AccessPathBehavior, 'capabilities' | 'audit'>>
   operationalBindings?: readonly OperationalPathBinding[]
 }): AuthorityCandidate {
   return Object.freeze({
@@ -281,6 +313,7 @@ export function authorityCandidateFromGrantRow(input: {
   runtimeRef?: string | null
   providerModelRef?: string | null
   approvalRef?: string | null
+  behaviorDimensions?: Partial<Omit<AccessPathBehavior, 'capabilities' | 'audit'>>
 }): AuthorityCandidate | null {
   const kind = input.row.kind === 'direct' ? 'direct' : input.row.kind === 'team' ? 'team' : null
   const grantId = String(input.row.grant_id ?? '')
@@ -303,6 +336,7 @@ export function authorityCandidateFromGrantRow(input: {
     runtimeRef: input.runtimeRef,
     providerModelRef: input.providerModelRef,
     approvalRef: input.approvalRef,
+    behaviorDimensions: input.behaviorDimensions,
   })
 }
 
@@ -310,6 +344,37 @@ function scopedName(logicalId: string): { namespace: string; name: string } | nu
   const separator = logicalId.indexOf('/')
   if (separator < 1 || separator === logicalId.length - 1) return null
   return { namespace: logicalId.slice(0, separator), name: logicalId.slice(separator + 1) }
+}
+
+function operationalBindingsForGraph(
+  graph: Extract<OperationalResourceGraphResult, { status: 'current' }>
+): OperationalPathBinding[] {
+  const supported = new Set([
+    'host',
+    'context',
+    'mcp_server',
+    'workflow_recipe',
+    'shared_filesystem',
+  ])
+  return graph.resources
+    .filter(resource => supported.has(resource.resourceType))
+    .map(resource => ({
+      resourceType: resource.resourceType as OperationalPathBinding['resourceType'],
+      logicalId: resource.logicalId,
+      providerUid: resource.providerUid,
+      providerResourceVersion: resource.providerResourceVersion,
+      behaviorSources: resource.behaviorSources,
+      relationships: graph.relationships
+        .filter(
+          relationship =>
+            relationship.sourceType === resource.resourceType &&
+            relationship.sourceId === resource.logicalId
+        )
+        .map(relationship => ({
+          instanceId: relationship.relationshipInstanceId,
+          behaviorAttributes: relationship.behaviorAttributes,
+        })),
+    }))
 }
 
 function publicRelationships(graph: OperationalResourceGraphResult | null) {
@@ -327,6 +392,11 @@ async function loadSimpleOperationalGrantCandidates(input: {
   db: Pick<DbClient, 'query'>
   budget: AccessExecutionBudget
   userId: string
+  behaviorDimensions: (
+    graph: Extract<OperationalResourceGraphResult, { status: 'current' }>,
+    runtimeRef: string | null,
+    teamId?: string
+  ) => ReturnType<typeof assembleOperationalBehaviorDimensions>
   resource: CanonicalResourceIdentity
   graph: Extract<OperationalResourceGraphResult, { status: 'current' }>
 }): Promise<AuthorityCandidate[]> {
@@ -412,22 +482,13 @@ async function loadSimpleOperationalGrantCandidates(input: {
       : input.resource.type === 'sandbox_app'
         ? ['sandbox_app.read', 'sandbox_app.use', 'sandbox_oauth.vend']
         : ['workflow.read', 'workflow.trigger']
-  const relevantRelationships = input.graph.relationships.filter(
-    relationship => relationship.sourceType === input.resource.type || isRecipe
-  )
+  const selectedGraph = selectOperationalPathGraph({ graph: input.graph })
+  if (!selectedGraph) return []
   const runtimeRef = JSON.stringify(
-    relevantRelationships
+    selectedGraph.relationships
       .map(relationship => relationship.relationshipInstanceId)
       .sort(compareCanonicalUtf8Text)
   )
-  const bindingType =
-    input.resource.type === 'sandbox_app' ? 'workflow_recipe' : input.resource.type
-  const bindingProviderUid =
-    input.resource.type === 'sandbox_app'
-      ? relevantRelationships.find(relationship => relationship.sourceType === 'workflow_recipe')
-          ?.sourceProviderUid
-      : input.graph.resource.providerUid
-  if (!bindingProviderUid) return []
   return (result.rows as Record<string, unknown>[]).flatMap(row => {
     const value = authorityCandidateFromGrantRow({
       row,
@@ -435,17 +496,12 @@ async function loadSimpleOperationalGrantCandidates(input: {
       capabilities,
       runtimeSensitive: true,
       runtimeRef,
-      operationalBindings: [
-        {
-          resourceType: bindingType as OperationalPathBinding['resourceType'],
-          logicalId: input.resource.logicalId,
-          providerUid: bindingProviderUid,
-          relationships: relevantRelationships.map(relationship => ({
-            instanceId: relationship.relationshipInstanceId,
-            behaviorAttributes: relationship.behaviorAttributes,
-          })),
-        },
-      ],
+      behaviorDimensions: input.behaviorDimensions(
+        selectedGraph,
+        runtimeRef,
+        row.team_id ? String(row.team_id) : undefined
+      ),
+      operationalBindings: operationalBindingsForGraph(selectedGraph),
     })
     return value ? [value] : []
   })
@@ -455,6 +511,11 @@ async function loadDerivedOperationalCandidates(input: {
   db: Pick<DbClient, 'query'>
   budget: AccessExecutionBudget
   userId: string
+  behaviorDimensions: (
+    graph: Extract<OperationalResourceGraphResult, { status: 'current' }>,
+    runtimeRef: string | null,
+    teamId?: string
+  ) => ReturnType<typeof assembleOperationalBehaviorDimensions>
   resource: CanonicalResourceIdentity
   graph: Extract<OperationalResourceGraphResult, { status: 'current' }>
 }): Promise<AuthorityCandidate[]> {
@@ -531,6 +592,11 @@ async function loadDerivedOperationalCandidates(input: {
       const contextId = contextIds.find(value => scopedName(value)?.name === sourceName)
       if (!contextId) continue
       for (const edge of directEdges.filter(value => value.sourceId === contextId)) {
+        const selectedGraph = selectOperationalPathGraph({
+          graph: input.graph,
+          contextId,
+        })
+        if (!selectedGraph) continue
         const filesystemScope =
           input.resource.type === 'shared_filesystem'
             ? JSON.stringify({
@@ -552,26 +618,13 @@ async function loadDerivedOperationalCandidates(input: {
               : ['shared_filesystem.read'],
           runtimeSensitive: input.resource.type === 'mcp_server',
           runtimeRef: edge.relationshipInstanceId,
+          behaviorDimensions: input.behaviorDimensions(
+            selectedGraph,
+            edge.relationshipInstanceId,
+            row.team_id ? String(row.team_id) : undefined
+          ),
           filesystemScope,
-          operationalBindings: [
-            {
-              resourceType: 'context',
-              logicalId: contextId,
-              providerUid: edge.sourceProviderUid,
-              relationships: [
-                {
-                  instanceId: edge.relationshipInstanceId,
-                  behaviorAttributes: edge.behaviorAttributes,
-                },
-              ],
-            },
-            {
-              resourceType: derivedResourceType,
-              logicalId: input.resource.logicalId,
-              providerUid: input.graph.resource.providerUid,
-              relationships: [],
-            },
-          ],
+          operationalBindings: operationalBindingsForGraph(selectedGraph),
         })
         if (value) output.push(value)
       }
@@ -582,6 +635,12 @@ async function loadDerivedOperationalCandidates(input: {
     for (const hostEdge of hostEdges.filter(value => value.sourceId === hostId)) {
       const contextEdge = directEdges.find(value => value.sourceId === hostEdge.targetId)
       if (!contextEdge) continue
+      const selectedGraph = selectOperationalPathGraph({
+        graph: input.graph,
+        contextId: hostEdge.targetId,
+        hostId,
+      })
+      if (!selectedGraph) continue
       const value = authorityCandidateFromGrantRow({
         row: {
           ...row,
@@ -594,36 +653,12 @@ async function loadDerivedOperationalCandidates(input: {
           hostEdge.relationshipInstanceId,
           contextEdge.relationshipInstanceId,
         ]),
-        operationalBindings: [
-          {
-            resourceType: 'host',
-            logicalId: hostId,
-            providerUid: hostEdge.sourceProviderUid,
-            relationships: [
-              {
-                instanceId: hostEdge.relationshipInstanceId,
-                behaviorAttributes: hostEdge.behaviorAttributes,
-              },
-            ],
-          },
-          {
-            resourceType: 'context',
-            logicalId: hostEdge.targetId,
-            providerUid: contextEdge.sourceProviderUid,
-            relationships: [
-              {
-                instanceId: contextEdge.relationshipInstanceId,
-                behaviorAttributes: contextEdge.behaviorAttributes,
-              },
-            ],
-          },
-          {
-            resourceType: 'mcp_server',
-            logicalId: input.resource.logicalId,
-            providerUid: input.graph.resource.providerUid,
-            relationships: [],
-          },
-        ],
+        behaviorDimensions: input.behaviorDimensions(
+          selectedGraph,
+          JSON.stringify([hostEdge.relationshipInstanceId, contextEdge.relationshipInstanceId]),
+          row.team_id ? String(row.team_id) : undefined
+        ),
+        operationalBindings: operationalBindingsForGraph(selectedGraph),
       })
       if (value) output.push(value)
     }
@@ -714,7 +749,36 @@ async function loadDatabaseCandidates(input: {
            ON twt.team_id = tm.team_id
           AND twt.recipe_namespace = wr.recipe_namespace
           AND twt.recipe_name = wr.recipe_name
-        WHERE $2::text = 'workflow_run' AND wr.run_id::text = $3
+       WHERE $2::text = 'workflow_run' AND wr.run_id::text = $3
+       UNION ALL
+       SELECT 'direct', 'workflow_artifacts:user:' || wr.run_id || ':' || $3,
+              NULL, NULL, NULL, wr.recipe_namespace, wr.recipe_name,
+              NULL, wr.team_id::text, wr.usage_team_id, NULL, NULL
+         FROM workflow_runs wr
+         JOIN user_workflow_triggers uwt
+           ON uwt.user_id = $1
+          AND uwt.recipe_namespace = wr.recipe_namespace
+          AND uwt.recipe_name = wr.recipe_name
+        WHERE $2::text = 'workflow_artifact'
+          AND wr.run_id::text = split_part($3, '/', 1)
+          AND split_part($3, '/', 2) <> ''
+          AND wr.actor_type = 'user' AND wr.actor_id = $1
+          AND wr.team_id IS NULL AND wr.usage_team_id IS NULL
+       UNION ALL
+       SELECT 'team', 'workflow_artifacts:team:' || tm.team_id || ':' || $3,
+              tm.team_id, tm.role, NULL, wr.recipe_namespace, wr.recipe_name,
+              NULL, wr.team_id::text, wr.usage_team_id, NULL, NULL
+         FROM workflow_runs wr
+         JOIN team_members tm
+           ON (tm.team_id = wr.team_id OR tm.team_id::text = wr.usage_team_id)
+          AND tm.user_id = $1 AND tm.status = 'active'
+         JOIN team_workflow_triggers twt
+           ON twt.team_id = tm.team_id
+          AND twt.recipe_namespace = wr.recipe_namespace
+          AND twt.recipe_name = wr.recipe_name
+        WHERE $2::text = 'workflow_artifact'
+          AND wr.run_id::text = split_part($3, '/', 1)
+          AND split_part($3, '/', 2) <> ''
        UNION ALL
        SELECT 'direct', 'workflow_approvals:user:' || war.id, NULL, NULL, NULL,
               war.recipe_namespace, war.recipe_name, war.expires_at, NULL, NULL, NULL, NULL
@@ -794,22 +858,19 @@ async function loadDatabaseCandidates(input: {
     const type = resource.type
     const capabilities: AccessCapability[] =
       type === 'workflow_run'
-        ? [
-            'workflow.read',
-            'workflow.run.manage',
-            'workflow.artifact.read',
-            'workflow.artifact.delete',
-          ]
-        : type === 'workflow_approval'
-          ? ['workflow.approval.decide']
-          : type === 'gfs_resource'
-            ? gfsPermissionsToCapabilities(row.permissions)
-            : ['notification.read']
+        ? ['workflow.read', 'workflow.artifact.read', 'workflow.artifact.delete']
+        : type === 'workflow_artifact'
+          ? ['workflow.artifact.read', 'workflow.artifact.delete']
+          : type === 'workflow_approval'
+            ? ['workflow.approval.decide']
+            : type === 'gfs_resource'
+              ? gfsPermissionsToCapabilities(row.permissions)
+              : ['notification.read']
     const value = authorityCandidateFromGrantRow({
       row,
       userId: snapshot.userId,
       capabilities,
-      runtimeSensitive: type === 'workflow_run',
+      runtimeSensitive: type === 'workflow_run' || type === 'workflow_artifact',
       approvalRef: type === 'workflow_approval' ? `approval:${resource.logicalId}` : undefined,
       filesystemScope:
         type === 'gfs_resource'
@@ -824,7 +885,11 @@ async function loadDatabaseCandidates(input: {
     instanceId?: string
   }> = []
   for (const row of rows) {
-    if (resource.type === 'workflow_run' || resource.type === 'workflow_approval') {
+    if (
+      resource.type === 'workflow_run' ||
+      resource.type === 'workflow_artifact' ||
+      resource.type === 'workflow_approval'
+    ) {
       relationships.push(
         Object.freeze({
           type: 'recipe',
@@ -874,15 +939,34 @@ export async function loadResourceAuthority(input: {
     return loadDatabaseCandidates(input)
   }
   if (input.operationalGraph?.status === 'current') {
+    const policySnapshot = await loadRuntimeBehaviorPolicySnapshot({
+      db: input.db,
+      budget: input.budget,
+      contextRefs: budgetContextRefsForGraph(input.operationalGraph),
+    })
+    const behaviorDimensions = (
+      graph: Extract<OperationalResourceGraphResult, { status: 'current' }>,
+      runtimeRef: string | null,
+      teamId?: string
+    ) =>
+      assembleOperationalBehaviorDimensions({
+        userId: input.snapshot.userId,
+        ...(teamId ? { teamId } : {}),
+        graph,
+        policySnapshot,
+        runtimeRef,
+      })
     const candidates = ['mcp_server', 'shared_filesystem'].includes(input.resource.type)
       ? await loadDerivedOperationalCandidates({
           ...input,
           userId: input.snapshot.userId,
+          behaviorDimensions,
           graph: input.operationalGraph,
         })
       : await loadSimpleOperationalGrantCandidates({
           ...input,
           userId: input.snapshot.userId,
+          behaviorDimensions,
           graph: input.operationalGraph,
         })
     return Object.freeze({

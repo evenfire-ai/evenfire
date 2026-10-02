@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { vi } from 'vitest'
 import { OPERATIONAL_SOURCE_FAMILIES } from '../src/services/access/operationalAccessProjection.js'
+import { PR2_RUNTIME_HOPS } from '../src/services/access/pr2RuntimeReadiness.js'
 import {
   CATALOG_FAMILIES,
   type ConfiguredUserAccessIntent,
@@ -14,6 +15,11 @@ import {
 import { resolveEffectiveUserAccessPolicy } from '../src/services/access/userAccessRuntimePolicy.js'
 
 const allFamilies = new Set(CATALOG_FAMILIES)
+const allPr2RuntimeHopsReady = Object.freeze(
+  Object.fromEntries(
+    PR2_RUNTIME_HOPS.map(hop => [hop, 'ready'])
+  ) as DeploymentReadiness['pr2RuntimeHops']
+)
 
 function intent(overrides: Partial<ConfiguredUserAccessIntent> = {}): ConfiguredUserAccessIntent {
   const configured: ConfiguredUserAccessIntent = {
@@ -55,6 +61,7 @@ function readiness(overrides: Partial<DeploymentReadiness> = {}): DeploymentRead
     actionSafeRevisions: 'ready',
     actionContext: 'ready',
     rpcDelegationAllHops: 'ready',
+    pr2RuntimeHops: allPr2RuntimeHopsReady,
     desktop: 'ready',
     explicitTeamAdapters: 'ready',
     profile: 'ready',
@@ -169,6 +176,36 @@ describe('central user-access rollout compiler', () => {
     })
     expect(policy.policyRevision).toMatch(/^[0-9a-f]{64}$/)
   })
+
+  it.each([
+    'workflow_authority_bindings',
+    'gfs_controller_checkpoint',
+    'sandbox_derived_view',
+    'activity_session_search_provenance',
+  ] as const)(
+    'does not advertise action-context v2 while the %s PR 2 hop is unavailable',
+    missingHop => {
+      const pr2RuntimeHops = { ...allPr2RuntimeHopsReady, [missingHop]: 'unavailable' as const }
+
+      expect(() =>
+        compileUserAccessPolicy(intent({ actionContextV2: true }), readiness({ pr2RuntimeHops }))
+      ).toThrowError(new UserAccessPolicyConfigurationError('action_context_pr2_hops_unavailable'))
+    }
+  )
+
+  it.each(PR2_RUNTIME_HOPS)(
+    'does not advertise RPC delegation v2 while the %s PR 2 hop is unavailable',
+    missingHop => {
+      const pr2RuntimeHops = { ...allPr2RuntimeHopsReady, [missingHop]: 'unavailable' as const }
+
+      expect(() =>
+        compileUserAccessPolicy(
+          intent({ actionContextV2: true, rpcDelegationV2: true }),
+          readiness({ pr2RuntimeHops })
+        )
+      ).toThrowError(new UserAccessPolicyConfigurationError('action_context_pr2_hops_unavailable'))
+    }
+  )
 
   it('enumerates every configured Boolean/lifecycle/catalog combination deterministically', () => {
     const booleanKeys = [
@@ -288,8 +325,8 @@ describe('central user-access rollout compiler', () => {
     }
   )
 
-  it('does not query operational readiness or advertise families while catalog rollout is off', async () => {
-    const query = vi.fn()
+  it('preserves the query-free legacy path while catalog and v2 readiness are off', async () => {
+    const query = vi.fn().mockResolvedValue({ rows: [], rowCount: 0 })
     const policy = await resolveEffectiveUserAccessPolicy({
       intent: intent(),
       db: { query } as never,

@@ -3,6 +3,7 @@ import type { K8sGateway } from '../../k8s.js'
 import type { ClerumResourceType } from '../../types.js'
 import type { OperationalPathBinding } from './accessAuthorityStore.js'
 import type { AccessExecutionBudget } from './accessExecutionBudget.js'
+import { compareCanonicalUtf8Text } from './canonicalText.js'
 import { projectOperationalObject } from './operationalAccessProjection.js'
 
 type ExactGateway = Pick<K8sGateway, 'getResourceExact'>
@@ -33,9 +34,30 @@ function scopedName(logicalId: string): { namespace: string; name: string } | nu
   return { namespace: logicalId.slice(0, separator), name: logicalId.slice(separator + 1) }
 }
 
-function canonicalBehavior(value: Readonly<Record<string, string | number | boolean>>): string {
-  return JSON.stringify(
-    Object.fromEntries(Object.entries(value).sort(([left], [right]) => left.localeCompare(right)))
+function canonicalValue(value: unknown): string {
+  if (value === undefined || value === null || typeof value !== 'object') {
+    return JSON.stringify(value) ?? 'null'
+  }
+  if (Array.isArray(value)) return `[${value.map(canonicalValue).join(',')}]`
+  return `{${Object.entries(value as Record<string, unknown>)
+    .sort(([left], [right]) => compareCanonicalUtf8Text(left, right))
+    .map(([key, entry]) => `${JSON.stringify(key)}:${canonicalValue(entry)}`)
+    .join(',')}}`
+}
+
+function canonicalRelationships(
+  values: readonly Readonly<{
+    instanceId: string
+    behaviorAttributes: Readonly<Record<string, string | number | boolean>>
+  }>[]
+): string {
+  return canonicalValue(
+    [...values]
+      .map(value => ({
+        instanceId: value.instanceId,
+        behaviorAttributes: value.behaviorAttributes,
+      }))
+      .sort((left, right) => compareCanonicalUtf8Text(left.instanceId, right.instanceId))
   )
 }
 
@@ -99,18 +121,33 @@ export async function validateExactOperationalBindings(input: {
           resource.resourceType === binding.resourceType && resource.logicalId === binding.logicalId
       )
       if (!root || !root.enabled || root.deletedAt) return { status: 'not_found' }
-      if (root.providerUid !== binding.providerUid) return { status: 'stale' }
-      for (const expected of binding.relationships) {
-        const current = projection.relationships.find(
-          relationship => relationship.relationshipInstanceId === expected.instanceId
+      if (
+        root.providerUid !== binding.providerUid ||
+        root.providerResourceVersion !== binding.providerResourceVersion
+      ) {
+        return { status: 'stale' }
+      }
+      if (
+        binding.behaviorSources &&
+        canonicalValue(root.behaviorSources) !== canonicalValue(binding.behaviorSources)
+      ) {
+        return { status: 'stale' }
+      }
+      const currentRelationships = projection.relationships
+        .filter(
+          relationship =>
+            relationship.sourceType === binding.resourceType &&
+            relationship.sourceId === binding.logicalId
         )
-        if (
-          !current ||
-          canonicalBehavior(current.behaviorAttributes) !==
-            canonicalBehavior(expected.behaviorAttributes)
-        ) {
-          return { status: 'stale' }
-        }
+        .map(relationship => ({
+          instanceId: relationship.relationshipInstanceId,
+          behaviorAttributes: relationship.behaviorAttributes,
+        }))
+      if (
+        canonicalRelationships(currentRelationships) !==
+        canonicalRelationships(binding.relationships)
+      ) {
+        return { status: 'stale' }
       }
     } catch (error) {
       return isNotFound(error) ? { status: 'not_found' } : { status: 'unavailable' }

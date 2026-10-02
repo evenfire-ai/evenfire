@@ -85,11 +85,11 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
 
   it('classifies, creates, and reruns all PR1 indexes without replay', async () => {
     const firstVersions = await versions(databasePool)
-    expect(PR1_ONLINE_INDEX_PLAN).toHaveLength(25)
+    expect(PR1_ONLINE_INDEX_PLAN).toHaveLength(26)
     expect(FRESH_TABLE_INDEXES).toHaveLength(14)
 
     const allNames = [...PR1_ONLINE_INDEX_PLAN.map(index => index.name), ...FRESH_TABLE_INDEXES]
-    expect(new Set(allNames)).toHaveLength(39)
+    expect(new Set(allNames)).toHaveLength(40)
     const indexes = await databasePool.query<{ relname: string; indisvalid: boolean }>(
       `SELECT relation.relname, index.indisvalid
          FROM pg_class relation
@@ -97,7 +97,7 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
         WHERE relation.relname = ANY($1::text[])`,
       [allNames]
     )
-    expect(indexes.rows).toHaveLength(39)
+    expect(indexes.rows).toHaveLength(40)
     expect(indexes.rows.every(row => row.indisvalid)).toBe(true)
 
     await initDb({ connect: () => databasePool.connect() })
@@ -382,6 +382,75 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
     )
     expect(after.rows[0]?.oid).toBe(before.rows[0]?.oid)
     expect(await versions(databasePool)).toContain(entry.migrationVersion)
+  })
+
+  it('converges every synchronized PR2 legacy identity through the canonical runner', async () => {
+    const legacyIdentities: Array<{ canonical: string; aliases: readonly string[] }> = [
+      {
+        canonical: '0131_workflow_authority_bindings',
+        aliases: ['0115_workflow_authority_bindings', '010f_workflow_authority_bindings'],
+      },
+      {
+        canonical: '0132_gfs_upload_authority_bindings',
+        aliases: ['0116_gfs_upload_authority_bindings', '0110_gfs_upload_authority_bindings'],
+      },
+      {
+        canonical: '0133_pr2_readiness_evidence',
+        aliases: [
+          '0119_pr2_readiness_evidence',
+          '0117_pr2_readiness_evidence',
+          '0111_pr2_readiness_evidence',
+        ],
+      },
+      {
+        canonical: '0134_pr2_runtime_privileges',
+        aliases: [
+          '011a_pr2_runtime_privileges',
+          '0118_pr2_runtime_privileges',
+          '0112_pr2_runtime_privileges',
+        ],
+      },
+      {
+        canonical: '0135_workflow_recipe_authority_entity',
+        aliases: [
+          '011b_workflow_recipe_authority_entity',
+          '0119_workflow_recipe_authority_entity',
+          '0113_workflow_recipe_authority_entity',
+        ],
+      },
+      {
+        canonical: '0136_workflow_run_failure_reason',
+        aliases: [
+          '011c_workflow_run_failure_reason',
+          '011a_workflow_run_failure_reason',
+          '0114_workflow_run_failure_reason',
+        ],
+      },
+      {
+        canonical: '0115_llm_allowed_models_image_input',
+        aliases: ['011b_llm_allowed_models_image_input'],
+      },
+    ]
+
+    for (const { canonical, aliases } of legacyIdentities) {
+      for (const legacy of aliases) {
+        await databasePool.query('DELETE FROM schema_migrations WHERE version = ANY($1::text[])', [
+          [canonical, ...aliases],
+        ])
+        await databasePool.query(
+          `INSERT INTO schema_migrations(version) VALUES ($1) ON CONFLICT DO NOTHING`,
+          [legacy]
+        )
+
+        await initDb({ connect: () => databasePool.connect() })
+        const applied = await versions(databasePool)
+        expect(applied).toContain(canonical)
+        expect(applied).toContain(legacy)
+
+        await initDb({ connect: () => databasePool.connect() })
+        expect(await versions(databasePool)).toEqual(applied)
+      }
+    }
   })
 
   it('keeps legacy team-member payloads compatible with revision triggers', async () => {

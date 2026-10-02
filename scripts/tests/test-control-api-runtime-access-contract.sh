@@ -9,9 +9,9 @@ relation_count="$(awk -F '\t' '!/^[[:space:]]*(#|$)/ { count++ } END { print cou
 duplicate_count="$(awk -F '\t' '!/^[[:space:]]*(#|$)/ { seen[$1]++ } END { for (name in seen) if (seen[name] > 1) count++ } END { print count + 0 }' "$PROFILE_FILE")"
 invalid_count="$(awk -F '\t' '!/^[[:space:]]*(#|$)/ && (NF != 2 || $1 !~ /^[a-z][a-z0-9_]*$/ || $2 !~ /^(legacy_dml|upsert|append|read|link_lifecycle|none)$/) { count++ } END { print count + 0 }' "$PROFILE_FILE")"
 
-# The frozen dev profile has 97 rows; synchronized PR1 contributes its
-# accepted access relations and this target adds three entity-change relations.
-if [[ "$relation_count" != "110" || "$duplicate_count" != "0" || "$invalid_count" != "0" ]] || \
+# The synchronized PR1 parent contributes three entity-change relations; PR2 adds
+# the workflow authority and readiness relations.
+if [[ "$relation_count" != "113" || "$duplicate_count" != "0" || "$invalid_count" != "0" ]] || \
   ! grep -qx $'dynamic_clients\tlegacy_dml' "$PROFILE_FILE" || \
   ! grep -qx $'entity_change_feed\tnone' "$PROFILE_FILE" || \
   ! grep -qx $'entity_change_outbox\tnone' "$PROFILE_FILE" || \
@@ -19,6 +19,9 @@ if [[ "$relation_count" != "110" || "$duplicate_count" != "0" || "$invalid_count
   ! grep -qx $'mcp_secret_rollback_permits\tlegacy_dml' "$PROFILE_FILE" || \
   ! grep -qx $'gfs_desktop_operator_links\tlink_lifecycle' "$PROFILE_FILE" || \
   ! grep -qx $'desktop_user_retirement_operations\tlink_lifecycle' "$PROFILE_FILE" || \
+  ! grep -qx $'workflow_authority_bindings\tappend' "$PROFILE_FILE" || \
+  ! grep -qx $'pr2_readiness_activations\tupsert' "$PROFILE_FILE" || \
+  ! grep -qx $'pr2_readiness_evidence\tupsert' "$PROFILE_FILE" || \
   ! grep -Fq '$2 !~ /^(legacy_dml|upsert|append|read|link_lifecycle|none)$/' "$MIGRATION_SCRIPT" || \
   ! grep -Fq "('INSERT', expected.access_profile IN ('legacy_dml', 'upsert', 'append', 'link_lifecycle'))" "$MIGRATION_SCRIPT" || \
   ! grep -Fq "('UPDATE', expected.access_profile IN ('legacy_dml', 'upsert', 'link_lifecycle'))" "$MIGRATION_SCRIPT" || \

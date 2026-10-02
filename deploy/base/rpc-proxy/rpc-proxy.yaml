@@ -31,7 +31,10 @@ spec:
     spec:
       automountServiceAccountToken: false
       containers:
-      - envFrom:
+      - env:
+        - name: RPC_PROXY_MCP_SERVER_NAMESPACE
+          value: mcp-server
+        envFrom:
         - configMapRef:
             name: rpc-proxy-config
         - secretRef:

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { performance } from 'node:perf_hooks'
 import {
   looksLikeWorkflowAccessRequest,
   looksLikeWorkflowTriggerRequest,
@@ -34,6 +35,7 @@ describe('provider workflow access gate', () => {
 
   it('detects explicit or workflow-shaped trigger requests without matching generic run text', () => {
     expect(looksLikeWorkflowTriggerRequest('Run risk-review with marker alpha')).toBe(true)
+    expect(looksLikeWorkflowTriggerRequest('Run research-summary-workflow')).toBe(true)
     expect(looksLikeWorkflowTriggerRequest('Execute the workflow recipe named payroll')).toBe(true)
     expect(looksLikeWorkflowTriggerRequest('Run a command')).toBe(false)
     expect(
@@ -41,6 +43,14 @@ describe('provider workflow access gate', () => {
         'List the workflow recipes I can run. Include exact workflow recipe names only.'
       )
     ).toBe(false)
+  })
+
+  it('rejects a long malformed hyphenated name without polynomial backtracking', () => {
+    const content = `Run a${'-'.repeat(32_000)}!`
+    const startedAt = performance.now()
+
+    expect(looksLikeWorkflowTriggerRequest(content)).toBe(false)
+    expect(performance.now() - startedAt).toBeLessThan(100)
   })
 
   it('uses channel-specific verification copy', () => {

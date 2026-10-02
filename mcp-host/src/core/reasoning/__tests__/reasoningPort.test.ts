@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { RuntimeActionAuthorityError } from '../../../runtime/actionAuthority'
 import { LlmError } from '../../errors'
 import { LlmPort } from '../../interfaces'
 import type { TokenCounter } from '../../tokenizer/tokenCounter'
@@ -52,6 +53,17 @@ function createMockLlmPort(): LlmPort {
 }
 
 describe('DefaultReasoningPort.respondWithTools', () => {
+  it('preserves typed runtime authority availability failures', async () => {
+    const mockLlm = createMockLlmPort()
+    const authorityError = new RuntimeActionAuthorityError('authority_unavailable')
+    ;(mockLlm.completeWithTools as any).mockRejectedValue(authorityError)
+
+    const port = new DefaultReasoningPort(mockLlm, new DefaultPromptBuilder())
+    const result = await port.respondWithTools({ messages: [], available_tools: [] })
+
+    expect(result).toEqual({ type: 'error', error: authorityError })
+  })
+
   it('should classify tool_calls response as RespondResult.ToolCalls', async () => {
     const mockLlm = createMockLlmPort()
     ;(mockLlm.completeWithTools as any).mockResolvedValue({
@@ -158,6 +170,17 @@ describe('DefaultReasoningPort.respondWithTools', () => {
 })
 
 describe('DefaultReasoningPort.continueWithToolResults', () => {
+  it('preserves typed runtime authority denials', async () => {
+    const mockLlm = createMockLlmPort()
+    const authorityError = new RuntimeActionAuthorityError('access_path_stale')
+    ;(mockLlm.completeWithTools as any).mockRejectedValue(authorityError)
+
+    const port = new DefaultReasoningPort(mockLlm, new DefaultPromptBuilder())
+    const result = await port.continueWithToolResults({ messages: [], available_tools: [] }, [])
+
+    expect(result).toEqual({ type: 'error', error: authorityError })
+  })
+
   it('should append tool results after conversation messages (Risk 3.5)', async () => {
     const mockLlm = createMockLlmPort()
     ;(mockLlm.completeWithTools as any).mockResolvedValue({

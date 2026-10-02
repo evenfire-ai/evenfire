@@ -1,3 +1,4 @@
+import type { DbClient } from '../../db.js'
 import type { K8sGateway } from '../../k8s.js'
 import { getMcpHostCallerKey } from '../../utils/auth/mcpHostJwtToken.js'
 import {
@@ -15,6 +16,7 @@ import {
   createRun,
 } from '../workflowRunService.js'
 import type { TriggerAllowedActor, TriggerBody, WorkflowRouteCaller } from './types.js'
+import type { WorkflowAuthorityBinding } from './workflowAuthorityBindingService.js'
 import {
   getMcpHostWorkflowPrincipalId,
   getTriggerActorForCaller,
@@ -225,6 +227,12 @@ export async function triggerWorkflow(params: {
   body: TriggerBody
   idempotencyKey: string
   correlationId?: string
+  authority?: WorkflowAuthorityBinding | null
+  reauthorize?: () => Promise<WorkflowAuthorityBinding | null>
+  validateCurrentInTransaction?: (
+    db: DbClient,
+    authority: WorkflowAuthorityBinding
+  ) => Promise<WorkflowAuthorityBinding>
 }): Promise<WorkflowTriggerResult> {
   const { gateway, caller, recipeNamespace: ns, recipeName: name, body } = params
   const idempotencyKey = params.idempotencyKey.trim()
@@ -370,6 +378,9 @@ export async function triggerWorkflow(params: {
         maxDurationSeconds: maxRunDurationSeconds,
         ttlSecondsAfterFinished,
       },
+      authority: params.authority,
+      reauthorize: params.reauthorize,
+      validateCurrentInTransaction: params.validateCurrentInTransaction,
     })
 
     if (approval.kind === 'mismatch') {
@@ -413,6 +424,7 @@ export async function triggerWorkflow(params: {
       inputs: body.inputs ?? {},
       intermediateParameters: body.intermediateParameters ?? null,
       outputOverrides: body.outputOverrides ?? null,
+      authorityBindingHash: params.authority?.bindingHash ?? null,
     })
 
     try {
@@ -468,6 +480,9 @@ export async function triggerWorkflow(params: {
       output_overrides: body.outputOverrides ?? null,
       max_duration_seconds: maxRunDurationSeconds,
       ttl_seconds_after_finished: ttlSecondsAfterFinished,
+      authority: params.authority,
+      reauthorize: params.reauthorize,
+      validateCurrentInTransaction: params.validateCurrentInTransaction,
     })
     return { kind: 'run', ...result }
   } catch (err) {

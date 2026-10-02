@@ -2,6 +2,7 @@ import express from 'express'
 import cors from 'cors'
 import { config } from './config.js'
 import { apiErrorHandler } from './errorHandler.js'
+import { stripInboundTrustedEdgeHeaders } from './middleware/auth.js'
 import { createDesktopRouter } from './routes/desktopProxy.js'
 import { createHealthRouter } from './routes/health.js'
 import { createMcpOauthRouter } from './routes/mcpOauth.js'
@@ -13,6 +14,8 @@ import { createSandboxUiSessionRouter } from './routes/sandboxUi.js'
 
 export function createApp() {
   const app = express()
+
+  app.use(stripInboundTrustedEdgeHeaders)
 
   app.use(
     cors({

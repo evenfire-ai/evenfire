@@ -1,13 +1,16 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { randomBytes } from 'node:crypto'
 import { Pool } from 'pg'
+import { config } from '../src/config.js'
 import { initDb } from '../src/db.js'
 import {
   admitHostMessage,
   hostMessageAdmissionBucketKey,
 } from '../src/services/hostMessageAdmission.js'
+import { admitHostRpc, hostRpcAdmissionBucketKey } from '../src/services/hostRpcAdmission.js'
 import {
   acquireRateLimitConcurrencyLease,
+  checkAndIncrementStrictWithQuery,
   checkAndIncrementWithQuery,
 } from '../src/services/rateLimiterService.js'
 
@@ -28,8 +31,17 @@ describeRealPostgres('rate limiter atomicity on real PostgreSQL', () => {
   const database = `rate_limiter_${randomBytes(6).toString('hex')}`
   const bucketKey = `real-pg:${randomBytes(8).toString('hex')}`
   const preAdmissionKey = `host-artifact-pre-admission:user-${randomBytes(8).toString('hex')}`
+  const sandboxUserA = `user-${randomBytes(8).toString('hex')}`
+  const sandboxUserB = `user-${randomBytes(8).toString('hex')}`
+  const sandboxTokenVendKey = `sandbox-oauth-token-vend:${sandboxUserA}`
+  const sandboxDisconnectKey = `sandbox-oauth-grant-disconnect:${sandboxUserA}`
+  const sandboxOtherUserKey = `sandbox-oauth-token-vend:${sandboxUserB}`
   const messageSubject = `user-${randomBytes(8).toString('hex')}`
   const messageAdmissionKey = hostMessageAdmissionBucketKey(messageSubject)
+  const hostRpcSubject = `user-${randomBytes(8).toString('hex')}`
+  const hostRpcOtherSubject = `user-${randomBytes(8).toString('hex')}`
+  const hostRpcKey = hostRpcAdmissionBucketKey(hostRpcSubject)
+  const hostRpcOtherKey = hostRpcAdmissionBucketKey(hostRpcOtherSubject)
   const connectionString = databaseUrl(
     adminUrl ?? 'postgresql://postgres@127.0.0.1/postgres',
     database
@@ -47,7 +59,16 @@ describeRealPostgres('rate limiter atomicity on real PostgreSQL', () => {
 
   afterAll(async () => {
     await pool?.query('DELETE FROM rate_limit_buckets WHERE bucket_key = ANY($1)', [
-      [bucketKey, preAdmissionKey, messageAdmissionKey],
+      [
+        bucketKey,
+        preAdmissionKey,
+        sandboxTokenVendKey,
+        sandboxDisconnectKey,
+        sandboxOtherUserKey,
+        messageAdmissionKey,
+        hostRpcKey,
+        hostRpcOtherKey,
+      ],
     ])
     await pool?.end()
     if (!adminPool) return
@@ -113,6 +134,62 @@ describeRealPostgres('rate limiter atomicity on real PostgreSQL', () => {
     }
   })
 
+  it('shares each Sandbox OAuth user-operation budget across independent sessions', async () => {
+    const clients = [await pool.connect(), await pool.connect()]
+    try {
+      const tokenResults = []
+      for (let requestIndex = 0; requestIndex < 11; requestIndex += 1) {
+        const client = clients[requestIndex % clients.length]
+        tokenResults.push(
+          await checkAndIncrementWithQuery(
+            (text, values) => client.query(text, values),
+            sandboxTokenVendKey,
+            10,
+            windowStartMs,
+            1
+          )
+        )
+      }
+
+      expect(tokenResults.slice(0, 10).every(result => result.allowed)).toBe(true)
+      expect(tokenResults[10]).toMatchObject({ allowed: false, count: 11, remaining: 0 })
+
+      const disconnect = await checkAndIncrementWithQuery(
+        (text, values) => clients[0].query(text, values),
+        sandboxDisconnectKey,
+        10,
+        windowStartMs,
+        1
+      )
+      const otherUser = await checkAndIncrementWithQuery(
+        (text, values) => clients[1].query(text, values),
+        sandboxOtherUserKey,
+        10,
+        windowStartMs,
+        1
+      )
+      expect(disconnect).toMatchObject({ allowed: true, count: 1, remaining: 9 })
+      expect(otherUser).toMatchObject({ allowed: true, count: 1, remaining: 9 })
+
+      const persisted = await pool.query<{ bucket_key: string; count: string }>(
+        `SELECT bucket_key, count
+           FROM rate_limit_buckets
+          WHERE bucket_key = ANY($1)
+          ORDER BY bucket_key`,
+        [[sandboxTokenVendKey, sandboxDisconnectKey, sandboxOtherUserKey]]
+      )
+      expect(
+        Object.fromEntries(persisted.rows.map(row => [row.bucket_key, Number(row.count)]))
+      ).toEqual({
+        [sandboxDisconnectKey]: 1,
+        [sandboxOtherUserKey]: 1,
+        [sandboxTokenVendKey]: 11,
+      })
+    } finally {
+      clients.forEach(client => client.release())
+    }
+  })
+
   it('enforces Host-message admission atomically across independent PostgreSQL sessions', async () => {
     const clients = [await pool.connect(), await pool.connect()]
     try {
@@ -144,6 +221,65 @@ describeRealPostgres('rate limiter atomicity on real PostgreSQL', () => {
       )
       expect(Number(persisted.rows[0]?.count)).toBe(61)
     } finally {
+      clients.forEach(client => client.release())
+    }
+  })
+
+  it('enforces one strict Host-RPC subject budget across sessions and fixed windows', async () => {
+    const clients = [await pool.connect(), await pool.connect()]
+    const mutableConfig = config as typeof config & { hostRpcAdmissionRlPerMin: number }
+    const originalLimit = mutableConfig.hostRpcAdmissionRlPerMin
+    mutableConfig.hostRpcAdmissionRlPerMin = 3
+    const admitOn = (client: (typeof clients)[number], at = windowStartMs) =>
+      admitHostRpc(hostRpcSubject, (key, limit) =>
+        checkAndIncrementStrictWithQuery(
+          (text, values) => client.query(text, values),
+          key,
+          limit,
+          at,
+          1
+        )
+      )
+    try {
+      const results = []
+      for (let index = 0; index < 4; index += 1) {
+        results.push(await admitOn(clients[index % clients.length]))
+      }
+      expect(results.map(result => result.status)).toEqual([
+        'allowed',
+        'allowed',
+        'allowed',
+        'limited',
+      ])
+      expect(results.filter(result => result.status === 'allowed')).toHaveLength(3)
+      expect(results.filter(result => result.status === 'limited')).toHaveLength(1)
+
+      const persisted = await pool.query<{ count: string }>(
+        'SELECT count FROM rate_limit_buckets WHERE bucket_key = $1 AND window_start_ms = $2',
+        [hostRpcKey, windowStartMs]
+      )
+      expect(Number(persisted.rows[0]?.count)).toBe(4)
+
+      const otherSubject = await admitHostRpc(hostRpcOtherSubject, (key, limit) =>
+        checkAndIncrementStrictWithQuery(
+          (text, values) => clients[1].query(text, values),
+          key,
+          limit,
+          windowStartMs,
+          1
+        )
+      )
+      expect(otherSubject.status).toBe('allowed')
+
+      const nextWindow = await admitOn(clients[0], windowStartMs + 60_000)
+      expect(nextWindow).toMatchObject({ status: 'allowed', check: { count: 1 } })
+
+      const failedStore = await admitHostRpc(hostRpcSubject, async () => {
+        throw new Error('store unavailable')
+      })
+      expect(failedStore).toEqual({ status: 'unavailable' })
+    } finally {
+      mutableConfig.hostRpcAdmissionRlPerMin = originalLimit
       clients.forEach(client => client.release())
     }
   })

@@ -10,6 +10,7 @@ HCC_OLD="aa11bb22cc33dd44ee55ff6677889900aa11bb22cc33dd44ee55ff6677889900"
 HCC_NEW="ff00ee11dd22cc33bb44aa5566778899ff00ee11dd22cc33bb44aa5566778899"
 WRC_OLD="1111111111111111111111111111111111111111111111111111111111111111"
 WRC_NEW="2222222222222222222222222222222222222222222222222222222222222222"
+EDGE_OLD="3333333333333333333333333333333333333333333333333333333333333333"
 
 cat > "$TMP/bin/openssl" <<'SH'
 #!/usr/bin/env bash
@@ -67,10 +68,24 @@ case "${args[0]:-}" in
             printf '%s' "$KUBE_SECRET_WRC" | base64 | tr -d '\n'
           fi
         fi
+        if [[ "$ns" == "rpc-proxy" && "${args[2]:-}" == "rpc-proxy-secrets" && \
+              "$jsonpath" == *RPC_PROXY_MCP_HOST_EDGE_TOKEN* && -n "${KUBE_SECRET_RPC_EDGE:-}" ]]; then
+          printf '%s' "$KUBE_SECRET_RPC_EDGE" | base64 | tr -d '\n'
+        fi
+        if [[ "$ns" == "mcp-host" && "${args[2]:-}" == "rpc-proxy-edge-credentials" && \
+              "$jsonpath" == *RPC_PROXY_MCP_HOST_EDGE_TOKEN* && -n "${KUBE_SECRET_MCP_EDGE:-}" ]]; then
+          printf '%s' "$KUBE_SECRET_MCP_EDGE" | base64 | tr -d '\n'
+        fi
         exit 0
         ;;
-      deploy|deployment)
+      deploy|deployment|deployments)
         if [[ "${KUBE_DEPLOY_EXISTS:-}" == "1" ]]; then
+          if [[ "${args[1]:-}" == "deployments" ]]; then
+            printf '%s\n' 'deployment.apps/chatllm'
+          fi
+          exit 0
+        fi
+        if [[ "${args[1]:-}" == "deployments" ]]; then
           exit 0
         fi
         exit 1
@@ -85,6 +100,22 @@ case "${args[0]:-}" in
       for ((i=0; i<${#args[@]}; i++)); do
         if [[ "${args[$i]}" == "-p" ]]; then
           printf '%s' "${args[$((i+1))]}" > "${CAPTURE_FILE:?}"
+        fi
+      done
+    fi
+    if [[ "$ns" == "rpc-proxy" && "${args[1]:-}" == "secret" && \
+          "${args[2]:-}" == "rpc-proxy-secrets" && -n "${RPC_CAPTURE_FILE:-}" ]]; then
+      for ((i=0; i<${#args[@]}; i++)); do
+        if [[ "${args[$i]}" == "-p" ]]; then
+          printf '%s' "${args[$((i+1))]}" > "$RPC_CAPTURE_FILE"
+        fi
+      done
+    fi
+    if [[ "$ns" == "mcp-host" && "${args[1]:-}" == "secret" && \
+          "${args[2]:-}" == "rpc-proxy-edge-credentials" && -n "${EDGE_CAPTURE_FILE:-}" ]]; then
+      for ((i=0; i<${#args[@]}; i++)); do
+        if [[ "${args[$i]}" == "-p" ]]; then
+          printf '%s' "${args[$((i+1))]}" > "$EDGE_CAPTURE_FILE"
         fi
       done
     fi
@@ -109,7 +140,7 @@ printf '%s\n' 'DEV_HMAC_SECRET="dev-member-registration-hmac-secret"' \
 assert_no_secret_material() {
   local log
   for log in "$TMP/stdout" "$TMP/stderr"; do
-    if grep -E 'aa11bb22cc33dd44|ff00ee11dd22cc33|1111111111111111|2222222222222222|0123456789abcdef0123456789abcdef' "$log" >/dev/null; then
+    if grep -E 'aa11bb22cc33dd44|ff00ee11dd22cc33|1111111111111111|2222222222222222|3333333333333333|4444444444444444|0123456789abcdef0123456789abcdef' "$log" >/dev/null; then
       echo "secret material leaked into $log" >&2
       cat "$log" >&2
       exit 1
@@ -121,10 +152,15 @@ run_apply() {
   local context="$1" capture="$2"
   shift 2
   : > "$TMP/openssl-rand-count"
-  CAPTURE_FILE="$capture" PATH="$TMP/bin:$PATH" CONTEXT="$context" \
+  if ! CAPTURE_FILE="$capture" RPC_CAPTURE_FILE="$TMP/rpc-secret.json" \
+    EDGE_CAPTURE_FILE="$TMP/mcp-host-edge-secret.json" PATH="$TMP/bin:$PATH" CONTEXT="$context" \
     OPENSSL_RAND_COUNT_FILE="$TMP/openssl-rand-count" \
     CLERUM_PROJECT_DIR="$TMP/sibling" "$@" \
-    bash "$ROOT/deploy/scripts/apply-inter-service-tokens.sh" >"$TMP/stdout" 2>"$TMP/stderr"
+    bash "$ROOT/deploy/scripts/apply-inter-service-tokens.sh" >"$TMP/stdout" 2>"$TMP/stderr"; then
+    cat "$TMP/stderr" >&2
+    cat "$TMP/stdout" >&2
+    return 1
+  fi
 }
 
 run_hcc_apply() {
@@ -132,7 +168,8 @@ run_hcc_apply() {
   shift
   : > "$rollout"
   : > "$TMP/openssl-rand-count"
-  CAPTURE_FILE="$TMP/hcc-capture.json" ROLLOUT_LOG="$rollout" KUBE_DEPLOY_EXISTS=1 \
+  CAPTURE_FILE="$TMP/hcc-capture.json" RPC_CAPTURE_FILE="$TMP/rpc-secret.json" \
+    EDGE_CAPTURE_FILE="$TMP/mcp-host-edge-secret.json" ROLLOUT_LOG="$rollout" KUBE_DEPLOY_EXISTS=1 \
     PATH="$TMP/bin:$PATH" CONTEXT=gke-dev \
     OPENSSL_RAND_COUNT_FILE="$TMP/openssl-rand-count" \
     CLERUM_PROJECT_DIR="$TMP/sibling" "$@" \
@@ -150,6 +187,21 @@ minikube_capture="$TMP/minikube-control-api-internal-tokens.json"
 run_apply clerum-codex-member-registration-test "$minikube_capture" env
 jq -e '.stringData.CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET and .stringData.CONTROL_API_INTERNAL_TOKENS and .stringData.CONTROL_API_INTERNAL_SERVICE_TOKENS' "$minikube_capture" >/dev/null
 jq -e '.stringData.CONTROL_API_INTERNAL_SERVICE_TOKENS | contains("codex-llm-proxy=")' "$minikube_capture" >/dev/null
+jq -e '.stringData.CONTROL_API_INTERNAL_SERVICE_TOKENS | contains("gfs-controller=")' "$minikube_capture" >/dev/null
+jq -e '.stringData.CONTROL_API_INTERNAL_SERVICE_TOKENS | contains("workspace-files-controller=")' "$minikube_capture" >/dev/null
+jq -e '.stringData.RPC_PROXY_MCP_HOST_EDGE_TOKEN | test("^[0-9a-f]{64}$")' "$TMP/rpc-secret.json" >/dev/null
+jq -e '.stringData.RPC_PROXY_MCP_HOST_EDGE_TOKEN | test("^[0-9a-f]{64}$")' "$TMP/mcp-host-edge-secret.json" >/dev/null
+test "$(jq -r '.stringData.RPC_PROXY_MCP_HOST_EDGE_TOKEN' "$TMP/rpc-secret.json")" = \
+  "$(jq -r '.stringData.RPC_PROXY_MCP_HOST_EDGE_TOKEN' "$TMP/mcp-host-edge-secret.json")"
+
+duplicate_capture="$TMP/duplicate-filesystem-token.json"
+if run_apply clerum-codex-member-registration-test "$duplicate_capture" env \
+  CONTROL_API_INTERNAL_TOKEN_GFSC=duplicate-filesystem-controller-token \
+  CONTROL_API_INTERNAL_TOKEN_WFC=duplicate-filesystem-controller-token; then
+  echo "expected duplicate filesystem controller identities to fail" >&2
+  exit 1
+fi
+grep -q 'filesystem controller service tokens must be distinct' "$TMP/stderr"
 jq -e '.stringData.CONTROL_API_INTERNAL_SERVICE_TOKENS | contains("grok-llm-proxy=")' "$minikube_capture" >/dev/null
 
 branch_profile_capture="$TMP/branch-profile-control-api-internal-tokens.json"
@@ -173,8 +225,10 @@ jq -e '.stringData.CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET == "test-member-r
 
 unchanged_rollout="$TMP/rollout-unchanged.log"
 KUBE_SECRET_HCC="$HCC_OLD" KUBE_SECRET_WRC="$WRC_OLD" \
+KUBE_SECRET_RPC_EDGE="$EDGE_OLD" KUBE_SECRET_MCP_EDGE="$EDGE_OLD" \
   run_hcc_apply "$unchanged_rollout" env \
   CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET=test-member-registration-hmac \
+  RPC_PROXY_MCP_HOST_EDGE_TOKEN="$EDGE_OLD" \
   INTERNAL_CONTROL_JWT_HCC_HMAC_SECRET="$HCC_OLD" \
   INTERNAL_CONTROL_JWT_WRC_HMAC_SECRET="$WRC_OLD"
 grep -q 'Skipping rollout of control-plane/host-context-controller: hcc-hmac unchanged' "$TMP/stderr"
@@ -190,6 +244,7 @@ assert_no_secret_material
 # Both resolve_token and HCC_HMAC_BEFORE read KUBE_SECRET_HCC.
 preserve_rollout="$TMP/rollout-preserve-or-generate.log"
 KUBE_SECRET_HCC="$HCC_OLD" KUBE_SECRET_WRC="$WRC_OLD" \
+KUBE_SECRET_RPC_EDGE="$EDGE_OLD" KUBE_SECRET_MCP_EDGE="$EDGE_OLD" \
   run_hcc_apply "$preserve_rollout" env \
   -u INTERNAL_CONTROL_JWT_HCC_HMAC_SECRET \
   -u INTERNAL_CONTROL_JWT_WRC_HMAC_SECRET \
@@ -205,8 +260,10 @@ assert_no_secret_material
 
 changed_rollout="$TMP/rollout-changed.log"
 KUBE_SECRET_HCC="$HCC_OLD" KUBE_SECRET_WRC="$WRC_OLD" \
+KUBE_SECRET_RPC_EDGE="$EDGE_OLD" KUBE_SECRET_MCP_EDGE="$EDGE_OLD" \
   run_hcc_apply "$changed_rollout" env \
   CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET=test-member-registration-hmac \
+  RPC_PROXY_MCP_HOST_EDGE_TOKEN="$EDGE_OLD" \
   INTERNAL_CONTROL_JWT_HCC_HMAC_SECRET="$HCC_NEW" \
   INTERNAL_CONTROL_JWT_WRC_HMAC_SECRET="$WRC_OLD"
 if grep -q 'hcc-hmac unchanged' "$TMP/stderr"; then
@@ -219,8 +276,10 @@ assert_no_secret_material
 
 wrc_only_rollout="$TMP/rollout-wrc-only.log"
 KUBE_SECRET_HCC="$HCC_OLD" KUBE_SECRET_WRC="$WRC_OLD" \
+KUBE_SECRET_RPC_EDGE="$EDGE_OLD" KUBE_SECRET_MCP_EDGE="$EDGE_OLD" \
   run_hcc_apply "$wrc_only_rollout" env \
   CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET=test-member-registration-hmac \
+  RPC_PROXY_MCP_HOST_EDGE_TOKEN="$EDGE_OLD" \
   INTERNAL_CONTROL_JWT_HCC_HMAC_SECRET="$HCC_OLD" \
   INTERNAL_CONTROL_JWT_WRC_HMAC_SECRET="$WRC_NEW"
 grep -q 'Skipping rollout of control-plane/host-context-controller: hcc-hmac unchanged' "$TMP/stderr"
@@ -242,9 +301,11 @@ assert_no_secret_material
 
 force_rollout="$TMP/rollout-force.log"
 KUBE_SECRET_HCC="$HCC_OLD" KUBE_SECRET_WRC="$WRC_OLD" \
+KUBE_SECRET_RPC_EDGE="$EDGE_OLD" KUBE_SECRET_MCP_EDGE="$EDGE_OLD" \
   run_hcc_apply "$force_rollout" env \
   FORCE_CONSUMER_RESTART=true \
   CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET=test-member-registration-hmac \
+  RPC_PROXY_MCP_HOST_EDGE_TOKEN="$EDGE_OLD" \
   INTERNAL_CONTROL_JWT_HCC_HMAC_SECRET="$HCC_OLD" \
   INTERNAL_CONTROL_JWT_WRC_HMAC_SECRET="$WRC_OLD"
 if grep -q 'hcc-hmac unchanged' "$TMP/stderr"; then
@@ -253,6 +314,18 @@ if grep -q 'hcc-hmac unchanged' "$TMP/stderr"; then
 fi
 grep -q 'Rolling deployment control-plane/host-context-controller' "$TMP/stderr"
 grep -q 'host-context-controller' "$force_rollout"
+assert_no_secret_material
+
+edge_rotation_rollout="$TMP/rollout-edge-token-rotation.log"
+KUBE_SECRET_HCC="$HCC_OLD" KUBE_SECRET_WRC="$WRC_OLD" \
+KUBE_SECRET_RPC_EDGE="$EDGE_OLD" KUBE_SECRET_MCP_EDGE="$EDGE_OLD" \
+  run_hcc_apply "$edge_rotation_rollout" env \
+  CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET=test-member-registration-hmac \
+  RPC_PROXY_MCP_HOST_EDGE_TOKEN=4444444444444444444444444444444444444444444444444444444444444444 \
+  INTERNAL_CONTROL_JWT_HCC_HMAC_SECRET="$HCC_OLD" \
+  INTERNAL_CONTROL_JWT_WRC_HMAC_SECRET="$WRC_OLD"
+grep -q 'Rolling HCC-managed MCP Host deployments' "$TMP/stderr"
+grep -q 'mcp-host .*rollout restart deployments' "$edge_rotation_rollout"
 assert_no_secret_material
 
 echo "inter-service token patch tests passed"

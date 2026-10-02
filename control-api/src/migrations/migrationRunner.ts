@@ -1,6 +1,6 @@
 import type { DbClient } from '../db.js'
 import { migrationSessionBoundsSql } from './migrationExecutionPolicy.js'
-import { preparePr1Migration } from './pr1OnlineIndexPlan.js'
+import { hasPostSchemaOnlineIndexes, preparePr1Migration } from './pr1OnlineIndexPlan.js'
 
 export const PR1_MIGRATION_VERSIONS = Object.freeze([
   '0125_user_access_foundation',
@@ -33,11 +33,22 @@ export const DEV_POST_0106_MIGRATION_VERSIONS = Object.freeze([
   '0124_entity_change_definer_search_path',
 ] as const)
 
+export const PR2_MIGRATION_VERSIONS = Object.freeze([
+  '0131_workflow_authority_bindings',
+  '0132_gfs_upload_authority_bindings',
+  '0133_pr2_readiness_evidence',
+  '0134_pr2_runtime_privileges',
+  '0135_workflow_recipe_authority_entity',
+  '0136_workflow_run_failure_reason',
+  '0137_r31_runtime_behavior_sources',
+])
+
 const NON_PR1_POST_0106_MIGRATION_VERSIONS = new Set<string>(DEV_POST_0106_MIGRATION_VERSIONS)
 
 const CLASSIFIED_POST_0106_MIGRATION_VERSIONS = Object.freeze([
   ...DEV_POST_0106_MIGRATION_VERSIONS,
   ...PR1_MIGRATION_VERSIONS,
+  ...PR2_MIGRATION_VERSIONS,
 ] as const)
 
 export type MigrationDescriptor = {
@@ -82,7 +93,7 @@ export async function applyPendingPr1Migrations({
   recordMigration,
 }: ApplyPendingPr1MigrationsInput): Promise<void> {
   const byVersion = new Map(migrations.map(migration => [migration.version, migration]))
-  const expected = new Set<string>(PR1_MIGRATION_VERSIONS)
+  const expected = new Set<string>([...PR1_MIGRATION_VERSIONS, ...PR2_MIGRATION_VERSIONS])
   const unclassified = migrations.filter(
     migration =>
       migration.version > '0106_oauth_grants_owner_generalization' &&
@@ -104,8 +115,17 @@ export async function applyPendingPr1Migrations({
     const acceptedLegacyVersion = migration.legacyVersions?.find(alias =>
       appliedVersions.has(alias)
     )
-    if (isPr1Migration && !acceptedLegacyVersion) {
+    const hasPostSchemaIndexes = hasPostSchemaOnlineIndexes(version)
+    if (isPr1Migration && !acceptedLegacyVersion && !hasPostSchemaIndexes) {
       await preparePr1Migration(db, version)
+    }
+
+    if (isPr1Migration && !acceptedLegacyVersion && hasPostSchemaIndexes) {
+      await runBoundedTransaction(db, async () => migration.apply(db))
+      await preparePr1Migration(db, version, 'after-schema')
+      await runBoundedTransaction(db, async () => recordMigration(db, version))
+      appliedVersions.add(version)
+      continue
     }
 
     await runBoundedTransaction(db, async () => {
