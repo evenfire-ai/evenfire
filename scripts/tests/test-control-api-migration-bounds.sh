@@ -174,6 +174,16 @@ run_fixture() {
     bash "$DEPLOY_FILE" --overlay "$overlay" 2>&1
 }
 
+expect_fixture_failure() {
+  local description="$1"
+  shift
+  local output
+  if output="$("$@" 2>&1)"; then
+    fail "$description unexpectedly succeeded"
+  fi
+  printf '%s' "$output"
+}
+
 run_fixture success >/dev/null
 ruby -rjson -e '
   job = JSON.parse(File.read(ARGV.fetch(0)))
@@ -261,7 +271,8 @@ if run_fixture active-jobspec-mismatch >/dev/null; then
 fi
 mv "$fixture_root/jobspec-matched.json" "$capture"
 
-status_output="$(run_fixture active-status-error || true)"
+status_output="$(expect_fixture_failure 'existing migration Job status check' \
+  run_fixture active-status-error)"
 [[ "$status_output" == *'could not determine existing migration Job status'* ]] || \
   fail "existing migration Job status error did not fail closed"
 
@@ -279,7 +290,8 @@ fi
 mv "$fixture_root/race-matched.json" "$capture"
 
 : >"$log_file"
-timeout_output="$(run_fixture timeout-cleanup-succeeds || true)"
+timeout_output="$(expect_fixture_failure 'migration client timeout' \
+  run_fixture timeout-cleanup-succeeds)"
 grep -q 'delete job control-api-db-migrate.*--cascade=foreground.*--wait=false' "$log_file" || \
   fail "client timeout did not issue foreground Job deletion"
 grep -Eq 'wait --for=delete --timeout=(59|60)s job/control-api-db-migrate' "$log_file" || \
@@ -290,20 +302,24 @@ grep -Eq 'wait --for=delete --timeout=(59|60)s pod -l job-name=control-api-db-mi
 [[ "$timeout_output" != *'fixture-timeout-cleanup-succeeds'* ]] || \
   fail "migration diagnostics exposed a secret"
 
-cleanup_output="$(run_fixture timeout-cleanup-fails || true)"
+cleanup_output="$(expect_fixture_failure 'unproven migration cleanup' \
+  run_fixture timeout-cleanup-fails)"
 [[ "$cleanup_output" == *'cleanup could not prove Job and pod termination within 60s'* ]] || \
   fail "unproven migration Job cleanup did not fail distinctly"
 
-delete_output="$(run_fixture timeout-delete-fails || true)"
+delete_output="$(expect_fixture_failure 'failed migration Job delete' \
+  run_fixture timeout-delete-fails)"
 [[ "$delete_output" == *'cleanup could not prove Job and pod termination within 60s'* ]] || \
   fail "failed migration Job delete was masked"
 
-job_wait_output="$(run_fixture timeout-job-wait-fails || true)"
+job_wait_output="$(expect_fixture_failure 'failed migration Job deletion proof' \
+  run_fixture timeout-job-wait-fails)"
 [[ "$job_wait_output" == *'cleanup could not prove Job and pod termination within 60s'* ]] || \
   fail "failed migration Job deletion proof was masked"
 
 : >"$log_file"
-run_fixture timeout-shared-deadline >/dev/null 2>&1 || true
+expect_fixture_failure 'shared migration cleanup deadline' \
+  run_fixture timeout-shared-deadline >/dev/null 2>&1
 job_timeout="$(sed -nE 's/.*--for=delete --timeout=([0-9]+)s job\/.*/\1/p' "$log_file" | tail -1)"
 pod_timeout="$(sed -nE 's/.*--for=delete --timeout=([0-9]+)s pod .*/\1/p' "$log_file" | tail -1)"
 [ -n "$job_timeout" ] && [ -n "$pod_timeout" ] && [ "$pod_timeout" -lt "$job_timeout" ] || \
