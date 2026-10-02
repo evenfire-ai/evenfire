@@ -4,6 +4,7 @@ export type TabBarOption<T extends string> = {
   disabled?: boolean
   href?: string
   label: ReactNode
+  onLinkActivate?: () => void
   value: T
 }
 
