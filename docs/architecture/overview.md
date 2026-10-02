@@ -1652,7 +1652,7 @@ All three calls carry the `x-clerum-edge-*` caller headers (`x-clerum-edge-calle
 
 Approving a tool runs that call only. It does not allowlist the rest of the turn or every tool on the same MCP server. A later call, including the same tool with different arguments, asks again.
 
-`/approve always` (and the desktop **Always approve** button) stores that exact tool name for later calls in the conversation. `/deny` records that exact tool name. The denial stays in effect until the same user approves that tool, including after the host restarts.
+`/approve always` (and the desktop **Always approve** button) stores that exact tool name for later calls in the conversation. `/deny` records that exact tool name. The denial stays in effect until the same user approves that tool, including after the host restarts. Denials apply to calls made in that conversation only: a workflow triggered from it does not inherit them, and its steps follow the workflow's own tool scoping.
 
 | Scenario                                                  | Approvals required                    |
 | --------------------------------------------------------- | ------------------------------------- |
