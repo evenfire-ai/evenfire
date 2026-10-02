@@ -78,7 +78,9 @@ export function createApp(gateway: K8sGateway) {
   })
   const app = express()
   app.set('trust proxy', 1)
-  const jsonBodyParser = express.json({ limit: config.jsonBodyLimit })
+  // Reject compressed JSON before inflation: this parser runs before
+  // authentication, and a small encoded body can allocate a much larger one.
+  const jsonBodyParser = express.json({ limit: config.jsonBodyLimit, inflate: false })
   const tracingInFlightLimiter = createTracingInFlightLimiter(getTracingMaxInFlight())
   app.use((req, res, next) => {
     if (req.method === 'POST' && req.path.startsWith(TRACING_INTERNAL_PATH_PREFIX)) {
@@ -93,7 +95,9 @@ export function createApp(gateway: K8sGateway) {
       next()
       return
     }
-    if (req.method === 'POST' && LLM_AUTHORIZE_PATH.test(req.path)) {
+    // Express permits repeated separators at router mount boundaries. Match
+    // the exemption on the normalized path without changing request routing.
+    if (req.method === 'POST' && LLM_AUTHORIZE_PATH.test(req.path.replace(/\/+/g, '/'))) {
       next()
       return
     }

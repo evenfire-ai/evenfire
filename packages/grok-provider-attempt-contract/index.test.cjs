@@ -1552,10 +1552,10 @@ test('parity: identical verdicts across both visualPayload copies, dimension lim
   assert.equal(codexVisualPayload.inspectVisualImage(large).ok, false)
 })
 
-// Every branch of the copied container readers, one input each. Both copies
-// must return the exact expected verdict, so a mutant cannot survive by
-// changing the two copies the same way or by changing only one.
-test('parity: every container-reader branch returns the same exact verdict in both copies', () => {
+// Exact verdicts for the shared container-reader branches represented below.
+// Both copies must agree with the golden result, so these reader paths cannot
+// drift silently; this corpus is not a claim about future reader branches.
+test('parity: shared container-reader branches return the same exact verdict in both copies', () => {
   const u32 = value => [(value >>> 24) & 255, (value >>> 16) & 255, (value >>> 8) & 255, value & 255]
   // CRCs are not verified by either reader, so they are zero here.
   const chunk = (type, data = []) => [...u32(data.length), ...Buffer.from(type, 'latin1'), ...data, 0, 0, 0, 0]
@@ -1581,6 +1581,16 @@ test('parity: every container-reader branch returns the same exact verdict in bo
     ['png, well formed', png(validPng), accepted(validPng.length, 3, 2)],
     ['png, zero width', png([...SIG, ...ihdr(0, 2), ...idat, ...iend]), invalid('PNG dimensions must be positive')],
     ['png, zero height', png([...SIG, ...ihdr(3, 0), ...idat, ...iend]), invalid('PNG dimensions must be positive')],
+    [
+      'png, 14-byte IHDR',
+      png([
+        ...SIG,
+        ...chunk('IHDR', [...u32(3), ...u32(2), 8, 6, 0, 0, 0, 0]),
+        ...idat,
+        ...iend,
+      ]),
+      invalid('PNG first chunk must be a 13-byte IHDR'),
+    ],
     [
       'png, first chunk is not IHDR',
       png([...SIG, ...idat, ...iend]),
@@ -1625,6 +1635,21 @@ test('parity: every container-reader branch returns the same exact verdict in bo
       'jpeg, byte where a marker belongs',
       jpeg([...SOI, 0x00, ...sof(0xc0, 8, 6), ...sos, ...scan, ...EOI]),
       invalid('JPEG marker framing is malformed'),
+    ],
+    [
+      'jpeg, legal fill bytes before a marker',
+      jpeg([...SOI, 0xff, 0xff, ...sof(0xc0, 8, 6), ...sos, ...scan, ...EOI]),
+      accepted(validJpeg.length + 2, 8, 6),
+    ],
+    [
+      'jpeg, standalone temporary marker',
+      jpeg([...SOI, 0xff, 0x01, ...sof(0xc0, 8, 6), ...sos, ...scan, ...EOI]),
+      accepted(validJpeg.length + 2, 8, 6),
+    ],
+    [
+      'jpeg, standalone restart marker 7',
+      jpeg([...SOI, 0xff, 0xd7, ...sof(0xc0, 8, 6), ...sos, ...scan, ...EOI]),
+      accepted(validJpeg.length + 2, 8, 6),
     ],
     ['jpeg, short segment', jpeg([...SOI, 0xff, 0xe0, 0x00, 0x01, ...EOI]), invalid('JPEG segment is truncated')],
     [

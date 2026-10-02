@@ -677,8 +677,8 @@ describe('authorize raw-body scan before JSON.parse', () => {
   })
 
   it('answers 400 to a 5000-deep and a 150000-deep body without recursion or the authorizer', async () => {
-    // JSON.stringify overflows the stack on a body this deep, so the scan is
-    // the only bound: the authorizer no longer checks nesting itself.
+    // JSON.stringify overflows the stack on a body this deep. The raw scan
+    // refuses it before parsing; the authorizer also guards direct calls.
     await withRoute(async url => {
       for (const depth of [5000, 150000]) {
         const response = await fetch(url, {

@@ -1,15 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { config } from '../src/config.js'
 import {
+  LlmProviderAttemptAuthorizeError,
   type LlmProviderAttemptAuthorizerDeps,
   authorizeLlmProviderAttempt,
 } from '../src/services/llmProviderAttemptAuthorizer.js'
 import type { McpHostAccessClaims } from '../src/utils/auth/mcpHostJwtToken.js'
 
-// The contracts cap nesting inside the authorizer (64 containers in tool
-// parameters and tool-call arguments). The route's raw-body scan bounds the
-// whole body at 70 containers before JSON.parse; its end-to-end depth test is
-// in routes.mcp-host.llmProviderAttempts.test.ts.
+// The contracts cap free-form trees at 64 containers. The authorizer also
+// guards the complete body before serialization, including direct service
+// calls that never pass through the route's raw-body scan. The deepest accepted
+// assistant tool-call arguments sit six containers below the body root.
 
 const PROVIDERS = [
   {
@@ -80,6 +81,27 @@ describe('authorizeLlmProviderAttempt contract nesting cap', () => {
   })
 
   for (const p of PROVIDERS) {
+    it(`rejects 100000-deep ${p.provider} bodies before serialization and assignment lookup`, async () => {
+      const bodies = [
+        wireBody(p, nestedObjects(100_000)),
+        wireBody(p, '{"type":"object"}', `,"extra":${nestedObjects(100_000)}`),
+      ]
+      const stringify = vi.spyOn(JSON, 'stringify')
+      try {
+        for (const body of bodies) {
+          const current = deps()
+          const attempt = authorizeLlmProviderAttempt(claims(p.scope), body, current)
+          await expect(attempt).rejects.toBeInstanceOf(LlmProviderAttemptAuthorizeError)
+          await expect(attempt).rejects.toMatchObject({ code: 'invalid_request' })
+          await expect(attempt).rejects.toThrow(/maximum nesting depth/)
+          expect(stringify).not.toHaveBeenCalledWith(body)
+          expect(current.resolveAssignment).not.toHaveBeenCalled()
+        }
+      } finally {
+        stringify.mockRestore()
+      }
+    })
+
     it(`lets a ${p.provider} request with 64-deep tool parameters past the contract cap`, async () => {
       const body = wireBody(p, nestedObjects(64))
       const current = deps()

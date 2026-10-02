@@ -6,5 +6,65 @@
   {
     "suite": "routes.mcp-host.llmProviderAttempts.test.ts",
     "fullName": "authorize raw-body scan before JSON.parse preserves the module logger binding and request correlation on body refusals"
+  },
+  {
+    "suite": "routes.mcp-host.llmProviderAttempts.createApp.test.ts",
+    "fullName": "createApp authorize parser boundary canonical path codex-subscription checks JWT before parsing malformed, 100000-deep and gzip bodies"
+  },
+  {
+    "suite": "routes.mcp-host.llmProviderAttempts.createApp.test.ts",
+    "fullName": "createApp authorize parser boundary canonical path codex-subscription refuses authenticated over-deep and malformed bodies before authorize and accepts a valid body"
+  },
+  {
+    "suite": "routes.mcp-host.llmProviderAttempts.createApp.test.ts",
+    "fullName": "createApp authorize parser boundary canonical path codex-subscription refuses authenticated gzip before authorize and accepts the same uncompressed body"
+  },
+  {
+    "suite": "routes.mcp-host.llmProviderAttempts.createApp.test.ts",
+    "fullName": "createApp authorize parser boundary canonical path grok-subscription checks JWT before parsing malformed, 100000-deep and gzip bodies"
+  },
+  {
+    "suite": "routes.mcp-host.llmProviderAttempts.createApp.test.ts",
+    "fullName": "createApp authorize parser boundary canonical path grok-subscription refuses authenticated over-deep and malformed bodies before authorize and accepts a valid body"
+  },
+  {
+    "suite": "routes.mcp-host.llmProviderAttempts.createApp.test.ts",
+    "fullName": "createApp authorize parser boundary canonical path grok-subscription refuses authenticated gzip before authorize and accepts the same uncompressed body"
+  },
+  {
+    "suite": "routes.mcp-host.llmProviderAttempts.createApp.test.ts",
+    "fullName": "createApp authorize parser boundary double-slash path codex-subscription checks JWT before parsing malformed, 100000-deep and gzip bodies"
+  },
+  {
+    "suite": "routes.mcp-host.llmProviderAttempts.createApp.test.ts",
+    "fullName": "createApp authorize parser boundary double-slash path codex-subscription refuses authenticated over-deep and malformed bodies before authorize and accepts a valid body"
+  },
+  {
+    "suite": "routes.mcp-host.llmProviderAttempts.createApp.test.ts",
+    "fullName": "createApp authorize parser boundary double-slash path codex-subscription refuses authenticated gzip before authorize and accepts the same uncompressed body"
+  },
+  {
+    "suite": "routes.mcp-host.llmProviderAttempts.createApp.test.ts",
+    "fullName": "createApp authorize parser boundary double-slash path grok-subscription checks JWT before parsing malformed, 100000-deep and gzip bodies"
+  },
+  {
+    "suite": "routes.mcp-host.llmProviderAttempts.createApp.test.ts",
+    "fullName": "createApp authorize parser boundary double-slash path grok-subscription refuses authenticated over-deep and malformed bodies before authorize and accepts a valid body"
+  },
+  {
+    "suite": "routes.mcp-host.llmProviderAttempts.createApp.test.ts",
+    "fullName": "createApp authorize parser boundary double-slash path grok-subscription refuses authenticated gzip before authorize and accepts the same uncompressed body"
+  },
+  {
+    "suite": "services.llmProviderAttemptAuthorizer.depth.test.ts",
+    "fullName": "authorizeLlmProviderAttempt contract nesting cap rejects 100000-deep codex-subscription bodies before serialization and assignment lookup"
+  },
+  {
+    "suite": "services.llmProviderAttemptAuthorizer.depth.test.ts",
+    "fullName": "authorizeLlmProviderAttempt contract nesting cap rejects 100000-deep grok-subscription bodies before serialization and assignment lookup"
+  },
+  {
+    "suite": "routes.mcp-host.llmProviderAttempts.createApp.test.ts",
+    "fullName": "createApp global JSON encoding refuses compressed JSON before parsing or the public handler and accepts the same uncompressed body"
   }
 ]

@@ -7,6 +7,7 @@ const path = require('node:path')
 const test = require('node:test')
 const zlib = require('node:zlib')
 const contract = require('./index.cjs')
+const visualPayload = require('./visualPayload.cjs')
 const {
   declaredHeaderPng,
   declaredHeaderPngOfSize,
@@ -712,6 +713,47 @@ test('v2 fixture png is a real image: real CRCs and an inflatable scanline strea
   assert.equal(raw.length, height * (1 + width * 3))
   for (let row = 0; row < height; row++) {
     assert.equal(raw[row * (1 + width * 3)], 0, `scanline ${row} filter byte`)
+  }
+})
+
+test('visualPayload: marker-fill and IHDR-length edges return exact verdicts', () => {
+  const u32 = value => [(value >>> 24) & 255, (value >>> 16) & 255, (value >>> 8) & 255, value & 255]
+  // CRCs are zero because this corpus tests container structure, not pixel decoding.
+  const chunk = (type, data = []) => [...u32(data.length), ...Buffer.from(type, 'latin1'), ...data, 0, 0, 0, 0]
+  const SIG = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]
+  const SOI = [0xff, 0xd8]
+  const EOI = [0xff, 0xd9]
+  const sof = [
+    0xff, 0xc0, 0x00, 0x11, 0x08, 0, 6, 0, 8,
+    0x03, 1, 0x11, 0, 2, 0x11, 0, 3, 0x11, 0,
+  ]
+  const sos = [0xff, 0xda, 0x00, 0x0c, 0x03, 1, 0, 2, 0x11, 3, 0x11, 0x00, 0x3f, 0x00]
+  const jpegWithPrefix = prefix => [...SOI, ...prefix, ...sof, ...sos, 0x12, 0x34, ...EOI]
+  const invalid = message => ({ ok: false, code: 'invalid', message })
+  const accepted = (bytes, width, height) => ({ ok: true, value: { bytes, width, height } })
+  const jpegLength = jpegWithPrefix([]).length
+  const corpus = [
+    ['legal FF FF fill before a marker', 'image/jpeg', jpegWithPrefix([0xff, 0xff]), accepted(jpegLength + 2, 8, 6)],
+    ['standalone temporary marker', 'image/jpeg', jpegWithPrefix([0xff, 0x01]), accepted(jpegLength + 2, 8, 6)],
+    ['standalone restart marker 7', 'image/jpeg', jpegWithPrefix([0xff, 0xd7]), accepted(jpegLength + 2, 8, 6)],
+    [
+      'malformed 14-byte IHDR',
+      'image/png',
+      [
+        ...SIG,
+        ...chunk('IHDR', [...u32(3), ...u32(2), 8, 6, 0, 0, 0, 0]),
+        ...chunk('IDAT', [0x78, 0x9c]),
+        ...chunk('IEND'),
+      ],
+      invalid('PNG first chunk must be a 13-byte IHDR'),
+    ],
+  ]
+  for (const [name, mimeType, bytes, expected] of corpus) {
+    assert.deepEqual(
+      visualPayload.inspectVisualImage({ mimeType, data: Buffer.from(bytes).toString('base64') }),
+      expected,
+      name
+    )
   }
 })
 
