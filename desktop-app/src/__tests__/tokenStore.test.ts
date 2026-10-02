@@ -1,4 +1,10 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { mkdtemp, rm } from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
+
+let testHome = ''
+let restoreHomedir: (() => void) | undefined
 
 // In-memory keychain backing the mocked keytar module. Keyed by service:account
 // so per-environment account isolation is directly observable.
@@ -17,8 +23,8 @@ vi.mock('keytar', () => ({
   ),
 }))
 
-// app.isReady()=false + safeStorage unavailable ⇒ the keytar path is the only
-// active store, which is exactly what we want to assert per-env isolation on.
+// app.isReady()=false + safeStorage unavailable keeps keytar in memory and
+// routes plain-file fallback reads under the temporary home directory below.
 vi.mock('electron', () => ({
   app: { isReady: vi.fn(() => false), getPath: vi.fn(() => '/tmp/evenfire-test') },
   safeStorage: { isEncryptionAvailable: vi.fn(() => false) },
@@ -34,6 +40,17 @@ const ENV_B = 'env_b-111111111111'
 const ENV_A_WITH_RPC = 'env_a_rpc-222222222222'
 
 let TokenStore: typeof import('../tokenStore.js').TokenStore
+
+beforeAll(async () => {
+  testHome = await mkdtemp(path.join(os.tmpdir(), 'evenfire-token-store-test-'))
+  const homedirSpy = vi.spyOn(os, 'homedir').mockReturnValue(testHome)
+  restoreHomedir = () => homedirSpy.mockRestore()
+})
+
+afterAll(async () => {
+  restoreHomedir?.()
+  if (testHome) await rm(testHome, { recursive: true, force: true })
+})
 
 beforeEach(async () => {
   keychain.clear()
