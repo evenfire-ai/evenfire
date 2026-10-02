@@ -1,6 +1,11 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import * as k8s from '@kubernetes/client-node'
 import { randomBytes, randomUUID } from 'node:crypto'
+import { once } from 'node:events'
 import { readFileSync } from 'node:fs'
+import { createServer as createHttpServer } from 'node:http'
+import type { Socket } from 'node:net'
+import { setImmediate as nextTurn } from 'node:timers/promises'
 import { Pool } from 'pg'
 import {
   LIMITS as GROK_LIMITS,
@@ -8,7 +13,7 @@ import {
 } from '@clerum/grok-provider-attempt-contract'
 import { LIMITS } from '@clerum/llm-provider-attempt-contract'
 import { config } from '../src/config.js'
-import { initDb } from '../src/db.js'
+import { type DbClient, initDb, withTransaction as withProductionTransaction } from '../src/db.js'
 import { deriveOAuthEncryptionKey } from '../src/oauth/encryption.js'
 import { __resetBudgetCheckCache, evaluateBudgetCheck } from '../src/services/budgets/check.js'
 import { getActiveReservation } from '../src/services/budgets/reservations.js'
@@ -38,7 +43,10 @@ import {
   insertLlmProviderAttempt,
 } from '../src/services/llmProviderAttemptStore.js'
 import { issueRegisteredCodexExecutionTicket } from '../src/services/llmProviderAttemptTicket.js'
+import { ResourceService } from '../src/services/resourceService.js'
 import type { McpHostAccessClaims } from '../src/utils/auth/mcpHostJwtToken.js'
+import { createPostgresCommitReplyBlackhole } from './helpers/realPostgresCancellation.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 // The Grok authorizer signs through this module, not through a dependency, so
 // the Grok envelope test taps the real issuer here: the ticket is registered
@@ -77,6 +85,77 @@ function databaseUrl(baseUrl: string, database: string): string {
 
 function quoteIdent(value: string): string {
   return `"${value.replace(/"/g, '""')}"`
+}
+
+async function cancellationDeadline<T>(promise: Promise<T>): Promise<T> {
+  let timer: NodeJS.Timeout | undefined
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error('authorizer cancellation phase did not complete')),
+          2_000
+        )
+      }),
+    ])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+async function observeCancellation(check: () => Promise<boolean>): Promise<void> {
+  const deadline = Date.now() + 2_000
+  while (!(await check())) {
+    if (Date.now() >= deadline) throw new Error('authorizer physical state did not settle')
+    await nextTurn()
+  }
+}
+
+async function createAssignmentLookupPeer(stall: boolean) {
+  let arrived!: () => void
+  const arrival = new Promise<void>(resolve => {
+    arrived = resolve
+  })
+  const sockets = new Set<Socket>()
+  const server = createHttpServer((req, res) => {
+    arrived()
+    if (stall) return
+    res.setHeader('Content-Type', 'application/json')
+    res.end(JSON.stringify({ metadata: { name: 'research-host' } }))
+  })
+  server.on('connection', socket => {
+    sockets.add(socket)
+    socket.once('close', () => sockets.delete(socket))
+  })
+  server.listen(0, '127.0.0.1')
+  await once(server, 'listening')
+  const address = server.address()
+  if (!address || typeof address === 'string') throw new Error('missing assignment peer address')
+  const kubeconfig = new k8s.KubeConfig()
+  kubeconfig.loadFromOptions({
+    clusters: [
+      { name: 'fixture', server: `http://127.0.0.1:${address.port}`, skipTLSVerify: false },
+    ],
+    users: [{ name: 'fixture' }],
+    contexts: [{ name: 'fixture', cluster: 'fixture', user: 'fixture' }],
+    currentContext: 'fixture',
+  })
+  return {
+    resources: new ResourceService(kubeconfig.makeApiClient(k8s.CustomObjectsApi), 'fixture', {
+      hosts: 'fixture',
+    }),
+    arrived: arrival,
+    recover: () => {
+      stall = false
+    },
+    close: async () => {
+      for (const socket of sockets) socket.destroy()
+      await new Promise<void>((resolve, reject) =>
+        server.close(error => (error ? reject(error) : resolve()))
+      )
+    },
+  }
 }
 
 const REQUEST = {
@@ -155,6 +234,315 @@ describeRealPostgres('Codex provider-attempt authorization on real PostgreSQL', 
       issueTicket: issueRegisteredCodexExecutionTicket,
       ...overrides,
     }
+  }
+
+  function registerProductionCancellationCases(fixture: {
+    provider: 'codex-subscription' | 'grok-subscription'
+    model: string
+    connectionKey: string
+    caller: () => McpHostAccessClaims
+    request: () => Record<string, unknown>
+    readConnection: () => Promise<{
+      id: string
+      catalogRevision: number
+      credentialRevision: number
+      connectionKey: string
+    } | null>
+    policyHash: (connection: {
+      catalogRevision: number
+      credentialRevision: number
+      connectionKey: string
+    }) => string
+  }): void {
+    describe(`${fixture.provider} production cancellation`, () => {
+      async function run(stage: 'assignment' | 'query' | 'commit'): Promise<void> {
+        const invocationId = `actual-cancel-${randomUUID()}`
+        const budgetId = randomUUID()
+        const current = await fixture.readConnection()
+        expect(current).not.toBeNull()
+        const payload = {
+          request: fixture.request(),
+          invocationId,
+          attemptGeneration: 1,
+          providerAttemptIndex: 1,
+          policyRevision: current!.catalogRevision,
+          policyHash: fixture.policyHash(current!),
+        }
+        const observer = new Pool({
+          connectionString,
+          max: 1,
+          connectionTimeoutMillis: 2_000,
+          statement_timeout: 2_000,
+          idleTimeoutMillis: 1_000,
+        })
+        const proxy =
+          stage === 'commit'
+            ? await createPostgresCommitReplyBlackhole(connectionString)
+            : undefined
+        const workPool = new Pool({
+          connectionString: proxy?.connectionString ?? connectionString,
+          ssl: false,
+          max: 1,
+          connectionTimeoutMillis: 2_000,
+          statement_timeout: 15_000,
+          idleTimeoutMillis: 1_000,
+        })
+        const lookup = await createAssignmentLookupPeer(stage === 'assignment')
+        const controller = new AbortController()
+        const reason = Object.assign(new Error('authorize_timeout'), { code: 'authorize_timeout' })
+        const phases: string[] = []
+        let backendPid: number | undefined
+        let attemptId: string | undefined
+        let reservationId: string | undefined
+        let stallQuery = stage === 'query'
+        let settled = false
+        const previousTap = grokTicketTap.afterIssue
+
+        async function counts() {
+          return (
+            await observer.query<{ attempts: number; tickets: number; reservations: number }>(
+              `SELECT
+             (SELECT COUNT(*)::int FROM llm_provider_attempts WHERE invocation_id = $1) AS attempts,
+             (SELECT COUNT(*)::int FROM llm_provider_attempt_tickets t JOIN llm_provider_attempts a
+               ON t.provider_attempt_id = a.id WHERE a.invocation_id = $1) AS tickets,
+             (SELECT COUNT(*)::int FROM budget_pending_reservations WHERE budget_id = $2) AS reservations`,
+              [invocationId, budgetId]
+            )
+          ).rows[0]
+        }
+
+        async function afterRealIssue(
+          db: DbClient,
+          input: { providerAttemptId: string; budgetReservationId: string },
+          issued: { claims: { jti: string } }
+        ): Promise<void> {
+          const registered = await db.query(
+            `SELECT a.provider, a.connection_id, a.budget_reservation_id,
+                    t.jti, t.status AS ticket_status, r.budget_id, r.host_ref
+               FROM llm_provider_attempts a
+               JOIN llm_provider_attempt_tickets t ON t.provider_attempt_id = a.id
+               JOIN budget_pending_reservations r ON r.id::text = a.budget_reservation_id
+              WHERE a.id = $1`,
+            [input.providerAttemptId]
+          )
+          expect(registered.rows).toEqual([
+            {
+              provider: fixture.provider,
+              connection_id: current!.id,
+              budget_reservation_id: input.budgetReservationId,
+              jti: issued.claims.jti,
+              ticket_status: 'issued',
+              budget_id: budgetId,
+              host_ref: fixture.caller().hostRefs[0],
+            },
+          ])
+          attemptId = input.providerAttemptId
+          reservationId = input.budgetReservationId
+          phases.push('ticket_registered')
+          // The real issuer has already signed and registered its ticket. This
+          // native statement supplies a deterministic interruptible phase; no
+          // test barrier resolves the work after cancellation.
+          if (stallQuery) await db.query('SELECT pg_sleep(30)')
+        }
+
+        function productionDeps(signal: AbortSignal): LlmProviderAttemptAuthorizerDeps {
+          if (fixture.provider === 'grok-subscription') {
+            grokTicketTap.afterIssue = async (db, input, issued) => {
+              await afterRealIssue(db, input, issued)
+              return issued
+            }
+          }
+          return testDeps({
+            signal,
+            resolveAssignment: async (_hostRef, forwarded) => {
+              expect(forwarded).toBe(signal)
+              phases.push('assignment')
+              await lookup.resources.getResource('hosts', 'research-host', 'fixture', forwarded)
+              return {
+                liveBrokerProviders: [fixture.provider],
+                liveConnectionRef: fixture.connectionKey,
+              }
+            },
+            withTransaction: async (work, _unused, options) => {
+              // Assert the authorizer's actual forwarding before binding this
+              // fixture database; do not inject a separate cancellation source.
+              expect(options?.signal).toBe(signal)
+              return withProductionTransaction(
+                async tx => {
+                  phases.push('transaction')
+                  const identity = await tx.query('SELECT pg_backend_pid() AS pid')
+                  backendPid = (identity.rows[0] as { pid: number }).pid
+                  return work(tx)
+                },
+                workPool,
+                options
+              )
+            },
+            evaluateBudget: async (...args) => {
+              const result = await evaluateBudgetCheck(...args)
+              expect(result.allowed).toBe(true)
+              expect(result.reservationIds).toHaveLength(1)
+              phases.push('budget_reserved')
+              return result
+            },
+            insertAttempt: async (db, input) => {
+              const attempt = await insertLlmProviderAttempt(db, input)
+              phases.push('attempt_inserted')
+              return attempt
+            },
+            issueTicket: async (db, input) => {
+              const issued = await issueRegisteredCodexExecutionTicket(db, input)
+              await afterRealIssue(db, input, issued)
+              return issued
+            },
+          })
+        }
+
+        try {
+          const runtime = (
+            await observer.query<{ version: string; version_num: string }>(
+              "SELECT version(), current_setting('server_version_num') AS version_num"
+            )
+          ).rows[0]
+          expect(Number(runtime.version_num)).toBeGreaterThanOrEqual(160000)
+          expect(Number(runtime.version_num)).toBeLessThan(170000)
+          expect(runtime.version).toMatch(/linux|darwin|bsd|illumos/i)
+          await observer.query(
+            `INSERT INTO token_budgets
+              (id, name, scope, unit, limit_amount, period, min_start_amount, max_task_amount, enforcement)
+             VALUES ($1, 'actual authorize cancellation', $2::jsonb, 'tokens', 100, 'daily', 1, 200, 'block')`,
+            [budgetId, JSON.stringify({ provider: [fixture.provider], model: [fixture.model] })]
+          )
+          __resetBudgetCheckCache()
+          const outcome = authorizeLlmProviderAttempt(
+            fixture.caller(),
+            payload,
+            productionDeps(controller.signal)
+          )
+            .then(
+              value => ({ value }),
+              error => ({ error })
+            )
+            .finally(() => {
+              settled = true
+            })
+          const expectedPhases = [
+            'assignment',
+            'transaction',
+            'budget_reserved',
+            'attempt_inserted',
+            'ticket_registered',
+          ]
+          if (stage === 'assignment') {
+            await cancellationDeadline(lookup.arrived)
+            expect(phases).toEqual(['assignment'])
+            expect(workPool.totalCount).toBe(0)
+          } else if (stage === 'query') {
+            await observeCancellation(async () => {
+              if (!backendPid) return false
+              const result = await observer.query<{ state: string; query: string }>(
+                'SELECT state, query FROM pg_stat_activity WHERE pid = $1',
+                [backendPid]
+              )
+              return (
+                result.rows[0]?.state === 'active' &&
+                result.rows[0]?.query === 'SELECT pg_sleep(30)'
+              )
+            })
+            expect(phases).toEqual(expectedPhases)
+            expect(await counts()).toEqual({ attempts: 0, tickets: 0, reservations: 0 })
+          } else {
+            await cancellationDeadline(proxy!.commitForwarded)
+            await observeCancellation(async () => (await counts()).attempts === 1)
+            await observeCancellation(async () => proxy!.discardedReplyBytes > 0)
+            expect(phases).toEqual(expectedPhases)
+            expect(proxy!.commands).toEqual(['BEGIN', 'COMMIT'])
+            expect(proxy!.discardedReplyBytes).toBeGreaterThan(0)
+          }
+          expect(settled).toBe(false)
+          controller.abort(reason)
+          const interrupted = await cancellationDeadline(outcome)
+          expect('error' in interrupted ? interrupted.error : undefined).toBe(reason)
+          expect(workPool.totalCount).toBe(0)
+          if (backendPid) {
+            await observeCancellation(
+              async () =>
+                (
+                  await observer.query<{ count: number }>(
+                    'SELECT COUNT(*)::int AS count FROM pg_stat_activity WHERE pid = $1',
+                    [backendPid]
+                  )
+                ).rows[0].count === 0
+            )
+          }
+          await withProductionTransaction(async db => {
+            const result = await db.query(
+              'SELECT pg_try_advisory_xact_lock(hashtext($1)) AS available',
+              [budgetId]
+            )
+            expect((result.rows[0] as { available: boolean }).available).toBe(true)
+          }, observer)
+          if (stage === 'commit') {
+            // The client never received COMMIT acknowledgement, yet the real
+            // business ledger is durable. Do not label this rollback/no spend.
+            expect(await counts()).toEqual({ attempts: 1, tickets: 1, reservations: 1 })
+            const attempt = await observer.query(
+              'SELECT id, provider, connection_id, budget_reservation_id, status FROM llm_provider_attempts WHERE invocation_id = $1',
+              [invocationId]
+            )
+            expect(attempt.rows).toEqual([
+              {
+                id: attemptId,
+                provider: fixture.provider,
+                connection_id: current!.id,
+                budget_reservation_id: reservationId,
+                status: 'authorized',
+              },
+            ])
+          } else {
+            expect(await counts()).toEqual({ attempts: 0, tickets: 0, reservations: 0 })
+            stallQuery = false
+            lookup.recover()
+            phases.length = 0
+            const later = await authorizeLlmProviderAttempt(
+              fixture.caller(),
+              payload,
+              productionDeps(new AbortController().signal)
+            )
+            expect(later.providerAttemptId).toBe(attemptId)
+            expect(phases).toEqual(expectedPhases)
+            expect(await counts()).toEqual({ attempts: 1, tickets: 1, reservations: 1 })
+            expect(workPool.idleCount).toBe(1)
+          }
+        } finally {
+          controller.abort(reason)
+          grokTicketTap.afterIssue = previousTap
+          proxy?.allowReplies()
+          await endPoolAndWaitForClients(workPool)
+          await proxy?.close()
+          await lookup.close()
+          await observer.query('DELETE FROM token_budgets WHERE id = $1', [budgetId])
+          __resetBudgetCheckCache()
+          await endPoolAndWaitForClients(observer)
+        }
+      }
+
+      it(
+        'cancels a configured Kubernetes lookup before any production transaction, then reauthorizes the same binding',
+        () => run('assignment'),
+        10_000
+      )
+      it(
+        'cancels a native query after real budget, attempt and signed ticket writes, then rolls back and reauthorizes',
+        () => run('query'),
+        10_000
+      )
+      it(
+        'keeps real authorization ledger rows when COMMIT executes but its reply is lost',
+        () => run('commit'),
+        10_000
+      )
+    })
   }
 
   beforeAll(async () => {
@@ -463,6 +851,27 @@ describeRealPostgres('Codex provider-attempt authorization on real PostgreSQL', 
     }
   )
 
+  registerProductionCancellationCases({
+    provider: 'codex-subscription',
+    model: REQUEST.model,
+    connectionKey: 'deployment-default',
+    caller: claims,
+    readConnection: () => getSafeCodexSubscriptionConnection(pool),
+    request: () => ({
+      ...REQUEST,
+      schemaVersion: 'codex-completion-request.v2',
+      requestId: randomUUID(),
+      idempotencyKey: randomUUID(),
+    }),
+    policyHash: connection =>
+      computeCodexPolicyHash({
+        model: REQUEST.model,
+        catalogRevision: connection.catalogRevision,
+        credentialRevision: connection.credentialRevision,
+        connectionKey: connection.connectionKey,
+      }),
+  })
+
   // #784: the Grok twin of the Codex rollback above, on an image-bearing V2
   // request. The Grok path checks its proxy envelope after signing and before
   // commit, so a refusal there must roll back the attempt, the registered
@@ -518,6 +927,35 @@ describeRealPostgres('Codex provider-attempt authorization on real PostgreSQL', 
     afterAll(() => {
       config.grokSubscriptionEnabled = previousGrokFlag
       grokTicketTap.afterIssue = null
+    })
+
+    registerProductionCancellationCases({
+      provider: 'grok-subscription',
+      model: GROK_MODEL,
+      connectionKey: GROK_CONNECTION_KEY,
+      caller: grokClaims,
+      readConnection: () => getSafeGrokSubscriptionConnection(pool, GROK_CONNECTION_KEY),
+      request: () => ({
+        schemaVersion: 'grok-completion-request.v2',
+        requestId: randomUUID(),
+        idempotencyKey: randomUUID(),
+        provider: 'grok-subscription',
+        model: GROK_MODEL,
+        messages: [
+          {
+            role: 'user',
+            content: 'look',
+            contentParts: [{ type: 'text', text: 'look' }, fixturePngPart()],
+          },
+        ],
+      }),
+      policyHash: connection =>
+        computeGrokPolicyHash({
+          model: GROK_MODEL,
+          catalogRevision: connection.catalogRevision,
+          credentialRevision: connection.credentialRevision,
+          connectionKey: GROK_CONNECTION_KEY,
+        }),
     })
 
     it.each([false, true])(

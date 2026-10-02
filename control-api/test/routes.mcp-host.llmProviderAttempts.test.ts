@@ -884,7 +884,8 @@ describe('resolveHostAssignedAssignment', () => {
     expect(gateway.getResource).toHaveBeenCalledWith(
       'workflowrecipes',
       'codex-recipe',
-      'sandbox-recipes'
+      'sandbox-recipes',
+      undefined
     )
   })
 

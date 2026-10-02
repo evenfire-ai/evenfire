@@ -11,6 +11,11 @@ import {
 import { config } from '../../config.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import type { K8sGateway } from '../../k8s.js'
+import { LLM_PROVIDER_ATTEMPT_ADMISSION_POLICY } from '../../middleware/llmProviderAttemptAdmissionLimits.js'
+import {
+  AuthorizeBodyAdmission,
+  AuthorizeWorkInterrupted,
+} from '../../middleware/llmProviderAttemptBodyAdmission.js'
 import { requireMcpHostJwt } from '../../middleware/mcpHostJwtAuth.js'
 import { rootLogger } from '../../observability/logger.js'
 import {
@@ -29,6 +34,10 @@ import { llmProviderAttemptAuthorizeRateLimits } from '../workflows/shared/rateL
 
 const LOG_MODULE = 'mcp-host-llm-provider-attempts'
 const log = rootLogger.child({ module: LOG_MODULE })
+
+// Retained bodies belong to the Node process, including when multiple apps or
+// routers are constructed. A per-router owner would multiply the allowance.
+const authorizeBodyAdmission = new AuthorizeBodyAdmission(LLM_PROVIDER_ATTEMPT_ADMISSION_POLICY)
 
 // JSON.parse allocates one heap object per container, so a body under
 // the byte limit can exhaust the heap before either authorizer runs. The
@@ -93,8 +102,10 @@ export type LiveBrokerAssignment = {
 
 export async function resolveHostAssignedAssignment(
   gateway: Pick<K8sGateway, 'getResource'>,
-  hostRef: string
+  hostRef: string,
+  signal?: AbortSignal
 ): Promise<LiveBrokerAssignment> {
+  signal?.throwIfAborted()
   if (hostRef.includes('/')) {
     const [recipeNamespace, recipeName, ...rest] = hostRef.split('/')
     if (!recipeNamespace || !recipeName || rest.length > 0) {
@@ -107,8 +118,10 @@ export async function resolveHostAssignedAssignment(
       const recipe = (await gateway.getResource(
         'workflowrecipes',
         recipeName,
-        recipeNamespace
+        recipeNamespace,
+        signal
       )) as { metadata?: { annotations?: Record<string, string> }; spec?: Record<string, unknown> }
+      signal?.throwIfAborted()
       const spec = recipe?.spec && typeof recipe.spec === 'object' ? recipe.spec : {}
       const liveBrokerProviders = collectRecipeOauthBrokerProviders(spec)
       return {
@@ -117,6 +130,7 @@ export async function resolveHostAssignedAssignment(
         annotations: recipe?.metadata?.annotations,
       }
     } catch (err) {
+      signal?.throwIfAborted()
       if (err instanceof LlmProviderAttemptAuthorizeError) throw err
       throw new LlmProviderAttemptAuthorizeError(
         'host_binding_mismatch',
@@ -125,9 +139,10 @@ export async function resolveHostAssignedAssignment(
     }
   }
   try {
-    const host = (await gateway.getResource('hosts', hostRef, config.hostsNamespace)) as {
+    const host = (await gateway.getResource('hosts', hostRef, config.hostsNamespace, signal)) as {
       spec?: Record<string, unknown>
     }
+    signal?.throwIfAborted()
     const spec = host?.spec && typeof host.spec === 'object' ? host.spec : {}
     const model = spec.model
     const connectionRef =
@@ -139,6 +154,7 @@ export async function resolveHostAssignedAssignment(
       liveConnectionRef: readHostCodexConnectionRef(connectionRef),
     }
   } catch (err) {
+    signal?.throwIfAborted()
     if (err instanceof LlmProviderAttemptAuthorizeError) throw err
     throw new LlmProviderAttemptAuthorizeError(
       'host_binding_mismatch',
@@ -149,31 +165,44 @@ export async function resolveHostAssignedAssignment(
 
 export function createMcpHostLlmProviderAttemptRoutes(gateway: K8sGateway): Router {
   const router = Router()
+  // Shared by both providers: preserve the larger visual envelope (Codex
+  // #660, Grok #784) and each authorizer's provider-specific limit. Refuse
+  // encoded bodies and scan raw structure before JSON.parse allocates objects.
+  const authorizeBodyParser = express.json({
+    limit: Math.max(LIMITS.maxVisualRequestBodyBytes, GROK_LIMITS.maxVisualRequestBodyBytes),
+    inflate: false,
+    verify: verifyBodyStructure,
+  })
   router.post(
     '/mcp-host/llm/provider-attempts/authorize',
     ...llmProviderAttemptAuthorizeRateLimits(),
     requireMcpHostJwt,
-    // Shared by both providers: admit the larger visual envelope (Codex #660,
-    // Grok #784). Each authorizer then applies its own provider's limit.
-    // `inflate: false` refuses an encoded body: 35 KiB of gzip inflates to
-    // 35 MiB.
-    express.json({
-      limit: Math.max(LIMITS.maxVisualRequestBodyBytes, GROK_LIMITS.maxVisualRequestBodyBytes),
-      inflate: false,
-      verify: verifyBodyStructure,
-    }),
     asyncHandler(async (req: Request, res: Response) => {
-      const claims = req.mcpHostJwt
-      if (!claims) {
-        res.status(401).json({ error: 'Unauthorized' })
-        return
-      }
       try {
-        const result = await authorizeLlmProviderAttempt(claims, req.body, {
-          resolveAssignment: hostRef => resolveHostAssignedAssignment(gateway, hostRef),
+        await authorizeBodyAdmission.run(req, res, authorizeBodyParser, async signal => {
+          signal.throwIfAborted()
+          const claims = req.mcpHostJwt
+          if (!claims) {
+            res.status(401).json({ error: 'Unauthorized' })
+            return
+          }
+          const result = await authorizeLlmProviderAttempt(claims, req.body, {
+            signal,
+            resolveAssignment: hostRef => resolveHostAssignedAssignment(gateway, hostRef, signal),
+          })
+          signal.throwIfAborted()
+          res.status(200).json(result)
         })
-        res.status(200).json(result)
       } catch (err) {
+        if (err instanceof AuthorizeWorkInterrupted) {
+          // A closed transport only requests cancellation. run() has awaited
+          // dependency/transaction cleanup before ownership reaches this catch.
+          if (req.aborted || res.destroyed || res.writableEnded) return
+          const requestLog = req.log?.child({ module: LOG_MODULE }) ?? log
+          requestLog.warn({ event: 'llm_provider_attempt_authorize_interrupted', code: err.code })
+          res.status(503).json({ error: 'authorize_timeout' })
+          return
+        }
         sendAuthorizeError(res, err)
       }
     })
