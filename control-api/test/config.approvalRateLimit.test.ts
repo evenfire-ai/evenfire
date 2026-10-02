@@ -1,4 +1,45 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
+const LOG_LEVELS = ['warn', 'info', 'error', 'debug'] as const
+const loggerCalls = {
+  warn: vi.fn<(...args: unknown[]) => void>(),
+  info: vi.fn<(...args: unknown[]) => void>(),
+  error: vi.fn<(...args: unknown[]) => void>(),
+  debug: vi.fn<(...args: unknown[]) => void>(),
+}
+const TOPOLOGY_EVENT = 'external_rate_limit_topology_advisory'
+
+function advisoryCalls(level: (typeof LOG_LEVELS)[number]) {
+  return loggerCalls[level].mock.calls.filter(
+    ([fields]) =>
+      typeof fields === 'object' &&
+      fields !== null &&
+      'event' in fields &&
+      fields.event === TOPOLOGY_EVENT
+  )
+}
+
+function expectNoAdvisory() {
+  for (const level of LOG_LEVELS) expect(advisoryCalls(level)).toEqual([])
+}
+
+function expectAdvisory(values: readonly number[], sources: readonly string[]) {
+  expect(advisoryCalls('warn')).toEqual([
+    [
+      {
+        event: TOPOLOGY_EVENT,
+        resolved: {
+          operation: { value: values[0], source: sources[0] },
+          session: { value: values[1], source: sources[1] },
+          clientIp: { value: values[2], source: sources[2] },
+        },
+        recommendedTopology: 'operation <= session < clientIp',
+      },
+      'External rate limits cross the recommended topology; preserving configured values',
+    ],
+  ])
+  for (const level of ['info', 'error', 'debug'] as const) expect(advisoryCalls(level)).toEqual([])
+}
 
 const RATE_LIMIT_KEYS = [
   'APPROVAL_RL_REQUEST_PER_MIN',
@@ -18,6 +59,13 @@ async function loadConfigWith(
   Object.assign(process.env, overrides)
   vi.resetModules()
   try {
+    // Attach after the reset to the same real logger instance config imports.
+    const { rootLogger } = await import('../src/observability/logger.js')
+    for (const level of LOG_LEVELS) {
+      vi.spyOn(rootLogger, level).mockImplementation((...args: unknown[]) =>
+        loggerCalls[level](...args)
+      )
+    }
     const mod = await import('../src/config.js')
     return mod.config
   } finally {
@@ -30,6 +78,7 @@ async function loadConfigWith(
 }
 
 describe('control-api approval rate limit config', () => {
+  beforeEach(() => vi.clearAllMocks())
   afterEach(() => {
     vi.resetModules()
     vi.restoreAllMocks()
@@ -50,13 +99,12 @@ describe('control-api approval rate limit config', () => {
   })
 
   it('uses the recommended external defaults without a boot advisory', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
     const config = await loadConfigWith({})
 
     expect(config.approvalRlExternalPerMin).toBe(60)
     expect(config.approvalRlExternalEdgePerMin).toBe(120)
     expect(config.approvalRlExternalClientIpPerMin).toBe(1200)
-    expect(warn).not.toHaveBeenCalled()
+    expectNoAdvisory()
   })
 
   it.each([
@@ -64,36 +112,41 @@ describe('control-api approval rate limit config', () => {
       label: 'operation above the default session budget',
       override: { APPROVAL_RL_EXTERNAL_PER_MIN: '121' },
       expected: [121, 120, 1200],
+      sources: ['environment', 'default', 'default'],
     },
     {
       label: 'session equal to the default client-IP budget',
       override: { APPROVAL_RL_EXTERNAL_EDGE_PER_MIN: '1200' },
       expected: [60, 1200, 1200],
+      sources: ['default', 'environment', 'default'],
     },
     {
       label: 'client-IP equal to the default session budget',
       override: { APPROVAL_RL_EXTERNAL_CLIENT_IP_PER_MIN: '120' },
       expected: [60, 120, 120],
+      sources: ['default', 'default', 'environment'],
     },
     {
       label: 'session below the default operation budget',
       override: { APPROVAL_RL_EXTERNAL_EDGE_PER_MIN: '30' },
       expected: [60, 30, 1200],
+      sources: ['default', 'environment', 'default'],
     },
-  ])('boots with and preserves a partial override: $label', async ({ override, expected }) => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
-    const config = await loadConfigWith(override)
+  ])(
+    'boots with and preserves a partial override: $label',
+    async ({ override, expected, sources }) => {
+      const config = await loadConfigWith(override)
 
-    expect([
-      config.approvalRlExternalPerMin,
-      config.approvalRlExternalEdgePerMin,
-      config.approvalRlExternalClientIpPerMin,
-    ]).toEqual(expected)
-    expect(warn).toHaveBeenCalledTimes(1)
-  })
+      expect([
+        config.approvalRlExternalPerMin,
+        config.approvalRlExternalEdgePerMin,
+        config.approvalRlExternalClientIpPerMin,
+      ]).toEqual(expected)
+      expectAdvisory(expected, sources)
+    }
+  )
 
   it('accepts equality and reversed scopes while preserving every explicit value', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
     const config = await loadConfigWith({
       APPROVAL_RL_EXTERNAL_PER_MIN: '500',
       APPROVAL_RL_EXTERNAL_EDGE_PER_MIN: '120',
@@ -103,28 +156,16 @@ describe('control-api approval rate limit config', () => {
     expect(config.approvalRlExternalPerMin).toBe(500)
     expect(config.approvalRlExternalEdgePerMin).toBe(120)
     expect(config.approvalRlExternalClientIpPerMin).toBe(120)
-    expect(warn).toHaveBeenCalledTimes(1)
+    expectAdvisory([500, 120, 120], ['environment', 'environment', 'environment'])
   })
 
   it('warns once with the resolved tuple and source without mutating values', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
     const config = await loadConfigWith({ APPROVAL_RL_EXTERNAL_PER_MIN: '121' })
 
     expect(config.approvalRlExternalPerMin).toBe(121)
     expect(config.approvalRlExternalEdgePerMin).toBe(120)
     expect(config.approvalRlExternalClientIpPerMin).toBe(1200)
-    expect(warn).toHaveBeenCalledTimes(1)
-    expect(warn).toHaveBeenCalledWith(
-      expect.stringContaining('preserving exact configured values'),
-      {
-        resolved: {
-          operation: { value: 121, source: 'environment' },
-          session: { value: 120, source: 'default' },
-          clientIp: { value: 1200, source: 'default' },
-        },
-        recommendedTopology: 'operation <= session < clientIp',
-      }
-    )
+    expectAdvisory([121, 120, 1200], ['environment', 'default', 'default'])
   })
 
   it.each([
@@ -142,7 +183,6 @@ describe('control-api approval rate limit config', () => {
   it.each(['', '   ', '\t'])(
     'treats a blank external rate-limit override (%j) as the default',
     async blank => {
-      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
       const config = await loadConfigWith({
         APPROVAL_RL_EXTERNAL_PER_MIN: blank,
         APPROVAL_RL_EXTERNAL_EDGE_PER_MIN: blank,
@@ -152,12 +192,11 @@ describe('control-api approval rate limit config', () => {
       expect(config.approvalRlExternalPerMin).toBe(60)
       expect(config.approvalRlExternalEdgePerMin).toBe(120)
       expect(config.approvalRlExternalClientIpPerMin).toBe(1200)
-      expect(warn).not.toHaveBeenCalled()
+      expectNoAdvisory()
     }
   )
 
   it('does not warn for a coherent explicit topology', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
     const config = await loadConfigWith({
       APPROVAL_RL_EXTERNAL_PER_MIN: '30',
       APPROVAL_RL_EXTERNAL_EDGE_PER_MIN: '60',
@@ -167,6 +206,6 @@ describe('control-api approval rate limit config', () => {
     expect(config.approvalRlExternalPerMin).toBe(30)
     expect(config.approvalRlExternalEdgePerMin).toBe(60)
     expect(config.approvalRlExternalClientIpPerMin).toBe(600)
-    expect(warn).not.toHaveBeenCalled()
+    expectNoAdvisory()
   })
 })
