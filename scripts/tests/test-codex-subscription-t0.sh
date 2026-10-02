@@ -245,6 +245,7 @@ run_group "control-api" "control-api" \
   "test/routes.mcp-host.llmProviderAttempts.bodyAdmission.test.ts" \
   "test/llmProviderAttemptBodyAdmission.test.ts" \
   "test/llmProviderAttemptAuthorizer.cancellation.test.ts" \
+  "test/helpers.realPostgresCancellation.test.ts" \
   "test/routes.mcp-host.llmProviderAttempts.test.ts" \
   "test/routes.adminRecipes.test.ts" \
   "test/routes.adminPluginWorkloadSdk.test.ts" \

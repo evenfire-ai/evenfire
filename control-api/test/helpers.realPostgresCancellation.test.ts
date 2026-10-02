@@ -2,7 +2,10 @@ import { expect, it } from 'vitest'
 import { once } from 'node:events'
 import { type Socket, createConnection, createServer } from 'node:net'
 import { setImmediate as nextTurn } from 'node:timers/promises'
-import { createPostgresCommitReplyBlackhole } from './helpers/realPostgresCancellation.js'
+import {
+  createPostgresCommitReplyBlackhole,
+  createPostgresDisconnectBlackhole,
+} from './helpers/realPostgresCancellation.js'
 
 async function observed(check: () => boolean): Promise<void> {
   const deadline = Date.now() + 1_000
@@ -89,4 +92,63 @@ it('refuses an encrypted protocol prerequisite instead of pretending to observe 
       ['postgresql:', '//fixture@127.0.0.1/fixture?sslmode=require'].join('')
     )
   ).rejects.toThrow('plaintext PostgreSQL connection')
+})
+
+it('hides frontend Terminate and FIN as well as replies without closing the backend socket', async () => {
+  const sockets = new Set<Socket>()
+  let backendSocket: Socket | undefined
+  let received = Buffer.alloc(0)
+  let ended = false
+  const backend = createServer({ allowHalfOpen: true }, socket => {
+    backendSocket = socket
+    sockets.add(socket)
+    socket.on('data', chunk => {
+      received = Buffer.concat([received, chunk])
+      socket.write('visible-reply')
+    })
+    socket.on('end', () => {
+      ended = true
+    })
+    socket.on('error', () => {})
+  })
+  backend.listen(0, '127.0.0.1')
+  await once(backend, 'listening')
+  const address = backend.address()
+  if (!address || typeof address === 'string') throw new Error('missing fixture backend address')
+  const proxy = await createPostgresDisconnectBlackhole(
+    ['postgresql:', `//fixture@127.0.0.1:${address.port}/fixture`].join('')
+  )
+  const target = new URL(proxy.connectionString)
+  const client = createConnection({ host: target.hostname, port: Number(target.port) })
+  let replies = Buffer.alloc(0)
+  client.on('data', chunk => {
+    replies = Buffer.concat([replies, chunk])
+  })
+  client.on('error', () => {})
+  try {
+    await once(client, 'connect')
+    const startup = Buffer.alloc(8)
+    startup.writeInt32BE(8)
+    startup.writeInt32BE(196608, 4)
+    client.write(startup)
+    await observed(() => replies.toString() === 'visible-reply')
+    proxy.dropRepliesAndDisconnects()
+    const terminate = Buffer.from([88, 0, 0, 0, 4])
+    client.end(terminate)
+    await observed(() => proxy.suppressedDisconnects === 1)
+    expect(proxy.discardedFrontendBytes).toBe(terminate.length)
+    expect(received).toEqual(startup)
+    expect(ended).toBe(false)
+    expect(backendSocket?.destroyed).toBe(false)
+    backendSocket!.write('hidden-reply')
+    await observed(() => proxy.discardedReplyBytes === Buffer.byteLength('hidden-reply'))
+    expect(replies.toString()).toBe('visible-reply')
+  } finally {
+    client.destroy()
+    await proxy.close()
+    for (const socket of sockets) socket.destroy()
+    await new Promise<void>((resolve, reject) =>
+      backend.close(error => (error ? reject(error) : resolve()))
+    )
+  }
 })

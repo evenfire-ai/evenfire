@@ -309,12 +309,43 @@ function protocolMessage(type: string, body: Buffer): Buffer {
   return Buffer.concat([header, body])
 }
 
-async function postgresPeer(handshake = true) {
+function textRows(columns: string[], values: Array<string | null>): Buffer[] {
+  const count = Buffer.alloc(2)
+  count.writeInt16BE(columns.length)
+  const fields = columns.map(name => {
+    const description = Buffer.alloc(18)
+    description.writeInt32BE(25, 6)
+    description.writeInt16BE(-1, 10)
+    description.writeInt32BE(-1, 12)
+    return Buffer.concat([Buffer.from(`${name}\0`), description])
+  })
+  const row = values.map(value => {
+    const bytes = value === null ? undefined : Buffer.from(value)
+    const length = Buffer.alloc(4)
+    length.writeInt32BE(bytes?.length ?? -1)
+    return bytes ? Buffer.concat([length, bytes]) : length
+  })
+  return [
+    protocolMessage('T', Buffer.concat([count, ...fields])),
+    protocolMessage('D', Buffer.concat([count, ...row])),
+  ]
+}
+
+async function postgresPeer(
+  handshake = true,
+  settings: { statement?: string | null; idle?: string | null } = {}
+) {
   const connected = deferred()
   const queries: string[] = []
+  const sessionChanges: Array<{ sql: string; values: Array<string | null> }> = []
+  const lifecycle: string[] = []
   const sockets = new Set<Socket>()
+  const stalledReplies: Array<() => void> = []
   let stalledSql = ''
+  let stalledOccurrence = 1
   let failedSql = ''
+  let failedOccurrence = 1
+  const occurrences = new Map<string, number>()
   const server = createTcpServer({ allowHalfOpen: true }, socket => {
     sockets.add(socket)
     socket.on('error', () => {})
@@ -322,6 +353,60 @@ async function postgresPeer(handshake = true) {
     connected.resolve()
     let startup = true
     let buffered = Buffer.alloc(0)
+    let statement = ''
+    let parameters: Array<string | null> = []
+    let state = 'I'
+    let waiting = false
+    let pendingSync = false
+    let idleTimeout = settings.idle === undefined ? '0' : settings.idle
+    const statementTimeout = settings.statement === undefined ? '15000' : settings.statement
+    const ready = () => socket.write(protocolMessage('Z', Buffer.from(state)))
+    const describe = (sql: string): [string[], Array<string | null>] => {
+      if (sql.includes('FROM pg_settings')) {
+        return [
+          ['statement_timeout_ms', 'idle_timeout_ms'],
+          [statementTimeout, idleTimeout],
+        ]
+      }
+      if (sql === 'SELECT set_config($1, $2, false)') return [['set_config'], [parameters[1]]]
+      return [[], []]
+    }
+    const execute = (sql: string, simple: boolean) => {
+      queries.push(sql)
+      const occurrence = (occurrences.get(sql) ?? 0) + 1
+      occurrences.set(sql, occurrence)
+      if (sql === 'SELECT set_config($1, $2, false)') {
+        sessionChanges.push({ sql, values: [...parameters] })
+      }
+      const complete = () => {
+        if (sql === failedSql && occurrence === failedOccurrence) {
+          if (state === 'T') state = 'E'
+          socket.write(
+            protocolMessage('E', Buffer.from('SERROR\0C42704\0Mfixture statement failure\0\0'))
+          )
+        } else {
+          if (sql === 'BEGIN') state = 'T'
+          if (sql === 'ROLLBACK' || sql === 'COMMIT') state = 'I'
+          if (sql === 'SELECT set_config($1, $2, false)') idleTimeout = parameters[1]
+          const [columns, values] = describe(sql)
+          if (columns.length) {
+            const [description, row] = textRows(columns, values)
+            if (simple) socket.write(description)
+            socket.write(row)
+          }
+          socket.write(protocolMessage('C', Buffer.from(`${sql.split(' ')[0]}\0`)))
+        }
+        waiting = false
+        if (simple || pendingSync) {
+          pendingSync = false
+          ready()
+        }
+      }
+      if (sql === stalledSql && occurrence === stalledOccurrence) {
+        waiting = true
+        stalledReplies.push(complete)
+      } else complete()
+    }
     socket.on('data', chunk => {
       buffered = Buffer.concat([buffered, chunk])
       if (startup) {
@@ -341,28 +426,38 @@ async function postgresPeer(handshake = true) {
         const length = buffered.readInt32BE(1)
         const body = buffered.subarray(5, length + 1)
         buffered = buffered.subarray(length + 1)
-        if (type !== 'Q') continue
-        const sql = body.toString('utf8', 0, body.length - 1)
-        queries.push(sql)
-        if (sql === failedSql) {
+        if (type === 'Q') {
+          parameters = []
+          execute(body.toString('utf8', 0, body.length - 1), true)
+        } else if (type === 'P') {
+          const start = body.indexOf(0) + 1
+          statement = body.toString('utf8', start, body.indexOf(0, start))
+          socket.write(protocolMessage('1', Buffer.alloc(0)))
+        } else if (type === 'B') {
+          let offset = body.indexOf(0) + 1
+          offset = body.indexOf(0, offset) + 1
+          const formats = body.readInt16BE(offset)
+          offset += 2 + formats * 2
+          const count = body.readInt16BE(offset)
+          offset += 2
+          parameters = []
+          for (let index = 0; index < count; index++) {
+            const size = body.readInt32BE(offset)
+            offset += 4
+            parameters.push(size < 0 ? null : body.toString('utf8', offset, offset + size))
+            if (size >= 0) offset += size
+          }
+          socket.write(protocolMessage('2', Buffer.alloc(0)))
+        } else if (type === 'D') {
+          const [columns, values] = describe(statement)
           socket.write(
-            Buffer.concat([
-              protocolMessage(
-                'E',
-                Buffer.from('SERROR\0C42704\0Munsupported connection check parameter\0\0')
-              ),
-              protocolMessage('Z', Buffer.from('E')),
-            ])
+            columns.length ? textRows(columns, values)[0] : protocolMessage('n', Buffer.alloc(0))
           )
-          continue
+        } else if (type === 'E') execute(statement, false)
+        else if (type === 'S') {
+          if (waiting) pendingSync = true
+          else ready()
         }
-        if (sql === stalledSql) continue
-        socket.write(
-          Buffer.concat([
-            protocolMessage('C', Buffer.from(`${sql.split(' ')[0]}\0`)),
-            protocolMessage('Z', Buffer.from(sql === 'BEGIN' ? 'T' : 'I')),
-          ])
-        )
       }
     })
     // This deliberate half-open peer never sends EOF in response to Terminate.
@@ -382,6 +477,8 @@ async function postgresPeer(handshake = true) {
     idleTimeoutMillis: 1_000,
   })
   pool.on('error', () => {})
+  pool.on('connect', client => client.once('end', () => lifecycle.push('end')))
+  pool.on('remove', () => lifecycle.push('remove'))
   cleanup.push(async () => {
     for (const socket of sockets) socket.destroy()
     await pool.end()
@@ -392,12 +489,19 @@ async function postgresPeer(handshake = true) {
   return {
     connected,
     queries,
+    sessionChanges,
+    lifecycle,
     pool,
-    stall: (sql: string) => {
+    stall: (sql: string, occurrence = 1) => {
       stalledSql = sql
+      stalledOccurrence = occurrence
     },
-    fail: (sql: string) => {
+    resume: () => {
+      for (const reply of stalledReplies.splice(0)) reply()
+    },
+    fail: (sql: string, occurrence = 1) => {
       failedSql = sql
+      failedOccurrence = occurrence
     },
   }
 }
@@ -425,9 +529,12 @@ describe('scoped transaction cancellation with the native pg driver and sockets'
     ).rejects.toMatchObject({ code: '42704' })
     expect(work).not.toHaveBeenCalled()
     expect(fixture.queries).toEqual([
+      expect.stringContaining('FROM pg_settings'),
+      'SELECT set_config($1, $2, false)',
       'BEGIN',
       "SET LOCAL client_connection_check_interval = '100ms'",
       'ROLLBACK',
+      'SELECT set_config($1, $2, false)',
     ])
   })
 
@@ -586,10 +693,171 @@ describe('scoped transaction cancellation with the native pg driver and sockets'
     controller.abort(reason)
     expect(((await within(outcome)) as { error: unknown }).error).toBe(reason)
     expect(fixture.queries).toEqual([
+      expect.stringContaining('FROM pg_settings'),
+      'SELECT set_config($1, $2, false)',
       'BEGIN',
       "SET LOCAL client_connection_check_interval = '100ms'",
       'COMMIT',
     ])
     expect(fixture.pool.totalCount).toBe(0)
+  })
+})
+
+describe('cancellable transaction server idle backstop with native pool max one', () => {
+  const settingSql = 'SELECT set_config($1, $2, false)'
+
+  it.each(['0', '45000'])(
+    'bounds an effective idle timeout of %s before BEGIN and restores it after acknowledged COMMIT',
+    async idle => {
+      const fixture = await postgresPeer(true, { idle })
+      await expect(
+        withTransaction(async () => 'committed', fixture.pool, {
+          signal: new AbortController().signal,
+        })
+      ).resolves.toBe('committed')
+      expect(fixture.sessionChanges).toEqual([
+        { sql: settingSql, values: ['idle_in_transaction_session_timeout', '15000'] },
+        { sql: settingSql, values: ['idle_in_transaction_session_timeout', idle] },
+      ])
+      expect(fixture.queries.indexOf(settingSql)).toBeLessThan(fixture.queries.indexOf('BEGIN'))
+      expect(fixture.queries.lastIndexOf(settingSql)).toBeGreaterThan(
+        fixture.queries.indexOf('COMMIT')
+      )
+      expect(fixture.pool.totalCount).toBe(1)
+      expect(fixture.pool.idleCount).toBe(1)
+      const inspected = await fixture.pool.query(
+        "SELECT setting FROM pg_settings WHERE name = 'idle_in_transaction_session_timeout'"
+      )
+      expect(inspected.rows[0].idle_timeout_ms).toBe(idle)
+    }
+  )
+
+  it('preserves a smaller positive server idle limit without changing the session', async () => {
+    const fixture = await postgresPeer(true, { idle: '300' })
+    await expect(
+      withTransaction(async () => 'committed', fixture.pool, {
+        signal: new AbortController().signal,
+      })
+    ).resolves.toBe('committed')
+    expect(fixture.sessionChanges).toEqual([])
+    expect(fixture.pool.idleCount).toBe(1)
+  })
+
+  it.each(['0', '99', '30001', 'not-a-number', null])(
+    'fails before BEGIN for effective statement timeout %s and physically evicts the checkout',
+    async statement => {
+      const fixture = await postgresPeer(true, { statement })
+      const work = vi.fn()
+      const removed = vi.fn()
+      fixture.pool.on('remove', removed)
+      await expect(
+        withTransaction(work, fixture.pool, { signal: new AbortController().signal })
+      ).rejects.toThrow('Invalid effective PostgreSQL cancellation timeout bounds')
+      expect(work).not.toHaveBeenCalled()
+      expect(fixture.queries).toHaveLength(1)
+      expect(fixture.queries).not.toContain('BEGIN')
+      expect(fixture.pool.totalCount).toBe(0)
+      expect(removed).toHaveBeenCalledOnce()
+      expect(fixture.lifecycle).toEqual(['end', 'remove'])
+    }
+  )
+
+  it('restores the session after acknowledged ROLLBACK without replacing the primary work error', async () => {
+    const fixture = await postgresPeer()
+    const primary = new Error('work failed')
+    await expect(
+      withTransaction(
+        async () => {
+          throw primary
+        },
+        fixture.pool,
+        { signal: new AbortController().signal }
+      )
+    ).rejects.toBe(primary)
+    expect(fixture.queries.indexOf('ROLLBACK')).toBeLessThan(
+      fixture.queries.lastIndexOf(settingSql)
+    )
+    expect(fixture.sessionChanges.at(-1)?.values).toEqual([
+      'idle_in_transaction_session_timeout',
+      '0',
+    ])
+    expect(fixture.pool.idleCount).toBe(1)
+  })
+
+  it('poisons and physically ends a failed session setup without running work', async () => {
+    const fixture = await postgresPeer()
+    fixture.fail(settingSql)
+    const work = vi.fn()
+    const removed = vi.fn()
+    fixture.pool.on('remove', removed)
+    await expect(
+      withTransaction(work, fixture.pool, { signal: new AbortController().signal })
+    ).rejects.toMatchObject({ code: '42704' })
+    expect(work).not.toHaveBeenCalled()
+    expect(fixture.queries).not.toContain('BEGIN')
+    expect(fixture.sessionChanges).toHaveLength(1)
+    expect(fixture.pool.totalCount).toBe(0)
+    expect(removed).toHaveBeenCalledOnce()
+    expect(fixture.lifecycle).toEqual(['end', 'remove'])
+  })
+
+  it('evicts a failed restoration while preserving the acknowledged COMMIT outcome', async () => {
+    const fixture = await postgresPeer()
+    fixture.fail(settingSql, 2)
+    const removed = vi.fn()
+    fixture.pool.on('remove', removed)
+    await expect(
+      withTransaction(async () => 'committed', fixture.pool, {
+        signal: new AbortController().signal,
+      })
+    ).resolves.toBe('committed')
+    expect(fixture.queries).toContain('COMMIT')
+    expect(fixture.queries).not.toContain('ROLLBACK')
+    expect(fixture.pool.totalCount).toBe(0)
+    expect(removed).toHaveBeenCalledOnce()
+    expect(fixture.lifecycle).toEqual(['end', 'remove'])
+    await expect(withTransaction(async () => 'recovered', fixture.pool)).resolves.toBe('recovered')
+  })
+
+  it('evicts a failed restoration after ROLLBACK and keeps the original work failure', async () => {
+    const fixture = await postgresPeer()
+    fixture.fail(settingSql, 2)
+    const primary = new Error('work failed')
+    await expect(
+      withTransaction(
+        async () => {
+          throw primary
+        },
+        fixture.pool,
+        { signal: new AbortController().signal }
+      )
+    ).rejects.toBe(primary)
+    expect(fixture.queries).toContain('ROLLBACK')
+    expect(fixture.pool.totalCount).toBe(0)
+    expect(fixture.lifecycle).toEqual(['end', 'remove'])
+  })
+
+  it('retains the sole pool checkout until restoration finishes before serving the next borrower', async () => {
+    const fixture = await postgresPeer()
+    fixture.stall(settingSql, 2)
+    let settled = false
+    const first = withTransaction(async () => 'first', fixture.pool, {
+      signal: new AbortController().signal,
+    }).finally(() => {
+      settled = true
+    })
+    await observed(() => fixture.sessionChanges.length === 2)
+    const borrowed = (fixture.pool as unknown as { _clients: PoolClient[] })._clients[0]
+    const release = vi.spyOn(borrowed, 'release')
+    const next = withTransaction(async () => 'next', fixture.pool)
+    await observed(() => fixture.pool.waitingCount === 1)
+    expect(settled).toBe(false)
+    expect(release).not.toHaveBeenCalled()
+    expect(fixture.pool.totalCount).toBe(1)
+    fixture.resume()
+    await expect(first).resolves.toBe('first')
+    await expect(next).resolves.toBe('next')
+    expect(fixture.pool.totalCount).toBe(1)
+    expect(fixture.pool.idleCount).toBe(1)
   })
 })

@@ -495,24 +495,24 @@ behavior changes:
     visual entries (running or queued) of the gate's 10. A token whose `sub`
     is missing, empty or not a string is refused 401 before any gate or
     share is taken. When the share is full, the proxy answers 503
-    `provider_unavailable` and logs `codex_proxy_admission_refused` with
-    `reason: visual_host_share`. The share is released together with the
-    visual slot: on read-deadline expiry, on client close before hand-off,
-    and when the handler's finally block unwinds.
+    `visual_host_share` and logs `codex_proxy_admission_refused` with
+    `reason: visual_host_share`. The share is released with the visual slot
+    when the parser completion callback clears retained body references, or
+    when the stream handler's finally block unwinds. A deadline or response
+    close requests cancellation and does not release a live parser owner.
 
     **Visual body read deadline and slot lifetime.** Once the visual gate
     grants a slot, the body must be read and parsed within
     `BODY_READ_DEADLINE_MS` (10 s). Otherwise the proxy answers 408
-    `request_timeout` with `connection: close` (the rest of the body is never
-    read, so the connection cannot be reused) and frees the slot and the
-    principal share. After the grant, the slot is also freed when the response
-    closes for any other reason, which covers every refusal before the stream
-    starts. That close hook releases only while the slot is still held by the
-    admission code: a kept visual body hands the release to the handler, which
-    frees it in its outer `finally`, and a demoted body releases through the
-    admission path before it joins the ordinary stream gate. A visual-gate
-    refusal (queue full, wait exceeded) is answered 503 `provider_unavailable`
-    and logged as `codex_proxy_admission_refused` with `reason: visual_gate`.
+    `request_timeout` with `connection: close` and starts the bounded
+    `VISUAL_READ_CLOSE_GRACE_MS` destruction backstop. The parser callback
+    clears retained body references before releasing the slot and principal
+    share; neither the deadline nor response close grants capacity early.
+    A kept visual body transfers the release to the handler's outer `finally`;
+    a demoted body releases through admission after acquiring its byte budget,
+    before joining the ordinary stream gate. A visual-gate capacity refusal
+    (queue full, wait exceeded) answers 503 `visual_gate` and logs
+    `codex_proxy_admission_refused` with `reason: visual_gate`.
     A client that leaves while queued is not gate saturation: its place is freed
     silently, with no log and no response.
 

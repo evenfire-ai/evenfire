@@ -277,6 +277,7 @@ run_group "control-api grok" "control-api" \
   "test/routes.mcp-host.llmProviderAttempts.bodyAdmission.test.ts" \
   "test/llmProviderAttemptBodyAdmission.test.ts" \
   "test/llmProviderAttemptAuthorizer.cancellation.test.ts" \
+  "test/helpers.realPostgresCancellation.test.ts" \
   "test/routes.internal.llmProviderAttempts.grok.test.ts" \
   "test/routes.adminPluginWorkloadSdk.test.ts" \
   "test/routes.adminRecipes.test.ts" \

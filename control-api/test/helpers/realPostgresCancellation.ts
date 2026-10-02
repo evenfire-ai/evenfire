@@ -3,6 +3,15 @@ import { type Socket, createConnection, createServer } from 'node:net'
 
 /** Observe a real COMMIT while discarding its reply on the owned local PG lane. */
 export async function createPostgresCommitReplyBlackhole(connectionString: string) {
+  return createPostgresProtocolBlackhole(connectionString, true)
+}
+
+/** Hide replies and client disconnects without ending the real backend socket. */
+export async function createPostgresDisconnectBlackhole(connectionString: string) {
+  return createPostgresProtocolBlackhole(connectionString, false)
+}
+
+async function createPostgresProtocolBlackhole(connectionString: string, dropCommitReply: boolean) {
   const target = new URL(connectionString)
   const sslMode = target.searchParams.get('sslmode')
   if (sslMode && sslMode !== 'disable') {
@@ -14,23 +23,39 @@ export async function createPostgresCommitReplyBlackhole(connectionString: strin
   const commitForwarded = new Promise<void>(resolve => {
     commit = resolve
   })
-  let armed = true
+  let armed = dropCommitReply
   let dropping = false
   let discardedReplyBytes = 0
-  const server = createServer(front => {
+  let discardedFrontendBytes = 0
+  let suppressDisconnects = false
+  let suppressedDisconnects = 0
+  const server = createServer({ allowHalfOpen: true }, front => {
     const host = target.hostname.replace(/^\[|\]$/g, '')
-    const back = createConnection({ host, port: Number(target.port || 5432) })
+    const back = createConnection({ host, port: Number(target.port || 5432), allowHalfOpen: true })
     for (const socket of [front, back]) {
       sockets.add(socket)
       socket.once('close', () => sockets.delete(socket))
     }
-    front.on('error', () => back.destroy())
+    front.on('error', () => {
+      if (suppressDisconnects) suppressedDisconnects++
+      else back.destroy()
+    })
     back.on('error', () => front.destroy())
-    front.on('end', () => back.end())
+    front.on('end', () => {
+      if (suppressDisconnects) suppressedDisconnects++
+      else back.end()
+    })
     back.on('end', () => front.end())
     let startup = true
     let buffered = Buffer.alloc(0)
     front.on('data', chunk => {
+      // pg may send Terminate before FIN on an idle checkout. A network fault
+      // that hides disconnects must suppress both; forwarding either would let
+      // the test pass because of EOF instead of the server timeout backstop.
+      if (suppressDisconnects) {
+        discardedFrontendBytes += chunk.length
+        return
+      }
       buffered = Buffer.concat([buffered, chunk])
       if (startup && buffered.length >= 4 && buffered.length >= buffered.readInt32BE(0)) {
         buffered = buffered.subarray(buffered.readInt32BE(0))
@@ -70,8 +95,20 @@ export async function createPostgresCommitReplyBlackhole(connectionString: strin
     get discardedReplyBytes() {
       return discardedReplyBytes
     },
+    get discardedFrontendBytes() {
+      return discardedFrontendBytes
+    },
+    get suppressedDisconnects() {
+      return suppressedDisconnects
+    },
+    dropRepliesAndDisconnects: () => {
+      armed = false
+      dropping = true
+      suppressDisconnects = true
+    },
     allowReplies: () => {
       dropping = false
+      suppressDisconnects = false
     },
     close: async () => {
       for (const socket of sockets) socket.destroy()

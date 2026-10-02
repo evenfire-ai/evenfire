@@ -6,7 +6,10 @@ import { Pool } from 'pg'
 import { type DbClient, initDb, withTransaction } from '../src/db.js'
 import { reserveInDangerZone } from '../src/services/budgets/reservations.js'
 import { insertLlmProviderAttempt } from '../src/services/llmProviderAttemptStore.js'
-import { createPostgresCommitReplyBlackhole } from './helpers/realPostgresCancellation.js'
+import {
+  createPostgresCommitReplyBlackhole,
+  createPostgresDisconnectBlackhole,
+} from './helpers/realPostgresCancellation.js'
 import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
@@ -245,4 +248,101 @@ realPostgres('scoped transaction cancellation mechanism and durable outcome', ()
       await proxy.close()
     }
   }, 10_000)
+  it.each(['idle', 'active-then-aborted'] as const)(
+    'bounds the remote %s transaction after local cleanup when a protocol blackhole hides both replies and disconnects',
+    async mode => {
+      const proxy = await createPostgresDisconnectBlackhole(connectionString)
+      const isolated = new Pool({
+        connectionString: proxy.connectionString,
+        ssl: false,
+        max: 1,
+        connectionTimeoutMillis: 2_000,
+        statement_timeout: 2_000,
+        options: '-c idle_in_transaction_session_timeout=0',
+      })
+      const invocationId = randomUUID()
+      const lock = mode === 'idle' ? 806303 : 806304
+      const entered = deferred<number>()
+      const controller = new AbortController()
+      const reason = Object.assign(new Error('authorize_timeout'), { code: 'authorize_timeout' })
+      try {
+        const outcome = withTransaction(
+          async db => {
+            const identity = await db.query('SELECT pg_backend_pid() AS pid')
+            const setting = await db.query(
+              "SELECT setting FROM pg_settings WHERE name = 'idle_in_transaction_session_timeout'"
+            )
+            expect((setting.rows[0] as { setting: string }).setting).toBe('2000')
+            await writeAuthorizeRows(db, invocationId)
+            await db.query('SELECT pg_advisory_xact_lock($1)', [lock])
+            entered.resolve((identity.rows[0] as { pid: number }).pid)
+            if (mode === 'active-then-aborted') await db.query('SELECT pg_sleep(30)')
+            else await once(controller.signal, 'abort')
+          },
+          isolated,
+          { signal: controller.signal }
+        ).then(
+          value => ({ value }),
+          error => ({ error })
+        )
+        const pid = await Promise.race([
+          entered.promise,
+          outcome.then(early => {
+            if ('error' in early) throw early.error
+            throw new Error('transaction ended before the physical fixture was ready')
+          }),
+        ])
+        const backendState = async () => {
+          const result = await observer.query<{ state: string; query: string }>(
+            'SELECT state, query FROM pg_stat_activity WHERE pid = $1 AND datname = $2',
+            [pid, database]
+          )
+          return result.rows[0]
+        }
+        await observe(async () => {
+          const backend = await backendState()
+          return mode === 'idle'
+            ? backend?.state === 'idle in transaction'
+            : backend?.state === 'active' && backend.query === 'SELECT pg_sleep(30)'
+        })
+        proxy.dropRepliesAndDisconnects()
+        controller.abort(reason)
+        expect(((await outcome) as { error: unknown }).error).toBe(reason)
+        expect(isolated.totalCount).toBe(0)
+        await observe(async () => proxy.suppressedDisconnects > 0)
+        // Local completion cannot establish remote cleanup. The backend still
+        // exists with its socket held by the fault proxy, independently observed.
+        expect(await backendState()).toBeDefined()
+        if (mode === 'active-then-aborted') {
+          // The server statement timeout first enters TRANS_ABORT. A SET LOCAL
+          // idle limit would have reverted to zero here and leave this backend
+          // alive indefinitely; the pre-BEGIN session backstop must remain.
+          await observe(
+            async () => (await backendState())?.state === 'idle in transaction (aborted)',
+            4_000
+          )
+          expect(proxy.discardedReplyBytes).toBeGreaterThan(0)
+        }
+        await observe(async () => !(await backendState()), 6_000)
+        await lockAvailable(lock)
+        expect(await rowCounts(invocationId)).toEqual({ attempts: 0, tickets: 0, reservations: 0 })
+        proxy.allowReplies()
+
+        // With max one, a fresh physical backend still serves and commits the
+        // real writer after both the local checkout and remote backend ended.
+        const later = randomUUID()
+        await withTransaction(db => writeAuthorizeRows(db, later), isolated, {
+          signal: new AbortController().signal,
+        })
+        expect(await rowCounts(later)).toEqual({ attempts: 1, tickets: 1, reservations: 1 })
+        await pool.query('DELETE FROM budget_pending_reservations WHERE task_ref = $1', [later])
+      } finally {
+        controller.abort(reason)
+        proxy.allowReplies()
+        await endPoolAndWaitForClients(isolated)
+        await proxy.close()
+      }
+    },
+    20_000
+  )
 })

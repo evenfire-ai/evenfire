@@ -6728,6 +6728,8 @@ export async function withTransaction<T>(
   }
   let transactionStarted = false
   let commitSent = false
+  let transactionFinished = false
+  let originalIdleTimeout: string | undefined
   let releaseError: Error | boolean | undefined
 
   // pg-pool detaches its own idle 'error' listener from a client while it is
@@ -6747,9 +6749,9 @@ export async function withTransaction<T>(
   client.on('error', onClientError)
 
   let termination: Promise<void> | undefined
-  const onAbort = (): void => {
+  const terminateClient = (reason: Error | boolean): void => {
+    releaseError ??= reason
     if (termination) return
-    releaseError = signal?.reason instanceof Error ? signal.reason : true
     termination = client.end().catch(error => {
       releaseError = error instanceof Error ? error : true
     })
@@ -6761,11 +6763,58 @@ export async function withTransaction<T>(
     // finish the caller ahead of that event.
     client.connection.stream.destroy()
   }
+  const onAbort = (): void => {
+    terminateClient(signal?.reason instanceof Error ? signal.reason : true)
+  }
   signal?.addEventListener('abort', onAbort, { once: true })
   if (signal?.aborted) onAbort()
 
   try {
     signal?.throwIfAborted()
+    if (signal) {
+      // Read normalized milliseconds from this backend, not from client startup
+      // options: a role/database default or a reused session can be different.
+      const settings = await client.query<{
+        statement_timeout_ms: string | null
+        idle_timeout_ms: string | null
+      }>(`SELECT
+        (SELECT setting FROM pg_settings WHERE name = 'statement_timeout') AS statement_timeout_ms,
+        (SELECT setting FROM pg_settings WHERE name = 'idle_in_transaction_session_timeout') AS idle_timeout_ms`)
+      signal.throwIfAborted()
+      const setting = settings.rows[0]
+      const statementTimeout = setting?.statement_timeout_ms
+      const idleTimeout = setting?.idle_timeout_ms
+      const statementMs = Number(statementTimeout)
+      const idleMs = Number(idleTimeout)
+      // These are the existing createBoundedPgPoolForConnection startup bounds.
+      // An unbounded or invalid effective server setting cannot supply a finite
+      // remote cleanup backstop, so this cancellable transaction must fail loud.
+      if (
+        typeof statementTimeout !== 'string' ||
+        !/^\d+$/.test(statementTimeout) ||
+        !Number.isInteger(statementMs) ||
+        statementMs < 100 ||
+        statementMs > 30_000 ||
+        typeof idleTimeout !== 'string' ||
+        !/^\d+$/.test(idleTimeout) ||
+        !Number.isSafeInteger(idleMs)
+      ) {
+        throw new Error('Invalid effective PostgreSQL cancellation timeout bounds')
+      }
+      if (idleMs === 0 || idleMs > statementMs) {
+        // This must be SESSION scope before BEGIN. AbortTransaction restores a
+        // SET LOCAL value before entering idle-in-transaction (aborted), which
+        // would remove the very backstop needed when a blackhole hides our FIN.
+        // Record the original before sending: a missing set_config reply is also
+        // uncertain, and that checkout must be ended rather than returned healthy.
+        originalIdleTimeout = idleTimeout
+        await client.query('SELECT set_config($1, $2, false)', [
+          'idle_in_transaction_session_timeout',
+          statementTimeout,
+        ])
+        signal.throwIfAborted()
+      }
+    }
     await client.query('BEGIN')
     transactionStarted = true
     if (signal) {
@@ -6795,6 +6844,7 @@ export async function withTransaction<T>(
     signal?.throwIfAborted()
     commitSent = true
     await client.query('COMMIT')
+    transactionFinished = true
     signal?.throwIfAborted()
     return result
   } catch (error) {
@@ -6803,6 +6853,7 @@ export async function withTransaction<T>(
     } else {
       try {
         await client.query('ROLLBACK')
+        transactionFinished = true
       } catch (rollbackError) {
         releaseError = rollbackError instanceof Error ? rollbackError : true
       }
@@ -6813,6 +6864,36 @@ export async function withTransaction<T>(
     throw error
   } finally {
     // Work (including its own finally) and any rollback have already unwound.
+    // Only an acknowledged, healthy transaction may restore session state and
+    // return to the pool. Lost COMMIT/ROLLBACK replies leave the server backstop
+    // installed; local transport completion is not remote cleanup observation.
+    if (
+      originalIdleTimeout !== undefined &&
+      transactionFinished &&
+      !releaseError &&
+      !asyncClientError &&
+      !signal?.aborted
+    ) {
+      try {
+        await client.query('SELECT set_config($1, $2, false)', [
+          'idle_in_transaction_session_timeout',
+          originalIdleTimeout,
+        ])
+      } catch (restoreError) {
+        // Do not replace the work outcome or relabel an acknowledged COMMIT as
+        // a rollback. A session that failed restoration is physically ended.
+        releaseError = restoreError instanceof Error ? restoreError : true
+      }
+    }
+    if (signal && (releaseError || asyncClientError || signal.aborted)) {
+      terminateClient(
+        signal.aborted
+          ? signal.reason instanceof Error
+            ? signal.reason
+            : true
+          : (releaseError ?? asyncClientError ?? true)
+      )
+    }
     // Keep both listeners and the checkout until physical termination completes.
     if (termination) await termination
     signal?.removeEventListener('abort', onAbort)

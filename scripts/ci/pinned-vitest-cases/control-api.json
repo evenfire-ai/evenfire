@@ -222,5 +222,61 @@
   {
     "suite": "llmProviderAttemptAuthorizer.cancellation.test.ts",
     "fullName": "scoped transaction cancellation with the native pg driver and sockets keeps a lost COMMIT reply uncertain and never attempts rollback or returns that client healthy"
+  },
+  {
+    "suite": "helpers.realPostgresCancellation.test.ts",
+    "fullName": "hides frontend Terminate and FIN as well as replies without closing the backend socket"
+  },
+  {
+    "suite": "llmProviderAttemptAuthorizer.cancellation.test.ts",
+    "fullName": "cancellable transaction server idle backstop with native pool max one bounds an effective idle timeout of 0 before BEGIN and restores it after acknowledged COMMIT"
+  },
+  {
+    "suite": "llmProviderAttemptAuthorizer.cancellation.test.ts",
+    "fullName": "cancellable transaction server idle backstop with native pool max one bounds an effective idle timeout of 45000 before BEGIN and restores it after acknowledged COMMIT"
+  },
+  {
+    "suite": "llmProviderAttemptAuthorizer.cancellation.test.ts",
+    "fullName": "cancellable transaction server idle backstop with native pool max one preserves a smaller positive server idle limit without changing the session"
+  },
+  {
+    "suite": "llmProviderAttemptAuthorizer.cancellation.test.ts",
+    "fullName": "cancellable transaction server idle backstop with native pool max one fails before BEGIN for effective statement timeout 0 and physically evicts the checkout"
+  },
+  {
+    "suite": "llmProviderAttemptAuthorizer.cancellation.test.ts",
+    "fullName": "cancellable transaction server idle backstop with native pool max one fails before BEGIN for effective statement timeout 99 and physically evicts the checkout"
+  },
+  {
+    "suite": "llmProviderAttemptAuthorizer.cancellation.test.ts",
+    "fullName": "cancellable transaction server idle backstop with native pool max one fails before BEGIN for effective statement timeout 30001 and physically evicts the checkout"
+  },
+  {
+    "suite": "llmProviderAttemptAuthorizer.cancellation.test.ts",
+    "fullName": "cancellable transaction server idle backstop with native pool max one fails before BEGIN for effective statement timeout not-a-number and physically evicts the checkout"
+  },
+  {
+    "suite": "llmProviderAttemptAuthorizer.cancellation.test.ts",
+    "fullName": "cancellable transaction server idle backstop with native pool max one fails before BEGIN for effective statement timeout null and physically evicts the checkout"
+  },
+  {
+    "suite": "llmProviderAttemptAuthorizer.cancellation.test.ts",
+    "fullName": "cancellable transaction server idle backstop with native pool max one restores the session after acknowledged ROLLBACK without replacing the primary work error"
+  },
+  {
+    "suite": "llmProviderAttemptAuthorizer.cancellation.test.ts",
+    "fullName": "cancellable transaction server idle backstop with native pool max one poisons and physically ends a failed session setup without running work"
+  },
+  {
+    "suite": "llmProviderAttemptAuthorizer.cancellation.test.ts",
+    "fullName": "cancellable transaction server idle backstop with native pool max one evicts a failed restoration while preserving the acknowledged COMMIT outcome"
+  },
+  {
+    "suite": "llmProviderAttemptAuthorizer.cancellation.test.ts",
+    "fullName": "cancellable transaction server idle backstop with native pool max one evicts a failed restoration after ROLLBACK and keeps the original work failure"
+  },
+  {
+    "suite": "llmProviderAttemptAuthorizer.cancellation.test.ts",
+    "fullName": "cancellable transaction server idle backstop with native pool max one retains the sole pool checkout until restoration finishes before serving the next borrower"
   }
 ]
