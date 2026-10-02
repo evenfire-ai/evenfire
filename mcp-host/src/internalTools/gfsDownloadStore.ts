@@ -22,6 +22,7 @@ export type GfsDownloadStoreErrorCode =
   | 'download_missing'
   | 'download_busy'
   | 'host_quota_exceeded'
+  | 'publication_cancelled'
   | 'storage_write_failed'
   | 'unsupported_store_schema'
   | 'workspace_unavailable'
@@ -205,16 +206,18 @@ async function syncDirectory(directory: string): Promise<void> {
   }
 }
 
-async function sha256FileHandle(handle: fs.FileHandle): Promise<string> {
+async function sha256FileHandle(handle: fs.FileHandle, assertActive?: () => void): Promise<string> {
   const digest = createHash('sha256')
   const chunk = Buffer.alloc(64 * 1024)
   let position = 0
   for (;;) {
+    assertActive?.()
     const { bytesRead } = await handle.read(chunk, 0, chunk.byteLength, position)
     if (bytesRead === 0) break
     digest.update(chunk.subarray(0, bytesRead))
     position += bytesRead
   }
+  assertActive?.()
   return digest.digest('hex')
 }
 
@@ -385,7 +388,12 @@ export class GfsDownloadStore {
     }
   }
 
-  async publish(id: string, callerIdentity: string, sha256: string): Promise<GfsDownloadReceipt> {
+  async publish(
+    id: string,
+    callerIdentity: string,
+    sha256: string,
+    publication?: { signal?: AbortSignal; deadlineMs?: number }
+  ): Promise<GfsDownloadReceipt> {
     this.assertInitialized()
     const record = this.record(id)
     const receipt = await this.serialize(async () => {
@@ -404,20 +412,41 @@ export class GfsDownloadStore {
         )
         .catch(() => undefined)
       if (!partialHandle) throw new GfsDownloadStoreError('download_missing')
+      let renamed = false
       try {
         const info = await partialHandle.stat()
         if (!info.isFile() || info.isSymbolicLink() || info.size !== record.sizeBytes)
           throw new GfsDownloadStoreError('download_missing')
-        if ((await sha256FileHandle(partialHandle)) !== sha256)
+        if (
+          (await sha256FileHandle(partialHandle, () => this.assertPublicationOpen(publication))) !==
+          sha256
+        )
           throw new GfsDownloadStoreError('corrupt_store_ledger')
+        // A finished rename is not a publication. The journal commit below is.
+        this.assertPublicationOpen(publication)
         await fs.rename(partial, source)
+        renamed = true
       } finally {
         await partialHandle.close()
       }
+      if (!renamed) throw new GfsDownloadStoreError('download_missing')
       await syncDirectory(path.dirname(source))
+      this.assertPublicationOpen(publication)
       record.state = 'completed'
       record.sha256 = sha256
-      await this.persist()
+      try {
+        await this.persist(publication)
+        this.assertPublicationOpen(publication)
+      } catch (error) {
+        // Publication is not observable outside this serialized operation until
+        // its journal has settled. Cancellation restores charged, unreadable
+        // transfer state even when it arrives during the atomic journal commit.
+        record.state = 'transferring'
+        delete record.sha256
+        if (error instanceof GfsDownloadStoreError && error.code === 'publication_cancelled')
+          await this.persist()
+        throw error
+      }
       return {
         id,
         source: record.source,
@@ -429,6 +458,65 @@ export class GfsDownloadStore {
     })
     this.releaseActive(record)
     return receipt
+  }
+
+  /** Reuse only after the caller has freshly authorized this exact source version. */
+  async reusableReceipt(
+    callerIdentity: string,
+    source: GfsImageSource,
+    sizeBytes: number,
+    bounds?: { signal?: AbortSignal; deadlineMs?: number }
+  ): Promise<GfsDownloadReceipt | undefined> {
+    this.assertInitialized()
+    return this.serialize(async () => {
+      this.assertPublicationOpen(bounds)
+      const record = Object.values(this.ledger.records).find(
+        item =>
+          item.callerIdentity === callerIdentity &&
+          item.state === 'completed' &&
+          Date.parse(item.expiresAt) > Date.now() &&
+          item.sizeBytes === sizeBytes &&
+          item.source.drive === source.drive &&
+          item.source.resourceId === source.resourceId &&
+          item.source.version === source.version &&
+          item.sha256 !== undefined
+      )
+      if (!record) return undefined
+      const unavailable = async (): Promise<undefined> => {
+        record.state = 'missing'
+        delete record.sha256
+        await this.persist()
+        return undefined
+      }
+      const handle = await fs
+        .open(
+          path.join(this.hostRoot, record.hostPath),
+          constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_EXCL | constants.O_NONBLOCK
+        )
+        .catch(() => undefined)
+      if (!handle) return unavailable()
+      try {
+        const info = await handle.stat()
+        if (!info.isFile() || info.size !== sizeBytes || (info.mode & 0o777) !== 0o600)
+          return unavailable()
+        if (
+          (await sha256FileHandle(handle, () => this.assertPublicationOpen(bounds))) !==
+          record.sha256
+        )
+          return unavailable()
+      } finally {
+        await handle.close()
+      }
+      this.assertPublicationOpen(bounds)
+      return {
+        id: record.id,
+        source,
+        path: record.path,
+        sizeBytes: record.sizeBytes,
+        sha256: record.sha256!,
+        expiresAt: record.expiresAt,
+      }
+    })
   }
 
   async fail(id: string, callerIdentity: string): Promise<void> {
@@ -540,7 +628,16 @@ export class GfsDownloadStore {
         (info.mode & 0o777) !== 0o600
       )
         throw new GfsDownloadStoreError('download_missing')
-      bytes = await handle.readFile()
+      bytes = Buffer.alloc(record.sizeBytes)
+      let offset = 0
+      while (offset < record.sizeBytes) {
+        const { bytesRead } = await handle.read(bytes, offset, record.sizeBytes - offset, offset)
+        if (bytesRead <= 0) throw new GfsDownloadStoreError('download_missing')
+        offset += bytesRead
+      }
+      const probe = Buffer.alloc(1)
+      const extra = await handle.read(probe, 0, 1, record.sizeBytes)
+      if (extra.bytesRead !== 0) throw new GfsDownloadStoreError('download_missing')
     } finally {
       await handle.close()
     }
@@ -787,9 +884,13 @@ export class GfsDownloadStore {
     }
   }
 
-  private async persist(): Promise<void> {
+  private async persist(publication?: {
+    signal?: AbortSignal
+    deadlineMs?: number
+  }): Promise<void> {
+    const temporary = `${this.ledgerPath}.tmp-${randomUUID()}`
     try {
-      const temporary = `${this.ledgerPath}.tmp-${randomUUID()}`
+      this.assertPublicationOpen(publication)
       const handle = await fs.open(
         temporary,
         constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL,
@@ -801,10 +902,19 @@ export class GfsDownloadStore {
       } finally {
         await handle.close()
       }
+      this.assertPublicationOpen(publication)
       await fs.rename(temporary, this.ledgerPath)
       await syncDirectory(this.storeRoot)
+      this.assertPublicationOpen(publication)
     } catch (error) {
-      this.unsafe = true
+      if (error instanceof GfsDownloadStoreError && error.code === 'publication_cancelled') {
+        try {
+          await fs.rm(temporary, { force: true })
+        } catch {
+          this.unsafe = true
+          throw new GfsDownloadStoreError('storage_write_failed')
+        }
+      } else this.unsafe = true
       throw error
     }
   }
@@ -891,6 +1001,14 @@ export class GfsDownloadStore {
     } finally {
       unlock()
     }
+  }
+
+  private assertPublicationOpen(publication?: { signal?: AbortSignal; deadlineMs?: number }): void {
+    if (
+      publication?.signal?.aborted ||
+      (publication?.deadlineMs !== undefined && Date.now() >= publication.deadlineMs)
+    )
+      throw new GfsDownloadStoreError('publication_cancelled')
   }
 
   private assertInitialized(): void {

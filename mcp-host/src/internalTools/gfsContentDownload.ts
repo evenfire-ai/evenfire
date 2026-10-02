@@ -106,6 +106,13 @@ export async function downloadGfsContent(
     controller.abort()
   }, timeoutMs)
   const signal = controller.signal
+  const publicationStopped = () => signal.aborted || Date.now() >= deadlineMs
+  const assertPublicationOpen = (): void => {
+    if (!publicationStopped()) return
+    if (Date.now() >= deadlineMs) expired = true
+    if (!signal.aborted) controller.abort()
+    throw new GfsDownloadError(expired ? 'timeout' : 'cancelled')
+  }
   const resourcePath = `/v1/resources/${encodeURIComponent(args.resourceId)}`
   const query = `?drive=${encodeURIComponent(args.drive)}`
   const init: RequestInit = {
@@ -137,6 +144,19 @@ export async function downloadGfsContent(
     } catch (error) {
       if (error instanceof VisualInputError) throw transferError(error)
       throw error
+    }
+
+    // Reuse preserves the original copy's TTL and quota charge, but never
+    // substitutes for fresh GFS authorization, identity and version checks.
+    const retained = await options.store.reusableReceipt(
+      options.callerIdentity,
+      source,
+      sizeBytes,
+      { signal, deadlineMs }
+    )
+    if (retained) {
+      assertPublicationOpen()
+      return retained
     }
 
     transfer = await options.store.createTransfer({
@@ -201,19 +221,38 @@ export async function downloadGfsContent(
     }
 
     if (bytes !== sizeBytes) throw new GfsDownloadError('incomplete_response')
-    if (signal.aborted) throw new GfsDownloadError('cancelled')
+    assertPublicationOpen()
     await destination.sync()
+    assertPublicationOpen()
     await destination.close()
     destination = undefined
+    assertPublicationOpen()
     const receipt = await options.store.publish(
       transfer.id,
       options.callerIdentity,
-      digest.digest('hex')
+      digest.digest('hex'),
+      {
+        signal,
+        deadlineMs,
+      }
     )
+    assertPublicationOpen()
     published = true
     return receipt
   } catch (error) {
-    if (signal.aborted) throw new GfsDownloadError(expired ? 'timeout' : 'cancelled')
+    if (
+      error instanceof GfsDownloadStoreError &&
+      error.code === 'publication_cancelled' &&
+      Date.now() >= deadlineMs
+    )
+      expired = true
+    if (
+      signal.aborted ||
+      (error instanceof GfsDownloadStoreError && error.code === 'publication_cancelled')
+    ) {
+      if (Date.now() >= deadlineMs) expired = true
+      throw new GfsDownloadError(expired ? 'timeout' : 'cancelled')
+    }
     if (error instanceof GfsDownloadError) throw error
     if (error instanceof VisualInputError) throw transferError(error)
     if (error instanceof GfsDownloadStoreError) throw error

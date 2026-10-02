@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createHash } from 'node:crypto'
 import * as fs from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -29,6 +29,7 @@ beforeEach(async () => {
 })
 
 afterEach(async () => {
+  vi.restoreAllMocks()
   await store.close().catch(() => undefined)
   await fs.rm(hostRoot, { recursive: true, force: true })
 })
@@ -284,4 +285,190 @@ describe('GFS download store', () => {
       code: 'corrupt_store_ledger',
     })
   })
+  it('does not commit a publication released after abort and keeps failed cleanup reserved', async () => {
+    const expiresAt = new Date(Date.now() + 60_000).toISOString()
+    const transfer = await store.createTransfer({
+      callerIdentity: 'caller-a',
+      callerWorkspacePath: callerRoot,
+      source,
+      sizeBytes: 7,
+      expiresAt,
+    })
+    await fs.writeFile(path.join(callerRoot, `${transfer.path}.partial`), 'fixture')
+    const sha256 = createHash('sha256').update('fixture').digest('hex')
+    const probe = await fs.open(path.join(callerRoot, 'probe'), 'w')
+    const prototype = Object.getPrototypeOf(probe) as fs.FileHandle
+    await probe.close()
+    const controller = new AbortController()
+    let releaseRead!: () => void
+    const readBlocked = new Promise<void>(resolve => {
+      releaseRead = resolve
+    })
+    let readEntered!: () => void
+    const readStarted = new Promise<void>(resolve => {
+      readEntered = resolve
+    })
+    let heldRead = false
+    const originalRead = prototype.read
+    vi.spyOn(prototype, 'read').mockImplementation(async function (
+      this: fs.FileHandle,
+      ...values: unknown[]
+    ) {
+      const info = await this.stat()
+      if (!heldRead && info.isFile() && info.size === 7) {
+        heldRead = true
+        readEntered()
+        await readBlocked
+      }
+      return originalRead.apply(this, values as never)
+    })
+
+    const pending = store.publish(transfer.id, 'caller-a', sha256, { signal: controller.signal })
+    const rejected = expect(pending).rejects.toMatchObject({ code: 'publication_cancelled' })
+    await readStarted
+    controller.abort()
+    releaseRead()
+    await rejected
+    expect(store.debugRecord(transfer.id)).toMatchObject({ state: 'transferring' })
+    expect(store.debugRecord(transfer.id)?.sha256).toBeUndefined()
+    vi.restoreAllMocks()
+
+    const directory = path.dirname(path.join(callerRoot, transfer.path))
+    await fs.rm(directory, { recursive: true, force: true })
+    await expect(store.fail(transfer.id, 'caller-a')).rejects.toMatchObject({
+      code: 'storage_write_failed',
+    })
+    expect(store.debugRecord(transfer.id)).toMatchObject({
+      state: 'cleanup_failed',
+      sizeBytes: 7,
+    })
+    expect(store.debugUsage()).toMatchObject({ bytes: 7, files: 1 })
+  })
+
+  it('rejects a managed file that grows after its size check without reading the extra body', async () => {
+    const transfer = await store.createTransfer({
+      callerIdentity: 'caller-a',
+      callerWorkspacePath: callerRoot,
+      source,
+      sizeBytes: 7,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    })
+    await fs.writeFile(path.join(callerRoot, `${transfer.path}.partial`), 'fixture')
+    const receipt = await store.publish(
+      transfer.id,
+      'caller-a',
+      createHash('sha256').update('fixture').digest('hex')
+    )
+    await expect(store.readManagedFile(receipt.path, 'caller-a')).resolves.toEqual(
+      Buffer.from('fixture')
+    )
+
+    const probe = await fs.open(path.join(callerRoot, 'probe'), 'w')
+    const prototype = Object.getPrototypeOf(probe) as fs.FileHandle
+    await probe.close()
+    let grown = false
+    const originalStat = prototype.stat
+    vi.spyOn(prototype, 'stat').mockImplementation(async function (this: fs.FileHandle) {
+      const info = await originalStat.call(this)
+      if (!grown && info.isFile() && info.size === 7) {
+        grown = true
+        await fs.appendFile(path.join(callerRoot, receipt.path), 'X'.repeat(64))
+      }
+      return info
+    })
+    let readBytes = 0
+    const originalRead = prototype.read
+    vi.spyOn(prototype, 'read').mockImplementation(async function (
+      this: fs.FileHandle,
+      ...values: unknown[]
+    ) {
+      const result = await originalRead.apply(this, values as never)
+      readBytes += result.bytesRead
+      return result
+    })
+
+    await expect(store.readManagedFile(receipt.path, 'caller-a')).rejects.toMatchObject({
+      code: 'download_missing',
+    })
+    expect(grown).toBe(true)
+    expect(readBytes).toBe(receipt.sizeBytes + 1)
+  })
+
+  it.each([
+    ['temporary journal sync', 'abort'],
+    ['temporary journal sync', 'deadline'],
+    ['committed journal directory sync', 'abort'],
+    ['committed journal directory sync', 'deadline'],
+  ] as const)(
+    'keeps publication unreadable during cancellation at %s (%s)',
+    async (phase, cancellation) => {
+      const transfer = await store.createTransfer({
+        callerIdentity: 'caller-a',
+        callerWorkspacePath: callerRoot,
+        source,
+        sizeBytes: 7,
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      })
+      await fs.writeFile(path.join(callerRoot, `${transfer.path}.partial`), 'fixture')
+      const ledgerDirectory = path.join(hostRoot, '.gfs-download-store')
+      const directoryInfo = await fs.stat(ledgerDirectory)
+      const probe = await fs.open(path.join(callerRoot, 'probe'), 'w')
+      const prototype = Object.getPrototypeOf(probe) as fs.FileHandle
+      await probe.close()
+      let release!: () => void
+      const blocked = new Promise<void>(resolve => {
+        release = resolve
+      })
+      let entered!: () => void
+      const started = new Promise<void>(resolve => {
+        entered = resolve
+      })
+      let held = false
+      const originalSync = prototype.sync
+      vi.spyOn(prototype, 'sync').mockImplementation(async function (this: fs.FileHandle) {
+        const info = await this.stat()
+        const atBoundary =
+          phase === 'temporary journal sync'
+            ? info.isFile() && info.size > 7
+            : info.isDirectory() && info.ino === directoryInfo.ino
+        if (!held && atBoundary && store.debugRecord(transfer.id)?.state === 'completed') {
+          held = true
+          entered()
+          await blocked
+        }
+        return originalSync.call(this)
+      })
+      const controller = new AbortController()
+      let now = Date.now()
+      const deadlineMs = now + 1000
+      if (cancellation === 'deadline') vi.spyOn(Date, 'now').mockImplementation(() => now)
+      const pending = store.publish(
+        transfer.id,
+        'caller-a',
+        createHash('sha256').update('fixture').digest('hex'),
+        { signal: controller.signal, deadlineMs }
+      )
+      const rejected = expect(pending).rejects.toMatchObject({ code: 'publication_cancelled' })
+      await started
+      if (cancellation === 'abort') controller.abort()
+      else now = deadlineMs
+      release()
+      await rejected
+
+      expect(store.debugRecord(transfer.id)).toMatchObject({ state: 'transferring' })
+      expect(store.debugRecord(transfer.id)?.sha256).toBeUndefined()
+      await expect(store.readManagedFile(transfer.path, 'caller-a')).rejects.toMatchObject({
+        code: 'download_missing',
+      })
+      const ledger = JSON.parse(
+        await fs.readFile(path.join(ledgerDirectory, 'ledger-v1.json'), 'utf8')
+      )
+      expect(ledger.records[transfer.id].state).toBe('transferring')
+      expect(ledger.records[transfer.id].sha256).toBeUndefined()
+      expect((await fs.readdir(ledgerDirectory)).filter(name => name.includes('.tmp-'))).toEqual([])
+      expect(store.debugUsage()).toMatchObject({ bytes: 7, files: 1 })
+      await store.fail(transfer.id, 'caller-a')
+      expect(store.debugUsage()).toMatchObject({ bytes: 0, files: 0 })
+    }
+  )
 })

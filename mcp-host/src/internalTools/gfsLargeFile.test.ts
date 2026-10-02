@@ -184,6 +184,99 @@ describe('GFS large-file tool routing', () => {
     )
   })
 
+  it.each([
+    ['binary', Buffer.from([0xff, 0x00, 0xfe, 0x01])],
+    ['SVG', Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"></svg>')],
+  ])(
+    'preserves a small %s source as a workspace file without inline content',
+    async (_kind, bytes) => {
+      const file = content(bytes)
+      const receipt = {
+        id: 'download-small',
+        source,
+        path: '.gfs-downloads/input-download-small/source',
+        sizeBytes: bytes.byteLength,
+        sha256: createHash('sha256').update(bytes).digest('hex'),
+        expiresAt: '2026-10-08T00:00:00.000Z',
+      }
+      const download = vi.fn(async () => receipt)
+      const gfs = client({ read: vi.fn(async () => file), download })
+      gfs.readMetadata = vi.fn(async () => snapshot(bytes.byteLength))
+      const store = fakeDownloadStore()
+      const tool = buildGfsReadTools(gfs, {
+        referencedFiles: new Map(),
+        downloadStore: store,
+        callerIdentity: 'caller-a',
+        callerWorkspacePath: callerWorkspace,
+      }).find(item => item.name === 'clerum__gfs_read')!
+
+      const { outcome, parsed } = await result(tool, target)
+
+      expect(outcome.success).toBe(true)
+      expect(parsed).toMatchObject({
+        delivery: 'workspace_file',
+        ...receipt,
+        usage: {
+          approval: 'user-approval-required',
+          wholeFileToContextAllowed: false,
+          boundedOutputOnly: true,
+        },
+      })
+      expect(outcome.images).toBeUndefined()
+      expect(download).toHaveBeenCalledWith(
+        target,
+        expect.objectContaining({ expectedVersion: source.version, store })
+      )
+      expect(file.reservation.release).toHaveBeenCalledOnce()
+    }
+  )
+
+  it.each([
+    [Buffer.from([0xff, 0x00, 0xfe, 0x01]), 'unsupported_binary_format'],
+    [Buffer.from('<svg></svg>'), 'svg_visual_input_not_supported'],
+  ])(
+    'keeps a small non-inline source reference-only when workspace delivery is unavailable',
+    async (bytes, reason) => {
+      const file = content(bytes)
+      const gfs = client({ read: vi.fn(async () => file) })
+      gfs.readMetadata = vi.fn(async () => snapshot(bytes.byteLength))
+      const tool = buildGfsReadTools(gfs, { referencedFiles: new Map() }).find(
+        item => item.name === 'clerum__gfs_read'
+      )!
+
+      const { parsed } = await result(tool, target)
+
+      expect(parsed).toMatchObject({ delivery: 'reference_only', reason })
+      expect(parsed.resource).toEqual(source)
+      expect(file.reservation.release).toHaveBeenCalledOnce()
+    }
+  )
+
+  it('does not download a newer small binary version after its classification read', async () => {
+    const file = content(Buffer.from([0xff, 0x00]))
+    const download = vi.fn(async () => {
+      throw new GfsDownloadError('version_conflict')
+    })
+    const gfs = client({ read: vi.fn(async () => file), download })
+    gfs.readMetadata = vi.fn(async () => snapshot(file.bytes.byteLength))
+    const tool = buildGfsReadTools(gfs, {
+      referencedFiles: new Map(),
+      downloadStore: fakeDownloadStore(),
+      callerIdentity: 'caller-a',
+      callerWorkspacePath: callerWorkspace,
+    }).find(item => item.name === 'clerum__gfs_read')!
+
+    const { outcome, parsed } = await result(tool, target)
+
+    expect(outcome.success).toBe(true)
+    expect(parsed).toMatchObject({ availability: 'stale', expectedVersion: source.version })
+    expect(download).toHaveBeenCalledWith(
+      target,
+      expect.objectContaining({ expectedVersion: source.version })
+    )
+    expect(file.reservation.release).toHaveBeenCalledOnce()
+  })
+
   it('preserves a workspace receipt before projecting a byte-classified image', async () => {
     const png = Buffer.from(
       'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',

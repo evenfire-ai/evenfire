@@ -271,4 +271,185 @@ describe('governed GFS content download', () => {
     ).rejects.toThrow('gfsc 403')
     expect(await retainedDirectories()).toEqual([])
   })
+
+  it('does not publish when file sync is released after abort', async () => {
+    const controller = new AbortController()
+    const bytes = new Uint8Array([1, 2, 3, 4, 5])
+    const probe = await fs.open(path.join(callerRoot, 'probe'), 'w')
+    const prototype = Object.getPrototypeOf(probe) as fs.FileHandle
+    await probe.close()
+    let releaseSync!: () => void
+    const syncBlocked = new Promise<void>(resolve => {
+      releaseSync = resolve
+    })
+    let syncEntered!: () => void
+    const syncStarted = new Promise<void>(resolve => {
+      syncEntered = resolve
+    })
+    let heldSync = false
+    const originalSync = prototype.sync
+    vi.spyOn(prototype, 'sync').mockImplementation(async function (this: fs.FileHandle) {
+      const info = await this.stat()
+      if (!heldSync && info.isFile() && info.size === bytes.byteLength) {
+        heldSync = true
+        syncEntered()
+        await syncBlocked
+      }
+      return originalSync.call(this)
+    })
+
+    const pending = downloadGfsContent(harness(bytes), args, options({ signal: controller.signal }))
+    const rejected = expect(pending).rejects.toMatchObject({ code: 'cancelled' })
+    await syncStarted
+    controller.abort()
+    releaseSync()
+    await rejected
+    expect(await retainedDirectories()).toEqual([])
+    expect(store.debugUsage()).toMatchObject({ bytes: 0, files: 0 })
+    await downloadGfsContent(harness(new Uint8Array([1])), args, options())
+  })
+
+  it('does not commit a publication released after abort', async () => {
+    const controller = new AbortController()
+    const bytes = new Uint8Array([9, 8, 7])
+    const probe = await fs.open(path.join(callerRoot, 'probe'), 'w')
+    const prototype = Object.getPrototypeOf(probe) as fs.FileHandle
+    await probe.close()
+    let releaseRead!: () => void
+    const readBlocked = new Promise<void>(resolve => {
+      releaseRead = resolve
+    })
+    let readEntered!: () => void
+    const readStarted = new Promise<void>(resolve => {
+      readEntered = resolve
+    })
+    let heldRead = false
+    const originalRead = prototype.read
+    vi.spyOn(prototype, 'read').mockImplementation(async function (
+      this: fs.FileHandle,
+      ...values: unknown[]
+    ) {
+      const info = await this.stat()
+      if (!heldRead && info.isFile() && info.size === bytes.byteLength) {
+        heldRead = true
+        readEntered()
+        await readBlocked
+      }
+      return originalRead.apply(this, values as never)
+    })
+
+    const pending = downloadGfsContent(harness(bytes), args, options({ signal: controller.signal }))
+    const rejected = expect(pending).rejects.toMatchObject({ code: 'cancelled' })
+    await readStarted
+    controller.abort()
+    releaseRead()
+    await rejected
+    expect(await retainedDirectories()).toEqual([])
+    expect(store.debugUsage()).toMatchObject({ bytes: 0, files: 0 })
+    await downloadGfsContent(harness(new Uint8Array([1])), args, options())
+  })
+
+  it('keeps quota reserved when cancellation cleanup fails', async () => {
+    const controller = new AbortController()
+    const bytes = new Uint8Array([1, 2, 3, 4, 5])
+    const probe = await fs.open(path.join(callerRoot, 'probe'), 'w')
+    const prototype = Object.getPrototypeOf(probe) as fs.FileHandle
+    await probe.close()
+    let releaseSync!: () => void
+    const syncBlocked = new Promise<void>(resolve => {
+      releaseSync = resolve
+    })
+    let syncEntered!: () => void
+    const syncStarted = new Promise<void>(resolve => {
+      syncEntered = resolve
+    })
+    let heldSync = false
+    const originalSync = prototype.sync
+    vi.spyOn(prototype, 'sync').mockImplementation(async function (this: fs.FileHandle) {
+      const info = await this.stat()
+      if (!heldSync && info.isFile() && info.size === bytes.byteLength) {
+        heldSync = true
+        syncEntered()
+        await syncBlocked
+      }
+      return originalSync.call(this)
+    })
+
+    const pending = downloadGfsContent(harness(bytes), args, options({ signal: controller.signal }))
+    const rejected = expect(pending).rejects.toMatchObject({ code: 'cancelled' })
+    await syncStarted
+    const [name] = await retainedDirectories()
+    const directory = path.join(callerRoot, '.gfs-downloads', name)
+    await fs.rename(directory, `${directory}.parked`)
+    await fs.writeFile(directory, 'not-a-directory')
+    controller.abort()
+    releaseSync()
+    await rejected
+    expect(store.debugUsage()).toMatchObject({ bytes: bytes.byteLength, files: 1 })
+    const ledger = JSON.parse(
+      await fs.readFile(path.join(hostRoot, '.gfs-download-store', 'ledger-v1.json'), 'utf8')
+    ) as { records: Record<string, { state: string; sha256?: string }> }
+    const [record] = Object.values(ledger.records)
+    expect(record?.state).toBe('cleanup_failed')
+    expect(record?.sha256).toBeUndefined()
+    await expect(
+      downloadGfsContent(harness(new Uint8Array([1])), args, options())
+    ).resolves.toMatchObject({
+      sizeBytes: 1,
+    })
+  })
+
+  it('reuses a verified copy only after fresh authorization without renewing its TTL', async () => {
+    const bytes = new Uint8Array([1, 2, 3, 4])
+    const request = vi.fn(harness(bytes))
+    const first = await downloadGfsContent(request, args, options())
+    const usage = store.debugUsage()
+    const second = await downloadGfsContent(request, args, options())
+
+    expect(second).toEqual(first)
+    expect(second.expiresAt).toBe(first.expiresAt)
+    expect(store.debugUsage()).toEqual(usage)
+    expect(request.mock.calls).toHaveLength(3)
+    expect(request.mock.calls.filter(([url]) => url.includes('/content?'))).toHaveLength(1)
+  })
+
+  it('does not reuse retained bytes after upstream permission is revoked', async () => {
+    const bytes = new Uint8Array([1, 2, 3])
+    await downloadGfsContent(harness(bytes), args, options())
+    const request = vi.fn(async () => new Response('denied', { status: 403 }))
+
+    await expect(downloadGfsContent(request, args, options())).rejects.toThrow('gfsc 403')
+    expect(request).toHaveBeenCalledOnce()
+    expect(store.debugUsage()).toMatchObject({ bytes: bytes.byteLength, files: 1 })
+  })
+
+  it('does not substitute a retained version for a newly stale reference', async () => {
+    const bytes = new Uint8Array([1, 2, 3])
+    await downloadGfsContent(harness(bytes), args, options({ expectedVersion: 4 }))
+    const request = vi.fn(harness(bytes, { metadata: { version: 5 } }))
+
+    await expect(
+      downloadGfsContent(request, args, options({ expectedVersion: 4 }))
+    ).rejects.toMatchObject({
+      code: 'version_conflict',
+    })
+    expect(request).toHaveBeenCalledOnce()
+  })
+
+  it('replaces an invalid cached copy through the authorized source and keeps old bytes accounted', async () => {
+    const bytes = new Uint8Array([1, 2, 3])
+    const first = await downloadGfsContent(harness(bytes), args, options())
+    await fs.writeFile(path.join(callerRoot, first.path), new Uint8Array([3, 2, 1]))
+    const request = vi.fn(harness(bytes))
+    const second = await downloadGfsContent(request, args, options())
+
+    expect(second.id).not.toBe(first.id)
+    expect(second.sha256).toBe(first.sha256)
+    expect(request).toHaveBeenCalledTimes(2)
+    expect(store.debugRecord(first.id)?.state).toBe('missing')
+    expect(store.debugUsage()).toMatchObject({ bytes: bytes.byteLength * 2, files: 2 })
+    await expect(store.readManagedFile(second.path, 'caller-a')).resolves.toEqual(
+      Buffer.from(bytes)
+    )
+  })
 })

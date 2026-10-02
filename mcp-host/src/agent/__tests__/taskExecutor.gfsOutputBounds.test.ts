@@ -13,7 +13,9 @@ import type { GfsProcessingLeaseProvider } from '../../internalTools/gfsProcessi
 import { TaskLifecycle } from '../../lifecycle/taskLifecycle'
 import type { SingleTurnProvider } from '../../llm/types'
 import { SseProgressReporter, progressReporterRegistry } from '../../progress/sseProgressReporter'
+import type { SuspendedEvent } from '../../progress/types'
 import type { Task } from '../../queue/types'
+import { createSessionRouteHandlers } from '../../server/sessionRouteHandlers'
 import { TaskExecutor, type TaskExecutorDeps, resolveTaskSessionKey } from '../taskExecutor'
 
 const savedConfig = {
@@ -54,6 +56,7 @@ function makeScenario(options: {
   command: string
   thresholdBytes: number
   spilloverStorage?: SpilloverStorage
+  threadId?: string
 }) {
   appConfig.toolSpilloverThresholdBytes = options.thresholdBytes
   const shellCall: ToolCall = {
@@ -105,6 +108,7 @@ function makeScenario(options: {
       messageId: `${options.taskId}-message`,
       timestamp: new Date().toISOString(),
       hostRef: `${options.taskId}-host`,
+      ...(options.threadId ? { threadId: options.threadId } : {}),
     },
     conversationHistory: [
       { role: 'user', content: 'Process the governed file', timestamp: new Date() },
@@ -117,8 +121,12 @@ function makeScenario(options: {
   const lifecycle = new TaskLifecycle()
   lifecycle.register(task)
   const progressEvents: string[] = []
+  const suspendedEvents: SuspendedEvent[] = []
+  const toolStarts: string[] = []
   const reporter = new SseProgressReporter(task.id, lifecycle, NoopSafety)
   reporter.subscribe(event => {
+    if (event.type === 'suspended') suspendedEvents.push(event.data)
+    if (event.type === 'tool_start') toolStarts.push(event.data.toolName)
     if (event.type === 'tool_progress' && event.data.outputPreview) {
       progressEvents.push(JSON.stringify(event.data.outputPreview))
     }
@@ -164,6 +172,8 @@ function makeScenario(options: {
     conversationManager,
     sessionKey,
     progressEvents,
+    suspendedEvents,
+    toolStarts,
     create: () => new TaskExecutor(task, deps),
     dispose: () => {
       progressReporterRegistry.delete(task.id)
@@ -183,6 +193,20 @@ function finalToolMessage(requests: ChatMessage[][]): ChatMessage {
   return message!
 }
 
+function assertPreviewBeforeExecution(
+  scenario: ReturnType<typeof makeScenario>,
+  executor: TaskExecutor
+) {
+  expect(scenario.suspendedEvents).toHaveLength(1)
+  expect(scenario.suspendedEvents[0]).toMatchObject({
+    requestId: executor.pendingApproval!.request_id,
+    inputPreview: { text: scenario.shellCall.arguments.command, truncated: false },
+  })
+  expect(scenario.toolStarts).toEqual([])
+  expect(executor.pendingApproval!.parameters).toEqual(scenario.shellCall.arguments)
+  expect(executor.pendingApproval).not.toHaveProperty('inputPreview')
+}
+
 it('keeps failed GFS shell output bounded with spillover disabled', async () => {
   const proofFile = 'gfs-output-proof.txt'
   const scenario = makeScenario({
@@ -197,6 +221,7 @@ it('keeps failed GFS shell output bounded with spillover disabled', async () => 
     const executor = await scenario.run()
     expect(executor.executorState).toBe('waiting_approval')
     expect(fs.existsSync(path.join(callerWorkspace, proofFile))).toBe(false)
+    assertPreviewBeforeExecution(scenario, executor)
 
     await executor.resumeAfterApproval(false)
 
@@ -299,6 +324,7 @@ it('cancels before shell execution and performs no second provider round-trip', 
   try {
     const executor = await scenario.run()
     expect(executor.executorState).toBe('waiting_approval')
+    assertPreviewBeforeExecution(scenario, executor)
     executor.abort()
     await executor.resumeAfterApproval(false)
 
@@ -321,6 +347,7 @@ it('denies shell approval without executing the command', async () => {
   try {
     const executor = await scenario.run()
     expect(executor.executorState).toBe('waiting_approval')
+    assertPreviewBeforeExecution(scenario, executor)
     executor.sourceTask.responseCallback = async payload => {
       if (payload.response) responsePayloads.push(payload.response)
     }
@@ -340,6 +367,7 @@ it('rehydrates a waiting GFS shell approval into a fresh executor', async () => 
   const proofFile = 'gfs-cold-resume-proof.txt'
   const scenario = makeScenario({
     taskId: 'gfs-shell-cold-resume',
+    threadId: 'preview-cold-chat',
     thresholdBytes: 2 * 1024 * 1024,
     command: `node -e "require('fs').writeFileSync('${proofFile}','resumed')"`,
   })
@@ -350,10 +378,37 @@ it('rehydrates a waiting GFS shell approval into a fresh executor', async () => 
     const approval = first.pendingApproval
     expect(approval).toBeDefined()
     expect(approval!.task_budget).toBeDefined()
+    assertPreviewBeforeExecution(scenario, first)
+    const handlers = createSessionRouteHandlers({
+      getConversationManager: () => scenario.conversationManager,
+      redactToolError: (_tool, text) => text,
+      redactTitle: text => text,
+    })
+    const snapshot = await handlers.handleSessionMessages(
+      'gfs-caller',
+      'gfs-shell-cold-resume-channel',
+      'preview-cold-chat',
+      {}
+    )
+    expect(snapshot?.pendingApproval).toMatchObject({
+      requestId: approval!.request_id,
+      inputPreview: { text: scenario.shellCall.arguments.command, truncated: false },
+    })
+    expect(
+      await handlers.handleSessionMessages(
+        'another-caller',
+        'gfs-shell-cold-resume-channel',
+        'preview-cold-chat',
+        {}
+      )
+    ).toBeNull()
 
     const second = scenario.create()
     await second.rehydrateWaitingApproval(scenario.sessionKey, approval!)
     expect(second.executorState).toBe('waiting_approval')
+    expect(second.pendingApproval!.request_id).toBe(approval!.request_id)
+    expect(second.pendingApproval!.parameters).toEqual(scenario.shellCall.arguments)
+    expect(fs.existsSync(path.join(callerWorkspace, proofFile))).toBe(false)
     await second.resumeAfterApproval(false)
 
     expect(second.executorState).toBe('completed')

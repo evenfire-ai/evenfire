@@ -3,6 +3,7 @@ import type { FileReferenceResolution } from '../agent/fileReferenceResolver'
 import { logger } from '../logger'
 import { inspectImage, validateImage } from '../visualInput/imageValidation'
 import { VisualInputError } from '../visualInput/policy'
+import type { MemoryReservation } from '../visualInput/policy'
 import type {
   InternalToolCallContext,
   InternalToolDefinition,
@@ -143,6 +144,16 @@ function workspaceFileUsage(visualDelivery: 'included' | 'not_included', visualR
   }
 }
 
+function workspaceFileWithoutImage(receipt: GfsDownloadResult, reason: string): InternalToolResult {
+  return ok({
+    delivery: 'workspace_file',
+    ...receipt,
+    visualDelivery: 'not_included',
+    visualReason: reason,
+    usage: workspaceFileUsage('not_included', reason),
+  })
+}
+
 async function projectManagedImage(
   receipt: GfsDownloadResult,
   downloadStore: GfsDownloadStore,
@@ -150,69 +161,81 @@ async function projectManagedImage(
   options: InternalToolExecutionOptions | undefined,
   knownBytes?: Buffer
 ): Promise<InternalToolResult> {
-  let visualReason = 'not_image'
+  let readReservation: MemoryReservation | undefined
   try {
     let bytes = knownBytes
+    const prefix =
+      bytes?.subarray(0, 16) ??
+      (await downloadStore.readManagedFilePrefix(receipt.path, callerIdentity))
+    const hasImageMagic =
+      prefix.length >= 3 &&
+      ((prefix[0] === 0x89 && prefix[1] === 0x50 && prefix[2] === 0x4e) ||
+        (prefix[0] === 0xff && prefix[1] === 0xd8 && prefix[2] === 0xff))
+    if (!hasImageMagic) return workspaceFileWithoutImage(receipt, 'not_image')
+    const visualInput = options?.visualInput
+    if (!visualInput)
+      return workspaceFileWithoutImage(receipt, 'image_input_unavailable_in_this_execution')
+    const capability = await visualInput.resolveCapability(options?.signal)
+    if (options?.signal?.aborted) throw new VisualInputError('cancelled')
+    if (capability.status !== 'supported')
+      return workspaceFileWithoutImage(receipt, `model_image_input_${capability.status}`)
+    const profile = capability.deliveryLimits
+    if (!profile) return workspaceFileWithoutImage(receipt, 'provider_visual_profile_unavailable')
+    if (
+      (profile.maxImageBytes !== undefined && receipt.sizeBytes > profile.maxImageBytes) ||
+      (profile.maxImageEncodedBytes !== undefined &&
+        4 * Math.ceil(receipt.sizeBytes / 3) > profile.maxImageEncodedBytes)
+    )
+      return workspaceFileWithoutImage(receipt, 'provider_visual_limit_exceeded')
     if (bytes === undefined) {
-      const prefix = await downloadStore.readManagedFilePrefix(receipt.path, callerIdentity)
-      const hasImageMagic =
-        prefix.length >= 3 &&
-        ((prefix[0] === 0x89 && prefix[1] === 0x50 && prefix[2] === 0x4e) ||
-          (prefix[0] === 0xff && prefix[1] === 0xd8 && prefix[2] === 0xff))
-      if (!hasImageMagic)
-        return {
-          success: true,
-          content: JSON.stringify({
-            delivery: 'workspace_file',
-            ...receipt,
-            visualDelivery: 'not_included',
-            visualReason,
-            usage: workspaceFileUsage('not_included', visualReason),
-          }),
-        }
+      if (receipt.sizeBytes > visualInput.budget.remainingReadBytes)
+        throw new VisualInputError('limit_exceeded')
+      // Reserve before the physical read. Inline classification bytes already
+      // carry their read reservation and are not charged twice.
+      readReservation = visualInput.budget.reserve(receipt.sizeBytes)
+      visualInput.budget.consumeRead(receipt.sizeBytes)
       bytes = await downloadStore.readManagedFile(receipt.path, callerIdentity)
     }
-    const image = inspectImage(bytes)
-    if (image) {
-      const visualInput = options?.visualInput
-      if (!visualInput) visualReason = 'image_input_unavailable_in_this_execution'
-      else {
-        const capability = await visualInput.resolveCapability(options?.signal)
-        if (options?.signal?.aborted) throw new VisualInputError('cancelled')
-        if (capability.status !== 'supported')
-          visualReason = `model_image_input_${capability.status}`
-        else {
-          await validateImage(bytes, image, { signal: options?.signal, budget: visualInput.budget })
-          if (options?.signal?.aborted) throw new VisualInputError('cancelled')
-          const dataBase64 = visualInput.budget.encodeImage(bytes)
-          return {
-            success: true,
-            content: JSON.stringify({
-              delivery: 'workspace_file',
-              ...receipt,
-              visualDelivery: 'included',
-              usage: workspaceFileUsage('included'),
-            }),
-            images: [
-              { ...image, source: receipt.source, sizeBytes: receipt.sizeBytes, dataBase64 },
-            ],
-          }
-        }
-      }
+    if (options?.signal?.aborted) throw new VisualInputError('cancelled')
+    const limits = {
+      maxFileBytes: profile.maxImageBytes ?? GFS_FILE_LIMITS.maxFileBytes,
+      maxDimension: profile.maxDimension,
+      maxPixels: profile.maxPixels,
+    }
+    const image = inspectImage(bytes, limits)
+    if (!image) return workspaceFileWithoutImage(receipt, 'not_image')
+    if (
+      (profile.maxDimension !== undefined &&
+        (image.width > profile.maxDimension || image.height > profile.maxDimension)) ||
+      (profile.maxPixels !== undefined && image.width * image.height > profile.maxPixels)
+    )
+      return workspaceFileWithoutImage(receipt, 'provider_visual_limit_exceeded')
+    await validateImage(bytes, image, {
+      signal: options?.signal,
+      budget: visualInput.budget,
+      limits,
+    })
+    if (options?.signal?.aborted) throw new VisualInputError('cancelled')
+    const dataBase64 = visualInput.budget.encodeImage(bytes)
+    return {
+      success: true,
+      content: JSON.stringify({
+        delivery: 'workspace_file',
+        ...receipt,
+        visualDelivery: 'included',
+        usage: workspaceFileUsage('included'),
+      }),
+      images: [{ ...image, source: receipt.source, sizeBytes: receipt.sizeBytes, dataBase64 }],
     }
   } catch (error) {
-    if (error instanceof VisualInputError && error.code !== 'cancelled') visualReason = error.code
-    else throw error
-  }
-  return {
-    success: true,
-    content: JSON.stringify({
-      delivery: 'workspace_file',
-      ...receipt,
-      visualDelivery: 'not_included',
-      visualReason,
-      usage: workspaceFileUsage('not_included', visualReason),
-    }),
+    if (error instanceof VisualInputError && error.code !== 'cancelled')
+      return workspaceFileWithoutImage(
+        receipt,
+        error.code === 'limit_exceeded' ? 'local_visual_resources_exceeded' : error.code
+      )
+    throw error
+  } finally {
+    readReservation?.release()
   }
 }
 
@@ -221,7 +244,11 @@ const driveResourceParams = {
   required: ['drive', 'resourceId'],
   properties: {
     drive: { type: 'string', description: 'gfs drive name (e.g. "main").' },
-    resourceId: { type: 'string', description: 'Resource id (32-hex rid).' },
+    resourceId: {
+      type: 'string',
+      description:
+        'The resourceId returned by GFS discovery (32-hex rid or UUID). A filename, path, or UUID embedded in a filename is not the resourceId. For a human path, find the accessible folder and list its children first.',
+    },
   },
 } as const
 
@@ -347,7 +374,7 @@ export function buildGfsReadTools(
     {
       name: 'clerum__gfs_accessible',
       description:
-        'List GFS resources this agent can access, including effective permissions and stable gfsUri links.',
+        'List directly accessible GFS resources, including effective permissions and stable gfsUri links. A directory with coversDescendants grants access to its children; discover those children with clerum__gfs_list before reading or downloading a named file.',
       parameters: {
         type: 'object',
         required: ['drive'],
@@ -484,7 +511,7 @@ export function buildGfsReadTools(
               : { expectedVersion: snapshot?.source.version ?? expectedVersion }),
           })
           if (options?.signal?.aborted) throw new VisualInputError('cancelled')
-          const image = inspectImage(file.bytes)
+          const image = inspectImage(file.bytes, { maxFileBytes: GFS_FILE_LIMITS.maxFileBytes })
           if (image) {
             if (canDownload) {
               recordGfsDownloadAdmission('workspace_attempt')
@@ -508,9 +535,21 @@ export function buildGfsReadTools(
             if (options?.signal?.aborted) throw new VisualInputError('cancelled')
             if (capability.status !== 'supported')
               return fileReference(file, `model_image_input_${capability.status}`)
+            const profile = capability.deliveryLimits
+            if (!profile) return fileReference(file, 'provider_visual_profile_unavailable')
+            if (
+              profile.maxImageEncodedBytes !== undefined &&
+              4 * Math.ceil(file.bytes.byteLength / 3) > profile.maxImageEncodedBytes
+            )
+              return fileReference(file, 'provider_visual_limit_exceeded')
             await validateImage(file.bytes, image, {
               signal: options?.signal,
               budget: visualInput.budget,
+              limits: {
+                maxFileBytes: profile.maxImageBytes ?? GFS_FILE_LIMITS.maxFileBytes,
+                maxDimension: profile.maxDimension,
+                maxPixels: profile.maxPixels,
+              },
             })
             if (options?.signal?.aborted) throw new VisualInputError('cancelled')
             const dataBase64 = visualInput.budget.encodeImage(file.bytes)
@@ -532,8 +571,20 @@ export function buildGfsReadTools(
           // Inline text is bounded by the generic GFS policy; larger sources were
           // routed to the workspace before this in-memory read.
           const text = decodeTextContent(file.bytes)
-          if (text === null) return fileReference(file, 'unsupported_binary_format')
-          if (isSvgText(text)) return fileReference(file, 'svg_visual_input_not_supported')
+          if (text === null || isSvgText(text)) {
+            if (canDownload) {
+              recordGfsDownloadAdmission('workspace_attempt')
+              return await downloadToWorkspace(
+                target as { drive: string; resourceId: string },
+                file.source.version,
+                options
+              )
+            }
+            return fileReference(
+              file,
+              text === null ? 'unsupported_binary_format' : 'svg_visual_input_not_supported'
+            )
+          }
           return ok(text)
         } catch (err) {
           if (
