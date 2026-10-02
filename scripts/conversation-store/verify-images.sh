@@ -9,6 +9,12 @@ source "$ROOT/scripts/minikube/docker-cli-env.sh"
   printf 'CONVERSATION_STORE_PROFILE_INVALID\n' >&2
   exit 1
 }
+mode=capabilities
+if [[ "${1:-}" == --desktop-startup ]]; then
+  mode=desktop-startup
+  shift
+  [[ "$#" -le 1 ]] || { printf 'DESKTOP_STARTUP_ARGUMENT_INVALID\n' >&2; exit 1; }
+fi
 images=("$@")
 for image in "${images[@]}"; do
   [[ "${#image}" -le 2048 && "$image" =~ ^[A-Za-z0-9][A-Za-z0-9._:/@-]*$ ]] || {
@@ -16,7 +22,9 @@ for image in "${images[@]}"; do
     exit 1
   }
 done
-if [[ ${#images[@]} -eq 0 ]]; then
+if [[ "$mode" == desktop-startup && ${#images[@]} -eq 0 ]]; then
+  images=(clerum/mcp-host-desktop:test)
+elif [[ ${#images[@]} -eq 0 ]]; then
   images=(
     clerum/mcp-host:test
     clerum/mcp-host-slim:test
@@ -70,7 +78,13 @@ cleanup_probe_containers() {
         --format '{{index .Config.Labels "clerum.io/conversation-store-probe"}}' \
         "$id")" || return 1
       [[ "$label" == "$probe_id" ]] || continue
-      owned_docker 20 docker container rm --force "$id" >/dev/null 2>&1 || cleanup_status=1
+      if [[ "$mode" == desktop-startup ]]; then
+        # Remove only anonymous volumes attached to this verified probe. Desktop
+        # base images may declare VOLUME /config; do not retain private logs.
+        owned_docker 20 docker container rm --force --volumes "$id" >/dev/null 2>&1 || cleanup_status=1
+      else
+        owned_docker 20 docker container rm --force "$id" >/dev/null 2>&1 || cleanup_status=1
+      fi
     done <<<"$container_ids"
   fi
   return "$cleanup_status"
@@ -79,13 +93,83 @@ probe_id="$(node -e 'process.stdout.write(require("node:crypto").randomUUID())')
 cleanup() {
   local status=$?
   trap - EXIT
-  cleanup_probe_containers || status=1
-  docker_cli_env_cleanup || status=1
+  local cleanup_status=0
+  if [[ "$mode" == desktop-startup ]]; then
+    cleanup_probe_containers 2>/dev/null || cleanup_status=1
+  else
+    cleanup_probe_containers || cleanup_status=1
+  fi
+  docker_cli_env_cleanup || cleanup_status=1
+  if [[ "$mode" == desktop-startup ]]; then
+    if [[ "$cleanup_status" -ne 0 ]]; then
+      printf 'DESKTOP_STARTUP_TERMINAL status=Failed category=CleanupFailed\n'
+    else
+      printf 'DESKTOP_STARTUP_TERMINAL %s cleanup=ok\n' "${desktop_terminal:-status=Failed category=ProbeIncomplete}"
+    fi
+  fi
+  [[ "$cleanup_status" -eq 0 ]] || status=1
   rm -rf -- "$task"
   exit "$status"
 }
 trap cleanup EXIT
 docker_cli_env_prepare false
+if [[ "$mode" == desktop-startup ]]; then
+  # Docker's implicit VOLUME semantics differ from Kubernetes. This proves
+  # only the actual image entrypoint under the HCC main-container policy.
+  printf 'DESKTOP_STARTUP status=Pending scope=image-entrypoint-policy-only\n'
+  desktop_terminal='status=Failed category=DaemonTransportFailed'
+  owned_docker 20 docker version --format '{{.Server.Version}}' >/dev/null 2>&1 || exit 1
+  image="${images[0]}"
+  desktop_terminal='status=Failed category=ImageMissing'
+  image_id="$(owned_docker 20 docker image inspect --format '{{.Id}}' "$image" 2>/dev/null)" || exit 1
+  [[ "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 1
+  printf 'IMAGE_ID %s %s\n' "$image" "$image_id"
+  desktop_terminal='status=Failed category=ContainerStartTransportFailed'
+  # No /run mount or entrypoint/command override: preserve the baseline s6
+  # failure if the HCC UID1001/drop-ALL/NoNewPrivileges policy cannot start it.
+  container_id="$(owned_docker 20 docker run --detach --pull=never --network=none --user 1001:1001 \
+    --cap-drop=ALL --security-opt=no-new-privileges:true --memory=1g --memory-swap=1g --cpus=1 --pids-limit=256 \
+    --stop-timeout=5 --log-driver=local --log-opt=max-size=256k --log-opt=max-file=1 \
+    --label "clerum.io/conversation-store-probe=$probe_id" \
+    --tmpfs /tmp:rw,size=64m,uid=1001,gid=1001,mode=1777 \
+    --tmpfs /config/workspace:rw,size=64m,uid=1001,gid=1001,mode=0700 \
+    "$image_id" 2>/dev/null)" || exit 1
+  [[ "$container_id" =~ ^[0-9a-f]{64}$ ]] || exit 1
+  desktop_terminal='status=Failed category=ContainerOwnershipUnknown'
+  label="$(owned_docker 10 docker container inspect \
+    --format '{{index .Config.Labels "clerum.io/conversation-store-probe"}}' "$container_id" 2>/dev/null)" || exit 1
+  [[ "$label" == "$probe_id" ]] || exit 1
+  helper="$ROOT/scripts/conversation-store/desktop-startup-observation.mjs"
+  snapshot_source="$(node "$helper" --remote-source)"
+  observation_status=0
+  # The in-container observer uses a 30s monotonic deadline. The inherited
+  # runner bounds transport too; every subsequent operation has its own cap.
+  owned_docker 35 docker exec --user 1001:1001 "$container_id" \
+    node --input-type=module -e "$snapshot_source" \
+    >"$task/startup-proof.json" 2>/dev/null || observation_status=$?
+  desktop_terminal='status=Failed category=ContainerStateUnknown'
+  state_format='{{.State.Status}} {{.State.ExitCode}} {{.State.OOMKilled}}'
+  owned_docker 10 docker container inspect --format "$state_format" "$container_id" \
+    >"$task/observed-state" 2>/dev/null || exit 1
+  termination=already-exited
+  if [[ "$(cat "$task/observed-state")" == running\ * ]]; then
+    termination=probe-stop
+    desktop_terminal='status=Failed category=ContainerStopFailed'
+    owned_docker 10 docker container stop --time 5 "$container_id" >/dev/null 2>&1 || exit 1
+  fi
+  owned_docker 10 docker container inspect --format "$state_format" "$container_id" \
+    >"$task/final-state" 2>/dev/null || exit 1
+  desktop_terminal='status=Failed category=LogObservationFailed'
+  # Raw lines are streamed through the fixed-category classifier and discarded.
+  # The bounded local log driver is removed with this exact-label container.
+  owned_docker 10 docker logs --tail 80 "$container_id" 2>&1 | \
+    node "$helper" --logs >"$task/categories.json" || exit 1
+  result_status=0
+  desktop_terminal="$(node "$helper" --summarize "$task/startup-proof.json" \
+    "$task/observed-state" "$task/final-state" "$task/categories.json" \
+    "$observation_status" "$termination")" || result_status=$?
+  exit "$result_status"
+fi
 owned_docker 20 docker version --format '{{.Server.Version}}'
 count=0
 for image in "${images[@]}"; do

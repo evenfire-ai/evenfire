@@ -22,6 +22,8 @@ cp "$REPO_ROOT/scripts/conversation-store/verify-images.sh" \
   "$TMP_ROOT/repo/scripts/conversation-store/verify-images.sh"
 cp "$REPO_ROOT/scripts/conversation-store/verify-image-output.mjs" \
   "$TMP_ROOT/repo/scripts/conversation-store/verify-image-output.mjs"
+cp "$REPO_ROOT/scripts/conversation-store/desktop-startup-observation.mjs" \
+  "$TMP_ROOT/repo/scripts/conversation-store/desktop-startup-observation.mjs"
 cp "$REPO_ROOT/scripts/minikube/docker-cli-env.sh" \
   "$TMP_ROOT/repo/scripts/minikube/docker-cli-env.sh"
 cp "$REPO_ROOT/scripts/minikube/run-with-deadline.mjs" \
@@ -29,6 +31,7 @@ cp "$REPO_ROOT/scripts/minikube/run-with-deadline.mjs" \
 cat >"$TMP_ROOT/repo/scripts/minikube/require-t2-mutation-lock.sh" <<'LOCK_STUB'
 #!/usr/bin/env bash
 set -euo pipefail
+[[ "${TEST_LOCK_FAILURE:-0}" != 1 ]] || exit 88
 exit 0
 LOCK_STUB
 chmod +x "$TMP_ROOT/repo/scripts/minikube/require-t2-mutation-lock.sh"
@@ -115,6 +118,13 @@ docker() {
         'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
         'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
       ;;
+    'container inspect --format {{.State.Status}} {{.State.ExitCode}} {{.State.OOMKilled}} '*)
+      if [[ "${TEST_STARTUP_MODE:-live}" == s6 || "$(cat "${TEST_LOG_FILE%/*}/stub-startup-state")" == exited ]]; then
+        printf 'exited 1 false\r\n'
+      else
+        printf 'running 0 false\r\n'
+      fi
+      ;;
     'container inspect --format '*)
       case "${!#}" in
         aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa)
@@ -129,8 +139,61 @@ docker() {
           ;;
       esac
       ;;
-    'container rm --force aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')
-      :
+    'container rm --force aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'|    'container rm --force --volumes aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')
+      [[ "${TEST_CLEANUP_FAILURE:-0}" != 1 ]] || return 79
+      ;;
+    'run --detach --pull=never --network=none --user 1001:1001 '*)
+      for required in \
+        '--cap-drop=ALL' '--security-opt=no-new-privileges:true' '--memory=1g' '--memory-swap=1g' \
+        '--cpus=1' '--pids-limit=256' '--stop-timeout=5' \
+        '--tmpfs /tmp:rw,size=64m,uid=1001,gid=1001,mode=1777' \
+        '--tmpfs /config/workspace:rw,size=64m,uid=1001,gid=1001,mode=0700'; do
+        [[ "$*" == *"$required"* ]] || return 95
+      done
+      for forbidden in '--entrypoint' '--env' '--volume' '--mount' '--tmpfs /run' '--privileged'; do
+        [[ "$*" != *"$forbidden"* ]] || return 95
+      done
+      [[ "${!#}" =~ ^sha256:[0-9a-f]{64}$ ]] || return 94
+      for arg in "$@"; do
+        if [[ "$arg" == clerum.io/conversation-store-probe=* ]]; then
+          printf '%s' "${arg#clerum.io/conversation-store-probe=}" >"${TEST_LOG_FILE%/*}/stub-probe-id"
+        fi
+      done
+      printf 'running' >"${TEST_LOG_FILE%/*}/stub-startup-state"
+      printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\r\n'
+      ;;
+    'exec --user 1001:1001 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa node --input-type=module -e '*)
+      case "${TEST_STARTUP_MODE:-live}" in
+        s6) return 1 ;;
+        transport) printf '{"proofVersion":1}\r\n'; return 77 ;;
+        timeout) return 124 ;;
+      esac
+      TEST_STARTUP_MODE="${TEST_STARTUP_MODE:-live}" node --input-type=module - <<'SNAPSHOT_STUB'
+const fact = (pid, ppid) => ({ pid, ppid, startTime: String(pid), state: "S", uid: [1001,1001,1001,1001], gid: [1001,1001,1001,1001], noNewPrivs: 1, caps: Object.fromEntries(["CapInh","CapPrm","CapEff","CapBnd","CapAmb"].map((name) => [name,"0000000000000000"])) });
+const init = fact(1,0), supervisor = fact(20,1), child = fact(21,20);
+const last = { init, supervisors: [supervisor], children: [child], childExitRecorded: false, categories: [] };
+let reason = "EntryObserved";
+switch (process.env.TEST_STARTUP_MODE) {
+  case "missing": last.supervisors = []; break;
+  case "duplicate": last.children.push(fact(22,20)); break;
+  case "dead": last.children = []; last.childExitRecorded = true; break;
+  case "uid": child.uid[0] = 0; break;
+  case "gid": supervisor.gid[0] = 0; break;
+  case "nnp": init.noNewPrivs = 0; break;
+  case "caps": supervisor.caps.CapEff = "0000000000000001"; break;
+  case "auth": reason = "ChildConfigurationFailure"; last.children = []; last.childExitRecorded = true; last.categories = ["MissingAuthentication"]; break;
+}
+process.stdout.write(JSON.stringify({ proofVersion: 1, reason, singleChildEntered: true, windowCompleted: true, distinctSupervisors: 1, distinctChildren: 1, last }) + "\r\n");
+SNAPSHOT_STUB
+      ;;
+    'container stop --time 5 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')
+      printf 'exited' >"${TEST_LOG_FILE%/*}/stub-startup-state"
+      ;;
+    'logs --tail 80 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')
+      if [[ "${TEST_STARTUP_MODE:-live}" == s6 ]]; then
+        printf 's6-mkdir: fatal: unable to mkdir /run/s6: Permission denied\r\n'
+      fi
+      printf 'PRIVATE_LOG_SENTINEL_SHOULD_NOT_BE_EMITTED\r\n'
       ;;
     'container rm --force '*)
       printf 'FOREIGN_CONTAINER_REMOVE_ATTEMPT %s\n' "${!#}" >&2
@@ -284,6 +347,134 @@ if [[ "$malicious_status" -eq 1 ]] &&
   pass 'malicious image ref is rejected before any remote operation'
 else
   fail 'malicious image ref reached a remote or host operation'
+fi
+
+
+# The same CI-selected wrapper exercises the opt-in actual-entrypoint subprobe.
+run_startup_case() {
+  local scenario="$1" expected_status="$2" expected_category="$3" result=0
+  local log="$TMP_ROOT/startup-$scenario.log" out="$TMP_ROOT/startup-$scenario.out" err="$TMP_ROOT/startup-$scenario.err"
+  PATH="$TMP_ROOT/bin:$PATH" TEST_STARTUP_MODE="$scenario" \
+  TEST_CLEANUP_FAILURE="$([[ "$scenario" == cleanup ]] && printf 1 || printf 0)" \
+  TEST_LOG_FILE="$log" MINIKUBE_PROFILE="$TEST_PROFILE" \
+    bash "$TMP_ROOT/repo/scripts/conversation-store/verify-images.sh" --desktop-startup \
+    >"$out" 2>"$err" || result=$?
+  if [[ "$result" -eq "$expected_status" ]] && \
+     grep -Fq 'DESKTOP_STARTUP status=Pending' "$out" && \
+     grep -Fq "${expected_category}" "$out" && \
+     ! grep -Fq 'PRIVATE_LOG_SENTINEL' "$out" && \
+     ! grep -Fq 'PRIVATE_LOG_SENTINEL' "$err" && \
+     ! grep -Fq 'CONVERSATION_STORE_IMAGES_PASS' "$out"; then
+    pass "Desktop entrypoint subprobe handles $scenario truthfully"
+  else
+    fail "Desktop scenario $scenario returned $result (expected $expected_status): $(cat "$out") $(cat "$err")"
+  fi
+  if ! grep -Fq 'container rm --force --volumes aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' "$log" || \
+     grep -Fq 'container rm --force --volumes bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' "$log"; then
+    fail "Desktop scenario $scenario did not restrict anonymous-volume cleanup to its exact-label container"
+  fi
+}
+
+run_startup_case live 0 '"status":"EntryObserved"'
+if grep -Fq 'REMOTE_DOCKER run --detach --pull=never --network=none --user 1001:1001 --cap-drop=ALL --security-opt=no-new-privileges:true' "$TMP_ROOT/startup-live.log" && \
+   grep -Fq '"uid":[1001,1001,1001,1001]' "$TMP_ROOT/startup-live.out" && \
+   grep -Fq '"noNewPrivs":1' "$TMP_ROOT/startup-live.out" && \
+   grep -Fq '"CapEff":"0000000000000000"' "$TMP_ROOT/startup-live.out" && \
+   grep -Fq '"windowCompleted":true' "$TMP_ROOT/startup-live.out" && \
+   grep -Fq '"termination":"probe-stop"' "$TMP_ROOT/startup-live.out" && \
+   grep -Fq '"final":{"status":"exited","exitCode":1,"oomKilled":false}' "$TMP_ROOT/startup-live.out" && \
+   ! grep -Fq 'HOST_DOCKER run' "$TMP_ROOT/startup-live.log"; then
+  pass 'Desktop uses the real entrypoint, bounded policy, actual kernel identities and observed exit'
+else
+  fail 'Desktop entrypoint policy or compact process/exit proof was incomplete'
+fi
+run_startup_case s6 1 '"category":"S6RuntimePermission"'
+run_startup_case auth 1 '"category":"MissingAuthentication"'
+run_startup_case missing 1 '"category":"MissingSupervisorOrChild"'
+run_startup_case dead 1 '"status":"Failed"'
+run_startup_case duplicate 1 '"category":"MultipleProcesses"'
+for scenario in uid gid nnp caps; do
+  run_startup_case "$scenario" 1 '"category":"ProcessPolicyMismatch"'
+done
+run_startup_case transport 1 '"transportExit":77'
+run_startup_case timeout 1 '"transportTimedOut":true'
+run_startup_case cleanup 1 'status=Failed category=CleanupFailed'
+
+lock_result=0
+: >"$TMP_ROOT/startup-lock.log"
+PATH="$TMP_ROOT/bin:$PATH" TEST_LOCK_FAILURE=1 TEST_LOG_FILE="$TMP_ROOT/startup-lock.log" \
+MINIKUBE_PROFILE="$TEST_PROFILE" \
+  bash "$TMP_ROOT/repo/scripts/conversation-store/verify-images.sh" --desktop-startup \
+  >"$TMP_ROOT/startup-lock.out" 2>"$TMP_ROOT/startup-lock.err" || lock_result=$?
+if [[ "$lock_result" -eq 88 && ! -s "$TMP_ROOT/startup-lock.log" ]]; then
+  pass 'Desktop subprobe refuses a missing inherited mutation lease before Docker transport'
+else
+  fail 'Desktop subprobe bypassed the inherited mutation lease'
+fi
+
+# Compare the public target's lease identity to the existing image gate.
+if node --input-type=module - "$REPO_ROOT/Makefile" <<'MAKE_CONTRACT'
+import * as fs from "node:fs";
+const make = fs.readFileSync(process.argv[2], "utf8");
+const recipe = (target) => make.match(new RegExp(`^${target}:.*\\n((?:\\t.*\\n)+)`, "m"))?.[1];
+const existing = recipe("minikube-verify-conversation-store-images");
+const startup = recipe("minikube-probe-desktop-startup");
+if (!existing || !startup || existing.split("bash scripts/conversation-store/")[0] !== startup.split("bash scripts/conversation-store/")[0] || !startup.endsWith("bash scripts/conversation-store/verify-images.sh --desktop-startup\n")) process.exit(1);
+MAKE_CONTRACT
+then
+  pass 'public Desktop target inherits the same profile/context/worktree/lock contract'
+else
+  fail 'public Desktop target changed the image gate ownership contract'
+fi
+
+# Execute the exact emitted observer with a hermetic /proc surface. This catches
+# source mutations that canned Docker responses cannot detect.
+if node --input-type=module - "$REPO_ROOT/scripts/conversation-store/desktop-startup-observation.mjs" <<'OBSERVER_CONTRACT'
+import * as vm from "node:vm";
+import * as assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+const source = execFileSync(process.execPath, [process.argv[2], "--remote-source"], { encoding: "utf8" }).replace('import * as fs from "node:fs";\n', "");
+async function probe(scenario) {
+  let clock = 0, output = "";
+  const members = scenario === "missing" ? [1] : scenario === "multiple" ? [1,20,21,22] : [1,20,21];
+  const fields = (pid) => ["S", pid === 1 ? 0 : pid === 20 ? 1 : 20, ...Array(17).fill(0), pid];
+  const status = (pid) => `Uid:\t${(scenario === "uid" && pid === 21) || (scenario === "inituid" && pid === 1) ? 0 : 1001}\t1001\t1001\t1001\nGid:\t${scenario === "gid" && pid === 20 ? 0 : 1001}\t1001\t1001\t1001\nNoNewPrivs:\t${scenario === "nnp" && pid === 21 ? 0 : 1}\n` + ["CapInh","CapPrm","CapEff","CapBnd","CapAmb"].map((name) => `${name}:\t${pid === 20 && ((scenario === "caps" && name === "CapEff") || (scenario === "bnd" && name === "CapBnd")) ? "0000000000000001" : "0000000000000000"}\n`).join("");
+  const fs = {
+    constants: { O_RDONLY: 0, O_NOFOLLOW: 1 },
+    readdirSync: () => members.filter((pid) => scenario !== "dead" || clock < 250 || pid !== 21).map(String),
+    readlinkSync: () => "/usr/bin/node",
+    readFileSync: (file) => {
+      const [, pidRaw, kind] = file.match(/^\/proc\/(\d+)\/(status|stat|cmdline)$/) ?? [];
+      const pid = Number(pidRaw);
+      if (!members.includes(pid)) throw new Error("Absent");
+      if (kind === "status") return status(pid);
+      if (kind === "stat") return `${pid} (node) ${fields(pid).join(" ")}`;
+      if (kind === "cmdline") return `node\0${pid === 20 ? "/app/mcp-host/ops/desktop-supervisor.mjs" : pid >= 21 ? "/app/mcp-host/dist/main.js" : "/init"}\0`;
+      throw new Error("UnexpectedRead");
+    },
+    openSync: () => { throw new Error("Absent"); },
+  };
+  await vm.runInNewContext(`(async () => { ${source} })()`, {
+    fs, Buffer, performance: { now: () => clock },
+    setTimeout: (resolve, delay) => { clock += delay; resolve(); },
+    process: { stdout: { write: (text) => { output += text; } } },
+  });
+  return JSON.parse(output);
+}
+const live = await probe("live");
+assert.equal(live.reason, "EntryObserved");
+assert.equal(live.singleChildEntered, true);
+assert.equal(live.windowCompleted, true);
+assert.equal(live.last.children[0].ppid, live.last.supervisors[0].pid);
+assert.equal((await probe("missing")).reason, "MissingSupervisorOrChild");
+assert.equal((await probe("dead")).reason, "ChildExited");
+assert.equal((await probe("multiple")).reason, "MultipleProcesses");
+for (const scenario of ["uid","inituid","gid","nnp","caps","bnd"]) assert.equal((await probe(scenario)).reason, "ProcessPolicyMismatch");
+OBSERVER_CONTRACT
+then
+  pass 'emitted observer reads real process lineage and kernel privileges before any entry result'
+else
+  fail 'emitted observer accepted absent/dead children or unsafe kernel privileges'
 fi
 
 exit "$FAIL"

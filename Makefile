@@ -274,6 +274,13 @@ minikube-verify-conversation-store-images: ## Verify immutable local image IDs a
 		bash scripts/minikube/with-t2-mutation-lock.sh -- \
 		bash scripts/conversation-store/verify-images.sh
 
+.PHONY: minikube-probe-desktop-startup
+minikube-probe-desktop-startup: ## Observe the actual Desktop image entrypoint under the owned lease; no PVC/API/T2 certification
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(CONTROL_API_REAL_PG_CONTEXT)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- \
+		bash scripts/conversation-store/verify-images.sh --desktop-startup
+
 .PHONY: minikube-build-custom-coordinator-fixture minikube-build-custom-coordinator-fixture-body
 minikube-build-custom-coordinator-fixture: ## Build only the custom coordinator E2E fixture image in minikube
 	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
