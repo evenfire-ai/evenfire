@@ -11,11 +11,12 @@ const navigation = vi.hoisted(() => ({
   replace: vi.fn(),
   push: vi.fn(),
   tab: undefined as string | undefined,
+  name: 'quota-agent',
 }))
 
 vi.mock('next/navigation', () => ({
-  useParams: () => ({ name: 'quota-agent', tab: navigation.tab }),
-  usePathname: () => '/agents/quota-agent',
+  useParams: () => ({ name: navigation.name, tab: navigation.tab }),
+  usePathname: () => `/agents/${navigation.name}`,
   useRouter: () => navigation,
   useSearchParams: () => new URLSearchParams(),
 }))
@@ -141,6 +142,7 @@ describe('HostDetailsPage optional subscription throttling', () => {
 
   beforeEach(() => {
     navigation.tab = undefined
+    navigation.name = 'quota-agent'
     __resetReadRequestCacheForTests()
     api.setControlUIReadPrincipal('unit-test-admin', 'admin')
     vi.clearAllMocks()
@@ -195,6 +197,7 @@ describe('HostDetailsPage optional subscription throttling', () => {
     __resetReadRequestCacheForTests()
     vi.unstubAllGlobals()
     vi.restoreAllMocks()
+    vi.useRealTimers()
   })
 
   it('makes no subscription GET for ordinary sections and reuses editor metadata across reopening', async () => {
@@ -274,4 +277,149 @@ describe('HostDetailsPage optional subscription throttling', () => {
     expect(screen.getByRole('region', { name: 'Identity editor' })).toHaveTextContent('quota-agent')
     expect(api.apiSend).not.toHaveBeenCalled()
   })
+
+  it.each(['codex-subscription', 'grok-subscription'] as const)(
+    'does not confirm retained %s models under a different connection that throttles, then recovers only that binding',
+    async provider => {
+      vi.useFakeTimers()
+      const modelA = provider === 'codex-subscription' ? 'gpt-5.1' : 'grok-4.6'
+      const modelB = provider === 'codex-subscription' ? 'gpt-5.4' : 'grok-4.7'
+      vi.mocked(api.getHostDetailBundle).mockImplementation(
+        async name =>
+          ({
+            host: {
+              ...host,
+              metadata: { ...host.metadata, name },
+              spec: {
+                ...host.spec,
+                secretRef: undefined,
+                model: {
+                  provider,
+                  name: modelA,
+                  connectionRef: name === 'quota-agent' ? 'connection-a' : 'connection-b',
+                },
+              },
+            },
+            contexts: [
+              buildContextResource({
+                metadata: { name: 'quota-context' },
+                spec: { contextId: 'quota-context', mcpServers: ['documents-connector'] },
+              }),
+            ],
+            secrets: [],
+            users: [],
+            teams: [],
+            agentUsers: [],
+            agentTeams: [],
+          }) as never
+      )
+      vi.mocked(api.getLlmModels).mockResolvedValue({
+        rows: [modelA, modelB].map((model, index) => ({
+          id: `binding-model-${index}`,
+          provider,
+          model,
+          enabled: true,
+          stale: false,
+          vendor: provider === 'codex-subscription' ? 'OpenAI' : 'xAI',
+          display_name: null,
+          context_window_tokens: null,
+          created_at: '',
+          updated_at: '',
+        })),
+      })
+      let bReads = 0
+      fetchMock.mockImplementation((input: RequestInfo | URL) => {
+        const url = String(input)
+        if (url.endsWith('/capabilities'))
+          return Promise.resolve(
+            json({
+              providers: {
+                'codex-subscription': { enabled: true },
+                'grok-subscription': { enabled: true },
+              },
+            })
+          )
+        if (url.endsWith('/connection-a/models'))
+          return Promise.resolve(json({ models: [{ model: modelA, enabled: true, stale: false }] }))
+        if (url.endsWith('/connection-b/models')) {
+          bReads += 1
+          return Promise.resolve(
+            bReads === 1
+              ? throttle()
+              : json({ models: [{ model: modelB, enabled: true, stale: false }] })
+          )
+        }
+        return Promise.resolve(
+          json({
+            connections: ['a', 'b'].map(suffix => ({
+              connectionKey: `connection-${suffix}`,
+              displayName: `Connection ${suffix}`,
+              status: 'connected',
+              credentialRevision: 1,
+              catalogRevision: 1,
+              catalogStatus: 'ready',
+              defaultModel: suffix === 'a' ? modelA : modelB,
+            })),
+          })
+        )
+      })
+      const flush = () =>
+        act(async () => {
+          await vi.advanceTimersByTimeAsync(0)
+        })
+      renderPage()
+      await flush()
+      navigate('Models & creds')
+      fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
+      await flush()
+      let dialog = screen.getByRole('dialog', { name: 'Edit model configuration' })
+      expect(within(dialog).getByRole('button', { name: 'Save' })).toBeEnabled()
+      fireEvent.click(
+        within(dialog).getByLabelText('Current model', { selector: '#llm-primary-model' })
+      )
+      expect(screen.getByRole('option', { name: new RegExp(modelA) })).not.toHaveTextContent(
+        'out of allowlist'
+      )
+      fireEvent.click(
+        within(dialog).getByLabelText('Current model', { selector: '#llm-primary-model' })
+      )
+
+      // Reuse the page under a new route/detail producer input. Its real HTTP
+      // catalog client must fence A's loaded result as the B binding is hydrated.
+      navigation.name = 'quota-agent-b'
+      rerenderPage()
+      await flush()
+      dialog = screen.getByRole('dialog', { name: 'Edit model configuration' })
+      expect(screen.getByRole('heading', { name: 'Agent: Operations agent' })).toBeInTheDocument()
+      expect(within(dialog).getByRole('alert')).toHaveTextContent('Try again in 12 seconds.')
+      expect(
+        within(dialog).getByLabelText('Current model', { selector: '#llm-primary-model' })
+      ).toHaveTextContent(modelA)
+      expect(within(dialog).getByRole('button', { name: 'Save' })).toBeDisabled()
+      fireEvent.click(
+        within(dialog).getByLabelText('Current model', { selector: '#llm-primary-model' })
+      )
+      expect(screen.getByRole('option', { name: new RegExp(modelA) })).toHaveTextContent(
+        'out of allowlist'
+      )
+      expect(screen.queryByRole('option', { name: new RegExp(modelB) })).toBeNull()
+      fireEvent.click(
+        within(dialog).getByLabelText('Current model', { selector: '#llm-primary-model' })
+      )
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(12_000)
+      })
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Retry' }))
+      await flush()
+      expect(within(dialog).queryByRole('alert')).toBeNull()
+      fireEvent.click(
+        within(dialog).getByLabelText('Current model', { selector: '#llm-primary-model' })
+      )
+      expect(screen.getByRole('option', { name: new RegExp(modelB) })).not.toHaveTextContent(
+        'out of allowlist'
+      )
+      expect(screen.queryByRole('option', { name: new RegExp(modelA) })).toBeNull()
+      expect(api.apiSend).not.toHaveBeenCalled()
+    }
+  )
 })

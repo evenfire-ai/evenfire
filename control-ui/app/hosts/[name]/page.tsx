@@ -244,9 +244,24 @@ export default function HostDetailsPage() {
   } = useLlmAllowedModels()
   const [modelNameDraft, setModelNameDraft] = useState('')
   const [connectionRefDraft, setConnectionRefDraft] = useState(CODEX_UNASSIGNED_CONNECTION_KEY)
-  const [codexModels, setCodexModels] = useState<string[]>([])
+  const [grantCatalog, setGrantCatalog] = useState<{
+    provider: LlmProvider
+    connectionRef: string
+    models: string[]
+  } | null>(null)
+  // A retained catalog is display data for its exact broker/connection only;
+  // changing the draft binding cannot make the old models valid for a new grant.
+  const [codexModels, grokModels] = useMemo(() => {
+    const models =
+      grantCatalog?.provider === providerDraft && grantCatalog.connectionRef === connectionRefDraft
+        ? grantCatalog.models
+        : []
+    return [
+      providerDraft === 'codex-subscription' ? models : [],
+      providerDraft === GROK_SUBSCRIPTION_PROVIDER ? models : [],
+    ] as const
+  }, [connectionRefDraft, grantCatalog, providerDraft])
   const [codexConnections, setCodexConnections] = useState<CodexSubscriptionConnectionView[]>([])
-  const [grokModels, setGrokModels] = useState<string[]>([])
   const [grokConnections, setGrokConnections] = useState<GrokSubscriptionConnectionView[]>([])
   const [codexInventoryLoaded, setCodexInventoryLoaded] = useState(false)
   const [grokInventoryLoaded, setGrokInventoryLoaded] = useState(false)
@@ -468,22 +483,24 @@ export default function HostDetailsPage() {
   useEffect(() => {
     if (!editingModel) return
     if (!connectionRefDraft.trim() || connectionRefDraft === CODEX_UNASSIGNED_CONNECTION_KEY) {
-      setCodexModels([])
-      setGrokModels([])
+      setGrantCatalog(null)
       setGrantCatalogError('')
       return
     }
     const controller = new AbortController()
     setGrantCatalogError('')
     if (providerDraft === GROK_SUBSCRIPTION_PROVIDER) {
-      setCodexModels([])
       void listGrokConnectionModels(connectionRefDraft, {
         signal: controller.signal,
         refresh: inventoryRetryNonce > 0,
       })
         .then(models => {
           if (controller.signal.aborted) return
-          setGrokModels(offeredCodexModelNames(models))
+          setGrantCatalog({
+            provider: providerDraft,
+            connectionRef: connectionRefDraft,
+            models: offeredCodexModelNames(models),
+          })
         })
         .catch(err => {
           if (controller.signal.aborted) return
@@ -495,14 +512,17 @@ export default function HostDetailsPage() {
         controller.abort()
       }
     }
-    setGrokModels([])
     void listCodexConnectionModels(connectionRefDraft, {
       signal: controller.signal,
       refresh: inventoryRetryNonce > 0,
     })
       .then(models => {
         if (controller.signal.aborted) return
-        setCodexModels(offeredCodexModelNames(models))
+        setGrantCatalog({
+          provider: providerDraft,
+          connectionRef: connectionRefDraft,
+          models: offeredCodexModelNames(models),
+        })
       })
       .catch(err => {
         if (controller.signal.aborted) return
@@ -971,7 +991,7 @@ export default function HostDetailsPage() {
     if (parsed.kind === 'empty') {
       setSecretRefDraft('')
       setConnectionRefDraft(CODEX_UNASSIGNED_CONNECTION_KEY)
-      setCodexModels([])
+      setGrantCatalog(null)
       setGrantCatalogError('')
       return
     }
@@ -986,8 +1006,7 @@ export default function HostDetailsPage() {
     }
     setSecretRefDraft(parsed.name)
     setConnectionRefDraft(CODEX_UNASSIGNED_CONNECTION_KEY)
-    setCodexModels([])
-    setGrokModels([])
+    setGrantCatalog(null)
     setGrantCatalogError('')
     if (isOauthBrokerProvider(providerDraft)) {
       setProviderDraft('openai')
@@ -1531,8 +1550,7 @@ export default function HostDetailsPage() {
                     // another broker's connection key.
                     if (next.provider !== providerDraft) {
                       setConnectionRefDraft(CODEX_UNASSIGNED_CONNECTION_KEY)
-                      setCodexModels([])
-                      setGrokModels([])
+                      setGrantCatalog(null)
                       setGrantCatalogError('')
                     }
                   }}

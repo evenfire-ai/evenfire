@@ -55,11 +55,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     email: '',
   })
   const sessionExpiredToastShownRef = useRef(false)
+  const authOperationRef = useRef(0)
 
   // The router and ToastProvider callbacks are stable in normal runtime; keep
   // this singleton registration tied to them if either provider is remounted.
   useEffect(() => {
     const handleAuthError = () => {
+      authOperationRef.current += 1
       if (sessionExpiredToastShownRef.current) return
       sessionExpiredToastShownRef.current = true
       resetPublishScopeCache()
@@ -72,24 +74,31 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [router, showToast])
 
   const checkAuth = useCallback(async () => {
+    const operation = ++authOperationRef.current
     try {
       const response = await getControlUIAuthMe()
-      if (!response.me.id) {
+      if (operation !== authOperationRef.current) return
+      const { id, username, email, role } = response.me
+      if (!id) {
         clearAdminAuthToken()
         setAuthState({ id: '', isLoggedIn: false, isLoading: false, username: '', email: '' })
         return
       }
-      setControlUIReadPrincipal(response.me.id, response.me.role || 'admin')
+      setControlUIReadPrincipal(id, role || 'admin')
       sessionExpiredToastShownRef.current = false
-      setAuthState(prev => ({
-        ...prev,
-        id: response.me.id || prev.id,
-        isLoggedIn: true,
-        isLoading: false,
-        username: response.me.username || prev.username,
-        email: response.me.email || prev.email,
-      }))
+      setAuthState(prev => {
+        if (operation !== authOperationRef.current) return prev
+        const sameIdentity = prev.id === id
+        return {
+          id,
+          isLoggedIn: true,
+          isLoading: false,
+          username: username ?? (sameIdentity ? prev.username : ''),
+          email: email === undefined ? (sameIdentity ? prev.email : '') : (email ?? ''),
+        }
+      })
     } catch (error) {
+      if (operation !== authOperationRef.current) return
       // Session-expiry errors are handled by the global toast/redirect path.
       if (isSilentApiError(error)) {
         setAuthState({ id: '', isLoggedIn: false, isLoading: false, username: '', email: '' })
@@ -104,13 +113,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     void checkAuth()
     const onRemoteInvalidation = () => void checkAuth()
     window.addEventListener(CONTROL_UI_SESSION_INVALIDATION_EVENT, onRemoteInvalidation)
-    return () =>
+    return () => {
+      authOperationRef.current += 1
       window.removeEventListener(CONTROL_UI_SESSION_INVALIDATION_EVENT, onRemoteInvalidation)
+    }
   }, [checkAuth])
 
   const login = useCallback(
     async (username: string, password: string): Promise<AdminLoginResponse> => {
+      const operation = ++authOperationRef.current
       const result = await loginControlUI(username, password)
+      if (operation !== authOperationRef.current) return result
       setControlUIReadPrincipal(result.me.id, 'admin')
       resetPublishScopeCache()
       invalidateRegistryCapabilityCache()
@@ -128,9 +141,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   )
 
   const logout = useCallback(async () => {
+    const operation = ++authOperationRef.current
     try {
       await logoutControlUI()
     } finally {
+      if (operation !== authOperationRef.current) return
       resetPublishScopeCache(authState.id)
       sessionExpiredToastShownRef.current = false
       // Drop the module-level registry-capability cache so a same-tab
