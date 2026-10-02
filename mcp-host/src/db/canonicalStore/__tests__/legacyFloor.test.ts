@@ -911,6 +911,94 @@ describe('floor adoption and accepted-write recovery', () => {
     expect(currentCatalog(f.root)).toBe(before)
     expect(readJournal(f.root, binding)).toBeUndefined()
   })
+  it('prepares sqlite-pvc after a consumed floor import while retaining evidence and accepted writes', async () => {
+    const f = await recoveryFixture()
+    const pins = await inspectLegacyRecovery(f.root, `C_import:${f.exportId}`, { binding })
+    const request: LegacyRecoveryRequest = {
+      ...pins,
+      ...binding,
+      schemaVersion: 1,
+      storageContract: 'legacy-floor',
+      requestId: randomUUID(),
+      maintenanceId: f.maintenanceId,
+    }
+    await beginLegacyRecovery(f.root, request, floorAuthorization(request), { binding })
+    const db = currentDb(f.root)
+    db.exec(
+      "INSERT INTO messages (session_id,ordinal,role,content,timestamp) VALUES ('s1',3,'assistant','accepted after import',3)"
+    )
+    recompute(db)
+    db.close()
+    const catalog = currentCatalog(f.root)
+    const result = await verifyPreparation('sqlite-pvc', {
+      root: f.root,
+      binding,
+      maintenanceId: f.maintenanceId,
+      scratchRoot: fixture(),
+    })
+    const importDirectory = path.join(f.root, '.canonical-store-import', f.exportId)
+    expect(result.catalogHash).toBe(catalog)
+    expect(fs.readdirSync(importDirectory).sort()).toEqual(['consumed.json', 'manifest.json'])
+  })
+  it.each(['unconsumed', 'receipt', 'journal', 'retired', 'foreign', 'new-host'] as const)(
+    'blocks unsafe or historical imports during store preparation',
+    async kind => {
+      const f = await recoveryFixture()
+      const pins = await inspectLegacyRecovery(f.root, `C_import:${f.exportId}`, { binding })
+      const request: LegacyRecoveryRequest = {
+        ...pins,
+        ...binding,
+        schemaVersion: 1,
+        storageContract: 'legacy-floor',
+        requestId: randomUUID(),
+        maintenanceId: f.maintenanceId,
+      }
+      if (kind !== 'unconsumed')
+        await beginLegacyRecovery(f.root, request, floorAuthorization(request), { binding })
+      const importDirectory = path.join(f.root, '.canonical-store-import', f.exportId)
+      const marker = readLegacyMarker(f.root, binding)!
+      const retired = path.join(
+        operationDirectory(f.root, marker.migrationId),
+        'retired',
+        `C_import-${f.exportId}`,
+        'state.db'
+      )
+      if (kind === 'receipt') {
+        const receiptPath = path.join(importDirectory, 'consumed.json')
+        const receipt = JSON.parse(fs.readFileSync(receiptPath, 'utf8'))
+        receipt.sourceHash = '0'.repeat(64)
+        fs.writeFileSync(receiptPath, JSON.stringify(receipt))
+      }
+      if (kind === 'journal') {
+        const journal = archived(f.root, marker.migrationId)
+        journal.phase = 'retiring'
+        fs.writeFileSync(
+          path.join(operationDirectory(f.root, marker.migrationId), 'journal.json'),
+          JSON.stringify(journal)
+        )
+      }
+      if (kind === 'retired') fs.appendFileSync(retired, 'tampered')
+      const reason =
+        kind === 'unconsumed' || kind === 'new-host'
+          ? 'SourceExportRequired'
+          : kind === 'foreign'
+            ? 'HostUidMismatch'
+            : 'JournalInvalid'
+      const sourceClass = kind === 'new-host' ? ('new-host' as const) : ('sqlite-pvc' as const)
+      await expect(
+        verifyPreparation(sourceClass, {
+          root: f.root,
+          binding: kind === 'foreign' ? { hostUid: 'foreign', pvcUid: 'foreign' } : binding,
+          maintenanceId: f.maintenanceId,
+          scratchRoot: fixture(),
+        })
+      ).rejects.toMatchObject({ reason })
+      if (kind === 'unconsumed')
+        expect(fs.readdirSync(importDirectory).sort()).toEqual(['manifest.json', 'state.db'])
+      else
+        expect(fs.readdirSync(importDirectory).sort()).toEqual(['consumed.json', 'manifest.json'])
+    }
+  )
   it.each(['root-marker-retirement', 'state-marker-retirement', 'state-marker-write', 'archived'])(
     'replays accepted-write-preserving floor recovery after %s without creating a store ID',
     async point => {

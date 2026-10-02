@@ -113,6 +113,20 @@ function pvcCandidates(root: string): CandidateId[] {
   }
   return ids
 }
+function importIds(root: string): string[] {
+  const imports = path.join(root, '.canonical-store-import')
+  if (!exists(imports)) return []
+  safePath(root, imports)
+  return fs.readdirSync(imports).sort()
+}
+function assertConsumedImports(root: string, binding: Binding): void {
+  for (const id of importIds(root)) {
+    assertUuid(id)
+    const manifest = readImportManifest(root, id, binding)
+    if (!isImportConsumed(root, id, binding, manifest))
+      throw new CanonicalStoreError('SourceExportRequired')
+  }
+}
 async function inspectPhysical(directory: string, options: PhysicalProofOptions) {
   return inspectCandidate(directory, {
     root: options.root,
@@ -192,11 +206,10 @@ export async function verifyPreparation(
     }
   }
   const ids = pvcCandidates(options.root)
-  const imports = path.join(options.root, '.canonical-store-import')
-  if (exists(imports) && fs.readdirSync(imports).length !== 0)
-    throw new CanonicalStoreError('SourceExportRequired')
+  const imports = importIds(options.root)
   if (sourceClass === 'new-host') {
     if (
+      imports.length !== 0 ||
       ids.length !== 0 ||
       discoverBackupSets(options.root).length !== 0 ||
       exists(path.join(options.root, FINAL_MARKER)) ||
@@ -221,6 +234,7 @@ export async function verifyPreparation(
       throw new CanonicalStoreError('AdoptBindingMismatch')
     return { ...proofBase(options, sourceClass), manifestHash: measured }
   }
+  assertConsumedImports(options.root, options.binding)
   if (ids.length === 0) throw new CanonicalStoreError('SourceExportRequired')
   if (ids.length > LIMITS.maxCandidates) throw new CanonicalStoreError('ManifestTooLarge')
   const candidates: CandidateManifest[] = []
