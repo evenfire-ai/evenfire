@@ -28,6 +28,35 @@ const largePng = realPngOfSize(3 * MIB + 1, 2, 2, 7)
 const largeJpeg = padJpegToSize(Buffer.from(JPEG_2X2_BASE64, 'base64'), 3 * MIB + 1)
 const smallPng = Buffer.from(PNG_2X2_BASE64, 'base64')
 
+/**
+ * Keep the byte-boundary fixture decoder-cheap. A single multi-MiB tEXt chunk
+ * can exhaust the native decoder's five-second limit on Linux; small ancillary
+ * chunks preserve the exact source size and independently decoded 2x2 raster.
+ */
+function pngWithBoundedTextChunks(size: number): Buffer {
+  const maxChunkBytes = 512 * 1024
+  let remaining = size - smallPng.byteLength
+  const chunks: Buffer[] = [smallPng.subarray(0, smallPng.byteLength - 12)]
+  while (remaining > 0) {
+    let chunkBytes = Math.min(remaining, maxChunkBytes)
+    if (remaining > chunkBytes && remaining - chunkBytes < 16) chunkBytes -= 16
+    if (chunkBytes < 16) throw new Error('PNG fixture needs space for a complete tEXt chunk')
+    const type = Buffer.from('tEXt', 'ascii')
+    const data = Buffer.alloc(chunkBytes - 12, 0x20)
+    Buffer.from('pad\0', 'latin1').copy(data)
+    const length = Buffer.alloc(4)
+    length.writeUInt32BE(data.byteLength)
+    const checksum = Buffer.alloc(4)
+    checksum.writeUInt32BE(crc32(Buffer.concat([type, data])))
+    chunks.push(Buffer.concat([length, type, data, checksum]))
+    remaining -= chunkBytes
+  }
+  chunks.push(smallPng.subarray(smallPng.byteLength - 12))
+  const png = Buffer.concat(chunks)
+  if (png.byteLength !== size) throw new Error('PNG fixture source size mismatch')
+  return png
+}
+
 /** A valid one-bit grayscale PNG whose real decoder verifies the raster. */
 function compressed2048Png(): Buffer {
   const chunk = (name: string, data: Buffer): Buffer => {
@@ -150,12 +179,24 @@ describe('GFS managed image projection', () => {
   it.each([8 * MIB, 16 * MIB])(
     'accepts %i source bytes through the Codex visual boundary',
     async size => {
-      const png = realPngOfSize(size, 2, 2, 7)
+      const png = pngWithBoundedTextChunks(size)
+      expect(png.byteLength).toBe(size)
       const subject = scenario(png)
       const result = await subject.run()
 
       expect(result.success).toBe(true)
-      expect(JSON.parse(result.content!)).toMatchObject({
+      const receipt = JSON.parse(result.content!)
+      expect(
+        receipt.visualReason,
+        JSON.stringify({
+          sizeBytes: size,
+          visualReason: receipt.visualReason ?? null,
+          imageCount: result.images?.length ?? 0,
+          readBytes: subject.budget.readBytes,
+          residentBytes: subject.budget.residentBytes,
+        })
+      ).toBeUndefined()
+      expect(receipt).toMatchObject({
         sizeBytes: size,
         visualDelivery: 'included',
         usage: { visualDelivery: 'included' },

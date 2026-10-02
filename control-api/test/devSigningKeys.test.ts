@@ -353,7 +353,9 @@ describe('devSigningKeys persistence contract', () => {
     const expected = createPublicKey(signing).export({ type: 'spki', format: 'pem' }).toString()
     const fd = openSync(join(store, 'rpc.public.pem'), 'r')
     try {
-      expect(fstatSync(fd).mode & 0o777).toBe(0o644)
+      // Creation respects the caller's umask, including the harness's 077.
+      // Reading the mask is supported in Vitest workers; changing it is not.
+      expect(fstatSync(fd).mode & 0o777).toBe(0o644 & ~process.umask())
       expect(readFileSync(fd, 'utf8').trim()).toBe(expected.trim())
     } finally {
       closeSync(fd)
