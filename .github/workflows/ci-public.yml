@@ -160,6 +160,13 @@ jobs:
           # PINNED_SUITES is unquoted on purpose: one argument per file name.
           node ../scripts/ci/assert-pinned-vitest-suites.mjs "$report" $PINNED_SUITES
 
+      - name: Test canonical-store development contracts
+        if: matrix.service == 'mcp-host'
+        run: |
+          node --test scripts/tests/canonical-store-lifecycle-contract.test.mjs \
+            scripts/tests/canonical-store-record.test.mjs
+          bash scripts/tests/test-conversation-store-verify-images.sh
+
       - name: Test web-search image with isolated DNS TLS and MCP
         if: matrix.service == 'mcp-servers/web-search'
         working-directory: mcp-servers/web-search

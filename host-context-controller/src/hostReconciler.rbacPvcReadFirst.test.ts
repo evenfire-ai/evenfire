@@ -308,7 +308,10 @@ describe('Host read-first RBAC and PVC contracts', () => {
       },
       spec: { volumeName: 'bound-volume' },
     })
-    await expect((f.reconciler as any).ensurePvc(host)).resolves.toBe(true)
+    await expect((f.reconciler as any).ensurePvc(host)).resolves.toEqual({
+      applied: true,
+      pvcUid: 'pvc-uid',
+    })
     expect(f.core.readNamespacedPersistentVolumeClaim).toHaveBeenCalledOnce()
     expect(f.core.createNamespacedPersistentVolumeClaim).not.toHaveBeenCalled()
     expect(f.core.replaceNamespacedPersistentVolumeClaim).not.toHaveBeenCalled()
@@ -317,7 +320,10 @@ describe('Host read-first RBAC and PVC contracts', () => {
 
   it('updates an unbound Host PVC once with its observed resourceVersion', async () => {
     const f = fixture()
-    await expect((f.reconciler as any).ensurePvc(host)).resolves.toBe(true)
+    await expect((f.reconciler as any).ensurePvc(host)).resolves.toEqual({
+      applied: true,
+      pvcUid: 'uid-rbac-host-workspace',
+    })
     expect(f.core.readNamespacedPersistentVolumeClaim).toHaveBeenCalledOnce()
     expect(f.core.createNamespacedPersistentVolumeClaim).not.toHaveBeenCalled()
     expect(f.core.replaceNamespacedPersistentVolumeClaim).toHaveBeenCalledOnce()
@@ -341,7 +347,10 @@ describe('Host read-first RBAC and PVC contracts', () => {
       })
     f.core.createNamespacedPersistentVolumeClaim.mockRejectedValueOnce({ code: 409 })
 
-    await expect((f.reconciler as any).ensurePvc(host)).resolves.toBe(true)
+    await expect((f.reconciler as any).ensurePvc(host)).resolves.toEqual({
+      applied: true,
+      pvcUid: 'pvc-uid',
+    })
 
     expect(f.core.readNamespacedPersistentVolumeClaim).toHaveBeenCalledTimes(2)
     expect(f.core.createNamespacedPersistentVolumeClaim).toHaveBeenCalledOnce()
@@ -364,7 +373,10 @@ describe('Host read-first RBAC and PVC contracts', () => {
     const f = fixture()
     f.core.readNamespacedPersistentVolumeClaim.mockRejectedValueOnce({ code: 404 })
     f.core.createNamespacedPersistentVolumeClaim.mockRejectedValueOnce({ code: 503 })
-    await expect((f.reconciler as any).ensurePvc(host)).resolves.toBe(false)
+    await expect((f.reconciler as any).ensurePvc(host)).resolves.toEqual({
+      applied: false,
+      pvcUid: undefined,
+    })
     expect(f.core.readNamespacedPersistentVolumeClaim).toHaveBeenCalledOnce()
     expect(f.core.createNamespacedPersistentVolumeClaim).toHaveBeenCalledOnce()
     expect(f.core.replaceNamespacedPersistentVolumeClaim).not.toHaveBeenCalled()
@@ -375,7 +387,10 @@ describe('Host read-first RBAC and PVC contracts', () => {
   it.each([409, 503])('retains Host PVC PUT%d without retrying or recording a skip', async code => {
     const f = fixture()
     f.core.replaceNamespacedPersistentVolumeClaim.mockRejectedValueOnce({ code })
-    await expect((f.reconciler as any).ensurePvc(host)).resolves.toBe(false)
+    await expect((f.reconciler as any).ensurePvc(host)).resolves.toEqual({
+      applied: false,
+      pvcUid: 'uid-rbac-host-workspace',
+    })
     expect(f.core.readNamespacedPersistentVolumeClaim).toHaveBeenCalledOnce()
     expect(f.core.replaceNamespacedPersistentVolumeClaim).toHaveBeenCalledOnce()
     expect(f.core.createNamespacedPersistentVolumeClaim).not.toHaveBeenCalled()

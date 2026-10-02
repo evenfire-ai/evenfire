@@ -567,6 +567,373 @@ spec:
                     reason:
                       type: string
                       description: Human-readable explanation when the stateless request was rejected.
+                conversationStore:
+                  type: object
+                  description: >-
+                    Controller-owned canonical conversation-store state (#825).
+                    Only status.request is written by control-api's trusted
+                    operator path; every other field is owned by
+                    host-context-controller.
+                  properties:
+                    operatorProposal:
+                      type: object
+                      description: Controller-owned readonly preparation target; never grants mutation authority.
+                      required: [schemaVersion, state, hostUid, pvcUid, storageContract, image]
+                      x-kubernetes-validations:
+                        - rule: "self.state != 'ready' || (has(self.templateRevision) && has(self.effectiveLifecycle) && has(self.sourceEnvironmentReferencesHash))"
+                          message: Ready targets require exact current storage and environment reference pins.
+                        - rule: "self.state != 'blocked' || (!has(self.templateRevision) && has(self.reason))"
+                          message: Blocked targets cannot supply preparation pins.
+                      properties:
+                        schemaVersion: {type: integer, enum: [1]}
+                        state: {type: string, enum: [ready, blocked]}
+                        hostUid: {type: string, minLength: 1}
+                        pvcUid: {type: string, minLength: 1}
+                        storageContract: {type: string, enum: [legacy-floor, canonical]}
+                        image: {type: string, minLength: 1}
+                        templateRevision: {type: string, pattern: '^[0-9a-f]{64}$'}
+                        effectiveLifecycle: {type: string, enum: [stateful, stateless, desktop]}
+                        sourceEnvironmentReferencesHash: {type: string, pattern: '^[0-9a-f]{64}$'}
+                        reason: {type: string, minLength: 1}
+                    request:
+                      type: object
+                      description: Trusted operator request written via control-api (#825 section 5.6).
+                      required:
+                        - schemaVersion
+                        - requestId
+                        - operation
+                        - hostUid
+                        - pvcUid
+                        - maintenanceId
+                        - principal
+                      properties:
+                        storageContract: {type: string, enum: [legacy-floor, canonical]}
+                        schemaVersion:
+                          type: integer
+                          enum: [1]
+                        requestId:
+                          type: string
+                          minLength: 1
+                        operation:
+                          type: string
+                          enum: [maintenance, prepare, adopt, release]
+                        hostUid:
+                          type: string
+                          minLength: 1
+                        pvcUid:
+                          type: string
+                          minLength: 1
+                        maintenanceId:
+                          type: string
+                          minLength: 1
+                        principal:
+                          type: object
+                          description: Server-added authenticated principal; never caller-supplied.
+                          required: [storageContract, kind, subject]
+                          properties:
+                            kind:
+                              type: string
+                              enum: [control-admin]
+                            subject:
+                              type: string
+                              minLength: 1
+                        targetImage:
+                          type: string
+                        templateRevision:
+                          type: string
+                          description: Storage-contract revision hash; excludes volatile credential values.
+                        sourceClass:
+                          type: string
+                          enum: [sqlite-pvc, sqlite-external-exported, new-host, memory, unknown]
+                        manifestHash:
+                          type: string
+                        exportId:
+                          type: string
+                        migrationId:
+                          type: string
+                        candidateHash:
+                          type: string
+                        expectedMigrationId:
+                          type: string
+                          description: Floor release/recovery pairing; requires current catalog hash.
+                        expectedStoreId:
+                          type: string
+                          description: Recovery pairing only; never fabricate for plain adoption.
+                        expectedCurrentCatalogHash:
+                          type: string
+                          description: Recovery pairing only; must accompany expectedStoreId.
+                    requestResult:
+                      type: object
+                      description: Controller-owned, binding-bound acknowledgement of the trusted request (#825).
+                      required: [storageContract, requestId, hostUid, pvcUid, state, updatedAt]
+                      properties:
+                        storageContract: {type: string, enum: [legacy-floor, canonical]}
+                        requestId:
+                          type: string
+                          minLength: 1
+                        hostUid:
+                          type: string
+                          minLength: 1
+                        pvcUid:
+                          type: string
+                          minLength: 1
+                        state:
+                          type: string
+                          enum: [accepted, completed, rejected]
+                        updatedAt:
+                          type: string
+                        reason:
+                          type: string
+                    compatibility:
+                      type: object
+                      description: Established contract level for the exact Host/PVC binding (#825).
+                      required: [storageContract, schemaVersion, hostUid, pvcUid, contractVersion, establishedAt]
+                      x-kubernetes-validations:
+                        - rule: "self.storageContract != 'legacy-floor' || (has(self.layoutVersion) && has(self.migrationId) && has(self.databasePath) && has(self.writerFenceRoot) && has(self.catalogHash))"
+                          message: Legacy floor requires its completed bound physical proof.
+                      properties:
+                        storageContract: {type: string, enum: [legacy-floor, canonical]}
+                        schemaVersion:
+                          type: integer
+                          enum: [1]
+                        hostUid:
+                          type: string
+                          minLength: 1
+                        pvcUid:
+                          type: string
+                          minLength: 1
+                        contractVersion:
+                          type: integer
+                          enum: [1]
+                        layoutVersion: {type: integer, enum: [1]}
+                        migrationId: {type: string, minLength: 1}
+                        databasePath: {type: string, enum: [state/state.db]}
+                        writerFenceRoot: {type: string, enum: [state]}
+                        catalogHash: {type: string, pattern: '^[0-9a-f]{64}$'}
+                        establishedAt:
+                          type: string
+                    preparation:
+                      type: object
+                      description: Controller-owned preparation receipt gating the FIRST canonical rollout (#825).
+                      required:
+                        - storageContract
+                        - schemaVersion
+                        - requestId
+                        - hostUid
+                        - pvcUid
+                        - templateRevision
+                        - image
+                        - sourceClass
+                        - maintenanceId
+                        - preparedAt
+                        - provenance
+                      properties:
+                        storageContract: {type: string, enum: [legacy-floor, canonical]}
+                        schemaVersion:
+                          type: integer
+                          enum: [1]
+                        requestId:
+                          type: string
+                          minLength: 1
+                        hostUid:
+                          type: string
+                          minLength: 1
+                        pvcUid:
+                          type: string
+                          minLength: 1
+                        templateRevision:
+                          type: string
+                        image:
+                          type: string
+                        sourceClass:
+                          type: string
+                          enum: [sqlite-pvc, sqlite-external-exported, new-host, memory, unknown]
+                        manifestHash:
+                          type: string
+                        exportId:
+                          type: string
+                        maintenanceId:
+                          type: string
+                        preparedAt:
+                          type: string
+                        verificationJobName:
+                          type: string
+                        verificationJobUid:
+                          type: string
+                        provenance:
+                          type: string
+                          enum: [new, existing]
+                    layout:
+                      type: object
+                      description: Monotonic canonical layout commitment for the exact binding (#825).
+                      required: [version, hostUid, pvcUid, state, committedAt]
+                      properties:
+                        version:
+                          type: integer
+                          enum: [1]
+                        hostUid:
+                          type: string
+                          minLength: 1
+                        pvcUid:
+                          type: string
+                          minLength: 1
+                        state:
+                          type: string
+                          enum: [pending, ready]
+                        committedAt:
+                          type: string
+                        storeId:
+                          type: string
+                    maintenance:
+                      type: object
+                      description: Durable maintenance state; wake/drain never cancels it (#825).
+                      required: [storageContract, maintenanceId, hostUid, pvcUid, phase, startedAt, updatedAt]
+                      properties:
+                        storageContract: {type: string, enum: [legacy-floor, canonical]}
+                        maintenanceId:
+                          type: string
+                          minLength: 1
+                        hostUid:
+                          type: string
+                          minLength: 1
+                        pvcUid:
+                          type: string
+                          minLength: 1
+                        phase:
+                          type: string
+                          enum: [quiescing, fenced, migrating, completing, completed, released, failed]
+                        startedAt:
+                          type: string
+                        updatedAt:
+                          type: string
+                        reason:
+                          type: string
+                    provisioningIntent:
+                      type: object
+                      description: Native Host birth observed after a known LIST/WATCH; cold LIST never creates this controller record.
+                      required: [schemaVersion, hostUid, hostCreatedAt, source, observedResourceVersion, watchResourceVersion, recordedAt]
+                      properties:
+                        schemaVersion: {type: integer, enum: [1]}
+                        hostUid: {type: string, minLength: 1}
+                        hostCreatedAt: {type: string, minLength: 1}
+                        source: {type: string, enum: [watch-added]}
+                        observedResourceVersion: {type: string, minLength: 1}
+                        watchResourceVersion: {type: string, minLength: 1}
+                        recordedAt: {type: string}
+                    provisioning:
+                      type: object
+                      description: Controller-owned verified canonical-store provisioning evidence (#825).
+                      required: [hostUid, pvcUid, createdAt]
+                      properties:
+                        hostUid: {type: string, minLength: 1}
+                        pvcUid: {type: string, minLength: 1}
+                        createdAt: {type: string}
+                    writerProof:
+                      type: object
+                      description: Controller-owned verified canonical-store writerProof evidence (#825).
+                      required: [storageContract, hostUid, pvcUid, maintenanceId, sourcePodUid, sourceImageId, sourceRestartCount, nodeName, exportId, manifestHash, sourceSnapshotHash, verifiedAt]
+                      properties:
+                        storageContract: {type: string, enum: [legacy-floor, canonical]}
+                        hostUid: {type: string, minLength: 1}
+                        pvcUid: {type: string, minLength: 1}
+                        maintenanceId: {type: string, minLength: 1}
+                        sourcePodUid: {type: string, minLength: 1}
+                        sourceImageId: {type: string, minLength: 1}
+                        sourceRestartCount: {type: integer, minimum: 0}
+                        nodeName: {type: string, minLength: 1}
+                        exportId: {type: string, minLength: 1}
+                        manifestHash: {type: string, pattern: '^[0-9a-f]{64}$'}
+                        sourceSnapshotHash: {type: string, pattern: '^[0-9a-f]{64}$'}
+                        verifiedAt: {type: string}
+                    execution:
+                      type: object
+                      description: Controller-owned verified canonical-store execution evidence (#825).
+                      required: [storageContract, requestId, hostUid, pvcUid, maintenanceId, requestHash, jobName, jobUid, image, templateRevision, operation, phase, createdAt]
+                      properties:
+                        storageContract: {type: string, enum: [legacy-floor, canonical]}
+                        requestId: {type: string, minLength: 1}
+                        hostUid: {type: string, minLength: 1}
+                        pvcUid: {type: string, minLength: 1}
+                        maintenanceId: {type: string, minLength: 1}
+                        requestHash: {type: string, pattern: '^[0-9a-f]{64}$'}
+                        resolvedImageId: {type: string, minLength: 1}
+                        imageProvenance: {type: string, enum: [pod-immutable-reference]}
+                        jobName: {type: string, minLength: 1}
+                        jobUid: {type: string, minLength: 1}
+                        image: {type: string, minLength: 1}
+                        templateRevision: {type: string, pattern: '^[0-9a-f]{64}$'}
+                        operation: {type: string, enum: [prepare, adopt, release]}
+                        phase: {type: string, enum: [preparation, migrate, layout-precheck, adopt, current]}
+                        createdAt: {type: string}
+                    operationOutcome:
+                      type: object
+                      description: Controller-owned verified canonical-store operationOutcome evidence (#825).
+                      required: [layoutVersion, storageContract, requestId, operation, hostUid, pvcUid, maintenanceId, reason, jobName, jobUid]
+                      x-kubernetes-validations:
+                        - rule: "self.storageContract == 'canonical' ? has(self.storeId) : (!has(self.storeId) && has(self.migrationId) && has(self.databasePath) && has(self.writerFenceRoot))"
+                          message: Storage identity must match the explicit contract.
+                      properties:
+                        storageContract: {type: string, enum: [legacy-floor, canonical]}
+                        requestId: {type: string, minLength: 1}
+                        operation: {type: string, enum: [prepare, adopt]}
+                        hostUid: {type: string, minLength: 1}
+                        pvcUid: {type: string, minLength: 1}
+                        maintenanceId: {type: string, minLength: 1}
+                        jobName: {type: string, minLength: 1}
+                        layoutVersion: {type: integer, enum: [1]}
+                        databasePath: {type: string, enum: [state/state.db]}
+                        writerFenceRoot: {type: string, enum: [state]}
+                        catalogHash: {type: string, pattern: '^[0-9a-f]{64}$'}
+                        migrationId: {type: string, minLength: 1}
+                        storeId: {type: string, minLength: 1}
+                        reason: {type: string, minLength: 1}
+                        jobUid: {type: string, minLength: 1}
+                    completion:
+                      type: object
+                      description: Controller-owned verified canonical-store completion evidence (#825).
+                      required: [storageContract, proofVersion, hostUid, pvcUid, maintenanceId, migrationId, currentCatalogHash]
+                      x-kubernetes-validations:
+                        - rule: "self.storageContract == 'canonical' ? has(self.storeId) : (!has(self.storeId) && has(self.migrationId) && has(self.databasePath) && has(self.writerFenceRoot))"
+                          message: Storage identity must match the explicit contract.
+                      properties:
+                        storageContract: {type: string, enum: [legacy-floor, canonical]}
+                        requestId: {type: string, minLength: 1}
+                        requestHash: {type: string, pattern: '^[0-9a-f]{64}$'}
+                        controllerUid: {type: string, minLength: 1}
+                        capabilityId: {type: string, minLength: 1}
+                        proofVersion: {type: integer, enum: [1]}
+                        hostUid: {type: string, minLength: 1}
+                        pvcUid: {type: string, minLength: 1}
+                        maintenanceId: {type: string, minLength: 1}
+                        migrationId: {type: string, minLength: 1}
+                        layoutVersion: {type: integer, enum: [1]}
+                        databasePath: {type: string, enum: [state/state.db]}
+                        writerFenceRoot: {type: string, enum: [state]}
+                        catalogHash: {type: string, pattern: '^[0-9a-f]{64}$'}
+                        storeId: {type: string, minLength: 1}
+                        currentCatalogHash: {type: string, pattern: '^[0-9a-f]{64}$'}
+                        manifestHash: {type: string, pattern: '^[0-9a-f]{64}$'}
+                        candidateHash: {type: string, pattern: '^[0-9a-f]{64}$'}
+                    ready:
+                      type: object
+                      description: ConversationStoreReady observation, separate from lifecycle early-return (#825).
+                      required: [ready, reason]
+                      properties:
+                        ready:
+                          type: boolean
+                        reason:
+                          type: string
+                          enum:
+                            - Canonical
+                            - LayoutReady
+                            - MigrationPending
+                            - MigrationBlocked
+                            - ImageFloorMissing
+                            - InitFailedUnclassified
+                            - InitOutcomeMismatch
+                            - Deferred
+                        message:
+                          type: string
                 conditions:
                   type: array
                   items:

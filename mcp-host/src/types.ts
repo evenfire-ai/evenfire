@@ -4,6 +4,7 @@
 import type { ApprovalConfig } from './core/extensions/approvalTypes'
 import type { GuardrailsConfig } from './core/guardrails/config'
 import type { LlmProvider } from './llm/registryCore'
+import type { ConversationStoreMaintenanceStatus } from './runtime/canonicalStoreMaintenance'
 
 /**
  * Model configuration.
@@ -107,6 +108,21 @@ export interface RawLlmPolicy {
  * Host CRD.
  */
 export interface HostCRD {
+  uid?: string
+  resourceVersion?: string
+  status?: {
+    conversationStore?: {
+      maintenance?: ConversationStoreMaintenanceStatus
+      compatibility?: { storageContract?: 'legacy-floor' | 'canonical' }
+      layout?: {
+        version: 1
+        hostUid: string
+        pvcUid: string
+        state: 'pending' | 'ready'
+        storeId?: string
+      }
+    }
+  }
   name: string
   namespace: string
   spec: HostSpec

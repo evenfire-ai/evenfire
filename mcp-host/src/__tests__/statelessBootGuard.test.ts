@@ -104,6 +104,23 @@ describe('resolveSessionDbPathFrom', () => {
     }
   }
 
+  it('never uses a workspace or tmp fallback for the admitted legacy floor', () => {
+    const inputs = pathInputs({
+      storageContract: 'legacy-floor',
+      canonicalStateDir: '/var/lib/clerum/state',
+      sessionDbDir: '/var/lib/clerum/state',
+    })
+    expect(resolveSessionDbPathFrom(inputs)).toBe('/var/lib/clerum/state/state.db')
+    for (const override of [
+      { sessionDbDir: '' },
+      { sessionDbDir: '/workspace' },
+      { sessionDbPath: '/workspace/state.db' },
+      { canonicalStateDir: 'state' },
+    ]) {
+      expect(() => resolveSessionDbPathFrom({ ...inputs, ...override })).toThrow('DbPathMismatch')
+    }
+  })
+
   it('prefers CLERUM_SESSION_DB_DIR over every other source', () => {
     expect(
       resolveSessionDbPathFrom(

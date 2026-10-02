@@ -3,7 +3,12 @@
  *
  * Routing and authz are split into dedicated modules under src/server/.
  */
-import express, { type NextFunction, type Request, type Response } from 'express'
+import express, {
+  type NextFunction,
+  type Request,
+  type RequestHandler,
+  type Response,
+} from 'express'
 import * as fs from 'fs'
 import * as http from 'http'
 import * as path from 'path'
@@ -11,6 +16,7 @@ import { register } from 'prom-client'
 import { readOpenedArtifactBuffer, redactArtifactForDelivery } from './artifacts/artifactBytes'
 import type { ArtifactSecretEntry } from './artifacts/artifactRedaction'
 import type { RuntimeLifecycleGate } from './lifecycle/statelessHeartbeat'
+import { logger } from './logger'
 import './mcp/catalogBootstrapMetrics'
 import './mcp/statusHeartbeatMetrics'
 import './observability/processMetrics'
@@ -291,6 +297,8 @@ export class RPCServer {
   private workflowRouter: ReturnType<typeof createWorkflowRouter> | null = null
   private artifactSecretEntriesProvider: (() => ArtifactSecretEntry[]) | null = null
   private lifecycleGate: RuntimeLifecycleGate | null = null
+  private conversationStoreMaintenanceGate: (() => boolean) | null = null
+  private readonly conversationStoreBusinessCalls = new Set<Promise<unknown>>()
 
   constructor(port: number = 8080) {
     this.port = port
@@ -359,6 +367,10 @@ export class RPCServer {
     // Readiness/health check — no auth required (K8s probes don't send JWT).
     // Runtime auth degradation returns 503 readiness while liveness stays 200.
     this.app.get('/v1/runtime/health', (_req, res) => {
+      if (this.conversationStoreMaintenanceGate?.()) {
+        json(res, 503, { status: 'maintenance' })
+        return
+      }
       const runtimeAuth = runtimeAuthHealthSnapshot()
       if (runtimeAuth.state === 'degraded') {
         json(res, 503, { status: 'degraded' })
@@ -372,15 +384,15 @@ export class RPCServer {
       res.send(await register.metrics())
     })
 
-    this.app.get('/v1/runtime/status', runtimeEdgeGuard(['rpc-proxy']), async (req, res) => {
+    this.app.get('/v1/runtime/status', this.runtimeGuard(['rpc-proxy']), async (req, res) => {
       await handleStatusRoute(req, res, this.routeDeps())
     })
-    this.app.get('/v1/runtime/activity', runtimeEdgeGuard(['rpc-proxy']), async (req, res) => {
+    this.app.get('/v1/runtime/activity', this.runtimeGuard(['rpc-proxy']), async (req, res) => {
       await handleActivityRoute(req, res, this.routeDeps())
     })
     this.app.get(
       '/v1/runtime/activity/stream',
-      runtimeEdgeGuard(['rpc-proxy']),
+      this.runtimeGuard(['rpc-proxy']),
       async (req, res) => {
         await handleActivityStreamRoute(req, res, this.routeDeps())
       }
@@ -388,7 +400,7 @@ export class RPCServer {
 
     this.app.post(
       '/v1/runtime/messages',
-      runtimeEdgeGuard(['rpc-proxy', 'channel-reader', 'workflow-approval-request-reader']),
+      this.runtimeGuard(['rpc-proxy', 'channel-reader', 'workflow-approval-request-reader']),
       async (req, res) => {
         // Stage 3 (stateless-agents) — reversible DRAINING fence. While the
         // host is draining/drained, new intake is rejected with the exact
@@ -411,7 +423,7 @@ export class RPCServer {
 
     this.app.post(
       '/v1/runtime/approvals/approve',
-      runtimeEdgeGuard(['rpc-proxy', 'channel-reader']),
+      this.runtimeGuard(['rpc-proxy', 'channel-reader']),
       async (req, res) => {
         await handleApprovalRoute(req, res, true, this.routeDeps())
       }
@@ -419,7 +431,7 @@ export class RPCServer {
 
     this.app.post(
       '/v1/runtime/approvals/deny',
-      runtimeEdgeGuard(['rpc-proxy', 'channel-reader']),
+      this.runtimeGuard(['rpc-proxy', 'channel-reader']),
       async (req, res) => {
         await handleApprovalRoute(req, res, false, this.routeDeps())
       }
@@ -427,7 +439,7 @@ export class RPCServer {
 
     this.app.post(
       '/v1/runtime/provider-messages/authorize',
-      runtimeEdgeGuard(['channel-reader', 'workflow-approval-request-reader']),
+      this.runtimeGuard(['channel-reader', 'workflow-approval-request-reader']),
       async (req, res) => {
         await handleProviderMessageAuthorizationRoute(req, res, this.routeDeps())
       }
@@ -435,7 +447,7 @@ export class RPCServer {
 
     this.app.post(
       '/v1/runtime/workflow-approvals/decide',
-      runtimeEdgeGuard(['channel-reader', 'workflow-approval-request-reader']),
+      this.runtimeGuard(['channel-reader', 'workflow-approval-request-reader']),
       async (req, res) => {
         await handleProviderWorkflowApprovalDecisionRoute(req, res, this.routeDeps())
       }
@@ -443,7 +455,7 @@ export class RPCServer {
 
     this.app.post(
       '/v1/runtime/workflow-approval-mediums/link-sessions/confirm',
-      runtimeEdgeGuard(['channel-reader', 'workflow-approval-request-reader']),
+      this.runtimeGuard(['channel-reader', 'workflow-approval-request-reader']),
       async (req, res) => {
         await handleWorkflowApprovalMediumEnrollmentRoute(req, res, this.routeDeps())
       }
@@ -451,7 +463,7 @@ export class RPCServer {
 
     this.app.post(
       '/v1/runtime/workflow-approvals/resolve',
-      runtimeEdgeGuard(['channel-reader']),
+      this.runtimeGuard(['channel-reader']),
       async (req, res) => {
         await handleProviderWorkflowApprovalResolveRoute(req, res, this.routeDeps())
       }
@@ -459,7 +471,7 @@ export class RPCServer {
 
     this.app.post(
       '/v1/runtime/workflow-results/latest',
-      runtimeEdgeGuard(['channel-reader']),
+      this.runtimeGuard(['channel-reader']),
       async (req, res) => {
         await handleProviderWorkflowResultRequestRoute(req, res, this.routeDeps())
       }
@@ -467,7 +479,7 @@ export class RPCServer {
 
     this.app.post(
       '/v1/runtime/workflow-approval-notifications/claim',
-      runtimeEdgeGuard(['channel-reader']),
+      this.runtimeGuard(['channel-reader']),
       async (req, res) => {
         await handleWorkflowApprovalNotificationClaimRoute(req, res, this.routeDeps())
       }
@@ -475,7 +487,7 @@ export class RPCServer {
 
     this.app.post(
       '/v1/runtime/workflow-approval-notifications/deliveries/:id/:action',
-      runtimeEdgeGuard(['channel-reader']),
+      this.runtimeGuard(['channel-reader']),
       async (req, res) => {
         const action = String(req.params.action || '')
         if (action !== 'ack' && action !== 'fail') {
@@ -494,13 +506,13 @@ export class RPCServer {
 
     this.app.post(
       '/v1/runtime/workflow-approval-mediums/telegram/challenges/confirm-provider-event',
-      runtimeEdgeGuard(['channel-reader']),
+      this.runtimeGuard(['channel-reader']),
       async (req, res) => {
         await handleTelegramWorkflowApprovalVerificationRoute(req, res, this.routeDeps())
       }
     )
 
-    this.app.get('/v1/runtime/sessions', runtimeEdgeGuard(['rpc-proxy']), async (req, res) => {
+    this.app.get('/v1/runtime/sessions', this.runtimeGuard(['rpc-proxy']), async (req, res) => {
       await handleSessionsListRoute(req, res, this.routeDeps())
     })
 
@@ -510,6 +522,7 @@ export class RPCServer {
     this.app.get(
       '/v1/runtime/sessions/search',
       requireScope('host:session:read'),
+      this.maintenanceBusinessGuard,
       async (req, res) => {
         await handleSessionSearchRoute(req, res, this.routeDeps())
       }
@@ -517,7 +530,7 @@ export class RPCServer {
 
     this.app.get(
       '/v1/runtime/sessions/:agent/:chatId/messages',
-      runtimeEdgeGuard(['rpc-proxy']),
+      this.runtimeGuard(['rpc-proxy']),
       async (req, res) => {
         await handleSessionMessagesRoute(req, res, this.routeDeps())
       }
@@ -525,7 +538,7 @@ export class RPCServer {
 
     this.app.get(
       '/v1/runtime/sessions/:agent/:chatId/context-breakdown',
-      runtimeEdgeGuard(['rpc-proxy']),
+      this.runtimeGuard(['rpc-proxy']),
       async (req, res) => {
         await handleContextBreakdownRoute(req, res, this.routeDeps())
       }
@@ -533,7 +546,7 @@ export class RPCServer {
 
     this.app.get(
       '/v1/runtime/tasks/:taskId/result',
-      runtimeEdgeGuard(['rpc-proxy', 'channel-reader', 'workflow-approval-request-reader']),
+      this.runtimeGuard(['rpc-proxy', 'channel-reader', 'workflow-approval-request-reader']),
       async (req, res) => {
         await handleTaskResultRoute(req, res, req.params.taskId as string, this.routeDeps())
       }
@@ -541,7 +554,7 @@ export class RPCServer {
 
     this.app.post(
       '/v1/runtime/tasks/:taskId/cancel',
-      runtimeEdgeGuard(['rpc-proxy']),
+      this.runtimeGuard(['rpc-proxy']),
       async (req, res) => {
         const taskId = String(req.params.taskId || '').trim()
         if (!taskId) {
@@ -576,6 +589,7 @@ export class RPCServer {
     this.app.post(
       '/v1/runtime/compact',
       requireScope('host:compaction:invoke'),
+      this.maintenanceBusinessGuard,
       async (req, res) => {
         await handleCompactionRoute(req, res, this.routeDeps())
       }
@@ -585,29 +599,29 @@ export class RPCServer {
     // write (set-model). Both behind the edge guard: rpc-proxy has already
     // enforced host:session:read / host:model:write scopes, and it injects the
     // verified edge user + hostRef the handlers scope the session lookup to.
-    this.app.get('/v1/runtime/models', runtimeEdgeGuard(['rpc-proxy']), async (req, res) => {
+    this.app.get('/v1/runtime/models', this.runtimeGuard(['rpc-proxy']), async (req, res) => {
       await handleModelsListRoute(req, res, this.routeDeps())
     })
-    this.app.post('/v1/runtime/model', runtimeEdgeGuard(['rpc-proxy']), async (req, res) => {
+    this.app.post('/v1/runtime/model', this.runtimeGuard(['rpc-proxy']), async (req, res) => {
       await handleSetModelRoute(req, res, this.routeDeps())
     })
     // Spec 15 Fase B — per-session rename. Behind the same edge guard: rpc-proxy
     // has enforced host:session:write and injects the verified edge user + hostRef.
     this.app.patch(
       '/v1/runtime/sessions/:agent/:chatId/name',
-      runtimeEdgeGuard(['rpc-proxy']),
+      this.runtimeGuard(['rpc-proxy']),
       async (req, res) => {
         await handleSetTitleRoute(req, res, this.routeDeps())
       }
     )
 
-    this.app.get('/v1/runtime/cron/results', runtimeEdgeGuard(['channel-reader']), (req, res) => {
+    this.app.get('/v1/runtime/cron/results', this.runtimeGuard(['channel-reader']), (req, res) => {
       handleCronResultsRoute(req, res, this.routeDeps())
     })
 
     this.app.delete(
       '/v1/runtime/cron/results/:taskId',
-      runtimeEdgeGuard(['channel-reader']),
+      this.runtimeGuard(['channel-reader']),
       (req, res) => {
         handleCronResultAckRoute(req, res, req.params.taskId as string, this.routeDeps())
       }
@@ -615,7 +629,7 @@ export class RPCServer {
 
     this.app.get(
       '/v1/runtime/tasks/:taskId/progress/stream',
-      runtimeEdgeGuard(['rpc-proxy', 'channel-reader', 'workflow-approval-request-reader']),
+      this.runtimeGuard(['rpc-proxy', 'channel-reader', 'workflow-approval-request-reader']),
       async (req, res) => {
         await handleProgressStreamRoute(req, res, req.params.taskId as string, this.routeDeps())
       }
@@ -638,7 +652,7 @@ export class RPCServer {
     this.app.get(
       '/v1/runtime/artifacts',
       rejectWorkflowRuntimeArtifacts,
-      runtimeEdgeGuard(['rpc-proxy']),
+      this.runtimeGuard(['rpc-proxy']),
       (_req, res) => {
         try {
           // Re-resolved per request: getOutputDir() depends on the Host CRD, which
@@ -676,7 +690,7 @@ export class RPCServer {
     this.app.get(
       '/v1/runtime/artifacts/:filename/download',
       rejectWorkflowRuntimeArtifacts,
-      runtimeEdgeGuard(['rpc-proxy']),
+      this.runtimeGuard(['rpc-proxy']),
       (req, res) => {
         const filename = req.params.filename as string
         if (isInternalWorkflowArtifactName(filename)) {
@@ -755,7 +769,7 @@ export class RPCServer {
   }
 
   onMessage(handler: MessageHandler): void {
-    this.messageHandler = handler
+    this.messageHandler = this.trackConversationStoreBusiness(handler)
   }
 
   onStatus(handler: StatusHandler): void {
@@ -763,43 +777,43 @@ export class RPCServer {
   }
 
   onApproval(handler: ApprovalHandler): void {
-    this.approvalHandler = handler
+    this.approvalHandler = this.trackConversationStoreBusiness(handler)
   }
 
   onProviderWorkflowApprovalDecision(handler: ProviderWorkflowApprovalDecisionHandler): void {
-    this.providerWorkflowApprovalDecisionHandler = handler
+    this.providerWorkflowApprovalDecisionHandler = this.trackConversationStoreBusiness(handler)
   }
 
   onProviderWorkflowApprovalResolve(handler: ProviderWorkflowApprovalResolveHandler): void {
-    this.providerWorkflowApprovalResolveHandler = handler
+    this.providerWorkflowApprovalResolveHandler = this.trackConversationStoreBusiness(handler)
   }
 
   onProviderWorkflowResultRequest(handler: ProviderWorkflowResultRequestHandler): void {
-    this.providerWorkflowResultRequestHandler = handler
+    this.providerWorkflowResultRequestHandler = this.trackConversationStoreBusiness(handler)
   }
 
   onProviderMessageAuthorization(handler: ProviderMessageAuthorizationHandler): void {
-    this.providerMessageAuthorizationHandler = handler
+    this.providerMessageAuthorizationHandler = this.trackConversationStoreBusiness(handler)
   }
 
   onWorkflowApprovalNotificationClaim(handler: WorkflowApprovalNotificationClaimHandler): void {
-    this.workflowApprovalNotificationClaimHandler = handler
+    this.workflowApprovalNotificationClaimHandler = this.trackConversationStoreBusiness(handler)
   }
 
   onWorkflowApprovalNotificationTerminal(
     handler: WorkflowApprovalNotificationTerminalHandler
   ): void {
-    this.workflowApprovalNotificationTerminalHandler = handler
+    this.workflowApprovalNotificationTerminalHandler = this.trackConversationStoreBusiness(handler)
   }
 
   onWorkflowApprovalMediumEnrollment(handler: WorkflowApprovalMediumEnrollmentHandler): void {
-    this.workflowApprovalMediumEnrollmentHandler = handler
+    this.workflowApprovalMediumEnrollmentHandler = this.trackConversationStoreBusiness(handler)
   }
 
   onTelegramWorkflowApprovalVerification(
     handler: TelegramWorkflowApprovalVerificationHandler
   ): void {
-    this.telegramWorkflowApprovalVerificationHandler = handler
+    this.telegramWorkflowApprovalVerificationHandler = this.trackConversationStoreBusiness(handler)
   }
 
   onActivitySnapshot(handler: ActivitySnapshotHandler): void {
@@ -811,7 +825,7 @@ export class RPCServer {
   }
 
   onTaskResult(handler: TaskResultHandler): void {
-    this.taskResultHandler = handler
+    this.taskResultHandler = this.trackConversationStoreBusiness(handler)
   }
 
   onCronResults(handler: CronResultsHandler): void {
@@ -819,7 +833,7 @@ export class RPCServer {
   }
 
   onCronResultAck(handler: CronResultAckHandler): void {
-    this.cronResultAckHandler = handler
+    this.cronResultAckHandler = this.trackConversationStoreBusiness(handler)
   }
 
   onProgressStream(handler: ProgressStreamHandler): void {
@@ -831,35 +845,35 @@ export class RPCServer {
   }
 
   onSessionsList(handler: SessionsListHandler): void {
-    this.sessionsListHandler = handler
+    this.sessionsListHandler = this.trackConversationStoreBusiness(handler)
   }
 
   onSessionMessages(handler: SessionMessagesHandler): void {
-    this.sessionMessagesHandler = handler
+    this.sessionMessagesHandler = this.trackConversationStoreBusiness(handler)
   }
 
   onContextBreakdown(handler: ContextBreakdownHandler): void {
-    this.contextBreakdownHandler = handler
+    this.contextBreakdownHandler = this.trackConversationStoreBusiness(handler)
   }
 
   onSessionSearch(handler: SessionSearchHandler): void {
-    this.sessionSearchHandler = handler
+    this.sessionSearchHandler = this.trackConversationStoreBusiness(handler)
   }
 
   onCompaction(handler: CompactionHandler): void {
-    this.compactionHandler = handler
+    this.compactionHandler = this.trackConversationStoreBusiness(handler)
   }
 
   onModelsList(handler: ModelsListHandler): void {
-    this.modelsListHandler = handler
+    this.modelsListHandler = this.trackConversationStoreBusiness(handler)
   }
 
   onSetModel(handler: SetModelHandler): void {
-    this.setModelHandler = handler
+    this.setModelHandler = this.trackConversationStoreBusiness(handler)
   }
 
   onSetTitle(handler: SetTitleHandler): void {
-    this.setTitleHandler = handler
+    this.setTitleHandler = this.trackConversationStoreBusiness(handler)
   }
 
   /** Activate workflow mode — mounts /api/v1/workflow/* routes. */
@@ -873,6 +887,81 @@ export class RPCServer {
 
   /** Stage 3 (stateless-agents) — wire the DRAINING fence + activity tracker
    *  consulted by the POST /v1/runtime/messages route. */
+  setConversationStoreMaintenanceGate(gate: () => boolean): void {
+    this.conversationStoreMaintenanceGate = gate
+  }
+
+  private readonly maintenanceBusinessGuard: RequestHandler = (_req, res, next) => {
+    if (this.conversationStoreMaintenanceGate?.()) {
+      json(res, 503, { code: 'conversation_store_maintenance' })
+      return
+    }
+    next()
+  }
+
+  private runtimeGuard(callers: Parameters<typeof runtimeEdgeGuard>[0]): RequestHandler {
+    const authenticate = runtimeEdgeGuard(callers)
+    return (req, res, next) =>
+      authenticate(req, res, (error?: unknown) => {
+        if (error) {
+          next(error)
+          return
+        }
+        if (
+          this.conversationStoreMaintenanceGate?.() &&
+          !['/v1/runtime/status', '/v1/runtime/activity', '/v1/runtime/activity/stream'].includes(
+            req.path
+          )
+        ) {
+          json(res, 503, { code: 'conversation_store_maintenance' })
+          return
+        }
+        next()
+      })
+  }
+
+  private trackConversationStoreBusiness<T extends (...args: never[]) => unknown>(handler: T): T {
+    return ((...args: Parameters<T>) => {
+      if (this.conversationStoreMaintenanceGate?.()) throw new Error('ConversationStoreMaintenance')
+      const result = handler(...args)
+      if (
+        result !== null &&
+        typeof result === 'object' &&
+        'then' in result &&
+        typeof result.then === 'function'
+      ) {
+        const operation = Promise.resolve(result)
+        this.conversationStoreBusinessCalls.add(operation)
+        void operation.then(
+          () => this.conversationStoreBusinessCalls.delete(operation),
+          () => this.conversationStoreBusinessCalls.delete(operation)
+        )
+      }
+      return result
+    }) as T
+  }
+
+  /** Includes a compaction/approval call whose client disconnected before its promise settled. */
+  async drainConversationStoreBusiness(timeoutMs = 30_000): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      await Promise.race([
+        (async () => {
+          while (this.conversationStoreBusinessCalls.size)
+            await Promise.allSettled(Array.from(this.conversationStoreBusinessCalls))
+        })(),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error('ConversationStoreMaintenanceHttpPending')),
+            timeoutMs
+          )
+        }),
+      ])
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
+  }
+
   setLifecycleGate(gate: RuntimeLifecycleGate): void {
     this.lifecycleGate = gate
   }
@@ -912,12 +1001,12 @@ export class RPCServer {
       this.server = this.app.listen(this.port)
 
       this.server.on('error', err => {
-        console.error('[Server] Error:', err)
+        logger.error({ err }, '[Server] listener failed')
         reject(err)
       })
 
       this.server.on('listening', () => {
-        console.log(`[Server] RPC server listening on port ${this.port}`)
+        logger.info({ port: this.port }, '[Server] RPC server listening')
         resolve()
       })
     })
@@ -930,7 +1019,7 @@ export class RPCServer {
         return
       }
       this.server.close(() => {
-        console.log('[Server] RPC server stopped')
+        logger.info({}, '[Server] RPC server stopped')
         resolve()
       })
     })

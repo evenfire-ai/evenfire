@@ -563,8 +563,252 @@ export interface HostLifecycleStatus {
   reason?: string
 }
 
+/** Explicit admission contract; a compatible floor never authorizes canonical activation. */
+export type ConversationStoreStorageContract = 'legacy-floor' | 'canonical'
+
+/** Source class of the Host's conversation store (#825). */
+export type ConversationStoreSourceClass =
+  | 'sqlite-pvc'
+  | 'sqlite-external-exported'
+  | 'new-host'
+  | 'memory'
+  | 'unknown'
+
+/**
+ * Trusted operator request written to Host.status.conversationStore.request
+ * by control-api's authenticated operator path (#825 section 5.6). HCC never
+ * accepts this from a tenant annotation or arbitrary metadata; it validates
+ * the binding (HostUID + observed PVC UID), target image/storage-template
+ * revision, source proof and live maintenance before producing the
+ * controller-owned preparation receipt.
+ */
+export interface ConversationStoreRequest {
+  storageContract: ConversationStoreStorageContract
+  schemaVersion: 1
+  requestId: string
+  operation: 'maintenance' | 'prepare' | 'adopt' | 'release'
+  hostUid: string
+  pvcUid: string
+  maintenanceId: string
+  /** Server-added authenticated principal; never caller-supplied. */
+  principal: ConversationStoreRequestPrincipal
+  targetImage?: string
+  templateRevision?: string
+  sourceClass?: ConversationStoreSourceClass
+  manifestHash?: string
+  exportId?: string
+  migrationId?: string
+  candidateHash?: string
+  expectedStoreId?: string
+  expectedMigrationId?: string
+  expectedCurrentCatalogHash?: string
+}
+
+/** Authenticated control-api operator principal (server-added). */
+export interface ConversationStoreRequestPrincipal {
+  kind: 'control-admin'
+  subject: string
+}
+
+/**
+ * Controller-owned outcome of a trusted conversation-store request (#825).
+ * A pending or accepted request cannot be overwritten; `accepted` allows
+ * only an idempotent resend of the same requestId; `completed`/`rejected` frees the
+ * Host for a new requestId. An observed controller failure records `rejected`
+ * with a closed reason.
+ */
+export interface ConversationStoreRequestResult {
+  storageContract: ConversationStoreStorageContract
+  requestId: string
+  hostUid: string
+  pvcUid: string
+  state: 'accepted' | 'completed' | 'rejected'
+  updatedAt: string
+  reason?: string
+}
+
+/**
+ * Established contract level (#825 section 5.6): once HCC admits the first
+ * compatible delivery for the exact Host/PVC binding, later compatible image
+ * renewals within the same contract do not replay first-preparation.
+ */
+export interface ConversationStoreCompatibility {
+  storageContract: ConversationStoreStorageContract
+  schemaVersion: 1
+  hostUid: string
+  pvcUid: string
+  contractVersion: 1
+  /** Floor proof has no canonical identity; these pins identify its bound completed precheck. */
+  layoutVersion?: 1
+  migrationId?: string
+  databasePath?: 'state/state.db'
+  writerFenceRoot?: 'state'
+  catalogHash?: string
+  establishedAt: string
+}
+
+/**
+ * Operator-produced preparation receipt gating the FIRST canonical rollout of
+ * issue #825 (plan section 5.6). HCC validates the binding (HostUID plus the
+ * observed PVC UID and intended image) before any spec.template change that
+ * introduces the new image, precheck init, fence or Recreate strategy. A tenant
+ * annotation or a stale condition can never authorize preparation or adoption.
+ */
+export interface ConversationStorePreparation {
+  storageContract: ConversationStoreStorageContract
+  schemaVersion: 1
+  /** Operator request identity; bound to the preparation dispatch (one-shot). */
+  requestId: string
+  hostUid: string
+  pvcUid: string
+  /** Hash of the intended pod template; binds the receipt to a rollout. */
+  templateRevision: string
+  /** Immutable image reference intended for this Host. */
+  image: string
+  sourceClass: ConversationStoreSourceClass
+  /** Hash measured by the preparation helper. */
+  manifestHash?: string
+  exportId?: string
+  /** Active maintenance binding when the source required fenced export. */
+  maintenanceId: string
+  preparedAt: string
+  verificationJobName?: string
+  verificationJobUid?: string
+  /** Source provenance: 'new' for a newly created PVC, 'existing' otherwise. */
+  provenance: 'new' | 'existing'
+}
+
+/** Monotonic canonical layout commitment persisted in Host status (#825 5.6). */
+export interface ConversationStoreLayoutCommitment {
+  version: 1
+  hostUid: string
+  pvcUid: string
+  state: 'pending' | 'ready'
+  committedAt: string
+  /** Populated once the init container reports the store identity. */
+  storeId?: string
+}
+
+/**
+ * Durable maintenance state for the canonical conversation store (#825 5.7).
+ * Wake and ordinary stateless drain must never cancel it; replicas stay gated
+ * (quiesced) before any data mutation and the status is preserved on updates.
+ */
+export interface ConversationStoreMaintenance {
+  storageContract: ConversationStoreStorageContract
+  maintenanceId: string
+  hostUid: string
+  pvcUid: string
+  phase: 'quiescing' | 'fenced' | 'migrating' | 'completing' | 'completed' | 'released' | 'failed'
+  startedAt: string
+  updatedAt: string
+  reason?: string
+}
+
+/** Closed reason map for the ConversationStoreReady observation (#825 5.4.1). */
+export type ConversationStoreReadyReason =
+  | 'Canonical'
+  | 'LayoutReady'
+  | 'MigrationPending'
+  | 'MigrationBlocked'
+  | 'ImageFloorMissing'
+  | 'InitFailedUnclassified'
+  | 'InitOutcomeMismatch'
+  | 'Deferred'
+
+export interface ConversationStoreReadyStatus {
+  ready: boolean
+  reason: ConversationStoreReadyReason
+  message?: string
+}
+
+export interface ConversationStoreProvisioningIntent {
+  schemaVersion: 1
+  hostUid: string
+  hostCreatedAt: string
+  source: 'watch-added'
+  observedResourceVersion: string
+  watchResourceVersion: string
+  recordedAt: string
+}
+
+export interface ConversationStoreProvisioning {
+  hostUid: string
+  pvcUid: string
+  createdAt: string
+}
+
+/** Exact native execution identity issued by HCC before the helper authorizes mutation. */
+export interface ConversationStoreExecutionStatus {
+  storageContract: ConversationStoreStorageContract
+  requestId: string
+  hostUid: string
+  pvcUid: string
+  maintenanceId: string
+  requestHash: string
+  /** Native CRI provenance is separate from the requested OCI manifest digest. */
+  resolvedImageId?: string
+  imageProvenance?: 'pod-immutable-reference'
+  jobName: string
+  jobUid: string
+  image: string
+  templateRevision: string
+  phase: 'preparation' | 'migrate' | 'layout-precheck' | 'adopt' | 'current'
+  operation: 'prepare' | 'adopt' | 'release'
+  createdAt: string
+}
+
+/** Read-only target diagnostic; it never grants preparation or mutation authority. */
+export interface ConversationStoreOperatorProposal {
+  schemaVersion: 1
+  state: 'ready' | 'blocked'
+  hostUid: string
+  pvcUid: string
+  storageContract: ConversationStoreStorageContract
+  image: string
+  templateRevision?: string
+  effectiveLifecycle?: 'stateful' | 'stateless' | 'desktop'
+  sourceEnvironmentReferencesHash?: string
+  reason?: string
+}
+
+/** Controller-owned Host.status.conversationStore contract (#825). */
+export interface HostConversationStoreStatus {
+  operatorProposal?: ConversationStoreOperatorProposal
+  request?: ConversationStoreRequest
+  requestResult?: ConversationStoreRequestResult
+  compatibility?: ConversationStoreCompatibility
+  preparation?: ConversationStorePreparation
+  layout?: ConversationStoreLayoutCommitment
+  maintenance?: ConversationStoreMaintenance
+  ready?: ConversationStoreReadyStatus
+  provisioning?: ConversationStoreProvisioning
+  provisioningIntent?: ConversationStoreProvisioningIntent
+  writerProof?: import('./conversationStoreOperator').ConversationStoreWriterProof
+  completion?: import('./conversationStoreOperator').ConversationStorePhysicalProof
+  execution?: ConversationStoreExecutionStatus
+  operationOutcome?: {
+    layoutVersion: 1
+    storageContract: ConversationStoreStorageContract
+    requestId: string
+    operation: 'prepare' | 'adopt'
+    hostUid: string
+    pvcUid: string
+    maintenanceId: string
+    storeId?: string
+    migrationId?: string
+    catalogHash?: string
+    databasePath?: 'state/state.db'
+    writerFenceRoot?: 'state'
+    reason: string
+    jobName: string
+    jobUid: string
+  }
+}
+
 export interface HostCrdStatus {
   lifecycle?: HostLifecycleStatus
+  conversationStore?: HostConversationStoreStatus
   conditions?: HostCondition[]
 }
 

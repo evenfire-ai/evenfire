@@ -15,6 +15,12 @@ import * as k8s from '@kubernetes/client-node'
 import { HostReconciler } from '../src/hostReconciler'
 import { HostCRD } from '../src/types'
 import {
+  canonicalRuntimeHost,
+  createCanonicalFixtureHostApi,
+  installCanonicalPvcApi,
+  installCanonicalRuntimeConfigApi,
+} from './__fixtures__/canonicalRuntime'
+import {
   asAppsApi,
   asCoreApi,
   asNetworkingApi,
@@ -100,7 +106,7 @@ vi.mock('../src/gfsHostBinding', () => ({
 }))
 
 function makeHost(overrides?: Partial<HostCRD>): HostCRD {
-  return {
+  return canonicalRuntimeHost({
     name: 'alpha-host',
     namespace: 'mcp-host',
     spec: {
@@ -110,23 +116,27 @@ function makeHost(overrides?: Partial<HostCRD>): HostCRD {
       channels: ['channel-a'],
     },
     ...overrides,
-  }
+  })
 }
 
-function createReconciler() {
+function createReconciler(resolveHost: () => HostCRD = () => makeHost()) {
   const appsApi = createMockAppsApi()
+  const customApi = createCanonicalFixtureHostApi(resolveHost)
   const coreApi = createMockCoreApi()
+  installCanonicalPvcApi(coreApi)
+  installCanonicalRuntimeConfigApi(coreApi)
   const networkingApi = createMockNetworkingApi()
   const rbacApi = createMockRbacApi()
 
   const reconciler = new HostReconciler({} as k8s.KubeConfig, {
     appsApi: asAppsApi(appsApi),
+    customApi: customApi as unknown as k8s.CustomObjectsApi,
     coreApi: asCoreApi(coreApi),
     networkingApi: asNetworkingApi(networkingApi),
     rbacApi: asRbacApi(rbacApi),
   })
 
-  return { reconciler, appsApi, coreApi, networkingApi, rbacApi }
+  return { reconciler, appsApi, coreApi, networkingApi, rbacApi, customApi }
 }
 
 /** Extract the channel-reader Deployment body from the convergence PUT. */

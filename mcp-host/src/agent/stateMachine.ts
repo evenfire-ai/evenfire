@@ -193,6 +193,7 @@ export class AgentStateMachine extends EventEmitter {
 
   // Per-task execution (managed via executor map)
   private activeExecutors = new Map<string, TaskExecutor>()
+  private conversationStoreMaintenance = false
   private approvalMap = new Map<
     string,
     {
@@ -217,6 +218,11 @@ export class AgentStateMachine extends EventEmitter {
   // we ultimately give up on.
   private clearPendingApprovalRetries = new Map<string, { attempts: number; nextTry: number }>()
   private clearRetryTimer: ReturnType<typeof setInterval> | null = null
+  private clearsInFlight = new Map<string, Promise<void>>()
+  private failedClears = new Map<string, () => void>()
+  private approvalMutationsInFlight = new Set<Promise<unknown>>()
+  private approvalMutationFailed = false
+  private retiredForConversationStoreMaintenance = false
   private isRunning: boolean = false
 
   // Core infrastructure
@@ -692,6 +698,7 @@ export class AgentStateMachine extends EventEmitter {
     expiresAt: number | undefined,
     now: number
   ): ReturnType<typeof setTimeout> | undefined {
+    if (this.conversationStoreMaintenance) return undefined
     if (typeof expiresAt === 'number' && Number.isFinite(expiresAt)) {
       return setTimeout(
         () => {
@@ -1069,6 +1076,7 @@ export class AgentStateMachine extends EventEmitter {
    * Handle approval timeout: auto-deny the executor and clean up.
    */
   private handleApprovalTimeout(requestId: string): void {
+    if (this.conversationStoreMaintenance) return
     const entry = this.approvalMap.get(requestId)
     if (!entry) return
 
@@ -1102,7 +1110,7 @@ export class AgentStateMachine extends EventEmitter {
     // timeout handler returns promptly; errors are logged. Wrap in
     // Promise.resolve so legacy synchronous test doubles (which return void)
     // still flow through the same path.
-    Promise.resolve(executor.deny()).catch(err => {
+    this.trackApprovalMutation(Promise.resolve(executor.deny())).catch(err => {
       logger.error({ err: err }, `executor.deny() raised after timeout:`)
     })
   }
@@ -1177,7 +1185,7 @@ export class AgentStateMachine extends EventEmitter {
 
     // Resume execution (fire and forget).
     // Session release happens in onComplete/onFail callbacks.
-    executor.resumeAfterApproval(alwaysApprove).catch(err => {
+    this.trackApprovalMutation(executor.resumeAfterApproval(alwaysApprove)).catch(err => {
       logger.error({ err: err }, `Resume after approval failed:`)
     })
 
@@ -1250,7 +1258,7 @@ export class AgentStateMachine extends EventEmitter {
     // future restart cannot resurrect a phantom approval. Promise.resolve()
     // wraps legacy synchronous test doubles.
     try {
-      await Promise.resolve(executor.deny())
+      await this.trackApprovalMutation(Promise.resolve(executor.deny()))
     } catch (err) {
       logger.error({ err: err }, `executor.deny() failed:`)
     }
@@ -1264,6 +1272,8 @@ export class AgentStateMachine extends EventEmitter {
    * Start the agent (begin processing tasks).
    */
   start(): void {
+    if (this.conversationStoreMaintenance || this.retiredForConversationStoreMaintenance)
+      throw new Error('ConversationStoreMaintenanceAgentFenced')
     if (this.isRunning) {
       logger.info({ component: 'Agent' }, 'Already running')
       return
@@ -1281,6 +1291,107 @@ export class AgentStateMachine extends EventEmitter {
       this.clearRetryTimer.unref()
     }
     this.setState('idle')
+  }
+
+  /** Pause background writers while accepted session tasks finish naturally. */
+  beginConversationStoreMaintenance(): void {
+    this.conversationStoreMaintenance = true
+    if (this.clearRetryTimer !== null) {
+      clearInterval(this.clearRetryTimer)
+      this.clearRetryTimer = null
+    }
+    for (const entry of this.approvalMap.values()) {
+      if (entry.timerId) clearTimeout(entry.timerId)
+      entry.timerId = undefined
+    }
+  }
+
+  /** Preserve durable approvals; do not drive shutdown cancellation transitions. */
+  async quiesceForConversationStoreMaintenance(timeoutMs = 30_000): Promise<void> {
+    this.beginConversationStoreMaintenance()
+    this.isRunning = false
+    const running = Array.from(this.activeExecutors.values()).filter(
+      executor => executor.executorState !== 'waiting_approval'
+    )
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      await Promise.race([
+        Promise.all(running.map(executor => executor.waitForCompletion())),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error('ConversationStoreMaintenanceExecutorPending')),
+            timeoutMs
+          )
+        }),
+      ])
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
+    if (
+      Array.from(this.activeExecutors.values()).some(
+        executor => executor.executorState !== 'waiting_approval'
+      )
+    ) {
+      throw new Error('ConversationStoreMaintenanceExecutorPending')
+    }
+    let clearTimer: ReturnType<typeof setTimeout> | undefined
+    try {
+      await Promise.race([
+        (async () => {
+          await Promise.allSettled([
+            ...this.clearsInFlight.values(),
+            ...this.approvalMutationsInFlight,
+          ])
+          // The periodic retry is paused. Retry each already-known failed
+          // cancellation once while its exact pending request and worker live.
+          const failed = new Set([
+            ...this.failedClears.keys(),
+            ...this.clearPendingApprovalRetries.keys(),
+          ])
+          await Promise.allSettled(Array.from(failed, key => this.tryClearPendingApproval(key)))
+          await Promise.allSettled([
+            ...this.clearsInFlight.values(),
+            ...this.approvalMutationsInFlight,
+          ])
+          if (
+            this.failedClears.size ||
+            this.clearPendingApprovalRetries.size ||
+            this.clearsInFlight.size ||
+            this.approvalMutationsInFlight.size ||
+            this.approvalMutationFailed
+          ) {
+            throw new Error('ConversationStoreMaintenanceApprovalPending')
+          }
+        })(),
+        new Promise<never>((_, reject) => {
+          clearTimer = setTimeout(
+            () => reject(new Error('ConversationStoreMaintenanceApprovalPending')),
+            timeoutMs
+          )
+        }),
+      ])
+    } finally {
+      if (clearTimer) clearTimeout(clearTimer)
+    }
+    this.retiredForConversationStoreMaintenance = true
+    // Old executors and callbacks must not be reused after the SQLite worker closes.
+    // A fresh runtime reconstructs these exact rows through the cold-start loader on release.
+    this.approvalMap.clear()
+    this.activeExecutors.clear()
+    this.setState('paused')
+  }
+
+  /** Called only by the committed two-phase release on a fresh prepared agent. */
+  activateAfterConversationStoreMaintenance(): void {
+    if (this.retiredForConversationStoreMaintenance)
+      throw new Error('ConversationStoreMaintenanceAgentRetired')
+    this.conversationStoreMaintenance = false
+    const now = Date.now()
+    for (const [requestId, entry] of this.approvalMap) {
+      if (entry.timerId) clearTimeout(entry.timerId)
+      entry.timerId = this.makeApprovalTimeout(requestId, entry.expiresAt, now)
+    }
+    this.start()
   }
 
   /**
@@ -1339,6 +1450,8 @@ export class AgentStateMachine extends EventEmitter {
    * Resume the agent.
    */
   resume(): void {
+    if (this.conversationStoreMaintenance || this.retiredForConversationStoreMaintenance)
+      throw new Error('ConversationStoreMaintenanceAgentFenced')
     logger.info({ component: 'Agent' }, 'Resuming agent')
     this.isRunning = true
     this.setState('idle')
@@ -1762,15 +1875,25 @@ export class AgentStateMachine extends EventEmitter {
             channelId: msg?.channelId || 'default',
             threadId: msg?.threadId,
           })
-          this.conversationManager.cancelTurnBySessionKey(sessionKey)
+          const cancelledTurn = this.conversationManager.getSessionByKey(sessionKey)?.turns.at(-1)
           // T2.1: clearPendingApproval is async (IronClaw write-through for
           // the cancel-during-approval path). B5 — wrapped in a bounded
           // retry queue so transient SQLite failures don't leave an orphan
           // pending_approval row. `tryClearPendingApproval` is fire-and-
           // forget by design (the lifecycle subscriber is sync); the retry
           // timer drains pending failures.
-          this.tryClearPendingApproval(sessionKey)
-          this.releaseSessionForTask(executor.sourceTask)
+          void this.tryClearPendingApproval(sessionKey, () => {
+            const current = this.conversationManager.getSessionByKey(sessionKey)
+            if (
+              current?.state === 'idle' &&
+              current.turns.at(-1) === cancelledTurn &&
+              !current.pending_approval &&
+              !current.activeTaskId
+            ) {
+              this.conversationManager.cancelTurnBySessionKey(sessionKey)
+            }
+            this.releaseSessionForTask(executor.sourceTask)
+          }).catch(() => undefined)
           executor.abort() // defensive; no-op while suspended
           this.activeExecutors.delete(ev.taskId) // explicit — no finally will run
           return
@@ -1801,16 +1924,47 @@ export class AgentStateMachine extends EventEmitter {
    * SQLite errors don't silently leak orphan `pending_approval` rows that
    * cold-start would later resurrect.
    */
-  private tryClearPendingApproval(sessionKey: string): void {
-    this.conversationManager
+  private trackApprovalMutation<T>(write: Promise<T>): Promise<T> {
+    const tracked = write
+      .catch(error => {
+        this.approvalMutationFailed = true
+        throw error
+      })
+      .finally(() => {
+        this.approvalMutationsInFlight.delete(tracked)
+      })
+    this.approvalMutationsInFlight.add(tracked)
+    void tracked.catch(() => undefined)
+    return tracked
+  }
+
+  private tryClearPendingApproval(
+    sessionKey: string,
+    afterAck: () => void = () => {}
+  ): Promise<void> {
+    if (this.retiredForConversationStoreMaintenance)
+      return Promise.reject(new Error('ConversationStoreMaintenanceAgentRetired'))
+    const existing = this.clearsInFlight.get(sessionKey)
+    if (existing) return existing
+    const callback = this.failedClears.get(sessionKey) ?? afterAck
+    const write = this.conversationManager
       .clearPendingApproval(sessionKey)
       .then(() => {
-        // Success — drop any prior retry bookkeeping.
+        callback()
         this.clearPendingApprovalRetries.delete(sessionKey)
+        this.failedClears.delete(sessionKey)
       })
-      .catch(err => {
-        this.scheduleClearRetry(sessionKey, err)
+      .catch(error => {
+        this.failedClears.set(sessionKey, callback)
+        this.scheduleClearRetry(sessionKey, error)
+        throw error
       })
+      .finally(() => {
+        if (this.clearsInFlight.get(sessionKey) === write) this.clearsInFlight.delete(sessionKey)
+      })
+    this.clearsInFlight.set(sessionKey, write)
+    void write.catch(() => undefined)
+    return write
   }
 
   private scheduleClearRetry(sessionKey: string, lastErr: unknown): void {
@@ -1844,13 +1998,14 @@ export class AgentStateMachine extends EventEmitter {
   }
 
   private drainClearPendingApprovalRetries(): void {
+    if (this.conversationStoreMaintenance) return
     if (this.clearPendingApprovalRetries.size === 0) return
     const now = Date.now()
     for (const [sessionKey, entry] of this.clearPendingApprovalRetries) {
       if (entry.nextTry > now) continue
       // Re-attempt. `tryClearPendingApproval` either deletes the entry on
       // success or re-schedules via `scheduleClearRetry`.
-      this.tryClearPendingApproval(sessionKey)
+      void this.tryClearPendingApproval(sessionKey).catch(() => undefined)
     }
   }
 

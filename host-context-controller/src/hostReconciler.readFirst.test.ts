@@ -1,6 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type * as k8s from '@kubernetes/client-node'
 import {
+  appliedCanonicalDeployment,
+  canonicalFixturePvcUid,
+  canonicalRuntimeHost,
+  createCanonicalFixtureHostApi,
+  installCanonicalPvcApi,
+  installCanonicalRuntimeConfigApi,
+} from '../test/__fixtures__/canonicalRuntime'
+import {
   asAppsApi,
   asCoreApi,
   asCustomApi,
@@ -18,22 +26,24 @@ import { HostReconciler } from './hostReconciler'
 import { CREATE_KINDS, createsTotal, writeSkipsTotal } from './metrics'
 import type { HostCRD } from './types'
 
-const host: HostCRD = {
+const host: HostCRD = canonicalRuntimeHost({
   name: 'read-first-host',
   namespace: 'mcp-host',
   uid: 'host-uid',
   spec: { host: 'read-first-host', contextRef: 'context', secretRef: 'host-secret' },
-}
+})
 
-function fixture() {
+function fixture(resolveHost: () => HostCRD = () => host) {
   const core = createMockCoreApi()
+  installCanonicalRuntimeConfigApi(core)
+  installCanonicalPvcApi(core)
   const apps = createMockAppsApi()
   const reconciler = new HostReconciler(makeStubKc(), {
     coreApi: asCoreApi(core),
     appsApi: asAppsApi(apps),
     networkingApi: asNetworkingApi(createMockNetworkingApi()),
     rbacApi: asRbacApi(createMockRbacApi()),
-    customApi: asCustomApi(createMockCustomApi()),
+    customApi: asCustomApi(createCanonicalFixtureHostApi(resolveHost)),
   })
   vi.spyOn(reconciler as any, 'computeChannelReaderRevisionForHost').mockResolvedValue('revision')
   return { core, apps, reconciler }
@@ -56,7 +66,15 @@ const cases = [
 
 function invoke(reconciler: HostReconciler, method: string, revalidate?: () => void) {
   return method === 'ensureDeployment'
-    ? (reconciler as any)[method](host, [], 'runtime-revision', undefined, undefined, revalidate)
+    ? (reconciler as any)[method](
+        host,
+        [],
+        'runtime-revision',
+        undefined,
+        undefined,
+        revalidate,
+        canonicalFixturePvcUid(host)
+      )
     : (reconciler as any)[method](host, revalidate)
 }
 
@@ -138,7 +156,8 @@ describe('Host read-first Service and Deployment contracts', () => {
         'old-revision',
         undefined,
         resolveState,
-        revalidate
+        revalidate,
+        canonicalFixturePvcUid(host)
       )
     ).rejects.toBe(superseded)
     expect(resolveState).toHaveBeenCalledOnce()
@@ -157,7 +176,15 @@ describe('Host read-first Service and Deployment contracts', () => {
         lifecycle: { stateless: false, state: 'active' },
       }
     })
-    await (reconciler as any).ensureDeployment(host, [], 'old-revision', undefined, resolveState)
+    await (reconciler as any).ensureDeployment(
+      host,
+      [],
+      'old-revision',
+      undefined,
+      resolveState,
+      undefined,
+      canonicalFixturePvcUid(host)
+    )
     expect(resolveState).toHaveBeenCalledOnce()
     expect(apps.createNamespacedDeployment).toHaveBeenCalledOnce()
     const body = apps.createNamespacedDeployment.mock.calls[0][0].body as k8s.V1Deployment
@@ -172,7 +199,7 @@ describe('Host read-first Service and Deployment contracts', () => {
     'builds a present Host Deployment once per attempt with fresh state (%i conflicts)',
     async conflicts => {
       const { apps, reconciler } = fixture()
-      const existing = reconciler.buildDeployment(host, [], 'old-revision')
+      const existing = appliedCanonicalDeployment(reconciler, host, [], 'old-revision')
       apps.readNamespacedDeployment.mockImplementation(async () => ({
         ...existing,
         metadata: {
@@ -190,7 +217,15 @@ describe('Host read-first Service and Deployment contracts', () => {
         }
       })
 
-      await (reconciler as any).ensureDeployment(host, [], 'old-revision', undefined, resolveState)
+      await (reconciler as any).ensureDeployment(
+        host,
+        [],
+        'old-revision',
+        undefined,
+        resolveState,
+        undefined,
+        canonicalFixturePvcUid(host)
+      )
 
       const attempts = conflicts + 1
       expect(apps.readNamespacedDeployment).toHaveBeenCalledTimes(attempts)
@@ -267,19 +302,19 @@ describe('Host read-first Service and Deployment contracts', () => {
   })
 
   function hostWithoutSecretRef(): HostCRD {
-    return {
+    return canonicalRuntimeHost({
       name: 'codex-cert',
       namespace: 'mcp-host',
       uid: 'host-uid-nosecret',
       spec: { host: 'codex-cert', contextRef: 'context' },
-    }
+    })
   }
 
   function liveHostDeploymentWithoutSecretValue(
     reconciler: HostReconciler,
     hostNoSecret: HostCRD
   ): k8s.V1Deployment {
-    const desired = reconciler.buildDeployment(hostNoSecret, [], 'runtime-revision')
+    const desired = appliedCanonicalDeployment(reconciler, hostNoSecret, [], 'runtime-revision')
     const liveEqual = structuredClone(desired)
     const liveSecret = liveEqual.spec?.template.spec?.containers
       .flatMap(container => container.env ?? [])
@@ -293,9 +328,9 @@ describe('Host read-first Service and Deployment contracts', () => {
   }
 
   it('T5: Host without secretRef skips replace when live omits empty value', async () => {
-    const { apps, reconciler } = fixture()
+    const { apps, reconciler } = fixture(() => hostNoSecret)
     const hostNoSecret = hostWithoutSecretRef()
-    const desired = reconciler.buildDeployment(hostNoSecret, [], 'runtime-revision')
+    const desired = appliedCanonicalDeployment(reconciler, hostNoSecret, [], 'runtime-revision')
     const secretEnv = desired.spec?.template.spec?.containers
       .flatMap(container => container.env ?? [])
       .find(env => env.name === 'CLERUM_LLM_SECRET_REF')
@@ -303,20 +338,36 @@ describe('Host read-first Service and Deployment contracts', () => {
     const liveEqual = liveHostDeploymentWithoutSecretValue(reconciler, hostNoSecret)
     writeSkipsTotal.reset()
     apps.readNamespacedDeployment.mockResolvedValue(liveEqual)
-    await (reconciler as any).ensureDeployment(hostNoSecret, [], 'runtime-revision')
+    await (reconciler as any).ensureDeployment(
+      hostNoSecret,
+      [],
+      'runtime-revision',
+      undefined,
+      undefined,
+      undefined,
+      canonicalFixturePvcUid(hostNoSecret)
+    )
     expect(apps.readNamespacedDeployment).toHaveBeenCalledTimes(1)
     expect(apps.replaceNamespacedDeployment).not.toHaveBeenCalled()
     expect(apps.createNamespacedDeployment).not.toHaveBeenCalled()
   })
 
   it('T5: Host without secretRef still replaces when the live image differs', async () => {
-    const { apps, reconciler } = fixture()
+    const { apps, reconciler } = fixture(() => hostNoSecret)
     const hostNoSecret = hostWithoutSecretRef()
     const liveDrift = liveHostDeploymentWithoutSecretValue(reconciler, hostNoSecret)
     liveDrift.spec!.template.spec!.containers[0].image = 'registry.example.com/mcp-host:other'
     liveDrift.metadata = { ...liveDrift.metadata, resourceVersion: '12' }
     apps.readNamespacedDeployment.mockResolvedValue(liveDrift)
-    await (reconciler as any).ensureDeployment(hostNoSecret, [], 'runtime-revision')
+    await (reconciler as any).ensureDeployment(
+      hostNoSecret,
+      [],
+      'runtime-revision',
+      undefined,
+      undefined,
+      undefined,
+      canonicalFixturePvcUid(hostNoSecret)
+    )
     expect(apps.readNamespacedDeployment).toHaveBeenCalledTimes(1)
     expect(apps.replaceNamespacedDeployment).toHaveBeenCalledTimes(1)
   })

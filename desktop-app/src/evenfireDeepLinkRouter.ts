@@ -1,3 +1,5 @@
+import { dialog } from 'electron'
+
 type RendererTarget = {
   isDestroyed: () => boolean
   webContents: {
@@ -86,6 +88,13 @@ export function createEvenfireDeepLinkRouter<TWindow extends RendererTarget>(
     options.requestMainWindow()
   }
 
+  const notifyExternalLogout = (): void => {
+    const window = options.getWindow()
+    if (!window || window.isDestroyed()) return
+    options.focusMainWindow()
+    window.webContents.send('auth:externalLogout')
+  }
+
   const handle = (rawUrl: string): void => {
     let parsed: URL
     try {
@@ -103,12 +112,12 @@ export function createEvenfireDeepLinkRouter<TWindow extends RendererTarget>(
     }
 
     if (hostname === 'logout') {
-      void options.logout().finally(() => {
-        const window = options.getWindow()
-        if (!window || window.isDestroyed()) return
-        options.focusMainWindow()
-        window.webContents.send('auth:externalLogout')
-      })
+      void options
+        .logout()
+        .then(notifyExternalLogout)
+        .catch(() => {
+          dialog.showErrorBox('Evenfire', 'Logout failed. Please try again.')
+        })
       return
     }
 

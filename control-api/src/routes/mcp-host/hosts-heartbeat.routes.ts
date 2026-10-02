@@ -101,7 +101,46 @@ export function parseHeartbeatBody(raw: unknown): HeartbeatParseResult {
 }
 
 type HostLifecycleView = {
-  status?: { lifecycle?: { state?: string } }
+  metadata?: { uid?: string }
+  status?: {
+    lifecycle?: { state?: string }
+    conversationStore?: {
+      maintenance?: {
+        maintenanceId?: string
+        hostUid?: string
+        pvcUid?: string
+        phase?: string
+      }
+    }
+  }
+}
+
+/** Read-only controller challenge. A heartbeat payload is never quiescence authority. */
+export function currentConversationStoreMaintenance(
+  host: HostLifecycleView,
+  authenticatedHostUid: string | undefined
+): { maintenanceId: string; hostUid: string; pvcUid: string; phase: string } | null {
+  const maintenance = host.status?.conversationStore?.maintenance
+  if (!maintenance || maintenance.phase === 'released') return null
+  if (
+    !authenticatedHostUid ||
+    authenticatedHostUid !== host.metadata?.uid ||
+    maintenance.hostUid !== authenticatedHostUid ||
+    !maintenance.maintenanceId ||
+    !maintenance.pvcUid ||
+    !maintenance.phase ||
+    !['quiescing', 'fenced', 'migrating', 'completing', 'completed', 'failed'].includes(
+      maintenance.phase
+    )
+  ) {
+    throw new Error('maintenance_binding_unavailable')
+  }
+  return {
+    maintenanceId: maintenance.maintenanceId,
+    hostUid: authenticatedHostUid,
+    pvcUid: maintenance.pvcUid,
+    phase: maintenance.phase,
+  }
 }
 
 export function createMcpHostHostsHeartbeatRoutes(gateway: K8sGateway): Router {
@@ -187,7 +226,16 @@ export function createMcpHostHostsHeartbeatRoutes(gateway: K8sGateway): Router {
             return res.status(503).json({ error: 'host_state_unavailable' })
           }
 
-          return res.status(200).json({ drain: host.status?.lifecycle?.state === 'draining' })
+          let maintenance: ReturnType<typeof currentConversationStoreMaintenance>
+          try {
+            maintenance = currentConversationStoreMaintenance(host, auth.host_uid)
+          } catch {
+            return res.status(503).json({ error: 'maintenance_binding_unavailable' })
+          }
+          return res.status(200).json({
+            drain: host.status?.lifecycle?.state === 'draining',
+            ...(maintenance ? { conversationStoreMaintenance: maintenance } : {}),
+          })
         } catch (err) {
           next(err)
         }

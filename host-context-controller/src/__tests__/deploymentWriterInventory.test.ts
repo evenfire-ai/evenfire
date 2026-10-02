@@ -5,6 +5,7 @@ import { join, relative } from 'node:path'
 const SRC_ROOT = join(__dirname, '..')
 
 const GATED = new Set([
+  'conversationStoreOperatorKubernetes.ts',
   'hostReconciler.ts',
   'reconciler.ts',
   'sharedFileSystemReconciler.ts',
@@ -143,7 +144,7 @@ describe('Deployment writer inventory', () => {
     }
 
     expect(hits.map(h => h.rel).sort()).toEqual([...GATED, ...EXEMPT].sort())
-    expect(hits.reduce((sum, h) => sum + h.count, 0)).toBe(8)
+    expect(hits.reduce((sum, h) => sum + h.count, 0)).toBe(9)
     expect(
       hits
         .filter(h => h.gated)

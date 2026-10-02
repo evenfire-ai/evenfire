@@ -14,6 +14,22 @@ import {
 } from './codexExecutionProjection'
 import { config } from './config'
 import { HOST_LABEL, MANAGED_BY_LABEL, MANAGED_BY_VALUE } from './constants'
+import {
+  computeConversationStoreTemplateRevision,
+  conversationStoreAttemptKey,
+  conversationStoreInitBindingMatches,
+  isCanonicalSuccessOutcome,
+  isLegacyFloorSuccessOutcome,
+  resolveConversationStoreOwnerChain,
+  validateConversationStoreOperationSemantics,
+  verifyConversationStoreInitOutcome,
+} from './conversationStoreObservation'
+import {
+  ConversationStoreOperator,
+  type ConversationStoreOperatorContext,
+} from './conversationStoreOperator'
+import { ConversationStoreKubernetesOperatorPort } from './conversationStoreOperatorKubernetes'
+import { projectConversationStoreSourceEnvironment } from './conversationStoreSourceEnvironment'
 import { mintHostGfsToken } from './gfsHostBinding'
 import { GFS_HOST_SCOPES } from './gfsHostPolicy'
 import { makeExpectedHostGfsSubject } from './gfsHostSubject'
@@ -43,6 +59,8 @@ import {
 import { hccLogger } from './logger'
 import { issueMcpHostRuntimeTokens } from './mcpHostRuntimeTokenIssuerClient'
 import {
+  conversationStoreInitOutcomesTotal,
+  conversationStoreRolloutGateDecisionsTotal,
   createsTotal,
   hostCleanupDeferredTotal,
   hostDeleteCleanupTotal,
@@ -60,6 +78,12 @@ import {
   mcpHostRuntimeTokenSecretName,
 } from './secretFactory'
 import {
+  CANONICAL_STORE_CLI_PATH,
+  CANONICAL_STORE_LAYOUT_ANNOTATION,
+  CANONICAL_STORE_OPT_IN_ANNOTATION,
+  CANONICAL_STORE_STATE_MOUNT_PATH,
+  WORKSPACE_PVC_ROOT_MOUNT_PATH,
+  buildCanonicalStoreInitContainer,
   buildWorkspaceLayoutInitContainer,
   decodeJwtExpMs,
   effectiveRotateBeforeMs,
@@ -69,9 +93,13 @@ import { EffectiveHostLifecycle, SuspendFromHeartbeatOutcome } from './stateless
 import { ReflectHostOutcomeFn, StatelessLifecycleExecutor } from './statelessLifecycleExecutor'
 import {
   CommunicationChannelCRD,
+  ConversationStoreCompatibility,
+  ConversationStoreRequest,
+  ConversationStoreStorageContract,
   EffectiveMcpHostControlScope,
   HostCRD,
   HostChannelReaderStatus,
+  HostConversationStoreStatus,
   HostRuntimeControlScope,
   HostRuntimeStatus,
   HostWorkflowControlScope,
@@ -98,6 +126,29 @@ export type { EffectiveHostLifecycle } from './statelessLifecycle.types'
 const HOST_GROUP = 'clerum.io'
 const HOST_VERSION = 'v1alpha1'
 const HOST_PLURAL = 'hosts'
+
+/**
+ * Canonical conversation-store inputs threaded from the observed PVC identity
+ * into the Deployment builder (#825). `pvcUid` must come from an actual
+ * PersistentVolumeClaim observation (positive provenance); a boolean
+ * "PVC exists" result is insufficient to bind the store identity.
+ */
+interface CanonicalStoreDeploymentInput {
+  pvcUid: string
+  /** True once the Host is on the canonical dual-subPath layout (#825). */
+  canonical?: boolean
+  storageContract?: ConversationStoreStorageContract
+  image?: string
+  sourceEnvironment?: k8s.V1EnvVar[]
+  provenance?: 'new-host' | 'verified-empty-sqlite'
+  maintenanceId?: string
+}
+
+/** Result of the per-Host FIRST canonical rollout gate (#825 section 5.6). */
+type CanonicalRolloutGateDecision =
+  | { status: 'proceed' }
+  | { status: 'preserve-applied'; reason: string }
+  | { status: 'fail-closed'; reason: string }
 
 /**
  * Lane label for a Host reconcile, used only for low-cardinality telemetry:
@@ -441,6 +492,8 @@ export class HostFleetReconcileError extends AggregateError {
 type HostReconcilerDeps = {
   appsApi?: k8s.AppsV1Api
   coreApi?: k8s.CoreV1Api
+  batchApi?: k8s.BatchV1Api
+  conversationStoreOperatorPort?: import('./conversationStoreOperator').ConversationStoreOperatorPort
   networkingApi?: k8s.NetworkingV1Api
   rbacApi?: k8s.RbacAuthorizationV1Api
   customApi?: k8s.CustomObjectsApi
@@ -538,7 +591,26 @@ export class HostReconciler {
   private readonly kubeConfig: k8s.KubeConfig
   private readonly now: () => Date
   private readonly newTelemetryOccurrenceId: () => string
+  private readonly conversationStoreOperator: ConversationStoreOperator
+  private batchApiInstance: k8s.BatchV1Api | undefined
   private readonly statusMap: Map<string, HostRuntimeStatus> = new Map()
+  /**
+   * Latest ConversationStoreReady observation per Host (#825 section 5.4.1).
+   * Separate from HostRuntimeStatus: a Deferred conversation store never
+   * blocks the runtime's own lifecycle early-return paths.
+   */
+  private readonly conversationStoreReadyByHost = new Map<
+    string,
+    { ready: boolean; reason: string; message?: string }
+  >()
+  /**
+   * Deduplicated canonical init attempts (#825): keys are
+   * (podUID, container, restartCount, finishedAt) so a relist/wake that
+   * re-delivers the same terminated attempt is counted once while a genuine
+   * retry (new restartCount/finishedAt) is a new observation.
+   */
+  private readonly observedConversationStoreAttempts = new Set<string>()
+  private readonly countedConversationStoreAttempts = new Set<string>()
   private codexSnapshot: CodexCatalogSnapshot = { flagEnabled: false }
   private lastCodexConfigMap: k8s.V1ConfigMap | undefined
   private readonly readinessTimers: Map<string, ReturnType<typeof setTimeout>> = new Map()
@@ -634,6 +706,29 @@ export class HostReconciler {
     this.customApiInstance = deps?.customApi
     this.now = deps?.now ?? (() => new Date())
     this.newTelemetryOccurrenceId = deps?.newTelemetryOccurrenceId ?? randomUUID
+    this.batchApiInstance = deps?.batchApi
+    const operatorPort =
+      deps?.conversationStoreOperatorPort ??
+      new ConversationStoreKubernetesOperatorPort({
+        kubeConfig: kc,
+        appsApi: this.appsApi,
+        coreApi: this.coreApi,
+        rbacApi: this.rbacApi,
+        batchApi: () =>
+          (this.batchApiInstance ??= makeHostK8sApiClient(
+            kc,
+            k8s.BatchV1Api,
+            config.hostK8sRequestTimeoutMs
+          )),
+        readFreshHost: host => this.readFreshHost(host),
+        writeStatus: (context, request, fields) =>
+          this.persistConversationStoreFields(context, request, fields),
+        now: this.now,
+        imagePullSecrets: config.hostImagePullSecretName
+          ? [{ name: config.hostImagePullSecretName }]
+          : undefined,
+      })
+    this.conversationStoreOperator = new ConversationStoreOperator(operatorPort)
     this.resolveContextMounts = deps?.resolveContextMounts ?? (async () => [])
     this.hostFrontsOAuthServerFn = deps?.hostFrontsOAuthServer ?? (async () => false)
     this.countCommunicationChannels = deps?.countCommunicationChannels ?? (() => 0)
@@ -2568,6 +2663,440 @@ export class HostReconciler {
     this.statusGenerations.set(name, this.reconcileGenerations.get(name) ?? 0)
   }
 
+  /** Record the latest ConversationStoreReady observation (#825). */
+  private setConversationStoreReady(
+    name: string,
+    status: { ready: boolean; reason: string; message?: string }
+  ): void {
+    this.conversationStoreReadyByHost.set(name, status)
+  }
+
+  /** Latest ConversationStoreReady observation (#825); public read view. */
+  getConversationStoreReady(
+    name: string
+  ): { ready: boolean; reason: string; message?: string } | undefined {
+    return this.conversationStoreReadyByHost.get(name)
+  }
+
+  /**
+   * Persist the monotonic canonical layout commitment (#825 section 5.6) to
+   * the Host /status subresource under a resourceVersion CAS with bounded 409
+   * retries against fresh reads. A pre-existing commitment for a different
+   * binding fails closed; the same binding is idempotent (monotonic — never
+   * rewritten or removed here).
+   */
+  private async persistConversationStoreLayoutCommitment(
+    host: HostCRD,
+    pvcUid: string
+  ): Promise<void> {
+    if (!host.uid) {
+      throw new Error(
+        `Cannot commit the canonical store layout for Host "${host.name}" without a HostUID`
+      )
+    }
+    const maxAttempts = 5
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      const fresh = await this.readFreshHost(host)
+      if (!fresh.resourceVersion) throw new Error('OperatorHostIdentityMissing')
+      const currentPvc = await this.coreApi.readNamespacedPersistentVolumeClaim({
+        namespace: host.namespace,
+        name: this.pvcName(host),
+      })
+      if (currentPvc.metadata?.uid !== pvcUid || currentPvc.metadata.deletionTimestamp)
+        throw new Error('OperatorBindingChanged')
+      if (fresh.uid !== host.uid) {
+        throw new Error(
+          `Host identity changed while committing the canonical store layout for "${host.name}"`
+        )
+      }
+      const existing = fresh.status?.conversationStore?.layout
+      if (existing) {
+        if (existing.version !== 1 || existing.hostUid !== host.uid || existing.pvcUid !== pvcUid) {
+          throw new Error(
+            `Canonical store layout binding mismatch for Host "${host.name}"; refusing downgrade or rebind`
+          )
+        }
+        return
+      }
+      const commitment = {
+        version: 1 as const,
+        hostUid: host.uid,
+        pvcUid,
+        state: 'pending' as const,
+        committedAt: this.now().toISOString(),
+      }
+      const ops: Array<{ op: 'test' | 'add'; path: string; value: unknown }> = [
+        { op: 'test', path: '/metadata/uid', value: host.uid },
+      ]
+      if (fresh.resourceVersion !== undefined) {
+        ops.push({
+          op: 'test',
+          path: '/metadata/resourceVersion',
+          value: fresh.resourceVersion,
+        })
+      }
+      if (!fresh.status?.conversationStore) {
+        ops.push({
+          op: 'add',
+          path: '/status/conversationStore',
+          value: { layout: commitment },
+        })
+      } else {
+        ops.push({
+          op: 'add',
+          path: '/status/conversationStore/layout',
+          value: commitment,
+        })
+      }
+      try {
+        await this.customApi.patchNamespacedCustomObjectStatus({
+          group: HOST_GROUP,
+          version: HOST_VERSION,
+          namespace: host.namespace,
+          plural: HOST_PLURAL,
+          name: host.name,
+          body: ops,
+        })
+        return
+      } catch (error) {
+        if (getErrorCode(error) === 409 && attempt < maxAttempts) continue
+        throw error
+      }
+    }
+    throw new Error(
+      `Canonical store layout commit for Host "${host.name}" exhausted ${maxAttempts} conflict retries`
+    )
+  }
+
+  /**
+   * Persist the controller-owned, binding-bound request acknowledgement
+   * (#825): `accepted` lets control-api replace a handled maintenance request
+   * with a same-bound prepare request (prepare is allowed during quiescing);
+   * `completed`/`rejected` free the Host for a new requestId. A resend of the
+   * same requestId is idempotent only under the SAME Host/PVC binding; a
+   * different binding for a known requestId is a replay and fails closed.
+   */
+  private async persistConversationStoreRequestResult(
+    host: HostCRD,
+    pvcUid: string,
+    requestId: string,
+    state: 'accepted' | 'completed' | 'rejected',
+    reason?: string
+  ): Promise<void> {
+    if (!host.uid) {
+      throw new Error(
+        `Cannot acknowledge a conversation-store request for Host "${host.name}" without a HostUID`
+      )
+    }
+    const maxAttempts = 5
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      const fresh = await this.readFreshHost(host)
+      if (fresh.uid !== host.uid) {
+        throw new Error(
+          `Host identity changed while acknowledging conversation-store request for "${host.name}"`
+        )
+      }
+      const existing = fresh.status?.conversationStore?.requestResult
+      if (
+        existing &&
+        existing.requestId === requestId &&
+        existing.hostUid === host.uid &&
+        existing.pvcUid === pvcUid &&
+        existing.state === state &&
+        (reason ?? undefined) === (existing.reason ?? undefined)
+      ) {
+        return
+      }
+      if (existing && existing.requestId === requestId) {
+        if (existing.hostUid !== host.uid || existing.pvcUid !== pvcUid) {
+          throw new Error(
+            `Conversation-store request replay with a different binding for Host "${host.name}"`
+          )
+        }
+        if (existing.state === 'completed' || existing.state === 'rejected') {
+          // Terminal results are monotonic: never downgrade a completed or
+          // rejected acknowledgement back to accepted.
+          return
+        }
+      }
+      const result = {
+        requestId,
+        hostUid: host.uid,
+        pvcUid,
+        state,
+        updatedAt: this.now().toISOString(),
+        ...(reason ? { reason } : {}),
+      }
+      const ops: Array<{ op: 'add'; path: string; value: unknown }> = []
+      if (fresh.resourceVersion !== undefined) {
+        ops.push({
+          op: 'add',
+          path: '/metadata/resourceVersion',
+          value: fresh.resourceVersion,
+        })
+      }
+      if (!fresh.status?.conversationStore) {
+        ops.push({
+          op: 'add',
+          path: '/status/conversationStore',
+          value: { requestResult: result },
+        })
+      } else {
+        ops.push({
+          op: 'add',
+          path: '/status/conversationStore/requestResult',
+          value: result,
+        })
+      }
+      try {
+        await this.customApi.patchNamespacedCustomObjectStatus({
+          group: HOST_GROUP,
+          version: HOST_VERSION,
+          namespace: host.namespace,
+          plural: HOST_PLURAL,
+          name: host.name,
+          body: ops,
+        })
+        return
+      } catch (error) {
+        if (getErrorCode(error) === 409 && attempt < maxAttempts) continue
+        throw error
+      }
+    }
+    throw new Error(
+      `Conversation-store request acknowledgement for Host "${host.name}" exhausted ${maxAttempts} conflict retries`
+    )
+  }
+
+  /**
+   * Persist layout pending->ready plus the Compatibility level (#825) ONLY
+   * after a validated canonical init outcome observed through the exact
+   * owner chain with matching binding pins. Never called from a prepare
+   * request alone. Maintenance is untouched: JSON Patch writes specific
+   * paths, so wake/relist/replica changes can never drop an existing
+   * maintenance state.
+   */
+  private async persistConversationStoreLayoutReady(
+    host: HostCRD,
+    pvcUid: string,
+    storeId: string
+  ): Promise<void> {
+    if (!host.uid) {
+      throw new Error(
+        `Cannot mark the canonical store ready for Host "${host.name}" without a HostUID`
+      )
+    }
+    const maxAttempts = 5
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      const fresh = await this.readFreshHost(host)
+      if (!fresh.resourceVersion) throw new Error('OperatorHostIdentityMissing')
+      const currentPvc = await this.coreApi.readNamespacedPersistentVolumeClaim({
+        namespace: host.namespace,
+        name: this.pvcName(host),
+      })
+      if (currentPvc.metadata?.uid !== pvcUid || currentPvc.metadata.deletionTimestamp)
+        throw new Error('OperatorBindingChanged')
+      if (fresh.uid !== host.uid) {
+        throw new Error(
+          `Host identity changed while marking the canonical store ready for "${host.name}"`
+        )
+      }
+      const layout = fresh.status?.conversationStore?.layout
+      if (!layout || layout.hostUid !== host.uid || layout.pvcUid !== pvcUid) {
+        throw new Error(
+          `Canonical store layout binding mismatch while marking ready for Host "${host.name}"`
+        )
+      }
+      if (layout.state === 'ready' && layout.storeId === storeId) return
+      const nextLayout = { ...layout, state: 'ready' as const, storeId }
+      const ops: Array<{ op: 'test' | 'add'; path: string; value: unknown }> = [
+        { op: 'test', path: '/metadata/uid', value: host.uid },
+      ]
+      if (fresh.resourceVersion !== undefined) {
+        ops.push({
+          op: 'test',
+          path: '/metadata/resourceVersion',
+          value: fresh.resourceVersion,
+        })
+      }
+      ops.push(
+        { op: 'add', path: '/status/conversationStore/layout', value: nextLayout },
+        {
+          op: 'add',
+          path: '/status/conversationStore/ready',
+          value: { ready: true, reason: 'Canonical' },
+        },
+        {
+          op: 'add',
+          path: '/status/conversationStore/compatibility',
+          value: {
+            schemaVersion: 1,
+            hostUid: host.uid,
+            pvcUid,
+            storageContract: 'canonical',
+            contractVersion: 1,
+            establishedAt: this.now().toISOString(),
+          },
+        }
+      )
+      try {
+        await this.customApi.patchNamespacedCustomObjectStatus({
+          group: HOST_GROUP,
+          version: HOST_VERSION,
+          namespace: host.namespace,
+          plural: HOST_PLURAL,
+          name: host.name,
+          body: ops,
+        })
+        return
+      } catch (error) {
+        if (getErrorCode(error) === 409 && attempt < maxAttempts) continue
+        throw error
+      }
+    }
+    throw new Error(
+      `Canonical store ready transition for Host "${host.name}" exhausted ${maxAttempts} conflict retries`
+    )
+  }
+
+  /**
+   * Observe the canonical init outcome through the EXACT owner chain
+   * HostUID -> DeploymentUID -> ReplicaSetUID -> PodUID (#825). Only
+   * terminated attempts with matching binding pins are evidence; attempts are
+   * deduplicated by (podUID, container, restartCount, finishedAt). A
+   * validated canonical success (ok + layoutVersion 1 + storeId + coherent
+   * exit) transitions layout pending->ready and establishes compatibility.
+   * Everything else records the separate ConversationStoreReady observation
+   * without touching the lifecycle conditions.
+   */
+  private async observeConversationStoreInitOutcome(
+    host: HostCRD,
+    observedPvcUid: string | undefined
+  ): Promise<void> {
+    if (!host.uid || !observedPvcUid) return
+    try {
+      const deployment = await this.readHostDeploymentOrNull(host)
+      if (!deployment?.metadata?.uid) return
+      const labelSelector = `app=${host.name}`
+      const [replicaSetList, podList] = await Promise.all([
+        this.appsApi.listNamespacedReplicaSet({ namespace: host.namespace, labelSelector }),
+        this.coreApi.listNamespacedPod({ namespace: host.namespace, labelSelector }),
+      ])
+      const chain = resolveConversationStoreOwnerChain({
+        hostUid: host.uid,
+        deployment,
+        replicaSets: replicaSetList.items ?? [],
+        pods: podList.items ?? [],
+      })
+      if (!chain.ok) {
+        this.setConversationStoreReady(host.name, {
+          ready: false,
+          reason: 'Deferred',
+          message: `owner chain unresolved: ${chain.reason}`,
+        })
+        return
+      }
+      for (const { pod } of chain.pods) {
+        const podUid = pod.metadata?.uid
+        if (!podUid || !pod.metadata?.resourceVersion || pod.metadata.deletionTimestamp) continue
+        const currentInit = deployment.spec?.template?.spec?.initContainers?.find(
+          container => container.name === 'canonical-store-init'
+        )
+        const podInit = pod.spec?.initContainers?.find(
+          container => container.name === 'canonical-store-init'
+        )
+        if (
+          !currentInit ||
+          !podInit ||
+          currentInit.image !== podInit.image ||
+          !isDeepStrictEqual(currentInit.command, podInit.command) ||
+          !isDeepStrictEqual(currentInit.args, podInit.args)
+        )
+          continue
+        const status = pod.status?.initContainerStatuses?.find(
+          s => s.name === 'canonical-store-init'
+        )
+        if (!status) continue
+        const terminated = status.state?.terminated ?? status.lastState?.terminated
+        if (!terminated) continue
+        const finishedAt =
+          terminated.finishedAt instanceof Date
+            ? terminated.finishedAt.toISOString()
+            : terminated.finishedAt
+        const attemptKey = conversationStoreAttemptKey(
+          podUid,
+          'canonical-store-init',
+          status.restartCount ?? 0,
+          finishedAt
+        )
+        if (this.observedConversationStoreAttempts.has(attemptKey)) continue
+        const initSpec = pod.spec?.initContainers?.find(c => c.name === 'canonical-store-init')
+        if (!initSpec || !conversationStoreInitBindingMatches(initSpec, host.uid, observedPvcUid)) {
+          this.setConversationStoreReady(host.name, {
+            ready: false,
+            reason: 'Deferred',
+            message: 'canonical init binding pins mismatch',
+          })
+          continue
+        }
+        const verified = verifyConversationStoreInitOutcome(terminated.message, terminated.exitCode)
+        if (!this.countedConversationStoreAttempts.has(attemptKey)) {
+          conversationStoreInitOutcomesTotal.inc({
+            outcome: verified.valid && verified.parsed?.outcome === 'ok' ? 'ok' : 'blocked',
+            reason: verified.reason,
+          })
+          this.countedConversationStoreAttempts.add(attemptKey)
+        }
+        if (!verified.valid || !verified.parsed || !isCanonicalSuccessOutcome(verified.parsed)) {
+          this.observedConversationStoreAttempts.add(attemptKey)
+        }
+        if (!verified.valid || !verified.parsed) {
+          this.setConversationStoreReady(host.name, {
+            ready: false,
+            reason: verified.reason,
+          })
+          continue
+        }
+        if (isCanonicalSuccessOutcome(verified.parsed) && verified.parsed.storeId) {
+          await this.persistConversationStoreLayoutReady(
+            host,
+            observedPvcUid,
+            verified.parsed.storeId
+          )
+          this.setConversationStoreReady(host.name, { ready: true, reason: 'Canonical' })
+          this.observedConversationStoreAttempts.add(attemptKey)
+        } else if (
+          isLegacyFloorSuccessOutcome(verified.parsed) &&
+          host.status?.conversationStore?.compatibility?.storageContract === 'legacy-floor' &&
+          host.status.conversationStore.compatibility.migrationId === verified.parsed.migrationId
+        ) {
+          this.setConversationStoreReady(host.name, { ready: true, reason: 'LayoutReady' })
+        } else if (verified.parsed.outcome === 'ok') {
+          this.setConversationStoreReady(host.name, {
+            ready: false,
+            reason: 'MigrationPending',
+            message: verified.parsed.reason,
+          })
+        } else {
+          this.setConversationStoreReady(host.name, {
+            ready: false,
+            reason:
+              verified.parsed.reason === 'ImageFloorMissing'
+                ? 'ImageFloorMissing'
+                : 'MigrationBlocked',
+            message: verified.parsed.reason,
+          })
+        }
+        return
+      }
+    } catch (error) {
+      log.warn('Failed to observe canonical conversation-store init outcome', {
+        host: host.name,
+        err: error,
+      })
+    }
+  }
+
   private advanceReconcileGeneration(name: string): number {
     const generation = (this.reconcileGenerations.get(name) ?? 0) + 1
     this.reconcileGenerations.set(name, generation)
@@ -2576,6 +3105,7 @@ export class HostReconciler {
 
   private clearStatus(name: string): void {
     this.statusMap.delete(name)
+    this.conversationStoreReadyByHost.delete(name)
     this.reconcileGenerations.delete(name)
     this.statusGenerations.delete(name)
     this.lifecycle.clearHost(name)
@@ -3354,8 +3884,18 @@ export class HostReconciler {
     mounts: ResolvedSfsMount[] = [],
     runtimeTokenRevision = '',
     lifecycle?: EffectiveHostLifecycle,
-    grokExecutionEnabled = this.hostDerivesGrokExecution(host)
+    grokExecutionEnabled = this.hostDerivesGrokExecution(host),
+    canonicalStore?: CanonicalStoreDeploymentInput
   ): k8s.V1Deployment {
+    if (canonicalStore && (!host.uid || !canonicalStore.pvcUid)) {
+      throw new Error(
+        `Canonical store deployment for Host "${host.name}" requires a verified HostUID and PVCUID binding`
+      )
+    }
+    const storageContract =
+      canonicalStore?.storageContract ?? (canonicalStore?.canonical ? 'canonical' : 'legacy-floor')
+    const canonicalMode = !!canonicalStore && storageContract === 'canonical'
+    const admittedStore = !!canonicalStore
     const labels: Record<string, string> = {
       app: host.name,
       [MANAGED_BY_LABEL]: MANAGED_BY_VALUE,
@@ -3368,7 +3908,7 @@ export class HostReconciler {
     // (and tests) fall back to the synchronously derivable view.
     const effectiveLifecycle = lifecycle ?? this.lifecycle.effectiveLifecycleFromCache(host)
     const isStateless = effectiveLifecycle.stateless
-    const image = isDesktop ? config.desktopImage : config.hostImage
+    const image = canonicalStore?.image ?? (isDesktop ? config.desktopImage : config.hostImage)
     const resources = isDesktop ? config.desktopResources : config.hostResources
     // Stage 6 (W5): stateless pods may override the pull policy (guarded —
     // see resolveStatelessImagePullPolicy). Non-stateless pods keep the
@@ -3393,7 +3933,7 @@ export class HostReconciler {
       '/tmp',
       WORKFLOW_TOKEN_MOUNT_PATH,
       MCP_HOST_RUNTIME_AUTH_STATE_PATH,
-      ...(isStateless ? [STATE_MOUNT_PATH] : []),
+      ...(isStateless || admittedStore ? [CANONICAL_STORE_STATE_MOUNT_PATH] : []),
     ]
     const contextMounts = mounts.filter(m => {
       const reason = HostReconciler.contextMountPathRejectionReason(m.mountPath, reservedMountPaths)
@@ -3466,11 +4006,35 @@ export class HostReconciler {
     if (grokExecutionEnabled) {
       env.push({ name: 'MCP_HOST_GROK_SUBSCRIPTION_ENABLED', value: 'true' })
     }
+    // Every admitted floor/canonical template uses the same durable DB path and
+    // fence binding. Only the explicit discriminator authorizes canonical identity.
+    if (canonicalStore && host.uid) {
+      env.push(
+        { name: 'CLERUM_CANONICAL_STATE_DIR', value: CANONICAL_STORE_STATE_MOUNT_PATH },
+        {
+          name: 'CLERUM_CANONICAL_POD_UID',
+          valueFrom: { fieldRef: { fieldPath: 'metadata.uid' } },
+        },
+        { name: 'CLERUM_HOST_UID', value: host.uid },
+        { name: 'CLERUM_PVC_UID', value: canonicalStore.pvcUid },
+        { name: 'CLERUM_SESSION_STORE', value: 'sqlite' },
+        { name: 'CLERUM_SESSION_DB_DIR', value: CANONICAL_STORE_STATE_MOUNT_PATH },
+        { name: 'CLERUM_CANONICAL_STORE_REQUIRED', value: String(canonicalMode) },
+        { name: 'CLERUM_CANONICAL_STORE_CONTRACT', value: storageContract },
+        { name: 'CLERUM_DB_BARRIER_FULL', value: 'true' }
+      )
+    }
     if (isStateless) {
       env.push(
         { name: 'CLERUM_STATELESS_LIFECYCLE', value: 'true' },
-        { name: 'CLERUM_SESSION_STORE', value: 'sqlite' },
-        { name: 'CLERUM_SESSION_DB_DIR', value: STATE_MOUNT_PATH },
+        // Legacy stateless pods keep the explicit sqlite env; canonical pods
+        // already carry the unified values above.
+        ...(admittedStore
+          ? []
+          : [
+              { name: 'CLERUM_SESSION_STORE', value: 'sqlite' },
+              { name: 'CLERUM_SESSION_DB_DIR', value: STATE_MOUNT_PATH },
+            ]),
         // Stage 3: the heartbeat emitter requires its own pod UID so HCC
         // can discard heartbeats from stale pods after a wake.
         {
@@ -3575,20 +4139,37 @@ export class HostReconciler {
         name: host.name,
         namespace: host.namespace,
         labels,
-        ...(host.uid ? { annotations: { [HOST_UID_ANNOTATION]: host.uid } } : {}),
+        ...((host.uid || canonicalMode) && {
+          annotations: {
+            ...(host.uid ? { [HOST_UID_ANNOTATION]: host.uid } : {}),
+            // Durable marker accompanying the Host status layout commitment
+            // (#825 section 5.6): the controller uses the status OR this
+            // marker to preserve the canonical contract even if the opt-in is
+            // removed or the Deployment is recreated.
+            ...(canonicalMode ? { [CANONICAL_STORE_LAYOUT_ANNOTATION]: '1' } : {}),
+          },
+        }),
       },
       spec: {
         // A suspended stateless Host scales to 0 on EVERY reconcile path
         // (event + resync): the state lives in the CRD status, so neither a
         // routine reconcile nor an HCC restart resurrects it.
         replicas: isStateless && effectiveLifecycle.state === 'suspended' ? 0 : 1,
-        strategy: {
-          type: 'RollingUpdate',
-          rollingUpdate: {
-            maxSurge: 0,
-            maxUnavailable: 1,
-          },
-        },
+        // Canonical store pods use Recreate + a bounded 30s grace so a rollout
+        // never overlaps two writers on the same RWO PVC (#825 section 5.1).
+        // Neither the grace period nor an API DELETED event proves an isolated
+        // process died; the writer fence remains the actual exclusion.
+        ...(admittedStore
+          ? { strategy: { type: 'Recreate' as const } }
+          : {
+              strategy: {
+                type: 'RollingUpdate' as const,
+                rollingUpdate: {
+                  maxSurge: 0,
+                  maxUnavailable: 1,
+                },
+              },
+            }),
         selector: {
           matchLabels: { app: host.name },
         },
@@ -3603,6 +4184,10 @@ export class HostReconciler {
             // mcp-host watch only its own Host CRD, env CM/Secret, and LLM
             // Secret.
             serviceAccountName: this.hostSaName(host),
+            // Canonical store pods (#825 section 5.1): bounded 30s grace so a
+            // Recreate rollout gives the writer time to drain and close the
+            // SQLite connection. The grace alone never proves the process died.
+            ...(admittedStore ? { terminationGracePeriodSeconds: 30 } : {}),
             // A stateless Host may be recreated after a user interaction.
             // Give only that on-demand workload the interactive class so its
             // wake can preempt explicitly lower-priority batch work. Keep
@@ -3612,29 +4197,64 @@ export class HostReconciler {
             imagePullSecrets: config.hostImagePullSecretName
               ? [{ name: config.hostImagePullSecretName }]
               : undefined,
-            // Stage 1.2: stateless Hosts migrate the workspace PVC to the
-            // dual-subPath layout before mcp-host starts. Non-stateless pods
-            // keep the pre-stateless shape untouched.
-            ...(isStateless
-              ? { initContainers: [buildWorkspaceLayoutInitContainer(image, imagePullPolicy)] }
-              : {}),
+            // Canonical store init (#825) runs the journal-backed CLI migrate
+            // for every mode and replaces the legacy newest-source-wins shell.
+            // Otherwise Stage 1.2 keeps the stateless-only legacy layout init.
+            ...(admittedStore && host.uid
+              ? {
+                  initContainers: [
+                    buildCanonicalStoreInitContainer({
+                      image,
+                      imagePullPolicy,
+                      hostUid: host.uid,
+                      pvcUid: canonicalStore.pvcUid,
+                      nodePath: isDesktop ? '/usr/bin/node' : '/usr/local/bin/node',
+                      storageContract,
+                    }),
+                  ],
+                }
+              : isStateless
+                ? { initContainers: [buildWorkspaceLayoutInitContainer(image, imagePullPolicy)] }
+                : {}),
             containers: [
               {
                 name: 'mcp-host',
                 image,
                 imagePullPolicy,
                 ports,
-                envFrom: [{ configMapRef: { name: config.hostConfigMapName } }],
-                env,
+                ...(!admittedStore
+                  ? { envFrom: [{ configMapRef: { name: config.hostConfigMapName } }] }
+                  : {}),
+                env: admittedStore
+                  ? [
+                      ...(canonicalStore?.sourceEnvironment ?? []).filter(
+                        source => !env.some(binding => binding.name === source.name)
+                      ),
+                      ...env,
+                    ]
+                  : env,
                 volumeMounts: [
-                  ...(isStateless
+                  // Canonical layout (#825 section 5.1): one PVC, two
+                  // subPaths — workspace/ at the workspace path and state/ at
+                  // the durable state dir — identical across stateful,
+                  // stateless and Desktop Hosts.
+                  ...(admittedStore
                     ? [
-                        // Same PVC mounted twice: workspace/ at the workspace
-                        // path, state/ at the durable session-state dir.
                         { name: 'workspace', mountPath: workspacePath, subPath: 'workspace' },
-                        { name: 'workspace', mountPath: STATE_MOUNT_PATH, subPath: 'state' },
+                        {
+                          name: 'workspace',
+                          mountPath: CANONICAL_STORE_STATE_MOUNT_PATH,
+                          subPath: 'state',
+                        },
                       ]
-                    : [{ name: 'workspace', mountPath: workspacePath }]),
+                    : isStateless
+                      ? [
+                          // Same PVC mounted twice: workspace/ at the workspace
+                          // path, state/ at the durable session-state dir.
+                          { name: 'workspace', mountPath: workspacePath, subPath: 'workspace' },
+                          { name: 'workspace', mountPath: STATE_MOUNT_PATH, subPath: 'state' },
+                        ]
+                      : [{ name: 'workspace', mountPath: workspacePath }]),
                   {
                     name: 'mcp-host-runtime-tokens',
                     mountPath: WORKFLOW_TOKEN_MOUNT_PATH,
@@ -3904,10 +4524,18 @@ export class HostReconciler {
     this.readinessTimers.set(name, timer)
   }
 
-  private async ensurePvc(host: HostCRD, revalidate?: () => void): Promise<boolean> {
+  private async ensurePvc(
+    host: HostCRD,
+    revalidate?: () => void
+  ): Promise<{ applied: boolean; pvcUid?: string }> {
     const pvc = this.buildPvc(host)
     const name = this.pvcName(host)
     let createFailed = false
+    let observedPvcUid: string | undefined
+    const capturePvcUid = (observed: k8s.V1PersistentVolumeClaim | undefined): void => {
+      const uid = observed?.metadata?.uid
+      if (typeof uid === 'string' && uid.length > 0) observedPvcUid = uid
+    }
     const mutationAllowed = () => {
       revalidate?.()
       return true
@@ -3916,27 +4544,55 @@ export class HostReconciler {
     // non-throwing POST and convergence failures of this PVC writer.
     const result = await ensureResource({
       mutationAllowed,
-      read: () =>
-        observeExistenceRead('PersistentVolumeClaim', () =>
+      read: async () => {
+        const observed = await observeExistenceRead('PersistentVolumeClaim', () =>
           this.coreApi.readNamespacedPersistentVolumeClaim({ namespace: host.namespace, name })
-        ),
+        )
+        capturePvcUid(observed)
+        return observed
+      },
       create: async () => {
         try {
-          await observeCreate('PersistentVolumeClaim', () =>
+          const created = await observeCreate('PersistentVolumeClaim', () =>
             this.coreApi.createNamespacedPersistentVolumeClaim({
               namespace: host.namespace,
               body: pvc,
             })
           )
+          capturePvcUid(created)
+          await this.persistConversationStoreProvisioning(host, created)
         } catch (error) {
           if (error != null && getErrorCode(error) === 409) throw error
           createFailed = true
           log.error('Failed to create Host PVC', { host: host.name, err: error })
+          return
+        }
+        try {
+          // Fresh creation returns before the bounded subresource fields are
+          // observable on every driver; read back once to capture the actual
+          // UID used for positive provenance (#825). A failure here propagates
+          // because the gate must never fall back to an assumed identity.
+          if (observedPvcUid === undefined) {
+            const created = await observeExistenceRead('PersistentVolumeClaim', () =>
+              this.coreApi.readNamespacedPersistentVolumeClaim({
+                namespace: host.namespace,
+                name,
+              })
+            )
+            capturePvcUid(created)
+          }
+        } catch (error) {
+          log.error('Failed to read back newly created Host PVC', {
+            host: host.name,
+            err: error,
+          })
+          throw error
         }
       },
       converge: async read => {
         try {
           const existing = await read()
+          capturePvcUid(existing)
           revalidate?.()
           if (existing.spec?.volumeName) return
           pvc.metadata!.resourceVersion = existing.metadata?.resourceVersion
@@ -3953,7 +4609,8 @@ export class HostReconciler {
       },
       onSkipped: () => createsTotal.inc({ kind: 'PersistentVolumeClaim', outcome: 'skipped' }),
     })
-    return !createFailed && this.resourceApplySucceeded(result)
+    const applied = !createFailed && this.resourceApplySucceeded(result)
+    return { applied, pvcUid: observedPvcUid }
   }
 
   private async ensureService(host: HostCRD, revalidate?: () => void): Promise<boolean> {
@@ -4014,17 +4671,826 @@ export class HostReconciler {
     return result === 'created' || result === 'replaced' || result === 'up_to_date'
   }
 
+  /**
+   * True when the observed Deployment's applied template already carries the
+   * canonical contract (#825): the layout marker, unified state subPath,
+   * canonical env and the canonical init container. Used by the FIRST rollout
+   * gate to decide whether a desired change introduces the delivery.
+   */
+  private static deploymentHasCanonicalContract(deployment: k8s.V1Deployment | undefined): boolean {
+    const podSpec = deployment?.spec?.template?.spec
+    if (!podSpec) return false
+    if (
+      deployment.metadata?.annotations?.[CANONICAL_STORE_LAYOUT_ANNOTATION] !== '1' &&
+      deployment.metadata?.annotations?.['clerum.io/canonical-store-layout'] !== '1'
+    ) {
+      return false
+    }
+    const mounts = podSpec.containers?.find(c => c.name === 'mcp-host')?.volumeMounts ?? []
+    const hasStateSubPath = mounts.some(
+      m =>
+        m.name === 'workspace' &&
+        m.subPath === 'state' &&
+        m.mountPath === CANONICAL_STORE_STATE_MOUNT_PATH
+    )
+    const env = podSpec.containers?.find(c => c.name === 'mcp-host')?.env ?? []
+    const hasCanonicalEnv = env.some(
+      v => v.name === 'CLERUM_CANONICAL_STORE_REQUIRED' && v.value === 'true'
+    )
+    const hasCanonicalInit = (podSpec.initContainers ?? []).some(
+      c => c.name === 'canonical-store-init'
+    )
+    return hasStateSubPath && hasCanonicalEnv && hasCanonicalInit
+  }
+
+  /**
+   * Whether applying `desired` over `existing` would introduce the #825
+   * delivery: a changed mcp-host image, the canonical init/precheck, the
+   * Recreate strategy/grace, or the unified canonical mounts/env. Any such
+   * change requires the per-Host preparation gate (plan section 5.6).
+   */
+  private static deploymentIntroducesCanonicalDelivery(
+    desired: k8s.V1Deployment,
+    existing: k8s.V1Deployment | undefined
+  ): boolean {
+    if (!desired.spec?.template?.spec || !existing?.spec?.template?.spec) return true
+    // Every first pod-template change can destroy an unprotected off-PVC
+    // source. Compare through the repository's Kubernetes default normalizer;
+    // replica changes and Deployment-only metadata do not trigger a rollout.
+    const protectedTemplate = (deployment: k8s.V1Deployment): k8s.V1Deployment => ({
+      apiVersion: 'apps/v1',
+      kind: 'Deployment',
+      metadata: {},
+      spec: {
+        selector: { matchLabels: {} },
+        template: deployment.spec!.template,
+        strategy: deployment.spec!.strategy,
+      },
+    })
+    return !deploymentMatchesDesired(protectedTemplate(desired), protectedTemplate(existing))
+  }
+
+  /** Only the native known LIST/WATCH caller may record a positive Host birth. */
+  async recordConversationStoreProvisioningIntent(
+    host: HostCRD,
+    observation: Omit<import('./types').ConversationStoreProvisioningIntent, 'recordedAt'>,
+    revalidate: () => void
+  ): Promise<HostCRD> {
+    return this.lifecycle.serializeByHost(host.name, async () => {
+      for (let attempt = 0; attempt < 5; attempt++) {
+        revalidate()
+        const raw = (await this.customApi.getNamespacedCustomObject({
+          group: HOST_GROUP,
+          version: HOST_VERSION,
+          namespace: host.namespace,
+          plural: HOST_PLURAL,
+          name: host.name,
+        })) as {
+          metadata?: { uid?: string; resourceVersion?: string; creationTimestamp?: string }
+          status?: HostCRD['status']
+        }
+        if (
+          !host.uid ||
+          raw.metadata?.uid !== host.uid ||
+          observation.hostUid !== host.uid ||
+          !raw.metadata.resourceVersion ||
+          raw.metadata.creationTimestamp !== observation.hostCreatedAt ||
+          observation.source !== 'watch-added'
+        )
+          throw new Error('HostBirthIdentityChanged')
+        const store = raw.status?.conversationStore
+        const previous = store?.provisioningIntent
+        if (previous) {
+          if (
+            !isDeepStrictEqual(
+              { ...previous, recordedAt: undefined },
+              { ...observation, recordedAt: undefined }
+            )
+          )
+            throw new Error('HostBirthIntentConflict')
+          return this.readFreshHost(host)
+        }
+        if (
+          store?.layout ||
+          store?.compatibility ||
+          store?.preparation ||
+          store?.writerProof ||
+          store?.completion ||
+          store?.provisioning
+        )
+          throw new Error('HostSourceHistoryUnknown')
+        const absent = async (read: () => Promise<unknown>): Promise<boolean> => {
+          try {
+            await read()
+            return false
+          } catch (error) {
+            if (getErrorCode(error) === 404) return true
+            throw error
+          }
+        }
+        if (
+          !(await absent(() =>
+            this.appsApi.readNamespacedDeployment({ namespace: host.namespace, name: host.name })
+          )) ||
+          !(await absent(() =>
+            this.coreApi.readNamespacedPersistentVolumeClaim({
+              namespace: host.namespace,
+              name: this.pvcName(host),
+            })
+          )) ||
+          (
+            await this.coreApi.listNamespacedPod({
+              namespace: host.namespace,
+              labelSelector: `app=${host.name}`,
+            })
+          ).items.length !== 0
+        )
+          throw new Error('HostSourceHistoryUnknown')
+        const intent = { ...observation, recordedAt: this.now().toISOString() }
+        const body: Array<{ op: 'test' | 'add'; path: string; value: unknown }> = [
+          { op: 'test', path: '/metadata/uid', value: host.uid },
+          { op: 'test', path: '/metadata/resourceVersion', value: raw.metadata.resourceVersion },
+          !raw.status
+            ? {
+                op: 'add',
+                path: '/status',
+                value: { conversationStore: { provisioningIntent: intent } },
+              }
+            : !store
+              ? {
+                  op: 'add',
+                  path: '/status/conversationStore',
+                  value: { provisioningIntent: intent },
+                }
+              : { op: 'add', path: '/status/conversationStore/provisioningIntent', value: intent },
+        ]
+        revalidate()
+        try {
+          await this.customApi.patchNamespacedCustomObjectStatus({
+            group: HOST_GROUP,
+            version: HOST_VERSION,
+            namespace: host.namespace,
+            plural: HOST_PLURAL,
+            name: host.name,
+            body,
+          })
+          return this.readFreshHost(host)
+        } catch (error) {
+          if ((getErrorCode(error) === 409 || getErrorCode(error) === 422) && attempt < 4) continue
+          throw error
+        }
+      }
+      throw new Error('HostBirthStatusConflict')
+    })
+  }
+
+  /** A GET or 409 is never a positive PVC creation receipt. */
+  private async persistConversationStoreProvisioning(
+    host: HostCRD,
+    created: k8s.V1PersistentVolumeClaim
+  ): Promise<void> {
+    if (!host.uid || !created.metadata?.uid || !created.metadata.creationTimestamp) return
+    const createdAt =
+      created.metadata.creationTimestamp instanceof Date
+        ? created.metadata.creationTimestamp.toISOString()
+        : String(created.metadata.creationTimestamp)
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const fresh = await this.readFreshHost(host)
+      if (fresh.uid !== host.uid || !fresh.resourceVersion)
+        throw new Error('HostBirthIdentityChanged')
+      const intent = fresh.status?.conversationStore?.provisioningIntent
+      if (!intent) return // Unknown/cold LIST Hosts remain unable to claim a new catalog.
+      if (
+        intent.schemaVersion !== 1 ||
+        intent.source !== 'watch-added' ||
+        intent.hostUid !== host.uid ||
+        !Number.isFinite(Date.parse(createdAt)) ||
+        Date.parse(createdAt) < Date.parse(intent.hostCreatedAt)
+      )
+        throw new Error('HostBirthIntentConflict')
+      const existing = fresh.status?.conversationStore?.provisioning
+      if (existing) {
+        if (
+          existing.hostUid !== host.uid ||
+          existing.pvcUid !== created.metadata.uid ||
+          existing.createdAt !== createdAt
+        )
+          throw new Error('HostBirthIntentConflict')
+        return
+      }
+      const pvc = await this.coreApi.readNamespacedPersistentVolumeClaim({
+        namespace: host.namespace,
+        name: this.pvcName(host),
+      })
+      const currentCreatedAt =
+        pvc.metadata?.creationTimestamp instanceof Date
+          ? pvc.metadata.creationTimestamp.toISOString()
+          : String(pvc.metadata?.creationTimestamp)
+      if (
+        pvc.metadata?.uid !== created.metadata.uid ||
+        pvc.metadata.deletionTimestamp ||
+        currentCreatedAt !== createdAt
+      )
+        throw new Error('OperatorBindingChanged')
+      const body = [
+        { op: 'test', path: '/metadata/uid', value: host.uid },
+        { op: 'test', path: '/metadata/resourceVersion', value: fresh.resourceVersion },
+        { op: 'test', path: '/status/conversationStore/provisioningIntent', value: intent },
+        {
+          op: 'add',
+          path: '/status/conversationStore/provisioning',
+          value: { hostUid: host.uid, pvcUid: created.metadata.uid, createdAt },
+        },
+      ]
+      try {
+        await this.customApi.patchNamespacedCustomObjectStatus({
+          group: HOST_GROUP,
+          version: HOST_VERSION,
+          namespace: host.namespace,
+          plural: HOST_PLURAL,
+          name: host.name,
+          body,
+        })
+        return
+      } catch (error) {
+        if ((getErrorCode(error) === 409 || getErrorCode(error) === 422) && attempt < 4) continue
+        throw error
+      }
+    }
+    throw new Error('HostBirthStatusConflict')
+  }
+
+  private async persistConversationStoreOperatorProposal(
+    host: HostCRD,
+    proposal: import('./types').ConversationStoreOperatorProposal,
+    revalidate?: () => void
+  ): Promise<HostCRD> {
+    for (let attempt = 0; attempt < 5; attempt++) {
+      revalidate?.()
+      const fresh = await this.readFreshHost(host)
+      if (
+        fresh.uid !== proposal.hostUid ||
+        !fresh.resourceVersion ||
+        !isDeepStrictEqual(fresh.spec, host.spec) ||
+        fresh.annotations?.[CANONICAL_STORE_OPT_IN_ANNOTATION] !==
+          host.annotations?.[CANONICAL_STORE_OPT_IN_ANNOTATION]
+      )
+        throw new Error('OperatorBindingChanged')
+      const pvc = await this.coreApi.readNamespacedPersistentVolumeClaim({
+        namespace: host.namespace,
+        name: this.pvcName(host),
+      })
+      if (
+        pvc.metadata?.uid !== proposal.pvcUid ||
+        !pvc.metadata.resourceVersion ||
+        pvc.metadata.deletionTimestamp ||
+        this.desiredConversationStoreContract(fresh, proposal.pvcUid) !== proposal.storageContract
+      )
+        throw new Error('OperatorBindingChanged')
+      if (isDeepStrictEqual(fresh.status?.conversationStore?.operatorProposal, proposal))
+        return fresh
+      const body: Array<{ op: 'test' | 'add'; path: string; value: unknown }> = [
+        { op: 'test', path: '/metadata/uid', value: proposal.hostUid },
+        { op: 'test', path: '/metadata/resourceVersion', value: fresh.resourceVersion },
+        !fresh.status
+          ? {
+              op: 'add',
+              path: '/status',
+              value: { conversationStore: { operatorProposal: proposal } },
+            }
+          : !fresh.status.conversationStore
+            ? {
+                op: 'add',
+                path: '/status/conversationStore',
+                value: { operatorProposal: proposal },
+              }
+            : { op: 'add', path: '/status/conversationStore/operatorProposal', value: proposal },
+      ]
+      revalidate?.()
+      try {
+        await this.customApi.patchNamespacedCustomObjectStatus({
+          group: HOST_GROUP,
+          version: HOST_VERSION,
+          namespace: host.namespace,
+          plural: HOST_PLURAL,
+          name: host.name,
+          body,
+        })
+        return this.readFreshHost(fresh)
+      } catch (error) {
+        if ((getErrorCode(error) === 409 || getErrorCode(error) === 422) && attempt < 4) continue
+        throw error
+      }
+    }
+    throw new Error('OperatorProposalStatusConflict')
+  }
+
+  private async observeConversationStoreOperatorProposal(
+    host: HostCRD,
+    pvcUid: string,
+    image: string,
+    lifecycle: EffectiveHostLifecycle,
+    mounts: ResolvedSfsMount[],
+    revalidate?: () => void
+  ): Promise<{
+    host: HostCRD
+    sourceEnvironment: k8s.V1EnvVar[]
+    proposal: import('./types').ConversationStoreOperatorProposal
+  }> {
+    if (!host.uid) throw new Error('OperatorHostIdentityMissing')
+    const base = {
+      schemaVersion: 1 as const,
+      hostUid: host.uid,
+      pvcUid,
+      storageContract: this.desiredConversationStoreContract(host, pvcUid),
+      image,
+    }
+    let sourceEnvironment: k8s.V1EnvVar[] = []
+    let proposal: import('./types').ConversationStoreOperatorProposal
+    if (lifecycle.suspensionBlocked)
+      proposal = { ...base, state: 'blocked', reason: 'TemplateAuthorityUnavailable' }
+    else {
+      try {
+        sourceEnvironment = await this.readConversationStoreSourceEnvironment(host)
+        proposal = !/@sha256:[0-9a-f]{64}$/.test(image)
+          ? { ...base, state: 'blocked', reason: 'ImmutableImageRequired' }
+          : {
+              ...base,
+              state: 'ready',
+              templateRevision: this.conversationStoreTemplateRevision(
+                host,
+                pvcUid,
+                image,
+                lifecycle,
+                mounts,
+                sourceEnvironment
+              ),
+              effectiveLifecycle:
+                host.spec.desktop?.browser || host.spec.desktop?.x11
+                  ? 'desktop'
+                  : lifecycle.stateless
+                    ? 'stateless'
+                    : 'stateful',
+              sourceEnvironmentReferencesHash: createHash('sha256')
+                .update(JSON.stringify(sourceEnvironment))
+                .digest('hex'),
+            }
+      } catch (error) {
+        // Unknown metadata/unsafe loader names produce no target pins. They do
+        // not mutate an existing unprepared Pod or mint source-writer proof.
+        const reason =
+          error instanceof Error &&
+          ['SourceEnvironmentUnverified', 'SourceEnvironmentUnsafe'].includes(error.message)
+            ? error.message
+            : 'SourceEnvironmentUnavailable'
+        proposal = { ...base, state: 'blocked', reason }
+      }
+    }
+    revalidate?.()
+    return {
+      host: await this.persistConversationStoreOperatorProposal(host, proposal, revalidate),
+      sourceEnvironment,
+      proposal,
+    }
+  }
+
+  private desiredConversationStoreContract(
+    host: HostCRD,
+    pvcUid: string
+  ): ConversationStoreStorageContract {
+    const store = host.status?.conversationStore
+    return host.annotations?.[CANONICAL_STORE_OPT_IN_ANNOTATION] === 'enabled' ||
+      this.conversationStoreLayoutCommitted(host, pvcUid) ||
+      (store?.operationOutcome?.storageContract === 'canonical' &&
+        store.operationOutcome.hostUid === host.uid &&
+        store.operationOutcome.pvcUid === pvcUid &&
+        !!store.operationOutcome.storeId)
+      ? 'canonical'
+      : 'legacy-floor'
+  }
+
+  private async readConversationStoreSourceEnvironment(host: HostCRD): Promise<k8s.V1EnvVar[]> {
+    const source = await this.coreApi.readNamespacedConfigMap({
+      namespace: host.namespace,
+      name: config.hostConfigMapName,
+    })
+    return projectConversationStoreSourceEnvironment(source, config.hostConfigMapName)
+  }
+
+  /** Derive the hash from the same effective builder inputs; mutable credential values are excluded. */
+  conversationStoreTemplateRevision(
+    host: HostCRD,
+    pvcUid: string,
+    image: string,
+    assessedLifecycle?: EffectiveHostLifecycle,
+    mounts: ResolvedSfsMount[] = [],
+    sourceEnvironment: k8s.V1EnvVar[] = []
+  ): string {
+    if (!host.uid) throw new Error('OperatorHostIdentityMissing')
+    const storageContract = this.desiredConversationStoreContract(host, pvcUid)
+    const lifecycle = assessedLifecycle ?? this.lifecycle.effectiveLifecycleFromCache(host)
+    const deployment = this.buildDeployment(
+      host,
+      mounts,
+      '',
+      lifecycle,
+      this.hostDerivesGrokExecution(host),
+      { pvcUid, storageContract, image, sourceEnvironment }
+    )
+    const container = deployment.spec!.template.spec!.containers.find(
+      value => value.name === 'mcp-host'
+    )!
+    const init = deployment.spec!.template.spec!.initContainers!.find(
+      value => value.name === 'canonical-store-init'
+    )!
+    const workspace = container.volumeMounts!.find(
+      value => value.name === 'workspace' && value.subPath === 'workspace'
+    )!
+    const state = container.volumeMounts!.find(
+      value => value.name === 'workspace' && value.subPath === 'state'
+    )!
+    const env = Object.fromEntries((container.env ?? []).map(value => [value.name, value.value]))
+    return computeConversationStoreTemplateRevision({
+      storageContract,
+      image: container.image!,
+      layoutVersion: 1,
+      workspaceSubPath: workspace.subPath!,
+      stateSubPath: state.subPath!,
+      workspaceMountPath: workspace.mountPath,
+      stateMountPath: state.mountPath,
+      sessionStore: env.CLERUM_SESSION_STORE!,
+      sessionDbDir: env.CLERUM_SESSION_DB_DIR!,
+      canonicalRequired: env.CLERUM_CANONICAL_STORE_REQUIRED!,
+      hostUid: host.uid,
+      pvcUid,
+      initImage: init.image!,
+      initCommand: init.command ?? [],
+      initArgs: init.args ?? [],
+      initEnv: (init.env ?? []).map(value => ({ name: value.name, value: value.value })),
+      effectiveMode:
+        host.spec.desktop?.browser || host.spec.desktop?.x11
+          ? 'desktop'
+          : lifecycle.stateless
+            ? 'stateless'
+            : 'stateful',
+      lifecycleContract: lifecycle.stateless ? 'stateless' : 'stateful',
+      contextMounts: container.volumeMounts!.filter(
+        value =>
+          value.name !== 'workspace' &&
+          value.name !== 'mcp-host-runtime-tokens' &&
+          value.name !== 'workflow-auth-state' &&
+          value.name !== 'tmp'
+      ),
+      sourceEnvironment: sourceEnvironment.map(value => ({
+        name: value.name,
+        valueFrom: value.valueFrom,
+      })),
+    })
+  }
+
+  private conversationStorePreparationMatches(
+    host: HostCRD,
+    pvcUid: string | undefined,
+    image: string,
+    assessedLifecycle?: EffectiveHostLifecycle,
+    mounts: ResolvedSfsMount[] = [],
+    sourceEnvironment: k8s.V1EnvVar[] = []
+  ): boolean {
+    const preparation = host.status?.conversationStore?.preparation
+    const maintenance = host.status?.conversationStore?.maintenance
+    return (
+      !!host.uid &&
+      !!pvcUid &&
+      !!preparation &&
+      preparation.schemaVersion === 1 &&
+      preparation.hostUid === host.uid &&
+      preparation.pvcUid === pvcUid &&
+      preparation.image === image &&
+      preparation.storageContract === this.desiredConversationStoreContract(host, pvcUid) &&
+      preparation.templateRevision ===
+        this.conversationStoreTemplateRevision(
+          host,
+          pvcUid,
+          image,
+          assessedLifecycle,
+          mounts,
+          sourceEnvironment
+        ) &&
+      !!maintenance &&
+      maintenance.hostUid === host.uid &&
+      maintenance.pvcUid === pvcUid &&
+      maintenance.maintenanceId === preparation.maintenanceId &&
+      ['fenced', 'migrating', 'completed', 'released'].includes(maintenance.phase) &&
+      (preparation.sourceClass === 'new-host'
+        ? preparation.provenance === 'new' &&
+          host.status?.conversationStore?.provisioning?.hostUid === host.uid &&
+          host.status.conversationStore.provisioning.pvcUid === pvcUid
+        : preparation.sourceClass === 'sqlite-external-exported' &&
+          preparation.provenance === 'existing' &&
+          !!preparation.exportId &&
+          /^[0-9a-f-]{36}$/.test(preparation.exportId) &&
+          !!preparation.manifestHash &&
+          /^[0-9a-f]{64}$/.test(preparation.manifestHash) &&
+          host.status?.conversationStore?.writerProof?.hostUid === host.uid &&
+          host.status.conversationStore.writerProof.pvcUid === pvcUid &&
+          host.status.conversationStore.writerProof.maintenanceId === preparation.maintenanceId &&
+          host.status.conversationStore.writerProof.exportId === preparation.exportId &&
+          host.status.conversationStore.writerProof.manifestHash === preparation.manifestHash)
+    )
+  }
+
+  /** Narrow controller CAS; an awaited helper can never complete a replaced request or rebound PVC. */
+  private async persistConversationStoreFields(
+    context: import('./conversationStoreOperator').ConversationStoreOperatorContext,
+    request: ConversationStoreRequest,
+    fields: Partial<Omit<HostConversationStoreStatus, 'request'>>
+  ): Promise<HostCRD> {
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const fresh = await this.readFreshHost(context.host)
+      if (
+        fresh.uid !== request.hostUid ||
+        !fresh.resourceVersion ||
+        !isDeepStrictEqual(fresh.status?.conversationStore?.request, request)
+      )
+        throw new Error('OperatorBindingChanged')
+      const pvc = await this.coreApi.readNamespacedPersistentVolumeClaim({
+        namespace: fresh.namespace,
+        name: context.pvcName,
+      })
+      if (
+        pvc.metadata?.uid !== request.pvcUid ||
+        !pvc.metadata.resourceVersion ||
+        pvc.metadata.deletionTimestamp
+      )
+        throw new Error('OperatorBindingChanged')
+      const current = fresh.status?.conversationStore ?? {}
+      const changes = { ...fields }
+      // Re-observation of one phase/outcome must not emit a status event forever.
+      for (const key of ['maintenance', 'requestResult'] as const) {
+        const previous = current[key],
+          next = changes[key]
+        if (
+          previous &&
+          next &&
+          isDeepStrictEqual(
+            { ...previous, updatedAt: undefined },
+            { ...next, updatedAt: undefined }
+          )
+        ) {
+          delete changes[key]
+        }
+      }
+      const changed = Object.entries(changes).filter(
+        ([key, value]) =>
+          !isDeepStrictEqual(current[key as keyof HostConversationStoreStatus], value)
+      )
+      if (!changed.length) {
+        context.host = fresh
+        return fresh
+      }
+      const body: Array<{ op: 'test' | 'add'; path: string; value: unknown }> = [
+        { op: 'test', path: '/metadata/uid', value: request.hostUid },
+        { op: 'test', path: '/metadata/resourceVersion', value: fresh.resourceVersion },
+        { op: 'test', path: '/status/conversationStore/request', value: request },
+        ...changed.map(([key, value]) => ({
+          op: 'add' as const,
+          path: `/status/conversationStore/${key}`,
+          value,
+        })),
+      ]
+      try {
+        await this.customApi.patchNamespacedCustomObjectStatus({
+          group: HOST_GROUP,
+          version: HOST_VERSION,
+          namespace: fresh.namespace,
+          plural: HOST_PLURAL,
+          name: fresh.name,
+          body,
+        })
+        const next = await this.readFreshHost(fresh)
+        if (
+          next.uid !== request.hostUid ||
+          !isDeepStrictEqual(next.status?.conversationStore?.request, request)
+        )
+          throw new Error('OperatorBindingChanged')
+        context.host = next
+        return next
+      } catch (error) {
+        if ((getErrorCode(error) === 409 || getErrorCode(error) === 422) && attempt < 4) continue
+        throw error
+      }
+    }
+    throw new Error('OperatorStatusConflict')
+  }
+
+  /**
+   * Validate a trusted control-api operator request (#825 section 5.6) against
+   * the CURRENT Host identity, the actually observed PVC UID, and the intended
+   * image. A tenant annotation, stale condition, or unbound fingerprint can
+   * never authorize preparation; memory/unknown sources block the first
+   * rollout pending explicit product decisions (plan section 5.7).
+   */
+  private validateConversationStoreRequest(
+    host: HostCRD,
+    request: ConversationStoreRequest | undefined,
+    observedPvcUid: string | undefined,
+    desiredImage: string,
+    assessedLifecycle?: EffectiveHostLifecycle,
+    mounts: ResolvedSfsMount[] = [],
+    sourceEnvironment: k8s.V1EnvVar[] = []
+  ): { valid: true; request: ConversationStoreRequest } | { valid: false; reason: string } {
+    if (!request) return { valid: false, reason: 'no operator request' }
+    if (request.schemaVersion !== 1) return { valid: false, reason: 'unsupported request schema' }
+    if (!host.uid || request.hostUid !== host.uid) {
+      return { valid: false, reason: 'request HostUID binding mismatch' }
+    }
+    if (!observedPvcUid || request.pvcUid !== observedPvcUid) {
+      return { valid: false, reason: 'request PVCUID binding mismatch' }
+    }
+    if (request.targetImage && request.targetImage !== desiredImage) {
+      return { valid: false, reason: 'request target image mismatch' }
+    }
+    if (request.sourceClass === 'memory' || request.sourceClass === 'unknown') {
+      return {
+        valid: false,
+        reason: `source class "${request.sourceClass}" requires export before rollout`,
+      }
+    }
+    if (request.sourceClass === 'sqlite-external-exported' && !request.manifestHash) {
+      return { valid: false, reason: 'external SQLite source requires a manifest hash' }
+    }
+    if (!request.requestId || !request.maintenanceId || !request.principal) {
+      return { valid: false, reason: 'request identity incomplete' }
+    }
+    // Storage-contract templateRevision (#825): mandatory for prepare and
+    // verified against the locally computed stable hash when pinned. The hash
+    // covers image/layout/mounts/DB/binding/init and excludes ephemeral
+    // credentials so routine auth renewal never replays first-preparation.
+    const templateRevision = this.conversationStoreTemplateRevision(
+      host,
+      observedPvcUid,
+      desiredImage,
+      assessedLifecycle,
+      mounts,
+      sourceEnvironment
+    )
+    if (request.operation === 'prepare' && !request.templateRevision) {
+      return { valid: false, reason: 'prepare requires the storage-contract templateRevision pin' }
+    }
+    if (request.templateRevision && request.templateRevision !== templateRevision) {
+      return { valid: false, reason: 'request storage-contract revision mismatch' }
+    }
+    const semantics = validateConversationStoreOperationSemantics({
+      operation: request.operation,
+      storageContract: request.storageContract,
+      floorMigrationId:
+        host.status?.conversationStore?.compatibility?.storageContract === 'legacy-floor'
+          ? host.status.conversationStore.compatibility.migrationId
+          : undefined,
+      hasExpectedMigrationId: !!request.expectedMigrationId,
+      maintenancePhase: host.status?.conversationStore?.maintenance?.phase,
+      layoutStoreId: host.status?.conversationStore?.layout?.storeId,
+      hasMigrationId: !!request.migrationId,
+      hasManifestHash: !!request.manifestHash,
+      hasCandidateHash: !!request.candidateHash,
+      hasExpectedStoreId: !!request.expectedStoreId,
+      hasExpectedCurrentCatalogHash: !!request.expectedCurrentCatalogHash,
+    })
+    if (!semantics.valid) {
+      return { valid: false, reason: semantics.reason }
+    }
+    return { valid: true, request }
+  }
+
+  /**
+   * Compatibility level (#825 section 5.6): once the exact Host/PVC binding
+   * has established contractVersion 1, compatible renewals (for example image
+   * updates that preserve the storage contract) proceed without replaying the
+   * first-preparation request. A binding mismatch is never compatible.
+   */
+  private conversationStoreCompatibilityEstablished(
+    host: HostCRD,
+    observedPvcUid: string | undefined
+  ): boolean {
+    const compatibility = host.status?.conversationStore?.compatibility
+    return (
+      !!compatibility &&
+      compatibility.schemaVersion === 1 &&
+      compatibility.contractVersion === 1 &&
+      compatibility.storageContract ===
+        this.desiredConversationStoreContract(host, observedPvcUid ?? '') &&
+      (compatibility.storageContract !== 'legacy-floor' ||
+        (compatibility.layoutVersion === 1 &&
+          /^[0-9a-f-]{36}$/.test(compatibility.migrationId ?? '') &&
+          compatibility.databasePath === 'state/state.db' &&
+          compatibility.writerFenceRoot === 'state' &&
+          /^[0-9a-f]{64}$/.test(compatibility.catalogHash ?? ''))) &&
+      !!host.uid &&
+      compatibility.hostUid === host.uid &&
+      !!observedPvcUid &&
+      compatibility.pvcUid === observedPvcUid
+    )
+  }
+
+  /**
+   * Monotonic layout commitment (#825 section 5.6): once persisted for the
+   * exact Host/PVC binding the canonical layout cannot be downgraded, even if
+   * the opt-in annotation is removed or the Deployment is recreated.
+   */
+  private conversationStoreLayoutCommitted(
+    host: HostCRD,
+    observedPvcUid: string | undefined
+  ): boolean {
+    const layout = host.status?.conversationStore?.layout
+    return (
+      !!layout &&
+      layout.version === 1 &&
+      !!host.uid &&
+      layout.hostUid === host.uid &&
+      !!observedPvcUid &&
+      layout.pvcUid === observedPvcUid
+    )
+  }
+
+  /**
+   * FIRST canonical rollout gate (#825 plan section 5.6). Publishing HCC or
+   * changing its global image references does not authorize replacing every
+   * Pod: without a valid operator request, an established compatibility level,
+   * or an already-committed layout, the applied template and image are
+   * preserved (replicas may still change for wake/suspend). A legacy Host that
+   * lost its Deployment fails closed instead of being recreated with the
+   * global image. New Hosts enter only through a positive provisioning request
+   * bound to the actually created PVC.
+   */
+  private decideCanonicalRolloutGate(opts: {
+    host: HostCRD
+    desired: k8s.V1Deployment
+    existing: k8s.V1Deployment | undefined
+    observedPvcUid: string | undefined
+    assessedLifecycle?: EffectiveHostLifecycle
+    mounts?: ResolvedSfsMount[]
+    sourceEnvironment?: k8s.V1EnvVar[]
+  }): CanonicalRolloutGateDecision {
+    const { host, desired, existing, observedPvcUid } = opts
+    const introduces = HostReconciler.deploymentIntroducesCanonicalDelivery(desired, existing)
+    if (!introduces) {
+      conversationStoreRolloutGateDecisionsTotal.inc({ decision: 'proceed' })
+      return { status: 'proceed' }
+    }
+    if (this.conversationStoreLayoutCommitted(host, observedPvcUid)) {
+      conversationStoreRolloutGateDecisionsTotal.inc({ decision: 'proceed' })
+      return { status: 'proceed' }
+    }
+    if (this.conversationStoreCompatibilityEstablished(host, observedPvcUid)) {
+      conversationStoreRolloutGateDecisionsTotal.inc({ decision: 'proceed' })
+      return { status: 'proceed' }
+    }
+    const desiredImage =
+      desired.spec?.template?.spec?.containers?.find(c => c.name === 'mcp-host')?.image ?? ''
+    const prepared = this.conversationStorePreparationMatches(
+      host,
+      observedPvcUid,
+      desiredImage,
+      opts.assessedLifecycle,
+      opts.mounts,
+      opts.sourceEnvironment
+    )
+    const validation = prepared
+      ? { valid: true as const }
+      : { valid: false as const, reason: 'verified preparation receipt missing or stale' }
+    if (!validation.valid) {
+      if (existing && HostReconciler.isHccOwnedHostResource(existing, host.name)) {
+        conversationStoreRolloutGateDecisionsTotal.inc({ decision: 'preserve_applied' })
+        return {
+          status: 'preserve-applied',
+          reason: `ConversationStoreDeferred: ${validation.reason}`,
+        }
+      }
+      conversationStoreRolloutGateDecisionsTotal.inc({ decision: 'fail_closed' })
+      return {
+        status: 'fail-closed',
+        reason: `ConversationStoreDeferred: ${validation.reason}; refusing to create or replace the Deployment`,
+      }
+    }
+    conversationStoreRolloutGateDecisionsTotal.inc({ decision: 'proceed' })
+    return { status: 'proceed' }
+  }
+
   private async ensureDeployment(
     host: HostCRD,
     mounts: ResolvedSfsMount[],
     runtimeTokenRevision: string | undefined,
     lifecycle?: EffectiveHostLifecycle,
     resolveStateBeforeMutation?: () => Promise<DeploymentMutationState>,
-    revalidate?: () => void
+    revalidate?: () => void,
+    observedPvcUid?: string
   ): Promise<boolean> {
     let observedDeployment: k8s.V1Deployment | undefined
     let holdingTemplate = false
     let applied = true
+    // Set when the #825 FIRST rollout gate preserves the applied template or
+    // fails closed; surfaced as ConversationStoreReady=False/Deferred.
+    let canonicalRolloutDeferredReason: string | undefined
     const buildDesiredDeployment = async (): Promise<k8s.V1Deployment | null> => {
       const state = resolveStateBeforeMutation ? await resolveStateBeforeMutation() : null
       const effective = state?.lifecycle ?? lifecycle
@@ -4057,13 +5523,163 @@ export class HostReconciler {
           spec: { ...existing.spec, replicas },
         }
       }
-      return this.buildDeployment(
+      // Canonical activation (#825 section 5.6): the opt-in annotation
+      // requests activation, while an already-committed layout or an
+      // established compatibility level keeps the canonical contract even if
+      // the opt-in is later removed (monotonic — no downgrade to root mounts).
+      const targetLifecycle =
+        effective ?? (await this.lifecycle.assessLifecycle(host, mounts)).effective
+      revalidate?.()
+      const target = observedPvcUid
+        ? await this.observeConversationStoreOperatorProposal(
+            host,
+            observedPvcUid,
+            host.spec.desktop?.browser || host.spec.desktop?.x11
+              ? config.desktopImage
+              : config.hostImage,
+            targetLifecycle,
+            mounts,
+            revalidate
+          )
+        : undefined
+      // The awaited diagnostic CAS/readback can observe a revoked receipt or
+      // a replaced request without changing generation. Admission uses that
+      // fresh controller status, never the captured pre-await Host object.
+      if (target) host = target.host
+      revalidate?.()
+      const layoutCommitted = this.conversationStoreLayoutCommitted(host, observedPvcUid)
+      const compatibilityEstablished = this.conversationStoreCompatibilityEstablished(
+        host,
+        observedPvcUid
+      )
+      const storageContract = this.desiredConversationStoreContract(host, observedPvcUid ?? '')
+      const canonicalRequested = storageContract === 'canonical'
+      const sourceEnvironment = target?.sourceEnvironment ?? []
+      if (
+        target?.proposal.state === 'blocked' &&
+        target.proposal.reason !== 'ImmutableImageRequired' &&
+        (layoutCommitted || compatibilityEstablished)
+      )
+        throw new Error(target.proposal.reason)
+      const request = host.status?.conversationStore?.request
+      const desiredImageForRequest =
+        host.spec.desktop?.browser || host.spec.desktop?.x11
+          ? config.desktopImage
+          : config.hostImage
+      const requestValidation = this.validateConversationStoreRequest(
+        host,
+        request,
+        observedPvcUid,
+        desiredImageForRequest,
+        targetLifecycle,
+        mounts,
+        sourceEnvironment
+      )
+      // Binding/coordination env goes ONLY on admitted templates (#825):
+      // an un-admitted legacy Host keeps its exact legacy pod spec so routine
+      // non-delivery convergence (for example runtime-token annotation rolls)
+      // still works while the FIRST rollout gate protects image/spec changes.
+      const conversationStoreAdmitted =
+        layoutCommitted ||
+        compatibilityEstablished ||
+        this.conversationStorePreparationMatches(
+          host,
+          observedPvcUid,
+          desiredImageForRequest,
+          targetLifecycle,
+          mounts,
+          sourceEnvironment
+        )
+      const canonicalStore: CanonicalStoreDeploymentInput | undefined =
+        observedPvcUid && conversationStoreAdmitted
+          ? {
+              pvcUid: observedPvcUid,
+              canonical: canonicalRequested,
+              storageContract,
+              sourceEnvironment,
+              // Positive provenance only for an actual new Host provisioning
+              // request (#825): the CLI blocks creation without it.
+              ...(requestValidation.valid && requestValidation.request.sourceClass === 'new-host'
+                ? {
+                    provenance: 'new-host' as const,
+                    maintenanceId: requestValidation.request.maintenanceId,
+                  }
+                : {}),
+            }
+          : undefined
+      const desired = this.buildDeployment(
         host,
         mounts,
         state?.runtimeTokenRevision ?? runtimeTokenRevision,
-        effective,
-        state?.grokExecutionEnabled ?? this.hostDerivesGrokExecution(host)
+        targetLifecycle,
+        state?.grokExecutionEnabled ?? this.hostDerivesGrokExecution(host),
+        canonicalStore
       )
+      // FIRST canonical rollout gate (#825 plan section 5.6): without a valid
+      // trusted operator request, established compatibility, or a committed
+      // layout, preserve the applied template/image or fail closed.
+      const gate = this.decideCanonicalRolloutGate({
+        host,
+        desired,
+        existing: observedDeployment,
+        observedPvcUid,
+        assessedLifecycle: targetLifecycle,
+        mounts,
+        sourceEnvironment,
+      })
+      if (gate.status === 'preserve-applied') {
+        canonicalRolloutDeferredReason = gate.reason
+        const existing = observedDeployment
+        if (
+          !existing ||
+          !HostReconciler.isHccOwnedHostResource(existing, host.name) ||
+          existing.metadata?.name !== host.name ||
+          existing.metadata?.namespace !== host.namespace ||
+          !existing.metadata?.uid ||
+          !existing.metadata?.resourceVersion ||
+          existing.metadata.deletionTimestamp ||
+          !existing.spec?.template?.spec
+        ) {
+          throw new Error(
+            `Cannot preserve an unverified Deployment for Host "${host.name}" during the canonical-store rollout gate`
+          )
+        }
+        const annotatedHostUid = existing.metadata.annotations?.[HOST_UID_ANNOTATION]
+        if (!host.uid || annotatedHostUid !== host.uid) {
+          throw new Error(
+            `Cannot preserve an unverified Deployment for Host "${host.name}" during the canonical-store rollout gate`
+          )
+        }
+        // Preserve UID/resourceVersion and the APPLIED pod spec (image, env,
+        // mounts, init, strategy); replicas may still change for wake/suspend,
+        // and desired template metadata (for example the runtime-token
+        // revision annotation) still rolls so credential renewals are not
+        // frozen by the delivery gate.
+        const replicas = desired.spec?.replicas ?? existing.spec.replicas ?? 1
+        return {
+          ...existing,
+          spec: {
+            ...existing.spec,
+            replicas,
+            template: {
+              ...existing.spec.template,
+              metadata: existing.spec.template.metadata,
+            },
+          },
+        }
+      }
+      if (gate.status === 'fail-closed') {
+        canonicalRolloutDeferredReason = gate.reason
+        throw new Error(gate.reason)
+      }
+      if (
+        canonicalStore?.storageContract === 'canonical' &&
+        !this.conversationStoreLayoutCommitted(host, observedPvcUid)
+      ) {
+        // The controller receipt exists only after physical source verification.
+        await this.persistConversationStoreLayoutCommitment(host, canonicalStore.pvcUid)
+      }
+      return desired
     }
     const mutationAllowed = () => {
       revalidate?.()
@@ -4112,7 +5728,15 @@ export class HostReconciler {
             }),
         }),
     })
-    return applied && this.resourceApplySucceeded(result)
+    const deploymentApplied = applied && this.resourceApplySucceeded(result)
+    if (canonicalRolloutDeferredReason) {
+      this.setConversationStoreReady(host.name, {
+        ready: false,
+        reason: 'Deferred',
+        message: canonicalRolloutDeferredReason,
+      })
+    }
+    return deploymentApplied
   }
 
   private async deleteRuntimeResources(name: string, namespace: string): Promise<void> {
@@ -5052,6 +6676,99 @@ export class HostReconciler {
     }
 
     revalidateHostMutationBoundary()
+    const operatorStore = host.status?.conversationStore
+    const terminalOperatorRequest =
+      operatorStore?.request &&
+      operatorStore.requestResult?.requestId === operatorStore.request.requestId &&
+      ['completed', 'rejected'].includes(operatorStore.requestResult.state)
+    if (
+      (operatorStore?.request && !terminalOperatorRequest) ||
+      (operatorStore?.maintenance && operatorStore.maintenance.phase !== 'released')
+    ) {
+      const fresh = await this.readFreshHost(host)
+      if (fresh.uid !== host.uid)
+        throw new HostMutationIdentityChangedError('conversation-store operation', host.name)
+      const pvc = await this.coreApi.readNamespacedPersistentVolumeClaim({
+        namespace: host.namespace,
+        name: this.pvcName(host),
+      })
+      if (!pvc.metadata?.uid) throw new Error('OperatorPvcUnverified')
+      const image =
+        fresh.status?.conversationStore?.request?.operation === 'prepare'
+          ? fresh.spec.desktop?.browser || fresh.spec.desktop?.x11
+            ? config.desktopImage
+            : config.hostImage
+          : (fresh.status?.conversationStore?.preparation?.image ??
+            (fresh.spec.desktop?.browser || fresh.spec.desktop?.x11
+              ? config.desktopImage
+              : config.hostImage))
+      // Resolve the same authoritative mode inputs used by the Deployment
+      // builder. This assessment reads only; it cannot wake, drain or scale.
+      const operatorMounts = await this.resolveContextMounts(fresh)
+      revalidateHostMutationBoundary()
+      const operatorLifecycle = await this.lifecycle.assessLifecycle(fresh, operatorMounts)
+      revalidateHostMutationBoundary()
+      if (
+        operatorLifecycle.effective.suspensionBlocked &&
+        fresh.status?.conversationStore?.request?.operation === 'prepare'
+      ) {
+        this.setConversationStoreReady(fresh.name, {
+          ready: false,
+          reason: 'Deferred',
+          message: 'Template authority is unavailable',
+        })
+        return
+      }
+      const target = await this.observeConversationStoreOperatorProposal(
+        fresh,
+        pvc.metadata.uid,
+        image,
+        operatorLifecycle.effective,
+        operatorMounts,
+        revalidateHostMutationBoundary
+      )
+      if (target.proposal.state === 'blocked') {
+        this.setConversationStoreReady(fresh.name, {
+          ready: false,
+          reason: 'Deferred',
+          message: target.proposal.reason,
+        })
+        return
+      }
+      const context: ConversationStoreOperatorContext = {
+        host: target.host,
+        pvcName: this.pvcName(fresh),
+        pvcUid: pvc.metadata.uid,
+        image,
+        templateRevision: this.conversationStoreTemplateRevision(
+          fresh,
+          pvc.metadata.uid,
+          image,
+          operatorLifecycle.effective,
+          operatorMounts,
+          target.sourceEnvironment
+        ),
+        storageContract: this.desiredConversationStoreContract(fresh, pvc.metadata.uid),
+        canonicalRequested:
+          this.desiredConversationStoreContract(fresh, pvc.metadata.uid) === 'canonical',
+      }
+      const operation = await this.conversationStoreOperator.reconcile(context)
+      revalidateHostMutationBoundary()
+      host = operation.host
+      if (operation.held) {
+        const deployment = await this.readHostDeploymentOrNull(host)
+        this.setStatus(host.name, {
+          deployed: !!deployment,
+          ready: false,
+          message: `Conversation store maintenance: ${host.status?.conversationStore?.maintenance?.phase ?? 'blocked'}`,
+        })
+        this.setConversationStoreReady(
+          host.name,
+          host.status?.conversationStore?.ready ?? { ready: false, reason: 'MigrationPending' }
+        )
+        return
+      }
+    }
     // Wake fast-path (Stage 4.3) BEFORE the heavy reconcile body: reconciles
     // are serialized PER HOST (serializeByHost), so a pending wake for THIS
     // Host must not wait behind token issuance, NetworkPolicies or the
@@ -5160,10 +6877,10 @@ export class HostReconciler {
     let serviceApplied = true
     const resourceErrors: unknown[] = []
     const npFailures: string[] = []
-    const ensureIndependentResource = async (
+    const ensureIndependentResource = async <T>(
       kind: 'Host PVC' | 'Host Service',
-      reconcile: () => Promise<boolean>
-    ): Promise<boolean> => {
+      reconcile: () => Promise<T>
+    ): Promise<T | false> => {
       try {
         return await reconcile()
       } catch (error) {
@@ -5174,7 +6891,7 @@ export class HostReconciler {
           resource: kind,
           err: error,
         })
-        return false
+        return false as const
       }
     }
     const holdAppliedRuntime = async (wakeRequested: boolean): Promise<void> => {
@@ -5281,7 +6998,8 @@ export class HostReconciler {
         undefined,
         { ...lifecycle.effective, allowScaleUpDuringHold: allowScaleUp },
         undefined,
-        revalidateHostMutationBoundary
+        revalidateHostMutationBoundary,
+        observedPvcUid
       )
       revalidateHostMutationBoundary()
       const runtimeExpectedToRun =
@@ -5330,9 +7048,11 @@ export class HostReconciler {
     }
 
     revalidateHostMutationBoundary()
-    pvcApplied = await ensureIndependentResource('Host PVC', () =>
+    const pvcResult = await ensureIndependentResource('Host PVC', () =>
       this.ensurePvc(host, revalidateHostMutationBoundary)
     )
+    pvcApplied = pvcResult !== false ? pvcResult.applied : false
+    const observedPvcUid = pvcResult !== false ? pvcResult.pvcUid : undefined
     revalidateHostMutationBoundary()
     serviceApplied = await ensureIndependentResource('Host Service', () =>
       this.ensureService(host, revalidateHostMutationBoundary)
@@ -5560,7 +7280,8 @@ export class HostReconciler {
         runtimeTokenProvision.revision,
         lifecycle.effective,
         resolveDeploymentState,
-        revalidateHostMutationBoundary
+        revalidateHostMutationBoundary,
+        observedPvcUid
       )
     } catch (error) {
       if (error instanceof Error && error.name === 'RuntimeScopeObservationUnavailableError') {
@@ -5610,6 +7331,15 @@ export class HostReconciler {
       ready: ready && npFailures.length === 0,
       message,
     })
+    // #825: observe the canonical init outcome (exact owner chain, binding
+    // pins, dedup) only after a committed layout; the separate
+    // ConversationStoreReady observation never gates the lifecycle status.
+    if (
+      this.conversationStoreLayoutCommitted(host, observedPvcUid) ||
+      this.conversationStoreCompatibilityEstablished(host, observedPvcUid)
+    ) {
+      await this.observeConversationStoreInitOutcome(host, observedPvcUid)
+    }
     // Do not schedule a readiness poll when NetworkPolicy has degraded the
     // runtime: the same-generation poll would overwrite the degraded verdict
     // with "Running" once the Deployment alone becomes Ready.

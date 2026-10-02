@@ -21,6 +21,13 @@ describe('isStateDbPath', () => {
     '/state.db',
     'state.db-wal',
     'state.db-shm',
+    'state.db-journal',
+    'state.db.bak',
+    'state.db.pre-20260930.bak',
+    'state.db-wal.pre-20260930.bak',
+    '.canonical-store-import/export/state.db',
+    'state/.canonical-store/retired/receipt.md',
+    '.clerum-canonical-store-precheck-operation',
     'sub/state.db',
     'sub/deep/state.db-wal',
     '.clerum-state',
@@ -32,7 +39,6 @@ describe('isStateDbPath', () => {
 
   it.each([
     'notes.md',
-    'state.db.bak',
     'state.database',
     'mystate.db',
     'daily/2026-07-03.md',
@@ -75,6 +81,101 @@ describe('state-db guard enforcement', () => {
       const service = new WorkspaceService(workspace)
       await service.write('notes/today.md', 'hello')
       expect(await service.read('notes/today.md')).toBe('hello')
+    })
+  })
+
+  describe('canonical store records and aliases', () => {
+    const protectedPaths = [
+      'state.db.bak',
+      'state.db-wal.pre-20260930.bak',
+      'state/.canonical-store/retired/catalog.md',
+      '.canonical-store-import/export/catalog.md',
+      '.clerum-canonical-store',
+      '.clerum-canonical-store-precheck-operation',
+    ]
+    function seedRecords(): void {
+      for (const relative of protectedPaths) {
+        const target = path.join(workspace, relative)
+        fs.mkdirSync(path.dirname(target), { recursive: true })
+        fs.writeFileSync(target, 'retained catalog marker')
+      }
+      fs.writeFileSync(path.join(workspace, 'notes.md'), 'ordinary catalog marker')
+    }
+
+    it('blocks reads, writes, appends and deletion while ordinary documents remain usable', async () => {
+      seedRecords()
+      const service = new WorkspaceService(workspace)
+      for (const relative of protectedPaths) {
+        await expect(service.read(relative)).rejects.toThrow(StateDbPathError)
+        await expect(service.write(relative, 'changed')).rejects.toThrow(StateDbPathError)
+        await expect(service.append(relative, 'changed')).rejects.toThrow(StateDbPathError)
+        await expect(service.delete(relative)).rejects.toThrow(StateDbPathError)
+        expect(await service.exists(relative)).toBe(false)
+        expect(fs.readFileSync(path.join(workspace, relative), 'utf-8')).toBe(
+          'retained catalog marker'
+        )
+      }
+      await service.append('notes.md', 'visible document')
+      expect(await service.read('notes.md')).toContain('visible document')
+    })
+
+    it('omits platform records from listing, recursive enumeration and search', async () => {
+      seedRecords()
+      const service = new WorkspaceService(workspace)
+      const listed = (await service.list()).map(entry => entry.path)
+      expect(listed).toContain('notes.md')
+      expect(listed).not.toContain('state.db')
+      expect(listed).not.toContain('state.db.bak')
+      expect(listed).not.toContain('.canonical-store-import')
+      expect(listed).not.toContain('.clerum-canonical-store')
+      expect(await service.listAll()).toEqual(['notes.md'])
+      const matches = await service.search('catalog marker')
+      expect(matches.map(match => match.path)).toEqual(['notes.md'])
+      expect(matches[0].content).toContain('ordinary catalog marker')
+    })
+
+    it('blocks in-workspace symlink and hard-link aliases before accessing their bytes', async () => {
+      seedRecords()
+      fs.symlinkSync(
+        path.join(workspace, 'state/.canonical-store/retired/catalog.md'),
+        path.join(workspace, 'alias.md')
+      )
+      fs.symlinkSync(
+        path.join(workspace, 'state/.canonical-store'),
+        path.join(workspace, 'alias-directory')
+      )
+      fs.linkSync(path.join(workspace, 'state.db.bak'), path.join(workspace, 'hard-alias.md'))
+      const service = new WorkspaceService(workspace)
+      const read = new FileReadTool(workspace)
+      const write = new FileWriteTool(workspace)
+      for (const relative of ['alias.md', 'hard-alias.md']) {
+        await expect(service.read(relative)).rejects.toThrow(StateDbPathError)
+        await expect(service.append(relative, 'changed')).rejects.toThrow(StateDbPathError)
+        expect((await read.execute({ path: relative })).is_error).toBe(true)
+        expect(
+          (await write.execute({ path: relative, content: 'changed', append: true })).is_error
+        ).toBe(true)
+      }
+      await expect(service.list('alias-directory')).rejects.toThrow(StateDbPathError)
+      expect((await service.list()).map(entry => entry.path)).not.toContain('alias.md')
+      expect((await service.list()).map(entry => entry.path)).not.toContain('hard-alias.md')
+      expect((await service.search('catalog marker')).map(match => match.path)).toEqual([
+        'notes.md',
+      ])
+      expect((await read.execute({ path: 'notes.md' })).is_error).toBe(false)
+      expect(fs.readFileSync(path.join(workspace, 'state.db.bak'), 'utf-8')).toBe(
+        'retained catalog marker'
+      )
+    })
+
+    it('preserves legitimate in-workspace document symlinks', async () => {
+      fs.writeFileSync(path.join(workspace, 'notes.md'), 'visible document')
+      fs.symlinkSync(path.join(workspace, 'notes.md'), path.join(workspace, 'document.md'))
+      const service = new WorkspaceService(workspace)
+      expect(await service.read('document.md')).toBe('visible document')
+      expect((await new FileReadTool(workspace).execute({ path: 'document.md' })).content).toBe(
+        'visible document'
+      )
     })
   })
 

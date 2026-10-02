@@ -22,6 +22,13 @@ rules:
   - apiGroups: ['clerum.io']
     resources: ['hosts']
     verbs: ['get', 'list', 'create', 'update', 'patch', 'delete']
+  # #825: control-api writes ONLY status.conversationStore.request through the
+  # trusted operator endpoint, under an admission rule that freezes every other
+  # conversationStore field. get/patch (no update) keeps the CAS JSON Patch
+  # shape (test metadata.uid/resourceVersion + add request) as the only path.
+  - apiGroups: ['clerum.io']
+    resources: ['hosts/status']
+    verbs: ['get', 'patch']
   # SharedFileSystem CRDs (always in mcp-host ns) — Control UI admin endpoints
   # under /api/v1/admin/shared-filesystems list/get/create/delete CRDs and the
   # proxy endpoint reads the CRD before forwarding to the per-SFS wfc.
@@ -104,6 +111,12 @@ rules:
   - apiGroups: ['apps']
     resources: ['deployments']
     verbs: ['get', 'list', 'create', 'update', 'delete']
+  # #825: read-only owner chain Host -> Deployment -> ReplicaSet -> Pod for
+  # the ConversationStoreReady observation and init-outcome dedup
+  # (podUID, initName, restartCount, finishedAt, lastState). No write verbs.
+  - apiGroups: ['apps']
+    resources: ['replicasets']
+    verbs: ['get', 'list', 'watch']
   # Manage per-host Services and PVCs
   - apiGroups: ['']
     resources: ['services', 'persistentvolumeclaims']
@@ -145,6 +158,11 @@ rules:
   - apiGroups: ['']
     resources: ['pods']
     verbs: ['get', 'list']
+  # #825: execute the trusted kernel verifier inside the exact source Host Pod
+  # before any source-destructive rollout; the coordinator checks its owner chain.
+  - apiGroups: ['']
+    resources: ['pods/exec']
+    verbs: ['create']
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

@@ -1,6 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import * as k8s from '@kubernetes/client-node'
 import {
+  canonicalFixturePvcUid,
+  canonicalRuntimeHost,
+  createCanonicalFixtureHostApi,
+  installCanonicalPvcApi,
+  installCanonicalRuntimeConfigApi,
+} from '../test/__fixtures__/canonicalRuntime'
+import {
   asAppsApi,
   asCoreApi,
   asNetworkingApi,
@@ -50,6 +57,7 @@ vi.mock('./config', () => ({
     hostWorkspaceStorageClassName: 'standard',
     hostWorkspaceStorageSize: '1Gi',
     hostWorkspacePath: '/workspace',
+    hostConfigMapName: 'mcp-host-config',
     hostImage: 'clerum/mcp-host:test',
     desktopImage: 'clerum/mcp-host-desktop:test',
     hostImagePullPolicy: 'IfNotPresent',
@@ -1056,7 +1064,10 @@ describe('HostReconciler Host inventory mutation authority', () => {
 
   function stubPreDeploymentReconcileEffects(reconciler: HostReconciler): void {
     vi.spyOn(reconciler as any, 'validateHostSecret').mockResolvedValue({ ok: true })
-    vi.spyOn(reconciler as any, 'ensurePvc').mockResolvedValue(true)
+    vi.spyOn(reconciler as any, 'ensurePvc').mockImplementation(async (host: unknown) => ({
+      applied: true,
+      pvcUid: canonicalFixturePvcUid(host as HostCRD),
+    }))
     vi.spyOn(reconciler as any, 'ensureService').mockResolvedValue(true)
     for (const method of [
       'ensureHostServiceAccount',
@@ -1437,17 +1448,21 @@ describe('HostReconciler Host inventory mutation authority', () => {
 
   it('revalidates the Host spec at the final Deployment create-state boundary', async () => {
     const appsApi = createMockAppsApi()
+    const coreApi = createMockCoreApi()
+    installCanonicalRuntimeConfigApi(coreApi)
+    installCanonicalPvcApi(coreApi)
     const reconciler = new HostReconciler({} as k8s.KubeConfig, {
       appsApi: asAppsApi(appsApi),
-      coreApi: asCoreApi(createMockCoreApi()),
+      customApi: createCanonicalFixtureHostApi(() => current) as unknown as k8s.CustomObjectsApi,
+      coreApi: asCoreApi(coreApi),
       networkingApi: asNetworkingApi(createMockNetworkingApi()),
       rbacApi: asRbacApi(createMockRbacApi()),
     })
-    const host = {
+    const host = canonicalRuntimeHost({
       ...makeHost({ name: 'deployment-create-race' }),
       uid: 'host-uid',
       generation: 3,
-    }
+    })
     let current = host
     reconciler.setResolveCurrentHost(name => (name === host.name ? current : undefined))
     reconciler.setHostWatchAuthority(() => ({ known: true, generation: 12 }))
@@ -1478,17 +1493,21 @@ describe('HostReconciler Host inventory mutation authority', () => {
 
   it('revalidates the Host spec after a Deployment create conflict and before replace', async () => {
     const appsApi = createMockAppsApi()
+    const coreApi = createMockCoreApi()
+    installCanonicalRuntimeConfigApi(coreApi)
+    installCanonicalPvcApi(coreApi)
     const reconciler = new HostReconciler({} as k8s.KubeConfig, {
       appsApi: asAppsApi(appsApi),
-      coreApi: asCoreApi(createMockCoreApi()),
+      customApi: createCanonicalFixtureHostApi(() => current) as unknown as k8s.CustomObjectsApi,
+      coreApi: asCoreApi(coreApi),
       networkingApi: asNetworkingApi(createMockNetworkingApi()),
       rbacApi: asRbacApi(createMockRbacApi()),
     })
-    const host = {
+    const host = canonicalRuntimeHost({
       ...makeHost({ name: 'deployment-replace-race' }),
       uid: 'host-uid',
       generation: 3,
-    }
+    })
     let current = host
     reconciler.setResolveCurrentHost(name => (name === host.name ? current : undefined))
     reconciler.setHostWatchAuthority(() => ({ known: true, generation: 13 }))
@@ -1525,17 +1544,21 @@ describe('HostReconciler Host inventory mutation authority', () => {
 
   it('revalidates the Host spec before retrying a conflicted Deployment replace', async () => {
     const appsApi = createMockAppsApi()
+    const coreApi = createMockCoreApi()
+    installCanonicalRuntimeConfigApi(coreApi)
+    installCanonicalPvcApi(coreApi)
     const reconciler = new HostReconciler({} as k8s.KubeConfig, {
       appsApi: asAppsApi(appsApi),
-      coreApi: asCoreApi(createMockCoreApi()),
+      customApi: createCanonicalFixtureHostApi(() => current) as unknown as k8s.CustomObjectsApi,
+      coreApi: asCoreApi(coreApi),
       networkingApi: asNetworkingApi(createMockNetworkingApi()),
       rbacApi: asRbacApi(createMockRbacApi()),
     })
-    const host = {
+    const host = canonicalRuntimeHost({
       ...makeHost({ name: 'deployment-retry-race' }),
       uid: 'host-uid',
       generation: 3,
-    }
+    })
     let current = host
     let deploymentReads = 0
     reconciler.setResolveCurrentHost(name => (name === host.name ? current : undefined))

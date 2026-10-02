@@ -47,6 +47,7 @@ export class SessionProcessor extends EventEmitter {
   private config: SessionProcessorConfig
   private nextDispatchAt = 0
   private dispatchTimer: ReturnType<typeof setTimeout> | undefined
+  private conversationStoreAdmissionFenced = false
 
   constructor(config: SessionProcessorConfig) {
     super()
@@ -76,6 +77,7 @@ export class SessionProcessor extends EventEmitter {
    * if capacity is available.
    */
   enqueue(sessionKey: string, task: Task): void {
+    if (this.conversationStoreAdmissionFenced) throw new Error('ConversationStoreMaintenance')
     let queue = this.sessionQueues.get(sessionKey)
     if (!queue) {
       queue = []
@@ -84,6 +86,50 @@ export class SessionProcessor extends EventEmitter {
     queue.push(task)
     this.emit('task:enqueued', { sessionKey, task })
     this.tryProcessNext()
+  }
+
+  /** Drain accepted tasks without cancelling live approvals or dropping their successors. */
+  drainForConversationStoreMaintenance(timeoutMs = 30_000): Promise<void> {
+    this.conversationStoreAdmissionFenced = true
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 120_000) {
+      return Promise.reject(new Error('ConversationStoreMaintenanceDeadlineInvalid'))
+    }
+    const events = [
+      'task:completed',
+      'task:suspended',
+      'task:failed',
+      'task:skipped',
+      'task:budget_denied',
+    ]
+    return new Promise<void>((resolve, reject) => {
+      const cleanup = () => {
+        clearTimeout(timer)
+        for (const event of events) this.off(event, check)
+      }
+      const check = () => {
+        if (this.activeSessions.size !== 0) return
+        const queued = Array.from(this.sessionQueues.values()).reduce(
+          (count, tasks) => count + tasks.length,
+          0
+        )
+        if (queued === 0) {
+          cleanup()
+          resolve()
+          return
+        }
+        if (this.pendingSessionCount === 0) {
+          cleanup()
+          reject(new Error('ConversationStoreMaintenanceApprovalQueuePending'))
+        }
+      }
+      const timer = setTimeout(() => {
+        cleanup()
+        reject(new Error('ConversationStoreMaintenanceTasksStillRunning'))
+      }, timeoutMs)
+      for (const event of events) this.on(event, check)
+      this.tryProcessNext()
+      check()
+    })
   }
 
   /**

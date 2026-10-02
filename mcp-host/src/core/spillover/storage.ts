@@ -21,6 +21,7 @@ import { createHash } from 'crypto'
 import * as fs from 'fs/promises'
 import * as path from 'path'
 import { Counter, Gauge, Histogram } from 'prom-client'
+import { logger } from '../../logger'
 import { buildSpilloverRef, parseSpilloverRef } from './refResolver'
 import { generateStructureHint, inferContentType } from './structureHints'
 import type {
@@ -141,6 +142,10 @@ const SPILLOVER_ROOT = 'spillover'
 export class SpilloverStorage {
   private readonly opts: SpilloverStorageOptions
   private gcTimer: NodeJS.Timeout | null = null
+  private gcHeld = false
+  private sweepsInFlight = new Set<Promise<SweepResult>>()
+  private sweepFailed = false
+  private sweepFailure: unknown
   /** Resolved absolute root for safety prefix checks. Trailing separator stripped. */
   private readonly rootAbs: string
 
@@ -263,10 +268,27 @@ export class SpilloverStorage {
    * Walk the spillover root, delete files older than TTL, and rmdir empty
    * task directories. Returns the totals it freed.
    *
-   * Defensive: never throws — sweep is best-effort observability. Errors
-   * are logged once and the next sweep retries.
+   * Missing files during a normal GC race are harmless. Other filesystem
+   * failures propagate and remain visible to the maintenance drain.
    */
-  async sweep(): Promise<SweepResult> {
+  sweep(): Promise<SweepResult> {
+    if (this.gcHeld) return Promise.reject(new Error('SpilloverMaintenanceHeld'))
+    const sweep = this.runSweep()
+    this.sweepsInFlight.add(sweep)
+    void sweep.then(
+      () => {
+        this.sweepsInFlight.delete(sweep)
+      },
+      error => {
+        this.sweepsInFlight.delete(sweep)
+        this.sweepFailed = true
+        this.sweepFailure = error
+      }
+    )
+    return sweep
+  }
+
+  private async runSweep(): Promise<SweepResult> {
     let bytesFreed = 0
     let filesDeleted = 0
     let bytesAlive = 0
@@ -275,8 +297,9 @@ export class SpilloverStorage {
     let taskDirs: string[]
     try {
       taskDirs = await fs.readdir(this.rootAbs)
-    } catch {
-      // Root not created yet (no spillover ever written). Nothing to do.
+    } catch (error) {
+      // A fresh workspace legitimately has no spillover directory yet.
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
       clerumSpilloverBytesTotal?.set(0)
       return { bytesFreed: 0, filesDeleted: 0 }
     }
@@ -288,7 +311,9 @@ export class SpilloverStorage {
       let entries: string[]
       try {
         entries = await fs.readdir(taskDirAbs)
-      } catch {
+      } catch (error) {
+        if (!['ENOENT', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code ?? ''))
+          throw error
         continue
       }
 
@@ -298,14 +323,14 @@ export class SpilloverStorage {
           const stat = await fs.stat(entryAbs)
           if (!stat.isFile()) continue
           if (stat.mtimeMs <= cutoff) {
+            await fs.rm(entryAbs, { force: true })
             bytesFreed += stat.size
             filesDeleted += 1
-            await fs.rm(entryAbs, { force: true })
           } else {
             bytesAlive += stat.size
           }
-        } catch {
-          // skip on race
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
         }
       }
 
@@ -313,8 +338,9 @@ export class SpilloverStorage {
       try {
         const remaining = await fs.readdir(taskDirAbs)
         if (remaining.length === 0) await fs.rmdir(taskDirAbs)
-      } catch {
-        // skip
+      } catch (error) {
+        if (!['ENOENT', 'ENOTEMPTY'].includes((error as NodeJS.ErrnoException).code ?? ''))
+          throw error
       }
     }
 
@@ -359,11 +385,13 @@ export class SpilloverStorage {
 
   /** Start the periodic GC sweep. No-op if `gcIntervalMs === 0`. */
   startGc(): void {
+    this.gcHeld = false
     if (this.opts.gcIntervalMs === 0) return
     if (this.gcTimer) return
     this.gcTimer = setInterval(() => {
+      if (this.gcHeld) return
       this.sweep().catch(err => {
-        console.error('[SpilloverStorage] GC sweep failed:', err)
+        logger.error({ err }, 'Spillover GC sweep failed')
       })
     }, this.opts.gcIntervalMs)
     // Don't keep the process alive just for the sweep.
@@ -372,10 +400,19 @@ export class SpilloverStorage {
 
   /** Stop the periodic GC sweep. Idempotent. */
   stopGc(): void {
+    this.gcHeld = true
     if (this.gcTimer) {
       clearInterval(this.gcTimer)
       this.gcTimer = null
     }
+  }
+
+  /** Stop admission and wait for every public/boot/periodic sweep already started. */
+  async drainGc(): Promise<void> {
+    this.stopGc()
+    await Promise.allSettled(Array.from(this.sweepsInFlight))
+    if (this.sweepFailed)
+      throw new AggregateError([this.sweepFailure], 'SpilloverMaintenanceSweepFailed')
   }
 
   /** Test-only helper to forcibly drop a blob (simulates TTL expiration). */

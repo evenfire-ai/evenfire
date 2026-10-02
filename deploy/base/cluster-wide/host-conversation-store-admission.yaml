@@ -1,0 +1,88 @@
+# #825 authorization boundary: operator intent is distinct from controller
+# evidence. RBAC cannot reserve individual status fields, so this policy must
+# accompany control-api's narrow hosts/status patch grant.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: host-conversation-store-field-ownership
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ['clerum.io']
+        apiVersions: ['v1alpha1']
+        operations: ['CREATE', 'UPDATE']
+        resources: ['hosts', 'hosts/status']
+        scope: Namespaced
+  variables:
+    - name: controlApi
+      expression: "request.userInfo.username == 'system:serviceaccount:control-plane:control-api'"
+    - name: hcc
+      expression: "request.userInfo.username == 'system:serviceaccount:control-plane:host-context-controller'"
+    - name: newStatus
+      expression: "has(object.status) && object.status != null ? object.status : {}"
+    - name: oldStatus
+      expression: "oldObject != null && has(oldObject.status) && oldObject.status != null ? oldObject.status : {}"
+    - name: newStore
+      expression: "'conversationStore' in variables.newStatus && variables.newStatus.conversationStore != null ? variables.newStatus.conversationStore : {}"
+    - name: oldStore
+      expression: "'conversationStore' in variables.oldStatus && variables.oldStatus.conversationStore != null ? variables.oldStatus.conversationStore : {}"
+    - name: newRequest
+      expression: "'request' in variables.newStore ? variables.newStore.request : null"
+    - name: oldRequest
+      expression: "'request' in variables.oldStore ? variables.oldStore.request : null"
+    - name: controllerFieldsUnchanged
+      expression: >-
+        variables.oldStore.all(k, k == 'request' ||
+          (k in variables.newStore && variables.oldStore[k] == variables.newStore[k])) &&
+        variables.newStore.all(k, k == 'request' ||
+          (k in variables.oldStore && variables.newStore[k] == variables.oldStore[k]))
+    - name: otherStatusUnchanged
+      expression: >-
+        variables.oldStatus.all(k, k == 'conversationStore' ||
+          (k in variables.newStatus && variables.oldStatus[k] == variables.newStatus[k])) &&
+        variables.newStatus.all(k, k == 'conversationStore' ||
+          (k in variables.oldStatus && variables.newStatus[k] == variables.oldStatus[k]))
+    - name: newAnnotations
+      expression: "has(object.metadata.annotations) ? object.metadata.annotations : {}"
+    - name: oldAnnotations
+      expression: "oldObject != null && has(oldObject.metadata.annotations) ? oldObject.metadata.annotations : {}"
+    - name: reservedAnnotationsUnchanged
+      expression: >-
+        ['clerum.io/canonical-store-request', 'clerum.io/canonical-store-adopt',
+         'clerum.io/canonical-store-maintenance'].all(k,
+          (k in variables.newAnnotations) == (k in variables.oldAnnotations) &&
+          (!(k in variables.newAnnotations) || variables.newAnnotations[k] == variables.oldAnnotations[k]))
+  validations:
+    - expression: >-
+        variables.newRequest == variables.oldRequest ||
+        (variables.controlApi && request.subResource == 'status' && variables.newRequest != null &&
+         variables.newRequest.schemaVersion == 1 && variables.newRequest.hostUid == object.metadata.uid &&
+         variables.newRequest.principal.kind == 'control-admin' &&
+         variables.newRequest.principal.subject.size() > 0)
+      message: "Only control-api may submit a bound operator request through Host/status. Host metadata and runtime credentials do not authorize migration."
+      reason: Forbidden
+    - expression: >-
+        variables.controllerFieldsUnchanged || (variables.hcc && request.subResource == 'status')
+      message: "Conversation-store maintenance, preparation receipts, compatibility, layout and observations are owned by host-context-controller."
+      reason: Forbidden
+    - expression: "!variables.controlApi || variables.otherStatusUnchanged"
+      message: "control-api conversation-store requests must preserve all other Host status fields."
+      reason: Forbidden
+    - expression: >-
+        variables.oldRequest == null || variables.newRequest == null ||
+        variables.oldRequest.requestId != variables.newRequest.requestId ||
+        variables.oldRequest == variables.newRequest
+      message: "A conversation-store requestId cannot be reused with different operation, principal or binding pins."
+      reason: Forbidden
+    - expression: "variables.reservedAnnotationsUnchanged || variables.hcc"
+      message: "Only host-context-controller may project reserved conversation-store request annotations. Annotations never replace operator authorization."
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: host-conversation-store-field-ownership
+spec:
+  policyName: host-conversation-store-field-ownership
+  validationActions: ['Deny']

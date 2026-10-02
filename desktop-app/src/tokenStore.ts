@@ -1,10 +1,60 @@
 import { app, safeStorage } from 'electron'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
+import { realpathSync } from 'node:fs'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
 const SERVICE = 'Evenfire'
+let isolationScope: string | undefined
+let isolationRequired = false
+let isolationInvalid = false
+let isolatedUserData: string | undefined
+let storageAccessStarted = false
+
+/** Latch the already-selected isolation mode before services can restore auth. */
+export function requireTokenStoreIsolation(): void {
+  isolationRequired = true
+}
+function assertIsolatedStorageContext(): void {
+  if (!isolationRequired) return
+  if (isolationInvalid || !isolationScope || !isolatedUserData || !app.isReady()) {
+    throw new Error('TokenStoreIsolationNotBound')
+  }
+  try {
+    if (realpathSync(app.getPath('userData')) !== isolatedUserData) {
+      throw new Error('TokenStoreIsolationUserDataMismatch')
+    }
+  } catch {
+    isolationInvalid = true
+    throw new Error('TokenStoreIsolationContextChanged')
+  }
+}
+
+/** Bind only after main has verified the existing dev-isolation runtime.
+ * Per-run userData alone does not isolate the operating-system keychain. */
+export function bindTokenStoreIsolation(userDataDir: string): void {
+  requireTokenStoreIsolation()
+  try {
+    if (isolationInvalid || storageAccessStarted || !app.isReady())
+      throw new Error('TokenStoreIsolationAfterStorageAccess')
+    const actual = realpathSync(app.getPath('userData'))
+    if (realpathSync(userDataDir) !== actual) throw new Error('TokenStoreIsolationUserDataMismatch')
+    const scope = `${SERVICE}::dev-isolation::${createHash('sha256').update(actual).digest('hex')}`
+    if (isolationScope && isolationScope !== scope)
+      throw new Error('TokenStoreIsolationAlreadyBound')
+    isolatedUserData = actual
+    isolationScope = scope
+  } catch (error) {
+    isolationInvalid = true
+    throw error
+  }
+}
+function serviceForStorageAccess(): string {
+  storageAccessStarted = true
+  assertIsolatedStorageContext()
+  return isolationScope ?? SERVICE
+}
 /**
  * Legacy single global slot (pre per-environment scoping). Read once for a
  * best-effort migration into the active environment's slot, then deleted.
@@ -72,6 +122,7 @@ async function loadKeytar(): Promise<KeytarModule | null> {
 }
 
 async function resolvedStorageBase(): Promise<string> {
+  assertIsolatedStorageContext()
   const base = app?.isReady() ? app.getPath('userData') : path.join(os.homedir(), '.evenfire')
   await fs.mkdir(base, { recursive: true })
   return base
@@ -157,11 +208,12 @@ export class TokenStore {
     options: { legacyEnvKeys?: readonly string[] } = {}
   ): Promise<string | null> {
     assertEnvKey(envKey)
+    const service = serviceForStorageAccess()
     const account = accountFor(envKey)
     const keytar = await loadKeytar()
     if (keytar) {
       try {
-        const stored = await keytar.getPassword(SERVICE, account)
+        const stored = await keytar.getPassword(service, account)
         if (stored) return stored
       } catch {
         // Packaged builds can fail keychain access depending on host policies.
@@ -190,6 +242,9 @@ export class TokenStore {
     } catch {
       // No per-env plain-text token — fall through to legacy migration.
     }
+
+    // Isolated runs never read, copy or delete normal/global legacy material.
+    if (isolationRequired) return null
 
     const migratedScopedToken = await this.migrateLegacyEnvToken(
       envKey,
@@ -322,11 +377,12 @@ export class TokenStore {
 
   async setSessionToken(token: string, envKey: string): Promise<void> {
     assertEnvKey(envKey)
+    const service = serviceForStorageAccess()
     const account = accountFor(envKey)
     const keytar = await loadKeytar()
     if (keytar) {
       try {
-        await keytar.setPassword(SERVICE, account, token)
+        await keytar.setPassword(service, account, token)
         return
       } catch {
         // Fall through to file storage when keychain writes fail.
@@ -348,22 +404,31 @@ export class TokenStore {
     options: { legacyEnvKeys?: readonly string[] } = {}
   ): Promise<void> {
     assertEnvKey(envKey)
-    const legacyEnvKeys = Array.from(
-      new Set(
-        (options.legacyEnvKeys ?? [])
-          .map(key => String(key || '').trim())
-          .filter(key => key && key !== envKey)
-      )
-    )
+    const service = serviceForStorageAccess()
+    const legacyEnvKeys = isolationRequired
+      ? []
+      : Array.from(
+          new Set(
+            (options.legacyEnvKeys ?? [])
+              .map(key => String(key || '').trim())
+              .filter(key => key && key !== envKey)
+          )
+        )
     for (const legacyEnvKey of legacyEnvKeys) assertEnvKey(legacyEnvKey)
     const scopedEnvKeys = [envKey, ...legacyEnvKeys]
     const keytar = await loadKeytar()
     if (keytar) {
       const deleteKeychainPassword = async (account: string) => {
         try {
-          await keytar.deletePassword(SERVICE, account)
+          await keytar.deletePassword(service, account)
         } catch {
-          // Keychain cleanup is best-effort; continue through the scoped files.
+          if (isolationRequired) {
+            throw Object.assign(new Error('TokenStoreIsolationCleanupFailed'), {
+              code: 'TokenStoreIsolationCleanupFailed',
+              surface: 'keychain',
+            })
+          }
+          // Normal-mode cleanup remains best-effort for existing callers.
         }
       }
       for (const scopedEnvKey of scopedEnvKeys) {
@@ -371,25 +436,41 @@ export class TokenStore {
       }
       // Best-effort cleanup of the legacy global slot so it can't be migrated
       // into another environment later.
-      await deleteKeychainPassword(LEGACY_ACCOUNT)
+      if (!isolationRequired) await deleteKeychainPassword(LEGACY_ACCOUNT)
+    }
+    const removeStorageFile = async (filename: string): Promise<void> => {
+      try {
+        assertIsolatedStorageContext()
+        if (isolationRequired) await removeTokenFileDurably(filename)
+        else await fs.unlink(filename)
+      } catch (error) {
+        if (isolationRequired && (error as NodeJS.ErrnoException | undefined)?.code !== 'ENOENT') {
+          throw Object.assign(new Error('TokenStoreIsolationCleanupFailed'), {
+            code: 'TokenStoreIsolationCleanupFailed',
+            surface: 'file',
+          })
+        }
+      }
     }
     // Always clean up file-based storage regardless of keychain result,
     // since prior versions may have written both stores.
     await Promise.all([
       ...scopedEnvKeys.flatMap(scopedEnvKey => [
-        encryptedFilePath(scopedEnvKey)
-          .then(file => fs.unlink(file))
-          .catch(() => {}),
-        plainFilePath(scopedEnvKey)
-          .then(file => fs.unlink(file))
-          .catch(() => {}),
+        encryptedFilePath(scopedEnvKey).then(removeStorageFile),
+        plainFilePath(scopedEnvKey).then(removeStorageFile),
       ]),
+      // File legacy names are inside this verified userData directory; unlike
+      // the OS global slot they can be removed on an isolated run's logout.
       legacyEncryptedFilePath()
-        .then(file => fs.unlink(file))
-        .catch(() => {}),
+        .then(removeStorageFile)
+        .catch(error => {
+          if (isolationRequired) throw error
+        }),
       legacyFilePath()
-        .then(file => fs.unlink(file))
-        .catch(() => {}),
+        .then(removeStorageFile)
+        .catch(error => {
+          if (isolationRequired) throw error
+        }),
     ])
   }
 }

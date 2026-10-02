@@ -204,6 +204,13 @@ export interface Config {
    *  When set, state.db lives at `${sessionDbDir}/state.db` and takes
    *  precedence over the workspace-derived path. */
   sessionDbDir: string
+  /** #825: HCC binds the PVC fence on all admitted templates. */
+  canonicalStateDir: string
+  canonicalStoreRequired: boolean
+  canonicalStoreContract: string
+  canonicalHostUid: string
+  canonicalPvcUid: string
+  canonicalPodUid: string
   /** D3 §1.1 — stateless agent lifecycle (CLERUM_STATELESS_LIFECYCLE).
    *  Activates the durability barrier and the fail-loud boot guard. */
   statelessLifecycle: boolean
@@ -955,6 +962,8 @@ export const config: Config = {
     if (raw === 'memory' || raw === 'sqlite' || raw === 'dual') {
       return raw as 'memory' | 'sqlite' | 'dual'
     }
+    if (getEnvBool('CLERUM_CANONICAL_STORE_REQUIRED', false))
+      throw new Error('CanonicalStoreRequiresSqlite')
     console.warn(
       `[Config] CLERUM_SESSION_STORE='${raw}' is not recognized — falling back to 'memory'`
     )
@@ -963,6 +972,12 @@ export const config: Config = {
   sessionStoreModeRaw: (getEnv('CLERUM_SESSION_STORE', 'memory') || 'memory').toLowerCase(),
   sessionDbPath: getEnv('CLERUM_SESSION_DB_PATH', '') || '',
   sessionDbDir: getEnv('CLERUM_SESSION_DB_DIR', '') || '',
+  canonicalStateDir: getEnv('CLERUM_CANONICAL_STATE_DIR', '') || '',
+  canonicalStoreRequired: getEnvBool('CLERUM_CANONICAL_STORE_REQUIRED', false),
+  canonicalStoreContract: getEnv('CLERUM_CANONICAL_STORE_CONTRACT', '') || '',
+  canonicalHostUid: getEnv('CLERUM_HOST_UID', '') || '',
+  canonicalPvcUid: getEnv('CLERUM_PVC_UID', '') || '',
+  canonicalPodUid: getEnv('CLERUM_CANONICAL_POD_UID', '') || '',
   statelessLifecycle: getEnvBool('CLERUM_STATELESS_LIFECYCLE', false),
   statelessHeartbeatIntervalMs: parseStatelessHeartbeatIntervalMs(
     getEnv('CLERUM_STATELESS_HEARTBEAT_INTERVAL_MS')

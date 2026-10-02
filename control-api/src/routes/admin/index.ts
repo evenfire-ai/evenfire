@@ -6,6 +6,7 @@ import { createAdminCodexSubscriptionRouter } from './codexSubscription.js'
 import { createAdminContextRouter } from './context.js'
 import { createAdminControlAdminsRouter } from './controlAdmins.js'
 import { createAdminHostArtifactsRouter } from './hostArtifacts.js'
+import { createAdminHostConversationStoreRouter } from './hostConversationStore.js'
 import { createAdminHostEnvRouter } from './hostEnv.js'
 import { createAdminHostsOverviewRouter } from './hostsOverview.js'
 import { createAdminLlmModelsRouter } from './llmModels.js'
@@ -31,6 +32,7 @@ import { createAdminUsersRouter } from './users.js'
 export function createAdminRouter(gateway: K8sGateway): Router {
   const router = Router()
   router.use(createAdminHostsOverviewRouter(gateway))
+  router.use(createAdminHostConversationStoreRouter(gateway))
   router.use(createAdminControlAdminsRouter())
   router.use(createAdminHostArtifactsRouter(gateway))
   router.use(createAdminHostEnvRouter(gateway))
