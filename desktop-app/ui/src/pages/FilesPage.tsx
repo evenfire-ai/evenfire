@@ -292,6 +292,15 @@ export function FilesPage({
   // the prefetch effect can consult it without re-arming when a job starts.
   const zipJobRef = useRef<string | null>(null)
   const zipAbortRef = useRef<AbortController | null>(null)
+  // Navigating away must not leave a walk spending the shared GFS read budget
+  // with no Stop reachable: unmount aborts it, so the one-job-at-a-time
+  // invariant also holds across unmount/remount (a fresh mount starts fresh,
+  // never alongside a zombie walk from the previous page instance).
+  useEffect(() => {
+    return () => {
+      zipAbortRef.current?.abort()
+    }
+  }, [])
   const [draggingResourceId, setDraggingResourceId] = useState<string | null>(null)
   const [dragOverFolderId, setDragOverFolderId] = useState<string | null>(null)
   const [movingResourceId, setMovingResourceId] = useState<string | null>(null)

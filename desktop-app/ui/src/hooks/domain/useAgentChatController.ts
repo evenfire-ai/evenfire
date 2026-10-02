@@ -3510,6 +3510,11 @@ export function useAgentChatController({
    */
   const restoreComposerAttachmentsAfterCancel = useCallback(
     (taskId: string, agentRef: string) => {
+      // The awaited cancel RPC can straddle an agent switch: the attachments
+      // belong to the agent that was canceled, so they must never land in the
+      // composer of whatever agent is selected by the time the answer arrives
+      // (mirrors the Discard-all guard below).
+      if (activeChatVisibilityRef.current.selectedAgent !== agentRef) return
       const snapshots = getRetainedSendsForTask(taskId)
       const images = snapshots.flatMap(snapshot => snapshot.attachments)
       const references = snapshots.flatMap(snapshot => snapshot.references)

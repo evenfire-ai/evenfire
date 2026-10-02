@@ -3570,6 +3570,79 @@ describe('FilesPage', () => {
     expect(click).not.toHaveBeenCalled()
   })
 
+  it('aborts a running zip walk when the page unmounts, so a remount cannot double-walk (M2)', async () => {
+    // Real timers: the first walk parks on the in-flight listing itself, so
+    // only the abort race can end it; the second walk's first request is
+    // immediate on its own fresh throttle.
+    let settleFirst!: (value: { items: unknown[]; nextCursor: null }) => void
+    const listChildren = vi.fn(() => {
+      if (listChildren.mock.calls.length === 1)
+        return new Promise(resolve => {
+          settleFirst = resolve
+        })
+      return Promise.resolve({ items: [], nextCursor: null })
+    })
+    const pushToast = vi.fn()
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { listChildren, download: vi.fn() } },
+    })
+    const assetsRow = {
+      resourceId: 'folder-1',
+      rid: 'folder-1',
+      gfsUri: 'gfs://main/folder-1',
+      drive: 'main',
+      parentResourceId: null,
+      name: 'Assets',
+      kind: 'directory' as const,
+      path: '/Assets',
+      version: 0,
+      bytes: 0,
+      sources: ['grant'],
+      permissions: ['read'],
+      coversDescendants: false,
+    }
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      accessibleResources: [assetsRow],
+    })
+
+    const first = renderFilesPage(pushToast)
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Options for Assets' }))
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Download as zip' }))
+    })
+    expect(screen.getByTestId('gfs-zip-progress')).toBeTruthy()
+    expect(listChildren).toHaveBeenCalledTimes(1)
+
+    // Navigating away: the unmount cleanup must stop the walk.
+    first.unmount()
+    await act(async () => {
+      await new Promise(resolve => setTimeout(resolve, 0))
+    })
+    expect(pushToast).toHaveBeenCalledWith('Stopped preparing Assets.zip.', 'info')
+
+    // A fresh mount must be able to start a fresh walk — with the previous
+    // one terminated, never alongside a zombie spending the same budget.
+    const second = renderFilesPage(pushToast)
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Options for Assets' }))
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Download as zip' }))
+    })
+    await act(async () => {
+      await new Promise(resolve => setTimeout(resolve, 0))
+    })
+
+    expect(listChildren).toHaveBeenCalledTimes(2)
+    expect(pushToast).toHaveBeenCalledWith('"Assets" has no downloadable files.', 'info')
+    second.unmount()
+    void settleFirst
+  })
+
   it('tells the user a zip is already being prepared instead of ignoring the click (L7)', async () => {
     vi.useFakeTimers()
     // The listing never settles, so the first job stays in flight.

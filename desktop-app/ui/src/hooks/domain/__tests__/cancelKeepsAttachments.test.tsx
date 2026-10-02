@@ -248,4 +248,39 @@ describe('STORY-38 — attachments survive message cancel', () => {
     expect(result.current.composerImageAttachments).toHaveLength(1)
     expect(result.current.composerImageAttachments[0]).toMatchObject({ id: 'agent-y-image' })
   })
+
+  it('does not restore attachments into another agent composer when the cancel answer lands late (L3)', async () => {
+    // The cancel RPC straddles an agent switch: its answer must not drop the
+    // canceled agent's attachments into the NEW agent's composer.
+    let resolveCancel!: () => void
+    clerum.rpc.cancelTask.mockReturnValue(
+      new Promise<void>(resolve => {
+        resolveCancel = resolve
+      })
+    )
+    const rendered = renderController()
+    await waitFor(() => expect(clerum.chat.getIndex).toHaveBeenCalled())
+    await act(async () => {
+      await loadHostModels(modelTransport, 'agent-x', null)
+    })
+    act(() => rendered.result.current.handleAddComposerImageAttachments([image]))
+    act(() => rendered.result.current.handleAddComposerReferenceAttachments([pluginReference]))
+    await sendAsync(rendered.result, 'task-slow')
+
+    let cancelDone!: Promise<void>
+    act(() => {
+      cancelDone = rendered.result.current.cancelTask('task-slow')
+    })
+    // Switch agents while the RPC is still in flight.
+    rendered.rerender({ selectedAgent: 'agent-y', agentNames: ['agent-x', 'agent-y'] })
+
+    await act(async () => {
+      resolveCancel()
+      await cancelDone
+    })
+
+    expect(rendered.result.current.composerImageAttachments).toHaveLength(0)
+    expect(rendered.result.current.composerReferenceAttachments).toHaveLength(0)
+    expect(keptToastCall(rendered.spies)).toBeUndefined()
+  })
 })
