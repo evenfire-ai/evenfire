@@ -209,7 +209,11 @@ export class ProviderAttemptAuthorizer {
         code,
         code === 'payload_too_large'
           ? `${contract.label} request is too large; use fewer or smaller images, or reduce context`
-          : `authorize failed with ${response.status}`,
+          : code === 'authorize_capacity_exceeded'
+            ? 'Too many requests are active. Wait for them to finish or send fewer concurrent requests.'
+            : code === 'authorize_timeout'
+              ? 'Request authorization timed out. Wait for active requests to finish, then try again.'
+              : `authorize failed with ${response.status}`,
         { retryAfterMs: response.status === 429 ? retryAfterMs(response) : undefined }
       )
     }

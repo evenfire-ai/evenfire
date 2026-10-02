@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { createServer } from 'node:http'
 import {
   ENVELOPE_ALLOWANCE_BYTES as GROK_CONTRACT_ENVELOPE_ALLOWANCE_BYTES,
   LIMITS as GROK_LIMITS,
@@ -451,6 +452,135 @@ describe('ProviderAttemptAuthorizer', () => {
       message: 'authorize failed with 502',
     })
   })
+
+  async function nativeAuthorizeFailure(response: Response) {
+    const responseBody = await response.text()
+    const responseHeaders: Record<string, string> = {}
+    response.headers.forEach((value, name) => {
+      responseHeaders[name] = value
+    })
+    let requests = 0
+    const observed: Array<{ method: string | undefined; path: string | undefined }> = []
+    const server = createServer((req, res) => {
+      requests += 1
+      observed.push({ method: req.method, path: req.url })
+      req.resume()
+      req.once('end', () => {
+        res.writeHead(response.status, responseHeaders)
+        res.end(responseBody)
+      })
+    })
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject)
+      server.listen(0, '127.0.0.1', resolve)
+    })
+    try {
+      const address = server.address()
+      if (typeof address !== 'object' || address === null) {
+        throw new Error('authorize fixture has no bound address')
+      }
+      const refreshOnUnauthorized = vi.fn()
+      const authorizer = new ProviderAttemptAuthorizer({
+        authorizeUrl: resolveCodexAuthorizeUrl(`http://127.0.0.1:${address.port}`),
+        readPlatformJwt: () => 'platform-jwt',
+        refreshOnUnauthorized,
+      })
+      const err = await authorizer.authorize(realisticEnvelope({})).then(
+        () => undefined,
+        (caught: unknown) => caught
+      )
+      expect(observed).toEqual([
+        { method: 'POST', path: '/api/v1/mcp-host/llm/provider-attempts/authorize' },
+      ])
+      return { err, requests, refreshOnUnauthorized }
+    } finally {
+      server.closeAllConnections()
+      await new Promise<void>((resolve, reject) => {
+        server.close(error => (error ? reject(error) : resolve()))
+      })
+    }
+  }
+
+  it.each([
+    [
+      'authorize_capacity_exceeded',
+      'Too many requests are active. Wait for them to finish or send fewer concurrent requests.',
+    ],
+    [
+      'authorize_timeout',
+      'Request authorization timed out. Wait for active requests to finish, then try again.',
+    ],
+  ])(
+    'T-AUTH-local-message explains %s over native HTTP without changing either provider outcome',
+    async (code, message) => {
+      const { err, requests, refreshOnUnauthorized } = await nativeAuthorizeFailure(
+        Response.json(
+          {
+            error: code,
+            reason: 'untrusted upstream reason',
+            message: 'untrusted upstream message',
+          },
+          { status: 503 }
+        )
+      )
+      expect(requests).toBe(1)
+      expect(refreshOnUnauthorized).not.toHaveBeenCalled()
+      expect(err).toBeInstanceOf(CodexAuthorizeError)
+      expect(err).toMatchObject({ code, message })
+      expect((err as CodexAuthorizeError).retryAfterMs).toBeUndefined()
+      for (const provider of [
+        new CodexSubscriptionProvider('gpt-5.3-codex', {} as never),
+        new GrokSubscriptionProvider('grok-4.6', {} as never),
+      ]) {
+        const classified = provider.classifyError(err)
+        expect(classified).toMatchObject({
+          code: LlmErrorCode.ApiCallFailed,
+          retryable: false,
+          message,
+          providerCode: code,
+          providerDispatched: false,
+        })
+        expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
+      }
+    }
+  )
+
+  it.each([
+    ['HTML', () => nginx(503, 'authorize_capacity_exceeded'), 'provider_unavailable'],
+    [
+      'uncoded JSON',
+      () =>
+        Response.json(
+          { reason: 'authorize_capacity_exceeded', message: 'authorize_timeout' },
+          { status: 503 }
+        ),
+      'provider_unavailable',
+    ],
+    [
+      'unknown code',
+      () => Response.json({ error: 'unknown_capacity_code' }, { status: 503 }),
+      'unknown_capacity_code',
+    ],
+    [
+      'non-string code',
+      () => Response.json({ error: { code: 'authorize_capacity_exceeded' } }, { status: 503 }),
+      'provider_unavailable',
+    ],
+    [
+      'malformed JSON',
+      () => new Response('{"error":"authorize_capacity_exceeded"', { status: 503 }),
+      'provider_unavailable',
+    ],
+  ] as const)(
+    'T-AUTH-local-message keeps a generic native HTTP 503 diagnosis for %s',
+    async (_label, response, code) => {
+      const { err, requests, refreshOnUnauthorized } = await nativeAuthorizeFailure(response())
+      expect(requests).toBe(1)
+      expect(refreshOnUnauthorized).not.toHaveBeenCalled()
+      expect(err).toMatchObject({ code, message: 'authorize failed with 503' })
+      expect((err as CodexAuthorizeError).retryAfterMs).toBeUndefined()
+    }
+  )
 
   // G1-6 (#720): a limiter in front of control-api can answer 429 with no JSON
   // code. It is a rate limit, not a provider outage.
