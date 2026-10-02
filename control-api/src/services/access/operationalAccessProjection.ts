@@ -240,7 +240,7 @@ function contextRelationships(params: {
   observedGeneration: number | null
   relationshipNamespaces: ProjectionInput['relationshipNamespaces']
 }): OperationalRelationshipRecord[] {
-  const relationships = stringArray(params.spec.mcpServers).map(server =>
+  const relationships = [...new Set(stringArray(params.spec.mcpServers))].map(server =>
     relationship({
       ...params,
       sourceType: 'context',

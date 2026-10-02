@@ -83,6 +83,35 @@ describe('operational access projection', () => {
     ])
   })
 
+  it('deduplicates repeated MCP allowlist entries but preserves distinct targets', () => {
+    const projection = projectOperationalObject({
+      environmentId: 'test:cluster',
+      plural: 'contexts',
+      namespace: 'contexts',
+      object: {
+        ...contextObject([]),
+        spec: {
+          contextId: 'ctx-a',
+          mcpServers: ['server-a', 'server-a', 'server-b'],
+          sharedFileSystems: [],
+        },
+      },
+      behaviorFingerprintKey: 'test-key',
+      relationshipNamespaces: namespaces,
+    })
+    const relationships = projection.relationships.filter(
+      relationship => relationship.relationshipType === 'includes_mcp_server'
+    )
+
+    expect(relationships.map(relationship => relationship.targetId).sort()).toEqual([
+      'mcp-server/server-a',
+      'mcp-server/server-b',
+    ])
+    expect(
+      new Set(relationships.map(relationship => relationship.relationshipInstanceId)).size
+    ).toBe(2)
+  })
+
   it('rejects over-budget relationship fan-out before projection', () => {
     expect(() =>
       projectOperationalObject({
