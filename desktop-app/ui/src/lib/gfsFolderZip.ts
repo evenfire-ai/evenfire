@@ -2,10 +2,14 @@
  * BUG-175 — recursive "Download as zip" for a GFS folder, assembled fully in
  * the renderer from the existing `window.clerum.gfs` read plane.
  *
- * Budget contract: the server meters GFS reads per actor (~120 requests/min
- * shared with the browsing surface), so every listing and download below goes
- * through `createGfsReadThrottle`, which spaces requests to that budget, and a
- * 429 answer backs off once by the server-provided `retryAfterSeconds` before
+ * Budget contract: the producer meters this walk's request classes per actor —
+ * resource reads (children, affordances, resolve) and proxy reads (downloads)
+ * — at 480/min each by default (control-api `externalGfsResourceReadRlPerMin`
+ * / `externalGfsProxyReadRlPerMin`). Every listing and download below goes
+ * through `createGfsReadThrottle`, deliberately spaced at a CONSERVATIVE
+ * fraction of those ceilings (see `GFS_ZIP_READS_PER_MINUTE`) so one walk
+ * leaves room for the browsing surfaces sharing the same classes, and a 429
+ * answer backs off once by the server-provided `retryAfterSeconds` before
  * failing. Byte and entry ceilings bound the walk before anything large is
  * buffered, and entries the caller cannot read (a listing row marked
  * unreadable, or a 403 on the download itself) are skipped and reported back
@@ -15,7 +19,12 @@
 import { isRateLimited, parseHttpStatus, parseRetryAfterSeconds } from '@lib/gfsGrantErrors'
 import { createZipWriter } from '@lib/zipWriter'
 
-/** Server-side GFS read budget the walk must respect (requests per minute). */
+/**
+ * Client-side pacing for the walk, a deliberate conservative margin: the
+ * producer's default ceilings for the classes used here are 480/min each
+ * (resource reads, proxy reads); spacing at 120/min keeps one walk well under
+ * them while the Files browsing surface shares the same classes.
+ */
 export const GFS_ZIP_READS_PER_MINUTE = 120
 /** Refuse before buffering: total uncompressed bytes across the folder. */
 export const GFS_ZIP_MAX_TOTAL_BYTES = 1024 * 1024 * 1024
@@ -149,17 +158,45 @@ function isAccessDenied(message: string): boolean {
 }
 
 /**
+ * Zip entry-name length ceiling per segment. ZIP name fields are 16-bit byte
+ * counts; a name whose UTF-8 encoding reaches 65 536 bytes would silently
+ * truncate there and corrupt the archive, so segments are cut well under it.
+ */
+export const GFS_ZIP_MAX_SEGMENT_NAME_BYTES = 1024
+
+const segmentNameEncoder = new TextEncoder()
+
+/** Truncates by code point so the UTF-8 encoding stays `maxBytes` or less. */
+function truncateToUtf8Bytes(name: string, maxBytes: number): string {
+  if (segmentNameEncoder.encode(name).length <= maxBytes) return name
+  let kept = ''
+  let used = 0
+  for (const character of name) {
+    const size = segmentNameEncoder.encode(character).length
+    if (used + size > maxBytes) break
+    kept += character
+    used += size
+  }
+  return kept
+}
+
+/**
  * Zip-safe path segment. Separators, NUL and the characters Windows forbids
  * (`: * ? " < > |`) map to `_`; trailing dots/spaces (also invalid on Windows)
  * are stripped; only the EXACT `.`/`..` segments are dropped, so dotfiles like
- * `.env` keep their name. Traversal is impossible regardless: separators are
- * gone before the segment is used.
+ * `.env` keep their name; and the UTF-8 encoding is capped at
+ * `GFS_ZIP_MAX_SEGMENT_NAME_BYTES` so the 16-bit ZIP name fields can never
+ * truncate. Traversal is impossible regardless: separators are gone before the
+ * segment is used.
  */
 function sanitizeZipSegment(name: string): string {
-  const cleaned = name
-    .replace(/[/\\:*?"<>|\u0000]/g, '_')
-    .replace(/[\s.]+$/, '')
-    .trim()
+  const cleaned = truncateToUtf8Bytes(
+    name
+      .replace(/[/\\:*?"<>|\u0000]/g, '_')
+      .replace(/[\s.]+$/, '')
+      .trim(),
+    GFS_ZIP_MAX_SEGMENT_NAME_BYTES
+  )
   if (!cleaned || cleaned === '.' || cleaned === '..') return 'unnamed'
   return cleaned
 }

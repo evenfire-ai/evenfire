@@ -438,6 +438,54 @@ describe('createGfsFolderZip', () => {
     expect(result.fileName).toBe('Weird_Name_.zip')
   })
 
+  it('caps entry-name length so the 16-bit ZIP name fields cannot truncate (L4)', async () => {
+    // 70 000 ASCII bytes would overflow ZIP's uint16 name length and corrupt
+    // the archive; the segment must be cut under the documented ceiling.
+    const overlong = `${'a'.repeat(70_000)}.txt`
+    const deps = depsFor({
+      root: [
+        {
+          items: [folder({ resourceId: 'huge', name: overlong })],
+          nextCursor: null,
+        },
+      ],
+    })
+    const result = await createGfsFolderZip(
+      { resourceId: 'root', drive: 'main', name: 'Long' },
+      { deps }
+    )
+
+    expect(result.fileCount).toBe(1)
+    const names = zipEntryNames(result.bytes)
+    expect(names).toHaveLength(1)
+    const written = names[0]!
+    // The archive parses back (zipEntryNames reads the real central
+    // directory); the written name is well inside the uint16 field and the
+    // SEGMENT was cut under the documented ceiling.
+    expect(written.startsWith('Long/')).toBe(true)
+    expect(new TextEncoder().encode(written).length).toBeLessThan(65536)
+    expect(new TextEncoder().encode(written.slice('Long/'.length)).length).toBeLessThanOrEqual(1024)
+    // Truncation keeps whole code points: a multi-byte character near the cut
+    // is never split.
+    const emojiDeps = depsFor({
+      root: [
+        {
+          items: [folder({ resourceId: 'emoji', name: `${'😀'.repeat(600)}x` })],
+          nextCursor: null,
+        },
+      ],
+    })
+    const emojiResult = await createGfsFolderZip(
+      { resourceId: 'root', drive: 'main', name: 'Emoji' },
+      { deps: emojiDeps }
+    )
+    const emojiName = zipEntryNames(emojiResult.bytes)[0]!
+    expect(emojiName.endsWith('\uFFFD')).toBe(false)
+    expect(new TextEncoder().encode(emojiName.slice('Emoji/'.length)).length).toBeLessThanOrEqual(
+      1024
+    )
+  })
+
   it('treats a missing byte count as zero instead of NaN-poisoning the size guard (M1)', async () => {
     const deps = depsFor({
       root: [
