@@ -48,6 +48,10 @@ const WORKLOAD_SECRET_ENV = 'CONFIG_TOKEN'
 const WORKLOAD_SECRET_VALUE = 'workflow-config-token-e2e'
 const RUN_MAX_DURATION_SECONDS = 600
 const RUN_TTL_SECONDS_AFTER_FINISHED = 7200
+const REGISTRY_ENTRY_VERSION = '1.0.0'
+
+let controlAdminToken = ''
+let publishedRegistryEntryName = ''
 
 type K8sWorkflowRecipe = {
   status?: { workflowExecution?: { phase?: string; message?: string } }
@@ -82,6 +86,10 @@ function requireAdminPassword(): string {
 
 function sqlLiteral(value: string): string {
   return `'${value.replace(/'/g, "''")}'`
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
 function kubectl(args: string[], input?: string, timeout = 30_000): string {
@@ -261,12 +269,185 @@ async function controlUiLogin(page: Page): Promise<string> {
   const signInButton = page.getByRole('button', { name: /^Sign in$/ })
   await expect(signInButton).toBeEnabled({ timeout: 10_000 })
   await signInButton.click()
-  await expect(page.getByText('Workflow Recipes', { exact: false })).toBeVisible({
+  await expect(page).toHaveURL(/\/agents$/, { timeout: 25_000 })
+  await expect(page.getByRole('link', { name: 'Installed Plugins', exact: true })).toBeVisible({
     timeout: 25_000,
   })
   const token = await page.evaluate(() => localStorage.getItem('controlUiAdminToken') ?? '')
   expect(token, 'Control UI should persist admin token after login').toBeTruthy()
   return token
+}
+
+async function openInstalledPluginsFromSidebar(page: Page): Promise<void> {
+  const pluginsLink = page.getByRole('link', { name: 'Installed Plugins', exact: true })
+  await pluginsLink.click()
+  await expect(page).toHaveURL(/\/plugins$/, { timeout: 30_000 })
+  await expect(page.getByRole('button', { name: 'Install Plugin', exact: true })).toBeVisible({
+    timeout: 30_000,
+  })
+  await expect(
+    page.getByText('Select a plugin to view status, run history, and actions.')
+  ).toBeVisible({ timeout: 30_000 })
+}
+
+async function openInstalledPluginFromSidebar(page: Page, recipeName: string): Promise<void> {
+  await openInstalledPluginsFromSidebar(page)
+  const search = page.getByLabel('Search plugins', { exact: true })
+  await expect(search).toBeEnabled({ timeout: 30_000 })
+  await search.fill(recipeName)
+  const openPlugin = page.getByRole('link', { name: `Open ${recipeName}`, exact: true })
+  await expect(openPlugin).toBeVisible({ timeout: 30_000 })
+  await openPlugin.click()
+  await expect(page).toHaveURL(
+    new RegExp(`/plugins/${RECIPE_NS}/${escapeRegExp(recipeName)}/workloads$`),
+    { timeout: 30_000 }
+  )
+  await expect(page.getByRole('heading', { name: recipeName, exact: true })).toBeVisible({
+    timeout: 30_000,
+  })
+}
+
+async function grantPluginUserFromDetail(page: Page, userEmail: string): Promise<void> {
+  await page.getByRole('tab', { name: /^Members/ }).click()
+  await expect(page).toHaveURL(/\/members$/, { timeout: 30_000 })
+  const triggerUsers = page.getByTestId('workflow-access-trigger-users')
+  await expect(triggerUsers).toBeVisible({ timeout: 30_000 })
+  await page.getByRole('button', { name: 'Add member', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: 'Add member', exact: true })
+  await expect(dialog).toBeVisible({ timeout: 10_000 })
+  const search = dialog.getByRole('textbox', { name: 'Search members...' })
+  await expect(search).toBeVisible({ timeout: 20_000 })
+  await search.fill(userEmail)
+  const option = dialog.getByRole('option').filter({ hasText: userEmail })
+  await expect(option).toBeVisible({ timeout: 20_000 })
+  const optionAccessibleName = await option.getAttribute('aria-label')
+  expect(optionAccessibleName, `${userEmail} option should expose its member identity`).toContain(
+    userEmail
+  )
+  const selectedMemberLabel = optionAccessibleName!.replace(
+    new RegExp(`,\\s*${escapeRegExp(userEmail)}$`),
+    ''
+  )
+  await option.click()
+  await expect(option).toHaveAttribute('aria-selected', 'true', { timeout: 10_000 })
+  await dialog.getByRole('button', { name: 'Add member', exact: true }).click()
+  await expect(triggerUsers.getByText(userEmail)).toBeVisible({ timeout: 20_000 })
+  const memberActions = triggerUsers.getByRole('button', {
+    name: `Actions for member trigger access: ${selectedMemberLabel}`,
+    exact: true,
+  })
+  await expect(memberActions).toBeVisible({ timeout: 20_000 })
+  await memberActions.click()
+  const removeMemberAccess = page.getByRole('menuitem', {
+    name: 'Remove member trigger access',
+    exact: true,
+  })
+  await expect(removeMemberAccess).toBeVisible({ timeout: 10_000 })
+  await page.keyboard.press('Escape')
+  await expect(removeMemberAccess).toBeHidden({ timeout: 10_000 })
+}
+
+async function publishSnippetRegistryEntry(adminToken: string, recipeName: string): Promise<void> {
+  // Plugin publishing is intentionally absent from ControlUI. This package
+  // fixture is setup only; installation itself remains a visible user journey.
+  const response = await apiRequest(
+    'POST',
+    `${CONTROL_API}/api/v1/admin/registry/entries`,
+    JSON.stringify({
+      name: recipeName,
+      version: REGISTRY_ENTRY_VERSION,
+      entryType: 'recipe',
+      description: `Layer 3A snippet runtime journey for ${recipeName}`,
+      author: 'e2e-test',
+      origin: 'human-authored',
+      category: 'workflow',
+      tags: ['e2e', 'snippet', 'layer3a'],
+      contentCreatorTag: 'community',
+      configCreatorTag: 'community',
+      visibility: 'private',
+      recipe: JSON.stringify(buildSnippetRecipeManifest(recipeName)),
+    }),
+    { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' }
+  )
+  expect(response.status, `publish snippet plugin package: ${response.body}`).toBe(201)
+  const published = JSON.parse(response.body) as { name?: unknown }
+  expect(published.name, 'published plugin package should return its scoped name').toContain(
+    recipeName
+  )
+  publishedRegistryEntryName = String(published.name)
+}
+
+async function provisionSnippetSecretsThroughControlUi(
+  page: Page,
+  recipeName: string
+): Promise<void> {
+  const secretName = `${recipeName}-coingecko-api`
+  await page.getByRole('tab', { name: 'Secrets', exact: true }).click()
+  await expect(page).toHaveURL(/\/secrets$/, { timeout: 30_000 })
+  const addSecret = page.getByRole('button', { name: `Add recipe secret ${secretName}` })
+  await expect(addSecret).toBeVisible({ timeout: 30_000 })
+  await addSecret.click()
+  await expect(page).toHaveURL(/\/secrets\/new\?/, { timeout: 30_000 })
+  await expect(page.getByRole('heading', { name: 'Create recipe secret' })).toBeVisible({
+    timeout: 30_000,
+  })
+  await expect(page.locator('#recipe-secret-name')).toHaveValue(secretName)
+  await expect(page.getByLabel('Owner recipe')).toHaveValue(recipeName)
+  await page.getByRole('button', { name: 'Continue', exact: true }).click()
+
+  const keyInputs = page.getByPlaceholder('API_KEY')
+  const valueInputs = page.getByPlaceholder('secret value')
+  await expect(keyInputs).toHaveCount(2, { timeout: 30_000 })
+  await expect(valueInputs).toHaveCount(2, { timeout: 30_000 })
+
+  const expectedSecretKeys = [SNIPPET_SECRET_KEY, WORKLOAD_SECRET_KEY].sort()
+  await expect
+    .poll(
+      async () => {
+        const currentKeys = await Promise.all((await keyInputs.all()).map(key => key.inputValue()))
+        return [...currentKeys].sort()
+      },
+      {
+        timeout: 30_000,
+        message: 'Secrets form should expose exactly the two recipe key inputs',
+      }
+    )
+    .toEqual(expectedSecretKeys)
+
+  // The public Secrets form contract pairs key/value rows by array order. A
+  // non-assertion inputValue snapshot binds each value through its matching
+  // key rather than choosing a row by fixed position.
+  const keyLocators = await keyInputs.all()
+  const valueLocators = await valueInputs.all()
+  const keyValues = await Promise.all(keyLocators.map(key => key.inputValue()))
+  expect([...keyValues].sort()).toEqual(expectedSecretKeys)
+  const secretInputRowByKey = new Map<string, { keyInput: Locator; valueInput: Locator }>()
+  keyValues.forEach((keyValue, index) => {
+    const keyInput = keyLocators[index]
+    const valueInput = valueLocators[index]
+    if (keyInput && valueInput) secretInputRowByKey.set(keyValue, { keyInput, valueInput })
+  })
+  for (const [keyValue, { keyInput, valueInput }] of secretInputRowByKey) {
+    await expect(keyInput).toBeVisible()
+    await expect(valueInput).toBeVisible()
+    if (keyValue === SNIPPET_SECRET_KEY) await valueInput.fill(SNIPPET_SECRET_VALUE)
+    if (keyValue === WORKLOAD_SECRET_KEY) await valueInput.fill(WORKLOAD_SECRET_VALUE)
+  }
+
+  const createResponse = page.waitForResponse(
+    response => {
+      if (!response.url().includes('/admin/recipe-secrets')) return false
+      if (response.request().method() !== 'POST') return false
+      return response.request().postDataJSON()?.name === secretName
+    },
+    { timeout: 30_000 }
+  )
+  await page.getByRole('button', { name: 'Create secret', exact: true }).click()
+  const created = await createResponse
+  expect(created.status()).toBe(201)
+  await expect(page).toHaveURL(/\/secrets\/recipe$/, { timeout: 30_000 })
+
+  await openInstalledPluginFromSidebar(page, recipeName)
 }
 
 async function installRecipeFromControlUi(
@@ -275,40 +456,48 @@ async function installRecipeFromControlUi(
   userEmail: string
 ): Promise<string> {
   const adminToken = await controlUiLogin(page)
-  await page.goto(`${CONTROL_UI}/workflow-recipes`)
-  await page.getByRole('button', { name: 'Install Recipe' }).click()
+  controlAdminToken = adminToken
+  await publishSnippetRegistryEntry(adminToken, recipeName)
 
-  const editor = page.locator('textarea').first()
-  await expect(editor).toBeVisible({ timeout: 15_000 })
-  await editor.fill(JSON.stringify(buildSnippetRecipeManifest(recipeName), null, 2))
-  await page.getByRole('button', { name: 'Validate' }).click()
-  await expect(page.getByText(/Configuration & Secrets/i)).toBeVisible({ timeout: 15_000 })
-  const secretInput = page.getByPlaceholder(`Enter value for ${SNIPPET_SECRET_ALIAS}`)
-  await expect(secretInput).toBeVisible({ timeout: 15_000 })
-  await secretInput.fill(SNIPPET_SECRET_VALUE)
-  const workloadSecretInput = page.getByPlaceholder(`Enter value for ${WORKLOAD_SECRET_ENV}`)
-  await expect(workloadSecretInput).toBeVisible({ timeout: 15_000 })
-  await workloadSecretInput.fill(WORKLOAD_SECRET_VALUE)
+  await openInstalledPluginsFromSidebar(page)
+  await page.getByRole('button', { name: 'Install Plugin', exact: true }).click()
+  await expect(page).toHaveURL(/\/marketplace\/org\/entries$/, { timeout: 30_000 })
+  const entrySearch = page.getByLabel('Search entries', { exact: true })
+  await expect(entrySearch).toBeEnabled({ timeout: 30_000 })
+  await entrySearch.fill(recipeName)
+  const entryActions = page.getByRole('button', {
+    name: `Actions for ${publishedRegistryEntryName} v${REGISTRY_ENTRY_VERSION}`,
+  })
+  await expect(entryActions).toBeVisible({ timeout: 30_000 })
+  await entryActions.click()
+  await page.getByRole('menuitem', { name: 'Install', exact: true }).click()
+  await expect(page).toHaveURL(/\/marketplace\/install\?/, { timeout: 30_000 })
+  await expect(
+    page
+      .getByRole('heading', { name: 'Install a private plugin', exact: true })
+      .or(page.getByRole('heading', { name: 'Install from Marketplace', exact: true }))
+  ).toBeVisible({ timeout: 30_000 })
 
-  const userPicker = page.getByLabel('Pick a user to grant trigger access')
-  await expect(userPicker).toBeVisible({ timeout: 20_000 })
-  const optionValue = await userPicker
-    .locator('option')
-    .filter({ hasText: userEmail })
-    .first()
-    .getAttribute('value')
-  expect(optionValue, `${userEmail} should be selectable in Control UI grants panel`).toBeTruthy()
-  await userPicker.selectOption(optionValue!)
-  await page.getByRole('button', { name: 'Grant user' }).click()
-  await expect(page.getByTestId('workflow-access-trigger-users')).toContainText(userEmail, {
-    timeout: 10_000,
+  await page.getByRole('button', { name: 'Continue', exact: true }).click()
+  await expect(page.getByText('No external egress declarations were found.')).toBeVisible({
+    timeout: 30_000,
+  })
+  await page.getByRole('button', { name: 'Continue', exact: true }).click()
+  await expect(
+    page.getByText(
+      `Recipe ${publishedRegistryEntryName} v${REGISTRY_ENTRY_VERSION} will be installed`
+    )
+  ).toBeVisible({ timeout: 30_000 })
+  await page.getByRole('button', { name: 'Install plugin', exact: true }).click()
+  await expect(page).toHaveURL(new RegExp(`/plugins/${RECIPE_NS}/${escapeRegExp(recipeName)}$`), {
+    timeout: 60_000,
+  })
+  await expect(page.getByRole('heading', { name: recipeName, exact: true })).toBeVisible({
+    timeout: 30_000,
   })
 
-  await page.getByRole('button', { name: 'Deploy Recipe' }).click()
-  await expect(page.locator('textarea')).toHaveCount(0, { timeout: 45_000 })
-  await expect(page.getByRole('link', { name: `Open ${recipeName}` })).toBeVisible({
-    timeout: 45_000,
-  })
+  await provisionSnippetSecretsThroughControlUi(page, recipeName)
+  await grantPluginUserFromDetail(page, userEmail)
   assertWorkflowRecipeSecretMaterialized(recipeName)
   assertInstalledRecipeDoesNotContainSecretValues(recipeName)
   return adminToken
@@ -344,25 +533,8 @@ async function grantExistingRecipeUserFromControlUi(
   recipeName: string,
   userEmail: string
 ): Promise<void> {
-  await page.goto(
-    `${CONTROL_UI}/workflow-recipes/${encodeURIComponent(RECIPE_NS)}/${encodeURIComponent(recipeName)}?edit=1`
-  )
-  await expect(page.getByText(`Edit Recipe: ${recipeName}`)).toBeVisible({ timeout: 30_000 })
-  await page.getByRole('button', { name: 'Validate' }).click()
-  await expect(page.getByText(/Validation passed/i)).toBeVisible({ timeout: 15_000 })
-  const userPicker = page.getByLabel('Pick a user to grant trigger access')
-  await expect(userPicker).toBeVisible({ timeout: 20_000 })
-  const optionValue = await userPicker
-    .locator('option')
-    .filter({ hasText: userEmail })
-    .first()
-    .getAttribute('value')
-  expect(optionValue, `${userEmail} should be selectable when editing grants`).toBeTruthy()
-  await userPicker.selectOption(optionValue!)
-  await page.getByRole('button', { name: 'Grant user' }).click()
-  await expect(page.getByTestId('workflow-access-trigger-users')).toContainText(userEmail, {
-    timeout: 15_000,
-  })
+  await openInstalledPluginFromSidebar(page, recipeName)
+  await grantPluginUserFromDetail(page, userEmail)
 }
 
 async function waitForRecipeWorkflowPhase(
@@ -629,8 +801,22 @@ async function downloadArtifactFromControlUiRun(
   recipeName: string,
   runId: string
 ): Promise<SnippetArtifactPayload> {
-  await page.goto(
-    `${CONTROL_UI}/workflow-recipes/${encodeURIComponent(RECIPE_NS)}/${encodeURIComponent(recipeName)}/runs/${encodeURIComponent(runId)}`
+  await openInstalledPluginFromSidebar(page, recipeName)
+  await page.getByRole('tab', { name: /^Runs/ }).click()
+  await expect(page).toHaveURL(/\/runs$/, { timeout: 30_000 })
+  const openRun = page.getByRole('link', {
+    name: `Open run ${runId.slice(0, 8)}`,
+    exact: true,
+  })
+  await expect(openRun).toBeVisible({ timeout: 30_000 })
+  await openRun.click()
+  await expect(page).toHaveURL(
+    new RegExp(
+      `^${escapeRegExp(CONTROL_UI)}/plugins/${RECIPE_NS}/${escapeRegExp(
+        recipeName
+      )}/runs/${escapeRegExp(runId)}$`
+    ),
+    { timeout: 30_000 }
   )
   await expect(page.getByTestId('artifacts-panel')).toBeVisible({ timeout: 60_000 })
   const artifactRow = page.getByTestId('artifact-row').filter({ hasText: ARTIFACT_NAME })
@@ -742,6 +928,20 @@ function cleanupRecipe(name: string): void {
   }
 
   try {
+    kubectl([
+      '-n',
+      RECIPE_NS,
+      'delete',
+      'secret',
+      `${name}-coingecko-api`,
+      '--ignore-not-found=true',
+    ])
+  } catch {
+    // The recipe cleanup below remains the primary failure; a stale test-owned
+    // credential can be removed by the later cleanup pass if this race loses.
+  }
+
+  try {
     const workflowNames = kubectl([
       '-n',
       RECIPE_NS,
@@ -817,6 +1017,19 @@ function cleanupRecipe(name: string): void {
   }
 }
 
+async function cleanupPublishedRegistryEntry(): Promise<void> {
+  if (!publishedRegistryEntryName || !controlAdminToken) return
+  const response = await apiRequest(
+    'DELETE',
+    `${CONTROL_API}/api/v1/admin/registry/entries/${encodeURIComponent(
+      publishedRegistryEntryName
+    )}/versions/${encodeURIComponent(REGISTRY_ENTRY_VERSION)}`,
+    undefined,
+    { Authorization: `Bearer ${controlAdminToken}` }
+  )
+  expect([200, 204, 404]).toContain(response.status)
+}
+
 test.describe('Layer 3A snippet runtime user flow', () => {
   test.slow()
   test.describe.configure({ timeout: 900_000 })
@@ -828,6 +1041,7 @@ test.describe('Layer 3A snippet runtime user flow', () => {
 
   test.afterAll(async () => {
     cleanupRecipe(RECIPE_NAME)
+    await cleanupPublishedRegistryEntry()
   })
 
   test('installs in Control UI, triggers in Desktop App, and downloads run-scoped snippet artifact', async ({
