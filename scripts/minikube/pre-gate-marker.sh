@@ -12,14 +12,17 @@ pre_gate_marker_fingerprint_dir() {
     return 0
   fi
 
-  # `.claude/` holds agent tool state (plan-state.json and the like) that is
-  # rewritten outside any source change; hashing it invalidates a fresh marker.
+  # Agent state and generated dev credentials are not deployed inputs. Image
+  # contexts exclude .dev-keys, so local key creation/rotation must not stale
+  # the marker for an otherwise identical source and image acquisition.
   local digest
   if ! digest="$(
     set -o pipefail
     find "${project_dir}/${dir}" \
       -type f \
       ! -path '*/.claude/*' \
+      ! -path '*/.dev-keys' \
+      ! -path '*/.dev-keys/*' \
       ! -path '*/node_modules/*' \
       ! -path '*/dist/*' \
       ! -path '*/.next/*' \
@@ -64,6 +67,7 @@ pre_gate_marker_cluster_fingerprint() {
     host-context-controller \
     packages/workflow-runtime-core \
     packages/network-policy-core \
+    packages/jwt-key-policy \
     workflow-recipes \
     packages/workflow-sdk \
     tests/e2e/fixtures/custom-workflow-coordinator \

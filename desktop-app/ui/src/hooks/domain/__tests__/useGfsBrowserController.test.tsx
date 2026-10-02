@@ -2,9 +2,22 @@
 import { type ReactNode, useState } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AuthContext, type AuthContextValue } from '@contexts/AuthContext'
-import { QueryClient, QueryClientProvider, focusManager } from '@tanstack/react-query'
+import {
+  QueryClient,
+  QueryClientProvider,
+  focusManager,
+  useQueryClient,
+} from '@tanstack/react-query'
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
 import { desktopQueryDefaults } from '@lib/queryClient'
+import {
+  childView,
+  listChildrenPage,
+  resolveDeniedMessage,
+  resolveResource,
+  resolvedDirectory,
+} from '@/gfs/__fixtures__/gfsProducerFixtures'
+import { shouldRevalidateGfsQuery } from '@/lib/gfsEntityChangeState'
 import { desktopQueryKeys } from '../queryKeys'
 import { useGfsBrowserController } from '../useGfsBrowserController'
 
@@ -88,6 +101,8 @@ function authValue(me: AuthContextValue['me']): AuthContextValue {
 
 function Probe() {
   const ctrl = useGfsBrowserController()
+  const queryClient = useQueryClient()
+  const [backgroundRefreshOutcome, setBackgroundRefreshOutcome] = useState('not-run')
   return (
     <>
       <div data-testid="current">{ctrl.current?.resourceId ?? 'none'}</div>
@@ -109,6 +124,7 @@ function Probe() {
       <div data-testid="open-error">{ctrl.openError ?? 'none'}</div>
       <div data-testid="loading">{ctrl.loading ? 'loading' : 'idle'}</div>
       <div data-testid="loading-accessible">{ctrl.loadingAccessible ? 'loading' : 'idle'}</div>
+      <div data-testid="background-refresh-outcome">{backgroundRefreshOutcome}</div>
       <div data-testid="row-affordances">{ctrl.rowAffordances?.held.join(',') ?? 'none'}</div>
       <div data-testid="held-permissions">{ctrl.affordances?.held.join(',') ?? 'none'}</div>
       {ctrl.items.map(item => (
@@ -126,11 +142,51 @@ function Probe() {
           crumb {crumb.name}
         </button>
       ))}
+      {ctrl.items.map(item => (
+        <button key={item.resourceId} type="button" onClick={() => ctrl.openChild(item)}>
+          child {item.name}
+        </button>
+      ))}
       <button type="button" onClick={() => swallow(ctrl.openUri('gfs://main/root'))}>
         open
       </button>
+      <button type="button" onClick={() => swallow(ctrl.openUri('gfs://main/denied-link'))}>
+        open denied link
+      </button>
+      <button type="button" onClick={() => swallow(ctrl.refreshCurrentLocation())}>
+        refresh current location
+      </button>
+      <button
+        type="button"
+        onClick={() => {
+          void ctrl
+            .refreshCurrentLocation({ background: true })
+            .then(updated => setBackgroundRefreshOutcome(updated ? 'updated' : 'superseded'))
+            .catch(() => setBackgroundRefreshOutcome('failed'))
+        }}
+      >
+        background refresh current location
+      </button>
+      <button type="button" onClick={() => swallow(ctrl.openUri('gfs://main/folder-b'))}>
+        open user destination
+      </button>
       <button type="button" onClick={() => swallow(ctrl.refreshAffordances())}>
         refresh permissions
+      </button>
+      <button
+        type="button"
+        onClick={() =>
+          void queryClient.invalidateQueries({
+            queryKey: desktopQueryKeys.gfsRoot,
+            predicate: query => shouldRevalidateGfsQuery(query.queryKey),
+            refetchType: 'active',
+          })
+        }
+      >
+        revalidate GFS scope
+      </button>
+      <button type="button" onClick={() => ctrl.loadMore()}>
+        load more
       </button>
       <button
         type="button"
@@ -238,6 +294,87 @@ function ProductionHarness({ children }: { children: ReactNode }) {
 }
 
 describe('useGfsBrowserController', () => {
+  it('keeps loaded pages and avoids per-row reads during a scope revalidation', async () => {
+    const root = await resolveResource(
+      resolvedDirectory('root', 'Root', { gfsUri: 'gfs://main/root' })
+    )
+    const firstPageItems = Array.from({ length: 30 }, (_, index) =>
+      childView(`row-${index}`, `row-${index}.md`, 'file', { parentResourceId: 'root' })
+    )
+    const secondPageItems = [childView('row-30', 'row-30.md', 'file', { parentResourceId: 'root' })]
+    const firstPage = await listChildrenPage(firstPageItems, 'next-page')
+    const secondPage = await listChildrenPage(secondPageItems)
+    let finishFirstRefresh!: (page: typeof firstPage) => void
+    let finishSecondRefresh!: (page: typeof secondPage) => void
+    const pendingFirstRefresh = new Promise<typeof firstPage>(resolve => {
+      finishFirstRefresh = resolve
+    })
+    const pendingSecondRefresh = new Promise<typeof secondPage>(resolve => {
+      finishSecondRefresh = resolve
+    })
+    const listChildren = vi.fn((_resourceId: string, _drive: string, cursor?: string) => {
+      const call = listChildren.mock.calls.length
+      if (call === 3) return pendingFirstRefresh
+      if (call === 4) return pendingSecondRefresh
+      return cursor ? secondPage : firstPage
+    })
+    const listAccessible = vi.fn(async () => ({ items: [], nextCursor: null }))
+    const affordances = vi.fn(async () => ({
+      held: ['read'],
+      canDelegate: false,
+      grantableBits: [],
+      canCreateShare: false,
+    }))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: { listAccessible, resolve: vi.fn(async () => root), listChildren, affordances },
+      },
+    })
+
+    render(<Probe />, { wrapper: ProductionHarness })
+    await act(async () => screen.getByRole('button', { name: 'open' }).click())
+    await waitFor(() => expect(screen.getByTestId('items-count').textContent).toBe('30'))
+    await waitFor(() => expect(affordances).toHaveBeenCalledTimes(31))
+
+    await act(async () => screen.getByRole('button', { name: 'load more' }).click())
+    await waitFor(() => expect(screen.getByTestId('items-count').textContent).toBe('31'))
+    await waitFor(() => expect(affordances).toHaveBeenCalledTimes(32))
+
+    const childrenKey = desktopQueryKeys.gfsChildren(':user-a:team-a', 'root', 'main')
+    const affordanceKey = desktopQueryKeys.gfsAffordances(':user-a:team-a', 'row-0', 'main')
+
+    await act(async () => screen.getByRole('button', { name: 'revalidate GFS scope' }).click())
+    await waitFor(() => expect(listChildren).toHaveBeenCalledTimes(3))
+    expect(screen.getByTestId('items-count').textContent).toBe('31')
+    expect(affordances).toHaveBeenCalledTimes(32)
+    const cachedChildren = lastHarnessQueryClient?.getQueryData<{
+      pages: Array<{ items: Array<{ resourceId: string }> }>
+    }>(childrenKey)
+    expect(cachedChildren?.pages).toHaveLength(2)
+    expect(cachedChildren?.pages[0]?.items).toEqual(
+      expect.arrayContaining([expect.objectContaining({ resourceId: 'row-0' })])
+    )
+    expect(cachedChildren?.pages[1]?.items).toEqual([
+      expect.objectContaining({ resourceId: 'row-30' }),
+    ])
+
+    await act(async () => finishFirstRefresh(firstPage))
+    await waitFor(() => expect(listChildren).toHaveBeenCalledTimes(4))
+    expect(screen.getByTestId('items-count').textContent).toBe('31')
+    await act(async () => finishSecondRefresh(secondPage))
+    await waitFor(() => expect(listChildren).toHaveBeenCalledTimes(4))
+    await waitFor(() => expect(affordances).toHaveBeenCalledTimes(32))
+
+    // Two retained pages are refetched, but the 31 cached row permission
+    // queries are not repeated on a periodic scope tick.
+    expect(listAccessible).toHaveBeenCalledTimes(2)
+    expect(affordances).toHaveBeenCalledTimes(32)
+    expect(screen.getByTestId('items-count').textContent).toBe('31')
+    expect(shouldRevalidateGfsQuery(childrenKey)).toBe(true)
+    expect(shouldRevalidateGfsQuery(affordanceKey)).toBe(false)
+  })
+
   afterEach(() => {
     cleanup()
     lastHarnessQueryClient = null
@@ -288,6 +425,164 @@ describe('useGfsBrowserController', () => {
 
     await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('none'))
     expect(lastHarnessQueryClient?.getQueryData(grantsKey)).toBeUndefined()
+  })
+
+  it('preserves a failed link error when a background refresh resolves the current folder', async () => {
+    const root = await resolveResource(
+      resolvedDirectory('root', 'Root', { gfsUri: 'gfs://main/root' })
+    )
+    const resolve = vi
+      .fn()
+      .mockResolvedValueOnce(root)
+      .mockRejectedValueOnce(new Error(await resolveDeniedMessage('gfs://main/denied-link')))
+      .mockResolvedValue(root)
+
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve,
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+          affordances: vi.fn(async () => ({
+            held: [],
+            canDelegate: false,
+            grantableBits: [],
+            canCreateShare: false,
+          })),
+        },
+      },
+    })
+
+    render(<Probe />, { wrapper: Harness })
+    await act(async () => screen.getByRole('button', { name: 'open' }).click())
+    await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('root'))
+
+    await act(async () => screen.getByRole('button', { name: 'open denied link' }).click())
+    await waitFor(() => expect(screen.getByTestId('open-error').textContent).not.toBe('none'))
+    const linkError = screen.getByTestId('open-error').textContent
+
+    await act(async () =>
+      screen.getByRole('button', { name: 'background refresh current location' }).click()
+    )
+
+    await waitFor(() => expect(resolve).toHaveBeenCalledTimes(3))
+    expect(screen.getByTestId('current').textContent).toBe('root')
+    expect(screen.getByTestId('open-error').textContent).toBe(linkError)
+  })
+
+  it.each(['success', 'denial'] as const)(
+    'keeps a newly opened child folder when an older refresh completes with %s',
+    async completion => {
+      const folderA = await resolveResource(
+        resolvedDirectory('folder-a', 'Folder A', { gfsUri: 'gfs://main/root' })
+      )
+      const folderAChildren = await listChildrenPage([
+        childView('folder-b', 'Folder B', 'directory', { parentResourceId: 'folder-a' }),
+      ])
+      let resolveRefresh!: (resource: typeof folderA) => void
+      let rejectRefresh!: (reason?: unknown) => void
+      const deferredRefresh = new Promise<typeof folderA>((resolve, reject) => {
+        resolveRefresh = resolve
+        rejectRefresh = reject
+      })
+      const resolve = vi
+        .fn()
+        .mockResolvedValueOnce(folderA)
+        .mockImplementationOnce(() => deferredRefresh)
+
+      Object.defineProperty(window, 'clerum', {
+        configurable: true,
+        value: {
+          gfs: {
+            resolve,
+            listChildren: vi.fn(async (resourceId: string) =>
+              resourceId === 'folder-a' ? folderAChildren : { items: [], nextCursor: null }
+            ),
+            affordances: vi.fn(async () => ({
+              held: [],
+              canDelegate: false,
+              grantableBits: [],
+              canCreateShare: false,
+            })),
+          },
+        },
+      })
+
+      render(<Probe />, { wrapper: Harness })
+      await act(async () => screen.getByRole('button', { name: 'open' }).click())
+      await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('folder-a'))
+      await screen.findByRole('button', { name: 'child Folder B' })
+
+      screen.getByRole('button', { name: 'refresh current location' }).click()
+      await waitFor(() => expect(resolve).toHaveBeenCalledTimes(2))
+      screen.getByRole('button', { name: 'child Folder B' }).click()
+      await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('folder-b'))
+
+      if (completion === 'success') {
+        await act(async () => resolveRefresh(folderA))
+      } else {
+        const denied = await resolveDeniedMessage('gfs://main/root')
+        await act(async () => rejectRefresh(new Error(denied)))
+      }
+
+      await waitFor(() => {
+        expect(screen.getByTestId('current').textContent).toBe('folder-b')
+        expect(screen.getByTestId('crumbs').textContent).toBe('Folder A / Folder B')
+      })
+    }
+  )
+
+  it('does not let a live background refresh supersede a pending user navigation', async () => {
+    const folderA = await resolveResource(
+      resolvedDirectory('folder-a', 'Folder A', { gfsUri: 'gfs://main/root' })
+    )
+    const folderB = await resolveResource(
+      resolvedDirectory('folder-b', 'Folder B', { gfsUri: 'gfs://main/folder-b' })
+    )
+    let finishUserNavigation!: (resource: typeof folderB) => void
+    const deferredUserNavigation = new Promise<typeof folderB>(resolve => {
+      finishUserNavigation = resolve
+    })
+    const resolve = vi
+      .fn()
+      .mockResolvedValueOnce(folderA)
+      .mockImplementationOnce(() => deferredUserNavigation)
+      .mockImplementationOnce(() => new Promise<typeof folderA>(() => {}))
+
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          resolve,
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+          affordances: vi.fn(async () => ({
+            held: [],
+            canDelegate: false,
+            grantableBits: [],
+            canCreateShare: false,
+          })),
+        },
+      },
+    })
+
+    render(<Probe />, { wrapper: Harness })
+    await act(async () => screen.getByRole('button', { name: 'open' }).click())
+    await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('folder-a'))
+
+    screen.getByRole('button', { name: 'open user destination' }).click()
+    await waitFor(() => expect(resolve).toHaveBeenCalledTimes(2))
+    await act(async () => {
+      screen.getByRole('button', { name: 'background refresh current location' }).click()
+    })
+    await waitFor(() =>
+      expect(screen.getByTestId('background-refresh-outcome').textContent).toBe('superseded')
+    )
+    expect(resolve).toHaveBeenCalledTimes(2)
+    await act(async () => finishUserNavigation(folderB))
+
+    await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('folder-b'))
+    expect(screen.getByTestId('current-name').textContent).toBe('Folder B')
   })
 
   it('exposes the presented verdict for a failed affordances read, not the IPC wrapper', async () => {
@@ -1856,6 +2151,212 @@ describe('useGfsBrowserController', () => {
     expect(screen.getByTestId('crumbs').textContent).toBe('')
     // The cached listing must not outlive the access that produced it.
     expect(lastHarnessQueryClient?.getQueryData(childrenKey)).toBeUndefined()
+  })
+
+  it('keeps a folder listing during revalidation, then purges it after authoritative 403', async () => {
+    const root = await resolveResource(
+      resolvedDirectory('root', 'Root', { gfsUri: 'gfs://main/root' })
+    )
+    const accessibleRoot = childView('other-root', 'Other folder', 'directory')
+    const child = childView('private-child', 'private.md', 'file', { parentResourceId: 'root' })
+    let denyRefresh!: (error: Error) => void
+    const deniedRefresh = new Promise<never>((_resolve, reject) => {
+      denyRefresh = reject
+    })
+    const listChildren = vi
+      .fn()
+      .mockResolvedValueOnce(await listChildrenPage([child]))
+      .mockImplementationOnce(() => deniedRefresh)
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [accessibleRoot], nextCursor: null })),
+          resolve: vi.fn(async () => root),
+          listChildren,
+          affordances: vi.fn(async () => ({
+            held: ['read'],
+            canDelegate: false,
+            grantableBits: [],
+            canCreateShare: false,
+          })),
+        },
+      },
+    })
+
+    render(<Probe />, { wrapper: ProductionHarness })
+    await act(async () => screen.getByRole('button', { name: 'open' }).click())
+    await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('root'))
+    await waitFor(() => expect(screen.getByTestId('items-count').textContent).toBe('1'))
+
+    const childrenKey = desktopQueryKeys.gfsChildren(':user-a:team-a', 'root', 'main')
+    void lastHarnessQueryClient?.invalidateQueries({ queryKey: childrenKey })
+    await waitFor(() => expect(listChildren).toHaveBeenCalledTimes(2))
+    expect(screen.getByTestId('current').textContent).toBe('root')
+    expect(screen.getByTestId('items-count').textContent).toBe('1')
+
+    await act(async () => denyRefresh(new Error(await resolveDeniedMessage('gfs://main/root'))))
+    await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('none'))
+    expect(screen.getByTestId('items-count').textContent).toBe('0')
+    expect(screen.getByTestId('open-error').textContent).toBe(
+      'This folder or file is no longer available.'
+    )
+    expect(screen.getByTestId('access-state').textContent).toBe('active')
+    expect(screen.getByTestId('accessible-count').textContent).toBe('1')
+    await waitFor(() => expect(lastHarnessQueryClient?.getQueryData(childrenKey)).toBeUndefined())
+  })
+
+  it('does not let an old folder denial cancel a pending destination navigation', async () => {
+    const root = await resolveResource(
+      resolvedDirectory('root', 'Root', { gfsUri: 'gfs://main/root' })
+    )
+    const folderB = await resolveResource(
+      resolvedDirectory('folder-b', 'Folder B', { gfsUri: 'gfs://main/folder-b' })
+    )
+    let finishNavigation!: (resource: typeof folderB) => void
+    const pendingNavigation = new Promise<typeof folderB>(resolve => {
+      finishNavigation = resolve
+    })
+    const resolve = vi
+      .fn()
+      .mockResolvedValueOnce(root)
+      .mockImplementationOnce(() => pendingNavigation)
+    const listChildren = vi
+      .fn()
+      .mockResolvedValueOnce(await listChildrenPage([childView('leaf', 'leaf.md', 'file')]))
+      .mockRejectedValueOnce(new Error(await resolveDeniedMessage('gfs://main/root')))
+      .mockResolvedValue({ items: [], nextCursor: null })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve,
+          listChildren,
+          affordances: vi.fn(async () => ({
+            held: ['read'],
+            canDelegate: false,
+            grantableBits: [],
+            canCreateShare: false,
+          })),
+        },
+      },
+    })
+
+    render(<Probe />, { wrapper: ProductionHarness })
+    await act(async () => screen.getByRole('button', { name: 'open' }).click())
+    await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('root'))
+    await waitFor(() => expect(listChildren).toHaveBeenCalledTimes(1))
+    screen.getByRole('button', { name: 'open user destination' }).click()
+    await waitFor(() => expect(resolve).toHaveBeenCalledTimes(2))
+
+    void lastHarnessQueryClient?.invalidateQueries({
+      exact: true,
+      queryKey: desktopQueryKeys.gfsChildren(':user-a:team-a', 'root', 'main'),
+    })
+    await waitFor(() => expect(listChildren).toHaveBeenCalledTimes(2))
+    await act(async () => finishNavigation(folderB))
+
+    await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('folder-b'))
+    expect(screen.getByTestId('current-name').textContent).toBe('Folder B')
+    expect(screen.getByTestId('open-error').textContent).toBe('none')
+  })
+
+  it('keeps the complete breadcrumb trail and retries a transient ancestor failure', async () => {
+    const parent = await resolveResource(
+      resolvedDirectory('parent', 'Parent', { gfsUri: 'gfs://main/parent', path: '/Parent' })
+    )
+    const leaf = await resolveResource(
+      resolvedDirectory('leaf', 'Leaf', {
+        gfsUri: 'gfs://main/root',
+        path: '/Parent/Leaf',
+        parentResourceId: 'parent',
+      })
+    )
+    const resolve = vi
+      .fn()
+      .mockResolvedValueOnce(leaf)
+      .mockResolvedValueOnce(parent)
+      .mockResolvedValueOnce(leaf)
+      .mockRejectedValueOnce(new Error('503 Service Unavailable'))
+      .mockResolvedValueOnce(leaf)
+      .mockResolvedValueOnce(parent)
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          resolve,
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+          affordances: vi.fn(async () => ({
+            held: [],
+            canDelegate: false,
+            grantableBits: [],
+            canCreateShare: false,
+          })),
+        },
+      },
+    })
+
+    render(<Probe />, { wrapper: Harness })
+    await act(async () => screen.getByRole('button', { name: 'open' }).click())
+    await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('leaf'))
+    expect(screen.getByTestId('crumbs').textContent).toBe('Parent / Leaf')
+
+    await act(async () => {
+      screen.getByRole('button', { name: 'background refresh current location' }).click()
+    })
+    await waitFor(() => expect(resolve).toHaveBeenCalledTimes(4))
+    expect(screen.getByTestId('crumbs').textContent).toBe('Parent / Leaf')
+    await waitFor(() => expect(resolve).toHaveBeenCalledTimes(6), { timeout: 2000 })
+    expect(screen.getByTestId('crumbs').textContent).toBe('Parent / Leaf')
+  })
+
+  it('drops only an authoritatively denied ancestor while keeping the readable location open', async () => {
+    const parent = await resolveResource(
+      resolvedDirectory('parent', 'Parent', { gfsUri: 'gfs://main/parent', path: '/Parent' })
+    )
+    const leaf = await resolveResource(
+      resolvedDirectory('leaf', 'Leaf', {
+        gfsUri: 'gfs://main/root',
+        path: '/Parent/Leaf',
+        parentResourceId: 'parent',
+      })
+    )
+    const resolve = vi
+      .fn()
+      .mockResolvedValueOnce(leaf)
+      .mockResolvedValueOnce(parent)
+      .mockResolvedValueOnce(leaf)
+      .mockRejectedValueOnce(new Error('403 Forbidden: httpStatus=403'))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          resolve,
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+          affordances: vi.fn(async () => ({
+            held: [],
+            canDelegate: false,
+            grantableBits: [],
+            canCreateShare: false,
+          })),
+        },
+      },
+    })
+
+    render(<Probe />, { wrapper: Harness })
+    await act(async () => screen.getByRole('button', { name: 'open' }).click())
+    await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('leaf'))
+    expect(screen.getByTestId('crumbs').textContent).toBe('Parent / Leaf')
+
+    await act(async () => {
+      screen.getByRole('button', { name: 'background refresh current location' }).click()
+    })
+    await waitFor(() => expect(resolve).toHaveBeenCalledTimes(4))
+
+    expect(screen.getByTestId('current').textContent).toBe('leaf')
+    expect(screen.getByTestId('crumbs').textContent).toBe('Leaf')
+    expect(screen.getByTestId('open-error').textContent).toBe('none')
   })
 
   it('revalidates accessible resources on remount even under production cache defaults', async () => {

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { DEFAULT_TOAST_DURATION_MS } from '@constants/toasts'
 import { desktopQueryClient } from '@lib/queryClient'
 import type {
@@ -10,6 +10,10 @@ import type {
   SessionMe,
 } from '../../../../src/types'
 import type { Tone } from '../../uiTypes'
+import {
+  createDesktopEnvironmentSetupHandler,
+  getDesktopEnvironmentRestOriginMatches,
+} from './desktopEnvironmentHandoff'
 import type { SetStatusFn } from './types'
 
 interface UseAuthControllerParams {
@@ -38,11 +42,26 @@ function isUnauthorizedError(error: unknown) {
 }
 
 export function useAuthController({ setStatus, onSessionNeedsLoad }: UseAuthControllerParams) {
-  const [booting, setBooting] = useState(true)
-  const [busy, setBusy] = useState(false)
+  const [booting, setBootingState] = useState(true)
+  const bootingRef = useRef(true)
+  const setBooting = useCallback((next: boolean) => {
+    bootingRef.current = next
+    setBootingState(next)
+  }, [])
+  const [busy, setBusyState] = useState(false)
+  const busyRef = useRef(false)
+  const setBusy = useCallback((next: boolean) => {
+    busyRef.current = next
+    setBusyState(next)
+  }, [])
   const [statusText, setStatusText] = useState('Ready.')
   const [statusTone, setStatusTone] = useState<Tone>('info')
-  const [isAuthenticated, setIsAuthenticated] = useState(false)
+  const [isAuthenticated, setIsAuthenticatedState] = useState(false)
+  const isAuthenticatedRef = useRef(false)
+  const setIsAuthenticated = useCallback((next: boolean) => {
+    isAuthenticatedRef.current = next
+    setIsAuthenticatedState(next)
+  }, [])
   const [me, setMe] = useState<SessionMe | null>(null)
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
@@ -52,7 +71,12 @@ export function useAuthController({ setStatus, onSessionNeedsLoad }: UseAuthCont
   const [runtimeConfigSetupExternalRestApiBaseUrl, setRuntimeConfigSetupExternalRestApiBaseUrl] =
     useState('')
   const [runtimeConfigSetupRpcProxyBaseUrl, setRuntimeConfigSetupRpcProxyBaseUrl] = useState('')
-  const [authTransitioning, setAuthTransitioning] = useState(false)
+  const [authTransitioning, setAuthTransitioningState] = useState(false)
+  const authTransitioningRef = useRef(false)
+  const setAuthTransitioning = useCallback((next: boolean) => {
+    authTransitioningRef.current = next
+    setAuthTransitioningState(next)
+  }, [])
   const [runtimeConfigState, setRuntimeConfigState] = useState<DesktopRuntimeConfigState | null>(
     null
   )
@@ -75,6 +99,16 @@ export function useAuthController({ setStatus, onSessionNeedsLoad }: UseAuthCont
     isAuthenticated &&
     dependencyHealth &&
     (!dependencyHealth.externalRestApi.ok || !dependencyHealth.rpcProxy.ok)
+  )
+
+  const getDesktopEnvironmentHandoffAuthState = useCallback(
+    () => ({
+      booting: bootingRef.current,
+      busy: busyRef.current,
+      authTransitioning: authTransitioningRef.current,
+      isAuthenticated: isAuthenticatedRef.current,
+    }),
+    []
   )
 
   const refreshRuntimeConfigState = useCallback(async () => {
@@ -133,30 +167,6 @@ export function useAuthController({ setStatus, onSessionNeedsLoad }: UseAuthCont
         })
     })
   }, [completeDesktopSetupWith, setStatus])
-
-  useEffect(() => {
-    return window.clerum.auth.onDesktopEnvironmentSetup(({ externalRestApiBaseUrl, appName }) => {
-      const normalizedExternalRestApiBaseUrl = externalRestApiBaseUrl.trim()
-      if (!normalizedExternalRestApiBaseUrl) return
-      try {
-        const url = new URL(normalizedExternalRestApiBaseUrl)
-        if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-          throw new Error('Only http(s) desktop environment URLs are supported')
-        }
-      } catch (error) {
-        setStatus(
-          `Desktop setup link rejected: ${error instanceof Error ? error.message : String(error)}`,
-          'error'
-        )
-        return
-      }
-      setPendingDesktopEnvironmentSetup({
-        externalRestApiBaseUrl: normalizedExternalRestApiBaseUrl,
-        rpcProxyBaseUrl: '',
-        appName: appName?.trim() || 'Evenfire',
-      })
-    })
-  }, [setStatus])
 
   useEffect(() => {
     return window.clerum.auth.onExternalLogout(() => {
@@ -325,38 +335,58 @@ export function useAuthController({ setStatus, onSessionNeedsLoad }: UseAuthCont
     }
   }
 
-  const handleSelectRuntimeConfig = async (
-    optionId: string
-  ): Promise<DesktopRuntimeConfigState | null> => {
-    try {
-      setBusy(true)
-      setBackendSwitchHint(null)
-      const state = await window.clerum.auth.selectRuntimeConfig(optionId)
-      // Switching environment (pre-login) must not carry another env's cached
-      // queries forward (spec §5.2 P1). The env is bound to login (D4: no switch
-      // without logout), so a full clear is sufficient — no per-env query keys.
-      desktopQueryClient.clear()
-      setRuntimeConfigState(state)
-      setDesktopSetupAuthorizationToken('')
-      setDesktopSetupStarted(false)
-      const selected = state.options.find(option => option.id === state.activeOptionId)
-      setStatus(
-        selected ? `Environment selected: ${selected.label}.` : 'Environment selected.',
-        'success',
-        undefined,
-        { global: false, toast: true }
-      )
-      return state
-    } catch (error) {
-      setStatus(
-        `Failed to switch environment: ${error instanceof Error ? error.message : String(error)}`,
-        'error'
-      )
-      return null
-    } finally {
-      setBusy(false)
-    }
-  }
+  const handleSelectRuntimeConfig = useCallback(
+    async (optionId: string): Promise<DesktopRuntimeConfigState | null> => {
+      try {
+        setBusy(true)
+        setBackendSwitchHint(null)
+        const state = await window.clerum.auth.selectRuntimeConfig(optionId)
+        // Switching environment (pre-login) must not carry another env's cached
+        // queries forward (spec §5.2 P1). The env is bound to login (D4: no switch
+        // without logout), so a full clear is sufficient — no per-env query keys.
+        desktopQueryClient.clear()
+        setRuntimeConfigState(state)
+        setDesktopSetupAuthorizationToken('')
+        setDesktopSetupStarted(false)
+        const selected = state.options.find(option => option.id === state.activeOptionId)
+        setStatus(
+          selected ? `Environment selected: ${selected.label}.` : 'Environment selected.',
+          'success',
+          undefined,
+          { global: false, toast: true }
+        )
+        return state
+      } catch (error) {
+        setStatus(
+          `Failed to switch environment: ${error instanceof Error ? error.message : String(error)}`,
+          'error'
+        )
+        return null
+      } finally {
+        setBusy(false)
+      }
+    },
+    [setStatus]
+  )
+
+  useEffect(() => {
+    return window.clerum.auth.onDesktopEnvironmentSetup(
+      createDesktopEnvironmentSetupHandler({
+        getAuthState: getDesktopEnvironmentHandoffAuthState,
+        refreshRuntimeConfigState,
+        handleSelectRuntimeConfig,
+        onSessionNeedsLoad,
+        setPendingDesktopEnvironmentSetup,
+        setStatus,
+      })
+    )
+  }, [
+    getDesktopEnvironmentHandoffAuthState,
+    handleSelectRuntimeConfig,
+    onSessionNeedsLoad,
+    refreshRuntimeConfigState,
+    setStatus,
+  ])
 
   const handleClearRuntimeConfigSelection = async (): Promise<DesktopRuntimeConfigState | null> => {
     try {
@@ -392,8 +422,67 @@ export function useAuthController({ setStatus, onSessionNeedsLoad }: UseAuthCont
     if (!nextConfig) return
     setAuthTransitioning(true)
     try {
+      let currentConfigState: DesktopRuntimeConfigState
+      try {
+        currentConfigState = await refreshRuntimeConfigState()
+      } catch {
+        setStatus('Could not verify the desktop environment. Try opening it again.', 'error')
+        return
+      }
+
+      const restOriginMatches = getDesktopEnvironmentRestOriginMatches(
+        currentConfigState,
+        nextConfig.externalRestApiBaseUrl
+      )
+
+      if (restOriginMatches.localhost) {
+        setPendingDesktopEnvironmentSetup(null)
+        setStatus(
+          'Desktop setup link rejected: the Localhost environment cannot be opened from a link.',
+          'error'
+        )
+        return
+      }
+
+      if (restOriginMatches.saved.length > 0) {
+        if (restOriginMatches.saved.length > 1) {
+          setPendingDesktopEnvironmentSetup(null)
+          setStatus(
+            'Desktop setup link rejected because multiple saved environments use this REST host.',
+            'error'
+          )
+          return
+        }
+
+        const selectedState = await handleSelectRuntimeConfig(restOriginMatches.saved[0].id)
+        if (!selectedState) return
+        setPendingDesktopEnvironmentSetup(null)
+        try {
+          await onSessionNeedsLoad({ preserveNav: true })
+        } catch (error) {
+          setStatus(
+            `Could not load the selected desktop environment: ${error instanceof Error ? error.message : String(error)}`,
+            'error'
+          )
+        }
+        return
+      }
+
       const state = await handleSaveRuntimeConfig(nextConfig)
       if (!state) return
+      const selectedOption = state.options.find(option => option.id === state.activeOptionId)
+      const selectedRestOriginMatches = getDesktopEnvironmentRestOriginMatches(
+        state,
+        nextConfig.externalRestApiBaseUrl
+      ).saved.some(option => option.id === state.activeOptionId)
+      if (!selectedOption || !selectedRestOriginMatches || !selectedOption.rpcProxyBaseUrl.trim()) {
+        setPendingDesktopEnvironmentSetup(null)
+        setStatus(
+          'Desktop environment setup could not verify the confirmed REST and RPC endpoints.',
+          'error'
+        )
+        return
+      }
       setPendingDesktopEnvironmentSetup(null)
       setDesktopEnvironmentSetupComplete(true)
       setStatus('Desktop environment saved.', 'success')
