@@ -234,7 +234,7 @@ describe('sendAgentMessage — auto-title on send (B10)', () => {
 })
 
 describe('sendAgentMessage — new chat target', () => {
-  it('does not reuse the prior chat when a send races the New chat selection commit', async () => {
+  it('keeps a retained raw send callback off the prior chat after New chat clears it', async () => {
     const priorChatId = 'prior-chat'
     await clerum.chat.create('agent-x', priorChatId)
     await clerum.chat.upsertMessages('agent-x', priorChatId, [
@@ -254,10 +254,10 @@ describe('sendAgentMessage — new chat target', () => {
     })
     expect(result.current.activeChatId).toBe(priorChatId)
 
-    // A composer event queued from the current conversation can run while the
-    // new chat's list request is still unresolved. Model useAppController's
-    // blank selection and route transition, then hold that selection load.
-    const sendImmediately = result.current.handleSendAgentMessage
+    // Retain the raw hook callback before New chat commits. This is deliberately
+    // callback-hardening coverage; pendingChatSelection.characterization covers
+    // the production stable action after a superseded list load resolves.
+    const retainedRawSend = result.current.handleSendAgentMessage
     clerum.chat.getIndex.mockClear()
     clerum.chat.getIndex.mockReturnValue(new Promise(() => undefined))
     await act(async () => {
@@ -270,7 +270,7 @@ describe('sendAgentMessage — new chat target', () => {
     expect(result.current.chatMessages).toEqual([])
 
     await act(async () => {
-      await sendImmediately('start the next conversation')
+      await retainedRawSend('start the next conversation')
     })
 
     const request = clerum.rpc.invokeHostMessage.mock.calls.at(-1)?.[1] as

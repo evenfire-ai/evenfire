@@ -101,6 +101,9 @@ export type PendingChatSelection =
  */
 export interface ChatListControllerHost {
   switchToChat: (agentRef: string, chatId: string) => Promise<void>
+  beginSelectionIntent: () => number
+  getSelectionIntentRevision: () => number
+  clearPendingSelection: (agentRef: string, preserveSpecificChatId?: string) => void
   scrollChatToBottom: () => void
   dispatchSession: (chatKey: string, event: SessionFsmEvent) => void
   clearComposerDraft: (chatId: string) => void
@@ -504,6 +507,7 @@ export function useChatListController({
       const authorityScopeGeneration = authorityScopeGenerationRef.current
       const authorityScopeAtRequest = currentAuthorityScopeRef.current
       const hostAuthorityEpoch = getHostAuthorityEpoch(agentRef)
+      const selectionIntentRevisionAtRequest = host.current?.getSelectionIntentRevision()
       chatListNextCursorByAgentRef.current[agentRef] = null
       if (selectedAgentRef.current === agentRef) {
         setChatListHasMoreRemoteSessions(false)
@@ -636,6 +640,8 @@ export function useChatListController({
           activeChatId !== latestServerSession.chatId &&
           serverIsNewerThanSelection &&
           currentHost.shouldAutoSelectLatest() &&
+          selectionIntentRevisionAtRequest !== undefined &&
+          currentHost.getSelectionIntentRevision() === selectionIntentRevisionAtRequest &&
           !suppressAutoSelection
         ) {
           currentHost.markAutoSelectedChat(latestServerSession.chatId)
@@ -668,6 +674,7 @@ export function useChatListController({
       getHostAuthorityEpoch,
       isHostAccessBlocked,
       onHostAccessRevoked,
+      host,
     ]
   )
 
@@ -987,9 +994,20 @@ export function useChatListController({
     },
     []
   )
-  const clearPendingSelection = useCallback((agentName: string) => {
-    delete pendingChatSelectionByAgentRef.current[agentName]
-  }, [])
+  const clearPendingSelection = useCallback(
+    (agentName: string, preserveSpecificChatId?: string) => {
+      const pendingSelection = pendingChatSelectionByAgentRef.current[agentName]
+      // Keep a matching intent for the agent-selection effect when a direct
+      // switch and route change are committed in the same turn.
+      if (
+        pendingSelection?.mode === 'specific' &&
+        pendingSelection.chatId === preserveSpecificChatId
+      )
+        return
+      delete pendingChatSelectionByAgentRef.current[agentName]
+    },
+    []
+  )
   const isChatDeleted = useCallback(
     (agentRef: string, chatId: string) =>
       deletedChatIdsByAgentRef.current.get(agentRef)?.has(chatId) ?? false,
@@ -1001,17 +1019,20 @@ export function useChatListController({
   const handleCreateChat = useCallback(async () => {
     const agentRef = selectedAgentRef.current
     if (!agentRef) return
+    const selectionIntentRevision = host.current?.beginSelectionIntent()
+    host.current?.clearPendingSelection(agentRef)
     const requestGeneration = requestGenerationRef.current
     const chatId = crypto.randomUUID()
     const meta = await chatStore.createChat(agentRef, chatId)
     chatStore.clearCachedRemoteData()
-    if (
-      selectedAgentRef.current !== agentRef ||
-      requestGenerationRef.current !== requestGeneration
-    ) {
+    if (selectedAgentRef.current !== agentRef || requestGenerationRef.current !== requestGeneration)
       return
-    }
     appendNewEntry(agentRef, meta)
+    if (
+      selectionIntentRevision !== undefined &&
+      host.current?.getSelectionIntentRevision() !== selectionIntentRevision
+    )
+      return
     host.current?.markAutoSelectedChat(null)
     await host.current?.switchToChat(agentRef, chatId)
     host.current?.scrollChatToBottom()

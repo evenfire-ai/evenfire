@@ -8,7 +8,9 @@
  * See .specs/refactor-useAgentChatController/plan.md Fase 0 + spec.md B.4.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, waitFor } from '@testing-library/react'
+import { act, renderHook, waitFor } from '@testing-library/react'
+import { useAgentChatActionsValue } from '@hooks/useAgentChatActionsValue'
+import type { useAppController } from '@hooks/useAppController'
 import { renderController } from './__fixtures__/controllerHarness'
 import { type MockClerum, installMockClerum, uninstallMockClerum } from './__fixtures__/mockClerum'
 
@@ -355,5 +357,216 @@ describe('pendingChatSelection effect', () => {
       'agent-x',
       'older-chat'
     )
+  })
+
+  it('keeps New chat authoritative when an older specific selection load resolves', async () => {
+    const priorChatId = 'prior-chat'
+    await clerum.chat.create('agent-x', priorChatId)
+    await clerum.chat.upsertMessages('agent-x', priorChatId, [
+      {
+        id: 'prior-message',
+        role: 'user',
+        content: 'keep this in the previous chat',
+        timestamp: Date.now(),
+      },
+    ])
+    const priorChatIndex = await clerum.readIndex('agent-x')
+
+    const controller = renderController({ navItem: 'agents' })
+    await settleMount()
+    await waitFor(() => expect(controller.result.current.chatListLoading).toBe(false))
+
+    const indexCallsBeforeSelection = clerum.chat.getIndex.mock.calls.length
+    const index = deferred<Awaited<ReturnType<typeof clerum.chat.getIndex>>>()
+    clerum.chat.getIndex.mockReturnValue(index.promise)
+    const cachedMessages = deferred<Awaited<ReturnType<typeof clerum.chat.loadMessages>>>()
+    const loadMessages = clerum.chat.loadMessages.getMockImplementation()
+    if (!loadMessages) throw new Error('Expected the real ChatStore loadMessages producer')
+    clerum.chat.loadMessages.mockImplementation((agentRef, chatId, limit, offset) =>
+      agentRef === 'agent-x' && chatId === priorChatId
+        ? cachedMessages.promise
+        : loadMessages(agentRef, chatId, limit, offset)
+    )
+    clerum.rpc.invokeHostMessage.mockResolvedValue({ response: 'fresh reply' })
+
+    await act(async () => {
+      controller.result.current.setPendingChatSelection('agent-x', priorChatId)
+      controller.rerender({ navItem: 'chat' })
+    })
+    await waitFor(() =>
+      expect(clerum.chat.getIndex.mock.calls.length).toBeGreaterThan(indexCallsBeforeSelection)
+    )
+    expect(controller.result.current.chatListLoading).toBe(true)
+
+    const actions = renderHook(() =>
+      useAgentChatActionsValue(
+        controller.result.current as unknown as ReturnType<typeof useAppController>
+      )
+    )
+
+    try {
+      // Match the New chat selection transition in useAppController. Its blank
+      // state is committed while the older specific selection still awaits IPC.
+      await act(async () => {
+        controller.result.current.setPendingChatSelection('agent-x', null, {
+          suppressAutoSelect: true,
+        })
+        controller.result.current.clearActiveChat()
+        actions.rerender()
+      })
+      expect(controller.result.current.activeChatId).toBeNull()
+      expect(controller.result.current.chatMessages).toEqual([])
+
+      await act(async () => {
+        index.resolve(priorChatIndex)
+      })
+      await waitFor(() => expect(controller.result.current.chatListLoading).toBe(false))
+      if (controller.result.current.activeChatId === priorChatId) {
+        await waitFor(() =>
+          expect(clerum.chat.loadMessages).toHaveBeenCalledWith(
+            'agent-x',
+            priorChatId,
+            expect.any(Number),
+            undefined
+          )
+        )
+      }
+
+      // ComposerPanel receives this stable action from the production action-value
+      // factory. Calling it now models a send after the New chat commit and the
+      // older index response, while the re-opened chat's cache read stays pending.
+      await act(async () => {
+        actions.rerender()
+        await actions.result.current.handleSendAgentMessage('start the next conversation')
+      })
+
+      const request = clerum.rpc.invokeHostMessage.mock.calls.at(-1)?.[1] as
+        | { threadId?: string }
+        | undefined
+      expect(request?.threadId).not.toBe(priorChatId)
+
+      const priorMessages = await clerum.persistedMessages('agent-x', priorChatId)
+      expect(priorMessages).toEqual([
+        expect.objectContaining({ id: 'prior-message', content: 'keep this in the previous chat' }),
+      ])
+      const newChatId = request?.threadId
+      expect(newChatId).toBeTruthy()
+      expect(await clerum.persistedMessages('agent-x', newChatId!)).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ role: 'user', content: 'start the next conversation' }),
+          expect.objectContaining({ role: 'assistant', content: 'fresh reply' }),
+        ])
+      )
+    } finally {
+      await act(async () => {
+        cachedMessages.resolve(await loadMessages('agent-x', priorChatId, undefined, undefined))
+      })
+      controller.unmount()
+      actions.unmount()
+    }
+  })
+
+  it('keeps a newer selection while retaining a delayed New chat in the list', async () => {
+    await clerum.chat.create('agent-x', 'selected-chat')
+    const controller = renderController({ navItem: 'agents' })
+    await settleMount()
+    await waitFor(() => expect(controller.result.current.chatListLoading).toBe(false))
+
+    const createChat = clerum.chat.create.getMockImplementation()
+    if (!createChat) throw new Error('Expected the real ChatStore create producer')
+    const releaseCreate = deferred<void>()
+    const created = deferred<Awaited<ReturnType<typeof clerum.chat.create>>>()
+    clerum.chat.create.mockImplementation(async (agentRef, chatId) => {
+      const meta = await createChat(agentRef, chatId)
+      created.resolve(meta)
+      await releaseCreate.promise
+      return meta
+    })
+
+    let createPromise!: Promise<void>
+    act(() => {
+      createPromise = controller.result.current.handleCreateChat()
+    })
+    const createdChat = await created.promise
+
+    await act(async () => {
+      await controller.result.current.switchToChat('agent-x', 'selected-chat')
+    })
+
+    await act(async () => {
+      releaseCreate.resolve()
+      await createPromise
+    })
+
+    expect(controller.result.current.activeChatId).toBe('selected-chat')
+    expect(controller.result.current.chatList).toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: createdChat.id })])
+    )
+    controller.unmount()
+  })
+
+  it('keeps an accepted blank-chat send bound when New chat arrives during creation', async () => {
+    const controller = renderController({ navItem: 'chat' })
+    await settleMount()
+    await waitFor(() => expect(controller.result.current.chatListLoading).toBe(false))
+
+    const createChat = clerum.chat.create.getMockImplementation()
+    if (!createChat) throw new Error('Expected the real ChatStore create producer')
+    const releaseCreate = deferred<void>()
+    const created = deferred<Awaited<ReturnType<typeof clerum.chat.create>>>()
+    clerum.chat.create.mockImplementation(async (agentRef, chatId) => {
+      const meta = await createChat(agentRef, chatId)
+      created.resolve(meta)
+      await releaseCreate.promise
+      return meta
+    })
+    clerum.rpc.invokeHostMessage.mockResolvedValue({ response: 'sent reply' })
+
+    const actions = renderHook(() =>
+      useAgentChatActionsValue(
+        controller.result.current as unknown as ReturnType<typeof useAppController>
+      )
+    )
+    let sendPromise!: Promise<void>
+    act(() => {
+      sendPromise = actions.result.current.handleSendAgentMessage('accepted before New chat')
+    })
+    const createdChat = await created.promise
+
+    try {
+      await act(async () => {
+        controller.result.current.setPendingChatSelection('agent-x', null, {
+          suppressAutoSelect: true,
+        })
+        controller.result.current.clearActiveChat()
+        actions.rerender()
+      })
+      expect(controller.result.current.activeChatId).toBeNull()
+      expect(controller.result.current.chatMessages).toEqual([])
+
+      await act(async () => {
+        releaseCreate.resolve()
+        await sendPromise
+      })
+
+      const request = clerum.rpc.invokeHostMessage.mock.calls.at(-1)?.[1] as
+        | { threadId?: string }
+        | undefined
+      expect(request?.threadId).toBe(createdChat.id)
+      expect(await clerum.persistedMessages('agent-x', createdChat.id)).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ role: 'user', content: 'accepted before New chat' }),
+          expect.objectContaining({ role: 'assistant', content: 'sent reply' }),
+        ])
+      )
+      expect(controller.result.current.activeChatId).toBeNull()
+    } finally {
+      releaseCreate.resolve()
+      await act(async () => {
+        await sendPromise.catch(() => undefined)
+      })
+      actions.unmount()
+      controller.unmount()
+    }
   })
 })
