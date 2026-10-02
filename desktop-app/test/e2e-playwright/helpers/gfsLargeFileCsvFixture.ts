@@ -6,6 +6,8 @@ import * as path from 'node:path'
 // The Desktop journey that consumes it exercises the Electron IPC path.
 export const GFS_LARGE_CSV_SIZE = 3_836_961
 export const GFS_OLD_VISUAL_LIMIT = 3_145_728
+export const GFS_LARGE_CSV_INCIDENT_SHA256 =
+  '675b72d7ba4c4c6eca3a49a076ed6adcff72165805e2069bc3619bca333c9bd1'
 
 export interface GfsLargeCsvFixture {
   fileName: string
@@ -96,7 +98,8 @@ function countCsvRecords(buffer: Buffer): number {
 /**
  * Resolve the incident-shaped CSV. CI uses the deterministic synthetic buffer;
  * a local run can provide the original customer CSV through
- * `E2E_GFS_LARGE_CSV_PATH`. The original is never copied into the repository.
+ * `E2E_GFS_LARGE_CSV_PATH`; its digest must match the recorded incident copy.
+ * The original is never copied into the repository.
  */
 export function resolveGfsLargeCsvFixture(): GfsLargeCsvFixture {
   const explicitPath = process.env.E2E_GFS_LARGE_CSV_PATH
@@ -106,6 +109,11 @@ export function resolveGfsLargeCsvFixture(): GfsLargeCsvFixture {
   if (buffer.byteLength !== GFS_LARGE_CSV_SIZE)
     throw new Error(
       `E2E_GFS_LARGE_CSV_PATH must contain exactly ${GFS_LARGE_CSV_SIZE} bytes; got ${buffer.byteLength}`
+    )
+  const sha256 = crypto.createHash('sha256').update(buffer).digest('hex')
+  if (sha256 !== GFS_LARGE_CSV_INCIDENT_SHA256)
+    throw new Error(
+      `E2E_GFS_LARGE_CSV_PATH digest mismatch; expected ${GFS_LARGE_CSV_INCIDENT_SHA256}, got ${sha256}`
     )
 
   return {
