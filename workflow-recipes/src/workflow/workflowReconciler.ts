@@ -26,6 +26,11 @@ import { mintRecipeHostGfsToken } from '../gfsBinding'
 import { createLogger } from '../observability/logger'
 import { CRD_GROUP, CRD_VERSION, WORKFLOWRECIPE_PLURAL } from '../reconciler/crdConstants'
 import {
+  deleteOutcomeFields,
+  observeNamespacedDelete,
+  shouldRecordDelete,
+} from '../reconciler/deleteOutcome'
+import {
   ResourceVanishedAfterConflictError,
   RetryableReconcileError,
   getErrorCode,
@@ -64,12 +69,14 @@ import {
   projectCodexRecipeVerdict,
 } from './codexRecipeVerdict'
 import {
+  type PodPresence,
   type PodReadiness,
   deletePodIfExists,
   evaluateCompletedRuntimePodRecovery,
   evaluateCrashRecovery,
   getContainerWaitingReason,
   getPodPhase,
+  getPodPresence,
   getPodReadiness,
   isRecoverableContainerWaitingReason,
   waitForPodDeletion,
@@ -89,13 +96,20 @@ import {
   issueMcpHostWorkflowControlToken,
 } from './mcpHostRuntimeTokenIssuerClient'
 import type { ModelConfigHandler } from './modelConfigHandler'
-import { NetworkPolicyConfig, buildWorkflowNetworkPolicies } from './networkPolicyFactory'
+import {
+  NetworkPolicyConfig,
+  buildRunLaneNetworkPolicyCatalog,
+  buildWorkflowNetworkPolicies,
+} from './networkPolicyFactory'
 import { ObjectStorageClient, StorageCredentials, StorageRef } from './objectStorageClient'
 import {
   type EagerSdkBootstrapProof,
   type McpHostRuntimeTokenRefreshReason,
   type McpHostRuntimeTokenRefreshResult,
   NO_MCP_HOST_RUNTIME_TOKEN_REFRESH,
+  type NetworkPolicyLegacyFact,
+  type NetworkPolicyPassSummary,
+  type NetworkPolicyPruneFact,
   PluginWorkloadSdkProvisioner,
   type WorkflowNetworkPolicyApplySummary,
 } from './pluginWorkloadSdkProvisioner'
@@ -220,6 +234,14 @@ type RunLaneNetworkPolicyApplyResult =
       reason: 'terminating' | 'contended'
     }
   | { policy: string; action: 'conflict'; reason: NetworkPolicyConflictReason }
+/**
+ * Which Codex/Grok proxy policy survives a prune that does not desire it: a
+ * proxy whose verdict is uncertain. The skip log names it `reason: 'uncertain'`.
+ */
+interface RunLaneProxyKeepReasons {
+  codex: boolean
+  grok: boolean
+}
 // Read-then-write rounds per NetworkPolicy and pass. Three rounds is at most
 // three writes, the same as the create plus two replaces it replaced.
 const NETWORK_POLICY_APPLY_ROUNDS = 3
@@ -243,20 +265,160 @@ export interface PluginWorkloadSdkCleanupOptions {
    * remains the owner of shared runtime resources.
    */
   preserveWorkflowRuntime?: boolean
+  /**
+   * Identity for the live legacy-delete ledger. It shares the gone-set and
+   * backoff with `reconcile()` and the WRC retry; it never erases either.
+   */
+  recipeUid?: string
+  /**
+   * True only while the recipe itself is being deleted. A completed cleanup
+   * may then drop the process-local legacy ledger entry; a pending cleanup
+   * must retain it so the finalizer retry resumes from the same window.
+   */
+  recipeDeleted?: boolean
+}
+
+export class LegacyNetworkPolicyDeletePendingError extends Error {
+  constructor(
+    recipeName: string,
+    readonly retryAfterMs: number
+  ) {
+    super(`Legacy mcp-servers internet egress NetworkPolicy delete is pending for ${recipeName}`)
+    this.name = 'LegacyNetworkPolicyDeletePendingError'
+  }
+}
+
+function buildLegacyMcpServersInternetEgressPolicyName(recipeName: string): string {
+  return `${recipeName}-mcp-servers-egress-internet`
 }
 
 export const NETWORK_POLICY_OWNERSHIP_CONDITION_TYPE = 'WorkflowNetworkPolicyOwnership'
 
 /**
- * Published only as `False/RetryPending` while a run-lane NetworkPolicy is
- * left pending a retry (terminating or contended), and removed once the
- * policies converge. The WRC short-circuits of a running workflow never reach
- * `reconcile()`, so this marker is what tells them to apply the policies again.
+ * Published only as `False` while the run-lane policies have not converged,
+ * and removed once they have. It carries two independent facts (see
+ * `networkPolicyMarkerFacts`):
+ *
+ * - apply (`converged | pending`): `pending` when a desired policy was left
+ *   unwritten (terminating or contended). The pass requeues, and the WRC
+ *   short-circuits of a running workflow, which never reach `reconcile()`,
+ *   apply the policies again while it is set.
+ * - prune (`converged | pending | unevaluated`, see `NetworkPolicyPruneFact`):
+ *   `pending` when a DELETE the prune owed did not land, `unevaluated` when
+ *   its LIST failed. No requeue for either, since nothing but `reconcile()`
+ *   prunes. Only a later `reconcile()` prune that lands, the `unmanaged`
+ *   writer after a full SDK teardown, or the finalizer clears it; every other
+ *   path carries it over (see `networkPolicyMarkerConditions`).
+ *
+ * Each combination with a fact that is not converged has its own reason
+ * (`RetryPending`, `PrunePending`, `PruneUnevaluated`, `RetryAndPrunePending`,
+ * `RetryAndPruneUnevaluated`), and current facts are read back from the reason.
+ * The frozen historical combined marker is normalized by the decoder below.
  */
 export const NETWORK_POLICIES_CONVERGED_CONDITION_TYPE = 'WorkflowNetworkPoliciesConverged'
 
-const NETWORK_POLICY_RETRY_PENDING_MESSAGE =
-  'One or more run-lane NetworkPolicies are pending a retry (terminating or contended)'
+/** The two facts the WorkflowNetworkPoliciesConverged marker carries. */
+export interface NetworkPolicyMarkerFacts {
+  apply: 'converged' | 'pending'
+  prune: NetworkPolicyPruneFact
+}
+
+const CONVERGED_NETWORK_POLICY_MARKER_FACTS = {
+  apply: 'converged',
+  prune: 'converged',
+} as const satisfies NetworkPolicyMarkerFacts
+
+/**
+ * One current reason per combination of facts. Current messages are prose for
+ * operators. The decoder separately recognizes the exact historical combined
+ * marker emitted before those facts had distinct reasons.
+ */
+const NETWORK_POLICY_MARKER_REASONS = {
+  RetryPending: {
+    facts: { apply: 'pending', prune: 'converged' },
+    message: 'One or more run-lane NetworkPolicies are pending a retry (terminating or contended)',
+  },
+  PrunePending: {
+    facts: { apply: 'converged', prune: 'pending' },
+    message:
+      'One or more run-lane NetworkPolicies the spec no longer wants are pending a delete; the next reconcile() pass or the finalizer removes them',
+  },
+  PruneUnevaluated: {
+    facts: { apply: 'converged', prune: 'unevaluated' },
+    message:
+      'The run-lane NetworkPolicies the spec no longer wants could not be listed, so none was pruned; the next reconcile() pass or the finalizer removes them',
+  },
+  RetryAndPrunePending: {
+    facts: { apply: 'pending', prune: 'pending' },
+    message:
+      'One or more run-lane NetworkPolicies are pending a retry (terminating or contended), and one or more the spec no longer wants are pending a delete',
+  },
+  RetryAndPruneUnevaluated: {
+    facts: { apply: 'pending', prune: 'unevaluated' },
+    message:
+      'One or more run-lane NetworkPolicies are pending a retry (terminating or contended), and the ones the spec no longer wants could not be listed for a prune',
+  },
+} as const satisfies Record<string, { facts: NetworkPolicyMarkerFacts; message: string }>
+
+/**
+ * The only historical message this controller interprets. Before every fact
+ * had its own reason, `af0152924` encoded apply-plus-prune as `RetryPending`
+ * with exactly this prose. Equality is deliberate: substring or reworded
+ * messages do not gain a prune fact.
+ */
+const HISTORICAL_RETRY_AND_PRUNE_PENDING_MESSAGE =
+  'One or more run-lane NetworkPolicies are pending a retry (terminating or contended), and one or more the spec no longer wants are pending a delete'
+
+type NetworkPolicyMarkerReason = keyof typeof NETWORK_POLICY_MARKER_REASONS
+
+function isNetworkPolicyMarkerReason(
+  reason: string | undefined
+): reason is NetworkPolicyMarkerReason {
+  return reason !== undefined && Object.hasOwn(NETWORK_POLICY_MARKER_REASONS, reason)
+}
+
+/** The reason for `facts`, or `undefined` when both are converged. */
+function networkPolicyMarkerReason(
+  facts: NetworkPolicyMarkerFacts
+): NetworkPolicyMarkerReason | undefined {
+  const retry = facts.apply === 'pending'
+  switch (facts.prune) {
+    case 'converged':
+      return retry ? 'RetryPending' : undefined
+    case 'pending':
+      return retry ? 'RetryAndPrunePending' : 'PrunePending'
+    case 'unevaluated':
+      return retry ? 'RetryAndPruneUnevaluated' : 'PruneUnevaluated'
+    default: {
+      const unreachable: never = facts.prune
+      throw new Error(`Unknown NetworkPolicy prune fact: ${String(unreachable)}`)
+    }
+  }
+}
+
+/**
+ * Published only as `False`/`DeletePending` while the legacy
+ * `<recipe>-mcp-servers-egress-internet` policy is pending a delete (see
+ * `NetworkPolicyLegacyFact`), and removed once it is gone. The fact is read
+ * back from the reason alone.
+ */
+export const LEGACY_NETWORK_POLICY_REMOVED_CONDITION_TYPE = 'WorkflowLegacyNetworkPolicyRemoved'
+
+const LEGACY_NETWORK_POLICY_REASONS = {
+  DeletePending: {
+    fact: 'pending',
+    message:
+      'The legacy mcp-servers internet egress NetworkPolicy is pending a delete; a later pass or the finalizer removes it',
+  },
+} as const satisfies Record<string, { fact: NetworkPolicyLegacyFact; message: string }>
+
+type LegacyNetworkPolicyReason = keyof typeof LEGACY_NETWORK_POLICY_REASONS
+
+function isLegacyNetworkPolicyReason(
+  reason: string | undefined
+): reason is LegacyNetworkPolicyReason {
+  return reason !== undefined && Object.hasOwn(LEGACY_NETWORK_POLICY_REASONS, reason)
+}
 
 /**
  * Merged by its own group in `patchStatus`, apart from the workflow-output
@@ -266,6 +428,7 @@ const NETWORK_POLICY_RETRY_PENDING_MESSAGE =
 export const NETWORK_POLICY_OWNERSHIP_CONDITION_TYPES = new Set([
   NETWORK_POLICY_OWNERSHIP_CONDITION_TYPE,
   NETWORK_POLICIES_CONVERGED_CONDITION_TYPE,
+  LEGACY_NETWORK_POLICY_REMOVED_CONDITION_TYPE,
 ])
 
 /**
@@ -287,27 +450,91 @@ export function networkPolicyConditionsChanged(
   return signal(existing ?? []) !== signal(fresh)
 }
 
-/** True when the published status still carries the retry marker. */
+/**
+ * True when the published marker says an apply is pending a retry. A marker
+ * that carries only a pending prune does not count: the retry prunes nothing,
+ * so reapplying for it would do no work.
+ */
 export function hasNetworkPolicyRetryPendingMarker(
   conditions: StatusCondition[] | undefined
 ): boolean {
-  return (conditions ?? []).some(
-    c => c.type === NETWORK_POLICIES_CONVERGED_CONDITION_TYPE && c.status === 'False'
+  return networkPolicyMarkerFacts(conditions).apply === 'pending'
+}
+
+/**
+ * True while the published group says the legacy mcp-servers internet policy
+ * is pending a delete (`WorkflowLegacyNetworkPolicyRemoved=False/DeletePending`).
+ * Only this reason enters the `legacy-retry` writer; a reason this controller
+ * did not write is never interpreted.
+ */
+export function hasLegacyNetworkPolicyDeletePendingMarker(
+  conditions: StatusCondition[] | undefined
+): boolean {
+  const published = publishedMarker(
+    conditions,
+    LEGACY_NETWORK_POLICY_REMOVED_CONDITION_TYPE,
+    isLegacyNetworkPolicyReason
+  )
+  return (
+    published.kind === 'known' &&
+    LEGACY_NETWORK_POLICY_REASONS[published.condition.reason as LegacyNetworkPolicyReason].fact ===
+      'pending'
   )
 }
 
-function buildNetworkPolicyRetryPendingCondition(
+/**
+ * Backoff between two DELETEs of the legacy mcp-servers internet policy for
+ * one recipe after a DELETE that did not land: 60 s, doubling up to 1 h. A
+ * transient 403 does not leave a false DeletePending for hours, a sustained
+ * one costs one DELETE per hour per recipe, and a converged recipe costs none.
+ */
+export const LEGACY_NETWORK_POLICY_DELETE_BACKOFF_BASE_MS = 60_000
+export const LEGACY_NETWORK_POLICY_DELETE_BACKOFF_MAX_MS = 3_600_000
+
+/**
+ * Reads the facts a published marker carries. This and
+ * `buildNetworkPolicyConvergedCondition` are the only places that encode what
+ * the marker means. A `False` marker with any other reason was not written by
+ * this controller and reads as converged facts.
+ */
+export function networkPolicyMarkerFacts(
+  conditions: StatusCondition[] | undefined
+): NetworkPolicyMarkerFacts {
+  const marker = (conditions ?? []).find(
+    c => c.type === NETWORK_POLICIES_CONVERGED_CONDITION_TYPE && c.status === 'False'
+  )
+  if (!isNetworkPolicyMarkerReason(marker?.reason)) {
+    return { ...CONVERGED_NETWORK_POLICY_MARKER_FACTS }
+  }
+  if (
+    marker.reason === 'RetryPending' &&
+    marker.message === HISTORICAL_RETRY_AND_PRUNE_PENDING_MESSAGE
+  ) {
+    return { apply: 'pending', prune: 'pending' }
+  }
+  return { ...NETWORK_POLICY_MARKER_REASONS[marker.reason].facts }
+}
+
+/**
+ * The marker for `facts`, or `undefined` when both are converged (the marker
+ * is then removed). `lastTransitionTime` follows `status`: a marker that stays
+ * `False` keeps the time it was first published, whichever fact it now names.
+ */
+export function buildNetworkPolicyConvergedCondition(
+  facts: NetworkPolicyMarkerFacts,
   now: string,
   existingConditions?: StatusCondition[]
-): StatusCondition {
+): StatusCondition | undefined {
+  const reason = networkPolicyMarkerReason(facts)
+  if (reason === undefined) return undefined
   const existing = existingConditions?.find(
     c => c.type === NETWORK_POLICIES_CONVERGED_CONDITION_TYPE && c.status === 'False'
   )
   return {
     type: NETWORK_POLICIES_CONVERGED_CONDITION_TYPE,
     status: 'False',
-    reason: 'RetryPending',
-    message: NETWORK_POLICY_RETRY_PENDING_MESSAGE,
+    reason,
+    message: NETWORK_POLICY_MARKER_REASONS[reason].message,
     lastTransitionTime: existing?.lastTransitionTime ?? now,
   }
 }
@@ -354,26 +581,229 @@ export function buildNetworkPolicyOwnershipConditions(
 }
 
 /**
- * The status fields one policy apply pass contributes, shared by the run lane
- * and the SDK-only lane so both translate a summary the same way. No summary
- * (the pass returned before the apply) yields neither field, which keeps the
- * published conditions. A summary always yields the group's conditions, `[]`
- * included: the ownership condition when a policy conflicts, and the retry
- * marker plus the retry flag when a policy was left pending a retry.
+ * The legacy marker for `fact`, or `undefined` once the policy is removed.
+ * `lastTransitionTime` is kept while the marker stays `False`.
  */
-export function translateNetworkPolicyApplySummary(
-  summary: WorkflowNetworkPolicyApplySummary | undefined,
+function buildLegacyNetworkPolicyCondition(
+  fact: NetworkPolicyLegacyFact,
+  now: string,
+  existingConditions?: StatusCondition[]
+): StatusCondition | undefined {
+  switch (fact) {
+    case 'removed':
+      return undefined
+    case 'pending': {
+      const existing = existingConditions?.find(
+        c => c.type === LEGACY_NETWORK_POLICY_REMOVED_CONDITION_TYPE && c.status === 'False'
+      )
+      return {
+        type: LEGACY_NETWORK_POLICY_REMOVED_CONDITION_TYPE,
+        status: 'False',
+        reason: 'DeletePending',
+        message: LEGACY_NETWORK_POLICY_REASONS.DeletePending.message,
+        lastTransitionTime: existing?.lastTransitionTime ?? now,
+      }
+    }
+    default: {
+      const unreachable: never = fact
+      throw new Error(`Unknown legacy NetworkPolicy fact: ${String(unreachable)}`)
+    }
+  }
+}
+
+/**
+ * Who writes the NetworkPolicy condition group, and so which facts it
+ * observed (Table A on `retryRunLaneNetworkPolicies`):
+ *
+ * - `reconcile`: a full pass (run lane, eager lane, SDK-only lane with a
+ *   summary). Observes the apply, the prune and the legacy delete.
+ * - `apply-retry`: the mid-run retry. Observes the apply; carries the prune
+ *   and legacy facts.
+ * - `legacy-retry`: the legacy delete the WRC retries before its
+ *   short-circuits while `DeletePending` is published. Observes the legacy
+ *   fact; carries the apply and prune facts and the ownership condition.
+ * - `terminal`: the run ended, so a pending apply is dropped; carries the
+ *   prune and legacy facts and the ownership condition.
+ * - `unmanaged`: the kill switch, the SDK-only lane without a runtime and
+ *   the capability removal. Written only after a teardown that deleted every
+ *   SDK policy, the legacy one by name included, so it clears the group.
+ */
+export type NetworkPolicyMarkerWriter =
+  | { kind: 'reconcile'; summary: NetworkPolicyPassSummary }
+  | { kind: 'apply-retry'; summary: WorkflowNetworkPolicyApplySummary }
+  | { kind: 'legacy-retry'; legacy: NetworkPolicyLegacyFact }
+  | { kind: 'terminal' }
+  | { kind: 'unmanaged' }
+
+/**
+ * A marker a carrying writer found published. `unknown` is a condition of a
+ * marker type whose status or reason this controller did not write: it is
+ * never interpreted, only kept as it is.
+ */
+type PublishedMarker =
+  | { kind: 'absent' }
+  | { kind: 'known'; condition: StatusCondition }
+  | { kind: 'unknown'; condition: StatusCondition }
+
+function publishedMarker(
+  existingConditions: StatusCondition[] | undefined,
+  type: string,
+  isKnownReason: (reason: string | undefined) => boolean
+): PublishedMarker {
+  const condition = (existingConditions ?? []).find(c => c.type === type)
+  if (condition === undefined) return { kind: 'absent' }
+  if (condition.status === 'False' && isKnownReason(condition.reason)) {
+    return { kind: 'known', condition }
+  }
+  return { kind: 'unknown', condition }
+}
+
+function warnUnknownNetworkPolicyMarker(
+  writer: NetworkPolicyMarkerWriter['kind'],
+  condition: StatusCondition
+): void {
+  createLogger('wrc', 'network-policy-marker').warn(
+    'Keeping a NetworkPolicy marker with a reason this controller did not write',
+    { writer, type: condition.type, status: condition.status, reason: condition.reason }
+  )
+}
+
+/** The converged marker a carrying writer publishes for its observed apply. */
+function carriedConvergedMarker(
+  writer: NetworkPolicyMarkerWriter['kind'],
+  apply: NetworkPolicyMarkerFacts['apply'],
+  existingConditions: StatusCondition[] | undefined,
+  now: string
+): StatusCondition | undefined {
+  const published = publishedMarker(
+    existingConditions,
+    NETWORK_POLICIES_CONVERGED_CONDITION_TYPE,
+    isNetworkPolicyMarkerReason
+  )
+  if (published.kind === 'unknown') {
+    warnUnknownNetworkPolicyMarker(writer, published.condition)
+    return published.condition
+  }
+  const { prune } = networkPolicyMarkerFacts(existingConditions)
+  return buildNetworkPolicyConvergedCondition({ apply, prune }, now, existingConditions)
+}
+
+/** The legacy marker a carrying writer publishes: the published one, as is. */
+function carriedLegacyMarker(
+  writer: NetworkPolicyMarkerWriter['kind'],
+  existingConditions: StatusCondition[] | undefined
+): StatusCondition | undefined {
+  const published = publishedMarker(
+    existingConditions,
+    LEGACY_NETWORK_POLICY_REMOVED_CONDITION_TYPE,
+    isLegacyNetworkPolicyReason
+  )
+  switch (published.kind) {
+    case 'absent':
+      return undefined
+    case 'known':
+      return published.condition
+    case 'unknown':
+      warnUnknownNetworkPolicyMarker(writer, published.condition)
+      return published.condition
+    default: {
+      const unreachable: never = published
+      throw new Error(`Unknown published marker: ${String(unreachable)}`)
+    }
+  }
+}
+
+function presentConditions(conditions: (StatusCondition | undefined)[]): StatusCondition[] {
+  return conditions.filter((c): c is StatusCondition => c !== undefined)
+}
+
+/**
+ * The whole NetworkPolicy condition group `writer` publishes: the ownership
+ * condition, the converged marker and the legacy marker, each only while it
+ * is `False`. `[]` removes the group. Every writer goes through here, so each
+ * fact is observed, carried or cleared exactly as Table A says.
+ */
+export function networkPolicyMarkerConditions(
+  writer: NetworkPolicyMarkerWriter,
+  existingConditions: StatusCondition[] | undefined,
+  now: string
+): StatusCondition[] {
+  switch (writer.kind) {
+    case 'reconcile': {
+      const { summary } = writer
+      return presentConditions([
+        ...buildNetworkPolicyOwnershipConditions(summary, now, existingConditions),
+        buildNetworkPolicyConvergedCondition(
+          { apply: summary.retryPending ? 'pending' : 'converged', prune: summary.prune },
+          now,
+          existingConditions
+        ),
+        buildLegacyNetworkPolicyCondition(summary.legacy, now, existingConditions),
+      ])
+    }
+    case 'apply-retry': {
+      const { summary } = writer
+      return presentConditions([
+        ...buildNetworkPolicyOwnershipConditions(summary, now, existingConditions),
+        carriedConvergedMarker(
+          writer.kind,
+          summary.retryPending ? 'pending' : 'converged',
+          existingConditions,
+          now
+        ),
+        carriedLegacyMarker(writer.kind, existingConditions),
+      ])
+    }
+    case 'legacy-retry':
+      return presentConditions([
+        ...(existingConditions ?? []).filter(
+          c => c.type === NETWORK_POLICY_OWNERSHIP_CONDITION_TYPE
+        ),
+        carriedConvergedMarker(
+          writer.kind,
+          networkPolicyMarkerFacts(existingConditions).apply,
+          existingConditions,
+          now
+        ),
+        buildLegacyNetworkPolicyCondition(writer.legacy, now, existingConditions),
+      ])
+    case 'terminal':
+      return presentConditions([
+        ...(existingConditions ?? []).filter(
+          c => c.type === NETWORK_POLICY_OWNERSHIP_CONDITION_TYPE
+        ),
+        carriedConvergedMarker(writer.kind, 'converged', existingConditions, now),
+        carriedLegacyMarker(writer.kind, existingConditions),
+      ])
+    case 'unmanaged':
+      return []
+    default: {
+      const unreachable: never = writer
+      throw new Error(`Unknown NetworkPolicy marker writer: ${String(unreachable)}`)
+    }
+  }
+}
+
+/**
+ * The status fields one full pass contributes, shared by the run lane, the
+ * eager lane and the SDK-only lane so all three translate a summary the same
+ * way (the `reconcile` writer). No summary (the pass returned before the
+ * apply) yields neither field, which keeps the published conditions. A
+ * summary always yields the whole group, `[]` included. Only a pending retry
+ * sets the retry flag (and with it a requeue).
+ */
+export function translateNetworkPolicyPassSummary(
+  summary: NetworkPolicyPassSummary | undefined,
   existingConditions: StatusCondition[] | undefined,
   now: string
 ): Pick<WorkflowReconcileResult, 'networkPolicyOwnershipConditions' | 'networkPolicyRetryPending'> {
   if (summary === undefined) return {}
   return {
-    networkPolicyOwnershipConditions: [
-      ...buildNetworkPolicyOwnershipConditions(summary, now, existingConditions),
-      ...(summary.retryPending
-        ? [buildNetworkPolicyRetryPendingCondition(now, existingConditions)]
-        : []),
-    ],
+    networkPolicyOwnershipConditions: networkPolicyMarkerConditions(
+      { kind: 'reconcile', summary },
+      existingConditions,
+      now
+    ),
     ...(summary.retryPending ? { networkPolicyRetryPending: true } : {}),
   }
 }
@@ -896,10 +1326,11 @@ export interface WorkflowReconcileResult {
   clearWorkflowExecution?: boolean
   workflowConditions?: StatusCondition[]
   /**
-   * The `WorkflowNetworkPolicyOwnership` condition from this pass's policy
-   * apply. Undefined when the pass returned before the apply, which keeps the
-   * published condition; `[]` when no policy is owned by another controller (a
-   * pending retry does not count as a conflict), which removes it.
+   * The NetworkPolicy condition group this pass's policy apply produced
+   * (`networkPolicyMarkerConditions`): the ownership condition and the
+   * converged and legacy markers. Undefined when the pass returned before the
+   * apply, which keeps the published group; `[]` when every fact converged
+   * and no policy is owned by another controller, which removes it.
    */
   networkPolicyOwnershipConditions?: StatusCondition[]
   /**
@@ -1120,6 +1551,16 @@ export class WorkflowReconciler {
     snapshot: CodexCatalogSnapshot
   } = { snapshot: { flagEnabled: false } }
   private readonly codexContexts = new Map<string, CodexReconcileContext>()
+  /** B3(c): one process-lifetime DELETE of the leftover mcp-servers internet NP. Keyed by recipe uid. */
+  private readonly prunedLegacyMcpServersInternetEgress = new Set<string>()
+  /**
+   * R4-L4: the backoff after a legacy DELETE that did not land, keyed like the
+   * gone set. `notBeforeMs` is the earliest time the next DELETE may be sent.
+   */
+  private readonly legacyMcpServersInternetEgressBackoff = new Map<
+    string,
+    { delayMs: number; notBeforeMs: number }
+  >()
 
   constructor(private readonly deps: WorkflowReconcilerDeps) {
     this.pluginWorkloadSdkProvisioner = new PluginWorkloadSdkProvisioner({
@@ -1357,7 +1798,7 @@ export class WorkflowReconciler {
     message: string
     pluginWorkloadSdkBootstrapProof?: EagerSdkBootstrapProof
     /** Undefined when the eager host returned before applying the policies. */
-    networkPolicies?: WorkflowNetworkPolicyApplySummary
+    networkPolicies?: NetworkPolicyPassSummary
   }> {
     if (!this.deps.config.pluginWorkloadSdkEnabled || !spec.pluginWorkloadSdk) {
       // Nothing is applied here, so no summary: an empty one would read as
@@ -1527,14 +1968,24 @@ export class WorkflowReconciler {
             this.teardownDelete(() =>
               this.deleteNetworkPoliciesByLabelSelector(
                 ns,
-                `clerum.io/recipe=${recipeName},clerum.io/managed-by=wrc`
+                `clerum.io/recipe=${recipeName},clerum.io/managed-by=wrc`,
+                buildLegacyMcpServersInternetEgressPolicyName(recipeName)
               )
             ),
             this.teardownDelete(() =>
               this.deleteNetworkPoliciesByLabelSelector(
                 this.deps.config.mcpServerNamespace,
-                `clerum.io/recipe=${recipeName},clerum.io/managed-by=wrc`
+                `clerum.io/recipe=${recipeName},clerum.io/managed-by=wrc`,
+                buildLegacyMcpServersInternetEgressPolicyName(recipeName)
               )
+            ),
+            // The legacy internet policy may carry no labels, while a labeled
+            // copy is excluded from the sweeps above. Both forms go through
+            // the one live ledger so a completed cleanup can prove `unmanaged`.
+            this.cleanupLegacyMcpServersInternetEgress(
+              recipeName,
+              options.recipeUid,
+              options.recipeDeleted === true
             ),
           ]),
     ])
@@ -1589,6 +2040,9 @@ export class WorkflowReconciler {
           `Plugin Workload SDK revocation for ${recipeName} was not confirmed disabled or absent`
         )
       }
+    }
+    if (options.recipeDeleted === true) {
+      this.forgetLegacyMcpServersInternetEgress(recipeName, options.recipeUid)
     }
   }
 
@@ -1752,7 +2206,7 @@ export class WorkflowReconciler {
     // Empty until this pass applies the policies, then what the apply found.
     // A return before the apply leaves it empty, and patchStatus keeps the
     // published condition.
-    let networkPolicyStatus: ReturnType<typeof translateNetworkPolicyApplySummary> = {}
+    let networkPolicyStatus: ReturnType<typeof translateNetworkPolicyPassSummary> = {}
     const withWorkflowConditions = (result: WorkflowReconcileResult): WorkflowReconcileResult => ({
       ...result,
       workflowConditions,
@@ -1776,11 +2230,12 @@ export class WorkflowReconciler {
 
     try {
       // Check crash recovery for existing Pods
-      let coordPhase = await getPodPhase(
+      const coordPresence = await getPodPresence(
         this.deps.coreApi,
         `${recipeName}-coordinator`,
         this.deps.config.sandboxNamespace
       )
+      let coordPhase = coordPresence.kind === 'present' ? coordPresence.phase : undefined
       const coordWaitingReason = await getContainerWaitingReason(
         this.deps.coreApi,
         `${recipeName}-coordinator`,
@@ -1800,13 +2255,14 @@ export class WorkflowReconciler {
             this.deps.config.sandboxNamespace
           )
         : undefined
-      let mcpHostPhase = needsMcpHost
-        ? await getPodPhase(
+      const mcpHostPresence: PodPresence = needsMcpHost
+        ? await getPodPresence(
             this.deps.coreApi,
             `${recipeName}-mcp-host`,
             this.deps.config.sandboxNamespace
           )
-        : undefined
+        : { kind: 'unread' }
+      let mcpHostPhase = mcpHostPresence.kind === 'present' ? mcpHostPresence.phase : undefined
       let artifactReaderPhase = needsArtifactReader
         ? await getPodPhase(
             this.deps.coreApi,
@@ -1858,11 +2314,26 @@ export class WorkflowReconciler {
       }
 
       if (awaitsTriggeredRun) {
+        const samePassPresence: Partial<Record<WorkflowRuntimeComponent, PodPresence>> = {
+          'workflow-coordinator': coordPresence,
+          ...(mcpHostPresence.kind !== 'unread' ? { 'workflow-mcp-host': mcpHostPresence } : {}),
+        }
         for (const component of runtime.cleanup.deleteBeforeTriggeredRun) {
           // Plugin Workload SDK: keep the mcp-host alive across the
           // awaiting-trigger window — it hosts the always-on SDK server.
           // Only the coordinator (and run-scoped pods) are torn down here.
           if (eagerMcpHostForSdk && component === 'workflow-mcp-host') continue
+          // B3(d): skip DELETE only when the same-pass GET was a 404. A live
+          // pod with an empty status.phase is present and must still be deleted.
+          const presence = samePassPresence[component]
+          if (presence?.kind === 'absent') {
+            log.debug('Skipping runtime component DELETE; same-pass GET was absent', {
+              recipe: recipeName,
+              component,
+              presence: presence.kind,
+            })
+            continue
+          }
           await this.deleteRuntimeComponentIfExists(recipeName, component)
         }
 
@@ -1900,7 +2371,7 @@ export class WorkflowReconciler {
           // No summary means the host returned before the apply, so the pass
           // cannot say whether a conflict is gone. A `failed` pod after the
           // apply still carries a real summary and publishes it.
-          networkPolicyStatus = translateNetworkPolicyApplySummary(
+          networkPolicyStatus = translateNetworkPolicyPassSummary(
             eagerNetworkPolicies,
             currentStatus?.conditions,
             new Date().toISOString()
@@ -2365,7 +2836,7 @@ export class WorkflowReconciler {
         false,
         codexVerdict.grokProjection
       )
-      networkPolicyStatus = translateNetworkPolicyApplySummary(
+      networkPolicyStatus = translateNetworkPolicyPassSummary(
         runLaneNetworkPolicies,
         currentStatus?.conditions,
         new Date().toISOString()
@@ -2899,8 +3370,10 @@ export class WorkflowReconciler {
    * so dropping mcp-host/coordinator/snippet-runner here frees CPU/RAM without
    * losing any artifacts.
    *
-   * Idempotent: deleting an already-gone pod is a 404 no-op (deletePodIfExists).
-   * Deliberately EXCLUDES `workflow-artifact-reader`.
+   * DELETE-first and 404-safe (`deletePodIfExists`). This path is outside B3
+   * (E.4(e), §7.16): do not add a GET just to skip the DELETE. The archive
+   * TTL still owns leftover objects. Deliberately EXCLUDES
+   * `workflow-artifact-reader`.
    *
    * The component list is an explicit literal (not derived from
    * `runtime.cleanup.*`) on purpose: the "artifact-reader is preserved"
@@ -2948,9 +3421,95 @@ export class WorkflowReconciler {
    * Reapply the run-lane NetworkPolicies outside reconcile(). The running and
    * active short-circuits return before reconcile(), so a policy a previous
    * pass left pending (terminating or contended) would otherwise stay as it is
-   * until the run ends. Builds the same set reconcile() applies and only
-   * applies it: no codex, grok or legacy prune, because those follow an
-   * eligibility verdict that can change while a run is in progress.
+   * until the run ends. Builds the desired set with a verdict computed now and
+   * applies it, but deletes nothing: the run's pods are live and may still use
+   * any lane the spec wanted when they were created, so a revoke here cuts
+   * their traffic. That includes the legacy mcp-servers internet policy, which
+   * this path keeps. The summary is apply-only, so this path
+   * is the `apply-retry` writer of Table A below: it observes the apply and
+   * carries the published prune and legacy facts.
+   *
+   * What each path does to a run-lane policy (verdict = Codex/Grok
+   * eligibility; it governs only the proxy lanes, every other catalog lane
+   * follows the spec alone; legacy = `<recipe>-mcp-servers-egress-internet`):
+   *
+   * | path                 | proxy required | proxy uncertain | proxy retired | other lane, not desired | legacy          |
+   * | reconcile() pass     | applied        | kept if live    | pruned        | pruned                  | deleted         |
+   * | mid-run retry (this) | applied        | kept if live    | kept          | kept                    | kept            |
+   * | legacy retry         | untouched      | untouched       | untouched     | untouched               | deleted, backoff |
+   * | terminal teardown    | kept           | kept            | kept          | kept                    | kept            |
+   * | finalizer            | deleted        | deleted         | deleted       | deleted                 | deleted         |
+   *
+   * Table A, what each writer publishes (`networkPolicyMarkerConditions`).
+   * The facts are A (apply: `converged | pending`), P (prune: `converged |
+   * pending | unevaluated`, `unevaluated` being a failed LIST) and L (legacy:
+   * `removed | pending`), read back from the condition reasons alone:
+   *
+   * | A         | P           | `WorkflowNetworkPoliciesConverged` | requeue            |
+   * | converged | converged   | absent                             | none               |
+   * | pending   | converged   | False/`RetryPending`               | the retry's        |
+   * | converged | pending     | False/`PrunePending`               | none               |
+   * | converged | unevaluated | False/`PruneUnevaluated`           | none               |
+   * | pending   | pending     | False/`RetryAndPrunePending`       | as RetryPending    |
+   * | pending   | unevaluated | False/`RetryAndPruneUnevaluated`   | as RetryPending    |
+   *
+   * | L       | `WorkflowLegacyNetworkPolicyRemoved` |
+   * | removed | absent                               |
+   * | pending | False/`DeletePending`                |
+   *
+   * | writer                                             | A                | P       | L       | clears             |
+   * | `reconcile` (run lane, eager, SDK with a summary)  | observed         | observed | observed | what converged    |
+   * | SDK with a runtime and no summary                  | not written      | not written | not written | nothing     |
+   * | `apply-retry` (this, in-progress and active)       | observed         | carried | carried | A only             |
+   * | `legacy-retry` (WRC, before the short-circuits)    | carried          | carried | observed, backoff | L only   |
+   * | `terminal`                                         | forced converged | carried | carried | A                  |
+   * | `unmanaged` (kill switch, SDK lane without a runtime, capability removal) | converged | converged | removed | everything |
+   * | finalizer                                          | the object is deleted |    |         |                    |
+   *
+   * The legacy retry runs in the WRC before limit validation, every
+   * short-circuit and the early token reap, only while `DeletePending` is
+   * published. It, the reconcile() pass and a full SDK cleanup share one
+   * backoff per recipe: after a DELETE that did
+   * not land, the next one waits `min(prev * 2 || 60 s, 1 h)`, and inside
+   * that window the delete answers `pending` without a request. A `removed`
+   * answer clears L with a conditions-only patch; `pending` writes nothing.
+   * The watcher's legacy-only callback requeues after the rest of the window;
+   * it does not force a full reconcile. A cleanup that must remove the legacy
+   * policy but observes `pending` fails before `unmanaged` and requeues the
+   * full cleanup at the same window. Finalizer cleanup is the last chance:
+   * it sends through the same ledger even inside a window, then records and
+   * forgets state only after the complete cleanup succeeds.
+   *
+   * A carrying writer keeps a marker whose reason it did not write as it is
+   * and warns; `reconcile` overwrites it. `unmanaged` is written only after
+   * `cleanupPluginWorkloadSdk` without `preserveWorkflowRuntime` succeeded:
+   * its label sweeps exclude the legacy name, and the shared live ledger
+   * deletes that name once; a failure or backoff fails the pass before the
+   * writer runs. A pending or
+   * unevaluated prune is not retried outside reconcile(): only reconcile()
+   * can compute the desired set, and the finalizer's label sweep removes
+   * every run-lane leftover. On the finalizer, a non-404 DELETE is logged by
+   * `safeDelete` and not rethrown, so the finalizer completes.
+   *
+   * Historical `af0152924` markers are read only from their reason, except
+   * the one exact `RetryPending` combined message defined beside the decoder.
+   * Its ambiguous `PrunePending` cannot be safely promoted to L: current
+   * ordinary prune failures use the same reason, so they require a real
+   * reconcile() observation before the legacy retry can run.
+   *
+   * A desired lane is applied on both apply paths; an uncertain verdict never
+   * creates a proxy. Terminal teardown deletes a run-scoped run's compute pods
+   * and its cross-namespace transport workloads, and, for every terminal
+   * recipe, revokes `<recipe>-coordinator-to-gfs` unless the run completed and
+   * that policy may open; that policy is outside the run-lane catalog. It
+   * deletes no run-lane policy. The finalizer deletes a fixed list of run-lane
+   * names and sweeps by the recipe labels in the sandbox and mcp-server
+   * namespaces; the legacy policy predates those labels and is deleted by
+   * name in the mcp-server namespace.
+   *
+   * reconcile(), and so its prune, also runs while the run's pods are live:
+   * the WRC falls through to it for a run in `initializing` or `recovering`,
+   * and for any in-progress run while transport network readiness is pending.
    */
   async retryRunLaneNetworkPolicies(
     recipeName: string,
@@ -2975,7 +3534,7 @@ export class WorkflowReconciler {
       runtimeScopeRecipeName,
       codexView
     )
-    const policies = await this.buildWorkflowNetworkPoliciesForSpec(
+    const { policies } = await this.buildWorkflowNetworkPoliciesForSpec(
       recipeName,
       recipeUid,
       spec,
@@ -3174,13 +3733,115 @@ export class WorkflowReconciler {
     }
   }
 
-  private async pruneLegacyMcpServersInternetEgressPolicy(recipeName: string): Promise<void> {
-    await this.safeDelete(() =>
+  private legacyMcpServersInternetEgressKey(recipeName: string, recipeUid?: string): string {
+    return recipeUid && recipeUid.length > 0 ? recipeUid : recipeName
+  }
+
+  private forgetLegacyMcpServersInternetEgress(recipeName: string, recipeUid?: string): void {
+    this.prunedLegacyMcpServersInternetEgress.delete(recipeName)
+    this.legacyMcpServersInternetEgressBackoff.delete(recipeName)
+    if (recipeUid) {
+      this.prunedLegacyMcpServersInternetEgress.delete(recipeUid)
+      this.legacyMcpServersInternetEgressBackoff.delete(recipeUid)
+    }
+  }
+
+  private async cleanupLegacyMcpServersInternetEgress(
+    recipeName: string,
+    recipeUid?: string,
+    lastChance = false
+  ): Promise<void> {
+    const fact = await this.pruneLegacyMcpServersInternetEgressPolicy(
+      recipeName,
+      recipeUid,
+      lastChance
+    )
+    if (fact === 'pending') {
+      throw new LegacyNetworkPolicyDeletePendingError(
+        recipeName,
+        Math.max(1, this.legacyMcpServersInternetEgressRetryDelayMs(recipeName, recipeUid ?? ''))
+      )
+    }
+  }
+
+  /**
+   * R4-L4: the legacy delete the WRC retries before its short-circuits while
+   * `DeletePending` is published (the `legacy-retry` writer). The same delete
+   * and backoff as the reconcile() pass: inside the backoff window it answers
+   * `pending` without a request.
+   */
+  async retryLegacyMcpServersInternetEgressDelete(
+    recipeName: string,
+    recipeUid: string
+  ): Promise<NetworkPolicyLegacyFact> {
+    return this.pruneLegacyMcpServersInternetEgressPolicy(recipeName, recipeUid)
+  }
+
+  /**
+   * R4-L4: how long until the next legacy DELETE may be sent for this recipe;
+   * 0 when no backoff is running. The WRC requeues a pass that leaves
+   * `DeletePending` published after this delay.
+   */
+  legacyMcpServersInternetEgressRetryDelayMs(recipeName: string, recipeUid: string): number {
+    const backoff = this.legacyMcpServersInternetEgressBackoff.get(
+      this.legacyMcpServersInternetEgressKey(recipeName, recipeUid)
+    )
+    if (backoff === undefined) return 0
+    return Math.max(0, backoff.notBeforeMs - Date.now())
+  }
+
+  private async pruneLegacyMcpServersInternetEgressPolicy(
+    recipeName: string,
+    recipeUid?: string,
+    lastChance = false
+  ): Promise<NetworkPolicyLegacyFact> {
+    const key = this.legacyMcpServersInternetEgressKey(recipeName, recipeUid)
+    if (this.prunedLegacyMcpServersInternetEgress.has(key)) {
+      this.log.debug('Skipping legacy mcp-servers internet NP delete; already observed gone', {
+        recipe: recipeName,
+      })
+      return 'removed'
+    }
+    const backoff = this.legacyMcpServersInternetEgressBackoff.get(key)
+    if (backoff !== undefined && !lastChance && Date.now() < backoff.notBeforeMs) {
+      this.log.debug('Skipping legacy mcp-servers internet NP delete; inside its backoff window', {
+        recipe: recipeName,
+        retryInMs: backoff.notBeforeMs - Date.now(),
+      })
+      return 'pending'
+    }
+    const outcome = await observeNamespacedDelete(() =>
       this.deps.networkingApi.deleteNamespacedNetworkPolicy({
-        name: `${recipeName}-mcp-servers-egress-internet`,
+        name: buildLegacyMcpServersInternetEgressPolicyName(recipeName),
         namespace: this.deps.config.mcpServerNamespace,
       })
     )
+    if (outcome.kind === 'failed') {
+      const delayMs = Math.min(
+        backoff === undefined ? LEGACY_NETWORK_POLICY_DELETE_BACKOFF_BASE_MS : backoff.delayMs * 2,
+        LEGACY_NETWORK_POLICY_DELETE_BACKOFF_MAX_MS
+      )
+      this.legacyMcpServersInternetEgressBackoff.set(key, {
+        delayMs,
+        notBeforeMs: Date.now() + delayMs,
+      })
+      this.log.error('Legacy mcp-servers internet NP delete failed', {
+        recipe: recipeName,
+        ...deleteOutcomeFields(outcome),
+        retryInMs: delayMs,
+        err: outcome.error,
+      })
+      return 'pending'
+    }
+    this.legacyMcpServersInternetEgressBackoff.delete(key)
+    this.log.info('Legacy mcp-servers internet NP delete', {
+      recipe: recipeName,
+      ...deleteOutcomeFields(outcome),
+    })
+    if (shouldRecordDelete(outcome)) {
+      this.prunedLegacyMcpServersInternetEgress.add(key)
+    }
+    return 'removed'
   }
 
   private needsRuntimeHttpEgressRefresh(spec: WorkflowRecipeSpec): boolean {
@@ -3215,7 +3876,7 @@ export class WorkflowReconciler {
       eligibility: 'ineligible',
       reason: 'static_only',
     }
-  ): Promise<k8s.V1NetworkPolicy[]> {
+  ): Promise<{ policies: k8s.V1NetworkPolicy[]; catalog: Set<string> }> {
     const runtimeHttpEgressPolicyNames = this.runtimeHttpEgressPolicyNames(recipeName, spec)
     const runtimeHttpEgressState =
       runtimeHttpEgressPolicyNames.length > 0 && runtimeHttpEgressClass(spec) === 'exact-host'
@@ -3322,7 +3983,12 @@ export class WorkflowReconciler {
         runtimeHttpEgressState.annotations
       )
     }
-    return policies
+    const catalog = buildRunLaneNetworkPolicyCatalog(
+      npConfig,
+      mcpServerFullNames,
+      snippetMcpServerFullNames
+    )
+    return { policies, catalog }
   }
 
   /**
@@ -3341,8 +4007,8 @@ export class WorkflowReconciler {
     codexProjection: CodexExecutionProjection,
     eagerSdkMcpHost = false,
     grokProjection?: CodexExecutionProjection & { requiresGrokProxyEgress?: boolean }
-  ): Promise<WorkflowNetworkPolicyApplySummary> {
-    const policies = await this.buildWorkflowNetworkPoliciesForSpec(
+  ): Promise<NetworkPolicyPassSummary> {
+    const { policies, catalog } = await this.buildWorkflowNetworkPoliciesForSpec(
       recipeName,
       recipeUid,
       spec,
@@ -3352,29 +4018,119 @@ export class WorkflowReconciler {
       eagerSdkMcpHost,
       grokProjection
     )
-    const summary = await this.applyNetworkPolicyList(policies)
+    return this.applyAndPruneRunLaneNetworkPolicies(recipeName, recipeUid, policies, catalog, {
+      codex: codexProjection.eligibility === 'uncertain',
+      grok: grokProjection?.eligibility === 'uncertain',
+    })
+  }
+
+  private async applyAndPruneRunLaneNetworkPolicies(
+    recipeName: string,
+    recipeUid: string,
+    policies: k8s.V1NetworkPolicy[],
+    catalog: Set<string>,
+    keepProxies: RunLaneProxyKeepReasons
+  ): Promise<NetworkPolicyPassSummary> {
+    const applied = await this.applyNetworkPolicyList(policies)
     const policyNames = new Set(policies.map(policy => policy.metadata?.name))
+    const prune = await this.pruneUndesiredRunLaneNetworkPolicies(
+      recipeName,
+      policyNames,
+      catalog,
+      keepProxies
+    )
+    const legacy = await this.pruneLegacyMcpServersInternetEgressPolicy(recipeName, recipeUid)
+    return { ...applied, prune, legacy }
+  }
+
+  /**
+   * Drop run-lane NetworkPolicies that exist and are no longer desired.
+   * Two-term selector only (`managed-by=wrc`): a single-term recipe selector
+   * would also return the recipes-lane policies in the same namespace.
+   * Universe is the factory catalog (GFS never in it), not LIST \ desired.
+   * A Codex/Grok proxy whose verdict is uncertain survives even when it is
+   * absent from this pass's desired set. A listed policy with an
+   * ownerReference is skipped, matching the apply's ownership veto. Only
+   * reconcile() prunes; the mid-run retry never calls this (see
+   * retryRunLaneNetworkPolicies for the per-path table). A failed LIST
+   * evaluated nothing and answers `unevaluated`; a DELETE that did not land
+   * answers `pending`.
+   */
+  private async pruneUndesiredRunLaneNetworkPolicies(
+    recipeName: string,
+    desiredNames: Set<string | undefined>,
+    catalog: Set<string>,
+    keepProxies: RunLaneProxyKeepReasons
+  ): Promise<NetworkPolicyPruneFact> {
+    const namespace = this.deps.config.sandboxNamespace
+    const labelSelector = `clerum.io/recipe=${recipeName},clerum.io/managed-by=wrc`
+    let list: { items?: k8s.V1NetworkPolicy[] }
+    try {
+      list = await this.deps.networkingApi.listNamespacedNetworkPolicy({
+        namespace,
+        labelSelector,
+      })
+    } catch (error: unknown) {
+      this.log.error('Run-lane NP prune LIST failed; apply outcome is kept', {
+        recipe: recipeName,
+        err: error,
+      })
+      return 'unevaluated'
+    }
     const codexProxyPolicyName = `${recipeName}-mcp-host-to-codex-proxy`
     const grokProxyPolicyName = `${recipeName}-mcp-host-to-grok-proxy`
-
-    if (!policyNames.has(codexProxyPolicyName) && codexProjection.eligibility !== 'uncertain') {
-      await this.safeDelete(() =>
-        this.deps.networkingApi.deleteNamespacedNetworkPolicy({
-          name: codexProxyPolicyName,
-          namespace: this.deps.config.sandboxNamespace,
+    let deletePending = false
+    for (const policy of list.items ?? []) {
+      const name = policy.metadata?.name
+      if (!name || desiredNames.has(name)) continue
+      const keep =
+        name === codexProxyPolicyName
+          ? keepProxies.codex
+          : name === grokProxyPolicyName
+            ? keepProxies.grok
+            : false
+      if (keep) {
+        this.log.debug('Skipping run-lane NP prune', {
+          recipe: recipeName,
+          policy: name,
+          reason: 'uncertain',
         })
-      )
-    }
-    if (!policyNames.has(grokProxyPolicyName) && grokProjection?.eligibility !== 'uncertain') {
-      await this.safeDelete(() =>
-        this.deps.networkingApi.deleteNamespacedNetworkPolicy({
-          name: grokProxyPolicyName,
-          namespace: this.deps.config.sandboxNamespace,
+        continue
+      }
+      if (!catalog.has(name)) {
+        this.log.debug('Skipping run-lane NP prune', {
+          recipe: recipeName,
+          policy: name,
+          reason: 'not-in-catalog',
         })
+        continue
+      }
+      // Same ownership veto the run-lane apply uses: a policy under our name
+      // that carries an ownerReference belongs to someone else, and the apply
+      // already refuses to replace it.
+      const ownership = classifyOwnerlessNetworkPolicyOwnership(policy)
+      if (ownership.kind !== 'owned') {
+        this.log.warn('Skipping run-lane NP prune', {
+          recipe: recipeName,
+          policy: name,
+          reason: ownership.kind === 'conflict' ? ownership.reason : ownership.kind,
+        })
+        continue
+      }
+      const outcome = await observeNamespacedDelete(() =>
+        this.deps.networkingApi.deleteNamespacedNetworkPolicy({ name, namespace })
       )
+      if (outcome.kind === 'failed') {
+        this.log.error('Run-lane NP prune delete failed', {
+          recipe: recipeName,
+          policy: name,
+          ...deleteOutcomeFields(outcome),
+          err: outcome.error,
+        })
+        deletePending = true
+      }
     }
-    await this.pruneLegacyMcpServersInternetEgressPolicy(recipeName)
-    return summary
+    return deletePending ? 'pending' : 'converged'
   }
 
   /**
@@ -3638,12 +4394,14 @@ export class WorkflowReconciler {
   async reconcileDelete(
     recipeName: string,
     recipeNamespace?: string,
-    spec?: WorkflowRecipeSpec
+    spec?: WorkflowRecipeSpec,
+    recipeUid?: string
   ): Promise<void> {
     const ns = this.deps.config.sandboxNamespace
     const log = createLogger('wrc', recipeName)
     log.info(`Deleting workflow resources`)
     this.pluginWorkloadSdkProvisioner.clearRecipeState(recipeName)
+    this.forgetLegacyMcpServersInternetEgress(recipeName, recipeUid)
 
     // Best-effort cleanup of the recipe's subdirectory on the workflow output PVC.
     // Must run BEFORE pod deletion while mcp-host is still reachable; failures
@@ -3758,8 +4516,9 @@ export class WorkflowReconciler {
     // NP-02: wf-mcp-host-ingress lives in mcpServerNamespace, not sandboxNamespace.
     // NP-03: now one NP per mcp-server (named `wf-mcp-ingress-${mcpServerName}`).
     // List-by-label is the cleanest cleanup — all managed NPs have recipe label.
-    const mcpServerNpNames: string[] = [] // legacy single-NP name no longer used;
-    // per-mcp-server NPs are deleted via label selector below.
+    // Per-mcp-server NPs are deleted via label selector below. The legacy
+    // internet policy predates those labels, so it is deleted by name (R4-L4).
+    const mcpServerNpNames: string[] = [buildLegacyMcpServersInternetEgressPolicyName(recipeName)]
     const mcpNs = this.deps.config.mcpServerNamespace
 
     const cleanupTasks: Array<{ label: string; run: () => Promise<void> }> = [
@@ -3978,7 +4737,8 @@ export class WorkflowReconciler {
 
   private async deleteNetworkPoliciesByLabelSelector(
     namespace: string,
-    labelSelector: string
+    labelSelector: string,
+    excludeName?: string
   ): Promise<void> {
     const list = await this.deps.networkingApi.listNamespacedNetworkPolicy({
       namespace,
@@ -3988,6 +4748,7 @@ export class WorkflowReconciler {
       (list.items ?? [])
         .map(policy => policy.metadata?.name)
         .filter((name): name is string => Boolean(name))
+        .filter(name => name !== excludeName)
         .map(async name => {
           try {
             await this.deps.networkingApi.deleteNamespacedNetworkPolicy({ name, namespace })

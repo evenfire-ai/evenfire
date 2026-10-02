@@ -26,6 +26,7 @@ for file in "$MINIKUBE_DIR/profile-readiness.sh" "$ROOT/scripts/tests/test-minik
   "$ROOT/scripts/tests/lib/minikube-fixture-repo.sh" \
   "$ROOT/scripts/tests/test-minikube-t2-public-boundary.sh" \
   "$ROOT/scripts/tests/test-minikube-t2-scenarios.sh" \
+  "$ROOT/scripts/tests/test-branch-profile-lifecycle.sh" \
   "$ROOT/scripts/tests/test-minikube-t2-proxy-runtime.sh" \
   "$ROOT/scripts/tests/test-minikube-t2-control-api-runtime.sh" \
   "$ROOT/scripts/tests/test-minikube-image-capability-fixture.sh" \
@@ -100,6 +101,22 @@ for identity_file in "$COMMON" "$ROOT/scripts/minikube/sync-auth-key.sh" "$ROOT/
   grep -Fq 't2_worktree_id' "$identity_file"
 done
 grep -Fq 'bash "$T2_PROJECT_DIR/scripts/tests/test-minikube-t2-contract.sh"' "$T2"
+# run_t0 runs under the lease owner but does not hold the lease, so its children
+# must not inherit the pinned origin/dev: t2_resolve_origin_dev refuses a pin
+# without T2_SKIP_LOCK=true. Every child starts through t2_run_outside_lease;
+# T0 receives origin/dev explicitly as T0_ORIGIN_DEV.
+# Continuation lines are joined so a wrapped command is checked as one line.
+run_t0_body="$(awk '/^run_t0\(\) \{/{f=1} !f{next} sub(/\\$/, ""){buf=buf $0; next} {print buf $0; buf=""} /^\}/{exit}' "$T2")"
+[ -n "$run_t0_body" ] || { printf 'FAIL: run_t0 not found in t2.sh\n' >&2; exit 1; }
+unwrapped_t0_children="$(printf '%s\n' "$run_t0_body" | grep -E '^[[:space:]]*(bash |T0_PROJECT_DIR=)' | grep -Ev '^[[:space:]]*bash -n ' || true)"
+[ -z "$unwrapped_t0_children" ] || {
+  printf 'FAIL: run_t0 starts a child without t2_run_outside_lease:\n%s\n' "$unwrapped_t0_children" >&2
+  exit 1
+}
+[ "$(printf '%s\n' "$run_t0_body" | grep -Ec '^[[:space:]]*t2_run_outside_lease ')" -eq 4 ] || {
+  printf 'FAIL: run_t0 must start t0.sh, T2_T0_COMMAND, the contract test and the setup-handoff test through t2_run_outside_lease\n' >&2
+  exit 1
+}
 
 required_codes="DEVELOPMENT_SCOPE_REQUIRED PROFILE_OWNERSHIP_MISMATCH PROFILE_BUSY PROFILE_LOCK_REQUIRED HEAD_MARKER_MISMATCH IMAGE_MANIFEST_MISMATCH BOOTSTRAP_REQUIRED CERTIFICATION_REQUIRED SECRET_MISSING CONFIGMAP_MISSING POSTGRES_NOT_READY REAL_PG_REQUIRED_BUT_UNAVAILABLE REAL_PG_SUITE_FAILED REAL_PG_REPORT_INCOMPLETE UNSUPPORTED_T1_CONCURRENCY ZERO_TESTS_EXECUTED PORT_FORWARD_CONFLICT NP08_HCC_AUTHORIZATION_FAILED PLAYWRIGHT_FAILED"
 for code in $required_codes; do
@@ -430,6 +447,7 @@ bash -c '
   source "$1"
   parsed="$(t2_get_name control-plane/control-postgres)"
   test "$parsed" = "control-plane	control-postgres"
+  T2_ORIGIN_DEV=0123456789abcdef0123456789abcdef01234567
   t2_lock_acquire
   t2_lock_release
 ' bash "$COMMON"
@@ -448,6 +466,7 @@ T2_WORKTREE_ID=contract-worktree \
 bash -c '
   common="$1"
   source "$common"
+  T2_ORIGIN_DEV=0123456789abcdef0123456789abcdef01234567
   t2_lock_acquire
   token="$T2_LOCK_TOKEN"
   export T2_PROJECT_DIR T2_BRANCH T2_HEAD T2_ORIGIN_DEV T2_MERGE_BASE
@@ -481,7 +500,7 @@ EOF
 if T2_LOCK_ROOT="$tmp/locks" MINIKUBE_PROFILE=busy-profile T2_CONTEXT=busy-profile \
   T2_PROJECT_DIR="$ROOT" T2_BRANCH=test/minikube-contract T2_HEAD=0123456789abcdef \
   T2_ORIGIN_DEV=0123456789abcdef T2_MERGE_BASE=0123456789abcdef \
-  bash -c 'source "$1"; t2_lock_acquire' bash "$COMMON" 2>"$tmp/busy.err"; then
+  bash -c 'source "$1"; T2_ORIGIN_DEV=0123456789abcdef0123456789abcdef01234567; t2_lock_acquire' bash "$COMMON" 2>"$tmp/busy.err"; then
   echo 'FAIL: live profile owner was replaced' >&2
   exit 1
 fi
@@ -491,12 +510,26 @@ mkdir -p "$tmp/locks/empty-profile.lock"
 if T2_LOCK_ROOT="$tmp/locks" MINIKUBE_PROFILE=empty-profile T2_CONTEXT=empty-profile \
   T2_PROJECT_DIR="$ROOT" T2_BRANCH=test/minikube-contract T2_HEAD=0123456789abcdef \
   T2_ORIGIN_DEV=0123456789abcdef T2_MERGE_BASE=0123456789abcdef \
-  bash -c 'source "$1"; t2_lock_acquire' bash "$COMMON" 2>"$tmp/empty.err"; then
+  bash -c 'source "$1"; T2_ORIGIN_DEV=0123456789abcdef0123456789abcdef01234567; t2_lock_acquire' bash "$COMMON" 2>"$tmp/empty.err"; then
   echo 'FAIL: an ownerless profile lock was reclaimed' >&2
   exit 1
 fi
 grep -Fq 'PROFILE_BUSY' "$tmp/empty.err"
 grep -Fq 'orphaned' "$tmp/empty.err"
+
+# The lease owner pins origin/dev for its children, so it cannot take the
+# lease without one.
+if T2_LOCK_ROOT="$tmp/locks" MINIKUBE_PROFILE=clerum-unpinned T2_CONTEXT=clerum-unpinned \
+  T2_PROJECT_DIR="$ROOT" T2_BRANCH=test/minikube-contract T2_HEAD=0123456789abcdef \
+  bash -c 'source "$1"; t2_lock_acquire' bash "$COMMON" 2>"$tmp/unpinned.err"; then
+  echo 'FAIL: a lease owner without origin/dev acquired the lock' >&2
+  exit 1
+fi
+grep -Fq 'DEVELOPMENT_SCOPE_REQUIRED: the lease owner has no origin/dev to pin' "$tmp/unpinned.err"
+if [ -e "$tmp/locks/clerum-unpinned.lock" ]; then
+  echo 'FAIL: an unpinned lease owner left a lock behind' >&2
+  exit 1
+fi
 
 cert_root="$tmp/certifications"
 mkdir -p "$cert_root/prior" "$cert_root/current"

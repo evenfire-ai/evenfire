@@ -2,7 +2,7 @@
 # Launches the Desktop App Playwright E2E suite against the selected cluster.
 # Assumes branch-profile port-forwards are running for the same cluster. The
 # active URLs are read from the caller environment (normally ports.env emitted
-# by Clerum's .local-notes/minikube-profiles/branch.mk); fixed shared defaults
+# by Clerum's scripts/minikube-profiles/branch.mk); fixed shared defaults
 # are retained only for the unscoped clerum-test profile.
 #
 # Visual modes:
