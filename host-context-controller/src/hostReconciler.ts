@@ -532,6 +532,12 @@ type DeploymentMutationState = {
   grokExecutionEnabled: boolean
 }
 
+type HostObservationMark = {
+  name: string
+  namespace: string
+  uid: string
+}
+
 export class HostReconciler {
   private readonly appsApi: k8s.AppsV1Api
   private readonly coreApi: k8s.CoreV1Api
@@ -547,7 +553,7 @@ export class HostReconciler {
   private readonly now: () => Date
   private readonly newTelemetryOccurrenceId: () => string
   private readonly statusMap: Map<string, HostRuntimeStatus> = new Map()
-  private readonly hostsAwaitingOAuthObservation = new Set<string>()
+  private readonly hostsAwaitingOAuthObservation = new Map<string, HostObservationMark>()
   private codexSnapshot: CodexCatalogSnapshot = { flagEnabled: false }
   private lastCodexConfigMap: k8s.V1ConfigMap | undefined
   private readonly readinessTimers: Map<string, ReturnType<typeof setTimeout>> = new Map()
@@ -715,14 +721,34 @@ export class HostReconciler {
     this.hostFrontsOAuthServerFn = fn
   }
 
-  takeHostsAwaitingOAuthObservation(): string[] {
-    const names = [...this.hostsAwaitingOAuthObservation]
+  takeHostsAwaitingOAuthObservation(): HostObservationMark[] {
+    const observations = [...this.hostsAwaitingOAuthObservation.values()]
     this.hostsAwaitingOAuthObservation.clear()
-    return names
+    return observations
   }
 
-  requeueHostsAwaitingOAuthObservation(names: string[]): void {
-    for (const name of names) this.hostsAwaitingOAuthObservation.add(name)
+  requeueHostsAwaitingOAuthObservation(observations: HostObservationMark[]): void {
+    for (const observation of observations) {
+      const key = `${observation.namespace}/${observation.name}`
+      const pending = this.hostsAwaitingOAuthObservation.get(key)
+      // A failed job restores its captured identity, never a newer Host's mark.
+      if (!pending || pending.uid === observation.uid) {
+        this.hostsAwaitingOAuthObservation.set(key, observation)
+      }
+    }
+  }
+
+  private markHostAwaitingOAuthObservation(host: HostCRD): void {
+    // Pending work requires an object identity. An OAuth read can outlive a
+    // replacement watch event; that old pass must not replace the new mark.
+    if (!host.uid) return
+    const current = this.resolveCurrentHost?.(host.name)
+    if (current && (current.namespace !== host.namespace || current.uid !== host.uid)) return
+    this.hostsAwaitingOAuthObservation.set(`${host.namespace}/${host.name}`, {
+      name: host.name,
+      namespace: host.namespace,
+      uid: host.uid,
+    })
   }
 
   /**
@@ -1610,13 +1636,24 @@ export class HostReconciler {
     )
   }
 
+  private static hasHeldWakeTemplateBinding(
+    record: Pick<k8s.V1Secret, 'metadata'> | null
+  ): boolean {
+    return (
+      !!record?.metadata?.annotations?.[RUNTIME_TOKEN_BOOTSTRAP_DEPLOYMENT_UID_ANNOTATION] &&
+      !!record.metadata.annotations[RUNTIME_TOKEN_BOOTSTRAP_APPLIED_REVISION_ANNOTATION]
+    )
+  }
+
   private static heldWakeTemplateRefreshPending(
     record: Pick<k8s.V1Secret, 'metadata'> | null,
     deployment: k8s.V1Deployment | null
   ): boolean {
     return (
-      !!record &&
-      HostReconciler.bootstrapBindingMatchesDeployment(record, deployment) &&
+      // The persisted binding also records an unacknowledged wake. Replacing
+      // its Deployment does not acknowledge the required fresh mint/rollout.
+      // Exact binding is still required to preserve a pre-Ready template.
+      HostReconciler.hasHeldWakeTemplateBinding(record) &&
       (deployment?.spec?.replicas ?? 1) > 0 &&
       HostReconciler.deploymentReady(deployment)
     )
@@ -1709,6 +1746,9 @@ export class HostReconciler {
       return false
     }
     return (
+      // A replaced bound wake cannot reuse its potentially consumed material.
+      // Ordinary fresh rollouts have no binding and retain revision-based reuse.
+      HostReconciler.hasHeldWakeTemplateBinding(credentialRecord) ||
       credentialRecord?.metadata?.annotations?.[RUNTIME_TOKEN_BOOTSTRAP_STATE_ANNOTATION] !==
         RUNTIME_TOKEN_BOOTSTRAP_STATE_FRESH ||
       HostReconciler.deploymentRuntimeTokenRevision(deployment) !== currentRevision
@@ -2182,11 +2222,16 @@ export class HostReconciler {
           !options.preserveDeploymentTemplateOnWake &&
           cacheSynced &&
           options.targetSuspended !== true &&
+          retainedScopeIsTrusted &&
+          HostReconciler.deploymentBelongsToHost(deployment, host) &&
           HostReconciler.heldWakeTemplateRefreshPending(existing, deployment)
         const liveFrontsOAuth = await this.observeFrontsOAuthServer(host)
         let observedFrontsOAuth: boolean
         if (liveFrontsOAuth.observed) {
-          this.hostsAwaitingOAuthObservation.delete(host.name)
+          const observationKey = `${host.namespace}/${host.name}`
+          if (this.hostsAwaitingOAuthObservation.get(observationKey)?.uid === host.uid) {
+            this.hostsAwaitingOAuthObservation.delete(observationKey)
+          }
           observedFrontsOAuth = liveFrontsOAuth.frontsOAuthServer
         } else {
           const observationFailure = {
@@ -2214,7 +2259,7 @@ export class HostReconciler {
                 'deferring runtime token decision: OAuth observation unavailable and retained scope grants oauth:user-token',
                 observationFailure
               )
-              this.hostsAwaitingOAuthObservation.add(host.name)
+              this.markHostAwaitingOAuthObservation(host)
               return null
             }
             log.warn(
@@ -2227,7 +2272,7 @@ export class HostReconciler {
               'skipping runtime token mint during channel cache loss without an authoritative OAuth observation',
               observationFailure
             )
-            this.hostsAwaitingOAuthObservation.add(host.name)
+            this.markHostAwaitingOAuthObservation(host)
             return null
           }
         }
@@ -5803,7 +5848,7 @@ export class HostReconciler {
       await this.deleteHostRuntimeResources(name, namespace)
       this.clearStatus(name)
       this.desktopHosts.delete(name)
-      this.hostsAwaitingOAuthObservation.delete(name)
+      this.hostsAwaitingOAuthObservation.delete(`${namespace}/${name}`)
       // The delete path has no uid to key by, so every entry for this
       // namespace/name goes: the object is gone and no outcome will carry its
       // evidence (#696).

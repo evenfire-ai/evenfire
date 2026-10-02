@@ -123,7 +123,7 @@ function makeHost(overrides?: Partial<HostCRD>): HostCRD {
 
 function makeStatelessHost(
   overrides: { name?: string; spec?: Partial<HostCRD['spec']>; status?: HostCrdStatus } = {}
-): HostCRD {
+): HostCRD & { uid: string } {
   const name = overrides.name ?? 'stateless-host'
   return {
     name,
@@ -4898,62 +4898,73 @@ describe('HostReconciler stateless lifecycle — guarded image pull policy (Stag
       expect(issue).toHaveBeenCalledOnce()
     })
 
-    it('T6: defers a held wake refresh when OAuth cannot be observed with the cache synced', async () => {
-      const host = makeStatelessHost({
-        status: { lifecycle: { state: 'active', wakeHandledGeneration: 1 } },
-      })
-      const { reconciler, appsApi, coreApi } = createReconciler({
-        isCommunicationChannelCacheSynced: () => true,
-        countCommunicationChannels: () => 0,
-      })
-      const oauth = vi.fn(async (): Promise<boolean> => {
-        throw new Error('McpServer read unavailable')
-      })
-      reconciler.setHostFrontsOAuthServer(oauth)
-      const applied = trustedRuntimeDeployment(reconciler, host, {
-        replicas: 1,
-        readyReplicas: 1,
-      })
-      applied.spec!.template!.metadata!.annotations = {
-        ...applied.spec!.template!.metadata!.annotations,
-        [RUNTIME_TOKEN_REVISION_ANNOTATION]: APPLIED_RUNTIME_REVISION,
-      }
-      // A retained grant plus the wake binding: the pass must defer, not narrow.
-      const record = await mintedRuntimeCredentialRecord(host, {
-        bootstrap: 'fresh',
-        frontsOAuthServer: true,
-        annotations: wakeBootstrapBinding(applied.metadata!.uid!),
-      })
-      appsApi.readNamespacedDeployment.mockImplementation(async () => structuredClone(applied))
-      coreApi.readNamespacedSecret.mockResolvedValue(record)
-      const issue = vi.mocked(issueMcpHostRuntimeTokens)
-      const warn = vi.spyOn(HostContextLogger.prototype, 'warn').mockImplementation(() => undefined)
-      issue.mockClear()
-      const deferredBefore = await wakeRefreshCount('deferred_oauth_unobserved')
-      try {
-        const provision = await (reconciler as any).ensureMcpHostRuntimeTokenSecret(host, {
-          targetSuspended: false,
+    it.each([false, true])(
+      'T6: defers a held wake refresh when OAuth cannot be observed with the cache synced (replacement=%s)',
+      async replacement => {
+        const host = makeStatelessHost({
+          status: { lifecycle: { state: 'active', wakeHandledGeneration: 1 } },
         })
-
-        expect(provision).toBeNull()
-        expect(issue).not.toHaveBeenCalled()
-        expect(coreApi.replaceNamespacedSecret).not.toHaveBeenCalled()
-        // Witness: every bounded OAuth attempt ran before the deferral.
-        expect(oauth).toHaveBeenCalledTimes(3)
-        expect(await wakeRefreshCount('deferred_oauth_unobserved')).toBe(deferredBefore + 1)
-        expect(reconciler.takeHostsAwaitingOAuthObservation()).toEqual([host.name])
-        expect(warn).toHaveBeenCalledWith(
-          expect.stringContaining('deferring runtime token decision'),
-          expect.objectContaining({
-            host: host.name,
-            observation: 'frontsOAuthServer',
-            attempts: 3,
+        const { reconciler, appsApi, coreApi } = createReconciler({
+          isCommunicationChannelCacheSynced: () => true,
+          countCommunicationChannels: () => 0,
+        })
+        const oauth = vi.fn(async (): Promise<boolean> => {
+          throw new Error('McpServer read unavailable')
+        })
+        reconciler.setHostFrontsOAuthServer(oauth)
+        const applied = trustedRuntimeDeployment(reconciler, host, {
+          replicas: 1,
+          readyReplicas: 1,
+        })
+        applied.spec!.template!.metadata!.annotations = {
+          ...applied.spec!.template!.metadata!.annotations,
+          [RUNTIME_TOKEN_REVISION_ANNOTATION]: APPLIED_RUNTIME_REVISION,
+        }
+        // A retained grant plus the wake binding: the pass must defer, not narrow.
+        const record = await mintedRuntimeCredentialRecord(host, {
+          bootstrap: 'fresh',
+          frontsOAuthServer: true,
+          annotations: wakeBootstrapBinding(applied.metadata!.uid!),
+        })
+        if (replacement) {
+          applied.metadata!.uid = 'replacement-oauth-unobserved-uid'
+          applied.metadata!.resourceVersion = 'replacement-oauth-unobserved-version'
+        }
+        appsApi.readNamespacedDeployment.mockImplementation(async () => structuredClone(applied))
+        coreApi.readNamespacedSecret.mockResolvedValue(record)
+        const issue = vi.mocked(issueMcpHostRuntimeTokens)
+        const warn = vi
+          .spyOn(HostContextLogger.prototype, 'warn')
+          .mockImplementation(() => undefined)
+        issue.mockClear()
+        const deferredBefore = await wakeRefreshCount('deferred_oauth_unobserved')
+        try {
+          const provision = await (reconciler as any).ensureMcpHostRuntimeTokenSecret(host, {
+            targetSuspended: false,
           })
-        )
-      } finally {
-        warn.mockRestore()
+
+          expect(provision).toBeNull()
+          expect(issue).not.toHaveBeenCalled()
+          expect(coreApi.replaceNamespacedSecret).not.toHaveBeenCalled()
+          // Witness: every bounded OAuth attempt ran before the deferral.
+          expect(oauth).toHaveBeenCalledTimes(3)
+          expect(await wakeRefreshCount('deferred_oauth_unobserved')).toBe(deferredBefore + 1)
+          expect(reconciler.takeHostsAwaitingOAuthObservation()).toEqual([
+            { name: host.name, namespace: host.namespace, uid: host.uid },
+          ])
+          expect(warn).toHaveBeenCalledWith(
+            expect.stringContaining('deferring runtime token decision'),
+            expect.objectContaining({
+              host: host.name,
+              observation: 'frontsOAuthServer',
+              attempts: 3,
+            })
+          )
+        } finally {
+          warn.mockRestore()
+        }
       }
-    })
+    )
 
     it('T3b: retains an OAuth-deferred wake until a successful observation narrows the mint', async () => {
       const { host, reconciler, appsApi, coreApi, liveRecord } = await boundWakeRuntime({
@@ -4973,7 +4984,7 @@ describe('HostReconciler stateless lifecycle — guarded image pull policy (Stag
       expect(coreApi.readNamespacedSecret).toHaveBeenCalled()
       expect(issue).not.toHaveBeenCalled()
       const pending = reconciler.takeHostsAwaitingOAuthObservation()
-      expect(pending).toEqual([host.name])
+      expect(pending).toEqual([{ name: host.name, namespace: host.namespace, uid: host.uid }])
       // Restore the destructive snapshot so successful observation must ACK it.
       reconciler.requeueHostsAwaitingOAuthObservation(pending)
       oauth.mockClear().mockResolvedValue(false)
@@ -4990,7 +5001,9 @@ describe('HostReconciler stateless lifecycle — guarded image pull policy (Stag
 
     it('T9b: removes a deferred Host after its owned runtime resources are deleted', async () => {
       const { host, reconciler, appsApi, coreApi } = await boundWakeRuntime()
-      reconciler.requeueHostsAwaitingOAuthObservation([host.name])
+      reconciler.requeueHostsAwaitingOAuthObservation([
+        { name: host.name, namespace: host.namespace, uid: host.uid },
+      ])
       await reconciler.reconcileDelete(host.name, host.namespace)
       expect(appsApi.deleteNamespacedDeployment).toHaveBeenCalledWith({
         name: host.name,
@@ -4998,6 +5011,89 @@ describe('HostReconciler stateless lifecycle — guarded image pull policy (Stag
       })
       expect(coreApi.deleteNamespacedSecret).toHaveBeenCalled()
       expect(reconciler.takeHostsAwaitingOAuthObservation()).toEqual([])
+    })
+
+    it('R1-H1: a late failed retry cannot overwrite a replacement Host pending observation', async () => {
+      const { host, reconciler } = await boundWakeRuntime()
+      const oldObservation = { name: host.name, namespace: host.namespace, uid: host.uid }
+      reconciler.requeueHostsAwaitingOAuthObservation([oldObservation])
+      const oldSnapshot = reconciler.takeHostsAwaitingOAuthObservation()
+      expect(oldSnapshot).toEqual([oldObservation])
+
+      const replacementObservation = { ...oldObservation, uid: `${host.uid}-replacement` }
+      reconciler.requeueHostsAwaitingOAuthObservation([replacementObservation])
+      // A rejected old in-flight job restores its captured snapshot after B
+      // has already deferred. Requeue must retain B's newer identity.
+      reconciler.requeueHostsAwaitingOAuthObservation(oldSnapshot)
+      expect(reconciler.takeHostsAwaitingOAuthObservation()).toEqual([replacementObservation])
+    })
+
+    it('R1-H1: an old Host observation cannot acknowledge its replacement pending mark', async () => {
+      const { host, reconciler, coreApi } = await boundWakeRuntime({
+        replicas: 1,
+        readyReplicas: 0,
+        cacheSynced: () => false,
+      })
+      const replacementObservation = {
+        name: host.name,
+        namespace: host.namespace,
+        uid: `${host.uid}-replacement`,
+      }
+      reconciler.requeueHostsAwaitingOAuthObservation([replacementObservation])
+      const oauth = vi.fn(async () => false)
+      reconciler.setHostFrontsOAuthServer(oauth)
+      const issue = vi.mocked(issueMcpHostRuntimeTokens)
+      issue.mockClear()
+
+      await (reconciler as any).ensureMcpHostRuntimeTokenSecret(host)
+
+      expect(oauth).toHaveBeenCalledOnce()
+      expect(coreApi.readNamespacedSecret).toHaveBeenCalled()
+      expect(issue).not.toHaveBeenCalled()
+      expect(reconciler.takeHostsAwaitingOAuthObservation()).toEqual([replacementObservation])
+    })
+
+    it('R1-H1: a stale OAuth deferral cannot overwrite the replacement Host mark', async () => {
+      const { host, reconciler, coreApi } = await boundWakeRuntime({
+        replicas: 1,
+        readyReplicas: 0,
+        retainedFrontsOAuth: true,
+        cacheSynced: () => false,
+      })
+      let currentHost: HostCRD = host
+      reconciler.setResolveCurrentHost(() => currentHost)
+      let releaseObservation!: () => void
+      const observationBarrier = new Promise<void>(resolve => {
+        releaseObservation = resolve
+      })
+      let observationStarted!: () => void
+      const started = new Promise<void>(resolve => {
+        observationStarted = resolve
+      })
+      const oauth = vi.fn(async (): Promise<boolean> => {
+        observationStarted()
+        await observationBarrier
+        throw new Error('McpServer observation unavailable')
+      })
+      reconciler.setHostFrontsOAuthServer(oauth)
+      const issue = vi.mocked(issueMcpHostRuntimeTokens)
+      issue.mockClear()
+      const provision = (reconciler as any).ensureMcpHostRuntimeTokenSecret(host)
+      await started
+      currentHost = { ...host, uid: `${host.uid}-replacement` }
+      const replacementObservation = {
+        name: currentHost.name,
+        namespace: currentHost.namespace,
+        uid: currentHost.uid!,
+      }
+      reconciler.requeueHostsAwaitingOAuthObservation([replacementObservation])
+      releaseObservation()
+
+      await expect(provision).resolves.toBeNull()
+      expect(oauth).toHaveBeenCalledTimes(3)
+      expect(coreApi.readNamespacedSecret).toHaveBeenCalled()
+      expect(issue).not.toHaveBeenCalled()
+      expect(reconciler.takeHostsAwaitingOAuthObservation()).toEqual([replacementObservation])
     })
 
     it('T7: does not force a wake refresh for a suspended target after authority returns', async () => {
@@ -5198,63 +5294,193 @@ describe('HostReconciler stateless lifecycle — guarded image pull policy (Stag
       expect(appsApi.createNamespacedDeployment).not.toHaveBeenCalled()
     })
 
-    it('T10: reuses a persisted held-wake refresh after the rollout write fails', async () => {
-      const { host, reconciler, appsApi, coreApi, liveDeployment } = await boundWakeRuntime()
+    it.each([
+      { label: 'original Ready Deployment', replacement: false, readyReplicas: 1 },
+      { label: 'recreated Ready Deployment', replacement: true, readyReplicas: 1 },
+      { label: 'original pre-Ready Deployment', replacement: false, readyReplicas: 0 },
+      {
+        label: 'recreated pre-Ready Deployment using the stored bootstrap revision',
+        replacement: true,
+        readyReplicas: 0,
+      },
+    ])('R1-H2: refreshes a real held wake once for $label', async scenario => {
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date('2026-10-01T12:00:00Z'))
+      let cacheSynced = false
+      const host = makeStatelessHost({
+        status: { lifecycle: { state: 'active', wakeHandledGeneration: 1 } },
+      })
+      const { reconciler, appsApi, coreApi, customApi } = createReconciler({
+        isCommunicationChannelCacheSynced: () => cacheSynced,
+        countCommunicationChannels: () => 0,
+      })
+      customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(host))
+      const oauth = vi.fn(async () => false)
+      reconciler.setHostFrontsOAuthServer(oauth)
       const issue = vi.mocked(issueMcpHostRuntimeTokens)
-      const failure = Object.assign(new Error('probe Deployment rollout unavailable'), {
-        code: 503,
-      })
-      let failRollout = true
-      const persistedReplace = appsApi.replaceNamespacedDeployment.getMockImplementation()!
+      try {
+        // Reuse the existing producer's synthetic, decodable material. The
+        // bootstrap binding below is emitted by the real outage wake path.
+        await mintedRuntimeCredentialRecord(host, { bootstrap: 'fresh' })
+        const wakeMaterial = await issue.mock.results.at(-1)!.value
+        const applied = reconciler.buildDeployment(host)
+        applied.spec!.replicas = 0
+        applied.spec!.template!.metadata!.annotations = {
+          ...applied.spec!.template!.metadata!.annotations,
+          [RUNTIME_TOKEN_REVISION_ANNOTATION]: APPLIED_RUNTIME_REVISION,
+        }
+        markPersistedRuntimeTrusted(applied, host, 0)
+        const liveDeployment = persistHostDeployment(appsApi, host, applied)
+        const liveRecord = persistRuntimeCredential(coreApi, runtimeCredentialRecord(host))
+        issue.mockClear()
+        issue.mockResolvedValueOnce(wakeMaterial)
+        await reconciler.reconcile(host)
+        expect(issue).toHaveBeenCalledOnce()
+        expect(liveDeployment().spec!.replicas).toBe(1)
+        const boundUid = liveDeployment().metadata!.uid!
+        expect(liveRecord().metadata!.annotations).toMatchObject(wakeBootstrapBinding(boundUid))
+        const heldTemplate = structuredClone(liveDeployment().spec!.template)
 
-      issue.mockClear()
-      coreApi.readNamespacedSecret.mockClear()
-      coreApi.replaceNamespacedSecret.mockClear()
-      appsApi.replaceNamespacedDeployment.mockClear()
-      appsApi.replaceNamespacedDeployment.mockImplementation(async request => {
-        if (request.name !== host.name) return persistedReplace(request)
-        if (failRollout) throw failure
-        return persistedReplace(request)
-      })
+        if (scenario.replacement) {
+          liveDeployment().metadata!.uid = 'replacement-after-real-wake-uid'
+          liveDeployment().metadata!.resourceVersion = 'replacement-after-real-wake-version'
+          if (scenario.readyReplicas === 0) {
+            liveDeployment().spec!.template!.metadata!.annotations![
+              RUNTIME_TOKEN_REVISION_ANNOTATION
+            ] = liveRecord().metadata!.annotations!['clerum.io/runtime-token-secret-revision']!
+          }
+        }
+        liveDeployment().status = { readyReplicas: scenario.readyReplicas }
+        issue.mockClear()
+        oauth.mockClear()
+        appsApi.replaceNamespacedDeployment.mockClear()
+        coreApi.readNamespacedSecret.mockClear()
+        coreApi.replaceNamespacedSecret.mockClear()
+        cacheSynced = true
 
-      await expect(reconciler.reconcile(host)).rejects.toThrow(failure)
+        for (let pass = 0; pass < 3; pass += 1) {
+          await reconciler.reconcile(host)
+        }
 
-      expect(coreApi.readNamespacedSecret).toHaveBeenCalled()
-      expect(issue).toHaveBeenCalledOnce()
-      const firstPassWrites = runtimeTokenSecretWrites(coreApi)
-      expect(firstPassWrites).toHaveLength(1)
-      const persistedRevision =
-        firstPassWrites[0]!.metadata?.annotations?.['clerum.io/runtime-token-secret-revision']
-      expect(persistedRevision).toBeTruthy()
-      expect(firstPassWrites[0]!.metadata?.annotations).toMatchObject({
-        'clerum.io/runtime-token-bootstrap-state': 'fresh',
-        'clerum.io/runtime-token-rollout-required': 'true',
-      })
-      expect(firstPassWrites[0]!.metadata?.annotations).not.toHaveProperty(BOOTSTRAP_UID_ANNOTATION)
-      expect(
-        liveDeployment().spec?.template?.metadata?.annotations?.[RUNTIME_TOKEN_REVISION_ANNOTATION]
-      ).toBe(APPLIED_RUNTIME_REVISION)
+        expect(oauth).toHaveBeenCalled()
+        expect(coreApi.readNamespacedSecret).toHaveBeenCalled()
+        if (!scenario.replacement && scenario.readyReplicas === 0) {
+          expect(issue).not.toHaveBeenCalled()
+          expect(hostDeploymentReplacements(appsApi, host.name)).toHaveLength(0)
+          expect(liveDeployment().spec!.template).toEqual(heldTemplate)
+          expect(liveRecord().metadata!.annotations![BOOTSTRAP_UID_ANNOTATION]).toBe(boundUid)
+          liveDeployment().status = { readyReplicas: 1 }
+          await reconciler.reconcile(host)
+        }
 
-      failRollout = false
-      issue.mockClear()
-      coreApi.readNamespacedSecret.mockClear()
-      coreApi.replaceNamespacedSecret.mockClear()
-      appsApi.replaceNamespacedDeployment.mockClear()
-      await reconciler.reconcile(host)
-
-      expect(coreApi.readNamespacedSecret).toHaveBeenCalled()
-      expect(issue).not.toHaveBeenCalled()
-      expect(runtimeTokenSecretWrites(coreApi)).toHaveLength(0)
-      const rolloutWrites = hostDeploymentReplacements(appsApi, host.name)
-      expect(rolloutWrites).toHaveLength(1)
-      expect(
-        rolloutWrites[0]![0].body.spec?.template?.metadata?.annotations?.[
-          RUNTIME_TOKEN_REVISION_ANNOTATION
-        ]
-      ).toBe(persistedRevision)
-      expect(
-        liveDeployment().spec?.template?.metadata?.annotations?.[RUNTIME_TOKEN_REVISION_ANNOTATION]
-      ).toBe(persistedRevision)
+        expect(issue).toHaveBeenCalledOnce()
+        expect(hostDeploymentReplacements(appsApi, host.name)).toHaveLength(1)
+        expect(liveRecord().metadata!.annotations).not.toHaveProperty(BOOTSTRAP_UID_ANNOTATION)
+        expect(liveRecord().metadata!.annotations).not.toHaveProperty(
+          BOOTSTRAP_APPLIED_REVISION_ANNOTATION
+        )
+        expect(
+          liveDeployment().spec!.template!.metadata!.annotations![RUNTIME_TOKEN_REVISION_ANNOTATION]
+        ).toBe(liveRecord().metadata!.annotations!['clerum.io/runtime-token-secret-revision'])
+        // The ordinary fresh rollout has no held-wake binding and must reuse
+        // its just-applied revision while the replacement pod is still starting.
+        liveDeployment().status = { readyReplicas: 0 }
+        await reconciler.reconcile(host)
+        expect(issue).toHaveBeenCalledOnce()
+        expect(hostDeploymentReplacements(appsApi, host.name)).toHaveLength(1)
+      } finally {
+        vi.useRealTimers()
+      }
     })
+
+    it.each([false, true])(
+      'T10: reuses a persisted held-wake refresh after the rollout write fails (channel interruption=%s)',
+      async channelInterruption => {
+        let cacheSynced = true
+        const { host, reconciler, appsApi, coreApi, liveDeployment } = await boundWakeRuntime({
+          cacheSynced: () => cacheSynced,
+        })
+        const issue = vi.mocked(issueMcpHostRuntimeTokens)
+        const failure = Object.assign(new Error('probe Deployment rollout unavailable'), {
+          code: 503,
+        })
+        let failRollout = true
+        const persistedReplace = appsApi.replaceNamespacedDeployment.getMockImplementation()!
+
+        issue.mockClear()
+        coreApi.readNamespacedSecret.mockClear()
+        coreApi.replaceNamespacedSecret.mockClear()
+        appsApi.replaceNamespacedDeployment.mockClear()
+        appsApi.replaceNamespacedDeployment.mockImplementation(async request => {
+          if (request.name !== host.name) return persistedReplace(request)
+          if (failRollout) throw failure
+          return persistedReplace(request)
+        })
+
+        await expect(reconciler.reconcile(host)).rejects.toThrow(failure)
+
+        expect(coreApi.readNamespacedSecret).toHaveBeenCalled()
+        expect(issue).toHaveBeenCalledOnce()
+        const firstPassWrites = runtimeTokenSecretWrites(coreApi)
+        expect(firstPassWrites).toHaveLength(1)
+        const persistedRevision =
+          firstPassWrites[0]!.metadata?.annotations?.['clerum.io/runtime-token-secret-revision']
+        expect(persistedRevision).toBeTruthy()
+        expect(firstPassWrites[0]!.metadata?.annotations).toMatchObject({
+          'clerum.io/runtime-token-bootstrap-state': 'fresh',
+          'clerum.io/runtime-token-rollout-required': 'true',
+        })
+        expect(firstPassWrites[0]!.metadata?.annotations).not.toHaveProperty(
+          BOOTSTRAP_UID_ANNOTATION
+        )
+        expect(
+          liveDeployment().spec?.template?.metadata?.annotations?.[
+            RUNTIME_TOKEN_REVISION_ANNOTATION
+          ]
+        ).toBe(APPLIED_RUNTIME_REVISION)
+
+        if (channelInterruption) {
+          cacheSynced = false
+          issue.mockClear()
+          coreApi.replaceNamespacedSecret.mockClear()
+          appsApi.replaceNamespacedDeployment.mockClear()
+          await reconciler.reconcile(host)
+          // Loss of channel authority keeps the Ready pod in place despite the
+          // persisted fresh rollout. Recovery must use that emission, not mint again.
+          expect(issue).not.toHaveBeenCalled()
+          expect(hostDeploymentReplacements(appsApi, host.name)).toHaveLength(0)
+          expect(runtimeTokenSecretWrites(coreApi).some(write => write.stringData)).toBe(false)
+          expect(
+            liveDeployment().spec!.template!.metadata!.annotations![
+              RUNTIME_TOKEN_REVISION_ANNOTATION
+            ]
+          ).toBe(APPLIED_RUNTIME_REVISION)
+          cacheSynced = true
+        }
+
+        failRollout = false
+        issue.mockClear()
+        coreApi.readNamespacedSecret.mockClear()
+        coreApi.replaceNamespacedSecret.mockClear()
+        appsApi.replaceNamespacedDeployment.mockClear()
+        await reconciler.reconcile(host)
+
+        expect(coreApi.readNamespacedSecret).toHaveBeenCalled()
+        expect(issue).not.toHaveBeenCalled()
+        expect(runtimeTokenSecretWrites(coreApi)).toHaveLength(0)
+        const rolloutWrites = hostDeploymentReplacements(appsApi, host.name)
+        expect(rolloutWrites).toHaveLength(1)
+        expect(
+          rolloutWrites[0]![0].body.spec?.template?.metadata?.annotations?.[
+            RUNTIME_TOKEN_REVISION_ANNOTATION
+          ]
+        ).toBe(persistedRevision)
+        expect(
+          liveDeployment().spec?.template?.metadata?.annotations?.[
+            RUNTIME_TOKEN_REVISION_ANNOTATION
+          ]
+        ).toBe(persistedRevision)
+      }
+    )
   })
 })

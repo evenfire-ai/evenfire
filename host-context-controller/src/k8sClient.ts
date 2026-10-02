@@ -246,6 +246,7 @@ type NetworkPolicyConvergenceCause =
   | 'context-reconcile-failure'
 type OauthReobservationTrigger = 'mcpserver_recovery' | 'periodic_retry'
 type CompletedInventoryRevision = { contextRevision: number; serverRevision: number }
+
 // A scoped McpServer pass retries only names left incomplete by a pass whose
 // effects all ran under this inventory revision. 'full' covers the fleet.
 type McpServerConvergenceRequest =
@@ -1594,53 +1595,69 @@ export class McpServerWatcher implements McpServerProvider {
 
   private reconcileHostsAwaitingOAuthObservation(trigger: OauthReobservationTrigger): void {
     if (this.stopped) return
-    const names = this.hostReconciler.takeHostsAwaitingOAuthObservation()
-    const admittedHosts: HostCRD[] = []
-    for (const name of names) {
+    const observations = this.hostReconciler.takeHostsAwaitingOAuthObservation()
+    const admittedHosts: Array<HostCRD & { uid: string }> = []
+    for (const observation of observations) {
       hccLogger.info('re-observing OAuth scope after McpServer recovery', {
         trigger,
-        host: name,
+        host: observation.name,
       })
-      if (!this.admitHostDependentEffects(`McpServer recovery Host "${name}" convergence`)) {
-        this.hostReconciler.requeueHostsAwaitingOAuthObservation([name])
+      if (
+        !this.admitHostDependentEffects(`McpServer recovery Host "${observation.name}" convergence`)
+      ) {
+        this.hostReconciler.requeueHostsAwaitingOAuthObservation([observation])
         oauthReobservationTotal.inc({ trigger, result: 'requeued' })
         hccLogger.warn('[K8s] requeued Hosts awaiting OAuth observation', {
           trigger,
-          host: name,
+          host: observation.name,
           reason: 'admission-rejected',
         })
         continue
       }
 
-      const host = this.hosts.get(name)
-      if (!host) continue
-      admittedHosts.push(host)
+      const host = this.hosts.get(observation.name)
+      if (!host || host.namespace !== observation.namespace || host.uid !== observation.uid) {
+        continue
+      }
+      admittedHosts.push({ ...host, uid: observation.uid })
     }
 
     // Keep the whole admitted snapshot visible before any Host I/O. Watch
     // recovery and resync must settle independently of a slow Host, and later
     // triggers must not enqueue another job while that Host is unresolved.
     if (admittedHosts.length === 0) return
-    this.hostReconciler.requeueHostsAwaitingOAuthObservation(admittedHosts.map(host => host.name))
+    this.hostReconciler.requeueHostsAwaitingOAuthObservation(
+      admittedHosts.map(host => ({
+        name: host.name,
+        namespace: host.namespace,
+        uid: host.uid,
+      }))
+    )
     for (const host of admittedHosts) {
       if (this.stopped) break
-      const name = host.name
-      if (this.oauthReobservationInFlight.has(name)) continue
-      this.oauthReobservationInFlight.add(name)
+      const key = `${host.namespace}/${host.name}`
+      if (this.oauthReobservationInFlight.has(key)) continue
+      this.oauthReobservationInFlight.add(key)
       void (async () => {
         try {
           await this.hostReconciler.reconcile(host, 'retry')
           oauthReobservationTotal.inc({ trigger, result: 'reconciled' })
         } catch (error) {
-          this.hostReconciler.requeueHostsAwaitingOAuthObservation([name])
+          this.hostReconciler.requeueHostsAwaitingOAuthObservation([
+            {
+              name: host.name,
+              namespace: host.namespace,
+              uid: host.uid,
+            },
+          ])
           oauthReobservationTotal.inc({ trigger, result: 'failed' })
           hccLogger.warn('[K8s] requeued Hosts awaiting OAuth observation', {
             trigger,
-            host: name,
+            host: host.name,
             err: error,
           })
         } finally {
-          this.oauthReobservationInFlight.delete(name)
+          this.oauthReobservationInFlight.delete(key)
         }
       })()
     }
