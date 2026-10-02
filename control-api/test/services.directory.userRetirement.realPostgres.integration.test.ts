@@ -57,8 +57,8 @@ describeRealPostgres('retireDesktopUser on real PostgreSQL', () => {
   }, 60_000)
 
   afterAll(async () => {
-    corePoolConnectSpy?.mockRestore()
     try {
+      corePoolConnectSpy?.mockRestore()
       await endPoolAndWaitForClients(testPool)
       if (!adminPool) return
       await waitForDatabaseConnectionsToClose(adminPool, database)

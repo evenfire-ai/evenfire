@@ -74,9 +74,9 @@ describeRealPostgres('deleteControlAdmin on real PostgreSQL', () => {
   }, 60_000)
 
   afterAll(async () => {
-    querySpy?.mockRestore()
-    connectSpy?.mockRestore()
     try {
+      querySpy?.mockRestore()
+      connectSpy?.mockRestore()
       await endPoolAndWaitForClients(testPool)
       if (!adminPool) return
       await waitForDatabaseConnectionsToClose(adminPool, database)

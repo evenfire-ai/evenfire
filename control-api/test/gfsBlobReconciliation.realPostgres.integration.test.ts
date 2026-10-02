@@ -102,16 +102,19 @@ describeRealPostgres('GFS blob reconciliation on real PostgreSQL + on-disk BlobS
   })
 
   afterAll(async () => {
-    await endPoolAndWaitForClients(pool)
-    await rm(blobRoot, { recursive: true, force: true }).catch(() => undefined)
-    if (!adminPool) return
-    await adminPool.query(
-      `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
-        WHERE datname = $1 AND pid <> pg_backend_pid()`,
-      [database]
-    )
-    await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdent(database)}`)
-    await adminPool.end()
+    try {
+      await endPoolAndWaitForClients(pool)
+      await rm(blobRoot, { recursive: true, force: true }).catch(() => undefined)
+      if (!adminPool) return
+      await adminPool.query(
+        `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+          WHERE datname = $1 AND pid <> pg_backend_pid()`,
+        [database]
+      )
+      await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdent(database)}`)
+    } finally {
+      await adminPool?.end()
+    }
   })
 
   it('reaps an orphaned generation blob: deletes the real bytes AND removes the manifest row', async () => {
