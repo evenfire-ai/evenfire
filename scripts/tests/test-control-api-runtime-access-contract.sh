@@ -9,9 +9,10 @@ relation_count="$(awk -F '\t' '!/^[[:space:]]*(#|$)/ { count++ } END { print cou
 duplicate_count="$(awk -F '\t' '!/^[[:space:]]*(#|$)/ { seen[$1]++ } END { for (name in seen) if (seen[name] > 1) count++ } END { print count + 0 }' "$PROFILE_FILE")"
 invalid_count="$(awk -F '\t' '!/^[[:space:]]*(#|$)/ && (NF != 2 || $1 !~ /^[a-z][a-z0-9_]*$/ || $2 !~ /^(legacy_dml|upsert|append|read|link_lifecycle|none)$/) { count++ } END { print count + 0 }' "$PROFILE_FILE")"
 
-# The frozen dev profile has 97 rows; synchronized PR1 contributes its
-# accepted access relations and this target adds three entity-change relations.
-if [[ "$relation_count" != "110" || "$duplicate_count" != "0" || "$invalid_count" != "0" ]] || \
+# The exact runtime profile includes the composable catalog environment reader
+# and the accepted access relations layered over the frozen dev inventory.
+if [[ "$relation_count" != "111" || "$duplicate_count" != "0" || "$invalid_count" != "0" ]] || \
+  ! grep -qx $'authorization_catalog_environment\tread' "$PROFILE_FILE" || \
   ! grep -qx $'dynamic_clients\tlegacy_dml' "$PROFILE_FILE" || \
   ! grep -qx $'entity_change_feed\tnone' "$PROFILE_FILE" || \
   ! grep -qx $'entity_change_outbox\tnone' "$PROFILE_FILE" || \

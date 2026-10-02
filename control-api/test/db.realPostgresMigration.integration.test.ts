@@ -501,6 +501,7 @@ describeRealPostgres('control-api real Postgres migrations', () => {
     const exactControlApiRelations = [
       'administrative_events',
       'agent_run_events',
+      'authorization_catalog_environment',
       'governed_event_read_v1',
       'governed_event_stream',
       'governed_approval_prompt_history',
@@ -524,6 +525,7 @@ describeRealPostgres('control-api real Postgres migrations', () => {
     const expectedControlApiRelations: Record<string, string[]> = {
       administrative_events: ['INSERT', 'SELECT'],
       agent_run_events: ['INSERT', 'SELECT'],
+      authorization_catalog_environment: ['SELECT'],
       governed_event_read_v1: ['SELECT'],
       governed_event_stream: ['INSERT', 'SELECT'],
       governed_approval_prompt_history: ['INSERT', 'SELECT'],
