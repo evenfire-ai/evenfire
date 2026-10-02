@@ -100,6 +100,24 @@ describe('routes/auth password-login', () => {
     expect(String(res.headers['set-cookie'])).toContain('profile_session=desktop-session-jwt')
   })
 
+  it('delegates Google verification behind the Control API limiter with trusted client IP', async () => {
+    authServiceMock.loginWithGoogle.mockResolvedValueOnce({
+      token: 'google-session-jwt',
+      me: { id: 'user-1', email: 'user@example.test' },
+    })
+
+    const response = await request(buildApp())
+      .post('/api/v1/auth/google')
+      .set('x-forwarded-for', '198.51.100.52')
+      .send({ idToken: 'opaque-google-token' })
+
+    expect(response.status).toBe(200)
+    expect(authServiceMock.loginWithGoogle).toHaveBeenCalledWith(
+      { idToken: 'opaque-google-token' },
+      '198.51.100.52'
+    )
+  })
+
   it('documents the password-reset limiter headers and client-IP contract', async () => {
     authServiceMock.requestPasswordReset.mockResolvedValue({ requested: true })
     const app = buildApp()

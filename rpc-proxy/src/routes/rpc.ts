@@ -1,6 +1,7 @@
 import { Router } from 'express'
 import type { Response as ExpressResponse, NextFunction } from 'express'
 import { randomUUID } from 'crypto'
+import { rateLimit } from 'express-rate-limit'
 import { config } from '../config.js'
 import {
   type AuthedRequest,
@@ -13,6 +14,7 @@ import { jsonBody } from '../middleware/jsonBody.js'
 import { rpcInvocationContext } from '../rpcAccessContext.js'
 import {
   ControlApiConnectorsRejectedError,
+  ControlApiHostMessageAdmissionError,
   type HostWakeApiResponse,
   fetchUserConnectorsFromControlApi,
   requestHostWakeFromControlApi,
@@ -33,6 +35,7 @@ import {
   forwardRpcToServer,
   forwardTaskResultFromHost,
   listAllowedServersForUser,
+  resolveArtifactReadHostConnectionForUser,
   resolveHostConnectionForUser,
   resolveServerConnectionForUser,
   validateRpcRequest,
@@ -52,6 +55,15 @@ const RFC1123_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/
 // own copy (the two services share no package, so each names its own).
 const SESSIONS_LIMIT_CAP = 100
 const MESSAGES_LIMIT_CAP = 200
+const HOST_ARTIFACT_READ_LIMIT_PER_MIN = 30
+
+type ArtifactReadRequest = AuthedRequest & {
+  artifactReadWakeDeadlineMs?: number
+  artifactReadHost?: Extract<
+    Awaited<ReturnType<typeof resolveArtifactReadHostConnectionForUser>>,
+    { url: string }
+  >
+}
 
 function isSafeUpstreamPathSegment(value: string): boolean {
   return (
@@ -166,6 +178,16 @@ function controlApiHostAccessRejection(error: unknown): ControlApiHostAccessReje
   return null
 }
 
+function controlApiArtifactReadRetryAfterSeconds(error: unknown): number | null {
+  if (!(error instanceof Error) || error.name !== 'ControlApiArtifactReadRateLimitedError') {
+    return null
+  }
+  const retryAfterSeconds = (error as Error & { retryAfterSeconds?: unknown }).retryAfterSeconds
+  return typeof retryAfterSeconds === 'number' && Number.isFinite(retryAfterSeconds)
+    ? Math.max(1, Math.ceil(retryAfterSeconds))
+    : null
+}
+
 export function respondControlApiHostAccessRejection(
   res: ExpressResponse,
   rejection: ControlApiHostAccessRejection
@@ -265,6 +287,72 @@ async function readArtifactResponseBuffer(response: Response): Promise<Buffer> {
 
 export function createRpcRouter(): Router {
   const router = Router()
+
+  // Control API owns the durable, cross-replica artifact budget. This edge
+  // backstop uses the same verified identity + canonical Host key so route
+  // analysis can prove both artifact reads are bounded without replacing the
+  // authoritative PG limiter or consuming Host wake capacity.
+  const artifactReadEdgeRateLimit = rateLimit({
+    windowMs: 60_000,
+    limit: HOST_ARTIFACT_READ_LIMIT_PER_MIN,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    keyGenerator: req => {
+      const artifactRead = req as ArtifactReadRequest
+      const subject = artifactRead.auth?.sub
+      const hostRef = artifactRead.artifactReadHost?.name
+      return `host-artifact-read:${subject ?? '__missing_subject__'}:${hostRef ?? '__missing_host__'}`
+    },
+    handler: (_req, res) => {
+      const raw = res.getHeader('Retry-After')
+      const retryAfterSeconds =
+        typeof raw === 'string' && /^\d+$/.test(raw) ? Math.max(1, Number(raw)) : 60
+      res.status(429).json({ error: 'Too Many Requests', retryAfterSeconds })
+    },
+  })
+
+  const resolveArtifactReadHost = async (
+    req: ArtifactReadRequest,
+    res: ExpressResponse,
+    next: NextFunction
+  ) => {
+    try {
+      const auth = req.auth!
+      const hostRef = String(req.params.hostRef || '').trim()
+      if (!hostRef) {
+        res.status(400).json({ error: 'hostRef is required' })
+        return
+      }
+      if (!RFC1123_RE.test(hostRef)) {
+        res.status(400).json({ error: 'Invalid host reference' })
+        return
+      }
+      req.artifactReadWakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
+      const artifactReadHost = await resolveArtifactReadHostConnectionForUser(
+        auth.sub,
+        hostRef,
+        extractAuthToken(req),
+        { teamId: auth.teamId }
+      )
+      if (isHostAccessDenied(artifactReadHost)) {
+        respondHostAccessDenied(res, artifactReadHost)
+        return
+      }
+      req.artifactReadHost = artifactReadHost
+      next()
+    } catch (error) {
+      const retryAfterSeconds = controlApiArtifactReadRetryAfterSeconds(error)
+      if (retryAfterSeconds !== null) {
+        res.setHeader('Retry-After', String(retryAfterSeconds))
+        res.status(429).json({
+          error: 'Too Many Requests',
+          retryAfterSeconds,
+        })
+        return
+      }
+      guardedNext(res, next, error)
+    }
+  }
 
   router.get(
     '/rpc/servers',
@@ -467,6 +555,7 @@ export function createRpcRouter(): Router {
         const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
         const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
           teamId: auth.teamId,
+          messageResolution: true,
           ...(traceContext.sessionId
             ? {
                 directRunBinding: {
@@ -548,6 +637,15 @@ export function createRpcRouter(): Router {
         // the wake path (which would re-forward an already-delivered message).
         res.status(200).json(upstreamResponse)
       } catch (error) {
+        if (error instanceof ControlApiHostMessageAdmissionError) {
+          if (error.status === 429) {
+            for (const [name, value] of Object.entries(error.headers)) {
+              res.setHeader(name, value)
+            }
+          }
+          res.status(error.status).json(error.body)
+          return
+        }
         const rejection = controlApiHostAccessRejection(error)
         if (rejection) {
           respondControlApiHostAccessRejection(res, rejection)
@@ -1452,27 +1550,15 @@ export function createRpcRouter(): Router {
     '/rpc/hosts/:hostRef/artifacts',
     requireRpcAuth,
     requireScope('host:task:read'),
+    resolveArtifactReadHost,
+    artifactReadEdgeRateLimit,
     async (req: AuthedRequest, res, next) => {
       try {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
         const hostRef = String(req.params.hostRef || '').trim()
-        if (!hostRef) {
-          res.status(400).json({ error: 'hostRef is required' })
-          return
-        }
-        if (!RFC1123_RE.test(hostRef)) {
-          res.status(400).json({ error: 'Invalid host reference' })
-          return
-        }
-        const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
-        const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
-          teamId: auth.teamId,
-        })
-        if (isHostAccessDenied(host)) {
-          respondHostAccessDenied(res, host)
-          return
-        }
+        const host = (req as ArtifactReadRequest).artifactReadHost!
+        const wakeDeadlineMs = (req as ArtifactReadRequest).artifactReadWakeDeadlineMs!
         const baseUrl = host.url.replace(/\/+$/, '')
         // Wake-eligible finite operation (§11.4): scope stays host:task:read.
         // Unlike approve/deny/model this is a read-only list of small JSON: a
@@ -1517,38 +1603,30 @@ export function createRpcRouter(): Router {
     '/rpc/hosts/:hostRef/artifacts/:filename/download',
     requireRpcAuth,
     requireScope('host:task:read'),
+    (req: AuthedRequest, res, next) => {
+      const filename = String(req.params.filename || '').trim()
+      if (
+        !filename ||
+        filename.includes('..') ||
+        filename.includes('/') ||
+        filename.includes('\\') ||
+        filename.includes('\0')
+      ) {
+        res.status(400).json({ error: 'Invalid filename' })
+        return
+      }
+      next()
+    },
+    resolveArtifactReadHost,
+    artifactReadEdgeRateLimit,
     async (req: AuthedRequest, res, next) => {
       try {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
         const hostRef = String(req.params.hostRef || '').trim()
         const filename = String(req.params.filename || '').trim()
-        if (!hostRef) {
-          res.status(400).json({ error: 'hostRef is required' })
-          return
-        }
-        if (!RFC1123_RE.test(hostRef)) {
-          res.status(400).json({ error: 'Invalid host reference' })
-          return
-        }
-        if (
-          !filename ||
-          filename.includes('..') ||
-          filename.includes('/') ||
-          filename.includes('\\') ||
-          filename.includes('\0')
-        ) {
-          res.status(400).json({ error: 'Invalid filename' })
-          return
-        }
-        const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
-        const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
-          teamId: auth.teamId,
-        })
-        if (isHostAccessDenied(host)) {
-          respondHostAccessDenied(res, host)
-          return
-        }
+        const host = (req as ArtifactReadRequest).artifactReadHost!
+        const wakeDeadlineMs = (req as ArtifactReadRequest).artifactReadWakeDeadlineMs!
         const baseUrl = host.url.replace(/\/+$/, '')
         // Wake-eligible finite operation (§11.4): scope stays host:task:read.
         // The success path only commits (`res.send`) at the very end, so a

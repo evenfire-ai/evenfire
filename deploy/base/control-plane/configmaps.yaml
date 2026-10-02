@@ -15,6 +15,10 @@ data:
   CONTROL_API_MCP_SERVERS_NAMESPACE: mcp-server
   CONTROL_API_COMMUNICATION_CHANNELS_NAMESPACE: channels
   CONTROL_API_SECRETS_NAMESPACE: mcp-host
+  # Catalog projection is operator-activated only. Base remains off so an
+  # environment cannot start a writer without selecting an explicit rollout
+  # configuration, single-writer ownership, and rollback plan.
+  CONTROL_API_OPERATIONAL_ACCESS_INDEXER_ENABLED: 'false'
   CONTROL_API_JWT_ISSUER: control-api
   CONTROL_API_JWT_AUDIENCE: dev-profile-ui
   CONTROL_API_RPC_JWT_ISSUER: control-api

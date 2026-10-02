@@ -41,6 +41,52 @@ const runtimeRoles = [
   'trace_maintenance_runtime',
   'workflow_recipes_runtime',
 ] as const
+const accessFoundationDefinerSignatures = [
+  'authorization_bump_user_revision(pg_catalog.uuid)',
+  'authorization_bump_team_revision(pg_catalog.uuid)',
+  'authorization_bump_subject_revision(pg_catalog.text, pg_catalog.text)',
+  'authorization_bump_user_row_revision()',
+  'authorization_bump_team_row_revision()',
+  'authorization_bump_workflow_run_revision()',
+  'authorization_bump_workflow_approval_revision()',
+  'authorization_bump_notification_revision()',
+  'authorization_bump_gfs_subject_revision()',
+  'authorization_bump_gfs_resource_component(pg_catalog.uuid)',
+  'authorization_bump_gfs_authority_revision()',
+  'authorization_bump_gfs_resource_subjects(pg_catalog.uuid)',
+  'authorization_bump_gfs_resource_revision()',
+  'authorization_bump_resource_revision(pg_catalog.text, pg_catalog.text, pg_catalog.text)',
+  'authorization_bump_team_membership_revision()',
+  'authorization_bump_user_grant_revision()',
+  'authorization_bump_team_grant_revision()',
+  'authorization_bump_operational_resource_revision()',
+  'authorization_bump_operational_relationship_revision()',
+] as const
+const accessFoundationDefinerNames = accessFoundationDefinerSignatures.map(signature =>
+  signature.slice(0, signature.indexOf('('))
+)
+
+type AccessFoundationDefinerState = {
+  function_name: string
+  config: string[] | null
+  owner: string
+  acl: string[] | null
+}
+
+async function readAccessFoundationDefinerState(pool: Pool) {
+  return pool.query<AccessFoundationDefinerState>(
+    `SELECT procedure.proname AS function_name,
+            procedure.proconfig AS config,
+            pg_get_userbyid(procedure.proowner) AS owner,
+            procedure.proacl AS acl
+       FROM pg_proc procedure
+       JOIN pg_namespace namespace ON namespace.oid = procedure.pronamespace
+      WHERE namespace.nspname = 'public'
+        AND procedure.proname = ANY($1::text[])
+      ORDER BY procedure.proname`,
+    [accessFoundationDefinerNames]
+  )
+}
 
 function databaseUrl(baseUrl: string, database: string): string {
   const url = new URL(baseUrl)
@@ -158,6 +204,19 @@ describeRealPostgres('control-api real Postgres migrations', () => {
     const connector = { connect: () => dbPool.connect() }
 
     await initDb(connector)
+    const obsoleteCatalogRevision = await dbPool.query<{ function_name: string | null }>(
+      `SELECT to_regprocedure('public.authorization_bump_catalog_revision()')::text
+         AS function_name`
+    )
+    expect(obsoleteCatalogRevision.rows).toEqual([{ function_name: null }])
+    const freshAccessFoundationFunctions = await readAccessFoundationDefinerState(dbPool)
+    expect(freshAccessFoundationFunctions.rows.map(row => row.function_name)).toEqual(
+      [...accessFoundationDefinerNames].sort()
+    )
+    for (const { config } of freshAccessFoundationFunctions.rows) {
+      expect(config).toEqual(['search_path=pg_catalog, public, pg_temp'])
+    }
+
     const firstVersions = await dbPool.query<{ version: string }>(
       'SELECT version FROM schema_migrations ORDER BY version'
     )
@@ -1936,9 +1995,55 @@ describeRealPostgres('control-api real Postgres migrations', () => {
     }
   })
 
-  it('prevents temp-type shadowing in entity-change SECURITY DEFINER triggers', async () => {
+  it('prevents temp-type shadowing in access-foundation SECURITY DEFINER triggers', async () => {
     const { initDb } = await import('../src/db.js')
-    await initDb({ connect: () => dbPool.connect() })
+    const connector = { connect: () => dbPool.connect() }
+    const hardeningVersion = '012a_user_access_foundation_definer_temp_shadow_hardening'
+
+    const preUpgradeFunctions = await readAccessFoundationDefinerState(dbPool)
+    expect(preUpgradeFunctions.rows.map(row => row.function_name)).toEqual(
+      [...accessFoundationDefinerNames].sort()
+    )
+    for (const { config } of preUpgradeFunctions.rows) {
+      expect(config).toEqual(['search_path=pg_catalog, public, pg_temp'])
+    }
+
+    const originalOwnersAndGrants = preUpgradeFunctions.rows.map(
+      ({ function_name, owner, acl }) => ({ function_name, owner, acl })
+    )
+
+    // Model an already-migrated pre-fix database: restore the old function
+    // settings and remove only the new forward-migration marker.
+    for (const signature of accessFoundationDefinerSignatures) {
+      await dbPool.query(`ALTER FUNCTION public.${signature} SET search_path = pg_catalog, public`)
+    }
+    const removedMarker = await dbPool.query(
+      `DELETE FROM schema_migrations WHERE version = $1 RETURNING version`,
+      [hardeningVersion]
+    )
+    expect(removedMarker.rows).toEqual([{ version: hardeningVersion }])
+
+    await initDb(connector)
+    const migratedMarker = await dbPool.query<{ version: string }>(
+      `SELECT version FROM schema_migrations WHERE version = $1`,
+      [hardeningVersion]
+    )
+    expect(migratedMarker.rows).toEqual([{ version: hardeningVersion }])
+
+    const upgradedFunctions = await readAccessFoundationDefinerState(dbPool)
+    expect(upgradedFunctions.rows.map(row => row.function_name)).toEqual(
+      [...accessFoundationDefinerNames].sort()
+    )
+    for (const { config } of upgradedFunctions.rows) {
+      expect(config).toEqual(['search_path=pg_catalog, public, pg_temp'])
+    }
+    expect(
+      upgradedFunctions.rows.map(({ function_name, owner, acl }) => ({
+        function_name,
+        owner,
+        acl,
+      }))
+    ).toEqual(originalOwnersAndGrants)
 
     const attackerRole = `entity_change_shadow_${randomBytes(5).toString('hex')}`
     const attackerPassword = randomBytes(24).toString('hex')
@@ -1981,6 +2086,19 @@ describeRealPostgres('control-api real Postgres migrations', () => {
           resourceId,
         ])
         expect(stored.rowCount).toBe(1)
+        const revision = await dbPool.query<{ revision: string }>(
+          `SELECT revision::text
+             FROM authorization_resource_revisions
+            WHERE environment_id = (
+                    SELECT environment_id
+                      FROM authorization_catalog_environment
+                     WHERE singleton = TRUE
+                  )
+              AND resource_type = 'gfs_resource'
+              AND resource_id = $1`,
+          [resourceId]
+        )
+        expect(revision.rows).toEqual([{ revision: '1' }])
       } finally {
         attacker.release()
       }
@@ -2005,7 +2123,7 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       `)
       expect(functionPaths.rows).toHaveLength(4)
       for (const { config } of functionPaths.rows) {
-        expect(config).toContain('search_path=pg_catalog, public, pg_temp')
+        expect(config).toEqual(['search_path=pg_catalog, public, pg_temp'])
       }
     } finally {
       await attackerPool?.end()

@@ -67,6 +67,61 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
     expect(currentCollisions).toEqual([])
   })
 
+  it('registers the narrow R56-B1 access-foundation definer hardening migration', async () => {
+    const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
+    const version = '012a_user_access_foundation_definer_temp_shadow_hardening'
+    const migration = CONTROL_API_MIGRATIONS.find(candidate => candidate.version === version)
+    const versions = CONTROL_API_MIGRATIONS.map(candidate => candidate.version)
+
+    expect(migration).toBeDefined()
+    expect(migration?.legacyVersions).toBeUndefined()
+    expect(versions.indexOf('0129_gfs_catalog_revision_components')).toBeLessThan(
+      versions.indexOf(version)
+    )
+    expect(versions.indexOf(version)).toBeLessThan(
+      versions.indexOf('0130_legacy_password_security_epoch_backfill')
+    )
+    if (!migration) return
+
+    const query = vi.fn().mockResolvedValue({ rows: [], rowCount: 0 })
+    await migration.apply({ query } as never)
+    expect(query).toHaveBeenCalledOnce()
+
+    const sql = query.mock.calls.map(([statement]) => String(statement)).join('\n')
+    const compactSql = sql.replace(/\s+/g, '')
+    const signatures = [
+      'authorization_bump_user_revision(pg_catalog.uuid)',
+      'authorization_bump_team_revision(pg_catalog.uuid)',
+      'authorization_bump_subject_revision(pg_catalog.text,pg_catalog.text)',
+      'authorization_bump_user_row_revision()',
+      'authorization_bump_team_row_revision()',
+      'authorization_bump_workflow_run_revision()',
+      'authorization_bump_workflow_approval_revision()',
+      'authorization_bump_notification_revision()',
+      'authorization_bump_gfs_subject_revision()',
+      'authorization_bump_gfs_resource_component(pg_catalog.uuid)',
+      'authorization_bump_gfs_authority_revision()',
+      'authorization_bump_gfs_resource_subjects(pg_catalog.uuid)',
+      'authorization_bump_gfs_resource_revision()',
+      'authorization_bump_resource_revision(pg_catalog.text,pg_catalog.text,pg_catalog.text)',
+      'authorization_bump_team_membership_revision()',
+      'authorization_bump_user_grant_revision()',
+      'authorization_bump_team_grant_revision()',
+      'authorization_bump_operational_resource_revision()',
+      'authorization_bump_operational_relationship_revision()',
+    ]
+
+    // 0128_composable_catalog_revisions removes this trigger before 012a runs.
+    expect(signatures).not.toContain('authorization_bump_catalog_revision()')
+    expect(sql.match(/ALTER FUNCTION public\./g)).toHaveLength(signatures.length)
+    for (const signature of signatures) {
+      expect(compactSql).toContain(
+        `ALTERFUNCTIONpublic.${signature}SETsearch_path=pg_catalog,public,pg_temp;`
+      )
+    }
+    expect(sql).not.toMatch(/\b(?:CREATE OR REPLACE|DROP|GRANT|REVOKE|OWNER TO)\b/i)
+  })
+
   it('recognizes all previously deployed feed migration versions without reapplying DDL', async () => {
     const { CONTROL_API_MIGRATIONS, initDb } = await import('../src/db.js')
     const migration = CONTROL_API_MIGRATIONS.find(
@@ -190,6 +245,10 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
 
     expect(migration).toBeDefined()
     if (!migration) return
+    expect(migration.legacyVersions).toEqual([
+      '0101_mcp_secret_rollback_permits',
+      '0109_mcp_secret_rollback_permits',
+    ])
 
     const query = vi.fn().mockResolvedValue({ rows: [], rowCount: 0 })
     await migration.apply({ query } as never)

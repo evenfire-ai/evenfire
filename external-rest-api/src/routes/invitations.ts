@@ -8,16 +8,15 @@ import {
   getInvitationByToken,
   listPendingInvitations,
   setupInvitationPassword,
+  setupInvitationPasswordWithToken,
 } from '../services/invitationsService.js'
-import { setProfileSessionCookie } from '../sessionCookie.js'
+import { clearProfileSessionCookie, setProfileSessionCookie } from '../sessionCookie.js'
 
 const tokenLookupRateLimit = createRateLimiter({ windowMs: 60_000, maxRequests: 30 })
 const acceptRateLimit = createRateLimiter({ windowMs: 60_000, maxRequests: 10 })
 
-type InvitationPasswordAuth = {
-  userId: string
-  email: string
-  sessionToken: string
+function requestedSessionContract(req: Request): 'v2' | undefined {
+  return req.header('x-evenfire-session-contract') === 'v2' ? 'v2' : undefined
 }
 
 function sendAcceptInvitationError(
@@ -70,56 +69,6 @@ function sendInvitationPasswordError(
   res.status(400).json({ error: 'Password must be between 8 and 256 characters' })
 }
 
-async function invitationPasswordAuthFromRequest(req: Request): Promise<
-  | { auth: InvitationPasswordAuth }
-  | {
-      status: number
-      body: Record<string, string>
-    }
-> {
-  const sessionToken = extractAuthToken(req)
-  if (sessionToken) {
-    const claims = verifyToken(sessionToken)
-    if (claims) {
-      return { auth: { userId: claims.userId, email: claims.email, sessionToken } }
-    }
-  }
-
-  const token = String(req.body?.token || '').trim()
-  const email = String(req.body?.email || '')
-    .trim()
-    .toLowerCase()
-  if (!token || !email) {
-    return { status: 401, body: { error: 'Unauthorized' } }
-  }
-
-  const accepted = await acceptInvitation(token, email)
-  if (accepted.error) {
-    const response = {
-      invalid: { status: 400, body: { error: 'Invalid invitation' } },
-      not_found: { status: 404, body: { error: 'Invitation not found' } },
-      forbidden: {
-        status: 403,
-        body: { error: 'Invitation email does not match authenticated user' },
-      },
-      expired: { status: 410, body: { error: 'Invitation has expired' } },
-      not_pending: { status: 400, body: { error: 'Invitation is not pending' } },
-    }[accepted.error]
-    return response ?? { status: 502, body: { error: 'Failed to start invited session' } }
-  }
-  if (!accepted.data?.token || !accepted.data.userId) {
-    return { status: 502, body: { error: 'Failed to start invited session' } }
-  }
-
-  return {
-    auth: {
-      userId: accepted.data.userId,
-      email: accepted.data.email,
-      sessionToken: accepted.data.token,
-    },
-  }
-}
-
 export function createInvitationsRouter(): Router {
   const router = Router()
 
@@ -151,19 +100,35 @@ export function createInvitationsRouter(): Router {
         return
       }
 
-      const authResult = await invitationPasswordAuthFromRequest(req)
-      if ('status' in authResult) {
-        res.status(authResult.status).json(authResult.body)
+      const sessionToken = extractAuthToken(req)
+      const claims = sessionToken ? verifyToken(sessionToken) : null
+      const invitationToken = String(req.body?.token || '').trim()
+      const invitationEmail = String(req.body?.email || '')
+        .trim()
+        .toLowerCase()
+      if (!claims && (!invitationToken || !invitationEmail)) {
+        res.status(401).json({ error: 'Unauthorized' })
         return
       }
-
-      const result = await setupInvitationPassword(authResult.auth, invitationId, password)
+      const result = claims
+        ? await setupInvitationPassword(
+            { userId: claims.userId, email: claims.email, sessionToken },
+            invitationId,
+            password
+          )
+        : await setupInvitationPasswordWithToken({
+            token: invitationToken,
+            email: invitationEmail,
+            invitationId,
+            password,
+            sessionContract: requestedSessionContract(req),
+          })
       if (result.error) {
         sendInvitationPasswordError(res, result.error)
         return
       }
-      setProfileSessionCookie(req, res, authResult.auth.sessionToken)
-      res.status(200).json(result.data)
+      clearProfileSessionCookie(req, res)
+      res.status(200).json({ ...result.data, reauthenticationRequired: true })
     } catch (error) {
       next(error)
     }
@@ -219,7 +184,7 @@ export function createInvitationsRouter(): Router {
         return
       }
 
-      const result = await acceptInvitation(token, email)
+      const result = await acceptInvitation(token, email, requestedSessionContract(req))
       if (result.error) {
         sendAcceptInvitationError(res, result.error)
         return
