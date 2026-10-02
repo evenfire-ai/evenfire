@@ -44,10 +44,10 @@ assert_live_cleanup() {
   run_cleanup "${PROFILE}" true
   [[ "$(head -n 1 "${FIXTURE_CALLS}")" == lease-validated ]]
   [[ "$(wc -l <"${FIXTURE_CALLS}" | tr -d ' ')" == 3 ]]
-  rg -q -- "--context=${PROFILE} --request-timeout=20s -n registry delete deployment registry-api registry-minio registry-postgres registry-zot" "${FIXTURE_CALLS}"
-  rg -q -- "--context=${PROFILE} --request-timeout=20s -n registry delete service registry-api registry-minio registry-postgres registry-zot" "${FIXTURE_CALLS}"
-  ! rg -q 'delete (namespace|pvc|secret|configmap)|kube-system' "${FIXTURE_CALLS}"
-  rg -q '^LOCAL_REGISTRY_REMOVAL=PASS$' "${TMP_DIR}/output"
+  grep -Fq -- "--context=${PROFILE} --request-timeout=20s -n registry delete deployment registry-api registry-minio registry-postgres registry-zot" "${FIXTURE_CALLS}"
+  grep -Fq -- "--context=${PROFILE} --request-timeout=20s -n registry delete service registry-api registry-minio registry-postgres registry-zot" "${FIXTURE_CALLS}"
+  ! grep -Eq 'delete (namespace|pvc|secret|configmap)|kube-system' "${FIXTURE_CALLS}"
+  grep -Eq '^LOCAL_REGISTRY_REMOVAL=PASS$' "${TMP_DIR}/output"
 }
 
 : >"${FIXTURE_CALLS}"
@@ -65,7 +65,7 @@ printf 'PASS: invalid lease prevents mutation; valid lease admits named cleanup\
 : >"${FIXTURE_CALLS}"
 if run_cleanup "${PROFILE}" true true; then exit 1; fi
 [[ "$(wc -l <"${FIXTURE_CALLS}" | tr -d ' ')" == 2 ]]
-! rg -q '^LOCAL_REGISTRY_REMOVAL=PASS$' "${TMP_DIR}/output"
+! grep -Eq '^LOCAL_REGISTRY_REMOVAL=PASS$' "${TMP_DIR}/output"
 assert_live_cleanup
 printf 'PASS: Kubernetes failure is propagated; restored boundary completes cleanup\n'
 
