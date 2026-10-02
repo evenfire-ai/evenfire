@@ -19,7 +19,7 @@ const GATEWAY_PATH = path.resolve(
 )
 
 /** Execute the registry install producer's Secret-name and envSecret expressions. */
-function registrySecretFactory(): {
+function registrySecretFactory(registrySource?: string): {
   name: (serverName: string) => string
   envSecret: (secretName: string, keyNames: string[]) => EnvSecret
   managed: () => boolean
@@ -27,18 +27,30 @@ function registrySecretFactory(): {
 } {
   const source = ts.createSourceFile(
     REGISTRY_PATH,
-    readFileSync(REGISTRY_PATH, 'utf8'),
+    registrySource ?? readFileSync(REGISTRY_PATH, 'utf8'),
     ts.ScriptTarget.Latest,
     true
   )
   const assignments: ts.Expression[] = []
   const secretNames: ts.Expression[] = []
   const managedExpressions: ts.Expression[] = []
-  const managedReassignments: ts.BinaryExpression[] = []
+  const unsupportedManagedWrites: ts.Node[] = []
   const registryLabels: ts.Expression[] = []
   const registryAnnotations: ts.Expression[] = []
   const registryResourceMetadata: ts.Expression[] = []
   let catalogAnnotations: ts.FunctionDeclaration | undefined
+
+  function canWriteManaged(node: ts.Node): boolean {
+    if (
+      ts.isPropertyAccessExpression(node) &&
+      node.expression.getText(source) === 'mcpServerSpec'
+    ) {
+      return node.name.text === 'managed'
+    }
+    // Even a dynamic key might resolve to "managed" at runtime. No computed
+    // writes are modeled by the fixture, so every one must fail closed.
+    return ts.isElementAccessExpression(node) && node.expression.getText(source) === 'mcpServerSpec'
+  }
 
   function visit(node: ts.Node): void {
     if (
@@ -87,8 +99,31 @@ function registrySecretFactory(): {
         assignments.push(node.right)
       }
     }
-    if (ts.isBinaryExpression(node) && node.left.getText(source) === 'mcpServerSpec.managed') {
-      managedReassignments.push(node)
+    if (
+      ts.isBinaryExpression(node) &&
+      node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
+      node.operatorToken.kind <= ts.SyntaxKind.LastAssignment &&
+      (canWriteManaged(node.left) || node.left.getText(source) === 'mcpServerSpec')
+    ) {
+      unsupportedManagedWrites.push(node)
+    }
+    if (
+      ((ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node)) &&
+        (node.operator === ts.SyntaxKind.PlusPlusToken ||
+          node.operator === ts.SyntaxKind.MinusMinusToken) &&
+        canWriteManaged(node.operand)) ||
+      (ts.isDeleteExpression(node) && canWriteManaged(node.expression))
+    ) {
+      unsupportedManagedWrites.push(node)
+    }
+    if (
+      ts.isCallExpression(node) &&
+      node.arguments[0]?.getText(source) === 'mcpServerSpec' &&
+      ['Object.assign', 'Object.defineProperty', 'Object.defineProperties', 'Reflect.set'].includes(
+        node.expression.getText(source)
+      )
+    ) {
+      unsupportedManagedWrites.push(node)
     }
     if (
       ts.isCallExpression(node) &&
@@ -112,12 +147,18 @@ function registrySecretFactory(): {
     ts.forEachChild(node, visit)
   }
   visit(source)
+  if (unsupportedManagedWrites.length > 0) {
+    const write = unsupportedManagedWrites[0]
+    const line = source.getLineAndCharacterOfPosition(write.getStart(source)).line + 1
+    throw new Error(
+      `Unsupported registry managed write at ${path.basename(REGISTRY_PATH)}:${line}: ${write.getText(source)}`
+    )
+  }
   if (
     assignments.length !== 1 ||
     !ts.isObjectLiteralExpression(assignments[0]) ||
     secretNames.length !== 1 ||
     managedExpressions.length !== 1 ||
-    managedReassignments.length !== 0 ||
     registryAnnotations.length !== 1 ||
     registryResourceMetadata.length !== 1 ||
     !catalogAnnotations
@@ -251,8 +292,12 @@ export function registrySecretName(serverName: string): string {
   return registrySecret.name(serverName)
 }
 
-export function registryMcpServerManaged(): boolean {
-  return registrySecret.managed()
+/** Optional source input supports contract mutation tests without writing to
+ * the backend producer file. Ordinary fixtures use the checkout's source. */
+export function registryMcpServerManaged(registrySource?: string): boolean {
+  return registrySource === undefined
+    ? registrySecret.managed()
+    : registrySecretFactory(registrySource).managed()
 }
 
 export function registryMcpServerMetadata(

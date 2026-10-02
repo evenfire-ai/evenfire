@@ -1,0 +1,24 @@
+import { expect, it } from 'vitest'
+import { readFileSync } from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { registryMcpServerManaged } from '../fixtures/registryMcpServerProducer'
+
+const REGISTRY_PATH = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '../../../control-api/src/routes/admin/registry.ts'
+)
+
+it('rejects a later computed managed write in the registry producer', () => {
+  const source = readFileSync(REGISTRY_PATH, 'utf8')
+  const marker = '        // Local plugins whose image lives on the evenfire registry'
+  expect(source).toContain(marker)
+  const changedSource = source.replace(
+    marker,
+    `        mcpServerSpec['managed'] = false\n\n${marker}`
+  )
+
+  expect(() => registryMcpServerManaged(changedSource)).toThrow(
+    /unsupported registry managed write.*mcpServerSpec\['managed'\] = false/i
+  )
+})
