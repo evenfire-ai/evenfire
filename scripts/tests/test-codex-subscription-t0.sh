@@ -14,6 +14,20 @@ FAIL=0
 GROUPS_RUN=0
 REGISTERED=()
 
+# Read-only inventory mode for hermetic discovery tests and operator inspection.
+# It does not enter package, cluster, Electron or browser execution.
+if [[ "${1:-}" == "--discovery-only" ]]; then
+  if [[ "$#" -ne 2 ]]; then
+    echo "usage: $0 --discovery-only <registered-file>" >&2
+    exit 2
+  fi
+  node "${ROOT}/scripts/tests/lib/subscription-t0-discovery.mjs" codex "${ROOT}" "$2"
+  exit "$?"
+elif [[ "$#" -ne 0 ]]; then
+  echo "unsupported T0 argument: $1" >&2
+  exit 2
+fi
+
 pass() { echo "PASS: $1"; }
 fail() { echo "FAIL: $1"; FAIL=1; }
 
@@ -180,7 +194,6 @@ require_ci_matrix_entry() {
 # proves they exist and that the CI real-PG lane asserts each one ran.
 require_real_pg_suite() {
   local rel="$1"
-  REGISTERED+=("${rel}")
   require_file "${rel}" || return 1
   local suite
   # The real-PG lane lists each suite by its file name, `.test.ts` included.
@@ -221,7 +234,12 @@ fi
 run_group "shared-contract" "packages/llm-provider-attempt-contract" "index.test.cjs"
 run_group "codex-catalog-projection" "packages/codex-catalog-projection" "index.test.cjs"
 
+# This is a filesystem-only freeze contract, not a browser/runtime journey.
+run_group "codex-upstream-contract-freeze" "tests/e2e" "integration/codex-subscription-contract-freeze.test.ts"
+
 run_node_group "approved-tools-fixtures-and-runner" \
+  "scripts/tests/subscription-t0-discovery.test.mjs" \
+  "scripts/e2e/fixtures/subscription-image-provider.test.mjs" \
   "scripts/tests/run-node-test-files.test.mjs" \
   "tests/e2e/fixtures/codex-subscription/approved-tools/server.test.mjs" \
   "scripts/e2e/prepare-codex-approved-tools.test.mjs" \
@@ -310,6 +328,7 @@ run_group "codex-llm-proxy" "codex-llm-proxy" \
 
 run_group "mcp-host" "mcp-host" \
   "src/__tests__/bodylimits.test.ts" \
+  "src/llm/__tests__/attachmentBudgetRefusal.test.ts" \
   "src/llm/__tests__/imageSource.test.ts" \
   "src/capabilities/toolCatalogTools.test.ts" \
   "src/core/orchestration/__tests__/approvedToolsLifecycle.integration.test.ts" \
@@ -399,62 +418,28 @@ else
       "src/__tests__/devIsolation.test.ts" \
       "ui/src/components/agents/__tests__/ComposerPanel.test.tsx" \
       "ui/src/components/agents/__tests__/ModelSelector.test.tsx" \
+      "test/subscriptionImageCollection.test.ts" \
+      "test/subscriptionImageChallenge.test.ts" \
+      "test/subscriptionImageRunContract.test.ts" \
+      "test/subscriptionAdmissionGuard.test.ts" \
+      "test/codexImageChallenge.test.ts" \
       "ui/src/constants/__tests__/attachments.test.ts" \
       "ui/src/hooks/__tests__/useHostModels.test.tsx" \
       "ui/src/hooks/domain/__tests__/useAgentChatController.pendingModel.test.tsx"
   fi
 fi
 
-# A Codex suite that exists but is not listed above is lost coverage. Every
-# proxy/contract test file and every *codex* test file in the Codex-touching
-# packages must be registered in a group or as a real-PG presence check.
-is_registered() {
-  local candidate="$1" entry
-  for entry in "${REGISTERED[@]}"; do
-    [[ "${entry}" == "${candidate}" ]] && return 0
-  done
-  return 1
-}
-# The scan proves nothing when it looks at nothing: a missing root only makes
-# `find` write to stderr, and an empty result would read as "all registered".
-# So every root must exist and the scan must find candidates.
-suite_roots=(codex-llm-proxy/test packages/llm-provider-attempt-contract)
-named_roots=(control-api mcp-host workflow-recipes host-context-controller control-ui)
-scan_roots_missing=0
-for scan_root in "${suite_roots[@]}" "${named_roots[@]}"; do
-  if [[ ! -d "${ROOT}/${scan_root}" ]]; then
-    fail "unlisted-suite scan root ${scan_root} is missing"
-    scan_roots_missing=1
-  fi
-done
-unlisted=0
-candidates=0
-while IFS= read -r rel; do
-  [[ -n "${rel}" ]] || continue
-  candidates=$((candidates + 1))
-  if ! is_registered "${rel}"; then
-    fail "unlisted Codex suite ${rel}"
-    unlisted=1
-  fi
-done < <(
-  cd "${ROOT}" &&
-    {
-      find "${suite_roots[@]}" \
-        -name node_modules -prune -o -type f \( -name '*.test.ts' -o -name '*.test.cjs' \) -print
-      find "${named_roots[@]}" \
-        \( -name node_modules -o -name dist -o -name .next -o -name coverage \) -prune -o \
-        -type f -iname '*codex*' \( -name '*.test.ts' -o -name '*.test.tsx' \) -print
-    } | sort -u
-)
-if [[ "${candidates}" -eq 0 ]]; then
-  fail "unlisted-suite scan found no Codex test files"
+# Every candidate is registered in T0 or has an explicit CI/PG/runtime lane.
+# Discovery never certifies those other lanes; each requires its own physical receipt.
+discovery_registry="$(mktemp)"
+printf '%s\n' "${REGISTERED[@]}" >"${discovery_registry}"
+if ! node "${ROOT}/scripts/tests/lib/subscription-t0-discovery.mjs" codex "${ROOT}" "${discovery_registry}"; then
+  FAIL=1
 fi
-if [[ "${unlisted}" -eq 0 && "${scan_roots_missing}" -eq 0 && "${candidates}" -gt 0 ]]; then
-  pass "every Codex suite is registered in T0 (${candidates} candidates scanned)"
-fi
+rm -f "${discovery_registry}"
 
-if [[ "${GROUPS_RUN}" -ne 12 ]]; then
-  fail "expected all 12 T0 groups, ran ${GROUPS_RUN}"
+if [[ "${GROUPS_RUN}" -ne 13 ]]; then
+  fail "expected all 13 T0 groups, ran ${GROUPS_RUN}"
 fi
 
 if [[ "${FAIL}" -ne 0 ]]; then

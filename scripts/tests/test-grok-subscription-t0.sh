@@ -15,9 +15,23 @@ set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 FAIL=0
 GROUPS_RUN=0
-EXPECTED_GROUPS=10
+EXPECTED_GROUPS=11
 REGISTERED=()
 COUNT_SUMMARY=""
+
+# Read-only inventory mode for hermetic discovery tests and operator inspection.
+# It does not enter package, cluster, Electron or browser execution.
+if [[ "${1:-}" == "--discovery-only" ]]; then
+  if [[ "$#" -ne 2 ]]; then
+    echo "usage: $0 --discovery-only <registered-file>" >&2
+    exit 2
+  fi
+  node "${ROOT}/scripts/tests/lib/subscription-t0-discovery.mjs" grok "${ROOT}" "$2"
+  exit "$?"
+elif [[ "$#" -ne 0 ]]; then
+  echo "unsupported T0 argument: $1" >&2
+  exit 2
+fi
 
 pass() { echo "PASS: $1"; }
 fail() { echo "FAIL: $1"; FAIL=1; }
@@ -166,6 +180,34 @@ run_group() {
   rm -f "$log"
 }
 
+run_node_group() {
+  local name="$1" rel log
+  shift
+  local files=()
+  for rel in "$@"; do
+    REGISTERED+=("${rel}")
+    require_file "$rel" || return 1
+    files+=("${ROOT}/$rel")
+  done
+  [[ ${#files[@]} -gt 0 ]] || { fail "$name: group listed no suite files"; return 1; }
+  log="$(mktemp)"
+  echo "── ${name} ──"
+  if ! node "$ROOT/scripts/tests/run-node-test-files.mjs" "${files[@]}" >"$log" 2>&1; then
+    fail "$name: command failed"
+    cat "$log"
+    rm -f "$log"
+    return 1
+  fi
+  if ! assert_executed_counts "$name" "$log" "${#files[@]}"; then
+    rm -f "$log"
+    return 1
+  fi
+  rm -f "$log"
+  GROUPS_RUN=$((GROUPS_RUN + 1))
+  pass "$name"
+}
+
+
 require_ci_matrix_entry() {
   local entry="$1"
   if ! grep -Eq "^[[:space:]]+- ${entry}$" "${ROOT}/.github/workflows/ci-public.yml"; then
@@ -179,7 +221,6 @@ require_ci_matrix_entry() {
 # proves they exist and that the CI real-PG lane asserts each one ran.
 require_real_pg_suite() {
   local rel="$1"
-  REGISTERED+=("${rel}")
   require_file "${rel}" || return 1
   local suite
   # The real-PG lane lists each suite by its file name, `.test.ts` included.
@@ -193,6 +234,10 @@ require_real_pg_suite() {
 }
 
 echo "Grok subscription T0 aggregator"
+
+run_node_group "subscription-discovery-and-offline-image-provider" \
+  "scripts/tests/subscription-t0-discovery.test.mjs" \
+  "scripts/e2e/fixtures/subscription-image-provider.test.mjs"
 
 require_ci_matrix_entry "grok-llm-proxy"
 require_ci_matrix_entry "packages/grok-provider-attempt-contract"
@@ -363,6 +408,10 @@ else
   else
     pass "desktop-app verify:electron"
     run_group "desktop-app grok" "desktop-app" \
+      "test/subscriptionImageCollection.test.ts" \
+      "test/subscriptionImageChallenge.test.ts" \
+      "test/subscriptionImageRunContract.test.ts" \
+      "test/subscriptionAdmissionGuard.test.ts" \
       "ui/src/constants/__tests__/attachments.test.ts" \
       "ui/src/components/agents/__tests__/ComposerPanel.test.tsx"
   fi
@@ -379,53 +428,14 @@ if require_file "scripts/tests/test-grok-llm-proxy-deploy-contract.sh" &&
   fi
 fi
 
-# A Grok suite that exists but is not listed above is lost coverage. Every
-# proxy/contract test file and every *grok* test file in the Grok-touching
-# packages must be registered in a group or as a real-PG presence check.
-is_registered() {
-  local candidate="$1" entry
-  for entry in "${REGISTERED[@]}"; do
-    [[ "${entry}" == "${candidate}" ]] && return 0
-  done
-  return 1
-}
-# The scan proves nothing when it looks at nothing: a missing root only makes
-# `find` write to stderr, and an empty result would read as "all registered".
-# So every root must exist and the scan must find candidates.
-suite_roots=(grok-llm-proxy/test packages/grok-provider-attempt-contract)
-named_roots=(control-api mcp-host workflow-recipes host-context-controller control-ui)
-scan_roots_missing=0
-for scan_root in "${suite_roots[@]}" "${named_roots[@]}"; do
-  if [[ ! -d "${ROOT}/${scan_root}" ]]; then
-    fail "unlisted-suite scan root ${scan_root} is missing"
-    scan_roots_missing=1
-  fi
-done
-unlisted=0
-candidates=0
-while IFS= read -r rel; do
-  [[ -n "${rel}" ]] || continue
-  candidates=$((candidates + 1))
-  if ! is_registered "${rel}"; then
-    fail "unlisted Grok suite ${rel}"
-    unlisted=1
-  fi
-done < <(
-  cd "${ROOT}" &&
-    {
-      find "${suite_roots[@]}" \
-        -name node_modules -prune -o -type f \( -name '*.test.ts' -o -name '*.test.cjs' \) -print
-      find "${named_roots[@]}" \
-        \( -name node_modules -o -name dist -o -name .next -o -name coverage \) -prune -o \
-        -type f -iname '*grok*' \( -name '*.test.ts' -o -name '*.test.tsx' \) -print
-    } | sort -u
-)
-if [[ "${candidates}" -eq 0 ]]; then
-  fail "unlisted-suite scan found no Grok test files"
+# Every candidate is registered in T0 or has an explicit CI/PG/runtime lane.
+# Discovery never certifies those other lanes; each requires its own physical receipt.
+discovery_registry="$(mktemp)"
+printf '%s\n' "${REGISTERED[@]}" >"${discovery_registry}"
+if ! node "${ROOT}/scripts/tests/lib/subscription-t0-discovery.mjs" grok "${ROOT}" "${discovery_registry}"; then
+  FAIL=1
 fi
-if [[ "${unlisted}" -eq 0 && "${scan_roots_missing}" -eq 0 && "${candidates}" -gt 0 ]]; then
-  pass "every Grok suite is registered in T0 (${candidates} candidates scanned)"
-fi
+rm -f "${discovery_registry}"
 
 if [[ "${GROUPS_RUN}" -ne "${EXPECTED_GROUPS}" ]]; then
   fail "expected all ${EXPECTED_GROUPS} T0 groups, ran ${GROUPS_RUN}"
