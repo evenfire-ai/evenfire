@@ -60,9 +60,11 @@ function createHandler(
     authTransitioning: boolean
     isAuthenticated: boolean
   },
-  refreshRuntimeConfigState = async () => runtimeConfigModule!.getDesktopRuntimeConfigState(),
-  logoutForEnvironmentMismatch = vi.fn(async () => undefined),
-  onSessionNeedsLoad = vi.fn(async () => undefined)
+  refreshRuntimeConfigState: () => Promise<
+    Awaited<ReturnType<typeof import('../../../../../src/config').getDesktopRuntimeConfigState>>
+  > = async () => runtimeConfigModule!.getDesktopRuntimeConfigState(),
+  logoutForEnvironmentMismatch: () => Promise<void> = vi.fn(async () => {}),
+  onSessionNeedsLoad: () => Promise<void> = vi.fn(async () => {})
 ) {
   const selectRuntimeConfig = vi.fn(async (optionId: string) => {
     await runtimeConfigModule!.selectDesktopRuntimeConfigOption(optionId)
@@ -150,8 +152,8 @@ describe('Desktop environment handoff concurrency', () => {
 
     let busy = false
     let isAuthenticated = true
-    let finishLogout = () => undefined
-    let reportLogoutStarted = () => undefined
+    let finishLogout: () => void = () => {}
+    let reportLogoutStarted: () => void = () => {}
     const logoutStarted = new Promise<void>(resolve => {
       reportLogoutStarted = resolve
     })
