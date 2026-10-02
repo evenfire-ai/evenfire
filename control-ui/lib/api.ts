@@ -4288,7 +4288,8 @@ export async function listOrgImages(): Promise<{ org: string; images: OrgImage[]
 // already_connected, recovery_in_progress, not_pending, not_recoverable,
 // org_name_taken, registration_capacity, rate_limited, invalid_contact_email,
 // org_blocklisted, claim_expired, claim_rejected, already_claimed,
-// deployment_suspended, client_unavailable, connection_superseded.
+// deployment_suspended, client_unavailable, connection_superseded,
+// registry_signing_material_unavailable.
 
 export type RegistryConnectionState =
   | 'disconnected'

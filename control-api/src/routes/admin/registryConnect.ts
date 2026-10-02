@@ -13,7 +13,10 @@ import {
   markConnected,
   upsertPendingConnection,
 } from '../../services/registryConnectionDb.js'
-import { signPop } from '../../services/registryPopSigner.js'
+import {
+  RegistrySigningMaterialUnavailableError,
+  signPop,
+} from '../../services/registryPopSigner.js'
 
 /**
  * The self-hosted connect flow (spec §6.1/§6.3). control-ui JWT auth; the
@@ -39,6 +42,26 @@ import { signPop } from '../../services/registryPopSigner.js'
 /** Bound every registry hop (registryClient.ts convention). */
 const REGISTRY_FETCH_TIMEOUT_MS = 10_000
 
+function respondToSigningMaterialFailure(
+  error: unknown,
+  res: Response,
+  operation: 'status' | 'registration' | 'claim' | 'recovery'
+): boolean {
+  if (!(error instanceof RegistrySigningMaterialUnavailableError)) return false
+  rootLogger.warn(
+    {
+      event: 'registry_pop_key_unavailable',
+      source: 'registry_pop',
+      slot: 'pop',
+      operation,
+      reason: error.reason,
+    },
+    'Registry proof-of-possession signing material rejected'
+  )
+  res.status(409).json({ error: 'registry_signing_material_unavailable' })
+  return true
+}
+
 export function createRegistryConnectRouter(): Router {
   const router = Router()
   const base = (): string => `${config.registryUrl}/api/v1/deployments`
@@ -54,7 +77,9 @@ export function createRegistryConnectRouter(): Router {
     | { kind: 'error'; status: number }
 
   // Single claim implementation shared by the manual paste route and the
-  // auto-claim path. EXCEPTION-TOTAL: markConnected encrypts and writes to
+  // auto-claim path. Permanent signing policy failures propagate before the
+  // registry can consume a claim token. Later failures are values because
+  // markConnected encrypts and writes to
   // Postgres AFTER the registry has already burned the one-time secret, so a
   // throw here must be a value the caller can act on, never an unhandled 500.
   async function redeemClaim(input: {
@@ -64,12 +89,12 @@ export function createRegistryConnectRouter(): Router {
     adminId: string
     claimToken: string
   }): Promise<ClaimOutcome> {
+    const pop = signPop({
+      privateKeyPem: input.privateKeyPem,
+      sub: input.adminId,
+      kid: input.keyId,
+    })
     try {
-      const pop = signPop({
-        privateKeyPem: input.privateKeyPem,
-        sub: input.adminId,
-        kid: input.keyId,
-      })
       const claimRes = await fetch(`${base()}/claim`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', DPoP: pop },
@@ -161,15 +186,16 @@ export function createRegistryConnectRouter(): Router {
   // Poll the registry for the deployment's current lifecycle status. Best-effort:
   // a poll failure degrades to the locally-known pending state so GET never 500s
   // on a transient registry hiccup. Returns the parsed status/suspended/claimed
-  // triple, or null on any failure.
+  // triple, or null on transport/response failure. A local signing-policy
+  // conflict is permanent and must reach the route before any registry call.
   async function pollRegistryStatus(row: {
     deploymentId: string
     keyId: string
     privateKeyPem: string
     adminId: string
   }): Promise<{ status: string | null; suspended: boolean; claimed: boolean } | null> {
+    const pop = signPop({ privateKeyPem: row.privateKeyPem, sub: row.adminId, kid: row.keyId })
     try {
-      const pop = signPop({ privateKeyPem: row.privateKeyPem, sub: row.adminId, kid: row.keyId })
       const statusRes = await fetch(`${base()}/${row.deploymentId}/status`, {
         method: 'GET',
         headers: { DPoP: pop },
@@ -192,9 +218,9 @@ export function createRegistryConnectRouter(): Router {
         suspended: parsed.suspended === true,
         claimed: parsed.claimed === true,
       }
-    } catch (err) {
+    } catch {
       rootLogger.warn(
-        { event: 'registry_connect_status_poll_error', err: (err as Error).message },
+        { event: 'registry_connect_status_poll_error', reason: 'registry_transport_failure' },
         'status poll threw; degrading to local pending'
       )
       return null
@@ -311,6 +337,7 @@ export function createRegistryConnectRouter(): Router {
           authEnabled,
         })
       } catch (err) {
+        if (respondToSigningMaterialFailure(err, res, 'status')) return
         next(err)
       }
     }
@@ -513,6 +540,7 @@ export function createRegistryConnectRouter(): Router {
           .status(202)
           .json({ state: 'connecting', deploymentId: reg.deployment_id, requestedOrgName })
       } catch (err) {
+        if (respondToSigningMaterialFailure(err, res, 'registration')) return
         next(err)
       }
     }
@@ -569,6 +597,7 @@ export function createRegistryConnectRouter(): Router {
           return
       }
     } catch (err) {
+      if (respondToSigningMaterialFailure(err, res, 'claim')) return
       next(err)
     }
   })
@@ -633,12 +662,12 @@ export function createRegistryConnectRouter(): Router {
           'attempting auto-claim recovery'
         )
         let claimToken: string
+        const pop = signPop({
+          privateKeyPem: row.privateKeyPem,
+          sub: ctx.adminId,
+          kid: row.keyId,
+        })
         try {
-          const pop = signPop({
-            privateKeyPem: row.privateKeyPem,
-            sub: ctx.adminId,
-            kid: row.keyId,
-          })
           const rotRes = await fetch(`${base()}/${row.deploymentId}/claim-token`, {
             method: 'POST',
             headers: { DPoP: pop },
@@ -709,6 +738,7 @@ export function createRegistryConnectRouter(): Router {
             return
         }
       } catch (err) {
+        if (respondToSigningMaterialFailure(err, res, 'recovery')) return
         next(err)
       }
     }
