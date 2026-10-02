@@ -243,7 +243,8 @@ export async function resolveVoucherSigningMaterial(): Promise<{
       kid: row.keyId,
     }
   }
-  // managed
+  // Managed environment material is validated at startup. Retain this check
+  // for isolated consumers so missing material still maps to VoucherUnavailableError.
   if (!config.registryVoucherPrivateKey || !config.registryVoucherKid) {
     throw new VoucherUnavailableError()
   }

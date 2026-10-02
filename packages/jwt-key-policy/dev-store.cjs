@@ -161,14 +161,16 @@ function readStoreFile(filePath, visibility) {
 
 function readSigningFile(privatePath) {
   const raw = readStoreFile(privatePath, 'private')
-  return raw === undefined ? undefined : parseSigningMaterial(raw, privatePath)
+  return raw === undefined
+    ? undefined
+    : parseSigningMaterial(raw, `dev JWT signing key (${path.basename(privatePath)})`)
 }
 
 function readPublicFile(publicPath) {
   const raw = readStoreFile(publicPath, 'public')
   return raw === undefined
     ? undefined
-    : parseVerifierMaterial(raw, publicPath, { origin: 'store' })
+    : parseVerifierMaterial(raw, `dev JWT verifier key (${path.basename(publicPath)})`, { origin: 'store' })
 }
 
 /**
@@ -269,7 +271,7 @@ function loadOrCreateDevSigningMaterial(slot, absoluteStore) {
       privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
       publicKeyEncoding: { type: 'spki', format: 'pem' },
     })
-    const candidate = parseSigningMaterial(privateKey, privatePath)
+    const candidate = parseSigningMaterial(privateKey, `dev JWT signing key (${path.basename(privatePath)})`)
     publishMaterial(privatePath, candidate.privatePem, 'private')
     // Always consume the published inode. An EEXIST winner owns the identity,
     // not this process's generated candidate.

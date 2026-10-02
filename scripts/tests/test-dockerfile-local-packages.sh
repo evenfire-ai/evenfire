@@ -216,18 +216,38 @@ assert_control_api_runtime_prune_after_builds() {
   fi
 }
 
-assert_control_api_make_root_context() {
-  local from_root from_service expected
-  expected="docker build -f \"$REPO_ROOT/control-api/Dockerfile\" -t example.invalid/evenfire/control-api:fixture \"$REPO_ROOT\""
-  from_root="$(cd "$REPO_ROOT" && make -n -f control-api/Makefile docker-build REGISTRY=example.invalid/evenfire TAG=fixture)"
-  from_service="$(cd "$REPO_ROOT/control-api" && make -n docker-build REGISTRY=example.invalid/evenfire TAG=fixture)"
+assert_service_make_root_context() {
+  local service="$1" target="${2:-docker-build}" from_root from_service expected
+  if [[ "$target" == docker-push-cross ]]; then
+    expected="docker buildx build --platform linux/amd64 -f \"$REPO_ROOT/$service/Dockerfile\" -t example.invalid/evenfire/$service:fixture --push \"$REPO_ROOT\""
+  else
+    expected="docker build -f \"$REPO_ROOT/$service/Dockerfile\" -t example.invalid/evenfire/$service:fixture \"$REPO_ROOT\""
+  fi
+  from_root="$(cd "$REPO_ROOT" && make -n -f "$service/Makefile" "$target" REGISTRY=example.invalid/evenfire TAG=fixture)"
+  from_service="$(cd "$REPO_ROOT/$service" && make -n "$target" REGISTRY=example.invalid/evenfire TAG=fixture)"
   if [[ "$from_root" != "$expected" || "$from_service" != "$expected" ]]; then
-    fail 'Control API Make docker-build must use its explicit Dockerfile and root context from either supported cwd'
+    fail "$service Make $target must use its explicit Dockerfile and root context from either supported cwd"
   fi
 }
 
+assert_service_secret_exclusions_after_allowlist() {
+  local service="$1" ignore="$REPO_ROOT/$1/Dockerfile.dockerignore"
+  local last_allow exclude_line pattern
+  last_allow="$(awk '/^!/ { line=NR } END { print line+0 }' "$ignore")"
+  for pattern in '**/.dev-keys/' '**/.env' '**/.env.*' '**/*.pem' '**/*.key'; do
+    exclude_line="$(awk -v pattern="$pattern" '$0 == pattern { line=NR } END { print line+0 }' "$ignore")"
+    if [[ "$exclude_line" -le "$last_allow" ]]; then
+      fail "$service context must exclude $pattern after all allow rules, including nested src files"
+    fi
+  done
+}
+
 assert_control_api_runtime_prune_after_builds
-assert_control_api_make_root_context
+for service in control-api rpc-proxy external-rest-api; do
+  assert_service_make_root_context "$service"
+  assert_service_secret_exclusions_after_allowlist "$service"
+done
+assert_service_make_root_context rpc-proxy docker-push-cross
 
 # Direct consumers.  The first four are Node services; profile-ui and
 # control-ui are Next.js consumers and therefore also require materialization.

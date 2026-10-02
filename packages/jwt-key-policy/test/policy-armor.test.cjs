@@ -130,3 +130,37 @@ test('safe contextual failures contain neither input material nor native crypto 
     rejected(() => parseSigningMaterial(signing, 'INVALID_POLICY_OPTIONS', { fingerprints }), 'invalid_type')
   }
 })
+
+test('unsafe diagnostic sources are redacted in parser errors and serialized metadata', () => {
+  // Synthetic labels exercise redaction without embedding any credentials.
+  for (const source of [
+    undefined, null, 1, {}, '', '/synthetic/dev-store/rpc.pem', '9invalid',
+    '.invalid', 'A'.repeat(161), 'label-----suffix', 'Bearer x', 'Basic x',
+    'label bEaReR x', 'label bAsIc x', 'label\nsecond line', 'label?query',
+  ]) {
+    for (const parse of [parseSigningMaterial, parseVerifierMaterial]) {
+      assert.throws(() => parse('invalid', source), error => {
+        assert.equal(error instanceof JwtKeyMaterialError, true)
+        assert.equal(error.source, 'JWT key material')
+        assert.equal(error.message.startsWith('JWT key material '), true)
+        if (typeof source === 'string' && source !== '') {
+          assert.equal(error.message.includes(source), false)
+          assert.equal(JSON.stringify(error).includes(source), false)
+        }
+        return true
+      })
+    }
+  }
+})
+
+test('safe diagnostic sources retain their context through the maximum label length', () => {
+  for (const source of ['VERIFIER_SOURCE', 'rpc.pem', 'dev JWT signing key (rpc.pem)', 'A'.repeat(160)]) {
+    for (const parse of [parseSigningMaterial, parseVerifierMaterial]) {
+      assert.throws(() => parse('invalid', source), error => {
+        assert.equal(error.source, source)
+        assert.equal(error.message.startsWith(source + ' '), true)
+        return true
+      })
+    }
+  }
+})

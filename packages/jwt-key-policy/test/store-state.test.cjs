@@ -157,6 +157,33 @@ for (const [name, privateValue, publicValue, reason] of [
   })
 }
 
+for (const slot of ['rpc', 'session', 'admin']) {
+  for (const role of ['signing', 'verifier']) {
+    test(`corrupt ${slot} ${role} material retains a safe slot label without its directory`, t => {
+      const { store } = fixture(t)
+      publishPair(store, pair, slot)
+      const filename = `${slot}${role === 'verifier' ? '.public' : ''}.pem`
+      fs.writeFileSync(path.join(store, filename), 'synthetic invalid material')
+      const before = snapshot(store)
+      const actions = [() => storeApi.loadOrCreateDevSigningMaterial(slot, store)]
+      if (role === 'verifier') actions.push(() => storeApi.readDevVerifierMaterial(slot, store))
+      for (const action of actions) {
+        assert.throws(action, error => {
+          assert.equal(error instanceof policy.JwtKeyMaterialError, true)
+          assert.equal(error.code, 'ERR_JWT_KEY_INVALID')
+          assert.equal(error.reason, 'invalid_pem')
+          assert.equal(error.source, `dev JWT ${role} key (${filename})`)
+          assert.equal(error.message.includes(filename), true)
+          assert.equal(error.message.includes(store), false)
+          assert.equal(JSON.stringify(error).includes(store), false)
+          return true
+        })
+      }
+      assert.deepEqual(snapshot(store), before)
+    })
+  }
+}
+
 for (const half of ['private', 'public']) {
   test(`a generated-denied ${half} identity fails through the real parser and preserves the pair`, t => {
     const { store } = fixture(t)

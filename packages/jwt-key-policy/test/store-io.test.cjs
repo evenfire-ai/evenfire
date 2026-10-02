@@ -151,10 +151,12 @@ for (const stage of ['fstatSync', 'readSync']) {
 
 test('initial oversize and growth past the bound fail with closed descriptors', t => {
   const { store } = fixture(t)
+  const oversizedStoreFailure = error => error instanceof storeApi.DevKeyStoreError &&
+    error.code === 'ERR_JWT_DEV_STORE' && error.reason === 'material_too_large'
   publishPair(store, pair)
   const file = path.join(store, 'rpc.public.pem')
   fs.writeFileSync(file, 'x'.repeat(policy.MAX_PEM_MATERIAL_BYTES + 1))
-  expectReason(() => storeApi.readDevVerifierMaterial('rpc', store), 'material_too_large')
+  assert.throws(() => storeApi.readDevVerifierMaterial('rpc', store), oversizedStoreFailure)
   fs.writeFileSync(file, pair.publicKey)
   const held = new Set()
   let grew = false
@@ -165,7 +167,7 @@ test('initial oversize and growth past the bound fail with closed descriptors', 
       if (!grew) { grew = true; fs.appendFileSync(file, 'x'.repeat(policy.MAX_PEM_MATERIAL_BYTES)) }
       return original(...args)
     },
-  }, () => expectReason(() => storeApi.readDevVerifierMaterial('rpc', store), 'material_too_large'))
+  }, () => assert.throws(() => storeApi.readDevVerifierMaterial('rpc', store), oversizedStoreFailure))
   assert.equal(grew, true)
   assert.equal(held.size, 0)
 })
