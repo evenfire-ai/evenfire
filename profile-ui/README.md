@@ -18,7 +18,14 @@ See `.env.example`.
 Important variables:
 
 - `NEXT_PUBLIC_EXTERNAL_REST_API_BASE_URL`
+- `NEXT_PUBLIC_PROFILE_DESKTOP_HANDOFF_ENABLED` (build-time; defaults to `false`)
 - `EXTERNAL_REST_API_INTERNAL_URL` (server-side proxy target)
+
+The Profile-to-Desktop environment handoff is disabled by default to protect older
+Desktop clients from ambiguous REST-only links. Enable it only after the updated
+Desktop consumer is released and operators have verified that older supported
+clients are no longer in use. Image builds can set the repository variable
+`PROFILE_DESKTOP_HANDOFF_ENABLED=true`; unset or `false` keeps the handoff disabled.
 
 ## Local
 

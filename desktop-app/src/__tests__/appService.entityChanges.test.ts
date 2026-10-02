@@ -45,6 +45,46 @@ function setSyntheticEntityChangeSession(service: object, value: string, generat
   state.entityChangeSessionGeneration = generation
 }
 
+describe('AppService runtime transition ownership', () => {
+  it('rejects a handoff selection from an older session generation before reading profiles', async () => {
+    const service = new AppService() as any
+    service.sessionGeneration = 9
+
+    await expect(service.selectRuntimeConfigForHandoff('saved-profile', 8)).rejects.toThrow(
+      'stale_session_generation'
+    )
+    expect(service.getSessionGeneration()).toBe(9)
+  })
+
+  it('does not persist an environment selection after another transition supersedes it', async () => {
+    const service = new AppService() as any
+    service.sessionGeneration = 9
+    service.sessionToken = 'synthetic-session-token'
+    service.me = { id: 'user-1', teamId: 'team-1' }
+    service.beginPrewarmAuthTransition = () => () => undefined
+    service.ensureEntityChangeConnection = vi.fn()
+
+    let finishUploadSuspension!: () => void
+    service.suspendDesktopGfsUploadsForAuthBoundary = () =>
+      new Promise<void>(resolve => {
+        finishUploadSuspension = resolve
+      })
+    const persistEnvironmentSelection = vi.fn(async () => undefined)
+    const changing = service.applyRuntimeEnvironmentChange(persistEnvironmentSelection, 9)
+
+    await flushAsyncWork()
+    expect(service.getSessionGeneration()).toBe(10)
+
+    // A login or environment selection advances the same native owner revision.
+    service.sessionGeneration += 1
+    finishUploadSuspension()
+
+    await expect(changing).rejects.toThrow('stale_session_generation')
+    expect(persistEnvironmentSelection).not.toHaveBeenCalled()
+    expect(service.entityChangeEnvironmentSwitching).toBe(false)
+  })
+})
+
 describe('AppService entity-change fan-out', () => {
   it('rebinds a live subscriber after expiry through public Google login', async () => {
     const service = new AppService() as any

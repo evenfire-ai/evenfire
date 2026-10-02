@@ -5,6 +5,7 @@ import type {
   DependencyHealth,
   DesktopReleaseStatus,
   DesktopRuntimeConfig,
+  DesktopRuntimeConfigHandoffSelection,
   DesktopRuntimeConfigState,
   LoginBackendHint,
   SessionMe,
@@ -12,13 +13,14 @@ import type {
 import type { Tone } from '../../uiTypes'
 import {
   createDesktopEnvironmentSetupHandler,
-  getDesktopEnvironmentRestOriginMatches,
+  getDesktopEnvironmentRestMatches,
 } from './desktopEnvironmentHandoff'
 import type { SetStatusFn } from './types'
 
 interface UseAuthControllerParams {
   setStatus: SetStatusFn
   onSessionNeedsLoad: (options?: { preserveNav?: boolean }) => Promise<void>
+  logoutForEnvironmentMismatch: () => Promise<number | null>
 }
 
 function isInvitationExpiredError(error: unknown) {
@@ -41,7 +43,11 @@ function isUnauthorizedError(error: unknown) {
   return /\b401\s+unauthorized\b/.test(message) || /:\s*401\s/.test(message)
 }
 
-export function useAuthController({ setStatus, onSessionNeedsLoad }: UseAuthControllerParams) {
+export function useAuthController({
+  setStatus,
+  onSessionNeedsLoad,
+  logoutForEnvironmentMismatch,
+}: UseAuthControllerParams) {
   const [booting, setBootingState] = useState(true)
   const bootingRef = useRef(true)
   const setBooting = useCallback((next: boolean) => {
@@ -116,6 +122,8 @@ export function useAuthController({ setStatus, onSessionNeedsLoad }: UseAuthCont
     setRuntimeConfigState(state)
     return state
   }, [])
+
+  const getSessionGeneration = useCallback(() => window.clerum.auth.getSessionGeneration(), [])
 
   const completeDesktopSetupWith = useCallback(
     async (nextEmail: string, nextAuthorizationToken: string) => {
@@ -335,26 +343,33 @@ export function useAuthController({ setStatus, onSessionNeedsLoad }: UseAuthCont
     }
   }
 
+  const applySelectedRuntimeConfigState = useCallback(
+    (state: DesktopRuntimeConfigState) => {
+      // Switching environment (pre-login) must not carry another env's cached
+      // queries forward (spec §5.2 P1). The env is bound to login (D4: no switch
+      // without logout), so a full clear is sufficient — no per-env query keys.
+      desktopQueryClient.clear()
+      setRuntimeConfigState(state)
+      setDesktopSetupAuthorizationToken('')
+      setDesktopSetupStarted(false)
+      const selected = state.options.find(option => option.id === state.activeOptionId)
+      setStatus(
+        selected ? `Environment selected: ${selected.label}.` : 'Environment selected.',
+        'success',
+        undefined,
+        { global: false, toast: true }
+      )
+    },
+    [setStatus]
+  )
+
   const handleSelectRuntimeConfig = useCallback(
     async (optionId: string): Promise<DesktopRuntimeConfigState | null> => {
       try {
         setBusy(true)
         setBackendSwitchHint(null)
         const state = await window.clerum.auth.selectRuntimeConfig(optionId)
-        // Switching environment (pre-login) must not carry another env's cached
-        // queries forward (spec §5.2 P1). The env is bound to login (D4: no switch
-        // without logout), so a full clear is sufficient — no per-env query keys.
-        desktopQueryClient.clear()
-        setRuntimeConfigState(state)
-        setDesktopSetupAuthorizationToken('')
-        setDesktopSetupStarted(false)
-        const selected = state.options.find(option => option.id === state.activeOptionId)
-        setStatus(
-          selected ? `Environment selected: ${selected.label}.` : 'Environment selected.',
-          'success',
-          undefined,
-          { global: false, toast: true }
-        )
+        applySelectedRuntimeConfigState(state)
         return state
       } catch (error) {
         setStatus(
@@ -366,23 +381,58 @@ export function useAuthController({ setStatus, onSessionNeedsLoad }: UseAuthCont
         setBusy(false)
       }
     },
-    [setStatus]
+    [applySelectedRuntimeConfigState, setStatus]
+  )
+
+  const handleSelectRuntimeConfigForHandoff = useCallback(
+    async (
+      optionId: string,
+      expectedSessionGeneration: number
+    ): Promise<DesktopRuntimeConfigHandoffSelection | null> => {
+      try {
+        setBusy(true)
+        setBackendSwitchHint(null)
+        const selection = await window.clerum.auth.selectRuntimeConfigForHandoff(
+          optionId,
+          expectedSessionGeneration
+        )
+        applySelectedRuntimeConfigState(selection.runtimeConfigState)
+        return selection
+      } catch (error) {
+        if (error instanceof Error && error.message.includes('stale_session_generation')) {
+          return null
+        }
+        setStatus(
+          `Failed to switch environment: ${error instanceof Error ? error.message : String(error)}`,
+          'error'
+        )
+        return null
+      } finally {
+        setBusy(false)
+      }
+    },
+    [applySelectedRuntimeConfigState, setStatus]
   )
 
   useEffect(() => {
     return window.clerum.auth.onDesktopEnvironmentSetup(
       createDesktopEnvironmentSetupHandler({
         getAuthState: getDesktopEnvironmentHandoffAuthState,
+        getSessionGeneration,
         refreshRuntimeConfigState,
-        handleSelectRuntimeConfig,
+        handleSelectRuntimeConfig: handleSelectRuntimeConfigForHandoff,
         onSessionNeedsLoad,
+        logoutForEnvironmentMismatch,
         setPendingDesktopEnvironmentSetup,
         setStatus,
       })
     )
   }, [
     getDesktopEnvironmentHandoffAuthState,
+    getSessionGeneration,
     handleSelectRuntimeConfig,
+    handleSelectRuntimeConfigForHandoff,
+    logoutForEnvironmentMismatch,
     onSessionNeedsLoad,
     refreshRuntimeConfigState,
     setStatus,
@@ -430,12 +480,12 @@ export function useAuthController({ setStatus, onSessionNeedsLoad }: UseAuthCont
         return
       }
 
-      const restOriginMatches = getDesktopEnvironmentRestOriginMatches(
+      const restMatches = getDesktopEnvironmentRestMatches(
         currentConfigState,
         nextConfig.externalRestApiBaseUrl
       )
 
-      if (restOriginMatches.localhost) {
+      if (restMatches.localhost) {
         setPendingDesktopEnvironmentSetup(null)
         setStatus(
           'Desktop setup link rejected: the Localhost environment cannot be opened from a link.',
@@ -444,17 +494,17 @@ export function useAuthController({ setStatus, onSessionNeedsLoad }: UseAuthCont
         return
       }
 
-      if (restOriginMatches.saved.length > 0) {
-        if (restOriginMatches.saved.length > 1) {
+      if (restMatches.saved.length > 0) {
+        if (restMatches.saved.length > 1) {
           setPendingDesktopEnvironmentSetup(null)
           setStatus(
-            'Desktop setup link rejected because multiple saved environments use this REST host.',
+            'Desktop setup link rejected because multiple saved environments use this REST API.',
             'error'
           )
           return
         }
 
-        const selectedState = await handleSelectRuntimeConfig(restOriginMatches.saved[0].id)
+        const selectedState = await handleSelectRuntimeConfig(restMatches.saved[0].id)
         if (!selectedState) return
         setPendingDesktopEnvironmentSetup(null)
         try {
@@ -471,11 +521,11 @@ export function useAuthController({ setStatus, onSessionNeedsLoad }: UseAuthCont
       const state = await handleSaveRuntimeConfig(nextConfig)
       if (!state) return
       const selectedOption = state.options.find(option => option.id === state.activeOptionId)
-      const selectedRestOriginMatches = getDesktopEnvironmentRestOriginMatches(
+      const selectedRestMatches = getDesktopEnvironmentRestMatches(
         state,
         nextConfig.externalRestApiBaseUrl
       ).saved.some(option => option.id === state.activeOptionId)
-      if (!selectedOption || !selectedRestOriginMatches || !selectedOption.rpcProxyBaseUrl.trim()) {
+      if (!selectedOption || !selectedRestMatches || !selectedOption.rpcProxyBaseUrl.trim()) {
         setPendingDesktopEnvironmentSetup(null)
         setStatus(
           'Desktop environment setup could not verify the confirmed REST and RPC endpoints.',

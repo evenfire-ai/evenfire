@@ -60,23 +60,48 @@ function createHandler(
     authTransitioning: boolean
     isAuthenticated: boolean
   },
-  refreshRuntimeConfigState = async () => runtimeConfigModule!.getDesktopRuntimeConfigState()
+  refreshRuntimeConfigState: () => Promise<
+    Awaited<ReturnType<typeof import('../../../../../src/config').getDesktopRuntimeConfigState>>
+  > = async () => runtimeConfigModule!.getDesktopRuntimeConfigState(),
+  logoutForEnvironmentMismatch?: () => Promise<number | null>,
+  onSessionNeedsLoad: () => Promise<void> = vi.fn(async () => {}),
+  readSessionGeneration?: () => Promise<number>
 ) {
-  const selectRuntimeConfig = vi.fn(async (optionId: string) => {
+  let sessionGeneration = 0
+  const getSessionGeneration = readSessionGeneration ?? (async () => sessionGeneration)
+  const logout =
+    logoutForEnvironmentMismatch ??
+    vi.fn(async () => {
+      sessionGeneration += 1
+      return sessionGeneration
+    })
+  const selectRuntimeConfig = vi.fn(async (optionId: string, _expectedGeneration?: number) => {
     await runtimeConfigModule!.selectDesktopRuntimeConfigOption(optionId)
-    return runtimeConfigModule!.getDesktopRuntimeConfigState()
+    sessionGeneration += 1
+    return {
+      runtimeConfigState: await runtimeConfigModule!.getDesktopRuntimeConfigState(),
+      sessionGeneration,
+    }
   })
   const setPendingDesktopEnvironmentSetup = vi.fn()
   const setStatus = vi.fn()
   const handler = createDesktopEnvironmentSetupHandler({
     getAuthState,
+    getSessionGeneration,
     refreshRuntimeConfigState,
     handleSelectRuntimeConfig: selectRuntimeConfig,
-    onSessionNeedsLoad: vi.fn(async () => undefined),
+    onSessionNeedsLoad,
+    logoutForEnvironmentMismatch: logout,
     setPendingDesktopEnvironmentSetup,
     setStatus,
   })
-  return { handler, selectRuntimeConfig, setPendingDesktopEnvironmentSetup, setStatus }
+  return {
+    handler,
+    onSessionNeedsLoad,
+    selectRuntimeConfig,
+    setPendingDesktopEnvironmentSetup,
+    setStatus,
+  }
 }
 
 describe('Desktop environment handoff concurrency', () => {
@@ -120,20 +145,261 @@ describe('Desktop environment handoff concurrency', () => {
     expect(setPendingDesktopEnvironmentSetup).not.toHaveBeenCalled()
   })
 
+  it.each([
+    {
+      outcome: 'selects the linked saved environment',
+      externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/api/v1`,
+      action: 'select',
+    },
+    {
+      outcome: 'prompts to add the linked environment',
+      externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/other`,
+      action: 'prompt',
+    },
+  ])('waits for logout to finish, then $outcome', async ({ externalRestApiBaseUrl, action }) => {
+    const state = await runtimeConfigModule!.getDesktopRuntimeConfigState()
+    const savedTarget = state.options.find(
+      option =>
+        option.externalRestApiBaseUrl === `${targetEnvironment.externalRestApiBaseUrl}/api/v1`
+    )
+    if (!savedTarget) throw new Error('The config producer did not return the saved REST profile')
+
+    let sessionGeneration = 0
+    let busy = false
+    let isAuthenticated = true
+    let finishLogout: () => void = () => {}
+    let reportLogoutStarted: () => void = () => {}
+    const logoutStarted = new Promise<void>(resolve => {
+      reportLogoutStarted = resolve
+    })
+    const logoutFinished = new Promise<void>(resolve => {
+      finishLogout = resolve
+    })
+    const logout = vi.fn(async () => {
+      busy = true
+      reportLogoutStarted()
+      await logoutFinished
+      isAuthenticated = false
+      busy = false
+      sessionGeneration += 1
+      return sessionGeneration
+    })
+    const { handler, selectRuntimeConfig, setPendingDesktopEnvironmentSetup } = createHandler(
+      () => ({ booting: false, busy, authTransitioning: false, isAuthenticated }),
+      undefined,
+      logout,
+      undefined,
+      async () => sessionGeneration
+    )
+
+    const handling = handler({ ...targetEnvironment, externalRestApiBaseUrl })
+    await logoutStarted
+
+    expect(busy).toBe(true)
+    expect(selectRuntimeConfig).not.toHaveBeenCalled()
+    expect(setPendingDesktopEnvironmentSetup).toHaveBeenCalledWith(null)
+
+    finishLogout()
+    await handling
+
+    expect(busy).toBe(false)
+    expect(logout).toHaveBeenCalledOnce()
+    if (action === 'select') {
+      expect(selectRuntimeConfig).toHaveBeenCalledWith(savedTarget.id, 1)
+      expect(setPendingDesktopEnvironmentSetup).toHaveBeenLastCalledWith(null)
+    } else {
+      expect(selectRuntimeConfig).not.toHaveBeenCalled()
+      expect(setPendingDesktopEnvironmentSetup).toHaveBeenLastCalledWith({
+        ...targetEnvironment,
+        externalRestApiBaseUrl,
+        rpcProxyBaseUrl: '',
+      })
+    }
+  })
+
+  it('keeps the current environment when token removal fails during handoff logout', async () => {
+    let rendererAuthenticated = true
+    const clearSessionToken = vi.fn(async () => {
+      throw new Error('secure storage unavailable')
+    })
+    const logoutForEnvironmentMismatch = vi.fn(async () => {
+      try {
+        await clearSessionToken()
+      } catch {
+        // AppService retains the active session when durable token removal fails.
+      }
+      return null
+    })
+    const onSessionNeedsLoad = vi.fn(async () => {
+      rendererAuthenticated = true
+    })
+    const { handler, selectRuntimeConfig, setPendingDesktopEnvironmentSetup } = createHandler(
+      () => ({
+        booting: false,
+        busy: false,
+        authTransitioning: false,
+        isAuthenticated: rendererAuthenticated,
+      }),
+      undefined,
+      logoutForEnvironmentMismatch,
+      onSessionNeedsLoad
+    )
+
+    await handler({
+      ...targetEnvironment,
+      externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/api/v1`,
+    })
+
+    expect(clearSessionToken).toHaveBeenCalledOnce()
+    expect(onSessionNeedsLoad).toHaveBeenCalledWith({ preserveNav: true })
+    expect(rendererAuthenticated).toBe(true)
+    expect(selectRuntimeConfig).not.toHaveBeenCalled()
+    expect(setPendingDesktopEnvironmentSetup).toHaveBeenLastCalledWith(null)
+    expect(setPendingDesktopEnvironmentSetup).not.toHaveBeenCalledWith(
+      expect.objectContaining({ externalRestApiBaseUrl: expect.any(String) })
+    )
+  })
+
+  it('keeps the current environment when a failed logout leaves the live session active', async () => {
+    let rendererAuthenticated = true
+    const logoutForEnvironmentMismatch = vi.fn(async () => {
+      // handleLogout reports a failed logout and resolves; the live session remains active.
+      return null
+    })
+    const onSessionNeedsLoad = vi.fn(async () => {
+      rendererAuthenticated = true
+    })
+    const {
+      handler,
+      onSessionNeedsLoad: onSessionNeedsLoadSpy,
+      selectRuntimeConfig,
+      setPendingDesktopEnvironmentSetup,
+    } = createHandler(
+      () => ({
+        booting: false,
+        busy: false,
+        authTransitioning: false,
+        isAuthenticated: rendererAuthenticated,
+      }),
+      undefined,
+      logoutForEnvironmentMismatch,
+      onSessionNeedsLoad
+    )
+
+    await handler({
+      ...targetEnvironment,
+      externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/api/v1`,
+    })
+
+    expect(onSessionNeedsLoadSpy).toHaveBeenCalledWith({ preserveNav: true })
+    expect(rendererAuthenticated).toBe(true)
+    expect(selectRuntimeConfig).not.toHaveBeenCalled()
+    expect(setPendingDesktopEnvironmentSetup).toHaveBeenCalledWith(null)
+  })
+
+  it.each([
+    {
+      targetKind: 'saved target',
+      externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/api/v1`,
+      loginOutcome: 'starts',
+      loginState: { busy: true, authTransitioning: true, isAuthenticated: false },
+    },
+    {
+      targetKind: 'saved target',
+      externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/api/v1`,
+      loginOutcome: 'completes',
+      loginState: { busy: false, authTransitioning: false, isAuthenticated: true },
+    },
+    {
+      targetKind: 'new target',
+      externalRestApiBaseUrl: 'https://new-api.example.test',
+      loginOutcome: 'starts',
+      loginState: { busy: true, authTransitioning: true, isAuthenticated: false },
+    },
+    {
+      targetKind: 'new target',
+      externalRestApiBaseUrl: 'https://new-api.example.test',
+      loginOutcome: 'completes',
+      loginState: { busy: false, authTransitioning: false, isAuthenticated: true },
+    },
+  ])(
+    'does not continue toward a $targetKind when a newer login $loginOutcome during the second config read',
+    async ({ externalRestApiBaseUrl, loginState }) => {
+      let sessionGeneration = 0
+      let authState = {
+        booting: false,
+        busy: false,
+        authTransitioning: false,
+        isAuthenticated: true,
+      }
+      let refreshCount = 0
+      let finishSecondRefresh!: () => void
+      let reportSecondRefreshStarted!: () => void
+      const secondRefreshStarted = new Promise<void>(resolve => {
+        reportSecondRefreshStarted = resolve
+      })
+      const runtimeConfigState = await runtimeConfigModule!.getDesktopRuntimeConfigState()
+      const refreshRuntimeConfigState = () => {
+        refreshCount += 1
+        if (refreshCount === 1) return Promise.resolve(runtimeConfigState)
+        return new Promise<typeof runtimeConfigState>(resolve => {
+          finishSecondRefresh = () => resolve(runtimeConfigState)
+          reportSecondRefreshStarted()
+        })
+      }
+      const logoutForEnvironmentMismatch = vi.fn(async () => {
+        sessionGeneration += 1
+        authState = { ...authState, isAuthenticated: false }
+        return sessionGeneration
+      })
+      const onSessionNeedsLoad = vi.fn(async () => {})
+      const { handler, selectRuntimeConfig, setPendingDesktopEnvironmentSetup } = createHandler(
+        () => authState,
+        refreshRuntimeConfigState,
+        logoutForEnvironmentMismatch,
+        onSessionNeedsLoad,
+        async () => sessionGeneration
+      )
+
+      const handling = handler({ ...targetEnvironment, externalRestApiBaseUrl })
+      await secondRefreshStarted
+      sessionGeneration += 1
+      authState = { ...authState, ...loginState }
+      finishSecondRefresh()
+      await handling
+
+      expect(selectRuntimeConfig).not.toHaveBeenCalled()
+      expect(setPendingDesktopEnvironmentSetup).toHaveBeenCalledWith(null)
+      expect(setPendingDesktopEnvironmentSetup).not.toHaveBeenCalledWith(
+        expect.objectContaining({ externalRestApiBaseUrl })
+      )
+      expect(onSessionNeedsLoad).not.toHaveBeenCalled()
+    }
+  )
+
   it('keeps the first environment link when another arrives during verification', async () => {
     const finishRefreshes: Array<() => void> = []
     const runtimeConfigState = await runtimeConfigModule!.getDesktopRuntimeConfigState()
+    let reportRefreshStarted!: () => void
+    const refreshStarted = new Promise<void>(resolve => {
+      reportRefreshStarted = resolve
+    })
     const refreshRuntimeConfigState = () =>
       new Promise<typeof runtimeConfigState>(resolve => {
         finishRefreshes.push(() => resolve(runtimeConfigState))
+        reportRefreshStarted()
       })
     const { handler } = createHandler(
       () => ({ booting: false, busy: false, authTransitioning: false, isAuthenticated: false }),
       refreshRuntimeConfigState
     )
 
-    const first = handler(targetEnvironment)
+    const first = handler({
+      ...targetEnvironment,
+      externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/api/v1`,
+    })
     const second = handler(otherEnvironment)
+    await refreshStarted
     finishRefreshes.forEach(finishRefresh => finishRefresh())
     await Promise.all([first, second])
 
@@ -144,7 +410,7 @@ describe('Desktop environment handoff concurrency', () => {
   })
 })
 
-describe('Desktop environment origin matching', () => {
+describe('Desktop environment REST endpoint matching', () => {
   it.each([
     [
       'a REST host suffix',
@@ -181,7 +447,7 @@ describe('Desktop environment origin matching', () => {
     })
   })
 
-  it('selects the unique saved REST profile when the link omits RPC', async () => {
+  it('selects the exact saved REST profile when the link omits RPC', async () => {
     const state = await runtimeConfigModule!.getDesktopRuntimeConfigState()
     const savedTarget = state.options.find(
       option =>
@@ -192,9 +458,12 @@ describe('Desktop environment origin matching', () => {
       () => ({ booting: false, busy: false, authTransitioning: false, isAuthenticated: false })
     )
 
-    await handler({ ...targetEnvironment, rpcProxyBaseUrl: '' })
+    await handler({
+      ...targetEnvironment,
+      externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/api/v1`,
+    })
 
-    expect(selectRuntimeConfig).toHaveBeenCalledWith(savedTarget.id)
+    expect(selectRuntimeConfig).toHaveBeenCalledWith(savedTarget.id, 0)
     expect(setPendingDesktopEnvironmentSetup).toHaveBeenCalledWith(null)
   })
 
@@ -212,11 +481,10 @@ describe('Desktop environment origin matching', () => {
     await handler({
       ...targetEnvironment,
       externalRestApiBaseUrl: 'https://api.example.test./api/v1',
-      rpcProxyBaseUrl: '',
     })
 
     const finalState = await runtimeConfigModule!.getDesktopRuntimeConfigState()
-    expect(selectRuntimeConfig).toHaveBeenCalledWith(savedTarget.id)
+    expect(selectRuntimeConfig).toHaveBeenCalledWith(savedTarget.id, 0)
     expect(setPendingDesktopEnvironmentSetup).toHaveBeenCalledWith(null)
     expect(finalState.options).toHaveLength(state.options.length)
     expect(finalState.currentConfig?.externalRestApiBaseUrl).toBe(
@@ -246,27 +514,39 @@ describe('Desktop environment origin matching', () => {
     )
   })
 
-  it('rejects an omitted RPC when multiple saved profiles share the REST origin', async () => {
-    await runtimeConfigModule!.saveDesktopRuntimeConfig({
-      appName: 'Second API profile',
-      externalRestApiBaseUrl: targetEnvironment.externalRestApiBaseUrl,
-      rpcProxyBaseUrl: 'https://second-rpc.example.test',
-    })
-    const { handler, selectRuntimeConfig, setPendingDesktopEnvironmentSetup, setStatus } =
-      createHandler(() => ({
-        booting: false,
-        busy: false,
-        authTransitioning: false,
-        isAuthenticated: false,
-      }))
+  it.each(['one saved profile', 'multiple saved profiles'])(
+    'offers to add an unmatched REST path with %s on the same origin',
+    async profileCount => {
+      if (profileCount === 'multiple saved profiles') {
+        await runtimeConfigModule!.saveDesktopRuntimeConfig({
+          appName: 'Second API profile',
+          externalRestApiBaseUrl: targetEnvironment.externalRestApiBaseUrl,
+          rpcProxyBaseUrl: 'https://second-rpc.example.test',
+        })
+      }
+      const { handler, selectRuntimeConfig, setPendingDesktopEnvironmentSetup, setStatus } =
+        createHandler(() => ({
+          booting: false,
+          busy: false,
+          authTransitioning: false,
+          isAuthenticated: false,
+        }))
 
-    await handler({ ...targetEnvironment, rpcProxyBaseUrl: '' })
+      await handler({
+        ...targetEnvironment,
+        externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/other`,
+      })
 
-    expect(selectRuntimeConfig).not.toHaveBeenCalled()
-    expect(setPendingDesktopEnvironmentSetup).toHaveBeenCalledWith(null)
-    expect(setStatus).toHaveBeenCalledWith(
-      expect.stringMatching(/multiple saved environments use this REST host/i),
-      'error'
-    )
-  })
+      expect(selectRuntimeConfig).not.toHaveBeenCalled()
+      expect(setPendingDesktopEnvironmentSetup).toHaveBeenCalledWith({
+        ...targetEnvironment,
+        externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/other`,
+        rpcProxyBaseUrl: '',
+      })
+      expect(setStatus).not.toHaveBeenCalledWith(
+        expect.stringMatching(/multiple saved environments/i),
+        'error'
+      )
+    }
+  )
 })

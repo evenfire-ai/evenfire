@@ -102,7 +102,6 @@ describe('evenfire deep-link router', () => {
         payload: {
           appName: 'Acme',
           externalRestApiBaseUrl: 'https://api.example.test',
-          rpcProxyBaseUrl: 'https://rpc.example.test',
         },
         window: 'initial',
       },
@@ -148,7 +147,6 @@ describe('evenfire deep-link router', () => {
         payload: {
           appName: 'Env',
           externalRestApiBaseUrl: 'https://api.example.test',
-          rpcProxyBaseUrl: '',
         },
         window: 'initial',
       },
@@ -183,7 +181,6 @@ describe('evenfire deep-link router', () => {
         payload: {
           appName: 'Second',
           externalRestApiBaseUrl: 'https://api.example.test',
-          rpcProxyBaseUrl: '',
         },
         window: 'recreated',
       },

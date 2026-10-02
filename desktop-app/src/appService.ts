@@ -52,6 +52,7 @@ import {
   DesktopAppInfo,
   DesktopReleaseStatus,
   DesktopRuntimeConfig,
+  DesktopRuntimeConfigHandoffSelection,
   EntityChangeStreamEvent,
   ExternalChannelsSummary,
   HostActivitySnapshot,
@@ -1505,14 +1506,20 @@ export class AppService {
       token = await this.tokenStore.getSessionToken(envKey, { legacyEnvKeys })
     } catch (error) {
       console.warn('[AppService] Failed to read the saved session token:', error)
-      if (this.sessionGeneration === restoreGeneration) {
+      if (
+        this.sessionGeneration === restoreGeneration &&
+        (this.sessionToken !== null || this.me !== null)
+      ) {
         this.clearAuthenticatedSessionState()
       }
       return { authenticated: false, me: null }
     }
     if (this.logoutInProgress) return { authenticated: false, me: null }
     if (!token) {
-      if (this.sessionGeneration === restoreGeneration) {
+      if (
+        this.sessionGeneration === restoreGeneration &&
+        (this.sessionToken !== null || this.me !== null)
+      ) {
         this.clearAuthenticatedSessionState()
       }
       return { authenticated: false, me: null }
@@ -1595,10 +1602,11 @@ export class AppService {
     }
   }
 
-  private async installAuthenticatedLogin(result: {
-    token: string
-    me: SessionMe
-  }): Promise<SessionState> {
+  private async installAuthenticatedLogin(
+    result: { token: string; me: SessionMe },
+    expectedSessionGeneration: number
+  ): Promise<SessionState> {
+    this.assertSessionGeneration(expectedSessionGeneration)
     const releasePrewarm = this.beginPrewarmAuthTransition()
     try {
       const previousToken = this.sessionToken
@@ -1618,6 +1626,7 @@ export class AppService {
           }
           throw error
         }
+        this.assertSessionGeneration(expectedSessionGeneration)
         if (
           this.sessionGeneration !== previousGeneration ||
           this.sessionToken !== previousToken ||
@@ -1646,9 +1655,14 @@ export class AppService {
     }
   }
 
-  private async completePasswordLogin(email: string, password: string): Promise<SessionState> {
+  private async completePasswordLogin(
+    email: string,
+    password: string,
+    expectedSessionGeneration: number
+  ): Promise<SessionState> {
+    this.assertSessionGeneration(expectedSessionGeneration)
     const result = await this.authClient.passwordLogin(email, password)
-    return this.installAuthenticatedLogin(result)
+    return this.installAuthenticatedLogin(result, expectedSessionGeneration)
   }
 
   async getDependenciesHealth(): Promise<DependencyHealth> {
@@ -1685,7 +1699,23 @@ export class AppService {
     return getDesktopRuntimeConfigState()
   }
 
-  private async applyRuntimeEnvironmentChange(operation: () => Promise<void>): Promise<void> {
+  getSessionGeneration(): number {
+    return this.sessionGeneration
+  }
+
+  private assertSessionGeneration(expectedSessionGeneration: number): void {
+    if (this.sessionGeneration !== expectedSessionGeneration) {
+      throw new Error('stale_session_generation')
+    }
+  }
+
+  private async applyRuntimeEnvironmentChange(
+    operation: () => Promise<void>,
+    expectedSessionGeneration?: number
+  ): Promise<number> {
+    if (expectedSessionGeneration !== undefined) {
+      this.assertSessionGeneration(expectedSessionGeneration)
+    }
     const oldEnvKey = getActiveEnvKey()
     const oldBaseUrl = normalizeDesktopUploadBaseUrl(config.externalRestApiBaseUrl)
     const oldLegacyEnvKeys = getActiveLegacyEnvKeys()
@@ -1697,10 +1727,16 @@ export class AppService {
       // Invalidate a restore that may still be awaiting keychain/getMe before it
       // can bind an old-environment token to the newly selected runtime.
       this.sessionGeneration += 1
+      const transitionGeneration = this.sessionGeneration
       if (hadAuthenticatedScope) await this.suspendDesktopGfsUploadsForAuthBoundary()
+      this.assertSessionGeneration(transitionGeneration)
       try {
         await operation()
+        this.assertSessionGeneration(transitionGeneration)
       } catch (error) {
+        if (this.sessionGeneration !== transitionGeneration) {
+          throw new Error('stale_session_generation')
+        }
         const environmentUnchanged =
           getActiveEnvKey() === oldEnvKey &&
           normalizeDesktopUploadBaseUrl(config.externalRestApiBaseUrl) === oldBaseUrl
@@ -1716,7 +1752,11 @@ export class AppService {
         await this.tokenStore.clearSessionToken(oldEnvKey, { legacyEnvKeys: oldLegacyEnvKeys })
       } else if (hadAuthenticatedScope && this.sessionToken && this.me) {
         this.activateGfsAuthScope()
+        this.sessionGeneration += 1
+      } else {
+        this.sessionGeneration += 1
       }
+      return this.sessionGeneration
     } finally {
       this.entityChangeEnvironmentSwitching = false
       if (
@@ -1730,6 +1770,26 @@ export class AppService {
   }
 
   async selectRuntimeConfig(optionId: string) {
+    return (await this.selectRuntimeConfigWithGeneration(optionId)).runtimeConfigState
+  }
+
+  async selectRuntimeConfigForHandoff(
+    optionId: string,
+    expectedSessionGeneration: number
+  ): Promise<DesktopRuntimeConfigHandoffSelection> {
+    if (!Number.isSafeInteger(expectedSessionGeneration) || expectedSessionGeneration < 0) {
+      throw new Error('invalid_session_generation')
+    }
+    return this.selectRuntimeConfigWithGeneration(optionId, expectedSessionGeneration)
+  }
+
+  private async selectRuntimeConfigWithGeneration(
+    optionId: string,
+    expectedSessionGeneration?: number
+  ): Promise<DesktopRuntimeConfigHandoffSelection> {
+    if (expectedSessionGeneration !== undefined) {
+      this.assertSessionGeneration(expectedSessionGeneration)
+    }
     const state = getDesktopRuntimeConfigState()
     const selected = state.options.find(option => option.id === String(optionId || '').trim())
     const nextEnvKey = selected
@@ -1740,9 +1800,22 @@ export class AppService {
       selected !== undefined &&
       normalizeDesktopUploadBaseUrl(selected.externalRestApiBaseUrl) ===
         normalizeDesktopUploadBaseUrl(config.externalRestApiBaseUrl)
-    if (sameUploadBoundary) await selectDesktopRuntimeConfigOption(optionId)
-    else await this.applyRuntimeEnvironmentChange(() => selectDesktopRuntimeConfigOption(optionId))
-    return getDesktopRuntimeConfigState()
+    if (sameUploadBoundary) {
+      this.sessionGeneration += 1
+      const transitionGeneration = this.sessionGeneration
+      await selectDesktopRuntimeConfigOption(optionId)
+      this.assertSessionGeneration(transitionGeneration)
+      this.sessionGeneration += 1
+    } else {
+      await this.applyRuntimeEnvironmentChange(
+        () => selectDesktopRuntimeConfigOption(optionId),
+        expectedSessionGeneration
+      )
+    }
+    return {
+      runtimeConfigState: getDesktopRuntimeConfigState(),
+      sessionGeneration: this.sessionGeneration,
+    }
   }
 
   async clearRuntimeConfigSelection() {
@@ -1771,8 +1844,10 @@ export class AppService {
   }
 
   async googleLogin(idToken: string): Promise<SessionState> {
+    if (this.logoutInProgress) throw new Error('auth_transition_in_progress')
+    const loginGeneration = ++this.sessionGeneration
     const result = await this.authClient.googleLogin(idToken)
-    return this.installAuthenticatedLogin(result)
+    return this.installAuthenticatedLogin(result, loginGeneration)
   }
 
   private async openProfileDesktopSetup(email: string): Promise<{
@@ -1886,6 +1961,7 @@ export class AppService {
   }
 
   async completeDesktopSetup(email: string, authorizationToken: string) {
+    const setupGeneration = ++this.sessionGeneration
     const normalizedEmail = email.trim().toLowerCase()
     if (!normalizedEmail || !authorizationToken.trim()) {
       throw new Error('email and authorization token are required')
@@ -1899,11 +1975,14 @@ export class AppService {
         throw new Error('desktop setup configuration mismatch')
       }
 
+      this.assertSessionGeneration(setupGeneration)
       await saveDesktopRuntimeConfig({
         externalRestApiBaseUrl: activation.externalRestApiBaseUrl,
         rpcProxyBaseUrl: '',
         appName: activation.appName,
       })
+      this.assertSessionGeneration(setupGeneration)
+      this.sessionGeneration += 1
       await this.resolveRuntimeConfigIfNeeded().catch(() => undefined)
       return getDesktopRuntimeConfigState()
     } catch (error) {
@@ -1915,14 +1994,17 @@ export class AppService {
   }
 
   async passwordLogin(email: string, password: string): Promise<PasswordLoginResult> {
+    if (this.logoutInProgress) throw new Error('auth_transition_in_progress')
+    const loginGeneration = ++this.sessionGeneration
     hydrateDesktopRuntimeConfig()
     const normalizedEmail = email.trim().toLowerCase()
     if (!isDesktopRuntimeConfigured()) {
       throw new Error('desktop_setup_required')
     }
     await this.resolveRuntimeConfigIfNeeded()
+    this.assertSessionGeneration(loginGeneration)
 
-    return this.completePasswordLogin(normalizedEmail, password)
+    return this.completePasswordLogin(normalizedEmail, password, loginGeneration)
   }
 
   /**
@@ -2071,18 +2153,28 @@ export class AppService {
     return { opened: true }
   }
 
-  async logout(): Promise<void> {
+  async logout(): Promise<number> {
     this.logoutInProgress = true
+    this.sessionGeneration += 1
+    const logoutGeneration = this.sessionGeneration
     const releasePrewarm = this.beginPrewarmAuthTransition()
     try {
       const envKey = getActiveEnvKey()
       const legacyEnvKeys = getActiveLegacyEnvKeys()
       await this.suspendDesktopGfsUploadsForAuthBoundary()
+      this.assertSessionGeneration(logoutGeneration)
+      try {
+        await this.tokenStore.clearSessionToken(envKey, { legacyEnvKeys })
+        this.assertSessionGeneration(logoutGeneration)
+      } catch (error) {
+        if (this.sessionToken && this.me) this.activateGfsAuthScope()
+        throw error
+      }
       this.clearAuthenticatedSessionState()
-      await this.tokenStore.clearSessionToken(envKey, { legacyEnvKeys })
       // Grants survive logout (they are keyed by userId), but every cached SDK
       // result must not: the next user of this machine gets nothing of this one's.
       tryGetPluginSdkRuntime()?.notifySessionChanged(false)
+      return this.sessionGeneration
     } finally {
       releasePrewarm()
       this.logoutInProgress = false

@@ -18,6 +18,7 @@ import {
   DesktopAppInfo,
   DesktopReleaseStatus,
   DesktopRuntimeConfig,
+  DesktopRuntimeConfigHandoffSelection,
   DesktopRuntimeConfigState,
   EntityChangeStreamEvent,
   ExternalChannelsSummary,
@@ -68,12 +69,17 @@ declare global {
       }
       auth: {
         getSessionState: () => Promise<SessionState>
+        getSessionGeneration: () => Promise<number>
         getDependenciesHealth: () => Promise<{
           externalRestApi: { ok: boolean; detail?: string }
           rpcProxy: { ok: boolean; detail?: string }
         }>
         getRuntimeConfigState: () => Promise<DesktopRuntimeConfigState>
         selectRuntimeConfig: (optionId: string) => Promise<DesktopRuntimeConfigState>
+        selectRuntimeConfigForHandoff: (
+          optionId: string,
+          expectedSessionGeneration: number
+        ) => Promise<DesktopRuntimeConfigHandoffSelection>
         clearRuntimeConfigSelection: () => Promise<DesktopRuntimeConfigState>
         saveRuntimeConfig: (config: DesktopRuntimeConfig) => Promise<DesktopRuntimeConfigState>
         deleteRuntimeConfig: (optionId: string) => Promise<DesktopRuntimeConfigState>
@@ -97,17 +103,13 @@ declare global {
           callback: (payload: { email: string; authorizationToken: string }) => void
         ) => () => void
         onDesktopEnvironmentSetup: (
-          callback: (payload: {
-            externalRestApiBaseUrl: string
-            rpcProxyBaseUrl: string
-            appName?: string
-          }) => void
+          callback: (payload: { externalRestApiBaseUrl: string; appName?: string }) => void
         ) => () => void
         getDesktopReleaseStatus: () => Promise<DesktopReleaseStatus>
         getDesktopAppInfo: () => Promise<DesktopAppInfo>
         openDesktopRelease: (releaseUrl: string) => Promise<{ opened: true }>
         onExternalLogout: (callback: () => void) => () => void
-        logout: () => Promise<{ ok: true }>
+        logout: () => Promise<{ ok: true; sessionGeneration: number }>
       }
       team: {
         list: () => Promise<{ currentTeamId: string; items: TeamSummary[] }>

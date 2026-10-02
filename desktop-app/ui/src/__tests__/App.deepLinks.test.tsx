@@ -394,9 +394,10 @@ describe('App deep-link orchestration', () => {
     expect(confirmDialogHarness.props?.title).toBe('Add desktop environment?')
     const dialogBody = renderToStaticMarkup(<>{confirmDialogHarness.props?.body}</>)
     expect(dialogBody).toContain(
-      'Review the service URLs for <strong>Example tenant</strong>. Continue only if you trust them.'
+      'Review the External REST API for <strong>Example tenant</strong>. Continue only if you trust this host.'
     )
-    expect(dialogBody).toContain('https://rpc.example.test')
+    expect(dialogBody).toContain('https://api.example.test')
+    expect(dialogBody).not.toContain('https://rpc.example.test')
   })
 
   beforeEach(() => {

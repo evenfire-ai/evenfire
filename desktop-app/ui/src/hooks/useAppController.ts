@@ -182,11 +182,17 @@ export function useAppController() {
   const onSessionNeedsLoad = useCallback(async (options?: { preserveNav?: boolean }) => {
     return loadSessionRef.current(options)
   }, [])
+  const logoutForEnvironmentMismatchRef = useRef<() => Promise<number | null>>(async () => null)
+  const logoutForEnvironmentMismatch = useCallback(
+    () => logoutForEnvironmentMismatchRef.current(),
+    []
+  )
 
   // ─── Auth ───
   const auth = useAuthController({
     setStatus: fullSetStatus,
     onSessionNeedsLoad,
+    logoutForEnvironmentMismatch,
   })
 
   // ─── First-run onboarding ───
@@ -893,7 +899,7 @@ export function useAppController() {
   loadSessionRef.current = loadSession
 
   // ─── Cross-domain: handleLogout ───
-  const handleLogout = useCallback(async () => {
+  const logoutAndGetSessionGeneration = useCallback(async (): Promise<number | null> => {
     try {
       auth.setBusy(true)
       await chat.stopAllActivityStreams()
@@ -912,16 +918,18 @@ export function useAppController() {
       queryClient.clear()
       activeAuthenticatedSessionIdentityRef.current = null
       authenticatedSessionIdentityRef.current = null
-      await window.clerum.auth.logout()
+      const logoutResult = await window.clerum.auth.logout()
       chat.resetChat()
       notif.resetNotifications()
       fullSetStatus('Logged out.', 'success')
       await loadSession()
+      return logoutResult.sessionGeneration
     } catch (error) {
       fullSetStatus(
         `Logout failed: ${error instanceof Error ? error.message : String(error)}`,
         'error'
       )
+      return null
     } finally {
       auth.setBusy(false)
     }
@@ -940,6 +948,10 @@ export function useAppController() {
     resetWorkflowsData,
     teamsData.reset,
   ])
+  const handleLogout = useCallback(async (): Promise<void> => {
+    await logoutAndGetSessionGeneration()
+  }, [logoutAndGetSessionGeneration])
+  logoutForEnvironmentMismatchRef.current = logoutAndGetSessionGeneration
 
   // ─── Cross-domain: handleOpenAgentWorkspace ───
   const openAgentWorkspace = useCallback(

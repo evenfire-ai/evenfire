@@ -15,6 +15,7 @@ const mocks = vi.hoisted(() => ({
   getConfiguredExternalRestApiBaseUrl: vi.fn(),
   getDesktopEnvironment: vi.fn(),
   getMe: vi.fn(),
+  isDesktopEnvironmentHandoffEnabled: vi.fn(),
   isSilentApiError: vi.fn(),
   listWorkflowApprovalMediums: vi.fn(),
   logout: vi.fn(),
@@ -109,6 +110,7 @@ vi.mock('@lib/approvalChannels', () => ({
 
 vi.mock('@lib/desktopAppLinks', () => ({
   buildDesktopEnvironmentLink: mocks.buildDesktopEnvironmentLink,
+  isDesktopEnvironmentHandoffEnabled: mocks.isDesktopEnvironmentHandoffEnabled,
   navigateToDesktopApp: mocks.navigateToDesktopApp,
 }))
 
@@ -122,6 +124,7 @@ beforeEach(() => {
   mocks.getConfiguredExternalRestApiBaseUrl.mockReturnValue('https://api.example.com')
   mocks.getDesktopEnvironment.mockResolvedValue(desktopEnvironment)
   mocks.getMe.mockResolvedValue(currentUser)
+  mocks.isDesktopEnvironmentHandoffEnabled.mockReturnValue(true)
   mocks.isSilentApiError.mockReturnValue(false)
   mocks.listWorkflowApprovalMediums.mockResolvedValue([])
   mocks.refreshApprovalTargets.mockResolvedValue([])
@@ -150,5 +153,22 @@ describe('Settings desktop setup handoff', () => {
 
     expect(mocks.buildDesktopEnvironmentLink).toHaveBeenCalledWith(desktopEnvironment)
     expect(mocks.navigateToDesktopApp).toHaveBeenCalledWith(desktopHref)
+  })
+
+  it('keeps manual REST setup available while automatic handoff is disabled', async () => {
+    mocks.isDesktopEnvironmentHandoffEnabled.mockReturnValue(false)
+
+    render(<SettingsContent activeSettingsTab="profile" activeSocialTab="telegram" />)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Setup desktop app' }))
+
+    const dialog = await screen.findByRole('dialog', { name: 'Setup desktop app' })
+    expect(
+      within(dialog).getByText(/Automatic Desktop handoff is temporarily unavailable/)
+    ).toBeInTheDocument()
+    expect(
+      within(dialog).queryByRole('button', { name: 'Open desktop app and setup' })
+    ).not.toBeInTheDocument()
+    expect(within(dialog).getByRole('button', { name: 'Copy External REST API URL' })).toBeEnabled()
   })
 })

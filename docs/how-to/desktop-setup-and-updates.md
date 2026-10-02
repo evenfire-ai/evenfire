@@ -54,13 +54,20 @@ environment at the forwarded External REST API.
 
 ### 2. From Profile UI, by deep link
 
-A member can hand the app its environment from the browser: in **Profile UI →
-Settings → Setup desktop app**, copy the External REST API and click **Open
-desktop app and setup**. That opens an `evenfire://desktop-environment` deep
-link the installed app handles — it saves or updates the environment, and if the
-External REST API was already saved, it updates the name and re-discovers the
-RPC proxy. Fleets can also be pre-seeded with a `CLERUM_DESKTOP_CONFIG_PATH`
-config file (see
+When Profile-to-Desktop handoff is enabled, a member can open the environment
+from **Profile UI → Settings → Setup desktop app**. Desktop selects a single
+saved environment with the exact External REST API URL. If the current session
+uses another REST URL, Desktop signs out before switching. If no exact match is
+saved, Desktop asks before adding the environment; after confirmation, the
+External REST API supplies the RPC proxy URL. Multiple saved exact matches are
+rejected for manual resolution.
+
+The handoff is disabled by default. A release operator can enable it by setting
+the `PROFILE_DESKTOP_HANDOFF_ENABLED` repository variable to `true` when
+building Profile UI, after releasing the updated Desktop client and retiring
+older supported clients. While it is disabled, copy the REST API URL from
+Profile UI Settings and add it from Desktop's sign-in screen. Fleets can also
+be pre-seeded with a `CLERUM_DESKTOP_CONFIG_PATH` config file (see
 [Ship it to your users](../surfaces/desktop-app.md#ship-it-to-your-users)).
 
 ### 3. Through an invitation
