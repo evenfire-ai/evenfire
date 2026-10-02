@@ -124,6 +124,7 @@ jobs:
               - 'packages/workflow-runtime-core/**'
               - 'packages/workflow-recipe-capability-policy/**'
               - 'packages/image-policy/**'
+              - 'packages/jwt-key-policy/**'
               - 'packages/display-field/**'
               - 'packages/llm-provider-attempt-contract/**'
               - 'packages/grok-provider-attempt-contract/**'
@@ -135,6 +136,7 @@ jobs:
               - 'packages/gfs-interaction-policy/**'
             external-rest-api:
               - 'external-rest-api/**'
+              - 'packages/jwt-key-policy/**'
             host-context-controller:
               - 'host-context-controller/**'
               - 'packages/workflow-recipe-capability-policy/**'
@@ -159,6 +161,7 @@ jobs:
               - 'packages/frontend-components/**'
             rpc-proxy:
               - 'rpc-proxy/**'
+              - 'packages/jwt-key-policy/**'
             workflow-recipes:
               - 'workflow-recipes/**'
               - 'packages/workflow-runtime-core/**'
@@ -268,6 +271,7 @@ jobs:
             changed: ${{ needs.detect.outputs.control-ui }}
           - image: external-rest-api
             path: external-rest-api
+            rooted: true
             changed: ${{ needs.detect.outputs.external-rest-api }}
           - image: host-context-controller
             path: host-context-controller
@@ -307,6 +311,7 @@ jobs:
             changed: ${{ needs.detect.outputs.profile-ui }}
           - image: rpc-proxy
             path: rpc-proxy
+            rooted: true
             changed: ${{ needs.detect.outputs.rpc-proxy }}
           - image: workflow-recipes
             path: workflow-recipes

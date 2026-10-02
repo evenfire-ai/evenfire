@@ -103,11 +103,59 @@ Security guarantees:
 
 ## Local Run
 
+Use Node 24 or newer. Start `control-api` first with `CLERUM_DEV_MODE=true`
+so it creates the shared development signing keys, then start this service in
+a separate terminal:
+
 ```bash
 cd external-rest-api
 npm install
-npm run dev
+CLERUM_DEV_MODE=true npm run dev
 ```
+
+`make dev` also opts into this local mode. It is rejected with
+`NODE_ENV=production`. Without this opt-in, set
+`EXTERNAL_REST_API_JWT_PUBLIC_KEY` explicitly.
+
+The shared store defaults to `control-api/.dev-keys` in the same checkout.
+Leave `EVENFIRE_DEV_KEY_STORE` unset or blank to use that default; a nonblank
+override must be an absolute path set consistently in all three services.
+`control-api` persists generated keys across restarts, and this service reads
+`session.public.pem` at startup.
+
+If `CONTROL_API_SESSION_JWT_PRIVATE_KEY` is supplied through the environment,
+set `EXTERNAL_REST_API_JWT_PUBLIC_KEY` to its matching public key explicitly.
+The signer does not update the store for an environment-supplied key, so an
+older store may contain a different identity. After deleting or rotating stored
+keys, or switching to an environment-supplied key, reconfigure the verifier as
+needed and restart it. Running verifiers do not silently refresh their key
+identity.
+
+JWT material is checked by the shared `@clerum/jwt-key-policy`. Configure an
+RSA public key as SPKI or PKCS#1 PEM. An X509 certificate may carry the public
+identity, without CA, hostname or expiry validation. Private PEM environment
+values remain accepted for legacy compatibility and are converted to public
+SPKI; prefer supplying only the public half. Store public files reject private
+material. Exactly one complete PEM object is required; bundles, encrypted
+private material, non-RSA keys and historical committed identities fail.
+
+Every RS256 key must be RSA-2048 or stronger, including verifiers. This
+deliberately rejects previously accepted weak verifier keys under
+[RFC 7518 section 3.3](https://www.rfc-editor.org/rfc/rfc7518.html#section-3.3).
+The material/read limit is 64 KiB. Invalid explicit input never selects a
+different source or regenerates an identity.
+
+The dev store requires POSIX no-follow/nonblocking/exclusive-file guarantees,
+trusted ancestor directories and cooperating services with the same effective
+UID. It does not defend against hostile ancestors or same-UID processes.
+Use explicit signing/verifying environment keys for different users or
+unsupported platforms; this verifier then performs no store access. Corrupt
+or rejected keys require operator repair; they are not rotated automatically.
+
+`make docker-build` uses the repository root context. The equivalent command
+from that root is `docker build -f external-rest-api/Dockerfile .`. The image
+preserves the service/package layout and excludes package tests and local key
+data.
 
 ## Kubernetes Deploy
 
