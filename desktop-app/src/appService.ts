@@ -1616,6 +1616,10 @@ export class AppService {
     await this.tokenStore.prepareForQuit()
   }
 
+  cancelQuitPreparation(): void {
+    this.quitPreparationStarted = false
+  }
+
   private async runSandboxUiPartitionGcSafely(): Promise<void> {
     try {
       const { app } = await import('electron')

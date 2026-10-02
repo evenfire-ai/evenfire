@@ -58,12 +58,39 @@ export function createRetryableInitializer(initialize: () => Promise<unknown>) {
 
 export function registerQuitDrain(
   app: Pick<App, 'on' | 'quit'>,
-  prepareForQuit: () => Promise<void>
+  prepareForQuit: () => Promise<void>,
+  cancelQuitPreparation: () => void
 ): void {
   let quitDrainStarted = false
   let quitDrainComplete = false
+
+  const reopenQuitAttempt = (): void => {
+    if (!quitDrainStarted || !quitDrainComplete) return
+    quitDrainStarted = false
+    quitDrainComplete = false
+    cancelQuitPreparation()
+  }
+
+  app.on('browser-window-created', (_event, window) => {
+    window.webContents.on('will-prevent-unload', event => {
+      if (!quitDrainComplete) return
+
+      // The native beforeunload prompt blocks the event loop until the user
+      // decides. Once it returns, a live window means the user canceled quit.
+      setImmediate(() => {
+        if (!event.defaultPrevented && !window.isDestroyed()) reopenQuitAttempt()
+      })
+    })
+  })
+
   app.on('before-quit', event => {
-    if (quitDrainComplete) return
+    if (quitDrainComplete) {
+      // Another before-quit listener can still veto the resumed app.quit().
+      setImmediate(() => {
+        if (event.defaultPrevented) reopenQuitAttempt()
+      })
+      return
+    }
 
     event.preventDefault()
     if (quitDrainStarted) return
@@ -76,5 +103,12 @@ export function registerQuitDrain(
       })
     }
     void prepareForQuit().then(resumeQuit, resumeQuit)
+  })
+
+  app.on('will-quit', event => {
+    if (!quitDrainComplete) return
+    setImmediate(() => {
+      if (event.defaultPrevented) reopenQuitAttempt()
+    })
   })
 }

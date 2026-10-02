@@ -68,7 +68,11 @@ process.stderr?.on?.('error', () => {})
 
 let mainWindow: BrowserWindow | null = null
 const appService = new AppService()
-registerQuitDrain(app, () => appService.prepareForQuit())
+registerQuitDrain(
+  app,
+  () => appService.prepareForQuit(),
+  () => appService.cancelQuitPreparation()
+)
 const sandboxUiDeepLinkQueue = new SandboxUiDeepLinkQueue()
 // U5: deliver mcp-oauth completions to the renderer, or queue them when the
 // renderer is not yet ready (cold start), draining after `app:rendererReady`.

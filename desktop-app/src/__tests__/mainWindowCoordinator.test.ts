@@ -111,17 +111,37 @@ describe('retryable initializer', () => {
 })
 
 describe('quit drain registration', () => {
+  const nextImmediate = () => new Promise<void>(resolve => setImmediate(resolve))
+
+  function createAppHarness() {
+    const listeners = new Map<string, (...args: any[]) => void>()
+    const app = {
+      on: vi.fn((event: string, listener: (...args: any[]) => void) => {
+        listeners.set(event, listener)
+      }),
+      quit: vi.fn(),
+    }
+    return {
+      app,
+      emit: (event: string, ...args: any[]) => listeners.get(event)?.(...args),
+    }
+  }
+
   it('retries quit after the before-quit event has returned', async () => {
     let beforeQuitListener: ((event: { preventDefault: () => void }) => void) | null = null
     const quitEvent = { preventDefault: vi.fn() }
     const app = {
-      on: vi.fn((_event: 'before-quit', listener: typeof beforeQuitListener) => {
-        beforeQuitListener = listener
+      on: vi.fn((event: string, listener: typeof beforeQuitListener) => {
+        if (event === 'before-quit') beforeQuitListener = listener
       }),
       quit: vi.fn(() => beforeQuitListener?.({ preventDefault: vi.fn() })),
     }
     const prepareForQuit = vi.fn(async () => undefined)
-    registerQuitDrain(app as unknown as Parameters<typeof registerQuitDrain>[0], prepareForQuit)
+    registerQuitDrain(
+      app as unknown as Parameters<typeof registerQuitDrain>[0],
+      prepareForQuit,
+      vi.fn()
+    )
 
     beforeQuitListener?.(quitEvent)
     expect(quitEvent.preventDefault).toHaveBeenCalledOnce()
@@ -131,5 +151,52 @@ describe('quit drain registration', () => {
     await new Promise<void>(resolve => setImmediate(resolve))
     expect(app.quit).toHaveBeenCalledOnce()
     expect(prepareForQuit).toHaveBeenCalledOnce()
+  })
+
+  it('reopens quit preparation after a page cancels the resumed quit', async () => {
+    const { app, emit } = createAppHarness()
+    const prepareForQuit = vi.fn(async () => undefined)
+    const cancelQuitPreparation = vi.fn()
+    registerQuitDrain(
+      app as unknown as Parameters<typeof registerQuitDrain>[0],
+      prepareForQuit,
+      cancelQuitPreparation
+    )
+
+    const firstAttempt = { preventDefault: vi.fn() }
+    emit('before-quit', firstAttempt)
+    expect(firstAttempt.preventDefault).toHaveBeenCalledOnce()
+    await Promise.resolve()
+    await nextImmediate()
+    expect(app.quit).toHaveBeenCalledOnce()
+
+    const resumedAttempt = { preventDefault: vi.fn() }
+    emit('before-quit', resumedAttempt)
+    expect(resumedAttempt.preventDefault).not.toHaveBeenCalled()
+
+    let willPreventUnload: ((event: { defaultPrevented: boolean }) => void) | undefined
+    emit(
+      'browser-window-created',
+      {},
+      {
+        isDestroyed: () => false,
+        webContents: {
+          on: vi.fn((_event: string, listener: typeof willPreventUnload) => {
+            willPreventUnload = listener
+          }),
+        },
+      }
+    )
+    willPreventUnload?.({ defaultPrevented: false })
+    await nextImmediate()
+
+    expect(cancelQuitPreparation).toHaveBeenCalledOnce()
+
+    const retryAttempt = { preventDefault: vi.fn() }
+    emit('before-quit', retryAttempt)
+    expect(retryAttempt.preventDefault).toHaveBeenCalledOnce()
+    await Promise.resolve()
+    await nextImmediate()
+    expect(prepareForQuit).toHaveBeenCalledTimes(2)
   })
 })
