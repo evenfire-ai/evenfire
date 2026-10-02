@@ -1,6 +1,12 @@
-import { createPublicKey } from 'node:crypto'
 import { DEFAULT_ALLOWED_PLUGIN_IMAGE_PREFIXES } from '@clerum/image-policy'
+import {
+  type SigningMaterial,
+  parseSigningMaterial,
+  parseVerifierMaterial,
+} from '@clerum/jwt-key-policy'
+import { type DevJwtSlot, loadOrCreateDevJwtSigningMaterial } from './devSigningKeys.js'
 import { REACTIVE_REFRESH_BUFFER_MS } from './oauth/tokenHelper.js'
+import { rootLogger } from './observability/logger.js'
 
 function boundedIntegerEnv(name: string, fallback: number, min: number, max: number): number {
   const parsed = Number(process.env[name])
@@ -56,8 +62,8 @@ type Config = {
   adminJwtTtlSeconds: number
   /**
    * Optional RS256 private key used exclusively to sign registry identity
-   * vouchers (POST /api/v1/registry/identity-voucher). When unset, falls back
-   * to adminJwtPrivateKey.
+   * vouchers (POST /api/v1/registry/identity-voucher). Managed mode requires
+   * this dedicated material; self-hosted mode resolves its enrolled identity.
    *
    * Rationale: a captured admin session JWT (aud=control-ui, 1h TTL) signed by
    * the SAME key as a voucher (aud=registry-api, 60s TTL) becomes a usable
@@ -515,10 +521,6 @@ const EXTERNAL_GFS_OPERATION_RL_PER_MIN_CEILING = 180
 // 100 requests per second from one source on one public admin route.
 const ADMIN_PUBLIC_TOKEN_IP_RL_PER_MIN_CEILING = 6_000
 
-function normalizePem(value: string): string {
-  return value.replace(/\\n/g, '\n').trim()
-}
-
 function parseRegistryConnectionMode(): 'managed' | 'self-hosted' {
   const raw = process.env.REGISTRY_CONNECTION_MODE
   if (raw === undefined || raw === '') return 'managed' // default; requiredness enforced in the guard below
@@ -553,12 +555,13 @@ const externalRateLimitConfig = (() => {
     operation.value <= session.value && session.value < clientIp.value
 
   if (!followsRecommendedTopology) {
-    console.warn(
-      '[ControlAPI] External rate-limit configuration crosses the recommended operation <= session < clientIp topology; preserving exact configured values',
+    rootLogger.warn(
       {
+        event: 'external_rate_limit_topology_advisory',
         resolved: { operation, session, clientIp },
         recommendedTopology: 'operation <= session < clientIp',
-      }
+      },
+      'External rate limits cross the recommended topology; preserving configured values'
     )
   }
 
@@ -576,106 +579,62 @@ function failClosedBooleanFromEnv(name: string): boolean {
   throw new Error(`${name} must be 'true' or 'false' (got '${raw}')`)
 }
 
-function publicKeyFromPrivateKey(privateKey: string): string {
-  return createPublicKey(privateKey).export({ type: 'spki', format: 'pem' }).toString()
+const CLERUM_DEV_MODE_ENABLED = process.env.CLERUM_DEV_MODE === 'true'
+if (process.env.NODE_ENV === 'production' && CLERUM_DEV_MODE_ENABLED) {
+  throw new Error(
+    '[SECURITY] Startup rejected: CLERUM_DEV_MODE=true is not allowed with NODE_ENV=production. ' +
+      'Provide deployment-specific JWT signing keys and unset CLERUM_DEV_MODE.'
+  )
 }
 
-const DEV_RPC_JWT_PRIVATE_KEY = normalizePem(`-----BEGIN PRIVATE KEY-----
-MIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQCsIhgYd6Ew+kYp
-4/FopBqsNfnKvOJ9TmLh/OkjcS2QpJTqzm6DsSQrFzYN0x6Sipd72+vuorJXCKKV
-Qi6xcteJbso8wmUP8V3kGjtDG3r3BiIvkjgrft4OAI3oPct24fJISeSF0jQYOkHg
-szYBI7FCQRpt6l6RlMxDITGYIif90cnXkH7gD22KJ6mFg5A2vcZydb14OiYy3o0k
-vKmKRuvEk7o7sCvQb6tpNt+W2HwRDNacYX5aBBbiKIzfCwWGloTSZSURswYMZMwB
-nLUp/EBFG75Bmbcuj7kCIJoeSKMMKCUexcuGqxiLYB1GJq8PUaT0so//O0rDur8P
-p9gXOY5DAgMBAAECggEAVAGPoOFBWZXLCEamWls8aS8uaTMlleHbgE7duN5TTnQD
-+VQluz+IVz9MshKGqR3aMCh0TFI6lx8vuYhDIXbamcfoCx8UE2PIXroukeGncUcd
-B/pkT1XrKQo8N0txMOO0SnNFg8nCgtBrti2//W5d4+fB7kKjRIlJ5rkcaxLAUa5z
-fpvaz+DhwBvvIi5zakhUBGVinVnQV6cKS5c52ccYikSNG9ysGBParCbVsQCwgLan
-JhWCmRYuPj5MoaELcZ7lBO2ow+SO/VSTW03fnC/cIYCxZqAEEnq3fg5/FFsy6xsB
-CbwQQaGnUrrw/LyGX3vyW7eXDL4hOYLp+l+tZklqAQKBgQDe8I4RegQ7lGvVnEoo
-xTBdZg6kgjSRRBMs67/E+HrnnHC8gMjT2MlJguYQEonFP8teDoj0l7+1Bj/LRyHv
-CyZr03EpevMQut27VdEO/qWYaGpOsXC2xkuiJWeKYvp3//lcIofXy9VhStlsisk6
-yx1LAY6iiZvptaCzJmYTU677swKBgQDFqMaLyLAAIpMcBrLDlGt8qyB6ZVaJZTHP
-vs13Md6RJPVXXyGtWRtpMwOSwHJNyy3xN23rWtlj32UE9KW/47oxjbkXfpExG/fi
-UBeA80AtjM57q66+LZ9Rs5EAFcOsNrd11XY4Y/37/MMbWQgjfW44uEeB2drx9mB0
-LU9H+1KbMQKBgFKij8Zil9cNuLrA56wdC0RTY/IOYTXHKeRorfhwsf3PuunkQoxj
-upiI8IXcmTyH3PXMJW+kH+cVnefXQfi9BUzKXxOlAxucaDvcH1WThgXsDhuFIeZd
-sgM0IiDldzmro95G3ltarokVmWnmN5iXWRBIT3pnz2bdb+d3wDZBuoaJAoGABCl9
-pMvhCN+xgVGSyhOB/+oKkQk5PUNoPRujb/MY4K2KjQBv0RqjPR/Z32k1/vVcTkwA
-gIg1M6ksk2Ija1r8PLbjQt9jZ0lTeux80jZND6h7YJdI4rBLPoktcHcE28d7LXwF
-NULFwlycLyM8zKKDg6Y9uzo/JgEuHsQlezqLjsECgYAboHrpwXg/SBatigtBvj0E
-1ccXGGLgN2dhDbAlZoSKDITOxGiOw48bOX1lT25c06muru+2mCNrsN2lMs07VGk8
-PSRsIuFZis/4vrRtjoxUB4OQ29+mfVgqGsABPugCmi/r22gWrvl1aqEEqstg3m7x
-sKRpFxViv5P5TmnxLggnhw==
------END PRIVATE KEY-----`)
-
-const DEV_SESSION_JWT_PRIVATE_KEY = normalizePem(`-----BEGIN PRIVATE KEY-----
-MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQDCtmNr2NL+v57Z
-gXUWoRA0wuyd995tjNetk5vu48wqFcGgqMmH+1pH2/eRfayt9W2iKRwoqvRJ9rsw
-xIudlZ0ROaLsy9t5UPcemxelV6ObD0PTN5hhIZmmUsX9vodjQvPZdUzxZ0mXcOJz
-K75JltnF4dm0wIxNOO+agj8hiaY7g3c+DP9IaLtXcSLCgAs4M/g5YO93/XEVSIw+
-yUs+BlQRzNDm0ikBoPh7SibeBQ2zI4phzmKCiObqihWoj1PdNQYFUnS5JkHue1bE
-pDf1bIhof6iqfAMZsNwMtD/BO4G1yfhutZMOBbXEDvcdUFIiYYW+8cJYGJAGIjWe
-+i9Q/S5ZAgMBAAECggEABTd9g63SHl7sLrvqEw6C6IT58bQKxrDdtPH13TFHfq+p
-SciH6L+mYDM/p2tgcWM4Wh5Dmb/VzncAtipn6rOP2x6qE7HVCiOuEUj6udR2ptCC
-gtHUIHMV4qfIU/dzOWi5b4+13Whk53yv5oHLJf3XjRaTXoVDpQyD1+YKMrf1RxYf
-QIiI6ChaDmPmZ8mJF56vZLz1S98HBvtMlTtI+IYhhkxScSq77enb44NLZ0FInXtr
-UJ0WiJ1JYUZdESauiXFH/fTKyXF7vp5ZAIThG+hGaJ987HV8DXL0S0gmFRkw2Wj2
-44IKEC+VH60GTIysQ2HmbKExAYwngZBBCNTgoawWgQKBgQDwLLqmCVPgxZ2dkxi3
-5RlLZfhPRANQzj4GyE2oQtRwthGn30QJ3tc26WIjDt7a2vRUGiHOEONeDcJQg726
-JeBgUMDCuwA9QkdyDZhupF9Erl9f6C515k7Y2il7JX0sA1MmV5Phgh2XH+rUq6Li
-A7EFS5P1mT/J7XU842NdD+xUgQKBgQDPis0QJ/1eHY9j6pQC6d8riLEG3lRHiCVt
-94gp8YoNI6iJRl4fVUO1A4JxjNIz04g7ZXLusuFUgznXnxGv2+pju//vvVbQeyD6
-HKDvfd1Xt0xTe5Y/X5g2l7b7dvHc9o9YAhxqkMmxuusdF+z++VLWbf3T7XXAiufS
-k4thtd8N2QKBgQCnCMSqsvQF8AolS+c2BfxohruCDTAtI7LZrrbrncb3uHhhAxLj
-tnqA8yFQdoghN4QTdbUrBm3KvND2hBkQfEUnVyIojDunXxAnTzNDR8gGESu9nNGr
-J4iQonGU9sauNIXAtcngXUjNEOKWE+SNQbn8j8qQVYuamS4fMZmqYGehgQKBgHng
-kufH9BxO06PjX6QOX0YbcYoNCgUvyHs5f7bR5zYsGI70ydUwpyAnvXSdM9vHfxsS
-SloupfCRV2huO17AkHadMoFA+ThY9laqdT/u9ArM03+69dKleqeklIo7oXEXQbp3
-EuTpvegnUma1ZDGfjKvrz8GikyHM8LJSfumUejaRAoGBALaksx+nAwBqSehPEsU3
-84xsDCj0jiJy5SVlKAnyVKM4bjI8pgCHY2dD9jqCYEfRKIMB6jKZDS7ZE1n1IeIC
-aI29j2LQbxz6hwRqZisBaGgOg5GaL74Hjodh2OwWl5fGFdKXFFPSsJAYeK6sOxgB
-VUxHFu+yhYVbZ5uhL8whXgrI
------END PRIVATE KEY-----`)
-
-// Use a different dev key for admin JWT to prevent token confusion
-const DEV_ADMIN_JWT_PRIVATE_KEY = normalizePem(`-----BEGIN PRIVATE KEY-----
-MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCysO8JjPH3o4s7
-aq/fuxtlm8K6C7NH5xbHA5inHrUA/4Yv2XFXrQUkkkqO1GE78i+bqSg7OBXKWfXY
-GmGKkHScmz190vMCunF6K4pqWKCuQv1z/ZPCWOZGllqBnNkooBBHzbtvRZHP2oHr
-eeluMy//svUY3Fwy0ud7atMBhTeB7PQjumHAoBgf/Nj5PmIfaXSqm3/gjLq3ulY5
-DSqCsp4k8V7mphYrdzwFYadYmSGgsI1QJOdRrXIZoge5HArPA8f1vjvqtLvY0aoY
-LjFFlcB6Kc50jPc/Kaks3QfIiNKw8FSWF7AgvAPmNAELoPFh5ctAljRQdZEus6pB
-GQmx6nrJAgMBAAECggEAC+MGgbqDKaOy2kTgdngATG/yQhVPa63xF1PTSrG5nXuC
-CgqTVj9jn1FOfaYd4kKb/WVBMIBMfcmid6nYmYK+ySCwFF/NK94qeJOvKWAkLzd0
-XAwPMV9f0SwFEQh1rzTHpHkoefBVMPAikp8pYrvrul0lng3hob1jKfP7Haemn8E+
-mlOLlGkW3mbyAi65bOPTdaqx+uGj5q8ZY1Bz84e23xIWV0bTTsqWJ7/JBc9wG5/9
-JA2tWs4QuYhs+14n+TLpnniYUolMUyxPeoaJV81cU1UTNSUbBTZ5ndXAWoenv9Gv
-PaR7awUwTPq/qV2+ZgEoPwa9omQQNmk0ACdTNDfSsQKBgQDmtAuBJTrhoXpcPOQV
-Qz7rr1fWFvFS729AuWDNhPWaC6/Q2mkwEVB2jMCn7tZhx0M8HEO2xduDlThi0pbu
-35shxeYTwQno+SFeCG8l/AmmKp/nJpO8d7PKEwLB8IBm8WYCqIQ4gPWc958enR4Y
-2Nve0HtVlnvSSAqeZ58f8gNiEQKBgQDGSOHQ0jN/LRjchCw6QOifZgYm7nCafZuj
-G9BBXTVZBXZZlODfDH9tkZaywywuBw/cw7Rcn9k2GWoxm3WjYgQjMB45BcZIpaZo
-kLmr6ZQUzxm3JAdT2U3v0XNTD8A8oFsvlEr6/Uno/uNqQq6EufMls6gPzUaVO56Q
-AFwKO/pVOQKBgQCw96tbhZOFQLj7yDmtlcfOQtK+BxtW4xQUMh9vh25enFhhfSjz
-FlUCmzWtnCgXGSMaGRRYP64DYZO/OotM8Xmujn/O52USsQhHeXDJUmyUal3+kjkB
-eVEQ0URsQHA+hy4ZG+tQ7Jt7rPcCJMPRi4gdgw8YuDaDN3/tws7tUlgGAQKBgBY+
-Zta+PfiuXnOegDeowG/hSh9j8E3keWk63Yn3otxxuG0kPnXHOSRZiMZVDse7ExR4
-/+rEI+Hlx/v4rKG/hSdNZpaPB0dvDdP9KFcYxPvwn7nj2M6XOh8FKCLRSYeDlbco
-s6CkeX4h2fE5uco58gTwupHLPXfQUGFnKOwc/mBBAoGAZOC3cOzdROA6t12hlXBG
-nFoBPwztGGlol4VRjNHOUv21999k1s9vujmfdoEbtCT8UWR735Cmahv6Dlqhgmfz
-udFCb0WGbuF+RYuIoF3rm2aQMZoCCl5E4QlgJroKBTkfFugxZJ+1SLZJ4KKRcMrB
-gg1uS2CBS2kyMhFQcB5FLFw=
------END PRIVATE KEY-----`)
+const JWT_SIGNING_KEY_ENV_NAMES: Record<DevJwtSlot, string> = {
+  rpc: 'CONTROL_API_RPC_JWT_PRIVATE_KEY',
+  session: 'CONTROL_API_SESSION_JWT_PRIVATE_KEY',
+  admin: 'CONTROL_API_ADMIN_JWT_PRIVATE_KEY',
+}
 
 const DEV_ADMIN_PASSWORD_HASH = '$2b$12$9QdfGGp5KYg8osGa1n0.DuwQiB1RopCWIDJhmsuK4ygjTmIT8pvgy'
 
-const RPC_JWT_PRIVATE_KEY = normalizePem(
-  requiredOrDevDefault('CONTROL_API_RPC_JWT_PRIVATE_KEY', DEV_RPC_JWT_PRIVATE_KEY)
-)
-const RPC_JWT_PUBLIC_KEY = normalizePem(
-  process.env.CONTROL_API_RPC_JWT_PUBLIC_KEY || publicKeyFromPrivateKey(RPC_JWT_PRIVATE_KEY)
-)
+// Validate every explicit input before dev-store access. A malformed configured
+// slot must not cause another slot to generate a new local identity.
+const explicitJwtSigningMaterial: Partial<Record<DevJwtSlot, SigningMaterial>> = {}
+for (const slot of ['rpc', 'session', 'admin'] as const) {
+  const envName = JWT_SIGNING_KEY_ENV_NAMES[slot]
+  const raw = process.env[envName]
+  if (raw) explicitJwtSigningMaterial[slot] = parseSigningMaterial(raw, envName)
+}
+const voucherRaw = process.env.CONTROL_API_REGISTRY_VOUCHER_PRIVATE_KEY
+const voucherMaterial = voucherRaw
+  ? parseSigningMaterial(voucherRaw, 'CONTROL_API_REGISTRY_VOUCHER_PRIVATE_KEY')
+  : undefined
+const rpcVerifierRaw = process.env.CONTROL_API_RPC_JWT_PUBLIC_KEY
+const explicitRpcVerifier = rpcVerifierRaw
+  ? parseVerifierMaterial(
+      rpcVerifierRaw,
+      'effective RPC JWT verifier public key (CONTROL_API_RPC_JWT_PUBLIC_KEY)'
+    )
+  : undefined
+
+function assertRpcIdentity(signing: SigningMaterial): void {
+  if (explicitRpcVerifier && explicitRpcVerifier.fingerprint !== signing.fingerprint) {
+    throw new Error(
+      'CONTROL_API_RPC_JWT_PUBLIC_KEY must correspond to CONTROL_API_RPC_JWT_PRIVATE_KEY'
+    )
+  }
+}
+if (explicitJwtSigningMaterial.rpc) assertRpcIdentity(explicitJwtSigningMaterial.rpc)
+if (!CLERUM_DEV_MODE_ENABLED) {
+  for (const slot of ['rpc', 'session', 'admin'] as const) {
+    if (!explicitJwtSigningMaterial[slot]) required(JWT_SIGNING_KEY_ENV_NAMES[slot])
+  }
+}
+const jwtSigningMaterial = Object.fromEntries(
+  (['rpc', 'session', 'admin'] as const).map(slot => [
+    slot,
+    explicitJwtSigningMaterial[slot] ?? loadOrCreateDevJwtSigningMaterial(slot),
+  ])
+) as Record<DevJwtSlot, SigningMaterial>
+assertRpcIdentity(jwtSigningMaterial.rpc)
 
 const memberRegistrationMode: 'remote' | 'hosted' = (() => {
   const raw = (process.env.CONTROL_API_MEMBER_REGISTRATION_MODE || 'remote').trim()
@@ -708,8 +667,9 @@ if (memberRegistrationMode === 'hosted') {
     )
   }
   if (memberRegistrationEnvPresent('CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET')) {
-    console.warn(
-      '[ControlAPI] CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET is set but IGNORED in hosted member-registration mode (deploy-injected legacy value; credentials are self-enrolled and stored in Postgres)'
+    rootLogger.warn(
+      { event: 'hosted_member_registration_env_secret_ignored' },
+      'Hosted member-registration uses its enrolled credentials'
     )
   }
 }
@@ -836,13 +796,11 @@ export const config: Config = {
   ),
   controlUiBaseUrl: process.env.CONTROL_API_CONTROL_UI_BASE_URL || 'http://127.0.0.1:3000',
   controlUiAppName: process.env.CONTROL_API_CONTROL_UI_APP_NAME || 'Evenfire',
-  sessionJwtPrivateKey: normalizePem(
-    requiredOrDevDefault('CONTROL_API_SESSION_JWT_PRIVATE_KEY', DEV_SESSION_JWT_PRIVATE_KEY)
-  ),
+  sessionJwtPrivateKey: jwtSigningMaterial.session.privatePem,
   jwtIssuer: requiredOrDevDefault('CONTROL_API_JWT_ISSUER', 'control-api'),
   jwtAudience: requiredOrDevDefault('CONTROL_API_JWT_AUDIENCE', 'profile-ui'),
-  rpcJwtPrivateKey: RPC_JWT_PRIVATE_KEY,
-  rpcJwtPublicKey: RPC_JWT_PUBLIC_KEY,
+  rpcJwtPrivateKey: jwtSigningMaterial.rpc.privatePem,
+  rpcJwtPublicKey: explicitRpcVerifier?.publicPem ?? jwtSigningMaterial.rpc.publicPem,
   rpcJwtIssuer: requiredOrDevDefault('CONTROL_API_RPC_JWT_ISSUER', 'control-api'),
   rpcJwtAudience: requiredOrDevDefault('CONTROL_API_RPC_JWT_AUDIENCE', 'rpc-proxy'),
   rpcTokenTtlSeconds: Number(process.env.CONTROL_API_RPC_TOKEN_TTL_SECONDS || 300),
@@ -850,17 +808,12 @@ export const config: Config = {
   hostSecretLabelValue: process.env.CONTROL_API_HOST_SECRET_LABEL_VALUE || 'true',
   policyAuthAudience: process.env.CONTROL_API_POLICY_AUTH_AUDIENCE || 'control-api',
   googleClientId: requiredOrDevDefault('CONTROL_API_GOOGLE_CLIENT_ID', 'dev-google-client-id'),
-  adminJwtPrivateKey: normalizePem(
-    requiredOrDevDefault('CONTROL_API_ADMIN_JWT_PRIVATE_KEY', DEV_ADMIN_JWT_PRIVATE_KEY)
-  ),
+  adminJwtPrivateKey: jwtSigningMaterial.admin.privatePem,
   adminJwtIssuer: requiredOrDevDefault('CONTROL_API_ADMIN_JWT_ISSUER', 'control-api'),
   adminJwtAudience: requiredOrDevDefault('CONTROL_API_ADMIN_JWT_AUDIENCE', 'control-ui'),
   adminJwtTtlSeconds: Number(process.env.CONTROL_API_ADMIN_JWT_TTL_SECONDS || 60 * 60),
-  // Optional — empty string means "fall back to adminJwtPrivateKey" (see
-  // registry.ts). Production should set this to a dedicated RS256 key.
-  registryVoucherPrivateKey: normalizePem(
-    process.env.CONTROL_API_REGISTRY_VOUCHER_PRIVATE_KEY ?? ''
-  ),
+  // No implicit admin identity substitution; managed mode requires this key.
+  registryVoucherPrivateKey: voucherMaterial?.privatePem ?? '',
   registryVoucherKid: process.env.CONTROL_API_REGISTRY_VOUCHER_KID ?? '',
   registryUrl: process.env.CLERUM_REGISTRY_URL ?? '',
   registryClientId: process.env.CLERUM_REGISTRY_CLIENT_ID ?? '',
@@ -1543,7 +1496,10 @@ if (config.registryAuthEnabled) {
       'REGISTRY_CONNECTION_MODE is required (managed|self-hosted) when CLERUM_REGISTRY_AUTH_ENABLED=true'
     )
   }
-  console.log(`[ControlAPI] Registry connection mode: ${config.registryConnectionMode}`)
+  rootLogger.info(
+    { event: 'registry_connection_mode', mode: config.registryConnectionMode },
+    'Registry connection mode'
+  )
 
   if (config.registryConnectionMode === 'managed') {
     // Managed machine creds live in env (unchanged).
@@ -1573,28 +1529,11 @@ if (config.registryAuthEnabled) {
   // AFTER initDb (config.ts is sync and cannot query Postgres). See Task 8.
 }
 
-// Production safety check: reject known dev keys at startup
 if (process.env.NODE_ENV === 'production') {
   // NOTE: the old voucher-key fallback WARN (dedicated key unset → sign with the
   // admin JWT key) is gone. Under voucher v2 a managed prod boot without the
   // dedicated key/kid FAILS FAST in the registryAuthEnabled guard above (unless
   // break-glass), so there is no silent fallback left to warn about.
-
-  const devKeyFingerprint = 'MIIEvAIBADANBgkqhkiG9w0BAQEFAASC' // start of DEV_RPC_JWT_PRIVATE_KEY
-  const devSessionFingerprint = 'MIIEvgIBADANBgkqhkiG9w0BAQEFAASC' // start of DEV_SESSION_JWT_PRIVATE_KEY
-  const devAdminFingerprint = 'MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCysO8J' // start of DEV_ADMIN_JWT_PRIVATE_KEY
-  if (
-    config.rpcJwtPrivateKey.includes(devKeyFingerprint) ||
-    config.sessionJwtPrivateKey.includes(devSessionFingerprint) ||
-    config.adminJwtPrivateKey.includes(devKeyFingerprint) ||
-    config.adminJwtPrivateKey.includes(devAdminFingerprint)
-  ) {
-    throw new Error(
-      '[SECURITY] Production startup rejected: hardcoded dev JWT signing keys detected. ' +
-        'Set CONTROL_API_RPC_JWT_PRIVATE_KEY, CONTROL_API_SESSION_JWT_PRIVATE_KEY, and ' +
-        'CONTROL_API_ADMIN_JWT_PRIVATE_KEY to real secrets.'
-    )
-  }
 
   for (const [serviceName, token] of Object.entries(config.internalServiceTokens)) {
     if (/^dev-/.test(token)) {

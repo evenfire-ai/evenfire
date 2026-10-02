@@ -1,6 +1,7 @@
 // test/services.registryConnectionDb.test.ts
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { generateKeyPairSync, randomBytes } from 'node:crypto'
+import { publicKeyPemFingerprint } from '@clerum/jwt-key-policy'
 import {
   decryptOAuthSecret,
   deriveOAuthEncryptionKey,
@@ -112,11 +113,12 @@ afterEach(() => {
 
 describe('resolveVoucherSigningMaterial — managed', () => {
   it('returns the env voucher key + kid', async () => {
-    const { privateKey } = keypair()
+    const { privateKey, publicKey } = keypair()
     cfg.registryVoucherPrivateKey = privateKey
     cfg.registryVoucherKid = 'key-uuid-123'
     const { signingKey, kid } = await resolveVoucherSigningMaterial()
-    expect(signingKey).toBe(privateKey)
+    expect(signingKey === privateKey.trim()).toBe(true)
+    expect(publicKeyPemFingerprint(signingKey)).toBe(publicKeyPemFingerprint(publicKey))
     expect(kid).toBe('key-uuid-123')
     // managed never touches the DB
     expect(dbQuery).not.toHaveBeenCalled()
@@ -137,17 +139,24 @@ describe('resolveVoucherSigningMaterial — managed', () => {
 
 describe('resolveVoucherSigningMaterial — self-hosted', () => {
   it('decrypts the private key from the DB row and uses row.key_id as kid', async () => {
-    const { privateKey } = keypair()
+    const { privateKey, publicKey } = keypair()
     const encKey = randomBytes(32).toString('hex')
     cfg.registryConnectionMode = 'self-hosted'
     cfg.oauthEncryptionKey = encKey
     const enc = encryptOAuthSecret(deriveOAuthEncryptionKey(encKey), privateKey)
     dbQuery.mockResolvedValueOnce({
-      rows: [makeRawRow(encKey, { key_id: 'row-kid-9', private_key_encrypted: enc })],
+      rows: [
+        makeRawRow(encKey, {
+          key_id: 'row-kid-9',
+          public_key_pem: publicKey,
+          private_key_encrypted: enc,
+        }),
+      ],
       rowCount: 1,
     })
     const { signingKey, kid } = await resolveVoucherSigningMaterial()
-    expect(signingKey).toBe(privateKey)
+    expect(signingKey === privateKey.trim()).toBe(true)
+    expect(publicKeyPemFingerprint(signingKey)).toBe(publicKeyPemFingerprint(publicKey))
     expect(kid).toBe('row-kid-9')
   })
 

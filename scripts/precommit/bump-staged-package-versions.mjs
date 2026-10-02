@@ -30,6 +30,11 @@ const MANIFEST_FIELD_BY_PACKAGE = {
 }
 const MANIFEST_COUNTER_PACKAGES = Object.keys(MANIFEST_FIELD_BY_PACKAGE)
 
+// Changes to these prebuilt runtime packages affect their declared consumers
+// even when no file inside a service was staged. Read dependency declarations
+// from the index so unstaged manifest edits cannot choose committed counters.
+const SHARED_RUNTIME_PACKAGE_ROOTS = ['packages/jwt-key-policy']
+
 function exitWithError(message, status = 1) {
   console.error(message)
   process.exit(status)
@@ -65,6 +70,26 @@ function readJsonFromGit(ref, relativePath) {
   }
 
   return JSON.parse(result.stdout)
+}
+
+function getAffectedPackageRootsForFile(file) {
+  const directRoot = getPackageRootForFile(file)
+  const sharedRoot = SHARED_RUNTIME_PACKAGE_ROOTS.find(
+    root => file === root || file.startsWith(`${root}/`)
+  )
+  if (!sharedRoot) return directRoot ? [directRoot] : []
+
+  const sharedPath = resolve(repoRoot, sharedRoot)
+  const consumers = sortedPackageRoots.filter(root => {
+    const manifest = readJsonFromGit('', `${root}/package.json`)
+    return Object.values(manifest?.dependencies ?? {}).some(
+      spec =>
+        typeof spec === 'string' &&
+        spec.startsWith('file:') &&
+        resolve(repoRoot, root, spec.slice(5)) === sharedPath
+    )
+  })
+  return [...(directRoot ? [directRoot] : []), ...consumers]
 }
 
 function stageFile(relativePath) {
@@ -141,7 +166,7 @@ const affectedPackages = [
       .map(file => file.trim())
       .filter(Boolean)
       .filter(file => !IGNORED_FILES.includes(file))
-      .map(getPackageRootForFile)
+      .flatMap(getAffectedPackageRootsForFile)
       .filter(Boolean)
   ),
 ]
