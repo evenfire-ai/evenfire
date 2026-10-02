@@ -2,6 +2,7 @@
 import { describe, expect, it } from 'vitest'
 import { act, renderHook } from '@testing-library/react'
 import { AGENT_WORKSPACE_ROUTES, DESKTOP_ROUTES } from '../../../constants/navigation'
+import { resolveGfsPreview } from '../../../lib/gfsPreview'
 import {
   closeWorkspaceTab,
   openChatTab,
@@ -85,6 +86,23 @@ describe('useNavigationController — agent-centric navigation (Fase 2)', () => 
       byteLength: 3,
     })
     expect(result.current.navItem).toBe(DESKTOP_ROUTES.preview)
+  })
+
+  it('carries the listing version into preview state for stale-row ordering', () => {
+    const { result } = renderHook(() => useNavigationController())
+    const preview = resolveGfsPreview({
+      gfsUri: 'gfs://main/versioned',
+      name: 'README.md',
+      bytes: 80,
+      version: 8,
+    })
+    expect(preview).not.toBeNull()
+    act(() => result.current.openPreviewSection(preview!))
+
+    expect(result.current.activeTab?.preview).toMatchObject({
+      gfsUri: 'gfs://main/versioned',
+      resourceVersion: 8,
+    })
   })
 
   it('openPreviewSection dedupes by gfsUri: re-opening the same file focuses its tab', () => {

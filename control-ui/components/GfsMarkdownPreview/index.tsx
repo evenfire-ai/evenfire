@@ -88,6 +88,7 @@ export function GfsMarkdownPreview({
   fileName,
   onClose,
   rid,
+  unavailable = false,
 }: GfsMarkdownPreviewProps): React.JSX.Element {
   const titleId = useId()
   const dialogRef = useRef<HTMLElement | null>(null)
@@ -125,6 +126,15 @@ export function GfsMarkdownPreview({
   useEffect(() => {
     let active = true
 
+    if (unavailable) {
+      setSource(null)
+      setPreviewError(null)
+      setCopyState('idle')
+      return () => {
+        active = false
+      }
+    }
+
     async function loadPreview(): Promise<void> {
       try {
         assertGfsMarkdownPreviewSize(byteLength)
@@ -134,8 +144,13 @@ export function GfsMarkdownPreview({
         if (active) setSource(markdown)
       } catch (error) {
         if (!active) return
+        const status = (error as { status?: number } | null)?.status
         setPreviewError(
-          error instanceof Error ? error.message : 'Could not load the Markdown preview'
+          status === 403 || status === 404
+            ? 'File unavailable.'
+            : error instanceof Error
+              ? error.message
+              : 'Could not load the Markdown preview.'
         )
       }
     }
@@ -144,7 +159,7 @@ export function GfsMarkdownPreview({
     return () => {
       active = false
     }
-  }, [byteLength, rid])
+  }, [byteLength, rid, unavailable])
 
   function markCopyState(state: 'copied' | 'error'): boolean {
     if (!mountedRef.current) return false
@@ -193,7 +208,7 @@ export function GfsMarkdownPreview({
         aria-labelledby={titleId}
       >
         <header className="cu-gfs-markdown-preview-dialog__header">
-          <h3 id={titleId}>{fileName}</h3>
+          <h3 id={titleId}>{unavailable ? 'File unavailable' : fileName}</h3>
           <div className="cu-gfs-markdown-preview-dialog__header-actions">
             <Button
               className="cu-gfs-markdown-preview-dialog__copy"
@@ -203,7 +218,7 @@ export function GfsMarkdownPreview({
                   ? 'Copied preview contents to clipboard'
                   : 'Copy preview contents to clipboard'
               }
-              disabled={source === null}
+              disabled={source === null || unavailable}
               onClick={() => void copySourceToClipboard()}
             >
               <IconCopy width={18} height={18} />
@@ -223,17 +238,21 @@ export function GfsMarkdownPreview({
           </div>
         </header>
         <div className="cu-gfs-markdown-preview-dialog__body">
-          {previewError ? (
+          {unavailable ? (
+            <div className="cu-gfs-markdown-preview-dialog__loading" role="status">
+              File unavailable.
+            </div>
+          ) : previewError ? (
             <div className="cu-banner cu-banner--error" role="alert">
               {previewError}
             </div>
           ) : null}
-          {!previewError && source === null ? (
+          {!unavailable && !previewError && source === null ? (
             <div className="cu-gfs-markdown-preview-dialog__loading" role="status">
               Loading preview…
             </div>
           ) : null}
-          {source !== null && !previewError ? (
+          {!unavailable && source !== null && !previewError ? (
             isPlainText ? (
               <article
                 aria-label={`Text preview of ${fileName}`}
