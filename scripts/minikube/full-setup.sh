@@ -23,6 +23,9 @@
 #   MINIKUBE_RECREATE_PROFILE=true     Allow destructive profile recreation only
 #   CONFIRM_PROFILE=<profile>          when it matches the exact target profile.
 #   BRANCH_PROFILE_DEPLOY_DIR=<dir>     Optional branch-profile deploy cache root.
+#   MINIKUBE_DEPLOY_EVENFIRE_REGISTRY=false
+#                                      Deploy and seed the local sibling Registry
+#                                      only when explicitly set to true.
 #   IMAGE_SOURCE=ghcr|local            ghcr (default) pulls published images;
 #                                      local builds all of them from source.
 #   MINIKUBE_IMAGE_TAG=<tag>           Render-time override of the committed
@@ -161,6 +164,12 @@ export MINIKUBE_IMAGE_TAG="${MINIKUBE_IMAGE_TAG:-}"
 case "${REUSE_DB:-false}" in
   true|1|yes) RESET_DB=false ;;
   *) : ;;
+esac
+
+MINIKUBE_DEPLOY_EVENFIRE_REGISTRY="${MINIKUBE_DEPLOY_EVENFIRE_REGISTRY:-false}"
+case "${MINIKUBE_DEPLOY_EVENFIRE_REGISTRY}" in
+  true|false) ;;
+  *) err "MINIKUBE_DEPLOY_EVENFIRE_REGISTRY must be true or false"; exit 1 ;;
 esac
 
 SEED_PROFILE="${MINIKUBE_SEED_PROFILE:-minimal}"
@@ -383,6 +392,25 @@ if [ "${T2_SETUP_HANDOFF_REQUIRED}" = true ]; then
   fi
 fi
 TOTAL_STEPS=12
+
+# Resolve an explicitly requested local Registry before any cluster operation.
+# Repository discovery alone must never opt a bootstrap into deploying it.
+if [ "${MINIKUBE_DEPLOY_EVENFIRE_REGISTRY}" = true ]; then
+  EVENFIRE_DIR_DEFAULT="$(cd "${PROJECT_DIR}/.." && pwd)/evenfire-registry"
+  EVENFIRE_DIR="${EVENFIRE_REGISTRY_DIR:-${EVENFIRE_DIR_DEFAULT}}"
+  if [[ ! -d "${EVENFIRE_DIR}" || ! -f "${EVENFIRE_DIR}/Dockerfile" ]]; then
+    err "MINIKUBE_DEPLOY_EVENFIRE_REGISTRY=true requires an evenfire-registry checkout with a Dockerfile at ${EVENFIRE_DIR}"
+    exit 1
+  fi
+  if [[ ! -f "${EVENFIRE_DIR}/deploy/overlays/minikube/kustomization.yaml" ]]; then
+    err "The requested local Registry has no Minikube overlay at ${EVENFIRE_DIR}/deploy/overlays/minikube/kustomization.yaml"
+    exit 1
+  fi
+  if [[ ! -f "${PROJECT_DIR}/scripts/minikube/deploy-evenfire-registry.sh" ]]; then
+    err "The requested local Registry requires scripts/minikube/deploy-evenfire-registry.sh"
+    exit 1
+  fi
+fi
 # MINIKUBE_IMAGE_TAG overrides the committed pin AT RENDER TIME ONLY.
 #
 # A stdout filter cannot do this: the overlay is rendered from a DIRECTORY at
@@ -2061,31 +2089,17 @@ fi
 # ======================================================================
 # Step 7: Deploy evenfire-registry side-by-side
 # ======================================================================
-# evenfire-registry (registry-api + postgres + minio) lives in a sibling
-# repo, not this monorepo. The helper resolves the sibling checkout from normal
-# primary repos and worktrees, then applies the consumer NetworkPolicies from
-# this overlay so control-api/workflow-recipes can reach registry-api.
+# The local evenfire-registry stack is optional. Centralized Registry
+# connections and their registration/authentication flows are independent.
 step_header 7 $TOTAL_STEPS "evenfire-registry side-by-side deploy"
 
-EVENFIRE_DIR_DEFAULT="$(cd "${PROJECT_DIR}/.." && pwd)/evenfire-registry"
-EVENFIRE_DIR="${EVENFIRE_REGISTRY_DIR:-${EVENFIRE_DIR_DEFAULT}}"
-if [[ -d "${EVENFIRE_DIR}" && -f "${EVENFIRE_DIR}/Dockerfile" ]]; then
-  log "Found evenfire-registry at ${EVENFIRE_DIR} — deploying..."
-  if [ -f "${PROJECT_DIR}/scripts/minikube/deploy-evenfire-registry.sh" ]; then
-    if MINIKUBE_PROFILE="${PROFILE}" EVENFIRE_REGISTRY_DIR="${EVENFIRE_DIR}" \
-         bash "${PROJECT_DIR}/scripts/minikube/deploy-evenfire-registry.sh"; then
-      ok "evenfire-registry deployed"
-    else
-      warn "evenfire-registry deploy failed — registry calls will fail until you fix this."
-      warn "Run manually: make minikube-deploy-evenfire-registry"
-    fi
-  else
-    warn "skip: scripts/minikube/deploy-evenfire-registry.sh not present (sibling repo not included in this distribution)"
-  fi
+if [ "${MINIKUBE_DEPLOY_EVENFIRE_REGISTRY}" = true ]; then
+  log "Deploying the explicitly requested local Registry from ${EVENFIRE_DIR}..."
+  MINIKUBE_PROFILE="${PROFILE}" EVENFIRE_REGISTRY_DIR="${EVENFIRE_DIR}" \
+    bash "${PROJECT_DIR}/scripts/minikube/deploy-evenfire-registry.sh"
+  ok "Local evenfire-registry deployed"
 else
-  warn "evenfire-registry deploy failed — registry calls will fail until you fix this."
-  warn "Run manually: MINIKUBE_PROFILE=${PROFILE} make minikube-deploy-evenfire-registry"
-  warn "If auto-discovery fails, pass EVENFIRE_REGISTRY_DIR=/absolute/path/to/evenfire-registry"
+  log "Skipping local Registry deployment (MINIKUBE_DEPLOY_EVENFIRE_REGISTRY=false)"
 fi
 
 # member-registration-service was extracted to a sibling repo too. Build +
@@ -2126,9 +2140,8 @@ CORE_DEPLOYS=(
   "mcp-host:chatllm"
   "mcp-server:mcp-proxy"
 )
-# registry-api is deployed by Step 7 (side-by-side); failure there is a
-# warning, not blocking — leave it out of the CORE_DEPLOYS readiness gate
-# so a missing evenfire-registry checkout doesn't fail the whole setup.
+# The optional local Registry is requested explicitly in Step 7. Keep it
+# out of CORE_DEPLOYS; strict T2 setup separately checks deployed workloads.
 
 all_ready=true
 for entry in "${CORE_DEPLOYS[@]}"; do
@@ -2189,24 +2202,26 @@ fi
 # ======================================================================
 step_header 9 $TOTAL_STEPS "Seed Registry Catalog"
 
-# Registry seed lives in evenfire-registry (sibling repo). If it's checked
-# out and exposes a `seed-minikube` make target, run it. Otherwise skip
-# loudly — control-ui's "Registry Catalog" tab will be empty but everything
-# else still works.
-EVENFIRE_DIR_DEFAULT="$(cd "${PROJECT_DIR}/.." && pwd)/evenfire-registry"
-EVENFIRE_DIR="${EVENFIRE_REGISTRY_DIR:-${EVENFIRE_DIR_DEFAULT}}"
-if [[ ! -d "${EVENFIRE_DIR}" ]]; then
-  warn "evenfire-registry not found at ${EVENFIRE_DIR} — skipping registry seed"
+# Only seed the explicitly requested local sibling stack. The configured
+# centralized Registry connection and its registration flow stay independent.
+REGISTRY_CATALOG_SEEDED=false
+if [ "${MINIKUBE_DEPLOY_EVENFIRE_REGISTRY}" = false ]; then
+  log "Skipping local Registry catalog seed (MINIKUBE_DEPLOY_EVENFIRE_REGISTRY=false)"
+elif [[ ! -d "${EVENFIRE_DIR}" ]]; then
+  err "The explicitly requested local Registry checkout is no longer available at ${EVENFIRE_DIR}"
+  exit 1
 elif ! $KC get deployment registry-api -n registry &>/dev/null; then
-  warn "registry-api deployment not found in clerum-test — skipping seed"
+  warn "registry-api deployment not found in ${PROFILE} — skipping local catalog seed"
 elif ! (cd "${EVENFIRE_DIR}" && make -n minikube-seed >/dev/null 2>&1); then
-  warn "evenfire-registry has no 'minikube-seed' target — skipping seed"
+  warn "evenfire-registry has no 'minikube-seed' target — skipping local catalog seed"
 else
-  log "Running evenfire-registry minikube-seed target..."
+  log "Running the local evenfire-registry minikube-seed target..."
   if (cd "${EVENFIRE_DIR}" && make minikube-seed 2>&1 | tail -25); then
+    REGISTRY_CATALOG_SEEDED=true
     ok "Registry catalog seeded"
   else
-    warn "Registry seed encountered errors — check output above"
+    err "The requested local Registry catalog seed failed"
+    exit 1
   fi
 fi
 
@@ -2429,5 +2444,11 @@ else
     fi
   fi
 fi
-echo -e "    ${GREEN}✓${NC} Registry catalog seeded (MCP servers + recipes)"
+if [ "${REGISTRY_CATALOG_SEEDED}" = true ]; then
+  echo -e "    ${GREEN}✓${NC} Registry catalog seeded (MCP servers + recipes)"
+elif [ "${MINIKUBE_DEPLOY_EVENFIRE_REGISTRY}" = false ]; then
+  echo -e "    ${YELLOW}○${NC} Local Registry deployment and catalog seed not requested"
+else
+  echo -e "    ${YELLOW}⚠${NC} Local Registry catalog seed not completed"
+fi
 echo ""
