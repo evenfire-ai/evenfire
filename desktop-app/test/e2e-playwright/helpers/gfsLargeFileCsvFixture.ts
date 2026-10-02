@@ -25,8 +25,14 @@ function csvField(value: string): string {
 
 export function buildGfsLargeCsvFixture(): GfsLargeCsvFixture {
   const sentinel = `GFS_LARGE_CSV_SENTINEL_${crypto.randomUUID()}`
-  let content = `${csvField('id,record name')},${csvField('notes,value')}\n`
+  let content = `${csvField('id')},${csvField('record name')},${csvField(
+    'notes,value'
+  )},${csvField('value')}\n`
+  let contentBytes = Buffer.byteLength(content, 'utf8')
   let recordCount = 1
+  const finalPrefix = `${csvField('record-final')},${csvField('final, sentinel row')},"${sentinel}`
+  const closing = `",${csvField('0')}\n`
+  const minimumFinalLength = Buffer.byteLength(finalPrefix + closing, 'utf8')
 
   for (let index = 1; ; index += 1) {
     const multiline = index % 97 === 0
@@ -36,21 +42,14 @@ export function buildGfsLargeCsvFixture(): GfsLargeCsvFixture {
     const row = `${csvField(`record-${index}`)},${csvField(
       `name, with comma ${index}`
     )},${csvField(notes)},${csvField(String(index % 17))}\n`
-    const finalPrefix = `${csvField('record-final')},${csvField(
-      'final, sentinel row'
-    )},${csvField(`${sentinel}`)}`
-    const minimumFinalLength = finalPrefix.length + 2
-    if (Buffer.byteLength(content, 'utf8') + row.length + minimumFinalLength > GFS_LARGE_CSV_SIZE)
-      break
+    const rowBytes = Buffer.byteLength(row, 'utf8')
+    if (contentBytes + rowBytes + minimumFinalLength > GFS_LARGE_CSV_SIZE) break
     content += row
+    contentBytes += rowBytes
     recordCount += 1
   }
 
-  const finalPrefix = `${csvField('record-final')},${csvField(
-    'final, sentinel row'
-  )},${csvField(`${sentinel}`)}`
-  const closing = `${csvField('0')}\n`
-  const usedBytes = Buffer.byteLength(content, 'utf8') + finalPrefix.length + closing.length
+  const usedBytes = contentBytes + minimumFinalLength
   if (usedBytes > GFS_LARGE_CSV_SIZE) throw new Error('GFS large CSV fixture sizing underflow')
   const padding = 'z'.repeat(GFS_LARGE_CSV_SIZE - usedBytes)
   content += `${finalPrefix}${padding}${closing}`

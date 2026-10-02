@@ -10,11 +10,15 @@
  *    Node command reports the independently generated CSV record count and a
  *    sentinel located beyond the former 3 MiB boundary.
  *  - Setup shortcuts: managed agent/folder fixture seeding and the local CSV
- *    buffer are named preconditions. No provider-route mock, storage mutation,
+ *    file are named preconditions. No provider-route mock, storage mutation,
  *    direct API trigger, or broad network mock is used.
  */
 import { type Locator, type Page, expect, test } from '@playwright/test'
 import { randomUUID } from 'node:crypto'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { getGfsChildResourceSummary, getGfsGrantSummary } from '../../../tests/e2e/gfsUiFixtures'
 import { exactNameFilter } from './helpers/agentLocators'
 import { type ManagedGfsAgent, getManagedAgentDisplayName } from './helpers/gfsAgentDiscovery'
 import { assertGfsInfraHealthy } from './helpers/gfsFixtures'
@@ -80,8 +84,7 @@ async function sendTaskAndApproveShell(
   const approvalText = await stepper.innerText()
   expect(approvalText).toContain('shell_exec')
   expect(approvalText).toContain('node')
-  if (csv.source === 'synthetic') expect(approvalText).toContain(csv.sentinel!)
-  else expect(approvalText).toContain('createHash')
+  expect(approvalText).toContain('createHash')
   await approval.click()
 
   await expect(response).toContainText(/ROWS=/, { timeout: RESPONSE_TIMEOUT_MS })
@@ -113,6 +116,8 @@ test.describe('GFS agent large-file CLI journey', () => {
   let fixtures: AgentGfsLargeFileFixtures
   let agentLabel: string
   let csv: GfsLargeCsvFixture
+  let csvUploadPath: string
+  let syntheticDirectory: string | undefined
 
   test.beforeAll(() => {
     assertGfsInfraHealthy()
@@ -122,10 +127,21 @@ test.describe('GFS agent large-file CLI journey', () => {
     expect(csv.buffer.byteLength).toBe(GFS_LARGE_CSV_SIZE)
     if (csv.source === 'synthetic')
       expect(csv.buffer.indexOf(csv.sentinel!, 'utf8')).toBeGreaterThan(GFS_OLD_VISUAL_LIMIT)
+    if (csv.sourcePath) csvUploadPath = csv.sourcePath
+    else {
+      // Electron's file picker requires a real local path for getPathForFile.
+      syntheticDirectory = mkdtempSync(join(tmpdir(), 'gfs-agent-large-csv-'))
+      csvUploadPath = join(syntheticDirectory, csv.fileName)
+      writeFileSync(csvUploadPath, csv.buffer, { mode: 0o600 })
+    }
   })
 
   test.afterAll(() => {
-    fixtures?.cleanup()
+    try {
+      fixtures?.cleanup()
+    } finally {
+      if (syntheticDirectory) rmSync(syntheticDirectory, { recursive: true, force: true })
+    }
   })
 
   test('user uploads a 3.8 MiB CSV and approves local processing', async () => {
@@ -148,13 +164,39 @@ test.describe('GFS agent large-file CLI journey', () => {
           page.waitForEvent('filechooser', { timeout: 30_000 }),
           upload.click(),
         ])
-        await chooser.setFiles(csv.sourcePath!)
+        await chooser.setFiles(csvUploadPath)
         await expect(page.getByText(`Uploaded ${csv.fileName}`)).toBeVisible({
           timeout: 30_000,
         })
         await expect(
           browser.getByRole('button', { name: `Open ${csv.fileName}`, exact: true })
         ).toBeVisible({ timeout: 30_000 })
+        const uploaded = getGfsChildResourceSummary({
+          parentResourceId: fixtures.granted.resourceId,
+          name: csv.fileName,
+        })
+        expect(uploaded).toMatchObject({
+          kind: 'file',
+          bytes: GFS_LARGE_CSV_SIZE,
+          deleted: false,
+        })
+        const hostGrant = getGfsGrantSummary({
+          resourceId: fixtures.granted.resourceId,
+          subjectType: 'host',
+          subjectId: fixtures.agent.subjectId,
+        })
+        expect(hostGrant).toMatchObject({ permissions: ['read'], inherit: true })
+        await test.info().attach('gfs-source-identity', {
+          contentType: 'application/json',
+          body: JSON.stringify({
+            resourceId: uploaded!.resourceId,
+            parentResourceId: fixtures.granted.resourceId,
+            version: uploaded!.version,
+            bytes: uploaded!.bytes,
+            hostSubjectId: fixtures.agent.subjectId,
+            hostGrant,
+          }),
+        })
       })
 
       let expandButton: Locator
@@ -182,12 +224,15 @@ test.describe('GFS agent large-file CLI journey', () => {
         const shellRow = toolStepRow(page, 'shell_exec')
         await expect(shellRow).toBeVisible({ timeout: 15_000 })
         await expect(shellRow.locator('.stepper-step-duration.state-error')).toHaveCount(0)
-        await expect(await stepOutput(shellRow)).toContainText(`ROWS=${csv.recordCount}`)
-        await expect(await stepOutput(shellRow)).toContainText(`PROOF=${csv.tailProof}`)
+        const shellOutput = await stepOutput(shellRow)
+        const expectedRows = new RegExp(`\\bROWS=${csv.recordCount}(?=\\s|$)`)
+        const expectedProof = new RegExp(`\\bPROOF=${csv.tailProof}(?=\\s|$)`)
+        await expect(shellOutput).toContainText(expectedRows)
+        await expect(shellOutput).toContainText(expectedProof)
 
-        await expect(response).toContainText(`ROWS=${csv.recordCount}`)
-        await expect(response).toContainText(`PROOF=${csv.tailProof}`)
-        await expect(response).not.toContain('zzzzzzzzzz')
+        await expect(response).toContainText(expectedRows)
+        await expect(response).toContainText(expectedProof)
+        await expect(response).not.toContainText('zzzzzzzzzz')
       })
 
       await test.step('source remains visible after read-only processing', async () => {

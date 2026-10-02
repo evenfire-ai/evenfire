@@ -1,5 +1,6 @@
 import type { FileReferenceV1 } from '@clerum/gfs-interaction-policy'
 import type { FileReferenceResolution } from '../agent/fileReferenceResolver'
+import { logger } from '../logger'
 import { inspectImage, validateImage } from '../visualInput/imageValidation'
 import { VisualInputError } from '../visualInput/policy'
 import type {
@@ -630,6 +631,45 @@ export function buildGfsReadTools(
             options
           )
         } catch (error) {
+          // Traces omit tool arguments; retain only public target identifiers
+          // and a bounded failure category, never GFSC bodies or raw errors.
+          const drive =
+            typeof target.drive === 'string' &&
+            target.drive.length > 0 &&
+            target.drive.length <= 64 &&
+            !/[^a-z0-9_-]/.test(target.drive)
+              ? target.drive
+              : undefined
+          const resourceId = normalizeRid(target.resourceId)
+          const status =
+            error instanceof GfscHttpError
+              ? error.status
+              : error instanceof Error
+                ? Number(/^gfsc (\d{3}):/.exec(error.message)?.[1])
+                : Number.NaN
+          logger.warn(
+            {
+              component: 'GfsDownload',
+              ...(drive === undefined ? {} : { drive }),
+              ...(resourceId?.length === 32 ? { resourceId } : {}),
+              ...(Number.isInteger(status) && status >= 100 && status <= 599
+                ? { httpStatus: status }
+                : {}),
+              errorClass:
+                error instanceof GfscHttpError
+                  ? 'GfscHttpError'
+                  : error instanceof GfsDownloadError
+                    ? 'GfsDownloadError'
+                    : error instanceof GfsDownloadStoreError
+                      ? 'GfsDownloadStoreError'
+                      : error instanceof VisualInputError
+                        ? 'VisualInputError'
+                        : error instanceof Error
+                          ? 'Error'
+                          : 'unknown',
+            },
+            'GFS workspace download failed'
+          )
           if (expectedVersion !== undefined && versionConflict(error))
             return ok({ availability: 'stale', ...target, expectedVersion })
           return fail(error)
