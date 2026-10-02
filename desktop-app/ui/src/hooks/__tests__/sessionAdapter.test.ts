@@ -5,10 +5,7 @@ import {
   buildChatMessageAttachments,
   buildResponseFileAttachments,
 } from '../../lib/chatMessageAttachments'
-import {
-  buildComposerReferencesPromptSection,
-  buildComposerRequestContent,
-} from '../../lib/composerReferencesPrompt'
+import { buildComposerRequestContent } from '../../lib/composerReferencesPrompt'
 import { buildComposerResendDraft } from '../../lib/composerResend'
 import type { ComposerReferenceAttachment } from '../../uiTypes'
 import { turnsToChatMessages } from '../sessionAdapter'
@@ -60,7 +57,7 @@ describe('turnsToChatMessages', () => {
     ])
   })
 
-  it('merges an image-only optimistic turn using producer-shaped attachments', () => {
+  it('keeps an image-only optimistic turn without a proved server identity', () => {
     const existing: ChatMessage[] = [
       {
         id: 'optimistic-user',
@@ -95,7 +92,11 @@ describe('turnsToChatMessages', () => {
 
     const merged = mergeAuthoritativeServerMessages(existing, incoming)
 
-    expect(merged.map(message => message.id)).toEqual(['turn-7-user', 'turn-7-assistant'])
+    expect(merged.map(message => message.id)).toEqual([
+      'optimistic-user',
+      'turn-7-user',
+      'turn-7-assistant',
+    ])
     expect(merged[0]?.attachments).toMatchObject([{ type: 'uploaded_file', label: 'photo.png' }])
   })
 
@@ -116,9 +117,7 @@ describe('turnsToChatMessages', () => {
     ])
     const existing: ChatMessage[] = [
       {
-        id: 'optimistic-user',
-        role: 'user',
-        content: 'Analyze charts',
+        ...incoming[0]!,
         timestamp: 1,
         attachments: [
           {
@@ -205,6 +204,57 @@ describe('turnsToChatMessages', () => {
     ])
     expect(draft.referenceAttachments).toHaveLength(1)
     expect(draft.unrestorable).toEqual([{ type: 'global_file', label: 'Report' }])
+  })
+
+  it('retains two versioned same-label global files on their identified server turn', () => {
+    const references: ComposerReferenceAttachment[] = [
+      {
+        id: 'first-global',
+        type: 'global_file',
+        label: 'Report',
+        drive: 'drive-7',
+        resourceId: 'first',
+        gfsUri: 'gfs://drive-7/first',
+        version: 3,
+        bytes: 4096,
+      },
+      {
+        id: 'second-global',
+        type: 'global_file',
+        label: 'Report',
+        drive: 'drive-7',
+        resourceId: 'second',
+        gfsUri: 'gfs://drive-7/second',
+        version: 8,
+        bytes: 8192,
+      },
+    ]
+    const incoming = turnsToChatMessages([
+      {
+        number: 9,
+        user_input: buildComposerRequestContent('Compare both reports', references),
+        started_at: new Date(9).toISOString(),
+      },
+    ])
+    expect(incoming[0]?.attachments).toMatchObject([
+      { type: 'global_file', label: 'Report' },
+      { type: 'global_file', label: 'Report' },
+    ])
+    const local: ChatMessage = {
+      ...incoming[0]!,
+      attachments: buildChatMessageAttachments([], references),
+    }
+    const once = mergeAuthoritativeServerMessages([local], incoming)
+    const twice = mergeAuthoritativeServerMessages(once, incoming)
+    expect(twice).toEqual(once)
+    expect(once).toHaveLength(1)
+    expect(once[0]?.attachments).toHaveLength(2)
+    const draft = buildComposerResendDraft(once[0]!)
+    expect(draft.referenceAttachments).toMatchObject([
+      { type: 'global_file', gfsUri: 'gfs://drive-7/first', version: 3, bytes: 4096 },
+      { type: 'global_file', gfsUri: 'gfs://drive-7/second', version: 8, bytes: 8192 },
+    ])
+    expect(draft.unrestorable).toEqual([])
   })
 
   it('does not resend references from a same-text idle echo onto a context-free server turn', () => {
@@ -370,11 +420,11 @@ describe('turnsToChatMessages', () => {
       attachments: [firstImage],
     }
     const localEcho: ChatMessage = {
-      id: 'first-prompt-idle-echo',
+      id: 'second-prompt-idle-echo',
       role: 'user',
       content: 'repeat',
       timestamp: 2,
-      attachments: [firstImage],
+      attachments: [secondImage],
     }
     const existing = [firstTurn, localEcho, incoming[0]!]
     const once = mergeAuthoritativeServerMessages(existing, incoming, {
@@ -386,11 +436,11 @@ describe('turnsToChatMessages', () => {
     expect(twice).toEqual(once)
     expect(once.map(message => message.id)).toEqual([
       'turn-1-user',
-      'first-prompt-idle-echo',
+      'second-prompt-idle-echo',
       'turn-2-user',
     ])
     expect(buildComposerResendDraft(once[0]!).imageAttachments[0]?.dataBase64).toBe('AQ==')
-    expect(buildComposerResendDraft(once[1]!).imageAttachments[0]?.dataBase64).toBe('AQ==')
+    expect(buildComposerResendDraft(once[1]!).imageAttachments[0]?.dataBase64).toBe('Ag==')
     expect(buildComposerResendDraft(once[2]!).imageAttachments).toEqual([])
     expect(once[2]?.attachments).toMatchObject([{ type: 'uploaded_file', label: 'shared.png' }])
   })
@@ -463,6 +513,46 @@ describe('turnsToChatMessages', () => {
     expect(once.find(message => message.id === 'turn-2-assistant')?.attachments).toEqual([
       responseFile,
     ])
+    expect(mergeAuthoritativeServerMessages(once, incoming)).toEqual(once)
+  })
+
+  it('keeps a response-file echo local when two assistant turns share its text', () => {
+    const incoming = turnsToChatMessages([
+      { number: 1, user_input: 'first', response: 'done', started_at: new Date(1).toISOString() },
+      { number: 2, user_input: 'second', response: 'done', started_at: new Date(3).toISOString() },
+    ])
+    const responseFile = buildResponseFileAttachments({
+      attachments: [
+        {
+          id: 'result',
+          kind: 'file',
+          filename: 'result.txt',
+          mimeType: 'text/plain',
+          encoding: 'base64',
+          dataBase64: 'b2s=',
+          sizeBytes: 2,
+        },
+      ],
+    })[0]!
+    const localEcho: ChatMessage = {
+      id: 'ambiguous-assistant-echo',
+      role: 'assistant',
+      content: 'done',
+      timestamp: 2,
+      attachments: [responseFile],
+    }
+    const once = mergeAuthoritativeServerMessages(
+      [incoming[1]!, localEcho, incoming[3]!],
+      incoming,
+      { activeTaskIds: new Set() }
+    )
+    expect(once.filter(message => message.role === 'assistant').map(message => message.id)).toEqual(
+      ['turn-1-assistant', 'ambiguous-assistant-echo', 'turn-2-assistant']
+    )
+    expect(once.find(message => message.id === 'ambiguous-assistant-echo')?.attachments).toEqual([
+      responseFile,
+    ])
+    expect(once.find(message => message.id === 'turn-2-assistant')?.attachments).toBeUndefined()
     expect(mergeAuthoritativeServerMessages(once, incoming)).toEqual(once)
   })
 

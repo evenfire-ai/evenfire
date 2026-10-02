@@ -333,12 +333,11 @@ describe('ChatThread resend action (TASK-42)', () => {
         started_at: new Date(2).toISOString(),
       },
     ])
-    const user = mergeAuthoritativeServerMessages([local], incoming)[0]!
-    expect(user.attachments?.map(attachment => attachment.type)).toEqual([
-      'plugin',
-      'uploaded_file',
-    ])
-    renderWithUserMessage(user)
+    const merged = mergeAuthoritativeServerMessages([local], incoming)
+    expect(merged.map(message => message.id)).toEqual(['optimistic-user', 'turn-10-user'])
+    expect(merged[0]?.attachments?.map(attachment => attachment.type)).toEqual(['uploaded_file'])
+    expect(merged[1]?.attachments?.map(attachment => attachment.type)).toEqual(['plugin'])
+    renderWithUserMessage(merged[0]!)
     fireEvent.click(screen.getByRole('button', { name: 'Resend message' }))
     expect(pushToast).toHaveBeenCalledWith(
       "1 attachment from the original message couldn't be restored.",

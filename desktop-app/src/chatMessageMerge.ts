@@ -18,7 +18,102 @@ function attachmentName(attachment: ChatMessageAttachment): string {
   return (attachment.filename || attachment.label).trim()
 }
 
-/** Keep server chips in order while pairing repeated image names by occurrence. */
+type AttachmentRule = { identified: 'enrich' | 'server'; contentEcho: 'unique' | 'retain' }
+
+/** Mirrors work-tracker/specs/attachment-reconciliation-provenance.md. */
+const ATTACHMENT_RULES: Record<ChatMessageAttachment['type'], AttachmentRule> = {
+  uploaded_file: { identified: 'enrich', contentEcho: 'retain' },
+  global_file: { identified: 'enrich', contentEcho: 'retain' },
+  agent_file: { identified: 'enrich', contentEcho: 'retain' },
+  response_file: { identified: 'enrich', contentEcho: 'unique' },
+  plugin: { identified: 'server', contentEcho: 'retain' },
+  connector: { identified: 'server', contentEcho: 'retain' },
+}
+
+function attachmentIdentitiesConflict(
+  server: ChatMessageAttachment,
+  local: ChatMessageAttachment
+): boolean {
+  if (server.type === 'global_file' && local.type === 'global_file') {
+    return Boolean(
+      (server.gfsUri && local.gfsUri && server.gfsUri !== local.gfsUri) ||
+      (server.version !== undefined &&
+        local.version !== undefined &&
+        server.version !== local.version)
+    )
+  }
+  if (server.type === 'agent_file' && local.type === 'agent_file') {
+    return Boolean(
+      server.filesystemName &&
+      local.filesystemName &&
+      server.path &&
+      local.path &&
+      (server.filesystemName !== local.filesystemName || server.path !== local.path)
+    )
+  }
+  return false
+}
+
+function sameStructuredAttachmentIdentity(
+  server: ChatMessageAttachment,
+  local: ChatMessageAttachment
+): boolean {
+  if (server.type === 'global_file' && local.type === 'global_file') {
+    return Boolean(server.gfsUri && server.gfsUri === local.gfsUri)
+  }
+  if (server.type === 'agent_file' && local.type === 'agent_file') {
+    return Boolean(
+      server.filesystemName &&
+      server.path &&
+      server.filesystemName === local.filesystemName &&
+      server.path === local.path
+    )
+  }
+  return false
+}
+
+function enrichIdentifiedAttachment(
+  server: ChatMessageAttachment,
+  local: ChatMessageAttachment
+): ChatMessageAttachment {
+  if (server.type === 'global_file') {
+    if (
+      !local.gfsUri ||
+      !Number.isSafeInteger(local.version) ||
+      !Number.isSafeInteger(local.bytes) ||
+      (server.version !== undefined && server.version !== local.version)
+    ) {
+      return server
+    }
+    return {
+      ...server,
+      gfsUri: server.gfsUri ?? local.gfsUri,
+      drive: server.drive ?? local.drive,
+      resourceId: server.resourceId ?? local.resourceId,
+      version: server.version ?? local.version,
+      bytes: server.bytes ?? local.bytes,
+    }
+  }
+  if (server.type === 'agent_file') {
+    if (!local.filesystemName || !local.path) return server
+    return {
+      ...server,
+      filesystemName: server.filesystemName ?? local.filesystemName,
+      path: server.path ?? local.path,
+    }
+  }
+  if (!local.dataBase64) return server
+  return {
+    ...server,
+    filename: server.filename ?? local.filename,
+    mimeType: server.mimeType ?? local.mimeType,
+    encoding: server.encoding ?? local.encoding,
+    dataBase64: server.dataBase64 ?? local.dataBase64,
+    sizeBytes: server.sizeBytes ?? local.sizeBytes,
+  }
+}
+
+/** Keep server chips in order while pairing names only within an identified turn. */
 function mergeAttachmentChips(
   server: ChatMessageAttachment[] | undefined,
   local: ChatMessageAttachment[] | undefined
@@ -32,7 +127,8 @@ function mergeAttachmentChips(
     const localIndex = local.findIndex(
       (attachment, index) =>
         !matchedLocalIndexes.has(index) &&
-        (attachment.type === 'uploaded_file' || Boolean(attachment.dataBase64)) &&
+        ATTACHMENT_RULES[attachment.type].identified === 'enrich' &&
+        !attachmentIdentitiesConflict(server[serverIndex]!, attachment) &&
         predicate(attachment)
     )
     if (localIndex < 0) return
@@ -43,6 +139,10 @@ function mergeAttachmentChips(
   // Stable IDs win even when the server changes a display label.
   server.forEach((attachment, index) => {
     pair(index, candidate => candidate.type === attachment.type && candidate.id === attachment.id)
+  })
+  server.forEach((attachment, index) => {
+    if (localIndexByServerIndex.has(index)) return
+    pair(index, candidate => sameStructuredAttachmentIdentity(attachment, candidate))
   })
   // Parsed server IDs differ from optimistic IDs. Pair the remaining chips by
   // type + name in order, including collisions such as two "photo.png" images.
@@ -60,50 +160,49 @@ function mergeAttachmentChips(
   const merged = server.map((attachment, index) => {
     const localIndex = localIndexByServerIndex.get(index)
     const match = localIndex === undefined ? undefined : local[localIndex]
-    if (!match?.dataBase64) return attachment
-    return {
-      ...attachment,
-      filename: attachment.filename ?? match.filename,
-      mimeType: attachment.mimeType ?? match.mimeType,
-      encoding: attachment.encoding ?? match.encoding,
-      dataBase64: attachment.dataBase64 ?? match.dataBase64,
-      sizeBytes: attachment.sizeBytes ?? match.sizeBytes,
-    }
+    return match ? enrichIdentifiedAttachment(attachment, match) : attachment
   })
   return [
     ...merged,
     ...local.filter(
       (attachment, index) =>
-        !matchedLocalIndexes.has(index) &&
-        (attachment.type === 'uploaded_file' || Boolean(attachment.dataBase64))
+        !matchedLocalIndexes.has(index) && ATTACHMENT_RULES[attachment.type].identified === 'enrich'
     ),
   ]
 }
 
-function collapseSafeAttachments(
-  attachments: ChatMessageAttachment[] | undefined
-): ChatMessageAttachment[] | undefined {
-  return attachments?.filter(
-    attachment =>
-      Boolean(attachment.dataBase64) ||
-      (attachment.type !== 'plugin' &&
-        attachment.type !== 'connector' &&
-        attachment.type !== 'agent_file' &&
-        attachment.type !== 'global_file')
+function contentEchoIsUnique(
+  local: ChatMessage,
+  authoritative: ChatMessage[],
+  existing: ChatMessage[]
+): boolean {
+  const serverSlots = new Map<string, ChatMessage>()
+  for (const row of [...existing, ...authoritative]) {
+    if (messageServerTurnNumber(row) !== undefined) serverSlots.set(serverSlotKey(row), row)
+  }
+  const matchingSlots = [...serverSlots.values()].filter(
+    row => row.role === local.role && row.content === local.content
   )
+  const matchingLocals = existing.filter(
+    row =>
+      messageServerTurnNumber(row) === undefined &&
+      row.role === local.role &&
+      row.content === local.content &&
+      !row.isError &&
+      !row.preserveLocal
+  )
+  return matchingSlots.length === 1 && matchingLocals.length === 1
 }
 
-function hasByteBearingUploadedImage(message: ChatMessage): boolean {
-  // Parsed server image chips expose only filename and list position. Those
-  // fields cannot distinguish different bytes in same-name prompts. A
-  // content-only collapse has no stronger turn identity, so the local image
-  // must remain on its own bubble. Response files are assistant output
-  // artifacts and retain their established collapse behavior.
-  return Boolean(
-    message.attachments?.some(
-      attachment => attachment.type === 'uploaded_file' && Boolean(attachment.dataBase64)
+function contentEchoMayCollapse(local: ChatMessage, unique: boolean): boolean {
+  if (
+    local.attachments?.some(
+      attachment => ATTACHMENT_RULES[attachment.type].contentEcho === 'retain' || !unique
     )
-  )
+  ) {
+    return false
+  }
+  return unique || !local.toolSteps?.length
 }
 
 function preferredServerMessage(
@@ -227,16 +326,17 @@ export function mergeAuthoritativeServerMessages(
   const removedIndexes = new Set<number>()
   const removedIndexByMessage = new Map<ChatMessage, number>()
   const localByServerMessage = new Map<ChatMessage, ChatMessage>()
-  // Side metadata (toolSteps/attachments/tokens via copyLocalMetadata) of a
-  // collapsed idle echo, keyed by the authoritative row it merges onto. Kept
-  // SEPARATE from localByServerMessage: the collapse is not a positional 1↔1
-  // replacement, so it must not drive the local anchor index nor the single-claim
-  // filter — it only contributes metadata to a server row that always survives
-  // (§6.2, R2-M1).
+  const identifiedServerMessages = new Set<ChatMessage>()
+  // Eligible output artifacts and tool steps from a uniquely owned idle echo.
+  // A content-only collapse cannot establish attachment or task identity.
   const collapsedEchoMetadataByServerMessage = new Map<ChatMessage, ChatMessage>()
   const consumedLocalMessages = new Set<ChatMessage>()
 
-  const markLocalReplacement = (serverMessage: ChatMessage, localMessage: ChatMessage) => {
+  const markLocalReplacement = (
+    serverMessage: ChatMessage,
+    localMessage: ChatMessage,
+    identified: boolean
+  ) => {
     const index = existing.indexOf(localMessage)
     if (index < 0 || consumedLocalMessages.has(localMessage)) return
     consumedLocalMessages.add(localMessage)
@@ -244,18 +344,12 @@ export function mergeAuthoritativeServerMessages(
     removedIndexes.add(index)
     removedIndexByMessage.set(localMessage, index)
     localByServerMessage.set(serverMessage, localMessage)
+    if (identified) identifiedServerMessages.add(serverMessage)
   }
 
-  // Collapse sibling of markLocalReplacement: evicts a turnless idle echo from the
-  // output WITHOUT registering localByServerMessage (no positional 1↔1 anchoring),
-  // but DOES merge its side metadata (toolSteps/attachments/tokens via
-  // copyLocalMetadata) onto the authoritative row of its slot — the same echoRow
-  // its content matched. The server row never changes content or presence, so this
-  // can never reintroduce R1-B1 (property #1 still guards every numbered server
-  // row, §6.1) and never rewrites content (loss-safety of text, §6.2). It is no
-  // longer pure drop-only: it is drop of the local ∩ merge of its metadata into the
-  // surviving authoritative row, so toolSteps/attachments the optimistic bubble
-  // accumulated are not lost when the reconciled server row lacks them (R2-M1).
+  // Remove a proven unique text echo without treating it as an identified
+  // replacement. Only attachment classes allowed by the decision table reach
+  // this path; its metadata cannot become a positional anchor or a task ID.
   const dropLocalEcho = (localMessage: ChatMessage, echoRow: ChatMessage) => {
     const index = existing.indexOf(localMessage)
     if (index < 0 || consumedLocalMessages.has(localMessage)) return
@@ -275,7 +369,7 @@ export function mergeAuthoritativeServerMessages(
         messageServerTurnNumber(local) !== undefined &&
         serverSlotKey(local) === slot
     )
-    if (sameSlot) markLocalReplacement(serverMessage, sameSlot)
+    if (sameSlot) markLocalReplacement(serverMessage, sameSlot, true)
   }
 
   const serverTurnAllowedForTurnlessLocal = (
@@ -342,7 +436,7 @@ export function mergeAuthoritativeServerMessages(
 
   for (const [message, matches] of liveLocalExactMatches) {
     if (matches.length === 1 && exactMatchClaimants.get(matches[0]!) === 1) {
-      markLocalReplacement(matches[0]!, message)
+      markLocalReplacement(matches[0]!, message, true)
     }
   }
 
@@ -367,7 +461,7 @@ export function mergeAuthoritativeServerMessages(
     // this role is free to host the idle optimistic (candidateTurns empty) AND it is
     // bracketed on both sides by numbered turns (slot saturation — the core case is
     // the consecutive same-role sandwich Q = P + 1), the bubble is the residual echo
-    // of an already-materialised numbered turn. We drop it (drop-only) ONLY when its
+    // of an already-materialised numbered turn. We collapse it ONLY when its
     // content matches the AUTHORITATIVE incoming row of the same role that fills the
     // neighbour's (turn, role) slot — NOT the numbered neighbour taken from
     // `existing`, which can be stale: the row that actually lands in that output slot
@@ -421,7 +515,10 @@ export function mergeAuthoritativeServerMessages(
           : matchesAuthoritative(previousAuthoritative)
             ? previousAuthoritative
             : undefined
-        if (echoRow && !hasByteBearingUploadedImage(message)) {
+        if (
+          echoRow &&
+          contentEchoMayCollapse(message, contentEchoIsUnique(message, authoritative, existing))
+        ) {
           dropLocalEcho(message, echoRow)
         }
       }
@@ -435,35 +532,25 @@ export function mergeAuthoritativeServerMessages(
         serverTurnAllowedForTurnlessLocal(serverMessage, message, index)
     )
     if (!candidates.length) continue
-    markLocalReplacement(candidates[0]!, message)
+    // A free positional slot can dedupe plain optimistic text, but it does
+    // not establish ownership for attachments or tool steps.
+    if (message.attachments?.length || message.toolSteps?.length) continue
+    markLocalReplacement(candidates[0]!, message, false)
   }
 
   const hydratedReplacements = authoritative.map(message => {
     const local = localByServerMessage.get(message)
-    let hydrated = preferredServerMessage(message, local, { copyLocalMetadata: Boolean(local) })
-    // Merge safe side metadata of a collapsed idle echo onto its authoritative
-    // slot row (§6.2, R2-M1). A same-text collapse does not prove that a local
-    // plugin/file reference belonged to this server turn; Resend must not turn
-    // that unverified reference into a new prompt attachment. Byte-bearing
-    // uploaded images never reach this path on a content-only collapse;
-    // response-file output artifacts and toolSteps can still be kept. It
-    // deliberately
-    // does NOT use preferredServerMessage/copyLocalMetadata here: that path also
-    // copies `task_id` (echo identity), which is correct for D-1 replacement (the
-    // server IS the live task's echo) but WRONG for an idle collapse — the task is
-    // done and the collapse is by content coincidence, not identity. Tagging a
-    // historical server row with a done task's id leaks identity and would break the
-    // task_id-based dedupe consumers rely on (the exact class the ':602' stale-
-    // metadata guard forbids). `content` is never touched either (loss-safety, §6.1).
-    // This does NOT affect localAnchorIndex: the collapse has no positional anchor.
+    let hydrated = preferredServerMessage(message, local, {
+      copyLocalMetadata: identifiedServerMessages.has(message),
+    })
+    // A unique content-only collapse may carry output artifacts and tool steps.
+    // Images and input references never reach this path, and no task ID or
+    // positional anchor is copied from the echo.
     const collapsedEcho = collapsedEchoMetadataByServerMessage.get(message)
     if (collapsedEcho) {
       hydrated = {
         ...hydrated,
-        attachments: mergeAttachmentChips(
-          hydrated.attachments,
-          collapseSafeAttachments(collapsedEcho.attachments)
-        ),
+        attachments: mergeAttachmentChips(hydrated.attachments, collapsedEcho.attachments),
         toolSteps: hydrated.toolSteps?.length ? hydrated.toolSteps : collapsedEcho.toolSteps,
       }
     }

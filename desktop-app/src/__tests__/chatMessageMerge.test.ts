@@ -352,7 +352,7 @@ describe('mergeAuthoritativeServerMessages', () => {
     expect(merged.map(message => message.id)).toEqual(['turn-1-user', 'turn-2-user'])
   })
 
-  it('replaces completed task-backed echoes inside their authoritative turn', () => {
+  it('does not attribute an unscoped completed task ID to an authoritative turn', () => {
     const merged = mergeAuthoritativeServerMessages(
       [
         {
@@ -389,7 +389,7 @@ describe('mergeAuthoritativeServerMessages', () => {
     )
 
     expect(merged.map(message => message.id)).toEqual(['turn-4-user', 'turn-4-assistant'])
-    expect(merged.every(message => message.task_id === 'completed-task')).toBe(true)
+    expect(merged.every(message => message.task_id === undefined)).toBe(true)
   })
 
   it('preserves turnless system messages inside an authoritative range', () => {
