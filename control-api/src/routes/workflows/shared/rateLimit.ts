@@ -1,6 +1,7 @@
 import type { Request, Response } from 'express'
 import { ipKeyGenerator, rateLimit } from 'express-rate-limit'
 import { createHash } from 'node:crypto'
+import { config } from '../../../config.js'
 import { rateLimitMiddleware } from '../../../middleware/rateLimitMiddleware.js'
 import { verifyAdminToken } from '../../../utils/auth/adminAuthToken.js'
 import { verifyExternalSessionToken } from '../../../utils/auth/externalSessionAuthToken.js'
@@ -16,9 +17,6 @@ const WORKFLOW_GRANT_WRITE_PER_MINUTE = 20
 const WORKFLOW_ADMIN_READ_PER_MINUTE = 60
 const ADMIN_OUTPUTS_READ_PER_MINUTE = 30
 const WORKFLOW_TRIGGER_PER_MINUTE = 10
-const ADMIN_CODEX_READ_PER_MINUTE = 30
-const ADMIN_CODEX_WRITE_PER_MINUTE = 20
-const CODEX_OAUTH_CALLBACK_PER_MINUTE = 20
 const LLM_PROVIDER_ATTEMPT_AUTHORIZE_PER_MINUTE = 60
 
 /**
@@ -140,17 +138,17 @@ export function adminOutputsReadRateLimits() {
 }
 
 function adminCodexReadEdgeRateLimit() {
-  return createWorkflowEdgeRateLimit('admin_codex_read_edge', ADMIN_CODEX_READ_PER_MINUTE)
+  return createWorkflowEdgeRateLimit('admin_codex_read_edge', config.adminSubscriptionReadPerMin)
 }
 
 function adminCodexWriteEdgeRateLimit() {
-  return createWorkflowEdgeRateLimit('admin_codex_write_edge', ADMIN_CODEX_WRITE_PER_MINUTE)
+  return createWorkflowEdgeRateLimit('admin_codex_write_edge', config.adminSubscriptionWritePerMin)
 }
 
 function adminCodexReadRateLimit() {
   return rateLimitMiddleware({
     bucketType: 'admin_codex_read',
-    maxPerMinute: ADMIN_CODEX_READ_PER_MINUTE,
+    maxPerMinute: config.adminSubscriptionReadPerMin,
     getBucketKey: hashedAdminWorkflowCredentialBucket('admin_codex_read'),
     onBackendUnavailable: 'process-memory',
   })
@@ -159,7 +157,7 @@ function adminCodexReadRateLimit() {
 function adminCodexWriteRateLimit() {
   return rateLimitMiddleware({
     bucketType: 'admin_codex_write',
-    maxPerMinute: ADMIN_CODEX_WRITE_PER_MINUTE,
+    maxPerMinute: config.adminSubscriptionWritePerMin,
     getBucketKey: hashedAdminWorkflowCredentialBucket('admin_codex_write'),
     onBackendUnavailable: 'process-memory',
   })
@@ -186,7 +184,7 @@ export function codexOAuthCallbackRateLimits() {
   return [
     rateLimit({
       windowMs: 60_000,
-      limit: CODEX_OAUTH_CALLBACK_PER_MINUTE,
+      limit: config.subscriptionOAuthCallbackPerMin,
       standardHeaders: 'draft-7',
       legacyHeaders: false,
       keyGenerator: codexOAuthCallbackBucketKey,
@@ -194,7 +192,7 @@ export function codexOAuthCallbackRateLimits() {
     }),
     rateLimitMiddleware({
       bucketType: 'codex_oauth_callback',
-      maxPerMinute: CODEX_OAUTH_CALLBACK_PER_MINUTE,
+      maxPerMinute: config.subscriptionOAuthCallbackPerMin,
       getBucketKey: codexOAuthCallbackBucketKey,
       onBackendUnavailable: 'process-memory',
     }),

@@ -208,6 +208,9 @@ type Config = {
   workflowArtifactDownloadMaxBytes: number
   // Per-minute rate limits (PG-backed token buckets).
   approvalRlRequestPerMin: number
+  adminSubscriptionReadPerMin: number
+  adminSubscriptionWritePerMin: number
+  subscriptionOAuthCallbackPerMin: number
   approvalRlRefreshPerMin: number
   approvalRlExternalPerMin: number
   approvalRlExternalEdgePerMin: number
@@ -1000,6 +1003,18 @@ export const config: Config = {
   workflowArtifactDownloadMaxBytes: positiveIntegerFromEnv(
     'CLERUM_ATTACHMENT_MAX_BYTES',
     50 * 1024 * 1024
+  ),
+  adminSubscriptionReadPerMin: positiveIntegerFromEnv(
+    'CONTROL_API_ADMIN_SUBSCRIPTION_READ_PER_MIN',
+    150
+  ),
+  adminSubscriptionWritePerMin: positiveIntegerFromEnv(
+    'CONTROL_API_ADMIN_SUBSCRIPTION_WRITE_PER_MIN',
+    100
+  ),
+  subscriptionOAuthCallbackPerMin: positiveIntegerFromEnv(
+    'CONTROL_API_SUBSCRIPTION_OAUTH_CALLBACK_PER_MIN',
+    100
   ),
   approvalRlRequestPerMin: Number(process.env.APPROVAL_RL_REQUEST_PER_MIN || 120),
   approvalRlRefreshPerMin: Number(process.env.APPROVAL_RL_REFRESH_PER_MIN || 20),

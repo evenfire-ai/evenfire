@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
 import { config } from '../src/config.js'
@@ -69,6 +69,139 @@ function pgAllows() {
 }
 
 describe('routes/workflows/shared/rateLimit', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  function countRequests() {
+    const counts = new Map<string, number>()
+    mockCheckAndIncrement.mockReset()
+    mockCheckAndIncrement.mockImplementation(async (key: string, limit: number) => {
+      const windowStartMs = Math.floor(Date.now() / 60_000) * 60_000
+      const identity = `${key}|${windowStartMs}`
+      const count = (counts.get(identity) ?? 0) + 1
+      counts.set(identity, count)
+      return {
+        allowed: count <= limit,
+        backendAvailable: true,
+        remaining: Math.max(0, limit - count),
+        resetMs: windowStartMs + 60_000,
+        windowStartMs,
+        count,
+      }
+    })
+    return counts
+  }
+
+  it('shares 150 subscription reads across provider routes and recovers at reset', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(1_800_000_000_000)
+    const counts = countRequests()
+    const app = express()
+    for (const path of ['/codex/connections', '/grok/connections', '/grok/models']) {
+      app.get(path, ...adminCodexReadRateLimits(), (_req, res) => res.sendStatus(204))
+    }
+    const paths = ['/codex/connections', '/grok/connections', '/grok/models']
+    for (let i = 0; i < 150; i++) {
+      await request(app)
+        .get(paths[i % paths.length])
+        .set('Cookie', 'control_ui_admin_session=signed-admin-a')
+        .expect(204)
+    }
+    expect(counts.size).toBe(1)
+    const denied = await request(app)
+      .get(paths[0])
+      .set('Cookie', 'control_ui_admin_session=signed-admin-a')
+      .expect(429)
+    expect(denied.headers['x-ratelimit-limit']).toBe('150')
+    expect(denied.headers['retry-after']).toBeDefined()
+    vi.setSystemTime(1_800_000_060_000)
+    const recovered = await request(app)
+      .get(paths[0])
+      .set('Cookie', 'control_ui_admin_session=signed-admin-a')
+      .expect(204)
+    expect(recovered.headers['x-ratelimit-remaining']).toBe('149')
+  })
+
+  it('gives distinct verified sessions independent subscription allowances', async () => {
+    countRequests()
+    const app = express()
+    app.get('/connections', ...adminCodexReadRateLimits(), (_req, res) => res.sendStatus(204))
+    for (const session of ['signed-admin-a', 'signed-admin-b']) {
+      for (let i = 0; i < 150; i++) {
+        await request(app)
+          .get('/connections')
+          .set('Cookie', `control_ui_admin_session=${session}`)
+          .expect(204)
+      }
+    }
+    await request(app)
+      .get('/connections')
+      .set('Cookie', 'control_ui_admin_session=signed-admin-a')
+      .expect(429)
+  })
+
+  it('uses a configured read budget for both edge and distributed gates', async () => {
+    const original = config.adminSubscriptionReadPerMin
+    config.adminSubscriptionReadPerMin = 3
+    try {
+      countRequests()
+      const app = express()
+      app.get('/connections', ...adminCodexReadRateLimits(), (_req, res) => res.sendStatus(204))
+      for (let i = 0; i < 3; i++) {
+        await request(app)
+          .get('/connections')
+          .set('Cookie', 'control_ui_admin_session=signed-admin-a')
+          .expect(204)
+      }
+      const denied = await request(app)
+        .get('/connections')
+        .set('Cookie', 'control_ui_admin_session=signed-admin-a')
+        .expect(429)
+      expect(denied.headers['ratelimit-policy']).toBe('3;w=60')
+      expect(mockCheckAndIncrement.mock.calls.every(call => call[1] === 3)).toBe(true)
+    } finally {
+      config.adminSubscriptionReadPerMin = original
+    }
+  })
+
+  it('allows 100 subscription writes without consuming the read quota', async () => {
+    const counts = countRequests()
+    const app = express()
+    app.post('/connections', ...adminCodexWriteRateLimits(), (_req, res) => res.sendStatus(204))
+    app.get('/connections', ...adminCodexReadRateLimits(), (_req, res) => res.sendStatus(204))
+    for (let i = 0; i < 100; i++) {
+      await request(app)
+        .post('/connections')
+        .set('Cookie', 'control_ui_admin_session=signed-admin-a')
+        .expect(204)
+    }
+    await request(app)
+      .post('/connections')
+      .set('Cookie', 'control_ui_admin_session=signed-admin-a')
+      .expect(429)
+    await request(app)
+      .get('/connections')
+      .set('Cookie', 'control_ui_admin_session=signed-admin-a')
+      .expect(204)
+    expect(counts.size).toBe(2)
+  })
+
+  it('enforces the 100 callback budget with retry timing', async () => {
+    countRequests()
+    const app = express()
+    app.get('/callback', ...codexOAuthCallbackRateLimits(), (_req, res) => res.sendStatus(204))
+    for (let i = 0; i < 100; i++) {
+      await request(app).get('/callback').query({ state: 'unit-callback-state' }).expect(204)
+    }
+    const denied = await request(app)
+      .get('/callback')
+      .query({ state: 'unit-callback-state' })
+      .expect(429)
+    expect(denied.headers['ratelimit-policy']).toBe('100;w=60')
+    expect(denied.headers['retry-after']).toBeDefined()
+  })
+
   beforeEach(() => {
     mockVerifyAdminToken.mockImplementation((token: string) =>
       token.startsWith('signed-') ? signedClaims(token.slice('signed-'.length)) : null
