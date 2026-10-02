@@ -145,8 +145,7 @@ export async function loadPrincipalAuthoritySnapshot(input: {
             CASE
               WHEN $2::text = 'v2' THEN COALESCE((
                 SELECT s.session_version::text || ':' || s.current_jti::text || ':' ||
-                       COALESCE(s.revoked_at::text, '') || ':' || s.idle_expires_at::text || ':' ||
-                       s.absolute_expires_at::text
+                       COALESCE(s.revoked_at::text, '') || ':' || s.absolute_expires_at::text
                   FROM external_user_sessions s
                  WHERE s.sid::text = $3 AND s.user_id = u.id
               ), 'missing')
