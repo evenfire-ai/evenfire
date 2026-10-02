@@ -11,6 +11,8 @@ export interface GfsReadOptions {
    * content is requested.
    */
   expectedVersion?: number
+  /** Reuse a validated routing snapshot so inline classification cannot observe a second version. */
+  metadataSnapshot?: { source: GfsImageSource; size: number }
 }
 
 /** A validated metadata/content snapshot. This object is never a tool result. */

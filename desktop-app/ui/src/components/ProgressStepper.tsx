@@ -122,14 +122,17 @@ function activeProgressLabel(progress: TaskProgress): string {
 function OutputPanel({
   preview,
   isError,
+  toolCallId,
 }: {
   preview: NonNullable<ProgressStep['outputPreview']>
   isError?: boolean
+  toolCallId: string
 }) {
   const latestLines = preview.tailLines.length > 0 ? preview.tailLines : preview.headLines
   return (
     <div
       data-testid="step-output-panel"
+      data-tool-call-id={toolCallId}
       className={`stepper-step-output${isError ? ' stepper-step-output--error' : ''}`}
     >
       <pre className="stepper-step-output-code">{latestLines.join('\n')}</pre>
@@ -243,10 +246,14 @@ function StepList({ steps }: { steps: TaskProgress['steps'] }) {
               <div className="stepper-step-error-detail">{step.errorSummary}</div>
             )}
             {isExpanded && step.state !== 'running' && step.outputPreview && (
-              <OutputPanel preview={step.outputPreview} isError={step.state === 'error'} />
+              <OutputPanel
+                preview={step.outputPreview}
+                isError={step.state === 'error'}
+                toolCallId={step.toolCallId}
+              />
             )}
             {isExpanded && step.state === 'running' && step.liveOutputPreview && (
-              <OutputPanel preview={step.liveOutputPreview} />
+              <OutputPanel preview={step.liveOutputPreview} toolCallId={step.toolCallId} />
             )}
           </React.Fragment>
         )
@@ -459,6 +466,14 @@ export function ProgressStepper({
             </IconButton>
           )}
         </div>
+        {info?.inputPreview && !isConnect && (
+          <div data-testid="approval-input-preview" className="stepper-step-output">
+            <pre className="stepper-step-output-code">{info.inputPreview.text}</pre>
+            {info.inputPreview.truncated && (
+              <p role="note">This preview is incomplete or changed by redaction.</p>
+            )}
+          </div>
+        )}
         {info && canConnect && (
           <div className="stepper-approval-actions">
             <Button

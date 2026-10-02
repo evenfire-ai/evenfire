@@ -63,6 +63,7 @@ import {
   withResolvedHookDescriptors,
 } from './guardrailHookResolver'
 import { createGfscClient, inspectGfsToolScopes } from './internalTools/gfsClient'
+import { GfsDownloadStore } from './internalTools/gfsDownloadStore'
 import { HostWatcher, LlmHookWatcher, getHost, getLlmHook } from './k8sClient'
 import { StatelessHeartbeat } from './lifecycle/statelessHeartbeat'
 import { TaskLifecycle } from './lifecycle/taskLifecycle'
@@ -232,6 +233,9 @@ let contextMapperClient: ContextMapperClient | null = null
 let mcpAuthorityLastSuccessAt = 0
 let activityHub: HostActivityHub | null = null
 let workspaceProvider: ScopedWorkspaceProvider | null = null
+let gfsWorkspaceProvider: ScopedWorkspaceProvider | null = null
+let gfsDownloadStore: GfsDownloadStore | null = null
+let gfsDownloadCleanupTimer: NodeJS.Timeout | null = null
 let spilloverStorage: SpilloverStorage | null = null
 let conversationStoreHandle: ConversationStoreHandle | null = null
 let promptCache: PromptCache | null = null
@@ -1723,6 +1727,21 @@ async function initializeAgent(): Promise<void> {
   agent.setDynamicEnvProvider(() => agentToolEnvProvider(configStore))
   agent.setSecretEntriesProvider(() => configStore?.listSecretEntries() ?? [])
 
+  gfsWorkspaceProvider = new ScopedWorkspaceProvider(config.nativeTool.workspacePath)
+  gfsDownloadStore = new GfsDownloadStore(config.nativeTool.workspacePath)
+  await gfsDownloadStore.initialize()
+  agent.setGfsWorkspaceProvider(gfsWorkspaceProvider)
+  agent.setGfsDownloadStore(gfsDownloadStore)
+  gfsDownloadCleanupTimer = setInterval(
+    () => {
+      void gfsDownloadStore?.cleanupExpired().catch(err => {
+        logger.warn({ err: err }, '[Main] GFS download cleanup failed:')
+      })
+    },
+    60 * 60 * 1000
+  )
+  gfsDownloadCleanupTimer.unref?.()
+
   // Phase 7–8: Create WorkspaceService when memory is enabled
   const memoryCfg = currentHost?.spec.memory || config.memory
   if (memoryCfg?.enabled) {
@@ -2037,6 +2056,24 @@ const prepareIncomingMessage = createIncomingAdmission({
   applySessionModelSelection,
   dispatch: dispatchIncomingMessage,
   fileReferenceGfs: fileReferenceGfsGate,
+  gfsSurfaceRuntimeCapability: message => {
+    const callerWorkspacePath = gfsWorkspaceProvider?.forSource(message)?.userRootPath
+    const shellApprovalEnabled =
+      (currentHost?.spec.approval || config.approvalConfig)?.tools?.shell_exec !== false
+    const workspaceFile = Boolean(
+      config.enableApproval &&
+      message.sender &&
+      gfsDownloadStore &&
+      callerWorkspacePath &&
+      shellApprovalEnabled
+    )
+    return {
+      workspaceFile,
+      localExecutor: workspaceFile,
+      // Visual support is decided per physical provider attempt, never here.
+      visual: false,
+    }
+  },
   logger,
 })
 
@@ -3051,6 +3088,15 @@ async function shutdown(signal: string): Promise<void> {
       await conversationStoreHandle.shutdown()
     } catch (err) {
       logger.warn({ err: err }, '[Main] ConversationStore shutdown raised:')
+    }
+  }
+
+  if (gfsDownloadStore) {
+    if (gfsDownloadCleanupTimer) clearInterval(gfsDownloadCleanupTimer)
+    try {
+      await gfsDownloadStore.close()
+    } catch (err) {
+      logger.warn({ err: err }, '[Main] GFS download store shutdown raised:')
     }
   }
 

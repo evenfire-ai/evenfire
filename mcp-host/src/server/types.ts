@@ -9,6 +9,7 @@ import type { ModelWireEntry } from '../config/modelResolution.js'
 import type { ApprovalDecision } from '../core/extensions/approvalTypes'
 import type { Attachment, TraceContextV1 } from '../core/types'
 import type { McpServerStatusEntry } from '../mcp/serverStatus'
+import type { ApprovalInputPreview } from '../progress/types'
 import type { TaskError } from '../queue/types'
 
 export interface ProviderIdentity {
@@ -547,6 +548,7 @@ export interface SessionStateWire {
     // reason ⇒ generic approval (back-compat). Set by `sessionRouteHandlers`.
     reason?: 'approval_required' | 'connect_required'
     mcpServerName?: string
+    inputPreview?: ApprovalInputPreview
   }
   /** Lifetime token totals; omitted when the session has had no LLM call yet. */
   tokens?: SessionTokensWire
