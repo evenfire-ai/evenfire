@@ -64,7 +64,6 @@ describeRealPostgres('oauth reactive refresh — row-lock serialization (real Po
   let adminPool: Pool
   let dbPool: Pool
   let db: DbClient
-  const clientClosures: Promise<void>[] = []
 
   beforeAll(async () => {
     if (!adminUrl) throw new Error('CONTROL_API_REAL_PG_ADMIN_URL is required')
@@ -73,9 +72,6 @@ describeRealPostgres('oauth reactive refresh — row-lock serialization (real Po
     dbPool = new Pool({ connectionString: databaseUrl(adminUrl, database) })
     // pg-pool can resolve end() before its clients' asynchronous socket closes.
     // Register physical closure before initDb creates the first connection.
-    dbPool.on('connect', client => {
-      clientClosures.push(new Promise<void>(resolve => client.once('end', resolve)))
-    })
     await initDb({ connect: () => dbPool.connect() })
     db = { query: (text, values) => dbPool.query(text, values) }
   })
