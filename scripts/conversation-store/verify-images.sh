@@ -46,12 +46,14 @@ owned_docker() {
     quoted_arg="$(quote_remote_arg "$arg")"
     remote_command+="${remote_command:+ }${quoted_arg}"
   done
+  # The SSH PTY emits CRLF; remove only the terminal CR on each output line.
+  # pipefail preserves failed transport exits through the normalizer.
   node "$DOCKER_CLI_DEADLINE_RUNNER" \
     --timeout-seconds "$timeout_seconds" \
     --heartbeat-seconds "$MINIKUBE_DOCKER_HEARTBEAT_SECONDS" \
     --kill-grace-seconds "$MINIKUBE_DOCKER_KILL_GRACE_SECONDS" \
     --label conversation-store-image -- \
-    minikube -p "$MINIKUBE_PROFILE" ssh -- "$remote_command"
+    minikube -p "$MINIKUBE_PROFILE" ssh -- "$remote_command" | awk '{ sub(/\r$/, ""); print }'
 }
 cleanup_probe_containers() {
   local container_ids cleanup_status=0 id label

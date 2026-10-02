@@ -83,41 +83,45 @@ if [[ "$profile" != "${TEST_PROFILE:?}" ]]; then
 fi
 docker() {
   printf 'REMOTE_DOCKER %s\n' "$*" >>"${TEST_LOG_FILE:?}"
+  if [[ "${TEST_INSPECT_FAILURE:-0}" == 1 && "$*" == 'image inspect '* ]]; then
+    printf 'sha256:%064d\r\n' 1
+    return 77
+  fi
   case "$*" in
     'version --format {{.Server.Version}}')
       printf '99.9.0\n'
       ;;
     'image inspect --format {{.Id}} clerum/mcp-host:test')
-      printf 'sha256:%064d\n' 1
+      printf 'sha256:%064d\r\n' 1
       ;;
     'image inspect --format {{.Id}} clerum/mcp-host-slim:test')
-      printf 'sha256:%064d\n' 2
+      printf 'sha256:%064d\r\n' 2
       ;;
     'image inspect --format {{.Id}} clerum/mcp-host-full:test')
-      printf 'sha256:%064d\n' 3
+      printf 'sha256:%064d\r\n' 3
       ;;
     'image inspect --format {{.Id}} clerum/mcp-host-desktop:test')
-      printf 'sha256:%064d\n' 4
+      printf 'sha256:%064d\r\n' 4
       ;;
     'image inspect --format {{.Id}} registry.example:5000/clerum/mcp-host:test'|\
     'image inspect --format {{.Id}} clerum/mcp-host@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'|\
     'image inspect --format {{.Id}} sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd')
-      printf 'sha256:%064d\n' 5
+      printf 'sha256:%064d\r\n' 5
       ;;
     'container ls --all --no-trunc --filter label=clerum.io/conversation-store-probe='*)
       printf '%s' "${6#label=clerum.io/conversation-store-probe=}" \
         >"${TEST_LOG_FILE%/*}/stub-probe-id"
-      printf '%s\n%s\n' \
+      printf '%s\r\n%s\r\n' \
         'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
         'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
       ;;
     'container inspect --format '*)
       case "${!#}" in
         aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa)
-          printf '%s\n' "$(cat "${TEST_LOG_FILE%/*}/stub-probe-id")"
+          printf '%s\r\n' "$(cat "${TEST_LOG_FILE%/*}/stub-probe-id")"
           ;;
         bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb)
-          printf 'foreign-probe\n'
+          printf 'foreign-probe\r\n'
           ;;
         *)
           printf 'UNEXPECTED_CONTAINER_INSPECT %s\n' "${!#}" >&2
@@ -245,6 +249,22 @@ if [[ "$valid_refs_status" -eq 0 ]] && grep -Fq 'CONVERSATION_STORE_IMAGES_PASS 
   pass 'safe registry-port, digest and immutable-ID references remain supported'
 else
   fail "safe explicit image references were rejected (exit $valid_refs_status): $(cat "$TMP_ROOT/valid-refs-err.log")"
+fi
+
+# A valid-looking ID must not hide a failed remote inspect through normalization.
+inspect_failure_status=0
+PATH="$TMP_ROOT/bin:$PATH" \
+TEST_INSPECT_FAILURE=1 \
+TEST_LOG_FILE="$TMP_ROOT/inspect-failure.log" \
+MINIKUBE_PROFILE="$TEST_PROFILE" \
+  bash "$TMP_ROOT/repo/scripts/conversation-store/verify-images.sh" \
+  >"$TMP_ROOT/inspect-failure-out.log" 2>"$TMP_ROOT/inspect-failure-err.log" || inspect_failure_status=$?
+if [[ "$inspect_failure_status" -eq 1 ]] &&
+   grep -Fq 'IMAGE_MISSING' "$TMP_ROOT/inspect-failure-err.log" &&
+   ! grep -Fq 'REMOTE_DOCKER run ' "$TMP_ROOT/inspect-failure.log"; then
+  pass 'CRLF normalization preserves failed remote inspect exits before any probe'
+else
+  fail 'CRLF normalization hid a failed remote inspect'
 fi
 
 malicious_ref='clerum/mcp-host:test; printf pwned $(printf injected) `printf injected`'
