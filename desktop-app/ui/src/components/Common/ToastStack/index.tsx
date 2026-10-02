@@ -17,7 +17,13 @@ export function ToastStack({ items, onDismiss }: ToastStackProps) {
           className={`toast tone-${item.tone}`}
         >
           <span aria-hidden className="toast-icon">
-            {item.tone === 'success' ? '●' : item.tone === 'error' ? '!' : 'i'}
+            {item.tone === 'success'
+              ? '●'
+              : item.tone === 'error'
+                ? '!'
+                : item.tone === 'warn'
+                  ? '▲'
+                  : 'i'}
           </span>
           <span className="toast-body">{item.text}</span>
           {item.action ? (

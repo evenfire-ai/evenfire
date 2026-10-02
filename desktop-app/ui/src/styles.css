@@ -10637,6 +10637,10 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
   border-color: rgba(var(--success-rgb), 0.5);
 }
 
+.toast.tone-warn {
+  border-color: rgba(var(--warning-rgb), 0.5);
+}
+
 .toast.tone-error {
   border-color: rgba(var(--danger-rgb), 0.52);
 }

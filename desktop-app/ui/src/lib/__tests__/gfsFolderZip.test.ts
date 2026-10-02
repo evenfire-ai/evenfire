@@ -7,6 +7,7 @@ import {
   GfsFolderZipLimitError,
   type GfsFolderZipProgress,
   type GfsZipChildItem,
+  type GfsZipChildrenPage,
   createGfsFolderZip,
   createGfsReadThrottle,
 } from '../gfsFolderZip'
@@ -345,6 +346,36 @@ describe('createGfsFolderZip', () => {
       { deps, signal: controller.signal }
     )
     const expectation = expect(walk).rejects.toMatchObject({ name: 'AbortError' })
+    controller.abort()
+    await expectation
+  })
+
+  it('stops during the RETRIED listing, not only its first attempt (review L3)', async () => {
+    const controller = new AbortController()
+    let attempts = 0
+    const deps: GfsFolderZipDeps = {
+      listChildren: vi.fn(() => {
+        attempts += 1
+        if (attempts === 1)
+          return Promise.reject(new Error('429 httpStatus=429 retryAfterSeconds=0'))
+        // The retried listing hangs: without the abort race on the retry the
+        // walk would park here forever and a Stop could never land.
+        return new Promise<GfsZipChildrenPage>(() => undefined)
+      }),
+      download: async () => ({ bytes: new ArrayBuffer(0) }),
+      throttle: { acquire: async () => undefined },
+      sleep: async () => undefined,
+    }
+
+    const walk = createGfsFolderZip(
+      { resourceId: 'root', drive: 'main', name: 'Stopped' },
+      { deps, signal: controller.signal }
+    )
+    const expectation = expect(walk).rejects.toMatchObject({ name: 'AbortError' })
+    // Let the first attempt reject, the backoff elapse and the retry fire
+    // (each await in the retry chain is its own microtask tick).
+    for (let index = 0; index < 200 && attempts < 2; index += 1) await Promise.resolve()
+    expect(attempts).toBe(2)
     controller.abort()
     await expectation
   })

@@ -218,6 +218,8 @@ export async function createGfsFolderZip(
    * re-enters the budget through `throttle.acquire()`, so a
    * `retryAfterSeconds=0` answer cannot fire the retry with zero spacing
    * against the same per-minute budget that just refused the first attempt.
+   * Both attempts race the abort signal, so a Stop during the retried request
+   * preempts immediately instead of waiting out the in-flight call.
    */
   const withRateLimitRetry = async <T>(operation: () => Promise<T>): Promise<T> => {
     try {
@@ -228,7 +230,7 @@ export async function createGfsFolderZip(
       if (!isRateLimited(message)) throw error
       await withAbort(sleep(Math.min((parseRetryAfterSeconds(message) ?? 15) * 1000, 120_000)))
       await withAbort(throttle.acquire())
-      return operation()
+      return withAbort(operation())
     }
   }
 
@@ -333,7 +335,7 @@ export async function createGfsFolderZip(
     await withAbort(throttle.acquire())
     let bytes: ArrayBuffer
     try {
-      bytes = (await withRateLimitRetry(() => withAbort(download(file.uri)))).bytes
+      bytes = (await withRateLimitRetry(() => download(file.uri))).bytes
     } catch (error) {
       if (isFolderZipAbortError(error)) throw error
       const message = toMessage(error)

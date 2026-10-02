@@ -1,7 +1,18 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { ToastStack } from '../index'
+
+// Resolve the stylesheet relative to THIS test file so the assertion passes
+// regardless of the directory vitest is launched from.
+const toastStyles = readFileSync(resolve(__dirname, '../../../../styles.css'), 'utf8')
+
+function cssRule(selector: string) {
+  const match = toastStyles.match(new RegExp(`${selector}\\s*\\{([^}]*)\\}`))
+  return match?.[1] ?? ''
+}
 
 afterEach(() => {
   cleanup()
@@ -26,6 +37,14 @@ describe('ToastStack', () => {
     expect(screen.getByRole('status').textContent).toContain('Saved.')
     expect(screen.getByRole('alert').textContent).toContain('Boom.')
     expect(screen.queryByRole('button')).toBeNull()
+  })
+
+  it('renders a warn toast with the warn tone class, warning glyph and amber border (L1)', () => {
+    render(<ToastStack items={[{ id: 3, tone: 'warn', text: 'Skipped 1 entry' }]} />)
+    const toast = screen.getByRole('status')
+    expect(toast.className).toBe('toast tone-warn')
+    expect(toast.querySelector('.toast-icon')?.textContent).toBe('▲')
+    expect(cssRule('.toast.tone-warn')).toContain('rgba(var(--warning-rgb)')
   })
 
   it('runs the toast action and dismisses through onDismiss when clicked', () => {
