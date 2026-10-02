@@ -9,9 +9,11 @@ import { ArtifactsBadge } from './ArtifactsBadge'
 interface ProgressStepperProps {
   progress: TaskProgress | undefined
   hostRef?: string
-  onApprove?: () => void
-  onAlwaysApprove?: () => void
-  onDeny?: () => void
+  // A decision handler may resolve to its outcome; `'failed'` re-enables the
+  // same request for a retry (see `ApprovalDecisionSettlement`).
+  onApprove?: () => unknown
+  onAlwaysApprove?: () => unknown
+  onDeny?: () => unknown
   onCancel?: () => void
   // U5 (mcp-oauth reactive consent): fired for a `connect_required` suspension —
   // opens the provider "Connect <server>" OAuth flow instead of Approve/Deny.
@@ -266,7 +268,10 @@ export function ProgressStepper({
   onConnect,
 }: ProgressStepperProps) {
   const [expanded, setExpanded] = useState(false)
-  const [approvalPending, setApprovalPending] = useState(false)
+  // The decision latch belongs to one approval request, not to the mounted card:
+  // the same card stays mounted while a resumed task suspends on a new request,
+  // which must start with active controls. Only a failed decision releases it.
+  const [decidingRequestId, setDecidingRequestId] = useState<string | null>(null)
   const [connectPending, setConnectPending] = useState(false)
   const [isCancelling, setIsCancelling] = useState(false)
 
@@ -423,6 +428,17 @@ export function ProgressStepper({
     const isConnect = info?.reason === 'connect_required'
     const connectServer = info?.mcpServerName || 'the connector'
     const canConnect = isConnect && !!onConnect
+    const approvalPending = !!info && decidingRequestId === info.requestId
+    const decide = (handler: () => unknown) => {
+      if (!info) return
+      const requestId = info.requestId
+      setDecidingRequestId(requestId)
+      void Promise.resolve(handler()).then(outcome => {
+        if (outcome === 'failed') {
+          setDecidingRequestId(current => (current === requestId ? null : current))
+        }
+      })
+    }
     return (
       <div data-testid="progress-stepper" className="progress-stepper status-suspended">
         <div className="stepper-suspended-row">
@@ -487,10 +503,7 @@ export function ProgressStepper({
                 className="stepper-btn stepper-btn-approve"
                 color="success"
                 disabled={approvalPending}
-                onClick={() => {
-                  setApprovalPending(true)
-                  onApprove()
-                }}
+                onClick={() => decide(onApprove)}
                 size="sm"
                 variant="soft"
               >
@@ -503,10 +516,7 @@ export function ProgressStepper({
                 className="stepper-btn stepper-btn-always-approve"
                 color="success"
                 disabled={approvalPending}
-                onClick={() => {
-                  setApprovalPending(true)
-                  onAlwaysApprove()
-                }}
+                onClick={() => decide(onAlwaysApprove)}
                 size="sm"
                 variant="soft"
               >
@@ -519,10 +529,7 @@ export function ProgressStepper({
                 className="stepper-btn stepper-btn-deny"
                 color="danger"
                 disabled={approvalPending}
-                onClick={() => {
-                  setApprovalPending(true)
-                  onDeny()
-                }}
+                onClick={() => decide(onDeny)}
                 size="sm"
                 variant="soft"
               >

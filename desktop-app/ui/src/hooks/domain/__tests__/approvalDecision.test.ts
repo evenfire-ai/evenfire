@@ -68,7 +68,7 @@ describe('decideApproval — happy path (5 steps)', () => {
   it('optimistically flips to processing, calls RPC with teamId, resolves + toasts', async () => {
     const deps = buildDeps()
     seedAwaiting(deps)
-    await decideApproval(deps, target)
+    expect(await decideApproval(deps, target)).toBe('ok')
 
     expect(deps.fsm.getState(chatKey)?.phase).toBe('processing')
     expect(deps.approve).toHaveBeenCalledWith(target)
@@ -91,7 +91,7 @@ describe('decideApproval — guard (step 1)', () => {
     // FSM already past the gate (processing) — not awaiting this request.
     deps.fsm.dispatch(chatKey, { type: 'SEND_STARTED', taskId: 't1' })
     deps.fsm.dispatch(chatKey, { type: 'TASK_CREATED', taskId: 't1' })
-    await decideApproval(deps, target)
+    expect(await decideApproval(deps, target)).toBe('not_awaiting')
     expect(deps.approve).not.toHaveBeenCalled()
     expect(deps.pushToast).toHaveBeenCalledWith('That request was already handled.', 'info')
   })
@@ -115,7 +115,7 @@ describe('decideApproval — failure (step 5)', () => {
       })),
     })
     seedAwaiting(deps)
-    await decideApproval(deps, target)
+    expect(await decideApproval(deps, target)).toBe('already_decided')
     // Optimistic processing is kept (converged), not reverted.
     expect(deps.fsm.getState(chatKey)?.phase).toBe('processing')
     expect(deps.resolveApprovalNotification).toHaveBeenCalled()
@@ -128,7 +128,7 @@ describe('decideApproval — failure (step 5)', () => {
       approve: vi.fn(async () => ({ success: false, error: 'Agent not initialized' })),
     })
     seedAwaiting(deps)
-    await decideApproval(deps, target)
+    expect(await decideApproval(deps, target)).toBe('failed')
     expect(deps.fsm.getState(chatKey)?.phase).toBe('awaiting_approval')
     expect(deps.reconcile).toHaveBeenCalledWith(chatKey, 'approval_decision_failed', target.taskId)
     expect(deps.pushToast).toHaveBeenCalledWith(
@@ -144,7 +144,7 @@ describe('decideApproval — failure (step 5)', () => {
       }),
     })
     seedAwaiting(deps)
-    await decideApproval(deps, target)
+    expect(await decideApproval(deps, target)).toBe('failed')
     expect(deps.fsm.getState(chatKey)?.phase).toBe('awaiting_approval')
     expect(deps.reconcile).toHaveBeenCalledWith(chatKey, 'approval_decision_failed', target.taskId)
     expect(deps.pushToast).toHaveBeenCalledWith('Failed to approve request: fetch failed', 'error')

@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useState } from 'react'
 import { type TaskState, makeTaskKey, useAgentTaskTracker } from '@contexts/AgentTaskTrackerContext'
-import type { ApprovalDecisionTarget } from '@hooks/domain/approvalDecision'
+import type {
+  ApprovalDecisionSettlement,
+  ApprovalDecisionTarget,
+} from '@hooks/domain/approvalDecision'
 import { trackerStateToTaskProgress } from '@hooks/domain/trackerToProgress'
 import { ProgressStepper } from '../ProgressStepper'
 
@@ -12,7 +15,7 @@ interface Props {
   localMessageIds: Set<string>
   onCancelTask?: (taskId: string) => void
   /** §4.7.4: central approval decider (in-flight placeholder = surface d). */
-  decideApproval: (target: ApprovalDecisionTarget) => Promise<void>
+  decideApproval: (target: ApprovalDecisionTarget) => Promise<ApprovalDecisionSettlement>
   /**
    * §8-R2 optimistic paint: the FSM projection's pending approval for this chat.
    * `seedSuspended` is gone, so on a rejoin the approve/deny gate is driven by the
@@ -82,7 +85,7 @@ export function InFlightAssistantPlaceholder({
             si
               ? () => {
                   // Surface (d), §4.7.4: funnel through the central decider.
-                  void decideApproval({
+                  return decideApproval({
                     agentRef,
                     chatId,
                     taskId,
@@ -96,7 +99,7 @@ export function InFlightAssistantPlaceholder({
           onAlwaysApprove={
             si
               ? () => {
-                  void decideApproval({
+                  return decideApproval({
                     agentRef,
                     chatId,
                     taskId,
@@ -111,7 +114,7 @@ export function InFlightAssistantPlaceholder({
           onDeny={
             si
               ? () => {
-                  void decideApproval({
+                  return decideApproval({
                     agentRef,
                     chatId,
                     taskId,

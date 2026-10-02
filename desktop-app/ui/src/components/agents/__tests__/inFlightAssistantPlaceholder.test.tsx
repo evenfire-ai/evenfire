@@ -41,7 +41,7 @@ function renderWith(tracker: TaskTracker, localMessageIds: Set<string>, chatId =
         chatId={chatId}
         localMessageIds={localMessageIds}
         onCancelTask={vi.fn()}
-        decideApproval={vi.fn(async () => undefined)}
+        decideApproval={vi.fn(async () => 'ok' as const)}
       />
     </AgentTaskTrackerContext.Provider>
   )
@@ -79,7 +79,7 @@ describe('InFlightAssistantPlaceholder (D.5)', () => {
           chatId={chatId}
           localMessageIds={new Set()}
           onCancelTask={vi.fn()}
-          decideApproval={vi.fn(async () => undefined)}
+          decideApproval={vi.fn(async () => 'ok' as const)}
         />
       </AgentTaskTrackerContext.Provider>
     )
@@ -129,7 +129,7 @@ describe('InFlightAssistantPlaceholder (D.5)', () => {
           chatId="c1"
           localMessageIds={new Set()}
           onCancelTask={vi.fn()}
-          decideApproval={vi.fn(async () => undefined)}
+          decideApproval={vi.fn(async () => 'ok' as const)}
         />
       </AgentTaskTrackerContext.Provider>
     )

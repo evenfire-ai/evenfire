@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import type { ProgressStep, TaskProgress } from '../../uiTypes'
 import { ProgressStepper } from '../ProgressStepper'
 
@@ -403,6 +403,87 @@ describe('ProgressStepper — suspended status (approval flow)', () => {
     const approveBtn = screen.getByTestId('approval-approve-btn')
     expect(approveBtn.hasAttribute('disabled')).toBe(true)
     expect(denyBtn.hasAttribute('disabled')).toBe(true)
+  })
+
+  describe('decision latch is bound to the current request', () => {
+    function suspendedOn(requestId: string, displayName: string) {
+      return makeProgress({ status: 'suspended', suspendedInfo: { requestId, displayName } })
+    }
+
+    function controls() {
+      return ['approval-approve-btn', 'approval-always-approve-btn', 'approval-deny-btn'].map(id =>
+        screen.getByTestId(id)
+      )
+    }
+
+    function deferred<T>() {
+      let resolve!: (value: T) => void
+      const promise = new Promise<T>(r => {
+        resolve = r
+      })
+      return { promise, resolve }
+    }
+
+    it('enables every control for a second request on the same mounted card', async () => {
+      const first = deferred<string>()
+      const onApprove = vi.fn().mockReturnValueOnce(first.promise)
+      const { rerender } = render(
+        <ProgressStepper
+          progress={suspendedOn('req-A', 'Tool A')}
+          onApprove={onApprove}
+          onAlwaysApprove={vi.fn()}
+          onDeny={vi.fn()}
+        />
+      )
+
+      fireEvent.click(screen.getByTestId('approval-approve-btn'))
+      for (const btn of controls()) expect(btn.hasAttribute('disabled')).toBe(true)
+
+      rerender(
+        <ProgressStepper
+          progress={suspendedOn('req-B', 'Tool B')}
+          onApprove={onApprove}
+          onAlwaysApprove={vi.fn()}
+          onDeny={vi.fn()}
+        />
+      )
+      for (const btn of controls()) expect(btn.hasAttribute('disabled')).toBe(false)
+      expect(screen.getByTestId('approval-approve-btn').textContent).toBe('Approve')
+
+      // A late settlement for request A must not touch request B's controls.
+      await act(async () => {
+        first.resolve('failed')
+        await first.promise
+      })
+      for (const btn of controls()) expect(btn.hasAttribute('disabled')).toBe(false)
+
+      fireEvent.click(screen.getByTestId('approval-deny-btn'))
+      for (const btn of controls()) expect(btn.hasAttribute('disabled')).toBe(true)
+    })
+
+    it('re-enables the same request for a retry when its decision failed', async () => {
+      const onApprove = vi.fn().mockResolvedValueOnce('failed')
+      render(<ProgressStepper progress={suspendedOn('req-A', 'Tool A')} onApprove={onApprove} />)
+
+      await act(async () => {
+        fireEvent.click(screen.getByTestId('approval-approve-btn'))
+      })
+      const btn = screen.getByTestId('approval-approve-btn')
+      expect(btn.hasAttribute('disabled')).toBe(false)
+      expect(btn.textContent).toBe('Approve')
+    })
+
+    it('keeps the request locked once its decision was accepted', async () => {
+      const onApprove = vi.fn().mockResolvedValueOnce('ok')
+      render(<ProgressStepper progress={suspendedOn('req-A', 'Tool A')} onApprove={onApprove} />)
+
+      await act(async () => {
+        fireEvent.click(screen.getByTestId('approval-approve-btn'))
+      })
+      const btn = screen.getByTestId('approval-approve-btn')
+      expect(btn.hasAttribute('disabled')).toBe(true)
+      expect(btn.textContent).toBe('Approving...')
+    })
   })
 
   it('renders step list when suspended with existing steps after expanding details', () => {

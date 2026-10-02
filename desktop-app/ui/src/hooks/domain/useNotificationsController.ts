@@ -12,7 +12,7 @@ import type {
   DesktopNotificationPermission,
   Tone,
 } from '../../uiTypes'
-import type { ApprovalDecisionTarget } from './approvalDecision'
+import type { ApprovalDecisionSettlement, ApprovalDecisionTarget } from './approvalDecision'
 import type { PushNotificationInput, SetStatusFn } from './types'
 
 type WorkflowApprovalDecisionCallbackInput = {
@@ -44,7 +44,7 @@ interface UseNotificationsControllerParams {
   ) => Promise<void> | void
   /** §4.7.4: the central approval decider — the in-app bell funnels through it so
    *  the chat FSM badge converges when deciding from the notification panel. */
-  decideApproval: (target: ApprovalDecisionTarget) => Promise<void>
+  decideApproval: (target: ApprovalDecisionTarget) => Promise<ApprovalDecisionSettlement>
   pushToast: (msg: string, tone: Tone) => void
   setStatus: SetStatusFn
 }

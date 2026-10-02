@@ -28,6 +28,7 @@ import type {
   WorkflowCompletionNotificationTarget,
 } from '../uiTypes'
 import {
+  type ApprovalDecisionSettlement,
   type ApprovalDecisionTarget,
   decideApproval as decideApprovalCore,
   handleMcpOauthCompletion,
@@ -246,9 +247,9 @@ export function useAppController() {
   // controller (it needs its FSM store), but the in-app bell handlers live in
   // `useNotificationsController` (created earlier). This ref bridges the order so
   // all four surfaces funnel through the same `decideApproval`.
-  const decideApprovalRef = useRef<(target: ApprovalDecisionTarget) => Promise<void>>(
-    async () => {}
-  )
+  const decideApprovalRef = useRef<
+    (target: ApprovalDecisionTarget) => Promise<ApprovalDecisionSettlement>
+  >(async () => 'not_awaiting')
   const decideApproval = useCallback(
     (target: ApprovalDecisionTarget) => decideApprovalRef.current(target),
     []

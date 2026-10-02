@@ -26,6 +26,11 @@ export const APPROVAL_ALREADY_DECIDED_MARKERS = [
 
 export type ApprovalOutcome = 'ok' | 'already_decided' | 'failed'
 
+/** What `decideApproval` settled to. `'not_awaiting'` means the double-decision
+ *  guard refused it locally (no RPC). Only `'failed'` leaves the request open for
+ *  a retry from the same surface. */
+export type ApprovalDecisionSettlement = ApprovalOutcome | 'not_awaiting'
+
 /** Classify a settled approve/deny result. A thrown error (network / non-ok
  *  HTTP) is mapped to `'failed'` by the caller's catch. A nullish result is
  *  treated as success (back-compat: a void RPC that resolved without a body). */
@@ -173,7 +178,7 @@ function errorMessage(error: unknown): string {
 export async function decideApproval(
   deps: DecideApprovalDeps,
   target: ApprovalDecisionTarget
-): Promise<void> {
+): Promise<ApprovalDecisionSettlement> {
   const chatKey = makeTaskKey(target.agentRef, target.chatId)
   const entry = deps.fsm.getState(chatKey)
   const hasEntry = !!entry
@@ -188,7 +193,7 @@ export async function decideApproval(
       entry!.phase === 'awaiting_approval' && entry!.pendingApproval?.requestId === target.requestId
     if (!awaitingThis) {
       deps.pushToast('That request was already handled.', 'info')
-      return
+      return 'not_awaiting'
     }
     // Step 2 — optimistic dispatch: badge flips to Running immediately.
     deps.fsm.dispatch(chatKey, {
@@ -215,7 +220,7 @@ export async function decideApproval(
     }
     deps.reconcile(chatKey, 'approval_decision_failed', target.taskId)
     deps.pushToast(`Failed to ${target.decision} request: ${errorMessage(error)}`, 'error')
-    return
+    return 'failed'
   }
 
   const outcome = classifyApprovalResult(result)
@@ -233,7 +238,7 @@ export async function decideApproval(
     })
     deps.reconcile(chatKey, 'approval_decided', target.taskId)
     deps.pushToast(`${verb} request for ${target.agentRef}.`, 'success')
-    return
+    return 'ok'
   }
 
   // Step 5a — already decided by another channel: converge, no revert.
@@ -246,7 +251,7 @@ export async function decideApproval(
     })
     deps.pushToast('That request was already decided.', 'info')
     deps.reconcile(chatKey, 'approval_conflict', target.taskId)
-    return
+    return 'already_decided'
   }
 
   // Step 5b — genuine `success:false` failure: revert (suppression in reducer) +
@@ -263,4 +268,5 @@ export async function decideApproval(
     `Failed to ${target.decision} request: ${result.error ?? 'unknown error'}`,
     'error'
   )
+  return 'failed'
 }
