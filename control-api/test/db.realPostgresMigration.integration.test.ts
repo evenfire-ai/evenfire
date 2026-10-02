@@ -56,7 +56,6 @@ const accessFoundationDefinerSignatures = [
   'authorization_bump_gfs_resource_subjects(pg_catalog.uuid)',
   'authorization_bump_gfs_resource_revision()',
   'authorization_bump_resource_revision(pg_catalog.text, pg_catalog.text, pg_catalog.text)',
-  'authorization_bump_catalog_revision()',
   'authorization_bump_team_membership_revision()',
   'authorization_bump_user_grant_revision()',
   'authorization_bump_team_grant_revision()',
@@ -205,6 +204,11 @@ describeRealPostgres('control-api real Postgres migrations', () => {
     const connector = { connect: () => dbPool.connect() }
 
     await initDb(connector)
+    const obsoleteCatalogRevision = await dbPool.query<{ function_name: string | null }>(
+      `SELECT to_regprocedure('public.authorization_bump_catalog_revision()')::text
+         AS function_name`
+    )
+    expect(obsoleteCatalogRevision.rows).toEqual([{ function_name: null }])
     const freshAccessFoundationFunctions = await readAccessFoundationDefinerState(dbPool)
     expect(freshAccessFoundationFunctions.rows.map(row => row.function_name)).toEqual(
       [...accessFoundationDefinerNames].sort()

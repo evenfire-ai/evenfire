@@ -3,6 +3,8 @@ import type { DbClient } from '../db.js'
 /**
  * Harden the installed access-foundation SECURITY DEFINER functions without
  * changing their bodies, ownership, grants, or behavior.
+ * The obsolete authorization_bump_catalog_revision() routine is intentionally
+ * excluded because 0128_composable_catalog_revisions drops it before this runs.
  */
 export async function applyUserAccessFoundationDefinerTempShadowHardening(
   db: DbClient
@@ -37,8 +39,6 @@ export async function applyUserAccessFoundationDefinerTempShadowHardening(
     ALTER FUNCTION public.authorization_bump_resource_revision(
       pg_catalog.text, pg_catalog.text, pg_catalog.text
     ) SET search_path = pg_catalog, public, pg_temp;
-    ALTER FUNCTION public.authorization_bump_catalog_revision()
-      SET search_path = pg_catalog, public, pg_temp;
     ALTER FUNCTION public.authorization_bump_team_membership_revision()
       SET search_path = pg_catalog, public, pg_temp;
     ALTER FUNCTION public.authorization_bump_user_grant_revision()

@@ -104,7 +104,6 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
       'authorization_bump_gfs_resource_subjects(pg_catalog.uuid)',
       'authorization_bump_gfs_resource_revision()',
       'authorization_bump_resource_revision(pg_catalog.text,pg_catalog.text,pg_catalog.text)',
-      'authorization_bump_catalog_revision()',
       'authorization_bump_team_membership_revision()',
       'authorization_bump_user_grant_revision()',
       'authorization_bump_team_grant_revision()',
@@ -112,6 +111,8 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
       'authorization_bump_operational_relationship_revision()',
     ]
 
+    // 0128_composable_catalog_revisions removes this trigger before 012a runs.
+    expect(signatures).not.toContain('authorization_bump_catalog_revision()')
     expect(sql.match(/ALTER FUNCTION public\./g)).toHaveLength(signatures.length)
     for (const signature of signatures) {
       expect(compactSql).toContain(
