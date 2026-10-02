@@ -212,10 +212,14 @@ describe('user-access foundation migration', () => {
     const gfsIndex = CONTROL_API_MIGRATIONS.findIndex(
       candidate => candidate.version === '0129_gfs_catalog_revision_components'
     )
+    const hardeningIndex = CONTROL_API_MIGRATIONS.findIndex(
+      candidate => candidate.version === '012a_user_access_foundation_definer_temp_shadow_hardening'
+    )
     const epochIndex = CONTROL_API_MIGRATIONS.findIndex(
       candidate => candidate.version === '0130_legacy_password_security_epoch_backfill'
     )
-    expect(epochIndex).toBe(gfsIndex + 1)
+    expect(hardeningIndex).toBe(gfsIndex + 1)
+    expect(epochIndex).toBe(hardeningIndex + 1)
 
     const recordedVersions = CONTROL_API_MIGRATIONS.filter(
       candidate => candidate.version !== migration?.version

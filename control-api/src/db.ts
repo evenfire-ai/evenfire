@@ -7,6 +7,7 @@ import {
 import { config } from './config.js'
 import { migrationSessionBoundsSql } from './migrations/migrationExecutionPolicy.js'
 import { applyPendingPr1Migrations } from './migrations/migrationRunner.js'
+import { applyUserAccessFoundationDefinerTempShadowHardening } from './migrations/userAccessFoundationDefinerTempShadowMigration.js'
 import { rootLogger } from './observability/logger.js'
 import {
   applyCatalogUtf8OrderingSchema,
@@ -6384,6 +6385,12 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
       '0105_gfs_catalog_revision_components',
     ],
     apply: applyComposableCatalogRevisionSchema,
+  },
+  {
+    // The access-foundation bodies are immutable; harden their installed
+    // SECURITY DEFINER search paths without replaying those historical bodies.
+    version: '012a_user_access_foundation_definer_temp_shadow_hardening',
+    apply: applyUserAccessFoundationDefinerTempShadowHardening,
   },
   {
     version: '0130_legacy_password_security_epoch_backfill',
