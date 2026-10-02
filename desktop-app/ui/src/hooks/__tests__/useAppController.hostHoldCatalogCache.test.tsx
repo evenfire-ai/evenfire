@@ -103,9 +103,13 @@ describe('useAppController Host hold and the session catalog cache', () => {
     clerum.rpc.invokeHostMessage.mockResolvedValue({ response: 'Known reply' })
     clerum.rpc.renameSession.mockRejectedValue(await ipcHostAccessRevoked('rpc:renameSession'))
     const { app, probe } = await mountAppAndProbe()
+    await waitFor(() => expect(app.result.current.runtimeConfigState).not.toBeNull())
     await waitFor(() => expect(app.result.current.latestChatSessions).toHaveLength(2))
     act(() => app.result.current.handleSelectChatAgent(HOST_A, { chatId: chatA }))
     await waitFor(() => expect(app.result.current.activeChatId).toBe(chatA))
+    // Wait for the selected catalog's post-paint response before the send clears
+    // caches, so it cannot refill A between that reset and the warm-read counts.
+    await waitFor(() => expect(app.result.current.chatListHasMoreRemoteSessions).toBe(true))
     await act(async () => {
       await app.result.current.handleSelectChat(chatA)
       await app.result.current.handleSendAgentMessage('Known message')
