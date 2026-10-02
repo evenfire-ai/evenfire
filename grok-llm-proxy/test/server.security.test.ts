@@ -1772,7 +1772,7 @@ describe('grok-llm-proxy ticket-aware stream-gate wait (#739 D1-bis)', () => {
   }
 
   /**
-   * Frees the held slots and lets any waiter still polling the shared gate
+   * Frees the held slots and lets any waiter still queued at the shared gate
    * finish on the fake clock, so the module gate is empty for the next test.
    */
   async function releaseAndDrain(slots: Array<() => void>): Promise<void> {
@@ -1872,8 +1872,8 @@ describe('grok-llm-proxy ticket-aware stream-gate wait (#739 D1-bis)', () => {
       await vi.advanceTimersByTimeAsync(50_000)
       expect(await withinReal(reply, 100)).toBeUndefined()
       slots.pop()?.()
-      // One stream-gate poll interval.
-      await vi.advanceTimersByTimeAsync(10)
+      // The release hands the slot to the queued request; no timer is involved.
+      await vi.advanceTimersByTimeAsync(0)
       const res = await withinReal(reply, 2_000)
       expect(res?.status).toBe(200)
       expect(res?.text).toContain('data: {"type":"text","text":"t0"}')
