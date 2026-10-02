@@ -1,5 +1,5 @@
 import React from 'react'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import * as api from '../../lib/api'
 import {
@@ -14,6 +14,26 @@ import {
 import { buildSecretSummary } from '../../test/fixtures/secretSummary'
 import { HostWizard } from '../HostWizard'
 import { ToastProvider } from '../Toast'
+
+const grokCapabilityState = vi.hoisted(() => ({
+  enabled: true,
+  capabilities: {
+    providers: { 'codex-subscription': { enabled: true }, 'grok-subscription': { enabled: true } },
+  },
+}))
+
+vi.mock('../../lib/hooks/useSubscriptionCapabilities', () => ({
+  useSubscriptionCapabilities: () => {
+    grokCapabilityState.capabilities.providers['grok-subscription'].enabled =
+      grokCapabilityState.enabled
+    return {
+      capabilities: grokCapabilityState.capabilities,
+      loading: false,
+      error: null,
+      retry: vi.fn(),
+    }
+  },
+}))
 
 /**
  * Tests for the HostWizard refactor that closes an authorization gap: admins
@@ -148,6 +168,10 @@ vi.mock('../../lib/api', () => ({
 if (!Element.prototype.scrollIntoView) {
   Element.prototype.scrollIntoView = () => {}
 }
+
+beforeEach(() => {
+  grokCapabilityState.enabled = true
+})
 
 async function renderWizard(props?: {
   mcpServers?: Array<{ metadata?: { name?: string; namespace?: string } }>
@@ -1341,15 +1365,37 @@ describe('HostWizard — broker-backed Codex authoring', () => {
   }, 15_000)
 
   it('hides the Grok provider when the Grok capability probe reports disabled', async () => {
+    grokCapabilityState.enabled = false
     vi.mocked(listGrokSubscriptionConnections).mockRejectedValue({ status: 404 })
     await renderWizard()
     await walkToModelStep({ agentName: 'grok-flag-off' })
-    await waitFor(() => {
-      expect(listGrokSubscriptionConnections).toHaveBeenCalled()
-    })
+    expect(listGrokSubscriptionConnections).not.toHaveBeenCalled()
     fireEvent.click(screen.getByLabelText('Provider', { selector: '#llm-primary-provider' }))
     expect(screen.getByRole('option', { name: /^OpenAI$/ })).toBeInTheDocument()
     expect(screen.queryByRole('option', { name: 'xAI Grok Subscription' })).not.toBeInTheDocument()
+  }, 15_000)
+
+  it('loads inventories only at the model step and keeps the provider through a throttle and explicit retry', async () => {
+    mockGrokGrant()
+    vi.mocked(listGrokSubscriptionConnections).mockRejectedValueOnce(
+      Object.assign(new Error('This request limit has been reached. Try again in 12 seconds.'), {
+        status: 429,
+        code: 'rate_limited',
+        retryAfterSeconds: 12,
+      })
+    )
+    await renderWizard()
+    expect(listGrokSubscriptionConnections).not.toHaveBeenCalled()
+    await walkToModelStep({ agentName: 'quota-draft-agent' })
+    const provider = screen.getByLabelText('Provider', { selector: '#llm-primary-provider' })
+    const before = provider.textContent
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('Try again in 12 seconds.')
+    fireEvent.click(within(alert).getByRole('button', { name: 'Retry' }))
+    await waitFor(() => expect(screen.queryByText(/Try again in 12 seconds/)).toBeNull())
+    expect(provider).toHaveTextContent(before!)
+    fireEvent.click(screen.getByRole('button', { name: /Select LLM Secret/i }))
+    expect(await screen.findByText('Team Grok')).toBeInTheDocument()
   }, 15_000)
 
   it('offers the Grok provider once the Grok capability probe succeeds', async () => {

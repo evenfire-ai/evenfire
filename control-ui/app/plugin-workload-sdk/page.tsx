@@ -6,6 +6,7 @@ import { DashboardLayout } from '@components/DashboardLayout'
 import { SectionSearchInput } from '@components/SectionSearchInput'
 import { SelectionDropdown } from '@components/SelectionDropdown'
 import { IconPluginSdk } from '@components/Sidebar/icons'
+import { SubscriptionCapabilityNotice } from '@components/SubscriptionCapabilityNotice'
 import { TablePanelHeader } from '@components/TablePanelHeader'
 import { useToast } from '@components/Toast'
 import { IconRefresh, IconX } from '@components/icons'
@@ -42,8 +43,8 @@ import {
   listGrokConnectionModels,
   listGrokSubscriptionConnections,
 } from '@lib/grokSubscription'
-import { loadGrokSubscriptionCapability } from '@lib/grokSubscriptionFeature'
 import { useLlmAllowedModels } from '@lib/hooks/useLlmAllowedModels'
+import { useSubscriptionCapabilities } from '@lib/hooks/useSubscriptionCapabilities'
 import {
   GROK_SUBSCRIPTION_PROVIDER,
   LLM_PROVIDER_OPTIONS,
@@ -449,6 +450,9 @@ function GrantFormModal({
   onSaved: () => void
 }) {
   const { showToast } = useToast()
+  const subscriptionCapabilities = useSubscriptionCapabilities()
+  const grokEnabled =
+    subscriptionCapabilities.capabilities?.providers['grok-subscription']?.enabled ?? false
   const isEdit = grant !== null
   const initialRecipeInfo = sdkRecipes.find(
     recipe => recipe.namespace === grant?.recipeNamespace && recipe.name === grant?.recipeName
@@ -483,11 +487,13 @@ function GrantFormModal({
   const isCodexProvider = modelProvider === OPENAI_SUBSCRIPTION_PROVIDER
   const isGrokProvider = modelProvider === GROK_SUBSCRIPTION_PROVIDER
   const isBrokerProvider = isCodexProvider || isGrokProvider
-  const [grokEnabled, setGrokEnabled] = useState(false)
   const [codexConnectionRef, setCodexConnectionRef] = useState('')
   const [codexConnections, setCodexConnections] = useState<CodexSubscriptionConnectionView[]>([])
   const [grokConnections, setGrokConnections] = useState<GrokSubscriptionConnectionView[]>([])
   const [codexModels, setCodexModels] = useState<string[]>([])
+  const [grantInventoryError, setGrantInventoryError] = useState('')
+  const [grantInventoryLoading, setGrantInventoryLoading] = useState(false)
+  const [grantInventoryRetryNonce, setGrantInventoryRetryNonce] = useState(0)
   const [allowedEventTypes, setAllowedEventTypes] = useState(
     (grant?.allowedEventTypes ?? []).join(', ')
   )
@@ -552,79 +558,74 @@ function GrantFormModal({
   }, [])
   useEffect(() => {
     if (!isCodexProvider) return
-    let cancelled = false
-    listCodexSubscriptionConnections()
+    const controller = new AbortController()
+    setGrantInventoryLoading(true)
+    listCodexSubscriptionConnections({
+      signal: controller.signal,
+      refresh: grantInventoryRetryNonce > 0,
+    })
       .then(connections => {
-        if (cancelled) return
+        if (controller.signal.aborted) return
         setCodexConnections(connections.filter(isAssignableCodexGrant))
+        setGrantInventoryError('')
       })
       .catch(err => {
-        if (cancelled) return
-        setCodexConnections([])
-        if (!isDisabledCapabilityError(err)) {
-          setError(err instanceof Error ? err.message : 'Could not load ChatGPT subscriptions')
-        }
+        if (controller.signal.aborted || isDisabledCapabilityError(err)) return
+        setGrantInventoryError(
+          err instanceof Error && err.message ? err.message : 'Could not load ChatGPT subscriptions'
+        )
       })
-    return () => {
-      cancelled = true
-    }
-  }, [isCodexProvider])
-  useEffect(() => {
-    let cancelled = false
-    loadGrokSubscriptionCapability()
-      .then(capability => {
-        if (!cancelled) setGrokEnabled(capability.enabled)
+      .finally(() => {
+        if (!controller.signal.aborted) setGrantInventoryLoading(false)
       })
-      .catch(err => {
-        if (cancelled) return
-        // loadGrokSubscriptionCapability already maps "disabled" to
-        // { enabled: false }; anything reaching here is a real probe failure
-        // and must not be presented as the flag being off.
-        setGrokEnabled(false)
-        setError(err instanceof Error ? err.message : 'Could not load Grok subscriptions')
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [])
+    return () => controller.abort()
+  }, [grantInventoryRetryNonce, isCodexProvider])
   useEffect(() => {
     if (!isGrokProvider) return
-    let cancelled = false
-    listGrokSubscriptionConnections()
+    const controller = new AbortController()
+    setGrantInventoryLoading(true)
+    listGrokSubscriptionConnections({
+      signal: controller.signal,
+      refresh: grantInventoryRetryNonce > 0,
+    })
       .then(connections => {
-        if (cancelled) return
+        if (controller.signal.aborted) return
         setGrokConnections(connections.filter(isAssignableGrokGrant))
+        setGrantInventoryError('')
       })
       .catch(err => {
-        if (cancelled) return
-        setGrokConnections([])
-        if (!isDisabledCapabilityError(err)) {
-          setError(err instanceof Error ? err.message : 'Could not load Grok subscriptions')
-        }
+        if (controller.signal.aborted || isDisabledCapabilityError(err)) return
+        setGrantInventoryError(
+          err instanceof Error && err.message ? err.message : 'Could not load Grok subscriptions'
+        )
       })
-    return () => {
-      cancelled = true
-    }
-  }, [isGrokProvider])
+      .finally(() => {
+        if (!controller.signal.aborted) setGrantInventoryLoading(false)
+      })
+    return () => controller.abort()
+  }, [grantInventoryRetryNonce, isGrokProvider])
   useEffect(() => {
     if (!isBrokerProvider || !codexConnectionRef) {
       setCodexModels([])
       return
     }
-    let cancelled = false
+    const controller = new AbortController()
     const loader = isGrokProvider ? listGrokConnectionModels : listCodexConnectionModels
-    loader(codexConnectionRef)
+    loader(codexConnectionRef, { signal: controller.signal, refresh: grantInventoryRetryNonce > 0 })
       .then(models => {
-        if (cancelled) return
+        if (controller.signal.aborted) return
         setCodexModels(models.filter(row => row.enabled && !row.stale).map(row => row.model))
       })
-      .catch(() => {
-        if (!cancelled) setCodexModels([])
+      .catch(err => {
+        if (!controller.signal.aborted)
+          setGrantInventoryError(
+            err instanceof Error ? err.message : 'Could not load subscription models'
+          )
       })
     return () => {
-      cancelled = true
+      controller.abort()
     }
-  }, [isBrokerProvider, isGrokProvider, codexConnectionRef])
+  }, [isBrokerProvider, isGrokProvider, codexConnectionRef, grantInventoryRetryNonce])
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
 
@@ -854,6 +855,25 @@ function GrantFormModal({
         </div>
         <form onSubmit={handleSubmit}>
           <div className="cu-modal-panel__body">
+            <SubscriptionCapabilityNotice state={subscriptionCapabilities} />
+            {grantInventoryLoading ? (
+              <p className="cu-muted" role="status">
+                Loading subscription options…
+              </p>
+            ) : null}
+            {grantInventoryError ? (
+              <div className="cu-banner cu-banner--error" role="alert">
+                <span>{grantInventoryError}</span>
+                <Button
+                  type="button"
+                  className="cu-btn--sm"
+                  variant="ghost"
+                  onClick={() => setGrantInventoryRetryNonce(value => value + 1)}
+                >
+                  Retry
+                </Button>
+              </div>
+            ) : null}
             {error ? <div className="cu-banner cu-banner--error">{error}</div> : null}
 
             <FormSection title="Recipe binding">

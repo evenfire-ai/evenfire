@@ -10,13 +10,16 @@ import React, {
   useState,
 } from 'react'
 import { useRouter } from 'next/navigation'
+import { CONTROL_UI_SESSION_INVALIDATION_EVENT } from '@constants/readRequests'
 import { CONTROL_ROUTES } from '@constants/routes'
 import {
   type AdminLoginResponse,
+  clearAdminAuthToken,
   getControlUIAuthMe,
   isSilentApiError,
   loginControlUI,
   logoutControlUI,
+  setControlUIReadPrincipal,
   setGlobalAuthErrorHandler,
 } from '../lib/api'
 import { buildControlUiLoginPath, getCurrentControlUiPath } from '../lib/authRedirect'
@@ -71,6 +74,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const checkAuth = useCallback(async () => {
     try {
       const response = await getControlUIAuthMe()
+      if (!response.me.id) {
+        clearAdminAuthToken()
+        setAuthState({ id: '', isLoggedIn: false, isLoading: false, username: '', email: '' })
+        return
+      }
+      setControlUIReadPrincipal(response.me.id, response.me.role || 'admin')
       sessionExpiredToastShownRef.current = false
       setAuthState(prev => ({
         ...prev,
@@ -86,17 +95,23 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setAuthState({ id: '', isLoggedIn: false, isLoading: false, username: '', email: '' })
         return
       }
+      clearAdminAuthToken()
       setAuthState({ id: '', isLoggedIn: false, isLoading: false, username: '', email: '' })
     }
   }, [])
 
   useEffect(() => {
     void checkAuth()
+    const onRemoteInvalidation = () => void checkAuth()
+    window.addEventListener(CONTROL_UI_SESSION_INVALIDATION_EVENT, onRemoteInvalidation)
+    return () =>
+      window.removeEventListener(CONTROL_UI_SESSION_INVALIDATION_EVENT, onRemoteInvalidation)
   }, [checkAuth])
 
   const login = useCallback(
     async (username: string, password: string): Promise<AdminLoginResponse> => {
       const result = await loginControlUI(username, password)
+      setControlUIReadPrincipal(result.me.id, 'admin')
       resetPublishScopeCache()
       invalidateRegistryCapabilityCache()
       sessionExpiredToastShownRef.current = false

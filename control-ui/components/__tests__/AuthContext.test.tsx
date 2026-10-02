@@ -1,6 +1,6 @@
 import React from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { apiGet } from '../../lib/api'
 import {
   PublishScopeProvider,
@@ -11,6 +11,10 @@ import {
   __resetRegistryCapabilityCacheForTests,
   useRegistryCapability,
 } from '../../lib/hooks/useRegistryCapability'
+import {
+  __resetReadRequestCacheForTests,
+  getReadRequestPrincipal,
+} from '../../lib/readRequestCache'
 import { AuthProvider, useAuth } from '../AuthContext'
 import { ToastProvider } from '../Toast'
 
@@ -104,6 +108,7 @@ afterEach(() => {
   __resetRegistryCapabilityCacheForTests()
   window.localStorage.clear()
   vi.unstubAllGlobals()
+  __resetReadRequestCacheForTests()
 })
 
 describe('AuthProvider session expiry handling', () => {
@@ -411,6 +416,38 @@ describe('AuthProvider session expiry handling', () => {
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
     expect(replaceMock).toHaveBeenCalledWith('/')
     expect(window.localStorage.getItem('controlUiAdminToken')).toBeNull()
+  })
+
+  it('reverifies a remote cookie-session change once without an invalidation loop', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        response(200, { me: { id: 'admin-a', username: 'admin-a', role: 'admin' } })
+      )
+      .mockResolvedValueOnce(
+        response(200, { me: { id: 'admin-b', username: 'admin-b', role: 'admin' } })
+      )
+    vi.stubGlobal('fetch', fetchMock)
+    render(
+      <ToastProvider>
+        <AuthProvider>
+          <AuthUserProbe />
+        </AuthProvider>
+      </ToastProvider>
+    )
+    await waitFor(() => expect(screen.getByTestId('auth-user')).toHaveTextContent('admin-a'))
+    const otherTab = new BroadcastChannel('control-ui-read-metadata-invalidation')
+    const loopMessages: unknown[] = []
+    otherTab.onmessage = event => loopMessages.push(event.data)
+    await act(async () => {
+      otherTab.postMessage({ type: 'session-invalidation' })
+      await new Promise(resolve => setTimeout(resolve, 0))
+    })
+    await waitFor(() => expect(screen.getByTestId('auth-user')).toHaveTextContent('admin-b'))
+    expect(getReadRequestPrincipal()?.principalId).toBe('admin-b')
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(loopMessages).toEqual([])
+    otherTab.close()
   })
 
   it('redirects after logout even when token revocation fails', async () => {

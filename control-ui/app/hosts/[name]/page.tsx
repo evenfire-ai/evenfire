@@ -11,9 +11,11 @@ import {
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { DetailPageShell } from '@components/DetailPageShell'
 import { SelectionDropdown } from '@components/SelectionDropdown'
+import { SubscriptionCapabilityNotice } from '@components/SubscriptionCapabilityNotice'
 import { useToast } from '@components/Toast'
 import { HOST_DEFAULT_TAB, HOST_TABS } from '@constants/hostDetails'
 import { CONTROL_ROUTES } from '@constants/routes'
+import { useSubscriptionCapabilities } from '@lib/hooks/useSubscriptionCapabilities'
 import { HostAccessTab } from '../../../components/HostAccessTab'
 import { HostAdvancedTab } from '../../../components/HostAdvancedTab'
 import type { HostGuardrails } from '../../../components/HostGuardrailsSection/types'
@@ -126,6 +128,12 @@ function agentConnectorMutationError(error: unknown): string {
   return contextMutationError(error, 'Failed to update connectors for this agent.')
 }
 
+function subscriptionInventoryMessage(error: unknown, brand: string): string {
+  return error instanceof Error && error.message
+    ? error.message
+    : `Could not load ${brand} subscriptions`
+}
+
 function AgentActionsMenu({ busy, onDelete }: { busy: boolean; onDelete: () => void }) {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
@@ -202,6 +210,11 @@ export default function HostDetailsPage() {
   const [initialLoading, setInitialLoading] = useState(true)
 
   const [editingModel, setEditingModel] = useState(false)
+  const subscriptionCapabilities = useSubscriptionCapabilities({ enabled: editingModel })
+  const codexEnabled =
+    subscriptionCapabilities.capabilities?.providers['codex-subscription'].enabled ?? false
+  const grokEnabled =
+    subscriptionCapabilities.capabilities?.providers['grok-subscription'].enabled ?? false
   const [llmSecretModalOpen, setLlmSecretModalOpen] = useState(false)
   const [showDeleteAgentConfirm, setShowDeleteAgentConfirm] = useState(false)
   const [deletingAgent, setDeletingAgent] = useState(false)
@@ -235,8 +248,12 @@ export default function HostDetailsPage() {
   const [codexConnections, setCodexConnections] = useState<CodexSubscriptionConnectionView[]>([])
   const [grokModels, setGrokModels] = useState<string[]>([])
   const [grokConnections, setGrokConnections] = useState<GrokSubscriptionConnectionView[]>([])
-  const [grokEnabled, setGrokEnabled] = useState(false)
+  const [codexInventoryLoaded, setCodexInventoryLoaded] = useState(false)
+  const [grokInventoryLoaded, setGrokInventoryLoaded] = useState(false)
   const [grantCatalogError, setGrantCatalogError] = useState('')
+  const [subscriptionInventoryError, setSubscriptionInventoryError] = useState('')
+  const [subscriptionInventoryLoading, setSubscriptionInventoryLoading] = useState(false)
+  const [inventoryRetryNonce, setInventoryRetryNonce] = useState(0)
   const catalogForEditor = useMemo(() => {
     if (providerDraft === 'codex-subscription') {
       const others = allowedCatalog.filter(row => row.provider !== 'codex-subscription')
@@ -392,86 +409,111 @@ export default function HostDetailsPage() {
   ])
 
   useEffect(() => {
-    let cancelled = false
-    void listCodexSubscriptionConnections()
-      .then(rows => {
-        if (!cancelled) setCodexConnections(rows)
-      })
-      .catch(err => {
-        if (!cancelled) {
-          setCodexConnections([])
-          if (!isDisabledCapabilityError(err)) {
-            setError(err instanceof Error ? err.message : 'Could not load ChatGPT subscriptions')
-          }
-        }
-      })
-    void listGrokSubscriptionConnections()
-      .then(rows => {
-        if (!cancelled) {
-          setGrokConnections(rows)
-          setGrokEnabled(true)
-        }
-      })
-      .catch(err => {
-        if (!cancelled) {
-          setGrokConnections([])
-          setGrokEnabled(false)
-          if (!isDisabledCapabilityError(err)) {
-            setError(err instanceof Error ? err.message : 'Could not load Grok subscriptions')
-          }
-        }
-      })
-    return () => {
-      cancelled = true
+    if (!editingModel || !subscriptionCapabilities.capabilities) {
+      setSubscriptionInventoryError('')
+      setSubscriptionInventoryLoading(false)
+      return
     }
-  }, [])
+    const controller = new AbortController()
+    setSubscriptionInventoryLoading(true)
+    const requests = [
+      codexEnabled
+        ? listCodexSubscriptionConnections({
+            signal: controller.signal,
+            refresh: inventoryRetryNonce > 0,
+          })
+        : Promise.resolve([]),
+      ...(grokEnabled
+        ? [
+            listGrokSubscriptionConnections({
+              signal: controller.signal,
+              refresh: inventoryRetryNonce > 0,
+            }),
+          ]
+        : []),
+    ]
+    Promise.allSettled(requests)
+      .then(([codexResult, grokResult]) => {
+        if (controller.signal.aborted) return
+        if (codexResult.status === 'fulfilled') {
+          setCodexConnections(codexResult.value)
+          setCodexInventoryLoaded(codexEnabled)
+        }
+        if (grokResult?.status === 'fulfilled') {
+          setGrokConnections(grokResult.value)
+          setGrokInventoryLoaded(true)
+        }
+        setSubscriptionInventoryError('')
+        const failure = [codexResult, grokResult].find(
+          result => result?.status === 'rejected' && !isDisabledCapabilityError(result.reason)
+        )
+        if (failure?.status === 'rejected') throw failure.reason
+      })
+      .catch(err => {
+        if (controller.signal.aborted || isDisabledCapabilityError(err)) return
+        setSubscriptionInventoryError(subscriptionInventoryMessage(err, 'subscription'))
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setSubscriptionInventoryLoading(false)
+      })
+    return () => controller.abort()
+  }, [
+    codexEnabled,
+    editingModel,
+    grokEnabled,
+    inventoryRetryNonce,
+    subscriptionCapabilities.capabilities,
+  ])
 
   useEffect(() => {
+    if (!editingModel) return
     if (!connectionRefDraft.trim() || connectionRefDraft === CODEX_UNASSIGNED_CONNECTION_KEY) {
       setCodexModels([])
       setGrokModels([])
       setGrantCatalogError('')
       return
     }
-    let cancelled = false
+    const controller = new AbortController()
     setGrantCatalogError('')
     if (providerDraft === GROK_SUBSCRIPTION_PROVIDER) {
       setCodexModels([])
-      void listGrokConnectionModels(connectionRefDraft)
+      void listGrokConnectionModels(connectionRefDraft, {
+        signal: controller.signal,
+        refresh: inventoryRetryNonce > 0,
+      })
         .then(models => {
-          if (cancelled) return
+          if (controller.signal.aborted) return
           setGrokModels(offeredCodexModelNames(models))
         })
         .catch(err => {
-          if (cancelled) return
-          setGrokModels([])
-          setModelNameDraft('')
+          if (controller.signal.aborted) return
           setGrantCatalogError(
             err instanceof Error ? err.message : 'Could not load Grok grant models'
           )
         })
       return () => {
-        cancelled = true
+        controller.abort()
       }
     }
     setGrokModels([])
-    void listCodexConnectionModels(connectionRefDraft)
+    void listCodexConnectionModels(connectionRefDraft, {
+      signal: controller.signal,
+      refresh: inventoryRetryNonce > 0,
+    })
       .then(models => {
-        if (cancelled) return
+        if (controller.signal.aborted) return
         setCodexModels(offeredCodexModelNames(models))
       })
       .catch(err => {
-        if (cancelled) return
-        setCodexModels([])
-        setModelNameDraft('')
+        if (controller.signal.aborted) return
         setGrantCatalogError(
           err instanceof Error ? err.message : 'Could not load ChatGPT grant models'
         )
       })
     return () => {
-      cancelled = true
+      controller.abort()
     }
-  }, [connectionRefDraft, providerDraft])
+  }, [connectionRefDraft, editingModel, inventoryRetryNonce, providerDraft])
 
   useEffect(() => {
     setActiveTab(parseHostTab(params.tab))
@@ -784,7 +826,7 @@ export default function HostDetailsPage() {
       options.push({
         group: 'ChatGPT subscriptions',
         value: credentialSelectValue('', connectionRefDraft),
-        label: `${connectionRefDraft} (unavailable)`,
+        label: codexInventoryLoaded ? `${connectionRefDraft} (unavailable)` : connectionRefDraft,
         meta: 'ChatGPT subscription',
         providers: [{ id: 'codex-subscription', label: 'ChatGPT Subscription' }],
       })
@@ -800,7 +842,7 @@ export default function HostDetailsPage() {
       options.push({
         group: 'Grok subscriptions',
         value: credentialSelectValue('', connectionRefDraft, GROK_SUBSCRIPTION_PROVIDER),
-        label: `${connectionRefDraft} (unavailable)`,
+        label: grokInventoryLoaded ? `${connectionRefDraft} (unavailable)` : connectionRefDraft,
         meta: 'Grok subscription',
         providers: [{ id: GROK_SUBSCRIPTION_PROVIDER, label: 'xAI Grok Subscription' }],
       })
@@ -810,6 +852,8 @@ export default function HostDetailsPage() {
     availableLlmSecrets,
     codexConnections,
     grokConnections,
+    codexInventoryLoaded,
+    grokInventoryLoaded,
     connectionRefDraft,
     currentSecretKeys,
     providerDraft,
@@ -1457,6 +1501,24 @@ export default function HostDetailsPage() {
               title="Edit model configuration"
             >
               <div className="cu-form-stack cu-form-stack--wide">
+                <SubscriptionCapabilityNotice state={subscriptionCapabilities} />
+                {subscriptionInventoryLoading ? (
+                  <p className="cu-muted" role="status">
+                    Loading subscription options…
+                  </p>
+                ) : null}
+                {subscriptionInventoryError || grantCatalogError ? (
+                  <div className="cu-banner cu-banner--error" role="alert">
+                    <span>{subscriptionInventoryError || grantCatalogError}</span>
+                    <button
+                      type="button"
+                      className="cu-btn cu-btn--ghost cu-btn--sm"
+                      onClick={() => setInventoryRetryNonce(value => value + 1)}
+                    >
+                      Retry
+                    </button>
+                  </div>
+                ) : null}
                 <LlmProviderConfig
                   provider={providerDraft}
                   model={modelNameDraft}
