@@ -8,7 +8,6 @@ import {
   exists,
   fileHash,
   objectHash,
-  privateDirectory,
   safePath,
   syncDirectory,
   syncFile,

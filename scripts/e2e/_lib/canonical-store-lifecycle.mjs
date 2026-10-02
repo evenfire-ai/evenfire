@@ -4,6 +4,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawn } from 'node:child_process'
+import { readCanonicalStoreRecord } from './canonical-store-record.cjs'
 
 export const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const HASH = /^[0-9a-f]{64}$/
@@ -100,15 +101,12 @@ export function validateBarrierDirectory(directory, runId) {
   const info = fs.lstatSync(directory)
   assert.ok(info.isDirectory() && !info.isSymbolicLink())
   assert.equal(info.mode & 0o777, 0o700)
-  const binding = JSON.parse(fs.readFileSync(path.join(resolved, 'binding.json'), 'utf8'))
+  const binding = readCanonicalStoreRecord(path.join(resolved, 'binding.json'))
   assert.equal(binding.runId, runId)
   return resolved
 }
 export function readBoundRecord(filename, expected) {
-  const info = fs.lstatSync(filename)
-  assert.ok(info.isFile() && !info.isSymbolicLink())
-  assert.equal(info.mode & 0o777, 0o600)
-  const record = JSON.parse(fs.readFileSync(filename, 'utf8'))
+  const record = readCanonicalStoreRecord(filename)
   for (const [key, value] of Object.entries(expected)) assert.equal(record[key], value)
   return record
 }
@@ -215,5 +213,8 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   else if (command === 'catalog') validateCatalog(json(args[0]), { hostUid: args[1], pvcUid: args[2] }, args[3] === 'canonical')
   else if (command === 'hold') assertLiveHold(json(args[0]), args[1])
   else if (command === 'barrier') validateBarrierDirectory(args[0], args[1])
+  else if (command === 'ack') readBoundRecord(args[0], {
+    runId: args[1], phase: args[2], sequence: Number(args[3]), uiVerified: true,
+  })
   else throw new Error('unknown lifecycle contract command')
 }

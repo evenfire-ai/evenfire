@@ -15,14 +15,41 @@
  */
 
 const COMPONENT_RE = /^\[([^\]]+)\]\s*/
+const WRITER_SINKS_SYMBOL = Symbol.for('clerum.mcpHost.logger.writerSinks')
 const SENSITIVE_KEY_RE =
   /password|secret|token|authorization|cookie|api[_-]?key|dsn|private|refresh|credential|account[_-]?id/i
 const UNSAFE_OBJECT_KEY = /^(?:__proto__|constructor|prototype)$/
 const SAFE_OBJECT_KEY = /^[A-Za-z0-9._-]{1,64}$/
 
-const originalLog = console.log.bind(console)
-const originalError = console.error.bind(console)
-const originalWarn = console.warn.bind(console)
+type ConsoleWriter = (...args: unknown[]) => void
+type ConsoleMethodName = 'log' | 'error' | 'warn'
+type GlobalWithWriterSinks = typeof globalThis & {
+  [WRITER_SINKS_SYMBOL]?: WeakMap<ConsoleWriter, ConsoleWriter>
+}
+
+const writerSinks: WeakMap<ConsoleWriter, ConsoleWriter> = (() => {
+  const globalWithWriterSinks = globalThis as GlobalWithWriterSinks
+  const existing = globalWithWriterSinks[WRITER_SINKS_SYMBOL]
+  if (existing instanceof WeakMap) return existing
+
+  const created = new WeakMap<ConsoleWriter, ConsoleWriter>()
+  globalWithWriterSinks[WRITER_SINKS_SYMBOL] = created
+  return created
+})()
+
+function resolveConsoleWriter(method: ConsoleMethodName): ConsoleWriter {
+  const current = console[method] as ConsoleWriter
+  return writerSinks.get(current) ?? current.bind(console)
+}
+
+// Vitest can re-evaluate this module while retaining the process-global
+// console. The process-wide WeakMap associates wrapper identity with its
+// legitimate sink, so re-evaluation recovers that writer instead of wrapping
+// the previous wrapper. Instrumentation that replaces a method or the whole
+// console object contributes its current method as the new sink.
+const originalLog = resolveConsoleWriter('log')
+const originalError = resolveConsoleWriter('error')
+const originalWarn = resolveConsoleWriter('warn')
 
 function isSafeObjectKey(key: string): boolean {
   return SAFE_OBJECT_KEY.test(key) && !UNSAFE_OBJECT_KEY.test(key)
@@ -72,7 +99,7 @@ function formatArgs(args: unknown[]): string {
   return args.map(a => (typeof a === 'string' ? a : JSON.stringify(redactUnknown(a)))).join(' ')
 }
 
-function emit(level: string, args: unknown[]): void {
+function emit(level: 'info' | 'warn' | 'error', args: unknown[]): void {
   const raw = formatArgs(args)
 
   // Skip empty lines and separator lines (====, ----)
@@ -105,9 +132,19 @@ function emit(level: string, args: unknown[]): void {
   writer(JSON.stringify(entry))
 }
 
-console.log = (...args: unknown[]) => emit('info', args)
-console.error = (...args: unknown[]) => emit('error', args)
-console.warn = (...args: unknown[]) => emit('warn', args)
+function installConsoleWrapper(
+  method: ConsoleMethodName,
+  level: 'info' | 'warn' | 'error',
+  writer: ConsoleWriter
+): void {
+  const wrapper: ConsoleWriter = (...args: unknown[]) => emit(level, args)
+  writerSinks.set(wrapper, writer)
+  console[method] = wrapper
+}
+
+installConsoleWrapper('log', 'info', originalLog)
+installConsoleWrapper('error', 'error', originalError)
+installConsoleWrapper('warn', 'warn', originalWarn)
 
 /** Explicit structured entry point for service code, sharing redaction and sinks. */
 function writeStructured(

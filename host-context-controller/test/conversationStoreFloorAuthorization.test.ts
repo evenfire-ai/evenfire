@@ -1,9 +1,5 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import * as k8s from '@kubernetes/client-node'
-import {
-  type CanonicalOperatorHost,
-  resolveCanonicalOperatorRequestForTesting,
-} from '../../mcp-host/src/runtime/canonicalOperatorAuthorization'
 import {
   ConversationStoreOperator,
   type ConversationStoreOperatorContext,
@@ -22,6 +18,43 @@ const HASH = 'a'.repeat(64)
 const CATALOG = 'b'.repeat(64)
 const IMAGE = `ghcr.io/evenfire/mcp-host@sha256:${'c'.repeat(64)}`
 const NOW = '2026-10-01T10:00:00.000Z'
+
+type RuntimeAuthorizationInput = {
+  requestId: string
+  operation: 'prepare'
+  action: 'verify-current'
+}
+type RuntimeAuthorizationResult = {
+  authorization: {
+    kind: 'legacy-floor-finalization-verification'
+    expectedMigrationId: string
+    expectedCurrentCatalogHash: string
+  }
+}
+type CanonicalOperatorRuntimeHost = {
+  metadata: Pick<HostCRD, 'name' | 'namespace' | 'uid' | 'resourceVersion'>
+  spec: HostCRD['spec']
+  status: HostCRD['status']
+}
+type CanonicalOperatorRuntimeModule = {
+  resolveCanonicalOperatorRequestForTesting: (
+    input: RuntimeAuthorizationInput,
+    boundary: Awaited<ReturnType<typeof producedStatus>>['boundary']
+  ) => Promise<RuntimeAuthorizationResult>
+}
+
+// Load the real resolver at runtime so HCC's typecheck does not compile the
+// independent MCP Host package. Positive and negative assertions check the
+// actual wire contract; the resolver is never mocked.
+async function resolveRuntimeAuthorization(
+  input: RuntimeAuthorizationInput,
+  boundary: Awaited<ReturnType<typeof producedStatus>>['boundary']
+) {
+  const runtime = await vi.importActual<CanonicalOperatorRuntimeModule>(
+    '../../mcp-host/src/runtime/canonicalOperatorAuthorization'
+  )
+  return runtime.resolveCanonicalOperatorRequestForTesting(input, boundary)
+}
 
 async function producedStatus() {
   const request: ConversationStoreRequest = {
@@ -188,17 +221,16 @@ async function producedStatus() {
     spec: structuredClone(job.spec!.template.spec),
     status: { phase: 'Running' },
   }
-  const runtimeHost = (): CanonicalOperatorHost =>
-    ({
-      metadata: {
-        name: host.name,
-        namespace: host.namespace,
-        uid: host.uid,
-        resourceVersion: host.resourceVersion,
-      },
-      spec: host.spec,
-      status: host.status,
-    }) as CanonicalOperatorHost
+  const runtimeHost = (): CanonicalOperatorRuntimeHost => ({
+    metadata: {
+      name: host.name,
+      namespace: host.namespace,
+      uid: host.uid,
+      resourceVersion: host.resourceVersion,
+    },
+    spec: host.spec,
+    status: host.status,
+  })
   const boundary = {
     context: { hostName: host.name, namespace: host.namespace, podUid: pod.metadata!.uid! },
     readers: {
@@ -241,12 +273,11 @@ describe('actual HCC floor outcome crosses runtime finalization authority', () =
       migrationId: MIGRATION,
       catalogHash: CATALOG,
     })
-    const result = await resolveCanonicalOperatorRequestForTesting(
+    const result = await resolveRuntimeAuthorization(
       {
         requestId: REQUEST,
         operation: 'prepare',
         action: 'verify-current',
-        storageContract: 'legacy-floor',
       },
       f.boundary
     )
@@ -261,12 +292,11 @@ describe('actual HCC floor outcome crosses runtime finalization authority', () =
     delete (f.host.status!.conversationStore!.operationOutcome as Partial<{ layoutVersion: 1 }>)
       .layoutVersion
     await expect(
-      resolveCanonicalOperatorRequestForTesting(
+      resolveRuntimeAuthorization(
         {
           requestId: REQUEST,
           operation: 'prepare',
           action: 'verify-current',
-          storageContract: 'legacy-floor',
         },
         f.boundary
       )

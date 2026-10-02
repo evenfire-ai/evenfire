@@ -19,7 +19,6 @@ import { issueMcpHostRuntimeTokens } from '../src/mcpHostRuntimeTokenIssuerClien
 import { registry } from '../src/metrics'
 import { HostCRD, type HostWorkflowControlScope } from '../src/types'
 import {
-  canonicalFixtureHostApiObject,
   canonicalFixturePvcUid,
   canonicalRuntimeHost,
   createCanonicalFixtureHostApi,

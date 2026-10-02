@@ -22,8 +22,10 @@ function preMigrationDb(): Database.Database {
 }
 
 describe('migration 015 — sessions.model_selection_revision', () => {
-  it('appends last to the ordered migration list', () => {
-    expect(migrations[migrations.length - 1]?.name).toBe(migration.name)
+  it('remains immediately before later additive migrations in the ordered list', () => {
+    const migrationIndex = migrations.findIndex(item => item.name === migration.name)
+    expect(migrationIndex).toBeGreaterThan(-1)
+    expect(migrations[migrationIndex + 1]?.name).toBe('016-canonical-store-identity')
   })
 
   it('adds a NOT NULL revision that reads 0 for every pre-existing row', () => {

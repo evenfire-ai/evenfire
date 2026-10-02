@@ -15,6 +15,10 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { promisify } from 'node:util'
+import {
+  openCanonicalStoreRecordDirectory,
+  readCanonicalStoreRecord,
+} from '../../../scripts/e2e/_lib/canonical-store-record.cjs'
 import { admitIsolationBaseDir, defaultIsolationBaseDir } from '../../src/devIsolation'
 import { openAgentsPage } from './navigationHelpers'
 
@@ -428,7 +432,14 @@ export function waitCheckpoint(
   return new Promise((resolve, reject) => {
     const filename = path.join(directory, `${sequence}.json`)
     let done = false
-    const watcher = fs.watch(directory, check)
+    const directoryDescriptor = openCanonicalStoreRecordDirectory(directory)
+    let watcher: fs.FSWatcher
+    try {
+      watcher = fs.watch(directory, check)
+    } catch (error) {
+      fs.closeSync(directoryDescriptor)
+      throw error
+    }
     const timer = setTimeout(() => finish(new Error('Runtime checkpoint deadline')), 300000)
     const failed = () => finish(new Error('Runtime gate ended before required checkpoint'))
     gate.once('exit', failed)
@@ -437,6 +448,7 @@ export function waitCheckpoint(
       if (done) return
       done = true
       watcher.close()
+      fs.closeSync(directoryDescriptor)
       clearTimeout(timer)
       gate.removeListener('exit', failed)
       gate.removeListener('error', failed)
@@ -445,11 +457,7 @@ export function waitCheckpoint(
     }
     function check() {
       try {
-        if (!fs.existsSync(filename)) return
-        const info = fs.lstatSync(filename)
-        if (!info.isFile() || info.isSymbolicLink() || (info.mode & 0o777) !== 0o600)
-          throw new Error('Unsafe checkpoint')
-        const record = JSON.parse(fs.readFileSync(filename, 'utf8')) as Checkpoint
+        const record = readCanonicalStoreRecord(filename, directoryDescriptor) as Checkpoint
         if (
           record.schemaVersion !== 1 ||
           record.runId !== runId ||
@@ -460,6 +468,7 @@ export function waitCheckpoint(
           throw new Error('Stale checkpoint binding')
         finish(undefined, record)
       } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
         finish(error as Error)
       }
     }

@@ -238,7 +238,7 @@ checkpoint() {
   [ -n "$BARRIER" ] || return 0
   printf '%s\n' "$record" > "$BARRIER/checkpoint.next"; mv "$BARRIER/checkpoint.next" "$BARRIER/${STEP}.json"
   acknowledgement="$BARRIER/${STEP}.ack.json"
-  ui_acknowledged() { [ -f "$acknowledgement" ] && node -e 'const f=require("node:fs"),a=require("node:assert/strict"),p=process.argv[1],s=f.lstatSync(p);a.ok(s.isFile()&&!s.isSymbolicLink());a.equal(s.mode&511,384);const x=JSON.parse(f.readFileSync(p));a.equal(x.runId,process.argv[2]);a.equal(x.phase,process.argv[3]);a.equal(x.sequence,Number(process.argv[4]));a.equal(x.uiVerified,true)' "$acknowledgement" "$RUN_ID" "$1" "$STEP"; }
+  ui_acknowledged() { [ -f "$acknowledgement" ] && node "$CONTRACT" ack "$acknowledgement" "$RUN_ID" "$1" "$STEP"; }
   wait_until 100 'visible UI checkpoint ack' ui_acknowledged "$1"
   if [ "$2" != hold ]; then catalog_snapshot "$SCRATCH/ui-after.json" canonical; node "$CONTRACT" post-write "$SCRATCH/catalog-baseline.json" "$SCRATCH/ui-after.json"; cp "$SCRATCH/ui-after.json" "$SCRATCH/catalog-baseline.json"; fi
 }

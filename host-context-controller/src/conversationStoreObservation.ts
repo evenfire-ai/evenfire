@@ -150,13 +150,7 @@ export function verifyConversationStoreInitOutcome(
     return { valid: false, reason: 'InitOutcomeMismatch' }
   const expectedExit = CANONICAL_STORE_REASON_EXITS[reason]
   const expectedOutcome = expectedExit === 0 ? 'ok' : 'blocked'
-  if (
-    exitCode !== undefined &&
-    (exitCode !== expectedExit || candidate.outcome !== expectedOutcome)
-  ) {
-    return { valid: false, reason: 'InitOutcomeMismatch' }
-  }
-  if (exitCode === undefined && candidate.outcome !== expectedOutcome) {
+  if (exitCode !== expectedExit || candidate.outcome !== expectedOutcome) {
     return { valid: false, reason: 'InitOutcomeMismatch' }
   }
   return {

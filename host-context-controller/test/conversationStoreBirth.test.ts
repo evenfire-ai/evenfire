@@ -193,7 +193,7 @@ describe('positive native Host birth provenance', () => {
 })
 
 describe('operator status dispatch identity', () => {
-  const state = {
+  const state: HostConversationStoreStatus = {
     request: {
       schemaVersion: 1,
       storageContract: 'canonical',
@@ -214,7 +214,7 @@ describe('operator status dispatch identity', () => {
       updatedAt: BORN,
     },
     provisioningIntent: { ...intent, recordedAt: BORN },
-  } as HostConversationStoreStatus
+  }
   it('dispatches same-generation operation, native execution and durable provenance changes', () => {
     for (const changed of [
       {
@@ -229,7 +229,7 @@ describe('operator status dispatch identity', () => {
       {
         ...state,
         execution: {
-          storageContract: 'canonical',
+          storageContract: 'canonical' as const,
           requestHash: 'a'.repeat(64),
           requestId: UID,
           hostUid: UID,

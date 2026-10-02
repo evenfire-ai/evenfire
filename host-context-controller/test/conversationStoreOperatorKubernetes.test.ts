@@ -129,7 +129,16 @@ function fixture() {
       resourceVersion: '1',
       annotations: { 'clerum.io/host-uid': HOST },
     },
-    spec: { replicas: 0 },
+    spec: {
+      replicas: 0,
+      selector: { matchLabels: { app: 'alpha' } },
+      template: {
+        metadata: { labels: { app: 'alpha' } },
+        spec: {
+          containers: [{ name: 'mcp-host', image: IMAGE }],
+        },
+      },
+    },
   } as k8s.V1Deployment
   const apps = {
     readNamespacedDeployment: vi.fn(async () => clone(deployment)),
@@ -146,21 +155,28 @@ function fixture() {
       ],
     })),
   } as unknown as k8s.AppsV1Api
-  const execProgram = vi.fn(async () =>
-    JSON.stringify({
-      proofVersion: 1,
-      storageContract: 'canonical',
-      outcome: 'ok',
-      hostUid: HOST,
-      pvcUid: PVC,
-      maintenanceId: MAINT,
-      sourcePodUid: 'source-pod',
-      requestId: REQUEST,
-      requestHash: computeConversationStoreRequestHash(request),
-      exportId: EXPORT,
-      manifestHash: HASH,
-      sourceSnapshotHash: SNAPSHOT,
-    })
+  const execProgram = vi.fn(
+    async (
+      _namespace: string,
+      _pod: string,
+      _container: string,
+      _program: string,
+      _args: string[]
+    ) =>
+      JSON.stringify({
+        proofVersion: 1,
+        storageContract: 'canonical',
+        outcome: 'ok',
+        hostUid: HOST,
+        pvcUid: PVC,
+        maintenanceId: MAINT,
+        sourcePodUid: 'source-pod',
+        requestId: REQUEST,
+        requestHash: computeConversationStoreRequestHash(request),
+        exportId: EXPORT,
+        manifestHash: HASH,
+        sourceSnapshotHash: SNAPSHOT,
+      })
   )
   const port = new ConversationStoreKubernetesOperatorPort({
     kubeConfig: {} as k8s.KubeConfig,
@@ -269,7 +285,15 @@ function fixture() {
         uid: 'source-pod',
         resourceVersion: '1',
         labels: { app: 'alpha' },
-        ownerReferences: [{ name: 'alpha-rs', uid: 'replica-set', controller: true }],
+        ownerReferences: [
+          {
+            apiVersion: 'apps/v1',
+            kind: 'ReplicaSet',
+            name: 'alpha-rs',
+            uid: 'replica-set',
+            controller: true,
+          },
+        ],
       },
       spec: {
         nodeName: 'test-node',

@@ -34,7 +34,8 @@ run_rejected api-host ui-uid api-pvc 30000000-0000-4000-8000-000000000001
 run_rejected api-host api-uid ui-pvc 30000000-0000-4000-8000-000000000001
 run_rejected api-host api-uid api-pvc 30000000-0000-4000-8000-000000000002
 # API/UI and lifecycle evidence predicates are behavioral, with falsifiers.
-node --test "$ROOT/scripts/tests/canonical-store-lifecycle-contract.test.mjs"
+node --test "$ROOT/scripts/tests/canonical-store-lifecycle-contract.test.mjs" \
+  "$ROOT/scripts/tests/canonical-store-record.test.mjs"
 python3 - "$ROOT" <<'CHECK'
 import sys
 from pathlib import Path

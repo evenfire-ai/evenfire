@@ -12,8 +12,10 @@
  *  5. Non-cancel transition — abort NOT called
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { ConversationState } from '../../core/types'
 import { TaskLifecycle } from '../../lifecycle/taskLifecycle'
 import { MessageQueue } from '../../queue/messageQueue'
+import { serializeSessionKey } from '../../session/types'
 import { AgentStateMachine } from '../stateMachine'
 
 // ── mocks ─────────────────────────────────────────────────────────────────────
@@ -101,10 +103,15 @@ describe('AgentStateMachine cancel subscriber', () => {
   })
 
   // ── 2. Waiting-approval branch ──────────────────────────────────────────────
-  it('waiting_approval branch: clears timer, approvalMap, pending_approval, releases session, aborts, deletes executor', () => {
+  it('waiting_approval branch: clears durable approval before cancel and session release', async () => {
     const timerId = setTimeout(() => {}, 60_000)
 
     const task = makeTask('t2')
+    const sessionKey = serializeSessionKey({
+      userId: task.sourceMessage.sender,
+      channelType: task.sourceMessage.channelType,
+      channelId: task.sourceMessage.channelId,
+    })
     const mockExecutor = {
       abort: vi.fn(),
       pendingApproval: {
@@ -120,20 +127,58 @@ describe('AgentStateMachine cancel subscriber', () => {
     ;(agent as any).activeExecutors.set('t2', mockExecutor)
     ;(agent as any).approvalMap.set('r2', { taskId: 't2', timerId, registeredAt: new Date() })
 
-    const cancelSpy = vi.spyOn(agent.getConversationManager(), 'cancelTurnBySessionKey')
-    const releaseSpy = vi.spyOn(agent as any, 'releaseSessionForTask').mockImplementation(() => {})
+    const conversationManager = agent.getConversationManager()
+    const conversation = await conversationManager.getOrCreate(sessionKey)
+    await conversationManager.startTurn(conversation, 'work requiring approval', 't2')
+    await conversationManager.suspendForApproval(conversation, {
+      request_id: 'r2',
+      tool_name: 'some_tool',
+      tool_call_id: 'c2',
+      parameters: {},
+      description: 'test',
+      context_snapshot: [],
+    })
+
+    const cleanupOrder: string[] = []
+    const originalClear = conversationManager.clearPendingApproval.bind(conversationManager)
+    const clearSpy = vi
+      .spyOn(conversationManager, 'clearPendingApproval')
+      .mockImplementation(async key => {
+        await originalClear(key)
+        cleanupOrder.push('clear-ack')
+      })
+    const originalCancel = conversationManager.cancelTurnBySessionKey.bind(conversationManager)
+    const cancelSpy = vi
+      .spyOn(conversationManager, 'cancelTurnBySessionKey')
+      .mockImplementation(key => {
+        originalCancel(key)
+        cleanupOrder.push('cancel-turn')
+      })
+    const originalRelease = (agent as any).releaseSessionForTask.bind(agent)
+    const releaseSpy = vi.spyOn(agent as any, 'releaseSessionForTask').mockImplementation(task => {
+      originalRelease(task)
+      cleanupOrder.push('release-session')
+    })
 
     lc.register(task as any)
     lc.transition('t2', 'processing', 'dispatched')
     lc.transition('t2', 'waiting_approval', 'natural')
     lc.transition('t2', 'cancelled', 'user_requested')
+    const durableClear = (agent as any).clearsInFlight.get(sessionKey) as Promise<void>
+    expect(durableClear).toBeDefined()
+    await durableClear
 
     // approvalMap entry removed
     expect((agent as any).approvalMap.has('r2')).toBe(false)
-    // conversationManager.cancelTurnBySessionKey called (BUG-9: was clearPendingApproval)
-    expect(cancelSpy).toHaveBeenCalled()
-    // session released
-    expect(releaseSpy).toHaveBeenCalled()
+    // Durable approval resolution must ACK before BUG-9 turn cancellation and release.
+    expect(cleanupOrder).toEqual(['clear-ack', 'cancel-turn', 'release-session'])
+    expect(cancelSpy).toHaveBeenCalledOnce()
+    expect(clearSpy).toHaveBeenCalledOnce()
+    expect(releaseSpy).toHaveBeenCalledOnce()
+    expect(conversation.state).toBe(ConversationState.Idle)
+    expect(conversation.pending_approval).toBeUndefined()
+    expect(conversation.activeTaskId).toBeUndefined()
+    expect(conversation.turns.at(-1)?.response).toBe('[Task cancelled by user before completion]')
     // abort called
     expect(mockExecutor.abort).toHaveBeenCalledOnce()
     // executor deleted (no finally will run for a suspended executor)

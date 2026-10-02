@@ -144,22 +144,6 @@ interface CanonicalStoreDeploymentInput {
   maintenanceId?: string
 }
 
-/**
- * Runtime coordination env (#825): CLERUM_CANONICAL_STATE_DIR names the PVC
- * state directory in legacy AND canonical templates (stateful/Desktop derive it
- * from the root workspace mount; stateless use the dedicated state mount);
- * CLERUM_CANONICAL_POD_UID is the downward-API pod identity for every admitted
- * template while legacy CLERUM_POD_UID stays stateless-only; the Host/PVC
- * binding envs enable the runtime fence only when both the explicit state dir
- * and binding exist.
- */
-const CONVERSATION_STORE_COORDINATION_ENV_NAMES = [
-  'CLERUM_CANONICAL_STATE_DIR',
-  'CLERUM_CANONICAL_POD_UID',
-  'CLERUM_HOST_UID',
-  'CLERUM_PVC_UID',
-] as const
-
 /** Result of the per-Host FIRST canonical rollout gate (#825 section 5.6). */
 type CanonicalRolloutGateDecision =
   | { status: 'proceed' }
