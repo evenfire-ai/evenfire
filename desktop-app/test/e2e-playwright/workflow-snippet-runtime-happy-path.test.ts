@@ -33,6 +33,8 @@ import {
 const CONTROL_API = process.env.CONTROL_API_BASE_URL || 'http://127.0.0.1:8090'
 const CONTROL_UI =
   process.env.CONTROL_UI_BASE_URL || process.env.CONTROL_UI_URL || 'http://127.0.0.1:3000'
+const CONTROL_UI_ORIGIN = new URL(CONTROL_UI).origin
+const CONTROL_UI_API = `${CONTROL_UI_ORIGIN}/control-api`
 const ADMIN_USERNAME = process.env.E2E_ADMIN_USERNAME || process.env.ADMIN_USER || 'admin'
 const ADMIN_PASSWORD =
   process.env.E2E_ADMIN_PASSWORD || process.env.ADMIN_PASSWORD || process.env.ADMIN_PASS
@@ -50,7 +52,6 @@ const RUN_MAX_DURATION_SECONDS = 600
 const RUN_TTL_SECONDS_AFTER_FINISHED = 7200
 const REGISTRY_ENTRY_VERSION = '1.0.0'
 
-let controlAdminToken = ''
 let publishedRegistryEntryName = ''
 
 type K8sWorkflowRecipe = {
@@ -257,9 +258,10 @@ function buildSnippetRecipeManifest(name: string): Record<string, unknown> {
   }
 }
 
-async function controlUiLogin(page: Page): Promise<string> {
+async function controlUiLogin(page: Page): Promise<void> {
   const password = requireAdminPassword()
-  await page.goto(CONTROL_UI)
+  // E2E_GUARDIAN_ENTRY_POINT: enter the public Control UI root before UI login.
+  await page.goto('/')
   const usernameInput = page.getByLabel('Username')
   const passwordInput = page.getByLabel('Password')
   await expect(usernameInput).toBeVisible({ timeout: 20_000 })
@@ -273,9 +275,13 @@ async function controlUiLogin(page: Page): Promise<string> {
   await expect(page.getByRole('link', { name: 'Installed Plugins', exact: true })).toBeVisible({
     timeout: 25_000,
   })
-  const token = await page.evaluate(() => localStorage.getItem('controlUiAdminToken') ?? '')
-  expect(token, 'Control UI should persist admin token after login').toBeTruthy()
-  return token
+  const session = await page.request.get(`${CONTROL_UI_API}/api/v1/admin/auth/me`)
+  expect(session.status(), 'Control UI login should establish an authenticated session').toBe(200)
+  const authenticated = (await session.json()) as { me?: { id?: string } }
+  expect(
+    authenticated.me?.id,
+    'Control UI session should identify the signed-in admin'
+  ).toBeTruthy()
 }
 
 async function openInstalledPluginsFromSidebar(page: Page): Promise<void> {
@@ -347,13 +353,13 @@ async function grantPluginUserFromDetail(page: Page, userEmail: string): Promise
   await expect(removeMemberAccess).toBeHidden({ timeout: 10_000 })
 }
 
-async function publishSnippetRegistryEntry(adminToken: string, recipeName: string): Promise<void> {
+async function publishSnippetRegistryEntry(page: Page, recipeName: string): Promise<void> {
   // Plugin publishing is intentionally absent from ControlUI. This package
-  // fixture is setup only; installation itself remains a visible user journey.
-  const response = await apiRequest(
-    'POST',
-    `${CONTROL_API}/api/v1/admin/registry/entries`,
-    JSON.stringify({
+  // fixture reuses the browser's UI-created session; installation itself
+  // remains a visible user journey.
+  const response = await page.request.post(`${CONTROL_UI_API}/api/v1/admin/registry/entries`, {
+    headers: { Origin: CONTROL_UI_ORIGIN },
+    data: {
       name: recipeName,
       version: REGISTRY_ENTRY_VERSION,
       entryType: 'recipe',
@@ -366,11 +372,10 @@ async function publishSnippetRegistryEntry(adminToken: string, recipeName: strin
       configCreatorTag: 'community',
       visibility: 'private',
       recipe: JSON.stringify(buildSnippetRecipeManifest(recipeName)),
-    }),
-    { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' }
-  )
-  expect(response.status, `publish snippet plugin package: ${response.body}`).toBe(201)
-  const published = JSON.parse(response.body) as { name?: unknown }
+    },
+  })
+  expect(response.status(), 'publish snippet plugin package').toBe(201)
+  const published = (await response.json()) as { name?: unknown }
   expect(published.name, 'published plugin package should return its scoped name').toContain(
     recipeName
   )
@@ -454,10 +459,9 @@ async function installRecipeFromControlUi(
   page: Page,
   recipeName: string,
   userEmail: string
-): Promise<string> {
-  const adminToken = await controlUiLogin(page)
-  controlAdminToken = adminToken
-  await publishSnippetRegistryEntry(adminToken, recipeName)
+): Promise<void> {
+  await controlUiLogin(page)
+  await publishSnippetRegistryEntry(page, recipeName)
 
   await openInstalledPluginsFromSidebar(page)
   await page.getByRole('button', { name: 'Install Plugin', exact: true }).click()
@@ -500,7 +504,6 @@ async function installRecipeFromControlUi(
   await grantPluginUserFromDetail(page, userEmail)
   assertWorkflowRecipeSecretMaterialized(recipeName)
   assertInstalledRecipeDoesNotContainSecretValues(recipeName)
-  return adminToken
 }
 
 function assertWorkflowRecipeSecretMaterialized(recipeName: string): void {
@@ -575,18 +578,15 @@ async function waitForRecipeWorkflowPhase(
   return last
 }
 
-async function waitForAdminRecipeActive(adminToken: string, name: string): Promise<void> {
+async function waitForAdminRecipeActive(page: Page, name: string): Promise<void> {
   await expect
     .poll(
       async () => {
-        const res = await apiRequest(
-          'GET',
-          `${CONTROL_API}/api/v1/admin/workflows/${RECIPE_NS}/${name}`,
-          undefined,
-          { Authorization: `Bearer ${adminToken}` }
+        const res = await page.request.get(
+          `${CONTROL_UI_API}/api/v1/admin/workflows/${RECIPE_NS}/${name}`
         )
-        if (res.status !== 200) return `http-${res.status}`
-        const parsed = JSON.parse(res.body) as { status?: { phase?: string } }
+        if (res.status() !== 200) return `http-${res.status()}`
+        const parsed = (await res.json()) as { status?: { phase?: string } }
         return parsed.status?.phase ?? ''
       },
       {
@@ -1023,31 +1023,37 @@ function cleanupRecipe(name: string): void {
   }
 }
 
-async function cleanupPublishedRegistryEntry(): Promise<void> {
-  if (!publishedRegistryEntryName || !controlAdminToken) return
-  const response = await apiRequest(
-    'DELETE',
-    `${CONTROL_API}/api/v1/admin/registry/entries/${encodeURIComponent(
+async function cleanupPublishedRegistryEntry(page: Page): Promise<void> {
+  if (!publishedRegistryEntryName) return
+  const response = await page.request.delete(
+    `${CONTROL_UI_API}/api/v1/admin/registry/entries/${encodeURIComponent(
       publishedRegistryEntryName
     )}/versions/${encodeURIComponent(REGISTRY_ENTRY_VERSION)}`,
-    undefined,
-    { Authorization: `Bearer ${controlAdminToken}` }
+    { headers: { Origin: CONTROL_UI_ORIGIN } }
   )
-  expect([200, 204, 404]).toContain(response.status)
+  expect([200, 204, 404]).toContain(response.status())
+  publishedRegistryEntryName = ''
 }
 
 test.describe('Layer 3A snippet runtime user flow', () => {
   test.slow()
   test.describe.configure({ timeout: 900_000 })
+  test.use({ baseURL: CONTROL_UI })
 
   test.beforeAll(async () => {
     ensureWorkflowTriggerFixturesSeeded()
     await clearSession()
   })
 
-  test.afterAll(async () => {
+  test.afterEach(async ({ page }) => {
+    // Clean up through the shared UI session before its browser context is disposed.
     cleanupRecipe(RECIPE_NAME)
-    await cleanupPublishedRegistryEntry()
+    await cleanupPublishedRegistryEntry(page)
+  })
+
+  test.afterAll(() => {
+    // Keep this idempotent second pass for failures during beforeAll or fixture setup.
+    cleanupRecipe(RECIPE_NAME)
   })
 
   test('installs in Control UI, triggers in Desktop App, and downloads run-scoped snippet artifact', async ({
@@ -1058,9 +1064,9 @@ test.describe('Layer 3A snippet runtime user flow', () => {
       apiRequest('GET', `${EXT_API}/health`).then(res => expect(res.status).toBe(200)),
     ])
 
-    const adminToken = await installRecipeFromControlUi(page, RECIPE_NAME, E2E_EMAIL)
+    await installRecipeFromControlUi(page, RECIPE_NAME, E2E_EMAIL)
     await waitForRecipeWorkflowPhase(RECIPE_NAME, 'completed', 300_000)
-    await waitForAdminRecipeActive(adminToken, RECIPE_NAME)
+    await waitForAdminRecipeActive(page, RECIPE_NAME)
 
     const { userId, userToken } = await loginAs(E2E_EMAIL)
     const { app, page: desktopPage } = await launchAndLogin(E2E_EMAIL)
