@@ -515,7 +515,10 @@ describe('image source identity compatibility (#650)', () => {
     expect(imagePartsOf(binding.completeWithTools[0].messages)).toHaveLength(4)
     expect(
       imagePartsOf(binding.completeWithTools[0].messages).every(
-        part => part.source?.kind === 'tool' || part.source?.kind === 'attachment'
+        part =>
+          part.source?.kind === 'tool' ||
+          part.source?.kind === 'attachment' ||
+          part.source?.kind === 'gfs'
       )
     ).toBe(true)
     expect(messages).toEqual(snapshot)

@@ -167,7 +167,10 @@ async function readManagedImageBytes(
 ): Promise<Buffer> {
   const target = await resolveManagedImagePath(receipt, callerWorkspacePath)
 
-  const handle = await fs.open(target, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW)
+  const handle = await fs.open(
+    target,
+    fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_EXCL
+  )
   try {
     const stat = await handle.stat()
     if (
@@ -191,7 +194,10 @@ async function readManagedImagePrefix(
   callerWorkspacePath: string
 ): Promise<Buffer> {
   const target = await resolveManagedImagePath(receipt, callerWorkspacePath)
-  const handle = await fs.open(target, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW)
+  const handle = await fs.open(
+    target,
+    fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_EXCL
+  )
   try {
     const prefix = Buffer.alloc(16)
     const { bytesRead } = await handle.read(prefix, 0, prefix.length, 0)
@@ -526,10 +532,11 @@ export function buildGfsReadTools(
                   reason: 'workspace_delivery_is_required_for_this_file_size',
                 })
               }
-              recordGfsDownloadAdmission('inline_attempt')
-              if (expectedVersion === undefined) expectedVersion = metadata.source.version
             }
           }
+          recordGfsDownloadAdmission('inline_attempt')
+          if (expectedVersion === undefined && snapshot?.source.version !== undefined)
+            expectedVersion = snapshot.source.version
           file = await client.read(target as { drive: string; resourceId: string }, {
             ...callOptions(options),
             timeoutMs: options?.timeoutMs,

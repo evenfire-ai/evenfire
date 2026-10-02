@@ -77,7 +77,7 @@ describe('readGfsContent expectedVersion (#666)', () => {
   )
 
   it.each([
-    ['grew past the file limit', { bytes: VISUAL_INPUT_LIMITS.fileBytes + 1 }, 'limit_exceeded'],
+    ['grew past the file limit', { bytes: GFS_FILE_LIMITS.maxFileBytes + 1 }, 'limit_exceeded'],
     ['became a directory', { kind: 'directory' }, 'unsupported_format'],
   ])(
     'reports a pinned read as version_conflict when the newer version %s',

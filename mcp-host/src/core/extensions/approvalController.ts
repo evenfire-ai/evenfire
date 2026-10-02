@@ -18,7 +18,7 @@
 import { LoopController } from '../interfaces'
 import { ChatMessage, PendingApproval, ToolDefinition } from '../types'
 import type { Conversation } from '../types'
-import { getMcpServerPrefix, isMcpToolName } from './mcpApprovalGateController'
+import { getMcpServerPrefix } from './mcpApprovalGateController'
 
 /**
  * Decorator that checks auto_approved_tools before delegating to base controller.
