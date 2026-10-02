@@ -1163,6 +1163,19 @@ minikube-deploy-evenfire-registry: ## Build + deploy evenfire-registry side-by-s
 	   echo "skip: scripts/minikube/deploy-evenfire-registry.sh not present (sibling repo not included in this distribution)"; \
 	 fi
 
+.PHONY: minikube-remove-evenfire-registry minikube-remove-evenfire-registry-body
+minikube-remove-evenfire-registry: ## Remove optional local Registry workloads; retain data and centralized settings
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- \
+		$(MAKE) --no-print-directory minikube-remove-evenfire-registry-body
+
+minikube-remove-evenfire-registry-body:
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" CONTROL_API_REAL_PG_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK=true T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		bash scripts/minikube/remove-evenfire-registry.sh
+
 .PHONY: minikube-seed-registry
 minikube-seed-registry: ## Seed registry catalog — run seed from your registry server repo
 	@echo "Registry seeding lives in the registry server repo (evenfire-registry or your own implementation)."

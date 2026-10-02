@@ -9,6 +9,7 @@ import {
   HOST_ACCESS_REVOKED_MESSAGE,
   boundedErrorExcerpt,
   hostAccessDenialMessage,
+  rpcTokenMintRevocationMessage,
 } from '../upstreamErrors.js'
 
 vi.mock('../config.js', () => ({
@@ -295,5 +296,137 @@ describe('upstreamErrors helpers', () => {
     expect(hostAccessDenialMessage(403, 'host_access_revoked')).toBeNull()
     expect(hostAccessDenialMessage(403, '{"error":"host_access_revoked"}')).toBeNull()
     expect(hostAccessDenialMessage(403, '')).toBeNull()
+  })
+})
+
+describe('RPC token mint revocation coverage', () => {
+  const requested = ['host-a', 'host-b']
+  const validBody = JSON.stringify({
+    error: 'host_access_denied',
+    code: 'host_access_revoked',
+    revokedHostRefs: requested,
+  })
+  const bodyWith = (fields: Record<string, unknown>) =>
+    JSON.stringify({
+      error: 'host_access_denied',
+      code: 'host_access_revoked',
+      revokedHostRefs: requested,
+      ...fields,
+    })
+
+  it('D1-full: confirms coverage of every requested Host', () => {
+    expect(rpcTokenMintRevocationMessage(403, validBody, requested)).toBe(
+      HOST_ACCESS_REVOKED_MESSAGE
+    )
+  })
+
+  const negatives: Array<{
+    name: string
+    status: number
+    body: string
+    requested: unknown
+  }> = [
+    {
+      name: 'partial coverage',
+      status: 403,
+      body: bodyWith({ revokedHostRefs: ['host-a'] }),
+      requested,
+    },
+    {
+      name: 'absent code',
+      status: 403,
+      body: JSON.stringify({ error: 'host_access_denied', revokedHostRefs: requested }),
+      requested,
+    },
+    { name: 'wrong code', status: 403, body: bodyWith({ code: 'host_access_denied' }), requested },
+    {
+      name: 'reserved words only in error',
+      status: 403,
+      body: JSON.stringify({ error: 'host_access_revoked', revokedHostRefs: requested }),
+      requested,
+    },
+    {
+      name: 'reserved words only in message',
+      status: 403,
+      body: JSON.stringify({ message: 'host_access_revoked', revokedHostRefs: requested }),
+      requested,
+    },
+    {
+      name: 'reserved words in text',
+      status: 403,
+      body: 'Forbidden: host_access_revoked',
+      requested,
+    },
+    { name: 'malformed JSON', status: 403, body: '{"code":"host_access_revoked"', requested },
+    { name: 'null JSON', status: 403, body: 'null', requested },
+    { name: 'array JSON', status: 403, body: '[' + validBody + ']', requested },
+    { name: 'string JSON', status: 403, body: JSON.stringify('host_access_revoked'), requested },
+    { name: 'number JSON', status: 403, body: '42', requested },
+    {
+      name: 'missing revoked list',
+      status: 403,
+      body: JSON.stringify({ error: 'host_access_denied', code: 'host_access_revoked' }),
+      requested,
+    },
+    {
+      name: 'non-array revoked list',
+      status: 403,
+      body: bodyWith({ revokedHostRefs: 'host-a' }),
+      requested,
+    },
+    {
+      name: 'non-string revoked element',
+      status: 403,
+      body: bodyWith({ revokedHostRefs: ['host-a', 'host-b', 42] }),
+      requested,
+    },
+    { name: 'empty revoked list', status: 403, body: bodyWith({ revokedHostRefs: [] }), requested },
+    { name: '401 status', status: 401, body: validBody, requested },
+    { name: '500 status', status: 500, body: validBody, requested },
+    { name: 'empty requested set', status: 403, body: validBody, requested: [] },
+    { name: 'missing requested set', status: 403, body: validBody, requested: undefined },
+    { name: 'non-array requested set', status: 403, body: validBody, requested: 'host-a' },
+    {
+      name: 'blank requested ref',
+      status: 403,
+      body: bodyWith({ revokedHostRefs: ['host-a', ' '] }),
+      requested: ['host-a', ' '],
+    },
+    {
+      name: 'wildcard requested ref',
+      status: 403,
+      body: bodyWith({ revokedHostRefs: ['host-a', '*'] }),
+      requested: ['host-a', '*'],
+    },
+    { name: 'non-string requested ref', status: 403, body: validBody, requested: ['host-a', 42] },
+  ]
+
+  it.each(negatives)(
+    'D1-negative: rejects $name with a same-test valid mint witness',
+    ({ status, body, requested: refs }) => {
+      expect(rpcTokenMintRevocationMessage(403, validBody, requested)).toBe(
+        HOST_ACCESS_REVOKED_MESSAGE
+      )
+      expect(rpcTokenMintRevocationMessage(status, body, refs)).toBeNull()
+    }
+  )
+
+  it('D1-canonical: trims and deduplicates requested refs before checking complete coverage', () => {
+    expect(rpcTokenMintRevocationMessage(403, validBody, requested)).toBe(
+      HOST_ACCESS_REVOKED_MESSAGE
+    )
+    expect(
+      rpcTokenMintRevocationMessage(403, validBody, [' host-b ', 'host-a', 'host-b', ' host-a '])
+    ).toBe(HOST_ACCESS_REVOKED_MESSAGE)
+  })
+
+  it('D2-legacy: recognizes the correct mint body using the published classifier', () => {
+    expect(hostAccessDenialMessage(403, validBody)).toBe(HOST_ACCESS_REVOKED_MESSAGE)
+  })
+
+  it('D2-mint: recognizes the correct mint body with requested-Host validation', () => {
+    expect(rpcTokenMintRevocationMessage(403, validBody, requested)).toBe(
+      HOST_ACCESS_REVOKED_MESSAGE
+    )
   })
 })

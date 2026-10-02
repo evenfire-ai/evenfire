@@ -37,6 +37,7 @@ import {
 import { getAccessToken } from '../src/oauth/tokenHelper.js'
 import { type McpServerResource, normalizeMcpServerOwnerDecl } from '../src/routes/mcpOauth.js'
 import { MockGateway } from './mockGateway.js'
+import { waitForDatabaseConnectionsToClose } from './realPostgresCleanup.ts'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
@@ -84,7 +85,7 @@ describeRealPostgres('oauth reactive refresh — row-lock serialization (real Po
       await dbPool?.end()
       await Promise.all(clientClosures)
       if (adminPool) {
-        // A remaining connection must fail DROP rather than be force-terminated.
+        await waitForDatabaseConnectionsToClose(adminPool, database)
         await adminPool.query(`DROP DATABASE IF EXISTS "${database.replace(/"/g, '""')}"`)
       }
     } finally {

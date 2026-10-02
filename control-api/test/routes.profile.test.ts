@@ -16,6 +16,7 @@ const svc = vi.hoisted(() => ({
   findMembership: vi.fn(),
   getCurrentTeam: vi.fn(),
   getMe: vi.fn(),
+  getReachableAgentNames: vi.fn(),
   getTeamAgents: vi.fn(),
   getTeamContexts: vi.fn(),
   getUserAgents: vi.fn(),
@@ -125,6 +126,10 @@ describe('routes/profile', () => {
 
   beforeEach(() => {
     Object.values(svc).forEach(fn => fn.mockReset())
+    svc.getReachableAgentNames.mockImplementation(async (userId: string) => ({
+      userId,
+      agentNames: ['pro-agent'],
+    }))
     Object.values(rpcMock).forEach(fn => fn.mockReset())
     Object.values(googleAuthMock).forEach(fn => fn.mockReset())
     Object.values(sandboxUiScopeMock).forEach(fn => fn.mockReset())
@@ -874,6 +879,7 @@ describe('routes/profile', () => {
       .expect(403)
       .expect({ error: 'sandbox_ui_scope_required' })
 
+    expect(svc.getReachableAgentNames).not.toHaveBeenCalled()
     expect(sandboxUiScopeMock.userHasUiBearingRecipeAccess).not.toHaveBeenCalled()
     expect(rpcMock.issueRpcAccessToken).not.toHaveBeenCalled()
   })
@@ -900,6 +906,7 @@ describe('routes/profile', () => {
       .expect(403)
       .expect({ error: 'sandbox_ui_host_ref_required' })
 
+    expect(svc.getReachableAgentNames).not.toHaveBeenCalled()
     expect(sandboxUiScopeMock.userHasUiBearingRecipeAccess).not.toHaveBeenCalled()
     expect(rpcMock.issueRpcAccessToken).not.toHaveBeenCalled()
   })
@@ -926,11 +933,12 @@ describe('routes/profile', () => {
       .expect(403)
       .expect({ error: 'sandbox_ui_host_ref_exclusive' })
 
+    expect(svc.getReachableAgentNames).not.toHaveBeenCalled()
     expect(sandboxUiScopeMock.userHasUiBearingRecipeAccess).not.toHaveBeenCalled()
     expect(rpcMock.issueRpcAccessToken).not.toHaveBeenCalled()
   })
 
-  it('rejects mixed, missing, and wildcard direct host grants for teamless sessions', async () => {
+  it('C8: rejects mixed, missing, and wildcard direct host grants for teamless sessions', async () => {
     const sessionToken = signExternalSessionToken({
       userId: 'user-teamless',
       email: 'teamless@example.com',
@@ -939,6 +947,10 @@ describe('routes/profile', () => {
       authGeneration: 1,
     })
     svc.getUserAgents.mockResolvedValue({
+      userId: 'user-teamless',
+      agentNames: ['pro-agent'],
+    })
+    svc.getReachableAgentNames.mockResolvedValue({
       userId: 'user-teamless',
       agentNames: ['pro-agent'],
     })
@@ -956,6 +968,9 @@ describe('routes/profile', () => {
       .expect(403)
       .expect({ error: 'direct_host_access_required' })
 
+    expect(svc.getUserAgents).toHaveBeenCalledWith('user-teamless')
+    expect(svc.getReachableAgentNames).not.toHaveBeenCalled()
+
     await withInternalServiceAuth(request(app).post('/external/rpc/token'))
       .send({
         sessionToken,
@@ -965,6 +980,8 @@ describe('routes/profile', () => {
       .expect(403)
       .expect({ error: 'invalid_host_refs' })
 
+    expect(svc.getUserAgents).toHaveBeenCalledTimes(1)
+    expect(svc.getReachableAgentNames).not.toHaveBeenCalled()
     expect(rpcMock.issueRpcAccessToken).not.toHaveBeenCalled()
   })
 

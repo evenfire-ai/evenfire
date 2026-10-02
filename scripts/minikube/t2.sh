@@ -99,6 +99,8 @@ run_t0() {
     bash -c "$T2_T0_COMMAND"
   fi
   bash "$T2_PROJECT_DIR/scripts/tests/test-minikube-t2-contract.sh"
+  bash "$T2_PROJECT_DIR/scripts/tests/test-minikube-registry-optin.sh"
+  bash "$T2_PROJECT_DIR/scripts/tests/test-minikube-registry-cleanup.sh"
   bash "$T2_PROJECT_DIR/scripts/tests/test-minikube-t2-setup-handoff.sh"
   T2_T0_STATUS=PASS
   t2_evidence_write T0 PASS "syntax, ShellCheck when available, affected package test/build/typecheck, contract, and diff checks passed; duration=$((SECONDS - phase_started_seconds))s"
