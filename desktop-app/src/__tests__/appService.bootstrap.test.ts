@@ -503,6 +503,52 @@ describe('AppService invitation configuration lookup', () => {
     expect(getMe).toHaveBeenCalledTimes(1)
   })
 
+  it('keeps the completed logout generation when an expired restore finds no saved token', async () => {
+    const configPath = await createTempConfigPath('clerum-desktop-restore-after-logout')
+    await fs.writeFile(
+      configPath,
+      JSON.stringify({
+        externalRestApiBaseUrl: 'https://api.example.com',
+        rpcProxyBaseUrl: 'https://rpc.example.com',
+        appName: 'Example',
+      })
+    )
+    process.env.CLERUM_DESKTOP_CONFIG_PATH = configPath
+    process.env.EXTERNAL_REST_API_BASE_URL = 'https://api.example.com'
+    process.env.RPC_PROXY_BASE_URL = 'https://rpc.example.com'
+    vi.resetModules()
+
+    const [{ AppService }, { getActiveEnvKey }] = await Promise.all([
+      import('../appService.js'),
+      import('../config.js'),
+    ])
+    const service = new AppService() as unknown as {
+      getSessionGeneration: () => number
+      getSessionState: () => Promise<unknown>
+      logout: () => Promise<number>
+      savedSessionRestoreAttemptedEnvKey: string
+      savedSessionRestoreAttemptedAtMs: number
+      tokenStore: {
+        clearSessionToken: ReturnType<typeof vi.fn>
+        getSessionToken: ReturnType<typeof vi.fn>
+      }
+    }
+    service.tokenStore = {
+      clearSessionToken: vi.fn().mockResolvedValue(undefined),
+      getSessionToken: vi.fn().mockResolvedValue(null),
+    } as never
+
+    const logoutGeneration = await service.logout()
+    service.savedSessionRestoreAttemptedEnvKey = getActiveEnvKey()
+    service.savedSessionRestoreAttemptedAtMs = 0
+
+    await expect(service.getSessionState()).resolves.toEqual({ authenticated: false, me: null })
+    expect(service.getSessionGeneration()).toBe(logoutGeneration)
+    expect(service.tokenStore.getSessionToken).toHaveBeenCalledWith(getActiveEnvKey(), {
+      legacyEnvKeys: expect.any(Array),
+    })
+  })
+
   it('clears a saved token when startup session restore is rejected by the API', async () => {
     const configPath = await createTempConfigPath('clerum-desktop-restore-api')
     await fs.writeFile(

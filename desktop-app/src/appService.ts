@@ -1506,14 +1506,20 @@ export class AppService {
       token = await this.tokenStore.getSessionToken(envKey, { legacyEnvKeys })
     } catch (error) {
       console.warn('[AppService] Failed to read the saved session token:', error)
-      if (this.sessionGeneration === restoreGeneration) {
+      if (
+        this.sessionGeneration === restoreGeneration &&
+        (this.sessionToken !== null || this.me !== null)
+      ) {
         this.clearAuthenticatedSessionState()
       }
       return { authenticated: false, me: null }
     }
     if (this.logoutInProgress) return { authenticated: false, me: null }
     if (!token) {
-      if (this.sessionGeneration === restoreGeneration) {
+      if (
+        this.sessionGeneration === restoreGeneration &&
+        (this.sessionToken !== null || this.me !== null)
+      ) {
         this.clearAuthenticatedSessionState()
       }
       return { authenticated: false, me: null }
