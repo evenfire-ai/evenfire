@@ -34,6 +34,39 @@ type ApiRequestOptions = {
   silentUnauthorized?: boolean
 }
 
+const PROFILE_LOGOUT_UNCONFIRMED_KEY = 'profile_logout_unconfirmed'
+let logoutUnconfirmedInMemory = false
+
+function hasUnconfirmedLogout(): boolean {
+  if (typeof window === 'undefined') return false
+  if (logoutUnconfirmedInMemory) return true
+  try {
+    return window.localStorage.getItem(PROFILE_LOGOUT_UNCONFIRMED_KEY) === 'true'
+  } catch {
+    return false
+  }
+}
+
+function markLogoutUnconfirmed(): void {
+  if (typeof window === 'undefined') return
+  logoutUnconfirmedInMemory = true
+  try {
+    window.localStorage.setItem(PROFILE_LOGOUT_UNCONFIRMED_KEY, 'true')
+  } catch {
+    // Auth state still signs out in memory when browser storage is unavailable.
+  }
+}
+
+function clearUnconfirmedLogout(): void {
+  if (typeof window === 'undefined') return
+  logoutUnconfirmedInMemory = false
+  try {
+    window.localStorage.removeItem(PROFILE_LOGOUT_UNCONFIRMED_KEY)
+  } catch {
+    // A successful login remains usable for the current page even if storage is unavailable.
+  }
+}
+
 export class AuthExpiredError extends Error {
   silent = true
   status = 401
@@ -104,9 +137,17 @@ export function clearToken(): void {
   if (typeof window === 'undefined') return
   // Clear legacy browser-readable storage for users upgrading from the old
   // token flow. The active profile session is now an HttpOnly cookie.
-  window.localStorage.removeItem(EXTERNAL_SESSION_TOKEN_KEY)
-  window.localStorage.removeItem(EXTERNAL_SESSION_TOKEN_EXPIRES_AT_KEY)
-  document.cookie = `${EXTERNAL_SESSION_TOKEN_KEY}=; path=/; max-age=0; SameSite=Lax`
+  try {
+    window.localStorage.removeItem(EXTERNAL_SESSION_TOKEN_KEY)
+    window.localStorage.removeItem(EXTERNAL_SESSION_TOKEN_EXPIRES_AT_KEY)
+  } catch {
+    // Continue local logout even when browser storage is unavailable.
+  }
+  try {
+    document.cookie = `${EXTERNAL_SESSION_TOKEN_KEY}=; path=/; max-age=0; SameSite=Lax`
+  } catch {
+    // The server-owned HttpOnly cookie is expired by the logout response.
+  }
 }
 
 export async function apiGet(
@@ -114,6 +155,13 @@ export async function apiGet(
   q: Record<string, string | undefined> = {},
   options: ApiRequestOptions = {}
 ) {
+  if (hasUnconfirmedLogout()) {
+    if (options.silentUnauthorized) {
+      clearToken()
+      throw new AuthExpiredError()
+    }
+    handleUnauthorized()
+  }
   const res = await fetch(`${EXTERNAL_REST_API_BASE_URL}${path}${query(q)}`, {
     cache: 'no-store',
     credentials: 'include',
@@ -138,6 +186,7 @@ export async function apiSend(
   q: Record<string, string | undefined> = {},
   extraHeaders: Record<string, string> = {}
 ) {
+  if (hasUnconfirmedLogout()) handleUnauthorized()
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     ...extraHeaders,
@@ -188,18 +237,27 @@ export async function loginWithPassword(
     throw new Error(`${res.status} ${res.statusText} - ${detail}`)
   }
   clearToken()
+  clearUnconfirmedLogout()
   return (await res.json()) as PasswordLoginResponse
 }
 
-export async function logoutProfileUI(): Promise<void> {
+export async function logoutProfileUI(): Promise<{ revocationConfirmed: boolean }> {
+  markLogoutUnconfirmed()
+  let revocationConfirmed = false
   try {
-    await fetch(`${EXTERNAL_REST_API_BASE_URL}/api/v1/auth/logout`, {
+    const response = await fetch(`${EXTERNAL_REST_API_BASE_URL}/api/v1/auth/logout`, {
       method: 'POST',
       credentials: 'include',
     })
+    revocationConfirmed = response.ok
+  } catch {
+    // The browser cannot expire an HttpOnly cookie without a server response.
+    // The local marker prevents that cookie from restoring or authorizing Profile state.
   } finally {
     clearToken()
   }
+  if (revocationConfirmed) clearUnconfirmedLogout()
+  return { revocationConfirmed }
 }
 
 export async function requestPasswordReset(email: string): Promise<{ requested: true }> {

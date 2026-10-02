@@ -174,6 +174,7 @@ export function createAuthRouter(): Router {
         res.status(200).json({ ok: true })
         return
       }
+      clearProfileSessionCookie(req, res)
       next(error)
     }
   })
