@@ -30,6 +30,13 @@ function isControlApiStatus(error: unknown, status: number): error is ControlApi
   return error instanceof ControlApiError && error.status === status
 }
 
+function isRetiredAccountLoginDenial(error: unknown): error is ControlApiError {
+  if (!isControlApiStatus(error, 403) || !error.body || typeof error.body !== 'object') {
+    return false
+  }
+  return 'error' in error.body && error.body.error === 'membership_not_found'
+}
+
 type LoginResponse = {
   token: string
   me: unknown
@@ -83,6 +90,10 @@ export function createAuthRouter(): Router {
         return
       }
       if (isControlApiStatus(error, 403)) {
+        if (isRetiredAccountLoginDenial(error)) {
+          res.status(401).json({ error: 'Unauthorized' })
+          return
+        }
         res.status(403).json({ error: 'membership_not_found' })
         return
       }
@@ -110,6 +121,10 @@ export function createAuthRouter(): Router {
         return
       }
       if (message.includes('(401)')) {
+        res.status(401).json({ error: 'Unauthorized' })
+        return
+      }
+      if (isRetiredAccountLoginDenial(error)) {
         res.status(401).json({ error: 'Unauthorized' })
         return
       }

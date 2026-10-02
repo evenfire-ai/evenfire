@@ -43,6 +43,45 @@ describe('routes/auth password-login', () => {
     expect(res.body).toEqual({ error: 'Unauthorized' })
   })
 
+  it('keeps retired accounts indistinguishable from invalid credentials', async () => {
+    authServiceMock.loginWithPassword.mockRejectedValueOnce(
+      new ControlApiError('private upstream detail', 403, { error: 'membership_not_found' })
+    )
+
+    const res = await request(buildApp())
+      .post('/api/v1/auth/password-login')
+      .send({ email: 'retired@example.invalid', password: 'wrong-password' })
+
+    expect(res.status).toBe(401)
+    expect(res.body).toEqual({ error: 'Unauthorized' })
+  })
+
+  it('keeps retired Google accounts indistinguishable across credential providers', async () => {
+    authServiceMock.loginWithGoogle.mockRejectedValueOnce(
+      new ControlApiError('private upstream detail', 403, { error: 'membership_not_found' })
+    )
+
+    const res = await request(buildApp())
+      .post('/api/v1/auth/google')
+      .send({ idToken: 'validly-shaped-google-token' })
+
+    expect(res.status).toBe(401)
+    expect(res.body).toEqual({ error: 'Unauthorized' })
+  })
+
+  it('preserves the password-not-set response', async () => {
+    authServiceMock.loginWithPassword.mockRejectedValueOnce(
+      new ControlApiError('control-api error (409)', 409, { error: 'password_not_set' })
+    )
+
+    const res = await request(buildApp())
+      .post('/api/v1/auth/password-login')
+      .send({ email: 'active@example.invalid', password: 'password' })
+
+    expect(res.status).toBe(409)
+    expect(res.body).toEqual({ error: 'password_not_set' })
+  })
+
   it('sets an HttpOnly profile session cookie and omits bearer token body for browser login', async () => {
     authServiceMock.loginWithPassword.mockResolvedValueOnce({
       token: 'profile-session-jwt',
