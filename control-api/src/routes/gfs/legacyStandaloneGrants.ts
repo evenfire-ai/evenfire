@@ -1,4 +1,5 @@
 import type { Request, Response, Router } from 'express'
+import { config } from '../../config.js'
 import { pool } from '../../db.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import { requireAuthForControlUI } from '../../middleware/controlUIAuth.js'
@@ -64,7 +65,7 @@ export function registerLegacyStandaloneGrantReportRoute(router: Router): void {
   // consuming the grant-mutation budget while still bounding operator polling.
   const legacyGrantReportRateLimit = rateLimitMiddleware({
     bucketType: 'gfs_grants_legacy_report',
-    maxPerMinute: 30,
+    maxPerMinute: config.adminGfsLegacyGrantReportPerMin,
     getBucketKey: req => {
       const sub = (req as { adminAuth?: { sub?: string } }).adminAuth?.sub
       return sub ? `gfsgrants-legacy:${sub}` : null

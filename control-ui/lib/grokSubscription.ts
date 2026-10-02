@@ -11,6 +11,8 @@ import {
   sanitizeSubscriptionCatalogSync,
   sanitizeSubscriptionConnection,
 } from './codexSubscription'
+import { invalidateReadRequestCache } from './readRequestCache'
+import type { SubscriptionCapabilityLoadOptions } from './subscriptionCapabilities'
 
 export const GROK_SUBSCRIPTION_API_BASE = '/api/v1/admin/llm/providers/grok-subscription'
 export const GROK_UNASSIGNED_CONNECTION_KEY = CODEX_UNASSIGNED_CONNECTION_KEY
@@ -137,8 +139,18 @@ function keyedPath(connectionKey: string, action?: string): string {
   return action ? `${base}/${action}` : base
 }
 
-export async function listGrokSubscriptionConnections(): Promise<GrokSubscriptionConnectionView[]> {
-  const raw = (await apiGet(`${GROK_SUBSCRIPTION_API_BASE}/connections`)) as {
+export async function listGrokSubscriptionConnections(
+  options: SubscriptionCapabilityLoadOptions = {}
+): Promise<GrokSubscriptionConnectionView[]> {
+  const raw = (await apiGet(
+    `${GROK_SUBSCRIPTION_API_BASE}/connections`,
+    {},
+    {
+      metadataRead: 'subscription-connections',
+      refresh: options.refresh,
+      signal: options.signal,
+    }
+  )) as {
     connections?: unknown
   }
   return Array.isArray(raw.connections)
@@ -150,15 +162,24 @@ export async function createGrokSubscriptionConnection(input: {
   displayName: string
   connectionKey?: string
 }): Promise<GrokSubscriptionConnectionView> {
-  return sanitizeGrokConnection(
-    await apiSend('POST', `${GROK_SUBSCRIPTION_API_BASE}/connections`, input)
-  )
+  const raw = await apiSend('POST', `${GROK_SUBSCRIPTION_API_BASE}/connections`, input)
+  invalidateReadRequestCache()
+  return sanitizeGrokConnection(raw)
 }
 
 export async function listGrokConnectionModels(
-  connectionKey: string
+  connectionKey: string,
+  options: SubscriptionCapabilityLoadOptions = {}
 ): Promise<Array<{ model: string; enabled: boolean; stale: boolean }>> {
-  const raw = (await apiGet(`${keyedPath(connectionKey)}/models`)) as {
+  const raw = (await apiGet(
+    `${keyedPath(connectionKey)}/models`,
+    {},
+    {
+      metadataRead: 'subscription-model-catalog',
+      refresh: options.refresh,
+      signal: options.signal,
+    }
+  )) as {
     models?: Array<{ model?: string; enabled?: boolean; stale?: boolean }>
   }
   return Array.isArray(raw.models)
@@ -176,9 +197,9 @@ export async function startGrokDeviceConnect(
   intent: GrokOAuthIntent,
   connectionKey: string
 ): Promise<GrokDeviceStartView> {
-  return sanitizeGrokDeviceStart(
-    await apiSend('POST', keyedPath(connectionKey, 'device/start'), { intent })
-  )
+  const raw = await apiSend('POST', keyedPath(connectionKey, 'device/start'), { intent })
+  invalidateReadRequestCache()
+  return sanitizeGrokDeviceStart(raw)
 }
 
 export async function pollGrokDevice(
@@ -191,7 +212,9 @@ export async function pollGrokDevice(
   >
   assertNoForbiddenKeys(raw)
   if (raw.status === 'connected') {
-    return { status: 'connected', connection: sanitizeGrokConnection(raw.connection) }
+    const connection = sanitizeGrokConnection(raw.connection)
+    invalidateReadRequestCache()
+    return { status: 'connected', connection }
   }
   if (raw.status === 'expired' || raw.status === 'denied') {
     return { status: raw.status }
@@ -209,20 +232,26 @@ export async function pollGrokDevice(
 export async function syncGrokSubscriptionCatalog(
   connectionKey: string
 ): Promise<GrokCatalogSyncView> {
-  return sanitizeGrokCatalogSync(await apiSend('POST', keyedPath(connectionKey, 'catalog/sync')))
+  const raw = await apiSend('POST', keyedPath(connectionKey, 'catalog/sync'))
+  invalidateReadRequestCache()
+  return sanitizeGrokCatalogSync(raw)
 }
 
 export async function revokeGrokSubscription(
   connectionKey: string
 ): Promise<GrokSubscriptionConnectionView> {
-  return sanitizeGrokConnection(await apiSend('POST', keyedPath(connectionKey, 'revoke')))
+  const raw = await apiSend('POST', keyedPath(connectionKey, 'revoke'))
+  invalidateReadRequestCache()
+  return sanitizeGrokConnection(raw)
 }
 
 export async function patchGrokSubscriptionConnection(
   connectionKey: string,
   patch: { displayName?: string; defaultModel?: string | null }
 ): Promise<GrokSubscriptionConnectionView> {
-  return sanitizeGrokConnection(await apiSend('PATCH', keyedPath(connectionKey), patch))
+  const raw = await apiSend('PATCH', keyedPath(connectionKey), patch)
+  invalidateReadRequestCache()
+  return sanitizeGrokConnection(raw)
 }
 
 export async function patchGrokCatalogModel(
@@ -235,6 +264,7 @@ export async function patchGrokCatalogModel(
     `${keyedPath(connectionKey)}/models/${encodeURIComponent(model)}`,
     { enabled }
   )) as { models?: Array<{ model?: string; enabled?: boolean; stale?: boolean }> }
+  invalidateReadRequestCache()
   return Array.isArray(raw.models)
     ? raw.models
         .filter(row => typeof row.model === 'string' && row.model.trim())

@@ -2,6 +2,8 @@
 
 import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { validateDisplayField } from '@clerum/display-field'
+import { SubscriptionCapabilityNotice } from '@components/SubscriptionCapabilityNotice'
+import { useSubscriptionCapabilities } from '@lib/hooks/useSubscriptionCapabilities'
 import { CreateFlowPanel } from '@/components/CreateFlowPanel'
 import { CreateStepFlow } from '@/components/CreateStepFlow'
 import { LlmProviderConfig } from '@/components/LlmProviderConfig'
@@ -247,6 +249,11 @@ export function HostWizard({
   const { showToast } = useToast()
   const [step, setStep] = useState(0)
   const [busy, setBusy] = useState(false)
+  const subscriptionCapabilities = useSubscriptionCapabilities({ enabled: step === 1 })
+  const codexEnabled =
+    subscriptionCapabilities.capabilities?.providers['codex-subscription'].enabled ?? false
+  const grokEnabled =
+    subscriptionCapabilities.capabilities?.providers['grok-subscription'].enabled ?? false
   const [error, setError] = useState('')
   const [directoryLoading, setDirectoryLoading] = useState(false)
   const [directoryLoadError, setDirectoryLoadError] = useState('')
@@ -300,7 +307,10 @@ export function HostWizard({
   const [codexConnections, setCodexConnections] = useState<CodexSubscriptionConnectionView[]>([])
   const [grokModels, setGrokModels] = useState<string[]>([])
   const [grokConnections, setGrokConnections] = useState<GrokSubscriptionConnectionView[]>([])
-  const [grokEnabled, setGrokEnabled] = useState(false)
+  const [grantInventoryError, setGrantInventoryError] = useState('')
+  const [grantCatalogError, setGrantCatalogError] = useState('')
+  const [grantInventoryLoading, setGrantInventoryLoading] = useState(false)
+  const [inventoryRetryNonce, setInventoryRetryNonce] = useState(0)
   const [stateless, setStateless] = useState(false)
   const [users, setUsers] = useState<
     Array<{ id: string; email: string; name: string | null; displayName: string | null }>
@@ -442,79 +452,100 @@ export function HostWizard({
     [allowedCatalog, existingSecrets]
   )
   useEffect(() => {
-    let cancelled = false
-    void listCodexSubscriptionConnections()
-      .then(rows => {
-        if (!cancelled) setCodexConnections(rows)
-      })
-      .catch(err => {
-        if (!cancelled) {
-          setCodexConnections([])
-          if (!isDisabledCapabilityError(err)) {
-            setError(err instanceof Error ? err.message : 'Could not load ChatGPT subscriptions')
-          }
-        }
-      })
-    void listGrokSubscriptionConnections()
-      .then(rows => {
-        if (!cancelled) {
-          setGrokConnections(rows)
-          setGrokEnabled(true)
-        }
-      })
-      .catch(err => {
-        if (!cancelled) {
-          setGrokConnections([])
-          setGrokEnabled(false)
-          if (!isDisabledCapabilityError(err)) {
-            setError(err instanceof Error ? err.message : 'Could not load Grok subscriptions')
-          }
-        }
-      })
-    return () => {
-      cancelled = true
+    if (step !== 1 || !subscriptionCapabilities.capabilities) {
+      setGrantInventoryError('')
+      setGrantInventoryLoading(false)
+      return
     }
-  }, [])
+    const controller = new AbortController()
+    setGrantInventoryLoading(true)
+    const requests = [
+      codexEnabled
+        ? listCodexSubscriptionConnections({
+            signal: controller.signal,
+            refresh: inventoryRetryNonce > 0,
+          })
+        : Promise.resolve([]),
+      ...(grokEnabled
+        ? [
+            listGrokSubscriptionConnections({
+              signal: controller.signal,
+              refresh: inventoryRetryNonce > 0,
+            }),
+          ]
+        : []),
+    ]
+    Promise.allSettled(requests)
+      .then(([codexResult, grokResult]) => {
+        if (controller.signal.aborted) return
+        if (codexResult.status === 'fulfilled') setCodexConnections(codexResult.value)
+        if (grokResult?.status === 'fulfilled') setGrokConnections(grokResult.value)
+        setGrantInventoryError('')
+        const failure = [codexResult, grokResult].find(
+          result => result?.status === 'rejected' && !isDisabledCapabilityError(result.reason)
+        )
+        if (failure?.status === 'rejected') throw failure.reason
+      })
+      .catch(err => {
+        if (controller.signal.aborted || isDisabledCapabilityError(err)) return
+        setGrantInventoryError(
+          err instanceof Error && err.message ? err.message : 'Could not load subscription options'
+        )
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setGrantInventoryLoading(false)
+      })
+    return () => controller.abort()
+  }, [codexEnabled, grokEnabled, inventoryRetryNonce, step, subscriptionCapabilities.capabilities])
   useEffect(() => {
+    if (step !== 1) return
     if (!connectionRef.trim() || connectionRef === CODEX_UNASSIGNED_CONNECTION_KEY) {
       setCodexModels([])
       setGrokModels([])
+      setGrantCatalogError('')
       return
     }
-    let cancelled = false
+    setGrantCatalogError('')
+    const controller = new AbortController()
     if (provider === GROK_SUBSCRIPTION_PROVIDER) {
       setCodexModels([])
-      void listGrokConnectionModels(connectionRef)
+      void listGrokConnectionModels(connectionRef, {
+        signal: controller.signal,
+        refresh: inventoryRetryNonce > 0,
+      })
         .then(models => {
-          if (!cancelled) setGrokModels(offeredCodexModelNames(models))
+          if (!controller.signal.aborted) setGrokModels(offeredCodexModelNames(models))
         })
-        .catch(() => {
-          if (!cancelled) {
-            setGrokModels([])
-            setModelName('')
-            setError('Could not load Grok grant models')
+        .catch(err => {
+          if (!controller.signal.aborted) {
+            setGrantCatalogError(
+              err instanceof Error ? err.message : 'Could not load Grok grant models'
+            )
           }
         })
       return () => {
-        cancelled = true
+        controller.abort()
       }
     }
     setGrokModels([])
-    void listCodexConnectionModels(connectionRef)
+    void listCodexConnectionModels(connectionRef, {
+      signal: controller.signal,
+      refresh: inventoryRetryNonce > 0,
+    })
       .then(models => {
-        if (!cancelled) setCodexModels(offeredCodexModelNames(models))
+        if (!controller.signal.aborted) setCodexModels(offeredCodexModelNames(models))
       })
-      .catch(() => {
-        if (!cancelled) {
-          setCodexModels([])
-          setModelName('')
-          setError('Could not load ChatGPT grant models')
+      .catch(err => {
+        if (!controller.signal.aborted) {
+          setGrantCatalogError(
+            err instanceof Error ? err.message : 'Could not load ChatGPT grant models'
+          )
         }
       })
     return () => {
-      cancelled = true
+      controller.abort()
     }
-  }, [connectionRef, provider])
+  }, [connectionRef, inventoryRetryNonce, provider, step])
   // Keep the selected model valid for the current provider's enabled models:
   // seed the default once the allowlist loads, and re-default if a provider
   // switch left the model out of range.
@@ -928,6 +959,7 @@ export function HostWizard({
       >
         {step === 0 && (
           <div className="cu-form-stack cu-agent-form-stack">
+            <SubscriptionCapabilityNotice state={subscriptionCapabilities} />
             <Field
               description="The name members see. The identifier used in URLs is derived automatically."
               htmlFor="wizard-agent-name"
@@ -1020,6 +1052,37 @@ export function HostWizard({
 
         {step === 1 && (
           <div className="cu-form-stack cu-agent-form-stack">
+            {grantInventoryLoading ? (
+              <p className="cu-muted" role="status">
+                Loading subscription options…
+              </p>
+            ) : null}
+            {grantInventoryError ? (
+              <div className="cu-banner cu-banner--error" role="alert">
+                <span>{grantInventoryError}</span>
+                <Button
+                  type="button"
+                  className="cu-btn--sm"
+                  variant="ghost"
+                  onClick={() => setInventoryRetryNonce(value => value + 1)}
+                >
+                  Retry
+                </Button>
+              </div>
+            ) : null}
+            {grantCatalogError ? (
+              <div className="cu-banner cu-banner--error" role="alert">
+                {grantCatalogError}
+                <Button
+                  type="button"
+                  className="cu-btn--sm"
+                  variant="ghost"
+                  onClick={() => setInventoryRetryNonce(value => value + 1)}
+                >
+                  Retry
+                </Button>
+              </div>
+            ) : null}
             <div className="cu-agent-access-section">
               <strong>LLM credentials</strong>
               <span className="cu-muted cu-agent-access-hint">
