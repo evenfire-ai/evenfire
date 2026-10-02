@@ -821,10 +821,16 @@ async function downloadArtifactFromControlUiRun(
   await expect(page.getByTestId('artifacts-panel')).toBeVisible({ timeout: 60_000 })
   const artifactRow = page.getByTestId('artifact-row').filter({ hasText: ARTIFACT_NAME })
   await expect(artifactRow).toBeVisible({ timeout: 15_000 })
+  await artifactRow
+    .getByRole('button', { name: `Actions for artifact ${ARTIFACT_NAME}`, exact: true })
+    .click()
+  const downloadAction = page.getByRole('menuitem', { name: 'Download', exact: true })
+  await expect(downloadAction).toBeVisible()
+  await expect(downloadAction).toBeEnabled()
   return JSON.parse(
     await downloadTextFromButton(
       page,
-      artifactRow.getByTestId('artifact-download'),
+      downloadAction,
       ARTIFACT_NAME,
       `${runId.slice(0, 8)}-${ARTIFACT_NAME}`
     )
