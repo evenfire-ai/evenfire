@@ -1,4 +1,10 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { mkdtemp, rm } from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
+
+let testHome = ''
+let restoreHomedir: (() => void) | undefined
 
 // In-memory keychain backing the mocked keytar module. Keyed by service:account
 // so per-environment account isolation is directly observable.
@@ -17,8 +23,8 @@ vi.mock('keytar', () => ({
   ),
 }))
 
-// app.isReady()=false + safeStorage unavailable ⇒ the keytar path is the only
-// active store, which is exactly what we want to assert per-env isolation on.
+// app.isReady()=false + safeStorage unavailable keeps keytar in memory and
+// routes plain-file fallback reads under the temporary home directory below.
 vi.mock('electron', () => ({
   app: { isReady: vi.fn(() => false), getPath: vi.fn(() => '/tmp/evenfire-test') },
   safeStorage: { isEncryptionAvailable: vi.fn(() => false) },
@@ -35,8 +41,20 @@ const ENV_A_WITH_RPC = 'env_a_rpc-222222222222'
 
 let TokenStore: typeof import('../tokenStore.js').TokenStore
 
+beforeAll(async () => {
+  testHome = await mkdtemp(path.join(os.tmpdir(), 'evenfire-token-store-test-'))
+  const homedirSpy = vi.spyOn(os, 'homedir').mockReturnValue(testHome)
+  restoreHomedir = () => homedirSpy.mockRestore()
+})
+
+afterAll(async () => {
+  restoreHomedir?.()
+  if (testHome) await rm(testHome, { recursive: true, force: true })
+})
+
 beforeEach(async () => {
   keychain.clear()
+  vi.clearAllMocks()
   TokenStore = (await import('../tokenStore.js')).TokenStore
 })
 
@@ -48,6 +66,41 @@ describe('TokenStore per-environment slots (spec §5.2)', () => {
     // Physically stored under the namespaced account, never the global one.
     expect(keychain.get(keyOf(SERVICE, `${LEGACY_ACCOUNT}::${ENV_A}`))).toBe('tok-a')
     expect(keychain.has(keyOf(SERVICE, LEGACY_ACCOUNT))).toBe(false)
+  })
+
+  it('waits for active native credential operations before quitting', async () => {
+    const keytar = await import('keytar')
+    let finishWrite!: () => void
+    vi.mocked(keytar.setPassword).mockImplementationOnce(
+      () =>
+        new Promise<void>(resolve => {
+          finishWrite = resolve
+        })
+    )
+    const store = new TokenStore()
+    const write = store.setSessionToken('tok-a', ENV_A)
+
+    await vi.waitFor(() => {
+      expect(keytar.setPassword).toHaveBeenCalledWith(
+        SERVICE,
+        `${LEGACY_ACCOUNT}::${ENV_A}`,
+        'tok-a'
+      )
+    })
+
+    let drainFinished = false
+    const prepareForQuit = (store as TokenStore & { prepareForQuit?: () => Promise<void> })
+      .prepareForQuit
+    const drain = (prepareForQuit ? prepareForQuit.call(store) : Promise.resolve()).then(() => {
+      drainFinished = true
+    })
+    await new Promise<void>(resolve => setImmediate(resolve))
+    expect(drainFinished).toBe(false)
+
+    finishWrite()
+    await expect(write).resolves.toBeUndefined()
+    await expect(drain).resolves.toBeUndefined()
+    expect(drainFinished).toBe(true)
   })
 
   it('does not leak env A token into env B', async () => {

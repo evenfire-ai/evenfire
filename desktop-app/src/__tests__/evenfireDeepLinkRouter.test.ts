@@ -229,4 +229,26 @@ describe('evenfire deep-link router', () => {
     expect(harness.focusWindow).not.toHaveBeenCalled()
     expect(harness.requestMainWindow).not.toHaveBeenCalled()
   })
+
+  it('handles a shutdown rejection from an external logout link', async () => {
+    const harness = createHarness()
+    const unhandledRejections: unknown[] = []
+    const observeUnhandledRejection = (reason: unknown) => {
+      unhandledRejections.push(reason)
+    }
+    harness.logout.mockRejectedValue(new Error('Application is shutting down'))
+    process.on('unhandledRejection', observeUnhandledRejection)
+
+    try {
+      harness.router.handle('evenfire://logout')
+      await new Promise<void>(resolve => setImmediate(resolve))
+
+      expect(unhandledRejections).toEqual([])
+      expect(harness.sent).toEqual([
+        { channel: 'auth:externalLogout', payload: undefined, window: 'initial' },
+      ])
+    } finally {
+      process.off('unhandledRejection', observeUnhandledRejection)
+    }
+  })
 })

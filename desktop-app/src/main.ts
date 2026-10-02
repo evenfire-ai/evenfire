@@ -20,7 +20,11 @@ import {
 } from './devIsolation.js'
 import { createEvenfireDeepLinkRouter } from './evenfireDeepLinkRouter.js'
 import { assertTrustedSender, registerIpcHandlers } from './ipc.js'
-import { createMainWindowCoordinator, createRetryableInitializer } from './mainWindowCoordinator.js'
+import {
+  createMainWindowCoordinator,
+  createRetryableInitializer,
+  registerQuitDrain,
+} from './mainWindowCoordinator.js'
 import { wireMainWindowRendererReadiness } from './mainWindowReadiness.js'
 import { McpOauthCompletionQueue } from './mcpOauthCompletionQueue.js'
 import { initPluginSdkRuntime } from './pluginSdkRuntime.js'
@@ -64,6 +68,11 @@ process.stderr?.on?.('error', () => {})
 
 let mainWindow: BrowserWindow | null = null
 const appService = new AppService()
+registerQuitDrain(
+  app,
+  () => appService.prepareForQuit(),
+  () => appService.cancelQuitPreparation()
+)
 const sandboxUiDeepLinkQueue = new SandboxUiDeepLinkQueue()
 // U5: deliver mcp-oauth completions to the renderer, or queue them when the
 // renderer is not yet ready (cold start), draining after `app:rendererReady`.
