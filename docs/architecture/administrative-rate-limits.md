@@ -76,6 +76,12 @@ healthy prompts therefore consume 3600/4200 general requests before bootstrap,
 other methods or retries. Both authenticated request gates default to 6000.
 Capability authority is not cached to reduce those charges.
 
+The calculation above models the healthy static-secret SDK path only. That path
+does not call the separate direct-Host provider-attempt authorization or OAuth
+broker routes. Subscription/OAuth SDK paths can call those routes and therefore
+also face their budgets of 300 operations per minute. Each path must use its own applicable
+counters; provider/account quotas and retries can lower capacity further.
+
 The three credential requests carry the Host runtime access JWT, including
 the requests forwarded by WRC. They are attributed to that verified Host or
 recipe, not to WRC’s internal service identity. Namespace equal to the Hosts
@@ -140,7 +146,7 @@ producer exit 0; skipped physical tests do not establish correctness.
 For an authorized rollout, verify effective numeric owners, source/image
 revision, ledger migration ordering, old-writer drain, independent identities,
 forwarding policy and visible recovery. Keep upstream provider quotas, bytes,
-concurrency and unrelated authentication/minting safeguards separate.429 must
+concurrency and unrelated authentication/minting safeguards separate. A 429 must
 remain possible under deliberate overload and must be understandable.
 
 References: issue #985; #433 owns broader edge-store/cardinality coordination;
