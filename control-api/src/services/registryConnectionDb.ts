@@ -1,3 +1,4 @@
+import { JwtKeyMaterialError, parseSigningMaterial } from '@clerum/jwt-key-policy'
 import { config } from '../config.js'
 import { pool, withTransaction } from '../db.js'
 import type { DbClient } from '../db.js'
@@ -6,6 +7,7 @@ import {
   deriveOAuthEncryptionKey,
   encryptOAuthSecret,
 } from '../oauth/encryption.js'
+import { rootLogger } from '../observability/logger.js'
 import {
   invalidateRegistryIdentityCaches,
   isRegistryIdentityCacheGenerationCurrent,
@@ -13,7 +15,7 @@ import {
 } from './registryIdentityCache.js'
 
 /**
- * Thrown when no voucher signing key/kid is resolvable (route maps to 500
+ * Thrown when no accepted voucher signing key/kid is resolvable (route maps to 500
  * registry_voucher_unavailable). Authoritative home is here so
  * `resolveVoucherSigningMaterial` can throw it without importing
  * registryVoucher.ts (which would cycle). registryVoucher.ts re-exports it so
@@ -201,6 +203,30 @@ export async function deleteConnection(db: DbClient = pool): Promise<void> {
   invalidateRegistryIdentityCaches()
 }
 
+function usableVoucherSigningKey(
+  raw: string,
+  context: { source: 'registry_connection' | 'environment'; deploymentId?: string }
+): string {
+  try {
+    return parseSigningMaterial(raw, 'Registry voucher signing key').privatePem
+  } catch (error) {
+    if (!(error instanceof JwtKeyMaterialError)) throw error
+    rootLogger.warn(
+      {
+        event:
+          error.code === 'ERR_JWT_KEY_BANNED'
+            ? 'registry_voucher_key_banned'
+            : 'registry_voucher_key_invalid',
+        ...context,
+        slot: 'voucher',
+        reason: error.reason,
+      },
+      'Registry voucher signing material rejected'
+    )
+    throw new VoucherUnavailableError()
+  }
+}
+
 /** Mode-aware voucher signing material (spec §14.2). */
 export async function resolveVoucherSigningMaterial(): Promise<{
   signingKey: string
@@ -208,14 +234,26 @@ export async function resolveVoucherSigningMaterial(): Promise<{
 }> {
   if (config.registryConnectionMode === 'self-hosted') {
     const row = await getRegistryConnection()
-    if (!row || !row.privateKeyPem || !row.keyId) throw new VoucherUnavailableError()
-    return { signingKey: row.privateKeyPem, kid: row.keyId }
+    if (!row || !row.keyId) throw new VoucherUnavailableError()
+    return {
+      signingKey: usableVoucherSigningKey(row.privateKeyPem, {
+        source: 'registry_connection',
+        deploymentId: row.deploymentId,
+      }),
+      kid: row.keyId,
+    }
   }
-  // managed
+  // Managed environment material is validated at startup. Retain this check
+  // for isolated consumers so missing material still maps to VoucherUnavailableError.
   if (!config.registryVoucherPrivateKey || !config.registryVoucherKid) {
     throw new VoucherUnavailableError()
   }
-  return { signingKey: config.registryVoucherPrivateKey, kid: config.registryVoucherKid }
+  return {
+    signingKey: usableVoucherSigningKey(config.registryVoucherPrivateKey, {
+      source: 'environment',
+    }),
+    kid: config.registryVoucherKid,
+  }
 }
 
 /** Mode-aware machine (client_credentials) creds (spec §8 registryClient). */

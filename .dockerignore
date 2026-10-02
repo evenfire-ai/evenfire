@@ -24,6 +24,8 @@
 **/*.pem
 **/*.key
 kubeconfig*
+# Local-only JWT signing keys generated in dev mode; never enter the image.
+control-api/.dev-keys/
 **/node_modules
 **/dist
 **/.next
