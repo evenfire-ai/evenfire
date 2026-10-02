@@ -21,8 +21,12 @@ import {
   K8sNotFoundError,
   type MutableResourceSnapshot,
 } from '../../services/resourceService.js'
-import { captureSecretForCleanup } from '../../services/secretCleanup.js'
 import { secretKeyNames } from '../../services/secretKeyNames.js'
+import { readSecretOrNull } from '../../services/secretRead.js'
+import {
+  isRecipeOwnedSecret,
+  secretIdentityPreconditions,
+} from '../../services/secretRepository.js'
 import {
   ClerumResourceType,
   type ResourcePreconditions,
@@ -1133,12 +1137,45 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
         }
       }
 
-      // Capture the credential Secret identity BEFORE deleting the parent CR: a
-      // same-name Secret created in the gap belongs to a different owner, and a
-      // name-addressed delete afterwards would remove it.
+      // Capture the credential Secret identity BEFORE deleting the parent CR.
+      // A same-name Secret can be created in the gap, and a name-addressed
+      // delete afterwards would remove that replacement — a different owner's
+      // object — on the strength of a decision made about something that no
+      // longer exists. Every cleanup below is bound to the snapshot taken here.
+      // Same reasoning, and same shape, as the registry uninstall path.
+      //
+      // Only a 404 means "no Secret to clean up" (#807). Any other read failure
+      // fails the request here, before the CR delete, so nothing is deleted:
+      // everything above this point is a read. Skipping the cascade instead
+      // would let an RBAC drift silently disable it and leave a live
+      // credential behind with a 200. The CommunicationChannel pre-read above
+      // already fails closed the same way. `readSecretOrNull` maps 401/403 to
+      // 502 and other upstream failures to 503 (`secret_read_failed`), and
+      // `clerumErrorHandler` logs the upstream status without response headers.
+      const captureSecretForCleanup = async (
+        secretName: string
+      ): Promise<
+        | { status: 'ready'; precondition: SecretPreconditions }
+        | { status: 'absent' | 'recipe-owned' | 'identity-unavailable' }
+      > => {
+        const raw = await readSecretOrNull(gateway, secretName, ns)
+        if (raw === null) return { status: 'absent' }
+        // Recipe-owned Secrets belong to /admin/recipe-secrets. The mcp-secret
+        // route refuses them with 409; deleting one here would route around
+        // that guard.
+        if (isRecipeOwnedSecret(raw)) return { status: 'recipe-owned' }
+        // The apiserver answered but the object carries no UID/resourceVersion,
+        // so the cascade delete cannot be fenced. This is not a read failure:
+        // the cleanup is skipped and the CR is still deleted. (The registry
+        // uninstall treats a missing identity as a 503 instead.)
+        const precondition = secretIdentityPreconditions(raw)
+        if (!precondition) return { status: 'identity-unavailable' }
+        return { status: 'ready', precondition }
+      }
+
       const ccSecretCleanup =
         plural === 'communicationchannels' && ccSecretRefName
-          ? await captureSecretForCleanup(gateway, ccSecretRefName, ns, log)
+          ? await captureSecretForCleanup(ccSecretRefName)
           : null
 
       const deleted = await gateway.deleteResource(plural, name, ns)
