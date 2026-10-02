@@ -124,6 +124,97 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
     expect(await versions(databasePool)).toContain(entry.migrationVersion)
   })
 
+  it('reuses a deparsed partial index without rebuilding its physical index', async () => {
+    const entry = PR1_ONLINE_INDEX_PLAN.find(
+      index => index.name === 'workflow_runs_actor_catalog_idx'
+    )!
+    const before = await databasePool.query<{ oid: string }>(
+      'SELECT $1::regclass::oid::text AS oid',
+      [entry.name]
+    )
+    await databasePool.query('DELETE FROM schema_migrations WHERE version = $1', [
+      entry.migrationVersion,
+    ])
+
+    await initDb({ connect: () => databasePool.connect() })
+
+    const after = await databasePool.query<{ oid: string }>(
+      'SELECT $1::regclass::oid::text AS oid',
+      [entry.name]
+    )
+    expect(after.rows[0]?.oid).toBe(before.rows[0]?.oid)
+    expect(await versions(databasePool)).toContain(entry.migrationVersion)
+  })
+
+  it('rejects same-name indexes with changed identity, grouping, predicate, or order', async () => {
+    const suffix = randomBytes(4).toString('hex')
+    const table = `d34_index_semantics_${suffix}`
+    await databasePool.query(`
+      CREATE TABLE ${table} (
+        userid text,
+        "userId" text,
+        id integer,
+        a integer,
+        b integer,
+        c integer,
+        included_a text,
+        included_b text
+      )
+    `)
+    const cases = [
+      {
+        name: `d34_quoted_identity_${suffix}`,
+        expected: `(${quoteIdentifier('userId')})`,
+        actual: '(userid)',
+      },
+      {
+        name: `d34_grouping_${suffix}`,
+        expected: '(((a + b) * c))',
+        actual: '((a + b * c))',
+      },
+      {
+        name: `d34_predicate_${suffix}`,
+        expected: '(userid) WHERE userid IS NOT NULL',
+        actual: `(userid) WHERE userid <> ''`,
+      },
+      {
+        name: `d34_key_order_${suffix}`,
+        expected: '(userid, id)',
+        actual: '(id, userid)',
+      },
+      {
+        name: `d34_include_order_${suffix}`,
+        expected: '(userid) INCLUDE (included_a, included_b)',
+        actual: '(userid) INCLUDE (included_b, included_a)',
+      },
+    ]
+
+    for (const candidate of cases) {
+      await databasePool.query(`CREATE INDEX ${candidate.name} ON ${table} ${candidate.actual}`)
+      const entry: OnlineIndexDefinition = {
+        migrationVersion: '0125_user_access_foundation',
+        name: candidate.name,
+        table,
+        createSql: `CREATE INDEX CONCURRENTLY ${candidate.name} ON ${table} ${candidate.expected}`,
+      }
+      await expect(ensureOnlineIndex(databasePool, entry)).rejects.toThrow(
+        `Non-equivalent existing index: ${candidate.name}`
+      )
+    }
+
+    const uniqueName = `d34_unique_mismatch_${suffix}`
+    await databasePool.query(`CREATE INDEX ${uniqueName} ON ${table} (userid)`)
+    await expect(
+      ensureOnlineIndex(databasePool, {
+        migrationVersion: '0125_user_access_foundation',
+        name: uniqueName,
+        table,
+        unique: true,
+        createSql: `CREATE UNIQUE INDEX CONCURRENTLY ${uniqueName} ON ${table} (userid)`,
+      })
+    ).rejects.toThrow(`Non-equivalent existing index: ${uniqueName}`)
+  })
+
   it('repairs an equivalent interrupted index and enforces the online bound', async () => {
     const name = `d34_interrupted_${randomBytes(4).toString('hex')}`
     const entry: OnlineIndexDefinition = {

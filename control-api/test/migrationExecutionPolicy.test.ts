@@ -364,6 +364,66 @@ describe('D34 PR1 migration runner', () => {
 })
 
 describe('D34 online-index recovery', () => {
+  it.each([
+    [
+      'quoted identifier case',
+      'CREATE INDEX idx ON team_members ("userId")',
+      'CREATE INDEX idx ON team_members (userid)',
+    ],
+    [
+      'significant expression grouping',
+      'CREATE INDEX idx ON sample ((a + b) * c)',
+      'CREATE INDEX idx ON sample (a + b * c)',
+    ],
+    [
+      'column casts',
+      'CREATE INDEX idx ON sample (value::text)',
+      'CREATE INDEX idx ON sample (value)',
+    ],
+    [
+      'quoted literal contents',
+      "CREATE INDEX idx ON sample ((payload ->> 'userId'))",
+      "CREATE INDEX idx ON sample ((payload ->> 'userid'))",
+    ],
+  ])('preserves %s in canonical definitions', (_case, left, right) => {
+    expect(canonicalOnlineIndexDefinition(left)).not.toBe(canonicalOnlineIndexDefinition(right))
+  })
+
+  it('normalizes only harmless PostgreSQL index DDL decoration', () => {
+    expect(
+      canonicalOnlineIndexDefinition(
+        'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx ON sample (((a + b)))'
+      )
+    ).toBe(canonicalOnlineIndexDefinition('CREATE INDEX idx ON public.sample USING btree (a+b)'))
+  })
+
+  it('retains significant predicate grouping across boolean operators', () => {
+    const grouped = `CREATE INDEX idx ON sample (value)
+      WHERE ((first_value = 1 OR second_value = 2) AND third_value = 3)`
+    const regrouped = `CREATE INDEX idx ON sample (value)
+      WHERE first_value = 1 OR (second_value = 2 AND third_value = 3)`
+
+    expect(canonicalOnlineIndexDefinition(grouped)).not.toBe(
+      canonicalOnlineIndexDefinition(regrouped)
+    )
+
+    const precedence = `CREATE INDEX idx ON sample (value)
+      WHERE first_value = 1 OR second_value = 2 AND third_value = 3`
+    const explicitGrouping = `CREATE INDEX idx ON sample (value)
+      WHERE (first_value = 1 OR second_value = 2) AND third_value = 3`
+    expect(canonicalOnlineIndexDefinition(precedence)).not.toBe(
+      canonicalOnlineIndexDefinition(explicitGrouping)
+    )
+  })
+
+  it('retains text casts except at the fixed deparser coercion seams', () => {
+    const castedColumn = 'CREATE INDEX idx ON sample (recipe_namespace::text)'
+    const uncastColumn = 'CREATE INDEX idx ON sample (recipe_namespace)'
+    expect(canonicalOnlineIndexDefinition(castedColumn)).not.toBe(
+      canonicalOnlineIndexDefinition(uncastColumn)
+    )
+  })
+
   it('repairs only an equivalent invalid index and rejects a different definition', async () => {
     const entry = PR1_ONLINE_INDEX_PLAN[0]!
     const states = new Map(
