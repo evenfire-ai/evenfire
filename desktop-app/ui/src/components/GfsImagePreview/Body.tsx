@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, useState } from 'react'
 import { Button, StatusBanner } from '@components/Common'
 import { IconCopy } from '@components/SidebarNav/icons'
 import { GFS_IMAGE_PREVIEW_MAX_BYTES } from '@constants/gfsImagePreview'
+import { estimateBase64DecodedLength } from '@lib/base64Size'
 import { describeGfsReadError } from '@lib/gfsGrantErrors'
 import { assertGfsImagePreviewSize } from '@lib/gfsImagePreview'
 import type { GfsImagePreviewBodyProps } from './types'
@@ -17,6 +18,7 @@ export function GfsImagePreviewBody({
   byteLength,
   fileName,
   gfsUri,
+  dataBase64,
   mimeType,
   onDownloadError,
   titleId,
@@ -44,15 +46,34 @@ export function GfsImagePreviewBody({
 
     const loadPreview = async () => {
       try {
+        // Exactly one source is allowed (see GfsImagePreviewSource). Reject
+        // both missing and ambiguous sources before reading either one.
+        if ((dataBase64 === undefined) === (gfsUri === undefined)) {
+          throw new Error('Image preview requires exactly one source')
+        }
         // The listed size is a skip HINT (fail fast without a round-trip); the
         // download itself is independently bounded so a wrong listed size cannot
         // materialize an oversized payload.
         assertGfsImagePreviewSize(byteLength)
-        const { bytes } = await window.clerum.gfs.downloadPreview(
-          gfsUri,
-          GFS_IMAGE_PREVIEW_MAX_BYTES
-        )
-        assertGfsImagePreviewSize(bytes.byteLength)
+        let bytes: ArrayBuffer
+        if (dataBase64 !== undefined) {
+          // Inline source (chat image attachments): the bytes already sit on
+          // the attachment, so decode locally instead of a GFS round-trip.
+          // Still guard the DECODED length — a lying `byteLength` hint must
+          // not materialize an oversized blob.
+          assertGfsImagePreviewSize(estimateBase64DecodedLength(dataBase64))
+          bytes = decodeBase64ToArrayBuffer(dataBase64)
+          assertGfsImagePreviewSize(bytes.byteLength)
+        } else {
+          const downloaded = await window.clerum.gfs.downloadPreview(
+            // Non-null by the source guard above (dataBase64 is absent → gfsUri
+            // is present).
+            gfsUri!,
+            GFS_IMAGE_PREVIEW_MAX_BYTES
+          )
+          bytes = downloaded.bytes
+          assertGfsImagePreviewSize(bytes.byteLength)
+        }
         if (!active) return
         const blob = new Blob([bytes], { type: mimeType })
         setSourceBlob(blob)
@@ -82,7 +103,7 @@ export function GfsImagePreviewBody({
       active = false
       if (objectUrl) URL.revokeObjectURL(objectUrl)
     }
-  }, [byteLength, gfsUri, mimeType])
+  }, [byteLength, gfsUri, dataBase64, mimeType])
 
   useEffect(() => {
     mountedRef.current = true
@@ -175,6 +196,15 @@ export function GfsImagePreviewBody({
       </div>
     </>
   )
+}
+
+function decodeBase64ToArrayBuffer(dataBase64: string): ArrayBuffer {
+  const binary = window.atob(dataBase64)
+  const bytes = new Uint8Array(binary.length)
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index)
+  }
+  return bytes.buffer
 }
 
 async function convertBlobToPng(blob: Blob): Promise<Blob | null> {

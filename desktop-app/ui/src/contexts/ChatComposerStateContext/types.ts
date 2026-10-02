@@ -20,6 +20,12 @@ export interface ChatComposerStateContextValue {
   failedAgentSend: FailedAgentSend | null
   activeMessageCount: number
   composerFocusRequestId: number
+  /**
+   * Bumps `composerFocusRequestId` so the mounted composer focuses (and
+   * scrolls) itself. Stable identity — safe in deps. Used by surfaces outside
+   * the composer (e.g. TASK-42 resend) to draw attention to a repopulated draft.
+   */
+  requestComposerFocus: () => void
 }
 
 export interface ChatComposerStateProviderProps {

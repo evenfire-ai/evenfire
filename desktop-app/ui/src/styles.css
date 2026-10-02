@@ -7141,6 +7141,33 @@ h3 {
   padding-inline: var(--space-1);
 }
 
+/* BUG-176: sent-message image chips open the shared GfsImagePreview modal.
+ * Same trigger contract as the composer's chip (transparent inline-flex
+ * button inside the chip frame, zoom-in cursor, keyboard focus ring). */
+.message-attachment-preview-trigger {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+  flex: 1 1 auto;
+  height: 100%;
+  border: none;
+  background: transparent;
+  color: inherit;
+  padding: 0;
+  cursor: zoom-in;
+  font: inherit;
+  line-height: 1;
+  text-align: left;
+}
+
+.message-attachment-preview-trigger:focus-visible {
+  outline: 2px solid rgba(var(--focus-rgb), 0.56);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
 .chat-bubble.assistant {
   padding: 0;
   border-color: transparent;
@@ -14512,20 +14539,52 @@ pre {
 }
 
 /* D.5b — time-aware nudges (rendered below the in-flight progress) */
+/* TASK-228: the nudge renders as one contained card — banner + dismiss (×) in
+ * a header row, mini-summary and the tier action in a footer row — instead of
+ * loosely stacked rows. */
 .nudge-area {
   display: flex;
   flex-direction: column;
-  gap: var(--space-1-5);
+  gap: var(--space-2);
   margin-top: var(--space-2);
   /* Cap the width so the nudge reads as a contained card instead of stretching
    * full-width with the chat (and growing on larger windows). */
   max-width: 460px;
+  padding: var(--space-2);
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-control);
+  background: var(--panel);
 }
 
-/* The nudge's call-to-action: a clear soft button anchored bottom-right of the
- * capped card rather than a faint full-width row. */
+.nudge-area__header {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-1-5);
+  min-width: 0;
+}
+
+.nudge-area__header .status-banner {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.nudge-area__dismiss {
+  flex: 0 0 auto;
+  margin: calc(-1 * var(--space-0-5)) calc(-1 * var(--space-1)) 0 0;
+}
+
+.nudge-area__footer {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-1-5) var(--space-2);
+  min-width: 0;
+}
+
+/* The nudge's call-to-action: anchored bottom-right of the card, level with
+ * the mini-summary when one is present (T5), alone otherwise (T3). */
 .nudge-area-action {
-  align-self: flex-end;
+  margin-left: auto;
 }
 
 .nudge-mini-summary {
