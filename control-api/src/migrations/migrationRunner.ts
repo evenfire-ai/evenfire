@@ -10,6 +10,8 @@ export const PR1_MIGRATION_VERSIONS = Object.freeze([
   '0129_gfs_catalog_revision_components',
   '012a_user_access_foundation_definer_temp_shadow_hardening',
   '0130_legacy_password_security_epoch_backfill',
+  // Executed immediately after 0125 by the runner, before the remaining PR1 migrations.
+  '0138_authorization_revision_delete_compatibility',
 ] as const)
 
 export const DEV_POST_0106_MIGRATION_VERSIONS = Object.freeze([
@@ -45,6 +47,10 @@ export type MigrationDescriptor = {
   legacyVersions?: readonly string[]
   apply: (db: DbClient) => Promise<void>
 }
+
+const AUTHORIZATION_REVISION_COMPATIBILITY_PREREQUISITE = '0125_user_access_foundation'
+const AUTHORIZATION_REVISION_COMPATIBILITY_VERSION =
+  '0138_authorization_revision_delete_compatibility'
 
 type ApplyPendingPr1MigrationsInput = {
   db: DbClient
@@ -98,12 +104,43 @@ export async function applyPendingPr1Migrations({
   for (const version of CLASSIFIED_POST_0106_MIGRATION_VERSIONS) {
     const migration = byVersion.get(version)
     if (!migration) throw new Error(`Missing registered post-0106 migration: ${version}`)
-    if (appliedVersions.has(version)) continue
-
-    const isPr1Migration = expected.has(version)
+    const compatibilityMigration =
+      version === AUTHORIZATION_REVISION_COMPATIBILITY_PREREQUISITE
+        ? byVersion.get(AUTHORIZATION_REVISION_COMPATIBILITY_VERSION)
+        : undefined
+    if (version === AUTHORIZATION_REVISION_COMPATIBILITY_PREREQUISITE && !compatibilityMigration) {
+      throw new Error(
+        `Missing registered authorization revision compatibility migration: ${AUTHORIZATION_REVISION_COMPATIBILITY_VERSION}`
+      )
+    }
     const acceptedLegacyVersion = migration.legacyVersions?.find(alias =>
       appliedVersions.has(alias)
     )
+    const currentMigrationApplied = appliedVersions.has(version) || Boolean(acceptedLegacyVersion)
+    if (currentMigrationApplied) {
+      const currentReceiptPending = !appliedVersions.has(version)
+      const compatibilityReceiptPending =
+        compatibilityMigration && !appliedVersions.has(compatibilityMigration.version)
+      if (currentReceiptPending || compatibilityReceiptPending) {
+        await runBoundedTransaction(db, async () => {
+          if (currentReceiptPending) await recordMigration(db, version)
+          if (compatibilityReceiptPending) {
+            await compatibilityMigration.apply(db)
+            await recordMigration(db, compatibilityMigration.version)
+          }
+        })
+        if (currentReceiptPending) appliedVersions.add(version)
+        if (compatibilityReceiptPending) appliedVersions.add(compatibilityMigration.version)
+      }
+      continue
+    }
+
+    const isPr1Migration = expected.has(version)
+    if (compatibilityMigration && appliedVersions.has(compatibilityMigration.version)) {
+      throw new Error(
+        `Team revision compatibility is recorded before its prerequisite: ${compatibilityMigration.version}`
+      )
+    }
     if (isPr1Migration && !acceptedLegacyVersion) {
       await preparePr1Migration(db, version)
     }
@@ -111,7 +148,12 @@ export async function applyPendingPr1Migrations({
     await runBoundedTransaction(db, async () => {
       if (!acceptedLegacyVersion) await migration.apply(db)
       await recordMigration(db, version)
+      if (compatibilityMigration) {
+        await compatibilityMigration.apply(db)
+        await recordMigration(db, compatibilityMigration.version)
+      }
     })
     appliedVersions.add(version)
+    if (compatibilityMigration) appliedVersions.add(compatibilityMigration.version)
   }
 }

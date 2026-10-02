@@ -5,6 +5,7 @@ import {
   createBoundedPgPoolForConnection,
 } from './boundedPgPool.js'
 import { config } from './config.js'
+import { applyAuthorizationRevisionDeleteCompatibility } from './migrations/authorizationRevisionDeleteCompatibilityMigration.js'
 import { migrationSessionBoundsSql } from './migrations/migrationExecutionPolicy.js'
 import { applyPendingPr1Migrations } from './migrations/migrationRunner.js'
 import { applyUserAccessFoundationDefinerTempShadowHardening } from './migrations/userAccessFoundationDefinerTempShadowMigration.js'
@@ -6400,6 +6401,10 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
       '0106_legacy_password_security_epoch_backfill',
     ],
     apply: backfillLegacyPasswordSecurityEpochs,
+  },
+  {
+    version: '0138_authorization_revision_delete_compatibility',
+    apply: applyAuthorizationRevisionDeleteCompatibility,
   },
 ]
 
