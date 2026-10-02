@@ -1,0 +1,59 @@
+name: Release assets
+
+# Gives every published release the stable asset names the README links to
+# through releases/latest/download/<name>, so those links follow each new
+# release without anyone editing the README. Builds keep being uploaded with
+# the version in their names; scripts/release/release-assets.mjs says which
+# asset maps to which stable name and why.
+#
+# `released` fires when a release is published or a pre-release is promoted,
+# and never for a pre-release -- which `latest` skips anyway.
+#
+# The desktop zips are uploaded after the release is published, so the job
+# polls for them. If it times out, upload the missing builds and dispatch this
+# workflow with the release's tag; the same dispatch fixes a release cut before
+# this workflow existed, or one whose build was re-uploaded.
+on:
+  release:
+    types: [released]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to normalize (for example v0.10.0)'
+        required: true
+      wait_minutes:
+        description: 'Minutes to wait for builds that are not uploaded yet'
+        required: false
+        default: '0'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-assets-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  normalize:
+    name: Stable asset names
+    runs-on: ubuntu-latest
+    # A fork's release has nothing to do with the README links here.
+    if: github.repository == 'evenfire-ai/evenfire'
+    timeout-minutes: 150
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+
+      - name: Normalize asset names
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+          WAIT_MINUTES: ${{ github.event_name == 'release' && '120' || inputs.wait_minutes }}
+        run: |
+          node scripts/release/normalize-release-assets.mjs \
+            --tag "$RELEASE_TAG" --wait-minutes "$WAIT_MINUTES"

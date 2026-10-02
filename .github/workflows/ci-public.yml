@@ -631,6 +631,9 @@ jobs:
       - name: Test release coordinates (writer, checker, floor decoupling)
         run: bash scripts/tests/test-release-coordinates.sh
 
+      - name: Test release asset names and the README download links
+        run: node scripts/tests/run-node-test-files.mjs scripts/release/release-assets.test.mjs
+
       - name: Test precommit release-manifest exemption
         run: bash scripts/tests/test-precommit-release-manifest-ignore.sh
 
