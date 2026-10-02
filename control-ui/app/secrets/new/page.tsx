@@ -123,7 +123,7 @@ function CreateSecretPageContent() {
   const prefillOwnerRecipe =
     scope === 'recipe' ? (searchParams.get('ownerRecipe') ?? '').trim() : ''
   const [recipeOwnershipKind, setRecipeOwnershipKind] = useState<'owner-recipe' | 'shared'>(
-    prefillOwnerRecipe ? 'owner-recipe' : 'owner-recipe'
+    'owner-recipe'
   )
   const [recipeOwnerName, setRecipeOwnerName] = useState(prefillOwnerRecipe)
   const [availableRecipes, setAvailableRecipes] = useState<string[]>([])
@@ -222,13 +222,12 @@ function CreateSecretPageContent() {
     scope === 'llm' ? llmCanSubmit : scope === 'mcp' ? mcpCanSubmit : recipeCanSubmit
   const activeNameInvalid =
     activeSecretName.length > 0 &&
-    scope !== 'llm' &&
     (!MCP_SECRET_NAME_PATTERN.test(activeSecretName) || activeSecretName.length > 253)
   const canContinue =
     step === 0
       ? activeSecretName.length > 0 &&
-        (scope === 'llm' ||
-          (MCP_SECRET_NAME_PATTERN.test(activeSecretName) && activeSecretName.length <= 253)) &&
+        MCP_SECRET_NAME_PATTERN.test(activeSecretName) &&
+        activeSecretName.length <= 253 &&
         (scope !== 'recipe' ||
           recipeOwnershipKind === 'shared' ||
           recipeOwnerName.trim().length > 0)
@@ -260,6 +259,12 @@ function CreateSecretPageContent() {
     const secretName = llmName.trim()
     if (!secretName) {
       setError('Secret name is required.')
+      return
+    }
+    if (!MCP_SECRET_NAME_PATTERN.test(secretName) || secretName.length > 253) {
+      setError(
+        'Secret name must be lowercase alphanumeric and hyphens, and must start/end with an alphanumeric character.'
+      )
       return
     }
     const stringData = Object.fromEntries(
@@ -450,9 +455,20 @@ function CreateSecretPageContent() {
             >
               {step === 0 && scope === 'llm' ? (
                 <div className="cu-form-stack cu-agent-form-stack">
-                  <Field htmlFor="llm-secret-name" label="Secret name" required>
+                  <Field
+                    description="Kubernetes resource name: lowercase alphanumeric and hyphens, max 253 chars."
+                    error={
+                      activeNameInvalid
+                        ? 'Name must match the Kubernetes DNS name format.'
+                        : undefined
+                    }
+                    htmlFor="llm-secret-name"
+                    label="Secret name"
+                    required
+                  >
                     <TextInput
                       id="llm-secret-name"
+                      invalid={activeNameInvalid}
                       value={llmName}
                       onChange={event => setLlmName(event.target.value)}
                       placeholder="secret-name"
@@ -463,8 +479,11 @@ function CreateSecretPageContent() {
                 </div>
               ) : null}
 
-              {step === 1 && scope === 'llm' ? (
-                <div className="cu-form-stack cu-agent-form-stack cu-agent-form-stack--wide">
+              {scope === 'llm' ? (
+                <div
+                  className="cu-form-stack cu-agent-form-stack cu-agent-form-stack--wide"
+                  hidden={step !== 1}
+                >
                   <LlmCredentialFields
                     draft={llmKeyDraft}
                     onChange={(dataKey, value) =>
