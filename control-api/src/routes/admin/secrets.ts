@@ -58,7 +58,7 @@ const defaultMcpSecretRollbackPermitStore: McpSecretRollbackPermitStore = {
 
 const mcpSecretDeleteEdgeRateLimit = rateLimit({
   windowMs: 60_000,
-  limit: 60,
+  limit: config.adminConnectorDeleteEdgePerMin,
   standardHeaders: 'draft-7',
   legacyHeaders: false,
   // Keyed on `sub`, not `jti`: `signAdminToken` mints a fresh `jti` on every
@@ -76,7 +76,7 @@ const mcpSecretDeleteEdgeRateLimit = rateLimit({
 
 const mcpSecretDeleteRateLimit = rateLimitMiddleware({
   bucketType: 'admin_mcp_secret_delete',
-  maxPerMinute: 30,
+  maxPerMinute: config.adminConnectorDeletePerMin,
   // Same reasoning as mcpSecretDeleteEdgeRateLimit: the stable principal, so
   // re-authenticating does not hand the caller a fresh delete budget.
   getBucketKey: req => {
@@ -88,7 +88,7 @@ const mcpSecretDeleteRateLimit = rateLimitMiddleware({
   // union has no fail-open member, so both modes still enforce.
   //
   // 'process-memory', not 'closed': this is an admin-authenticated surface that
-  // already sits behind mcpSecretDeleteEdgeRateLimit (in-process, 60/min), which
+  // already sits behind the in-process edge limiter, which
   // caps it whether or not Postgres can count. 'closed' answers 503, which would
   // deny an operator the ability to delete a Secret precisely during a Postgres
   // outage — when removing a compromised Secret matters most. The two 'closed'

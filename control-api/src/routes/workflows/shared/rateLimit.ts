@@ -1,8 +1,13 @@
-import type { Request, Response } from 'express'
-import { ipKeyGenerator, rateLimit } from 'express-rate-limit'
+import type { Request, RequestHandler, Response } from 'express'
+import { type RateLimitInfo, ipKeyGenerator, rateLimit } from 'express-rate-limit'
 import { createHash } from 'node:crypto'
 import { config } from '../../../config.js'
-import { rateLimitMiddleware } from '../../../middleware/rateLimitMiddleware.js'
+import { CalendarMinuteRateLimitStore } from '../../../middleware/calendarMinuteRateLimitStore.js'
+import {
+  type RateLimitEnforcerOptions,
+  rateLimitMiddleware,
+} from '../../../middleware/rateLimitMiddleware.js'
+import { rateLimitHitsTotal } from '../../../observability/metrics.js'
 import { verifyAdminToken } from '../../../utils/auth/adminAuthToken.js'
 import { verifyExternalSessionToken } from '../../../utils/auth/externalSessionAuthToken.js'
 import {
@@ -12,12 +17,31 @@ import {
 import { CONTROL_UI_ADMIN_SESSION_COOKIE, readCookie } from '../../../utils/auth/sessionCookies.js'
 import { extractBearerToken } from '../../../utils/extractBearerToken.js'
 
-const WORKFLOW_GRANT_READ_PER_MINUTE = 60
-const WORKFLOW_GRANT_WRITE_PER_MINUTE = 20
-const WORKFLOW_ADMIN_READ_PER_MINUTE = 60
-const ADMIN_OUTPUTS_READ_PER_MINUTE = 30
+// Invalid credentials still use the original source-IP abuse budgets. Raised
+// administrative capacity applies only after the existing signature check.
+const UNVERIFIED_WORKFLOW_GRANT_READ_PER_MINUTE = 60
+const UNVERIFIED_WORKFLOW_GRANT_WRITE_PER_MINUTE = 20
+const UNVERIFIED_WORKFLOW_ADMIN_READ_PER_MINUTE = 60
+const UNVERIFIED_ADMIN_OUTPUTS_READ_PER_MINUTE = 30
 const WORKFLOW_TRIGGER_PER_MINUTE = 10
-const LLM_PROVIDER_ATTEMPT_AUTHORIZE_PER_MINUTE = 60
+const UNVERIFIED_ADMIN_SUBSCRIPTION_READ_PER_MINUTE = 30
+const UNVERIFIED_ADMIN_SUBSCRIPTION_WRITE_PER_MINUTE = 20
+const SUBSCRIPTION_CALLBACK_IP_PER_MINUTE = 20
+
+function hasVerifiedAdminCredential(req: Request): boolean {
+  return verifiedAdminRateLimitIdentity(adminWorkflowRateLimitCredential(req)) !== null
+}
+
+/** Reuse the existing enforcer without raising a distinct unauthenticated gate. */
+function withUnverifiedIpBudget(
+  options: RateLimitEnforcerOptions & { getBucketKey: (req: Request) => string | null },
+  unverifiedMaxPerMinute: number,
+  isVerified: (req: Request) => boolean
+): RequestHandler {
+  const verified = rateLimitMiddleware(options)
+  const unverified = rateLimitMiddleware({ ...options, maxPerMinute: unverifiedMaxPerMinute })
+  return (req, res, next) => (isVerified(req) ? verified : unverified)(req, res, next)
+}
 
 /**
  * Credential surface matched by requireAdminWorkflowCaller: bearer for automation,
@@ -37,9 +61,12 @@ export function verifiedAdminRateLimitSubject(credential: string | null): string
   return claims?.sub || null
 }
 
-function hashedAdminWorkflowCredentialBucket(prefix: string) {
+function hashedAdminWorkflowCredentialBucket(
+  prefix: string,
+  getCredential: (req: Request) => string | null = adminWorkflowRateLimitCredential
+) {
   return (req: Request): string | null => {
-    const credential = adminWorkflowRateLimitCredential(req)
+    const credential = getCredential(req)
     const sessionIdentity = verifiedAdminRateLimitIdentity(credential)
     if (sessionIdentity) {
       const hash = createHash('sha256').update(sessionIdentity).digest('hex').slice(0, 32)
@@ -65,8 +92,12 @@ export function shouldSkipWorkflowGrantEdgeRateLimit(req: Request): boolean {
  * - Verified admin cookie/bearer → per-session bucket (isolates live sessions)
  * - Unverified credential → IP bucket (rotation cannot mint fresh identities)
  */
-export function workflowGrantEdgeRateLimitKey(prefix: string, req: Request): string {
-  const sessionIdentity = verifiedAdminRateLimitIdentity(adminWorkflowRateLimitCredential(req))
+export function workflowGrantEdgeRateLimitKey(
+  prefix: string,
+  req: Request,
+  getCredential: (req: Request) => string | null = adminWorkflowRateLimitCredential
+): string {
+  const sessionIdentity = verifiedAdminRateLimitIdentity(getCredential(req))
   if (sessionIdentity) {
     const hash = createHash('sha256').update(sessionIdentity).digest('hex').slice(0, 32)
     return `${prefix}:sub:${hash}`
@@ -74,11 +105,11 @@ export function workflowGrantEdgeRateLimitKey(prefix: string, req: Request): str
   return `${prefix}:ip:${ipKeyGenerator(req.ip ?? 'unknown')}`
 }
 
-function workflowGrantEdgeRateKey(prefix: string) {
-  return (req: Request): string => workflowGrantEdgeRateLimitKey(prefix, req)
+function workflowGrantEdgeRateKey(prefix: string, getCredential: (req: Request) => string | null) {
+  return (req: Request): string => workflowGrantEdgeRateLimitKey(prefix, req, getCredential)
 }
 
-function workflowGrantEdgeRateLimitHandler(_req: Request, res: Response): void {
+function edgeRateLimitDenied(bucketType: string, req: Request, res: Response): void {
   const raw = res.getHeader('Retry-After')
   const retryAfterSeconds =
     typeof raw === 'number' && Number.isSafeInteger(raw) && raw > 0
@@ -86,18 +117,44 @@ function workflowGrantEdgeRateLimitHandler(_req: Request, res: Response): void {
       : typeof raw === 'string' && /^\d+$/.test(raw)
         ? Math.max(1, Number(raw))
         : 60
-  res.status(429).json({ error: 'Too Many Requests', retryAfterSeconds })
+  const info = (req as Request & { rateLimit?: RateLimitInfo }).rateLimit
+  rateLimitHitsTotal.inc({ bucket_type: bucketType, result: 'denied' }, 1)
+  req.log?.warn(
+    {
+      event: 'rate_limit_denied',
+      bucketType,
+      count: info?.used,
+      maxPerMinute: info?.limit,
+      source: 'edge-memory',
+      method: req.method,
+      route: typeof req.route?.path === 'string' ? req.route.path : undefined,
+    },
+    'rate limit exceeded'
+  )
+  res.status(429).json({
+    error: 'Too Many Requests',
+    code: 'rate_limited',
+    message: `This request limit has been reached. Try again in ${retryAfterSeconds} seconds.`,
+    retryAfterSeconds,
+  })
 }
 
-function createWorkflowEdgeRateLimit(prefix: string, limit: number) {
+function createWorkflowEdgeRateLimit(
+  prefix: string,
+  limit: number,
+  unverifiedLimit: number,
+  getCredential: (req: Request) => string | null = adminWorkflowRateLimitCredential
+) {
   return rateLimit({
     windowMs: 60_000,
-    limit,
+    store: new CalendarMinuteRateLimitStore(),
+    limit: req =>
+      verifiedAdminRateLimitIdentity(getCredential(req)) !== null ? limit : unverifiedLimit,
     standardHeaders: 'draft-7',
     legacyHeaders: false,
-    skip: shouldSkipWorkflowGrantEdgeRateLimit,
-    keyGenerator: workflowGrantEdgeRateKey(prefix),
-    handler: workflowGrantEdgeRateLimitHandler,
+    skip: req => getCredential(req) === null,
+    keyGenerator: workflowGrantEdgeRateKey(prefix, getCredential),
+    handler: (req, res) => edgeRateLimitDenied(prefix, req, res),
   })
 }
 
@@ -106,11 +163,19 @@ function createWorkflowEdgeRateLimit(prefix: string, limit: number) {
  * Routers that own a rate-limit family instantiate the tuple once and reuse it.
  */
 export function workflowGrantReadEdgeRateLimit() {
-  return createWorkflowEdgeRateLimit('workflow_grants_read_edge', WORKFLOW_GRANT_READ_PER_MINUTE)
+  return createWorkflowEdgeRateLimit(
+    'workflow_grants_read_edge',
+    config.adminWorkflowGrantReadPerMin,
+    UNVERIFIED_WORKFLOW_GRANT_READ_PER_MINUTE
+  )
 }
 
 export function workflowGrantWriteEdgeRateLimit() {
-  return createWorkflowEdgeRateLimit('workflow_grants_write_edge', WORKFLOW_GRANT_WRITE_PER_MINUTE)
+  return createWorkflowEdgeRateLimit(
+    'workflow_grants_write_edge',
+    config.adminWorkflowGrantWritePerMin,
+    UNVERIFIED_WORKFLOW_GRANT_WRITE_PER_MINUTE
+  )
 }
 
 export function workflowGrantReadRateLimits() {
@@ -122,11 +187,19 @@ export function workflowGrantWriteRateLimits() {
 }
 
 function workflowAdminReadEdgeRateLimit() {
-  return createWorkflowEdgeRateLimit('workflow_admin_read_edge', WORKFLOW_ADMIN_READ_PER_MINUTE)
+  return createWorkflowEdgeRateLimit(
+    'workflow_admin_read_edge',
+    config.adminWorkflowReadPerMin,
+    UNVERIFIED_WORKFLOW_ADMIN_READ_PER_MINUTE
+  )
 }
 
 function adminOutputsReadEdgeRateLimit() {
-  return createWorkflowEdgeRateLimit('admin_outputs_read_edge', ADMIN_OUTPUTS_READ_PER_MINUTE)
+  return createWorkflowEdgeRateLimit(
+    'admin_outputs_read_edge',
+    config.adminOutputsReadPerMin,
+    UNVERIFIED_ADMIN_OUTPUTS_READ_PER_MINUTE
+  )
 }
 
 export function workflowAdminReadRateLimits() {
@@ -137,65 +210,108 @@ export function adminOutputsReadRateLimits() {
   return [adminOutputsReadEdgeRateLimit(), adminOutputsReadRateLimit()] as const
 }
 
-function adminCodexReadEdgeRateLimit() {
-  return createWorkflowEdgeRateLimit('admin_codex_read_edge', config.adminSubscriptionReadPerMin)
+/** Subscription routes follow their cookie-only parent authentication. */
+function adminSubscriptionCredential(req: Request): string | null {
+  return readCookie(req, CONTROL_UI_ADMIN_SESSION_COOKIE) || null
 }
 
-function adminCodexWriteEdgeRateLimit() {
-  return createWorkflowEdgeRateLimit('admin_codex_write_edge', config.adminSubscriptionWritePerMin)
+function hasVerifiedSubscriptionCredential(req: Request): boolean {
+  return verifiedAdminRateLimitIdentity(adminSubscriptionCredential(req)) !== null
 }
 
-function adminCodexReadRateLimit() {
-  return rateLimitMiddleware({
-    bucketType: 'admin_codex_read',
-    maxPerMinute: config.adminSubscriptionReadPerMin,
-    getBucketKey: hashedAdminWorkflowCredentialBucket('admin_codex_read'),
-    onBackendUnavailable: 'process-memory',
-  })
+function adminSubscriptionReadEdgeRateLimit() {
+  return createWorkflowEdgeRateLimit(
+    'admin_subscription_read_edge',
+    config.adminSubscriptionReadPerMin,
+    UNVERIFIED_ADMIN_SUBSCRIPTION_READ_PER_MINUTE,
+    adminSubscriptionCredential
+  )
 }
 
-function adminCodexWriteRateLimit() {
-  return rateLimitMiddleware({
-    bucketType: 'admin_codex_write',
-    maxPerMinute: config.adminSubscriptionWritePerMin,
-    getBucketKey: hashedAdminWorkflowCredentialBucket('admin_codex_write'),
-    onBackendUnavailable: 'process-memory',
-  })
+function adminSubscriptionWriteEdgeRateLimit() {
+  return createWorkflowEdgeRateLimit(
+    'admin_subscription_write_edge',
+    config.adminSubscriptionWritePerMin,
+    UNVERIFIED_ADMIN_SUBSCRIPTION_WRITE_PER_MINUTE,
+    adminSubscriptionCredential
+  )
 }
 
-export function adminCodexReadRateLimits() {
-  return [adminCodexReadEdgeRateLimit(), adminCodexReadRateLimit()] as const
+function adminSubscriptionReadRateLimit() {
+  return withUnverifiedIpBudget(
+    {
+      bucketType: 'admin_subscription_read',
+      maxPerMinute: config.adminSubscriptionReadPerMin,
+      getBucketKey: hashedAdminWorkflowCredentialBucket(
+        'admin_subscription_read',
+        adminSubscriptionCredential
+      ),
+      onBackendUnavailable: 'process-memory',
+    },
+    UNVERIFIED_ADMIN_SUBSCRIPTION_READ_PER_MINUTE,
+    hasVerifiedSubscriptionCredential
+  )
 }
 
-export function adminCodexWriteRateLimits() {
-  return [adminCodexWriteEdgeRateLimit(), adminCodexWriteRateLimit()] as const
+function adminSubscriptionWriteRateLimit() {
+  return withUnverifiedIpBudget(
+    {
+      bucketType: 'admin_subscription_write',
+      maxPerMinute: config.adminSubscriptionWritePerMin,
+      getBucketKey: hashedAdminWorkflowCredentialBucket(
+        'admin_subscription_write',
+        adminSubscriptionCredential
+      ),
+      onBackendUnavailable: 'process-memory',
+    },
+    UNVERIFIED_ADMIN_SUBSCRIPTION_WRITE_PER_MINUTE,
+    hasVerifiedSubscriptionCredential
+  )
 }
 
-function codexOAuthCallbackBucketKey(req: Request): string {
+export function adminSubscriptionReadRateLimits() {
+  return [adminSubscriptionReadEdgeRateLimit(), adminSubscriptionReadRateLimit()] as const
+}
+
+export function adminSubscriptionWriteRateLimits() {
+  return [adminSubscriptionWriteEdgeRateLimit(), adminSubscriptionWriteRateLimit()] as const
+}
+
+function subscriptionOAuthCallbackBucketKey(req: Request): string {
   const state = typeof req.query.state === 'string' ? req.query.state.trim() : ''
   if (state) {
     const hash = createHash('sha256').update(state).digest('hex').slice(0, 32)
-    return `codex_oauth_callback:state:${hash}`
+    return `subscription_oauth_callback:state:${hash}`
   }
-  return `codex_oauth_callback:ip:${ipKeyGenerator(req.ip ?? 'unknown')}`
+  return `subscription_oauth_callback:ip:${ipKeyGenerator(req.ip ?? 'unknown')}`
 }
 
-export function codexOAuthCallbackRateLimits() {
+export function subscriptionOAuthCallbackRateLimits() {
+  const hasState = (req: Request) =>
+    typeof req.query.state === 'string' && req.query.state.trim().length > 0
   return [
     rateLimit({
       windowMs: 60_000,
-      limit: config.subscriptionOAuthCallbackPerMin,
+      store: new CalendarMinuteRateLimitStore(),
+      limit: req =>
+        hasState(req)
+          ? config.subscriptionOAuthCallbackPerMin
+          : SUBSCRIPTION_CALLBACK_IP_PER_MINUTE,
       standardHeaders: 'draft-7',
       legacyHeaders: false,
-      keyGenerator: codexOAuthCallbackBucketKey,
-      handler: workflowGrantEdgeRateLimitHandler,
+      keyGenerator: subscriptionOAuthCallbackBucketKey,
+      handler: (req, res) => edgeRateLimitDenied('subscription_oauth_callback_edge', req, res),
     }),
-    rateLimitMiddleware({
-      bucketType: 'codex_oauth_callback',
-      maxPerMinute: config.subscriptionOAuthCallbackPerMin,
-      getBucketKey: codexOAuthCallbackBucketKey,
-      onBackendUnavailable: 'process-memory',
-    }),
+    withUnverifiedIpBudget(
+      {
+        bucketType: 'subscription_oauth_callback',
+        maxPerMinute: config.subscriptionOAuthCallbackPerMin,
+        getBucketKey: subscriptionOAuthCallbackBucketKey,
+        onBackendUnavailable: 'process-memory',
+      },
+      SUBSCRIPTION_CALLBACK_IP_PER_MINUTE,
+      hasState
+    ),
   ] as const
 }
 
@@ -205,7 +321,7 @@ export function codexOAuthCallbackRateLimits() {
  *   1st-party hosts which share that sentinel and must key by `hostRefs[0]`
  * - Missing or unverified bearer → client IP (rotation cannot mint buckets)
  */
-export function mcpHostAttemptRateLimitKey(req: Request): string {
+function mcpHostAttemptRateLimitPrincipal(req: Request): string | null {
   const attached = mcpHostVerifiedRateLimitPrincipal(req.mcpHostJwt)
   // Always verify. Gating on bearer truthiness is a user-controlled skip of
   // the security check (CodeQL js/user-controlled-bypass). Empty or forged
@@ -213,27 +329,40 @@ export function mcpHostAttemptRateLimitKey(req: Request): string {
   const verified = mcpHostVerifiedRateLimitPrincipal(
     verifyMcpHostAccessJwt(extractBearerToken(req))
   )
-  const principal = attached ?? verified
+  return attached ?? verified
+}
+
+export function mcpHostAttemptRateLimitKey(req: Request): string {
+  const principal = mcpHostAttemptRateLimitPrincipal(req)
   if (principal) return `llm_provider_attempt:${principal}`
   return `llm_provider_attempt:ip:${ipKeyGenerator(req.ip ?? 'unknown')}`
 }
 
 export function llmProviderAttemptAuthorizeRateLimits() {
+  const hasPrincipal = (req: Request) => mcpHostAttemptRateLimitPrincipal(req) !== null
   return [
     rateLimit({
       windowMs: 60_000,
-      limit: LLM_PROVIDER_ATTEMPT_AUTHORIZE_PER_MINUTE,
+      store: new CalendarMinuteRateLimitStore(),
+      limit: req =>
+        hasPrincipal(req)
+          ? config.llmProviderAttemptAuthorizePerMin
+          : config.llmProviderAttemptAuthorizeAnonymousIpPerMin,
       standardHeaders: 'draft-7',
       legacyHeaders: false,
       keyGenerator: mcpHostAttemptRateLimitKey,
-      handler: workflowGrantEdgeRateLimitHandler,
+      handler: (req, res) => edgeRateLimitDenied('llm_provider_attempt_authorize_edge', req, res),
     }),
-    rateLimitMiddleware({
-      bucketType: 'llm_provider_attempt_authorize',
-      maxPerMinute: LLM_PROVIDER_ATTEMPT_AUTHORIZE_PER_MINUTE,
-      getBucketKey: mcpHostAttemptRateLimitKey,
-      onBackendUnavailable: 'process-memory',
-    }),
+    withUnverifiedIpBudget(
+      {
+        bucketType: 'llm_provider_attempt_authorize',
+        maxPerMinute: config.llmProviderAttemptAuthorizePerMin,
+        getBucketKey: mcpHostAttemptRateLimitKey,
+        onBackendUnavailable: 'process-memory',
+      },
+      config.llmProviderAttemptAuthorizeAnonymousIpPerMin,
+      hasPrincipal
+    ),
   ] as const
 }
 
@@ -249,12 +378,16 @@ function adminWorkflowTriggerRateLimitKey(req: Request): string | null {
 }
 
 export function adminWorkflowTriggerRateLimit() {
-  return rateLimitMiddleware({
-    bucketType: 'workflow_trigger',
-    maxPerMinute: WORKFLOW_TRIGGER_PER_MINUTE,
-    getBucketKey: adminWorkflowTriggerRateLimitKey,
-    onBackendUnavailable: 'process-memory',
-  })
+  return withUnverifiedIpBudget(
+    {
+      bucketType: 'workflow_trigger',
+      maxPerMinute: config.adminWorkflowTriggerPerMin,
+      getBucketKey: adminWorkflowTriggerRateLimitKey,
+      onBackendUnavailable: 'process-memory',
+    },
+    WORKFLOW_TRIGGER_PER_MINUTE,
+    hasVerifiedAdminCredential
+  )
 }
 
 function hashedWorkflowTriggerBucket(credential: string): string {
@@ -326,39 +459,55 @@ export function mcpHostWorkflowTriggerRateLimit() {
 }
 
 function workflowAdminReadRateLimit() {
-  return rateLimitMiddleware({
-    bucketType: 'workflow_admin_read',
-    maxPerMinute: WORKFLOW_ADMIN_READ_PER_MINUTE,
-    getBucketKey: hashedAdminWorkflowCredentialBucket('workflow_admin_read'),
-    onBackendUnavailable: 'process-memory',
-  })
+  return withUnverifiedIpBudget(
+    {
+      bucketType: 'workflow_admin_read',
+      maxPerMinute: config.adminWorkflowReadPerMin,
+      getBucketKey: hashedAdminWorkflowCredentialBucket('workflow_admin_read'),
+      onBackendUnavailable: 'process-memory',
+    },
+    UNVERIFIED_WORKFLOW_ADMIN_READ_PER_MINUTE,
+    hasVerifiedAdminCredential
+  )
 }
 
 function adminOutputsReadRateLimit() {
-  return rateLimitMiddleware({
-    bucketType: 'admin_outputs_read',
-    maxPerMinute: ADMIN_OUTPUTS_READ_PER_MINUTE,
-    getBucketKey: hashedAdminWorkflowCredentialBucket('admin_outputs_read'),
-    onBackendUnavailable: 'process-memory',
-  })
+  return withUnverifiedIpBudget(
+    {
+      bucketType: 'admin_outputs_read',
+      maxPerMinute: config.adminOutputsReadPerMin,
+      getBucketKey: hashedAdminWorkflowCredentialBucket('admin_outputs_read'),
+      onBackendUnavailable: 'process-memory',
+    },
+    UNVERIFIED_ADMIN_OUTPUTS_READ_PER_MINUTE,
+    hasVerifiedAdminCredential
+  )
 }
 
 export function workflowGrantReadRateLimit() {
-  return rateLimitMiddleware({
-    bucketType: 'workflow_grants_read',
-    maxPerMinute: WORKFLOW_GRANT_READ_PER_MINUTE,
-    getBucketKey: hashedAdminWorkflowCredentialBucket('workflow_grants_read'),
-    onBackendUnavailable: 'process-memory',
-  })
+  return withUnverifiedIpBudget(
+    {
+      bucketType: 'workflow_grants_read',
+      maxPerMinute: config.adminWorkflowGrantReadPerMin,
+      getBucketKey: hashedAdminWorkflowCredentialBucket('workflow_grants_read'),
+      onBackendUnavailable: 'process-memory',
+    },
+    UNVERIFIED_WORKFLOW_GRANT_READ_PER_MINUTE,
+    hasVerifiedAdminCredential
+  )
 }
 
 export function workflowGrantWriteRateLimit() {
-  return rateLimitMiddleware({
-    bucketType: 'workflow_grants_write',
-    maxPerMinute: WORKFLOW_GRANT_WRITE_PER_MINUTE,
-    getBucketKey: hashedAdminWorkflowCredentialBucket('workflow_grants_write'),
-    onBackendUnavailable: 'process-memory',
-  })
+  return withUnverifiedIpBudget(
+    {
+      bucketType: 'workflow_grants_write',
+      maxPerMinute: config.adminWorkflowGrantWritePerMin,
+      getBucketKey: hashedAdminWorkflowCredentialBucket('workflow_grants_write'),
+      onBackendUnavailable: 'process-memory',
+    },
+    UNVERIFIED_WORKFLOW_GRANT_WRITE_PER_MINUTE,
+    hasVerifiedAdminCredential
+  )
 }
 
 /** Keep distinct signed sessions in distinct pre-auth quota buckets. */

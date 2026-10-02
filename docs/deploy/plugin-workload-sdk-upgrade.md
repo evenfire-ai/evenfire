@@ -63,10 +63,11 @@ permanently trapped.
 
 | ENV variable | Default | Limits |
 |---|---|---|
-| `CONTROL_API_PLUGIN_SDK_NOTIFICATIONS_PER_MIN` | `150` | clientNotifications invocations per minute |
-| `CONTROL_API_PLUGIN_SDK_PROMPTBRIDGE_PER_MIN` | `120` | promptBridge invocations per minute |
-| `CONTROL_API_PLUGIN_SDK_REQUEST_BUCKET_PER_MIN` | `600` | shared SDK request bucket per minute |
-| `CONTROL_API_PLUGIN_SDK_PREAUTH_PER_MIN` | `600` | pre-authorization checks per minute |
+| `CONTROL_API_PLUGIN_SDK_NOTIFICATIONS_PER_MIN` | `750` | clientNotifications invocations per minute |
+| `CONTROL_API_PLUGIN_SDK_PROMPTBRIDGE_PER_MIN` | `600` | promptBridge invocations per minute |
+| `CONTROL_API_PLUGIN_SDK_REQUEST_BUCKET_PER_MIN` | `3000` | authenticated shared SDK request bucket per minute |
+| `CONTROL_API_PLUGIN_SDK_PREAUTH_PER_MIN` | `600` | anonymous or invalid-credential source-IP pre-auth checks per minute |
+| `CONTROL_API_PLUGIN_SDK_AUTHENTICATED_PREAUTH_PER_MIN` | `3000` | verified Host principal pre-auth checks per minute |
 
 The defaults above equal the code defaults in `control-api/src/config.ts` and
 are registered in both `deploy/base/control-plane/configmaps.yaml` and the

@@ -1,19 +1,20 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
+import { createHash } from 'node:crypto'
 import request from 'supertest'
 import { config } from '../src/config.js'
 import {
-  adminCodexReadRateLimits,
-  adminCodexWriteRateLimits,
   adminOutputsReadRateLimits,
+  adminSubscriptionReadRateLimits,
+  adminSubscriptionWriteRateLimits,
   adminWorkflowRateLimitCredential,
   adminWorkflowTriggerRateLimit,
-  codexOAuthCallbackRateLimits,
   llmProviderAttemptAuthorizeRateLimits,
   mcpHostAttemptRateLimitKey,
   mcpHostWorkflowTriggerRateLimit,
   mcpHostWorkflowTriggerRateLimitCredential,
   shouldSkipWorkflowGrantEdgeRateLimit,
+  subscriptionOAuthCallbackRateLimits,
   verifiedAdminRateLimitSubject,
   workflowAdminReadRateLimits,
   workflowGrantEdgeRateLimitKey,
@@ -99,7 +100,7 @@ describe('routes/workflows/shared/rateLimit', () => {
     const counts = countRequests()
     const app = express()
     for (const path of ['/codex/connections', '/grok/connections', '/grok/models']) {
-      app.get(path, ...adminCodexReadRateLimits(), (_req, res) => res.sendStatus(204))
+      app.get(path, ...adminSubscriptionReadRateLimits(), (_req, res) => res.sendStatus(204))
     }
     const paths = ['/codex/connections', '/grok/connections', '/grok/models']
     for (let i = 0; i < 150; i++) {
@@ -126,7 +127,9 @@ describe('routes/workflows/shared/rateLimit', () => {
   it('gives distinct verified sessions independent subscription allowances', async () => {
     countRequests()
     const app = express()
-    app.get('/connections', ...adminCodexReadRateLimits(), (_req, res) => res.sendStatus(204))
+    app.get('/connections', ...adminSubscriptionReadRateLimits(), (_req, res) =>
+      res.sendStatus(204)
+    )
     for (const session of ['signed-admin-a', 'signed-admin-b']) {
       for (let i = 0; i < 150; i++) {
         await request(app)
@@ -141,13 +144,37 @@ describe('routes/workflows/shared/rateLimit', () => {
       .expect(429)
   })
 
+  it('aligns edge recovery with the database wall-clock window after a late first request', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(1_800_000_030_000)
+    mockVerifyAdminToken.mockImplementation(() => signedClaims('window-fixture'))
+    countRequests()
+    const app = express()
+    app.get('/connections', ...adminSubscriptionReadRateLimits(), (_req, res) =>
+      res.sendStatus(204)
+    )
+    const cookie = 'control_ui_admin_session=window-fixture'
+    const first = await request(app).get('/connections').set('Cookie', cookie).expect(204)
+    expect(first.headers.ratelimit).toMatch(/reset=30\b/)
+    for (let i = 1; i < 150; i++)
+      await request(app).get('/connections').set('Cookie', cookie).expect(204)
+    const denied = await request(app).get('/connections').set('Cookie', cookie).expect(429)
+    expect(denied.headers['retry-after']).toBe('30')
+    vi.setSystemTime(1_800_000_060_000)
+    for (let i = 0; i < 150; i++)
+      await request(app).get('/connections').set('Cookie', cookie).expect(204)
+    await request(app).get('/connections').set('Cookie', cookie).expect(429)
+  })
+
   it('uses a configured read budget for both edge and distributed gates', async () => {
     const original = config.adminSubscriptionReadPerMin
     config.adminSubscriptionReadPerMin = 3
     try {
       countRequests()
       const app = express()
-      app.get('/connections', ...adminCodexReadRateLimits(), (_req, res) => res.sendStatus(204))
+      app.get('/connections', ...adminSubscriptionReadRateLimits(), (_req, res) =>
+        res.sendStatus(204)
+      )
       for (let i = 0; i < 3; i++) {
         await request(app)
           .get('/connections')
@@ -165,11 +192,36 @@ describe('routes/workflows/shared/rateLimit', () => {
     }
   })
 
+  it.each(['signed-admin-b', 'unverified-fixture'])(
+    'attributes subscription reads to the cookie despite an extra bearer %s',
+    async extra => {
+      countRequests()
+      const app = express()
+      app.get('/connections', ...adminSubscriptionReadRateLimits(), (_req, res) =>
+        res.sendStatus(204)
+      )
+      await request(app)
+        .get('/connections')
+        .set('Cookie', 'control_ui_admin_session=signed-admin-a')
+        .set('Authorization', `Bearer ${extra}`)
+        .expect(204)
+      const expected = createHash('sha256').update('signed-admin-a').digest('hex').slice(0, 32)
+      expect(mockCheckAndIncrement.mock.calls[0]?.slice(0, 2)).toEqual([
+        `admin_subscription_read:${expected}`,
+        150,
+      ])
+    }
+  )
+
   it('allows 100 subscription writes without consuming the read quota', async () => {
     const counts = countRequests()
     const app = express()
-    app.post('/connections', ...adminCodexWriteRateLimits(), (_req, res) => res.sendStatus(204))
-    app.get('/connections', ...adminCodexReadRateLimits(), (_req, res) => res.sendStatus(204))
+    app.post('/connections', ...adminSubscriptionWriteRateLimits(), (_req, res) =>
+      res.sendStatus(204)
+    )
+    app.get('/connections', ...adminSubscriptionReadRateLimits(), (_req, res) =>
+      res.sendStatus(204)
+    )
     for (let i = 0; i < 100; i++) {
       await request(app)
         .post('/connections')
@@ -190,7 +242,9 @@ describe('routes/workflows/shared/rateLimit', () => {
   it('enforces the 100 callback budget with retry timing', async () => {
     countRequests()
     const app = express()
-    app.get('/callback', ...codexOAuthCallbackRateLimits(), (_req, res) => res.sendStatus(204))
+    app.get('/callback', ...subscriptionOAuthCallbackRateLimits(), (_req, res) =>
+      res.sendStatus(204)
+    )
     for (let i = 0; i < 100; i++) {
       await request(app).get('/callback').query({ state: 'unit-callback-state' }).expect(204)
     }
@@ -200,6 +254,40 @@ describe('routes/workflows/shared/rateLimit', () => {
       .expect(429)
     expect(denied.headers['ratelimit-policy']).toBe('100;w=60')
     expect(denied.headers['retry-after']).toBeDefined()
+  })
+
+  it.each([
+    ['workflow grant reads', 300, workflowGrantReadRateLimits],
+    ['workflow grant writes', 100, workflowGrantWriteRateLimits],
+    ['workflow administrative reads', 300, workflowAdminReadRateLimits],
+    ['administrative output reads', 150, adminOutputsReadRateLimits],
+  ] as const)(
+    'allows the increased %s capacity through both gates',
+    async (_family, limit, factory) => {
+      mockVerifyAdminToken.mockImplementation(() => signedClaims('capacity-fixture'))
+      countRequests()
+      const app = express()
+      app.get('/capacity', ...factory(), (_req, res) => res.sendStatus(204))
+      const cookie = 'control_ui_admin_session=capacity-fixture'
+      for (let i = 0; i < limit; i++) {
+        await request(app).get('/capacity').set('Cookie', cookie).expect(204)
+      }
+      const denied = await request(app).get('/capacity').set('Cookie', cookie).expect(429)
+      expect(denied.body.code).toBe('rate_limited')
+      expect(denied.headers['retry-after']).toBeDefined()
+      expect(mockCheckAndIncrement.mock.calls.every(call => call[1] === limit)).toBe(true)
+    }
+  )
+
+  it('retains the 20-request callback IP safeguard when no state is supplied', async () => {
+    countRequests()
+    const app = express()
+    app.get('/callback', ...subscriptionOAuthCallbackRateLimits(), (_req, res) =>
+      res.sendStatus(204)
+    )
+    for (let i = 0; i < 20; i++) await request(app).get('/callback').expect(204)
+    await request(app).get('/callback').expect(429)
+    expect(mockCheckAndIncrement.mock.calls.every(call => call[1] === 20)).toBe(true)
   })
 
   beforeEach(() => {
@@ -363,9 +451,9 @@ describe('routes/workflows/shared/rateLimit', () => {
     expect(workflowGrantWriteRateLimits()).toHaveLength(2)
     expect(workflowAdminReadRateLimits()).toHaveLength(2)
     expect(adminOutputsReadRateLimits()).toHaveLength(2)
-    expect(adminCodexReadRateLimits()).toHaveLength(2)
-    expect(adminCodexWriteRateLimits()).toHaveLength(2)
-    expect(codexOAuthCallbackRateLimits()).toHaveLength(2)
+    expect(adminSubscriptionReadRateLimits()).toHaveLength(2)
+    expect(adminSubscriptionWriteRateLimits()).toHaveLength(2)
+    expect(subscriptionOAuthCallbackRateLimits()).toHaveLength(2)
     expect(llmProviderAttemptAuthorizeRateLimits()).toHaveLength(2)
   })
 
