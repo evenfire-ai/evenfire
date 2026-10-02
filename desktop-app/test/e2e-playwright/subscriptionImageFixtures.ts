@@ -23,6 +23,7 @@ import {
   observePrivateIsolation,
   readMainRecord as readMainAdmission,
   refusePlaintextSessionFiles,
+  validateVendorLedger,
   verifyEncryptedKeyringFiles,
   verifyMainAdmission,
   verifyMountIsolation,
@@ -200,8 +201,31 @@ export type VendorAttempt = {
   imageSha256: string[]
   mimeTypes: string[]
   requestSha256: string
-  responseKind: 'pixels' | 'text' | 'rejected'
+  responseKind: 'pixels' | 'text' | 'rejected' | 'tool_calls'
   outputSha256?: string
+  journey?: 'tool-screenshot' | 'gfs-image'
+  stage?: 'prepare' | 'capture' | 'read' | 'pixels'
+  toolCalls?: Array<{
+    id: string
+    name: 'shell_exec' | 'desktop_screenshot' | 'clerum__gfs_read'
+    argumentsSha256: string
+  }>
+  toolOutputs?: Array<{
+    id: string
+    outputSha256: string
+    resource?: { kind: 'gfs'; drive: string; resourceId: string; version: number; gfsUri: string }
+  }>
+  referencedFiles?: Array<{
+    referenceId: string
+    drive: string
+    resourceId: string
+    version: number
+    availability: 'available'
+    byteLength: number
+  }>
+  receivedImageDigests?: string[]
+  receivedImageOrder?: string[]
+  decodedPixels?: Array<{ width: number; height: number }>
 }
 export function readVendorAttempts(
   run: SubscriptionImageRun,
@@ -216,30 +240,9 @@ export function readVendorAttempts(
     runId?: string
     attempts?: VendorAttempt[]
   }
-  if (
-    ledger.kind !== 'evenfire-subscription-image-vendor-v1' ||
-    ledger.runId !== run.runId ||
-    !Array.isArray(ledger.attempts) ||
-    ledger.attempts.length > 256
-  )
+  if (!Array.isArray(ledger.attempts))
     throw new Error('External vendor ledger does not belong to this run')
-  for (const [index, row] of ledger.attempts.entries()) {
-    if (
-      row.sequence !== index + 1 ||
-      row.provider !== binding.provider ||
-      typeof row.model !== 'string' ||
-      !/^[a-f0-9-]{36}$/.test(row.receiptId) ||
-      !Array.isArray(row.imageSha256) ||
-      row.imageSha256.length > 20 ||
-      row.imageSha256.some(value => !/^[a-f0-9]{64}$/.test(value)) ||
-      !Array.isArray(row.mimeTypes) ||
-      row.mimeTypes.length !== row.imageSha256.length ||
-      !/^[a-f0-9]{64}$/.test(row.requestSha256) ||
-      !['pixels', 'text', 'rejected'].includes(row.responseKind)
-    ) {
-      throw new Error('External vendor ledger has invalid bounded evidence')
-    }
-  }
+  validateVendorLedger(ledger, run.runId, binding)
   return ledger.attempts
 }
 type Fixtures = {

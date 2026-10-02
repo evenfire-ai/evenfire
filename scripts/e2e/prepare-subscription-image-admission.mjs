@@ -56,11 +56,12 @@ function required(values, name) {
   return value
 }
 
-function run(command, args, options = {}) {
+export function run(command, args, options = {}) {
   return execFileSync(command, args, {
     encoding: 'utf8',
     timeout: options.timeout ?? 900_000,
-    stdio: options.stdio ?? ['ignore', 'pipe', 'pipe'],
+    input: options.input,
+    stdio: options.stdio ?? [options.input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
   })
 }
 
@@ -88,13 +89,6 @@ function writePrivateJson(filename, value) {
   fs.writeFileSync(filename, JSON.stringify(value), { flag: 'wx', mode: 0o600 })
 }
 
-// Published into the read-only admission mount: readable by the non-root
-// container user, never writable by it. Integrity stays hash-bound.
-function writePublishedJson(filename, value) {
-  fs.writeFileSync(filename, JSON.stringify(value), { flag: 'wx', mode: 0o644 })
-  fs.chmodSync(filename, 0o644)
-}
-
 export async function prepare(argv = process.argv.slice(2)) {
   const values = parseArgs(argv)
   const suiteId = required(values, 'suite')
@@ -111,11 +105,13 @@ export async function prepare(argv = process.argv.slice(2)) {
   if (context !== profile) refuse('PREPARE_CONTEXT_MISMATCH')
   const suite = resolveSuite(suiteId)
   if (!suite.modes.includes(mode)) refuse('SUITE_MODE_NOT_ADMITTED')
-  if (!path.isAbsolute(scratch) || !path.isAbsolute(framesFile) || !path.isAbsolute(detector))
+  // Login frames travel through the live private input channel, never a file.
+  if (framesFile !== '-') refuse('PREPARE_PRIVATE_INPUT_REQUIRES_STDIN')
+  if (!path.isAbsolute(scratch) || !path.isAbsolute(bindingsFile) || !path.isAbsolute(detector))
     refuse('PREPARE_ABSOLUTE_PATHS')
   if (scratch.startsWith(`${SCRIPT_ROOT}/`) || scratch === SCRIPT_ROOT)
     refuse('PREPARE_SCRATCH_INSIDE_REPO')
-  for (const filename of [framesFile, bindingsFile]) {
+  for (const filename of [bindingsFile]) {
     const stat = fs.lstatSync(filename)
     const parent = path.dirname(filename)
     if (
@@ -190,6 +186,7 @@ export async function prepare(argv = process.argv.slice(2)) {
     'create',
     '--name',
     containerName,
+    '-i',
     '--user',
     '10001:10001',
     '--read-only',
@@ -305,7 +302,7 @@ export async function prepare(argv = process.argv.slice(2)) {
     }
     for (const [name, value] of files) {
       const filename = path.join(admissionDir, name)
-      writePublishedJson(filename, value)
+      writePrivateJson(filename, value)
       receipts[receiptNames[name]] = { value, sha256: digest(JSON.stringify(value)) }
     }
     const sealedFilename = path.join(scratch, 'subscription-image-source.json')
@@ -359,7 +356,7 @@ export async function prepare(argv = process.argv.slice(2)) {
       createdAt: new Date(Date.parse(volumeInspect.CreatedAt)).toISOString(),
       inspectSha256: digest(JSON.stringify(volumeInspect)),
     }
-    writePublishedJson(path.join(admissionDir, 'main-admission.json'), admission)
+    writePrivateJson(path.join(admissionDir, 'main-admission.json'), admission)
     const framesPayload = [
       'main-admission.json',
       ...Object.values(MAIN_RECEIPT_FILES),
@@ -395,9 +392,22 @@ export async function prepare(argv = process.argv.slice(2)) {
     const attached = spawn('docker', ['attach', '--sig-proxy=false', containerName], {
       stdio: ['pipe', 'inherit', 'inherit'],
     })
-    const frames = fs.readFileSync(framesFile)
-    attached.stdin.end(frames)
-    const result = await new Promise(resolve => attached.once('exit', (code, signal) => resolve({ code, signal })))
+    let inputFailed = false
+    const onInputError = () => {
+      inputFailed = true
+      attached.kill('SIGTERM')
+    }
+    attached.stdin.on('error', onInputError)
+    process.stdin.once('error', onInputError)
+    process.stdin.pipe(attached.stdin)
+    let result
+    try {
+      result = await new Promise(resolve => attached.once('exit', (code, signal) => resolve({ code, signal })))
+    } finally {
+      process.stdin.unpipe(attached.stdin)
+      process.stdin.off('error', onInputError)
+      process.stdin.pause()
+    }
     const status = run('docker', ['wait', containerName], { timeout: 30_000 }).trim()
     for (const name of ['runner.json', 'journey-result.json', path.basename(observationFile)]) {
       try {
@@ -417,13 +427,14 @@ export async function prepare(argv = process.argv.slice(2)) {
       container: containerName,
       attachExit: result.code,
       attachSignal: result.signal,
+      inputFailed,
       containerStatus: status,
       admissionDir,
       receiptDir,
       scratch,
     }
     console.log(JSON.stringify(summary, null, 2))
-    return status === '0' && result.code === 0 ? 0 : 1
+    return status === '0' && result.code === 0 && !inputFailed ? 0 : 1
   } catch (err) {
     if (values.keep !== 'true') {
       try {

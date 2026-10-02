@@ -15,6 +15,8 @@ import {
   parseMountInfo,
   privateBusPath,
   readPrivateJson,
+  readMainRecord,
+  verifyRuntimeReceipts,
   unixSocketInode,
   verifyAccount,
   verifyJourneyReport,
@@ -27,6 +29,7 @@ import {
   verifySourceManifest,
   verifyThirdPartyArtifact,
 } from './lib/subscription-image-runner-contract.mjs'
+import { runtimeFromInspect } from './lib/subscription-image-main-admission.mjs'
 import { allowedSourcePath } from './lib/subscription-image-source-context.mjs'
 import {
   verifyPressureMetadata,
@@ -286,7 +289,7 @@ function mainMetadata() {
         SecurityOpt: [],
       },
       Mounts: [
-        { Type: 'bind', Source: '/private/e2e-admission', Destination: '/runner-admission', RW: false },
+        { Type: 'volume', Name: 'evenfire-sir-123456abcdef-admission', Source: '/var/lib/docker/volumes/evenfire-sir-123456abcdef-admission/_data', Destination: '/runner-admission', RW: false },
         { Type: 'tmpfs', Source: 'tmpfs', Destination: home, RW: true },
         { Type: 'tmpfs', Source: 'tmpfs', Destination: '/run/evenfire-e2e', RW: true },
         { Type: 'tmpfs', Source: 'tmpfs', Destination: '/tmp', RW: true },
@@ -544,6 +547,115 @@ test('vendor frames require the sealed physical proxy identity and an unchanged 
   assert.throws(() => admitVendorFrame(changed, 'unit-run', binding, source, [row]))
 })
 
+
+test('v2 named admission volume is the only permitted main-side inspect mount', () => {
+  const { admission, receipts } = mainMetadata()
+  const inspect = structuredClone(receipts.inspect.value.container)
+  inspect.Mounts[0] = {
+    Type: 'volume',
+    Name: admission.volume.name,
+    Source: `/var/lib/docker/volumes/${admission.volume.name}/_data`,
+    Destination: '/runner-admission',
+    RW: false,
+  }
+  const options = { runId: admission.runId, suiteId: admission.suiteId, home }
+  assert.doesNotThrow(() => runtimeFromInspect(inspect, options))
+  for (const change of [
+    value => { value.Mounts[0].Type = 'bind' },
+    value => { value.Mounts[0].Name = 'evenfire-sir-ffffffffffff-admission' },
+    value => { value.Mounts[0].RW = true },
+    value => { value.Mounts.push({ Type: 'volume', Name: 'extra', Destination: '/extra', RW: false }) },
+    value => { value.Mounts[0].Source = '/Users/operator/private' },
+  ]) {
+    const changed = structuredClone(inspect)
+    change(changed)
+    assert.throws(() => runtimeFromInspect(changed, options))
+  }
+})
+
+test('v2 runtime receipt verifies the exact named read-only admission volume', () => {
+  const { admission, receipts } = mainMetadata()
+  receipts.inspect.value.container.Mounts[0] = {
+    Type: 'volume',
+    Name: admission.volume.name,
+    Source: `/var/lib/docker/volumes/${admission.volume.name}/_data`,
+    Destination: '/runner-admission',
+    RW: false,
+  }
+  assert.doesNotThrow(() => verifyRuntimeReceipts(admission, receipts))
+  for (const change of [
+    value => { value.inspect.value.container.Mounts[0].Type = 'bind' },
+    value => { value.inspect.value.container.Mounts[0].Name = 'foreign-volume' },
+    value => { value.inspect.value.container.Mounts[0].RW = true },
+    value => { value.inspect.value.container.Mounts.push({ Type: 'tmpfs', Destination: '/extra', RW: true }) },
+  ]) {
+    const changed = structuredClone(receipts)
+    change(changed)
+    assert.throws(() => verifyRuntimeReceipts(admission, changed))
+  }
+})
+
+test('v2 main records accept the runner UID with strict private file provenance', () => {
+  const directory = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'subscription-main-record-'))
+  try {
+    const filename = path.join(directory, 'unit.json')
+    fs.writeFileSync(filename, JSON.stringify({ kind: 'unit-only-json' }), { mode: 0o600 })
+    assert.equal(readMainRecord(filename).uid, process.getuid())
+    fs.chmodSync(filename, 0o644)
+    assert.throws(() => readMainRecord(filename))
+    fs.chmodSync(filename, 0o600)
+    const alias = path.join(directory, 'alias.json')
+    fs.symlinkSync(filename, alias)
+    assert.throws(() => readMainRecord(alias))
+    fs.unlinkSync(alias)
+    fs.linkSync(filename, alias)
+    assert.throws(() => readMainRecord(filename))
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test('tool vendor metadata stays closed, bounded and immutable without raw content', () => {
+  const binding = { provider: 'grok-subscription', modelId: 'unit-vision', unsupportedModelId: 'unit-text' }
+  const source = { profile: 'unit-owned', podUid: 'unit-pod', imageId: `sha256:${'a'.repeat(64)}` }
+  const resource = { kind: 'gfs', drive: 'unit-drive', resourceId: 'a'.repeat(32), version: 1, gfsUri: `gfs://unit-drive/${'a'.repeat(32)}` }
+  const row = {
+    sequence: 1, provider: binding.provider, model: binding.modelId,
+    receiptId: '11111111-1111-4111-8111-111111111111',
+    imageSha256: [], mimeTypes: [], receivedImageDigests: [], receivedImageOrder: [], decodedPixels: [],
+    requestSha256: 'b'.repeat(64), responseKind: 'tool_calls', outputSha256: 'c'.repeat(64),
+    journey: 'gfs-image', stage: 'read',
+    toolCalls: [{ id: 'call_unit', name: 'clerum__gfs_read', argumentsSha256: 'd'.repeat(64) }],
+    toolOutputs: [{ id: 'call_previous', outputSha256: 'e'.repeat(64), resource }],
+    referencedFiles: [{ referenceId: `gfs:unit-drive:${'a'.repeat(32)}@v1`, drive: 'unit-drive', resourceId: 'a'.repeat(32), version: 1, availability: 'available', byteLength: 1024 }],
+  }
+  const frame = { kind: 'evenfire-subscription-image-vendor-frame-v1', runId: 'unit-run', provider: binding.provider, source,
+    ledger: { kind: 'evenfire-subscription-image-vendor-v1', runId: 'unit-run', attempts: [row] } }
+  assert.equal(admitVendorFrame(frame, 'unit-run', binding, source, []).attempts.length, 1)
+  assert.equal(admitVendorFrame(frame, 'unit-run', binding, source).attempts.length, 1)
+  assert.throws(() => admitVendorFrame(frame, 'unit-run', binding, source, null))
+  assert.equal(admitVendorFrame(frame, 'unit-run', binding, source, [row]).attempts.length, 1)
+  for (const change of [
+    value => { value.extraHeader = 'unknown' },
+    value => { value.ledger.extraHeader = 'unknown' },
+    value => { value.ledger.attempts[0].toolCalls[0].arguments = 'forbidden raw arguments' },
+    value => { value.ledger.attempts[0].toolOutputs[0].output = 'forbidden raw output' },
+    value => { value.ledger.attempts[0].toolCalls[0].argumentsSha256 = 'not-a-hash' },
+    value => { value.ledger.attempts[0].toolCalls = Array.from({ length: 33 }, () => row.toolCalls[0]) },
+    value => { value.ledger.attempts[0].toolOutputs[0].resource.gfsUri = 'https://example.invalid' },
+    value => { value.ledger.attempts[0].referencedFiles[0].byteLength = Number.MAX_SAFE_INTEGER },
+    value => { value.ledger.attempts[0].stage = 'capture' },
+    value => { value.ledger.attempts[0].decodedPixels = [{ width: 512, height: 512, answer: 'forbidden' }] },
+  ]) {
+    const changed = structuredClone(frame)
+    change(changed)
+    assert.throws(() => admitVendorFrame(changed, 'unit-run', binding, source, []))
+  }
+  const changed = structuredClone(frame)
+  changed.ledger.attempts[0].toolCalls[0].argumentsSha256 = 'f'.repeat(64)
+  assert.throws(() => admitVendorFrame(changed, 'unit-run', binding, source, [row]))
+})
+
 test('named journey reporter rejects missing, skipped, duplicate or foreign-file cases even with producer exit zero', () => {
   // This synthetic reporter tests only the status guard, never an E2E pass.
   const file = '/unit/subscription-image-input.spec.ts'
@@ -699,4 +811,16 @@ test('pressure metadata and native owner observations refuse drift', () => {
       metadata
     )
   )
+})
+
+
+test('host command wrapper transmits the complete admission input to a native child', async () => {
+  const { run } = await import('../e2e/prepare-subscription-image-admission.mjs')
+  const input = JSON.stringify({ kind: 'unit-admission-io', count: 4 })
+  const result = run(
+    process.execPath,
+    ['-e', "process.stdout.write(require('node:fs').readFileSync(0, 'utf8'))"],
+    { input, timeout: 1000 }
+  )
+  assert.equal(result, input)
 })

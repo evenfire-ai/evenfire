@@ -9,6 +9,7 @@ import {
   RUNNER_RUN_BASE,
   RunnerAdmissionError,
   digest,
+  admissionVolumeName,
   parsePortForwardRecord,
   pinnedBaseImage,
   resolveSuite,
@@ -71,11 +72,12 @@ export function runtimeFromInspect(inspect, { runId, suiteId, home }) {
   if (
     mounts.length !== 4 ||
     admissionMounts.length !== 1 ||
-    admissionMounts[0].Type !== 'bind' ||
+    admissionMounts[0].Type !== 'volume' ||
+    admissionMounts[0].Name !== admissionVolumeName(runId) ||
     admissionMounts[0].RW !== false ||
     typeof admissionMounts[0].Source !== 'string' ||
     !admissionMounts[0].Source ||
-    mounts.some(mount => mount.Type === 'bind' && mount.Destination !== RUNNER_ADMISSION_ROOT) ||
+    mounts.some(mount => mount.Type === 'bind') ||
     mounts.some(
       mount => PERSONAL.test(String(mount.Source ?? '')) || PERSONAL.test(String(mount.Destination ?? ''))
     ) ||

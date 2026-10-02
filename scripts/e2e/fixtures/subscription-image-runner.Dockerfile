@@ -39,6 +39,10 @@ COPY scripts/tests/lib/subscription-image-runner-contract.mjs \
      scripts/tests/lib/subscription-image-source-context.mjs ./scripts/tests/lib/
 COPY desktop-app/test/e2e-playwright/ ./desktop-app/test/e2e-playwright/
 COPY scripts/e2e/run-subscription-image-journeys.mjs ./scripts/e2e/run-subscription-image-journeys.mjs
+COPY scripts/e2e/prepare-subscription-remaining-fixtures.mjs \
+     scripts/e2e/prepare-subscription-remaining-fixtures.gfs.mjs \
+     scripts/e2e/prepare-subscription-remaining-fixtures.runtime.mjs \
+     scripts/e2e/prepare-subscription-remaining-fixtures.prepare.mjs ./scripts/e2e/
 COPY scripts/e2e/fixtures/ ./scripts/e2e/fixtures/
 COPY subscription-image-input-source.json ./subscription-image-input-source.json
 # Compile-time UI feature flags come from the admitted suite contract. The
@@ -92,15 +96,33 @@ COPY desktop-app/test/e2e-playwright/subscription-image-input.spec.ts \
      desktop-app/test/e2e-playwright/subscriptionImageFixtures.ts \
      desktop-app/test/e2e-playwright/subscriptionImageRunContract.ts \
      desktop-app/test/e2e-playwright/subscriptionImageChallenge.ts \
-     desktop-app/test/e2e-playwright/codexImageChallenge.ts ./desktop-app/test/e2e-playwright/
+     desktop-app/test/e2e-playwright/codexImageChallenge.ts \
+     desktop-app/test/e2e-playwright/subscription-tool-screenshot.spec.ts \
+     desktop-app/test/e2e-playwright/subscription-gfs-image.spec.ts \
+     desktop-app/test/e2e-playwright/subscription-admission-recovery.spec.ts \
+     desktop-app/test/e2e-playwright/playwright.subscription-tool-screenshot.config.ts \
+     desktop-app/test/e2e-playwright/playwright.subscription-gfs-image.config.ts \
+     desktop-app/test/e2e-playwright/playwright.subscription-admission-recovery.config.ts \
+     desktop-app/test/e2e-playwright/subscriptionRemainingJourneyConfig.ts \
+     desktop-app/test/e2e-playwright/subscriptionRemainingJourneyData.ts \
+     desktop-app/test/e2e-playwright/subscriptionRemainingJourneyUi.ts \
+     desktop-app/test/e2e-playwright/subscriptionRemainingJourneysContract.ts \
+     desktop-app/test/e2e-playwright/navigationHelpers.ts ./desktop-app/test/e2e-playwright/
 COPY scripts/e2e/run-subscription-image-journeys.mjs ./scripts/e2e/run-subscription-image-journeys.mjs
+COPY scripts/e2e/prepare-subscription-remaining-fixtures.mjs \
+     scripts/e2e/prepare-subscription-remaining-fixtures.gfs.mjs \
+     scripts/e2e/prepare-subscription-remaining-fixtures.runtime.mjs \
+     scripts/e2e/prepare-subscription-remaining-fixtures.prepare.mjs ./scripts/e2e/
 COPY scripts/e2e/fixtures/subscription-image-provider.mjs \
      scripts/e2e/fixtures/subscription-image-challenge.cjs \
      scripts/e2e/fixtures/subscription-image-session.mjs \
+     scripts/e2e/fixtures/subscription-image-admission-pressure.mjs \
      scripts/e2e/fixtures/subscription-image-runner.base-image ./scripts/e2e/fixtures/
 COPY scripts/tests/lib/subscription-image-runner-contract.mjs \
      scripts/tests/lib/subscription-image-source-context.mjs ./scripts/tests/lib/
 COPY subscription-image-input-source.json ./subscription-image-input-source.json
+# Exported public source is private on the host; the sealed nonroot image must read it.
+RUN chmod -R a+rX /opt/evenfire
 RUN node --input-type=module -e "import {sealSourceManifest} from './scripts/e2e/run-subscription-image-journeys.mjs'; sealSourceManifest(process.cwd())" \
     && chown root:root desktop-app/node_modules/electron/dist/chrome-sandbox \
     && chmod 4755 desktop-app/node_modules/electron/dist/chrome-sandbox

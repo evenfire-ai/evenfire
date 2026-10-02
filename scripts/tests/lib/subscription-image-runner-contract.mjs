@@ -25,6 +25,11 @@ const nsNames = ['mnt', 'pid', 'user']
 export const RUNNER_RUN_BASE = '/run/evenfire-e2e'
 export const RUNNER_ADMISSION_ROOT = '/runner-admission'
 
+export function admissionVolumeName(runId) {
+  if (!/^subscription-image-[a-f0-9]{12}$/.test(runId ?? '')) refuse('ADMISSION_VOLUME_IDENTITY')
+  return `evenfire-sir-${runId.slice('subscription-image-'.length)}-admission`
+}
+
 export function readPrivateRecord(filename, maxBytes = 64 * 1024, uid = process.getuid?.()) {
   if (fs.realpathSync(path.dirname(filename)) !== path.dirname(filename))
     refuse('PRIVATE_PARENT_SYMLINK')
@@ -68,7 +73,6 @@ export function readMainRecord(filename, maxBytes = 4 * 1024 * 1024) {
       stat.size > maxBytes
     )
       refuse('MAIN_RECEIPT_BOUND_OR_MODE')
-    if (stat.uid === process.getuid?.()) refuse('MAIN_RECEIPT_AUTHORED_BY_RUNNER')
     const raw = fs.readFileSync(fd)
     return { value: JSON.parse(raw.toString('utf8')), sha256: digest(raw), uid: stat.uid }
   } finally {
@@ -852,51 +856,84 @@ export function verifyJourneyReport(report, mode, expectedFile) {
   return verifySuiteReport(report, mode, resolveSuite(), expectedFile)
 }
 
-export function admitVendorFrame(frame, runId, binding, source, previous) {
-  if (
-    frame.kind !== 'evenfire-subscription-image-vendor-frame-v1' ||
-    frame.runId !== runId ||
-    frame.provider !== binding.provider ||
-    !isDeepStrictEqual(frame.source, source) ||
-    frame.ledger?.kind !== 'evenfire-subscription-image-vendor-v1' ||
-    frame.ledger.runId !== runId ||
-    !Array.isArray(frame.ledger.attempts) ||
-    frame.ledger.attempts.length > 256 ||
-    frame.ledger.attempts.length < previous.length
-  )
+const closedVendorObject = (value, keys) =>
+  value !== null && typeof value === 'object' && !Array.isArray(value) &&
+  Object.keys(value).every(key => keys.includes(key))
+const vendorHash = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value)
+const vendorId = value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value)
+const vendorHashes = value => Array.isArray(value) && value.length <= 20 && value.every(vendorHash)
+const vendorList = (value, limit, check) => Array.isArray(value) && value.length <= limit && value.every(check)
+const vendorDrive = value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value)
+const vendorResourceId = value => typeof value === 'string' && /^[a-f0-9]{32}$/.test(value)
+const vendorResource = value =>
+  closedVendorObject(value, ['kind', 'drive', 'resourceId', 'version', 'gfsUri']) &&
+  value.kind === 'gfs' && vendorDrive(value.drive) && vendorResourceId(value.resourceId) &&
+  integer(value.version) && value.gfsUri === `gfs://${value.drive}/${value.resourceId}`
+
+export function validateVendorLedger(ledger, runId, binding, previous = []) {
+  if (!closedVendorObject(ledger, ['kind', 'runId', 'attempts']) ||
+      ledger.kind !== 'evenfire-subscription-image-vendor-v1' || ledger.runId !== runId ||
+      !Array.isArray(ledger.attempts) || ledger.attempts.length > 256 ||
+      !Array.isArray(previous) || ledger.attempts.length < previous.length)
     refuse('VENDOR_EVIDENCE_SOURCE_OR_SEQUENCE')
-  for (const [index, row] of frame.ledger.attempts.entries()) {
-    const allowed = [
-      'sequence',
-      'provider',
-      'model',
-      'receiptId',
-      'imageSha256',
-      'mimeTypes',
-      'requestSha256',
-      'responseKind',
-      'outputSha256',
-    ]
-    if (
-      Object.keys(row).some(key => !allowed.includes(key)) ||
-      row.sequence !== index + 1 ||
-      row.provider !== binding.provider ||
+  for (const [index, row] of ledger.attempts.entries()) {
+    if (!closedVendorObject(row, [
+      'sequence', 'provider', 'model', 'receiptId', 'imageSha256', 'mimeTypes',
+      'requestSha256', 'responseKind', 'outputSha256', 'journey', 'stage',
+      'toolCalls', 'toolOutputs', 'referencedFiles', 'receivedImageDigests',
+      'receivedImageOrder', 'decodedPixels',
+    ]) || row.sequence !== index + 1 || row.provider !== binding.provider ||
       ![binding.modelId, binding.unsupportedModelId].includes(row.model) ||
-      !/^[a-f0-9-]{36}$/.test(row.receiptId) ||
-      !Array.isArray(row.imageSha256) ||
-      row.imageSha256.length > 20 ||
-      row.imageSha256.some(value => !/^[a-f0-9]{64}$/.test(value)) ||
-      !Array.isArray(row.mimeTypes) ||
+      typeof row.receiptId !== 'string' || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(row.receiptId) ||
+      !vendorHashes(row.imageSha256) || !Array.isArray(row.mimeTypes) ||
       row.mimeTypes.length !== row.imageSha256.length ||
       row.mimeTypes.some(value => !['image/png', 'image/jpeg'].includes(value)) ||
-      !/^[a-f0-9]{64}$/.test(row.requestSha256) ||
-      !['pixels', 'text', 'rejected'].includes(row.responseKind) ||
-      (row.outputSha256 !== undefined && !/^[a-f0-9]{64}$/.test(row.outputSha256))
-    )
+      !vendorHash(row.requestSha256) || !['pixels', 'text', 'rejected', 'tool_calls'].includes(row.responseKind) ||
+      (row.outputSha256 !== undefined && !vendorHash(row.outputSha256)))
       refuse('VENDOR_EVIDENCE_SHAPE')
+    if ((row.journey !== undefined && !['tool-screenshot', 'gfs-image'].includes(row.journey)) ||
+        (row.stage !== undefined && (row.journey === undefined ||
+          !(row.journey === 'tool-screenshot' ? ['prepare', 'capture', 'pixels'] : ['read', 'pixels']).includes(row.stage))) ||
+        (row.responseKind === 'tool_calls' && (!row.journey || !row.stage)))
+      refuse('VENDOR_EVIDENCE_TOOL_STAGE')
+    if ((row.receivedImageDigests !== undefined || row.receivedImageOrder !== undefined) &&
+        (!vendorHashes(row.receivedImageDigests) || !vendorHashes(row.receivedImageOrder) ||
+          !isDeepStrictEqual(row.receivedImageDigests, row.imageSha256) ||
+          !isDeepStrictEqual(row.receivedImageOrder, row.imageSha256)))
+      refuse('VENDOR_EVIDENCE_IMAGE_ORDER')
+    if (row.decodedPixels !== undefined &&
+        (!vendorList(row.decodedPixels, 20, value =>
+          closedVendorObject(value, ['width', 'height']) && integer(value.width) && integer(value.height) &&
+          value.width <= 9000 && value.height <= 9000) ||
+          row.decodedPixels.length > row.imageSha256.length ||
+          (row.responseKind !== 'rejected' && row.decodedPixels.length !== row.imageSha256.length)))
+      refuse('VENDOR_EVIDENCE_PIXEL_METADATA')
+    if (row.toolCalls !== undefined && !vendorList(row.toolCalls, 32, value =>
+        closedVendorObject(value, ['id', 'name', 'argumentsSha256']) && vendorId(value.id) &&
+        ['shell_exec', 'desktop_screenshot', 'clerum__gfs_read'].includes(value.name) && vendorHash(value.argumentsSha256)))
+      refuse('VENDOR_EVIDENCE_TOOL_CALL')
+    if (row.toolOutputs !== undefined && !vendorList(row.toolOutputs, 32, value =>
+        closedVendorObject(value, ['id', 'outputSha256', 'resource']) && vendorId(value.id) &&
+        vendorHash(value.outputSha256) && (value.resource === undefined || vendorResource(value.resource))))
+      refuse('VENDOR_EVIDENCE_TOOL_OUTPUT')
+    if (row.referencedFiles !== undefined && !vendorList(row.referencedFiles, 2, value =>
+        closedVendorObject(value, ['referenceId', 'drive', 'resourceId', 'version', 'availability', 'byteLength']) &&
+        vendorDrive(value.drive) && vendorResourceId(value.resourceId) && integer(value.version) &&
+        value.referenceId === `gfs:${value.drive}:${value.resourceId}@v${value.version}` &&
+        value.availability === 'available' && integer(value.byteLength) && value.byteLength <= 20 * 1024 * 1024))
+      refuse('VENDOR_EVIDENCE_FILE_REFERENCE')
     if (index < previous.length && !isDeepStrictEqual(row, previous[index]))
       refuse('VENDOR_EVIDENCE_HISTORY_CHANGED')
   }
+  return ledger.attempts
+}
+
+export function admitVendorFrame(frame, runId, binding, source, previous = []) {
+  if (!closedVendorObject(frame, ['kind', 'runId', 'provider', 'source', 'ledger']) ||
+      frame.kind !== 'evenfire-subscription-image-vendor-frame-v1' || frame.runId !== runId ||
+      frame.provider !== binding.provider || !isDeepStrictEqual(frame.source, source))
+    refuse('VENDOR_EVIDENCE_SOURCE_OR_SEQUENCE')
+  validateVendorLedger(frame.ledger, runId, binding, previous)
   return frame.ledger
 }
 
@@ -978,11 +1015,13 @@ export function verifyRuntimeReceipts(admission, receipts, phase = 'admit') {
   if (
     mounts.length !== 4 ||
     admissionMounts.length !== 1 ||
-    admissionMounts[0].Type !== 'bind' ||
+    admissionMounts[0].Type !== 'volume' ||
+    admissionMounts[0].Name !== admissionVolumeName(admission.runId) ||
+    admissionMounts[0].Name !== admission.volume?.name ||
     admissionMounts[0].RW !== false ||
     typeof admissionMounts[0].Source !== 'string' ||
     !admissionMounts[0].Source ||
-    mounts.some(mount => mount.Type === 'bind' && mount.Destination !== RUNNER_ADMISSION_ROOT) ||
+    mounts.some(mount => mount.Type === 'bind') ||
     mounts.some(mount => personalStatePath(mount.Source) || personalStatePath(mount.Destination)) ||
     !tmpfsOk
   )
@@ -1157,8 +1196,7 @@ export function verifyMainAdmission(
   const volume = admission.volume
   if (
     !volume ||
-    volume.name !==
-      `evenfire-sir-${admission.runId.slice('subscription-image-'.length)}-admission` ||
+    volume.name !== admissionVolumeName(admission.runId) ||
     volume.driver !== 'local' ||
     !Number.isFinite(Date.parse(volume.createdAt)) ||
     !/^[a-f0-9]{64}$/.test(volume.inspectSha256 ?? '')
