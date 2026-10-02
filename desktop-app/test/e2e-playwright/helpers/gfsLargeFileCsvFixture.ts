@@ -11,6 +11,7 @@ export const GFS_LARGE_CSV_INCIDENT_SHA256 =
 
 export interface GfsLargeCsvFixture {
   fileName: string
+  sourcePath?: string
   buffer: Buffer
   recordCount: number
   sentinel?: string
@@ -118,6 +119,7 @@ export function resolveGfsLargeCsvFixture(): GfsLargeCsvFixture {
 
   return {
     fileName: path.basename(explicitPath),
+    sourcePath: explicitPath,
     buffer,
     recordCount: countCsvRecords(buffer),
     tailProof: crypto

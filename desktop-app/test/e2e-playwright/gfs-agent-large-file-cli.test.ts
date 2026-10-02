@@ -17,11 +17,11 @@ import { type Locator, type Page, expect, test } from '@playwright/test'
 import { randomUUID } from 'node:crypto'
 import { exactNameFilter } from './helpers/agentLocators'
 import { type ManagedGfsAgent, getManagedAgentDisplayName } from './helpers/gfsAgentDiscovery'
+import { assertGfsInfraHealthy } from './helpers/gfsFixtures'
 import {
-  type AgentGfsFixtures,
-  assertGfsInfraHealthy,
-  seedAgentGfsFixtures,
-} from './helpers/gfsFixtures'
+  type AgentGfsLargeFileFixtures,
+  seedAgentGfsLargeFileFixtures,
+} from './helpers/gfsLargeFileAgentFixture'
 import {
   GFS_LARGE_CSV_SIZE,
   GFS_OLD_VISUAL_LIMIT,
@@ -67,53 +67,29 @@ async function sendTaskAndApproveShell(
   page: Page,
   prompt: string
 ): Promise<{ response: Locator; expandButton: Locator }> {
-  const responseCountBefore = await page.getByTestId('agent-response').count()
-  const approvalCountBefore = await page.getByTestId('approval-approve-btn').count()
-  const progressCountBefore = await page.getByTestId('progress-expand-btn').count()
   const response = page.getByTestId('agent-response').filter({ hasText: runToken })
-  let approvedShell = false
+  const approval = page.getByTestId('approval-approve-btn')
 
   await page.getByTestId('chat-input').fill(prompt)
   await page.getByTestId('send-button').click()
 
-  const deadline = Date.now() + RESPONSE_TIMEOUT_MS
-  for (;;) {
-    const remaining = deadline - Date.now()
-    if (remaining <= 0) throw new Error('Timed out waiting for approval or final response')
-    const approvalButtons = await page.getByTestId('approval-approve-btn').all()
-    const nextApproval = approvalButtons[approvalCountBefore]
-    if (!nextApproval) throw new Error('new shell approval was not created')
-    const first = await Promise.race([
-      nextApproval
-        .waitFor({ state: 'visible', timeout: remaining })
-        .then(() => 'approval' as const),
-      response.waitFor({ state: 'visible', timeout: remaining }).then(() => 'response' as const),
-    ]).catch(error => {
-      throw error
-    })
-    void nextApproval.waitFor({ state: 'hidden', timeout: 1 }).catch(() => undefined)
+  await expect(approval).toHaveCount(1, { timeout: RESPONSE_TIMEOUT_MS })
+  await expect(approval).toBeVisible({ timeout: 10_000 })
+  const stepper = page.getByTestId('progress-stepper').filter({ has: approval })
+  await expect(stepper).toBeVisible({ timeout: 10_000 })
+  const approvalText = await stepper.innerText()
+  expect(approvalText).toContain('shell_exec')
+  expect(approvalText).toContain('node')
+  if (csv.source === 'synthetic') expect(approvalText).toContain(csv.sentinel!)
+  else expect(approvalText).toContain('createHash')
+  await approval.click()
 
-    if (first === 'response') break
-    const stepper = page.getByTestId('progress-stepper').filter({ has: nextApproval })
-    await expect(stepper).toBeVisible({ timeout: 10_000 })
-    const approvalText = await stepper.innerText()
-    if (/shell_exec/i.test(approvalText)) {
-      approvedShell = true
-      expect(approvalText).toContain('node')
-      if (csv.source === 'synthetic') expect(approvalText).toContain(csv.sentinel!)
-      else expect(approvalText).toContain('createHash')
-    }
-    await nextApproval.click()
-  }
-
-  expect(approvedShell, 'the journey must approve an actual shell_exec command').toBe(true)
   await expect(response).toContainText(/ROWS=/, { timeout: RESPONSE_TIMEOUT_MS })
   await expect(response).toContainText(/PROOF=[0-9a-f]{16}/, {
     timeout: RESPONSE_TIMEOUT_MS,
   })
-  const progressButtons = await page.getByTestId('progress-expand-btn').all()
-  const expandButton = progressButtons[progressCountBefore]
-  if (!expandButton) throw new Error('new tool-progress stepper was not created')
+  const expandButton = page.getByTestId('progress-expand-btn')
+  await expect(expandButton).toHaveCount(1, { timeout: PROGRESS_TIMEOUT_MS })
   await expect(expandButton).toBeVisible({ timeout: PROGRESS_TIMEOUT_MS })
   return { response, expandButton }
 }
@@ -134,13 +110,13 @@ async function stepOutput(row: Locator): Promise<Locator> {
 test.describe('GFS agent large-file CLI journey', () => {
   test.describe.configure({ mode: 'serial' })
 
-  let fixtures: AgentGfsFixtures
+  let fixtures: AgentGfsLargeFileFixtures
   let agentLabel: string
   let csv: GfsLargeCsvFixture
 
   test.beforeAll(() => {
     assertGfsInfraHealthy()
-    fixtures = seedAgentGfsFixtures(OWNER_EMAIL)
+    fixtures = seedAgentGfsLargeFileFixtures(OWNER_EMAIL)
     agentLabel = getManagedAgentDisplayName(fixtures.agent)
     csv = resolveGfsLargeCsvFixture()
     expect(csv.buffer.byteLength).toBe(GFS_LARGE_CSV_SIZE)
@@ -158,22 +134,27 @@ test.describe('GFS agent large-file CLI journey', () => {
       await test.step('user uploads the exact CSV through Files', async () => {
         await openResourcesNavItem(page, 'nav-files')
         await expect(page.getByRole('heading', { name: 'Files', exact: true })).toBeVisible()
-        const shared = page.getByRole('region', { name: 'GFS resources shared with you' })
-        await expect(shared).toContainText(fixtures.granted.name, { timeout: 30_000 })
-        await shared.getByRole('button', { name: fixtures.granted.name, exact: true }).click()
         const browser = page.getByRole('region', { name: 'EvenDrive browser' })
         await expect(browser).toBeVisible({ timeout: 30_000 })
-        await browser.getByLabel('Upload file').setInputFiles({
-          name: csv.fileName,
-          mimeType: 'text/csv',
-          buffer: csv.buffer,
-        })
+        await browser
+          .getByRole('button', { name: `Open ${fixtures.granted.name}`, exact: true })
+          .click()
+        await expect(
+          browser.getByRole('button', { name: `Open ${fixtures.granted.childName}`, exact: true })
+        ).toBeVisible({ timeout: 30_000 })
+        const upload = browser.getByRole('button').filter({ hasText: /^Upload file$/ })
+        await expect(upload).toBeVisible({ timeout: 30_000 })
+        const [chooser] = await Promise.all([
+          page.waitForEvent('filechooser', { timeout: 30_000 }),
+          upload.click(),
+        ])
+        await chooser.setFiles(csv.sourcePath!)
         await expect(page.getByText(`Uploaded ${csv.fileName}`)).toBeVisible({
           timeout: 30_000,
         })
-        await expect(browser.getByRole('button', { name: csv.fileName, exact: true })).toBeVisible({
-          timeout: 30_000,
-        })
+        await expect(
+          browser.getByRole('button', { name: `Open ${csv.fileName}`, exact: true })
+        ).toBeVisible({ timeout: 30_000 })
       })
 
       let expandButton: Locator
@@ -211,10 +192,11 @@ test.describe('GFS agent large-file CLI journey', () => {
 
       await test.step('source remains visible after read-only processing', async () => {
         await openResourcesNavItem(page, 'nav-files')
-        const shared = page.getByRole('region', { name: 'GFS resources shared with you' })
-        await shared.getByRole('button', { name: fixtures.granted.name, exact: true }).click()
         const browser = page.getByRole('region', { name: 'EvenDrive browser' })
-        await expect(browser.getByRole('button', { name: csv.fileName })).toBeVisible({
+        await browser
+          .getByRole('button', { name: `Open ${fixtures.granted.name}`, exact: true })
+          .click()
+        await expect(browser.getByRole('button', { name: `Open ${csv.fileName}` })).toBeVisible({
           timeout: 30_000,
         })
       })
