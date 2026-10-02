@@ -360,7 +360,7 @@ describe('visual stream-gate handoff', () => {
     )
     const overflow = await postCompletion(port, 'codex-completion-request.v2', largeContent)
     expect(overflow.status).toBe(503)
-    expect(await overflow.json()).toEqual({ error: 'provider_unavailable' })
+    expect(await overflow.json()).toEqual({ error: 'visual_gate' })
 
     const textWhileSaturated = postCompletion(port, 'codex-completion-request.v1')
     await waitFor(
@@ -481,7 +481,7 @@ describe('visual stream-gate handoff', () => {
     )
     const fifth = await postCompletion(port, 'codex-completion-request.v2', largeContent)
     expect(fifth.status).toBe(503)
-    expect(await fifth.json()).toEqual({ error: 'provider_unavailable' })
+    expect(await fifth.json()).toEqual({ error: 'visual_host_share' })
     expect(warn).toHaveBeenCalledWith(
       {
         event: 'codex_proxy_admission_refused',
@@ -619,7 +619,7 @@ describe('visual stream-gate handoff', () => {
 
       const fifth = await postBody(port, platformToken(), invalidTicketBody(maxBodyBytes))
       expect(fifth.status).toBe(503)
-      expect(await fifth.json()).toEqual({ error: 'provider_unavailable' })
+      expect(await fifth.json()).toEqual({ error: 'visual_host_share' })
       // The refusal names the principal it applied to, so an operator can tell
       // which host was throttled.
       expect(warn).toHaveBeenCalledWith(
@@ -704,7 +704,7 @@ describe('visual stream-gate handoff', () => {
         for (let i = 0; i < targetCount; i += 1) {
           const res = await postBody(port, platformToken(), invalidTicketBody(maxBodyBytes))
           expect(res.status).toBe(503)
-          expect(await res.json()).toEqual({ error: 'provider_unavailable' })
+          expect(await res.json()).toEqual({ error: 'visual_gate' })
         }
         expect(acquire).toHaveBeenCalledTimes(
           VISUAL_STREAM_LIMITS.maxConcurrentStreams +
@@ -789,7 +789,7 @@ describe('visual stream-gate handoff', () => {
       ).toBe(2)
       const fifth = await refusedRequest
       expect(fifth.status).toBe(503)
-      expect(await fifth.json()).toEqual({ error: 'provider_unavailable' })
+      expect(await fifth.json()).toEqual({ error: 'visual_host_share' })
       expect(warn).toHaveBeenCalledWith(
         {
           event: 'codex_proxy_admission_refused',

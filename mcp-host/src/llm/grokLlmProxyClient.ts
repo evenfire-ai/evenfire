@@ -15,6 +15,13 @@ export const GROK_PROXY_COMPLETIONS_PATH = '/internal/runtime/v1/grok/completion
  * sentence that says what to do; everything else keeps the diagnostic shape.
  */
 export function grokProxyErrorMessage(code: string, status?: number): string {
+  if (
+    code === 'visual_host_share' ||
+    code === 'visual_gate' ||
+    code === 'proxy_capacity_exceeded'
+  ) {
+    return 'Grok proxy admission is full. Wait for an active request to finish or send fewer concurrent requests before retrying; this is not a Grok outage.'
+  }
   if (code === 'client_upgrade_required') {
     return 'Grok subscription inference is unavailable: xAI now requires a newer Grok client version than this deployment sends. An operator can set GROK_LLM_PROXY_CLIENT_VERSION to a current Grok Build release, or contact support — retrying will not help.'
   }
@@ -194,7 +201,9 @@ export class GrokLlmProxyClient {
         return this.streamOnce(input, false)
       }
       const payload = (await response.json().catch(() => ({}))) as Record<string, unknown>
-      // A 413 with no JSON code comes from the gateway in front of the proxy
+      // Only the proxy-owned machine `error` field identifies the outcome; an
+      // upstream `reason` string is never promoted to trusted provenance. A
+      // 413 with no JSON code comes from the gateway in front of the proxy
       // (nginx `client_max_body_size`): a size refusal of this request, never a
       // provider outage (#739). A code the 413 carries still wins. A 429 is a
       // rate limit (G1-6, G1-11, #720): the proxy answers `rate_limited`

@@ -545,6 +545,90 @@ describe('GrokLlmProxyClient', () => {
     expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
   })
 
+  it.each(['visual_host_share', 'visual_gate', 'proxy_capacity_exceeded'] as const)(
+    'decodes the local %s admission code without failover and keeps the client usable',
+    async code => {
+      const fetchFn = vi
+        .fn()
+        .mockResolvedValueOnce(
+          Response.json({ error: code, reason: 'untrusted upstream prose' }, { status: 503 })
+        )
+        .mockResolvedValueOnce(new Response(sse([{ type: 'done', outcome: 'success' }])))
+      const grok = client(fetchFn)
+      const err = await grok.stream(STREAM_INPUT).then(
+        () => undefined,
+        (e: unknown) => e
+      )
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+      expect(err).toBeInstanceOf(GrokProxyError)
+      if (!(err instanceof GrokProxyError)) throw new Error('expected GrokProxyError')
+      expect(err).toMatchObject({
+        code,
+        message: grokProxyErrorMessage(code, 503),
+        dispatched: true,
+      })
+      expect(err.message).not.toContain('untrusted upstream prose')
+
+      const provider = new GrokSubscriptionProvider('grok-4.6', {} as never)
+      const classified = provider.classifyError(err)
+      expect(classified.code).toBe(LlmErrorCode.ApiCallFailed)
+      expect(classified.retryable).toBe(false)
+      expect(classified.providerCode).toBe(code)
+      expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
+
+      const next = await grok.stream(STREAM_INPUT)
+      expect(next.outcome).toBe('success')
+      expect(fetchFn).toHaveBeenCalledTimes(2)
+
+      const outage = provider.classifyError(
+        new GrokProxyError('provider_unavailable', 'real upstream outage')
+      )
+      expect(outage.code).toBe(LlmErrorCode.ModelOverloaded)
+      expect(outage.retryable).toBe(true)
+      expect(classifyFailoverClass(outage.code, outage.retryable)).toBe('provider_unavailable')
+    }
+  )
+
+  it.each([
+    [
+      'unknown_machine_code',
+      JSON.stringify({ error: 'future_proxy_error' }),
+      LlmErrorCode.ApiCallFailed,
+      false,
+      'future_proxy_error',
+    ],
+    [
+      'reason_only',
+      JSON.stringify({ reason: 'visual_gate' }),
+      LlmErrorCode.ModelOverloaded,
+      true,
+      'provider_unavailable',
+    ],
+    ['malformed_json', '{', LlmErrorCode.ModelOverloaded, true, 'provider_unavailable'],
+  ] as const)(
+    'keeps wire %s separate from trusted local refusal provenance',
+    async (_label, body, code, retryable, providerCode) => {
+      const fetchFn = vi
+        .fn()
+        .mockResolvedValue(
+          new Response(body, { status: 503, headers: { 'content-type': 'application/json' } })
+        )
+      const proxy = client(fetchFn)
+      const error = await proxy.stream(STREAM_INPUT).then(
+        () => undefined,
+        (caught: unknown) => caught
+      )
+      expect(error).toBeInstanceOf(GrokProxyError)
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+      const provider = new GrokSubscriptionProvider('grok-4.6', {} as never)
+      const classified = provider.classifyError(error)
+      expect(classified).toMatchObject({ code, retryable, providerCode })
+      expect(classifyFailoverClass(classified.code, classified.retryable)).toBe(
+        retryable ? 'provider_unavailable' : null
+      )
+    }
+  )
+
   // T-TE-1 (D4) — the proxy passes control-api's redeem refusal through as
   // `403 { error: 'ticket_expired' }` when the ticket died while the request
   // was queued. Nothing reached the provider, so a re-authorized retry is the

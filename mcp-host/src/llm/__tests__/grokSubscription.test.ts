@@ -47,6 +47,8 @@ function deps(overrides?: {
   return {
     authorizer: { authorize },
     proxy: { stream },
+    authorize,
+    stream,
     attemptContext: vi.fn(() => ({
       policyRevision: 1,
       policyHash: 'b'.repeat(64),
@@ -56,6 +58,37 @@ function deps(overrides?: {
 }
 
 describe('GrokSubscriptionProvider', () => {
+  it.each(['visual_host_share', 'visual_gate', 'proxy_capacity_exceeded'] as const)(
+    'keeps the provider usable after a local %s admission refusal',
+    async code => {
+      const wired = deps({
+        stream: vi
+          .fn()
+          .mockRejectedValueOnce(
+            new GrokProxyError(code, 'proxy admission is full', { dispatched: true })
+          )
+          .mockResolvedValueOnce({ text: 'next text turn', toolCalls: [], outcome: 'success' }),
+      })
+      const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
+
+      await expect(
+        provider.completeSingleTurn([{ role: 'user', content: 'image' }])
+      ).rejects.toMatchObject({ code })
+      const result = await provider.completeSingleTurn([{ role: 'user', content: 'next text' }])
+      expect(result.content).toBe('next text turn')
+      expect(wired.authorize).toHaveBeenCalledTimes(2)
+      expect(wired.stream).toHaveBeenCalledTimes(2)
+
+      const classified = provider.classifyError(
+        new GrokProxyError(code, 'proxy admission is full', { dispatched: true })
+      )
+      expect(classified.code).toBe(LlmErrorCode.ApiCallFailed)
+      expect(classified.retryable).toBe(false)
+      expect(classified.providerCode).toBe(code)
+      expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
+    }
+  )
+
   it.each(['unknown', 'canceled', 'error'])(
     'never returns executable calls from a %s batch',
     async outcome => {

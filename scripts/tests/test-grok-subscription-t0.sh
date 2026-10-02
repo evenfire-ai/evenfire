@@ -252,6 +252,7 @@ run_group "grok-llm-proxy" "grok-llm-proxy" \
   "test/sseBackpressure.test.ts" \
   "test/sseHeartbeat.test.ts" \
   "test/streamGate.handoff.test.ts" \
+  "test/visualBodyReadOwnership.test.ts" \
   "test/toolNameMap.test.ts" \
   "test/upstreamErrorHint.test.ts"
 
@@ -273,6 +274,9 @@ run_group "control-api grok" "control-api" \
   "test/subscriptionGrantIdentity.test.ts" \
   "test/llmProviders.test.ts" \
   "test/routes.admin.grokSubscription.test.ts" \
+  "test/routes.mcp-host.llmProviderAttempts.bodyAdmission.test.ts" \
+  "test/llmProviderAttemptBodyAdmission.test.ts" \
+  "test/llmProviderAttemptAuthorizer.cancellation.test.ts" \
   "test/routes.internal.llmProviderAttempts.grok.test.ts" \
   "test/routes.adminPluginWorkloadSdk.test.ts" \
   "test/routes.adminRecipes.test.ts" \
@@ -296,6 +300,7 @@ run_group "mcp-host grok" "mcp-host" \
   "src/llm/__tests__/imageSource.test.ts" \
   "src/llm/__tests__/grokLlmProxyClient.test.ts" \
   "src/llm/__tests__/imageInput.test.ts" \
+  "src/llm/failover/__tests__/subscriptionAdmission.integration.test.ts" \
   "src/llm/__tests__/providerAttemptAuthorizer.test.ts" \
   "src/core/adapters/__tests__/llmImageCompatibility.test.ts" \
   "src/agent/__tests__/taskExecutor.test.ts" \

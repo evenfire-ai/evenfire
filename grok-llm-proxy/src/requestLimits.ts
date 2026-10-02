@@ -51,6 +51,13 @@ export const IN_FLIGHT_BODY_BUDGET_BODIES = 3
  */
 export const BODY_READ_DEADLINE_MS = 10_000
 
+/**
+ * Bounds the interval between a visual read timeout/client response close and
+ * forced request destruction. The parser's callback—not this timer—releases the
+ * visual slot and principal share.
+ */
+export const VISUAL_READ_CLOSE_GRACE_MS = 100
+
 export const STREAM_LIMITS = {
   maxConcurrentStreams: 8,
   maxQueuedRequests: 16,
@@ -94,9 +101,10 @@ export const VISUAL_STREAM_LIMITS = {
  * Fair share of the visual gate's entries — running plus queued — that one
  * platform principal (`sub` plus sorted `hostRefs`) may hold at once. Above the
  * share, further visual requests from that principal are refused 503
- * `provider_unavailable` with log reason `visual_host_share`, so one principal
+ * `visual_host_share`, so one principal
  * cannot fill a gate that every other host still needs. The gate widths above
  * are unchanged; the share only bounds how much of them one principal occupies.
+ * Its refusal is a local capacity outcome, not an upstream outage.
  */
 export const VISUAL_PER_HOST_MAX_ADMITTED = 2
 
@@ -117,14 +125,18 @@ export type RequestLimitKind =
   | 'queue_wait'
   | 'ticket_life'
 
+export type RequestLimitCode = 'provider_unavailable' | 'proxy_capacity_exceeded' | 'visual_gate'
+
 export class RequestLimitError extends Error {
-  readonly code = 'provider_unavailable'
+  readonly code: RequestLimitCode
   constructor(
     message: string,
-    readonly kind: RequestLimitKind
+    readonly kind: RequestLimitKind,
+    code: RequestLimitCode = 'provider_unavailable'
   ) {
     super(message)
     this.name = 'RequestLimitError'
+    this.code = code
   }
 }
 
@@ -178,7 +190,8 @@ export class StreamGate {
   constructor(
     private readonly maxConcurrent: number = STREAM_LIMITS.maxConcurrentStreams,
     private readonly maxQueued: number = STREAM_LIMITS.maxQueuedRequests,
-    private readonly maxQueueWaitMs: number = STREAM_LIMITS.maxQueueWaitMs
+    private readonly maxQueueWaitMs: number = STREAM_LIMITS.maxQueueWaitMs,
+    private readonly queueCapacityCode: RequestLimitCode = 'proxy_capacity_exceeded'
   ) {
     // A NaN or fractional size would let every caller through or queue
     // without bound, because the comparisons below would never hold.
@@ -221,7 +234,7 @@ export class StreamGate {
     if (signal?.aborted) throw new RequestLimitError('stream request was aborted', 'aborted')
     if (this.running >= this.maxConcurrent) {
       if (this.queued >= this.maxQueued)
-        throw new RequestLimitError('stream queue is full', 'queue_full')
+        throw new RequestLimitError('stream queue is full', 'queue_full', this.queueCapacityCode)
       this.queued += 1
       try {
         await new Promise<void>((resolve, reject) => {
@@ -247,7 +260,8 @@ export class StreamGate {
             reject(
               new RequestLimitError(
                 'stream queue wait exceeded',
-                deadlineGoverns ? 'deadline' : 'queue_wait'
+                deadlineGoverns ? 'deadline' : 'queue_wait',
+                deadlineGoverns ? 'provider_unavailable' : this.queueCapacityCode
               )
             )
           }
@@ -289,7 +303,9 @@ export const streamGate = new StreamGate()
 
 export const visualStreamGate = new StreamGate(
   VISUAL_STREAM_LIMITS.maxConcurrentStreams,
-  VISUAL_STREAM_LIMITS.maxQueuedRequests
+  VISUAL_STREAM_LIMITS.maxQueuedRequests,
+  STREAM_LIMITS.maxQueueWaitMs,
+  'visual_gate'
 )
 
 type BodyWaiter = { bytes: number; grant: (release: () => void) => void }
@@ -348,7 +364,11 @@ export class BodyBudget {
       return this.take(bytes)
     }
     if (this.waiters.length >= this.maxQueued) {
-      throw new RequestLimitError('body admission queue is full', 'queue_full')
+      throw new RequestLimitError(
+        'body admission queue is full',
+        'queue_full',
+        'proxy_capacity_exceeded'
+      )
     }
     return new Promise<() => void>((resolve, reject) => {
       let deadline: ReturnType<typeof setTimeout> | undefined

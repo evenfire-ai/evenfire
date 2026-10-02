@@ -107,12 +107,23 @@ existing kill switches (`MCP_HOST_CODEX_SUBSCRIPTION_ENABLED` and
 `CODEX_LLM_PROXY_EXECUTION_ENABLED`). Missing image provenance returns
 `image_source_invalid`. Limit errors, including HTTP 413 without a JSON body,
 remain non-retryable and do not fail over. Images are never silently stripped.
-Two 503s the proxy gives an image request before redeem are different:
-`visual_gate` (the visual gate is full) and `visual_host_share` (the
-principal's share of it is full) answer `provider_unavailable`, which the Host
-classifies as `LLM_MODEL_OVERLOADED`, retryable, and a Host with a fallback
-provider configured fails over on it. Whether that should stay retryable is
-tracked in #868.
+Three local-capacity outcomes the proxy can give before redeem are closed wire
+identities: `visual_host_share` (the principal's share is full), `visual_gate`
+(the visual gate's queue is full or waited out), and
+`proxy_capacity_exceeded` (ordinary stream/body capacity). They classify as
+non-retryable `LLM_API_CALL_FAILED`, do not construct fallback or install its
+cooldown, and leave the primary usable for the next text turn. Only the
+proxy-owned machine-code field supplies that identity; upstream prose or a
+`reason` field never does. A timed-out visual reader keeps its slot and
+principal share until parser termination, with a bounded close/destruction
+backstop. Real upstream outage, connect-failure and 429 semantics remain
+unchanged.
+
+The critical Codex test title migrated from "visual admission overflow answers
+503 provider_unavailable and logs visual_gate" to "visual admission overflow
+answers 503 visual_gate and logs visual_gate". Its physical file and the original
+503, refusal-log, no-redeem and capacity-recovery protections remain pinned; the
+wire literal changed to reflect the local-capacity contract.
 
 Residual risk. Tool screenshots reach the upstream in a user-role message,
 after the tool messages, behind the fixed text "These images are output of the
@@ -504,6 +515,7 @@ behavior changes:
     and logged as `codex_proxy_admission_refused` with `reason: visual_gate`.
     A client that leaves while queued is not gate saturation: its place is freed
     silently, with no log and no response.
+
   - It requires the redeem response to carry `maxStreamDurationMs` greater
     than 0. An absent value is a contract violation, not a default.
   - It logs one `codex_proxy_attempt_finished` event per completion attempt,
@@ -542,6 +554,7 @@ behavior changes:
     `provider_unavailable`. The metric labels it `request_limit` to keep it
     apart from upstream outages, and the log line carries the limit's fixed
     `reason`.
+
 - **Live-target attestation.** Codex authorize attests the live Host or recipe
   target. The allowed providers come only from the spec's model, allowed
   models and fallbacks (Hosts) or agent providers (recipes). A target that
@@ -712,7 +725,7 @@ code the proxy constructs, and every code it refuses a request with
   | -------------------------------------------------------- | --------------------------------- |
   | `request exceeds maxRequestBodyBytes`                    | serialized UTF-8 byte cap         |
   | `request exceeds maxRequestBodyBytes outside image data` | non-image share of a V2 request   |
-  | `request exceeds maxRequestElements`                    | element count in `checkStructure` |
+  | `request exceeds maxRequestElements`                     | element count in `checkStructure` |
   | `messages exceed <maxMessages>`                          | message count                     |
   | `messages[i].toolCalls exceed <maxToolCalls>`            | tool calls on one message         |
 

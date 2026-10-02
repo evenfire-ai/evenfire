@@ -242,6 +242,9 @@ run_group "control-api" "control-api" \
   "test/routes.admin.codexSubscription.test.ts" \
   "test/routes.admin.codexSubscription.hostWrite.test.ts" \
   "test/routes.auth.codexSubscriptionCallback.test.ts" \
+  "test/routes.mcp-host.llmProviderAttempts.bodyAdmission.test.ts" \
+  "test/llmProviderAttemptBodyAdmission.test.ts" \
+  "test/llmProviderAttemptAuthorizer.cancellation.test.ts" \
   "test/routes.mcp-host.llmProviderAttempts.test.ts" \
   "test/routes.adminRecipes.test.ts" \
   "test/routes.adminPluginWorkloadSdk.test.ts" \
@@ -300,6 +303,7 @@ run_group "codex-llm-proxy" "codex-llm-proxy" \
   "test/sseBackpressure.test.ts" \
   "test/sseHeartbeat.test.ts" \
   "test/streamGate.handoff.test.ts" \
+  "test/visualBodyReadOwnership.test.ts" \
   "test/streamLimitsFreeze.test.ts" \
   "test/toolNameMap.test.ts"
 
@@ -325,6 +329,7 @@ run_group "mcp-host" "mcp-host" \
   "src/llm/__tests__/codexSubscription.test.ts" \
   "src/llm/__tests__/codexLlmProxyClient.test.ts" \
   "src/llm/__tests__/subscriptionRequestHash.test.ts" \
+  "src/llm/failover/__tests__/subscriptionAdmission.integration.test.ts" \
   "src/llm/__tests__/providerAttemptAuthorizer.test.ts" \
   "src/llm/hostLlmBinding.test.ts" \
   "src/config/configStore.test.ts" \

@@ -201,7 +201,9 @@ describe('grok-llm-proxy security surface', () => {
   })
 
   it('reserves the visual transport budget for an authenticated ~30 MiB V2 body', async () => {
-    const { runtimeApp, adminApp } = createProxyApps(config({ maxBodyBytes: DEFAULT_MAX_BODY_BYTES }))
+    const { runtimeApp, adminApp } = createProxyApps(
+      config({ maxBodyBytes: DEFAULT_MAX_BODY_BYTES })
+    )
     // Deliberately invalid ticket: this test checks parser admission and the
     // unchanged ticket gate, without redeeming or contacting any model. 30 MiB
     // is past the Codex 24 MiB visual ceiling and inside the Grok 35 MiB one.
@@ -287,7 +289,9 @@ describe('grok-llm-proxy security surface', () => {
     const acquire = vi.spyOn(visualStreamGate, 'acquire')
     const visual = await send('x'.repeat(8_000_000), {
       schemaVersion: 'grok-completion-request.v2',
-      messages: [{ role: 'user', contentParts: [{ type: 'image', data: 'A'.repeat(1024 * 1024) }] }],
+      messages: [
+        { role: 'user', contentParts: [{ type: 'image', data: 'A'.repeat(1024 * 1024) }] },
+      ],
     })
     expect(visual.status).toBe(400)
     expect(visual.body.error).toBe('invalid_request')
@@ -340,7 +344,10 @@ describe('grok-llm-proxy security surface', () => {
     const { runtimeApp, probeApp } = createProxyApps(config({ maxBodyBytes: 65_536 }), {
       streamCompletion: async () => {
         streamCalls += 1
-        throw new GrokTransportError('payload_too_large', 'request exceeds maxVisualRequestBodyBytes')
+        throw new GrokTransportError(
+          'payload_too_large',
+          'request exceeds maxVisualRequestBodyBytes'
+        )
       },
     })
     const res = await request(runtimeApp)
@@ -352,7 +359,9 @@ describe('grok-llm-proxy security surface', () => {
     expect(res.status).toBe(413)
     expect(res.body).toEqual({ error: 'payload_too_large' })
     const metricsText = (await request(probeApp).get('/metrics')).text
-    expect(metricsText).toMatch(/^grok_proxy_attempt_failures_total\{code="payload_too_large"\} 1$/m)
+    expect(metricsText).toMatch(
+      /^grok_proxy_attempt_failures_total\{code="payload_too_large"\} 1$/m
+    )
   })
 
   it('does not let a V2 declaration raise the non-image budget to 35 MiB', async () => {
@@ -854,10 +863,12 @@ describe('grok-llm-proxy startup config', () => {
       loadConfig({ ...base, GROK_LLM_PROXY_MAX_BODY_BYTES: String(LIMITS.maxRequestBodyBytes) })
     ).toThrow(/GROK_LLM_PROXY_MAX_BODY_BYTES must be at least/)
     // Witness: the floor itself and any larger value load.
-    expect(loadConfig({ ...base, GROK_LLM_PROXY_MAX_BODY_BYTES: String(floor) }).maxBodyBytes).toBe(floor)
-    expect(loadConfig({ ...base, GROK_LLM_PROXY_MAX_BODY_BYTES: String(floor + 1) }).maxBodyBytes).toBe(
-      floor + 1
+    expect(loadConfig({ ...base, GROK_LLM_PROXY_MAX_BODY_BYTES: String(floor) }).maxBodyBytes).toBe(
+      floor
     )
+    expect(
+      loadConfig({ ...base, GROK_LLM_PROXY_MAX_BODY_BYTES: String(floor + 1) }).maxBodyBytes
+    ).toBe(floor + 1)
   })
 
   it('defaults the visual body limit to the contract visual ceiling, with no allowance on top', () => {
@@ -1266,7 +1277,10 @@ describe('grok-llm-proxy attempt telemetry', () => {
 
   // Denies the redeem after `delayMs`, which is longer than the heartbeat
   // interval the caller configures.
-  function slowDenyingClient(code: string, delayMs: number): {
+  function slowDenyingClient(
+    code: string,
+    delayMs: number
+  ): {
     client: ControlApiClient
     redeemCalls: () => number
   } {
@@ -1661,6 +1675,33 @@ describe('grok-llm-proxy attempt telemetry', () => {
     expect('err' in (lines[0] ?? {})).toBe(false)
   })
 
+  it.each(['visual_host_share', 'visual_gate', 'proxy_capacity_exceeded'])(
+    'normalizes real transport upstream 503 claiming %s to provider_unavailable',
+    async code => {
+      const fetchFn = vi
+        .fn<typeof fetch>()
+        .mockResolvedValue(
+          Response.json({ error: code, reason: 'local capacity claim' }, { status: 503 })
+        )
+      const { res, receipts, lines, metricsText } = await run({
+        providerAttemptId: 'att-spoofed-local',
+        fetchFn,
+      })
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+      expect(res.status).toBe(503)
+      expect(res.body).toEqual({ error: 'provider_unavailable' })
+      expect(receipts).toEqual([expect.objectContaining({ outcome: 'error' })])
+      expect(lines).toHaveLength(1)
+      expect(lines[0]).toMatchObject({
+        code: 'provider_unavailable',
+        deliveredAs: 'http_status',
+        httpStatus: 503,
+      })
+      expect(failureCount(metricsText, 'provider_unavailable')).toBe(1)
+      expect(failureCount(metricsText, 'request_limit')).toBe(0)
+    }
+  )
+
   it('(g1-1a) answers 429 rate_limited and forwards a valid upstream Retry-After', async () => {
     const { res, receipts, lines, metricsText } = await run({
       providerAttemptId: 'att-rate-http',
@@ -1732,7 +1773,9 @@ describe('grok-llm-proxy attempt telemetry', () => {
     // Witness: a keepalive went out first, so only the frame can carry it.
     expect(keepaliveCount(res.text)).toBeGreaterThanOrEqual(1)
     expect(
-      res.text.endsWith('data: {"type":"error","code":"upstream_rejected","upstreamStatus":402}\n\n')
+      res.text.endsWith(
+        'data: {"type":"error","code":"upstream_rejected","upstreamStatus":402}\n\n'
+      )
     ).toBe(true)
     expect(lines).toHaveLength(1)
     expect(lines[0]).toMatchObject({
@@ -2143,20 +2186,24 @@ describe('grok-llm-proxy attempt telemetry', () => {
   it('(rl1) logs the request-limit reason and labels its failure metric request_limit', async () => {
     const acquire = vi
       .spyOn(streamGate, 'acquire')
-      .mockRejectedValueOnce(new RequestLimitError('stream queue is full', 'queue_full'))
+      .mockRejectedValueOnce(
+        new RequestLimitError('stream queue is full', 'queue_full', 'proxy_capacity_exceeded')
+      )
     try {
-      const { res, receipts, lines, metricsText } = await run({ providerAttemptId: 'att-queue-full' })
+      const { res, receipts, lines, metricsText } = await run({
+        providerAttemptId: 'att-queue-full',
+      })
       // Witness: the refusal came from the stream gate this test replaced.
       expect(acquire).toHaveBeenCalledTimes(1)
       expect(res.status).toBe(503)
-      expect(res.body).toEqual({ error: 'provider_unavailable' })
+      expect(res.body).toEqual({ error: 'proxy_capacity_exceeded' })
       // The gate refused before the redeem, so there is no receipt to finalize.
       expect(receipts).toEqual([])
       expect(lines).toHaveLength(1)
       expect(lines[0]).toMatchObject({
         providerAttemptId: 'att-queue-full',
         outcome: 'failed',
-        code: 'provider_unavailable',
+        code: 'proxy_capacity_exceeded',
         reason: 'stream queue is full',
         deliveredAs: 'http_status',
         httpStatus: 503,
@@ -2220,9 +2267,7 @@ describe('grok-llm-proxy attempt telemetry', () => {
     })
     expect(res.status).toBe(200)
     expect(keepaliveCount(res.text)).toBeGreaterThanOrEqual(1)
-    expect(res.text.endsWith('data: {"type":"error","code":"provider_unavailable"}\n\n')).toBe(
-      true
-    )
+    expect(res.text.endsWith('data: {"type":"error","code":"provider_unavailable"}\n\n')).toBe(true)
     expect(lines).toHaveLength(1)
     expect(lines[0]).toMatchObject({
       outcome: 'failed',
@@ -2513,7 +2558,10 @@ describe('grok-llm-proxy ticket-aware stream-gate wait (#739 D1-bis)', () => {
   }, 30_000)
 
   /** A V2 envelope past `maxBodyBytes`, so it takes the visual gate. */
-  function visualEnvelope(providerAttemptId: string, ticketLifeMs: number): Record<string, unknown> {
+  function visualEnvelope(
+    providerAttemptId: string,
+    ticketLifeMs: number
+  ): Record<string, unknown> {
     const raw: Record<string, unknown> = {
       schemaVersion: 'grok-completion-request.v2',
       requestId: `req-${providerAttemptId}`,
@@ -2565,7 +2613,10 @@ describe('grok-llm-proxy ticket-aware stream-gate wait (#739 D1-bis)', () => {
         .set('Authorization', `Bearer ${platformToken()}`)
         .send(body)
         .then(res => res)
-      await until(() => visualStreamGate.snapshot().queued === 1, 'the body queueing at the visual gate')
+      await until(
+        () => visualStreamGate.snapshot().queued === 1,
+        'the body queueing at the visual gate'
+      )
 
       await vi.advanceTimersByTimeAsync(ticketLifeMs)
       // Witness: the body was still waiting for the slot at the ticket's expiry.
@@ -2920,7 +2971,7 @@ describe('grok-llm-proxy body budget release on upstream acceptance (#739 D2)', 
       const client = open(proxy.port, payload)
       await until(() => client.ended(), 'the refusal')
       expect(client.status()).toBe(503)
-      expect(JSON.parse(client.received())).toEqual({ error: 'provider_unavailable' })
+      expect(JSON.parse(client.received())).toEqual({ error: 'proxy_capacity_exceeded' })
       await until(() => proxy.closes() === 1, "the response's close event")
       expect(client.errors()).toEqual([])
       expect(proxy.reservations()).toEqual([Buffer.byteLength(payload)])
@@ -3086,7 +3137,10 @@ describe('grok-llm-proxy graceful drain on shutdown (#739 D6)', () => {
     req.end(payload)
     let closing: Promise<void> | undefined
     try {
-      await until(() => received.includes('data: {"type":"text","text":"t0"}'), 'the first SSE frame')
+      await until(
+        () => received.includes('data: {"type":"text","text":"t0"}'),
+        'the first SSE frame'
+      )
       closing = apps.close().then(() => {
         order.push('closed')
       })

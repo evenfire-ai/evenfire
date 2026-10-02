@@ -355,7 +355,7 @@ describe('codex-llm-proxy body admission (#731 R3-2)', () => {
     }
   }, 30_000)
 
-  it('T-R3-2c answers provider_unavailable once the admission queue is full', async () => {
+  it('T-R3-2c answers proxy_capacity_exceeded once the admission queue is full', async () => {
     // A small body limit keeps this cheap; the budget scales with it.
     const maxBodyBytes = 16 * 1024
     const proxy = await heldProxy(maxBodyBytes)
@@ -375,16 +375,16 @@ describe('codex-llm-proxy body admission (#731 R3-2)', () => {
         const overflow = await post(proxy.port, payload('overflow'))
         // Witnesses: the refusal was answered, and the admission logged why.
         expect(overflow.status).toBe(503)
-        expect(JSON.parse(overflow.body)).toEqual({ error: 'provider_unavailable' })
+        expect(JSON.parse(overflow.body)).toEqual({ error: 'proxy_capacity_exceeded' })
         const logged = warn.mock.calls.map(call => call[0] as unknown as Record<string, unknown>)
         expect(logged.filter(entry => entry?.event === 'codex_proxy_denied')).toEqual([
-          { event: 'codex_proxy_denied', code: 'provider_unavailable' },
+          { event: 'codex_proxy_denied', code: 'proxy_capacity_exceeded' },
         ])
         expect(logged.filter(entry => entry?.event === 'codex_proxy_admission_refused')).toEqual([
           {
             event: 'codex_proxy_admission_refused',
             reason: 'body_budget',
-            code: 'provider_unavailable',
+            code: 'proxy_capacity_exceeded',
             kind: 'queue_full',
             detail: expect.any(String),
           },

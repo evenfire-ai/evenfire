@@ -1,9 +1,9 @@
+import { describe, expect, it, vi } from 'vitest'
+import jwt from 'jsonwebtoken'
 import { generateKeyPairSync } from 'node:crypto'
 import { createServer, request as httpRequest } from 'node:http'
 import type { AddressInfo } from 'node:net'
-import jwt from 'jsonwebtoken'
 import request from 'supertest'
-import { describe, expect, it, vi } from 'vitest'
 import {
   ENVELOPE_ALLOWANCE_BYTES as CONTRACT_ENVELOPE_ALLOWANCE_BYTES,
   LIMITS,
@@ -15,7 +15,7 @@ import {
 import { verifyAdminPermit } from '../src/auth/adminPermitVerifier.js'
 import { verifyExecutionTicket } from '../src/auth/executionTicketVerifier.js'
 import { CodexTransportError } from '../src/codexTransport.js'
-import { loadConfig, type CodexLlmProxyConfig } from '../src/config.js'
+import { type CodexLlmProxyConfig, loadConfig } from '../src/config.js'
 import {
   ControlApiClient,
   ControlApiClientError,
@@ -184,9 +184,7 @@ describe('codex-llm-proxy security surface', () => {
   })
 
   it('reserves the larger transport budget for authenticated visual requests', async () => {
-    const { runtimeApp, adminApp } = createProxyApps(
-      config({ maxBodyBytes: 1_048_576 })
-    )
+    const { runtimeApp, adminApp } = createProxyApps(config({ maxBodyBytes: 1_048_576 }))
     // Deliberately invalid ticket: this test checks parser admission and the
     // unchanged ticket gate, without redeeming or contacting any model.
     const payload = {
@@ -266,7 +264,9 @@ describe('codex-llm-proxy security surface', () => {
     try {
       const visual = await send('x'.repeat(8_000_000), {
         schemaVersion: 'codex-completion-request.v2',
-        messages: [{ role: 'user', contentParts: [{ type: 'image', data: 'A'.repeat(1024 * 1024) }] }],
+        messages: [
+          { role: 'user', contentParts: [{ type: 'image', data: 'A'.repeat(1024 * 1024) }] },
+        ],
       })
       expect(visual.status).toBe(400)
       expect(visual.body.error).toBe('invalid_request')
@@ -304,7 +304,10 @@ describe('codex-llm-proxy security surface', () => {
     const { runtimeApp, probeApp } = createProxyApps(config({ maxBodyBytes: 65_536 }), {
       streamCompletion: async () => {
         streamCalls += 1
-        throw new CodexTransportError('payload_too_large', 'request exceeds maxVisualRequestBodyBytes')
+        throw new CodexTransportError(
+          'payload_too_large',
+          'request exceeds maxVisualRequestBodyBytes'
+        )
       },
     })
     const res = await request(runtimeApp)
@@ -316,7 +319,9 @@ describe('codex-llm-proxy security surface', () => {
     expect(res.status).toBe(413)
     expect(res.body).toEqual({ error: 'payload_too_large' })
     const metricsText = (await request(probeApp).get('/metrics')).text
-    expect(metricsText).toMatch(/^codex_proxy_attempt_failures_total\{code="payload_too_large"\} 1$/m)
+    expect(metricsText).toMatch(
+      /^codex_proxy_attempt_failures_total\{code="payload_too_large"\} 1$/m
+    )
   })
 
   it('does not let a V2 declaration raise the non-image budget to 24 MiB', async () => {
@@ -392,9 +397,7 @@ describe('codex-llm-proxy security surface', () => {
   }, 60_000)
 
   it('rate limits the completion endpoint before body parsing and authorization', async () => {
-    const { runtimeApp } = createProxyApps(
-      config({ maxBodyBytes: 1024 })
-    )
+    const { runtimeApp } = createProxyApps(config({ maxBodyBytes: 1024 }))
     const completion = () => request(runtimeApp).post('/internal/runtime/v1/codex/completions')
     const oversized = {
       executionTicket: 'invalid-ticket',
@@ -918,17 +921,21 @@ describe('codex-llm-proxy startup config', () => {
   // accepts, so it is refused at startup, as the visual override is.
   it('T-R9-3 refuses a body limit below the contract request cap plus the envelope allowance', () => {
     const floor = LIMITS.maxRequestBodyBytes + ENVELOPE_ALLOWANCE_BYTES
-    expect(() => loadConfig({ ...base, CODEX_LLM_PROXY_MAX_BODY_BYTES: String(floor - 1) })).toThrow(
+    expect(() =>
+      loadConfig({ ...base, CODEX_LLM_PROXY_MAX_BODY_BYTES: String(floor - 1) })
+    ).toThrow(
       'CODEX_LLM_PROXY_MAX_BODY_BYTES must be at least the contract request cap plus the envelope allowance'
     )
     expect(() =>
       loadConfig({ ...base, CODEX_LLM_PROXY_MAX_BODY_BYTES: String(LIMITS.maxRequestBodyBytes) })
     ).toThrow(/CODEX_LLM_PROXY_MAX_BODY_BYTES must be at least/)
     // Witness: the floor itself and any larger value load.
-    expect(loadConfig({ ...base, CODEX_LLM_PROXY_MAX_BODY_BYTES: String(floor) }).maxBodyBytes).toBe(floor)
-    expect(loadConfig({ ...base, CODEX_LLM_PROXY_MAX_BODY_BYTES: String(floor + 1) }).maxBodyBytes).toBe(
-      floor + 1
-    )
+    expect(
+      loadConfig({ ...base, CODEX_LLM_PROXY_MAX_BODY_BYTES: String(floor) }).maxBodyBytes
+    ).toBe(floor)
+    expect(
+      loadConfig({ ...base, CODEX_LLM_PROXY_MAX_BODY_BYTES: String(floor + 1) }).maxBodyBytes
+    ).toBe(floor + 1)
   })
 
   it('T-R2-6c does not refuse a request at the contract cap with a real ticket as payload_too_large', async () => {
@@ -945,14 +952,11 @@ describe('codex-llm-proxy startup config', () => {
     expect(typeof res.body.error).toBe('string')
   })
 
-  it.each([undefined, '', '   '])(
-    'fails at startup when the control-api URL is %j',
-    value => {
-      expect(() => loadConfig({ ...base, CODEX_LLM_PROXY_CONTROL_API_URL: value })).toThrow(
-        /CODEX_LLM_PROXY_CONTROL_API_URL/
-      )
-    }
-  )
+  it.each([undefined, '', '   '])('fails at startup when the control-api URL is %j', value => {
+    expect(() => loadConfig({ ...base, CODEX_LLM_PROXY_CONTROL_API_URL: value })).toThrow(
+      /CODEX_LLM_PROXY_CONTROL_API_URL/
+    )
+  })
 
   it.each(['not a url', 'ftp://control-api/api/v1', 'file:///etc/passwd'])(
     'fails at startup when the control-api URL %j is not http(s)',
@@ -1178,7 +1182,10 @@ describe('codex-llm-proxy attempt telemetry', () => {
 
   // Denies the redeem after `delayMs`, which is longer than the heartbeat
   // interval the caller configures.
-  function slowDenyingClient(code: string, delayMs: number): {
+  function slowDenyingClient(
+    code: string,
+    delayMs: number
+  ): {
     client: ControlApiClient
     redeemCalls: () => number
   } {
@@ -1215,7 +1222,8 @@ describe('codex-llm-proxy attempt telemetry', () => {
     const warn = vi.spyOn(logger, 'warn')
     const { client, receipts } = grantingClient(options.maxStreamDurationMs)
     const apps = createProxyApps(config({ maxBodyBytes: 65_536, ...options.configOverrides }), {
-      controlApiClient: options.controlApiClient ?? (deniedCode ? denyingClient(deniedCode) : client),
+      controlApiClient:
+        options.controlApiClient ?? (deniedCode ? denyingClient(deniedCode) : client),
       fetchFn: options.fetchFn ?? upstream(textDeltas, calls, options.terminal),
       lookup: options.lookup ?? lookup,
     })
@@ -1699,6 +1707,37 @@ describe('codex-llm-proxy attempt telemetry', () => {
     expect('err' in (lines[0] ?? {})).toBe(false)
   })
 
+  it.each(['visual_host_share', 'visual_gate', 'proxy_capacity_exceeded'])(
+    'normalizes real transport upstream 503 claiming %s to provider_unavailable',
+    async code => {
+      const fetchFn = vi
+        .fn<typeof fetch>()
+        .mockResolvedValue(
+          Response.json({ error: code, reason: 'local capacity claim' }, { status: 503 })
+        )
+      const { res, receipts, lines, metricsText } = await run(
+        'att-spoofed-local',
+        0,
+        0,
+        undefined,
+        undefined,
+        { fetchFn }
+      )
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+      expect(res.status).toBe(503)
+      expect(res.body).toEqual({ error: 'provider_unavailable' })
+      expect(receipts).toEqual([expect.objectContaining({ outcome: 'error' })])
+      expect(lines).toHaveLength(1)
+      expect(lines[0]).toMatchObject({
+        code: 'provider_unavailable',
+        deliveredAs: 'http_status',
+        httpStatus: 503,
+      })
+      expect(failureCount(metricsText, 'provider_unavailable')).toBe(1)
+      expect(failureCount(metricsText, 'request_limit')).toBe(0)
+    }
+  )
+
   it('(g1-1a) answers 429 rate_limited and forwards a valid upstream Retry-After', async () => {
     const { res, receipts, lines, metricsText } = await run(
       'att-rate-http',
@@ -1776,7 +1815,9 @@ describe('codex-llm-proxy attempt telemetry', () => {
     // Witness: a keepalive went out first, so only the frame can carry it.
     expect(keepaliveCount(res.text)).toBeGreaterThanOrEqual(1)
     expect(
-      res.text.endsWith('data: {"type":"error","code":"upstream_rejected","upstreamStatus":402}\n\n')
+      res.text.endsWith(
+        'data: {"type":"error","code":"upstream_rejected","upstreamStatus":402}\n\n'
+      )
     ).toBe(true)
     expect(lines).toHaveLength(1)
     expect(lines[0]).toMatchObject({
@@ -1885,14 +1926,9 @@ describe('codex-llm-proxy attempt telemetry', () => {
   })
 
   it('(p) T-R7-2c sends an SSE context_length_exceeded frame when text was already streamed', async () => {
-    const { res, lines } = await run(
-      'att-context-sse',
-      1,
-      0,
-      undefined,
-      undefined,
-      { terminal: UPSTREAM_CONTEXT_OVERFLOW_FRAMES }
-    )
+    const { res, lines } = await run('att-context-sse', 1, 0, undefined, undefined, {
+      terminal: UPSTREAM_CONTEXT_OVERFLOW_FRAMES,
+    })
     expect(res.status).toBe(200)
     expect(res.text).toContain('data: {"type":"text","text":"t0"}')
     expect(res.text).toContain('data: {"type":"error","code":"context_length_exceeded"}')
@@ -1998,13 +2034,7 @@ describe('codex-llm-proxy attempt telemetry', () => {
   it.each(['constructor', '__proto__', 'toString', 'hasOwnProperty'])(
     '(g) answers 503 for the inherited control-api code %j instead of crashing',
     async code => {
-      const { res, lines, metricsText } = await run(
-        `att-proto-${code}`,
-        0,
-        0,
-        undefined,
-        code
-      )
+      const { res, lines, metricsText } = await run(`att-proto-${code}`, 0, 0, undefined, code)
       expect(res.status).toBe(503)
       expect(res.body).toEqual({ error: code })
       // Witness: the attempt was reached and logged, so the status above is the
@@ -2019,20 +2049,22 @@ describe('codex-llm-proxy attempt telemetry', () => {
   it('(l) logs the request-limit reason and labels its failure metric request_limit', async () => {
     const acquire = vi
       .spyOn(streamGate, 'acquire')
-      .mockRejectedValueOnce(new RequestLimitError('stream queue is full', 'queue_full'))
+      .mockRejectedValueOnce(
+        new RequestLimitError('stream queue is full', 'queue_full', 'proxy_capacity_exceeded')
+      )
     try {
       const { res, receipts, lines, metricsText } = await run('att-queue-full', 0, 0)
       // Witness: the refusal came from the stream gate this test replaced.
       expect(acquire).toHaveBeenCalledTimes(1)
       expect(res.status).toBe(503)
-      expect(res.body).toEqual({ error: 'provider_unavailable' })
+      expect(res.body).toEqual({ error: 'proxy_capacity_exceeded' })
       // The gate refused before the redeem, so there is no receipt to finalize.
       expect(receipts).toEqual([])
       expect(lines).toHaveLength(1)
       expect(lines[0]).toMatchObject({
         providerAttemptId: 'att-queue-full',
         outcome: 'failed',
-        code: 'provider_unavailable',
+        code: 'proxy_capacity_exceeded',
         reason: 'stream queue is full',
         deliveredAs: 'http_status',
         httpStatus: 503,
@@ -2094,9 +2126,7 @@ describe('codex-llm-proxy attempt telemetry', () => {
     })
     expect(res.status).toBe(200)
     expect(keepaliveCount(res.text)).toBeGreaterThanOrEqual(1)
-    expect(res.text.endsWith('data: {"type":"error","code":"provider_unavailable"}\n\n')).toBe(
-      true
-    )
+    expect(res.text.endsWith('data: {"type":"error","code":"provider_unavailable"}\n\n')).toBe(true)
     expect(lines).toHaveLength(1)
     expect(lines[0]).toMatchObject({
       outcome: 'failed',
@@ -2306,7 +2336,10 @@ describe('codex-llm-proxy ticket-aware stream-gate wait (#739 D1-bis)', () => {
         .set('Authorization', `Bearer ${platformToken()}`)
         .send(envelope('att-ticket-life', ticketLifeMs))
         .then(res => res)
-      await until(() => streamGate.snapshot().queued === 1, 'the request queueing at the stream gate')
+      await until(
+        () => streamGate.snapshot().queued === 1,
+        'the request queueing at the stream gate'
+      )
 
       await vi.advanceTimersByTimeAsync(ticketLifeMs - 1)
       // Witness: the request waited for the ticket's whole life, it was not
@@ -2359,7 +2392,10 @@ describe('codex-llm-proxy ticket-aware stream-gate wait (#739 D1-bis)', () => {
         .set('Authorization', `Bearer ${platformToken()}`)
         .send(envelope('att-ticket-alive', 60_000))
         .then(res => res)
-      await until(() => streamGate.snapshot().queued === 1, 'the request queueing at the stream gate')
+      await until(
+        () => streamGate.snapshot().queued === 1,
+        'the request queueing at the stream gate'
+      )
 
       await vi.advanceTimersByTimeAsync(50_000)
       expect(await withinReal(reply, 100)).toBeUndefined()
@@ -2377,7 +2413,10 @@ describe('codex-llm-proxy ticket-aware stream-gate wait (#739 D1-bis)', () => {
   }, 30_000)
 
   /** A V2 envelope past `maxBodyBytes`, so it takes the visual gate. */
-  function visualEnvelope(providerAttemptId: string, ticketLifeMs: number): Record<string, unknown> {
+  function visualEnvelope(
+    providerAttemptId: string,
+    ticketLifeMs: number
+  ): Record<string, unknown> {
     const raw: Record<string, unknown> = {
       schemaVersion: 'codex-completion-request.v2',
       requestId: `req-${providerAttemptId}`,
@@ -2431,7 +2470,10 @@ describe('codex-llm-proxy ticket-aware stream-gate wait (#739 D1-bis)', () => {
         .set('Authorization', `Bearer ${platformToken()}`)
         .send(body)
         .then(res => res)
-      await until(() => visualStreamGate.snapshot().queued === 1, 'the body queueing at the visual gate')
+      await until(
+        () => visualStreamGate.snapshot().queued === 1,
+        'the body queueing at the visual gate'
+      )
 
       await vi.advanceTimersByTimeAsync(ticketLifeMs)
       // Witness: the body was still waiting for a slot at the ticket's expiry.
@@ -2463,7 +2505,7 @@ describe('codex-llm-proxy ticket-aware stream-gate wait (#739 D1-bis)', () => {
   // overflow witness naming gate saturation. Grok already pins this twin; the
   // queue is filled directly so the refusal under test is the global visual
   // gate, not the per-principal share.
-  it('visual admission overflow answers 503 provider_unavailable and logs visual_gate', async () => {
+  it('visual admission overflow answers 503 visual_gate and logs visual_gate', async () => {
     const warn = vi.spyOn(logger, 'warn')
     const held: Array<() => void> = []
     const waiting: Array<Promise<() => void>> = []
@@ -2487,12 +2529,12 @@ describe('codex-llm-proxy ticket-aware stream-gate wait (#739 D1-bis)', () => {
         .set('Authorization', `Bearer ${platformToken({ sub: 'default/visual-gate-full' })}`)
         .send(visualEnvelope('att-visual-gate-full', 60_000))
       expect(res.status).toBe(503)
-      expect(res.body).toEqual({ error: 'provider_unavailable' })
+      expect(res.body).toEqual({ error: 'visual_gate' })
       expect(warn).toHaveBeenCalledWith(
         expect.objectContaining({
           event: 'codex_proxy_admission_refused',
           reason: 'visual_gate',
-          code: 'provider_unavailable',
+          code: 'visual_gate',
         }),
         'admission refused'
       )
@@ -2837,7 +2879,7 @@ describe('codex-llm-proxy body budget release on upstream acceptance (#739 D2)',
       const client = open(proxy.port, payload)
       await until(() => client.ended(), 'the refusal')
       expect(client.status()).toBe(503)
-      expect(JSON.parse(client.received())).toEqual({ error: 'provider_unavailable' })
+      expect(JSON.parse(client.received())).toEqual({ error: 'proxy_capacity_exceeded' })
       await until(() => proxy.closes() === 1, "the response's close event")
       expect(client.errors()).toEqual([])
       expect(proxy.reservations()).toEqual([Buffer.byteLength(payload)])
@@ -3004,7 +3046,10 @@ describe('codex-llm-proxy graceful drain on shutdown (#739 D6)', () => {
     req.end(payload)
     let closing: Promise<void> | undefined
     try {
-      await until(() => received.includes('data: {"type":"text","text":"t0"}'), 'the first SSE frame')
+      await until(
+        () => received.includes('data: {"type":"text","text":"t0"}'),
+        'the first SSE frame'
+      )
       closing = apps.close().then(() => {
         order.push('closed')
       })

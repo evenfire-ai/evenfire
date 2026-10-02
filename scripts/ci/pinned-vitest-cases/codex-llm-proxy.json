@@ -49,7 +49,15 @@
   },
   {
     "suite": "server.security.test.ts",
-    "fullName": "codex-llm-proxy ticket-aware stream-gate wait (#739 D1-bis) visual admission overflow answers 503 provider_unavailable and logs visual_gate"
+    "fullName": "codex-llm-proxy ticket-aware stream-gate wait (#739 D1-bis) visual admission overflow answers 503 visual_gate and logs visual_gate"
+  },
+  {
+    "suite": "server.security.test.ts",
+    "fullName": "codex-llm-proxy attempt telemetry (l) logs the request-limit reason and labels its failure metric request_limit"
+  },
+  {
+    "suite": "bodyAdmission.test.ts",
+    "fullName": "codex-llm-proxy body admission (#731 R3-2) T-R3-2c answers proxy_capacity_exceeded once the admission queue is full"
   },
   {
     "suite": "streamGate.handoff.test.ts",
@@ -57,7 +65,15 @@
   },
   {
     "suite": "streamGate.handoff.test.ts",
+    "fullName": "visual stream-gate handoff visual per-host share admits at most four visual entries per principal while another principal proceeds"
+  },
+  {
+    "suite": "streamGate.handoff.test.ts",
     "fullName": "visual stream-gate handoff visual per-host share releases the principal share when the visual queue is full before grant"
+  },
+  {
+    "suite": "visualBodyReadOwnership.test.ts",
+    "fullName": "codex visual body read ownership keeps the visual slot and principal share until the timed-out parser terminates"
   },
   {
     "suite": "streamGate.handoff.test.ts",
@@ -66,5 +82,25 @@
   {
     "suite": "streamGate.handoff.test.ts",
     "fullName": "visual stream-gate handoff visual slot lifetime holds the queue place of a disconnected large-body waiter until its grant"
+  },
+  {
+    "suite": "visualBodyReadOwnership.test.ts",
+    "fullName": "codex visual body read ownership stops the native reader independently when a non-reading peer never finishes the response"
+  },
+  {
+    "suite": "visualBodyReadOwnership.test.ts",
+    "fullName": "codex visual body read ownership clears a late successful native parse after its read deadline without dispatching it"
+  },
+  {
+    "suite": "visualBodyReadOwnership.test.ts",
+    "fullName": "codex visual body read ownership clears the retained parsed body after response close before its callback returns"
+  },
+  {
+    "suite": "server.security.test.ts",
+    "fullName": "codex-llm-proxy attempt telemetry normalizes real transport upstream 503 claiming visual_gate to provider_unavailable"
+  },
+  {
+    "suite": "streamLimitsFreeze.test.ts",
+    "fullName": "codex-subscription stream limits freeze rejects open or mutable admission code producers while reading the closed production union"
   }
 ]

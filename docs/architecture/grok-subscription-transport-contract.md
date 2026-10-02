@@ -143,10 +143,11 @@ ordinary limit.
 identity (`sub` plus sorted `hostRefs`) may hold at most 2 visual entries
 (running or queued) of the gate's 5. A token whose `sub` is missing, empty or
 not a string is refused 401 before any gate or share is taken. When the share
-is full, the proxy answers 503 `provider_unavailable` and logs
+is full, the proxy answers 503 `visual_host_share` and logs
 `grok_proxy_admission_refused` with `reason: visual_host_share`. The share is
-released together with the visual slot: on read-deadline expiry, on client
-close before hand-off, and when the handler's finally block unwinds.
+released with the visual slot only after parser termination (or by the route's
+stream finally); a timeout or response close first bounds and destroys the
+still-owned request so body-parser can unwind.
 
 The visual wait uses the request's single admission clock (arrival +
 `maxQueueWaitMs`, 60 s). Unlike the ordinary stream gate, it does not end at
@@ -154,14 +155,16 @@ the ticket's `exp`. A ticket that expired while its visual body waited is
 refused `ticket_expired` when the proxy verifies it after the read, before any
 redeem. Once a slot is granted, the body must be read and parsed within
 `BODY_READ_DEADLINE_MS` (10 s); otherwise the proxy answers 408
-`request_timeout` with `connection: close` and frees the slot. After the grant,
-the slot is also freed when the response closes for any other reason, which
-covers every refusal before the stream starts. The raw-body scan
+`request_timeout` with `connection: close`, starts a bounded destruction
+backstop, and releases the slot and principal share only in body-parser's
+completion callback. A response close before hand-off follows the same
+backstop. The raw-body scan
 refuses a body nested deeper than 70 (`BODY_STRUCTURE_LIMITS.maxDepth`) with
 400 `invalid_request` before `JSON.parse`, so `JSON.stringify` and the byte
-measurement never see a deeper tree. A visual-gate refusal (queue full, wait exceeded) is
-answered 503 `provider_unavailable` and logged as
-`grok_proxy_admission_refused` with `reason: visual_gate`.
+measurement never see a deeper tree. A visual-gate capacity refusal (queue
+full or queue wait) is answered 503 `visual_gate`. Ordinary stream/body queue
+full and queue-wait capacity refusals answer 503 `proxy_capacity_exceeded`;
+deadline, abort and ticket-life outcomes keep their existing identities.
 
 A client that disconnects while its request is queued frees its queue place
 only if Node sees the disconnect. Node keeps reading a queued request's socket
@@ -230,11 +233,12 @@ Errors:
   `payload_too_large`. The Host maps `payload_too_large` to
   `LLM_CONTEXT_LENGTH_EXCEEDED`, not retryable.
 - Images are never stripped silently, and a size refusal never triggers a
-  provider fallback. A 503 from the visual gate or from the per-principal
-  share (`visual_gate`, `visual_host_share`) is different: the proxy answers
-  `provider_unavailable`, the Host classifies it as `LLM_MODEL_OVERLOADED`,
-  retryable, and a Host with a fallback provider configured fails over on it.
-  Whether that should stay retryable is tracked in #868.
+  provider fallback. Local proxy capacity outcomes are also terminal:
+  `visual_host_share`, `visual_gate`, and ordinary
+  `proxy_capacity_exceeded` decode through the proxy-owned machine-code field,
+  classify as non-retryable `LLM_API_CALL_FAILED`, and do not install fallback
+  cooldown. An upstream `reason` string is never trusted as provenance. Real
+  upstream 503, connect failure and 429 behavior remains unchanged.
 
 Desktop. The composer budget for `grok-subscription` is 16 MiB per image and
 16 MiB decoded in total, with no dimension bound. That is the shared rpc-proxy

@@ -357,12 +357,12 @@ describe('grok visual stream-gate handoff', () => {
     const warn = vi.spyOn(logger, 'warn')
     const overflow = await postCompletion(port, 'grok-completion-request.v2', largeContent)
     expect(overflow.status).toBe(503)
-    expect(await overflow.json()).toEqual({ error: 'provider_unavailable' })
+    expect(await overflow.json()).toEqual({ error: 'visual_gate' })
     expect(warn).toHaveBeenCalledWith(
       expect.objectContaining({
         event: 'grok_proxy_admission_refused',
         reason: 'visual_gate',
-        code: 'provider_unavailable',
+        code: 'visual_gate',
       }),
       'admission refused'
     )
@@ -470,7 +470,7 @@ describe('grok visual stream-gate handoff', () => {
     )
     const third = await postCompletion(port, 'grok-completion-request.v2', largeContent)
     expect(third.status).toBe(503)
-    expect(await third.json()).toEqual({ error: 'provider_unavailable' })
+    expect(await third.json()).toEqual({ error: 'visual_host_share' })
     expect(warn).toHaveBeenCalledWith(
       {
         event: 'grok_proxy_admission_refused',
@@ -605,7 +605,7 @@ describe('grok visual stream-gate handoff', () => {
 
       const third = await postBody(port, platformToken(), invalidTicketBody(maxBodyBytes))
       expect(third.status).toBe(503)
-      expect(await third.json()).toEqual({ error: 'provider_unavailable' })
+      expect(await third.json()).toEqual({ error: 'visual_host_share' })
       // The refusal names the principal it applied to, so an operator can tell
       // which host was throttled.
       expect(warn).toHaveBeenCalledWith(
@@ -684,7 +684,7 @@ describe('grok visual stream-gate handoff', () => {
         for (let i = 0; i < targetCount; i += 1) {
           const res = await postBody(port, platformToken(), invalidTicketBody(maxBodyBytes))
           expect(res.status).toBe(503)
-          expect(await res.json()).toEqual({ error: 'provider_unavailable' })
+          expect(await res.json()).toEqual({ error: 'visual_gate' })
         }
         expect(acquire).toHaveBeenCalledTimes(
           1 + VISUAL_STREAM_LIMITS.maxQueuedRequests + targetCount
@@ -759,7 +759,7 @@ describe('grok visual stream-gate handoff', () => {
       ).toBe(1)
       const third = await refusedRequest
       expect(third.status).toBe(503)
-      expect(await third.json()).toEqual({ error: 'provider_unavailable' })
+      expect(await third.json()).toEqual({ error: 'visual_host_share' })
       expect(warn).toHaveBeenCalledWith(
         {
           event: 'grok_proxy_admission_refused',

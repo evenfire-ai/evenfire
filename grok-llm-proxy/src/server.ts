@@ -46,6 +46,7 @@ import {
   STREAM_LIMITS,
   TicketLifeError,
   VISUAL_PER_HOST_MAX_ADMITTED,
+  VISUAL_READ_CLOSE_GRACE_MS,
   streamGate,
   visualStreamGate,
 } from './requestLimits.js'
@@ -116,7 +117,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function reject(res: Response, status: number, code: string, type?: string): void {
   if (res.headersSent) return
   logger.warn(
-    type === undefined ? { event: 'grok_proxy_denied', code } : { event: 'grok_proxy_denied', code, type },
+    type === undefined
+      ? { event: 'grok_proxy_denied', code }
+      : { event: 'grok_proxy_denied', code, type },
     'request denied'
   )
   res.status(status).json({ error: code })
@@ -270,7 +273,7 @@ function bodyAdmission(
           },
           'admission refused'
         )
-        reject(res, 503, 'provider_unavailable')
+        reject(res, 503, err.code)
       }
     )
   }
@@ -288,6 +291,8 @@ export type ProxyRuntimeDeps = {
   lookup?: OriginPolicyOptions['lookup']
   /** Test seam for the body-read deadline. Production uses `BODY_READ_DEADLINE_MS`. */
   bodyReadDeadlineMs?: number
+  /** Test seam for the bounded visual-parser close backstop. */
+  visualReadCloseGraceMs?: number
   /** Test seam: hang or observe a stream without contacting Grok. */
   streamCompletion?: typeof streamGrokCompletion
 }
@@ -337,9 +342,16 @@ export function createProxyApps(
   // One budget for both apps: every body this process reads counts against it.
   const bodyBudget = new BodyBudget(IN_FLIGHT_BODY_BUDGET_BODIES * config.maxBodyBytes)
   const bodyReadDeadlineMs = deps.bodyReadDeadlineMs ?? BODY_READ_DEADLINE_MS
+  const visualReadCloseGraceMs = deps.visualReadCloseGraceMs ?? VISUAL_READ_CLOSE_GRACE_MS
+  for (const [name, value] of Object.entries({ bodyReadDeadlineMs, visualReadCloseGraceMs })) {
+    if (!Number.isSafeInteger(value) || value <= 0 || value > 2_147_483_647) {
+      throw new RangeError(`${name} must be a positive signed-32-bit integer`)
+    }
+  }
   // Per-principal occupancy of the visual gate (running plus queued entries).
   // Keyed on the verified platform principal: sub plus sorted hostRefs.
   const visualPrincipalAdmissions = new Map<string, number>()
+  const visualRequestOwners = new WeakSet<GatedRequest>()
 
   const runtimeApp = express()
   // R9-M-B: the token is checked from the header before any budget is taken or
@@ -384,12 +396,12 @@ export function createProxyApps(
   // neither header has no body, so only a declared length takes a visual slot.
   //
   // A granted slot is released exactly once. The handler hands it to the
-  // stream or releases it; every other exit (a parse error, a throw that
-  // reaches the error handler, a dropped client) ends with the response's
-  // `close` event, which releases whatever is still held. Like a budgeted
-  // body, a visual body must be read and parsed within `bodyReadDeadlineMs` of
-  // the grant, or it is answered 408 `request_timeout`, its slot released and
-  // its connection closed.
+  // stream; parser errors and timeouts release it only after body-parser's
+  // callback proves that work has unwound. A response close starts a bounded
+  // request-destruction backstop rather than releasing live parser ownership.
+  // Like a budgeted body, a visual body must be read and parsed within
+  // `bodyReadDeadlineMs` of the grant, or it is answered 408 `request_timeout`
+  // with `connection: close`.
   const selectTransportBudget = (req: GatedRequest, res: Response, next: NextFunction): void => {
     const declared = contentLengthBytes(req)
     if (declared !== null && declared > config.maxVisualBodyBytes) {
@@ -423,7 +435,7 @@ export function createProxyApps(
         },
         'admission refused'
       )
-      reject(res, 503, 'provider_unavailable')
+      reject(res, 503, 'visual_host_share')
       return
     }
     visualPrincipalAdmissions.set(visualPrincipal, admittedByPrincipal + 1)
@@ -471,7 +483,7 @@ export function createProxyApps(
             },
             'admission refused'
           )
-          reject(res, 503, 'provider_unavailable')
+          reject(res, 503, err.code)
           return
         }
         next(err)
@@ -485,38 +497,55 @@ export function createProxyApps(
         req.grokStreamRelease = undefined
       }
       req.grokStreamRelease = releaseVisual
-      let expired = false
+      let cancelled = false
+      let parserSettled = false
+      let closeGrace: ReturnType<typeof setTimeout> | undefined
+      const cancelParser = (): void => {
+        if (parserSettled || closeGrace !== undefined) return
+        closeGrace = setTimeout(() => {
+          if (!parserSettled) req.destroy()
+        }, visualReadCloseGraceMs)
+      }
       const readDeadline = setTimeout(() => {
-        expired = true
-        releaseVisual()
+        cancelled = true
+        cancelParser()
         if (res.headersSent) return
         // The rest of the body is never read, so the connection cannot be reused.
         res.setHeader('connection', 'close')
         reject(res, 408, 'request_timeout')
       }, bodyReadDeadlineMs)
-      res.once('close', () => {
+      const onResponseClose = (): void => {
+        cancelled = true
         clearTimeout(readDeadline)
-        // The close handler releases only while the slot is still held here. A kept
-        // visual body transfers `req.grokStreamRelease` into the handler,
-        // which clears the field and releases in its outer `finally`. A
-        // demoted body releases through `releaseAdmission` before it joins
-        // the ordinary stream gate; this hook may still fire after demotion
-        // but finds the field empty and no-ops. Releasing here after hand-off
-        // would free the visual slot and the principal share while the
-        // handler still holds the parsed body during its (up to ~30 s)
-        // unwind, admitting another large body over the gate width.
-        if (req.grokStreamRelease) releaseVisual()
-      })
+        cancelParser()
+      }
+      res.once('close', onResponseClose)
       visualJson(req, res, err => {
+        parserSettled = true
         clearTimeout(readDeadline)
-        // The 408 already answered this request; the parser's late error
-        // (the body aborted by the closed connection) has no one to reach.
-        if (expired) return
+        if (closeGrace !== undefined) clearTimeout(closeGrace)
+        res.off('close', onResponseClose)
+        if (cancelled || err) {
+          req.body = undefined
+          if (err !== null && typeof err === 'object' && 'body' in err) {
+            delete (err as { body?: unknown }).body
+          }
+        }
+        // Capacity remains charged until body-parser has actually unwound. On
+        // success, `req.grokStreamRelease` transfers ownership to the handler,
+        // which releases it in its outer `finally`; refusals release here.
+        if (cancelled || err) releaseVisual()
+        if (cancelled) return
         if (err) {
-          releaseVisual()
           next(err)
           return
         }
+        res.once('close', () => {
+          // A synchronous handler throw can happen before its async owner
+          // installs cancellation and a finally block. Once that owner has
+          // taken over, response close must not release its live work.
+          if (!visualRequestOwners.has(req)) releaseVisual()
+        })
         next()
       })
     })()
@@ -623,6 +652,7 @@ export function createProxyApps(
       // to req 'close' aborts the Grok hop on every call (3–12ms canceled).
       // Abort only when the client drops the response before we finish writing.
       abortWhenClientDisconnects(req, res, abort)
+      visualRequestOwners.add(gated)
       // One `grok_proxy_attempt_finished` line per attempt. Identifiers and
       // counts only: never the body, ticket, frames, tool names or arguments.
       const attempt = {
@@ -782,9 +812,9 @@ export function createProxyApps(
         stopHeartbeat?.()
         const mapped = mapError(err)
         metrics.observeAttempt('error', 'completion_stream')
-        // A request limit answers provider_unavailable on the wire; its own
-        // label keeps it apart from real upstream outages in the metric. A
-        // ticket that died in the queue is counted as provider_unavailable.
+        // Queue capacity has a terminal local wire code; the request_limit
+        // metric also includes abort/deadline kinds that keep their existing
+        // wire semantics. Ticket expiry remains provider_unavailable.
         metrics.observeAttemptFailure(
           err instanceof RequestLimitError && !(err instanceof TicketLifeError)
             ? 'request_limit'
@@ -792,8 +822,7 @@ export function createProxyApps(
         )
         if (err instanceof UpstreamTimeoutError) metrics.observeUpstreamTimeout(err.kind)
         const deliveredAs = res.headersSent ? 'sse_error' : 'http_status'
-        const causeCode =
-          err instanceof ControlApiClientError ? err.causeCode : fetchCauseCode(err)
+        const causeCode = err instanceof ControlApiClientError ? err.causeCode : fetchCauseCode(err)
         logger.warn(
           {
             event: 'grok_proxy_attempt_finished',
@@ -829,7 +858,9 @@ export function createProxyApps(
             : undefined
         const rejectedBy = typeof upstreamStatus === 'number' ? { upstreamStatus } : {}
         if (deliveredAs === 'sse_error') {
-          res.write(`data: ${JSON.stringify({ type: 'error', code: mapped.code, ...rejectedBy })}\n\n`)
+          res.write(
+            `data: ${JSON.stringify({ type: 'error', code: mapped.code, ...rejectedBy })}\n\n`
+          )
           res.end()
           return
         }
@@ -847,6 +878,10 @@ export function createProxyApps(
       } finally {
         stopHeartbeat?.()
         release?.()
+        // Defence in depth for an early throw after this async owner took over
+        // but before the visual release was moved into `release`.
+        gated.grokStreamRelease?.()
+        gated.grokStreamRelease = undefined
         // A demoted body's reservation, when the stream ended before the body
         // was written upstream. Budgeted bodies are also released on close.
         gated.grokBodyRelease?.()
@@ -1022,6 +1057,9 @@ const ATTEMPT_ERROR_STATUS: Record<string, number> = {
   // would spend the same budget again, so it is a gateway timeout, not 503.
   stream_duration_exceeded: 504,
   connection_unavailable: 503,
+  visual_host_share: 503,
+  visual_gate: 503,
+  proxy_capacity_exceeded: 503,
   provider_unavailable: 503,
   sse_buffer_exceeded: 503,
   invalid_receipt: 503,
@@ -1062,7 +1100,6 @@ function isMappedError(err: unknown): err is MappedError {
 function mapError(err: unknown): { status: number; code: string } {
   if (!isMappedError(err)) return { status: 503, code: 'provider_unavailable' }
   if (err instanceof OriginDeniedError) return { status: 403, code: 'origin_denied' }
-  if (err instanceof RequestLimitError) return { status: 503, code: 'provider_unavailable' }
   return { status: attemptErrorStatus(err.code), code: err.code }
 }
 
