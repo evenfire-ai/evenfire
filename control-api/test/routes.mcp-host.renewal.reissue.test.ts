@@ -389,32 +389,42 @@ describe('POST /api/v1/workflow-auth/reissue', () => {
     expect(res.body.error).toBe('Internal Server Error')
   })
 
-  it('rate-limits by jti: bursts over approvalRlReissuePerMin return 429', async () => {
+  it('rate-limits reissue bursts for the same recipe within one minute', async () => {
     const limit = config.approvalRlReissuePerMin
-    // Note: each reissue needs a DIFFERENT token (jti is single-use), so the
-    // rate limiter bucket is keyed on (namespace/recipe) NOT per-jti — we
-    // re-read the middleware to confirm. Actually per the route config the
-    // bucket key is `reissue:${recipeNamespace}/${recipeName}` because
-    // getMcpHostRefreshRateLimitKey returns ns/recipe (not jti).
-    //
-    // So: limit+1 calls with DIFFERENT tokens for the SAME recipe should
-    // trip the limiter on the (limit+1)-th call.
-    for (let i = 0; i < limit; i++) {
-      const token = issueExpiredRefreshToken()
-      const res = await request(app)
-        .post('/api/v1/workflow-auth/reissue')
-        .set('Authorization', `Bearer ${token}`)
-        .send({ recipe_name: RECIPE })
-      expect(res.status).toBe(200)
-    }
+    const nowMs = Date.now()
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(nowMs)
+    try {
+      // Each token is single-use; the recipe shares one fixed rate-limit window.
+      for (let i = 0; i < limit; i++) {
+        const token = issueExpiredRefreshToken()
+        const res = await request(app)
+          .post('/api/v1/workflow-auth/reissue')
+          .set('Authorization', `Bearer ${token}`)
+          .send({ recipe_name: RECIPE })
+        expect(res.status).toBe(200)
+      }
 
-    const overflowToken = issueExpiredRefreshToken()
-    const limited = await request(app)
-      .post('/api/v1/workflow-auth/reissue')
-      .set('Authorization', `Bearer ${overflowToken}`)
-      .send({ recipe_name: RECIPE })
-    expect(limited.status).toBe(429)
-    expect(limited.headers['retry-after']).toBeDefined()
+      const overflowToken = issueExpiredRefreshToken()
+      const limited = await request(app)
+        .post('/api/v1/workflow-auth/reissue')
+        .set('Authorization', `Bearer ${overflowToken}`)
+        .send({ recipe_name: RECIPE })
+      const limiterQueries = mockPoolQuery.mock.calls.filter(
+        ([sql]) => typeof sql === 'string' && /INSERT INTO rate_limit_buckets/i.test(sql)
+      )
+      expect(limiterQueries).toHaveLength(limit + 1)
+      expect(limiterQueries.map(([, params]) => params)).toEqual(
+        Array.from({ length: limit + 1 }, () => [
+          `reissue:${NS}/${RECIPE}`,
+          Math.floor(nowMs / 60_000) * 60_000,
+          1,
+        ])
+      )
+      expect(limited.status).toBe(429)
+      expect(limited.headers['retry-after']).toBeDefined()
+    } finally {
+      clock.mockRestore()
+    }
   })
 
   it('does not let forged expired refresh claims poison the reissue rate-limit bucket', async () => {
