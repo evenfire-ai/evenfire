@@ -93,9 +93,7 @@ describe('aggregate access shadow comparison', () => {
   })
 
   it('reserves physical statement capacity for a database-consuming child build', async () => {
-    const budget = AccessExecutionBudget.create('catalog', {
-      limits: { databaseStatements: 8 },
-    })
+    const budget = AccessExecutionBudget.create('catalog')
     const query = vi.fn().mockResolvedValue({ rows: [], rowCount: 0 })
     try {
       await expect(
@@ -114,7 +112,7 @@ describe('aggregate access shadow comparison', () => {
         )
       ).resolves.toBe('match')
       expect(query).toHaveBeenCalledTimes(1)
-      expect(budget.remaining('databaseStatements')).toBe(7)
+      expect(budget.remaining('databaseStatements')).toBe(1_492)
     } finally {
       budget.close()
     }
