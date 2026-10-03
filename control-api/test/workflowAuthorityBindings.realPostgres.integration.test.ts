@@ -11,7 +11,11 @@ import { canonicalResourceIdentity } from '../src/services/access/resourceIdenti
 import { createUserSession, revokeUserSession } from '../src/services/auth/userSessionService.js'
 import { adminDeleteTeam } from '../src/services/directory/teams.js'
 import { recordDecision } from '../src/services/userApprovalRequestService.js'
-import { createRun } from '../src/services/workflowRunService.js'
+import {
+  computeWorkflowRunPayloadHash,
+  createApprovedRun,
+  createRun,
+} from '../src/services/workflowRunService.js'
 import { deriveApprovalConsumeAuthority } from '../src/services/workflows/workflowActionTransition.js'
 import {
   type WorkflowAuthorityBinding,
@@ -388,6 +392,91 @@ describeRealPostgres('workflow authority bindings on real PostgreSQL', () => {
         bounded: true,
       }),
     ])
+  })
+
+  it('returns an existing legacy approved run when its absent binding decodes as undefined', async () => {
+    const recipeName = `legacy-approved-retry-${randomUUID()}`
+    const idempotencyKey = `legacy-approved-${randomUUID()}`
+    const callerKey = 'mcp-host-control'
+    await databasePool.query(
+      `INSERT INTO user_workflow_triggers(user_id, recipe_namespace, recipe_name)
+       VALUES ($1, 'sandbox-recipes', $2)
+       ON CONFLICT DO NOTHING`,
+      [userId, recipeName]
+    )
+    const approval = await createWorkflowTriggerApprovalRequest({
+      recipeNamespace: 'sandbox-recipes',
+      recipeName,
+      callerKey,
+      targetUserId: userId,
+      payload: { message: 'Approve legacy workflow trigger' },
+      idempotencyKey,
+      runIntent: {
+        actorType: 'user',
+        actorId: userId,
+        teamId: null,
+        usageTeamId: null,
+        triggerSource: 'onDemand',
+        inputs: { topic: 'legacy retry' },
+      },
+    })
+    expect(approval.kind).toBe('approval')
+    if (approval.kind !== 'approval') throw new Error('expected approval request')
+
+    // This row models a historical approval that predates typed run-intent storage.
+    await databasePool.query(
+      `DELETE FROM workflow_approval_trigger_run_intents WHERE approval_request_id = $1`,
+      [approval.approvalRequestId]
+    )
+    await expect(
+      recordDecision(approval.approvalRequestId, 'approve', { userId })
+    ).resolves.toMatchObject({ ok: true })
+
+    const inputs = { topic: 'legacy retry' }
+    const runInput = {
+      recipe_namespace: 'sandbox-recipes',
+      recipe_name: recipeName,
+      actor_type: 'user' as const,
+      actor_id: userId,
+      idempotency_key: idempotencyKey,
+      trigger_source: 'onDemand',
+      inputs,
+      ttl_seconds_after_finished: defaultTtlSecondsAfterFinished,
+      approval_request_id: approval.approvalRequestId,
+      idempotency_payload_hash: computeWorkflowRunPayloadHash({
+        recipeNamespace: 'sandbox-recipes',
+        recipeName,
+        actorType: 'user',
+        actorId: userId,
+        idempotencyKey,
+        triggerSource: 'onDemand',
+        approvalRequestId: approval.approvalRequestId,
+        callerKey,
+        inputs,
+      }),
+      approval_caller_key: callerKey,
+      correlation_id: idempotencyKey,
+    }
+
+    const first = await createApprovedRun(runInput)
+    expect(first.created).toBe(true)
+    const retried = await createApprovedRun(runInput)
+
+    expect(retried).toEqual({ row: first.row, created: false })
+    expect(first.row.initiating_authority_binding_id).toBeNull()
+    await expect(
+      databasePool.query<{ count: string }>(
+        `SELECT count(*)::text AS count FROM workflow_runs
+          WHERE recipe_namespace = $1 AND recipe_name = $2 AND idempotency_key = $3`,
+        ['sandbox-recipes', recipeName, idempotencyKey]
+      )
+    ).resolves.toMatchObject({ rows: [{ count: '1' }] })
+    await expect(
+      databasePool.query<{ status: string }>(
+        `SELECT status FROM workflow_approval_requests WHERE id = $1`,
+        [approval.approvalRequestId]
+      )
+    ).resolves.toMatchObject({ rows: [{ status: 'consumed' }] })
   })
 
   it('creates trigger runs and approvals with one shared pool connection', async () => {

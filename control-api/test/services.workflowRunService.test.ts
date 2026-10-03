@@ -145,6 +145,54 @@ describe('services/workflowRunService.createApprovedRun', () => {
     )
   })
 
+  it('treats an absent legacy authority binding as SQL NULL on an approved-run retry', async () => {
+    const { query } = makeClient()
+    const existing = {
+      run_id: 'legacy-approved-run',
+      recipe_namespace: input.recipe_namespace,
+      recipe_name: input.recipe_name,
+      actor_id: input.actor_id,
+      approval_request_id: input.approval_request_id,
+      idempotency_payload_hash: input.idempotency_payload_hash,
+      initiating_authority_binding_id: null,
+    }
+    query
+      .mockResolvedValueOnce({ rows: [], rowCount: null })
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+      .mockResolvedValueOnce({ rows: [], rowCount: null })
+      .mockResolvedValueOnce({ rows: [existing], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [], rowCount: null })
+
+    await expect(createApprovedRun(input)).resolves.toEqual({ row: existing, created: false })
+    expect(mockedConsumeApprovalForTrigger).not.toHaveBeenCalled()
+  })
+
+  it('keeps non-null v2 authority binding mismatches strict on approved-run retries', async () => {
+    const { query } = makeClient()
+    query
+      .mockResolvedValueOnce({ rows: [], rowCount: null })
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+      .mockResolvedValueOnce({ rows: [], rowCount: null })
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            actor_id: input.actor_id,
+            approval_request_id: input.approval_request_id,
+            idempotency_payload_hash: input.idempotency_payload_hash,
+            initiating_authority_binding_id: 'persisted-v2-binding',
+          },
+        ],
+        rowCount: 1,
+      })
+      .mockResolvedValueOnce({ rows: [], rowCount: null })
+
+    await expect(createApprovedRun(input)).rejects.toBeInstanceOf(
+      WorkflowRunIdempotencyConflictError
+    )
+    expect(mockedConsumeApprovalForTrigger).not.toHaveBeenCalled()
+    expect(query).toHaveBeenLastCalledWith('ROLLBACK')
+  })
+
   it('rejects idempotency reuse with a different payload hash', async () => {
     const { query } = makeClient()
     query

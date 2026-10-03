@@ -347,7 +347,8 @@ export async function createApprovedRun(input: CreateApprovedRunInput): Promise<
         row.idempotency_payload_hash !== runInput.idempotency_payload_hash ||
         row.approval_request_id !== runInput.approval_request_id ||
         row.actor_id !== runInput.actor_id ||
-        row.initiating_authority_binding_id !== runInput.initiating_authority_binding_id
+        (row.initiating_authority_binding_id ?? null) !==
+          (runInput.initiating_authority_binding_id ?? null)
       ) {
         throw new WorkflowRunIdempotencyConflictError()
       }
