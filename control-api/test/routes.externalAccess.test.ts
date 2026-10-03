@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   validateV2: vi.fn(),
   resolvePolicy: vi.fn(),
   resolveAuthorization: vi.fn(),
+  buildCatalog: vi.fn(),
 }))
 
 const rateLimiter = vi.hoisted(() => ({ checkAndIncrement: vi.fn() }))
@@ -37,6 +38,11 @@ vi.mock('../src/services/access/userAccessRuntimePolicy.js', () => ({
 vi.mock('../src/services/access/liveAuthorizationResolver.js', () => ({
   resolveLiveAuthorization: mocks.resolveAuthorization,
 }))
+vi.mock('../src/services/access/accessCatalogCoordinator.js', async importOriginal => {
+  const actual =
+    await importOriginal<typeof import('../src/services/access/accessCatalogCoordinator.js')>()
+  return { ...actual, buildAccessCatalog: mocks.buildCatalog }
+})
 vi.mock('../src/services/rateLimiterService.js', () => rateLimiter)
 
 function effectivePolicy(overrides: Record<string, unknown> = {}) {
@@ -73,6 +79,12 @@ describe('external user-access contracts', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mocks.resolvePolicy.mockResolvedValue(effectivePolicy())
+    mocks.buildCatalog.mockResolvedValue({
+      complete: true,
+      items: [],
+      nextCursor: null,
+      partialErrors: [],
+    })
     mocks.verifyV2.mockReturnValue(null)
     mocks.verifyV1.mockReturnValue({
       userId: '10000000-0000-4000-8000-000000000001',
@@ -204,6 +216,171 @@ describe('external user-access contracts', () => {
       10
     )
     expect(mocks.resolvePolicy).not.toHaveBeenCalled()
+  })
+
+  it('admits the mounted default twelve-family catalog at its complete producer cost', async () => {
+    const familyCount = 12
+    mocks.verifyV1.mockReturnValue(null)
+    mocks.verifyV2.mockReturnValue({
+      sub: '10000000-0000-4000-8000-000000000001',
+      sid: '20000000-0000-4000-8000-000000000002',
+      jti: '30000000-0000-4000-8000-000000000003',
+      sv: 1,
+      ver: 2,
+      typ: 'user_session',
+      email: 'user@example.test',
+      auth_time: 1_900_000_000,
+      amr: ['pwd'],
+    })
+    mocks.validateV2.mockImplementation(async (_claims, options) => {
+      options.budget.charge({
+        kind: 'producerCalls',
+        amount: options.touch === false ? 2 : 3,
+      })
+      return {
+        status: 'valid',
+        identity: {
+          userId: '10000000-0000-4000-8000-000000000001',
+          email: 'user@example.test',
+          sid: '20000000-0000-4000-8000-000000000002',
+          jti: '30000000-0000-4000-8000-000000000003',
+          sessionVersion: 1,
+        },
+      }
+    })
+    mocks.resolvePolicy.mockImplementation(async options => {
+      if (options.catalogReadiness) {
+        options.budget.charge({ kind: 'producerCalls' })
+      }
+      return effectivePolicy({ serveCatalog: true })
+    })
+    mocks.buildCatalog.mockImplementation(async (input, options) => {
+      const requestedFamilies = input.families?.length ?? familyCount
+      options.budget.charge({
+        kind: 'producerCalls',
+        amount: 4 + 2 * requestedFamilies,
+      })
+      return {
+        complete: true,
+        items: [],
+        nextCursor: null,
+        partialErrors: [],
+      }
+    })
+
+    const response = await request(app())
+      .get('/external/access/catalog')
+      .set('x-user-session-token', 'signed-v2-synthetic')
+
+    expect(mocks.buildCatalog).toHaveBeenCalledOnce()
+    expect(response.status).toBe(200)
+    expect(mocks.buildCatalog).toHaveBeenCalledWith(
+      expect.not.objectContaining({ families: expect.anything() }),
+      expect.objectContaining({ budget: expect.any(Object) })
+    )
+    expect(mocks.validateV2).toHaveBeenCalledTimes(2)
+    const catalogBudget = mocks.buildCatalog.mock.calls[0]?.[1].budget
+    expect(catalogBudget?.limits.producerCalls).toBe(42)
+    expect(catalogBudget?.remaining('producerCalls')).toBe(8)
+  })
+
+  it('preserves the eleven-family catalog control and rejects revoked authority before catalog work', async () => {
+    const familyList =
+      'user,team,host,context,mcp_server,workflow_recipe,workflow_run,workflow_approval,notification,gfs_resource,shared_filesystem'
+    mocks.verifyV1.mockReturnValue(null)
+    mocks.verifyV2.mockReturnValue({
+      sub: '10000000-0000-4000-8000-000000000001',
+      sid: '20000000-0000-4000-8000-000000000002',
+      jti: '30000000-0000-4000-8000-000000000003',
+      sv: 1,
+      ver: 2,
+      typ: 'user_session',
+      email: 'user@example.test',
+      auth_time: 1_900_000_000,
+      amr: ['pwd'],
+    })
+    mocks.validateV2.mockImplementation(async (_claims, options) => {
+      options.budget.charge({
+        kind: 'producerCalls',
+        amount: options.touch === false ? 2 : 3,
+      })
+      return {
+        status: 'valid',
+        identity: {
+          userId: '10000000-0000-4000-8000-000000000001',
+          email: 'user@example.test',
+          sid: '20000000-0000-4000-8000-000000000002',
+          jti: '30000000-0000-4000-8000-000000000003',
+          sessionVersion: 1,
+        },
+      }
+    })
+    mocks.resolvePolicy.mockImplementation(async options => {
+      if (options.catalogReadiness) {
+        options.budget.charge({ kind: 'producerCalls' })
+      }
+      return effectivePolicy({ serveCatalog: true })
+    })
+    mocks.buildCatalog.mockImplementation(async (input, options) => {
+      const requestedFamilies = input.families?.length ?? 12
+      options.budget.charge({
+        kind: 'producerCalls',
+        amount: 4 + 2 * requestedFamilies,
+      })
+      return { complete: true, items: [], nextCursor: null, partialErrors: [] }
+    })
+
+    const elevenFamilyResponse = await request(app())
+      .get('/external/access/catalog')
+      .query({ families: familyList })
+      .set('x-user-session-token', 'signed-v2-synthetic')
+
+    expect(elevenFamilyResponse.status).toBe(200)
+
+    mocks.validateV2.mockResolvedValue({ status: 'revoked', reason: 'revoked' })
+    mocks.buildCatalog.mockClear()
+    const revokedResponse = await request(app())
+      .get('/external/access/catalog')
+      .set('x-user-session-token', 'signed-v2-synthetic')
+
+    expect(revokedResponse.status).toBe(401)
+    expect(mocks.buildCatalog).not.toHaveBeenCalled()
+  })
+
+  it('stops the mounted catalog before producer work when readiness is unavailable', async () => {
+    mocks.verifyV1.mockReturnValue(null)
+    mocks.verifyV2.mockReturnValue({
+      sub: '10000000-0000-4000-8000-000000000001',
+      sid: '20000000-0000-4000-8000-000000000002',
+      jti: '30000000-0000-4000-8000-000000000003',
+      sv: 1,
+      ver: 2,
+      typ: 'user_session',
+      email: 'user@example.test',
+      auth_time: 1_900_000_000,
+      amr: ['pwd'],
+    })
+    mocks.validateV2.mockResolvedValue({
+      status: 'valid',
+      identity: {
+        userId: '10000000-0000-4000-8000-000000000001',
+        email: 'user@example.test',
+        sid: '20000000-0000-4000-8000-000000000002',
+        jti: '30000000-0000-4000-8000-000000000003',
+        sessionVersion: 1,
+      },
+    })
+    mocks.resolvePolicy.mockImplementation(async options => {
+      if (options.catalogReadiness) throw new Error('readiness unavailable')
+      return effectivePolicy({ serveCatalog: true })
+    })
+
+    const response = await request(app())
+      .get('/external/access/catalog')
+      .set('x-user-session-token', 'signed-v2-synthetic')
+
+    expect(response.status).toBe(503)
+    expect(mocks.buildCatalog).not.toHaveBeenCalled()
   })
 
   it('uses the authoritative target schema for team management actions', async () => {

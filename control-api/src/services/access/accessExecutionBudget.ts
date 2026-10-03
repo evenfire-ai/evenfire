@@ -3,8 +3,8 @@ export const ACCESS_EXECUTION_LIMIT_CLAMPS = Object.freeze({
   catalogDeadlineMs: 5_000,
   actionDeadlineMs: 2_000,
   statementTimeoutMs: 2_500,
-  producerCalls: 32,
-  databaseStatements: 128,
+  producerCalls: 42,
+  databaseStatements: 1_493,
   producerConcurrency: 4,
   keyCandidatesPerCall: 101,
   objects: 1_000,
@@ -27,7 +27,7 @@ export type AccessExecutionKind = 'catalog' | 'action' | 'indexer'
 const ACCESS_EXECUTION_CLASS_LIMITS: Readonly<
   Record<AccessExecutionKind, Readonly<{ producerCalls: number; databaseStatements: number }>>
 > = Object.freeze({
-  catalog: Object.freeze({ producerCalls: 32, databaseStatements: 128 }),
+  catalog: Object.freeze({ producerCalls: 42, databaseStatements: 1_493 }),
   action: Object.freeze({ producerCalls: 32, databaseStatements: 128 }),
   indexer: Object.freeze({ producerCalls: 41, databaseStatements: 55 }),
 })

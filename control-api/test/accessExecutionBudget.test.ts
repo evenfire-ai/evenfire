@@ -27,9 +27,43 @@ describe('AccessExecutionBudget', () => {
     const budget = AccessExecutionBudget.create('catalog')
     expect(() => budget.assertPageSize(101)).toThrow(AccessBudgetConfigurationError)
     expect(() => budget.assertCursorBytes(16 * 1024 + 1)).toThrow(AccessBudgetConfigurationError)
-    expect(budget.remaining('producerCalls')).toBe(32)
-    expect(budget.remaining('databaseStatements')).toBe(128)
+    expect(budget.remaining('producerCalls')).toBe(42)
+    expect(budget.remaining('databaseStatements')).toBe(1_493)
     budget.close()
+
+    const actionBudget = AccessExecutionBudget.create('action')
+    expect(actionBudget.remaining('producerCalls')).toBe(32)
+    expect(actionBudget.remaining('databaseStatements')).toBe(128)
+    actionBudget.close()
+  })
+
+  it('keeps each execution class within its own authorized producer and SQL ceiling', () => {
+    expect(resolveAccessExecutionLimits({ producerCalls: 42 }, 'catalog').producerCalls).toBe(42)
+    expect(
+      resolveAccessExecutionLimits({ databaseStatements: 1_493 }, 'catalog').databaseStatements
+    ).toBe(1_493)
+    expect(resolveAccessExecutionLimits({ producerCalls: 41 }, 'indexer').producerCalls).toBe(41)
+    expect(
+      resolveAccessExecutionLimits({ databaseStatements: 55 }, 'indexer').databaseStatements
+    ).toBe(55)
+    expect(() =>
+      AccessExecutionBudget.create('catalog', { limits: { producerCalls: 43 } })
+    ).toThrow(AccessBudgetConfigurationError)
+    expect(() =>
+      AccessExecutionBudget.create('catalog', { limits: { databaseStatements: 1_494 } })
+    ).toThrow(AccessBudgetConfigurationError)
+    expect(() => AccessExecutionBudget.create('action', { limits: { producerCalls: 33 } })).toThrow(
+      AccessBudgetConfigurationError
+    )
+    expect(() =>
+      AccessExecutionBudget.create('action', { limits: { databaseStatements: 129 } })
+    ).toThrow(AccessBudgetConfigurationError)
+    expect(() => resolveAccessExecutionLimits({ producerCalls: 42 }, 'indexer')).toThrow(
+      AccessBudgetConfigurationError
+    )
+    expect(() => resolveAccessExecutionLimits({ databaseStatements: 56 }, 'indexer')).toThrow(
+      AccessBudgetConfigurationError
+    )
   })
 
   it('isolates the bounded indexer ceiling from ordinary action requests', () => {
