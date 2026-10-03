@@ -133,11 +133,14 @@ export async function validateExactOperationalBindings(input: {
       ) {
         return { status: 'stale' }
       }
+      const boundRelationshipIds = new Set(binding.relationships.map(value => value.instanceId))
       const currentRelationships = projection.relationships
         .filter(
           relationship =>
             relationship.sourceType === binding.resourceType &&
-            relationship.sourceId === binding.logicalId
+            relationship.sourceId === binding.logicalId &&
+            relationship.relationshipType !== 'context_identity_alias' &&
+            boundRelationshipIds.has(relationship.relationshipInstanceId)
         )
         .map(relationship => ({
           instanceId: relationship.relationshipInstanceId,
