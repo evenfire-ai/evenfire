@@ -17,6 +17,7 @@ import {
   gfsPermissionsToCapabilities,
   normalizeAccessCapabilities,
 } from './capabilityRegistry.js'
+import { canonicalContextLogicalIdSql } from './contextIdentitySql.js'
 import type { ValidatedOperationTarget } from './operationTarget.js'
 import type { OperationalResourceGraphResult } from './operationalAccessReader.js'
 import type { CanonicalResourceIdentity } from './resourceIdentity.js'
@@ -340,7 +341,23 @@ async function loadSimpleOperationalGrantCandidates(input: {
   const result = await query(
     input.db,
     input.budget,
-    `WITH candidates AS (
+    `WITH requested_context_references AS (
+       SELECT $5::text AS logical_id, split_part($5::text, '/', 2) AS reference_name
+       UNION
+       SELECT alias_relationship.source_id,
+              split_part(alias_relationship.target_id, '/', 2)
+         FROM operational_resource_relationships alias_relationship
+         JOIN operational_resource_index alias_source
+           ON alias_source.environment_id = alias_relationship.environment_id
+          AND alias_source.resource_type = 'context'
+          AND alias_source.logical_id = alias_relationship.source_id
+          AND alias_source.provider_uid = alias_relationship.source_provider_uid
+        WHERE alias_relationship.environment_id = $6
+          AND alias_relationship.source_type = 'context'
+          AND alias_relationship.source_id = $5
+          AND alias_relationship.relationship_type = 'context_identity_alias'
+          AND alias_relationship.target_type = 'context'
+     ), candidates AS (
        SELECT 'direct'::text AS kind,
               'user_agents:' || ua.user_id || ':' || ua.agent_name AS grant_id,
               NULL::uuid AS team_id, NULL::text AS current_role
@@ -357,14 +374,19 @@ async function loadSimpleOperationalGrantCandidates(input: {
        SELECT 'direct', 'user_contexts:' || uc.user_id || ':' || uc.context_id,
               NULL, NULL
          FROM user_contexts uc
-        WHERE $2::text = 'context' AND uc.user_id = $1 AND uc.context_id = $4
+         JOIN requested_context_references requested
+           ON requested.reference_name = uc.context_id
+        WHERE $2::text = 'context' AND uc.user_id = $1
+          AND ${canonicalContextLogicalIdSql('$6', "split_part(requested.logical_id, '/', 1) || '/' || uc.context_id")} = requested.logical_id
        UNION ALL
        SELECT 'team', 'team_contexts:' || tc.team_id || ':' || tc.context_id,
               tc.team_id, tm.role
          FROM team_contexts tc
+         JOIN requested_context_references requested
+           ON requested.reference_name = tc.context_id
          JOIN team_members tm ON tm.team_id = tc.team_id
         WHERE $2::text = 'context' AND tm.user_id = $1 AND tm.status = 'active'
-          AND tc.context_id = $4
+          AND ${canonicalContextLogicalIdSql('$6', "split_part(requested.logical_id, '/', 1) || '/' || tc.context_id")} = requested.logical_id
        UNION ALL
        SELECT 'direct', ${directWorkflowTriggerGrantId},
               NULL, NULL
@@ -382,12 +404,14 @@ async function loadSimpleOperationalGrantCandidates(input: {
      )
      SELECT * FROM candidates
      ORDER BY kind, team_id NULLS FIRST, grant_id
-     LIMIT $5`,
+     LIMIT $7`,
     [
       input.userId,
       input.resource.type,
       identity.namespace,
       identity.name,
+      input.resource.logicalId,
+      input.graph.resource.environmentId,
       input.budget.limits.accessPaths + 1,
     ]
   )
@@ -484,27 +508,57 @@ async function loadDerivedOperationalCandidates(input: {
         )
       : []
   const hostIds = [...new Set(hostEdges.map(edge => edge.sourceId))]
-  const contextNames = contextIds.map(value => scopedName(value)?.name ?? '').filter(Boolean)
   const hostNames = hostIds.map(value => scopedName(value)?.name ?? '').filter(Boolean)
-  if (contextNames.length === 0 && hostNames.length === 0) return []
+  if (contextIds.length === 0 && hostNames.length === 0) return []
   const result = await query(
     input.db,
     input.budget,
-    `WITH context_names AS (SELECT UNNEST($2::text[]) AS name),
+    `WITH context_names AS (SELECT UNNEST($2::text[]) AS logical_id),
+          context_references AS MATERIALIZED (
+       SELECT requested.logical_id,
+              split_part(requested.logical_id, '/', 2) AS reference_name
+         FROM context_names requested
+       UNION
+       SELECT requested.logical_id,
+              split_part(alias_relationship.target_id, '/', 2)
+         FROM context_names requested
+         JOIN operational_resource_relationships alias_relationship
+           ON alias_relationship.environment_id = $4
+          AND alias_relationship.source_type = 'context'
+          AND alias_relationship.source_id = requested.logical_id
+          AND alias_relationship.relationship_type = 'context_identity_alias'
+          AND alias_relationship.target_type = 'context'
+         JOIN operational_resource_index alias_source
+           ON alias_source.environment_id = alias_relationship.environment_id
+          AND alias_source.resource_type = 'context'
+          AND alias_source.logical_id = alias_relationship.source_id
+          AND alias_source.provider_uid = alias_relationship.source_provider_uid
+     ),
           host_names AS (SELECT UNNEST($3::text[]) AS name),
           candidates AS (
        SELECT 'direct'::text AS kind,
               'user_contexts:' || uc.user_id || ':' || uc.context_id AS grant_id,
               NULL::uuid AS team_id, NULL::text AS current_role,
-              'context'::text AS source_type, uc.context_id AS source_name
-         FROM user_contexts uc JOIN context_names requested ON requested.name = uc.context_id
-        WHERE uc.user_id = $1
+              'context'::text AS source_type, context_identity.canonical_id AS source_name
+        FROM user_contexts uc
+        JOIN context_references requested ON requested.reference_name = uc.context_id
+        CROSS JOIN LATERAL (
+          SELECT ${canonicalContextLogicalIdSql('$4', "split_part(requested.logical_id, '/', 1) || '/' || uc.context_id")}
+                   AS canonical_id
+        ) context_identity
+        WHERE uc.user_id = $1 AND context_identity.canonical_id = requested.logical_id
        UNION ALL
        SELECT 'team', 'team_contexts:' || tc.team_id || ':' || tc.context_id,
-              tc.team_id, tm.role, 'context', tc.context_id
-         FROM team_contexts tc JOIN context_names requested ON requested.name = tc.context_id
+              tc.team_id, tm.role, 'context', context_identity.canonical_id
+         FROM team_contexts tc
+         JOIN context_references requested ON requested.reference_name = tc.context_id
+         CROSS JOIN LATERAL (
+           SELECT ${canonicalContextLogicalIdSql('$4', "split_part(requested.logical_id, '/', 1) || '/' || tc.context_id")}
+                    AS canonical_id
+         ) context_identity
          JOIN team_members tm ON tm.team_id = tc.team_id
         WHERE tm.user_id = $1 AND tm.status = 'active'
+          AND context_identity.canonical_id = requested.logical_id
        UNION ALL
        SELECT 'direct', 'user_agents:' || ua.user_id || ':' || ua.agent_name,
               NULL, NULL, 'host', ua.agent_name
@@ -519,15 +573,21 @@ async function loadDerivedOperationalCandidates(input: {
      )
      SELECT * FROM candidates
      ORDER BY kind, team_id NULLS FIRST, grant_id, source_type, source_name
-     LIMIT $4`,
-    [input.userId, contextNames, hostNames, input.budget.limits.accessPaths + 1]
+     LIMIT $5`,
+    [
+      input.userId,
+      contextIds,
+      hostNames,
+      input.graph.resource.environmentId,
+      input.budget.limits.accessPaths + 1,
+    ]
   )
   const output: AuthorityCandidate[] = []
   for (const row of result.rows as Record<string, unknown>[]) {
     const sourceType = String(row.source_type)
     const sourceName = String(row.source_name)
     if (sourceType === 'context') {
-      const contextId = contextIds.find(value => scopedName(value)?.name === sourceName)
+      const contextId = contextIds.find(value => value === sourceName)
       if (!contextId) continue
       for (const edge of directEdges.filter(value => value.sourceId === contextId)) {
         const filesystemScope =

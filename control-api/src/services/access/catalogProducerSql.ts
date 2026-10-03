@@ -1,5 +1,6 @@
 import type { CatalogFamily } from './catalogContracts.js'
 import { boundedKeyUnionSql, catalogTextAfterSql } from './catalogProducerSupport.js'
+import { canonicalContextLogicalIdSql } from './contextIdentitySql.js'
 
 export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.freeze({
   user: boundedKeyUnionSql([
@@ -47,26 +48,38 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
   ]),
   context: boundedKeyUnionSql([
     {
-      sql: `SELECT $6::text || '/' || uc.context_id AS logical_id, uc.context_id AS source_key
+      sql: `SELECT context_identity.canonical_id AS logical_id,
+                   context_identity.canonical_id AS source_key
               FROM user_contexts uc
+              CROSS JOIN LATERAL (
+                SELECT ${canonicalContextLogicalIdSql('$3', "$6::text || '/' || uc.context_id")}
+                         AS canonical_id
+              ) context_identity
               JOIN operational_resource_index resource
                 ON resource.environment_id = $3 AND resource.resource_type = 'context'
-               AND resource.logical_id = $6::text || '/' || uc.context_id
+               AND resource.logical_id = context_identity.canonical_id
                AND resource.enabled = TRUE AND resource.deleted_at IS NULL
-      WHERE uc.user_id = $1 AND ${catalogTextAfterSql('uc.context_id', '$7')}`,
-      orderBy: 'source_key',
+      WHERE uc.user_id = $1
+        AND ${catalogTextAfterSql('context_identity.canonical_id', '$7')}`,
+      orderBy: 'logical_id',
+      duplicateCapable: true,
     },
     {
-      sql: `SELECT $6::text || '/' || tc.context_id AS logical_id, tc.context_id AS source_key
+      sql: `SELECT context_identity.canonical_id AS logical_id,
+                   context_identity.canonical_id AS source_key
               FROM team_contexts tc
+              CROSS JOIN LATERAL (
+                SELECT ${canonicalContextLogicalIdSql('$3', "$6::text || '/' || tc.context_id")}
+                         AS canonical_id
+              ) context_identity
               JOIN team_members tm ON tm.team_id = tc.team_id
               JOIN operational_resource_index resource
                 ON resource.environment_id = $3 AND resource.resource_type = 'context'
-               AND resource.logical_id = $6::text || '/' || tc.context_id
+               AND resource.logical_id = context_identity.canonical_id
                AND resource.enabled = TRUE AND resource.deleted_at IS NULL
       WHERE tm.user_id = $1 AND tm.status = 'active'
-        AND ${catalogTextAfterSql('tc.context_id', '$7')}`,
-      orderBy: 'source_key',
+        AND ${catalogTextAfterSql('context_identity.canonical_id', '$7')}`,
+      orderBy: 'logical_id',
       duplicateCapable: true,
     },
   ]),
@@ -74,15 +87,19 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
     {
       sql: `SELECT edge.target_id AS logical_id
        FROM user_contexts uc
+       CROSS JOIN LATERAL (
+         SELECT ${canonicalContextLogicalIdSql('$3', "$6::text || '/' || uc.context_id")}
+                  AS canonical_id
+       ) context_identity
        JOIN operational_resource_relationships edge
          ON edge.environment_id = $3
         AND edge.source_type = 'context'
-        AND edge.source_id = $6::text || '/' || uc.context_id
+        AND edge.source_id = context_identity.canonical_id
        AND edge.relationship_type = 'includes_mcp_server'
         AND edge.target_type = 'mcp_server'
        JOIN operational_resource_index source_resource
          ON source_resource.environment_id = $3 AND source_resource.resource_type = 'context'
-        AND source_resource.logical_id = edge.source_id
+        AND source_resource.logical_id = context_identity.canonical_id
         AND source_resource.enabled = TRUE AND source_resource.deleted_at IS NULL
        JOIN operational_resource_index target_resource
          ON target_resource.environment_id = $3 AND target_resource.resource_type = 'mcp_server'
@@ -94,16 +111,20 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
     {
       sql: `SELECT edge.target_id AS logical_id
        FROM team_contexts tc
+       CROSS JOIN LATERAL (
+         SELECT ${canonicalContextLogicalIdSql('$3', "$6::text || '/' || tc.context_id")}
+                  AS canonical_id
+       ) context_identity
        JOIN team_members tm ON tm.team_id = tc.team_id
        JOIN operational_resource_relationships edge
          ON edge.environment_id = $3
         AND edge.source_type = 'context'
-        AND edge.source_id = $6::text || '/' || tc.context_id
+        AND edge.source_id = context_identity.canonical_id
         AND edge.relationship_type = 'includes_mcp_server'
         AND edge.target_type = 'mcp_server'
        JOIN operational_resource_index source_resource
          ON source_resource.environment_id = $3 AND source_resource.resource_type = 'context'
-        AND source_resource.logical_id = edge.source_id
+        AND source_resource.logical_id = context_identity.canonical_id
         AND source_resource.enabled = TRUE AND source_resource.deleted_at IS NULL
        JOIN operational_resource_index target_resource
          ON target_resource.environment_id = $3 AND target_resource.resource_type = 'mcp_server'
@@ -119,13 +140,17 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
        JOIN operational_resource_relationships host_edge
          ON host_edge.environment_id = $3
         AND host_edge.source_type = 'host'
-        AND host_edge.source_id = $5::text || '/' || ua.agent_name
+       AND host_edge.source_id = $5::text || '/' || ua.agent_name
         AND host_edge.relationship_type = 'uses_context'
         AND host_edge.target_type = 'context'
+       CROSS JOIN LATERAL (
+         SELECT ${canonicalContextLogicalIdSql('$3', 'host_edge.target_id')}
+                  AS canonical_id
+       ) context_identity
        JOIN operational_resource_relationships mcp_edge
          ON mcp_edge.environment_id = $3
         AND mcp_edge.source_type = 'context'
-        AND mcp_edge.source_id = host_edge.target_id
+        AND mcp_edge.source_id = context_identity.canonical_id
         AND mcp_edge.relationship_type = 'includes_mcp_server'
         AND mcp_edge.target_type = 'mcp_server'
        JOIN operational_resource_index host_resource
@@ -134,7 +159,7 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
         AND host_resource.enabled = TRUE AND host_resource.deleted_at IS NULL
        JOIN operational_resource_index context_resource
          ON context_resource.environment_id = $3 AND context_resource.resource_type = 'context'
-        AND context_resource.logical_id = host_edge.target_id
+        AND context_resource.logical_id = context_identity.canonical_id
         AND context_resource.enabled = TRUE AND context_resource.deleted_at IS NULL
        JOIN operational_resource_index target_resource
          ON target_resource.environment_id = $3 AND target_resource.resource_type = 'mcp_server'
@@ -150,13 +175,17 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
        JOIN operational_resource_relationships host_edge
          ON host_edge.environment_id = $3
         AND host_edge.source_type = 'host'
-        AND host_edge.source_id = $5::text || '/' || ta.agent_name
+       AND host_edge.source_id = $5::text || '/' || ta.agent_name
         AND host_edge.relationship_type = 'uses_context'
         AND host_edge.target_type = 'context'
+       CROSS JOIN LATERAL (
+         SELECT ${canonicalContextLogicalIdSql('$3', 'host_edge.target_id')}
+                  AS canonical_id
+       ) context_identity
        JOIN operational_resource_relationships mcp_edge
          ON mcp_edge.environment_id = $3
         AND mcp_edge.source_type = 'context'
-        AND mcp_edge.source_id = host_edge.target_id
+        AND mcp_edge.source_id = context_identity.canonical_id
         AND mcp_edge.relationship_type = 'includes_mcp_server'
         AND mcp_edge.target_type = 'mcp_server'
        JOIN operational_resource_index host_resource
@@ -165,7 +194,7 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
         AND host_resource.enabled = TRUE AND host_resource.deleted_at IS NULL
        JOIN operational_resource_index context_resource
          ON context_resource.environment_id = $3 AND context_resource.resource_type = 'context'
-        AND context_resource.logical_id = host_edge.target_id
+        AND context_resource.logical_id = context_identity.canonical_id
         AND context_resource.enabled = TRUE AND context_resource.deleted_at IS NULL
        JOIN operational_resource_index target_resource
          ON target_resource.environment_id = $3 AND target_resource.resource_type = 'mcp_server'
@@ -325,15 +354,19 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
     {
       sql: `SELECT edge.target_id AS logical_id
        FROM user_contexts uc
+       CROSS JOIN LATERAL (
+         SELECT ${canonicalContextLogicalIdSql('$3', "$6::text || '/' || uc.context_id")}
+                  AS canonical_id
+       ) context_identity
        JOIN operational_resource_relationships edge
          ON edge.environment_id = $3
         AND edge.source_type = 'context'
-        AND edge.source_id = $6::text || '/' || uc.context_id
+        AND edge.source_id = context_identity.canonical_id
         AND edge.relationship_type = 'mounts_shared_filesystem'
         AND edge.target_type = 'shared_filesystem'
        JOIN operational_resource_index source_resource
          ON source_resource.environment_id = $3 AND source_resource.resource_type = 'context'
-        AND source_resource.logical_id = edge.source_id
+        AND source_resource.logical_id = context_identity.canonical_id
         AND source_resource.enabled = TRUE AND source_resource.deleted_at IS NULL
        JOIN operational_resource_index target_resource
          ON target_resource.environment_id = $3
@@ -346,16 +379,20 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
     {
       sql: `SELECT edge.target_id AS logical_id
        FROM team_contexts tc
+       CROSS JOIN LATERAL (
+         SELECT ${canonicalContextLogicalIdSql('$3', "$6::text || '/' || tc.context_id")}
+                  AS canonical_id
+       ) context_identity
        JOIN team_members tm ON tm.team_id = tc.team_id
        JOIN operational_resource_relationships edge
          ON edge.environment_id = $3
         AND edge.source_type = 'context'
-        AND edge.source_id = $6::text || '/' || tc.context_id
+        AND edge.source_id = context_identity.canonical_id
         AND edge.relationship_type = 'mounts_shared_filesystem'
         AND edge.target_type = 'shared_filesystem'
        JOIN operational_resource_index source_resource
          ON source_resource.environment_id = $3 AND source_resource.resource_type = 'context'
-        AND source_resource.logical_id = edge.source_id
+        AND source_resource.logical_id = context_identity.canonical_id
         AND source_resource.enabled = TRUE AND source_resource.deleted_at IS NULL
        JOIN operational_resource_index target_resource
          ON target_resource.environment_id = $3

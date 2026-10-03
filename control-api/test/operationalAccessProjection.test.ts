@@ -59,6 +59,39 @@ describe('operational access projection', () => {
     )
   })
 
+  it('projects a supported Context alias without changing canonical identity', () => {
+    const projection = projectOperationalObject({
+      environmentId: 'test:cluster',
+      plural: 'contexts',
+      namespace: 'contexts',
+      object: {
+        ...contextObject([]),
+        metadata: {
+          ...contextObject([]).metadata,
+          name: 'ctx-resource',
+        },
+        spec: {
+          contextId: 'ctx-wire',
+          mcpServers: [],
+          sharedFileSystems: [],
+        },
+      },
+      behaviorFingerprintKey: 'test-key',
+      relationshipNamespaces: namespaces,
+    })
+
+    expect(projection.rootId).toBe('contexts/ctx-resource')
+    expect(projection.relationships).toContainEqual(
+      expect.objectContaining({
+        sourceType: 'context',
+        sourceId: 'contexts/ctx-resource',
+        relationshipType: 'context_identity_alias',
+        targetType: 'context',
+        targetId: 'contexts/ctx-wire',
+      })
+    )
+  })
+
   it('preserves repeated filesystem relationship instances with different mount scopes', () => {
     const projection = projectOperationalObject({
       environmentId: 'test:cluster',

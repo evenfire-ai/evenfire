@@ -2,6 +2,7 @@ import type { DbClient } from '../../db.js'
 import { runAccessDatabaseQuery } from './accessDatabaseQuery.js'
 import type { AccessExecutionBudget } from './accessExecutionBudget.js'
 import { revisionOfValues } from './authorizationRevision.js'
+import { canonicalContextLogicalIdSql } from './contextIdentitySql.js'
 import type {
   OperationalRelationshipRecord,
   OperationalResourceType,
@@ -194,20 +195,33 @@ export async function loadOperationalResourceGraph(input: {
   const relationshipResult = await budgetedQuery(
     input.db,
     input.budget,
-    `SELECT environment_id, source_type, source_id, relationship_type,
-            target_type, target_id, relationship_instance_id, behavior_attributes,
+    `SELECT relationship.environment_id, relationship.source_type,
+            relationship.source_id, relationship.relationship_type,
+            relationship.target_type,
+            CASE WHEN relationship.relationship_type = 'uses_context'
+              THEN ${canonicalContextLogicalIdSql('$1', 'relationship.target_id')}
+              ELSE relationship.target_id
+            END AS target_id,
+            relationship.relationship_instance_id, relationship.behavior_attributes,
             source_family, source_provider_uid, source_resource_version,
             observed_generation, content_bytes
-       FROM operational_resource_relationships
-      WHERE environment_id = $1
+       FROM operational_resource_relationships relationship
+      WHERE relationship.environment_id = $1
+        AND relationship.relationship_type <> 'context_identity_alias'
+        AND (relationship.relationship_type <> 'uses_context'
+          OR ${canonicalContextLogicalIdSql('$1', 'relationship.target_id')} IS NOT NULL)
         AND (
-          (source_type = $2 AND source_id = $3)
-          OR (target_type = $2 AND target_id = $3)
+          (relationship.source_type = $2 AND relationship.source_id = $3)
+          OR (relationship.target_type = $2 AND
+              (CASE WHEN relationship.relationship_type = 'uses_context'
+                THEN ${canonicalContextLogicalIdSql('$1', 'relationship.target_id')}
+                ELSE relationship.target_id
+              END) = $3)
           OR (
             $2 = 'mcp_server'
-            AND relationship_type = 'uses_context'
-            AND target_type = 'context'
-            AND target_id IN (
+            AND relationship.relationship_type = 'uses_context'
+            AND relationship.target_type = 'context'
+            AND ${canonicalContextLogicalIdSql('$1', 'relationship.target_id')} IN (
               SELECT mcp_edge.source_id
                 FROM operational_resource_relationships mcp_edge
                WHERE mcp_edge.environment_id = $1
@@ -217,8 +231,9 @@ export async function loadOperationalResourceGraph(input: {
             )
           )
       )
-      ORDER BY source_type, source_id, relationship_type,
-               target_type, target_id, relationship_instance_id
+      ORDER BY relationship.source_type, relationship.source_id,
+               relationship.relationship_type, relationship.target_type,
+               target_id, relationship.relationship_instance_id
       LIMIT $4`,
     [
       input.environmentId,

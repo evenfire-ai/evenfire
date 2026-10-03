@@ -33,6 +33,7 @@ export type OperationalRelationshipRecord = Readonly<{
   sourceId: string
   relationshipType:
     | 'uses_context'
+    | 'context_identity_alias'
     | 'includes_mcp_server'
     | 'mounts_shared_filesystem'
     | 'exposes_sandbox_app'
@@ -367,6 +368,20 @@ export function projectOperationalObject(input: ProjectionInput): OperationalObj
       )
     }
   } else if (family === 'context') {
+    const contextId = optionalBoundedString(spec.contextId, 253)
+    if (contextId && contextId !== name) {
+      relationships.push(
+        relationship({
+          ...common,
+          sourceType: 'context',
+          sourceId: rootId,
+          relationshipType: 'context_identity_alias',
+          targetType: 'context',
+          targetId: logicalId('context', namespace, contextId),
+          instanceParts: ['context', rootId, 'identity-alias', contextId],
+        })
+      )
+    }
     relationships.push(
       ...contextRelationships({
         ...common,

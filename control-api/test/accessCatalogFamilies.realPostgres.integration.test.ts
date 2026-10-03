@@ -438,6 +438,306 @@ describeRealPostgres('all aggregate catalog families on real producers', () => {
     })
   }
 
+  it('resolves producer Context aliases to one canonical catalog and authority identity', async () => {
+    const suffix = randomBytes(5).toString('hex')
+    const contextName = `r55-m7-context-${suffix}`
+    const contextAlias = `r55-m7-wire-${suffix}`
+    const hostName = `r55-m7-host-${suffix}`
+    const mcpName = `r55-m7-mcp-${suffix}`
+    const sharedFilesystemName = `r55-m7-files-${suffix}`
+    const duplicateAliasName = `r55-m7-duplicate-${suffix}`
+    const nextContextAlias = `r55-m7-next-wire-${suffix}`
+    const contextUid = randomUUID()
+    const contextSource = operationalSourceSpecs.find(value => value.family === 'context')!
+    const hostSource = operationalSourceSpecs.find(value => value.family === 'host')!
+    const mcpSource = operationalSourceSpecs.find(value => value.family === 'mcp_server')!
+    const sharedFilesystemSource = operationalSourceSpecs.find(
+      value => value.family === 'shared_filesystem'
+    )!
+    let contextObject = fixture({
+      plural: 'contexts',
+      namespace: config.contextsNamespace,
+      name: contextName,
+      uid: contextUid,
+      spec: {
+        contextId: contextAlias,
+        mcpServers: [mcpName],
+        sharedFileSystems: [{ name: sharedFilesystemName, mountPath: '/workspace/m7' }],
+      },
+    })
+    let hostObject = fixture({
+      plural: 'hosts',
+      namespace: config.hostsNamespace,
+      name: hostName,
+      uid: randomUUID(),
+      spec: { contextRef: contextAlias },
+    })
+    const mcpObject = fixture({
+      plural: 'mcpservers',
+      namespace: config.mcpServersNamespace,
+      name: mcpName,
+      uid: randomUUID(),
+    })
+    const sharedFilesystemObject = fixture({
+      plural: 'sharedfilesystems',
+      namespace: config.sharedFilesystemsNamespace,
+      name: sharedFilesystemName,
+      uid: randomUUID(),
+    })
+    kubernetesApi.put(contextObject.plural, contextObject.namespace, contextObject.object)
+    kubernetesApi.put(hostObject.plural, hostObject.namespace, hostObject.object)
+    kubernetesApi.put(mcpObject.plural, mcpObject.namespace, mcpObject.object)
+    kubernetesApi.put(
+      sharedFilesystemObject.plural,
+      sharedFilesystemObject.namespace,
+      sharedFilesystemObject.object
+    )
+    await indexer.reconcileSource(contextSource)
+    await indexer.reconcileSource(hostSource)
+    await indexer.reconcileSource(mcpSource)
+    await indexer.reconcileSource(sharedFilesystemSource)
+    await databasePool.query(`INSERT INTO user_contexts(user_id, context_id) VALUES ($1, $2)`, [
+      userId,
+      contextAlias,
+    ])
+    await databasePool.query(`INSERT INTO user_agents(user_id, agent_name) VALUES ($1, $2)`, [
+      userId,
+      hostName,
+    ])
+
+    try {
+      const canonicalContextId = `${config.contextsNamespace}/${contextName}`
+      const contextCatalog = await buildAccessCatalog(
+        { session, families: ['context'], limit: 100 },
+        { transaction: transaction(databasePool) }
+      )
+      const contextItem = contextCatalog.items.find(
+        item => item.resource.logicalId === canonicalContextId
+      )
+      expect(contextCatalog.complete).toBe(true)
+      expect(contextItem?.resource.logicalId).toBe(canonicalContextId)
+      expect(contextItem?.resource.providerUid).toBe(contextUid)
+      expect(contextItem?.accessPaths).toHaveLength(1)
+      expect(contextItem?.relationships).not.toContainEqual(
+        expect.objectContaining({ type: 'context_identity_alias' })
+      )
+
+      const mcpCatalog = await buildAccessCatalog(
+        { session, families: ['mcp_server'], limit: 100 },
+        { transaction: transaction(databasePool) }
+      )
+      const mcpItem = mcpCatalog.items.find(
+        item => item.resource.logicalId === `${config.mcpServersNamespace}/${mcpName}`
+      )
+      expect(mcpCatalog.complete).toBe(true)
+      expect(mcpItem?.accessPaths).toHaveLength(2)
+      for (const path of mcpItem!.accessPaths) {
+        await expect(
+          resolveLiveAuthorization(
+            {
+              session,
+              requiredCapability: 'mcp_server.read',
+              resource: canonicalResourceIdentity(mcpItem!.resource),
+              requestedAccessPathId: path.accessPathId,
+            },
+            { transaction: transaction(databasePool), gateway }
+          )
+        ).resolves.toEqual(
+          expect.objectContaining({
+            status: 'allowed',
+            selectedPath: expect.objectContaining({ id: path.accessPathId }),
+          })
+        )
+      }
+
+      const sharedFilesystemCatalog = await buildAccessCatalog(
+        { session, families: ['shared_filesystem'], limit: 100 },
+        { transaction: transaction(databasePool) }
+      )
+      const sharedFilesystemItem = sharedFilesystemCatalog.items.find(
+        item =>
+          item.resource.logicalId === `${config.sharedFilesystemsNamespace}/${sharedFilesystemName}`
+      )
+      expect(sharedFilesystemCatalog.complete).toBe(true)
+      expect(sharedFilesystemItem?.accessPaths).toHaveLength(1)
+      await expect(
+        resolveLiveAuthorization(
+          {
+            session,
+            requiredCapability: 'shared_filesystem.read',
+            resource: canonicalResourceIdentity(sharedFilesystemItem!.resource),
+            requestedAccessPathId: sharedFilesystemItem!.accessPaths[0].accessPathId,
+          },
+          { transaction: transaction(databasePool), gateway }
+        )
+      ).resolves.toEqual(
+        expect.objectContaining({
+          status: 'allowed',
+          selectedPath: expect.objectContaining({
+            id: sharedFilesystemItem!.accessPaths[0].accessPathId,
+          }),
+        })
+      )
+
+      const duplicateAliasObject = fixture({
+        plural: 'contexts',
+        namespace: config.contextsNamespace,
+        name: duplicateAliasName,
+        uid: randomUUID(),
+        spec: { contextId: contextAlias, mcpServers: [], sharedFileSystems: [] },
+      })
+      kubernetesApi.put(
+        duplicateAliasObject.plural,
+        duplicateAliasObject.namespace,
+        duplicateAliasObject.object
+      )
+      await indexer.reconcileSource(contextSource)
+      const duplicateAliasCatalog = await buildAccessCatalog(
+        { session, families: ['context'], limit: 100 },
+        { transaction: transaction(databasePool) }
+      )
+      expect(duplicateAliasCatalog.items).toHaveLength(0)
+      const duplicateAliasMcpCatalog = await buildAccessCatalog(
+        { session, families: ['mcp_server'], limit: 100 },
+        { transaction: transaction(databasePool) }
+      )
+      expect(
+        duplicateAliasMcpCatalog.items.find(
+          item => item.resource.logicalId === `${config.mcpServersNamespace}/${mcpName}`
+        )?.accessPaths ?? []
+      ).toHaveLength(0)
+      kubernetesApi.delete(
+        duplicateAliasObject.plural,
+        duplicateAliasObject.namespace,
+        duplicateAliasName
+      )
+      await indexer.reconcileSource(contextSource)
+
+      const nameCollisionObject = fixture({
+        plural: 'contexts',
+        namespace: config.contextsNamespace,
+        name: contextAlias,
+        uid: randomUUID(),
+        spec: { mcpServers: [], sharedFileSystems: [] },
+      })
+      kubernetesApi.put(
+        nameCollisionObject.plural,
+        nameCollisionObject.namespace,
+        nameCollisionObject.object
+      )
+      await indexer.reconcileSource(contextSource)
+      const nameCollisionCatalog = await buildAccessCatalog(
+        { session, families: ['context'], limit: 100 },
+        { transaction: transaction(databasePool) }
+      )
+      expect(nameCollisionCatalog.items).toHaveLength(0)
+      kubernetesApi.delete(nameCollisionObject.plural, nameCollisionObject.namespace, contextAlias)
+      await indexer.reconcileSource(contextSource)
+
+      contextObject = fixture({
+        plural: 'contexts',
+        namespace: config.contextsNamespace,
+        name: contextName,
+        uid: contextUid,
+        spec: {
+          contextId: nextContextAlias,
+          mcpServers: [mcpName],
+          sharedFileSystems: [{ name: sharedFilesystemName, mountPath: '/workspace/m7' }],
+        },
+      })
+      kubernetesApi.put(contextObject.plural, contextObject.namespace, contextObject.object)
+      await indexer.reconcileSource(contextSource)
+      const staleAliasCatalog = await buildAccessCatalog(
+        { session, families: ['context'], limit: 100 },
+        { transaction: transaction(databasePool) }
+      )
+      expect(staleAliasCatalog.items).toHaveLength(0)
+
+      await databasePool.query(
+        `UPDATE user_contexts SET context_id = $3 WHERE user_id = $1 AND context_id = $2`,
+        [userId, contextAlias, nextContextAlias]
+      )
+      hostObject = fixture({
+        plural: 'hosts',
+        namespace: config.hostsNamespace,
+        name: hostName,
+        uid: String((hostObject.object.metadata as Record<string, unknown>).uid),
+        spec: { contextRef: nextContextAlias },
+      })
+      kubernetesApi.put(hostObject.plural, hostObject.namespace, hostObject.object)
+      await indexer.reconcileSource(hostSource)
+      const refreshedCatalog = await buildAccessCatalog(
+        { session, families: ['context'], limit: 100 },
+        { transaction: transaction(databasePool) }
+      )
+      const refreshedContext = refreshedCatalog.items.find(
+        item => item.resource.logicalId === canonicalContextId
+      )
+      expect(refreshedContext?.accessPaths).toHaveLength(1)
+
+      const oldContextPathId = refreshedContext!.accessPaths[0].accessPathId
+      const recreatedUid = randomUUID()
+      contextObject = fixture({
+        plural: 'contexts',
+        namespace: config.contextsNamespace,
+        name: contextName,
+        uid: recreatedUid,
+        spec: {
+          contextId: nextContextAlias,
+          mcpServers: [mcpName],
+          sharedFileSystems: [{ name: sharedFilesystemName, mountPath: '/workspace/m7' }],
+        },
+      })
+      kubernetesApi.put(contextObject.plural, contextObject.namespace, contextObject.object)
+      await indexer.reconcileSource(contextSource)
+      const recreatedCatalog = await buildAccessCatalog(
+        { session, families: ['context'], limit: 100 },
+        { transaction: transaction(databasePool) }
+      )
+      const recreatedContext = recreatedCatalog.items.find(
+        item => item.resource.logicalId === canonicalContextId
+      )
+      expect(recreatedContext?.resource.providerUid).toBe(recreatedUid)
+      expect(recreatedContext?.accessPaths.map(path => path.accessPathId)).not.toContain(
+        oldContextPathId
+      )
+      await expect(
+        resolveLiveAuthorization(
+          {
+            session,
+            requiredCapability: 'context.read',
+            resource: canonicalResourceIdentity(refreshedContext!.resource),
+            requestedAccessPathId: oldContextPathId,
+          },
+          { transaction: transaction(databasePool), gateway }
+        )
+      ).resolves.toEqual(expect.objectContaining({ status: 'access_path_stale' }))
+    } finally {
+      await databasePool.query(
+        `DELETE FROM user_contexts WHERE user_id = $1 AND context_id = ANY($2::text[])`,
+        [userId, [contextAlias, nextContextAlias]]
+      )
+      await databasePool.query(`DELETE FROM user_agents WHERE user_id = $1 AND agent_name = $2`, [
+        userId,
+        hostName,
+      ])
+      kubernetesApi.delete(hostObject.plural, hostObject.namespace, hostName)
+      kubernetesApi.delete(contextObject.plural, contextObject.namespace, contextName)
+      kubernetesApi.delete('contexts', config.contextsNamespace, duplicateAliasName)
+      kubernetesApi.delete('contexts', config.contextsNamespace, contextAlias)
+      kubernetesApi.delete(mcpObject.plural, mcpObject.namespace, mcpName)
+      kubernetesApi.delete(
+        sharedFilesystemObject.plural,
+        sharedFilesystemObject.namespace,
+        sharedFilesystemName
+      )
+      await indexer.reconcileSource(hostSource)
+      await indexer.reconcileSource(contextSource)
+      await indexer.reconcileSource(mcpSource)
+      await indexer.reconcileSource(sharedFilesystemSource)
+    }
+  })
+
   it('excludes an ineligible sibling Host from selected MCP hydration', async () => {
     const hostSource = operationalSourceSpecs.find(value => value.family === 'host')!
     const disabledHost = fixture({

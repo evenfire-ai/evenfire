@@ -1,3 +1,4 @@
+import { canonicalContextLogicalIdSql } from './contextIdentitySql.js'
 import { workflowTriggerGrantIdentitySql } from './workflowTriggerGrantIdentity.js'
 
 const directWorkflowTriggerGrantId = workflowTriggerGrantIdentitySql('direct', 'access_grant')
@@ -92,9 +93,12 @@ export const SIMPLE_OPERATIONAL_HYDRATION_SQL = `
              NULL, NULL
         FROM resources resource
         JOIN user_contexts access_grant
-          ON $4::text = 'context'
-         AND resource.logical_id = $6::text || '/' || access_grant.context_id
-       WHERE access_grant.user_id = $1
+          ON $4::text = 'context' AND access_grant.user_id = $1
+        CROSS JOIN LATERAL (
+          SELECT ${canonicalContextLogicalIdSql('$3', "$6::text || '/' || access_grant.context_id")}
+                   AS canonical_id
+        ) context_identity
+       WHERE resource.logical_id = context_identity.canonical_id
       UNION ALL
       SELECT resource.logical_id, 'team',
              'team_contexts:' || access_grant.team_id || ':' || access_grant.context_id,
@@ -102,10 +106,14 @@ export const SIMPLE_OPERATIONAL_HYDRATION_SQL = `
         FROM resources resource
         JOIN team_contexts access_grant
           ON $4::text = 'context'
-         AND resource.logical_id = $6::text || '/' || access_grant.context_id
         JOIN team_members membership
           ON membership.team_id = access_grant.team_id AND membership.user_id = $1
          AND membership.status = 'active'
+        CROSS JOIN LATERAL (
+          SELECT ${canonicalContextLogicalIdSql('$3', "$6::text || '/' || access_grant.context_id")}
+                   AS canonical_id
+        ) context_identity
+       WHERE resource.logical_id = context_identity.canonical_id
       UNION ALL
       SELECT resource.logical_id, 'direct',
              ${directWorkflowTriggerGrantId},
@@ -164,7 +172,10 @@ export const SIMPLE_OPERATIONAL_HYDRATION_SQL = `
   ), relationships AS MATERIALIZED (
     SELECT DISTINCT relationship.source_id AS logical_id, relationship.source_id,
            relationship.relationship_type, relationship.target_type,
-           relationship.target_id, relationship.relationship_instance_id,
+           CASE WHEN relationship.relationship_type = 'uses_context'
+             THEN ${canonicalContextLogicalIdSql('$3', 'relationship.target_id')}
+             ELSE relationship.target_id
+           END AS target_id, relationship.relationship_instance_id,
            relationship.behavior_attributes, relationship.source_type,
            relationship.source_provider_uid, relationship.source_resource_version
       FROM operational_resource_relationships relationship
@@ -174,8 +185,14 @@ export const SIMPLE_OPERATIONAL_HYDRATION_SQL = `
          (relationship.source_type = resource.resource_type
           AND relationship.source_id = resource.logical_id)
          OR (relationship.target_type = resource.resource_type
-          AND relationship.target_id = resource.logical_id)
+          AND (CASE WHEN relationship.relationship_type = 'uses_context'
+                 THEN ${canonicalContextLogicalIdSql('$3', 'relationship.target_id')}
+                 ELSE relationship.target_id
+               END) = resource.logical_id)
        )
+     WHERE relationship.relationship_type <> 'context_identity_alias'
+       AND (relationship.relationship_type <> 'uses_context'
+         OR ${canonicalContextLogicalIdSql('$3', 'relationship.target_id')} IS NOT NULL)
     ORDER BY logical_id, relationship_type, target_type, target_id,
              relationship_instance_id
     LIMIT $8
@@ -236,8 +253,17 @@ export const DERIVED_OPERATIONAL_HYDRATION_SQL = `
        AND source_resource.deleted_at IS NULL
      WHERE relationship.source_type = 'context'
   ), host_edges AS MATERIALIZED (
-    SELECT relationship.*
+    SELECT relationship.environment_id, relationship.source_type,
+           relationship.source_id, relationship.relationship_type,
+           relationship.target_type, context_identity.canonical_id AS target_id,
+           relationship.relationship_instance_id, relationship.behavior_attributes,
+           relationship.source_family, relationship.source_provider_uid,
+           relationship.source_resource_version, relationship.source_generation,
+           relationship.observed_generation, relationship.content_bytes
       FROM operational_resource_relationships relationship
+      CROSS JOIN LATERAL (
+        SELECT ${canonicalContextLogicalIdSql('$3', 'relationship.target_id')} AS canonical_id
+      ) context_identity
       JOIN operational_resource_index host_resource
         ON host_resource.environment_id = relationship.environment_id
        AND host_resource.resource_type = 'host'
@@ -247,7 +273,7 @@ export const DERIVED_OPERATIONAL_HYDRATION_SQL = `
       JOIN operational_resource_index context_resource
         ON context_resource.environment_id = relationship.environment_id
        AND context_resource.resource_type = 'context'
-       AND context_resource.logical_id = relationship.target_id
+       AND context_resource.logical_id = context_identity.canonical_id
        AND context_resource.enabled = TRUE
        AND context_resource.deleted_at IS NULL
      WHERE $4::text = 'mcp_server'
@@ -255,7 +281,7 @@ export const DERIVED_OPERATIONAL_HYDRATION_SQL = `
        AND relationship.source_type = 'host'
        AND relationship.relationship_type = 'uses_context'
        AND relationship.target_type = 'context'
-       AND relationship.target_id IN (SELECT source_id FROM direct_edges)
+       AND context_identity.canonical_id IN (SELECT source_id FROM direct_edges)
   ), paths AS MATERIALIZED (
     SELECT * FROM (
       SELECT edge.target_id AS logical_id, 'direct'::text AS kind,
@@ -269,7 +295,7 @@ export const DERIVED_OPERATIONAL_HYDRATION_SQL = `
              NULL::text AS host_edge_instance, NULL::jsonb AS host_edge_behavior
         FROM direct_edges edge
         JOIN user_contexts access_grant
-          ON edge.source_id = $6::text || '/' || access_grant.context_id
+          ON edge.source_id = ${canonicalContextLogicalIdSql('$3', "split_part(edge.source_id, '/', 1) || '/' || access_grant.context_id")}
        WHERE access_grant.user_id = $1
       UNION ALL
       SELECT edge.target_id, 'team',
@@ -280,7 +306,7 @@ export const DERIVED_OPERATIONAL_HYDRATION_SQL = `
              edge.behavior_attributes, NULL, NULL, NULL, NULL
         FROM direct_edges edge
         JOIN team_contexts access_grant
-          ON edge.source_id = $6::text || '/' || access_grant.context_id
+          ON edge.source_id = ${canonicalContextLogicalIdSql('$3', "split_part(edge.source_id, '/', 1) || '/' || access_grant.context_id")}
         JOIN team_members membership
           ON membership.team_id = access_grant.team_id AND membership.user_id = $1
          AND membership.status = 'active'
