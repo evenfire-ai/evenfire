@@ -228,11 +228,31 @@ export const DERIVED_OPERATIONAL_HYDRATION_SQL = `
              WHEN $4::text = 'mcp_server' THEN 'includes_mcp_server'
              ELSE 'mounts_shared_filesystem'
            END
+      JOIN operational_resource_index source_resource
+        ON source_resource.environment_id = relationship.environment_id
+       AND source_resource.resource_type = 'context'
+       AND source_resource.logical_id = relationship.source_id
+       AND source_resource.enabled = TRUE
+       AND source_resource.deleted_at IS NULL
+     WHERE relationship.source_type = 'context'
   ), host_edges AS MATERIALIZED (
     SELECT relationship.*
       FROM operational_resource_relationships relationship
+      JOIN operational_resource_index host_resource
+        ON host_resource.environment_id = relationship.environment_id
+       AND host_resource.resource_type = 'host'
+       AND host_resource.logical_id = relationship.source_id
+       AND host_resource.enabled = TRUE
+       AND host_resource.deleted_at IS NULL
+      JOIN operational_resource_index context_resource
+        ON context_resource.environment_id = relationship.environment_id
+       AND context_resource.resource_type = 'context'
+       AND context_resource.logical_id = relationship.target_id
+       AND context_resource.enabled = TRUE
+       AND context_resource.deleted_at IS NULL
      WHERE $4::text = 'mcp_server'
        AND relationship.environment_id = $3
+       AND relationship.source_type = 'host'
        AND relationship.relationship_type = 'uses_context'
        AND relationship.target_type = 'context'
        AND relationship.target_id IN (SELECT source_id FROM direct_edges)
