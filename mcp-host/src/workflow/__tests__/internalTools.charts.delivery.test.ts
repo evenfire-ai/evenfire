@@ -259,6 +259,15 @@ describe('chart size limits', () => {
     expect(size.width / size.height).toBeCloseTo(4000 / 100, 1)
   })
 
+  it('draws the default size for a width or height that is not a positive number', async () => {
+    const result = await chart().execute({ ...yearly, width: -5, height: 'tall' }, outputDir)
+    expect(result.success).toBe(true)
+    expect(result.content).toContain('width -5 is not a positive number; used 800.')
+    expect(result.content).toContain('height tall is not a positive number; used 400.')
+    const size = pngSize(result.artifact!.path)
+    expect(size.width / size.height).toBeCloseTo(800 / 400, 2)
+  })
+
   it('charges the quota for the PNG written, not for the canvas it was drawn on', async () => {
     const prev = process.env.CLERUM_WORKFLOW_OUTPUT_QUOTA_MB
     process.env.CLERUM_WORKFLOW_OUTPUT_QUOTA_MB = '1'

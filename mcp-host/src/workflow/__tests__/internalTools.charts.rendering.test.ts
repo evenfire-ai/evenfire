@@ -598,6 +598,59 @@ describe('gauge readout', () => {
     expect(r.content).toContain('-5')
     expect(r.content).toContain('below 0')
   })
+
+  /** The dial segments [arc, rest] of the gauge `args` draws, and the notes it returns. */
+  async function dial(args: Record<string, unknown>): Promise<{ data: unknown; notes: string }> {
+    const seen: unknown[] = []
+    const draw = Chart.prototype.draw
+    const spy = vi.spyOn(Chart.prototype, 'draw').mockImplementation(function (this: Chart) {
+      seen.push([...this.data.datasets[0].data])
+      return draw.call(this)
+    })
+    try {
+      const r = await findTool('clerum__generate_chart').execute(
+        { filename: 'dial.png', type: 'gauge', ...args },
+        outputDir
+      )
+      expect(r.success, r.error).toBe(true)
+      return { data: seen[seen.length - 1], notes: r.content ?? '' }
+    } finally {
+      spy.mockRestore()
+    }
+  }
+
+  const reading = (value: number) => ({ data: { datasets: [{ data: [value] }] } })
+
+  it.each([-5, 0])('draws the default dial and says so when gaugeMax is %s', async gaugeMax => {
+    const { data, notes } = await dial({ ...reading(40), gaugeMax })
+    expect(data).toEqual([40, 60])
+    expect(notes).toContain(`gaugeMax ${gaugeMax} is not a positive number; used 100.`)
+    expect(notes).not.toContain('shown full')
+    expect(notes).not.toContain('shown empty')
+  })
+
+  it('measures a reading against the dial it draws when gaugeMax is not positive', async () => {
+    const over = await dial({ ...reading(150), gaugeMax: -5 })
+    expect(over.data).toEqual([100, 0])
+    expect(over.notes).toContain('gaugeMax -5 is not a positive number; used 100.')
+    expect(over.notes).toContain(
+      'the gauge value 150 exceeds gaugeMax 100, so the dial is shown full'
+    )
+  })
+
+  it('keeps a positive gaugeMax, and the default when none is sent', async () => {
+    expect(await dial({ ...reading(40), gaugeMax: 50 })).toEqual({
+      data: [40, 10],
+      notes: expect.not.stringContaining('gaugeMax'),
+    })
+    expect((await dial({ ...reading(0.25), gaugeMax: 0.5 })).data).toEqual([0.25, 0.25])
+    expect((await dial({ ...reading(40), gaugeMax: '50' })).data).toEqual([40, 10])
+    for (const unset of [{}, { gaugeMax: null }]) {
+      const { data, notes } = await dial({ ...reading(40), ...unset })
+      expect(data).toEqual([40, 60])
+      expect(notes).not.toContain('gaugeMax')
+    }
+  })
 })
 
 describe('colors follow their points', () => {

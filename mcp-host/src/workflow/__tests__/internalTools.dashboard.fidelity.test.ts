@@ -591,6 +591,41 @@ describe('gauge', () => {
     })
     expect(notes).not.toContain('labels')
   })
+
+  const gauge = async (extra: Record<string, unknown>) => {
+    const { html, notes } = await render({
+      data: { title: 'T', charts: [{ type: 'gauge', datasets: [{ data: [40] }], ...extra }] },
+    })
+    const [spec] = chartSpecs(html)
+    return {
+      dial: (spec.datasets as Array<{ data: number[] }>)[0].data,
+      readout: spec.gauge,
+      notes,
+    }
+  }
+
+  it.each([-5, 0, 'none'])('says it drew 0..100 when gaugeMax is %j', async gaugeMax => {
+    const { dial, readout, notes } = await gauge({ gaugeMax })
+    expect(dial).toEqual([40, 60])
+    expect(readout).toEqual({ value: '40', max: '100' })
+    expect(notes).toContain(
+      `data.charts[0]: gaugeMax ${gaugeMax} is not a positive number; used 100.`
+    )
+  })
+
+  it('keeps a positive gaugeMax, written as a number or as text, without a note', async () => {
+    for (const [extra, max] of [
+      [{ gaugeMax: 50 }, 50],
+      [{ gaugeMax: '1,200' }, 1200],
+      [{}, 100],
+      [{ gaugeMax: null }, 100],
+    ] as const) {
+      const { dial, readout, notes } = await gauge(extra)
+      expect(dial).toEqual([40, max - 40])
+      expect(readout).toEqual({ value: '40', max: String(max) })
+      expect(notes).not.toContain('gaugeMax')
+    }
+  })
 })
 
 describe('funnel stages', () => {

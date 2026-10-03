@@ -334,6 +334,9 @@ function translate(
       chart.legend = false
       const requestedMax = coerceNumber(spec.gaugeMax)
       const max = requestedMax !== undefined && requestedMax > 0 ? requestedMax : 100
+      if (max !== requestedMax && spec.gaugeMax !== undefined && spec.gaugeMax !== null) {
+        warnings.push(`gaugeMax ${String(spec.gaugeMax)} is not a positive number; used 100.`)
+      }
       const values = firstSeriesValues(datasets[0])
       const raw = values[0] ?? 0
       if (values.length > 1) {

@@ -368,7 +368,8 @@ function resolveChartType(
       if (!ds) return o
       const values = (ds.data as unknown[]).filter((v): v is number => typeof v === 'number')
       const reading = values[0] ?? 0
-      const max = Math.max(0, Number(args.gaugeMax) || 100)
+      // The dial and its notes use this one validated ceiling.
+      const max = positiveNumber('gaugeMax', args.gaugeMax, 100, o.notes)
       // Only the arc is bounded by the dial; the readout prints the reading.
       const arc = Math.min(Math.max(reading, 0), max)
       if (reading > max) {
@@ -542,8 +543,12 @@ function isVisuallyEmpty(datasets: ChartDataset[]): boolean {
   return sawNumber
 }
 
-function clampDimension(
-  field: 'width' | 'height',
+/**
+ * `value` as a positive finite number; `fallback` when it is unset, and also
+ * when it is not one, which `warnings` records.
+ */
+function positiveNumber(
+  field: string,
   value: unknown,
   fallback: number,
   warnings: string[]
@@ -554,6 +559,16 @@ function clampDimension(
     warnings.push(`${field} ${String(value)} is not a positive number; used ${fallback}.`)
     return fallback
   }
+  return n
+}
+
+function clampDimension(
+  field: 'width' | 'height',
+  value: unknown,
+  fallback: number,
+  warnings: string[]
+): number {
+  const n = positiveNumber(field, value, fallback, warnings)
   if (n > MAX_CHART_DIMENSION) {
     warnings.push(
       `${field} ${n} is over the ${MAX_CHART_DIMENSION} maximum; used ${MAX_CHART_DIMENSION}.`
