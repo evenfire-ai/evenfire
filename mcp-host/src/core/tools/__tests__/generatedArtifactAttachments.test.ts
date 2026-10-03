@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
+import { zipEntries } from '../../../workflow/__tests__/support/zipEntries'
 import type { ArtifactMetadata } from '../../../workflow/types'
 import type { NativeToolConfig } from '../../interfaces'
 import type { Attachment } from '../../types'
@@ -351,6 +352,70 @@ describe('generated internal artifact attachments', () => {
     })
     expect(leaked.is_error).toBe(false)
     expect(leaked.attachments ?? []).toHaveLength(0)
+  })
+
+  describe('XLSX record keys, which the sheet prints as its header', () => {
+    const secret = 'probe-redaction-value'
+
+    function xlsxTool() {
+      process.env.CLERUM_OUTPUT_DIR = outputDir
+      const registry = new NativeToolRegistry(
+        {
+          workspacePath: outputDir,
+          shellTimeout: 5000,
+          toolTimeout: 60000,
+          toolProgressInterval: 30000,
+          httpAllowlist: [],
+          envAllowlist: ['PATH'],
+          memoryMaxSize: 1048576,
+        },
+        'conv-1',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        null,
+        {
+          maxBytes: 52_428_800,
+          secretEntriesProvider: () => [{ name: 'PROBE_VALUE', value: secret }],
+        }
+      )
+      return registry.get('clerum__generate_xlsx')!
+    }
+
+    function sheetXml(file: string): string {
+      return [...zipEntries(file)]
+        .filter(([name]) => name.startsWith('xl/') && name.endsWith('.xml'))
+        .map(([, data]) => data.toString('utf8'))
+        .join('\n')
+    }
+
+    it('attaches a sheet whose keys hold no secret', async () => {
+      const result = await xlsxTool().execute({
+        filename: 'ordinary.xlsx',
+        sheets: [{ name: 'S', rows: [{ Region: 'North', Total: 5 }] }],
+      })
+      expect(result.is_error).toBe(false)
+      expect(result.attachments ?? []).toHaveLength(1)
+      const attached = path.join(outputDir, 'attached.xlsx')
+      fs.writeFileSync(attached, decoded(result.attachments![0]!))
+      expect(sheetXml(attached)).toContain('Region')
+    })
+
+    it.each([
+      ['as sent', secret],
+      ['split by a control character', 'probe-red\u0007action-value'],
+      ['split by an ANSI escape', 'probe-red\u001b[31maction-value'],
+      ['split by half a surrogate pair', 'probe-red\uD800action-value'],
+    ])('does not attach a sheet whose key prints a secret %s', async (_label, key) => {
+      const result = await xlsxTool().execute({
+        filename: 'keyed.xlsx',
+        sheets: [{ name: 'S', rows: [{ [key]: 'ordinary' }] }],
+      })
+      expect(result.is_error).toBe(false)
+      expect(sheetXml(path.join(outputDir, 'keyed.xlsx'))).toContain(secret)
+      expect(result.attachments ?? []).toHaveLength(0)
+    })
   })
 
   it('native internal tools return generated artifact attachments through the adapter', async () => {

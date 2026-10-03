@@ -3,7 +3,7 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 import { INTERNAL_TOOLS } from '../internalTools'
-import { cleanText, cleanToolArgs } from '../toolText'
+import { cleanText, cleanToolArgs, printedForms } from '../toolText'
 import { XML_FORBIDDEN_CHARS, zipEntries } from './support/zipEntries'
 
 describe('cleanText', () => {
@@ -95,6 +95,55 @@ describe('cleanToolArgs', () => {
     const input = { body: 'x' }
     cleanToolArgs(input)
     expect(input).toEqual({ body: 'x' })
+  })
+})
+
+/** Every string and object key `value` holds. */
+function textsOf(value: unknown, out: string[] = []): string[] {
+  if (typeof value === 'string') out.push(value)
+  else if (Array.isArray(value)) value.forEach(item => textsOf(item, out))
+  else if (value && typeof value === 'object') {
+    for (const [key, item] of Object.entries(value)) {
+      out.push(key)
+      textsOf(item, out)
+    }
+  }
+  return out
+}
+
+describe('printedForms', () => {
+  it('holds every string and key of the cleaned arguments', () => {
+    const args = {
+      body: 'a\u0007b',
+      sheets: [
+        {
+          rows: [
+            { 'probe-red\u0007action-value': 'ordinary', 'Cost\u001b[31m': 3 },
+            { '<b>Region</b>': ['x\u0000y'] },
+          ],
+        },
+      ],
+      columnFormats: { 'Total\uD800': 'currency' },
+      nested: { 'in\u0007ner': { 'deep\u001b[0mest': 'value\u0007' } },
+    }
+    const forms = new Set(printedForms(args))
+    for (const text of textsOf(cleanToolArgs(args))) expect(forms, text).toContain(text)
+  })
+
+  it('reads a key in the same printed forms as a value', () => {
+    const key = 'probe-<b>red</b>[act](https://a.example)ion&#45;value'
+    const asKey = printedForms({ rows: [{ [key]: 1 }] })
+    const asValue = printedForms({ rows: [[key]] })
+    for (const form of asValue) expect(asKey).toContain(form)
+    expect(asKey).toContain('probe-redaction-value')
+  })
+
+  it('reads keys nested absurdly deep without overflowing the stack', () => {
+    let deep: unknown = { 'k\u0007': 'v' }
+    for (let i = 0; i < 10_000; i++) deep = { n: deep }
+    const forms = printedForms({ body: 'a\u0007', extra: deep })
+    expect(forms).toContain('a')
+    expect(forms).toContain('extra')
   })
 })
 

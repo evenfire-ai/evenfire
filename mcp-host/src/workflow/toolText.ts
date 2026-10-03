@@ -72,12 +72,15 @@ const INVISIBLE = /[­​-‏⁠-⁤﻿]/g
 const MARKDOWN_ESCAPE = /\\([!-/:-@[-`{-~])/g
 
 /**
- * The text of every string in `args` in the forms a document generator may
- * print it: as sent, cleaned as cleanToolArgs cleans it, with HTML tags,
- * character references, backslash escapes and invisible characters taken out,
- * with markdown markers taken out too, and read as inline markdown, where a
- * link prints its label. Text split by any of these prints whole, so a check
- * for leaked secrets that reads every form sees it whole.
+ * The text of every string in `args`, object keys included, in the forms a
+ * document generator may print it: as sent, cleaned as cleanToolArgs cleans
+ * it, with HTML tags, character references, backslash escapes and invisible
+ * characters taken out, with markdown markers taken out too, and read as
+ * inline markdown, where a link prints its label. Text split by any of these
+ * prints whole, so a check for leaked secrets that reads every form sees it
+ * whole. Keys count because a generator can print one, as an XLSX sheet prints
+ * the keys of record rows as its header. Like cleanToolArgs, it reads no
+ * deeper than MAX_DEPTH.
  */
 export function printedForms(args: unknown): string[] {
   const sent: string[] = []
@@ -85,7 +88,12 @@ export function printedForms(args: unknown): string[] {
     if (depth > MAX_DEPTH) return
     if (typeof value === 'string') sent.push(value)
     else if (Array.isArray(value)) value.forEach(item => collect(item, depth + 1))
-    else if (isPlainObject(value)) Object.values(value).forEach(item => collect(item, depth + 1))
+    else if (isPlainObject(value)) {
+      for (const [key, item] of Object.entries(value)) {
+        sent.push(key)
+        collect(item, depth + 1)
+      }
+    }
   }
   collect(args, 0)
   const cleaned = sent.map(cleanText)
