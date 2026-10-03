@@ -161,7 +161,11 @@ describe('action authorizer v2', () => {
       if (result.status !== 'allowed') return
       expect(resolve).toHaveBeenCalledWith(
         expect.objectContaining({
-          resource: expect.objectContaining({ type: 'host', logicalId: 'default/chatllm' }),
+          resource: requestedResource,
+          authorizationResource: expect.objectContaining({
+            type: 'host',
+            logicalId: 'default/chatllm',
+          }),
           operationTarget,
         }),
         expect.any(Object)

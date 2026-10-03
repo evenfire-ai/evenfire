@@ -64,7 +64,12 @@ export type LiveAuthorizationInput = Readonly<{
 export type LiveActionAuthorizationInput = Readonly<{
   session: AccessAuthoritySession
   operationId: ActionOperationId
+  /**
+   * The signed operation resource remains authoritative for target validation.
+   * Runtime actions may resolve grants through an exact Host ancestor instead.
+   */
   resource: CanonicalResourceIdentity
+  authorizationResource?: CanonicalResourceIdentity
   operationTarget?: unknown
   requestedAccessPathId?: string
 }>
@@ -472,18 +477,52 @@ export async function resolveLiveActionAuthorization(
   if (!requiredCapability || operation.requiredCapabilities.length !== 1) {
     return { status: 'denied', code: 'unknown_capability' }
   }
+  let operationResource: CanonicalResourceIdentity
+  let authorizationResource: CanonicalResourceIdentity
+  let operationTarget: ReturnType<typeof validateActionOperationTarget>
+  try {
+    operationResource = canonicalResourceIdentity(input.resource)
+    if (
+      resourceIdentityKey(operationResource) !== resourceIdentityKey(input.resource) ||
+      operationResource.environmentId !== canonicalEnvironmentId()
+    ) {
+      return { status: 'invalid', code: 'invalid_resource' }
+    }
+    authorizationResource = canonicalResourceIdentity(input.authorizationResource ?? input.resource)
+    if (
+      resourceIdentityKey(authorizationResource) !==
+        resourceIdentityKey(input.authorizationResource ?? input.resource) ||
+      authorizationResource.environmentId !== operationResource.environmentId
+    ) {
+      return { status: 'invalid', code: 'invalid_resource' }
+    }
+    operationTarget = validateActionOperationTarget({
+      operationId: input.operationId,
+      resource: operationResource,
+      operationTarget: input.operationTarget,
+    })
+  } catch (error) {
+    if (error instanceof ActionOperationTargetError) {
+      return { status: 'invalid', code: 'invalid_operation_target' }
+    }
+    return { status: 'invalid', code: 'invalid_resource' }
+  }
+  if (resourceIdentityKey(authorizationResource) !== resourceIdentityKey(operationResource)) {
+    const hostRef = operationTarget && 'hostRef' in operationTarget ? operationTarget.hostRef : null
+    if (
+      authorizationResource.type !== 'host' ||
+      typeof hostRef !== 'string' ||
+      hostRef !== authorizationResource.logicalId
+    ) {
+      return { status: 'invalid', code: 'invalid_resource' }
+    }
+  }
   const request: LiveAuthorizationInput = {
     session: input.session,
     requiredCapability,
-    resource: input.resource,
-    operationTarget: input.operationTarget,
+    resource: authorizationResource,
+    operationTarget,
     ...(input.requestedAccessPathId ? { requestedAccessPathId: input.requestedAccessPathId } : {}),
   }
-  return resolveLiveAuthorizationUsing(request, options, (_capability, resource) =>
-    validateActionOperationTarget({
-      operationId: input.operationId,
-      resource,
-      operationTarget: input.operationTarget,
-    })
-  )
+  return resolveLiveAuthorizationUsing(request, options, () => operationTarget)
 }

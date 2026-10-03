@@ -1107,6 +1107,195 @@ describeRealPostgres('all aggregate catalog families on real producers', () => {
     expect(manageDenied).toEqual({ status: 'denied', code: 'forbidden' })
   })
 
+  it('authorizes chat and session actions through Host grants without changing signed resource identity', async () => {
+    const issued = await createUserSession(
+      {
+        userId,
+        email: `${userId}@example.test`,
+        authenticationMethods: ['password'],
+      },
+      { db: databasePool as never }
+    )
+    const actionSession: ExternalSessionAuthorityContext = {
+      contract: 'v2',
+      userId,
+      sid: issued.identity.sid,
+      jti: issued.identity.jti,
+      sessionVersion: issued.identity.sessionVersion,
+    }
+    const hostRef = `${config.hostsNamespace}/catalog-host`
+    const hostCatalog = await buildAccessCatalog(
+      { session: actionSession, families: ['host'], limit: 20 },
+      { transaction: transaction(databasePool) }
+    )
+    const hostItem = hostCatalog.items.find(item => item.resource.logicalId === hostRef)
+    const directPath = hostItem?.accessPaths.find(path => path.kind === 'direct')
+    expect(directPath, 'producer-backed direct Host grant').toBeDefined()
+
+    const mismatchedAncestry = await resolveLiveActionAuthorization(
+      {
+        session: actionSession,
+        operationId: 'chat.read',
+        resource: canonicalResourceIdentity({ environmentId, type: 'chat', logicalId: 'chat-a' }),
+        authorizationResource: canonicalResourceIdentity({
+          environmentId,
+          type: 'host',
+          logicalId: `${config.hostsNamespace}/other-host`,
+        }),
+        operationTarget: {
+          hostRef,
+          agent: 'main',
+          chatId: 'chat-a',
+        },
+      },
+      {
+        transaction: async () => {
+          throw new Error('mismatched ancestry must not reach PostgreSQL')
+        },
+      }
+    )
+    expect(mismatchedAncestry).toEqual({ status: 'invalid', code: 'invalid_resource' })
+
+    const actions = [
+      {
+        operationId: 'chat.read' as const,
+        resource: canonicalResourceIdentity({ environmentId, type: 'chat', logicalId: 'chat-a' }),
+        target: { hostRef, agent: 'main', chatId: 'chat-a' },
+      },
+      {
+        operationId: 'task.read' as const,
+        resource: canonicalResourceIdentity({
+          environmentId,
+          type: 'runtime_session',
+          logicalId: 'task-a',
+        }),
+        target: { hostRef, taskId: 'task-a' },
+      },
+      {
+        operationId: 'task.manage' as const,
+        resource: canonicalResourceIdentity({
+          environmentId,
+          type: 'runtime_session',
+          logicalId: 'task-a',
+        }),
+        target: { hostRef, taskId: 'task-a', action: 'cancel' },
+      },
+      {
+        operationId: 'model.read' as const,
+        resource: canonicalResourceIdentity({
+          environmentId,
+          type: 'runtime_session',
+          logicalId: 'session-a',
+        }),
+        target: { hostRef, agent: 'main', chatId: 'chat-a' },
+      },
+      {
+        operationId: 'model.select' as const,
+        resource: canonicalResourceIdentity({
+          environmentId,
+          type: 'runtime_session',
+          logicalId: 'session-a',
+        }),
+        target: {
+          hostRef,
+          agent: 'main',
+          chatId: 'chat-a',
+          provider: 'openai',
+          model: 'test-model',
+        },
+      },
+      {
+        operationId: 'session.read' as const,
+        resource: canonicalResourceIdentity({
+          environmentId,
+          type: 'runtime_session',
+          logicalId: 'session-a',
+        }),
+        target: { hostRef },
+      },
+      {
+        operationId: 'session.manage' as const,
+        resource: canonicalResourceIdentity({
+          environmentId,
+          type: 'runtime_session',
+          logicalId: 'session-a',
+        }),
+        target: { hostRef, agent: 'main', chatId: 'chat-a', action: 'delete' },
+      },
+    ]
+
+    for (const action of actions) {
+      const result = await authorizeActionV2(
+        {
+          session: actionSession,
+          requested: { version: 2, requestedAccessPathId: directPath!.accessPathId },
+          operationId: action.operationId,
+          resource: action.resource,
+          operationTarget: action.target,
+          allocateChatMessageId: false,
+          gateway,
+        },
+        { authorizationOptions: { transaction: transaction(databasePool) } }
+      )
+      expect(result.status, action.operationId).toBe('allowed')
+      if (result.status === 'allowed') {
+        expect(result.context.resource).toEqual(action.resource)
+        expect(result.context.target).toEqual(action.target)
+      }
+    }
+
+    await databasePool.query(
+      `UPDATE external_user_sessions SET revoked_at = NOW() WHERE sid = $1`,
+      [issued.identity.sid]
+    )
+    const revoked = await authorizeActionV2(
+      {
+        session: actionSession,
+        requested: { version: 2, requestedAccessPathId: directPath!.accessPathId },
+        operationId: 'chat.read',
+        resource: canonicalResourceIdentity({ environmentId, type: 'chat', logicalId: 'chat-a' }),
+        operationTarget: { hostRef, agent: 'main', chatId: 'chat-a' },
+        allocateChatMessageId: false,
+        gateway,
+      },
+      { authorizationOptions: { transaction: transaction(databasePool) } }
+    )
+    expect(revoked).toEqual({ status: 'denied', code: 'session_not_live' })
+
+    const ungrantedUserId = randomUUID()
+    await databasePool.query(
+      `INSERT INTO users(id, email, name) VALUES ($1, $2, 'Un-granted Action User')`,
+      [ungrantedUserId, `${ungrantedUserId}@example.test`]
+    )
+    const ungrantedIssued = await createUserSession(
+      {
+        userId: ungrantedUserId,
+        email: `${ungrantedUserId}@example.test`,
+        authenticationMethods: ['password'],
+      },
+      { db: databasePool as never }
+    )
+    const ungranted = await authorizeActionV2(
+      {
+        session: {
+          contract: 'v2',
+          userId: ungrantedUserId,
+          sid: ungrantedIssued.identity.sid,
+          jti: ungrantedIssued.identity.jti,
+          sessionVersion: ungrantedIssued.identity.sessionVersion,
+        },
+        requested: { version: 2 },
+        operationId: 'chat.read',
+        resource: canonicalResourceIdentity({ environmentId, type: 'chat', logicalId: 'chat-a' }),
+        operationTarget: { hostRef, agent: 'main', chatId: 'chat-a' },
+        allocateChatMessageId: false,
+        gateway,
+      },
+      { authorizationOptions: { transaction: transaction(databasePool) } }
+    )
+    expect(ungranted.status).not.toBe('allowed')
+  })
+
   it('binds applicable budget policy but not mutable reservation consumption', async () => {
     const resource = canonicalResourceIdentity({
       environmentId,

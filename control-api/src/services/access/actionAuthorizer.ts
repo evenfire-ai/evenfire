@@ -27,7 +27,11 @@ import {
   resolveLiveActionAuthorization,
 } from './liveAuthorizationResolver.js'
 import { actionOperationTargetHash } from './operationTarget.js'
-import { type CanonicalResourceIdentity, canonicalResourceIdentity } from './resourceIdentity.js'
+import {
+  type CanonicalResourceIdentity,
+  canonicalResourceIdentity,
+  resourceIdentityKey,
+} from './resourceIdentity.js'
 
 export type ActionAuthorizationV2Result =
   | Readonly<{
@@ -153,7 +157,10 @@ export async function authorizeActionV2(
       {
         session: input.session,
         operationId: input.operationId,
-        resource: authorizationResource,
+        resource: input.resource,
+        ...(resourceIdentityKey(authorizationResource) !== resourceIdentityKey(input.resource)
+          ? { authorizationResource }
+          : {}),
         operationTarget: preparedTarget.target,
         ...(input.requested.requestedAccessPathId
           ? { requestedAccessPathId: input.requested.requestedAccessPathId }
