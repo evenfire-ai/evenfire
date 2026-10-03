@@ -172,6 +172,10 @@ jobs:
         working-directory: desktop-app
         run: npx playwright install --with-deps chromium
 
+      - name: Test subscription login privacy
+        if: matrix.service == 'desktop-app'
+        run: node --test scripts/tests/subscription-private-ui-input.test.mjs
+
       - name: Test the pinned-suite checker
         if: matrix.service == 'gfs-controller'
         run: node scripts/tests/run-node-test-files.mjs scripts/ci/assert-pinned-vitest-suites.test.mjs

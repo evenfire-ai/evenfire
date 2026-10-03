@@ -153,6 +153,46 @@ function releaseOptionsForQa(options, receiptFile) {
   return parseOptions(Object.entries(fields).flatMap(([key, value]) => value === true ? [`--${key}`] : [`--${key}`, String(value)]))
 }
 
+export function validateMemoryOperatorSelection(options) {
+  const username = options?.operatorUser
+  assert(typeof username === 'string' && /^[A-Za-z0-9_.-]{3,64}$/.test(username),
+    'COORDINATOR_OPERATOR_USERNAME_INVALID')
+  if (options.prepareFixtures && Object.hasOwn(options.publicArguments ?? {}, 'operator-user')) {
+    assert(options.publicArguments['operator-user'] === username, 'COORDINATOR_OPERATOR_SOURCE_CHANGED')
+    return 'existing'
+  }
+  if (options.prepareFixtures) {
+    assert(username === `${options.runId}-operator`, 'COORDINATOR_ISOLATED_OPERATOR_REQUIRED')
+    return 'generated'
+  }
+  assert(options.fixtureBinding, 'COORDINATOR_ISOLATED_OPERATOR_REQUIRED')
+  return 'fixture'
+}
+
+function validatePrivateControlMaterial(material) {
+  assert(material && typeof material.operatorPassword === 'string' &&
+    material.operatorPassword.length >= 8 && material.operatorPassword.length <= 1024 &&
+    (material.cookie === undefined || (typeof material.cookie === 'string' &&
+      material.cookie.length <= 8192 && !/[\r\n\0]/.test(material.cookie))) &&
+    (material.desktopPassword === undefined || (typeof material.desktopPassword === 'string' &&
+      material.desktopPassword.length >= 8 && material.desktopPassword.length <= 1024)) &&
+    Object.keys(material).every(key => ['operatorPassword', 'cookie', 'desktopPassword'].includes(key)),
+    'COORDINATOR_PRIVATE_OPERATOR_REQUIRED')
+}
+
+export function seedPrivateMaterial(material) {
+  validatePrivateControlMaterial(material)
+  return {
+    operatorPassword: material.operatorPassword,
+    ...(material.cookie === undefined ? {} : { cookie: material.cookie }),
+  }
+}
+
+export function desktopPasswordFor(material) {
+  validatePrivateControlMaterial(material)
+  return material.desktopPassword ?? material.operatorPassword
+}
+
 /** Physical callers keep this one real CAS fence across all cgroup windows and
  * image suites. Its methods use the existing private driver/runner; no raw
  * credential enters options, receipts or the recovery record.
@@ -170,7 +210,7 @@ export async function withControlApiFixtureRuntime(options, privateMaterial, wor
       check(value); referenceOptions = value
       if (value.prepareFixtures) memoryState = 'created-or-unknown'
       else if (value.fixtureBinding) { memoryState = 'created'; receiptFile = value.publicArguments['fixtures-receipt'] }
-      const report = await seed(value, privateMaterial)
+      const report = await seed(value, seedPrivateMaterial(privateMaterial))
       if (value.prepareFixtures) { memoryState = 'created'; receiptFile = value.report }
       return report
     },
@@ -183,12 +223,26 @@ export async function withControlApiFixtureRuntime(options, privateMaterial, wor
       if (value.prepareFixtures) { memoryState = 'created'; receiptFile = value.report; referenceOptions = value }
       return report
     },
+    async proxyMemory(runId, value, work) {
+      check(value)
+      assert(memoryState === 'created' && value.prepareFixtures !== true && value.fixtureBinding &&
+        value.publicArguments?.['fixtures-receipt'] === receiptFile && typeof work === 'function' &&
+        /^subscription-image-[a-f0-9]{12}$/.test(runId) && images.length === 4 &&
+        images.every(status => status.state === 'revoked'), 'COORDINATOR_LIVE_PROXY_FIXTURE_REQUIRED')
+      referenceOptions = value
+      const grantStatus = { state: 'not-created', bindings: [] }; images.push(grantStatus)
+      // Resume the same owned memory run/UIDs while the original cron fence is
+      // active. The registered image status participates in outer restoration.
+      return seed(value, seedPrivateMaterial(privateMaterial), async session =>
+        withImageQaSession(session, runId, grantStatus, qa => work({ session, qa,
+          qaState: () => ({ state: grantStatus.state, bindings: structuredClone(grantStatus.bindings) }) })))
+    },
   }
   try { result = await work(runtime) } catch (error) { failure = error }
   finally {
     if (memoryState === 'created' && receiptFile) {
       try {
-        const released = await seed(releaseOptionsForQa(referenceOptions, receiptFile), privateMaterial, async session => session.revokeMemory())
+        const released = await seed(releaseOptionsForQa(referenceOptions, receiptFile), seedPrivateMaterial(privateMaterial), async session => session.revokeMemory())
         assert(released.kind === 'control-api-authorize-qa-finalization.v1' && released.fixtureFinalization?.verified === true &&
           released.fixtureFinalization.state === 'revoked' && released.fixtureFinalization.grantsRevoked === 2 &&
           released.fixtureFinalization.hostsDetached === 2, 'COORDINATOR_MEMORY_QA_FINALIZATION_UNPROVED')
@@ -511,13 +565,9 @@ async function pressureRelay({ containerName, pressure, metadata, processIdentit
 
 export async function coordinate(prepareArguments, memoryOptions, privateMaterial, catalogRuntime) {
   assert(process.versions.node.startsWith('24.') && fs.realpathSync(process.cwd()) === ROOT, 'COORDINATOR_NODE24_WORKTREE_REQUIRED')
-  assert((memoryOptions.prepareFixtures === true || memoryOptions.fixtureBinding) && privateMaterial && typeof privateMaterial.operatorPassword === 'string' &&
-    privateMaterial.operatorPassword.length >= 8 && privateMaterial.operatorPassword.length <= 1024 &&
-    (privateMaterial.cookie === undefined || (typeof privateMaterial.cookie === 'string' &&
-      privateMaterial.cookie.length <= 8192 && !/[\r\n\0]/.test(privateMaterial.cookie))) &&
-    Object.keys(privateMaterial).every(key => ['operatorPassword', 'cookie'].includes(key)),
-    'COORDINATOR_PRIVATE_OPERATOR_REQUIRED')
-  assert(memoryOptions.operatorUser === `${memoryOptions.runId}-operator`, 'COORDINATOR_ISOLATED_OPERATOR_REQUIRED')
+  assert(memoryOptions.prepareFixtures === true || memoryOptions.fixtureBinding, 'COORDINATOR_ISOLATED_OPERATOR_REQUIRED')
+  validatePrivateControlMaterial(privateMaterial)
+  validateMemoryOperatorSelection(memoryOptions)
   assert(memoryOptions.prepare === 'restart', 'COORDINATOR_RECONCILED_BASELINE_REQUIRED')
   const values = Object.fromEntries(Array.from({ length: prepareArguments.length / 2 }, (_, index) =>
     [prepareArguments[index * 2].slice(2), prepareArguments[index * 2 + 1]]))
@@ -550,7 +600,7 @@ export async function coordinate(prepareArguments, memoryOptions, privateMateria
         { timeout: 150_000 })
     }
     if (memoryOptions.prepareFixtures) memoryState = 'created-or-unknown'
-    await seed(memoryOptions, privateMaterial, async session => {
+    await seed(memoryOptions, seedPrivateMaterial(privateMaterial), async session => {
       memoryState = 'created'
       await withImageQaSession(session, values['run-id'], grantStatus, async qa => {
         assert(qa.credentialState === 'opaque-qa-not-real-G8' && qa.vendorCronsDisabled === true &&
@@ -604,7 +654,7 @@ export async function coordinate(prepareArguments, memoryOptions, privateMateria
           },
           frames(admission) {
             const loginFrame = Object.fromEntries([['kind', 'evenfire-subscription-image-login-v1'],
-              ['runId', admission.runId], ['email', qa.loginEmail], ['password', privateMaterial.operatorPassword]])
+              ['runId', admission.runId], ['email', qa.loginEmail], ['password', desktopPasswordFor(privateMaterial)]])
             return Readable.from(vendorFrames({ admission, states, remainingFrame, loginFrame, signal: abort.signal,
               observe: state => {
                 relay?.assertHealthy()
@@ -680,7 +730,7 @@ async function main() {
     material = JSON.parse(bytes.toString('utf8')); bytes.fill(0); bytes = Buffer.alloc(0); break
   }
   assert(material?.kind === 'evenfire-subscription-image-private-control-v1', 'COORDINATOR_PRIVATE_INPUT_REQUIRED')
-  const privateMaterial = Object.fromEntries(['operatorPassword', 'cookie'].filter(field => material[field] !== undefined)
+  const privateMaterial = Object.fromEntries(['operatorPassword', 'cookie', 'desktopPassword'].filter(field => material[field] !== undefined)
     .map(field => [field, material[field]]))
   material = undefined
   const result = await coordinate(argv, memoryOptions, privateMaterial)

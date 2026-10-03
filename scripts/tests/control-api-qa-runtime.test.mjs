@@ -7,7 +7,8 @@ import vm from 'node:vm'
 import { stripTypeScriptTypes } from 'node:module'
 import { isDeepStrictEqual } from 'node:util'
 import { CATALOG_CRON_KEYS, snapshotDeployment, deploymentMutationPatch, openControlApiCatalogIsolation,
-  withControlApiFixtureRuntime, catalogRestorationSafe } from '../e2e/coordinate-subscription-image-journeys.mjs'
+  withControlApiFixtureRuntime, catalogRestorationSafe, seedPrivateMaterial,
+  withImageQaSession } from '../e2e/coordinate-subscription-image-journeys.mjs'
 import { revokeMemoryFixtures } from './lib/control-api-authorize-memory-seeder.ts'
 
 const id = number => `00000000-0000-4000-8000-${String(number).padStart(12, '0')}`
@@ -21,44 +22,69 @@ function patchObject(object, operations) {
     else target[key] = structuredClone(operation.value)
   }
 }
-function fixture({ seedFailure = false } = {}) {
+function fixture({ seedFailure = false, imageRevokeFailure = false } = {}) {
   const resource = { metadata: { uid: id(1), resourceVersion: '1' }, spec: { replicas: 1,
     template: { spec: { containers: [{ name: 'control-api', image, env: [...CATALOG_CRON_KEYS.map(name => ({ name, value: 'true' })),
       { name: 'UNRELATED', value: 'keep' }] }] } } } }
   const events = [], recovery = []
+  const liveBindings = [0, 1].map(index => ({ hostRef: `unit-memory-${index}`, hostUid: id(10 + index),
+    connectionId: id(20 + index), connectionKey: `unit-memory-grant-${index}` }))
+  let prepared = false, memoryRevoked = false
   const effective = () => Object.fromEntries(resource.spec.template.spec.containers[0].env.map(entry => [entry.name, entry.value]))
   const context = { assert: (value, code) => assert(value, code), validImageId: value => value === image,
     imageId: value => value, ROOT: '/unit-source', NAMESPACE: 'control-plane', CATALOG_CRON_KEYS, snapshotDeployment, deploymentMutationPatch,
     getDeployment: () => structuredClone(resource), readyPod: () => ({ metadata: { name: 'unit-api' }, status: { containerStatuses: [{ name: 'control-api', imageID: image }] } }),
     until: async check => check(), json: () => ({ llm: effective()[CATALOG_CRON_KEYS[0]] === 'true', subscription: effective()[CATALOG_CRON_KEYS[1]] === 'true' }),
     patchDeployment: (_context, _name, patch) => { patchObject(resource, patch); events.push('cron-patch'); resource.metadata.resourceVersion = String(Number(resource.metadata.resourceVersion) + 1) },
-    command: () => '', catalogRestorationSafe,
+    command: () => '', catalogRestorationSafe, seedPrivateMaterial,
     restoreDeployments: async (_context, states) => {
       for (const state of states) patchObject(resource, deploymentMutationPatch(resource, state.original, state.applied, true))
       events.push('restore-original-crons')
     },
-    seed: async (_options, _private, finalization) => {
+    seed: async (value, _private, work) => {
       assert(CATALOG_CRON_KEYS.every(name => effective()[name] === 'false')); events.push('seed-sees-false')
       if (seedFailure) throw new Error('UNIT_SEED_FAILED')
-      if (finalization) { await finalization({ revokeMemory: async () => { events.push('memory-revoked-verified'); return { verified: true } } });
-        return { kind: 'control-api-authorize-qa-finalization.v1', fixtureFinalization: { verified: true, state: 'revoked', grantsRevoked: 2, hostsDetached: 2 } } }
-      return { fixtures: {} }
+      if (value.prepareFixtures) { assert.equal(prepared, false, 'fixed Hosts cannot be reseeded'); prepared = true }
+      if (work) {
+        const session = { fixtures: { bindings: structuredClone(liveBindings) },
+          prepareImages: async () => { assert.equal(memoryRevoked, false); events.push('proxy-images-created');
+            return { bindings: [{ provider: 'grok-subscription', hostRef: 'unit-image-grok' },
+              { provider: 'codex-subscription', hostRef: 'unit-image-codex' }] } },
+          revokeImages: async () => { events.push('proxy-images-revoke');
+            if (imageRevokeFailure) return { verified: false }
+            return { verified: true, grantsRevoked: 2, hostsDetached: 2 } },
+          revokeMemory: async () => { assert.equal(memoryRevoked, false); memoryRevoked = true;
+            events.push('memory-revoked-verified'); return { verified: true } } }
+        await work(session)
+      }
+      return memoryRevoked
+        ? { kind: 'control-api-authorize-qa-finalization.v1', fixtureFinalization: { verified: true, state: 'revoked', grantsRevoked: 2, hostsDetached: 2 } }
+        : { fixtures: { bindings: structuredClone(liveBindings) }, producer: { code: 0, signal: null } }
     },
-    releaseOptionsForQa: options => options,
+    coordinate: async (_args, value, _private, scope) => {
+      assert.equal(value.prepareFixtures, false); assert.equal(memoryRevoked, false)
+      assert(CATALOG_CRON_KEYS.every(name => effective()[name] === 'false'))
+      scope.grantStatus.state = 'revoked'; events.push('journey-images-revoked')
+      return { producerExit: 0, restoration: { verified: true } }
+    },
+    releaseOptionsForQa: options => ({ ...options, prepareFixtures: false }),
     writeCatalogRecovery: (...args) => { recovery.push(args); events.push('retain-crons-false') },
-    Error, Promise, Object, path: { dirname: () => '/unit-report', join: (...parts) => parts.join('/') },
+    Error, Promise, Object, structuredClone, path: { dirname: () => '/unit-report', join: (...parts) => parts.join('/') },
   }
   const sandbox = vm.createContext(context)
   context.openControlApiCatalogIsolation = vm.runInContext(`(${openControlApiCatalogIsolation.toString()})`, sandbox)
+  context.withImageQaSession = vm.runInContext(`(${withImageQaSession.toString()})`, sandbox)
   const wrapper = vm.runInContext(`(${withControlApiFixtureRuntime.toString()})`, sandbox)
   const options = { profile: 'qa-unit', context: 'qa-unit', runId: 'pr806-memory-123456789abc', prepare: 'restart', prepareFixtures: true,
     report: '/unit-report/seed.json', publicArguments: {} }
-  return { wrapper, options, events, recovery, resource, effective }
+  // Public, test-only input; it is not an actual operator credential.
+  const material = { operatorPassword: 'unit-only-control-material' }
+  return { wrapper, options, material, events, recovery, resource, effective, liveBindings }
 }
 
 test('actual wrapper applies real cron keys false before seed and restores true only after final memory revocation', async () => {
   const world = fixture()
-  await world.wrapper(world.options, {}, async runtime => {
+  await world.wrapper(world.options, world.material, async runtime => {
     assert.deepEqual(runtime.initialSnapshot.env, Object.fromEntries(CATALOG_CRON_KEYS.map(name => [name, 'true'])))
     await runtime.run(world.options)
   })
@@ -68,16 +94,56 @@ test('actual wrapper applies real cron keys false before seed and restores true 
 })
 test('partial seed failure keeps actual crons false and records recovery; a zero-QA work failure restores originals', async () => {
   const partial = fixture({ seedFailure: true })
-  await assert.rejects(partial.wrapper(partial.options, {}, runtime => runtime.run(partial.options)), /UNIT_SEED_FAILED/)
+  await assert.rejects(partial.wrapper(partial.options, partial.material, runtime => runtime.run(partial.options)), /UNIT_SEED_FAILED/)
   assert(CATALOG_CRON_KEYS.every(name => partial.effective()[name] === 'false'))
   assert(!partial.events.includes('restore-original-crons')); assert.equal(partial.recovery.length, 1)
   const zero = fixture()
-  await assert.rejects(zero.wrapper(zero.options, {}, async () => { throw new Error('UNIT_BEFORE_QA') }), /UNIT_BEFORE_QA/)
+  await assert.rejects(zero.wrapper(zero.options, zero.material, async () => { throw new Error('UNIT_BEFORE_QA') }), /UNIT_BEFORE_QA/)
   assert(CATALOG_CRON_KEYS.every(name => zero.effective()[name] === 'true'))
   for (const state of ['created', 'created-or-unknown']) {
     assert.equal(catalogRestorationSafe(state, []), false)
     assert.equal(catalogRestorationSafe('revoked', [{ state }]), false)
   }
+})
+
+test('registered proxy work resumes the same live memory UID run after four image revokes and revokes memory once outside', async () => {
+  const world = fixture()
+  await world.wrapper(world.options, world.material, async runtime => {
+    await runtime.run(world.options)
+    const resumed = { ...world.options, prepareFixtures: false, fixtureBinding: { uid: world.liveBindings[0].hostUid },
+      report: '/unit-report/proxy-session.json', publicArguments: { 'fixtures-receipt': world.options.report } }
+    await assert.rejects(runtime.proxyMemory('subscription-image-123456789abc', resumed, async () => {}), /LIVE_PROXY_FIXTURE/)
+    for (let n = 0; n < 4; n++) await runtime.journey([], resumed)
+    const reseed = { ...resumed, prepareFixtures: true }
+    await assert.rejects(runtime.proxyMemory('subscription-image-123456789abc', reseed, async () => {}), /LIVE_PROXY_FIXTURE/)
+    await assert.rejects(runtime.proxyMemory('subscription-image-123456789abc', { ...resumed, runId: 'pr806-memory-aaaaaaaaaaaa' }, async () => {}), /SCOPE_CHANGED/)
+    await runtime.proxyMemory('subscription-image-123456789abc', resumed, async ({ session, qaState }) => {
+      assert.deepEqual(session.fixtures.bindings, world.liveBindings)
+      assert.equal(qaState().state, 'created')
+      const view = qaState(); view.state = 'revoked'; view.bindings.length = 0
+      assert.equal(qaState().state, 'created'); assert.equal(qaState().bindings.length, 2)
+      assert(!world.events.includes('memory-revoked-verified'))
+      world.events.push('proxy-work-with-live-memory')
+    })
+    assert(!world.events.includes('memory-revoked-verified'))
+  })
+  assert.equal(world.events.filter(event => event === 'memory-revoked-verified').length, 1)
+  assert(world.events.indexOf('proxy-work-with-live-memory') < world.events.indexOf('proxy-images-revoke'))
+  assert(world.events.indexOf('proxy-images-revoke') < world.events.indexOf('memory-revoked-verified'))
+  assert(world.events.indexOf('memory-revoked-verified') < world.events.indexOf('restore-original-crons'))
+})
+test('registered proxy revoke unknown retains actual cronfalse despite independent final memory revoke', async () => {
+  const world = fixture({ imageRevokeFailure: true })
+  await assert.rejects(world.wrapper(world.options, world.material, async runtime => {
+    await runtime.run(world.options)
+    const resumed = { ...world.options, prepareFixtures: false, fixtureBinding: { uid: world.liveBindings[0].hostUid },
+      publicArguments: { 'fixtures-receipt': world.options.report } }
+    for (let n = 0; n < 4; n++) await runtime.journey([], resumed)
+    await runtime.proxyMemory('subscription-image-123456789abc', resumed, async () => world.events.push('proxy-work'))
+  }), /QA_GRANT_RESTORATION_FAILED/)
+  assert.equal(world.events.filter(event => event === 'memory-revoked-verified').length, 1)
+  assert(!world.events.includes('restore-original-crons')); assert.equal(world.recovery.length, 1)
+  assert(CATALOG_CRON_KEYS.every(name => world.effective()[name] === 'false'))
 })
 
 test('real first-tick scheduler would call direct sync after restart; disabled actual config gate prevents scheduling', async () => {

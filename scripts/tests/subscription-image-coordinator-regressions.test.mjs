@@ -8,7 +8,8 @@ import path from 'node:path'
 import net from 'node:net'
 import { once } from 'node:events'
 import { prepareVendorEvidenceDirectory } from '../e2e/fixtures/subscription-image-provider.mjs'
-import { closePressureResources, withImageQaSession, qaRestorationTargets } from '../e2e/coordinate-subscription-image-journeys.mjs'
+import { closePressureResources, withImageQaSession, qaRestorationTargets,
+  validateMemoryOperatorSelection, seedPrivateMaterial, desktopPasswordFor } from '../e2e/coordinate-subscription-image-journeys.mjs'
 import { openAdmissionPressure, pressureCommandDeadlineMs, verifyPressureMetadata } from '../e2e/fixtures/subscription-image-admission-pressure.mjs'
 import { openAuthorizeAdmissionPressure } from './measure-control-api-authorize-memory.mjs'
 import { prepareSubscriptionImageBindings, revokeSubscriptionImageBindings, resumeMemoryFixtures } from './lib/control-api-authorize-memory-seeder.ts'
@@ -179,6 +180,33 @@ function qaWorld({ residualFallback = false } = {}) {
   return { options, operator, memory, session, prod, hosts, grants }
 }
 
+test('explicit existing operator is admitted while the generated default remains mandatory without opt-in', () => {
+  const runId = 'pr806-memory-123456789abc'
+  const explicit = { runId, prepareFixtures: true, operatorUser: 'manual.admin',
+    publicArguments: { 'operator-user': 'manual.admin' } }
+  assert.equal(validateMemoryOperatorSelection(explicit), 'existing')
+  const generated = { runId, prepareFixtures: true, operatorUser: `${runId}-operator`, publicArguments: {} }
+  assert.equal(validateMemoryOperatorSelection(generated), 'generated')
+  assert.throws(() => validateMemoryOperatorSelection({ ...generated, operatorUser: 'manual.admin' }),
+    /ISOLATED_OPERATOR_REQUIRED/)
+  assert.throws(() => validateMemoryOperatorSelection({ ...explicit, publicArguments: { 'operator-user': 'other.admin' } }),
+    /OPERATOR_SOURCE_CHANGED/)
+  assert.equal(validateMemoryOperatorSelection({ runId, fixtureBinding: {}, operatorUser: 'manual.admin' }), 'fixture')
+})
+
+test('RAM-only Desktop secret is withheld from the admin seed and defaults to the operator secret', () => {
+  const separated = { operatorPassword: 'unit-admin-password', desktopPassword: 'unit-desktop-password' }
+  assert.deepEqual(Object.keys(seedPrivateMaterial(separated)), ['operatorPassword'])
+  assert.equal(desktopPasswordFor(separated), 'unit-desktop-password')
+  const shared = { operatorPassword: 'unit-shared-password' }
+  assert.deepEqual(seedPrivateMaterial(shared), shared)
+  assert.equal(desktopPasswordFor(shared), 'unit-shared-password')
+  assert.deepEqual(Object.keys(seedPrivateMaterial({ ...separated, cookie: 'unit-cookie' })).sort(),
+    ['cookie', 'operatorPassword'])
+  assert.throws(() => seedPrivateMaterial({ ...separated, repeatedDesktopPassword: 'unit-desktop-password' }),
+    /PRIVATE_OPERATOR_REQUIRED/)
+})
+
 test('detach refuses an API success retaining a QA fallback before it can claim verified revocation', async () => {
   const world = qaWorld({ residualFallback: true }), state = []
   await prepareSubscriptionImageBindings({ ...world, prepared: world.memory, runId: 'subscription-image-111111111111', state })
@@ -199,6 +227,12 @@ test('prepareA -> revokeA -> resume retained memory -> prepareB uses fresh image
   assert(qaB.bindings.every(binding => world.grants.get(binding.connectionKey).status === 'connected'))
   assert(qaB.bindings.every(binding => !qaA.bindings.some(before => before.connectionKey === binding.connectionKey || before.hostRef === binding.hostRef)))
   await assert.rejects(resumeMemoryFixtures({ ...world, expected: { ...world.memory, bindings: qaA.bindings } }), /BINDING_FOREIGN/)
+})
+
+test('native resume rejects a changed operator username and Desktop UUID even after explicit admission', async () => {
+  const world = qaWorld()
+  await assert.rejects(resumeMemoryFixtures({ ...world, expected: { ...world.memory,
+    operatorUsername: 'wrong.admin', operatorDesktopUserId: uid(999) } }), /OPERATOR_CHANGED/)
 })
 
 test('revocation barrier retains vendor fixtures on residual fallback while allowing independent CAPI restoration', async () => {

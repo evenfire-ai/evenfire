@@ -102,5 +102,9 @@
   {
     "suite": "contractFreeze.test.ts",
     "fullName": "grok-subscription contract freeze rejects open or mutable admission code producers while reading the closed production union"
+  },
+  {
+    "suite": "visualBodyReadOwnership.test.ts",
+    "fullName": "grok visual body read ownership eagerly releases a refused visual body before its response-close backstop"
   }
 ]

@@ -20,6 +20,7 @@ type ObservedRead = {
   error: unknown
   finishes: number
   endCalls: number
+  suppressedCloseBackstops: number
 }
 
 const parserBarrier = vi.hoisted(() => {
@@ -69,10 +70,24 @@ vi.mock('express', async () => {
                   error: undefined,
                   finishes: 0,
                   endCalls: 0,
+                  suppressedCloseBackstops: 0,
                 }
               : undefined
           if (read) {
             parserBarrier.reads.push(read)
+            if (req.headers['x-visual-hold-response-close'] === '1') {
+              // Controlled fault injection for the direct-release witness:
+              // production may not register its response-close backstop, so a
+              // released slot can only have come from the route's eager path.
+              const originalOnce = res.once.bind(res)
+              res.once = ((event: string, listener: (...args: unknown[]) => void) => {
+                if (event === 'close') {
+                  read.suppressedCloseBackstops += 1
+                  return res
+                }
+                return originalOnce(event, listener as never)
+              }) as Response['once']
+            }
             res.once('finish', () => {
               read.finishes += 1
             })
@@ -272,6 +287,49 @@ async function postVisualStatus(port: number, body: string): Promise<number> {
   return status
 }
 
+function openVisualKeepAlive(port: number): {
+  send: (body: string) => Promise<number>
+  destroy: () => void
+} {
+  let owner: ReturnType<typeof connectTcp> | undefined
+  let wire = ''
+  const statusWaiters: Array<(status: number) => void> = []
+  owner = connectTcp(port, '127.0.0.1')
+  sockets.add(owner)
+  owner.once('close', () => sockets.delete(owner!))
+  owner.setTimeout(5_000, () => {
+    owner?.destroy()
+    for (const resolve of statusWaiters.splice(0)) resolve(-1)
+  })
+  owner.on('data', data => {
+    wire += data.toString('utf8')
+    for (;;) {
+      const match = /HTTP\/1\.1 (\d{3})/.exec(wire)
+      if (!match) return
+      wire = wire.slice(match.index + match[0].length)
+      statusWaiters.shift()?.(Number(match[1]))
+    }
+  })
+  return {
+    send(body: string) {
+      return new Promise<number>((resolve, reject) => {
+        statusWaiters.push(resolve)
+        owner?.once('error', reject)
+        owner?.write(
+          `POST ${COMPLETIONS_PATH} HTTP/1.1\r\n` +
+            `Host: 127.0.0.1:${port}\r\n` +
+            `Authorization: Bearer ${platformToken()}\r\n` +
+            `Content-Type: application/json\r\n` +
+            `X-Visual-Hold-Response-Close: 1\r\n` +
+            `Content-Length: ${Buffer.byteLength(body)}\r\n` +
+            `\r\n${body}`
+        )
+      })
+    },
+    destroy: () => owner?.destroy(),
+  }
+}
+
 describe('codex visual body read ownership', () => {
   const servers: Array<ReturnType<typeof createProxyApps>> = []
   const listeners: Array<ReturnType<typeof createServer>> = []
@@ -442,6 +500,40 @@ describe('codex visual body read ownership', () => {
       'a parsed visual body did not release its admission after the route response'
     )
   })
+
+  it('eagerly releases a refused visual body before its response-close backstop', async () => {
+    const apps = createProxyApps(config())
+    servers.push(apps)
+    const listener = createServer(apps.runtimeApp).listen(0)
+    listeners.push(listener)
+    const address = listener.address()
+    if (!address || typeof address === 'string') throw new Error('listener has no port')
+
+    const client = openVisualKeepAlive(address.port)
+    const firstResponse = client.send(invalidTicketBody())
+    await waitFor(
+      () => parserBarrier.reads.length === 1 && parserBarrier.reads[0]!.returned,
+      'the first refused visual route did not reach its direct-release path'
+    )
+    const firstRead = parserBarrier.reads[0]!
+    expect(await firstResponse).toBe(403)
+    expect(firstRead.nativeSettled).toBe(true)
+    expect(firstRead.error).toBeUndefined()
+    expect(firstRead.suppressedCloseBackstops).toBe(1)
+    expect(visualStreamGate.snapshot()).toEqual({ running: 0, queued: 0 })
+
+    const secondResponse = client.send(invalidTicketBody())
+    expect(await secondResponse).toBe(403)
+    await waitFor(
+      () => parserBarrier.reads.length === 2 && parserBarrier.reads.every(read => read.returned),
+      'the next eligible visual request was not admitted after direct release'
+    )
+    expect(parserBarrier.reads[1]!.nativeSettled).toBe(true)
+    expect(parserBarrier.reads[1]!.error).toBeUndefined()
+    expect(visualStreamGate.snapshot()).toEqual({ running: 0, queued: 0 })
+    client.destroy()
+  })
+
   it('stops the native reader independently when a non-reading peer never finishes the response', async () => {
     const apps = createProxyApps(config(), { bodyReadDeadlineMs: 40, visualReadCloseGraceMs: 15 })
     servers.push(apps)

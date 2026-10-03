@@ -241,6 +241,7 @@ run_node_group "subscription-discovery-and-offline-image-provider" \
   "scripts/tests/subscription-image-coordinator.test.mjs" \
   "scripts/tests/subscription-image-coordinator-regressions.test.mjs" \
   "scripts/tests/control-api-qa-runtime.test.mjs" \
+  "scripts/tests/subscription-private-ui-input.test.mjs" \
   "scripts/tests/subscription-image-input-frames.test.mjs" \
   "scripts/e2e/prepare-subscription-remaining-fixtures.test.mjs" \
   "scripts/e2e/fixtures/subscription-image-provider.test.mjs"

@@ -39,6 +39,7 @@ import {
   requireSubscriptionImageRun,
   verifyRunnerObservation,
 } from './subscriptionImageRunContract.js'
+import { enterLoginPassword } from './subscriptionPrivateUiInput.mjs'
 
 export const subscriptionImageRun = requireSubscriptionImageRun()
 const repoRoot = path.resolve(__dirname, '../../..')
@@ -341,7 +342,7 @@ export const test = base.extend<Fixtures>({
     await expect(loginEmail).toBeVisible({ timeout: 30_000 })
     await expect(page.locator('#password-input')).toBeVisible()
     await loginEmail.fill(process.env.E2E_SUBSCRIPTION_IMAGE_LOGIN_EMAIL!)
-    await page.locator('#password-input').fill(process.env.E2E_SUBSCRIPTION_IMAGE_LOGIN_PASSWORD!)
+    await enterLoginPassword(page, process.env.E2E_SUBSCRIPTION_IMAGE_LOGIN_PASSWORD!)
     await page.getByRole('button', { name: 'Sign in', exact: true }).click()
     await expect(loginEmail).toHaveCount(0)
     await expect(page.getByTestId('nav-settings-menu')).toBeVisible({

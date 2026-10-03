@@ -21,6 +21,8 @@ const fixedFiles = [
     'subscription-image-input.spec.ts',
     'playwright.subscription-image.config.ts',
     'subscriptionImageFixtures.ts',
+    'subscriptionPrivateUiInput.mjs',
+    'subscriptionPrivateUiInput.d.mts',
     'subscriptionImageRunContract.ts',
     'subscriptionImageChallenge.ts',
     'codexImageChallenge.ts',
