@@ -129,6 +129,7 @@ describe('direct trusted service runtime admission', () => {
       server as unknown as { server: { address: () => AddressInfo } }
     ).server.address()
     const client = new RPCClient(`http://127.0.0.1:${address.port}`)
+    const admissionClock = vi.spyOn(Date, 'now').mockReturnValue(120_001)
     const quiet = vi.spyOn(console, 'log').mockImplementation(() => undefined)
     const quietError = vi.spyOn(console, 'error').mockImplementation(() => undefined)
 
@@ -288,7 +289,20 @@ describe('direct trusted service runtime admission', () => {
       expect(denied.error?.retryAfterSeconds).toBeGreaterThanOrEqual(1)
       expect(denied.error?.retryAfterSeconds).toBeLessThanOrEqual(60)
       expect(messageHandler).toHaveBeenCalledTimes(600)
+
+      admissionClock.mockReturnValue(180_000)
+      const afterRollover = await client.sendMessage({
+        content: 'next fixed window',
+        channelType: 'slack',
+        channelId: 'channel-next-window',
+        sender: 'sender-next-window',
+        timestamp: new Date(),
+        messageId: 'message-next-window',
+      })
+      expect(afterRollover.success).toBe(true)
+      expect(messageHandler).toHaveBeenCalledTimes(601)
     } finally {
+      admissionClock.mockRestore()
       quiet.mockRestore()
       quietError.mockRestore()
       await server.stop()
