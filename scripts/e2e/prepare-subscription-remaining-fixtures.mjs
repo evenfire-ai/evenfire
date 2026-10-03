@@ -5,6 +5,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { createRequire } from 'node:module'
 import { validateRemainingFixture } from '../../desktop-app/test/e2e-playwright/subscriptionRemainingJourneysContract.ts'
+import { decodeInChild, hasCompleteImageContainer } from './fixtures/subscription-image-decoder.mjs'
 
 const codec = createRequire(import.meta.url)('./fixtures/subscription-image-challenge.cjs')
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex')
@@ -127,9 +128,10 @@ async function validateFrame(frame, admission, root) {
         (asset.mimeType === 'image/png' && !bytes.subarray(0, 8).equals(Buffer.from([137,80,78,71,13,10,26,10]))) ||
         (asset.mimeType === 'image/jpeg' && !bytes.subarray(0, 3).equals(Buffer.from([255,216,255]))) ||
         (matches[0].sizeBytes !== undefined && matches[0].sizeBytes !== bytes.length)) fail('REMAINING_FIXTURE_ASSET_MISMATCH')
-    // Decoding each received byte sequence rules out shape-only images and an
-    // answer table keyed by file names, digests or PNG metadata.
-    await codec.decodeTileChallenge(bytes)
+    // A malformed native container can crash the addon. Reuse the vendor's
+    // isolated decoder so rejected bytes cannot kill the runner or preparer.
+    if (!hasCompleteImageContainer(bytes, asset.mimeType)) fail('REMAINING_FIXTURE_ASSET_MISMATCH')
+    await decodeInChild(bytes)
     decoded.push({ filename, bytes })
   }
   return { receipt, receiptPath, decoded }

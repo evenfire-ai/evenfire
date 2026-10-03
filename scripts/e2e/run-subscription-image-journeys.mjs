@@ -33,11 +33,14 @@ import {
   verifySourceManifest,
 } from '../tests/lib/subscription-image-runner-contract.mjs'
 import { startPrivateSession } from './fixtures/subscription-image-session.mjs'
+import { acceptRemainingFixtureFrame } from './prepare-subscription-remaining-fixtures.mjs'
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 const RUN_BASE = RUNNER_RUN_BASE
 const ADMISSION_ROOT = RUNNER_ADMISSION_ROOT
-const MAX_FRAME_BYTES = 4 * 1024 * 1024
+const MAX_FRAME_BYTES = 8 * 1024 * 1024
+const MAX_PENDING_INPUT_BYTES = 2 * MAX_FRAME_BYTES
+const MAX_PENDING_INPUT_FRAMES = 32
 const SESSION_ADMISSION_DEADLINE_MS = 2_700_000
 const VOLUME_MANIFEST_FILE = 'volume-manifest.json'
 const refuse = code => {
@@ -138,6 +141,10 @@ export function sealSourceManifest(repoRoot) {
     'mcp-host/package.json',
     'mcp-host/package-lock.json',
     'scripts/e2e/run-subscription-image-journeys.mjs',
+    'scripts/e2e/prepare-subscription-remaining-fixtures.mjs',
+    'scripts/e2e/prepare-subscription-remaining-fixtures.gfs.mjs',
+    'scripts/e2e/prepare-subscription-remaining-fixtures.runtime.mjs',
+    'scripts/e2e/prepare-subscription-remaining-fixtures.prepare.mjs',
     'scripts/e2e/fixtures',
     'scripts/tests/lib/subscription-image-runner-contract.mjs',
     'scripts/tests/lib/subscription-image-source-context.mjs',
@@ -228,9 +235,21 @@ async function loopbackRelay(target) {
   }
 }
 
-function inputFrames(admission, root) {
+export function inputFrames(
+  admission,
+  root,
+  { input = process.stdin, loginEnv = process.env, deadlineMs = 30_000 } = {}
+) {
+  const suite = resolveSuite(admission.suiteId)
   let buffered = Buffer.alloc(0),
-    receivedLogin = false
+    receivedLogin = false,
+    remainingFixture,
+    pendingBytes = 0,
+    draining = false,
+    ended = false,
+    closed = false,
+    failed
+  const pending = []
   const previous = new Map(admission.bindings.map(binding => [binding.provider, []]))
   const vendorReady = new Set()
   let resolveReady, rejectReady, rejectFailure
@@ -242,16 +261,32 @@ function inputFrames(admission, root) {
     rejectFailure = reject
   })
   // Retain a handler immediately, including before the runner starts waiting.
+  void ready.catch(() => {})
   void failure.catch(() => {})
+  const erasePending = () => {
+    buffered.fill(0)
+    buffered = Buffer.alloc(0)
+    for (const line of pending.splice(0)) {
+      pendingBytes -= line.length + 1
+      line.fill(0)
+    }
+  }
   const fail = err => {
+    if (failed || closed) return
+    failed = err
+    clearTimeout(timer)
+    input.pause()
+    erasePending()
     rejectReady(err)
     rejectFailure(err)
   }
   const timer = setTimeout(
-    () => rejectReady(new RunnerAdmissionError('PRIVATE_INPUT_DEADLINE')),
-    30_000
+    () => fail(new RunnerAdmissionError('PRIVATE_INPUT_DEADLINE')),
+    deadlineMs
   )
-  const accept = frame => {
+  const accept = async frame => {
+    if (!frame || typeof frame !== 'object' || Array.isArray(frame))
+      refuse('PRIVATE_INPUT_FRAME_INVALID')
     if (frame.kind === 'evenfire-subscription-image-login-v1') {
       if (
         receivedLogin ||
@@ -265,9 +300,13 @@ function inputFrames(admission, root) {
         refuse('PRIVATE_LOGIN_FRAME')
       // The authorized test login stays only in this process and the existing
       // visible-login fixture's child environment. Never persist or echo it.
-      process.env.E2E_SUBSCRIPTION_IMAGE_LOGIN_EMAIL = frame.email
-      process.env.E2E_SUBSCRIPTION_IMAGE_LOGIN_PASSWORD = frame.password
+      loginEnv.E2E_SUBSCRIPTION_IMAGE_LOGIN_EMAIL = frame.email
+      loginEnv.E2E_SUBSCRIPTION_IMAGE_LOGIN_PASSWORD = frame.password
       receivedLogin = true
+    } else if (frame.kind === 'evenfire-subscription-remaining-fixture-frame-v1') {
+      if (!suite.fixtureReceiptEnv || remainingFixture)
+        refuse('REMAINING_FIXTURE_NOT_AUTHORIZED')
+      remainingFixture = await acceptRemainingFixtureFrame(frame, { admission, runRoot: root })
     } else {
       const binding = admission.bindings.find(candidate => candidate.provider === frame.provider)
       if (admission.mode !== 'fixture' || !binding) refuse('VENDOR_FRAME_NOT_AUTHORIZED')
@@ -297,48 +336,103 @@ function inputFrames(admission, root) {
       previous.set(frame.provider, ledger.attempts)
       vendorReady.add(frame.provider)
     }
-    if (receivedLogin && (admission.mode === 'real' || vendorReady.size === 2)) {
-      clearTimeout(timer)
-      resolveReady()
+  }
+  const drain = async () => {
+    if (draining || failed || closed) return
+    draining = true
+    try {
+      for (let line; !failed && !closed && (line = pending.shift()); ) {
+        const bytes = line.length + 1
+        try {
+          const frame = JSON.parse(line.toString('utf8'))
+          line.fill(0)
+          await accept(frame)
+        } finally {
+          line.fill(0)
+          pendingBytes -= bytes
+        }
+      }
+      if (failed || closed) return
+      if (ended && (!receivedLogin || buffered.length)) refuse('PRIVATE_INPUT_ENDED')
+      if (
+        !buffered.length &&
+        receivedLogin &&
+        (admission.mode === 'real' || vendorReady.size === 2) &&
+        (!suite.fixtureReceiptEnv || remainingFixture)
+      ) {
+        clearTimeout(timer)
+        resolveReady(
+          suite.fixtureReceiptEnv
+            ? { [suite.optInEnv]: '1', [suite.fixtureReceiptEnv]: remainingFixture.receiptPath }
+            : {}
+        )
+      }
+    } catch (err) {
+      fail(err)
+    } finally {
+      draining = false
+      if (!failed && !closed && !ended) input.resume()
     }
   }
   const onData = chunk => {
+    if (failed || closed) return
+    input.pause()
     try {
-      if (buffered.length + chunk.length > MAX_FRAME_BYTES) refuse('PRIVATE_INPUT_FRAME_BOUND')
+      if (!Buffer.isBuffer(chunk)) refuse('PRIVATE_INPUT_FRAME_INVALID')
+      // Includes the frame currently decoding, queued frames and incomplete
+      // bytes. Pausing stdin also applies native pipe backpressure during decode.
+      if (pendingBytes + buffered.length + chunk.length > MAX_PENDING_INPUT_BYTES)
+        refuse('PRIVATE_INPUT_PENDING_BYTES_BOUND')
       buffered = Buffer.concat([buffered, chunk])
       for (let end; (end = buffered.indexOf(10)) !== -1; ) {
         const line = buffered.subarray(0, end)
         buffered = buffered.subarray(end + 1)
         if (!line.length) refuse('PRIVATE_INPUT_FRAME_EMPTY')
-        try {
-          accept(JSON.parse(line.toString('utf8')))
-        } finally {
+        if (line.length > MAX_FRAME_BYTES) {
           line.fill(0)
+          refuse('PRIVATE_INPUT_FRAME_BOUND')
         }
+        if (pending.length + Number(draining) >= MAX_PENDING_INPUT_FRAMES) {
+          line.fill(0)
+          refuse('PRIVATE_INPUT_PENDING_FRAMES_BOUND')
+        }
+        pending.push(line)
+        pendingBytes += line.length + 1
       }
+      if (buffered.length > MAX_FRAME_BYTES) refuse('PRIVATE_INPUT_FRAME_BOUND')
+      void drain()
     } catch (err) {
       fail(err)
-      process.stdin.pause()
     }
   }
-  process.stdin.on('data', onData)
   const onEnd = () => {
-    if (!receivedLogin || admission.mode === 'fixture')
-      fail(new RunnerAdmissionError('PRIVATE_INPUT_ENDED'))
+    ended = true
+    if (admission.mode === 'fixture') fail(new RunnerAdmissionError('PRIVATE_INPUT_ENDED'))
+    else void drain()
   }
-  process.stdin.once('end', onEnd)
   const onError = () => fail(new RunnerAdmissionError('PRIVATE_INPUT_FAILED'))
-  process.stdin.once('error', onError)
+  const onClose = () => {
+    if (!ended) fail(new RunnerAdmissionError('PRIVATE_INPUT_ENDED'))
+  }
+  input.on('data', onData)
+  input.once('end', onEnd)
+  input.once('error', onError)
+  input.once('close', onClose)
   return {
     ready,
     failure,
+    assertHealthy: () => {
+      if (failed) throw failed
+    },
     close: () => {
+      closed = true
       clearTimeout(timer)
-      process.stdin.off('data', onData)
-      process.stdin.off('end', onEnd)
-      process.stdin.off('error', onError)
-      process.stdin.pause()
-      buffered.fill(0)
+      input.off('data', onData)
+      input.off('end', onEnd)
+      input.off('error', onError)
+      input.off('close', onClose)
+      input.pause()
+      erasePending()
     },
   }
 }
@@ -439,7 +533,7 @@ async function prepare(admissionFile) {
         )
     }
     channel = inputFrames(admission, root)
-    await channel.ready
+    Object.assign(env, await channel.ready)
     env.E2E_SUBSCRIPTION_IMAGE_LOGIN_EMAIL = process.env.E2E_SUBSCRIPTION_IMAGE_LOGIN_EMAIL
     env.E2E_SUBSCRIPTION_IMAGE_LOGIN_PASSWORD = process.env.E2E_SUBSCRIPTION_IMAGE_LOGIN_PASSWORD
     const contract = await import(
@@ -506,6 +600,7 @@ async function prepare(admissionFile) {
       root,
       desktopRequire,
       inputFailure: channel.failure,
+      assertInputHealthy: channel.assertHealthy,
       close: async () => {
         channel.close()
         await Promise.all([rest.close(), rpc.close()])
@@ -519,6 +614,7 @@ async function prepare(admissionFile) {
 }
 
 async function runJourneys(prepared) {
+  prepared.assertInputHealthy()
   const cli = prepared.desktopRequire.resolve('@playwright/test/cli')
   const child = spawn(
     process.execPath,

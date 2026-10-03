@@ -240,6 +240,8 @@ run_group "codex-upstream-contract-freeze" "tests/e2e" "integration/codex-subscr
 run_node_group "approved-tools-fixtures-and-runner" \
   "scripts/tests/subscription-t0-discovery.test.mjs" \
   "scripts/tests/subscription-image-runner.test.mjs" \
+  "scripts/tests/subscription-image-input-frames.test.mjs" \
+  "scripts/e2e/prepare-subscription-remaining-fixtures.test.mjs" \
   "scripts/e2e/fixtures/subscription-image-provider.test.mjs" \
   "scripts/tests/run-node-test-files.test.mjs" \
   "tests/e2e/fixtures/codex-subscription/approved-tools/server.test.mjs" \

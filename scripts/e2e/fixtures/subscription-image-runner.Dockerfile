@@ -115,6 +115,7 @@ COPY scripts/e2e/prepare-subscription-remaining-fixtures.mjs \
      scripts/e2e/prepare-subscription-remaining-fixtures.prepare.mjs ./scripts/e2e/
 COPY scripts/e2e/fixtures/subscription-image-provider.mjs \
      scripts/e2e/fixtures/subscription-image-challenge.cjs \
+     scripts/e2e/fixtures/subscription-image-decoder.mjs \
      scripts/e2e/fixtures/subscription-image-session.mjs \
      scripts/e2e/fixtures/subscription-image-admission-pressure.mjs \
      scripts/e2e/fixtures/subscription-image-runner.base-image ./scripts/e2e/fixtures/
