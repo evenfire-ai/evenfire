@@ -1,7 +1,8 @@
 /**
  * Every text a model sends to the dashboard lands in an HTML file the user
  * opens, so each one must reach the page escaped. Each case puts a tag in one
- * field; dropping escapeHtml from the code that prints that field fails it.
+ * field and finds it on the page as text, so the field is shown; dropping
+ * escapeHtml from the code that prints that field fails it.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import * as fs from 'fs'
@@ -11,7 +12,15 @@ import { escapeHtml } from '../dashboardHtml'
 import { INTERNAL_TOOLS } from '../internalTools'
 
 const dashboard = INTERNAL_TOOLS.find(t => t.name === 'clerum__generate_dashboard')!
-const TAG = '<img src=x onerror=alert(1)>'
+// An element the inline markdown reader keeps as text, unlike <img>, which it
+// removes, so the tag reaches the escaping of every field that reads markdown.
+const TAG = '<svg onload=alert(1)>'
+
+/** The tag is on the page as text and nowhere as markup. */
+function expectEscaped(html: string): void {
+  expect(html).not.toMatch(/<svg onload/i)
+  expect(html).toMatch(/&lt;svg onload=/i)
+}
 
 let dir: string
 beforeEach(() => {
@@ -23,7 +32,7 @@ afterEach(() => {
 
 const cases: Array<[string, Record<string, unknown>]> = [
   ['the title', { title: TAG }],
-  ['the subtitle', { title: 'T', subtitle: TAG }],
+  ['the headline', { title: 'T', headline: TAG }],
   ['a KPI label', { title: 'T', kpis: [{ label: TAG, value: '1' }] }],
   ['a KPI value', { title: 'T', kpis: [{ label: 'L', value: TAG }] }],
   ['a KPI delta', { title: 'T', kpis: [{ label: 'L', value: '1', delta: TAG }] }],
@@ -31,7 +40,7 @@ const cases: Array<[string, Record<string, unknown>]> = [
   ['a table header', { title: 'T', tables: [{ headers: [TAG], rows: [['1']] }] }],
   ['a table cell', { title: 'T', tables: [{ headers: ['A'], rows: [[TAG]] }] }],
   [
-    'a badge cell',
+    'a severity cell that names no severity',
     { title: 'T', tables: [{ headers: ['S'], rows: [[TAG]], columnTypes: { S: 'severity' } }] },
   ],
   [
@@ -41,15 +50,24 @@ const cases: Array<[string, Record<string, unknown>]> = [
       charts: [{ type: 'bar', title: TAG, labels: ['a'], datasets: [{ data: [1] }] }],
     },
   ],
+  ['a section title', { title: 'T', sections: [{ title: TAG, type: 'narrative', content: 'x' }] }],
   [
-    'a section',
-    { title: 'T', sections: [{ title: TAG, type: 'narrative', content: `Text ${TAG}` }] },
+    'the text of a section',
+    { title: 'T', sections: [{ title: 'S', type: 'narrative', content: `Text ${TAG}` }] },
+  ],
+  [
+    'an item of a bullet section',
+    { title: 'T', sections: [{ title: 'S', type: 'bullets', content: ['a', TAG] }] },
   ],
   ['the eyebrow', { title: 'T', eyebrow: TAG }],
   ['the status label', { title: 'T', status: 'green', statusLabel: TAG }],
   [
-    'a code section',
-    { title: 'T', sections: [{ title: 'C', type: 'code', language: TAG, content: TAG }] },
+    'the language of a code section',
+    { title: 'T', sections: [{ title: 'C', type: 'code', language: TAG, content: 'x' }] },
+  ],
+  [
+    'the code of a code section',
+    { title: 'T', sections: [{ title: 'C', type: 'code', content: TAG }] },
   ],
 ]
 
@@ -60,8 +78,7 @@ describe('dashboard text reaches the page escaped', () => {
       dir
     )
     expect(result.success, result.error).toBe(true)
-    const html = fs.readFileSync(result.artifact!.path, 'utf8')
-    expect(html).not.toMatch(/<img src=x/i)
+    expectEscaped(fs.readFileSync(result.artifact!.path, 'utf8'))
   })
 
   it.each([
@@ -82,9 +99,34 @@ describe('dashboard text reaches the page escaped', () => {
       dir
     )
     expect(result.success, result.error).toBe(true)
-    const html = fs.readFileSync(result.artifact!.path, 'utf8')
-    expect(html).not.toMatch(/<img src=x/i)
-    expect(html).toMatch(/&lt;img/i)
+    expectEscaped(fs.readFileSync(result.artifact!.path, 'utf8'))
+  })
+
+  const chart = (spec: Record<string, unknown>) => ({
+    type: 'bar',
+    labels: ['a'],
+    datasets: [{ data: [1] }],
+    ...spec,
+  })
+
+  it.each([
+    ['the label under a gauge', true, chart({ type: 'gauge', labels: [TAG] })],
+    ['a chart type it cannot draw', true, chart({ type: TAG })],
+    [
+      'a series name in a chart shown as a table',
+      false,
+      chart({ datasets: [{ label: TAG, data: [1] }] }),
+    ],
+    ['a category in a chart shown as a table', false, chart({ labels: [TAG] })],
+  ])('%s', async (_field, inlineChartJs, spec) => {
+    // A chart that draws beside it, so the page is written when this one cannot be.
+    const charts = [spec, chart({})]
+    const result = await dashboard.execute(
+      { filename: 'x.html', inlineChartJs, data: { title: 'T', charts } },
+      dir
+    )
+    expect(result.success, result.error).toBe(true)
+    expectEscaped(fs.readFileSync(result.artifact!.path, 'utf8'))
   })
 })
 
@@ -95,7 +137,7 @@ describe('dashboard text outside the data', () => {
       dir
     )
     expect(result.success, result.error).toBe(true)
-    expect(fs.readFileSync(result.artifact!.path, 'utf8')).not.toMatch(/<img src=x/i)
+    expectEscaped(fs.readFileSync(result.artifact!.path, 'utf8'))
   })
 
   it('escapes a value quoted in the notice that replaces a block it cannot show', async () => {
@@ -111,9 +153,7 @@ describe('dashboard text outside the data', () => {
       dir
     )
     expect(result.success, result.error).toBe(true)
-    const html = fs.readFileSync(result.artifact!.path, 'utf8')
-    expect(html).not.toMatch(/<img src=x/i)
-    expect(html).toMatch(/&lt;img/i)
+    expectEscaped(fs.readFileSync(result.artifact!.path, 'utf8'))
   })
 
   it('puts no inherited name into a badge class', async () => {
