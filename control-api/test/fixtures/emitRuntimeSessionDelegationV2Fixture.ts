@@ -53,8 +53,14 @@ async function main(): Promise<void> {
     },
     {
       resolve: async input => {
-        if (input.resource.type !== 'host' || input.resource.logicalId !== 'mcp-host/chatllm') {
-          throw new Error('runtime_session_authority_must_resolve_through_host')
+        if (input.resource.type !== 'runtime_session' || input.resource.logicalId !== 'session-a') {
+          throw new Error('runtime_session_action_identity_must_remain_the_signed_resource')
+        }
+        if (
+          input.authorizationResource?.type !== 'host' ||
+          input.authorizationResource.logicalId !== 'mcp-host/chatllm'
+        ) {
+          throw new Error('runtime_session_grant_ancestry_must_resolve_through_host')
         }
         return {
           status: 'allowed',
