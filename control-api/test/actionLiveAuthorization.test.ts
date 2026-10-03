@@ -159,7 +159,12 @@ function fakeTransaction(kind: 'host' | 'mcp_server', options: { behaviorSources
         rowCount: families.length,
       }
     }
-    if (text.includes('FROM operational_resource_index')) {
+    if (
+      text.includes('FROM operational_resource_index') &&
+      !text.includes('FROM operational_resource_relationships') &&
+      !text.includes('WITH context_names AS') &&
+      !text.includes('WITH requested_context_references AS')
+    ) {
       const resources =
         kind === 'host'
           ? [hostProjection.resources[0]!]
@@ -172,7 +177,10 @@ function fakeTransaction(kind: 'host' | 'mcp_server', options: { behaviorSources
       }
       return { rows, rowCount: rows.length }
     }
-    if (text.includes('FROM operational_resource_relationships')) {
+    if (
+      text.includes('SELECT relationship.environment_id') &&
+      text.includes('FROM operational_resource_relationships')
+    ) {
       const rows =
         kind === 'mcp_server'
           ? contextProjection.relationships
@@ -186,18 +194,45 @@ function fakeTransaction(kind: 'host' | 'mcp_server', options: { behaviorSources
     if (text.includes('SELECT DISTINCT ON (context_id)')) {
       return { rows: [], rowCount: 0 }
     }
-    if (text.includes('WITH context_names AS')) {
+    if (text.includes('WITH requested_context_references AS')) {
       return {
         rows: [
           {
             kind: 'direct',
-            grant_id: `user_contexts:${userId}:ctx-a`,
+            grant_id: `user_agents:${userId}:host-a`,
             team_id: null,
             current_role: null,
-            source_type: 'context',
-            source_name: 'ctx-a',
           },
         ],
+        rowCount: 1,
+      }
+    }
+    if (text.includes('WITH context_names AS')) {
+      // The production CTE also carries host candidates; return the grant for
+      // the resource under test instead of matching only its context branch.
+      return {
+        rows:
+          kind === 'mcp_server'
+            ? [
+                {
+                  kind: 'direct',
+                  grant_id: `user_contexts:${userId}:ctx-a`,
+                  team_id: null,
+                  current_role: null,
+                  source_type: 'context',
+                  source_name: `${config.contextsNamespace}/ctx-a`,
+                },
+              ]
+            : [
+                {
+                  kind: 'direct',
+                  grant_id: `user_agents:${userId}:host-a`,
+                  team_id: null,
+                  current_role: null,
+                  source_type: 'host',
+                  source_name: 'host-a',
+                },
+              ],
         rowCount: 1,
       }
     }
