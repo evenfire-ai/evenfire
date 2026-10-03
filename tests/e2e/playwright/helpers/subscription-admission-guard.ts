@@ -1,13 +1,34 @@
-import type { Page } from '@playwright/test'
 import path from 'node:path'
 
+function controlApiAdminPath(pathname: string): string | null {
+  const apiPrefix = '/api/v1/admin/'
+  const proxyMount = '/control-api'
+  const directPath = pathname.startsWith(`${proxyMount}${apiPrefix}`)
+    ? pathname.slice(proxyMount.length)
+    : pathname
+  return directPath.startsWith(apiPrefix) ? directPath : null
+}
+export function isSubscriptionAdmissionAuthProbe(url: string, method: string): boolean {
+  if (method !== 'GET') return false
+  try {
+    return controlApiAdminPath(new URL(url).pathname) === '/api/v1/admin/auth/me'
+  } catch {
+    return false
+  }
+}
 /** Observer only: negative guards own waitForResponse on the real auth probe. */
 export function isProtectedSubscriptionBusinessPath(pathname: string): boolean {
+  const directPath = controlApiAdminPath(pathname)
+  if (directPath === null) return false
   return /^\/api\/v1\/admin\/(?:llm\/providers\/(?:codex-subscription|grok-subscription)(?:\/|$)|(?:hosts|agents)(?:\/|$)|llm-models(?:\/|$))/.test(
-    pathname
+    directPath
   )
 }
-export function observeProtectedSubscriptionBusinessAccess(page: Page): string[] {
+type BusinessRequest = { url(): string; method(): string }
+type BusinessRequestSource = {
+  on(event: 'request', listener: (request: BusinessRequest) => void): unknown
+}
+export function observeProtectedSubscriptionBusinessAccess(page: BusinessRequestSource): string[] {
   const attempted: string[] = []
   page.on('request', request => {
     const pathname = new URL(request.url()).pathname

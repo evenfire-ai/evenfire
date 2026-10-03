@@ -110,11 +110,29 @@ beforeEach(async () => {
     },
   }))
   runtimeConfigModule = await import('../../../../../src/config')
+  // Profile ids combine the app-name slug with Date.now(). Allocate the
+  // path-based target's id through a distinct temporary root profile, then
+  // discard that placeholder after creating the user-facing path profile.
+  await runtimeConfigModule.saveDesktopRuntimeConfig({
+    ...targetEnvironment,
+    appName: 'Example tenant path',
+  })
   await runtimeConfigModule.saveDesktopRuntimeConfig({
     ...targetEnvironment,
     externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/api/v1`,
     rpcProxyBaseUrl: `${targetEnvironment.rpcProxyBaseUrl}/rpc`,
   })
+  const pathNamePlaceholder = (
+    await runtimeConfigModule.getDesktopRuntimeConfigState()
+  ).options.find(
+    option =>
+      option.externalRestApiBaseUrl === targetEnvironment.externalRestApiBaseUrl &&
+      option.rpcProxyBaseUrl === targetEnvironment.rpcProxyBaseUrl
+  )
+  if (!pathNamePlaceholder) {
+    throw new Error('The config producer did not retain the distinct path-profile id')
+  }
+  await runtimeConfigModule.deleteDesktopRuntimeConfigOption(pathNamePlaceholder.id)
   await runtimeConfigModule.saveDesktopRuntimeConfig(otherEnvironment)
 
   mocks.getRuntimeConfigState.mockImplementation(async () =>
@@ -239,6 +257,7 @@ describe('Desktop environment handoff', () => {
         option.rpcProxyBaseUrl === targetEnvironment.rpcProxyBaseUrl
     )
     if (!savedTarget) throw new Error('The config producer did not return the saved REST profile')
+    expect(savedTarget.id).not.toBe(pathBasedTarget.id)
     const other = (await runtimeConfigModule!.getDesktopRuntimeConfigState()).options.find(
       option => option.id !== savedTarget.id && option.id !== '__localhost__'
     )

@@ -7,7 +7,10 @@
  * - LLM Models is no longer the ChatGPT assignment owner.
  */
 import { expect, test } from '@playwright/test'
-import { observeProtectedSubscriptionBusinessAccess } from '../helpers/subscription-admission-guard'
+import {
+  isSubscriptionAdmissionAuthProbe,
+  observeProtectedSubscriptionBusinessAccess,
+} from '../helpers/subscription-admission-guard'
 
 test.describe('Codex subscription admission', () => {
   for (const guard of [
@@ -31,10 +34,8 @@ test.describe('Codex subscription admission', () => {
       page,
     }) => {
       const attemptedBusiness = observeProtectedSubscriptionBusinessAccess(page)
-      const authProbe = page.waitForResponse(
-        response =>
-          new URL(response.url()).pathname === '/api/v1/admin/auth/me' &&
-          response.request().method() === 'GET'
+      const authProbe = page.waitForResponse(response =>
+        isSubscriptionAdmissionAuthProbe(response.url(), response.request().method())
       )
       // Negative deep-link guard: direct access is the behavior under test.
       await page.goto(guard.path)
