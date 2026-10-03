@@ -52,6 +52,16 @@ async function versions(pool: Pool): Promise<string[]> {
   return result.rows.map(row => row.version)
 }
 
+async function removeMigrationReceiptForReplay(pool: Pool, version: string): Promise<void> {
+  const versionsToRemove =
+    version === '0125_user_access_foundation'
+      ? [version, '0138_authorization_revision_delete_compatibility']
+      : [version]
+  await pool.query('DELETE FROM schema_migrations WHERE version = ANY($1::text[])', [
+    versionsToRemove,
+  ])
+}
+
 describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
   const database = `control_api_d34_${randomBytes(6).toString('hex')}`
   const connectionString = databaseUrl(
@@ -110,9 +120,7 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
       'SELECT $1::regclass::oid::text AS oid',
       [entry.name]
     )
-    await databasePool.query('DELETE FROM schema_migrations WHERE version = $1', [
-      entry.migrationVersion,
-    ])
+    await removeMigrationReceiptForReplay(databasePool, entry.migrationVersion)
 
     await initDb({ connect: () => databasePool.connect() })
 
@@ -132,9 +140,7 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
       'SELECT $1::regclass::oid::text AS oid',
       [entry.name]
     )
-    await databasePool.query('DELETE FROM schema_migrations WHERE version = $1', [
-      entry.migrationVersion,
-    ])
+    await removeMigrationReceiptForReplay(databasePool, entry.migrationVersion)
 
     await initDb({ connect: () => databasePool.connect() })
 
@@ -307,9 +313,7 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
     const entry = PR1_ONLINE_INDEX_PLAN[0]!
     await databasePool.query(`DROP INDEX ${entry.name}`)
     await databasePool.query(`CREATE INDEX ${entry.name} ON team_members (team_id)`)
-    await databasePool.query('DELETE FROM schema_migrations WHERE version = $1', [
-      entry.migrationVersion,
-    ])
+    await removeMigrationReceiptForReplay(databasePool, entry.migrationVersion)
 
     await expect(initDb({ connect: () => databasePool.connect() })).rejects.toThrow(
       `Non-equivalent existing index: ${entry.name}`
@@ -409,6 +413,7 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
     const appliedVersions = new Set([
       ...DEV_POST_0106_MIGRATION_VERSIONS,
       ...PR1_MIGRATION_VERSIONS.slice(0, 3),
+      '0138_authorization_revision_delete_compatibility',
     ])
     const recordTable = `d34_record_${randomBytes(4).toString('hex')}`
     await client.query(`CREATE TEMP TABLE ${recordTable}(version text PRIMARY KEY)`)
@@ -456,9 +461,7 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
       'SELECT $1::regclass::oid::text AS oid',
       [entry.name]
     )
-    await databasePool.query('DELETE FROM schema_migrations WHERE version = $1', [
-      entry.migrationVersion,
-    ])
+    await removeMigrationReceiptForReplay(databasePool, entry.migrationVersion)
     await databasePool.query(
       `INSERT INTO schema_migrations(version)
        VALUES ('0101_user_access_foundation')

@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { Pool, type PoolClient } from 'pg'
+import { initDb } from '../src/db.js'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
@@ -49,7 +50,6 @@ describeRealPostgres('D34 previous-image writer compatibility on real PostgreSQL
     adminPool = new Pool({ connectionString: adminUrl })
     await adminPool.query(`CREATE DATABASE ${quoteIdentifier(database)}`)
     databasePool = new Pool({ connectionString })
-    const { initDb } = await import('../src/db.js')
     await initDb({ connect: () => databasePool.connect() })
   })
 
