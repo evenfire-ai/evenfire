@@ -8,7 +8,16 @@ import * as os from 'os'
 import * as path from 'path'
 import { INTERNAL_TOOLS } from '../internalTools'
 import { PPTX_TEMPLATE_FIELDS } from '../pptxTemplates'
-import { chartXmls, generatePptx, shapeWithText, slideCount, slideXml } from './support/pptxXml'
+import {
+  chartValues,
+  chartXmls,
+  generatePptx,
+  pictures,
+  shapeWithText,
+  slideCount,
+  slideXml,
+  writeImage,
+} from './support/pptxXml'
 
 let outputDir: string
 
@@ -39,6 +48,129 @@ describe('clerum__generate_pptx — template data is declared', () => {
         expect(props[field].description).toContain(template)
       }
     }
+  })
+})
+
+type SchemaNode = Record<string, any>
+
+const pptxTool = INTERNAL_TOOLS.find(t => t.name === 'clerum__generate_pptx')!
+const pptxParameters = pptxTool.parameters as SchemaNode
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/** A schema with its descriptions taken out: what a validator or a provider acts on. */
+function shapeOf(node: unknown): unknown {
+  if (Array.isArray(node)) return node.map(shapeOf)
+  if (!isRecord(node)) return node
+  return Object.fromEntries(
+    Object.entries(node)
+      .filter(([key, value]) => !(key === 'description' && typeof value === 'string'))
+      .map(([key, value]) => [key, shapeOf(value)])
+  )
+}
+
+/**
+ * `value` with only the properties `schema` declares, as a client or provider
+ * that builds the call from the declared fields sends it.
+ */
+function declaredOnly(schema: SchemaNode | undefined, value: unknown): unknown {
+  const kind = Array.isArray(value) ? 'array' : isRecord(value) ? 'object' : typeof value
+  const node = schema?.anyOf
+    ? (schema.anyOf as SchemaNode[]).find(branch => [branch.type].flat().includes(kind))
+    : schema
+  if (Array.isArray(value)) return value.map(item => declaredOnly(node?.items, item))
+  if (!isRecord(value) || !node?.properties) return value
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([key]) => key in node.properties)
+      .map(([key, item]) => [key, declaredOnly(node.properties[key], item)])
+  )
+}
+
+describe('clerum__generate_pptx — template charts are declared', () => {
+  const data = pptxParameters.properties.data.properties as Record<string, SchemaNode>
+  const slideChart = pptxParameters.properties.slides.items.properties.chart as SchemaNode
+  const templateCharts = (): Array<[string, SchemaNode]> =>
+    Object.entries(data)
+      .map(([name, node]): [string, SchemaNode] =>
+        node.type === 'array' ? [`${name}[]`, node.items] : [name, node]
+      )
+      .filter(([, node]) => node.properties?.type?.enum?.includes('bar'))
+
+  it('finds every chart the templates read', () => {
+    expect(templateCharts().map(([name]) => name)).toEqual([
+      'charts[]',
+      'revenueChart',
+      'breakdownChart',
+      'tractionChart',
+    ])
+  })
+
+  it('declares at each the fields of slides[].chart, as slides[].chart types them', () => {
+    // The nested `data` form is left out of the template charts; the flat
+    // fields alone draw any chart.
+    const { data: nested, ...fields } = slideChart.properties as Record<string, SchemaNode>
+    expect(nested).toBeDefined()
+    for (const [name, node] of templateCharts()) {
+      expect(shapeOf(node.properties), name).toEqual(shapeOf(fields))
+      expect(node.description, name).toContain('slides[].chart')
+    }
+  })
+})
+
+describe('clerum__generate_pptx — template charts sent with declared fields only', () => {
+  const NATIVE = {
+    type: 'bar',
+    title: 'Revenue by month',
+    labels: ['Jul', 'Aug'],
+    datasets: [{ label: 'Revenue', data: [1200, 1500] }],
+    caption: 'Unaudited figures.',
+  }
+  const COVERS: Record<string, Record<string, unknown>> = {
+    'executive-brief': { title: 'Brief' },
+    'quarterly-review': { title: 'Q3 review', period: 'Q3 2026' },
+    'pitch-deck': { company: 'Acme', tagline: 'T', problem: 'P', solution: 'S' },
+  }
+  const CHARTS: Array<[string, string, (chart: unknown) => Record<string, unknown>]> = [
+    ['executive-brief', 'charts', chart => ({ charts: [chart] })],
+    ['quarterly-review', 'revenueChart', chart => ({ revenueChart: chart })],
+    ['quarterly-review', 'breakdownChart', chart => ({ breakdownChart: chart })],
+    ['pitch-deck', 'tractionChart', chart => ({ tractionChart: chart })],
+  ]
+
+  async function sendDeclared(template: string, data: Record<string, unknown>) {
+    const args = { filename: 'd.pptx', template, data: { ...COVERS[template], ...data } }
+    const sent = declaredOnly(pptxParameters, args) as Record<string, unknown>
+    return { sent, result: await generatePptx(sent, outputDir) }
+  }
+
+  it.each(CHARTS)('%s draws data.%s as a native chart', async (template, _field, place) => {
+    const { sent, result } = await sendDeclared(template, place(NATIVE))
+    expect(sent.data).toEqual({ ...COVERS[template], ...place(NATIVE) })
+    expect(result.success, result.error).toBe(true)
+    const file = path.join(outputDir, 'd.pptx')
+    const charts = chartXmls(file)
+    expect(charts).toHaveLength(1)
+    expect(chartValues(charts[0])).toEqual([['1200', '1500']])
+    expect(allText(file)).toContain('Revenue by month')
+    expect(allText(file)).toContain('Unaudited figures.')
+  })
+
+  it.each(CHARTS)('%s draws data.%s from a chart image', async (template, _field, place) => {
+    await writeImage(outputDir, 'sales.png', 400, 300)
+    const chart = { path: 'sales.png', title: 'Sales', caption: 'From the chart tool.' }
+    const { sent, result } = await sendDeclared(template, place(chart))
+    expect(sent.data).toEqual({ ...COVERS[template], ...place(chart) })
+    expect(result.success, result.error).toBe(true)
+    const file = path.join(outputDir, 'd.pptx')
+    expect(chartXmls(file)).toHaveLength(0)
+    const withPicture = Array.from({ length: slideCount(file) }, (_, i) =>
+      slideXml(file, i + 1)
+    ).filter(xml => pictures(xml).length > 0)
+    expect(withPicture).toHaveLength(1)
+    expect(allText(file)).toContain('From the chart tool.')
   })
 })
 

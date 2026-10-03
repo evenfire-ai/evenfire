@@ -1415,52 +1415,78 @@ const PPTX_SERIES_SHORT = {
   data: 'Values.',
 }
 
-const PPTX_CHART_SCHEMA = {
-  type: 'object',
-  description:
-    'A native, editable chart { type, labels, datasets }, or { path } for a chart image.',
-  properties: {
-    path: {
-      type: 'string',
-      description:
-        "Chart image file name from clerum__generate_chart (e.g. 'sales.png'), for " +
-        'types the native list lacks. Native data given too is drawn if the file cannot be used.',
+/** What a chart's fields say: in full under slides[].chart, briefly in each template chart. */
+interface PptxChartAbout {
+  path: string
+  type: string
+  title: string
+  series: Parameters<typeof pptxChartSeries>[0]
+  /** The labels and datasets nested under `data`; declared only where this is set. */
+  nested?: string
+  caption: string
+}
+
+/**
+ * A chart, as slides[].chart and every template chart declare it. Both are
+ * built here, so each declares the same fields with the same types and only
+ * the descriptions differ: a provider or client that builds the call from the
+ * declared fields sends no other, so a field named only in prose never arrives.
+ */
+function pptxChart(description: string, about: PptxChartAbout): Record<string, unknown> {
+  return {
+    type: 'object',
+    description,
+    properties: {
+      path: { type: 'string', description: about.path },
+      type: { type: 'string', enum: [...NATIVE_CHART_TYPES], description: about.type },
+      title: { type: 'string', description: about.title },
+      ...pptxChartSeries(about.series),
+      ...(about.nested === undefined
+        ? {}
+        : {
+            data: {
+              type: 'object',
+              description: about.nested,
+              properties: pptxChartSeries(PPTX_SERIES_SHORT),
+            },
+          }),
+      caption: { type: 'string', description: about.caption },
     },
-    type: {
-      type: 'string',
-      enum: [...NATIVE_CHART_TYPES],
-      description: 'Native chart type. Only for native charts: with path, leave it out.',
-    },
-    title: { type: 'string', description: 'Heading, unless it repeats the slide title.' },
-    ...pptxChartSeries({
+  }
+}
+
+const PPTX_CHART_SCHEMA = pptxChart(
+  'A native, editable chart { type, labels, datasets }, or { path } for a chart image.',
+  {
+    path:
+      "Chart image file name from clerum__generate_chart (e.g. 'sales.png'), for " +
+      'types the native list lacks. Native data given too is drawn if the file cannot be used.',
+    type: 'Native chart type. Only for native charts: with path, leave it out.',
+    title: 'Heading, unless it repeats the slide title.',
+    series: {
       labels: 'Category labels, one per value.',
       datasets: 'Series; a pie or doughnut draws only the first.',
       label: 'Legend name.',
       data: 'One value per label; null leaves a gap.',
-    }),
-    data: {
-      type: 'object',
-      description: 'Or labels and datasets nested here, as clerum__generate_chart takes them.',
-      properties: pptxChartSeries(PPTX_SERIES_SHORT),
     },
-    caption: { type: 'string', description: 'Note under the chart.' },
-  },
-}
+    nested: 'Or labels and datasets nested here, as clerum__generate_chart takes them.',
+    caption: 'Note under the chart.',
+  }
+)
 
 /**
- * A template chart. Its fields are those of slides[].chart, which the schema
- * spells out once: every model request carries the schema, and the deck
- * builder checks a template chart as it checks a slide's (readNativeChart, then
- * the chart normalizer), naming the field it cannot use.
+ * A template chart: slides[].chart with short descriptions and without its
+ * nested `data` form, which the flat fields make unnecessary. The deck builder
+ * reads both the same way (readChart).
  */
 function pptxTemplateChart(description: string): Record<string, unknown> {
-  return {
-    type: 'object',
-    description: `${description} Same fields as slides[].chart.`,
-    properties: {
-      type: { type: 'string', enum: [...NATIVE_CHART_TYPES], description: 'Chart type.' },
-    },
-  }
+  return pptxChart(`${description} As slides[].chart.`, {
+    path: PPTX_PATH_SHORT,
+    type: 'Chart type.',
+    title: 'Slide title.',
+    series: PPTX_SERIES_SHORT,
+    caption: 'Note.',
+  })
 }
 
 function pptxColumn(description: string): Record<string, unknown> {

@@ -11,7 +11,9 @@ const BUDGET: Record<string, number> = {
   clerum__generate_pdf: 3800,
   clerum__generate_docx: 3200,
   clerum__generate_xlsx: 5400,
-  clerum__generate_pptx: 14000,
+  // Each template chart declares its own fields, as a client that sends only
+  // declared fields needs; internalTools.pptx.templates.test.ts holds them there.
+  clerum__generate_pptx: 16700,
   clerum__generate_chart: 4300,
   clerum__generate_dashboard: 14100,
   clerum__list_workflows: 500,
@@ -21,7 +23,7 @@ const BUDGET: Record<string, number> = {
   clerum__context_files_read: 550,
 }
 
-const TOTAL_BUDGET = 47500
+const TOTAL_BUDGET = 50300
 
 function size(tool: (typeof INTERNAL_TOOLS)[number]): number {
   return JSON.stringify({
