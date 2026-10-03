@@ -219,6 +219,7 @@ export async function loadOperationalResourceGraph(input: {
               END) = $3)
           OR (
             $2 = 'mcp_server'
+            AND relationship.source_type = 'host'
             AND relationship.relationship_type = 'uses_context'
             AND relationship.target_type = 'context'
             AND ${canonicalContextLogicalIdSql('$1', 'relationship.target_id')} IN (

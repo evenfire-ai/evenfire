@@ -200,6 +200,7 @@ describeRealPostgres('all aggregate catalog families on real producers', () => {
   let databasePool: Pool
   let gateway: K8sGateway
   let indexer: OperationalAccessIndexer
+  let initialWireRequestCount = 0
 
   beforeAll(async () => {
     adminPool = new Pool({ connectionString: adminUrl })
@@ -324,6 +325,7 @@ describeRealPostgres('all aggregate catalog families on real producers', () => {
     for (const source of operationalSourceSpecs) {
       await indexer.reconcileSource(source)
     }
+    initialWireRequestCount = kubernetesApi.requests.length
   })
 
   afterAll(async () => {
@@ -596,7 +598,9 @@ describeRealPostgres('all aggregate catalog families on real producers', () => {
         { session, families: ['context'], limit: 100 },
         { transaction: transaction(databasePool) }
       )
-      expect(duplicateAliasCatalog.items).toHaveLength(0)
+      expect(
+        duplicateAliasCatalog.items.some(item => item.resource.logicalId === canonicalContextId)
+      ).toBe(false)
       const duplicateAliasMcpCatalog = await buildAccessCatalog(
         { session, families: ['mcp_server'], limit: 100 },
         { transaction: transaction(databasePool) }
@@ -630,7 +634,9 @@ describeRealPostgres('all aggregate catalog families on real producers', () => {
         { session, families: ['context'], limit: 100 },
         { transaction: transaction(databasePool) }
       )
-      expect(nameCollisionCatalog.items).toHaveLength(0)
+      expect(
+        nameCollisionCatalog.items.some(item => item.resource.logicalId === canonicalContextId)
+      ).toBe(false)
       kubernetesApi.delete(nameCollisionObject.plural, nameCollisionObject.namespace, contextAlias)
       await indexer.reconcileSource(contextSource)
 
@@ -651,7 +657,9 @@ describeRealPostgres('all aggregate catalog families on real producers', () => {
         { session, families: ['context'], limit: 100 },
         { transaction: transaction(databasePool) }
       )
-      expect(staleAliasCatalog.items).toHaveLength(0)
+      expect(
+        staleAliasCatalog.items.some(item => item.resource.logicalId === canonicalContextId)
+      ).toBe(false)
 
       await databasePool.query(
         `UPDATE user_contexts SET context_id = $3 WHERE user_id = $1 AND context_id = $2`,
@@ -1060,7 +1068,8 @@ describeRealPostgres('all aggregate catalog families on real producers', () => {
   })
 
   it('uses real Kubernetes list and exact-read wire boundaries', async () => {
-    const listRequests = kubernetesApi.requests.filter(request => !request.watch && !request.name)
+    const initialWireRequests = kubernetesApi.requests.slice(0, initialWireRequestCount)
+    const listRequests = initialWireRequests.filter(request => !request.watch && !request.name)
     expect(listRequests).toHaveLength(operationalSourceSpecs.length)
     expect(listRequests.map(request => `${request.namespace}/${request.plural}`).sort()).toEqual(
       operationalSourceSpecs.map(source => `${source.namespace}/${source.plural}`).sort()

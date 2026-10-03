@@ -169,30 +169,114 @@ export const SIMPLE_OPERATIONAL_HYDRATION_SQL = `
     ) all_paths
     ORDER BY logical_id, kind, team_id NULLS FIRST, grant_id
     LIMIT $7
-  ), relationships AS MATERIALIZED (
-    SELECT DISTINCT relationship.source_id AS logical_id, relationship.source_id,
-           relationship.relationship_type, relationship.target_type,
-           CASE WHEN relationship.relationship_type = 'uses_context'
-             THEN ${canonicalContextLogicalIdSql('$3', 'relationship.target_id')}
-             ELSE relationship.target_id
-           END AS target_id, relationship.relationship_instance_id,
-           relationship.behavior_attributes, relationship.source_type,
-           relationship.source_provider_uid, relationship.source_resource_version
+  ), outgoing_relationships AS MATERIALIZED (
+    SELECT relationship.*
       FROM operational_resource_relationships relationship
       JOIN resources resource
         ON relationship.environment_id = $3
-       AND (
-         (relationship.source_type = resource.resource_type
-          AND relationship.source_id = resource.logical_id)
-         OR (relationship.target_type = resource.resource_type
-          AND (CASE WHEN relationship.relationship_type = 'uses_context'
-                 THEN ${canonicalContextLogicalIdSql('$3', 'relationship.target_id')}
-                 ELSE relationship.target_id
-               END) = resource.logical_id)
-       )
+       AND relationship.source_type = resource.resource_type
+       AND relationship.source_id = resource.logical_id
      WHERE relationship.relationship_type <> 'context_identity_alias'
-       AND (relationship.relationship_type <> 'uses_context'
-         OR ${canonicalContextLogicalIdSql('$3', 'relationship.target_id')} IS NOT NULL)
+  ), context_reference_ids AS MATERIALIZED (
+    SELECT resource.logical_id AS reference_id
+      FROM resources resource
+     WHERE resource.resource_type = 'context'
+    UNION
+    SELECT alias_relationship.target_id AS reference_id
+      FROM resources resource
+      JOIN operational_resource_relationships alias_relationship
+        ON alias_relationship.environment_id = $3
+       AND alias_relationship.source_type = 'context'
+       AND alias_relationship.source_id = resource.logical_id
+       AND alias_relationship.relationship_type = 'context_identity_alias'
+       AND alias_relationship.target_type = 'context'
+      JOIN operational_resource_index alias_source
+        ON alias_source.environment_id = alias_relationship.environment_id
+       AND alias_source.resource_type = 'context'
+       AND alias_source.logical_id = alias_relationship.source_id
+       AND alias_source.provider_uid = alias_relationship.source_provider_uid
+     WHERE resource.resource_type = 'context'
+    UNION
+    SELECT relationship.target_id AS reference_id
+      FROM outgoing_relationships relationship
+     WHERE relationship.relationship_type = 'uses_context'
+  ), context_identity_candidates AS MATERIALIZED (
+    SELECT reference.reference_id, canonical_resource.logical_id AS canonical_id
+      FROM context_reference_ids reference
+      JOIN operational_resource_index canonical_resource
+        ON canonical_resource.environment_id = $3
+       AND canonical_resource.resource_type = 'context'
+       AND canonical_resource.logical_id = reference.reference_id
+    UNION ALL
+    SELECT reference.reference_id, alias_relationship.source_id AS canonical_id
+      FROM context_reference_ids reference
+      JOIN operational_resource_relationships alias_relationship
+        ON alias_relationship.environment_id = $3
+       AND alias_relationship.source_type = 'context'
+       AND alias_relationship.relationship_type = 'context_identity_alias'
+       AND alias_relationship.target_type = 'context'
+       AND alias_relationship.target_id = reference.reference_id
+      JOIN operational_resource_index alias_source
+        ON alias_source.environment_id = alias_relationship.environment_id
+       AND alias_source.resource_type = 'context'
+       AND alias_source.logical_id = alias_relationship.source_id
+       AND alias_source.provider_uid = alias_relationship.source_provider_uid
+  ), context_identities AS MATERIALIZED (
+    SELECT candidate.reference_id, MIN(candidate.canonical_id) AS canonical_id
+      FROM context_identity_candidates candidate
+     GROUP BY candidate.reference_id
+    HAVING COUNT(DISTINCT candidate.canonical_id) = 1
+  ), relationships AS MATERIALIZED (
+    SELECT DISTINCT relationship.logical_id, relationship.source_id,
+           relationship.relationship_type, relationship.target_type,
+           relationship.target_id, relationship.relationship_instance_id,
+           relationship.behavior_attributes, relationship.source_type,
+           relationship.source_provider_uid, relationship.source_resource_version
+      FROM (
+        SELECT relationship.source_id AS logical_id, relationship.source_id,
+               relationship.relationship_type, relationship.target_type,
+               CASE WHEN relationship.relationship_type = 'uses_context'
+                 THEN context_identity.canonical_id
+                 ELSE relationship.target_id
+               END AS target_id, relationship.relationship_instance_id,
+               relationship.behavior_attributes, relationship.source_type,
+               relationship.source_provider_uid, relationship.source_resource_version
+          FROM outgoing_relationships relationship
+          LEFT JOIN context_identities context_identity
+            ON relationship.relationship_type = 'uses_context'
+           AND context_identity.reference_id = relationship.target_id
+         WHERE relationship.relationship_type <> 'uses_context'
+            OR context_identity.canonical_id IS NOT NULL
+        UNION ALL
+        SELECT relationship.source_id AS logical_id, relationship.source_id,
+               relationship.relationship_type, relationship.target_type,
+               relationship.target_id, relationship.relationship_instance_id,
+               relationship.behavior_attributes, relationship.source_type,
+               relationship.source_provider_uid, relationship.source_resource_version
+          FROM operational_resource_relationships relationship
+          JOIN resources resource
+            ON relationship.environment_id = $3
+           AND relationship.target_type = resource.resource_type
+           AND relationship.target_id = resource.logical_id
+         WHERE relationship.relationship_type <> 'context_identity_alias'
+           AND relationship.relationship_type <> 'uses_context'
+        UNION ALL
+        SELECT relationship.source_id AS logical_id, relationship.source_id,
+               relationship.relationship_type, relationship.target_type,
+               context_identity.canonical_id AS target_id,
+               relationship.relationship_instance_id,
+               relationship.behavior_attributes, relationship.source_type,
+               relationship.source_provider_uid, relationship.source_resource_version
+          FROM context_identities context_identity
+          JOIN operational_resource_relationships relationship
+            ON relationship.environment_id = $3
+           AND relationship.target_type = 'context'
+           AND relationship.relationship_type = 'uses_context'
+           AND relationship.target_id = context_identity.reference_id
+          JOIN resources resource
+            ON resource.resource_type = 'context'
+           AND resource.logical_id = context_identity.canonical_id
+      ) relationship
     ORDER BY logical_id, relationship_type, target_type, target_id,
              relationship_instance_id
     LIMIT $8
@@ -259,7 +343,8 @@ export const DERIVED_OPERATIONAL_HYDRATION_SQL = `
            relationship.relationship_instance_id, relationship.behavior_attributes,
            relationship.source_family, relationship.source_provider_uid,
            relationship.source_resource_version, relationship.source_generation,
-           relationship.observed_generation, relationship.content_bytes
+           relationship.observed_generation, relationship.content_bytes,
+           relationship.observed_at
       FROM operational_resource_relationships relationship
       CROSS JOIN LATERAL (
         SELECT ${canonicalContextLogicalIdSql('$3', 'relationship.target_id')} AS canonical_id
@@ -295,7 +380,7 @@ export const DERIVED_OPERATIONAL_HYDRATION_SQL = `
              NULL::text AS host_edge_instance, NULL::jsonb AS host_edge_behavior
         FROM direct_edges edge
         JOIN user_contexts access_grant
-          ON edge.source_id = ${canonicalContextLogicalIdSql('$3', "split_part(edge.source_id, '/', 1) || '/' || access_grant.context_id")}
+          ON edge.source_id = ${canonicalContextLogicalIdSql('$3', "$6::text || '/' || access_grant.context_id")}
        WHERE access_grant.user_id = $1
       UNION ALL
       SELECT edge.target_id, 'team',
@@ -306,7 +391,7 @@ export const DERIVED_OPERATIONAL_HYDRATION_SQL = `
              edge.behavior_attributes, NULL, NULL, NULL, NULL
         FROM direct_edges edge
         JOIN team_contexts access_grant
-          ON edge.source_id = ${canonicalContextLogicalIdSql('$3', "split_part(edge.source_id, '/', 1) || '/' || access_grant.context_id")}
+          ON edge.source_id = ${canonicalContextLogicalIdSql('$3', "$6::text || '/' || access_grant.context_id")}
         JOIN team_members membership
           ON membership.team_id = access_grant.team_id AND membership.user_id = $1
          AND membership.status = 'active'

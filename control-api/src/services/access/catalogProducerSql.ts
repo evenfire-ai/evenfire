@@ -60,7 +60,7 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
                AND resource.logical_id = context_identity.canonical_id
                AND resource.enabled = TRUE AND resource.deleted_at IS NULL
       WHERE uc.user_id = $1
-        AND ${catalogTextAfterSql('context_identity.canonical_id', '$7')}`,
+        AND ${catalogTextAfterSql("SPLIT_PART(context_identity.canonical_id, '/', 2)", '$7')}`,
       orderBy: 'logical_id',
       duplicateCapable: true,
     },
@@ -78,7 +78,7 @@ export const CATALOG_KEY_SQL: Readonly<Record<CatalogFamily, string>> = Object.f
                AND resource.logical_id = context_identity.canonical_id
                AND resource.enabled = TRUE AND resource.deleted_at IS NULL
       WHERE tm.user_id = $1 AND tm.status = 'active'
-        AND ${catalogTextAfterSql('context_identity.canonical_id', '$7')}`,
+        AND ${catalogTextAfterSql("SPLIT_PART(context_identity.canonical_id, '/', 2)", '$7')}`,
       orderBy: 'logical_id',
       duplicateCapable: true,
     },
