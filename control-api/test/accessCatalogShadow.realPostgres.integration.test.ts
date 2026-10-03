@@ -4,7 +4,10 @@ import { Pool } from 'pg'
 import { type DbClient, initDb } from '../src/db.js'
 import { buildAccessCatalog } from '../src/services/access/accessCatalogCoordinator.js'
 import { compareAccessCatalogShadow } from '../src/services/access/accessCatalogShadow.js'
-import { withAccessDatabaseTransaction } from '../src/services/access/accessDatabaseQuery.js'
+import {
+  runAccessDatabaseQuery,
+  withAccessDatabaseTransaction,
+} from '../src/services/access/accessDatabaseQuery.js'
 import { AccessExecutionBudget } from '../src/services/access/accessExecutionBudget.js'
 import type { ExternalSessionAuthorityContext } from '../src/services/auth/externalSessionAuthentication.js'
 
@@ -72,9 +75,15 @@ describeRealPostgres('aggregate shadow physical statement budget on real Postgre
         [teamId, memberUserId]
       )
       await databasePool.query(
-        `INSERT INTO gfs_resources(resource_id, drive, name, kind)
-         VALUES ($1, $2, $3, 'directory')`,
-        [resourceId, `shadow-${database}`, `/member/${index}`]
+        `INSERT INTO gfs_resources(resource_id, drive, parent_resource_id, name, kind)
+         VALUES ($1, $2, CASE WHEN $4::integer = 0 THEN NULL ELSE $5::uuid END, $3, 'directory')`,
+        [
+          resourceId,
+          `shadow-${database}`,
+          index === 0 ? '/' : `member-${index}`,
+          index,
+          resourceIds[0],
+        ]
       )
       await databasePool.query(
         `INSERT INTO gfs_grants(drive, resource_id, subject_type, subject_id, permissions)
@@ -131,7 +140,15 @@ describeRealPostgres('aggregate shadow physical statement budget on real Postgre
                 options.budget!,
                 async db => {
                   statements += 1
-                  return db.query('SELECT 1 WHERE $1::int = 1', [1])
+                  return runAccessDatabaseQuery(
+                    db,
+                    options.budget!,
+                    'SELECT 1 WHERE $1::int = 1',
+                    [1],
+                    {
+                      chargeProducer: false,
+                    }
+                  )
                 },
                 { connectionPool: databasePool, mode: 'caller_configured' }
               )
