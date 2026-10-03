@@ -543,7 +543,8 @@ describe('routes/external/workflows', () => {
         initiating_authority_binding_id: 'binding-1',
       }
       mockPoolQuery
-        .mockResolvedValueOnce({ rows: [{ '1': 1 }], rowCount: 1 })
+        // V2 grant attribution comes from the already-validated selected binding;
+        // unlike legacy sessions, it performs no second grant-resolver query.
         .mockResolvedValueOnce({ rows: [], rowCount: 1 })
         .mockResolvedValueOnce({ rows: [], rowCount: 0 })
         .mockResolvedValueOnce({ rows: [{ id: 'binding-1' }], rowCount: 1 })
