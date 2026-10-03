@@ -28,8 +28,8 @@ The part structure, the source union and the image validator are copies of
 the Codex V2 contract (issue #650); the Grok contract package does not import
 the Codex one, and a parity test runs one image corpus through both copies.
 
-Limits, from the xAI documentation (grok-4.5, 4.6 and 4.7 list
-"Text, Image → Text"):
+Local limits, informed by the public xAI image documentation and shared
+ingress policy:
 
 - at most 20 images per request (xAI sets no count limit; 20 matches the
   shared ingress);
@@ -42,7 +42,9 @@ There is **no dimension or pixel limit**. The validator reads the PNG or
 JPEG header to check the container. It has no upper bound on width or height
 (a declared 9000×9000 PNG is accepted and reaches the upstream); it refuses
 only a zero dimension. This differs from
-Codex, whose 2048 px bound comes from its measured endpoint. The validator
+Codex, whose conservative local 2048 px hard limit is informed by historical
+endpoint and client evidence. Current private-service visual acceptance remains
+unverified (G8). The validator
 checks canonical base64, MIME/container framing and header dimensions; it does
 not decode pixels.
 

@@ -353,7 +353,13 @@ describe('devSigningKeys persistence contract', () => {
     const expected = createPublicKey(signing).export({ type: 'spki', format: 'pem' }).toString()
     const fd = openSync(join(store, 'rpc.public.pem'), 'r')
     try {
-      expect(fstatSync(fd).mode & 0o777).toBe(0o644)
+      // publishMaterial requests 0644 for public material but leaves it subject
+      // to the process umask; the store only forbids group/other write, so a
+      // hardened umask such as 077 legitimately yields 0600 here.
+      const mode = fstatSync(fd).mode & 0o777
+      expect(mode & 0o600).toBe(0o600)
+      expect(mode & 0o022).toBe(0)
+      expect(mode & 0o111).toBe(0)
       expect(readFileSync(fd, 'utf8').trim()).toBe(expected.trim())
     } finally {
       closeSync(fd)
