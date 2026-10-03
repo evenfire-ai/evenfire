@@ -438,6 +438,96 @@ describeRealPostgres('all aggregate catalog families on real producers', () => {
     })
   }
 
+  it('excludes an ineligible sibling Host from selected MCP hydration', async () => {
+    const hostSource = operationalSourceSpecs.find(value => value.family === 'host')!
+    const disabledHost = fixture({
+      plural: 'hosts',
+      namespace: config.hostsNamespace,
+      name: 'disabled-catalog-host',
+      uid: 'disabled-catalog-host-uid',
+      spec: { enabled: false, contextRef: 'catalog-context' },
+    })
+    kubernetesApi.put(disabledHost.plural, disabledHost.namespace, disabledHost.object)
+    await indexer.reconcileSource(hostSource)
+    await databasePool.query(
+      `INSERT INTO user_agents(user_id, agent_name) VALUES ($1, 'disabled-catalog-host')`,
+      [userId]
+    )
+
+    try {
+      const disabledEdge = await databasePool.query<{ relationship_instance_id: string }>(
+        `SELECT relationship_instance_id
+           FROM operational_resource_relationships
+          WHERE environment_id = $1 AND source_type = 'host'
+            AND source_id = $2 AND relationship_type = 'uses_context'
+            AND target_id = $3`,
+        [
+          environmentId,
+          `${config.hostsNamespace}/disabled-catalog-host`,
+          `${config.contextsNamespace}/catalog-context`,
+        ]
+      )
+      const enabledEdge = await databasePool.query<{ relationship_instance_id: string }>(
+        `SELECT relationship_instance_id
+           FROM operational_resource_relationships
+          WHERE environment_id = $1 AND source_type = 'host'
+            AND source_id = $2 AND relationship_type = 'uses_context'
+            AND target_id = $3`,
+        [
+          environmentId,
+          `${config.hostsNamespace}/catalog-host`,
+          `${config.contextsNamespace}/catalog-context`,
+        ]
+      )
+      const directContextEdge = await databasePool.query<{ relationship_instance_id: string }>(
+        `SELECT relationship_instance_id
+           FROM operational_resource_relationships
+          WHERE environment_id = $1 AND source_type = 'context'
+            AND source_id = $2 AND relationship_type = 'includes_mcp_server'
+            AND target_id = $3`,
+        [
+          environmentId,
+          `${config.contextsNamespace}/catalog-context`,
+          `${config.mcpServersNamespace}/catalog-mcp`,
+        ]
+      )
+      expect(disabledEdge.rows).toHaveLength(1)
+      expect(enabledEdge.rows).toHaveLength(1)
+      expect(directContextEdge.rows).toHaveLength(1)
+
+      const catalog = await buildAccessCatalog(
+        { session, families: ['mcp_server'], limit: 100 },
+        { transaction: transaction(databasePool) }
+      )
+      const item = catalog.items.find(
+        value => value.resource.logicalId === `${config.mcpServersNamespace}/catalog-mcp`
+      )
+      expect(catalog.complete).toBe(true)
+      expect(catalog.partialErrors).toEqual([])
+      expect(item).toBeDefined()
+      const runtimeRefs = item!.accessPaths.flatMap(path => {
+        const runtime = path.behaviorDescriptors.runtime
+        return runtime.state === 'known' && runtime.value ? [runtime.value] : []
+      })
+      expect(
+        runtimeRefs.some(value => value.includes(enabledEdge.rows[0]!.relationship_instance_id))
+      ).toBe(true)
+      expect(
+        runtimeRefs.some(value => value === directContextEdge.rows[0]!.relationship_instance_id)
+      ).toBe(true)
+      expect(
+        runtimeRefs.some(value => value.includes(disabledEdge.rows[0]!.relationship_instance_id))
+      ).toBe(false)
+    } finally {
+      await databasePool.query(
+        `DELETE FROM user_agents WHERE user_id = $1 AND agent_name = 'disabled-catalog-host'`,
+        [userId]
+      )
+      kubernetesApi.delete(disabledHost.plural, disabledHost.namespace, 'disabled-catalog-host')
+      await indexer.reconcileSource(hostSource)
+    }
+  })
+
   it('round-trips a catalog write path when capability selection excludes a read-only sibling', async () => {
     const catalog = await buildAccessCatalog(
       { session, families: ['gfs_resource'], limit: 10 },
