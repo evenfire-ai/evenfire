@@ -46,6 +46,7 @@ let setAuthenticatedForTest: ((value: boolean) => void) | null = null
 let runtimeConfigModule: typeof import('../../../../../src/config') | null = null
 let runtimeConfigDirectory = ''
 const originalOnboardingPreview = process.env.EVENFIRE_ONBOARDING_PREVIEW
+const frozenProfileIdMilliseconds = 1790000000000
 
 function Probe() {
   const auth = useAuthController({
@@ -92,6 +93,7 @@ async function savedTargetOptionId(): Promise<string> {
 
 beforeEach(async () => {
   vi.clearAllMocks()
+  vi.spyOn(Date, 'now').mockReturnValue(frozenProfileIdMilliseconds)
   desktopEnvironmentSetupListener = null
   confirmDesktopEnvironmentSetupForTest = null
   setBootingForTest = null
@@ -110,29 +112,11 @@ beforeEach(async () => {
     },
   }))
   runtimeConfigModule = await import('../../../../../src/config')
-  // Profile ids combine the app-name slug with Date.now(). Allocate the
-  // path-based target's id through a distinct temporary root profile, then
-  // discard that placeholder after creating the user-facing path profile.
-  await runtimeConfigModule.saveDesktopRuntimeConfig({
-    ...targetEnvironment,
-    appName: 'Example tenant path',
-  })
   await runtimeConfigModule.saveDesktopRuntimeConfig({
     ...targetEnvironment,
     externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/api/v1`,
     rpcProxyBaseUrl: `${targetEnvironment.rpcProxyBaseUrl}/rpc`,
   })
-  const pathNamePlaceholder = (
-    await runtimeConfigModule.getDesktopRuntimeConfigState()
-  ).options.find(
-    option =>
-      option.externalRestApiBaseUrl === targetEnvironment.externalRestApiBaseUrl &&
-      option.rpcProxyBaseUrl === targetEnvironment.rpcProxyBaseUrl
-  )
-  if (!pathNamePlaceholder) {
-    throw new Error('The config producer did not retain the distinct path-profile id')
-  }
-  await runtimeConfigModule.deleteDesktopRuntimeConfigOption(pathNamePlaceholder.id)
   await runtimeConfigModule.saveDesktopRuntimeConfig(otherEnvironment)
 
   mocks.getRuntimeConfigState.mockImplementation(async () =>
@@ -167,6 +151,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   cleanup()
+  vi.restoreAllMocks()
   vi.doUnmock('electron')
   vi.resetModules()
   await fsp.rm(runtimeConfigDirectory, { recursive: true, force: true })
@@ -257,6 +242,8 @@ describe('Desktop environment handoff', () => {
         option.rpcProxyBaseUrl === targetEnvironment.rpcProxyBaseUrl
     )
     if (!savedTarget) throw new Error('The config producer did not return the saved REST profile')
+    // The frozen Date.now value makes the historical slug+timestamp collision
+    // deterministic. Deleting one profile must never remove its same-name peer.
     expect(savedTarget.id).not.toBe(pathBasedTarget.id)
     const other = (await runtimeConfigModule!.getDesktopRuntimeConfigState()).options.find(
       option => option.id !== savedTarget.id && option.id !== '__localhost__'

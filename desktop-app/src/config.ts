@@ -1,5 +1,5 @@
 import { app } from 'electron'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import os from 'node:os'
@@ -783,7 +783,9 @@ export async function saveDesktopRuntimeConfig(next: DesktopRuntimeConfig): Prom
   const filePath = nextProfileFilePath(directoryPath, validated.appName || DEFAULT_APP_NAME)
   const timestamp = new Date().toISOString()
   const profile: StoredRuntimeProfile = {
-    id: `${toAppSlug(validated.appName || DEFAULT_APP_NAME)}-${Date.now()}`,
+    // Two profiles can legitimately share an app name. A UUID keeps their
+    // identities independent even when saves occur in the same millisecond.
+    id: `${toAppSlug(validated.appName || DEFAULT_APP_NAME)}-${randomUUID()}`,
     appName: validated.appName?.trim() || DEFAULT_APP_NAME,
     filePath,
     createdAt: timestamp,
