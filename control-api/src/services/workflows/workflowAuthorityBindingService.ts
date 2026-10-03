@@ -155,9 +155,9 @@ export async function requireWorkflowActionAuthority(input: {
   if (
     resourceIdentityKey(claims.resource as CanonicalResourceIdentity) !==
       resourceIdentityKey(resource) ||
-    JSON.stringify(claims.resource) !== JSON.stringify(resource) ||
+    stableStringify(claims.resource) !== stableStringify(resource) ||
     claims.targetHashes[input.operationId] !== targetHash ||
-    JSON.stringify(claims.targets[input.operationId]) !== JSON.stringify(input.target)
+    stableStringify(claims.targets[input.operationId]) !== stableStringify(input.target)
   ) {
     throw new WorkflowAuthorityError(403, 'forbidden')
   }
@@ -270,8 +270,8 @@ export async function requireCurrentWorkflowApprovalAuthority(input: {
     result.context.principal.sid !== binding.sid ||
     result.context.principal.sessionVersion !== binding.sessionVersion ||
     result.context.targetHash !== binding.targetHash ||
-    JSON.stringify(result.context.resource) !== JSON.stringify(binding.resource) ||
-    JSON.stringify(result.context.target) !== JSON.stringify(binding.target)
+    stableStringify(result.context.resource) !== stableStringify(binding.resource) ||
+    stableStringify(result.context.target) !== stableStringify(binding.target)
   ) {
     throw new WorkflowAuthorityError(409, 'access_path_stale')
   }

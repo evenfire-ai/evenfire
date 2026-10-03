@@ -160,6 +160,74 @@ describe('workflow authority binding ingress', () => {
     })
   })
 
+  it('accepts canonically identical resource fields regardless of property order', async () => {
+    const claims = validClaims()
+    const reorderedResource = {
+      displayName: resource.displayName,
+      logicalId: resource.logicalId,
+      canonicalId: resource.canonicalId,
+      type: resource.type,
+      environmentId: resource.environmentId,
+    }
+    mocks.verify.mockReturnValueOnce({ ...claims, resource: reorderedResource })
+
+    await expect(
+      requireWorkflowActionAuthority({
+        req: request(),
+        caller: caller as never,
+        operationId: 'workflow.trigger',
+        resourceType: 'workflow_recipe',
+        resourceLogicalId: 'sandbox-recipes/demo',
+        target,
+        gateway: {} as never,
+      })
+    ).resolves.toMatchObject({ binding: { resource } })
+  })
+
+  it('accepts canonically identical targets regardless of property order', async () => {
+    const claims = validClaims()
+    const reorderedTarget = { recipeName: 'demo', recipeNamespace: 'sandbox-recipes' }
+    mocks.verify.mockReturnValueOnce({
+      ...claims,
+      targets: { 'workflow.trigger': reorderedTarget },
+    })
+
+    await expect(
+      requireWorkflowActionAuthority({
+        req: request(),
+        caller: caller as never,
+        operationId: 'workflow.trigger',
+        resourceType: 'workflow_recipe',
+        resourceLogicalId: 'sandbox-recipes/demo',
+        target,
+        gateway: {} as never,
+      })
+    ).resolves.toMatchObject({ binding: { target } })
+  })
+
+  it.each([
+    ['changed target value', { recipeNamespace: 'sandbox-recipes', recipeName: 'other' }],
+    ['extra target key', { ...target, unexpected: true }],
+  ])('rejects a claim with a %s', async (_label, claimedTarget) => {
+    const claims = validClaims()
+    mocks.verify.mockReturnValueOnce({
+      ...claims,
+      targets: { 'workflow.trigger': claimedTarget },
+    })
+
+    await expect(
+      requireWorkflowActionAuthority({
+        req: request(),
+        caller: caller as never,
+        operationId: 'workflow.trigger',
+        resourceType: 'workflow_recipe',
+        resourceLogicalId: 'sandbox-recipes/demo',
+        target,
+        gateway: {} as never,
+      })
+    ).rejects.toMatchObject({ status: 403, code: 'forbidden' })
+  })
+
   it('fails closed for missing, duplicate, wrong-operation, and denied authority', async () => {
     await expect(
       requireWorkflowActionAuthority({
