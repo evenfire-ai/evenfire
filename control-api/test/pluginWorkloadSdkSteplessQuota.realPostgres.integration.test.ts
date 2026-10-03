@@ -3,6 +3,7 @@ import { randomBytes, randomUUID } from 'node:crypto'
 import { Pool } from 'pg'
 import type { PluginWorkloadSdkFamily } from '../src/services/pluginWorkloadSdkDb.js'
 import type { McpHostAccessClaims } from '../src/utils/auth/mcpHostJwtToken.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 /**
  * Stepless / SDK-only quota regression on real PostgreSQL (issue #348,
@@ -109,8 +110,8 @@ describeRealPostgres(
     })
 
     afterAll(async () => {
-      await db?.pool.end()
-      await db?.rateLimitPool.end()
+      await endPoolAndWaitForClients(db?.pool)
+      await endPoolAndWaitForClients(db?.rateLimitPool)
       if (previousPgConnectionString === undefined) {
         delete process.env.CONTROL_API_PG_CONNECTION_STRING
       } else {

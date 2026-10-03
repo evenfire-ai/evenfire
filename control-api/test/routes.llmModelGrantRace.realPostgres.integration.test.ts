@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { randomBytes } from 'node:crypto'
 import { Pool } from 'pg'
 import request from 'supertest'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 // R1-H3 fase 2 (llm-model reductor ↔ grant upsert) — regression test for the
 // TOCTOU race the per-MODEL advisory lock closes on the grant seam (mini-spec
@@ -168,9 +169,9 @@ describeRealPostgres('llm-model reductor ↔ grant upsert serialization (R1-H3 f
   afterAll(async () => {
     if (previousPgEnv === undefined) delete process.env.CONTROL_API_PG_CONNECTION_STRING
     else process.env.CONTROL_API_PG_CONNECTION_STRING = previousPgEnv
-    await racePool?.end().catch(() => {})
-    await corePool?.end().catch(() => {})
-    await limiterPool?.end().catch(() => {})
+    await endPoolAndWaitForClients(racePool)
+    await endPoolAndWaitForClients(corePool)
+    await endPoolAndWaitForClients(limiterPool)
     if (!adminPool) return
     await adminPool.query(
       `SELECT pg_terminate_backend(pid) FROM pg_stat_activity

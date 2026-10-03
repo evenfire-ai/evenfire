@@ -30,6 +30,7 @@ import { PostgresGovernedSessionReplayRepository } from '../src/services/tracing
 import { projectAcceptedUsageEvents } from '../src/services/tracing/usageProjection.js'
 import { ingestUsageEventsInTransaction } from '../src/services/usageEvents.js'
 import { signRpcAccessToken } from '../src/utils/auth/rpcAuthToken.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 import './realPostgres.requirement.ts'
 
 type PrivilegeExpectation = Record<string, Set<string>>
@@ -139,7 +140,7 @@ describeRealPostgres('control-api real Postgres migrations', () => {
   })
 
   afterAll(async () => {
-    await dbPool?.end()
+    await endPoolAndWaitForClients(dbPool)
     if (adminPool) {
       await adminPool.query(
         `SELECT pg_terminate_backend(pid)

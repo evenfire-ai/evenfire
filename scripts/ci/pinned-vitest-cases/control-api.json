@@ -1,0 +1,282 @@
+[
+  {
+    "suite": "helpers.realPostgresTeardown.test.ts",
+    "fullName": "endPoolAndWaitForClients ends a real pg Pool whose in-flight connect is refused"
+  },
+  {
+    "suite": "routes.mcp-host.llmProviderAttempts.test.ts",
+    "fullName": "authorize raw-body scan before JSON.parse preserves the module logger binding and request correlation on body refusals"
+  },
+  {
+    "suite": "routes.mcp-host.llmProviderAttempts.createApp.test.ts",
+    "fullName": "createApp authorize parser boundary canonical path codex-subscription checks JWT before parsing malformed, 100000-deep and gzip bodies"
+  },
+  {
+    "suite": "routes.mcp-host.llmProviderAttempts.createApp.test.ts",
+    "fullName": "createApp authorize parser boundary canonical path codex-subscription refuses authenticated over-deep and malformed bodies before authorize and accepts a valid body"
+  },
+  {
+    "suite": "routes.mcp-host.llmProviderAttempts.createApp.test.ts",
+    "fullName": "createApp authorize parser boundary canonical path codex-subscription refuses authenticated gzip before authorize and accepts the same uncompressed body"
+  },
+  {
+    "suite": "routes.mcp-host.llmProviderAttempts.createApp.test.ts",
+    "fullName": "createApp authorize parser boundary canonical path grok-subscription checks JWT before parsing malformed, 100000-deep and gzip bodies"
+  },
+  {
+    "suite": "routes.mcp-host.llmProviderAttempts.createApp.test.ts",
+    "fullName": "createApp authorize parser boundary canonical path grok-subscription refuses authenticated over-deep and malformed bodies before authorize and accepts a valid body"
+  },
+  {
+    "suite": "routes.mcp-host.llmProviderAttempts.createApp.test.ts",
+    "fullName": "createApp authorize parser boundary canonical path grok-subscription refuses authenticated gzip before authorize and accepts the same uncompressed body"
+  },
+  {
+    "suite": "routes.mcp-host.llmProviderAttempts.createApp.test.ts",
+    "fullName": "createApp authorize parser boundary double-slash path codex-subscription checks JWT before parsing malformed, 100000-deep and gzip bodies"
+  },
+  {
+    "suite": "routes.mcp-host.llmProviderAttempts.createApp.test.ts",
+    "fullName": "createApp authorize parser boundary double-slash path codex-subscription refuses authenticated over-deep and malformed bodies before authorize and accepts a valid body"
+  },
+  {
+    "suite": "routes.mcp-host.llmProviderAttempts.createApp.test.ts",
+    "fullName": "createApp authorize parser boundary double-slash path codex-subscription refuses authenticated gzip before authorize and accepts the same uncompressed body"
+  },
+  {
+    "suite": "routes.mcp-host.llmProviderAttempts.createApp.test.ts",
+    "fullName": "createApp authorize parser boundary double-slash path grok-subscription checks JWT before parsing malformed, 100000-deep and gzip bodies"
+  },
+  {
+    "suite": "routes.mcp-host.llmProviderAttempts.createApp.test.ts",
+    "fullName": "createApp authorize parser boundary double-slash path grok-subscription refuses authenticated over-deep and malformed bodies before authorize and accepts a valid body"
+  },
+  {
+    "suite": "routes.mcp-host.llmProviderAttempts.createApp.test.ts",
+    "fullName": "createApp authorize parser boundary double-slash path grok-subscription refuses authenticated gzip before authorize and accepts the same uncompressed body"
+  },
+  {
+    "suite": "services.llmProviderAttemptAuthorizer.depth.test.ts",
+    "fullName": "authorizeLlmProviderAttempt contract nesting cap rejects 100000-deep codex-subscription bodies before serialization and assignment lookup"
+  },
+  {
+    "suite": "services.llmProviderAttemptAuthorizer.depth.test.ts",
+    "fullName": "authorizeLlmProviderAttempt contract nesting cap rejects 100000-deep grok-subscription bodies before serialization and assignment lookup"
+  },
+  {
+    "suite": "routes.mcp-host.llmProviderAttempts.createApp.test.ts",
+    "fullName": "createApp global JSON encoding refuses compressed JSON before parsing or the public handler and accepts the same uncompressed body"
+  },
+  {
+    "suite": "llmProviderAttemptBodyAdmission.test.ts",
+    "fullName": "AuthorizeBodyAdmission policy and idempotence rejects invalid counts and timer values and freezes the accepted policy"
+  },
+  {
+    "suite": "llmProviderAttemptBodyAdmission.test.ts",
+    "fullName": "AuthorizeBodyAdmission policy and idempotence an old release cannot free the slot occupied by a newer request"
+  },
+  {
+    "suite": "llmProviderAttemptBodyAdmission.test.ts",
+    "fullName": "AuthorizeBodyAdmission policy and idempotence clears retained request bodies and ignores duplicate parser callbacks"
+  },
+  {
+    "suite": "llmProviderAttemptBodyAdmission.test.ts",
+    "fullName": "AuthorizeBodyAdmission parser lifecycle propagates the 'malformed JSON' parser error after removing its raw body"
+  },
+  {
+    "suite": "llmProviderAttemptBodyAdmission.test.ts",
+    "fullName": "AuthorizeBodyAdmission parser lifecycle propagates the 'over-deep structure' parser error after removing its raw body"
+  },
+  {
+    "suite": "llmProviderAttemptBodyAdmission.test.ts",
+    "fullName": "AuthorizeBodyAdmission parser lifecycle propagates the 'compressed body' parser error after removing its raw body"
+  },
+  {
+    "suite": "llmProviderAttemptBodyAdmission.test.ts",
+    "fullName": "AuthorizeBodyAdmission parser lifecycle propagates the 'payload over limit' parser error after removing its raw body"
+  },
+  {
+    "suite": "llmProviderAttemptBodyAdmission.test.ts",
+    "fullName": "AuthorizeBodyAdmission parser lifecycle stops a stalled read through closeGrace even when response finish never arrives"
+  },
+  {
+    "suite": "llmProviderAttemptBodyAdmission.test.ts",
+    "fullName": "AuthorizeBodyAdmission parser lifecycle bounds a never-finishing capacity refusal without reading or starting work"
+  },
+  {
+    "suite": "llmProviderAttemptBodyAdmission.test.ts",
+    "fullName": "AuthorizeBodyAdmission parser lifecycle uses close during parsing only to stop the reader and never starts work"
+  },
+  {
+    "suite": "llmProviderAttemptBodyAdmission.test.ts",
+    "fullName": "AuthorizeBodyAdmission work cancellation preserves typed authorize_timeout after real signal-aware work settles"
+  },
+  {
+    "suite": "llmProviderAttemptBodyAdmission.test.ts",
+    "fullName": "AuthorizeBodyAdmission work cancellation does not free a work owner on client close until signal-aware work unwinds"
+  },
+  {
+    "suite": "llmProviderAttemptBodyAdmission.test.ts",
+    "fullName": "AuthorizeBodyAdmission HTTP fixture preserves chunked JSON and releases after work completes"
+  },
+  {
+    "suite": "llmProviderAttemptBodyAdmission.test.ts",
+    "fullName": "AuthorizeBodyAdmission HTTP fixture refuses an over-cap request before parsing and keeps a disconnected work owner charged"
+  },
+  {
+    "suite": "llmProviderAttemptBodyAdmission.test.ts",
+    "fullName": "AuthorizeBodyAdmission HTTP fixture releases only after the real body-parser callback follows a destroyed stalled request"
+  },
+  {
+    "suite": "routes.mcp-host.llmProviderAttempts.bodyAdmission.test.ts",
+    "fullName": "createApp retained authorize-body ownership shares the actual production cap across apps and principals and retains disconnected work until unwind"
+  },
+  {
+    "suite": "routes.mcp-host.llmProviderAttempts.bodyAdmission.test.ts",
+    "fullName": "createApp retained authorize-body ownership runs both rate limits and JWT before taking any body owner"
+  },
+  {
+    "suite": "routes.mcp-host.llmProviderAttempts.bodyAdmission.test.ts",
+    "fullName": "createApp retained authorize-body ownership preserves chunked codex JSON through the actual app and releases the body"
+  },
+  {
+    "suite": "routes.mcp-host.llmProviderAttempts.bodyAdmission.test.ts",
+    "fullName": "createApp retained authorize-body ownership preserves chunked grok JSON through the actual app and releases the body"
+  },
+  {
+    "suite": "routes.mcp-host.llmProviderAttempts.bodyAdmission.test.ts",
+    "fullName": "createApp retained authorize-body ownership releases after authorize denial and admits a subsequent request"
+  },
+  {
+    "suite": "routes.mcp-host.llmProviderAttempts.bodyAdmission.test.ts",
+    "fullName": "createApp retained authorize-body ownership releases after unexpected authorizer error and admits a subsequent request"
+  },
+  {
+    "suite": "routes.mcp-host.llmProviderAttempts.bodyAdmission.test.ts",
+    "fullName": "createApp retained authorize-body ownership returns terminal authorize_timeout after the real work clock aborts, without publishing late success"
+  },
+  {
+    "suite": "routes.mcp-host.llmProviderAttempts.bodyAdmission.test.ts",
+    "fullName": "createApp retained authorize-body ownership stops a stalled body reader on the real read clock before releasing and admits the next request"
+  },
+  {
+    "suite": "routes.mcp-host.llmProviderAttempts.bodyAdmission.test.ts",
+    "fullName": "Host and Recipe assignment owner cancellation passes the same signal to Host lookup and preserves cancellation"
+  },
+  {
+    "suite": "routes.mcp-host.llmProviderAttempts.bodyAdmission.test.ts",
+    "fullName": "Host and Recipe assignment owner cancellation passes the same signal to Recipe lookup and preserves cancellation"
+  },
+  {
+    "suite": "llmProviderAttemptAuthorizer.cancellation.test.ts",
+    "fullName": "authorizer Kubernetes cancellation on the configured native client terminates no-headers with the configured CA, bearer and server intact, then serves a later lookup"
+  },
+  {
+    "suite": "llmProviderAttemptAuthorizer.cancellation.test.ts",
+    "fullName": "authorizer Kubernetes cancellation on the configured native client terminates no-eof with the configured CA, bearer and server intact, then serves a later lookup"
+  },
+  {
+    "suite": "llmProviderAttemptAuthorizer.cancellation.test.ts",
+    "fullName": "authorizer Kubernetes cancellation on the configured native client does not enter the cross-namespace fallback after cancellation without an explicit namespace"
+  },
+  {
+    "suite": "llmProviderAttemptAuthorizer.cancellation.test.ts",
+    "fullName": "authorizer Kubernetes cancellation on the configured native client forwards the optional signal through K8sGateway without reconfiguring its client"
+  },
+  {
+    "suite": "llmProviderAttemptAuthorizer.cancellation.test.ts",
+    "fullName": "authorizer Kubernetes cancellation on the configured native client propagates codex-subscription cancellation into assignment and never enters a transaction"
+  },
+  {
+    "suite": "llmProviderAttemptAuthorizer.cancellation.test.ts",
+    "fullName": "authorizer Kubernetes cancellation on the configured native client propagates grok-subscription cancellation into assignment and never enters a transaction"
+  },
+  {
+    "suite": "llmProviderAttemptAuthorizer.cancellation.test.ts",
+    "fullName": "scoped transaction cancellation with the native pg driver and sockets never borrows a client for an already aborted request"
+  },
+  {
+    "suite": "llmProviderAttemptAuthorizer.cancellation.test.ts",
+    "fullName": "scoped transaction cancellation with the native pg driver and sockets fails without running work if the server does not support scoped connection polling"
+  },
+  {
+    "suite": "llmProviderAttemptAuthorizer.cancellation.test.ts",
+    "fullName": "scoped transaction cancellation with the native pg driver and sockets terminates an in-flight rollback before final release and preserves the typed owner reason"
+  },
+  {
+    "suite": "llmProviderAttemptAuthorizer.cancellation.test.ts",
+    "fullName": "scoped transaction cancellation with the native pg driver and sockets terminates an active native query and evicts the client exactly once before recovery"
+  },
+  {
+    "suite": "llmProviderAttemptAuthorizer.cancellation.test.ts",
+    "fullName": "scoped transaction cancellation with the native pg driver and sockets terminates an idle half-open client but remains owned through callback cleanup"
+  },
+  {
+    "suite": "llmProviderAttemptAuthorizer.cancellation.test.ts",
+    "fullName": "scoped transaction cancellation with the native pg driver and sockets awaits bounded connect failure and preserves the cancellation reason without sending BEGIN"
+  },
+  {
+    "suite": "llmProviderAttemptAuthorizer.cancellation.test.ts",
+    "fullName": "scoped transaction cancellation with the native pg driver and sockets disposes a borrow that arrives after abort before any new statement or healthy return"
+  },
+  {
+    "suite": "llmProviderAttemptAuthorizer.cancellation.test.ts",
+    "fullName": "scoped transaction cancellation with the native pg driver and sockets keeps a lost COMMIT reply uncertain and never attempts rollback or returns that client healthy"
+  },
+  {
+    "suite": "helpers.realPostgresCancellation.test.ts",
+    "fullName": "hides frontend Terminate and FIN as well as replies without closing the backend socket"
+  },
+  {
+    "suite": "llmProviderAttemptAuthorizer.cancellation.test.ts",
+    "fullName": "cancellable transaction server idle backstop with native pool max one bounds an effective idle timeout of 0 before BEGIN and restores it after acknowledged COMMIT"
+  },
+  {
+    "suite": "llmProviderAttemptAuthorizer.cancellation.test.ts",
+    "fullName": "cancellable transaction server idle backstop with native pool max one bounds an effective idle timeout of 45000 before BEGIN and restores it after acknowledged COMMIT"
+  },
+  {
+    "suite": "llmProviderAttemptAuthorizer.cancellation.test.ts",
+    "fullName": "cancellable transaction server idle backstop with native pool max one preserves a smaller positive server idle limit without changing the session"
+  },
+  {
+    "suite": "llmProviderAttemptAuthorizer.cancellation.test.ts",
+    "fullName": "cancellable transaction server idle backstop with native pool max one fails before BEGIN for effective statement timeout 0 and physically evicts the checkout"
+  },
+  {
+    "suite": "llmProviderAttemptAuthorizer.cancellation.test.ts",
+    "fullName": "cancellable transaction server idle backstop with native pool max one fails before BEGIN for effective statement timeout 99 and physically evicts the checkout"
+  },
+  {
+    "suite": "llmProviderAttemptAuthorizer.cancellation.test.ts",
+    "fullName": "cancellable transaction server idle backstop with native pool max one fails before BEGIN for effective statement timeout 30001 and physically evicts the checkout"
+  },
+  {
+    "suite": "llmProviderAttemptAuthorizer.cancellation.test.ts",
+    "fullName": "cancellable transaction server idle backstop with native pool max one fails before BEGIN for effective statement timeout not-a-number and physically evicts the checkout"
+  },
+  {
+    "suite": "llmProviderAttemptAuthorizer.cancellation.test.ts",
+    "fullName": "cancellable transaction server idle backstop with native pool max one fails before BEGIN for effective statement timeout null and physically evicts the checkout"
+  },
+  {
+    "suite": "llmProviderAttemptAuthorizer.cancellation.test.ts",
+    "fullName": "cancellable transaction server idle backstop with native pool max one restores the session after acknowledged ROLLBACK without replacing the primary work error"
+  },
+  {
+    "suite": "llmProviderAttemptAuthorizer.cancellation.test.ts",
+    "fullName": "cancellable transaction server idle backstop with native pool max one poisons and physically ends a failed session setup without running work"
+  },
+  {
+    "suite": "llmProviderAttemptAuthorizer.cancellation.test.ts",
+    "fullName": "cancellable transaction server idle backstop with native pool max one evicts a failed restoration while preserving the acknowledged COMMIT outcome"
+  },
+  {
+    "suite": "llmProviderAttemptAuthorizer.cancellation.test.ts",
+    "fullName": "cancellable transaction server idle backstop with native pool max one evicts a failed restoration after ROLLBACK and keeps the original work failure"
+  },
+  {
+    "suite": "llmProviderAttemptAuthorizer.cancellation.test.ts",
+    "fullName": "cancellable transaction server idle backstop with native pool max one retains the sole pool checkout until restoration finishes before serving the next borrower"
+  }
+]

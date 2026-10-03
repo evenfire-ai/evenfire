@@ -36,6 +36,7 @@ import {
 } from '../src/oauth/store.js'
 import { getAccessToken } from '../src/oauth/tokenHelper.js'
 import { type McpServerResource, normalizeMcpServerOwnerDecl } from '../src/routes/mcpOauth.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 import { MockGateway } from './mockGateway.js'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
@@ -81,7 +82,7 @@ describeRealPostgres('oauth reactive refresh — row-lock serialization (real Po
 
   afterAll(async () => {
     try {
-      await dbPool?.end()
+      await endPoolAndWaitForClients(dbPool)
       await Promise.all(clientClosures)
       if (adminPool) {
         // A remaining connection must fail DROP rather than be force-terminated.

@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { Pool, type PoolClient } from 'pg'
 import request from 'supertest'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 // The external GFS limiter's Postgres backend, against real PostgreSQL at the
 // production pool bounds: the CORE_POOL_* and RATE_LIMIT_POOL_* variables are
@@ -118,8 +119,8 @@ describeRealPostgres('external GFS rate limiter backend (real PostgreSQL)', () =
       if (value === undefined) delete process.env[key]
       else process.env[key] = value
     }
-    await corePool?.end().catch(() => {})
-    await limiterPool?.end().catch(() => {})
+    await endPoolAndWaitForClients(corePool)
+    await endPoolAndWaitForClients(limiterPool)
     if (!adminPool) return
     await adminPool.query(
       `SELECT pg_terminate_backend(pid) FROM pg_stat_activity

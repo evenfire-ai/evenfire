@@ -12,6 +12,7 @@ import {
   oauthGrantExists,
   upsertOAuthGrant,
 } from '../src/oauth/store.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 import { MockGateway } from './mockGateway.js'
 
 // T1/T4 — the disconnect composition (buildMcpServerGrantKey → deleteOAuthGrant)
@@ -72,7 +73,7 @@ describeRealPostgres('mcp-server grant disconnect composition (real Postgres)', 
   })
 
   afterAll(async () => {
-    await dbPool?.end()
+    await endPoolAndWaitForClients(dbPool)
     if (adminPool) {
       await adminPool.query(
         `SELECT pg_terminate_backend(pid) FROM pg_stat_activity

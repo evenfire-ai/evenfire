@@ -12,6 +12,7 @@ import {
   refreshOAuthGrantTokens,
   upsertOAuthGrant,
 } from '../src/oauth/store.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 // T1/T5 — shared-identity grant semantics derived from the REAL producer
 // (real ON CONFLICT DO NOTHING + CHECK constraints), not a hand-built fixture.
@@ -48,7 +49,7 @@ describeRealPostgres('oauth store — shared grants (real Postgres)', () => {
   })
 
   afterAll(async () => {
-    await dbPool?.end()
+    await endPoolAndWaitForClients(dbPool)
     if (adminPool) {
       await adminPool.query(
         `SELECT pg_terminate_backend(pid) FROM pg_stat_activity

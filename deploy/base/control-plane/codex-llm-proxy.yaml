@@ -84,12 +84,19 @@ spec:
                 secretKeyRef:
                   name: codex-llm-proxy-secrets
                   key: CODEX_LLM_PROXY_CONTROL_API_TOKEN
-            # Caps V8's old space under the 1Gi limit so the heap is collected
-            # before the kernel kills the pod. Measured peak with eight 8 MiB
-            # streams, two 24 MiB visual streams and three queued 8 MiB bodies
-            # (#739 D5): 790 MiB of RSS with this cap, 886-1009 MiB without it.
+            # Caps V8's old space under the 2048Mi limit so the heap is
+            # collected before the kernel kills the pod. Measured peak with
+            # eight 8 MiB streams, two 24 MiB visual streams and three queued
+            # 8 MiB bodies (#739 D5): 790 MiB of RSS at a 384 MiB cap, 886-1009
+            # MiB without one. The byte-based BodyBudget also admits about
+            # eight compact bodies of the worst structure the contract admits
+            # (#806 Q1), each a ~44 MiB tree once parsed. With 8 held streams,
+            # 8 queued bodies and two visual streams, 640 MiB aborted 3 of 3
+            # and 768 MiB passed 3 of 3; that load peaked at 1327-1460 MiB of
+            # RSS on macOS, which is not cgroup memory. 768 MiB is the smallest
+            # cap tested that passes, not a proven minimum.
             - name: NODE_OPTIONS
-              value: "--max-old-space-size=384"
+              value: "--max-old-space-size=768"
           ports:
             - name: runtime
               containerPort: 8080
@@ -116,7 +123,7 @@ spec:
               memory: 768Mi
             limits:
               cpu: 250m
-              memory: 1Gi
+              memory: 2048Mi
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

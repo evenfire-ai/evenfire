@@ -23,6 +23,7 @@ import {
   createSilentInvitationForTeams,
 } from '../src/services/directory/membership.js'
 import { retireDesktopUser } from '../src/services/directory/users.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 import './realPostgres.requirement.ts'
 import { waitForDatabaseConnectionsToClose } from './realPostgresCleanup.ts'
 
@@ -184,7 +185,7 @@ describeRealPostgres('control admin replace-inviter invitations on real PostgreS
     connectSpy?.mockRestore()
     if (!adminPool) return
     try {
-      await testPool?.end()
+      await endPoolAndWaitForClients(testPool)
       await waitForDatabaseConnectionsToClose(adminPool, database)
       await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdent(database)}`)
     } finally {

@@ -26,6 +26,7 @@ import { resultToOutcome } from '../src/oauth/proactiveRefreshPolicy.js'
 import { getAccessTokenReactive } from '../src/oauth/reactiveTokenHelper.js'
 import { getOAuthGrant, upsertOAuthGrant } from '../src/oauth/store.js'
 import { type McpServerResource, normalizeMcpServerOwnerDecl } from '../src/routes/mcpOauth.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 import { MockGateway } from './mockGateway.js'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
@@ -85,7 +86,7 @@ describeRealPostgres(
     })
 
     afterAll(async () => {
-      await dbPool?.end()
+      await endPoolAndWaitForClients(dbPool)
       if (adminPool) {
         await adminPool.query(
           `SELECT pg_terminate_backend(pid) FROM pg_stat_activity

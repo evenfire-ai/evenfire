@@ -11,6 +11,7 @@ import { PgResourceStore } from '../../gfs-controller/src/db/resourceStore.js'
 import { GfsWriteService, PgTransactor } from '../../gfs-controller/src/db/writeStore.js'
 import { BlobStore } from '../../gfs-controller/src/storage/blobStore.js'
 import { initDb } from '../src/db.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
@@ -154,7 +155,7 @@ describeRealPostgres('GFS Copy publication on real PostgreSQL and filesystem blo
   }, 60_000)
 
   afterAll(async () => {
-    await pool?.end()
+    await endPoolAndWaitForClients(pool)
     await rm(blobRoot, { recursive: true, force: true }).catch(() => undefined)
     if (!adminPool) return
     await adminPool.query(

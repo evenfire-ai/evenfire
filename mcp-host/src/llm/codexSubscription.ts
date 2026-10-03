@@ -10,15 +10,17 @@ import {
   CompletionResponse,
   ChatMessage as CoreChatMessage,
   FinishReason,
-  MessageContentImageSource,
-  MessageContentPart,
   ToolCompletionResponse,
   ToolDefinition,
-  textContentFromParts,
 } from '../core/types'
 import { logger } from '../logger'
+import {
+  attachmentBudgetRefusalMessageFor,
+  buildAttachmentBudgetRefusals,
+} from './attachmentBudgetRefusal'
 import { CodexLlmProxyClient, CodexProxyError } from './codexLlmProxyClient'
 import { classifyUnknown } from './errorClassification'
+import { IMAGE_SOURCE_INVALID, canonicalRefusalCode, projectMessage } from './imageSource'
 import { CodexAuthorizeError, ProviderAttemptAuthorizer } from './providerAttemptAuthorizer'
 import { rateLimitRetryDelayMs, waitBeforeRetry } from './rateLimitRetry'
 import { type LlmProvider, descriptorFor } from './registryCore'
@@ -39,108 +41,16 @@ export type CodexAttemptContext = {
 }
 
 /**
- * The contract `limit` refusals that mean "this turn carries too much".
- *
- * Of the `fail('limit', …)` checks on a request, only these are about
- * conversation volume, all in `llm-provider-attempt-contract/index.cjs`: the
- * real byte bound and its non-image share on a V2 request (both in
- * `parseCodexCompletionRequestRoot`), the element bound that proxies it
- * (`checkStructure`), and `maxMessages` and `messages[i].toolCalls` (both in
- * `parseMessages`).
- * All five are "this conversation is too long", which is exactly what
- * `ContextLengthExceeded` — "Conversation Too Long" — promises the user.
- * Compaction reaches them unevenly. The context manager counts bytes and,
- * through the registry's `maxMessages`, the message count, so it compacts
- * before either bound; a single turn holding more than `maxMessages`
- * messages stays unshrinkable, because the cut never lands inside a turn.
- * `maxToolCalls` also bounds every response, so only history produced by
- * another provider can carry an over-long `toolCalls` array.
- *
- * The others are not. Nesting depth (`checkStructure`, `assertFiniteTree`),
- * `generation.maxOutputTokens` (`parseGeneration`) and `deadlineMs`
- * (`parseCodexCompletionRequestRoot`) out of range are malformed or
- * out-of-range parameters, and a shorter conversation fixes none of them;
- * labelling them a context-length failure would send the user into a
- * compaction loop that cannot converge. They stay `invalid_request`, which is
- * what "fails an over-deep tool schema locally without a stack overflow" in
- * `subscriptionRequestHash.test.ts` pins for the over-deep schema.
- * The image budgets belong to the attachments, not the conversation: a `size`
- * one is `attachment_too_large` (see `ATTACHMENT_BUDGET_REFUSALS`), the
- * `maxImages` `count` one stays `invalid_request`.
- *
- * `hashCanonicalCodexRequest` also returns a `kind`, but it cannot replace the
- * message here: `size` covers the conversation bytes and the image byte and
- * dimension budgets alike, and `count` covers `maxMessages` and `maxImages`
- * alike. A shorter conversation fixes the first of each pair and none of the
- * second, so the message stays the discriminator at this boundary (#731). The
- * byte pattern is a prefix so it covers both the element bound and the
- * `outside image data` check of a V2 request.
- *
- * `messages exceed` is defence in depth rather than a reachable branch: the
- * guard below raises that exact message with this same classification before
- * `hashCanonicalCodexRequest` runs, so the contract's own copy of it only
- * arrives here if that guard is ever removed.
+ * The Codex image budget refusals, built from the Codex contract limits (see
+ * `buildAttachmentBudgetRefusals` for the rows and their order).
  */
-const CONTEXT_LENGTH_REFUSALS = [
-  /^request exceeds maxRequestBodyBytes/,
-  /^messages exceed \d+$/,
-  /^messages\[\d+\]\.toolCalls exceed \d+$/,
-]
-
-function isContextLengthRefusal(code: string, message: string): boolean {
-  return code === 'limit' && CONTEXT_LENGTH_REFUSALS.some(pattern => pattern.test(message))
-}
-
-const BYTES_PER_MIB = 1024 * 1024
-
-/**
- * The contract `size` refusals that an attached image caused, each with the
- * sentence the user reads. The Desktop renders the classified message as the
- * error bubble under "Invalid Attachment", so the sentence names the limit the
- * image broke; the numbers come from the contract's own limits.
- *
- * The per-image messages carry a `messages[i].contentParts[j]: ` prefix, so
- * they are anchored at the end only. `maxImagePixels` equals
- * `maxImageDimension` squared and the dimension check runs first, so the pixel
- * refusal is unreachable with today's limits; it is mapped so a looser pixel
- * limit cannot reach the user as a raw contract string.
- *
- * The V2 whole-body ceiling (`maxVisualRequestBodyBytes`) is checked before any
- * part is parsed. It is an attachment refusal only when the request carries an
- * image: a V2 request whose text alone crosses it is a conversation that is too
- * long, and blaming an attachment the user never sent would be false.
- */
-const ATTACHMENT_BUDGET_REFUSALS: ReadonlyArray<{
-  pattern: RegExp
-  requiresImage: boolean
-  userMessage: string
-}> = [
-  {
-    pattern: /image exceeds \d+ decoded bytes$/,
-    requiresImage: false,
-    userMessage: `An attached image is too large: it exceeds ${VISUAL_LIMITS.maxImageBytes / BYTES_PER_MIB} MiB. Reduce its size and send it again.`,
-  },
-  {
-    pattern: /image dimension exceeds \d+$/,
-    requiresImage: false,
-    userMessage: `An attached image is too large: its width or height exceeds ${VISUAL_LIMITS.maxImageDimension} pixels. Resize it and send it again.`,
-  },
-  {
-    pattern: /image pixel count exceeds \d+$/,
-    requiresImage: false,
-    userMessage: `An attached image is too large: it has more than ${VISUAL_LIMITS.maxImagePixels.toLocaleString('en-US')} pixels. Resize it and send it again.`,
-  },
-  {
-    pattern: /^request exceeds \d+ total image bytes$/,
-    requiresImage: false,
-    userMessage: `The attached images are too large together: they exceed ${VISUAL_LIMITS.maxTotalImageBytes / BYTES_PER_MIB} MiB in total. Send fewer or smaller images.`,
-  },
-  {
-    pattern: /^request exceeds maxVisualRequestBodyBytes$/,
-    requiresImage: true,
-    userMessage: `The message and its attached images are too large together: they exceed ${LIMITS.maxVisualRequestBodyBytes / BYTES_PER_MIB} MiB. Send fewer or smaller images.`,
-  },
-]
+const ATTACHMENT_BUDGET_REFUSALS = buildAttachmentBudgetRefusals({
+  maxImageBytes: VISUAL_LIMITS.maxImageBytes,
+  maxTotalImageBytes: VISUAL_LIMITS.maxTotalImageBytes,
+  maxVisualRequestBodyBytes: LIMITS.maxVisualRequestBodyBytes,
+  maxImageDimension: VISUAL_LIMITS.maxImageDimension,
+  maxImagePixels: VISUAL_LIMITS.maxImagePixels,
+})
 
 /**
  * The user-facing sentence for a contract refusal caused by an attached image,
@@ -150,10 +60,11 @@ export function attachmentBudgetRefusalMessage(
   contractMessage: string,
   requestCarriesImage: boolean
 ): string | undefined {
-  return ATTACHMENT_BUDGET_REFUSALS.find(
-    refusal =>
-      refusal.pattern.test(contractMessage) && (requestCarriesImage || !refusal.requiresImage)
-  )?.userMessage
+  return attachmentBudgetRefusalMessageFor(
+    ATTACHMENT_BUDGET_REFUSALS,
+    contractMessage,
+    requestCarriesImage
+  )
 }
 
 function mapCodexUsage(usage?: { inputTokens: number; outputTokens: number }): {
@@ -190,66 +101,8 @@ export type CodexSubscriptionDeps = {
  * itself cannot succeed, so neither may trigger a retry or a provider fallback.
  */
 const CODEX_REQUEST_INVALID = 'invalid_request'
-const CODEX_IMAGE_SOURCE_INVALID = 'image_source_invalid'
 /** A local image budget refusal (`ATTACHMENT_BUDGET_REFUSALS`). */
 const CODEX_ATTACHMENT_TOO_LARGE = 'attachment_too_large'
-
-/** One image part as the Codex V2 contract serializes it. */
-type ProjectedImagePart = {
-  type: 'image'
-  mimeType: 'image/jpeg' | 'image/png'
-  data: string
-  source: MessageContentImageSource
-}
-
-/** One message as either contract version serializes it. */
-type ProjectedMessage = {
-  role: CoreChatMessage['role']
-  content: string
-  contentParts?: Array<{ type: 'text'; text: string } | ProjectedImagePart>
-  name?: string
-  toolCallId?: string
-  toolCalls?: Array<{ id: string; name: string; arguments: Record<string, unknown> }>
-}
-
-/**
- * Provenance for one image part. The shared contract requires a source on every
- * Codex V2 image and bounds its id charset; this checks only presence and shape,
- * so the contract stays the single owner of format and size limits.
- */
-function imageSourceError(detail: string): CodexAuthorizeError {
-  return new CodexAuthorizeError(
-    CODEX_IMAGE_SOURCE_INVALID,
-    `image part has no usable provenance source (${detail}); host producers must attach the attachment or tool call it came from`
-  )
-}
-
-function projectImageSource(
-  part: Extract<MessageContentPart, { type: 'image' }>
-): MessageContentImageSource {
-  const source = part.source
-  if (!source) throw imageSourceError('missing source')
-  if (source.kind === 'attachment') {
-    if (!source.attachmentId?.trim()) throw imageSourceError('empty attachmentId')
-    if (!source.messageId?.trim()) throw imageSourceError('empty messageId')
-    return {
-      kind: 'attachment',
-      attachmentId: source.attachmentId,
-      messageId: source.messageId,
-    }
-  }
-  if (source.kind === 'tool') {
-    if (!source.attachmentId?.trim()) throw imageSourceError('empty attachmentId')
-    if (!source.toolCallId?.trim()) throw imageSourceError('empty toolCallId')
-    return { kind: 'tool', attachmentId: source.attachmentId, toolCallId: source.toolCallId }
-  }
-  if (source.kind === 'gfs') {
-    if (!source.attachmentId?.trim()) throw imageSourceError('empty attachmentId')
-    if (!source.toolCallId?.trim()) throw imageSourceError('empty toolCallId')
-    return { kind: 'tool', attachmentId: source.attachmentId, toolCallId: source.toolCallId }
-  }
-  throw imageSourceError('unknown source kind')
-}
 
 function assertTerminalCodexOutcome(result: {
   text: string
@@ -410,6 +263,19 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
       // terminal; the message already names the limit for the user.
       return {
         code: LlmErrorCode.InvalidAttachment,
+        retryable: false,
+        message: err instanceof Error ? err.message : String(err),
+        providerCode: code,
+        ...(providerDispatched !== undefined ? { providerDispatched } : {}),
+      }
+    }
+    if (code === IMAGE_SOURCE_INVALID) {
+      // A host producer attached an image with no usable provenance source. The
+      // same messages fail the same way on every provider, so it is terminal:
+      // neither a retry nor a failover can fix it. The arm is explicit so a
+      // change to the generic arm below cannot make it retryable.
+      return {
+        code: LlmErrorCode.ApiCallFailed,
         retryable: false,
         message: err instanceof Error ? err.message : String(err),
         providerCode: code,
@@ -602,11 +468,7 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
         throw new CodexAuthorizeError(CODEX_ATTACHMENT_TOO_LARGE, attachmentRefusal)
       }
       throw new CodexAuthorizeError(
-        isContextLengthRefusal(canonical.code, canonical.message)
-          ? 'request_limit_exceeded'
-          : canonical.kind === 'size'
-            ? 'payload_too_large'
-            : CODEX_REQUEST_INVALID,
+        canonicalRefusalCode(canonical),
         `codex completion request rejected: ${canonical.message}`
       )
     }
@@ -681,57 +543,14 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
     }
   }
 
-  /**
-   * Project the loop's messages onto the wire contract.
-   *
-   * A turn with no parts stays byte-identical to V1. As soon as one message
-   * carries parts the whole request moves to V2, where the text parts are
-   * authoritative for `content` — that is what keeps a redacted (text-only)
-   * message consistent with the contract's equality rule.
-   */
-  private projectMessage(message: CoreChatMessage): ProjectedMessage {
-    const projected: ProjectedMessage = {
-      role: message.role,
-      content: message.content ?? '',
-      ...(message.name ? { name: message.name } : {}),
-      ...(message.tool_call_id ? { toolCallId: message.tool_call_id } : {}),
-      ...(message.role === 'assistant' && message.tool_calls && message.tool_calls.length > 0
-        ? {
-            toolCalls: message.tool_calls.map(call => ({
-              id: call.id,
-              name: call.name,
-              arguments: call.arguments,
-            })),
-          }
-        : {}),
-    }
-    const parts = message.contentParts
-    if (!parts || parts.length === 0) return projected
-    if (message.role !== 'user') {
-      throw new CodexAuthorizeError(
-        CODEX_REQUEST_INVALID,
-        `content parts are only supported on user messages (role=${message.role})`
-      )
-    }
-    const contentParts: NonNullable<ProjectedMessage['contentParts']> = parts.map(part =>
-      part.type === 'text'
-        ? { type: 'text', text: part.text }
-        : {
-            type: 'image',
-            mimeType: part.mimeType,
-            data: part.data,
-            source: projectImageSource(part),
-          }
-    )
-    return { ...projected, content: textContentFromParts(contentParts), contentParts }
-  }
-
   private buildRequest(
     messages: CoreChatMessage[],
     tools: ToolDefinition[] | undefined,
     options?: { max_tokens?: number; temperature?: number; tool_choice?: string }
   ): CodexCompletionRequest {
-    const projectedMessages = messages.map(message => this.projectMessage(message))
+    const projectedMessages = messages.map(message =>
+      projectMessage(message, CODEX_REQUEST_INVALID)
+    )
     const presentedTools =
       tools && tools.length > 0
         ? tools.map(tool => ({
@@ -774,8 +593,9 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
           }
         : {}),
     }
-    // V1 stays byte-identical for every text-only turn; one message with parts
-    // moves the whole request to V2, which is the only version that carries them.
+    // V1 stays byte-identical for a turn with no contentParts. One message with
+    // parts, even text-only parts left by redaction, moves the whole request to
+    // V2, the only version that carries them.
     if (!projectedMessages.some(message => message.contentParts !== undefined)) {
       return { schemaVersion: 'codex-completion-request.v1', ...base }
     }

@@ -7,6 +7,7 @@ import { initDb } from '../src/db.js'
 import { deriveOAuthEncryptionKey } from '../src/oauth/encryption.js'
 import { bootstrapSharedOAuthGrant, upsertOAuthGrant } from '../src/oauth/store.js'
 import { resolveConnectorsForAgents } from '../src/services/access/mcpInvocable.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 import { MockGateway } from './mockGateway.js'
 
 // T1 — the connectors classifier exercised end-to-end against grant state built
@@ -45,7 +46,7 @@ describeRealPostgres('resolveConnectorsForAgents tri-state (real Postgres)', () 
   })
 
   afterAll(async () => {
-    await dbPool?.end()
+    await endPoolAndWaitForClients(dbPool)
     if (adminPool) {
       await adminPool.query(
         `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
