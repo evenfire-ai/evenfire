@@ -130,6 +130,13 @@ jobs:
         working-directory: ${{ matrix.service }}
         run: npm ci
 
+      # Desktop strict-pixel fixture checks consume the Host's locked native
+      # canvas dependency through mcp-host/package.json.
+      - name: Install Host dependencies for Desktop fixture checks
+        if: matrix.service == 'desktop-app'
+        working-directory: mcp-host
+        run: npm ci
+
       # Host's native HTTP admission test imports each proxy server. Install the
       # existing locked proxy dependencies on this otherwise isolated matrix job.
       - name: Install Codex proxy dependencies for Host integration

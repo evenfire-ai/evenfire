@@ -135,7 +135,8 @@ async function createAssignmentLookupPeer(stall: boolean) {
   const kubeconfig = new k8s.KubeConfig()
   kubeconfig.loadFromOptions({
     clusters: [
-      { name: 'fixture', server: `http://127.0.0.1:${address.port}`, skipTLSVerify: false },
+      // client-node requires an explicit opt-in for this owned loopback HTTP peer.
+      { name: 'fixture', server: `http://127.0.0.1:${address.port}`, skipTLSVerify: true },
     ],
     users: [{ name: 'fixture' }],
     contexts: [{ name: 'fixture', cluster: 'fixture', user: 'fixture' }],
@@ -146,6 +147,9 @@ async function createAssignmentLookupPeer(stall: boolean) {
       hosts: 'fixture',
     }),
     arrived: arrival,
+    get openSocketCount() {
+      return sockets.size
+    },
     recover: () => {
       stall = false
     },
@@ -426,6 +430,16 @@ describeRealPostgres('Codex provider-attempt authorization on real PostgreSQL', 
             .finally(() => {
               settled = true
             })
+          async function beforeCancellation<T>(phase: Promise<T>): Promise<T> {
+            // Report an actual authorization failure instead of timing out on a
+            // phase that the rejected production path can no longer reach.
+            const unexpectedCompletion = outcome.then(result => {
+              if ('error' in result) throw result.error
+              throw new Error('authorizer completed before its cancellation phase')
+            })
+            if (settled) return unexpectedCompletion
+            return cancellationDeadline(Promise.race([phase, unexpectedCompletion]))
+          }
           const expectedPhases = [
             'assignment',
             'transaction',
@@ -434,15 +448,18 @@ describeRealPostgres('Codex provider-attempt authorization on real PostgreSQL', 
             'ticket_registered',
           ]
           if (stage === 'assignment') {
-            await cancellationDeadline(lookup.arrived)
+            await beforeCancellation(lookup.arrived)
             expect(phases).toEqual(['assignment'])
             expect(workPool.totalCount).toBe(0)
+            expect(lookup.openSocketCount).toBe(1)
           } else if (stage === 'query') {
             await observeCancellation(async () => {
-              if (!backendPid) return false
-              const result = await observer.query<{ state: string; query: string }>(
-                'SELECT state, query FROM pg_stat_activity WHERE pid = $1',
-                [backendPid]
+              if (!backendPid) return beforeCancellation(Promise.resolve(false))
+              const result = await beforeCancellation(
+                observer.query<{ state: string; query: string }>(
+                  'SELECT state, query FROM pg_stat_activity WHERE pid = $1',
+                  [backendPid]
+                )
               )
               return (
                 result.rows[0]?.state === 'active' &&
@@ -452,8 +469,10 @@ describeRealPostgres('Codex provider-attempt authorization on real PostgreSQL', 
             expect(phases).toEqual(expectedPhases)
             expect(await counts()).toEqual({ attempts: 0, tickets: 0, reservations: 0 })
           } else {
-            await cancellationDeadline(proxy!.commitForwarded)
-            await observeCancellation(async () => (await counts()).attempts === 1)
+            await beforeCancellation(proxy!.commitForwarded)
+            await observeCancellation(
+              async () => (await beforeCancellation(counts())).attempts === 1
+            )
             await observeCancellation(async () => proxy!.discardedReplyBytes > 0)
             expect(phases).toEqual(expectedPhases)
             expect(proxy!.commands).toEqual(['BEGIN', 'COMMIT'])
@@ -464,6 +483,9 @@ describeRealPostgres('Codex provider-attempt authorization on real PostgreSQL', 
           const interrupted = await cancellationDeadline(outcome)
           expect('error' in interrupted ? interrupted.error : undefined).toBe(reason)
           expect(workPool.totalCount).toBe(0)
+          if (stage === 'assignment') {
+            await observeCancellation(async () => lookup.openSocketCount === 0)
+          }
           if (backendPid) {
             await observeCancellation(
               async () =>
