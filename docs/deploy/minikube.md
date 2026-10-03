@@ -1095,3 +1095,27 @@ duplicated in the manual restart list above.
 > `CLERUM_AUTH_JWT_PUBLIC_KEY`) and the live `gfs-config` ConfigMap (as
 > `jwt-public-key`), and it is already invoked by
 > `make minikube-gen-keys` and `make minikube-deploy-all`.
+
+## Rotate internal service credentials
+
+Use the normal setup/deploy path, which runs
+`deploy/scripts/apply-inter-service-tokens.sh`, to rotate the internal service
+credentials. Do not patch the GFSC or WFC token Secret by itself: both services
+read their token from a process-start environment variable, so existing pods
+do not observe a Secret update automatically.
+
+When either dedicated token changes, the helper restarts every existing GFS
+writer/reader Deployment selected by
+the existing `clerum.io/globalfilesystem` resource label and every
+per-filesystem WFC Deployment selected by the existing
+`clerum.io/sharedfilesystem` resource label. It waits for each rollout using
+one shared 180-second deadline. Unchanged values do not trigger these extra
+restarts. `FORCE_CONSUMER_RESTART=true` requests a reload when an operator has
+evidence that running pods are stale despite unchanged Secret values.
+
+Keep old and replacement token values only in the approved secret manager or a
+secure operator environment. If any bounded rollout fails, the helper exits
+nonzero; restore the previous token values through the same source and rerun
+the helper to roll consumers back. The helper does not print token values. A
+successful helper run proves only that the selected local cluster rollouts
+completed; it is not evidence of a deployed customer-environment rotation.

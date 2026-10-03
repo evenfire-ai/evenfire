@@ -449,6 +449,8 @@ describe('sharedFileSystemFactory — buildDeployment (controller + root initCon
 
   it('selects pods by app=workspace-files-controller plus SFS identity', () => {
     const dep = buildDeployment(makeSfs(), config)
+    expect(dep.metadata?.labels?.[SFS_LABEL]).toBe('team-mission')
+    expect(dep.metadata?.labels?.[SFS_NAMESPACE_LABEL]).toBe('mcp-host')
     expect(dep.spec?.selector.matchLabels).toMatchObject({
       app: WFC_APP_LABEL,
       [SFS_LABEL]: 'team-mission',

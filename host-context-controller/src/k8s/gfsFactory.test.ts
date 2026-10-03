@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { GlobalFileSystemCRD } from '../types'
 import {
   DEFAULT_GFS_STORAGE_CLASS,
+  GFS_LABEL,
   GFS_TEMPLATE_HASH_ANNOTATION,
   GfsFactoryConfig,
   buildDeployment,
@@ -78,6 +79,10 @@ describe('readerReplicas', () => {
 
 describe('gfsFactory writer Deployment', () => {
   const dep = buildDeployment(gfs(), config, 'writer')
+
+  it('retains the GlobalFileSystem identity label for credential rotation selection', () => {
+    expect(dep.metadata?.labels?.[GFS_LABEL]).toBe('gfs')
+  })
 
   it('is a single RW replica with same-pod ownership preparation', () => {
     expect(dep.metadata?.name).toBe('gfsc-writer')

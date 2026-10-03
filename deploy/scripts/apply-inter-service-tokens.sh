@@ -46,7 +46,7 @@ set -euo pipefail
 #   INTERNAL_CONTROL_JWT_WRC_HMAC_SECRET override WRC HMAC (default: preserve-or-generate)
 #   INTERNAL_CONTROL_JWT_HCC_HMAC_SECRET override HCC HMAC (default: preserve-or-generate)
 #   FORCE_CONSUMER_RESTART               if true, restart every consumer including
-#                                        HCC even when the HCC HMAC is unchanged
+#                                        GFSC, WFC and HCC when credentials are unchanged
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 # shellcheck source=lib/clerum-minikube-context.sh
@@ -269,8 +269,22 @@ kctl -n channels patch secret workflow-approval-request-reader-credentials \
 # so a whole-Secret resourceVersion (or parsing `patched (no change)`) would
 # Recreate HCC on a WRC-only rotation. Values stay in shell locals — never logged.
 HCC_HMAC_BEFORE="$(read_secret_key control-plane internal-control-jwt-secrets INTERNAL_CONTROL_JWT_HCC_HMAC_SECRET)"
+# GFSC/WFC consume these Secrets as process-start environment variables, so a
+# token change requires an exact-selector rollout after patching the Secrets.
+GFSC_TOKEN_BEFORE="$(read_secret_key gfs gfs-controller-service-token token)"
+WFC_TOKEN_BEFORE="$(read_secret_key mcp-host workspace-files-controller-service-token token)"
 RPC_MCP_HOST_EDGE_BEFORE="$(read_secret_key rpc-proxy rpc-proxy-secrets RPC_PROXY_MCP_HOST_EDGE_TOKEN)"
 MCP_HOST_EDGE_BEFORE="$(read_secret_key mcp-host rpc-proxy-edge-credentials RPC_PROXY_MCP_HOST_EDGE_TOKEN)"
+if [ "${FORCE_CONSUMER_RESTART:-}" = "true" ] || [ "$GFSC_TOKEN_BEFORE" != "$TOKEN_GFSC" ]; then
+  GFSC_TOKEN_CHANGED=true
+else
+  GFSC_TOKEN_CHANGED=false
+fi
+if [ "${FORCE_CONSUMER_RESTART:-}" = "true" ] || [ "$WFC_TOKEN_BEFORE" != "$TOKEN_WFC" ]; then
+  WFC_TOKEN_CHANGED=true
+else
+  WFC_TOKEN_CHANGED=false
+fi
 if [ "${FORCE_CONSUMER_RESTART:-}" = "true" ] || \
    [ -z "$HCC_HMAC_BEFORE" ] || \
    [ "$HCC_HMAC_BEFORE" != "$INTERNAL_CONTROL_HCC_HMAC" ]; then
@@ -431,6 +445,57 @@ fi
 if kctl -n channels get deploy -l app=channel-reader >/dev/null 2>&1; then
   log "Rolling channel-reader deployments to pick up fresh Secret values"
   kctl -n channels rollout restart deploy -l app=channel-reader >/dev/null || true
+fi
+
+# GFSC and WFC read their dedicated Secret values into process-start
+# environment variables. Restart all exact producer-selected Deployments only
+# when the corresponding credential changes (or an operator explicitly forces
+# every consumer to reload). Bound the combined verification window so a large
+# set of per-filesystem WFC Deployments cannot wait indefinitely.
+restart_and_verify_selected_deployments() {
+  local ns="$1" selector="$2" label="$3" deployments resource remaining
+  remaining=$((CONSUMER_ROLLOUT_DEADLINE - SECONDS))
+  [ "$remaining" -gt 0 ] || die "credential rollout deadline expired before listing $label deployments"
+  if ! deployments="$(kctl -n "$ns" get deployments -l "$selector" \
+    -o name --request-timeout="${remaining}s")"; then
+    die "could not list $label deployments for credential refresh"
+  fi
+  if [ -z "$deployments" ]; then
+    log "No $label deployments exist; credential will be consumed when they are created"
+    return
+  fi
+  while IFS= read -r resource; do
+    [ -n "$resource" ] || continue
+    case "$resource" in
+      deployment.apps/*|deployment/*) ;;
+      *) die "unexpected deployment resource returned for $label" ;;
+    esac
+    remaining=$((CONSUMER_ROLLOUT_DEADLINE - SECONDS))
+    [ "$remaining" -gt 0 ] || die "credential rollout deadline expired before $label verification"
+    log "Restarting $label deployment ${resource#*/} to load the updated credential"
+    if ! kctl -n "$ns" rollout restart "$resource" \
+      --request-timeout="${remaining}s" >/dev/null; then
+      die "could not restart $label deployment ${resource#*/}"
+    fi
+    remaining=$((CONSUMER_ROLLOUT_DEADLINE - SECONDS))
+    [ "$remaining" -gt 0 ] || die "credential rollout deadline expired before $label verification"
+    if ! kctl -n "$ns" rollout status "$resource" --timeout="${remaining}s" \
+      --request-timeout="${remaining}s" >/dev/null; then
+      die "credential rollout did not become ready for $label deployment ${resource#*/}"
+    fi
+  done <<< "$deployments"
+}
+
+if [ "$GFSC_TOKEN_CHANGED" = "true" ] || [ "$WFC_TOKEN_CHANGED" = "true" ]; then
+  CONSUMER_ROLLOUT_DEADLINE=$((SECONDS + 180))
+  if [ "$GFSC_TOKEN_CHANGED" = "true" ]; then
+    restart_and_verify_selected_deployments \
+      gfs clerum.io/globalfilesystem GFSC
+  fi
+  if [ "$WFC_TOKEN_CHANGED" = "true" ]; then
+    restart_and_verify_selected_deployments \
+      mcp-host clerum.io/sharedfilesystem WFC
+  fi
 fi
 
 log "Done."
