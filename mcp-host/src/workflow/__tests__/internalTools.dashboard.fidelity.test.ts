@@ -3,7 +3,8 @@
  * told what was changed or left out: list blocks, table cells, KPI figures,
  * footer provenance, series colors and gauge readings.
  */
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { Chart } from 'chart.js'
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
@@ -589,6 +590,113 @@ describe('gauge', () => {
       data: { title: 'T', charts: [{ type: 'gauge', datasets: [{ data: [72] }] }] },
     })
     expect(notes).not.toContain('labels')
+  })
+})
+
+describe('funnel stages', () => {
+  interface Stages {
+    labels: unknown[]
+    data: unknown[]
+    backgroundColor: unknown
+    borderColor: unknown
+  }
+
+  async function dashboardFunnel(data: Record<string, unknown>): Promise<Stages> {
+    const { html } = await render({ data: { title: 'T', charts: [{ type: 'funnel', ...data }] } })
+    const [funnel] = chartSpecs(html)
+    const ds = (funnel.datasets as Array<Record<string, unknown>>)[0]
+    return {
+      labels: funnel.labels as unknown[],
+      data: ds.data as unknown[],
+      backgroundColor: ds.backgroundColor,
+      borderColor: ds.borderColor,
+    }
+  }
+
+  /** The funnel clerum__generate_chart draws from the same data, as Chart.js drew it. */
+  async function pngFunnel(data: Record<string, unknown>): Promise<Stages> {
+    const seen: Stages[] = []
+    const draw = Chart.prototype.draw
+    const spy = vi.spyOn(Chart.prototype, 'draw').mockImplementation(function (this: Chart) {
+      const ds = this.data.datasets[0]
+      seen.push({
+        labels: [...(this.data.labels ?? [])],
+        data: [...ds.data],
+        backgroundColor: ds.backgroundColor,
+        borderColor: ds.borderColor,
+      })
+      return draw.call(this)
+    })
+    try {
+      const tool = INTERNAL_TOOLS.find(t => t.name === 'clerum__generate_chart')!
+      const r = await tool.execute(
+        { filename: 'f.png', type: 'funnel', showValues: false, data },
+        outputDir
+      )
+      expect(r.success, r.error).toBe(true)
+    } finally {
+      spy.mockRestore()
+    }
+    return seen[seen.length - 1]
+  }
+
+  it('keeps each stage in the colors it was sent with when the stages are sorted', async () => {
+    const funnel = await dashboardFunnel({
+      labels: ['low', 'high'],
+      datasets: [
+        {
+          data: [1, 10],
+          backgroundColor: ['#111111', '#222222'],
+          borderColor: ['#333333', '#444444'],
+        },
+      ],
+    })
+    expect(funnel).toEqual({
+      labels: ['high', 'low'],
+      data: [10, 1],
+      backgroundColor: ['#222222', '#111111'],
+      borderColor: ['#444444', '#333333'],
+    })
+  })
+
+  it('gives each stage the color a short list gave it before the sort, as the PNG does', async () => {
+    const data = {
+      labels: ['Visits', 'Paid', 'Signups', 'Trials'],
+      datasets: [
+        {
+          data: [2400, 10000, 2400, 5000],
+          backgroundColor: ['#dc2626', '#16a34a', '#f59e0b'],
+          borderColor: '#0f172a',
+        },
+      ],
+    }
+    const dashboard = await dashboardFunnel(data)
+    expect(dashboard).toEqual({
+      labels: ['Paid', 'Trials', 'Visits', 'Signups'],
+      data: [10000, 5000, 2400, 2400],
+      backgroundColor: ['#16a34a', '#dc2626', '#dc2626', '#f59e0b'],
+      borderColor: '#0f172a',
+    })
+    expect(await pngFunnel(data)).toEqual(dashboard)
+  })
+
+  it('moves a replaced color with its stage and leaves series colors as they were', async () => {
+    const replaced = await dashboardFunnel({
+      labels: ['a', 'b'],
+      datasets: [{ data: [1, 2], backgroundColor: ['#111111', 'nope'] }],
+    })
+    expect(replaced.backgroundColor).toEqual(['$chart-0', '#111111'])
+    expect(replaced.borderColor).toBe('$chart-0')
+
+    const single = await dashboardFunnel({
+      labels: ['a', 'b'],
+      datasets: [{ data: [1, 2], backgroundColor: '#111111', borderColor: [] }],
+    })
+    expect(single).toMatchObject({ labels: ['b', 'a'], backgroundColor: '#111111' })
+    expect(single.borderColor).toEqual([])
+
+    const plain = await dashboardFunnel({ labels: ['a', 'b'], datasets: [{ data: [1, 2] }] })
+    expect(plain).toMatchObject({ backgroundColor: '$chart-0', borderColor: '$chart-0' })
   })
 })
 

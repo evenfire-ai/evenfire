@@ -284,12 +284,23 @@ function translate(
       chart.type = 'bar'
       chart.indexAxis = 'y'
       chart.legend = false
-      const pairs = firstSeriesValues(datasets[0]).map((v, i) => ({ v, l: labels[i] ?? '' }))
+      const first = datasets[0]
+      const pairs = firstSeriesValues(first).map((v, i) => ({ v, l: labels[i] ?? '', i }))
       pairs.sort((a, b) => b.v - a.v)
       chart.labels = pairs.map(p => p.l)
-      chart.datasets = [
-        { ...styled({ ...datasets[0], data: pairs.map(p => p.v) }, 0, 'bar'), label: '' },
-      ]
+      // Per-stage colors follow their stage through the sort, as in the PNG
+      // funnel; a short list wraps as Chart.js wraps it.
+      const follow = (colors: string | string[] | undefined) =>
+        Array.isArray(colors) && colors.length > 0
+          ? pairs.map(p => colors[p.i % colors.length])
+          : colors
+      const stages = {
+        ...first,
+        data: pairs.map(p => p.v),
+        backgroundColor: follow(first?.backgroundColor),
+        borderColor: follow(first?.borderColor),
+      }
+      chart.datasets = [{ ...styled(stages, 0, 'bar'), label: '' }]
       return { chart, warnings }
     }
     case 'waterfall': {
