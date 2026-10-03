@@ -22,7 +22,15 @@ export const ACCESS_EXECUTION_LIMIT_CLAMPS = Object.freeze({
   responseBytes: 4 * 1024 * 1024,
 })
 
-export type AccessExecutionKind = 'catalog' | 'action'
+export type AccessExecutionKind = 'catalog' | 'action' | 'indexer'
+
+const ACCESS_EXECUTION_CLASS_LIMITS: Readonly<
+  Record<AccessExecutionKind, Readonly<{ producerCalls: number; databaseStatements: number }>>
+> = Object.freeze({
+  catalog: Object.freeze({ producerCalls: 32, databaseStatements: 128 }),
+  action: Object.freeze({ producerCalls: 32, databaseStatements: 128 }),
+  indexer: Object.freeze({ producerCalls: 41, databaseStatements: 55 }),
+})
 
 export type AccessExecutionLimitName = keyof typeof ACCESS_EXECUTION_LIMIT_CLAMPS
 export type AccessExecutionLimits = Readonly<Record<AccessExecutionLimitName, number>>
@@ -171,11 +179,15 @@ function positiveSafeInteger(value: unknown): value is number {
 }
 
 export function resolveAccessExecutionLimits(
-  requested: Partial<AccessExecutionLimits> = {}
+  requested: Partial<AccessExecutionLimits> = {},
+  kind: AccessExecutionKind = 'action'
 ): AccessExecutionLimits {
+  const classLimits = ACCESS_EXECUTION_CLASS_LIMITS[kind]
   const values: Record<AccessExecutionLimitName, number> = {
     ...ACCESS_EXECUTION_LIMIT_CLAMPS,
+    ...classLimits,
   }
+  const maximums = { ...ACCESS_EXECUTION_LIMIT_CLAMPS, ...classLimits }
   for (const key of Object.keys(ACCESS_EXECUTION_LIMIT_CLAMPS) as Array<
     keyof AccessExecutionLimits
   >) {
@@ -184,7 +196,7 @@ export function resolveAccessExecutionLimits(
     if (!positiveSafeInteger(supplied)) {
       throw new AccessBudgetConfigurationError(key, 'must be a positive safe integer')
     }
-    if (supplied > ACCESS_EXECUTION_LIMIT_CLAMPS[key]) {
+    if (supplied > maximums[key]) {
       throw new AccessBudgetConfigurationError(key, 'exceeds the hard code clamp')
     }
     values[key] = supplied
@@ -244,7 +256,7 @@ export class AccessExecutionBudget {
       parentSignal?: AbortSignal
     } = {}
   ): AccessExecutionBudget {
-    const limits = resolveAccessExecutionLimits(options.limits)
+    const limits = resolveAccessExecutionLimits(options.limits, kind)
     const teamGfsMembershipAdmissionLimit =
       options.teamGfsMembershipAdmissionLimit === undefined
         ? null
@@ -261,7 +273,7 @@ export class AccessExecutionBudget {
     }
     const controller = new AbortController()
     const now = options.now ?? Date.now()
-    const deadlineMs = kind === 'catalog' ? limits.catalogDeadlineMs : limits.actionDeadlineMs
+    const deadlineMs = kind === 'action' ? limits.actionDeadlineMs : limits.catalogDeadlineMs
     const shared: SharedAccessBudgetState = {
       counters: createCounters(limits),
       semaphore: new AccessSemaphore(limits.producerConcurrency),

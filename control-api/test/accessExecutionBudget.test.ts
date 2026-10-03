@@ -32,6 +32,30 @@ describe('AccessExecutionBudget', () => {
     budget.close()
   })
 
+  it('isolates the bounded indexer ceiling from ordinary action requests', () => {
+    const indexer = AccessExecutionBudget.create('indexer')
+    expect(indexer.remaining('producerCalls')).toBe(41)
+    expect(indexer.remaining('databaseStatements')).toBe(55)
+    expect(() => indexer.charge({ kind: 'producerCalls', amount: 42 })).toThrow(
+      AccessBudgetExceededError
+    )
+    expect(() => indexer.charge({ kind: 'databaseStatements', amount: 56 })).toThrow(
+      AccessBudgetExceededError
+    )
+    indexer.close()
+
+    const action = AccessExecutionBudget.create('action')
+    expect(action.remaining('producerCalls')).toBe(32)
+    expect(action.remaining('databaseStatements')).toBe(128)
+    expect(() => action.charge({ kind: 'producerCalls', amount: 33 })).toThrow(
+      AccessBudgetExceededError
+    )
+    expect(() => action.charge({ kind: 'databaseStatements', amount: 129 })).toThrow(
+      AccessBudgetExceededError
+    )
+    action.close()
+  })
+
   it('charges objects, bytes, paths, relationships, rows, memo, and response limits', () => {
     const budget = AccessExecutionBudget.create('catalog', {
       limits: {
