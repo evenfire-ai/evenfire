@@ -51,6 +51,7 @@ function restoreEnv(): void {
 
 describe('RPCServer runtime artifact routes', () => {
   let outputDir = ''
+  let outsideDir = ''
   let outsideFile = ''
 
   afterEach(() => {
@@ -58,8 +59,9 @@ describe('RPCServer runtime artifact routes', () => {
       fs.rmSync(outputDir, { recursive: true, force: true })
       outputDir = ''
     }
-    if (outsideFile) {
-      fs.rmSync(outsideFile, { force: true })
+    if (outsideDir) {
+      fs.rmSync(outsideDir, { recursive: true, force: true })
+      outsideDir = ''
       outsideFile = ''
     }
     restoreEnv()
@@ -86,7 +88,8 @@ describe('RPCServer runtime artifact routes', () => {
 
   it('lists only regular downloadable artifacts from the configured output directory', async () => {
     outputDir = makeOutputDir()
-    outsideFile = path.join(os.tmpdir(), `clerum-outside-${process.pid}-${Date.now()}.txt`)
+    outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), 'clerum-runtime-artifact-outside-'))
+    outsideFile = path.join(outsideDir, 'secret.txt')
     fs.writeFileSync(path.join(outputDir, 'report.md'), '# ok\n')
     fs.writeFileSync(path.join(outputDir, '.clerum-state'), '{}')
     fs.mkdirSync(path.join(outputDir, 'nested'))
@@ -114,7 +117,8 @@ describe('RPCServer runtime artifact routes', () => {
 
   it('does not download symlink artifacts from the output directory', async () => {
     outputDir = makeOutputDir()
-    outsideFile = path.join(os.tmpdir(), `clerum-outside-${process.pid}-${Date.now()}.txt`)
+    outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), 'clerum-runtime-artifact-outside-'))
+    outsideFile = path.join(outsideDir, 'secret.txt')
     fs.writeFileSync(outsideFile, 'secret outside output')
     fs.symlinkSync(outsideFile, path.join(outputDir, 'leak.md'))
     const { server, baseUrl } = await startServer(outputDir)
