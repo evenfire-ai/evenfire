@@ -1133,6 +1133,11 @@ function softBreaks(html: string): string {
   })
 }
 
+/** Whether a cell holds a value: anything but blank text, null or nothing, an object or list included. */
+function holdsValue(cell: unknown): boolean {
+  return (cell !== null && typeof cell === 'object') || dashText(cell).trim() !== ''
+}
+
 /** Each row cut or padded to one cell per header, reporting cells that held a value and were cut. */
 function fitRowsToHeaders(
   rows: unknown[][],
@@ -1147,7 +1152,7 @@ function fitRowsToHeaders(
       padded++
       return [...row, ...Array<string>(width - row.length).fill('')]
     }
-    if (row.slice(width).some(cell => dashText(cell).trim() !== '')) {
+    if (row.slice(width).some(holdsValue)) {
       cut.push(
         `${where}.rows[${r}] has ${row.length} cells for ${width} headers; the extra ` +
           `${row.length - width} ${row.length - width === 1 ? 'was' : 'were'} left out.`

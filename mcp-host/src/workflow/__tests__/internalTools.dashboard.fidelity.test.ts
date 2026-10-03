@@ -143,6 +143,62 @@ describe('tables', () => {
     expect(notes).not.toContain('rows[2]')
   })
 
+  it.each([
+    ['an object', { hidden: 1 }],
+    ['a list', [1, 2]],
+    ['an empty object', {}],
+    ['an empty list', []],
+    ['text', 'tail'],
+    ['zero', 0],
+    ['false', false],
+  ])('says it left out an extra cell holding %s', async (_what, extra) => {
+    const { html, notes } = await render({
+      data: { title: 'T', tables: [{ headers: ['A'], rows: [['keep', extra]] }] },
+    })
+    expect(html.match(/<td>.*?<\/td>/g)).toEqual(['<td>keep</td>'])
+    expect(notes).toContain(
+      'data.tables[0].rows[0] has 2 cells for 1 headers; the extra 1 was left out. Add headers for them or drop them.'
+    )
+  })
+
+  it('cuts blank extra cells without a note and counts every row that lost a value', async () => {
+    const quiet = await render({
+      data: { title: 'T', tables: [{ headers: ['A'], rows: [['keep', '', '  ', null]] }] },
+    })
+    expect(quiet.html.match(/<td>.*?<\/td>/g)).toEqual(['<td>keep</td>'])
+    expect(quiet.notes).not.toContain('left out')
+
+    const { notes } = await render({
+      data: {
+        title: 'T',
+        tables: [
+          {
+            headers: ['A'],
+            rows: [
+              ['a', { k: 1 }],
+              ['b', ''],
+              ['c', ['x']],
+            ],
+          },
+        ],
+      },
+    })
+    expect(notes).toContain(
+      'data.tables[0].rows[0] has 2 cells for 1 headers; the extra 1 was left out. ' +
+        '1 more row(s) had extra cells too.'
+    )
+  })
+
+  it('still shows a structured cell that has a header, as text with a note', async () => {
+    const { html, notes } = await render({
+      data: { title: 'T', tables: [{ headers: ['A', 'B'], rows: [[{ k: 1 }, [1, 2]]] }] },
+    })
+    expect(html).toContain('<td>{&quot;k&quot;:1}</td>')
+    expect(html).toContain('<td>1, 2</td>')
+    expect(notes).toContain('data.tables[0]: 2 cell(s) held an object or a list and are shown')
+    expect(notes).not.toContain('left out')
+  })
+
   it('lets a wide table scroll on screen and fit the page in print', async () => {
     const { html } = await render({ data: { title: 'T', kpis: [{ label: 'x', value: 1 }] } })
     expect(html).toMatch(/\.data-table-wrap \{[^}]*overflow-x: auto/)
