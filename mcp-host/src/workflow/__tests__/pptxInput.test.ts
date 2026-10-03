@@ -61,6 +61,12 @@ describe('readStringList', () => {
       '5. Initech',
     ])
     expect(list('4. Fourth\n5. Fifth', ctx)).toEqual(['4. Fourth', '5. Fifth'])
+    // A 10 in a list of three counts nothing, so every number of the list stays.
+    expect(list('1. First\n2) Second\n10. Tenth', ctx)).toEqual([
+      '1. First',
+      '2) Second',
+      '10. Tenth',
+    ])
     expect(list('1. First\n2. Second\n2024. A record year', ctx)).toEqual([
       '1. First',
       '2. Second',
