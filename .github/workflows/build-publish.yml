@@ -399,6 +399,11 @@ jobs:
           MATRIX_DOCKERFILE: ${{ matrix.dockerfile }}
           MATRIX_ROOTED: ${{ matrix.rooted }}
         run: |
+          set -euo pipefail
+          service_version=unknown
+          if [ -f "$MATRIX_PATH/package.json" ]; then
+            service_version="$(node scripts/ci/resolve-package-version.cjs "$MATRIX_PATH/package.json")"
+          fi
           # Rooted services COPY from sibling directories (packages/*) so their
           # Docker build context must be the repo root and the Dockerfile path
           # is fully qualified.
@@ -409,11 +414,7 @@ jobs:
             echo "context=$MATRIX_PATH" >> "$GITHUB_OUTPUT"
             echo "file=$MATRIX_PATH/${MATRIX_DOCKERFILE:-Dockerfile}" >> "$GITHUB_OUTPUT"
           fi
-          if [ -f "$MATRIX_PATH/package.json" ]; then
-            echo "service-version=$(node -e 'const p=require(process.argv[1]); process.stdout.write(String(p.version))' "$MATRIX_PATH/package.json")" >> "$GITHUB_OUTPUT"
-          else
-            echo "service-version=unknown" >> "$GITHUB_OUTPUT"
-          fi
+          echo "service-version=$service_version" >> "$GITHUB_OUTPUT"
 
       - name: Build and push by digest
         if: ${{ matrix.changed == 'true' || needs.detect.outputs.force_all == 'true' }}

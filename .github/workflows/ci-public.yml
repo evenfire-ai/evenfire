@@ -697,6 +697,9 @@ jobs:
       - name: Test release coordinates (writer, checker, floor decoupling)
         run: bash scripts/tests/test-release-coordinates.sh
 
+      - name: Test build-publish service version extraction
+        run: bash scripts/tests/test-build-publish-service-version.sh
+
       - name: Test precommit release-manifest exemption
         run: bash scripts/tests/test-precommit-release-manifest-ignore.sh
 
