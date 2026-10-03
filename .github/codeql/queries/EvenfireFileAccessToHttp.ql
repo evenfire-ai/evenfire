@@ -66,7 +66,7 @@ private predicate writesBaseUrlThroughRuntimeAuth(
   exists(VarAccess runtimeAuthUse |
     write.getPropertyName() = "baseUrl" and
     runtimeAuthUse.getVariable() = runtimeAuth and
-    DataFlow::valueNode(runtimeAuthUse) = write.getBase()
+    DataFlow::valueNode(runtimeAuthUse).getASuccessor*() = write.getBase()
   )
 }
 
