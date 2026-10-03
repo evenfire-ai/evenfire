@@ -519,18 +519,23 @@ function refuse(key: string, reason: string): void {
   while (refused.size > MAX_REFUSALS) refused.delete(refused.keys().next().value as string)
 }
 
-/** Keep `bytes` for `key`, dropping the oldest images no running call uses past the budget. */
-function keepDecoded(key: string, bytes: Buffer): void {
-  decodedBytes -= decoded.get(key)?.length ?? 0
-  decoded.delete(key)
-  decoded.set(key, bytes)
-  decodedBytes += bytes.length
+/** Drop the oldest images no running call uses until the kept bytes fit the budget. */
+function trimDecoded(): void {
   for (const [k, v] of decoded) {
     if (decodedBytes <= MAX_DECODED_BYTES) break
     if (inUse.has(k)) continue
     decoded.delete(k)
     decodedBytes -= v.length
   }
+}
+
+/** Keep `bytes` for `key`, then trim to the budget. */
+function keepDecoded(key: string, bytes: Buffer): void {
+  decodedBytes -= decoded.get(key)?.length ?? 0
+  decoded.delete(key)
+  decoded.set(key, bytes)
+  decodedBytes += bytes.length
+  trimDecoded()
 }
 
 function decodedKey(file: string): string | undefined {
@@ -640,6 +645,8 @@ export async function predecodeImages(args: unknown, outputDir: string): Promise
       if (count > 0) inUse.set(key, count)
       else inUse.delete(key)
     }
+    // A call holds its images past the budget; once they are free, trim back to it.
+    trimDecoded()
   }
 }
 

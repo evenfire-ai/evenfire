@@ -4,6 +4,7 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 import { fitImageSize, loadEmbeddableImage, predecodeImages } from '../embeddedImages'
+import { INTERNAL_TOOLS } from '../internalTools'
 
 let outputDir: string
 
@@ -346,31 +347,116 @@ describe('loadEmbeddableImage', () => {
 })
 
 describe('images decoded for a call', () => {
-  /** A WebP of noise, whose decoded PNG is a few megabytes. */
-  async function writeNoise(name: string, seed: number) {
+  /** MAX_DECODED_BYTES: what the cache keeps once no call holds its images. */
+  const BUDGET = 64 * 1024 * 1024
+
+  /**
+   * WebPs of noise named `names`, each about 0.5 MB on disk and about
+   * 3.4 MB decoded, so 21 of them decode to more than the budget.
+   */
+  async function writeNoise(names: string[]) {
     const canvas = createCanvas(1000, 1000)
     const ctx = canvas.getContext('2d')
     const image = ctx.createImageData(1000, 1000)
-    let s = seed
+    // xorshift32, so every run decodes to the same size.
+    let s = 2463534242
     for (let i = 0; i < image.data.length; i++) {
-      s = (s * 1103515245 + 12345) % 2147483648
+      s ^= s << 13
+      s ^= s >>> 17
+      s ^= s << 5
       image.data[i] = i % 4 === 3 ? 255 : s & 255
     }
     ctx.putImageData(image, 0, 0)
-    fs.writeFileSync(path.join(outputDir, name), await canvas.encode('webp', 100))
+    const webp = await canvas.encode('webp', 50)
+    for (const name of names) fs.writeFileSync(path.join(outputDir, name), webp)
   }
+
+  /** Decoded bytes the cache still holds for `names`. */
+  function kept(names: string[]): number {
+    return names.reduce(
+      (sum, name) => sum + (loadEmbeddableImage(name, outputDir, [])?.data.length ?? 0),
+      0
+    )
+  }
+
+  const named = (prefix: string, count: number) =>
+    Array.from({ length: count }, (_, i) => `${prefix}-${i}.webp`)
 
   it('stay readable while another call decodes more than the cache holds', async () => {
     await writeImage('held.webp', 'webp')
     const releaseHeld = await predecodeImages(['held.webp'], outputDir)
-    const others = Array.from({ length: 34 }, (_, i) => `noise-${i}.webp`)
-    for (const [i, name] of others.entries()) await writeNoise(name, i + 1)
+    const others = named('noise', 21)
+    await writeNoise(others)
     const releaseOthers = await predecodeImages(others, outputDir)
+    expect(kept(others)).toBeGreaterThan(BUDGET)
     releaseOthers()
 
     const warnings: string[] = []
     expect(loadEmbeddableImage('held.webp', outputDir, warnings)).toBeDefined()
     expect(warnings).toEqual([])
     releaseHeld()
+  }, 60_000)
+
+  it('fit the budget again once the tool call that decoded them ends', async () => {
+    const images = named('photo', 21)
+    await writeNoise(images)
+    const markdown = INTERNAL_TOOLS.find(t => t.name === 'clerum__generate_markdown')!
+    const result = await markdown.execute(
+      { filename: 'photos.md', content: images.map(name => `![photo](${name})`).join('\n') },
+      outputDir
+    )
+    expect(result.success, result.error).toBe(true)
+
+    const left = kept(images)
+    expect(left).toBeGreaterThan(0)
+    expect(left).toBeLessThanOrEqual(BUDGET)
+    // The oldest go first.
+    expect(loadEmbeddableImage(images[0], outputDir, [])).toBeUndefined()
+    expect(loadEmbeddableImage(images[20], outputDir, [])).toBeDefined()
+  }, 60_000)
+
+  it.each(['first', 'second'])(
+    'keep what a running call holds when the %s of two calls ends',
+    async ending => {
+      const first = named('first', 11)
+      const second = named('second', 11)
+      await writeNoise([...first, ...second])
+      const releaseFirst = await predecodeImages(first, outputDir)
+      const releaseSecond = await predecodeImages(second, outputDir)
+      const size = kept(first.slice(0, 1))
+      expect(kept([...first, ...second])).toBe(22 * size)
+      expect(22 * size).toBeGreaterThan(BUDGET)
+
+      const [releaseEnding, releaseRunning] =
+        ending === 'first' ? [releaseFirst, releaseSecond] : [releaseSecond, releaseFirst]
+      const running = ending === 'first' ? second : first
+      releaseEnding()
+      expect(kept(running)).toBe(11 * size)
+      expect(kept([...first, ...second])).toBeLessThanOrEqual(BUDGET)
+
+      releaseRunning()
+      releaseEnding()
+      expect(kept([...first, ...second])).toBeLessThanOrEqual(BUDGET)
+    },
+    60_000
+  )
+
+  it('stay held by one call after another releases them twice', async () => {
+    const shared = named('shared', 1)
+    const others = named('other', 21)
+    await writeNoise([...shared, ...others])
+    const releaseOne = await predecodeImages(shared, outputDir)
+    const releaseTwo = await predecodeImages(shared, outputDir)
+    releaseOne()
+    releaseOne()
+
+    // The shared image is the oldest, so it would be the first to go.
+    const releaseOthers = await predecodeImages(others, outputDir)
+    releaseOthers()
+    expect(kept(shared)).toBeGreaterThan(0)
+    expect(kept([...shared, ...others])).toBeLessThanOrEqual(BUDGET)
+
+    releaseTwo()
+    expect(kept([...shared, ...others])).toBeLessThanOrEqual(BUDGET)
   }, 60_000)
 })
