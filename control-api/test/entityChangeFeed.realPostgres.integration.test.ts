@@ -3,6 +3,7 @@ import { randomBytes, randomUUID } from 'node:crypto'
 import { Pool } from 'pg'
 import { initDb } from '../src/db.js'
 import { DbSeedResourceStore, seedRootDirectories } from '../src/gfs/seedResources.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 import './realPostgres.requirement.ts'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
@@ -39,8 +40,8 @@ describeRealPostgres('entity change feed real PostgreSQL contract', () => {
   })
 
   afterAll(async () => {
-    await instancePool?.end()
-    await replicaPool?.end()
+    await endPoolAndWaitForClients(instancePool)
+    await endPoolAndWaitForClients(replicaPool)
     if (adminPool) {
       await adminPool.query(
         `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
@@ -48,7 +49,7 @@ describeRealPostgres('entity change feed real PostgreSQL contract', () => {
         [database]
       )
       await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdent(database)}`)
-      await adminPool.end()
+      await endPoolAndWaitForClients(adminPool)
     }
   })
 
