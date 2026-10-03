@@ -3,6 +3,7 @@ import { runAccessDatabaseQuery } from './accessDatabaseQuery.js'
 import type { AccessExecutionBudget } from './accessExecutionBudget.js'
 import { revisionOfValues } from './authorizationRevision.js'
 import { compareCanonicalUtf8Text } from './canonicalText.js'
+import { canonicalContextLogicalIdSql } from './contextIdentitySql.js'
 import type {
   OperationalBehaviorSources,
   OperationalRelationshipRecord,
@@ -490,12 +491,43 @@ export async function loadOperationalResourceGraphs(input: {
          FROM jsonb_array_elements($2::jsonb) AS value
      ),
      relationship_rows AS (
-       SELECT environment_id, source_type, source_id, relationship_type,
-              target_type, target_id, relationship_instance_id, behavior_attributes,
-              source_family, source_provider_uid, source_resource_version,
-              observed_generation, content_bytes
-         FROM operational_resource_relationships
-        WHERE environment_id = $1
+       SELECT relationship.environment_id, relationship.source_type,
+              relationship.source_id, relationship.relationship_type,
+              relationship.target_type,
+              CASE WHEN relationship.relationship_type = 'uses_context'
+                THEN ${canonicalContextLogicalIdSql('$1', 'relationship.target_id')}
+                ELSE relationship.target_id
+              END AS target_id,
+              relationship.relationship_instance_id, relationship.behavior_attributes,
+              relationship.source_family, relationship.source_provider_uid,
+              relationship.source_resource_version, relationship.observed_generation,
+              relationship.content_bytes
+         FROM operational_resource_relationships relationship
+        WHERE relationship.environment_id = $1
+         AND relationship.relationship_type <> 'context_identity_alias'
+         AND (relationship.relationship_type <> 'uses_context'
+           OR ${canonicalContextLogicalIdSql('$1', 'relationship.target_id')} IS NOT NULL)
+         AND (
+           relationship.source_type <> 'context'
+           OR NOT EXISTS (
+             SELECT 1 FROM roots derived_root
+              WHERE derived_root.resource_type IN ('mcp_server', 'shared_filesystem')
+           )
+           OR EXISTS (
+             SELECT 1 FROM roots mcp_root
+              WHERE mcp_root.resource_type = 'mcp_server'
+                AND relationship.relationship_type = 'includes_mcp_server'
+                AND relationship.target_type = 'mcp_server'
+                AND relationship.target_id = mcp_root.logical_id
+           )
+           OR EXISTS (
+             SELECT 1 FROM roots filesystem_root
+              WHERE filesystem_root.resource_type = 'shared_filesystem'
+                AND relationship.relationship_type = 'mounts_shared_filesystem'
+                AND relationship.target_type = 'shared_filesystem'
+                AND relationship.target_id = filesystem_root.logical_id
+           )
+         )
      ),
      context_ids AS (
        SELECT roots.resource_type, roots.logical_id, edge.target_id AS context_id
@@ -784,19 +816,49 @@ export async function loadOperationalResourceGraph(input: {
   const relationshipResult = await budgetedQuery(
     input.db,
     input.budget,
-    `SELECT environment_id, source_type, source_id, relationship_type,
-            target_type, target_id, relationship_instance_id, behavior_attributes,
-            source_family, source_provider_uid, source_resource_version,
-            observed_generation, content_bytes
-       FROM operational_resource_relationships
-      WHERE environment_id = $1
+    `SELECT relationship.environment_id, relationship.source_type,
+            relationship.source_id, relationship.relationship_type,
+            relationship.target_type,
+            CASE WHEN relationship.relationship_type = 'uses_context'
+              THEN ${canonicalContextLogicalIdSql('$1', 'relationship.target_id')}
+              ELSE relationship.target_id
+            END AS target_id,
+            relationship.relationship_instance_id, relationship.behavior_attributes,
+            relationship.source_family, relationship.source_provider_uid,
+            relationship.source_resource_version, relationship.observed_generation,
+            relationship.content_bytes
+       FROM operational_resource_relationships relationship
+      WHERE relationship.environment_id = $1
+        AND relationship.relationship_type <> 'context_identity_alias'
+        AND (relationship.relationship_type <> 'uses_context'
+          OR ${canonicalContextLogicalIdSql('$1', 'relationship.target_id')} IS NOT NULL)
         AND (
-          (source_type = $2 AND source_id = $3)
-          OR ($2 <> 'context' AND target_type = $2 AND target_id = $3)
+          $2 NOT IN ('mcp_server', 'shared_filesystem')
+          OR relationship.source_type <> 'context'
           OR (
-            source_type = 'context'
-            AND source_id IN (
-              SELECT context_edge.target_id
+            $2 = 'mcp_server'
+            AND relationship.relationship_type = 'includes_mcp_server'
+            AND relationship.target_type = 'mcp_server'
+            AND relationship.target_id = $3
+          )
+          OR (
+            $2 = 'shared_filesystem'
+            AND relationship.relationship_type = 'mounts_shared_filesystem'
+            AND relationship.target_type = 'shared_filesystem'
+            AND relationship.target_id = $3
+          )
+        )
+        AND (
+          (relationship.source_type = $2 AND relationship.source_id = $3)
+          OR ($2 <> 'context' AND relationship.target_type = $2 AND
+              (CASE WHEN relationship.relationship_type = 'uses_context'
+                THEN ${canonicalContextLogicalIdSql('$1', 'relationship.target_id')}
+                ELSE relationship.target_id
+              END) = $3)
+          OR (
+            relationship.source_type = 'context'
+            AND relationship.source_id IN (
+              SELECT ${canonicalContextLogicalIdSql('$1', 'context_edge.target_id')}
                 FROM operational_resource_relationships context_edge
                WHERE context_edge.environment_id = $1
                  AND context_edge.source_type = $2
@@ -820,7 +882,7 @@ export async function loadOperationalResourceGraph(input: {
                  AND mount_edge.target_type = 'shared_filesystem'
                  AND mount_edge.target_id = $3
               UNION
-              SELECT recipe_edge.target_id
+              SELECT ${canonicalContextLogicalIdSql('$1', 'recipe_edge.target_id')}
                 FROM operational_resource_relationships recipe_edge
                WHERE $2 = 'workflow_recipe'
                  AND recipe_edge.environment_id = $1
@@ -829,7 +891,7 @@ export async function loadOperationalResourceGraph(input: {
                  AND recipe_edge.relationship_type = 'uses_context'
                  AND recipe_edge.target_type = 'context'
               UNION
-              SELECT recipe_edge.target_id
+              SELECT ${canonicalContextLogicalIdSql('$1', 'recipe_edge.target_id')}
                 FROM operational_resource_relationships expose_edge
                 JOIN operational_resource_relationships recipe_edge
                   ON recipe_edge.environment_id = expose_edge.environment_id
@@ -846,10 +908,10 @@ export async function loadOperationalResourceGraph(input: {
           )
           OR (
             $2 = 'mcp_server'
-            AND source_type = 'host'
-            AND relationship_type = 'uses_context'
-            AND target_type = 'context'
-            AND target_id IN (
+            AND relationship.source_type = 'host'
+            AND relationship.relationship_type = 'uses_context'
+            AND relationship.target_type = 'context'
+            AND ${canonicalContextLogicalIdSql('$1', 'relationship.target_id')} IN (
               SELECT mcp_edge.source_id
                 FROM operational_resource_relationships mcp_edge
                WHERE mcp_edge.environment_id = $1
@@ -860,19 +922,20 @@ export async function loadOperationalResourceGraph(input: {
           )
           OR (
             $2 = 'sandbox_app'
-            AND source_type = 'workflow_recipe'
-            AND source_id IN (
-              SELECT source_id
-                FROM operational_resource_relationships
-               WHERE environment_id = $1
-                 AND relationship_type = 'exposes_sandbox_app'
-                 AND target_type = 'sandbox_app'
-                 AND target_id = $3
+            AND relationship.source_type = 'workflow_recipe'
+            AND relationship.source_id IN (
+              SELECT expose_edge.source_id
+                FROM operational_resource_relationships expose_edge
+               WHERE expose_edge.environment_id = $1
+                 AND expose_edge.relationship_type = 'exposes_sandbox_app'
+                 AND expose_edge.target_type = 'sandbox_app'
+                 AND expose_edge.target_id = $3
             )
           )
         )
-      ORDER BY source_type, source_id, relationship_type,
-               target_type, target_id, relationship_instance_id
+      ORDER BY relationship.source_type, relationship.source_id,
+               relationship.relationship_type, relationship.target_type,
+               target_id, relationship.relationship_instance_id
       LIMIT $4`,
     [
       input.environmentId,

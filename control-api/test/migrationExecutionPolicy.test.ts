@@ -31,6 +31,20 @@ const FRESH_TABLE_INDEXES = Object.freeze([
   'invitation_delivery_commands_invitation_idx',
 ])
 
+const USER_ACCESS_FOUNDATION_VERSION = '0125_user_access_foundation'
+const AUTHORIZATION_REVISION_COMPATIBILITY_VERSION =
+  '0138_authorization_revision_delete_compatibility'
+
+function expectedMigrationExecutionOrder(versions: readonly string[]): string[] {
+  const withoutCompatibility = versions.filter(
+    version => version !== AUTHORIZATION_REVISION_COMPATIBILITY_VERSION
+  )
+  const foundationIndex = withoutCompatibility.indexOf(USER_ACCESS_FOUNDATION_VERSION)
+  expect(foundationIndex).toBeGreaterThanOrEqual(0)
+  withoutCompatibility.splice(foundationIndex + 1, 0, AUTHORIZATION_REVISION_COMPATIBILITY_VERSION)
+  return withoutCompatibility
+}
+
 describe('D34 migration execution policy', () => {
   it('classifies inherited parent migrations before the re-slotted PR1 migrations', () => {
     expect(DEV_POST_0106_MIGRATION_VERSIONS.slice(-6)).toEqual([
@@ -277,11 +291,13 @@ describe('D34 PR1 migration runner', () => {
       },
     })
 
-    expect(applied).toEqual([
-      ...DEV_POST_0106_MIGRATION_VERSIONS,
-      ...PR1_MIGRATION_VERSIONS,
-      ...PR2_MIGRATION_VERSIONS,
-    ])
+    expect(applied).toEqual(
+      expectedMigrationExecutionOrder([
+        ...DEV_POST_0106_MIGRATION_VERSIONS,
+        ...PR1_MIGRATION_VERSIONS,
+        ...PR2_MIGRATION_VERSIONS,
+      ])
+    )
     expect(queries.filter(({ sql }) => sql === 'BEGIN')).toHaveLength(34)
     expect(queries.filter(({ sql }) => sql === 'COMMIT')).toHaveLength(34)
     expect(queries.filter(({ sql }) => sql === 'ROLLBACK')).toHaveLength(0)
@@ -475,16 +491,329 @@ describe('D34 PR1 migration runner', () => {
       },
     })
 
-    expect(applyOrder).toEqual([
+    const expectedOrder = expectedMigrationExecutionOrder([
       ...DEV_POST_0106_MIGRATION_VERSIONS,
       ...PR1_MIGRATION_VERSIONS,
       ...PR2_MIGRATION_VERSIONS,
     ])
-    expect(recorded).toEqual(applyOrder)
+    expect(applyOrder).toEqual(expectedOrder)
+    expect(recorded).toEqual(expectedOrder)
+  })
+
+  it('commits 0125 and its deletion-compatible successor as one migration phase', async () => {
+    const events: string[] = []
+    const transactionEvents: string[] = []
+    let activeTransaction = 0
+    let nextTransaction = 0
+    const migrations = [
+      ...DEV_POST_0106_MIGRATION_VERSIONS.map(version => ({
+        version,
+        apply: vi.fn(async () => {
+          events.push(version)
+          transactionEvents.push(`${version}:apply:${activeTransaction}`)
+        }),
+      })),
+      ...PR1_MIGRATION_VERSIONS.map(version => ({
+        version,
+        apply: vi.fn(async () => {
+          events.push(version)
+          transactionEvents.push(`${version}:apply:${activeTransaction}`)
+        }),
+      })),
+      ...PR2_MIGRATION_VERSIONS.map(version => ({
+        version,
+        apply: vi.fn(async () => {
+          events.push(version)
+          transactionEvents.push(`${version}:apply:${activeTransaction}`)
+        }),
+      })),
+    ]
+    const db = {
+      query: vi.fn(async (sql: string, values?: unknown[]) => {
+        if (sql === 'BEGIN') {
+          activeTransaction = ++nextTransaction
+        } else if (sql === 'COMMIT' || sql === 'ROLLBACK') {
+          activeTransaction = 0
+        }
+        if (sql.includes('FROM pg_class index_rel')) {
+          const entry = PR1_ONLINE_INDEX_PLAN.find(index => index.name === values?.[0])
+          return {
+            rows: entry
+              ? [
+                  {
+                    table_name: entry.table,
+                    indisunique: Boolean(entry.unique),
+                    indisvalid: true,
+                    definition: entry.createSql,
+                  },
+                ]
+              : [],
+            rowCount: entry ? 1 : 0,
+          }
+        }
+        return { rows: [], rowCount: 0 }
+      }),
+    }
+    const applied = [...DEV_POST_0106_MIGRATION_VERSIONS]
+    const expectedOrder = expectedMigrationExecutionOrder(PR1_MIGRATION_VERSIONS)
+
+    await applyPendingPr1Migrations({
+      db,
+      migrations,
+      appliedVersions: new Set([...applied, ...PR2_MIGRATION_VERSIONS]),
+      recordMigration: async (_db, version) => {
+        events.push(`receipt:${version}`)
+        transactionEvents.push(`${version}:receipt:${activeTransaction}`)
+      },
+    })
+
+    expect(events.filter(event => !event.startsWith('receipt:'))).toEqual(expectedOrder)
+    const parentIndex = events.indexOf(USER_ACCESS_FOUNDATION_VERSION)
+    const parentReceiptIndex = events.indexOf(`receipt:${USER_ACCESS_FOUNDATION_VERSION}`)
+    const compatibilityIndex = events.indexOf(AUTHORIZATION_REVISION_COMPATIBILITY_VERSION)
+    const compatibilityReceiptIndex = events.indexOf(
+      `receipt:${AUTHORIZATION_REVISION_COMPATIBILITY_VERSION}`
+    )
+    expect(parentIndex).toBeLessThan(parentReceiptIndex)
+    expect(parentReceiptIndex).toBeLessThan(compatibilityIndex)
+    expect(compatibilityIndex).toBeLessThan(compatibilityReceiptIndex)
+    const phaseTransactionIds = [
+      `${USER_ACCESS_FOUNDATION_VERSION}:apply`,
+      `${USER_ACCESS_FOUNDATION_VERSION}:receipt`,
+      `${AUTHORIZATION_REVISION_COMPATIBILITY_VERSION}:apply`,
+      `${AUTHORIZATION_REVISION_COMPATIBILITY_VERSION}:receipt`,
+    ].map(prefix => {
+      const event = transactionEvents.find(candidate => candidate.startsWith(`${prefix}:`))
+      return event?.split(':').at(-1)
+    })
+    expect(phaseTransactionIds).toHaveLength(4)
+    expect(new Set(phaseTransactionIds).size).toBe(1)
+    expect(phaseTransactionIds[0]).not.toBe('0')
+    expect(db.query.mock.calls.filter(([sql]) => sql === 'BEGIN')).toHaveLength(
+      PR1_MIGRATION_VERSIONS.length
+    )
+    expect(db.query.mock.calls.filter(([sql]) => sql === 'COMMIT')).toHaveLength(
+      PR1_MIGRATION_VERSIONS.length
+    )
+  })
+
+  it('repairs an applied 0125 prefix before preparing 0127 indexes', async () => {
+    const events: string[] = []
+    const migrations = [
+      ...DEV_POST_0106_MIGRATION_VERSIONS.map(version => ({
+        version,
+        apply: vi.fn(async () => {
+          events.push(version)
+        }),
+      })),
+      ...PR1_MIGRATION_VERSIONS.map(version => ({
+        version,
+        apply: vi.fn(async () => {
+          events.push(version)
+        }),
+      })),
+      ...PR2_MIGRATION_VERSIONS.map(version => ({
+        version,
+        apply: vi.fn(async () => {
+          events.push(version)
+        }),
+      })),
+    ]
+    const db = {
+      query: vi.fn(async (sql: string, values?: unknown[]) => {
+        if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') {
+          events.push(sql)
+        }
+        if (sql.includes('FROM pg_class index_rel')) {
+          events.push('prepare:0127')
+          const entry = PR1_ONLINE_INDEX_PLAN.find(index => index.name === values?.[0])
+          return {
+            rows: entry
+              ? [
+                  {
+                    table_name: entry.table,
+                    indisunique: Boolean(entry.unique),
+                    indisvalid: true,
+                    definition: entry.createSql,
+                  },
+                ]
+              : [],
+            rowCount: entry ? 1 : 0,
+          }
+        }
+        return { rows: [], rowCount: 0 }
+      }),
+    }
+    const appliedVersions = new Set([
+      ...DEV_POST_0106_MIGRATION_VERSIONS,
+      ...PR2_MIGRATION_VERSIONS,
+      USER_ACCESS_FOUNDATION_VERSION,
+      '0126_invitation_delivery_commands',
+      ...PR1_MIGRATION_VERSIONS.filter(
+        version =>
+          version !== USER_ACCESS_FOUNDATION_VERSION &&
+          version !== '0126_invitation_delivery_commands' &&
+          version !== '0127_catalog_utf8_ordering' &&
+          version !== AUTHORIZATION_REVISION_COMPATIBILITY_VERSION
+      ),
+    ])
+
+    await applyPendingPr1Migrations({
+      db,
+      migrations,
+      appliedVersions,
+      recordMigration: async (_db, version) => {
+        events.push(`receipt:${version}`)
+      },
+    })
+
+    expect(events.indexOf(AUTHORIZATION_REVISION_COMPATIBILITY_VERSION)).toBeLessThan(
+      events.indexOf('prepare:0127')
+    )
+    expect(events.indexOf(`receipt:${AUTHORIZATION_REVISION_COMPATIBILITY_VERSION}`)).toBeLessThan(
+      events.indexOf('prepare:0127')
+    )
+    expect(events.filter(event => event === 'BEGIN')).toHaveLength(3)
+    expect(events.filter(event => event === 'COMMIT')).toHaveLength(3)
+    const repairCommit = events.indexOf('COMMIT')
+    expect(repairCommit).toBeLessThan(events.indexOf('prepare:0127'))
+  })
+
+  it('preserves the 0125 alias when its 0138 successor is already recorded', async () => {
+    const foundation = {
+      version: USER_ACCESS_FOUNDATION_VERSION,
+      legacyVersions: ['0109_user_access_foundation'],
+      apply: vi.fn(async () => undefined),
+    }
+    const compatibility = {
+      version: AUTHORIZATION_REVISION_COMPATIBILITY_VERSION,
+      apply: vi.fn(async () => undefined),
+    }
+    const migrations = [
+      ...DEV_POST_0106_MIGRATION_VERSIONS.map(version => ({
+        version,
+        apply: vi.fn(async () => undefined),
+      })),
+      ...PR1_MIGRATION_VERSIONS.filter(
+        version =>
+          version !== USER_ACCESS_FOUNDATION_VERSION &&
+          version !== AUTHORIZATION_REVISION_COMPATIBILITY_VERSION
+      ).map(version => ({ version, apply: vi.fn(async () => undefined) })),
+      ...PR2_MIGRATION_VERSIONS.map(version => ({
+        version,
+        apply: vi.fn(async () => undefined),
+      })),
+      foundation,
+      compatibility,
+    ]
+    const appliedVersions = new Set([
+      ...DEV_POST_0106_MIGRATION_VERSIONS,
+      ...PR2_MIGRATION_VERSIONS,
+      ...PR1_MIGRATION_VERSIONS.filter(version => version !== USER_ACCESS_FOUNDATION_VERSION),
+      '0109_user_access_foundation',
+    ])
+    const recorded: string[] = []
+
+    await applyPendingPr1Migrations({
+      db: { query: vi.fn(async () => ({ rows: [], rowCount: 0 })) },
+      migrations,
+      appliedVersions,
+      recordMigration: async (_db, version) => {
+        recorded.push(version)
+      },
+    })
+
+    expect(recorded).toEqual([USER_ACCESS_FOUNDATION_VERSION])
+    expect(foundation.apply).not.toHaveBeenCalled()
+    expect(compatibility.apply).not.toHaveBeenCalled()
+    expect(appliedVersions).toContain(USER_ACCESS_FOUNDATION_VERSION)
+  })
+
+  it('fails closed when 0138 is recorded without the 0125 prerequisite', async () => {
+    await expect(
+      applyPendingPr1Migrations({
+        db: { query: vi.fn(async () => ({ rows: [], rowCount: 0 })) },
+        migrations: [
+          ...DEV_POST_0106_MIGRATION_VERSIONS.map(version => ({
+            version,
+            apply: vi.fn(async () => undefined),
+          })),
+          ...PR1_MIGRATION_VERSIONS.map(version => ({
+            version,
+            apply: vi.fn(async () => undefined),
+          })),
+        ],
+        appliedVersions: new Set([
+          ...DEV_POST_0106_MIGRATION_VERSIONS,
+          AUTHORIZATION_REVISION_COMPATIBILITY_VERSION,
+        ]),
+        recordMigration: vi.fn(async () => undefined),
+      })
+    ).rejects.toThrow('recorded before its prerequisite')
   })
 })
 
 describe('D34 online-index recovery', () => {
+  it.each([
+    [
+      'quoted identifier case',
+      'CREATE INDEX idx ON team_members ("userId")',
+      'CREATE INDEX idx ON team_members (userid)',
+    ],
+    [
+      'significant expression grouping',
+      'CREATE INDEX idx ON sample ((a + b) * c)',
+      'CREATE INDEX idx ON sample (a + b * c)',
+    ],
+    [
+      'column casts',
+      'CREATE INDEX idx ON sample (value::text)',
+      'CREATE INDEX idx ON sample (value)',
+    ],
+    [
+      'quoted literal contents',
+      "CREATE INDEX idx ON sample ((payload ->> 'userId'))",
+      "CREATE INDEX idx ON sample ((payload ->> 'userid'))",
+    ],
+  ])('preserves %s in canonical definitions', (_case, left, right) => {
+    expect(canonicalOnlineIndexDefinition(left)).not.toBe(canonicalOnlineIndexDefinition(right))
+  })
+
+  it('normalizes only harmless PostgreSQL index DDL decoration', () => {
+    expect(
+      canonicalOnlineIndexDefinition(
+        'CREATE INDEX CONCURRENTLY IF NOT EXISTS idx ON sample (((a + b)))'
+      )
+    ).toBe(canonicalOnlineIndexDefinition('CREATE INDEX idx ON public.sample USING btree (a+b)'))
+  })
+
+  it('retains significant predicate grouping across boolean operators', () => {
+    const grouped = `CREATE INDEX idx ON sample (value)
+      WHERE ((first_value = 1 OR second_value = 2) AND third_value = 3)`
+    const regrouped = `CREATE INDEX idx ON sample (value)
+      WHERE first_value = 1 OR (second_value = 2 AND third_value = 3)`
+
+    expect(canonicalOnlineIndexDefinition(grouped)).not.toBe(
+      canonicalOnlineIndexDefinition(regrouped)
+    )
+
+    const precedence = `CREATE INDEX idx ON sample (value)
+      WHERE first_value = 1 OR second_value = 2 AND third_value = 3`
+    const explicitGrouping = `CREATE INDEX idx ON sample (value)
+      WHERE (first_value = 1 OR second_value = 2) AND third_value = 3`
+    expect(canonicalOnlineIndexDefinition(precedence)).not.toBe(
+      canonicalOnlineIndexDefinition(explicitGrouping)
+    )
+  })
+
+  it('retains text casts except at the fixed deparser coercion seams', () => {
+    const castedColumn = 'CREATE INDEX idx ON sample (recipe_namespace::text)'
+    const uncastColumn = 'CREATE INDEX idx ON sample (recipe_namespace)'
+    expect(canonicalOnlineIndexDefinition(castedColumn)).not.toBe(
+      canonicalOnlineIndexDefinition(uncastColumn)
+    )
+  })
+
   it('repairs only an equivalent invalid index and rejects a different definition', async () => {
     const entry = PR1_ONLINE_INDEX_PLAN[0]!
     const states = new Map(

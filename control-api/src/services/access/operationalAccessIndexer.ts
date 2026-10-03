@@ -142,7 +142,7 @@ export class OperationalAccessIndexer {
   }
 
   async reconcileSource(spec: OperationalSourceSpec, parentSignal?: AbortSignal): Promise<string> {
-    const budget = AccessExecutionBudget.create('catalog', { parentSignal })
+    const budget = AccessExecutionBudget.create('indexer', { parentSignal })
     try {
       const stagingGeneration = await this.index.beginRelist({
         environmentId: this.environmentId,

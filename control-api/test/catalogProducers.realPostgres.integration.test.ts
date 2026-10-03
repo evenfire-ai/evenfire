@@ -13,9 +13,11 @@ import {
   catalogKey,
 } from '../src/services/access/catalogContracts.js'
 import { requireCatalogProducer } from '../src/services/access/catalogProducers.js'
+import { OperationalAccessIndex } from '../src/services/access/operationalAccessIndex.js'
 import {
   OPERATIONAL_SOURCE_FAMILIES,
   canonicalEnvironmentId,
+  projectOperationalObject,
 } from '../src/services/access/operationalAccessProjection.js'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
@@ -202,6 +204,130 @@ describeRealPostgres('catalog producer SQL on real PostgreSQL', () => {
           throw new Error(`Producer ${family} failed`, { cause: error })
         }
       }
+    } finally {
+      budget.close()
+    }
+  })
+
+  it('stages a producer-shaped Context with duplicate allowlist entries exactly once', async () => {
+    const index = new OperationalAccessIndex(databasePool)
+    const budget = AccessExecutionBudget.create('catalog')
+    const contextName = `r55-m8-${randomBytes(6).toString('hex')}`
+    const sourceId = `${config.contextsNamespace}/${contextName}`
+    const projection = projectOperationalObject({
+      environmentId,
+      plural: 'contexts',
+      namespace: config.contextsNamespace,
+      object: {
+        metadata: {
+          name: contextName,
+          namespace: config.contextsNamespace,
+          uid: randomUUID(),
+          resourceVersion: '1',
+          generation: 1,
+        },
+        spec: {
+          contextId: contextName,
+          mcpServers: ['server-a', 'server-a', 'server-b'],
+          sharedFileSystems: [
+            { name: 'filesystem-a', mountPath: '/workspace/a' },
+            { name: 'filesystem-a', mountPath: '/workspace/b' },
+          ],
+        },
+      },
+      behaviorFingerprintKey: 'test-context-fingerprint-key',
+      relationshipNamespaces: {
+        context: config.contextsNamespace,
+        mcpServer: config.mcpServersNamespace,
+        sharedFilesystem: config.sharedFilesystemsNamespace,
+      },
+    })
+
+    try {
+      const stagingGeneration = await index.beginRelist({
+        environmentId,
+        sourceFamily: 'context',
+        budget,
+      })
+      await index.stageRelistPage({
+        environmentId,
+        sourceFamily: 'context',
+        stagingGeneration,
+        projections: [projection],
+        budget,
+      })
+
+      const staged = await databasePool.query<{
+        relationship_type: string
+        target_id: string
+        behavior_attributes: Record<string, unknown>
+      }>(
+        `SELECT relationship_type, target_id, behavior_attributes
+           FROM operational_relationships_staging
+          WHERE environment_id = $1
+            AND source_family = 'context'
+            AND source_id = $2
+            AND source_generation = $3
+          ORDER BY relationship_type, target_id, behavior_attributes->>'mountPath'`,
+        [environmentId, sourceId, stagingGeneration]
+      )
+      expect(staged.rows).toEqual([
+        {
+          relationship_type: 'includes_mcp_server',
+          target_id: `${config.mcpServersNamespace}/server-a`,
+          behavior_attributes: {},
+        },
+        {
+          relationship_type: 'includes_mcp_server',
+          target_id: `${config.mcpServersNamespace}/server-b`,
+          behavior_attributes: {},
+        },
+        {
+          relationship_type: 'mounts_shared_filesystem',
+          target_id: `${config.sharedFilesystemsNamespace}/filesystem-a`,
+          behavior_attributes: { mountPath: '/workspace/a', readOnly: true },
+        },
+        {
+          relationship_type: 'mounts_shared_filesystem',
+          target_id: `${config.sharedFilesystemsNamespace}/filesystem-a`,
+          behavior_attributes: { mountPath: '/workspace/b', readOnly: true },
+        },
+      ])
+      await index.promoteRelist({
+        environmentId,
+        sourceFamily: 'context',
+        stagingGeneration,
+        resourceVersion: '1',
+        budget,
+      })
+
+      const promoted = await databasePool.query<{ relationship_type: string; target_id: string }>(
+        `SELECT relationship_type, target_id
+           FROM operational_resource_relationships
+          WHERE environment_id = $1
+            AND source_family = 'context'
+            AND source_id = $2
+          ORDER BY relationship_type, target_id`,
+        [environmentId, sourceId]
+      )
+      expect(promoted.rows).toEqual([
+        {
+          relationship_type: 'includes_mcp_server',
+          target_id: `${config.mcpServersNamespace}/server-a`,
+        },
+        {
+          relationship_type: 'includes_mcp_server',
+          target_id: `${config.mcpServersNamespace}/server-b`,
+        },
+        {
+          relationship_type: 'mounts_shared_filesystem',
+          target_id: `${config.sharedFilesystemsNamespace}/filesystem-a`,
+        },
+        {
+          relationship_type: 'mounts_shared_filesystem',
+          target_id: `${config.sharedFilesystemsNamespace}/filesystem-a`,
+        },
+      ])
     } finally {
       budget.close()
     }

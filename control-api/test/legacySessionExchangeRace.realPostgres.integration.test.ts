@@ -1,14 +1,18 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import bcrypt from 'bcryptjs'
-import { randomBytes, randomUUID } from 'node:crypto'
+import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { Pool, type PoolClient } from 'pg'
 import { type DbClient, initDb } from '../src/db.js'
 import type { AuthClaims } from '../src/profileTypes.js'
 import type { EffectiveUserAccessPolicy } from '../src/services/access/userAccessPolicy.js'
 import { exchangeLegacyExternalUserSession } from '../src/services/auth/externalSessionIssuance.js'
 import {
+  createUserSession,
   revokeAllUserSessions,
+  revokeLegacyUserSession,
+  revokeUserSession,
   validateLegacyUserSession,
+  validateUserSessionClaims,
 } from '../src/services/auth/userSessionService.js'
 import { verifyUserPassword } from '../src/services/directory/login.js'
 import {
@@ -19,6 +23,7 @@ import {
   signExternalSessionToken,
   verifyExternalSessionToken,
 } from '../src/utils/auth/externalSessionAuthToken.js'
+import { verifyUserSessionV2Token } from '../src/utils/auth/userSessionV2Token.js'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
@@ -545,5 +550,102 @@ describeRealPostgres('legacy replacement exchange serialization on real PostgreS
       firstEpoch.rows[0]!.valid_after.getTime()
     )
     expect(epoch.rows[0]?.reason).toBe('newer')
+  })
+
+  it('does not let a stale authenticated actor revoke replacement sessions', async () => {
+    const legacySource = await principal('stale-v1-revocation-actor')
+    const staleLegacyAuthority = {
+      contract: 'v1' as const,
+      userId: legacySource.userId,
+      tokenHash: createHash('sha256').update(legacySource.token).digest('hex'),
+      issuedAt: legacySource.claims.iat!,
+      authGeneration: legacySource.claims.authGeneration!,
+    }
+    await revokeLegacyUserSession(legacySource.token, legacySource.claims, 'logout', databasePool)
+    const replacementAfterLegacyInvalidation = await createUserSession(
+      {
+        userId: legacySource.userId,
+        email: legacySource.email,
+        authenticationMethods: ['pwd'],
+      },
+      { db: databasePool }
+    )
+
+    await expect(
+      revokeAllUserSessions(
+        legacySource.userId,
+        'user_revoked_all',
+        databasePool,
+        staleLegacyAuthority
+      )
+    ).resolves.toBe(0)
+    const replacementLegacyClaims = verifyUserSessionV2Token(
+      replacementAfterLegacyInvalidation.token
+    )
+    expect(replacementLegacyClaims).not.toBeNull()
+    await expect(
+      validateUserSessionClaims(replacementLegacyClaims!, { db: databasePool, touch: false })
+    ).resolves.toMatchObject({ status: 'valid' })
+
+    const v2Actor = await createUserSession(
+      {
+        userId: legacySource.userId,
+        email: legacySource.email,
+        authenticationMethods: ['pwd'],
+      },
+      { db: databasePool }
+    )
+    const v2Target = await createUserSession(
+      {
+        userId: legacySource.userId,
+        email: legacySource.email,
+        authenticationMethods: ['pwd'],
+      },
+      { db: databasePool }
+    )
+    const staleV2Authority = {
+      contract: 'v2' as const,
+      userId: legacySource.userId,
+      sid: v2Actor.identity.sid,
+      jti: v2Actor.identity.jti,
+      sessionVersion: v2Actor.identity.sessionVersion,
+    }
+    await revokeUserSession(legacySource.userId, v2Actor.identity.sid, 'logout', databasePool)
+
+    await expect(
+      revokeUserSession(
+        legacySource.userId,
+        v2Target.identity.sid,
+        'user_revoked',
+        databasePool,
+        staleV2Authority
+      )
+    ).resolves.toBe(false)
+    const targetClaims = verifyUserSessionV2Token(v2Target.token)
+    expect(targetClaims).not.toBeNull()
+    await expect(
+      validateUserSessionClaims(targetClaims!, { db: databasePool, touch: false })
+    ).resolves.toMatchObject({ status: 'valid' })
+
+    const currentActor = await createUserSession(
+      {
+        userId: legacySource.userId,
+        email: legacySource.email,
+        authenticationMethods: ['pwd'],
+      },
+      { db: databasePool }
+    )
+    await expect(
+      revokeUserSession(legacySource.userId, v2Target.identity.sid, 'user_revoked', databasePool, {
+        contract: 'v2',
+        userId: legacySource.userId,
+        sid: currentActor.identity.sid,
+        jti: currentActor.identity.jti,
+        sessionVersion: currentActor.identity.sessionVersion,
+      })
+    ).resolves.toBe(true)
+    await expect(
+      validateUserSessionClaims(targetClaims!, { db: databasePool, touch: false })
+    ).resolves.toMatchObject({ status: 'revoked' })
   })
 })

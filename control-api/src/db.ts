@@ -5,6 +5,7 @@ import {
   createBoundedPgPoolForConnection,
 } from './boundedPgPool.js'
 import { config } from './config.js'
+import { applyAuthorizationRevisionDeleteCompatibility } from './migrations/authorizationRevisionDeleteCompatibilityMigration.js'
 import { migrationSessionBoundsSql } from './migrations/migrationExecutionPolicy.js'
 import { applyPendingPr1Migrations } from './migrations/migrationRunner.js'
 import { applyUserAccessFoundationDefinerTempShadowHardening } from './migrations/userAccessFoundationDefinerTempShadowMigration.js'
@@ -6591,6 +6592,11 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     version: '0137_r31_runtime_behavior_sources',
     legacyVersions: ['0120_r31_runtime_behavior_sources'],
     apply: applyR31RuntimeBehaviorSourcesSchema,
+  },
+  {
+    // Compatibility repair is applied atomically with 0125 by the migration runner.
+    version: '0138_authorization_revision_delete_compatibility',
+    apply: applyAuthorizationRevisionDeleteCompatibility,
   },
 ]
 

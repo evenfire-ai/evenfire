@@ -59,6 +59,39 @@ describe('operational access projection', () => {
     )
   })
 
+  it('projects a supported Context alias without changing canonical identity', () => {
+    const projection = projectOperationalObject({
+      environmentId: 'test:cluster',
+      plural: 'contexts',
+      namespace: 'contexts',
+      object: {
+        ...contextObject([]),
+        metadata: {
+          ...contextObject([]).metadata,
+          name: 'ctx-resource',
+        },
+        spec: {
+          contextId: 'ctx-wire',
+          mcpServers: [],
+          sharedFileSystems: [],
+        },
+      },
+      behaviorFingerprintKey: 'test-key',
+      relationshipNamespaces: namespaces,
+    })
+
+    expect(projection.rootId).toBe('contexts/ctx-resource')
+    expect(projection.relationships).toContainEqual(
+      expect.objectContaining({
+        sourceType: 'context',
+        sourceId: 'contexts/ctx-resource',
+        relationshipType: 'context_identity_alias',
+        targetType: 'context',
+        targetId: 'contexts/ctx-wire',
+      })
+    )
+  })
+
   it('preserves repeated filesystem relationship instances with different mount scopes', () => {
     const projection = projectOperationalObject({
       environmentId: 'test:cluster',
@@ -81,6 +114,35 @@ describe('operational access projection', () => {
       '/workspace/a',
       '/workspace/b',
     ])
+  })
+
+  it('deduplicates repeated MCP allowlist entries but preserves distinct targets', () => {
+    const projection = projectOperationalObject({
+      environmentId: 'test:cluster',
+      plural: 'contexts',
+      namespace: 'contexts',
+      object: {
+        ...contextObject([]),
+        spec: {
+          contextId: 'ctx-a',
+          mcpServers: ['server-a', 'server-a', 'server-b'],
+          sharedFileSystems: [],
+        },
+      },
+      behaviorFingerprintKey: 'test-key',
+      relationshipNamespaces: namespaces,
+    })
+    const relationships = projection.relationships.filter(
+      relationship => relationship.relationshipType === 'includes_mcp_server'
+    )
+
+    expect(relationships.map(relationship => relationship.targetId).sort()).toEqual([
+      'mcp-server/server-a',
+      'mcp-server/server-b',
+    ])
+    expect(
+      new Set(relationships.map(relationship => relationship.relationshipInstanceId)).size
+    ).toBe(2)
   })
 
   it('rejects over-budget relationship fan-out before projection', () => {

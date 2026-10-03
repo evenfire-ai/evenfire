@@ -130,7 +130,7 @@ export async function compareAccessCatalogShadow(
   try {
     child = parent.child({
       producerCalls: 8,
-      databaseStatements: 8,
+      databaseStatements: 109,
       objects: 200,
       decodedBytes: 2 * 1024 * 1024,
       accessPaths: 512,

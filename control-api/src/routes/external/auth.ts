@@ -447,7 +447,9 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
             ? await revokeUserSession(
                 authentication.claims.userId,
                 authentication.claims.sid,
-                'logout'
+                'logout',
+                undefined,
+                authentication.authorityContext
               )
             : await revokeLegacyUserSession(token, authentication.claims, 'logout')
         return res.status(200).json({ revoked })
@@ -480,7 +482,9 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
         const authentication = req.externalSessionAuthentication!
         const revoked = await revokeAllUserSessions(
           authentication.claims.userId,
-          'user_revoked_all'
+          'user_revoked_all',
+          undefined,
+          authentication.authorityContext
         )
         return res.status(200).json({ revoked })
       } catch {
@@ -512,7 +516,9 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
         const revoked = await revokeUserSession(
           authentication.claims.userId,
           String(req.params.sid || '').trim(),
-          'user_revoked'
+          'user_revoked',
+          undefined,
+          authentication.authorityContext
         )
         return res.status(200).json({ revoked })
       } catch {

@@ -62,6 +62,7 @@ export type OperationalRelationshipRecord = Readonly<{
   sourceId: string
   relationshipType:
     | 'uses_context'
+    | 'context_identity_alias'
     | 'includes_mcp_server'
     | 'mounts_shared_filesystem'
     | 'exposes_sandbox_app'
@@ -621,24 +622,26 @@ function contextRelationships(params: {
   observedGeneration: number | null
   relationshipNamespaces: ProjectionInput['relationshipNamespaces']
 }): OperationalRelationshipRecord[] {
-  const relationships = stringArray(
-    params.spec.mcpServers === undefined ? [] : params.spec.mcpServers
-  ).map(server =>
-    relationship({
-      ...params,
-      sourceType: 'context',
-      sourceId: params.rootId,
-      relationshipType: 'includes_mcp_server',
-      targetType: 'mcp_server',
-      targetId: `${params.relationshipNamespaces.mcpServer}/${server}`,
-      instanceParts: [
-        'context',
-        params.rootId,
-        'mcp',
-        `${params.relationshipNamespaces.mcpServer}/${server}`,
-      ],
-    })
-  )
+  const relationships: OperationalRelationshipRecord[] = []
+  const mcpServers = stringArray(params.spec.mcpServers === undefined ? [] : params.spec.mcpServers)
+  for (const server of new Set(mcpServers)) {
+    relationships.push(
+      relationship({
+        ...params,
+        sourceType: 'context',
+        sourceId: params.rootId,
+        relationshipType: 'includes_mcp_server',
+        targetType: 'mcp_server',
+        targetId: `${params.relationshipNamespaces.mcpServer}/${server}`,
+        instanceParts: [
+          'context',
+          params.rootId,
+          'mcp',
+          `${params.relationshipNamespaces.mcpServer}/${server}`,
+        ],
+      })
+    )
+  }
   const mounts = optionalArray(params.spec.sharedFileSystems, 'shared_filesystems_invalid')
   if (mounts.length > 256) throw new OperationalProjectionError('relationship_fanout_exceeded')
   for (const [index, value] of mounts.entries()) {
@@ -770,6 +773,20 @@ export function projectOperationalObject(input: ProjectionInput): OperationalObj
       )
     }
   } else if (family === 'context') {
+    const contextId = optionalBoundedString(spec.contextId, 253)
+    if (contextId && contextId !== name) {
+      relationships.push(
+        relationship({
+          ...common,
+          sourceType: 'context',
+          sourceId: rootId,
+          relationshipType: 'context_identity_alias',
+          targetType: 'context',
+          targetId: logicalId('context', namespace, contextId),
+          instanceParts: ['context', rootId, 'identity-alias', contextId],
+        })
+      )
+    }
     relationships.push(
       ...contextRelationships({
         ...common,

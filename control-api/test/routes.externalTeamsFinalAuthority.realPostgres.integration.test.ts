@@ -578,4 +578,92 @@ describeRealPostgres('external team mutations final source authority on real Pos
       }
     })
   }
+
+  it('serializes reciprocal managed-user retirements before related membership locks', async () => {
+    const firstUserId = randomUUID()
+    const secondUserId = randomUUID()
+    const sharedTeamId = randomUUID()
+    const firstEmail = `reciprocal-first-${firstUserId}@example.test`
+    const secondEmail = `reciprocal-second-${secondUserId}@example.test`
+    await databasePool.query(
+      `INSERT INTO users(id, email, name, lifecycle_state, lifecycle_version)
+       VALUES ($1::uuid, $2, 'Reciprocal First', 'active', 1),
+              ($3::uuid, $4, 'Reciprocal Second', 'active', 1)`,
+      [firstUserId, firstEmail, secondUserId, secondEmail]
+    )
+    await databasePool.query(`INSERT INTO teams(id, name) VALUES ($1::uuid, 'Reciprocal')`, [
+      sharedTeamId,
+    ])
+    await databasePool.query(
+      `INSERT INTO team_members(team_id, user_id, role, status)
+       VALUES ($1::uuid, $2::uuid, 'admin', 'active'),
+              ($1::uuid, $3::uuid, 'admin', 'active')`,
+      [sharedTeamId, firstUserId, secondUserId]
+    )
+    const [firstSession, secondSession] = await Promise.all([
+      issueExternalUserSession(
+        {
+          contract: 'v1',
+          userId: firstUserId,
+          email: firstEmail,
+          teamId: sharedTeamId,
+          role: 'admin',
+          authGeneration: 1,
+          authenticationMethods: ['password'],
+        },
+        { policy: runtimePolicy }
+      ),
+      issueExternalUserSession(
+        {
+          contract: 'v1',
+          userId: secondUserId,
+          email: secondEmail,
+          teamId: sharedTeamId,
+          role: 'admin',
+          authGeneration: 1,
+          authenticationMethods: ['password'],
+        },
+        { policy: runtimePolicy }
+      ),
+    ])
+
+    let admitted = 0
+    let releaseRequests!: () => void
+    const bothAuthenticated = new Promise<void>(resolve => {
+      releaseRequests = resolve
+    })
+    rateLimit.checkAndIncrement.mockImplementation(async () => {
+      admitted += 1
+      if (admitted === 2) releaseRequests()
+      await bothAuthenticated
+      return {
+        allowed: true,
+        count: 1,
+        remaining: 9,
+        resetMs: Date.now() + 60_000,
+        windowStartMs: Date.now(),
+      }
+    })
+
+    const [firstResponse, secondResponse] = await Promise.all([
+      request(app())
+        .delete(`/external/members/${secondUserId}`)
+        .set('x-user-session-token', firstSession.token)
+        .set('Idempotency-Key', `reciprocal-${firstUserId}-${secondUserId}`)
+        .send({ reason: 'reciprocal retirement serialization' }),
+      request(app())
+        .delete(`/external/members/${firstUserId}`)
+        .set('x-user-session-token', secondSession.token)
+        .set('Idempotency-Key', `reciprocal-${secondUserId}-${firstUserId}`)
+        .send({ reason: 'reciprocal retirement serialization' }),
+    ])
+
+    expect(admitted).toBe(2)
+    expect([firstResponse.status, secondResponse.status].sort((a, b) => a - b)).toEqual([200, 403])
+    const remaining = await databasePool.query<{ id: string }>(
+      `SELECT id::text AS id FROM users WHERE id = ANY($1::uuid[]) ORDER BY id`,
+      [[firstUserId, secondUserId]]
+    )
+    expect(remaining.rows).toHaveLength(1)
+  })
 })

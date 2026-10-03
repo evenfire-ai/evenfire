@@ -216,6 +216,116 @@ describeRealPostgres('user-access runtime role contract on real PostgreSQL', () 
     expect(resolved.status).toBe('allowed')
   })
 
+  it('keeps catalog continuation and resolver authority stable across normal session activity', async () => {
+    const teamIds = [randomUUID(), randomUUID()]
+    for (const [index, teamId] of teamIds.entries()) {
+      await databasePool.query(`INSERT INTO teams(id, name) VALUES ($1, $2)`, [
+        teamId,
+        `Activity Revision ${index}`,
+      ])
+      await databasePool.query(
+        `INSERT INTO team_members(team_id, user_id, role, status)
+         VALUES ($1, $2, 'member', 'active')`,
+        [teamId, userId]
+      )
+    }
+    const issued = await createUserSession(
+      { userId, email: `${userId}@example.test`, authenticationMethods: ['pwd'] },
+      { db: databasePool }
+    )
+    const session: ExternalSessionAuthorityContext = {
+      contract: 'v2',
+      userId,
+      sid: issued.identity.sid,
+      jti: issued.identity.jti,
+      sessionVersion: issued.identity.sessionVersion,
+    }
+    const firstPage = await buildAccessCatalog(
+      { session, families: ['team'], limit: 1 },
+      { transaction: runAsControlApiRuntime }
+    )
+    expect(firstPage.items).toHaveLength(1)
+    expect(firstPage.nextCursor).toBeTruthy()
+
+    const item = firstPage.items[0]!
+    const selectedPath = item.accessPaths.find(path => path.capabilities.includes('team.read'))
+    expect(selectedPath).toBeDefined()
+    const firstResolution = await resolveLiveAuthorization(
+      {
+        session,
+        requiredCapability: 'team.read',
+        resource: canonicalResourceIdentity(item.resource),
+        requestedAccessPathId: selectedPath!.accessPathId,
+      },
+      { transaction: runAsControlApiRuntime }
+    )
+    expect(firstResolution.status).toBe('allowed')
+
+    const idleBefore = await databasePool.query<{ idle_expires_at: Date }>(
+      `SELECT idle_expires_at FROM external_user_sessions WHERE sid = $1`,
+      [session.sid]
+    )
+    await databasePool.query(
+      `UPDATE external_user_sessions
+          SET last_used_at = clock_timestamp(),
+              idle_expires_at = LEAST(absolute_expires_at, clock_timestamp() + interval '14 days')
+        WHERE sid = $1`,
+      [session.sid]
+    )
+    const idleAfter = await databasePool.query<{ idle_expires_at: Date }>(
+      `SELECT idle_expires_at FROM external_user_sessions WHERE sid = $1`,
+      [session.sid]
+    )
+    expect(idleAfter.rows[0]!.idle_expires_at.getTime()).toBeGreaterThan(
+      idleBefore.rows[0]!.idle_expires_at.getTime()
+    )
+
+    const continued = await buildAccessCatalog(
+      { session, families: ['team'], limit: 1, cursor: firstPage.nextCursor },
+      { transaction: runAsControlApiRuntime }
+    )
+    expect(continued.complete).toBe(true)
+    expect(continued.items).toHaveLength(1)
+    const continuedResolution = await resolveLiveAuthorization(
+      {
+        session,
+        requiredCapability: 'team.read',
+        resource: canonicalResourceIdentity(item.resource),
+        requestedAccessPathId: selectedPath!.accessPathId,
+      },
+      { transaction: runAsControlApiRuntime }
+    )
+    expect(continuedResolution.status).toBe('allowed')
+    if (firstResolution.status !== 'allowed' || continuedResolution.status !== 'allowed') {
+      throw new Error('expected both activity-bound resolutions to be allowed')
+    }
+    expect(continuedResolution.authorizationRevision).toBe(firstResolution.authorizationRevision)
+
+    await databasePool.query(
+      `UPDATE external_user_sessions
+          SET idle_expires_at = clock_timestamp() - interval '1 second'
+        WHERE sid = $1`,
+      [session.sid]
+    )
+    await expect(
+      buildAccessCatalog(
+        { session, families: ['team'], limit: 1 },
+        { transaction: runAsControlApiRuntime }
+      )
+    ).rejects.toMatchObject({ code: 'session_not_live' })
+    await expect(
+      resolveLiveAuthorization(
+        {
+          session,
+          requiredCapability: 'team.read',
+          resource: canonicalResourceIdentity(item.resource),
+          requestedAccessPathId: selectedPath!.accessPathId,
+        },
+        { transaction: runAsControlApiRuntime }
+      )
+    ).resolves.toMatchObject({ status: 'denied', code: 'session_not_live' })
+  })
+
   it('denies the session tables to unrelated roles and PUBLIC', async () => {
     const publicPrivilege = await databasePool.query<{ allowed: boolean }>(
       `SELECT EXISTS (

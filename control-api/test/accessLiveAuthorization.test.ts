@@ -134,6 +134,20 @@ function fakeTransaction(options: FakeDbOptions = {}) {
         rowCount: 4,
       }
     }
+    if (text.includes('FROM operational_resource_relationships relationship')) {
+      return { rows: [], rowCount: 0 }
+    }
+    if (text.includes('SELECT * FROM candidates')) {
+      const rows = options.hostGrantRows ?? [
+        {
+          kind: 'direct',
+          grant_id: `user_agents:${userId}:host-a`,
+          team_id: null,
+          current_role: null,
+        },
+      ]
+      return { rows, rowCount: rows.length }
+    }
     if (text.includes('FROM operational_resource_index')) {
       return {
         rows: [

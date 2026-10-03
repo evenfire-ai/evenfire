@@ -277,4 +277,50 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
       /CREATE INDEX IF NOT EXISTS[\s\S]+?ON mcp_secret_rollback_permits\s*\(\s*expires_at\s*\)/i
     )
   })
+
+  it('registers the narrow 0125 team-delete compatibility successor', async () => {
+    const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
+    const predecessorIndex = CONTROL_API_MIGRATIONS.findIndex(
+      candidate => candidate.version === '0125_user_access_foundation'
+    )
+    const migration = CONTROL_API_MIGRATIONS.find(
+      candidate => candidate.version === '0138_authorization_revision_delete_compatibility'
+    )
+
+    expect(predecessorIndex).toBeGreaterThanOrEqual(0)
+    expect(migration).toBeDefined()
+    expect(CONTROL_API_MIGRATIONS.at(-1)?.version).toBe(
+      '0138_authorization_revision_delete_compatibility'
+    )
+    expect(migration?.legacyVersions).toBeUndefined()
+    if (!migration) return
+
+    const query = vi.fn().mockResolvedValue({ rows: [], rowCount: 0 })
+    await migration.apply({ query } as never)
+
+    expect(query).toHaveBeenCalledOnce()
+    const sql = String(query.mock.calls[0]?.[0])
+    for (const functionName of [
+      'authorization_bump_user_revision',
+      'authorization_bump_team_revision',
+    ]) {
+      expect(sql).toMatch(
+        new RegExp(`CREATE OR REPLACE FUNCTION public\\.${functionName}\\(target_.* UUID\\)`, 'i')
+      )
+      expect(sql).toMatch(
+        new RegExp(
+          `${functionName}[\\s\\S]+?SELECT ${functionName.includes('user') ? 'users' : 'teams'}\\.id[\\s\\S]+FROM ${functionName.includes('user') ? 'users' : 'teams'}`,
+          'i'
+        )
+      )
+    }
+    expect(sql).toMatch(
+      /CREATE OR REPLACE FUNCTION public\.authorization_bump_team_revision\(target_team_id UUID\)/i
+    )
+    expect(sql).toMatch(/SECURITY DEFINER[\s\S]+SET search_path = pg_catalog, public, pg_temp/i)
+    expect(sql).toMatch(/SELECT teams\.id[\s\S]+FROM teams[\s\S]+WHERE teams\.id = target_team_id/i)
+    expect(sql).toMatch(/SELECT users\.id[\s\S]+FROM users[\s\S]+WHERE users\.id = target_user_id/i)
+    expect(sql).not.toMatch(/VALUES\s*\(target_(?:team|user)_id/i)
+    expect(sql).not.toMatch(/\b(?:GRANT|REVOKE|OWNER TO)\b/i)
+  })
 })

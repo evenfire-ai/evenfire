@@ -129,7 +129,7 @@ export async function loadCatalogRequestContext(input: {
               WHEN $2::text = 'v2' THEN COALESCE((
                 SELECT session.session_version::text || ':' || session.current_jti::text || ':' ||
                        COALESCE(session.revoked_at::text, '') || ':' ||
-                       session.idle_expires_at::text || ':' || session.absolute_expires_at::text
+                       session.absolute_expires_at::text
                   FROM external_user_sessions session
                  WHERE session.sid::text = $3 AND session.user_id = users.id
               ), 'missing')

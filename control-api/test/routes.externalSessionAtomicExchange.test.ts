@@ -4,6 +4,10 @@ import request from 'supertest'
 import { createExternalAuthRouter } from '../src/routes/external/auth.js'
 
 const sessions = vi.hoisted(() => ({ authenticateExternalUserSession: vi.fn() }))
+const revocations = vi.hoisted(() => ({
+  revokeAllUserSessions: vi.fn(),
+  revokeUserSession: vi.fn(),
+}))
 const issuance = vi.hoisted(() => ({
   exchangeLegacyExternalUserSession: vi.fn(),
   issueExternalUserSession: vi.fn(),
@@ -16,6 +20,10 @@ vi.mock('../src/services/auth/externalSessionAuthentication.js', () => ({
   ...sessions,
   renewExternalUserSession: vi.fn(),
 }))
+vi.mock('../src/services/auth/userSessionService.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/services/auth/userSessionService.js')>()
+  return { ...actual, ...revocations }
+})
 vi.mock('../src/services/auth/externalSessionIssuance.js', () => issuance)
 vi.mock('../src/services/rateLimiterService.js', () => limiter)
 vi.mock('../src/db.js', () => ({ pool: { query: database.query } }))
@@ -61,6 +69,8 @@ describe('legacy external-session replacement exchange', () => {
       policy: { issueV1: true, switchCompatibility: true },
     })
     issuance.issueExternalUserSession.mockResolvedValue({ token: 'stale-token', contract: 'v1' })
+    revocations.revokeAllUserSessions.mockResolvedValue(1)
+    revocations.revokeUserSession.mockResolvedValue(true)
     database.query.mockResolvedValue({
       rows: [{ role: 'admin', lifecycle_version: 1 }],
       rowCount: 1,
@@ -119,5 +129,107 @@ describe('legacy external-session replacement exchange', () => {
       .expect(403, { error: 'membership_not_found' })
 
     expect(issuance.issueExternalUserSession).not.toHaveBeenCalled()
+  })
+
+  it('binds revoke-all to the authenticated actor authority context', async () => {
+    const authorityContext = {
+      contract: 'v1' as const,
+      userId: claims.userId,
+      tokenHash: 'source-hash',
+      issuedAt: claims.iat,
+      authGeneration: 1,
+    }
+    sessions.authenticateExternalUserSession.mockResolvedValueOnce({
+      status: 'authenticated',
+      contract: 'v1',
+      claims,
+      authorityContext,
+      policy: { issueV1: true, switchCompatibility: true },
+    })
+
+    await request(app())
+      .post('/external/auth/sessions/revoke-all')
+      .set('x-forwarded-for', '203.0.113.44')
+      .set('x-user-session-token', 'source-token')
+      .expect(200, { revoked: 1 })
+
+    expect(revocations.revokeAllUserSessions).toHaveBeenCalledWith(
+      claims.userId,
+      'user_revoked_all',
+      undefined,
+      authorityContext
+    )
+  })
+
+  it('binds targeted revocation to the authenticated v2 actor authority context', async () => {
+    const v2Claims = {
+      userId: claims.userId,
+      sid: 'source-session',
+      jti: 'source-jti',
+    }
+    const authorityContext = {
+      contract: 'v2' as const,
+      userId: claims.userId,
+      sid: v2Claims.sid,
+      jti: v2Claims.jti,
+      sessionVersion: 1,
+    }
+    sessions.authenticateExternalUserSession.mockResolvedValueOnce({
+      status: 'authenticated',
+      contract: 'v2',
+      claims: v2Claims,
+      authorityContext,
+      policy: { issueV1: true, switchCompatibility: true },
+    })
+
+    await request(app())
+      .post('/external/auth/sessions/target-session/revoke')
+      .set('x-forwarded-for', '203.0.113.44')
+      .set('x-user-session-token', 'source-token')
+      .expect(200, { revoked: true })
+
+    expect(revocations.revokeUserSession).toHaveBeenCalledWith(
+      claims.userId,
+      'target-session',
+      'user_revoked',
+      undefined,
+      authorityContext
+    )
+  })
+
+  it('binds v2 logout to the authenticated actor authority context', async () => {
+    const v2Claims = {
+      userId: claims.userId,
+      sid: 'source-session',
+      jti: 'source-jti',
+    }
+    const authorityContext = {
+      contract: 'v2' as const,
+      userId: claims.userId,
+      sid: v2Claims.sid,
+      jti: v2Claims.jti,
+      sessionVersion: 1,
+    }
+    sessions.authenticateExternalUserSession.mockResolvedValueOnce({
+      status: 'authenticated',
+      contract: 'v2',
+      claims: v2Claims,
+      authorityContext,
+      policy: { issueV1: true, switchCompatibility: true },
+    })
+
+    await request(app())
+      .post('/external/auth/session/logout')
+      .set('x-forwarded-for', '203.0.113.44')
+      .set('x-user-session-token', 'source-token')
+      .expect(200, { revoked: true })
+
+    expect(revocations.revokeUserSession).toHaveBeenCalledWith(
+      claims.userId,
+      v2Claims.sid,
+      'logout',
+      undefined,
+      authorityContext
+    )
   })
 })
