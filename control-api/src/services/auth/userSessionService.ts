@@ -417,9 +417,13 @@ export async function revokeUserSession(
   userId: string,
   sid: string,
   reason: string,
-  db?: SessionDatabase
+  db?: SessionDatabase,
+  actorContext?: ExternalSessionAuthorityContext
 ): Promise<boolean> {
   const work = async (transaction: SessionDatabase): Promise<boolean> => {
+    if (actorContext && !(await isCurrentRevocationActor(transaction, userId, actorContext))) {
+      return false
+    }
     const locked = await transaction.query(
       `SELECT sid
          FROM external_user_sessions
@@ -449,11 +453,15 @@ export async function revokeUserSession(
 export async function revokeAllUserSessions(
   userId: string,
   reason: string,
-  db?: SessionDatabase
+  db?: SessionDatabase,
+  actorContext?: ExternalSessionAuthorityContext
 ): Promise<number> {
   const work = async (transaction: SessionDatabase) => {
     const user = await transaction.query(`SELECT id FROM users WHERE id = $1 FOR UPDATE`, [userId])
     if ((user.rowCount ?? 0) === 0) return 0
+    if (actorContext && !(await isCurrentRevocationActor(transaction, userId, actorContext))) {
+      return 0
+    }
     const revokedAt = await loadDatabaseNow(transaction)
 
     await transaction.query(
@@ -481,6 +489,18 @@ export async function revokeAllUserSessions(
   }
 
   return db ? work(db) : withTransaction(work)
+}
+
+async function isCurrentRevocationActor(
+  transaction: SessionDatabase,
+  targetUserId: string,
+  actorContext: ExternalSessionAuthorityContext
+): Promise<boolean> {
+  if (actorContext.userId !== targetUserId) return false
+  const authentication = await validateExternalSessionAuthorityContext(actorContext, {
+    db: transaction,
+  })
+  return authentication.status === 'valid' && authentication.identity.userId === targetUserId
 }
 
 export async function validateExternalSessionAuthorityContext(
