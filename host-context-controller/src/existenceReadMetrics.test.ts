@@ -28,6 +28,10 @@ it('initializes the real read registry before any test seeding', async () => {
 // Review each exclusion when its enclosing operation changes. Counts describe
 // expressions, not executions; a newly added direct read must be classified.
 const readExclusions: Record<string, readonly [number, string]> = {
+  'hostReconciler.ts::assertRpcProxyEdgeCohortReady::readNamespacedDeployment': [
+    1,
+    'Fail-closed strict Host rollout gate reads the Proxy Deployment cohort',
+  ],
   'hostReconciler.ts::readHostDeploymentOrNull::readNamespacedDeployment': [
     1,
     'Input to runtime binding and refresh decisions',
@@ -255,7 +259,7 @@ function assertReadInventory(sources: Record<string, string>): void {
     expect(excluded[id], `Stale or changed read exclusion: ${id}`).toBe(count)
   }
   expect(Object.values(wrapped).reduce((sum, count) => sum + count, 0)).toBe(26)
-  expect(Object.values(excluded).reduce((sum, count) => sum + count, 0)).toBe(44)
+  expect(Object.values(excluded).reduce((sum, count) => sum + count, 0)).toBe(45)
 }
 
 it('classifies every direct dot-property production SDK read as observed or explicitly excluded', () => {

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+trap 'echo "unexpected token-test failure at line ${LINENO}" >&2' ERR
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TOKEN_SCRIPT="${INTER_SERVICE_TOKENS_SCRIPT:-$ROOT/deploy/scripts/apply-inter-service-tokens.sh}"
@@ -41,16 +42,38 @@ set -euo pipefail
 args=("$@")
 if [[ "${args[0]:-}" == "--context" ]]; then
   args=("${args[@]:2}")
+elif [[ "${args[0]:-}" == --context=* ]]; then
+  args=("${args[@]:1}")
 fi
 ns=""
 if [[ "${args[0]:-}" == "-n" ]]; then
   ns="${args[1]}"
   args=("${args[@]:2}")
 fi
+for ((index=0; index<${#args[@]}; index++)); do
+  if [[ "${args[$index]}" == "-n" ]]; then
+    ns="${args[$((index + 1))]:-}"
+    break
+  fi
+done
 case "${args[0]:-}" in
+  config)
+    if [[ "${args[1]:-}" == "current-context" ]]; then
+      printf '%s\n' "${CONTEXT:-test-context}"
+    fi
+    exit 0
+    ;;
   get)
     case "${args[1]:-}" in
       ns) exit 0 ;;
+      pods)
+        if [[ "${args[*]}" == *"-n rpc-proxy"* ]]; then
+          printf '%s\n' '{"items":[{"metadata":{"labels":{"clerum.io/rpc-proxy-edge-protocol":"dedicated-header-v1"}},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}]}}]}'
+        else
+          printf '%s\n' '{"items":[]}'
+        fi
+        exit 0
+        ;;
       secret)
         jsonpath=""
         for ((i=0; i<${#args[@]}; i++)); do
@@ -92,6 +115,20 @@ case "${args[0]:-}" in
         exit 0
         ;;
       deploy|deployment|deployments)
+        if [[ "${args[1]:-}" == "deployment" && "${args[2]:-}" == "rpc-proxy" && \
+              "${args[*]}" == *"-o json"* ]]; then
+          printf '%s\n' '{"metadata":{"generation":1},"spec":{"replicas":1,"template":{"metadata":{"labels":{"clerum.io/rpc-proxy-edge-protocol":"dedicated-header-v1"}}}},"status":{"observedGeneration":1,"updatedReplicas":1,"readyReplicas":1,"availableReplicas":1}}'
+          exit 0
+        fi
+        if [[ "${args[1]:-}" == "deployment" && "${args[2]:-}" == "host-context-controller" && \
+              "${args[*]}" == *"-o json"* ]]; then
+          printf '%s\n' '{"metadata":{"generation":1},"spec":{"replicas":1,"template":{"metadata":{"labels":{}},"spec":{"containers":[{"env":[{"name":"CONTEXT_MAPPER_HOST_RPC_PROXY_EDGE_PROTOCOL","value":"dedicated-header-v1"}]}]}}},"status":{"observedGeneration":1,"updatedReplicas":1,"readyReplicas":1,"availableReplicas":1}}'
+          exit 0
+        fi
+        if [[ "${args[1]:-}" == "deployments" && "${args[*]}" == *"-o jsonpath="* ]]; then
+          printf '%s\n' 'chatllm'
+          exit 0
+        fi
         selector=""
         for ((i=0; i<${#args[@]}; i++)); do
           if [[ "${args[$i]}" == "-l" || "${args[$i]}" == "--selector" ]]; then
@@ -126,8 +163,8 @@ case "${args[0]:-}" in
         fi
         exit 1
         ;;
-    esac
-    ;;
+      esac
+      ;;
   create)
     exit 0
     ;;
@@ -212,12 +249,16 @@ run_hcc_apply() {
   shift
   : > "$rollout"
   : > "$TMP/openssl-rand-count"
-  CAPTURE_FILE="$TMP/hcc-capture.json" RPC_CAPTURE_FILE="$TMP/rpc-secret.json" \
+  if ! CAPTURE_FILE="$TMP/hcc-capture.json" RPC_CAPTURE_FILE="$TMP/rpc-secret.json" \
     EDGE_CAPTURE_FILE="$TMP/mcp-host-edge-secret.json" ROLLOUT_LOG="$rollout" KUBE_DEPLOY_EXISTS=1 \
     PATH="$TMP/bin:$PATH" CONTEXT=gke-dev \
     OPENSSL_RAND_COUNT_FILE="$TMP/openssl-rand-count" \
     CLERUM_PROJECT_DIR="$TMP/sibling" "$@" \
-    bash "$TOKEN_SCRIPT" >"$TMP/stdout" 2>"$TMP/stderr"
+    bash "$TOKEN_SCRIPT" >"$TMP/stdout" 2>"$TMP/stderr"; then
+    cat "$TMP/stderr" >&2
+    cat "$TMP/stdout" >&2
+    return 1
+  fi
 }
 
 assert_other_consumers_restarted() {
@@ -444,7 +485,7 @@ if grep -q 'hcc-hmac unchanged' "$TMP/stderr"; then
   exit 1
 fi
 grep -q 'Rolling deployment control-plane/host-context-controller' "$TMP/stderr"
-grep -q 'host-context-controller' "$changed_rollout"
+grep -q 'control-plane rollout restart deployment/host-context-controller' "$changed_rollout"
 assert_no_secret_material
 
 wrc_only_rollout="$TMP/rollout-wrc-only.log"
@@ -502,8 +543,14 @@ KUBE_SECRET_RPC_EDGE="$EDGE_OLD" KUBE_SECRET_MCP_EDGE="$EDGE_OLD" \
   RPC_PROXY_MCP_HOST_EDGE_TOKEN=4444444444444444444444444444444444444444444444444444444444444444 \
   INTERNAL_CONTROL_JWT_HCC_HMAC_SECRET="$HCC_OLD" \
   INTERNAL_CONTROL_JWT_WRC_HMAC_SECRET="$WRC_OLD"
-grep -q 'Rolling HCC-managed MCP Host deployments' "$TMP/stderr"
-grep -q 'mcp-host .*rollout restart deployments' "$edge_rotation_rollout"
+proxy_restart_line="$(grep -n 'rpc-proxy rollout restart deployment/rpc-proxy' "$edge_rotation_rollout" | cut -d: -f1)"
+host_restart_line="$(grep -n 'mcp-host rollout restart deployment/chatllm' "$edge_rotation_rollout" | cut -d: -f1)"
+if [[ -z "$proxy_restart_line" || -z "$host_restart_line" || \
+      "$proxy_restart_line" -ge "$host_restart_line" ]]; then
+  echo "edge token rotation must use the ordered Proxy-before-Host coordinator" >&2
+  cat "$edge_rotation_rollout" >&2
+  exit 1
+fi
 assert_no_secret_material
 
 echo "inter-service token patch tests passed"

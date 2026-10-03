@@ -5,6 +5,7 @@ import * as os from 'os'
 import * as path from 'path'
 import type { RPCServer } from '../server'
 import { MAX_ARTIFACT_BYTES } from '../workflow/artifactPaths'
+import { withRpcProxyEdgeTestAuthentication } from './rpcProxyEdgeTestHeaders'
 
 const ORIGINAL_ENABLE_AUTH = process.env.CLERUM_ENABLE_AUTH
 const ORIGINAL_OUTPUT_DIR = process.env.CLERUM_OUTPUT_DIR
@@ -29,11 +30,11 @@ async function startServer(
   return { server, baseUrl: `http://127.0.0.1:${address.port}` }
 }
 
-const rpcEdgeHeaders = {
+const rpcEdgeHeaders = withRpcProxyEdgeTestAuthentication({
   'x-clerum-edge-caller': 'rpc-proxy',
   'x-clerum-edge-host-ref': 'chatllm',
   'x-clerum-edge-user-id': 'user-1',
-}
+})
 
 function makeOutputDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'clerum-runtime-artifact-test-'))

@@ -52,6 +52,7 @@ spec:
     metadata:
       labels:
         app: host-context-controller
+        clerum.io/host-runtime-edge-protocol: dedicated-header-v1
     spec:
       serviceAccountName: host-context-controller
       securityContext:
@@ -90,6 +91,8 @@ spec:
           value: mcp-host
         - name: CONTEXT_MAPPER_HOST_IMAGE
           value: clerum/mcp-host:0.9.5
+        - name: CONTEXT_MAPPER_HOST_RPC_PROXY_EDGE_PROTOCOL
+          value: dedicated-header-v1
         - name: CONTEXT_MAPPER_EGRESS_PROXY_IMAGE
           value: clerum/nginx-egress-proxy:0.1.0
         # Legacy JSON GFS mutation cap (bytes), passed through to generated gfsc

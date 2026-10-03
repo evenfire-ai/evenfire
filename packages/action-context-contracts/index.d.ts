@@ -3,6 +3,8 @@ export declare const ACTION_OPERATION_SCOPE_PREFIX: 'action:'
 export declare const ACTION_TARGET_HASH_PREFIX: 'ath2_'
 export declare const ACTION_BEHAVIOR_HASH_PREFIX: 'bh2_'
 export declare const ACTION_AUTHORITY_CHECKPOINT_PATH: '/api/v1/internal/action-authority/checkpoint'
+export declare const RPC_PROXY_MCP_HOST_EDGE_TOKEN_HEADER: 'x-clerum-rpc-proxy-edge-token'
+export declare const RPC_PROXY_MCP_HOST_EDGE_TOKEN_DEV_DEFAULT: 'dev-rpc-proxy-mcp-host-edge-token'
 export declare const ACTION_AUTHORITY_DESTINATION_KINDS: readonly ['host', 'mcp_server']
 export declare const ACCESS_RESOURCE_TYPES: readonly [
   'user',

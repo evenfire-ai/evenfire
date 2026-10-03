@@ -34,6 +34,20 @@ test('Host route deterministic validators preserve approval, model, and title ru
   })
 })
 
+test('RPC Proxy to MCP Host edge authentication uses one canonical dedicated header', () => {
+  assert.equal(
+    contracts.RPC_PROXY_MCP_HOST_EDGE_TOKEN_HEADER,
+    'x-clerum-rpc-proxy-edge-token'
+  )
+})
+
+test('local RPC Proxy and MCP Host share one explicit development credential', () => {
+  assert.equal(
+    contracts.RPC_PROXY_MCP_HOST_EDGE_TOKEN_DEV_DEFAULT,
+    'dev-rpc-proxy-mcp-host-edge-token'
+  )
+})
+
 test('overlong normalized titles skip unbounded code-point array materialization', () => {
   const originalFrom = Array.from
   let calls = 0

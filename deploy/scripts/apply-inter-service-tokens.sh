@@ -407,13 +407,14 @@ kctl -n channels patch secret workflow-approval-request-reader-credentials --typ
 # the Secret": an out-of-band kubectl patch of the HCC key, then a re-run that
 # preserve-or-generates from the Secret, will skip. Heal that with
 # FORCE_CONSUMER_RESTART=true.
+EDGE_PROXY_RESTART=false
+EDGE_HCC_RESTART=false
+EDGE_HOSTS_RESTART=false
 for pair in "control-plane:control-api" \
             "control-plane:codex-llm-proxy" \
             "control-plane:grok-llm-proxy" \
             "control-plane:workflow-recipes" \
-            "control-plane:host-context-controller" \
             "profiles:external-rest-api" \
-            "rpc-proxy:rpc-proxy" \
             "webhook-ingress:webhook-proxy" \
             "channels:clerum-workflow-approval-request-reader"; do
   ns="${pair%%:*}"
@@ -429,17 +430,45 @@ for pair in "control-plane:control-api" \
   fi
 done
 
+# HCC, RPC Proxy, and HCC-managed Hosts share a protocol transition boundary.
+# Defer those restarts to the cohort-aware coordinator; direct restarts here
+# could let token rotation bypass the strict-Host / compatible-Proxy order.
+if kctl -n control-plane get deploy host-context-controller >/dev/null 2>&1; then
+  if [ "$HCC_SECRET_CHANGED" = "true" ]; then
+    log "Rolling deployment control-plane/host-context-controller through the edge coordinator"
+    EDGE_HCC_RESTART=true
+  else
+    log "Skipping rollout of control-plane/host-context-controller: hcc-hmac unchanged"
+  fi
+fi
+if { [ "$RPC_MCP_HOST_EDGE_CHANGED" = "true" ] || \
+     [ "${FORCE_CONSUMER_RESTART:-}" = "true" ]; } && \
+   kctl -n rpc-proxy get deploy rpc-proxy >/dev/null 2>&1; then
+  EDGE_PROXY_RESTART=true
+fi
+
 # MCP Host consumes the edge token as an environment variable. Restart only
 # HCC-managed Host deployments when either Secret projection changes so every
 # pod reloads the same preserved credential used by RPC Proxy.
-if [ "$RPC_MCP_HOST_EDGE_CHANGED" = "true" ]; then
+if [ "$RPC_MCP_HOST_EDGE_CHANGED" = "true" ] || \
+   [ "${FORCE_CONSUMER_RESTART:-}" = "true" ]; then
   HOST_DEPLOYMENTS="$(kctl -n mcp-host get deployments \
     -l clerum.io/managed-by=host-context-controller -o name)"
   if [ -n "$HOST_DEPLOYMENTS" ]; then
-    log "Rolling HCC-managed MCP Host deployments to pick up the RPC Proxy edge token"
-    kctl -n mcp-host rollout restart deployments \
-      -l clerum.io/managed-by=host-context-controller >/dev/null
+    EDGE_HOSTS_RESTART=true
   fi
+fi
+
+if [ "$EDGE_PROXY_RESTART" = "true" ] || [ "$EDGE_HCC_RESTART" = "true" ] || \
+   [ "$EDGE_HOSTS_RESTART" = "true" ]; then
+  EDGE_ROLLOUT_CONTEXT="${CONTEXT:-$(kubectl config current-context)}"
+  [ -n "$EDGE_ROLLOUT_CONTEXT" ] || die "cannot resolve Kubernetes context for edge rollout"
+  EDGE_RESTART_ARGS=(restart-targets --context "$EDGE_ROLLOUT_CONTEXT")
+  [ "$EDGE_PROXY_RESTART" != "true" ] || EDGE_RESTART_ARGS+=(--restart-proxy)
+  [ "$EDGE_HCC_RESTART" != "true" ] || EDGE_RESTART_ARGS+=(--restart-hcc)
+  [ "$EDGE_HOSTS_RESTART" != "true" ] || EDGE_RESTART_ARGS+=(--restart-all-hosts)
+  bash "${REPO_ROOT}/scripts/minikube/rollout-rpc-proxy-edge-protocol.sh" \
+    "${EDGE_RESTART_ARGS[@]}"
 fi
 
 if kctl -n channels get deploy -l app=channel-reader >/dev/null 2>&1; then

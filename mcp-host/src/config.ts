@@ -1,6 +1,7 @@
 /**
  * Configuration settings loaded from environment variables.
  */
+import { RPC_PROXY_MCP_HOST_EDGE_TOKEN_DEV_DEFAULT } from '@clerum/action-context-contracts'
 import { FILE_REFERENCE_MAX_COUNT } from '@clerum/gfs-interaction-policy'
 import type { ApprovalConfig } from './core/extensions/approvalTypes'
 import type { GuardrailsConfig } from './core/guardrails/config'
@@ -18,9 +19,10 @@ import { HostSpec, McpServerInfo, MemoryConfig, ModelConfig, PersonalizationConf
 export const PLUGIN_WORKLOAD_SDK_CAPABILITIES = ['promptBridge', 'clientNotifications'] as const
 export type PluginWorkloadSdkCapability = (typeof PLUGIN_WORKLOAD_SDK_CAPABILITIES)[number]
 
-export function parseRpcProxyEdgeToken(raw: string | undefined, production: boolean): string {
-  const token = raw?.trim() ?? ''
-  if ((token && (token.length < 16 || token.length > 4096)) || (production && !token)) {
+export function parseRpcProxyEdgeToken(raw: string | undefined, required: boolean): string {
+  const supplied = raw?.trim() ?? ''
+  const token = supplied || (required ? '' : RPC_PROXY_MCP_HOST_EDGE_TOKEN_DEV_DEFAULT)
+  if ((token && (token.length < 16 || token.length > 4096)) || (required && !token)) {
     throw new Error('MCP_HOST_RPC_PROXY_EDGE_TOKEN is missing or invalid')
   }
   return token
@@ -736,7 +738,7 @@ if (!devMode) validateHccAuthorityTiming(contextMapperPollInterval, hccAuthority
 
 const rpcProxyEdgeToken = parseRpcProxyEdgeToken(
   process.env.MCP_HOST_RPC_PROXY_EDGE_TOKEN,
-  process.env.NODE_ENV === 'production'
+  !devMode
 )
 
 export const config: Config = {

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { AddressInfo } from 'net'
 import type { CancelHandler, CancelResult, RPCServer } from '../server'
+import { withRpcProxyEdgeTestAuthentication } from './rpcProxyEdgeTestHeaders'
 
 async function startServer(
   cancelResult: CancelResult | (() => CancelResult)
@@ -33,11 +34,11 @@ async function startServerWithHandler(
 }
 
 function rpcEdgeHeaders(userId = 'alice'): Record<string, string> {
-  return {
+  return withRpcProxyEdgeTestAuthentication({
     'x-clerum-edge-caller': 'rpc-proxy',
     'x-clerum-edge-host-ref': 'chatllm',
     'x-clerum-edge-user-id': userId,
-  }
+  })
 }
 
 describe('POST /v1/runtime/tasks/:taskId/cancel', () => {

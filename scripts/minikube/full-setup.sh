@@ -1722,6 +1722,8 @@ apply_fenced_recovery_overlay() {
 
 writer_recovery_state_load || exit 1
 prepare_refreshed_k8s_api_network_policy || exit 1
+RUBYOPT=--disable=gems ruby "${SCRIPT_DIR}/assert-rpc-proxy-edge-apply-safe.rb" \
+  --context "${PROFILE}" --overlay "${ACTIVE_MINIKUBE_RENDER_DIR}" || exit 1
 CONTEXT="${PROFILE}" bash "${PROJECT_DIR}/deploy/scripts/apply-gfs-writer-secret.sh"
 if [ "$RESET_DB" = true ]; then
   log "Database reset path — HCC cutover deferred until post-convergence verification"
@@ -2018,23 +2020,17 @@ if [ "$SKIP_BUILD" = false ]; then
     # created via the Control UI, not at bootstrap time.
     "control-plane:control-api"
     "control-plane:control-ui"
-    "control-plane:host-context-controller"
     "control-plane:workflow-recipes"
-    "mcp-host:chatllm"
     "mcp-server:mcp-proxy"
     "profiles:external-rest-api"
     "profiles:profile-ui"
-    "rpc-proxy:rpc-proxy"
   )
   if [ "$SKIP_UIS" = true ]; then
     REFRESH_DEPLOYS=(
       "control-plane:control-api"
-      "control-plane:host-context-controller"
       "control-plane:workflow-recipes"
-      "mcp-host:chatllm"
       "mcp-server:mcp-proxy"
       "profiles:external-rest-api"
-      "rpc-proxy:rpc-proxy"
     )
   fi
   RESTARTED=0
@@ -2043,9 +2039,12 @@ if [ "$SKIP_BUILD" = false ]; then
     name="${entry##*:}"
     if $KC get deployment "$name" -n "$ns" >/dev/null 2>&1; then
       $KC rollout restart deployment/"$name" -n "$ns" >/dev/null 2>&1 && \
-        RESTARTED=$((RESTARTED + 1))
+      RESTARTED=$((RESTARTED + 1))
     fi
   done
+  bash "${SCRIPT_DIR}/rollout-rpc-proxy-edge-protocol.sh" restart-targets \
+    --context "${PROFILE}" --restart-proxy --restart-hcc --restart-all-hosts || exit 1
+  RESTARTED=$((RESTARTED + 3))
   ok "Restarted ${RESTARTED} deployment(s) to pick up fresh image digests"
 fi
 

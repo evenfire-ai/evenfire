@@ -14,7 +14,11 @@ import {
   makeStubKc,
 } from '../test/__fixtures__/testMocks'
 import { asApiserverService } from './__tests__/asApiserverService'
-import { HostReconciler } from './hostReconciler'
+import {
+  HostReconciler,
+  RPC_PROXY_EDGE_PROTOCOL_LABEL,
+  RPC_PROXY_EDGE_PROTOCOL_V1,
+} from './hostReconciler'
 import { CREATE_KINDS, createsTotal, writeSkipsTotal } from './metrics'
 import type { HostCRD } from './types'
 
@@ -148,8 +152,26 @@ describe('Host read-first Service and Deployment contracts', () => {
   })
 
   it('uses state resolved after GET404 in the first Deployment POST', async () => {
-    const { apps, reconciler } = fixture()
+    const { core, apps, reconciler } = fixture()
     apps.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 })
+    apps.readNamespacedDeployment.mockResolvedValueOnce({
+      metadata: { generation: 1 },
+      spec: {
+        replicas: 1,
+        template: {
+          metadata: { labels: { [RPC_PROXY_EDGE_PROTOCOL_LABEL]: RPC_PROXY_EDGE_PROTOCOL_V1 } },
+        },
+      },
+      status: { observedGeneration: 1, updatedReplicas: 1, readyReplicas: 1, availableReplicas: 1 },
+    } as k8s.V1Deployment)
+    core.listNamespacedPod.mockResolvedValueOnce({
+      items: [
+        {
+          metadata: { labels: { [RPC_PROXY_EDGE_PROTOCOL_LABEL]: RPC_PROXY_EDGE_PROTOCOL_V1 } },
+          status: { phase: 'Running', conditions: [{ type: 'Ready', status: 'True' }] },
+        },
+      ],
+    })
     const resolveState = vi.fn(async () => {
       expect(apps.readNamespacedDeployment).toHaveBeenCalledOnce()
       return {

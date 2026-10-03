@@ -831,12 +831,36 @@ if [[ "${cluster_changed}" == "true" ]]; then
   assert_workflow_gateway_prompt_bridge_finalization_route
   assert_hcc_gateway_np08_routes
 
-  rollout_if_present control-plane host-context-controller
+  hcc_edge_protocol="$(${KC} get deployment host-context-controller -n control-plane -o json | \
+    jq -er '[.spec.template.spec.containers[]?.env[]? | \
+      select(.name == "CONTEXT_MAPPER_HOST_RPC_PROXY_EDGE_PROTOCOL") | .value] | \
+      if length == 1 then .[0] else error("protocol selector must be explicit") end')"
+  if [[ "${hcc_edge_protocol}" == "dedicated-header-v1" ]]; then
+    # Upgrade order: the producer cohort must be fully Ready before the strict
+    # HCC can converge any Host Deployment to the authenticated protocol.
+    rollout_if_present rpc-proxy rpc-proxy
+    bash "${SCRIPT_DIR}/rpc-proxy-edge-rollout-gate.sh" wait-proxy \
+      --context "${PROFILE}" --timeout-seconds 120
+    rollout_if_present control-plane host-context-controller
+  elif [[ "${hcc_edge_protocol}" == "legacy-headers" ]]; then
+    # Rollback order is reverse: HCC reconciles Hosts to the compatible
+    # protocol, then the read-only gate must see no strict Host before Proxy.
+    rollout_if_present control-plane host-context-controller
+  else
+    log "ERROR: unsupported HCC Host edge protocol selector; refusing rollout"
+    exit 1
+  fi
   rollout_if_present control-plane workflow-recipes
   rollout_if_present control-plane control-ui
   rollout_if_present profiles external-rest-api
-  rollout_if_present rpc-proxy rpc-proxy
-  rollout_namespace_deployments mcp-host
+  if [[ "${hcc_edge_protocol}" == "legacy-headers" ]]; then
+    rollout_namespace_deployments mcp-host
+    bash "${SCRIPT_DIR}/rpc-proxy-edge-rollout-gate.sh" wait-hosts-legacy \
+      --context "${PROFILE}" --timeout-seconds 120
+    rollout_if_present rpc-proxy rpc-proxy
+  else
+    rollout_namespace_deployments mcp-host
+  fi
   rollout_if_present channels clerum-channel-reader
   rollout_if_present channels clerum-workflow-approval-request-reader
   if gate_needs_registry; then

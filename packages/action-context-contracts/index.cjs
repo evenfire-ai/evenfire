@@ -7,6 +7,8 @@ const ACTION_OPERATION_SCOPE_PREFIX = 'action:'
 const ACTION_TARGET_HASH_PREFIX = 'ath2_'
 const ACTION_BEHAVIOR_HASH_PREFIX = 'bh2_'
 const ACTION_AUTHORITY_CHECKPOINT_PATH = '/api/v1/internal/action-authority/checkpoint'
+const RPC_PROXY_MCP_HOST_EDGE_TOKEN_HEADER = 'x-clerum-rpc-proxy-edge-token'
+const RPC_PROXY_MCP_HOST_EDGE_TOKEN_DEV_DEFAULT = 'dev-rpc-proxy-mcp-host-edge-token'
 const ACTION_AUTHORITY_DESTINATION_KINDS = Object.freeze(['host', 'mcp_server'])
 const MAX_TARGET_FIELDS = 12
 const MAX_TARGET_VALUE_LENGTH = 1024
@@ -1222,6 +1224,8 @@ function classifyMcpCallerOperation(input) {
 module.exports = {
   ACTION_CONTEXT_VERSION,
   ACTION_AUTHORITY_CHECKPOINT_PATH,
+  RPC_PROXY_MCP_HOST_EDGE_TOKEN_HEADER,
+  RPC_PROXY_MCP_HOST_EDGE_TOKEN_DEV_DEFAULT,
   ACTION_AUTHORITY_DESTINATION_KINDS,
   ACTION_BEHAVIOR_HASH_PREFIX,
   ACCESS_RESOURCE_TYPES,

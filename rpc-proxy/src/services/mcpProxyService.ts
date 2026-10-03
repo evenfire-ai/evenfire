@@ -1,3 +1,4 @@
+import { RPC_PROXY_MCP_HOST_EDGE_TOKEN_HEADER } from '@clerum/action-context-contracts'
 import type { AuthorizedActionV2 } from '../actionAuthorityV2.js'
 import { config } from '../config.js'
 import { ResolvedServerConnection } from '../types.js'
@@ -120,11 +121,12 @@ export async function resolveHostConnectionForUser(
 
   const headers: Record<string, string> = {
     ...host.headers,
-    authorization: `Bearer ${config.mcpHostEdgeToken}`,
     'x-clerum-edge-caller': 'rpc-proxy',
     'x-clerum-edge-host-ref': hostRef,
     'x-service-token': 'rpc-proxy',
   }
+  delete headers.authorization
+  headers[RPC_PROXY_MCP_HOST_EDGE_TOKEN_HEADER] = config.mcpHostEdgeToken
   if (edgeContext?.actionContextV2) {
     headers['x-clerum-edge-action-context'] = edgeContext.actionContextV2
   } else {
@@ -157,12 +159,13 @@ export async function resolveArtifactReadHostConnectionForUser(
 
   const headers: Record<string, string> = {
     ...host.headers,
-    authorization: `Bearer ${config.mcpHostEdgeToken}`,
     'x-clerum-edge-caller': 'rpc-proxy',
     'x-clerum-edge-host-ref': hostRef,
     'x-clerum-edge-user-id': userId,
     'x-service-token': 'rpc-proxy',
   }
+  delete headers.authorization
+  headers[RPC_PROXY_MCP_HOST_EDGE_TOKEN_HEADER] = config.mcpHostEdgeToken
   if (edgeContext?.teamId) headers['x-clerum-edge-team-id'] = edgeContext.teamId
   headers['x-clerum-edge-access-scope'] =
     edgeContext?.accessScope ?? (edgeContext?.teamId ? 'team' : 'user')

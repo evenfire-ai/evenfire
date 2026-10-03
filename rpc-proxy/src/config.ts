@@ -1,3 +1,5 @@
+import { RPC_PROXY_MCP_HOST_EDGE_TOKEN_DEV_DEFAULT } from '@clerum/action-context-contracts'
+
 type Config = {
   port: number
   corsOrigin: string[] | '*'
@@ -106,7 +108,7 @@ export function parseRpcProxyMcpHostEdgeToken(
   production: boolean
 ): string {
   const supplied = raw?.trim() ?? ''
-  const value = supplied || (production ? '' : 'dev-rpc-proxy-mcp-host-edge-token')
+  const value = supplied || (production ? '' : RPC_PROXY_MCP_HOST_EDGE_TOKEN_DEV_DEFAULT)
   if (!value)
     throw new Error('Missing required environment variable: RPC_PROXY_MCP_HOST_EDGE_TOKEN')
   assertNotPlaceholder('RPC_PROXY_MCP_HOST_EDGE_TOKEN', value)

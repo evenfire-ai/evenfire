@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { AddressInfo } from 'net'
 import { createHash } from 'node:crypto'
+import { withRpcProxyEdgeTestAuthentication } from './rpcProxyEdgeTestHeaders'
 
 type StartResult = {
   server: any
@@ -23,11 +24,11 @@ async function startServer(
 }
 
 function rpcEdgeHeaders(userId = 'user-1'): Record<string, string> {
-  return {
+  return withRpcProxyEdgeTestAuthentication({
     'x-clerum-edge-caller': 'rpc-proxy',
     'x-clerum-edge-host-ref': 'chatllm',
     'x-clerum-edge-user-id': userId,
-  }
+  })
 }
 
 function channelReaderEdgeHeaders(
@@ -105,7 +106,7 @@ describe('RPCServer v1 runtime interface contract', () => {
       })
       expect(response.status).toBe(401)
       await expect(response.json()).resolves.toEqual({
-        error: 'Missing rpc edge caller context',
+        error: 'Missing authenticated rpc-proxy service context',
       })
     } finally {
       await server.stop()

@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { resolveHostConnectionForUser, resolveServerConnectionForUser } from './mcpProxyService.js'
+import {
+  resolveArtifactReadHostConnectionForUser,
+  resolveHostConnectionForUser,
+  resolveServerConnectionForUser,
+} from './mcpProxyService.js'
 
 describe('v2 checkpoint destination routing', () => {
   afterEach(() => vi.restoreAllMocks())
@@ -19,7 +23,7 @@ describe('v2 checkpoint destination routing', () => {
       url: 'http://chatllm.mcp-host.svc.cluster.local:8080',
       headers: {
         'x-clerum-edge-action-context': 'trusted-edge',
-        authorization: expect.stringMatching(/^Bearer .{16,}$/),
+        'x-clerum-rpc-proxy-edge-token': expect.stringMatching(/^.{16,}$/),
         'x-service-token': 'rpc-proxy',
       },
     })
@@ -37,6 +41,35 @@ describe('v2 checkpoint destination routing', () => {
         },
       })
     ).rejects.toThrow('Invalid v2 host destination binding')
+  })
+
+  it('uses the same dedicated edge credential header for artifact-read connections', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          userId: 'user',
+          hostRef: 'chatllm',
+          url: 'http://chatllm.mcp-host.svc.cluster.local:8080',
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      )
+    )
+
+    const connection = await resolveArtifactReadHostConnectionForUser(
+      'user',
+      'chatllm',
+      'rpc-access-token'
+    )
+
+    expect(connection).toMatchObject({
+      headers: {
+        'x-clerum-rpc-proxy-edge-token': expect.stringMatching(/^.{16,}$/),
+        'x-clerum-edge-caller': 'rpc-proxy',
+        'x-service-token': 'rpc-proxy',
+      },
+    })
+    expect(connection?.headers.authorization).toBeUndefined()
+    expect(fetchSpy).toHaveBeenCalledOnce()
   })
 
   it('routes MCP from the validated checkpoint without the legacy catalog cache', async () => {

@@ -9,7 +9,8 @@ assets.
 
 - All platform services deployed to a real cluster (not a single dev-mode `mcp-host`)
 - JWT auth chain on the external edges (desktop → rpc-proxy, service → control-api);
-  `mcp-host` runtime routes still use edge trust headers, restricted by NetworkPolicy
+  RPC Proxy → MCP Host runtime calls also require the dedicated shared edge credential,
+  caller/service markers, and the existing Host/action bindings
 - Default-deny NetworkPolicies enforced (Calico or equivalent CNI with policy)
 - Secrets and LLM keys in cluster Secrets / your secret manager
 - Non-root, capability-dropped workloads; coordinator images digest-pinned and
@@ -36,6 +37,14 @@ kubectl apply -f ./charts/clerum-crds/crds/
 ```
 
 ## Recommended rollout order
+
+For the authenticated RPC Proxy → MCP Host protocol, production must upgrade
+compatible RPC Proxy replicas before strict HCC/Host behavior and roll HCC/Hosts
+back before rolling Proxy back. The in-repository executable barrier currently
+covers the supported Minikube path. Production GCP rollout/rollback orchestration
+is owned by `keyper-labs/evenfire-infra`; this OSS repository does not publish its
+exact workflow path. Do not enable the strict production Host protocol until that
+orchestrator enforces both directions of the barrier.
 
 1. **Cluster prerequisites** — CNI with NetworkPolicy, storage classes as needed,
    registry pull credentials.

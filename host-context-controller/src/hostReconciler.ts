@@ -98,6 +98,36 @@ export type { EffectiveHostLifecycle } from './statelessLifecycle.types'
 const HOST_GROUP = 'clerum.io'
 const HOST_VERSION = 'v1alpha1'
 const HOST_PLURAL = 'hosts'
+export const RPC_PROXY_EDGE_PROTOCOL_LABEL = 'clerum.io/rpc-proxy-edge-protocol'
+export const RPC_PROXY_EDGE_PROTOCOL_V1 = 'dedicated-header-v1'
+
+export function rpcProxyProtocolCohortIsReady(
+  deployment: k8s.V1Deployment,
+  pods: k8s.V1Pod[]
+): boolean {
+  const desired = deployment.spec?.replicas ?? 1
+  const generation = deployment.metadata?.generation
+  return (
+    desired > 0 &&
+    typeof generation === 'number' &&
+    (deployment.status?.observedGeneration ?? 0) >= generation &&
+    deployment.status?.updatedReplicas === desired &&
+    deployment.status?.readyReplicas === desired &&
+    deployment.status?.availableReplicas === desired &&
+    deployment.spec?.template?.metadata?.labels?.[RPC_PROXY_EDGE_PROTOCOL_LABEL] ===
+      RPC_PROXY_EDGE_PROTOCOL_V1 &&
+    pods.length === desired &&
+    pods.every(
+      pod =>
+        !pod.metadata?.deletionTimestamp &&
+        pod.metadata?.labels?.[RPC_PROXY_EDGE_PROTOCOL_LABEL] === RPC_PROXY_EDGE_PROTOCOL_V1 &&
+        pod.status?.phase === 'Running' &&
+        pod.status.conditions?.some(
+          condition => condition.type === 'Ready' && condition.status === 'True'
+        )
+    )
+  )
+}
 
 /**
  * Lane label for a Host reconcile, used only for low-cardinality telemetry:
@@ -674,6 +704,22 @@ export class HostReconciler {
         })
       },
     })
+  }
+
+  private async assertRpcProxyEdgeCohortReady(): Promise<void> {
+    const deployment = await this.appsApi.readNamespacedDeployment({
+      name: 'rpc-proxy',
+      namespace: config.rpcProxyNamespace,
+    })
+    const pods = await this.coreApi.listNamespacedPod({
+      namespace: config.rpcProxyNamespace,
+      labelSelector: 'app=rpc-proxy',
+    })
+    if (!rpcProxyProtocolCohortIsReady(deployment, pods.items ?? [])) {
+      throw new Error(
+        'RPC Proxy edge protocol cohort is not fully ready; strict MCP Host rollout is blocked'
+      )
+    }
   }
 
   /** CustomObjects API client for Host /status writes (lazily constructed). */
@@ -3361,6 +3407,9 @@ export class HostReconciler {
       [MANAGED_BY_LABEL]: MANAGED_BY_VALUE,
       [HOST_LABEL]: host.name,
       [CONTEXT_LABEL]: host.spec.contextRef,
+      ...(config.hostRpcProxyEdgeProtocol
+        ? { [RPC_PROXY_EDGE_PROTOCOL_LABEL]: config.hostRpcProxyEdgeProtocol }
+        : {}),
     }
 
     const isDesktop = !!(host.spec.desktop?.browser || host.spec.desktop?.x11)
@@ -4032,6 +4081,7 @@ export class HostReconciler {
     revalidate?: () => void
   ): Promise<boolean> {
     let observedDeployment: k8s.V1Deployment | undefined
+    let deploymentBeingReplaced: k8s.V1Deployment | undefined
     let holdingTemplate = false
     let applied = true
     const buildDesiredDeployment = async (): Promise<k8s.V1Deployment | null> => {
@@ -4094,6 +4144,14 @@ export class HostReconciler {
           applied = false
           return
         }
+        if (
+          config.hostRpcProxyEdgeProtocol === RPC_PROXY_EDGE_PROTOCOL_V1 &&
+          deployment.metadata?.labels?.[RPC_PROXY_EDGE_PROTOCOL_LABEL] ===
+            RPC_PROXY_EDGE_PROTOCOL_V1
+        ) {
+          await this.assertRpcProxyEdgeCohortReady()
+          revalidate?.()
+        }
         return observeCreate('Deployment', () =>
           this.appsApi.createNamespacedDeployment({ namespace: host.namespace, body: deployment })
         )
@@ -4108,17 +4166,30 @@ export class HostReconciler {
             if (!desired) throw new Error('Deployment disappeared during preservation')
             return desired
           },
-          mergeExisting: (desired, existing) =>
-            holdingTemplate ? desired : preserveHostDeploymentAnnotations(desired, existing),
+          mergeExisting: (desired, existing) => {
+            deploymentBeingReplaced = existing
+            return holdingTemplate ? desired : preserveHostDeploymentAnnotations(desired, existing)
+          },
           isUpToDate: deploymentMatchesDesired,
           mutationAllowed,
           read,
-          replace: body =>
-            this.appsApi.replaceNamespacedDeployment({
+          replace: async body => {
+            if (
+              config.hostRpcProxyEdgeProtocol === RPC_PROXY_EDGE_PROTOCOL_V1 &&
+              deploymentBeingReplaced?.spec?.template?.metadata?.labels?.[
+                RPC_PROXY_EDGE_PROTOCOL_LABEL
+              ] !== RPC_PROXY_EDGE_PROTOCOL_V1 &&
+              body.metadata?.labels?.[RPC_PROXY_EDGE_PROTOCOL_LABEL] === RPC_PROXY_EDGE_PROTOCOL_V1
+            ) {
+              await this.assertRpcProxyEdgeCohortReady()
+              revalidate?.()
+            }
+            return this.appsApi.replaceNamespacedDeployment({
               namespace: host.namespace,
               name: host.name,
               body,
-            }),
+            })
+          },
         }),
     })
     return applied && this.resourceApplySucceeded(result)

@@ -2,6 +2,7 @@ import type { NextFunction, Request, Response } from 'express'
 import { createHash, timingSafeEqual } from 'node:crypto'
 import {
   type ActionOperationId,
+  RPC_PROXY_MCP_HOST_EDGE_TOKEN_HEADER,
   type TrustedEdgeActionContextV2,
   canonicalActionTargetJson,
   hashActionTarget,
@@ -52,14 +53,11 @@ function cleanHeader(req: Request, name: string): string | undefined {
 function rpcProxyServiceAuthenticated(req: Request): boolean {
   const expected = config.rpcProxyEdgeToken
   const service = cleanHeader(req, EDGE_SERVICE_HEADER)
-  const authorization = cleanHeader(req, 'authorization') ?? ''
-  const match = /^Bearer\s+(.+)$/i.exec(authorization)
-  const token = match?.[1]?.trim() ?? ''
+  const token = cleanHeader(req, RPC_PROXY_MCP_HOST_EDGE_TOKEN_HEADER) ?? ''
 
-  // Local non-production fixtures may omit deployment credentials. Production
-  // startup requires the configured token, so a deployed guard never takes this
-  // compatibility branch.
-  if (!expected) return process.env.NODE_ENV !== 'production' && !authorization && !service
+  // Configuration supplies either the projected cluster secret or the one
+  // explicit local development value. Never accept caller/context headers alone.
+  if (!expected) return false
   if (service !== 'rpc-proxy' || token.length < 16 || token.length > 4096) return false
   const actualBytes = Buffer.from(token)
   const expectedBytes = Buffer.from(expected)
@@ -268,7 +266,7 @@ export function runtimeEdgeGuard(
       res.status(401).json({ error: 'Missing authenticated rpc-proxy service context' })
       return
     }
-    if (req.headers.authorization && assertedCaller !== 'rpc-proxy') {
+    if (req.headers.authorization) {
       res
         .status(401)
         .json({ error: 'Authorization is not accepted on this direct mcp-host runtime route' })

@@ -296,11 +296,13 @@ Desktop App
       validates rpc_token  (issuer=control-api, aud=rpc-proxy)
       → control-api:8090  GET /rpc/access/users/{id}/mcp-hosts/chatllm
           ← { url: "http://chatllm.mcp-host.svc:8080", hostRef: "chatllm" }
-      → chatllm:8080  GET /v1/runtime/status   ← NO Authorization header
+      → chatllm:8080  GET /v1/runtime/status   ← dedicated service-edge header
           x-clerum-edge-caller: rpc-proxy
+          x-clerum-rpc-proxy-edge-token: <existing RPC Proxy → MCP Host secret>
+          x-service-token: rpc-proxy
           x-clerum-edge-host-ref: chatllm
           x-clerum-edge-user-id: <userId>
-          mcp-host's runtimeEdgeGuard validates the edge headers
+          mcp-host's runtimeEdgeGuard validates the dedicated credential and bindings
           ← status JSON
 ```
 
@@ -309,9 +311,29 @@ Desktop App
 | Invariant                    | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Same RSA key**             | `rpc-proxy-secrets.RPC_PROXY_JWT_PUBLIC_KEY` == `mcp-host-config.CLERUM_AUTH_JWT_PUBLIC_KEY` == `gfs-config.jwt-public-key` == public pair of `control-api-secrets.CONTROL_API_RPC_JWT_PRIVATE_KEY`. `scripts/minikube/generate-keys.sh` writes the two Secrets into `deploy/minikube/secrets/jwt-signing-keys.yaml`; the ConfigMap values are **not** in that manifest — `scripts/minikube/sync-auth-key.sh` copies the public key from the live `rpc-proxy-secrets` Secret into both live consumer ConfigMaps. |
-| **Token stops at rpc-proxy** | The RPC token (`aud: "rpc-proxy"`) is validated by rpc-proxy and is NOT forwarded. `/v1/runtime/*` routes on mcp-host are wrapped in `runtimeEdgeGuard`, which returns `401 Authorization is not accepted on this direct mcp-host runtime route` if an `Authorization` header is present.                                                                                                                                                                                                                        |
+| **Token stops at rpc-proxy** | The RPC token (`aud: "rpc-proxy"`) is validated by rpc-proxy and is NOT forwarded. The existing Proxy → Host edge credential uses `x-clerum-rpc-proxy-edge-token`, never HTTP `Authorization`. Host direct runtime routes continue to reject Authorization; the credential is accepted only for asserted `rpc-proxy` calls with the exact service marker and Host/action bindings. |
 | **Issuer**                   | All RPC tokens have `iss: "control-api"`. mcp-host must have `CLERUM_AUTH_JWT_ISSUER=control-api`                                                                                                                                                                                                                                                                                                                                                                                                                |
-| **Edge headers**             | `rpc-proxy/src/services/controlApiRestService.ts` returns `headers: {}` on purpose; `mcpProxyService.ts` then adds `x-clerum-edge-caller: rpc-proxy`, `x-clerum-edge-host-ref`, `x-clerum-edge-user-id`. Adding an `Authorization` header here would make every mcp-host call fail 401.                                                                                                                                                                                                                          |
+| **Edge headers**             | `rpc-proxy/src/services/controlApiRestService.ts` returns `headers: {}` on purpose. Both Host connection producers in `mcpProxyService.ts` add the canonical dedicated edge credential header plus `x-service-token: rpc-proxy` and the existing caller/context headers. They explicitly remove inherited Authorization so the new Proxy remains compatible with an old Host during rolling deployment. |
+
+### Authenticated Proxy/Host rollout order
+
+The RPC Proxy Deployment pod template carries the non-secret
+`clerum.io/rpc-proxy-edge-protocol=dedicated-header-v1` cohort marker. HCC
+requires the full current Ready Proxy cohort before it writes any strict Host
+Deployment. `make minikube-restart-all` and the pre-gate incremental path use the
+same bounded ordering: Proxy, cohort proof, HCC, then Hosts. Do not manually
+roll a Proxy back while strict Host Deployments remain. The supported local
+rollback wrapper restores HCC/Hosts first and only then the Proxy:
+
+```bash
+MINIKUBE_PROFILE=<owned-profile> HCC_TO_REVISION=<legacy-hcc-revision> \
+  RPC_PROXY_TO_REVISION=<legacy-proxy-revision> make minikube-rollback-rpc-proxy
+```
+
+The wrapper uses the branch-owned mutation lease, explicit Kubernetes context,
+bounded rollout waits, and fails closed if a strict Host Deployment or Pod is
+still present. Production GCP rollout/rollback orchestration is owned by the
+separate `keyper-labs/evenfire-infra` repository.
 
 ### GFS Upload v2 local/T2 profile
 
@@ -387,8 +409,12 @@ CLERUM_AUTH_JWT_PUBLIC_KEY    = <same public key as rpc-proxy-secrets>
 > `POST /v1/runtime/compact` (scope `host:compaction:invoke`). These use
 > `requireScope`, which verifies an RS256 token issued by control-api with
 > `aud: "rpc-proxy"` — hence the audience value above. Every other
-> `/v1/runtime/*` route is edge-header authenticated and **rejects** an
-> `Authorization` header with 401.
+> `/v1/runtime/*` route is protected by the runtime edge guard. RPC Proxy
+> authenticates with the existing edge credential in
+> `x-clerum-rpc-proxy-edge-token`; direct non-Proxy callers cannot use the
+> caller/context headers as authentication, and their Authorization header is
+> rejected. The edge credential is never sent in Authorization, so legacy Hosts
+> remain compatible during a rolling Proxy upgrade.
 
 ---
 
@@ -467,9 +493,8 @@ docker build -t ghcr.io/evenfire-ai/rpc-proxy:<tag> rpc-proxy/
 #    local mode:
 docker build -t clerum/rpc-proxy:test rpc-proxy/
 
-# 4. Restart deployment
-kubectl rollout restart deployment/rpc-proxy -n rpc-proxy --context clerum-test
-kubectl rollout status deployment/rpc-proxy -n rpc-proxy --timeout=60s
+# 4. Restart through the ordered edge-protocol coordinator
+MINIKUBE_PROFILE=clerum-test make minikube-restart-deploy SVC=rpc-proxy NS=rpc-proxy
 ```
 
 > A multi-node profile (`MINIKUBE_MULTI_NODE=true`) has no shared daemon to
@@ -480,7 +505,7 @@ kubectl rollout status deployment/rpc-proxy -n rpc-proxy --timeout=60s
 
 ```bash
 kubectl apply -f deploy/overlays/minikube/configmaps/rpc-proxy-config.yaml --context clerum-test
-kubectl rollout restart deployment/rpc-proxy -n rpc-proxy --context clerum-test
+MINIKUBE_PROFILE=clerum-test make minikube-restart-deploy SVC=rpc-proxy NS=rpc-proxy
 ```
 
 > **Important**: Pods read ConfigMaps **at startup** (via `envFrom`).
@@ -940,17 +965,10 @@ make minikube-logs SVC=control-api NS=control-plane
 
 ### End-to-End Auth Test From Inside the Cluster
 
-`/v1/runtime/status` is edge-header authenticated, not bearer authenticated: it
-**rejects** an `Authorization` header with 401. Reproduce what rpc-proxy sends:
-
-```bash
-kubectl exec -n mcp-host deployment/chatllm -- \
-  wget -qO- \
-  --header="x-clerum-edge-caller: rpc-proxy" \
-  --header="x-clerum-edge-host-ref: chatllm" \
-  --header="x-clerum-edge-user-id: test-user" \
-  http://chatllm.mcp-host.svc.cluster.local:8080/v1/runtime/status
-```
+Do not test a protected Host route by hand-assembling caller/context headers or
+copying the edge credential out of its Secret. Use an authenticated RPC Proxy
+request with a supported user session. A direct runtime request is expected to
+fail because caller/context headers are not service authentication.
 
 `rpc-proxy-secrets` holds only public/verification material plus the control-api
 service token (`RPC_PROXY_JWT_PUBLIC_KEY`, `RPC_PROXY_CONTROL_API_SERVICE_TOKEN`).
@@ -1040,8 +1058,9 @@ make minikube-restart-all                 # Restart all pods to pick up new keys
 | Symptom                                                                      | Cause                                                                                                                                                                                                                                                                              | Solution                                                                                                                                                                         |
 | ---------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `401: "Invalid token"` from chatllm                                          | Only the two bearer routes (`GET /v1/runtime/sessions/search`, `POST /v1/runtime/compact`) can emit this — `requireScope` rejected the RS256 token (expired, wrong issuer, or wrong audience). The SSE poll of `/v1/runtime/status` carries no bearer token and cannot produce it. | Verify `CLERUM_AUTH_JWT_ISSUER=control-api` and `CLERUM_AUTH_JWT_AUDIENCE=rpc-proxy` in mcp-host-config, and that the public key matches. Restart chatllm.                       |
-| `401: "Authorization is not accepted on this direct mcp-host runtime route"` | Something added an `Authorization` header to a `/v1/runtime/*` call. `controlApiRestService.ts` returns `headers: {}` on purpose                                                                                                                                                   | Do not forward the RPC token to mcp-host. Runtime calls must carry only the `x-clerum-edge-*` headers                                                                            |
-| `401: "Missing runtime edge caller context"` from chatllm                    | Call reached mcp-host without a valid `x-clerum-edge-caller` (must be `rpc-proxy`, `channel-reader` or `workflow-approval-request-reader`)                                                                                                                                         | Call through rpc-proxy instead of hitting mcp-host directly                                                                                                                      |
+| `401: "Missing authenticated rpc-proxy service context"` from chatllm        | The RPC Proxy edge credential is missing/wrong, the required service marker is absent, or the credential was placed in Authorization instead of the dedicated header.                                                                                                           | Preserve the existing edge Secret; route through RPC Proxy and use the dedicated authenticated producer path. Do not trust caller headers alone.                                |
+| `401: "Authorization is not accepted on this direct mcp-host runtime route"` | A non-Proxy direct runtime caller sent Authorization.                                                                                                                                                                                                                             | Keep Authorization out of direct runtime calls; RPC Proxy uses the separate dedicated edge header.                                                                              |
+| `401: "Missing runtime edge caller context"` from chatllm                    | Call reached mcp-host without an allowed caller context.                                                                                                                                                                                                                         | Call through RPC Proxy or the intended independent service caller instead of hand-assembling Host headers.                                                                       |
 | `401: "Invalid token"` in rpc-proxy when opening stream                      | Session token expired in Desktop App                                                                                                                                                                                                                                               | Close and reopen the app, do logout/login                                                                                                                                        |
 | `403: "Forbidden: user cannot access this host"`                             | hostRef does not match what is authorized in control-api, or the Host CRD does not exist                                                                                                                                                                                           | Verify `kubectl get host chatllm -n mcp-host`, verify host assignment to team                                                                                                    |
 | Pod in `ImagePullBackOff`                                                    | The cluster does not hold an image it was told to run                                                                                                                                                                                                                              | `make minikube-verify-images` to see the mode and the missing refs, then `make minikube-pull-images` (ghcr) or `make minikube-build-images` (local). See the section above.      |
@@ -1078,11 +1097,8 @@ make minikube-setup ARGS="--force-keys"
 `make minikube-sync-auth-key`. **After regenerating keys**, restart the consumers:
 
 ```bash
-# Restart all pods that use the keys:
-kubectl rollout restart deployment/rpc-proxy -n rpc-proxy
-kubectl rollout restart deployment/chatllm -n mcp-host
-kubectl rollout restart deployment/control-api -n control-plane
-kubectl rollout restart deployment/external-rest-api -n profiles
+# Restart through the ordered edge-protocol coordinator and restart other services:
+MINIKUBE_PROFILE=clerum-test make minikube-restart-all
 ```
 
 The chained auth-key sync restarts the GFSC writer and reader itself when their
