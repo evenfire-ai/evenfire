@@ -69,8 +69,8 @@ afterEach(() => {
 
 // Real ChatStore-backed effects can exceed Testing Library's 1-second default
 // on loaded local/T0 runners. This follows the #958 wiring-timeout contract.
-function waitFor<T>(callback: () => T | Promise<T>) {
-  return rtlWaitFor(callback, { timeout: ASYNC_WAIT_TIMEOUT_MS })
+function waitFor<T>(callback: () => T | Promise<T>, options?: Parameters<typeof rtlWaitFor>[1]) {
+  return rtlWaitFor(callback, { timeout: ASYNC_WAIT_TIMEOUT_MS, ...options })
 }
 
 const image: ComposerImageAttachment = {
