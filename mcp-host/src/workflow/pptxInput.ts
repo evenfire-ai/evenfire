@@ -184,10 +184,21 @@ const ORDERED_MARKER = /^\d{1,9}[.)]\s+/
 const NESTED_ITEM = /^[ \t]+(?:[-*+•]|\d{1,9}[.)])\s/
 
 /**
+ * The number of a numbered list marker, when it could count an item of a list
+ * this long: "2024. A record year" in a short list is a year, not a position.
+ */
+function countsItem(text: string, items: number): boolean {
+  const n = /^(\d{1,9})[.)]\s/.exec(text)
+  return !!n && Number(n[1]) <= items
+}
+
+/**
  * A list of text items. One string is read as one item per line. Slides show
  * one level of bullets, so a nested item joins the first level, and the result
- * says so. Numbers are taken off only when every item is a list item: a lone
- * "2024. A record year" keeps its year.
+ * says so. Numbers are taken off the first level only when every item is a
+ * list item and every number could count one of them, and off a nested item
+ * when its number could: a lone "2024. A record year", or two years in a row,
+ * keep their years.
  */
 export function readStringList(
   value: unknown,
@@ -212,7 +223,12 @@ export function readStringList(
     .map((item, i) => ({ text: readText(item, at(i), max, ctx), nested: nested[i] }))
     .filter((item): item is { text: string; nested: boolean } => !!item.text)
   const marked = (text: string) => LIST_MARKER.test(text) || ORDERED_MARKER.test(text)
-  const numbered = items.length > 1 && items.every(item => marked(item.text))
+  const bareOf = (text: string) => text.replace(LIST_MARKER, '')
+  const counts = (text: string) => countsItem(bareOf(text), items.length)
+  const numbered =
+    items.length > 1 &&
+    items.every(item => marked(item.text)) &&
+    items.every(item => item.nested || !ORDERED_MARKER.test(bareOf(item.text)) || counts(item.text))
   const first = nested.indexOf(true)
   if (first >= 0) {
     ctx.warnings.push(
@@ -222,8 +238,8 @@ export function readStringList(
   }
   return items
     .map(({ text, nested }) => {
-      const bare = text.replace(LIST_MARKER, '')
-      return numbered || nested ? bare.replace(ORDERED_MARKER, '') : bare
+      const bare = bareOf(text)
+      return (nested ? counts(text) : numbered) ? bare.replace(ORDERED_MARKER, '') : bare
     })
     .filter(Boolean)
 }

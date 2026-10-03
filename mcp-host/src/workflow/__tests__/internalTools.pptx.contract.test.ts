@@ -260,6 +260,48 @@ describe('clerum__generate_pptx — execute() answers malformed input by field',
     expect(body.paragraphs).toEqual(['one', 'two'])
   })
 
+  it('keeps the year that begins each bullet, and takes list numbers off', async () => {
+    const bodyOf = async (bullets: string[] | string) => {
+      const result = await generatePptx(
+        { filename: 'n.pptx', slides: [{ layout: 'title-bullets', title: 'Years', bullets }] },
+        outputDir
+      )
+      expect(result.success, result.error).toBe(true)
+      expect(result.content).not.toContain('Notes')
+      return textShapes(slideXml(path.join(outputDir, 'n.pptx'), 1)).find(s =>
+        s.paragraphs.some(p => p.includes('year') || p.includes('Second'))
+      )!.paragraphs
+    }
+    expect(await bodyOf(['2024. A record year', '2025. Another strong year'])).toEqual([
+      '2024. A record year',
+      '2025. Another strong year',
+    ])
+    expect(await bodyOf('1. First\n2) Second')).toEqual(['First', 'Second'])
+  })
+
+  it('takes the numbers off every level of a numbered outline, and says it was flattened', async () => {
+    const outline = [
+      '1. Plan',
+      '   1. Build',
+      '      1. Design',
+      '      2. Code',
+      '   2. Ship',
+      '2. Grow',
+    ]
+    for (const bullets of [outline.join('\n'), outline]) {
+      const result = await generatePptx(
+        { filename: 'o.pptx', slides: [{ layout: 'title-bullets', title: 'Outline', bullets }] },
+        outputDir
+      )
+      expect(result.success, result.error).toBe(true)
+      expect(result.content).toContain('is a nested bullet')
+      const body = textShapes(slideXml(path.join(outputDir, 'o.pptx'), 1)).find(s =>
+        s.paragraphs.some(p => p.includes('Design'))
+      )!
+      expect(body.paragraphs).toEqual(['Plan', 'Build', 'Design', 'Code', 'Ship', 'Grow'])
+    }
+  })
+
   it('reads table rows sent as records in header order', async () => {
     const result = await generatePptx(
       {
