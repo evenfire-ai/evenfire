@@ -130,6 +130,26 @@ describe('dashboard text reaches the page escaped', () => {
   })
 })
 
+// The reader removes an <img> outright, so an image tag is only ever text or
+// gone: never markup. The word after it shows the field was printed.
+const IMG = '<img src=x onerror=alert(1)>Witness'
+
+describe('an image tag in dashboard text', () => {
+  it.each(cases)('never reaches %s as markup', async (_field, data) => {
+    const sent = JSON.stringify(data).split(JSON.stringify(TAG).slice(1, -1)).join(IMG)
+    const withImg = JSON.parse(sent)
+    const result = await dashboard.execute(
+      { filename: 'x.html', template: 'executive-brief', data: withImg },
+      dir
+    )
+    expect(result.success, result.error).toBe(true)
+    // Table cells may break long words with <wbr>.
+    const html = fs.readFileSync(result.artifact!.path, 'utf8').replace(/<wbr>/g, '')
+    expect(html).not.toMatch(/<img src=x/i)
+    expect(html).toContain('Witness')
+  })
+})
+
 describe('dashboard text outside the data', () => {
   it('escapes the company name in the footer', async () => {
     const result = await dashboard.execute(
