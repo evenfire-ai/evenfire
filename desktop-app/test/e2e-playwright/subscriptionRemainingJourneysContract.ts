@@ -1,5 +1,6 @@
 // E2E_GUARDIAN_IPC_FLOW: pure collection admission and fixture shape validation; no launch, network or session access.
 import path from 'node:path'
+import { pressureCommandDeadlineMs } from '../../../scripts/e2e/fixtures/subscription-image-admission-pressure.mjs'
 import type {
   SubscriptionImageProvider,
   SubscriptionImageRun,
@@ -45,7 +46,12 @@ export type AdmissionFixture = RuntimeIdentity & {
   readDeadlineMs: number
   // The private relay client validates its own sealed metadata and physical
   // socket ownership. This layer never invents a URL, JWT or IPC command.
-  pressure: { receiptFile: string }
+  pressure: {
+    receiptFile: string
+    workDeadlineMs: number
+    closeGraceMs: number
+    commandDeadlineMs: number
+  }
   // Main must prove a real eligible fallback exists before testing no-failover.
   fallback: { provider: SubscriptionImageProvider; modelId: string }
 }
@@ -218,7 +224,6 @@ export function validateRemainingFixture(
         fixture.fallback,
         'Admission fixture requires an actual eligible fallback'
       )
-      const other = run.bindings.find(candidate => candidate.provider !== binding.provider)
       const pressure = record(
         fixture.pressure,
         'Admission pressure requires sealed private relay metadata'
@@ -247,8 +252,17 @@ export function validateRemainingFixture(
         !Number.isSafeInteger(fixture.readDeadlineMs) ||
         Number(fixture.readDeadlineMs) < 1 ||
         Number(fixture.readDeadlineMs) > 2_147_483_647 ||
-        fallback.provider !== other?.provider ||
-        fallback.modelId !== other?.modelId
+        pressure.commandDeadlineMs !==
+          pressureCommandDeadlineMs({
+            readDeadlineMs: fixture.readDeadlineMs as number,
+            workDeadlineMs: pressure.workDeadlineMs as number,
+            closeGraceMs: pressure.closeGraceMs as number,
+          }) ||
+        fallback.provider !== binding.provider ||
+        typeof fallback.modelId !== 'string' ||
+        !fallback.modelId ||
+        fallback.modelId === binding.modelId ||
+        fallback.modelId === binding.unsupportedModelId
       ) {
         throw new Error(
           'Admission fixture must bind real owned capacity and an eligible physical fallback'

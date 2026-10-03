@@ -343,25 +343,61 @@ describe('createApp retained authorize-body ownership', () => {
         const body = JSON.stringify({
           request: { provider: `${provider}-subscription`, chunked: true },
         })
+        const workStarted = deferred()
+        const permitUnwind = deferred()
+        vi.mocked(authorizer.authorizeLlmProviderAttempt).mockImplementationOnce(
+          async (_claims, _body, deps) => {
+            workStarted.resolve()
+            await permitUnwind.promise
+            deps?.signal?.throwIfAborted()
+            return SUCCESS
+          }
+        )
         const sent = send(app.url, {
           ...headers(`chunked-${provider}-host`, provider),
+          'x-admission-case': 'held',
           'transfer-encoding': 'chunked',
         })
+        const firstOutcome = sent.response.catch(error => error)
         sent.client.write(body.slice(0, 20))
         sent.client.end(body.slice(20))
-        const response = await sent.response
-        expect(response.status).toBe(200)
-        expect(authorizer.authorizeLlmProviderAttempt).toHaveBeenCalledExactlyOnceWith(
-          expect.objectContaining({ hostRefs: [`chunked-${provider}-host`] }),
-          JSON.parse(body),
-          expect.objectContaining({
-            signal: expect.any(AbortSignal),
-            resolveAssignment: expect.any(Function),
+        try {
+          await workStarted.promise
+          expect(app.observations[0]).toMatchObject({ bodyDataSubscriptions: 1 })
+
+          const refused = await send(
+            app.url,
+            headers(`chunked-refused-${provider}-host`, provider),
+            '{}'
+          ).response
+          expect(refused.status).toBe(503)
+          expect(JSON.parse(refused.body)).toEqual({ error: 'authorize_capacity_exceeded' })
+          expect(app.observations[1]).toMatchObject({
+            bodyDataSubscriptions: 0,
+            readBytesBeforeResponse: 0,
           })
-        )
-        expect((app.observations[0].request as Request).body).toBeUndefined()
-        const next = await send(app.url, headers(`next-${provider}-host`, provider), '{}').response
-        expect(next.status).toBe(200)
+
+          permitUnwind.resolve()
+          const response = await firstOutcome
+          expect(response.status).toBe(200)
+          expect(authorizer.authorizeLlmProviderAttempt).toHaveBeenCalledExactlyOnceWith(
+            expect.objectContaining({ hostRefs: [`chunked-${provider}-host`] }),
+            JSON.parse(body),
+            expect.objectContaining({
+              signal: expect.any(AbortSignal),
+              resolveAssignment: expect.any(Function),
+            })
+          )
+          expect((app.observations[0].request as Request).body).toBeUndefined()
+          const next = await send(app.url, headers(`next-${provider}-host`, provider), '{}')
+            .response
+          expect(next.status).toBe(200)
+          expect(authorizer.authorizeLlmProviderAttempt).toHaveBeenCalledTimes(2)
+        } finally {
+          sent.client.destroy()
+          permitUnwind.resolve()
+          await firstOutcome
+        }
       })
     })
   }

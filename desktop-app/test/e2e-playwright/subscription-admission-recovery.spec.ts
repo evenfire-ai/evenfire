@@ -64,13 +64,15 @@ for (const binding of run.bindings) {
     appPage,
   }, testInfo) => {
     const fixture = receipt.fixtures[binding.provider] as AdmissionFixture
+    // Keep the configured visible-journey budget and separately admit the nine
+    // bounded private commands (including finally release/close on failure).
+    test.setTimeout(testInfo.timeout + 9 * fixture.pressure.commandDeadlineMs)
     await openOwnedChat(appPage, binding)
     const refusalReceiptId = randomUUID()
     const refusalPrompt = `Reply with TEXT_RECEIPT:${refusalReceiptId} only. Receipt: ${refusalReceiptId}`
     await appPage.getByTestId('chat-input').fill(refusalPrompt)
     const pressure = await openAdmissionPressure({
       receiptFile: fixture.pressure.receiptFile,
-      deadlineMs: 30_000,
     })
     let released = false
     try {
@@ -81,6 +83,10 @@ for (const binding of run.bindings) {
       expect(metadata.podUid).toBe(fixture.controlApiPodUid)
       expect(metadata.imageId).toBe(fixture.controlApiImageId)
       expect(metadata.maxInFlight).toBe(fixture.maxInFlight)
+      expect(metadata.commandDeadlineMs).toBe(fixture.pressure.commandDeadlineMs)
+      expect(metadata.readDeadlineMs).toBe(fixture.readDeadlineMs)
+      expect(metadata.workDeadlineMs).toBe(fixture.pressure.workDeadlineMs)
+      expect(metadata.closeGraceMs).toBe(fixture.pressure.closeGraceMs)
       expect(new Set(metadata.hostRefs)).toEqual(new Set(run.bindings.map(item => item.hostRef)))
       const baseline = (await pressure.owners()) as OwnerObservation
       expect(baseline.pressureRunId).toBe(metadata.pressureRunId)

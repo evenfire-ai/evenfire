@@ -18,5 +18,7 @@ export default defineConfig({
   reporter: [['list']],
   outputDir: path.join(run.runRoot, 'playwright-results'),
   metadata: { mode: run.mode, runId: run.runId, profile: run.profile },
-  use: { screenshot: 'only-on-failure', trace: 'retain-on-failure', video: 'retain-on-failure' },
+  // Playwright action traces retain the plaintext value supplied at visible login.
+  // Keep private credentials in RAM; screenshots/video mask the password input.
+  use: { screenshot: 'only-on-failure', trace: 'off', video: 'retain-on-failure' },
 })

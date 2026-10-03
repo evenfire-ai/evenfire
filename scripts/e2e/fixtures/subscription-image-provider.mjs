@@ -9,6 +9,7 @@ import { deepStrictEqual } from 'node:assert/strict'
 import { createRequire } from 'node:module'
 import fs from 'node:fs'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { requirePixelRenderer } from './subscription-image-challenge.cjs'
 import { decodeInChild, hasCompleteImageContainer } from './subscription-image-decoder.mjs'
 
@@ -330,6 +331,26 @@ export function createSubscriptionImageVendor({ runId, bindings, acceptedProvide
   return { respond, snapshot }
 }
 
+/** The pod's emptyDir masks image-time /tmp contents. Create the immediate
+ * private evidence directory at runtime, then verify it without following a
+ * symlink or changing an existing directory's ownership/permissions.
+ */
+export function prepareVendorEvidenceDirectory(evidencePath) {
+  if (typeof evidencePath !== 'string' || !path.isAbsolute(evidencePath) ||
+      path.resolve(evidencePath) !== evidencePath || fs.existsSync(evidencePath)) {
+    throw new Error('External vendor evidence requires a fresh absolute path')
+  }
+  const directory = path.dirname(evidencePath)
+  try { fs.mkdirSync(directory, { mode: 0o700 }) }
+  catch (error) { if (error.code !== 'EEXIST') throw error }
+  const parent = fs.lstatSync(directory)
+  if (!parent.isDirectory() || parent.isSymbolicLink() || parent.uid !== process.getuid?.() ||
+      (parent.mode & 0o777) !== 0o700 || fs.realpathSync(directory) !== directory) {
+    throw new Error('External vendor evidence requires a private owned directory')
+  }
+  return directory
+}
+
 /** Explicit derived-runtime hook. The caller owns restoration/image/lease proof. */
 export function installSubscriptionImageVendor(env = process.env) {
   if (env.NODE_ENV !== 'test' || env.EVENFIRE_SUBSCRIPTION_IMAGE_VENDOR_FIXTURE !== '1') {
@@ -338,13 +359,7 @@ export function installSubscriptionImageVendor(env = process.env) {
   const acceptedProvider = env.SUBSCRIPTION_IMAGE_FIXTURE_PROVIDER
   if (!Object.hasOwn(SUBSCRIPTION_VENDOR_URLS, acceptedProvider ?? '')) throw new Error('External vendor fixture requires its physical proxy provider binding')
   const evidencePath = env.SUBSCRIPTION_IMAGE_EVIDENCE_PATH
-  if (!evidencePath || !path.isAbsolute(evidencePath) || fs.existsSync(evidencePath)) {
-    throw new Error('External vendor evidence requires a fresh absolute path')
-  }
-  const parent = fs.statSync(path.dirname(evidencePath))
-  if (!parent.isDirectory() || parent.uid !== process.getuid?.() || (parent.mode & 0o077) !== 0) {
-    throw new Error('External vendor evidence requires a private owned directory')
-  }
+  prepareVendorEvidenceDirectory(evidencePath)
   const bindings = ['GROK', 'CODEX'].map(kind => ({ provider: `${kind.toLowerCase()}-subscription`,
     modelId: env[`E2E_${kind}_IMAGE_MODEL`], unsupportedModelId: env[`E2E_${kind}_IMAGE_UNSUPPORTED_MODEL`] }))
   const vendor = createSubscriptionImageVendor({ runId: env.E2E_SUBSCRIPTION_IMAGE_RUN_ID, bindings, acceptedProvider,
@@ -353,6 +368,21 @@ export function installSubscriptionImageVendor(env = process.env) {
       fs.writeFileSync(temporary, JSON.stringify(snapshot), { flag: 'wx', mode: 0o600 })
       fs.renameSync(temporary, evidencePath)
     } })
+  // Physical activation witness from the actual imported application process.
+  // Whitelist QA metadata; never read proc environ, headers or credential slots.
+  if (process.platform !== 'linux' || !/^24\./.test(process.versions.node)) {
+    throw new Error('External vendor fixture requires its inspected Linux Node24 runtime')
+  }
+  const witness = { kind: 'evenfire-subscription-image-vendor-runtime-v1',
+    runId: env.E2E_SUBSCRIPTION_IMAGE_RUN_ID, provider: acceptedProvider,
+    pid: process.pid, uid: process.getuid(),
+    startTime: fs.readFileSync('/proc/self/stat', 'utf8').split(') ')[1].split(' ')[19],
+    nodeVersion: process.versions.node, musl: !process.report.getReport().header.glibcVersionRuntime,
+    importSha256: sha256(fs.readFileSync(fileURLToPath(import.meta.url))),
+    nodeOptionsSha256: sha256(env.NODE_OPTIONS ?? ''),
+    productionDistSha256: sha256(fs.readFileSync(path.join(process.cwd(), 'dist/main.js'))),
+    bindings }
+  fs.writeFileSync(`${evidencePath}.runtime.json`, JSON.stringify(witness), { flag: 'wx', mode: 0o600 })
   fs.writeFileSync(evidencePath, JSON.stringify(vendor.snapshot()), { flag: 'wx', mode: 0o600 })
   const original = globalThis.fetch
   globalThis.fetch = async (input, init) => {

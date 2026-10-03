@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+// E2E_GUARDIAN_IPC_FLOW: host admission and private channel preparation only;
+// actual Desktop network transitions and business signals stay in the specs.
 // Host-side orchestration for the subscription-image runner chain:
 // export allowlisted source -> build pinned image -> create private container ->
 // copy the in-container session observation -> seal docker inspect, stack marker,
@@ -85,11 +87,23 @@ function privateDirectory(directory) {
   fs.chmodSync(directory, 0o700)
 }
 
+export function validatePrepareScratch(directory) {
+  if (!path.isAbsolute(directory) || path.resolve(directory) !== directory ||
+      fs.realpathSync(path.dirname(directory)) !== path.dirname(directory)) refuse('PREPARE_SCRATCH_PATH')
+  if (!fs.existsSync(directory)) return
+  const stat = fs.lstatSync(directory)
+  if (!stat.isDirectory() || stat.isSymbolicLink() || stat.uid !== process.getuid?.() ||
+      (stat.mode & 0o777) !== 0o700 || fs.readdirSync(directory).length !== 0) refuse('PREPARE_SCRATCH_NOT_FRESH')
+}
+
 function writePrivateJson(filename, value) {
   fs.writeFileSync(filename, JSON.stringify(value), { flag: 'wx', mode: 0o600 })
 }
 
-export async function prepare(argv = process.argv.slice(2)) {
+export async function prepare(argv = process.argv.slice(2), privateFlow) {
+  if (privateFlow !== undefined && (!privateFlow || typeof privateFlow !== 'object' ||
+      !Array.isArray(privateFlow.bindings) || typeof privateFlow.frames !== 'function' ||
+      typeof privateFlow.close !== 'function')) refuse('PREPARE_PRIVATE_FLOW_INVALID')
   const values = parseArgs(argv)
   const suiteId = required(values, 'suite')
   const mode = required(values, 'mode')
@@ -98,7 +112,7 @@ export async function prepare(argv = process.argv.slice(2)) {
   const scratch = required(values, 'scratch')
   const framesFile = required(values, 'frames')
   const detector = required(values, 'red-detector')
-  const bindingsFile = required(values, 'bindings')
+  const bindingsFile = privateFlow ? undefined : required(values, 'bindings')
   const cacheRoot = values['cache-root'] ?? DEFAULT_CACHE_ROOT
   if (!/^[a-z0-9][a-z0-9-]{0,62}$/.test(profile ?? '') || profile === 'clerum-test')
     refuse('PREPARE_PROFILE_REQUIRED')
@@ -107,11 +121,12 @@ export async function prepare(argv = process.argv.slice(2)) {
   if (!suite.modes.includes(mode)) refuse('SUITE_MODE_NOT_ADMITTED')
   // Login frames travel through the live private input channel, never a file.
   if (framesFile !== '-') refuse('PREPARE_PRIVATE_INPUT_REQUIRES_STDIN')
-  if (!path.isAbsolute(scratch) || !path.isAbsolute(bindingsFile) || !path.isAbsolute(detector))
+  if (!path.isAbsolute(scratch) || (!privateFlow && !path.isAbsolute(bindingsFile)) || !path.isAbsolute(detector))
     refuse('PREPARE_ABSOLUTE_PATHS')
   if (scratch.startsWith(`${SCRIPT_ROOT}/`) || scratch === SCRIPT_ROOT)
     refuse('PREPARE_SCRATCH_INSIDE_REPO')
-  for (const filename of [bindingsFile]) {
+  validatePrepareScratch(scratch)
+  for (const filename of bindingsFile ? [bindingsFile] : []) {
     const stat = fs.lstatSync(filename)
     const parent = path.dirname(filename)
     if (
@@ -136,6 +151,7 @@ export async function prepare(argv = process.argv.slice(2)) {
   const source = exportSourceContext(SCRIPT_ROOT, contextDir, detector)
   if (source.gitHead !== run('git', ['-C', SCRIPT_ROOT, 'rev-parse', 'HEAD']).trim())
     refuse('PREPARE_SOURCE_RACE')
+  await privateFlow?.beforeBuild?.({ contextDir, source })
   // Third-party artifact (separate allowlist and receipt; never part of the Git
   // source manifest). The host fetch stays behind the local sfw wrapper.
   const sfwAsset = sfwFreeAsset(values.arch ?? process.arch)
@@ -307,7 +323,7 @@ export async function prepare(argv = process.argv.slice(2)) {
     }
     const sealedFilename = path.join(scratch, 'subscription-image-source.json')
     run('docker', ['cp', `${containerName}:/opt/evenfire/subscription-image-source.json`, sealedFilename])
-    const bindings = JSON.parse(fs.readFileSync(bindingsFile, 'utf8'))
+    const bindings = privateFlow?.bindings ?? JSON.parse(fs.readFileSync(bindingsFile, 'utf8'))
     const transports = Object.fromEntries(
       Object.entries(PORT_FORWARD_SERVICES).map(([kind, expected]) => [
         kind,
@@ -349,12 +365,21 @@ export async function prepare(argv = process.argv.slice(2)) {
       },
       bindings,
       transports,
+      vendorSources: privateFlow?.vendorSources,
     })
     admission.volume = {
       name: volumeName,
       driver: 'local',
       createdAt: new Date(Date.parse(volumeInspect.CreatedAt)).toISOString(),
       inspectSha256: digest(JSON.stringify(volumeInspect)),
+    }
+    if (privateFlow?.configure) {
+      const additions = await privateFlow.configure(admission, { containerName })
+      if (additions !== undefined) {
+        if (!additions || typeof additions !== 'object' ||
+            Object.keys(additions).some(key => key !== 'pressureMetadata')) refuse('PREPARE_ADMISSION_EXTENSION_INVALID')
+        Object.assign(admission, additions)
+      }
     }
     writePrivateJson(path.join(admissionDir, 'main-admission.json'), admission)
     const framesPayload = [
@@ -398,15 +423,27 @@ export async function prepare(argv = process.argv.slice(2)) {
       attached.kill('SIGTERM')
     }
     attached.stdin.on('error', onInputError)
-    process.stdin.once('error', onInputError)
-    process.stdin.pipe(attached.stdin)
+    const input = privateFlow ? await privateFlow.frames(admission, { containerName }) : process.stdin
+    input.once('error', onInputError)
+    input.pipe(attached.stdin)
+    const interrupted = () => { inputFailed = true; attached.kill('SIGTERM') }
+    process.once('SIGTERM', interrupted)
+    process.once('SIGINT', interrupted)
+    const deadline = setTimeout(interrupted, 3_600_000)
     let result
     try {
-      result = await new Promise(resolve => attached.once('exit', (code, signal) => resolve({ code, signal })))
+      result = await new Promise((resolve, reject) => {
+        attached.once('error', () => reject(new RunnerAdmissionError('PREPARE_ATTACH_FAILED')))
+        attached.once('close', (code, signal) => resolve({ code, signal }))
+      })
     } finally {
-      process.stdin.unpipe(attached.stdin)
-      process.stdin.off('error', onInputError)
-      process.stdin.pause()
+      clearTimeout(deadline)
+      process.off('SIGTERM', interrupted)
+      process.off('SIGINT', interrupted)
+      input.unpipe(attached.stdin)
+      input.off('error', onInputError)
+      input.pause()
+      await privateFlow?.close()
     }
     const status = run('docker', ['wait', containerName], { timeout: 30_000 }).trim()
     for (const name of ['runner.json', 'journey-result.json', path.basename(observationFile)]) {
@@ -449,6 +486,16 @@ export async function prepare(argv = process.argv.slice(2)) {
       }
     }
     throw err
+  } finally {
+    await privateFlow?.close()
+    if (values.keep !== 'true') {
+      for (const args of [['rm', '-f', containerName], ['volume', 'rm', '-f', volumeName]]) {
+        try { run('docker', args, { timeout: 60_000 }) } catch {
+          // Restoration of the leased stack belongs to the coordinator. An
+          // absent fresh container/volume is harmless; never touch other names.
+        }
+      }
+    }
   }
 }
 

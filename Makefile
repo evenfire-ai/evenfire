@@ -1576,6 +1576,24 @@ minikube-control-api-authorize-memory-body:
 	@T2_SKIP_LOCK=true node scripts/tests/measure-control-api-authorize-memory.mjs --config "$$CONTROL_API_MEMORY_CONFIG"
 
 # Isolated subscription image journeys use the existing branch-profile mutation lease.
+.PHONY: minikube-subscription-image-coordinated
+minikube-subscription-image-coordinated:
+	@test -n "$${SUBSCRIPTION_IMAGE_MEMORY_CONFIG:-}" || { echo "SUBSCRIPTION_IMAGE_MEMORY_CONFIG required"; exit 1; }
+	@test -n "$${SUBSCRIPTION_IMAGE_RUN_ID:-}" || { echo "SUBSCRIPTION_IMAGE_RUN_ID required"; exit 1; }
+	@test -n "$${SUBSCRIPTION_IMAGE_SUITE:-}" || { echo "SUBSCRIPTION_IMAGE_SUITE required"; exit 1; }
+	@test -n "$${SUBSCRIPTION_IMAGE_SCRATCH:-}" || { echo "SUBSCRIPTION_IMAGE_SCRATCH required"; exit 1; }
+	@test -n "$${SUBSCRIPTION_IMAGE_RED_DETECTOR:-}" || { echo "SUBSCRIPTION_IMAGE_RED_DETECTOR required"; exit 1; }
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(CONTROL_API_REAL_PG_CONTEXT)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- \
+		node scripts/e2e/coordinate-subscription-image-journeys.mjs \
+			--memory-config "$$SUBSCRIPTION_IMAGE_MEMORY_CONFIG" \
+			--suite "$$SUBSCRIPTION_IMAGE_SUITE" --mode fixture \
+			--profile "$$MINIKUBE_PROFILE" --run-id "$$SUBSCRIPTION_IMAGE_RUN_ID" \
+			--scratch "$$SUBSCRIPTION_IMAGE_SCRATCH" --frames - \
+			--red-detector "$$SUBSCRIPTION_IMAGE_RED_DETECTOR" \
+			$${SUBSCRIPTION_IMAGE_SFW_ARTIFACT:+--sfw-artifact "$$SUBSCRIPTION_IMAGE_SFW_ARTIFACT"}
+
 .PHONY: minikube-subscription-image-journeys
 minikube-subscription-image-journeys:
 	@test -n "$${MINIKUBE_PROFILE:-}" || { echo "MINIKUBE_PROFILE required"; exit 1; }

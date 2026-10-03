@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url'
 import { stripTypeScriptTypes } from 'node:module'
 import { createHash } from 'node:crypto'
 import { buildAuthorizeFixture, buildRejectedFixture, buildGfsFixture, SHAPES, MIB, sha256 } from './lib/control-api-authorize-memory-fixtures.mjs'
+import { pressureCommandDeadlineMs } from '../e2e/fixtures/subscription-image-admission-pressure.mjs'
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 const NAMESPACE = 'control-plane', DEPLOYMENT = 'control-api', CONTAINER = 'control-api'
 const sleepPoll = ms => new Promise(resolve => setTimeout(resolve, ms))
@@ -146,7 +147,10 @@ async function waitFor(check, predicate, timeoutMs, code) { const deadline = Dat
 export async function openAuthorizeAdmissionPressure(channel, privateOptions) {
   const baseline = await channel.call({ kind: 'hello', options: { ...privateOptions, pressureOnly: true } })
   assert(baseline.pressureOnly === true && baseline.owner.inFlight === 0 && baseline.policy.maxInFlight === privateOptions.candidate.concurrency, 'PRESSURE_BASELINE_UNPROVED')
+  const commandDeadlineMs = pressureCommandDeadlineMs(baseline.policy)
+  channel.timeoutMs = commandDeadlineMs
   const handles = []
+  let closing
   const zeroBusiness = async () => {
     const counts = await channel.call({ kind: 'counts' })
     assert(counts.total === 0 && counts.tickets === 0 && counts.reservationRows === 0, 'PRESSURE_REACHED_BUSINESS_WORK')
@@ -165,15 +169,26 @@ export async function openAuthorizeAdmissionPressure(channel, privateOptions) {
     return value
   }
   return {
+    policy: Object.freeze({ ...baseline.policy }), commandDeadlineMs,
     async hold() {
-      assert(handles.length === 0, 'PRESSURE_ALREADY_HELD')
+      assert(!closing && handles.length === 0, 'PRESSURE_ALREADY_HELD_OR_CLOSING')
       for (let index = 0; index < baseline.policy.maxInFlight; index++) {
+        assert(!closing, 'PRESSURE_CLOSING')
         const handle = await channel.open({ requestId: `${privateOptions.runId}-pressure-${index + 1}`, route: 'authorize', hostRef: privateOptions.bindings[index % privateOptions.bindings.length].hostRef, length: 35 * MIB - 4096 })
         handles.push(handle); await channel.call({ kind: 'write', requestId: handle.requestId, length: 1 }, Buffer.from('{'))
       }
       return waitFor(owners, value => value.inFlight === baseline.policy.maxInFlight && value.serverReads.reads.length === handles.length && value.serverReads.reads.every(read => handles.some(handle => handle.requestId === read.requestId) && read.receivedBodyBytes > 0 && read.complete === false), baseline.policy.readDeadlineMs, 'AUTHENTICATED_SERVER_BODY_HOLD_UNOBSERVED')
     }, owners, release,
-    async close() { if (handles.length) await release(); return channel.stop() },
+    close() {
+      return closing ??= (async () => {
+        const failures = []
+        try { if (handles.length) await release() } catch (error) { failures.push(error) }
+        let producer
+        try { producer = await channel.stop() } catch (error) { failures.push(error) }
+        if (failures.length) throw new AggregateError(failures, 'PRESSURE_CLOSE_FAILED')
+        return producer
+      })()
+    },
   }
 }
 export function validateReceipt(report) {
@@ -196,7 +211,9 @@ export function validateReceipt(report) {
   }
   return true
 }
-export async function run(options, privateSeedOptions) {
+export async function run(options, privateSeedOptions, privateFixtureWork) {
+  assert(privateFixtureWork === undefined || ((options.prepareFixtures === true || options.fixtureBinding) &&
+    typeof privateFixtureWork === 'function'), 'PRIVATE_FIXTURE_WORK_INVALID')
   assert(privateSeedOptions === undefined || (privateSeedOptions && typeof privateSeedOptions === 'object' && !Array.isArray(privateSeedOptions) && Object.keys(privateSeedOptions).every(key => ['cookie', 'operatorPassword'].includes(key))), 'PRIVATE_SEED_ARGUMENT_INVALID')
   for (const field of ['cookie', 'operatorPassword', 'password', 'privateSeedOptions', 'dsn', 'privateKey']) assert(!(field in options) && !(field in (options.publicArguments ?? {})), 'PRIVATE_MATERIAL_CANNOT_ENTER_PUBLIC_OPTIONS')
   // The long-lived caller retains its original object in RAM across preparation,
@@ -225,13 +242,13 @@ export async function run(options, privateSeedOptions) {
   assert(options.report.startsWith(allowedReports + path.sep) && !fs.existsSync(options.report), 'FRESH_CANONICAL_REPORT_REQUIRED')
   fs.mkdirSync(path.dirname(options.report), { recursive: true, mode: 0o700 }); assert(fs.realpathSync(path.dirname(options.report)) === path.dirname(options.report), 'REPORT_PARENT_SYMLINK')
   if (options.fixtureBinding) assert(options.fixtureBinding.worktreeId === worktreeId && options.fixtureBinding.clusterFingerprint === marker.clusterFingerprint, 'FIXTURE_PROFILE_IDENTITY_CHANGED')
-  const report = { kind: options.prepareFixtures ? 'control-api-authorize-memory-fixtures.v1' : 'control-api-authorize-memory.v1', status: 'running', startedAt: new Date().toISOString(), source: { head, worktreeId, policySha256: sha256(fs.readFileSync(path.join(ROOT, 'control-api/src/middleware/llmProviderAttemptAdmissionLimits.ts'))), driverSha256: sha256(fs.readFileSync(fileURLToPath(import.meta.url))), companionBundleSha256: sha256(buildAuthorizeMemoryCompanionBundle()), clusterFingerprint: marker.clusterFingerprint, imagesGeneratedAt: manifest.generated }, options, runs: [], restoration: { verified: false } }
+  const report = { kind: options.prepareFixtures || privateFixtureWork ? 'control-api-authorize-memory-fixtures.v1' : 'control-api-authorize-memory.v1', status: 'running', startedAt: new Date().toISOString(), source: { head, worktreeId, policySha256: sha256(fs.readFileSync(path.join(ROOT, 'control-api/src/middleware/llmProviderAttemptAdmissionLimits.ts'))), driverSha256: sha256(fs.readFileSync(fileURLToPath(import.meta.url))), companionBundleSha256: sha256(buildAuthorizeMemoryCompanionBundle()), clusterFingerprint: marker.clusterFingerprint, imagesGeneratedAt: manifest.generated }, options, runs: [], restoration: { verified: false } }
   const save = () => { const temporary = options.report + '.next'; fs.writeFileSync(temporary, JSON.stringify(report, null, 2), { flag: 'wx', mode: 0o600 }); fs.renameSync(temporary, options.report) }
   const deployment = await json(['-n', NAMESPACE, 'get', 'deployment', DEPLOYMENT, '-o', 'json'])
   assert(deployment.spec.replicas === 1, 'SINGLE_APP_REPLICA_REQUIRED')
   const ci = deployment.spec.template.spec.containers.findIndex(container => container.name === CONTAINER)
   assert(ci >= 0 && !deployment.spec.template.spec.hostNetwork, 'OWNED_CONTAINER_REQUIRED')
-  if (options.prepareFixtures) {
+  if (options.prepareFixtures || privateFixtureWork) {
     const ready = (await json(['-n', NAMESPACE, 'get', 'pods', '-l', 'app=control-api', '-o', 'json'])).items.filter(pod => !pod.metadata.deletionTimestamp && pod.status.phase === 'Running' && pod.status.containerStatuses?.some(item => item.name === CONTAINER && item.ready))
     assert(ready.length === 1, 'SEED_READY_API_POD_AMBIGUOUS')
     const pod = ready[0], status = pod.status.containerStatuses.find(item => item.name === CONTAINER), spec = pod.spec.containers.find(item => item.name === CONTAINER)
@@ -242,13 +259,42 @@ export async function run(options, privateSeedOptions) {
     const imageId = status.imageID.match(/sha256:[a-f0-9]{64}$/)?.[0]
     assert(imageId && imageId === (manifest.images[spec.image] ?? manifest.images[`docker.io/${spec.image}`]) && manifest.sourceRevisions?.[spec.image] === head, 'SEED_IMAGE_SOURCE_MISMATCH')
     report.podUid = pod.metadata.uid; report.imageId = imageId; report.containerId = status.containerID
-    report.source.seederBundleSha256 = sha256(buildAuthorizeMemorySeederBundle()); report.phase = 'real-fixture-preparation'; save()
-    const child = spawn('kubectl', ['--context', options.context, '-n', NAMESPACE, 'exec', '-i', pod.metadata.name, '-c', CONTAINER, '--', 'env', '-u', 'NODE_OPTIONS', 'node', '--max-old-space-size=256', '--input-type=module', '-e', buildAuthorizeMemorySeederBundle()], { cwd: ROOT, env, stdio: ['pipe', 'pipe', 'pipe'] })
+    const { prepareGfsImages } = await import('../e2e/prepare-subscription-remaining-fixtures.gfs.mjs')
+    const seederBundle = buildAuthorizeMemorySeederBundle(privateFixtureWork ? prepareGfsImages : undefined)
+    report.source.seederBundleSha256 = sha256(seederBundle); report.phase = 'real-fixture-preparation'; save()
+    const child = spawn('kubectl', ['--context', options.context, '-n', NAMESPACE, 'exec', '-i', pod.metadata.name, '-c', CONTAINER, '--', 'env', '-u', 'NODE_OPTIONS', 'node', '--max-old-space-size=256', '--input-type=module', '-e', seederBundle], { cwd: ROOT, env, stdio: ['pipe', 'pipe', 'pipe'] })
     const channel = new Channel(child, 120000)
     try {
-      report.fixtures = await channel.call({ kind: 'prepare', options: { runId: options.runId, hostNamespace: options.hostNamespace, operatorUser: options.operatorUser, ...privateMaterial } })
+      const resumed = !options.prepareFixtures && readOwnedJson(options.publicArguments['fixtures-receipt']).fixtures
+      report.fixtures = await channel.call({ kind: options.prepareFixtures ? 'prepare' : 'resume',
+        options: { runId: options.runId, hostNamespace: options.hostNamespace, operatorUser: options.operatorUser, ...privateMaterial },
+        ...(resumed ? { input: { fixtures: resumed } } : {}) })
+      if (privateFixtureWork) {
+        // Only the actual session's private command interface is passed out.
+        // No cookie/password, server module or mutable report is exposed.
+        await privateFixtureWork({ fixtures: report.fixtures,
+          apiPod: { name: pod.metadata.name, uid: pod.metadata.uid, imageId },
+          source: { head, worktreeId, clusterFingerprint: marker.clusterFingerprint },
+          prepareImages: runId => channel.call({ kind: 'prepare-subscription-images', input: { runId } }),
+          prepareGfs: input => channel.call({ kind: 'prepare-gfs-images', input }),
+          revokeImages: () => channel.call({ kind: 'revoke-subscription-images' }),
+          revokeMemory: async () => {
+            const result = await channel.call({ kind: 'revoke-memory-fixtures' })
+            assert(result.verified === true && result.state === 'revoked' && result.grantsRevoked === 2 && result.hostsDetached === 2,
+              'MEMORY_QA_FINALIZATION_UNPROVED')
+            report.fixtureFinalization = result
+            return result
+          },
+        })
+      }
       report.producer = await channel.stop(); report.finishedAt = new Date().toISOString(); report.status = 'complete'; report.phase = 'complete'
-      validateFixtureReceipt(report, options); save(); return report
+      if (report.fixtureFinalization) {
+        report.kind = 'control-api-authorize-qa-finalization.v1'
+        report.releasedFixtureIdentities = report.fixtures.bindings.map(({ hostRef, hostUid, connectionKey, connectionId }) =>
+          ({ hostRef, hostUid, connectionKey, connectionId }))
+        delete report.fixtures
+      } else validateFixtureReceipt(report, options)
+      save(); return report
     } catch {
       report.status = 'failed'; report.failure = 'REAL_FIXTURE_PREPARATION_FAILED'; report.finishedAt = new Date().toISOString()
       await channel.stop().catch(() => {}); report.producer = channel.exit ?? { code: null, signal: 'unknown' }; save(); throw new Error('SEED_FAILED_REPORT_SAVED')

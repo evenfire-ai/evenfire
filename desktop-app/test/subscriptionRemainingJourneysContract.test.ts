@@ -108,10 +108,15 @@ function admissionReceipt() {
           readDeadlineMs: 10000,
           // This suite tests only outer metadata admission. The physical pressure
           // client must reject this unit-only record; it is never used to hold work.
-          pressure: { receiptFile: '/runner-admission/unit-pressure-metadata.json' },
+          pressure: {
+            receiptFile: '/runner-admission/unit-pressure-metadata.json',
+            workDeadlineMs: 30000,
+            closeGraceMs: 250,
+            commandDeadlineMs: 40250,
+          },
           fallback: {
-            provider: run.bindings.find(item => item.provider !== binding.provider)!.provider,
-            modelId: run.bindings.find(item => item.provider !== binding.provider)!.modelId,
+            provider: binding.provider,
+            modelId: `${binding.provider}-eligible-alternate`,
           },
         },
       ])
@@ -273,6 +278,22 @@ describe('remaining subscription journeys collection and data-preparation gates'
       validateRemainingFixture(value, { ...input, suite: 'admission-recovery' }, run, digest)
     ).toThrow('eligible physical fallback')
   })
+  it('admits a sealed command deadline derived from its actual policy', () => {
+    const value = admissionReceipt()
+    expect(
+      validateRemainingFixture(value, { ...input, suite: 'admission-recovery' }, run, digest)
+    ).toBe(value)
+  })
+  it.each([30000, 40249, 40251])(
+    'refuses a command deadline that does not match policy: %s',
+    deadline => {
+      const value = admissionReceipt()
+      value.fixtures['grok-subscription']!.pressure.commandDeadlineMs = deadline
+      expect(() =>
+        validateRemainingFixture(value, { ...input, suite: 'admission-recovery' }, run, digest)
+      ).toThrow('owned capacity')
+    }
+  )
   it('rejects pressure metadata with no actual control-api pod identity', () => {
     const value = admissionReceipt()
     value.fixtures['grok-subscription']!.controlApiPodUid = 'unknown'

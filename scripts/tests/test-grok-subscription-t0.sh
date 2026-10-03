@@ -238,6 +238,9 @@ echo "Grok subscription T0 aggregator"
 run_node_group "subscription-discovery-and-offline-image-provider" \
   "scripts/tests/subscription-t0-discovery.test.mjs" \
   "scripts/tests/subscription-image-runner.test.mjs" \
+  "scripts/tests/subscription-image-coordinator.test.mjs" \
+  "scripts/tests/subscription-image-coordinator-regressions.test.mjs" \
+  "scripts/tests/control-api-qa-runtime.test.mjs" \
   "scripts/tests/subscription-image-input-frames.test.mjs" \
   "scripts/e2e/prepare-subscription-remaining-fixtures.test.mjs" \
   "scripts/e2e/fixtures/subscription-image-provider.test.mjs"

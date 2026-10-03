@@ -67,7 +67,9 @@ function canonicalReceipt(receipt) {
     } else {
       fixtures[provider] = { ...common, controlApiPodUid: raw.controlApiPodUid,
         controlApiImageId: raw.controlApiImageId, maxInFlight: raw.maxInFlight,
-        readDeadlineMs: raw.readDeadlineMs, pressure: { receiptFile: raw.pressure?.receiptFile },
+        readDeadlineMs: raw.readDeadlineMs, pressure: { receiptFile: raw.pressure?.receiptFile,
+          workDeadlineMs: raw.pressure?.workDeadlineMs, closeGraceMs: raw.pressure?.closeGraceMs,
+          commandDeadlineMs: raw.pressure?.commandDeadlineMs },
         fallback: { provider: raw.fallback?.provider, modelId: raw.fallback?.modelId } }
     }
   }

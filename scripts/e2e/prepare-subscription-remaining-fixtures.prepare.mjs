@@ -44,18 +44,20 @@ export async function prepareRemainingFixtures({ admission, runRoot, hostBinding
       fixtures[binding.provider] = { ...common, folderNames: result.folderNames, files }
       evidence[binding.provider] = result.evidence
     } else {
-      const other = admission.bindings.find(item => item.provider !== binding.provider)
       const configured = actual[0].fallback
       if (!pressure || pressure.profile !== admission.profile || pressure.context !== admission.context ||
           pressure.sourceManifestSha256 !== admission.sourceManifestSha256 ||
-          !pressure.hostRefs?.includes(binding.hostRef) || configured?.provider !== other.provider ||
-          configured?.modelId !== other.modelId ||
+          !pressure.hostRefs?.includes(binding.hostRef) || configured?.provider !== binding.provider ||
+          typeof configured?.modelId !== 'string' || configured.modelId === binding.modelId ||
+          !actual[0].catalogueModels?.includes(configured.modelId) ||
           !runtime.fallbacks.some(item => item.provider === configured.provider && item.model === configured.modelId)) {
         throw new Error('REMAINING_PREPARE_ACTUAL_PRESSURE_AND_FALLBACK_REQUIRED')
       }
       fixtures[binding.provider] = { ...common, controlApiPodUid: pressure.podUid,
         controlApiImageId: pressure.imageId, maxInFlight: pressure.maxInFlight,
-        readDeadlineMs: pressure.readDeadlineMs, pressure: { receiptFile: pressure.receiptFile },
+        readDeadlineMs: pressure.readDeadlineMs, pressure: { receiptFile: pressure.receiptFile,
+          workDeadlineMs: pressure.workDeadlineMs, closeGraceMs: pressure.closeGraceMs,
+          commandDeadlineMs: pressure.commandDeadlineMs },
         fallback: { provider: configured.provider, modelId: configured.modelId } }
     }
     const fresh = observeQaHostRuntime(target)

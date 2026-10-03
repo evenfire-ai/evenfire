@@ -1,3 +1,4 @@
+// E2E_GUARDIAN_IPC_FLOW: private fixture protocol, never a renderer transition.
 // Frozen client surface for the private admission-pressure companion.
 //
 // openAdmissionPressure({ receiptFile, socketPath, deadlineMs }) -> {
@@ -39,6 +40,18 @@ const refuse = code => {
 }
 const MAX_FRAME_BYTES = 64 * 1024
 
+/** Existing lifecycle observation grace plus one private IPC delivery window.
+ * Values come from the actual compiled policy returned by the companion.
+ * @param {{readDeadlineMs:number, workDeadlineMs:number, closeGraceMs:number}} policy
+ */
+export function pressureCommandDeadlineMs(policy) {
+  if (!Number.isSafeInteger(policy?.readDeadlineMs) || policy.readDeadlineMs < 100 || policy.readDeadlineMs > 60_000 ||
+      !Number.isSafeInteger(policy.workDeadlineMs) || policy.workDeadlineMs < 100 || policy.workDeadlineMs > 120_000 ||
+      !Number.isSafeInteger(policy.closeGraceMs) || policy.closeGraceMs < 1 || policy.closeGraceMs > 10_000 ||
+      policy.closeGraceMs >= policy.readDeadlineMs) refuse('ADMISSION_PRESSURE_POLICY_INVALID')
+  return Math.max(policy.readDeadlineMs, policy.workDeadlineMs + policy.closeGraceMs + 5_000) + 5_000
+}
+
 export function verifyPressureMetadata(metadata) {
   if (
     metadata?.kind !== 'evenfire-subscription-image-pressure-metadata-v1' ||
@@ -56,6 +69,8 @@ export function verifyPressureMetadata(metadata) {
     metadata.hostRefs.some(value => typeof value !== 'string' || !value) ||
     !Number.isSafeInteger(metadata.maxInFlight) ||
     metadata.maxInFlight < 1 ||
+    metadata.maxInFlight > 4 ||
+    metadata.commandDeadlineMs !== pressureCommandDeadlineMs(metadata) ||
     typeof metadata.socketPath !== 'string' ||
     !path.isAbsolute(metadata.socketPath)
   )
@@ -103,12 +118,22 @@ export function verifyPressureObservation(value, expectation = {}, metadata) {
 }
 
 /**
- * @param {{ receiptFile?: string, deadlineMs?: number }} options
+ * @param {{ receiptFile?: string }} options
  */
-export async function openAdmissionPressure({ receiptFile, deadlineMs = 30_000 } = {}) {
+export async function openAdmissionPressure({ receiptFile } = {}) {
   if (typeof receiptFile !== 'string' || !path.isAbsolute(receiptFile))
     refuse('ADMISSION_PRESSURE_RECEIPT_REQUIRED')
-  const metadata = verifyPressureMetadata(readMainRecord(receiptFile).value)
+  const sealed = readMainRecord(receiptFile).value
+  // The existing four-file admission volume seals this metadata inside the
+  // main admission. The private socket is created by an owned docker-exec
+  // relay in the runner's tmpfs; no extra mount or plaintext account is needed.
+  const metadata = verifyPressureMetadata(sealed.pressureMetadata ?? sealed)
+  const deadlineMs = metadata.commandDeadlineMs
+  if (sealed.pressureMetadata && (sealed.profile !== metadata.profile ||
+      sealed.context !== metadata.context || sealed.stack?.worktreeId !== metadata.worktreeId ||
+      sealed.sourceManifestSha256 !== metadata.sourceManifestSha256 ||
+      metadata.hostRefs.some(host => !sealed.bindings?.some(binding => binding.hostRef === host))))
+    refuse('ADMISSION_PRESSURE_SEALED_BINDING')
   if (!fs.existsSync(metadata.socketPath)) refuse('ADMISSION_PRESSURE_SOCKET_MISSING')
   const socket = await new Promise((resolve, reject) => {
     const candidate = net.connect({ path: metadata.socketPath })
