@@ -1133,4 +1133,97 @@ describe('network/gateway intent (manifest-level)', () => {
       .map(route => `${route.method} ${route.path}  (${route.file.replace('../', 'control-api/')})`)
     expect(missing).toEqual([])
   })
+
+  it('routes derived wake and readiness producers through their exact authenticated gateways', () => {
+    const configmaps = read(`${BASE}/control-plane/configmaps.yaml`)
+    const rpcWakeProducer = read('../../rpc-proxy/src/services/controlApiRestService.ts')
+    const rpcReadinessProducer = read('../../rpc-proxy/src/services/pr2ReadinessReporter.ts')
+    const hostReadinessProducer = read('../../mcp-host/src/runtime/pr2ReadinessReporter.ts')
+    const wakeHandler = read('../../control-api/src/routes/internal/actionAuthorityHostWake.ts')
+    const readinessHandler = read('../../control-api/src/routes/internal/pr2ReadinessEvidence.ts')
+    const hostGatewayConfig = read(`${BASE}/control-plane/host-context-controller.yaml`)
+    const rpcGateway = docContaining(yamlDocs(configmaps), 'name: control-api-rpc-gateway')
+    const workflowGateway = docContaining(
+      yamlDocs(configmaps),
+      'name: nginx-workflow-approval-gateway'
+    )
+    const wake = locationBlock(
+      rpcGateway,
+      'location ~ ^/api/v1/internal/action-authority/hosts/[^/]+/wake$'
+    )
+    const rpcReadiness = locationBlock(
+      rpcGateway,
+      'location = /api/v1/internal/pr2-readiness/runtime-evidence'
+    )
+    const hostReadiness = locationBlock(
+      workflowGateway,
+      'location = /api/v1/internal/pr2-readiness/runtime-evidence'
+    )
+
+    expect(wake).toMatch(/limit_except POST/)
+    expect(wake).toContain('proxy_set_header Authorization $http_authorization;')
+    expect(wake).toContain('proxy_set_header X-Service-Token $http_x_service_token;')
+    expect(rpcReadiness).toMatch(/limit_except POST/)
+    expect(rpcReadiness).toContain('proxy_set_header Authorization $http_authorization;')
+    expect(rpcReadiness).toContain('proxy_set_header X-Service-Token $http_x_service_token;')
+    expect(hostReadiness).toMatch(/limit_except POST/)
+    expect(hostReadiness).toContain('proxy_set_header Authorization $http_authorization;')
+    expect(hostReadiness).not.toContain('X-Service-Token')
+
+    expect(rpcWakeProducer).toContain(
+      '/internal/action-authority/hosts/${encodeURIComponent(hostRef)}/wake'
+    )
+    expect(rpcWakeProducer).toContain('authorization: `Bearer ${config.controlApiServiceToken}`')
+    expect(rpcWakeProducer).toContain("'x-service-token': config.controlApiServiceName")
+    expect(rpcReadinessProducer).toContain('/internal/pr2-readiness/runtime-evidence')
+    expect(rpcReadinessProducer).toContain("'x-service-token': 'rpc-proxy'")
+    expect(hostReadinessProducer).toContain('/api/v1/internal/pr2-readiness/runtime-evidence')
+    expect(hostReadinessProducer).toContain('authorization: `Bearer ${auth.accessToken}`')
+    expect(hostReadinessProducer).not.toContain('x-service-token')
+    expect(hostGatewayConfig).toContain(
+      'http://nginx-workflow-approval-gateway.control-plane.svc.cluster.local:8092'
+    )
+
+    expect(wakeHandler).toContain("'/internal/action-authority/hosts/:hostRef/wake'")
+    expect(wakeHandler).toContain('requireActionCheckpointCaller')
+    expect(readinessHandler).toContain("'/internal/pr2-readiness/runtime-evidence'")
+    expect(readinessHandler).toContain('requirePr2RuntimeReadinessWriter')
+
+    const rpcLocations = gatewayAllowlistLocations(rpcGateway)
+    const workflowLocations = gatewayAllowlistLocations(workflowGateway)
+    expect(
+      routeIsAllowlisted(
+        { method: 'POST', path: '/api/v1/internal/action-authority/hosts/:hostRef/wake', file: '' },
+        rpcLocations
+      )
+    ).toBe(true)
+    expect(
+      routeIsAllowlisted(
+        {
+          method: 'POST',
+          path: '/api/v1/internal/action-authority/hosts/:hostRef/wake/debug',
+          file: '',
+        },
+        rpcLocations
+      )
+    ).toBe(false)
+    expect(
+      routeIsAllowlisted(
+        { method: 'POST', path: '/api/v1/internal/pr2-readiness/runtime-evidence', file: '' },
+        rpcLocations
+      )
+    ).toBe(true)
+    expect(
+      routeIsAllowlisted(
+        { method: 'GET', path: '/api/v1/internal/pr2-readiness/runtime-evidence', file: '' },
+        rpcLocations
+      )
+    ).toBe(false)
+    expect(
+      routeIsAllowlisted(
+        { method: 'POST', path: '/api/v1/internal/pr2-readiness/runtime-evidence', file: '' },
+        workflowLocations
+      )
+    ).toBe(true)
+  })
 })
