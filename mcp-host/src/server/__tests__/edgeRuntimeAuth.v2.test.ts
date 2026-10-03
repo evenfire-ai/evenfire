@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
-import type { Request, Response } from 'express'
+import type { Response as ExpressResponse, Request } from 'express'
 import { execFileSync } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { resolve } from 'node:path'
@@ -122,7 +122,7 @@ async function rpcProxyHeaderFor(input: {
     {
       hostMessageAdmission,
       fetchImpl: vi.fn().mockResolvedValue(
-        new Response(JSON.stringify(checkpoint), {
+        new globalThis.Response(JSON.stringify(checkpoint), {
           status: 200,
           headers: { 'content-type': 'application/json' },
         })
@@ -173,7 +173,7 @@ describe('runtimeEdgeGuard v2', () => {
         response.body = body
         return this
       },
-    } as unknown as Response
+    } as unknown as ExpressResponse
     let continued = false
     runtimeEdgeGuard(['rpc-proxy', 'channel-reader'], operations)(req, res, () => {
       continued = true
@@ -406,7 +406,7 @@ describe('runtimeEdgeGuard v2', () => {
       vi.stubGlobal(
         'fetch',
         vi.fn().mockResolvedValue(
-          new Response(
+          new globalThis.Response(
             JSON.stringify({
               userId,
               hostRef: 'chatllm',
