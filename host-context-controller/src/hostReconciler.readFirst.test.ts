@@ -158,12 +158,13 @@ describe('Host read-first Service and Deployment contracts', () => {
       metadata: { generation: 1 },
       spec: {
         replicas: 1,
+        selector: { matchLabels: { app: 'rpc-proxy' } },
         template: {
           metadata: { labels: { [RPC_PROXY_EDGE_PROTOCOL_LABEL]: RPC_PROXY_EDGE_PROTOCOL_V1 } },
         },
       },
       status: { observedGeneration: 1, updatedReplicas: 1, readyReplicas: 1, availableReplicas: 1 },
-    } as k8s.V1Deployment)
+    } as unknown as k8s.V1Deployment)
     core.listNamespacedPod.mockResolvedValueOnce({
       items: [
         {

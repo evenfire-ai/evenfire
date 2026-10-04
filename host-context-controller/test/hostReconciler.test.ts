@@ -192,12 +192,13 @@ describe('HostReconciler', () => {
       metadata: { generation: 4 },
       spec: {
         replicas: 2,
+        selector: { matchLabels: { app: 'rpc-proxy' } },
         template: {
           metadata: { labels: { [RPC_PROXY_EDGE_PROTOCOL_LABEL]: RPC_PROXY_EDGE_PROTOCOL_V1 } },
         },
       },
       status: { observedGeneration: 4, updatedReplicas: 2, readyReplicas: 2, availableReplicas: 2 },
-    } as k8s.V1Deployment
+    } as unknown as k8s.V1Deployment
     const pod = (overrides: Partial<k8s.V1Pod> = {}) =>
       ({
         metadata: { labels: { [RPC_PROXY_EDGE_PROTOCOL_LABEL]: RPC_PROXY_EDGE_PROTOCOL_V1 } },
@@ -213,7 +214,7 @@ describe('HostReconciler', () => {
     expect(
       rpcProxyProtocolCohortIsReady(deployment, [
         ready[0]!,
-        pod({ metadata: { deletionTimestamp: 'now' } }),
+        pod({ metadata: { deletionTimestamp: new Date('2026-10-03T00:00:00.000Z') } }),
       ])
     ).toBe(false)
     expect(
@@ -224,7 +225,15 @@ describe('HostReconciler', () => {
     ).toBe(false)
     expect(
       rpcProxyProtocolCohortIsReady(
-        { ...deployment, spec: { ...deployment.spec, replicas: 0 } },
+        {
+          ...deployment,
+          spec: {
+            ...deployment.spec,
+            replicas: 0,
+            selector: deployment.spec?.selector ?? { matchLabels: {} },
+            template: deployment.spec?.template ?? { metadata: {}, spec: { containers: [] } },
+          },
+        },
         []
       )
     ).toBe(false)

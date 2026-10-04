@@ -1,10 +1,8 @@
-import { AccessExecutionBudget } from '../../src/services/access/accessExecutionBudget.js'
-import { knownBehavior } from '../../src/services/access/accessPath.js'
-import { checkpointActionAuthority } from '../../src/services/access/actionAuthorityCheckpoint.js'
-import { issueHostMessageAdmissionReceipt } from '../../src/utils/auth/hostMessageAdmissionReceipt.js'
+import { installControlApiJwtTestKeys } from '../../../scripts/testing/controlApiJwtTestKeys.js'
+import type { checkpointActionAuthority as checkpointActionAuthorityFn } from '../../src/services/access/actionAuthorityCheckpoint.js'
 
 type FixtureInput = Readonly<{
-  request: Parameters<typeof checkpointActionAuthority>[0]['request']
+  request: Parameters<typeof checkpointActionAuthorityFn>[0]['request']
   destination: Readonly<{ kind: 'host' | 'mcp_server'; ref: string; url: string }> | null
   pathKind?: 'direct' | 'team'
   effectiveTeamId?: string | null
@@ -13,6 +11,18 @@ type FixtureInput = Readonly<{
 }>
 
 async function main(): Promise<void> {
+  installControlApiJwtTestKeys()
+  const [
+    { AccessExecutionBudget },
+    { knownBehavior },
+    { checkpointActionAuthority },
+    { issueHostMessageAdmissionReceipt },
+  ] = await Promise.all([
+    import('../../src/services/access/accessExecutionBudget.js'),
+    import('../../src/services/access/accessPath.js'),
+    import('../../src/services/access/actionAuthorityCheckpoint.js'),
+    import('../../src/utils/auth/hostMessageAdmissionReceipt.js'),
+  ])
   const input = JSON.parse(process.argv[2] ?? '') as FixtureInput
   const behavior = Object.freeze({
     capabilities: Object.freeze(['fixture.authorized']),
