@@ -124,6 +124,11 @@ function databaseUrl(baseUrl: string, database: string): string {
 
 const NS = config.mcpServersNamespace
 const ORIGIN = 'https://control.example.com'
+
+/** ORIGIN as a literal inside a RegExp (its dots must not match any character). */
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
 const CONTEXT = 'ctx-a'
 const KEY = deriveOAuthEncryptionKey(config.oauthEncryptionKey)
 const DCR_CLIENT_ID = DCR_PUBLIC_REGISTRATION_RESPONSE.client_id
@@ -238,7 +243,7 @@ describeRealPostgres('per-server remote callback (real Postgres)', () => {
     expect(replayed).toBe(registeredUri)
     expect(reported).toBe(registeredUri)
     expect(registeredUri).toMatch(
-      new RegExp(`^${ORIGIN}/api/v1/oauth-callback/remote/atlassian/[0-9a-f-]{36}$`)
+      new RegExp(`^${escapeRegExp(ORIGIN)}/api/v1/oauth-callback/remote/atlassian/[0-9a-f-]{36}$`)
     )
     const grants = await dbPool.query('SELECT recipe_name FROM oauth_grants')
     expect(grants.rows).toEqual([{ recipe_name: 'atlassian' }])

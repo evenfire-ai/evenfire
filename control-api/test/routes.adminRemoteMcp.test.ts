@@ -422,7 +422,7 @@ describe('POST /admin/mcp-servers/remote (install saga)', () => {
         baseUrl: 'https://mcp.notion.com/mcp',
         mode: 'pre-registered',
         clientId: 'client-abc',
-        clientSecret: 'shhh-secret',
+        clientSecret: 'fixture-client-secret',
       })
 
     expect(res.status).toBe(201)
@@ -1910,6 +1910,8 @@ describe('POST /admin/mcp-servers/remote — DCR install saga (C2)', () => {
 describe('POST /admin/mcp-servers/remote — per-server callback (AS without RFC 9207)', () => {
   const PUBLIC_IP = async () => ['93.184.216.34']
   const ORIGIN = 'https://control.example.com'
+  /** ORIGIN as a literal inside a RegExp (its dots must not match any character). */
+  const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
   const CIMD_SELF_CLIENT_ID = `${ORIGIN}/api/v1/.well-known/evenfire-mcp-client`
   const ATLASSIAN_REGISTRATION =
     'https://auth.atlassian.com/VCeDsk8ZHncYF1g234fKtc4lNipbBhu3/dcr/register'
@@ -2003,7 +2005,7 @@ describe('POST /admin/mcp-servers/remote — per-server callback (AS without RFC
       callbackVariant: 'per-server',
     })
     expect(res.body.redirectUri).toMatch(
-      new RegExp(`^${ORIGIN}/api/v1/oauth-callback/remote/atlassian/${NONCE_RE}$`)
+      new RegExp(`^${escapeRegExp(ORIGIN)}/api/v1/oauth-callback/remote/atlassian/${NONCE_RE}$`)
     )
     // The nonce is this installation's install_id (what the callback will check).
     const stored = [...rows.values()][0]
@@ -2259,7 +2261,7 @@ describe('POST /admin/mcp-servers/remote — per-server callback (AS without RFC
       baseUrl: 'https://mcp.notion.com/mcp',
       mode: 'pre-registered',
       clientId,
-      clientSecret: 'pre-reg-secret',
+      clientSecret: 'fixture-pre-reg-secret',
     })
   }
 
@@ -2481,10 +2483,11 @@ describe('POST /admin/mcp-servers/remote — per-server callback (AS without RFC
         variant: 'per-server',
         redirectUriTemplate: `${ORIGIN}/api/v1/oauth-callback/remote/{serverName}/{installId}`,
       })
+      const atlassianHost = 'auth.atlassian.com'
       expect(res.body.detected.asEndpointHosts).toEqual({
-        authorization: 'auth.atlassian.com',
-        token: 'auth.atlassian.com',
-        registration: 'auth.atlassian.com',
+        authorization: atlassianHost,
+        token: atlassianHost,
+        registration: atlassianHost,
       })
     })
 
@@ -2495,9 +2498,10 @@ describe('POST /admin/mcp-servers/remote — per-server callback (AS without RFC
         variant: 'per-server',
         redirectUriTemplate: `${ORIGIN}/api/v1/oauth-callback/remote/{serverName}`,
       })
+      const linearHost = 'mcp.linear.app'
       expect(res.body.detected.asEndpointHosts).toEqual({
-        authorization: 'mcp.linear.app',
-        token: 'mcp.linear.app',
+        authorization: linearHost,
+        token: linearHost,
       })
     })
 

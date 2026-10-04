@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import fc from 'fast-check'
 import type { PinnedTransport } from '../src/http/pinnedFetch.js'
 import {
+  type AsEndpointSites,
   type DiscoveryDeps,
   checkAsEndpointsSameSite,
   discoverRemoteOAuth,
@@ -181,44 +182,54 @@ describe('discovery same-site rule — mixed metadata (mix-up via a borrowed AS)
   })
 })
 
+/** The endpoints of one AS, positionally: issuer, authorization, token, registration. */
+function sites(
+  issuer: string,
+  authorization: string,
+  token: string,
+  registration?: string
+): AsEndpointSites {
+  return { issuer, authorization, token, ...(registration ? { registration } : {}) }
+}
+
 describe('registrableSite / checkAsEndpointsSameSite (PSL semantics)', () => {
   it('private PSL section: two github.io tenants are two sites', () => {
     expect(registrableSite('https://a.github.io/x')).toBe('a.github.io')
     expect(
-      checkAsEndpointsSameSite({
-        issuer: 'https://a.github.io',
-        authorization: 'https://a.github.io/authorize',
-        token: 'https://b.github.io/token',
-      })
+      checkAsEndpointsSameSite(
+        sites('https://a.github.io', 'https://a.github.io/authorize', 'https://b.github.io/token')
+      )
     ).toMatchObject({ ok: false, field: 'token' })
   })
 
   it('subdomains of one registrable domain are one site (api.vercel.com ~ vercel.com)', () => {
     expect(
-      checkAsEndpointsSameSite({
-        issuer: 'https://vercel.com',
-        authorization: 'https://vercel.com/oauth/authorize',
-        token: 'https://api.vercel.com/login/oauth/token',
-        registration: 'https://api.vercel.com/login/oauth/register',
-      })
+      checkAsEndpointsSameSite(
+        sites(
+          'https://vercel.com',
+          'https://vercel.com/oauth/authorize',
+          'https://api.vercel.com/login/oauth/token',
+          'https://api.vercel.com/login/oauth/register'
+        )
+      )
     ).toEqual({ ok: true })
   })
 
   it('a host that is itself a public suffix has no site; null never equals null', () => {
     expect(registrableSite('https://github.io/token')).toBeNull()
     expect(
-      checkAsEndpointsSameSite({
-        issuer: 'https://github.io',
-        authorization: 'https://github.io/authorize',
-        token: 'https://github.io/token',
-      })
+      checkAsEndpointsSameSite(
+        sites('https://github.io', 'https://github.io/authorize', 'https://github.io/token')
+      )
     ).toMatchObject({ ok: false, field: 'issuer' })
     expect(
-      checkAsEndpointsSameSite({
-        issuer: 'https://honest.example.com',
-        authorization: 'https://honest.example.com/authorize',
-        token: 'https://herokuapp.com/token',
-      })
+      checkAsEndpointsSameSite(
+        sites(
+          'https://honest.example.com',
+          'https://honest.example.com/authorize',
+          'https://herokuapp.com/token'
+        )
+      )
     ).toMatchObject({ ok: false, field: 'token' })
   })
 
