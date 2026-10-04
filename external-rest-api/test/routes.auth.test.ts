@@ -63,7 +63,7 @@ describe('routes/auth password-login', () => {
 
     const res = await request(buildApp())
       .post('/api/v1/auth/google')
-      .send({ idToken: 'validly-shaped-google-token' })
+      .send({ idToken: 'validly-shaped-test-token' })
 
     expect(res.status).toBe(401)
     expect(res.body).toEqual({ error: 'Unauthorized' })
@@ -76,7 +76,7 @@ describe('routes/auth password-login', () => {
 
     const res = await request(buildApp())
       .post('/api/v1/auth/password-login')
-      .send({ email: 'active@example.invalid', password: 'password' })
+      .send({ email: 'active@example.invalid', password: 'valid-password' })
 
     expect(res.status).toBe(409)
     expect(res.body).toEqual({ error: 'password_not_set' })
@@ -84,7 +84,7 @@ describe('routes/auth password-login', () => {
 
   it('sets an HttpOnly profile session cookie and omits bearer token body for browser login', async () => {
     authServiceMock.loginWithPassword.mockResolvedValueOnce({
-      token: 'profile-session-jwt',
+      token: 'profile-session-test-token',
       me: {
         id: 'user-1',
         email: 'user@example.invalid',
@@ -105,7 +105,9 @@ describe('routes/auth password-login', () => {
 
     expect(res.body.token).toBeUndefined()
     expect(res.body.me.email).toBe('user@example.invalid')
-    expect(String(res.headers['set-cookie'])).toContain('profile_session=profile-session-jwt')
+    expect(String(res.headers['set-cookie'])).toContain(
+      'profile_session=profile-session-test-token'
+    )
     expect(String(res.headers['set-cookie'])).toContain('HttpOnly')
     expect(String(res.headers['set-cookie'])).toContain('Max-Age=43200')
     expect(String(res.headers['set-cookie'])).toContain('Secure')
@@ -114,7 +116,7 @@ describe('routes/auth password-login', () => {
 
   it('returns the bearer token body for non-browser Desktop App login', async () => {
     authServiceMock.loginWithPassword.mockResolvedValueOnce({
-      token: 'desktop-session-jwt',
+      token: 'desktop-session-test-token',
       me: {
         id: 'user-1',
         email: 'user@example.invalid',
@@ -131,25 +133,27 @@ describe('routes/auth password-login', () => {
       .send({ email: 'user@example.invalid', password: 'correct-password' })
       .expect(200)
 
-    expect(res.body.token).toBe('desktop-session-jwt')
+    expect(res.body.token).toBe('desktop-session-test-token')
     expect(res.body.me.email).toBe('user@example.invalid')
-    expect(String(res.headers['set-cookie'])).toContain('profile_session=desktop-session-jwt')
+    expect(String(res.headers['set-cookie'])).toContain(
+      'profile_session=desktop-session-test-token'
+    )
   })
 
   it('delegates Google verification behind the Control API limiter with trusted client IP', async () => {
     authServiceMock.loginWithGoogle.mockResolvedValueOnce({
-      token: 'google-session-jwt',
+      token: 'google-session-test-token',
       me: { id: 'user-1', email: 'user@example.test' },
     })
 
     const response = await request(buildApp())
       .post('/api/v1/auth/google')
       .set('x-forwarded-for', '198.51.100.52')
-      .send({ idToken: 'opaque-google-token' })
+      .send({ idToken: 'opaque-test-token' })
 
     expect(response.status).toBe(200)
     expect(authServiceMock.loginWithGoogle).toHaveBeenCalledWith(
-      { idToken: 'opaque-google-token' },
+      { idToken: 'opaque-test-token' },
       '198.51.100.52'
     )
   })

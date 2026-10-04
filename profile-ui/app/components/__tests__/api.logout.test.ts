@@ -29,7 +29,7 @@ describe('Profile logout client boundary', () => {
     vi.mocked(fetch)
       .mockResolvedValueOnce(new Response('', { status: 503 }))
       .mockResolvedValueOnce(
-        new Response(JSON.stringify({ token: 'new-token', me: { id: 'user-1' } }), {
+        new Response(JSON.stringify({ token: 'new-test-token', me: { id: 'user-1' } }), {
           status: 200,
           headers: { 'content-type': 'application/json' },
         })
