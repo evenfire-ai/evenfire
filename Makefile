@@ -82,6 +82,7 @@ TEST_SERVICES := \
 	packages/workflow-runtime-core \
 	packages/workflow-sdk \
 	packages/network-policy-core \
+	packages/jwt-key-policy \
 	packages/codex-catalog-projection \
 	packages/llm-provider-attempt-contract \
 	packages/action-context-contracts \

@@ -1,6 +1,8 @@
 FROM node:24-alpine AS builder
 WORKDIR /app
 
+# Prebuilt policy and POSIX store: copy only the production exports and types.
+COPY packages/jwt-key-policy/package.json packages/jwt-key-policy/index.cjs packages/jwt-key-policy/index.d.ts packages/jwt-key-policy/dev-store.cjs packages/jwt-key-policy/dev-store.d.ts ./packages/jwt-key-policy/
 COPY packages/workflow-recipe-capability-policy ./packages/workflow-recipe-capability-policy
 COPY packages/image-policy ./packages/image-policy
 # Shared prebuilt data-only providers package (no build step). Copied before
@@ -35,6 +37,9 @@ COPY control-api/src ./src
 
 RUN npm run build
 RUN npm prune --production
+# Its compiled dist and file-linked llm-providers are runtime inputs; the
+# TypeScript/Vitest toolchain was needed only until both package/service builds.
+RUN npm --prefix /app/packages/workflow-runtime-core prune --omit=dev
 
 FROM node:24-alpine
 ARG EVENFIRE_SOURCE_REVISION

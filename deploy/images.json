@@ -24,6 +24,7 @@
         "packages/workflow-runtime-core/**",
         "packages/workflow-recipe-capability-policy/**",
         "packages/image-policy/**",
+        "packages/jwt-key-policy/**",
         "packages/display-field/**",
         "packages/llm-provider-attempt-contract/**",
         "packages/llm-providers/**",
@@ -51,7 +52,8 @@
     {
       "name": "external-rest-api",
       "path": "external-rest-api",
-      "source_paths": ["external-rest-api/**"],
+      "rooted": true,
+      "source_paths": ["external-rest-api/**", "packages/jwt-key-policy/**"],
       "published": true,
       "deployed_to_minikube": true
     },
@@ -174,7 +176,7 @@
       "name": "rpc-proxy",
       "path": "rpc-proxy",
       "rooted": true,
-      "source_paths": ["rpc-proxy/**", "packages/action-context-contracts/**"],
+      "source_paths": ["rpc-proxy/**", "packages/action-context-contracts/**", "packages/jwt-key-policy/**"],
       "published": true,
       "deployed_to_minikube": true
     },

@@ -2,6 +2,7 @@ FROM node:24-alpine AS builder
 WORKDIR /app
 
 COPY packages/action-context-contracts ./packages/action-context-contracts
+COPY packages/jwt-key-policy/package.json packages/jwt-key-policy/index.cjs packages/jwt-key-policy/index.d.ts packages/jwt-key-policy/dev-store.cjs packages/jwt-key-policy/dev-store.d.ts ./packages/jwt-key-policy/
 COPY rpc-proxy/package*.json ./rpc-proxy/
 WORKDIR /app/rpc-proxy
 RUN npm ci
@@ -24,6 +25,7 @@ ENV EVENFIRE_SERVICE_VERSION=$EVENFIRE_SERVICE_VERSION
 ENV RPC_PROXY_PORT=8094
 
 COPY packages/action-context-contracts ./packages/action-context-contracts
+COPY --from=builder --chown=app:app /app/packages/jwt-key-policy ./packages/jwt-key-policy
 COPY --from=builder --chown=app:app /app/rpc-proxy/package*.json ./rpc-proxy/
 COPY --from=builder --chown=app:app /app/rpc-proxy/dist ./rpc-proxy/dist
 COPY --from=builder --chown=app:app /app/rpc-proxy/node_modules ./rpc-proxy/node_modules

@@ -101,10 +101,12 @@ export function verifyRpcAccessToken(token: string): RpcAccessClaims | null {
 
     if (
       typeof payload?.sub !== 'string' ||
+      payload.sub.trim().length === 0 ||
       (payload?.typ !== 'user' && payload?.typ !== 'service') ||
       !Array.isArray(payload?.scopes) ||
       !Array.isArray(payload?.hostRefs) ||
       typeof payload?.jti !== 'string' ||
+      payload.jti.trim().length === 0 ||
       typeof payload?.iat !== 'number' ||
       typeof payload?.exp !== 'number'
     ) {

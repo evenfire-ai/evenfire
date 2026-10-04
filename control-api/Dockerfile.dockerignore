@@ -2,6 +2,12 @@
 !packages/
 !packages/action-context-contracts/
 !packages/action-context-contracts/**
+!packages/jwt-key-policy/
+!packages/jwt-key-policy/package.json
+!packages/jwt-key-policy/index.cjs
+!packages/jwt-key-policy/index.d.ts
+!packages/jwt-key-policy/dev-store.cjs
+!packages/jwt-key-policy/dev-store.d.ts
 !packages/workflow-recipe-capability-policy/
 !packages/workflow-recipe-capability-policy/**
 !packages/image-policy/
@@ -26,3 +32,12 @@
 !control-api/tsconfig.json
 !control-api/src/
 !control-api/src/**
+**/node_modules/
+**/dist/
+**/.dev-keys/
+**/.env
+**/.env.*
+**/*.pem
+**/*.key
+**/*.log
+**/.local-notes/

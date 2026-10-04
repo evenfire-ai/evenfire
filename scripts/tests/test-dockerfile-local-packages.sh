@@ -647,6 +647,74 @@ assert_publish_root_build_context() {
     fail "$selector publish must use the repository-root Docker build context"
   fi
 }
+assert_jwt_policy_runtime_context() {
+  local service="$1" ignore="$REPO_ROOT/$1/Dockerfile.dockerignore"
+  local actual expected
+  expected="$(printf '%s\n' \
+    '!packages/jwt-key-policy/' \
+    '!packages/jwt-key-policy/package.json' \
+    '!packages/jwt-key-policy/index.cjs' \
+    '!packages/jwt-key-policy/index.d.ts' \
+    '!packages/jwt-key-policy/dev-store.cjs' \
+    '!packages/jwt-key-policy/dev-store.d.ts')"
+  actual="$(awk 'index($0, "!packages/jwt-key-policy/") == 1 { print }' "$ignore")"
+  if [[ "$actual" != "$expected" ]]; then
+    fail "$service context must allow only the policy runtime files and types"
+  fi
+  assert_copy_before_first_ci "$service/Dockerfile" jwt-key-policy
+  if ! grep -Fq '/app/packages' "$REPO_ROOT/$service/Dockerfile" || \
+     ! grep -Fq "WORKDIR /app/$service" "$REPO_ROOT/$service/Dockerfile"; then
+    fail "$service must preserve the runtime package/service file-link layout"
+  fi
+}
+
+for service in control-api rpc-proxy external-rest-api; do
+  assert_jwt_policy_runtime_context "$service"
+done
+
+assert_control_api_runtime_prune_after_builds() {
+  local file="$REPO_ROOT/control-api/Dockerfile" final_build prune runtime
+  final_build="$(line_of_last "$file" 'RUN npm run build')"
+  prune="$(line_of_first "$file" 'RUN npm --prefix /app/packages/workflow-runtime-core prune --omit=dev')"
+  runtime="$(awk '/^FROM / { count++; if (count == 2) { print NR; exit } }' "$file")"
+  if [[ -z "$final_build" || -z "$prune" || -z "$runtime" || \
+        "$prune" -le "$final_build" || "$prune" -ge "$runtime" ]]; then
+    fail 'Control API must prune workflow-runtime-core dev dependencies after all builds, before runtime COPY'
+  fi
+}
+
+assert_service_make_root_context() {
+  local service="$1" target="${2:-docker-build}" from_root from_service expected
+  if [[ "$target" == docker-push-cross ]]; then
+    expected="docker buildx build --platform linux/amd64 -f \"$REPO_ROOT/$service/Dockerfile\" -t example.invalid/evenfire/$service:fixture --push \"$REPO_ROOT\""
+  else
+    expected="docker build -f \"$REPO_ROOT/$service/Dockerfile\" -t example.invalid/evenfire/$service:fixture \"$REPO_ROOT\""
+  fi
+  from_root="$(cd "$REPO_ROOT" && make -n -f "$service/Makefile" "$target" REGISTRY=example.invalid/evenfire TAG=fixture)"
+  from_service="$(cd "$REPO_ROOT/$service" && make -n "$target" REGISTRY=example.invalid/evenfire TAG=fixture)"
+  if [[ "$from_root" != "$expected" || "$from_service" != "$expected" ]]; then
+    fail "$service Make $target must use its explicit Dockerfile and root context from either supported cwd"
+  fi
+}
+
+assert_service_secret_exclusions_after_allowlist() {
+  local service="$1" ignore="$REPO_ROOT/$1/Dockerfile.dockerignore"
+  local last_allow exclude_line pattern
+  last_allow="$(awk '/^!/ { line=NR } END { print line+0 }' "$ignore")"
+  for pattern in '**/.dev-keys/' '**/.env' '**/.env.*' '**/*.pem' '**/*.key'; do
+    exclude_line="$(awk -v pattern="$pattern" '$0 == pattern { line=NR } END { print line+0 }' "$ignore")"
+    if [[ "$exclude_line" -le "$last_allow" ]]; then
+      fail "$service context must exclude $pattern after all allow rules, including nested src files"
+    fi
+  done
+}
+
+assert_control_api_runtime_prune_after_builds
+for service in control-api rpc-proxy external-rest-api; do
+  assert_service_make_root_context "$service"
+  assert_service_secret_exclusions_after_allowlist "$service"
+done
+assert_service_make_root_context rpc-proxy docker-push-cross
 
 # Direct consumers.  The first four are Node services; profile-ui and
 # control-ui are Next.js consumers and therefore also require materialization.

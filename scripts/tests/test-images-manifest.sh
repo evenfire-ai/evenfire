@@ -1438,6 +1438,51 @@ assert_e2e_only_images_are_unpublished_minikube_fixtures() {
   fi
 }
 
+assert_jwt_key_policy_change_rebuilds_all_consumers() {
+  local output rc
+  output="$(node -e '
+    import("'"$REPO_ROOT"'/scripts/release/images-manifest.mjs").then(async m => {
+      const fs = await import("node:fs")
+      const wf = fs.readFileSync("'"$REPO_ROOT"'/.github/workflows/build-publish.yml", "utf8")
+      const sourcePath = "packages/jwt-key-policy/**"
+      const expected = ["control-api", "external-rest-api", "rpc-proxy"]
+      const problems = []
+      const filtersMatch = wf.match(/filters: \|\n([\s\S]*?)\n\n {2}build-push:/)
+      if (!filtersMatch) throw new Error("paths-filter block is missing")
+      const filters = {}
+      let currentKey
+      for (const line of filtersMatch[1].split("\n")) {
+        if (!line.trim()) continue
+        const key = line.match(/^\s*([\w.-]+):\s*$/)
+        const value = line.match(/^\s*-\s*\x27([^\x27]+)\x27\s*$/)
+        if (key) { currentKey = key[1]; filters[currentKey] = [] }
+        else if (value && currentKey) filters[currentKey].push(value[1])
+        else throw new Error("unexpected paths-filter syntax")
+      }
+      const selectedFilters = Object.entries(filters)
+        .filter(([, paths]) => paths.includes(sourcePath)).map(([name]) => name).sort()
+      const selectedImages = m.IMAGES
+        .filter(image => image.source_paths?.includes(sourcePath)).map(image => image.name).sort()
+      if (selectedFilters.join(",") !== expected.join(",")) problems.push("JWT policy filter consumer set differs")
+      if (selectedImages.join(",") !== expected.join(",")) problems.push("JWT policy manifest consumer set differs")
+      for (const name of expected) {
+        const image = m.IMAGES.find(image => image.name === name)
+        if (!image?.rooted) problems.push(`${name} must use the root build context`)
+        const manifest = JSON.parse(fs.readFileSync(`'"$REPO_ROOT"'/${name}/package.json`, "utf8"))
+        if (manifest.dependencies?.["@clerum/jwt-key-policy"] !== "file:../packages/jwt-key-policy") {
+          problems.push(`${name} must declare its production policy dependency`)
+        }
+      }
+      console.log(problems.join("; "))
+    }).catch(error => { console.log(error.message); process.exit(1) })' 2>&1)"
+  rc=$?
+  if [ "$rc" -ne 0 ] || [ -n "$output" ]; then
+    fail "JWT policy consumer routing contract failed: $output"
+  else
+    pass "a JWT-policy-only change rebuilds all three rooted consumers"
+  fi
+}
+
 assert_every_defined_case_is_invoked() {
   local self defined invoked missing
   self="$REPO_ROOT/scripts/tests/test-images-manifest.sh"
@@ -1467,6 +1512,7 @@ assert_control_ui_qa_recorder_change_rebuilds_control_ui
 assert_llm_provider_attempt_contract_change_rebuilds_consumers
 assert_codex_catalog_projection_change_rebuilds_consumers
 assert_gfs_interaction_policy_change_rebuilds_consumers
+assert_jwt_key_policy_change_rebuilds_all_consumers
 assert_all_three_image_lists_agree
 assert_the_verify_set_splits_on_published_not_on_mode
 assert_the_default_ghcr_verify_set_omits_only_the_e2e_fixtures

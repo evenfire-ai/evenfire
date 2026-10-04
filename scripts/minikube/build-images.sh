@@ -1238,8 +1238,9 @@ build_image "control-api" \
   "${PROJECT_DIR}/control-api/Dockerfile"
 
 build_image "external-rest-api" \
-  "${PROJECT_DIR}/external-rest-api" \
-  "clerum/external-rest-api:test"
+  "${PROJECT_DIR}" \
+  "clerum/external-rest-api:test" \
+  "${PROJECT_DIR}/external-rest-api/Dockerfile"
 
 build_image "rpc-proxy" \
   "${PROJECT_DIR}" \

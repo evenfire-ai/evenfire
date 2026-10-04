@@ -1,4 +1,14 @@
+import { dirname, join } from 'node:path'
 import { RPC_PROXY_MCP_HOST_EDGE_TOKEN_DEV_DEFAULT } from '@clerum/action-context-contracts'
+import { parseVerifierMaterial } from '@clerum/jwt-key-policy'
+import { readDevVerifierMaterial, resolveDevKeyStoreDir } from '@clerum/jwt-key-policy/dev-store'
+
+const DEV_MODE_ENABLED = process.env.CLERUM_DEV_MODE === 'true'
+if (process.env.NODE_ENV === 'production' && DEV_MODE_ENABLED) {
+  throw new Error(
+    '[SECURITY] Startup rejected: CLERUM_DEV_MODE=true is not allowed with NODE_ENV=production.'
+  )
+}
 
 type Config = {
   port: number
@@ -117,11 +127,6 @@ export function parseRpcProxyMcpHostEdgeToken(
   }
   return value
 }
-
-function normalizePem(value: string): string {
-  return value.replace(/\\n/g, '\n').trim()
-}
-
 export function parseSandboxUiAllowedPorts(raw: string): ReadonlySet<number> {
   const ports = new Set<number>()
   for (const token of raw.split(',')) {
@@ -193,24 +198,39 @@ export function parseWakeMaxHoldMs(raw: string): number {
   return MAX_REQUEST_HOLD_MS
 }
 
-const DEV_RPC_JWT_PUBLIC_KEY = normalizePem(`-----BEGIN PUBLIC KEY-----
-MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArCIYGHehMPpGKePxaKQa
-rDX5yrzifU5i4fzpI3EtkKSU6s5ug7EkKxc2DdMekoqXe9vr7qKyVwiilUIusXLX
-iW7KPMJlD/Fd5Bo7Qxt69wYiL5I4K37eDgCN6D3LduHySEnkhdI0GDpB4LM2ASOx
-QkEabepekZTMQyExmCIn/dHJ15B+4A9tiiephYOQNr3GcnW9eDomMt6NJLypikbr
-xJO6O7Ar0G+raTbflth8EQzWnGF+WgQW4iiM3wsFhpaE0mUlEbMGDGTMAZy1KfxA
-RRu+QZm3Lo+5AiCaHkijDCglHsXLhqsYi2AdRiavD1Gk9LKP/ztKw7q/D6fYFzmO
-QwIDAQAB
------END PUBLIC KEY-----`)
+function serviceRoot(): string {
+  // Works in every supported runtime: CommonJS (dist and ts-node) resolves
+  // __dirname to <service>/dist or <service>/src; Vitest's ESM transform falls
+  // back to the service working directory used by every test/npm script.
+  return typeof __dirname === 'string' && __dirname ? dirname(__dirname) : process.cwd()
+}
+
+/**
+ * Env var first; explicit dev mode loads the public half published next to the
+ * control-api signing key; every other mode fails closed. The resolved key is
+ * always fingerprint-checked so a historically committed public key is never
+ * accepted as a verifier.
+ */
+function resolveRpcJwtPublicKey(): string {
+  const envName = 'RPC_PROXY_JWT_PUBLIC_KEY'
+  const fromEnv = process.env[envName]
+  if (fromEnv) return parseVerifierMaterial(fromEnv, envName).publicPem
+  if (DEV_MODE_ENABLED) {
+    const storeDir = resolveDevKeyStoreDir(
+      join(serviceRoot(), '..', 'control-api'),
+      process.env.EVENFIRE_DEV_KEY_STORE
+    )
+    return readDevVerifierMaterial('rpc', storeDir).publicPem
+  }
+  return required(envName)
+}
 
 export const config: Config = {
   port: Number(process.env.RPC_PROXY_PORT || 8094),
   corsOrigin: parseCorsOrigin(
     requiredOrDevDefault('RPC_PROXY_CORS_ORIGIN', 'http://localhost:3000')
   ),
-  jwtPublicKey: normalizePem(
-    requiredOrDevDefault('RPC_PROXY_JWT_PUBLIC_KEY', DEV_RPC_JWT_PUBLIC_KEY)
-  ),
+  jwtPublicKey: resolveRpcJwtPublicKey(),
   jwtIssuer: requiredOrDevDefault('RPC_PROXY_JWT_ISSUER', 'control-api'),
   jwtAudience: requiredOrDevDefault('RPC_PROXY_JWT_AUDIENCE', 'rpc-proxy'),
   upstreamTimeoutMs: parsePositiveIntMs(

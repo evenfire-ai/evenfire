@@ -9,6 +9,10 @@ vi.mock('../src/config.js', () => ({
   },
 }))
 
+// The test exercises the shared public-error contract, not External REST's
+// process configuration. Its production config requires a deployment JWT key.
+vi.mock('../../external-rest-api/src/config.js', () => ({ config: {} }))
+
 function okResponse(body?: unknown): Response {
   return {
     ok: true,

@@ -1,6 +1,6 @@
 {
   "name": "clerum-rpc-proxy",
-  "version": "0.1.126",
+  "version": "0.1.127",
   "description": "External-facing RPC proxy for tenant-scoped MCP access",
   "main": "dist/main.js",
   "engines": {
@@ -10,6 +10,7 @@
     "build": "tsc",
     "test": "vitest run",
     "test:watch": "vitest",
+    "typecheck:jwt-contract": "tsc -p tsconfig.jwt-contract-tests.json --noEmit",
     "test:e2e": "npm --prefix ../tests/e2e run test:rpc-proxy-e2e",
     "test:e2e:watch": "npm --prefix ../tests/e2e run test:rpc-proxy-e2e:watch",
     "start": "node dist/main.js",
@@ -17,6 +18,7 @@
   },
   "dependencies": {
     "@clerum/action-context-contracts": "file:../packages/action-context-contracts",
+    "@clerum/jwt-key-policy": "file:../packages/jwt-key-policy",
     "cors": "^2.8.5",
     "express": "^4.21.2",
     "express-rate-limit": "^8.5.1",

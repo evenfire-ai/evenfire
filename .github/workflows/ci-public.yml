@@ -69,6 +69,7 @@ jobs:
           - packages/workflow-runtime-core
           - packages/workflow-sdk
           - packages/network-policy-core
+          - packages/jwt-key-policy
           - packages/llm-provider-attempt-contract
           - packages/llm-providers
           - packages/grok-provider-attempt-contract
@@ -140,6 +141,11 @@ jobs:
       - name: Build
         working-directory: ${{ matrix.service }}
         run: npm run build
+
+      - name: Typecheck JWT policy consumer contracts
+        if: matrix.service == 'control-api' || matrix.service == 'rpc-proxy' || matrix.service == 'external-rest-api'
+        working-directory: ${{ matrix.service }}
+        run: npm run typecheck:jwt-contract
 
       - name: Build Profile UI image builder stage
         if: matrix.service == 'profile-ui'
@@ -240,7 +246,7 @@ jobs:
       # no tsconfig and no typescript dependency), so `npx tsc` there would fetch
       # the unrelated `tsc` package from the registry instead of typechecking.
       - name: Typecheck (tsc --noEmit)
-        if: matrix.service != 'mcp-servers' && matrix.service != 'packages/desktop-app-links' && matrix.service != 'packages/gfs-interaction-policy' && matrix.service != 'packages/network-policy-core' && matrix.service != 'packages/llm-provider-attempt-contract' && matrix.service != 'packages/grok-provider-attempt-contract' && matrix.service != 'packages/llm-providers' && matrix.service != 'packages/codex-catalog-projection' && matrix.service != 'packages/action-context-contracts'
+        if: matrix.service != 'mcp-servers' && matrix.service != 'packages/desktop-app-links' && matrix.service != 'packages/gfs-interaction-policy' && matrix.service != 'packages/network-policy-core' && matrix.service != 'packages/jwt-key-policy' && matrix.service != 'packages/llm-provider-attempt-contract' && matrix.service != 'packages/grok-provider-attempt-contract' && matrix.service != 'packages/llm-providers' && matrix.service != 'packages/codex-catalog-projection' && matrix.service != 'packages/action-context-contracts'
         working-directory: ${{ matrix.service }}
         run: npx tsc --noEmit
 
