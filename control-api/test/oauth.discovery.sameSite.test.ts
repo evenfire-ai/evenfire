@@ -131,17 +131,18 @@ describe('discovery same-site rule — mixed metadata (mix-up via a borrowed AS)
     })
   })
 
-  it('revocation endpoint on another site → rejected', async () => {
-    const { outcome } = await discover(
-      atlassianWith(as => {
-        as.revocation_endpoint = 'https://attacker.example/revoke'
-      })
-    )
-    expect(!outcome.ok && outcome.error).toMatchObject({
-      kind: 'as_endpoints_cross_site',
-      field: 'revocation',
+  // Nothing sends to the revocation endpoint and it is not pinned on the CR, so it is
+  // not trusted with anything; an off-site or relative one must not block the install.
+  for (const revocation of ['https://attacker.example/revoke', '/oauth/revoke']) {
+    it(`revocation endpoint ${JSON.stringify(revocation)} → ignored, discovery succeeds`, async () => {
+      const { outcome } = await discover(
+        atlassianWith(as => {
+          as.revocation_endpoint = revocation
+        })
+      )
+      expect(outcome.ok).toBe(true)
     })
-  })
+  }
 
   it('authorization endpoint on another site → rejected', async () => {
     const { outcome } = await discover(
@@ -199,7 +200,6 @@ describe('registrableSite / checkAsEndpointsSameSite (PSL semantics)', () => {
         authorization: 'https://vercel.com/oauth/authorize',
         token: 'https://api.vercel.com/login/oauth/token',
         registration: 'https://api.vercel.com/login/oauth/register',
-        revocation: 'https://api.vercel.com/login/oauth/token/revoke',
       })
     ).toEqual({ ok: true })
   })

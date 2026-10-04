@@ -170,7 +170,6 @@ export interface AsEndpointSites {
   authorization: string
   token: string
   registration?: string
-  revocation?: string
 }
 
 export type AsEndpointSiteCheck =
@@ -185,10 +184,12 @@ export type AsEndpointSiteCheck =
  * client at the honest AS and redeem its codes at the attacker. With `iss` the response
  * is bound to the issuer and this rule is not needed.
  *
- * `revocation` is checked although nothing sends to it yet, so the day it is used it
- * cannot receive refresh tokens on an unvalidated host. A `null` site is never equal to
- * anything, including another `null`. Pure: callers pass the endpoints they are about
- * to trust (discovery output, or the values pinned on a CR).
+ * Only the endpoints we send to are checked. `revocation_endpoint` is neither used nor
+ * pinned on the CR, so an off-site or malformed one must not block an install; whatever
+ * starts sending refresh tokens to it must first pin it on the CR and add it here (and
+ * to the runtime coherence rule). A `null` site is never equal to anything, including
+ * another `null`. Pure: callers pass the endpoints they are about to trust (discovery
+ * output, or the values pinned on a CR).
  */
 export function checkAsEndpointsSameSite(endpoints: AsEndpointSites): AsEndpointSiteCheck {
   const issuerSite = registrableSite(endpoints.issuer)
@@ -204,7 +205,6 @@ export function checkAsEndpointsSameSite(endpoints: AsEndpointSites): AsEndpoint
     'authorization',
     'token',
     'registration',
-    'revocation',
   ]
   for (const field of fields) {
     const url = endpoints[field]
@@ -762,7 +762,6 @@ export async function discoverRemoteOAuth(
       ...(typeof as.registration_endpoint === 'string'
         ? { registration: as.registration_endpoint }
         : {}),
-      ...(typeof as.revocation_endpoint === 'string' ? { revocation: as.revocation_endpoint } : {}),
     })
     if (!sameSite.ok) {
       log.warn(
