@@ -15,6 +15,15 @@ import { RFC1123_RE } from '../http/rfc1123.js'
  *                    so an AS can only ever deliver a code to the server it was issued
  *                    for.
  *
+ * Accepted residual: per-server URIs extend the shared one (`/remote/<serverName>…`), so
+ * the separation relies on the AS comparing redirect URIs exactly (RFC 9700 §4.1.3). An
+ * AS that accepted the platform CIMD client (registered for `/remote` only), sent no
+ * `iss`, AND matched redirect URIs by prefix would deliver a code for that client to a
+ * per-server URI, where the callback cannot tell it apart. No AS meeting all three is
+ * known; moving the per-server root would not help against string-prefix matching unless
+ * it shared no prefix with `/oauth-callback/remote`, and the URI shape is fixed once
+ * operators register it.
+ *
  * This module is the single place that derives the variant and builds the URI, so the
  * value registered at the AS, sent on authorize and replayed on the token exchange
  * cannot drift apart. It deliberately imports nothing from the OAuth modules: both
