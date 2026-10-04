@@ -3503,6 +3503,7 @@ export class HostReconciler {
           secretKeyRef: {
             name: 'rpc-proxy-edge-credentials',
             key: 'RPC_PROXY_MCP_HOST_EDGE_TOKEN',
+            optional: config.hostRpcProxyEdgeProtocol !== RPC_PROXY_EDGE_PROTOCOL_V1,
           },
         },
       },

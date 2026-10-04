@@ -22,7 +22,7 @@ export type PluginWorkloadSdkCapability = (typeof PLUGIN_WORKLOAD_SDK_CAPABILITI
 export function parseRpcProxyEdgeToken(raw: string | undefined, required: boolean): string {
   const supplied = raw?.trim() ?? ''
   const token = supplied || (required ? '' : RPC_PROXY_MCP_HOST_EDGE_TOKEN_DEV_DEFAULT)
-  if ((token && (token.length < 16 || token.length > 4096)) || (required && !token)) {
+  if (token && (token.length < 16 || token.length > 4096)) {
     throw new Error('MCP_HOST_RPC_PROXY_EDGE_TOKEN is missing or invalid')
   }
   return token

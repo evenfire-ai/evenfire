@@ -22,6 +22,11 @@ const EDGE_CHANNEL_ID_HEADER = 'x-clerum-edge-channel-id'
 const EDGE_SENDER_HEADER = 'x-clerum-edge-sender'
 const EDGE_SERVICE_HEADER = 'x-service-token'
 export const EDGE_ACTION_CONTEXT_HEADER = 'x-clerum-edge-action-context'
+const V2_AUTHORITY_ONLY_HEADERS = [
+  'x-clerum-edge-access-path-id',
+  'x-clerum-edge-authorization-revision',
+  'x-clerum-edge-operation-id',
+] as const
 const MAX_ACTION_CONTEXT_HEADER_BYTES = 32 * 1024
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const TARGET_HASH_PATTERN = /^ath2_[A-Za-z0-9_-]{43}$/
@@ -43,6 +48,10 @@ function firstHeaderValue(req: Request, name: string): string | undefined {
   const value = req.headers[name]
   if (Array.isArray(value)) return value[0]
   return value
+}
+
+function hasHeader(req: Request, name: string): boolean {
+  return Object.prototype.hasOwnProperty.call(req.headers, name.toLowerCase())
 }
 
 function cleanHeader(req: Request, name: string): string | undefined {
@@ -262,7 +271,25 @@ export function runtimeEdgeGuard(
   const allowed = new Set<RuntimeCallerKind>(allowedCallers)
   return (req: Request, res: Response, next: NextFunction): void => {
     const assertedCaller = cleanHeader(req, EDGE_CALLER_HEADER)
-    if (assertedCaller === 'rpc-proxy' && !rpcProxyServiceAuthenticated(req)) {
+    const unsupportedAuthorityHeader = V2_AUTHORITY_ONLY_HEADERS.some(name => hasHeader(req, name))
+    const declaresV2Authority =
+      hasHeader(req, EDGE_ACTION_CONTEXT_HEADER) || unsupportedAuthorityHeader
+
+    // Legacy context headers retain their pre-PR3 behavior. A declared V2
+    // envelope selects the authenticated path; standalone authority fields are
+    // rejected rather than reinterpreted as legacy context.
+    if (unsupportedAuthorityHeader) {
+      res.status(401).json({ error: 'Unsupported runtime V2 authority header' })
+      return
+    }
+    if (declaresV2Authority && assertedCaller !== 'rpc-proxy') {
+      res.status(401).json({ error: 'Missing authenticated rpc-proxy service context' })
+      return
+    }
+    if (
+      declaresV2Authority &&
+      (!cleanHeader(req, EDGE_ACTION_CONTEXT_HEADER) || !rpcProxyServiceAuthenticated(req))
+    ) {
       res.status(401).json({ error: 'Missing authenticated rpc-proxy service context' })
       return
     }

@@ -192,11 +192,12 @@ describe('PATCH /rpc/hosts/:hostRef/sessions/:agent/:chatId/name — rename pass
     serviceMock.resolveHostConnectionForUser.mockImplementation(
       async (_userId, _hostRef, _token, edgeContext) => ({
         name: 'chatllm',
-        url: edgeContext.destination.url,
+        url: edgeContext.authorizedActionV2?.checkpoint.destination.url,
         headers: {
           'x-clerum-edge-caller': 'rpc-proxy',
           'x-clerum-edge-host-ref': 'chatllm',
-          'x-clerum-edge-action-context': edgeContext.actionContextV2,
+          'x-clerum-rpc-proxy-edge-token': 'test-edge-token',
+          'x-clerum-edge-action-context': edgeContext.authorizedActionV2?.trustedEdgeHeader,
         },
       })
     )
@@ -233,12 +234,17 @@ describe('PATCH /rpc/hosts/:hostRef/sessions/:agent/:chatId/name — rename pass
       'chatllm',
       'v2-token',
       expect.objectContaining({
-        actionContextV2: expect.any(String),
-        destination: expect.objectContaining({ kind: 'host', ref: 'mcp-host/chatllm' }),
+        authorizedActionV2: expect.objectContaining({
+          trustedEdgeHeader: expect.any(String),
+          checkpoint: expect.objectContaining({
+            destination: expect.objectContaining({ kind: 'host', ref: 'mcp-host/chatllm' }),
+          }),
+        }),
       })
     )
     const upstreamHeaders = fetchMock.mock.calls[1][1].headers as Record<string, string>
     expect(upstreamHeaders['x-clerum-edge-action-context']).toEqual(expect.any(String))
+    expect(upstreamHeaders['x-clerum-rpc-proxy-edge-token']).toBe('test-edge-token')
     expect(upstreamHeaders['x-clerum-edge-user-id']).toBeUndefined()
   })
 

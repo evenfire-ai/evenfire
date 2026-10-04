@@ -146,13 +146,14 @@ describe('direct trusted service runtime admission', () => {
       expect(invalid.error?.message).toContain('HTTP 400')
       expect(messageHandler).not.toHaveBeenCalled()
 
-      const forgedRpcProxy = await fetch(`http://127.0.0.1:${address.port}/v1/runtime/messages`, {
+      const forgedRpcProxyV2 = await fetch(`http://127.0.0.1:${address.port}/v1/runtime/messages`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'x-clerum-edge-caller': 'rpc-proxy',
           'x-clerum-edge-host-ref': 'chatllm',
           'x-clerum-edge-user-id': 'verified-user',
+          'x-clerum-edge-action-context': 'forged-v2-envelope',
         },
         body: JSON.stringify({
           content: 'forged rpc edge',
@@ -164,7 +165,7 @@ describe('direct trusted service runtime admission', () => {
           hostRef: 'chatllm',
         }),
       })
-      expect(forgedRpcProxy.status).toBe(401)
+      expect(forgedRpcProxyV2.status).toBe(401)
       expect(messageHandler).not.toHaveBeenCalled()
 
       const originalFetch = globalThis.fetch.bind(globalThis)

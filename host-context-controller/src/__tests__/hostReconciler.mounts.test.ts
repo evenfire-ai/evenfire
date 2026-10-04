@@ -979,10 +979,46 @@ describe('HostReconciler.buildDeployment — SharedFileSystem mounts', () => {
     expect(rpcProxyEdgeToken?.valueFrom?.secretKeyRef).toEqual({
       name: 'rpc-proxy-edge-credentials',
       key: 'RPC_PROXY_MCP_HOST_EDGE_TOKEN',
+      optional: true,
     })
     // Only the built-in runtime volumes — no context-files volumes.
     const volNames = (podSpec.volumes ?? []).map(v => v.name).sort()
     expect(volNames).toEqual(['mcp-host-runtime-tokens', 'tmp', 'workflow-auth-state', 'workspace'])
+  })
+
+  it('keeps new Host images on legacy protocol until V2 is explicitly selected', () => {
+    const mutableConfig = hccConfig as unknown as {
+      hostRpcProxyEdgeProtocol: 'legacy-headers' | 'dedicated-header-v1'
+      hostImage: string
+    }
+    const previousProtocol = mutableConfig.hostRpcProxyEdgeProtocol
+    const previousImage = mutableConfig.hostImage
+    try {
+      expect(previousProtocol).toBe('legacy-headers')
+      mutableConfig.hostRpcProxyEdgeProtocol = 'legacy-headers'
+      mutableConfig.hostImage = 'clerum/mcp-host:pr2-new-image'
+      const legacy = new HostReconciler(makeStubKc()).buildDeployment(makeHost())
+      const legacyContainer = legacy.spec!.template!.spec!.containers![0]!
+      expect(legacyContainer.image).toBe('clerum/mcp-host:pr2-new-image')
+      expect(legacy.spec!.template!.metadata!.labels?.[RPC_PROXY_EDGE_PROTOCOL_LABEL]).toBe(
+        'legacy-headers'
+      )
+      expect(
+        legacyContainer.env?.find(entry => entry.name === 'MCP_HOST_RPC_PROXY_EDGE_TOKEN')
+          ?.valueFrom?.secretKeyRef?.optional
+      ).toBe(true)
+
+      mutableConfig.hostRpcProxyEdgeProtocol = RPC_PROXY_EDGE_PROTOCOL_V1
+      const strict = new HostReconciler(makeStubKc()).buildDeployment(makeHost())
+      const strictContainer = strict.spec!.template!.spec!.containers![0]!
+      expect(
+        strictContainer.env?.find(entry => entry.name === 'MCP_HOST_RPC_PROXY_EDGE_TOKEN')
+          ?.valueFrom?.secretKeyRef?.optional
+      ).toBe(false)
+    } finally {
+      mutableConfig.hostRpcProxyEdgeProtocol = previousProtocol
+      mutableConfig.hostImage = previousImage
+    }
   })
 
   it('adds a pod-template runtime token revision annotation when HCC rotates tokens', () => {

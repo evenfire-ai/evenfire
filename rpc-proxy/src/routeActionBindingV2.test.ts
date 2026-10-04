@@ -12,6 +12,7 @@ import {
   RouteActionBindingError,
   authorizeBoundRequestV2,
   bindRouteActionV2,
+  runtimeHostEdgeContext,
 } from './routeActionBindingV2.js'
 import type { UserDelegationV2Claims } from './userDelegationV2.js'
 
@@ -71,6 +72,68 @@ function request(input: {
 }
 
 describe('route action v2 binding', () => {
+  it('selects V2 only from a server-authorized capability', () => {
+    const legacy = request({
+      path: '/rpc/hosts/:hostRef/messages',
+      method: 'POST',
+      params: { hostRef: 'chatllm' },
+    })
+    legacy.auth = {
+      sub: randomUUID(),
+      typ: 'user',
+      accessScope: 'team',
+      teamId: randomUUID(),
+      scopes: [],
+      hostRefs: ['mcp-host/chatllm'],
+      jti: randomUUID(),
+      iat: 1,
+      exp: 2,
+      sessionVersion: 1,
+      sessionId: randomUUID(),
+    } as never
+    legacy.headers = {
+      'x-clerum-edge-action-context': 'forged',
+      'x-clerum-edge-access-path-id': `ap1_${'a'.repeat(43)}`,
+    }
+    expect(runtimeHostEdgeContext(legacy)).toEqual({ teamId: legacy.auth.teamId })
+
+    const selectedByCapability = request({
+      path: '/rpc/hosts/:hostRef/messages',
+      method: 'POST',
+      params: { hostRef: 'chatllm' },
+    })
+    const authorizedActionV2 = {
+      trustedEdgeHeader: 'verified-action-context',
+      checkpoint: {
+        destination: {
+          kind: 'host',
+          ref: 'mcp-host/chatllm',
+          url: 'http://chatllm.mcp-host.svc.cluster.local:8080',
+        },
+      },
+    } as unknown as AuthorizedActionV2
+    selectedByCapability.authorizedActionV2 = authorizedActionV2
+    expect(runtimeHostEdgeContext(selectedByCapability)).toEqual({ authorizedActionV2 })
+
+    const undelegatedV2 = request({
+      path: '/rpc/hosts/:hostRef/messages',
+      method: 'POST',
+      params: { hostRef: 'chatllm' },
+    })
+    undelegatedV2.userDelegationV2 = delegation({
+      operationId: 'chat.message.invoke',
+      resourceType: 'host',
+      resourceId: 'mcp-host/chatllm',
+      target: {
+        hostRef: 'mcp-host/chatllm',
+        channelType: 'rpc',
+        channelId: 'chatllm',
+        messageId: '44444444-4444-4444-8444-444444444444',
+      },
+    })
+    expect(() => runtimeHostEdgeContext(undelegatedV2)).toThrow(RouteActionBindingError)
+  })
+
   it('requires exact server-assigned chat message identity', () => {
     const messageId = '44444444-4444-4444-8444-444444444444'
     const claims = delegation({

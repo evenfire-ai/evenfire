@@ -585,7 +585,7 @@ export const config: Config = {
   // rpc-proxy namespace
   rpcProxyNamespace: getEnv('CONTEXT_MAPPER_RPC_PROXY_NAMESPACE', 'rpc-proxy')!,
   hostRpcProxyEdgeProtocol: (() => {
-    const protocol = getEnv('CONTEXT_MAPPER_HOST_RPC_PROXY_EDGE_PROTOCOL', 'dedicated-header-v1')
+    const protocol = getEnv('CONTEXT_MAPPER_HOST_RPC_PROXY_EDGE_PROTOCOL', 'legacy-headers')
     if (protocol !== 'legacy-headers' && protocol !== 'dedicated-header-v1') {
       throw new Error(
         'CONTEXT_MAPPER_HOST_RPC_PROXY_EDGE_PROTOCOL must be legacy-headers or dedicated-header-v1'

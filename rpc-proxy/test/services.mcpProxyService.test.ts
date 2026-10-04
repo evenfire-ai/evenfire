@@ -1,5 +1,4 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { RPC_PROXY_MCP_HOST_EDGE_TOKEN_HEADER } from '@clerum/action-context-contracts'
 import { config } from '../src/config.js'
 import {
   forwardHostMessageToHost,
@@ -236,7 +235,6 @@ describe('services/mcpProxyService', () => {
       name: 'agent2',
       url: 'http://agent2.mcp-host:8080',
       headers: {
-        [RPC_PROXY_MCP_HOST_EDGE_TOKEN_HEADER]: config.mcpHostEdgeToken,
         'x-clerum-edge-access-scope': 'user',
         'x-clerum-edge-caller': 'rpc-proxy',
         'x-clerum-edge-host-ref': 'agent2',

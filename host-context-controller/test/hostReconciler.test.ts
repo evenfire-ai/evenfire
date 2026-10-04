@@ -40,6 +40,7 @@ vi.mock('../src/config', () => ({
     controlPlaneNamespace: 'control-plane',
     hostNamespace: 'mcp-host',
     rpcProxyNamespace: 'rpc-proxy',
+    hostRpcProxyEdgeProtocol: 'legacy-headers',
     channelsNamespace: 'channels',
     hostFullReconcileConcurrency: 2,
     channelReaderImage: 'clerum/channel-reader:test',

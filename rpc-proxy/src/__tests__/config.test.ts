@@ -12,10 +12,8 @@ import {
 } from '../config.js'
 
 describe('parseRpcProxyMcpHostEdgeToken', () => {
-  it('requires an explicit production credential', () => {
-    expect(() => parseRpcProxyMcpHostEdgeToken(undefined, true)).toThrow(
-      'Missing required environment variable: RPC_PROXY_MCP_HOST_EDGE_TOKEN'
-    )
+  it('allows production startup without the dormant V2 credential', () => {
+    expect(parseRpcProxyMcpHostEdgeToken(undefined, true)).toBe('')
   })
 
   it('accepts a bounded configured credential', () => {

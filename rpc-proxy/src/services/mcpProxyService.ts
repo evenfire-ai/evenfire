@@ -96,16 +96,17 @@ export async function resolveHostConnectionForUser(
     requestId?: string
     messageResolution?: boolean
     directRunBinding?: DirectRunBindingRequest
-    actionContextV2?: string
-    destination?: Readonly<{ kind: 'host' | 'mcp_server'; ref: string; url: string }>
+    authorizedActionV2?: AuthorizedActionV2
   }
 ): Promise<ResolvedServerConnection | HostAccessDenial | null> {
   const expectedRef = `${config.hostNamespace}/${hostRef}`
-  const host = edgeContext?.actionContextV2
-    ? edgeContext.destination?.kind === 'host' && edgeContext.destination.ref === expectedRef
+  const authorizedActionV2 = edgeContext?.authorizedActionV2
+  const destination = authorizedActionV2?.checkpoint.destination
+  const host = authorizedActionV2
+    ? destination?.kind === 'host' && destination.ref === expectedRef
       ? {
           name: hostRef,
-          url: edgeContext.destination.url,
+          url: destination.url,
           headers: {},
           attributionBindingStatus: undefined,
         }
@@ -126,9 +127,12 @@ export async function resolveHostConnectionForUser(
     'x-service-token': 'rpc-proxy',
   }
   delete headers.authorization
-  headers[RPC_PROXY_MCP_HOST_EDGE_TOKEN_HEADER] = config.mcpHostEdgeToken
-  if (edgeContext?.actionContextV2) {
-    headers['x-clerum-edge-action-context'] = edgeContext.actionContextV2
+  if (authorizedActionV2) {
+    if (!config.mcpHostEdgeToken) {
+      throw new Error('RPC Proxy edge credential is unavailable for authorized V2 Host traffic')
+    }
+    headers[RPC_PROXY_MCP_HOST_EDGE_TOKEN_HEADER] = config.mcpHostEdgeToken
+    headers['x-clerum-edge-action-context'] = authorizedActionV2.trustedEdgeHeader
   } else {
     headers['x-clerum-edge-user-id'] = userId
     if (edgeContext?.teamId) headers['x-clerum-edge-team-id'] = edgeContext.teamId
@@ -165,7 +169,7 @@ export async function resolveArtifactReadHostConnectionForUser(
     'x-service-token': 'rpc-proxy',
   }
   delete headers.authorization
-  headers[RPC_PROXY_MCP_HOST_EDGE_TOKEN_HEADER] = config.mcpHostEdgeToken
+  // Spec 48 artifact reads remain legacy-only and carry no V2 authority.
   if (edgeContext?.teamId) headers['x-clerum-edge-team-id'] = edgeContext.teamId
   headers['x-clerum-edge-access-scope'] =
     edgeContext?.accessScope ?? (edgeContext?.teamId ? 'team' : 'user')

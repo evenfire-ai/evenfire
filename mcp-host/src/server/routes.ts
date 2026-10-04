@@ -363,6 +363,22 @@ export async function handleMessageRoute(
     if (message?.channelType === 'rpc') {
       const caller = getRuntimeCallerContext(req)
       if (caller?.caller === 'rpc-proxy' && caller.userId) {
+        const metadata =
+          message.metadata && typeof message.metadata === 'object'
+            ? (message.metadata as Record<string, unknown>)
+            : undefined
+        const declaresV2Authority =
+          Object.prototype.hasOwnProperty.call(message, 'authorityV2') ||
+          Boolean(
+            metadata &&
+            ['authorityV2', 'accessPathId', 'authorizationRevision'].some(key =>
+              Object.prototype.hasOwnProperty.call(metadata, key)
+            )
+          )
+        if (!caller.actionContextV2 && declaresV2Authority) {
+          badRequest(res, 'V2 authority requires authenticated V2 runtime context')
+          return
+        }
         message.sender = caller.userId
         if (caller.actionContextV2) {
           const target = caller.actionContextV2.target

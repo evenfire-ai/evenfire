@@ -551,14 +551,13 @@ export function runtimeHostEdgeContext(
     sessionId: string
     origin: 'direct_chat' | 'channel_event' | 'api'
   }
-  actionContextV2?: string
-  destination?: Readonly<{ kind: 'host' | 'mcp_server'; ref: string; url: string }>
+  authorizedActionV2?: AuthorizedActionV2
 } {
   const authorized = req.authorizedActionV2
-  const actionContextV2 = trustedEdgeActionContextHeader(req)
-  if (actionContextV2 && authorized?.checkpoint.destination) {
-    return { ...extra, actionContextV2, destination: authorized.checkpoint.destination }
-  }
+  // A checkpointed V2 action selects the authenticated path. Never downgrade
+  // because its destination is missing or malformed; the resolver fails closed.
+  if (authorized) return { ...extra, authorizedActionV2: authorized }
+  if (req.userDelegationV2) throw new RouteActionBindingError('invalid_binding')
   return {
     ...extra,
     teamId: req.auth?.teamId ?? null,

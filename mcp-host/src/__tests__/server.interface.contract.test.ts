@@ -106,7 +106,7 @@ describe('RPCServer v1 runtime interface contract', () => {
       })
       expect(response.status).toBe(401)
       await expect(response.json()).resolves.toEqual({
-        error: 'Missing authenticated rpc-proxy service context',
+        error: 'Missing rpc edge caller context',
       })
     } finally {
       await server.stop()

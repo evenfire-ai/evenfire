@@ -1,13 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Request, Response } from 'express'
 import { createHash } from 'node:crypto'
+import type { TrustedEdgeActionContextV2 } from '@clerum/action-context-contracts'
 import {
   FILE_REFERENCE_MAX_COUNT,
   buildGfsFileReference,
   classifyBytes,
 } from '@clerum/gfs-interaction-policy'
 import { type IncomingAdmissionDeps, createIncomingAdmission } from '../../agent/incomingAdmission'
-import type { TrustedEdgeActionContextV2 } from '@clerum/action-context-contracts'
 import { config } from '../../config'
 import { ConversationError, ConversationErrorCode } from '../../core/errors'
 import { handleMessageRoute } from '../routes'
@@ -176,6 +176,48 @@ describe('handleMessageRoute — rpc sender identity invariant', () => {
       accessPathId: actionContextV2.accessPathId,
       effectiveTeamId: null,
     })
+  })
+
+  it.each([
+    {
+      label: 'body authorityV2',
+      fields: { authorityV2: { accessPathId: `ap1_${'b'.repeat(43)}` } },
+    },
+    {
+      label: 'metadata accessPathId',
+      fields: { metadata: { accessPathId: `ap1_${'b'.repeat(43)}` } },
+    },
+    {
+      label: 'metadata authorizationRevision',
+      fields: { metadata: { authorizationRevision: `ar1_${'c'.repeat(43)}` } },
+    },
+  ])('rejects $label on the legacy runtime path', async ({ fields }) => {
+    const messageHandler = vi.fn()
+    const req = {
+      runtimeCaller: {
+        caller: 'rpc-proxy',
+        hostRef: 'chatllm',
+        userId: 'legit-user',
+        teamId: 'legacy-team',
+      },
+      body: {
+        sender: 'legit-user',
+        channelType: 'rpc',
+        channelId: 'chatllm',
+        content: 'hi',
+        timestamp: 'now',
+        messageId: 'm1',
+        hostRef: 'chatllm',
+        ...fields,
+      },
+      query: {},
+    } as unknown as Request
+    const captured = makeRes()
+
+    await handleMessageRoute(req, captured.res, makeHandlers({ messageHandler }))
+
+    expect(captured.statusCode).toBe(400)
+    expect(messageHandler).not.toHaveBeenCalled()
   })
 
   it('rejects a messageId that differs from the trusted v2 operation target', async () => {
