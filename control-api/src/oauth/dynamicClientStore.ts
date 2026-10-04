@@ -247,20 +247,21 @@ export async function getDynamicClient(
 }
 
 /**
- * Whether any dynamic client in this server namespace carries `clientId`, pending,
- * bound or legacy alike: every row stands for a client that may still be live at its
- * AS (teardown deletes the row). Reads no encrypted column.
+ * Whether any dynamic client of `issuer` in this server namespace carries `clientId`,
+ * pending, bound or legacy alike: every row stands for a client that may still be live
+ * at its AS (teardown deletes the row). A client_id is only unique within its AS, so a
+ * row of another issuer is another client. Reads no encrypted column.
  */
 export async function isDynamicClientIdRegistered(
   db: DbClient,
-  input: { serverNamespace: string; clientId: string; ownerKind?: 'mcpserver' }
+  input: { serverNamespace: string; issuer: string; clientId: string; ownerKind?: 'mcpserver' }
 ): Promise<boolean> {
   const result = await db.query(
     `SELECT 1
        FROM dynamic_clients
-      WHERE owner_kind = $1 AND server_namespace = $2 AND client_id = $3
+      WHERE owner_kind = $1 AND server_namespace = $2 AND client_id = $3 AND issuer = $4
       LIMIT 1`,
-    [resolveOwnerKind(input), input.serverNamespace, input.clientId]
+    [resolveOwnerKind(input), input.serverNamespace, input.clientId, input.issuer]
   )
   return result.rows.length > 0
 }

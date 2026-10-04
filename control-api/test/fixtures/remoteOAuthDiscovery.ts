@@ -644,13 +644,14 @@ export function makeInMemoryDynamicClientsDb(): {
         return { rows: [], rowCount: 0 }
       }
       if (text.includes('FROM dynamic_clients') && text.includes('client_id = $3')) {
-        // Existence by client_id within a namespace (pre-registered uniqueness).
-        const [owner_kind, server_namespace, client_id] = values
+        // Existence by (issuer, client_id) within a namespace (pre-registered uniqueness).
+        const [owner_kind, server_namespace, client_id, issuer] = values
         const hit = [...rows.values()].some(
           row =>
             row.owner_kind === owner_kind &&
             row.server_namespace === server_namespace &&
-            row.client_id === client_id
+            row.client_id === client_id &&
+            row.issuer === issuer
         )
         return hit ? { rows: [{ '?column?': 1 }], rowCount: 1 } : { rows: [], rowCount: 0 }
       }

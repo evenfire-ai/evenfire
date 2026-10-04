@@ -2324,6 +2324,54 @@ describe('POST /admin/mcp-servers/remote — per-server callback (AS without RFC
     await expect(gw.getResource('mcpservers', 'cimd-pre', NS)).rejects.toThrow()
   })
 
+  // A client_id is only unique within its AS: the same string at another provider is
+  // another client, registered there with its own redirect URI.
+  function atOtherProvider(result: DiscoveryResult): DiscoveryResult {
+    return JSON.parse(
+      JSON.stringify(result).split('https://mcp.notion.com').join('https://auth.other-provider.io')
+    ) as DiscoveryResult
+  }
+
+  it('I17 the same client_id at another provider (remote server) → 201', async () => {
+    const gw = gatewayWithContext('ctx-a')
+    const { db } = makeInMemoryDynamicClientsDb()
+    const other = atOtherProvider(notionResult)
+    expect(other.issuer).toBe('https://auth.other-provider.io')
+    expect((await installPreRegistered(gw, { db }, 'first-server', 'shared-cid')).status).toBe(201)
+    const res = await installPreRegistered(gw, { db }, 'second-server', 'shared-cid', other)
+    expect(res.status).toBe(201)
+  })
+
+  it('I17 the same client_id as a DCR client at another provider → 201', async () => {
+    const gw = gatewayWithContext('ctx-a')
+    const { db, rows } = makeInMemoryDynamicClientsDb()
+    const { transport } = makeDcrTransport({
+      responseJson: JSON.stringify(DCR_CONFIDENTIAL_REGISTRATION_RESPONSE),
+      redirectUris: 'requested',
+    })
+    mockDiscovery(dcrConfNoIssResult)
+    const dcr = await request(app(gw, { db, dcr: { transport, resolveDns: PUBLIC_IP } }))
+      .post('/admin/mcp-servers/remote')
+      .send({
+        serverName: 'dcr-server',
+        contextRef: 'ctx-a',
+        baseUrl: 'https://mcp.notion.com/mcp',
+        mode: 'dcr',
+      })
+    expect(dcr.status).toBe(201)
+    const dcrClientId = [...rows.values()][0].client_id as string
+    await gw.deleteResource('mcpservers', 'dcr-server', NS)
+
+    const res = await installPreRegistered(
+      gw,
+      { db },
+      'pre-server',
+      dcrClientId,
+      atOtherProvider(notionResult)
+    )
+    expect(res.status).toBe(201)
+  })
+
   it('I17 does not constrain a shared (RFC 9207) pre-registered install → 201', async () => {
     const gw = gatewayWithContext('ctx-a')
     const { db } = makeInMemoryDynamicClientsDb()

@@ -387,24 +387,36 @@ export type PreRegisteredClientIdConflict = 'cimd_client' | 'remote_server' | 'd
  * per-server client must belong to exactly one server: its one registered redirect URI
  * is what binds its codes to that server, and a client shared with another server (or
  * one of our DCR clients, or the platform CIMD identity, which lists the shared
- * callback) would let the AS deliver a code for one server to another. Check-then-create
- * without a fence: an admin-only action on a confidential client, where a lost race
- * still leaves each server with its own redirect URI.
+ * callback) would let the AS deliver a code for one server to another. A client_id is
+ * only unique within its AS, so servers and DCR clients of another issuer never
+ * conflict: that AS holds a different client, with its own redirect URIs. Issuers are
+ * compared exactly, as discovery pins them (RFC 8414: the metadata `issuer` must equal
+ * the URL it was fetched from). Check-then-create without a fence: an admin-only action
+ * on a confidential client, where a lost race still leaves each server with its own
+ * redirect URI.
  */
 async function preRegisteredClientIdConflict(
   gateway: K8sGateway,
   db: DbClient,
   namespace: string,
+  issuer: string,
   clientId: string
 ): Promise<PreRegisteredClientIdConflict | null> {
   if (isCimdClientId(clientId)) return 'cimd_client'
   const servers = (await gateway.listResource('mcpservers', namespace)) as Array<{
-    spec?: { oauth?: { source?: unknown; id?: unknown } }
+    spec?: { oauth?: { source?: unknown; id?: unknown; issuer?: unknown } }
   }>
-  if (servers.some(s => s?.spec?.oauth?.source === 'remote' && s.spec.oauth.id === clientId)) {
+  if (
+    servers.some(
+      s =>
+        s?.spec?.oauth?.source === 'remote' &&
+        s.spec.oauth.id === clientId &&
+        s.spec.oauth.issuer === issuer
+    )
+  ) {
     return 'remote_server'
   }
-  if (await isDynamicClientIdRegistered(db, { serverNamespace: namespace, clientId })) {
+  if (await isDynamicClientIdRegistered(db, { serverNamespace: namespace, issuer, clientId })) {
     return 'dynamic_client'
   }
   return null
@@ -807,6 +819,7 @@ export function createAdminRemoteMcpRouter(
           gateway,
           db,
           config.mcpServersNamespace,
+          discovery.issuer,
           body.clientId as string
         )
         if (conflict !== null) {
