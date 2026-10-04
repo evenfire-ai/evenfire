@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render as rtlRender, screen, waitFor } from '@testing-library/react'
 import * as api from '../../lib/api'
+import * as clipboard from '../../lib/clipboard'
 import * as remoteMcp from '../../lib/remoteMcp'
 import type { DiscoverRemoteResponse, RemoteTransportProbe } from '../../lib/remoteMcp.types'
 import { buildContextResource } from '../../test/fixtures/contextResource'
@@ -45,7 +46,11 @@ vi.mock('../../lib/api', async importOriginal => {
   }
 })
 
+// The wizard copies through this helper; the test asserts what it is handed.
+vi.mock('../../lib/clipboard', () => ({ copyTextToClipboard: vi.fn(async () => true) }))
+
 const discoverMock = vi.mocked(remoteMcp.discoverRemoteServer)
+const copyMock = vi.mocked(clipboard.copyTextToClipboard)
 const installMock = vi.mocked(remoteMcp.installRemoteServer)
 const getContextsMock = vi.mocked(api.getContexts)
 
@@ -364,6 +369,27 @@ describe('AddRemoteServerWizard', () => {
     expect(uri).toHaveValue(perServerUri('hubspot'))
     expect(uri).toHaveAttribute('readonly')
     expect(screen.getByRole('button', { name: 'Copy redirect URI' })).toBeInTheDocument()
+  })
+
+  it('pre-registered per-server: Copy hands the shown URI to the clipboard and confirms', async () => {
+    copyMock.mockClear()
+    copyMock.mockResolvedValueOnce(true)
+    await detectPreRegisteredPerServer('hubspot')
+    fireEvent.click(screen.getByRole('button', { name: 'Copy redirect URI' }))
+
+    await waitFor(() => expect(copyMock).toHaveBeenCalledWith(perServerUri('hubspot')))
+    expect(copyMock).toHaveBeenCalledTimes(1)
+    expect(await screen.findByText('Redirect URI copied.')).toBeInTheDocument()
+  })
+
+  it('pre-registered per-server: a failed copy tells the operator to copy it by hand', async () => {
+    copyMock.mockResolvedValueOnce(false)
+    await detectPreRegisteredPerServer('hubspot')
+    fireEvent.click(screen.getByRole('button', { name: 'Copy redirect URI' }))
+
+    expect(
+      await screen.findByText('Copy failed — select and copy the URI manually.')
+    ).toBeInTheDocument()
   })
 
   it('pre-registered per-server: after the 201 holds on the URI until Done', async () => {
