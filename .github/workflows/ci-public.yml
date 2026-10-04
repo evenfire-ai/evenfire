@@ -119,6 +119,13 @@ jobs:
         working-directory: ${{ matrix.service }}
         run: npm ci
 
+      # Cross-service integration tests import RPC Proxy source directly, whose
+      # config now loads the shared JWT policy package from its own node_modules.
+      - name: Install RPC Proxy dependencies for Control API tests
+        if: matrix.service == 'control-api'
+        working-directory: rpc-proxy
+        run: npm ci
+
       - name: Verify Electron runtime
         if: matrix.service == 'desktop-app'
         working-directory: desktop-app
