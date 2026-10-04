@@ -8,7 +8,7 @@ vi.mock('../src/controlApiClient.js', () => client)
 const { issueRpcDelegationV2 } = await import('../src/services/rpcDelegationService.js')
 
 const repositoryRoot = resolve(process.cwd(), '..')
-const tsx = resolve(repositoryRoot, 'rpc-proxy/node_modules/.bin/tsx')
+const tsx = resolve(repositoryRoot, 'external-rest-api/node_modules/.bin/tsx')
 const producer = resolve(
   repositoryRoot,
   'control-api/test/fixtures/emitBodyBoundRouteDelegationV2Fixture.ts'

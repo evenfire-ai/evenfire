@@ -16,7 +16,7 @@ function parseByControlApi(payload: unknown) {
   const root = resolve(process.cwd(), '..')
   return JSON.parse(
     execFileSync(
-      resolve(root, 'rpc-proxy/node_modules/.bin/tsx'),
+      resolve(root, 'external-rest-api/node_modules/.bin/tsx'),
       [
         resolve(root, 'control-api/test/fixtures/parsePr2ReadinessEvidenceFixture.ts'),
         'external-rest-api',

@@ -137,11 +137,16 @@ export function createDevJwtVerifierContract(options: VerifierContractOptions) {
     assert.ok(layout && artifactRoot, 'Prepare the actual consumer artifacts before running a runtime case')
     const moduleDir = join(layout, options.service, runtime)
     const policyDir = join(layout, 'node_modules/@clerum/jwt-key-policy')
+    const contractsDir = join(layout, 'node_modules/@clerum/action-context-contracts')
     mkdirSync(join(layout, 'control-api'), { recursive: true })
     mkdirSync(moduleDir, { recursive: true })
     mkdirSync(policyDir, { recursive: true })
+    mkdirSync(contractsDir, { recursive: true })
     for (const name of ['package.json', 'index.cjs', 'index.d.ts', 'dev-store.cjs', 'dev-store.d.ts']) {
       copyFileSync(join(repoRoot, 'packages/jwt-key-policy', name), join(policyDir, name))
+    }
+    for (const name of ['package.json', 'index.cjs', 'index.d.ts']) {
+      copyFileSync(join(repoRoot, 'packages/action-context-contracts', name), join(contractsDir, name))
     }
     const configPath = join(moduleDir, runtime === 'src' ? 'config.ts' : 'config.js')
     copyFileSync(runtime === 'src' ? options.configSource : join(artifactRoot, 'config.js'), configPath)
