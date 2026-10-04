@@ -9,6 +9,7 @@ import {
   handleOAuthCallback,
 } from '../src/oauth/callback.js'
 import type { DiscoveryResult } from '../src/oauth/discovery.js'
+import { getDynamicClientBinding } from '../src/oauth/dynamicClientStore.js'
 import { deriveOAuthEncryptionKey } from '../src/oauth/encryption.js'
 import {
   type McpServerOAuthSpecInput,
@@ -360,6 +361,87 @@ describe('per-server callback — only the URI this installation registered', ()
       )
       expect(result).toEqual({ kind: 'invalid_state', reason: 'binding_mismatch' })
     }
+    expect(h.tokenPosts).toHaveLength(0)
+  })
+
+  // I6 with the shared server's REAL bound nonce: the nonce and row checks pass, so only
+  // the variant check stands between this request and an exchange with no `iss` at all.
+  it('a shared (RFC 9207) server on its own bound nonce, no iss → binding_mismatch, no exchange', async () => {
+    const srv = await installDcr('shared-dcr', sharedDcr, dcrPilot('public').mcpUrl)
+    const row = await getDynamicClientBinding(db, { serverNamespace: NS, serverName: srv.name })
+    expect(row?.installId).toMatch(/^[0-9a-f-]{36}$/)
+    const h = harness()
+
+    const result = await handleOAuthCallback(
+      {
+        target: perServer(srv.name, row?.installId),
+        code: 'CODE',
+        state: await stateFor(srv.name),
+      },
+      h.deps
+    )
+
+    expect(result).toEqual({ kind: 'invalid_state', reason: 'binding_mismatch' })
+    expect(h.tokenPosts).toHaveLength(0)
+  })
+
+  // A CR deleted and recreated outside the uninstall (kubectl, GitOps) leaves the old
+  // row behind with the same nonce and client id; only its cr_uid no longer matches.
+  it('DCR: a CR recreated over a surviving row → binding_mismatch on the old nonce, no exchange', async () => {
+    const srv = await installDcr('atlassian')
+    const cr = (await gateway.getResource('mcpservers', srv.name, NS)) as {
+      metadata: { name: string; uid: string; labels?: Record<string, string> }
+      spec: Record<string, unknown>
+    }
+    await gateway.deleteResource('mcpservers', srv.name, NS)
+    await gateway.createResource(
+      'mcpservers',
+      { metadata: { name: cr.metadata.name, labels: cr.metadata.labels }, spec: cr.spec },
+      NS
+    )
+    const recreated = (await gateway.getResource('mcpservers', srv.name, NS)) as {
+      metadata: { uid: string }
+    }
+    expect(recreated.metadata.uid).not.toBe(cr.metadata.uid)
+    const row = await getDynamicClientBinding(db, { serverNamespace: NS, serverName: srv.name })
+    expect(row?.installId).toBe(srv.nonce)
+    expect(row?.crUid).toBe(cr.metadata.uid)
+    const h = harness()
+
+    const result = await handleOAuthCallback(
+      { target: perServer(srv.name, srv.nonce), code: 'CODE', state: await stateFor(srv.name) },
+      h.deps
+    )
+
+    expect(result).toEqual({ kind: 'invalid_state', reason: 'binding_mismatch' })
+    expect(h.tokenPosts).toHaveLength(0)
+  })
+
+  // The CR's client id rewritten in place (same uid): the row still belongs to this CR
+  // but was registered for another client, so its nonce binds nothing.
+  it('DCR: a bound row registered for another client id → binding_mismatch, no exchange', async () => {
+    const srv = await installDcr('atlassian')
+    const cr = (await gateway.getResource('mcpservers', srv.name, NS)) as {
+      metadata: { uid: string; resourceVersion?: string }
+      spec: { oauth: Record<string, unknown> } & Record<string, unknown>
+    }
+    await gateway.updateResource(
+      'mcpservers',
+      srv.name,
+      {
+        metadata: { uid: cr.metadata.uid, resourceVersion: cr.metadata.resourceVersion },
+        spec: { ...cr.spec, oauth: { ...cr.spec.oauth, id: 'rewritten-client-id' } },
+      },
+      NS
+    )
+    const h = harness()
+
+    const result = await handleOAuthCallback(
+      { target: perServer(srv.name, srv.nonce), code: 'CODE', state: await stateFor(srv.name) },
+      h.deps
+    )
+
+    expect(result).toEqual({ kind: 'invalid_state', reason: 'binding_mismatch' })
     expect(h.tokenPosts).toHaveLength(0)
   })
 
