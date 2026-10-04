@@ -146,6 +146,30 @@ function crossSitePerServerOAuth(): Record<string, unknown> {
   return oauth
 }
 
+/** The Atlassian per-server DCR shape, coherent until a test edits it. */
+function perServerDcrOAuth(): Record<string, unknown> {
+  return buildRemoteOAuthSpec(perServerDiscovery, {
+    clientMode: 'public',
+    grantScope: 'user',
+    dynamicClientId: 'dyn-atlassian-public',
+  }) as unknown as Record<string, unknown>
+}
+
+/** A per-server CR written without `issuer`: no site to anchor the endpoints to. */
+function perServerWithoutIssuerOAuth(): Record<string, unknown> {
+  const oauth = perServerDcrOAuth()
+  delete oauth.issuer
+  return oauth
+}
+
+/** A per-server CR whose registration endpoint was moved off the issuer's site. */
+function crossSiteRegistrationOAuth(): Record<string, unknown> {
+  return {
+    ...perServerDcrOAuth(),
+    registrationEndpoint: 'https://register.example.net/oauth/register',
+  }
+}
+
 const INCOHERENT = [
   // CRD mirrors: refused in consent and token issuance alike.
   {
@@ -171,6 +195,18 @@ const INCOHERENT = [
   {
     label: 'per-server AS endpoints off the issuer site',
     oauth: crossSitePerServerOAuth,
+    reason: 'as_endpoints_cross_site',
+    consentOnly: true,
+  },
+  {
+    label: 'per-server CR without an issuer',
+    oauth: perServerWithoutIssuerOAuth,
+    reason: 'as_endpoints_cross_site',
+    consentOnly: true,
+  },
+  {
+    label: 'per-server registration endpoint off the issuer site',
+    oauth: crossSiteRegistrationOAuth,
     reason: 'as_endpoints_cross_site',
     consentOnly: true,
   },
@@ -206,6 +242,11 @@ describe('resolver mirror of the remote CRD coherence rules', () => {
     expect(crossSite.issForCallback).toBeUndefined()
     expect(new URL(crossSite.tokenEndpoint as string).hostname).toBe('api.dropboxapi.com')
     expect(new URL(crossSite.issuer as string).hostname).toMatch(/dropbox\.com$/)
+    // The edits below are the only incoherence in their shapes: the base is coherent.
+    const base = perServerDcrOAuth()
+    expect(base.issForCallback).toBeUndefined()
+    expect(resolveServerOAuthSubject(crFrom('srv', base), 'consent')?.decl.id).toBe(base.id)
+    expect(typeof base.registrationEndpoint).toBe('string')
   })
 
   for (const c of INCOHERENT) {
