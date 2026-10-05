@@ -13,6 +13,5 @@ export {
   UnifiedApprovalGateController,
   McpApprovalGateController,
   isMcpToolName,
-  getMcpServerPrefix,
 } from './mcpApprovalGateController'
 export { validateApprovalConfig } from './approvalConfigValidation'

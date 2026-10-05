@@ -124,8 +124,7 @@ describe('Lead Scout denial stickiness', () => {
     await manager.completeTurn(conversation, 'search approved')
 
     // Turn 2 — she denies find_company_people. That call does not run.
-    // A plain approval must not leave the server allowlisted. startTurn
-    // clears only the per-turn wildcard.
+    // A plain approval must not leave the server allowlisted.
     await manager.startTurn(conversation, 'Look for more contacts and add them', 'task-deny')
     expect(conversation.auto_approved_tools.has('evenreach-query')).toBe(false)
     expect(conversation.auto_approved_tools.has('*')).toBe(false)

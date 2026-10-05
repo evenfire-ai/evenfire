@@ -1120,19 +1120,48 @@ export class SqliteConversationStore implements ConversationStore {
         sessionKey
       )
     } catch (err) {
-      // The decision is already applied in memory. Fail closed: consume the
-      // pending row on its own so a restart can never rehydrate an approval
-      // for a call that was already decided, then surface the failure.
-      await this.persistQueue
-        .enqueueSync({ kind: 'delete_pending_approval', requestId }, sessionKey)
-        .catch(deleteErr => {
-          logger.error(
-            { err: deleteErr, requestId, decision },
-            'Failed to consume a pending approval after its decision write failed'
-          )
-        })
+      // The decision is already applied in memory. Consume the pending row so
+      // a restart cannot rehydrate an approval for a call that was already
+      // decided, then surface the failure. First try with the session state
+      // (so the chat is not left awaiting an approval that no longer exists),
+      // then the row alone. If the store rejects both (e.g. a dead worker), the
+      // row can still come back on restart; the caller already reports the
+      // decision as not saved.
+      await this.consumeAfterFailedDecision(conv, requestId, decision, sessionKey)
       throw err
     }
+  }
+
+  private async consumeAfterFailedDecision(
+    conv: Conversation,
+    requestId: string,
+    decision: 'approve' | 'deny' | 'cancel',
+    sessionKey: string | undefined
+  ): Promise<void> {
+    try {
+      await this.persistQueue.enqueueSync(
+        {
+          kind: 'update_session_state',
+          sessionId: conv.id,
+          state: conv.state,
+          activeTaskId: decision === 'approve' ? undefined : null,
+          activeTraceContext: decision === 'approve' ? undefined : null,
+          deletePendingRequestId: requestId,
+        },
+        sessionKey
+      )
+      return
+    } catch {
+      // Fall through to consuming the row on its own.
+    }
+    await this.persistQueue
+      .enqueueSync({ kind: 'delete_pending_approval', requestId }, sessionKey)
+      .catch(deleteErr => {
+        logger.error(
+          { err: deleteErr, requestId, decision },
+          'Failed to consume a pending approval after its decision write failed'
+        )
+      })
   }
 
   async shutdown(): Promise<void> {

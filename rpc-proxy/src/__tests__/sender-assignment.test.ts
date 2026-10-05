@@ -283,6 +283,7 @@ describe('POST /rpc/hosts/:hostRef/approvals/approve — userId identity invaria
         .expect(400)
 
       expect(fetchMock).not.toHaveBeenCalled()
+      expect(serviceMock.resolveHostConnectionForUser).not.toHaveBeenCalled()
     }
   )
 

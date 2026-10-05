@@ -3,10 +3,11 @@
  * file-backed SQLite store: what a fresh pod reads back after deny, approve
  * and cancel, and after a decision whose write failed.
  */
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
+import { logger } from '../../../../logger'
 import { ApprovalController } from '../../../extensions/approvalController'
 import { DefaultLoopController } from '../../../orchestration/loopConfig'
 import { ConversationState } from '../../../types'
@@ -83,6 +84,24 @@ describe('approval decisions across a restart', () => {
     expect(decision).toMatchObject({ type: 'suspend' })
   })
 
+  it('logs unreadable saved denials and loads the session without them', async () => {
+    const podA = pod()
+    const conv = await suspendOn(new ConversationManager(podA.store), 'req-1', 'shell_exec')
+    await new ConversationManager(podA.store).deny(conv, { userId: 'user-a' })
+    podA.worker.db.prepare('UPDATE sessions SET denied_tools = ?').run('{"tool":')
+
+    const podB = await restart(podA)
+    const errors = vi.spyOn(logger, 'error')
+    const reloaded = await new ConversationManager(podB.store).getOrCreate(SESSION_KEY)
+
+    expect(reloaded.denied_tools?.size ?? 0).toBe(0)
+    expect(errors).toHaveBeenCalledWith(
+      expect.objectContaining({ event: 'denied_tools_unreadable', sessionId: reloaded.id }),
+      expect.any(String)
+    )
+    errors.mockRestore()
+  })
+
   it('saves an approval that lifts a denial, so it stays lifted after a restart', async () => {
     const podA = pod()
     const manager = new ConversationManager(podA.store)
@@ -125,10 +144,16 @@ describe('approval decisions across a restart', () => {
         BEGIN SELECT RAISE(ABORT, 'injected resolution failure'); END`)
     }
 
+    function sessionState(handle: StoreHandle): string {
+      return (handle.worker.db.prepare('SELECT state FROM sessions').get() as { state: string })
+        .state
+    }
+
     it('deny', async () => {
       const podA = pod()
       const manager = new ConversationManager(podA.store)
       const conv = await suspendOn(manager, 'req-1', 'shell_exec')
+      expect(pendingRows(podA)).toBe(1)
       failSessionResolution(podA)
 
       await expect(manager.deny(conv, { userId: 'user-a' })).rejects.toThrow(
@@ -146,15 +171,37 @@ describe('approval decisions across a restart', () => {
       const podA = pod()
       const manager = new ConversationManager(podA.store)
       await suspendOn(manager, 'req-1', 'shell_exec')
+      expect(pendingRows(podA)).toBe(1)
       failSessionResolution(podA)
 
       await manager.clearPendingApproval(SESSION_KEY).catch(() => {})
+      // Witness: the injected failure fired (the session never left awaiting).
+      expect(sessionState(podA)).toBe('awaiting_approval')
       expect(pendingRows(podA)).toBe(0)
 
       const podB = await restart(podA)
       expect(await new SqliteColdStartLoader(podB.store).loadPendingApprovals(Date.now())).toEqual(
         []
       )
+    })
+
+    it('a failed denial write still leaves an idle, usable session', async () => {
+      const podA = pod()
+      const manager = new ConversationManager(podA.store)
+      const conv = await suspendOn(manager, 'req-1', 'shell_exec')
+      podA.worker.db.exec(`CREATE TRIGGER fail_denial BEFORE UPDATE OF denied_tools ON sessions
+        BEGIN SELECT RAISE(ABORT, 'injected denial failure'); END`)
+
+      await expect(manager.deny(conv, { userId: 'user-a' })).rejects.toThrow(
+        'injected denial failure'
+      )
+      expect(pendingRows(podA)).toBe(0)
+      expect(sessionState(podA)).toBe('idle')
+
+      const podB = await restart(podA)
+      const reloaded = await new ConversationManager(podB.store).getOrCreate(SESSION_KEY)
+      expect(reloaded.state).toBe(ConversationState.Idle)
+      await new ConversationManager(podB.store).startTurn(reloaded, 'next', 'task-next')
     })
   })
 })

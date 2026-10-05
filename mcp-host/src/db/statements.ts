@@ -98,15 +98,15 @@ export function prepareStatements(db: Database): PreparedStatements {
              END
        WHERE id = @id
     `),
-    // D.1 — COALESCE above can SET or KEEP active_task_id but never CLEAR it
-    // (a NULL param means "keep"). The dispatcher runs this dedicated clear
-    // statement, inside the same transaction, when a caller explicitly passes
-    // activeTaskId: null (turn complete/fail/cancel).
     updateSessionDeniedTools: db.prepare(`
       UPDATE sessions
          SET denied_tools = @denied_tools
        WHERE id = @id
     `),
+    // D.1 — COALESCE above can SET or KEEP active_task_id but never CLEAR it
+    // (a NULL param means "keep"). The dispatcher runs this dedicated clear
+    // statement, inside the same transaction, when a caller explicitly passes
+    // activeTaskId: null (turn complete/fail/cancel).
     clearSessionActiveTask: db.prepare(`
       UPDATE sessions
          SET active_task_id = NULL,

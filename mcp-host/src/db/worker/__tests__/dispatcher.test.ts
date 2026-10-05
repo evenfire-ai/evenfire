@@ -732,6 +732,19 @@ describe('dbWorker dispatcher', () => {
       expect(sessionRow().state).toBe('awaiting_approval')
       expect(sessionRow().denied_tools ?? null).toBeNull()
     })
+
+    it('rolls back the session and denial when consuming the pending row fails', async () => {
+      const deps = createDispatcher(db)
+      await seedAwaitingApproval(deps)
+      db.exec(`CREATE TRIGGER fail_consume BEFORE DELETE ON pending_approvals
+               BEGIN SELECT RAISE(ABORT, 'injected consume failure'); END`)
+
+      await expect(dispatch(denyOp, deps)).rejects.toThrow('injected consume failure')
+
+      expect(pendingCount()).toBe(1)
+      expect(sessionRow().state).toBe('awaiting_approval')
+      expect(sessionRow().denied_tools ?? null).toBeNull()
+    })
   })
 
   it('projects the connect_required discriminator on the cold DB paths (page + summary)', async () => {

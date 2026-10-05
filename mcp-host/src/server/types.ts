@@ -288,7 +288,7 @@ export type ActivityStreamHandler = (onEvent: (event: HostActivityEvent) => void
 }
 export type ApprovalHandler = (
   decision: ApprovalDecision
-) => Promise<{ success: boolean; error?: string }>
+) => Promise<{ success: boolean; error?: string; code?: 'denial_not_saved' }>
 export interface ProviderWorkflowApprovalDecision {
   approvalRequestId: string
   decision: 'approve' | 'deny'

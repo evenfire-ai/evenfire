@@ -1197,7 +1197,7 @@ export class AgentStateMachine extends EventEmitter {
     requestId: string,
     channelType?: string,
     channelId?: string
-  ): Promise<{ success: boolean; error?: string }> {
+  ): Promise<{ success: boolean; error?: string; code?: 'denial_not_saved' }> {
     const entry = this.approvalMap.get(requestId)
     if (!entry) {
       return { success: false, error: `No pending approval for request ${requestId}` }
@@ -1249,9 +1249,10 @@ export class AgentStateMachine extends EventEmitter {
       taskId: entry.taskId,
     })
 
-    // T2.1: deny() is now async. We await so the HTTP 200 only returns once
-    // the durable pending_approval row is gone (IronClaw write-through). A
-    // future restart cannot resurrect a phantom approval. Promise.resolve()
+    // T2.1: deny() is now async. We await so a success only returns once the
+    // denial and the consumed pending_approval row are durable (IronClaw
+    // write-through). If that write fails, the store still consumes the row
+    // when it can, and this returns `denial_not_saved`. Promise.resolve()
     // wraps legacy synchronous test doubles.
     let saved = true
     try {
@@ -1266,8 +1267,11 @@ export class AgentStateMachine extends EventEmitter {
     this.releaseSessionForTask(executor.sourceTask)
 
     if (!saved) {
+      // A terminal outcome, not a retryable failure: the call is cancelled and
+      // the request consumed. Clients key on `code` to stop offering a retry.
       return {
         success: false,
+        code: 'denial_not_saved',
         error: 'The tool call was cancelled, but the denial could not be saved.',
       }
     }

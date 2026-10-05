@@ -31,15 +31,6 @@ export function isMcpToolName(toolName: string): boolean {
   return toolName.includes('__')
 }
 
-/**
- * Extract the MCP server prefix from a tool name.
- * Returns null if the tool name is not an MCP tool.
- */
-export function getMcpServerPrefix(toolName: string): string | null {
-  const idx = toolName.indexOf('__')
-  return idx >= 0 ? toolName.substring(0, idx) : null
-}
-
 // ─── U5 · Reactive OAuth-consent suspension ──────────────────────────────────
 
 /** Typed `connect_required` marker carried on a tool result's metadata. */
@@ -85,8 +76,8 @@ export function buildConnectRequiredApproval(
     tool_kind: 'mcp_server_tool',
     // The authoritative server name is the marker's mcpServerName (set from the
     // manager's sourceRef), mirroring the HITL gate's createSuspension
-    // (tool_source_ref = traceDescriptor.sourceRef). getMcpServerPrefix splits on
-    // the FIRST '__', so it truncates a server whose own name contains '__';
+    // (tool_source_ref = traceDescriptor.sourceRef). Splitting the tool name on
+    // the FIRST '__' would truncate a server whose own name contains '__';
     // reuse the marker to keep both suspension paths consistent (R3-L3).
     tool_source_ref: marker.mcpServerName,
     parameters: call.arguments,
