@@ -56,10 +56,13 @@ function signedMcpState(): string {
 
 function input(): CallbackInput {
   return {
-    oauthClientId: OAUTH_CLIENT_ID,
+    target: {
+      kind: 'client',
+      id: OAUTH_CLIENT_ID,
+      redirectUri: 'https://example.test/oauth/callback',
+    },
     code: 'auth-code-single-use',
     state: signedMcpState(),
-    redirectUri: 'https://example.test/oauth/callback',
   }
 }
 

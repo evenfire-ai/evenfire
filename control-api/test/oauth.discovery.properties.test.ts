@@ -4,6 +4,7 @@ import {
   type AuthorizationServerMetadata,
   type ProtectedResourceMetadata,
   type RegistrationMode,
+  advertisesIssBinding,
   deriveQuirks,
   selectRegistrationMode,
 } from '../src/oauth/discovery.js'
@@ -17,13 +18,17 @@ import { PILOTS } from './fixtures/remoteOAuthDiscovery.js'
 
 // Reference implementation of the normative order, kept deliberately independent
 // of the production one so the property catches a reordering in either direction.
+// Without RFC 9207 CIMD is never a candidate (its single platform identity can only
+// list the shared callback, which relies on `iss`).
 function expectedMode(input: {
   hasPreRegisteredClient: boolean
   cimdSupported: boolean
   tokenEndpointAuthMethods: string[]
   hasRegistrationEndpoint: boolean
+  issBindingSupported: boolean
 }): RegistrationMode {
   if (input.hasPreRegisteredClient) return 'pre-registered'
+  if (!input.issBindingSupported) return input.hasRegistrationEndpoint ? 'dcr' : 'manual'
   if (input.cimdSupported && input.tokenEndpointAuthMethods.includes('none')) return 'cimd'
   if (input.hasRegistrationEndpoint) return 'dcr'
   return 'manual'
@@ -39,17 +44,20 @@ describe('selectRegistrationMode — order pre-reg > CIMD > DCR > manual (T2)', 
         fc.boolean(),
         authMethodArb,
         fc.boolean(),
+        fc.boolean(),
         (
           hasPreRegisteredClient,
           cimdSupported,
           tokenEndpointAuthMethods,
-          hasRegistrationEndpoint
+          hasRegistrationEndpoint,
+          issBindingSupported
         ) => {
           const input = {
             hasPreRegisteredClient,
             cimdSupported,
             tokenEndpointAuthMethods,
             hasRegistrationEndpoint,
+            issBindingSupported,
           }
           expect(selectRegistrationMode(input)).toBe(expectedMode(input))
         }
@@ -59,17 +67,52 @@ describe('selectRegistrationMode — order pre-reg > CIMD > DCR > manual (T2)', 
 
   it('pre-registered wins over everything else', () => {
     fc.assert(
+      fc.property(
+        fc.boolean(),
+        authMethodArb,
+        fc.boolean(),
+        fc.boolean(),
+        (cimd, methods, reg, iss) => {
+          expect(
+            selectRegistrationMode({
+              hasPreRegisteredClient: true,
+              cimdSupported: cimd,
+              tokenEndpointAuthMethods: methods,
+              hasRegistrationEndpoint: reg,
+              issBindingSupported: iss,
+            })
+          ).toBe('pre-registered')
+        }
+      )
+    )
+  })
+
+  it('never selects CIMD without RFC 9207', () => {
+    fc.assert(
       fc.property(fc.boolean(), authMethodArb, fc.boolean(), (cimd, methods, reg) => {
         expect(
           selectRegistrationMode({
-            hasPreRegisteredClient: true,
+            hasPreRegisteredClient: false,
             cimdSupported: cimd,
             tokenEndpointAuthMethods: methods,
             hasRegistrationEndpoint: reg,
+            issBindingSupported: false,
           })
-        ).toBe('pre-registered')
+        ).not.toBe('cimd')
       })
     )
+  })
+
+  it('CIMD-only AS (no registration endpoint) without RFC 9207 → manual', () => {
+    expect(
+      selectRegistrationMode({
+        hasPreRegisteredClient: false,
+        cimdSupported: true,
+        tokenEndpointAuthMethods: ['none'],
+        hasRegistrationEndpoint: false,
+        issBindingSupported: false,
+      })
+    ).toBe('manual')
   })
 
   it('CIMD requires BOTH cimdSupported AND `none` (never one alone)', () => {
@@ -80,6 +123,7 @@ describe('selectRegistrationMode — order pre-reg > CIMD > DCR > manual (T2)', 
         cimdSupported: true,
         tokenEndpointAuthMethods: ['client_secret_post'],
         hasRegistrationEndpoint: true,
+        issBindingSupported: true,
       })
     ).toBe('dcr')
     // `none` without cimdSupported → not cimd.
@@ -89,11 +133,13 @@ describe('selectRegistrationMode — order pre-reg > CIMD > DCR > manual (T2)', 
         cimdSupported: false,
         tokenEndpointAuthMethods: ['none'],
         hasRegistrationEndpoint: true,
+        issBindingSupported: true,
       })
     ).toBe('dcr')
   })
 
-  it('the 4 real pilots all select CIMD', () => {
+  it('the 4 real pilots: CIMD only where the AS returns `iss` (Linear, Sentry)', () => {
+    const expected = { notion: 'dcr', linear: 'cimd', sentry: 'cimd', canva: 'dcr' } as const
     for (const key of ['notion', 'linear', 'sentry', 'canva'] as const) {
       const as = JSON.parse(PILOTS[key].as.json) as AuthorizationServerMetadata
       expect(
@@ -102,8 +148,9 @@ describe('selectRegistrationMode — order pre-reg > CIMD > DCR > manual (T2)', 
           cimdSupported: as.client_id_metadata_document_supported === true,
           tokenEndpointAuthMethods: as.token_endpoint_auth_methods_supported ?? [],
           hasRegistrationEndpoint: typeof as.registration_endpoint === 'string',
+          issBindingSupported: advertisesIssBinding(as),
         })
-      ).toBe('cimd')
+      ).toBe(expected[key])
     }
   })
 })

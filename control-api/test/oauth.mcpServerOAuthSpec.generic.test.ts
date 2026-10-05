@@ -43,7 +43,7 @@ function serverFrom(oauth: Record<string, unknown>, contextRef = 'ctx-a'): McpSe
 
 describe('resolveServerOAuthSubject — generic lane (DEC-28)', () => {
   it('public (neither ref) → secretSource:public, no refs, provider label generic', () => {
-    const r = resolveServerOAuthSubject(serverFrom({ ...KNOBS }))
+    const r = resolveServerOAuthSubject(serverFrom({ ...KNOBS }), 'consent')
     expect(r).not.toBeNull()
     expect(r?.decl.id).toBe('my-generic-client')
     expect(r?.decl.provider).toBe('generic')
@@ -70,7 +70,8 @@ describe('resolveServerOAuthSubject — generic lane (DEC-28)', () => {
         ...KNOBS,
         clientIdRef: { name: 'gen-creds', key: 'client_id' },
         clientSecretRef: { name: 'gen-creds', key: 'client_secret' },
-      })
+      }),
+      'consent'
     )
     expect(r?.decl.clientIdRef).toEqual({ name: 'gen-creds', key: 'client_id' })
     expect(r?.decl.clientSecretRef).toEqual({ name: 'gen-creds', key: 'client_secret' })
@@ -88,7 +89,8 @@ describe('resolveServerOAuthSubject — generic lane (DEC-28)', () => {
         refreshEndpoint: 'https://idp.example.com/refresh',
         resource: 'https://api.example.com',
         extraAuthorizeParams: { audience: 'aud-1', dropped: 42 },
-      })
+      }),
+      'consent'
     )
     expect(r?.decl.generic?.refreshEndpoint).toBe('https://idp.example.com/refresh')
     expect(r?.decl.generic?.resource).toBe('https://api.example.com')
@@ -101,7 +103,10 @@ describe('resolveServerOAuthSubject — generic lane (DEC-28)', () => {
     // the runtime reader must apply the same key cap (genericKnobs: 16).
     const many: Record<string, string> = {}
     for (let i = 0; i < 20; i++) many[`k${String(i).padStart(2, '0')}`] = `v${i}`
-    const r = resolveServerOAuthSubject(serverFrom({ ...KNOBS, extraAuthorizeParams: many }))
+    const r = resolveServerOAuthSubject(
+      serverFrom({ ...KNOBS, extraAuthorizeParams: many }),
+      'consent'
+    )
     expect(Object.keys(r?.decl.generic?.extraAuthorizeParams ?? {}).length).toBe(16)
   })
 
@@ -110,7 +115,8 @@ describe('resolveServerOAuthSubject — generic lane (DEC-28)', () => {
       serverFrom({
         ...KNOBS,
         extraAuthorizeParams: { ok: 'short', tooLong: 'x'.repeat(1025) },
-      })
+      }),
+      'consent'
     )
     const params = r?.decl.generic?.extraAuthorizeParams ?? {}
     // The over-long value is dropped, not truncated or forwarded.
@@ -120,28 +126,34 @@ describe('resolveServerOAuthSubject — generic lane (DEC-28)', () => {
 
   it('half-declared refs (only one) fail closed to null', () => {
     expect(
-      resolveServerOAuthSubject(serverFrom({ ...KNOBS, clientIdRef: { name: 'x', key: 'y' } }))
+      resolveServerOAuthSubject(
+        serverFrom({ ...KNOBS, clientIdRef: { name: 'x', key: 'y' } }),
+        'consent'
+      )
     ).toBeNull()
     expect(
-      resolveServerOAuthSubject(serverFrom({ ...KNOBS, clientSecretRef: { name: 'x', key: 'y' } }))
+      resolveServerOAuthSubject(
+        serverFrom({ ...KNOBS, clientSecretRef: { name: 'x', key: 'y' } }),
+        'consent'
+      )
     ).toBeNull()
   })
 
   it('malformed wire enum fails closed to null', () => {
     expect(
-      resolveServerOAuthSubject(serverFrom({ ...KNOBS, tokenRequestFormat: 'xml' }))
+      resolveServerOAuthSubject(serverFrom({ ...KNOBS, tokenRequestFormat: 'xml' }), 'consent')
     ).toBeNull()
     expect(
-      resolveServerOAuthSubject(serverFrom({ ...KNOBS, tokenAuthMethod: 'header' }))
+      resolveServerOAuthSubject(serverFrom({ ...KNOBS, tokenAuthMethod: 'header' }), 'consent')
     ).toBeNull()
     expect(
-      resolveServerOAuthSubject(serverFrom({ ...KNOBS, scopeSeparator: 'semicolon' }))
+      resolveServerOAuthSubject(serverFrom({ ...KNOBS, scopeSeparator: 'semicolon' }), 'consent')
     ).toBeNull()
   })
 
   it('missing required endpoint fails closed to null', () => {
     const { tokenEndpoint: _drop, ...noToken } = KNOBS
-    expect(resolveServerOAuthSubject(serverFrom(noToken))).toBeNull()
+    expect(resolveServerOAuthSubject(serverFrom(noToken), 'consent')).toBeNull()
   })
 
   it('resolveServerOAuth keys the grant coordinate by oauth.id (grantScope respected)', () => {
@@ -166,7 +178,8 @@ describe('baked lane is unaffected by the generic branch', () => {
         clientSecretRef: { name: 'creds', key: 'client-secret' },
         scopes: ['a'],
         backgroundAccess: true,
-      })
+      }),
+      'consent'
     )
     expect(r?.decl.provider).toBe('google')
     expect('generic' in (r?.decl ?? {})).toBe(false)

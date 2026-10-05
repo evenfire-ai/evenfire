@@ -205,7 +205,9 @@ describe('pendingChatSelection effect', () => {
     })
     await waitFor(() => expect(clerum.chat.getIndex.mock.calls.length).toBeGreaterThan(1))
 
-    const sendPromise = act(async () => {
+    // Keep the index pending while the send finishes, and close this act scope
+    // before waiting for progress or resolving the list in another scope.
+    await act(async () => {
       await result.current.handleSendAgentMessage('keep latest from stealing this chat')
     })
     await waitFor(() => expect(clerum.hasProgressHandler('task-latest-race')).toBe(true))
@@ -221,7 +223,6 @@ describe('pendingChatSelection effect', () => {
       })
     })
 
-    await sendPromise
     expect(result.current.activeChatId).toBe(createdChatId)
     expect(clerum.rpc.loadSessionMessages).not.toHaveBeenCalledWith(
       'agent-x',
@@ -334,7 +335,7 @@ describe('pendingChatSelection effect', () => {
 
     await waitFor(() => expect(clerum.chat.getIndex).toHaveBeenCalled())
 
-    const sendPromise = act(async () => {
+    await act(async () => {
       await result.current.handleSendAgentMessage('keep this visible')
     })
     await waitFor(() => expect(clerum.hasProgressHandler('task-race')).toBe(true))
@@ -350,7 +351,6 @@ describe('pendingChatSelection effect', () => {
       })
     })
 
-    await sendPromise
     expect(result.current.activeChatId).toBe(createdChatId)
     expect(clerum.rpc.loadSessionMessages).not.toHaveBeenCalledWith(
       'agent-x',

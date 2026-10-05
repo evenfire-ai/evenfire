@@ -1,0 +1,11 @@
+{
+  "status": 400,
+  "body": {
+    "error": "discovery_failed",
+    "detail": {
+      "kind": "as_endpoints_cross_site",
+      "field": "token",
+      "detail": "token endpoint is on site \"dropboxapi.com\", issuer is on site \"dropbox.com\""
+    }
+  }
+}

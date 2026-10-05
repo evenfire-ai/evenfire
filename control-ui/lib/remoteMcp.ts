@@ -7,7 +7,11 @@ import type {
   InstallRemoteRequest,
   InstallRemoteResponse,
   InstallTransportUnreachableDetail,
+  RemoteCallbackPreview,
+  RemoteCallbackVariant,
+  RemoteClientIdConflict,
   RemoteClientMode,
+  RemoteDcrRejectionKind,
   RemoteDetected,
   RemoteDiscoveryErrorKind,
   RemoteInstallMode,
@@ -147,6 +151,55 @@ export function getRemoteServerNameError(name: string): string {
 }
 
 /**
+ * The callback variant an install would use. Authority is the backend `callback`
+ * preview; a control-api older than it is read with the backend's own rule (shared
+ * iff the AS returns `iss`), which that version can only install on the shared path.
+ */
+export function remoteCallbackVariant(
+  discovery: Pick<DiscoverRemoteResponse, 'callback' | 'detected'>
+): RemoteCallbackVariant {
+  if (discovery.callback) return discovery.callback.variant
+  return discovery.detected.issForCallback ? 'shared' : 'per-server'
+}
+
+/**
+ * Why the detected configuration cannot be installed from here, or '' when it can.
+ * A per-server install needs a configured callback origin (control-api answers 503
+ * otherwise). A control-api older than the callback preview has no per-server
+ * callback at all and rejects every install against an AS without RFC 9207.
+ */
+export function remoteCallbackBlocker(
+  discovery: Pick<DiscoverRemoteResponse, 'callback' | 'detected'>
+): string {
+  if (remoteCallbackVariant(discovery) !== 'per-server') return ''
+  const { callback } = discovery
+  if (!callback) {
+    return 'This authorization server does not support RFC 9207, and this control-api version can only install servers that do. Update control-api to install it with a redirect URI of its own.'
+  }
+  if (!callback.configured) {
+    return 'The public OAuth callback URL is not configured on this deployment (CONTROL_API_OAUTH_CALLBACK_BASE_URL, a bare origin). This authorization server needs a redirect URI of its own, so it cannot be installed until that is set.'
+  }
+  return ''
+}
+
+/**
+ * The redirect URI the operator registers at the provider for a pre-registered
+ * client, or null when there is nothing to show yet. The `{serverName}` placeholder
+ * is filled only with a name that passes the wizard's validation, and a template
+ * still carrying `{installId}` is DCR-only (registered by control-api itself).
+ */
+export function remotePreRegisteredRedirectUri(
+  callback: RemoteCallbackPreview | undefined,
+  serverName: string
+): string | null {
+  const template = callback?.configured ? callback.redirectUriTemplate : undefined
+  if (!template || template.includes('{installId}')) return null
+  if (!template.includes('{serverName}')) return template
+  if (getRemoteServerNameError(serverName) !== '') return null
+  return template.split('{serverName}').join(serverName)
+}
+
+/**
  * Client-side FORM validation for the remote wizard's base URL (UX only — control-api
  * returns the authoritative 422 and its SSRF guard is what blocks a hostile target).
  * Returns '' when acceptable, else a message. Mirrors the generic lane's endpoint
@@ -190,8 +243,10 @@ function asCodedError(error: unknown): CodedError {
 
 /** Human copy for a `discovery_failed` detail kind (used by discover + install). */
 export function describeDiscoveryError(
-  kind: RemoteDiscoveryErrorKind | string | undefined
+  kind: RemoteDiscoveryErrorKind | string | undefined,
+  field?: string
 ): string {
+  if (kind === 'as_endpoints_cross_site') return describeCrossSite(field)
   switch (kind) {
     case 'fetch_failed':
       return "Couldn't reach the server to read its OAuth metadata. Check the URL and that the host is publicly reachable."
@@ -216,13 +271,71 @@ export function describeDiscoveryError(
   }
 }
 
+/**
+ * Without RFC 9207 every AS endpoint must share the issuer's registrable domain.
+ * `field` names what failed: the issuer itself (a public suffix, IP literal or URL
+ * with credentials has no domain to compare against) or one endpoint, which is then
+ * either on another domain or has none.
+ */
+function describeCrossSite(field: string | undefined): string {
+  const why =
+    'It does not identify itself in OAuth responses (RFC 9207), so the connector only trusts endpoints on the issuer’s own domain, and this server cannot be installed.'
+  if (field === 'issuer') {
+    return `The authorization server's issuer has no registrable domain of its own (it is a shared hosting suffix, an IP address, or carries credentials). ${why}`
+  }
+  const subject = field ? `${field} endpoint is` : 'endpoints are'
+  return `The authorization server's ${subject} not on the issuer's domain. ${why}`
+}
+
 function discoveryDetailKind(body: Record<string, unknown> | undefined): string | undefined {
+  return detailString(body, 'kind')
+}
+
+function detailString(
+  body: Record<string, unknown> | undefined,
+  key: 'kind' | 'field'
+): string | undefined {
   const detail = body?.detail
   if (detail && typeof detail === 'object') {
-    const kind = (detail as { kind?: unknown }).kind
-    if (typeof kind === 'string') return kind
+    const value = (detail as Record<string, unknown>)[key]
+    if (typeof value === 'string') return value
   }
   return undefined
+}
+
+function describeDiscoveryFailure(body: Record<string, unknown> | undefined): string {
+  return describeDiscoveryError(discoveryDetailKind(body), detailString(body, 'field'))
+}
+
+/** Copy for a DCR response refused after the client was minted (and revoked). */
+function describeDcrRejection(kind: RemoteDcrRejectionKind): string {
+  switch (kind) {
+    case 'redirect_uris_mismatch':
+      return 'The authorization server registered a different redirect URI than the one requested, so the new client was discarded and nothing was installed.'
+    case 'redirect_uris_missing':
+      return "The authorization server did not confirm the redirect URI it registered, which this server's own callback requires, so the new client was discarded and nothing was installed."
+    case 'client_id_is_cimd_identity':
+      return "The authorization server returned this platform's CIMD identity as the new client ID, so the client was discarded and nothing was installed."
+  }
+}
+
+const DCR_REJECTION_KINDS: readonly string[] = [
+  'redirect_uris_mismatch',
+  'redirect_uris_missing',
+  'client_id_is_cimd_identity',
+] satisfies readonly RemoteDcrRejectionKind[]
+
+function describeClientIdConflict(conflict: unknown): string {
+  switch (conflict as RemoteClientIdConflict) {
+    case 'remote_server':
+      return 'This client ID is already used by another remote server. Register a separate OAuth client for this server at the provider, with its own redirect URI.'
+    case 'dynamic_client':
+      return 'This client ID belongs to a client this platform registered dynamically. Register a separate OAuth client for this server at the provider.'
+    case 'cimd_client':
+      return "This client ID is the platform's CIMD identity, which cannot back a single server. Register a separate OAuth client for this server at the provider."
+    default:
+      return 'This client ID already backs another client. Register a separate OAuth client for this server at the provider.'
+  }
 }
 
 /**
@@ -233,15 +346,21 @@ function discoveryDetailKind(body: Record<string, unknown> | undefined): string 
 export function mapRemoteDiscoverError(error: unknown): string {
   const e = asCodedError(error)
   if (e.code === 'discovery_failed') {
-    return describeDiscoveryError(discoveryDetailKind(e.body))
+    return describeDiscoveryFailure(e.body)
   }
   // Kernel §4 400: `{ error: '<message>', errors }`. formatApiError surfaces the
   // message in `.message`; fall back to it (or a generic line).
   return e.message?.trim() || 'Could not detect the remote server. Check the URL and try again.'
 }
 
-/** Map an install-step failure to UI copy across the documented error codes. */
-export function mapRemoteInstallError(error: unknown): string {
+/**
+ * Map an install-step failure to UI copy across the documented error codes.
+ * `callbackVariant` is the variant the wizard previewed, when control-api reported one.
+ */
+export function mapRemoteInstallError(
+  error: unknown,
+  context: { callbackVariant?: RemoteCallbackVariant } = {}
+): string {
   const e = asCodedError(error)
   const code = e.code
   const body = e.body
@@ -254,18 +373,32 @@ export function mapRemoteInstallError(error: unknown): string {
       return serverMessage || 'The requested registration mode is not supported by this server.'
     case 'auth_method_unsupported':
       return "The authorization server assigned a client authentication method this platform cannot present, so this server can't be installed automatically."
-    case 'dcr_registration_failed':
+    case 'dcr_registration_failed': {
+      const kind = discoveryDetailKind(body)
+      if (kind && DCR_REJECTION_KINDS.includes(kind)) {
+        return describeDcrRejection(kind as RemoteDcrRejectionKind)
+      }
       return `Dynamic client registration failed at the authorization server${
-        discoveryDetailKind(body) ? ` (${discoveryDetailKind(body)})` : ''
+        kind ? ` (${kind})` : ''
       }.`
+    }
     case 'dcr_persist_failed':
       return 'The client was registered but its credentials could not be stored. Nothing was installed — please try again.'
     case 'callback_base_url_unconfigured':
-      return 'The public OAuth callback URL is not configured on this deployment. Set it before installing a remote OAuth server.'
+      return context.callbackVariant === 'per-server'
+        ? 'The public OAuth callback URL is not configured on this deployment (CONTROL_API_OAUTH_CALLBACK_BASE_URL, a bare origin). This authorization server needs a redirect URI of its own, so set it before installing.'
+        : 'The public OAuth callback URL is not configured on this deployment. Set CONTROL_API_OAUTH_CALLBACK_BASE_URL (a bare origin) before installing this server.'
+    case 'issuer_binding_required':
+      return (
+        serverMessage ||
+        'This authorization server does not advertise RFC 9207, which this install mode requires.'
+      )
+    case 'oauth_client_id_in_use':
+      return describeClientIdConflict(body?.conflict)
     case 'discovery_failed':
       // D-7: install re-runs discovery server-side, so a discover-time failure
       // reappears here with the same detail kind.
-      return describeDiscoveryError(discoveryDetailKind(body))
+      return describeDiscoveryFailure(body)
     case 'invalid_request':
       return 'The install request was rejected as invalid. Reload the page and try again.'
     case 'transport_unreachable': {
