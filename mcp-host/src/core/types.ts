@@ -9,6 +9,7 @@
 import type { FileReferenceDigest, FileReferenceV1 } from '@clerum/gfs-interaction-policy'
 import type { IncomingMessage as HostIncomingMessage } from '../server/types'
 import type { GfsImageSource } from '../visualInput/policy'
+import type { AttachmentReadLedgerSnapshot } from './attachments/attachmentReadBudget'
 import type { SystemPromptParts } from './reasoning/systemPrompt'
 
 // ─── Message Types ──────────────────────────────────────────
@@ -631,6 +632,11 @@ export interface TaskExecutionBudgetSnapshot {
   maxIterations: number
   /** Cumulative source-read work; payloads are not durable task budget data. */
   visualReadBytes?: number
+  /**
+   * C15/C16 — the turn's attachment read ledger, carried inside this existing
+   * JSON column. Data-only counts; no file bytes, no content.
+   */
+  attachmentReadLedger?: AttachmentReadLedgerSnapshot
 }
 
 export interface PendingApproval {

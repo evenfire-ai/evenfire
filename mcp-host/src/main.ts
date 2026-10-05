@@ -530,9 +530,16 @@ function currentFailoverSupport(): {
   engine: FailoverEngine
   policy: LlmPolicy
   buildProvider: (entry: FallbackEntry) => SingleTurnProvider | null
+  contextWindowForPair: (provider: string, model: string) => number | undefined
 } | null {
   if (!failoverEngine || !currentPolicy) return null
-  return { engine: failoverEngine, policy: currentPolicy, buildProvider: buildFallbackProvider }
+  return {
+    engine: failoverEngine,
+    policy: currentPolicy,
+    buildProvider: buildFallbackProvider,
+    contextWindowForPair: (provider, model) =>
+      contextWindowForModel(allowlistView(), provider, model),
+  }
 }
 
 /**

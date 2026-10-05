@@ -14,6 +14,11 @@ import { maybeWrapFailover } from '../core/adapters/failoverLlmPort'
 import { maybeWrapHookedLlmPort } from '../core/adapters/hookedLlmPort'
 import { AdapterStaticContext, LlmPortAdapter } from '../core/adapters/llmPortAdapter'
 import { CompositeToolRegistry, McpToolRegistryAdapter } from '../core/adapters/toolRegistryAdapter'
+import {
+  AttachmentReadLedger,
+  mergeAttachmentReadLedgerSnapshots,
+  readAttachmentReadLedgerSnapshot,
+} from '../core/attachments/attachmentReadBudget'
 import { compactConversation } from '../core/conversation/compaction'
 import { ConversationManager } from '../core/conversation/conversation'
 import { deriveAutoTitle } from '../core/conversation/sessionTitle'
@@ -24,6 +29,7 @@ import {
   COMPACTION_PRESSURE_THRESHOLD,
   PressureContextManager,
   tierDecisionTokens,
+  toolMessageBudgetTokens,
 } from '../core/extensions/contextManager'
 import {
   UnifiedApprovalGateController,
@@ -113,6 +119,7 @@ import { resolveCronTaskSessionKey, serializeSessionKey } from '../session'
 import { GovernedRunReporter, UsageReporter } from '../usage/usageReporter.js'
 import { resolveProviderWorkflowCallerContext } from '../workflow/providerWorkflowCallerContextClient'
 import type { Workspace } from '../workspace/service'
+import { attachmentContextWindow } from './attachmentContextWindow'
 import type { CronScheduler } from './cronScheduler'
 import { referencedFilesForTurnContext } from './fileReferenceResolver'
 import {
@@ -288,6 +295,14 @@ export class TaskExecutor {
   private tokenCounter: TokenCounter | null = null
   /** #731 — the task's context window, resolved and logged once. */
   private contextWindow: number | null = null
+  /**
+   * C15/C16 — one turn-owned attachment read ledger per executor. The native
+   * tool registry is memoized for the life of this executor, so the tool holds
+   * THIS instance by reference and the ledger mutates in place: `reset()` only
+   * after a successful `startTurn`, `restore()` on an approval resume that
+   * continues the same turn.
+   */
+  private readonly attachmentReadLedger = new AttachmentReadLedger()
   /**
    * P2 token budgets (§5.2) — snapshot of the conversation's lifetime token
    * counters captured at task start, used as the per-task brake baseline.
@@ -483,6 +498,10 @@ export class TaskExecutor {
         this.task.traceContext ?? null,
         autoTitle
       )
+      // C15/C16 — a fresh turn starts with a zeroed attachment read ledger. The
+      // reset runs only after `startTurn` resolved: a rejected write throws
+      // above and must not hand the retried turn a fresh budget.
+      this.attachmentReadLedger.reset()
       this.turnTiming?.addSessionLoadMs(Date.now() - sessionLoadStart)
 
       // P2 token budgets (§5.2) — capture the per-task brake baseline NOW, before
@@ -693,6 +712,9 @@ export class TaskExecutor {
         () => this.buildLoopConfig({ skipContextManager: true }),
         this.abortController.signal
       )
+      // Resume continues the same turn. Restore its independent budget before
+      // executing the suspended tool; never derive spend from compacted text.
+      this.restoreAttachmentReadLedger(approval)
       const suspendedCall = {
         id: approval.tool_call_id,
         name: approval.tool_name,
@@ -1025,6 +1047,29 @@ export class TaskExecutor {
   }
 
   /**
+   * C15/C16 — restore the turn ledger from the approval's own snapshot. The
+   * persisted value is authoritative and independent of message history, so
+   * compaction and earlier turns cannot change it. A missing or invalid
+   * snapshot fails closed: compacted history cannot prove that nothing was
+   * spent. New approvals always carry even the valid zero snapshot.
+   */
+  private restoreAttachmentReadLedger(approval: PendingApproval): void {
+    const persisted = readAttachmentReadLedgerSnapshot(approval.task_budget?.attachmentReadLedger)
+    if (persisted) {
+      // Warm resume must never decrease what the live turn already recorded.
+      this.attachmentReadLedger.restore(
+        mergeAttachmentReadLedgerSnapshots(this.attachmentReadLedger.snapshot(), persisted)
+      )
+      return
+    }
+    logger.warn(
+      { component: 'TaskExecutor', taskId: this.taskId, reason: 'attachment_read_ledger_missing' },
+      'Approval has no usable attachment ledger; failing closed for the rest of the turn'
+    )
+    this.attachmentReadLedger.exhaust(this.contextMaxTokens())
+  }
+
+  /**
    * #731 — the attempt contract's `maxMessages` for the provider, or
    * `undefined` when it has none. An unregistered provider type has no
    * contract, the same case `buildSourceMessageContentParts` guards with
@@ -1234,7 +1279,15 @@ export class TaskExecutor {
       }
 
       case 'need_approval': {
-        result.approval.task_budget = this.executionBudget.pause()
+        // C15/C16 — every pause (first, legacy re-pause, connect re-pause)
+        // funnels through here, so the turn's attachment read ledger is stamped
+        // inside the existing `task_budget` JSON column. Compaction cannot
+        // lose it; no new column or migration is needed.
+        const attachmentReadLedger = this.attachmentReadLedger.snapshot()
+        result.approval.task_budget = {
+          ...this.executionBudget.pause(),
+          attachmentReadLedger,
+        }
         // #666 R4-M2 — persist the sanitized source message so a cold restart
         // rebuilds the file-reference pins and attachment metadata. The inline
         // bytes (dataBase64) never persist.
@@ -1473,6 +1526,15 @@ export class TaskExecutor {
     }
 
     const { registry, loopController, bridge } = await this.buildToolRegistry()
+    const applicableToolCounters = registry
+      .listDefinitions()
+      .some(tool => tool.name === 'clerum__attachment_read')
+      ? (effectiveLlmPort.getToolTokenCounters?.() ?? [tokenCounter])
+      : [tokenCounter]
+    const toolCounters = [...new Set(applicableToolCounters)]
+    await Promise.all(
+      toolCounters.filter(counter => counter !== tokenCounter).map(counter => counter.warmup())
+    )
 
     // T2.2 — when the prompt-cache flag is ON and we have the dependencies
     // wired (PromptCache + WorkspaceService), build the tiered
@@ -1591,6 +1653,14 @@ export class TaskExecutor {
     // oversized outputs and stamp `spillover_ref` on the result.
     loopConfig.spilloverStorage = this.deps.spilloverStorage
     loopConfig.taskId = this.taskId
+    // C15/C16 — the exact synchronous measurement the bounded native readers
+    // use for a result: the full tool message (framing + the larger applicable
+    // provider/BPE estimate), never a content-only shortcut.
+    // Page limits are enforced even when compaction is in tokenizer dry-run.
+    // Use the largest applicable synchronous estimate for every destination;
+    // emitted pages can survive a provider change in a later reasoning round.
+    loopConfig.measureToolMessage = message =>
+      Math.max(...toolCounters.map(counter => toolMessageBudgetTokens(message, counter, false)))
     // F3 (dynamic-tool-loading): context the `clerum__tool_call` bridge intercept
     // needs in `executeToolCalls`. Undefined when no McpManager is wired.
     loopConfig.bridge = bridge
@@ -2064,6 +2134,15 @@ export class TaskExecutor {
       {
         maxBytes: appConfig.attachmentMaxBytes,
         secretEntriesProvider: this.deps.secretEntriesProvider,
+        // Keep the ledger and bound pages for every model this task may serve.
+        ledger: this.attachmentReadLedger,
+        contextWindowTokens: attachmentContextWindow(
+          this.contextMaxTokens(),
+          this.deps.llmProvider.getProviderType(),
+          this.deps.failover?.policy.fallbacks ?? [],
+          this.deps.failover?.contextWindowForPair,
+          appConfig.contextMaxTokens
+        ),
       },
       this.deps.spilloverStorage,
       this.deps.sessionSearchService,

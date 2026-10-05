@@ -20,6 +20,45 @@ function boundedCount(value: number): boolean {
   return Number.isSafeInteger(value) && value >= 0
 }
 
+/**
+ * Strict reader for a persisted ledger snapshot. Returns null (never a guess,
+ * never a partial value) unless every field is a safe non-negative integer and
+ * the read count is within the hard cap. The spend is deliberately NOT clamped
+ * to a window: a ledger that spent above the current envelope must stay
+ * above it, so widening the window later cannot restore spent allowance.
+ */
+export function readAttachmentReadLedgerSnapshot(
+  value: unknown
+): AttachmentReadLedgerSnapshot | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null
+  const record = value as Record<string, unknown>
+  const { reads, spentTokens, bytesRead } = record
+  if (!boundedCount(reads as number) || !boundedCount(spentTokens as number)) return null
+  if (!boundedCount(bytesRead as number)) return null
+  if ((reads as number) > MAX_ATTACHMENT_READS_PER_TURN) return null
+  return {
+    reads: reads as number,
+    spentTokens: spentTokens as number,
+    bytesRead: bytesRead as number,
+  }
+}
+
+/**
+ * Monotone per-field maximum. The warm resume path merges the persisted
+ * snapshot into the live ledger with this, so a stale or replayed approval can
+ * never decrease reads or spend the running turn already recorded.
+ */
+export function mergeAttachmentReadLedgerSnapshots(
+  live: AttachmentReadLedgerSnapshot,
+  persisted: AttachmentReadLedgerSnapshot
+): AttachmentReadLedgerSnapshot {
+  return {
+    reads: Math.max(live.reads, persisted.reads),
+    spentTokens: Math.max(live.spentTokens, persisted.spentTokens),
+    bytesRead: Math.max(live.bytesRead, persisted.bytesRead),
+  }
+}
+
 /** Owned by one turn; registry memoization does not determine its lifetime. */
 export class AttachmentReadLedger {
   private state: AttachmentReadLedgerSnapshot = { reads: 0, spentTokens: 0, bytesRead: 0 }
@@ -33,13 +72,23 @@ export class AttachmentReadLedger {
   }
 
   restore(snapshot: AttachmentReadLedgerSnapshot): void {
-    if (
-      !Object.values(snapshot).every(boundedCount) ||
-      snapshot.reads > MAX_ATTACHMENT_READS_PER_TURN
-    ) {
-      throw new Error('Invalid attachment read ledger snapshot')
+    const parsed = readAttachmentReadLedgerSnapshot(snapshot)
+    if (!parsed) throw new Error('Invalid attachment read ledger snapshot')
+    this.state = parsed
+  }
+
+  /**
+   * Fail-closed state for a turn whose spend cannot be trusted (a legacy or
+   * corrupt snapshot). No further page can
+   * be emitted, and no spend is guessed.
+   */
+  exhaust(windowTokens: number): void {
+    const { turnTokens } = attachmentReadBudgets(windowTokens)
+    this.state = {
+      reads: MAX_ATTACHMENT_READS_PER_TURN,
+      spentTokens: Math.max(this.state.spentTokens, turnTokens),
+      bytesRead: this.state.bytesRead,
     }
-    this.state = { ...snapshot }
   }
 
   beginRead(): boolean {
@@ -66,7 +115,12 @@ export class AttachmentReadLedger {
   }
 
   debit(windowTokens: number, cost: number, bytesRead: number): void {
-    if (!boundedCount(bytesRead) || !this.canEmit(windowTokens, cost)) {
+    if (
+      !boundedCount(bytesRead) ||
+      !this.canEmit(windowTokens, cost) ||
+      !Number.isSafeInteger(this.state.spentTokens + cost) ||
+      !Number.isSafeInteger(this.state.bytesRead + bytesRead)
+    ) {
       throw new Error('Attachment output cannot fit the remaining page/turn budget')
     }
     this.state.spentTokens += cost

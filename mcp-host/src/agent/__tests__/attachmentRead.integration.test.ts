@@ -48,13 +48,21 @@ function lastUserText(messages: ChatMessage[]): string {
   return user.content ?? ''
 }
 
-async function runTask(filename: string, mimeType: string, bytes: Buffer) {
+async function runTask(
+  filename: string,
+  mimeType: string,
+  bytes: Buffer,
+  options: { contextWindowTokens?: number } = {}
+) {
   const attachment = admittedFile(filename, mimeType, bytes)
-  return { ...(await runTaskWith(attachment)), attachment }
+  return { ...(await runTaskWith(attachment, options)), attachment }
 }
 
 /** Without an attachment the double answers directly; with one it reads it first. */
-async function runTaskWith(attachment: ReturnType<typeof admittedFile> | undefined) {
+async function runTaskWith(
+  attachment: ReturnType<typeof admittedFile> | undefined,
+  options: { contextWindowTokens?: number } = {}
+) {
   const call: ToolCall = {
     id: 'read-1',
     name: 'clerum__attachment_read',
@@ -117,6 +125,9 @@ async function runTaskWith(attachment: ReturnType<typeof admittedFile> | undefin
     mcpManager: new McpManager(),
     workspaceService: undefined,
     modelName: 'test-model',
+    ...(options.contextWindowTokens !== undefined
+      ? { contextWindowTokens: options.contextWindowTokens }
+      : {}),
     approvalConfig: undefined,
     config: {
       maxTaskDuration: 300000,
@@ -136,6 +147,14 @@ async function runTaskWith(attachment: ReturnType<typeof admittedFile> | undefin
   const executor = new TaskExecutor(task, deps)
   await executor.run()
   return { attachment, call, deps, executor, providerCalls, task }
+}
+
+/** The tool message content is the `<tool_output>` wrapper around the page JSON. */
+function toolPayload(content: string): Record<string, unknown> {
+  const bodyStart = content.indexOf('\n')
+  const bodyEnd = content.lastIndexOf('\n</tool_output>')
+  if (bodyStart < 0 || bodyEnd < 0) throw new Error('tool message is not wrapped')
+  return JSON.parse(content.slice(bodyStart + 1, bodyEnd)) as Record<string, unknown>
 }
 
 describe('clerum__attachment_read through a complete task (#666)', () => {
@@ -186,6 +205,43 @@ describe('clerum__attachment_read through a complete task (#666)', () => {
     expect(result?.content).toContain(SENTINEL)
     expect(result?.content).toContain('"kind":"text"')
     expect(result?.content).not.toContain('�')
+    expect(deps.onComplete).toHaveBeenCalledTimes(1)
+  })
+
+  it('bounds the emitted page with the explicit turn window and debits the shared ledger', async () => {
+    Object.assign(appConfig, {
+      enableApproval: false,
+      dynamicToolsEnabled: false,
+      promptCacheEnabled: true,
+    })
+    // window 25_000 → page 2_500 / turn 7_500 with the notice reserve covered,
+    // so the page binds (limit=page_budget) and a 65 KiB dense file cannot be
+    // emitted whole; under the default 100k window it would arrive complete.
+    const fileBytes = 65_535
+    const { call, deps, executor, providerCalls } = await runTask(
+      'dense.txt',
+      'text/plain',
+      Buffer.from('A'.repeat(fileBytes)),
+      { contextWindowTokens: 25_000 }
+    )
+
+    expect(deps.onFail).not.toHaveBeenCalled()
+    expect(executor.executorState).toBe('completed')
+    expect(providerCalls).toHaveLength(2)
+    const result = providerCalls[1]!.messages.find(
+      message => message.role === 'tool' && message.tool_call_id === call.id
+    )
+    expect(result?.content).toBeTruthy()
+    const payload = toolPayload(result!.content)
+    expect(payload.kind).toBe('text')
+    expect(payload.truncated).toBe(true)
+    expect(payload.limit).toBe('page_budget')
+    const byteRange = payload.byteRange as { offset: number; length: number }
+    expect(byteRange.offset).toBe(0)
+    expect(byteRange.length).toBeGreaterThan(0)
+    expect(byteRange.length).toBeLessThan(fileBytes)
+    expect(typeof payload.nextOffset).toBe('number')
+    expect(payload.nextOffset as number).toBeGreaterThan(0)
     expect(deps.onComplete).toHaveBeenCalledTimes(1)
   })
 

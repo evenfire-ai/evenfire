@@ -12,6 +12,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import { validateIncomingAttachments } from '../../../agent/incomingAttachments'
 import type { IncomingMessage } from '../../../server'
+import { AttachmentReadLedger } from '../../attachments/attachmentReadBudget'
 import type { Tool, ToolRegistry } from '../../interfaces'
 import { BasicSafety } from '../../safety/safety'
 import { DefaultToolOutputProcessor } from '../../safety/toolOutputProcessor'
@@ -131,6 +132,10 @@ describe('executeSingleTool — clerum__attachment_read pages stay inline (#666,
         toolProgressInterval: 0,
         spilloverStorage: storage,
         taskId: TASK_ID,
+        // C15/C16 — the bounded reader refuses to run without an exact
+        // measurement; the loop always wires this in production.
+        measureToolMessage: message =>
+          Math.max(Math.ceil(Buffer.byteLength(message.content ?? '', 'utf8') / 4) + 4, 1),
       }
     )
   }
@@ -146,7 +151,10 @@ describe('executeSingleTool — clerum__attachment_read pages stay inline (#666,
       hostRef: 'host-1',
       attachments: [attachment],
     }
-    return new AttachmentReadTool(message, READ_LIMIT)
+    return new AttachmentReadTool(message, READ_LIMIT, {
+      contextWindowTokens: 100_000,
+      ledger: new AttachmentReadLedger(),
+    })
   }
 
   function eventTypes(): string[] {

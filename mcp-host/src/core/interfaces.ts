@@ -44,6 +44,8 @@ export interface LlmPort {
    * absent.
    */
   getTokenCounter?(): TokenCounter
+  /** Counters for all destinations that may receive this turn's paged output. */
+  getToolTokenCounters?(): readonly TokenCounter[]
 }
 
 // ─── Reasoning ──────────────────────────────────────────────

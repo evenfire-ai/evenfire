@@ -6,6 +6,7 @@ import { describe, expect, it } from 'vitest'
 import { createHash } from 'node:crypto'
 import { validateIncomingAttachments } from '../../../agent/incomingAttachments'
 import type { IncomingMessage } from '../../../server'
+import { AttachmentReadLedger } from '../../attachments/attachmentReadBudget'
 import type { NativeToolConfig } from '../../interfaces'
 import { SpilloverStorage } from '../../spillover'
 import type { Attachment } from '../../types'
@@ -74,13 +75,25 @@ function toolNames(registry: NativeToolRegistry): string[] {
   return registry.listDefinitions().map(definition => definition.name)
 }
 
+/** C15/C16 — the per-turn ledger and window a real caller always supplies. */
+function attachmentOptions(
+  ledger: AttachmentReadLedger = new AttachmentReadLedger(),
+  contextWindowTokens = 100_000
+) {
+  return { maxBytes: 3_145_728, ledger, contextWindowTokens }
+}
+
 describe('NativeToolRegistry — clerum__attachment_read (#666)', () => {
   it('registers the tool for a message with a kind:file attachment', () => {
     const registry = new NativeToolRegistry(
       config,
       'conv-1',
       undefined,
-      message(attachments('file'))
+      message(attachments('file')),
+      undefined,
+      undefined,
+      undefined,
+      attachmentOptions()
     )
     expect(toolNames(registry)).toContain('clerum__attachment_read')
     expect(registry.get('clerum__attachment_read')!.parametersSchema()).toMatchObject({
@@ -98,10 +111,23 @@ describe('NativeToolRegistry — clerum__attachment_read (#666)', () => {
       config,
       'conv-1',
       undefined,
-      message(attachments('file'))
+      message(attachments('file')),
+      undefined,
+      undefined,
+      undefined,
+      attachmentOptions()
     )
     expect(toolNames(control)).toContain('clerum__attachment_read')
-    const registry = new NativeToolRegistry(config, 'conv-1', undefined, source)
+    const registry = new NativeToolRegistry(
+      config,
+      'conv-1',
+      undefined,
+      source,
+      undefined,
+      undefined,
+      undefined,
+      attachmentOptions()
+    )
     // Witness: the registry was built and presents its always-on native tools.
     expect(toolNames(registry)).toContain('file_read')
     expect(toolNames(registry)).not.toContain('clerum__attachment_read')
@@ -110,10 +136,82 @@ describe('NativeToolRegistry — clerum__attachment_read (#666)', () => {
   it('refuses to build without the per-call limit when a file is attached', () => {
     const { attachmentTextReadMaxBytes: _omitted, ...withoutLimit } = config
     // Control: the same config builds when no file is attached.
-    expect(() => new NativeToolRegistry(withoutLimit, 'conv-1', undefined, message())).not.toThrow()
     expect(
-      () => new NativeToolRegistry(withoutLimit, 'conv-1', undefined, message(attachments('file')))
+      () =>
+        new NativeToolRegistry(
+          withoutLimit,
+          'conv-1',
+          undefined,
+          message(),
+          undefined,
+          undefined,
+          undefined,
+          attachmentOptions()
+        )
+    ).not.toThrow()
+    expect(
+      () =>
+        new NativeToolRegistry(
+          withoutLimit,
+          'conv-1',
+          undefined,
+          message(attachments('file')),
+          undefined,
+          undefined,
+          undefined,
+          attachmentOptions()
+        )
     ).toThrow('NativeToolConfig.attachmentTextReadMaxBytes is required for file attachments')
+  })
+
+  it('refuses to register the tool without the turn ledger and window', () => {
+    // Control: the full wiring registers it.
+    expect(
+      () =>
+        new NativeToolRegistry(
+          config,
+          'conv-1',
+          undefined,
+          message(attachments('file')),
+          undefined,
+          undefined,
+          undefined,
+          attachmentOptions()
+        )
+    ).not.toThrow()
+    expect(
+      () =>
+        new NativeToolRegistry(
+          config,
+          'conv-1',
+          undefined,
+          message(attachments('file')),
+          undefined,
+          undefined,
+          undefined,
+          { maxBytes: 3_145_728 }
+        )
+    ).toThrow(/ledger/)
+  })
+
+  it('wires the SAME turn ledger into the registered tool', async () => {
+    const ledger = new AttachmentReadLedger()
+    for (let i = 0; i < 32; i++) ledger.beginRead()
+    const registry = new NativeToolRegistry(
+      config,
+      'conv-1',
+      undefined,
+      message(attachments('file')),
+      undefined,
+      undefined,
+      undefined,
+      attachmentOptions(ledger)
+    )
+    const tool = registry.get('clerum__attachment_read')!
+    const output = await tool.execute({ attachmentId: 'file-1' })
+    // The pre-spent ledger is observable through the registry-built tool.
+    expect(output.content).toContain('read_budget_exhausted')
+    expect(output.is_error).toBe(false)
   })
 
   it('registers a spillover-exempt tool whether or not the turn has spillover storage', () => {
@@ -131,7 +229,7 @@ describe('NativeToolRegistry — clerum__attachment_read (#666)', () => {
       undefined,
       undefined,
       undefined,
-      undefined,
+      attachmentOptions(),
       storage
     )
     // Witness: this turn can spill (the read-back tool is present).
@@ -141,7 +239,16 @@ describe('NativeToolRegistry — clerum__attachment_read (#666)', () => {
     expect(spilling.description()).toContain('reader=text')
     expect(spilling.description()).not.toContain('spillover')
 
-    const inline = new NativeToolRegistry(config, 'conv-1', undefined, message(attachments('file')))
+    const inline = new NativeToolRegistry(
+      config,
+      'conv-1',
+      undefined,
+      message(attachments('file')),
+      undefined,
+      undefined,
+      undefined,
+      attachmentOptions()
+    )
     expect(inline.get('clerum__spillover_read')).toBeNull()
     const reader = inline.get('clerum__attachment_read')!
     expect(reader.spilloverExempt?.()).toBe(true)

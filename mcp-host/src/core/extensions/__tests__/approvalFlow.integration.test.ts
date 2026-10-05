@@ -19,6 +19,7 @@ import type { ApprovalConfig } from '../approvalTypes'
 vi.mock('../../../config', () => ({
   config: {
     devMode: true,
+    contextMaxTokens: 100_000,
     enableApproval: true,
     enableNudge: false,
     nudgeMaxIterations: 3,
