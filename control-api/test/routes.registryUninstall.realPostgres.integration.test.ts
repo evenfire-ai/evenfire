@@ -228,7 +228,8 @@ describeRealPostgres('registry uninstall tears OAuth grants down (real Postgres)
             const resolved = resolveServerOAuthSubject(
               (await gw.getResource('mcpservers', name, NS)) as Parameters<
                 typeof resolveServerOAuthSubject
-              >[0]
+              >[0],
+              'consent'
             )
             return resolved ? { namespace: NS, ...resolved } : null
           },

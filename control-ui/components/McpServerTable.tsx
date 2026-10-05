@@ -22,6 +22,7 @@ import { TableHeaderRow } from './TableHeaderRow'
 import type { TableHeaderColumn } from './TableHeaderRow/types'
 import { TablePanelHeader } from './TablePanelHeader'
 import { IconRefresh } from './icons'
+import { Button } from './ui'
 
 const ENABLED_TOOLTIP = 'Enabled controls whether this server is available to agents.'
 type ConnectorSortKey = 'name' | 'description' | 'managed' | 'enabled' | 'status'
@@ -275,35 +276,31 @@ export function McpServerTable({
             {isInitialLoad ? 'Connectors' : `Connectors (${filteredRows.length})`}
           </>
         }
-        titleActions={
+        secondaryActions={
           onCreate || onAddRemote ? (
-            <RowActionsMenu
-              ariaLabel="Connector actions"
-              horizontalTrigger
-              actions={[
-                ...(onCreate
-                  ? [
-                      {
-                        key: 'create',
-                        label: 'Create connector',
-                        onClick: onCreate,
-                        disabled: isInitialLoad,
-                      },
-                    ]
-                  : []),
-                ...(onAddRemote
-                  ? [
-                      {
-                        key: 'add-remote',
-                        label: 'Add remote server',
-                        onClick: onAddRemote,
-                        disabled: isInitialLoad,
-                      },
-                    ]
-                  : []),
-              ]}
-            />
-          ) : null
+            <>
+              {onCreate ? (
+                <Button
+                  size="sm"
+                  className="cu-btn--mcp-install"
+                  onClick={onCreate}
+                  disabled={isInitialLoad}
+                >
+                  Create connector
+                </Button>
+              ) : null}
+              {onAddRemote ? (
+                <Button
+                  size="sm"
+                  className="cu-btn--mcp-install"
+                  onClick={onAddRemote}
+                  disabled={isInitialLoad}
+                >
+                  Add remote server
+                </Button>
+              ) : null}
+            </>
+          ) : undefined
         }
         subtitle="Browse connector deployments and agent access."
         actionsClassName="cu-table-panel__actions--mcp"

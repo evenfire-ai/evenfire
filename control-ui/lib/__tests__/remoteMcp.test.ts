@@ -1,12 +1,30 @@
 import { describe, expect, it } from 'vitest'
 import {
-  DCR_CONFIDENTIAL_DETECTED,
-  DCR_PUBLIC_DETECTED,
-  NOTION_DETECTED,
   NOTION_TRANSPORT_ALIVE,
   TRANSPORT_INCONCLUSIVE_TIMEOUT,
   VERCEL_TRANSPORT_DEAD,
 } from '../../test/fixtures/remoteMcpDiscovery'
+import {
+  ATLASSIAN_DISCOVER,
+  ATLASSIAN_DISCOVER_UNCONFIGURED,
+  CALLBACK_UNCONFIGURED_FAILURE,
+  CIMD_WITHOUT_ISS_BINDING_FAILURE,
+  CLIENT_ID_IN_USE_FAILURE,
+  DCR_CONFIDENTIAL_DETECTED,
+  DCR_REDIRECT_MISMATCH_FAILURE,
+  DROPBOX_DISCOVER_FAILURE,
+  ISSUER_PUBLIC_SUFFIX_DISCOVER_FAILURE,
+  LINEAR_DETECTED,
+  LINEAR_DISCOVER,
+  LINEAR_DISCOVER_UNCONFIGURED,
+  NOTION_DETECTED,
+  NOTION_DISCOVER,
+  OLDER_CONTROL_API_DCR_DISCOVER,
+  OLDER_CONTROL_API_LINEAR_DISCOVER,
+  PRE_REGISTERED_PER_SERVER_DETECTED,
+  PRE_REGISTERED_PER_SERVER_DISCOVER,
+  apiErrorFrom,
+} from '../../test/fixtures/remoteMcpWire'
 import {
   buildRemoteInstallRequest,
   describeDiscoveryError,
@@ -17,11 +35,14 @@ import {
   installModeForRegistration,
   mapRemoteDiscoverError,
   mapRemoteInstallError,
+  remoteCallbackBlocker,
+  remoteCallbackVariant,
+  remotePreRegisteredRedirectUri,
   requiresPreRegisteredCredentials,
   shouldWarnNoRefresh,
   transportBlocksContinue,
 } from '../remoteMcp'
-import type { RemoteDetected, RemoteTransportProbe } from '../remoteMcp.types'
+import type { RemoteTransportProbe } from '../remoteMcp.types'
 
 describe('installModeForRegistration (D-3/D-7)', () => {
   it('maps each registration mode to its install mode', () => {
@@ -65,11 +86,10 @@ describe('shouldWarnNoRefresh (D-8)', () => {
 
 describe('displayClientMode', () => {
   it('derives the confirm-step client mode from the resolved install mode', () => {
-    expect(displayClientMode(NOTION_DETECTED)).toBe('public') // cimd
-    expect(displayClientMode(DCR_PUBLIC_DETECTED)).toBe('public')
+    expect(displayClientMode(LINEAR_DETECTED)).toBe('public') // cimd
+    expect(displayClientMode(NOTION_DETECTED)).toBe('public') // dcr, `none` offered
     expect(displayClientMode(DCR_CONFIDENTIAL_DETECTED)).toBe('confidential')
-    const manual: RemoteDetected = { ...NOTION_DETECTED, registrationMode: 'manual' }
-    expect(displayClientMode(manual)).toBe('confidential') // pre-registered
+    expect(displayClientMode(PRE_REGISTERED_PER_SERVER_DETECTED)).toBe('confidential')
   })
 })
 
@@ -89,6 +109,78 @@ describe('getRemoteServerNameError', () => {
     expect(getRemoteServerNameError('-leading')).not.toBe('')
     expect(getRemoteServerNameError('trailing-')).not.toBe('')
     expect(getRemoteServerNameError('a'.repeat(64))).not.toBe('')
+  })
+})
+
+describe('remoteCallbackVariant', () => {
+  it('reads the backend callback preview', () => {
+    expect(remoteCallbackVariant(LINEAR_DISCOVER)).toBe('shared')
+    expect(remoteCallbackVariant(NOTION_DISCOVER)).toBe('per-server')
+    expect(remoteCallbackVariant(PRE_REGISTERED_PER_SERVER_DISCOVER)).toBe('per-server')
+  })
+
+  it('on a control-api without the preview, falls back to the RFC 9207 rule', () => {
+    expect(remoteCallbackVariant(OLDER_CONTROL_API_LINEAR_DISCOVER)).toBe('shared')
+    expect(remoteCallbackVariant(OLDER_CONTROL_API_DCR_DISCOVER)).toBe('per-server')
+  })
+})
+
+describe('remoteCallbackBlocker', () => {
+  it('does not block a configured shared or per-server install', () => {
+    expect(remoteCallbackBlocker(LINEAR_DISCOVER)).toBe('')
+    expect(remoteCallbackBlocker(ATLASSIAN_DISCOVER)).toBe('')
+    expect(remoteCallbackBlocker(PRE_REGISTERED_PER_SERVER_DISCOVER)).toBe('')
+  })
+
+  it('blocks a per-server install when the callback base URL is not configured', () => {
+    expect(remoteCallbackBlocker(ATLASSIAN_DISCOVER_UNCONFIGURED)).toMatch(
+      /callback URL is not configured/i
+    )
+  })
+
+  it('does not block a shared install without a configured base URL', () => {
+    // control-api decides per mode there (a shared CIMD/DCR install still answers 503).
+    expect(LINEAR_DISCOVER_UNCONFIGURED.callback).toEqual({ configured: false, variant: 'shared' })
+    expect(remoteCallbackBlocker(LINEAR_DISCOVER_UNCONFIGURED)).toBe('')
+  })
+
+  it('on an older control-api, blocks every install against an AS without RFC 9207', () => {
+    expect(OLDER_CONTROL_API_DCR_DISCOVER.detected.registrationMode).toBe('dcr')
+    expect(remoteCallbackBlocker(OLDER_CONTROL_API_DCR_DISCOVER)).toMatch(/update control-api/i)
+    expect(remoteCallbackBlocker(OLDER_CONTROL_API_LINEAR_DISCOVER)).toBe('')
+  })
+})
+
+describe('remotePreRegisteredRedirectUri', () => {
+  const perServer = PRE_REGISTERED_PER_SERVER_DISCOVER.callback
+
+  it('fills the server name into the per-server template', () => {
+    expect(remotePreRegisteredRedirectUri(perServer, 'hubspot')).toBe(
+      perServer?.redirectUriTemplate?.replace('{serverName}', 'hubspot')
+    )
+    expect(remotePreRegisteredRedirectUri(perServer, 'hubspot')).toMatch(
+      /\/api\/v1\/oauth-callback\/remote\/hubspot$/
+    )
+  })
+
+  it('shows nothing until the name is valid', () => {
+    expect(remotePreRegisteredRedirectUri(perServer, '')).toBeNull()
+    expect(remotePreRegisteredRedirectUri(perServer, 'Bad_Name')).toBeNull()
+    expect(remotePreRegisteredRedirectUri(perServer, '-x')).toBeNull()
+  })
+
+  it('returns the shared URI as-is, whatever the name', () => {
+    expect(remotePreRegisteredRedirectUri(LINEAR_DISCOVER.callback, '')).toBe(
+      LINEAR_DISCOVER.callback?.redirectUriTemplate
+    )
+  })
+
+  it('never shows a DCR template (control-api registers it) nor an unconfigured one', () => {
+    expect(remotePreRegisteredRedirectUri(ATLASSIAN_DISCOVER.callback, 'atlassian')).toBeNull()
+    expect(
+      remotePreRegisteredRedirectUri(ATLASSIAN_DISCOVER_UNCONFIGURED.callback, 'atlassian')
+    ).toBeNull()
+    expect(remotePreRegisteredRedirectUri(undefined, 'atlassian')).toBeNull()
   })
 })
 
@@ -174,6 +266,7 @@ describe('describeDiscoveryError', () => {
       'redirect_blocked',
       'prm_resource_mismatch',
       'issuer_mismatch',
+      'as_endpoints_cross_site',
     ] as const
     const texts = kinds.map(describeDiscoveryError)
     expect(new Set(texts).size).toBe(kinds.length)
@@ -184,6 +277,19 @@ describe('describeDiscoveryError', () => {
 })
 
 describe('mapRemoteDiscoverError', () => {
+  it('maps the Dropbox cross-site failure naming the offending endpoint', () => {
+    const copy = mapRemoteDiscoverError(apiErrorFrom(DROPBOX_DISCOVER_FAILURE))
+    expect(copy).toMatch(/token endpoint is not on the issuer's domain/i)
+    expect(copy).toMatch(/RFC 9207/)
+  })
+
+  it('maps an issuer without a registrable domain to its own copy', () => {
+    const copy = mapRemoteDiscoverError(apiErrorFrom(ISSUER_PUBLIC_SUFFIX_DISCOVER_FAILURE))
+    expect(copy).toMatch(/issuer has no registrable domain/i)
+    expect(copy).not.toMatch(/endpoint is not on/i)
+    expect(copy).not.toBe(mapRemoteDiscoverError(apiErrorFrom(DROPBOX_DISCOVER_FAILURE)))
+  })
+
   it('maps a discovery_failed detail kind', () => {
     const err = Object.assign(new Error('502 ...'), {
       status: 502,
@@ -233,12 +339,80 @@ describe('mapRemoteInstallError', () => {
     expect(mapRemoteInstallError(err)).toContain('invalid_response')
   })
 
-  it('maps callback_base_url_unconfigured to plain copy', () => {
-    const err = Object.assign(new Error('503'), {
-      code: 'callback_base_url_unconfigured',
-      body: {},
+  it('maps callback_base_url_unconfigured by the previewed callback variant', () => {
+    const err = apiErrorFrom(CALLBACK_UNCONFIGURED_FAILURE)
+    const perServer = mapRemoteInstallError(err, { callbackVariant: 'per-server' })
+    expect(perServer).toMatch(/callback url is not configured/i)
+    expect(perServer).toMatch(/redirect URI of its own/i)
+    // Shared CIMD/DCR without an origin answer the same 503; so does an unknown variant.
+    for (const copy of [
+      mapRemoteInstallError(err, { callbackVariant: 'shared' }),
+      mapRemoteInstallError(err),
+    ]) {
+      expect(copy).toMatch(/callback url is not configured/i)
+      expect(copy).toMatch(/CONTROL_API_OAUTH_CALLBACK_BASE_URL/)
+      expect(copy).not.toMatch(/redirect URI of its own/i)
+    }
+  })
+
+  it('uses the server message when CIMD is refused for lack of RFC 9207', () => {
+    expect(mapRemoteInstallError(apiErrorFrom(CIMD_WITHOUT_ISS_BINDING_FAILURE))).toBe(
+      'this authorization server supports CIMD but not RFC 9207; install with mode "dcr"'
+    )
+  })
+
+  it('maps a per-server client_id conflict to "register a separate client"', () => {
+    const copy = mapRemoteInstallError(apiErrorFrom(CLIENT_ID_IN_USE_FAILURE))
+    expect(copy).toMatch(/another remote server/i)
+    expect(copy).toMatch(/separate OAuth client/i)
+  })
+
+  it('maps each oauth_client_id_in_use conflict to its own copy', () => {
+    const copies = ['remote_server', 'dynamic_client', 'cimd_client', undefined].map(conflict =>
+      mapRemoteInstallError(
+        Object.assign(new Error('409'), {
+          code: 'oauth_client_id_in_use',
+          body: { error: 'oauth_client_id_in_use', conflict },
+        })
+      )
+    )
+    expect(new Set(copies).size).toBe(copies.length)
+  })
+
+  it('maps a refused DCR redirect URI without leaking the raw kind', () => {
+    const copy = mapRemoteInstallError(apiErrorFrom(DCR_REDIRECT_MISMATCH_FAILURE))
+    expect(copy).toMatch(/different redirect URI/i)
+    expect(copy).toMatch(/nothing was installed/i)
+    expect(copy).not.toContain('redirect_uris_mismatch')
+  })
+
+  it('gives each refused-DCR kind its own copy', () => {
+    const kinds = ['redirect_uris_mismatch', 'redirect_uris_missing', 'client_id_is_cimd_identity']
+    const copies = kinds.map(kind =>
+      mapRemoteInstallError(
+        Object.assign(new Error('400'), {
+          code: 'dcr_registration_failed',
+          body: { error: 'dcr_registration_failed', detail: { kind } },
+        })
+      )
+    )
+    expect(new Set(copies).size).toBe(kinds.length)
+    for (const [i, copy] of copies.entries()) expect(copy).not.toContain(kinds[i])
+  })
+
+  it('maps issuer_binding_required to the server message, else neutral copy', () => {
+    // No golden: the router now answers a CIMD request against an AS without RFC 9207
+    // with mode_unsupported first, so this 422 is only a defensive branch there.
+    const withMessage = Object.assign(new Error('422'), {
+      code: 'issuer_binding_required',
+      body: { error: 'issuer_binding_required', message: 'a CIMD install requires it' },
     })
-    expect(mapRemoteInstallError(err)).toMatch(/callback url is not configured/i)
+    expect(mapRemoteInstallError(withMessage)).toBe('a CIMD install requires it')
+    const bare = Object.assign(new Error('422'), {
+      code: 'issuer_binding_required',
+      body: { error: 'issuer_binding_required' },
+    })
+    expect(mapRemoteInstallError(bare)).toMatch(/does not advertise RFC 9207/)
   })
 
   it('maps a re-run discovery_failed at install', () => {

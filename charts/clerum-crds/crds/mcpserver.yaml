@@ -667,8 +667,9 @@ spec:
                 # baked (source absent) AND generic get the slug narrow, since a
                 # generic client_id IS spec.oauth.id and must be a callback-path-safe slug.
                 # 'remote' is reserved: baked/generic callbacks route by /oauth-callback/<id>,
-                # and /oauth-callback/remote is the single stable redirect every remote
-                # client registers, so a baked/generic server with that id would share it.
+                # and /oauth-callback/remote is the shared redirect of remote clients whose
+                # AS advertises RFC 9207 (the others register /oauth-callback/remote/<name>[/<installId>]),
+                # so a baked/generic server with that id would share it.
                 - rule: "!has(self.oauth) || (has(self.oauth.source) && self.oauth.source == 'remote') || !has(self.oauth.id) || (self.oauth.id.matches('^[a-z0-9-]{1,63}$') && self.oauth.id != 'remote')"
                   message: "baked/generic spec.oauth.id must match ^[a-z0-9-]{1,63}$ and must not be 'remote' (reserved for the remote OAuth callback)"
                 # BAKED-REQ: baked (no source) requires the classic adapter quartet.
