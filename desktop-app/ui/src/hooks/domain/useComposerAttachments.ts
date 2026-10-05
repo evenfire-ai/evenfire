@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { COMPOSER_MAX_IMAGE_ATTACHMENTS } from '@constants/attachments'
-import { clearComposerDraft, clearComposerDraftAfterSend } from '@lib/composerDraftStore'
+import { clearComposerDraft } from '@lib/composerDraftStore'
 import type { ComposerImageAttachment, ComposerReferenceAttachment } from '../../uiTypes'
 
 interface UseComposerAttachmentsParams {
@@ -63,16 +63,6 @@ export function useComposerAttachments({
     clearComposerImageAttachments()
     setComposerReferenceAttachments([])
   }, [clearComposerImageAttachments])
-
-  /** Post-send cleanup: clear the persisted draft for this chat, then the pending
-   *  attachments. Combines the three original send-path calls into one. */
-  const clearComposerAfterSend = useCallback(
-    (chatId: string | null) => {
-      clearComposerDraftAfterSend(chatId)
-      resetComposerAttachments()
-    },
-    [resetComposerAttachments]
-  )
 
   // Clear pending attachments when the selected agent changes (attachments are
   // per-agent). The parent clears its own error/resend banner on the same change.
@@ -190,7 +180,6 @@ export function useComposerAttachments({
     composerAttachmentRevisionRef,
     composerReferenceAttachments,
     resetComposerAttachments,
-    clearComposerAfterSend,
     clearComposerDraft,
     handleAddComposerImageAttachments,
     handleUpdateComposerImageAttachment,

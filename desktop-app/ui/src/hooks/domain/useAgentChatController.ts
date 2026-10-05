@@ -717,7 +717,6 @@ export function useAgentChatController({
     composerAttachmentRevisionRef,
     composerReferenceAttachments,
     resetComposerAttachments,
-    clearComposerAfterSend,
     clearComposerDraft,
     handleAddComposerImageAttachments,
     handleUpdateComposerImageAttachment,
@@ -3094,17 +3093,23 @@ export function useAgentChatController({
         draftRevision: originalDraftRevision,
       })
       lastRetainedSendIdRef.current = userMessageId
-      if (
-        !preserveComposer &&
-        activeChatVisibilityRef.current.selectedAgent === sendAgent &&
-        activeChatVisibilityRef.current.activeChatId === sendChatId &&
-        composerAttachmentRevisionRef.current === originalAttachmentRevision &&
+      // The accepted text belongs to its captured origin, while attachments
+      // belong to the selected agent. Navigation can change the visible chat
+      // without changing either owner.
+      const canConsumeComposer =
+        !preserveComposer && originalDraftAgent === sendAgent && sendStillAuthorized()
+      const shouldClearOriginDraft =
+        canConsumeComposer &&
         getComposerDraftRevision(originalDraftChat, originalDraftAgent ?? undefined) ===
           originalDraftRevision
-      ) {
-        clearComposerAfterSend(sendChatId)
-        clearComposerDraft(null, sendAgent)
+      const shouldResetAttachments =
+        canConsumeComposer &&
+        activeChatVisibilityRef.current.selectedAgent === sendAgent &&
+        composerAttachmentRevisionRef.current === originalAttachmentRevision
+      if (shouldClearOriginDraft) {
+        clearComposerDraft(originalDraftChat, originalDraftAgent ?? undefined)
       }
+      if (shouldResetAttachments) resetComposerAttachments()
       setAgentError(null)
       setFailedAgentSend(null)
       setAgentSending(true)
@@ -3466,7 +3471,7 @@ export function useAgentChatController({
       composerReferenceAttachments,
       chatList,
       chatStore,
-      clearComposerAfterSend,
+      resetComposerAttachments,
       fsm,
       applyLocalTitleOnly,
       pushToast,

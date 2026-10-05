@@ -11,6 +11,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { useAgentChatActionsValue } from '@hooks/useAgentChatActionsValue'
 import type { useAppController } from '@hooks/useAppController'
+import {
+  getComposerDraft,
+  resetComposerDraftStore,
+  setComposerDraft,
+} from '@lib/composerDraftStore'
 import { renderController } from './__fixtures__/controllerHarness'
 import { type MockClerum, installMockClerum, uninstallMockClerum } from './__fixtures__/mockClerum'
 
@@ -21,6 +26,7 @@ let uuidCounter = 0
 
 beforeEach(() => {
   uuidCounter = 0
+  resetComposerDraftStore()
   vi.spyOn(globalThis.crypto, 'randomUUID').mockImplementation(
     () => `uuid-${++uuidCounter}` as `${string}-${string}-${string}-${string}-${string}`
   )
@@ -30,6 +36,7 @@ beforeEach(() => {
 afterEach(() => {
   vi.restoreAllMocks()
   vi.useRealTimers()
+  resetComposerDraftStore()
   uninstallMockClerum()
 })
 
@@ -527,9 +534,11 @@ describe('pendingChatSelection effect', () => {
         controller.result.current as unknown as ReturnType<typeof useAppController>
       )
     )
+    const acceptedDraft = 'accepted before New chat'
+    act(() => setComposerDraft(null, acceptedDraft, 'agent-x'))
     let sendPromise!: Promise<void>
     act(() => {
-      sendPromise = actions.result.current.handleSendAgentMessage('accepted before New chat')
+      sendPromise = actions.result.current.handleSendAgentMessage(getComposerDraft(null, 'agent-x'))
     })
     const createdChat = await created.promise
 
@@ -555,11 +564,341 @@ describe('pendingChatSelection effect', () => {
       expect(request?.threadId).toBe(createdChat.id)
       expect(await clerum.persistedMessages('agent-x', createdChat.id)).toEqual(
         expect.arrayContaining([
-          expect.objectContaining({ role: 'user', content: 'accepted before New chat' }),
+          expect.objectContaining({ role: 'user', content: acceptedDraft }),
           expect.objectContaining({ role: 'assistant', content: 'sent reply' }),
         ])
       )
       expect(controller.result.current.activeChatId).toBeNull()
+      expect(getComposerDraft(null, 'agent-x')).toBe('')
+
+      await act(async () => {
+        await actions.result.current.handleSendAgentMessage(getComposerDraft(null, 'agent-x'))
+      })
+      expect(clerum.chat.create).toHaveBeenCalledTimes(1)
+      expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
+    } finally {
+      releaseCreate.resolve()
+      await act(async () => {
+        await sendPromise.catch(() => undefined)
+      })
+      actions.unmount()
+      controller.unmount()
+    }
+  })
+
+  it('preserves newer blank-chat text while consuming the accepted origin revision', async () => {
+    const controller = renderController({ navItem: 'chat' })
+    await settleMount()
+    await waitFor(() => expect(controller.result.current.chatListLoading).toBe(false))
+
+    const createChat = clerum.chat.create.getMockImplementation()
+    if (!createChat) throw new Error('Expected the real ChatStore create producer')
+    const releaseCreate = deferred<void>()
+    const created = deferred<Awaited<ReturnType<typeof clerum.chat.create>>>()
+    const releaseSecondCreate = deferred<void>()
+    const secondCreated = deferred<Awaited<ReturnType<typeof clerum.chat.create>>>()
+    let createNumber = 0
+    clerum.chat.create.mockImplementation(async (agentRef, chatId) => {
+      const meta = await createChat(agentRef, chatId)
+      createNumber += 1
+      if (createNumber === 1) {
+        created.resolve(meta)
+        await releaseCreate.promise
+      } else {
+        secondCreated.resolve(meta)
+        await releaseSecondCreate.promise
+      }
+      return meta
+    })
+    clerum.rpc.invokeHostMessage.mockResolvedValue({ response: 'sent reply' })
+
+    const actions = renderHook(() =>
+      useAgentChatActionsValue(
+        controller.result.current as unknown as ReturnType<typeof useAppController>
+      )
+    )
+    const acceptedDraft = 'accepted before New chat'
+    const newerDraft = 'typed after New chat'
+    const acceptedFileId = '0123456789abcdef0123456789abcdef'
+    const acceptedReference = {
+      id: `global-file:main:${acceptedFileId}`,
+      type: 'global_file' as const,
+      resourceId: acceptedFileId,
+      drive: 'main',
+      gfsUri: `gfs://main/${acceptedFileId}`,
+      label: 'accepted-file.md',
+      version: 1,
+      bytes: 1,
+    }
+    act(() => {
+      setComposerDraft(null, acceptedDraft, 'agent-x')
+      controller.result.current.handleAddComposerReferenceAttachments([acceptedReference])
+    })
+    act(() => actions.rerender())
+    let sendPromise!: Promise<void>
+    let secondSendPromise: Promise<void> | undefined
+    act(() => {
+      sendPromise = actions.result.current.handleSendAgentMessage(getComposerDraft(null, 'agent-x'))
+    })
+    const createdChat = await created.promise
+
+    try {
+      act(() => {
+        controller.result.current.setPendingChatSelection('agent-x', null, {
+          suppressAutoSelect: true,
+        })
+        controller.result.current.clearActiveChat()
+        setComposerDraft(null, newerDraft, 'agent-x')
+      })
+
+      await act(async () => {
+        releaseCreate.resolve()
+        await sendPromise
+      })
+
+      const request = clerum.rpc.invokeHostMessage.mock.calls.at(-1)?.[1] as
+        | { threadId?: string; fileReferences?: unknown[] }
+        | undefined
+      expect(request?.threadId).toBe(createdChat.id)
+      expect(request?.fileReferences).toHaveLength(1)
+      expect(getComposerDraft(null, 'agent-x')).toBe(newerDraft)
+      expect(controller.result.current.composerReferenceAttachments).toEqual([])
+      expect(await clerum.persistedMessages('agent-x', createdChat.id)).toEqual(
+        expect.arrayContaining([expect.objectContaining({ role: 'user', content: acceptedDraft })])
+      )
+
+      act(() => actions.rerender())
+      act(() => {
+        secondSendPromise = actions.result.current.handleSendAgentMessage(
+          getComposerDraft(null, 'agent-x')
+        )
+      })
+      const secondCreatedChat = await secondCreated.promise
+      act(() => {
+        setComposerDraft(null, '', 'agent-x')
+        setComposerDraft(null, newerDraft, 'agent-x')
+      })
+      await act(async () => {
+        releaseSecondCreate.resolve()
+        await secondSendPromise
+      })
+      expect(getComposerDraft(null, 'agent-x')).toBe(newerDraft)
+      expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(2)
+      expect(clerum.rpc.invokeHostMessage.mock.calls.at(-1)?.[1]).toMatchObject({
+        threadId: secondCreatedChat.id,
+      })
+    } finally {
+      releaseCreate.resolve()
+      releaseSecondCreate.resolve()
+      await act(async () => {
+        await sendPromise.catch(() => undefined)
+        await secondSendPromise?.catch(() => undefined)
+      })
+      actions.unmount()
+      controller.unmount()
+    }
+  })
+
+  it('clears only the captured draft when the accepted destination becomes visible', async () => {
+    const controller = renderController({ navItem: 'chat' })
+    await settleMount()
+    await waitFor(() => expect(controller.result.current.chatListLoading).toBe(false))
+
+    const createChat = clerum.chat.create.getMockImplementation()
+    if (!createChat) throw new Error('Expected the real ChatStore create producer')
+    const releaseCreate = deferred<void>()
+    const created = deferred<Awaited<ReturnType<typeof clerum.chat.create>>>()
+    clerum.chat.create.mockImplementation(async (agentRef, chatId) => {
+      const meta = await createChat(agentRef, chatId)
+      created.resolve(meta)
+      await releaseCreate.promise
+      return meta
+    })
+    clerum.rpc.invokeHostMessage.mockResolvedValue({ response: 'sent reply' })
+
+    const actions = renderHook(() =>
+      useAgentChatActionsValue(
+        controller.result.current as unknown as ReturnType<typeof useAppController>
+      )
+    )
+    const acceptedDraft = 'accepted from blank chat'
+    const destinationDraft = 'new draft in the destination'
+    act(() => setComposerDraft(null, acceptedDraft, 'agent-x'))
+    let sendPromise!: Promise<void>
+    act(() => {
+      sendPromise = actions.result.current.handleSendAgentMessage(getComposerDraft(null, 'agent-x'))
+    })
+    const createdChat = await created.promise
+
+    try {
+      await act(async () => {
+        controller.result.current.setPendingChatSelection('agent-x', null, {
+          suppressAutoSelect: true,
+        })
+        controller.result.current.clearActiveChat()
+        await controller.result.current.switchToChat('agent-x', createdChat.id)
+      })
+      act(() => setComposerDraft(createdChat.id, destinationDraft))
+
+      await act(async () => {
+        releaseCreate.resolve()
+        await sendPromise
+      })
+
+      expect(controller.result.current.activeChatId).toBe(createdChat.id)
+      expect(getComposerDraft(null, 'agent-x')).toBe('')
+      expect(getComposerDraft(createdChat.id)).toBe(destinationDraft)
+      expect(clerum.rpc.invokeHostMessage.mock.calls.at(-1)?.[1]).toMatchObject({
+        threadId: createdChat.id,
+      })
+    } finally {
+      releaseCreate.resolve()
+      await act(async () => {
+        await sendPromise.catch(() => undefined)
+      })
+      actions.unmount()
+      controller.unmount()
+    }
+  })
+
+  it('consumes the accepted chat origin without clearing the newly selected chat draft', async () => {
+    const createChat = clerum.chat.create.getMockImplementation()
+    if (!createChat) throw new Error('Expected the real ChatStore create producer')
+    const sourceChat = await createChat('agent-x', 'source-chat')
+    const destinationChat = await createChat('agent-x', 'destination-chat')
+    clerum.chat.getIndex.mockResolvedValue(await clerum.readIndex('agent-x'))
+
+    const controller = renderController({ navItem: 'agents' })
+    await settleMount()
+    await waitFor(() => expect(controller.result.current.chatListLoading).toBe(false))
+    await act(async () => {
+      await controller.result.current.switchToChat('agent-x', sourceChat.id)
+    })
+    expect(controller.result.current.activeChatId).toBe(sourceChat.id)
+
+    const upsertMessages = clerum.chat.upsertMessages.getMockImplementation()
+    if (!upsertMessages) throw new Error('Expected the real ChatStore upsert producer')
+    const firstWriteStarted = deferred<void>()
+    const releaseFirstWrite = deferred<void>()
+    let firstWrite = true
+    clerum.chat.upsertMessages.mockImplementation(async (...args) => {
+      const result = await upsertMessages(...args)
+      if (firstWrite) {
+        firstWrite = false
+        firstWriteStarted.resolve()
+        await releaseFirstWrite.promise
+      }
+      return result
+    })
+    clerum.rpc.invokeHostMessage.mockResolvedValue({ response: 'sent reply' })
+
+    const actions = renderHook(() =>
+      useAgentChatActionsValue(
+        controller.result.current as unknown as ReturnType<typeof useAppController>
+      )
+    )
+    const acceptedDraft = 'accepted in source chat'
+    const destinationDraft = 'new text in destination chat'
+    act(() => setComposerDraft(sourceChat.id, acceptedDraft))
+    let sendPromise!: Promise<void>
+    act(() => {
+      sendPromise = actions.result.current.handleSendAgentMessage(getComposerDraft(sourceChat.id))
+    })
+
+    try {
+      await firstWriteStarted.promise
+      await act(async () => {
+        await controller.result.current.switchToChat('agent-x', destinationChat.id)
+      })
+      act(() => setComposerDraft(destinationChat.id, destinationDraft))
+
+      await act(async () => {
+        releaseFirstWrite.resolve()
+        await sendPromise
+      })
+
+      expect(controller.result.current.activeChatId).toBe(destinationChat.id)
+      expect(getComposerDraft(sourceChat.id)).toBe('')
+      expect(getComposerDraft(destinationChat.id)).toBe(destinationDraft)
+      expect(clerum.rpc.invokeHostMessage.mock.calls.at(-1)?.[1]).toMatchObject({
+        threadId: sourceChat.id,
+      })
+      expect(await clerum.persistedMessages('agent-x', sourceChat.id)).toEqual(
+        expect.arrayContaining([expect.objectContaining({ role: 'user', content: acceptedDraft })])
+      )
+    } finally {
+      releaseFirstWrite.resolve()
+      await act(async () => {
+        await sendPromise.catch(() => undefined)
+      })
+      actions.unmount()
+      controller.unmount()
+    }
+  })
+
+  it('consumes accepted text without clearing references added after send start', async () => {
+    const controller = renderController({ navItem: 'chat' })
+    await settleMount()
+    await waitFor(() => expect(controller.result.current.chatListLoading).toBe(false))
+
+    const createChat = clerum.chat.create.getMockImplementation()
+    if (!createChat) throw new Error('Expected the real ChatStore create producer')
+    const releaseCreate = deferred<void>()
+    const created = deferred<Awaited<ReturnType<typeof clerum.chat.create>>>()
+    clerum.chat.create.mockImplementation(async (agentRef, chatId) => {
+      const meta = await createChat(agentRef, chatId)
+      created.resolve(meta)
+      await releaseCreate.promise
+      return meta
+    })
+    clerum.rpc.invokeHostMessage.mockResolvedValue({ response: 'sent reply' })
+
+    const actions = renderHook(() =>
+      useAgentChatActionsValue(
+        controller.result.current as unknown as ReturnType<typeof useAppController>
+      )
+    )
+    const acceptedDraft = 'accepted before New chat'
+    const newerFileId = 'fedcba9876543210fedcba9876543210'
+    const newerReference = {
+      id: `global-file:main:${newerFileId}`,
+      type: 'global_file' as const,
+      resourceId: newerFileId,
+      drive: 'main',
+      gfsUri: `gfs://main/${newerFileId}`,
+      label: 'new-file.md',
+      version: 1,
+      bytes: 1,
+    }
+    act(() => setComposerDraft(null, acceptedDraft, 'agent-x'))
+    let sendPromise!: Promise<void>
+    act(() => {
+      sendPromise = actions.result.current.handleSendAgentMessage(getComposerDraft(null, 'agent-x'))
+    })
+    const createdChat = await created.promise
+
+    try {
+      act(() => {
+        controller.result.current.setPendingChatSelection('agent-x', null, {
+          suppressAutoSelect: true,
+        })
+        controller.result.current.clearActiveChat()
+        actions.result.current.handleAddComposerReferenceAttachments([newerReference])
+      })
+
+      await act(async () => {
+        releaseCreate.resolve()
+        await sendPromise
+      })
+
+      const request = clerum.rpc.invokeHostMessage.mock.calls.at(-1)?.[1] as
+        | { threadId?: string }
+        | undefined
+      expect(request?.threadId).toBe(createdChat.id)
+      expect(getComposerDraft(null, 'agent-x')).toBe('')
+      expect(controller.result.current.composerReferenceAttachments).toEqual([
+        expect.objectContaining(newerReference),
+      ])
     } finally {
       releaseCreate.resolve()
       await act(async () => {
