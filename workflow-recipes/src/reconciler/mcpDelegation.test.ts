@@ -5,7 +5,8 @@
  */
 import { describe, expect, it, vi } from 'vitest'
 import { WorkflowRecipeCRD } from '../types'
-import { captureLogger } from './__tests__/captureLogger'
+import { captureLogger, captureLoggerLevels } from './__tests__/captureLogger'
+import { ResourceVanishedAfterConflictError } from './k8sErrors'
 import {
   DelegationDeps,
   PRE_DEPLOY_ANNOTATION,
@@ -1872,6 +1873,208 @@ describe('ensureRecipeContext', () => {
     const callArg = mockCustomApi.createNamespacedCustomObject.mock.calls[0][0]
     expect(callArg.body.metadata.ownerReferences).toBeUndefined()
     expect(callArg.body.metadata.namespace).toBe('mcp-server')
+  })
+})
+
+describe('read-first Context apply (#760)', () => {
+  // ensureRecipeContext POSTed on every pass and read only after a 409, so a
+  // Context that already existed cost one rejected create per call, twice per
+  // reconcile. These cases pin the read-first contract of ensureTransportService.
+  const CONTEXT_NAME = 'wf-test-recipe'
+  const ownerRef = {
+    apiVersion: 'clerum.io/v1alpha1' as const,
+    kind: 'WorkflowRecipe',
+    name: 'test-recipe',
+    uid: 'uid-abc-123',
+    controller: true,
+    blockOwnerDeletion: true,
+  }
+  type LiveContext = { metadata?: Record<string, unknown>; spec?: Record<string, unknown> }
+
+  // A same-namespace private Context that already matches ['server-a', 'server-b'].
+  const unchangedPrivateContext = (): LiveContext => ({
+    metadata: {
+      name: CONTEXT_NAME,
+      resourceVersion: '3',
+      labels: { 'clerum.io/recipe': 'test-recipe', 'clerum.io/managed-by': 'wrc' },
+      ownerReferences: [ownerRef],
+    },
+    spec: { contextId: CONTEXT_NAME, mcpServers: ['server-a', 'server-b'] },
+  })
+
+  /**
+   * Stateful Context double: GET answers 404 while no Context is stored, a
+   * create of a stored Context answers 409, a replace stores the body and bumps
+   * resourceVersion. Every other plural reads as absent and accepts writes.
+   */
+  function contextStore(initial: LiveContext | null) {
+    let live = initial ? structuredClone(initial) : null
+    const customApi = {
+      getNamespacedCustomObject: vi.fn().mockImplementation((args: { plural: string }) => {
+        if (args.plural !== 'contexts' || !live) return Promise.reject({ code: 404 })
+        return Promise.resolve(structuredClone(live))
+      }),
+      createNamespacedCustomObject: vi
+        .fn()
+        .mockImplementation((args: { plural: string; body: LiveContext }) => {
+          if (args.plural !== 'contexts') return Promise.resolve({})
+          if (live) return Promise.reject({ code: 409 })
+          live = {
+            ...structuredClone(args.body),
+            metadata: { ...args.body.metadata, resourceVersion: '1' },
+          }
+          return Promise.resolve({})
+        }),
+      replaceNamespacedCustomObject: vi
+        .fn()
+        .mockImplementation((args: { plural: string; body: LiveContext }) => {
+          if (args.plural !== 'contexts') return Promise.resolve({})
+          const rv = Number((live?.metadata?.resourceVersion as string | undefined) ?? '0')
+          live = {
+            ...structuredClone(args.body),
+            metadata: { ...args.body.metadata, resourceVersion: String(rv + 1) },
+          }
+          return Promise.resolve({})
+        }),
+    }
+    const coreApi = {
+      readNamespacedService: vi.fn().mockRejectedValue({ code: 404 }),
+      createNamespacedService: vi.fn().mockResolvedValue({}),
+    }
+    const deps: DelegationDeps = {
+      customApi: customApi as unknown as DelegationDeps['customApi'],
+      coreApi: coreApi as unknown as DelegationDeps['coreApi'],
+    }
+    return { customApi, deps, store: (next: LiveContext | null) => (live = next) }
+  }
+
+  const contextCalls = (fn: ReturnType<typeof vi.fn>, name = CONTEXT_NAME) =>
+    fn.mock.calls.filter(([args]) => {
+      const a = args as { plural: string; name?: string; body?: { metadata?: { name?: string } } }
+      return a.plural === 'contexts' && (a.name ?? a.body?.metadata?.name) === name
+    }).length
+  const loggedFor = (level: ReturnType<typeof vi.fn>, message: string) =>
+    level.mock.calls.filter(
+      ([msg, ctx]) =>
+        msg === message && (ctx as { contextName?: string })?.contextName === CONTEXT_NAME
+    ).length
+  const ensure = (deps: DelegationDeps, servers = ['server-a', 'server-b']) =>
+    ensureRecipeContext(deps, 'test-recipe', servers, 'mcp-server', ownerRef)
+
+  it('C1: an unchanged Context is read once and nothing is written', async () => {
+    const { customApi, deps } = contextStore(unchangedPrivateContext())
+    const logs = captureLoggerLevels(['info', 'debug'] as const)
+    try {
+      await expect(ensure(deps)).resolves.toBe(CONTEXT_NAME)
+      expect(loggedFor(logs.calls.debug, 'Context unchanged; skipping update')).toBe(1)
+    } finally {
+      logs.restore()
+    }
+    expect(contextCalls(customApi.getNamespacedCustomObject)).toBe(1)
+    expect(contextCalls(customApi.createNamespacedCustomObject)).toBe(0)
+    expect(contextCalls(customApi.replaceNamespacedCustomObject)).toBe(0)
+  })
+
+  it('C2: a Context missing a server is read once and replaced from that read', async () => {
+    const existing = unchangedPrivateContext()
+    existing.spec = { contextId: CONTEXT_NAME, mcpServers: ['server-a'] }
+    const { customApi, deps } = contextStore(existing)
+
+    await ensure(deps)
+
+    expect(contextCalls(customApi.getNamespacedCustomObject)).toBe(1)
+    expect(contextCalls(customApi.createNamespacedCustomObject)).toBe(0)
+    expect(contextCalls(customApi.replaceNamespacedCustomObject)).toBe(1)
+    const body = customApi.replaceNamespacedCustomObject.mock.calls[0][0].body
+    expect(body.spec.mcpServers).toEqual(['server-a', 'server-b'])
+    expect(body.metadata.resourceVersion).toBe('3')
+  })
+
+  it('C3: an absent Context is read, then created', async () => {
+    const { customApi, deps } = contextStore(null)
+    const logs = captureLoggerLevels(['info', 'debug'] as const)
+    try {
+      await ensure(deps)
+      expect(loggedFor(logs.calls.info, 'Created per-recipe Context')).toBe(1)
+    } finally {
+      logs.restore()
+    }
+    const get = customApi.getNamespacedCustomObject
+    const create = customApi.createNamespacedCustomObject
+    expect(contextCalls(get)).toBe(1)
+    expect(contextCalls(create)).toBe(1)
+    expect(get.mock.invocationCallOrder[0]).toBeLessThan(create.mock.invocationCallOrder[0])
+  })
+
+  it('C4: a create conflict re-reads the Context and compares it', async () => {
+    const { customApi, deps, store } = contextStore(null)
+    // Another writer creates the same Context between our read and our POST.
+    customApi.createNamespacedCustomObject.mockImplementationOnce(() => {
+      store(unchangedPrivateContext())
+      return Promise.reject({ code: 409 })
+    })
+    const logs = captureLoggerLevels(['info', 'debug'] as const)
+    try {
+      await ensure(deps)
+      expect(loggedFor(logs.calls.debug, 'Context unchanged; skipping update')).toBe(1)
+    } finally {
+      logs.restore()
+    }
+    expect(contextCalls(customApi.getNamespacedCustomObject)).toBe(2)
+    expect(contextCalls(customApi.createNamespacedCustomObject)).toBe(1)
+    expect(contextCalls(customApi.replaceNamespacedCustomObject)).toBe(0)
+  })
+
+  it('C5: a read error other than 404 is rethrown and nothing is created', async () => {
+    const { customApi, deps } = contextStore(null)
+    const readError = { code: 500 }
+    customApi.getNamespacedCustomObject.mockRejectedValue(readError)
+
+    await expect(ensure(deps)).rejects.toBe(readError)
+
+    expect(contextCalls(customApi.getNamespacedCustomObject)).toBe(1)
+    expect(contextCalls(customApi.createNamespacedCustomObject)).toBe(0)
+  })
+
+  it('C6: both callers of one pass read an existing Context and neither writes it', async () => {
+    // Pre-deploy and delegation each call ensureRecipeContext. The recipe lives
+    // in sandbox-recipes and the Context in mcp-server, so the canonical private
+    // Context carries no ownerReference.
+    const recipe = makeRecipe()
+    const { customApi, deps } = contextStore({
+      metadata: {
+        name: CONTEXT_NAME,
+        resourceVersion: '3',
+        labels: { 'clerum.io/recipe': 'test-recipe', 'clerum.io/managed-by': 'wrc' },
+      },
+      spec: { contextId: CONTEXT_NAME, mcpServers: ['test-recipe-redis-mcp'] },
+    })
+    const logs = captureLoggerLevels(['info', 'debug'] as const)
+    try {
+      await expect(preDeployMcpServers(deps, recipe, 'mcp-server', new Map())).resolves.toEqual([
+        'test-recipe-redis-mcp',
+      ])
+      await expect(
+        delegateTransportWorkloads(deps, recipe, 'mcp-server', new Map())
+      ).resolves.toEqual(['test-recipe-redis-mcp'])
+      expect(loggedFor(logs.calls.debug, 'Context unchanged; skipping update')).toBe(2)
+    } finally {
+      logs.restore()
+    }
+    expect(contextCalls(customApi.getNamespacedCustomObject)).toBe(2)
+    expect(contextCalls(customApi.createNamespacedCustomObject)).toBe(0)
+    expect(contextCalls(customApi.replaceNamespacedCustomObject)).toBe(0)
+  })
+
+  it('C7: a Context that vanishes after the create conflict asks for a fresh reconcile', async () => {
+    const { customApi, deps } = contextStore(null)
+    // The conflicting object is gone again by the time we re-read it.
+    customApi.createNamespacedCustomObject.mockRejectedValueOnce({ code: 409 })
+
+    await expect(ensure(deps)).rejects.toBeInstanceOf(ResourceVanishedAfterConflictError)
+
+    expect(contextCalls(customApi.getNamespacedCustomObject)).toBe(2)
+    expect(contextCalls(customApi.replaceNamespacedCustomObject)).toBe(0)
   })
 })
 
