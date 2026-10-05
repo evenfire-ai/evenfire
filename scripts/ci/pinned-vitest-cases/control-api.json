@@ -1,7 +1,7 @@
 [
   {
     "suite": "helpers.realPostgresTeardown.test.ts",
-    "fullName": "endPoolAndWaitForClients ends a real pg Pool whose in-flight connect is refused"
+    "fullName": "endPoolAndWaitForClients against a real pg Pool and a PG wire stub resolves when a client still connecting at end() fails to connect"
   },
   {
     "suite": "routes.mcp-host.llmProviderAttempts.test.ts",
