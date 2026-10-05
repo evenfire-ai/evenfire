@@ -299,7 +299,14 @@ describe('createGfsFolderZip', () => {
 
   it('forwards the stop signal to the producer bridge on both call kinds (R1-M1)', async () => {
     const controller = new AbortController()
-    const listChildren = vi.fn(() => new Promise(() => undefined))
+    const listChildren = vi.fn(
+      (
+        _resourceId: string,
+        _drive?: string,
+        _cursor?: string,
+        _options?: { signal?: AbortSignal }
+      ) => new Promise<GfsZipChildrenPage>(() => undefined)
+    )
     const download = vi.fn(async () => ({ bytes: new ArrayBuffer(4) }))
     const previousClerum = (window as { clerum?: unknown }).clerum
     ;(window as { clerum?: unknown }).clerum = { gfs: { listChildren, download } }
@@ -355,8 +362,9 @@ describe('createGfsFolderZip', () => {
     expect(skipped[0]?.path.length).toBeLessThan(120)
     // The walk terminated at the overflow depth instead of chasing all 110
     // levels: bounded listing work, no downloads.
-    expect(deps.listChildren.mock.calls.length).toBeLessThanOrEqual(110)
-    expect(deps.listChildren.mock.calls.length).toBeGreaterThanOrEqual(90)
+    const listingCalls = vi.mocked(deps.listChildren).mock.calls.length
+    expect(listingCalls).toBeLessThanOrEqual(110)
+    expect(listingCalls).toBeGreaterThanOrEqual(90)
     expect(deps.download).not.toHaveBeenCalled()
   })
 
