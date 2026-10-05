@@ -290,6 +290,41 @@ describe('createGfsFolderZip', () => {
     expect(deps.download).not.toHaveBeenCalled()
   })
 
+  it('skips entries whose complete path would overflow the 16-bit ZIP name field (R1-M2)', async () => {
+    // A 110-deep chain of 700-byte segment names crosses 65535 assembled
+    // bytes around depth ~93: the overlong child is skipped (visible notice,
+    // shortened path) and its subtree is pruned, so the walk stays bounded.
+    const longName = 'a'.repeat(700)
+    const depth = 110
+    const pages: Record<string, Array<{ items: GfsZipChildItem[]; nextCursor: null }>> = {}
+    const chainChild = (index: number) =>
+      index === depth - 1
+        ? folder({ resourceId: 'leaf', name: 'leaf.txt', kind: 'file' })
+        : folder({ resourceId: `f${index}`, name: longName, kind: 'directory' })
+    pages.root = [{ items: [chainChild(0)], nextCursor: null }]
+    for (let index = 0; index < depth - 1; index += 1) {
+      pages[`f${index}`] = [{ items: [chainChild(index + 1)], nextCursor: null }]
+    }
+    const deps = depsFor(pages)
+
+    const result = await createGfsFolderZip(
+      { resourceId: 'root', drive: 'main', name: 'Deep' },
+      { deps }
+    ).catch(error => error)
+
+    // The only file lived under the pruned subtree: nothing archivable, and
+    // the skip notice explains why with a path a human can read.
+    expect(result).toBeInstanceOf(GfsFolderZipEmptyError)
+    const skipped = (result as GfsFolderZipEmptyError).skipped
+    expect(skipped[0]?.reason).toBe('Path too long')
+    expect(skipped[0]?.path.length).toBeLessThan(120)
+    // The walk terminated at the overflow depth instead of chasing all 110
+    // levels: bounded listing work, no downloads.
+    expect(deps.listChildren.mock.calls.length).toBeLessThanOrEqual(110)
+    expect(deps.listChildren.mock.calls.length).toBeGreaterThanOrEqual(90)
+    expect(deps.download).not.toHaveBeenCalled()
+  })
+
   it('refuses when the actual downloaded bytes exceed the ceiling', async () => {
     const deps = depsFor(
       {

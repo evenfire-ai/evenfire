@@ -139,6 +139,24 @@ export interface GfsZipFolderSource {
   name: string
 }
 
+/**
+ * Complete-entry path bound. ZIP name fields are 16-bit BYTE counts, so the
+ * fully assembled entry path (all segments joined) must stay strictly under
+ * 65535 encoded bytes. Segments are capped individually
+ * (`GFS_ZIP_MAX_SEGMENT_NAME_BYTES`); this bound closes the deep-nesting case
+ * where many legal segments stack past the field. An overlong entry is skipped
+ * with a visible notice, and an overlong DIRECTORY prunes its subtree — every
+ * descendant would overflow too (spec: ZIP budget model).
+ */
+export const GFS_ZIP_MAX_ENTRY_PATH_BYTES = 65535
+
+const zipPathEncoder = new TextEncoder()
+
+/** Human-noticeable stand-in for an over-long path (the real one is unusable). */
+function shortenForNotice(path: string): string {
+  return path.length > 80 ? `${path.slice(0, 48)}…${path.slice(-24)}` : path
+}
+
 function toMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
@@ -305,6 +323,10 @@ export async function createGfsFolderZip(
       }
       for (const child of page.items) {
         const path = `${next.prefix}/${sanitizeZipSegment(child.name)}`
+        if (zipPathEncoder.encode(path).length >= GFS_ZIP_MAX_ENTRY_PATH_BYTES) {
+          skipped.push({ path: shortenForNotice(path), reason: 'Path too long' })
+          continue
+        }
         if (child.readable === false) {
           skipped.push({ path, reason: 'No access' })
           continue
