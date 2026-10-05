@@ -247,6 +247,59 @@ export async function getDynamicClient(
 }
 
 /**
+ * Whether any dynamic client of `issuer` in this server namespace carries `clientId`,
+ * pending, bound or legacy alike: every row stands for a client that may still be live
+ * at its AS (teardown deletes the row). A client_id is only unique within its AS, so a
+ * row of another issuer is another client. Reads no encrypted column.
+ */
+export async function isDynamicClientIdRegistered(
+  db: DbClient,
+  input: { serverNamespace: string; issuer: string; clientId: string; ownerKind?: 'mcpserver' }
+): Promise<boolean> {
+  const result = await db.query(
+    `SELECT 1
+       FROM dynamic_clients
+      WHERE owner_kind = $1 AND server_namespace = $2 AND client_id = $3 AND issuer = $4
+      LIMIT 1`,
+    [resolveOwnerKind(input), input.serverNamespace, input.clientId, input.issuer]
+  )
+  return result.rows.length > 0
+}
+
+/** The installation identity of a dynamic client, without any credential material. */
+export interface DynamicClientBinding {
+  clientId: string
+  /** Install nonce the client's redirect URI was registered with; undefined = legacy row. */
+  installId?: string
+  /** metadata.uid of the McpServer the row is bound to; undefined = pending or legacy. */
+  crUid?: string
+}
+
+/**
+ * Read which installation a server's dynamic client belongs to. Reads no encrypted
+ * column, so the consent paths can check the binding without decrypting a secret they
+ * may never use.
+ */
+export async function getDynamicClientBinding(
+  db: DbClient,
+  key: DynamicClientKey
+): Promise<DynamicClientBinding | null> {
+  const result = await db.query(
+    `SELECT client_id, install_id, cr_uid
+       FROM dynamic_clients
+      WHERE owner_kind = $1 AND server_namespace = $2 AND server_name = $3`,
+    [resolveOwnerKind(key), key.serverNamespace, key.serverName]
+  )
+  if (result.rows.length === 0) return null
+  const row = result.rows[0] as Pick<DynamicClientDbRow, 'client_id' | 'install_id' | 'cr_uid'>
+  return {
+    clientId: row.client_id,
+    installId: row.install_id ?? undefined,
+    crUid: row.cr_uid ?? undefined,
+  }
+}
+
+/**
  * Metadata-only view of a `dynamic_clients` row whose confidential secret is at
  * or near expiry — enough for the DCR lifecycle decision (§5) without touching
  * any encrypted material.

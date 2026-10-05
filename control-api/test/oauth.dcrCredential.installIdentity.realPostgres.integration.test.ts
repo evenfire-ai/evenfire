@@ -200,7 +200,7 @@ describeRealPostgres(
           const cr = (await gateway.getResource('mcpservers', name, NS)) as Parameters<
             typeof resolveServerOAuthSubject
           >[0]
-          const resolved = resolveServerOAuthSubject(cr)
+          const resolved = resolveServerOAuthSubject(cr, 'consent')
           return resolved ? { namespace: NS, ...resolved } : null
         },
       }
@@ -212,7 +212,7 @@ describeRealPostgres(
       transport: ReturnType<typeof recordingAs>['transport']
     ) {
       const input: CallbackInput = {
-        oauthClientId: 'remote',
+        target: { kind: 'remote-shared', origin: 'https://control.example.com' },
         code: 'AUTH_CODE',
         state: signOAuthState(STATE_SECRET, {
           subjectKind: 'mcp',
@@ -222,7 +222,6 @@ describeRealPostgres(
           grantKind: 'user',
           background: false,
         } as Parameters<typeof signOAuthState>[1]),
-        redirectUri: 'https://control.example.com/api/v1/oauth-callback/remote',
         iss: discovery.issuer,
       }
       const deps: CallbackDeps = {

@@ -18,7 +18,10 @@ import type {
   RemoteClientRouting,
   ServerOAuthSecretSource,
 } from './callback.js'
+import { isCimdClientId } from './cimdIdentity.js'
+import { checkAsEndpointsSameSite } from './discovery.js'
 import { MAX_EXTRA_AUTHORIZE_PARAMS, MAX_EXTRA_AUTHORIZE_PARAM_VALUE_LEN } from './genericKnobs.js'
+import { remoteCallbackVariant } from './remoteCallback.js'
 import type { OAuthGrantKey } from './store.js'
 
 const log = rootLogger.child({ module: 'mcp-server-oauth-spec' })
@@ -37,6 +40,8 @@ export interface McpServerOAuthDecl {
   clientMode?: unknown
   authorizationEndpoint?: unknown
   tokenEndpoint?: unknown
+  registrationEndpoint?: unknown
+  issuer?: unknown
   resource?: unknown
   bearerInBody?: unknown
   supportsRefresh?: unknown
@@ -230,13 +235,20 @@ export interface ResolvedServerOAuthSubject {
   crUid?: string
 }
 
-export type RemoteOAuthSpecIncoherence = 'public_client_with_secret_refs' | 'bearer_in_body'
+export type RemoteOAuthSpecIncoherence =
+  | 'public_client_with_secret_refs'
+  | 'bearer_in_body'
+  | 'cimd_without_issuer_binding'
+  | 'as_endpoints_cross_site'
 
 /**
  * A remote `spec.oauth` the admission rules reject but that reached the apiserver
- * anyway (CRD applied after the object, or a write that bypassed validation). The
- * runtime cannot honor it, so consent, authorize-URL minting and token issuance
- * refuse it with this specific error instead of degrading to a generic failure.
+ * anyway (CRD applied after the object, or a write that bypassed validation, e.g. by
+ * kubectl/GitOps). The phase using it refuses it with this specific error instead of
+ * degrading to a generic failure: the CRD-mirror reasons (`public_client_with_secret_refs`,
+ * `bearer_in_body`) in consent and token issuance alike; the per-server callback
+ * reasons (`cimd_without_issuer_binding`, `as_endpoints_cross_site`) only in consent
+ * (authorize-URL minting and the callback), so grants already obtained keep serving.
  */
 export class RemoteOAuthSpecIncoherentError extends Error {
   readonly code = 'remote_oauth_spec_incoherent'
@@ -246,7 +258,20 @@ export class RemoteOAuthSpecIncoherentError extends Error {
   }
 }
 
-function remoteOAuthSpecIncoherence(oauth: McpServerOAuthDecl): RemoteOAuthSpecIncoherence | null {
+/**
+ * Where a remote server's `spec.oauth` is being used:
+ *   - `consent` — authorize-URL minting and the OAuth callback, where a new code is
+ *                 issued and redeemed;
+ *   - `token`   — serving and refreshing a grant already obtained (user-token, the
+ *                 reactive refresh and the proactive cron).
+ * Required at every call site, with no default, so no reader silently picks a phase.
+ */
+export type RemoteOAuthCoherencePhase = 'consent' | 'token'
+
+function remoteOAuthSpecIncoherence(
+  oauth: McpServerOAuthDecl,
+  phase: RemoteOAuthCoherencePhase
+): RemoteOAuthSpecIncoherence | null {
   if (
     oauth.clientMode === 'public' &&
     (oauth.clientIdRef != null || oauth.clientSecretRef != null)
@@ -254,23 +279,64 @@ function remoteOAuthSpecIncoherence(oauth: McpServerOAuthDecl): RemoteOAuthSpecI
     return 'public_client_with_secret_refs'
   }
   if (oauth.bearerInBody === true) return 'bearer_in_body'
+  // The per-server rules defend the authorization response (which AS minted a code, and
+  // where it is redeemed). A grant already obtained is sealed to this CR's uid and its
+  // endpoints are immutable, so a refresh only ever returns to the token endpoint that
+  // issued it: blocking it would strand existing grants without closing any mix-up.
+  if (phase === 'consent' && remoteCallbackVariant(oauth) === 'per-server') {
+    // The CIMD document lists only the shared callback, so its client can never be
+    // bound to one server's redirect URI; without `iss` nothing else ties its codes to
+    // this server.
+    if (isCimdClientId(oauth.id)) return 'cimd_without_issuer_binding'
+    if (!asEndpointsOnIssuerSite(oauth)) return 'as_endpoints_cross_site'
+  }
   return null
 }
 
 /**
+ * The install-time same-site rule, re-applied to the endpoints pinned on a per-server
+ * CR. The install already enforces it, but a CR written straight to the apiserver
+ * skips the install, and without `iss` a token endpoint off the issuer's site would
+ * redeem our codes. An endpoint that is not a string is left to the routing reader,
+ * which fails closed on it; a missing issuer fails here, since per-server consent
+ * cannot be anchored without one.
+ */
+function asEndpointsOnIssuerSite(oauth: McpServerOAuthDecl): boolean {
+  const optional = (value: unknown): string | undefined =>
+    typeof value === 'string' && value.length > 0 ? value : undefined
+  const authorization = optional(oauth.authorizationEndpoint)
+  const token = optional(oauth.tokenEndpoint)
+  if (authorization === undefined || token === undefined) return true
+  const registration = optional(oauth.registrationEndpoint)
+  return checkAsEndpointsSameSite({
+    issuer: typeof oauth.issuer === 'string' ? oauth.issuer : '',
+    authorization,
+    token,
+    ...(registration ? { registration } : {}),
+  }).ok
+}
+
+/**
  * Runtime mirror of the remote-carril coherence rules of the McpServer CRD
- * (REMOTE-SECRET-PAIRING for `public`, REMOTE-BEARER-HEADER). Throws
+ * (REMOTE-SECRET-PAIRING for `public`, REMOTE-BEARER-HEADER) and of the install's
+ * per-server callback rules (no CIMD client and same-site AS endpoints when the AS
+ * does not return `iss`, which the CRD cannot express). Throws
  * {@link RemoteOAuthSpecIncoherentError} for a remote server whose shape no
- * install path produces; a no-op for every other lane.
+ * install path produces; a no-op for every other lane. The CRD mirrors apply in both
+ * phases; the per-server callback rules only in `consent` (see
+ * {@link RemoteOAuthCoherencePhase}).
  *
  * Deliberately NOT applied by {@link resolveServerOAuth}: that coordinate backs
  * revoke and the grant-existence sweep, and an incoherent server must still be
  * disconnectable and must not push the sweep into its fail-open branch.
  */
-export function assertRemoteOAuthSpecCoherent(server: McpServerOAuthSpecInput): void {
+export function assertRemoteOAuthSpecCoherent(
+  server: McpServerOAuthSpecInput,
+  phase: RemoteOAuthCoherencePhase
+): void {
   const oauth = server.spec?.oauth
   if (!oauth || readOAuthLane(oauth) !== 'remote') return
-  const reason = remoteOAuthSpecIncoherence(oauth)
+  const reason = remoteOAuthSpecIncoherence(oauth, phase)
   if (!reason) return
   const name = server.metadata?.name
   log.warn(
@@ -278,8 +344,9 @@ export function assertRemoteOAuthSpecCoherent(server: McpServerOAuthSpecInput): 
       event: 'remote_oauth_spec_incoherent',
       mcpServerName: typeof name === 'string' ? name : undefined,
       reason,
+      phase,
     },
-    'remote mcp-server oauth spec is incoherent; refusing consent and token issuance'
+    'remote mcp-server oauth spec is incoherent; refusing it in this phase'
   )
   throw new RemoteOAuthSpecIncoherentError(reason)
 }
@@ -298,6 +365,8 @@ function extractRemoteRouting(oauth: McpServerOAuthDecl): RemoteClientRouting | 
     typeof oauth.issForCallback === 'string' && oauth.issForCallback.length > 0
       ? oauth.issForCallback
       : undefined
+  const issuer =
+    typeof oauth.issuer === 'string' && oauth.issuer.length > 0 ? oauth.issuer : undefined
   return {
     authorizationEndpoint,
     tokenEndpoint,
@@ -306,6 +375,7 @@ function extractRemoteRouting(oauth: McpServerOAuthDecl): RemoteClientRouting | 
     bearerInBody: oauth.bearerInBody === true,
     supportsRefresh: oauth.supportsRefresh === true,
     issForCallback,
+    ...(issuer ? { issuer } : {}),
   }
 }
 
@@ -435,7 +505,8 @@ function normalizeScopes(scopes: unknown): string[] | undefined {
  *     secret (K8s Secret or `getDynamicClient`) per `secretSource`.
  */
 export function resolveServerOAuthSubject(
-  server: McpServerOAuthSpecInput
+  server: McpServerOAuthSpecInput,
+  phase: RemoteOAuthCoherencePhase
 ): ResolvedServerOAuthSubject | null {
   const oauth = server.spec?.oauth
   if (!oauth || typeof oauth.id !== 'string' || oauth.id.length === 0) return null
@@ -449,7 +520,7 @@ export function resolveServerOAuthSubject(
 
   // ─── Remote lane (`source:'remote'`) ─────────────────────────────────────
   if (lane === 'remote') {
-    assertRemoteOAuthSpecCoherent(server)
+    assertRemoteOAuthSpecCoherent(server, phase)
     const remote = extractRemoteRouting(oauth)
     if (!remote) return null
     const secretSource = resolveRemoteSecretSource(oauth, remote.clientMode)
