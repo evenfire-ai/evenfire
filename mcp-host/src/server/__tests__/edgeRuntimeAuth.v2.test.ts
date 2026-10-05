@@ -239,7 +239,7 @@ describe('runtimeEdgeGuard v2', () => {
         effectiveTeamId: null,
       },
     })
-    expect(response.body.teamId).toBeUndefined()
+    expect(response.body).not.toHaveProperty('teamId')
     const decoded = JSON.parse(Buffer.from(header, 'base64url').toString('utf8')) as Record<
       string,
       unknown
@@ -543,6 +543,6 @@ describe('runtimeEdgeGuard v2', () => {
     })
 
     expect(response.status).toBe(200)
-    expect(response.body.caller).toBe('channel-reader')
+    expect(response.body).toHaveProperty('caller', 'channel-reader')
   })
 })
