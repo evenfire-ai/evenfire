@@ -85,9 +85,20 @@ function seedOauthServer(
  * supplied contexts; the grant DELETE returns `rowCount`. Anything else is an
  * empty result. Records the DELETE call so tests can assert the flavored key.
  */
-function mockDb(opts: { memberContexts: string[]; deleteRowCount?: number }): void {
+function mockDb(opts: {
+  memberContexts: string[]
+  userAgents?: string[]
+  deleteRowCount?: number
+}): void {
   mockPoolQuery.mockImplementation((sql: unknown) => {
     const text = typeof sql === 'string' ? sql : ''
+    if (text.includes('FROM user_agents')) {
+      const agents = opts.userAgents ?? []
+      return Promise.resolve({
+        rows: agents.map(agent_name => ({ agent_name })),
+        rowCount: agents.length,
+      })
+    }
     if (text.includes('FROM user_contexts')) {
       return Promise.resolve({
         rows: opts.memberContexts.map(context_id => ({ context_id })),
@@ -201,6 +212,21 @@ describe('DELETE /api/v1/internal/mcp-oauth/grant (spec 11 U4)', () => {
     expect(res.status).toBe(403)
     expect(res.body.error).toBe('context_membership_denied')
     expect(deleteCalls()).toHaveLength(0)
+  })
+
+  // #989: agent access is authoritative. A user granted the agent (user_agents)
+  // whose Context holds the server can revoke without a user_contexts row.
+  it('user flavor: a user granted the agent that owns the Context revokes → 204', async () => {
+    seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user', contextRef: 'ctx-9' })
+    void gateway.createResource(
+      'hosts',
+      { metadata: { name: 'agent-9' }, spec: { contextRef: 'ctx-9' } },
+      config.hostsNamespace
+    )
+    mockDb({ memberContexts: [], userAgents: ['agent-9'] })
+    const res = await del(app).send({ mcpServerName: 'gdrive', userId: 'user-7' })
+    expect(res.status).toBe(204)
+    expect(deleteCalls()).toHaveLength(1)
   })
 
   it('user flavor: idempotent — revoking an absent grant still returns 204', async () => {

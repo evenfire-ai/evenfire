@@ -40,7 +40,7 @@ import {
   remoteCallbackVariant,
 } from '../../oauth/remoteCallback.js'
 import { deleteOAuthGrant } from '../../oauth/store.js'
-import { getUserContexts } from '../../services/directory/index.js'
+import { getUserMemberContexts } from '../../services/access/contextMembership.js'
 import { K8sNotFoundError } from '../../services/resourceService.js'
 import {
   buildPublicCallbackUrl,
@@ -321,14 +321,15 @@ export function createInternalOAuthRouter(gateway: K8sGateway): Router {
         // `spec.contextRef` is CRD-required + singular, so every server has one;
         // a server that somehow lacks it cannot be membership-verified → fail
         // closed. Same rule + primitive as the callback bootstrap
-        // (getUserContexts → user_contexts) so membership lives in ONE place
+        // (getUserMemberContexts: agent access via user_agents/team_agents, plus
+        // legacy user_contexts — #989) so membership lives in ONE place
         // (D4). Deliberately NOT resolveInvocableMcpServersForContexts: that
         // applies U3's grant-presence gate, which filters out servers WITHOUT a
         // grant — exactly the ones connect exists to bootstrap (chicken-and-egg).
         if (!coord.contextRef) {
           return res.status(403).json({ error: 'context_membership_denied' })
         }
-        const { contextIds } = await getUserContexts(userId)
+        const { contextIds } = await getUserMemberContexts(gateway, userId)
         if (!contextIds.includes(coord.contextRef)) {
           return res.status(403).json({ error: 'context_membership_denied' })
         }
@@ -420,7 +421,8 @@ export function createInternalOAuthRouter(gateway: K8sGateway): Router {
   //     shared grant → blast-radius: the WHOLE Context is disconnected.
   //
   // The Context-membership gate runs for EVERY grantScope. It SHARES its
-  // data-reader (`getUserContexts` → user_contexts) with the authorize-URL mint
+  // data-reader (`getUserMemberContexts`: agent access + legacy user_contexts)
+  // with the authorize-URL mint
   // and the callback bootstrap (D4 for the membership LOOKUP); the membership
   // RULE itself is written inline at each of those sites (here, the mint, and
   // partially in callback.ts), not factored into one function. Fail-closed: a
@@ -497,7 +499,7 @@ export function createInternalOAuthRouter(gateway: K8sGateway): Router {
         if (!resolved.contextRef) {
           return res.status(403).json({ error: 'context_membership_denied' })
         }
-        const { contextIds } = await getUserContexts(userId)
+        const { contextIds } = await getUserMemberContexts(gateway, userId)
         if (!contextIds.includes(resolved.contextRef)) {
           return res.status(403).json({ error: 'context_membership_denied' })
         }

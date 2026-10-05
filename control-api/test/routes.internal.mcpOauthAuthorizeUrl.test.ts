@@ -230,6 +230,77 @@ describe('POST /api/v1/internal/mcp-oauth/authorize-url (U5)', () => {
     expect(membershipQuery?.[1]).toEqual(['user-7'])
   })
 
+  // #989: a user granted the agent at creation has user_agents (or team_agents)
+  // rows but no user_contexts row. Agent access is authoritative, so they are a
+  // member of that agent's Context and can mint the authorize URL.
+  describe('agent-granted membership (#989)', () => {
+    function routeDb(opts: { userAgents?: string[]; teams?: string[]; teamAgents?: string[] }) {
+      mockPoolQuery.mockImplementation((sql: unknown) => {
+        const text = typeof sql === 'string' ? sql : ''
+        const rows = (values: Array<Record<string, string>>) =>
+          Promise.resolve({ rows: values, rowCount: values.length })
+        if (text.includes('FROM user_agents')) {
+          return rows((opts.userAgents ?? []).map(agent_name => ({ agent_name })))
+        }
+        if (text.includes('FROM team_members')) {
+          return rows((opts.teams ?? []).map(id => ({ id, name: id, role: 'member' })))
+        }
+        if (text.includes('FROM team_agents')) {
+          return rows((opts.teamAgents ?? []).map(agent_name => ({ agent_name })))
+        }
+        return rows([])
+      })
+    }
+
+    function seedHost(name: string, contextRef: string) {
+      void gateway.createResource(
+        'hosts',
+        { metadata: { name }, spec: { contextRef } },
+        config.hostsNamespace
+      )
+    }
+
+    it('a user granted the agent directly mints the URL without a user_contexts row', async () => {
+      seedOauthServer(gateway, {
+        name: 'gdrive',
+        grantScope: 'user',
+        contextRef: 'jose-agent-60946',
+      })
+      seedHost('jose-agent', 'jose-agent-60946')
+      routeDb({ userAgents: ['jose-agent'] })
+      const res = await post(app)
+        .set('Authorization', 'Bearer dev-rpc-proxy-token')
+        .set('x-service-token', 'rpc-proxy')
+        .send({ mcpServerName: 'gdrive', userId: 'user-7' })
+      expect(res.status).toBe(200)
+      expect(res.body.authorizeUrl).toContain('https://accounts.google.com/')
+    })
+
+    it('a user whose team is granted the agent mints the URL for a context-scope server', async () => {
+      seedOauthServer(gateway, { name: 'gdrive', grantScope: 'context', contextRef: 'team-ctx' })
+      seedHost('team-agent', 'team-ctx')
+      routeDb({ teams: ['team-1'], teamAgents: ['team-agent'] })
+      const res = await post(app)
+        .set('Authorization', 'Bearer dev-rpc-proxy-token')
+        .set('x-service-token', 'rpc-proxy')
+        .send({ mcpServerName: 'gdrive', userId: 'user-7' })
+      expect(res.status).toBe(200)
+    })
+
+    it('a user granted only a DIFFERENT agent is still rejected 403', async () => {
+      seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user', contextRef: 'ctx-9' })
+      seedHost('jose-agent', 'jose-agent-60946')
+      seedHost('owner-agent', 'ctx-9')
+      routeDb({ userAgents: ['jose-agent'] })
+      const res = await post(app)
+        .set('Authorization', 'Bearer dev-rpc-proxy-token')
+        .set('x-service-token', 'rpc-proxy')
+        .send({ mcpServerName: 'gdrive', userId: 'user-8' })
+      expect(res.status).toBe(403)
+      expect(res.body.error).toBe('context_membership_denied')
+    })
+  })
+
   // Security fix (the asymmetry hole): a `user`-scope server whose Context the
   // user is NOT in must be rejected — no consent for another Context's
   // integration, no cross-context enumeration oracle.

@@ -282,11 +282,12 @@ export interface CallbackDeps {
    */
   mcpServerReader?: McpServerOAuthReader
   /**
-   * Resolve the Contexts a user is a member of (via `user_contexts`). Required
+   * Resolve the Contexts a user is a member of (agent access via
+   * `user_agents`/`team_agents`, plus legacy `user_contexts`). Required
    * ONLY for the shared-identity mcp bootstrap (`grantScope='context'`): a
    * shared grant plants a team credential for everyone in the Context, so the
    * consenting user MUST be a member first. Injected so the pure callback stays
-   * testable; the route wires the real `getUserContexts`. When absent on a
+   * testable; the route wires the real `getUserMemberContexts`. When absent on a
    * shared-context path, that path fails closed (`context_membership_denied`).
    * The per-user path never touches it (its key IS the user).
    */
