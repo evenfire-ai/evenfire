@@ -90,6 +90,12 @@ rm -rf "$fake"
 # (a zsh coprocess flag) and no literal <admin-*> placeholders sent to the API.
 grep -nE 'read[[:space:]]+(-[a-zA-Z]*p|-r -s -p)' "$GUIDE" && fail "guide uses bash-only read -p"
 grep -nE -- "--arg [ue] '<admin-" "$GUIDE" && fail "guide sends literal <admin-*> placeholders"
+# A pasted multi-line block feeds its own later lines to `read`; the human block
+# must be one subshell so the shell parses all of it before prompting.
+setup_blk="$(ruby -e 'b=File.read(ARGV[0]).scan(/```bash\n(.*?)```/m).flatten.find{|x| x.include?("/api/v1/admin/auth/setup")}; puts b' "$GUIDE")"
+first="$(printf '%s\n' "$setup_blk" | grep -v '^[[:space:]]*#' | awk 'NF' | head -1)"
+last="$(printf '%s\n' "$setup_blk" | awk 'NF' | tail -1)"
+{ [ "$first" = "(" ] && [ "$last" = ")" ]; } || fail "admin setup block is not wrapped in one ( ... ) subshell"
 if command -v zsh >/dev/null; then
   blk="$(ruby -e 'b=File.read(ARGV[0]).scan(/```bash\n(.*?)```/m).flatten.find{|x| x.include?("/api/v1/admin/auth/setup")}; puts b' "$GUIDE")"
   zsh -n -c "$blk" 2>/dev/null || fail "admin setup block is not valid zsh"

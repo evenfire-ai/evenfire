@@ -569,26 +569,31 @@ kubectl --context "$CONTEXT" -n control-plane port-forward service/control-api 1
 ```
 
 Human (their own terminal, bash or zsh; 8–256 character password stored straight
-into their password manager). Set the two values on the first lines:
+into their password manager). Set the two values on the first lines, paste the
+whole block, then type the password at the prompt. The block is one `( … )`
+subshell on purpose: a pasted multi-line block otherwise feeds its own next line
+to `read` as the password.
 
 ```bash
+(
 EF_USER='your-admin-username'
 EF_EMAIL='you@example.com'
 LOCAL=127.0.0.1:18090          # the address the agent's port-forward listens on
 printf 'New Evenfire admin password: '; stty -echo; IFS= read -r EF_PW; stty echo; echo
-[ ${#EF_PW} -ge 8 ] || echo 'password too short (min 8) - stop and re-run'
+[ ${#EF_PW} -ge 8 ] || { echo 'password too short (min 8); nothing sent'; exit 1; }
 jq -n --arg u "$EF_USER" --arg e "$EF_EMAIL" --arg p "$EF_PW" \
   '{username:$u,email:$e,password:$p}' \
 | curl -sS -o /dev/null -w 'setup HTTP %{http_code}\n' \
     -X POST "http://$LOCAL/api/v1/admin/auth/setup" \
     -H 'content-type: application/json' --data-binary @-
-unset EF_PW
+)
 ```
 
 Expect a 2xx. A **400** means the request was rejected (empty or short
 password, invalid email); nothing was claimed, so fix the input and re-run.
 **409** ("Initial admin setup is no longer available") on a fresh
-install means someone else already claimed the account. Treat it as a security
+install means the account is already claimed. First ask the human whether they
+already ran the block (a repeat run returns 409). Otherwise treat it as a security
 incident: stop, keep ingress closed, and tell the human.
 
 Then the human sets the LLM key: port-forward `service/control-ui` 3000, log in,
