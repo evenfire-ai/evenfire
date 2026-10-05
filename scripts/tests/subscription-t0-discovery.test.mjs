@@ -401,12 +401,53 @@ test('memory calibration owns a dedicated lane and cannot enter T0', t => {
   createFile(fixture.root, testFile)
   createFile(fixture.root, driver)
   createFile(fixture.root, 'Makefile', 'minikube-control-api-authorize-memory:\n\t@true\n')
+  const workflow = '.github/workflows/ci-public.yml'
+  const workflowWith = step => `jobs:
+  test:
+    steps:
+      - uses: actions/checkout@v4
+${step}
+      - name: Test
+        run: npm test
+`
+  createFile(fixture.root, workflow, workflowWith(`      - name: Test calibration
+        if: matrix.service == 'desktop-app'
+        run: |
+          node scripts/tests/run-node-test-files.mjs \\
+            scripts/tests/other.test.mjs \\
+            ${testFile}`))
 
   const result = auditSubscriptionDiscovery('codex', fixture.root, fixture.registered)
   assert.deepEqual(result.violations, [])
   const entry = result.candidates.find(candidate => candidate.file === testFile)
   assert.equal(entry?.lane, 'calibration:control-api-memory')
   assert.match(String(entry?.consumer), /physical calibration only/)
+  assert.match(String(entry?.consumer), /ci-public\.yml \(scripts\/tests\/run-node-test-files\.mjs /)
+
+  // The Makefile target alone runs nothing in CI: a workflow that only names
+  // the suite in a comment, in a relocated step or not at all is rejected.
+  const unverified = `unverified calibration:control-api-memory consumer for ${testFile}`
+  for (const step of [
+    '',
+    `      # ${testFile} is listed here but never run.
+      - name: Test other suites
+        run: node scripts/tests/run-node-test-files.mjs scripts/tests/other.test.mjs`,
+    `      - name: Test calibration elsewhere
+        working-directory: scripts
+        run: node scripts/tests/run-node-test-files.mjs ${testFile}`,
+    `      - name: Test calibration allowed to fail
+        continue-on-error: true
+        run: node scripts/tests/run-node-test-files.mjs ${testFile}`,
+  ]) {
+    writeFileSync(path.join(fixture.root, workflow), workflowWith(step))
+    const negative = auditSubscriptionDiscovery('codex', fixture.root, fixture.registered)
+    assert.ok(negative.violations.includes(unverified), step || 'workflow without the step')
+    assert.equal(negative.candidates.find(candidate => candidate.file === testFile)?.consumer, undefined)
+  }
+  writeFileSync(path.join(fixture.root, workflow), workflowWith(`      - name: Test calibration
+        run: node scripts/tests/run-node-test-files.mjs ${testFile}`))
+  const restored = auditSubscriptionDiscovery('codex', fixture.root, fixture.registered)
+  assert.deepEqual(restored.violations, [])
 
   const registered = auditSubscriptionDiscovery(
     'codex',

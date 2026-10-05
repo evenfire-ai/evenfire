@@ -71,11 +71,13 @@ async function remainingFrame(admission, root) {
           fixtureImagePath: remainingAssetPath(root, admission.suiteId, asset.name), imageSha256: asset.sha256,
           width: 512, height: 512 }
       }) }]
-    const other = admission.bindings.find(candidate => candidate.provider !== binding.provider)
+    // commandDeadlineMs = max(read, work + closeGrace + 5000) + 5000 for the
+    // compiled companion policy; the eligible fallback is a same-provider alternate.
     return [binding.provider, { ...identity, controlApiPodUid: uuid(40), controlApiImageId: `sha256:${'e'.repeat(64)}`,
       maxInFlight: 2, readDeadlineMs: 500,
-      pressure: { receiptFile: '/runner-admission/pressure-metadata.json' },
-      fallback: { provider: other.provider, modelId: other.modelId } }]
+      pressure: { receiptFile: '/runner-admission/pressure-metadata.json',
+        workDeadlineMs: 1000, closeGraceMs: 250, commandDeadlineMs: 11250 },
+      fallback: { provider: binding.provider, modelId: `${binding.modelId}-alternate` } }]
   }))
   return buildRemainingFixtureFrame({ admission, runRoot: root, fixtures, assets })
 }

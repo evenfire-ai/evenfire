@@ -184,7 +184,8 @@ test('admission fixture accepts eligible same-provider alternate and rejects imp
     profile: run.profile, context: run.context, sourceManifestSha256: digest, preparedAt: new Date().toISOString(),
     fixtures: Object.fromEntries(bindings.map(binding => [binding.provider, { hostRef: binding.hostRef, podUid: uid,
       imageId: `sha256:${digest}`, controlApiPodUid: uid, controlApiImageId: `sha256:${digest}`, maxInFlight: 1,
-      readDeadlineMs: 10000, pressure: { receiptFile: '/runner-admission/main-admission.json' }, fallback: binding.fallback }])) }
+      readDeadlineMs: 10000, pressure: { receiptFile: '/runner-admission/main-admission.json', workDeadlineMs: 30000,
+        closeGraceMs: 250, commandDeadlineMs: 40250 }, fallback: binding.fallback }])) }
   const input = { suite: 'admission-recovery', fixtureReceiptPath: `${runRoot}/remaining.json` }
   assert.equal(validateRemainingFixture(receipt, input, run, digest), receipt)
   const bad = structuredClone(receipt)
@@ -196,8 +197,10 @@ test('public source separates private input, actual frame stream, vendor-only de
   const root = path.resolve(path.dirname(new URL(import.meta.url).pathname), '../..')
   const source = fs.readFileSync(path.join(root, 'scripts/e2e/coordinate-subscription-image-journeys.mjs'), 'utf8')
   const dockerfile = fs.readFileSync(path.join(root, 'scripts/e2e/fixtures/subscription-image-proxy.Dockerfile'), 'utf8')
-  assert(source.includes('seed(memoryOptions, privateMaterial, async session'))
-  assert(source.includes('session.revokeImages()') && source.includes('restoreDeployments(memoryOptions.context, states)'))
+  assert(source.includes('seed(memoryOptions, seedPrivateMaterial(privateMaterial), async session'))
+  assert(source.includes('session.revokeImages()') &&
+    source.includes('const targets = qaRestorationTargets(grantStatus.state, states)') &&
+    source.includes('restoreDeployments(memoryOptions.context, targets.restore)'))
   assert(!source.includes('/environ') && !source.includes('page.evaluate') && !source.includes('storageState'))
   assert(dockerfile.includes('/app/mcp-host/node_modules/@napi-rs/') && !dockerfile.includes('npm ') && !dockerfile.includes('COPY dist'))
 })

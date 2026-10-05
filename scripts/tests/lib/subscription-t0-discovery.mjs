@@ -247,15 +247,39 @@ function verifyOtherConsumer(root, file, lane) {
   return `${ciPath}#test (${service}); ${configPath}`
 }
 
+const nodeTestRunner = 'scripts/tests/run-node-test-files.mjs'
+
+// A workflow step consumes `file` only when its own run command passes it to
+// the explicit node:test runner from the repository root. A comment, another
+// step's command, a relocated working-directory or a step allowed to fail
+// does not count.
+function ciStepRunsNodeTest(ci, file) {
+  return ci.split(/\n\s*- (?=name:|uses:|run:)/).slice(1).some(step => {
+    if (/^\s*(?:working-directory|continue-on-error):/m.test(step)) return false
+    const run = step.split(/^\s*run:/m)[1]
+    if (run === undefined) return false
+    const tokens = run.split('\n')
+      .filter(line => !line.trim().startsWith('#'))
+      .join(' ')
+      .replace(/\\(?=\s|$)/g, ' ')
+      .split(/\s+/)
+      .filter(token => token && token !== '|')
+    const runner = tokens.findIndex((token, index) => token === nodeTestRunner && tokens[index - 1] === 'node')
+    return runner !== -1 && tokens.slice(runner + 1).includes(file)
+  })
+}
+
 function verifyCalibrationConsumer(root, file, lane) {
   if (lane !== 'calibration:control-api-memory') return undefined
   const driver = 'scripts/tests/measure-control-api-authorize-memory.mjs'
-  if (!regularFile(root, file) || !regularFile(root, driver)) return undefined
+  const ciPath = '.github/workflows/ci-public.yml'
+  if (!regularFile(root, file) || !regularFile(root, driver) || !regularFile(root, ciPath)) return undefined
   const makefile = regularFile(root, 'Makefile')
     ? readFileSync(path.join(root, 'Makefile'), 'utf8')
     : ''
   if (!makefile.includes('minikube-control-api-authorize-memory:')) return undefined
-  return `Makefile#minikube-control-api-authorize-memory (physical calibration only); ${driver}`
+  if (!ciStepRunsNodeTest(readFileSync(path.join(root, ciPath), 'utf8'), file)) return undefined
+  return `${ciPath} (${nodeTestRunner} ${file}); Makefile#minikube-control-api-authorize-memory (physical calibration only); ${driver}`
 }
 
 export function auditSubscriptionDiscovery(provider, root, registered) {

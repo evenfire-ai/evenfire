@@ -785,9 +785,15 @@ test('pressure metadata and native owner observations refuse drift', () => {
     pressureRunId: 'subscription-image-pressure-123456abcdef',
     hostRefs: ['unit-grok', 'unit-codex'],
     maxInFlight: 2,
+    // Compiled companion policy; commandDeadlineMs = max(read, work + closeGrace + 5000) + 5000.
+    readDeadlineMs: 10000,
+    workDeadlineMs: 30000,
+    closeGraceMs: 250,
+    commandDeadlineMs: 40250,
     socketPath: '/run/evenfire-e2e/pressure.sock',
   }
   assert.doesNotThrow(() => verifyPressureMetadata(metadata))
+  assert.throws(() => verifyPressureMetadata({ ...metadata, commandDeadlineMs: 40251 }), /METADATA_INVALID/)
   assert.throws(() => verifyPressureMetadata({ ...metadata, hostRefs: ['unit-grok', 'unit-grok'] }))
   assert.throws(() => verifyPressureMetadata({ ...metadata, socketPath: 'relative.sock' }))
   const value = {
