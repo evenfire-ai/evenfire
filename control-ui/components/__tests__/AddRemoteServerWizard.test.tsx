@@ -72,6 +72,10 @@ afterEach(() => {
   getContextsMock.mockResolvedValue({
     items: [buildContextResource({ metadata: { name: 'research', resourceVersion: 'rv1' } })],
   })
+  // mockClear keeps queued *Once values; reset so an unused one cannot leak into the
+  // next test, then restore the default successful copy.
+  copyMock.mockReset()
+  copyMock.mockResolvedValue(true)
 })
 
 function renderWizard(props?: Partial<Parameters<typeof AddRemoteServerWizard>[0]>) {
@@ -372,8 +376,6 @@ describe('AddRemoteServerWizard', () => {
   })
 
   it('pre-registered per-server: Copy hands the shown URI to the clipboard and confirms', async () => {
-    copyMock.mockClear()
-    copyMock.mockResolvedValueOnce(true)
     await detectPreRegisteredPerServer('hubspot')
     fireEvent.click(screen.getByRole('button', { name: 'Copy redirect URI' }))
 
@@ -407,6 +409,11 @@ describe('AddRemoteServerWizard', () => {
     const uri = await screen.findByRole('textbox', { name: 'Redirect URI' })
     expect(uri).toHaveValue(PRE_REGISTERED_PER_SERVER_INSTALLED.redirectUri)
     expect(screen.queryByText(/differs from the one shown before/i)).not.toBeInTheDocument()
+    // The URI the operator copies after install is the one control-api reported.
+    fireEvent.click(screen.getByRole('button', { name: 'Copy redirect URI' }))
+    await waitFor(() =>
+      expect(copyMock).toHaveBeenCalledWith(PRE_REGISTERED_PER_SERVER_INSTALLED.redirectUri)
+    )
     expect(onInstalled).not.toHaveBeenCalled()
     expect(screen.queryByRole('button', { name: 'Back' })).not.toBeInTheDocument()
 
