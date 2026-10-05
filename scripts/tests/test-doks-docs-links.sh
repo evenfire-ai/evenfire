@@ -86,6 +86,15 @@ printf '#!/usr/bin/env bash\necho API_EGRESS_PATH=cnp\nexit 0\n' >"$fake/api-egr
 grep -qx 'API_EGRESS_PATH=cnp' "$fake/api-egress.env" 2>/dev/null || fail "Phase 0.1 block does not record api-egress.env"
 rm -rf "$fake"
 
+# Human-run blocks must work in zsh (macOS default) as well as bash: no `read -p`
+# (a zsh coprocess flag) and no literal <admin-*> placeholders sent to the API.
+grep -nE 'read[[:space:]]+(-[a-zA-Z]*p|-r -s -p)' "$GUIDE" && fail "guide uses bash-only read -p"
+grep -nE -- "--arg [ue] '<admin-" "$GUIDE" && fail "guide sends literal <admin-*> placeholders"
+if command -v zsh >/dev/null; then
+  blk="$(ruby -e 'b=File.read(ARGV[0]).scan(/```bash\n(.*?)```/m).flatten.find{|x| x.include?("/api/v1/admin/auth/setup")}; puts b' "$GUIDE")"
+  zsh -n -c "$blk" 2>/dev/null || fail "admin setup block is not valid zsh"
+fi
+
 # GFS credentials are reconciled before the overlay apply (docs/deploy/gfs-permission-store.md order).
 r_line="$(grep -n 'reconcile-gfs-deploy-credentials.sh' "$GUIDE" | head -1 | cut -d: -f1)"
 a_line="$(grep -n 'apply -f "$WORK/render.yaml"' "$GUIDE" | head -1 | cut -d: -f1)"

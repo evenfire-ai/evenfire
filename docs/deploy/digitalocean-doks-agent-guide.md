@@ -568,13 +568,16 @@ Agent (terminal 1, leave running):
 kubectl --context "$CONTEXT" -n control-plane port-forward service/control-api 18090:8090
 ```
 
-Human (their own terminal, 8–256 character password stored straight into their
-password manager):
+Human (their own terminal, bash or zsh; 8–256 character password stored straight
+into their password manager). Set the two values on the first lines:
 
 ```bash
+EF_USER='your-admin-username'
+EF_EMAIL='you@example.com'
 LOCAL=127.0.0.1:18090          # the address the agent's port-forward listens on
-read -r -s -p 'New Evenfire admin password: ' EF_PW; echo
-jq -n --arg u '<admin-username>' --arg e '<admin-email>' --arg p "$EF_PW" \
+printf 'New Evenfire admin password: '; stty -echo; IFS= read -r EF_PW; stty echo; echo
+[ ${#EF_PW} -ge 8 ] || echo 'password too short (min 8) - stop and re-run'
+jq -n --arg u "$EF_USER" --arg e "$EF_EMAIL" --arg p "$EF_PW" \
   '{username:$u,email:$e,password:$p}' \
 | curl -sS -o /dev/null -w 'setup HTTP %{http_code}\n' \
     -X POST "http://$LOCAL/api/v1/admin/auth/setup" \
@@ -582,7 +585,9 @@ jq -n --arg u '<admin-username>' --arg e '<admin-email>' --arg p "$EF_PW" \
 unset EF_PW
 ```
 
-Expect a 2xx. **409** ("Initial admin setup is no longer available") on a fresh
+Expect a 2xx. A **400** means the request was rejected (empty or short
+password, invalid email); nothing was claimed, so fix the input and re-run.
+**409** ("Initial admin setup is no longer available") on a fresh
 install means someone else already claimed the account. Treat it as a security
 incident: stop, keep ingress closed, and tell the human.
 
