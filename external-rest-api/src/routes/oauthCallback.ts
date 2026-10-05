@@ -7,6 +7,9 @@ const REMOTE_SERVER_NAME_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/
 // Lowercase only: control-api mints the nonce with crypto.randomUUID(), which is
 // always lowercase, so any other casing is not a redirect URI it ever registered.
 const INSTALL_NONCE_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+// control-api's CIMD_ROUTE_PATH (control-api/src/oauth/cimdIdentity.ts), relative to
+// the /api/v1 mount on both sides.
+const CIMD_PATH = '/.well-known/evenfire-mcp-client'
 
 function rawQueryOf(req: Request): string {
   const queryStart = req.originalUrl.indexOf('?')
@@ -21,12 +24,26 @@ function rawQueryOf(req: Request): string {
  * untouched so the signed `state` and `code` are never re-encoded — and relay its
  * response, including the HTML success page that bounces to clerum://oauth-completed.
  *
- * This is the only public, unauthenticated route in this gateway, so it MUST stay a
- * thin passthrough: never read or trust anything beyond the validated path segments
- * and the opaque query string.
+ * Together with the CIMD document below, these are the only public, unauthenticated
+ * routes in this gateway, so they MUST stay thin passthroughs: never read or trust
+ * anything beyond the validated path segments and the opaque query string.
  */
 export function createOauthCallbackRouter(): Router {
   const router = Router()
+
+  // PUBLIC CIMD Client ID Metadata Document (SEP-991). Its URL on this gateway IS the
+  // platform's OAuth client_id for the remote MCP-OAuth lane, so a remote AS must be
+  // able to fetch it here (control-api serves it at CIMD_PUBLIC_PATH). Fixed path:
+  // nothing from the request — no params, no query — reaches the forward, which
+  // carries this gateway's service token. The document holds no secrets.
+  router.get(CIMD_PATH, async (_req, res, next) => {
+    try {
+      const result = await controlApiPassthroughGet(CIMD_PATH, '')
+      res.status(result.status).type(result.contentType).send(result.body)
+    } catch (err) {
+      next(err)
+    }
+  })
 
   // Per-server remote callback (/remote/<serverName>[/<installNonce>]). The forward
   // carries this gateway's service token, so an unvalidated segment (e.g. a decoded

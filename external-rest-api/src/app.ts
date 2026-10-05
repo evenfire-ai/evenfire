@@ -75,7 +75,7 @@ export function createApp() {
   api.use(createEntityChangesRouter())
   api.use(createUserApprovalDecisionsRouter())
   api.use(createOauthGrantsRouter())
-  // PUBLIC (no auth) — provider redirect target; passthrough to control-api.
+  // PUBLIC (no auth) — provider redirect target and CIMD document; passthrough to control-api.
   api.use(createOauthCallbackRouter())
   api.use(createWorkflowApprovalMediumsRouter())
   api.use(createExternalWorkflowsRouter())

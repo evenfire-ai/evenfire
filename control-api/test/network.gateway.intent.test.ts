@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import { CIMD_PUBLIC_PATH, CIMD_ROUTE_PATH } from '../src/oauth/cimdIdentity.js'
 import {
   boundedEnvBytesFromSource,
   staticExportedBytesFromSource,
@@ -396,6 +397,24 @@ describe('network/gateway intent (manifest-level)', () => {
     // ~1MB, far below the gfsc write cap (GFS_MAX_WRITE_BODY_BYTES = 25165824,
     // 24MiB) that the operator path already honors end to end.
     expect(funnelConf).toContain('client_max_body_size 25165824;')
+  })
+
+  it('exposes the CIMD client metadata document through the public me-path (cloudflared → external-rest-api → funnel → control-api)', () => {
+    // The document's public URL IS our CIMD client_id (SEP-991), built from the public
+    // gateway origin. A remote AS fetches it there, so every hop must forward exactly
+    // CIMD_PUBLIC_PATH: a missing hop 404s/403s it and every CIMD consent fails.
+    const funnelConf = docContaining(
+      yamlDocs(read(`${BASE}/profiles/configmaps.yaml`)),
+      'name: profile-control-funnel-nginx'
+    )
+    const block = locationBlock(funnelConf, `location = ${CIMD_PUBLIC_PATH} {`)
+    // Read-only and fixed: GET (and HEAD) only, and the upstream URI is the literal
+    // path, so no client-supplied query or suffix reaches control-api.
+    expect(block).toMatch(/limit_except GET \{\s*deny all;\s*\}/)
+    expect(block).toContain(`proxy_pass http://$control_api_origin${CIMD_PUBLIC_PATH};`)
+
+    const gatewayRoute = read('../../external-rest-api/src/routes/oauthCallback.ts')
+    expect(gatewayRoute).toContain(`const CIMD_PATH = '${CIMD_ROUTE_PATH}'`)
   })
 
   it('keeps the GFS v2 part cap chain below the gateway request cap', () => {
