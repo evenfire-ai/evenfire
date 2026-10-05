@@ -111,7 +111,7 @@ describe('JwtVerifier', () => {
         behaviorBindingHash: 'bh2_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
       },
       sourceIssuedAt: now - 1,
-      sourceExpiresAt: now + 60,
+      sourceExpiresAt: now + 600,
     }
     const key = await importPKCS8(privatePem, 'RS256')
     const token = await new SignJWT({
@@ -130,6 +130,103 @@ describe('JwtVerifier', () => {
 
     await expect(makeVerifier().verifyBearer(`Bearer ${token}`)).resolves.toMatchObject({
       actionAuthority,
+    })
+  })
+
+  it('rejects a signed WFC child that outlives its source authority', async () => {
+    const now = Math.floor(Date.now() / 1000)
+    const userId = '11111111-1111-4111-8111-111111111111'
+    const actionAuthority = {
+      binding: {
+        version: 2,
+        userId,
+        sid: '22222222-2222-4222-8222-222222222222',
+        sessionVersion: 1,
+        delegationJti: '33333333-3333-4333-8333-333333333333',
+        operationId: 'shared_filesystem.read',
+        resource: {
+          environmentId: 'development:local-cluster',
+          type: 'shared_filesystem',
+          canonicalId: 'shared_filesystem:mcp-host/team-mission',
+          logicalId: 'mcp-host/team-mission',
+          displayName: 'team-mission',
+        },
+        target: {
+          sharedFileSystemNamespace: 'mcp-host',
+          sharedFileSystemName: 'team-mission',
+          relationshipInstanceId: 'rel1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          canonicalRelativePath: 'docs',
+        },
+        targetHash: 'ath2_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        accessPathId: 'ap1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        authorizationRevision: 'ar1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        pathKind: 'direct',
+        effectiveTeamId: null,
+        behaviorBindingHash: 'bh2_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      },
+      sourceIssuedAt: now - 1,
+      sourceExpiresAt: now + 60,
+    }
+    const token = await mintToken({
+      sharedFileSystem: 'team-mission',
+      expiresIn: '5m',
+      actionAuthority,
+    })
+    await expect(makeVerifier().verifyBearer(`Bearer ${token}`)).rejects.toMatchObject({
+      code: 'forbidden',
+    })
+  })
+
+  it('rejects V2 provenance without a bounded child expiration', async () => {
+    const now = Math.floor(Date.now() / 1000)
+    const userId = '11111111-1111-4111-8111-111111111111'
+    const actionAuthority = {
+      binding: {
+        version: 2,
+        userId,
+        sid: '22222222-2222-4222-8222-222222222222',
+        sessionVersion: 1,
+        delegationJti: '33333333-3333-4333-8333-333333333333',
+        operationId: 'shared_filesystem.read',
+        resource: {
+          environmentId: 'development:local-cluster',
+          type: 'shared_filesystem',
+          canonicalId: 'shared_filesystem:mcp-host/team-mission',
+          logicalId: 'mcp-host/team-mission',
+          displayName: 'team-mission',
+        },
+        target: {
+          sharedFileSystemNamespace: 'mcp-host',
+          sharedFileSystemName: 'team-mission',
+          relationshipInstanceId: 'rel1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          canonicalRelativePath: 'docs',
+        },
+        targetHash: 'ath2_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        accessPathId: 'ap1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        authorizationRevision: 'ar1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        pathKind: 'direct',
+        effectiveTeamId: null,
+        behaviorBindingHash: 'bh2_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      },
+      sourceIssuedAt: now - 1,
+      sourceExpiresAt: now + 600,
+    }
+    const key = await importPKCS8(privatePem, 'RS256')
+    const token = await new SignJWT({
+      sharedFileSystem: 'team-mission',
+      sharedFileSystemNamespace: 'mcp-host',
+      scopes: [WFC_FILE_READ_SCOPE],
+      actionAuthority,
+    })
+      .setProtectedHeader({ alg: 'RS256' })
+      .setIssuer('control-api')
+      .setAudience('workspace-files-controller')
+      .setSubject(userId)
+      .setIssuedAt(now)
+      .sign(key)
+
+    await expect(makeVerifier().verifyBearer(`Bearer ${token}`)).rejects.toMatchObject({
+      code: 'forbidden',
     })
   })
 

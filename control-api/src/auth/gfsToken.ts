@@ -2,6 +2,7 @@ import jwt from 'jsonwebtoken'
 import { createHash, createPublicKey } from 'node:crypto'
 import type { AuthorityBindingV2 } from '@clerum/action-context-contracts'
 import { config } from '../config.js'
+import { boundedActionAuthorityTokenLifetime } from '../utils/auth/actionAuthorityLifetime.js'
 
 /**
  * gfs (Global File System) access token.
@@ -107,6 +108,10 @@ export function signGfsToken(input: {
   principalType?: 'user' | 'control-admin'
   actionAuthority?: FilesystemActionAuthorityV2
 }): { token: string; expiresInSeconds: number } {
+  const lifetime = boundedActionAuthorityTokenLifetime(
+    config.gfsTokenTtlSeconds,
+    input.actionAuthority
+  )
   const claims: Omit<GfsTokenClaims, 'iat' | 'exp'> = {
     sub: input.subject,
     drive: input.drive,
@@ -125,12 +130,16 @@ export function signGfsToken(input: {
         }
       : {}),
   }
-  const token = jwt.sign(claims, config.rpcJwtPrivateKey, {
-    algorithm: 'RS256',
-    issuer: config.rpcJwtIssuer,
-    audience: config.gfsTokenAudience,
-    expiresIn: config.gfsTokenTtlSeconds,
-    keyid: gfsSigningKeyId(),
-  })
-  return { token, expiresInSeconds: config.gfsTokenTtlSeconds }
+  const token = jwt.sign(
+    { ...claims, ...(lifetime.issuedAt === undefined ? {} : { iat: lifetime.issuedAt }) },
+    config.rpcJwtPrivateKey,
+    {
+      algorithm: 'RS256',
+      issuer: config.rpcJwtIssuer,
+      audience: config.gfsTokenAudience,
+      expiresIn: lifetime.expiresInSeconds,
+      keyid: gfsSigningKeyId(),
+    }
+  )
+  return { token, expiresInSeconds: lifetime.expiresInSeconds }
 }

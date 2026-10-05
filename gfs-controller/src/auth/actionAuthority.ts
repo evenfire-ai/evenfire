@@ -129,7 +129,7 @@ export function parseGfsActionAuthority(
     !Number.isSafeInteger(issuedAt) ||
     !Number.isSafeInteger(expiresAt) ||
     issuedAt > outer.iat ||
-    expiresAt > outer.exp ||
+    outer.exp > expiresAt ||
     expiresAt <= issuedAt
   ) {
     throw new Error('actionAuthority is invalid')

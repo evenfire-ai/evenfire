@@ -126,11 +126,27 @@ describe('verifyGfsToken', () => {
       sub: DESKTOP_USER_ID,
       principalType: 'user',
       authGeneration: 1,
-      actionAuthority: v2Authority(now, now + 300),
+      actionAuthority: v2Authority(now, now + 600),
     })
     const claims = verifyGfsToken(token, { key, audience: AUD })
     expect(claims.actionAuthority?.binding.operationId).toBe('gfs.read')
     expect(claims.actionAuthority?.sourceIssuedAt).toBe(now - 1)
+    expect(claims.actionAuthority?.sourceExpiresAt).toBeGreaterThan(claims.exp)
+  })
+
+  it('rejects a signed child that expires after its source authority', () => {
+    const now = Math.floor(Date.now() / 1000)
+    const token = sign(
+      {
+        ...goodPayload,
+        sub: DESKTOP_USER_ID,
+        principalType: 'user',
+        authGeneration: 1,
+        actionAuthority: v2Authority(now, now + 60),
+      },
+      { expiresIn: 300 }
+    )
+    expect(() => verifyGfsToken(token, { key, audience: AUD })).toThrow(/actionAuthority/)
   })
 
   it('rejects incomplete v2 provenance instead of treating it as legacy', () => {

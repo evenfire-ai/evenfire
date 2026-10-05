@@ -128,7 +128,8 @@ export function parseWfcActionAuthority(
     !Number.isSafeInteger(sourceExpiresAt) ||
     sourceExpiresAt <= sourceIssuedAt ||
     (outer.iat !== undefined && sourceIssuedAt > outer.iat) ||
-    (outer.exp !== undefined && sourceExpiresAt > outer.exp)
+    outer.exp === undefined ||
+    outer.exp > sourceExpiresAt
   ) {
     throw err('forbidden', 'actionAuthority is invalid')
   }

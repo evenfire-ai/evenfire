@@ -2,6 +2,7 @@ import jwt from 'jsonwebtoken'
 import { randomUUID } from 'node:crypto'
 import type { AuthorityBindingV2 } from '@clerum/action-context-contracts'
 import { config } from '../../config.js'
+import { boundedActionAuthorityTokenLifetime } from './actionAuthorityLifetime.js'
 
 export const WFC_BROWSING_READ_SCOPE = 'files:read'
 export const WFC_BROWSING_WRITE_SCOPE = 'files:write'
@@ -44,6 +45,10 @@ export function signWfcBrowsingToken(input: {
   scopes?: readonly WfcBrowsingScope[]
   actionAuthority?: WfcActionAuthorityV2
 }): { token: string; expiresInSeconds: number } {
+  const lifetime = boundedActionAuthorityTokenLifetime(
+    config.wfcTokenTtlSeconds,
+    input.actionAuthority
+  )
   const claims: Omit<WfcBrowsingClaims, 'iat' | 'exp'> = {
     sub: input.subject,
     sharedFileSystem: input.sharedFileSystem,
@@ -60,11 +65,15 @@ export function signWfcBrowsingToken(input: {
         }
       : {}),
   }
-  const token = jwt.sign(claims, config.rpcJwtPrivateKey, {
-    algorithm: 'RS256',
-    issuer: config.rpcJwtIssuer,
-    audience: config.wfcJwtAudience,
-    expiresIn: config.wfcTokenTtlSeconds,
-  })
-  return { token, expiresInSeconds: config.wfcTokenTtlSeconds }
+  const token = jwt.sign(
+    { ...claims, ...(lifetime.issuedAt === undefined ? {} : { iat: lifetime.issuedAt }) },
+    config.rpcJwtPrivateKey,
+    {
+      algorithm: 'RS256',
+      issuer: config.rpcJwtIssuer,
+      audience: config.wfcJwtAudience,
+      expiresIn: lifetime.expiresInSeconds,
+    }
+  )
+  return { token, expiresInSeconds: lifetime.expiresInSeconds }
 }

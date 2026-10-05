@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import jwt from 'jsonwebtoken'
+import { loadVerificationKey } from '../../gfs-controller/src/auth/keys.js'
+import { verifyGfsToken } from '../../gfs-controller/src/auth/verify.js'
 import { GFS_SCOPES, gfsSigningKeyId, signGfsToken } from '../src/auth/gfsToken.js'
 import { config } from '../src/config.js'
 import { parseRequestedGfsScopes } from '../src/routes/gfs/token.js'
@@ -8,6 +10,37 @@ const VERIFY = {
   algorithms: ['RS256'] as jwt.Algorithm[],
   audience: 'gfs-controller',
   issuer: 'control-api',
+}
+
+function gfsActionAuthority(now: number, sourceExpiresAt: number) {
+  const userId = '11111111-1111-4111-8111-111111111111'
+  const resourceId = '44444444-4444-4444-8444-444444444444'
+  return {
+    binding: {
+      version: 2 as const,
+      userId,
+      sid: '22222222-2222-4222-8222-222222222222',
+      sessionVersion: 1,
+      delegationJti: '33333333-3333-4333-8333-333333333333',
+      operationId: 'gfs.read' as const,
+      resource: {
+        environmentId: 'development:local-cluster',
+        type: 'gfs_resource' as const,
+        canonicalId: `gfs_resource:${resourceId}`,
+        logicalId: resourceId,
+        displayName: 'document',
+      },
+      target: { drive: 'main', resourceId },
+      targetHash: 'ath2_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      accessPathId: 'ap1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      authorizationRevision: 'ar1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      pathKind: 'direct' as const,
+      effectiveTeamId: null,
+      behaviorBindingHash: 'bh2_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    },
+    sourceIssuedAt: now - 1,
+    sourceExpiresAt,
+  }
 }
 
 describe('signGfsToken', () => {
@@ -118,6 +151,60 @@ describe('signGfsToken', () => {
 
     expect(decoded.actionAuthority).toEqual(actionAuthority)
     expect(decoded).not.toHaveProperty('serviceToken')
+  })
+
+  it('accepts a child shorter than source authority through the real GFS verifier', () => {
+    const now = Math.floor(Date.now() / 1_000)
+    const actionAuthority = gfsActionAuthority(now, now + config.gfsTokenTtlSeconds * 2)
+    const issued = signGfsToken({
+      subject: actionAuthority.binding.userId,
+      drive: 'main',
+      scopes: ['gfs.read'],
+      principalType: 'user',
+      authGeneration: 1,
+      actionAuthority,
+    })
+    const claims = verifyGfsToken(issued.token, {
+      key: loadVerificationKey(config.rpcJwtPublicKey),
+      audience: 'gfs-controller',
+    })
+
+    expect(issued.expiresInSeconds).toBe(config.gfsTokenTtlSeconds)
+    expect(claims.exp - claims.iat).toBe(issued.expiresInSeconds)
+    expect(claims.actionAuthority?.sourceExpiresAt).toBeGreaterThan(claims.exp)
+  })
+
+  it('clips a child to remaining GFS source life and rejects an expired source', () => {
+    const now = Math.floor(Date.now() / 1_000)
+    const authority = gfsActionAuthority(now, now + 60)
+    const issued = signGfsToken({
+      subject: authority.binding.userId,
+      drive: 'main',
+      scopes: ['gfs.read'],
+      principalType: 'user',
+      authGeneration: 1,
+      actionAuthority: authority,
+    })
+    const claims = verifyGfsToken(issued.token, {
+      key: loadVerificationKey(config.rpcJwtPublicKey),
+      audience: 'gfs-controller',
+    })
+    expect(issued.expiresInSeconds).toBeLessThanOrEqual(60)
+    expect(claims.exp).toBeLessThanOrEqual(authority.sourceExpiresAt)
+
+    expect(() =>
+      signGfsToken({
+        subject: authority.binding.userId,
+        drive: 'main',
+        scopes: ['gfs.read'],
+        principalType: 'user',
+        authGeneration: 1,
+        actionAuthority: {
+          ...gfsActionAuthority(now, now - 1),
+          sourceIssuedAt: now - 60,
+        },
+      })
+    ).toThrow('action_authority_expired')
   })
 
   it('FAILS verification under the wrong audience (fail-loud)', () => {
