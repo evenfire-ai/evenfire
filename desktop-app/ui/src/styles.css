@@ -7141,6 +7141,33 @@ h3 {
   padding-inline: var(--space-1);
 }
 
+/* BUG-176: sent-message image chips open the shared GfsImagePreview modal.
+ * Same trigger contract as the composer's chip (transparent inline-flex
+ * button inside the chip frame, zoom-in cursor, keyboard focus ring). */
+.message-attachment-preview-trigger {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+  flex: 1 1 auto;
+  height: 100%;
+  border: none;
+  background: transparent;
+  color: inherit;
+  padding: 0;
+  cursor: zoom-in;
+  font: inherit;
+  line-height: 1;
+  text-align: left;
+}
+
+.message-attachment-preview-trigger:focus-visible {
+  outline: 2px solid rgba(var(--focus-rgb), 0.56);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
 .chat-bubble.assistant {
   padding: 0;
   border-color: transparent;
@@ -8035,6 +8062,21 @@ h3 {
   outline-offset: 2px;
 }
 
+/* Match the Settings menu hover across both themes. Highlight the chip frame
+   only while its preview button is hovered, leaving the remove action alone. */
+.message-attachment-chip:has(> .message-attachment-preview-trigger:hover),
+.composer-attachment-chip:has(> .composer-attachment-preview-trigger:hover) {
+  background: var(--list-item-hover-bg);
+  border-color: rgba(var(--accent-rgb), 0.34);
+  color: var(--text);
+}
+
+.message-attachment-preview-trigger:hover:enabled,
+.composer-attachment-preview-trigger:hover:enabled {
+  background: transparent;
+  color: inherit;
+}
+
 .composer-attachment-chip img {
   width: 28px;
   height: 28px;
@@ -8267,13 +8309,17 @@ h3 {
   padding: var(--space-5);
 }
 
+:root[data-theme='light'] .composer-image-preview-overlay {
+  background: rgba(0, 0, 0, 0.72);
+}
+
 .composer-image-preview-dialog {
   position: relative;
   width: min(96vw, 1120px);
   max-height: 92vh;
   border-radius: var(--radius-md);
   border: 1px solid rgba(var(--edge-rgb), 0.45);
-  background: rgba(var(--surface-rgb), 0.97);
+  background: var(--panel);
   box-shadow: var(--shadow-hard);
   padding: var(--space-4);
   display: grid;
@@ -8315,7 +8361,7 @@ h3 {
   max-height: calc(92vh - 120px);
   object-fit: contain;
   border-radius: var(--radius-sm);
-  background: rgba(var(--surface-alt-rgb), 0.45);
+  background: var(--media-surface);
 }
 
 .composer-image-preview-canvas {
@@ -8323,7 +8369,7 @@ h3 {
   width: 100%;
   max-height: calc(92vh - 170px);
   border-radius: var(--radius-sm);
-  background: rgba(var(--surface-alt-rgb), 0.45);
+  background: var(--media-surface);
   touch-action: none;
   cursor: crosshair;
 }
@@ -14533,20 +14579,52 @@ pre {
 }
 
 /* D.5b — time-aware nudges (rendered below the in-flight progress) */
+/* TASK-228: the nudge renders as one contained card — banner + dismiss (×) in
+ * a header row, mini-summary and the tier action in a footer row — instead of
+ * loosely stacked rows. */
 .nudge-area {
   display: flex;
   flex-direction: column;
-  gap: var(--space-1-5);
+  gap: var(--space-2);
   margin-top: var(--space-2);
   /* Cap the width so the nudge reads as a contained card instead of stretching
    * full-width with the chat (and growing on larger windows). */
   max-width: 460px;
+  padding: var(--space-2);
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-control);
+  background: var(--panel);
 }
 
-/* The nudge's call-to-action: a clear soft button anchored bottom-right of the
- * capped card rather than a faint full-width row. */
+.nudge-area__header {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-1-5);
+  min-width: 0;
+}
+
+.nudge-area__header .status-banner {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.nudge-area__dismiss {
+  flex: 0 0 auto;
+  margin: calc(-1 * var(--space-0-5)) calc(-1 * var(--space-1)) 0 0;
+}
+
+.nudge-area__footer {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-1-5) var(--space-2);
+  min-width: 0;
+}
+
+/* The nudge's call-to-action: anchored bottom-right of the card, level with
+ * the mini-summary when one is present (T5), alone otherwise (T3). */
 .nudge-area-action {
-  align-self: flex-end;
+  margin-left: auto;
 }
 
 .nudge-mini-summary {
@@ -15654,6 +15732,21 @@ pre {
   display: inline-flex;
   align-items: center;
   gap: var(--space-2);
+}
+
+.da-gfs-image-preview-dialog__header-main {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.da-gfs-image-preview-dialog__header-main .da-gfs-preview-title {
+  flex: 0 1 auto;
+}
+
+.da-gfs-image-preview-dialog__header-main .da-gfs-image-preview-dialog__copy {
+  flex: 0 0 auto;
 }
 
 .da-gfs-image-preview-dialog__close.ui-button,

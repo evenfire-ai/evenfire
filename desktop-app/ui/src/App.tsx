@@ -2507,6 +2507,7 @@ export function App() {
       handleDenyNotification: vm.handleDenyNotification,
       handleRefreshPendingApprovals: vm.handleRefreshPendingApprovals,
       handleDecidePendingApproval: vm.handleDecidePendingApproval,
+      pushToast: vm.pushToast,
     }),
     [
       vm.clearNotifications,
@@ -2524,6 +2525,7 @@ export function App() {
       vm.pendingApprovalActionId,
       vm.pendingApprovals,
       vm.pendingApprovalsLoading,
+      vm.pushToast,
       vm.removeNotification,
       vm.resolveApprovalNotification,
       vm.toasts,
@@ -2573,6 +2575,12 @@ export function App() {
     ]
   )
 
+  // Stable focus-request bumper shared through ChatComposerStateContext: the
+  // composer focuses (and scrolls) itself when the id increments (TASK-42).
+  const requestComposerFocus = React.useCallback(() => {
+    setComposerFocusRequestId(value => value + 1)
+  }, [])
+
   const chatComposerStateValue = React.useMemo(
     () => ({
       activeChatId: vm.activeChatId,
@@ -2585,6 +2593,7 @@ export function App() {
       failedAgentSend: vm.failedAgentSend,
       activeMessageCount: vm.activeMessages.length,
       composerFocusRequestId,
+      requestComposerFocus,
     }),
     [
       vm.activeChatId,
@@ -2597,6 +2606,7 @@ export function App() {
       vm.failedAgentSend,
       vm.activeMessages.length,
       composerFocusRequestId,
+      requestComposerFocus,
     ]
   )
 
