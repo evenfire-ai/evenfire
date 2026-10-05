@@ -3,7 +3,7 @@ import {
   cleanupNativeCommitTestHarness,
   createNativeCommitTestHarness,
   deferred,
-} from './appService.nativeCommitTestHarness.js'
+} from '../../testSupport/appService.nativeCommitTestHarness.js'
 
 afterEach(cleanupNativeCommitTestHarness)
 

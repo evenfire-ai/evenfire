@@ -1151,7 +1151,17 @@ export class AppService {
     return this.me.teamId || ''
   }
 
-  private async switchSessionToTeam(teamId: string, token = this.requireSessionToken()) {
+  private switchSessionToTeam(
+    teamId: string,
+    token?: string,
+    options: { commitOwnerHeld?: boolean } = {}
+  ): Promise<string> {
+    const run = () =>
+      this.switchSessionToTeamWithCommitOwner(teamId, token ?? this.requireSessionToken())
+    return options.commitOwnerHeld ? run() : this.withNativeAuthEnvironmentCommit(run)
+  }
+
+  private async switchSessionToTeamWithCommitOwner(teamId: string, token: string) {
     const releaseTransientHop = this.enterGfsTransientTeamHop()
     const targetTeamId = String(teamId || '').trim()
     try {
@@ -1274,7 +1284,9 @@ export class AppService {
 
       try {
         if (shouldSwitch) {
-          activeToken = await this.switchSessionToTeam(targetTeamId, originalToken)
+          activeToken = await this.switchSessionToTeam(targetTeamId, originalToken, {
+            commitOwnerHeld: true,
+          })
         }
 
         try {
@@ -1285,7 +1297,9 @@ export class AppService {
         } finally {
           if (shouldRestore) {
             try {
-              await this.switchSessionToTeam(originalTeamId, this.requireSessionToken())
+              await this.switchSessionToTeam(originalTeamId, this.requireSessionToken(), {
+                commitOwnerHeld: true,
+              })
               restoredOriginalTeam = true
             } catch (restoreError) {
               if (!operationError) throw restoreError
@@ -3687,10 +3701,6 @@ export class AppService {
   }
 
   async switchTeam(teamId: string): Promise<SessionState> {
-    return this.withNativeAuthEnvironmentCommit(() => this.switchTeamWithCommitOwner(teamId))
-  }
-
-  private async switchTeamWithCommitOwner(teamId: string): Promise<SessionState> {
     const targetTeamId = String(teamId || '').trim()
     if (!targetTeamId) throw new Error('teamId is required')
     // Explicit team changes fence opportunistic wake immediately. A failed
@@ -3714,39 +3724,48 @@ export class AppService {
       // NOTE: only the user-initiated `switchTeam` closes streams — the transient
       // per-operation team hops in `runWithTeamContext`/`switchSessionToTeam` (e.g.
       // minting a cross-team RPC token to decide an approval) must NOT.
-      await this.switchSessionToTeam(targetTeamId)
-      if (!this.me) throw new Error('Team switch ended without an authenticated session')
-      // A deliberate user switch is the only team-context boundary that fences
-      // in-flight uploads. Transient runWithTeamContext hops intentionally use
-      // switchSessionToTeam directly and must leave those jobs untouched.
-      try {
-        await this.suspendDesktopGfsUploadsForAuthBoundary(previousIdentity)
-      } catch (error) {
-        // The replacement session is already installed at this point. If the
-        // auth-boundary state write fails, do not leave that token/me paired
-        // with a blocked or stale GFS scope. Cleanup remains inside the outer
-        // transient-hop gate, and the original persistence error is preserved.
-        this.clearAuthenticatedSessionState()
-        try {
-          await this.tokenStore.clearSessionToken(getActiveEnvKey(), {
-            legacyEnvKeys: getActiveLegacyEnvKeys(),
-          })
-        } catch (clearError) {
-          console.warn(
-            '[AppService] Failed to clear a partially switched team session:',
-            clearError
-          )
+      const switchedToken = await this.switchSessionToTeam(targetTeamId)
+      const switchedMe = this.me
+      const switchedGeneration = this.sessionGeneration
+      const switchedEnvironment = this.captureAuthEnvironmentBinding()
+      return await this.withNativeAuthEnvironmentCommit(async () => {
+        this.assertSessionGeneration(switchedGeneration)
+        this.assertAuthEnvironmentBinding(switchedEnvironment)
+        if (this.sessionToken !== switchedToken || !switchedMe || this.me !== switchedMe) {
+          throw new Error('stale_auth_epoch: authenticated team scope changed before activation')
         }
-        throw error
-      }
-      this.activateGfsAuthScope()
-      this.updateEntityChangeSessionToken(this.sessionToken)
-      this.stopAllStreams()
-      // Grants are keyed by userId, not by team, so they carry over — but every
-      // cached org/agents/contexts answer is now about the wrong team. Drop the
-      // cache and tell mounted plugins to refetch.
-      tryGetPluginSdkRuntime()?.notifySessionChanged(true)
-      return { authenticated: true, me: this.me }
+        // A deliberate user switch is the only team-context boundary that fences
+        // in-flight uploads. Transient runWithTeamContext hops intentionally use
+        // switchSessionToTeam directly and must leave those jobs untouched.
+        try {
+          await this.suspendDesktopGfsUploadsForAuthBoundary(previousIdentity)
+        } catch (error) {
+          // The replacement session is already installed at this point. If the
+          // auth-boundary state write fails, do not leave that token/me paired
+          // with a blocked or stale GFS scope. Cleanup remains inside the outer
+          // transient-hop gate, and the original persistence error is preserved.
+          this.clearAuthenticatedSessionState()
+          try {
+            await this.tokenStore.clearSessionToken(getActiveEnvKey(), {
+              legacyEnvKeys: getActiveLegacyEnvKeys(),
+            })
+          } catch (clearError) {
+            console.warn(
+              '[AppService] Failed to clear a partially switched team session:',
+              clearError
+            )
+          }
+          throw error
+        }
+        this.activateGfsAuthScope()
+        this.updateEntityChangeSessionToken(this.sessionToken)
+        this.stopAllStreams()
+        // Grants are keyed by userId, not by team, so they carry over — but every
+        // cached org/agents/contexts answer is now about the wrong team. Drop the
+        // cache and tell mounted plugins to refetch.
+        tryGetPluginSdkRuntime()?.notifySessionChanged(true)
+        return { authenticated: true, me: this.me }
+      })
     } finally {
       releasePrewarm()
       releaseTransientHop()

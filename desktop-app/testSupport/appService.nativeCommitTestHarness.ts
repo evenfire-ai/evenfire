@@ -3,7 +3,7 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
-vi.mock('../chatStoreBinding.js', () => ({
+vi.mock('../src/chatStoreBinding.js', () => ({
   bindChatStoreForUser: vi.fn(),
   unbindChatStore: vi.fn(),
   __setChatStoreBaseDirForTests: vi.fn(),
@@ -72,8 +72,8 @@ export async function createNativeCommitTestHarness() {
   }))
 
   const [{ AppService }, runtimeConfig] = await Promise.all([
-    import('../appService.js'),
-    import('../config.js'),
+    import('../src/appService.js'),
+    import('../src/config.js'),
   ])
   const restA = 'https://api-a.example.test'
   const restB = 'https://api-b.example.test'
