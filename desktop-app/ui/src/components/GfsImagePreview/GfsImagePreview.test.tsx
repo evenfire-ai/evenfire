@@ -80,6 +80,12 @@ describe('GfsImagePreview layout', () => {
     const closeButton = screen.getByRole('button', { name: 'Close image preview' })
     expect(closeButton.classList.contains('ui-button')).toBe(true)
     expect(closeButton.classList.contains('da-gfs-image-preview-dialog__close')).toBe(true)
+    const headerMain = screen
+      .getByRole('dialog', { name: 'diagram.png' })
+      .querySelector('.da-gfs-image-preview-dialog__header-main')
+    expect(headerMain?.contains(copyButton)).toBe(true)
+    expect(headerMain?.firstElementChild).toBe(copyButton)
+    expect(headerMain?.contains(closeButton)).toBe(false)
     expect((modal as HTMLElement).style.left).toBe('74px')
     expect((modal as HTMLElement).style.right).toBe('0px')
 
