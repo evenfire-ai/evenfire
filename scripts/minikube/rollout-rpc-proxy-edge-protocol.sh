@@ -39,6 +39,7 @@ while [[ $# -gt 0 ]]; do
     --restart-proxy) RESTART_PROXY=true; shift ;;
     --restart-hcc) RESTART_HCC=true; shift ;;
     --restart-all-hosts) RESTART_ALL_HOSTS=true; shift ;;
+    --restart-all-non-edge) RESTART_ALL_NON_EDGE=true; shift ;;
     --restart-host) HOST_DEPLOYMENTS+=("${2:?missing Host Deployment}"); shift 2 ;;
     *) usage; exit 2 ;;
   esac

@@ -95,6 +95,26 @@ if [[ "$args" == *'get deployment host-context-controller '* ]]; then
     "$hcc_marker" "$env_json"
   exit 0
 fi
+if [[ "$args" == *'get deployments -n control-plane '* ]]; then
+  printf '%s\n' host-context-controller api-worker
+  exit 0
+fi
+if [[ "$args" == *'get deployments -n mcp-server '* ]]; then
+  echo mcp-server
+  exit 0
+fi
+if [[ "$args" == *'get deployments -n profiles '* ]]; then
+  echo external-rest-api
+  exit 0
+fi
+if [[ "$args" == *'get deployments -n rpc-proxy '* ]]; then
+  echo rpc-proxy
+  exit 0
+fi
+if [[ "$args" == *'get deployments -n channels '* ]]; then
+  echo channel-reader
+  exit 0
+fi
 if [[ "$args" == *'get pods -n control-plane '* ]]; then
   echo '{"items":[{"metadata":{"labels":{"app":"host-context-controller"}},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}]}}]}'
   exit 0
@@ -216,5 +236,38 @@ hcc_undo_line="$(grep -nF 'rollout undo deployment/host-context-controller -n co
 proxy_undo_line="$(grep -nF 'rollout undo deployment/rpc-proxy -n rpc-proxy' "$FAKE_LOG" | cut -d: -f1)"
 [[ "$hcc_undo_line" -lt "$proxy_undo_line" ]] || fail 'Proxy rollback preceded HCC rollback'
 pass 'Proxy rollback is admitted only after HCC/Host compatibility is proven'
+
+make_plan="$(make -n minikube-restart-all MINIKUBE_PROFILE=fixture-context)"
+[[ "$make_plan" == *'--restart-all-non-edge --restart-proxy'* &&
+   "$make_plan" == *'--restart-hcc --restart-all-hosts'* ]] ||
+  fail 'Makefile restart-all argv no longer includes the documented rollout options'
+: >"$FAKE_LOG"
+FAKE_SCENARIO=proxy-strict FAKE_HCC_PROTOCOL=dedicated-header-v1 FAKE_LOG="$FAKE_LOG" \
+  KUBECTL_BIN="$FAKE_KUBECTL" bash "$ROLLOUT" restart-targets --context fixture-context \
+    --restart-all-non-edge --restart-proxy --restart-hcc --restart-all-hosts >/dev/null ||
+  fail 'Make-produced restart-all options were rejected or failed'
+for expected in \
+  'rollout restart deployment/api-worker -n control-plane' \
+  'rollout restart deployment/mcp-server -n mcp-server' \
+  'rollout restart deployment/external-rest-api -n profiles' \
+  'rollout restart deployment/channel-reader -n channels'; do
+  grep -Fq "$expected" "$FAKE_LOG" || fail "restart-all branch omitted $expected"
+done
+[[ "$(grep -Fc 'rollout restart deployment/host-context-controller -n control-plane' "$FAKE_LOG")" -eq 1 &&
+   "$(grep -Fc 'rollout restart deployment/rpc-proxy -n rpc-proxy' "$FAKE_LOG")" -eq 1 ]] ||
+  fail 'restart-all-non-edge duplicated an edge-owned restart'
+pass 'Make restart-all argv reaches the non-edge restart branch and excludes edge Deployments'
+
+: >"$FAKE_LOG"
+if KUBECTL_BIN="$FAKE_KUBECTL" bash "$ROLLOUT" restart-targets --context fixture-context \
+  --unknown-option >/dev/null 2>&1; then
+  fail 'unknown rollout option was accepted'
+fi
+if KUBECTL_BIN="$FAKE_KUBECTL" bash "$ROLLOUT" restart-targets --context fixture-context \
+  --restart-host >/dev/null 2>&1; then
+  fail 'missing restart-host argument was accepted'
+fi
+[[ ! -s "$FAKE_LOG" ]] || fail 'invalid rollout arguments reached kubectl'
+pass 'unknown options and missing arguments remain rejected before runtime calls'
 
 echo 'PASS: RPC Proxy edge rollout contract'
