@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { type TaskState, makeTaskKey, useAgentTaskTracker } from '@contexts/AgentTaskTrackerContext'
-import { Button, StatusBanner } from '@components/Common'
+import { Button, IconButton, StatusBanner } from '@components/Common'
+import { IconClose } from '@components/SidebarNav/icons'
 import { useBrowserWindowState } from '@hooks/useBrowserWindowState'
 import { useTaskTier } from '@hooks/useTaskTier'
 import type { ProgressStep } from '../../uiTypes'
@@ -40,11 +41,19 @@ function MiniSummary({ steps }: { steps: ProgressStep[] }) {
  * the misleading copy — this guard does. No replacement "waiting for your
  * approval" banner: the approval card rendered above is already that affordance,
  * and duplicating it would just add noise under it.
+ *
+ * TASK-228: every tier renders a dismiss (×) button. A dismissal is keyed by
+ * task identity and suppresses all later tiers of that same task; a new task
+ * (same chat or another) starts fresh. Tier timing/thresholds are untouched.
  */
 export function NudgeArea({ agentRef, chatId, onStartNewChat, onRefreshState }: Props) {
   const tracker = useAgentTaskTracker()
   const key = makeTaskKey(agentRef, chatId)
   const [state, setState] = useState<TaskState | undefined>(() => tracker.get(key))
+  // TASK-228: tasks the user explicitly dismissed. Keyed by task identity so a
+  // dismissal hides every later tier of the SAME task (tracker updates keep
+  // arriving) while a NEW task in the same chat starts fresh with its nudges.
+  const [dismissedTaskIds, setDismissedTaskIds] = useState<ReadonlySet<string>>(() => new Set())
   const { isWindowVisible } = useBrowserWindowState()
   const tier = useTaskTier(state)
 
@@ -57,6 +66,15 @@ export function NudgeArea({ agentRef, chatId, onStartNewChat, onRefreshState }: 
     return tracker.subscribe(key, setState)
   }, [tracker, key])
 
+  const dismissNudge = useCallback((taskIdentity: string) => {
+    setDismissedTaskIds(previous => {
+      if (previous.has(taskIdentity)) return previous
+      const next = new Set(previous)
+      next.add(taskIdentity)
+      return next
+    })
+  }, [])
+
   if (!state) return null
   if (state.status === 'completed' || state.status === 'cancelled' || state.status === 'failed')
     return null
@@ -67,23 +85,46 @@ export function NudgeArea({ agentRef, chatId, onStartNewChat, onRefreshState }: 
   // window too.
   if (state.status === 'suspended' || state.pendingApproval) return null
   if (tier === 'T1' || tier === 'T2') return null
+  // Degenerate-taskId fallback (PR #859 review): keying an id-less task's
+  // dismissal to the CHAT key would suppress every future task in the chat,
+  // contradicting "a new task starts fresh". `startedAt` stays per-task.
+  const taskIdentity = state.taskId || `${key}@${state.startedAt}`
+  if (dismissedTaskIds.has(taskIdentity)) return null
+
+  const dismissButton = (
+    <IconButton
+      className="nudge-area__dismiss"
+      aria-label="Dismiss this suggestion"
+      label="Dismiss this suggestion"
+      size="xs"
+      variant="ghost"
+      onClick={() => dismissNudge(taskIdentity)}
+    >
+      <IconClose width={14} height={14} />
+    </IconButton>
+  )
 
   if (tier === 'T3') {
     return (
       <div className="nudge-area" data-tier="T3">
-        <StatusBanner tone="info" compact>
-          This task is taking longer than usual. You can keep working in another chat — we'll let
-          you know here when it's done.
-        </StatusBanner>
-        <Button
-          className="nudge-area-action"
-          variant="soft"
-          color="primary"
-          size="sm"
-          onClick={onStartNewChat}
-        >
-          Start a new chat
-        </Button>
+        <div className="nudge-area__header">
+          <StatusBanner tone="info" compact>
+            This task is taking longer than usual. You can keep working in another chat — we'll let
+            you know here when it's done.
+          </StatusBanner>
+          {dismissButton}
+        </div>
+        <div className="nudge-area__footer">
+          <Button
+            className="nudge-area-action"
+            variant="soft"
+            color="primary"
+            size="sm"
+            onClick={onStartNewChat}
+          >
+            Start a new chat
+          </Button>
+        </div>
       </div>
     )
   }
@@ -94,10 +135,15 @@ export function NudgeArea({ agentRef, chatId, onStartNewChat, onRefreshState }: 
       : 'Your agent is still working. Your system will notify you when it finishes.'
     return (
       <div className="nudge-area" data-tier="T4">
-        <StatusBanner tone="info" compact>
-          {text}
-        </StatusBanner>
-        <MiniSummary steps={state.steps} />
+        <div className="nudge-area__header">
+          <StatusBanner tone="info" compact>
+            {text}
+          </StatusBanner>
+          {dismissButton}
+        </div>
+        <div className="nudge-area__footer">
+          <MiniSummary steps={state.steps} />
+        </div>
       </div>
     )
   }
@@ -105,19 +151,24 @@ export function NudgeArea({ agentRef, chatId, onStartNewChat, onRefreshState }: 
   // T5
   return (
     <div className="nudge-area" data-tier="T5">
-      <StatusBanner tone="warn" compact>
-        Your agent is still working. If you think something might be stuck, you can refresh the
-        state.
-      </StatusBanner>
-      <MiniSummary steps={state.steps} />
-      <Button
-        className="nudge-area-action"
-        variant="soft"
-        size="sm"
-        onClick={() => void onRefreshState()}
-      >
-        Refresh state
-      </Button>
+      <div className="nudge-area__header">
+        <StatusBanner tone="warn" compact>
+          Your agent is still working. If you think something might be stuck, you can refresh the
+          state.
+        </StatusBanner>
+        {dismissButton}
+      </div>
+      <div className="nudge-area__footer">
+        <MiniSummary steps={state.steps} />
+        <Button
+          className="nudge-area-action"
+          variant="soft"
+          size="sm"
+          onClick={() => void onRefreshState()}
+        >
+          Refresh state
+        </Button>
+      </div>
     </div>
   )
 }

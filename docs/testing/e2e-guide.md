@@ -117,9 +117,9 @@ make minikube-pf-all
 ```
 
 For Control UI / Desktop on a branch-owned profile, the first-hand entry
-point (gitignored helper at repo root — do not search for it) is the
+point `scripts/minikube-profiles/branch.mk` is the
 host-side hold. Implementation:
-`.local-notes/minikube-profiles/branch-profile.sh`.
+`scripts/minikube-profiles/branch-profile.sh`.
 HARD DENY: do not `ls`/`cat` `~/.cache/clerum/minikube-profiles/`.
 Profile-owned random ports only (never shared `:3000`/`:8090`).
 `make minikube-pf-all-bg` is a gate refresh only; it must not replace
@@ -130,10 +130,10 @@ it as the lasting hold.
 
 ```bash
 MINIKUBE_PROFILE=<owned-profile> \
-  make -f .local-notes/minikube-profiles/branch.mk branch-profile-pf
+  make -f scripts/minikube-profiles/branch.mk branch-profile-pf
 
 MINIKUBE_PROFILE=<owned-profile> \
-  make -f .local-notes/minikube-profiles/branch.mk branch-profile-health
+  make -f scripts/minikube-profiles/branch.mk branch-profile-health
 ```
 
 With shared-profile (`make minikube-pf-all`) port-forwards held, verify the
