@@ -132,6 +132,19 @@ describe('getPodPresence', () => {
       }
     )
   })
+
+  it.each([403, 500])('rethrows a GET %i instead of reporting the pod absent', async code => {
+    const readNamespacedPod = vi.fn().mockRejectedValueOnce({ code })
+    const coreApi = { readNamespacedPod } as unknown as Parameters<typeof getPodPresence>[0]
+
+    await expect(
+      getPodPresence(coreApi, 'recipe-coordinator', 'sandbox-recipes')
+    ).rejects.toMatchObject({ code })
+    expect(readNamespacedPod).toHaveBeenCalledWith({
+      name: 'recipe-coordinator',
+      namespace: 'sandbox-recipes',
+    })
+  })
 })
 
 describe('waitForPodDeletion', () => {

@@ -3876,6 +3876,9 @@ describe('WorkflowReconciler — reconcile loop', () => {
       const result = await reconciler.reconcile('test-wf', 'uid-123', SANDBOX, makeSpec())
 
       expect(result.workflowPhase).toBe('failed')
+      // The 403 stops the reconcile at the first coordinator read; a 403
+      // mapped to absent would continue to a second read.
+      expect(podReads(coreApi, COORDINATOR)).toBe(1)
       expect(podDeletes(coreApi, COORDINATOR)).toBe(0)
     })
 
