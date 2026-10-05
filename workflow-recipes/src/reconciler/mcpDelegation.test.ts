@@ -71,6 +71,20 @@ function makeRecipeWithBindings(): WorkflowRecipeCRD {
   }
 }
 
+/**
+ * A getter that answers every Context read with 404 and every other read from
+ * `others`. The Context writer reads before it creates (#760); without this a
+ * Once queue built for McpServer reads would run dry and hand the Context read
+ * `undefined`, which no API server returns.
+ */
+function contextAbsentGet(others: ReturnType<typeof vi.fn>) {
+  return vi
+    .fn()
+    .mockImplementation((args: { plural: string }) =>
+      args.plural === 'contexts' ? Promise.reject({ code: 404 }) : others(args)
+    )
+}
+
 // ─── Pure Builder Tests ───────────────────────────────────────────────
 
 describe('mcpServerName', () => {
@@ -962,6 +976,7 @@ describe('ensureRecipeContext', () => {
   it('H04a — creates per-recipe Context CRD with correct server names', async () => {
     const mockCustomApi = {
       createNamespacedCustomObject: vi.fn().mockResolvedValue({}),
+      getNamespacedCustomObject: vi.fn().mockRejectedValue({ code: 404 }),
     }
     const deps: DelegationDeps = {
       customApi: mockCustomApi as unknown as DelegationDeps['customApi'],
@@ -1009,6 +1024,7 @@ describe('ensureRecipeContext', () => {
     const recipe = makeRecipe({ spec: { ...makeRecipe().spec, contextRef: 'context1' } })
     const mockCustomApi = {
       createNamespacedCustomObject: vi.fn().mockResolvedValue({}),
+      getNamespacedCustomObject: vi.fn().mockRejectedValue({ code: 404 }),
     }
     const deps: DelegationDeps = {
       customApi: mockCustomApi as unknown as DelegationDeps['customApi'],
@@ -1045,7 +1061,7 @@ describe('ensureRecipeContext', () => {
     // never be repaired. The length check makes exactly that case a write.
     const recipe = makeRecipe({ spec: { ...makeRecipe().spec, contextRef: 'context1' } })
     const mockCustomApi = {
-      createNamespacedCustomObject: vi.fn().mockRejectedValueOnce({ code: 409 }),
+      createNamespacedCustomObject: vi.fn(),
       getNamespacedCustomObject: vi.fn().mockResolvedValue({
         metadata: { resourceVersion: '7', labels: { 'clerum.io/managed-by': 'wrc' } },
         spec: {
@@ -1075,6 +1091,7 @@ describe('ensureRecipeContext', () => {
     const written =
       mockCustomApi.replaceNamespacedCustomObject.mock.calls[0][0].body.spec.mcpServers
     expect(written).toEqual(['existing-server', 'test-recipe-redis-mcp'])
+    expect(mockCustomApi.createNamespacedCustomObject).not.toHaveBeenCalled()
   })
 
   it('does not silently drop a new server when a duplicate makes the lengths match', async () => {
@@ -1100,7 +1117,7 @@ describe('ensureRecipeContext', () => {
     // no-shrink and no-duplicates pass vacuously on the corrupted input.
     const recipe = makeRecipe({ spec: { ...makeRecipe().spec, contextRef: 'context1' } })
     const mockCustomApi = {
-      createNamespacedCustomObject: vi.fn().mockRejectedValueOnce({ code: 409 }),
+      createNamespacedCustomObject: vi.fn(),
       getNamespacedCustomObject: vi.fn().mockResolvedValue({
         metadata: { resourceVersion: '9', labels: { 'clerum.io/managed-by': 'wrc' } },
         spec: { contextId: 'context1', mcpServers: ['server-a', 'server-a'] },
@@ -1122,11 +1139,12 @@ describe('ensureRecipeContext', () => {
       mockCustomApi.replaceNamespacedCustomObject.mock.calls[0][0].body.spec.mcpServers
     // The new server lands AND the duplicate is gone, in the same write.
     expect(written).toEqual(['server-a', 'server-b'])
+    expect(mockCustomApi.createNamespacedCustomObject).not.toHaveBeenCalled()
   })
 
   it('H04b — writes on 409 when live Context has no mcpServers (empty→filled is not a skip)', async () => {
     const mockCustomApi = {
-      createNamespacedCustomObject: vi.fn().mockRejectedValueOnce({ code: 409 }),
+      createNamespacedCustomObject: vi.fn(),
       getNamespacedCustomObject: vi.fn().mockResolvedValue({ metadata: { resourceVersion: '5' } }),
       replaceNamespacedCustomObject: vi.fn().mockResolvedValue({}),
     }
@@ -1153,12 +1171,13 @@ describe('ensureRecipeContext', () => {
         }),
       })
     )
+    expect(mockCustomApi.createNamespacedCustomObject).not.toHaveBeenCalled()
   })
 
   it('uses explicit contextRef as the effective Context and preserves existing allowlist', async () => {
     const recipe = makeRecipe({ spec: { ...makeRecipe().spec, contextRef: 'context1' } })
     const mockCustomApi = {
-      createNamespacedCustomObject: vi.fn().mockRejectedValueOnce({ code: 409 }),
+      createNamespacedCustomObject: vi.fn(),
       getNamespacedCustomObject: vi.fn().mockResolvedValue({
         metadata: {
           resourceVersion: '5',
@@ -1219,12 +1238,13 @@ describe('ensureRecipeContext', () => {
     expect(
       (replaceCall.body as { metadata?: Record<string, unknown> }).metadata
     ).not.toHaveProperty('ownerReferences')
+    expect(mockCustomApi.createNamespacedCustomObject).not.toHaveBeenCalled()
   })
 
   it('retries explicit contextRef replacement when Kubernetes reports a resourceVersion conflict', async () => {
     const recipe = makeRecipe({ spec: { ...makeRecipe().spec, contextRef: 'context1' } })
     const mockCustomApi = {
-      createNamespacedCustomObject: vi.fn().mockRejectedValueOnce({ code: 409 }),
+      createNamespacedCustomObject: vi.fn(),
       getNamespacedCustomObject: vi
         .fn()
         .mockResolvedValueOnce({
@@ -1286,12 +1306,13 @@ describe('ensureRecipeContext', () => {
         }),
       })
     )
+    expect(mockCustomApi.createNamespacedCustomObject).not.toHaveBeenCalled()
   })
 
   it('fails clearly after exhausting explicit contextRef replacement conflicts', async () => {
     const recipe = makeRecipe({ spec: { ...makeRecipe().spec, contextRef: 'context1' } })
     const mockCustomApi = {
-      createNamespacedCustomObject: vi.fn().mockRejectedValueOnce({ code: 409 }),
+      createNamespacedCustomObject: vi.fn(),
       getNamespacedCustomObject: vi.fn().mockResolvedValue({
         metadata: { resourceVersion: '5' },
         spec: { contextId: 'context1', mcpServers: ['existing-server'] },
@@ -1316,12 +1337,13 @@ describe('ensureRecipeContext', () => {
 
     expect(mockCustomApi.getNamespacedCustomObject).toHaveBeenCalledTimes(3)
     expect(mockCustomApi.replaceNamespacedCustomObject).toHaveBeenCalledTimes(3)
+    expect(mockCustomApi.createNamespacedCustomObject).not.toHaveBeenCalled()
   })
 
   it('skips shared Context replace when the union and WRC-authored labels already match', async () => {
     const recipe = makeRecipe({ spec: { ...makeRecipe().spec, contextRef: 'context1' } })
     const mockCustomApi = {
-      createNamespacedCustomObject: vi.fn().mockRejectedValueOnce({ code: 409 }),
+      createNamespacedCustomObject: vi.fn(),
       getNamespacedCustomObject: vi.fn().mockResolvedValue({
         metadata: {
           resourceVersion: '9',
@@ -1355,12 +1377,13 @@ describe('ensureRecipeContext', () => {
     expect(contextName).toBe('context1')
     expect(mockCustomApi.getNamespacedCustomObject).toHaveBeenCalledTimes(1)
     expect(mockCustomApi.replaceNamespacedCustomObject).not.toHaveBeenCalled()
+    expect(mockCustomApi.createNamespacedCustomObject).not.toHaveBeenCalled()
   })
 
   it('writes a shared Context when managed-by is missing even if the server union already matches', async () => {
     const recipe = makeRecipe({ spec: { ...makeRecipe().spec, contextRef: 'context1' } })
     const mockCustomApi = {
-      createNamespacedCustomObject: vi.fn().mockRejectedValueOnce({ code: 409 }),
+      createNamespacedCustomObject: vi.fn(),
       getNamespacedCustomObject: vi.fn().mockResolvedValue({
         metadata: {
           resourceVersion: '9',
@@ -1407,12 +1430,13 @@ describe('ensureRecipeContext', () => {
         'clerum.io/recipe'
       ]
     ).not.toBe('test-recipe')
+    expect(mockCustomApi.createNamespacedCustomObject).not.toHaveBeenCalled()
   })
 
   it('skips shared Context replace even when a leftover spec-hash annotation is present', async () => {
     const recipe = makeRecipe({ spec: { ...makeRecipe().spec, contextRef: 'context1' } })
     const mockCustomApi = {
-      createNamespacedCustomObject: vi.fn().mockRejectedValueOnce({ code: 409 }),
+      createNamespacedCustomObject: vi.fn(),
       getNamespacedCustomObject: vi.fn().mockResolvedValue({
         metadata: {
           resourceVersion: '9',
@@ -1442,13 +1466,14 @@ describe('ensureRecipeContext', () => {
 
     expect(mockCustomApi.getNamespacedCustomObject).toHaveBeenCalledTimes(1)
     expect(mockCustomApi.replaceNamespacedCustomObject).not.toHaveBeenCalled()
+    expect(mockCustomApi.createNamespacedCustomObject).not.toHaveBeenCalled()
   })
 
   it('skips private Context replace when mcpServers and WRC labels already match', async () => {
     // Helper-compatibility path: omitted recipeNamespace means same-ns ownership.
     // A valid private no-op must already carry this recipe's ownerRef.
     const mockCustomApi = {
-      createNamespacedCustomObject: vi.fn().mockRejectedValueOnce({ code: 409 }),
+      createNamespacedCustomObject: vi.fn(),
       getNamespacedCustomObject: vi.fn().mockResolvedValue({
         metadata: {
           resourceVersion: '3',
@@ -1475,6 +1500,7 @@ describe('ensureRecipeContext', () => {
     expect(contextName).toBe('wf-test-recipe')
     expect(mockCustomApi.getNamespacedCustomObject).toHaveBeenCalledTimes(1)
     expect(mockCustomApi.replaceNamespacedCustomObject).not.toHaveBeenCalled()
+    expect(mockCustomApi.createNamespacedCustomObject).not.toHaveBeenCalled()
   })
 
   it('rewrites a same-namespace private ownerRef when controller flags drifted', async () => {
@@ -1495,11 +1521,12 @@ describe('ensureRecipeContext', () => {
     expect(
       (liveOf().metadata as { ownerReferences?: unknown } | undefined)?.ownerReferences
     ).toEqual([ownerRef])
+    expect(mockCustomApi.createNamespacedCustomObject).not.toHaveBeenCalled()
   })
 
   it('skips canonical private Context replace when servers and labels match without a recipe ownerRef', async () => {
     const mockCustomApi = {
-      createNamespacedCustomObject: vi.fn().mockRejectedValueOnce({ code: 409 }),
+      createNamespacedCustomObject: vi.fn(),
       getNamespacedCustomObject: vi.fn().mockResolvedValue({
         metadata: {
           resourceVersion: '3',
@@ -1524,11 +1551,12 @@ describe('ensureRecipeContext', () => {
     )
 
     expect(mockCustomApi.replaceNamespacedCustomObject).not.toHaveBeenCalled()
+    expect(mockCustomApi.createNamespacedCustomObject).not.toHaveBeenCalled()
   })
 
   it('writes a private Context when the recipe label does not match', async () => {
     const mockCustomApi = {
-      createNamespacedCustomObject: vi.fn().mockRejectedValueOnce({ code: 409 }),
+      createNamespacedCustomObject: vi.fn(),
       getNamespacedCustomObject: vi.fn().mockResolvedValue({
         metadata: {
           resourceVersion: '3',
@@ -1559,6 +1587,7 @@ describe('ensureRecipeContext', () => {
         }),
       })
     )
+    expect(mockCustomApi.createNamespacedCustomObject).not.toHaveBeenCalled()
   })
 
   function contextApiWithLiveState(initial: {
@@ -1567,7 +1596,7 @@ describe('ensureRecipeContext', () => {
   }) {
     let live = structuredClone(initial)
     const mockCustomApi = {
-      createNamespacedCustomObject: vi.fn().mockRejectedValue({ code: 409 }),
+      createNamespacedCustomObject: vi.fn(),
       getNamespacedCustomObject: vi
         .fn()
         .mockImplementation(() => Promise.resolve(structuredClone(live))),
@@ -1628,6 +1657,7 @@ describe('ensureRecipeContext', () => {
 
     expect(mockCustomApi.replaceNamespacedCustomObject).toHaveBeenCalledTimes(1)
     expect(liveOf().spec?.contextId).toBe('context1')
+    expect(mockCustomApi.createNamespacedCustomObject).not.toHaveBeenCalled()
   })
 
   it('repairs a private empty contextId once, then skips the next reconcile', async () => {
@@ -1645,12 +1675,13 @@ describe('ensureRecipeContext', () => {
 
     expect(mockCustomApi.replaceNamespacedCustomObject).toHaveBeenCalledTimes(1)
     expect(liveOf().spec?.contextId).toBe('wf-test-recipe')
+    expect(mockCustomApi.createNamespacedCustomObject).not.toHaveBeenCalled()
   })
 
   it('keeps a non-empty contextId that differs from metadata.name and does not write', async () => {
     const recipe = makeRecipe({ spec: { ...makeRecipe().spec, contextRef: 'context1' } })
     const mockCustomApi = {
-      createNamespacedCustomObject: vi.fn().mockRejectedValueOnce({ code: 409 }),
+      createNamespacedCustomObject: vi.fn(),
       getNamespacedCustomObject: vi.fn().mockResolvedValue({
         metadata: {
           resourceVersion: '9',
@@ -1678,6 +1709,7 @@ describe('ensureRecipeContext', () => {
     )
 
     expect(mockCustomApi.replaceNamespacedCustomObject).not.toHaveBeenCalled()
+    expect(mockCustomApi.createNamespacedCustomObject).not.toHaveBeenCalled()
   })
 
   it('strips a stale cross-namespace recipe ownerRef from a canonical private Context once', async () => {
@@ -1709,6 +1741,7 @@ describe('ensureRecipeContext', () => {
 
     expect(mockCustomApi.replaceNamespacedCustomObject).toHaveBeenCalledTimes(1)
     expect(liveOf().metadata).not.toHaveProperty('ownerReferences')
+    expect(mockCustomApi.createNamespacedCustomObject).not.toHaveBeenCalled()
   })
 
   it('repairs empty contextId and a stale cross-namespace ownerRef in one write', async () => {
@@ -1741,6 +1774,7 @@ describe('ensureRecipeContext', () => {
     expect(mockCustomApi.replaceNamespacedCustomObject).toHaveBeenCalledTimes(1)
     expect(liveOf().spec?.contextId).toBe('wf-test-recipe')
     expect(liveOf().metadata).not.toHaveProperty('ownerReferences')
+    expect(mockCustomApi.createNamespacedCustomObject).not.toHaveBeenCalled()
   })
 
   it('preserves foreign ownerReferences and finalizers on a necessary Context write', async () => {
@@ -1752,7 +1786,7 @@ describe('ensureRecipeContext', () => {
     }
     const recipe = makeRecipe({ spec: { ...makeRecipe().spec, contextRef: 'context1' } })
     const mockCustomApi = {
-      createNamespacedCustomObject: vi.fn().mockRejectedValueOnce({ code: 409 }),
+      createNamespacedCustomObject: vi.fn(),
       getNamespacedCustomObject: vi.fn().mockResolvedValue({
         metadata: {
           resourceVersion: '9',
@@ -1786,12 +1820,13 @@ describe('ensureRecipeContext', () => {
     }
     expect(replaceCall.body?.metadata?.ownerReferences).toEqual([foreignOwner])
     expect(replaceCall.body?.metadata?.finalizers).toEqual(['example.com/protect'])
+    expect(mockCustomApi.createNamespacedCustomObject).not.toHaveBeenCalled()
   })
 
   it('does not write a shared Context when only foreign metadata is present', async () => {
     const recipe = makeRecipe({ spec: { ...makeRecipe().spec, contextRef: 'context1' } })
     const mockCustomApi = {
-      createNamespacedCustomObject: vi.fn().mockRejectedValueOnce({ code: 409 }),
+      createNamespacedCustomObject: vi.fn(),
       getNamespacedCustomObject: vi.fn().mockResolvedValue({
         metadata: {
           resourceVersion: '9',
@@ -1832,11 +1867,13 @@ describe('ensureRecipeContext', () => {
     )
 
     expect(mockCustomApi.replaceNamespacedCustomObject).not.toHaveBeenCalled()
+    expect(mockCustomApi.createNamespacedCustomObject).not.toHaveBeenCalled()
   })
 
   it('H04c — re-throws non-409 errors', async () => {
     const mockCustomApi = {
       createNamespacedCustomObject: vi.fn().mockRejectedValue(new Error('API error')),
+      getNamespacedCustomObject: vi.fn().mockRejectedValue({ code: 404 }),
     }
     const deps: DelegationDeps = {
       customApi: mockCustomApi as unknown as DelegationDeps['customApi'],
@@ -1855,6 +1892,7 @@ describe('ensureRecipeContext', () => {
     // `recipeNamespace` param differs from the target `namespace`.
     const mockCustomApi = {
       createNamespacedCustomObject: vi.fn().mockResolvedValue({}),
+      getNamespacedCustomObject: vi.fn().mockRejectedValue({ code: 404 }),
     }
     const deps: DelegationDeps = {
       customApi: mockCustomApi as unknown as DelegationDeps['customApi'],
@@ -2084,10 +2122,12 @@ describe('delegateTransportWorkloads', () => {
       // Call 1: McpServer pre-check GET → 404 (new server)
       // Call 2: ensureRecipeContext createNamespacedCustomObject → succeeds
       createNamespacedCustomObject: vi.fn().mockResolvedValue({}),
-      getNamespacedCustomObject: vi
-        .fn()
-        // Pre-check GET: 404 → server does not exist yet, safe to create
-        .mockRejectedValueOnce({ code: 404 }),
+      getNamespacedCustomObject: contextAbsentGet(
+        vi
+          .fn()
+          // Pre-check GET: 404 → server does not exist yet, safe to create
+          .mockRejectedValueOnce({ code: 404 })
+      ),
     }
     const mockCoreApi = {
       readNamespacedService: vi.fn().mockRejectedValue({ code: 404 }),
@@ -2371,7 +2411,7 @@ describe('delegateTransportWorkloads', () => {
   it('does NOT patch shared Context (H-04 isolation — no patchNamespacedCustomObject)', async () => {
     const mockCustomApi = {
       createNamespacedCustomObject: vi.fn().mockResolvedValue({}),
-      getNamespacedCustomObject: vi.fn().mockRejectedValueOnce({ code: 404 }),
+      getNamespacedCustomObject: contextAbsentGet(vi.fn().mockRejectedValueOnce({ code: 404 })),
       patchNamespacedCustomObject: vi.fn().mockResolvedValue({}),
     }
     const mockCoreApi = {
@@ -2422,10 +2462,12 @@ describe('delegateTransportWorkloads', () => {
   it('skips non-transport workloads', async () => {
     const mockCustomApi = {
       createNamespacedCustomObject: vi.fn().mockResolvedValue({}),
-      getNamespacedCustomObject: vi
-        .fn()
-        // Pre-check GET: 404 → server does not exist yet, safe to create
-        .mockRejectedValueOnce({ code: 404 }),
+      getNamespacedCustomObject: contextAbsentGet(
+        vi
+          .fn()
+          // Pre-check GET: 404 → server does not exist yet, safe to create
+          .mockRejectedValueOnce({ code: 404 })
+      ),
     }
     const mockCoreApi = {
       readNamespacedService: vi.fn().mockRejectedValue({ code: 404 }),
@@ -2448,12 +2490,14 @@ describe('delegateTransportWorkloads', () => {
   it('M3 — handles existing recipe-owned McpServer with replace (resourceVersion)', async () => {
     const mockCustomApi = {
       createNamespacedCustomObject: vi.fn().mockResolvedValue({}),
-      getNamespacedCustomObject: vi
-        .fn()
-        // Pre-check GET: server exists AND has clerum.io/recipe label → recipe-owned, replace path
-        .mockResolvedValueOnce({
-          metadata: { resourceVersion: '42', labels: { 'clerum.io/recipe': 'test-recipe' } },
-        }),
+      getNamespacedCustomObject: contextAbsentGet(
+        vi
+          .fn()
+          // Pre-check GET: server exists AND has clerum.io/recipe label → recipe-owned, replace path
+          .mockResolvedValueOnce({
+            metadata: { resourceVersion: '42', labels: { 'clerum.io/recipe': 'test-recipe' } },
+          })
+      ),
       replaceNamespacedCustomObject: vi.fn().mockResolvedValue({}),
     }
     const mockCoreApi = {
@@ -2526,17 +2570,19 @@ describe('delegateTransportWorkloads', () => {
   it('retries McpServer replace conflicts with the latest object', async () => {
     const mockCustomApi = {
       createNamespacedCustomObject: vi.fn().mockResolvedValue({}),
-      getNamespacedCustomObject: vi
-        .fn()
-        .mockResolvedValueOnce({
-          metadata: { resourceVersion: '42', labels: { 'clerum.io/recipe': 'test-recipe' } },
-        })
-        .mockResolvedValueOnce({
-          metadata: { resourceVersion: '43', labels: { 'clerum.io/recipe': 'test-recipe' } },
-        })
-        .mockResolvedValueOnce({
-          metadata: { resourceVersion: '44', labels: { 'clerum.io/recipe': 'test-recipe' } },
-        }),
+      getNamespacedCustomObject: contextAbsentGet(
+        vi
+          .fn()
+          .mockResolvedValueOnce({
+            metadata: { resourceVersion: '42', labels: { 'clerum.io/recipe': 'test-recipe' } },
+          })
+          .mockResolvedValueOnce({
+            metadata: { resourceVersion: '43', labels: { 'clerum.io/recipe': 'test-recipe' } },
+          })
+          .mockResolvedValueOnce({
+            metadata: { resourceVersion: '44', labels: { 'clerum.io/recipe': 'test-recipe' } },
+          })
+      ),
       replaceNamespacedCustomObject: vi
         .fn()
         .mockRejectedValueOnce({ code: 409 })
@@ -2555,7 +2601,11 @@ describe('delegateTransportWorkloads', () => {
     const delegated = await delegateTransportWorkloads(deps, makeRecipe(), 'mcp-server', new Map())
 
     expect(delegated).toEqual(['test-recipe-redis-mcp'])
-    expect(mockCustomApi.replaceNamespacedCustomObject).toHaveBeenCalledTimes(3)
+    expect(
+      mockCustomApi.replaceNamespacedCustomObject.mock.calls.filter(
+        ([args]) => (args as { plural: string }).plural === 'mcpservers'
+      )
+    ).toHaveLength(3)
     expect(mockCustomApi.replaceNamespacedCustomObject).toHaveBeenNthCalledWith(
       3,
       expect.objectContaining({
@@ -2573,21 +2623,23 @@ describe('delegateTransportWorkloads', () => {
     const desiredManifest = buildMcpServerManifest(recipe.spec.workloads![0], recipe, 'mcp-server')!
     const mockCustomApi = {
       createNamespacedCustomObject: vi.fn().mockResolvedValue({}),
-      getNamespacedCustomObject: vi
-        .fn()
-        .mockResolvedValueOnce({
-          metadata: { resourceVersion: '42', labels: { 'clerum.io/recipe': 'test-recipe' } },
-        })
-        .mockResolvedValueOnce({
-          metadata: { resourceVersion: '43', labels: { 'clerum.io/recipe': 'test-recipe' } },
-        })
-        .mockResolvedValueOnce({
-          metadata: { resourceVersion: '44', labels: { 'clerum.io/recipe': 'test-recipe' } },
-        })
-        .mockResolvedValueOnce({
-          metadata: { resourceVersion: '45', labels: { 'clerum.io/recipe': 'test-recipe' } },
-          spec: desiredManifest.spec,
-        }),
+      getNamespacedCustomObject: contextAbsentGet(
+        vi
+          .fn()
+          .mockResolvedValueOnce({
+            metadata: { resourceVersion: '42', labels: { 'clerum.io/recipe': 'test-recipe' } },
+          })
+          .mockResolvedValueOnce({
+            metadata: { resourceVersion: '43', labels: { 'clerum.io/recipe': 'test-recipe' } },
+          })
+          .mockResolvedValueOnce({
+            metadata: { resourceVersion: '44', labels: { 'clerum.io/recipe': 'test-recipe' } },
+          })
+          .mockResolvedValueOnce({
+            metadata: { resourceVersion: '45', labels: { 'clerum.io/recipe': 'test-recipe' } },
+            spec: desiredManifest.spec,
+          })
+      ),
       replaceNamespacedCustomObject: vi
         .fn()
         .mockRejectedValueOnce({ code: 409 })
@@ -2684,12 +2736,14 @@ describe('delegateTransportWorkloads', () => {
         .fn()
         .mockRejectedValueOnce({ code: 409 })
         .mockResolvedValueOnce({}),
-      getNamespacedCustomObject: vi
-        .fn()
-        .mockRejectedValueOnce({ code: 404 })
-        .mockResolvedValueOnce({
-          metadata: { resourceVersion: '44', labels: { 'clerum.io/recipe': 'test-recipe' } },
-        }),
+      getNamespacedCustomObject: contextAbsentGet(
+        vi
+          .fn()
+          .mockRejectedValueOnce({ code: 404 })
+          .mockResolvedValueOnce({
+            metadata: { resourceVersion: '44', labels: { 'clerum.io/recipe': 'test-recipe' } },
+          })
+      ),
       replaceNamespacedCustomObject: vi.fn().mockResolvedValue({}),
     }
     const mockCoreApi = {

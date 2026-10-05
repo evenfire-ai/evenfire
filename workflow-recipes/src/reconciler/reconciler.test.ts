@@ -493,19 +493,25 @@ describe('WorkflowRecipeReconciler', () => {
     mockCustomApi.replaceNamespacedCustomObject.mockReset()
     mockCustomApi.replaceNamespacedCustomObject.mockResolvedValue({})
     mockCustomApi.getNamespacedCustomObject.mockReset()
-    mockCustomApi.getNamespacedCustomObject.mockImplementation(({ name }: { name?: string }) =>
-      Promise.resolve({
-        metadata: {
-          uid: liveWorkflowRecipeUid(name),
-          resourceVersion: '1',
-          annotations: { 'clerum.io/network-ready': 'true' },
-          labels: { 'clerum.io/recipe': 'test-recipe' },
-        },
-        status: {
-          conditions: [{ type: 'ExternalEgressReady', status: 'True' }],
-        },
-        spec: { mcpServers: [] },
-      })
+    // No per-recipe Context exists until a test seeds one: the Context writer
+    // reads first (#760), and an object here would send every transport pass
+    // down the replace path instead of the create.
+    mockCustomApi.getNamespacedCustomObject.mockImplementation(
+      ({ name, plural }: { name?: string; plural?: string }) =>
+        plural === 'contexts'
+          ? Promise.reject({ code: 404 })
+          : Promise.resolve({
+              metadata: {
+                uid: liveWorkflowRecipeUid(name),
+                resourceVersion: '1',
+                annotations: { 'clerum.io/network-ready': 'true' },
+                labels: { 'clerum.io/recipe': 'test-recipe' },
+              },
+              status: {
+                conditions: [{ type: 'ExternalEgressReady', status: 'True' }],
+              },
+              spec: { mcpServers: [] },
+            })
     )
     mockCustomApi.patchNamespacedCustomObjectStatus.mockClear()
     mockNetworkingApi.createNamespacedNetworkPolicy.mockReset()

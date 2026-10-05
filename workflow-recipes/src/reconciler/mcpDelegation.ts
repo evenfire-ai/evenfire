@@ -969,15 +969,37 @@ export async function ensureRecipeContext(
     },
   }
 
-  const replaceExistingContext = async (): Promise<{ wrote: boolean }> => {
+  const readContext = async (): Promise<ExistingContextSnapshot> =>
+    (await deps.customApi.getNamespacedCustomObject({
+      group: CRD_GROUP,
+      version: CRD_VERSION,
+      namespace,
+      plural: CONTEXT_PLURAL,
+      name: contextName,
+    })) as ExistingContextSnapshot
+
+  // Every read in here runs after a conflict (create or replace), so the
+  // object is known to have existed; a 404 asks for a fresh reconciliation.
+  const rereadContext = async (): Promise<ExistingContextSnapshot> => {
+    try {
+      return await readContext()
+    } catch (error) {
+      if (getErrorCode(error) === 404) {
+        throw new ResourceVanishedAfterConflictError(`Context "${contextName}" in ${namespace}`, {
+          cause: error,
+        })
+      }
+      throw error
+    }
+  }
+
+  // `initial` is the snapshot the caller already read; attempt 1 compares
+  // against it instead of reading again.
+  const replaceExistingContext = async (
+    initial?: ExistingContextSnapshot
+  ): Promise<{ wrote: boolean }> => {
     for (let attempt = 1; attempt <= CONTEXT_REPLACE_CONFLICT_RETRIES; attempt += 1) {
-      const existing = (await deps.customApi.getNamespacedCustomObject({
-        group: CRD_GROUP,
-        version: CRD_VERSION,
-        namespace,
-        plural: CONTEXT_PLURAL,
-        name: contextName,
-      })) as ExistingContextSnapshot
+      const existing = attempt === 1 && initial ? initial : await rereadContext()
 
       // Semantic post-merge equality. Do not stamp clerum.io/spec-hash on a
       // shared Context: N recipe writers would flap the annotation the same
@@ -1055,30 +1077,46 @@ export async function ensureRecipeContext(
   // One mechanism for all three outcomes of this one decision (#568 review, R1-L5).
   const log = createLogger('wrc', recipeName)
 
+  // Read first (#760): a POST against an existing Context is a rejected write
+  // that the audit log still counts, and this runs twice per reconcile.
+  let initial: ExistingContextSnapshot | null
   try {
-    await deps.customApi.createNamespacedCustomObject({
-      group: CRD_GROUP,
-      version: CRD_VERSION,
-      namespace,
-      plural: CONTEXT_PLURAL,
-      body: contextBody,
-    })
-    log.info('Created per-recipe Context', { contextName, servers: serverNames.length })
+    initial = await readContext()
   } catch (error) {
-    if (getErrorCode(error) === 409) {
-      const { wrote } = await replaceExistingContext()
-      if (wrote) {
-        log.info('Updated per-recipe Context', { contextName, servers: serverNames.length })
-      } else {
-        // DEBUG, not INFO. This is the steady state: it fires on every reconcile
-        // pass for every recipe, which at the current cadence is the log volume
-        // #492 exists about. The writes above are the events worth an INFO line;
-        // "nothing happened" is not (#568 review, jozer-rami minors).
-        log.debug('Context unchanged; skipping update', { contextName })
+    if (getErrorCode(error) !== 404) throw error
+    initial = null
+  }
+
+  let wrote: boolean
+  if (initial) {
+    ;({ wrote } = await replaceExistingContext(initial))
+  } else {
+    try {
+      await deps.customApi.createNamespacedCustomObject({
+        group: CRD_GROUP,
+        version: CRD_VERSION,
+        namespace,
+        plural: CONTEXT_PLURAL,
+        body: contextBody,
+      })
+      log.info('Created per-recipe Context', { contextName, servers: serverNames.length })
+      return contextName
+    } catch (error) {
+      if (getErrorCode(error) !== 409) {
+        throw error
       }
-    } else {
-      throw error
+      // Another writer created it between our read and this POST.
+      ;({ wrote } = await replaceExistingContext())
     }
+  }
+  if (wrote) {
+    log.info('Updated per-recipe Context', { contextName, servers: serverNames.length })
+  } else {
+    // DEBUG, not INFO. This is the steady state: it fires on every reconcile
+    // pass for every recipe, which at the current cadence is the log volume
+    // #492 exists about. The writes above are the events worth an INFO line;
+    // "nothing happened" is not (#568 review, jozer-rami minors).
+    log.debug('Context unchanged; skipping update', { contextName })
   }
   return contextName
 }
