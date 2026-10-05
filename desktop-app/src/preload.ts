@@ -45,6 +45,26 @@ const DESKTOP_COMMAND_IDS = new Set<DesktopCommandId>([
   'app.backToApps',
 ])
 
+/**
+ * Producer-side cancellation wiring (folder-zip Stop, R1-M1): a cancellable
+ * invoke carries a requestId; if the caller's signal aborts, tell main to abort
+ * the in-flight request. The cleanup detaches the listener once the invoke
+ * settles either way.
+ */
+function attachRequestAbort(signal?: AbortSignal): {
+  requestId?: string
+  cleanup: () => void
+} {
+  if (!signal) return { cleanup: () => undefined }
+  const requestId = crypto.randomUUID()
+  const onAbort = () => ipcRenderer.send('gfs:abort', { requestId })
+  signal.addEventListener('abort', onAbort, { once: true })
+  return {
+    requestId,
+    cleanup: () => signal.removeEventListener('abort', onAbort),
+  }
+}
+
 function isDesktopCommandId(value: unknown): value is DesktopCommandId {
   return typeof value === 'string' && DESKTOP_COMMAND_IDS.has(value as DesktopCommandId)
 }
@@ -143,14 +163,31 @@ const clerum = Object.freeze({
   },
   gfs: {
     resolve: (uri: string) => ipcRenderer.invoke('gfs:resolve', { uri }),
-    download: (uri: string, options?: { maxBytes?: number }) =>
-      ipcRenderer.invoke('gfs:download', { uri, maxBytes: options?.maxBytes }),
+    download: (uri: string, options?: { maxBytes?: number; signal?: AbortSignal }) => {
+      const abort = attachRequestAbort(options?.signal)
+      return ipcRenderer
+        .invoke('gfs:download', {
+          uri,
+          maxBytes: options?.maxBytes,
+          requestId: abort.requestId,
+        })
+        .finally(abort.cleanup)
+    },
     downloadPreview: (uri: string, maxBytes: number) =>
       ipcRenderer.invoke('gfs:downloadPreview', { uri, maxBytes }),
     listAccessible: (drive?: string, cursor?: string) =>
       ipcRenderer.invoke('gfs:listAccessible', { drive, cursor }),
-    listChildren: (resourceId: string, drive?: string, cursor?: string) =>
-      ipcRenderer.invoke('gfs:listChildren', { resourceId, drive, cursor }),
+    listChildren: (
+      resourceId: string,
+      drive?: string,
+      cursor?: string,
+      options?: { signal?: AbortSignal }
+    ) => {
+      const abort = attachRequestAbort(options?.signal)
+      return ipcRenderer
+        .invoke('gfs:listChildren', { resourceId, drive, cursor, requestId: abort.requestId })
+        .finally(abort.cleanup)
+    },
     affordances: (resourceId: string, drive?: string) =>
       ipcRenderer.invoke('gfs:affordances', { resourceId, drive }),
     createFolder: (parentResourceId: string, name: string, drive?: string) =>

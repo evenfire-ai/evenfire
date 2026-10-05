@@ -25,11 +25,17 @@ export interface BoundedDownloadDeps {
 export async function fetchBoundedBytes(
   url: string,
   token: string,
-  opts?: { maxBytes?: number },
+  opts?: { maxBytes?: number; signal?: AbortSignal },
   deps: BoundedDownloadDeps = { fetch }
 ): Promise<ArrayBuffer> {
   const maxBytes = opts?.maxBytes
   const controller = new AbortController()
+  // An external signal (producer-side cancellation, R1-M1) funnels into the
+  // same controller that bounds the body: aborting it ends the fetch.
+  if (opts?.signal) {
+    if (opts.signal.aborted) controller.abort()
+    else opts.signal.addEventListener('abort', () => controller.abort(), { once: true })
+  }
   const res = await deps.fetch(url, {
     headers: { authorization: `Bearer ${token}` },
     signal: controller.signal,

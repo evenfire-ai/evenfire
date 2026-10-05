@@ -291,6 +291,32 @@ export function registerIpcHandlers(service: AppService): void {
   const entityChangeOwnerCleanupRegistered = new Set<number>()
   const activeDesktopNotifications = new Map<string, Notification>()
 
+  // Producer-side cancellation for cancellable GFS reads (folder-zip walk,
+  // R1-M1): the renderer attaches a requestId to an invoke and fires
+  // 'gfs:abort' on Stop; the in-flight request's AbortController ends the
+  // producer fetch instead of leaving it to burn the read budget.
+  const gfsRequestAborters = new Map<string, AbortController>()
+  ipcMain.on('gfs:abort', (event, payload: { requestId?: string }) => {
+    try {
+      assertTrustedSender(event)
+    } catch {
+      return
+    }
+    const requestId = payload?.requestId ? sanitizeString(payload.requestId) : ''
+    if (requestId) gfsRequestAborters.get(requestId)?.abort()
+  })
+  function runWithGfsAbortSignal<T>(
+    requestId: string | undefined,
+    run: (signal?: AbortSignal) => Promise<T>
+  ): Promise<T> {
+    if (!requestId) return run(undefined)
+    const controller = new AbortController()
+    gfsRequestAborters.set(requestId, controller)
+    return run(controller.signal).finally(() => {
+      gfsRequestAborters.delete(requestId)
+    })
+  }
+
   ipcMain.handle('auth:getSessionState', async event => {
     assertTrustedSender(event)
     return service.getSessionState()
@@ -480,18 +506,24 @@ export function registerIpcHandlers(service: AppService): void {
     assertTrustedSender(event)
     return service.resolveGfsUri(sanitizeString(payload?.uri))
   })
-  ipcMain.handle('gfs:download', async (event, payload: { uri: string; maxBytes?: number }) => {
-    assertTrustedSender(event)
-    // Optional producer-side bound (folder-zip walk): when present it is
-    // validated here in main so an over-large body is rejected before it
-    // materializes in either process. Absent keeps the single-file
-    // save-to-disk path uncapped.
-    const maxBytes = sanitizeOptionalPositiveInteger(payload?.maxBytes, 'maxBytes')
-    if (maxBytes !== undefined && maxBytes > GFS_DOWNLOAD_MAX_BYTES_CEILING) {
-      throw new Error('download limit exceeds the allowed maximum')
+  ipcMain.handle(
+    'gfs:download',
+    async (event, payload: { uri: string; maxBytes?: number; requestId?: string }) => {
+      assertTrustedSender(event)
+      // Optional producer-side bound (folder-zip walk): when present it is
+      // validated here in main so an over-large body is rejected before it
+      // materializes in either process. Absent keeps the single-file
+      // save-to-disk path uncapped.
+      const maxBytes = sanitizeOptionalPositiveInteger(payload?.maxBytes, 'maxBytes')
+      if (maxBytes !== undefined && maxBytes > GFS_DOWNLOAD_MAX_BYTES_CEILING) {
+        throw new Error('download limit exceeds the allowed maximum')
+      }
+      const requestId = payload?.requestId ? sanitizeString(payload.requestId) : undefined
+      return runWithGfsAbortSignal(requestId, signal =>
+        service.downloadGfsUri(sanitizeString(payload?.uri), maxBytes, signal)
+      )
     }
-    return service.downloadGfsUri(sanitizeString(payload?.uri), maxBytes)
-  })
+  )
   ipcMain.handle(
     'gfs:downloadPreview',
     async (event, payload: { uri: string; maxBytes: number }) => {
@@ -524,11 +556,17 @@ export function registerIpcHandlers(service: AppService): void {
   )
   ipcMain.handle(
     'gfs:listChildren',
-    async (event, payload: { resourceId: string; drive?: string; cursor?: string }) => {
+    async (
+      event,
+      payload: { resourceId: string; drive?: string; cursor?: string; requestId?: string }
+    ) => {
       assertTrustedSender(event)
       const drive = payload?.drive ? sanitizeString(payload.drive) : undefined
       const cursor = payload?.cursor ? sanitizeString(payload.cursor) : undefined
-      return service.listGfsChildren(sanitizeString(payload?.resourceId), drive, cursor)
+      const requestId = payload?.requestId ? sanitizeString(payload.requestId) : undefined
+      return runWithGfsAbortSignal(requestId, signal =>
+        service.listGfsChildren(sanitizeString(payload?.resourceId), drive, cursor, signal)
+      )
     }
   )
   ipcMain.handle(

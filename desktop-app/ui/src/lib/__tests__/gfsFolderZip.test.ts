@@ -135,9 +135,13 @@ describe('createGfsFolderZip', () => {
     expect(result.fileName).toBe('Docs.zip')
     expect(result.fileCount).toBe(3)
     expect(result.skipped).toEqual([])
-    expect(deps.listChildren).toHaveBeenCalledWith('folder-root', 'main', undefined)
-    expect(deps.listChildren).toHaveBeenCalledWith('folder-root', 'main', '1')
-    expect(deps.listChildren).toHaveBeenCalledWith('sub', 'main', undefined)
+    expect(deps.listChildren).toHaveBeenCalledWith('folder-root', 'main', undefined, {
+      signal: undefined,
+    })
+    expect(deps.listChildren).toHaveBeenCalledWith('folder-root', 'main', '1', {
+      signal: undefined,
+    })
+    expect(deps.listChildren).toHaveBeenCalledWith('sub', 'main', undefined, { signal: undefined })
 
     const names = zipEntryNames(result.bytes)
     expect(names.sort()).toEqual(['Docs/a.txt', 'Docs/b.png', 'Docs/sub/c.md'].sort())
@@ -291,6 +295,34 @@ describe('createGfsFolderZip', () => {
     // Bounded work: the refusal fires inside the FIRST listing page.
     expect(deps.listChildren).toHaveBeenCalledTimes(1)
     expect(deps.download).not.toHaveBeenCalled()
+  })
+
+  it('forwards the stop signal to the producer bridge on both call kinds (R1-M1)', async () => {
+    const controller = new AbortController()
+    const listChildren = vi.fn(() => new Promise(() => undefined))
+    const download = vi.fn(async () => ({ bytes: new ArrayBuffer(4) }))
+    const previousClerum = (window as { clerum?: unknown }).clerum
+    ;(window as { clerum?: unknown }).clerum = { gfs: { listChildren, download } }
+
+    try {
+      const walk = createGfsFolderZip(
+        { resourceId: 'root', drive: 'main', name: 'Bridge' },
+        { signal: controller.signal }
+      )
+      const rejection = expect(walk).rejects.toMatchObject({ name: 'AbortError' })
+      for (let index = 0; index < 200 && listChildren.mock.calls.length === 0; index += 1)
+        await Promise.resolve()
+      const bridgeOptions = listChildren.mock.calls[0]?.[3] as { signal?: AbortSignal } | undefined
+      // The default wiring hands the walk's signal to the bridge, so the
+      // producer fetch dies with the walk instead of outliving the Stop.
+      expect(bridgeOptions?.signal).toBeInstanceOf(AbortSignal)
+      expect(bridgeOptions?.signal?.aborted).toBe(false)
+      controller.abort()
+      await rejection
+      expect(bridgeOptions?.signal?.aborted).toBe(true)
+    } finally {
+      ;(window as { clerum?: unknown }).clerum = previousClerum
+    }
   })
 
   it('skips entries whose complete path would overflow the 16-bit ZIP name field (R1-M2)', async () => {

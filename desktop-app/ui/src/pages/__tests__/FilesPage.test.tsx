@@ -3582,6 +3582,17 @@ describe('FilesPage', () => {
     expect(pushToast).toHaveBeenCalledWith('Stopped preparing Assets.zip.', 'info')
     expect(pushToast).not.toHaveBeenCalledWith(expect.stringContaining('Downloaded'), 'success')
     expect(click).not.toHaveBeenCalled()
+
+    // A replacement walk starts cleanly once the stopped one has settled —
+    // one job at a time, no overlap (R1-M1).
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Options for Assets' }))
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Download as zip' }))
+    })
+    expect(screen.getByTestId('gfs-zip-progress')).toBeTruthy()
+    expect(listChildren).toHaveBeenCalledTimes(2)
   })
 
   it('aborts a running zip walk when the page unmounts, so a remount cannot double-walk (M2)', async () => {

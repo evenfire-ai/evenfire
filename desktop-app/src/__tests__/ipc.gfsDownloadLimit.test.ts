@@ -56,12 +56,12 @@ describe('gfs:download maxBytes boundary (R1-H2)', () => {
 
   it('passes a within-ceiling bound through to the service', async () => {
     await handler('gfs:download')(trusted, { uri, maxBytes: 1024 })
-    expect(service.downloadGfsUri).toHaveBeenCalledWith(uri, 1024)
+    expect(service.downloadGfsUri).toHaveBeenCalledWith(uri, 1024, undefined)
   })
 
   it('stays uncapped when no bound is requested', async () => {
     await handler('gfs:download')(trusted, { uri })
-    expect(service.downloadGfsUri).toHaveBeenCalledWith(uri, undefined)
+    expect(service.downloadGfsUri).toHaveBeenCalledWith(uri, undefined, undefined)
   })
 
   it('rejects a bound above the ceiling before reaching the service', async () => {

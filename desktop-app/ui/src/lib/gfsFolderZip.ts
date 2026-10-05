@@ -120,13 +120,25 @@ export interface GfsZipChildrenPage {
 }
 
 export interface GfsFolderZipDeps {
-  listChildren(resourceId: string, drive: string, cursor?: string): Promise<GfsZipChildrenPage>
+  /**
+   * Lists one folder page. `options.signal` propagates the walk's stop to the
+   * producer-side fetch when the default bridge is used (R1-M1).
+   */
+  listChildren(
+    resourceId: string,
+    drive: string,
+    cursor?: string,
+    options?: { signal?: AbortSignal }
+  ): Promise<GfsZipChildrenPage>
   /**
    * Downloads one file. `options.maxBytes` is the producer-side bound for the
    * transfer (R1-H2): the bounded fetch rejects before an over-budget body
-   * materializes in either process.
+   * materializes in either process. `options.signal` as above.
    */
-  download(uri: string, options?: { maxBytes?: number }): Promise<{ bytes: ArrayBuffer }>
+  download(
+    uri: string,
+    options?: { maxBytes?: number; signal?: AbortSignal }
+  ): Promise<{ bytes: ArrayBuffer }>
   throttle: GfsReadThrottle
   sleep: (ms: number) => Promise<void>
 }
@@ -244,12 +256,22 @@ export async function createGfsFolderZip(
 ): Promise<GfsFolderZipResult> {
   const maxTotalBytes = options.limits?.maxTotalBytes ?? GFS_ZIP_MAX_TOTAL_BYTES
   const maxEntries = options.limits?.maxEntries ?? GFS_ZIP_MAX_ENTRIES
+  // Defaults read the real bridge; the walk's AbortSignal rides along on both
+  // call kinds so a Stop cancels the producer-side fetch, not just the
+  // renderer's patience (R1-M1).
   const listChildren: GfsFolderZipDeps['listChildren'] =
     options.deps?.listChildren ??
-    ((resourceId, drive, cursor) => window.clerum.gfs.listChildren(resourceId, drive, cursor))
+    ((resourceId, drive, cursor, requestOptions) =>
+      window.clerum.gfs.listChildren(resourceId, drive, cursor, {
+        signal: requestOptions?.signal ?? options.signal,
+      }))
   const download: GfsFolderZipDeps['download'] =
     options.deps?.download ??
-    ((uri, requestOptions) => window.clerum.gfs.download(uri, requestOptions))
+    ((uri, requestOptions) =>
+      window.clerum.gfs.download(uri, {
+        maxBytes: requestOptions?.maxBytes,
+        signal: requestOptions?.signal ?? options.signal,
+      }))
   const sleep =
     options.deps?.sleep ?? ((ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms)))
   const throttle = options.deps?.throttle ?? createGfsReadThrottle()
@@ -324,7 +346,9 @@ export async function createGfsFolderZip(
       await withAbort(throttle.acquire())
       let page: GfsZipChildrenPage
       try {
-        page = await withRateLimitRetry(() => listChildren(next.resourceId, folder.drive, cursor))
+        page = await withRateLimitRetry(() =>
+          listChildren(next.resourceId, folder.drive, cursor, { signal })
+        )
       } catch (error) {
         const message = toMessage(error)
         if (isAccessDenied(message)) {

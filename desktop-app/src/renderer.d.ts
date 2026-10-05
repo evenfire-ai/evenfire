@@ -133,7 +133,7 @@ declare global {
         }>
         download: (
           uri: string,
-          options?: { maxBytes?: number }
+          options?: { maxBytes?: number; signal?: AbortSignal }
         ) => Promise<{
           resource: {
             drive: string
@@ -198,7 +198,8 @@ declare global {
         listChildren: (
           resourceId: string,
           drive?: string,
-          cursor?: string
+          cursor?: string,
+          options?: { signal?: AbortSignal }
         ) => Promise<{
           items: Array<{
             resourceId: string
