@@ -65,7 +65,13 @@ function createHandler(
   > = async () => runtimeConfigModule!.getDesktopRuntimeConfigState(),
   logoutForEnvironmentMismatch?: () => Promise<number | null>,
   onSessionNeedsLoad: () => Promise<void> = vi.fn(async () => {}),
-  readSessionGeneration?: () => Promise<number>
+  readSessionGeneration?: () => Promise<number>,
+  requestEnvironmentSwitchConfirmation: (details: {
+    activeEnvironmentName: string
+    activeExternalRestApiBaseUrl: string
+    targetEnvironmentName: string
+    targetExternalRestApiBaseUrl: string
+  }) => Promise<boolean> = vi.fn(async () => true)
 ) {
   let sessionGeneration = 0
   const getSessionGeneration = readSessionGeneration ?? (async () => sessionGeneration)
@@ -92,12 +98,15 @@ function createHandler(
     handleSelectRuntimeConfig: selectRuntimeConfig,
     onSessionNeedsLoad,
     logoutForEnvironmentMismatch: logout,
+    requestEnvironmentSwitchConfirmation,
     setPendingDesktopEnvironmentSetup,
     setStatus,
   })
   return {
     handler,
     onSessionNeedsLoad,
+    logout,
+    requestEnvironmentSwitchConfirmation,
     selectRuntimeConfig,
     setPendingDesktopEnvironmentSetup,
     setStatus,
@@ -215,6 +224,39 @@ describe('Desktop environment handoff concurrency', () => {
         rpcProxyBaseUrl: '',
       })
     }
+  })
+
+  it('asks before logging out to switch from an authenticated environment', async () => {
+    const requestEnvironmentSwitchConfirmation = vi.fn(async () => false)
+    const {
+      handler,
+      logout,
+      requestEnvironmentSwitchConfirmation: requestConfirmation,
+      selectRuntimeConfig,
+      setPendingDesktopEnvironmentSetup,
+    } = createHandler(
+      () => ({ booting: false, busy: false, authTransitioning: false, isAuthenticated: true }),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      requestEnvironmentSwitchConfirmation
+    )
+
+    await handler({
+      ...targetEnvironment,
+      externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/api/v1`,
+    })
+
+    expect(requestConfirmation).toHaveBeenCalledWith({
+      activeEnvironmentName: 'Current tenant',
+      activeExternalRestApiBaseUrl: currentEnvironment.externalRestApiBaseUrl,
+      targetEnvironmentName: targetEnvironment.appName,
+      targetExternalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/api/v1`,
+    })
+    expect(logout).not.toHaveBeenCalled()
+    expect(selectRuntimeConfig).not.toHaveBeenCalled()
+    expect(setPendingDesktopEnvironmentSetup).not.toHaveBeenCalled()
   })
 
   it('keeps the current environment when token removal fails during handoff logout', async () => {

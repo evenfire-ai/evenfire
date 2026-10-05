@@ -8,7 +8,7 @@ import type {
   DesktopRuntimeConfigHandoffSelection,
   DesktopRuntimeConfigState,
 } from '../../../../src/types'
-import type { SetStatusFn } from './types'
+import type { DesktopEnvironmentSwitchConfirmation, SetStatusFn } from './types'
 
 const LOCALHOST_OPTION_ID = '__localhost__'
 
@@ -33,6 +33,9 @@ type DesktopEnvironmentSetupHandlerOptions = {
     expectedSessionGeneration: number
   ) => Promise<DesktopRuntimeConfigHandoffSelection | null>
   onSessionNeedsLoad: (options?: { preserveNav?: boolean }) => Promise<void>
+  requestEnvironmentSwitchConfirmation: (
+    details: DesktopEnvironmentSwitchConfirmation
+  ) => Promise<boolean>
   logoutForEnvironmentMismatch: () => Promise<number | null>
   setPendingDesktopEnvironmentSetup: (config: DesktopRuntimeConfig | null) => void
   setStatus: SetStatusFn
@@ -80,6 +83,7 @@ export function createDesktopEnvironmentSetupHandler({
   refreshRuntimeConfigState,
   handleSelectRuntimeConfig,
   onSessionNeedsLoad,
+  requestEnvironmentSwitchConfirmation,
   logoutForEnvironmentMismatch,
   setPendingDesktopEnvironmentSetup,
   setStatus,
@@ -166,6 +170,18 @@ export function createDesktopEnvironmentSetupHandler({
       )
     )
     if (authState.isAuthenticated && !activeRestEndpointMatches) {
+      const switchConfirmed = await requestEnvironmentSwitchConfirmation({
+        activeEnvironmentName: configState.currentConfig?.appName?.trim() || 'Current environment',
+        activeExternalRestApiBaseUrl: configState.currentConfig?.externalRestApiBaseUrl || '',
+        targetEnvironmentName: linkedConfig.appName || 'Evenfire',
+        targetExternalRestApiBaseUrl: linkedConfig.externalRestApiBaseUrl,
+      })
+      if (!switchConfirmed) return
+      if (!(await ownsSessionGeneration(sessionGeneration))) return
+
+      authState = getAuthState()
+      if (isAuthenticationOperationInProgress(authState) || !authState.isAuthenticated) return
+
       setPendingDesktopEnvironmentSetup(null)
       let logoutGeneration: number | null
       try {

@@ -47,6 +47,8 @@ let desktopEnvironmentSetupListener:
   | ((payload: DesktopEnvironmentSetupPayload) => void | Promise<void>)
   | null = null
 let confirmDesktopEnvironmentSetupForTest: (() => Promise<void>) | null = null
+let confirmDesktopEnvironmentSwitchForTest: (() => void) | null = null
+let cancelDesktopEnvironmentSwitchForTest: (() => void) | null = null
 let setBootingForTest: ((value: boolean) => void) | null = null
 let setAuthenticatedForTest: ((value: boolean) => void) | null = null
 let runtimeConfigModule: typeof import('../../../../../src/config') | null = null
@@ -63,6 +65,8 @@ function Probe() {
   setBootingForTest = auth.setBooting
   setAuthenticatedForTest = auth.setIsAuthenticated
   confirmDesktopEnvironmentSetupForTest = auth.handleConfirmDesktopEnvironmentSetup
+  confirmDesktopEnvironmentSwitchForTest = auth.handleConfirmDesktopEnvironmentSwitchConfirmation
+  cancelDesktopEnvironmentSwitchForTest = auth.handleCancelDesktopEnvironmentSwitchConfirmation
 
   return (
     <>
@@ -70,6 +74,10 @@ function Probe() {
       <div data-testid="pending-environment">
         {auth.pendingDesktopEnvironmentSetup?.externalRestApiBaseUrl || 'none'}
       </div>
+      <div data-testid="pending-environment-switch">
+        {auth.pendingDesktopEnvironmentSwitchConfirmation?.targetExternalRestApiBaseUrl || 'none'}
+      </div>
+      <div data-testid="is-authenticated">{auth.isAuthenticated ? 'yes' : 'no'}</div>
       <div data-testid="pending-rpc">
         {auth.pendingDesktopEnvironmentSetup?.rpcProxyBaseUrl || 'none'}
       </div>
@@ -102,6 +110,8 @@ beforeEach(async () => {
   vi.clearAllMocks()
   desktopEnvironmentSetupListener = null
   confirmDesktopEnvironmentSetupForTest = null
+  confirmDesktopEnvironmentSwitchForTest = null
+  cancelDesktopEnvironmentSwitchForTest = null
   setBootingForTest = null
   setAuthenticatedForTest = null
   runtimeConfigModule = null
@@ -473,7 +483,73 @@ describe('Desktop environment handoff', () => {
     expect(screen.getByTestId('pending-rpc')).toHaveTextContent('none')
   })
 
-  it('logs out and selects the linked saved environment when REST endpoints differ', async () => {
+  it('keeps the current session when the user cancels a REST environment switch', async () => {
+    render(<Probe />)
+    await waitFor(() => expect(screen.getByTestId('configuration-loaded')).toHaveTextContent('yes'))
+    await act(async () => setAuthenticatedForTest?.(true))
+    mocks.logoutForEnvironmentMismatch.mockClear()
+    mocks.clearQueryCache.mockClear()
+
+    let handoff!: Promise<void>
+    await act(async () => {
+      handoff = Promise.resolve(
+        desktopEnvironmentSetupListener!({
+          ...targetEnvironment,
+          externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/api/v1`,
+        })
+      )
+    })
+    await waitFor(() =>
+      expect(screen.getByTestId('pending-environment-switch')).toHaveTextContent(
+        `${targetEnvironment.externalRestApiBaseUrl}/api/v1`
+      )
+    )
+
+    expect(mocks.logoutForEnvironmentMismatch).not.toHaveBeenCalled()
+    expect(mocks.clearQueryCache).not.toHaveBeenCalled()
+    expect(screen.getByTestId('pending-environment')).toHaveTextContent('none')
+
+    await act(async () => cancelDesktopEnvironmentSwitchForTest?.())
+    await act(async () => handoff)
+
+    expect(mocks.logoutForEnvironmentMismatch).not.toHaveBeenCalled()
+    expect(mocks.selectRuntimeConfigForHandoff).not.toHaveBeenCalled()
+    expect(mocks.clearQueryCache).not.toHaveBeenCalled()
+    expect(screen.getByTestId('is-authenticated')).toHaveTextContent('yes')
+    expect(screen.getByTestId('pending-environment-switch')).toHaveTextContent('none')
+  })
+
+  it('does not log out a newer session after the switch confirmation is open', async () => {
+    render(<Probe />)
+    await waitFor(() => expect(screen.getByTestId('configuration-loaded')).toHaveTextContent('yes'))
+    await act(async () => setAuthenticatedForTest?.(true))
+    mocks.logoutForEnvironmentMismatch.mockClear()
+
+    let handoff!: Promise<void>
+    await act(async () => {
+      handoff = Promise.resolve(
+        desktopEnvironmentSetupListener!({
+          ...targetEnvironment,
+          externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/api/v1`,
+        })
+      )
+    })
+    await waitFor(() =>
+      expect(screen.getByTestId('pending-environment-switch')).toHaveTextContent(
+        `${targetEnvironment.externalRestApiBaseUrl}/api/v1`
+      )
+    )
+
+    nativeSessionGeneration += 1
+    await act(async () => confirmDesktopEnvironmentSwitchForTest?.())
+    await act(async () => handoff)
+
+    expect(mocks.logoutForEnvironmentMismatch).not.toHaveBeenCalled()
+    expect(mocks.selectRuntimeConfigForHandoff).not.toHaveBeenCalled()
+    expect(screen.getByTestId('pending-environment')).toHaveTextContent('none')
+  })
+
+  it('logs out and selects the linked saved environment after switch confirmation', async () => {
     const state = await runtimeConfigModule!.getDesktopRuntimeConfigState()
     const otherOption = state.options.find(
       option => option.externalRestApiBaseUrl === otherEnvironment.externalRestApiBaseUrl
@@ -487,10 +563,23 @@ describe('Desktop environment handoff', () => {
     mocks.selectRuntimeConfig.mockClear()
     mocks.setStatus.mockClear()
 
-    await dispatchDesktopEnvironmentLink({
-      ...targetEnvironment,
-      externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/api/v1`,
+    let handoff!: Promise<void>
+    await act(async () => {
+      handoff = Promise.resolve(
+        desktopEnvironmentSetupListener!({
+          ...targetEnvironment,
+          externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/api/v1`,
+        })
+      )
     })
+    await waitFor(() =>
+      expect(screen.getByTestId('pending-environment-switch')).toHaveTextContent(
+        `${targetEnvironment.externalRestApiBaseUrl}/api/v1`
+      )
+    )
+    expect(mocks.logoutForEnvironmentMismatch).not.toHaveBeenCalled()
+    await act(async () => confirmDesktopEnvironmentSwitchForTest?.())
+    await act(async () => handoff)
 
     expect(mocks.logoutForEnvironmentMismatch).toHaveBeenCalledOnce()
     expect(mocks.selectRuntimeConfigForHandoff).toHaveBeenCalledWith(await savedTargetOptionId(), 1)

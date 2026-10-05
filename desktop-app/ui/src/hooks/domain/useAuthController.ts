@@ -15,7 +15,7 @@ import {
   createDesktopEnvironmentSetupHandler,
   getDesktopEnvironmentRestMatches,
 } from './desktopEnvironmentHandoff'
-import type { SetStatusFn } from './types'
+import type { DesktopEnvironmentSwitchConfirmation, SetStatusFn } from './types'
 
 interface UseAuthControllerParams {
   setStatus: SetStatusFn
@@ -94,6 +94,30 @@ export function useAuthController({
   const [desktopEnvironmentSetupComplete, setDesktopEnvironmentSetupComplete] = useState(false)
   const [pendingDesktopEnvironmentSetup, setPendingDesktopEnvironmentSetup] =
     useState<DesktopRuntimeConfig | null>(null)
+  const [
+    pendingDesktopEnvironmentSwitchConfirmation,
+    setPendingDesktopEnvironmentSwitchConfirmation,
+  ] = useState<DesktopEnvironmentSwitchConfirmation | null>(null)
+  const desktopEnvironmentSwitchConfirmationResolver = useRef<
+    ((confirmed: boolean) => void) | null
+  >(null)
+
+  const requestEnvironmentSwitchConfirmation = useCallback(
+    (details: DesktopEnvironmentSwitchConfirmation) =>
+      new Promise<boolean>(resolve => {
+        desktopEnvironmentSwitchConfirmationResolver.current?.(false)
+        desktopEnvironmentSwitchConfirmationResolver.current = resolve
+        setPendingDesktopEnvironmentSwitchConfirmation(details)
+      }),
+    []
+  )
+
+  const resolveEnvironmentSwitchConfirmation = useCallback((confirmed: boolean) => {
+    const resolve = desktopEnvironmentSwitchConfirmationResolver.current
+    desktopEnvironmentSwitchConfirmationResolver.current = null
+    setPendingDesktopEnvironmentSwitchConfirmation(null)
+    resolve?.(confirmed)
+  }, [])
 
   const runtimeConfigMissing = Boolean(runtimeConfigState && !runtimeConfigState.configured)
   const showRuntimeConfigSelector = Boolean(
@@ -415,18 +439,26 @@ export function useAuthController({
   )
 
   useEffect(() => {
-    return window.clerum.auth.onDesktopEnvironmentSetup(
+    const unsubscribe = window.clerum.auth.onDesktopEnvironmentSetup(
       createDesktopEnvironmentSetupHandler({
         getAuthState: getDesktopEnvironmentHandoffAuthState,
         getSessionGeneration,
         refreshRuntimeConfigState,
         handleSelectRuntimeConfig: handleSelectRuntimeConfigForHandoff,
         onSessionNeedsLoad,
+        requestEnvironmentSwitchConfirmation,
         logoutForEnvironmentMismatch,
         setPendingDesktopEnvironmentSetup,
         setStatus,
       })
     )
+    return () => {
+      unsubscribe()
+      const resolve = desktopEnvironmentSwitchConfirmationResolver.current
+      desktopEnvironmentSwitchConfirmationResolver.current = null
+      setPendingDesktopEnvironmentSwitchConfirmation(null)
+      resolve?.(false)
+    }
   }, [
     getDesktopEnvironmentHandoffAuthState,
     getSessionGeneration,
@@ -434,6 +466,7 @@ export function useAuthController({
     handleSelectRuntimeConfigForHandoff,
     logoutForEnvironmentMismatch,
     onSessionNeedsLoad,
+    requestEnvironmentSwitchConfirmation,
     refreshRuntimeConfigState,
     setStatus,
   ])
@@ -466,6 +499,23 @@ export function useAuthController({
       toast: true,
     })
   }
+
+  const handleCancelDesktopEnvironmentSwitchConfirmation = useCallback(() => {
+    resolveEnvironmentSwitchConfirmation(false)
+    setStatus(
+      'Environment switch cancelled. Your current session remains active.',
+      'info',
+      undefined,
+      {
+        global: false,
+        toast: true,
+      }
+    )
+  }, [resolveEnvironmentSwitchConfirmation, setStatus])
+
+  const handleConfirmDesktopEnvironmentSwitchConfirmation = useCallback(() => {
+    resolveEnvironmentSwitchConfirmation(true)
+  }, [resolveEnvironmentSwitchConfirmation])
 
   const handleConfirmDesktopEnvironmentSetup = async (): Promise<void> => {
     const nextConfig = pendingDesktopEnvironmentSetup
@@ -577,6 +627,7 @@ export function useAuthController({
     desktopReleaseStatus,
     desktopEnvironmentSetupComplete,
     pendingDesktopEnvironmentSetup,
+    pendingDesktopEnvironmentSwitchConfirmation,
     backendSwitchHint,
     runtimeConfigMissing,
     showRuntimeConfigSelector,
@@ -610,6 +661,8 @@ export function useAuthController({
     handleClearRuntimeConfigSelection,
     handleCancelDesktopEnvironmentSetup,
     handleConfirmDesktopEnvironmentSetup,
+    handleCancelDesktopEnvironmentSwitchConfirmation,
+    handleConfirmDesktopEnvironmentSwitchConfirmation,
     refreshDesktopReleaseStatus,
     handleOpenDesktopRelease,
   }

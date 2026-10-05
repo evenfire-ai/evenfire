@@ -1445,6 +1445,7 @@ export function useAppController() {
     desktopReleaseStatus: auth.desktopReleaseStatus,
     desktopEnvironmentSetupComplete: auth.desktopEnvironmentSetupComplete,
     pendingDesktopEnvironmentSetup: auth.pendingDesktopEnvironmentSetup,
+    pendingDesktopEnvironmentSwitchConfirmation: auth.pendingDesktopEnvironmentSwitchConfirmation,
     backendSwitchHint: auth.backendSwitchHint,
     showRuntimeConfigSelector: auth.showRuntimeConfigSelector,
     dependencyHealth: auth.dependencyHealth,
@@ -1469,6 +1470,10 @@ export function useAppController() {
     handleClearRuntimeConfigSelection: auth.handleClearRuntimeConfigSelection,
     handleCancelDesktopEnvironmentSetup: auth.handleCancelDesktopEnvironmentSetup,
     handleConfirmDesktopEnvironmentSetup: auth.handleConfirmDesktopEnvironmentSetup,
+    handleCancelDesktopEnvironmentSwitchConfirmation:
+      auth.handleCancelDesktopEnvironmentSwitchConfirmation,
+    handleConfirmDesktopEnvironmentSwitchConfirmation:
+      auth.handleConfirmDesktopEnvironmentSwitchConfirmation,
     handleOpenDesktopRelease: auth.handleOpenDesktopRelease,
     setDesktopEnvironmentSetupComplete: auth.setDesktopEnvironmentSetupComplete,
     handleLogout,
