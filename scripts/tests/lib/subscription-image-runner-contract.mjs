@@ -782,7 +782,7 @@ export const SUITE_CONTRACTS = Object.freeze({
     expectedNames: () =>
       SUITE_PROVIDERS.map(
         provider =>
-          `${provider} local admission refusal settles visibly and a subsequent text turn stays on primary`
+          `${provider} text turn completes on primary while the retained authorize unit is held`
       ),
   },
 })

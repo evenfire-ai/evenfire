@@ -1,11 +1,17 @@
 /**
- * E2E_GUARDIAN_IPC_FLOW: visible login -> owned Host/model -> visible Send while
- * the real authorizer owner is held -> visible terminal refusal -> actual owner
+ * E2E_GUARDIAN_IPC_FLOW: visible login -> owned Host/model -> the real
+ * authorizer's retained-body unit is held -> visible text Send -> primary
+ * completion and durable task while the unit is still held -> actual owner
  * drain -> visible new chat/text Send -> primary completion and durable tasks.
- * The private companion prepares competing authorized incomplete bodies only.
- * It never sends, authenticates, selects, or advances the Desktop business flow.
- * Native inspector observations belong to the actual server instance and PID;
- * unknown/missing ownership is a failure, never a synthetic counter or UI error.
+ * A text authorize body fits the ordinary parser and never takes the retained
+ * unit, so a held unit must not delay or refuse it. The refusal reasons of the
+ * retained path (principal_share, queue_full, queue_wait) are covered by the
+ * control-api HTTP tests; a visible image refusal journey is not part of this
+ * lane. The private companion prepares competing authorized incomplete bodies
+ * only. It never sends, authenticates, selects, or advances the Desktop
+ * business flow. Native inspector observations belong to the actual server
+ * instance and PID; unknown/missing ownership is a failure, never a synthetic
+ * counter or UI error.
  */
 import { randomUUID } from 'node:crypto'
 import { openAdmissionPressure } from '../../../scripts/e2e/fixtures/subscription-image-admission-pressure.mjs'
@@ -18,7 +24,6 @@ import {
 } from './subscriptionImageFixtures.js'
 import { readRemainingFixture } from './subscriptionRemainingJourneyData.js'
 import {
-  assertPrimary,
   observeDurableTurn,
   openOwnedChat,
   outputPattern,
@@ -59,18 +64,51 @@ function assertSameNativeOwner(
   expect(observation.counts).toEqual({ sameRunAttempts: 0, sameRunTickets: 0, reservations: 0 })
 }
 
+async function completeTextTurn(
+  appPage: Parameters<typeof submitVisibly>[0],
+  binding: (typeof run.bindings)[number],
+  afterVisibleAnswer?: () => Promise<void>
+) {
+  const receiptId = randomUUID()
+  const prompt = `Reply with TEXT_RECEIPT:${receiptId} only. Receipt: ${receiptId}`
+  await submitVisibly(appPage, binding, prompt)
+  const expectedOutput = `TEXT_RECEIPT:${receiptId}`
+  const expected = outputPattern([expectedOutput])
+  await settledVisibleAnswer(appPage, binding, expected)
+  if (afterVisibleAnswer) await afterVisibleAnswer()
+  const turn = await observeDurableTurn(appPage, binding, {
+    status: 'completed',
+    response: expected,
+  })
+  expect(turn.toolSteps).toEqual([])
+  await expect
+    .poll(() => readVendorAttempts(run, binding).filter(row => row.receiptId === receiptId), {
+      timeout: 20_000,
+    })
+    .toHaveLength(1)
+  const wire = readVendorAttempts(run, binding).find(row => row.receiptId === receiptId)!
+  expect(wire.model).toBe(binding.modelId)
+  expect(wire.responseKind).toBe('text')
+  expect(wire.imageSha256).toEqual([])
+  expect(wire.outputSha256).toBe(sha256(expectedOutput))
+  // The exact-one primary attempt above is the witness for this zero.
+  for (const other of run.bindings.filter(item => item.provider !== binding.provider)) {
+    expect(readVendorAttempts(run, other).filter(row => row.receiptId === receiptId)).toHaveLength(
+      0
+    )
+  }
+  return { turn, receiptId, wire }
+}
+
 for (const binding of run.bindings) {
-  test(`${binding.provider} local admission refusal settles visibly and a subsequent text turn stays on primary`, async ({
+  test(`${binding.provider} text turn completes on primary while the retained authorize unit is held`, async ({
     appPage,
   }, testInfo) => {
     const fixture = receipt.fixtures[binding.provider] as AdmissionFixture
-    // Keep the configured visible-journey budget and separately admit the nine
+    // Keep the configured visible-journey budget and separately admit the eight
     // bounded private commands (including finally release/close on failure).
-    test.setTimeout(testInfo.timeout + 9 * fixture.pressure.commandDeadlineMs)
+    test.setTimeout(testInfo.timeout + 8 * fixture.pressure.commandDeadlineMs)
     await openOwnedChat(appPage, binding)
-    const refusalReceiptId = randomUUID()
-    const refusalPrompt = `Reply with TEXT_RECEIPT:${refusalReceiptId} only. Receipt: ${refusalReceiptId}`
-    await appPage.getByTestId('chat-input').fill(refusalPrompt)
     const pressure = await openAdmissionPressure({
       receiptFile: fixture.pressure.receiptFile,
     })
@@ -93,47 +131,33 @@ for (const binding of run.bindings) {
       assertSameNativeOwner(baseline, baseline, fixture.maxInFlight)
       expect(baseline.owners).toEqual({ baseline: 0, held: 0, drained: 0 })
       const held = (await pressure.hold({ maxInFlight: fixture.maxInFlight })) as OwnerObservation
+      const heldAt = Date.now()
       assertSameNativeOwner(held, baseline, fixture.maxInFlight)
       expect(held.owners.held).toBe(fixture.maxInFlight)
-      await test.step('send through Desktop and inspect the local refusal while actual owners remain held', async () => {
-        await submitVisibly(appPage, binding, refusalPrompt)
-        const response = appPage.getByTestId('agent-response')
-        await expect(response).toHaveCount(1, { timeout: 60_000 })
-        await expect(response).toHaveClass(/chat-bubble--error/)
-        await expect(response.locator('.error-bubble-label')).toContainText(/Connection Error/i)
-        await expect(response.locator('.error-bubble-message')).toContainText(
-          /authorize.*503|authorize_capacity_exceeded|admission.*full/i
-        )
-        await response.getByText('Details', { exact: true }).click()
-        await expect(response.locator('.error-bubble-details-text')).toBeVisible()
-        await expect(response.locator('.error-bubble-details-text')).toContainText(
-          /authorize.*503|authorize_capacity_exceeded|admission.*full/i
-        )
-        await expect(appPage.locator('.chat-message--in-flight')).toHaveCount(0)
-        await expect(appPage.getByTestId('send-button')).toHaveAttribute(
-          'aria-label',
-          'Send message'
-        )
-        await expect(appPage.getByTestId('chat-input')).toBeEnabled()
-        await assertPrimary(appPage, binding)
-      })
-      const stillHeld = (await pressure.owners()) as OwnerObservation
-      assertSameNativeOwner(stillHeld, baseline, fixture.maxInFlight)
-      expect(stillHeld.owners.held).toBe(fixture.maxInFlight)
-      const failed = await observeDurableTurn(appPage, binding, { status: 'failed' })
-      expect(failed.error).toMatchObject({
-        code: 'LLM_API_CALL_FAILED',
-        retryable: false,
-        provider: binding.provider,
-      })
-      expect(failed.toolSteps).toEqual([])
-      for (const target of run.bindings)
-        expect(
-          readVendorAttempts(run, target).filter(row => row.receiptId === refusalReceiptId)
-        ).toHaveLength(0)
-      const beforeRelease = (await pressure.owners()) as OwnerObservation
-      assertSameNativeOwner(beforeRelease, baseline, fixture.maxInFlight)
-      expect(beforeRelease.owners.held).toBe(fixture.maxInFlight)
+      // The holder's incomplete body is answered 408 at the read deadline, after
+      // which the unit cannot be re-held. If text authorizes still queued behind
+      // the retained unit, the answer could only appear after that 408 and both
+      // checks below fail; they are the witness that the turn ran while held.
+      // Both run as soon as the answer is visible, before the durable and
+      // vendor reads, so those reads do not count against the deadline.
+      let settledMs = -1
+      let stillHeld: OwnerObservation | undefined
+      const whileHeld =
+        await test.step('send text through Desktop while the retained unit is held', () =>
+          completeTextTurn(appPage, binding, async () => {
+            settledMs = Date.now() - heldAt
+            expect(
+              settledMs,
+              `text answer must appear inside the holder's ${fixture.readDeadlineMs} ms read deadline`
+            ).toBeLessThan(fixture.readDeadlineMs)
+            stillHeld = (await pressure.owners()) as OwnerObservation
+            assertSameNativeOwner(stillHeld, baseline, fixture.maxInFlight)
+            expect(
+              stillHeld.owners.held,
+              'the retained unit must still be held when the text answer is visible'
+            ).toBe(fixture.maxInFlight)
+          }))
+      expect(stillHeld, 'the held-unit witness must have run').toBeDefined()
       const drained = (await pressure.release()) as OwnerObservation
       released = true
       assertSameNativeOwner(drained, baseline, fixture.maxInFlight)
@@ -142,38 +166,12 @@ for (const binding of run.bindings) {
       assertSameNativeOwner(afterRelease, baseline, fixture.maxInFlight)
       expect(afterRelease.owners.drained).toBe(0)
       await openOwnedChat(appPage, binding)
-      const recoveryReceiptId = randomUUID()
-      const recoveryPrompt = `Reply with TEXT_RECEIPT:${recoveryReceiptId} only. Receipt: ${recoveryReceiptId}`
-      await submitVisibly(appPage, binding, recoveryPrompt)
-      const expectedOutput = `TEXT_RECEIPT:${recoveryReceiptId}`
-      const expected = outputPattern([expectedOutput])
-      await settledVisibleAnswer(appPage, binding, expected)
-      const recovered = await observeDurableTurn(appPage, binding, {
-        status: 'completed',
-        response: expected,
-      })
-      expect(recovered.taskId).not.toBe(failed.taskId)
-      expect(recovered.chatId).not.toBe(failed.chatId)
-      expect(recovered.toolSteps).toEqual([])
-      await expect
-        .poll(
-          () => readVendorAttempts(run, binding).filter(row => row.receiptId === recoveryReceiptId),
-          { timeout: 20_000 }
-        )
-        .toHaveLength(1)
-      const wire = readVendorAttempts(run, binding).find(
-        row => row.receiptId === recoveryReceiptId
-      )!
-      expect(wire.model).toBe(binding.modelId)
-      expect(wire.responseKind).toBe('text')
-      expect(wire.imageSha256).toEqual([])
-      expect(wire.outputSha256).toBe(sha256(expectedOutput))
-      for (const other of run.bindings.filter(item => item.provider !== binding.provider)) {
-        expect(
-          readVendorAttempts(run, other).filter(row => row.receiptId === recoveryReceiptId)
-        ).toHaveLength(0)
-      }
-      await testInfo.attach('admission-refusal-and-primary-recovery', {
+      const recovered =
+        await test.step('send text through Desktop after the unit is released', () =>
+          completeTextTurn(appPage, binding))
+      expect(recovered.turn.taskId).not.toBe(whileHeld.turn.taskId)
+      expect(recovered.turn.chatId).not.toBe(whileHeld.turn.chatId)
+      await testInfo.attach('text-while-held-and-after-release', {
         contentType: 'application/json',
         body: Buffer.from(
           JSON.stringify({
@@ -181,17 +179,23 @@ for (const binding of run.bindings) {
             provider: binding.provider,
             hostRef: binding.hostRef,
             model: binding.modelId,
-            failedTaskId: failed.taskId,
-            recoveredTaskId: recovered.taskId,
-            refusalReceiptId,
-            recoveryReceiptId,
+            heldTaskId: whileHeld.turn.taskId,
+            releasedTaskId: recovered.turn.taskId,
+            heldReceiptId: whileHeld.receiptId,
+            releasedReceiptId: recovered.receiptId,
+            heldSettledMs: settledMs,
             controlApiPodUid: fixture.controlApiPodUid,
             controlApiImageId: fixture.controlApiImageId,
-            nativeOwner: { baseline, held, stillHeld, beforeRelease, drained, afterRelease },
-            recoveryWire: {
-              sequence: wire.sequence,
-              requestSha256: wire.requestSha256,
-              outputSha256: wire.outputSha256,
+            nativeOwner: { baseline, held, stillHeld, drained, afterRelease },
+            heldWire: {
+              sequence: whileHeld.wire.sequence,
+              requestSha256: whileHeld.wire.requestSha256,
+              outputSha256: whileHeld.wire.outputSha256,
+            },
+            releasedWire: {
+              sequence: recovered.wire.sequence,
+              requestSha256: recovered.wire.requestSha256,
+              outputSha256: recovered.wire.outputSha256,
             },
           })
         ),
