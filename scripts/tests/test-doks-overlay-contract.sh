@@ -56,7 +56,8 @@ extract() {
       subs = { "<domain>" => "example.test", "<RELEASE_TAG>" => "v0.10.0",
                "<STORAGE_CLASS>" => "do-block-storage", "<GFS_SIZE>" => "100Gi",
                "<TUNNEL_ID>" => "00000000-0000-0000-0000-000000000000",
-               "<LLM_PROVIDER>" => "openai", "<LLM_MODEL>" => "gpt-5.4-mini" }
+               "<LLM_PROVIDER>" => "openai", "<LLM_MODEL>" => "gpt-5.4-mini",
+               "<TRACING_ENVIRONMENT>" => "pilot", "<CLUSTER_NAME>" => "test-cluster", "<REGION>" => "fra1" }
       subs.each { |k, val| body = body.gsub(k, val) }
       if (left = body[/<[A-Za-z_]+>/])
         abort "unsubstituted placeholder #{left} in #{path}"
@@ -136,6 +137,11 @@ render_variant() { # A|B
     cm = docs.find { |d| d["kind"] == "ConfigMap" && d.dig("metadata", "name") == "control-api-config" }
     prefixes = cm && cm.dig("data", "CONTROL_API_ALLOWED_IMAGE_PREFIXES").to_s
     errs << "CONTROL_API_ALLOWED_IMAGE_PREFIXES still allows clerum/" if prefixes.split(",").include?("clerum/")
+    # control-api and trace-maintenance-worker require these in production (v0.10.0
+    # control-api/src/services/tracing/environment.ts; trace-maintenance-worker configMapKeyRef).
+    %w[TRACING_ENVIRONMENT TRACING_CLUSTER_NAME TRACING_CLUSTER_LOCATION].each do |k|
+      errs << "control-api-config lacks #{k}" if cm.nil? || cm.dig("data", k).to_s.strip.empty?
+    end
     rp = docs.find { |d| d["kind"] == "ConfigMap" && d.dig("metadata", "name") == "rpc-proxy-config" }
     errs << "rpc-proxy-config missing" unless rp
     if rp

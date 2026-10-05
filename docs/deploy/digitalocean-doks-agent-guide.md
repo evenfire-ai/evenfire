@@ -107,6 +107,7 @@ Stop and ask for anything blank that blocks a phase.
 | LLM provider and model name (the **human** enters the key in Control UI) | Host instance |
 | Member invitations: hosted mode, remote registration service, or none | HMAC secret source (5.6) |
 | GlobalFileSystem size | `instances/globalfilesystem.yaml` |
+| A label for this deployment (for example `production` or `pilot`) | `TRACING_ENVIRONMENT` in `control-api-config` |
 
 Sizing: the full stack has run on 6 vCPU / 10 GB RAM in a single-node local
 evaluation; that is a floor for a smoke test, not a production sizing.
@@ -334,7 +335,7 @@ bash deploy/scripts/lint-networkpolicies.sh --rendered "$WORK/render.yaml" || ex
 if grep -q '10\.109\.0\.1/32' "$WORK/render.yaml"; then echo 'STOP: base API placeholder still rendered'; exit 1; fi
 cnps="$(grep -c '^kind: CiliumNetworkPolicy' "$WORK/render.yaml")"
 [ "$cnps" -eq 6 ] || { echo "STOP: expected 6 CiliumNetworkPolicies, rendered $cnps"; exit 1; }
-leftovers="$(grep -En 'localhost|127\.0\.0\.1|minikube|replace-with-|CLERUM_DEV_MODE|value: warn|<(domain|RELEASE_TAG|STORAGE_CLASS|GFS_SIZE|TUNNEL_ID|LLM_PROVIDER|LLM_MODEL)>' "$WORK/render.yaml" \
+leftovers="$(grep -En 'localhost|127\.0\.0\.1|minikube|replace-with-|CLERUM_DEV_MODE|value: warn|<(domain|RELEASE_TAG|STORAGE_CLASS|GFS_SIZE|TUNNEL_ID|LLM_PROVIDER|LLM_MODEL|TRACING_ENVIRONMENT|CLUSTER_NAME|REGION)>' "$WORK/render.yaml" \
   | grep -Ev 'CONTROL_API_GOOGLE_CLIENT_ID: replace-with-|WEBHOOK_PROXY_CONTROL_API_SERVICE_TOKEN: replace-with-')"
 if [ -n "$leftovers" ]; then printf 'STOP: dev leftovers in render:\n%s\n' "$leftovers"; exit 1; fi
 echo 'render gate: OK'

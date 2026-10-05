@@ -22,6 +22,8 @@ Placeholders you must replace before rendering:
 | `<GFS_SIZE>` | asked from the human |
 | `<LLM_PROVIDER>` / `<LLM_MODEL>` | the human's model choice |
 | `<TUNNEL_ID>` | Variant B only: the Cloudflare Tunnel UUID (not a secret) |
+| `<TRACING_ENVIRONMENT>` | a label for this deployment in audit and tracing records, asked from the human (for example `production` or `pilot`) |
+| `<CLUSTER_NAME>` / `<REGION>` | `$CLUSTER_NAME` / `$REGION` from the env file |
 
 ## Layout
 
@@ -377,9 +379,18 @@ data:
   CONTROL_API_DESKTOP_RPC_PROXY_BASE_URL: https://rpc.<domain>
   # Base includes clerum/, an unqualified Docker Hub namespace Evenfire does not own.
   CONTROL_API_ALLOWED_IMAGE_PREFIXES: ghcr.io/evenfire-ai/,registry.evenfire.ai/,mongodb/,mcr.microsoft.com/
+  # Required in production by control-api and trace-maintenance-worker; base does not set them.
+  TRACING_ENVIRONMENT: <TRACING_ENVIRONMENT>
+  TRACING_CLUSTER_NAME: <CLUSTER_NAME>
+  TRACING_CLUSTER_LOCATION: <REGION>
 ```
 
-Base ships `127.0.0.1` values that only work through a laptop port-forward. For an
+Without the three `TRACING_*` keys, control-api exits with "Missing required
+governed tracing environment variable: TRACING_ENVIRONMENT" and
+trace-maintenance-worker stays in `CreateContainerConfigError` (observed on a
+live DOKS install at the validated release; the minikube overlay sets them, base
+does not). Base ships `127.0.0.1` values that only work through a laptop
+port-forward. For an
 internal-only pilot use the agreed internal URLs. Leave
 `CONTROL_API_GROK_SUBSCRIPTION_ENABLED` at its base value `'false'` unless the
 human enables Grok; `GROK_LLM_PROXY_ADMIN_URL` is already an in-cluster URL.
