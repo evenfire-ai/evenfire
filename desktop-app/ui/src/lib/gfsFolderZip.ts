@@ -230,7 +230,8 @@ function truncateToUtf8Bytes(name: string, maxBytes: number): string {
  * truncate. Traversal is impossible regardless: separators are gone before the
  * segment is used.
  */
-function sanitizeZipSegment(name: string): string {
+/** Exported for property-based invariant tests (R1-M6). */
+export function sanitizeZipSegment(name: string): string {
   const cleaned = truncateToUtf8Bytes(
     name
       .replace(/[/\\:*?"<>|\u0000]/g, '_')

@@ -6,6 +6,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import { GFS_FILE_UPLOAD_PROTOCOL_MAX_BYTES } from '@constants/gfsFileUpload'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import type { GfsCrumb } from '@hooks/domain/useGfsBrowserController'
+import { childView, listChildrenPage } from '@/gfs/__fixtures__/gfsProducerFixtures'
 import type { Tone } from '@/uiTypes'
 import { FilesPage } from '../FilesPage'
 
@@ -3295,36 +3296,21 @@ describe('FilesPage', () => {
 
   it('downloads a folder recursively as one zip with progress and a skip notice (BUG-175)', async () => {
     vi.useFakeTimers()
-    const listChildren = vi.fn(async () => ({
-      items: [
-        {
-          resourceId: 'doc-1',
-          rid: 'doc-1',
-          gfsUri: 'gfs://main/doc-1',
-          drive: 'main',
+    // Producer-truthful wire fixtures: the children flow through the real
+    // GfsClient + structuredClone, not a hand-rolled .d.ts mirror (R1-M6).
+    const listChildren = vi.fn(async () =>
+      listChildrenPage([
+        childView('doc-1', 'plan.md', 'file', {
           parentResourceId: 'folder-1',
-          name: 'plan.md',
-          kind: 'file' as const,
           path: '/Assets/plan.md',
-          version: 0,
-          bytes: 4,
-        },
-        {
-          resourceId: 'hidden-1',
-          rid: 'hidden-1',
-          gfsUri: 'gfs://main/hidden-1',
-          drive: 'main',
+        }),
+        childView('hidden-1', 'secret.txt', 'file', {
           parentResourceId: 'folder-1',
-          name: 'secret.txt',
-          kind: 'file' as const,
           path: '/Assets/secret.txt',
-          version: 0,
-          bytes: 4,
           readable: false,
-        },
-      ],
-      nextCursor: null,
-    }))
+        }),
+      ])
+    )
     const download = vi.fn(async () => ({ bytes: new Uint8Array([1, 2, 3, 4]).buffer }))
     const pushToast = vi.fn()
     const createObjectURL = vi.fn(() => 'blob:folder-zip')
@@ -3378,8 +3364,13 @@ describe('FilesPage', () => {
     })
     expect(screen.queryByTestId('gfs-zip-progress')).toBeNull()
 
-    expect(listChildren).toHaveBeenCalledWith('folder-1', 'main', undefined)
-    expect(download).toHaveBeenCalledWith('gfs://main/doc-1', { maxBytes: 512 * 1024 * 1024 })
+    expect(listChildren).toHaveBeenCalledWith('folder-1', 'main', undefined, {
+      signal: expect.any(AbortSignal),
+    })
+    expect(download).toHaveBeenCalledWith('gfs://main/doc-1', {
+      maxBytes: 512 * 1024 * 1024,
+      signal: expect.any(AbortSignal),
+    })
     expect(createObjectURL).toHaveBeenCalledWith(expect.any(Blob))
     expect(click).toHaveBeenCalled()
     const savedName = (click.mock.instances[0] as HTMLAnchorElement | undefined)?.download
@@ -3394,23 +3385,15 @@ describe('FilesPage', () => {
 
   it('refuses a folder zip over the size limit with a clear message and saves nothing', async () => {
     vi.useFakeTimers()
-    const listChildren = vi.fn(async () => ({
-      items: [
-        {
-          resourceId: 'huge-1',
-          rid: 'huge-1',
-          gfsUri: 'gfs://main/huge-1',
-          drive: 'main',
+    const listChildren = vi.fn(async () =>
+      listChildrenPage([
+        childView('huge-1', 'huge.bin', 'file', {
           parentResourceId: 'folder-1',
-          name: 'huge.bin',
-          kind: 'file' as const,
           path: '/Assets/huge.bin',
-          version: 0,
           bytes: 1024 * 1024 * 1024 + 1,
-        },
-      ],
-      nextCursor: null,
-    }))
+        }),
+      ])
+    )
     const download = vi.fn(async () => ({ bytes: new ArrayBuffer(0) }))
     const pushToast = vi.fn()
     const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
@@ -3504,7 +3487,9 @@ describe('FilesPage', () => {
     })
     expect(screen.queryByTestId('gfs-zip-progress')).toBeNull()
 
-    expect(listChildren).toHaveBeenCalledWith('folder-1', 'main', undefined)
+    expect(listChildren).toHaveBeenCalledWith('folder-1', 'main', undefined, {
+      signal: expect.any(AbortSignal),
+    })
     expect(download).not.toHaveBeenCalled()
     expect(click).not.toHaveBeenCalled()
     expect(pushToast).toHaveBeenCalledWith('"Empty" has no downloadable files.', 'info')
@@ -3512,23 +3497,14 @@ describe('FilesPage', () => {
 
   it('stops a running folder zip from the progress strip without saving (M3)', async () => {
     vi.useFakeTimers()
-    const listChildren = vi.fn(async () => ({
-      items: [
-        {
-          resourceId: 'doc-1',
-          rid: 'doc-1',
-          gfsUri: 'gfs://main/doc-1',
-          drive: 'main',
+    const listChildren = vi.fn(async () =>
+      listChildrenPage([
+        childView('doc-1', 'plan.md', 'file', {
           parentResourceId: 'folder-1',
-          name: 'plan.md',
-          kind: 'file' as const,
           path: '/Assets/plan.md',
-          version: 0,
-          bytes: 4,
-        },
-      ],
-      nextCursor: null,
-    }))
+        }),
+      ])
+    )
     const download = vi.fn(async () => ({ bytes: new Uint8Array([1, 2, 3, 4]).buffer }))
     const pushToast = vi.fn()
     const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
@@ -3599,13 +3575,13 @@ describe('FilesPage', () => {
     // Real timers: the first walk parks on the in-flight listing itself, so
     // only the abort race can end it; the second walk's first request is
     // immediate on its own fresh throttle.
-    let settleFirst!: (value: { items: unknown[]; nextCursor: null }) => void
+    let settleFirst!: (value: Awaited<ReturnType<typeof listChildrenPage>>) => void
     const listChildren = vi.fn(() => {
       if (listChildren.mock.calls.length === 1)
         return new Promise(resolve => {
           settleFirst = resolve
         })
-      return Promise.resolve({ items: [], nextCursor: null })
+      return listChildrenPage([])
     })
     const pushToast = vi.fn()
     Object.defineProperty(window, 'clerum', {
@@ -3777,7 +3753,9 @@ describe('FilesPage', () => {
     })
 
     expect(listChildren).toHaveBeenCalledTimes(1)
-    expect(listChildren).toHaveBeenCalledWith('folder-1', 'main', undefined)
+    expect(listChildren).toHaveBeenCalledWith('folder-1', 'main', undefined, {
+      signal: expect.any(AbortSignal),
+    })
     expect(listChildren).not.toHaveBeenCalledWith('folder-p', 'main', undefined)
   })
 
