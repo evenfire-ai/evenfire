@@ -14,7 +14,8 @@ API server when a `NetworkPolicy` restricts it. You can instead use
 ([DOKS limits](https://docs.digitalocean.com/products/kubernetes/details/limits/)).
 Evenfire's base grants API egress only with NetworkPolicy ipBlocks (port 443).
 
-On a DOKS 1.36 HA, VPC-native cluster running Cilium 1.19 with
+On a DOKS 1.36 HA cluster created with custom subnets (VPC-native per doctl's
+`cluster create` help) running Cilium 1.19 with
 `policy-cidr-match-mode` unset, `api-egress-probe.sh` found that deny-all blocks
 the API server, and that **both** an ipBlock policy (ClusterIP and endpoint `/32`)
 and a CiliumNetworkPolicy `toEntities: kube-apiserver` restore it on their own.
@@ -76,8 +77,8 @@ denies pod egress to `169.254.169.254`. On the live cluster it sets
 - The network load balancer's idle timeout is not documented. The HTTP load
   balancer's is `do-loadbalancer-http-idle-timeout-seconds` ("The default is
   60."). `rpc` server-sent events send a keepalive every 15 s
-  (`RPC_PROXY_STREAM_KEEPALIVE_MS`), inside either limit. Write annotation values
-  as quoted strings.
+  (`RPC_PROXY_STREAM_KEEPALIVE_MS`), inside the documented HTTP load balancer
+  default. Write annotation values as quoted strings.
 - Pods cannot reach a load balancer's external IP from inside the cluster
   (hairpin); DigitalOcean documents the `do-loadbalancer-hostname` workaround.
 - Every load balancer is billed. Ask before creating one.
@@ -116,7 +117,7 @@ apply, and restart HCC (it reads `CONTEXT_MAPPER_K8S_API_CIDRS` only at
 startup). If `API_EGRESS_PATH=ipblock`, re-run `api-egress-probe.sh` first: until
 the patches are regenerated, API egress may be cut.
 
-The HA control plane is the default from 1.36 and cannot be disabled
+Clusters created on 1.36 or later get the HA control plane by default
 ([managed components](https://docs.digitalocean.com/products/kubernetes/details/managed/)).
 
 ## `clusterlint` findings: report them, do not rewrite workloads
@@ -153,6 +154,12 @@ changing its admission policies is a product change, not an install step.
   credentials, so `doctl` must stay installed and authenticated.
 - `doctl … -o json` omits `ha`, `auto_upgrade`, and `surge_upgrade` when they are
   false. Treat a missing key as `false` (`doks-discover.sh` does).
+- No API field says whether an existing cluster is VPC-native. `doctl kubernetes
+  cluster create --help` says default subnets (10.244.0.0/16, 10.245.0.0/16)
+  create a "virtual network" cluster and custom ones a "vpc-native cluster";
+  `doks-discover.sh` reports `VPC_NATIVE` from that, or `unknown`.
+- `doks-discover.sh` output is shell-quoted; source it (`. "$WORK/discovery.env"`)
+  rather than parsing it by hand.
 - Team Owners and Members are `cluster-admin` in every cluster
   ([custom role bindings](https://docs.digitalocean.com/products/kubernetes/how-to/set-up-custom-rolebindings/)).
   Read-only behaviour is the agent's job, not the token's.

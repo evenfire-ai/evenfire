@@ -93,6 +93,9 @@ grep -q '^cnp probe-a 198.51.100.10 6443$' "$dir/exec.log" || fail "nonstandard_
 grep -q '^cnp probe-a 10.0.0.1 443$' "$dir/exec.log" || fail "nonstandard_port: ClusterIP not probed on 443"
 grep -q '"6443"' "$dir"/applied-*.yaml || fail "nonstandard_port: CNP toPorts does not include the endpoint port"
 
+run_case mixed_ports STUB_API_PORT='443 6443'
+expect_rc mixed_ports 2
+
 run_case baseline_blocked STUB_BASELINE_RC=1
 expect_rc baseline_blocked 2
 expect_ns_gone baseline_blocked

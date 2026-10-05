@@ -29,7 +29,14 @@ run_case() { # name cluster-json-file [VAR=value ...]
     bash "$DISCOVER" >"$out" 2>"$err"
   rc=$?
 }
-want() { grep -qx "$2" "$out" || fail "$1: stdout lacks '$2' (got: $(tr '\n' ' ' <"$out"))"; }
+# want <case> KEY=value: the output must be shell-sourceable and set KEY to value.
+want() {
+  local k="${2%%=*}" v="${2#*=}" got errs
+  errs="$(bash -c '. "$1"' _ "$out" 2>&1 >/dev/null)"
+  [ -z "$errs" ] || fail "$1: output is not shell-sourceable: $errs"
+  got="$(bash -c '. "$1"; printf "%s" "${!2}"' _ "$out" "$k" 2>/dev/null)"
+  [ "$got" = "$v" ] || fail "$1: $k='$got', want '$v'"
+}
 stop() { [ "$rc" -ne 0 ] && grep -q 'STOP' "$err" || fail "$1: expected STOP, rc=$rc err=$(cat "$err")"; }
 
 cluster_json 1.36.3-do.5 '"ha":true,' running 10.240.0.0/16 10.96.0.0/19 >"$work/happy.json"
@@ -42,6 +49,7 @@ want happy 'HA=true'
 want happy 'AUTO_UPGRADE=false'
 want happy 'SURGE_UPGRADE=true'
 want happy 'VPC_NATIVE=yes'
+want happy 'ACCOUNT_TEAM=Example Team'
 want happy 'API_IPS=10.96.0.1 10.10.0.2'
 want happy 'API_ENDPOINT_PORT=443'
 want happy 'DNS_IP=10.96.0.10'
@@ -60,9 +68,12 @@ run_case missing_bool_keys "$work/nobool.json"
 want missing_bool_keys 'HA=false'
 want missing_bool_keys 'AUTO_UPGRADE=false'
 
-cluster_json 1.35.7-do.5 '' running '' '' >"$work/legacy.json"
+cluster_json 1.35.7-do.5 '' running 10.244.0.0/16 10.245.0.0/16 >"$work/legacy.json"
 run_case not_vpc_native "$work/legacy.json"
 want not_vpc_native 'VPC_NATIVE=no'
+cluster_json 1.35.7-do.5 '' running '' '' >"$work/nosubnet.json"
+run_case vpc_unknown "$work/nosubnet.json"
+want vpc_unknown 'VPC_NATIVE=unknown'
 
 for v in '1.33.0-do.2 REGIONAL' '1.33.1-do.0 REGIONAL_NETWORK' '1.32.9-do.4 REGIONAL' '1.36.3-do.1 REGIONAL_NETWORK' '1.33.10-do.0 REGIONAL_NETWORK'; do
   set -- $v
@@ -81,6 +92,13 @@ run_case not_running "$work/prov.json"
 stop not_running
 run_case nodelocal "$work/happy.json" STUB_NODELOCAL_RC=0
 stop nodelocal
+run_case no_dns "$work/happy.json" STUB_DNS_IP=
+stop no_dns
+run_case mixed_ports "$work/happy.json" STUB_API_PORT='443 6443'
+stop mixed_ports
+cluster_json 1.36-weird '' running 10.240.0.0/16 10.96.0.0/19 >"$work/weird.json"
+run_case unknown_version "$work/weird.json"
+stop unknown_version
 
 # Pinning: every doctl call carries --context t-ctx, none switches context;
 # every kubectl call carries --context do-fra1-test-cluster and is read-only.

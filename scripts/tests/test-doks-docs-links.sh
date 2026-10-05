@@ -65,6 +65,27 @@ grep -nE 'kubectl[^`]*delete[^`]*(cnp|ciliumnetworkpolic)' "$GUIDE" && fail "gui
 grep -nE '^[[:space:]]*doctl([[:space:]]+[^[:space:]]+)*[[:space:]]+auth[[:space:]]+switch' "$GUIDE" "$SKILL_DIR"/*.md "$SKILL_DIR"/references/*.md \
   && fail "a doctl auth switch command is present"
 
+# The guide's Phase 0.1 probe block must stop when a probe fails (no masked exit code).
+probe_block="$(ruby -e '
+  b = File.read(ARGV[0]).scan(/```bash\n(.*?)```/m).flatten.find { |x| x.include?("api-egress-probe.sh") && x.include?("np-deny-probe.sh") }
+  abort "no Phase 0.1 probe block" unless b
+  puts b.lines.reject { |l| l.include?(".evenfire-doks/env.sh") }.join' "$GUIDE")" || fail "cannot extract the Phase 0.1 block"
+fake="$(mktemp -d)"
+for rcs in "0 1" "0 2" "1 0"; do
+  set -- $rcs
+  printf '#!/usr/bin/env bash\nexit %s\n' "$1" >"$fake/np-deny-probe.sh"
+  printf '#!/usr/bin/env bash\necho API_EGRESS_PATH=none\nexit %s\n' "$2" >"$fake/api-egress-probe.sh"
+  if (env SKILL_SCRIPTS="$fake" WORK="$fake" CONTEXT=x bash -c "$probe_block") >/dev/null 2>&1; then
+    fail "Phase 0.1 block continued with np-deny exit $1 / api-egress exit $2"
+  fi
+done
+printf '#!/usr/bin/env bash\nexit 0\n' >"$fake/np-deny-probe.sh"
+printf '#!/usr/bin/env bash\necho API_EGRESS_PATH=cnp\nexit 0\n' >"$fake/api-egress-probe.sh"
+(env SKILL_SCRIPTS="$fake" WORK="$fake" CONTEXT=x bash -c "$probe_block") >/dev/null 2>&1 \
+  || fail "Phase 0.1 block failed although both probes passed"
+grep -qx 'API_EGRESS_PATH=cnp' "$fake/api-egress.env" 2>/dev/null || fail "Phase 0.1 block does not record api-egress.env"
+rm -rf "$fake"
+
 for f in AGENTS.md CLAUDE.md docs/README.md docs/llms.txt docs/deploy/production.md; do
   grep -q 'digitalocean-doks' "$f" || fail "$f has no pointer to the DOKS how-to"
 done

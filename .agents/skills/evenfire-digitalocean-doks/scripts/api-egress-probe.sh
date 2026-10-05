@@ -48,8 +48,11 @@ cluster_ip="$(k -n default get service kubernetes -o jsonpath='{.spec.clusterIP}
 ep_ips="$(k -n default get endpointslices -l kubernetes.io/service-name=kubernetes \
   -o jsonpath='{range .items[*]}{range .endpoints[*]}{.addresses[*]}{" "}{end}{end}')"
 ep_port="$(k -n default get endpointslices -l kubernetes.io/service-name=kubernetes \
-  -o jsonpath='{.items[0].ports[0].port}')"
-ep_port="${ep_port:-443}"
+  -o jsonpath='{.items[*].ports[*].port}' | tr ' ' '\n' | awk 'NF' | sort -u)"
+if [ "$(printf '%s\n' "$ep_port" | awk 'NF' | wc -l | tr -d ' ')" != 1 ] || ! [[ "$ep_port" =~ ^[0-9]+$ ]]; then
+  say "kubernetes EndpointSlices expose ports [$(printf '%s ' $ep_port)]; expected exactly one"
+  exit 2
+fi
 if [ -z "$cluster_ip" ] || [ -z "$(printf '%s' "$ep_ips" | tr -d ' ')" ]; then
   say "cannot read the kubernetes Service ClusterIP or its EndpointSlice addresses"
   exit 2

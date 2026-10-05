@@ -91,8 +91,9 @@ namespace and pod labels instead of by address. Client filtering belongs on the
 load balancer (`loadBalancerSourceRanges`).
 
 Use the ingress controller the customer already operates. If there is none,
-DigitalOcean's 1-Click catalog (`doctl kubernetes 1-click list`) offers
-`traefik`; installing it creates a billed load balancer, so ask first. Do not
+pick an in-cluster controller from DigitalOcean's 1-Click catalog
+(`doctl kubernetes 1-click list`; it listed `traefik` when this contract was
+validated). Installing it creates a billed load balancer, so ask first. Do not
 install ingress-nginx: the Kubernetes project ended its maintenance in March
 2026, with "no further releases, no bugfixes, and no updates to resolve any
 security vulnerabilities"

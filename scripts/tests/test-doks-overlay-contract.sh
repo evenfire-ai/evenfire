@@ -23,6 +23,27 @@ if ! git -C "$ROOT_DIR" rev-parse -q --verify "refs/tags/$RELEASE" >/dev/null; t
     || { echo "FAIL: release tag $RELEASE is not available" >&2; exit 1; }
 fi
 
+# guide_block <marker>: print the guide's first bash block containing <marker>,
+# without the env-file line (the test provides the environment).
+guide_block() {
+  ruby -e '
+    blocks = File.read(ARGV[0]).scan(/```bash\n(.*?)```/m).flatten
+    b = blocks.find { |x| x.include?(ARGV[1]) } or abort "no guide block containing #{ARGV[1]}"
+    puts b.lines.reject { |l| l.include?(".evenfire-doks/env.sh") }.join
+  ' "$GUIDE" "$1"
+}
+
+# discovery.env from the real doks-discover.sh against stub doctl/kubectl
+FIX="${ROOT_DIR}/scripts/tests/fixtures"
+mkdir -p "$work/disc"
+printf '{"team":{"name":"Example Team"},"status":"active"}' >"$work/disc/account.json"
+printf '[{"id":"c-1","version":"1.36.3-do.5","ha":true,"cluster_subnet":"10.240.0.0/16","service_subnet":"10.96.0.0/19","status":{"state":"running"}}]' >"$work/disc/cluster.json"
+env STUB_DIR="$work/disc" STUB_ACCOUNT_JSON="$work/disc/account.json" STUB_CLUSTER_JSON="$work/disc/cluster.json" \
+  DOCTL="$FIX/doks-stub-doctl.sh" KUBECTL="$FIX/doks-stub-kubectl-discover.sh" \
+  DOCTL_CONTEXT=t CLUSTER_NAME=c CONTEXT=do-fra1-c \
+  bash "$SKILL/scripts/doks-discover.sh" >"$work/discovery.env" 2>"$work/disc/err" \
+  || { echo "FAIL: doks-discover.sh failed: $(cat "$work/disc/err")" >&2; exit 1; }
+
 # extract <variant> <dest-overlay-dir>
 extract() {
   ruby -rfileutils -e '
@@ -58,11 +79,18 @@ render_variant() { # A|B
   mkdir -p "$ov"
   extract "$v" "$ov" >/dev/null || { fail "$v: cannot extract contract blocks"; return 1; }
   case "$v" in A) mode=controller ;; B) mode=tunnel ;; *) mode=internal ;; esac
-  OVERLAY_DIR="$ov" API_IPS='10.96.0.1 198.51.100.10' API_ENDPOINT_PORT=443 \
-    DNS_IP=10.96.0.10 STORAGE_CLASS=do-block-storage INGRESS_MODE="$mode" \
-    INGRESS_NAMESPACE=traefik \
-    INGRESS_POD_LABELS='app.kubernetes.io/name=traefik,app.kubernetes.io/instance=traefik-traefik' \
-    bash "$SKILL/scripts/write-network-patches.sh" >/dev/null || { fail "$v: write-network-patches failed"; return 1; }
+  # The guide's Phase 4 generator block, fed by real discovery output.
+  guide_block 'bash "$SKILL_SCRIPTS/write-network-patches.sh"' \
+    | sed -e "s#'<controller|tunnel|internal>'#$mode#" \
+          -e "s#'<controller namespace, Variant A>'#traefik#" \
+          -e "s#'<key=value,… of the controller pods, Variant A>'#app.kubernetes.io/name=traefik,app.kubernetes.io/instance=traefik-traefik#" \
+    >"$work/gen-$v.sh" || { fail "$v: cannot extract the guide generator block"; return 1; }
+  grep -q '<' "$work/gen-$v.sh" && { fail "$v: unreplaced placeholder in guide generator block: $(grep '<' "$work/gen-$v.sh")"; return 1; }
+  mkdir -p "$work/gw-$v" && cp "$work/discovery.env" "$work/gw-$v/discovery.env"
+  (cd "$tree" && env REPO_DIR="$tree" WORK="$work/gw-$v" SKILL_SCRIPTS="$SKILL/scripts" bash "$work/gen-$v.sh") \
+    >"$work/gen-$v.log" 2>&1 || { fail "$v: guide generator block failed: $(tail -3 "$work/gen-$v.log")"; return 1; }
+  grep -q 'cidr: 10.10.0.2/32' "$ov/patches/k8s-api-ip.yaml" \
+    || { fail "$v: discovery API_IPS did not reach the generated patches"; return 1; }
   local r="$work/render-$v.yaml"
   kubectl kustomize "$ov" >"$r" 2>"$work/kz-$v.err" || { fail "$v: kustomize: $(head -3 "$work/kz-$v.err")"; return 1; }
 

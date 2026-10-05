@@ -139,9 +139,11 @@ doctl --context "$DOCTL_CONTEXT" kubernetes cluster kubeconfig save "$CLUSTER_NA
 kubectl config get-contexts "$CONTEXT"
 ```
 
-The saved context runs `doctl` to fetch credentials, so `doctl` must stay
-installed and authenticated
+`--set-current-context` defaults to `true`
 ([kubeconfig save](https://docs.digitalocean.com/reference/doctl/reference/kubernetes/cluster/kubeconfig/save/)).
+The saved context runs `doctl kubernetes cluster kubeconfig exec-credential` to
+fetch short-lived credentials (doctl source, `commands/kubernetes.go`), so `doctl`
+must stay installed and authenticated with the same context.
 
 Then run discovery and keep its output:
 
@@ -158,7 +160,8 @@ kubectl --context "$CONTEXT" get validatingwebhookconfigurations,mutatingwebhook
 
 - `ACCOUNT_TEAM`, the cluster, or the region is not what the human named
 - `doks-discover.sh` exits non-zero (IPv6, cluster not running, no single default
-  StorageClass, NodeLocal DNS present)
+  StorageClass, NodeLocal DNS present, unparseable DOKS version, several
+  kubernetes EndpointSlice ports, no kube-dns Service)
 - Nodes cannot cover the evaluation floor
 - An admission policy, webhook, or Pod Security label would block the install.
   Report the rule; do not disable it.
@@ -174,8 +177,12 @@ first.
 
 ```bash
 . "$HOME/.evenfire-doks/env.sh"
-CONTEXT="$CONTEXT" bash "$SKILL_SCRIPTS/np-deny-probe.sh"
-CONTEXT="$CONTEXT" bash "$SKILL_SCRIPTS/api-egress-probe.sh" | tee "$WORK/api-egress.env"
+CONTEXT="$CONTEXT" bash "$SKILL_SCRIPTS/np-deny-probe.sh" \
+  || { echo "STOP: np-deny-probe.sh exit $?"; exit 1; }
+CONTEXT="$CONTEXT" bash "$SKILL_SCRIPTS/api-egress-probe.sh" > "$WORK/api-egress.env"
+rc=$?
+cat "$WORK/api-egress.env"
+[ "$rc" -eq 0 ] || { echo "STOP: api-egress-probe.sh exit $rc"; exit 1; }
 ```
 
 - `np-deny-probe.sh`: exit 0 is the only pass (owned and bare pod both denied).
@@ -214,6 +221,7 @@ Take every value from `$WORK/discovery.env`:
 | `NODELOCAL_DNS_IP` | empty on DOKS (discovery stops if NodeLocal DNS is installed) |
 | `DEFAULT_SC` | `<STORAGE_CLASS>` in the overlay |
 | `LB_DEFAULT` | the load balancer type a Service gets without an annotation |
+| `VPC_NATIVE` | `yes` / `no` from the cluster's subnets (doctl documents that the default 10.244.0.0/16 and 10.245.0.0/16 mean a non-VPC-native cluster), `unknown` if they are not reported |
 
 Write them into the overlay only with `write-network-patches.sh` (Phase 4). Never
 paste addresses from GKE, EKS, minikube, or another DOKS cluster.
@@ -224,9 +232,11 @@ paste addresses from GKE, EKS, minikube, or another DOKS cluster.
 
 - **NetworkPolicy enforcement:** built in (Cilium). Nothing to install.
 - **Ingress controller (Variant A only):** use the customer's existing controller.
-  If none exists, DigitalOcean's 1-Click catalog
-  (`doctl --context "$DOCTL_CONTEXT" kubernetes 1-click list`) offers `traefik`;
-  install it only with approval, because it creates a billed load balancer. Do
+  If none exists, list DigitalOcean's 1-Click catalog
+  (`doctl --context "$DOCTL_CONTEXT" kubernetes 1-click list`) and pick an
+  in-cluster ingress controller it offers (it listed `traefik` when this guide
+  was validated); install it only with approval, because it creates a billed
+  load balancer. Do
   not install ingress-nginx: it no longer receives security fixes
   ([Ingress NGINX retirement](https://kubernetes.io/blog/2025/11/11/ingress-nginx-retirement/)).
   Do not use Gateway API (see
