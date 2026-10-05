@@ -11,7 +11,7 @@
 #
 # Phases, in a throwaway namespace (deleted on exit), from two pods spread over
 # nodes when possible, to the kubernetes Service ClusterIP (443) and every
-# EndpointSlice address (on its own port), TCP connect only:
+# EndpointSlice address (on its own port), TCP connect only (`nc -z`, no bytes sent):
 #   BASELINE  no policy                                 must reach, else exit 2
 #   IPBLOCK   deny-all egress + ipBlock /32 allow       best case for ipBlocks
 #   CNP       + CiliumNetworkPolicy toEntities kube-apiserver with toPorts
@@ -117,7 +117,7 @@ reach_all() {
     while read -r ip port; do
       ok=false
       for ((i = 1; i <= ATTEMPTS; i++)); do
-        if k -n "$NS" exec "$pod" -- timeout 5 nc -w 3 "$ip" "$port" </dev/null >/dev/null 2>&1; then
+        if k -n "$NS" exec "$pod" -- timeout 5 nc -z -w 3 "$ip" "$port" </dev/null >/dev/null 2>&1; then
           ok=true; break
         fi
         [ "$i" -lt "$ATTEMPTS" ] && sleep "$PROBE_RETRY_SLEEP"
