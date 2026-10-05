@@ -18,6 +18,7 @@ import {
 } from '../src/services/access/teamGfsTopK.js'
 import type { ExternalSessionAuthorityContext } from '../src/services/auth/externalSessionAuthentication.js'
 import { CatalogQueryObservation } from './accessCatalogQueryObservation.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
@@ -124,17 +125,20 @@ describeRealPostgres('aggregate catalog plans on real PostgreSQL', () => {
   })
 
   afterAll(async () => {
-    await databasePool?.end()
-    if (adminPool) {
-      await adminPool.query(
-        `SELECT pg_terminate_backend(pid)
+    try {
+      await endPoolAndWaitForClients(databasePool)
+      if (adminPool) {
+        await adminPool.query(
+          `SELECT pg_terminate_backend(pid)
            FROM pg_stat_activity
           WHERE datname = $1 AND pid <> pg_backend_pid()`,
-        [database]
-      )
-      await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdentifier(database)}`)
-      await adminPool.query(`DROP ROLE IF EXISTS ${runtimeRoles.join(', ')}`)
-      await adminPool.end()
+          [database]
+        )
+        await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdentifier(database)}`)
+        await adminPool.query(`DROP ROLE IF EXISTS ${runtimeRoles.join(', ')}`)
+      }
+    } finally {
+      await adminPool?.end()
     }
   })
 

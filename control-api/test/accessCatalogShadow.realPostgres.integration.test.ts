@@ -10,6 +10,7 @@ import {
 } from '../src/services/access/accessDatabaseQuery.js'
 import { AccessExecutionBudget } from '../src/services/access/accessExecutionBudget.js'
 import type { ExternalSessionAuthorityContext } from '../src/services/auth/externalSessionAuthentication.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
@@ -100,16 +101,19 @@ describeRealPostgres('aggregate shadow physical statement budget on real Postgre
   })
 
   afterAll(async () => {
-    await databasePool?.end()
-    if (!adminPool) return
-    await adminPool.query(
-      `SELECT pg_terminate_backend(pid)
+    try {
+      await endPoolAndWaitForClients(databasePool)
+      if (!adminPool) return
+      await adminPool.query(
+        `SELECT pg_terminate_backend(pid)
          FROM pg_stat_activity
         WHERE datname = $1 AND pid <> pg_backend_pid()`,
-      [database]
-    )
-    await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdentifier(database)}`)
-    await adminPool.end()
+        [database]
+      )
+      await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdentifier(database)}`)
+    } finally {
+      await adminPool?.end()
+    }
   })
 
   it('executes and charges a real shadow SQL statement only when capacity is reserved', async () => {

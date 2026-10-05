@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import { randomBytes } from 'node:crypto'
 import { Pool, type PoolClient } from 'pg'
 import {
   runAccessDatabaseQuery,
@@ -11,6 +12,8 @@ import {
 } from '../src/services/access/accessExecutionBudget.js'
 import { catalogQuery } from '../src/services/access/catalogProducerSupport.js'
 import { OperationalAccessIndex } from '../src/services/access/operationalAccessIndex.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
+import { waitForDatabaseConnectionsToClose } from './realPostgresCleanup.ts'
 
 describe('physical access database statement accounting', () => {
   it('charges before execution and rejects the statement after the configured limit', async () => {
@@ -95,18 +98,44 @@ const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
 
 describeRealPostgres('access database cancellation on real PostgreSQL', () => {
-  let pool: Pool
+  const database = `access_cancel_${randomBytes(6).toString('hex')}`
+  let adminPool: Pool
+  let testPool: Pool
 
-  beforeAll(() => {
-    pool = new Pool({ connectionString: adminUrl })
+  function databaseUrl(baseUrl: string, databaseName: string): string {
+    const url = new URL(baseUrl)
+    url.pathname = `/${databaseName}`
+    return url.toString()
+  }
+
+  function quoteIdentifier(value: string): string {
+    return `"${value.replace(/"/g, '""')}"`
+  }
+
+  beforeAll(async () => {
+    adminPool = new Pool({ connectionString: adminUrl })
+    await adminPool.query(`CREATE DATABASE ${quoteIdentifier(database)}`)
+    testPool = new Pool({
+      connectionString: databaseUrl(
+        adminUrl ?? 'postgresql://postgres@db.example.com/postgres',
+        database
+      ),
+    })
   })
 
   afterAll(async () => {
-    await pool?.end()
+    try {
+      await endPoolAndWaitForClients(testPool)
+      if (!adminPool) return
+      await waitForDatabaseConnectionsToClose(adminPool, database)
+      await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdentifier(database)}`)
+    } finally {
+      await adminPool?.end()
+    }
   })
 
   it('cancels an active statement when its request budget is cancelled', async () => {
-    const client = (await pool.connect()) as PoolClient
+    const client = (await testPool.connect()) as PoolClient
     const budget = AccessExecutionBudget.create('catalog')
     const startedAt = performance.now()
     try {
@@ -121,7 +150,7 @@ describeRealPostgres('access database cancellation on real PostgreSQL', () => {
   })
 
   it('maps a real statement timeout to authoritative budget exhaustion', async () => {
-    const client = (await pool.connect()) as PoolClient
+    const client = (await testPool.connect()) as PoolClient
     const budget = AccessExecutionBudget.create('catalog')
     const startedAt = performance.now()
     try {

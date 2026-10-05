@@ -11,6 +11,7 @@ import { canonicalResourceIdentity } from '../src/services/access/resourceIdenti
 import type { ExternalSessionAuthorityContext } from '../src/services/auth/externalSessionAuthentication.js'
 import { createUserSession } from '../src/services/auth/userSessionService.js'
 import { retireDesktopUser } from '../src/services/directory/users.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
@@ -154,18 +155,21 @@ describeRealPostgres('final catalog and resolve lifecycle authority on real Post
   })
 
   afterAll(async () => {
-    corePoolConnectSpy?.mockRestore()
-    await databasePool?.end()
-    if (adminPool) {
-      await adminPool.query(
-        `SELECT pg_terminate_backend(pid)
+    try {
+      corePoolConnectSpy?.mockRestore()
+      await endPoolAndWaitForClients(databasePool)
+      if (adminPool) {
+        await adminPool.query(
+          `SELECT pg_terminate_backend(pid)
            FROM pg_stat_activity
           WHERE datname = $1 AND pid <> pg_backend_pid()`,
-        [database]
-      )
-      await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdentifier(database)}`)
-      await adminPool.query(`DROP ROLE IF EXISTS ${runtimeRoles.join(', ')}`)
-      await adminPool.end()
+          [database]
+        )
+        await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdentifier(database)}`)
+        await adminPool.query(`DROP ROLE IF EXISTS ${runtimeRoles.join(', ')}`)
+      }
+    } finally {
+      await adminPool?.end()
     }
   })
 
