@@ -173,7 +173,7 @@ describeRealPostgres('access database cancellation on real PostgreSQL', () => {
   })
 
   it('does not classify an operator cancellation with the same SQLSTATE as a timeout', async () => {
-    const client = (await pool.connect()) as PoolClient
+    const client = (await testPool.connect()) as PoolClient
     const budget = AccessExecutionBudget.create('catalog')
     try {
       await runAccessDatabaseQuery(client, budget, `SET statement_timeout = '500ms'`, [], {
@@ -183,7 +183,7 @@ describeRealPostgres('access database cancellation on real PostgreSQL', () => {
       })
       const query = catalogQuery(client, budget, 'SELECT pg_sleep(2)', [])
       setTimeout(() => {
-        void pool.query('SELECT pg_cancel_backend($1)', [client.processID])
+        void testPool.query('SELECT pg_cancel_backend($1)', [client.processID])
       }, 10)
       const error = await query.catch(value => value)
       expect(error).toMatchObject({ code: '57014' })
@@ -195,7 +195,7 @@ describeRealPostgres('access database cancellation on real PostgreSQL', () => {
   })
 
   it('requires rollback and preserves no transactional writes after timeout', async () => {
-    const client = (await pool.connect()) as PoolClient
+    const client = (await testPool.connect()) as PoolClient
     const budget = AccessExecutionBudget.create('catalog')
     try {
       await client.query(`CREATE TEMP TABLE access_timeout_rollback(value integer)`)
@@ -223,7 +223,7 @@ describeRealPostgres('access database cancellation on real PostgreSQL', () => {
 
   it('owns commit and cancellation rollback under one request budget', async () => {
     const table = `access_budget_transaction_${Date.now()}`
-    await pool.query(`CREATE TABLE ${table}(value integer NOT NULL)`)
+    await testPool.query(`CREATE TABLE ${table}(value integer NOT NULL)`)
     const committed = AccessExecutionBudget.create('catalog', { limits: { producerCalls: 1 } })
     try {
       await withAccessDatabaseTransaction(
@@ -231,7 +231,7 @@ describeRealPostgres('access database cancellation on real PostgreSQL', () => {
         async db => {
           await db.query(`INSERT INTO ${table}(value) VALUES(1)`)
         },
-        { mode: 'read_write', connectionPool: pool }
+        { mode: 'read_write', connectionPool: testPool }
       )
     } finally {
       committed.close()
@@ -245,17 +245,17 @@ describeRealPostgres('access database cancellation on real PostgreSQL', () => {
           await db.query(`INSERT INTO ${table}(value) VALUES(2)`)
           await db.query('SELECT pg_sleep(2)')
         },
-        { mode: 'read_write', connectionPool: pool }
+        { mode: 'read_write', connectionPool: testPool }
       )
       setTimeout(() => cancelled.cancel(), 50)
       await expect(work).rejects.toBeInstanceOf(AccessExecutionCancelledError)
-      const values = await pool.query<{ value: number }>(
+      const values = await testPool.query<{ value: number }>(
         `SELECT value FROM ${table} ORDER BY value`
       )
       expect(values.rows).toEqual([{ value: 1 }])
     } finally {
       cancelled.close()
-      await pool.query(`DROP TABLE IF EXISTS ${table}`)
+      await testPool.query(`DROP TABLE IF EXISTS ${table}`)
     }
   })
 
