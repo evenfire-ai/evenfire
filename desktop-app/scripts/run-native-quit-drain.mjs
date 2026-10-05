@@ -16,16 +16,17 @@ const appDataRoot = path.join(profileRoot, 'app-data')
 const userDataRoot = path.join(profileRoot, 'user-data')
 const sessionDataRoot = path.join(profileRoot, 'session-data')
 const configPath = path.join(profileRoot, 'runtime-config.json')
-await Promise.all(
-  [appDataRoot, userDataRoot, sessionDataRoot].map(directory =>
-    fs.mkdir(directory, { recursive: true })
-  )
-)
 const childEnvironment = { ...process.env }
 delete childEnvironment.ELECTRON_RUN_AS_NODE
 childEnvironment.CLERUM_DESKTOP_CONFIG_PATH = configPath
 
 try {
+  await Promise.all(
+    [appDataRoot, userDataRoot, sessionDataRoot].map(directory =>
+      fs.mkdir(directory, { recursive: true })
+    )
+  )
+
   const child = spawn(
     electronPath,
     [`--user-data-dir=${userDataRoot}`, './test/native/quit-drain.bootstrap.cjs', profileRoot],
