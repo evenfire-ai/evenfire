@@ -109,8 +109,7 @@ describe('GfsClient.download', () => {
     expect(new TextDecoder().decode(bytes)).toBe('hello')
     expect(t.fetchBytes).toHaveBeenCalledWith(
       `https://api.example/api/v1/me/gfs/proxy/${RID}?drive=main`,
-      'tok',
-      { maxBytes: undefined, signal: undefined }
+      'tok'
     )
   })
 })

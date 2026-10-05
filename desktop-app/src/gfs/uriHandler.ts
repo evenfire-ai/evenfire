@@ -457,10 +457,16 @@ export class GfsClient {
       `/api/v1/me/gfs/proxy/${resource.resourceId}?drive=${encodeURIComponent(resource.drive)}`
     )
     try {
-      const bytes = await this.transport.fetchBytes(proxyUrl, token, {
-        maxBytes: opts?.maxBytes,
-        signal: opts?.signal,
-      })
+      // The unbounded call keeps the exact 2-arg `fetchBytes` signature so
+      // existing callers stay byte-for-byte unchanged; any bound or
+      // cancellable call passes the opts object.
+      const bytes =
+        opts?.maxBytes !== undefined || opts?.signal !== undefined
+          ? await this.transport.fetchBytes(proxyUrl, token, {
+              maxBytes: opts?.maxBytes,
+              signal: opts?.signal,
+            })
+          : await this.transport.fetchBytes(proxyUrl, token)
       return { resource, bytes }
     } catch (error) {
       throw surfaceGfsGrantError(error)
