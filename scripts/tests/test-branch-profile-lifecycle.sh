@@ -1602,5 +1602,5 @@ printf 'fixture deploy file\n' >"${repo}/deploy/minikube/fixture.txt"
 minikube_test_assert_host_unchanged ||
   fail 'the lifecycle fixture changed the host checkout HEAD, branch, or working tree'
 ok
-(( ASSERTIONS >= 100 )) || fail "expected at least 100 assertions, ran ${ASSERTIONS}"
+(( ASSERTIONS >= 1000 )) || fail "expected at least 1000 assertions, ran ${ASSERTIONS}"
 printf 'PASS: branch-profile lifecycle scenarios (%s assertions)\n' "${ASSERTIONS}"
