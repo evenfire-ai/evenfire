@@ -339,6 +339,142 @@ describe('GFS download store', () => {
       code: 'corrupt_store_ledger',
     })
   })
+
+  it('fails closed on an existing zero-byte ledger and keeps the retained source', async () => {
+    const transfer = await store.createTransfer({
+      callerIdentity: 'caller-a',
+      callerWorkspacePath: callerRoot,
+      source,
+      sizeBytes: 7,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    })
+    await fs.writeFile(path.join(callerRoot, `${transfer.path}.partial`), 'fixture')
+    const receipt = await store.publish(
+      transfer.id,
+      'caller-a',
+      createHash('sha256').update('fixture').digest('hex')
+    )
+    await store.close()
+
+    const ledgerPath = path.join(hostRoot, '.gfs-download-store', 'ledger-v1.json')
+    await fs.writeFile(ledgerPath, '')
+
+    const reopened = new GfsDownloadStore(hostRoot)
+    await expect(reopened.initialize()).rejects.toMatchObject({
+      code: 'corrupt_store_ledger',
+    })
+    // The unreadable ledger and the retained source must survive untouched.
+    expect(await fs.readFile(ledgerPath, 'utf8')).toBe('')
+    expect(await fs.readFile(path.join(callerRoot, receipt.path), 'utf8')).toBe('fixture')
+  })
+
+  it('fails closed on an array-shaped persisted ledger and keeps the retained source', async () => {
+    const transfer = await store.createTransfer({
+      callerIdentity: 'caller-a',
+      callerWorkspacePath: callerRoot,
+      source,
+      sizeBytes: 7,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    })
+    await fs.writeFile(path.join(callerRoot, `${transfer.path}.partial`), 'fixture')
+    const receipt = await store.publish(
+      transfer.id,
+      'caller-a',
+      createHash('sha256').update('fixture').digest('hex')
+    )
+    await store.close()
+
+    const ledgerPath = path.join(hostRoot, '.gfs-download-store', 'ledger-v1.json')
+    // `typeof [] === 'object'` and Object.entries([]) is empty, so an array-shaped
+    // records map reads as an empty ledger unless it is rejected explicitly.
+    const persisted = JSON.stringify({ schemaVersion: 1, records: [] })
+    await fs.writeFile(ledgerPath, persisted)
+
+    const reopened = new GfsDownloadStore(hostRoot)
+    await expect(reopened.initialize()).rejects.toMatchObject({
+      code: 'corrupt_store_ledger',
+    })
+    expect(await fs.readFile(ledgerPath, 'utf8')).toBe(persisted)
+    expect(await fs.readFile(path.join(callerRoot, receipt.path), 'utf8')).toBe('fixture')
+  })
+
+  it('rejects an existing store whose durable ledger is missing', async () => {
+    const transfer = await store.createTransfer({
+      callerIdentity: 'caller-a',
+      callerWorkspacePath: callerRoot,
+      source,
+      sizeBytes: 7,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    })
+    await fs.writeFile(path.join(callerRoot, `${transfer.path}.partial`), 'fixture')
+    const receipt = await store.publish(
+      transfer.id,
+      'caller-a',
+      createHash('sha256').update('fixture').digest('hex')
+    )
+    await store.close()
+
+    const ledgerPath = path.join(hostRoot, '.gfs-download-store', 'ledger-v1.json')
+    await fs.rm(ledgerPath)
+
+    // The directory already existed with no durable ledger: unknown state, not
+    // a fresh store. Reject without recreating the ledger or touching sources.
+    await expect(new GfsDownloadStore(hostRoot).initialize()).rejects.toMatchObject({
+      code: 'corrupt_store_ledger',
+    })
+    await expect(fs.stat(ledgerPath)).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await fs.readFile(path.join(callerRoot, receipt.path), 'utf8')).toBe('fixture')
+    // A retry must fail on state, not on a writer lease leaked by the failure.
+    await expect(new GfsDownloadStore(hostRoot).initialize()).rejects.toMatchObject({
+      code: 'corrupt_store_ledger',
+    })
+  })
+
+  it('rejects a preexisting store directory that has no durable ledger', async () => {
+    const isolatedRoot = await fs.mkdtemp(path.join(tmpdir(), 'gfs-store-existing-'))
+    const isolatedStoreRoot = path.join(isolatedRoot, '.gfs-download-store')
+    await fs.mkdir(isolatedStoreRoot, { mode: 0o700 })
+    try {
+      await expect(new GfsDownloadStore(isolatedRoot).initialize()).rejects.toMatchObject({
+        code: 'corrupt_store_ledger',
+      })
+      expect(await fs.readdir(isolatedStoreRoot)).not.toContain('ledger-v1.json')
+    } finally {
+      await fs.rm(isolatedRoot, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects an array-shaped processingLeases map and keeps the retained source', async () => {
+    const transfer = await store.createTransfer({
+      callerIdentity: 'caller-a',
+      callerWorkspacePath: callerRoot,
+      source,
+      sizeBytes: 7,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    })
+    await fs.writeFile(path.join(callerRoot, `${transfer.path}.partial`), 'fixture')
+    const receipt = await store.publish(
+      transfer.id,
+      'caller-a',
+      createHash('sha256').update('fixture').digest('hex')
+    )
+    await store.close()
+
+    const ledgerPath = path.join(hostRoot, '.gfs-download-store', 'ledger-v1.json')
+    const persisted = JSON.parse(await fs.readFile(ledgerPath, 'utf8')) as {
+      processingLeases?: unknown
+    }
+    persisted.processingLeases = []
+    const rewritten = JSON.stringify(persisted)
+    await fs.writeFile(ledgerPath, rewritten)
+
+    await expect(new GfsDownloadStore(hostRoot).initialize()).rejects.toMatchObject({
+      code: 'corrupt_store_ledger',
+    })
+    expect(await fs.readFile(ledgerPath, 'utf8')).toBe(rewritten)
+    expect(await fs.readFile(path.join(callerRoot, receipt.path), 'utf8')).toBe('fixture')
+  })
+
   it('does not commit a publication released after abort and keeps failed cleanup reserved', async () => {
     const expiresAt = new Date(Date.now() + 60_000).toISOString()
     const transfer = await store.createTransfer({

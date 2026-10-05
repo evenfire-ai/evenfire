@@ -97,8 +97,9 @@ unavailable until recovery; a replacement needs fresh GFS authorization.
 - The working directory and `HOME` are the caller workspace. A supplied allowlisted or dynamic `HOME` cannot relocate execution outside it.
 - Each command requires live user approval.
 - Combined retained command output is bounded to 1 MiB. Live progress is bounded to 64 KiB. Exceeding the output bound terminates the process group and returns a truthful `output_limit_exceeded` result.
-- A processing lease is acquired after approval and before the child process is created. It is released only after process-group termination and output settlement. If acquisition fails, no process starts; if release fails, the result is an error and cleanup protection remains for recovery.
-- Expiry does not remove a copy protected by an admitted execution lease. Recovery conservatively retains leases until their bounded deadline rather than assuming that a child died with the Host.
+- A processing lease is acquired after approval and before the child process is created. Integrity checks precede its processing budget, and file expiry, lease expiry and shutdown are rechecked after durable admission. If admission becomes unavailable, it is rolled back and no process starts.
+- The lease is released only after process-group termination and output settlement. A live execution protects its copy even if the durable deadline has elapsed; a timer alone does not prove physical termination. If release fails, the result is an error and cleanup protection remains.
+- Recovery without a live owner conservatively retains leases until their bounded deadline rather than assuming that a child died with the Host. A failed admission rollback retains its durable reservation until that deadline without registering an execution that never started.
 
 Unix directory modes and random directory names do not provide cross-caller OS isolation when a Host shares one UID. Approved arbitrary shell access remains a documented Stage 1 residual; stronger executor isolation is separate Stage 2 work.
 
@@ -110,9 +111,13 @@ Generic workspace tools reject direct and symlink-resolved access to `.gfs-downl
 
 - Completed copies expire after the configured TTL, seven days by default.
 - Host and caller quotas account for partial and completed files. Unknown or corrupt accounting fails closed rather than reporting zero usage.
+- A new store publishes an atomic schema-1 ledger before accepting transfers. Every existing ledger is parsed, including empty content; invalid record or lease maps are rejected.
+- A pre-existing store directory with a missing ledger is unknown accounting, including an interrupted first initialization before ledger publication. Startup rejects it and preserves retained bytes for operator recovery instead of silently resetting quota. This can require recovery after a bootstrap interruption.
+- Startup does not reconstruct an accounting directory deleted in its entirety while caller copies remain. Approved shell commands share the Host UID and can destroy this state; whole-store deletion remains outside the recovery guarantee and requires operator inventory of retained copies.
 - Only positively identified expired entries are deleted. A cleanup failure remains charged and is observable for recovery.
 - Startup reconciles the ledger and partial files before the capability is advertised.
 - Shutdown stops new admission, drains active work where possible, and leaves unproven lease/recovery state protected.
+- Pending and queued admission rechecks shutdown after asynchronous validation and persistence. Shutdown rechecks active ownership before releasing the writer lease.
 
 ## Metrics
 

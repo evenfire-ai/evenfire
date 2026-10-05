@@ -97,7 +97,8 @@ function parseLedger(raw: string): StoreLedger {
     parsed === null ||
     (parsed as { schemaVersion?: unknown }).schemaVersion !== 1 ||
     typeof (parsed as { records?: unknown }).records !== 'object' ||
-    (parsed as { records: unknown }).records === null
+    (parsed as { records: unknown }).records === null ||
+    Array.isArray((parsed as { records: unknown }).records)
   )
     throw new GfsDownloadStoreError('corrupt_store_ledger')
 
@@ -147,7 +148,11 @@ function parseLedger(raw: string): StoreLedger {
   }
   const rawProcessingLeases = (parsed as { processingLeases?: unknown }).processingLeases
   if (rawProcessingLeases !== undefined) {
-    if (typeof rawProcessingLeases !== 'object' || rawProcessingLeases === null)
+    if (
+      typeof rawProcessingLeases !== 'object' ||
+      rawProcessingLeases === null ||
+      Array.isArray(rawProcessingLeases)
+    )
       throw new GfsDownloadStoreError('corrupt_store_ledger')
     for (const [id, value] of Object.entries(rawProcessingLeases)) {
       const lease = value as GfsProcessingLeaseRecord
@@ -255,20 +260,43 @@ export class GfsDownloadStore {
     const hostInfo = await fs.lstat(this.hostRoot)
     if (!hostInfo.isDirectory() || hostInfo.isSymbolicLink())
       throw new GfsDownloadStoreError('workspace_unavailable')
-    await fs.mkdir(this.storeRoot, { recursive: true, mode: 0o700 })
+    // Exclusive, non-recursive creation distinguishes a genuinely new store
+    // directory from one that already existed. The host root above is created
+    // recursively, so only the store directory itself is probed here.
+    let createdStoreRoot = false
+    try {
+      await fs.mkdir(this.storeRoot, { mode: 0o700 })
+      createdStoreRoot = true
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+    }
     const storeInfo = await fs.lstat(this.storeRoot)
     if (!storeInfo.isDirectory() || storeInfo.isSymbolicLink() || storeInfo.mode & 0o077)
       throw new GfsDownloadStoreError('workspace_unavailable')
 
     await this.acquireWriterLease()
-    let raw = ''
+    let raw: string | undefined
     try {
       try {
         raw = await fs.readFile(this.ledgerPath, 'utf8')
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
       }
-      if (raw) this.ledger = parseLedger(raw)
+      if (raw !== undefined) {
+        // A successful read must always parse, including empty content, so a
+        // truncated ledger fails closed.
+        this.ledger = parseLedger(raw)
+      } else if (createdStoreRoot) {
+        // Genuinely new store directory: make the durable schema-1 ledger exist
+        // before reconciliation or any transfer exposure, so a ledger missing
+        // later is unambiguously unknown state.
+        await this.persist()
+      } else {
+        // The directory already existed with no durable ledger: a lost ledger
+        // or an interrupted first creation. Both are unknown state. Fail closed
+        // for operator recovery instead of silently resetting quota.
+        throw new GfsDownloadStoreError('corrupt_store_ledger')
+      }
       await this.reconcile()
       this.initialized = true
       await this.cleanupExpired()
@@ -320,6 +348,8 @@ export class GfsDownloadStore {
     }
 
     await this.serialize(async () => {
+      this.assertInitialized()
+      if (this.closing) throw new GfsDownloadStoreError('download_busy')
       const usage = usageFor(Object.values(this.ledger.records))
       const callerBytes = usage.callerBytes[input.callerIdentity] ?? 0
       if (usage.bytes + input.sizeBytes > GFS_FILE_LIMITS.storageBytes)
@@ -728,6 +758,8 @@ export class GfsDownloadStore {
       throw new GfsDownloadStoreError('download_busy')
 
     return this.serialize(async () => {
+      this.assertInitialized()
+      if (this.closing) throw new GfsDownloadStoreError('download_busy')
       const now = Date.now()
       const retained = Object.values(this.ledger.records).filter(
         record => record.callerIdentity === callerIdentity
@@ -747,13 +779,17 @@ export class GfsDownloadStore {
         }
       }
       for (const record of candidates) await this.inspect(record.path, callerIdentity)
+      if (this.closing) throw new GfsDownloadStoreError('download_busy')
+      const admittedAt = Date.now()
+      if (retained.some(record => Date.parse(record.expiresAt) <= admittedAt))
+        throw new GfsDownloadStoreError('download_expired')
       const leaseId = randomUUID()
-      const expiresAt = new Date(now + requestedMs).toISOString()
+      const expiresAt = new Date(admittedAt + requestedMs).toISOString()
       const lease: GfsProcessingLeaseRecord = {
         leaseId,
         callerIdentity,
         recordIds: candidates.map(record => record.id),
-        acquiredAt: new Date(now).toISOString(),
+        acquiredAt: new Date(admittedAt).toISOString(),
         expiresAt,
       }
       this.ledger.processingLeases ??= {}
@@ -763,6 +799,27 @@ export class GfsDownloadStore {
       } catch (error) {
         delete this.ledger.processingLeases[leaseId]
         throw error
+      }
+      // Hashing and durable publication can outlast either deadline. Only
+      // return a new lease while both remain valid; an already admitted
+      // execution keeps its existing protection after the file's expiry.
+      const publishedAt = Date.now()
+      const denial = retained.some(record => Date.parse(record.expiresAt) <= publishedAt)
+        ? 'download_expired'
+        : this.closing || Date.parse(expiresAt) <= publishedAt
+          ? 'download_busy'
+          : undefined
+      if (denial) {
+        delete this.ledger.processingLeases[leaseId]
+        try {
+          await this.persist()
+        } catch (error) {
+          // A failed rollback retains the durable reservation until its
+          // deadline, without registering an execution that never started.
+          this.ledger.processingLeases[leaseId] = lease
+          throw error
+        }
+        throw new GfsDownloadStoreError(denial)
       }
       this.liveProcessingLeases.add(leaseId)
       return { leaseId, expiresAt }
@@ -821,6 +878,12 @@ export class GfsDownloadStore {
       throw new GfsDownloadStoreError('download_busy')
     }
     await this.mutationTail
+    // Work already queued before shutdown can finish admission while close
+    // waits. Never release writer ownership over a newly active operation.
+    if (this.activeIds.size > 0 || this.liveProcessingLeases.size > 0) {
+      this.closing = false
+      throw new GfsDownloadStoreError('download_busy')
+    }
     this.initialized = false
     try {
       await this.serialize(async () => {
@@ -838,9 +901,10 @@ export class GfsDownloadStore {
       const removed: string[] = []
       let stateChanged = false
       for (const [leaseId, lease] of Object.entries(this.ledger.processingLeases ?? {})) {
-        if (Date.parse(lease.expiresAt) <= now) {
+        // A live execution releases its lease after process-group termination.
+        // The durable deadline governs recovery when no live owner remains.
+        if (Date.parse(lease.expiresAt) <= now && !this.liveProcessingLeases.has(leaseId)) {
           delete this.ledger.processingLeases![leaseId]
-          this.liveProcessingLeases.delete(leaseId)
           stateChanged = true
         }
       }
@@ -1012,7 +1076,9 @@ export class GfsDownloadStore {
 
   private hasProcessingLease(recordId: string, now: number): boolean {
     return Object.values(this.ledger.processingLeases ?? {}).some(
-      lease => Date.parse(lease.expiresAt) > now && lease.recordIds.includes(recordId)
+      lease =>
+        (this.liveProcessingLeases.has(lease.leaseId) || Date.parse(lease.expiresAt) > now) &&
+        lease.recordIds.includes(recordId)
     )
   }
 
