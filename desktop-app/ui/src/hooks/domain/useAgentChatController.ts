@@ -95,7 +95,7 @@ import {
 } from './useChatListController'
 import { type ActiveChatVisibility, useChatNotifications } from './useChatNotifications'
 import { useChatScroll } from './useChatScroll'
-import { predictComposerImageMerge, useComposerAttachments } from './useComposerAttachments'
+import { useComposerAttachments } from './useComposerAttachments'
 import type { PushToastOptions } from './useToastController'
 
 // Re-exported from `useChatListController` (§4.4) so external importers
@@ -708,6 +708,7 @@ export function useAgentChatController({
     handleRemoveComposerImageAttachment,
     handleAddComposerReferenceAttachments,
     handleRemoveComposerReferenceAttachment,
+    restoreComposerImageAttachments,
   } = useComposerAttachments({ selectedAgent, clearSendError: clearComposerSendError })
 
   const { chatEndRef, scrollChatToBottom } = useChatScroll({
@@ -3522,8 +3523,9 @@ export function useAgentChatController({
         activeChatVisibilityRef.current.selectedAgent === agentRef &&
         activeChatVisibilityRef.current.activeChatId === originChatId
       if (!stillViewingOrigin()) return
-      const { dropped } = predictComposerImageMerge(composerImageAttachments, images)
-      handleAddComposerImageAttachments(
+      // One merge against the live composer snapshot — the counts and the
+      // committed state can never disagree (R1-M4).
+      const { dropped } = restoreComposerImageAttachments(
         images.map(attachment => ({
           ...attachment,
           previewDataUrl: `data:${attachment.mimeType};base64,${attachment.dataBase64}`,
@@ -3546,11 +3548,10 @@ export function useAgentChatController({
     },
     [
       getRetainedSendsForTask,
-      composerImageAttachments,
-      handleAddComposerImageAttachments,
       handleAddComposerReferenceAttachments,
       pushToast,
       resetComposerAttachments,
+      restoreComposerImageAttachments,
     ]
   )
 

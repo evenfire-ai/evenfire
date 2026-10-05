@@ -359,4 +359,56 @@ describe('STORY-38 — attachments survive message cancel', () => {
 
     expect(result.current.composerImageAttachments).toHaveLength(1)
   })
+
+  it('reports drops from the live composer state, not the render closure at cancel time (R1-M4)', async () => {
+    // The composer fills to 19 WHILE the cancel RPC is in flight — after the
+    // executing closure was captured. The toast must report drops against the
+    // state the merge actually reconciled with, not the stale empty snapshot.
+    let resolveCancel!: () => void
+    clerum.rpc.cancelTask.mockReturnValue(
+      new Promise<void>(resolve => {
+        resolveCancel = resolve
+      })
+    )
+    const sent = [0, 1, 2].map(index => ({
+      ...image,
+      id: `sent-${index}`,
+      name: `sent-${index}.png`,
+      dataBase64: `c2VudC0-${index}`,
+      previewDataUrl: `data:image/png;base64,c2VudC0-${index}`,
+    }))
+    const rendered = renderController()
+    await waitFor(() => expect(clerum.chat.getIndex).toHaveBeenCalled())
+    await act(async () => {
+      await loadHostModels(modelTransport, 'agent-x', null)
+    })
+    act(() => rendered.result.current.handleAddComposerImageAttachments(sent))
+    await sendAsync(rendered.result, 'task-race')
+
+    let cancelDone!: Promise<void>
+    act(() => {
+      cancelDone = rendered.result.current.cancelTask('task-race')
+    })
+    // 19 fresh images land in the composer while the RPC is pending.
+    const filler = Array.from({ length: 19 }, (_, index) => ({
+      ...image,
+      id: `filler-${index}`,
+      name: `filler-${index}.png`,
+      dataBase64: `ZmlsbGVy-${index}`,
+      previewDataUrl: `data:image/png;base64,ZmlsbGVy-${index}`,
+    }))
+    act(() => rendered.result.current.handleAddComposerImageAttachments(filler))
+    expect(rendered.result.current.composerImageAttachments).toHaveLength(19)
+
+    await act(async () => {
+      resolveCancel()
+      await cancelDone
+    })
+
+    expect(rendered.result.current.composerImageAttachments).toHaveLength(20)
+    const call = keptToastCall(rendered.spies)
+    expect(call?.[0]).toBe(
+      'Attachments kept — 2 of 3 images exceed the 20-image limit and were dropped.'
+    )
+  })
 })
