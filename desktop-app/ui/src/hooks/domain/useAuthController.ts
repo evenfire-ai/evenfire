@@ -554,7 +554,14 @@ export function useAuthController({
           return
         }
 
-        const selectedState = await handleSelectRuntimeConfig(restMatches.saved[0].id)
+        const [savedOption] = restMatches.saved
+        if (!savedOption) {
+          setPendingDesktopEnvironmentSetup(null)
+          setStatus('Could not resolve the saved desktop environment.', 'error')
+          return
+        }
+
+        const selectedState = await handleSelectRuntimeConfig(savedOption.id)
         if (!selectedState) return
         setPendingDesktopEnvironmentSetup(null)
         try {

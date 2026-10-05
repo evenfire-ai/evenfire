@@ -260,8 +260,14 @@ export function createDesktopEnvironmentSetupHandler({
     }
 
     if (restMatches.saved.length === 1) {
+      const [savedOption] = restMatches.saved
+      if (!savedOption) {
+        setPendingDesktopEnvironmentSetup(null)
+        setStatus('Could not resolve the saved desktop environment.', 'error')
+        return
+      }
       setPendingDesktopEnvironmentSetup(null)
-      const selection = await handleSelectRuntimeConfig(restMatches.saved[0].id, sessionGeneration)
+      const selection = await handleSelectRuntimeConfig(savedOption.id, sessionGeneration)
       if (!selection) return
       if (!(await ownsSessionGeneration(selection.sessionGeneration))) return
       authState = getAuthState()
