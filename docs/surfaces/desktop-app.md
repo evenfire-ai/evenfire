@@ -200,8 +200,9 @@ service, a teammate's, or local `make`-forwarded services — from the app's own
 proxy address follows from that environment; there is no second URL to enter.
 When Profile-to-Desktop handoff is enabled, Profile UI's
 `evenfire://desktop-environment` link selects one exact saved REST URL or asks
-the user before adding it; the REST API supplies the RPC proxy URL. This
-producer is disabled by default. Release operators enable the
+the user before adding it; an already-active exact REST endpoint is retained
+before duplicate saved matches are rejected. The REST API supplies the RPC
+proxy URL. This producer is disabled by default. Release operators enable the
 `PROFILE_DESKTOP_HANDOFF_ENABLED` image-build variable only after releasing the
 updated Desktop client and retiring older supported clients. While the gate is
 off, users can copy the REST URL from Profile UI Settings and add it in Desktop.
