@@ -919,6 +919,10 @@ export async function deleteTransportDelegation(
  * The Context has an ownerReference to the WorkflowRecipe so K8s GC handles
  * deletion automatically. Belt-and-suspenders explicit delete in cleanupDelegation.
  *
+ * Read-first, like ensureTransportService (#760): GET the Context; create it
+ * only on a 404; a 409 on that create re-reads and compares. A POST against an
+ * existing Context is a rejected write that the audit log still counts.
+ *
  * Returns the per-recipe context name.
  */
 export async function ensureRecipeContext(
@@ -1228,8 +1232,9 @@ export async function preDeployMcpServers(
   // Create (or update) the per-recipe Context CRD immediately after McpServers
   // are pre-deployed. This makes the allowlist visible to E2E tests and downstream
   // watchers in ~2-3s, well before waitForNetworkReady completes (~30s for stdio).
-  // delegateTransportWorkloads (Step 9a) will call ensureRecipeContext again
-  // idempotently after the network handshake completes.
+  // delegateTransportWorkloads (Step 9a) calls ensureRecipeContext again after
+  // the network handshake completes. In steady state that second call is one
+  // GET and no write, because the writer reads before it creates (#760).
   if (preDeployed.length > 0) {
     const recipeOwnerRef = {
       apiVersion: `${CRD_GROUP}/${CRD_VERSION}` as const,

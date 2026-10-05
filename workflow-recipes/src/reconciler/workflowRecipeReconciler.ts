@@ -4806,6 +4806,9 @@ export class WorkflowRecipeReconciler {
     })
   }
 
+  // Read-first, like ensureTransportService in mcpDelegation.ts (#760): GET the
+  // StatefulSet; create it only on a 404; a 409 on that create re-reads. A POST
+  // against an existing StatefulSet is a rejected write the audit log counts.
   private async createOrPatchStatefulSet(
     statefulSet: k8s.V1StatefulSet,
     namespace: string,
