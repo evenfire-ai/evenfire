@@ -138,16 +138,19 @@ describeRealPostgres('registry uninstall tears OAuth grants down (real Postgres)
   })
 
   afterAll(async () => {
-    dbHolder.target = null
-    await endPoolAndWaitForClients(dbPool)
-    if (adminPool) {
-      await adminPool.query(
-        `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+    try {
+      dbHolder.target = null
+      await endPoolAndWaitForClients(dbPool)
+      if (adminPool) {
+        await adminPool.query(
+          `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
           WHERE datname = $1 AND pid <> pg_backend_pid()`,
-        [database]
-      )
-      await adminPool.query(`DROP DATABASE IF EXISTS "${database.replace(/"/g, '""')}"`)
-      await adminPool.end()
+          [database]
+        )
+        await adminPool.query(`DROP DATABASE IF EXISTS "${database.replace(/"/g, '""')}"`)
+      }
+    } finally {
+      await adminPool?.end()
     }
   })
 

@@ -17,7 +17,34 @@ import {
   workflowRecipeFromWatchObject,
 } from './k8sClient'
 import { captureLogger } from './reconciler/__tests__/captureLogger'
+import { buildOAuthBrokerTokenSecret } from './reconciler/resourceBuilder'
+import type { SecretEventType, SecretLike } from './reconciler/secretWatcher'
 import type { WorkflowRecipeCRD } from './types'
+
+// startSecretWatch builds one SecretWatcher per namespace and hands it to a
+// K8sSecretWatchLoop. Capturing that hand-off lets a test drive the REAL
+// watcher instances the client constructed, so the callback wiring is covered
+// end to end instead of being replaced by a hand-injected callback.
+const secretLoops = vi.hoisted(
+  () =>
+    [] as Array<{
+      namespace: string
+      handler: { handleEvent: (type: SecretEventType, secret: SecretLike) => void }
+    }>
+)
+vi.mock('./k8sSecretWatchLoop', () => ({
+  K8sSecretWatchLoop: class {
+    constructor(
+      _kc: unknown,
+      namespace: string,
+      handler: { handleEvent: (type: SecretEventType, secret: SecretLike) => void }
+    ) {
+      secretLoops.push({ namespace, handler })
+    }
+    async start(): Promise<void> {}
+    stop(): void {}
+  },
+}))
 
 function makeWorkflowRecipe(overrides: Partial<WorkflowRecipeCRD> = {}): WorkflowRecipeCRD {
   return {
@@ -1526,10 +1553,12 @@ describe('workload status refresh loop helpers', () => {
     type InternalWatcher = {
       recipes: Map<string, WorkflowRecipeCRD>
       reconciler: { reconcile: typeof reconcile }
+      transientRetries: Map<string, { timer: ReturnType<typeof setTimeout>; attempts: number }>
       handleRecipeEvent: (type: string, recipe: WorkflowRecipeCRD) => Promise<void>
     }
     const internal = Object.create(WorkflowRecipeWatcher.prototype) as InternalWatcher
     internal.recipes = new Map([[cached.metadata.name, cached]])
+    internal.transientRetries = new Map()
     internal.reconciler = { reconcile }
 
     await internal.handleRecipeEvent('MODIFIED', statusOnly)
@@ -3248,5 +3277,120 @@ describe('WorkflowRecipeWatcher wiring — grant-update listener lifecycle (issu
     expect(listenerStop).toHaveBeenCalledTimes(1)
     // M4: the watcher owns the dedicated pool and must close its connection.
     expect(poolEnd).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('handleOAuthBrokerTokenAdded', () => {
+  type BrokerAddedInternal = {
+    config: { sandboxNamespace: string }
+    reconciler: { invalidateOAuthBrokerSecretLedger: (recipeName: string) => void }
+    recipes: Map<string, WorkflowRecipeCRD>
+    eventQueue: { enqueue: (key: string, task: () => Promise<void>) => unknown }
+    handleOAuthBrokerTokenAdded: (namespace: string, recipeName: string) => void
+  }
+
+  function recipeWith(name: string, backgroundAccess: boolean): WorkflowRecipeCRD {
+    const recipe = makeWorkflowRecipe({ metadata: { name, namespace: 'sandbox-recipes' } })
+    recipe.spec = {
+      ...recipe.spec,
+      oauthClients: backgroundAccess
+        ? [
+            {
+              id: 'gmail',
+              provider: 'google',
+              clientIdRef: { name: 'creds', key: 'client-id' },
+              clientSecretRef: { name: 'creds', key: 'client-secret' },
+              scopes: ['https://www.googleapis.com/auth/gmail.readonly'],
+              backgroundAccess: true,
+            },
+          ]
+        : [],
+    } as WorkflowRecipeCRD['spec']
+    return recipe
+  }
+
+  function setup() {
+    const watcher = new WorkflowRecipeWatcher(
+      {
+        makeApiClient: vi.fn(() => ({})),
+      } as unknown as import('@kubernetes/client-node').KubeConfig,
+      null
+    )
+    const internal = watcher as unknown as BrokerAddedInternal
+    const invalidate = vi.fn()
+    const enqueue = vi.fn()
+    internal.reconciler = { invalidateOAuthBrokerSecretLedger: invalidate }
+    internal.eventQueue = { enqueue }
+    internal.recipes = new Map([
+      ['no-bg', recipeWith('no-bg', false)],
+      ['with-bg', recipeWith('with-bg', true)],
+    ])
+    return { internal, invalidate, enqueue }
+  }
+
+  it('re-arms the ledger and re-reconciles a recipe that must not have a broker token', () => {
+    const { internal, invalidate, enqueue } = setup()
+    internal.handleOAuthBrokerTokenAdded(internal.config.sandboxNamespace, 'no-bg')
+    expect(invalidate).toHaveBeenCalledWith('no-bg')
+    expect(enqueue).toHaveBeenCalledTimes(1)
+    expect(enqueue.mock.calls[0]?.[0]).toBe('no-bg')
+  })
+
+  it('only invalidates for an opted-in recipe: a watch reconnect replays ADDED for every token', () => {
+    const { internal, invalidate, enqueue } = setup()
+    internal.handleOAuthBrokerTokenAdded(internal.config.sandboxNamespace, 'with-bg')
+    expect(invalidate).toHaveBeenCalledWith('with-bg')
+    expect(enqueue).not.toHaveBeenCalled()
+  })
+
+  it('re-arms the ledger and enqueues nothing for a recipe not yet cached', () => {
+    // The recipe's own ADDED event is queued already; that its pass then
+    // reaps the re-armed token is pinned in reconciler.test.ts by the B3
+    // ledger test "deletes the Secret again after ADDED invalidation".
+    const { internal, invalidate, enqueue } = setup()
+    internal.handleOAuthBrokerTokenAdded(internal.config.sandboxNamespace, 'not-cached')
+    // Liveness witness: the handler ran and armed the ledger for that recipe.
+    expect(invalidate).toHaveBeenCalledWith('not-cached')
+    expect(enqueue).not.toHaveBeenCalled()
+  })
+
+  it('startSecretWatch wires each namespace watcher to the handler with its own namespace', async () => {
+    const { internal, invalidate, enqueue } = setup()
+    secretLoops.length = 0
+    await (internal as unknown as { startSecretWatch: () => Promise<void> }).startSecretWatch()
+
+    // The Secret WRC itself writes, not a hand-written copy of its labels.
+    const brokerToken = buildOAuthBrokerTokenSecret(
+      'no-bg',
+      'jwt',
+      internal.config.sandboxNamespace
+    )
+
+    // Liveness witness: the sandbox-namespace watcher exists and reaches the handler.
+    const sandbox = secretLoops.find(l => l.namespace === internal.config.sandboxNamespace)
+    expect(sandbox).toBeDefined()
+    sandbox?.handler.handleEvent('ADDED', brokerToken)
+    expect(invalidate).toHaveBeenCalledWith('no-bg')
+    expect(enqueue).toHaveBeenCalledTimes(1)
+
+    // Every other namespace's watcher is bound to ITS namespace, so the handler ignores it.
+    const others = secretLoops.filter(l => l.namespace !== internal.config.sandboxNamespace)
+    expect(others.length).toBeGreaterThan(0)
+    for (const other of others) {
+      other.handler.handleEvent('ADDED', brokerToken)
+    }
+    expect(invalidate).toHaveBeenCalledTimes(1)
+    expect(enqueue).toHaveBeenCalledTimes(1)
+  })
+
+  it('ignores a same-named Secret outside the sandbox namespace', () => {
+    const { internal, invalidate, enqueue } = setup()
+    // Liveness witness: the same call in the sandbox namespace does act.
+    internal.handleOAuthBrokerTokenAdded(internal.config.sandboxNamespace, 'no-bg')
+    expect(invalidate).toHaveBeenCalledTimes(1)
+    expect(enqueue).toHaveBeenCalledTimes(1)
+    internal.handleOAuthBrokerTokenAdded('mcp-server', 'no-bg')
+    expect(invalidate).toHaveBeenCalledTimes(1)
+    expect(enqueue).toHaveBeenCalledTimes(1)
   })
 })
