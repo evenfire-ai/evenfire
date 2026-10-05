@@ -17,29 +17,32 @@ const CLIENT_ID = 'my-generic-client'
 const REDIRECT_URI = 'https://control.example.com/api/v1/oauth-callback/my-generic-client'
 
 function genericSubject(overrides: Record<string, unknown> = {}): McpServerOAuthSubject {
-  const resolved = resolveServerOAuthSubject({
-    spec: {
-      contextRef: 'ctx-A',
-      oauth: {
-        source: 'generic',
-        id: CLIENT_ID,
-        authorizationEndpoint: 'https://idp.example.com/authorize',
-        tokenEndpoint: 'https://idp.example.com/token',
-        resource: 'https://api.example.com',
-        tokenRequestFormat: 'form',
-        tokenAuthMethod: 'body',
-        scopeSeparator: 'comma',
-        sendScope: true,
-        usePkce: true,
-        includeResponseType: true,
-        supportsRefresh: true,
-        grantScope: 'user',
-        scopes: ['read', 'write'],
-        extraAuthorizeParams: { audience: 'aud-1' },
-        ...overrides,
+  const resolved = resolveServerOAuthSubject(
+    {
+      spec: {
+        contextRef: 'ctx-A',
+        oauth: {
+          source: 'generic',
+          id: CLIENT_ID,
+          authorizationEndpoint: 'https://idp.example.com/authorize',
+          tokenEndpoint: 'https://idp.example.com/token',
+          resource: 'https://api.example.com',
+          tokenRequestFormat: 'form',
+          tokenAuthMethod: 'body',
+          scopeSeparator: 'comma',
+          sendScope: true,
+          usePkce: true,
+          includeResponseType: true,
+          supportsRefresh: true,
+          grantScope: 'user',
+          scopes: ['read', 'write'],
+          extraAuthorizeParams: { audience: 'aud-1' },
+          ...overrides,
+        },
       },
     },
-  })
+    'consent'
+  )
   if (!resolved) throw new Error('fixture: generic resolve returned null')
   return { namespace: MCP_NS, ...resolved }
 }
