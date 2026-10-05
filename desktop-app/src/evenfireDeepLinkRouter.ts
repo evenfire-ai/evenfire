@@ -105,7 +105,7 @@ export function createEvenfireDeepLinkRouter<TWindow extends RendererTarget>(
     if (hostname === 'logout') {
       void options
         .logout()
-        .finally(() => {
+        .then(() => {
           const window = options.getWindow()
           if (!window || window.isDestroyed()) return
           options.focusMainWindow()
