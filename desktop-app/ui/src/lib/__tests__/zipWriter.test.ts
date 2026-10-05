@@ -89,6 +89,32 @@ describe('createZipWriter', () => {
     expect(writer.has('docs/plan (2).md')).toBe(true)
   })
 
+  it('de-duplicates case-insensitive collisions so portable extractors never overwrite (R1-L1)', () => {
+    const writer = createZipWriter()
+    writer.addFile('Report.txt', textBytes('upper'))
+    writer.addFile('report.txt', textBytes('lower'))
+    writer.addFile('REPORT.TXT', textBytes('shout'))
+
+    const entries = readStoredZip(writer.build())
+    expect(entries.map(entry => entry.name)).toEqual([
+      'Report.txt',
+      'report (2).txt',
+      'REPORT (3).TXT',
+    ])
+    // Distinct content survives the rename, byte-identical.
+    const contentDecoder = new TextDecoder()
+    expect(entries.map(entry => contentDecoder.decode(entry.bytes))).toEqual([
+      'upper',
+      'lower',
+      'shout',
+    ])
+    expect(writer.has('report.txt')).toBe(true)
+    // Case-insensitive membership: the shout-case original collides with the
+    // set even though it was renamed on write.
+    expect(writer.has('REPORT.TXT')).toBe(true)
+    expect(writer.has('report (4).txt')).toBe(false)
+  })
+
   it('marks names as UTF-8 in both header sets', () => {
     const writer = createZipWriter()
     writer.addFile('报告/tafel-übe.png', textBytes('x'))

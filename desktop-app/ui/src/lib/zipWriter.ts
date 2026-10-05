@@ -114,7 +114,8 @@ export function createZipWriter(options: CreateZipWriterOptions = {}): ZipWriter
   return {
     addFile(path, bytes) {
       const writtenPath = ensureUniqueName(path, usedNames)
-      usedNames.add(writtenPath)
+      // The set holds case-folded keys: collisions are matched case-insensitively.
+      usedNames.add(writtenPath.toLowerCase())
       const nameBytes = encodeName(writtenPath)
       const crc = crc32(bytes)
       const localHeaderOffset = length
@@ -143,7 +144,7 @@ export function createZipWriter(options: CreateZipWriterOptions = {}): ZipWriter
     },
 
     has(path) {
-      return usedNames.has(path)
+      return usedNames.has(path.toLowerCase())
     },
 
     entryCount() {
@@ -193,9 +194,16 @@ export function createZipWriter(options: CreateZipWriterOptions = {}): ZipWriter
   }
 }
 
-/** `a/b.txt` → `a/b (2).txt` style de-duplication for repeated zip names. */
+/**
+ * De-duplication for repeated zip entry names: `a/b.txt` → `a/b (2).txt`.
+ * Matching is case-insensitive across the WHOLE path (`Report.txt` collides
+ * with `report.txt`): portable case-insensitive extractors (macOS, Windows)
+ * would otherwise silently overwrite one of the two during extraction, so the
+ * second colliding name is suffixed instead (spec: name-collision policy).
+ */
 function ensureUniqueName(path: string, usedNames: Set<string>): string {
-  if (!usedNames.has(path)) return path
+  const fold = (candidate: string) => candidate.toLowerCase()
+  if (!usedNames.has(fold(path))) return path
   const slash = path.lastIndexOf('/')
   const directory = slash >= 0 ? path.slice(0, slash + 1) : ''
   const base = slash >= 0 ? path.slice(slash + 1) : path
@@ -204,7 +212,7 @@ function ensureUniqueName(path: string, usedNames: Set<string>): string {
   const extension = dot > 0 ? base.slice(dot) : ''
   let counter = 2
   let candidate = `${directory}${stem} (${counter})${extension}`
-  while (usedNames.has(candidate)) {
+  while (usedNames.has(fold(candidate))) {
     counter += 1
     candidate = `${directory}${stem} (${counter})${extension}`
   }
