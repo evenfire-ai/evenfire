@@ -93,13 +93,15 @@ run_t0() {
   bash -n "$SCRIPT_DIR/t2-common.sh" "$SCRIPT_DIR/t2-preflight.sh" "$SCRIPT_DIR/t2.sh" \
     "$SCRIPT_DIR/t2-setup-handoff.sh" \
     "$T2_PROJECT_DIR/scripts/tests/test-minikube-t2-setup-handoff.sh"
-  T0_PROJECT_DIR="$T2_PROJECT_DIR" T0_ORIGIN_DEV="$T2_ORIGIN_DEV" T0_HEAD="$T2_HEAD" \
+  # T0 does not hold the lease, so its children must not inherit the pinned
+  # origin/dev (see t2_run_outside_lease); T0 receives it as T0_ORIGIN_DEV.
+  t2_run_outside_lease T0_PROJECT_DIR="$T2_PROJECT_DIR" T0_ORIGIN_DEV="$T2_ORIGIN_DEV" T0_HEAD="$T2_HEAD" \
     bash "$T2_PROJECT_DIR/scripts/minikube/t0.sh"
   if [ -n "$T2_T0_COMMAND" ]; then
-    bash -c "$T2_T0_COMMAND"
+    t2_run_outside_lease bash -c "$T2_T0_COMMAND"
   fi
-  bash "$T2_PROJECT_DIR/scripts/tests/test-minikube-t2-contract.sh"
-  bash "$T2_PROJECT_DIR/scripts/tests/test-minikube-t2-setup-handoff.sh"
+  t2_run_outside_lease bash "$T2_PROJECT_DIR/scripts/tests/test-minikube-t2-contract.sh"
+  t2_run_outside_lease bash "$T2_PROJECT_DIR/scripts/tests/test-minikube-t2-setup-handoff.sh"
   T2_T0_STATUS=PASS
   t2_evidence_write T0 PASS "syntax, ShellCheck when available, affected package test/build/typecheck, contract, and diff checks passed; duration=$((SECONDS - phase_started_seconds))s"
 }

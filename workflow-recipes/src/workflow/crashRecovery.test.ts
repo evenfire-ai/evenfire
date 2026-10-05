@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   evaluateCompletedRuntimePodRecovery,
   evaluateCrashRecovery,
+  getPodPresence,
   inspectPodReadiness,
   waitForPodDeletion,
 } from './crashRecovery'
@@ -111,8 +112,43 @@ describe('crash recovery pod readiness classification', () => {
   })
 })
 
+describe('getPodPresence', () => {
+  it('returns absent on GET 404 and present on GET 200 with empty status', async () => {
+    const readNamespacedPod = vi
+      .fn()
+      .mockRejectedValueOnce({ code: 404 })
+      .mockResolvedValueOnce({ metadata: { name: 'recipe-coordinator' }, status: {} })
+    const coreApi = { readNamespacedPod } as unknown as Parameters<typeof getPodPresence>[0]
+
+    await expect(getPodPresence(coreApi, 'recipe-coordinator', 'sandbox-recipes')).resolves.toEqual(
+      {
+        kind: 'absent',
+      }
+    )
+    await expect(getPodPresence(coreApi, 'recipe-coordinator', 'sandbox-recipes')).resolves.toEqual(
+      {
+        kind: 'present',
+        phase: undefined,
+      }
+    )
+  })
+
+  it.each([403, 500])('rethrows a GET %i instead of reporting the pod absent', async code => {
+    const readNamespacedPod = vi.fn().mockRejectedValueOnce({ code })
+    const coreApi = { readNamespacedPod } as unknown as Parameters<typeof getPodPresence>[0]
+
+    await expect(
+      getPodPresence(coreApi, 'recipe-coordinator', 'sandbox-recipes')
+    ).rejects.toMatchObject({ code })
+    expect(readNamespacedPod).toHaveBeenCalledWith({
+      name: 'recipe-coordinator',
+      namespace: 'sandbox-recipes',
+    })
+  })
+})
+
 describe('waitForPodDeletion', () => {
-  it('returns true once getPodPhase reports the pod is gone', async () => {
+  it('returns true once getPodPresence reports the pod is gone', async () => {
     const readNamespacedPod = vi
       .fn()
       .mockResolvedValueOnce({ status: { phase: 'Running' } })
@@ -128,5 +164,24 @@ describe('waitForPodDeletion', () => {
       })
     ).resolves.toBe(true)
     expect(readNamespacedPod).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not treat a GET 200 with empty status.phase as deleted', async () => {
+    const readNamespacedPod = vi
+      .fn()
+      .mockResolvedValue({ metadata: { name: 'recipe-mcp-host' }, status: {} })
+    const coreApi = {
+      readNamespacedPod,
+    } as unknown as Parameters<typeof waitForPodDeletion>[0]
+
+    await expect(
+      waitForPodDeletion(coreApi, 'recipe-mcp-host', 'sandbox-recipes', {
+        timeoutMs: 20,
+        pollIntervalMs: 5,
+      })
+    ).resolves.toBe(false)
+    // Liveness witness: `false` also results if the wait never polled. Several GETs
+    // that each answered 200 show it kept looking until the timeout.
+    expect(readNamespacedPod.mock.calls.length).toBeGreaterThan(1)
   })
 })
