@@ -11,7 +11,10 @@ describe('AppService logout recovery ownership', () => {
   it('fails closed when token removal completes after the runtime boundary changes', async () => {
     const { service, runtimeConfig, optionB, restB } = await createNativeCommitTestHarness()
     service.authClient = {
-      googleLogin: vi.fn().mockResolvedValue({ token: 'session-a', me: { id: 'user-a' } }),
+      googleLogin: vi.fn().mockResolvedValue({
+        token: 'synthetic-session-a',
+        me: { id: 'user-a' },
+      }),
     } as never
     await service.googleLogin('initial-login')
 

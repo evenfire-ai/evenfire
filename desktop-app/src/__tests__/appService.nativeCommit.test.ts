@@ -21,10 +21,10 @@ describe('AppService native auth and environment commit ordering', () => {
           loginStarted.resolve()
           await releaseLogin.promise
           return requestRest === restA
-            ? { token: 'session-a-next', me: { id: 'user-a' } }
-            : { token: 'session-b', me: { id: 'user-b' } }
+            ? { token: 'synthetic-session-a-next', me: { id: 'user-a' } }
+            : { token: 'synthetic-session-b', me: { id: 'user-b' } }
         }
-        return { token: 'session-a', me: { id: 'user-a' } }
+        return { token: 'synthetic-session-a', me: { id: 'user-a' } }
       }),
     } as never
     await service.googleLogin('initial-login')
