@@ -10,8 +10,10 @@
  *     (at most `attachmentTextReadMaxBytes` per call). A page never splits a
  *     code point, so the text never carries U+FFFD. The caller bounds the
  *     page, so the tool is exempt from tool-output spillover and every page
- *     reaches the model inline (#678); `attachmentTextReadMaxBytes` is sized
- *     against the context budget for that reason.
+ *     reaches the model inline (#678). C16 additionally fits each emitted
+ *     page — after JSON escaping and the sanitized wrapper — into the
+ *     current-turn page/turn budgets, shrinking by whole code points with
+ *     measurement only; the tool is never re-executed to fit.
  *   - `reader:'none'`: a typed binary result; the bytes are never decoded.
  *
  * The text-or-binary rule is the one `clerum__gfs_read` applies
@@ -23,10 +25,28 @@
 import type { FileReferenceV1 } from '@clerum/gfs-interaction-policy'
 import { decodeTextContent } from '../../internalTools/textContent'
 import type { IncomingMessage } from '../../server'
-import type { Tool, ToolTraceDescriptor } from '../interfaces'
-import type { ToolOutput } from '../types'
+import { AttachmentReadLedger, attachmentReadBudgets } from '../attachments/attachmentReadBudget'
+import type {
+  ExecutionContext,
+  Tool,
+  ToolEmissionContext,
+  ToolTraceDescriptor,
+} from '../interfaces'
+import type { ToolOutput, ToolResult } from '../types'
 
-export type AttachmentReadErrorCode = 'attachment_not_found' | 'range_invalid'
+export type AttachmentReadErrorCode =
+  | 'attachment_not_found'
+  | 'range_invalid'
+  | 'measurement_unavailable'
+
+export interface AttachmentReadToolOptions {
+  /** Positive safe integer; the ledger derives page/turn budgets from it. */
+  contextWindowTokens: number
+  /** Turn-owned ledger; the registry wires one per turn. */
+  ledger: AttachmentReadLedger
+}
+
+export type AttachmentReadLimit = 'max_bytes' | 'page_budget' | 'turn_budget'
 
 // The result names the file by `attachmentId` (what the model passes to read
 // again) and `referenceId` (the FileReferenceV1 id, which pins the bytes by
@@ -43,6 +63,8 @@ export type AttachmentReadResult =
       kind: 'text'
       byteRange: { offset: number; length: number }
       truncated: boolean
+      limit?: AttachmentReadLimit
+      nextOffset?: number
       text: string
     }
   | {
@@ -52,15 +74,37 @@ export type AttachmentReadResult =
       reader: 'none'
       reason: 'no_reader_for_class' | 'text_decode_rejected' | 'bytes_unavailable_after_restart'
     }
+  | {
+      attachmentId: string
+      referenceId?: FileReferenceV1['id']
+      kind: 'read_budget_exhausted'
+      resumeOffset: number
+      message: string
+    }
 
 const ERROR_MESSAGES: Record<AttachmentReadErrorCode, string> = {
   attachment_not_found: 'No file with this attachmentId is attached to the current message.',
   range_invalid:
     'offset must be an integer within the file on a character boundary, and maxBytes an integer from 1 to the per-call limit that covers at least one character.',
+  measurement_unavailable:
+    'The runtime did not provide the exact output measurement this bounded reader requires.',
 }
 
 function isUtf8Continuation(byte: number): boolean {
   return (byte & 0xc0) === 0x80
+}
+
+const EXHAUSTED_MESSAGE =
+  'The current-turn attachment read budget is exhausted. Reattach the file in a new message to resume at the reported offset; earlier pages are not stored for re-reading.'
+
+/** Execute-time reservation consumed exactly once by finalizeResult. */
+interface PendingEmission {
+  attachmentId: string
+  referenceId?: FileReferenceV1['id']
+  offset: number
+  fileBytes: number
+  bytesRead: number
+  reservedCost: number | null
 }
 
 export class AttachmentReadTool implements Tool {
@@ -70,8 +114,22 @@ export class AttachmentReadTool implements Tool {
   /** @param maxBytesPerCall the per-call ceiling and the default page. */
   constructor(
     private readonly sourceMessage: IncomingMessage,
-    private readonly maxBytesPerCall: number
-  ) {}
+    private readonly maxBytesPerCall: number,
+    options: AttachmentReadToolOptions
+  ) {
+    if (!options || typeof options !== 'object') {
+      throw new Error('Attachment read options are required')
+    }
+    // Reuses the ledger's validation: positive safe integer or throw here,
+    // before any read can execute.
+    attachmentReadBudgets(options.contextWindowTokens)
+    this.contextWindowTokens = options.contextWindowTokens
+    this.ledger = options.ledger
+  }
+
+  private readonly contextWindowTokens: number
+  private readonly ledger: AttachmentReadLedger
+  private pending: PendingEmission | null = null
 
   name(): string {
     return 'clerum__attachment_read'
@@ -82,9 +140,10 @@ export class AttachmentReadTool implements Tool {
       'Read a file attached to the current message, by the attachmentId listed as attached_file in the turn context. ' +
       'Files with reader=text return UTF-8 text; read further pages with offset when truncated is true. ' +
       `A page is returned whole, up to maxBytes (default ${this.maxBytesPerCall} bytes); pass a smaller maxBytes to read less at a time. ` +
-      'Files with reader=none return a binary result without content. ' +
-      'A reader=text file whose bytes fail the text check also returns a binary result; ' +
-      'say the file cannot be read instead of guessing its content.'
+      'Files the native UTF-8 reader cannot interpret return a binary result without content; ' +
+      'say this tool cannot read the file instead of guessing its content. ' +
+      'Reading is current-turn only: page and turn budgets bound each response, and when they are exhausted ' +
+      'you must reattach the file in a new message to continue from the reported offset.'
     )
   }
 
@@ -133,7 +192,7 @@ export class AttachmentReadTool implements Tool {
     return { kind: 'internal_tool', sourceRef: 'mcp-host' }
   }
 
-  async execute(params: Record<string, unknown>): Promise<ToolOutput> {
+  async execute(params: Record<string, unknown>, context?: ExecutionContext): Promise<ToolOutput> {
     const start = Date.now()
     const attachment = this.sourceMessage.attachments?.find(
       candidate =>
@@ -142,8 +201,19 @@ export class AttachmentReadTool implements Tool {
         candidate.fileReference !== undefined
     )
     const reference = attachment?.fileReference
-    if (!attachment || !reference) return this.error('attachment_not_found', start)
+    if (!attachment || !reference) {
+      if (!this.ledger.beginRead())
+        return this.beginReadExhausted(attachment?.id, undefined, params)
+      return this.error('attachment_not_found', start, {
+        attachmentId: typeof params.attachmentId === 'string' ? params.attachmentId : '',
+        offset: 0,
+        fileBytes: 0,
+      })
+    }
     const identity = { attachmentId: attachment.id, referenceId: reference.id }
+
+    if (!this.ledger.beginRead())
+      return this.beginReadExhausted(identity.attachmentId, identity.referenceId, params)
 
     // #666 R4-M2 — a cold restart persists attachment metadata but never the
     // inline bytes, so the tool answers honestly instead of crashing on
@@ -151,7 +221,8 @@ export class AttachmentReadTool implements Tool {
     if (typeof attachment.dataBase64 !== 'string') {
       return this.ok(
         { ...identity, kind: 'binary', reader: 'none', reason: 'bytes_unavailable_after_restart' },
-        start
+        start,
+        { identity, offset: 0, fileBytes: 0, unavailableReason: 'bytes_unavailable_after_restart' }
       )
     }
 
@@ -166,13 +237,23 @@ export class AttachmentReadTool implements Tool {
       maxBytes < 1 ||
       maxBytes > this.maxBytesPerCall
     ) {
-      return this.error('range_invalid', start)
+      return this.error('range_invalid', start, {
+        identity,
+        offset: 0,
+        fileBytes: this.cachedBytes(attachment.id, attachment.dataBase64),
+      })
     }
 
     if (reference.reader === 'none') {
       return this.ok(
         { ...identity, kind: 'binary', reader: 'none', reason: 'no_reader_for_class' },
-        start
+        start,
+        {
+          identity,
+          offset,
+          fileBytes: this.cachedBytes(attachment.id, attachment.dataBase64),
+          unavailableReason: 'no_reader_for_class',
+        }
       )
     }
 
@@ -180,32 +261,151 @@ export class AttachmentReadTool implements Tool {
     if (!isText) {
       return this.ok(
         { ...identity, kind: 'binary', reader: 'none', reason: 'text_decode_rejected' },
-        start
+        start,
+        { identity, offset, fileBytes: bytes.length, unavailableReason: 'text_decode_rejected' }
       )
     }
-    if (offset > bytes.length) return this.error('range_invalid', start)
+    if (offset > bytes.length) {
+      return this.error('range_invalid', start, { identity, offset, fileBytes: bytes.length })
+    }
     if (offset < bytes.length && isUtf8Continuation(bytes[offset]!)) {
-      return this.error('range_invalid', start)
+      return this.error('range_invalid', start, { identity, offset, fileBytes: bytes.length })
     }
     let end = Math.min(offset + maxBytes, bytes.length)
     while (end < bytes.length && isUtf8Continuation(bytes[end]!)) end -= 1
-    if (end === offset && offset < bytes.length) return this.error('range_invalid', start)
+    if (end === offset && offset < bytes.length) {
+      return this.error('range_invalid', start, { identity, offset, fileBytes: bytes.length })
+    }
 
-    // A byte order mark is dropped only at the start of the file; further in,
-    // U+FEFF is file content and stays.
-    const text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: offset > 0 }).decode(
-      bytes.subarray(offset, end)
-    )
+    const measure = context?.measureResult
+    if (typeof measure !== 'function') {
+      return this.error('measurement_unavailable', start, {
+        identity,
+        offset,
+        fileBytes: bytes.length,
+      })
+    }
+
+    const notice = this.exhaustedResult(identity.attachmentId, identity.referenceId, offset)
+    const noticeCost = measure(JSON.stringify(notice))
+    const allowance = this.ledger.pageAllowance(this.contextWindowTokens, noticeCost)
+    let binding: AttachmentReadLimit | null = end < bytes.length ? 'max_bytes' : null
+    const serialized = this.serializePage(bytes, identity, offset, end, end < bytes.length, binding)
+    if (measure(serialized) > allowance) {
+      // Binary-search the largest codepoint-aligned end that still fits. The
+      // whole file is already decoded in memory; only serialization and the
+      // pure measurement run per probe.
+      // Advance from a boundary past the full codepoint that starts there;
+      // `boundary + 1` alone lands inside a multi-byte character.
+      const nextBoundary = (from: number): number => {
+        let boundary = from
+        while (boundary < bytes.length && isUtf8Continuation(bytes[boundary]!)) boundary += 1
+        let next = boundary + 1
+        while (next < bytes.length && isUtf8Continuation(bytes[next]!)) next += 1
+        return next
+      }
+      let lo = nextBoundary(offset)
+      let hi = end
+      let best = -1
+      while (lo <= hi) {
+        const mid = Math.floor((lo + hi) / 2)
+        let aligned = mid
+        while (aligned > lo && isUtf8Continuation(bytes[aligned]!)) aligned -= 1
+        const cost = measure(
+          this.serializePage(
+            bytes,
+            identity,
+            offset,
+            aligned,
+            aligned < bytes.length,
+            'page_budget'
+          )
+        )
+        if (cost <= allowance) {
+          best = aligned
+          lo = nextBoundary(aligned)
+        } else {
+          hi = aligned - 1
+        }
+      }
+      if (best < 0) {
+        return this.ok(notice, start, {
+          identity,
+          offset,
+          fileBytes: bytes.length,
+          reservedCost: noticeCost,
+          exhausted: true,
+        })
+      }
+      end = best
+      binding =
+        allowance < attachmentReadBudgets(this.contextWindowTokens).pageTokens
+          ? 'turn_budget'
+          : 'page_budget'
+    }
+
     return this.ok(
+      this.pageResult(bytes, identity, offset, end, end < bytes.length, binding),
+      start,
       {
-        ...identity,
-        kind: 'text',
-        byteRange: { offset, length: end - offset },
-        truncated: end < bytes.length,
-        text,
-      },
-      start
+        identity,
+        offset,
+        fileBytes: bytes.length,
+        bytesRead: end - offset,
+        reservedCost: measure(
+          this.serializePage(bytes, identity, offset, end, end < bytes.length, binding)
+        ),
+      }
     )
+  }
+
+  /**
+   * Final budget fence. Runs once per executed read after safety, spillover
+   * and any result transform. If the final message outgrew the reservation,
+   * replace it with the trusted exhausted notice at the ORIGINAL offset; if
+   * even that cannot fit, throw so publication stops without a rerun.
+   */
+  finalizeResult(result: ToolResult, context: ToolEmissionContext): ToolResult {
+    const pending = this.pending
+    if (!pending) throw new Error('AttachmentReadTool finalize called without a pending read')
+    this.pending = null
+
+    const actualCost = result.emittedMessageCost ?? context.measureContent(result.content)
+    if (!Number.isSafeInteger(actualCost) || actualCost < 0) {
+      throw new Error('Attachment read emission cost is not a safe non-negative integer')
+    }
+    const overran = pending.reservedCost !== null && actualCost > pending.reservedCost
+    if (!overran && this.ledger.canEmit(this.contextWindowTokens, actualCost)) {
+      this.ledger.debit(this.contextWindowTokens, actualCost, pending.bytesRead)
+      return { ...result, emittedMessageCost: actualCost }
+    }
+
+    const noticeRaw = JSON.stringify(
+      this.exhaustedResult(pending.attachmentId, pending.referenceId, pending.offset)
+    )
+    const noticeContent = context.renderContent(noticeRaw)
+    const noticeCost = context.measureContent(noticeContent)
+    if (!this.ledger.canEmit(this.contextWindowTokens, noticeCost)) {
+      throw new Error('Attachment read notice cannot fit the remaining page/turn budget')
+    }
+    this.ledger.debit(this.contextWindowTokens, noticeCost, 0)
+    return {
+      ...result,
+      content: noticeContent,
+      rawContent: noticeRaw,
+      is_error: false,
+      emittedMessageCost: noticeCost,
+      metadata: {
+        attachmentRead: {
+          origin: pending.offset === 0 ? 'current' : 'current_resumed',
+          offset: pending.offset,
+          length: 0,
+          fileBytes: pending.fileBytes,
+          truncated: true,
+          paused: true,
+        },
+      },
+    }
   }
 
   // The whole-file text check runs once per attachment; each page then
@@ -219,15 +419,164 @@ export class AttachmentReadTool implements Tool {
     return entry
   }
 
-  private ok(result: AttachmentReadResult, start: number): ToolOutput {
-    return { content: JSON.stringify(result), duration_ms: Date.now() - start, is_error: false }
+  private ok(
+    result: AttachmentReadResult,
+    start: number,
+    pending: {
+      identity: { attachmentId: string; referenceId: FileReferenceV1['id'] }
+      offset: number
+      fileBytes: number
+      bytesRead?: number
+      reservedCost?: number
+      exhausted?: boolean
+      unavailableReason?:
+        | 'no_reader_for_class'
+        | 'text_decode_rejected'
+        | 'bytes_unavailable_after_restart'
+    }
+  ): ToolOutput {
+    const content = JSON.stringify(result)
+    const truncated =
+      result.kind === 'text' ? result.truncated : result.kind === 'read_budget_exhausted'
+    const limit = result.kind === 'text' ? result.limit : undefined
+    this.pending = {
+      attachmentId: pending.identity.attachmentId,
+      referenceId: pending.identity.referenceId,
+      offset: pending.offset,
+      fileBytes: pending.fileBytes,
+      bytesRead: pending.bytesRead ?? 0,
+      reservedCost: pending.reservedCost ?? null,
+    }
+    return {
+      content,
+      duration_ms: Date.now() - start,
+      is_error: false,
+      metadata: {
+        attachmentRead: {
+          origin: pending.offset === 0 ? 'current' : 'current_resumed',
+          offset: pending.offset,
+          length: pending.bytesRead ?? 0,
+          fileBytes: pending.fileBytes,
+          ...(truncated ? { truncated: true } : { truncated: false }),
+          ...(limit ? { limit } : {}),
+          ...(pending.exhausted ? { paused: true } : { paused: false }),
+          ...(pending.unavailableReason ? { unavailableReason: pending.unavailableReason } : {}),
+        },
+      },
+    }
   }
 
-  private error(code: AttachmentReadErrorCode, start: number): ToolOutput {
+  private error(
+    code: AttachmentReadErrorCode,
+    start: number,
+    pending: {
+      identity?: { attachmentId: string; referenceId?: FileReferenceV1['id'] }
+      attachmentId?: string
+      offset: number
+      fileBytes: number
+    }
+  ): ToolOutput {
+    this.pending = {
+      attachmentId: pending.identity?.attachmentId ?? pending.attachmentId ?? '',
+      referenceId: pending.identity?.referenceId,
+      offset: pending.offset,
+      fileBytes: pending.fileBytes,
+      bytesRead: 0,
+      reservedCost: null,
+    }
     return {
       content: JSON.stringify({ error: code, message: ERROR_MESSAGES[code] }),
       duration_ms: Date.now() - start,
       is_error: true,
     }
+  }
+
+  private beginReadExhausted(
+    attachmentId: string | undefined,
+    referenceId: FileReferenceV1['id'] | undefined,
+    params: Record<string, unknown>
+  ): ToolOutput {
+    const offset =
+      typeof params.offset === 'number' && Number.isSafeInteger(params.offset) && params.offset >= 0
+        ? params.offset
+        : 0
+    const result = this.exhaustedResult(attachmentId ?? '', referenceId, offset)
+    this.pending = {
+      attachmentId: attachmentId ?? '',
+      referenceId,
+      offset,
+      fileBytes: 0,
+      bytesRead: 0,
+      reservedCost: null,
+    }
+    return {
+      content: JSON.stringify(result),
+      duration_ms: 0,
+      is_error: false,
+      metadata: {
+        attachmentRead: {
+          origin: offset === 0 ? 'current' : 'current_resumed',
+          offset,
+          length: 0,
+          fileBytes: 0,
+          truncated: true,
+          paused: true,
+        },
+      },
+    }
+  }
+
+  private exhaustedResult(
+    attachmentId: string,
+    referenceId: FileReferenceV1['id'] | undefined,
+    resumeOffset: number
+  ): AttachmentReadResult {
+    return {
+      attachmentId,
+      ...(referenceId !== undefined ? { referenceId } : {}),
+      kind: 'read_budget_exhausted',
+      resumeOffset,
+      message: EXHAUSTED_MESSAGE,
+    }
+  }
+
+  private pageResult(
+    bytes: Buffer,
+    identity: { attachmentId: string; referenceId: FileReferenceV1['id'] },
+    offset: number,
+    end: number,
+    truncated: boolean,
+    limit: AttachmentReadLimit | null
+  ): AttachmentReadResult {
+    // A byte order mark is dropped only at the start of the file; further in,
+    // U+FEFF is file content and stays.
+    const text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: offset > 0 }).decode(
+      bytes.subarray(offset, end)
+    )
+    return {
+      attachmentId: identity.attachmentId,
+      referenceId: identity.referenceId,
+      kind: 'text',
+      byteRange: { offset, length: end - offset },
+      truncated,
+      ...(truncated && limit ? { limit } : {}),
+      ...(truncated ? { nextOffset: end } : {}),
+      text,
+    }
+  }
+
+  private serializePage(
+    bytes: Buffer,
+    identity: { attachmentId: string; referenceId: FileReferenceV1['id'] },
+    offset: number,
+    end: number,
+    truncated: boolean,
+    limit: AttachmentReadLimit | null
+  ): string {
+    return JSON.stringify(this.pageResult(bytes, identity, offset, end, truncated, limit))
+  }
+
+  private cachedBytes(attachmentId: string, dataBase64: string): number {
+    return this.decode(attachmentId, dataBase64).bytes.length
   }
 }

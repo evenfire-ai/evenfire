@@ -45,17 +45,50 @@ describe('#666 file ingress configuration', () => {
     expect(config.attachmentFileMaxBytes).toBe(11_534_336)
   })
 
-  it('defaults the attachment text page to 64 KiB, under a quarter of the default compaction budget', async () => {
+  it('defaults the attachment text page to 64 KiB without assuming a token-to-byte ratio', async () => {
     vi.resetModules()
     // Precondition: the default is what is under test, so the variable must be unset.
     expect(process.env.CLERUM_ATTACHMENT_TEXT_READ_MAX_BYTES).toBeUndefined()
     const { config } = await import('./config')
     expect(config.attachmentTextReadMaxBytes).toBe(65_536)
     expect(config.nativeTool.attachmentTextReadMaxBytes).toBe(65_536)
-    // The page is inline, so it is measured against the context budget, not
-    // the spillover threshold: bytes / 4 heuristic tokens, 0.8 pressure.
-    expect(Math.ceil(65_536 / 4)).toBeLessThanOrEqual(0.8 * config.contextMaxTokens * 0.25)
   })
+
+  it.each([
+    ['CLERUM_ATTACHMENT_TEXT_READ_MAX_BYTES', '1048577', '1048576'],
+    ['CLERUM_ATTACHMENT_FILE_MAX_BYTES', '11534337', '11534336'],
+  ])(
+    'rejects %s above its transport ceiling and accepts the ceiling',
+    async (key, above, ceiling) => {
+      vi.resetModules()
+      vi.stubEnv(key, above)
+      await expect(import('./config').then(() => undefined)).rejects.toThrow(key)
+
+      vi.resetModules()
+      vi.stubEnv(key, ceiling)
+      const { config } = await import('./config')
+      const field =
+        key === 'CLERUM_ATTACHMENT_TEXT_READ_MAX_BYTES'
+          ? config.attachmentTextReadMaxBytes
+          : config.attachmentFileMaxBytes
+      expect(field).toBe(Number(ceiling))
+    }
+  )
+
+  it.each(['0', 'abc', '1.5', '10k'])(
+    'rejects an attachment text page of %j while accepting a smaller bounded page',
+    async value => {
+      vi.resetModules()
+      vi.stubEnv('CLERUM_ATTACHMENT_TEXT_READ_MAX_BYTES', value)
+      await expect(import('./config')).rejects.toThrow('CLERUM_ATTACHMENT_TEXT_READ_MAX_BYTES')
+
+      vi.resetModules()
+      vi.stubEnv('CLERUM_ATTACHMENT_TEXT_READ_MAX_BYTES', '4096')
+      const { config } = await import('./config')
+      expect(config.attachmentTextReadMaxBytes).toBe(4096)
+      expect(config.nativeTool.attachmentTextReadMaxBytes).toBe(4096)
+    }
+  )
 
   it.each(['0', 'abc', '2147483648'])(
     'rejects a per-file attachment limit of %j at config load, naming the variable',

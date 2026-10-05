@@ -1,3 +1,4 @@
+import { logger } from '../../logger'
 import { Safety } from '../interfaces'
 import { isPrivateIp } from '../tools/httpRequest'
 import { SanitizedOutput, ValidationResult } from '../types'
@@ -21,6 +22,11 @@ import { SanitizedOutput, ValidationResult } from '../types'
  * via ConfigStore takes effect immediately.
  */
 export type SecretEntriesProvider = () => Array<{ name: string; value: string }>
+
+function wrapToolOutput(toolName: string, content: string, wasSanitized: boolean): string {
+  const escaped = content.replace(/<\/tool_output>/gi, '&lt;/tool_output&gt;')
+  return `<tool_output name="${toolName}" sanitized="${wasSanitized}">\n${escaped}\n</tool_output>`
+}
 
 export class BasicSafety implements Safety {
   /**
@@ -139,7 +145,10 @@ export class BasicSafety implements Safety {
     }
 
     const valid = errors.length === 0
-    console.log(`[NewCore:Safety] validateInput → length=${input?.length ?? 0}, passed=${valid}`)
+    logger.info(
+      { component: 'Safety', length: input?.length ?? 0, passed: valid },
+      'Input validated'
+    )
     return { is_valid: valid, errors }
   }
 
@@ -228,8 +237,14 @@ export class BasicSafety implements Safety {
     const result = this.sanitizeFreeformContent(output, {
       secretWarning: `Potential secret detected in ${toolName} output`,
     })
-    console.log(
-      `[NewCore:Safety] sanitizeOutput → tool=${toolName}, sanitized=${result.was_modified}, warnings=${result.warnings.length}`
+    logger.info(
+      {
+        component: 'Safety',
+        toolName,
+        sanitized: result.was_modified,
+        warningCount: result.warnings.length,
+      },
+      'Tool output sanitized'
     )
     return result
   }
@@ -239,8 +254,9 @@ export class BasicSafety implements Safety {
       secretWarning: 'Potential secret detected in assistant response',
       extraFilters: BasicSafety.ASSISTANT_RESPONSE_FILTER_PATTERNS,
     })
-    console.log(
-      `[NewCore:Safety] sanitizeAssistantResponse → sanitized=${result.was_modified}, warnings=${result.warnings.length}`
+    logger.info(
+      { component: 'Safety', sanitized: result.was_modified, warningCount: result.warnings.length },
+      'Assistant response sanitized'
     )
     return result
   }
@@ -254,10 +270,19 @@ export class BasicSafety implements Safety {
    */
   wrapForLlm(toolName: string, content: string, wasSanitized: boolean): string {
     // Risk 4.10: Escape potential closing tags in content
-    const escaped = content.replace(/<\/tool_output>/gi, '&lt;/tool_output&gt;')
-    const wrapped = `<tool_output name="${toolName}" sanitized="${wasSanitized}">\n${escaped}\n</tool_output>`
-    console.log(`[NewCore:Safety] wrapForLlm → tool=${toolName}, wrappedLength=${wrapped.length}`)
+    const wrapped = wrapToolOutput(toolName, content, wasSanitized)
+    logger.info(
+      { component: 'Safety', toolName, wrappedLength: wrapped.length },
+      'Tool output wrapped'
+    )
     return wrapped
+  }
+
+  previewOutputForLlm(toolName: string, content: string): string {
+    const sanitized = this.sanitizeFreeformContent(content, {
+      secretWarning: `Potential secret detected in ${toolName} output`,
+    })
+    return wrapToolOutput(toolName, sanitized.content, sanitized.was_modified)
   }
 
   /**

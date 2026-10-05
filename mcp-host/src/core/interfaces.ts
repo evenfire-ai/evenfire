@@ -84,11 +84,18 @@ export interface ExecutionContext {
   timeoutMs?: number
   signal?: AbortSignal
   visualInput?: VisualInputContext
+  /** Pure estimate of the complete sanitized/wrapped message for this call. */
+  measureResult?: (content: string) => number
   /**
    * Tool calls this as output becomes available (not required to be line-aligned
    * — the ring buffer handles line boundaries).
    */
   onOutput(chunk: string): void
+}
+
+export interface ToolEmissionContext {
+  measureContent(content: string): number
+  renderContent(content: string): string
 }
 
 export interface Tool {
@@ -123,6 +130,11 @@ export interface Tool {
    * configured threshold.
    */
   spilloverExempt?(): boolean
+  /** Final budget/revocation fence, after result transforms and before publication. */
+  finalizeResult?(
+    result: ToolResult,
+    context: ToolEmissionContext
+  ): ToolResult | Promise<ToolResult>
 }
 
 // ─── Channel ────────────────────────────────────────────────
@@ -140,6 +152,8 @@ export interface Safety {
   validateToolParams(toolName: string, params: Record<string, unknown>): ValidationResult
   sanitizeOutput(toolName: string, output: string): SanitizedOutput
   wrapForLlm(toolName: string, content: string, wasSanitized: boolean): string
+  /** Same sanitizer and wrapper, without per-call observability effects. */
+  previewOutputForLlm?(toolName: string, content: string): string
 }
 
 // ─── Storage ────────────────────────────────────────────────
@@ -171,6 +185,8 @@ export interface PromptBuilder {
 export interface ToolOutputProcessor {
   beforeExecution(toolName: string, params: Record<string, unknown>): ValidationResult
   afterExecution(toolName: string, output: ToolOutput): string
+  /** Pure preparation for bounded native tools; never executes a tool or hook. */
+  previewForLlm?(toolName: string, content: string): string
 }
 
 export interface LoopController {

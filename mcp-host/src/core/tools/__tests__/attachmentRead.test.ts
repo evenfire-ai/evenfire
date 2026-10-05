@@ -7,6 +7,8 @@ import { createHash } from 'node:crypto'
 import { validateIncomingAttachments } from '../../../agent/incomingAttachments'
 import { decodeTextContent } from '../../../internalTools/textContent'
 import type { IncomingMessage } from '../../../server'
+import { AttachmentReadLedger } from '../../attachments/attachmentReadBudget'
+import { BasicSafety } from '../../safety/safety'
 import type { Attachment } from '../../types'
 import { AttachmentReadTool } from '../attachmentRead'
 
@@ -23,6 +25,12 @@ afterEach(() => {
 
 const READ_LIMIT = 65_536
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+const WINDOW_TOKENS = 4_000_000
+const safety = new BasicSafety()
+const measureResult = (raw: string): number =>
+  Math.ceil(
+    Buffer.byteLength(safety.previewOutputForLlm('clerum__attachment_read', raw), 'utf8') / 4
+  ) + 4
 
 function rawFile(id: string, filename: string, mimeType: string, bytes: Buffer) {
   return {
@@ -60,11 +68,14 @@ function toolFor(attachments: Attachment[], limit = READ_LIMIT): AttachmentReadT
     hostRef: 'host-1',
     attachments,
   }
-  return new AttachmentReadTool(message, limit)
+  return new AttachmentReadTool(message, limit, {
+    contextWindowTokens: WINDOW_TOKENS,
+    ledger: new AttachmentReadLedger(),
+  })
 }
 
 async function read(tool: AttachmentReadTool, params: Record<string, unknown>) {
-  const output = await tool.execute(params)
+  const output = await tool.execute(params, { onOutput: () => {}, measureResult })
   return { output, body: JSON.parse(output.content) as Record<string, unknown> }
 }
 

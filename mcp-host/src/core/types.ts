@@ -310,6 +310,8 @@ export interface ToolResult {
   is_error: boolean
   attachments?: Attachment[]
   metadata?: Record<string, unknown>
+  /** Token estimate of the final model-visible message; not part of its content. */
+  emittedMessageCost?: number
   /**
    * Pre-sanitization content for user-facing output preview.
    * WARNING: bypasses the XML safety wrapper. Do NOT use in LLM messages.

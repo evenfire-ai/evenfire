@@ -28,8 +28,10 @@ export async function executeSingleTool(
     | 'taskId'
     | 'visualInput'
     | 'abortSignal'
+    | 'measureToolMessage'
   >,
-  iteration?: number
+  iteration?: number,
+  transformResult?: (result: ToolResult) => Promise<ToolResult>
 ): Promise<ToolResult> {
   const { toolRegistry, toolOutputProcessor, events, toolTimeout } = config
 
@@ -62,6 +64,24 @@ export async function executeSingleTool(
     }
   }
 
+  const renderContent = (content: string): string => {
+    if (!tool.requiresSanitization()) return content
+    if (!toolOutputProcessor.previewForLlm) {
+      throw new Error('measureResult requires ToolOutputProcessor.previewForLlm')
+    }
+    return toolOutputProcessor.previewForLlm(call.name, content)
+  }
+  const measureContent = (content: string): number => {
+    if (!config.measureToolMessage)
+      throw new Error('measureToolMessage is required for bounded native output')
+    return config.measureToolMessage({
+      role: 'tool',
+      name: call.name,
+      tool_call_id: call.id,
+      content,
+    })
+  }
+
   events.emit({
     type: 'tool:called',
     data: { toolName: call.name, toolCallId: call.id },
@@ -72,11 +92,15 @@ export async function executeSingleTool(
   const executionContext: ExecutionContext = {
     onOutput: chunk => ringBuffer?.append(chunk),
     visualInput: config.visualInput,
+    measureResult: config.measureToolMessage
+      ? content => measureContent(renderContent(content))
+      : undefined,
   }
   let watcherId: NodeJS.Timeout | null = null
   const watcherStartedAt = Date.now()
 
   let wantsWatcher = false
+  let finalizingResult = false
   try {
     wantsWatcher =
       typeof tool.supportsProgressOutput === 'function' &&
@@ -216,7 +240,7 @@ export async function executeSingleTool(
       }
     }
 
-    return {
+    let result: ToolResult = {
       tool_call_id: call.id,
       name: call.name,
       content: finalContent,
@@ -226,7 +250,25 @@ export async function executeSingleTool(
       rawContent: output.content,
       spillover_ref: spilloverRef,
     }
+    // Post-result hooks execute once. Measure after them; a preview never
+    // repeats a hook, tool execution, progress event or spillover write.
+    finalizingResult = true
+    if (transformResult) result = await transformResult(result)
+    if (config.measureToolMessage) {
+      result = { ...result, emittedMessageCost: measureContent(result.content) }
+    }
+    if (tool.finalizeResult) {
+      result = await tool.finalizeResult(result, { measureContent, renderContent })
+      const finalCost = measureContent(result.content)
+      if (result.emittedMessageCost !== finalCost) {
+        throw new Error('Final tool-message measurement does not match its budget debit')
+      }
+    }
+    return result
   } catch (err) {
+    // A result-policy/finalization failure must stop publication. Turning it
+    // into an ordinary tool error could make the model repeat completed work.
+    if (finalizingResult) throw err
     const errorMessage =
       err instanceof ToolError ? err.message : `Tool execution failed: ${(err as Error).message}`
 

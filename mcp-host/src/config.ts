@@ -11,6 +11,7 @@ import {
   parseCodexToolPresentation,
 } from './core/orchestration/toolPresentationPolicy'
 import { ALL_PROVIDERS, type LlmProvider, descriptorFor, isLlmProvider } from './llm/registryCore'
+import { logger } from './logger'
 import type { McpCatalogBootstrapConfig } from './mcp/grantProbe'
 import { HostSpec, McpServerInfo, MemoryConfig, ModelConfig, PersonalizationConfig } from './types'
 
@@ -332,7 +333,12 @@ function getEnv(key: string, defaultValue?: string): string | undefined {
   return process.env[key] ?? defaultValue
 }
 
-function getExecutionLimit(key: string, defaultValue: number, allowZero = false): number {
+function getExecutionLimit(
+  key: string,
+  defaultValue: number,
+  allowZero = false,
+  maximum = 2_147_483_647
+): number {
   const raw = getEnv(key)
   if (raw === undefined) return defaultValue
   const value = Number(raw)
@@ -340,7 +346,7 @@ function getExecutionLimit(key: string, defaultValue: number, allowZero = false)
     !/^\d+$/.test(raw) ||
     !Number.isSafeInteger(value) ||
     value < (allowZero ? 0 : 1) ||
-    value > 2_147_483_647
+    value > maximum
   ) {
     throw new Error(`${key} must be a valid bounded integer`)
   }
@@ -361,8 +367,9 @@ function getEnvNumber(key: string, defaultValue: number): number {
   // Warn only when the value was actually set but invalid, so a typo'd env var
   // is visible in logs rather than silently ignored.
   if (!Number.isFinite(parsed) || parsed <= 0) {
-    console.warn(
-      `[config] ${key}=${value} is not a valid positive integer; using default ${defaultValue}`
+    logger.warn(
+      { component: 'Config', configurationKey: key, defaultValue },
+      'Invalid positive integer configuration; using its default'
     )
     return defaultValue
   }
@@ -452,17 +459,13 @@ function parseDevHostConfig(): HostSpec | undefined {
 
   try {
     const parsed = JSON.parse(configJson) as HostSpec
-    console.log('[Config] Parsed dev host config from CLERUM_HOST_CONFIG:')
-    console.log('[Config]   host:', parsed.host)
-    console.log('[Config]   contextRef:', parsed.contextRef)
-    console.log('[Config]   secretRef:', parsed.secretRef)
-    console.log(
-      '[Config]   model:',
-      parsed.model ? `${parsed.model.provider}/${parsed.model.name}` : 'not set'
+    logger.info(
+      { component: 'Config', modelConfigured: !!parsed.model },
+      'Parsed dev Host configuration'
     )
     return parsed
   } catch (error) {
-    console.error('[Config] Failed to parse CLERUM_HOST_CONFIG:', error)
+    logger.error({ component: 'Config', err: error }, 'Failed to parse dev Host configuration')
     return undefined
   }
 }
@@ -487,10 +490,9 @@ function buildDevHostConfig(provider?: LlmProvider, modelName?: string): HostSpe
       }
     : undefined
 
-  console.log('[Config] Built dev host config from env vars:')
-  console.log(
-    '[Config]   model:',
-    model ? `${model.provider}/${model.name}` : 'will auto-detect from API keys'
+  logger.info(
+    { component: 'Config', modelConfigured: !!model },
+    'Built dev Host configuration from environment'
   )
 
   return {
@@ -504,12 +506,13 @@ function buildDevHostConfig(provider?: LlmProvider, modelName?: string): HostSpe
 const devMode = getEnvBool('CLERUM_DEV_MODE', false)
 // Read once: the top-level field documents the limit, `nativeTool` carries it
 // to `clerum__attachment_read` (#666). A page is shipped inline (the tool is
-// spillover-exempt), so the default is sized against the context budget: at
-// the tokenizer heuristic of 4 bytes per token, 65_536 bytes is ~16k tokens,
-// about a fifth of the default compaction budget (0.8 * contextMaxTokens).
+// spillover-exempt). Its byte ceiling is separate from the measured page and
+// turn token budgets: dense data and output wrapping invalidate a fixed ratio.
 const attachmentTextReadMaxBytes = getExecutionLimit(
   'CLERUM_ATTACHMENT_TEXT_READ_MAX_BYTES',
-  65_536
+  65_536,
+  false,
+  1_048_576
 )
 const configuredWorkflowEnabled = getEnvBool('CLERUM_WORKFLOW_ENABLED', false)
 const configuredRuntimeKind = resolveMcpHostRuntimeKind({
@@ -642,13 +645,10 @@ function parseDevMcpServers(): McpServerInfo[] | undefined {
 
   try {
     const parsed = JSON.parse(serversJson) as McpServerInfo[]
-    console.log(`[Config] Parsed ${parsed.length} dev MCP server(s) from CLERUM_MCP_SERVERS`)
-    for (const server of parsed) {
-      console.log(`[Config]   - ${server.name}: ${server.transport.url}`)
-    }
+    logger.info({ component: 'Config', serverCount: parsed.length }, 'Parsed dev MCP servers')
     return parsed
   } catch (error) {
-    console.error('[Config] Failed to parse CLERUM_MCP_SERVERS:', error)
+    logger.error({ component: 'Config', err: error }, 'Failed to parse dev MCP servers')
     return undefined
   }
 }
@@ -663,12 +663,13 @@ function parseGuardrailsConfig(): GuardrailsConfig | undefined {
   if (!configJson) return undefined
   try {
     const parsed = JSON.parse(configJson) as GuardrailsConfig
-    console.log('[Config] Parsed guardrails config from CLERUM_GUARDRAILS_CONFIG:', {
-      rules: parsed.rules?.length ?? 0,
-    })
+    logger.info(
+      { component: 'Config', ruleCount: parsed.rules?.length ?? 0 },
+      'Parsed guardrails configuration'
+    )
     return parsed
   } catch (error) {
-    console.error('[Config] Failed to parse CLERUM_GUARDRAILS_CONFIG:', error)
+    logger.error({ component: 'Config', err: error }, 'Failed to parse guardrails configuration')
     return undefined
   }
 }
@@ -681,12 +682,13 @@ function parseApprovalConfig(): ApprovalConfig | undefined {
 
   try {
     const parsed = JSON.parse(configJson) as ApprovalConfig
-    console.log('[Config] Parsed approval config from CLERUM_APPROVAL_CONFIG:')
-    console.log('[Config]   defaultPolicy:', parsed.defaultPolicy)
-    console.log('[Config]   channels:', Object.keys(parsed.channels || {}))
+    logger.info(
+      { component: 'Config', channelCount: Object.keys(parsed.channels || {}).length },
+      'Parsed approval configuration'
+    )
     return parsed
   } catch (error) {
-    console.error('[Config] Failed to parse CLERUM_APPROVAL_CONFIG:', error)
+    logger.error({ component: 'Config', err: error }, 'Failed to parse approval configuration')
     return undefined
   }
 }
@@ -962,8 +964,9 @@ export const config: Config = {
     if (raw === 'memory' || raw === 'sqlite' || raw === 'dual') {
       return raw as 'memory' | 'sqlite' | 'dual'
     }
-    console.warn(
-      `[Config] CLERUM_SESSION_STORE='${raw}' is not recognized — falling back to 'memory'`
+    logger.warn(
+      { component: 'Config', configurationKey: 'CLERUM_SESSION_STORE', selectedMode: 'memory' },
+      'Unknown session store mode; using memory'
     )
     return 'memory' as const
   })(),
@@ -1042,7 +1045,12 @@ export const config: Config = {
   enableResponseAttachments: getEnvBool('CLERUM_ENABLE_RESPONSE_ATTACHMENTS', true),
   attachmentMaxCount: parseInt(getEnv('CLERUM_ATTACHMENT_MAX_COUNT', '3')!, 10),
   attachmentMaxBytes: parseInt(getEnv('CLERUM_ATTACHMENT_MAX_BYTES', '52428800')!, 10),
-  attachmentFileMaxBytes: getExecutionLimit('CLERUM_ATTACHMENT_FILE_MAX_BYTES', 11_534_336),
+  attachmentFileMaxBytes: getExecutionLimit(
+    'CLERUM_ATTACHMENT_FILE_MAX_BYTES',
+    11_534_336,
+    false,
+    11_534_336
+  ),
   attachmentTextReadMaxBytes,
   fileReferenceMaxCount: FILE_REFERENCE_MAX_COUNT,
   activityBufferSize: parseInt(getEnv('MCP_HOST_ACTIVITY_BUFFER_SIZE', '1000')!, 10),
@@ -1138,7 +1146,7 @@ export const config: Config = {
       try {
         seed = JSON.parse(seedJson) as Omit<PersonalizationConfig, 'enabled'>
       } catch {
-        console.error('[Config] Failed to parse CLERUM_IDENTITY_SEED')
+        logger.error({ component: 'Config' }, 'Failed to parse identity seed configuration')
       }
     }
     return { enabled, ...seed }

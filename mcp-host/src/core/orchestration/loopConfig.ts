@@ -43,6 +43,8 @@ export interface LoopConfig {
   loopController: LoopController
   contextManager: ContextManager
   toolOutputProcessor: ToolOutputProcessor
+  /** Synchronous estimate of the final model-visible tool message. Never network. */
+  measureToolMessage?: (message: ChatMessage) => number
 
   /**
    * The system prompt `reasoning` sends with a request that presents `tools`,

@@ -407,22 +407,17 @@ export async function executeToolCalls(
     }
 
     const progressStart = reportToolStart(config, call, iteration, i, calls.length, llmTextContent)
-    let toolResult = await executeSingleTool(call, config, iteration)
-
-    // PostToolUse redaction (spec §6.2 / §10 #3): installed `post_tool_use` hooks
-    // may redact the model-visible result `content` (never `is_error`). Only the
-    // LLM-message `content` is touched — `rawContent` (UI preview) is left intact.
-    // Applied here — before the abort push, the U5 connect-required suspend, and
-    // the main push below — so every downstream consumer sees the redacted result.
-    if (config.guardrails?.transformResult && toolIdentity) {
-      const view = await config.guardrails.transformResult(toolIdentity, call.arguments, {
-        content: toolResult.content,
-        isError: toolResult.is_error,
-      })
-      if (view.content !== toolResult.content) {
-        toolResult = { ...toolResult, content: view.content }
-      }
-    }
+    const transformResult =
+      config.guardrails?.transformResult && toolIdentity
+        ? async (result: ToolResult): Promise<ToolResult> => {
+            const view = await config.guardrails!.transformResult!(toolIdentity, call.arguments, {
+              content: result.content,
+              isError: result.is_error,
+            })
+            return view.content === result.content ? result : { ...result, content: view.content }
+          }
+        : undefined
+    const toolResult = await executeSingleTool(call, config, iteration, transformResult)
 
     // Retain policy-processed output before a subsequent tool can throw.
     if (config.onAttachments && toolResult.attachments?.length) {

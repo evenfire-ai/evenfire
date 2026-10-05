@@ -1,15 +1,17 @@
 /**
  * T1.2 — Pre-pruning pass executed BEFORE invoking the LLM.
  *
- * Four deterministic, LLM-free passes that try to recover context tokens
+ * Five deterministic, LLM-free passes that try to recover context tokens
  * before the tiered compactor (MoveToWorkspace / Summarize / Truncate)
  * pays an LLM call:
  *
- *   1. Dedup tool outputs by canonical SHA-256 content hash.
- *   2. One-line-summarize oversized tool outputs that live outside the
+ *   1. Collapse earlier `clerum__attachment_read` text pages into small
+ *      identity+range stubs (pressure-gated by the caller).
+ *   2. Dedup tool outputs by canonical SHA-256 content hash.
+ *   3. One-line-summarize oversized tool outputs that live outside the
  *      protected tail.
- *   3. JSON-safe truncate oversized `assistant.tool_calls[].arguments`.
- *   4. Strip historical media (image content parts) from anything before
+ *   4. JSON-safe truncate oversized `assistant.tool_calls[].arguments`.
+ *   5. Strip historical media (image content parts) from anything before
  *      the latest user message.
  *
  * Philosophy: local CPU is cheap compared to LLM tokens. Each pass is
@@ -43,6 +45,16 @@ export const clerumPrePruneSavingsTokensTotal = new Counter({
   help: 'Heuristic tokens reclaimed by T1.2 pre-pruning (sum of pre - post per call).',
 })
 
+/**
+ * Authoritative pressure snapshot supplied by the context manager. The
+ * attachment-page collapse only runs under real pressure; consumers that do
+ * not pass this object never collapse pages.
+ */
+export interface PrePrunePressure {
+  inputTokens: number
+  contextWindowTokens: number
+}
+
 export interface PrePruneOptions {
   /** Cuántos turns proteger del tail (default 3). */
   protectedTailTurns: number
@@ -71,6 +83,12 @@ export interface PrePruneOptions {
   oneLineSummariesEnabled: boolean
   jsonSafeTruncateEnabled: boolean
   stripMediaEnabled: boolean
+  /**
+   * C17 — collapse earlier `clerum__attachment_read` text pages under
+   * pressure. Defaults to true; the pass still requires an explicit,
+   * finite-positive `pressure` argument to fire.
+   */
+  attachmentPageCollapseEnabled?: boolean
 }
 
 export const DEFAULT_PRE_PRUNE_OPTIONS: PrePruneOptions = {
@@ -81,9 +99,15 @@ export const DEFAULT_PRE_PRUNE_OPTIONS: PrePruneOptions = {
   oneLineSummariesEnabled: true,
   jsonSafeTruncateEnabled: true,
   stripMediaEnabled: true,
+  attachmentPageCollapseEnabled: true,
 }
 
 const DUPLICATE_PREFIX = '[duplicate of tool_call_id='
+const ATTACHMENT_READ_TOOL_NAME = 'clerum__attachment_read'
+const ATTACHMENT_PAGE_COLLAPSE_MARKER =
+  '[earlier attachment page collapsed; re-read with clerum__attachment_read if needed]'
+const WRAPPED_ATTACHMENT_OUTPUT_PATTERN =
+  /^<tool_output name="clerum__attachment_read" sanitized="(true|false)">\n([\s\S]*)\n<\/tool_output>$/
 
 export interface PrePruneResult {
   messages: ChatMessage[]
@@ -100,13 +124,24 @@ export interface PrePruneResult {
  */
 export function prePrune(
   messages: ChatMessage[],
-  opts: PrePruneOptions = DEFAULT_PRE_PRUNE_OPTIONS
+  opts: PrePruneOptions = DEFAULT_PRE_PRUNE_OPTIONS,
+  pressure?: PrePrunePressure
 ): PrePruneResult {
   const preTokens = heuristicCount(messages)
   const protectedTailStart = computeProtectedTailStart(messages, opts.protectedTailTurns)
   const passesApplied: string[] = []
 
   let out = messages
+  if (
+    opts.attachmentPageCollapseEnabled !== false &&
+    attachmentCollapsePressureQualifies(pressure)
+  ) {
+    const next = collapseEarlierAttachmentPages(out)
+    if (next !== out) {
+      passesApplied.push('attachment_page_collapse')
+      out = next
+    }
+  }
   if (opts.dedupEnabled) {
     const next = dedupToolResults(out, protectedTailStart)
     if (next !== out) {
@@ -140,6 +175,18 @@ export function prePrune(
   return { messages: out, preTokens, postTokens, passesApplied }
 }
 
+function attachmentCollapsePressureQualifies(pressure: PrePrunePressure | undefined): boolean {
+  if (!pressure) return false
+  const { inputTokens, contextWindowTokens } = pressure
+  return (
+    Number.isFinite(inputTokens) &&
+    inputTokens >= 0 &&
+    Number.isFinite(contextWindowTokens) &&
+    contextWindowTokens > 0 &&
+    inputTokens >= 0.8 * contextWindowTokens
+  )
+}
+
 /**
  * Compute the protected-tail start index. The last K user messages start
  * the protected region; pre-prune leaves `messages[protectedTailStart..]`
@@ -162,6 +209,126 @@ export function computeProtectedTailStart(messages: ChatMessage[], tailTurns: nu
     }
   }
   return 0
+}
+
+// ─── Pass 0 — Collapse earlier attachment text pages ────────────────────────
+
+/** The genuine native text-page result of `clerum__attachment_read`. */
+interface AttachmentTextPage {
+  attachmentId: string
+  referenceId: string
+  kind: 'text'
+  byteRange: { offset: number; length: number }
+  truncated: boolean
+  text: string
+}
+
+/**
+ * C17 — collapse the text of `clerum__attachment_read` pages that belong to
+ * turns strictly before the LATEST user message. The stub keeps every field
+ * the model needs to re-read the page on demand — attachment/reference
+ * identity, byte range, truncation flag and the tool linkage — and replaces
+ * only `text` with a fixed marker. Pages of the current turn (from the latest
+ * user message onwards) stay byte-identical, as do foreign tools, malformed
+ * payloads and binary results.
+ *
+ * Boundary note: this pass deliberately uses the latest-user boundary, not
+ * `computeProtectedTailStart`. Attachment pages are the one payload the model
+ * can re-fetch deterministically, so under pressure they collapse even inside
+ * the protected tail, while every other pass keeps its protected-tail
+ * semantics unchanged.
+ */
+export function collapseEarlierAttachmentPages(messages: ChatMessage[]): ChatMessage[] {
+  const lastUserIndex = findLastUserIndex(messages)
+  if (lastUserIndex <= 0) return messages
+  let mutated: ChatMessage[] | null = null
+  for (let i = 0; i < lastUserIndex; i++) {
+    const msg = messages[i]
+    if (msg.role !== 'tool' || msg.name !== ATTACHMENT_READ_TOOL_NAME) continue
+    if (typeof msg.tool_call_id !== 'string' || msg.tool_call_id.length === 0) continue
+    const parsed = parseNativeAttachmentTextPage(msg.content)
+    if (!parsed) continue
+    if (parsed.page.text === ATTACHMENT_PAGE_COLLAPSE_MARKER) continue
+    if (mutated === null) mutated = messages.slice()
+    mutated[i] = { ...msg, content: buildAttachmentPageStub(parsed) }
+  }
+  return mutated ?? messages
+}
+
+function findLastUserIndex(messages: ChatMessage[]): number {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === 'user') return i
+  }
+  return -1
+}
+
+function parseNativeAttachmentTextPage(
+  content: string
+): { page: AttachmentTextPage; wrapperSanitized: string | null } | null {
+  let candidate = content
+  let wrapperSanitized: string | null = null
+  const wrapped = WRAPPED_ATTACHMENT_OUTPUT_PATTERN.exec(content)
+  if (wrapped) {
+    candidate = wrapped[2]!
+    wrapperSanitized = wrapped[1]!
+  }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(candidate)
+  } catch {
+    return null
+  }
+  if (!isAttachmentTextPage(parsed)) return null
+  return { page: parsed, wrapperSanitized }
+}
+
+function isAttachmentTextPage(value: unknown): value is AttachmentTextPage {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const obj = value as Record<string, unknown>
+  const keys = Object.keys(obj)
+  if (keys.length !== 6) return false
+  for (const key of ['attachmentId', 'byteRange', 'kind', 'referenceId', 'text', 'truncated']) {
+    if (!(key in obj)) return false
+  }
+  if (typeof obj.attachmentId !== 'string' || obj.attachmentId.length === 0) return false
+  if (typeof obj.referenceId !== 'string' || obj.referenceId.length === 0) return false
+  if (obj.kind !== 'text') return false
+  if (typeof obj.text !== 'string') return false
+  if (typeof obj.truncated !== 'boolean') return false
+  const range = obj.byteRange
+  if (!range || typeof range !== 'object' || Array.isArray(range)) return false
+  const rangeKeys = Object.keys(range)
+  if (rangeKeys.length !== 2 || !('offset' in range) || !('length' in range)) return false
+  const offset = (range as Record<string, unknown>).offset
+  const length = (range as Record<string, unknown>).length
+  if (
+    typeof offset !== 'number' ||
+    !Number.isSafeInteger(offset) ||
+    offset < 0 ||
+    typeof length !== 'number' ||
+    !Number.isSafeInteger(length) ||
+    length < 0
+  ) {
+    return false
+  }
+  return true
+}
+
+function buildAttachmentPageStub(parsed: {
+  page: AttachmentTextPage
+  wrapperSanitized: string | null
+}): string {
+  const { page, wrapperSanitized } = parsed
+  const stub = JSON.stringify({
+    attachmentId: page.attachmentId,
+    referenceId: page.referenceId,
+    kind: 'text',
+    byteRange: { offset: page.byteRange.offset, length: page.byteRange.length },
+    truncated: page.truncated,
+    text: ATTACHMENT_PAGE_COLLAPSE_MARKER,
+  })
+  if (wrapperSanitized === null) return stub
+  return `<tool_output name="${ATTACHMENT_READ_TOOL_NAME}" sanitized="${wrapperSanitized}">\n${stub}\n</tool_output>`
 }
 
 // ─── Pass 1 — Dedup tool outputs ────────────────────────────────────────────
