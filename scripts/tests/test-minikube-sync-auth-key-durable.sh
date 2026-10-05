@@ -43,11 +43,13 @@ PROFILE=fake
 CONTEXT=fake
 WORKTREE_ID=${T2_TEST_WORKTREE_ID}
 LOCK_KEY=${T2_TEST_LOCK_KEY}
+ORIGIN_DEV=${MINIKUBE_TEST_ORIGIN_DEV}
 TOKEN=${T2_LOCK_TOKEN}
 PID=$$
 PROCESS_START=${T2_PROCESS_START}
 EOF
 export T2_PROJECT_DIR="${MINIKUBE_TEST_PROJECT_DIR}" T2_PROFILE=fake T2_CONTEXT=fake T2_LOCK_ROOT T2_LOCK_TOKEN
+export T2_PINNED_ORIGIN_DEV="${MINIKUBE_TEST_ORIGIN_DEV}"
 
 # The discovery helper resolves target-key provenance from a sanitized view of
 # the exact ConfigMaps and Secrets referenced by candidate containers. These

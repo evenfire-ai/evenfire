@@ -122,17 +122,17 @@ The headless path exercises the production JWT chain end to end. With
 `make minikube-pf-all` holding port-forwards in another terminal
 (control-api :8090, external-rest-api :8091, rpc-proxy :8094, mcp-host :8080)
 on the shared `clerum-test` profile. For a branch-owned profile, first-hand
-entry point (gitignored helper at repo root — do not search for it):
+entry point `scripts/minikube-profiles/branch.mk`:
 
 ```bash
 MINIKUBE_PROFILE=<owned-profile> \
-  make -f .local-notes/minikube-profiles/branch.mk branch-profile-pf
+  make -f scripts/minikube-profiles/branch.mk branch-profile-pf
 
 MINIKUBE_PROFILE=<owned-profile> \
-  make -f .local-notes/minikube-profiles/branch.mk branch-profile-health
+  make -f scripts/minikube-profiles/branch.mk branch-profile-health
 ```
 
-Implementation: `.local-notes/minikube-profiles/branch-profile.sh`.
+Implementation: `scripts/minikube-profiles/branch-profile.sh`.
 HARD DENY: do not `ls`/`cat` `~/.cache/clerum/minikube-profiles/`.
 This is the host-side hold for Control UI / Desktop. Profile-owned random
 ports only (never shared `:3000`/`:8090`). `make minikube-pf-all-bg` is a
@@ -202,7 +202,7 @@ Details: [Connect Telegram](../how-to/connect-telegram.md).
 | `minikube start` fails on memory           | Raise Docker Desktop to ≥10 GB RAM / 6 CPUs — or, if you can't spare it, `MINIKUBE_MEMORY=9216 MINIKUBE_IMAGE_TAG=latest make minikube-setup` (stock Docker Desktop's ~9.9 GB is just under the 10 GB default)                                                                                                              |
 | Pods `Pending` early on                    | Calico is still coming up — wait, then `make minikube-status`                                                                                                                                                                                                                                                               |
 | postgres CrashLoopBackOff after cold start | `make minikube-setup ARGS="--reset-db --skip-build"`                                                                                                                                                                                                                                                                        |
-| Port-forwards die                          | Shared profile: re-run `make minikube-pf-all` (it holds them open; Ctrl-C stops). Branch-owned profile: `MINIKUBE_PROFILE=<owned-profile> make -f .local-notes/minikube-profiles/branch.mk branch-profile-pf` (do not use `branch-profile-pf-health` as the lasting hold; do not replace it with `make minikube-pf-all-bg`) |
+| Port-forwards die                          | Shared profile: re-run `make minikube-pf-all` (it holds them open; Ctrl-C stops). Branch-owned profile: `MINIKUBE_PROFILE=<owned-profile> make -f scripts/minikube-profiles/branch.mk branch-profile-pf` (do not use `branch-profile-pf-health` as the lasting hold; do not replace it with `make minikube-pf-all-bg`) |
 
 ## Next steps
 

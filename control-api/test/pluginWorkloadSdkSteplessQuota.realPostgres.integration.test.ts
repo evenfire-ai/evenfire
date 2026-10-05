@@ -3,6 +3,7 @@ import { randomBytes, randomUUID } from 'node:crypto'
 import { Pool } from 'pg'
 import type { PluginWorkloadSdkFamily } from '../src/services/pluginWorkloadSdkDb.js'
 import type { McpHostAccessClaims } from '../src/utils/auth/mcpHostJwtToken.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 /**
  * Stepless / SDK-only quota regression on real PostgreSQL (issue #348,
@@ -109,23 +110,26 @@ describeRealPostgres(
     })
 
     afterAll(async () => {
-      await db?.pool.end()
-      await db?.rateLimitPool.end()
-      if (previousPgConnectionString === undefined) {
-        delete process.env.CONTROL_API_PG_CONNECTION_STRING
-      } else {
-        process.env.CONTROL_API_PG_CONNECTION_STRING = previousPgConnectionString
-      }
-      if (adminPool) {
-        await adminPool.query(
-          `SELECT pg_terminate_backend(pid)
+      try {
+        await endPoolAndWaitForClients(db?.pool)
+        await endPoolAndWaitForClients(db?.rateLimitPool)
+        if (previousPgConnectionString === undefined) {
+          delete process.env.CONTROL_API_PG_CONNECTION_STRING
+        } else {
+          process.env.CONTROL_API_PG_CONNECTION_STRING = previousPgConnectionString
+        }
+        if (adminPool) {
+          await adminPool.query(
+            `SELECT pg_terminate_backend(pid)
            FROM pg_stat_activity
           WHERE datname = $1
             AND pid <> pg_backend_pid()`,
-          [database]
-        )
-        await adminPool.query(`DROP DATABASE IF EXISTS "${database.replace(/"/g, '""')}"`)
-        await adminPool.end()
+            [database]
+          )
+          await adminPool.query(`DROP DATABASE IF EXISTS "${database.replace(/"/g, '""')}"`)
+        }
+      } finally {
+        await adminPool?.end()
       }
     })
 
