@@ -26,9 +26,16 @@ function makeRes() {
   }
 }
 
-function makeReq(body: Record<string, unknown>): Request {
+function makeReq(
+  body: Record<string, unknown>,
+  runtimeCaller: Record<string, unknown> = {
+    caller: 'rpc-proxy',
+    userId: 'user-1',
+    hostRef: 'host-1',
+  }
+): Request {
   return {
-    runtimeCaller: { caller: 'rpc-proxy', userId: 'user-1', hostRef: 'host-1' },
+    runtimeCaller,
     params: {},
     body,
     query: {},
@@ -91,6 +98,30 @@ describe('handleApprovalRoute — alwaysApprove consent', () => {
     expect(approvalHandler).toHaveBeenCalledWith(
       expect.objectContaining({ approved: false, alwaysApprove: false })
     )
+  })
+
+  it('answers a mismatched channel caller with 403 before validating alwaysApprove', async () => {
+    const approvalHandler = vi.fn()
+    const out = makeRes()
+
+    await handleApprovalRoute(
+      makeReq(
+        {
+          userId: 'user-1',
+          requestId: 'req-1',
+          channelType: 'slack',
+          channelId: 'C-other',
+          alwaysApprove: 'true',
+        },
+        { caller: 'channel-reader', channelType: 'slack', channelId: 'C-1', sender: 'user-1' }
+      ),
+      out.res,
+      true,
+      makeHandlers({ approvalHandler })
+    )
+
+    expect(out.statusCode).toBe(403)
+    expect(approvalHandler).not.toHaveBeenCalled()
   })
 
   it('never records persistent consent on a denial', async () => {
