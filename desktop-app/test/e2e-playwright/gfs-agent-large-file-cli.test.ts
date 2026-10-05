@@ -87,6 +87,17 @@ async function sendTaskAndWaitForReviewedShell(
   const downloaded = completedToolStepRow(page, /gfs_download|gfs_read/)
   let receiptPath: string
   if (sourceMode === 'path') {
+    // The user supplied only a human path. An observed discovery result must
+    // precede the transfer; the harness never injects a resourceId into chat.
+    const discovery = completedToolStepRow(page, /gfs_accessible|gfs_list|gfs_search/)
+    expect(await discovery.count()).toBeGreaterThan(0)
+    const steps = await stepper.getByTestId(/^step-row-/).allInnerTexts()
+    const firstDiscovery = steps.findIndex(value =>
+      /gfs_accessible|gfs_list|gfs_search/.test(value)
+    )
+    const firstTransfer = steps.findIndex(value => /gfs_download|gfs_read/.test(value))
+    expect(firstDiscovery).toBeGreaterThanOrEqual(0)
+    expect(firstTransfer).toBeGreaterThan(firstDiscovery)
     await expect(downloaded).toHaveCount(1)
     const downloadOutput = await stepOutput(downloaded)
     await expect(downloadOutput).toContainText('workspace_file')

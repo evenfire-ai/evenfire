@@ -598,23 +598,23 @@ export async function launchAndLogin(
       .not.toBe('loading')
 
     const entryState = await readEntryState()
+    // A newly created isolated profile has no session to restore. An already
+    // authenticated shell here is an isolation failure, not a login shortcut.
+    expect(entryState).toBe('login')
     if (entryState === 'login') {
       await emailInput.fill(email)
       await passwordInput.fill(E2E_DESKTOP_PASSWORD)
       const signInButton = page.getByRole('button', { name: /^Sign in$/ })
-      // A restored session can race the form: the shell may replace the form
-      // between fill and click, making the button legitimately disappear.
-      // Accept either outcome — click when clickable, and only ever settle on
-      // the authenticated shell.
+      await expect(authenticatedShell).not.toBeVisible()
+      await expect(signInButton).toBeVisible()
+      await expect(signInButton).toBeEnabled()
+      await humanUiClick(signInButton)
       await expect
         .poll(
           async () => {
             if (await authenticatedShell.isVisible().catch(() => false)) return 'authenticated'
             const errorToast = page.getByRole('alert').filter({ hasText: /login|password|failed/i })
             if (await errorToast.isVisible().catch(() => false)) return 'error'
-            if (await signInButton.isEnabled().catch(() => false)) {
-              await humanUiClick(signInButton).catch(() => undefined)
-            }
             return 'pending'
           },
           {
