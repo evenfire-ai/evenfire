@@ -1,8 +1,13 @@
 import { describe, expect, it, vi } from 'vitest'
 import type * as k8s from '@kubernetes/client-node'
+import { Readable } from 'node:stream'
 import type { VerifiedMcpHostPrincipal } from '../mcpApiAuthentication'
 import { HostExecutionAuthorization, type HostExecutionHostRecord } from './authorization'
-import { type TrustedHostExecutionIdentity, buildHostExecutionJob } from './jobFactory'
+import {
+  type ApprovedExecutionRequest,
+  type TrustedHostExecutionIdentity,
+  buildHostExecutionJob,
+} from './jobFactory'
 import { HostExecutionOperations } from './operations'
 
 const identity: TrustedHostExecutionIdentity = {
@@ -44,14 +49,14 @@ const capturedResult = {
   stderr: '',
 }
 
-function fixture() {
+function fixture(approvedRequest: ApprovedExecutionRequest = request) {
   let host: HostExecutionHostRecord | null = {
     name: identity.hostName,
     namespace: identity.namespace,
     uid: identity.hostUid,
     generation: identity.hostGeneration,
   }
-  let job: k8s.V1Job | null = buildHostExecutionJob(identity, request)
+  let job: k8s.V1Job | null = buildHostExecutionJob(identity, approvedRequest)
   job.metadata!.uid = jobUid
   const pod: k8s.V1Pod = {
     metadata: {
@@ -69,14 +74,15 @@ function fixture() {
       ],
     },
     status: {
+      podIP: '10.244.0.7',
       containerStatuses: [
         {
           name: 'executor',
           image: identity.image,
           imageID: 'unit-image',
-          ready: false,
+          ready: true,
           restartCount: 0,
-          state: { terminated: { exitCode: 0 } },
+          state: { running: {} },
         },
       ],
     },
@@ -97,18 +103,31 @@ function fixture() {
   const core = {
     listNamespacedPod: vi.fn(async (_request: unknown) => ({ items: pods })),
     readNamespacedPod: vi.fn(async (_request: unknown) => pod),
-    readNamespacedPodLog: vi.fn(async (_request: unknown) => JSON.stringify(capturedResult)),
+  }
+  const results = {
+    read: vi.fn(async (_target: unknown): Promise<string | null> => JSON.stringify(capturedResult)),
+    clear: vi.fn(async (_target: unknown) => {}),
+  }
+  const inputs = {
+    ready: vi.fn(async (_target: unknown) => true),
+    send: vi.fn(
+      async (_target: unknown, _input: Readable, _bytes: number, _signal?: AbortSignal) => {}
+    ),
   }
   const authorization = new HostExecutionAuthorization(async () => host)
   const operations = new HostExecutionOperations(
     batch as unknown as ConstructorParameters<typeof HostExecutionOperations>[0],
     core as unknown as ConstructorParameters<typeof HostExecutionOperations>[1],
-    authorization
+    authorization,
+    results,
+    inputs
   )
   return {
     operations,
     batch,
     core,
+    results,
+    inputs,
     pod,
     getJob: () => job!,
     setJob: (value: k8s.V1Job | null) => {
@@ -178,20 +197,14 @@ describe('Host execution operations', () => {
     const renewed = { ...principal, jti: 'renewed-unit-test' }
     const result = await f.operations.inspect(renewed, handle)
     expect(result).toEqual({ state: 'completed', podUid, result: capturedResult })
-    expect(f.core.readNamespacedPodLog).toHaveBeenCalledWith(
-      expect.objectContaining({
-        container: 'executor',
-        follow: false,
-        limitBytes: 98_305,
-      })
-    )
+    expect(f.results.read).toHaveBeenCalledWith({ podUid, podIp: '10.244.0.7' })
     expect(f.batch.createNamespacedJob).toHaveBeenCalledTimes(1)
   })
 
   it('does not publish output if generation changes during its retrieval', async () => {
     const f = fixture()
     const handle = await f.operations.start(principal, identity, request)
-    f.core.readNamespacedPodLog.mockImplementationOnce(async () => {
+    f.results.read.mockImplementationOnce(async () => {
       f.setHost({
         name: identity.hostName,
         namespace: identity.namespace,
@@ -212,28 +225,29 @@ describe('Host execution operations', () => {
       await expect(f.operations.inspect(principal, handle)).rejects.toThrow(
         change === 'job' ? 'job_uid_replaced' : 'pod_owner_mismatch'
       )
-      expect(f.core.readNamespacedPodLog).not.toHaveBeenCalled()
+      expect(f.results.read).not.toHaveBeenCalled()
     }
   })
 
-  it('reports queued or running without fetching logs', async () => {
+  it('reports queued without I/O and running while the result is pending', async () => {
     const f = fixture()
     const handle = await f.operations.start(principal, identity, request)
     f.setPods([])
     await expect(f.operations.inspect(principal, handle)).resolves.toEqual({ state: 'queued' })
     f.setPods([f.pod])
     f.pod.status!.containerStatuses![0].state = { running: {} }
+    f.results.read.mockResolvedValueOnce(null)
     await expect(f.operations.inspect(principal, handle)).resolves.toEqual({
       state: 'running',
       podUid,
     })
-    expect(f.core.readNamespacedPodLog).not.toHaveBeenCalled()
+    expect(f.results.read).toHaveBeenCalledTimes(1)
   })
 
   it('refuses an oversized producer frame rather than publishing a partial result', async () => {
     const f = fixture()
     const handle = await f.operations.start(principal, identity, request)
-    f.core.readNamespacedPodLog.mockResolvedValueOnce('x'.repeat(100_000))
+    f.results.read.mockResolvedValueOnce('x'.repeat(100_000))
     await expect(f.operations.inspect(principal, handle)).rejects.toThrow(
       'execution_result_invalid'
     )
@@ -269,10 +283,10 @@ describe('Host execution operations', () => {
     await expect(f.operations.cancel(principal, handle)).rejects.toThrow('API unavailable')
   })
 
-  it('withholds logs when the Pod is replaced while log retrieval is pending', async () => {
+  it('withholds results when the Pod is replaced during retrieval', async () => {
     const f = fixture()
     const handle = await f.operations.start(principal, identity, request)
-    f.core.readNamespacedPodLog.mockImplementationOnce(async () => {
+    f.results.read.mockImplementationOnce(async () => {
       f.pod.metadata!.uid = 'replacement-pod'
       return 'output from a replaced pod'
     })
@@ -289,5 +303,110 @@ describe('Host execution operations', () => {
     await expect(f.operations.inspect(principal, handle)).rejects.toThrow(
       'execution_pod_inventory_ambiguous'
     )
+  })
+
+  it('opens and streams exactly the prepared input only after receiver readiness and authority checks', async () => {
+    const attachment: ApprovedExecutionRequest = {
+      ...request,
+      kind: 'attachment',
+      input: { byteLength: 3, sha256: 'a'.repeat(64) },
+    }
+    const f = fixture(attachment)
+    f.pod.status!.initContainerStatuses = [
+      {
+        name: 'input-receiver',
+        image: identity.image,
+        imageID: 'unit-input-image',
+        ready: false,
+        restartCount: 0,
+        state: { running: {} },
+      },
+    ]
+    const handle = await f.operations.start(principal, identity, attachment)
+    const input = Readable.from([Buffer.from([0, 255, 17])])
+    const open = vi.fn(async () => input)
+    await expect(f.operations.deliverInput(principal, handle, open)).resolves.toEqual({
+      state: 'input_delivered',
+      podUid,
+    })
+    expect(open).toHaveBeenCalledTimes(1)
+    expect(f.inputs.send).toHaveBeenCalledWith({ podUid, podIp: '10.244.0.7' }, input, 3, undefined)
+    expect(input.destroyed).toBe(true)
+    f.pod.status!.initContainerStatuses[0].state = { terminated: { exitCode: 0 } }
+    await expect(f.operations.deliverInput(principal, handle, open)).resolves.toEqual({
+      state: 'input_delivered',
+      podUid,
+    })
+    expect(open).toHaveBeenCalledTimes(1)
+    expect(f.inputs.send).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not open a file for a pending or replaced receiver', async () => {
+    const attachment: ApprovedExecutionRequest = {
+      ...request,
+      kind: 'attachment',
+      input: { byteLength: 3, sha256: 'a'.repeat(64) },
+    }
+    const f = fixture(attachment)
+    f.pod.status!.initContainerStatuses = [
+      {
+        name: 'input-receiver',
+        image: identity.image,
+        imageID: 'unit-input-image',
+        ready: false,
+        restartCount: 0,
+        state: { running: {} },
+      },
+    ]
+    const handle = await f.operations.start(principal, identity, attachment)
+    const open = vi.fn(async () => Readable.from([]))
+    f.inputs.ready.mockResolvedValueOnce(false)
+    await expect(f.operations.deliverInput(principal, handle, open)).resolves.toEqual({
+      state: 'input_pending',
+      podUid,
+    })
+    expect(open).not.toHaveBeenCalled()
+    f.inputs.ready.mockImplementationOnce(async () => {
+      f.pod.metadata!.uid = 'replacement'
+      return true
+    })
+    await expect(f.operations.deliverInput(principal, handle, open)).rejects.toThrow(
+      'pod_uid_replaced'
+    )
+    expect(open).not.toHaveBeenCalled()
+  })
+
+  it('closes an opened input without delivering bytes when authority changes during file opening', async () => {
+    const attachment: ApprovedExecutionRequest = {
+      ...request,
+      kind: 'attachment',
+      input: { byteLength: 3, sha256: 'a'.repeat(64) },
+    }
+    const f = fixture(attachment)
+    f.pod.status!.initContainerStatuses = [
+      {
+        name: 'input-receiver',
+        image: identity.image,
+        imageID: 'unit-input-image',
+        ready: false,
+        restartCount: 0,
+        state: { running: {} },
+      },
+    ]
+    const handle = await f.operations.start(principal, identity, attachment)
+    const input = Readable.from([Buffer.from('private')])
+    await expect(
+      f.operations.deliverInput(principal, handle, async () => {
+        f.setHost({
+          name: identity.hostName,
+          namespace: identity.namespace,
+          uid: identity.hostUid,
+          generation: 8,
+        })
+        return input
+      })
+    ).rejects.toThrow('host_generation_changed')
+    expect(f.inputs.send).not.toHaveBeenCalled()
+    expect(input.destroyed).toBe(true)
   })
 })

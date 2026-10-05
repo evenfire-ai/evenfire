@@ -27,6 +27,10 @@ spec:
   podSelector:
     matchLabels:
       clerum.io/managed-by: host-context-controller
+    matchExpressions:
+    - key: clerum.io/role
+      operator: NotIn
+      values: [host-execution]
   policyTypes:
   - Egress
   egress:
@@ -50,6 +54,10 @@ spec:
   podSelector:
     matchLabels:
       clerum.io/managed-by: host-context-controller
+    matchExpressions:
+    - key: clerum.io/role
+      operator: NotIn
+      values: [host-execution]
   policyTypes:
   - Ingress
   - Egress
@@ -142,6 +150,10 @@ spec:
   podSelector:
     matchLabels:
       clerum.io/managed-by: host-context-controller
+    matchExpressions:
+    - key: clerum.io/role
+      operator: NotIn
+      values: [host-execution]
   policyTypes:
   - Egress
   egress:
@@ -153,3 +165,36 @@ spec:
       protocol: TCP
     - port: 8443
       protocol: TCP
+
+---
+# Execution Pods get no inherited Host API, DNS or public-network lane. Only
+# HCC can fetch/clear the private result portal; Pod UID is not user authority.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: host-execution-private
+  namespace: mcp-host
+  labels:
+    clerum.io/policy-type: execution
+spec:
+  podSelector:
+    matchLabels:
+      clerum.io/managed-by: host-context-controller
+      clerum.io/role: host-execution
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: control-plane
+      podSelector:
+        matchLabels:
+          app: host-context-controller
+    ports:
+    - port: 9300
+      protocol: TCP
+    - port: 9301
+      protocol: TCP
+  egress: []

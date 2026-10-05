@@ -28,9 +28,12 @@ export const EXECUTION_EXECUTOR_CONTAINER_NAME = 'executor'
 export const EXECUTION_INPUT_RECEIVER_CONTAINER_NAME = 'input-receiver'
 /** Fixed receiver entrypoint inside the server-resolved Host image. */
 export const EXECUTION_RECEIVE_INPUT_ENTRYPOINT =
-  '/app/mcp-host/dist/core/execution/receiveInput.js'
-/** PID 1 captures aggregate output before it reaches the node's container log. */
-export const EXECUTION_RUN_ENTRYPOINT = '/app/mcp-host/dist/core/execution/runExecution.js'
+  '/app/mcp-host/dist/core/execution/receiveSession.js'
+export const EXECUTION_INPUT_PORT = 9301
+/** PID 1 retains captured results privately and serves only the scoped portal. */
+export const EXECUTION_RUN_ENTRYPOINT = '/app/mcp-host/dist/core/execution/runSession.js'
+export const EXECUTION_RESULT_PORT = 9300
+export const EXECUTION_POD_UID_ENV = 'EXECUTION_POD_UID'
 export const EXECUTION_WORKSPACE_MOUNT_PATH = '/workspace'
 export const EXECUTION_SCRATCH_MOUNT_PATH = '/scratch'
 export const EXECUTION_TMP_MOUNT_PATH = '/tmp'
@@ -451,11 +454,11 @@ export function buildHostExecutionJob(
           approved.input.sha256,
           String(approved.timeoutMs),
         ],
-        // The caller attaches to this init container to stream the payload;
-        // stdinOnce closes the stream after the single input.
-        stdin: true,
-        stdinOnce: true,
-        tty: false,
+        // One private HTTP stream is verified before this init process exits.
+        // No attach/exec subresource or service-account token is required.
+        env: [
+          { name: EXECUTION_POD_UID_ENV, valueFrom: { fieldRef: { fieldPath: 'metadata.uid' } } },
+        ],
         volumeMounts: [
           { name: INPUT_VOLUME_NAME, mountPath: EXECUTION_INPUT_MOUNT_PATH, readOnly: false },
         ],
@@ -481,7 +484,15 @@ export function buildHostExecutionJob(
     env: [
       { name: 'HOME', value: workingDir },
       { name: 'TMPDIR', value: EXECUTION_TMP_MOUNT_PATH },
+      { name: EXECUTION_POD_UID_ENV, valueFrom: { fieldRef: { fieldPath: 'metadata.uid' } } },
     ],
+    ports: [{ name: 'result', containerPort: EXECUTION_RESULT_PORT, protocol: 'TCP' }],
+    readinessProbe: {
+      tcpSocket: { port: 'result' },
+      periodSeconds: 1,
+      timeoutSeconds: 1,
+      failureThreshold: 5,
+    },
     volumeMounts: executorMounts,
     resources: {
       requests: { cpu: '100m', memory: '64Mi' },
@@ -540,7 +551,9 @@ export function buildHostExecutionJob(
     },
     spec: {
       backoffLimit: 0,
-      activeDeadlineSeconds: Math.ceil(approved.timeoutMs / 1000),
+      // Includes the bounded private-result delivery window. Command runtime
+      // itself is still limited by the launcher to the approved timeout.
+      activeDeadlineSeconds: Math.ceil(approved.timeoutMs / 1000) + 60,
       template: {
         metadata: { labels, annotations },
         spec: podSpec,

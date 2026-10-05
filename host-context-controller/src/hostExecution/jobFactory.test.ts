@@ -168,7 +168,7 @@ describe('bounded Host execution job factory', () => {
     ])
 
     expect(job.spec!.backoffLimit).toBe(0)
-    expect(job.spec!.activeDeadlineSeconds).toBe(60)
+    expect(job.spec!.activeDeadlineSeconds).toBe(120)
     expect(podSpec(job).restartPolicy).toBe('Never')
     expect(podSpec(job).initContainers).toBeUndefined()
     expect(volume(job, 'workspace').persistentVolumeClaim).toEqual({
@@ -188,6 +188,7 @@ describe('bounded Host execution job factory', () => {
     expect(executor.env).toEqual([
       { name: 'HOME', value: EXECUTION_WORKSPACE_MOUNT_PATH },
       { name: 'TMPDIR', value: EXECUTION_TMP_MOUNT_PATH },
+      { name: 'EXECUTION_POD_UID', valueFrom: { fieldRef: { fieldPath: 'metadata.uid' } } },
     ])
   })
 
@@ -247,6 +248,7 @@ describe('bounded Host execution job factory', () => {
     expect(executor.env).toEqual([
       { name: 'HOME', value: EXECUTION_SCRATCH_MOUNT_PATH },
       { name: 'TMPDIR', value: EXECUTION_TMP_MOUNT_PATH },
+      { name: 'EXECUTION_POD_UID', valueFrom: { fieldRef: { fieldPath: 'metadata.uid' } } },
     ])
     expect(collectNamespaces(job)).toEqual([identity.namespace])
   })
@@ -264,10 +266,12 @@ describe('bounded Host execution job factory', () => {
       String(attachmentRequest.timeoutMs),
     ])
     expect(receiver.args).toBeUndefined()
-    expect(receiver.stdin).toBe(true)
-    expect(receiver.stdinOnce).toBe(true)
-    expect(receiver.tty).toBe(false)
-    expect(receiver.env).toBeUndefined()
+    expect(receiver.stdin).toBeUndefined()
+    expect(receiver.stdinOnce).toBeUndefined()
+    expect(receiver.tty).toBeUndefined()
+    expect(receiver.env).toEqual([
+      { name: 'EXECUTION_POD_UID', valueFrom: { fieldRef: { fieldPath: 'metadata.uid' } } },
+    ])
     expect(receiver.envFrom).toBeUndefined()
     expect(receiver.volumeMounts).toEqual([
       { name: 'input', mountPath: EXECUTION_INPUT_MOUNT_PATH, readOnly: false },
@@ -345,9 +349,9 @@ describe('bounded Host execution job factory', () => {
       buildHostExecutionJob(identity, { ...workspaceRequest, timeoutMs }).spec!
         .activeDeadlineSeconds
 
-    expect(at(1_000)).toBe(1)
-    expect(at(90_001)).toBe(91)
-    expect(at(EXECUTION_TIMEOUT_MAX_MS)).toBe(1_500)
+    expect(at(1_000)).toBe(61)
+    expect(at(90_001)).toBe(151)
+    expect(at(EXECUTION_TIMEOUT_MAX_MS)).toBe(1_560)
     for (const timeoutMs of [999, 0, -1, 1.5, EXECUTION_TIMEOUT_MAX_MS + 1, Number.NaN]) {
       expect(
         rejection(() => buildHostExecutionJob(identity, { ...workspaceRequest, timeoutMs })).field

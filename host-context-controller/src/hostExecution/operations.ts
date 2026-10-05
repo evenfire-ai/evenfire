@@ -1,7 +1,9 @@
 import type * as k8s from '@kubernetes/client-node'
+import type { Readable } from 'node:stream'
 import type { VerifiedMcpHostPrincipal } from '../mcpApiAuthentication'
 import { getErrorCode, observeCreate, observeExistenceRead } from '../utils'
 import { HostExecutionAuthorization, type HostExecutionBinding } from './authorization'
+import type { ExecutionInputTransport } from './inputTransport'
 import {
   type ApprovedExecutionRequest,
   EXECUTION_EXECUTOR_CONTAINER_NAME,
@@ -12,20 +14,14 @@ import {
   validateHostExecutionJob,
   validateHostExecutionPod,
 } from './jobFactory'
-import {
-  EXECUTION_RESULT_MAX_BYTES,
-  type HostExecutionResult,
-  parseHostExecutionResult,
-} from './result'
+import { type HostExecutionResult, parseHostExecutionResult } from './result'
+import type { ExecutionResultTransport } from './resultTransport'
 
 type BatchApi = Pick<
   k8s.BatchV1Api,
   'createNamespacedJob' | 'readNamespacedJob' | 'deleteNamespacedJob'
 >
-type CoreApi = Pick<
-  k8s.CoreV1Api,
-  'listNamespacedPod' | 'readNamespacedPod' | 'readNamespacedPodLog'
->
+type CoreApi = Pick<k8s.CoreV1Api, 'listNamespacedPod' | 'readNamespacedPod'>
 
 /** Internal receipt retained with the prepared operation, never reconstructed
  * from a new upload or a caller-selected Host name. Contains no bearer token.
@@ -39,7 +35,7 @@ export interface HostExecutionHandle {
 export type HostExecutionObservation =
   | { state: 'queued' }
   | { state: 'waiting_for_input' | 'running'; podUid: string }
-  | { state: 'failed'; podUid: string; reason: 'input_receive_failed' }
+  | { state: 'failed'; podUid: string; reason: 'input_receive_failed' | 'execution_terminated' }
   | { state: 'completed'; podUid: string; result: HostExecutionResult }
 
 function bindingFor(identity: TrustedHostExecutionIdentity): HostExecutionBinding {
@@ -80,7 +76,9 @@ export class HostExecutionOperations {
   constructor(
     private readonly batch: BatchApi,
     private readonly core: CoreApi,
-    private readonly authorization: HostExecutionAuthorization
+    private readonly authorization: HostExecutionAuthorization,
+    private readonly results: Pick<ExecutionResultTransport, 'read' | 'clear'>,
+    private readonly inputs: Pick<ExecutionInputTransport, 'ready' | 'send'>
   ) {}
 
   async start(
@@ -146,6 +144,66 @@ export class HostExecutionOperations {
     return pods.items
   }
 
+  private async revalidatePod(
+    handle: HostExecutionHandle,
+    name: string,
+    uid: string
+  ): Promise<void> {
+    const job = await this.readJob(handle)
+    if (!job) throw new Error('execution_not_found')
+    const pod = await this.core.readNamespacedPod({ namespace: handle.identity.namespace, name })
+    validateHostExecutionPod(pod, job, handle.identity, handle.request, uid)
+  }
+
+  async deliverInput(
+    principal: VerifiedMcpHostPrincipal,
+    handle: HostExecutionHandle,
+    openInput: () => Promise<Readable>,
+    signal?: AbortSignal
+  ): Promise<{ state: 'input_pending' | 'input_delivered'; podUid?: string }> {
+    const binding = bindingFor(handle.identity)
+    await this.authorization.revalidate(principal, binding)
+    if (handle.request.kind !== 'attachment' || !handle.request.input) {
+      throw new Error('execution_input_contract_invalid')
+    }
+    const job = await this.readJob(handle)
+    if (!job) throw new Error('execution_not_found')
+    const pods = await this.readPods(handle)
+    await this.authorization.revalidate(principal, binding)
+    if (!pods.length) return { state: 'input_pending' }
+    const pod = pods[0]
+    validateHostExecutionPod(pod, job, handle.identity, handle.request)
+    const podUid = pod.metadata!.uid!
+    const receiver = pod.status?.initContainerStatuses?.find(
+      container => container.name === EXECUTION_INPUT_RECEIVER_CONTAINER_NAME
+    )
+    if (receiver?.state?.terminated) {
+      if (receiver.state.terminated.exitCode === 0) return { state: 'input_delivered', podUid }
+      throw new Error('execution_input_rejected')
+    }
+    if (!receiver?.state?.running) return { state: 'input_pending', podUid }
+    const podIp = pod.status?.podIP
+    if (!podIp || pod.spec?.hostNetwork === true) throw new Error('execution_result_target_invalid')
+    const target = { podUid, podIp }
+    const ready = await this.inputs.ready(target)
+    await this.revalidatePod(handle, pod.metadata!.name!, podUid)
+    await this.authorization.revalidate(principal, binding)
+    if (!ready) return { state: 'input_pending', podUid }
+    // The caller opens only the owner/generation/incarnation-bound file. This
+    // callback is never invoked for a queued, stale or foreign operation.
+    const input = await openInput()
+    try {
+      await this.revalidatePod(handle, pod.metadata!.name!, podUid)
+      await this.authorization.revalidate(principal, binding)
+      await this.inputs.send(target, input, handle.request.input.byteLength, signal)
+      await this.revalidatePod(handle, pod.metadata!.name!, podUid)
+      await this.authorization.revalidate(principal, binding)
+      return { state: 'input_delivered', podUid }
+    } finally {
+      input.destroy()
+    }
+  }
+
   async inspect(
     principal: VerifiedMcpHostPrincipal,
     handle: HostExecutionHandle
@@ -163,13 +221,15 @@ export class HostExecutionOperations {
     const executor = pod.status?.containerStatuses?.find(
       container => container.name === EXECUTION_EXECUTOR_CONTAINER_NAME
     )
-    if (!executor?.state?.terminated) {
+    if (!executor?.state?.running) {
       const receiver = pod.status?.initContainerStatuses?.find(
         container => container.name === EXECUTION_INPUT_RECEIVER_CONTAINER_NAME
       )
       if (receiver?.state?.terminated && receiver.state.terminated.exitCode !== 0) {
         return { state: 'failed', podUid, reason: 'input_receive_failed' }
       }
+      if (executor?.state?.terminated)
+        return { state: 'failed', podUid, reason: 'execution_terminated' }
       return {
         state:
           handle.request.kind === 'attachment' && !executor?.state?.running
@@ -178,24 +238,16 @@ export class HostExecutionOperations {
         podUid,
       }
     }
+    if (!executor.ready) return { state: 'running', podUid }
     const podName = pod.metadata!.name!
-    const output = await this.core.readNamespacedPodLog({
-      namespace: handle.identity.namespace,
-      name: podName,
-      container: EXECUTION_EXECUTOR_CONTAINER_NAME,
-      follow: false,
-      limitBytes: EXECUTION_RESULT_MAX_BYTES + 1,
-    })
+    const podIp = pod.status?.podIP
+    if (!podIp || pod.spec?.hostNetwork === true) throw new Error('execution_result_target_invalid')
+    const output = await this.results.read({ podUid, podIp })
     // A replaced Job cannot supply a result for the saved operation even if
     // it uses the same name. Check again after retrieving private output.
-    const currentJob = await this.readJob(handle)
-    if (!currentJob) throw new Error('execution_not_found')
-    const currentPod = await this.core.readNamespacedPod({
-      namespace: handle.identity.namespace,
-      name: podName,
-    })
-    validateHostExecutionPod(currentPod, currentJob, handle.identity, handle.request, podUid)
+    await this.revalidatePod(handle, podName, podUid)
     await this.authorization.revalidate(principal, binding)
+    if (output === null) return { state: 'running', podUid }
     return {
       state: 'completed',
       podUid,

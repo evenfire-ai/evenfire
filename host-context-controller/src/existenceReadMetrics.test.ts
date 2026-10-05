@@ -28,13 +28,9 @@ it('initializes the real read registry before any test seeding', async () => {
 // Review each exclusion when its enclosing operation changes. Counts describe
 // expressions, not executions; a newly added direct read must be classified.
 const readExclusions: Record<string, readonly [number, string]> = {
-  'hostExecution/operations.ts::inspect::readNamespacedPod': [
+  'hostExecution/operations.ts::revalidatePod::readNamespacedPod': [
     1,
-    'Exact Pod UID revalidation after private output retrieval',
-  ],
-  'hostExecution/operations.ts::inspect::readNamespacedPodLog': [
-    1,
-    'Bounded execution result retrieval, not a resource existence decision',
+    'Exact Pod UID revalidation across private input/output transport awaits',
   ],
   'hostReconciler.ts::readHostDeploymentOrNull::readNamespacedDeployment': [
     1,
@@ -264,7 +260,7 @@ function assertReadInventory(sources: Record<string, string>): void {
     expect(excluded[id], `Stale or changed read exclusion: ${id}`).toBe(count)
   }
   expect(Object.values(wrapped).reduce((sum, count) => sum + count, 0)).toBe(27)
-  expect(Object.values(excluded).reduce((sum, count) => sum + count, 0)).toBe(46)
+  expect(Object.values(excluded).reduce((sum, count) => sum + count, 0)).toBe(45)
 }
 
 it('classifies every direct dot-property production SDK read as observed or explicitly excluded', () => {
