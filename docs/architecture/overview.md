@@ -1652,7 +1652,11 @@ All three calls carry the `x-clerum-edge-*` caller headers (`x-clerum-edge-calle
 
 Approving a tool runs that call only. It does not allowlist the rest of the turn or every tool on the same MCP server. A later call, including the same tool with different arguments, asks again.
 
-`/approve always` (and the desktop **Always approve** button) stores that exact tool name for later calls in the conversation. `/deny` records that exact tool name. The denial stays in effect until the same user approves that tool, including after the host restarts. Denials apply to calls made in that conversation only: a workflow triggered from it does not inherit them, and its steps follow the workflow's own tool scoping.
+`/approve always` (and the desktop **Always approve** button) stores that exact tool name for later calls in the conversation. It never waives a forced gate: the stateless `cron_manage` create/enable card and a denial re-ask run the call once and allowlist nothing, and Desktop hides the button on those cards.
+
+`/deny` records that exact tool name and revokes an earlier **Always approve** for it. The denial stays in effect until the user who denied it approves that tool, including after the host restarts. An approval timeout records no denial.
+
+Denials apply to calls made in that conversation only. A workflow triggered from it does not inherit them; its steps follow the workflow's own tool scoping. So while any denial is active, tools that can start other tools out of sight ask again on every call, even when allowlisted: `workflow_trigger`, and `cron_manage` with `create`, `enable` or `trigger`. Autonomous cron runs keep their own narrow gate and do not consult chat denials.
 
 | Scenario                                                  | Approvals required                    |
 | --------------------------------------------------------- | ------------------------------------- |
@@ -1660,6 +1664,7 @@ Approving a tool runs that call only. It does not allowlist the rest of the turn
 | LLM calls tools from `airtable-server` + `mongodb-server` | One card per call                     |
 | Same tool after **Always approve**                        | Later calls of that exact name proceed |
 | Same tool after **Deny**                                 | Asks again until that tool is approved |
+| `workflow_trigger` / `cron_manage` create, enable, trigger while a denial is active | Asks on every call                    |
 
 **Channel commands:**
 
@@ -1667,7 +1672,7 @@ Approving a tool runs that call only. It does not allowlist the rest of the turn
 | ----------------- | ----------------------------------------------------- |
 | `/approve`        | Run the approved call only                            |
 | `/approve always` | Run the call and allowlist that exact tool name      |
-| `/deny`           | Cancel the call and block that tool name until approved |
+| `/deny`           | Cancel the call, block that tool name until approved, and revoke its Always approve |
 
 ### Architecture Components
 
