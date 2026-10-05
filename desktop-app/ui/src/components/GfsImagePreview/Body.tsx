@@ -5,6 +5,7 @@ import { GFS_IMAGE_PREVIEW_MAX_BYTES } from '@constants/gfsImagePreview'
 import { estimateBase64DecodedLength } from '@lib/base64Size'
 import { describeGfsReadError } from '@lib/gfsGrantErrors'
 import { assertGfsImagePreviewSize } from '@lib/gfsImagePreview'
+import { copyImageBlobToClipboard } from '@lib/imageClipboard'
 import type { GfsImagePreviewBodyProps } from './types'
 
 /**
@@ -126,40 +127,17 @@ export function GfsImagePreviewBody({
   async function copyImageToClipboard(): Promise<void> {
     if (!sourceBlob || !mountedRef.current) return
     try {
-      if (typeof ClipboardItem !== 'undefined' && navigator.clipboard?.write) {
-        let clipboardBlob: Blob | null = sourceBlob
-        if (!sourceBlob.type.includes('png')) {
-          clipboardBlob = await convertBlobToPng(sourceBlob)
-        }
-        if (!mountedRef.current) return
-        if (clipboardBlob) {
-          await navigator.clipboard.write([new ClipboardItem({ 'image/png': clipboardBlob })])
-          if (!mountedRef.current) return
-          markCopyState('copied')
-          return
-        }
-      }
-      if (navigator.clipboard?.writeText) {
-        const dataUrl = await blobToDataUrl(sourceBlob)
-        if (!mountedRef.current) return
-        await navigator.clipboard.writeText(dataUrl)
-        if (!mountedRef.current) return
-        markCopyState('copied')
-      } else {
-        markCopyState('error')
-      }
+      const copied = await copyImageBlobToClipboard(sourceBlob, () => mountedRef.current)
+      if (copied && mountedRef.current) markCopyState('copied')
     } catch {
-      markCopyState('error')
+      if (mountedRef.current) markCopyState('error')
     }
   }
 
   return (
     <>
       <header className="da-gfs-image-preview-dialog__header">
-        <HeadingTag className="da-gfs-preview-title" id={headingId}>
-          {fileName}
-        </HeadingTag>
-        <div className="da-gfs-image-preview-dialog__header-actions">
+        <div className="da-gfs-image-preview-dialog__header-main">
           <Button
             className="da-gfs-image-preview-dialog__copy"
             aria-label={
@@ -175,8 +153,11 @@ export function GfsImagePreviewBody({
               {copyState === 'copied' ? 'Copied' : 'Copy'}
             </span>
           </Button>
-          {headerActions}
+          <HeadingTag className="da-gfs-preview-title" id={headingId}>
+            {fileName}
+          </HeadingTag>
         </div>
+        <div className="da-gfs-image-preview-dialog__header-actions">{headerActions}</div>
       </header>
       <div className="da-gfs-image-preview-dialog__body">
         {previewError ? <StatusBanner tone="error" text={previewError} /> : null}
@@ -205,31 +186,4 @@ function decodeBase64ToArrayBuffer(dataBase64: string): ArrayBuffer {
     bytes[index] = binary.charCodeAt(index)
   }
   return bytes.buffer
-}
-
-async function convertBlobToPng(blob: Blob): Promise<Blob | null> {
-  if (typeof createImageBitmap === 'undefined') return null
-  try {
-    const bitmap = await createImageBitmap(blob)
-    const canvas = document.createElement('canvas')
-    canvas.width = bitmap.width
-    canvas.height = bitmap.height
-    const ctx = canvas.getContext('2d')
-    if (!ctx) return null
-    ctx.drawImage(bitmap, 0, 0)
-    return await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/png'))
-  } catch {
-    return null
-  }
-}
-
-async function blobToDataUrl(blob: Blob): Promise<string> {
-  const result = await new Promise<string | ArrayBuffer | null>((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onload = () => resolve(reader.result)
-    reader.onerror = () => reject(reader.error ?? new Error('Could not read the image'))
-    reader.readAsDataURL(blob)
-  })
-  if (typeof result !== 'string') throw new Error('Could not read the image')
-  return result
 }

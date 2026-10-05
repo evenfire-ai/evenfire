@@ -8062,6 +8062,21 @@ h3 {
   outline-offset: 2px;
 }
 
+/* Match the Settings menu hover across both themes. Highlight the chip frame
+   only while its preview button is hovered, leaving the remove action alone. */
+.message-attachment-chip:has(> .message-attachment-preview-trigger:hover),
+.composer-attachment-chip:has(> .composer-attachment-preview-trigger:hover) {
+  background: var(--list-item-hover-bg);
+  border-color: rgba(var(--accent-rgb), 0.34);
+  color: var(--text);
+}
+
+.message-attachment-preview-trigger:hover:enabled,
+.composer-attachment-preview-trigger:hover:enabled {
+  background: transparent;
+  color: inherit;
+}
+
 .composer-attachment-chip img {
   width: 28px;
   height: 28px;
@@ -8284,13 +8299,17 @@ h3 {
   padding: var(--space-5);
 }
 
+:root[data-theme='light'] .composer-image-preview-overlay {
+  background: rgba(0, 0, 0, 0.72);
+}
+
 .composer-image-preview-dialog {
   position: relative;
   width: min(96vw, 1120px);
   max-height: 92vh;
   border-radius: var(--radius-md);
   border: 1px solid rgba(var(--edge-rgb), 0.45);
-  background: rgba(var(--surface-rgb), 0.97);
+  background: var(--panel);
   box-shadow: var(--shadow-hard);
   padding: var(--space-4);
   display: grid;
@@ -8332,7 +8351,7 @@ h3 {
   max-height: calc(92vh - 120px);
   object-fit: contain;
   border-radius: var(--radius-sm);
-  background: rgba(var(--surface-alt-rgb), 0.45);
+  background: var(--media-surface);
 }
 
 .composer-image-preview-canvas {
@@ -8340,7 +8359,7 @@ h3 {
   width: 100%;
   max-height: calc(92vh - 170px);
   border-radius: var(--radius-sm);
-  background: rgba(var(--surface-alt-rgb), 0.45);
+  background: var(--media-surface);
   touch-action: none;
   cursor: crosshair;
 }
@@ -15692,6 +15711,21 @@ pre {
   display: inline-flex;
   align-items: center;
   gap: var(--space-2);
+}
+
+.da-gfs-image-preview-dialog__header-main {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.da-gfs-image-preview-dialog__header-main .da-gfs-preview-title {
+  flex: 0 1 auto;
+}
+
+.da-gfs-image-preview-dialog__header-main .da-gfs-image-preview-dialog__copy {
+  flex: 0 0 auto;
 }
 
 .da-gfs-image-preview-dialog__close.ui-button,

@@ -115,9 +115,20 @@ function userMessageWithAttachments(): AgentChatMessage {
   }
 }
 
-function renderWithUserMessage(user: AgentChatMessage) {
-  messages = [user]
-  groupedMessages = [{ role: 'user', items: [user] }]
+function renderWithErrorReply(user: AgentChatMessage) {
+  const errorReply: AgentChatMessage = {
+    id: 'assistant-error',
+    role: 'assistant',
+    content: 'The agent could not finish this request.',
+    timestamp: 2,
+    isError: true,
+    errorCode: 'LLM_MODEL_OVERLOADED',
+  }
+  messages = [user, errorReply]
+  groupedMessages = [
+    { role: 'user', items: [user] },
+    { role: 'assistant', items: [errorReply] },
+  ]
   render(<ChatThread />)
 }
 
@@ -134,10 +145,11 @@ afterEach(() => {
 })
 
 describe('ChatThread resend action (TASK-42)', () => {
-  it('re-populates the composer draft and re-attaches files + plugin indicators from a user message', () => {
-    renderWithUserMessage(userMessageWithAttachments())
+  it('restores the original prompt and attachments from an assistant error', () => {
+    renderWithErrorReply(userMessageWithAttachments())
 
-    fireEvent.click(screen.getByRole('button', { name: 'Resend message' }))
+    expect(screen.queryByRole('button', { name: 'Resend message' })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Resend prompt' }))
 
     expect(getComposerDraft('chat-1')).toBe('Summarize the chart with the plugin')
     expect(addComposerImageAttachments).toHaveBeenCalledTimes(1)
@@ -164,7 +176,7 @@ describe('ChatThread resend action (TASK-42)', () => {
     expect(requestComposerFocus).toHaveBeenCalledTimes(1)
   })
 
-  it('resending from an assistant message re-issues the originating user prompt (text + attachments + indicators)', () => {
+  it('hides resend on successful user and assistant messages', () => {
     const user = userMessageWithAttachments()
     const assistant: AgentChatMessage = {
       id: 'assistant-1',
@@ -191,27 +203,17 @@ describe('ChatThread resend action (TASK-42)', () => {
 
     render(<ChatThread />)
 
-    fireEvent.click(screen.getByRole('button', { name: 'Resend prompt' }))
-
-    // The draft carries the USER prompt, not the assistant reply.
-    expect(getComposerDraft('chat-1')).toBe('Summarize the chart with the plugin')
-    expect(addComposerImageAttachments).toHaveBeenCalledTimes(1)
-    expect(addComposerImageAttachments.mock.calls[0]![0]).toEqual([
-      expect.objectContaining({ name: 'chart.png', dataBase64: PNG_BASE64 }),
-    ])
-    expect(addComposerReferenceAttachments).toHaveBeenCalledTimes(1)
-    expect(addComposerReferenceAttachments.mock.calls[0]![0]).toEqual([
-      expect.objectContaining({ type: 'plugin', namespace: 'profits', name: 'revenue' }),
-    ])
-    expect(requestComposerFocus).toHaveBeenCalledTimes(1)
+    expect(screen.queryByRole('button', { name: 'Resend prompt' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Resend message' })).toBeNull()
   })
 
-  it('hides the resend action on an assistant message with no preceding user prompt', () => {
+  it('hides resend on an error with no preceding user prompt', () => {
     const assistant: AgentChatMessage = {
       id: 'assistant-only',
       role: 'assistant',
       content: 'A reply with no user turn before it.',
       timestamp: 1,
+      isError: true,
     }
     messages = [assistant]
     groupedMessages = [{ role: 'assistant', items: [assistant] }]
@@ -248,9 +250,9 @@ describe('ChatThread resend action (TASK-42)', () => {
   describe('dirty-composer contract (PR #859 review: refuse like handleRecoverFailedAgentSend)', () => {
     it('refuses with an error toast when the composer holds draft text', () => {
       setComposerDraft('chat-1', 'a half-written draft')
-      renderWithUserMessage(userMessageWithAttachments())
+      renderWithErrorReply(userMessageWithAttachments())
 
-      fireEvent.click(screen.getByRole('button', { name: 'Resend message' }))
+      fireEvent.click(screen.getByRole('button', { name: 'Resend prompt' }))
 
       expect(pushToast).toHaveBeenCalledTimes(1)
       expect(pushToast.mock.calls[0]![0]).toBe(
@@ -275,9 +277,9 @@ describe('ChatThread resend action (TASK-42)', () => {
           previewDataUrl: 'data:image/png;base64,cGVuZGluZw==',
         },
       ]
-      renderWithUserMessage(userMessageWithAttachments())
+      renderWithErrorReply(userMessageWithAttachments())
 
-      fireEvent.click(screen.getByRole('button', { name: 'Resend message' }))
+      fireEvent.click(screen.getByRole('button', { name: 'Resend prompt' }))
 
       expect(pushToast).toHaveBeenCalledTimes(1)
       expect(pushToast.mock.calls[0]![1]).toBe('error')
@@ -298,9 +300,9 @@ describe('ChatThread resend action (TASK-42)', () => {
         { id: 'legacy-2', type: 'uploaded_file', label: 'older-shot.png', addedOrder: 1 },
       ],
     }
-    renderWithUserMessage(user)
+    renderWithErrorReply(user)
 
-    fireEvent.click(screen.getByRole('button', { name: 'Resend message' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Resend prompt' }))
 
     // The resend itself still happens (text restored, focus nudged)…
     expect(getComposerDraft('chat-1')).toBe('Analyze these')
@@ -337,8 +339,8 @@ describe('ChatThread resend action (TASK-42)', () => {
     expect(merged.map(message => message.id)).toEqual(['optimistic-user', 'turn-10-user'])
     expect(merged[0]?.attachments?.map(attachment => attachment.type)).toEqual(['uploaded_file'])
     expect(merged[1]?.attachments?.map(attachment => attachment.type)).toEqual(['plugin'])
-    renderWithUserMessage(merged[0]!)
-    fireEvent.click(screen.getByRole('button', { name: 'Resend message' }))
+    renderWithErrorReply(merged[0]!)
+    fireEvent.click(screen.getByRole('button', { name: 'Resend prompt' }))
     expect(pushToast).toHaveBeenCalledWith(
       "1 attachment from the original message couldn't be restored.",
       'warn'

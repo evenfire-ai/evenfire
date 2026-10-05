@@ -748,13 +748,13 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
                         /\b[a-zA-Z0-9][a-zA-Z0-9._-]*\.html?\b/i.test(displayContent)
                       const showMetaRow = message.role === 'assistant' || message.role === 'user'
                       const copyContent = message.role === 'user' ? displayContent : message.content
-                      // TASK-42: a user message resends itself; an assistant
-                      // message (including error bubbles) resends the user
-                      // prompt that produced it.
-                      const resendSource =
-                        message.role === 'user'
+                      // Only error bubbles offer retry. An assistant error
+                      // restores the user prompt that produced it.
+                      const resendSource = message.isError
+                        ? message.role === 'user'
                           ? message
                           : findNearestPrecedingUserMessage(groupedWithKeys, groupIndex)
+                        : null
                       const metaRowRoleClass =
                         message.role === 'user'
                           ? 'chat-message-meta-row--user'
