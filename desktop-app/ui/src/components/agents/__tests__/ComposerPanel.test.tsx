@@ -36,6 +36,7 @@ const composerState: ChatComposerStateContextValue = {
   activeChatId: null,
   activeMessageCount: 0,
   composerFocusRequestId: 0,
+  requestComposerFocus: vi.fn(),
 }
 
 const draftState = { value: '', set: vi.fn() }
