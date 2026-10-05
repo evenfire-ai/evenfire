@@ -667,6 +667,14 @@ export function createRpcRouter(): Router {
           res.status(400).json({ error: 'hostRef is required' })
           return
         }
+        const parsed = req.body as Record<string, unknown>
+        // Persistent consent must be an explicit boolean: a truthy string such
+        // as "false" must never turn into an exact-name allowlist entry.
+        const alwaysApprove = parsed.alwaysApprove ?? false
+        if (typeof alwaysApprove !== 'boolean') {
+          res.status(400).json({ error: 'alwaysApprove must be a boolean' })
+          return
+        }
         const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
         const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
           teamId: auth.teamId,
@@ -679,11 +687,10 @@ export function createRpcRouter(): Router {
         // Translate Desktop App fields → mcp-host approval API fields.
         // Identity is always the JWT auth.sub (server-assigned, matches the
         // sender that was stamped onto the original message).
-        const parsed = req.body as Record<string, unknown>
         const upstreamBody = {
           userId: auth.sub,
           requestId: parsed.toolCallId || parsed.requestId,
-          alwaysApprove: parsed.alwaysApprove || false,
+          alwaysApprove,
         }
         // Wake-eligible finite operation (§11.4): the route scope stays
         // host:approval:write; wake capability rides on the token. A suspended

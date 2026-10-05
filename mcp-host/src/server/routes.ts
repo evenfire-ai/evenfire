@@ -526,6 +526,13 @@ export async function handleApprovalRoute(
       badRequest(res, 'Missing userId or requestId')
       return
     }
+    // Persistent consent must be an explicit boolean: a truthy string such as
+    // "false" must never turn into an exact-name allowlist entry.
+    const alwaysApprove = parsed.alwaysApprove ?? false
+    if (typeof alwaysApprove !== 'boolean') {
+      badRequest(res, 'alwaysApprove must be a boolean')
+      return
+    }
 
     let channelType = parsed.channelType as string | undefined
     let channelId = parsed.channelId as string | undefined
@@ -549,7 +556,7 @@ export async function handleApprovalRoute(
       userId,
       requestId,
       approved,
-      alwaysApprove: approved ? (parsed.alwaysApprove as boolean) || false : false,
+      alwaysApprove: approved && alwaysApprove,
       channelType,
       channelId,
     }
