@@ -172,7 +172,7 @@ export interface DecideApprovalDeps {
     requestId: string
     state: 'approved' | 'denied'
   }) => void
-  pushToast: (message: string, tone: 'success' | 'error' | 'info') => void
+  pushToast: (message: string, tone: 'success' | 'error' | 'info' | 'warn') => void
 }
 
 function errorMessage(error: unknown): string {
@@ -274,7 +274,7 @@ export async function decideApproval(
     deps.reconcile(chatKey, 'approval_decided', target.taskId)
     deps.pushToast(
       "The call was cancelled, but the denial wasn't saved; this tool may ask again.",
-      'error'
+      'warn'
     )
     return 'decided_not_saved'
   }

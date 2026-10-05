@@ -189,7 +189,7 @@ describe('decideApproval — failure (step 5)', () => {
     )
     expect(deps.pushToast).toHaveBeenCalledWith(
       "The call was cancelled, but the denial wasn't saved; this tool may ask again.",
-      'error'
+      'warn'
     )
     expect(deps.pushToast).toHaveBeenCalledTimes(1)
   })
