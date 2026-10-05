@@ -1,10 +1,13 @@
 import express, { type NextFunction, type Request, type Response, Router } from 'express'
+import type { IncomingHttpHeaders } from 'node:http'
 import {
   BODY_STRUCTURE_LIMITS as GROK_BODY_STRUCTURE_LIMITS,
+  ENVELOPE_ALLOWANCE_BYTES as GROK_ENVELOPE_ALLOWANCE_BYTES,
   LIMITS as GROK_LIMITS,
 } from '@clerum/grok-provider-attempt-contract'
 import {
   BODY_STRUCTURE_LIMITS,
+  ENVELOPE_ALLOWANCE_BYTES,
   LIMITS,
   createBodyStructureVerify,
 } from '@clerum/llm-provider-attempt-contract'
@@ -164,13 +167,41 @@ export async function resolveHostAssignedAssignment(
   }
 }
 
+// The text authorize envelope: the non-image request budget plus the envelope
+// allowance, the same cap each contract's structural scan uses.
+export const AUTHORIZE_TEXT_BODY_BYTES = Math.max(
+  LIMITS.maxRequestBodyBytes + ENVELOPE_ALLOWANCE_BYTES,
+  GROK_LIMITS.maxRequestBodyBytes + GROK_ENVELOPE_ALLOWANCE_BYTES
+)
+
+export type AuthorizeBudget = 'ordinary' | 'retained'
+
+// Node frames a body at exactly its Content-Length, and the ordinary parser
+// refuses a declared length above its limit before reading, so a declared
+// length at or below the text envelope bounds what the request can retain.
+// Only those requests skip the retained-body unit. Chunked bodies and lengths
+// that are not plain digits take the retained path, so a framing the bound
+// cannot read fails closed. A request with neither header has no body.
+export function selectAuthorizeBudget(headers: IncomingHttpHeaders): AuthorizeBudget {
+  if (headers['transfer-encoding'] !== undefined) return 'retained'
+  const declared = headers['content-length']
+  if (declared === undefined) return 'ordinary'
+  if (!/^\d+$/.test(declared)) return 'retained'
+  return Number(declared) <= AUTHORIZE_TEXT_BODY_BYTES ? 'ordinary' : 'retained'
+}
+
 export function createMcpHostLlmProviderAttemptRoutes(gateway: K8sGateway): Router {
   const router = Router()
   // Shared by both providers: preserve the larger visual envelope (Codex
   // #660, Grok #784) and each authorizer's provider-specific limit. Refuse
   // encoded bodies and scan raw structure before JSON.parse allocates objects.
-  const authorizeBodyParser = express.json({
+  const retainedBodyParser = express.json({
     limit: Math.max(LIMITS.maxVisualRequestBodyBytes, GROK_LIMITS.maxVisualRequestBodyBytes),
+    inflate: false,
+    verify: verifyBodyStructure,
+  })
+  const ordinaryBodyParser = express.json({
+    limit: AUTHORIZE_TEXT_BODY_BYTES,
     inflate: false,
     verify: verifyBodyStructure,
   })
@@ -179,21 +210,26 @@ export function createMcpHostLlmProviderAttemptRoutes(gateway: K8sGateway): Rout
     ...llmProviderAttemptAuthorizeRateLimits(),
     requireMcpHostJwt,
     asyncHandler(async (req: Request, res: Response) => {
-      try {
-        await authorizeBodyAdmission.run(req, res, authorizeBodyParser, async signal => {
-          signal.throwIfAborted()
-          const claims = req.mcpHostJwt
-          if (!claims) {
-            res.status(401).json({ error: 'Unauthorized' })
-            return
-          }
-          const result = await authorizeLlmProviderAttempt(claims, req.body, {
-            signal,
-            resolveAssignment: hostRef => resolveHostAssignedAssignment(gateway, hostRef, signal),
-          })
-          signal.throwIfAborted()
-          res.status(200).json(result)
+      const claims = req.mcpHostJwt
+      if (!claims) {
+        res.status(401).json({ error: 'Unauthorized' })
+        return
+      }
+      const work = async (signal: AbortSignal): Promise<void> => {
+        signal.throwIfAborted()
+        const result = await authorizeLlmProviderAttempt(claims, req.body, {
+          signal,
+          resolveAssignment: hostRef => resolveHostAssignedAssignment(gateway, hostRef, signal),
         })
+        signal.throwIfAborted()
+        res.status(200).json(result)
+      }
+      try {
+        if (selectAuthorizeBudget(req.headers) === 'ordinary') {
+          await authorizeBodyAdmission.runUncharged(req, res, ordinaryBodyParser, work)
+        } else {
+          await authorizeBodyAdmission.run(req, res, retainedBodyParser, work, claims)
+        }
       } catch (err) {
         if (err instanceof AuthorizeWorkInterrupted) {
           // A closed transport only requests cancellation. run() has awaited

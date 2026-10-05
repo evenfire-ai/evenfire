@@ -210,7 +210,7 @@ export class ProviderAttemptAuthorizer {
         code === 'payload_too_large'
           ? `${contract.label} request is too large; use fewer or smaller images, or reduce context`
           : code === 'authorize_capacity_exceeded'
-            ? 'Too many requests are active. Wait for them to finish or send fewer concurrent requests.'
+            ? 'Authorization is busy with other large requests, which share one capacity across all Hosts. Nothing was sent to the provider; wait for them to finish, then try again.'
             : code === 'authorize_timeout'
               ? 'Request authorization timed out. Wait for active requests to finish, then try again.'
               : `authorize failed with ${response.status}`,

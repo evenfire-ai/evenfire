@@ -1,11 +1,16 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import type { Request } from 'express'
 import { type IncomingMessage, createServer, request as httpRequest } from 'node:http'
+import net from 'node:net'
 import { LLM_PROVIDER_ATTEMPT_ADMISSION_POLICY } from '../src/middleware/llmProviderAttemptAdmissionLimits.js'
 import {
   AuthorizeBodyAdmission,
   AuthorizeWorkInterrupted,
 } from '../src/middleware/llmProviderAttemptBodyAdmission.js'
+import {
+  AUTHORIZE_TEXT_BODY_BYTES,
+  selectAuthorizeBudget,
+} from '../src/routes/mcp-host/llmProviderAttempts.routes.js'
 import * as authorizer from '../src/services/llmProviderAttemptAuthorizer.js'
 import * as rateLimiter from '../src/services/rateLimiterService.js'
 import { issueMcpHostAccessJwt } from '../src/utils/auth/mcpHostJwtToken.js'
@@ -68,11 +73,27 @@ type Observation = {
 
 type Reply = { status: number; headers: IncomingMessage['headers']; body: string }
 
-function headers(host: string, provider: 'codex' | 'grok' = 'codex') {
+function textHeaders(host: string, provider: 'codex' | 'grok' = 'codex'): Record<string, string> {
   const issued = issueMcpHostAccessJwt('default', host, [host], {
     workflowControlScopes: [provider === 'codex' ? 'llm:codex:execute' : 'llm:grok:execute'],
   })
   return { Authorization: `Bearer ${issued.token}`, 'content-type': 'application/json' }
+}
+
+// The retained-ownership cases compete for the retained-body unit. A small
+// body with a declared length takes the uncharged ordinary path, so these
+// requests are sent chunked, which selectAuthorizeBudget charges.
+function headers(host: string, provider: 'codex' | 'grok' = 'codex'): Record<string, string> {
+  return { ...textHeaders(host, provider), 'transfer-encoding': 'chunked' }
+}
+
+// Headers-only retained requests declare a length just above the text
+// envelope, the smallest declared length that takes the unit.
+function declaredRetainedHeaders(
+  host: string,
+  provider: 'codex' | 'grok' = 'codex'
+): Record<string, string> {
+  return { ...textHeaders(host, provider), 'content-length': String(AUTHORIZE_TEXT_BODY_BYTES + 1) }
 }
 
 function send(url: string, requestHeaders: Record<string, string>, body?: string) {
@@ -161,20 +182,44 @@ async function withApps(
   }
 }
 
+// The production queue wait outlives a healthy holder (read plus work
+// deadline). Cases that observe a queued request being refused shorten only
+// that timer, so the refusal arrives within the fixture deadline.
+function shortenQueueWait() {
+  const nativeSetTimeout = globalThis.setTimeout
+  return vi
+    .spyOn(globalThis, 'setTimeout')
+    .mockImplementation((fn, ms, ...args) =>
+      nativeSetTimeout(
+        fn,
+        ms === LLM_PROVIDER_ATTEMPT_ADMISSION_POLICY.queueWaitMs ? 40 : ms,
+        ...args
+      )
+    )
+}
+
 function observeHeldOwner() {
   const settled = deferred()
+  let admission: AuthorizeBodyAdmission | undefined
   const original = AuthorizeBodyAdmission.prototype.run
   const spy = vi.spyOn(AuthorizeBodyAdmission.prototype, 'run').mockImplementation(async function (
     this: AuthorizeBodyAdmission,
     ...args: Parameters<AuthorizeBodyAdmission['run']>
   ) {
+    admission = this
     try {
       return await original.apply(this, args)
     } finally {
       if (args[0].headers['x-admission-case'] === 'held') settled.resolve()
     }
   })
-  return { settled: settled.promise, spy }
+  return {
+    settled: settled.promise,
+    spy,
+    get admission() {
+      return admission
+    },
+  }
 }
 
 beforeEach(() => {
@@ -198,6 +243,7 @@ describe('createApp retained authorize-body ownership', () => {
     const permitUnwind = deferred()
     const owner = observeHeldOwner()
     const parse = vi.spyOn(JSON, 'parse')
+    const clock = shortenQueueWait()
     vi.mocked(authorizer.authorizeLlmProviderAttempt).mockImplementationOnce(
       async (_claims, _body, deps) => {
         started.resolve()
@@ -237,10 +283,10 @@ describe('createApp retained authorize-body ownership', () => {
 
           // The same refusal must also arrive from headers alone. An owner
           // that first buffers the next body would stall this request.
-          const headersOnly = await send(otherApp.url, {
-            ...headers('admission-headers-only-host'),
-            'content-length': '4096',
-          }).response
+          const headersOnly = await send(
+            otherApp.url,
+            declaredRetainedHeaders('admission-headers-only-host')
+          ).response
           expect(headersOnly.status).toBe(503)
           expect(otherApp.observations[1]).toMatchObject({
             bodyDataSubscriptions: 0,
@@ -292,7 +338,351 @@ describe('createApp retained authorize-body ownership', () => {
         }
       })
     } finally {
+      clock.mockRestore()
       parse.mockRestore()
+      owner.spy.mockRestore()
+    }
+  })
+
+  for (const provider of ['codex', 'grok'] as const) {
+    it(`queues a healthy overlapping chunked ${provider} request across apps before any read and executes it once`, async () => {
+      const started = deferred()
+      const permitUnwind = deferred()
+      const owner = observeHeldOwner()
+      vi.mocked(authorizer.authorizeLlmProviderAttempt).mockImplementationOnce(
+        async (_claims, _body, deps) => {
+          started.resolve()
+          await permitUnwind.promise
+          deps?.signal?.throwIfAborted()
+          return SUCCESS
+        }
+      )
+      try {
+        await withApps(2, async ([firstApp, otherApp]) => {
+          const first = send(
+            firstApp.url,
+            { ...headers(`healthy-first-${provider}-host`), 'x-admission-case': 'held' },
+            '{"first":true}'
+          )
+          const firstOutcome = first.response.catch(error => error)
+          const queuedBody = {
+            hostRef: `healthy-queued-${provider}-host`,
+            request: { provider: `${provider}-subscription` },
+          }
+          let queued: ReturnType<typeof send> | undefined
+          let queuedOutcome: Promise<Reply | Error> | undefined
+          try {
+            await started.promise
+            queued = send(otherApp.url, {
+              ...headers(`healthy-queued-${provider}-host`, provider),
+              'transfer-encoding': 'chunked',
+            })
+            queuedOutcome = queued.response.catch(error => error)
+            const encoded = JSON.stringify(queuedBody)
+            queued.client.write(encoded.slice(0, 12))
+            queued.client.end(encoded.slice(12))
+            await vi.waitFor(() =>
+              expect(owner.admission?.snapshot()).toMatchObject({ inFlight: 1, queued: 1 })
+            )
+            expect(otherApp.observations[0]).toMatchObject({
+              bodyDataSubscriptions: 0,
+              readBytesBeforeResponse: 0,
+            })
+            expect(authorizer.authorizeLlmProviderAttempt).toHaveBeenCalledOnce()
+
+            permitUnwind.resolve()
+            const replies = await Promise.all([firstOutcome, queuedOutcome])
+            expect(replies).toEqual([
+              expect.objectContaining({ status: 200 }),
+              expect.objectContaining({ status: 200 }),
+            ])
+            expect(JSON.parse((replies[1] as Reply).body)).toEqual(SUCCESS)
+            expect(otherApp.observations[0].bodyDataSubscriptions).toBe(1)
+            expect(authorizer.authorizeLlmProviderAttempt).toHaveBeenCalledTimes(2)
+            expect(authorizer.authorizeLlmProviderAttempt).toHaveBeenNthCalledWith(
+              2,
+              expect.objectContaining({ hostRefs: [`healthy-queued-${provider}-host`] }),
+              queuedBody,
+              expect.objectContaining({ signal: expect.any(AbortSignal) })
+            )
+            expect((otherApp.observations[0].request as Request).body).toBeUndefined()
+            expect(owner.admission?.snapshot()).toEqual({ inFlight: 0, queued: 0, principals: 0 })
+          } finally {
+            permitUnwind.resolve()
+            first.client.destroy()
+            queued?.client.destroy()
+            await Promise.all([firstOutcome, queuedOutcome])
+          }
+        })
+      } finally {
+        owner.spy.mockRestore()
+      }
+    })
+  }
+
+  it('uses the verified JWT share across providers and ignores a different body host before parsing', async () => {
+    const started = deferred()
+    const permitUnwind = deferred()
+    const owner = observeHeldOwner()
+    vi.mocked(authorizer.authorizeLlmProviderAttempt).mockImplementationOnce(
+      async (_claims, _body, deps) => {
+        started.resolve()
+        await permitUnwind.promise
+        deps?.signal?.throwIfAborted()
+        return SUCCESS
+      }
+    )
+    try {
+      await withApps(1, async ([app]) => {
+        const first = send(
+          app.url,
+          { ...headers('verified-share-host'), 'x-admission-case': 'held' },
+          '{}'
+        )
+        const firstOutcome = first.response.catch(error => error)
+        let queued: ReturnType<typeof send> | undefined
+        let queuedOutcome: Promise<Reply | Error> | undefined
+        let rejected: ReturnType<typeof send> | undefined
+        let rejectedOutcome: Promise<Reply | Error> | undefined
+        try {
+          await started.promise
+          queued = send(
+            app.url,
+            headers('verified-share-host', 'grok'),
+            '{"hostRef":"forged-second-host","request":{"provider":"grok-subscription"}}'
+          )
+          queuedOutcome = queued.response.catch(error => error)
+          await vi.waitFor(() =>
+            expect(owner.admission?.snapshot()).toMatchObject({
+              inFlight: 1,
+              queued: 1,
+              principals: 1,
+            })
+          )
+          rejected = send(
+            app.url,
+            headers('verified-share-host'),
+            '{"hostRef":"forged-third-host"}'
+          )
+          rejectedOutcome = rejected.response.catch(error => error)
+          await vi.waitFor(() => expect(owner.spy).toHaveBeenCalledTimes(3))
+          expect(owner.admission?.snapshot()).toEqual({ inFlight: 1, queued: 1, principals: 1 })
+          const refused = (await rejectedOutcome) as Reply
+          expect(refused.status).toBe(503)
+          expect(JSON.parse(refused.body)).toEqual({ error: 'authorize_capacity_exceeded' })
+          expect(app.observations[1]).toMatchObject({
+            bodyDataSubscriptions: 0,
+            readBytesBeforeResponse: 0,
+          })
+          expect(app.observations[2]).toMatchObject({
+            bodyDataSubscriptions: 0,
+            readBytesBeforeResponse: 0,
+          })
+          expect(authorizer.authorizeLlmProviderAttempt).toHaveBeenCalledOnce()
+
+          permitUnwind.resolve()
+          expect(await firstOutcome).toMatchObject({ status: 200 })
+          expect(await queuedOutcome).toMatchObject({ status: 200 })
+          const recovered = await send(app.url, headers('verified-share-host'), '{}').response
+          expect(recovered.status).toBe(200)
+          expect(authorizer.authorizeLlmProviderAttempt).toHaveBeenCalledTimes(3)
+          expect(owner.admission?.snapshot()).toEqual({ inFlight: 0, queued: 0, principals: 0 })
+        } finally {
+          permitUnwind.resolve()
+          first.client.destroy()
+          queued?.client.destroy()
+          rejected?.client.destroy()
+          await Promise.all([firstOutcome, queuedOutcome, rejectedOutcome])
+        }
+      })
+    } finally {
+      owner.spy.mockRestore()
+    }
+  })
+
+  it('removes a queued disconnect without parsing and returns that share for a later healthy overlap', async () => {
+    const started = deferred()
+    const permitUnwind = deferred()
+    const owner = observeHeldOwner()
+    vi.mocked(authorizer.authorizeLlmProviderAttempt).mockImplementationOnce(
+      async (_claims, _body, deps) => {
+        started.resolve()
+        await permitUnwind.promise
+        deps?.signal?.throwIfAborted()
+        return SUCCESS
+      }
+    )
+    try {
+      await withApps(1, async ([app]) => {
+        const first = send(
+          app.url,
+          { ...headers('queued-disconnect-holder'), 'x-admission-case': 'held' },
+          '{}'
+        )
+        const firstOutcome = first.response.catch(error => error)
+        let cancelled: ReturnType<typeof send> | undefined
+        let cancelledOutcome: Promise<Reply | Error> | undefined
+        let recovered: ReturnType<typeof send> | undefined
+        let recoveredOutcome: Promise<Reply | Error> | undefined
+        try {
+          await started.promise
+          cancelled = send(app.url, headers('queued-disconnect-host'), '{"cancelled":true}')
+          cancelledOutcome = cancelled.response.catch(error => error)
+          await vi.waitFor(() =>
+            expect(owner.admission?.snapshot()).toMatchObject({ inFlight: 1, queued: 1 })
+          )
+          cancelled.client.destroy()
+          await cancelledOutcome
+          await vi.waitFor(() =>
+            expect(owner.admission?.snapshot()).toEqual({ inFlight: 1, queued: 0, principals: 1 })
+          )
+          expect(app.observations[1]).toMatchObject({
+            bodyDataSubscriptions: 0,
+            readBytesBeforeResponse: 0,
+          })
+          expect(app.observations[1].request.destroyed).toBe(true)
+          expect(authorizer.authorizeLlmProviderAttempt).toHaveBeenCalledOnce()
+          recovered = send(app.url, headers('queued-disconnect-host'), '{"recovered":true}')
+          recoveredOutcome = recovered.response.catch(error => error)
+          await vi.waitFor(() =>
+            expect(owner.admission?.snapshot()).toMatchObject({ inFlight: 1, queued: 1 })
+          )
+          permitUnwind.resolve()
+          expect(await firstOutcome).toMatchObject({ status: 200 })
+          expect(await recoveredOutcome).toMatchObject({ status: 200 })
+          expect(authorizer.authorizeLlmProviderAttempt).toHaveBeenCalledTimes(2)
+          expect(owner.admission?.snapshot()).toEqual({ inFlight: 0, queued: 0, principals: 0 })
+        } finally {
+          permitUnwind.resolve()
+          first.client.destroy()
+          cancelled?.client.destroy()
+          recovered?.client.destroy()
+          await Promise.all([firstOutcome, cancelledOutcome, recoveredOutcome])
+        }
+      })
+    } finally {
+      owner.spy.mockRestore()
+    }
+  })
+
+  it('expires queued headers without reading them and preserves terminal local saturation followed by recovery', async () => {
+    const started = deferred()
+    const permitUnwind = deferred()
+    const owner = observeHeldOwner()
+    const nativeSetTimeout = globalThis.setTimeout
+    const clock = vi
+      .spyOn(globalThis, 'setTimeout')
+      .mockImplementation((fn, ms, ...args) =>
+        nativeSetTimeout(
+          fn,
+          ms === LLM_PROVIDER_ATTEMPT_ADMISSION_POLICY.queueWaitMs ? 40 : ms,
+          ...args
+        )
+      )
+    vi.mocked(authorizer.authorizeLlmProviderAttempt).mockImplementationOnce(
+      async (_claims, _body, deps) => {
+        started.resolve()
+        await permitUnwind.promise
+        deps?.signal?.throwIfAborted()
+        return SUCCESS
+      }
+    )
+    try {
+      await withApps(1, async ([app]) => {
+        const first = send(
+          app.url,
+          { ...headers('queued-expiry-holder'), 'x-admission-case': 'held' },
+          '{}'
+        )
+        const firstOutcome = first.response.catch(error => error)
+        try {
+          await started.promise
+          const expired = await send(app.url, declaredRetainedHeaders('queued-expiry-host'))
+            .response
+          expect(expired.status).toBe(503)
+          expect(JSON.parse(expired.body)).toEqual({ error: 'authorize_capacity_exceeded' })
+          expect(expired.headers.connection).toBe('close')
+          expect(app.observations[1]).toMatchObject({
+            bodyDataSubscriptions: 0,
+            readBytesBeforeResponse: 0,
+          })
+          await vi.waitFor(() => expect(app.observations[1].request.destroyed).toBe(true))
+          expect(owner.admission?.snapshot()).toEqual({ inFlight: 1, queued: 0, principals: 1 })
+          expect(authorizer.authorizeLlmProviderAttempt).toHaveBeenCalledOnce()
+          permitUnwind.resolve()
+          expect(await firstOutcome).toMatchObject({ status: 200 })
+          const recovered = await send(app.url, headers('queued-expiry-host'), '{}').response
+          expect(recovered.status).toBe(200)
+          expect(authorizer.authorizeLlmProviderAttempt).toHaveBeenCalledTimes(2)
+        } finally {
+          permitUnwind.resolve()
+          first.client.destroy()
+          await firstOutcome
+        }
+      })
+    } finally {
+      clock.mockRestore()
+      owner.spy.mockRestore()
+    }
+  })
+
+  it('keeps a queued reader paused after active disconnect until physical work unwind and then completes it once', async () => {
+    const started = deferred()
+    const abortObserved = deferred()
+    const permitUnwind = deferred()
+    const owner = observeHeldOwner()
+    vi.mocked(authorizer.authorizeLlmProviderAttempt).mockImplementationOnce(
+      async (_claims, _body, deps) => {
+        started.resolve()
+        deps?.signal?.addEventListener('abort', () => abortObserved.resolve(), { once: true })
+        await permitUnwind.promise
+        deps?.signal?.throwIfAborted()
+        return SUCCESS
+      }
+    )
+    try {
+      await withApps(2, async ([firstApp, otherApp]) => {
+        const first = send(
+          firstApp.url,
+          { ...headers('active-disconnect-holder'), 'x-admission-case': 'held' },
+          '{}'
+        )
+        const firstOutcome = first.response.catch(error => error)
+        let queued: ReturnType<typeof send> | undefined
+        let queuedOutcome: Promise<Reply | Error> | undefined
+        try {
+          await started.promise
+          queued = send(
+            otherApp.url,
+            headers('active-disconnect-queued-host', 'grok'),
+            '{"queued":true}'
+          )
+          queuedOutcome = queued.response.catch(error => error)
+          await vi.waitFor(() =>
+            expect(owner.admission?.snapshot()).toMatchObject({ inFlight: 1, queued: 1 })
+          )
+          first.client.destroy()
+          await abortObserved.promise
+          expect(otherApp.observations[0]).toMatchObject({
+            bodyDataSubscriptions: 0,
+            readBytesBeforeResponse: 0,
+          })
+          expect(authorizer.authorizeLlmProviderAttempt).toHaveBeenCalledOnce()
+          expect(owner.admission?.snapshot()).toEqual({ inFlight: 1, queued: 1, principals: 2 })
+          permitUnwind.resolve()
+          await owner.settled
+          expect(await queuedOutcome).toMatchObject({ status: 200 })
+          expect(authorizer.authorizeLlmProviderAttempt).toHaveBeenCalledTimes(2)
+          expect(firstApp.observations[0].responseWritesAfterClose).toBe(0)
+          expect(owner.admission?.snapshot()).toEqual({ inFlight: 0, queued: 0, principals: 0 })
+        } finally {
+          permitUnwind.resolve()
+          first.client.destroy()
+          queued?.client.destroy()
+          await Promise.all([firstOutcome, queuedOutcome])
+        }
+      })
+    } finally {
       owner.spy.mockRestore()
     }
   })
@@ -339,6 +729,8 @@ describe('createApp retained authorize-body ownership', () => {
 
   for (const provider of ['codex', 'grok'] as const) {
     it(`preserves chunked ${provider} JSON through the actual app and releases the body`, async () => {
+      const clock = shortenQueueWait()
+      onTestFinished(() => clock.mockRestore())
       await withApps(1, async ([app]) => {
         const body = JSON.stringify({
           request: { provider: `${provider}-subscription`, chunked: true },
@@ -500,8 +892,7 @@ describe('createApp retained authorize-body ownership', () => {
     try {
       await withApps(1, async ([app]) => {
         const sent = send(app.url, {
-          ...headers('read-timeout-host'),
-          'content-length': '128',
+          ...declaredRetainedHeaders('read-timeout-host'),
           'x-admission-case': 'held',
         })
         const response = await sent.response
@@ -544,4 +935,186 @@ describe('Host and Recipe assignment owner cancellation', () => {
       expect(getResource).toHaveBeenCalledOnce()
     })
   }
+})
+
+describe('createApp declared-length authorize budget', () => {
+  it('pins the text envelope to each contract text budget plus its envelope allowance', () => {
+    expect(AUTHORIZE_TEXT_BODY_BYTES).toBe(8_388_608 + 16_384)
+  })
+
+  it.each([
+    ['no body headers', {}, 'ordinary'],
+    ['zero declared length', { 'content-length': '0' }, 'ordinary'],
+    ['declared length at the text envelope', { 'content-length': '8404992' }, 'ordinary'],
+    ['declared length one byte above the envelope', { 'content-length': '8404993' }, 'retained'],
+    ['declared visual length', { 'content-length': String(35 * 1024 * 1024) }, 'retained'],
+    ['chunked body', { 'transfer-encoding': 'chunked' }, 'retained'],
+    [
+      'chunked body with a small declared length',
+      { 'transfer-encoding': 'chunked', 'content-length': '2' },
+      'retained',
+    ],
+    ['non-numeric declared length', { 'content-length': '12abc' }, 'retained'],
+    ['negative declared length', { 'content-length': '-1' }, 'retained'],
+    ['empty declared length', { 'content-length': '' }, 'retained'],
+  ] as const)('selects the %s budget', (_name, requestHeaders, expected) => {
+    expect(selectAuthorizeBudget(requestHeaders)).toBe(expected)
+  })
+
+  function observeAdmission() {
+    let admission: AuthorizeBodyAdmission | undefined
+    const charged = vi.fn()
+    const uncharged = vi.fn()
+    const run = AuthorizeBodyAdmission.prototype.run
+    const runUncharged = AuthorizeBodyAdmission.prototype.runUncharged
+    const runSpy = vi.spyOn(AuthorizeBodyAdmission.prototype, 'run').mockImplementation(function (
+      this: AuthorizeBodyAdmission,
+      ...args: Parameters<AuthorizeBodyAdmission['run']>
+    ) {
+      admission = this
+      charged(args[0].headers['x-admission-case'])
+      return run.apply(this, args)
+    })
+    const unchargedSpy = vi
+      .spyOn(AuthorizeBodyAdmission.prototype, 'runUncharged')
+      .mockImplementation(function (
+        this: AuthorizeBodyAdmission,
+        ...args: Parameters<AuthorizeBodyAdmission['runUncharged']>
+      ) {
+        admission = this
+        uncharged(args[0].headers['x-admission-case'])
+        return runUncharged.apply(this, args)
+      })
+    onTestFinished(() => {
+      runSpy.mockRestore()
+      unchargedSpy.mockRestore()
+    })
+    return {
+      charged,
+      uncharged,
+      get admission() {
+        if (!admission) throw new Error('no admission observed')
+        return admission
+      },
+    }
+  }
+
+  it('authorizes a text request from another Host while a declared visual body stalls the unit', async () => {
+    const observed = observeAdmission()
+    const textBody = '{"text":"hi"}'
+    let inFlightDuringText: number | undefined
+    vi.mocked(authorizer.authorizeLlmProviderAttempt).mockImplementationOnce(async claims => {
+      inFlightDuringText = observed.admission.snapshot().inFlight
+      expect(claims.hostRefs).toEqual(['text-host'])
+      return SUCCESS
+    })
+    await withApps(2, async ([visualApp, textApp]) => {
+      // Headers only: the declared body never arrives, so this request holds
+      // the retained unit inside its read deadline.
+      const stalled = send(visualApp.url, {
+        ...declaredRetainedHeaders('stalled-visual-host'),
+        'x-admission-case': 'stalled',
+      })
+      const stalledOutcome = stalled.response.catch(error => error)
+      try {
+        await vi.waitFor(() => expect(observed.charged).toHaveBeenCalledWith('stalled'))
+        await vi.waitFor(() => expect(observed.admission.snapshot().inFlight).toBe(1))
+
+        const text = await send(
+          textApp.url,
+          { ...textHeaders('text-host'), 'x-admission-case': 'text' },
+          textBody
+        ).response
+        expect(text.status).toBe(200)
+        expect(JSON.parse(text.body)).toEqual(SUCCESS)
+        expect(observed.uncharged).toHaveBeenCalledWith('text')
+        expect(authorizer.authorizeLlmProviderAttempt).toHaveBeenCalledOnce()
+        expect(authorizer.authorizeLlmProviderAttempt).toHaveBeenCalledWith(
+          expect.objectContaining({ hostRefs: ['text-host'] }),
+          JSON.parse(textBody),
+          expect.objectContaining({ signal: expect.any(AbortSignal) })
+        )
+        // The stalled visual request still holds the only unit.
+        expect(inFlightDuringText).toBe(1)
+        expect(observed.admission.snapshot().inFlight).toBe(1)
+      } finally {
+        stalled.client.destroy()
+        await stalledOutcome
+      }
+      await vi.waitFor(() => expect(observed.admission.snapshot().inFlight).toBe(0))
+    })
+  })
+
+  it('never charges a text request while its authorize work is running', async () => {
+    const observed = observeAdmission()
+    const workStarted = deferred()
+    const permitWork = deferred()
+    let snapshotDuringWork: ReturnType<AuthorizeBodyAdmission['snapshot']> | undefined
+    vi.mocked(authorizer.authorizeLlmProviderAttempt).mockImplementationOnce(async () => {
+      snapshotDuringWork = observed.admission.snapshot()
+      workStarted.resolve()
+      await permitWork.promise
+      return SUCCESS
+    })
+    await withApps(1, async ([app]) => {
+      const sent = send(app.url, textHeaders('uncharged-host'), '{"text":"uncharged"}')
+      await workStarted.promise
+      expect(app.observations[0].bodyDataSubscriptions).toBe(1)
+      expect(snapshotDuringWork).toEqual({ inFlight: 0, queued: 0, principals: 0 })
+      expect(observed.uncharged).toHaveBeenCalledOnce()
+      expect(observed.charged).not.toHaveBeenCalled()
+      permitWork.resolve()
+      expect((await sent.response).status).toBe(200)
+    })
+  })
+
+  it('reads only the declared bytes of a lying text request', async () => {
+    const observed = observeAdmission()
+    await withApps(1, async ([app]) => {
+      const { port, pathname } = new URL(app.url)
+      // Content-Length covers only an incomplete JSON prefix. The bytes after
+      // it are a complete pipelined request, so Node frames them as a second
+      // request instead of failing the connection, and the first response is
+      // the route's own answer to the 13 declared bytes.
+      const declared = '{"a":"bbbbbbb'
+      const surplus = [
+        `GET ${pathname} HTTP/1.1`,
+        'Host: 127.0.0.1',
+        'Connection: close',
+        '',
+        '',
+      ].join('\r\n')
+      const requestHeaders = textHeaders('lying-length-host')
+      const socket = net.connect(Number(port), '127.0.0.1')
+      const chunks: Buffer[] = []
+      const ended = new Promise<string>((resolve, reject) => {
+        socket.on('data', chunk => chunks.push(Buffer.from(chunk)))
+        socket.on('error', reject)
+        socket.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')))
+      })
+      socket.write(
+        [
+          `POST ${pathname} HTTP/1.1`,
+          'Host: 127.0.0.1',
+          `Authorization: ${requestHeaders.Authorization}`,
+          'Content-Type: application/json',
+          `Content-Length: ${Buffer.byteLength(declared)}`,
+          '',
+          declared + surplus,
+        ].join('\r\n')
+      )
+      const raw = await ended
+      expect(Buffer.byteLength(declared)).toBe(13)
+      const statuses = [...raw.matchAll(/HTTP\/1\.1 (\d{3}) /g)].map(match => Number(match[1]))
+      // The route refuses the 13-byte prefix; the surplus GET carries no JWT.
+      expect(statuses).toEqual([400, 401])
+      const [first, second] = raw.split(/(?=HTTP\/1\.1 401 )/)
+      expect(first).toContain('{"error":"invalid_request"}')
+      expect(second).toContain('{"error":"Unauthorized"}')
+      expect(observed.uncharged).toHaveBeenCalledOnce()
+      expect(observed.charged).not.toHaveBeenCalled()
+      expect(authorizer.authorizeLlmProviderAttempt).not.toHaveBeenCalled()
+      expect(observed.admission.snapshot()).toEqual({ inFlight: 0, queued: 0, principals: 0 })
+    })
+  })
 })

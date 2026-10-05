@@ -504,7 +504,7 @@ describe('ProviderAttemptAuthorizer', () => {
   it.each([
     [
       'authorize_capacity_exceeded',
-      'Too many requests are active. Wait for them to finish or send fewer concurrent requests.',
+      'Authorization is busy with other large requests, which share one capacity across all Hosts. Nothing was sent to the provider; wait for them to finish, then try again.',
     ],
     [
       'authorize_timeout',
