@@ -2,6 +2,7 @@ import { afterAll, beforeAll, expect, vi, describe as vitestDescribe } from 'vit
 import { it } from 'vitest'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { Pool, type PoolClient } from 'pg'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 // issue #375 M3 (jozer review): controllable PASSTHROUGH seam. Everything stays
 // real (the actual append implementation runs) until a test arms `failNext`,
@@ -106,28 +107,31 @@ describeRealPostgres(
 
     afterAll(async () => {
       try {
-        await listenClient?.query(`UNLISTEN ${sdk.PLUGIN_WORKLOAD_SDK_GRANT_UPDATE_CHANNEL}`)
-      } catch {
-        /* teardown */
-      }
-      listenClient?.release()
-      await listenPool?.end()
-      await db?.pool.end()
-      await db?.rateLimitPool.end()
-      if (previousPgConnectionString === undefined) {
-        delete process.env.CONTROL_API_PG_CONNECTION_STRING
-      } else {
-        process.env.CONTROL_API_PG_CONNECTION_STRING = previousPgConnectionString
-      }
-      if (adminPool) {
-        await adminPool.query(
-          `SELECT pg_terminate_backend(pid)
+        try {
+          await listenClient?.query(`UNLISTEN ${sdk.PLUGIN_WORKLOAD_SDK_GRANT_UPDATE_CHANNEL}`)
+        } catch {
+          /* teardown */
+        }
+        listenClient?.release()
+        await endPoolAndWaitForClients(listenPool)
+        await endPoolAndWaitForClients(db?.pool)
+        await endPoolAndWaitForClients(db?.rateLimitPool)
+        if (previousPgConnectionString === undefined) {
+          delete process.env.CONTROL_API_PG_CONNECTION_STRING
+        } else {
+          process.env.CONTROL_API_PG_CONNECTION_STRING = previousPgConnectionString
+        }
+        if (adminPool) {
+          await adminPool.query(
+            `SELECT pg_terminate_backend(pid)
          FROM pg_stat_activity
         WHERE datname = $1 AND pid <> pg_backend_pid()`,
-          [database]
-        )
-        await adminPool.query(`DROP DATABASE IF EXISTS "${database.replace(/"/g, '""')}"`)
-        await adminPool.end()
+            [database]
+          )
+          await adminPool.query(`DROP DATABASE IF EXISTS "${database.replace(/"/g, '""')}"`)
+        }
+      } finally {
+        await adminPool?.end()
       }
     })
 

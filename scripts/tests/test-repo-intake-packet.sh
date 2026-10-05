@@ -84,6 +84,10 @@ run_packet_with_profile() {
   )
 }
 
+# A bare "yes"/"no"/"dev" matches any line of the packet, so each value is
+# asserted on its own label row, formatted exactly as the packet's kv() prints it.
+kv_row() { printf '%-30s %s' "$1:" "$2"; }
+
 payload_value() {
   local payload="$1" key="$2"
   awk -F= -v wanted="${key}" '$1 == wanted { sub(/^[^=]*=/, ""); print; exit }' <<<"${payload}"
@@ -121,8 +125,8 @@ git -C "${MAIN_REPO}" config user.email "test@example.invalid"
 git -C "${MAIN_REPO}" config user.name "Clerum Test"
 
 printf '{"scripts":{"test":"true"}}\n' >"${MAIN_REPO}/package.json"
-mkdir -p "${MAIN_REPO}/.local-notes/minikube-profiles"
-printf '# test helper\n' >"${MAIN_REPO}/.local-notes/minikube-profiles/branch.mk"
+mkdir -p "${MAIN_REPO}/scripts/minikube-profiles"
+printf '# worktree-local helper (scripts/minikube-profiles)\n' >"${MAIN_REPO}/scripts/minikube-profiles/branch.mk"
 git -C "${MAIN_REPO}" add package.json
 git -C "${MAIN_REPO}" commit -q -m "initial"
 git -C "${MAIN_REPO}" update-ref refs/remotes/origin/dev HEAD
@@ -141,12 +145,12 @@ fi
 assert_contains "${PRIMARY_OUTPUT}" "repo_root:" "primary output includes repo root label"
 assert_contains "${PRIMARY_OUTPUT}" "${MAIN_REPO}" "primary output includes primary repo path"
 assert_contains "${PRIMARY_OUTPUT}" "branch:" "primary output includes branch label"
-assert_contains "${PRIMARY_OUTPUT}" "dev" "primary output reports branch"
+assert_contains "${PRIMARY_OUTPUT}" "$(kv_row branch dev)" "primary output reports branch"
 assert_contains "${PRIMARY_OUTPUT}" "profile_helper_exists:" "primary output includes profile helper label"
-assert_contains "${PRIMARY_OUTPUT}" "yes" "primary output finds profile helper"
+assert_contains "${PRIMARY_OUTPUT}" "$(kv_row profile_helper_exists yes)" "primary output finds profile helper"
 assert_contains "${PRIMARY_OUTPUT}" "profile_owner_resolver:" "primary output includes profile owner resolver label"
 assert_contains "${PRIMARY_OUTPUT}" "profile_cache_state:" "primary output includes profile cache state"
-assert_contains "${PRIMARY_OUTPUT}" "absent" "primary output reports an uninitialized isolated profile root"
+assert_contains "${PRIMARY_OUTPUT}" "$(kv_row profile_cache_state absent)" "primary output reports an uninitialized isolated profile root"
 assert_not_contains "${PRIMARY_OUTPUT}" "SENSITIVE_MARKER_DO_NOT_PRINT" "primary output does not print file contents"
 assert_not_contains "${PRIMARY_OUTPUT}" "local-sensitive.txt" "primary output does not print local sensitive filenames"
 assert_not_contains "${PRIMARY_OUTPUT}" "unbound variable" "primary output has no shell unbound-variable warnings"
@@ -272,16 +276,39 @@ assert_contains "${DETACHED_OUTPUT}" "repo_root:" "detached output includes repo
 assert_contains "${DETACHED_OUTPUT}" "${DETACHED_WT}" "detached output uses current worktree root"
 assert_contains "${DETACHED_OUTPUT}" "primary_checkout:" "detached output includes primary checkout label"
 assert_contains "${DETACHED_OUTPUT}" "${MAIN_REPO}" "detached output resolves primary checkout"
-assert_contains "${DETACHED_OUTPUT}" "detached:" "detached output includes detached label"
-assert_contains "${DETACHED_OUTPUT}" "yes" "detached output reports detached state"
-assert_contains "${DETACHED_OUTPUT}" "profile_helper_local:" "detached output includes local helper label"
-assert_contains "${DETACHED_OUTPUT}" "no" "detached output tolerates missing local .local-notes"
-assert_contains "${DETACHED_OUTPUT}" "profile_helper_primary:" "detached output includes primary helper label"
-assert_contains "${DETACHED_OUTPUT}" "yes" "detached output finds primary .local-notes helper"
+assert_contains "${DETACHED_OUTPUT}" "$(kv_row detached yes)" "detached output reports detached state"
+assert_contains "${DETACHED_OUTPUT}" "$(kv_row profile_helper_local no)" "detached output tolerates missing local scripts helper"
+assert_contains "${DETACHED_OUTPUT}" "$(kv_row profile_helper_primary yes)" "detached output finds primary scripts helper"
+assert_contains "${DETACHED_OUTPUT}" \
+  "$(kv_row profile_helper_command "make -f ${MAIN_REPO}/scripts/minikube-profiles/branch.mk branch-profile-info")" \
+  "detached output falls back to the primary scripts helper when the worktree has none"
 assert_not_contains "${DETACHED_OUTPUT}" "unbound variable" "detached output has no shell unbound-variable warnings"
 
+# Precedence: when both the worktree and the primary checkout carry the helper,
+# the packet must point at the worktree's own copy, because that is the
+# branch-profile code the branch under test ships.
+LOCAL_HELPER_WT="${TMP_ROOT}/local-helper"
+git -C "${MAIN_REPO}" worktree add -q -b feat/local-helper "${LOCAL_HELPER_WT}" HEAD
+mkdir -p "${LOCAL_HELPER_WT}/scripts/minikube-profiles"
+printf '# worktree-owned helper\n' >"${LOCAL_HELPER_WT}/scripts/minikube-profiles/branch.mk"
+LOCAL_HELPER_ROOT="${TMP_ROOT}/local-helper-profiles"
+mkdir -p "${LOCAL_HELPER_ROOT}"
+LOCAL_HELPER_OUTPUT="$(run_packet "${LOCAL_HELPER_WT}" "${LOCAL_HELPER_ROOT}" 2>&1)"
+LOCAL_HELPER_STATUS=$?
+if [[ "${LOCAL_HELPER_STATUS}" -eq 0 || "${LOCAL_HELPER_STATUS}" -eq 2 ]]; then
+  pass "repo intake packet runs in a worktree that carries its own helper"
+else
+  fail "repo intake packet runs in a worktree that carries its own helper"
+  echo "${LOCAL_HELPER_OUTPUT}"
+fi
+assert_contains "${LOCAL_HELPER_OUTPUT}" "$(kv_row profile_helper_local yes)" "local-helper output finds the worktree helper"
+assert_contains "${LOCAL_HELPER_OUTPUT}" "$(kv_row profile_helper_primary yes)" "local-helper output also finds the primary helper"
+assert_contains "${LOCAL_HELPER_OUTPUT}" \
+  "$(kv_row profile_helper_command "make -f ${LOCAL_HELPER_WT}/scripts/minikube-profiles/branch.mk branch-profile-info")" \
+  "local-helper output prefers the worktree helper over the primary one"
+
 # A run that skipped its assertions must not exit 0.
-if (( PASSED < 44 )); then
-  fail "expected at least 44 passing assertions, got ${PASSED}"
+if (( PASSED < 46 )); then
+  fail "expected at least 46 passing assertions, got ${PASSED}"
 fi
 exit "${FAIL}"

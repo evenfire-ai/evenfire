@@ -1,7 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { buildMcpHostHeadlessService } from './podFactory'
 import { buildMcpHostServiceName } from './resourceNames'
-import { WorkflowReconciler, type WorkflowReconcilerDeps } from './workflowReconciler'
+import {
+  LEGACY_NETWORK_POLICY_DELETE_BACKOFF_BASE_MS,
+  LegacyNetworkPolicyDeletePendingError,
+  WorkflowReconciler,
+  type WorkflowReconcilerDeps,
+} from './workflowReconciler'
 
 const crashRecoveryMocks = vi.hoisted(() => ({
   deletePodIfExists: vi.fn().mockResolvedValue(undefined),
@@ -16,6 +21,10 @@ const crashRecoveryMocks = vi.hoisted(() => ({
   evaluateCrashRecovery: vi.fn().mockReturnValue({ action: 'none', message: 'Pod is healthy' }),
   getContainerWaitingReason: vi.fn().mockResolvedValue(undefined),
   getPodPhase: vi.fn().mockResolvedValue(undefined),
+  getPodPresence: vi.fn(async (api: unknown, name: string, namespace: string) => {
+    const phase = await crashRecoveryMocks.getPodPhase(api, name, namespace)
+    return phase === undefined ? { kind: 'absent' as const } : { kind: 'present' as const, phase }
+  }),
   getPodReadiness: vi.fn().mockResolvedValue({ ready: true, phase: 'Running', uid: 'pod-uid-1' }),
   isRecoverableContainerWaitingReason: vi.fn(
     (phase: string | undefined, reason: string | undefined) =>
@@ -1289,15 +1298,30 @@ describe('WorkflowReconciler.reconcileDelete — orphaned Service cleanup', () =
       for (const call of crashRecoveryMocks.deletePodIfExists.mock.calls) {
         expect(call[2]).toBe(sandboxNamespace)
       }
+      expect(crashRecoveryMocks.getPodPresence).not.toHaveBeenCalled()
     })
 
-    it('is idempotent: re-running after pods are gone is a no-op (404-safe)', async () => {
+    it('is DELETE-first and 404-safe even when pods are already gone', async () => {
+      crashRecoveryMocks.deletePodIfExists.mockResolvedValue(undefined)
       const reconciler = new WorkflowReconciler(deps)
-      // deletePodIfExists already swallows 404 internally; a second pass must not throw.
+
       await reconciler.teardownComputePodsForTerminalRun('wf-run-7')
+
+      // Witness: the teardown ran (three DELETEs) and none of them was
+      // preceded by a raw pod GET, which getPodPresence alone would not show.
+      expect(crashRecoveryMocks.deletePodIfExists).toHaveBeenCalledTimes(3)
+      expect(crashRecoveryMocks.getPodPresence).not.toHaveBeenCalled()
+      expect(mockCoreApi.readNamespacedPod).not.toHaveBeenCalled()
+    })
+
+    it('is idempotent: a second pass still DELETE-first (404-safe)', async () => {
+      const reconciler = new WorkflowReconciler(deps)
+      await reconciler.teardownComputePodsForTerminalRun('wf-run-7')
+      crashRecoveryMocks.deletePodIfExists.mockClear()
       await expect(
         reconciler.teardownComputePodsForTerminalRun('wf-run-7')
       ).resolves.toBeUndefined()
+      expect(crashRecoveryMocks.deletePodIfExists).toHaveBeenCalledTimes(3)
     })
   })
 })
@@ -1411,6 +1435,9 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
     mockCoreApi.readNamespacedEndpoints.mockRejectedValue({ code: 404 })
     mockNetworkingApi.readNamespacedNetworkPolicy.mockRejectedValue({ code: 404 })
     mockNetworkingApi.listNamespacedNetworkPolicy.mockResolvedValue({ items: [] })
+    // clearAllMocks keeps implementations, so a DELETE failure one test
+    // injects must not leak into the next teardown.
+    mockNetworkingApi.deleteNamespacedNetworkPolicy.mockResolvedValue({})
     mockModelConfigHandler.configurePluginWorkloadSdkBootstrap.mockResolvedValue({
       status: 202,
       body: sdkBootstrapProof(),
@@ -1708,9 +1735,12 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
       // The conflict did not stop the rest of the pass.
       expect(createdNames()).toContain('sdk-only-workload-to-mcp-host-sdk-egress')
       expect(result.phase).toBe('active')
+      // The eager apply prunes too, so its summary carries the prune and legacy facts.
       expect(result.networkPolicies).toEqual({
         conflicts: [{ policy: foreignName, reason: 'owner-reference-mismatch' }],
         retryPending: false,
+        prune: 'converged',
+        legacy: 'removed',
       })
       expect(writesTo(foreignName)).toHaveLength(0)
     })
@@ -1740,6 +1770,8 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
           networkPolicies: {
             conflicts: [{ policy: foreignName, reason: 'owner-reference-mismatch' }],
             retryPending: true,
+            prune: 'converged',
+            legacy: 'removed',
           },
         })
 
@@ -1756,6 +1788,8 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
         expect(result.networkPolicies).toEqual({
           conflicts: [{ policy: foreignName, reason: 'owner-reference-mismatch' }],
           retryPending: true,
+          prune: 'converged',
+          legacy: 'removed',
         })
       }
     )
@@ -1869,6 +1903,8 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
         networkPolicies: {
           conflicts: [{ policy: foreignName, reason: 'owner-reference-mismatch' }],
           retryPending: false,
+          prune: 'converged',
+          legacy: 'removed',
         },
       })
 
@@ -1906,7 +1942,12 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
       ).pluginWorkloadSdkProvisioner
       const ensure = vi.spyOn(provisioner, 'ensureEagerSdkMcpHost').mockResolvedValue({
         status: 'failed',
-        networkPolicies: { conflicts: [], retryPending: true },
+        networkPolicies: {
+          conflicts: [],
+          retryPending: true,
+          prune: 'converged',
+          legacy: 'removed',
+        },
       })
 
       const result = await reconciler.reconcile(
@@ -1947,6 +1988,8 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
         networkPolicies: {
           conflicts: [{ policy: foreignName, reason: 'owner-reference-mismatch' }],
           retryPending: true,
+          prune: 'converged',
+          legacy: 'removed',
         },
       })
 
@@ -2000,6 +2043,8 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
         networkPolicies: {
           conflicts: [{ policy: foreignName, reason: 'owner-reference-mismatch' }],
           retryPending: false,
+          prune: 'converged',
+          legacy: 'removed',
         },
       })
 
@@ -2102,6 +2147,262 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
       namespace: sandboxNamespace,
     })
     expect(mockCoreApi.createNamespacedPod).not.toHaveBeenCalled()
+  })
+
+  // R4-L3: the SDK-only teardown is what makes the `unmanaged` marker writer
+  // true. The legacy mcp-servers internet policy may carry no labels, so the
+  // label sweep cannot be trusted to remove it; the teardown deletes it by name.
+  it('R4-L3: deletes the legacy internet policy by name in the SDK-only teardown, next to the label sweep', async () => {
+    const reconciler = new WorkflowReconciler(makeDeps())
+
+    await expect(reconciler.cleanupPluginWorkloadSdk('sdk-only')).resolves.toBeUndefined()
+
+    // Liveness witness: the label sweep ran in both namespaces.
+    expect(mockNetworkingApi.listNamespacedNetworkPolicy).toHaveBeenCalledWith({
+      namespace: sandboxNamespace,
+      labelSelector: 'clerum.io/recipe=sdk-only,clerum.io/managed-by=wrc',
+    })
+    expect(mockNetworkingApi.listNamespacedNetworkPolicy).toHaveBeenCalledWith({
+      namespace: mcpServerNamespace,
+      labelSelector: 'clerum.io/recipe=sdk-only,clerum.io/managed-by=wrc',
+    })
+    expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith({
+      name: 'sdk-only-mcp-servers-egress-internet',
+      namespace: mcpServerNamespace,
+    })
+  })
+
+  it('fails live SDK cleanup with the remaining shared legacy-delete window', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    mockNetworkingApi.deleteNamespacedNetworkPolicy.mockImplementation(
+      async ({ name }: { name: string }) => {
+        if (name === 'sdk-only-mcp-servers-egress-internet') {
+          throw { code: 403, message: 'forbidden' }
+        }
+        return {}
+      }
+    )
+    const reconciler = new WorkflowReconciler(makeDeps())
+
+    try {
+      const pending = await reconciler
+        .cleanupPluginWorkloadSdk('sdk-only', { recipeUid: 'uid-sdk-only' })
+        .catch(error => error)
+
+      expect(pending).toBeInstanceOf(LegacyNetworkPolicyDeletePendingError)
+      expect((pending as LegacyNetworkPolicyDeletePendingError).retryAfterMs).toBe(
+        LEGACY_NETWORK_POLICY_DELETE_BACKOFF_BASE_MS
+      )
+      // Positive API witness: the shared legacy path attempted the DELETE;
+      // the typed error describes the live cleanup's remaining backoff.
+      expect(
+        mockNetworkingApi.deleteNamespacedNetworkPolicy.mock.calls.filter(
+          ([arg]) => arg.name === 'sdk-only-mcp-servers-egress-internet'
+        )
+      ).toHaveLength(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // A-1: a pending legacy mcp-servers internet DELETE must not hold the SDK
+  // host pod and token Secrets in place. The legacy policy is unrelated to the
+  // SDK credentials, so the pod and Secret deletes run on every pass while the
+  // cleanup still fails closed with the legacy-pending error.
+  it('A-1: deletes the SDK host pod and token Secrets while the legacy policy DELETE is pending', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    mockNetworkingApi.deleteNamespacedNetworkPolicy.mockImplementation(
+      async ({ name }: { name: string }) => {
+        if (name === 'sdk-only-mcp-servers-egress-internet') {
+          throw { code: 403, message: 'forbidden' }
+        }
+        return {}
+      }
+    )
+    const reconciler = new WorkflowReconciler(makeDeps())
+    const policyDeletes = (name: string) =>
+      mockNetworkingApi.deleteNamespacedNetworkPolicy.mock.calls.filter(
+        ([arg]) => arg.name === name
+      )
+
+    try {
+      const first = await reconciler
+        .cleanupPluginWorkloadSdk('sdk-only', { recipeUid: 'uid-sdk-only' })
+        .catch(error => error)
+      const second = await reconciler
+        .cleanupPluginWorkloadSdk('sdk-only', { recipeUid: 'uid-sdk-only' })
+        .catch(error => error)
+
+      expect(first).toBeInstanceOf(LegacyNetworkPolicyDeletePendingError)
+      expect(second).toBeInstanceOf(LegacyNetworkPolicyDeletePendingError)
+      // Liveness witness: both passes ran the SDK network-policy teardown.
+      expect(policyDeletes('sdk-only-workload-to-mcp-host-sdk-ingress')).toHaveLength(2)
+      // The first pass attempted the legacy DELETE; the second is inside the
+      // backoff window and sends no request.
+      expect(policyDeletes('sdk-only-mcp-servers-egress-internet')).toHaveLength(1)
+      expect(mockCoreApi.deleteNamespacedPod).toHaveBeenCalledTimes(2)
+      expect(mockCoreApi.deleteNamespacedPod).toHaveBeenCalledWith({
+        name: 'sdk-only-mcp-host',
+        namespace: sandboxNamespace,
+        propagationPolicy: 'Background',
+      })
+      expect(mockCoreApi.deleteNamespacedSecret).toHaveBeenCalledTimes(4)
+      expect(mockCoreApi.deleteNamespacedSecret).toHaveBeenCalledWith({
+        name: 'wf-sdk-only-plugin-workload-sdk-token',
+        namespace: sandboxNamespace,
+      })
+      expect(mockCoreApi.deleteNamespacedSecret).toHaveBeenCalledWith({
+        name: 'wf-sdk-only-mcp-host-runtime-tokens',
+        namespace: sandboxNamespace,
+      })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('R4-L3: keeps the legacy internet policy in a hybrid teardown, which preserves the workflow runtime', async () => {
+    const reconciler = new WorkflowReconciler(makeDeps())
+
+    await expect(
+      reconciler.cleanupPluginWorkloadSdk('hybrid', { preserveWorkflowRuntime: true })
+    ).resolves.toBeUndefined()
+
+    // Liveness witness: the SDK-owned policies were deleted.
+    expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith({
+      name: 'hybrid-workload-to-mcp-host-sdk-ingress',
+      namespace: sandboxNamespace,
+    })
+    expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalledWith({
+      name: 'hybrid-mcp-servers-egress-internet',
+      namespace: mcpServerNamespace,
+    })
+  })
+
+  it('uses recipeUid as live identity and preserves the shared legacy gone-set', async () => {
+    const reconciler = new WorkflowReconciler(makeDeps())
+    const legacyDeletes = () =>
+      mockNetworkingApi.deleteNamespacedNetworkPolicy.mock.calls.filter(
+        ([arg]) => arg.name === 'sdk-only-mcp-servers-egress-internet'
+      )
+
+    await expect(
+      reconciler.retryLegacyMcpServersInternetEgressDelete('sdk-only', 'uid-sdk-only')
+    ).resolves.toBe('removed')
+    expect(legacyDeletes()).toHaveLength(1)
+
+    await reconciler.cleanupPluginWorkloadSdk('sdk-only', { recipeUid: 'uid-sdk-only' })
+    expect(legacyDeletes()).toHaveLength(1)
+
+    // This old-UID retry is a direct ledger probe. It does not pretend that
+    // Kubernetes recreated an object with the old UID.
+    await expect(
+      reconciler.retryLegacyMcpServersInternetEgressDelete('sdk-only', 'uid-sdk-only')
+    ).resolves.toBe('removed')
+    expect(legacyDeletes()).toHaveLength(1)
+  })
+
+  it('gives finalizer cleanup one last chance and forgets only after it completes', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    const reconciler = new WorkflowReconciler(makeDeps())
+    const legacyDeletes = () =>
+      mockNetworkingApi.deleteNamespacedNetworkPolicy.mock.calls.filter(
+        ([arg]) => arg.name === 'sdk-only-mcp-servers-egress-internet'
+      )
+    mockNetworkingApi.deleteNamespacedNetworkPolicy.mockImplementation(
+      async ({ name }: { name: string }) => {
+        if (name === 'sdk-only-mcp-servers-egress-internet') {
+          throw { code: 403, message: 'forbidden' }
+        }
+        return {}
+      }
+    )
+
+    try {
+      await expect(
+        reconciler.retryLegacyMcpServersInternetEgressDelete('sdk-only', 'uid-sdk-only')
+      ).resolves.toBe('pending')
+      expect(legacyDeletes()).toHaveLength(1)
+
+      // Finalizer cleanup must attempt the DELETE even inside the live window.
+      const pending = await reconciler
+        .cleanupPluginWorkloadSdk('sdk-only', {
+          recipeUid: 'uid-sdk-only',
+          recipeDeleted: true,
+        })
+        .catch(error => error)
+      expect(pending).toBeInstanceOf(LegacyNetworkPolicyDeletePendingError)
+      expect(legacyDeletes()).toHaveLength(2)
+
+      // A normal old-UID probe is still inside the shared backoff. This direct
+      // ledger probe does not model a Kubernetes object recreation.
+      await expect(
+        reconciler.retryLegacyMcpServersInternetEgressDelete('sdk-only', 'uid-sdk-only')
+      ).resolves.toBe('pending')
+      expect(legacyDeletes()).toHaveLength(2)
+
+      mockNetworkingApi.deleteNamespacedNetworkPolicy.mockImplementation(async () => ({}))
+      await reconciler.cleanupPluginWorkloadSdk('sdk-only', {
+        recipeUid: 'uid-sdk-only',
+        recipeDeleted: true,
+      })
+      expect(legacyDeletes()).toHaveLength(3)
+
+      // The successful, completed finalizer cleanup forgot the old entry. The
+      // old-UID probe is again a direct process-local ledger witness.
+      await expect(
+        reconciler.retryLegacyMcpServersInternetEgressDelete('sdk-only', 'uid-sdk-only')
+      ).resolves.toBe('removed')
+      expect(legacyDeletes()).toHaveLength(4)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not forget the finalizer ledger entry when a later cleanup phase fails', async () => {
+    const lateError = new Error('late finalize failed')
+    const revocationId = 'late-finalize-revocation'
+    const deps = makeDeps() as unknown as {
+      pluginWorkloadSdkRevocationClient?: unknown
+    }
+    const revocationClient = {
+      revoke: vi.fn().mockResolvedValue({
+        state: 'revoking',
+        revocationId,
+        revoked: 1,
+        fencedInvocations: 1,
+      }),
+      finalize: vi.fn().mockRejectedValue(lateError),
+    }
+    deps.pluginWorkloadSdkRevocationClient = revocationClient
+    const reconciler = new WorkflowReconciler(deps as WorkflowReconcilerDeps)
+    const legacyDeletes = () =>
+      mockNetworkingApi.deleteNamespacedNetworkPolicy.mock.calls.filter(
+        ([arg]) => arg.name === 'sdk-only-mcp-servers-egress-internet'
+      )
+
+    await expect(
+      reconciler.cleanupPluginWorkloadSdk('sdk-only', {
+        recipeUid: 'uid-sdk-only',
+        recipeDeleted: true,
+      })
+    ).rejects.toBe(lateError)
+
+    // Positive witnesses: the central legacy DELETE succeeded, and the later
+    // revocation-finalization phase—not an earlier network failure—rejected.
+    expect(legacyDeletes()).toHaveLength(1)
+    expect(revocationClient.finalize).toHaveBeenCalledWith(
+      sandboxNamespace,
+      'sdk-only',
+      revocationId
+    )
+
+    // The old-UID retry is a direct process-local ledger probe, not a
+    // Kubernetes recreation. It must hit the recorded gone-set, not send a
+    // second DELETE after only partial cleanup completion.
+    await expect(
+      reconciler.retryLegacyMcpServersInternetEgressDelete('sdk-only', 'uid-sdk-only')
+    ).resolves.toBe('removed')
+    expect(legacyDeletes()).toHaveLength(1)
   })
 
   it('defers absence reads until pod deletion completes so 404s cannot become unhandled rejections', async () => {
