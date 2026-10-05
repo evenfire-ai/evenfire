@@ -343,6 +343,12 @@ describe('Desktop environment handoff concurrency', () => {
     {
       targetKind: 'saved target',
       externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/api/v1`,
+      loginOutcome: 'supersedes by generation only',
+      loginState: null,
+    },
+    {
+      targetKind: 'saved target',
+      externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/api/v1`,
       loginOutcome: 'starts',
       loginState: { busy: true, authTransitioning: true, isAuthenticated: false },
     },
@@ -365,7 +371,7 @@ describe('Desktop environment handoff concurrency', () => {
       loginState: { busy: false, authTransitioning: false, isAuthenticated: true },
     },
   ])(
-    'does not continue toward a $targetKind when a newer login $loginOutcome during the second config read',
+    'does not continue toward a $targetKind when a newer session owner $loginOutcome during the second config read',
     async ({ externalRestApiBaseUrl, loginState }) => {
       let sessionGeneration = 0
       let authState = {
@@ -406,7 +412,7 @@ describe('Desktop environment handoff concurrency', () => {
       const handling = handler({ ...targetEnvironment, externalRestApiBaseUrl })
       await secondRefreshStarted
       sessionGeneration += 1
-      authState = { ...authState, ...loginState }
+      if (loginState) authState = { ...authState, ...loginState }
       finishSecondRefresh()
       await handling
 
