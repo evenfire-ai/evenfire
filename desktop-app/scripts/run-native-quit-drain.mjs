@@ -12,15 +12,29 @@ if (process.platform !== 'darwin') {
 
 const desktopRoot = fileURLToPath(new URL('..', import.meta.url))
 const profileRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'evenfire-quit-drain-profile-'))
+const appDataRoot = path.join(profileRoot, 'app-data')
+const userDataRoot = path.join(profileRoot, 'user-data')
+const sessionDataRoot = path.join(profileRoot, 'session-data')
+const configPath = path.join(profileRoot, 'runtime-config.json')
+await Promise.all(
+  [appDataRoot, userDataRoot, sessionDataRoot].map(directory =>
+    fs.mkdir(directory, { recursive: true })
+  )
+)
 const childEnvironment = { ...process.env }
 delete childEnvironment.ELECTRON_RUN_AS_NODE
+childEnvironment.CLERUM_DESKTOP_CONFIG_PATH = configPath
 
 try {
-  const child = spawn(electronPath, ['./test/native/quit-drain.fixture.cjs', profileRoot], {
-    cwd: desktopRoot,
-    env: childEnvironment,
-    stdio: ['ignore', 'pipe', 'pipe'],
-  })
+  const child = spawn(
+    electronPath,
+    [`--user-data-dir=${userDataRoot}`, './test/native/quit-drain.bootstrap.cjs', profileRoot],
+    {
+      cwd: desktopRoot,
+      env: childEnvironment,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }
+  )
   let output = ''
   child.stdout.on('data', chunk => {
     output += chunk.toString()

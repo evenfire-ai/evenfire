@@ -1,5 +1,38 @@
-import { describe, expect, it, vi } from 'vitest'
-import { AppService } from '../appService.js'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import fs from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
+
+const originalConfigPath = process.env.CLERUM_DESKTOP_CONFIG_PATH
+let isolatedConfigPath = ''
+let AppServiceClass: typeof import('../appService.js').AppService
+let getDesktopRuntimeConfigState: typeof import('../config.js').getDesktopRuntimeConfigState
+
+beforeAll(async () => {
+  const isolatedDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'evenfire-quit-preparation-'))
+  isolatedConfigPath = path.join(isolatedDirectory, 'runtime-config.json')
+  process.env.CLERUM_DESKTOP_CONFIG_PATH = isolatedConfigPath
+  vi.resetModules()
+
+  const [{ AppService }, configModule] = await Promise.all([
+    import('../appService.js'),
+    import('../config.js'),
+  ])
+  AppServiceClass = AppService
+  getDesktopRuntimeConfigState = configModule.getDesktopRuntimeConfigState
+})
+
+afterAll(async () => {
+  if (originalConfigPath === undefined) {
+    delete process.env.CLERUM_DESKTOP_CONFIG_PATH
+  } else {
+    process.env.CLERUM_DESKTOP_CONFIG_PATH = originalConfigPath
+  }
+  if (isolatedConfigPath) {
+    await fs.rm(path.dirname(isolatedConfigPath), { recursive: true, force: true })
+  }
+  vi.resetModules()
+})
 
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void
@@ -13,7 +46,7 @@ function createService(tokenStore: {
   prepareForQuit: ReturnType<typeof vi.fn>
   reopenAdmission: ReturnType<typeof vi.fn>
 }) {
-  const service = Object.create(AppService.prototype) as {
+  const service = Object.create(AppServiceClass.prototype) as {
     pendingCredentialProducers: Set<Promise<unknown>>
     quitPreparationStarted: boolean
     tokenStore: typeof tokenStore
@@ -30,6 +63,10 @@ function createService(tokenStore: {
 }
 
 describe('AppService quit preparation', () => {
+  it('loads runtime config from this suite’s isolated path', () => {
+    expect(getDesktopRuntimeConfigState().storagePath).toBe(isolatedConfigPath)
+  })
+
   it('reopens credential admission when Electron cancels a quit attempt', async () => {
     const tokenStore = {
       prepareForQuit: vi.fn().mockResolvedValue(undefined),
@@ -100,7 +137,7 @@ describe('AppService quit preparation', () => {
   })
 
   it('does not gate a runWithTeamContext call that has no team credential hop', async () => {
-    const service = Object.create(AppService.prototype) as {
+    const service = Object.create(AppServiceClass.prototype) as {
       pendingCredentialProducers: Set<Promise<unknown>>
       quitPreparationStarted: boolean
       teamContextQueue: Promise<void>

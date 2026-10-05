@@ -1,12 +1,29 @@
 const { app, BrowserWindow } = require('electron')
 const assert = require('node:assert/strict')
+const path = require('node:path')
+
+const profileRoot = path.resolve(process.argv.at(-1))
+const expectedPaths = {
+  appData: path.join(profileRoot, 'app-data'),
+  userData: path.join(profileRoot, 'user-data'),
+  sessionData: path.join(profileRoot, 'session-data'),
+}
+
+function assertOwnedPaths() {
+  for (const [name, expectedPath] of Object.entries(expectedPaths)) {
+    assert.equal(path.resolve(app.getPath(name)), expectedPath, `${name} path must be isolated`)
+  }
+  assert.equal(
+    path.resolve(process.env.CLERUM_DESKTOP_CONFIG_PATH || ''),
+    path.join(profileRoot, 'runtime-config.json')
+  )
+}
+
+assertOwnedPaths()
 const { AppService } = require('../../dist/appService.js')
+assertOwnedPaths()
 const { registerQuitDrain } = require('../../dist/mainWindowCoordinator.js')
 
-const profileRoot = process.argv.at(-1)
-app.setName('Evenfire Quit Drain Fixture')
-app.setPath('userData', profileRoot)
-app.setPath('sessionData', profileRoot)
 app.disableHardwareAcceleration()
 
 let willQuitObserved = false
