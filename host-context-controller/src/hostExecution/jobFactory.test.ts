@@ -145,6 +145,19 @@ function ownedPod(job: k8s.V1Job): k8s.V1Pod {
 }
 
 describe('bounded Host execution job factory', () => {
+  it('requests native collection of finished Jobs and their private input Pods without a caller', () => {
+    for (const request of [workspaceRequest, attachmentRequest]) {
+      const job = buildHostExecutionJob(identity, request)
+      // activeDeadlineSeconds stops work, but leaves terminated Pods and their
+      // input volumes behind unless the Kubernetes TTL controller collects
+      // the Job. A lost/disconnected caller must not retain those copies.
+      expect(job.spec!.ttlSecondsAfterFinished).toBe(0)
+      expect(job.spec!.activeDeadlineSeconds).toBeLessThanOrEqual(
+        Math.ceil(EXECUTION_TIMEOUT_MAX_MS / 1000) + 60
+      )
+    }
+  })
+
   it('encodes one workspace Job under the Host owner with targetable labels', () => {
     const job = buildHostExecutionJob(identity, workspaceRequest)
 

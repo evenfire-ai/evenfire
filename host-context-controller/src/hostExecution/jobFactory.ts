@@ -551,6 +551,10 @@ export function buildHostExecutionJob(
     },
     spec: {
       backoffLimit: 0,
+      // A terminated Pod can retain the private input volume after a caller
+      // disconnects. Native Job TTL cleanup collects finished/deadline-failed
+      // Jobs and their dependent Pods; API absence still is not purge proof.
+      ttlSecondsAfterFinished: 0,
       // Includes the bounded private-result delivery window. Command runtime
       // itself is still limited by the launcher to the approved timeout.
       activeDeadlineSeconds: Math.ceil(approved.timeoutMs / 1000) + 60,
