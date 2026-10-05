@@ -3379,7 +3379,7 @@ describe('FilesPage', () => {
     expect(screen.queryByTestId('gfs-zip-progress')).toBeNull()
 
     expect(listChildren).toHaveBeenCalledWith('folder-1', 'main', undefined)
-    expect(download).toHaveBeenCalledWith('gfs://main/doc-1')
+    expect(download).toHaveBeenCalledWith('gfs://main/doc-1', { maxBytes: 512 * 1024 * 1024 })
     expect(createObjectURL).toHaveBeenCalledWith(expect.any(Blob))
     expect(click).toHaveBeenCalled()
     const savedName = (click.mock.instances[0] as HTMLAnchorElement | undefined)?.download
@@ -3455,7 +3455,7 @@ describe('FilesPage', () => {
     expect(download).not.toHaveBeenCalled()
     expect(click).not.toHaveBeenCalled()
     expect(pushToast).toHaveBeenCalledWith(
-      expect.stringContaining('exceeds the 1 GiB folder-zip limit'),
+      expect.stringContaining('exceeds the 512 MiB folder-zip limit'),
       'error'
     )
   })

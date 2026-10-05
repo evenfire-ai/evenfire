@@ -17,6 +17,7 @@ import {
   requireChatStore,
   requireChatStoreForBindingGeneration,
 } from './chatStoreBinding.js'
+import { GFS_DOWNLOAD_MAX_BYTES_CEILING } from './gfs/downloadLimits.js'
 import { GFS_PREVIEW_MAX_BYTES } from './gfs/previewLimits.js'
 import { assertSafeRouteSegment } from './pathSafety.js'
 import {
@@ -479,9 +480,17 @@ export function registerIpcHandlers(service: AppService): void {
     assertTrustedSender(event)
     return service.resolveGfsUri(sanitizeString(payload?.uri))
   })
-  ipcMain.handle('gfs:download', async (event, payload: { uri: string }) => {
+  ipcMain.handle('gfs:download', async (event, payload: { uri: string; maxBytes?: number }) => {
     assertTrustedSender(event)
-    return service.downloadGfsUri(sanitizeString(payload?.uri))
+    // Optional producer-side bound (folder-zip walk): when present it is
+    // validated here in main so an over-large body is rejected before it
+    // materializes in either process. Absent keeps the single-file
+    // save-to-disk path uncapped.
+    const maxBytes = sanitizeOptionalPositiveInteger(payload?.maxBytes, 'maxBytes')
+    if (maxBytes !== undefined && maxBytes > GFS_DOWNLOAD_MAX_BYTES_CEILING) {
+      throw new Error('download limit exceeds the allowed maximum')
+    }
+    return service.downloadGfsUri(sanitizeString(payload?.uri), maxBytes)
   })
   ipcMain.handle(
     'gfs:downloadPreview',

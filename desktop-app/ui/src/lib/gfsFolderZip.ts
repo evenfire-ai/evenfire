@@ -26,8 +26,14 @@ import { createZipWriter } from '@lib/zipWriter'
  * them while the Files browsing surface shares the same classes.
  */
 export const GFS_ZIP_READS_PER_MINUTE = 120
-/** Refuse before buffering: total uncompressed bytes across the folder. */
-export const GFS_ZIP_MAX_TOTAL_BYTES = 1024 * 1024 * 1024
+/**
+ * Refuse before buffering: total bytes across the folder. 512 MiB is the
+ * documented end-to-end bound (spec: ZIP budget model): with the producer-side
+ * per-transfer maxBytes and the single pre-sized archive buffer, peak renderer
+ * memory at the ceiling is ~2x this cap (archive + save-time Blob) plus one
+ * bounded in-flight transfer.
+ */
+export const GFS_ZIP_MAX_TOTAL_BYTES = 512 * 1024 * 1024
 /** Refuse before buffering: total file entries across the folder. */
 export const GFS_ZIP_MAX_ENTRIES = 2000
 
@@ -115,7 +121,12 @@ export interface GfsZipChildrenPage {
 
 export interface GfsFolderZipDeps {
   listChildren(resourceId: string, drive: string, cursor?: string): Promise<GfsZipChildrenPage>
-  download(uri: string): Promise<{ bytes: ArrayBuffer }>
+  /**
+   * Downloads one file. `options.maxBytes` is the producer-side bound for the
+   * transfer (R1-H2): the bounded fetch rejects before an over-budget body
+   * materializes in either process.
+   */
+  download(uri: string, options?: { maxBytes?: number }): Promise<{ bytes: ArrayBuffer }>
   throttle: GfsReadThrottle
   sleep: (ms: number) => Promise<void>
 }
@@ -237,7 +248,8 @@ export async function createGfsFolderZip(
     options.deps?.listChildren ??
     ((resourceId, drive, cursor) => window.clerum.gfs.listChildren(resourceId, drive, cursor))
   const download: GfsFolderZipDeps['download'] =
-    options.deps?.download ?? (uri => window.clerum.gfs.download(uri))
+    options.deps?.download ??
+    ((uri, requestOptions) => window.clerum.gfs.download(uri, requestOptions))
   const sleep =
     options.deps?.sleep ?? ((ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms)))
   const throttle = options.deps?.throttle ?? createGfsReadThrottle()
@@ -396,10 +408,21 @@ export async function createGfsFolderZip(
     await withAbort(throttle.acquire())
     let bytes: ArrayBuffer
     try {
-      bytes = (await withRateLimitRetry(() => download(file.uri))).bytes
+      // R1-H2: bound the transfer producer-side by the remaining budget so an
+      // over-limit body (dishonest or missing declared size) is rejected
+      // before it materializes in the renderer; the receipt check below stays
+      // as the backstop.
+      const remainingBytes = maxTotalBytes - addedBytes
+      bytes = (await withRateLimitRetry(() => download(file.uri, { maxBytes: remainingBytes })))
+        .bytes
     } catch (error) {
       if (isFolderZipAbortError(error)) throw error
       const message = toMessage(error)
+      if (parseHttpStatus(message) === 413) {
+        throw new GfsFolderZipLimitError(
+          `"${folder.name}" exceeded the ${formatZipBytes(maxTotalBytes)} folder-zip limit while downloading. Download smaller subfolders individually.`
+        )
+      }
       if (isAccessDenied(message)) {
         skipped.push({ path: file.path, reason: 'Permission denied' })
         continue

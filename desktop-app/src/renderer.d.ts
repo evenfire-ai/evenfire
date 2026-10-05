@@ -131,7 +131,10 @@ declare global {
           bytes?: number
           updatedAt?: string
         }>
-        download: (uri: string) => Promise<{
+        download: (
+          uri: string,
+          options?: { maxBytes?: number }
+        ) => Promise<{
           resource: {
             drive: string
             resourceId: string

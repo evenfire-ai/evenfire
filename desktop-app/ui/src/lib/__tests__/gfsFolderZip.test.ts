@@ -54,7 +54,10 @@ function folder(
 
 function depsFor(
   pages: Record<string, Array<{ items: GfsZipChildItem[]; nextCursor: string | null }>>,
-  downloads: Record<string, () => Promise<{ bytes: ArrayBuffer }>> = {}
+  downloads: Record<
+    string,
+    (uri: string, options?: { maxBytes?: number }) => Promise<{ bytes: ArrayBuffer }>
+  > = {}
 ): GfsFolderZipDeps {
   return {
     listChildren: vi.fn(async (resourceId: string, _drive: string, cursor?: string) => {
@@ -65,9 +68,9 @@ function depsFor(
       if (!page) throw new Error(`no page ${index} for ${resourceId}`)
       return { items: page.items, nextCursor: page.nextCursor }
     }),
-    download: vi.fn(async (uri: string) => {
+    download: vi.fn(async (uri: string, options?: { maxBytes?: number }) => {
       const produce = downloads[uri]
-      if (produce) return produce()
+      if (produce) return produce(uri, options)
       return { bytes: bytesOf(uri) }
     }),
     // Spacing itself has a dedicated manual-clock test below the walk; here it
@@ -344,6 +347,79 @@ describe('createGfsFolderZip', () => {
         { deps, limits: { maxTotalBytes: 1024 } }
       )
     ).rejects.toThrow(/exceeded the 1 KiB folder-zip limit while downloading/)
+  })
+
+  it('bounds each transfer producer-side by the remaining budget (R1-H2)', async () => {
+    // Declared size missing (older server) + a dishonestly large body: the
+    // bounded fetch must refuse BEFORE the body materializes — the walk's
+    // only obligation after that is mapping the refusal to the limit error.
+    const deps = depsFor(
+      {
+        root: [
+          {
+            items: [
+              folder({
+                resourceId: 'ghost',
+                name: 'ghost.bin',
+                bytes: undefined as unknown as number,
+              }),
+            ],
+            nextCursor: null,
+          },
+        ],
+      },
+      {
+        'gfs://main/ghost': async (uri: string, options?: { maxBytes?: number }) => {
+          expect(options?.maxBytes).toBe(1024)
+          throw new Error('gfs download exceeds the 1024-byte limit httpStatus=413')
+        },
+      }
+    )
+
+    await expect(
+      createGfsFolderZip(
+        { resourceId: 'root', drive: 'main', name: 'Ghost' },
+        { deps, limits: { maxTotalBytes: 1024 } }
+      )
+    ).rejects.toThrow(/exceeded the 1 KiB folder-zip limit while downloading/)
+  })
+
+  it('carries a near-limit folder through download, zip and save-sized output (R1-H2)', async () => {
+    // Two honest files at half the ceiling each: the second transfer is
+    // bounded by exactly the remaining budget and both land in the archive.
+    const seenMaxBytes: Array<number | undefined> = []
+    const deps = depsFor(
+      {
+        root: [
+          {
+            items: [
+              folder({ resourceId: 'half-a', name: 'half-a.bin', bytes: 512 }),
+              folder({ resourceId: 'half-b', name: 'half-b.bin', bytes: 512 }),
+            ],
+            nextCursor: null,
+          },
+        ],
+      },
+      {
+        'gfs://main/half-a': async (_uri: string, options?: { maxBytes?: number }) => {
+          seenMaxBytes.push(options?.maxBytes)
+          return { bytes: new ArrayBuffer(512) }
+        },
+        'gfs://main/half-b': async (_uri: string, options?: { maxBytes?: number }) => {
+          seenMaxBytes.push(options?.maxBytes)
+          return { bytes: new ArrayBuffer(512) }
+        },
+      }
+    )
+
+    const result = await createGfsFolderZip(
+      { resourceId: 'root', drive: 'main', name: 'Brink' },
+      { deps, limits: { maxTotalBytes: 1024 } }
+    )
+    expect(result.fileCount).toBe(2)
+    expect(seenMaxBytes).toEqual([1024, 512])
+    // The archive itself exists and parses back.
+    expect(zipEntryNames(result.bytes).length).toBe(2)
   })
 
   it('backs off once on a 429 using the server-provided retry hint', async () => {

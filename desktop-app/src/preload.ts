@@ -143,7 +143,8 @@ const clerum = Object.freeze({
   },
   gfs: {
     resolve: (uri: string) => ipcRenderer.invoke('gfs:resolve', { uri }),
-    download: (uri: string) => ipcRenderer.invoke('gfs:download', { uri }),
+    download: (uri: string, options?: { maxBytes?: number }) =>
+      ipcRenderer.invoke('gfs:download', { uri, maxBytes: options?.maxBytes }),
     downloadPreview: (uri: string, maxBytes: number) =>
       ipcRenderer.invoke('gfs:downloadPreview', { uri, maxBytes }),
     listAccessible: (drive?: string, cursor?: string) =>
