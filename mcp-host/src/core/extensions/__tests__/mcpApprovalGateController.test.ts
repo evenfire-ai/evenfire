@@ -440,6 +440,47 @@ describe('UnifiedApprovalGateController — cron×stateless forced gate', () => 
     }
   })
 
+  it.each<[{ statelessLifecycle: boolean; cronManageGateOnly?: boolean }]>([
+    [{ statelessLifecycle: true }],
+    [{ statelessLifecycle: true, cronManageGateOnly: true }],
+  ])(
+    'an "Always approve" allowlist entry does not waive the forced create/enable gate (%j)',
+    options => {
+      const conv = makeConversation({ auto_approved_tools: new Set(['cron_manage']) })
+      const controller = new ApprovalController(
+        conv,
+        new UnifiedApprovalGateController(
+          makeMockRegistry({ cron_manage: { requiresApproval: true } }),
+          waivingConfig,
+          undefined,
+          options
+        ),
+        { honorDenials: options.cronManageGateOnly !== true }
+      )
+
+      for (const action of ['create', 'enable']) {
+        const result = controller.beforeTool('cron_manage', { action }, 'tc-new')
+        expect((result as any).type).toBe('suspend')
+        expect((result as any).approval.description).toBe(STATELESS_CRON_APPROVAL_PROMPT)
+      }
+      // Reads still follow the allowlist.
+      expect(controller.beforeTool('cron_manage', { action: 'list' }, 'tc-list')).toBe('proceed')
+
+      // The one-shot grant for the exact call the user just approved still runs.
+      conv.pending_approval = {
+        request_id: 'req-1',
+        tool_name: 'cron_manage',
+        tool_call_id: 'tc-approved',
+        parameters: { action: 'create' },
+        description: STATELESS_CRON_APPROVAL_PROMPT,
+        context_snapshot: [],
+      }
+      expect(controller.beforeTool('cron_manage', { action: 'create' }, 'tc-approved')).toBe(
+        'proceed'
+      )
+    }
+  )
+
   it('pins the exact user-facing consequence prompt', () => {
     expect(STATELESS_CRON_APPROVAL_PROMPT).toBe(
       'Approve scheduled task on a stateless agent? While any schedule is active, this agent ' +

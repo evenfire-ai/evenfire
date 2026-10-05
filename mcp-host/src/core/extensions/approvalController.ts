@@ -108,7 +108,12 @@ export class ApprovalController implements LoopController {
       return { type: 'suspend', approval: this.reapproval(toolName, params) }
     }
 
-    if (this.conversation.auto_approved_tools.has(toolName)) {
+    // An exact-name allowlist never waives a forced gate (stateless cron
+    // create/enable); only a one-shot grant for this exact call does.
+    if (
+      this.conversation.auto_approved_tools.has(toolName) &&
+      this.delegate.isForcedApproval?.(toolName, params) !== true
+    ) {
       return 'proceed'
     }
 

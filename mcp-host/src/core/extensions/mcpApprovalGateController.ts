@@ -218,6 +218,11 @@ export class UnifiedApprovalGateController implements LoopController {
     return this.delegate.refreshTools(currentTools)
   }
 
+  /** The cron×stateless gate is not waivable by an exact-name allowlist either. */
+  isForcedApproval(toolName: string, params: Record<string, unknown>): boolean {
+    return this.cronManageForcedApproval(toolName, params) !== null
+  }
+
   /**
    * Cron×stateless forced-approval gate (step 1.5). Returns a suspension only
    * when stateless cron management is explicitly allowed and the registered

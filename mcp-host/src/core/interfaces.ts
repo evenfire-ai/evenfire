@@ -173,6 +173,12 @@ export interface LoopController {
     params: Record<string, unknown>,
     toolCallId?: string
   ): 'proceed' | 'skip' | { type: 'suspend'; approval: PendingApproval }
+  /**
+   * True when this call is under an approval that no allowlist may waive
+   * (e.g. stateless cron_manage create/enable). A decorator must then still
+   * ask, unless the user approved this exact call.
+   */
+  isForcedApproval?(toolName: string, params: Record<string, unknown>): boolean
   onExhaustion(iteration: number): string
   refreshTools(currentTools: ToolDefinition[]): Promise<ToolDefinition[]>
 }
