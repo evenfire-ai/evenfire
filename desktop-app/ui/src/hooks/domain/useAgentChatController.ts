@@ -540,6 +540,14 @@ export function useAgentChatController({
 
   useEffect(() => {
     chatMessagesRef.current = chatMessages
+    const localPageRequest = activeChatLocalPageRequestRef.current
+    if (
+      localPageRequest &&
+      !localPageRequest.initialized &&
+      activeChatSwitchRequestRef.current === localPageRequest.request
+    ) {
+      localPageRequest.initialized = true
+    }
   }, [chatMessages])
 
   const [agentSending, setAgentSending] = useState(false)
@@ -604,6 +612,12 @@ export function useAgentChatController({
   })
   const activeChatSwitchRequestRef = useRef<symbol | null>(null)
   const activeChatSwitchKeyRef = useRef<string | null>(null)
+  // Visible messages become reusable only after the local page has been rendered
+  // and copied into chatMessagesRef by its effect.
+  const activeChatLocalPageRequestRef = useRef<{
+    request: symbol
+    initialized: boolean
+  } | null>(null)
   // Latest `pushToast` for the hoisted tracker callbacks (onTrackerTerminal reads
   // it) so that `tracker.setCallbacks` can run once (cross-ref D.3 M1) without
   // closing over a stale toast fn. Assigned in an effect, not the render body
@@ -892,6 +906,7 @@ export function useAgentChatController({
       activeChatId: null,
     }
     activeChatSwitchRequestRef.current = null
+    activeChatLocalPageRequestRef.current = null
     autoSelectedChatIdRef.current = null
     setActiveChatId(null)
     clearList()
@@ -955,6 +970,7 @@ export function useAgentChatController({
       if (!canReuseActiveSwitch) {
         activeChatSwitchRequestRef.current = switchRequest
         activeChatSwitchKeyRef.current = switchKey
+        activeChatLocalPageRequestRef.current = null
       }
       // A same-chat click must coalesce onto an already-running loud recovery.
       // Superseding it would discard the stream-loss caller that owns the Resend
@@ -1006,15 +1022,24 @@ export function useAgentChatController({
 
       // PHASE 1 — render only the newest local page. The authoritative reconcile
       // below requests a delta after the newest cached server turn.
+      const activeLocalPage = activeChatLocalPageRequestRef.current
+      const reuseVisibleMessages =
+        canReuseActiveSwitch &&
+        activeLocalPage?.request === switchRequest &&
+        activeLocalPage.initialized
       let cached: Awaited<ReturnType<typeof chatStore.loadMessages>> = []
+      let loadedLocalPage = false
       try {
-        cached = canReuseActiveSwitch
-          ? ([...chatMessagesRef.current] as AgentChatMessage[])
-          : ((await chatStore.loadMessages(
-              agentRef,
-              chatId,
-              LOCAL_MESSAGE_PAGE_SIZE
-            )) as AgentChatMessage[])
+        if (reuseVisibleMessages) {
+          cached = [...chatMessagesRef.current] as AgentChatMessage[]
+        } else {
+          cached = (await chatStore.loadMessages(
+            agentRef,
+            chatId,
+            LOCAL_MESSAGE_PAGE_SIZE
+          )) as AgentChatMessage[]
+        }
+        loadedLocalPage = true
       } catch (error) {
         console.warn('[chat-history] failed to load local messages', { agentRef, chatId, error })
       }
@@ -1025,9 +1050,12 @@ export function useAgentChatController({
         cached.length === LOCAL_MESSAGE_PAGE_SIZE &&
         (await hasLocalMessagesBeyond(chatStore, agentRef, chatId, LOCAL_MESSAGE_PAGE_SIZE))
       if (!isStillActive()) return
+      if (loadedLocalPage && !reuseVisibleMessages) {
+        activeChatLocalPageRequestRef.current = { request: switchRequest, initialized: false }
+      }
       loadedLocalMessageCountRef.current = cached.length
       setHasOlderMessages(hasOlderLocalMessages || hasOlderServerMessages)
-      if (!canReuseActiveSwitch) setChatMessages(cached as AgentChatMessage[])
+      if (!reuseVisibleMessages) setChatMessages(cached as AgentChatMessage[])
       // Phase 1 rendered the cache → clear the blocking spinner. The reconcile
       // runs under the `syncing` indicator (RECONCILE_STARTED, dispatched by the
       // reconcile gate) instead.
@@ -1305,6 +1333,7 @@ export function useAgentChatController({
       setActiveChatId(null)
       clearList()
       setChatListLoading(false)
+      activeChatLocalPageRequestRef.current = null
       setChatMessages([])
       setChatMessagesLoading(false)
       setHasOlderMessages(false)
@@ -1324,6 +1353,7 @@ export function useAgentChatController({
         selectedAgent,
       }
       setActiveChatId(requestedSelection.chatId)
+      activeChatLocalPageRequestRef.current = null
       setChatMessages([])
       setChatMessagesLoading(true)
       setHasOlderMessages(false)
@@ -1344,6 +1374,7 @@ export function useAgentChatController({
         selectedAgent,
       }
       setActiveChatId(null)
+      activeChatLocalPageRequestRef.current = null
       setChatMessages([])
       setChatMessagesLoading(false)
       setHasOlderMessages(false)
@@ -2003,6 +2034,7 @@ export function useAgentChatController({
           resetComposerAttachments()
           activeChatVisibilityRef.current = { ...view, selectedAgent: null, activeChatId: null }
           setActiveChatId(null)
+          activeChatLocalPageRequestRef.current = null
           setChatMessages([])
           setChatMessagesLoading(false)
           setHasOlderMessages(false)
@@ -2927,6 +2959,7 @@ export function useAgentChatController({
               selectedAgent: sendAgent,
             }
             setActiveChatId(chatId)
+            activeChatLocalPageRequestRef.current = null
             setChatMessages([])
           }
           await chatStore.setLastActive(sendAgent, chatId)
@@ -3654,6 +3687,7 @@ export function useAgentChatController({
         selectedAgent: agentName,
       }
       setActiveChatId(chatId)
+      activeChatLocalPageRequestRef.current = null
       setChatMessages([])
       setChatMessagesLoading(true)
       setHasOlderMessages(false)
@@ -3682,6 +3716,7 @@ export function useAgentChatController({
     }
     autoSelectedChatIdRef.current = null
     setActiveChatId(null)
+    activeChatLocalPageRequestRef.current = null
     setChatMessages([])
     setChatMessagesLoading(false)
     setHasOlderMessages(false)
