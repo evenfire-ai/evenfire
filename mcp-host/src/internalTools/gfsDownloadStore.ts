@@ -527,10 +527,28 @@ export class GfsDownloadStore {
         if (record.callerIdentity !== callerIdentity)
           throw new GfsDownloadStoreError('caller_mismatch')
         const directory = path.join(this.hostRoot, record.directory)
+        let info: Awaited<ReturnType<typeof fs.lstat>>
         try {
-          const info = await fs.lstat(directory)
-          if (!info.isDirectory() || info.isSymbolicLink())
-            throw new GfsDownloadStoreError('workspace_unavailable')
+          info = await fs.lstat(directory)
+        } catch (error) {
+          // A proven ENOENT means the directory was already removed; release the
+          // durable charge instead of stranding an unrecoverable cleanup_failed
+          // entry. Any other failure stays charged.
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+            record.state = 'cleanup_failed'
+            await this.persist()
+            throw new GfsDownloadStoreError('storage_write_failed')
+          }
+          delete this.ledger.records[id]
+          await this.persist()
+          return
+        }
+        if (!info.isDirectory() || info.isSymbolicLink()) {
+          record.state = 'cleanup_failed'
+          await this.persist()
+          throw new GfsDownloadStoreError('storage_write_failed')
+        }
+        try {
           await fs.rm(directory, { recursive: true, force: true })
         } catch {
           record.state = 'cleanup_failed'
@@ -709,22 +727,25 @@ export class GfsDownloadStore {
     if (!Number.isSafeInteger(requestedMs) || requestedMs <= 0 || requestedMs > 3_600_000)
       throw new GfsDownloadStoreError('download_busy')
 
-    const now = Date.now()
-    const candidates = Object.values(this.ledger.records).filter(
-      record =>
-        record.callerIdentity === callerIdentity &&
-        record.state === 'completed' &&
-        record.sha256 !== undefined &&
-        Date.parse(record.expiresAt) > now
-    )
-    if (candidates.length === 0) {
-      return {
-        leaseId: randomUUID(),
-        expiresAt: new Date(now + requestedMs).toISOString(),
-      }
-    }
-
     return this.serialize(async () => {
+      const now = Date.now()
+      const retained = Object.values(this.ledger.records).filter(
+        record => record.callerIdentity === callerIdentity
+      )
+      // Admission covers this caller's retained files without parsing the
+      // command. Expired bytes can remain while an existing execution holds
+      // them, but they must not authorize another execution before cleanup.
+      if (retained.some(record => Date.parse(record.expiresAt) <= now))
+        throw new GfsDownloadStoreError('download_expired')
+      const candidates = retained.filter(
+        record => record.state === 'completed' && record.sha256 !== undefined
+      )
+      if (candidates.length === 0) {
+        return {
+          leaseId: randomUUID(),
+          expiresAt: new Date(now + requestedMs).toISOString(),
+        }
+      }
       for (const record of candidates) await this.inspect(record.path, callerIdentity)
       const leaseId = randomUUID()
       const expiresAt = new Date(now + requestedMs).toISOString()
@@ -828,8 +849,23 @@ export class GfsDownloadStore {
         if (this.activeIds.has(record.id)) continue
         if (this.hasProcessingLease(record.id, now)) continue
         const directory = path.join(this.hostRoot, record.directory)
+        let info: Awaited<ReturnType<typeof fs.lstat>>
         try {
-          const info = await fs.lstat(directory)
+          info = await fs.lstat(directory)
+        } catch (error) {
+          // Only a proven ENOENT establishes that nothing remains to delete.
+          // Permission errors, ENOTDIR and other uncertain outcomes stay charged.
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+            removed.push(record.id)
+            continue
+          }
+          if (record.state !== 'cleanup_failed') {
+            record.state = 'cleanup_failed'
+            stateChanged = true
+          }
+          continue
+        }
+        try {
           const realDirectory = await fs.realpath(directory)
           if (!info.isDirectory() || info.isSymbolicLink() || realDirectory !== directory) {
             if (record.state !== 'cleanup_failed') {

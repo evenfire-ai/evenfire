@@ -206,6 +206,21 @@ export class ShellTool implements Tool {
       }
     }
 
+    if (context?.signal?.aborted) {
+      if (processingLease && this.processingLeases) {
+        try {
+          await this.processingLeases.releaseProcessingLease(processingLease)
+        } catch {
+          return {
+            content: 'Command cancelled before process start [processing_lease_release_failed]',
+            duration_ms: Date.now() - startTime,
+            is_error: true,
+          }
+        }
+      }
+      context.signal.throwIfAborted()
+    }
+
     return new Promise<ToolOutput>(resolve => {
       // detached: true makes the child a process group leader so we can kill
       // the whole group (shell + grandchildren like `sleep`) with -pid signal.

@@ -65,6 +65,91 @@ describe('GfsDownloadStore processing leases', () => {
     ).rejects.toMatchObject({ code: 'caller_mismatch' })
   })
 
+  it('rejects a new lease for an expired retained file before cleanup', async () => {
+    const receipt = await publishFixture()
+    vi.spyOn(Date, 'now').mockReturnValue(Date.parse(receipt.expiresAt))
+
+    await expect(
+      store.processingLeaseProvider('caller-a').acquireProcessingLease()
+    ).rejects.toMatchObject({ code: 'download_expired' })
+    expect(fs.existsSync(path.join(callerRoot, receipt.path))).toBe(true)
+    expect(store.debugRecord(receipt.id)).toBeDefined()
+
+    await store.cleanupExpired()
+    const lease = await store.processingLeaseProvider('caller-a').acquireProcessingLease()
+    await store.processingLeaseProvider('caller-a').releaseProcessingLease(lease)
+    await store.close()
+  })
+
+  it('rejects a new lease after expiry while preserving an admitted execution', async () => {
+    const receipt = await publishFixture()
+    const provider = store.processingLeaseProvider('caller-a')
+    const admitted = await provider.acquireProcessingLease()
+    vi.spyOn(Date, 'now').mockReturnValue(Date.parse(receipt.expiresAt) + 1)
+
+    await expect(provider.acquireProcessingLease()).rejects.toMatchObject({
+      code: 'download_expired',
+    })
+    await store.cleanupExpired()
+    expect(fs.existsSync(path.join(callerRoot, receipt.path))).toBe(true)
+    expect(store.debugRecord(receipt.id)).toBeDefined()
+
+    await provider.releaseProcessingLease(admitted)
+    await store.cleanupExpired()
+    expect(store.debugRecord(receipt.id)).toBeUndefined()
+    await store.close()
+  })
+
+  it('recovers admission when an expired record has no directory left to clean', async () => {
+    const receipt = await publishFixture()
+    // Crash-after-rm analogue: the directory is gone while the ledger entry and
+    // its charge remain. Cleanup must reconcile them, not strand them.
+    fs.rmSync(path.join(callerRoot, path.dirname(receipt.path)), { recursive: true, force: true })
+    vi.spyOn(Date, 'now').mockReturnValue(Date.parse(receipt.expiresAt) + 1)
+
+    await expect(
+      store.processingLeaseProvider('caller-a').acquireProcessingLease()
+    ).rejects.toMatchObject({ code: 'download_expired' })
+
+    await store.cleanupExpired()
+
+    expect(store.debugRecord(receipt.id)).toBeUndefined()
+    expect(store.debugUsage()).toEqual({ bytes: 0, files: 0, callerBytes: {}, callerFiles: {} })
+
+    const lease = await store.processingLeaseProvider('caller-a').acquireProcessingLease()
+    await store.processingLeaseProvider('caller-a').releaseProcessingLease(lease)
+    await store.close()
+  })
+
+  it('keeps another caller admissible while one caller has an expired record', async () => {
+    const expired = await publishFixture()
+    const callerBRoot = path.join(hostRoot, 'users', 'caller-b')
+    fs.mkdirSync(callerBRoot, { recursive: true, mode: 0o700 })
+    const callerBTransfer = await store.createTransfer({
+      callerIdentity: 'caller-b',
+      callerWorkspacePath: callerBRoot,
+      source,
+      sizeBytes: 7,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    })
+    fs.writeFileSync(path.join(callerBRoot, callerBTransfer.partialPath), Buffer.from('fixture'))
+    await store.publish(
+      callerBTransfer.id,
+      'caller-b',
+      createHash('sha256').update('fixture').digest('hex')
+    )
+    vi.spyOn(Date, 'now').mockReturnValue(Date.parse(expired.expiresAt) + 1)
+
+    await expect(
+      store.processingLeaseProvider('caller-a').acquireProcessingLease()
+    ).rejects.toMatchObject({ code: 'download_expired' })
+
+    const providerB = store.processingLeaseProvider('caller-b')
+    const leaseB = await providerB.acquireProcessingLease()
+    await providerB.releaseProcessingLease(leaseB)
+    await store.close()
+  })
+
   it('protects an expired download from cleanup while leased', async () => {
     const receipt = await publishFixture()
     const lease = await store

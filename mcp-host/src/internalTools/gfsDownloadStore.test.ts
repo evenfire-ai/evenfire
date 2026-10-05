@@ -217,6 +217,60 @@ describe('GFS download store', () => {
     })
   })
 
+  it('releases a failed transfer whose directory is already absent', async () => {
+    const transfer = await store.createTransfer({
+      callerIdentity: 'caller-a',
+      callerWorkspacePath: callerRoot,
+      source,
+      sizeBytes: 1024,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    })
+    // Crash-after-rm analogue: the directory is gone while the durable charge
+    // and its ledger entry remain.
+    await fs.rm(path.join(callerRoot, path.dirname(transfer.path)), {
+      recursive: true,
+      force: true,
+    })
+
+    await store.fail(transfer.id, 'caller-a')
+
+    expect(store.debugRecord(transfer.id)).toBeUndefined()
+    expect(store.debugUsage()).toEqual({ bytes: 0, files: 0, callerBytes: {}, callerFiles: {} })
+  })
+
+  it('keeps the charge when absence cannot be proven at lstat', async () => {
+    const transfer = await store.createTransfer({
+      callerIdentity: 'caller-a',
+      callerWorkspacePath: callerRoot,
+      source,
+      sizeBytes: 7,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    })
+    await fs.writeFile(path.join(callerRoot, `${transfer.path}.partial`), 'fixture')
+    await store.publish(
+      transfer.id,
+      'caller-a',
+      createHash('sha256').update('fixture').digest('hex')
+    )
+    const record = store.debugRecord(transfer.id)!
+    record.expiresAt = new Date(Date.now() - 1).toISOString()
+    await store.debugPersist()
+    // A regular file where the download directory belongs makes lstat fail with
+    // ENOTDIR. Only ENOENT proves absence; this must stay charged.
+    await fs.rm(path.join(callerRoot, '.gfs-downloads'), { recursive: true, force: true })
+    await fs.writeFile(path.join(callerRoot, '.gfs-downloads'), 'not-a-directory')
+
+    await store.cleanupExpired()
+
+    expect(store.debugRecord(transfer.id)).toMatchObject({ state: 'cleanup_failed' })
+    expect(store.debugUsage()).toEqual({
+      bytes: 7,
+      files: 1,
+      callerBytes: { 'caller-a': 7 },
+      callerFiles: { 'caller-a': 1 },
+    })
+  })
+
   it('reserves active-transfer slots atomically per caller and Host', async () => {
     const first = await store.createTransfer({
       callerIdentity: 'caller-a',
@@ -333,8 +387,10 @@ describe('GFS download store', () => {
     expect(store.debugRecord(transfer.id)?.sha256).toBeUndefined()
     vi.restoreAllMocks()
 
-    const directory = path.dirname(path.join(callerRoot, transfer.path))
-    await fs.rm(directory, { recursive: true, force: true })
+    // Force an unproven absence: a regular file where the download directory
+    // belongs makes lstat fail with ENOTDIR, so the charge must stay reserved.
+    await fs.rm(path.join(callerRoot, '.gfs-downloads'), { recursive: true, force: true })
+    await fs.writeFile(path.join(callerRoot, '.gfs-downloads'), 'not-a-directory')
     await expect(store.fail(transfer.id, 'caller-a')).rejects.toMatchObject({
       code: 'storage_write_failed',
     })

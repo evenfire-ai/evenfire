@@ -5,10 +5,11 @@
  * E2E contract (e2e-test-guardian):
  *  - Real user journey: login → Files → visible upload of an exact 3,836,961-byte
  *    CSV → exact managed agent chat → governed download → user-visible
- *    attended shell approval → completed tool stepper and bounded response.
- *  - Business signals: the download step reports a workspace file; the approved
- *    generated program reports the independent data-record count and columns,
- *    plus the last record ID beyond the former 3 MiB boundary.
+ *    attended shell approvals → completed tool stepper and bounded response.
+ *  - Business signals: the download step reports a workspace file; execution
+ *    completes after attended review; the final response reports the independent
+ *    data-record count and complete header. The synthetic file also proves its
+ *    unique last record beyond 3 MiB. Tool output previews are diagnostic only.
  *  - Setup shortcuts: managed agent/folder fixture seeding and the local CSV
  *    file are named preconditions. No provider-route mock, storage mutation,
  *    direct API trigger, or broad network mock is used.
@@ -29,6 +30,8 @@ import {
   GFS_LARGE_CSV_SIZE,
   GFS_OLD_VISUAL_LIMIT,
   type GfsLargeCsvFixture,
+  countMissingCsvColumns,
+  hasCsvDataRecordCount,
   resolveGfsLargeCsvFixture,
 } from './helpers/gfsLargeFileCsvFixture'
 import { openAgentsPage, openResourcesNavItem } from './navigationHelpers'
@@ -37,6 +40,8 @@ import { launchAndLogin } from './workflowUi'
 const OWNER_EMAIL = 'test@clerum.io'
 const RESPONSE_TIMEOUT_MS = 420_000
 const PROGRESS_TIMEOUT_MS = 45_000
+// A 16 KiB ceiling bounds header/count metadata well below the 3.8 MB input.
+const CSV_SUMMARY_MAX_BYTES = 16_384
 
 async function enterAgentChat(page: Page, agentName: string): Promise<void> {
   await openAgentsPage(page)
@@ -68,6 +73,9 @@ async function sendTaskAndWaitForReviewedShell(
 ): Promise<{ response: Locator; expandButton: Locator }> {
   const response = page.getByTestId('agent-response')
   const approval = page.getByTestId('approval-approve-btn')
+  // This is a new chat. A completed stepper from a prior turn must never
+  // satisfy the completion signal below.
+  await expect(page.getByTestId('progress-stepper')).toHaveCount(0)
 
   await page.getByTestId('chat-input').fill(prompt)
   await page.getByTestId('send-button').click()
@@ -85,7 +93,7 @@ async function sendTaskAndWaitForReviewedShell(
   await expect(details).toBeVisible()
   await details.click()
   const downloaded = completedToolStepRow(page, /gfs_download|gfs_read/)
-  let receiptPath: string
+  let receiptPath: string | undefined
   if (sourceMode === 'path') {
     // The user supplied only a human path. An observed discovery result must
     // precede the transfer; the harness never injects a resourceId into chat.
@@ -98,39 +106,48 @@ async function sendTaskAndWaitForReviewedShell(
     const firstTransfer = steps.findIndex(value => /gfs_download|gfs_read/.test(value))
     expect(firstDiscovery).toBeGreaterThanOrEqual(0)
     expect(firstTransfer).toBeGreaterThan(firstDiscovery)
-    await expect(downloaded).toHaveCount(1)
-    const downloadOutput = await stepOutput(downloaded)
-    await expect(downloadOutput).toContainText('workspace_file')
-    await expect(downloadOutput).toContainText(resourceId.replace(/-/g, ''))
-    // The bounded UI preview exposes the receipt ID before source fields. Use
-    // that ID to check the complete command and its exact file before approval.
-    const receiptId = (await downloadOutput.innerText()).match(/"id":"([A-Za-z0-9_-]+)"/)?.[1]
-    expect(receiptId).toBeTruthy()
-    receiptPath = `.gfs-downloads/input-${receiptId}/source`
+    await expect.poll(() => downloaded.count()).toBeGreaterThan(0)
+    const commandText = await commandPreview.innerText()
+    for (const row of await downloaded.all()) {
+      const downloadOutput = await stepOutput(row)
+      const outputText = await downloadOutput.innerText()
+      if (!outputText.includes('workspace_file')) continue
+      const sourceId = outputText.match(/"source"\s*:\s*\{[^}]*"resourceId"\s*:\s*"([^"]+)"/)?.[1]
+      if (sourceId?.replace(/-/g, '') !== resourceId.replace(/-/g, '')) continue
+      const receiptId = outputText.match(/"id"\s*:\s*"([A-Za-z0-9_-]+)"/)?.[1]
+      if (!receiptId) continue
+      // The store's receipt ID maps to this local path. The receipt's visible
+      // source binds the transfer to the upload; an ID alone does not prove it.
+      // The bounded preview does not certify fields such as source.version.
+      const candidatePath = `.gfs-downloads/input-${receiptId}/source`
+      if (commandText.includes(candidatePath)) receiptPath = candidatePath
+    }
+    expect(
+      receiptPath,
+      'The reviewed command must use a receipt for the uploaded source'
+    ).toBeTruthy()
   } else {
-    // The attached reference is prepared before the first model request. The
-    // model must use that local receipt without another GFS content tool call.
-    await expect(toolStepRow(page, 'gfs_download')).toHaveCount(0)
-    await expect(toolStepRow(page, 'gfs_read')).toHaveCount(0)
+    // An attached reference is prepared before the first model request. The
+    // agent may also revalidate it through the normal GFS tools.
     const path = (await commandPreview.innerText()).match(
       /\.gfs-downloads\/input-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/source/
     )?.[0]
     expect(path).toBeTruthy()
     receiptPath = path!
   }
-  await expect(commandPreview).toContainText(receiptPath)
+  await expect(commandPreview).toContainText(receiptPath!)
   await expect(completedToolStepRow(page, 'shell_exec')).toHaveCount(0)
   // The agent creates its own program from the normal business request. A
-  // reviewer inspects the complete visible command and approves once in the
-  // UI; keyword matching cannot authorize arbitrary generated code.
+  // reviewer inspects each complete visible command and approves individually
+  // in the UI; keyword matching cannot authorize arbitrary generated code.
   await test.info().attach('attended-shell-review-required', {
     contentType: 'text/plain',
-    body: 'Review the complete command and referenced script, verify read-only access to this receipt and bounded summary output, then approve once in the owned Desktop window.',
+    body: 'Review each complete command and referenced script, verify read-only access to this receipt and bounded summary output, then approve each request individually in the owned Desktop window.',
   })
-  await expect(approval).toHaveCount(0, { timeout: RESPONSE_TIMEOUT_MS })
-  await expect(completedToolStepRow(page, 'shell_exec')).toHaveCount(1, {
+  await expect(page.getByTestId('progress-stepper')).toHaveClass(/\bstatus-completed\b/, {
     timeout: RESPONSE_TIMEOUT_MS,
   })
+  await expect(approval).toHaveCount(0, { timeout: RESPONSE_TIMEOUT_MS })
   await expect(response).toBeVisible({ timeout: RESPONSE_TIMEOUT_MS })
   const expandButton = page.getByTestId('progress-expand-btn')
   await expect(expandButton).toHaveCount(1, { timeout: PROGRESS_TIMEOUT_MS })
@@ -151,12 +168,12 @@ function completedToolStepRow(page: Page, toolName: string | RegExp): Locator {
 async function stepOutput(row: Locator): Promise<Locator> {
   const toolCallId = (await row.getAttribute('data-testid'))?.slice('step-row-'.length)
   expect(toolCallId).toBeTruthy()
-  await row.click()
   const output = row
     .page()
     .getByTestId('step-output-panel')
     .and(row.page().locator(`[data-tool-call-id=${JSON.stringify(toolCallId)}]`))
     .locator('.stepper-step-output-code')
+  if (!(await output.isVisible())) await row.click()
   await expect(output).toBeVisible({ timeout: 10_000 })
   return output
 }
@@ -308,34 +325,41 @@ test.describe('GFS large-file business analysis with attended approval', () => {
           if ((await expandButton.getAttribute('aria-expanded')) === 'false')
             await expandButton.click()
           const downloadRow = completedToolStepRow(page, /gfs_download|gfs_read/)
-          await expect(downloadRow).toHaveCount(sourceMode === 'path' ? 1 : 0, { timeout: 15_000 })
           if (sourceMode === 'path') {
-            await expect(downloadRow).toBeVisible({ timeout: 15_000 })
+            expect(await downloadRow.count()).toBeGreaterThan(0)
             await expect(downloadRow.locator('.stepper-step-duration.state-error')).toHaveCount(0)
-            await expect(downloadRow).toContainText(/gfs_download|gfs_read/)
-          } else {
-            await expect(toolStepRow(page, 'gfs_download')).toHaveCount(0)
-            await expect(toolStepRow(page, 'gfs_read')).toHaveCount(0)
           }
 
           const shellRow = completedToolStepRow(page, 'shell_exec')
-          await expect(shellRow).toHaveCount(1, { timeout: 15_000 })
-          await expect(shellRow).toBeVisible({ timeout: 15_000 })
+          expect(await shellRow.count()).toBeGreaterThan(0)
           await expect(shellRow.locator('.stepper-step-duration.state-error')).toHaveCount(0)
-          const shellOutput = await stepOutput(shellRow)
-          const count = String(csv.recordCount - 1)
-          const expectedRows = new RegExp(`(?<![0-9])${count.split('').join('[.,\\s]*')}(?![0-9])`)
-          await expect(shellOutput).toContainText(expectedRows)
-          await expect(response).toContainText(expectedRows, { timeout: RESPONSE_TIMEOUT_MS })
-          if (csv.source === 'synthetic') {
-            for (const column of ['id', 'record name', 'notes,value', 'value']) {
-              await expect(shellOutput).toContainText(column)
-              await expect(response).toContainText(column)
-            }
-            await expect(shellOutput).toContainText('record-final')
-            await expect(response).toContainText('record-final')
+          for (const row of await shellRow.all()) {
+            await expect(row).toBeVisible()
           }
-          await expect(response).not.toContainText('zzzzzzzzzz')
+          // The turn is complete. Tool previews cap each line and show only
+          // the tail, so business metadata belongs to the final response.
+          const responseSummary = await response.innerText()
+          expect(
+            Buffer.byteLength(responseSummary, 'utf8'),
+            'The response must remain a bounded CSV summary'
+          ).toBeLessThanOrEqual(CSV_SUMMARY_MAX_BYTES)
+          expect(
+            hasCsvDataRecordCount(responseSummary, csv.dataRecordCount),
+            'Response must report the independent count as CSV data records'
+          ).toBe(true)
+          // Original header values remain in fixture memory. Failure messages
+          // report only the number of missing columns, never customer names.
+          expect(
+            countMissingCsvColumns(responseSummary, csv.columns),
+            'Response must include every independently parsed CSV column'
+          ).toBe(0)
+          if (csv.source === 'synthetic') {
+            await expect(response).toContainText(csv.lastRecordId!)
+          }
+          expect(
+            responseSummary.includes('zzzzzzzzzz'),
+            'Response must not dump synthetic padding'
+          ).toBe(false)
         })
 
         await test.step('source remains visible after read-only processing', async () => {
