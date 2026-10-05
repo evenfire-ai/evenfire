@@ -1651,7 +1651,15 @@ test('parity: shared container-reader branches return the same exact verdict in 
       jpeg([...SOI, 0xff, 0xd7, ...sof(0xc0, 8, 6), ...sos, ...scan, ...EOI]),
       accepted(validJpeg.length + 2, 8, 6),
     ],
+    [
+      'jpeg, SOS marker byte without the 0xFF prefix',
+      jpeg([...SOI, ...sof(0xc0, 8, 6), ...sos.slice(1), ...scan, ...EOI]),
+      invalid('JPEG marker framing is malformed'),
+    ],
     ['jpeg, short segment', jpeg([...SOI, 0xff, 0xe0, 0x00, 0x01, ...EOI]), invalid('JPEG segment is truncated')],
+    // The EOI bytes are read as the SOF length (0xFFD9), which runs past the
+    // end: the reader must return a verdict, not throw from a bounded read.
+    ['jpeg, segment length past the end', jpeg([...SOI, 0xff, 0xc0, ...EOI]), invalid('JPEG segment is truncated')],
     [
       'jpeg, short frame header',
       jpeg([...SOI, 0xff, 0xc0, 0x00, 0x04, 0x08, 0x00, ...sos, ...scan, ...EOI]),
@@ -1660,6 +1668,11 @@ test('parity: shared container-reader branches return the same exact verdict in 
     [
       'jpeg, zero width',
       jpeg([...SOI, ...sof(0xc0, 0, 6), ...sos, ...scan, ...EOI]),
+      invalid('JPEG dimensions must be positive'),
+    ],
+    [
+      'jpeg, zero height',
+      jpeg([...SOI, ...sof(0xc0, 8, 0), ...sos, ...scan, ...EOI]),
       invalid('JPEG dimensions must be positive'),
     ],
     ['jpeg, no frame header', jpeg([...SOI, ...sos, ...scan, ...EOI]), invalid('JPEG has no frame header')],

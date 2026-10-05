@@ -42,7 +42,8 @@ test.describe('Codex subscription admission', () => {
       const authentication = await authProbe
       expect(authentication.status()).toBe(401)
       await expect(page).toHaveURL(
-        url => url.pathname === '/login' && url.searchParams.get('next') === guard.next
+        // The public root owns sign-in; next retains the protected destination.
+        url => url.pathname === '/' && url.searchParams.get('next') === guard.next
       )
       await expect(page.getByLabel('Username or email')).toBeVisible()
       await expect(page.getByRole('button', { name: 'Sign in', exact: true })).toBeVisible()
