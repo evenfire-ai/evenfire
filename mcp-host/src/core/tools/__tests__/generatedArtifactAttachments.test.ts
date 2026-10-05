@@ -355,7 +355,7 @@ describe('generated internal artifact attachments', () => {
   })
 
   describe('XLSX record keys, which the sheet prints as its header', () => {
-    const secret = 'probe-redaction-value'
+    const protectedValue = 'probe-redaction-value'
 
     function xlsxTool() {
       process.env.CLERUM_OUTPUT_DIR = outputDir
@@ -377,7 +377,7 @@ describe('generated internal artifact attachments', () => {
         null,
         {
           maxBytes: 52_428_800,
-          secretEntriesProvider: () => [{ name: 'PROBE_VALUE', value: secret }],
+          secretEntriesProvider: () => [{ name: 'PROBE_VALUE', value: protectedValue }],
         }
       )
       return registry.get('clerum__generate_xlsx')!
@@ -403,7 +403,7 @@ describe('generated internal artifact attachments', () => {
     })
 
     it.each([
-      ['as sent', secret],
+      ['as sent', protectedValue],
       ['split by a control character', 'probe-red\u0007action-value'],
       ['split by an ANSI escape', 'probe-red\u001b[31maction-value'],
       ['split by half a surrogate pair', 'probe-red\uD800action-value'],
@@ -413,7 +413,7 @@ describe('generated internal artifact attachments', () => {
         sheets: [{ name: 'S', rows: [{ [key]: 'ordinary' }] }],
       })
       expect(result.is_error).toBe(false)
-      expect(sheetXml(path.join(outputDir, 'keyed.xlsx'))).toContain(secret)
+      expect(sheetXml(path.join(outputDir, 'keyed.xlsx'))).toContain(protectedValue)
       expect(result.attachments ?? []).toHaveLength(0)
     })
   })
