@@ -200,6 +200,59 @@ describe('quit drain registration', () => {
     expect(prepareForQuit).toHaveBeenCalledTimes(2)
   })
 
+  it('waits for preparation on a fresh attempt after a page cancels quit', async () => {
+    const { app, emit } = createAppHarness()
+    const firstPreparation = deferred()
+    const retryPreparation = deferred()
+    const prepareForQuit = vi
+      .fn<() => Promise<void>>()
+      .mockImplementationOnce(() => firstPreparation.promise)
+      .mockImplementationOnce(() => retryPreparation.promise)
+    const cancelQuitPreparation = vi.fn()
+    registerQuitDrain(
+      app as unknown as Parameters<typeof registerQuitDrain>[0],
+      prepareForQuit,
+      cancelQuitPreparation
+    )
+
+    emit('before-quit', { preventDefault: vi.fn() })
+    await Promise.resolve()
+    await nextImmediate()
+    expect(app.quit).not.toHaveBeenCalled()
+    firstPreparation.resolve()
+    await Promise.resolve()
+    await nextImmediate()
+    expect(app.quit).toHaveBeenCalledOnce()
+
+    let willPreventUnload: ((event: { defaultPrevented: boolean }) => void) | undefined
+    emit(
+      'browser-window-created',
+      {},
+      {
+        isDestroyed: () => false,
+        webContents: {
+          on: vi.fn((_event: string, listener: typeof willPreventUnload) => {
+            willPreventUnload = listener
+          }),
+        },
+      }
+    )
+    willPreventUnload?.({ defaultPrevented: false })
+    await nextImmediate()
+    expect(cancelQuitPreparation).toHaveBeenCalledOnce()
+
+    emit('before-quit', { preventDefault: vi.fn() })
+    await Promise.resolve()
+    expect(prepareForQuit).toHaveBeenCalledTimes(2)
+    await nextImmediate()
+    expect(app.quit).toHaveBeenCalledOnce()
+
+    retryPreparation.resolve()
+    await Promise.resolve()
+    await nextImmediate()
+    expect(app.quit).toHaveBeenCalledTimes(2)
+  })
+
   it('reopens quit preparation when a listener prevents resumed before-quit', async () => {
     const { app, emit } = createAppHarness()
     const prepareForQuit = vi.fn(async () => undefined)
