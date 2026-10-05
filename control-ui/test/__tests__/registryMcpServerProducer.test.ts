@@ -53,3 +53,17 @@ it('rejects a managed write through a spec alias in the registry producer', () =
     /unsupported registry managed write.*specAlias\['managed'\] = false/i
   )
 })
+
+it('rejects a managed write through an array-destructured spec alias', () => {
+  const source = readFileSync(REGISTRY_PATH, 'utf8')
+  const marker = '        // Stdio servers may need a custom command'
+  expect(source).toContain(marker)
+  const changedSource = source.replace(
+    marker,
+    `        const [specAlias] = [mcpServerSpec]\n        specAlias['managed'] = false\n\n${marker}`
+  )
+
+  expect(() => registryMcpServerManaged(changedSource)).toThrow(
+    /unsupported registry managed write/i
+  )
+})

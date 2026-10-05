@@ -18,6 +18,232 @@ const GATEWAY_PATH = path.resolve(
   '../../../control-api/test/mockGateway.ts'
 )
 
+function isFunctionLike(node: ts.Node): node is ts.FunctionLikeDeclaration {
+  return (
+    ts.isFunctionDeclaration(node) ||
+    ts.isFunctionExpression(node) ||
+    ts.isArrowFunction(node) ||
+    ts.isMethodDeclaration(node) ||
+    ts.isGetAccessorDeclaration(node) ||
+    ts.isSetAccessorDeclaration(node) ||
+    ts.isConstructorDeclaration(node)
+  )
+}
+
+/** Standard globals the producer scope may use directly; everything else it
+ * references resolves to a permissive stub. */
+const SCOPE_GLOBAL_WHITELIST = new Set([
+  'Object',
+  'Array',
+  'Reflect',
+  'Error',
+  'TypeError',
+  'RangeError',
+  'JSON',
+  'Math',
+  'Promise',
+  'Symbol',
+  'String',
+  'Number',
+  'Boolean',
+  'Map',
+  'Set',
+  'Date',
+  'RegExp',
+  'URL',
+  'console',
+  'crypto',
+  'isNaN',
+  'parseInt',
+  'parseFloat',
+  'globalThis',
+  'undefined',
+])
+
+/** Permissive stand-in for any producer binding whose real value the fixture
+ * cannot evaluate (imports, request state, config). Truthy and callable so
+ * guard calls take their branch — the conservative direction for write
+ * detection; numeric coercion yields 1 so `length > 0`-style guards run too.
+ * `then` resolves to undefined so a stray `await` over a stub cannot hang. */
+function createScopeStub(): unknown {
+  const stub: unknown = new Proxy(function scopeStub() {}, {
+    get(_target, prop) {
+      if (prop === Symbol.toPrimitive) return (hint: string) => (hint === 'number' ? 1 : '')
+      if (prop === 'then') return undefined
+      if (prop === Symbol.iterator) return function* emptyIterator() {}
+      if (prop === 'toString') return () => ''
+      if (prop === 'valueOf') return () => 1
+      return stub
+    },
+    apply() {
+      return stub as object
+    },
+    construct() {
+      return stub as object
+    },
+    has() {
+      return true
+    },
+  })
+  return stub
+}
+
+/** Executes the producer's spec-construction scope — from the
+ * `mcpServerSpec` declaration through the end of its enclosing function —
+ * with the spec object wrapped in a recording proxy. Identifier aliases,
+ * array/object destructuring, computed and dotted syntax, reflection, and
+ * same-scope helper calls all funnel through the proxy by object identity,
+ * so managed-write detection no longer depends on enumerating syntaxes.
+ * Handler-level returns are neutralized (their side effects kept) so every
+ * statement still executes, and awaits are stripped because every awaited
+ * callee resolves to a stub. Fails closed, naming the failure, when the
+ * scope throws or references a binding even a stub cannot satisfy. */
+function executeRegistrySpecScope(
+  specDeclaration: ts.VariableDeclaration,
+  source: ts.SourceFile
+): void {
+  const initializer = specDeclaration.initializer
+  if (!initializer) return
+  let handler: ts.Node | undefined = specDeclaration
+  while (handler && !isFunctionLike(handler)) handler = handler.parent
+  if (!handler || !isFunctionLike(handler) || !handler.body || !ts.isBlock(handler.body)) return
+  const body = handler.body
+  const declIndex = body.statements.findIndex(
+    statement => statement.pos <= specDeclaration.pos && specDeclaration.end <= statement.end
+  )
+  if (declIndex < 0) return
+
+  const start = body.statements[declIndex].getStart(source)
+  const end = body.statements[body.statements.length - 1].end
+  type Edit = { pos: number; end: number; text: string | null }
+  const edits: Edit[] = [{ pos: initializer.pos, end: initializer.end, text: null }]
+
+  const declaredNames = new Set<string>()
+  const referencedNames = new Set<string>()
+
+  function collectBindingNames(name: ts.BindingName): void {
+    if (ts.isIdentifier(name)) declaredNames.add(name.text)
+    else if (ts.isArrayBindingPattern(name))
+      name.elements.forEach(element => {
+        if (ts.isBindingElement(element)) collectBindingNames(element.name)
+      })
+    else if (ts.isObjectBindingPattern(name))
+      name.elements.forEach(element => collectBindingNames(element.name))
+  }
+
+  function collect(node: ts.Node, depth: number): void {
+    if (ts.isVariableDeclaration(node)) collectBindingNames(node.name)
+    if ((ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) && node.name) {
+      declaredNames.add(node.name.text)
+    }
+    if (isFunctionLike(node))
+      node.parameters.forEach(parameter => collectBindingNames(parameter.name))
+    if (ts.isCatchClause(node) && node.variableDeclaration)
+      collectBindingNames(node.variableDeclaration.name)
+    if (
+      (ts.isForStatement(node) || ts.isForOfStatement(node) || ts.isForInStatement(node)) &&
+      node.initializer &&
+      ts.isVariableDeclarationList(node.initializer)
+    ) {
+      node.initializer.declarations.forEach(declaration => collectBindingNames(declaration.name))
+    }
+    if (ts.isIdentifier(node)) {
+      const parent = node.parent
+      const isPropertyName =
+        (ts.isPropertyAccessExpression(parent) && parent.name === node) ||
+        ((ts.isPropertyAssignment(parent) ||
+          ts.isMethodDeclaration(parent) ||
+          ts.isGetAccessorDeclaration(parent) ||
+          ts.isSetAccessorDeclaration(parent)) &&
+          parent.name === node) ||
+        (ts.isBindingElement(parent) && parent.propertyName === node)
+      const isReference =
+        ts.isShorthandPropertyAssignment(parent) ||
+        ts.isComputedPropertyName(parent) ||
+        (!isPropertyName && !ts.isBindingElement(parent))
+      if (isReference && !declaredNames.has(node.text)) referencedNames.add(node.text)
+    }
+    if (ts.isAwaitExpression(node)) {
+      // Strip the `await` keyword, keeping the operand.
+      edits.push({ pos: node.getStart(source), end: node.expression.getStart(source), text: '' })
+    }
+    if (ts.isReturnStatement(node) && depth === 0) {
+      if (node.expression) {
+        edits.push({
+          pos: node.getStart(source),
+          end: node.expression.getStart(source),
+          text: 'void ',
+        })
+      } else {
+        edits.push({ pos: node.getStart(source), end: node.end, text: ';void 0;' })
+      }
+    }
+    const nextDepth = isFunctionLike(node) ? depth + 1 : depth
+    ts.forEachChild(node, child => collect(child, nextDepth))
+  }
+  for (const statement of body.statements.slice(declIndex)) collect(statement, 0)
+
+  edits.sort((a, b) => b.pos - a.pos)
+  let code = source.text.slice(start, end)
+  for (const edit of edits) {
+    if (edit.text === null) {
+      code =
+        code.slice(0, edit.pos - start) +
+        '__specProxy(' +
+        source.text.slice(edit.pos, edit.end) +
+        ')' +
+        code.slice(edit.end - start)
+    } else {
+      code = code.slice(0, edit.pos - start) + edit.text + code.slice(edit.end - start)
+    }
+  }
+
+  const envNames = [...referencedNames]
+    .filter(name => !SCOPE_GLOBAL_WHITELIST.has(name) && name !== 'this' && name !== 'arguments')
+    .sort()
+  let managedMutation: { op: string; value: unknown } | undefined
+  const specProxy = (target: Record<string, unknown>): Record<string, unknown> =>
+    new Proxy(target, {
+      set(t, prop, value) {
+        if (prop === 'managed') managedMutation = { op: 'set', value }
+        Reflect.set(t, prop, value)
+        return true
+      },
+      defineProperty(t, prop, description) {
+        if (prop === 'managed') managedMutation = { op: 'defineProperty', value: description.value }
+        Object.defineProperty(t, prop, description)
+        return true
+      },
+      deleteProperty(t, prop) {
+        if (prop === 'managed') managedMutation = { op: 'delete', value: undefined }
+        Reflect.deleteProperty(t, prop)
+        return true
+      },
+    })
+  const compiledScope = ts.transpileModule(code, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None },
+  }).outputText
+  try {
+    const runner = new Function(
+      '__specProxy',
+      ...envNames,
+      `return (() => {\n${compiledScope}\n})()`
+    )
+    runner(specProxy, ...envNames.map(() => createScopeStub()))
+  } catch (err) {
+    throw new Error(
+      `Registry producer scope execution failed: ${err instanceof Error ? err.message : String(err)}`
+    )
+  }
+  if (managedMutation) {
+    throw new Error(
+      `Unsupported registry managed write executed via ${managedMutation.op}: managed = ${String(
+        managedMutation.value
+      )}`
+    )
+  }
+}
+
 /** Execute the registry install producer's Secret-name and envSecret expressions. */
 function registrySecretFactory(registrySource?: string): {
   name: (serverName: string) => string
@@ -39,6 +265,7 @@ function registrySecretFactory(registrySource?: string): {
   const registryAnnotations: ts.Expression[] = []
   const registryResourceMetadata: ts.Expression[] = []
   let catalogAnnotations: ts.FunctionDeclaration | undefined
+  let specDeclaration: ts.VariableDeclaration | undefined
 
   /** Assignment operators: plain, compound, and logical forms. */
   function isAssignmentOperator(kind: ts.SyntaxKind): boolean {
@@ -182,6 +409,7 @@ function registrySecretFactory(registrySource?: string): {
     if (ts.isVariableDeclaration(node) && node.initializer) {
       const variableName = node.name.getText(source)
       if (variableName === 'mcpServerSpec' && ts.isObjectLiteralExpression(node.initializer)) {
+        specDeclaration = node
         let managedDerived = false
         for (const property of node.initializer.properties) {
           if (ts.isSpreadAssignment(property)) {
@@ -308,6 +536,8 @@ function registrySecretFactory(registrySource?: string): {
     .filter(candidate => candidate.pos < registryAnnotations[0].pos)
     .at(-1)
   if (!labels) throw new Error('Registry labels producer changed; rederive the frontend fixture')
+  // Execution semantics: total managed-write detection for the spec scope.
+  executeRegistrySpecScope(specDeclaration, source)
   const gatewaySource = ts.createSourceFile(
     GATEWAY_PATH,
     readFileSync(GATEWAY_PATH, 'utf8'),
