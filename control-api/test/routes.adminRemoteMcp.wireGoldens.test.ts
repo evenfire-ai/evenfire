@@ -303,8 +303,9 @@ describe('remote MCP wire goldens — POST / (install)', () => {
 
   it('install.dcrRegistrationRejected: the AS refused the registration (HTTP 400) → 400', async () => {
     const { db } = makeInMemoryDynamicClientsDb()
-    // Recorded from Vercel (https://api.vercel.com/login/oauth/register), which only
-    // accepts allow-listed redirect URIs for DCR.
+    // The rejection body Vercel (https://api.vercel.com/login/oauth/register) returns,
+    // since it only accepts allow-listed redirect URIs for DCR, replayed against the
+    // Atlassian pilot's registration endpoint.
     const { transport } = makeDcrTransport({
       registrationEndpoint: ATLASSIAN_REGISTRATION,
       responseJson: JSON.stringify({

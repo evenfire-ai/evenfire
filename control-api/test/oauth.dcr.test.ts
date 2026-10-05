@@ -322,6 +322,30 @@ describe('registerDynamicClient (RFC 7591, effectful via injected pinned transpo
       expect(error.errorDescription!.length).toBeLessThanOrEqual(DCR_ERROR_DESCRIPTION_MAX)
     })
 
+    it('the description drops invisible format characters (bidi overrides, zero-width)', async () => {
+      const error = await rejectWith(
+        JSON.stringify({
+          error: 'invalid_client_metadata',
+          error_description: 'safe\u202e txet desrever\u202c and\u200b hidden',
+        })
+      )
+      if (error.kind !== 'registration_rejected') throw new Error(error.kind)
+      expect(error.errorDescription).toBe('safe txet desrever and hidden')
+    })
+
+    it('truncation never splits a surrogate pair', async () => {
+      const error = await rejectWith(
+        JSON.stringify({
+          error: 'invalid_client_metadata',
+          // The emoji's high surrogate lands exactly on the last kept code unit.
+          error_description: `${'a'.repeat(DCR_ERROR_DESCRIPTION_MAX - 2)}\u{1F600}${'b'.repeat(50)}`,
+        })
+      )
+      if (error.kind !== 'registration_rejected') throw new Error(error.kind)
+      expect(error.errorDescription!.isWellFormed()).toBe(true)
+      expect(error.errorDescription).toBe(`${'a'.repeat(DCR_ERROR_DESCRIPTION_MAX - 2)}…`)
+    })
+
     it('a blank description is omitted', async () => {
       const error = await rejectWith(
         JSON.stringify({ error: 'invalid_client_metadata', error_description: ' \n\t ' })

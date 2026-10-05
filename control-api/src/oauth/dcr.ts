@@ -194,6 +194,12 @@ export const DCR_ERROR_DESCRIPTION_MAX = 300
 // Anything else is not a code we can show or log as one.
 const RFC6749_ERROR_CODE_RE = /^[\x20\x21\x23-\x5b\x5d-\x7e]{1,64}$/
 
+/** `value.slice(0, end)`, minus a high surrogate whose pair the cut would split. */
+function sliceWholeCodePoints(value: string, end: number): string {
+  const cut = value.slice(0, end)
+  return /[\uD800-\uDBFF]$/.test(cut) ? cut.slice(0, -1) : cut
+}
+
 /**
  * The RFC 6749 `error` / `error_description` of a rejected registration, bounded for
  * relay to the operator: the body is third-party content, so the code must match the
@@ -216,14 +222,18 @@ function boundedRegistrationError(bodyText: string): {
     result.error = parsed.error
   }
   if (typeof parsed.error_description === 'string') {
+    // Format characters (bidi overrides, zero-width) are invisible but can reorder
+    // how the operator sees the text, so they are dropped; control characters become
+    // spaces so line breaks still separate words.
     const description = parsed.error_description
+      .replace(/\p{Cf}/gu, '')
       .replace(/\p{Cc}/gu, ' ')
       .replace(/\s+/g, ' ')
       .trim()
     if (description.length > 0) {
       result.errorDescription =
         description.length > DCR_ERROR_DESCRIPTION_MAX
-          ? `${description.slice(0, DCR_ERROR_DESCRIPTION_MAX - 1).trimEnd()}…`
+          ? `${sliceWholeCodePoints(description, DCR_ERROR_DESCRIPTION_MAX - 1).trimEnd()}…`
           : description
     }
   }

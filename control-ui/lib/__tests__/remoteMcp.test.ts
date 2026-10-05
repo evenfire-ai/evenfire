@@ -439,6 +439,26 @@ describe('mapRemoteInstallError', () => {
       expect(copy).not.toContain('registration_rejected')
     })
 
+    it('drops invisible format characters so the banner cannot be visually reordered', () => {
+      expect(
+        rejected({
+          status: 400,
+          errorDescription: 'safe\u202e txet desrever\u202c and\u200b hidden',
+        })
+      ).toBe(
+        'The authorization server rejected client registration (HTTP 400): "safe txet desrever and hidden"'
+      )
+    })
+
+    it('truncation never splits a surrogate pair', () => {
+      const copy = rejected({
+        status: 400,
+        errorDescription: `${'a'.repeat(298)}\u{1F600}${'b'.repeat(50)}`,
+      })
+      expect(copy.isWellFormed()).toBe(true)
+      expect(copy).toContain(`"${'a'.repeat(298)}…"`)
+    })
+
     it('bounds third-party text even if the server relays it unbounded', () => {
       const copy = rejected({
         status: 400,

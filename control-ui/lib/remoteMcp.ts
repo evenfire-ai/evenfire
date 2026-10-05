@@ -333,11 +333,18 @@ const PROVIDER_DESCRIPTION_MAX = 300
 
 function boundedProviderText(value: unknown, max: number): string {
   if (typeof value !== 'string') return ''
+  // Drop invisible format characters (bidi overrides, zero-width) that could reorder
+  // the banner; control characters become spaces so line breaks still separate words.
   const text = value
+    .replace(/\p{Cf}/gu, '')
     .replace(/\p{Cc}/gu, ' ')
     .replace(/\s+/g, ' ')
     .trim()
-  return text.length > max ? `${text.slice(0, max - 1).trimEnd()}…` : text
+  if (text.length <= max) return text
+  // Never cut between the two halves of a surrogate pair.
+  let cut = text.slice(0, max - 1)
+  if (/[\uD800-\uDBFF]$/.test(cut)) cut = cut.slice(0, -1)
+  return `${cut.trimEnd()}…`
 }
 
 function describeRegistrationRejected(
