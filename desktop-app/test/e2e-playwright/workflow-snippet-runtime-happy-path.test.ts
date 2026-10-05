@@ -812,7 +812,7 @@ async function downloadArtifactFromControlUiRun(
   await openRun.click()
   await expect(page).toHaveURL(
     new RegExp(
-      `^${escapeRegExp(CONTROL_UI)}/plugins/${RECIPE_NS}/${escapeRegExp(
+      `^${escapeRegExp(CONTROL_UI_ORIGIN)}/plugins/${RECIPE_NS}/${escapeRegExp(
         recipeName
       )}/runs/${escapeRegExp(runId)}$`
     ),
