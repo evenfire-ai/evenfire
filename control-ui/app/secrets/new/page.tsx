@@ -24,6 +24,7 @@ import {
   getRecipes,
   getRegistryCredentialSchema,
 } from '@lib/api'
+import { isValidDNSSubdomain } from '@lib/k8sValidation'
 import { createEmptyLlmKeyDraft, validateLlmSecretData } from '@lib/llm'
 import {
   areRequiredCredentialRowsComplete,
@@ -34,6 +35,10 @@ import type { CredentialDraftRow } from '@lib/registryCredentialDraft.types'
 const HOST_SECRET_LABEL_KEY = 'clerum.io/host-secret'
 const HOST_SECRET_LABEL_VALUE = 'true'
 const MCP_SECRET_NAME_PATTERN = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/
+const LLM_SECRET_NAME_FIELD_ID = 'llm-secret-name'
+const LLM_SECRET_NAME_ERROR_ID = `${LLM_SECRET_NAME_FIELD_ID}-error`
+const LLM_SECRET_NAME_ERROR =
+  'Secret name must be a Kubernetes DNS subdomain: dot-separated labels of lowercase letters, numbers, and hyphens — max 63 characters per label, 253 in total.'
 
 type SecretScope = 'llm' | 'mcp' | 'recipe'
 
@@ -220,14 +225,22 @@ function CreateSecretPageContent() {
         : recipeRows.filter(row => row.secretKey.trim().length > 0 && row.value.trim().length > 0)
   const currentCanSubmit =
     scope === 'llm' ? llmCanSubmit : scope === 'mcp' ? mcpCanSubmit : recipeCanSubmit
-  const activeNameInvalid =
-    activeSecretName.length > 0 &&
-    (!MCP_SECRET_NAME_PATTERN.test(activeSecretName) || activeSecretName.length > 253)
+  // One name-validity predicate per scope, shared by the step-0 wizard gate,
+  // the inline field error, and the final save guard. LLM secrets POST to
+  // /admin/secrets, which defers to the Kubernetes API server's DNS-subdomain
+  // rules (dot-separated labels, ≤63 per label, ≤253 total) — the same
+  // semantics as lib/k8sValidation's isValidDNSSubdomain. The MCP and recipe
+  // routes validate server-side against the stricter label charset, so their
+  // gates stay aligned with what their own API accepts.
+  const activeNameValid =
+    scope === 'llm'
+      ? isValidDNSSubdomain(activeSecretName)
+      : MCP_SECRET_NAME_PATTERN.test(activeSecretName) && activeSecretName.length <= 253
+  const activeNameInvalid = activeSecretName.length > 0 && !activeNameValid
   const canContinue =
     step === 0
       ? activeSecretName.length > 0 &&
-        MCP_SECRET_NAME_PATTERN.test(activeSecretName) &&
-        activeSecretName.length <= 253 &&
+        activeNameValid &&
         (scope !== 'recipe' ||
           recipeOwnershipKind === 'shared' ||
           recipeOwnerName.trim().length > 0)
@@ -261,10 +274,8 @@ function CreateSecretPageContent() {
       setError('Secret name is required.')
       return
     }
-    if (!MCP_SECRET_NAME_PATTERN.test(secretName) || secretName.length > 253) {
-      setError(
-        'Secret name must be lowercase alphanumeric and hyphens, and must start/end with an alphanumeric character.'
-      )
+    if (!isValidDNSSubdomain(secretName)) {
+      setError(LLM_SECRET_NAME_ERROR)
       return
     }
     const stringData = Object.fromEntries(
@@ -456,19 +467,18 @@ function CreateSecretPageContent() {
               {step === 0 && scope === 'llm' ? (
                 <div className="cu-form-stack cu-agent-form-stack">
                   <Field
-                    description="Kubernetes resource name: lowercase alphanumeric and hyphens, max 253 chars."
-                    error={
-                      activeNameInvalid
-                        ? 'Name must match the Kubernetes DNS name format.'
-                        : undefined
-                    }
-                    htmlFor="llm-secret-name"
+                    description="Kubernetes resource name: dot-separated labels of lowercase alphanumeric and hyphens — max 63 chars per label, 253 in total."
+                    error={activeNameInvalid ? LLM_SECRET_NAME_ERROR : undefined}
+                    errorId={LLM_SECRET_NAME_ERROR_ID}
+                    htmlFor={LLM_SECRET_NAME_FIELD_ID}
                     label="Secret name"
                     required
                   >
                     <TextInput
-                      id="llm-secret-name"
+                      id={LLM_SECRET_NAME_FIELD_ID}
                       invalid={activeNameInvalid}
+                      aria-invalid={activeNameInvalid || undefined}
+                      aria-describedby={activeNameInvalid ? LLM_SECRET_NAME_ERROR_ID : undefined}
                       value={llmName}
                       onChange={event => setLlmName(event.target.value)}
                       placeholder="secret-name"
@@ -503,6 +513,7 @@ function CreateSecretPageContent() {
                         ? 'Name must match the Kubernetes DNS name format.'
                         : undefined
                     }
+                    errorId="mcp-secret-name-error"
                     htmlFor="mcp-secret-name"
                     label="Secret name"
                     required
@@ -510,6 +521,8 @@ function CreateSecretPageContent() {
                     <TextInput
                       id="mcp-secret-name"
                       invalid={activeNameInvalid}
+                      aria-invalid={activeNameInvalid || undefined}
+                      aria-describedby={activeNameInvalid ? 'mcp-secret-name-error' : undefined}
                       monospace
                       value={mcpName}
                       onChange={event => setMcpName(event.target.value)}
@@ -605,6 +618,7 @@ function CreateSecretPageContent() {
                         ? 'Name must match the Kubernetes DNS name format.'
                         : undefined
                     }
+                    errorId="recipe-secret-name-error"
                     htmlFor="recipe-secret-name"
                     label="Secret name"
                     required
@@ -612,6 +626,8 @@ function CreateSecretPageContent() {
                     <TextInput
                       id="recipe-secret-name"
                       invalid={activeNameInvalid}
+                      aria-invalid={activeNameInvalid || undefined}
+                      aria-describedby={activeNameInvalid ? 'recipe-secret-name-error' : undefined}
                       monospace
                       value={recipeName}
                       onChange={event => setRecipeName(event.target.value)}

@@ -83,20 +83,70 @@ describe('Create LLM secret flow', () => {
     })
   })
 
-  it('blocks Continue on a name outside the Kubernetes DNS format', () => {
+  it('accepts a valid dotted DNS-subdomain name and submits it', async () => {
+    render(<CreateSecretPage />)
+    await walkToValuesStep('team.primary')
+    addProvider('OpenAI')
+    fireEvent.change(screen.getByLabelText(/^OpenAI API key/i), {
+      target: { value: 'sk-live-123' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Create secret' }))
+    await waitFor(() => {
+      expect(apiSend).toHaveBeenCalledWith(
+        'POST',
+        '/api/v1/admin/secrets',
+        expect.objectContaining({ name: 'team.primary' })
+      )
+    })
+  })
+
+  it('accepts a 63-character label and a 253-character dotted name at the boundary', () => {
+    render(<CreateSecretPage />)
+    fireEvent.change(secretNameInput(), { target: { value: 'a'.repeat(63) } })
+    expect(screen.getByRole('button', { name: 'Continue' })).toBeEnabled()
+    const atLimit = `${'a'.repeat(63)}.${'a'.repeat(63)}.${'a'.repeat(63)}.${'a'.repeat(61)}`
+    expect(atLimit.length).toBe(253)
+    fireEvent.change(secretNameInput(), { target: { value: atLimit } })
+    expect(screen.getByRole('button', { name: 'Continue' })).toBeEnabled()
+  })
+
+  it('blocks Continue on a name outside the DNS-subdomain rules without submitting', () => {
     render(<CreateSecretPage />)
     fireEvent.change(secretNameInput(), { target: { value: 'My Secret!' } })
-    const field = secretNameInput().closest('.cu-field')
-    expect(field).not.toBeNull()
-    expect(screen.getByText('Name must match the Kubernetes DNS name format.')).toBeInTheDocument()
+    expect(screen.getByText(/must be a Kubernetes DNS subdomain/i)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Continue' })).toBeDisabled()
+    expect(apiSend).not.toHaveBeenCalled()
+  })
+
+  it('rejects a 64-character label and a 254-character dotted name', () => {
+    render(<CreateSecretPage />)
+    fireEvent.change(secretNameInput(), { target: { value: 'a'.repeat(64) } })
+    expect(screen.getByText(/must be a Kubernetes DNS subdomain/i)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Continue' })).toBeDisabled()
+    const overLimit = `${'a'.repeat(63)}.${'a'.repeat(63)}.${'a'.repeat(63)}.${'a'.repeat(62)}`
+    expect(overLimit.length).toBe(254)
+    fireEvent.change(secretNameInput(), { target: { value: overLimit } })
+    expect(screen.getByText(/must be a Kubernetes DNS subdomain/i)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Continue' })).toBeDisabled()
   })
 
-  it('blocks Continue on a name longer than 253 characters', () => {
+  it('exposes the invalid name to screen readers via aria-invalid and aria-describedby', () => {
     render(<CreateSecretPage />)
-    fireEvent.change(secretNameInput(), { target: { value: `${'a'.repeat(250)}-extra` } })
-    expect(screen.getByText('Name must match the Kubernetes DNS name format.')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Continue' })).toBeDisabled()
+    const input = secretNameInput()
+    // Valid (or empty): no invalid state announced.
+    expect(input).not.toHaveAttribute('aria-invalid')
+    fireEvent.change(input, { target: { value: 'Not A Name' } })
+    const invalidInput = secretNameInput()
+    expect(invalidInput).toHaveAttribute('aria-invalid', 'true')
+    const describedBy = invalidInput.getAttribute('aria-describedby')
+    expect(describedBy).toBeTruthy()
+    const errorElement = document.getElementById(describedBy ?? '')
+    expect(errorElement).not.toBeNull()
+    expect(errorElement?.textContent).toMatch(/must be a Kubernetes DNS subdomain/i)
+    // Recovery clears the announcement.
+    fireEvent.change(invalidInput, { target: { value: 'team.primary' } })
+    expect(secretNameInput()).not.toHaveAttribute('aria-invalid')
+    expect(secretNameInput()).not.toHaveAttribute('aria-describedby')
   })
 
   it('re-gates the flow when the name is invalidated after Back from step 2', async () => {
@@ -104,7 +154,7 @@ describe('Create LLM secret flow', () => {
     await walkToValuesStep('chatllm-api-keys')
     fireEvent.click(screen.getByRole('button', { name: 'Back' }))
     fireEvent.change(secretNameInput(), { target: { value: 'Not A Name' } })
-    expect(screen.getByText('Name must match the Kubernetes DNS name format.')).toBeInTheDocument()
+    expect(screen.getByText(/must be a Kubernetes DNS subdomain/i)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Continue' })).toBeDisabled()
     expect(apiSend).not.toHaveBeenCalled()
   })
