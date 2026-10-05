@@ -76,6 +76,23 @@ describe('handleApprovalRoute — alwaysApprove consent', () => {
     )
   })
 
+  it('records a denial even when it carries a non-boolean alwaysApprove', async () => {
+    const approvalHandler = vi.fn().mockResolvedValue({ success: true })
+    const out = makeRes()
+
+    await handleApprovalRoute(
+      makeReq({ requestId: 'req-1', alwaysApprove: 'true' }),
+      out.res,
+      false,
+      makeHandlers({ approvalHandler })
+    )
+
+    expect(out.statusCode).toBe(200)
+    expect(approvalHandler).toHaveBeenCalledWith(
+      expect.objectContaining({ approved: false, alwaysApprove: false })
+    )
+  })
+
   it('never records persistent consent on a denial', async () => {
     const approvalHandler = vi.fn().mockResolvedValue({ success: true })
     const out = makeRes()
