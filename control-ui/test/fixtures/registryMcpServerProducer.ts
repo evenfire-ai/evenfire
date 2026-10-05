@@ -81,18 +81,83 @@ function registrySecretFactory(registrySource?: string): {
     return targets
   }
 
+  /** Identifiers that can reference the spec object at the create call: the
+   * producer binding plus every local copy through an identifier chain
+   * (`const specAlias = mcpServerSpec`, `alias = specAlias`, transitively,
+   * re-scanned to a fixpoint so copy order never matters). Copies through
+   * object literals, property holders, or function boundaries are not
+   * modeled; writes that spell `.managed` on any receiver still fail
+   * closed independently of this set. */
+  function collectSpecObjectIdentifiers(): Set<string> {
+    const specIdentifiers = new Set(['mcpServerSpec'])
+    let grew = true
+    while (grew) {
+      grew = false
+      function discover(node: ts.Node): void {
+        if (
+          ts.isVariableDeclaration(node) &&
+          ts.isIdentifier(node.name) &&
+          node.initializer !== undefined &&
+          ts.isIdentifier(node.initializer) &&
+          specIdentifiers.has(node.initializer.getText(source)) &&
+          !specIdentifiers.has(node.name.getText(source))
+        ) {
+          specIdentifiers.add(node.name.getText(source))
+          grew = true
+        }
+        if (
+          ts.isBinaryExpression(node) &&
+          node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+          ts.isIdentifier(node.left) &&
+          ts.isIdentifier(node.right) &&
+          specIdentifiers.has(node.right.getText(source)) &&
+          !specIdentifiers.has(node.left.getText(source))
+        ) {
+          specIdentifiers.add(node.left.getText(source))
+          grew = true
+        }
+        ts.forEachChild(node, discover)
+      }
+      discover(source)
+    }
+    return specIdentifiers
+  }
+
+  const specObjectIdentifiers = collectSpecObjectIdentifiers()
+
+  /** Unwraps expression wrappers (`(...)`, `x!`, `x as T`) around a receiver. */
+  function unwrapReceiver(node: ts.Expression): ts.Expression {
+    while (
+      ts.isParenthesizedExpression(node) ||
+      ts.isNonNullExpression(node) ||
+      ts.isAsExpression(node) ||
+      ts.isTypeAssertionExpression(node) ||
+      ts.isSatisfiesExpression(node)
+    ) {
+      node = node.expression
+    }
+    return node
+  }
+
+  function isSpecObjectIdentifier(node: ts.Expression): boolean {
+    return ts.isIdentifier(node) && specObjectIdentifiers.has(node.getText(source))
+  }
+
   /** A target whose write can change the `managed` value this fixture
    * derives: the whole `mcpServerSpec` binding (rebinding swaps every
    * field), any `*.managed` member write (any receiver — an alias like
    * `const s = mcpServerSpec` still writes the same field), or any
-   * computed key on the spec (the key may resolve to "managed" at
-   * runtime, so every one fails closed). */
+   * computed key on the spec or one of its tracked aliases (the key may
+   * resolve to "managed" at runtime, so every one fails closed). */
   function writesRegistryManaged(target: ts.Node): boolean {
+    // A whole-binding write rejects only the extracted binding itself;
+    // rebinding an alias cannot mutate the spec object.
     if (ts.isIdentifier(target)) return target.getText(source) === 'mcpServerSpec'
     if (ts.isPropertyAccessExpression(target)) return target.name.getText(source) === 'managed'
-    return (
-      ts.isElementAccessExpression(target) && target.expression.getText(source) === 'mcpServerSpec'
-    )
+    if (ts.isElementAccessExpression(target)) {
+      return isSpecObjectIdentifier(unwrapReceiver(target.expression))
+    }
+    return false
   }
 
   /** Records the construct when any target it writes can change `managed`.
@@ -190,7 +255,8 @@ function registrySecretFactory(registrySource?: string): {
         'Reflect.set',
         'Reflect.defineProperty',
       ].includes(node.expression.getText(source)) &&
-      writesRegistryManaged(node.arguments[0])
+      (isSpecObjectIdentifier(unwrapReceiver(node.arguments[0])) ||
+        writesRegistryManaged(node.arguments[0]))
     ) {
       unsupportedManagedWrites.push(node)
     }
