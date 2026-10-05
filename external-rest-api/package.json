@@ -1,6 +1,6 @@
 {
   "name": "clerum-external-rest-api",
-  "version": "0.1.93",
+  "version": "0.1.96",
   "description": "External REST API for profile, team management, and RPC token brokerage",
   "main": "dist/main.js",
   "engines": {
@@ -12,10 +12,12 @@
     "dev": "tsx src/main.ts",
     "test": "vitest run --no-file-parallelism",
     "test:run": "vitest run --no-file-parallelism",
+    "typecheck:jwt-contract": "tsc -p tsconfig.jwt-contract-tests.json --noEmit",
     "test:e2e": "npm --prefix ../tests/e2e run test:external-rest-api-e2e",
     "test:e2e:watch": "npm --prefix ../tests/e2e run test:external-rest-api-e2e:watch"
   },
   "dependencies": {
+    "@clerum/jwt-key-policy": "file:../packages/jwt-key-policy",
     "cors": "^2.8.5",
     "express": "^4.21.2",
     "express-rate-limit": "^8.5.1",
