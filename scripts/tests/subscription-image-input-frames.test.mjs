@@ -12,7 +12,7 @@ import test from 'node:test'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { inputFrames, sealSourceManifest } from '../e2e/run-subscription-image-journeys.mjs'
 import { buildRemainingFixtureFrame, createRemainingPixelAssets, remainingAssetPath } from '../e2e/prepare-subscription-remaining-fixtures.mjs'
-import { decodeInChild } from '../e2e/fixtures/subscription-image-decoder.mjs'
+import { DECODER_TIMEOUT_MS, decodeInChild } from '../e2e/fixtures/subscription-image-decoder.mjs'
 import { digest, expectedJourneyNames, resolveSuite } from './lib/subscription-image-runner-contract.mjs'
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
@@ -158,8 +158,8 @@ async function nativeReceiver(t, admission, root, deadlineMs = RUNNER_INPUT_DEAD
       for (const notify of [...waiters]) notify()
     }
   })
-  const next = kind => new Promise((resolve, reject) => {
-    const timer = setTimeout(() => { waiters.splice(waiters.indexOf(check), 1); reject(Error(`UNIT_RECEIVER_${kind}_TIMEOUT`)) }, 10_000)
+  const next = (kind, timeoutMs = 10_000) => new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { waiters.splice(waiters.indexOf(check), 1); reject(Error(`UNIT_RECEIVER_${kind}_TIMEOUT`)) }, timeoutMs)
     const check = () => {
       const index = events.findIndex(value => value.kind === kind)
       if (index < 0 && !closed) return
@@ -244,7 +244,10 @@ test('native async decode failure never becomes ready and cannot publish a prepa
   asset.contentsBase64 = corrupt.toString('base64'); asset.sha256 = digest(corrupt)
   frame.receipt.fixtures[asset.provider].files.find(file => file.name === asset.name).imageSha256 = asset.sha256
   receiver.send([...initialFrames(admission), frame])
-  assert.match((await receiver.next('failed')).code, /image decoder exited/)
+  // A corrupt image may fail at once or run until the decoder kills its child
+  // at DECODER_TIMEOUT_MS; both end as "image decoder exited". The wait must
+  // outlast that bound or the harness timeout wins the race on slow runners.
+  assert.match((await receiver.next('failed', DECODER_TIMEOUT_MS + 10_000)).code, /image decoder exited/)
   assert.equal(receiver.events.some(value => value.kind === 'ready'), false)
   assert.equal(fs.existsSync(path.join(root, 'remaining-gfs-image.json')), false)
   assert.equal(fs.existsSync(path.join(root, 'remaining-gfs-image')), false)

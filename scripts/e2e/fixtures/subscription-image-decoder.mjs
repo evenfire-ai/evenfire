@@ -23,7 +23,7 @@ export function hasCompleteImageContainer(bytes, mimeType) {
 // Decode each received image in a throwaway process with empty env, no shell,
 // a fixed timeout, and bounded stdin/stdout. The vendor itself remains the
 // long-lived state machine and keeps all attempt state in its own PID.
-const DECODER_TIMEOUT_MS = 10_000
+export const DECODER_TIMEOUT_MS = 10_000
 const MAX_DECODER_STDOUT_BYTES = 1024 * 1024
 
 function decoderChildScript() {
