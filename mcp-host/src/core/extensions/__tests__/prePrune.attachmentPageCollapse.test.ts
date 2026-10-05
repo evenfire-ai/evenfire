@@ -122,6 +122,54 @@ describe('C17 collapseEarlierAttachmentPages — direct pass', () => {
     expect(out[5].content).toBe(messages[5].content)
   })
 
+  it('collapses paged results with nextOffset and keeps the validated continuation fields', () => {
+    const messages = conversation()
+    messages[2] = attachmentToolResult(
+      'tc_old',
+      wrapped(
+        nativePage({
+          limit: 'page_budget',
+          nextOffset: 65536,
+        })
+      )
+    )
+    const out = prePruneModule.collapseEarlierAttachmentPages(messages)
+    const stub = JSON.parse(out[2].content.split('\n')[1]!)
+    expect(stub.text).toBe(stubMarker())
+    expect(stub.limit).toBe('page_budget')
+    expect(stub.nextOffset).toBe(65536)
+    expect(out[5]).toBe(messages[5])
+    expect(() => validateToolLinkages(out)).not.toThrow()
+  })
+
+  it('does not start another turn when a tool supplies a synthetic image user message', () => {
+    const messages = conversation()
+    messages.push({ role: 'user', content: 'tool-supplied image', imageOrigin: 'tool_result' })
+    const out = prePruneModule.collapseEarlierAttachmentPages(messages)
+    expect(JSON.parse(out[2].content).text).toBe(stubMarker())
+    expect(out[5]).toBe(messages[5])
+    expect(out[5].content).toBe(messages[5].content)
+  })
+
+  it('leaves corrupt continuation metadata untouched with a valid continuation witness', () => {
+    const valid = conversation()
+    valid[2] = attachmentToolResult('tc_old', nativePage({ nextOffset: 65536 }))
+    expect(JSON.parse(prePruneModule.collapseEarlierAttachmentPages(valid)[2].content).text).toBe(
+      stubMarker()
+    )
+    for (const fields of [
+      { nextOffset: 1 },
+      { nextOffset: -1 },
+      { nextOffset: '65536' },
+      { nextOffset: 65536, truncated: false },
+      { limit: 'invented_limit' },
+    ]) {
+      const messages = conversation()
+      messages[2] = attachmentToolResult('tc_old', nativePage(fields))
+      expect(prePruneModule.collapseEarlierAttachmentPages(messages)[2]).toBe(messages[2])
+    }
+  })
+
   it('keeps untouched messages referentially identical and originals immutable', () => {
     const messages = conversation()
     const before = structuredClone(messages)

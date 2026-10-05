@@ -220,6 +220,8 @@ interface AttachmentTextPage {
   kind: 'text'
   byteRange: { offset: number; length: number }
   truncated: boolean
+  limit?: 'max_bytes' | 'page_budget' | 'turn_budget'
+  nextOffset?: number
   text: string
 }
 
@@ -257,7 +259,7 @@ export function collapseEarlierAttachmentPages(messages: ChatMessage[]): ChatMes
 
 function findLastUserIndex(messages: ChatMessage[]): number {
   for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i].role === 'user') return i
+    if (messages[i].role === 'user' && messages[i].imageOrigin !== 'tool_result') return i
   }
   return -1
 }
@@ -286,7 +288,18 @@ function isAttachmentTextPage(value: unknown): value is AttachmentTextPage {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false
   const obj = value as Record<string, unknown>
   const keys = Object.keys(obj)
-  if (keys.length !== 6) return false
+  if (keys.length < 6 || keys.length > 8) return false
+  const allowed = new Set([
+    'attachmentId',
+    'byteRange',
+    'kind',
+    'referenceId',
+    'text',
+    'truncated',
+    'limit',
+    'nextOffset',
+  ])
+  if (keys.some(key => !allowed.has(key))) return false
   for (const key of ['attachmentId', 'byteRange', 'kind', 'referenceId', 'text', 'truncated']) {
     if (!(key in obj)) return false
   }
@@ -311,6 +324,20 @@ function isAttachmentTextPage(value: unknown): value is AttachmentTextPage {
   ) {
     return false
   }
+  if (!Number.isSafeInteger(offset + length)) return false
+  if (
+    'limit' in obj &&
+    !['max_bytes', 'page_budget', 'turn_budget'].includes(obj.limit as string)
+  ) {
+    return false
+  }
+  if (
+    'nextOffset' in obj &&
+    (obj.truncated !== true ||
+      !Number.isSafeInteger(obj.nextOffset) ||
+      obj.nextOffset !== offset + length)
+  )
+    return false
   return true
 }
 
@@ -325,6 +352,8 @@ function buildAttachmentPageStub(parsed: {
     kind: 'text',
     byteRange: { offset: page.byteRange.offset, length: page.byteRange.length },
     truncated: page.truncated,
+    ...(page.limit !== undefined ? { limit: page.limit } : {}),
+    ...(page.nextOffset !== undefined ? { nextOffset: page.nextOffset } : {}),
     text: ATTACHMENT_PAGE_COLLAPSE_MARKER,
   })
   if (wrapperSanitized === null) return stub

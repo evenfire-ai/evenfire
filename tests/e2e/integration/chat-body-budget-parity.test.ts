@@ -181,14 +181,14 @@ describe('chat body budget parity across rpc-proxy, mcp-host and the composer (#
     )
   })
 
-  it('the Host admission default equals the per-file credit ceiling', () => {
-    const [, literal] = soleMatch(
+  it('the Host admission default and configured maximum equal the per-file credit ceiling', () => {
+    const [, literal, maximum] = soleMatch(
       sources.hostConfig,
-      /getExecutionLimit\('CLERUM_ATTACHMENT_FILE_MAX_BYTES', ([0-9_]+)\)/,
-      'mcp-host config CLERUM_ATTACHMENT_FILE_MAX_BYTES default'
+      /getExecutionLimit\(\s*'CLERUM_ATTACHMENT_FILE_MAX_BYTES',\s*([0-9_]+),\s*false,\s*([0-9_]+)\s*\)/,
+      'mcp-host config CLERUM_ATTACHMENT_FILE_MAX_BYTES bounds'
     )
-    expect(Number(literal.replaceAll('_', ''))).toBe(
-      constantValue(sources.mcpHost, 'MAX_FILE_DECODED_BYTES', 'mcp-host')
-    )
+    const ceiling = constantValue(sources.mcpHost, 'MAX_FILE_DECODED_BYTES', 'mcp-host')
+    expect(Number(literal.replaceAll('_', ''))).toBe(ceiling)
+    expect(Number(maximum.replaceAll('_', ''))).toBe(ceiling)
   })
 })
