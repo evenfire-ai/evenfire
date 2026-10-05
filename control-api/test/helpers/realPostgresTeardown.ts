@@ -1,7 +1,25 @@
-import type { EventEmitter } from 'node:events'
 import type { Pool } from 'pg'
 
-type TrackedClient = EventEmitter & { _ended?: boolean }
+/**
+ * The part of a pg Client this helper reads. `_ended` and the `end` event are
+ * pg 8.x internals and public API respectively; see the comment below.
+ */
+interface ClosingClient {
+  readonly _ended: boolean
+  once(event: 'end', listener: () => void): unknown
+  off(event: 'end', listener: () => void): unknown
+}
+
+// A removed client's pg-pool idleListener can still forward an error after
+// end() returns. Keep this shared observer on the ended pool for that late
+// teardown phase. Only PostgreSQL's expected backend-termination code is
+// handled; an unexpected error still escapes unchanged, including when an
+// earlier listener merely observed it. This function holds no pool reference.
+function handlePoolTeardownError(error: unknown): void {
+  if (error !== null && typeof error === 'object' && 'code' in error && error.code === '57P01')
+    return
+  throw error
+}
 
 /**
  * Ends a pg pool and resolves only after every client it held at end() has
@@ -11,34 +29,49 @@ type TrackedClient = EventEmitter & { _ended?: boolean }
  * client.end() it started is still in flight. A real-Postgres teardown that
  * then runs pg_terminate_backend can reach a client that is still closing; the
  * 57P01 it receives is re-emitted on the pool and, with no pool `error`
- * listener, fails the run as an unhandled error (#946).
+ * listener, fails the run as an unhandled error.
  *
- * The clients are taken from pg-pool's `_clients` at call time and each one is
- * awaited on its own `end` event. Counting pool `remove` events is not enough:
- * pg-pool emits none for a client whose connect fails (or whose onConnect
- * rejects), which hangs the wait, and a `remove` from a client dropped before
- * this call is counted in place of one still closing, which ends it early.
- * `_clients` is private to pg-pool 3.x; the helper throws if it is missing.
- * A client still open after `timeoutMs` rejects with a count, so a teardown
- * fails with a cause instead of the hook timeout.
+ * The helper snapshots the clients the pool holds before end() and waits for
+ * each one by identity. Counting pool `remove` events against `totalCount` is
+ * wrong both ways (pg-pool 3.13.0, `pg-pool/index.js`):
+ * - a client still connecting is in `_clients` (:242), but a failed connect
+ *   (:271-274) or a rejected onConnect (:294-295) drops it without `_remove`,
+ *   so no `remove` is ever emitted and the wait never ends;
+ * - a client removed before end() (release(true), expiry, idle timeout) is no
+ *   longer counted, yet `_remove` (:172-188) still emits its `remove` when its
+ *   connection closes, which stands in for a client still closing.
+ *
+ * pg 8.20.0 `pg/lib/client.js` sets `_ended` (:184) and emits `end` (:202-204)
+ * from the connection's `end` handler (:179), which `pg/lib/connection.js`
+ * emits on the socket's `close` (:60-62). That handler runs for a connection
+ * that closed and for a connect that failed (:191-196), so every client in the
+ * snapshot either has `_ended` set already or emits `end` exactly once.
+ * `_clients` is private to pg-pool: if it is not an array the helper throws,
+ * before ending the pool, rather than wait on something it cannot read.
+ *
+ * Scope: a client the pool had already removed before end() is not in the
+ * snapshot and is not waited for. Before ending the pool, the helper installs
+ * one retained error observer for the 57P01 such a client can still forward.
+ * Earlier listeners are preserved; unexpected errors remain visible/failing.
+ *
+ * The five-second deadline covers both pool.end() and client closure, below
+ * the ordinary ten-second test hook limit. A stuck close rejects explicitly;
+ * it does not authorize terminating a backend whose client is still open.
  *
  * A pool that was never created (setup failed first) is left alone, as the
  * `pool?.end()` it replaces did.
  */
-export async function endPoolAndWaitForClients(
-  pool: Pool | null | undefined,
-  timeoutMs = 10_000
-): Promise<void> {
+export async function endPoolAndWaitForClients(pool: Pool | null | undefined): Promise<void> {
   if (!pool) return
-  const clients = (pool as unknown as { _clients?: unknown })._clients
+  const clients = (pool as unknown as { _clients: unknown })._clients
   if (!Array.isArray(clients)) {
-    throw new Error(
-      'endPoolAndWaitForClients: pg-pool no longer exposes _clients; update the helper for this pg-pool version'
-    )
+    throw new Error('pg-pool internals changed: _clients is not an array')
   }
-  const tracked = clients.slice() as TrackedClient[]
-  const listeners: Array<[TrackedClient, () => void]> = []
-  const ended = tracked.map(
+  if (!pool.listeners('error').includes(handlePoolTeardownError)) {
+    pool.on('error', handlePoolTeardownError)
+  }
+  const listeners: Array<[ClosingClient, () => void]> = []
+  const closed = (clients as ClosingClient[]).map(
     client =>
       new Promise<void>(resolve => {
         if (client._ended) {
@@ -51,18 +84,19 @@ export async function endPoolAndWaitForClients(
       })
   )
   let timer: NodeJS.Timeout | undefined
-  const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => {
-      const open = tracked.filter(client => !client._ended).length
-      reject(
-        new Error(
-          `endPoolAndWaitForClients: ${open} of ${tracked.length} client(s) held at end() still connected after ${timeoutMs} ms (pool.ended=${pool.ended})`
-        )
-      )
-    }, timeoutMs)
-  })
   try {
-    await Promise.race([Promise.all([pool.end(), ...ended]), timeout])
+    await Promise.race([
+      (async () => {
+        await pool.end()
+        await Promise.all(closed)
+      })(),
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () => reject(new Error('Timed out after 5000ms waiting for pg pool clients to close')),
+          5_000
+        )
+      }),
+    ])
   } finally {
     clearTimeout(timer)
     for (const [client, onEnd] of listeners) client.off('end', onEnd)

@@ -121,7 +121,7 @@ describeRealPostgres('llm-model reductor ↔ host referencer serialization (R1-H
     limiterPool.on('error', () => {})
     const migratePool = new Pool({ connectionString })
     await dbMod.initDb({ connect: () => migratePool.connect() })
-    await migratePool.end()
+    await endPoolAndWaitForClients(migratePool)
 
     const appMod = await import('../src/app.js')
     const configMod = await import('../src/config.js')
@@ -171,19 +171,23 @@ describeRealPostgres('llm-model reductor ↔ host referencer serialization (R1-H
   }, 60_000)
 
   afterAll(async () => {
-    if (previousPgEnv === undefined) delete process.env.CONTROL_API_PG_CONNECTION_STRING
-    else process.env.CONTROL_API_PG_CONNECTION_STRING = previousPgEnv
-    // Drain the module pool's connections first so DROP DATABASE has no live users.
-    await endPoolAndWaitForClients(corePool)
-    await endPoolAndWaitForClients(limiterPool)
-    if (!adminPool) return
-    await adminPool.query(
-      `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+    try {
+      if (previousPgEnv === undefined) delete process.env.CONTROL_API_PG_CONNECTION_STRING
+      else process.env.CONTROL_API_PG_CONNECTION_STRING = previousPgEnv
+      // Drain the module pool's connections first so DROP DATABASE has no live users.
+      await endPoolAndWaitForClients(corePool).catch(() => {})
+      await endPoolAndWaitForClients(limiterPool).catch(() => {})
+      if (adminPool) {
+        await adminPool.query(
+          `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
         WHERE datname = $1 AND pid <> pg_backend_pid()`,
-      [database]
-    )
-    await adminPool.query(`DROP DATABASE IF EXISTS "${database.replace(/"/g, '""')}"`)
-    await adminPool.end()
+          [database]
+        )
+        await adminPool.query(`DROP DATABASE IF EXISTS "${database.replace(/"/g, '""')}"`)
+      }
+    } finally {
+      await adminPool?.end()
+    }
   })
 
   beforeEach(async () => {

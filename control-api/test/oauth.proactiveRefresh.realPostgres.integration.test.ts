@@ -72,15 +72,18 @@ describeRealPostgres('oauth proactive refresh — enumeration + claim (real Post
   })
 
   afterAll(async () => {
-    await endPoolAndWaitForClients(dbPool)
-    if (adminPool) {
-      await adminPool.query(
-        `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
-          WHERE datname = $1 AND pid <> pg_backend_pid()`,
-        [database]
-      )
-      await adminPool.query(`DROP DATABASE IF EXISTS "${database.replace(/"/g, '""')}"`)
-      await adminPool.end()
+    try {
+      await endPoolAndWaitForClients(dbPool)
+      if (adminPool) {
+        await adminPool.query(
+          `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+            WHERE datname = $1 AND pid <> pg_backend_pid()`,
+          [database]
+        )
+        await adminPool.query(`DROP DATABASE IF EXISTS "${database.replace(/"/g, '""')}"`)
+      }
+    } finally {
+      await adminPool?.end()
     }
   })
 

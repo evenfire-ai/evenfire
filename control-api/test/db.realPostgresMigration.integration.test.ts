@@ -140,17 +140,20 @@ describeRealPostgres('control-api real Postgres migrations', () => {
   })
 
   afterAll(async () => {
-    await endPoolAndWaitForClients(dbPool)
-    if (adminPool) {
-      await adminPool.query(
-        `SELECT pg_terminate_backend(pid)
-           FROM pg_stat_activity
-          WHERE datname = $1
-            AND pid <> pg_backend_pid()`,
-        [database]
-      )
-      await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdent(database)}`)
-      await adminPool.end()
+    try {
+      await endPoolAndWaitForClients(dbPool)
+      if (adminPool) {
+        await adminPool.query(
+          `SELECT pg_terminate_backend(pid)
+             FROM pg_stat_activity
+            WHERE datname = $1
+              AND pid <> pg_backend_pid()`,
+          [database]
+        )
+        await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdent(database)}`)
+      }
+    } finally {
+      await adminPool?.end()
     }
   })
 
@@ -2009,7 +2012,7 @@ describeRealPostgres('control-api real Postgres migrations', () => {
         expect(config).toContain('search_path=pg_catalog, public, pg_temp')
       }
     } finally {
-      await attackerPool?.end()
+      await endPoolAndWaitForClients(attackerPool)
       await dbPool.query(`DROP OWNED BY ${quoteIdent(attackerRole)}`)
       await adminPool.query(`DROP ROLE IF EXISTS ${quoteIdent(attackerRole)}`)
     }

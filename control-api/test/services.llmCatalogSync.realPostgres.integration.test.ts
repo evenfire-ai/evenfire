@@ -212,17 +212,21 @@ describeRealPostgres('syncDiscoveredModels on real PostgreSQL (#654 image_input)
   })
 
   afterAll(async () => {
-    await endPoolAndWaitForClients(dbPool)
-    if (!adminPool) return
-    await adminPool.query(
-      `SELECT pg_terminate_backend(pid)
+    try {
+      await endPoolAndWaitForClients(dbPool)
+      if (adminPool) {
+        await adminPool.query(
+          `SELECT pg_terminate_backend(pid)
          FROM pg_stat_activity
         WHERE datname = $1
           AND pid <> pg_backend_pid()`,
-      [database]
-    )
-    await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdent(database)}`)
-    await adminPool.end()
+          [database]
+        )
+        await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdent(database)}`)
+      }
+    } finally {
+      await adminPool?.end()
+    }
   })
 
   it('counts exactly the enabled rows whose image_input changed and republishes once', async () => {

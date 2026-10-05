@@ -181,7 +181,7 @@ describeRealPostgres('external GFS rate limits under concurrent load (real Postg
     limiterPool.on('error', () => {})
     const migratePool = new Pool({ connectionString })
     await dbMod.initDb({ connect: () => migratePool.connect() })
-    await migratePool.end()
+    await endPoolAndWaitForClients(migratePool)
 
     const appMod = await import('../src/app.js')
     const configMod = await import('../src/config.js')
@@ -221,22 +221,26 @@ describeRealPostgres('external GFS rate limits under concurrent load (real Postg
   })
 
   afterAll(async () => {
-    vi.useRealTimers()
-    for (const key of envKeys) {
-      const value = previousEnv.get(key)
-      if (value === undefined) delete process.env[key]
-      else process.env[key] = value
-    }
-    await endPoolAndWaitForClients(corePool)
-    await endPoolAndWaitForClients(limiterPool)
-    if (!adminPool) return
-    await adminPool.query(
-      `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+    try {
+      vi.useRealTimers()
+      for (const key of envKeys) {
+        const value = previousEnv.get(key)
+        if (value === undefined) delete process.env[key]
+        else process.env[key] = value
+      }
+      await endPoolAndWaitForClients(corePool).catch(() => {})
+      await endPoolAndWaitForClients(limiterPool).catch(() => {})
+      if (adminPool) {
+        await adminPool.query(
+          `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
         WHERE datname = $1 AND pid <> pg_backend_pid()`,
-      [database]
-    )
-    await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdent(database)}`)
-    await adminPool.end()
+          [database]
+        )
+        await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdent(database)}`)
+      }
+    } finally {
+      await adminPool?.end()
+    }
   })
 
   /**
