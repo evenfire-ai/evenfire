@@ -367,6 +367,31 @@ function installLiveStatefulSetStore(): void {
   )
 }
 
+/**
+ * Observe the StatefulSet WRC created with a test-chosen generation, spec and
+ * status. Reads still go through the live store, so an object WRC has not
+ * created reads as a 404 and the read before create sees what a real
+ * apiserver would.
+ */
+function observeLiveStatefulSetAs(observed: {
+  generation: number
+  spec: Record<string, unknown>
+  status: Record<string, unknown>
+}): void {
+  const storeRead = mockAppsApi.readNamespacedStatefulSet.getMockImplementation()!
+  mockAppsApi.readNamespacedStatefulSet.mockImplementation(
+    async (args: { name: string; namespace: string }) => {
+      const live = await storeRead(args)
+      return {
+        ...live,
+        metadata: { ...live.metadata, generation: observed.generation },
+        spec: { ...live.spec, ...observed.spec },
+        status: observed.status,
+      }
+    }
+  )
+}
+
 function installLiveServiceAndConfigMapStores(): void {
   installLiveStore(
     {
@@ -2323,8 +2348,8 @@ describe('WorkflowRecipeReconciler', () => {
   })
 
   it('treats a fully-ready StatefulSet as ready when observedGeneration transiently lags', async () => {
-    mockAppsApi.readNamespacedStatefulSet.mockRejectedValueOnce({ code: 404 }).mockResolvedValue({
-      metadata: { resourceVersion: '265', generation: 265 },
+    observeLiveStatefulSetAs({
+      generation: 265,
       spec: { replicas: 1 },
       status: { observedGeneration: 264, readyReplicas: 1 },
     })
@@ -2410,8 +2435,8 @@ describe('WorkflowRecipeReconciler', () => {
   })
 
   it('degrades when a child StatefulSet was externally scaled below recipe replicas', async () => {
-    mockAppsApi.readNamespacedStatefulSet.mockRejectedValueOnce({ code: 404 }).mockResolvedValue({
-      metadata: { resourceVersion: '2', generation: 2 },
+    observeLiveStatefulSetAs({
+      generation: 2,
       spec: { replicas: 0 },
       status: { observedGeneration: 2, readyReplicas: 0 },
     })
@@ -4220,19 +4245,38 @@ describe('WorkflowRecipeReconciler', () => {
       expect(createdBody!.metadata.annotations[SPEC_HASH]).toBeDefined()
 
       mockAppsApi.createNamespacedStatefulSet.mockRejectedValue({ code: 409 })
+      mockAppsApi.createNamespacedStatefulSet.mockClear()
       mockAppsApi.readNamespacedStatefulSet.mockResolvedValue({
         metadata: { resourceVersion: '9', annotations: createdBody!.metadata.annotations },
         spec: createdBody!.spec,
       })
       mockAppsApi.replaceNamespacedStatefulSet.mockClear()
+      mockAppsApi.readNamespacedStatefulSet.mockClear()
+      const name = (createdBody! as unknown as { metadata: { name: string } }).metadata.name
 
-      await (
-        reconciler as unknown as {
-          ensureStatefulSet: (w: unknown, r: unknown, l: string, s: unknown) => Promise<void>
-        }
-      ).ensureStatefulSet(workload, recipe, 'minimal', {})
+      // Liveness witnesses for the negative assertions below: the writer read
+      // this object and took the unchanged-hash branch.
+      const logs = captureLoggerLevels(['info', 'debug'] as const)
+      try {
+        await (
+          reconciler as unknown as {
+            ensureStatefulSet: (w: unknown, r: unknown, l: string, s: unknown) => Promise<void>
+          }
+        ).ensureStatefulSet(workload, recipe, 'minimal', {})
+        expect(
+          logs.calls.info.mock.calls.filter(
+            ([msg, ctx]) =>
+              msg === 'StatefulSet spec hash unchanged; skipping update' &&
+              (ctx as { name?: string })?.name === name
+          )
+        ).toHaveLength(1)
+      } finally {
+        logs.restore()
+      }
+      expect(readsOf(mockAppsApi.readNamespacedStatefulSet, name, 'sandbox-recipes')).toBe(1)
 
       expect(mockAppsApi.replaceNamespacedStatefulSet).not.toHaveBeenCalled()
+      expect(mockAppsApi.createNamespacedStatefulSet).not.toHaveBeenCalled()
       expect(mockAppsApi.patchNamespacedStatefulSet).not.toHaveBeenCalled()
     })
 
@@ -4257,6 +4301,7 @@ describe('WorkflowRecipeReconciler', () => {
       const existing = clone(createdBody!)
       existing.metadata.annotations = { [SPEC_HASH]: 'stale-or-missing' }
       mockAppsApi.createNamespacedStatefulSet.mockRejectedValue({ code: 409 })
+      mockAppsApi.createNamespacedStatefulSet.mockClear()
       mockAppsApi.readNamespacedStatefulSet.mockResolvedValue(existing)
       mockAppsApi.replaceNamespacedStatefulSet.mockClear()
       mockAppsApi.patchNamespacedStatefulSet.mockClear()
@@ -4268,6 +4313,7 @@ describe('WorkflowRecipeReconciler', () => {
       ).ensureStatefulSet(workload, recipe, 'minimal', {})
 
       expect(mockAppsApi.replaceNamespacedStatefulSet).not.toHaveBeenCalled()
+      expect(mockAppsApi.createNamespacedStatefulSet).not.toHaveBeenCalled()
       expect(mockAppsApi.patchNamespacedStatefulSet).toHaveBeenCalledTimes(1)
       expect(mockAppsApi.patchNamespacedStatefulSet.mock.calls[0][0].body).toEqual({
         metadata: { annotations: { [SPEC_HASH]: createdBody!.metadata.annotations[SPEC_HASH] } },
@@ -4297,6 +4343,7 @@ describe('WorkflowRecipeReconciler', () => {
       const existing = clone(existingBody!)
       existing.metadata.annotations = { [SPEC_HASH]: 'stale-old-template' }
       mockAppsApi.createNamespacedStatefulSet.mockRejectedValue({ code: 409 })
+      mockAppsApi.createNamespacedStatefulSet.mockClear()
       mockAppsApi.readNamespacedStatefulSet.mockResolvedValue(existing)
       mockAppsApi.replaceNamespacedStatefulSet.mockClear()
       mockAppsApi.patchNamespacedStatefulSet.mockClear()
@@ -4308,6 +4355,7 @@ describe('WorkflowRecipeReconciler', () => {
       ).ensureStatefulSet(newWorkload, newRecipe, 'minimal', {})
 
       expect(mockAppsApi.replaceNamespacedStatefulSet).not.toHaveBeenCalled()
+      expect(mockAppsApi.createNamespacedStatefulSet).not.toHaveBeenCalled()
       expect(mockAppsApi.patchNamespacedStatefulSet).toHaveBeenCalledTimes(1)
       const patchBody = mockAppsApi.patchNamespacedStatefulSet.mock.calls[0][0].body
       expect(patchBody.spec.template.spec.containers[0].image).toBe('postgres:16')
@@ -4363,6 +4411,7 @@ describe('WorkflowRecipeReconciler', () => {
         status: { phase: 'Pending' },
       }))
       mockAppsApi.createNamespacedStatefulSet.mockRejectedValue({ code: 409 })
+      mockAppsApi.createNamespacedStatefulSet.mockClear()
       mockAppsApi.readNamespacedStatefulSet.mockResolvedValue(existing)
       mockAppsApi.replaceNamespacedStatefulSet.mockClear()
       mockAppsApi.patchNamespacedStatefulSet.mockClear()
@@ -4374,6 +4423,7 @@ describe('WorkflowRecipeReconciler', () => {
       ).ensureStatefulSet(newWorkload, newRecipe, 'minimal', {})
 
       expect(mockAppsApi.replaceNamespacedStatefulSet).not.toHaveBeenCalled()
+      expect(mockAppsApi.createNamespacedStatefulSet).not.toHaveBeenCalled()
       expect(mockAppsApi.patchNamespacedStatefulSet).toHaveBeenCalledTimes(1)
       const patchBody = mockAppsApi.patchNamespacedStatefulSet.mock.calls[0][0].body
       expect(patchBody.spec.template.spec.containers[0].image).toBe('postgres:16')
@@ -4458,6 +4508,7 @@ describe('WorkflowRecipeReconciler', () => {
         status: { phase: 'Pending' },
       }))
       mockAppsApi.createNamespacedStatefulSet.mockRejectedValue({ code: 409 })
+      mockAppsApi.createNamespacedStatefulSet.mockClear()
       mockAppsApi.readNamespacedStatefulSet.mockResolvedValue(existing)
       mockAppsApi.replaceNamespacedStatefulSet.mockClear()
       mockAppsApi.patchNamespacedStatefulSet.mockClear()
@@ -4469,6 +4520,7 @@ describe('WorkflowRecipeReconciler', () => {
       ).ensureStatefulSet(newWorkload, newRecipe, 'minimal', {})
 
       expect(mockAppsApi.replaceNamespacedStatefulSet).not.toHaveBeenCalled()
+      expect(mockAppsApi.createNamespacedStatefulSet).not.toHaveBeenCalled()
       expect(mockAppsApi.patchNamespacedStatefulSet).toHaveBeenCalledTimes(1)
       const patchBody = mockAppsApi.patchNamespacedStatefulSet.mock.calls[0][0].body
       expect(patchBody.spec.template.spec.containers[0].env).toContainEqual({
@@ -4526,6 +4578,7 @@ describe('WorkflowRecipeReconciler', () => {
       const existing = clone(existingBody!)
       existing.metadata.annotations = { [SPEC_HASH]: 'stale-storage' }
       mockAppsApi.createNamespacedStatefulSet.mockRejectedValue({ code: 409 })
+      mockAppsApi.createNamespacedStatefulSet.mockClear()
       mockAppsApi.readNamespacedStatefulSet.mockResolvedValue(existing)
       mockAppsApi.replaceNamespacedStatefulSet.mockClear()
       mockAppsApi.patchNamespacedStatefulSet.mockClear()
@@ -4545,6 +4598,7 @@ describe('WorkflowRecipeReconciler', () => {
       })
 
       expect(mockAppsApi.replaceNamespacedStatefulSet).not.toHaveBeenCalled()
+      expect(mockAppsApi.createNamespacedStatefulSet).not.toHaveBeenCalled()
       expect(mockAppsApi.patchNamespacedStatefulSet).not.toHaveBeenCalled()
     })
 
@@ -4570,6 +4624,7 @@ describe('WorkflowRecipeReconciler', () => {
       existing.metadata.annotations = { [SPEC_HASH]: 'stale-immutable-drift' }
       existing.spec.serviceName = 'manually-mutated-headless-service'
       mockAppsApi.createNamespacedStatefulSet.mockRejectedValue({ code: 409 })
+      mockAppsApi.createNamespacedStatefulSet.mockClear()
       mockAppsApi.readNamespacedStatefulSet.mockResolvedValue(existing)
       mockAppsApi.replaceNamespacedStatefulSet.mockClear()
       mockAppsApi.patchNamespacedStatefulSet.mockClear()
@@ -4589,6 +4644,7 @@ describe('WorkflowRecipeReconciler', () => {
       })
 
       expect(mockAppsApi.replaceNamespacedStatefulSet).not.toHaveBeenCalled()
+      expect(mockAppsApi.createNamespacedStatefulSet).not.toHaveBeenCalled()
       expect(mockAppsApi.patchNamespacedStatefulSet).not.toHaveBeenCalled()
     })
 
@@ -7392,14 +7448,8 @@ describe('WorkflowRecipeReconciler', () => {
       },
     })
 
-    mockAppsApi.readNamespacedStatefulSet.mockImplementation(({ name }) => {
-      if (name === 'db') return Promise.reject({ code: 404 })
-      return Promise.resolve({
-        metadata: { resourceVersion: '1' },
-        spec: { replicas: 1 },
-        status: { readyReplicas: 1 },
-      })
-    })
+    // StatefulSet reads use the live store: the raw "db" was never created, so it
+    // reads as a 404, and the scoped one WRC creates reads back ready.
     mockCoreApi.readNamespacedService.mockImplementation(({ name }) => {
       if (name === 'db-headless') {
         return Promise.resolve({

@@ -12,7 +12,8 @@ const mockAppsApi = {
   replaceNamespacedDeployment: vi.fn().mockResolvedValue({}),
   deleteNamespacedDeployment: vi.fn().mockResolvedValue({}),
   createNamespacedStatefulSet: vi.fn().mockResolvedValue({}),
-  readNamespacedStatefulSet: vi.fn().mockResolvedValue({ metadata: { resourceVersion: '1' } }),
+  readNamespacedStatefulSet: vi.fn().mockRejectedValue({ code: 404 }),
+  patchNamespacedStatefulSet: vi.fn().mockResolvedValue({}),
   replaceNamespacedStatefulSet: vi.fn().mockResolvedValue({}),
   deleteNamespacedStatefulSet: vi.fn().mockResolvedValue({}),
   createNamespacedDaemonSet: vi.fn().mockResolvedValue({}),
@@ -117,11 +118,9 @@ describe('Workflow Reconciler Bifurcation', () => {
       spec: { replicas: 1 },
       status: { observedGeneration: 1, updatedReplicas: 1, readyReplicas: 1, availableReplicas: 1 },
     })
-    mockAppsApi.readNamespacedStatefulSet.mockResolvedValue({
-      metadata: { resourceVersion: '1' },
-      spec: { replicas: 1 },
-      status: { readyReplicas: 1 },
-    })
+    // StatefulSets are applied read-first: by default none exists, so the read
+    // before the create is a 404, as for a freshly approved recipe.
+    mockAppsApi.readNamespacedStatefulSet.mockReset().mockRejectedValue({ code: 404 })
     mockAppsApi.readNamespacedDaemonSet.mockResolvedValue({
       metadata: { resourceVersion: '1' },
       status: { desiredNumberScheduled: 1, numberReady: 1 },
