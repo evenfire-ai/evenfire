@@ -1979,14 +1979,6 @@ export class WorkflowReconciler {
                 buildLegacyMcpServersInternetEgressPolicyName(recipeName)
               )
             ),
-            // The legacy internet policy may carry no labels, while a labeled
-            // copy is excluded from the sweeps above. Both forms go through
-            // the one live ledger so a completed cleanup can prove `unmanaged`.
-            this.cleanupLegacyMcpServersInternetEgress(
-              recipeName,
-              options.recipeUid,
-              options.recipeDeleted === true
-            ),
           ]),
     ])
     if (!preserveWorkflowRuntime) {
@@ -2019,6 +2011,18 @@ export class WorkflowReconciler {
             ),
           ]),
     ])
+    if (!preserveWorkflowRuntime) {
+      // The legacy internet policy may carry no labels, while a labeled copy
+      // is excluded from the sweeps above. Both forms go through the one live
+      // ledger so a completed cleanup can prove `unmanaged`. It runs after the
+      // host pod and token Secrets are gone: a pending legacy DELETE must not
+      // hold the SDK credentials in place.
+      await this.cleanupLegacyMcpServersInternetEgress(
+        recipeName,
+        options.recipeUid,
+        options.recipeDeleted === true
+      )
+    }
     await this.assertPluginWorkloadSdkResourcesAbsent(recipeName, ns, networkPolicyNames, {
       preserveWorkflowRuntime,
     })
