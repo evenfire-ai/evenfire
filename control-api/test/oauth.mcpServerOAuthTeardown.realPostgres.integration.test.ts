@@ -19,6 +19,7 @@ import {
 } from '../src/oauth/store.js'
 import { rootLogger } from '../src/observability/logger.js'
 import { makeDcrTransport } from './fixtures/remoteOAuthDiscovery.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 /**
  * R3-H5 (T1/T3/T4) — the uninstall OAuth teardown fenced by the CR uid, observed as
@@ -59,15 +60,18 @@ describeRealPostgres('teardownMcpServerOAuthState — fenced by cr_uid (real Pos
   })
 
   afterAll(async () => {
-    await dbPool?.end()
-    if (adminPool) {
-      await adminPool.query(
-        `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
-          WHERE datname = $1 AND pid <> pg_backend_pid()`,
-        [database]
-      )
-      await adminPool.query(`DROP DATABASE IF EXISTS "${database.replace(/"/g, '""')}"`)
-      await adminPool.end()
+    try {
+      await endPoolAndWaitForClients(dbPool)
+      if (adminPool) {
+        await adminPool.query(
+          `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+            WHERE datname = $1 AND pid <> pg_backend_pid()`,
+          [database]
+        )
+        await adminPool.query(`DROP DATABASE IF EXISTS "${database.replace(/"/g, '""')}"`)
+      }
+    } finally {
+      await adminPool?.end()
     }
   })
 
@@ -274,15 +278,18 @@ describeRealPostgres('grant cr_uid sealing (D-T3, real Postgres)', () => {
   })
 
   afterAll(async () => {
-    await dbPool?.end()
-    if (adminPool) {
-      await adminPool.query(
-        `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
-          WHERE datname = $1 AND pid <> pg_backend_pid()`,
-        [database]
-      )
-      await adminPool.query(`DROP DATABASE IF EXISTS "${database.replace(/"/g, '""')}"`)
-      await adminPool.end()
+    try {
+      await endPoolAndWaitForClients(dbPool)
+      if (adminPool) {
+        await adminPool.query(
+          `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+            WHERE datname = $1 AND pid <> pg_backend_pid()`,
+          [database]
+        )
+        await adminPool.query(`DROP DATABASE IF EXISTS "${database.replace(/"/g, '""')}"`)
+      }
+    } finally {
+      await adminPool?.end()
     }
   })
 

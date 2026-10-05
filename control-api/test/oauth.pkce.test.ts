@@ -181,11 +181,14 @@ async function roundTrip(provider: OAuthProvider): Promise<{
 
   const cbResult = await handleOAuthCallback(
     {
-      oauthClientId: 'oauth1',
+      target: {
+        kind: 'client',
+        id: 'oauth1',
+        redirectUri: 'https://control.example.com/api/v1/oauth-callback/oauth1',
+      },
       code: 'AUTH_CODE',
       // The EXACT round-tripped state string.
       state: state as string,
-      redirectUri: 'https://control.example.com/api/v1/oauth-callback/oauth1',
     },
     deps
   )

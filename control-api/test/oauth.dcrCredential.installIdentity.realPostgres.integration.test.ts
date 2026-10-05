@@ -45,6 +45,7 @@ import {
   dcrPilot,
   makeDiscoveryTransport,
 } from './fixtures/remoteOAuthDiscovery.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 import { MockGateway } from './mockGateway.js'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
@@ -115,15 +116,18 @@ describeRealPostgres(
     })
 
     afterAll(async () => {
-      await dbPool?.end()
-      if (adminPool) {
-        await adminPool.query(
-          `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
-          WHERE datname = $1 AND pid <> pg_backend_pid()`,
-          [database]
-        )
-        await adminPool.query(`DROP DATABASE IF EXISTS "${database.replace(/"/g, '""')}"`)
-        await adminPool.end()
+      try {
+        await endPoolAndWaitForClients(dbPool)
+        if (adminPool) {
+          await adminPool.query(
+            `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+            WHERE datname = $1 AND pid <> pg_backend_pid()`,
+            [database]
+          )
+          await adminPool.query(`DROP DATABASE IF EXISTS "${database.replace(/"/g, '""')}"`)
+        }
+      } finally {
+        await adminPool?.end()
       }
     })
 
@@ -196,7 +200,7 @@ describeRealPostgres(
           const cr = (await gateway.getResource('mcpservers', name, NS)) as Parameters<
             typeof resolveServerOAuthSubject
           >[0]
-          const resolved = resolveServerOAuthSubject(cr)
+          const resolved = resolveServerOAuthSubject(cr, 'consent')
           return resolved ? { namespace: NS, ...resolved } : null
         },
       }
@@ -208,7 +212,7 @@ describeRealPostgres(
       transport: ReturnType<typeof recordingAs>['transport']
     ) {
       const input: CallbackInput = {
-        oauthClientId: 'remote',
+        target: { kind: 'remote-shared', origin: 'https://control.example.com' },
         code: 'AUTH_CODE',
         state: signOAuthState(STATE_SECRET, {
           subjectKind: 'mcp',
@@ -218,7 +222,6 @@ describeRealPostgres(
           grantKind: 'user',
           background: false,
         } as Parameters<typeof signOAuthState>[1]),
-        redirectUri: 'https://control.example.com/api/v1/oauth-callback/remote',
         iss: discovery.issuer,
       }
       const deps: CallbackDeps = {
