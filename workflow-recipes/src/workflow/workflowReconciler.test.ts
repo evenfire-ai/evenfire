@@ -2205,6 +2205,61 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
     }
   })
 
+  // A-1: a pending legacy mcp-servers internet DELETE must not hold the SDK
+  // host pod and token Secrets in place. The legacy policy is unrelated to the
+  // SDK credentials, so the pod and Secret deletes run on every pass while the
+  // cleanup still fails closed with the legacy-pending error.
+  it('A-1: deletes the SDK host pod and token Secrets while the legacy policy DELETE is pending', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    mockNetworkingApi.deleteNamespacedNetworkPolicy.mockImplementation(
+      async ({ name }: { name: string }) => {
+        if (name === 'sdk-only-mcp-servers-egress-internet') {
+          throw { code: 403, message: 'forbidden' }
+        }
+        return {}
+      }
+    )
+    const reconciler = new WorkflowReconciler(makeDeps())
+    const policyDeletes = (name: string) =>
+      mockNetworkingApi.deleteNamespacedNetworkPolicy.mock.calls.filter(
+        ([arg]) => arg.name === name
+      )
+
+    try {
+      const first = await reconciler
+        .cleanupPluginWorkloadSdk('sdk-only', { recipeUid: 'uid-sdk-only' })
+        .catch(error => error)
+      const second = await reconciler
+        .cleanupPluginWorkloadSdk('sdk-only', { recipeUid: 'uid-sdk-only' })
+        .catch(error => error)
+
+      expect(first).toBeInstanceOf(LegacyNetworkPolicyDeletePendingError)
+      expect(second).toBeInstanceOf(LegacyNetworkPolicyDeletePendingError)
+      // Liveness witness: both passes ran the SDK network-policy teardown.
+      expect(policyDeletes('sdk-only-workload-to-mcp-host-sdk-ingress')).toHaveLength(2)
+      // The first pass attempted the legacy DELETE; the second is inside the
+      // backoff window and sends no request.
+      expect(policyDeletes('sdk-only-mcp-servers-egress-internet')).toHaveLength(1)
+      expect(mockCoreApi.deleteNamespacedPod).toHaveBeenCalledTimes(2)
+      expect(mockCoreApi.deleteNamespacedPod).toHaveBeenCalledWith({
+        name: 'sdk-only-mcp-host',
+        namespace: sandboxNamespace,
+        propagationPolicy: 'Background',
+      })
+      expect(mockCoreApi.deleteNamespacedSecret).toHaveBeenCalledTimes(4)
+      expect(mockCoreApi.deleteNamespacedSecret).toHaveBeenCalledWith({
+        name: 'wf-sdk-only-plugin-workload-sdk-token',
+        namespace: sandboxNamespace,
+      })
+      expect(mockCoreApi.deleteNamespacedSecret).toHaveBeenCalledWith({
+        name: 'wf-sdk-only-mcp-host-runtime-tokens',
+        namespace: sandboxNamespace,
+      })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('R4-L3: keeps the legacy internet policy in a hybrid teardown, which preserves the workflow runtime', async () => {
     const reconciler = new WorkflowReconciler(makeDeps())
 
