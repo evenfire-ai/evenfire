@@ -87,11 +87,12 @@ realPostgres('scoped transaction cancellation mechanism and durable outcome', ()
   }, 60_000)
 
   afterAll(async () => {
-    await endPoolAndWaitForClients(pool)
-    await endPoolAndWaitForClients(observer)
-    if (admin) {
-      await admin.query(`DROP DATABASE IF EXISTS ${quoteIdent(database)}`)
-      await endPoolAndWaitForClients(admin)
+    try {
+      await endPoolAndWaitForClients(pool)
+      await endPoolAndWaitForClients(observer)
+      if (admin) await admin.query(`DROP DATABASE IF EXISTS ${quoteIdent(database)}`)
+    } finally {
+      await admin?.end()
     }
   })
 

@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import * as k8s from '@kubernetes/client-node'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { once } from 'node:events'
@@ -927,7 +927,6 @@ describeRealPostgres('Codex provider-attempt authorization on real PostgreSQL', 
     }
 
     beforeAll(async () => {
-      config.grokSubscriptionEnabled = true
       const created = await insertInitialGrokSubscriptionConnection(
         pool,
         KEY,
@@ -949,7 +948,13 @@ describeRealPostgres('Codex provider-attempt authorization on real PostgreSQL', 
       )
     })
 
-    afterAll(() => {
+    // Per-test flag and tap state: the file's only afterAll owns the
+    // administrative pool close (realPostgresAdminCleanup.guard.test.ts).
+    beforeEach(() => {
+      config.grokSubscriptionEnabled = true
+    })
+
+    afterEach(() => {
       config.grokSubscriptionEnabled = previousGrokFlag
       grokTicketTap.afterIssue = null
     })
