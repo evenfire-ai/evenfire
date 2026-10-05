@@ -13,11 +13,15 @@
 # nodes when possible, to the kubernetes Service ClusterIP (443) and every
 # EndpointSlice address (on its own port), TCP connect only (`nc -z`, no bytes sent):
 #   BASELINE  no policy                                 must reach, else exit 2
+#   DENY      deny-all egress only                      must be blocked, else exit 2
+#             (otherwise API egress is not policed and the next phases prove nothing)
 #   IPBLOCK   deny-all egress + ipBlock /32 allow       best case for ipBlocks
-#   CNP       + CiliumNetworkPolicy toEntities kube-apiserver with toPorts
+#   CNP       deny-all egress + CiliumNetworkPolicy toEntities kube-apiserver
+#             with toPorts; the ipBlock policy is removed first, because Cilium
+#             unions allow rules and would otherwise mask a failing CNP
 # A phase passes only if every pod reaches every target within ATTEMPTS tries.
 #
-# Output (stdout, KEY=value): API_IPS, BASELINE, IPBLOCK_PATH, CNP_PATH,
+# Output (stdout, KEY=value): API_IPS, BASELINE, DENY_ONLY, IPBLOCK_PATH, CNP_PATH,
 # API_EGRESS_PATH (cnp|ipblock|none, cnp preferred), NODES_TESTED.
 # Exit: 0 = at least one path works; 1 = both blocked; 2 = inconclusive.
 #
@@ -131,23 +135,32 @@ reach_all() {
   return 0
 }
 
-print_result() {
-  printf 'API_IPS=%s\nBASELINE=%s\nIPBLOCK_PATH=%s\nCNP_PATH=%s\nAPI_EGRESS_PATH=%s\nNODES_TESTED=%s\n' \
-    "$api_ips" "$1" "$2" "$3" "$4" "$nodes_tested"
+# reach_any: some pod reaches some target (used to prove deny-all blocks).
+reach_any() {
+  local pod ip port
+  for pod in $pods; do
+    while read -r ip port; do
+      if k -n "$NS" exec "$pod" -- timeout 5 nc -z -w 3 "$ip" "$port" </dev/null >/dev/null 2>&1; then
+        say "$pod reached $ip:$port"
+        return 0
+      fi
+    done <<<"$targets"
+  done
+  return 1
+}
+
+print_result() { # baseline deny ipblock cnp path
+  printf 'API_IPS=%s\nBASELINE=%s\nDENY_ONLY=%s\nIPBLOCK_PATH=%s\nCNP_PATH=%s\nAPI_EGRESS_PATH=%s\nNODES_TESTED=%s\n' \
+    "$api_ips" "$1" "$2" "$3" "$4" "$5" "$nodes_tested"
 }
 
 if ! reach_all; then
   say "pods cannot reach the API server before any policy exists; probe is inconclusive"
-  print_result blocked - - none
+  print_result blocked - - - none
   exit 2
 fi
 
-ipblock_peers="$(for ip in $api_ips; do printf '        - ipBlock:\n            cidr: %s/32\n' "$ip"; done)"
-port_list() {
-  local indent="$1" p
-  for p in $ports; do printf '%s- port: %s\n%s  protocol: TCP\n' "$indent" "$p" "$indent"; done
-}
-k -n "$NS" apply -f - >/dev/null <<EOF || { say "cannot create ipBlock policies"; exit 2; }
+k -n "$NS" apply -f - >/dev/null <<EOF || { say "cannot create deny-all policy"; exit 2; }
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -156,7 +169,20 @@ metadata:
 spec:
   podSelector: {}
   policyTypes: ["Egress"]
----
+EOF
+sleep "$PROBE_SLEEP"
+if reach_any; then
+  say "API server still reachable under deny-all egress; NetworkPolicy does not police API egress here"
+  print_result reach reach - - none
+  exit 2
+fi
+
+ipblock_peers="$(for ip in $api_ips; do printf '        - ipBlock:\n            cidr: %s/32\n' "$ip"; done)"
+port_list() {
+  local indent="$1" p
+  for p in $ports; do printf '%s- port: %s\n%s  protocol: TCP\n' "$indent" "$p" "$indent"; done
+}
+k -n "$NS" apply -f - >/dev/null <<EOF || { say "cannot create ipBlock policy"; exit 2; }
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -179,6 +205,8 @@ if [ "$cnp_crd" != true ]; then
   cnp_path=no-crd
   say "CiliumNetworkPolicy CRD not found"
 else
+  k -n "$NS" delete networkpolicy allow-api-ipblock >/dev/null \
+    || { say "cannot remove the ipBlock policy before the CNP phase"; exit 2; }
   cnp_ports="$(for p in $ports; do printf '            - port: "%s"\n              protocol: TCP\n' "$p"; done)"
   k -n "$NS" apply -f - >/dev/null <<EOF || { say "cannot create CiliumNetworkPolicy"; exit 2; }
 apiVersion: cilium.io/v2
@@ -203,7 +231,7 @@ if [ "$cnp_path" = works ]; then api_path=cnp
 elif [ "$ipblock_path" = works ]; then api_path=ipblock
 else api_path=none
 fi
-print_result reach "$ipblock_path" "$cnp_path" "$api_path"
+print_result reach blocked "$ipblock_path" "$cnp_path" "$api_path"
 if [ "$api_path" = none ]; then
   say "neither ipBlock nor CiliumNetworkPolicy reaches the API server under default-deny; do not install"
   exit 1

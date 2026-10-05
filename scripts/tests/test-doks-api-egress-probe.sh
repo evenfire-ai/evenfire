@@ -30,6 +30,7 @@ expect_ns_gone() { [ ! -f "$dir/ns" ] || fail "$1: probe namespace was not delet
 run_case doks_expected
 expect_rc doks_expected 0
 expect_out doks_expected 'BASELINE=reach'
+expect_out doks_expected 'DENY_ONLY=blocked'
 expect_out doks_expected 'IPBLOCK_PATH=blocked'
 expect_out doks_expected 'CNP_PATH=works'
 expect_out doks_expected 'API_EGRESS_PATH=cnp'
@@ -61,6 +62,11 @@ expect_rc ipblock_works 0
 expect_out ipblock_works 'IPBLOCK_PATH=works'
 expect_out ipblock_works 'API_EGRESS_PATH=cnp'
 
+grep -q '^delete networkpolicy allow-api-ipblock$' "$work/doks_expected/exec.log" \
+  || fail "doks_expected: ipBlock policy not removed before the CNP phase"
+grep -q '^cnp+ipblock ' "$work/doks_expected/exec.log" \
+  && fail "doks_expected: CNP phase measured with the ipBlock policy still present"
+
 run_case ipblock_only STUB_IPBLOCK_RC=0 STUB_CNP_RC=1
 expect_rc ipblock_only 0
 expect_out ipblock_only 'CNP_PATH=blocked'
@@ -90,6 +96,12 @@ grep -q '"6443"' "$dir"/applied-*.yaml || fail "nonstandard_port: CNP toPorts do
 run_case baseline_blocked STUB_BASELINE_RC=1
 expect_rc baseline_blocked 2
 expect_ns_gone baseline_blocked
+
+run_case deny_not_enforced STUB_DENY_RC=0
+expect_rc deny_not_enforced 2
+expect_out deny_not_enforced 'DENY_ONLY=reach'
+expect_out deny_not_enforced 'API_EGRESS_PATH=none'
+expect_ns_gone deny_not_enforced
 
 run_case single_node STUB_NODES='probe-a node-1\nprobe-b node-1'
 expect_rc single_node 0
