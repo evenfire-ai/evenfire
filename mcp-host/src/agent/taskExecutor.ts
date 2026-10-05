@@ -618,9 +618,16 @@ export class TaskExecutor {
 
       const approval = this.conversation.pending_approval
 
-      // Fallback: no snapshot, re-run from scratch
+      // Every production producer saves the conversation context with the
+      // approval, so this branch should never run. Without it the approved call
+      // cannot be resumed: re-running the loop fails closed (the model's new call
+      // has a new id, so the gate asks again), but it can repeat the same card.
+      // Log it at error level so it never goes unnoticed.
       if (!approval?.context_snapshot?.length) {
-        logger.info({ taskId: this.taskId }, 'No snapshot, re-running from scratch')
+        logger.error(
+          { taskId: this.taskId, requestId: approvalBeforeResolution?.request_id },
+          'Approved call has no saved context; re-running the loop, which will ask again'
+        )
         const result = await this.runAgentLoop()
         await this.handleLoopResult(result)
         if (
