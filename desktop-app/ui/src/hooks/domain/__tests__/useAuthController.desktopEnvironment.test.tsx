@@ -9,6 +9,7 @@ import { useAuthController } from '../useAuthController'
 
 const mocks = vi.hoisted(() => ({
   clearQueryCache: vi.fn(),
+  completeDesktopSetup: vi.fn(),
   getRuntimeConfigState: vi.fn(),
   getSessionGeneration: vi.fn(),
   logoutForEnvironmentMismatch: vi.fn(),
@@ -42,9 +43,13 @@ type DesktopEnvironmentSetupPayload = {
   externalRestApiBaseUrl: string
   appName?: string
 }
+type DesktopSetupTokenPayload = { email: string; authorizationToken: string }
 
 let desktopEnvironmentSetupListener:
   | ((payload: DesktopEnvironmentSetupPayload) => void | Promise<void>)
+  | null = null
+let desktopSetupTokenListener:
+  | ((payload: DesktopSetupTokenPayload) => void | Promise<void>)
   | null = null
 let confirmDesktopEnvironmentSetupForTest: (() => Promise<void>) | null = null
 let confirmDesktopEnvironmentSwitchForTest: (() => void) | null = null
@@ -109,6 +114,7 @@ async function savedTargetOptionId(): Promise<string> {
 beforeEach(async () => {
   vi.clearAllMocks()
   desktopEnvironmentSetupListener = null
+  desktopSetupTokenListener = null
   confirmDesktopEnvironmentSetupForTest = null
   confirmDesktopEnvironmentSwitchForTest = null
   cancelDesktopEnvironmentSwitchForTest = null
@@ -163,7 +169,10 @@ beforeEach(async () => {
     nativeSessionGeneration += 1
     return nativeSessionGeneration
   })
-  mocks.onDesktopSetupToken.mockReturnValue(() => undefined)
+  mocks.onDesktopSetupToken.mockImplementation(listener => {
+    desktopSetupTokenListener = listener
+    return () => undefined
+  })
   mocks.onExternalLogout.mockReturnValue(() => undefined)
   mocks.onDesktopEnvironmentSetup.mockImplementation(
     (listener: (payload: DesktopEnvironmentSetupPayload) => void | Promise<void>) => {
@@ -182,6 +191,7 @@ beforeEach(async () => {
       selectRuntimeConfigForHandoff: mocks.selectRuntimeConfigForHandoff,
       onDesktopEnvironmentSetup: mocks.onDesktopEnvironmentSetup,
       onDesktopSetupToken: mocks.onDesktopSetupToken,
+      completeDesktopSetup: mocks.completeDesktopSetup,
       onExternalLogout: mocks.onExternalLogout,
     },
   }
@@ -197,6 +207,26 @@ afterEach(async () => {
 })
 
 describe('Desktop environment handoff', () => {
+  it('asks the user to sign out when native desktop setup rejects an active session', async () => {
+    mocks.completeDesktopSetup.mockRejectedValue(new Error('desktop_setup_requires_signout'))
+    render(<Probe />)
+
+    await waitFor(() => expect(desktopSetupTokenListener).toBeTypeOf('function'))
+    await act(async () => {
+      desktopSetupTokenListener?.({
+        email: 'user@example.test',
+        authorizationToken: 'synthetic-setup-token',
+      })
+    })
+
+    await waitFor(() =>
+      expect(mocks.setStatus).toHaveBeenCalledWith(
+        'Sign out before setting up another desktop environment.',
+        'error'
+      )
+    )
+  })
+
   it('switches to a saved environment matching its REST endpoint', async () => {
     render(<Probe />)
     await waitFor(() => expect(screen.getByTestId('configuration-loaded')).toHaveTextContent('yes'))

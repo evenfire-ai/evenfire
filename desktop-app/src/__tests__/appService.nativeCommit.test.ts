@@ -8,6 +8,45 @@ import {
 afterEach(cleanupNativeCommitTestHarness)
 
 describe('AppService native auth and environment commit ordering', () => {
+  it('rejects desktop setup while preserving the active authenticated environment', async () => {
+    const { service, runtimeConfig, restA, restB } = await createNativeCommitTestHarness()
+    const me = { id: 'user-a', email: 'user-a@example.test', teamId: 'team-a' }
+    service.authClient = {
+      googleLogin: vi.fn().mockResolvedValue({ token: 'synthetic-session-a', me }),
+    } as never
+    const setupRequest = vi.fn().mockResolvedValue({
+      valid: true,
+      email: 'user-a@example.test',
+      externalRestApiBaseUrl: restB,
+      rpcProxyBaseUrl: 'https://rpc-b.example.test',
+      appName: 'Environment B',
+    })
+    const serviceInternals = service as unknown as {
+      memberRegistrationServiceClient: { completeDesktopSetup: typeof setupRequest }
+      completeDesktopSetup: (email: string, authorizationToken: string) => Promise<unknown>
+      getSessionGeneration: () => number
+    }
+    serviceInternals.memberRegistrationServiceClient = { completeDesktopSetup: setupRequest }
+
+    await service.googleLogin('synthetic-google-token')
+    const runtimeBeforeSetup = runtimeConfig.getDesktopRuntimeConfigState()
+    const generationBeforeSetup = serviceInternals.getSessionGeneration()
+    const gfsScopeBeforeSetup = service.gfsScopeIdentity
+
+    await expect(
+      serviceInternals.completeDesktopSetup('user-a@example.test', 'synthetic-setup-token')
+    ).rejects.toThrow('desktop_setup_requires_signout')
+
+    expect(setupRequest).not.toHaveBeenCalled()
+    expect(runtimeConfig.getDesktopRuntimeConfigState()).toEqual(runtimeBeforeSetup)
+    expect(runtimeConfig.config.externalRestApiBaseUrl).toBe(restA)
+    expect(service.sessionToken).toBe('synthetic-session-a')
+    expect(service.getCachedUserId()).toBe('user-a')
+    await expect(service.getSessionState()).resolves.toMatchObject({ authenticated: true, me })
+    expect(serviceInternals.getSessionGeneration()).toBe(generationBeforeSetup)
+    expect(service.gfsScopeIdentity).toEqual(gfsScopeBeforeSetup)
+  })
+
   it('keeps a pending environment selection ahead of a login commit', async () => {
     const { service, runtimeConfig, restA, restB, optionB } = await createNativeCommitTestHarness()
     const loginStarted = deferred<void>()

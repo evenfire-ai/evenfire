@@ -43,6 +43,14 @@ function isUnauthorizedError(error: unknown) {
   return /\b401\s+unauthorized\b/.test(message) || /:\s*401\s/.test(message)
 }
 
+function getDesktopSetupErrorMessage(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error)
+  if (message === 'desktop_setup_requires_signout') {
+    return 'Sign out before setting up another desktop environment.'
+  }
+  return 'Desktop setup could not be completed.'
+}
+
 export function useAuthController({
   setStatus,
   onSessionNeedsLoad,
@@ -190,8 +198,8 @@ export function useAuthController({
       setBusy(true)
       setAuthTransitioning(true)
       completeDesktopSetupWith(normalizedEmail, authorizationToken)
-        .catch(() => {
-          setStatus('Desktop setup could not be completed.', 'error')
+        .catch(error => {
+          setStatus(getDesktopSetupErrorMessage(error), 'error')
         })
         .finally(() => {
           setAuthTransitioning(false)
@@ -294,8 +302,8 @@ export function useAuthController({
       setBusy(true)
       setAuthTransitioning(true)
       await completeDesktopSetupWith(email, desktopSetupAuthorizationToken)
-    } catch {
-      setStatus('Desktop setup could not be completed.', 'error')
+    } catch (error) {
+      setStatus(getDesktopSetupErrorMessage(error), 'error')
     } finally {
       setAuthTransitioning(false)
       setBusy(false)

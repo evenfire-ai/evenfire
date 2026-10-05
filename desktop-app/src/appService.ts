@@ -2103,9 +2103,12 @@ export class AppService {
     if (!normalizedEmail || !authorizationToken.trim()) {
       throw new Error('email and authorization token are required')
     }
-    const setupGeneration = await this.withNativeAuthEnvironmentCommit(
-      async () => ++this.sessionGeneration
-    )
+    const setupGeneration = await this.withNativeAuthEnvironmentCommit(async () => {
+      if (this.sessionToken && this.me) {
+        throw new Error('desktop_setup_requires_signout')
+      }
+      return ++this.sessionGeneration
+    })
     let setupRequest:
       | ReturnType<MemberRegistrationServiceClient['completeDesktopSetup']>
       | undefined
