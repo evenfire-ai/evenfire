@@ -63,9 +63,13 @@ spec:
           value: '0.0.0.0'
         - name: MDB_MCP_HTTP_PORT
           value: '3000'
-        - name: MDB_MCP_HEALTH_CHECK_HOST
+        # This workload is intentionally served through a cluster Service and
+        # restricted by the generated NetworkPolicies.
+        - name: MDB_MCP_DANGEROUS_HOST_BINDING
+          value: 'true'
+        - name: MDB_MCP_MONITORING_SERVER_HOST
           value: '0.0.0.0'
-        - name: MDB_MCP_HEALTH_CHECK_PORT
+        - name: MDB_MCP_MONITORING_SERVER_PORT
           value: '3001'
         - name: MDB_MCP_READ_ONLY
           value: 'false'
