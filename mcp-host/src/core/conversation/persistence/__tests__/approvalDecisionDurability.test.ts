@@ -74,8 +74,8 @@ describe('approval decisions across a restart', () => {
     const reloaded = await new ConversationManager(podB.store).getOrCreate(SESSION_KEY)
 
     expect(reloaded.state).toBe(ConversationState.Idle)
-    expect([...(reloaded.denied_tools ?? [])]).toEqual(['shell_exec'])
-    expect(reloaded.denied_by?.shell_exec).toBe('user-a')
+    expect([...(reloaded.denials?.keys() ?? [])]).toEqual(['shell_exec'])
+    expect(reloaded.denials?.get('shell_exec')).toBe('user-a')
     const decision = new ApprovalController(reloaded, new DefaultLoopController()).beforeTool(
       'shell_exec',
       { path: '/tmp/x' },
@@ -94,7 +94,7 @@ describe('approval decisions across a restart', () => {
     const errors = vi.spyOn(logger, 'error')
     const reloaded = await new ConversationManager(podB.store).getOrCreate(SESSION_KEY)
 
-    expect(reloaded.denied_tools?.size ?? 0).toBe(0)
+    expect(reloaded.denials?.size ?? 0).toBe(0)
     expect(errors).toHaveBeenCalledWith(
       expect.objectContaining({ event: 'denied_tools_unreadable', sessionId: reloaded.id }),
       expect.any(String)
@@ -122,8 +122,8 @@ describe('approval decisions across a restart', () => {
     const podB = await restart(podA)
     const reloaded = await new ConversationManager(podB.store).getOrCreate(SESSION_KEY)
 
-    expect(reloaded.denied_tools?.size ?? 0).toBe(0)
-    expect(reloaded.denied_by?.shell_exec).toBeUndefined()
+    expect(reloaded.denials?.size ?? 0).toBe(0)
+    expect(reloaded.denials?.get('shell_exec')).toBeUndefined()
   })
 
   it('consumes the pending row when an approval is cancelled', async () => {

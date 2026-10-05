@@ -15,7 +15,7 @@ function makeConversation(overrides?: Partial<Conversation>): Conversation {
     created_at: new Date(),
     updated_at: new Date(),
     ...overrides,
-    denied_tools: overrides?.denied_tools,
+    denials: overrides?.denials,
   }
 }
 
@@ -282,7 +282,7 @@ describe('ApprovalController', () => {
   it('suspends a denied tool even when the exact name is allowlisted', () => {
     const conv = makeConversation({
       auto_approved_tools: new Set(['shell_exec', '*', 'mongodb-server']),
-      denied_tools: new Set(['shell_exec']),
+      denials: new Map([['shell_exec', null]]),
     })
     const controller = new ApprovalController(conv, customDelegateThatSuspends)
     const result = controller.beforeTool('shell_exec', { command: 'ls' })
@@ -301,7 +301,7 @@ describe('ApprovalController', () => {
 
   it('replaces a proceed with a re-approval card that names the tool', () => {
     const conv = makeConversation({
-      denied_tools: new Set(['file_read']),
+      denials: new Map([['file_read', null]]),
     })
     const registry = {
       get: (name: string) =>
@@ -425,7 +425,7 @@ describe('ApprovalController', () => {
     const proceeds = new DefaultLoopController()
 
     it('asks again even though the gate would proceed, and says why', () => {
-      const conv = makeConversation({ denied_tools: new Set(['shell_exec']) })
+      const conv = makeConversation({ denials: new Map([['shell_exec', null]]) })
       const controller = new ApprovalController(conv, proceeds)
 
       const result = controller.beforeTool('workflow_trigger', { name: 'wf' }, 'tc-1')
@@ -440,7 +440,7 @@ describe('ApprovalController', () => {
 
     it('asks again even when workflow_trigger is on the allowlist', () => {
       const conv = makeConversation({
-        denied_tools: new Set(['shell_exec']),
+        denials: new Map([['shell_exec', null]]),
         auto_approved_tools: new Set(['workflow_trigger']),
       })
       const controller = new ApprovalController(conv, proceeds)
@@ -458,7 +458,7 @@ describe('ApprovalController', () => {
     })
 
     it('does not ask again on a cron lane that ignores denials', () => {
-      const conv = makeConversation({ denied_tools: new Set(['shell_exec']) })
+      const conv = makeConversation({ denials: new Map([['shell_exec', null]]) })
       const controller = new ApprovalController(conv, proceeds, { honorDenials: false })
 
       expect(controller.beforeTool('workflow_trigger', { name: 'wf' }, 'tc-1')).toBe('proceed')
@@ -472,7 +472,7 @@ describe('ApprovalController', () => {
       'asks again for %s, even when cron_manage is allowlisted',
       action => {
         const conv = makeConversation({
-          denied_tools: new Set(['monid__run']),
+          denials: new Map([['monid__run', null]]),
           auto_approved_tools: new Set(['cron_manage']),
         })
         const controller = new ApprovalController(conv, proceeds)
@@ -486,7 +486,7 @@ describe('ApprovalController', () => {
 
     it.each(['list', 'get', 'delete', 'disable'])('follows the allowlist for %s', action => {
       const conv = makeConversation({
-        denied_tools: new Set(['monid__run']),
+        denials: new Map([['monid__run', null]]),
         auto_approved_tools: new Set(['cron_manage']),
       })
       const controller = new ApprovalController(conv, proceeds)
@@ -502,14 +502,14 @@ describe('ApprovalController', () => {
     })
 
     it('does not ask again on a cron lane that ignores denials', () => {
-      const conv = makeConversation({ denied_tools: new Set(['monid__run']) })
+      const conv = makeConversation({ denials: new Map([['monid__run', null]]) })
       const controller = new ApprovalController(conv, proceeds, { honorDenials: false })
 
       expect(controller.beforeTool('cron_manage', { action: 'trigger' }, 'tc-1')).toBe('proceed')
     })
 
     it("keeps the gate's own card and only marks it as a re-ask", () => {
-      const conv = makeConversation({ denied_tools: new Set(['monid__run']) })
+      const conv = makeConversation({ denials: new Map([['monid__run', null]]) })
       const controller = new ApprovalController(conv, customDelegateThatSuspends)
 
       const result = controller.beforeTool('cron_manage', { action: 'create' }, 'tc-1')
@@ -524,7 +524,7 @@ describe('ApprovalController', () => {
 
   describe('a denied tool asks again', () => {
     it("keeps the gate's description and marks the card as a denial re-ask", () => {
-      const conv = makeConversation({ denied_tools: new Set(['shell_exec']) })
+      const conv = makeConversation({ denials: new Map([['shell_exec', null]]) })
       const controller = new ApprovalController(conv, customDelegateThatSuspends)
 
       const result = controller.beforeTool('shell_exec', { command: 'ls' }, 'tc-1')
@@ -536,7 +536,7 @@ describe('ApprovalController', () => {
     })
 
     it('builds its own re-ask card when the gate would proceed', () => {
-      const conv = makeConversation({ denied_tools: new Set(['shell_exec']) })
+      const conv = makeConversation({ denials: new Map([['shell_exec', null]]) })
       const controller = new ApprovalController(conv, new DefaultLoopController())
 
       const result = controller.beforeTool('shell_exec', { command: 'ls' }, 'tc-1')
@@ -550,7 +550,7 @@ describe('ApprovalController', () => {
 
   it('a cron gate does not let a denial suspend an autonomous proceed', () => {
     const conv = makeConversation({
-      denied_tools: new Set(['cron_manage']),
+      denials: new Map([['cron_manage', null]]),
     })
     const proceed = {
       ...new DefaultLoopController(),

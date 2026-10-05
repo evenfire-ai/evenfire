@@ -22,6 +22,7 @@ import {
   SessionListQuery,
   SessionMessagesQuery,
 } from './conversationStore'
+import { liftDenial, recordDenial } from './denialPolicy'
 import { userIdFromRpcPrefix } from './sessionKeyParts'
 
 /**
@@ -102,7 +103,7 @@ export class ConversationManager {
       state: ConversationState.Idle,
       turns: [],
       auto_approved_tools: new Set(),
-      denied_tools: new Set(),
+      denials: new Map(),
       created_at: new Date(),
       updated_at: new Date(),
       // #654 — a freshly inserted row carries the column default, so the RAM
@@ -543,8 +544,9 @@ export class ConversationManager {
    * Approving one tool does not allowlist other tools, an MCP server, or the
    * rest of the turn. When alwaysApprove=true, only that tool's exact name is
    * stored for later turns, unless the card does not allow it (a forced gate or
-   * a denial re-ask). Approving this tool removes it from denied_tools when the
-   * approver is the user who denied it (or the denier is unknown).
+   * a denial re-ask). Approving this tool lifts its denial only when the
+   * approver is the user who denied it (or the denier is unknown); another
+   * user's approval runs this call once and keeps the denial (denialPolicy).
    *
    * **IronClaw write-through**: awaits durable approval-state mutation.
    */
@@ -563,13 +565,20 @@ export class ConversationManager {
     const requestId = conversation.pending_approval?.request_id
     if (conversation.pending_approval) {
       const toolName = conversation.pending_approval.tool_name
-      const denier = conversation.denied_by?.[toolName]
-      const sameUser = !denier || !userId || denier === userId
-      if (sameUser) {
-        conversation.denied_tools?.delete(toolName)
-        if (conversation.denied_by) delete conversation.denied_by[toolName]
-        // alwaysApprove stores only the exact tool name (for future turns)
-        if (alwaysApprove && conversation.pending_approval.alwaysApproveAllowed !== false) {
+      const lifted = liftDenial(conversation, toolName, userId)
+      // alwaysApprove stores only the exact tool name (for future turns).
+      if (alwaysApprove) {
+        if (lifted === 'kept_for_denier') {
+          logger.info(
+            { event: 'always_approve_ignored', toolName, reason: 'denied_by_another_user' },
+            'Always approve ignored: another user denied this tool'
+          )
+        } else if (conversation.pending_approval.alwaysApproveAllowed === false) {
+          logger.info(
+            { event: 'always_approve_ignored', toolName, reason: 'not_waivable' },
+            'Always approve ignored: this card cannot be allowlisted'
+          )
+        } else {
           conversation.auto_approved_tools.add(toolName)
         }
       }
@@ -586,7 +595,7 @@ export class ConversationManager {
    * Deny approval.
    * Transitions: AwaitingApproval → Idle
    *
-   * Records pending_approval.tool_name on denied_tools before clearing
+   * Records a denial of pending_approval.tool_name (denialPolicy) before clearing
    * pending_approval. A user denial is persisted with the session. An approval
    * timeout passes record:false and does not.
    *
@@ -607,15 +616,9 @@ export class ConversationManager {
     const deniedTool = conversation.pending_approval?.tool_name
     const record = options?.record !== false
     if (deniedTool && record) {
-      conversation.denied_tools ??= new Set()
-      conversation.denied_tools.add(deniedTool)
-      if (options?.userId) {
-        conversation.denied_by = { ...conversation.denied_by, [deniedTool]: options.userId }
-      }
-      // A deny is the latest explicit decision: it also revokes an earlier
-      // "Always approve" for this exact tool, so approving once later does not
-      // bring the blanket grant back.
-      conversation.auto_approved_tools.delete(deniedTool)
+      // The deny is the latest explicit decision: recordDenial also revokes an
+      // earlier "Always approve" for this exact tool.
+      recordDenial(conversation, deniedTool, options?.userId)
       logger.info(
         { event: 'approval_denial_recorded', toolName: deniedTool },
         'Recorded a tool denial'

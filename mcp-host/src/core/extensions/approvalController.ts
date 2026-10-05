@@ -4,21 +4,24 @@
  * Phase 6: Wraps a delegate LoopController (UnifiedApprovalGateController)
  * and intercepts beforeTool() before the delegate's approval check fires.
  *
- * There is a SINGLE approval gate in the code (SPEC-UNIFIED §21):
- *   loopController.beforeTool() in toolUseLoop.ts
+ * Approval decisions go through loopController.beforeTool() in toolUseLoop
+ * (SPEC-UNIFIED §21). The one other decision point is the guardrail `ask`
+ * lane in toolUseLoopToolBatch, which consumes only an exact one-shot grant.
+ * Both read denials through core/conversation/denialPolicy.
  *
  * The decorator chain:
- *   ApprovalController (denial suspend, then exact auto_approved_tools name,
- *     then one-shot of the same tool call id and arguments → "proceed")
+ *   ApprovalController (denial re-ask, re-ask for tools that start other tools
+ *     while a denial is active, exact auto_approved_tools name unless the gate
+ *     is forced, then one-shot of the same tool call id and arguments)
  *     └─ UnifiedApprovalGateController (MCP tool? → suspend. Native requiresApproval? → suspend. Else → "proceed")
  *
  * A "*" entry or an MCP server prefix in auto_approved_tools does not
  * short-circuit this gate. Gate 2 (tool.requiresApproval() inside toolUseLoop)
- * was REMOVED as part of the BUG-11 fix. All approval decisions now flow
- * through this single gate.
+ * was REMOVED as part of the BUG-11 fix.
  */
 import { randomUUID } from 'node:crypto'
 import { logger } from '../../logger'
+import { hasActiveDenials, isDenied } from '../conversation/denialPolicy'
 import { LoopController, ToolRegistry } from '../interfaces'
 import { ChatMessage, PendingApproval, ToolDefinition } from '../types'
 import type { Conversation } from '../types'
@@ -98,7 +101,7 @@ export class ApprovalController implements LoopController {
     params: Record<string, unknown>,
     toolCallId?: string
   ): 'proceed' | 'skip' | { type: 'suspend'; approval: PendingApproval } {
-    if (this.honorDenials && this.conversation.denied_tools?.has(toolName)) {
+    if (this.honorDenials && isDenied(this.conversation, toolName)) {
       logger.info(
         { event: 'approval_reask_required', toolName },
         'Previously denied tool requires approval again'
@@ -108,7 +111,7 @@ export class ApprovalController implements LoopController {
 
     if (
       this.honorDenials &&
-      (this.conversation.denied_tools?.size ?? 0) > 0 &&
+      hasActiveDenials(this.conversation) &&
       startsOtherTools(toolName, params)
     ) {
       logger.info(

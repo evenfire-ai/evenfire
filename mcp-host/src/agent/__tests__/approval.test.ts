@@ -611,7 +611,7 @@ describe('AgentStateMachine -- approval handling', () => {
     })
     // A timeout is not the user's decision: it records no denial.
     const conv = await shortTimeoutAgent.getConversationManager().getOrCreate(SESSION_KEY)
-    expect(conv.denied_tools?.has('shell_exec') ?? false).toBe(false)
+    expect(conv.denials?.has('shell_exec') ?? false).toBe(false)
   })
 
   describe('denials through the executor', () => {
@@ -675,11 +675,11 @@ describe('AgentStateMachine -- approval handling', () => {
       // The decision binding requires the original sender, so approve as that
       // sender but through the executor path that carries the approver id.
       const conv = await agent.getConversationManager().getOrCreate(SESSION_KEY)
-      conv.denied_by = { shell_exec: 'user-other' }
+      conv.denials?.set('shell_exec', 'user-other')
       expect((await agent.handleApproval('user-1', 'req-reask', true)).success).toBe(true)
 
       await vi.waitFor(() => expect(agent.getState()).toBe('idle'))
-      expect(conv.denied_tools?.has('shell_exec')).toBe(true)
+      expect(conv.denials?.has('shell_exec')).toBe(true)
       expect(conv.auto_approved_tools.has('shell_exec')).toBe(false)
     })
   })

@@ -47,6 +47,7 @@ import {
   type SessionTokenUsage,
   boundedTurns,
 } from '../conversationStore'
+import { serializeDenials } from '../denialPolicy'
 import {
   sessionPartsFromPrefixedKey,
   userIdFromRpcPrefix,
@@ -1091,15 +1092,7 @@ export class SqliteConversationStore implements ConversationStore {
   ): Promise<void> {
     const sessionKey = this.sessionKeyById.get(conv.id)
     if (sessionKey) this.reconcilePinning(sessionKey, conv)
-    const deniedToolsJson =
-      decision === 'cancel'
-        ? undefined
-        : JSON.stringify(
-            [...(conv.denied_tools ?? [])].map(tool => ({
-              tool,
-              userId: conv.denied_by?.[tool] ?? null,
-            }))
-          )
+    const deniedToolsJson = decision === 'cancel' ? undefined : serializeDenials(conv)
     try {
       await this.persistQueue.enqueueSync(
         {

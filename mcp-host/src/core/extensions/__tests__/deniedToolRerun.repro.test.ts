@@ -319,10 +319,10 @@ describe('Lead Scout denial stickiness', () => {
     await manager.deny(conversation, { userId: 'marcela' })
     // The deny is the latest decision: it revokes the earlier Always approve.
     expect(conversation.auto_approved_tools.has(FINDER)).toBe(false)
-    expect(conversation.denied_tools?.has(FINDER)).toBe(true)
+    expect(conversation.denials?.has(FINDER)).toBe(true)
 
     await manager.startTurn(conversation, 'find people a third time', 'task-after-deny')
-    expect(conversation.denied_tools?.has(FINDER)).toBe(true)
+    expect(conversation.denials?.has(FINDER)).toBe(true)
     const again = await turn([
       {
         type: 'tool_calls',

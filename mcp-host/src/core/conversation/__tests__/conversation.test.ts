@@ -307,11 +307,11 @@ describe('ConversationManager — approval transitions', () => {
     })
 
     await manager.deny(conv, { userId: 'user-a' })
-    expect(conv.denied_tools?.has('shell_exec')).toBe(true)
-    expect(conv.denied_by?.shell_exec).toBe('user-a')
+    expect(conv.denials?.has('shell_exec')).toBe(true)
+    expect(conv.denials?.get('shell_exec')).toBe('user-a')
 
     await manager.startTurn(conv, 'Run shell again', 'test-task-2')
-    expect(conv.denied_tools?.has('shell_exec')).toBe(true)
+    expect(conv.denials?.has('shell_exec')).toBe(true)
     await manager.suspendForApproval(conv, {
       request_id: 'req-deny-stick-2',
       tool_name: 'shell_exec',
@@ -322,7 +322,7 @@ describe('ConversationManager — approval transitions', () => {
     })
 
     await manager.approve(conv, false, 'user-b')
-    expect(conv.denied_tools?.has('shell_exec')).toBe(true)
+    expect(conv.denials?.has('shell_exec')).toBe(true)
     expect(conv.auto_approved_tools.has('shell_exec')).toBe(false)
 
     await manager.completeTurn(conv, 'still blocked')
@@ -336,7 +336,7 @@ describe('ConversationManager — approval transitions', () => {
       context_snapshot: [],
     })
     await manager.approve(conv, true, 'user-a')
-    expect(conv.denied_tools?.has('shell_exec')).toBe(false)
+    expect(conv.denials?.has('shell_exec')).toBe(false)
     expect(conv.auto_approved_tools.has('shell_exec')).toBe(true)
   })
 
@@ -367,7 +367,7 @@ describe('ConversationManager — approval transitions', () => {
     })
     await manager.approve(conv, false, 'user-revoke')
 
-    expect(conv.denied_tools?.has('shell_exec')).toBe(false)
+    expect(conv.denials?.has('shell_exec')).toBe(false)
     expect(conv.auto_approved_tools.has('shell_exec')).toBe(false)
   })
 
@@ -420,7 +420,7 @@ describe('ConversationManager — approval transitions', () => {
       context_snapshot: [],
     })
     await manager.deny(conv, { record: false })
-    expect(conv.denied_tools?.has('shell_exec')).toBeFalsy()
+    expect(conv.denials?.has('shell_exec')).toBeFalsy()
   })
 })
 

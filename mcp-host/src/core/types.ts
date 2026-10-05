@@ -434,13 +434,11 @@ export interface Conversation {
   pending_approval?: PendingApproval
   auto_approved_tools: Set<string>
   /**
-   * Exact tool names the user denied in this conversation. Checked before any
-   * allowlist. Persisted on `sessions.denied_tools` so a restart keeps the block.
+   * Exact tool names denied in this conversation → the user who denied each
+   * (null when unknown). Checked before any allowlist and persisted on
+   * `sessions.denied_tools`. Read and change it only through denialPolicy.
    */
-  denied_tools?: Set<string>
-  /** User id that recorded each denial. Another user's approval of one call
-   * does not clear it. Persisted beside `denied_tools`. */
-  denied_by?: Record<string, string>
+  denials?: Map<string, string | null>
   /**
    * Guardrail doom-loop counter (spec §6.4) — tracks consecutive identical
    * `(resolved tool, effective-input)` tool calls across turns within a task.

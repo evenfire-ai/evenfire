@@ -9,9 +9,10 @@
  *   ApprovalController (denial, then exact tool name, then the approved call id)
  *     └─ UnifiedApprovalGateController (MCP tool? → suspend. Native requiresApproval? → suspend. Else → "proceed")
  *
- * This is the SINGLE approval gate (SPEC-UNIFIED §21). Gate 2 (the old
- * tool.requiresApproval() check inside toolUseLoop) has been removed.
- * All approval decisions go through this controller via LoopController.beforeTool().
+ * This is the base approval gate behind LoopController.beforeTool()
+ * (SPEC-UNIFIED §21); the guardrail `ask` lane in toolUseLoopToolBatch is the
+ * only other decision point. Gate 2 (the old tool.requiresApproval() check
+ * inside toolUseLoop) has been removed.
  */
 import { randomUUID } from 'node:crypto'
 import { LoopController, Tool, ToolRegistry } from '../interfaces'

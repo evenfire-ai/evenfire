@@ -1,5 +1,6 @@
 import { randomUUID } from 'crypto'
 import { extractToolIntent, getDisplayName } from '../../progress/intentExtraction.js'
+import { isDenied } from '../conversation/denialPolicy'
 import { oneShotMatches } from '../extensions/approvalMatch'
 import {
   buildConnectRequiredApproval,
@@ -331,7 +332,7 @@ export async function executeToolCalls(
         // (spec §6.3). Broad `auto_approved_tools` do NOT — an explicit guardrail
         // ask needs an exact approval, so we only consume the pending_approval.
         const pending = config.conversation.pending_approval
-        const denied = config.conversation.denied_tools?.has(call.name) === true
+        const denied = isDenied(config.conversation, call.name)
         if (!denied && pending && oneShotMatches(pending, call.name, call.arguments, call.id)) {
           config.conversation.pending_approval = undefined
           recordDecision('tool', 'ask', gd.source, 'executed', gd.reasonCode, mode)

@@ -23,6 +23,7 @@ import type {
   TurnToolCall,
 } from '../../types'
 import { ConversationState, isTraceContextV1 } from '../../types'
+import { parseDenials } from '../denialPolicy'
 
 function parseTraceContext(raw: string | null | undefined): TraceContextV1 | null {
   if (!raw) return null
@@ -74,7 +75,12 @@ export function reconstructConversation(persisted: PersistedSession): Reconstruc
     turns,
     pending_approval: pending,
     auto_approved_tools: new Set(),
-    ...parseDeniedTools(persisted.session.denied_tools, persisted.session.id),
+    denials: parseDenials(persisted.session.denied_tools, () =>
+      logger.error(
+        { event: 'denied_tools_unreadable', sessionId: persisted.session.id },
+        'Persisted tool denials could not be read'
+      )
+    ),
     created_at: startedAt,
     updated_at: lastActivityAt,
     // D.1 — repopulate the in-flight task from the durable column. After a pod
@@ -123,52 +129,6 @@ export function reconstructConversation(persisted: PersistedSession): Reconstruc
  */
 function normalizeModelSelectionRevision(raw: number | null | undefined): number {
   return typeof raw === 'number' && Number.isSafeInteger(raw) && raw >= 0 ? raw : 0
-}
-
-/**
- * Parse the persisted `denied_tools` JSON (`[{ tool, userId }]`). NULL is no
- * denials. A malformed value is logged at error level: it cannot say which
- * tools were denied, so those tools ask through the normal gate again.
- */
-function parseDeniedTools(
-  raw: string | null | undefined,
-  sessionId: string
-): {
-  denied_tools: Set<string>
-  denied_by?: Record<string, string>
-} {
-  const denied_tools = new Set<string>()
-  const denied_by: Record<string, string> = {}
-  if (!raw) return { denied_tools }
-  const unreadable = () =>
-    logger.error(
-      { event: 'denied_tools_unreadable', sessionId },
-      'Persisted tool denials could not be read'
-    )
-  try {
-    const parsed = JSON.parse(raw) as unknown
-    if (!Array.isArray(parsed)) {
-      unreadable()
-      return { denied_tools }
-    }
-    for (const entry of parsed) {
-      const tool = (entry as { tool?: unknown } | null)?.tool
-      if (!entry || typeof entry !== 'object' || typeof tool !== 'string' || tool.length === 0) {
-        unreadable()
-        continue
-      }
-      const userId = (entry as { userId?: unknown }).userId
-      denied_tools.add(tool)
-      if (typeof userId === 'string' && userId.length > 0) denied_by[tool] = userId
-    }
-  } catch {
-    unreadable()
-    return { denied_tools: new Set() }
-  }
-  return {
-    denied_tools,
-    ...(Object.keys(denied_by).length > 0 ? { denied_by } : {}),
-  }
 }
 
 /**
