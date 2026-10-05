@@ -4213,6 +4213,8 @@ describe('WorkflowRecipeReconciler', () => {
         const outcome = ensure()
 
         await expect(outcome).rejects.toBeInstanceOf(ResourceVanishedAfterConflictError)
+        // The cause is the 404 of the re-read, as in ensureTransportService.
+        await expect(outcome).rejects.toMatchObject({ cause: { code: 404 } })
         const name = createdBody().metadata.name
         expect(readsOf(read, name, namespace)).toBe(2)
         expect(patch).toHaveBeenCalledTimes(0)

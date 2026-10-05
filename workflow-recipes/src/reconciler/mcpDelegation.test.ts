@@ -6,7 +6,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { WorkflowRecipeCRD } from '../types'
 import { captureLogger, captureLoggerLevels } from './__tests__/captureLogger'
-import { ResourceVanishedAfterConflictError } from './k8sErrors'
+import { ResourceVanishedAfterConflictError, RetryableReconcileError } from './k8sErrors'
 import {
   DelegationDeps,
   PRE_DEPLOY_ANNOTATION,
@@ -1142,7 +1142,7 @@ describe('ensureRecipeContext', () => {
     expect(mockCustomApi.createNamespacedCustomObject).not.toHaveBeenCalled()
   })
 
-  it('H04b — writes on 409 when live Context has no mcpServers (empty→filled is not a skip)', async () => {
+  it('H04b — replaces an existing Context that has no mcpServers (empty→filled is not a skip)', async () => {
     const mockCustomApi = {
       createNamespacedCustomObject: vi.fn(),
       getNamespacedCustomObject: vi.fn().mockResolvedValue({ metadata: { resourceVersion: '5' } }),
@@ -3029,9 +3029,10 @@ describe('preDeployMcpServers', () => {
     })
     const recipe = makeRecipe()
 
-    await expect(preDeployMcpServers(deps, recipe, 'mcp-server', new Map())).rejects.toThrow(
-      'Pre-deploy failed for workload(s): redis-mcp'
-    )
+    const outcome = preDeployMcpServers(deps, recipe, 'mcp-server', new Map())
+    await expect(outcome).rejects.toThrow('Pre-deploy failed for workload(s): redis-mcp')
+    // A permanent failure stays terminal (#998 audit).
+    await expect(outcome).rejects.not.toBeInstanceOf(RetryableReconcileError)
   })
 
   it('throws when the pre-deploy Context allowlist cannot be persisted', async () => {
@@ -3053,9 +3054,123 @@ describe('preDeployMcpServers', () => {
     })
     const recipe = makeRecipe()
 
-    await expect(preDeployMcpServers(deps, recipe, 'mcp-server', new Map())).rejects.toThrow(
-      'Pre-deploy Context allowlist failed'
+    const outcome = preDeployMcpServers(deps, recipe, 'mcp-server', new Map())
+    await expect(outcome).rejects.toThrow('Pre-deploy Context allowlist failed')
+    // A permanent Context error stays terminal (#998 audit).
+    await expect(outcome).rejects.not.toBeInstanceOf(RetryableReconcileError)
+  })
+
+  it('keeps a Context that vanished after a create conflict retryable on the pre-deploy path', async () => {
+    // GET 404, POST 409, re-read 404: the writer raises ResourceVanishedAfterConflictError.
+    // The pre-deploy wrapper must not turn it into a terminal error (#998 audit).
+    const deps = makePreDeployDeps({
+      customApi: {
+        createNamespacedCustomObject: vi
+          .fn()
+          .mockImplementation((opts: { body: { kind?: string } }) =>
+            opts.body.kind === 'Context' ? Promise.reject({ code: 409 }) : Promise.resolve({})
+          ),
+        getNamespacedCustomObject: vi.fn().mockRejectedValue({ code: 404 }),
+        patchNamespacedCustomObject: vi.fn().mockResolvedValue({}),
+        deleteNamespacedCustomObject: vi.fn().mockResolvedValue({}),
+        listNamespacedCustomObject: vi.fn().mockResolvedValue({ items: [] }),
+      } as any,
+    })
+    const recipe = makeRecipe()
+
+    const error = await preDeployMcpServers(deps, recipe, 'mcp-server', new Map()).then(
+      () => undefined,
+      (e: unknown) => e
     )
+
+    expect(error).toBeInstanceOf(RetryableReconcileError)
+    expect((error as Error).message).toContain('Pre-deploy Context allowlist failed')
+    expect((error as Error).message).toContain('disappeared after create conflict')
+    expect((error as { cause?: unknown }).cause).toBeInstanceOf(ResourceVanishedAfterConflictError)
+  })
+
+  it('keeps a pre-deploy failure retryable when every workload failed retryably', async () => {
+    // Service GET 404, POST 409, re-read 404 for the only transport workload.
+    const deps = makePreDeployDeps({
+      coreApi: {
+        createNamespacedService: vi.fn().mockRejectedValue({ code: 409 }),
+        readNamespacedService: vi.fn().mockRejectedValue({ code: 404 }),
+        replaceNamespacedService: vi.fn().mockResolvedValue({}),
+        deleteNamespacedService: vi.fn().mockResolvedValue({}),
+      } as any,
+    })
+    const recipe = makeRecipe()
+
+    const error = await preDeployMcpServers(deps, recipe, 'mcp-server', new Map()).then(
+      () => undefined,
+      (e: unknown) => e
+    )
+
+    expect(error).toBeInstanceOf(RetryableReconcileError)
+    expect((error as Error).message).toContain('Pre-deploy failed for workload(s): redis-mcp')
+  })
+
+  it('keeps a pre-deploy failure terminal when any workload failed permanently', async () => {
+    // redis-mcp: its Service vanishes after a create conflict (retryable).
+    // files-mcp: its McpServer create fails with a permanent error.
+    const deps = makePreDeployDeps({
+      customApi: {
+        createNamespacedCustomObject: vi
+          .fn()
+          .mockImplementation((opts: { body: { kind?: string; metadata?: { name?: string } } }) =>
+            opts.body.kind === 'McpServer' && String(opts.body.metadata?.name).includes('files-mcp')
+              ? Promise.reject(new Error('quota exceeded'))
+              : Promise.resolve({})
+          ),
+        getNamespacedCustomObject: vi.fn().mockRejectedValue({ code: 404 }),
+        patchNamespacedCustomObject: vi.fn().mockResolvedValue({}),
+        deleteNamespacedCustomObject: vi.fn().mockResolvedValue({}),
+        listNamespacedCustomObject: vi.fn().mockResolvedValue({ items: [] }),
+      } as any,
+      coreApi: {
+        createNamespacedService: vi
+          .fn()
+          .mockImplementation((opts: { body: { metadata?: { name?: string } } }) =>
+            String(opts.body.metadata?.name).includes('redis-mcp')
+              ? Promise.reject({ code: 409 })
+              : Promise.resolve({})
+          ),
+        readNamespacedService: vi.fn().mockRejectedValue({ code: 404 }),
+        replaceNamespacedService: vi.fn().mockResolvedValue({}),
+        deleteNamespacedService: vi.fn().mockResolvedValue({}),
+      } as any,
+    })
+    const recipe = makeRecipe({
+      spec: {
+        workloads: [
+          {
+            id: 'redis-mcp',
+            type: 'deployment',
+            image: 'clerum/redis-mcp:latest',
+            port: 3000,
+            transport: { type: 'streamableHttp', path: '/mcp' },
+          },
+          {
+            id: 'files-mcp',
+            type: 'deployment',
+            image: 'clerum/files-mcp:latest',
+            port: 3000,
+            transport: { type: 'streamableHttp', path: '/mcp' },
+          },
+        ],
+      },
+    })
+
+    const error = await preDeployMcpServers(deps, recipe, 'mcp-server', new Map()).then(
+      () => undefined,
+      (e: unknown) => e
+    )
+
+    // Witness: both workloads failed and were reported.
+    expect((error as Error).message).toContain(
+      'Pre-deploy failed for workload(s): redis-mcp, files-mcp'
+    )
+    expect(error).not.toBeInstanceOf(RetryableReconcileError)
   })
 
   it('returns empty array when recipe has no transport workloads', async () => {

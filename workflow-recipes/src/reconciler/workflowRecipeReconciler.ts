@@ -4830,11 +4830,15 @@ export class WorkflowRecipeReconciler {
           })
           throw error
         }
-        // Another writer created it between our read and this POST.
-        existing = await this.readStatefulSetIfPresent(name, namespace)
-        if (!existing) {
+        // Another writer created it between our read and this POST. A 404 on
+        // this re-read means it is gone again; the 404 is the cause, as in
+        // ensureTransportService.
+        try {
+          existing = await this.appsApi.readNamespacedStatefulSet({ name, namespace })
+        } catch (readError: unknown) {
+          if (getErrorCode(readError) !== 404) throw readError
           throw new ResourceVanishedAfterConflictError(`StatefulSet "${name}" in ${namespace}`, {
-            cause: error,
+            cause: readError,
           })
         }
       }
