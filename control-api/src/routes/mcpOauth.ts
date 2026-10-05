@@ -105,7 +105,7 @@ export function normalizeMcpServerOwnerDecl(
   // IDENTICALLY to the mint + callback (D4 — no drift). The remote decl carries the
   // pinned routing + secretSource that `getAccessToken` branches on.
   if (lane === 'remote') {
-    const resolved = resolveServerOAuthSubject(server)
+    const resolved = resolveServerOAuthSubject(server, 'token')
     if (!resolved) return null
     return { metadata: ownerMetadata(server), spec: { oauthClients: [resolved.decl] } }
   }
@@ -114,7 +114,7 @@ export function normalizeMcpServerOwnerDecl(
   // gets the pinned `generic` routing + secretSource that `getAccessToken`
   // branches on.
   if (lane === 'generic') {
-    const resolved = resolveServerOAuthSubject(server)
+    const resolved = resolveServerOAuthSubject(server, 'token')
     if (!resolved) return null
     return { metadata: ownerMetadata(server), spec: { oauthClients: [resolved.decl] } }
   }
@@ -475,7 +475,7 @@ export function createMcpOauthRouter(gateway: K8sGateway): Router {
         }
         // Checked up front, not only through the refresh reader: a still-fresh
         // access token is served without ever reading the owner declaration.
-        assertRemoteOAuthSpecCoherent(server)
+        assertRemoteOAuthSpecCoherent(server, 'token')
 
         // Bifurcate by grantScope read from the server. The KEY comes from the
         // shared derivation (`buildMcpServerGrantKey`, D4) so the mint, the
