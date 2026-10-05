@@ -59,6 +59,109 @@ beforeEach(async () => {
 })
 
 describe('TokenStore per-environment slots (spec §5.2)', () => {
+  it('rejects new operations after the TokenStore drain begins', async () => {
+    const keytar = await import('keytar')
+    let finishWrite!: () => void
+    vi.mocked(keytar.setPassword).mockImplementationOnce(
+      () =>
+        new Promise<void>(resolve => {
+          finishWrite = resolve
+        })
+    )
+    const store = new TokenStore()
+    const activeWrite = store.setSessionToken('active-token', ENV_A)
+    await vi.waitFor(() => {
+      expect(keytar.setPassword).toHaveBeenCalledWith(
+        SERVICE,
+        `${LEGACY_ACCOUNT}::${ENV_A}`,
+        'active-token'
+      )
+    })
+
+    const drain = store.prepareForQuit()
+    try {
+      await expect(store.setSessionToken('late-token', ENV_A)).rejects.toThrow(
+        'Application is shutting down'
+      )
+      expect(keytar.setPassword).toHaveBeenCalledOnce()
+    } finally {
+      finishWrite()
+      await Promise.all([activeWrite, drain])
+    }
+  })
+
+  it('finishes an accepted read migration after admission closes and drains its native write', async () => {
+    const keytar = await import('keytar')
+    const store = new TokenStore()
+    keychain.set(keyOf(SERVICE, LEGACY_ACCOUNT), 'legacy-token')
+
+    let finishLegacyRead!: () => void
+    const legacyRead = new Promise<void>(resolve => {
+      finishLegacyRead = resolve
+    })
+    const originalGetPassword = vi.mocked(keytar.getPassword).getMockImplementation()!
+    const originalSetPassword = vi.mocked(keytar.setPassword).getMockImplementation()!
+    vi.mocked(keytar.getPassword).mockImplementation(async (service, account) => {
+      if (account === LEGACY_ACCOUNT) await legacyRead
+      return originalGetPassword(service, account)
+    })
+
+    let finishWrite!: () => void
+    vi.mocked(keytar.setPassword).mockImplementationOnce(
+      () =>
+        new Promise<void>(resolve => {
+          finishWrite = resolve
+        })
+    )
+
+    const read = store.getSessionToken(ENV_A)
+    await vi.waitFor(() => {
+      expect(keytar.getPassword).toHaveBeenCalledWith(SERVICE, LEGACY_ACCOUNT)
+    })
+    let drainFinished = false
+    const drain = store.prepareForQuit().then(() => {
+      drainFinished = true
+    })
+    try {
+      await expect(store.clearSessionToken(ENV_B)).rejects.toThrow('Application is shutting down')
+      finishLegacyRead()
+      await vi.waitFor(() => {
+        expect(keytar.setPassword).toHaveBeenCalledWith(
+          SERVICE,
+          `${LEGACY_ACCOUNT}::${ENV_A}`,
+          'legacy-token'
+        )
+      })
+      expect(drainFinished).toBe(false)
+
+      finishWrite()
+      await expect(read).resolves.toBe('legacy-token')
+      await expect(drain).resolves.toBeUndefined()
+      expect(drainFinished).toBe(true)
+    } finally {
+      finishLegacyRead()
+      const migrationWriteStarted = await vi
+        .waitFor(() => {
+          expect(keytar.setPassword).toHaveBeenCalledWith(
+            SERVICE,
+            `${LEGACY_ACCOUNT}::${ENV_A}`,
+            'legacy-token'
+          )
+        })
+        .then(
+          () => true,
+          () => false
+        )
+      if (migrationWriteStarted) finishWrite?.()
+      else vi.mocked(keytar.setPassword).mockReset().mockImplementation(originalSetPassword)
+      await Promise.allSettled([read, drain])
+      vi.mocked(keytar.getPassword).mockReset().mockImplementation(originalGetPassword)
+      if (migrationWriteStarted) {
+        vi.mocked(keytar.setPassword).mockReset().mockImplementation(originalSetPassword)
+      }
+    }
+  })
+
   it('stores and reads a token under the env-scoped account', async () => {
     const store = new TokenStore()
     await store.setSessionToken('tok-a', ENV_A)

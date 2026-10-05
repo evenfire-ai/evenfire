@@ -143,8 +143,13 @@ async function removeTokenFileDurably(filePath: string): Promise<void> {
 
 export class TokenStore {
   private readonly pendingOperations = new Set<Promise<unknown>>()
+  private admissionClosed = false
 
   private trackOperation<T>(operation: () => Promise<T>): Promise<T> {
+    if (this.admissionClosed) {
+      return Promise.reject(new Error('Application is shutting down'))
+    }
+
     const pending = Promise.resolve().then(operation)
     this.pendingOperations.add(pending)
     void pending.then(
@@ -154,8 +159,19 @@ export class TokenStore {
     return pending
   }
 
+  /** Stop accepting new credential operations for the current quit attempt. */
+  private closeAdmission(): void {
+    this.admissionClosed = true
+  }
+
+  /** Reopen credential operations when Electron cancels the current quit attempt. */
+  reopenAdmission(): void {
+    this.admissionClosed = false
+  }
+
   /** Wait for active Keytar work and any storage fallback it triggers. */
   async prepareForQuit(): Promise<void> {
+    this.closeAdmission()
     while (this.pendingOperations.size > 0) {
       await Promise.allSettled([...this.pendingOperations])
     }
@@ -249,7 +265,7 @@ export class TokenStore {
         try {
           const token = await keytar.getPassword(SERVICE, legacyAccount)
           if (token) {
-            await this.setSessionToken(token, envKey)
+            await this.setSessionTokenOnce(token, envKey)
             await keytar.deletePassword(SERVICE, legacyAccount).catch(() => {})
             return token
           }
@@ -264,7 +280,7 @@ export class TokenStore {
           const encrypted = await fs.readFile(file)
           const token = safeStorage.decryptString(encrypted)
           if (token) {
-            await this.setSessionToken(token, envKey)
+            await this.setSessionTokenOnce(token, envKey)
             await removeTokenFileDurably(file).catch(() => {})
             return token
           }
@@ -279,7 +295,7 @@ export class TokenStore {
         const data = JSON.parse(raw) as { token?: unknown }
         const token = typeof data.token === 'string' && data.token ? data.token : null
         if (token) {
-          await this.setSessionToken(token, envKey)
+          await this.setSessionTokenOnce(token, envKey)
           await removeTokenFileDurably(file).catch(() => {})
           return token
         }
@@ -305,7 +321,7 @@ export class TokenStore {
       try {
         const legacy = await keytar.getPassword(SERVICE, LEGACY_ACCOUNT)
         if (legacy) {
-          await this.setSessionToken(legacy, envKey)
+          await this.setSessionTokenOnce(legacy, envKey)
           await keytar.deletePassword(SERVICE, LEGACY_ACCOUNT).catch(() => {})
           return legacy
         }
@@ -321,7 +337,7 @@ export class TokenStore {
         const encrypted = await fs.readFile(file)
         const token = safeStorage.decryptString(encrypted)
         if (token) {
-          await this.setSessionToken(token, envKey)
+          await this.setSessionTokenOnce(token, envKey)
           await removeTokenFileDurably(file).catch(() => {})
           return token
         }
@@ -337,7 +353,7 @@ export class TokenStore {
       const data = JSON.parse(raw) as { token?: unknown }
       const token = typeof data.token === 'string' && data.token ? data.token : null
       if (token) {
-        await this.setSessionToken(token, envKey)
+        await this.setSessionTokenOnce(token, envKey)
         await removeTokenFileDurably(file).catch(() => {})
       }
       return token
