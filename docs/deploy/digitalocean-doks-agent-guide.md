@@ -449,15 +449,23 @@ CONTEXT="$CONTEXT" ALLOWED_CONTEXTS="$CONTEXT" \
 The script applies `control-postgres` (PVC, Deployment, Service), waits for it,
 and runs the schema Job. The PVC creates a billed DigitalOcean volume.
 
-### 5.8 Runtime database roles
+### 5.8 Runtime database roles and GFS credentials
 
 ```bash
 CONTEXT="$CONTEXT" ALLOWED_CONTEXTS="$CONTEXT" \
-  bash deploy/scripts/provision-control-api-runtime-roles.sh
+  bash deploy/scripts/provision-control-api-runtime-roles.sh || { echo 'STOP: runtime roles'; exit 1; }
+GFS_REMOTE_RECONCILE_AUTHORIZED=true ALLOWED_CONTEXTS="$CONTEXT" CONTEXT="$CONTEXT" \
+  bash deploy/scripts/reconcile-gfs-deploy-credentials.sh || { echo 'STOP: GFS credentials'; exit 1; }
 ```
 
-Required. Without it control-api, workflow-recipes, and trace-maintenance-worker
-stay in `CreateContainerConfigError`.
+Both are required. Without the runtime roles, control-api, workflow-recipes, and
+trace-maintenance-worker stay in `CreateContainerConfigError`. The release's
+GFS permission-store document (`docs/deploy/gfs-permission-store.md`) orders
+"migrations, runtime-role reconciliation, apply the central
+`reconcile-gfs-deploy-credentials.sh` entrypoint, then apply the environment
+overlay". Without it, `gfs/gfs-controller-db` has no `connection-string`,
+`gfsc-writer` cannot start, and 5.12 stops with "gfs-controller-db.connection-string
+is empty". The script never rotates a valid credential, so re-running it is safe.
 
 ### 5.9 Re-render and gate
 

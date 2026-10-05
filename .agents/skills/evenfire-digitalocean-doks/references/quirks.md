@@ -217,6 +217,11 @@ account through a port-forward **before** any ingress exists (guide Phase 6). A
 
 ## Missing install steps break silently
 
+- `reconcile-gfs-deploy-credentials.sh` before the overlay apply (guide 5.8), as
+  the release's `docs/deploy/gfs-permission-store.md` orders it. Base declares
+  `gfs/gfs-controller-db` without its `connection-string`; without this step
+  `gfsc-writer` stays in `CreateContainerConfigError` and
+  `provision-gfs-runtime.sh` stops (observed live).
 - `provision-control-api-runtime-roles.sh` after the migration: base ships
   `control-api-postgres-runtime` and the workflow-recipes and trace-maintenance
   runtime Secrets empty. Without it those Deployments sit in

@@ -117,7 +117,7 @@ Follow the guide in order. Numbers match the guide's headings.
 - **Phase 5** — install, in order:
   [5.1] namespaces (including `ingress`), [5.2] CRDs (Helm **and** YAML),
   [5.3] RBAC, [5.4] JWT keys once, [5.5] Postgres superuser password,
-  [5.6] tokens, [5.7] DB migration, [5.8] runtime roles, [5.9] re-render and
+  [5.6] tokens, [5.7] DB migration, [5.8] runtime roles **and GFS credentials**, [5.9] re-render and
   gate, [5.10] apply, [5.11] tokens again, [5.12] `provision-gfs-runtime.sh`,
   [5.13] NetworkPolicy verify and preflight (check 3 FAILs for `gfs` and
   `llm-hooks` are expected), [5.14] WRC enforcement confirmation,
@@ -146,6 +146,7 @@ brackets:
 | Tokens [5.6, 5.11] | `CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET=… CONTEXT="$CONTEXT" bash deploy/scripts/apply-inter-service-tokens.sh` |
 | DB migration [5.7] | `CONTEXT="$CONTEXT" ALLOWED_CONTEXTS="$CONTEXT" bash deploy/scripts/run-control-api-db-migration.sh --overlay deploy/overlays/digitalocean-doks` |
 | Runtime roles [5.8] | `CONTEXT="$CONTEXT" ALLOWED_CONTEXTS="$CONTEXT" bash deploy/scripts/provision-control-api-runtime-roles.sh` |
+| GFS credentials [5.8] | `GFS_REMOTE_RECONCILE_AUTHORIZED=true ALLOWED_CONTEXTS="$CONTEXT" CONTEXT="$CONTEXT" bash deploy/scripts/reconcile-gfs-deploy-credentials.sh` |
 | Apply [5.10] | managed NetworkPolicies via `managed-netpols.rb` with `--as-group=system:masters`, then `kubectl --context "$CONTEXT" apply -f "$WORK/render.yaml"` (guide 5.10) |
 | GFS + auth sync + instances [5.12] | `ALLOWED_CONTEXTS="$CONTEXT" bash deploy/scripts/provision-gfs-runtime.sh --context "$CONTEXT" --overlay deploy/overlays/digitalocean-doks` |
 | NP verify [5.13] | `bash deploy/scripts/verify-networkpolicies.sh --overlay digitalocean-doks --context "$CONTEXT"` |

@@ -86,6 +86,13 @@ printf '#!/usr/bin/env bash\necho API_EGRESS_PATH=cnp\nexit 0\n' >"$fake/api-egr
 grep -qx 'API_EGRESS_PATH=cnp' "$fake/api-egress.env" 2>/dev/null || fail "Phase 0.1 block does not record api-egress.env"
 rm -rf "$fake"
 
+# GFS credentials are reconciled before the overlay apply (docs/deploy/gfs-permission-store.md order).
+r_line="$(grep -n 'reconcile-gfs-deploy-credentials.sh' "$GUIDE" | head -1 | cut -d: -f1)"
+a_line="$(grep -n 'apply -f "$WORK/render.yaml"' "$GUIDE" | head -1 | cut -d: -f1)"
+if [ -z "$r_line" ] || [ -z "$a_line" ] || [ "$r_line" -ge "$a_line" ]; then
+  fail "guide must run reconcile-gfs-deploy-credentials.sh before the overlay apply"
+fi
+
 # system:masters impersonation is allowed only for the managed NetworkPolicy file.
 imp="$(grep -n -- '--as-group=system:masters' "$GUIDE" | cut -d: -f1)"
 [ -n "$imp" ] || fail "guide 5.10 lacks the managed NetworkPolicy impersonated apply"
