@@ -15,6 +15,7 @@ import {
   EXECUTION_ROLE_LABEL,
   EXECUTION_ROLE_VALUE,
   EXECUTION_RUN_ENTRYPOINT,
+  EXECUTION_RUN_LAUNCHER_SCRIPT,
   EXECUTION_SCRATCH_MAX_BYTES,
   EXECUTION_SCRATCH_MOUNT_PATH,
   EXECUTION_TIMEOUT_MAX_MS,
@@ -191,6 +192,9 @@ describe('bounded Host execution job factory', () => {
 
     const executor = podSpec(job).containers![0]
     expect(executor.command).toEqual([
+      '/bin/sh',
+      '-c',
+      EXECUTION_RUN_LAUNCHER_SCRIPT,
       'node',
       EXECUTION_RUN_ENTRYPOINT,
       String(workspaceRequest.timeoutMs),
@@ -378,19 +382,19 @@ describe('bounded Host execution job factory', () => {
       argv: ['/bin/sh', '-c', ''],
     }
     expect(
-      podSpec(buildHostExecutionJob(identity, emptyTail)).containers![0].command!.slice(3)
+      podSpec(buildHostExecutionJob(identity, emptyTail)).containers![0].command!.slice(6)
     ).toEqual(['/bin/sh', '-c', ''])
     expect(
       podSpec(
         buildHostExecutionJob(identity, { ...workspaceRequest, argv: ['node', '', ''] })
-      ).containers![0].command!.slice(3)
+      ).containers![0].command!.slice(6)
     ).toEqual(['node', '', ''])
 
-    // No wrapper shell is inserted and the caller's array is not aliased.
+    // The fixed launcher keeps the caller's array literal and unaliased.
     const argv = ['/usr/bin/git', 'status']
     const job = buildHostExecutionJob(identity, { ...workspaceRequest, argv })
     argv.push('--porcelain')
-    expect(podSpec(job).containers![0].command!.slice(3)).toEqual(['/usr/bin/git', 'status'])
+    expect(podSpec(job).containers![0].command!.slice(6)).toEqual(['/usr/bin/git', 'status'])
     expect(podSpec(job).containers![0].args).toBeUndefined()
 
     // Aggregate UTF-8 bound, measured in bytes rather than characters.
@@ -398,7 +402,7 @@ describe('bounded Host execution job factory', () => {
     expect(
       podSpec(
         buildHostExecutionJob(identity, { ...workspaceRequest, argv: [halfBound] })
-      ).containers![0].command!.slice(3)
+      ).containers![0].command!.slice(6)
     ).toEqual([halfBound])
     for (const bad of [
       [''],

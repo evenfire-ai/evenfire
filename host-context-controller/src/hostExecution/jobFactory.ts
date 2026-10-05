@@ -32,6 +32,13 @@ export const EXECUTION_RECEIVE_INPUT_ENTRYPOINT =
 export const EXECUTION_INPUT_PORT = 9301
 /** PID 1 retains captured results privately and serves only the scoped portal. */
 export const EXECUTION_RUN_ENTRYPOINT = '/app/mcp-host/dist/core/execution/runSession.js'
+/**
+ * Fixed launcher for the executor. The approved vector is passed only as
+ * positional parameters, and the wrapper's stdout/stderr become /dev/null
+ * before Node replaces the shell, so PID 1 exposes no container output
+ * descriptors to a same-UID child. `/bin/sh` and Node ship in every image.
+ */
+export const EXECUTION_RUN_LAUNCHER_SCRIPT = 'exec "$0" "$@" >/dev/null 2>&1'
 export const EXECUTION_RESULT_PORT = 9300
 export const EXECUTION_POD_UID_ENV = 'EXECUTION_POD_UID'
 export const EXECUTION_WORKSPACE_MOUNT_PATH = '/workspace'
@@ -474,10 +481,19 @@ export function buildHostExecutionJob(
   const executor: k8s.V1Container = {
     name: EXECUTION_EXECUTOR_CONTAINER_NAME,
     image: resolved.image,
-    // The fixed launcher passes the approved vector literally to spawn, with
-    // no added shell. It bounds stdout/stderr at the producer, not just at the
-    // eventual API response. Separate arguments avoid JSON escape inflation.
-    command: ['node', EXECUTION_RUN_ENTRYPOINT, String(approved.timeoutMs), ...approved.argv],
+    // The fixed /bin/sh launcher execs Node with the approved vector as literal
+    // positional parameters (never interpolated into shell source) and points
+    // the wrapper's stdout/stderr at /dev/null before exec, so PID 1 exposes no
+    // container output descriptors to a same-UID child.
+    command: [
+      '/bin/sh',
+      '-c',
+      EXECUTION_RUN_LAUNCHER_SCRIPT,
+      'node',
+      EXECUTION_RUN_ENTRYPOINT,
+      String(approved.timeoutMs),
+      ...approved.argv,
+    ],
     workingDir,
     // Fixed server-owned, non-secret values only; `serviceLinks` stays disabled
     // so the API server cannot inject service environment into this pod.
