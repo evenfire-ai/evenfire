@@ -2314,6 +2314,9 @@ export class AppService {
       this.logoutInProgress = true
       this.sessionGeneration += 1
       const logoutGeneration = this.sessionGeneration
+      const logoutToken = this.sessionToken
+      const logoutMe = this.me
+      const logoutEnvironment = this.captureAuthEnvironmentBinding()
       const releasePrewarm = this.beginPrewarmAuthTransition()
       try {
         const envKey = getActiveEnvKey()
@@ -2324,7 +2327,21 @@ export class AppService {
           await this.tokenStore.clearSessionToken(envKey, { legacyEnvKeys })
           this.assertSessionGeneration(logoutGeneration)
         } catch (error) {
-          if (this.sessionToken && this.me) this.activateGfsAuthScope()
+          const capturedSessionStillOwnsBoundary =
+            this.sessionGeneration === logoutGeneration &&
+            this.sessionToken === logoutToken &&
+            this.me === logoutMe &&
+            getActiveEnvKey() === logoutEnvironment.environmentKey &&
+            normalizeDesktopUploadBaseUrl(config.externalRestApiBaseUrl) ===
+              logoutEnvironment.restBaseUrl
+          if (capturedSessionStillOwnsBoundary) {
+            if (logoutToken && logoutMe) this.activateGfsAuthScope()
+          } else if (this.sessionToken === logoutToken && this.me === logoutMe) {
+            this.clearAuthenticatedSessionState()
+            await this.tokenStore
+              .clearSessionToken(envKey, { legacyEnvKeys })
+              .catch(() => undefined)
+          }
           throw error
         }
         this.clearAuthenticatedSessionState()
