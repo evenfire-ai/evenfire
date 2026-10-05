@@ -86,6 +86,14 @@ printf '#!/usr/bin/env bash\necho API_EGRESS_PATH=cnp\nexit 0\n' >"$fake/api-egr
 grep -qx 'API_EGRESS_PATH=cnp' "$fake/api-egress.env" 2>/dev/null || fail "Phase 0.1 block does not record api-egress.env"
 rm -rf "$fake"
 
+# system:masters impersonation is allowed only for the managed NetworkPolicy file.
+imp="$(grep -n -- '--as-group=system:masters' "$GUIDE" | cut -d: -f1)"
+[ -n "$imp" ] || fail "guide 5.10 lacks the managed NetworkPolicy impersonated apply"
+for ln in $imp; do
+  sed -n "${ln},$((ln + 1))p" "$GUIDE" | grep -q 'managed-netpols.yaml' \
+    || fail "guide line $ln impersonates system:masters for something other than managed-netpols.yaml"
+done
+
 for f in AGENTS.md CLAUDE.md docs/README.md docs/llms.txt docs/deploy/production.md; do
   grep -q 'digitalocean-doks' "$f" || fail "$f has no pointer to the DOKS how-to"
 done

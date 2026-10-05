@@ -90,6 +90,7 @@ Never:
 - Expose ingress before `/api/v1/admin/auth/setup` has been claimed by the human
 - Call `scripts/minikube/sync-auth-key.sh` directly
 - Convert Evenfire workloads to StatefulSets to satisfy clusterlint; report instead
+- Impersonate `system:masters` for anything except the managed NetworkPolicies in guide 5.10
 - Silently install CLIs; print the install command instead
 
 ## Phases
@@ -145,7 +146,7 @@ brackets:
 | Tokens [5.6, 5.11] | `CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET=… CONTEXT="$CONTEXT" bash deploy/scripts/apply-inter-service-tokens.sh` |
 | DB migration [5.7] | `CONTEXT="$CONTEXT" ALLOWED_CONTEXTS="$CONTEXT" bash deploy/scripts/run-control-api-db-migration.sh --overlay deploy/overlays/digitalocean-doks` |
 | Runtime roles [5.8] | `CONTEXT="$CONTEXT" ALLOWED_CONTEXTS="$CONTEXT" bash deploy/scripts/provision-control-api-runtime-roles.sh` |
-| Apply [5.10] | `kubectl --context "$CONTEXT" apply -f "$WORK/render.yaml"` (gated render) |
+| Apply [5.10] | managed NetworkPolicies via `managed-netpols.rb` with `--as-group=system:masters`, then `kubectl --context "$CONTEXT" apply -f "$WORK/render.yaml"` (guide 5.10) |
 | GFS + auth sync + instances [5.12] | `ALLOWED_CONTEXTS="$CONTEXT" bash deploy/scripts/provision-gfs-runtime.sh --context "$CONTEXT" --overlay deploy/overlays/digitalocean-doks` |
 | NP verify [5.13] | `bash deploy/scripts/verify-networkpolicies.sh --overlay digitalocean-doks --context "$CONTEXT"` |
 | NP preflight [5.13] | `CONTEXT="$CONTEXT" OVERLAY=digitalocean-doks bash deploy/scripts/np-enforce-preflight.sh` |
@@ -159,6 +160,7 @@ Skill helpers (`$SKILL_SCRIPTS`):
 | `api-egress-probe.sh` | API-server egress under deny-all: ipBlock vs CiliumNetworkPolicy |
 | `write-network-patches.sh` | API / DNS / HCC patches, Cilium API egress policies, ingress-controller patches |
 | `image-gate.rb` | render gate: official GHCR tag, known third-party pins, no unset HCC image env vars |
+| `managed-netpols.rb` | selects the NetworkPolicies only `system:masters` may create, for the one impersonated apply in 5.10 |
 | `verify-rollout.sh` | fail-loud rollout proof by exact Deployment name plus container states |
 
 ## Success

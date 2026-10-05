@@ -148,6 +148,25 @@ render_variant() { # A|B
     if errs.empty? then exit 0 else warn errs.join("\n"); exit 1 end
   ' "$r" "$v" 2>"$work/shape-$v.err" || fail "$v: render shape: $(cat "$work/shape-$v.err")"
 
+  # managed-netpols.rb selects exactly the NetworkPolicies Evenfire's
+  # managed-networkpolicy-label-immutability policy refuses to let a non-
+  # system:masters admin create.
+  ruby "$SKILL/scripts/managed-netpols.rb" <"$r" >"$work/managed-$v.yaml" 2>"$work/managed-$v.err" \
+    || fail "$v: managed-netpols.rb failed: $(cat "$work/managed-$v.err")"
+  ruby -ryaml -e '
+    got = YAML.load_stream(File.read(ARGV[0])).compact
+    all = YAML.load_stream(File.read(ARGV[1])).compact
+    key = ->(d) { "#{d.dig("metadata","namespace")}/#{d.dig("metadata","name")}" }
+    owned = ->(d) { %w[host-context-controller wrc workflow-recipes].include?((d.dig("metadata","labels") || {})["clerum.io/managed-by"]) }
+    names = got.map(&key).sort
+    expected = all.select { |d| d["kind"] == "NetworkPolicy" && owned.(d) }.map(&key).sort
+    # The three a live DOKS apply rejected must be among them.
+    live = %w[mcp-server/deny-all-mcp-servers rpc-proxy/allow-ingress-rpc-proxy sandbox-recipes/allow-workflow-approval-gateway-egress-sandbox-recipes]
+    abort "missing live-rejected policies #{live - names}" unless (live - names).empty?
+    abort "selected #{names.size}, render has #{expected.size} managed NetworkPolicies" unless names == expected
+    abort "selected a non-managed object" unless got.all? { |d| d["kind"] == "NetworkPolicy" && owned.(d) }
+  ' "$work/managed-$v.yaml" "$r" 2>"$work/managed-chk-$v.err" || fail "$v: $(cat "$work/managed-chk-$v.err")"
+
   ruby -ryaml -e '
     dir = ARGV[0]
     errs = []

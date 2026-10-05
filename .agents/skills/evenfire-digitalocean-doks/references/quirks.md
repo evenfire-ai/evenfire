@@ -179,6 +179,24 @@ changing its admission policies is a product change, not an install step.
 - Volumes from `-retain` classes survive PVC deletion and keep billing until
   deleted by hand.
 
+## Managed NetworkPolicies need `system:masters` to create
+
+Evenfire's ValidatingAdmissionPolicy `managed-networkpolicy-label-immutability`
+(`deploy/base/cluster-wide/workflowrecipe-admission.yaml`) refuses to CREATE a
+NetworkPolicy labelled `clerum.io/managed-by: host-context-controller|wrc|workflow-recipes`
+unless the requester is the HCC or WRC service account or in `system:masters`.
+The base render ships 13 such policies. On a live DOKS cluster the installer's
+groups were `do-role-name:Member`, `k8saas:authenticated`, `k8saas:default`, and
+`system:authenticated`: `cluster-admin` by role binding, not `system:masters`.
+A plain apply created some of those policies before the binding took effect and
+was refused for the rest, so the outcome depends on apply order.
+
+Guide 5.10 applies exactly that subset (selected by
+[`scripts/managed-netpols.rb`](../scripts/managed-netpols.rb)) with
+`kubectl --as=evenfire-bootstrap --as-group=system:masters`, then the full render
+normally. Never impersonate for anything else, and never delete or relax the
+admission policy.
+
 ## Admin setup is first-come
 
 `POST /api/v1/admin/auth/setup` needs no login. It sets the admin credentials
