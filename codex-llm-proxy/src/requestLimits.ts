@@ -234,10 +234,31 @@ export class StreamGate {
    * the slot count, so a slot that frees after the bound does not admit it
    * even when the event loop stalled across the bound. A free slot is granted
    * at once whatever the deadline; the caller checks a deadline already past.
+   *
+   * The refusal names which bound ran out. The gate's own bound is
+   * `maxQueueWaitMs` after the enqueue, or after `queueWaitStartedAt` (epoch
+   * ms) when the caller passes it: the visual gate's own wait is the request's
+   * admission clock, so its caller passes the arrival instant. Without
+   * `queueWaitStartedAt`, a `deadlineAt` at or before the own bound governs
+   * (`deadline`, `provider_unavailable`). With it, the deadline and the own
+   * bound are measured from the same instant, so a `deadlineAt` equal to the
+   * own bound is that bound restated and only a strictly earlier one governs.
+   * Every other expiry is the gate's queue wait (`queue_wait`,
+   * `queueCapacityCode`). The decision does not depend on how many
+   * milliseconds passed between the caller's stamp and the enqueue.
    */
-  async acquire(signal?: AbortSignal, deadlineAt?: number): Promise<() => void> {
+  async acquire(
+    signal?: AbortSignal,
+    deadlineAt?: number,
+    queueWaitStartedAt?: number
+  ): Promise<() => void> {
     if (deadlineAt !== undefined && !Number.isFinite(deadlineAt)) {
       throw new RangeError(`a stream gate deadline must be a finite epoch time, got ${deadlineAt}`)
+    }
+    if (queueWaitStartedAt !== undefined && !Number.isFinite(queueWaitStartedAt)) {
+      throw new RangeError(
+        `a stream gate queue wait start must be a finite epoch time, got ${queueWaitStartedAt}`
+      )
     }
     if (signal?.aborted) throw new RequestLimitError('stream request was aborted', 'aborted')
     if (this.running >= this.maxConcurrent) {
@@ -257,12 +278,14 @@ export class StreamGate {
             reject(new RequestLimitError('stream request was aborted', 'aborted'))
           }
           const queuedAt = performance.now()
-          const waitBoundMs =
-            deadlineAt === undefined
-              ? this.maxQueueWaitMs
-              : Math.min(this.maxQueueWaitMs, deadlineAt - Date.now())
-          // The caller's deadline governs only when it is the nearer bound.
-          const deadlineGoverns = deadlineAt !== undefined && waitBoundMs < this.maxQueueWaitMs
+          const enqueuedAt = Date.now()
+          const ownBoundAt = (queueWaitStartedAt ?? enqueuedAt) + this.maxQueueWaitMs
+          const deadlineGoverns =
+            deadlineAt !== undefined &&
+            (queueWaitStartedAt === undefined ? deadlineAt <= ownBoundAt : deadlineAt < ownBoundAt)
+          // No waiter stays queued longer than maxQueueWaitMs after the enqueue.
+          const boundAt = deadlineAt !== undefined && deadlineGoverns ? deadlineAt : ownBoundAt
+          const waitBoundMs = Math.min(this.maxQueueWaitMs, boundAt - enqueuedAt)
           const expire = () => {
             settle()
             reject(

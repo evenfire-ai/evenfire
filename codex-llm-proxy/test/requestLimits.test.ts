@@ -429,3 +429,160 @@ describe('StreamGate', () => {
     expect(visualStreamGate.snapshot()).toEqual({ running: 0, queued: 0 })
   })
 })
+
+/**
+ * Records how an acquire settled: `admitted`, or the refusal's kind and wire
+ * code. Unset while the waiter is still queued.
+ */
+function settled(waiter: Promise<() => void>) {
+  const state: { outcome?: 'admitted' | { kind: string; code: string } } = {}
+  const done = waiter.then(
+    release => {
+      state.outcome = 'admitted'
+      release()
+    },
+    (err: RequestLimitError) => {
+      state.outcome = { kind: err.kind, code: err.code }
+    }
+  )
+  return { state, done }
+}
+
+describe('StreamGate refusal identity', () => {
+  const FAKE_CLOCK = {
+    toFake: ['setTimeout', 'clearTimeout', 'Date', 'performance'] as Array<
+      'setTimeout' | 'clearTimeout' | 'Date' | 'performance'
+    >,
+  }
+  const WAIT_MS = STREAM_LIMITS.maxQueueWaitMs
+
+  // The visual gate's own wait is the request's admission clock, so its caller
+  // passes the arrival instant. The refusal must not depend on how many ms
+  // passed between the arrival stamp and the enqueue.
+  it('refuses visual waiters enqueued 0, 1 and 5 ms after arrival as visual_gate at arrival + maxQueueWaitMs', async () => {
+    vi.useFakeTimers(FAKE_CLOCK)
+    try {
+      const gate = new StreamGate(1, 4, WAIT_MS, 'visual_gate')
+      const held = await gate.acquire()
+      const arrivedAt = Date.now()
+      const admissionDeadlineAt = arrivedAt + WAIT_MS
+      const atZero = settled(gate.acquire(undefined, admissionDeadlineAt, arrivedAt))
+      await vi.advanceTimersByTimeAsync(1)
+      const atOne = settled(gate.acquire(undefined, admissionDeadlineAt, arrivedAt))
+      await vi.advanceTimersByTimeAsync(4)
+      const atFive = settled(gate.acquire(undefined, admissionDeadlineAt, arrivedAt))
+
+      await vi.advanceTimersByTimeAsync(WAIT_MS - 5 - 1)
+      // Witness: one millisecond before the admission clock runs out, all
+      // three waiters are still queued, so none was refused early.
+      expect(Date.now()).toBe(admissionDeadlineAt - 1)
+      expect(gate.snapshot()).toEqual({ running: 1, queued: 3 })
+      expect([atZero.state.outcome, atOne.state.outcome, atFive.state.outcome]).toEqual([
+        undefined,
+        undefined,
+        undefined,
+      ])
+
+      await vi.advanceTimersByTimeAsync(1)
+      await Promise.all([atZero.done, atOne.done, atFive.done])
+      expect(Date.now()).toBe(admissionDeadlineAt)
+      const queueWait = { kind: 'queue_wait', code: 'visual_gate' }
+      expect(atZero.state.outcome).toEqual(queueWait)
+      expect(atOne.state.outcome).toEqual(queueWait)
+      expect(atFive.state.outcome).toEqual(queueWait)
+      expect(gate.snapshot()).toEqual({ running: 1, queued: 0 })
+      held()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('refuses a visual waiter whose caller deadline is strictly earlier than arrival + maxQueueWaitMs as deadline', async () => {
+    vi.useFakeTimers(FAKE_CLOCK)
+    try {
+      const gate = new StreamGate(1, 4, WAIT_MS, 'visual_gate')
+      const held = await gate.acquire()
+      const arrivedAt = Date.now()
+      await vi.advanceTimersByTimeAsync(5)
+      const callerDeadlineAt = arrivedAt + WAIT_MS - 1
+      const waiter = settled(gate.acquire(undefined, callerDeadlineAt, arrivedAt))
+
+      await vi.advanceTimersByTimeAsync(callerDeadlineAt - 1 - Date.now())
+      // Witness: still queued one millisecond before the caller's deadline.
+      expect(waiter.state.outcome).toBeUndefined()
+      expect(gate.snapshot()).toEqual({ running: 1, queued: 1 })
+
+      await vi.advanceTimersByTimeAsync(1)
+      await waiter.done
+      expect(Date.now()).toBe(callerDeadlineAt)
+      expect(waiter.state.outcome).toEqual({ kind: 'deadline', code: 'provider_unavailable' })
+      held()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // The ordinary gate measures its own bound from the enqueue. A caller
+  // deadline that lands exactly on that bound is the admission clock running
+  // out, which is answered with provider_unavailable.
+  it('refuses an ordinary waiter whose caller deadline ties its own bound as deadline', async () => {
+    vi.useFakeTimers(FAKE_CLOCK)
+    try {
+      const gate = new StreamGate(1, 1)
+      const held = await gate.acquire()
+      const enqueuedAt = Date.now()
+      const waiter = settled(gate.acquire(undefined, enqueuedAt + WAIT_MS))
+
+      await vi.advanceTimersByTimeAsync(WAIT_MS - 1)
+      // Witness: still queued one millisecond before the shared bound.
+      expect(waiter.state.outcome).toBeUndefined()
+      expect(gate.snapshot()).toEqual({ running: 1, queued: 1 })
+
+      await vi.advanceTimersByTimeAsync(1)
+      await waiter.done
+      expect(Date.now() - enqueuedAt).toBe(WAIT_MS)
+      expect(waiter.state.outcome).toEqual({ kind: 'deadline', code: 'provider_unavailable' })
+      held()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('refuses an ordinary waiter whose caller deadline is 1 ms past its own bound as queue_wait', async () => {
+    vi.useFakeTimers(FAKE_CLOCK)
+    try {
+      const gate = new StreamGate(1, 1)
+      const held = await gate.acquire()
+      const enqueuedAt = Date.now()
+      const waiter = settled(gate.acquire(undefined, enqueuedAt + WAIT_MS + 1))
+
+      await vi.advanceTimersByTimeAsync(WAIT_MS - 1)
+      // Witness: still queued one millisecond before the gate's own bound.
+      expect(waiter.state.outcome).toBeUndefined()
+      expect(gate.snapshot()).toEqual({ running: 1, queued: 1 })
+
+      await vi.advanceTimersByTimeAsync(1)
+      await waiter.done
+      // The gate's own bound ended the wait, not the later caller deadline.
+      expect(Date.now() - enqueuedAt).toBe(WAIT_MS)
+      expect(waiter.state.outcome).toEqual({ kind: 'queue_wait', code: 'proxy_capacity_exceeded' })
+      held()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('refuses a queue wait start that is not a finite epoch time', async () => {
+    const gate = new StreamGate(1, 1)
+    for (const start of [Number.NaN, Number.POSITIVE_INFINITY]) {
+      await expect(gate.acquire(undefined, undefined, start), String(start)).rejects.toThrow(
+        RangeError
+      )
+    }
+    // Witness: the refusal took no slot, and a finite start is accepted.
+    expect(gate.snapshot()).toEqual({ running: 0, queued: 0 })
+    const release = await gate.acquire(undefined, undefined, Date.now())
+    expect(gate.snapshot()).toEqual({ running: 1, queued: 0 })
+    release()
+  })
+})

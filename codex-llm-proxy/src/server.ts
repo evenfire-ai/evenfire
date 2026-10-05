@@ -60,6 +60,12 @@ type AdmittedRequest = Request & {
    */
   codexAdmissionDeadlineAt?: number
   /**
+   * The arrival instant the admission clock was stamped from, in epoch ms.
+   * The visual gate measures its own queue wait from it, so its refusal
+   * identity does not depend on when the request reached the gate.
+   */
+  codexAdmissionArrivedAt?: number
+  /**
    * #739 D2 — the body's budget reservation, set once it was granted. The
    * handler releases it when the upstream accepted the request; the
    * response's `close` event releases it on every other path. Idempotent.
@@ -200,7 +206,9 @@ function bodyAdmission(
   parse: RequestHandler
 ) {
   return (req: AdmittedRequest, res: Response, next: NextFunction): void => {
-    const admissionDeadlineAt = Date.now() + STREAM_LIMITS.maxQueueWaitMs
+    const arrivedAt = Date.now()
+    const admissionDeadlineAt = arrivedAt + STREAM_LIMITS.maxQueueWaitMs
+    req.codexAdmissionArrivedAt = arrivedAt
     req.codexAdmissionDeadlineAt = admissionDeadlineAt
     if (req.headers['transfer-encoding'] !== undefined) {
       reject(res, 411, 'length_required')
@@ -414,6 +422,13 @@ export function createProxyApps(
       reject(res, 401, 'Unauthorized')
       return
     }
+    // bodyAdmission stamps both before it hands the request here.
+    const arrivedAt = req.codexAdmissionArrivedAt
+    const admissionDeadlineAt = req.codexAdmissionDeadlineAt
+    if (arrivedAt === undefined || admissionDeadlineAt === undefined) {
+      next(new Error('visual admission was reached without body admission'))
+      return
+    }
     const visualPrincipal = JSON.stringify([platform.sub, ...[...platform.hostRefs].sort()])
     const admittedByPrincipal = visualPrincipalAdmissions.get(visualPrincipal) ?? 0
     if (admittedByPrincipal >= VISUAL_PER_HOST_MAX_ADMITTED) {
@@ -457,7 +472,10 @@ export function createProxyApps(
       const abortParse = (): void => parseAbort.abort()
       req.once('aborted', abortParse)
       try {
-        release = await visualStreamGate.acquire(parseAbort.signal, req.codexAdmissionDeadlineAt)
+        // The visual gate's own wait is the admission clock: it is measured
+        // from arrival, so a waiter that waits it out is refused as
+        // `visual_gate` however many ms passed before it reached the gate.
+        release = await visualStreamGate.acquire(parseAbort.signal, admissionDeadlineAt, arrivedAt)
       } catch (err) {
         req.off('aborted', abortParse)
         releasePrincipalShare()

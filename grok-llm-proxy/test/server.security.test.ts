@@ -29,6 +29,7 @@ import {
   ENVELOPE_ALLOWANCE_BYTES,
   RequestLimitError,
   STREAM_LIMITS,
+  VISUAL_STREAM_LIMITS,
   streamGate,
   visualStreamGate,
 } from '../src/requestLimits.js'
@@ -2644,6 +2645,88 @@ describe('grok-llm-proxy ticket-aware stream-gate wait (#739 D1-bis)', () => {
       warn.mockRestore()
     }
   }, 30_000)
+
+  // The visual gate's own wait is the admission clock stamped at arrival. A
+  // body that reaches the gate some ms after arrival and waits that clock out
+  // is refused as the gate's own queue wait, `visual_gate`: the same answer as
+  // a body that reached the gate in the arrival millisecond.
+  it.each([0, 5])(
+    'T-VG-QW-grok answers 503 visual_gate when a body enqueued %i ms after arrival waits out the admission clock',
+    async lagMs => {
+      fakeClock()
+      const warn = vi.spyOn(logger, 'warn')
+      const held: Array<() => void> = []
+      let acquire: { mockRestore: () => void } | undefined
+      try {
+        for (let i = 0; i < VISUAL_STREAM_LIMITS.maxConcurrentStreams; i += 1) {
+          held.push(await visualStreamGate.acquire())
+        }
+        const enqueue = visualStreamGate.acquire.bind(visualStreamGate)
+        // Moves the clock `lagMs` between the arrival stamp and the enqueue,
+        // then calls the real gate.
+        const spy = vi
+          .spyOn(visualStreamGate, 'acquire')
+          .mockImplementation((signal, deadlineAt, queueWaitStartedAt) => {
+            vi.setSystemTime(Date.now() + lagMs)
+            return enqueue(signal, deadlineAt, queueWaitStartedAt)
+          })
+        acquire = spy
+        const control = countingClient('granted')
+        const apps = createProxyApps(config({ maxBodyBytes: 65_536 }), {
+          controlApiClient: control.client,
+          fetchFn: upstream,
+          lookup,
+        })
+        const arrivedAt = Date.now()
+        const reply = request(apps.runtimeApp)
+          .post(COMPLETIONS)
+          .set('Authorization', `Bearer ${platformToken()}`)
+          .send(visualEnvelope(`att-visual-wait-${lagMs}`, 60_000))
+          .then(res => res)
+        await until(
+          () => spy.mock.calls.length === 1 && visualStreamGate.snapshot().queued === 1,
+          'the body queueing at the visual gate'
+        )
+        // Witness: the gate was handed the admission clock and the arrival
+        // instant, and it enqueued the body `lagMs` after arrival.
+        expect(spy.mock.calls[0]?.slice(1)).toEqual([
+          arrivedAt + STREAM_LIMITS.maxQueueWaitMs,
+          arrivedAt,
+        ])
+        expect(Date.now()).toBe(arrivedAt + lagMs)
+
+        await vi.advanceTimersByTimeAsync(STREAM_LIMITS.maxQueueWaitMs - lagMs - 1)
+        // Witness: still queued one millisecond before the admission clock
+        // runs out, so the body was not refused early.
+        expect(await withinReal(reply, 100)).toBeUndefined()
+        expect(visualStreamGate.snapshot().queued).toBe(1)
+        await vi.advanceTimersByTimeAsync(1)
+        const res = await withinReal(reply, 2_000)
+        expect(Date.now()).toBe(arrivedAt + STREAM_LIMITS.maxQueueWaitMs)
+        expect(res?.status).toBe(503)
+        expect(res?.body).toEqual({ error: 'visual_gate' })
+        expect(control.redeems()).toBe(0)
+        const refusals = warn.mock.calls
+          .map(call => call[0] as unknown as Record<string, unknown>)
+          .filter(entry => entry?.event === 'grok_proxy_admission_refused')
+        expect(refusals).toEqual([
+          {
+            event: 'grok_proxy_admission_refused',
+            reason: 'visual_gate',
+            code: 'visual_gate',
+            detail: 'stream queue wait exceeded',
+          },
+        ])
+        expect(visualStreamGate.snapshot()).toEqual({ running: held.length, queued: 0 })
+      } finally {
+        acquire?.mockRestore()
+        for (const release of held.splice(0)) release()
+        vi.useRealTimers()
+        warn.mockRestore()
+      }
+    },
+    30_000
+  )
 })
 
 /**
