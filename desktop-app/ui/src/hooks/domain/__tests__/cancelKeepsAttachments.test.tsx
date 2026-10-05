@@ -283,4 +283,80 @@ describe('STORY-38 — attachments survive message cancel', () => {
     expect(rendered.result.current.composerReferenceAttachments).toHaveLength(0)
     expect(keptToastCall(rendered.spies)).toBeUndefined()
   })
+
+  it.each([
+    ['success answer', 'resolve'],
+    ['404 answer', '404'],
+  ])(
+    'does not restore into another chat of the same agent when the cancel %s lands late (R1-H1)',
+    async (_name, mode) => {
+      let settleCancel!: (value?: void) => void
+      clerum.rpc.cancelTask.mockReturnValue(
+        new Promise<void>(resolve => {
+          settleCancel = resolve
+        })
+      )
+      if (mode === '404')
+        clerum.rpc.cancelTask.mockReturnValue(
+          new Promise((_resolve, reject) => {
+            settleCancel = () => reject(new Error('404 Not Found'))
+          })
+        )
+      const rendered = renderController()
+      await waitFor(() => expect(clerum.chat.getIndex).toHaveBeenCalled())
+      await act(async () => {
+        await loadHostModels(modelTransport, 'agent-x', null)
+      })
+      act(() => rendered.result.current.handleAddComposerImageAttachments([image]))
+      act(() => rendered.result.current.handleAddComposerReferenceAttachments([pluginReference]))
+      await sendAsync(rendered.result, 'task-chat-sw')
+      const originChat = rendered.result.current.activeChatId
+
+      let cancelDone!: Promise<void>
+      act(() => {
+        cancelDone = rendered.result.current.cancelTask('task-chat-sw')
+      })
+      // SAME agent, DIFFERENT chat while the RPC is in flight.
+      await act(async () => {
+        await rendered.result.current.switchToChat('agent-x', 'another-chat')
+      })
+      expect(rendered.result.current.activeChatId).toBe('another-chat')
+
+      await act(async () => {
+        settleCancel()
+        await cancelDone.catch(() => undefined)
+      })
+
+      // Nothing landed in the other chat's composer, and no kept-toast fired.
+      expect(rendered.result.current.composerImageAttachments).toHaveLength(0)
+      expect(rendered.result.current.composerReferenceAttachments).toHaveLength(0)
+      expect(keptToastCall(rendered.spies)).toBeUndefined()
+      // The origin chat's composer surface is the same per-agent state: empty.
+      await act(async () => {
+        await rendered.result.current.switchToChat('agent-x', originChat!)
+      })
+      expect(rendered.result.current.composerImageAttachments).toHaveLength(0)
+    }
+  )
+
+  it('stale Discard all no-ops after a same-agent chat switch (R1-H1)', async () => {
+    const { result, spies } = await mountedControllerWithAttachments()
+    await sendAsync(result, 'task-stale-chat')
+
+    await act(async () => {
+      await result.current.cancelTask('task-stale-chat')
+    })
+    const staleAction = keptToastAction(spies)
+    expect(staleAction?.label).toBe('Discard all')
+    expect(result.current.composerImageAttachments).toHaveLength(1)
+
+    // Same agent, different chat: the kept attachments ride along (per-agent
+    // state), but the toast is bound to the chat it came from.
+    await act(async () => {
+      await result.current.switchToChat('agent-x', 'another-chat')
+    })
+    act(() => staleAction?.onAction())
+
+    expect(result.current.composerImageAttachments).toHaveLength(1)
+  })
 })

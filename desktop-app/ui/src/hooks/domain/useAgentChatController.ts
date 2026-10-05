@@ -3503,22 +3503,25 @@ export function useAgentChatController({
    * composer so the user can reuse them. In-memory only: the composer state,
    * not GFS or any persisted store, owns the kept attachments.
    *
-   * The toast reports what actually survived the composer's image cap, and its
-   * Discard-all action is bound to the agent that was canceled: the toast can
-   * outlive an agent switch, and clearing the composer of a DIFFERENT agent
-   * would destroy that agent's own pending attachments.
+   * The restore and its Discard-all action are bound to BOTH the originating
+   * agent and the originating chat (the retained snapshot's chatId): the
+   * awaited cancel RPC — and the toast — can outlive a switch to a different
+   * agent or a different chat, and neither the attachments nor the discard may
+   * act on a composer the user has navigated away from. A skipped restore
+   * still releases the snapshot (a cancel is terminal by intent; see
+   * work-tracker/specs/folder-zip-and-cancel-restore-budget.md).
    */
   const restoreComposerAttachmentsAfterCancel = useCallback(
     (taskId: string, agentRef: string) => {
-      // The awaited cancel RPC can straddle an agent switch: the attachments
-      // belong to the agent that was canceled, so they must never land in the
-      // composer of whatever agent is selected by the time the answer arrives
-      // (mirrors the Discard-all guard below).
-      if (activeChatVisibilityRef.current.selectedAgent !== agentRef) return
       const snapshots = getRetainedSendsForTask(taskId)
       const images = snapshots.flatMap(snapshot => snapshot.attachments)
       const references = snapshots.flatMap(snapshot => snapshot.references)
       if (!images.length && !references.length) return
+      const originChatId = snapshots[0]?.chatId ?? null
+      const stillViewingOrigin = () =>
+        activeChatVisibilityRef.current.selectedAgent === agentRef &&
+        activeChatVisibilityRef.current.activeChatId === originChatId
+      if (!stillViewingOrigin()) return
       const { dropped } = predictComposerImageMerge(composerImageAttachments, images)
       handleAddComposerImageAttachments(
         images.map(attachment => ({
@@ -3535,10 +3538,7 @@ export function useAgentChatController({
         action: {
           label: 'Discard all',
           onAction: () => {
-            // Attachments are per-agent; chat switches do not change who owns
-            // them, but an agent switch does — no-op instead of clearing
-            // another agent's composer.
-            if (activeChatVisibilityRef.current.selectedAgent !== agentRef) return
+            if (!stillViewingOrigin()) return
             resetComposerAttachments()
           },
         },
