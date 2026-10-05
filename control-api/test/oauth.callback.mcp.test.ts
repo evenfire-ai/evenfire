@@ -40,10 +40,9 @@ function mcpState(overrides: Partial<Parameters<typeof signOAuthState>[1]> = {})
 
 function buildInput(overrides: Partial<CallbackInput> = {}): CallbackInput {
   return {
-    oauthClientId: 'google-drive',
+    target: { kind: 'client', id: 'google-drive', redirectUri: REDIRECT_URI },
     code: 'AUTH_CODE',
     state: mcpState(),
-    redirectUri: REDIRECT_URI,
     ...overrides,
   }
 }
@@ -70,7 +69,7 @@ function gdriveSubject(
       },
     },
   }
-  const resolved = resolveServerOAuthSubject(rawServer)
+  const resolved = resolveServerOAuthSubject(rawServer, 'consent')
   if (!resolved) throw new Error('fixture: resolveServerOAuthSubject returned null')
   return { namespace: MCP_NS, ...resolved }
 }
@@ -241,7 +240,10 @@ describe('handleOAuthCallback — mcp subject (U5)', () => {
 
   it('rejects when the callback-path oauthClientId disagrees with the signed state', async () => {
     const { deps } = buildDeps({ subject: gdriveSubject() })
-    const result = await handleOAuthCallback(buildInput({ oauthClientId: 'other' }), deps)
+    const result = await handleOAuthCallback(
+      buildInput({ target: { kind: 'client', id: 'other', redirectUri: REDIRECT_URI } }),
+      deps
+    )
     expect(result.kind).toBe('invalid_state')
   })
 
