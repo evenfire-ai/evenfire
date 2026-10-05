@@ -119,6 +119,26 @@ principal share until parser termination, with a bounded close/destruction
 backstop. Real upstream outage, connect-failure and 429 semantics remain
 unchanged.
 
+control-api's authorize route has two local outcomes of its own, also
+closed wire identities read only from the `error` field: 503
+`authorize_capacity_exceeded` (the retained-body admission is full, or a
+queued request waited past its bound) and 503 `authorize_timeout` (authorize
+work outlived its 30 s deadline). Both classify as non-retryable
+`LLM_API_CALL_FAILED`, do not fail over or install a cooldown, and send
+nothing to the provider. A capacity refusal is answered before the body is
+read, with `Connection: close`, so no attempt is recorded. Only the retained
+path takes a unit. A request whose declared `Content-Length` is at or below
+the text authorize envelope (`maxRequestBodyBytes` +
+`ENVELOPE_ALLOWANCE_BYTES`, 8404992 bytes, the larger of the two contracts)
+is parsed with that limit and never queues. A larger declared length, a
+chunked body or a length that is not plain digits takes the unit. The
+retained path parses one body at a time and queues at most two, in FIFO
+order, paused before any read. One principal (JWT `sub` plus its sorted
+`hostRefs`) holds at most two positions, running or queued. A waiter is
+refused after 40 s, the holder's read deadline (10 s) plus its work deadline
+(30 s). These bounds limit latency and fairness, not memory; the count of one
+is an uncertified ceiling (#813).
+
 The critical Codex test title migrated from "visual admission overflow answers
 503 provider_unavailable and logs visual_gate" to "visual admission overflow
 answers 503 visual_gate and logs visual_gate". Its physical file and the original
@@ -463,9 +483,12 @@ behavior changes:
   - It gives each request one admission clock, stamped at arrival: arrival +
     `maxQueueWaitMs`. The body budget, the visual gate and the stream gate
     all wait against that same instant, so `maxQueueWaitMs` is the total
-    time a request may spend queued in the proxy. A waiter still queued when
-    it runs out is rejected with `provider_unavailable` (reason
-    `body admission wait exceeded` or `stream queue wait exceeded`). Queue
+    time a request may spend queued in the proxy. A body-budget or
+    stream-gate waiter still queued when it runs out is rejected with
+    `provider_unavailable` (reason `body admission wait exceeded` or
+    `stream queue wait exceeded`); at an exact tie with the gate's own bound,
+    the admission clock decides. The admission clock is the visual gate's own
+    bound, so a visual waiter that runs it out is refused `visual_gate`. Queue
     wait, the 15 s control-api redeem timeout and the first keepalive
     together (60 + 15 + 60 = 135 s) stay below the Host HTTP client's 300 s
     header timeout.

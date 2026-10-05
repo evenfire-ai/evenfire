@@ -164,7 +164,9 @@ backstop. The raw-body scan
 refuses a body nested deeper than 70 (`BODY_STRUCTURE_LIMITS.maxDepth`) with
 400 `invalid_request` before `JSON.parse`, so `JSON.stringify` and the byte
 measurement never see a deeper tree. A visual-gate capacity refusal (queue
-full or queue wait) is answered 503 `visual_gate`. Ordinary stream/body queue
+full, or a waiter that runs out the admission clock, which is the visual
+gate's own bound) is answered 503 `visual_gate`, independent of how many
+milliseconds passed between arrival and the enqueue. Ordinary stream/body queue
 full and queue-wait capacity refusals answer 503 `proxy_capacity_exceeded`;
 deadline, abort and ticket-life outcomes keep their existing identities.
 
@@ -241,6 +243,25 @@ Errors:
   classify as non-retryable `LLM_API_CALL_FAILED`, and do not install fallback
   cooldown. An upstream `reason` string is never trusted as provenance. Real
   upstream 503, connect failure and 429 behavior remains unchanged.
+- control-api's authorize route has two local outcomes of its own, also
+  closed wire identities read only from the `error` field: 503
+  `authorize_capacity_exceeded` (the retained-body admission is full, or a
+  queued request waited past its bound) and 503 `authorize_timeout` (authorize
+  work outlived its 30 s deadline). Both classify as non-retryable
+  `LLM_API_CALL_FAILED`, do not fail over or install a cooldown, and send
+  nothing to the provider. A capacity refusal is answered before the body is
+  read, with `Connection: close`, so no attempt is recorded. Only the retained
+  path takes a unit. A request whose declared `Content-Length` is at or below
+  the text authorize envelope (`maxRequestBodyBytes` +
+  `ENVELOPE_ALLOWANCE_BYTES`, 8404992 bytes, the larger of the two contracts)
+  is parsed with that limit and never queues. A larger declared length, a
+  chunked body or a length that is not plain digits takes the unit. The
+  retained path parses one body at a time and queues at most two, in FIFO
+  order, paused before any read. One principal (JWT `sub` plus its sorted
+  `hostRefs`) holds at most two positions, running or queued. A waiter is
+  refused after 40 s, the holder's read deadline (10 s) plus its work deadline
+  (30 s). These bounds limit latency and fairness, not memory; the count of one
+  is an uncertified ceiling (#813).
 
 Desktop. The composer budget for `grok-subscription` is 16 MiB per image and
 16 MiB decoded in total, with no dimension bound. That is the shared rpc-proxy
@@ -472,9 +493,12 @@ Proxy robustness (both proxies):
 - Each request gets one admission clock, stamped at arrival: arrival +
   `maxQueueWaitMs`. The body budget and the stream gate both wait against
   that same instant, so `maxQueueWaitMs` is the total time a request may
-  spend queued in the proxy. A waiter still queued when it runs out is
-  rejected with `provider_unavailable` (reason `body admission wait exceeded`
-  or `stream queue wait exceeded`). Queue wait, the 15 s control-api redeem
+  spend queued in the proxy. A body-budget or stream-gate waiter still
+  queued when it runs out is rejected with `provider_unavailable` (reason
+  `body admission wait exceeded` or `stream queue wait exceeded`); at an exact
+  tie with the gate's own bound, the admission clock decides. The visual gate
+  differs: the admission clock is its own bound, so a visual waiter that runs
+  it out is refused `visual_gate` (see *Visual requests*). Queue wait, the 15 s control-api redeem
   timeout and the first keepalive together (60 + 15 + 60 = 135 s) stay below
   the Host HTTP client's 300 s header timeout.
 - The stream-gate wait also ends at the execution ticket's `exp`, with no
@@ -991,15 +1015,33 @@ Grok annotations. A new control-api also republishes on boot.
    `GROK_LLM_PROXY_EXECUTION_ENABLED`. `MCP_HOST_GROK_SUBSCRIPTION_ENABLED`
    follows automatically through HCC and WRC.
 
-Image input (#784) on a deployment where the Grok flags are already on: roll
-out `grok-llm-proxy` first, together with `codex-llm-proxy` (#784 also changes
+Image input (#784) on a deployment where the Grok flags are already on. The
+safe order is `grok-llm-proxy` and `codex-llm-proxy` first (#784 also changes
 the Codex non-image measurement; see the Codex transport contract, Rollout),
-then control-api together with the control-plane ConfigMap, then the four Host
-images, and wait until every pod of each runs
-the new image before starting the next. With the ConfigMap, restart
-`nginx-workflow-approval-gateway`: it mounts `nginx.conf` through `subPath`,
-so it keeps the old authorize `client_max_body_size` (25165824) until its pods
-are replaced.
+then control-api with the control-plane ConfigMap and a restart of
+`nginx-workflow-approval-gateway`, then the four Host images, each fully
+rolled out before the next. The GKE pipeline in `evenfire-infra`
+(`deploy-clerum-{dev,prod}.yml` with `codex-validator-rollout.py`) does not
+follow that order for Grok. It runs three phases:
+
+1. It applies control-api and `codex-llm-proxy` and waits until both fleets
+   run the new image.
+2. It applies everything else at once: `grok-llm-proxy`, the control-plane
+   ConfigMap (the gateway's `nginx.conf`) and HCC, which then replaces the
+   Host pods with the new Host images. Nothing orders the Grok proxy rollout
+   against the Host rollout.
+3. It restarts the ConfigMap consumers: `nginx-workflow-approval-gateway`
+   without waiting, then `grok-llm-proxy` and `codex-llm-proxy` with a wait,
+   then control-api.
+
+The Codex order holds, because control-api and `codex-llm-proxy` are new
+before any new Host runs. For Grok, a new Host can reach the new control-api
+while `grok-llm-proxy` is still old. The gateway mounts `nginx.conf` through
+`subPath`, so until phase 3 replaces its pods it keeps the old authorize
+`client_max_body_size` (25165824) and the old raw-URI `proxy_pass`. control-api
+canonicalises the authorize path itself before deciding the parser
+exemption, so the old forwarding does not reopen the parse before the JWT
+check.
 V2 has no version negotiation and no flag of its own: a new Host sends an
 image-bearing request as soon as it runs, and nothing tells it what the
 control-api or the proxy behind it accepts. Each mixed-version pairing fails
@@ -1014,9 +1056,18 @@ closed, and what the user sees is:
 | new Host, new control-api, old proxy | V2 above the old proxy parser (8 MiB) | authorized, refused by the proxy with 413 `payload_too_large` | "Conversation Too Long" |
 | old Host, any control-api and proxy | V1 only | unchanged | nothing new |
 
-The order proxy, control-api, Host keeps a V2 request from being authorized
-against a proxy that will refuse it: with the proxy already new, an old
-control-api refuses V2 before any attempt is recorded. Step 4's
+The two old-control-api rows cannot occur in the GKE pipeline, because
+control-api is new from phase 1. The other three rows can occur from the
+phase-2 apply until the `grok-llm-proxy` rollout and the gateway restart in
+phase 3 finish. Each fails closed before any upstream call, so nothing is
+billed, but the two old-proxy rows consume an authorized attempt, and all
+three show an error for an image turn that succeeds after the rollout. #784
+accepts that window. A deployment that needs no window must hold the Host
+images in HCC until phase 3 is done, or move `grok-llm-proxy`, the
+control-plane ConfigMap and the gateway restart into phase 1 in
+`evenfire-infra`; this PR changes neither. The safe order, proxy first, keeps
+a V2 request from being authorized against a proxy that will refuse it,
+because an old control-api refuses V2 before any attempt is recorded. Step 4's
 Host-before-proxy rule protects a response-side bound, `maxToolCalls`, whose
 band a new proxy would bill and an old Host would discard. #784 leaves
 `maxToolCalls` (256) unchanged, so the rule
