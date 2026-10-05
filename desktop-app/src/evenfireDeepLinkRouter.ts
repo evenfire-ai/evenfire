@@ -103,20 +103,18 @@ export function createEvenfireDeepLinkRouter<TWindow extends RendererTarget>(
     }
 
     if (hostname === 'logout') {
-      void options
-        .logout()
-        .then(() => {
+      void options.logout().then(
+        () => {
           const window = options.getWindow()
           if (!window || window.isDestroyed()) return
           options.focusMainWindow()
           window.webContents.send('auth:externalLogout')
-        })
-        .catch(error => {
-          // Quit preparation closes AppService admission before Electron tears
-          // down windows, so a late protocol logout is an expected rejection.
-          if (error instanceof Error && error.message === 'Application is shutting down') return
-          throw error
-        })
+        },
+        () => {
+          // Protocol links are fire-and-forget and have no failure response
+          // channel. Consume rejection without changing auth state or sending success.
+        }
+      )
       return
     }
 

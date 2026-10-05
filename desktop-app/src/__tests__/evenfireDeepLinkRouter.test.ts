@@ -250,4 +250,25 @@ describe('evenfire deep-link router', () => {
       process.off('unhandledRejection', observeUnhandledRejection)
     }
   })
+
+  it('handles unexpected external logout failures without reporting completion', async () => {
+    const harness = createHarness()
+    const unhandledRejections: unknown[] = []
+    const observeUnhandledRejection = (reason: unknown) => {
+      unhandledRejections.push(reason)
+    }
+    harness.logout.mockRejectedValue(new Error('logout failed'))
+    process.on('unhandledRejection', observeUnhandledRejection)
+
+    try {
+      harness.router.handle('evenfire://logout')
+      await new Promise<void>(resolve => setImmediate(resolve))
+
+      expect(unhandledRejections).toEqual([])
+      expect(harness.sent).toEqual([])
+      expect(harness.focusWindow).not.toHaveBeenCalled()
+    } finally {
+      process.off('unhandledRejection', observeUnhandledRejection)
+    }
+  })
 })
