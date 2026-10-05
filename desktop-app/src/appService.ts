@@ -1560,16 +1560,14 @@ export class AppService {
       this.savedSessionRestoreAttemptedAtMs = Date.now()
       let token: string | null = null
       let tokenReadFailed = false
-      let tokenReadError: unknown
       try {
         // getSessionToken can migrate a legacy token into a new durable slot,
         // so keep the native owner until its read/migration has settled.
         token = await this.tokenStore.getSessionToken(environment.environmentKey, {
           legacyEnvKeys,
         })
-      } catch (error) {
+      } catch {
         tokenReadFailed = true
-        tokenReadError = error
       }
       return {
         sessionGeneration: this.sessionGeneration,
@@ -1577,7 +1575,6 @@ export class AppService {
         legacyEnvKeys,
         token,
         tokenReadFailed,
-        tokenReadError,
       }
     })
     if (!reservation) return { authenticated: false, me: null }
@@ -1594,10 +1591,6 @@ export class AppService {
     })
 
     if (reservation.tokenReadFailed) {
-      console.warn(
-        '[AppService] Failed to read the saved session token:',
-        reservation.tokenReadError
-      )
       return this.withNativeAuthEnvironmentCommit(async () => {
         if (!ownsRestore()) return currentSession()
         if (this.sessionToken !== null || this.me !== null) this.clearAuthenticatedSessionState()
@@ -1660,8 +1653,6 @@ export class AppService {
           await this.tokenStore.clearSessionToken(reservation.environment.environmentKey, {
             legacyEnvKeys: reservation.legacyEnvKeys,
           })
-        } else {
-          console.warn('[AppService] Saved session restore failed; keeping token for retry:', error)
         }
         return { authenticated: false, me: null }
       })
@@ -3749,11 +3740,8 @@ export class AppService {
             await this.tokenStore.clearSessionToken(getActiveEnvKey(), {
               legacyEnvKeys: getActiveLegacyEnvKeys(),
             })
-          } catch (clearError) {
-            console.warn(
-              '[AppService] Failed to clear a partially switched team session:',
-              clearError
-            )
+          } catch {
+            // Preserve the original team-transition error when cleanup also fails.
           }
           throw error
         }
