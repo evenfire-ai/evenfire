@@ -1,4 +1,5 @@
 import express from 'express'
+import { posix } from 'node:path'
 import { config } from './config.js'
 import type { DbClient } from './db.js'
 import { clerumErrorHandler } from './http/errorHandler.js'
@@ -72,6 +73,21 @@ const GFS_UPLOAD_PART_PATH =
 // The global 150mb parser must not buffer an unauthenticated body.
 const LLM_AUTHORIZE_PATH = /^\/api\/v1\/mcp-host\/llm\/provider-attempts\/authorize\/?$/i
 
+// nginx selects the authorize location on the percent-decoded, dot-resolved,
+// slash-collapsed URI. Apply the same canonicalization here, so an alias that
+// nginx admitted with the 35 MiB allowance cannot reach the global parser.
+// Returns null when the path holds a malformed percent escape.
+function canonicalRequestPath(path: string): string | null {
+  let decoded: string
+  try {
+    decoded = decodeURIComponent(path)
+  } catch (err) {
+    if (err instanceof URIError) return null
+    throw err
+  }
+  return posix.normalize(decoded).replace(/\/+/g, '/')
+}
+
 export function createApp(gateway: K8sGateway) {
   const traceIngestDb: DbClient = meterTracingDbClient({
     query: (text, params) => getTracingPools().traceIngestPool.query(text, params),
@@ -95,11 +111,23 @@ export function createApp(gateway: K8sGateway) {
       next()
       return
     }
-    // Express permits repeated separators at router mount boundaries. Match
-    // the exemption on the normalized path without changing request routing.
-    if (req.method === 'POST' && LLM_AUTHORIZE_PATH.test(req.path.replace(/\/+/g, '/'))) {
-      next()
-      return
+    // Match the exemption on the canonical path without changing request
+    // routing. An alias that is not the routed path gets no body parser at
+    // all and ends in the routing 401/404; only the exact route parses its
+    // body, after the limiter and JWT. Express also permits repeated
+    // separators at router mount boundaries, which the canonical form covers.
+    if (req.method === 'POST') {
+      const canonicalPath = canonicalRequestPath(req.path)
+      if (canonicalPath === null) {
+        // The path cannot be classified, so its body is not parsed. The raw
+        // URI is not logged: it is caller-controlled.
+        res.status(400).json({ error: 'invalid_request' })
+        return
+      }
+      if (LLM_AUTHORIZE_PATH.test(canonicalPath)) {
+        next()
+        return
+      }
     }
     jsonBodyParser(req, res, next)
   })

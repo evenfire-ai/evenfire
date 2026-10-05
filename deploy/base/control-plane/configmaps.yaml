@@ -890,7 +890,12 @@ data:
           }
           error_page 502 = @control_plane_unavailable;
           error_page 504 = @control_plane_connect_timeout;
-          proxy_pass http://control_api_upstream;
+          # This exact location matches the normalized URI, but a proxy_pass
+          # without a URI part forwards the raw one. Aliases such as
+          # %61uthorize or ./authorize would then reach control-api with the
+          # 35 MiB allowance on a path its parser exemption does not know.
+          # The URI part makes nginx send the canonical path (query kept).
+          proxy_pass http://control_api_upstream/api/v1/mcp-host/llm/provider-attempts/authorize;
           proxy_set_header Host $host;
           proxy_set_header X-Real-IP $remote_addr;
           proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;

@@ -380,6 +380,26 @@ describe('network/gateway intent (manifest-level)', () => {
     expect(gatewayConf.match(/client_max_body_size/g)).toHaveLength(1)
   })
 
+  it('forwards the canonical authorize URI, not the raw alias nginx matched', () => {
+    const configmaps = read(`${BASE}/control-plane/configmaps.yaml`)
+    const gatewayConf = docContaining(yamlDocs(configmaps), 'name: nginx-workflow-approval-gateway')
+    const authorize = locationBlock(
+      gatewayConf,
+      'location = /api/v1/mcp-host/llm/provider-attempts/authorize'
+    )
+    // The exact location matches the normalized URI. A proxy_pass with a URI
+    // part replaces it with that canonical path; without one, nginx forwards
+    // %61uthorize or ./authorize unchanged and control-api's parser exemption
+    // would not recognise them.
+    const proxyPasses = authorize
+      .split('\n')
+      .map(line => line.replace(/#.*$/, '').trim())
+      .filter(line => line.startsWith('proxy_pass '))
+    expect(proxyPasses).toEqual([
+      'proxy_pass http://control_api_upstream/api/v1/mcp-host/llm/provider-attempts/authorize;',
+    ])
+  })
+
   it('pins the shipped Codex proxy visual envelope to 24MiB', () => {
     const proxy = read(`${BASE}/control-plane/codex-llm-proxy.yaml`)
     // #731: the ordinary body limit is derived from the contract cap plus the

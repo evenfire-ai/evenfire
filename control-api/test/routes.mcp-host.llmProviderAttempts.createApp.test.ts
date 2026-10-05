@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createServer, request as httpRequest } from 'node:http'
 import { gzipSync } from 'node:zlib'
-import { registry } from '../src/observability/metrics.js'
+import { rateLimitHitsTotal, registry } from '../src/observability/metrics.js'
 import * as authorizer from '../src/services/llmProviderAttemptAuthorizer.js'
 import { issueMcpHostAccessJwt } from '../src/utils/auth/mcpHostJwtToken.js'
 import { MockGateway } from './mockGateway.js'
@@ -238,6 +238,202 @@ describe('createApp authorize parser boundary', () => {
       })
     }
   }
+})
+
+const CANONICAL_AUTHORIZE_PATH = '/api/v1/mcp-host/llm/provider-attempts/authorize'
+
+// nginx selects the exact authorize location (35 MiB body allowance) after
+// percent-decoding, dot-segment resolution and slash collapsing. Each alias
+// here is one nginx admits there; none is the path Express routes to the
+// authorize handler. `status` is what the real app answers: no route matches
+// the alias, and an authentication gate refuses it (the bearer is a valid
+// mcp-host JWT, not an internal service token).
+const RAW_AUTHORIZE_ALIASES = [
+  {
+    name: 'percent-encoded letter',
+    path: '/api/v1/mcp-host/llm/provider-attempts/%61uthorize',
+    status: 401,
+  },
+  {
+    name: 'dot segment',
+    path: '/api/v1/mcp-host/llm/provider-attempts/./authorize',
+    status: 401,
+  },
+  {
+    name: 'encoded slash',
+    path: '/api/v1/mcp-host/llm/provider-attempts%2Fauthorize',
+    status: 401,
+  },
+  {
+    name: 'parent segment',
+    path: '/api/v1/mcp-host/llm/provider-attempts/x/../authorize',
+    status: 401,
+  },
+  {
+    name: 'encoded parent segment',
+    path: '/api/v1/mcp-host/llm/provider-attempts/x/%2e%2e/authorize',
+    status: 401,
+  },
+] as const
+
+/**
+ * POST with the request target sent byte-for-byte. fetch() resolves dot
+ * segments before sending, so it cannot produce `/./` or `/../` aliases.
+ */
+function postRaw(
+  baseUrl: string,
+  path: string,
+  requestHeaders: Record<string, string>,
+  body: string
+): Promise<{ status: number; body: string }> {
+  const { hostname, port } = new URL(baseUrl)
+  const payload = Buffer.from(body)
+  return new Promise((resolve, reject) => {
+    const req = httpRequest(
+      {
+        hostname,
+        port,
+        method: 'POST',
+        path,
+        headers: { ...requestHeaders, 'content-length': payload.length },
+      },
+      res => {
+        const status = res.statusCode
+        if (status === undefined) {
+          res.resume()
+          reject(new Error('response has no status'))
+          return
+        }
+        const chunks: string[] = []
+        res.setEncoding('utf8')
+        res.on('data', (chunk: string) => chunks.push(chunk))
+        res.on('error', reject)
+        res.on('end', () => resolve({ status, body: chunks.join('') }))
+      }
+    )
+    req.on('error', reject)
+    req.setTimeout(5_000, () => req.destroy(new Error('raw path probe timed out')))
+    req.end(payload)
+  })
+}
+
+/** Requests the authorize route's own limiter admitted (its bucket is unique to that route). */
+function authorizeLimiterAdmissions(): number {
+  const calls: unknown[][] = vi.mocked(rateLimitHitsTotal.inc).mock.calls
+  return calls.filter(
+    ([labels]) =>
+      typeof labels === 'object' &&
+      labels !== null &&
+      (labels as { bucket_type?: unknown }).bucket_type === 'llm_provider_attempt_authorize'
+  ).length
+}
+
+describe('createApp authorize parser exemption on raw path aliases', () => {
+  const p = PROVIDERS[0]
+  const success = {
+    providerAttemptId: 'attempt-1',
+    requestHash: 'a'.repeat(64),
+    executionTicket: 'test-execution-ticket',
+    expiresAt: '2026-01-01T00:00:00.000Z',
+  }
+
+  beforeEach(() => {
+    vi.mocked(authorizer.authorizeLlmProviderAttempt).mockReset()
+    vi.mocked(rateLimitHitsTotal.inc).mockClear()
+  })
+
+  /**
+   * Liveness witness for the negative assertions of each test: the canonical
+   * path, with the same JWT, passes the authorize limiter, has its body
+   * parsed (seen by the same JSON.parse spy) and reaches the service.
+   */
+  async function expectCanonicalControl(
+    url: string,
+    parse: { mock: { calls: unknown[][] } },
+    path = CANONICAL_AUTHORIZE_PATH
+  ): Promise<void> {
+    const admissionsBefore = authorizeLimiterAdmissions()
+    vi.mocked(authorizer.authorizeLlmProviderAttempt).mockResolvedValueOnce(success)
+    const response = await postRaw(url, path, headers(p), bodyOf(p))
+    expect(response.status).toBe(200)
+    expect(JSON.parse(response.body)).toEqual(success)
+    expect(authorizeLimiterAdmissions()).toBe(admissionsBefore + 1)
+    expect(parse.mock.calls.map(([text]) => text)).toContain(bodyOf(p))
+    expect(authorizer.authorizeLlmProviderAttempt).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ workflowControlScopes: [p.scope] }),
+      JSON.parse(bodyOf(p)),
+      expect.any(Object)
+    )
+  }
+
+  for (const alias of RAW_AUTHORIZE_ALIASES) {
+    it(`${alias.name}: no parser reads the body and the authorize route is not reached`, async () => {
+      // Valid JSON unique to this alias: any parser that read it would hand
+      // exactly this text to JSON.parse.
+      const aliasBody = JSON.stringify({ probe: 'raw-authorize-alias', path: alias.path })
+      await withApp('', async url => {
+        const parse = vi.spyOn(JSON, 'parse')
+        try {
+          const response = await postRaw(url, alias.path, headers(p), aliasBody)
+          expect(response.status).toBe(alias.status)
+          expect(parse.mock.calls.map(([text]) => text)).not.toContain(aliasBody)
+          expect(authorizeLimiterAdmissions()).toBe(0)
+          expect(authorizer.authorizeLlmProviderAttempt).not.toHaveBeenCalled()
+          await expectCanonicalControl(url, parse)
+        } finally {
+          parse.mockRestore()
+        }
+      })
+    })
+  }
+
+  it('canonical path with a query string: exempt from the global parser and routed to authorize', async () => {
+    const path = `${CANONICAL_AUTHORIZE_PATH}?q=1`
+    const unauthenticatedBody = JSON.stringify({ probe: 'authorize-with-query' })
+    await withApp('', async url => {
+      const parse = vi.spyOn(JSON, 'parse')
+      try {
+        const response = await postRaw(
+          url,
+          path,
+          { 'content-type': 'application/json' },
+          unauthenticatedBody
+        )
+        expect(response.status).toBe(401)
+        expect(JSON.parse(response.body)).toEqual({ error: 'Unauthorized' })
+        // Routed to authorize: its limiter ran, then the JWT check refused.
+        expect(authorizeLimiterAdmissions()).toBe(1)
+        expect(parse.mock.calls.map(([text]) => text)).not.toContain(unauthenticatedBody)
+        expect(authorizer.authorizeLlmProviderAttempt).not.toHaveBeenCalled()
+        await expectCanonicalControl(url, parse, path)
+      } finally {
+        parse.mockRestore()
+      }
+    })
+  })
+
+  it('malformed percent escape: 400 invalid_request before any parser reads the body', async () => {
+    const malformedBody = JSON.stringify({ probe: 'malformed-escape' })
+    await withApp('', async url => {
+      const parse = vi.spyOn(JSON, 'parse')
+      try {
+        const response = await postRaw(
+          url,
+          '/api/v1/mcp-host/llm/provider-attempts/%GGuthorize',
+          headers(p),
+          malformedBody
+        )
+        expect(response.status).toBe(400)
+        expect(JSON.parse(response.body)).toEqual({ error: 'invalid_request' })
+        expect(parse.mock.calls.map(([text]) => text)).not.toContain(malformedBody)
+        expect(authorizeLimiterAdmissions()).toBe(0)
+        expect(authorizer.authorizeLlmProviderAttempt).not.toHaveBeenCalled()
+        await expectCanonicalControl(url, parse)
+      } finally {
+        parse.mockRestore()
+      }
+    })
+  })
 })
 
 async function getWithJsonBody(

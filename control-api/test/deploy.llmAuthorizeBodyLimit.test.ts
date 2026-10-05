@@ -5,6 +5,8 @@ import { LIMITS as CODEX_LIMITS } from '@clerum/llm-provider-attempt-contract'
 import { AUTHORIZE_ENVELOPE_ALLOWANCE_BYTES } from '../src/services/llmProviderAttemptAuthorizer.js'
 
 const AUTHORIZE_LOCATION = 'location = /api/v1/mcp-host/llm/provider-attempts/authorize {'
+const CANONICAL_PROXY_PASS =
+  'proxy_pass http://control_api_upstream/api/v1/mcp-host/llm/provider-attempts/authorize;'
 
 /** The body of one nginx `location` block, from its opening line to its closing brace. */
 function locationBlock(config: string, opening: string): string {
@@ -22,8 +24,11 @@ describe('LLM authorize route body limit (#731 R3-3)', () => {
       'utf-8'
     )
     const block = locationBlock(config, AUTHORIZE_LOCATION)
-    // Witness: this is the block that proxies to control-api.
-    expect(block).toContain('proxy_pass http://control_api_upstream;')
+    // Witness: this is the block that proxies to control-api. It forwards the
+    // canonical URI, so an alias nginx admitted under this allowance cannot
+    // reach control-api on a path its parser exemption does not recognise.
+    expect(block).toContain(CANONICAL_PROXY_PASS)
+    expect(block.replace(/#.*$/gm, '').match(/\bproxy_pass\b/g)).toHaveLength(1)
     const directive = /client_max_body_size\s+(\d+);/.exec(block)
     expect(
       directive,
