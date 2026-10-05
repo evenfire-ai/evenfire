@@ -2374,6 +2374,38 @@ describe('POST /admin/mcp-servers/remote — per-server callback (AS without RFC
     expect(res.status).toBe(201)
   })
 
+  // The conflict is keyed on the AS issuer, never on the protected resource: with the
+  // two distinct, only the issuer can find the first server's client.
+  it('I17 conflicts on the issuer even when the resource differs from it → 409', async () => {
+    const gw = gatewayWithContext('ctx-a')
+    const { db } = makeInMemoryDynamicClientsDb()
+    const distinctResource: DiscoveryResult = {
+      ...notionResult,
+      resource: 'https://mcp.notion.com/mcp',
+    }
+    expect(distinctResource.resource).not.toBe(distinctResource.issuer)
+    expect(
+      (await installPreRegistered(gw, { db }, 'first-server', 'shared-cid', distinctResource))
+        .status
+    ).toBe(201)
+    const res = await installPreRegistered(
+      gw,
+      { db },
+      'second-server',
+      'shared-cid',
+      distinctResource
+    )
+    expect(res.status).toBe(409)
+    expect(res.body).toMatchObject({ error: 'oauth_client_id_in_use', conflict: 'remote_server' })
+  })
+
+  it('I17 a different client_id at the same provider → 201', async () => {
+    const gw = gatewayWithContext('ctx-a')
+    const { db } = makeInMemoryDynamicClientsDb()
+    expect((await installPreRegistered(gw, { db }, 'first-server', 'cid-one')).status).toBe(201)
+    expect((await installPreRegistered(gw, { db }, 'second-server', 'cid-two')).status).toBe(201)
+  })
+
   it('I17 does not constrain a shared (RFC 9207) pre-registered install → 201', async () => {
     const gw = gatewayWithContext('ctx-a')
     const { db } = makeInMemoryDynamicClientsDb()

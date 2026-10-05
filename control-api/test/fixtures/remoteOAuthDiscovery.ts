@@ -643,8 +643,14 @@ export function makeInMemoryDynamicClientsDb(): {
         }
         return { rows: [], rowCount: 0 }
       }
-      if (text.includes('FROM dynamic_clients') && text.includes('client_id = $3')) {
+      if (
+        text.includes('FROM dynamic_clients') &&
+        text.includes('client_id = $3') &&
+        text.includes('AND issuer = $4')
+      ) {
         // Existence by (issuer, client_id) within a namespace (pre-registered uniqueness).
+        // Matched on the issuer predicate too: a query that dropped it must not be
+        // answered as if it still filtered by issuer.
         const [owner_kind, server_namespace, client_id, issuer] = values
         const hit = [...rows.values()].some(
           row =>
