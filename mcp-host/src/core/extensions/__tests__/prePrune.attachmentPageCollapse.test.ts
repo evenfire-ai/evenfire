@@ -9,6 +9,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import { validateToolLinkages } from '../../orchestration/toolUseLoop'
+import { BasicSafety } from '../../safety/safety'
 import type { ChatMessage } from '../../types'
 import {
   DEFAULT_PRE_PRUNE_OPTIONS,
@@ -20,6 +21,7 @@ import * as prePruneModule from '../prePrune'
 
 const PAGE_TEXT = 'confidential page body '.repeat(200)
 const FILENAME = 'strategy-2027.md'
+const safety = new BasicSafety()
 
 function userMsg(content: string): ChatMessage {
   return { role: 'user', content }
@@ -46,7 +48,8 @@ function nativePage(overrides: Record<string, unknown> = {}): string {
 }
 
 function wrapped(content: string, toolName = 'clerum__attachment_read'): string {
-  return `<tool_output name="${toolName}" sanitized="true">\n${content}\n</tool_output>`
+  // Exercise the exact pure wrapper used to measure and emit real tool output.
+  return safety.previewOutputForLlm(toolName, content)
 }
 
 function stubMarker(): string {
@@ -108,7 +111,7 @@ describe('C17 collapseEarlierAttachmentPages — direct pass', () => {
     const out = prePruneModule.collapseEarlierAttachmentPages(messages)
 
     expect(
-      out[2].content.startsWith('<tool_output name="clerum__attachment_read" sanitized="true">')
+      out[2].content.startsWith('<tool_output name="clerum__attachment_read" sanitized="false">')
     ).toBe(true)
     expect(out[2].content.endsWith('</tool_output>')).toBe(true)
     const inner = out[2].content.split('\n')[1]!
@@ -140,6 +143,31 @@ describe('C17 collapseEarlierAttachmentPages — direct pass', () => {
     expect(stub.nextOffset).toBe(65536)
     expect(out[5]).toBe(messages[5])
     expect(() => validateToolLinkages(out)).not.toThrow()
+  })
+
+  it('keeps continuation metadata after a second pressured pre-prune of a real wrapper', () => {
+    const messages = conversation()
+    messages[2] = attachmentToolResult(
+      'tc_old',
+      wrapped(
+        nativePage({
+          limit: 'page_budget',
+          nextOffset: 65536,
+        })
+      )
+    )
+
+    const first = prePrune(messages, OPTIONS, PRESSURE_ON)
+    const second = prePrune(first.messages, OPTIONS, PRESSURE_ON)
+    expect(first.passesApplied).toContain('attachment_page_collapse')
+    expect(second.messages[2]).toBe(first.messages[2])
+    expect(second.messages[2].content.endsWith('</tool_output>')).toBe(true)
+    const stub = JSON.parse(second.messages[2].content.split('\n')[1]!)
+    expect(stub.byteRange).toEqual({ offset: 0, length: 65536 })
+    expect(stub.limit).toBe('page_budget')
+    expect(stub.nextOffset).toBe(65536)
+    expect(stub.text).toBe(stubMarker())
+    expect(() => validateToolLinkages(second.messages)).not.toThrow()
   })
 
   it('does not start another turn when a tool supplies a synthetic image user message', () => {

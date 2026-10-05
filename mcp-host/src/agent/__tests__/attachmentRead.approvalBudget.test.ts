@@ -97,10 +97,10 @@ async function fixture(readInitially = true) {
         usage,
         finish_reason: FinishReason.ToolUse,
         tool_calls: [
-          ...((!resumed && readInitially) || requestReadAfterResume
+          ...(readInitially || requestReadAfterResume
             ? [
                 {
-                  id: resumed ? 'read-after' : 'read-first',
+                  id: 'read-first',
                   name: 'clerum__attachment_read',
                   arguments: { attachmentId: 'public-file' },
                 },
