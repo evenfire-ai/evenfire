@@ -366,6 +366,87 @@ describe('ApprovalController', () => {
     expect(conv.pending_approval).toBeUndefined()
   })
 
+  describe('one-shot grant matches each dimension on its own', () => {
+    const approved = {
+      request_id: 'req-oneshot',
+      tool_name: 'evenfire-monid__monid_run',
+      parameters: { amount: 1, currency: 'usd' },
+      description: 'wallet',
+      tool_call_id: 'call-approved',
+      context_snapshot: [],
+    }
+
+    it.each([
+      ['same call id, different arguments', { amount: 2, currency: 'usd' }, 'call-approved'],
+      ['different call id, same arguments', { amount: 1, currency: 'usd' }, 'call-other'],
+      ['no call id on the new call', { amount: 1, currency: 'usd' }, undefined],
+    ])('suspends for %s', (_label, params, toolCallId) => {
+      const conv = makeConversation({ pending_approval: { ...approved } })
+      const controller = new ApprovalController(conv, customDelegateThatSuspends)
+
+      expect(controller.beforeTool('evenfire-monid__monid_run', params, toolCallId)).toEqual(
+        expect.objectContaining({ type: 'suspend' })
+      )
+      expect(conv.pending_approval?.tool_call_id).toBe('call-approved')
+    })
+
+    it('suspends when the approved call has no call id', () => {
+      const conv = makeConversation({ pending_approval: { ...approved, tool_call_id: '' } })
+      const controller = new ApprovalController(conv, customDelegateThatSuspends)
+
+      expect(
+        controller.beforeTool('evenfire-monid__monid_run', { amount: 1, currency: 'usd' }, '')
+      ).toEqual(expect.objectContaining({ type: 'suspend' }))
+    })
+
+    it('matches the approved arguments regardless of key order, once', () => {
+      const conv = makeConversation({ pending_approval: { ...approved } })
+      const controller = new ApprovalController(conv, customDelegateThatSuspends)
+
+      expect(
+        controller.beforeTool(
+          'evenfire-monid__monid_run',
+          { currency: 'usd', amount: 1 },
+          'call-approved'
+        )
+      ).toBe('proceed')
+      expect(
+        controller.beforeTool(
+          'evenfire-monid__monid_run',
+          { currency: 'usd', amount: 1 },
+          'call-approved'
+        )
+      ).toEqual(expect.objectContaining({ type: 'suspend' }))
+    })
+  })
+
+  describe('workflow_trigger while a denial is active', () => {
+    const proceeds = new DefaultLoopController()
+
+    it('asks again even though the gate would proceed', () => {
+      const conv = makeConversation({ denied_tools: new Set(['shell_exec']) })
+      const controller = new ApprovalController(conv, proceeds)
+
+      expect(controller.beforeTool('workflow_trigger', { name: 'wf' }, 'tc-1')).toEqual(
+        expect.objectContaining({ type: 'suspend' })
+      )
+    })
+
+    it('follows the gate when no tool is denied', () => {
+      const conv = makeConversation()
+      const controller = new ApprovalController(conv, proceeds)
+
+      expect(controller.beforeTool('workflow_trigger', { name: 'wf' }, 'tc-1')).toBe('proceed')
+    })
+
+    it('does not ask again on a cron lane that ignores denials', () => {
+      const conv = makeConversation({ denied_tools: new Set(['shell_exec']) })
+      const controller = new ApprovalController(conv, proceeds, { honorDenials: false })
+
+      expect(controller.beforeTool('workflow_trigger', { name: 'wf' }, 'tc-1')).toBe('proceed')
+    })
+  })
+
   it('a cron gate does not let a denial suspend an autonomous proceed', () => {
     const conv = makeConversation({
       denied_tools: new Set(['cron_manage']),

@@ -437,6 +437,57 @@ describe('AgentStateMachine -- approval handling', () => {
     })
   })
 
+  it('drops the one-shot grant once the approved call ran, before the loop continues', async () => {
+    const sessionKey = serializeSessionKey({
+      userId: 'user-1',
+      channelType: 'telegram',
+      channelId: 'test-channel',
+    })
+    let pendingWhenLoopResumed: unknown = 'not-called'
+    ;(runToolUseLoop as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce({
+        type: 'need_approval',
+        approval: {
+          request_id: 'req-oneshot',
+          tool_name: 'shell_exec',
+          parameters: { command: 'ls' },
+          description: 'Shell command',
+          tool_call_id: 'tc_1',
+          context_snapshot: [
+            { role: 'user', content: 'Do something' },
+            {
+              role: 'assistant',
+              content: '',
+              tool_calls: [{ id: 'tc_1', name: 'shell_exec', arguments: { command: 'ls' } }],
+            },
+          ],
+        },
+      })
+      .mockImplementationOnce(async () => {
+        const conv = await agent.getConversationManager().getOrCreate(sessionKey)
+        pendingWhenLoopResumed = conv.pending_approval
+        return {
+          type: 'response',
+          content: 'Done',
+          usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+        }
+      })
+    ;(executeSingleTool as ReturnType<typeof vi.fn>).mockResolvedValue({
+      tool_call_id: 'tc_1',
+      name: 'shell_exec',
+      content: 'ok',
+      is_error: false,
+    })
+
+    const task = createTestTask('user-1')
+    await agent.executeTask(task)
+    expect((await agent.handleApproval('user-1', 'req-oneshot', false)).success).toBe(true)
+
+    await vi.waitFor(() => expect(pendingWhenLoopResumed).not.toBe('not-called'))
+    expect(executeSingleTool).toHaveBeenCalledTimes(1)
+    expect(pendingWhenLoopResumed).toBeUndefined()
+  })
+
   it('emits tool progress events when resuming after approval', async () => {
     ;(runToolUseLoop as ReturnType<typeof vi.fn>)
       .mockResolvedValueOnce({
