@@ -97,7 +97,12 @@ function unexpectedReceiverStderr(value) {
   return value.replace(new RegExp(`\\(node:[0-9]+\\) ${escaped}`, 'g'), '')
 }
 
-async function nativeReceiver(t, admission, root, deadlineMs = 5_000) {
+// The runner's own inputFrames default. A shorter window lets the admission
+// deadline race the native decoder on slow CI runners, so a decode-failure
+// case can surface as PRIVATE_INPUT_DEADLINE instead of its real cause.
+const RUNNER_INPUT_DEADLINE_MS = 30_000
+
+async function nativeReceiver(t, admission, root, deadlineMs = RUNNER_INPUT_DEADLINE_MS) {
   const runner = pathToFileURL(path.join(repoRoot, 'scripts/e2e/run-subscription-image-journeys.mjs')).href
   // The child uses the actual runner receiver. IPC only controls unit lifecycle
   // and probes; all admitted frames cross the native stdin pipe.
@@ -308,7 +313,7 @@ test('native dropped stdin, malformed input and admission deadline fail instead 
   for (const control of ['drop', 'malformed', 'deadline']) {
     const root = privateRoot(), admission = unitAdmission('tool-screenshot')
     t.after(() => fs.rmSync(root, { recursive: true, force: true }))
-    const receiver = await nativeReceiver(t, admission, root, control === 'deadline' ? 75 : 5_000)
+    const receiver = await nativeReceiver(t, admission, root, control === 'deadline' ? 75 : RUNNER_INPUT_DEADLINE_MS)
     if (control === 'drop') receiver.child.stdin.end()
     if (control === 'malformed') receiver.child.stdin.write('{invalid}\n')
     const failure = await receiver.next('failed')
