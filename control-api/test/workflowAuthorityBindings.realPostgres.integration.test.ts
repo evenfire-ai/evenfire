@@ -30,6 +30,7 @@ import {
   issueUserDelegationV2,
   verifyUserDelegationV2,
 } from '../src/utils/auth/userDelegationV2Token.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 vi.mock('../src/services/notificationEmitter.js', async importOriginal => ({
   ...(await importOriginal<typeof import('../src/services/notificationEmitter.js')>()),
@@ -82,21 +83,30 @@ describeRealPostgres('workflow authority bindings on real PostgreSQL', () => {
   })
 
   afterAll(async () => {
-    corePoolConnectSpy?.mockRestore()
-    expect(databasePool?.waitingCount ?? 0).toBe(0)
-    expect(databasePool?.idleCount ?? 0).toBe(databasePool?.totalCount ?? 0)
-    await databasePool?.end()
-    if (adminPool) {
-      await adminPool.query(
-        `SELECT pg_terminate_backend(pid)
-           FROM pg_stat_activity
-          WHERE datname = $1 AND pid <> pg_backend_pid()`,
-        [database]
-      )
-      await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdentifier(database)}`)
-      await adminPool.query(`DROP ROLE IF EXISTS ${runtimeRoles.join(', ')}`)
-      await adminPool.end()
+    let waitingCount = 0
+    let idleCount = 0
+    let totalCount = 0
+    try {
+      corePoolConnectSpy?.mockRestore()
+      waitingCount = databasePool?.waitingCount ?? 0
+      idleCount = databasePool?.idleCount ?? 0
+      totalCount = databasePool?.totalCount ?? 0
+      await endPoolAndWaitForClients(databasePool)
+      if (adminPool) {
+        await adminPool.query(
+          `SELECT pg_terminate_backend(pid)
+             FROM pg_stat_activity
+            WHERE datname = $1 AND pid <> pg_backend_pid()`,
+          [database]
+        )
+        await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdentifier(database)}`)
+        await adminPool.query(`DROP ROLE IF EXISTS ${runtimeRoles.join(', ')}`)
+      }
+    } finally {
+      await adminPool?.end()
     }
+    expect(waitingCount).toBe(0)
+    expect(idleCount).toBe(totalCount)
   })
 
   afterEach(() => {
@@ -521,7 +531,7 @@ describeRealPostgres('workflow authority bindings on real PostgreSQL', () => {
       runBudget.close()
       approvalBudget.close()
       corePoolConnectSpy.mockImplementation((() => databasePool.connect()) as typeof pool.connect)
-      await limitedPool.end()
+      await endPoolAndWaitForClients(limitedPool)
     }
   })
 
@@ -1040,7 +1050,7 @@ describeRealPostgres('workflow authority bindings on real PostgreSQL', () => {
     } finally {
       budget.close()
       corePoolConnectSpy.mockImplementation((() => databasePool.connect()) as typeof pool.connect)
-      await singleConnectionPool.end()
+      await endPoolAndWaitForClients(singleConnectionPool)
     }
   })
 

@@ -9,6 +9,7 @@ import { listRunsByRecipe } from '../src/services/workflowRunService.js'
 import { archiveTerminalRuns } from '../src/services/workflowRunsArchiveService.js'
 import { mapDbRun } from '../src/services/workflows/workflowRunReadService.js'
 import { createWorkflowTriggerApprovalRequest } from '../src/services/workflows/workflowTriggerApprovalService.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 vi.mock('../src/services/notificationEmitter.js', async importOriginal => ({
   ...(await importOriginal<typeof import('../src/services/notificationEmitter.js')>()),
@@ -59,18 +60,21 @@ describeRealPostgres('workflow run failure reasons on PostgreSQL 16', () => {
   })
 
   afterAll(async () => {
-    corePoolConnectSpy?.mockRestore()
-    await databasePool?.end()
-    if (adminPool) {
-      await adminPool.query(
-        `SELECT pg_terminate_backend(pid)
-           FROM pg_stat_activity
-          WHERE datname = $1
-            AND pid <> pg_backend_pid()`,
-        [database]
-      )
-      await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdent(database)}`)
-      await adminPool.end()
+    try {
+      corePoolConnectSpy?.mockRestore()
+      await endPoolAndWaitForClients(databasePool)
+      if (adminPool) {
+        await adminPool.query(
+          `SELECT pg_terminate_backend(pid)
+             FROM pg_stat_activity
+            WHERE datname = $1
+              AND pid <> pg_backend_pid()`,
+          [database]
+        )
+        await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdent(database)}`)
+      }
+    } finally {
+      await adminPool?.end()
     }
   })
 

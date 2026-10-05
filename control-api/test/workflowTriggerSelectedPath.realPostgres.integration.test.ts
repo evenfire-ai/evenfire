@@ -33,6 +33,7 @@ import {
   issueUserDelegationV2,
   verifyUserDelegationV2,
 } from '../src/utils/auth/userDelegationV2Token.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 import { TemporaryKubernetesApi } from './helpers/temporaryKubernetesApi.js'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
@@ -202,23 +203,35 @@ describeRealPostgres('workflow trigger selected-path attribution on real Postgre
   })
 
   afterAll(async () => {
-    corePoolQuerySpy?.mockRestore()
-    corePoolConnectSpy?.mockRestore()
-    expect(databasePool?.waitingCount ?? 0).toBe(0)
-    expect(databasePool?.idleCount ?? 0).toBe(databasePool?.totalCount ?? 0)
-    await kubernetesApi.close()
-    await databasePool?.end()
-    if (adminPool) {
-      await adminPool.query(
-        `SELECT pg_terminate_backend(pid)
-           FROM pg_stat_activity
-          WHERE datname = $1 AND pid <> pg_backend_pid()`,
-        [database]
-      )
-      await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdentifier(database)}`)
-      await adminPool.query(`DROP ROLE IF EXISTS ${runtimeRoles.join(', ')}`)
-      await adminPool.end()
+    let waitingCount = 0
+    let idleCount = 0
+    let totalCount = 0
+    try {
+      corePoolQuerySpy?.mockRestore()
+      corePoolConnectSpy?.mockRestore()
+      waitingCount = databasePool?.waitingCount ?? 0
+      idleCount = databasePool?.idleCount ?? 0
+      totalCount = databasePool?.totalCount ?? 0
+      try {
+        await kubernetesApi.close()
+      } finally {
+        await endPoolAndWaitForClients(databasePool)
+      }
+      if (adminPool) {
+        await adminPool.query(
+          `SELECT pg_terminate_backend(pid)
+             FROM pg_stat_activity
+            WHERE datname = $1 AND pid <> pg_backend_pid()`,
+          [database]
+        )
+        await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdentifier(database)}`)
+        await adminPool.query(`DROP ROLE IF EXISTS ${runtimeRoles.join(', ')}`)
+      }
+    } finally {
+      await adminPool?.end()
     }
+    expect(waitingCount).toBe(0)
+    expect(idleCount).toBe(totalCount)
   })
 
   async function produceSelectedAuthority(recipeName: string, pathKind: 'direct' | 'team') {

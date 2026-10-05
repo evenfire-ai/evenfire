@@ -7,6 +7,7 @@ import {
   legacySessionAdmissionBucketKey,
 } from '../src/services/legacySessionAdmission.js'
 import { checkAndIncrementWithQuery } from '../src/services/rateLimiterService.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
@@ -43,18 +44,22 @@ describeRealPostgres('legacy session admission on real PostgreSQL', () => {
   }, 60_000)
 
   afterAll(async () => {
-    await pool?.query('DELETE FROM rate_limit_buckets WHERE bucket_key = ANY($1)', [
-      [bucketA, bucketB],
-    ])
-    await pool?.end()
-    if (!adminPool) return
-    await adminPool.query(
-      `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
-        WHERE datname = $1 AND pid <> pg_backend_pid()`,
-      [database]
-    )
-    await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdent(database)}`)
-    await adminPool.end()
+    try {
+      await pool?.query('DELETE FROM rate_limit_buckets WHERE bucket_key = ANY($1)', [
+        [bucketA, bucketB],
+      ])
+      await endPoolAndWaitForClients(pool)
+      if (adminPool) {
+        await adminPool.query(
+          `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+            WHERE datname = $1 AND pid <> pg_backend_pid()`,
+          [database]
+        )
+        await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdent(database)}`)
+      }
+    } finally {
+      await adminPool?.end()
+    }
   })
 
   it('shares the verified-subject budget across independent sessions and routes', async () => {
