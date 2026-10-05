@@ -40,6 +40,7 @@ export function trackerStateToTaskProgress(state: TaskState): TaskProgress {
           // connect_required suspension instead of the generic approval prompt.
           reason: state.pendingApproval.reason,
           mcpServerName: state.pendingApproval.mcpServerName,
+          alwaysApproveAllowed: state.pendingApproval.alwaysApproveAllowed,
         }
       : undefined,
     cancelReason:

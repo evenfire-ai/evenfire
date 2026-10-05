@@ -22,6 +22,16 @@ describe('classifyApprovalResult', () => {
     ).toBe('already_decided')
   })
 
+  it('denial_not_saved → decided_not_saved (the deny took effect)', () => {
+    expect(
+      classifyApprovalResult({
+        success: false,
+        code: 'denial_not_saved',
+        error: 'The tool call was cancelled, but the denial could not be saved.',
+      })
+    ).toBe('decided_not_saved')
+  })
+
   it('any other success:false → failed (default-conservative)', () => {
     expect(classifyApprovalResult({ success: false, error: 'Agent not initialized' })).toBe(
       'failed'
@@ -148,6 +158,40 @@ describe('decideApproval — failure (step 5)', () => {
     expect(deps.fsm.getState(chatKey)?.phase).toBe('awaiting_approval')
     expect(deps.reconcile).toHaveBeenCalledWith(chatKey, 'approval_decision_failed', target.taskId)
     expect(deps.pushToast).toHaveBeenCalledWith('Failed to approve request: fetch failed', 'error')
+  })
+
+  it('5c denial_not_saved: the deny took effect — no revert, resolve as denied, reconcile, warn', async () => {
+    const deps = buildDeps({
+      deny: vi.fn(async () => ({
+        success: false,
+        code: 'denial_not_saved',
+        error: 'The tool call was cancelled, but the denial could not be saved.',
+      })),
+    })
+    seedAwaiting(deps)
+    const denyTarget: ApprovalDecisionTarget = { ...target, decision: 'deny' }
+    expect(await decideApproval(deps, denyTarget)).toBe('decided_not_saved')
+
+    // The host cancelled the call: the FSM must NOT revert to the approval gate.
+    expect(deps.fsm.getState(chatKey)?.phase).toBe('processing')
+    expect(deps.fsm.getState(chatKey)?.pendingApproval).toBeUndefined()
+    expect(deps.resolveApprovalNotification).toHaveBeenCalledWith({
+      agentName: 'agent-a',
+      taskId: 't1',
+      requestId: 'req-1',
+      state: 'denied',
+    })
+    expect(deps.reconcile).toHaveBeenCalledWith(chatKey, 'approval_decided', target.taskId)
+    expect(deps.reconcile).not.toHaveBeenCalledWith(
+      chatKey,
+      'approval_decision_failed',
+      expect.anything()
+    )
+    expect(deps.pushToast).toHaveBeenCalledWith(
+      "The call was cancelled, but the denial wasn't saved; this tool may ask again.",
+      'error'
+    )
+    expect(deps.pushToast).toHaveBeenCalledTimes(1)
   })
 
   it('does NOT revert when a stream event advanced the task before the failure (suppression)', async () => {

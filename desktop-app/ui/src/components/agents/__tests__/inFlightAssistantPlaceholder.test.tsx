@@ -6,6 +6,10 @@ import {
   makeTaskKey,
 } from '@contexts/AgentTaskTrackerContext'
 import { act, cleanup, fireEvent, render } from '@testing-library/react'
+import type {
+  ApprovalDecisionSettlement,
+  ApprovalDecisionTarget,
+} from '@hooks/domain/approvalDecision'
 import { InFlightAssistantPlaceholder } from '../InFlightAssistantPlaceholder'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -168,5 +172,119 @@ describe('InFlightAssistantPlaceholder (D.5)', () => {
     // the ProgressStepper's re-enable timer can return it to an actionable state.
     expect(getByTestId('connect-mcp-btn')).not.toBeNull()
     errSpy.mockRestore()
+  })
+})
+
+describe('InFlightAssistantPlaceholder — approval decisions reach decideApproval', () => {
+  type DecideApproval = (target: ApprovalDecisionTarget) => Promise<ApprovalDecisionSettlement>
+
+  // Drives a real TaskTracker into a generic approval suspension through the same
+  // `suspended` stream event the live tracker consumes, so the stepper renders the
+  // production shape.
+  async function renderSuspended(
+    decideApproval: DecideApproval,
+    suspendedExtras: Record<string, unknown> = {}
+  ) {
+    let handler: ((e: unknown) => void | Promise<void>) | null = null
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      writable: true,
+      value: {
+        rpc: {
+          subscribeTaskProgress: vi.fn(async (_h: string, _t: string, onEvent: typeof handler) => {
+            handler = onEvent
+            return async () => undefined
+          }),
+          getTaskResult: vi.fn(async () => ({ response: 'ok' })),
+          cancelTask: vi.fn(async () => undefined),
+        },
+      },
+    })
+    const tracker = new TaskTracker()
+    tracker.start(makeTaskKey('agent-x', 'c1'), 'task-1', 'um-1')
+    const view = render(
+      <AgentTaskTrackerContext.Provider value={tracker}>
+        <InFlightAssistantPlaceholder
+          agentRef="agent-x"
+          chatId="c1"
+          localMessageIds={new Set()}
+          onCancelTask={vi.fn()}
+          decideApproval={decideApproval}
+        />
+      </AgentTaskTrackerContext.Provider>
+    )
+    await act(async () => {
+      if (!handler) throw new Error('no progress handler registered')
+      await handler({
+        type: 'suspended',
+        data: {
+          taskId: 'task-1',
+          requestId: 'req-1',
+          displayName: 'Shell',
+          reason: 'approval_required',
+          ...suspendedExtras,
+        },
+      })
+    })
+    return view
+  }
+
+  it('Always approve sends decision approve with alwaysApprove:true for the request', async () => {
+    const decideApproval = vi.fn<DecideApproval>().mockResolvedValue('ok')
+    const { getByTestId } = await renderSuspended(decideApproval)
+
+    await act(async () => {
+      fireEvent.click(getByTestId('approval-always-approve-btn'))
+    })
+
+    expect(decideApproval).toHaveBeenCalledTimes(1)
+    expect(decideApproval).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agentRef: 'agent-x',
+        chatId: 'c1',
+        taskId: 'task-1',
+        requestId: 'req-1',
+        decision: 'approve',
+        alwaysApprove: true,
+        source: 'placeholder',
+      })
+    )
+  })
+
+  it('plain Approve does not ask the host to allowlist the tool', async () => {
+    const decideApproval = vi.fn<DecideApproval>().mockResolvedValue('ok')
+    const { getByTestId } = await renderSuspended(decideApproval)
+
+    await act(async () => {
+      fireEvent.click(getByTestId('approval-approve-btn'))
+    })
+
+    expect(decideApproval).toHaveBeenCalledTimes(1)
+    const target = decideApproval.mock.calls[0]![0]
+    expect(target.decision).toBe('approve')
+    expect(target.alwaysApprove).not.toBe(true)
+  })
+
+  it('a failed settlement re-enables Always approve for a retry', async () => {
+    const decideApproval = vi.fn<DecideApproval>().mockResolvedValueOnce('failed')
+    const { getByTestId } = await renderSuspended(decideApproval)
+
+    await act(async () => {
+      fireEvent.click(getByTestId('approval-always-approve-btn'))
+    })
+
+    const btn = getByTestId('approval-always-approve-btn')
+    expect(btn.hasAttribute('disabled')).toBe(false)
+    expect(btn.textContent).toBe('Always approve')
+  })
+
+  it('hides Always approve when the suspension disallows it', async () => {
+    const decideApproval = vi.fn<DecideApproval>().mockResolvedValue('ok')
+    const { queryByTestId, getByTestId } = await renderSuspended(decideApproval, {
+      alwaysApproveAllowed: false,
+    })
+
+    expect(queryByTestId('approval-always-approve-btn')).toBeNull()
+    expect(getByTestId('approval-approve-btn')).not.toBeNull()
   })
 })

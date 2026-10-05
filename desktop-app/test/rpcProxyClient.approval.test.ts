@@ -89,6 +89,24 @@ describe('RpcProxyClient — approveToolCall()', () => {
     })
   })
 
+  it('surfaces a structured failure code from a success:false body', async () => {
+    fetchSpy.mockResolvedValueOnce(
+      okResponse({
+        success: false,
+        code: 'denial_not_saved',
+        error: 'The tool call was cancelled, but the denial could not be saved.',
+      })
+    )
+
+    const result = await client.denyToolCall('rpc-token', 'chatllm', 'task-123', 'tc-456', 'No')
+
+    expect(result).toEqual({
+      success: false,
+      code: 'denial_not_saved',
+      error: 'The tool call was cancelled, but the denial could not be saved.',
+    })
+  })
+
   it('URL-encodes hostRef with special characters', async () => {
     fetchSpy.mockResolvedValueOnce(okResponse())
 

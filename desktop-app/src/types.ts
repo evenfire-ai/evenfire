@@ -906,6 +906,9 @@ export type TaskProgressStreamEvent =
         // approval prompt) and correlates the later deep-link completion back to
         // this suspension by `mcpServerName`. Absent for `approval_required`.
         mcpServerName?: string
+        // `false` when the host refuses to allowlist this call ("Always approve"
+        // is hidden). Absent means allowed.
+        alwaysApproveAllowed?: false
       }
     }
   | { type: 'cancelled'; data: { taskId: string; reason: string } }
@@ -1010,6 +1013,9 @@ export interface PendingApprovalLite {
   // Absent on ordinary `approval_required` suspensions (byte-identical there).
   reason?: string
   mcpServerName?: string
+  // `false` when the host refuses to allowlist this call ("Always approve" is
+  // hidden). Absent means allowed.
+  alwaysApproveAllowed?: false
 }
 
 /**
@@ -1025,6 +1031,9 @@ export interface PendingApprovalLite {
 export interface ApprovalDecisionResult {
   success: boolean
   error?: string
+  // Structured failure code. `denial_not_saved`: the host cancelled the call and
+  // consumed the approval, but could not durably record the denial.
+  code?: string
 }
 
 /**

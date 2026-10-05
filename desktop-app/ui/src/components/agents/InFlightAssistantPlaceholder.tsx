@@ -31,6 +31,7 @@ interface Props {
     // suspended replays.
     reason?: string
     mcpServerName?: string
+    alwaysApproveAllowed?: false
   }
 }
 
@@ -97,7 +98,8 @@ export function InFlightAssistantPlaceholder({
               : undefined
           }
           onAlwaysApprove={
-            si
+            // The host may refuse to allowlist this call (`alwaysApproveAllowed: false`).
+            si && si.alwaysApproveAllowed !== false
               ? () => {
                   return decideApproval({
                     agentRef,

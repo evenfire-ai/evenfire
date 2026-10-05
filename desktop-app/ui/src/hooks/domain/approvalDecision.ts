@@ -24,11 +24,17 @@ export const APPROVAL_ALREADY_DECIDED_MARKERS = [
   'Task is no longer awaiting approval',
 ] as const
 
-export type ApprovalOutcome = 'ok' | 'already_decided' | 'failed'
+/** mcp-host's structured code for a deny that took effect (call cancelled,
+ *  approval consumed, task completed) but whose durable record failed. */
+export const APPROVAL_DENIAL_NOT_SAVED_CODE = 'denial_not_saved'
+
+export type ApprovalOutcome = 'ok' | 'already_decided' | 'decided_not_saved' | 'failed'
 
 /** What `decideApproval` settled to. `'not_awaiting'` means the double-decision
- *  guard refused it locally (no RPC). Only `'failed'` leaves the request open for
- *  a retry from the same surface. */
+ *  guard refused it locally (no RPC). `'decided_not_saved'` means the decision
+ *  took effect but was not durably recorded — the request is closed, so it is
+ *  NOT retryable. Only `'failed'` leaves the request open for a retry from the
+ *  same surface. */
 export type ApprovalDecisionSettlement = ApprovalOutcome | 'not_awaiting'
 
 /** Classify a settled approve/deny result. A thrown error (network / non-ok
@@ -38,6 +44,7 @@ export function classifyApprovalResult(
   result: ApprovalDecisionResult | null | undefined
 ): ApprovalOutcome {
   if (!result || result.success) return 'ok'
+  if (result.code === APPROVAL_DENIAL_NOT_SAVED_CODE) return 'decided_not_saved'
   const error = result.error ?? ''
   if (APPROVAL_ALREADY_DECIDED_MARKERS.some(marker => error.includes(marker))) {
     return 'already_decided'
@@ -252,6 +259,24 @@ export async function decideApproval(
     deps.pushToast('That request was already decided.', 'info')
     deps.reconcile(chatKey, 'approval_conflict', target.taskId)
     return 'already_decided'
+  }
+
+  // Step 5c — the host applied the decision (cancelled the call, consumed the
+  // approval) but could not record it: converge like a success (no revert, the
+  // gate must not reappear) and warn that the tool may ask again.
+  if (outcome === 'decided_not_saved') {
+    deps.resolveApprovalNotification({
+      agentName: target.agentRef,
+      taskId: target.taskId,
+      requestId: target.requestId,
+      state: resolvedState,
+    })
+    deps.reconcile(chatKey, 'approval_decided', target.taskId)
+    deps.pushToast(
+      "The call was cancelled, but the denial wasn't saved; this tool may ask again.",
+      'error'
+    )
+    return 'decided_not_saved'
   }
 
   // Step 5b — genuine `success:false` failure: revert (suppression in reducer) +

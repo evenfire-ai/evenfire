@@ -488,7 +488,8 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
               : undefined
           }
           onAlwaysApprove={
-            canAct && si && selectedAgent && activeChatId
+            // The host may refuse to allowlist this call (`alwaysApproveAllowed: false`).
+            canAct && si && si.alwaysApproveAllowed !== false && selectedAgent && activeChatId
               ? () => {
                   return decideApproval({
                     agentRef: selectedAgent,

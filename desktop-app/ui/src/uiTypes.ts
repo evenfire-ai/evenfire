@@ -188,6 +188,9 @@ export interface SuspendedInfo {
    *  is the server to connect. Absent on ordinary approval suspensions. */
   reason?: string
   mcpServerName?: string
+  /** `false` when the host refuses to allowlist this call (hides "Always
+   *  approve"). Absent means allowed. */
+  alwaysApproveAllowed?: false
 }
 
 export interface TaskProgress {
