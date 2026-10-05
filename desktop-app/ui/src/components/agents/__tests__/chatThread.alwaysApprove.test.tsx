@@ -17,6 +17,11 @@ const navigationValue = { selectedAgent: 'agent-x', handleSelectChatAgent: vi.fn
 const notificationsValue: { decideApproval: ReturnType<typeof vi.fn> } = {
   decideApproval: vi.fn(),
 }
+const composerStateValue = {
+  composerImageAttachments: [] as never[],
+  composerReferenceAttachments: [] as never[],
+  requestComposerFocus: vi.fn(),
+}
 const chatListValue = { chatList: [], chatListLoading: false, sessionStateByChatId: {} }
 const actionsValue = {
   chatEndRef: { current: null },
@@ -35,6 +40,9 @@ let progressByMessageId: Record<string, TaskProgress>
 vi.mock('@contexts/NavigationContext', () => ({ useNavigationContext: () => navigationValue }))
 vi.mock('@contexts/NotificationsContext', () => ({
   useNotificationsContext: () => notificationsValue,
+}))
+vi.mock('@contexts/ChatComposerStateContext', () => ({
+  useChatComposerStateContext: () => composerStateValue,
 }))
 vi.mock('@contexts/ChatListContext', () => ({ useChatListContext: () => chatListValue }))
 vi.mock('@contexts/AgentChatActionsContext', () => ({
