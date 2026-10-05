@@ -9,15 +9,15 @@ rule below is enforced by a named test.
 ## ZIP budget model (memory, entries, paths)
 
 **One budget, four accounting points.** The walk's byte ceiling
-(`GFS_ZIP_MAX_TOTAL_BYTES`, 512 MiB) bounds the *sum* of what the archive can
+(`GFS_ZIP_MAX_TOTAL_BYTES`, 512 MiB) bounds the _sum_ of what the archive can
 hold. It is enforced at every point where bytes could previously escape it:
 
-| Accounting point | Rule | Enforcement |
-| --- | --- | --- |
-| Planning (listing) | Declared child sizes sum to the ceiling; missing/unusable sizes count 0, never NaN | cumulative check per discovered file |
-| Transfer (per download) | `runningActual + incoming ≤ ceiling` must hold *producer-side*: each download carries `maxBytes = ceiling − runningActual + 1`; the bounded fetch rejects (413) before an over-budget body is materialized in the renderer | 413 maps to the same limit refusal |
-| Receipt | Actual buffer length re-checked before it enters the archive buffer | hard backstop |
-| Archive + save | One pre-sized single buffer (planned bytes + header overhead); `build()` returns a view; the anchor-save Blob is the one unavoidable copy | streaming writer contract |
+| Accounting point        | Rule                                                                                                                                                                                                                       | Enforcement                          |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------ |
+| Planning (listing)      | Declared child sizes sum to the ceiling; missing/unusable sizes count 0, never NaN                                                                                                                                         | cumulative check per discovered file |
+| Transfer (per download) | `runningActual + incoming ≤ ceiling` must hold _producer-side_: each download carries `maxBytes = ceiling − runningActual + 1`; the bounded fetch rejects (413) before an over-budget body is materialized in the renderer | 413 maps to the same limit refusal   |
+| Receipt                 | Actual buffer length re-checked before it enters the archive buffer                                                                                                                                                        | hard backstop                        |
+| Archive + save          | One pre-sized single buffer (planned bytes + header overhead); `build()` returns a view; the anchor-save Blob is the one unavoidable copy                                                                                  | streaming writer contract            |
 
 **Peak renderer memory** under this model is `archive buffer (≤ 512 MiB) + one
 in-flight download buffer (≤ remaining budget) + save-time Blob copy
@@ -28,7 +28,7 @@ producer-bounded model above is the defensible bound for this PR and is what
 the tests pin.
 
 **Entry counting includes directories.** `GFS_ZIP_MAX_ENTRIES` (2000) counts
-every accepted child — files *and* folders — because both cost walk work
+every accepted child — files _and_ folders — because both cost walk work
 (listing requests). The refusal message says "files and folders".
 
 **Complete encoded path bound.** A ZIP name field is a 16-bit byte count, so
@@ -55,7 +55,7 @@ property-based invariants (fast-check).
 `window.clerum.gfs.download` accept an optional `AbortSignal`. The preload
 bridge attaches a per-call `requestId`; on abort it fires `gfs:abort`; the main
 process holds one `AbortController` per in-flight requestId and threads it into
-the GFS client fetch, so a Stop ends the *producer's* work, not just the
+the GFS client fetch, so a Stop ends the _producer's_ work, not just the
 renderer's patience. The walk passes its job signal to every producer call,
 initial and retried. One job per Files page instance; unmount aborts; a
 replacement job cannot start until the previous walk settles (the handler's
@@ -63,7 +63,7 @@ replacement job cannot start until the previous walk settles (the handler's
 
 **Binding.** Cancel-restore and its Discard-all action are bound to BOTH the
 originating agent AND the originating chat (the retained snapshot's `chatId`).
-Composer attachment *state* is per-agent and shared across that agent's chats,
+Composer attachment _state_ is per-agent and shared across that agent's chats,
 so the binding is a semantic guard, not a storage key: if the user has moved to
 a different agent or a different chat by the time the cancel answer (or the
 toast action) lands, the restore/action no-ops. A skipped restore still
