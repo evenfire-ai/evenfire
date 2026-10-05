@@ -1,0 +1,15 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "..",
+    "noEmit": true,
+    "module": "ESNext",
+    "moduleResolution": "Bundler"
+  },
+  "include": [
+    "src/config.ts",
+    "test/config.devKeyStore.test.ts",
+    "../scripts/testing/devJwtVerifierContract.ts"
+  ],
+  "exclude": []
+}

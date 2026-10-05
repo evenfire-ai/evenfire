@@ -1,55 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { generateKeyPairSync, randomBytes } from 'node:crypto'
-
-function generateNonDevPem(): string {
-  // 3072-bit RSA. 2048-bit keys produce a PKCS8 header that collides with the
-  // dev-key fingerprint check in src/config.ts (`MIIEvAIBADANBgkqhkiG9w0BAQEFAASC`
-  // / `MIIEvgIBADANBgkqhkiG9w0BAQEFAASC`). 3072 yields a `MIIG/Q…` prefix that
-  // doesn't match either fingerprint and is still RS256-compatible.
-  return generateKeyPairSync('rsa', {
-    modulusLength: 3072,
-    privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
-    publicKeyEncoding: { type: 'spki', format: 'pem' },
-  }).privateKey
-}
-
-/**
- * Populate every CONTROL_API env var that the prod path requires so that
- * config evaluation reaches the voucher-key guard rather than throwing earlier
- * on a missing required env. Mirrors `requiredOrDevDefault` callsites in
- * `src/config.ts`.
- */
-function applyProdEnv(env: Record<string, string | undefined>): void {
-  env.NODE_ENV = 'production'
-  // Non-dev RPC/session/admin JWT keys — the existing prod guard rejects the
-  // hardcoded dev fingerprints.
-  env.CONTROL_API_RPC_JWT_PRIVATE_KEY = generateNonDevPem()
-  env.CONTROL_API_SESSION_JWT_PRIVATE_KEY = generateNonDevPem()
-  env.CONTROL_API_ADMIN_JWT_PRIVATE_KEY = generateNonDevPem()
-  // Remaining `requiredOrDevDefault` callsites in src/config.ts. Defaults are
-  // dev-only — production must set these explicitly.
-  env.INTERNAL_CONTROL_JWT_WRC_HMAC_SECRET = randomBytes(32).toString('hex')
-  env.INTERNAL_CONTROL_JWT_HCC_HMAC_SECRET = randomBytes(32).toString('hex')
-  env.CONTROL_API_MEMBER_REGISTRATION_SERVICE_BASE_URL = 'https://registration.evenfire.ai/api/v1'
-  env.CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET = randomBytes(32).toString('hex')
-  env.CONTROL_API_MEMBER_REGISTRATION_HMAC_KID = 'clerum'
-  env.CONTROL_API_MEMBER_REGISTRATION_TENANT_ID = 'clerum'
-  env.CONTROL_API_JWT_ISSUER = 'control-api'
-  env.CONTROL_API_JWT_AUDIENCE = 'profile-ui'
-  env.CONTROL_API_RPC_JWT_ISSUER = 'control-api'
-  env.CONTROL_API_RPC_JWT_AUDIENCE = 'rpc-proxy'
-  env.CONTROL_API_GOOGLE_CLIENT_ID = 'prod-google-client-id'
-  env.CONTROL_API_ADMIN_JWT_ISSUER = 'control-api'
-  env.CONTROL_API_ADMIN_JWT_AUDIENCE = 'control-ui'
-  env.CONTROL_API_ADMIN_BOOTSTRAP_USERNAME = 'admin'
-  // bcrypt hash of 'prod-bootstrap-password' (any valid bcrypt-shaped string is fine here).
-  env.CONTROL_API_ADMIN_BOOTSTRAP_PASSWORD_HASH =
-    '$2b$12$4dm17x2DESCxETGi0MpNruC0KpCev5lbKwqgmUkVLxKsNUxoXXXXXX'
-  env.CONTROL_API_OAUTH_STATE_HMAC_SECRET = randomBytes(32).toString('hex')
-  env.CONTROL_API_OAUTH_ENCRYPTION_KEY = randomBytes(32).toString('hex')
-  env.CONTROL_API_INTERNAL_SERVICE_TOKENS =
-    'external-rest-api=prod-external-rest-api-token,rpc-proxy=prod-rpc-proxy-token,webhook-proxy=prod-webhook-proxy-token'
-}
+import { createPublicKey } from 'node:crypto'
+import { applyProdEnv, generateNonDevPem } from './fixtures/productionConfigEnv.js'
 
 describe('config: production voucher key guard', () => {
   const origEnv = { ...process.env }
@@ -88,6 +39,27 @@ describe('config: production voucher key guard', () => {
     process.env.CONTROL_API_REGISTRY_VOUCHER_PRIVATE_KEY = generateNonDevPem()
     process.env.CONTROL_API_REGISTRY_VOUCHER_KID = 'key-uuid'
     await expect(import('../src/config.js')).resolves.toBeDefined()
+  })
+
+  it('checks the voucher signing slot against the banned fingerprints in production', async () => {
+    const voucherKey = generateNonDevPem()
+    const guard = await import('@clerum/jwt-key-policy')
+    const voucherFingerprint = guard.publicKeyPemFingerprint(
+      createPublicKey(voucherKey).export({ type: 'spki', format: 'pem' }).toString()
+    )
+    // Scope the additional denied identity to this real parsing decision.
+    // The package's immutable historical policy remains active.
+    const parseSigningMaterial = guard.parseSigningMaterial
+    vi.spyOn(guard, 'parseSigningMaterial').mockImplementation((raw, source, options) =>
+      parseSigningMaterial(raw, source, { ...options, fingerprints: [voucherFingerprint] })
+    )
+    process.env.CONTROL_API_REGISTRY_VOUCHER_PRIVATE_KEY = voucherKey
+
+    await expect(() => import('../src/config.js')).rejects.toMatchObject({
+      code: 'ERR_JWT_KEY_BANNED',
+      reason: 'banned_identity',
+      source: 'CONTROL_API_REGISTRY_VOUCHER_PRIVATE_KEY',
+    })
   })
 
   it('rejects default dev internal service tokens in production', async () => {

@@ -194,6 +194,13 @@ incremental_classify_path() {
     channel-reader/*) incremental_add_target channel-reader channels channel-reader-chatllm ;;
     mcp-proxy/*) incremental_add_target mcp-proxy mcp-server mcp-proxy ;;
     control-ui/*) incremental_add_target control-ui control-plane control-ui ;;
+    packages/jwt-key-policy/*)
+      # All three images consume this one policy/store package. Package-only
+      # changes must rebuild each consumer, including GHCR shadow builds.
+      incremental_add_target control-api control-plane control-api
+      incremental_add_target external-rest-api profiles external-rest-api
+      incremental_add_target rpc-proxy rpc-proxy rpc-proxy
+      ;;
     packages/gfs-interaction-policy/*)
       # Control UI imports the GFS naming policy and mcp-host imports the
       # FileReference v1 contract and byte classifier; both Dockerfiles COPY
