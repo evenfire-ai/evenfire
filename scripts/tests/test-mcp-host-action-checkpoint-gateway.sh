@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CLIENT="$ROOT_DIR/mcp-host/src/runtime/actionAuthorityCheckpointClient.ts"
+RPC_CLIENT="$ROOT_DIR/rpc-proxy/src/actionAuthorityV2.ts"
 CONTRACT="$ROOT_DIR/packages/action-context-contracts/index.cjs"
 
 checkpoint_path="$(sed -n "s/^const ACTION_AUTHORITY_CHECKPOINT_PATH = '\([^']*\)'$/\1/p" "$CONTRACT")"
@@ -12,6 +13,10 @@ if [[ -z "$checkpoint_path" ]]; then
 fi
 if ! grep -q 'ACTION_AUTHORITY_CHECKPOINT_PATH' "$CLIENT"; then
   echo "::error::MCP Host checkpoint client no longer uses the canonical route constant"
+  exit 1
+fi
+if ! grep -q 'ACTION_AUTHORITY_CHECKPOINT_PATH' "$RPC_CLIENT"; then
+  echo "::error::RPC Proxy checkpoint producer no longer uses the canonical route constant"
   exit 1
 fi
 
@@ -106,6 +111,45 @@ raise "#{overlay}: broad internal route proxy is not permitted in RPC gateway" i
 raise "#{overlay}: RPC gateway default-deny catch-all was removed" unless
   rpc_config.match?(/location\s+\/\s*\{\s*return 403;/m)
 
+rpc_checkpoint_open = "location = #{path} {"
+rpc_checkpoint_matches = rpc_lines.each_index.select { |index| rpc_lines[index].strip == rpc_checkpoint_open }
+raise "#{overlay}: expected one exact RPC checkpoint location, found #{rpc_checkpoint_matches.length}" unless
+  rpc_checkpoint_matches.length == 1
+rpc_checkpoint_depth = 0
+rpc_checkpoint_block = []
+rpc_lines.drop(rpc_checkpoint_matches.first).each do |line|
+  rpc_checkpoint_block << line
+  rpc_checkpoint_depth += line.count('{') - line.count('}')
+  break if rpc_checkpoint_depth.zero?
+end
+rpc_checkpoint_location = rpc_checkpoint_block.join
+raise "#{overlay}: RPC checkpoint location is not POST-only" unless
+  rpc_checkpoint_location.match?(/limit_except\s+POST\s*\{[^}]*deny all;/m)
+raise "#{overlay}: RPC checkpoint location does not proxy to Control API" unless
+  rpc_checkpoint_location.include?('proxy_pass http://control_api_upstream;')
+[
+  'proxy_set_header Authorization $http_authorization;',
+  'proxy_set_header X-Service-Token $http_x_service_token;',
+].each do |header|
+  raise "#{overlay}: RPC checkpoint route does not forward #{header}" unless
+    rpc_checkpoint_location.include?(header)
+end
+raise "#{overlay}: RPC checkpoint location disables request headers" if
+  rpc_checkpoint_location.match?(/proxy_pass_request_headers\s+off\s*;/)
+raise "#{overlay}: broad internal route proxy is not permitted in RPC gateway" if
+  rpc_config.match?(/location\s+(?:\^~\s+)?\/api\/v1\/internal(?:\/|\s*\{)/)
+
+rpc_proxy_config = documents.find do |document|
+  document.is_a?(Hash) && document['kind'] == 'ConfigMap' &&
+    document.dig('metadata', 'name') == 'rpc-proxy-config'
+end
+raise "#{overlay}: rendered RPC Proxy ConfigMap missing" unless rpc_proxy_config
+rpc_base_url = rpc_proxy_config.dig('data', 'RPC_PROXY_CONTROL_API_BASE_URL')
+expected_rpc_base_url =
+  'http://control-api-rpc-gateway.control-plane.svc.cluster.local:8090/api/v1'
+raise "#{overlay}: RPC Proxy checkpoint base URL changed unexpectedly" unless
+  rpc_base_url == expected_rpc_base_url
+
 gateway_policy = documents.find do |document|
   document.is_a?(Hash) && document['kind'] == 'NetworkPolicy' &&
     document.dig('metadata', 'name') == 'nginx-workflow-approval-gateway'
@@ -144,6 +188,6 @@ mcp_host_egress = mcp_host_policy.dig('spec', 'egress').find do |rule|
 end
 raise "#{overlay}: MCP Host cannot reach the narrow gateway on 8092" unless mcp_host_egress
 
-puts "PASS #{overlay}: exact checkpoint and Host-RPC admission routes remain bounded"
+puts "PASS #{overlay}: configured RPC checkpoint, workflow checkpoint, and Host-RPC routes remain bounded"
 RUBY
 done

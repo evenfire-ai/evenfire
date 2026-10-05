@@ -3,11 +3,13 @@ import { execFileSync } from 'node:child_process'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { resolve } from 'node:path'
 import {
+  ACTION_AUTHORITY_CHECKPOINT_PATH,
   canonicalResourceIdentity,
   hashActionTarget,
   validateActionOperationTarget,
 } from '@clerum/action-context-contracts'
 import { actionAuthorityCacheKey, authorizeActionV2 } from './actionAuthorityV2.js'
+import { config } from './config.js'
 import type { UserDelegationV2Claims } from './userDelegationV2.js'
 
 const resource = canonicalResourceIdentity({
@@ -206,6 +208,14 @@ describe('action authority checkpoint and cache isolation', () => {
     const authorized = await authorizeActionV2(delegation, bound, { fetchImpl })
     const call = fetchImpl.mock.calls[0] as unknown as [string, RequestInit]
     const requestBody = JSON.parse(String(call[1].body))
+    const expectedCheckpointUrl =
+      `${config.controlApiBaseUrl.replace(/\/+$/, '')}` +
+      `${ACTION_AUTHORITY_CHECKPOINT_PATH.replace(/^\/api\/v1/, '')}`
+    expect(call[0]).toBe(expectedCheckpointUrl)
+    expect(call[1].method).toBe('POST')
+    const checkpointHeaders = new Headers(call[1].headers)
+    expect(checkpointHeaders.get('authorization')?.startsWith('Bearer ')).toBe(true)
+    expect(checkpointHeaders.get('x-service-token')).toBe(config.controlApiServiceName)
     expect(requestBody).toMatchObject({
       version: 2,
       principal: { sub: delegation.sub, sid: delegation.sid, sessionVersion: delegation.sv },
