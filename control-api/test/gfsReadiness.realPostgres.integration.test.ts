@@ -4,6 +4,7 @@ import { Pool } from 'pg'
 import type { PoolClient } from 'pg'
 import { createPermissionStoreProbe } from '../../gfs-controller/src/authz/storeProbe.js'
 import { CONTROL_API_MIGRATIONS, assertDbReady, initDb } from '../src/db.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
@@ -59,15 +60,18 @@ describeRealPostgres('GFS Phase 0 real PostgreSQL readiness', () => {
   }, 60_000)
 
   afterAll(async () => {
-    await pool?.end()
-    if (!adminPool) return
-    await adminPool.query(
-      `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
-        WHERE datname = $1 AND pid <> pg_backend_pid()`,
-      [database]
-    )
-    await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdent(database)}`)
-    await adminPool.end()
+    try {
+      await endPoolAndWaitForClients(pool)
+      if (!adminPool) return
+      await adminPool.query(
+        `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+          WHERE datname = $1 AND pid <> pg_backend_pid()`,
+        [database]
+      )
+      await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdent(database)}`)
+    } finally {
+      await adminPool?.end()
+    }
   })
 
   it('fails Control API readiness while the latest migration is absent', async () => {

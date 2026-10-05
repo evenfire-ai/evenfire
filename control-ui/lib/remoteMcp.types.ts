@@ -36,6 +36,18 @@ export interface RemoteDetectedEndpoints {
   registration?: string
 }
 
+/**
+ * Hosts (hostname plus any non-default port) of the AS endpoints an install
+ * would trust. Reported only for a
+ * `per-server` callback (no RFC 9207 `iss`), where the same-site rule is all that
+ * ties them to the issuer and cannot tell two hosts of one domain apart.
+ */
+export interface RemoteAsEndpointHosts {
+  authorization: string
+  token: string
+  registration?: string
+}
+
 export interface RemoteDetectedQuirks {
   /** D-8: token goes in the request body, not the Authorization header. */
   bearerInBody: boolean
@@ -51,8 +63,31 @@ export interface RemoteDetected {
   resource: string
   issuer: string
   issForCallback?: string
+  asEndpointHosts?: RemoteAsEndpointHosts
   scopes: string[]
   quirks: RemoteDetectedQuirks
+}
+
+/**
+ * Which OAuth callback an install would register: the shared one when the AS
+ * returns `iss` (RFC 9207), otherwise one of the server's own.
+ */
+export type RemoteCallbackVariant = 'shared' | 'per-server'
+
+/** The `/discover` view of the callback an install from this result would use. */
+export interface RemoteCallbackPreview {
+  /**
+   * Whether the deployment has a usable public callback base URL. `false` blocks every
+   * `per-server` install. On `shared` only a pre-registered install proceeds (its URI
+   * falls back to the request Host at consent); shared CIMD and DCR still answer 503.
+   */
+  configured: boolean
+  variant: RemoteCallbackVariant
+  /**
+   * Redirect URI the install would register. Per-server URIs carry the literal
+   * placeholders `{serverName}` and, for DCR, `{installId}` (minted at install).
+   */
+  redirectUriTemplate?: string
 }
 
 export interface DiscoverRemoteRequest {
@@ -97,6 +132,8 @@ export interface DiscoverRemoteResponse {
    * control-api older than the probe (a missing `transport` never blocks).
    */
   transport?: RemoteTransportProbe
+  /** Absent on a control-api older than the per-server callback. */
+  callback?: RemoteCallbackPreview
 }
 
 export interface InstallRemoteRequest {
@@ -118,8 +155,23 @@ export interface InstallRemoteResponse {
   contextUpdated: true
   clientMode: RemoteClientMode
   registrationMode: RemoteRegistrationMode
+  callbackVariant?: RemoteCallbackVariant
+  /**
+   * The redirect URI the AS must hold. Authoritative over the `/discover` preview:
+   * the AS may have changed its RFC 9207 support in between.
+   */
+  redirectUri?: string
   clientSecretName?: string
 }
+
+/** Why a DCR registration response was refused after the client was minted. */
+export type RemoteDcrRejectionKind =
+  | 'redirect_uris_mismatch'
+  | 'redirect_uris_missing'
+  | 'client_id_is_cimd_identity'
+
+/** What already uses a pre-registered client_id (409 `oauth_client_id_in_use`). */
+export type RemoteClientIdConflict = 'cimd_client' | 'remote_server' | 'dynamic_client'
 
 /**
  * Detail of the new install-time `400 { error: 'transport_unreachable' }`,
@@ -148,3 +200,4 @@ export type RemoteDiscoveryErrorKind =
   | 'redirect_blocked'
   | 'prm_resource_mismatch'
   | 'issuer_mismatch'
+  | 'as_endpoints_cross_site'

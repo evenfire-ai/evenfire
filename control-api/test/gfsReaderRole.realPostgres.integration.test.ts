@@ -3,6 +3,7 @@ import { randomBytes } from 'node:crypto'
 import { Pool } from 'pg'
 import { createPermissionStoreProbe } from '../../gfs-controller/src/authz/storeProbe.js'
 import { CONTROL_API_MIGRATIONS, initDb } from '../src/db.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
@@ -62,20 +63,23 @@ describeRealPostgres('GFS reader and writer login isolation', () => {
   }, 60_000)
 
   afterAll(async () => {
-    await readerPool?.end()
-    await writerPool?.end()
-    await pool?.query('ALTER ROLE gfs_controller NOLOGIN NOINHERIT').catch(() => undefined)
-    await pool?.query('ALTER ROLE gfs_controller_reader NOLOGIN NOINHERIT').catch(() => undefined)
-    await pool?.query(`DROP ROLE IF EXISTS ${quoteIdent(inheritedRole)}`).catch(() => undefined)
-    await pool?.end()
-    if (!adminPool) return
-    await adminPool.query(
-      `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+    try {
+      await endPoolAndWaitForClients(readerPool)
+      await endPoolAndWaitForClients(writerPool)
+      await pool?.query('ALTER ROLE gfs_controller NOLOGIN NOINHERIT').catch(() => undefined)
+      await pool?.query('ALTER ROLE gfs_controller_reader NOLOGIN NOINHERIT').catch(() => undefined)
+      await pool?.query(`DROP ROLE IF EXISTS ${quoteIdent(inheritedRole)}`).catch(() => undefined)
+      await endPoolAndWaitForClients(pool)
+      if (!adminPool) return
+      await adminPool.query(
+        `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
         WHERE datname = $1 AND pid <> pg_backend_pid()`,
-      [database]
-    )
-    await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdent(database)}`)
-    await adminPool.end()
+        [database]
+      )
+      await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdent(database)}`)
+    } finally {
+      await adminPool?.end()
+    }
   })
 
   it('authenticates distinct DSNs as the exact NOINHERIT runtime identities', async () => {
@@ -180,7 +184,10 @@ describeRealPostgres('GFS reader and writer login isolation', () => {
         rows: [{ current_user: 'gfs_controller_reader' }],
       })
     } finally {
-      await Promise.all([freshWriter.end(), freshReader.end()])
+      await Promise.all([
+        endPoolAndWaitForClients(freshWriter),
+        endPoolAndWaitForClients(freshReader),
+      ])
     }
   })
 

@@ -7,7 +7,8 @@ URLs, DSNs, credentials, customer data, or raw runtime logs.
 ## Scope and entry points
 
 The contract is local-development-only. It requires a clean development
-branch descended from the current `origin/dev`, a generated profile owned by
+branch descended from the current `origin/dev` (the commit pinned when the lane
+takes its profile lease; see Ownership and concurrency), a generated profile owned by
 that canonical worktree path plus branch, and an explicit Kubernetes context
 for that profile. Exact-HEAD freshness is proved by the deployed marker and
 gate evidence, not by reallocating a profile after every commit.
@@ -46,30 +47,35 @@ matches HEAD and the current source fingerprint. `make minikube-pre-gate-sync`
 reconciles the profile; it does not emit a T2 verdict.
 
 The profile helper that generated the profile remains the source of truth for
-the profile metadata and random localhost port mapping. Resolve it from the
-primary checkout `.local-notes/minikube-profiles/branch.mk`. A legacy creation
+the profile metadata and random localhost port mapping. Resolve it from
+this worktree's `scripts/minikube-profiles/branch.mk`. A legacy creation
 SHA is historical metadata; it does not override stable worktree+branch
 ownership. Persisted `ports.env` is allocated once. Missing, corrupt, or
 ambiguous metadata fails closed; never regenerate or copy another lane's ports.
 
-First-hand entry point (gitignored helper at repo root — do not search for
-it):
+First-hand entry point `scripts/minikube-profiles/branch.mk`:
 
 ```bash
 MINIKUBE_PROFILE=<owned-profile> \
-  make -f .local-notes/minikube-profiles/branch.mk branch-profile-pf
+  make -f scripts/minikube-profiles/branch.mk branch-profile-pf
 
 MINIKUBE_PROFILE=<owned-profile> \
-  make -f .local-notes/minikube-profiles/branch.mk branch-profile-health
+  make -f scripts/minikube-profiles/branch.mk branch-profile-health
 ```
 
-Implementation: `.local-notes/minikube-profiles/branch-profile.sh`.
+Implementation: `scripts/minikube-profiles/branch-profile.sh`.
 HARD DENY: do not `ls`/`cat` `~/.cache/clerum/minikube-profiles/`.
 This is the host-side hold for Control UI / Desktop. Profile-owned random
 ports only (never shared `:3000`/`:8090`). `make minikube-pf-all-bg` is a
 gate refresh only; it must not replace `branch-profile-pf`. Do not start UI
-PFs from a sandboxed agent shell (hooks/PATH; runners clean children). Run
-the make target on the host. Do not kill this lane's `branch-profile-pf`.
+PFs from a sandboxed agent shell (hooks/PATH; runners clean children). A
+`make ... branch-profile-pf` that prints `PF` lines and exits 0 can still
+leave registered-but-dead pidfiles; the planner then fail-louds
+`PORT_FORWARD_CONFLICT` + `DEVELOPMENT_SCOPE_REQUIRED` before a transition.
+`T2_PORT_FORWARD_COMMAND` does not skip that pre-transition check. Restore
+with a lasting host hold + `branch-profile-health`, then re-enter
+`make minikube-t2`. Run the make target on the host. Do not kill this
+lane's `branch-profile-pf`.
 Inner `pre-gate-sync` may use `--skip-port-forwards`; never pass that
 globally into `make minikube-t2`. `branch-profile-pf-health` starts PFs then
 STOPS them on EXIT — do not use it as the lasting hold.
@@ -79,10 +85,9 @@ STOPS them on EXIT — do not use it as the lasting hold.
 pod it resolved at start, so after an in-run sync the host hold points at
 terminated pods and the Health/Playwright journeys fail against it. Run
 `make minikube-t2` from a host terminal with
-`T2_PORT_FORWARD_COMMAND='MINIKUBE_PROFILE=<owned-profile> make -f .local-notes/minikube-profiles/branch.mk branch-profile-pf'`.
-T2 runs that command from its own working directory, so in a worktree without
-a local `.local-notes/` pass the absolute path of the main checkout's
-`branch.mk`. T2 runs it once, after NP-08 and before Health, only when
+`T2_PORT_FORWARD_COMMAND='MINIKUBE_PROFILE=<owned-profile> make -f scripts/minikube-profiles/branch.mk branch-profile-pf'`.
+T2 runs that command from the worktree, so `scripts/minikube-profiles/branch.mk`
+resolves here. T2 runs it once, after NP-08 and before Health, only when
 `pre-gate-sync` ran in this invocation, and records `PortForwards=PASS`,
 `SKIPPED` (already synced), `NOT_RUN` (no registered hold and no command) or
 `FAIL` (`PORT_FORWARD_CONFLICT`: the command failed, or a registered hold
@@ -152,6 +157,17 @@ serialize through the atomic sibling directory
 concurrent loser fails closed and never removes either the stale directory or
 the winner's replacement lock.
 
+The lease owner also pins `origin/dev`. It records the commit it resolved as
+`ORIGIN_DEV` in the lock record and exports it as `T2_PINNED_ORIGIN_DEV`; every
+child of the lease validates ancestry against that pin instead of re-reading
+the remote-tracking ref, which a `git fetch` in any worktree of the repository
+moves. A move is reported as `origin/dev moved during the lane` and does not
+invalidate the lane. The pin is honored only under an inherited lease, must be
+a full commit SHA present in the repository, and must still be an ancestor of
+the local `origin/dev`: a force-push of `dev` during the lane, a lease child
+without a pin, or a pin that differs from the owner's record fails with
+`DEVELOPMENT_SCOPE_REQUIRED` or `PROFILE_OWNERSHIP_MISMATCH`.
+
 The pre-gate marker must contain the current worktree identifier, exact `HEAD`,
 cluster fingerprint, image coordinate, and the exact `imagesGeneratedAt` value
 from the image manifest. A mismatch—including a new image acquisition at the
@@ -172,8 +188,8 @@ in the final preflight after optional journeys; planner mode does not certify it
 Health and Playwright commands inherit the parent's opaque lease token,
 profile, explicit context, repository, and lock root for that invocation only.
 A nested mutation wrapper revalidates the full repository/branch/HEAD/profile/
-context/worktree/lock-key binding and live owner before using the lease. A
-missing token or mismatched binding fails; the journey cannot acquire a second
+context/worktree/lock-key/`origin/dev` binding and live owner before using the
+lease. A missing token or mismatched binding fails; the journey cannot acquire a second
 lease or redirect an inherited lease to another profile. Hermetic coverage is
 `bash scripts/tests/test-minikube-t2-proxy-runtime.sh`.
 
@@ -280,6 +296,16 @@ builds, Minikube image operations, Minikube status/docker-env, Kubernetes node
 inventory, and targeted health commands all have validated finite deadlines
 and process-group cleanup on timeout or interrupt.
 
+Host `npm test` is a separate precondition from cluster Ready. The T1
+preflight (`[real-pg-preflight] PASS ... packages=2`) only checks
+`control-api` and `gfs-controller` for host `vitest`+`pg`. After planner PASS
+and Ready deployments, `pre-gate-sync` still runs host `npm test` in each
+changed package listed in `scripts/minikube/pre-gate-sync.sh` (`run_if_changed`).
+`sh: vitest: command not found` / `minikube-pre-gate-sync` Error 127 is a
+missing host `npm ci` in that directory — not GFS and not a new profile.
+Install every remaining pre-gate package, then re-enter `make minikube-t2`.
+See `.cursor/skills/minikube-t0-t1-t2/reference.md` (Host npm vs cluster Ready).
+
 The local Real PostgreSQL lane resolves the
 `control-postgres` Secret using the explicit context, constructs its admin DSN
 only in process memory, and passes it only to the shared-server suites. Suites
@@ -372,7 +398,9 @@ non-T2 scope guard.
   image manifest is current, PostgreSQL and required namespaces/Services are
   present, deployments are Ready, and no foreign `kubectl port-forward` owns
   this profile. A targeted sync requires a bounded user-facing journey via
-  `T2_HEALTHCHECK_COMMAND`; other transitions may leave it opt-in. Control
+  `T2_HEALTHCHECK_COMMAND` on the same `make minikube-t2` invocation
+  (planner `T2_PREFLIGHT_PASS` then `PROFILE_UNHEALTHY` means the command
+  was missing); other transitions may leave it opt-in. Control
   UI/Desktop Playwright remains opt-in via `T2_PLAYWRIGHT_COMMAND`. Both are
   recorded as separate evidence statuses (`NOT_RUN` when optional;
   `T2_REQUIRE_PLAYWRIGHT=true` refuses a missing journey). Product E2E scripts
@@ -448,7 +476,7 @@ failure still uses the full target.
 
 Each run writes a sanitized `evidence.json` below the ignored local path
 `.local-notes/infra/runs/<timestamp>-<sha>/`. It contains branch/`HEAD`,
-`origin/dev`, merge-base, worktree path, profile/context identifiers,
+the `origin/dev` pinned at lane start, merge-base, worktree path, profile/context identifiers,
 fingerprint and image-manifest references, phase timestamps, lane statuses,
 test counts, and references to local log files. It never contains Secret
 values, DSNs, tokens, kubeconfig data, private URLs, user data, screenshots, or
