@@ -1,0 +1,41 @@
+{
+  "status": 200,
+  "body": {
+    "transport": {
+      "status": "alive",
+      "probedUrl": "https://mcp.notion.com/mcp",
+      "httpStatus": 401,
+      "challenge": true
+    },
+    "callback": {
+      "configured": true,
+      "variant": "per-server",
+      "redirectUriTemplate": "https://control.example.com/api/v1/oauth-callback/remote/{serverName}/{installId}"
+    },
+    "detected": {
+      "registrationMode": "dcr",
+      "dcr": {
+        "available": true,
+        "clientMode": "confidential",
+        "supportsRefresh": true
+      },
+      "endpoints": {
+        "authorization": "https://mcp.notion.com/authorize",
+        "token": "https://mcp.notion.com/token",
+        "registration": "https://mcp.notion.com/register"
+      },
+      "resource": "https://mcp.notion.com",
+      "issuer": "https://mcp.notion.com",
+      "asEndpointHosts": {
+        "authorization": "mcp.notion.com",
+        "token": "mcp.notion.com",
+        "registration": "mcp.notion.com"
+      },
+      "scopes": ["default"],
+      "quirks": {
+        "bearerInBody": false,
+        "supportsRefresh": true
+      }
+    }
+  }
+}
