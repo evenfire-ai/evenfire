@@ -252,6 +252,28 @@ const driveResourceParams = {
   },
 } as const
 
+const DOWNLOAD_RESOURCE_ID_PATTERN =
+  '^(?:[0-9a-fA-F]{32}|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$'
+const DOWNLOAD_RESOURCE_ID = new RegExp(DOWNLOAD_RESOURCE_ID_PATTERN)
+const downloadDriveResourceParams = {
+  ...driveResourceParams,
+  properties: {
+    ...driveResourceParams.properties,
+    resourceId: {
+      ...driveResourceParams.properties.resourceId,
+      pattern: DOWNLOAD_RESOURCE_ID_PATTERN,
+    },
+  },
+} as const
+
+function downloadTargetError(args: Record<string, unknown>): string | null {
+  if (typeof args.drive !== 'string' || args.drive.length === 0)
+    return 'drive must be the non-empty GFS drive name returned by discovery.'
+  if (typeof args.resourceId !== 'string' || !DOWNLOAD_RESOURCE_ID.test(args.resourceId))
+    return 'resourceId must be the observed 32-hex or dashed UUID from clerum__gfs_accessible/clerum__gfs_list; filenames, paths, and gfs:// URIs are not resource IDs.'
+  return null
+}
+
 /**
  * #666 — the version a file reference of the turn's message pins, and the
  * version gfsc reported instead when the reference was stale.
@@ -653,9 +675,9 @@ export function buildGfsReadTools(
       description:
         'Download a GFS file to this caller workspace without putting its contents in model context. Returns source metadata, SHA-256, exact size, version, expiry, and a relative workspace path for approved local processing.',
       parameters: {
-        ...driveResourceParams,
+        ...downloadDriveResourceParams,
         properties: {
-          ...driveResourceParams.properties,
+          ...downloadDriveResourceParams.properties,
           expectedVersion: {
             type: 'integer',
             minimum: 0,
@@ -664,6 +686,8 @@ export function buildGfsReadTools(
         },
       },
       execute: async (args, _outputDir, options): Promise<InternalToolResult> => {
+        const inputError = downloadTargetError(args)
+        if (inputError) return invalidArgs(inputError)
         const { expectedVersion: requestedVersion, ...target } = args
         if (requestedVersion !== undefined && !isValidIfMatch(requestedVersion))
           return invalidArgs('expectedVersion must be a non-negative integer.')

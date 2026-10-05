@@ -64,6 +64,16 @@ function fakeDownloadStore(): GfsDownloadStore {
   } as unknown as GfsDownloadStore
 }
 
+function spyDownloadStore() {
+  return {
+    reusableReceipt: vi.fn(),
+    createTransfer: vi.fn(),
+    publish: vi.fn(),
+    fail: vi.fn(),
+    readManagedFilePrefix: vi.fn(),
+  }
+}
+
 describe('GFS large-file tool routing', () => {
   it('does not expose generic workspace delivery without a store', () => {
     expect(
@@ -180,6 +190,88 @@ describe('GFS large-file tool routing', () => {
     expect(parsed).toMatchObject({ delivery: 'workspace_file', sizeBytes: 1 })
     expect(download).toHaveBeenCalledWith(
       target,
+      expect.objectContaining({ store, callerIdentity: 'caller-a' })
+    )
+  })
+
+  it.each([
+    ['path', { drive: 'main', resourceId: '/private/path/input.csv' }],
+    ['GFS URI', { drive: 'main', resourceId: `gfs://main/${target.resourceId}` }],
+    ['missing resourceId', { drive: 'main' }],
+    ['invalid resourceId', { drive: 'main', resourceId: 'input.csv' }],
+    [
+      'malformed hyphen groups',
+      { drive: 'main', resourceId: `${'a'.repeat(8)}-${'b'.repeat(24)}` },
+    ],
+  ])('rejects a %s before client or store work', async (_kind, args) => {
+    const download = vi.fn()
+    const store = spyDownloadStore()
+    const gfs = client({ download })
+    const tool = buildGfsReadTools(gfs, {
+      referencedFiles: new Map(),
+      downloadStore: store as unknown as GfsDownloadStore,
+      callerIdentity: 'caller-a',
+      callerWorkspacePath: callerWorkspace,
+    }).find(item => item.name === 'clerum__gfs_download')!
+    const properties = tool.parameters.properties as {
+      resourceId: { pattern?: string }
+    }
+
+    const result = await tool.execute(args, '/tmp')
+
+    const pattern = new RegExp(String(properties.resourceId.pattern))
+    expect(pattern.test(target.resourceId)).toBe(true)
+    expect(pattern.test('AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA')).toBe(true)
+    expect(pattern.test(`${'a'.repeat(8)}-${'b'.repeat(24)}`)).toBe(false)
+    expect(result).toEqual({
+      success: false,
+      error:
+        'resourceId must be the observed 32-hex or dashed UUID from clerum__gfs_accessible/clerum__gfs_list; filenames, paths, and gfs:// URIs are not resource IDs.',
+    })
+    expect(download).not.toHaveBeenCalled()
+    expect(gfs.accessible).not.toHaveBeenCalled()
+    expect(gfs.list).not.toHaveBeenCalled()
+    expect(gfs.read).not.toHaveBeenCalled()
+    expect(gfs.readMetadata).not.toHaveBeenCalled()
+    expect(gfs.stat).not.toHaveBeenCalled()
+    expect(gfs.resolve).not.toHaveBeenCalled()
+    expect(store.reusableReceipt).not.toHaveBeenCalled()
+    expect(store.createTransfer).not.toHaveBeenCalled()
+    expect(store.publish).not.toHaveBeenCalled()
+    expect(store.fail).not.toHaveBeenCalled()
+  })
+
+  it('keeps dashed UUID input working', async () => {
+    const dashed = [
+      target.resourceId.slice(0, 8),
+      target.resourceId.slice(8, 12),
+      target.resourceId.slice(12, 16),
+      target.resourceId.slice(16, 20),
+      target.resourceId.slice(20),
+    ]
+      .join('-')
+      .toUpperCase()
+    const download = vi.fn(async () => ({
+      id: 'download-dashed',
+      source,
+      path: '.gfs-downloads/download-dashed/source',
+      sizeBytes: 1,
+      sha256: 'd'.repeat(64),
+      expiresAt: '2026-10-08T00:00:00.000Z',
+    }))
+    const store = spyDownloadStore()
+    const tool = buildGfsReadTools(client({ download }), {
+      referencedFiles: new Map(),
+      downloadStore: store as unknown as GfsDownloadStore,
+      callerIdentity: 'caller-a',
+      callerWorkspacePath: callerWorkspace,
+    }).find(item => item.name === 'clerum__gfs_download')!
+
+    const { outcome } = await result(tool, { drive: target.drive, resourceId: dashed })
+
+    expect(outcome.success).toBe(true)
+    expect(download).toHaveBeenCalledWith(
+      { drive: target.drive, resourceId: dashed },
       expect.objectContaining({ store, callerIdentity: 'caller-a' })
     )
   })

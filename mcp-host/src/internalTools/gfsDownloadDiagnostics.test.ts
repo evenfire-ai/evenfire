@@ -98,15 +98,15 @@ describe('GFS download failure diagnostics', () => {
     { drive: 'main/private', resourceId: 'gfs://main/private' },
     { drive: 'a'.repeat(65), resourceId: '/unit-only/private/path' },
     { drive: 'main\n', resourceId: `${target.resourceId}\n` },
-  ])('omits unsafe or unbounded target identifiers: %j', async args => {
+  ])('rejects unsafe or unbounded targets before diagnostics: %j', async args => {
     const { tool, download } = harness()
-    download.mockRejectedValue(new Error(`gfsc 403: ${privateDetail}`))
 
-    await tool.execute(args, '/unit-only-output-path')
+    const result = await tool.execute(args, '/unit-only-output-path')
 
-    expect(vi.mocked(logger.warn).mock.calls).toEqual([
-      [{ component: 'GfsDownload', httpStatus: 403, errorClass: 'Error' }, warningMessage],
-    ])
+    expect(result.success).toBe(false)
+    expect(result.error).not.toContain(privateDetail)
+    expect(download).not.toHaveBeenCalled()
+    expect(logger.warn).not.toHaveBeenCalled()
   })
 
   it('does not trust arbitrary status, name or code fields, or an HTTP phrase inside the body', async () => {

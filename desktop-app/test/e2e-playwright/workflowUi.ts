@@ -1,3 +1,6 @@
+// E2E_GUARDIAN_IPC_FLOW: Desktop login and business interactions delegate their
+// requests to Electron's main process. Readiness is asserted through visible
+// identity and page state; renderer HTTP aliases do not observe these requests.
 import {
   type ElectronApplication,
   type Locator,
@@ -11,7 +14,9 @@ import fs from 'node:fs'
 import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { E2E_TEST_EMAIL } from '../../../tests/e2e/testUser'
+import { DEV_ISOLATION_ENV, devIsolationPaths } from '../../src/devIsolation'
 import type {
   PendingWorkflowApproval,
   WorkflowRecipeListResult,
@@ -263,27 +268,13 @@ export async function apiRequest(
   throw new Error('apiRequest retry loop exhausted')
 }
 
-export async function clearSession() {
-  try {
-    execFileSync('security', ['delete-generic-password', '-s', 'Evenfire', '-a', 'session-token'], {
-      encoding: 'utf-8',
-      timeout: 5_000,
-    })
-  } catch {
-    // The keychain item may not exist on a fresh machine.
-  }
-  const sessionFile = path.join(os.homedir(), '.evenfire', 'session-token.json')
-  try {
-    fs.unlinkSync(sessionFile)
-  } catch {
-    // The session file may not exist on a fresh machine.
-  }
-  const sessionEncFile = path.join(os.homedir(), '.clerum-desktop', 'session-token.enc')
-  try {
-    fs.unlinkSync(sessionEncFile)
-  } catch {
-    // The encrypted session file may not exist on a fresh machine.
-  }
+/**
+ * @deprecated launchAndLogin creates a fresh isolated profile for every run.
+ * Retain this non-destructive entry point for existing specs; clearing a global
+ * keychain account or home-directory session would affect the official app.
+ */
+export async function clearSession(): Promise<void> {
+  // A fresh per-run profile replaces global cleanup. No shared state is read.
 }
 
 export async function loginAs(
@@ -525,48 +516,65 @@ export async function launchAndLogin(
   email = E2E_EMAIL
 ): Promise<{ app: ElectronApplication; page: Page }> {
   assertDesktopBuildMatchesSource()
-  await clearSession()
   await loginAs(email)
-  const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'clerum-e2e-electron-'))
+  const runDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'evenfire-e2e-isolated-')))
+  const isolatedPaths = devIsolationPaths(runDir)
+  fs.mkdirSync(isolatedPaths.userDataDir, { mode: 0o700 })
+  const compiledAppPath = fs.realpathSync(path.join(DESKTOP_APP_ROOT, 'dist'))
+  const rpcUrl = process.env.RPC_PROXY_BASE_URL || 'http://127.0.0.1:8094'
 
   let app: ElectronApplication
   try {
     app = await electron.launch({
-      args: [`--user-data-dir=${userDataDir}`, path.resolve(__dirname, '../../dist/main.js')],
+      args: [`--user-data-dir=${isolatedPaths.userDataDir}`, path.join(compiledAppPath, 'main.js')],
       env: {
         ...process.env,
+        EVENFIRE_DEV_ISOLATION: '1',
+        [DEV_ISOLATION_ENV.runDir]: runDir,
+        [DEV_ISOLATION_ENV.restUrl]: EXT_API,
+        [DEV_ISOLATION_ENV.rpcUrl]: rpcUrl,
+        [DEV_ISOLATION_ENV.target]: path.basename(runDir),
+        [DEV_ISOLATION_ENV.appPath]: compiledAppPath,
+        [DEV_ISOLATION_ENV.pr]: process.env.E2E_DESKTOP_PR_NUMBER || '',
         EVENFIRE_RENDERER_URL: '',
         EXTERNAL_REST_API_BASE_URL: EXT_API,
-        RPC_PROXY_BASE_URL: process.env.RPC_PROXY_BASE_URL || 'http://127.0.0.1:8094',
-        // Isolate the desktop runtime-config from the global appData profile
-        // store. Without this, a stale persisted profile (e.g. a prior run's
-        // random port-forward) is auto-activated and overrides the injected
-        // localhost URLs, so login fetches a dead port (ECONNREFUSED). Pointing
-        // at a non-existent file in the per-test userDataDir yields zero stored
-        // profiles, so the app falls back to the localhost/env config. No-op in
-        // CI (clean appData); fixes local runs polluted by a real desktop login.
-        CLERUM_DESKTOP_CONFIG_PATH:
-          process.env.CLERUM_DESKTOP_CONFIG_PATH ||
-          path.join(userDataDir, 'e2e-runtime-config.json'),
+        RPC_PROXY_BASE_URL: rpcUrl,
+        CLERUM_DESKTOP_CONFIG_PATH: isolatedPaths.configPath,
       },
     })
   } catch (error) {
-    fs.rmSync(userDataDir, { recursive: true, force: true })
+    fs.rmSync(runDir, { recursive: true, force: true })
     throw error
   }
-  app.on('close', () => fs.rmSync(userDataDir, { recursive: true, force: true }))
+  app.on('close', () => fs.rmSync(runDir, { recursive: true, force: true }))
 
   const page = await app.firstWindow()
   await page.waitForLoadState('domcontentloaded')
 
+  try {
+    // These are public process identities, never credentials or environment
+    // dumps. Refuse an installed app, another checkout or a shared profile.
+    const runtime = await app.evaluate(({ app }) => ({
+      executablePath: process.execPath,
+      appPath: app.getAppPath(),
+      userData: app.getPath('userData'),
+      isPackaged: app.isPackaged,
+    }))
+    const verifiedElectronPath = require('electron') as unknown as string
+    expect(fs.realpathSync(runtime.executablePath)).toBe(fs.realpathSync(verifiedElectronPath))
+    expect(fs.realpathSync(runtime.appPath)).toBe(compiledAppPath)
+    expect(fs.realpathSync(runtime.userData)).toBe(fs.realpathSync(isolatedPaths.userDataDir))
+    expect(runtime.isPackaged).toBe(false)
+    expect(page.url()).toBe(pathToFileURL(path.join(DESKTOP_APP_ROOT, 'ui-dist/index.html')).href)
+  } catch (error) {
+    await app.close().catch(() => undefined)
+    throw error
+  }
+
   const emailInput = page.locator('#email-input')
   const passwordInput = page.locator('#password-input')
   const settingsMenuButton = page.getByTestId('nav-settings-menu')
-  const authenticatedShell = page
-    .getByTestId('nav-chat')
-    .or(settingsMenuButton)
-    .or(page.getByTestId('notification-bell'))
-    .first()
+  const authenticatedShell = settingsMenuButton
   const userDisplayName = page.getByTestId('user-display-name')
 
   try {
@@ -638,7 +646,7 @@ export async function launchAndLogin(
         identityVerified = true
       } catch {
         await page.keyboard.press('Escape')
-        await page.waitForTimeout(1_000)
+        await expect(signedInAccount).toBeHidden({ timeout: 7_000 })
       }
     }
     // The account section inside the popover resolves from its own fetch,
@@ -671,7 +679,7 @@ export async function openWorkflowsPage(page: Page): Promise<void> {
 export async function expectWorkflowsPageShell(page: Page): Promise<void> {
   const currentDesktopShell = page.getByRole('heading', { name: 'Plugins', exact: true })
   const currentDashboardShell = page.getByRole('heading', { name: /Workflow Recipes/ })
-  await expect(currentDesktopShell.or(currentDashboardShell).first()).toBeVisible({
+  await expect(currentDesktopShell.or(currentDashboardShell)).toBeVisible({
     timeout: 15_000,
   })
 }
@@ -679,8 +687,7 @@ export async function expectWorkflowsPageShell(page: Page): Promise<void> {
 export function workflowRow(page: Page, workflowName: string) {
   return page
     .locator('.workflows-list-card .da-grid__row')
-    .filter({ hasText: workflowName })
-    .first()
+    .filter({ has: page.getByText(workflowName, { exact: true }) })
 }
 
 export async function selectWorkflow(

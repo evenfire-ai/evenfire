@@ -5,28 +5,26 @@
  * E2E contract (e2e-test-guardian):
  *  - Real user journey: login → Files → visible upload of an exact 3,836,961-byte
  *    CSV → exact managed agent chat → governed download → user-visible
- *    `shell_exec` approval → completed tool stepper and bounded response.
+ *    attended shell approval → completed tool stepper and bounded response.
  *  - Business signals: the download step reports a workspace file; the approved
- *    Node command reports the independently generated CSV record count and a
- *    sentinel located beyond the former 3 MiB boundary.
+ *    generated program reports the independent data-record count and columns,
+ *    plus the last record ID beyond the former 3 MiB boundary.
  *  - Setup shortcuts: managed agent/folder fixture seeding and the local CSV
  *    file are named preconditions. No provider-route mock, storage mutation,
  *    direct API trigger, or broad network mock is used.
  */
 import { type Locator, type Page, expect, test } from '@playwright/test'
-import { randomUUID } from 'node:crypto'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { getGfsChildResourceSummary, getGfsGrantSummary } from '../../../tests/e2e/gfsUiFixtures'
 import { exactNameFilter } from './helpers/agentLocators'
-import { type ManagedGfsAgent, getManagedAgentDisplayName } from './helpers/gfsAgentDiscovery'
+import { getManagedAgentDisplayName } from './helpers/gfsAgentDiscovery'
 import { assertGfsInfraHealthy } from './helpers/gfsFixtures'
 import {
   type AgentGfsLargeFileFixtures,
   seedAgentGfsLargeFileFixtures,
 } from './helpers/gfsLargeFileAgentFixture'
-import { largeCsvProofCommand, largeCsvProofProgram } from './helpers/gfsLargeFileCliCommand'
 import {
   GFS_LARGE_CSV_SIZE,
   GFS_OLD_VISUAL_LIMIT,
@@ -39,7 +37,6 @@ import { launchAndLogin } from './workflowUi'
 const OWNER_EMAIL = 'test@clerum.io'
 const RESPONSE_TIMEOUT_MS = 420_000
 const PROGRESS_TIMEOUT_MS = 45_000
-const runToken = `GFS-LARGE-CLI-${randomUUID()}`
 
 async function enterAgentChat(page: Page, agentName: string): Promise<void> {
   await openAgentsPage(page)
@@ -63,13 +60,13 @@ async function enterAgentChat(page: Page, agentName: string): Promise<void> {
   })
 }
 
-async function sendTaskAndApproveShell(
+async function sendTaskAndWaitForReviewedShell(
   page: Page,
   prompt: string,
   resourceId: string,
   sourceMode: 'path' | 'reference'
 ): Promise<{ response: Locator; expandButton: Locator }> {
-  const response = page.getByTestId('agent-response').filter({ hasText: runToken })
+  const response = page.getByTestId('agent-response')
   const approval = page.getByTestId('approval-approve-btn')
 
   await page.getByTestId('chat-input').fill(prompt)
@@ -79,17 +76,15 @@ async function sendTaskAndApproveShell(
   await expect(approval).toBeVisible({ timeout: 10_000 })
   const stepper = page.getByTestId('progress-stepper').filter({ has: approval })
   await expect(stepper).toBeVisible({ timeout: 10_000 })
-  await expect(stepper).toContainText('shell_exec')
+  await expect(stepper).toContainText('Shell requires approval')
   const commandPreview = stepper.getByTestId('approval-input-preview')
   await expect(commandPreview).toBeVisible()
-  await expect(commandPreview).toContainText('node')
-  await expect(commandPreview).toContainText('createHash')
   await expect(commandPreview).toContainText('.gfs-downloads/')
   await expect(stepper.getByRole('note')).toHaveCount(0)
   const details = stepper.getByRole('button', { name: /More details/ })
   await expect(details).toBeVisible()
   await details.click()
-  const downloaded = completedToolStepRow(page, 'gfs_download')
+  const downloaded = completedToolStepRow(page, /gfs_download|gfs_read/)
   let receiptPath: string
   if (sourceMode === 'path') {
     await expect(downloaded).toHaveCount(1)
@@ -112,26 +107,31 @@ async function sendTaskAndApproveShell(
     expect(path).toBeTruthy()
     receiptPath = path!
   }
-  await expect(commandPreview).toHaveText(largeCsvProofCommand(runToken, receiptPath))
+  await expect(commandPreview).toContainText(receiptPath)
   await expect(completedToolStepRow(page, 'shell_exec')).toHaveCount(0)
-  await approval.click()
-  await expect(approval).toHaveCount(0, { timeout: PROGRESS_TIMEOUT_MS })
-
-  await expect(response).toContainText(/ROWS=/, { timeout: RESPONSE_TIMEOUT_MS })
-  await expect(response).toContainText(/PROOF=[0-9a-f]{16}/, {
+  // The agent creates its own program from the normal business request. A
+  // reviewer inspects the complete visible command and approves once in the
+  // UI; keyword matching cannot authorize arbitrary generated code.
+  await test.info().attach('attended-shell-review-required', {
+    contentType: 'text/plain',
+    body: 'Review the complete command and referenced script, verify read-only access to this receipt and bounded summary output, then approve once in the owned Desktop window.',
+  })
+  await expect(approval).toHaveCount(0, { timeout: RESPONSE_TIMEOUT_MS })
+  await expect(completedToolStepRow(page, 'shell_exec')).toHaveCount(1, {
     timeout: RESPONSE_TIMEOUT_MS,
   })
+  await expect(response).toBeVisible({ timeout: RESPONSE_TIMEOUT_MS })
   const expandButton = page.getByTestId('progress-expand-btn')
   await expect(expandButton).toHaveCount(1, { timeout: PROGRESS_TIMEOUT_MS })
   await expect(expandButton).toBeVisible({ timeout: PROGRESS_TIMEOUT_MS })
   return { response, expandButton }
 }
 
-function toolStepRow(page: Page, toolName: string): Locator {
+function toolStepRow(page: Page, toolName: string | RegExp): Locator {
   return page.getByTestId(/^step-row-/).filter({ hasText: toolName })
 }
 
-function completedToolStepRow(page: Page, toolName: string): Locator {
+function completedToolStepRow(page: Page, toolName: string | RegExp): Locator {
   return toolStepRow(page, toolName).filter({
     has: page.locator('.stepper-step-duration.state-completed'),
   })
@@ -150,7 +150,11 @@ async function stepOutput(row: Locator): Promise<Locator> {
   return output
 }
 
-test.describe('GFS agent large-file CLI journey', () => {
+test.describe('GFS large-file business analysis with attended approval', () => {
+  test.skip(
+    process.env.E2E_GFS_ATTENDED_APPROVAL !== '1',
+    'Real-provider acceptance requires a reviewer for the agent-generated shell command.'
+  )
   test.describe.configure({ mode: 'serial' })
   // Both the provider's approval request and its resumed answer have a bounded
   // deadline; the default Desktop test timeout must not close Electron first.
@@ -188,10 +192,14 @@ test.describe('GFS agent large-file CLI journey', () => {
   })
 
   for (const sourceMode of ['path', 'reference'] as const) {
-    test(`user uploads a 3.8 MiB CSV and approves local processing via ${sourceMode}`, async () => {
+    test(`user asks for CSV record count and columns via ${sourceMode}`, async () => {
       const { app, page } = await launchAndLogin(OWNER_EMAIL)
+      const desktopContext = app.context()
+      let ownedTraceStarted = false
       let sourceBefore: NonNullable<ReturnType<typeof getGfsChildResourceSummary>>
       try {
+        await desktopContext.tracing.start({ screenshots: true, snapshots: true, sources: false })
+        ownedTraceStarted = true
         await test.step('user uploads the exact CSV through Files', async () => {
           await openResourcesNavItem(page, 'nav-files')
           await expect(page.getByRole('heading', { name: 'Files', exact: true })).toBeVisible()
@@ -268,15 +276,14 @@ test.describe('GFS agent large-file CLI journey', () => {
           }
           const prompt =
             (sourceMode === 'path'
-              ? `Download "/${fixtures.granted.name}/${csv.fileName}" from GFS drive main with clerum__gfs_download. `
-              : 'Process the attached file using the ready workspace receipt prepared by the Host. ') +
-            'Do not print or file_read the whole file. Use exactly one approved shell_exec ' +
-            'Node.js command with the receipt path as an argument. Count complete CSV records including the header, ' +
-            'never raw newlines. Use exactly this read-only program, preserving its single-quoted shell argument and all bytes: ' +
-            `node -e '${largeCsvProofProgram(runToken)}' '<receipt path>'. ` +
-            'Replace only <receipt path> with the relative path from the successful download receipt. ' +
-            `Return the command stdout unchanged: RUN=${runToken} ROWS=<record count> PROOF=<16 hex characters>.`
-          const result = await sendTaskAndApproveShell(
+              ? `Analiza el CSV "${csv.fileName}" de la carpeta "${fixtures.granted.name}" en EvenDrive. `
+              : 'Analiza el CSV que adjunté. ') +
+            'Dime cuántos registros de datos contiene, sin contar la cabecera, y cuáles son sus columnas. ' +
+            (csv.source === 'synthetic'
+              ? 'Incluye también el identificador del último registro. '
+              : '') +
+            'Mantén el archivo original sin cambios y responde con un resumen breve.'
+          const result = await sendTaskAndWaitForReviewedShell(
             page,
             prompt,
             sourceBefore.resourceId,
@@ -289,12 +296,12 @@ test.describe('GFS agent large-file CLI journey', () => {
         await test.step('tool stepper proves governed transfer and local execution', async () => {
           if ((await expandButton.getAttribute('aria-expanded')) === 'false')
             await expandButton.click()
-          const downloadRow = completedToolStepRow(page, 'gfs_download')
+          const downloadRow = completedToolStepRow(page, /gfs_download|gfs_read/)
           await expect(downloadRow).toHaveCount(sourceMode === 'path' ? 1 : 0, { timeout: 15_000 })
           if (sourceMode === 'path') {
             await expect(downloadRow).toBeVisible({ timeout: 15_000 })
             await expect(downloadRow.locator('.stepper-step-duration.state-error')).toHaveCount(0)
-            await expect(downloadRow).toContainText('gfs_download')
+            await expect(downloadRow).toContainText(/gfs_download|gfs_read/)
           } else {
             await expect(toolStepRow(page, 'gfs_download')).toHaveCount(0)
             await expect(toolStepRow(page, 'gfs_read')).toHaveCount(0)
@@ -305,13 +312,18 @@ test.describe('GFS agent large-file CLI journey', () => {
           await expect(shellRow).toBeVisible({ timeout: 15_000 })
           await expect(shellRow.locator('.stepper-step-duration.state-error')).toHaveCount(0)
           const shellOutput = await stepOutput(shellRow)
-          const expectedRows = new RegExp(`\\bROWS=${csv.recordCount}(?=\\s|$)`)
-          const expectedProof = new RegExp(`\\bPROOF=${csv.tailProof}(?=\\s|$)`)
+          const count = String(csv.recordCount - 1)
+          const expectedRows = new RegExp(`(?<![0-9])${count.split('').join('[.,\\s]*')}(?![0-9])`)
           await expect(shellOutput).toContainText(expectedRows)
-          await expect(shellOutput).toContainText(expectedProof)
-
-          await expect(response).toContainText(expectedRows)
-          await expect(response).toContainText(expectedProof)
+          await expect(response).toContainText(expectedRows, { timeout: RESPONSE_TIMEOUT_MS })
+          if (csv.source === 'synthetic') {
+            for (const column of ['id', 'record name', 'notes,value', 'value']) {
+              await expect(shellOutput).toContainText(column)
+              await expect(response).toContainText(column)
+            }
+            await expect(shellOutput).toContainText('record-final')
+            await expect(response).toContainText('record-final')
+          }
           await expect(response).not.toContainText('zzzzzzzzzz')
         })
 
@@ -335,14 +347,37 @@ test.describe('GFS agent large-file CLI journey', () => {
         // Capture the owned test window while it is still alive. Automatic
         // post-test screenshots cannot recover a window already closed here.
         if (!page.isClosed()) {
-          await test.info().attach('large-file-desktop-failure', {
-            contentType: 'image/png',
-            body: await page.screenshot(),
-          })
+          try {
+            await test.info().attach('large-file-desktop-failure', {
+              contentType: 'image/png',
+              body: await page.screenshot({ timeout: 5_000 }),
+            })
+          } catch {
+            // A stalled renderer must not replace the original journey error.
+            await test.info().attach('large-file-screenshot-unavailable', {
+              contentType: 'text/plain',
+              body: 'The owned Electron window did not produce a screenshot within five seconds.',
+            })
+          }
         }
         throw error
       } finally {
-        await app.close()
+        try {
+          if (ownedTraceStarted) {
+            try {
+              await desktopContext.tracing.stop({
+                path: test.info().outputPath('large-file-electron-context-trace.zip'),
+              })
+            } catch {
+              await test.info().attach('large-file-context-trace-unavailable', {
+                contentType: 'text/plain',
+                body: 'The owned Electron context did not save its diagnostic trace.',
+              })
+            }
+          }
+        } finally {
+          await app.close()
+        }
       }
     })
   }

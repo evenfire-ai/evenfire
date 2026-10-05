@@ -866,6 +866,10 @@ export function migrateDesktopGfsUploadState(value: unknown): {
   }
 }
 
+export interface AppServiceOptions {
+  tokenStore?: TokenStore
+}
+
 export class AppService {
   private readonly authClient = new AuthClient()
   private readonly memberRegistrationServiceClient = new MemberRegistrationServiceClient()
@@ -878,7 +882,7 @@ export class AppService {
     requestJson,
     fetchBytes: (url, token, opts) => fetchBoundedBytes(url, token, opts),
   })
-  private readonly tokenStore = new TokenStore()
+  private readonly tokenStore: TokenStore
   private readonly rpcTokenManager = new RpcTokenManager(this.authClient)
   private sessionToken: string | null = null
   private me: SessionMe | null = null
@@ -973,6 +977,10 @@ export class AppService {
     string,
     { ownerId: number; stop: (opts?: { silent?: boolean }) => void }
   >()
+
+  constructor(options: AppServiceOptions = {}) {
+    this.tokenStore = options.tokenStore ?? new TokenStore()
+  }
 
   private static dedupe(values: string[]): string[] {
     return Array.from(new Set(values.map(value => String(value || '').trim()).filter(Boolean)))
