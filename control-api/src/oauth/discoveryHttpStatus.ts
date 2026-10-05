@@ -26,6 +26,7 @@ export function discoveryHttpStatus(error: DiscoveryError): number {
     case 'redirect_blocked':
     case 'prm_resource_mismatch':
     case 'issuer_mismatch':
+    case 'as_endpoints_cross_site':
       return 400
     default: {
       const _exhaustive: never = error

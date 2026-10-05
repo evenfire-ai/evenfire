@@ -55,8 +55,8 @@ describe('legacyProvider on the resolved coordinate', () => {
     source => {
       const oauth = { ...bakedOAuth('google', 'user'), source }
       const baked = bakedOAuth('google', 'user')
-      expect(resolveServerOAuthSubject(server(oauth))?.decl).toEqual(
-        resolveServerOAuthSubject(server(baked))?.decl
+      expect(resolveServerOAuthSubject(server(oauth), 'consent')?.decl).toEqual(
+        resolveServerOAuthSubject(server(baked), 'consent')?.decl
       )
       expect(normalizeMcpServerOwnerDecl(server(oauth))?.spec?.oauthClients).toEqual(
         normalizeMcpServerOwnerDecl(server(baked))?.spec?.oauthClients

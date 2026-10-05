@@ -1,0 +1,6 @@
+{
+  "status": 503,
+  "body": {
+    "error": "callback_base_url_unconfigured"
+  }
+}
