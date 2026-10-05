@@ -142,6 +142,10 @@ render_variant() { # A|B
     %w[TRACING_ENVIRONMENT TRACING_CLUSTER_NAME TRACING_CLUSTER_LOCATION].each do |k|
       errs << "control-api-config lacks #{k}" if cm.nil? || cm.dig("data", k).to_s.strip.empty?
     end
+    # Marketplace needs a registry URL and self-hosted mode (v0.10.0
+    # docs/how-to/connect-to-registry.md); base sets neither.
+    errs << "CLERUM_REGISTRY_URL not https://registry.evenfire.ai" unless cm && cm.dig("data", "CLERUM_REGISTRY_URL") == "https://registry.evenfire.ai"
+    errs << "REGISTRY_CONNECTION_MODE not self-hosted" unless cm && cm.dig("data", "REGISTRY_CONNECTION_MODE") == "self-hosted"
     rp = docs.find { |d| d["kind"] == "ConfigMap" && d.dig("metadata", "name") == "rpc-proxy-config" }
     errs << "rpc-proxy-config missing" unless rp
     if rp

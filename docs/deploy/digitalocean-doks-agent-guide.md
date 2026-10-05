@@ -599,6 +599,15 @@ incident: stop, keep ingress closed, and tell the human.
 Then the human sets the LLM key: port-forward `service/control-ui` 3000, log in,
 Control UI → **Secrets → LLM** for the Host's `secretRef`.
 
+Optional, for the connector and recipe catalog: Control UI → **Marketplace →
+Connect**, enter an organization name and contact email. This registers the
+deployment with `registry.evenfire.ai` (outbound HTTPS from control-api). Until
+then Marketplace shows "The registry is currently unavailable".
+
+`kubectl port-forward` drops after idle time or laptop sleep ("lost connection to
+pod"; the page then loads blank or times out). Restart it, or keep it in a loop:
+`while true; do kubectl --context "$CONTEXT" -n control-plane port-forward service/control-ui 13000:3000; sleep 2; done`.
+
 ---
 
 ## Phase 7 — Ingress (ask first)

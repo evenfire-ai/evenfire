@@ -383,13 +383,23 @@ data:
   TRACING_ENVIRONMENT: <TRACING_ENVIRONMENT>
   TRACING_CLUSTER_NAME: <CLUSTER_NAME>
   TRACING_CLUSTER_LOCATION: <REGION>
+  # Marketplace: base sets no registry, so the catalog reports "registry unavailable".
+  CLERUM_REGISTRY_URL: https://registry.evenfire.ai
+  REGISTRY_CONNECTION_MODE: self-hosted
 ```
 
 Without the three `TRACING_*` keys, control-api exits with "Missing required
 governed tracing environment variable: TRACING_ENVIRONMENT" and
 trace-maintenance-worker stays in `CreateContainerConfigError` (observed on a
 live DOKS install at the validated release; the minikube overlay sets them, base
-does not). Base ships `127.0.0.1` values that only work through a laptop
+does not). Without `CLERUM_REGISTRY_URL` and `REGISTRY_CONNECTION_MODE`, Control
+UI → Marketplace shows "The registry is currently unavailable" (also observed
+live). `REGISTRY_CONNECTION_MODE` defaults to `managed`, where the self-hosted
+connect flow never runs; `https://registry.evenfire.ai` is in control-api's
+built-in registry allowlist, and `control-api-external-egress` already allows
+outbound 443 (release doc `docs/how-to/connect-to-registry.md`). After install an
+admin connects once through Marketplace → Connect (Phase 8). Base ships
+`127.0.0.1` values that only work through a laptop
 port-forward. For an
 internal-only pilot use the agreed internal URLs. Leave
 `CONTROL_API_GROK_SUBSCRIPTION_ENABLED` at its base value `'false'` unless the
