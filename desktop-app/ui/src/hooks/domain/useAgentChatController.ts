@@ -6,6 +6,7 @@ import {
   parseTaskKey,
   useAgentTaskTracker,
 } from '@contexts/AgentTaskTrackerContext'
+import { FILE_REFERENCE_MAX_COUNT } from '@clerum/gfs-interaction-policy'
 import { COMPOSER_MAX_IMAGE_ATTACHMENTS } from '@constants/attachments'
 import {
   buildChatMessageAttachments,
@@ -709,6 +710,7 @@ export function useAgentChatController({
     handleAddComposerReferenceAttachments,
     handleRemoveComposerReferenceAttachment,
     restoreComposerImageAttachments,
+    restoreComposerReferenceAttachments,
   } = useComposerAttachments({ selectedAgent, clearSendError: clearComposerSendError })
 
   const { chatEndRef, scrollChatToBottom } = useChatScroll({
@@ -3523,19 +3525,31 @@ export function useAgentChatController({
         activeChatVisibilityRef.current.selectedAgent === agentRef &&
         activeChatVisibilityRef.current.activeChatId === originChatId
       if (!stillViewingOrigin()) return
-      // One merge against the live composer snapshot — the counts and the
-      // committed state can never disagree (R1-M4).
-      const { dropped } = restoreComposerImageAttachments(
+      // One merge per kind against the live composer snapshot — the counts and
+      // the committed state can never disagree (R1-M4), and the reference cap
+      // is enforced while restoring so the composer stays sendable (R1-M5).
+      const imageOutcome = restoreComposerImageAttachments(
         images.map(attachment => ({
           ...attachment,
           previewDataUrl: `data:${attachment.mimeType};base64,${attachment.dataBase64}`,
         }))
       )
-      handleAddComposerReferenceAttachments(references)
-      const message =
-        dropped > 0
-          ? `Attachments kept — ${dropped} of ${images.length} ${dropped === 1 ? 'image exceeds' : 'images exceed'} the ${COMPOSER_MAX_IMAGE_ATTACHMENTS}-image limit and ${dropped === 1 ? 'was' : 'were'} dropped.`
-          : 'Attachments kept'
+      const referenceOutcome = restoreComposerReferenceAttachments(references)
+      const droppedParts: string[] = []
+      if (imageOutcome.dropped > 0) {
+        droppedParts.push(
+          `${imageOutcome.dropped} of ${images.length} ${imageOutcome.dropped === 1 ? 'image exceeds' : 'images exceed'} the ${COMPOSER_MAX_IMAGE_ATTACHMENTS}-image limit`
+        )
+      }
+      if (referenceOutcome.dropped > 0) {
+        droppedParts.push(
+          `${referenceOutcome.dropped} of ${references.length} ${referenceOutcome.dropped === 1 ? 'reference exceeds' : 'references exceed'} the ${FILE_REFERENCE_MAX_COUNT}-file limit`
+        )
+      }
+      const totalDropped = imageOutcome.dropped + referenceOutcome.dropped
+      const message = droppedParts.length
+        ? `Attachments kept — ${droppedParts.join('; ')} and ${totalDropped === 1 ? 'was' : 'were'} dropped.`
+        : 'Attachments kept'
       pushToast(message, 'info', {
         action: {
           label: 'Discard all',
@@ -3548,10 +3562,10 @@ export function useAgentChatController({
     },
     [
       getRetainedSendsForTask,
-      handleAddComposerReferenceAttachments,
       pushToast,
       resetComposerAttachments,
       restoreComposerImageAttachments,
+      restoreComposerReferenceAttachments,
     ]
   )
 

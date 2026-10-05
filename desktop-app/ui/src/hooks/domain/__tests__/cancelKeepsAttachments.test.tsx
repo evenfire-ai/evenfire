@@ -411,4 +411,43 @@ describe('STORY-38 — attachments survive message cancel', () => {
       'Attachments kept — 2 of 3 images exceed the 20-image limit and were dropped.'
     )
   })
+
+  it('enforces the reference cap while restoring and reports the overflow (R1-M5)', async () => {
+    const sentReferences = [0, 1].map(index => ({
+      ...pluginReference,
+      id: `sent-ref-${index}`,
+      name: `helper-${index}`,
+      label: `helper plugin ${index}`,
+    }))
+    const rendered = renderController()
+    await waitFor(() => expect(clerum.chat.getIndex).toHaveBeenCalled())
+    await act(async () => {
+      await loadHostModels(modelTransport, 'agent-x', null)
+    })
+    act(() => rendered.result.current.handleAddComposerReferenceAttachments(sentReferences))
+    await sendAsync(rendered.result, 'task-refs')
+
+    // Nine more references land while the task runs: 9 held + 2 restored
+    // would be 11 — one past the send-time file limit.
+    const heldReferences = Array.from({ length: 9 }, (_, index) => ({
+      ...pluginReference,
+      id: `held-ref-${index}`,
+      name: `held-${index}`,
+      label: `held plugin ${index}`,
+    }))
+    act(() => rendered.result.current.handleAddComposerReferenceAttachments(heldReferences))
+    expect(rendered.result.current.composerReferenceAttachments).toHaveLength(11 - 2)
+
+    await act(async () => {
+      await rendered.result.current.cancelTask('task-refs')
+    })
+
+    // The composer ends AT the cap (sendable), and the toast reports the one
+    // reference that could not return.
+    expect(rendered.result.current.composerReferenceAttachments).toHaveLength(10)
+    const call = keptToastCall(rendered.spies)
+    expect(call?.[0]).toBe(
+      'Attachments kept — 1 of 2 reference exceeds the 10-file limit and was dropped.'
+    )
+  })
 })

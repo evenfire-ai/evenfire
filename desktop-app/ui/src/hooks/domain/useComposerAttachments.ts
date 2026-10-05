@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { FILE_REFERENCE_MAX_COUNT } from '@clerum/gfs-interaction-policy'
 import { COMPOSER_MAX_IMAGE_ATTACHMENTS } from '@constants/attachments'
 import { clearComposerDraft, clearComposerDraftAfterSend } from '@lib/composerDraftStore'
 import type { ComposerImageAttachment, ComposerReferenceAttachment } from '../../uiTypes'
@@ -41,6 +42,45 @@ export function mergeComposerImageAttachments(
       duplicates += 1
       continue
     }
+    accepted.push(
+      attachment.addedOrder != null ? attachment : { ...attachment, addedOrder: nextOrder() }
+    )
+    kept += 1
+  }
+  return { next: accepted, kept, duplicates, dropped: incoming.length - kept - duplicates }
+}
+
+export interface ComposerReferenceMergeOutcome {
+  /** The reconciled composer set (existing + accepted incoming, in order). */
+  next: ComposerReferenceAttachment[]
+  /** Incoming references that took a slot in the composer. */
+  kept: number
+  /** Incoming references already held by id (not added). */
+  duplicates: number
+  /** Incoming references the send-time file limit leaves no room for (lost). */
+  dropped: number
+}
+
+/**
+ * Reconciles incoming references into the composer's reference set with the
+ * add handler's id-dedupe PLUS the send-time `FILE_REFERENCE_MAX_COUNT` cap: a
+ * restore that produces an unsendable composer is not a restore (spec: restore
+ * semantics), so the cap is enforced while restoring, not first at send.
+ */
+export function mergeComposerReferenceAttachments(
+  existing: ComposerReferenceAttachment[],
+  incoming: ComposerReferenceAttachment[],
+  nextOrder: () => number = () => 0
+): ComposerReferenceMergeOutcome {
+  const accepted = [...existing]
+  let kept = 0
+  let duplicates = 0
+  for (const attachment of incoming) {
+    if (accepted.some(candidate => candidate.id === attachment.id)) {
+      duplicates += 1
+      continue
+    }
+    if (accepted.length >= FILE_REFERENCE_MAX_COUNT) break
     accepted.push(
       attachment.addedOrder != null ? attachment : { ...attachment, addedOrder: nextOrder() }
     )
@@ -279,6 +319,30 @@ export function useComposerAttachments({
     [clearSendError]
   )
 
+  /**
+   * Restore-path reconciliation for references (R1-M5): id-dedupe plus the
+   * send-time file cap, applied against the live snapshot, with counts that
+   * describe exactly that reconciliation.
+   */
+  const restoreComposerReferenceAttachments = useCallback(
+    (incoming: ComposerReferenceAttachment[]): ComposerReferenceMergeOutcome => {
+      composerAttachmentRevisionRef.current += 1
+      const outcome = mergeComposerReferenceAttachments(
+        composerReferenceAttachmentsRef.current,
+        incoming,
+        () => {
+          composerAttachmentOrderRef.current += 1
+          return composerAttachmentOrderRef.current
+        }
+      )
+      composerReferenceAttachmentsRef.current = outcome.next
+      setComposerReferenceAttachments(outcome.next)
+      clearSendError()
+      return outcome
+    },
+    [clearSendError]
+  )
+
   return {
     composerImageAttachments,
     composerAttachmentRevisionRef,
@@ -292,5 +356,6 @@ export function useComposerAttachments({
     handleAddComposerReferenceAttachments,
     handleRemoveComposerReferenceAttachment,
     restoreComposerImageAttachments,
+    restoreComposerReferenceAttachments,
   }
 }
