@@ -88,7 +88,7 @@ describe('evenfire deep-link router', () => {
     )
 
     harness.router.handle(
-      'evenfire://desktop-environment?externalRestApiBaseUrl=https%3A%2F%2Fapi.example.test&tenantName=Acme'
+      'evenfire://desktop-environment?externalRestApiBaseUrl=https%3A%2F%2Fapi.example.test&rpcProxyBaseUrl=https%3A%2F%2Frpc.example.test&tenantName=Acme'
     )
     harness.router.handle(
       'evenfire://desktop-setup?email=user%40example.test&authorizationToken=token-1'
@@ -99,7 +99,11 @@ describe('evenfire deep-link router', () => {
     expect(harness.sent).toEqual([
       {
         channel: 'auth:desktopEnvironmentSetup',
-        payload: { appName: 'Acme', externalRestApiBaseUrl: 'https://api.example.test' },
+        payload: {
+          appName: 'Acme',
+          externalRestApiBaseUrl: 'https://api.example.test',
+          rpcProxyBaseUrl: 'https://rpc.example.test',
+        },
         window: 'initial',
       },
       {
@@ -141,7 +145,11 @@ describe('evenfire deep-link router', () => {
       },
       {
         channel: 'auth:desktopEnvironmentSetup',
-        payload: { appName: 'Env', externalRestApiBaseUrl: 'https://api.example.test' },
+        payload: {
+          appName: 'Env',
+          externalRestApiBaseUrl: 'https://api.example.test',
+          rpcProxyBaseUrl: '',
+        },
         window: 'initial',
       },
     ])
@@ -172,7 +180,11 @@ describe('evenfire deep-link router', () => {
       },
       {
         channel: 'auth:desktopEnvironmentSetup',
-        payload: { appName: 'Second', externalRestApiBaseUrl: 'https://api.example.test' },
+        payload: {
+          appName: 'Second',
+          externalRestApiBaseUrl: 'https://api.example.test',
+          rpcProxyBaseUrl: '',
+        },
         window: 'recreated',
       },
       {

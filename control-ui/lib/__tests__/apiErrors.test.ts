@@ -1,5 +1,18 @@
-import { describe, expect, it } from 'vitest'
-import { formatApiError } from '../api'
+import { describe, expect, it, vi } from 'vitest'
+import { formatApiError, handleControlUIUnauthorized, setGlobalAuthErrorHandler } from '../api'
+
+describe('handleControlUIUnauthorized', () => {
+  it('clears the legacy browser token and invokes the registered session-expiry handler', () => {
+    const handler = vi.fn()
+    window.localStorage.setItem('controlUiAdminToken', 'synthetic-test-token')
+    setGlobalAuthErrorHandler(handler)
+
+    handleControlUIUnauthorized()
+
+    expect(window.localStorage.getItem('controlUiAdminToken')).toBeNull()
+    expect(handler).toHaveBeenCalledOnce()
+  })
+})
 
 describe('formatApiError', () => {
   it('preserves a nested structured error without rendering object Object', () => {

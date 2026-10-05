@@ -527,6 +527,43 @@ describe('FileExplorerTree — expanded folder revalidates its listing (R1-H5)',
       focusManager.setFocused(undefined)
     }
   })
+
+  it('purges cached children when an expanded folder is authoritatively denied', async () => {
+    let call = 0
+    const listChildren = vi.fn(async () => {
+      call += 1
+      if (call === 1) return listChildrenPage([childView('private-1', 'private.md', 'file')])
+      throw new Error('403 Forbidden: httpStatus=403')
+    })
+    installClerum({
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([accessibleResource('reports', 'Reports', 'directory')])
+      ),
+      listChildren,
+    })
+
+    const queryClient = new QueryClient({ defaultOptions: desktopQueryDefaults })
+    render(
+      <QueryClientProvider client={queryClient}>
+        <FileExplorerTree onOpenFolder={vi.fn()} onOpenPreview={vi.fn()} pushToast={vi.fn()} />
+      </QueryClientProvider>
+    )
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Expand Reports' }))
+    expect(await screen.findByRole('button', { name: 'private.md' })).toBeTruthy()
+
+    act(() => {
+      focusManager.setFocused(false)
+      focusManager.setFocused(true)
+    })
+
+    try {
+      await waitFor(() => expect(listChildren).toHaveBeenCalledTimes(2))
+      await waitFor(() => expect(screen.queryByRole('button', { name: 'private.md' })).toBeNull())
+    } finally {
+      focusManager.setFocused(undefined)
+    }
+  })
 })
 
 describe('FileExplorerTree — unreadable rows refuse activation (R1-H1)', () => {

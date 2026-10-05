@@ -6,10 +6,12 @@ import { Sidebar } from '@components/Sidebar'
 import { resetReleaseIdentityCache } from '@lib/releaseIdentity'
 
 const api = vi.hoisted(() => ({
+  getDesktopEnvironment: vi.fn(),
   getDesktopRelease: vi.fn(),
 }))
 
 vi.mock('@lib/api', () => ({
+  getDesktopEnvironment: api.getDesktopEnvironment,
   getDesktopRelease: api.getDesktopRelease,
 }))
 
@@ -59,8 +61,9 @@ beforeEach(() => {
   profileAccessState.refreshApprovalTargets.mockClear()
   profileAccessState.refreshManageableTeams.mockClear()
   resetReleaseIdentityCache()
+  api.getDesktopEnvironment.mockReset().mockReturnValue(new Promise(() => {}))
   api.getDesktopRelease.mockReset()
-  api.getDesktopRelease.mockResolvedValue({ releaseId: 'v0.6.0' })
+  api.getDesktopRelease.mockReturnValue(new Promise(() => {}))
 })
 
 afterEach(cleanup)
@@ -88,8 +91,26 @@ describe('Profile Sidebar access-controlled entries', () => {
   })
 })
 
+describe('Profile Sidebar navigation order', () => {
+  it('renders Home first, then the remaining sections alphabetically', () => {
+    profileAccessState.approvalTargets = [{ id: 'slack-target' }]
+    profileAccessState.canManageMembers = true
+
+    render(<Sidebar currentRoute="home" onLogout={vi.fn()} />)
+
+    expect(screen.getAllByRole('link').map(link => link.textContent?.trim())).toEqual([
+      'Home',
+      'Approval Channels',
+      'Connected Accounts',
+      'Members',
+      'Settings',
+    ])
+  })
+})
+
 describe('Profile Sidebar release identity', () => {
   it('titles the brand with the platform release, not the portal package version', async () => {
+    api.getDesktopRelease.mockResolvedValue({ releaseId: 'v0.6.0' })
     const view = render(<Sidebar currentRoute="settings" onLogout={vi.fn()} />)
     const brand = view.container.querySelector('.cu-sidebar__brand')
 

@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest'
-import type { DiscoveryResult } from '../src/oauth/discovery.js'
+import { beforeAll, describe, expect, it } from 'vitest'
+import { type DiscoveryResult, discoverRemoteOAuth } from '../src/oauth/discovery.js'
 import {
   type McpServerOAuthSpecInput,
   resolveServerOAuth,
@@ -7,6 +7,7 @@ import {
 } from '../src/oauth/mcpServerOAuthSpec.js'
 import { buildRemoteOAuthSpec } from '../src/routes/admin/remoteMcp.js'
 import { normalizeMcpServerOwnerDecl } from '../src/routes/mcpOauth.js'
+import { PILOTS, makeDiscoveryTransport } from './fixtures/remoteOAuthDiscovery.js'
 
 /**
  * C4/DEC-23: `resolveServerOAuthSubject` gains the remote lane. T1 — every remote
@@ -24,27 +25,23 @@ const CIMD_SELF = 'https://control.example.com/api/v1/.well-known/evenfire-mcp-c
 // `token: '…'` literal as a materialized credential; deriving the endpoint from
 // an interpolated origin keeps the value out of that shape (the guard exempts
 // interpolated values). Do not inline this back to a plain string literal.
-const NOTION = 'https://mcp.notion.com'
+const LINEAR = 'https://mcp.linear.app'
+
+// The real discovery over the Linear probe: CIMD with RFC 9207, the only kind of AS a
+// CIMD install targets, so every mode below is built from a producer-emittable result.
+let linear: DiscoveryResult
+
+beforeAll(async () => {
+  const outcome = await discoverRemoteOAuth(PILOTS.linear.mcpUrl, {
+    transport: makeDiscoveryTransport(PILOTS.linear),
+    resolveDns: async () => ['93.184.216.34'],
+  })
+  if (!outcome.ok) throw new Error(`fixture discovery failed: ${outcome.error.kind}`)
+  linear = outcome.result
+})
 
 function discovery(): DiscoveryResult {
-  return {
-    prm: { resource: 'https://mcp.notion.com' },
-    as: {
-      issuer: 'https://mcp.notion.com',
-      authorization_endpoint: 'https://mcp.notion.com/authorize',
-      token_endpoint: 'https://mcp.notion.com/token',
-      scopes_supported: ['read', 'write'],
-    },
-    resource: 'https://mcp.notion.com',
-    issuer: 'https://mcp.notion.com',
-    endpoints: {
-      authorization: `${NOTION}/authorize`,
-      token: `${NOTION}/token`,
-      registration: `${NOTION}/register`,
-    },
-    registrationMode: 'cimd',
-    quirks: { bearerInBody: false, supportsRefresh: true },
-  }
+  return linear
 }
 
 /** Wrap a producer-emitted `spec.oauth` into a CR shape the resolver reads. */
@@ -59,7 +56,10 @@ describe('resolveServerOAuthSubject — remote lane (real-producer fixtures, T1)
       grantScope: 'user',
       cimdClientId: CIMD_SELF,
     })
-    const r = resolveServerOAuthSubject(serverFrom(oauth as unknown as Record<string, unknown>))
+    const r = resolveServerOAuthSubject(
+      serverFrom(oauth as unknown as Record<string, unknown>),
+      'consent'
+    )
     expect(r).not.toBeNull()
     expect(r?.decl.id).toBe(CIMD_SELF)
     expect(r?.decl.provider).toBe('remote')
@@ -67,9 +67,9 @@ describe('resolveServerOAuthSubject — remote lane (real-producer fixtures, T1)
     expect(r?.decl.clientSecretRef).toBeUndefined()
     expect(r?.decl.secretSource).toEqual({ kind: 'public' })
     expect(r?.decl.remote).toMatchObject({
-      authorizationEndpoint: 'https://mcp.notion.com/authorize',
-      tokenEndpoint: 'https://mcp.notion.com/token',
-      resource: 'https://mcp.notion.com',
+      authorizationEndpoint: `${LINEAR}/authorize`,
+      tokenEndpoint: `${LINEAR}/token`,
+      resource: `${LINEAR}/mcp`,
       clientMode: 'public',
       supportsRefresh: true,
       bearerInBody: false,
@@ -82,7 +82,10 @@ describe('resolveServerOAuthSubject — remote lane (real-producer fixtures, T1)
       grantScope: 'user',
       dynamicClientId: 'dcr-pub-123',
     })
-    const r = resolveServerOAuthSubject(serverFrom(oauth as unknown as Record<string, unknown>))
+    const r = resolveServerOAuthSubject(
+      serverFrom(oauth as unknown as Record<string, unknown>),
+      'consent'
+    )
     expect(r?.decl.id).toBe('dcr-pub-123')
     expect(r?.decl.secretSource).toEqual({ kind: 'public' })
   })
@@ -93,7 +96,10 @@ describe('resolveServerOAuthSubject — remote lane (real-producer fixtures, T1)
       grantScope: 'user',
       dynamicClientId: 'dcr-conf-xyz',
     })
-    const r = resolveServerOAuthSubject(serverFrom(oauth as unknown as Record<string, unknown>))
+    const r = resolveServerOAuthSubject(
+      serverFrom(oauth as unknown as Record<string, unknown>),
+      'consent'
+    )
     expect(r?.decl.id).toBe('dcr-conf-xyz')
     expect(r?.decl.clientIdRef).toBeUndefined()
     expect(r?.decl.secretSource).toEqual({ kind: 'dcr-store' })
@@ -106,7 +112,10 @@ describe('resolveServerOAuthSubject — remote lane (real-producer fixtures, T1)
       clientSecretName: 'srv-oauth-client',
       preRegisteredClientId: 'client-abc',
     })
-    const r = resolveServerOAuthSubject(serverFrom(oauth as unknown as Record<string, unknown>))
+    const r = resolveServerOAuthSubject(
+      serverFrom(oauth as unknown as Record<string, unknown>),
+      'consent'
+    )
     expect(r?.decl.id).toBe('client-abc')
     expect(r?.decl.clientIdRef).toEqual({ name: 'srv-oauth-client', key: 'client_id' })
     expect(r?.decl.clientSecretRef).toEqual({ name: 'srv-oauth-client', key: 'client_secret' })
@@ -124,7 +133,7 @@ describe('resolveServerOAuthSubject — remote lane (real-producer fixtures, T1)
       cimdClientId: CIMD_SELF,
     }) as unknown as Record<string, unknown>
     delete oauth.tokenEndpoint
-    expect(resolveServerOAuthSubject(serverFrom(oauth))).toBeNull()
+    expect(resolveServerOAuthSubject(serverFrom(oauth), 'consent')).toBeNull()
   })
 
   it('remote resolves the grant coordinate too (resolveServerOAuth keys by oauth.id)', () => {
@@ -151,7 +160,7 @@ describe('baked lane stays byte-identical (no source)', () => {
   }
 
   it('returns exactly the confidential-K8s decl (no remote/secretSource keys)', () => {
-    const r = resolveServerOAuthSubject(serverFrom(BAKED))
+    const r = resolveServerOAuthSubject(serverFrom(BAKED), 'consent')
     expect(r?.decl).toEqual({
       id: 'google-drive',
       provider: 'google',
@@ -166,7 +175,7 @@ describe('baked lane stays byte-identical (no source)', () => {
 
   it('baked without clientSecretRef still fails closed (confidential-only)', () => {
     const { clientSecretRef: _drop, ...pub } = BAKED
-    expect(resolveServerOAuthSubject(serverFrom(pub))).toBeNull()
+    expect(resolveServerOAuthSubject(serverFrom(pub), 'consent')).toBeNull()
   })
 })
 
@@ -178,12 +187,12 @@ describe('normalizeMcpServerOwnerDecl (refresh reader) does not diverge from the
       cimdClientId: CIMD_SELF,
     })
     const normalized = normalizeMcpServerOwnerDecl({
-      metadata: { name: 'notion-remote', namespace: 'mcp-server' },
+      metadata: { name: 'linear-remote', namespace: 'mcp-server' },
       spec: { oauth: oauth as never },
     })
     const decl = normalized?.spec?.oauthClients?.[0]
     expect(decl?.id).toBe(CIMD_SELF)
-    expect(decl?.remote?.tokenEndpoint).toBe('https://mcp.notion.com/token')
+    expect(decl?.remote?.tokenEndpoint).toBe(`${LINEAR}/token`)
     expect(decl?.secretSource).toEqual({ kind: 'public' })
   })
 

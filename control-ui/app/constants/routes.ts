@@ -60,6 +60,7 @@ export const CONTROL_ROUTES = {
   guardrails: {
     root: '/guardrails',
     detail: (name: string) => `/guardrails/${segment(name)}`,
+    tab: (name: string, tab: string) => `/guardrails/${segment(name)}/${segment(tab)}`,
   },
   llmModels: {
     root: '/llm-models',
