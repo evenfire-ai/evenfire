@@ -42,6 +42,7 @@ import {
   DCR_PUBLIC_REGISTRATION_RESPONSE,
   PILOTS,
 } from './fixtures/remoteOAuthDiscovery.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 import { MockGateway } from './mockGateway.js'
 
 const testDb = vi.hoisted(() => ({
@@ -158,7 +159,7 @@ describeRealPostgres('per-server remote callback (real Postgres)', () => {
 
   afterAll(async () => {
     testDb.pool = undefined
-    await dbPool?.end()
+    if (dbPool) await endPoolAndWaitForClients(dbPool)
     if (adminPool) {
       await adminPool.query(
         `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
