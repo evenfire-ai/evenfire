@@ -50,6 +50,7 @@ import {
   handleWorkflowApprovalNotificationTerminalRoute,
   runtimeApiInfo,
 } from './server/routes'
+import { sessionSearchAuthority } from './server/sessionSearchAuth'
 import type {
   ActivitySnapshotHandler,
   ActivityStreamHandler,
@@ -535,13 +536,9 @@ export class RPCServer {
     // T3.1 — registered BEFORE `/sessions/:agent/:chatId/messages` so that
     // `search` is not eaten by the parameterized route (`agent=search` would
     // otherwise match and 404 at the second segment lookup).
-    this.app.get(
-      '/v1/runtime/sessions/search',
-      runtimeEdgeGuard(['rpc-proxy'], ['session.read']),
-      async (req, res) => {
-        await handleSessionSearchRoute(req, res, this.routeDeps())
-      }
-    )
+    this.app.get('/v1/runtime/sessions/search', sessionSearchAuthority, async (req, res) => {
+      await handleSessionSearchRoute(req, res, this.routeDeps())
+    })
 
     this.app.get(
       '/v1/runtime/sessions/:agent/:chatId/messages',

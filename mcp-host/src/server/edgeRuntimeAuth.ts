@@ -227,6 +227,13 @@ function readRuntimeCaller(req: Request): RuntimeCallerContext | null {
   }
 }
 
+export function declaresV2RuntimeAuthority(req: Request): boolean {
+  return (
+    hasHeader(req, EDGE_ACTION_CONTEXT_HEADER) ||
+    V2_AUTHORITY_ONLY_HEADERS.some(name => hasHeader(req, name))
+  )
+}
+
 function routeAliasForHostRef(hostRef: string): string | null {
   const [namespace, name, ...rest] = hostRef.split('/')
   if (!namespace || !name || rest.length > 0) return null
@@ -272,8 +279,7 @@ export function runtimeEdgeGuard(
   return (req: Request, res: Response, next: NextFunction): void => {
     const assertedCaller = cleanHeader(req, EDGE_CALLER_HEADER)
     const unsupportedAuthorityHeader = V2_AUTHORITY_ONLY_HEADERS.some(name => hasHeader(req, name))
-    const declaresV2Authority =
-      hasHeader(req, EDGE_ACTION_CONTEXT_HEADER) || unsupportedAuthorityHeader
+    const declaresV2Authority = declaresV2RuntimeAuthority(req)
 
     // Legacy context headers retain their pre-PR3 behavior. A declared V2
     // envelope selects the authenticated path; standalone authority fields are
