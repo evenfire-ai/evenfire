@@ -248,10 +248,11 @@ type LiveManifest = { metadata: { name: string } & Record<string, unknown> } & R
  * succeeds.
  *
  * `patch`, when given, merges `metadata.annotations` and the top-level `spec`
- * keys of the body into the stored object and bumps its resourceVersion. It is
- * not a strategic merge: assertions about what a patch sent read the request
- * body, not the stored object. A patch to an object the store never held
- * follows `unseenReplace`.
+ * keys of the body into the stored object, bumps its resourceVersion, and bumps
+ * its generation when the body carries `spec`, as the apiserver does. It is not
+ * a strategic merge: assertions about what a patch sent read the request body,
+ * not the stored object. A patch to an object the store does not hold answers
+ * 404, as the apiserver does, whatever `unseenReplace` says.
  */
 function installLiveStore(
   api: {
@@ -327,13 +328,11 @@ function installLiveStore(
     }) => {
       const k = key(namespace, name)
       const current = live.get(k)
-      if (!current) {
-        if (unseenReplace === 'reject') throw { code: 404 }
-        return {}
-      }
+      if (!current) throw { code: 404 }
       const metadata = current.metadata as LiveManifest['metadata'] & {
         annotations?: Record<string, string>
         resourceVersion?: string
+        generation?: number
       }
       live.set(k, {
         ...current,
@@ -341,6 +340,7 @@ function installLiveStore(
           ...metadata,
           annotations: { ...metadata.annotations, ...body.metadata?.annotations },
           resourceVersion: String(Number(metadata.resourceVersion ?? '1') + 1),
+          generation: (metadata.generation ?? 1) + (body.spec ? 1 : 0),
         },
         spec: { ...(current.spec as Record<string, unknown>), ...body.spec },
       })
@@ -4071,8 +4071,10 @@ describe('WorkflowRecipeReconciler', () => {
     })
 
     // #760: the StatefulSet writer reads before it creates, so a pass over an
-    // object that already exists writes nothing. Every count below is filtered
-    // by name: the same read serves the readiness probe and the legacy checks.
+    // object that already exists writes nothing. Every read and create count
+    // below is filtered by name, because the same read serves the readiness
+    // probe and the legacy checks. Patch counts stay unfiltered: nothing else
+    // patches a StatefulSet, so the unfiltered zero is the stricter assertion.
     describe('read-first StatefulSet apply (#760)', () => {
       type StsBody = {
         metadata: { name: string; annotations: Record<string, string> }
@@ -4197,7 +4199,10 @@ describe('WorkflowRecipeReconciler', () => {
         await expect(ensure()).rejects.toBe(failure)
 
         // Witness: the failing read happened; the create (which would succeed) did not.
-        expect(read).toHaveBeenCalledTimes(1)
+        const writerReads = read.mock.calls.filter(
+          ([args]) => args.namespace === namespace && String(args.name).includes(workload.id)
+        )
+        expect(writerReads).toHaveLength(1)
         expect(create).toHaveBeenCalledTimes(0)
         expect(patch).toHaveBeenCalledTimes(0)
       })
@@ -4250,6 +4255,9 @@ describe('WorkflowRecipeReconciler', () => {
       ).ensureStatefulSet(workload, recipe, 'minimal', {})
       expect(createdBody!.metadata.annotations[SPEC_HASH]).toBeDefined()
 
+      // Not reached on the read-first path (#760). If the writer went back to
+      // POST-first, this 409 would keep the old path working and only the
+      // zero-create assertion below would catch it.
       mockAppsApi.createNamespacedStatefulSet.mockRejectedValue({ code: 409 })
       mockAppsApi.createNamespacedStatefulSet.mockClear()
       mockAppsApi.readNamespacedStatefulSet.mockResolvedValue({
@@ -4306,11 +4314,17 @@ describe('WorkflowRecipeReconciler', () => {
 
       const existing = clone(createdBody!)
       existing.metadata.annotations = { [SPEC_HASH]: 'stale-or-missing' }
+      // Not reached on the read-first path (#760). If the writer went back to
+      // POST-first, this 409 would keep the old path working and only the
+      // zero-create assertion below would catch it.
       mockAppsApi.createNamespacedStatefulSet.mockRejectedValue({ code: 409 })
       mockAppsApi.createNamespacedStatefulSet.mockClear()
       mockAppsApi.readNamespacedStatefulSet.mockResolvedValue(existing)
       mockAppsApi.replaceNamespacedStatefulSet.mockClear()
       mockAppsApi.patchNamespacedStatefulSet.mockClear()
+      // The existing object lives in the read mock above, not in the live store,
+      // so the patch answers here instead of the store's 404 for an absent object.
+      mockAppsApi.patchNamespacedStatefulSet.mockResolvedValue({})
 
       await (
         reconciler as unknown as {
@@ -4348,11 +4362,17 @@ describe('WorkflowRecipeReconciler', () => {
 
       const existing = clone(existingBody!)
       existing.metadata.annotations = { [SPEC_HASH]: 'stale-old-template' }
+      // Not reached on the read-first path (#760). If the writer went back to
+      // POST-first, this 409 would keep the old path working and only the
+      // zero-create assertion below would catch it.
       mockAppsApi.createNamespacedStatefulSet.mockRejectedValue({ code: 409 })
       mockAppsApi.createNamespacedStatefulSet.mockClear()
       mockAppsApi.readNamespacedStatefulSet.mockResolvedValue(existing)
       mockAppsApi.replaceNamespacedStatefulSet.mockClear()
       mockAppsApi.patchNamespacedStatefulSet.mockClear()
+      // The existing object lives in the read mock above, not in the live store,
+      // so the patch answers here instead of the store's 404 for an absent object.
+      mockAppsApi.patchNamespacedStatefulSet.mockResolvedValue({})
 
       await (
         reconciler as unknown as {
@@ -4416,11 +4436,17 @@ describe('WorkflowRecipeReconciler', () => {
         },
         status: { phase: 'Pending' },
       }))
+      // Not reached on the read-first path (#760). If the writer went back to
+      // POST-first, this 409 would keep the old path working and only the
+      // zero-create assertion below would catch it.
       mockAppsApi.createNamespacedStatefulSet.mockRejectedValue({ code: 409 })
       mockAppsApi.createNamespacedStatefulSet.mockClear()
       mockAppsApi.readNamespacedStatefulSet.mockResolvedValue(existing)
       mockAppsApi.replaceNamespacedStatefulSet.mockClear()
       mockAppsApi.patchNamespacedStatefulSet.mockClear()
+      // The existing object lives in the read mock above, not in the live store,
+      // so the patch answers here instead of the store's 404 for an absent object.
+      mockAppsApi.patchNamespacedStatefulSet.mockResolvedValue({})
 
       await (
         reconciler as unknown as {
@@ -4513,11 +4539,17 @@ describe('WorkflowRecipeReconciler', () => {
         },
         status: { phase: 'Pending' },
       }))
+      // Not reached on the read-first path (#760). If the writer went back to
+      // POST-first, this 409 would keep the old path working and only the
+      // zero-create assertion below would catch it.
       mockAppsApi.createNamespacedStatefulSet.mockRejectedValue({ code: 409 })
       mockAppsApi.createNamespacedStatefulSet.mockClear()
       mockAppsApi.readNamespacedStatefulSet.mockResolvedValue(existing)
       mockAppsApi.replaceNamespacedStatefulSet.mockClear()
       mockAppsApi.patchNamespacedStatefulSet.mockClear()
+      // The existing object lives in the read mock above, not in the live store,
+      // so the patch answers here instead of the store's 404 for an absent object.
+      mockAppsApi.patchNamespacedStatefulSet.mockResolvedValue({})
 
       await (
         reconciler as unknown as {
@@ -4583,6 +4615,9 @@ describe('WorkflowRecipeReconciler', () => {
 
       const existing = clone(existingBody!)
       existing.metadata.annotations = { [SPEC_HASH]: 'stale-storage' }
+      // Not reached on the read-first path (#760). If the writer went back to
+      // POST-first, this 409 would keep the old path working and only the
+      // zero-create assertion below would catch it.
       mockAppsApi.createNamespacedStatefulSet.mockRejectedValue({ code: 409 })
       mockAppsApi.createNamespacedStatefulSet.mockClear()
       mockAppsApi.readNamespacedStatefulSet.mockResolvedValue(existing)
@@ -4629,6 +4664,9 @@ describe('WorkflowRecipeReconciler', () => {
       const existing = clone(createdBody!)
       existing.metadata.annotations = { [SPEC_HASH]: 'stale-immutable-drift' }
       existing.spec.serviceName = 'manually-mutated-headless-service'
+      // Not reached on the read-first path (#760). If the writer went back to
+      // POST-first, this 409 would keep the old path working and only the
+      // zero-create assertion below would catch it.
       mockAppsApi.createNamespacedStatefulSet.mockRejectedValue({ code: 409 })
       mockAppsApi.createNamespacedStatefulSet.mockClear()
       mockAppsApi.readNamespacedStatefulSet.mockResolvedValue(existing)

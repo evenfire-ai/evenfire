@@ -1551,6 +1551,8 @@ describe('ensureRecipeContext', () => {
     )
 
     expect(mockCustomApi.replaceNamespacedCustomObject).not.toHaveBeenCalled()
+    // Liveness witness: the writer read the Context before deciding not to write.
+    expect(mockCustomApi.getNamespacedCustomObject).toHaveBeenCalledTimes(1)
     expect(mockCustomApi.createNamespacedCustomObject).not.toHaveBeenCalled()
   })
 
@@ -1709,6 +1711,8 @@ describe('ensureRecipeContext', () => {
     )
 
     expect(mockCustomApi.replaceNamespacedCustomObject).not.toHaveBeenCalled()
+    // Liveness witness: the writer read the Context before deciding not to write.
+    expect(mockCustomApi.getNamespacedCustomObject).toHaveBeenCalledTimes(1)
     expect(mockCustomApi.createNamespacedCustomObject).not.toHaveBeenCalled()
   })
 
@@ -1867,6 +1871,8 @@ describe('ensureRecipeContext', () => {
     )
 
     expect(mockCustomApi.replaceNamespacedCustomObject).not.toHaveBeenCalled()
+    // Liveness witness: the writer read the Context before deciding not to write.
+    expect(mockCustomApi.getNamespacedCustomObject).toHaveBeenCalledTimes(1)
     expect(mockCustomApi.createNamespacedCustomObject).not.toHaveBeenCalled()
   })
 
@@ -1942,8 +1948,10 @@ describe('read-first Context apply (#760)', () => {
 
   /**
    * Stateful Context double: GET answers 404 while no Context is stored, a
-   * create of a stored Context answers 409, a replace stores the body and bumps
-   * resourceVersion. Every other plural reads as absent and accepts writes.
+   * create of a stored Context answers 409, a replace answers 404 without a
+   * stored Context and 409 on a stale resourceVersion, and otherwise stores the
+   * body and bumps resourceVersion. Every other plural reads as absent and
+   * accepts writes.
    */
   function contextStore(initial: LiveContext | null) {
     let live = initial ? structuredClone(initial) : null
@@ -1967,10 +1975,12 @@ describe('read-first Context apply (#760)', () => {
         .fn()
         .mockImplementation((args: { plural: string; body: LiveContext }) => {
           if (args.plural !== 'contexts') return Promise.resolve({})
-          const rv = Number((live?.metadata?.resourceVersion as string | undefined) ?? '0')
+          if (!live) return Promise.reject({ code: 404 })
+          const rv = live.metadata?.resourceVersion as string | undefined
+          if (args.body.metadata?.resourceVersion !== rv) return Promise.reject({ code: 409 })
           live = {
             ...structuredClone(args.body),
-            metadata: { ...args.body.metadata, resourceVersion: String(rv + 1) },
+            metadata: { ...args.body.metadata, resourceVersion: String(Number(rv) + 1) },
           }
           return Promise.resolve({})
         }),
@@ -1986,10 +1996,10 @@ describe('read-first Context apply (#760)', () => {
     return { customApi, deps, store: (next: LiveContext | null) => (live = next) }
   }
 
-  const contextCalls = (fn: ReturnType<typeof vi.fn>, name = CONTEXT_NAME) =>
+  const contextCalls = (fn: ReturnType<typeof vi.fn>) =>
     fn.mock.calls.filter(([args]) => {
       const a = args as { plural: string; name?: string; body?: { metadata?: { name?: string } } }
-      return a.plural === 'contexts' && (a.name ?? a.body?.metadata?.name) === name
+      return a.plural === 'contexts' && (a.name ?? a.body?.metadata?.name) === CONTEXT_NAME
     }).length
   const loggedFor = (level: ReturnType<typeof vi.fn>, message: string) =>
     level.mock.calls.filter(
@@ -2109,18 +2119,39 @@ describe('read-first Context apply (#760)', () => {
     // The conflicting object is gone again by the time we re-read it.
     customApi.createNamespacedCustomObject.mockRejectedValueOnce({ code: 409 })
 
-    await expect(ensure(deps)).rejects.toBeInstanceOf(ResourceVanishedAfterConflictError)
+    const outcome = ensure(deps)
+    await expect(outcome).rejects.toBeInstanceOf(ResourceVanishedAfterConflictError)
+    await expect(outcome).rejects.toThrow('disappeared after create conflict')
 
     expect(contextCalls(customApi.getNamespacedCustomObject)).toBe(2)
     expect(contextCalls(customApi.replaceNamespacedCustomObject)).toBe(0)
+  })
+
+  it('C8: a Context that vanishes after a replace conflict asks for a fresh reconcile', async () => {
+    const existing = unchangedPrivateContext()
+    existing.spec = { contextId: CONTEXT_NAME, mcpServers: ['server-a'] }
+    const { customApi, deps, store } = contextStore(existing)
+    // Another writer bumps the Context, then it is deleted before our retry reads it.
+    customApi.replaceNamespacedCustomObject.mockImplementationOnce(() => {
+      store(null)
+      return Promise.reject({ code: 409 })
+    })
+
+    const outcome = ensure(deps)
+    await expect(outcome).rejects.toBeInstanceOf(ResourceVanishedAfterConflictError)
+    await expect(outcome).rejects.toThrow('disappeared after replace conflict')
+
+    expect(contextCalls(customApi.getNamespacedCustomObject)).toBe(2)
+    expect(contextCalls(customApi.replaceNamespacedCustomObject)).toBe(1)
+    expect(contextCalls(customApi.createNamespacedCustomObject)).toBe(0)
   })
 })
 
 describe('delegateTransportWorkloads', () => {
   it('returns delegated server names and creates per-recipe Context (H-04)', async () => {
     const mockCustomApi = {
-      // Call 1: McpServer pre-check GET → 404 (new server)
-      // Call 2: ensureRecipeContext createNamespacedCustomObject → succeeds
+      // GET 1: McpServer pre-check → 404 (new server), then McpServer create.
+      // GET 2: ensureRecipeContext reads the Context → 404, then Context create.
       createNamespacedCustomObject: vi.fn().mockResolvedValue({}),
       getNamespacedCustomObject: contextAbsentGet(
         vi
@@ -2145,6 +2176,20 @@ describe('delegateTransportWorkloads', () => {
     expect(mockCoreApi.createNamespacedService).toHaveBeenCalledTimes(1)
     // createNamespacedCustomObject called twice: McpServer + per-recipe Context
     expect(mockCustomApi.createNamespacedCustomObject).toHaveBeenCalledTimes(2)
+    // The Context was read before it was created (#760).
+    const contextGet =
+      mockCustomApi.getNamespacedCustomObject.mock.invocationCallOrder[
+        mockCustomApi.getNamespacedCustomObject.mock.calls.findIndex(
+          ([args]) => (args as { plural: string }).plural === 'contexts'
+        )
+      ]
+    const contextCreate =
+      mockCustomApi.createNamespacedCustomObject.mock.invocationCallOrder[
+        mockCustomApi.createNamespacedCustomObject.mock.calls.findIndex(
+          ([args]) => (args as { plural: string }).plural === 'contexts'
+        )
+      ]
+    expect(contextGet).toBeLessThan(contextCreate)
     // Verify the Context CRD was created (second call), NOT the shared allowlist patched
     expect(mockCustomApi.createNamespacedCustomObject).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -2423,8 +2468,14 @@ describe('delegateTransportWorkloads', () => {
       coreApi: mockCoreApi as unknown as DelegationDeps['coreApi'],
     }
 
-    await delegateTransportWorkloads(deps, makeRecipe(), 'mcp-server', new Map())
+    await expect(
+      delegateTransportWorkloads(deps, makeRecipe(), 'mcp-server', new Map())
+    ).resolves.toEqual(['test-recipe-redis-mcp'])
 
+    // Liveness witness: the per-recipe Context was written by create.
+    expect(mockCustomApi.createNamespacedCustomObject).toHaveBeenCalledWith(
+      expect.objectContaining({ plural: 'contexts' })
+    )
     // patchNamespacedCustomObject must NOT be called — no shared context mutation
     expect(mockCustomApi.patchNamespacedCustomObject).not.toHaveBeenCalled()
   })

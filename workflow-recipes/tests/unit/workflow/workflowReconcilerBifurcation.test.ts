@@ -894,6 +894,7 @@ describe('Workflow Reconciler Bifurcation', () => {
     expect(mockCoreApi.replaceNamespacedSecret).not.toHaveBeenCalled()
     expect(mockAppsApi.createNamespacedStatefulSet).not.toHaveBeenCalled()
     expect(mockAppsApi.replaceNamespacedStatefulSet).not.toHaveBeenCalled()
+    expect(mockAppsApi.patchNamespacedStatefulSet).not.toHaveBeenCalled()
     expect(mockCoreApi.createNamespacedService).not.toHaveBeenCalled()
     expect(mockCoreApi.replaceNamespacedService).not.toHaveBeenCalled()
     expect(mockCoreApi.createNamespacedConfigMap).not.toHaveBeenCalled()

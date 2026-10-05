@@ -984,13 +984,14 @@ export async function ensureRecipeContext(
 
   // Every read in here runs after a conflict (create or replace), so the
   // object is known to have existed; a 404 asks for a fresh reconciliation.
-  const rereadContext = async (): Promise<ExistingContextSnapshot> => {
+  const rereadContext = async (after: 'create' | 'replace'): Promise<ExistingContextSnapshot> => {
     try {
       return await readContext()
     } catch (error) {
       if (getErrorCode(error) === 404) {
         throw new ResourceVanishedAfterConflictError(`Context "${contextName}" in ${namespace}`, {
           cause: error,
+          after,
         })
       }
       throw error
@@ -1003,7 +1004,12 @@ export async function ensureRecipeContext(
     initial?: ExistingContextSnapshot
   ): Promise<{ wrote: boolean }> => {
     for (let attempt = 1; attempt <= CONTEXT_REPLACE_CONFLICT_RETRIES; attempt += 1) {
-      const existing = attempt === 1 && initial ? initial : await rereadContext()
+      // Without a snapshot, attempt 1 follows a create conflict; every later
+      // attempt follows a replace conflict.
+      const existing =
+        attempt === 1 && initial
+          ? initial
+          : await rereadContext(attempt === 1 ? 'create' : 'replace')
 
       // Semantic post-merge equality. Do not stamp clerum.io/spec-hash on a
       // shared Context: N recipe writers would flap the annotation the same
