@@ -77,6 +77,28 @@ describe('AppService quit preparation', () => {
     }
   })
 
+  it('waits for an admitted producer before starting the TokenStore drain', async () => {
+    const producer = deferred<void>()
+    const tokenStore = {
+      prepareForQuit: vi.fn().mockResolvedValue(undefined),
+      reopenAdmission: vi.fn(),
+    }
+    const service = createService(tokenStore)
+    service.logoutOnce.mockReturnValue(producer.promise)
+    const logout = service.logout()
+    const preparation = service.prepareForQuit()
+
+    try {
+      expect(tokenStore.prepareForQuit).not.toHaveBeenCalled()
+      producer.resolve()
+      await Promise.all([logout, preparation])
+      expect(tokenStore.prepareForQuit).toHaveBeenCalledOnce()
+    } finally {
+      producer.resolve()
+      await Promise.allSettled([logout, preparation])
+    }
+  })
+
   it('does not gate a runWithTeamContext call that has no team credential hop', async () => {
     const service = Object.create(AppService.prototype) as {
       pendingCredentialProducers: Set<Promise<unknown>>

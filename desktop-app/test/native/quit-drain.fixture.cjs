@@ -12,13 +12,36 @@ app.disableHardwareAcceleration()
 let willQuitObserved = false
 let prepareCount = 0
 let cancellationCount = 0
+let producerSettled = false
+let producerDrainVerified = false
+let releasePendingProducer
+let producerStartedResolve
+const producerStarted = new Promise(resolve => {
+  producerStartedResolve = resolve
+})
+const producerGate = new Promise(resolve => {
+  releasePendingProducer = resolve
+})
 const appService = new AppService()
-// Exercise AppService's real producer gate without touching a credential store.
-appService.logoutOnce = async () => undefined
+let logoutCalls = 0
+appService.logoutOnce = async () => {
+  logoutCalls += 1
+  if (logoutCalls === 1) {
+    producerStartedResolve()
+    await producerGate
+    producerSettled = true
+  }
+}
+const tokenStoreDrain = appService.tokenStore.prepareForQuit.bind(appService.tokenStore)
+let tokenStoreDrainStartedBeforeProducerSettled = false
+appService.tokenStore.prepareForQuit = async () => {
+  if (!producerSettled) tokenStoreDrainStartedBeforeProducerSettled = true
+  await tokenStoreDrain()
+}
 app.on('will-quit', () => {
   willQuitObserved = true
-  if (prepareCount !== 2 || cancellationCount !== 1) {
-    console.error('quit was not re-prepared after the canceled attempt')
+  if (prepareCount !== 2 || cancellationCount !== 1 || !producerDrainVerified) {
+    console.error('quit producer drain or canceled-attempt retry was not verified')
     app.exit(7)
     return
   }
@@ -40,7 +63,23 @@ registerQuitDrain(
   app,
   async () => {
     prepareCount += 1
-    await appService.prepareForQuit()
+    const preparation = appService.prepareForQuit()
+    if (prepareCount === 1) {
+      let preparationSettled = false
+      void preparation.then(() => {
+        preparationSettled = true
+      })
+      await new Promise(resolve => setTimeout(resolve, 25))
+      const heldProducerAcrossPreparation = !preparationSettled && !producerSettled
+      releasePendingProducer()
+      await preparation
+      producerDrainVerified =
+        heldProducerAcrossPreparation &&
+        producerSettled &&
+        !tokenStoreDrainStartedBeforeProducerSettled
+      return
+    }
+    await preparation
   },
   () => {
     cancellationCount += 1
@@ -60,9 +99,12 @@ app
     await window.webContents.executeJavaScript(
       'window.onbeforeunload = event => { event.returnValue = false; return false }; void 0'
     )
+    const pendingLogout = appService.logout()
+    await producerStarted
     window.webContents.once('will-prevent-unload', () => {
       setImmediate(async () => {
         try {
+          await pendingLogout
           assert.equal(window.isDestroyed(), false)
           await assert.doesNotReject(appService.logout())
           await window.webContents.executeJavaScript('window.onbeforeunload = null; void 0')

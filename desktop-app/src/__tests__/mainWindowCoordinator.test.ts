@@ -199,4 +199,62 @@ describe('quit drain registration', () => {
     await nextImmediate()
     expect(prepareForQuit).toHaveBeenCalledTimes(2)
   })
+
+  it('reopens quit preparation when a listener prevents resumed before-quit', async () => {
+    const { app, emit } = createAppHarness()
+    const prepareForQuit = vi.fn(async () => undefined)
+    const cancelQuitPreparation = vi.fn()
+    registerQuitDrain(
+      app as unknown as Parameters<typeof registerQuitDrain>[0],
+      prepareForQuit,
+      cancelQuitPreparation
+    )
+
+    emit('before-quit', { preventDefault: vi.fn() })
+    await Promise.resolve()
+    await nextImmediate()
+    expect(app.quit).toHaveBeenCalledOnce()
+
+    const resumedQuit = { defaultPrevented: false, preventDefault: vi.fn() }
+    emit('before-quit', resumedQuit)
+    resumedQuit.defaultPrevented = true
+    await nextImmediate()
+    expect(cancelQuitPreparation).toHaveBeenCalledOnce()
+
+    const retry = { preventDefault: vi.fn() }
+    emit('before-quit', retry)
+    expect(retry.preventDefault).toHaveBeenCalledOnce()
+    await Promise.resolve()
+    await nextImmediate()
+    expect(prepareForQuit).toHaveBeenCalledTimes(2)
+  })
+
+  it('reopens quit preparation when a listener prevents will-quit', async () => {
+    const { app, emit } = createAppHarness()
+    const prepareForQuit = vi.fn(async () => undefined)
+    const cancelQuitPreparation = vi.fn()
+    registerQuitDrain(
+      app as unknown as Parameters<typeof registerQuitDrain>[0],
+      prepareForQuit,
+      cancelQuitPreparation
+    )
+
+    emit('before-quit', { preventDefault: vi.fn() })
+    await Promise.resolve()
+    await nextImmediate()
+    expect(app.quit).toHaveBeenCalledOnce()
+
+    const resumedQuit = { defaultPrevented: false }
+    emit('will-quit', resumedQuit)
+    resumedQuit.defaultPrevented = true
+    await nextImmediate()
+    expect(cancelQuitPreparation).toHaveBeenCalledOnce()
+
+    const retry = { preventDefault: vi.fn() }
+    emit('before-quit', retry)
+    expect(retry.preventDefault).toHaveBeenCalledOnce()
+    await Promise.resolve()
+    await nextImmediate()
+    expect(prepareForQuit).toHaveBeenCalledTimes(2)
+  })
 })
