@@ -5,6 +5,7 @@ import { Pool } from 'pg'
 import request from 'supertest'
 import type { DbClient } from '../src/db.js'
 import type { K8sGateway } from '../src/k8s.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 import { MockGateway } from './mockGateway.js'
 
 /**
@@ -137,16 +138,19 @@ describeRealPostgres('registry uninstall tears OAuth grants down (real Postgres)
   })
 
   afterAll(async () => {
-    dbHolder.target = null
-    await dbPool?.end()
-    if (adminPool) {
-      await adminPool.query(
-        `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+    try {
+      dbHolder.target = null
+      await endPoolAndWaitForClients(dbPool)
+      if (adminPool) {
+        await adminPool.query(
+          `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
           WHERE datname = $1 AND pid <> pg_backend_pid()`,
-        [database]
-      )
-      await adminPool.query(`DROP DATABASE IF EXISTS "${database.replace(/"/g, '""')}"`)
-      await adminPool.end()
+          [database]
+        )
+        await adminPool.query(`DROP DATABASE IF EXISTS "${database.replace(/"/g, '""')}"`)
+      }
+    } finally {
+      await adminPool?.end()
     }
   })
 
@@ -227,7 +231,8 @@ describeRealPostgres('registry uninstall tears OAuth grants down (real Postgres)
             const resolved = resolveServerOAuthSubject(
               (await gw.getResource('mcpservers', name, NS)) as Parameters<
                 typeof resolveServerOAuthSubject
-              >[0]
+              >[0],
+              'consent'
             )
             return resolved ? { namespace: NS, ...resolved } : null
           },

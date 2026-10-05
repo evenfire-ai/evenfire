@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Button, IconButton } from '@components/Common'
+import { IconCopy, IconEdit } from '@components/SidebarNav/icons'
+import { copyImageBlobToClipboard } from '@lib/imageClipboard'
 import type { ComposerImageAttachment } from '../../uiTypes'
 
 const COLOR_INPUT_FALLBACK = `#${'0'.repeat(6)}`
@@ -44,9 +46,25 @@ export function AnnotationCanvas({ attachment, onSave, onClose }: AnnotationCanv
   const [annotationBrushPx, setAnnotationBrushPx] = useState(5)
   const [annotationBusy, setAnnotationBusy] = useState(false)
   const [annotationError, setAnnotationError] = useState<string | null>(null)
+  const [copyBusy, setCopyBusy] = useState(false)
+  const [copyState, setCopyState] = useState<'idle' | 'copied' | 'error'>('idle')
   const annotationCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const annotationPointerActiveRef = useRef(false)
   const annotationLastPointRef = useRef<{ x: number; y: number } | null>(null)
+  const mountedRef = useRef(true)
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+    }
+  }, [])
+
+  useEffect(() => {
+    if (copyState === 'idle') return
+    const timeout = window.setTimeout(() => setCopyState('idle'), 2000)
+    return () => window.clearTimeout(timeout)
+  }, [copyState])
 
   const loadImage = useCallback((src: string) => {
     return new Promise<HTMLImageElement>((resolve, reject) => {
@@ -193,6 +211,29 @@ export function AnnotationCanvas({ attachment, onSave, onClose }: AnnotationCanv
     }
   }, [onSave, attachment, readBlobAsDataUrl])
 
+  const handleCopyImage = useCallback(async () => {
+    if (copyBusy) return
+    setCopyBusy(true)
+    setCopyState('idle')
+    try {
+      const binary = window.atob(attachment.dataBase64)
+      const buffer = new ArrayBuffer(binary.length)
+      const bytes = new Uint8Array(buffer)
+      for (let index = 0; index < binary.length; index += 1) {
+        bytes[index] = binary.charCodeAt(index)
+      }
+      const copied = await copyImageBlobToClipboard(
+        new Blob([buffer], { type: attachment.mimeType }),
+        () => mountedRef.current
+      )
+      if (copied && mountedRef.current) setCopyState('copied')
+    } catch {
+      if (mountedRef.current) setCopyState('error')
+    } finally {
+      if (mountedRef.current) setCopyBusy(false)
+    }
+  }, [attachment.dataBase64, attachment.mimeType, copyBusy])
+
   return createPortal(
     <div className="composer-image-preview-overlay" onClick={onClose} role="presentation">
       <div
@@ -213,17 +254,43 @@ export function AnnotationCanvas({ attachment, onSave, onClose }: AnnotationCanv
         </IconButton>
         <div className="composer-image-preview-actions">
           {!previewIsAnnotating ? (
-            <Button
-              color="neutral"
-              onClick={() => {
-                setAnnotationError(null)
-                setPreviewIsAnnotating(true)
-              }}
-              size="xs"
-              variant="ghost"
-            >
-              Annotate
-            </Button>
+            <>
+              <Button
+                color="neutral"
+                onClick={() => {
+                  setAnnotationError(null)
+                  setPreviewIsAnnotating(true)
+                }}
+                size="xs"
+                variant="ghost"
+              >
+                <IconEdit width={16} height={16} />
+                Annotate
+              </Button>
+              <Button
+                aria-label={
+                  copyState === 'copied'
+                    ? 'Copied image to clipboard'
+                    : copyState === 'error'
+                      ? 'Could not copy image'
+                      : 'Copy image to clipboard'
+                }
+                color="neutral"
+                disabled={copyBusy}
+                onClick={() => void handleCopyImage()}
+                size="xs"
+                variant="ghost"
+              >
+                <IconCopy width={16} height={16} />
+                <span aria-live="polite">
+                  {copyState === 'copied'
+                    ? 'Copied'
+                    : copyState === 'error'
+                      ? 'Copy failed'
+                      : 'Copy'}
+                </span>
+              </Button>
+            </>
           ) : (
             <>
               <label className="composer-image-preview-color">

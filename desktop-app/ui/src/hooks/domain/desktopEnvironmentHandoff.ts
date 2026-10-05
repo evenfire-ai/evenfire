@@ -104,7 +104,7 @@ function decideSavedEnvironment(
 
   if (!linkedRpcOrigin) {
     if (sameRestOrigin.length > 1) return { kind: 'reject', reason: 'ambiguous' }
-    if (sameRestOrigin.length === 1) return { kind: 'select', option: sameRestOrigin[0] }
+    if (sameRestOrigin.length === 1) return { kind: 'select', option: sameRestOrigin[0]! }
     return { kind: 'setup' }
   }
 

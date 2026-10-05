@@ -15,6 +15,7 @@ import type {
   UploadSessionRow,
 } from '../../gfs-controller/src/upload/uploadSession.js'
 import { initDb } from '../src/db.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
@@ -113,21 +114,26 @@ describeRealPostgres('GFS upload finalizer on real PostgreSQL + BlobStore', () =
   }, 60_000)
 
   afterAll(async () => {
-    await pool?.query('DELETE FROM gfs_resources WHERE drive = $1', [drive]).catch(() => undefined)
-    await pool
-      ?.query('DELETE FROM gfs_upload_sessions WHERE drive = $1', [drive])
-      .catch(() => undefined)
-    await pool?.end()
-    await rm(storageRoot, { recursive: true, force: true }).catch(() => undefined)
-    await rm(blobRoot, { recursive: true, force: true }).catch(() => undefined)
-    if (!adminPool) return
-    await adminPool.query(
-      `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
-        WHERE datname = $1 AND pid <> pg_backend_pid()`,
-      [database]
-    )
-    await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdent(database)}`)
-    await adminPool.end()
+    try {
+      await pool
+        ?.query('DELETE FROM gfs_resources WHERE drive = $1', [drive])
+        .catch(() => undefined)
+      await pool
+        ?.query('DELETE FROM gfs_upload_sessions WHERE drive = $1', [drive])
+        .catch(() => undefined)
+      await endPoolAndWaitForClients(pool)
+      await rm(storageRoot, { recursive: true, force: true }).catch(() => undefined)
+      await rm(blobRoot, { recursive: true, force: true }).catch(() => undefined)
+      if (!adminPool) return
+      await adminPool.query(
+        `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+          WHERE datname = $1 AND pid <> pg_backend_pid()`,
+        [database]
+      )
+      await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdent(database)}`)
+    } finally {
+      await adminPool?.end()
+    }
   })
 
   async function seedUpload(): Promise<{ upload: UploadSessionRow; uploadPart: UploadPartRow }> {
