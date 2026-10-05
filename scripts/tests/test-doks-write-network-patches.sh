@@ -17,7 +17,7 @@ new_overlay() {
   printf 'apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\n' >"$d/kustomization.yaml"
   printf '%s' "$d"
 }
-gen() { env API_IPS='10.201.0.1 198.51.100.10' DNS_IP='10.201.0.10' STORAGE_CLASS='do-block-storage' \
+gen() { env API_IPS='10.96.0.1 198.51.100.10' DNS_IP='10.96.0.10' STORAGE_CLASS='do-block-storage' \
   API_ENDPOINT_PORT=443 "$@" bash "$GEN" >/dev/null 2>"$work/stderr"; }
 
 # --- controller mode -------------------------------------------------------------
@@ -82,12 +82,12 @@ check_ingress ingress-controller-profiles.yaml 3001 8091
 check_ingress ingress-controller-rpc-proxy.yaml 8094
 check_ingress ingress-controller-webhook-proxy.yaml 8095
 
-grep -q 'cidr: 10.201.0.1/32' "$o/patches/k8s-api-ip.yaml" || fail "controller: k8s-api-ip.yaml lacks the ClusterIP /32"
+grep -q 'cidr: 10.96.0.1/32' "$o/patches/k8s-api-ip.yaml" || fail "controller: k8s-api-ip.yaml lacks the ClusterIP /32"
 grep -q 'cidr: 198.51.100.10/32' "$o/patches/k8s-api-ip.yaml" || fail "controller: k8s-api-ip.yaml lacks the endpoint /32"
 [ "$(grep -c '^kind: NetworkPolicy' "$o/patches/k8s-api-ip.yaml")" -eq 3 ] || fail "controller: k8s-api-ip.yaml should patch 3 policies"
-grep -q 'value: "10.201.0.1/32,198.51.100.10/32"' "$o/patches/hcc-cluster.yaml" || fail "controller: HCC API CIDRs wrong"
+grep -q 'value: "10.96.0.1/32,198.51.100.10/32"' "$o/patches/hcc-cluster.yaml" || fail "controller: HCC API CIDRs wrong"
 grep -q 'value: "do-block-storage"' "$o/patches/hcc-cluster.yaml" || fail "controller: HCC storage class wrong"
-grep -q 'cidr: 10.201.0.10/32' "$o/patches/kube-dns-egress-rule.yaml" || fail "controller: kube-dns rule wrong"
+grep -q 'cidr: 10.96.0.10/32' "$o/patches/kube-dns-egress-rule.yaml" || fail "controller: kube-dns rule wrong"
 
 # --- tunnel mode removes ingress-controller patches -------------------------------------
 gen OVERLAY_DIR="$o" INGRESS_MODE=tunnel || fail "tunnel: generator failed: $(cat "$work/stderr")"
@@ -105,7 +105,7 @@ if gen OVERLAY_DIR="$o" INGRESS_MODE=controller INGRESS_NAMESPACE=traefik; then
 fi
 if gen OVERLAY_DIR="$o" INGRESS_MODE=gateway; then fail "unknown INGRESS_MODE accepted"; fi
 if gen OVERLAY_DIR="$o" INGRESS_MODE=tunnel API_ENDPOINT_PORT=abc; then fail "non-numeric API_ENDPOINT_PORT accepted"; fi
-if env -u API_ENDPOINT_PORT OVERLAY_DIR="$o" INGRESS_MODE=tunnel API_IPS=10.201.0.1 DNS_IP=10.201.0.10 \
+if env -u API_ENDPOINT_PORT OVERLAY_DIR="$o" INGRESS_MODE=tunnel API_IPS=10.96.0.1 DNS_IP=10.96.0.10 \
   STORAGE_CLASS=x bash "$GEN" >/dev/null 2>&1; then fail "missing API_ENDPOINT_PORT accepted"; fi
 if gen OVERLAY_DIR="$work/nope" INGRESS_MODE=tunnel; then fail "missing overlay accepted"; fi
 

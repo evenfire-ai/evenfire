@@ -7,10 +7,10 @@ set -uo pipefail
 printf '%s\n' "$*" >>"$STUB_DIR/kubectl.log"
 j=" $* "
 case "$j" in
-  *" get service kubernetes "*) printf '%s' "${STUB_API_CLUSTERIP:-10.201.0.1}" ;;
+  *" get service kubernetes "*) printf '%s' "${STUB_API_CLUSTERIP:-10.96.0.1}" ;;
   *" get endpointslices "*ports*) printf '%s' "${STUB_API_PORT:-443}" ;;
-  *" get endpointslices "*) printf '%s' "${STUB_API_EP:-10.114.0.2}" ;;
-  *" get service kube-dns "*) printf '%s' "${STUB_DNS_IP:-10.201.0.10}" ;;
+  *" get endpointslices "*) printf '%s' "${STUB_API_EP:-10.10.0.2}" ;;
+  *" get service kube-dns "*) printf '%s' "${STUB_DNS_IP:-10.96.0.10}" ;;
   *" get daemonset node-local-dns "*) exit "${STUB_NODELOCAL_RC:-1}" ;;
   *" get storageclass "*)
     if [ "${STUB_NO_DEFAULT_SC:-0}" = 1 ]; then d='"false"'; else d='"true"'; fi

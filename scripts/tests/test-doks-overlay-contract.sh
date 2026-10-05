@@ -58,8 +58,8 @@ render_variant() { # A|B
   mkdir -p "$ov"
   extract "$v" "$ov" >/dev/null || { fail "$v: cannot extract contract blocks"; return 1; }
   [ "$v" = A ] && mode=controller || mode=tunnel
-  OVERLAY_DIR="$ov" API_IPS='10.201.0.1 198.51.100.10' API_ENDPOINT_PORT=443 \
-    DNS_IP=10.201.0.10 STORAGE_CLASS=do-block-storage INGRESS_MODE="$mode" \
+  OVERLAY_DIR="$ov" API_IPS='10.96.0.1 198.51.100.10' API_ENDPOINT_PORT=443 \
+    DNS_IP=10.96.0.10 STORAGE_CLASS=do-block-storage INGRESS_MODE="$mode" \
     INGRESS_NAMESPACE=traefik \
     INGRESS_POD_LABELS='app.kubernetes.io/name=traefik,app.kubernetes.io/instance=traefik-traefik' \
     bash "$SKILL/scripts/write-network-patches.sh" >/dev/null || { fail "$v: write-network-patches failed"; return 1; }

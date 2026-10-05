@@ -1,5 +1,10 @@
 # Evenfire repository instructions
 
+Customer self-host on an **existing DigitalOcean Kubernetes (DOKS)** cluster is
+not this file. Use `.agents/skills/evenfire-digitalocean-doks/SKILL.md` and
+`docs/deploy/digitalocean-doks-agent-guide.md`. Do not apply minikube overlays
+there and do not treat T0/T1/T2 as a customer install.
+
 ## Local Minikube reuse and ownership
 
 Use an existing healthy, branch-owned Minikube profile for successive local

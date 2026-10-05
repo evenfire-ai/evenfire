@@ -601,6 +601,24 @@ jobs:
       - name: Test minikube sandbox-ui NetworkPolicy lint (static-policy ownership + DNS)
         run: bash scripts/tests/test-lint-networkpolicies.sh
 
+      - name: Test DOKS skill helpers copied from the EKS skill
+        run: bash scripts/tests/test-doks-skill-helpers.sh
+
+      - name: Test DOKS API egress probe (stub kubectl)
+        run: bash scripts/tests/test-doks-api-egress-probe.sh
+
+      - name: Test DOKS network patch generator
+        run: bash scripts/tests/test-doks-write-network-patches.sh
+
+      - name: Test DOKS discovery helper (stub doctl and kubectl)
+        run: bash scripts/tests/test-doks-discover.sh
+
+      - name: Test DOKS overlay contract renders and gates at the validated release
+        run: bash scripts/tests/test-doks-overlay-contract.sh
+
+      - name: Test DOKS how-to and skill links, phases, and pointers
+        run: bash scripts/tests/test-doks-docs-links.sh
+
       - name: Test Plugin Workload SDK auth bootstrap policy
         run: bash scripts/tests/test-plugin-workload-sdk-auth-bootstrap.sh
 
