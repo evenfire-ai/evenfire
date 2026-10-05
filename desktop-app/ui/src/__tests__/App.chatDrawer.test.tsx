@@ -533,10 +533,15 @@ describe('App workspace chat tabs with held Host access', () => {
       'chat-a'
     )
 
+    // Updating the controller input runs App's production reconciliation effect:
+    // it must update A's title without replacing the requested pending tab.
     act(() => {
       currentController.chatList = [{ ...CHAT_TAB_A, title: 'Renamed A' }, CHAT_TAB_B]
       forceControllerRender()
     })
+    expect(currentController.workspaceTabs.tabs.find(tab => tab.id === 'chat-a')?.title).toBe(
+      'Renamed A'
+    )
     expect(screen.getByRole('button', { name: 'Renamed A' }).getAttribute('aria-pressed')).toBe(
       'true'
     )
@@ -577,6 +582,69 @@ describe('App workspace chat tabs with held Host access', () => {
     ).toBe('true')
     expect(screen.getByTestId('chat-page-surface').getAttribute('data-active-chat-id')).toBe(
       'chat-a'
+    )
+  })
+
+  it('keeps a held drawer chat inactive until access verification succeeds', async () => {
+    const chatA = openChatTab(createWorkspaceTabsState('chat-a', 'agent-a'), {
+      id: 'chat-a',
+      agentRef: 'agent-a',
+      chatId: 'chat-a',
+      title: 'Conversation A',
+    })
+    const chatB = openChatTab(chatA, {
+      id: 'chat-b',
+      agentRef: 'agent-b',
+      chatId: 'chat-b',
+      title: 'Conversation B',
+    })
+    const settings = openSettingsTab(chatB, { id: 'settings-1', section: 'settings' })
+    let hostAccessBlocked = true
+    currentController = makeController({
+      workspaceTabs: settings,
+      selectedAgent: 'agent-a',
+      activeChatId: 'chat-a',
+      chatList: CHAT_TAB_ACCESS_LIST,
+      latestChatSessions: [CHAT_TAB_B_LATEST],
+      hostAuthorityRevision: 0,
+      isHostAccessBlocked: vi.fn((agentRef: string) => agentRef === 'agent-b' && hostAccessBlocked),
+      verifyHostAccess: vi.fn(() =>
+        verificationChecks[0]!.promise.then(verified => {
+          if (verified) {
+            hostAccessBlocked = false
+            currentController.hostAuthorityRevision += 1
+          }
+          return verified
+        })
+      ),
+    } as Partial<AppController>)
+
+    render(<App />)
+    act(() => appHeaderHarness.props?.onToggleChatDrawer?.())
+    fireEvent.click(screen.getByRole('button', { name: 'Open chats' }))
+    fireEvent.click(screen.getByRole('option', { name: 'Conversation unavailable' }))
+
+    expect(currentController.handleSelectChatAgent).not.toHaveBeenCalledWith(
+      'agent-b',
+      expect.anything()
+    )
+    expect(screen.getByTestId('chat-page-surface').getAttribute('data-active-chat-id')).toBe(
+      'chat-a'
+    )
+    expect(
+      screen
+        .getByRole('button', { name: 'Conversation unavailable, checking access' })
+        .getAttribute('aria-busy')
+    ).toBe('true')
+
+    await act(async () => verificationChecks[0]!.resolve(true))
+
+    expect(currentController.handleSelectChatAgent).toHaveBeenCalledWith(
+      'agent-b',
+      expect.objectContaining({ chatId: 'chat-b', keepNavItem: true })
+    )
+    expect(screen.getByTestId('chat-page-surface').getAttribute('data-active-chat-id')).toBe(
+      'chat-b'
     )
   })
 })

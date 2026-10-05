@@ -347,6 +347,17 @@ export function App() {
   const nextChatTabId = vm.nextWorkspaceTabId
   const workspaceTabsRef = React.useRef(workspaceTabs)
   const workspaceTabSelectionIntentRef = React.useRef(0)
+  const pendingWorkspaceTabSelectionRef = React.useRef<{
+    tabId: string
+    selectionIntent: number
+    navigationIntent: number
+  } | null>(null)
+  const clearPendingWorkspaceTabSelection = React.useCallback((selectionIntent?: number) => {
+    const pending = pendingWorkspaceTabSelectionRef.current
+    if (selectionIntent !== undefined && pending?.selectionIntent !== selectionIntent) return
+    pendingWorkspaceTabSelectionRef.current = null
+    setPendingWorkspaceTabId(null)
+  }, [])
   const chatDrawerRef = React.useRef<HTMLElement | null>(null)
   // Mirrors `chatDrawerVisible` so the chat-tab handlers (which run from stable
   // callbacks) can tell whether a reveal should target the in-app drawer or the
@@ -495,37 +506,41 @@ export function App() {
     [availableSandboxUiApps, leaveSandboxForChat, vm.handleNavSelect, vm.handleSelectChatAgent]
   )
 
-  // Global strip selection: verify a held Host before activating its chat tab.
-  // Keeping the current tab active during this check also keeps its transcript
-  // paired with the selected tab while the chat list continues to reconcile.
-  const handleSelectWorkspaceTab = React.useCallback(
-    (id: string) => {
-      const tab = workspaceTabsRef.current.tabs.find(candidate => candidate.id === id)
+  // Both workspace and drawer selection wait on Host access before revealing a
+  // held chat. The drawer keeps its app tab active while switching its chat.
+  const requestWorkspaceTabSelection = React.useCallback(
+    (id: string, inDrawer: boolean) => {
+      const tab = workspaceTabsRef.current.tabs.find(
+        candidate => candidate.id === id && (!inDrawer || candidate.kind === 'chat')
+      )
       if (!tab) return
 
       const selectionIntent = ++workspaceTabSelectionIntentRef.current
       const navigationIntent = vm.beginNavigationIntent()
-      setPendingWorkspaceTabId(null)
+      clearPendingWorkspaceTabSelection()
       const agentRef = tab.kind === 'chat' ? tab.chat?.agentRef : undefined
-      if (agentRef && vm.isHostAccessBlocked(agentRef)) {
-        setPendingWorkspaceTabId(id)
-        void vm.verifyHostAccess(agentRef).then(verified => {
-          if (selectionIntent !== workspaceTabSelectionIntentRef.current) return
-          setPendingWorkspaceTabId(null)
-          if (!verified || !vm.isNavigationIntentCurrent(navigationIntent)) return
-
+      const activate = () => {
+        if (!inDrawer) {
           vm.clearAppsPicker()
           setWorkspaceTabs(state => selectWorkspaceTab(state, id))
-          revealWorkspaceTab(tab, false)
-        })
+        }
+        revealWorkspaceTab(tab, inDrawer)
+      }
+      if (!agentRef || !vm.isHostAccessBlocked(agentRef)) {
+        activate()
         return
       }
 
-      vm.clearAppsPicker()
-      setWorkspaceTabs(state => selectWorkspaceTab(state, id))
-      revealWorkspaceTab(tab, false)
+      pendingWorkspaceTabSelectionRef.current = { tabId: id, selectionIntent, navigationIntent }
+      setPendingWorkspaceTabId(id)
+      void vm.verifyHostAccess(agentRef).then(verified => {
+        if (selectionIntent !== workspaceTabSelectionIntentRef.current) return
+        clearPendingWorkspaceTabSelection(selectionIntent)
+        if (verified && vm.isNavigationIntentCurrent(navigationIntent)) activate()
+      })
     },
     [
+      clearPendingWorkspaceTabSelection,
       revealWorkspaceTab,
       setWorkspaceTabs,
       vm.beginNavigationIntent,
@@ -535,17 +550,13 @@ export function App() {
       vm.verifyHostAccess,
     ]
   )
-
-  // Drawer switcher selection: reveal the chat IN the drawer (keepNavItem), never
-  // stealing focus from the active app tab.
+  const handleSelectWorkspaceTab = React.useCallback(
+    (id: string) => requestWorkspaceTabSelection(id, false),
+    [requestWorkspaceTabSelection]
+  )
   const handleSelectDrawerChatTab = React.useCallback(
-    (id: string) => {
-      const tab = workspaceTabsRef.current.tabs.find(
-        candidate => candidate.id === id && candidate.kind === 'chat'
-      )
-      if (tab) revealWorkspaceTab(tab, true)
-    },
-    [revealWorkspaceTab]
+    (id: string) => requestWorkspaceTabSelection(id, true),
+    [requestWorkspaceTabSelection]
   )
 
   const handleCloseWorkspaceTab = React.useCallback(
@@ -553,7 +564,7 @@ export function App() {
       // A pending verification must not resurrect a tab after it is closed.
       workspaceTabSelectionIntentRef.current += 1
       vm.beginNavigationIntent()
-      setPendingWorkspaceTabId(null)
+      clearPendingWorkspaceTabSelection()
       const current = workspaceTabsRef.current
       const wasActive = current.activeTabId === id
       const next = closeWorkspaceTab(current, id)
@@ -564,7 +575,13 @@ export function App() {
       // §5). Reveal it so its content follows the strip.
       if (wasActive) revealWorkspaceTab(activeWorkspaceTab(next), false)
     },
-    [revealWorkspaceTab, setWorkspaceTabs, vm.beginNavigationIntent, vm.clearAppsPicker]
+    [
+      clearPendingWorkspaceTabSelection,
+      revealWorkspaceTab,
+      setWorkspaceTabs,
+      vm.beginNavigationIntent,
+      vm.clearAppsPicker,
+    ]
   )
 
   // Session-only strip reorder (drag & drop / keyboard). It never changes the
@@ -2000,6 +2017,15 @@ export function App() {
   // reference when already aligned), so this never ping-pongs with the reveal
   // paths and never drives a chat switch itself.
   React.useEffect(() => {
+    const pendingSelection = pendingWorkspaceTabSelectionRef.current
+    const pendingSelectionIsCurrent = Boolean(
+      pendingSelection &&
+      pendingSelection.selectionIntent === workspaceTabSelectionIntentRef.current &&
+      vm.isNavigationIntentCurrent(pendingSelection.navigationIntent)
+    )
+    if (pendingSelection && !pendingSelectionIsCurrent) {
+      clearPendingWorkspaceTabSelection(pendingSelection.selectionIntent)
+    }
     if ((vm.navItem !== DESKTOP_ROUTES.chat && !chatDrawerVisible) || !vm.selectedAgent) return
     const conversation = vm.activeChatId
       ? (vm.chatList.find(chat => chat.id === vm.activeChatId) ??
@@ -2016,6 +2042,20 @@ export function App() {
     setWorkspaceTabs(state => {
       const reconciled = reconcileWorkspaceChatTab(state, active, id)
       if (reconciled === state) return state
+      // Keep reconciling chat metadata while Host access is pending, but don't
+      // let the displayed conversation reactivate a tab over the user's request.
+      const pendingSelectionStillCurrent = Boolean(
+        pendingSelectionIsCurrent &&
+        pendingSelection &&
+        pendingWorkspaceTabSelectionRef.current?.selectionIntent ===
+          pendingSelection.selectionIntent &&
+        vm.isNavigationIntentCurrent(pendingSelection.navigationIntent)
+      )
+      if (pendingSelectionStillCurrent && reconciled.activeTabId !== state.activeTabId) {
+        return reconciled.tabs === state.tabs
+          ? state
+          : { tabs: reconciled.tabs, activeTabId: state.activeTabId }
+      }
       // Drawer mode: the active tab is the app tab. Keep the chat tab reconcile
       // created/aligned (so the switcher lists it) but DON'T let it steal the
       // active slot — activating a chat tab would flip navItem to chat and tear
@@ -2034,10 +2074,13 @@ export function App() {
     })
   }, [
     chatDrawerVisible,
+    clearPendingWorkspaceTabSelection,
     nextChatTabId,
+    pendingWorkspaceTabId,
     setWorkspaceTabs,
     vm.activeChatId,
     vm.chatList,
+    vm.isNavigationIntentCurrent,
     vm.latestChatSessions,
     vm.navItem,
     vm.selectedAgent,
@@ -2141,9 +2184,15 @@ export function App() {
       // chat-specific.
       const selectAndReveal = (next: typeof state) => {
         if (next === state) return
+        const nextTab = activeWorkspaceTab(next)
+        const agentRef = nextTab?.kind === 'chat' ? nextTab.chat?.agentRef : undefined
+        if (nextTab && agentRef && vm.isHostAccessBlocked(agentRef)) {
+          handleSelectWorkspaceTab(nextTab.id)
+          return
+        }
         vm.clearAppsPicker()
         setWorkspaceTabs(next)
-        revealWorkspaceTab(activeWorkspaceTab(next), false)
+        revealWorkspaceTab(nextTab, false)
       }
       if (commandId === 'commands.open') {
         closeChatLocalSearch(false)
@@ -2294,6 +2343,7 @@ export function App() {
       handleCloseWorkspaceTab,
       handleNewWorkspaceChatTab,
       handleSidebarNavSelect,
+      handleSelectWorkspaceTab,
       openChatDrawer,
       revealWorkspaceTab,
       sandboxUiMounted,
@@ -2304,6 +2354,7 @@ export function App() {
       vm.handleLogout,
       vm.handleSelectChatAgent,
       vm.isAuthenticated,
+      vm.isHostAccessBlocked,
       vm.navItem,
       vm.selectedAgent,
     ]
