@@ -891,6 +891,7 @@ export class AppService {
   private savedSessionRestoreAttemptedEnvKey: string | null = null
   private savedSessionRestoreAttemptedAtMs = 0
   private logoutInProgress = false
+  private nativeAuthEnvironmentCommitQueue: Promise<void> = Promise.resolve()
   private gfsAuthEpoch = 0
   private gfsDispatchBlocked = true
   // A transient runWithTeamContext hop temporarily installs another team's
@@ -1063,6 +1064,40 @@ export class AppService {
     })
   }
 
+  /**
+   * Serialize native operations that publish runtime configuration, session,
+   * token-store, or GFS authorization state. The queue recovers after either
+   * success or failure so one rejected transition cannot strand later work.
+   */
+  private withNativeAuthEnvironmentCommit<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.nativeAuthEnvironmentCommitQueue.then(operation, operation)
+    this.nativeAuthEnvironmentCommitQueue = result.then(
+      () => undefined,
+      () => undefined
+    )
+    return result
+  }
+
+  private captureAuthEnvironmentBinding(): { environmentKey: string; restBaseUrl: string } {
+    return {
+      environmentKey: getActiveEnvKey(),
+      restBaseUrl: normalizeDesktopUploadBaseUrl(config.externalRestApiBaseUrl),
+    }
+  }
+
+  private assertAuthEnvironmentBinding(binding: {
+    environmentKey: string
+    restBaseUrl: string
+  }): void {
+    const current = this.captureAuthEnvironmentBinding()
+    if (
+      current.environmentKey !== binding.environmentKey ||
+      current.restBaseUrl !== binding.restBaseUrl
+    ) {
+      throw new Error('stale_runtime_environment')
+    }
+  }
+
   getChatDeletionFenceAuthority(): {
     authorityScope: ChatAuthorityScope
     sessionGeneration: number
@@ -1195,11 +1230,19 @@ export class AppService {
     }
   }
 
-  private async runWithTeamContext<T>(
+  private runWithTeamContext<T>(
     teamId: string | null | undefined,
     operation: (sessionToken: string) => Promise<T>
   ): Promise<T> {
     const targetTeamId = String(teamId || '').trim()
+    const run = () => this.runWithTeamContextInTeamQueue(targetTeamId, operation)
+    return targetTeamId ? this.withNativeAuthEnvironmentCommit(run) : run()
+  }
+
+  private async runWithTeamContextInTeamQueue<T>(
+    targetTeamId: string,
+    operation: (sessionToken: string) => Promise<T>
+  ): Promise<T> {
     if (!targetTeamId) {
       await this.teamContextQueue.catch(() => undefined)
       return operation(this.requireSessionToken())
@@ -1494,87 +1537,120 @@ export class AppService {
   }
 
   private async restoreSavedSessionOnce(options: { runLaunchMaintenance?: boolean } = {}) {
-    if (this.logoutInProgress) return { authenticated: false, me: null }
-    const restoreGeneration = this.sessionGeneration
-    hydrateDesktopRuntimeConfig()
-    const envKey = getActiveEnvKey()
-    const legacyEnvKeys = getActiveLegacyEnvKeys()
-    this.savedSessionRestoreAttemptedEnvKey = envKey
-    this.savedSessionRestoreAttemptedAtMs = Date.now()
-    let token: string | null
-    try {
-      token = await this.tokenStore.getSessionToken(envKey, { legacyEnvKeys })
-    } catch (error) {
-      console.warn('[AppService] Failed to read the saved session token:', error)
-      if (
-        this.sessionGeneration === restoreGeneration &&
-        (this.sessionToken !== null || this.me !== null)
-      ) {
-        this.clearAuthenticatedSessionState()
+    const reservation = await this.withNativeAuthEnvironmentCommit(async () => {
+      if (this.logoutInProgress) return null
+      hydrateDesktopRuntimeConfig()
+      const environment = this.captureAuthEnvironmentBinding()
+      const legacyEnvKeys = getActiveLegacyEnvKeys()
+      this.savedSessionRestoreAttemptedEnvKey = environment.environmentKey
+      this.savedSessionRestoreAttemptedAtMs = Date.now()
+      let token: string | null = null
+      let tokenReadFailed = false
+      let tokenReadError: unknown
+      try {
+        // getSessionToken can migrate a legacy token into a new durable slot,
+        // so keep the native owner until its read/migration has settled.
+        token = await this.tokenStore.getSessionToken(environment.environmentKey, {
+          legacyEnvKeys,
+        })
+      } catch (error) {
+        tokenReadFailed = true
+        tokenReadError = error
       }
-      return { authenticated: false, me: null }
-    }
-    if (this.logoutInProgress) return { authenticated: false, me: null }
-    if (!token) {
-      if (
-        this.sessionGeneration === restoreGeneration &&
-        (this.sessionToken !== null || this.me !== null)
-      ) {
-        this.clearAuthenticatedSessionState()
+      return {
+        sessionGeneration: this.sessionGeneration,
+        environment,
+        legacyEnvKeys,
+        token,
+        tokenReadFailed,
+        tokenReadError,
       }
-      return { authenticated: false, me: null }
+    })
+    if (!reservation) return { authenticated: false, me: null }
+
+    const ownsRestore = () =>
+      this.sessionGeneration === reservation.sessionGeneration &&
+      !this.logoutInProgress &&
+      getActiveEnvKey() === reservation.environment.environmentKey &&
+      normalizeDesktopUploadBaseUrl(config.externalRestApiBaseUrl) ===
+        reservation.environment.restBaseUrl
+    const currentSession = () => ({
+      authenticated: Boolean(this.sessionToken && this.me),
+      me: this.me,
+    })
+
+    if (reservation.tokenReadFailed) {
+      console.warn(
+        '[AppService] Failed to read the saved session token:',
+        reservation.tokenReadError
+      )
+      return this.withNativeAuthEnvironmentCommit(async () => {
+        if (!ownsRestore()) return currentSession()
+        if (this.sessionToken !== null || this.me !== null) this.clearAuthenticatedSessionState()
+        return { authenticated: false, me: null }
+      })
     }
 
-    if (this.sessionGeneration !== restoreGeneration) {
-      return { authenticated: Boolean(this.sessionToken && this.me), me: this.me }
-    }
-    this.sessionToken = token
-    try {
-      const restoredMe = await this.authClient.getMe(token)
-      if (this.sessionGeneration !== restoreGeneration || this.sessionToken !== token) {
-        return { authenticated: Boolean(this.sessionToken && this.me), me: this.me }
-      }
-      await bindChatStoreForUser(restoredMe.id, envKey, {
-        legacyEnvKeys,
-        teamId: restoredMe.teamId,
+    const token = reservation.token
+    if (!token) {
+      return this.withNativeAuthEnvironmentCommit(async () => {
+        if (!ownsRestore()) return currentSession()
+        if (this.sessionToken !== null || this.me !== null) this.clearAuthenticatedSessionState()
+        return { authenticated: false, me: null }
       })
-      if (this.sessionGeneration !== restoreGeneration || this.sessionToken !== token) {
-        if (this.me) {
-          await this.bindCurrentChatStore(this.me.id)
-        } else {
-          unbindChatStore()
-        }
-        return { authenticated: Boolean(this.sessionToken && this.me), me: this.me }
-      }
-      this.me = restoredMe
-      this.updateEntityChangeSessionToken(token)
-      this.restartEntityChangeStreamForSessionReplacement()
-      this.accessCatalog = null
-      this.teamDirectoryCache = null
-      this.workflowApprovalTeamById.clear()
-      this.workflowTeamByKey.clear()
-      // Persisted uploads are never auto-resumed. The active owner/team/env can
-      // list only its own scoped records and must explicitly resume one, at
-      // which point the record is rebound to this newly activated auth epoch.
-      this.activateGfsAuthScope()
-      // Launch-time sandbox-ui partition GC. Fire-and-forget: a failure
-      // here must not block the user from logging in. Any network or fs
-      // error is logged inside the module.
-      if (options.runLaunchMaintenance) {
+    }
+
+    let getMeRequest: ReturnType<AuthClient['getMe']> | undefined
+    const requestStarted = await this.withNativeAuthEnvironmentCommit(async () => {
+      if (!ownsRestore()) return false
+      getMeRequest = this.authClient.getMe(token)
+      return true
+    })
+    if (!requestStarted || !getMeRequest) {
+      return this.withNativeAuthEnvironmentCommit(async () => currentSession())
+    }
+
+    try {
+      const restoredMe = await getMeRequest
+      const session = await this.withNativeAuthEnvironmentCommit(async () => {
+        if (!ownsRestore()) return currentSession()
+        this.sessionToken = token
+        await bindChatStoreForUser(restoredMe.id, reservation.environment.environmentKey, {
+          legacyEnvKeys: reservation.legacyEnvKeys,
+          teamId: restoredMe.teamId,
+        })
+        this.me = restoredMe
+        this.updateEntityChangeSessionToken(token)
+        this.restartEntityChangeStreamForSessionReplacement()
+        this.accessCatalog = null
+        this.teamDirectoryCache = null
+        this.workflowApprovalTeamById.clear()
+        this.workflowTeamByKey.clear()
+        // Persisted uploads are never auto-resumed. The active owner/team/env can
+        // list only its own scoped records and must explicitly resume one, at
+        // which point the record is rebound to this newly activated auth epoch.
+        this.activateGfsAuthScope()
+        return { authenticated: true, me: restoredMe }
+      })
+      if (session.authenticated && options.runLaunchMaintenance) {
+        // Launch-time sandbox-ui partition GC is best-effort and must not delay
+        // publishing the saved session.
         void this.runSandboxUiPartitionGcSafely()
       }
-      return { authenticated: true, me: this.me }
+      return session
     } catch (error) {
-      if (this.sessionGeneration !== restoreGeneration || this.sessionToken !== token) {
-        return { authenticated: Boolean(this.sessionToken && this.me), me: this.me }
-      }
-      this.clearAuthenticatedSessionState()
-      if (AppService.isRejectedStoredSessionError(error)) {
-        await this.tokenStore.clearSessionToken(envKey, { legacyEnvKeys })
-      } else {
-        console.warn('[AppService] Saved session restore failed; keeping token for retry:', error)
-      }
-      return { authenticated: false, me: null }
+      return this.withNativeAuthEnvironmentCommit(async () => {
+        if (!ownsRestore()) return currentSession()
+        this.clearAuthenticatedSessionState()
+        if (AppService.isRejectedStoredSessionError(error)) {
+          await this.tokenStore.clearSessionToken(reservation.environment.environmentKey, {
+            legacyEnvKeys: reservation.legacyEnvKeys,
+          })
+        } else {
+          console.warn('[AppService] Saved session restore failed; keeping token for retry:', error)
+        }
+        return { authenticated: false, me: null }
+      })
     }
   }
 
@@ -1660,13 +1736,26 @@ export class AppService {
     password: string,
     expectedSessionGeneration: number
   ): Promise<SessionState> {
-    this.assertSessionGeneration(expectedSessionGeneration)
-    const result = await this.authClient.passwordLogin(email, password)
-    return this.installAuthenticatedLogin(result, expectedSessionGeneration)
+    let loginRequest: ReturnType<AuthClient['passwordLogin']> | undefined
+    const binding = await this.withNativeAuthEnvironmentCommit(async () => {
+      this.assertSessionGeneration(expectedSessionGeneration)
+      const currentBinding = this.captureAuthEnvironmentBinding()
+      loginRequest = this.authClient.passwordLogin(email, password)
+      return currentBinding
+    })
+    if (!loginRequest) throw new Error('password login request was not dispatched')
+    const result = await loginRequest
+    return this.withNativeAuthEnvironmentCommit(async () => {
+      this.assertSessionGeneration(expectedSessionGeneration)
+      this.assertAuthEnvironmentBinding(binding)
+      return this.installAuthenticatedLogin(result, expectedSessionGeneration)
+    })
   }
 
   async getDependenciesHealth(): Promise<DependencyHealth> {
-    await this.resolveRuntimeConfigIfNeeded().catch(() => undefined)
+    await this.withNativeAuthEnvironmentCommit(() =>
+      this.resolveRuntimeConfigIfNeeded().catch(() => undefined)
+    )
     const [externalHealth, rpcHealth] = await Promise.allSettled([
       this.authClient.health(),
       this.rpcClient.health(),
@@ -1719,6 +1808,8 @@ export class AppService {
     const oldEnvKey = getActiveEnvKey()
     const oldBaseUrl = normalizeDesktopUploadBaseUrl(config.externalRestApiBaseUrl)
     const oldLegacyEnvKeys = getActiveLegacyEnvKeys()
+    const oldSessionToken = this.sessionToken
+    const oldMe = this.me
     const releasePrewarm = this.beginPrewarmAuthTransition()
     try {
       const hadAuthenticatedScope = Boolean(this.sessionToken && this.me)
@@ -1734,14 +1825,37 @@ export class AppService {
         await operation()
         this.assertSessionGeneration(transitionGeneration)
       } catch (error) {
-        if (this.sessionGeneration !== transitionGeneration) {
-          throw new Error('stale_session_generation')
-        }
         const environmentUnchanged =
           getActiveEnvKey() === oldEnvKey &&
           normalizeDesktopUploadBaseUrl(config.externalRestApiBaseUrl) === oldBaseUrl
-        if (!environmentUnchanged) this.clearAuthenticatedSessionState()
-        else if (hadAuthenticatedScope && this.sessionToken && this.me) this.activateGfsAuthScope()
+        if (this.sessionGeneration !== transitionGeneration) {
+          if (!environmentUnchanged) {
+            this.clearAuthenticatedSessionState()
+            await this.tokenStore
+              .clearSessionToken(oldEnvKey, { legacyEnvKeys: oldLegacyEnvKeys })
+              .catch(() => undefined)
+          } else if (this.sessionToken === oldSessionToken && this.me === oldMe) {
+            this.clearAuthenticatedSessionState()
+            await this.tokenStore
+              .clearSessionToken(oldEnvKey, { legacyEnvKeys: oldLegacyEnvKeys })
+              .catch(() => undefined)
+          }
+          throw new Error('stale_session_generation')
+        }
+        if (!environmentUnchanged) {
+          this.clearAuthenticatedSessionState()
+          await this.tokenStore
+            .clearSessionToken(oldEnvKey, { legacyEnvKeys: oldLegacyEnvKeys })
+            .catch(() => undefined)
+        } else if (
+          hadAuthenticatedScope &&
+          this.sessionToken === oldSessionToken &&
+          this.me === oldMe &&
+          this.sessionToken &&
+          this.me
+        ) {
+          this.activateGfsAuthScope()
+        }
         throw error
       }
       const boundaryChanged =
@@ -1787,67 +1901,86 @@ export class AppService {
     optionId: string,
     expectedSessionGeneration?: number
   ): Promise<DesktopRuntimeConfigHandoffSelection> {
-    if (expectedSessionGeneration !== undefined) {
-      this.assertSessionGeneration(expectedSessionGeneration)
-    }
-    const state = getDesktopRuntimeConfigState()
-    const selected = state.options.find(option => option.id === String(optionId || '').trim())
-    const nextEnvKey = selected
-      ? resolveEnvKey(selected.externalRestApiBaseUrl, selected.rpcProxyBaseUrl)
-      : null
-    const sameUploadBoundary =
-      nextEnvKey === state.envKey &&
-      selected !== undefined &&
-      normalizeDesktopUploadBaseUrl(selected.externalRestApiBaseUrl) ===
-        normalizeDesktopUploadBaseUrl(config.externalRestApiBaseUrl)
-    if (sameUploadBoundary) {
-      this.sessionGeneration += 1
-      const transitionGeneration = this.sessionGeneration
-      await selectDesktopRuntimeConfigOption(optionId)
-      this.assertSessionGeneration(transitionGeneration)
-      this.sessionGeneration += 1
-    } else {
-      await this.applyRuntimeEnvironmentChange(
-        () => selectDesktopRuntimeConfigOption(optionId),
-        expectedSessionGeneration
-      )
-    }
-    return {
-      runtimeConfigState: getDesktopRuntimeConfigState(),
-      sessionGeneration: this.sessionGeneration,
-    }
+    return this.withNativeAuthEnvironmentCommit(async () => {
+      if (expectedSessionGeneration !== undefined) {
+        this.assertSessionGeneration(expectedSessionGeneration)
+      }
+      const state = getDesktopRuntimeConfigState()
+      const selected = state.options.find(option => option.id === String(optionId || '').trim())
+      const nextEnvKey = selected
+        ? resolveEnvKey(selected.externalRestApiBaseUrl, selected.rpcProxyBaseUrl)
+        : null
+      const sameUploadBoundary =
+        nextEnvKey === state.envKey &&
+        selected !== undefined &&
+        normalizeDesktopUploadBaseUrl(selected.externalRestApiBaseUrl) ===
+          normalizeDesktopUploadBaseUrl(config.externalRestApiBaseUrl)
+      if (sameUploadBoundary) {
+        this.sessionGeneration += 1
+        const transitionGeneration = this.sessionGeneration
+        await selectDesktopRuntimeConfigOption(optionId)
+        this.assertSessionGeneration(transitionGeneration)
+        this.sessionGeneration += 1
+      } else {
+        await this.applyRuntimeEnvironmentChange(
+          () => selectDesktopRuntimeConfigOption(optionId),
+          expectedSessionGeneration
+        )
+      }
+      return {
+        runtimeConfigState: getDesktopRuntimeConfigState(),
+        sessionGeneration: this.sessionGeneration,
+      }
+    })
   }
 
   async clearRuntimeConfigSelection() {
-    await this.applyRuntimeEnvironmentChange(clearDesktopRuntimeConfigSelection)
-    return getDesktopRuntimeConfigState()
+    return this.withNativeAuthEnvironmentCommit(async () => {
+      await this.applyRuntimeEnvironmentChange(clearDesktopRuntimeConfigSelection)
+      return getDesktopRuntimeConfigState()
+    })
   }
 
   async saveRuntimeConfig(next: DesktopRuntimeConfig) {
-    const nextEnvKey = resolveEnvKey(next.externalRestApiBaseUrl, next.rpcProxyBaseUrl || '')
-    const sameUploadBoundary =
-      nextEnvKey === getActiveEnvKey() &&
-      normalizeDesktopUploadBaseUrl(next.externalRestApiBaseUrl) ===
-        normalizeDesktopUploadBaseUrl(config.externalRestApiBaseUrl)
-    if (sameUploadBoundary) await saveDesktopRuntimeConfig(next)
-    else await this.applyRuntimeEnvironmentChange(() => saveDesktopRuntimeConfig(next))
-    await this.resolveRuntimeConfigIfNeeded().catch(() => undefined)
-    return getDesktopRuntimeConfigState()
+    return this.withNativeAuthEnvironmentCommit(async () => {
+      const nextEnvKey = resolveEnvKey(next.externalRestApiBaseUrl, next.rpcProxyBaseUrl || '')
+      const sameUploadBoundary =
+        nextEnvKey === getActiveEnvKey() &&
+        normalizeDesktopUploadBaseUrl(next.externalRestApiBaseUrl) ===
+          normalizeDesktopUploadBaseUrl(config.externalRestApiBaseUrl)
+      if (sameUploadBoundary) await saveDesktopRuntimeConfig(next)
+      else await this.applyRuntimeEnvironmentChange(() => saveDesktopRuntimeConfig(next))
+      await this.resolveRuntimeConfigIfNeeded().catch(() => undefined)
+      return getDesktopRuntimeConfigState()
+    })
   }
 
   async deleteRuntimeConfig(optionId: string) {
-    const state = getDesktopRuntimeConfigState()
-    if (state.activeOptionId === String(optionId || '').trim())
-      await this.applyRuntimeEnvironmentChange(() => deleteDesktopRuntimeConfigOption(optionId))
-    else await deleteDesktopRuntimeConfigOption(optionId)
-    return getDesktopRuntimeConfigState()
+    return this.withNativeAuthEnvironmentCommit(async () => {
+      const state = getDesktopRuntimeConfigState()
+      if (state.activeOptionId === String(optionId || '').trim())
+        await this.applyRuntimeEnvironmentChange(() => deleteDesktopRuntimeConfigOption(optionId))
+      else await deleteDesktopRuntimeConfigOption(optionId)
+      return getDesktopRuntimeConfigState()
+    })
   }
 
   async googleLogin(idToken: string): Promise<SessionState> {
-    if (this.logoutInProgress) throw new Error('auth_transition_in_progress')
-    const loginGeneration = ++this.sessionGeneration
-    const result = await this.authClient.googleLogin(idToken)
-    return this.installAuthenticatedLogin(result, loginGeneration)
+    let loginRequest: ReturnType<AuthClient['googleLogin']> | undefined
+    const attempt = await this.withNativeAuthEnvironmentCommit(async () => {
+      if (this.logoutInProgress) throw new Error('auth_transition_in_progress')
+      const sessionGeneration = ++this.sessionGeneration
+      const binding = this.captureAuthEnvironmentBinding()
+      loginRequest = this.authClient.googleLogin(idToken)
+      return { sessionGeneration, binding }
+    })
+    if (!loginRequest) throw new Error('Google login request was not dispatched')
+    const result = await loginRequest
+    return this.withNativeAuthEnvironmentCommit(async () => {
+      this.assertSessionGeneration(attempt.sessionGeneration)
+      this.assertAuthEnvironmentBinding(attempt.binding)
+      return this.installAuthenticatedLogin(result, attempt.sessionGeneration)
+    })
   }
 
   private async openProfileDesktopSetup(email: string): Promise<{
@@ -1961,29 +2094,47 @@ export class AppService {
   }
 
   async completeDesktopSetup(email: string, authorizationToken: string) {
-    const setupGeneration = ++this.sessionGeneration
     const normalizedEmail = email.trim().toLowerCase()
     if (!normalizedEmail || !authorizationToken.trim()) {
       throw new Error('email and authorization token are required')
     }
-    try {
-      const activation = await this.memberRegistrationServiceClient.completeDesktopSetup(
+    const setupGeneration = await this.withNativeAuthEnvironmentCommit(
+      async () => ++this.sessionGeneration
+    )
+    let setupRequest:
+      | ReturnType<MemberRegistrationServiceClient['completeDesktopSetup']>
+      | undefined
+    await this.withNativeAuthEnvironmentCommit(async () => {
+      this.assertSessionGeneration(setupGeneration)
+      setupRequest = this.memberRegistrationServiceClient.completeDesktopSetup(
         normalizedEmail,
         authorizationToken
       )
+    })
+    if (!setupRequest) throw new Error('desktop setup request was not dispatched')
+
+    try {
+      const activation = await setupRequest
       if (activation.email.trim().toLowerCase() !== normalizedEmail) {
         throw new Error('desktop setup configuration mismatch')
       }
 
-      this.assertSessionGeneration(setupGeneration)
-      await saveDesktopRuntimeConfig({
-        externalRestApiBaseUrl: activation.externalRestApiBaseUrl,
-        rpcProxyBaseUrl: '',
-        appName: activation.appName,
+      const committedGeneration = await this.withNativeAuthEnvironmentCommit(async () => {
+        this.assertSessionGeneration(setupGeneration)
+        await saveDesktopRuntimeConfig({
+          externalRestApiBaseUrl: activation.externalRestApiBaseUrl,
+          rpcProxyBaseUrl: '',
+          appName: activation.appName,
+        })
+        this.assertSessionGeneration(setupGeneration)
+        this.sessionGeneration += 1
+        return this.sessionGeneration
       })
-      this.assertSessionGeneration(setupGeneration)
-      this.sessionGeneration += 1
-      await this.resolveRuntimeConfigIfNeeded().catch(() => undefined)
+      await this.withNativeAuthEnvironmentCommit(async () => {
+        if (this.sessionGeneration === committedGeneration) {
+          await this.resolveRuntimeConfigIfNeeded().catch(() => undefined)
+        }
+      })
       return getDesktopRuntimeConfigState()
     } catch (error) {
       if (error instanceof ApiError && error.status === 404) {
@@ -1994,16 +2145,21 @@ export class AppService {
   }
 
   async passwordLogin(email: string, password: string): Promise<PasswordLoginResult> {
-    if (this.logoutInProgress) throw new Error('auth_transition_in_progress')
-    const loginGeneration = ++this.sessionGeneration
-    hydrateDesktopRuntimeConfig()
-    const normalizedEmail = email.trim().toLowerCase()
-    if (!isDesktopRuntimeConfigured()) {
-      throw new Error('desktop_setup_required')
-    }
-    await this.resolveRuntimeConfigIfNeeded()
+    const loginGeneration = await this.withNativeAuthEnvironmentCommit(async () => {
+      if (this.logoutInProgress) throw new Error('auth_transition_in_progress')
+      const generation = ++this.sessionGeneration
+      hydrateDesktopRuntimeConfig()
+      if (!isDesktopRuntimeConfigured()) {
+        throw new Error('desktop_setup_required')
+      }
+      return generation
+    })
+    await this.withNativeAuthEnvironmentCommit(async () => {
+      this.assertSessionGeneration(loginGeneration)
+      await this.resolveRuntimeConfigIfNeeded()
+    })
     this.assertSessionGeneration(loginGeneration)
-
+    const normalizedEmail = email.trim().toLowerCase()
     return this.completePasswordLogin(normalizedEmail, password, loginGeneration)
   }
 
@@ -2154,31 +2310,33 @@ export class AppService {
   }
 
   async logout(): Promise<number> {
-    this.logoutInProgress = true
-    this.sessionGeneration += 1
-    const logoutGeneration = this.sessionGeneration
-    const releasePrewarm = this.beginPrewarmAuthTransition()
-    try {
-      const envKey = getActiveEnvKey()
-      const legacyEnvKeys = getActiveLegacyEnvKeys()
-      await this.suspendDesktopGfsUploadsForAuthBoundary()
-      this.assertSessionGeneration(logoutGeneration)
+    return this.withNativeAuthEnvironmentCommit(async () => {
+      this.logoutInProgress = true
+      this.sessionGeneration += 1
+      const logoutGeneration = this.sessionGeneration
+      const releasePrewarm = this.beginPrewarmAuthTransition()
       try {
-        await this.tokenStore.clearSessionToken(envKey, { legacyEnvKeys })
+        const envKey = getActiveEnvKey()
+        const legacyEnvKeys = getActiveLegacyEnvKeys()
+        await this.suspendDesktopGfsUploadsForAuthBoundary()
         this.assertSessionGeneration(logoutGeneration)
-      } catch (error) {
-        if (this.sessionToken && this.me) this.activateGfsAuthScope()
-        throw error
+        try {
+          await this.tokenStore.clearSessionToken(envKey, { legacyEnvKeys })
+          this.assertSessionGeneration(logoutGeneration)
+        } catch (error) {
+          if (this.sessionToken && this.me) this.activateGfsAuthScope()
+          throw error
+        }
+        this.clearAuthenticatedSessionState()
+        // Grants survive logout (they are keyed by userId), but every cached SDK
+        // result must not: the next user of this machine gets nothing of this one's.
+        tryGetPluginSdkRuntime()?.notifySessionChanged(false)
+        return this.sessionGeneration
+      } finally {
+        releasePrewarm()
+        this.logoutInProgress = false
       }
-      this.clearAuthenticatedSessionState()
-      // Grants survive logout (they are keyed by userId), but every cached SDK
-      // result must not: the next user of this machine gets nothing of this one's.
-      tryGetPluginSdkRuntime()?.notifySessionChanged(false)
-      return this.sessionGeneration
-    } finally {
-      releasePrewarm()
-      this.logoutInProgress = false
-    }
+    })
   }
 
   /** Resolve a gfs:// URI to its current resource via the API (no local mirror). */
@@ -3512,6 +3670,10 @@ export class AppService {
   }
 
   async switchTeam(teamId: string): Promise<SessionState> {
+    return this.withNativeAuthEnvironmentCommit(() => this.switchTeamWithCommitOwner(teamId))
+  }
+
+  private async switchTeamWithCommitOwner(teamId: string): Promise<SessionState> {
     const targetTeamId = String(teamId || '').trim()
     if (!targetTeamId) throw new Error('teamId is required')
     // Explicit team changes fence opportunistic wake immediately. A failed
