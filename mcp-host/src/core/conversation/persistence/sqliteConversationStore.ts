@@ -1091,7 +1091,6 @@ export class SqliteConversationStore implements ConversationStore {
   ): Promise<void> {
     const sessionKey = this.sessionKeyById.get(conv.id)
     if (sessionKey) this.reconcilePinning(sessionKey, conv)
-    await this.persistQueue.enqueueSync({ kind: 'delete_pending_approval', requestId }, sessionKey)
     const deniedToolsJson =
       decision === 'cancel'
         ? undefined
@@ -1113,6 +1112,9 @@ export class SqliteConversationStore implements ConversationStore {
         activeTaskId: decision === 'approve' ? undefined : null,
         activeTraceContext: decision === 'approve' ? undefined : null,
         deniedToolsJson,
+        // One transaction: the pending row is consumed only together with the
+        // session/denial outcome, so a failed write leaves the approval intact.
+        deletePendingRequestId: requestId,
       },
       sessionKey
     )

@@ -162,6 +162,9 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
               denied_tools: op.deniedToolsJson,
             })
           }
+          if (op.deletePendingRequestId !== undefined) {
+            s.deletePendingApproval.run(op.deletePendingRequestId)
+          }
         })
         tx.immediate()
         return { ok: true }

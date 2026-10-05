@@ -303,6 +303,38 @@ describe('AgentStateMachine -- approval handling', () => {
     )
   })
 
+  it('reports a denial that could not be saved instead of acknowledging it', async () => {
+    ;(runToolUseLoop as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      type: 'need_approval',
+      approval: {
+        request_id: 'req-1',
+        tool_name: 'shell_exec',
+        parameters: { command: 'rm -rf /' },
+        description: 'Dangerous command',
+        tool_call_id: 'tc_1',
+        context_snapshot: [],
+      },
+    })
+    vi.spyOn(agent.getConversationManager(), 'deny').mockRejectedValueOnce(
+      new Error('database is locked')
+    )
+
+    const task = createTestTask('user-1')
+    await agent.executeTask(task)
+    expect(agent.getState()).toBe('waiting_approval')
+
+    const result = await agent.handleDenial('user-1', 'req-1')
+
+    expect(result.success).toBe(false)
+    expect(result.error).toMatch(/could not be saved/i)
+    // The call is still cancelled and the task completes: deny fails safe.
+    expect(agent.getState()).toBe('idle')
+    expect(runToolUseLoop).toHaveBeenCalledTimes(1)
+    expect(task.responseCallback).toHaveBeenCalledWith(
+      expect.objectContaining({ response: expect.stringContaining('denied') })
+    )
+  })
+
   it('preserves attachments when resuming after approval', async () => {
     const priorAttachment = {
       id: 'att_prior',

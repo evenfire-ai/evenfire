@@ -1249,14 +1249,24 @@ export class AgentStateMachine extends EventEmitter {
     // the durable pending_approval row is gone (IronClaw write-through). A
     // future restart cannot resurrect a phantom approval. Promise.resolve()
     // wraps legacy synchronous test doubles.
+    let saved = true
     try {
       await Promise.resolve(executor.deny({ userId }))
     } catch (err) {
-      logger.error({ err: err }, `executor.deny() failed:`)
+      // The executor still cancels the call and completes the task; only the
+      // durable record is missing, so never acknowledge it as a saved denial.
+      saved = false
+      logger.error({ err: err, requestId, taskId: entry.taskId }, `executor.deny() failed:`)
     }
     this.activeExecutors.delete(entry.taskId)
     this.releaseSessionForTask(executor.sourceTask)
 
+    if (!saved) {
+      return {
+        success: false,
+        error: 'The tool call was cancelled, but the denial could not be saved.',
+      }
+    }
     return { success: true }
   }
 

@@ -935,26 +935,32 @@ export class TaskExecutor {
    * durable pending_approval delete before returning, so we await here too —
    * the channel notification (responseCallback) only fires after the DB
    * mutation lands. Callers that fire-and-forget should attach `.catch(...)`.
+   *
+   * A denial fails safe: if recording it throws, the call is still cancelled
+   * and the task still completes, then the error is rethrown so the caller can
+   * report that the denial was not saved.
    */
   async deny(options?: { record?: boolean; userId?: string }): Promise<void> {
     if (this.state !== 'waiting_approval' || !this.conversation) return
 
     const toolName = this.conversation.pending_approval?.tool_name || 'unknown'
-    await this.deps.conversationManager.deny(this.conversation, options)
+    try {
+      await this.deps.conversationManager.deny(this.conversation, options)
+    } finally {
+      // Terminal SSE event emitted automatically when onComplete → queue.completeTask
+      // → lifecycle.transition('completed') fires (SseProgressReporter subscription).
 
-    // Terminal SSE event emitted automatically when onComplete → queue.completeTask
-    // → lifecycle.transition('completed') fires (SseProgressReporter subscription).
+      const denialMessage = `Tool \`${toolName}\` was denied by the user. The operation was not performed.`
+      if (this.task.responseCallback) {
+        this.task.responseCallback({ response: denialMessage }).catch(err => {
+          logger.error({ taskId: this.taskId, err }, 'Failed to send denial')
+        })
+      }
 
-    const denialMessage = `Tool \`${toolName}\` was denied by the user. The operation was not performed.`
-    if (this.task.responseCallback) {
-      this.task.responseCallback({ response: denialMessage }).catch(err => {
-        logger.error({ taskId: this.taskId, err }, 'Failed to send denial')
-      })
+      this.state = 'completed'
+      this.deps.onComplete(this.task)
+      this.resolveCompletion?.()
     }
-
-    this.state = 'completed'
-    this.deps.onComplete(this.task)
-    this.resolveCompletion?.()
   }
 
   /**

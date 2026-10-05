@@ -227,6 +227,11 @@ export type WorkerOp =
       activeTraceContext?: string | null
       /** undefined = keep. A JSON array (including "[]") replaces the column. */
       deniedToolsJson?: string | null
+      /**
+       * Consume this pending approval in the SAME transaction, so a resolved
+       * decision never commits without its session/denial outcome (or vice versa).
+       */
+      deletePendingRequestId?: string
     }
   | { kind: 'reap_processing_sessions'; nowEpoch: number; chunkSize?: number }
   | {
