@@ -29,7 +29,7 @@ extract() {
     variant, dest = ARGV[1], ARGV[2]
     text = File.read(ARGV[0])
     n = 0
-    text.scan(/<!-- file: (\S+) variants: ([AB ]+) -->\s*\n```ya?ml\n(.*?)```/m) do |path, vs, body|
+    text.scan(/<!-- file: (\S+) variants: ([ABC ]+) -->\s*\n```ya?ml\n(.*?)```/m) do |path, vs, body|
       next unless vs.split.include?(variant)
       abort "unsafe path #{path}" if path.start_with?("/") || path.include?("..")
       subs = { "<domain>" => "example.test", "<RELEASE_TAG>" => "v0.10.0",
@@ -57,7 +57,7 @@ render_variant() { # A|B
   local ov="$tree/deploy/overlays/digitalocean-doks"
   mkdir -p "$ov"
   extract "$v" "$ov" >/dev/null || { fail "$v: cannot extract contract blocks"; return 1; }
-  [ "$v" = A ] && mode=controller || mode=tunnel
+  case "$v" in A) mode=controller ;; B) mode=tunnel ;; *) mode=internal ;; esac
   OVERLAY_DIR="$ov" API_IPS='10.96.0.1 198.51.100.10' API_ENDPOINT_PORT=443 \
     DNS_IP=10.96.0.10 STORAGE_CLASS=do-block-storage INGRESS_MODE="$mode" \
     INGRESS_NAMESPACE=traefik \
@@ -89,6 +89,7 @@ render_variant() { # A|B
       froms = Array(p.dig("spec", "ingress")).flat_map { |r| Array(r["from"]) }
       has_ctrl = froms.any? { |f| f.dig("namespaceSelector", "matchLabels", "kubernetes.io/metadata.name") == "traefik" }
       errs << "#{ns}/#{n}: ingress-controller peer #{has_ctrl ? "present" : "absent"} in variant #{v}" if has_ctrl != (v == "A")
+      errs << "#{ns}/#{n}: public ingress opened in internal-only variant" if v == "C" && froms.any? { |f| !f.dig("podSelector", "matchLabels", "app").to_s.eql?("cloudflared") }
       errs << "#{ns}/#{n}: ipBlock ingress peer" if froms.any? { |f| f["ipBlock"] }
     end
     cf = docs.find { |d| d["kind"] == "Deployment" && d.dig("metadata", "name") == "cloudflared" }
@@ -154,8 +155,10 @@ guide_gate() { # A|B
 
 render_variant A
 render_variant B
+render_variant C
 guide_gate A
 guide_gate B
+guide_gate C
 
 if [ "$fails" -ne 0 ]; then
   echo "test-doks-overlay-contract: $fails failure(s)" >&2

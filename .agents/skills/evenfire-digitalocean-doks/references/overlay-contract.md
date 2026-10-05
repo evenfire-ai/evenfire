@@ -220,6 +220,42 @@ data:
       - service: http_status:404
 ```
 
+### Variant C — internal only (port-forward)
+
+For an agreed internal pilot with no public exposure. Run the generator with
+`INGRESS_MODE=internal`. The base public-ingress policies stay as shipped: they
+admit only `cloudflared`, which is not deployed, so nothing outside the cluster
+reaches the five services. Operators use `kubectl port-forward`. Use the agreed
+internal names for `<domain>`.
+
+<!-- file: kustomization.yaml variants: C -->
+```yaml
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+  - configmaps/rpc-proxy-config.yaml
+  - configmaps/mcp-host-config.yaml
+  - patches/cilium-api-egress.yaml
+components:
+  - ../../components/ghcr-images
+patches:
+  - path: patches/control-api-config.yaml
+  - path: patches/dynamic-images.yaml
+  - path: patches/hcc-cluster.yaml
+  - path: patches/external-rest-api-urls.yaml
+  - path: patches/storage.yaml
+  - path: patches/k8s-api-ip.yaml
+  - target: {group: networking.k8s.io, version: v1, kind: NetworkPolicy, name: "allow-dns-egress-(channels|control-plane|mcp-host|mcp-server|profiles|rpc-proxy|sandbox-recipes|webhook-ingress)"}
+    path: patches/kube-dns-egress-rule.yaml
+  - target: {group: networking.k8s.io, version: v1, kind: NetworkPolicy, name: sandbox-ui-static-dns-egress, namespace: sandbox-ui}
+    path: patches/kube-dns-egress-rule.yaml
+```
+
+Moving from Variant C to A or B later is an overlay change: switch the
+kustomization, re-run the generator with the new `INGRESS_MODE`, and follow the
+day-2 rule (re-render, gate, apply, tokens, `provision-gfs-runtime.sh`).
+
 ## ConfigMaps not in base
 
 `rpc-proxy` loads `rpc-proxy-config` via `envFrom` (missing →
@@ -228,7 +264,7 @@ These are the `v0.10.0` minikube templates with the minikube values replaced.
 The three `RPC_PROXY_*` cookie and token values are removed: the real values live
 in `rpc-proxy-secrets`, written by `gen-jwt-keys.sh`.
 
-<!-- file: configmaps/rpc-proxy-config.yaml variants: A B -->
+<!-- file: configmaps/rpc-proxy-config.yaml variants: A B C -->
 ```yaml
 apiVersion: v1
 kind: ConfigMap
@@ -273,7 +309,7 @@ active well inside a 60 s load-balancer idle timeout.
 `provision-gfs-runtime.sh` syncs the real key from `rpc-proxy-secrets` (guide
 5.12) and must be re-run after every apply, which resets it.
 
-<!-- file: configmaps/mcp-host-config.yaml variants: A B -->
+<!-- file: configmaps/mcp-host-config.yaml variants: A B C -->
 ```yaml
 apiVersion: v1
 kind: ConfigMap
@@ -325,7 +361,7 @@ data:
 
 ## `patches/control-api-config.yaml`
 
-<!-- file: patches/control-api-config.yaml variants: A B -->
+<!-- file: patches/control-api-config.yaml variants: A B C -->
 ```yaml
 apiVersion: v1
 kind: ConfigMap
@@ -349,7 +385,7 @@ human enables Grok; `GROK_LLM_PROXY_ADMIN_URL` is already an in-cluster URL.
 
 ## `patches/external-rest-api-urls.yaml`
 
-<!-- file: patches/external-rest-api-urls.yaml variants: A B -->
+<!-- file: patches/external-rest-api-urls.yaml variants: A B C -->
 ```yaml
 apiVersion: apps/v1
 kind: Deployment
@@ -386,7 +422,7 @@ spec:
   namespace. Set them explicitly. `mcp-host-desktop` is published on GHCR even
   though the component does not list it.
 
-<!-- file: patches/dynamic-images.yaml variants: A B -->
+<!-- file: patches/dynamic-images.yaml variants: A B C -->
 ```yaml
 apiVersion: apps/v1
 kind: Deployment
@@ -456,7 +492,7 @@ DigitalOcean attaches at most 15 volumes to one DOKS node
 ([volume limits](https://docs.digitalocean.com/products/volumes/details/limits/)).
 A new install does not need DigitalOcean Network File Storage.
 
-<!-- file: patches/storage.yaml variants: A B -->
+<!-- file: patches/storage.yaml variants: A B C -->
 ```yaml
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -484,7 +520,7 @@ for `GlobalFileSystem/gfs` to reach `Ready`. Do not copy
 `communicationchannel.yaml`, `workflowrecipepolicy.yaml`, `instances-e2e/`, or
 `fake-telegram/` from minikube.
 
-<!-- file: instances/globalfilesystem.yaml variants: A B -->
+<!-- file: instances/globalfilesystem.yaml variants: A B C -->
 ```yaml
 apiVersion: clerum.io/v1alpha1
 kind: GlobalFileSystem
@@ -508,7 +544,7 @@ spec:
   retainOnDelete: true
 ```
 
-<!-- file: instances/context.yaml variants: A B -->
+<!-- file: instances/context.yaml variants: A B C -->
 ```yaml
 apiVersion: clerum.io/v1alpha1
 kind: Context
@@ -526,7 +562,7 @@ channel only after the human configures it. The Host's `secretRef` Secret
 (`chatllm-api-keys`) is filled by the human in Control UI → Secrets → LLM, never
 by the agent.
 
-<!-- file: instances/host.yaml variants: A B -->
+<!-- file: instances/host.yaml variants: A B C -->
 ```yaml
 apiVersion: clerum.io/v1alpha1
 kind: Host

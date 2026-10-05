@@ -123,8 +123,9 @@ Follow the guide in order. Numbers match the guide's headings.
   [5.15] `verify-rollout.sh`.
 - **Phase 6** — HUMAN claims the admin account through a port-forward, then
   enters the LLM key in Control UI.
-- **Phase 7** — ingress: controller patches already applied (Variant A), or
-  Tunnel credentials patched from a file (Variant B).
+- **Phase 7** — ingress: controller patches already applied (Variant A),
+  Tunnel credentials patched from a file (Variant B), or nothing to expose
+  (Variant C, internal only).
 - **Phase 8** — prove and hand over: [references/verify.md](references/verify.md).
 
 Load [references/quirks.md](references/quirks.md) before writing the overlay.

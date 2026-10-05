@@ -96,6 +96,12 @@ ls "$o"/patches/ingress-controller-*.yaml >/dev/null 2>&1 && fail "tunnel: ingre
 grep -q '"443"' "$o/patches/cilium-api-egress.yaml" || fail "tunnel: CNP lacks port 443"
 grep -q '"6443"' "$o/patches/cilium-api-egress.yaml" && fail "tunnel: stale 6443 port from previous run"
 
+# --- internal mode (port-forward only) writes no ingress patches ----------
+o="$(new_overlay internal)"
+gen OVERLAY_DIR="$o" INGRESS_MODE=internal || fail "internal: generator failed: $(cat "$work/stderr")"
+ls "$o"/patches/ingress-controller-*.yaml >/dev/null 2>&1 && fail "internal: ingress-controller patches written"
+[ -f "$o/patches/cilium-api-egress.yaml" ] || fail "internal: cilium-api-egress.yaml missing"
+
 # --- fail-closed inputs ----------------------------------------------------
 o="$(new_overlay bad)"
 if gen OVERLAY_DIR="$o" INGRESS_MODE=tunnel API_IPS='fd00::1'; then fail "IPv6 API_IPS accepted"; fi

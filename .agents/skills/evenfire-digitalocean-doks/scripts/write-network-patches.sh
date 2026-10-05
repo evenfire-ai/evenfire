@@ -22,7 +22,7 @@
 #                      policy after translating ClusterIP:443 to endpoint:port)
 #   DNS_IP             kube-dns Service ClusterIP (IPv4)
 #   STORAGE_CLASS      RWO block StorageClass for HCC Host workspaces
-#   INGRESS_MODE       controller | tunnel
+#   INGRESS_MODE       controller | tunnel | internal (port-forward only)
 # Required when INGRESS_MODE=controller (read both from the live controller pods):
 #   INGRESS_NAMESPACE  namespace of the ingress controller (e.g. Traefik)
 #   INGRESS_POD_LABELS comma-separated key=value labels of the controller pods
@@ -35,7 +35,7 @@ set -euo pipefail
 : "${API_ENDPOINT_PORT:?set API_ENDPOINT_PORT}"
 : "${DNS_IP:?set DNS_IP}"
 : "${STORAGE_CLASS:?set STORAGE_CLASS}"
-: "${INGRESS_MODE:?set INGRESS_MODE to controller or tunnel}"
+: "${INGRESS_MODE:?set INGRESS_MODE to controller, tunnel, or internal}"
 NODELOCAL_DNS_IP="${NODELOCAL_DNS_IP:-}"
 INGRESS_NAMESPACE="${INGRESS_NAMESPACE:-}"
 INGRESS_POD_LABELS="${INGRESS_POD_LABELS:-}"
@@ -59,8 +59,8 @@ case "$INGRESS_MODE" in
     for l in "${ingress_labels[@]}"; do
       [[ "$l" =~ ^[A-Za-z0-9./_-]+=[A-Za-z0-9._-]+$ ]] || die "INGRESS_POD_LABELS entry '$l' is not key=value"
     done ;;
-  tunnel) ;;
-  *) die "INGRESS_MODE must be controller or tunnel (Gateway API traffic carries Cilium's ingress identity, which a NetworkPolicy cannot select)" ;;
+  tunnel | internal) ;;
+  *) die "INGRESS_MODE must be controller, tunnel, or internal (Gateway API traffic carries Cilium's ingress identity, which a NetworkPolicy cannot select)" ;;
 esac
 
 mkdir -p "$OVERLAY_DIR/patches"

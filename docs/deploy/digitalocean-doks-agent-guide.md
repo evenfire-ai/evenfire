@@ -103,7 +103,7 @@ Stop and ask for anything blank that blocks a phase.
 | `doctl` auth context, cluster name, region | Identity; pin every command |
 | An account role that is `cluster-admin` (team Owner or Member) | CRDs, ClusterRoles |
 | Domain for `app` / `profile` / `api` / `rpc` / `webhook`, **or** "internal only" | CORS, OAuth callbacks, invitations |
-| Ingress: an in-cluster ingress controller behind a DigitalOcean load balancer, **or** Cloudflare Tunnel | Overlay variant and ingress policies |
+| Ingress: an in-cluster ingress controller behind a DigitalOcean load balancer, Cloudflare Tunnel, **or** internal only (port-forward) | Overlay variant and ingress policies |
 | LLM provider and model name (the **human** enters the key in Control UI) | Host instance |
 | Member invitations: hosted mode, remote registration service, or none | HMAC secret source (5.6) |
 | GlobalFileSystem size | `instances/globalfilesystem.yaml` |
@@ -295,8 +295,9 @@ echo "release pin OK: $RELEASE_TAG"
 
 Build `$REPO_DIR/deploy/overlays/digitalocean-doks` exactly as
 [overlay-contract.md](../../.agents/skills/evenfire-digitalocean-doks/references/overlay-contract.md)
-specifies, choosing Variant A (in-cluster ingress controller) or Variant B
-(Cloudflare Tunnel), and replacing every placeholder. Then generate the
+specifies, choosing Variant A (in-cluster ingress controller), Variant B
+(Cloudflare Tunnel), or Variant C (internal only, port-forward), and replacing
+every placeholder. Then generate the
 cluster-specific files:
 
 ```bash
@@ -306,7 +307,7 @@ cd "$REPO_DIR"
 OVERLAY_DIR=deploy/overlays/digitalocean-doks \
 API_IPS="$API_IPS" API_ENDPOINT_PORT="$API_ENDPOINT_PORT" DNS_IP="$DNS_IP" \
 STORAGE_CLASS="$DEFAULT_SC" NODELOCAL_DNS_IP="$NODELOCAL_DNS_IP" \
-INGRESS_MODE='<controller|tunnel>' INGRESS_NAMESPACE='<controller namespace, Variant A>' \
+INGRESS_MODE='<controller|tunnel|internal>' INGRESS_NAMESPACE='<controller namespace, Variant A>' \
 INGRESS_POD_LABELS='<key=value,… of the controller pods, Variant A>' \
   bash "$SKILL_SCRIPTS/write-network-patches.sh"
 ```
@@ -555,6 +556,9 @@ Control UI → **Secrets → LLM** for the Host's `secretRef`.
 ---
 
 ## Phase 7 — Ingress (ask first)
+
+**Variant C (internal only):** skip this phase. Nothing is exposed; operators use
+`kubectl port-forward`.
 
 **Variant A (in-cluster ingress controller):** the `ingress-controller-*` patches
 must already be in the applied render. Create Ingress (or the controller's own
