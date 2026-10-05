@@ -263,7 +263,31 @@ describe('createGfsFolderZip', () => {
         { resourceId: 'root', drive: 'main', name: 'Many' },
         { deps, limits: { maxEntries: 2 } }
       )
-    ).rejects.toThrow(/more than 2 files/)
+    ).rejects.toThrow(/more than 2 entries/)
+  })
+
+  it('counts DIRECTORIES against the entry budget, bounding folder-only walks (R1-M3)', async () => {
+    // 2001 empty folders used to pass the file-only budget: every one of them
+    // would then cost a listing request against the shared read budget.
+    const deps = depsFor({
+      root: [
+        {
+          items: Array.from({ length: GFS_ZIP_MAX_ENTRIES + 1 }, (_, index) =>
+            folder({ resourceId: `empty-${index}`, name: `empty-${index}`, kind: 'directory' })
+          ),
+          nextCursor: null,
+        },
+      ],
+    })
+
+    await expect(
+      createGfsFolderZip({ resourceId: 'root', drive: 'main', name: 'Hive' }, { deps })
+    ).rejects.toThrow(
+      new RegExp(`more than ${GFS_ZIP_MAX_ENTRIES} entries \\(files and folders\\)`)
+    )
+    // Bounded work: the refusal fires inside the FIRST listing page.
+    expect(deps.listChildren).toHaveBeenCalledTimes(1)
+    expect(deps.download).not.toHaveBeenCalled()
   })
 
   it('refuses when the actual downloaded bytes exceed the ceiling', async () => {

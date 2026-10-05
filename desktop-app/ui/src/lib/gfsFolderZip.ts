@@ -279,6 +279,8 @@ export async function createGfsFolderZip(
   ]
   const visitedFolders = new Set<string>()
   let plannedBytes = 0
+  // Every accepted child, files AND folders, against `maxEntries` (R1-M3).
+  let entriesSeen = 0
   // ── Phase 1: recursive listing (breadth-first, cursor-paginated). ──
   report({ phase: 'listing', filesFound: 0, filesAdded: 0, currentPath: rootName })
   while (queue.length) {
@@ -303,22 +305,22 @@ export async function createGfsFolderZip(
       }
       for (const child of page.items) {
         const path = `${next.prefix}/${sanitizeZipSegment(child.name)}`
-        if (child.kind === 'directory') {
-          if (child.readable === false) {
-            skipped.push({ path, reason: 'No access' })
-            continue
-          }
-          queue.push({ resourceId: child.resourceId, prefix: path })
-          continue
-        }
         if (child.readable === false) {
           skipped.push({ path, reason: 'No access' })
           continue
         }
-        if (files.length + 1 > maxEntries) {
+        // Directories cost the same walk work as files (one listing request
+        // each), so the entry budget counts BOTH kinds (R1-M3) — 2000 empty
+        // folders is 2000 requests, not zero work.
+        if (entriesSeen + 1 > maxEntries) {
           throw new GfsFolderZipLimitError(
-            `"${folder.name}" holds more than ${maxEntries} files, which exceeds the folder-zip limit. Download smaller subfolders individually.`
+            `"${folder.name}" holds more than ${maxEntries} entries (files and folders), which exceeds the folder-zip limit. Download smaller subfolders individually.`
           )
+        }
+        entriesSeen += 1
+        if (child.kind === 'directory') {
+          queue.push({ resourceId: child.resourceId, prefix: path })
+          continue
         }
         // Older servers omit `bytes`; a missing value must read as 0, not
         // NaN — NaN would poison `plannedBytes` and silently disable the
