@@ -63,7 +63,7 @@ function genericCr(confidential: boolean) {
 function genericReader(confidential: boolean): McpServerOAuthReader {
   return {
     read: vi.fn(async () => {
-      const resolved = resolveServerOAuthSubject(genericCr(confidential))
+      const resolved = resolveServerOAuthSubject(genericCr(confidential), 'consent')
       if (!resolved) return null
       return { namespace: MCP_NS, ...resolved } as McpServerOAuthSubject
     }),
@@ -94,7 +94,11 @@ function recordingTransport(responseJson: string, status = 200) {
 
 function genericInput(): CallbackInput {
   return {
-    oauthClientId: CLIENT_ID,
+    target: {
+      kind: 'client',
+      id: CLIENT_ID,
+      redirectUri: 'https://control.example.com/api/v1/oauth-callback/my-generic-client',
+    },
     code: 'AUTH_CODE',
     state: signOAuthState(STATE_SECRET, {
       subjectKind: 'mcp',
@@ -104,7 +108,6 @@ function genericInput(): CallbackInput {
       grantKind: 'user',
       background: false,
     } as Parameters<typeof signOAuthState>[1]),
-    redirectUri: 'https://control.example.com/api/v1/oauth-callback/my-generic-client',
   }
 }
 

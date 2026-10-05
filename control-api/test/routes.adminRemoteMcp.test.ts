@@ -21,12 +21,14 @@ import {
 } from '../src/oauth/dynamicClientStore.js'
 import { decryptOAuthSecret, deriveOAuthEncryptionKey } from '../src/oauth/encryption.js'
 import { probeMcpTransport } from '../src/oauth/mcpTransportProbe.js'
+import { remoteCallbackVariant } from '../src/oauth/remoteCallback.js'
 import {
   type AdminRemoteMcpDeps,
   createAdminRemoteMcpRouter,
 } from '../src/routes/admin/remoteMcp.js'
 import { K8sNotFoundError } from '../src/services/resourceService.js'
 import {
+  ATLASSIAN_V2_PILOT,
   DCR_BASIC_REGISTRATION_RESPONSE,
   DCR_CONFIDENTIAL_REGISTRATION_RESPONSE,
   DCR_PUBLIC_REGISTRATION_RESPONSE,
@@ -92,10 +94,14 @@ const inconclusiveProbe = boundProbe(async () => ({ status: 503, headers: {}, bo
 // discovery client run against the 2026-09-25 Vercel probe fixtures.
 let vercelResult: DiscoveryResult
 
-function makeApp(gateway: MockGateway, probe: typeof probeMcpTransport = genericProbe) {
+function makeApp(
+  gateway: MockGateway,
+  probe: typeof probeMcpTransport = genericProbe,
+  deps: AdminRemoteMcpDeps = {}
+) {
   const app = express()
   app.use(express.json())
-  app.use(createAdminRemoteMcpRouter(gateway as unknown as K8sGateway, { probe }))
+  app.use(createAdminRemoteMcpRouter(gateway as unknown as K8sGateway, { probe, ...deps }))
   app.use(
     (err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
       res.status(500).json({ error: err instanceof Error ? err.message : 'unknown' })
@@ -131,6 +137,20 @@ let rfc9207Result: DiscoveryResult
 // real producer (T1) by documented substitution of the Notion PRM's
 // `bearer_methods_supported` to `["body"]` — the only field changed.
 let bodyBearerResult: DiscoveryResult
+// Real Linear DiscoveryResult (T1): the 2026-09-29 Linear probe advertises CIMD + `none`
+// AND RFC 9207, so it still resolves to CIMD on the shared callback.
+let linearResult: DiscoveryResult
+// An AS that genuinely offers NO registration endpoint, derived from the real producer
+// (T1) by documented subtraction: the real Linear pilot minus `registration_endpoint`.
+// Linear keeps CIMD + RFC 9207, so discovery resolves to `cimd`, never `dcr`.
+let noDcrResult: DiscoveryResult
+
+/** Documented T1 subtraction: drop `registration_endpoint` from a pilot's AS metadata. */
+function withoutRegistrationEndpoint<T extends { as: { json: string } }>(pilot: T): T {
+  const as = JSON.parse(pilot.as.json)
+  delete as.registration_endpoint
+  return { ...pilot, as: { ...pilot.as, json: JSON.stringify(as) } }
+}
 
 /**
  * Documented T1 substitution: add `authorization_response_iss_parameter_supported`
@@ -190,6 +210,22 @@ beforeAll(async () => {
   if (!bodyBearerOutcome.ok)
     throw new Error(`body-bearer fixture discovery failed: ${bodyBearerOutcome.error.kind}`)
   bodyBearerResult = bodyBearerOutcome.result
+
+  const linearOutcome = await actual.discoverRemoteOAuth(PILOTS.linear.mcpUrl, {
+    transport: makeDiscoveryTransport(PILOTS.linear),
+    resolveDns: async () => ['93.184.216.34'],
+  })
+  if (!linearOutcome.ok)
+    throw new Error(`linear fixture discovery failed: ${linearOutcome.error.kind}`)
+  linearResult = linearOutcome.result
+
+  const noDcrOutcome = await actual.discoverRemoteOAuth(PILOTS.linear.mcpUrl, {
+    transport: makeDiscoveryTransport(withoutRegistrationEndpoint(PILOTS.linear)),
+    resolveDns: async () => ['93.184.216.34'],
+  })
+  if (!noDcrOutcome.ok)
+    throw new Error(`no-DCR fixture discovery failed: ${noDcrOutcome.error.kind}`)
+  noDcrResult = noDcrOutcome.result
 })
 
 beforeEach(() => {
@@ -210,18 +246,39 @@ describe('POST /admin/mcp-servers/remote/discover (dry-run)', () => {
     expect(discoverRemoteOAuth).not.toHaveBeenCalled()
   })
 
-  it('returns the "Detected" prefill for a CIMD server → 200', async () => {
+  it('returns the "Detected" prefill for a CIMD server (Linear: CIMD + RFC 9207) → 200', async () => {
+    expect(linearResult.registrationMode).toBe('cimd')
+    mockDiscovery(linearResult)
+    const res = await request(makeApp(gatewayWithContext()))
+      .post('/admin/mcp-servers/remote/discover')
+      .send({ baseUrl: 'https://mcp.linear.app/mcp' })
+    expect(res.status).toBe(200)
+    expect(res.body.detected.registrationMode).toBe('cimd')
+    expect(res.body.detected.endpoints.token).toBe('https://mcp.linear.app/token')
+    expect(res.body.detected.resource).toBe('https://mcp.linear.app/mcp')
+    expect(res.body.detected.issForCallback).toBe('https://mcp.linear.app')
+    expect(res.body.detected.quirks).toEqual({ bearerInBody: false, supportsRefresh: true })
+    // No DCR marker for a CIMD server.
+    expect(res.body.detected.dcr).toBeUndefined()
+  })
+
+  it('CIMD-capable AS WITHOUT RFC 9207 (Notion) is detected as DCR, not CIMD → 200', async () => {
+    // Notion advertises CIMD + `none` but no `iss`: CIMD's single platform identity can
+    // only list the shared callback, so discovery falls back to its registration endpoint.
+    expect(notionResult.registrationMode).toBe('dcr')
     mockDiscovery(notionResult)
     const res = await request(makeApp(gatewayWithContext()))
       .post('/admin/mcp-servers/remote/discover')
       .send({ baseUrl: 'https://mcp.notion.com/mcp' })
     expect(res.status).toBe(200)
-    expect(res.body.detected.registrationMode).toBe('cimd')
+    expect(res.body.detected.registrationMode).toBe('dcr')
+    expect(res.body.detected.issForCallback).toBeUndefined()
     expect(res.body.detected.endpoints.token).toBe('https://mcp.notion.com/token')
-    expect(res.body.detected.resource).toBe('https://mcp.notion.com')
-    expect(res.body.detected.quirks).toEqual({ bearerInBody: false, supportsRefresh: true })
-    // No DCR marker for a CIMD server.
-    expect(res.body.detected.dcr).toBeUndefined()
+    expect(res.body.detected.dcr).toEqual({
+      available: true,
+      clientMode: 'public',
+      supportsRefresh: true,
+    })
   })
 
   it('marks DCR mode available (C2) with resolved clientMode + supportsRefresh → 200', async () => {
@@ -345,39 +402,63 @@ describe('POST /admin/mcp-servers/remote (install saga)', () => {
     expect(ctx.spec.mcpServers).toContain('notion-remote')
   })
 
-  // R3F-H1 (regression of R3-H2): the shared remote callback fails closed without a
-  // pinned issuer, so an install against an AS that does NOT advertise RFC 9207 would
-  // create a server that can never complete OAuth (user hits 400 at consent). The
-  // install must reject up front. `notionResult` is the REAL Notion discovery (no
-  // `authorization_response_iss_parameter_supported`), derived from the real producer —
-  // NOT hand-authored. Fails at parent a835d7130 (install proceeds, 201 + CR).
-  it('rejects a remote install against an AS without RFC 9207 → 422, no CR, no Secret', async () => {
-    // Self-check the T1 fixture: real Notion genuinely lacks the issuer pin.
+  // Before the per-server callback, an AS without RFC 9207 was refused outright (422
+  // `issuer_binding_required`, R3F-H1): the shared callback has no mix-up defence without
+  // `iss`. Now such an install proceeds on a redirect URI of the server's own. A
+  // pre-registered client gets `/remote/<serverName>` (no nonce: the client is
+  // confidential and its secret dies with the CR), returned so the operator can register
+  // it. `notionResult` is the REAL Notion discovery (no RFC 9207).
+  it('pre-registered against an AS without RFC 9207 → 201 on a per-server redirect URI', async () => {
     expect(notionResult.issForCallback).toBeUndefined()
     mockDiscovery(notionResult)
     const gw = gatewayWithContext('ctx-a')
-    const createResourceSpy = vi.spyOn(gw, 'createResource')
-    const createSecretSpy = vi.spyOn(gw, 'createSecret')
+    const { db } = makeInMemoryDynamicClientsDb()
 
-    const res = await request(makeApp(gw)).post('/admin/mcp-servers/remote').send({
-      serverName: 'no-rfc9207-remote',
-      contextRef: 'ctx-a',
-      baseUrl: 'https://mcp.notion.com/mcp',
-      mode: 'pre-registered',
-      clientId: 'client-abc',
-      clientSecret: 'shhh-secret',
-    })
+    const res = await request(makeApp(gw, genericProbe, { db }))
+      .post('/admin/mcp-servers/remote')
+      .send({
+        serverName: 'no-rfc9207-remote',
+        contextRef: 'ctx-a',
+        baseUrl: 'https://mcp.notion.com/mcp',
+        mode: 'pre-registered',
+        clientId: 'client-abc',
+        clientSecret: 'fixture-client-secret',
+      })
 
-    // Observable outcome (T4): rejected before any write.
-    expect(res.status).toBe(422)
-    expect(res.body.error).toBe('issuer_binding_required')
-    expect(createResourceSpy).not.toHaveBeenCalled()
-    expect(createSecretSpy).not.toHaveBeenCalled()
-    await expect(gw.getResource('mcpservers', 'no-rfc9207-remote', NS)).rejects.toThrow()
+    expect(res.status).toBe(201)
+    expect(res.body.callbackVariant).toBe('per-server')
+    expect(res.body.redirectUri).toBe(
+      'https://control.example.com/api/v1/oauth-callback/remote/no-rfc9207-remote'
+    )
+    const cr = (await gw.getResource('mcpservers', 'no-rfc9207-remote', NS)) as {
+      spec: { oauth: Record<string, unknown> }
+    }
+    expect(cr.spec.oauth.issForCallback).toBeUndefined()
+    expect(cr.spec.oauth.id).toBe('client-abc')
     const ctx = (await gw.getResource('contexts', 'ctx-a', NS)) as {
       spec: { mcpServers?: string[] }
     }
-    expect(ctx.spec.mcpServers ?? []).not.toContain('no-rfc9207-remote')
+    expect(ctx.spec.mcpServers).toContain('no-rfc9207-remote')
+  })
+
+  // The CIMD identity lists only the shared callback, so a CIMD install on an AS without
+  // RFC 9207 stays refused. Discovery never resolves `cimd` there; this mutant of its
+  // real output (Notion, no RFC 9207, mode forced to `cimd`) stands for a regression in
+  // mode selection, which the defensive gate must still stop before any write.
+  it('CIMD against an AS without RFC 9207 (mode-selection regression) → 422, no CR', async () => {
+    expect(notionResult.issForCallback).toBeUndefined()
+    mockDiscovery({ ...notionResult, registrationMode: 'cimd' })
+    const gw = gatewayWithContext('ctx-a')
+    const createResourceSpy = vi.spyOn(gw, 'createResource')
+    const res = await request(makeApp(gw)).post('/admin/mcp-servers/remote').send({
+      serverName: 'cimd-no-iss',
+      contextRef: 'ctx-a',
+      baseUrl: 'https://mcp.notion.com/mcp',
+      mode: 'cimd',
+    })
+    expect(res.status).toBe(422)
+    expect(res.body.error).toBe('issuer_binding_required')
+    expect(createResourceSpy).not.toHaveBeenCalled()
   })
 
   it('body-bearer resource: rejects at admission and creates no CR (the runtime cannot honor bearerInBody)', async () => {
@@ -447,13 +528,15 @@ describe('POST /admin/mcp-servers/remote (install saga)', () => {
   })
 
   it('rejects mode "dcr" when server-side discovery resolves a non-DCR AS → 400 mode_unsupported', async () => {
-    // The AS actually offers CIMD (not DCR); the operator's "dcr" request loses.
-    mockDiscovery(notionResult)
+    // The AS offers CIMD but no registration endpoint; the operator's "dcr" request loses.
+    expect(noDcrResult.endpoints.registration).toBeUndefined()
+    expect(noDcrResult.registrationMode).toBe('cimd')
+    mockDiscovery(noDcrResult)
     const gw = gatewayWithContext('ctx-a')
     const res = await request(makeApp(gw)).post('/admin/mcp-servers/remote').send({
       serverName: 'stripe-remote',
       contextRef: 'ctx-a',
-      baseUrl: 'https://mcp.notion.com/mcp',
+      baseUrl: 'https://mcp.linear.app/mcp',
       mode: 'dcr',
     })
     expect(res.status).toBe(400)
@@ -705,6 +788,8 @@ describe('POST /admin/mcp-servers/remote — DCR install saga (C2)', () => {
   const PUBLIC_IP = async () => ['93.184.216.34']
   // The DCR request needs a configured public callback origin for redirect_uris.
   let savedCallbackBaseUrl: string
+  // Origin the live Vercel DCR captures were registered under (their echoed redirect_uris).
+  const CAPTURED_DCR_ORIGIN = 'http://127.0.0.1:8090'
 
   // Real DCR DiscoveryResults, DERIVED FROM THE REAL PRODUCER by documented
   // subtraction (DEC-19): the actual discovery client is run against the Notion
@@ -774,15 +859,16 @@ describe('POST /admin/mcp-servers/remote — DCR install saga (C2)', () => {
     return app
   }
 
-  // R3F-H1: a DCR AS without RFC 9207 must be rejected BEFORE the DCR registration
-  // POST (saga step 0), so no throwaway client is minted at the AS, no dynamic_clients
-  // row is written, and no CR is created. Fails at parent a835d7130 (install registers
-  // + persists + creates the CR). `dcrNoIssResult` is producer-derived (no iss), T1.
-  it('rejects a DCR install against an AS without RFC 9207 → 422, no DCR registration, no row, no CR', async () => {
+  // Before the per-server callback, a DCR AS without RFC 9207 was refused before
+  // registering (422, R3F-H1). Now the client registers a redirect URI of this
+  // installation's own — `/remote/<serverName>/<installId>` — and the install succeeds.
+  // `dcrNoIssResult` is producer-derived (no iss), T1; the AS echoes what we POSTed.
+  it('DCR against an AS without RFC 9207 → 201, registers /remote/<name>/<installId>', async () => {
     vi.mocked(discoverRemoteOAuth).mockResolvedValue({ ok: true, result: dcrNoIssResult })
     const { db, rows } = makeInMemoryDynamicClientsDb()
     const { transport, calls } = makeDcrTransport({
       responseJson: JSON.stringify(DCR_PUBLIC_REGISTRATION_RESPONSE),
+      redirectUris: 'requested',
     })
     const gw = gatewayWithContext('ctx-a')
     const res = await request(
@@ -796,13 +882,17 @@ describe('POST /admin/mcp-servers/remote — DCR install saga (C2)', () => {
         mode: 'dcr',
       })
 
-    // Observable outcome (T4): rejected before any AS registration or write.
-    expect(res.status).toBe(422)
-    expect(res.body.error).toBe('issuer_binding_required')
-    // No DCR POST to the AS, no persisted dynamic_clients row, no CR.
-    expect(calls).toHaveLength(0)
-    expect(rows.size).toBe(0)
-    await expect(gw.getResource('mcpservers', 'no-rfc9207-dcr', NS)).rejects.toThrow()
+    expect(res.status).toBe(201)
+    expect(res.body.callbackVariant).toBe('per-server')
+    const stored = [...rows.values()][0]
+    expect(res.body.redirectUri).toBe(
+      `https://control.example.com/api/v1/oauth-callback/remote/no-rfc9207-dcr/${stored.install_id}`
+    )
+    // The one DCR POST registered exactly the URI the install reports.
+    const posts = calls.filter(c => c.method === 'POST')
+    expect(posts).toHaveLength(1)
+    expect(JSON.parse(posts[0].body ?? '{}').redirect_uris).toEqual([res.body.redirectUri])
+    await expect(gw.getResource('mcpservers', 'no-rfc9207-dcr', NS)).resolves.toBeTruthy()
   })
 
   // T3(a) — fails at parent 9e4677652: DCR install returns 400 dcr_not_available there.
@@ -904,6 +994,10 @@ describe('POST /admin/mcp-servers/remote — DCR install saga (C2)', () => {
     // triggered the Vercel downgrade in production.
     vi.mocked(discoverRemoteOAuth).mockResolvedValue({ ok: true, result: dcrConfidentialResult })
     const { db, rows } = makeInMemoryDynamicClientsDb()
+    // The captured body echoes the redirect URI registered under the dev origin it was
+    // captured with; the shared variant rejects an echo that differs from the request,
+    // so the install runs under that same origin.
+    config.oauthCallbackBaseUrl = CAPTURED_DCR_ORIGIN
     const { transport } = makeDcrTransport({
       responseJson: DCR_VERCEL_DOWNGRADE_REGISTRATION_JSON,
     })
@@ -947,6 +1041,10 @@ describe('POST /admin/mcp-servers/remote — DCR install saga (C2)', () => {
   it('public DCR where the AS echoes a stray client_secret → 201 public, secret DISCARDED (not persisted)', async () => {
     vi.mocked(discoverRemoteOAuth).mockResolvedValue({ ok: true, result: dcrPublicResult })
     const { db, rows } = makeInMemoryDynamicClientsDb()
+    // The captured body echoes the redirect URI registered under the dev origin it was
+    // captured with; the shared variant rejects an echo that differs from the request,
+    // so the install runs under that same origin.
+    config.oauthCallbackBaseUrl = CAPTURED_DCR_ORIGIN
     const { transport } = makeDcrTransport({
       responseJson: DCR_PUBLIC_WITH_ECHOED_SECRET_REGISTRATION_JSON,
     })
@@ -1805,5 +1903,657 @@ describe('POST /admin/mcp-servers/remote — DCR install saga (C2)', () => {
     await expect(gw.getResource('mcpservers', serverName, NS)).rejects.toThrow()
     expect(rowState(await getDynamicClient(db, ENC_KEY, key))).toEqual(reclaimerState)
     expect(deleteUrls).toEqual([MINTED_URI])
+  })
+})
+
+// ─── Per-server callback for an AS without RFC 9207 ─────────────────────────
+describe('POST /admin/mcp-servers/remote — per-server callback (AS without RFC 9207)', () => {
+  const PUBLIC_IP = async () => ['93.184.216.34']
+  const ORIGIN = 'https://control.example.com'
+  /** ORIGIN as a literal inside a RegExp (its dots must not match any character). */
+  const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const CIMD_SELF_CLIENT_ID = `${ORIGIN}/api/v1/.well-known/evenfire-mcp-client`
+  const ATLASSIAN_REGISTRATION =
+    'https://auth.atlassian.com/VCeDsk8ZHncYF1g234fKtc4lNipbBhu3/dcr/register'
+  const NONCE_RE = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+  let savedCallbackBaseUrl: string
+
+  // All producer-derived (T1): the real discovery client over real probe fixtures, with
+  // documented substitutions only where named.
+  let atlassianResult: DiscoveryResult
+  // Notion minus CIMD, confidential, no RFC 9207 → per-server DCR-confidential. Its
+  // registration responses carry an RFC 7592 handle, so the cleanup DELETE is observable.
+  let dcrConfNoIssResult: DiscoveryResult
+  // Same AS with RFC 9207 → shared DCR-confidential.
+  let dcrConfSharedResult: DiscoveryResult
+  // Linear minus its registration endpoint and minus RFC 9207: CIMD-only without `iss` →
+  // `manual`, i.e. the operator must pre-register.
+  let cimdOnlyNoIssResult: DiscoveryResult
+
+  function withoutRfc9207<T extends { as: { json: string } }>(pilot: T): T {
+    const as = JSON.parse(pilot.as.json)
+    delete as.authorization_response_iss_parameter_supported
+    return { ...pilot, as: { ...pilot.as, json: JSON.stringify(as) } }
+  }
+
+  async function discoverPilot(pilot: Parameters<typeof makeDiscoveryTransport>[0]) {
+    const actual = await vi.importActual<typeof import('../src/oauth/discovery.js')>(
+      '../src/oauth/discovery.js'
+    )
+    const outcome = await actual.discoverRemoteOAuth(pilot.mcpUrl, {
+      transport: makeDiscoveryTransport(pilot),
+      resolveDns: PUBLIC_IP,
+    })
+    if (!outcome.ok) throw new Error(`fixture discovery failed: ${outcome.error.kind}`)
+    return outcome.result
+  }
+
+  beforeAll(async () => {
+    atlassianResult = await discoverPilot(ATLASSIAN_V2_PILOT)
+    dcrConfNoIssResult = await discoverPilot(dcrPilot('confidential'))
+    dcrConfSharedResult = await discoverPilot(withRfc9207(dcrPilot('confidential')))
+    cimdOnlyNoIssResult = await discoverPilot(
+      withoutRfc9207(withoutRegistrationEndpoint(PILOTS.linear))
+    )
+  })
+
+  beforeEach(() => {
+    vi.mocked(discoverRemoteOAuth).mockReset()
+    savedCallbackBaseUrl = config.oauthCallbackBaseUrl
+    config.oauthCallbackBaseUrl = ORIGIN
+  })
+  afterEach(() => {
+    config.oauthCallbackBaseUrl = savedCallbackBaseUrl
+  })
+
+  function app(gw: MockGateway, deps: AdminRemoteMcpDeps) {
+    return makeApp(gw, genericProbe, deps)
+  }
+
+  it('fixtures: Atlassian is CIMD+DCR without RFC 9207 on one site → dcr; the others as named', () => {
+    expect(atlassianResult.issForCallback).toBeUndefined()
+    expect(atlassianResult.as.client_id_metadata_document_supported).toBe(true)
+    expect(atlassianResult.registrationMode).toBe('dcr')
+    expect(dcrConfNoIssResult.issForCallback).toBeUndefined()
+    expect(dcrConfSharedResult.issForCallback).toBeTruthy()
+    expect(cimdOnlyNoIssResult.registrationMode).toBe('manual')
+  })
+
+  // I7 — the e2e origin of this change: Atlassian v2 returned 422 issuer_binding_required.
+  it('Atlassian (CIMD+DCR, no RFC 9207, same site) → 201 by DCR on /remote/<name>/<installId>', async () => {
+    mockDiscovery(atlassianResult)
+    const { db, rows } = makeInMemoryDynamicClientsDb()
+    const { transport, calls } = makeDcrTransport({
+      registrationEndpoint: ATLASSIAN_REGISTRATION,
+      responseJson: JSON.stringify(DCR_PUBLIC_REGISTRATION_RESPONSE),
+      redirectUris: 'requested',
+    })
+    const gw = gatewayWithContext('ctx-a')
+    const res = await request(app(gw, { db, dcr: { transport, resolveDns: PUBLIC_IP } }))
+      .post('/admin/mcp-servers/remote')
+      .send({
+        serverName: 'atlassian',
+        contextRef: 'ctx-a',
+        baseUrl: 'https://mcp.atlassian.com/v2/mcp',
+        mode: 'dcr',
+      })
+
+    expect(res.status).toBe(201)
+    expect(res.body).toMatchObject({
+      registrationMode: 'dcr',
+      clientMode: 'public',
+      callbackVariant: 'per-server',
+    })
+    expect(res.body.redirectUri).toMatch(
+      new RegExp(`^${escapeRegExp(ORIGIN)}/api/v1/oauth-callback/remote/atlassian/${NONCE_RE}$`)
+    )
+    // The nonce is this installation's install_id (what the callback will check).
+    const stored = [...rows.values()][0]
+    expect(res.body.redirectUri.endsWith(`/${stored.install_id}`)).toBe(true)
+    // I4 (partial): the DCR POST registered exactly the URI the 201 reports.
+    const post = calls.find(c => c.method === 'POST')
+    expect(JSON.parse(post?.body ?? '{}').redirect_uris).toEqual([res.body.redirectUri])
+
+    const cr = (await gw.getResource('mcpservers', 'atlassian', NS)) as {
+      spec: { oauth: Record<string, unknown> }
+    }
+    expect(cr.spec.oauth.issForCallback).toBeUndefined()
+    expect(cr.spec.oauth.id).toBe(DCR_PUBLIC_REGISTRATION_RESPONSE.client_id)
+  })
+
+  // I15 — one derivation: the variant the install decided before registering equals the
+  // variant the runtime will derive from the CR the saga actually wrote.
+  const I15_CASES = [
+    { label: 'shared CIMD (Linear)', mode: 'cimd', result: () => linearResult },
+    { label: 'shared DCR', mode: 'dcr', result: () => dcrConfSharedResult },
+    { label: 'per-server DCR', mode: 'dcr', result: () => dcrConfNoIssResult },
+    { label: 'shared pre-registered', mode: 'pre-registered', result: () => rfc9207Result },
+    { label: 'per-server pre-registered', mode: 'pre-registered', result: () => notionResult },
+  ] as const
+  for (const c of I15_CASES) {
+    it(`I15 ${c.label}: variant(install block) === variant(written CR)`, async () => {
+      mockDiscovery(c.result())
+      const { db } = makeInMemoryDynamicClientsDb()
+      const { transport } = makeDcrTransport({
+        responseJson: JSON.stringify(DCR_CONFIDENTIAL_REGISTRATION_RESPONSE),
+        redirectUris: 'requested',
+      })
+      const gw = gatewayWithContext('ctx-a')
+      const res = await request(app(gw, { db, dcr: { transport, resolveDns: PUBLIC_IP } }))
+        .post('/admin/mcp-servers/remote')
+        .send({
+          serverName: 'i15-server',
+          contextRef: 'ctx-a',
+          baseUrl: 'https://mcp.notion.com/mcp',
+          mode: c.mode,
+          ...(c.mode === 'pre-registered' ? { clientId: 'cid-i15', clientSecret: 's' } : {}),
+        })
+      expect(res.status).toBe(201)
+      const cr = (await gw.getResource('mcpservers', 'i15-server', NS)) as {
+        spec: { oauth: Record<string, unknown> }
+      }
+      const expected = c.result().issForCallback ? 'shared' : 'per-server'
+      expect(res.body.callbackVariant).toBe(expected)
+      expect(remoteCallbackVariant(cr.spec.oauth)).toBe(res.body.callbackVariant)
+    })
+  }
+
+  // I12 — the registration response must report the per-server URI we asked for.
+  const PER_SERVER_REJECTIONS = [
+    {
+      label: 'a different redirect URI (the shared one)',
+      redirectUris: [`${ORIGIN}/api/v1/oauth-callback/remote`] as string[],
+      kind: 'redirect_uris_mismatch',
+    },
+    { label: 'no redirect_uris', redirectUris: 'omit' as const, kind: 'redirect_uris_missing' },
+  ]
+  for (const c of PER_SERVER_REJECTIONS) {
+    it(`I12 per-server DCR response with ${c.label} → 400, no CR, no row, RFC 7592 DELETE sent`, async () => {
+      mockDiscovery(dcrConfNoIssResult)
+      const { db, rows } = makeInMemoryDynamicClientsDb()
+      const { transport, calls } = makeDcrTransport({
+        responseJson: JSON.stringify(DCR_CONFIDENTIAL_REGISTRATION_RESPONSE),
+        redirectUris: c.redirectUris,
+      })
+      const gw = gatewayWithContext('ctx-a')
+      const res = await request(app(gw, { db, dcr: { transport, resolveDns: PUBLIC_IP } }))
+        .post('/admin/mcp-servers/remote')
+        .send({
+          serverName: 'i12-server',
+          contextRef: 'ctx-a',
+          baseUrl: 'https://mcp.notion.com/mcp',
+          mode: 'dcr',
+        })
+      expect(res.status).toBe(400)
+      expect(res.body).toEqual({ error: 'dcr_registration_failed', detail: { kind: c.kind } })
+      expect(rows.size).toBe(0)
+      await expect(gw.getResource('mcpservers', 'i12-server', NS)).rejects.toThrow()
+      const deletes = calls.filter(call => call.method === 'DELETE')
+      expect(deletes.map(d => d.url)).toEqual([
+        DCR_CONFIDENTIAL_REGISTRATION_RESPONSE.registration_client_uri,
+      ])
+      // The management bearer never reaches the response.
+      expect(JSON.stringify(res.body)).not.toContain(
+        DCR_CONFIDENTIAL_REGISTRATION_RESPONSE.registration_access_token
+      )
+    })
+  }
+
+  it('I12 shared DCR response reporting a different redirect URI → 400, no CR, no row, DELETE sent', async () => {
+    mockDiscovery(dcrConfSharedResult)
+    const { db, rows } = makeInMemoryDynamicClientsDb()
+    const { transport, calls } = makeDcrTransport({
+      responseJson: JSON.stringify(DCR_CONFIDENTIAL_REGISTRATION_RESPONSE),
+      redirectUris: ['https://elsewhere.example.com/api/v1/oauth-callback/remote'],
+    })
+    const gw = gatewayWithContext('ctx-a')
+    const res = await request(app(gw, { db, dcr: { transport, resolveDns: PUBLIC_IP } }))
+      .post('/admin/mcp-servers/remote')
+      .send({
+        serverName: 'i12-shared',
+        contextRef: 'ctx-a',
+        baseUrl: 'https://mcp.notion.com/mcp',
+        mode: 'dcr',
+      })
+    expect(res.status).toBe(400)
+    expect(res.body.detail).toEqual({ kind: 'redirect_uris_mismatch' })
+    expect(rows.size).toBe(0)
+    await expect(gw.getResource('mcpservers', 'i12-shared', NS)).rejects.toThrow()
+    expect(calls.filter(call => call.method === 'DELETE')).toHaveLength(1)
+  })
+
+  it('I12 shared DCR response without redirect_uris is tolerated → 201', async () => {
+    mockDiscovery(dcrConfSharedResult)
+    const { db, rows } = makeInMemoryDynamicClientsDb()
+    const { transport } = makeDcrTransport({
+      responseJson: JSON.stringify(DCR_CONFIDENTIAL_REGISTRATION_RESPONSE),
+      redirectUris: 'omit',
+    })
+    const gw = gatewayWithContext('ctx-a')
+    const res = await request(app(gw, { db, dcr: { transport, resolveDns: PUBLIC_IP } }))
+      .post('/admin/mcp-servers/remote')
+      .send({
+        serverName: 'i12-omit',
+        contextRef: 'ctx-a',
+        baseUrl: 'https://mcp.notion.com/mcp',
+        mode: 'dcr',
+      })
+    expect(res.status).toBe(201)
+    expect(res.body.redirectUri).toBe(`${ORIGIN}/api/v1/oauth-callback/remote`)
+    expect(rows.size).toBe(1)
+  })
+
+  for (const c of [
+    { label: 'per-server', result: () => dcrConfNoIssResult },
+    { label: 'shared', result: () => dcrConfSharedResult },
+  ]) {
+    it(`I12 ${c.label} DCR assigning the platform CIMD client_id → 400, no CR, no row, DELETE sent`, async () => {
+      mockDiscovery(c.result())
+      const { db, rows } = makeInMemoryDynamicClientsDb()
+      const { transport, calls } = makeDcrTransport({
+        responseJson: JSON.stringify({
+          ...DCR_CONFIDENTIAL_REGISTRATION_RESPONSE,
+          client_id: CIMD_SELF_CLIENT_ID,
+        }),
+        redirectUris: 'requested',
+      })
+      const gw = gatewayWithContext('ctx-a')
+      const res = await request(app(gw, { db, dcr: { transport, resolveDns: PUBLIC_IP } }))
+        .post('/admin/mcp-servers/remote')
+        .send({
+          serverName: 'i12-cimd',
+          contextRef: 'ctx-a',
+          baseUrl: 'https://mcp.notion.com/mcp',
+          mode: 'dcr',
+        })
+      expect(res.status).toBe(400)
+      expect(res.body.detail).toEqual({ kind: 'client_id_is_cimd_identity' })
+      expect(rows.size).toBe(0)
+      await expect(gw.getResource('mcpservers', 'i12-cimd', NS)).rejects.toThrow()
+      expect(calls.filter(call => call.method === 'DELETE')).toHaveLength(1)
+    })
+  }
+
+  it('DCR response with an oversized client_id → 400, no CR, no row, RFC 7592 DELETE sent', async () => {
+    mockDiscovery(dcrConfNoIssResult)
+    const { db, rows } = makeInMemoryDynamicClientsDb()
+    const { transport, calls } = makeDcrTransport({
+      responseJson: JSON.stringify({
+        ...DCR_CONFIDENTIAL_REGISTRATION_RESPONSE,
+        client_id: `https://as.example.com/${'/'.repeat(200_000)}a`,
+      }),
+      redirectUris: 'requested',
+    })
+    const gw = gatewayWithContext('ctx-a')
+    const res = await request(app(gw, { db, dcr: { transport, resolveDns: PUBLIC_IP } }))
+      .post('/admin/mcp-servers/remote')
+      .send({
+        serverName: 'huge-client-id',
+        contextRef: 'ctx-a',
+        baseUrl: 'https://mcp.notion.com/mcp',
+        mode: 'dcr',
+      })
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe('dcr_registration_failed')
+    expect(res.body.detail.kind).toBe('invalid_response')
+    expect(rows.size).toBe(0)
+    await expect(gw.getResource('mcpservers', 'huge-client-id', NS)).rejects.toThrow()
+    expect(calls.filter(call => call.method === 'DELETE')).toHaveLength(1)
+  })
+
+  it('DCR oversized client_id without an RFC 7592 handle → 400, no DELETE, internal flag not echoed', async () => {
+    mockDiscovery(dcrConfNoIssResult)
+    const { db, rows } = makeInMemoryDynamicClientsDb()
+    const {
+      registration_client_uri: _u,
+      registration_access_token: _t,
+      ...noHandle
+    } = DCR_CONFIDENTIAL_REGISTRATION_RESPONSE
+    const { transport, calls } = makeDcrTransport({
+      responseJson: JSON.stringify({ ...noHandle, client_id: 'c'.repeat(513) }),
+      redirectUris: 'requested',
+    })
+    const gw = gatewayWithContext('ctx-a')
+    const res = await request(app(gw, { db, dcr: { transport, resolveDns: PUBLIC_IP } }))
+      .post('/admin/mcp-servers/remote')
+      .send({
+        serverName: 'huge-no-handle',
+        contextRef: 'ctx-a',
+        baseUrl: 'https://mcp.notion.com/mcp',
+        mode: 'dcr',
+      })
+    expect(res.status).toBe(400)
+    expect(res.body.detail.kind).toBe('invalid_response')
+    expect(res.body.detail.minted).toBeUndefined()
+    expect(calls.filter(call => call.method === 'DELETE')).toHaveLength(0)
+    expect(rows.size).toBe(0)
+  })
+
+  it('pre-registered clientId longer than the CRD cap (512) → 400 before discovery', async () => {
+    const gw = gatewayWithContext('ctx-a')
+    const res = await request(app(gw, {}))
+      .post('/admin/mcp-servers/remote')
+      .send({
+        serverName: 'long-cid',
+        contextRef: 'ctx-a',
+        baseUrl: 'https://mcp.notion.com/mcp',
+        mode: 'pre-registered',
+        clientId: 'c'.repeat(513),
+        clientSecret: 's',
+      })
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe('invalid_request')
+    expect(discoverRemoteOAuth).not.toHaveBeenCalled()
+  })
+
+  // I17 — a per-server pre-registered client belongs to exactly one server.
+  async function installPreRegistered(
+    gw: MockGateway,
+    deps: AdminRemoteMcpDeps,
+    serverName: string,
+    clientId: string,
+    result: DiscoveryResult = notionResult
+  ) {
+    mockDiscovery(result)
+    return request(app(gw, deps)).post('/admin/mcp-servers/remote').send({
+      serverName,
+      contextRef: 'ctx-a',
+      baseUrl: 'https://mcp.notion.com/mcp',
+      mode: 'pre-registered',
+      clientId,
+      clientSecret: 'fixture-pre-reg-secret',
+    })
+  }
+
+  it('I17 client_id already used by another remote server → 409, no Secret, no CR', async () => {
+    const gw = gatewayWithContext('ctx-a')
+    const { db } = makeInMemoryDynamicClientsDb()
+    // The first server is written by the real saga (T1), not seeded by hand.
+    expect((await installPreRegistered(gw, { db }, 'first-server', 'shared-cid')).status).toBe(201)
+    const res = await installPreRegistered(gw, { db }, 'second-server', 'shared-cid')
+    expect(res.status).toBe(409)
+    expect(res.body).toMatchObject({ error: 'oauth_client_id_in_use', conflict: 'remote_server' })
+    expect(res.body.message).toMatch(/separate OAuth client/)
+    await expect(gw.getResource('mcpservers', 'second-server', NS)).rejects.toThrow()
+    await expect(gw.getSecret('second-server-oauth-client', NS)).rejects.toThrow()
+  })
+
+  it('I17 client_id of a live DCR client → 409 (dynamic_client), no Secret, no CR', async () => {
+    const gw = gatewayWithContext('ctx-a')
+    const { db, rows } = makeInMemoryDynamicClientsDb()
+    const { transport } = makeDcrTransport({
+      responseJson: JSON.stringify(DCR_CONFIDENTIAL_REGISTRATION_RESPONSE),
+      redirectUris: 'requested',
+    })
+    // A real DCR install leaves the live dynamic_clients row (T1).
+    mockDiscovery(dcrConfNoIssResult)
+    const dcr = await request(app(gw, { db, dcr: { transport, resolveDns: PUBLIC_IP } }))
+      .post('/admin/mcp-servers/remote')
+      .send({
+        serverName: 'dcr-server',
+        contextRef: 'ctx-a',
+        baseUrl: 'https://mcp.notion.com/mcp',
+        mode: 'dcr',
+      })
+    expect(dcr.status).toBe(201)
+    const dcrClientId = [...rows.values()][0].client_id as string
+    expect(dcrClientId).toBe(DCR_CONFIDENTIAL_REGISTRATION_RESPONSE.client_id)
+    // With the CR still present the CR check answers first; remove it the way a
+    // `kubectl delete` does (the row, and the client at the AS, stay behind).
+    await gw.deleteResource('mcpservers', 'dcr-server', NS)
+    expect(rows.size).toBe(1)
+
+    const res = await installPreRegistered(gw, { db }, 'pre-server', dcrClientId)
+    expect(res.status).toBe(409)
+    expect(res.body).toMatchObject({ error: 'oauth_client_id_in_use', conflict: 'dynamic_client' })
+    expect(res.body.message).toMatch(/separate OAuth client/)
+    await expect(gw.getResource('mcpservers', 'pre-server', NS)).rejects.toThrow()
+    await expect(gw.getSecret('pre-server-oauth-client', NS)).rejects.toThrow()
+  })
+
+  it('I17 client_id equal to the platform CIMD identity (any origin) → 409 (cimd_client)', async () => {
+    const gw = gatewayWithContext('ctx-a')
+    const { db } = makeInMemoryDynamicClientsDb()
+    for (const clientId of [
+      CIMD_SELF_CLIENT_ID,
+      'https://old-origin.example.org/api/v1/.well-known/evenfire-mcp-client',
+    ]) {
+      const res = await installPreRegistered(gw, { db }, 'cimd-pre', clientId)
+      expect(res.status).toBe(409)
+      expect(res.body).toMatchObject({ error: 'oauth_client_id_in_use', conflict: 'cimd_client' })
+      expect(res.body.message).toMatch(/separate OAuth client/)
+    }
+    await expect(gw.getResource('mcpservers', 'cimd-pre', NS)).rejects.toThrow()
+  })
+
+  // A client_id is only unique within its AS: the same string at another provider is
+  // another client, registered there with its own redirect URI.
+  function atOtherProvider(result: DiscoveryResult): DiscoveryResult {
+    return JSON.parse(
+      JSON.stringify(result).split('https://mcp.notion.com').join('https://auth.other-provider.io')
+    ) as DiscoveryResult
+  }
+
+  it('I17 the same client_id at another provider (remote server) → 201', async () => {
+    const gw = gatewayWithContext('ctx-a')
+    const { db } = makeInMemoryDynamicClientsDb()
+    const other = atOtherProvider(notionResult)
+    expect(other.issuer).toBe('https://auth.other-provider.io')
+    expect((await installPreRegistered(gw, { db }, 'first-server', 'shared-cid')).status).toBe(201)
+    const res = await installPreRegistered(gw, { db }, 'second-server', 'shared-cid', other)
+    expect(res.status).toBe(201)
+  })
+
+  it('I17 the same client_id as a DCR client at another provider → 201', async () => {
+    const gw = gatewayWithContext('ctx-a')
+    const { db, rows } = makeInMemoryDynamicClientsDb()
+    const { transport } = makeDcrTransport({
+      responseJson: JSON.stringify(DCR_CONFIDENTIAL_REGISTRATION_RESPONSE),
+      redirectUris: 'requested',
+    })
+    mockDiscovery(dcrConfNoIssResult)
+    const dcr = await request(app(gw, { db, dcr: { transport, resolveDns: PUBLIC_IP } }))
+      .post('/admin/mcp-servers/remote')
+      .send({
+        serverName: 'dcr-server',
+        contextRef: 'ctx-a',
+        baseUrl: 'https://mcp.notion.com/mcp',
+        mode: 'dcr',
+      })
+    expect(dcr.status).toBe(201)
+    const dcrClientId = [...rows.values()][0].client_id as string
+    await gw.deleteResource('mcpservers', 'dcr-server', NS)
+
+    const res = await installPreRegistered(
+      gw,
+      { db },
+      'pre-server',
+      dcrClientId,
+      atOtherProvider(notionResult)
+    )
+    expect(res.status).toBe(201)
+  })
+
+  // The conflict is keyed on the AS issuer, never on the protected resource: with the
+  // two distinct, only the issuer can find the first server's client.
+  it('I17 conflicts on the issuer even when the resource differs from it → 409', async () => {
+    const gw = gatewayWithContext('ctx-a')
+    const { db } = makeInMemoryDynamicClientsDb()
+    const distinctResource: DiscoveryResult = {
+      ...notionResult,
+      resource: 'https://mcp.notion.com/mcp',
+    }
+    expect(distinctResource.resource).not.toBe(distinctResource.issuer)
+    expect(
+      (await installPreRegistered(gw, { db }, 'first-server', 'shared-cid', distinctResource))
+        .status
+    ).toBe(201)
+    const res = await installPreRegistered(
+      gw,
+      { db },
+      'second-server',
+      'shared-cid',
+      distinctResource
+    )
+    expect(res.status).toBe(409)
+    expect(res.body).toMatchObject({ error: 'oauth_client_id_in_use', conflict: 'remote_server' })
+  })
+
+  it('I17 a different client_id at the same provider → 201', async () => {
+    const gw = gatewayWithContext('ctx-a')
+    const { db } = makeInMemoryDynamicClientsDb()
+    expect((await installPreRegistered(gw, { db }, 'first-server', 'cid-one')).status).toBe(201)
+    expect((await installPreRegistered(gw, { db }, 'second-server', 'cid-two')).status).toBe(201)
+  })
+
+  it('I17 does not constrain a shared (RFC 9207) pre-registered install → 201', async () => {
+    const gw = gatewayWithContext('ctx-a')
+    const { db } = makeInMemoryDynamicClientsDb()
+    expect(
+      (await installPreRegistered(gw, { db }, 'a-shared', 'cid-x', rfc9207Result)).status
+    ).toBe(201)
+    expect(
+      (await installPreRegistered(gw, { db }, 'b-shared', 'cid-x', rfc9207Result)).status
+    ).toBe(201)
+  })
+
+  // Per-server origin fails closed; shared keeps its historical behaviour.
+  for (const baseUrl of ['', 'https://control.example.com/some/prefix']) {
+    it(`per-server install with callback base URL ${JSON.stringify(baseUrl)} → 503, nothing written or minted`, async () => {
+      config.oauthCallbackBaseUrl = baseUrl
+      const gw = gatewayWithContext('ctx-a')
+      const { db, rows } = makeInMemoryDynamicClientsDb()
+      const { transport, calls } = makeDcrTransport({
+        responseJson: JSON.stringify(DCR_CONFIDENTIAL_REGISTRATION_RESPONSE),
+        redirectUris: 'requested',
+      })
+      mockDiscovery(dcrConfNoIssResult)
+      const dcr = await request(app(gw, { db, dcr: { transport, resolveDns: PUBLIC_IP } }))
+        .post('/admin/mcp-servers/remote')
+        .send({
+          serverName: 'no-origin-dcr',
+          contextRef: 'ctx-a',
+          baseUrl: 'https://mcp.notion.com/mcp',
+          mode: 'dcr',
+        })
+      expect(dcr.status).toBe(503)
+      expect(dcr.body).toEqual({ error: 'callback_base_url_unconfigured' })
+      expect(calls).toHaveLength(0)
+      expect(rows.size).toBe(0)
+
+      const pre = await installPreRegistered(gw, { db }, 'no-origin-pre', 'cid-no-origin')
+      expect(pre.status).toBe(503)
+      expect(pre.body).toEqual({ error: 'callback_base_url_unconfigured' })
+      await expect(gw.getSecret('no-origin-pre-oauth-client', NS)).rejects.toThrow()
+      await expect(gw.getResource('mcpservers', 'no-origin-pre', NS)).rejects.toThrow()
+    })
+  }
+
+  it('shared pre-registered install without a callback base URL still succeeds (no redirectUri reported)', async () => {
+    config.oauthCallbackBaseUrl = ''
+    const gw = gatewayWithContext('ctx-a')
+    const res = await installPreRegistered(gw, {}, 'shared-no-origin', 'cid-y', rfc9207Result)
+    expect(res.status).toBe(201)
+    expect(res.body.callbackVariant).toBe('shared')
+    expect(res.body.redirectUri).toBeUndefined()
+  })
+
+  // mode_unsupported names the missing RFC 9207 and the mode that does work.
+  for (const c of [
+    { label: 'DCR available (Notion)', result: () => notionResult, next: 'dcr' },
+    {
+      label: 'no DCR (Linear minus registration)',
+      result: () => cimdOnlyNoIssResult,
+      next: 'pre-registered',
+    },
+  ]) {
+    it(`CIMD requested on a CIMD AS without RFC 9207, ${c.label} → 400 naming "${c.next}"`, async () => {
+      mockDiscovery(c.result())
+      const gw = gatewayWithContext('ctx-a')
+      const res = await request(app(gw, {})).post('/admin/mcp-servers/remote').send({
+        serverName: 'cimd-req',
+        contextRef: 'ctx-a',
+        baseUrl: 'https://mcp.notion.com/mcp',
+        mode: 'cimd',
+      })
+      expect(res.status).toBe(400)
+      expect(res.body).toEqual({
+        error: 'mode_unsupported',
+        message: `this authorization server supports CIMD but not RFC 9207; install with mode "${c.next}"`,
+      })
+    })
+  }
+
+  it('CIMD requested on a DCR-only AS keeps the generic message', async () => {
+    mockDiscovery(dcrConfNoIssResult)
+    const gw = gatewayWithContext('ctx-a')
+    const res = await request(app(gw, {})).post('/admin/mcp-servers/remote').send({
+      serverName: 'cimd-req2',
+      contextRef: 'ctx-a',
+      baseUrl: 'https://mcp.notion.com/mcp',
+      mode: 'cimd',
+    })
+    expect(res.status).toBe(400)
+    expect(res.body.message).toBe(
+      'this authorization server requires dynamic client registration; install with mode "dcr"'
+    )
+  })
+
+  describe('/discover callback preview', () => {
+    async function discoverWith(result: DiscoveryResult) {
+      mockDiscovery(result)
+      return request(makeApp(gatewayWithContext()))
+        .post('/admin/mcp-servers/remote/discover')
+        .send({ baseUrl: 'https://mcp.example.com/mcp' })
+    }
+
+    it('per-server DCR (Atlassian): template with {serverName}/{installId} + AS endpoint hosts', async () => {
+      const res = await discoverWith(atlassianResult)
+      expect(res.status).toBe(200)
+      expect(res.body.callback).toEqual({
+        configured: true,
+        variant: 'per-server',
+        redirectUriTemplate: `${ORIGIN}/api/v1/oauth-callback/remote/{serverName}/{installId}`,
+      })
+      const atlassianHost = 'auth.atlassian.com'
+      expect(res.body.detected.asEndpointHosts).toEqual({
+        authorization: atlassianHost,
+        token: atlassianHost,
+        registration: atlassianHost,
+      })
+    })
+
+    it('per-server pre-registered (CIMD-only AS without RFC 9207): template /remote/{serverName}', async () => {
+      const res = await discoverWith(cimdOnlyNoIssResult)
+      expect(res.body.callback).toEqual({
+        configured: true,
+        variant: 'per-server',
+        redirectUriTemplate: `${ORIGIN}/api/v1/oauth-callback/remote/{serverName}`,
+      })
+      const linearHost = 'mcp.linear.app'
+      expect(res.body.detected.asEndpointHosts).toEqual({
+        authorization: linearHost,
+        token: linearHost,
+      })
+    })
+
+    it('shared (Linear, RFC 9207): the real shared URI, no endpoint hosts', async () => {
+      const res = await discoverWith(linearResult)
+      expect(res.body.callback).toEqual({
+        configured: true,
+        variant: 'shared',
+        redirectUriTemplate: `${ORIGIN}/api/v1/oauth-callback/remote`,
+      })
+      expect(res.body.detected.asEndpointHosts).toBeUndefined()
+    })
+
+    for (const baseUrl of ['', 'https://control.example.com/some/prefix']) {
+      it(`per-server with callback base URL ${JSON.stringify(baseUrl)} → configured:false, no template`, async () => {
+        config.oauthCallbackBaseUrl = baseUrl
+        const res = await discoverWith(atlassianResult)
+        expect(res.status).toBe(200)
+        expect(res.body.callback).toEqual({ configured: false, variant: 'per-server' })
+      })
+    }
   })
 })

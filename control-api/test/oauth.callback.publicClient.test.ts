@@ -87,7 +87,11 @@ it('public client: exchanges without reading or sending a client_secret', async 
   })
 
   const result = await handleOAuthCallback(
-    { oauthClientId: 'salesforce', code: 'AUTH_CODE', state, redirectUri: REDIRECT_URI },
+    {
+      target: { kind: 'client', id: 'salesforce', redirectUri: REDIRECT_URI },
+      code: 'AUTH_CODE',
+      state,
+    },
     deps
   )
 
@@ -152,7 +156,11 @@ describe('confidential client (control) still reads + sends client_secret', () =
       background: false,
     })
     const result = await handleOAuthCallback(
-      { oauthClientId: 'salesforce', code: 'AUTH_CODE', state, redirectUri: REDIRECT_URI },
+      {
+        target: { kind: 'client', id: 'salesforce', redirectUri: REDIRECT_URI },
+        code: 'AUTH_CODE',
+        state,
+      },
       deps
     )
     expect(result.kind).toBe('ok')
