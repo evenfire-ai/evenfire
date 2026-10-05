@@ -4,6 +4,8 @@ import type { IncomingHttpHeaders } from 'node:http'
 
 export const HCC_MCP_AUDIENCE = 'host-context-controller'
 export const WORKFLOW_APPROVAL_AUDIENCE = 'workflow-approvals'
+/** Internal execution transport; attaching a file never grants this scope. */
+export const HOST_NATIVE_EXECUTION_SCOPE = 'host:tools:execute'
 export const MCP_CREDENTIAL_READ_CAPABILITY = 'mcp:credential:read'
 
 const HOST_NAME_RE = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/
@@ -17,6 +19,8 @@ export interface VerifiedMcpHostPrincipal {
   issuedAt: number
   expiresAt: number
   audiences: readonly string[]
+  /** Set only from a validated signed scope list, never from request headers. */
+  nativeExecutionAllowed?: true
 }
 
 export class McpApiAuthenticationError extends Error {
@@ -65,6 +69,17 @@ function canonicalHostUid(value: unknown): string | null {
   const normalized = value.trim()
   if (!normalized || normalized !== value || normalized.length > 128) return null
   return /[^A-Za-z0-9._:-]/.test(normalized) ? null : normalized
+}
+
+function hasNativeExecutionScope(value: unknown): boolean {
+  return (
+    Array.isArray(value) &&
+    value.length > 0 &&
+    value.length <= 32 &&
+    value.every(scope => typeof scope === 'string' && /^[a-z][a-z0-9:_-]{0,63}$/.test(scope)) &&
+    new Set(value).size === value.length &&
+    value.includes(HOST_NATIVE_EXECUTION_SCOPE)
+  )
 }
 
 function bearerFromHeaders(headers: IncomingHttpHeaders, rawHeaders: readonly string[]): string {
@@ -186,6 +201,9 @@ export class McpApiAuthenticator {
       issuedAt: payload.iat as number,
       expiresAt: payload.exp as number,
       audiences,
+      ...(hasNativeExecutionScope(payload.workflowControlScopes)
+        ? { nativeExecutionAllowed: true as const }
+        : {}),
     }
   }
 }

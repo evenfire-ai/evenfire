@@ -301,6 +301,7 @@ export const hostFleetLifecycleCatchTotal = counter({
 // Outcomes partition completed creates; sum created, conflict, and error for
 // completed attempts. The bounded kind inventory includes the read-first Secret.
 export const CREATE_KINDS = [
+  'Job',
   'NetworkPolicy',
   'Service',
   'Deployment',

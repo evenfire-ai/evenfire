@@ -182,6 +182,9 @@ export const ALL_MCP_HOST_CONTROL_SCOPES = [
   // eligible broker target. Never add it to user-declarable Host/Recipe CRD fields.
   'llm:codex:execute',
   'llm:grok:execute',
+  // Internal native-tool transport. Only HCC's Host-bound access lineage may
+  // use this at the execution gateway; it adds no attachment/user approval.
+  'host:tools:execute',
 ] as const
 
 export type McpHostControlScope = (typeof ALL_MCP_HOST_CONTROL_SCOPES)[number]
