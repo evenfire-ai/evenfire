@@ -30,11 +30,31 @@ import {
   searchEntries,
 } from '../src/services/registryClient.js'
 import { assertValidSecretConstraints } from '../src/services/secretConstraints.js'
+import { controlApiForbiddenRead } from './helpers/secretReadFailure.js'
 import { MockGateway } from './mockGateway.js'
 
 vi.mock('node:dns/promises', () => ({
   lookup: vi.fn(async () => [{ address: '93.184.216.34', family: 4 }]),
 }))
+
+// A real Pino instance writing to memory, so tests can read the error records
+// the registry routes actually emit (the route responses carry no cause).
+const logCapture = vi.hoisted(() => ({ lines: [] as string[] }))
+vi.mock('../src/observability/logger.js', async () => {
+  const { default: pino } = await import('pino')
+  const stream = {
+    write: (chunk: string) => {
+      logCapture.lines.push(chunk)
+    },
+  }
+  return { rootLogger: pino({ level: 'error' }, stream) }
+})
+
+function capturedErrorRecords(msg: string): Array<Record<string, unknown>> {
+  return logCapture.lines
+    .map(line => JSON.parse(line) as Record<string, unknown>)
+    .filter(record => record.msg === msg)
+}
 
 // ── Mock the registry client ─────────────────────────────────────────────────
 vi.mock('../src/services/registryClient.js', () => ({
@@ -76,6 +96,17 @@ describe('registryErrorLogFields', () => {
       code: 'registry_unavailable',
     })
     expect(JSON.stringify(fields)).not.toContain('sensitive marker')
+  })
+
+  it('reads the numeric code of an ApiException as its status and includes one level of cause', () => {
+    const upstream = controlApiForbiddenRead('srv-credentials', 'mcp-server')
+    const wrapper = Object.assign(new Error('rollback gave up'), { cause: upstream })
+
+    const fields = registryErrorLogFields(wrapper)
+
+    expect(fields).toEqual({ name: 'Error', cause: { name: 'Error', status: 403 } })
+    expect(JSON.stringify(fields)).not.toContain('system:serviceaccount')
+    expect(JSON.stringify(fields)).not.toContain('5f0c7a4e-secret-read')
   })
 
   it('drops untrusted status and code values', () => {
@@ -1244,6 +1275,69 @@ describe('POST /admin/registry/install', () => {
     await expect(gw.getSecret('my-airtable-credentials', 'mcp-server')).resolves.toMatchObject({
       metadata: { uid: expect.any(String), resourceVersion: expect.any(String) },
     })
+  })
+
+  it('logs the upstream status when the Secret rollback read is rejected', async () => {
+    vi.mocked(getEntryVersion).mockResolvedValueOnce(MOCK_ENTRY)
+    vi.mocked(getCredentialSchema).mockResolvedValueOnce(MOCK_SCHEMA_REQUIRED)
+    logCapture.lines.length = 0
+
+    const gw = new MockGateway('mcp-server')
+    await gw.createResource('contexts', {
+      metadata: { name: 'default-context' },
+      spec: { contextId: 'default-context', mcpServers: [] },
+    })
+    vi.spyOn(gw, 'createResource').mockImplementation(async (plural, body, ns) => {
+      if (plural === 'mcpservers' && body.metadata.name === 'my-airtable') {
+        throw Object.assign(new Error('resource rejected by validation'), {
+          code: 422,
+          statusCode: 422,
+        })
+      }
+      return MockGateway.prototype.createResource.call(gw, plural, body, ns)
+    })
+    // The rollback deletes the created Secret, then re-reads it to confirm the
+    // delete settled. That confirming read is the one control-api is refused.
+    let secretDeleted = false
+    const deleteSecretSpy = vi.spyOn(gw, 'deleteSecret').mockImplementation(async (...args) => {
+      secretDeleted = true
+      return MockGateway.prototype.deleteSecret.apply(gw, args)
+    })
+    const getSecretSpy = vi.spyOn(gw, 'getSecret').mockImplementation(async (...args) => {
+      if (secretDeleted) throw controlApiForbiddenRead(args[0], args[1] ?? 'mcp-server')
+      return MockGateway.prototype.getSecret.apply(gw, args)
+    })
+
+    const app = makeApp(gw as unknown as import('../src/k8s.js').K8sGateway)
+    const res = await request(app)
+      .post('/admin/registry/install')
+      .send({
+        serverName: 'my-airtable',
+        contextRef: 'default-context',
+        registryEntryName: 'airtable-mcp',
+        registryEntryVersion: '1.0.0',
+        credentials: { AIRTABLE_API_KEY: 'api-key-test-token' },
+      })
+      .expect(500)
+
+    expect(res.body).toEqual({
+      error: 'registry_install_rollback_incomplete',
+      outcome: 'compensation_failed',
+    })
+    expect(deleteSecretSpy).toHaveBeenCalledTimes(1)
+    expect(getSecretSpy).toHaveBeenCalledWith('my-airtable-credentials', 'mcp-server')
+    const records = capturedErrorRecords('Registry install rollback failed')
+    expect(records).toHaveLength(1)
+    expect(records[0]).toMatchObject({
+      subject: 'Secret/my-airtable-credentials',
+      error: {
+        name: 'RegistryInstallRollbackError',
+        code: 'registry_install_rollback_incomplete',
+        cause: { name: 'Error', status: 403 },
+      },
+    })
+    expect(logCapture.lines.join('')).not.toContain('5f0c7a4e-secret-read')
+    expect(logCapture.lines.join('')).not.toContain('system:serviceaccount')
   })
 
   it('preserves the Secret when Context rollback cannot atomically prove dependency safety', async () => {
@@ -3661,6 +3755,72 @@ describe('DELETE /admin/registry/uninstall/:serverName', () => {
     })
   })
 
+  function expectNoApiserverText(body: unknown): void {
+    const serialized = JSON.stringify(body)
+    expect(serialized).not.toContain('system:serviceaccount')
+    expect(serialized).not.toContain('audit-id')
+    expect(serialized).not.toContain('5f0c7a4e-secret-read')
+  }
+
+  it('stops at the secrets stage without apiserver text when the credential Secret snapshot read is rejected', async () => {
+    const gw = new MockGateway('mcp-server')
+    await gw.createResource(
+      'mcpservers',
+      { metadata: { name: 'rbac-srv' }, spec: { image: 'test:1.0' } },
+      'mcp-server'
+    )
+    ;(gw as unknown as { _seeded?: boolean })._seeded = true
+    const getSecretSpy = vi
+      .spyOn(gw, 'getSecret')
+      .mockRejectedValue(controlApiForbiddenRead('rbac-srv-credentials', 'mcp-server'))
+    const deleteResourceSpy = vi.spyOn(gw, 'deleteResource')
+
+    const { app } = makeApp(gw)
+    const res = await request(app).delete('/admin/registry/uninstall/rbac-srv').expect(503)
+
+    // Liveness witness: the snapshot read ran, so the stop came from its rejection.
+    expect(getSecretSpy).toHaveBeenCalledWith('rbac-srv-credentials', 'mcp-server')
+    expect(res.body).toMatchObject({
+      error: 'registry_uninstall_partial',
+      outcome: 'repair_required',
+      pending: ['secrets'],
+      deleted: [],
+    })
+    expect(res.body.warnings).toEqual([
+      'Secret/rbac-srv-credentials: unable to verify identity',
+      'Secret/rbac-srv-oauth-client: unable to verify identity',
+    ])
+    expectNoApiserverText(res.body)
+    expect(deleteResourceSpy).not.toHaveBeenCalled()
+  })
+
+  it('names only the HTTP status when the credential Secret delete is rejected', async () => {
+    const gw = new MockGateway('mcp-server')
+    await gw.createResource(
+      'mcpservers',
+      { metadata: { name: 'rbac-srv' }, spec: { image: 'test:1.0' } },
+      'mcp-server'
+    )
+    gw.seedSecret('rbac-srv-credentials', 'mcp-server')
+    ;(gw as unknown as { _seeded?: boolean })._seeded = true
+    const deleteSecretSpy = vi
+      .spyOn(gw, 'deleteSecret')
+      .mockRejectedValue(controlApiForbiddenRead('rbac-srv-credentials', 'mcp-server'))
+
+    const { app } = makeApp(gw)
+    const res = await request(app).delete('/admin/registry/uninstall/rbac-srv').expect(503)
+
+    expect(deleteSecretSpy).toHaveBeenCalledTimes(1)
+    expect(res.body).toMatchObject({
+      error: 'registry_uninstall_partial',
+      outcome: 'repair_required',
+      pending: ['secrets'],
+      deleted: [],
+    })
+    expect(res.body.warnings).toEqual(['Secret/rbac-srv-credentials: K8s error 403'])
+    expectNoApiserverText(res.body)
+  })
+
   it('does not delete a same-name replacement that wins the uninstall race', async () => {
     const gw = new MockGateway('mcp-server')
     await gw.createResource('mcpservers', {
@@ -3756,6 +3916,18 @@ describe('DELETE /admin/registry/uninstall/:serverName', () => {
 
 // ── Upgrade flow (§9.4) ─────────────────────────────────────────────────────
 describe('POST /admin/registry/upgrade', () => {
+  // The McpServer update rejected with a 422 answers the composed body, never
+  // the apiserver's own text ('upgrade conflict' in these fixtures).
+  const MCP_UPGRADE_REJECTED = {
+    error: 'registry_upstream_rejected',
+    message:
+      'the Kubernetes API server rejected the McpServer "my-srv" spec that control-api ' +
+      'built from registry entry test-mcp@2.0.0 (HTTP 422). Your request is not the cause: ' +
+      "the catalog entry and this cluster's McpServer definition or admission policy disagree.",
+    resourceType: 'mcp-server',
+    resourceName: 'my-srv',
+    namespace: 'mcp-server',
+  }
   const MOCK_ENTRY_V2 = {
     id: '1',
     name: 'test-mcp',
@@ -3869,7 +4041,13 @@ describe('POST /admin/registry/upgrade', () => {
       .expect(409)
 
     expect(raced).toBe(true)
-    expect(res.body.error).toContain('modified')
+    expect(res.body).toEqual({
+      error: 'registry_upstream_rejected',
+      message: `Secret "${secretName}" in namespace "mcp-server" changed while this request was running. Retry.`,
+      resourceType: 'secret',
+      resourceName: secretName,
+      namespace: 'mcp-server',
+    })
     expect(res.body.upgraded).toBeUndefined()
     await expect(gw.getSecret(secretName, 'mcp-server')).resolves.toMatchObject({
       metadata: {
@@ -4796,7 +4974,7 @@ describe('POST /admin/registry/upgrade', () => {
       })
       .expect(422)
 
-    expect(res.body.error).toContain('upgrade conflict')
+    expect(res.body).toEqual(MCP_UPGRADE_REJECTED)
     expect(updateSpy).toHaveBeenCalled()
     expect(deleteSecretSpy).toHaveBeenCalledWith(
       'my-srv-credentials',
@@ -4925,7 +5103,7 @@ describe('POST /admin/registry/upgrade', () => {
       })
       .expect(422)
 
-    expect(res.body.error).toContain('upgrade conflict')
+    expect(res.body).toEqual(MCP_UPGRADE_REJECTED)
     expect(updateSecretSpy).toHaveBeenCalledTimes(2)
     expect(updateSecretSpy.mock.calls[1][0]).toMatchObject({
       name: 'my-srv-credentials',
@@ -5036,11 +5214,9 @@ describe('POST /admin/registry/upgrade', () => {
       })
       .expect(422)
 
-    expect(res.body).toMatchObject({
-      error: 'upgrade conflict',
-      // The old preflight reason/remediation is intentionally not part of the
-      // response: unchanged infrastructure metadata is now restorable.
-    })
+    // The old preflight reason/remediation is intentionally not part of the
+    // response: unchanged infrastructure metadata is now restorable.
+    expect(res.body).toEqual(MCP_UPGRADE_REJECTED)
     expect(updateSecretSpy).toHaveBeenCalledTimes(2)
     expect(updateResourceSpy).toHaveBeenCalled()
     const legacyApplyKey = [
@@ -5098,7 +5274,7 @@ describe('POST /admin/registry/upgrade', () => {
       })
       .expect(422)
 
-    expect(res.body.error).toBe('upgrade conflict')
+    expect(res.body).toEqual(MCP_UPGRADE_REJECTED)
     expect(updateSecretSpy).toHaveBeenCalledTimes(2)
     expect(updateSecretSpy.mock.calls[0][0].annotations).not.toHaveProperty(futureKey)
     expect(updateSecretSpy.mock.calls[1][0].annotations).toMatchObject({
