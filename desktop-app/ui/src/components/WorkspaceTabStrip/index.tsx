@@ -31,6 +31,7 @@ function sideFromEvent(event: React.DragEvent<HTMLElement>): DropSide {
 export function WorkspaceTabStrip({
   tabs,
   activeTabId,
+  pendingTabId = null,
   onSelect,
   onClose,
   onReorder,
@@ -118,6 +119,7 @@ export function WorkspaceTabStrip({
         <div className="chat-view-tabs__list">
           {tabs.map((tab, index) => {
             const active = tab.id === activeTabId
+            const pending = tab.id === pendingTabId
             const sessionState =
               tab.kind === 'chat' && tab.chat?.agentRef && tab.chat?.chatId
                 ? chatList?.sessionStateByChatKey[makeTaskKey(tab.chat.agentRef, tab.chat.chatId)]
@@ -156,7 +158,8 @@ export function WorkspaceTabStrip({
                 <Button
                   align="start"
                   aria-controls={active ? panelId : undefined}
-                  aria-label={tab.title}
+                  aria-label={pending ? `${tab.title}, checking access` : tab.title}
+                  aria-busy={pending || undefined}
                   aria-pressed={active}
                   className="chat-view-tab__select"
                   color="neutral"
@@ -169,6 +172,7 @@ export function WorkspaceTabStrip({
                     <ChatStateBadge sessionState={sessionState} unreadTerminal={false} />
                   )}
                   <span className="chat-view-tab__label">{tab.title}</span>
+                  {pending && <span className="chat-view-tab__pending" aria-hidden="true" />}
                 </Button>
                 <Button
                   aria-label={`Close ${tab.title}`}

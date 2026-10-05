@@ -17142,6 +17142,30 @@ pre {
   white-space: nowrap;
 }
 
+.chat-view-tab__pending {
+  animation: chat-view-tab-pending 0.8s linear infinite;
+  border: 2px solid currentColor;
+  border-radius: 50%;
+  border-right-color: transparent;
+  flex: 0 0 0.75rem;
+  height: 0.75rem;
+  margin-left: var(--space-2);
+}
+
+@keyframes chat-view-tab-pending {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-view-tab__pending {
+    animation: none;
+    border-right-color: currentColor;
+    border-top-color: transparent;
+  }
+}
+
 .chat-view-tab__close {
   flex: 0 0 auto;
 }

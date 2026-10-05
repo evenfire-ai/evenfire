@@ -17,6 +17,7 @@ import {
   openFilesTab,
   openPreviewTab,
   openSettingsTab,
+  selectWorkspaceTab,
 } from '@lib/workspaceTabs'
 import { mapKindToRoute, settingsSectionForRoute } from '@lib/workspaceTabsRoute'
 import { App } from '@/App'
@@ -174,6 +175,9 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
   const noop = vi.fn()
   let controller: AppController
   let tabSequence = 2
+  let navigationIntent = 0
+  const beginNavigationIntent = vi.fn(() => ++navigationIntent)
+  const isNavigationIntentCurrent = vi.fn((intent: number) => navigationIntent === intent)
   const nextWorkspaceTabId = vi.fn(() => `ws-tab-${tabSequence++}`)
   // React-setState-faithful: bail out on an unchanged reference (so the
   // idempotent reconcile effect can't spin), otherwise commit + re-render.
@@ -229,6 +233,7 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
   // Faithful to the real controller: nav is a store action. `navItem` is derived
   // (useReactiveController), so these drive the store — never set navItem.
   const handleNavSelect = vi.fn((item: AppController['navItem']) => {
+    beginNavigationIntent()
     if (item === DESKTOP_ROUTES.chat) {
       controller.selectedAgent = null
       clearAppsPicker()
@@ -256,6 +261,7 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
   // app tab) untouched so the route stays on `apps`.
   const handleSelectChatAgent = vi.fn(
     (agentName: string, options: { chatId?: string; keepNavItem?: boolean } = {}) => {
+      beginNavigationIntent()
       controller.selectedAgent = agentName
       controller.activeChatId = options.chatId ?? null
       if (!options.keepNavItem) {
@@ -275,6 +281,7 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
       notification: { kind?: string; agentName?: string; chatId?: string },
       options: { keepNavItem?: boolean } = {}
     ) => {
+      beginNavigationIntent()
       // Faithful routing: workflow notifications navigate to the plugins section;
       // sdk notifications navigate away without touching the agent chat state.
       if (notification.kind === 'workflow_completed') {
@@ -356,6 +363,9 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     handleEnsureTeamContext: vi.fn(async () => false),
     getCurrentTeamId: vi.fn(() => 'team-a'),
     isHostAccessBlocked: vi.fn(() => false),
+    verifyHostAccess: vi.fn(async () => true),
+    beginNavigationIntent,
+    isNavigationIntentCurrent,
     handleSelectChatAgent,
     handleOpenNotification,
     handleNavSelect,
@@ -410,6 +420,166 @@ const CHAT_LIST = [
     messageCount: 0,
   },
 ]
+
+const CHAT_TAB_A = {
+  id: 'chat-a',
+  title: 'Conversation A',
+  createdAt: CHAT_LIST_TS,
+  updatedAt: CHAT_LIST_TS,
+  messageCount: 0,
+} satisfies AppController['chatList'][number]
+const CHAT_TAB_B = {
+  id: 'chat-b',
+  title: 'Conversation B',
+  createdAt: CHAT_LIST_TS,
+  updatedAt: CHAT_LIST_TS,
+  messageCount: 0,
+} satisfies AppController['chatList'][number]
+const CHAT_TAB_B_LATEST = {
+  ...CHAT_TAB_B,
+  agentRef: 'agent-b',
+} satisfies AppController['latestChatSessions'][number]
+const CHAT_TAB_ACCESS_LIST = [CHAT_TAB_A, CHAT_TAB_B]
+
+function deferredBoolean() {
+  let resolve!: (value: boolean) => void
+  const promise = new Promise<boolean>(resolvePromise => {
+    resolve = resolvePromise
+  })
+  return { promise, resolve }
+}
+
+describe('App workspace chat tabs with held Host access', () => {
+  let currentController: AppController
+  let verificationChecks: ReturnType<typeof deferredBoolean>[]
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    const chatA = openChatTab(createWorkspaceTabsState('chat-a', 'agent-a'), {
+      id: 'chat-a',
+      agentRef: 'agent-a',
+      chatId: 'chat-a',
+      title: 'Conversation A',
+    })
+    const chatB = openChatTab(chatA, {
+      id: 'chat-b',
+      agentRef: 'agent-b',
+      chatId: 'chat-b',
+      title: 'Conversation B',
+    })
+    const workspaceTabs = selectWorkspaceTab(chatB, 'chat-a')
+    let hostAccessBlocked = true
+    verificationChecks = [deferredBoolean(), deferredBoolean()]
+    let verificationIndex = 0
+
+    currentController = makeController({
+      workspaceTabs,
+      selectedAgent: 'agent-a',
+      activeChatId: 'chat-a',
+      chatList: CHAT_TAB_ACCESS_LIST,
+      latestChatSessions: [CHAT_TAB_B_LATEST],
+      hostAuthorityRevision: 0,
+      isHostAccessBlocked: vi.fn((agentRef: string) => agentRef === 'agent-b' && hostAccessBlocked),
+      verifyHostAccess: vi.fn(() => {
+        const check = verificationChecks[verificationIndex++]!
+        return check.promise.then(verified => {
+          if (verified) {
+            hostAccessBlocked = false
+            currentController.hostAuthorityRevision += 1
+          }
+          return verified
+        })
+      }),
+    } as Partial<AppController>)
+    vi.mocked(useAppController).mockImplementation(() => useReactiveController(currentController))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        shortcuts: { onCommand: vi.fn(() => vi.fn()) },
+        app: { rendererReady: vi.fn().mockResolvedValue(undefined) },
+        sandboxUi: {
+          listApps: vi.fn().mockResolvedValue({ apps: [] }),
+          listPendingDeepLinks: vi.fn().mockResolvedValue({ links: [] }),
+          clearPendingDeepLinks: vi.fn().mockResolvedValue(undefined),
+          onDeepLink: vi.fn(() => vi.fn()),
+          setVisible: vi.fn().mockResolvedValue(undefined),
+          setBounds: vi.fn().mockResolvedValue(undefined),
+          focusActive: vi.fn().mockResolvedValue(true),
+          close: vi.fn().mockResolvedValue(undefined),
+        },
+      } as unknown as Window['clerum'],
+    })
+  })
+
+  afterEach(() => {
+    cleanup()
+    delete (window as { clerum?: unknown }).clerum
+  })
+
+  it('keeps the current chat active through denial and list reconciliation, then switches on retry', async () => {
+    render(<App />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Conversation unavailable' }))
+
+    expect(
+      screen.getByRole('button', { name: 'Conversation A' }).getAttribute('aria-pressed')
+    ).toBe('true')
+    expect(
+      screen
+        .getByRole('button', { name: 'Conversation unavailable, checking access' })
+        .getAttribute('aria-busy')
+    ).toBe('true')
+    expect(screen.getByTestId('chat-page-surface').getAttribute('data-active-chat-id')).toBe(
+      'chat-a'
+    )
+
+    act(() => {
+      currentController.chatList = [{ ...CHAT_TAB_A, title: 'Renamed A' }, CHAT_TAB_B]
+      forceControllerRender()
+    })
+    expect(screen.getByRole('button', { name: 'Renamed A' }).getAttribute('aria-pressed')).toBe(
+      'true'
+    )
+    expect(screen.getByTestId('chat-page-surface').getAttribute('data-active-chat-id')).toBe(
+      'chat-a'
+    )
+
+    await act(async () => verificationChecks[0]!.resolve(false))
+    expect(screen.getByRole('button', { name: 'Renamed A' }).getAttribute('aria-pressed')).toBe(
+      'true'
+    )
+    expect(screen.getByRole('button', { name: 'Conversation unavailable' })).toBeTruthy()
+    expect(currentController.handleSelectChatAgent).not.toHaveBeenCalledWith(
+      'agent-b',
+      expect.anything()
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Conversation unavailable' }))
+    await act(async () => verificationChecks[1]!.resolve(true))
+
+    expect(
+      screen.getByRole('button', { name: 'Conversation B' }).getAttribute('aria-pressed')
+    ).toBe('true')
+    expect(screen.getByTestId('chat-page-surface').getAttribute('data-active-chat-id')).toBe(
+      'chat-b'
+    )
+  })
+
+  it('ignores a late verification after another workspace tab is selected', async () => {
+    render(<App />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Conversation unavailable' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Conversation A' }))
+    await act(async () => verificationChecks[0]!.resolve(true))
+
+    expect(
+      screen.getByRole('button', { name: 'Conversation A' }).getAttribute('aria-pressed')
+    ).toBe('true')
+    expect(screen.getByTestId('chat-page-surface').getAttribute('data-active-chat-id')).toBe(
+      'chat-a'
+    )
+  })
+})
 
 describe('App chat drawer — reopen preserves the last-viewed chat', () => {
   let currentController: AppController

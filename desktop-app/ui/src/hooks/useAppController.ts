@@ -321,6 +321,11 @@ export function useAppController() {
   const authorityScopeRef = useRef(authorityScope)
   authorityScopeRef.current = authorityScope
   const navigationIntentEpochRef = useRef(0)
+  const beginNavigationIntent = useCallback(() => ++navigationIntentEpochRef.current, [])
+  const isNavigationIntentCurrent = useCallback(
+    (intent: number) => navigationIntentEpochRef.current === intent,
+    []
+  )
   // Lazy-init: the factory must run once per mount, like the FSM store.
   const hostAuthorityRef = useRef<HostAuthorityStore | null>(null)
   if (!hostAuthorityRef.current) hostAuthorityRef.current = createHostAuthorityStore()
@@ -964,7 +969,7 @@ export function useAppController() {
   const handleOpenAgentWorkspace = useCallback(
     (agentName: string, route: AgentWorkspaceRoute = AGENT_WORKSPACE_ROUTES.connectors) => {
       if (!agentName) return
-      const navigationIntentEpoch = ++navigationIntentEpochRef.current
+      const navigationIntentEpoch = beginNavigationIntent()
       if (!isHostAccessBlocked(agentName)) {
         openAgentWorkspace(agentName, route)
         return
@@ -980,7 +985,7 @@ export function useAppController() {
         }
       })
     },
-    [isHostAccessBlocked, openAgentWorkspace, verifyHostAccess]
+    [beginNavigationIntent, isHostAccessBlocked, openAgentWorkspace, verifyHostAccess]
   )
 
   // ─── Cross-domain: handleSelectChatAgent (Chat page agent picker) ───
@@ -1088,7 +1093,7 @@ export function useAppController() {
   const handleSelectChatAgent = useCallback(
     (agentName: string, options: Parameters<typeof selectChatAgent>[1] = {}) => {
       if (!agentName) return
-      const navigationIntentEpoch = ++navigationIntentEpochRef.current
+      const navigationIntentEpoch = beginNavigationIntent()
       if (!isHostAccessBlocked(agentName)) {
         selectChatAgent(agentName, options)
         return
@@ -1104,12 +1109,15 @@ export function useAppController() {
         }
       })
     },
-    [isHostAccessBlocked, selectChatAgent, verifyHostAccess]
+    [beginNavigationIntent, isHostAccessBlocked, selectChatAgent, verifyHostAccess]
   )
 
   // ─── Cross-domain: handleNavSelect (extended) ───
   const handleNavSelect = useCallback(
     (item: NavItem) => {
+      // Route changes supersede any workspace-tab selection waiting for Host
+      // access verification, so a late response cannot steal navigation back.
+      beginNavigationIntent()
       const focusedChat = nav.handleNavSelect(item)
       if (item === DESKTOP_ROUTES.chat) {
         // `nav.handleNavSelect` owns the "which chat did this focus" precedence
@@ -1136,6 +1144,7 @@ export function useAppController() {
     [
       activity.agentLastActiveByAgent,
       agentsData.agentNames,
+      beginNavigationIntent,
       handleSelectChatAgent,
       nav.handleNavSelect,
     ]
@@ -1146,6 +1155,7 @@ export function useAppController() {
       target: AgentConversationNotificationTarget,
       options: { keepNavItem?: boolean } = {}
     ) => {
+      const navigationIntentEpoch = beginNavigationIntent()
       const targetAgent = String(target.agentName || '').trim()
       if (!targetAgent) return
       const targetChatId = String(target.chatId || '').trim()
@@ -1161,8 +1171,10 @@ export function useAppController() {
       try {
         if (requiresTeamSwitch) {
           await ensureTeamContext({ teamId: targetTeamId })
+          if (!isNavigationIntentCurrent(navigationIntentEpoch)) return
         }
         if (isHostAccessBlocked(targetAgent) && !(await verifyHostAccess(targetAgent))) return
+        if (!isNavigationIntentCurrent(navigationIntentEpoch)) return
 
         if (stayInDrawer) {
           // handleSelectChatAgent(keepNavItem) sets the active chat without
@@ -1193,6 +1205,7 @@ export function useAppController() {
         ) {
           try {
             await chat.switchToChat(targetAgent, targetChatId)
+            if (!isNavigationIntentCurrent(navigationIntentEpoch)) return
             nav.activateChatTab(targetAgent, targetChatId)
             return
           } catch {
@@ -1213,10 +1226,12 @@ export function useAppController() {
     [
       chat.setPendingChatSelection,
       chat.switchToChat,
+      beginNavigationIntent,
       ensureTeamContext,
       fullSetStatus,
       handleSelectChatAgent,
       isHostAccessBlocked,
+      isNavigationIntentCurrent,
       verifyHostAccess,
       nav.activateChatTab,
       nav.navItem,
@@ -1465,6 +1480,9 @@ export function useAppController() {
     navItem: nav.navItem,
     selectedAgent: nav.selectedAgent,
     isHostAccessBlocked,
+    verifyHostAccess,
+    beginNavigationIntent,
+    isNavigationIntentCurrent,
     hostAuthorityRevision,
     selectedAgentRoute: nav.selectedAgentRoute,
     setSelectedAgent: nav.setSelectedAgent,

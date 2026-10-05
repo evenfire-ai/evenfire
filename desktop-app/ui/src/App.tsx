@@ -313,6 +313,7 @@ export function App() {
   const [notificationTrayLeft, setNotificationTrayLeft] = React.useState<number | null>(null)
   const [chatDrawerOpen, setChatDrawerOpen] = React.useState(false)
   const [chatDrawerReady, setChatDrawerReady] = React.useState(false)
+  const [pendingWorkspaceTabId, setPendingWorkspaceTabId] = React.useState<string | null>(null)
   // Measured top of the embed slot, published as `--chat-drawer-top` so the fixed
   // drawer follows the app content down when the sandbox-ui header wraps (narrow
   // window). 0 means "not measured yet" -> the CSS fallback (64px) applies.
@@ -345,6 +346,7 @@ export function App() {
   const setWorkspaceTabs = vm.setWorkspaceTabs
   const nextChatTabId = vm.nextWorkspaceTabId
   const workspaceTabsRef = React.useRef(workspaceTabs)
+  const workspaceTabSelectionIntentRef = React.useRef(0)
   const chatDrawerRef = React.useRef<HTMLElement | null>(null)
   // Mirrors `chatDrawerVisible` so the chat-tab handlers (which run from stable
   // callbacks) can tell whether a reveal should target the in-app drawer or the
@@ -493,17 +495,45 @@ export function App() {
     [availableSandboxUiApps, leaveSandboxForChat, vm.handleNavSelect, vm.handleSelectChatAgent]
   )
 
-  // Global strip selection: activate the tab (so `navItem` derives this commit),
-  // then reveal its content.
+  // Global strip selection: verify a held Host before activating its chat tab.
+  // Keeping the current tab active during this check also keeps its transcript
+  // paired with the selected tab while the chat list continues to reconcile.
   const handleSelectWorkspaceTab = React.useCallback(
     (id: string) => {
       const tab = workspaceTabsRef.current.tabs.find(candidate => candidate.id === id)
       if (!tab) return
+
+      const selectionIntent = ++workspaceTabSelectionIntentRef.current
+      const navigationIntent = vm.beginNavigationIntent()
+      setPendingWorkspaceTabId(null)
+      const agentRef = tab.kind === 'chat' ? tab.chat?.agentRef : undefined
+      if (agentRef && vm.isHostAccessBlocked(agentRef)) {
+        setPendingWorkspaceTabId(id)
+        void vm.verifyHostAccess(agentRef).then(verified => {
+          if (selectionIntent !== workspaceTabSelectionIntentRef.current) return
+          setPendingWorkspaceTabId(null)
+          if (!verified || !vm.isNavigationIntentCurrent(navigationIntent)) return
+
+          vm.clearAppsPicker()
+          setWorkspaceTabs(state => selectWorkspaceTab(state, id))
+          revealWorkspaceTab(tab, false)
+        })
+        return
+      }
+
       vm.clearAppsPicker()
       setWorkspaceTabs(state => selectWorkspaceTab(state, id))
       revealWorkspaceTab(tab, false)
     },
-    [revealWorkspaceTab, setWorkspaceTabs, vm.clearAppsPicker]
+    [
+      revealWorkspaceTab,
+      setWorkspaceTabs,
+      vm.beginNavigationIntent,
+      vm.clearAppsPicker,
+      vm.isHostAccessBlocked,
+      vm.isNavigationIntentCurrent,
+      vm.verifyHostAccess,
+    ]
   )
 
   // Drawer switcher selection: reveal the chat IN the drawer (keepNavItem), never
@@ -520,6 +550,10 @@ export function App() {
 
   const handleCloseWorkspaceTab = React.useCallback(
     (id: string) => {
+      // A pending verification must not resurrect a tab after it is closed.
+      workspaceTabSelectionIntentRef.current += 1
+      vm.beginNavigationIntent()
+      setPendingWorkspaceTabId(null)
       const current = workspaceTabsRef.current
       const wasActive = current.activeTabId === id
       const next = closeWorkspaceTab(current, id)
@@ -530,7 +564,7 @@ export function App() {
       // §5). Reveal it so its content follows the strip.
       if (wasActive) revealWorkspaceTab(activeWorkspaceTab(next), false)
     },
-    [revealWorkspaceTab, setWorkspaceTabs, vm.clearAppsPicker]
+    [revealWorkspaceTab, setWorkspaceTabs, vm.beginNavigationIntent, vm.clearAppsPicker]
   )
 
   // Session-only strip reorder (drag & drop / keyboard). It never changes the
@@ -2843,6 +2877,7 @@ export function App() {
                                 {workspaceTabs.tabs.length > 0 && (
                                   <WorkspaceTabStrip
                                     tabs={visibleWorkspaceTabs}
+                                    pendingTabId={pendingWorkspaceTabId}
                                     activeTabId={
                                       vm.appsPickerActive ? null : workspaceTabs.activeTabId
                                     }
