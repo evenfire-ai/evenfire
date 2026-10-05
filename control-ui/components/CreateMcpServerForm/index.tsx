@@ -7,7 +7,7 @@ import { SelectionDropdown } from '@/components/SelectionDropdown'
 import { useToast } from '@/components/Toast'
 import { IconX } from '@/components/icons'
 import { Button, Field, FormSection, SelectInput, TextInput } from '@/components/ui'
-import { getAgentDisplayName } from '@/lib/agentName'
+import { attachServerToAgentContexts, resolveAgentContextRefs } from '@/lib/agentAccessTargets'
 import {
   McpServerUninstallIncompleteError,
   createMcpSecret,
@@ -16,23 +16,19 @@ import {
   deleteMcpServer,
   getAgentTeams,
   getAgentUsers,
-  getContext,
-  getHosts,
   getMcpSecretRollbackRepairIdentity,
   listOrgImages,
-  updateContext,
 } from '@/lib/api'
 import type {
   EgressBinding,
   EnvSecretKeyMapping,
   EnvVar,
-  HostResource,
   OrgImage,
   SecretIdentity,
 } from '@/lib/api'
 import { connectorContextAssignmentError } from '@/lib/connectorOAuthAccess'
-import { buildContextUpdatePayload } from '@/lib/contextMutation'
 import type { EgressEditorStatus } from '@/lib/egressModel'
+import { useAgentAccessTargets } from '@/lib/hooks/useAgentAccessTargets'
 import { createPrivateContext } from '@/lib/privateContext'
 import { EgressEditor } from '../EgressEditor'
 import { DEFAULT_REGISTRY_HOST, buildImageCoordinate } from '../PublisherView/dockerCredential'
@@ -70,12 +66,6 @@ const ACCESS_PREVIEW_GROUPS: Array<{ key: keyof AccessPreview; title: string }> 
   { key: 'users', title: 'Users' },
   { key: 'teams', title: 'Teams' },
 ]
-
-type AgentAccessTarget = {
-  name: string
-  label: string
-  contextRef: string
-}
 
 type OrgImageOption = {
   value: string
@@ -212,9 +202,7 @@ export function CreateMcpServerForm({
   const [port, setPort] = useState(3000)
   const [description, setDescription] = useState('')
   const [selectedAgentNames, setSelectedAgentNames] = useState<string[]>([])
-  const [agentTargets, setAgentTargets] = useState<AgentAccessTarget[]>([])
-  const [agentsLoading, setAgentsLoading] = useState(true)
-  const [agentsError, setAgentsError] = useState('')
+  const { agentTargets, agentsLoading, agentsError } = useAgentAccessTargets()
   const [accessPreview, setAccessPreview] = useState<AccessPreview>(EMPTY_ACCESS_PREVIEW)
   const [accessPreviewError, setAccessPreviewError] = useState('')
   const [loadingAccessPreview, setLoadingAccessPreview] = useState(false)
@@ -276,41 +264,6 @@ export function CreateMcpServerForm({
       })
     })
   }, [orgImageScope, orgImages])
-
-  useEffect(() => {
-    let cancelled = false
-    setAgentsLoading(true)
-    setAgentsError('')
-
-    getHosts()
-      .then(result => {
-        if (cancelled) return
-        const targets = ((result.items ?? []) as HostResource[])
-          .map(host => {
-            const agentName = host.metadata?.name || ''
-            const contextRef = String(host.spec?.contextRef ?? '').trim()
-            const label = getAgentDisplayName(agentName) || agentName
-            return { name: agentName, label, contextRef }
-          })
-          .filter(target => target.name && target.contextRef)
-          .sort((left, right) => left.label.localeCompare(right.label))
-        setAgentTargets(targets)
-      })
-      .catch(loadError => {
-        if (cancelled) return
-        setAgentTargets([])
-        setAgentsError(
-          loadError instanceof Error ? loadError.message : 'Failed to load available agents'
-        )
-      })
-      .finally(() => {
-        if (!cancelled) setAgentsLoading(false)
-      })
-
-    return () => {
-      cancelled = true
-    }
-  }, [])
 
   // Preview: the users/teams that already have access to the selected agents.
   // Adding this connector makes it usable by exactly those people.
@@ -498,11 +451,9 @@ export function CreateMcpServerForm({
     // agents. With no selection the connector gets its own private scope (an
     // implementation detail, same as Marketplace installs) so the resource
     // contract stays satisfied without exposing any concept to the user.
-    const selectedTargets = selectedAgentNames
-      .map(agentName => agentTargets.find(target => target.name === agentName))
-      .filter((target): target is AgentAccessTarget => Boolean(target))
-    const selectedContextRefs = Array.from(
-      new Set(selectedTargets.map(target => target.contextRef))
+    const { contextRefs: selectedContextRefs } = resolveAgentContextRefs(
+      selectedAgentNames,
+      agentTargets
     )
 
     let primaryContextRef: string
@@ -637,31 +588,10 @@ export function CreateMcpServerForm({
       // Give the selected agents access. Each agent's private scope gets an
       // additive write with its own loaded resourceVersion; failures are
       // collected so the operator knows the connector itself was created.
-      const failedAgents: string[] = []
-      await Promise.all(
-        selectedContextRefs.map(async contextRef => {
-          try {
-            const context = await getContext(contextRef)
-            const existingServers = context.spec?.mcpServers ?? []
-
-            if (!existingServers.includes(name)) {
-              await updateContext(
-                contextRef,
-                buildContextUpdatePayload(context.metadata?.resourceVersion, {
-                  contextId: context.spec?.contextId ?? contextRef,
-                  description: context.spec?.description,
-                  mcpServers: [...existingServers, name],
-                  sharedFileSystems: context.spec?.sharedFileSystems ?? [],
-                })
-              )
-            }
-          } catch {
-            const affected = selectedTargets
-              .filter(target => target.contextRef === contextRef)
-              .map(target => target.label)
-            failedAgents.push(...affected)
-          }
-        })
+      const failedAgents = await attachServerToAgentContexts(
+        name,
+        selectedContextRefs,
+        agentTargets
       )
 
       if (failedAgents.length > 0) {

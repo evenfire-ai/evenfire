@@ -16,12 +16,24 @@ export type GrantScopeOption = {
   description: string
 }
 
-/** A pre-registered install that succeeded; the wizard holds to show its redirect URI. */
-export type InstalledRedirectUri = {
+/**
+ * An install that succeeded but needs the operator's attention before leaving:
+ * a pre-registered redirect URI to copy, and/or agents that could not be given
+ * access.
+ */
+export type InstalledHold = {
   /** The URI control-api reported in the 201 — authoritative over the preview. */
-  redirectUri: string
+  redirectUri?: string
   /** The 201 URI differs from the one previewed before install. */
   changedSincePreview: boolean
+  /** Agents whose Context could not be updated after the install. */
+  accessWarning?: string
+}
+
+/** The generated private scope used when no agent is selected. */
+export type PrivateScope = {
+  serverName: string
+  contextRef: string
 }
 
 export type RedirectUriCopyProps = {

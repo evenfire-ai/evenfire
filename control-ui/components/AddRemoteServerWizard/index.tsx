@@ -1,15 +1,18 @@
 'use client'
 
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useState } from 'react'
 import { CreateFlowPanel } from '@components/CreateFlowPanel'
 import { CreateStepFlow } from '@components/CreateStepFlow'
+import { SelectionDropdown } from '@components/SelectionDropdown'
 import { useToast } from '@components/Toast'
 import { IconCopy } from '@components/icons'
 import { Button, Field, SelectInput, TextInput } from '@components/ui'
-import { getContexts, isSilentApiError } from '@lib/api'
-import type { ContextResource } from '@lib/api'
+import { attachServerToAgentContexts, resolveAgentContextRefs } from '@lib/agentAccessTargets'
+import { isSilentApiError } from '@lib/api'
 import { copyTextToClipboard } from '@lib/clipboard'
-import { contextResourceName } from '@lib/contextIdentity'
+import { connectorContextAssignmentError } from '@lib/connectorOAuthAccess'
+import { useAgentAccessTargets } from '@lib/hooks/useAgentAccessTargets'
+import { createPrivateContext } from '@lib/privateContext'
 import {
   buildRemoteInstallRequest,
   describeTransportProbe,
@@ -43,7 +46,8 @@ import {
 import type {
   AddRemoteServerWizardProps,
   AsEndpointHostsSummaryProps,
-  InstalledRedirectUri,
+  InstalledHold,
+  PrivateScope,
   RedirectUriCopyProps,
 } from './types'
 
@@ -61,9 +65,14 @@ export function AddRemoteServerWizard({
   // Step 0 — identity
   const [baseUrl, setBaseUrl] = useState('')
   const [serverName, setServerName] = useState('')
-  const [contextRef, setContextRef] = useState('')
-  const [contexts, setContexts] = useState<ContextResource[]>([])
-  const [contextsError, setContextsError] = useState('')
+  // Contexts are an internal detail of each agent (#990): the operator picks
+  // agents, exactly like Create connector, and the install derives its Context.
+  const [selectedAgentNames, setSelectedAgentNames] = useState<string[]>([])
+  const { agentTargets, agentsLoading, agentsError } = useAgentAccessTargets()
+  // With no agent selected, the connector gets a generated private scope. Kept
+  // across install retries for the same server name, so a failed install does
+  // not leave one orphaned scope per attempt.
+  const [privateScope, setPrivateScope] = useState<PrivateScope | null>(null)
 
   // Detection. Editing the URL clears `detected` (see the baseUrl onChange), so
   // a present `detected` always corresponds to the current URL (D-4: the pinned
@@ -86,26 +95,15 @@ export function AddRemoteServerWizard({
   const [installing, setInstalling] = useState(false)
   const [installError, setInstallError] = useState('')
   // A pre-registered install holds here so the operator can copy the redirect URI
-  // the AS must hold before leaving the wizard.
-  const [installed, setInstalled] = useState<InstalledRedirectUri | null>(null)
+  // the AS must hold before leaving the wizard; so does an install that could not
+  // give every selected agent access.
+  const [installed, setInstalled] = useState<InstalledHold | null>(null)
 
-  useEffect(() => {
-    let cancelled = false
-    ;(async () => {
-      try {
-        const res = await getContexts()
-        if (!cancelled) setContexts(res.items ?? [])
-      } catch (e) {
-        if (isSilentApiError(e)) return
-        if (!cancelled) {
-          setContextsError(e instanceof Error ? e.message : 'Failed to load contexts')
-        }
-      }
-    })()
-    return () => {
-      cancelled = true
-    }
-  }, [])
+  const { selectedTargets, contextRefs: selectedContextRefs } = resolveAgentContextRefs(
+    selectedAgentNames,
+    agentTargets
+  )
+  const selectedAgentLabels = selectedTargets.map(target => target.label)
 
   const serverNameError = serverName.length > 0 ? getRemoteServerNameError(serverName) : ''
   const trimmedBaseUrl = baseUrl.trim()
@@ -113,7 +111,7 @@ export function AddRemoteServerWizard({
   const identifiersValid =
     getRemoteBaseUrlError(trimmedBaseUrl) === '' &&
     getRemoteServerNameError(serverName) === '' &&
-    contextRef !== ''
+    !agentsLoading
 
   const installMode = detected ? installModeForRegistration(detected.registrationMode) : null
   const needsCredentials = installMode ? requiresPreRegisteredCredentials(installMode) : false
@@ -132,8 +130,22 @@ export function AddRemoteServerWizard({
 
   const credentialsComplete =
     !needsCredentials || (clientId.trim().length > 0 && clientSecret.length > 0)
+  // A shared (per-context) grant belongs to one scope, so it cannot be spread
+  // across agents with different Contexts. Checked before install: a remote
+  // install may already have registered a client at the provider.
+  const grantScopeError =
+    selectedContextRefs.length > 1
+      ? (connectorContextAssignmentError(
+          { contextRef: selectedContextRefs[0], oauth: { grantScope } },
+          selectedContextRefs
+        ) ?? '')
+      : ''
   const step1Valid =
-    Boolean(detected) && identifiersValid && credentialsComplete && callbackBlocker === ''
+    Boolean(detected) &&
+    identifiersValid &&
+    credentialsComplete &&
+    callbackBlocker === '' &&
+    grantScopeError === ''
 
   function canSelectStep(target: number): boolean {
     // Once installed, going back would offer a second install of the same server.
@@ -142,15 +154,6 @@ export function AddRemoteServerWizard({
     if (target === 1) return Boolean(detected) && identifiersValid
     return step1Valid
   }
-
-  const contextOptions = useMemo(
-    () =>
-      contexts
-        .map(context => contextResourceName(context))
-        .filter(name => name.length > 0)
-        .sort((left, right) => left.localeCompare(right)),
-    [contexts]
-  )
 
   function resetDetection() {
     setDetected(null)
@@ -198,11 +201,24 @@ export function AddRemoteServerWizard({
     }
   }
 
+  // The first selected agent's Context, or a private scope when none is selected.
+  async function resolvePrimaryContextRef(): Promise<string> {
+    if (selectedContextRefs[0]) return selectedContextRefs[0]
+    if (privateScope?.serverName === serverName) return privateScope.contextRef
+    const contextRef = await createPrivateContext(
+      { subject: serverName, description: `Connector access scope for ${serverName}` },
+      'We couldn’t prepare an access scope for this connector — please try again.'
+    )
+    setPrivateScope({ serverName, contextRef })
+    return contextRef
+  }
+
   async function runInstall() {
     if (!detected || !installMode) return
     setInstalling(true)
     setInstallError('')
     try {
+      const contextRef = await resolvePrimaryContextRef()
       const body = buildRemoteInstallRequest({
         serverName,
         contextRef,
@@ -214,11 +230,28 @@ export function AddRemoteServerWizard({
       })
       const res = await installRemoteServer(body)
       showToast(`Remote server ${res.serverName} installed.`, { tone: 'success' })
-      if (res.registrationMode === 'pre-registered' && res.redirectUri) {
+      // The install attached the server to the primary Context; give the other
+      // selected agents access the way Create connector does.
+      const failedAgents = await attachServerToAgentContexts(
+        res.serverName,
+        selectedContextRefs.filter(ref => ref !== contextRef),
+        agentTargets
+      )
+      const accessWarning =
+        failedAgents.length > 0
+          ? `${res.serverName} is installed, but we couldn't give access to ${failedAgents.join(', ')}. ` +
+            `Grant "${res.serverName}" to those agents from the Installed Connectors list.`
+          : undefined
+      const redirectUri =
+        res.registrationMode === 'pre-registered' && res.redirectUri ? res.redirectUri : undefined
+      if (redirectUri || accessWarning) {
         setInstalled({
-          redirectUri: res.redirectUri,
+          redirectUri,
           changedSincePreview:
-            preRegisteredRedirectUri !== null && preRegisteredRedirectUri !== res.redirectUri,
+            redirectUri !== undefined &&
+            preRegisteredRedirectUri !== null &&
+            preRegisteredRedirectUri !== redirectUri,
+          accessWarning,
         })
         return
       }
@@ -299,25 +332,32 @@ export function AddRemoteServerWizard({
               </Field>
 
               <Field
-                description="The context this connector is attached to. Agents using this context can call it."
-                error={contextsError || undefined}
-                label="Context"
-                htmlFor="remote-context-ref"
-                required
+                description={
+                  agentsLoading
+                    ? 'Loading available agents...'
+                    : selectedAgentNames.length > 0
+                      ? 'The connector will be usable by everyone who already has access to the selected agents.'
+                      : 'No agents selected: the connector is installed but cannot be used by any agent until you grant access.'
+                }
+                error={agentsError || undefined}
+                label="Which agents can use this connector?"
+                htmlFor="remote-agents"
               >
-                <SelectInput
-                  id="remote-context-ref"
-                  onChange={event => setContextRef(event.target.value)}
-                  disabled={detecting || contextOptions.length === 0}
-                  value={contextRef}
-                >
-                  <option value="">Select a context…</option>
-                  {contextOptions.map(name => (
-                    <option key={name} value={name}>
-                      {name}
-                    </option>
-                  ))}
-                </SelectInput>
+                <SelectionDropdown
+                  id="remote-agents"
+                  multiple
+                  onChange={setSelectedAgentNames}
+                  disabled={detecting || agentsLoading}
+                  value={selectedAgentNames}
+                  options={agentTargets.map(target => ({
+                    value: target.name,
+                    label: target.label,
+                  }))}
+                  placeholder={agentsLoading ? 'Loading agents...' : 'Select agents...'}
+                  searchPlaceholder="Search agents..."
+                  emptyLabel="No agents available."
+                  selectionLabel="Selected agents"
+                />
               </Field>
 
               {discoverError ? (
@@ -470,7 +510,7 @@ export function AddRemoteServerWizard({
               ) : null}
 
               <Field
-                description="Whether each user authorizes their own token or the context shares one."
+                description="Whether each user authorizes their own token or everyone shares one."
                 label="Grant scope"
                 htmlFor="remote-grant-scope"
               >
@@ -486,24 +526,42 @@ export function AddRemoteServerWizard({
                   ))}
                 </SelectInput>
               </Field>
+
+              {grantScopeError ? (
+                <div className="cu-banner cu-banner--error" role="alert">
+                  {grantScopeError}
+                </div>
+              ) : null}
             </div>
           ) : null}
 
           {step === 2 && installed ? (
             <div className="cu-form-stack cu-agent-form-stack">
-              <p className="cu-field__hint">
-                {serverName} is installed. Users can connect once this redirect URI is registered in
-                the provider’s OAuth client.
-              </p>
-              {installed.changedSincePreview ? (
+              {installed.accessWarning ? (
                 <div className="cu-banner cu-banner--warning" role="status">
-                  The authorization server changed since detection, so this redirect URI differs
-                  from the one shown before. Register this one.
+                  {installed.accessWarning}
                 </div>
               ) : null}
-              <Field label="Redirect URI" description="Register this exact URI at the provider.">
-                <RedirectUriCopy uri={installed.redirectUri} onCopy={copyRedirectUri} />
-              </Field>
+              {installed.redirectUri ? (
+                <>
+                  <p className="cu-field__hint">
+                    {serverName} is installed. Users can connect once this redirect URI is
+                    registered in the provider’s OAuth client.
+                  </p>
+                  {installed.changedSincePreview ? (
+                    <div className="cu-banner cu-banner--warning" role="status">
+                      The authorization server changed since detection, so this redirect URI differs
+                      from the one shown before. Register this one.
+                    </div>
+                  ) : null}
+                  <Field
+                    label="Redirect URI"
+                    description="Register this exact URI at the provider."
+                  >
+                    <RedirectUriCopy uri={installed.redirectUri} onCopy={copyRedirectUri} />
+                  </Field>
+                </>
+              ) : null}
             </div>
           ) : null}
 
@@ -515,8 +573,12 @@ export function AddRemoteServerWizard({
                   <strong>{serverName}</strong>
                 </div>
                 <div className="cu-summary-list__row">
-                  <span>Context</span>
-                  <strong>{contextRef}</strong>
+                  <span>Agents</span>
+                  <strong>
+                    {selectedAgentLabels.length > 0
+                      ? selectedAgentLabels.join(', ')
+                      : 'None yet — grant access from the Installed Connectors list'}
+                  </strong>
                 </div>
                 <div className="cu-summary-list__row">
                   <span>Remote URL</span>
@@ -532,7 +594,7 @@ export function AddRemoteServerWizard({
                 </div>
                 <div className="cu-summary-list__row">
                   <span>Grant scope</span>
-                  <strong>{grantScope === 'user' ? 'Per user' : 'Per context'}</strong>
+                  <strong>{grantScope === 'user' ? 'Per user' : 'Shared'}</strong>
                 </div>
                 <div className="cu-summary-list__row">
                   <span>Authorization endpoint</span>

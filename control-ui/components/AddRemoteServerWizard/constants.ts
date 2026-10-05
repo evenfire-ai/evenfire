@@ -5,9 +5,9 @@ export const REMOTE_WIZARD_STEPS = ['Identify', 'Configure', 'Confirm'] as const
 
 export const REMOTE_WIZARD_STEP_DETAILS = [
   {
-    description: 'URL, name, and agent context',
+    description: 'URL, name, and agent access',
     title: 'Identify the remote server',
-    subtitle: 'Enter the remote MCP server URL, name it, and pick the context to attach it to.',
+    subtitle: 'Enter the remote MCP server URL, name it, and choose the agents that can use it.',
   },
   {
     description: 'Detected OAuth configuration',
@@ -29,8 +29,8 @@ export const GRANT_SCOPE_OPTIONS: readonly GrantScopeOption[] = [
   },
   {
     value: 'context',
-    label: 'Per context',
-    description: 'One shared token for everyone using this context.',
+    label: 'Shared',
+    description: 'One shared token for everyone using the selected agents.',
   },
 ]
 
