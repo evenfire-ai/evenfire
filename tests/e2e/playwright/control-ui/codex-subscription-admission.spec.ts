@@ -11,6 +11,7 @@ import {
   isSubscriptionAdmissionAuthProbe,
   observeProtectedSubscriptionBusinessAccess,
 } from '../helpers/subscription-admission-guard'
+import { loginControlUiVisible } from '../helpers/visible-login'
 
 test.describe('Codex subscription admission', () => {
   for (const guard of [
@@ -62,7 +63,6 @@ test.describe('Codex subscription admission', () => {
   test('LLM Models no longer owns Codex assignment', async ({ page }) => {
     // E2E_GUARDIAN_ENTRY_POINT: legitimate root entry for the visible login.
     await page.goto('/')
-    const { loginControlUiVisible } = await import('../helpers/visible-login')
     await loginControlUiVisible(page)
 
     await test.step('sidebar LLM Models has no Codex subscription tab', async () => {
