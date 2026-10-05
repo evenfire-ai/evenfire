@@ -97,7 +97,6 @@ import {
 // `diagnoseLoginBackend`. Kept short so a post-login-failure diagnosis never
 // makes the failure feel slower than it already did.
 const BACKEND_PROBE_TIMEOUT_MS = 1500
-const CREDENTIAL_PRODUCER_DRAIN_TIMEOUT_MS = 5_000
 const ENTITY_CHANGE_RETRY_AFTER_CAP_MS = 5 * 60 * 1000
 // Two maximum server heartbeat intervals plus its maximum poll delay. This
 // matches the operator-stream liveness watchdog and bounds half-open sockets.
@@ -1614,21 +1613,9 @@ export class AppService {
 
   async prepareForQuit(): Promise<void> {
     this.quitPreparationStarted = true
-
-    let producerDeadline: ReturnType<typeof setTimeout> | undefined
-    try {
-      if (this.pendingCredentialProducers.size > 0) {
-        await Promise.race([
-          Promise.allSettled([...this.pendingCredentialProducers]),
-          new Promise<void>(resolve => {
-            producerDeadline = setTimeout(resolve, CREDENTIAL_PRODUCER_DRAIN_TIMEOUT_MS)
-          }),
-        ])
-      }
-    } finally {
-      if (producerDeadline) clearTimeout(producerDeadline)
+    if (this.pendingCredentialProducers.size > 0) {
+      await Promise.allSettled([...this.pendingCredentialProducers])
     }
-
     await this.tokenStore.prepareForQuit()
   }
 

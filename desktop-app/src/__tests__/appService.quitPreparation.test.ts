@@ -83,15 +83,48 @@ describe('AppService quit preparation', () => {
     expect(tokenStore.reopenAdmission).toHaveBeenCalledOnce()
   })
 
-  it('moves on to TokenStore draining after the five-second producer deadline', async () => {
+  it('finishes an admitted logout before draining storage beyond the former deadline', async () => {
     vi.useFakeTimers()
-    const producer = deferred<void>()
+    const pendingAuthFence = deferred<void>()
+    let storeAdmissionClosed = false
+    let persistedSession = true
+    const prepareForQuit = vi.fn(async () => {
+      storeAdmissionClosed = true
+    })
+    const clearSessionToken = vi.fn(async () => {
+      if (storeAdmissionClosed) throw new Error('Application is shutting down')
+      persistedSession = false
+    })
     const tokenStore = {
-      prepareForQuit: vi.fn().mockResolvedValue(undefined),
-      reopenAdmission: vi.fn(),
+      prepareForQuit,
+      clearSessionToken,
     }
-    const service = createService(tokenStore)
-    service.logoutOnce.mockReturnValue(producer.promise)
+    const service = Object.create(AppServiceClass.prototype) as {
+      pendingCredentialProducers: Set<Promise<unknown>>
+      quitPreparationStarted: boolean
+      logoutInProgress: boolean
+      sessionToken: string | null
+      me: object | null
+      tokenStore: typeof tokenStore
+      logout: () => Promise<void>
+      prepareForQuit: () => Promise<void>
+      beginPrewarmAuthTransition: () => () => void
+      suspendDesktopGfsUploadsForAuthBoundary: () => Promise<void>
+      clearAuthenticatedSessionState: () => void
+    }
+    service.pendingCredentialProducers = new Set()
+    service.quitPreparationStarted = false
+    service.logoutInProgress = false
+    service.sessionToken = 'active-session-token'
+    service.me = { id: 'synthetic-user' }
+    service.tokenStore = tokenStore
+    service.beginPrewarmAuthTransition = vi.fn(() => () => {})
+    service.suspendDesktopGfsUploadsForAuthBoundary = vi.fn(() => pendingAuthFence.promise)
+    service.clearAuthenticatedSessionState = vi.fn(() => {
+      service.sessionToken = null
+      service.me = null
+    })
+
     const logout = service.logout()
     let preparationSettled = false
     const preparation = service.prepareForQuit().then(() => {
@@ -101,15 +134,23 @@ describe('AppService quit preparation', () => {
     try {
       expect(service.quitPreparationStarted).toBe(true)
       await expect(service.logout()).rejects.toThrow('Application is shutting down')
-      expect(tokenStore.prepareForQuit).not.toHaveBeenCalled()
-      await vi.advanceTimersByTimeAsync(4_999)
+      await vi.advanceTimersByTimeAsync(5_001)
       expect(preparationSettled).toBe(false)
-      await vi.advanceTimersByTimeAsync(1)
-      expect(preparationSettled).toBe(true)
-      expect(tokenStore.prepareForQuit).toHaveBeenCalledOnce()
-    } finally {
-      producer.resolve()
+      expect(prepareForQuit).not.toHaveBeenCalled()
+      expect(service.sessionToken).toBe('active-session-token')
+      expect(persistedSession).toBe(true)
+
+      pendingAuthFence.resolve()
       await Promise.all([logout, preparation])
+      expect(preparationSettled).toBe(true)
+      expect(service.sessionToken).toBeNull()
+      expect(persistedSession).toBe(false)
+      expect(clearSessionToken.mock.invocationCallOrder[0]).toBeLessThan(
+        prepareForQuit.mock.invocationCallOrder[0]
+      )
+    } finally {
+      pendingAuthFence.resolve()
+      await Promise.allSettled([logout, preparation])
       vi.useRealTimers()
     }
   })
