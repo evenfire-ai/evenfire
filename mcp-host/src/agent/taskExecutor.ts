@@ -606,6 +606,9 @@ export class TaskExecutor {
       }
 
       const savedApproval = this.conversation.pending_approval
+      // Restore before legacy renewal or missing-context recovery can re-pause
+      // this turn. Those branches must not stamp a fresh attachment budget.
+      if (savedApproval) this.restoreAttachmentReadLedger(savedApproval)
       mergeCollectedAttachments(this.completedAttachments, savedApproval?.attachments ?? [])
       collectToolAttachments(savedApproval?.completed_results ?? [], this.completedAttachments)
       this.executionBudget.start(this.abortController)
@@ -712,9 +715,6 @@ export class TaskExecutor {
         () => this.buildLoopConfig({ skipContextManager: true }),
         this.abortController.signal
       )
-      // Resume continues the same turn. Restore its independent budget before
-      // executing the suspended tool; never derive spend from compacted text.
-      this.restoreAttachmentReadLedger(approval)
       const suspendedCall = {
         id: approval.tool_call_id,
         name: approval.tool_name,
