@@ -249,6 +249,11 @@ export interface Config {
   attachmentFileMaxBytes: number
   /** Bytes one `clerum__attachment_read` call may return (issue #666). */
   attachmentTextReadMaxBytes: number
+  /** Absolute retention duration; reads never extend it. */
+  attachmentStoreTtlMs: number
+  /** Committed, reserved and pending-cleanup bytes share these quotas. */
+  attachmentStoreSessionMaxBytes: number
+  attachmentStoreHostMaxBytes: number
   /**
    * Structured file references one incoming message may carry (issue #666).
    * The shared contract constant the Desktop composer also enforces; not
@@ -514,6 +519,40 @@ const attachmentTextReadMaxBytes = getExecutionLimit(
   false,
   1_048_576
 )
+const attachmentFileMaxBytes = getExecutionLimit(
+  'CLERUM_ATTACHMENT_FILE_MAX_BYTES',
+  11_534_336,
+  false,
+  11_534_336
+)
+const attachmentStoreTtlHours = getExecutionLimit(
+  'CLERUM_ATTACHMENT_STORE_TTL_HOURS',
+  168,
+  false,
+  // Date's absolute limit is stricter than the safe-integer limit. Admission
+  // must also check its trusted timestamp before adding this duration.
+  Math.floor((8_640_000_000_000_000 - Date.now()) / 3_600_000)
+)
+const attachmentStoreSessionMaxBytes = getExecutionLimit(
+  'CLERUM_ATTACHMENT_STORE_SESSION_MAX_BYTES',
+  67_108_864,
+  false,
+  Number.MAX_SAFE_INTEGER
+)
+const attachmentStoreHostMaxBytes = getExecutionLimit(
+  'CLERUM_ATTACHMENT_STORE_HOST_MAX_BYTES',
+  1_073_741_824,
+  false,
+  Number.MAX_SAFE_INTEGER
+)
+if (
+  attachmentStoreSessionMaxBytes < attachmentFileMaxBytes ||
+  attachmentStoreSessionMaxBytes > attachmentStoreHostMaxBytes
+) {
+  throw new Error(
+    'CLERUM_ATTACHMENT_STORE_SESSION_MAX_BYTES must accommodate one admitted file and not exceed CLERUM_ATTACHMENT_STORE_HOST_MAX_BYTES'
+  )
+}
 const configuredWorkflowEnabled = getEnvBool('CLERUM_WORKFLOW_ENABLED', false)
 const configuredRuntimeKind = resolveMcpHostRuntimeKind({
   workflowEnabled: configuredWorkflowEnabled,
@@ -1045,13 +1084,11 @@ export const config: Config = {
   enableResponseAttachments: getEnvBool('CLERUM_ENABLE_RESPONSE_ATTACHMENTS', true),
   attachmentMaxCount: parseInt(getEnv('CLERUM_ATTACHMENT_MAX_COUNT', '3')!, 10),
   attachmentMaxBytes: parseInt(getEnv('CLERUM_ATTACHMENT_MAX_BYTES', '52428800')!, 10),
-  attachmentFileMaxBytes: getExecutionLimit(
-    'CLERUM_ATTACHMENT_FILE_MAX_BYTES',
-    11_534_336,
-    false,
-    11_534_336
-  ),
+  attachmentFileMaxBytes,
   attachmentTextReadMaxBytes,
+  attachmentStoreTtlMs: attachmentStoreTtlHours * 3_600_000,
+  attachmentStoreSessionMaxBytes,
+  attachmentStoreHostMaxBytes,
   fileReferenceMaxCount: FILE_REFERENCE_MAX_COUNT,
   activityBufferSize: parseInt(getEnv('MCP_HOST_ACTIVITY_BUFFER_SIZE', '1000')!, 10),
   activityMaxEventBytes: parseInt(getEnv('MCP_HOST_ACTIVITY_MAX_EVENT_BYTES', '2048')!, 10),
