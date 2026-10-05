@@ -1,5 +1,14 @@
 import { useMemo } from 'react'
-import { Button, DataTable, EmptyState, Pill, ReferenceTag, StatusBanner } from '@components/Common'
+import {
+  Button,
+  DataTable,
+  EmptyState,
+  IconButton,
+  Pill,
+  ReferenceTag,
+  StatusBanner,
+} from '@components/Common'
+import { IconRefresh } from '@components/SidebarNav/icons'
 import { scopeCaption, statusPresentation } from '@lib/connectorPresentation'
 import { type ConnectorRow, deriveConnectorRows } from '@lib/connectorRows'
 import { formatMcpServerDisplayName } from '@lib/format'
@@ -122,8 +131,11 @@ function ConnectorRowView({
 }
 
 export function McpServersPage() {
-  const { loading, error, actionError, agents, pendingKey, authorize, disconnect } =
-    useConnectorsController()
+  // `autoRefresh` (#991): opening this screen, regaining focus, and a bounded
+  // poll keep the catalog current, so connectors added or removed by an admin
+  // mid-session appear without a restart.
+  const { loading, error, actionError, agents, pendingKey, refresh, authorize, disconnect } =
+    useConnectorsController({ autoRefresh: true })
   const { agentDisplayByName } = useAgentsDataController()
   const { handleOpenAgentWorkspace } = useNavigationContext()
 
@@ -133,7 +145,23 @@ export function McpServersPage() {
   return (
     <section className="page">
       <div className="page-header">
-        <h2>Connectors</h2>
+        <div className="mcp-servers-page-title">
+          <h2>Connectors</h2>
+          <IconButton
+            className="connectors-refresh"
+            disabled={loading}
+            label="Refresh connectors"
+            loading={loading}
+            onClick={() => {
+              void refresh()
+            }}
+            size="sm"
+            title="Refresh connectors"
+            variant="ghost"
+          >
+            <IconRefresh />
+          </IconButton>
+        </div>
         <p className="muted">
           Review the connectors available across your agents, authorize the ones that require setup,
           and disconnect the ones you no longer want.

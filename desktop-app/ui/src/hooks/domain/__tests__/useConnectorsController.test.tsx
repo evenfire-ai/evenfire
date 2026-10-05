@@ -1,10 +1,16 @@
 // @vitest-environment jsdom
 import type { ReactNode } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { QueryClient, QueryClientProvider, focusManager } from '@tanstack/react-query'
 import { act, cleanup, renderHook, waitFor } from '@testing-library/react'
 import type { RpcConnector, RpcConnectorsResult } from '../../../../../src/types'
-import { useConnectorsController } from '../useConnectorsController'
+import { desktopQueryDefaults } from '../../../lib/queryClient'
+import { desktopQueryKeys } from '../queryKeys'
+import {
+  CONNECTORS_POLL_INTERVAL_MS,
+  CONNECTORS_STALE_AFTER_MS,
+  useConnectorsController,
+} from '../useConnectorsController'
 
 /**
  * Renderer-side invariants of the connectors panel actions (T5#click→IPC). The
@@ -202,5 +208,109 @@ describe('useConnectorsController — click→IPC invariants (T5, T4)', () => {
     // Observable: the list is unchanged, and no refetch was issued.
     expect(connectorNames(result)).toEqual(['shared-drive', 'monday'])
     expect(rpc.listConnectors.mock.calls.length).toBe(listCallsBefore)
+  })
+})
+
+/**
+ * #991: the catalog used to load only at sign-in, so a connector an admin added
+ * or removed mid-session never reached the user until restart. A surface that
+ * SHOWS the catalog opts into `autoRefresh`: it refetches on open when the cache
+ * is stale, on a bounded poll while visible, and on window focus — all through
+ * the same imperative `refresh`, so the app-coordinated `reset` still clears it.
+ */
+describe('useConnectorsController — bounded staleness (#991)', () => {
+  afterEach(() => {
+    cleanup()
+    vi.useRealTimers()
+    vi.restoreAllMocks()
+    focusManager.setFocused(undefined)
+    delete (window as { clerum?: unknown }).clerum
+  })
+
+  function renderWithClient(
+    client: QueryClient,
+    options?: Parameters<typeof useConnectorsController>[0]
+  ) {
+    return renderHook(() => useConnectorsController(options), {
+      wrapper: ({ children }: { children: ReactNode }) => (
+        <QueryClientProvider client={client}>{children}</QueryClientProvider>
+      ),
+    })
+  }
+
+  const prodClient = () => new QueryClient({ defaultOptions: desktopQueryDefaults })
+  const seed = (client: QueryClient, ageMs: number) =>
+    client.setQueryData(desktopQueryKeys.connectors, payload([USER]), {
+      updatedAt: Date.now() - ageMs,
+    })
+
+  it('a surface without autoRefresh only reads the cache (app-coordinated load)', async () => {
+    const rpc = installClerum()
+    const client = prodClient()
+    seed(client, CONNECTORS_STALE_AFTER_MS * 10)
+    renderWithClient(client)
+    await act(async () => {})
+    expect(rpc.listConnectors).not.toHaveBeenCalled()
+  })
+
+  it('refetches on open when the cached catalog is older than the TTL', async () => {
+    const rpc = installClerum()
+    rpc.listConnectors.mockResolvedValueOnce(payload([USER, SHARED]))
+    const client = prodClient()
+    seed(client, CONNECTORS_STALE_AFTER_MS + 1_000)
+    const { result } = renderWithClient(client, { autoRefresh: true })
+    await waitFor(() => expect(connectorNames(result)).toEqual(['monday', 'shared-drive']))
+    expect(rpc.listConnectors).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not refetch on open within the TTL', async () => {
+    const rpc = installClerum()
+    const client = prodClient()
+    seed(client, 1_000)
+    renderWithClient(client, { autoRefresh: true })
+    await act(async () => {})
+    expect(rpc.listConnectors).not.toHaveBeenCalled()
+  })
+
+  it('polls while the surface stays open, so a server-side change appears within the TTL', async () => {
+    vi.useFakeTimers()
+    const rpc = installClerum()
+    const client = prodClient()
+    seed(client, 0)
+    renderWithClient(client, { autoRefresh: true })
+    await act(async () => {})
+    expect(rpc.listConnectors).not.toHaveBeenCalled()
+    await act(async () => {
+      vi.advanceTimersByTime(CONNECTORS_POLL_INTERVAL_MS + 1)
+    })
+    expect(rpc.listConnectors).toHaveBeenCalledTimes(1)
+  })
+
+  it('refetches on window focus when stale', async () => {
+    const rpc = installClerum()
+    const client = prodClient()
+    seed(client, CONNECTORS_STALE_AFTER_MS + 1_000)
+    focusManager.setFocused(false)
+    renderWithClient(client, { autoRefresh: true })
+    await waitFor(() => expect(rpc.listConnectors).toHaveBeenCalledTimes(1))
+    // Age the cache again, then regain focus.
+    seed(client, CONNECTORS_STALE_AFTER_MS + 1_000)
+    await act(async () => {
+      focusManager.setFocused(true)
+    })
+    await waitFor(() => expect(rpc.listConnectors).toHaveBeenCalledTimes(2))
+  })
+
+  it('after reset (logout / team switch), refreshIfStale fetches the new identity', async () => {
+    const rpc = installClerum()
+    const client = prodClient()
+    seed(client, 0)
+    const { result } = renderWithClient(client)
+    act(() => result.current.reset())
+    expect(client.getQueryData(desktopQueryKeys.connectors)).toBeUndefined()
+    await act(async () => {
+      await result.current.refreshIfStale()
+    })
+    expect(rpc.listConnectors).toHaveBeenCalledTimes(1)
   })
 })

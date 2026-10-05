@@ -1,5 +1,5 @@
-import { useCallback, useMemo, useState } from 'react'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { focusManager, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { RpcAgentConnectors, RpcConnector } from '../../../../src/types'
 import { connectorRowKey, isActionableConnector, isSharedConnector } from '../../lib/connectorRows'
 import { formatMcpServerDisplayName } from '../../lib/format'
@@ -11,6 +11,16 @@ import { desktopQueryKeys } from './queryKeys'
 export { isActionableConnector, isSharedConnector }
 
 const EMPTY_AGENTS: RpcAgentConnectors[] = []
+
+/**
+ * Bounded staleness for a surface that shows the catalog (#991). Opening it, or
+ * regaining window focus, refetches once the cache is older than
+ * `CONNECTORS_STALE_AFTER_MS`; while it stays open it re-checks every
+ * `CONNECTORS_POLL_INTERVAL_MS`. A connector an admin adds or removes therefore
+ * reaches the user within a minute instead of at the next sign-in.
+ */
+export const CONNECTORS_STALE_AFTER_MS = 15_000
+export const CONNECTORS_POLL_INTERVAL_MS = 60_000
 
 function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -38,7 +48,12 @@ export type ConnectorActionInput = {
   connector: RpcConnector
 }
 
-export function useConnectorsController() {
+export type ConnectorsControllerOptions = {
+  /** Keep the catalog fresh while the calling surface is visible (#991). */
+  autoRefresh?: boolean
+}
+
+export function useConnectorsController({ autoRefresh = false }: ConnectorsControllerOptions = {}) {
   const queryClient = useQueryClient()
   const [pendingKey, setPendingKey] = useState<string | null>(null)
   // The OUTCOME of the last write (connect/disconnect). The hook owns the action
@@ -50,9 +65,11 @@ export function useConnectorsController() {
   // Mirrors the sibling data-controllers (useMcpServersDataController /
   // useContextsDataController): the query is app-coordinated, never
   // self-enabling. `useAppController` owns the initial load (post-auth
-  // bootstrap) and the identity teardown (`reset` on logout / team-switch),
-  // so a nav to the panel only READS cache and a team-switch cannot leak the
-  // previous identity's OAuth authorization state (the key is identity-unscoped).
+  // bootstrap) and the identity teardown (`reset` on logout / team-switch), so
+  // a team-switch cannot leak the previous identity's OAuth authorization state
+  // (the key is identity-unscoped). A surface that shows the catalog may opt
+  // into bounded refetches with `autoRefresh` (#991); they go through the same
+  // imperative `refresh`, never through the query enabling itself.
   const query = useQuery({
     queryKey: desktopQueryKeys.connectors,
     queryFn: () => window.clerum.rpc.listConnectors(),
@@ -74,6 +91,38 @@ export function useConnectorsController() {
       // Query state already records the error for consumers.
     }
   }, [queryClient])
+
+  // Reads the cache state at call time (not a render snapshot) so the poll and
+  // focus listeners never act on a stale closure. A fetch already in flight —
+  // e.g. the post-auth bootstrap — is not duplicated. After `reset` the query is
+  // gone (`dataUpdatedAt` 0), so the next call fetches the new identity.
+  const refreshIfStale = useCallback(
+    async (maxAgeMs: number = CONNECTORS_STALE_AFTER_MS) => {
+      const state = queryClient.getQueryState(desktopQueryKeys.connectors)
+      if (state?.fetchStatus === 'fetching') return
+      if (state && state.dataUpdatedAt > 0 && Date.now() - state.dataUpdatedAt < maxAgeMs) return
+      await refresh()
+    },
+    [queryClient, refresh]
+  )
+
+  // Opt-in, so the query stays app-coordinated: only a visible surface drives
+  // these refetches, and each goes through `refresh` (identity teardown intact).
+  useEffect(() => {
+    if (!autoRefresh) return undefined
+    void refreshIfStale()
+    const interval = window.setInterval(() => {
+      void refreshIfStale(CONNECTORS_POLL_INTERVAL_MS)
+    }, CONNECTORS_POLL_INTERVAL_MS)
+    // `useWindowFocusBridge` forwards Electron window focus into focusManager.
+    const unsubscribeFocus = focusManager.subscribe(isFocused => {
+      if (isFocused) void refreshIfStale()
+    })
+    return () => {
+      window.clearInterval(interval)
+      unsubscribeFocus()
+    }
+  }, [autoRefresh, refreshIfStale])
 
   const reset = useCallback(() => {
     queryClient.removeQueries({ queryKey: desktopQueryKeys.connectors })
@@ -152,6 +201,7 @@ export function useConnectorsController() {
       agents,
       pendingKey,
       refresh,
+      refreshIfStale,
       reset,
       authorize,
       disconnect,
@@ -166,6 +216,7 @@ export function useConnectorsController() {
       query.fetchStatus,
       query.status,
       refresh,
+      refreshIfStale,
       reset,
     ]
   )

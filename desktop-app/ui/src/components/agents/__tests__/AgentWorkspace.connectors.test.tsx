@@ -10,6 +10,7 @@ import { AgentWorkspace } from '../AgentWorkspace'
 
 const mcpMock = vi.hoisted(() => ({
   selectedAgentMcpServers: [] as { name: string }[],
+  refresh: vi.fn(async () => undefined),
 }))
 
 const navMock = vi.hoisted(() => ({
@@ -26,6 +27,8 @@ const connectorsMock = vi.hoisted(() => ({
   actionError: null as string | null,
   authorize: vi.fn(async () => undefined),
   disconnect: vi.fn(async () => undefined),
+  refresh: vi.fn(async () => undefined),
+  options: [] as unknown[],
 }))
 
 vi.mock('@hooks/domain/useAgentsDataController', () => ({
@@ -39,6 +42,7 @@ vi.mock('@hooks/domain/useMcpServersDataController', () => ({
     agentContextByName: {},
     agentDisplayByName: {},
     selectedAgentMcpServers: mcpMock.selectedAgentMcpServers,
+    refresh: mcpMock.refresh,
   }),
 }))
 vi.mock('@hooks/domain/useTeamsDataController', () => ({
@@ -79,17 +83,21 @@ vi.mock('../ChatThread', () => ({ ChatThread: () => null }))
 // serves the controlled payload without a QueryClientProvider.
 vi.mock('@hooks/domain/useConnectorsController', async importActual => ({
   ...(await importActual<typeof import('@hooks/domain/useConnectorsController')>()),
-  useConnectorsController: () => ({
-    loading: false,
-    error: null,
-    agents: connectorsMock.agents,
-    pendingKey: connectorsMock.pendingKey,
-    actionError: connectorsMock.actionError,
-    refresh: vi.fn(),
-    reset: vi.fn(),
-    authorize: connectorsMock.authorize,
-    disconnect: connectorsMock.disconnect,
-  }),
+  useConnectorsController: (options?: unknown) => {
+    connectorsMock.options.push(options)
+    return {
+      loading: false,
+      error: null,
+      agents: connectorsMock.agents,
+      pendingKey: connectorsMock.pendingKey,
+      actionError: connectorsMock.actionError,
+      refresh: connectorsMock.refresh,
+      refreshIfStale: vi.fn(),
+      reset: vi.fn(),
+      authorize: connectorsMock.authorize,
+      disconnect: connectorsMock.disconnect,
+    }
+  },
 }))
 
 // One agent ('trader') with an authorized oauth connector, a requires_setup
@@ -136,6 +144,7 @@ describe('AgentWorkspace — Connectors tab OAuth actions', () => {
     connectorsMock.agents = []
     connectorsMock.pendingKey = null
     connectorsMock.actionError = null
+    connectorsMock.options = []
     mcpMock.selectedAgentMcpServers = []
   })
 
@@ -222,5 +231,38 @@ describe('AgentWorkspace — Connectors tab OAuth actions', () => {
       .map(b => b.textContent?.trim())
       .filter(label => label === 'Authorize' || label === 'Disconnect')
     expect(actionButtons).toEqual([])
+  })
+})
+
+// #991: the panel used to show the sign-in snapshot for the whole session.
+describe('AgentWorkspace — Connectors panel stays current (#991)', () => {
+  afterEach(() => {
+    cleanup()
+    vi.clearAllMocks()
+    navMock.selectedAgentRoute = 'mcp-servers'
+    connectorsMock.options = []
+    mcpMock.selectedAgentMcpServers = []
+  })
+
+  it('opening the panel keeps connectors fresh and reloads the agent mapping', () => {
+    renderTab()
+    expect(connectorsMock.options.at(-1)).toEqual({ autoRefresh: true })
+    expect(mcpMock.refresh).toHaveBeenCalledTimes(1)
+  })
+
+  it('chat mode does not poll connectors or reload the mapping', () => {
+    render(<AgentWorkspace scrollContainerRef={{ current: null }} mode="chat" />)
+    expect(connectorsMock.options.at(-1)).toEqual({ autoRefresh: false })
+    expect(mcpMock.refresh).not.toHaveBeenCalled()
+  })
+
+  it('the refresh button reloads both the connector grants and the agent mapping', async () => {
+    connectorsMock.agents = CONNECTORS.agents
+    mcpMock.selectedAgentMcpServers = [{ name: 'monday' }]
+    renderTab()
+    mcpMock.refresh.mockClear()
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh connectors' }))
+    await vi.waitFor(() => expect(connectorsMock.refresh).toHaveBeenCalledTimes(1))
+    expect(mcpMock.refresh).toHaveBeenCalledTimes(1)
   })
 })
