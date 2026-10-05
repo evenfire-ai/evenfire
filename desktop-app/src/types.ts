@@ -1309,6 +1309,15 @@ export interface ChatMessageAttachment {
   encoding?: 'base64'
   dataBase64?: string
   sizeBytes?: number
+  /** Reference identity survives server-turn display parsing for Resend. */
+  filesystemName?: string
+  path?: string
+  drive?: string
+  resourceId?: string
+  gfsUri?: string
+  /** Listed GFS identity required to resend a structured global-file reference. */
+  version?: number
+  bytes?: number
 }
 
 export interface ChatFile {

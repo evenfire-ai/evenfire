@@ -3,6 +3,7 @@ import { randomBytes } from 'node:crypto'
 import { Pool } from 'pg'
 import { initDb } from '../src/db.js'
 import { listGrantsReferencingModel } from '../src/services/pluginWorkloadSdkDb.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 // FIX C (T1/T3): exercise the REAL jsonb `@>` containment of
 // listGrantsReferencingModel against a real Postgres — the risky part the unit
@@ -63,17 +64,20 @@ describeRealPostgres('listGrantsReferencingModel jsonb containment on real Postg
   })
 
   afterAll(async () => {
-    await dbPool?.end()
-    if (!adminPool) return
-    await adminPool.query(
-      `SELECT pg_terminate_backend(pid)
-         FROM pg_stat_activity
-        WHERE datname = $1
-          AND pid <> pg_backend_pid()`,
-      [database]
-    )
-    await adminPool.query(`DROP DATABASE IF EXISTS "${database.replace(/"/g, '""')}"`)
-    await adminPool.end()
+    try {
+      await endPoolAndWaitForClients(dbPool)
+      if (!adminPool) return
+      await adminPool.query(
+        `SELECT pg_terminate_backend(pid)
+           FROM pg_stat_activity
+          WHERE datname = $1
+            AND pid <> pg_backend_pid()`,
+        [database]
+      )
+      await adminPool.query(`DROP DATABASE IF EXISTS "${database.replace(/"/g, '""')}"`)
+    } finally {
+      await adminPool?.end()
+    }
   })
 
   async function insertGrant(

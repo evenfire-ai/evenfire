@@ -51,12 +51,15 @@ describeRealPostgres('Codex subscription OAuth on real PostgreSQL', () => {
   }, 60_000)
 
   afterAll(async () => {
-    await pool?.end()
-    if (adminPool) {
-      await adminPool
-        .query(`DROP DATABASE IF EXISTS ${quoteIdent(database)}`)
-        .catch(() => undefined)
-      await adminPool.end()
+    try {
+      await pool?.end()
+      if (adminPool) {
+        await adminPool
+          .query(`DROP DATABASE IF EXISTS ${quoteIdent(database)}`)
+          .catch(() => undefined)
+      }
+    } finally {
+      await adminPool?.end()
     }
   })
 

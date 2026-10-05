@@ -4,7 +4,7 @@ import type {
   ApprovalDecisionSettlement,
   ApprovalDecisionTarget,
 } from '../hooks/domain/approvalDecision'
-import type { AppNotification, ToastMessage } from '../uiTypes'
+import type { AppNotification, ToastMessage, Tone } from '../uiTypes'
 
 export interface NotificationsContextValue {
   notifications: AppNotification[]
@@ -14,6 +14,8 @@ export interface NotificationsContextValue {
   pendingApprovalsLoading: boolean
   pendingApprovalActionId: string | null
   toasts: ToastMessage[]
+  /** Pushes onto the app toast stack (same controller the status bar uses). */
+  pushToast: (message: string, tone: Tone, options?: { durationMs?: number }) => void
   markNotificationsRead: () => void
   clearNotifications: () => void
   removeNotification: (notificationId: string) => void
